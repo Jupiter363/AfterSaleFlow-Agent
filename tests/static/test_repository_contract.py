@@ -285,3 +285,13 @@ def test_windows_secret_generator_defaults_to_project_root(tmp_path: Path) -> No
 
     assert result.returncode == 0, result.stderr
     assert (project / ".env").is_file()
+
+
+def test_java_service_uses_java_21_multistage_nonroot_image() -> None:
+    dockerfile = (ROOT / "java-api-service" / "Dockerfile").read_text(encoding="utf-8")
+
+    assert "FROM mcr.microsoft.com/openjdk/jdk:21-ubuntu AS build" in dockerfile
+    assert "RUN ./mvnw" in dockerfile
+    assert "FROM mcr.microsoft.com/openjdk/jdk:21-ubuntu" in dockerfile
+    assert "USER app" in dockerfile
+    assert "HEALTHCHECK" in dockerfile

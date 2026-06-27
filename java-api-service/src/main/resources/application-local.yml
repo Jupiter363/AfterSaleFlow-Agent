@@ -1,0 +1,51 @@
+spring:
+  datasource:
+    url: jdbc:postgresql://${POSTGRES_HOST:postgresql}:${POSTGRES_PORT:5432}/${JAVA_DB_NAME:dispute_system}
+    username: ${POSTGRES_USER}
+    password: ${POSTGRES_PASSWORD}
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 2
+      connection-timeout: 30000
+  data:
+    redis:
+      host: ${REDIS_HOST:redis}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD}
+      timeout: 3s
+  elasticsearch:
+    uris: ${ELASTICSEARCH_URL:http://elasticsearch:9200}
+
+app:
+  env: ${APP_ENV:local}
+  security:
+    service-secret: ${JAVA_SERVICE_SECRET}
+  agent:
+    base-url: ${PYTHON_AGENT_SERVICE_URL:http://python-agent-service:8000}
+    service-secret: ${PYTHON_AGENT_SERVICE_SECRET}
+    timeout-ms: 120000
+  ocr:
+    base-url: ${OCR_SERVICE_URL:http://ocr-parser-service:8010}
+    service-secret: ${OCR_SERVICE_SECRET}
+    timeout-ms: 120000
+  temporal:
+    address: ${TEMPORAL_ADDRESS:temporal-server:7233}
+    namespace: ${TEMPORAL_NAMESPACE:default}
+    task-queue: ${TEMPORAL_TASK_QUEUE:case-dispute-task-queue}
+  minio:
+    endpoint: ${MINIO_ENDPOINT:http://minio:9000}
+    access-key: ${MINIO_ROOT_USER}
+    secret-key: ${MINIO_ROOT_PASSWORD}
+  elasticsearch:
+    url: ${ELASTICSEARCH_URL:http://elasticsearch:9200}
+  feature:
+    agent-intake-enabled: ${FEATURE_AGENT_INTAKE_ENABLED:true}
+    agent-hearing-enabled: ${FEATURE_AGENT_HEARING_ENABLED:true}
+    agent-evaluation-enabled: ${FEATURE_AGENT_EVALUATION_ENABLED:true}
+    ocr-enabled: ${FEATURE_OCR_ENABLED:true}
+    human-review-required: ${FEATURE_HUMAN_REVIEW_REQUIRED:true}
+    tool-executor-simulation: ${FEATURE_TOOL_EXECUTOR_SIMULATION:true}
+    auto-close-enabled: ${FEATURE_AUTO_CLOSE_ENABLED:true}
+  logging:
+    audit-enabled: ${ENABLE_AUDIT_LOG:true}
+    sensitive-masking-enabled: ${ENABLE_SENSITIVE_LOG_MASKING:true}
