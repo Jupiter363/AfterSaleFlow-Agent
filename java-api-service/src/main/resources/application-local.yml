@@ -36,6 +36,8 @@ app:
     endpoint: ${MINIO_ENDPOINT:http://minio:9000}
     access-key: ${MINIO_ROOT_USER}
     secret-key: ${MINIO_ROOT_PASSWORD}
+    evidence-original-bucket: ${MINIO_BUCKET_EVIDENCE_ORIGINAL:evidence-original}
+    evidence-desensitized-bucket: ${MINIO_BUCKET_EVIDENCE_DESENSITIZED:evidence-desensitized}
   elasticsearch:
     url: ${ELASTICSEARCH_URL:http://elasticsearch:9200}
   feature:

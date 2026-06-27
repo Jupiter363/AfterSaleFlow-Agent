@@ -23,7 +23,11 @@ class InfrastructureClientConfigurationTest {
                         new AppProperties.Temporal(
                                 "localhost:7233", "default", "case-dispute-task-queue"),
                         new AppProperties.Minio(
-                                "http://localhost:19000", "minio-user", "minio-password"),
+                                "http://localhost:19000",
+                                "minio-user",
+                                "minio-password",
+                                "evidence-original",
+                                "evidence-desensitized"),
                         new AppProperties.Elasticsearch("http://localhost:19200"),
                         new AppProperties.Feature(true, true, true, true, true, true, true),
                         new AppProperties.Logging(true, true));

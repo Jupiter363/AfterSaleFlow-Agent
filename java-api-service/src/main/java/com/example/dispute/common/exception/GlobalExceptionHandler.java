@@ -64,7 +64,8 @@ public class GlobalExceptionHandler {
     @ExceptionHandler({
         MissingRequestHeaderException.class,
         ConstraintViolationException.class,
-        HttpMessageNotReadableException.class
+        HttpMessageNotReadableException.class,
+        IllegalArgumentException.class
     })
     public ResponseEntity<ApiResponse<Void>> handleInvalidRequest(
             Exception exception, HttpServletRequest request) {
@@ -119,6 +120,11 @@ public class GlobalExceptionHandler {
         }
         if (exception instanceof ConstraintViolationException) {
             return "request constraint violated";
+        }
+        if (exception instanceof IllegalArgumentException) {
+            return exception.getMessage() == null
+                    ? "invalid argument"
+                    : exception.getMessage();
         }
         return "request body is unreadable";
     }

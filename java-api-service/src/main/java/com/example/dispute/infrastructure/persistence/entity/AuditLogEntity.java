@@ -71,7 +71,9 @@ public class AuditLogEntity extends AbstractEntity {
             String userId,
             String role,
             String action,
+            String resourceType,
             String resourceId,
+            String beforeJson,
             String afterJson) {
         super(id);
         this.caseId = caseId;
@@ -81,10 +83,10 @@ public class AuditLogEntity extends AbstractEntity {
         this.role = role;
         this.service = "java-api-service";
         this.action = action;
-        this.resourceType = "FULFILLMENT_CASE";
+        this.resourceType = resourceType;
         this.resourceId = resourceId;
         this.outcome = "SUCCESS";
-        this.beforeJson = "{}";
+        this.beforeJson = beforeJson;
         this.afterJson = afterJson;
         this.metadataJson = "{}";
         this.createdBy = userId;
@@ -106,7 +108,35 @@ public class AuditLogEntity extends AbstractEntity {
                 userId,
                 role,
                 "CASE_CREATED",
+                "FULFILLMENT_CASE",
                 caseId,
+                "{}",
+                afterJson);
+    }
+
+    public static AuditLogEntity record(
+            String id,
+            String caseId,
+            String traceId,
+            String requestId,
+            String userId,
+            String role,
+            String action,
+            String resourceType,
+            String resourceId,
+            String beforeJson,
+            String afterJson) {
+        return new AuditLogEntity(
+                id,
+                caseId,
+                traceId,
+                requestId,
+                userId,
+                role,
+                action,
+                resourceType,
+                resourceId,
+                beforeJson,
                 afterJson);
     }
 

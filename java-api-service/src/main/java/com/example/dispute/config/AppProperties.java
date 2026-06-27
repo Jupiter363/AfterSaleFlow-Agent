@@ -20,7 +20,12 @@ public record AppProperties(
 
     public record Temporal(String address, String namespace, String taskQueue) {}
 
-    public record Minio(String endpoint, String accessKey, String secretKey) {}
+    public record Minio(
+            String endpoint,
+            String accessKey,
+            String secretKey,
+            String evidenceOriginalBucket,
+            String evidenceDesensitizedBucket) {}
 
     public record Elasticsearch(String url) {}
 

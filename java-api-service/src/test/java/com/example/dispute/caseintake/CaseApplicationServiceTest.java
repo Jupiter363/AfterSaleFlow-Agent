@@ -52,7 +52,12 @@ class CaseApplicationServiceTest {
                         new AppProperties.Integration("http://agent", "secret", 100),
                         new AppProperties.Integration("http://ocr", "secret", 100),
                         new AppProperties.Temporal("localhost:7233", "default", "queue"),
-                        new AppProperties.Minio("http://minio", "key", "secret"),
+                        new AppProperties.Minio(
+                                "http://minio",
+                                "key",
+                                "secret",
+                                "evidence-original",
+                                "evidence-desensitized"),
                         new AppProperties.Elasticsearch("http://elasticsearch"),
                         new AppProperties.Feature(true, true, true, true, true, true, false),
                         new AppProperties.Logging(true, true));

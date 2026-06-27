@@ -164,6 +164,17 @@ public class FulfillmentCaseEntity extends AbstractEntity {
         this.updatedBy = required(actorId, "actorId");
     }
 
+    public void markDossierBuilt(String actorId) {
+        if (caseStatus == CaseStatus.WAITING_SLOT_COMPLETION
+                || caseStatus == CaseStatus.CLOSED
+                || caseStatus == CaseStatus.CANCELLED) {
+            throw new IllegalStateException(
+                    "dossier cannot be built from case status " + caseStatus);
+        }
+        caseStatus = CaseStatus.DOSSIER_BUILT;
+        updatedBy = required(actorId, "actorId");
+    }
+
     @PrePersist
     void prePersist() {
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);

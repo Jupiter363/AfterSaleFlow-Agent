@@ -90,7 +90,7 @@ services:
 
   minio:
     <<: *common
-    image: minio/minio:RELEASE.2024-06-13T22-53-53Z
+    image: quay.io/minio/minio:RELEASE.2024-06-13T22-53-53Z
     command: server /data --console-address ":9001"
     environment:
       TZ: ${TZ:-Asia/Shanghai}
@@ -110,7 +110,7 @@ services:
 
   minio-init:
     <<: *common
-    image: minio/mc:RELEASE.2024-06-12T14-34-03Z
+    image: quay.io/minio/mc:RELEASE.2024-06-12T14-34-03Z
     restart: "no"
     depends_on:
       minio:
@@ -244,6 +244,8 @@ services:
       MINIO_ENDPOINT: http://minio:9000
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_BUCKET_EVIDENCE_ORIGINAL: ${MINIO_BUCKET_EVIDENCE_ORIGINAL:-evidence-original}
+      MINIO_BUCKET_EVIDENCE_DESENSITIZED: ${MINIO_BUCKET_EVIDENCE_DESENSITIZED:-evidence-desensitized}
       ELASTICSEARCH_URL: http://elasticsearch:9200
       JAVA_API_SERVICE_URL: http://java-api-service:8080
       OCR_SERVICE_SECRET: ${OCR_SERVICE_SECRET}
@@ -365,4 +367,3 @@ volumes:
   redis_data:
   elasticsearch_data:
   minio_data:
-
