@@ -1,0 +1,368 @@
+name: ${COMPOSE_PROJECT_NAME:-order-fulfillment-dispute-system}
+
+x-common: &common
+  restart: unless-stopped
+  networks:
+    - dispute-network
+
+services:
+  postgresql:
+    <<: *common
+    image: postgres:16-alpine
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      POSTGRES_DB: ${POSTGRES_DB:-dispute_system}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      JAVA_DB_NAME: ${JAVA_DB_NAME:-dispute_system}
+      TEMPORAL_DB_NAME: ${TEMPORAL_DB_NAME:-temporal}
+      LANGFUSE_DB_NAME: ${LANGFUSE_DB_NAME:-langfuse}
+      LITELLM_DB_NAME: ${LITELLM_DB_NAME:-litellm}
+    ports:
+      - "${POSTGRES_HOST_PORT:-15432}:5432"
+    volumes:
+      - postgresql_data:/var/lib/postgresql/data
+      - ./deploy/postgresql/init-multiple-databases.sh:/docker-entrypoint-initdb.d/10-init-multiple-databases.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  redis:
+    <<: *common
+    image: redis:7.2-alpine
+    command:
+      - sh
+      - -c
+      - exec redis-server --appendonly yes --requirepass "$$REDIS_PASSWORD"
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    ports:
+      - "${REDIS_HOST_PORT:-16379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  elasticsearch:
+    <<: *common
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      xpack.security.enrollment.enabled: "false"
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+    ports:
+      - "${ELASTICSEARCH_HOST_PORT:-19200}:9200"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9200/_cluster/health >/dev/null"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+
+  elasticsearch-init:
+    <<: *common
+    image: curlimages/curl:8.8.0
+    restart: "no"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    volumes:
+      - ./deploy/elasticsearch/init-indices.sh:/opt/init-indices.sh:ro
+    entrypoint: ["/bin/sh", "/opt/init-indices.sh"]
+    environment:
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/initialized"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    <<: *common
+    image: minio/minio:RELEASE.2024-06-13T22-53-53Z
+    command: server /data --console-address ":9001"
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "${MINIO_HOST_PORT:-19000}:9000"
+      - "${MINIO_CONSOLE_PORT:-19001}:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "mc ready local"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  minio-init:
+    <<: *common
+    image: minio/mc:RELEASE.2024-06-12T14-34-03Z
+    restart: "no"
+    depends_on:
+      minio:
+        condition: service_healthy
+    volumes:
+      - ./deploy/minio/init-buckets.sh:/opt/init-buckets.sh:ro
+    entrypoint: ["/bin/sh", "/opt/init-buckets.sh"]
+    environment:
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_BUCKET_EVIDENCE_ORIGINAL: ${MINIO_BUCKET_EVIDENCE_ORIGINAL:-evidence-original}
+      MINIO_BUCKET_EVIDENCE_DESENSITIZED: ${MINIO_BUCKET_EVIDENCE_DESENSITIZED:-evidence-desensitized}
+      MINIO_BUCKET_OCR_TEMP: ${MINIO_BUCKET_OCR_TEMP:-ocr-temp}
+      MINIO_BUCKET_POLICY_FILES: ${MINIO_BUCKET_POLICY_FILES:-policy-files}
+      MINIO_BUCKET_REVIEW_EXPORTS: ${MINIO_BUCKET_REVIEW_EXPORTS:-review-exports}
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/initialized"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  temporal-server:
+    <<: *common
+    image: temporalio/auto-setup:1.25.2
+    depends_on:
+      postgresql:
+        condition: service_healthy
+    environment:
+      DB: postgresql
+      DB_PORT: 5432
+      POSTGRES_SEEDS: postgresql
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PWD: ${POSTGRES_PASSWORD}
+      DBNAME: ${TEMPORAL_DB_NAME:-temporal}
+      VISIBILITY_DBNAME: temporal_visibility
+      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/development-sql.yaml
+    ports:
+      - "${TEMPORAL_HOST_PORT:-7233}:7233"
+    healthcheck:
+      test: ["CMD-SHELL", "tctl --address temporal-server:7233 cluster health | grep SERVING"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+
+  langfuse:
+    <<: *common
+    image: langfuse/langfuse:2.95.11
+    depends_on:
+      postgresql:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgresql:5432/${LANGFUSE_DB_NAME:-langfuse}
+      NEXTAUTH_URL: ${LANGFUSE_NEXTAUTH_URL:-http://localhost:13000}
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET}
+      SALT: ${LANGFUSE_SALT}
+      TELEMETRY_ENABLED: "false"
+    ports:
+      - "${LANGFUSE_PORT:-13000}:3000"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - node -e "fetch('http://localhost:3000/api/public/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+
+  litellm-proxy:
+    <<: *common
+    image: ghcr.io/berriai/litellm:main-v1.63.14-stable
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    depends_on:
+      postgresql:
+        condition: service_healthy
+    environment:
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
+      DEFAULT_LLM_API_BASE: ${DEFAULT_LLM_API_BASE:-https://api.deepseek.com}
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
+      LITELLM_SALT_KEY: ${LITELLM_SALT_KEY}
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgresql:5432/${LITELLM_DB_NAME:-litellm}
+    ports:
+      - "14000:4000"
+    volumes:
+      - ./deploy/litellm/config.yaml:/app/config.yaml:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness')"
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+
+  python-agent-service:
+    <<: *common
+    build:
+      context: ./python-agent-service
+    environment:
+      APP_ENV: ${APP_ENV:-local}
+      LITELLM_BASE_URL: http://litellm-proxy:4000
+      LITELLM_MODEL: deepseek-v4-flash
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
+      LANGFUSE_HOST: http://langfuse:3000
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY}
+      JAVA_API_SERVICE_URL: http://java-api-service:8080
+      PYTHON_AGENT_SERVICE_SECRET: ${PYTHON_AGENT_SERVICE_SECRET}
+      ENABLE_SENSITIVE_LOG_MASKING: ${ENABLE_SENSITIVE_LOG_MASKING:-true}
+    ports:
+      - "${PYTHON_AGENT_PORT:-18000}:8000"
+    depends_on:
+      litellm-proxy:
+        condition: service_healthy
+      langfuse:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 20s
+
+  ocr-parser-service:
+    <<: *common
+    build:
+      context: ./ocr-parser-service
+    environment:
+      APP_ENV: ${APP_ENV:-local}
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      JAVA_API_SERVICE_URL: http://java-api-service:8080
+      OCR_SERVICE_SECRET: ${OCR_SERVICE_SECRET}
+      OCR_TEMP_DIR: /tmp/ocr-parser
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports:
+      - "${OCR_SERVICE_PORT:-18010}:8010"
+    depends_on:
+      minio-init:
+        condition: service_healthy
+      elasticsearch-init:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8010/health')\""]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 20s
+
+  java-api-service:
+    <<: *common
+    build:
+      context: ./java-api-service
+    environment:
+      APP_ENV: ${APP_ENV:-local}
+      POSTGRES_HOST: postgresql
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      JAVA_DB_NAME: ${JAVA_DB_NAME:-dispute_system}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      TEMPORAL_ADDRESS: temporal-server:7233
+      TEMPORAL_NAMESPACE: default
+      TEMPORAL_TASK_QUEUE: case-dispute-task-queue
+      PYTHON_AGENT_SERVICE_URL: http://python-agent-service:8000
+      OCR_SERVICE_URL: http://ocr-parser-service:8010
+      JAVA_SERVICE_SECRET: ${JAVA_SERVICE_SECRET}
+      PYTHON_AGENT_SERVICE_SECRET: ${PYTHON_AGENT_SERVICE_SECRET}
+      OCR_SERVICE_SECRET: ${OCR_SERVICE_SECRET}
+      FEATURE_HUMAN_REVIEW_REQUIRED: "true"
+      FEATURE_TOOL_EXECUTOR_SIMULATION: "true"
+      ENABLE_AUDIT_LOG: "true"
+      ENABLE_SENSITIVE_LOG_MASKING: "true"
+    ports:
+      - "${JAVA_API_PORT:-18080}:8080"
+    depends_on:
+      postgresql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_healthy
+      elasticsearch-init:
+        condition: service_healthy
+      temporal-server:
+        condition: service_healthy
+      python-agent-service:
+        condition: service_healthy
+      ocr-parser-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/actuator/health | grep UP"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+
+  frontend:
+    <<: *common
+    build:
+      context: ./frontend
+    environment:
+      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-/api}
+      VITE_AGENT_API_BASE_URL: ${VITE_AGENT_API_BASE_URL:-/agent-api}
+      VITE_OCR_API_BASE_URL: ${VITE_OCR_API_BASE_URL:-/ocr-api}
+    ports:
+      - "${FRONTEND_PORT:-5173}:5173"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:5173/ >/dev/null"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 20s
+
+  nginx:
+    <<: *common
+    image: nginx:1.27-alpine
+    ports:
+      - "${NGINX_PORT:-8080}:80"
+    volumes:
+      - ./deploy/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      frontend:
+        condition: service_healthy
+      java-api-service:
+        condition: service_healthy
+      python-agent-service:
+        condition: service_healthy
+      ocr-parser-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost/healthz | grep ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+networks:
+  dispute-network:
+    driver: bridge
+
+volumes:
+  postgresql_data:
+  redis_data:
+  elasticsearch_data:
+  minio_data:
+
