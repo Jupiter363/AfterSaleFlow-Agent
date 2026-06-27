@@ -23,6 +23,7 @@
         <temporal.version>1.35.0</temporal.version>
         <minio.version>8.6.0</minio.version>
         <okhttp.version>5.1.0</okhttp.version>
+        <testcontainers.version>2.0.5</testcontainers.version>
     </properties>
 
     <dependencies>
@@ -115,6 +116,18 @@
             <groupId>io.temporal</groupId>
             <artifactId>temporal-testing</artifactId>
             <version>${temporal.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers</artifactId>
+            <version>${testcontainers.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-junit-jupiter</artifactId>
+            <version>${testcontainers.version}</version>
             <scope>test</scope>
         </dependency>
     </dependencies>
