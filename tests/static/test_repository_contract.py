@@ -15,6 +15,7 @@ REQUIRED_ROOT_FILES = {
     "CODE_STYLE.md",
     "SECURITY.md",
     ".gitignore",
+    ".gitattributes",
     ".editorconfig",
     ".env.example",
     "docker-compose.yml",
@@ -201,6 +202,19 @@ def test_gitignore_excludes_secrets_and_generated_outputs() -> None:
         ".worktrees/",
     ):
         assert pattern in text
+
+
+def test_gitattributes_preserves_container_and_shell_line_endings() -> None:
+    text = (ROOT / ".gitattributes").read_text(encoding="utf-8")
+
+    for rule in (
+        "* text=auto",
+        "*.sh text eol=lf",
+        "*.yml text eol=lf",
+        "*.yaml text eol=lf",
+        "Dockerfile text eol=lf",
+    ):
+        assert rule in text
 
 
 def test_windows_secret_generator_preserves_user_key_and_hides_secrets(
