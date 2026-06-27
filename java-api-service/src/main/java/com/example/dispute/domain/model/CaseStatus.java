@@ -2,6 +2,7 @@ package com.example.dispute.domain.model;
 
 public enum CaseStatus {
     INTAKE_PENDING,
+    WAITING_SLOT_COMPLETION,
     INTAKE_COMPLETED,
     DOSSIER_BUILDING,
     DOSSIER_BUILT,

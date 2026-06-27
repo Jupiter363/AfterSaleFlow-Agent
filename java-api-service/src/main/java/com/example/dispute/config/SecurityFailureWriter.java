@@ -14,12 +14,12 @@ import java.util.UUID;
 import org.springframework.stereotype.Component;
 
 @Component
-final class SecurityFailureWriter {
+public final class SecurityFailureWriter {
 
     private final ObjectMapper objectMapper;
     private final Clock clock;
 
-    SecurityFailureWriter(ObjectMapper objectMapper, Clock clock) {
+    public SecurityFailureWriter(ObjectMapper objectMapper, Clock clock) {
         this.objectMapper = objectMapper;
         this.clock = clock;
     }

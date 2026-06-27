@@ -151,6 +151,19 @@ public class FulfillmentCaseEntity extends AbstractEntity {
                 actorId);
     }
 
+    public void completeIntake(
+            String disputeType,
+            CaseStatus status,
+            RiskLevel riskLevel,
+            String intakeResultJson,
+            String actorId) {
+        this.disputeType = disputeType;
+        this.caseStatus = Objects.requireNonNull(status, "status must not be null");
+        this.riskLevel = Objects.requireNonNull(riskLevel, "riskLevel must not be null");
+        this.intakeResultJson = required(intakeResultJson, "intakeResultJson");
+        this.updatedBy = required(actorId, "actorId");
+    }
+
     @PrePersist
     void prePersist() {
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
@@ -180,5 +193,49 @@ public class FulfillmentCaseEntity extends AbstractEntity {
 
     public RouteType getRouteType() {
         return routeType;
+    }
+
+    public String getOrderId() {
+        return orderId;
+    }
+
+    public String getAfterSaleId() {
+        return afterSaleId;
+    }
+
+    public String getUserId() {
+        return userId;
+    }
+
+    public String getMerchantId() {
+        return merchantId;
+    }
+
+    public String getCaseType() {
+        return caseType;
+    }
+
+    public String getDisputeType() {
+        return disputeType;
+    }
+
+    public String getTitle() {
+        return title;
+    }
+
+    public String getDescription() {
+        return description;
+    }
+
+    public String getIntakeResultJson() {
+        return intakeResultJson;
+    }
+
+    public OffsetDateTime getCreatedAt() {
+        return createdAt;
+    }
+
+    public OffsetDateTime getUpdatedAt() {
+        return updatedAt;
     }
 }

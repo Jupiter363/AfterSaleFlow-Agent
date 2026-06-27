@@ -4,6 +4,7 @@ import com.example.dispute.common.api.ApiResponse;
 import com.example.dispute.common.api.ErrorCode;
 import com.example.dispute.common.trace.TraceIdFilter;
 import jakarta.servlet.http.HttpServletRequest;
+import jakarta.validation.ConstraintViolationException;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.Map;
@@ -13,6 +14,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.MissingRequestHeaderException;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
@@ -58,6 +61,23 @@ public class GlobalExceptionHandler {
         return ResponseEntity.status(errorCode.httpStatus()).body(body);
     }
 
+    @ExceptionHandler({
+        MissingRequestHeaderException.class,
+        ConstraintViolationException.class,
+        HttpMessageNotReadableException.class
+    })
+    public ResponseEntity<ApiResponse<Void>> handleInvalidRequest(
+            Exception exception, HttpServletRequest request) {
+        ErrorCode errorCode = ErrorCode.INVALID_ARGUMENT;
+        ApiResponse<Void> body =
+                failure(
+                        errorCode,
+                        "request validation failed",
+                        Map.of("reason", safeReason(exception)),
+                        request);
+        return ResponseEntity.status(errorCode.httpStatus()).body(body);
+    }
+
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ApiResponse<Void>> handleUnexpectedException(
             Exception exception, HttpServletRequest request) {
@@ -91,5 +111,15 @@ public class GlobalExceptionHandler {
             return identifier;
         }
         return prefix + UUID.randomUUID().toString().replace("-", "");
+    }
+
+    private static String safeReason(Exception exception) {
+        if (exception instanceof MissingRequestHeaderException missing) {
+            return "missing request header: " + missing.getHeaderName();
+        }
+        if (exception instanceof ConstraintViolationException) {
+            return "request constraint violated";
+        }
+        return "request body is unreadable";
     }
 }
