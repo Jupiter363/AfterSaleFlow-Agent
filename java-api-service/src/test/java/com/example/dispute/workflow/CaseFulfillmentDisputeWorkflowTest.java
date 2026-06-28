@@ -68,13 +68,14 @@ class CaseFulfillmentDisputeWorkflowTest {
                         .getResult(CaseWorkflowResult.class);
 
         assertThat(result.workflowStatus()).isEqualTo("COMPLETED");
-        assertThat(result.nextStage()).isEqualTo("CASE_CLOSURE");
+        assertThat(result.nextStage()).isEqualTo("EVALUATION_COMPLETE");
         assertThat(result.remedyPlanId()).isEqualTo("REMEDY_test");
         assertThat(result.reviewTaskId()).isEqualTo("REVIEW_test");
         assertThat(result.evidenceTimedOut()).isFalse();
         assertThat(activities.analysisCalls()).isEqualTo(2);
         assertThat(activities.recordedSignals()).containsExactly("SUBMISSION_signal");
         assertThat(activities.executionCalls).isEqualTo(1);
+        assertThat(activities.closureCalls).isEqualTo(1);
     }
 
     @Test
@@ -148,12 +149,13 @@ class CaseFulfillmentDisputeWorkflowTest {
                     io.temporal.client.WorkflowStub.fromTyped(workflow)
                             .getResult(CaseWorkflowResult.class);
 
-            assertThat(result.nextStage()).isEqualTo("CASE_CLOSURE");
+            assertThat(result.nextStage()).isEqualTo("EVALUATION_COMPLETE");
             assertThat(result.remedyPlanId()).isEqualTo("REMEDY_test");
         }
         assertThat(activities.remedyCalls).isEqualTo(2);
         assertThat(activities.analysisCalls()).isZero();
         assertThat(activities.executionCalls).isEqualTo(2);
+        assertThat(activities.closureCalls).isEqualTo(2);
     }
 
     @Test
@@ -184,10 +186,11 @@ class CaseFulfillmentDisputeWorkflowTest {
                 io.temporal.client.WorkflowStub.fromTyped(workflow)
                         .getResult(CaseWorkflowResult.class);
 
-        assertThat(result.nextStage()).isEqualTo("CASE_CLOSURE");
+        assertThat(result.nextStage()).isEqualTo("EVALUATION_COMPLETE");
         assertThat(activities.reviewCalls).isEqualTo(2);
         assertThat(activities.recordedSignals()).contains("SUBMISSION_review");
         assertThat(activities.executionCalls).isEqualTo(1);
+        assertThat(activities.closureCalls).isEqualTo(1);
     }
 
     private CaseFulfillmentDisputeWorkflow newWorkflow(String workflowId) {
@@ -220,6 +223,7 @@ class CaseFulfillmentDisputeWorkflowTest {
         private volatile int remedyCalls;
         private volatile int reviewCalls;
         private volatile int executionCalls;
+        private volatile int closureCalls;
 
         @Override
         public void initializeHearing(CaseWorkflowInput input) {}
@@ -273,6 +277,11 @@ class CaseFulfillmentDisputeWorkflowTest {
         @Override
         public void executeApprovedPlan(String caseId) {
             executionCalls++;
+        }
+
+        @Override
+        public void closeCaseAndEvaluate(String caseId) {
+            closureCalls++;
         }
 
         int analysisCalls() {

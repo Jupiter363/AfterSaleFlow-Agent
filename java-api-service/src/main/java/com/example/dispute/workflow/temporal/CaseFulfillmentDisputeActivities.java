@@ -39,4 +39,7 @@ public interface CaseFulfillmentDisputeActivities {
 
     @ActivityMethod
     void executeApprovedPlan(String caseId);
+
+    @ActivityMethod
+    void closeCaseAndEvaluate(String caseId);
 }

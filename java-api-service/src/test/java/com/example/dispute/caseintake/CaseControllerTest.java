@@ -147,6 +147,7 @@ class CaseControllerTest {
                 List.of(),
                 false,
                 OffsetDateTime.parse("2026-06-28T00:00:00Z"),
-                OffsetDateTime.parse("2026-06-28T00:00:00Z"));
+                OffsetDateTime.parse("2026-06-28T00:00:00Z"),
+                null);
     }
 }

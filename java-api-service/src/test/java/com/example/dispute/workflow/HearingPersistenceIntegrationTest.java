@@ -7,6 +7,7 @@ import com.example.dispute.domain.model.RiskLevel;
 import com.example.dispute.domain.model.RouteType;
 import com.example.dispute.common.audit.AuditRecorder;
 import com.example.dispute.executor.application.ToolExecutorService;
+import com.example.dispute.evaluation.application.CaseClosureService;
 import com.example.dispute.infrastructure.persistence.entity.AdjudicationDraftEntity;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.entity.HearingRecordEntity;
@@ -248,6 +249,7 @@ class HearingPersistenceIntegrationTest {
                         org.mockito.Mockito.mock(RemedyApplicationService.class),
                         org.mockito.Mockito.mock(ReviewApplicationService.class),
                         org.mockito.Mockito.mock(ToolExecutorService.class),
+                        org.mockito.Mockito.mock(CaseClosureService.class),
                         org.mockito.Mockito.mock(AuditRecorder.class),
                         mapper,
                         new TransactionTemplate(transactionManager));

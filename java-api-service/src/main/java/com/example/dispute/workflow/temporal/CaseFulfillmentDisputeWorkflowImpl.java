@@ -174,8 +174,15 @@ public class CaseFulfillmentDisputeWorkflowImpl
                     || "MODIFY_AND_APPROVE".equals(decision.decision())) {
                 status = "EXECUTING";
                 activities.executeApprovedPlan(input.caseId());
+                status = "CLOSING";
+                activities.closeCaseAndEvaluate(input.caseId());
                 status = "COMPLETED";
-                return result(input, draftId, planId, taskId, "CASE_CLOSURE");
+                return result(
+                        input,
+                        draftId,
+                        planId,
+                        taskId,
+                        "EVALUATION_COMPLETE");
             }
             status = "COMPLETED";
             manualRequired = true;

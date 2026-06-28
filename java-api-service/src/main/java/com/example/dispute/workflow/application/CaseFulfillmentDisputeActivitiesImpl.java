@@ -6,6 +6,7 @@ import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.ParseStatus;
 import com.example.dispute.executor.application.ToolExecutorService;
+import com.example.dispute.evaluation.application.CaseClosureService;
 import com.example.dispute.infrastructure.persistence.entity.AdjudicationDraftEntity;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.entity.HearingRecordEntity;
@@ -56,6 +57,7 @@ public class CaseFulfillmentDisputeActivitiesImpl
     private final RemedyApplicationService remedyService;
     private final ReviewApplicationService reviewService;
     private final ToolExecutorService toolExecutorService;
+    private final CaseClosureService closureService;
     private final AuditRecorder auditRecorder;
     private final ObjectMapper objectMapper;
     private final TransactionTemplate transactions;
@@ -72,6 +74,7 @@ public class CaseFulfillmentDisputeActivitiesImpl
             RemedyApplicationService remedyService,
             ReviewApplicationService reviewService,
             ToolExecutorService toolExecutorService,
+            CaseClosureService closureService,
             AuditRecorder auditRecorder,
             ObjectMapper objectMapper,
             TransactionTemplate transactions) {
@@ -86,6 +89,7 @@ public class CaseFulfillmentDisputeActivitiesImpl
         this.remedyService = remedyService;
         this.reviewService = reviewService;
         this.toolExecutorService = toolExecutorService;
+        this.closureService = closureService;
         this.auditRecorder = auditRecorder;
         this.objectMapper = objectMapper;
         this.transactions = transactions;
@@ -385,6 +389,16 @@ public class CaseFulfillmentDisputeActivitiesImpl
     public void executeApprovedPlan(String caseId) {
         toolExecutorService.executeApprovedActions(
                 caseId, "WORKFLOW_EXECUTE:" + caseId, SYSTEM);
+    }
+
+    @Override
+    public void closeCaseAndEvaluate(String caseId) {
+        closureService.close(
+                caseId,
+                "WORKFLOW_CLOSE:" + caseId,
+                SYSTEM,
+                "TRACE_EVALUATION_" + caseId,
+                "REQ_EVALUATION_" + caseId);
     }
 
     private static JsonNode nodeOutput(JsonNode raw, String node) {

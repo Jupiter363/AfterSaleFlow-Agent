@@ -248,6 +248,19 @@ public class FulfillmentCaseEntity extends AbstractEntity {
         updatedBy = required(actorId, "actorId");
     }
 
+    public void close(String actorId) {
+        if (caseStatus == CaseStatus.CLOSED) {
+            return;
+        }
+        if (caseStatus != CaseStatus.EXECUTING) {
+            throw new IllegalStateException(
+                    "case cannot close from status " + caseStatus);
+        }
+        caseStatus = CaseStatus.CLOSED;
+        closedAt = OffsetDateTime.now(ZoneOffset.UTC);
+        updatedBy = required(actorId, "actorId");
+    }
+
     @PrePersist
     void prePersist() {
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
@@ -325,5 +338,9 @@ public class FulfillmentCaseEntity extends AbstractEntity {
 
     public String getCurrentWorkflowId() {
         return currentWorkflowId;
+    }
+
+    public OffsetDateTime getClosedAt() {
+        return closedAt;
     }
 }

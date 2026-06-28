@@ -5,6 +5,9 @@ from app.schemas import (
     AdjudicationDraft,
     AdjudicationDraftOutput,
     HearingAnalysisResult,
+    EvaluationAnalysisResult,
+    EvaluationFinding,
+    EvaluationMetricScores,
     IntakeAnalysisOutput,
 )
 from app.main import create_app
@@ -47,6 +50,39 @@ class FakeIntakeWorkflow:
             missing_slots=[],
             title="Delivery dispute",
             normalized_description=request.description,
+        )
+
+
+class FakeEvaluationWorkflow:
+    def analyze(self, request, context):
+        return EvaluationAnalysisResult(
+            case_id=request.case_id,
+            evaluation_status="COMPLETED",
+            metric_scores=EvaluationMetricScores(
+                draft_approval_rate=1.0,
+                reviewer_modification_rate=0.0,
+                evidence_quality_score=0.8,
+                policy_coverage_score=0.7,
+                execution_quality_score=1.0,
+                process_quality_score=0.9,
+                overall_quality_score=0.88,
+            ),
+            findings=[
+                EvaluationFinding(
+                    category="POLICY_GAP",
+                    severity="LOW",
+                    summary="Policy could include another example.",
+                    supporting_references=[],
+                )
+            ],
+            rule_gap_suggestions=["Add an example."],
+            improvement_suggestions=["Keep evidence structured."],
+            automatic_changes_applied=False,
+            online_case_mutated=False,
+            evaluator_model="test-evaluation-model",
+            prompt_version="evaluation-v1",
+            latency_ms=5,
+            token_usage=12,
         )
 
 
@@ -137,3 +173,42 @@ def test_intake_api_matches_the_java_client_raw_response_contract() -> None:
             "Tracking says delivered but the user did not receive it."
         ),
     }
+
+
+def test_evaluation_api_only_accepts_authenticated_closed_case_snapshots() -> None:
+    client = TestClient(
+        create_app(
+            settings(),
+            FakeWorkflow(),
+            FakeIntakeWorkflow(),
+            FakeEvaluationWorkflow(),
+        )
+    )
+    payload = {
+        "case_id": "CASE_evaluation",
+        "case_status": "CLOSED",
+        "route_type": "DISPUTE_HEARING",
+        "risk_level": "HIGH",
+        "approval_decision": "APPROVE",
+        "adjudication_draft": {},
+        "approved_plan": {},
+        "action_records": [],
+        "evidence_summary": {},
+        "policy_summary": {},
+    }
+
+    unauthorized = client.post(
+        "/agent-api/v1/evaluations/analyze",
+        json=payload,
+        headers={"X-Service-Secret": "wrong-secret"},
+    )
+    response = client.post(
+        "/agent-api/v1/evaluations/analyze",
+        json=payload,
+        headers={"X-Service-Secret": "test-agent-service-secret"},
+    )
+
+    assert unauthorized.status_code == 401
+    assert response.status_code == 200
+    assert response.json()["evaluation_status"] == "COMPLETED"
+    assert response.json()["online_case_mutated"] is False

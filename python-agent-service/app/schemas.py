@@ -185,3 +185,66 @@ class IntakeAnalysisOutput(StrictModel):
     missing_slots: Annotated[list[Identifier], Field(max_length=20)]
     title: ShortText
     normalized_description: LongText
+
+
+class EvaluationAnalyzeRequest(StrictModel):
+    case_id: Annotated[str, StringConstraints(pattern=r"^CASE_[A-Za-z0-9_]{1,59}$")]
+    case_status: Literal["CLOSED"]
+    route_type: Identifier
+    risk_level: RiskLevel
+    approval_decision: Literal["APPROVE", "MODIFY_AND_APPROVE"]
+    adjudication_draft: dict[str, object]
+    approved_plan: dict[str, object]
+    action_records: Annotated[list[dict[str, object]], Field(max_length=100)]
+    evidence_summary: dict[str, object]
+    policy_summary: dict[str, object]
+
+
+class EvaluationFinding(StrictModel):
+    category: Literal[
+        "EVIDENCE_GAP",
+        "POLICY_GAP",
+        "PROCESS_GAP",
+        "AGENT_QUALITY",
+        "EXECUTION",
+    ]
+    severity: Literal["LOW", "MEDIUM", "HIGH"]
+    summary: ShortText
+    supporting_references: Annotated[list[Identifier], Field(max_length=50)]
+
+
+class EvaluationQualitativeScores(StrictModel):
+    evidence_quality_score: Confidence
+    policy_coverage_score: Confidence
+    execution_quality_score: Confidence
+    process_quality_score: Confidence
+    overall_quality_score: Confidence
+
+
+class EvaluationMetricScores(EvaluationQualitativeScores):
+    draft_approval_rate: Confidence
+    reviewer_modification_rate: Confidence
+
+
+class EvaluationAgentOutput(StrictModel):
+    qualitative_scores: EvaluationQualitativeScores
+    findings: Annotated[list[EvaluationFinding], Field(max_length=50)]
+    rule_gap_suggestions: Annotated[list[ShortText], Field(max_length=30)]
+    improvement_suggestions: Annotated[list[ShortText], Field(max_length=30)]
+    automatic_changes_applied: Literal[False] = False
+    online_case_mutated: Literal[False] = False
+
+
+class EvaluationAnalysisResult(StrictModel):
+    case_id: str
+    evaluation_status: Literal["COMPLETED"]
+    metric_scores: EvaluationMetricScores
+    findings: list[EvaluationFinding]
+    rule_gap_suggestions: list[str]
+    improvement_suggestions: list[str]
+    automatic_changes_applied: Literal[False] = False
+    online_case_mutated: Literal[False] = False
+    evaluator_model: str
+    prompt_version: str
+    latency_ms: Annotated[int, Field(ge=0)]
+    token_usage: Annotated[int, Field(ge=0)]

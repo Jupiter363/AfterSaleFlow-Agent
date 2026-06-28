@@ -23,4 +23,5 @@ public record CaseView(
         List<String> missingSlots,
         boolean agentDegraded,
         OffsetDateTime createdAt,
-        OffsetDateTime updatedAt) {}
+        OffsetDateTime updatedAt,
+        OffsetDateTime closedAt) {}

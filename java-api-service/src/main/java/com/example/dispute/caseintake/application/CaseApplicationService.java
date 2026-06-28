@@ -231,7 +231,8 @@ public class CaseApplicationService {
                 snapshot.missingSlots(),
                 snapshot.agentDegraded(),
                 entity.getCreatedAt(),
-                entity.getUpdatedAt());
+                entity.getUpdatedAt(),
+                entity.getClosedAt());
     }
 
     private IntakeSnapshot readSnapshot(String json) {

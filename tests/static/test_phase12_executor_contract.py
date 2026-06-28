@@ -74,7 +74,8 @@ def test_tool_call_is_outside_database_transaction_and_workflow_driven() -> None
     assert "ToolExecutionResult result = tool.execute(action)" in service
     assert "transactions.executeWithoutResult" in service
     assert "activities.executeApprovedPlan(input.caseId())" in workflow
-    assert "CASE_CLOSURE" in workflow
+    assert "activities.closeCaseAndEvaluate(input.caseId())" in workflow
+    assert "EVALUATION_COMPLETE" in workflow
     assert '"WORKFLOW_EXECUTE:" + caseId' in activities
 
 

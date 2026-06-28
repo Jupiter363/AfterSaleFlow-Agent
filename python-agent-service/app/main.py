@@ -15,10 +15,13 @@ from app.config import Settings, get_settings
 from app.llm import AgentServiceUnavailable, LiteLlmProxyClient
 from app.llm import AgentOutputSchemaError
 from app.intake import IntakeWorkflow
+from app.evaluation import EvaluationWorkflow
 from app.prompts import PromptRepository
 from app.schemas import (
     HearingAnalysisResult,
     HearingAnalyzeRequest,
+    EvaluationAnalysisResult,
+    EvaluationAnalyzeRequest,
     IntakeAnalysisOutput,
     IntakeAnalyzeRequest,
 )
@@ -40,10 +43,14 @@ def create_app(
     settings: Settings | None = None,
     workflow: HearingWorkflow | None = None,
     intake_workflow: IntakeWorkflow | None = None,
+    evaluation_workflow: EvaluationWorkflow | None = None,
 ) -> FastAPI:
     resolved = settings or get_settings()
     hearing_workflow = workflow or _build_workflow(resolved)
     resolved_intake_workflow = intake_workflow or _build_intake_workflow(resolved)
+    resolved_evaluation_workflow = evaluation_workflow or _build_evaluation_workflow(
+        resolved
+    )
     app = FastAPI(title="Python Agent Service", version="1.0.0")
 
     @app.middleware("http")
@@ -161,6 +168,30 @@ def create_app(
             resolved_intake_workflow.analyze, payload, context
         )
 
+    @app.post(
+        "/agent-api/v1/evaluations/analyze",
+        response_model=EvaluationAnalysisResult,
+    )
+    async def analyze_evaluation(
+        payload: EvaluationAnalyzeRequest,
+        request: Request,
+        x_service_secret: str = Header(alias=SERVICE_SECRET_HEADER),
+        x_role: str = Header(default="SYSTEM", alias="X-Role"),
+    ) -> EvaluationAnalysisResult:
+        _authorize(x_service_secret, resolved.python_agent_service_secret)
+        context = AgentTraceContext(
+            trace_id=request.state.trace_id,
+            request_id=request.state.request_id,
+            case_id=payload.case_id,
+            workflow_id=f"EVALUATION_{payload.case_id}",
+            user_id=None,
+            role=x_role,
+            prompt_version=resolved.evaluation_prompt_version,
+        )
+        return await run_in_threadpool(
+            resolved_evaluation_workflow.analyze, payload, context
+        )
+
     return app
 
 
@@ -194,6 +225,21 @@ def _build_intake_workflow(settings: Settings) -> IntakeWorkflow:
         PromptRepository(),
         tracer,
         settings.litellm_model,
+    )
+
+
+def _build_evaluation_workflow(settings: Settings) -> EvaluationWorkflow:
+    llm = LiteLlmProxyClient(
+        settings.litellm_base_url,
+        settings.litellm_model,
+        settings.litellm_master_key,
+        settings.llm_timeout_seconds,
+    )
+    return EvaluationWorkflow(
+        llm,
+        PromptRepository(),
+        _build_tracer(settings),
+        settings.evaluation_prompt_version,
     )
 
 

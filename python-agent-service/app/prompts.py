@@ -8,6 +8,7 @@ from typing import Any
 class PromptRepository:
     NODE_FILES = {
         "intake_analyze": "intake_analyze.md",
+        "evaluation_analyze": "evaluation_analyze.md",
         "issue_framing_node": "issue_framing_node.md",
         "evidence_gap_request_node": "evidence_gap_request_node.md",
         "party_liaison_node": "party_liaison_node.md",
