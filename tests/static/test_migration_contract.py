@@ -15,6 +15,7 @@ EXPECTED_MIGRATIONS = [
     "V003__init_hearing_tables.sql",
     "V004__init_review_executor_tables.sql",
     "V005__init_policy_audit_tables.sql",
+    "V006__init_router_flow_tables.sql",
 ]
 
 REQUIRED_TABLES = {
@@ -37,6 +38,8 @@ REQUIRED_TABLES = {
     "audit_log",
     "policy_rule",
     "evaluation_trace",
+    "route_decision",
+    "flow_conclusion",
 }
 
 
@@ -57,7 +60,7 @@ def table_body(sql: str, table: str) -> str:
     return match.group(1)
 
 
-def test_five_ordered_flyway_migrations_exist() -> None:
+def test_ordered_flyway_migrations_exist() -> None:
     actual = sorted(path.name for path in MIGRATION_DIR.glob("V*.sql"))
 
     assert actual == EXPECTED_MIGRATIONS
@@ -73,7 +76,13 @@ def test_all_required_tables_are_created_once() -> None:
 
 def test_business_tables_have_ids_timestamps_and_audit_actors() -> None:
     sql = migration_text()
-    append_only = {"audit_log", "hearing_record", "approval_record", "action_record"}
+    append_only = {
+        "audit_log",
+        "hearing_record",
+        "approval_record",
+        "action_record",
+        "route_decision",
+    }
 
     for table in REQUIRED_TABLES:
         body = table_body(sql, table)

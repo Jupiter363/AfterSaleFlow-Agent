@@ -20,6 +20,7 @@ import com.example.dispute.infrastructure.persistence.entity.EvidenceDossierEnti
 import com.example.dispute.infrastructure.persistence.entity.EvidenceItemEntity;
 import com.example.dispute.infrastructure.persistence.entity.EvidenceRequestEntity;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
+import com.example.dispute.infrastructure.persistence.entity.FlowConclusionEntity;
 import com.example.dispute.infrastructure.persistence.entity.HearingRecordEntity;
 import com.example.dispute.infrastructure.persistence.entity.HearingStateEntity;
 import com.example.dispute.infrastructure.persistence.entity.IssueEntity;
@@ -29,6 +30,7 @@ import com.example.dispute.infrastructure.persistence.entity.PolicyRuleEntity;
 import com.example.dispute.infrastructure.persistence.entity.RemedyPlanEntity;
 import com.example.dispute.infrastructure.persistence.entity.ReviewPacketEntity;
 import com.example.dispute.infrastructure.persistence.entity.ReviewTaskEntity;
+import com.example.dispute.infrastructure.persistence.entity.RouteDecisionEntity;
 import com.example.dispute.infrastructure.persistence.repository.ActionRecordRepository;
 import com.example.dispute.infrastructure.persistence.repository.AdjudicationDraftRepository;
 import com.example.dispute.infrastructure.persistence.repository.ApprovalRecordRepository;
@@ -39,6 +41,7 @@ import com.example.dispute.infrastructure.persistence.repository.EvidenceDossier
 import com.example.dispute.infrastructure.persistence.repository.EvidenceItemRepository;
 import com.example.dispute.infrastructure.persistence.repository.EvidenceRequestRepository;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
+import com.example.dispute.infrastructure.persistence.repository.FlowConclusionRepository;
 import com.example.dispute.infrastructure.persistence.repository.HearingRecordRepository;
 import com.example.dispute.infrastructure.persistence.repository.HearingStateRepository;
 import com.example.dispute.infrastructure.persistence.repository.IssueRepository;
@@ -48,6 +51,7 @@ import com.example.dispute.infrastructure.persistence.repository.PolicyRuleRepos
 import com.example.dispute.infrastructure.persistence.repository.RemedyPlanRepository;
 import com.example.dispute.infrastructure.persistence.repository.ReviewPacketRepository;
 import com.example.dispute.infrastructure.persistence.repository.ReviewTaskRepository;
+import com.example.dispute.infrastructure.persistence.repository.RouteDecisionRepository;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Table;
 import java.util.Map;
@@ -80,7 +84,9 @@ class PersistenceModelContractTest {
                         Map.entry(ActionRecordEntity.class, "action_record"),
                         Map.entry(AuditLogEntity.class, "audit_log"),
                         Map.entry(PolicyRuleEntity.class, "policy_rule"),
-                        Map.entry(EvaluationTraceEntity.class, "evaluation_trace"));
+                        Map.entry(EvaluationTraceEntity.class, "evaluation_trace"),
+                        Map.entry(RouteDecisionEntity.class, "route_decision"),
+                        Map.entry(FlowConclusionEntity.class, "flow_conclusion"));
 
         mappings.forEach(
                 (type, table) -> {
@@ -108,7 +114,9 @@ class PersistenceModelContractTest {
                             ActionRecordRepository.class,
                             AuditLogRepository.class,
                             PolicyRuleRepository.class,
-                            EvaluationTraceRepository.class
+                            EvaluationTraceRepository.class,
+                            RouteDecisionRepository.class,
+                            FlowConclusionRepository.class
                         })
                 .allMatch(JpaRepository.class::isAssignableFrom);
     }
@@ -116,7 +124,11 @@ class PersistenceModelContractTest {
     @Test
     void workflowStatesAreTypedEnumsInsteadOfMagicStrings() {
         assertThat(CaseStatus.valueOf("INTAKE_PENDING")).isNotNull();
-        assertThat(RouteType.valueOf("HUMAN_REVIEW")).isNotNull();
+        assertThat(RouteType.values())
+                .containsExactly(
+                        RouteType.REGULAR_FULFILLMENT,
+                        RouteType.RULE_BASED_RESOLUTION,
+                        RouteType.DISPUTE_HEARING);
         assertThat(RiskLevel.valueOf("CRITICAL")).isNotNull();
         assertThat(ParseStatus.valueOf("FAILED")).isNotNull();
         assertThat(HearingStatus.valueOf("WAITING_EVIDENCE")).isNotNull();

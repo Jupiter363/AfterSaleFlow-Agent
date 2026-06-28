@@ -54,7 +54,7 @@ class MigrationIntegrationTest {
         MigrateResult first = flyway.migrate();
         MigrateResult second = flyway.migrate();
 
-        assertThat(first.migrationsExecuted).isEqualTo(5);
+        assertThat(first.migrationsExecuted).isEqualTo(6);
         assertThat(second.migrationsExecuted).isZero();
 
         try (Connection connection =
@@ -79,7 +79,9 @@ class MigrationIntegrationTest {
                             "action_record",
                             "audit_log",
                             "policy_rule",
-                            "evaluation_trace");
+                            "evaluation_trace",
+                            "route_decision",
+                            "flow_conclusion");
             assertThat(columnType(connection, "evidence_item", "metadata_json"))
                     .isEqualTo("jsonb");
             assertThat(columnType(connection, "action_record", "execution_time"))
@@ -93,7 +95,9 @@ class MigrationIntegrationTest {
                             "idx_review_task_status",
                             "idx_action_record_case_id",
                             "idx_audit_log_case_id",
-                            "uq_policy_rule_code_version");
+                            "uq_policy_rule_code_version",
+                            "idx_route_decision_type_created",
+                            "idx_flow_conclusion_status");
         }
     }
 

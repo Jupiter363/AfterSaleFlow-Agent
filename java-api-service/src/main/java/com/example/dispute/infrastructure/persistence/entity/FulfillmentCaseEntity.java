@@ -175,6 +175,16 @@ public class FulfillmentCaseEntity extends AbstractEntity {
         updatedBy = required(actorId, "actorId");
     }
 
+    public void applyRoute(RouteType routeType, String actorId) {
+        if (caseStatus != CaseStatus.DOSSIER_BUILT) {
+            throw new IllegalStateException(
+                    "case cannot be routed from status " + caseStatus);
+        }
+        this.routeType = Objects.requireNonNull(routeType, "routeType must not be null");
+        this.caseStatus = CaseStatus.ROUTED;
+        this.updatedBy = required(actorId, "actorId");
+    }
+
     @PrePersist
     void prePersist() {
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
