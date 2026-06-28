@@ -298,6 +298,7 @@ services:
       TEMPORAL_ADDRESS: temporal-server:7233
       TEMPORAL_NAMESPACE: default
       TEMPORAL_TASK_QUEUE: case-dispute-task-queue
+      APP_TEMPORAL_WORKER_ENABLED: "true"
       PYTHON_AGENT_SERVICE_URL: http://python-agent-service:8000
       OCR_SERVICE_URL: http://ocr-parser-service:8010
       JAVA_SERVICE_SECRET: ${JAVA_SERVICE_SECRET}

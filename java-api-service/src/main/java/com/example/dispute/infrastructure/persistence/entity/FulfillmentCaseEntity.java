@@ -185,6 +185,20 @@ public class FulfillmentCaseEntity extends AbstractEntity {
         this.updatedBy = required(actorId, "actorId");
     }
 
+    public void startHearing(String workflowId, String actorId) {
+        if (caseStatus != CaseStatus.ROUTED
+                || routeType != RouteType.DISPUTE_HEARING) {
+            throw new IllegalStateException(
+                    "hearing cannot start from status "
+                            + caseStatus
+                            + " and route "
+                            + routeType);
+        }
+        this.currentWorkflowId = required(workflowId, "workflowId");
+        this.caseStatus = CaseStatus.HEARING;
+        this.updatedBy = required(actorId, "actorId");
+    }
+
     @PrePersist
     void prePersist() {
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
@@ -258,5 +272,9 @@ public class FulfillmentCaseEntity extends AbstractEntity {
 
     public OffsetDateTime getUpdatedAt() {
         return updatedAt;
+    }
+
+    public String getCurrentWorkflowId() {
+        return currentWorkflowId;
     }
 }
