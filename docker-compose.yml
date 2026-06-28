@@ -249,10 +249,14 @@ services:
       ELASTICSEARCH_URL: http://elasticsearch:9200
       JAVA_API_SERVICE_URL: http://java-api-service:8080
       OCR_SERVICE_SECRET: ${OCR_SERVICE_SECRET}
-      OCR_TEMP_DIR: /tmp/ocr-parser
+      OCR_TEMP_DIR: /var/lib/ocr-parser
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      ENABLE_SENSITIVE_LOG_MASKING: ${ENABLE_SENSITIVE_LOG_MASKING:-true}
     ports:
       - "${OCR_SERVICE_PORT:-18010}:8010"
+    volumes:
+      - ocr_parser_data:/var/lib/ocr-parser
+      - ocr_paddle_models:/home/app/.paddlex
     depends_on:
       minio-init:
         condition: service_healthy
@@ -367,3 +371,5 @@ volumes:
   redis_data:
   elasticsearch_data:
   minio_data:
+  ocr_parser_data:
+  ocr_paddle_models:

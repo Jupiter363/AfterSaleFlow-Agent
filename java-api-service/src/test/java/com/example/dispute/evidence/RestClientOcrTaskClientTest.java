@@ -9,6 +9,7 @@ import static org.springframework.test.web.client.response.MockRestResponseCreat
 import com.example.dispute.evidence.application.OcrTaskClient;
 import com.example.dispute.evidence.infrastructure.RestClientOcrTaskClient;
 import org.junit.jupiter.api.Test;
+import org.slf4j.MDC;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.client.MockRestServiceServer;
@@ -28,17 +29,25 @@ class RestClientOcrTaskClientTest {
         server.expect(requestTo("http://ocr:8010/ocr-api/v1/parse-tasks"))
                 .andExpect(method(HttpMethod.POST))
                 .andExpect(header("X-Service-Secret", "ocr-secret"))
+                .andExpect(header("X-Trace-Id", "TRACE_ocr_test"))
+                .andExpect(header("X-Request-Id", "REQ_ocr_test"))
                 .andExpect(jsonPath("$.evidence_id").value("EVIDENCE_ocr"))
                 .andExpect(jsonPath("$.object_key").value("case/evidence/proof.pdf"))
                 .andRespond(withSuccess("{}", MediaType.APPLICATION_JSON));
 
-        client.createParseTask(
-                new OcrTaskClient.ParseTask(
-                        "EVIDENCE_ocr",
-                        "CASE_ocr",
-                        "evidence-original",
-                        "case/evidence/proof.pdf",
-                        "application/pdf"));
+        try {
+            MDC.put("trace_id", "TRACE_ocr_test");
+            MDC.put("request_id", "REQ_ocr_test");
+            client.createParseTask(
+                    new OcrTaskClient.ParseTask(
+                            "EVIDENCE_ocr",
+                            "CASE_ocr",
+                            "evidence-original",
+                            "case/evidence/proof.pdf",
+                            "application/pdf"));
+        } finally {
+            MDC.clear();
+        }
 
         server.verify();
     }

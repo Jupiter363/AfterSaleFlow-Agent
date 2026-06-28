@@ -234,4 +234,30 @@ public class EvidenceItemEntity extends AbstractEntity {
     public OffsetDateTime getCreatedAt() {
         return createdAt;
     }
+
+    public String getParsedText() {
+        return parsedText;
+    }
+
+    public String getExtractionJson() {
+        return extractionJson;
+    }
+
+    public void applyParseSuccess(
+            String text, String extractionJson, String actorId) {
+        if (text == null || text.isBlank()) {
+            throw new IllegalArgumentException("parsed text must not be blank");
+        }
+        this.parsedText = text;
+        this.extractionJson = extractionJson;
+        this.parseStatus = ParseStatus.SUCCEEDED;
+        this.updatedBy = actorId;
+    }
+
+    public void applyParseFailure(String extractionJson, String actorId) {
+        this.parsedText = null;
+        this.extractionJson = extractionJson;
+        this.parseStatus = ParseStatus.FAILED;
+        this.updatedBy = actorId;
+    }
 }

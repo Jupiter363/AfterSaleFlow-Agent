@@ -43,7 +43,8 @@ import org.testcontainers.utility.DockerImageName;
         properties = {
             "spring.data.redis.repositories.enabled=false",
             "management.health.redis.enabled=false",
-            "management.health.elasticsearch.enabled=false"
+            "management.health.elasticsearch.enabled=false",
+            "app.ocr.service-secret=test-ocr-callback-secret"
         })
 @Testcontainers
 @SuppressWarnings({"rawtypes", "unchecked"})
@@ -152,6 +153,28 @@ class EvidenceApiIntegrationTest {
                 .containsEntry("desensitized", false);
         assertThat(evidenceRepository.count()).isEqualTo(1);
 
+        ResponseEntity<Map> callback =
+                restTemplate.exchange(
+                        url(
+                                "/internal/v1/evidences/"
+                                        + evidence.get("id")
+                                        + "/parse-result"),
+                        HttpMethod.POST,
+                        new HttpEntity<>(
+                                Map.of(
+                                        "status", "SUCCEEDED",
+                                        "text", "签收证明解析文本",
+                                        "metadata", Map.of("engine", "paddleocr")),
+                                systemHeaders()),
+                        Map.class);
+        assertThat(callback.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(
+                        evidenceRepository
+                                .findById(evidence.get("id").toString())
+                                .orElseThrow()
+                                .getParsedText())
+                .isEqualTo("签收证明解析文本");
+
         ResponseEntity<Map> built =
                 restTemplate.exchange(
                         url("/api/v1/cases/CASE_evidenceapi/dossier/build"),
@@ -179,6 +202,15 @@ class EvidenceApiIntegrationTest {
         headers.setContentType(contentType);
         headers.set(HeaderAuthenticationFilter.USER_ID_HEADER, "user-evidence-api");
         headers.set(HeaderAuthenticationFilter.ROLE_HEADER, "USER");
+        return headers;
+    }
+
+    private HttpHeaders systemHeaders() {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.set(HeaderAuthenticationFilter.USER_ID_HEADER, "ocr-parser-service");
+        headers.set(HeaderAuthenticationFilter.ROLE_HEADER, "SYSTEM");
+        headers.set("X-Service-Secret", "test-ocr-callback-secret");
         return headers;
     }
 
