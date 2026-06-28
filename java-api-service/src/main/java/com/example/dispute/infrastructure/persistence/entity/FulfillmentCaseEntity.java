@@ -235,6 +235,19 @@ public class FulfillmentCaseEntity extends AbstractEntity {
         updatedBy = required(actorId, "actorId");
     }
 
+    public void beginExecution(String actorId) {
+        if (caseStatus == CaseStatus.EXECUTING) {
+            updatedBy = required(actorId, "actorId");
+            return;
+        }
+        if (caseStatus != CaseStatus.APPROVED_FOR_EXECUTION) {
+            throw new IllegalStateException(
+                    "execution cannot start from status " + caseStatus);
+        }
+        caseStatus = CaseStatus.EXECUTING;
+        updatedBy = required(actorId, "actorId");
+    }
+
     @PrePersist
     void prePersist() {
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);

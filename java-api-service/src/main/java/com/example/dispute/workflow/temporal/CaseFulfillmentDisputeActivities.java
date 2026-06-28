@@ -36,4 +36,7 @@ public interface CaseFulfillmentDisputeActivities {
 
     @ActivityMethod
     String createReviewTask(String caseId, String remedyPlanId);
+
+    @ActivityMethod
+    void executeApprovedPlan(String caseId);
 }

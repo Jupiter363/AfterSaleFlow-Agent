@@ -43,6 +43,7 @@ public class ApprovalRecordEntity extends AbstractEntity {
     @PrePersist void prePersist(){createdAt=OffsetDateTime.now(ZoneOffset.UTC);}
     public String getCaseId(){return caseId;} public String getReviewTaskId(){return reviewTaskId;}
     public String getPlanId(){return planId;} public String getReviewerId(){return reviewerId;}
+    public String getReviewerRole(){return reviewerRole;}
     public ApprovalDecisionType getDecisionType(){return decisionType;}
     public String getOriginalPlanJson(){return originalPlanJson;} public String getApprovedPlanJson(){return approvedPlanJson;}
     public String getDecisionReason(){return decisionReason;}

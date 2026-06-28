@@ -170,11 +170,14 @@ public class CaseFulfillmentDisputeWorkflowImpl
                 status = "RUNNING";
                 continue;
             }
-            status = "COMPLETED";
             if ("APPROVE".equals(decision.decision())
                     || "MODIFY_AND_APPROVE".equals(decision.decision())) {
-                return result(input, draftId, planId, taskId, "TOOL_EXECUTOR");
+                status = "EXECUTING";
+                activities.executeApprovedPlan(input.caseId());
+                status = "COMPLETED";
+                return result(input, draftId, planId, taskId, "CASE_CLOSURE");
             }
+            status = "COMPLETED";
             manualRequired = true;
             return result(input, draftId, planId, taskId, "HUMAN_HANDOFF");
         }

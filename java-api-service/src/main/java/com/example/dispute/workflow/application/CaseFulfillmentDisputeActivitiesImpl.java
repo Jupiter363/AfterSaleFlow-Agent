@@ -5,6 +5,7 @@ import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.ParseStatus;
+import com.example.dispute.executor.application.ToolExecutorService;
 import com.example.dispute.infrastructure.persistence.entity.AdjudicationDraftEntity;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.entity.HearingRecordEntity;
@@ -54,6 +55,7 @@ public class CaseFulfillmentDisputeActivitiesImpl
     private final HearingAgentClient agentClient;
     private final RemedyApplicationService remedyService;
     private final ReviewApplicationService reviewService;
+    private final ToolExecutorService toolExecutorService;
     private final AuditRecorder auditRecorder;
     private final ObjectMapper objectMapper;
     private final TransactionTemplate transactions;
@@ -69,6 +71,7 @@ public class CaseFulfillmentDisputeActivitiesImpl
             HearingAgentClient agentClient,
             RemedyApplicationService remedyService,
             ReviewApplicationService reviewService,
+            ToolExecutorService toolExecutorService,
             AuditRecorder auditRecorder,
             ObjectMapper objectMapper,
             TransactionTemplate transactions) {
@@ -82,6 +85,7 @@ public class CaseFulfillmentDisputeActivitiesImpl
         this.agentClient = agentClient;
         this.remedyService = remedyService;
         this.reviewService = reviewService;
+        this.toolExecutorService = toolExecutorService;
         this.auditRecorder = auditRecorder;
         this.objectMapper = objectMapper;
         this.transactions = transactions;
@@ -375,6 +379,12 @@ public class CaseFulfillmentDisputeActivitiesImpl
     @Override
     public String createReviewTask(String caseId, String remedyPlanId) {
         return reviewService.createForWorkflow(caseId, remedyPlanId);
+    }
+
+    @Override
+    public void executeApprovedPlan(String caseId) {
+        toolExecutorService.executeApprovedActions(
+                caseId, "WORKFLOW_EXECUTE:" + caseId, SYSTEM);
     }
 
     private static JsonNode nodeOutput(JsonNode raw, String node) {

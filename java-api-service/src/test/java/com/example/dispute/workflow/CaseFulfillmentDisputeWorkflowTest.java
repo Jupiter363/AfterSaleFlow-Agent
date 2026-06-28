@@ -68,12 +68,13 @@ class CaseFulfillmentDisputeWorkflowTest {
                         .getResult(CaseWorkflowResult.class);
 
         assertThat(result.workflowStatus()).isEqualTo("COMPLETED");
-        assertThat(result.nextStage()).isEqualTo("TOOL_EXECUTOR");
+        assertThat(result.nextStage()).isEqualTo("CASE_CLOSURE");
         assertThat(result.remedyPlanId()).isEqualTo("REMEDY_test");
         assertThat(result.reviewTaskId()).isEqualTo("REVIEW_test");
         assertThat(result.evidenceTimedOut()).isFalse();
         assertThat(activities.analysisCalls()).isEqualTo(2);
         assertThat(activities.recordedSignals()).containsExactly("SUBMISSION_signal");
+        assertThat(activities.executionCalls).isEqualTo(1);
     }
 
     @Test
@@ -147,11 +148,12 @@ class CaseFulfillmentDisputeWorkflowTest {
                     io.temporal.client.WorkflowStub.fromTyped(workflow)
                             .getResult(CaseWorkflowResult.class);
 
-            assertThat(result.nextStage()).isEqualTo("TOOL_EXECUTOR");
+            assertThat(result.nextStage()).isEqualTo("CASE_CLOSURE");
             assertThat(result.remedyPlanId()).isEqualTo("REMEDY_test");
         }
         assertThat(activities.remedyCalls).isEqualTo(2);
         assertThat(activities.analysisCalls()).isZero();
+        assertThat(activities.executionCalls).isEqualTo(2);
     }
 
     @Test
@@ -182,9 +184,10 @@ class CaseFulfillmentDisputeWorkflowTest {
                 io.temporal.client.WorkflowStub.fromTyped(workflow)
                         .getResult(CaseWorkflowResult.class);
 
-        assertThat(result.nextStage()).isEqualTo("TOOL_EXECUTOR");
+        assertThat(result.nextStage()).isEqualTo("CASE_CLOSURE");
         assertThat(activities.reviewCalls).isEqualTo(2);
         assertThat(activities.recordedSignals()).contains("SUBMISSION_review");
+        assertThat(activities.executionCalls).isEqualTo(1);
     }
 
     private CaseFulfillmentDisputeWorkflow newWorkflow(String workflowId) {
@@ -216,6 +219,7 @@ class CaseFulfillmentDisputeWorkflowTest {
         private volatile int reviewerSignals;
         private volatile int remedyCalls;
         private volatile int reviewCalls;
+        private volatile int executionCalls;
 
         @Override
         public void initializeHearing(CaseWorkflowInput input) {}
@@ -264,6 +268,11 @@ class CaseFulfillmentDisputeWorkflowTest {
         public String createReviewTask(String caseId, String remedyPlanId) {
             reviewCalls++;
             return "REVIEW_test";
+        }
+
+        @Override
+        public void executeApprovedPlan(String caseId) {
+            executionCalls++;
         }
 
         int analysisCalls() {
