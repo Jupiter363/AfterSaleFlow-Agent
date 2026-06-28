@@ -22,6 +22,7 @@ import com.example.dispute.workflow.domain.HearingAnalysisActivityResult;
 import com.example.dispute.workflow.domain.PartyEvidenceSignal;
 import com.example.dispute.workflow.domain.ReviewerWorkflowSignal;
 import com.example.dispute.workflow.temporal.CaseFulfillmentDisputeActivities;
+import com.example.dispute.remedy.application.RemedyApplicationService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -50,6 +51,7 @@ public class CaseFulfillmentDisputeActivitiesImpl
     private final AdjudicationDraftRepository draftRepository;
     private final PartySubmissionRepository submissionRepository;
     private final HearingAgentClient agentClient;
+    private final RemedyApplicationService remedyService;
     private final AuditRecorder auditRecorder;
     private final ObjectMapper objectMapper;
     private final TransactionTemplate transactions;
@@ -63,6 +65,7 @@ public class CaseFulfillmentDisputeActivitiesImpl
             AdjudicationDraftRepository draftRepository,
             PartySubmissionRepository submissionRepository,
             HearingAgentClient agentClient,
+            RemedyApplicationService remedyService,
             AuditRecorder auditRecorder,
             ObjectMapper objectMapper,
             TransactionTemplate transactions) {
@@ -74,6 +77,7 @@ public class CaseFulfillmentDisputeActivitiesImpl
         this.draftRepository = draftRepository;
         this.submissionRepository = submissionRepository;
         this.agentClient = agentClient;
+        this.remedyService = remedyService;
         this.auditRecorder = auditRecorder;
         this.objectMapper = objectMapper;
         this.transactions = transactions;
@@ -357,6 +361,11 @@ public class CaseFulfillmentDisputeActivitiesImpl
                                         "evidence_timed_out", evidenceTimedOut));
                     }
                 });
+    }
+
+    @Override
+    public String planRemedy(String caseId, String workflowId) {
+        return remedyService.generateForWorkflow(caseId, workflowId);
     }
 
     private static JsonNode nodeOutput(JsonNode raw, String node) {

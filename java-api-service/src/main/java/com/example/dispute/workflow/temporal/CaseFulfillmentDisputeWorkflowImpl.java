@@ -46,8 +46,10 @@ public class CaseFulfillmentDisputeWorkflowImpl
     public CaseWorkflowResult run(CaseWorkflowInput input) {
         status = "RUNNING";
         if (input.routeType() != RouteType.DISPUTE_HEARING) {
+            String planId =
+                    activities.planRemedy(input.caseId(), input.workflowId());
             status = "COMPLETED";
-            return result(input, null);
+            return result(input, null, planId);
         }
 
         activities.initializeHearing(input);
@@ -67,8 +69,10 @@ public class CaseFulfillmentDisputeWorkflowImpl
                 manualRequired = true;
                 activities.completeHearing(
                         input.caseId(), input.workflowId(), true, evidenceTimedOut);
+                String planId =
+                        activities.planRemedy(input.caseId(), input.workflowId());
                 status = "COMPLETED";
-                return result(input, null);
+                return result(input, null, planId);
             }
             manualRequired = manualRequired || analysis.manualRequired();
             if (!analysis.requiresAdditionalEvidence()
@@ -83,8 +87,10 @@ public class CaseFulfillmentDisputeWorkflowImpl
                         input.workflowId(),
                         manualRequired,
                         evidenceTimedOut);
+                String planId =
+                        activities.planRemedy(input.caseId(), input.workflowId());
                 status = "COMPLETED";
-                return result(input, analysis.draftId());
+                return result(input, analysis.draftId(), planId);
             }
 
             status = "WAITING_EVIDENCE";
@@ -128,15 +134,17 @@ public class CaseFulfillmentDisputeWorkflowImpl
         return evidenceReceived;
     }
 
-    private CaseWorkflowResult result(CaseWorkflowInput input, String draftId) {
+    private CaseWorkflowResult result(
+            CaseWorkflowInput input, String draftId, String remedyPlanId) {
         return new CaseWorkflowResult(
                 input.caseId(),
                 input.workflowId(),
                 status,
-                "REMEDY_PLANNER",
+                "APPROVAL_POLICY_ENGINE",
                 manualRequired,
                 evidenceTimedOut,
-                draftId);
+                draftId,
+                remedyPlanId);
     }
 
     @Override

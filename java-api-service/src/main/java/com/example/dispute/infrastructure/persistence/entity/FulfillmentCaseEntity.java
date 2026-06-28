@@ -199,6 +199,15 @@ public class FulfillmentCaseEntity extends AbstractEntity {
         this.updatedBy = required(actorId, "actorId");
     }
 
+    public void markRemedyPlanned(String actorId) {
+        if (caseStatus != CaseStatus.ROUTED && caseStatus != CaseStatus.HEARING) {
+            throw new IllegalStateException(
+                    "remedy cannot be planned from status " + caseStatus);
+        }
+        this.caseStatus = CaseStatus.REMEDY_PLANNED;
+        this.updatedBy = required(actorId, "actorId");
+    }
+
     @PrePersist
     void prePersist() {
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);

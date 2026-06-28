@@ -65,7 +65,8 @@ class CaseFulfillmentDisputeWorkflowTest {
                         .getResult(CaseWorkflowResult.class);
 
         assertThat(result.workflowStatus()).isEqualTo("COMPLETED");
-        assertThat(result.nextStage()).isEqualTo("REMEDY_PLANNER");
+        assertThat(result.nextStage()).isEqualTo("APPROVAL_POLICY_ENGINE");
+        assertThat(result.remedyPlanId()).isEqualTo("REMEDY_test");
         assertThat(result.evidenceTimedOut()).isFalse();
         assertThat(activities.analysisCalls()).isEqualTo(2);
         assertThat(activities.recordedSignals()).containsExactly("SUBMISSION_signal");
@@ -85,7 +86,7 @@ class CaseFulfillmentDisputeWorkflowTest {
                                 Duration.ofHours(48)));
 
         assertThat(result.workflowStatus()).isEqualTo("COMPLETED");
-        assertThat(result.nextStage()).isEqualTo("REMEDY_PLANNER");
+        assertThat(result.nextStage()).isEqualTo("APPROVAL_POLICY_ENGINE");
         assertThat(result.evidenceTimedOut()).isTrue();
         assertThat(result.manualRequired()).isTrue();
         assertThat(environment.currentTimeMillis())
@@ -118,6 +119,31 @@ class CaseFulfillmentDisputeWorkflowTest {
         assertThat(activities.reviewerSignals).isEqualTo(1);
     }
 
+    @Test
+    void regularAndRuleRoutesGoDirectlyThroughRemedyPlanning() {
+        for (RouteType route :
+                List.of(
+                        RouteType.REGULAR_FULFILLMENT,
+                        RouteType.RULE_BASED_RESOLUTION)) {
+            String suffix = route.name().toLowerCase();
+            CaseFulfillmentDisputeWorkflow workflow =
+                    newWorkflow("WORKFLOW_" + suffix);
+            CaseWorkflowResult result =
+                    workflow.run(
+                            new CaseWorkflowInput(
+                                    "CASE_" + suffix,
+                                    "WORKFLOW_" + suffix,
+                                    route,
+                                    Duration.ofHours(24),
+                                    2));
+
+            assertThat(result.nextStage()).isEqualTo("APPROVAL_POLICY_ENGINE");
+            assertThat(result.remedyPlanId()).isEqualTo("REMEDY_test");
+        }
+        assertThat(activities.remedyCalls).isEqualTo(2);
+        assertThat(activities.analysisCalls()).isZero();
+    }
+
     private CaseFulfillmentDisputeWorkflow newWorkflow(String workflowId) {
         return client.newWorkflowStub(
                 CaseFulfillmentDisputeWorkflow.class,
@@ -145,6 +171,7 @@ class CaseFulfillmentDisputeWorkflowTest {
                 new java.util.concurrent.CopyOnWriteArrayList<>();
         private volatile boolean alwaysRequireEvidence;
         private volatile int reviewerSignals;
+        private volatile int remedyCalls;
 
         @Override
         public void initializeHearing(CaseWorkflowInput input) {}
@@ -182,6 +209,12 @@ class CaseFulfillmentDisputeWorkflowTest {
                 String workflowId,
                 boolean manualRequired,
                 boolean evidenceTimedOut) {}
+
+        @Override
+        public String planRemedy(String caseId, String workflowId) {
+            remedyCalls++;
+            return "REMEDY_test";
+        }
 
         int analysisCalls() {
             return calls.get();

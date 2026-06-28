@@ -30,4 +30,7 @@ public interface CaseFulfillmentDisputeActivities {
             String workflowId,
             boolean manualRequired,
             boolean evidenceTimedOut);
+
+    @ActivityMethod
+    String planRemedy(String caseId, String workflowId);
 }

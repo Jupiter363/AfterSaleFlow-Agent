@@ -26,7 +26,7 @@ def test_temporal_workflow_owns_wait_signal_timeout_and_retry() -> None:
     assert "RetryOptions.newBuilder()" in workflow
     assert "submitPartyEvidence" in contract
     assert "submitReviewerSignal" in contract
-    assert '"REMEDY_PLANNER"' in workflow
+    assert "activities.planRemedy" in workflow
 
 
 def test_hearing_controller_is_async_and_python_does_not_own_global_state() -> None:
