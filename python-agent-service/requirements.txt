@@ -1,0 +1,6 @@
+fastapi==0.138.0
+uvicorn[standard]==0.49.0
+pydantic-settings==2.14.0
+httpx==0.28.1
+langgraph==1.2.6
+langfuse==4.11.0

@@ -8,7 +8,7 @@ x-common: &common
 services:
   postgresql:
     <<: *common
-    image: postgres:16-alpine
+    image: public.ecr.aws/docker/library/postgres:16-alpine
     environment:
       TZ: ${TZ:-Asia/Shanghai}
       POSTGRES_DB: ${POSTGRES_DB:-dispute_system}
@@ -159,7 +159,7 @@ services:
 
   langfuse:
     <<: *common
-    image: langfuse/langfuse:2.95.11
+    image: ghcr.io/langfuse/langfuse:2.95.11
     depends_on:
       postgresql:
         condition: service_healthy
@@ -168,6 +168,12 @@ services:
       NEXTAUTH_URL: ${LANGFUSE_NEXTAUTH_URL:-http://localhost:13000}
       NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET}
       SALT: ${LANGFUSE_SALT}
+      LANGFUSE_INIT_ORG_ID: aftersale-flow
+      LANGFUSE_INIT_ORG_NAME: AfterSaleFlow
+      LANGFUSE_INIT_PROJECT_ID: dispute-agent
+      LANGFUSE_INIT_PROJECT_NAME: Dispute Agent
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_SECRET_KEY}
       TELEMETRY_ENABLED: "false"
     ports:
       - "${LANGFUSE_PORT:-13000}:3000"
@@ -218,6 +224,8 @@ services:
       LANGFUSE_HOST: http://langfuse:3000
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY}
+      LANGFUSE_ENABLED: "true"
+      PROMPT_VERSION: hearing-v1
       JAVA_API_SERVICE_URL: http://java-api-service:8080
       PYTHON_AGENT_SERVICE_SECRET: ${PYTHON_AGENT_SERVICE_SECRET}
       ENABLE_SENSITIVE_LOG_MASKING: ${ENABLE_SENSITIVE_LOG_MASKING:-true}
