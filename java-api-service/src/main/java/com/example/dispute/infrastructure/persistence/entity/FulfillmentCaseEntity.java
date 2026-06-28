@@ -208,6 +208,33 @@ public class FulfillmentCaseEntity extends AbstractEntity {
         this.updatedBy = required(actorId, "actorId");
     }
 
+    public void waitForHumanReview(String actorId) {
+        if (caseStatus != CaseStatus.REMEDY_PLANNED
+                && caseStatus != CaseStatus.WAITING_EVIDENCE) {
+            throw new IllegalStateException(
+                    "review cannot start from status " + caseStatus);
+        }
+        caseStatus = CaseStatus.WAITING_HUMAN_REVIEW;
+        updatedBy = required(actorId, "actorId");
+    }
+
+    public void applyReviewOutcome(
+            com.example.dispute.domain.model.ApprovalDecisionType decision,
+            String actorId) {
+        if (caseStatus != CaseStatus.WAITING_HUMAN_REVIEW) {
+            throw new IllegalStateException(
+                    "review cannot complete from status " + caseStatus);
+        }
+        caseStatus =
+                switch (decision) {
+                    case APPROVE, MODIFY_AND_APPROVE ->
+                            CaseStatus.APPROVED_FOR_EXECUTION;
+                    case REQUEST_MORE_EVIDENCE -> CaseStatus.WAITING_EVIDENCE;
+                    case REJECT, ESCALATE_MANUAL -> CaseStatus.MANUAL_HANDOFF;
+                };
+        updatedBy = required(actorId, "actorId");
+    }
+
     @PrePersist
     void prePersist() {
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);

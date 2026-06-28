@@ -23,6 +23,7 @@ import com.example.dispute.workflow.application.HearingAgentResult;
 import com.example.dispute.workflow.domain.CaseWorkflowInput;
 import com.example.dispute.workflow.domain.HearingAnalysisActivityCommand;
 import com.example.dispute.remedy.application.RemedyApplicationService;
+import com.example.dispute.review.application.ReviewApplicationService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.time.Duration;
@@ -244,6 +245,7 @@ class HearingPersistenceIntegrationTest {
                                     "test-model");
                         },
                         org.mockito.Mockito.mock(RemedyApplicationService.class),
+                        org.mockito.Mockito.mock(ReviewApplicationService.class),
                         org.mockito.Mockito.mock(AuditRecorder.class),
                         mapper,
                         new TransactionTemplate(transactionManager));

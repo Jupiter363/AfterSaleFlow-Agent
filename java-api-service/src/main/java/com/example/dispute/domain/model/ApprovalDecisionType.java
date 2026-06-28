@@ -4,5 +4,6 @@ public enum ApprovalDecisionType {
     APPROVE,
     REJECT,
     MODIFY_AND_APPROVE,
-    REQUEST_MORE_EVIDENCE
+    REQUEST_MORE_EVIDENCE,
+    ESCALATE_MANUAL
 }

@@ -91,4 +91,8 @@ public class AdjudicationDraftEntity extends AbstractEntity {
     public BigDecimal getConfidence() { return confidence; }
     public String getDraftText() { return draftText; }
     public String getDraftStatus() { return draftStatus; }
+    public String getFactFindingsJson() { return factFindingsJson; }
+    public String getEvidenceAssessmentJson() { return evidenceAssessmentJson; }
+    public String getPolicyApplicationJson() { return policyApplicationJson; }
+    public String getReviewerAttentionJson() { return reviewerAttentionJson; }
 }

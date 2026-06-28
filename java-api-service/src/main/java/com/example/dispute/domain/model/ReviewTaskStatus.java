@@ -6,6 +6,8 @@ public enum ReviewTaskStatus {
     IN_REVIEW,
     APPROVED,
     REJECTED,
+    WAITING_EVIDENCE,
+    ESCALATED,
     MODIFICATION_REQUIRED,
     CANCELLED
 }

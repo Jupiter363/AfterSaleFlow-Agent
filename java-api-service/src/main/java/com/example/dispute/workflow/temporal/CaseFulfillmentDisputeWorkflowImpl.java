@@ -48,8 +48,7 @@ public class CaseFulfillmentDisputeWorkflowImpl
         if (input.routeType() != RouteType.DISPUTE_HEARING) {
             String planId =
                     activities.planRemedy(input.caseId(), input.workflowId());
-            status = "COMPLETED";
-            return result(input, null, planId);
+            return awaitHumanReview(input, null, planId);
         }
 
         activities.initializeHearing(input);
@@ -71,8 +70,7 @@ public class CaseFulfillmentDisputeWorkflowImpl
                         input.caseId(), input.workflowId(), true, evidenceTimedOut);
                 String planId =
                         activities.planRemedy(input.caseId(), input.workflowId());
-                status = "COMPLETED";
-                return result(input, null, planId);
+                return awaitHumanReview(input, null, planId);
             }
             manualRequired = manualRequired || analysis.manualRequired();
             if (!analysis.requiresAdditionalEvidence()
@@ -89,8 +87,7 @@ public class CaseFulfillmentDisputeWorkflowImpl
                         evidenceTimedOut);
                 String planId =
                         activities.planRemedy(input.caseId(), input.workflowId());
-                status = "COMPLETED";
-                return result(input, analysis.draftId(), planId);
+                return awaitHumanReview(input, analysis.draftId(), planId);
             }
 
             status = "WAITING_EVIDENCE";
@@ -120,8 +117,15 @@ public class CaseFulfillmentDisputeWorkflowImpl
             activities.recordPartyEvidence(signal);
             evidenceReceived = true;
         }
+        Deque<ReviewerWorkflowSignal> reviewDecisions = new ArrayDeque<>();
         while (!reviewerSignals.isEmpty()) {
             ReviewerWorkflowSignal signal = reviewerSignals.removeFirst();
+            if (!"ESCALATE_MANUAL".equals(signal.decision())
+                    && !"CONTINUE_WITH_AVAILABLE_EVIDENCE".equals(
+                            signal.decision())) {
+                reviewDecisions.addLast(signal);
+                continue;
+            }
             activities.recordReviewerSignal(signal);
             if ("ESCALATE_MANUAL".equals(signal.decision())) {
                 manualRequired = true;
@@ -131,20 +135,95 @@ public class CaseFulfillmentDisputeWorkflowImpl
                 evidenceReceived = true;
             }
         }
+        reviewerSignals.addAll(reviewDecisions);
         return evidenceReceived;
     }
 
+    private CaseWorkflowResult awaitHumanReview(
+            CaseWorkflowInput input, String draftId, String planId) {
+        while (true) {
+            String taskId = activities.createReviewTask(input.caseId(), planId);
+            status = "WAITING_HUMAN_REVIEW";
+            boolean reviewed =
+                    Workflow.await(
+                            Duration.ofDays(7),
+                            () -> hasFinalReviewDecision());
+            if (!reviewed) {
+                manualRequired = true;
+                status = "COMPLETED";
+                return result(input, draftId, planId, taskId, "HUMAN_HANDOFF");
+            }
+            ReviewerWorkflowSignal decision = removeFinalReviewDecision();
+            activities.recordReviewerSignal(decision);
+            if ("REQUEST_MORE_EVIDENCE".equals(decision.decision())) {
+                status = "WAITING_EVIDENCE";
+                boolean supplied =
+                        Workflow.await(
+                                input.evidenceWaitTimeout(),
+                                () -> !partySignals.isEmpty());
+                if (supplied) {
+                    drainSignals();
+                } else {
+                    evidenceTimedOut = true;
+                    manualRequired = true;
+                }
+                status = "RUNNING";
+                continue;
+            }
+            status = "COMPLETED";
+            if ("APPROVE".equals(decision.decision())
+                    || "MODIFY_AND_APPROVE".equals(decision.decision())) {
+                return result(input, draftId, planId, taskId, "TOOL_EXECUTOR");
+            }
+            manualRequired = true;
+            return result(input, draftId, planId, taskId, "HUMAN_HANDOFF");
+        }
+    }
+
+    private boolean hasFinalReviewDecision() {
+        return reviewerSignals.stream()
+                .anyMatch(
+                        signal ->
+                                !"CONTINUE_WITH_AVAILABLE_EVIDENCE"
+                                                .equals(signal.decision())
+                                        && !"ESCALATE_MANUAL"
+                                                .equals(signal.decision()));
+    }
+
+    private ReviewerWorkflowSignal removeFinalReviewDecision() {
+        Deque<ReviewerWorkflowSignal> deferred = new ArrayDeque<>();
+        ReviewerWorkflowSignal selected = null;
+        while (!reviewerSignals.isEmpty()) {
+            ReviewerWorkflowSignal signal = reviewerSignals.removeFirst();
+            if (selected == null
+                    && !"CONTINUE_WITH_AVAILABLE_EVIDENCE"
+                            .equals(signal.decision())
+                    && !"ESCALATE_MANUAL".equals(signal.decision())) {
+                selected = signal;
+            } else {
+                deferred.addLast(signal);
+            }
+        }
+        reviewerSignals.addAll(deferred);
+        return selected;
+    }
+
     private CaseWorkflowResult result(
-            CaseWorkflowInput input, String draftId, String remedyPlanId) {
+            CaseWorkflowInput input,
+            String draftId,
+            String remedyPlanId,
+            String reviewTaskId,
+            String nextStage) {
         return new CaseWorkflowResult(
                 input.caseId(),
                 input.workflowId(),
                 status,
-                "APPROVAL_POLICY_ENGINE",
+                nextStage,
                 manualRequired,
                 evidenceTimedOut,
                 draftId,
-                remedyPlanId);
+                remedyPlanId,
+                reviewTaskId);
     }
 
     @Override

@@ -60,13 +60,17 @@ class CaseFulfillmentDisputeWorkflowTest {
                         "USER",
                         "SUBMISSION_signal",
                         List.of("EVIDENCE_signal")));
+        workflow.submitReviewerSignal(
+                new ReviewerWorkflowSignal(
+                        "reviewer-1", "APPROVE", "reviewed"));
         CaseWorkflowResult result =
                 io.temporal.client.WorkflowStub.fromTyped(workflow)
                         .getResult(CaseWorkflowResult.class);
 
         assertThat(result.workflowStatus()).isEqualTo("COMPLETED");
-        assertThat(result.nextStage()).isEqualTo("APPROVAL_POLICY_ENGINE");
+        assertThat(result.nextStage()).isEqualTo("TOOL_EXECUTOR");
         assertThat(result.remedyPlanId()).isEqualTo("REMEDY_test");
+        assertThat(result.reviewTaskId()).isEqualTo("REVIEW_test");
         assertThat(result.evidenceTimedOut()).isFalse();
         assertThat(activities.analysisCalls()).isEqualTo(2);
         assertThat(activities.recordedSignals()).containsExactly("SUBMISSION_signal");
@@ -86,7 +90,7 @@ class CaseFulfillmentDisputeWorkflowTest {
                                 Duration.ofHours(48)));
 
         assertThat(result.workflowStatus()).isEqualTo("COMPLETED");
-        assertThat(result.nextStage()).isEqualTo("APPROVAL_POLICY_ENGINE");
+        assertThat(result.nextStage()).isEqualTo("HUMAN_HANDOFF");
         assertThat(result.evidenceTimedOut()).isTrue();
         assertThat(result.manualRequired()).isTrue();
         assertThat(environment.currentTimeMillis())
@@ -128,20 +132,59 @@ class CaseFulfillmentDisputeWorkflowTest {
             String suffix = route.name().toLowerCase();
             CaseFulfillmentDisputeWorkflow workflow =
                     newWorkflow("WORKFLOW_" + suffix);
+            WorkflowClient.start(
+                    workflow::run,
+                    new CaseWorkflowInput(
+                            "CASE_" + suffix,
+                            "WORKFLOW_" + suffix,
+                            route,
+                            Duration.ofHours(24),
+                            2));
+            workflow.submitReviewerSignal(
+                    new ReviewerWorkflowSignal(
+                            "reviewer-1", "APPROVE", "reviewed"));
             CaseWorkflowResult result =
-                    workflow.run(
-                            new CaseWorkflowInput(
-                                    "CASE_" + suffix,
-                                    "WORKFLOW_" + suffix,
-                                    route,
-                                    Duration.ofHours(24),
-                                    2));
+                    io.temporal.client.WorkflowStub.fromTyped(workflow)
+                            .getResult(CaseWorkflowResult.class);
 
-            assertThat(result.nextStage()).isEqualTo("APPROVAL_POLICY_ENGINE");
+            assertThat(result.nextStage()).isEqualTo("TOOL_EXECUTOR");
             assertThat(result.remedyPlanId()).isEqualTo("REMEDY_test");
         }
         assertThat(activities.remedyCalls).isEqualTo(2);
         assertThat(activities.analysisCalls()).isZero();
+    }
+
+    @Test
+    void reviewerCanRequestEvidenceThenApproveTheResumedWorkflow() {
+        CaseFulfillmentDisputeWorkflow workflow =
+                newWorkflow("WORKFLOW_review_evidence");
+        WorkflowClient.start(
+                workflow::run,
+                new CaseWorkflowInput(
+                        "CASE_review_evidence",
+                        "WORKFLOW_review_evidence",
+                        RouteType.RULE_BASED_RESOLUTION,
+                        Duration.ofHours(24),
+                        2));
+        workflow.submitReviewerSignal(
+                new ReviewerWorkflowSignal(
+                        "reviewer-1",
+                        "REQUEST_MORE_EVIDENCE",
+                        "need delivery photo"));
+        workflow.submitPartyEvidence(
+                new PartyEvidenceSignal(
+                        "MERCHANT", "SUBMISSION_review", List.of("EVIDENCE_review")));
+        workflow.submitReviewerSignal(
+                new ReviewerWorkflowSignal(
+                        "reviewer-1", "APPROVE", "evidence verified"));
+
+        CaseWorkflowResult result =
+                io.temporal.client.WorkflowStub.fromTyped(workflow)
+                        .getResult(CaseWorkflowResult.class);
+
+        assertThat(result.nextStage()).isEqualTo("TOOL_EXECUTOR");
+        assertThat(activities.reviewCalls).isEqualTo(2);
+        assertThat(activities.recordedSignals()).contains("SUBMISSION_review");
     }
 
     private CaseFulfillmentDisputeWorkflow newWorkflow(String workflowId) {
@@ -172,6 +215,7 @@ class CaseFulfillmentDisputeWorkflowTest {
         private volatile boolean alwaysRequireEvidence;
         private volatile int reviewerSignals;
         private volatile int remedyCalls;
+        private volatile int reviewCalls;
 
         @Override
         public void initializeHearing(CaseWorkflowInput input) {}
@@ -214,6 +258,12 @@ class CaseFulfillmentDisputeWorkflowTest {
         public String planRemedy(String caseId, String workflowId) {
             remedyCalls++;
             return "REMEDY_test";
+        }
+
+        @Override
+        public String createReviewTask(String caseId, String remedyPlanId) {
+            reviewCalls++;
+            return "REVIEW_test";
         }
 
         int analysisCalls() {

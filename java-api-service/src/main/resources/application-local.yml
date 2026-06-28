@@ -33,6 +33,10 @@ app:
     namespace: ${TEMPORAL_NAMESPACE:default}
     task-queue: ${TEMPORAL_TASK_QUEUE:case-dispute-task-queue}
     worker-enabled: ${APP_TEMPORAL_WORKER_ENABLED:false}
+  approval:
+    refund-threshold: ${APPROVAL_REFUND_THRESHOLD:500.00}
+    reship-threshold: ${APPROVAL_RESHIP_THRESHOLD:300.00}
+    review-timeout-hours: ${APPROVAL_REVIEW_TIMEOUT_HOURS:168}
   minio:
     endpoint: ${MINIO_ENDPOINT:http://minio:9000}
     access-key: ${MINIO_ROOT_USER}

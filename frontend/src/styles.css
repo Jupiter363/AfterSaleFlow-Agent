@@ -1,0 +1,25 @@
+:root { font-family: Inter, "PingFang SC", sans-serif; color: #17211c; background: #eef1eb; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+.shell { min-height: 100vh; padding: 28px; }
+.hero { display: flex; justify-content: space-between; gap: 32px; padding: 28px 34px; color: #f7f4e9; background: #173c34; border-radius: 22px 22px 6px 6px; }
+.hero h1 { margin: 4px 0; font-family: Georgia, "Songti SC", serif; font-size: 36px; }
+.eyebrow { margin: 0; color: #d6a85f; font-size: 12px; letter-spacing: .18em; }
+.identity { display: grid; align-content: center; gap: 10px; min-width: 240px; }
+.workspace { display: grid; grid-template-columns: 290px 1fr; min-height: 650px; background: #fffdf7; border-radius: 0 0 22px 22px; box-shadow: 0 18px 50px #173c3420; }
+.task-panel { padding: 22px; border-right: 1px solid #dce1d8; }
+.panel-title, .packet-head, .actions, .risk-strip { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.task-card { display: grid; width: 100%; margin: 10px 0; padding: 15px; text-align: left; color: inherit; background: #f2f2e9; border: 1px solid transparent; border-radius: 12px; cursor: pointer; }
+.task-card.active { background: #e1eee8; border-color: #2d7564; }
+.priority { width: max-content; padding: 3px 7px; color: #8b3c28; background: #f3d8c6; border-radius: 20px; font-size: 11px; }
+.packet { padding: 28px 34px; overflow: hidden; }
+.risk-strip { justify-content: flex-start; margin: 18px 0; padding: 12px; background: #fff0e5; border-left: 4px solid #b94b2d; }
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+article { padding: 16px; background: #f5f5ef; border-radius: 12px; }
+article h3 { margin-top: 0; }
+pre { max-height: 230px; overflow: auto; white-space: pre-wrap; word-break: break-word; font: 12px/1.55 "JetBrains Mono", monospace; }
+.plan { margin-top: 14px; background: #edf5f1; }
+.decision { margin-top: 16px; }
+.actions { flex-wrap: wrap; justify-content: flex-end; margin-top: 12px; }
+.empty { display: grid; place-items: center; }
+@media (max-width: 900px) { .shell { padding: 0; } .hero { flex-direction: column; border-radius: 0; } .workspace { grid-template-columns: 1fr; } .task-panel { border-right: 0; } .grid { grid-template-columns: 1fr; } }

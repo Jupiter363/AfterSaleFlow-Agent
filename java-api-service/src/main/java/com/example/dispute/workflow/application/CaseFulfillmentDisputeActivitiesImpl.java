@@ -23,6 +23,7 @@ import com.example.dispute.workflow.domain.PartyEvidenceSignal;
 import com.example.dispute.workflow.domain.ReviewerWorkflowSignal;
 import com.example.dispute.workflow.temporal.CaseFulfillmentDisputeActivities;
 import com.example.dispute.remedy.application.RemedyApplicationService;
+import com.example.dispute.review.application.ReviewApplicationService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -52,6 +53,7 @@ public class CaseFulfillmentDisputeActivitiesImpl
     private final PartySubmissionRepository submissionRepository;
     private final HearingAgentClient agentClient;
     private final RemedyApplicationService remedyService;
+    private final ReviewApplicationService reviewService;
     private final AuditRecorder auditRecorder;
     private final ObjectMapper objectMapper;
     private final TransactionTemplate transactions;
@@ -66,6 +68,7 @@ public class CaseFulfillmentDisputeActivitiesImpl
             PartySubmissionRepository submissionRepository,
             HearingAgentClient agentClient,
             RemedyApplicationService remedyService,
+            ReviewApplicationService reviewService,
             AuditRecorder auditRecorder,
             ObjectMapper objectMapper,
             TransactionTemplate transactions) {
@@ -78,6 +81,7 @@ public class CaseFulfillmentDisputeActivitiesImpl
         this.submissionRepository = submissionRepository;
         this.agentClient = agentClient;
         this.remedyService = remedyService;
+        this.reviewService = reviewService;
         this.auditRecorder = auditRecorder;
         this.objectMapper = objectMapper;
         this.transactions = transactions;
@@ -366,6 +370,11 @@ public class CaseFulfillmentDisputeActivitiesImpl
     @Override
     public String planRemedy(String caseId, String workflowId) {
         return remedyService.generateForWorkflow(caseId, workflowId);
+    }
+
+    @Override
+    public String createReviewTask(String caseId, String remedyPlanId) {
+        return reviewService.createForWorkflow(caseId, remedyPlanId);
     }
 
     private static JsonNode nodeOutput(JsonNode raw, String node) {

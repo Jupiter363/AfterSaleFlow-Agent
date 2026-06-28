@@ -63,7 +63,10 @@ def test_workflow_enters_remedy_before_approval_and_api_is_read_only() -> None:
     )
     controller = read(JAVA / "remedy" / "api" / "RemedyController.java")
     assert "planRemedy" in activity
+    assert "createReviewTask" in activity
     assert "activities.planRemedy" in workflow
-    assert '"APPROVAL_POLICY_ENGINE"' in workflow
+    assert workflow.index("activities.planRemedy") < workflow.index(
+        "activities.createReviewTask"
+    )
     assert "@GetMapping" in controller
     assert "@PostMapping" not in controller

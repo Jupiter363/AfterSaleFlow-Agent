@@ -8,4 +8,5 @@ public record CaseWorkflowResult(
         boolean manualRequired,
         boolean evidenceTimedOut,
         String draftId,
-        String remedyPlanId) {}
+        String remedyPlanId,
+        String reviewTaskId) {}
