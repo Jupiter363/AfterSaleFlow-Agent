@@ -28,12 +28,16 @@ def test_all_review_actions_and_temporal_evidence_return_are_supported() -> None
 
 def test_reviewer_frontend_is_backend_driven_and_role_gated() -> None:
     app = read(ROOT / "frontend" / "src" / "App.vue")
+    actor = read(ROOT / "frontend" / "src" / "state" / "actor.js")
+    review = read(
+        ROOT / "frontend" / "src" / "views" / "ReviewWorkbenchView.vue"
+    )
     api = read(ROOT / "frontend" / "src" / "api" / "review.js")
     package = read(ROOT / "frontend" / "package.json")
     assert "PLATFORM_REVIEWER" in app
-    assert "CUSTOMER_SERVICE" in app
-    assert "MODIFY_AND_APPROVE" in app
-    assert "REQUEST_MORE_EVIDENCE" in app
+    assert "CUSTOMER_SERVICE" in actor
+    assert "MODIFY_AND_APPROVE" in review
+    assert "REQUEST_MORE_EVIDENCE" in review
     assert "review-tasks" in api
     assert '"element-plus"' in package and '"vue"' in package
 

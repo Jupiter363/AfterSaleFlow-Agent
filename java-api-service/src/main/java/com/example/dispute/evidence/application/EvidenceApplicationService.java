@@ -83,6 +83,7 @@ public class EvidenceApplicationService {
             OffsetDateTime occurredAt,
             AuthenticatedActor actor) {
         FulfillmentCaseEntity disputeCase = authorizedCase(caseId, actor);
+        validateSourceType(sourceType, actor);
         validateFile(file);
         byte[] content = bytes(file);
         validateSignature(file.getContentType(), content);
@@ -238,6 +239,7 @@ public class EvidenceApplicationService {
                 caseId,
                 saved.getDossierVersion(),
                 summary,
+                items.stream().map(this::toView).toList(),
                 timeline,
                 matrix);
     }
@@ -254,12 +256,20 @@ public class EvidenceApplicationService {
                                         new NotFoundException(
                                                 ErrorCode.EVIDENCE_NOT_FOUND,
                                                 "evidence dossier not found",
-                                                Map.of("case_id", caseId)));
+                                        Map.of("case_id", caseId)));
+        List<EvidenceView> evidences =
+                evidenceRepository
+                        .findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(
+                                caseId)
+                        .stream()
+                        .map(this::toView)
+                        .toList();
         return new BuildDossierResult(
                 dossier.getId(),
                 caseId,
                 dossier.getDossierVersion(),
                 readJsonMap(dossier.getSummaryJson()),
+                evidences,
                 readTimeline(dossier.getTimelineJson()),
                 readMatrix(dossier.getMatrixSummaryJson()));
     }
@@ -286,6 +296,21 @@ public class EvidenceApplicationService {
                     "OCR task creation deferred: evidence_id={}, error_type={}",
                     view.id(),
                     failure.getClass().getSimpleName());
+        }
+    }
+
+    private static void validateSourceType(
+            String sourceType, AuthenticatedActor actor) {
+        String expected =
+                switch (actor.role()) {
+                    case USER -> "USER_UPLOAD";
+                    case MERCHANT -> "MERCHANT_UPLOAD";
+                    case CUSTOMER_SERVICE, PLATFORM_REVIEWER, ADMIN, SYSTEM ->
+                            "PLATFORM_UPLOAD";
+                };
+        if (!expected.equals(sourceType)) {
+            throw new ForbiddenException(
+                    "evidence source does not match the authenticated actor");
         }
     }
 

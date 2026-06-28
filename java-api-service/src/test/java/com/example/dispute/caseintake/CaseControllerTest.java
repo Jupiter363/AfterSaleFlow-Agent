@@ -10,6 +10,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 import com.example.dispute.caseintake.api.CaseController;
 import com.example.dispute.caseintake.application.CaseApplicationService;
+import com.example.dispute.caseintake.application.CasePageView;
 import com.example.dispute.caseintake.application.CaseView;
 import com.example.dispute.common.exception.GlobalExceptionHandler;
 import com.example.dispute.common.trace.TraceIdFilter;
@@ -127,6 +128,32 @@ class CaseControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.id").value("CASE_test"))
                 .andExpect(jsonPath("$.data.intake_result_json").doesNotExist());
+    }
+
+    @Test
+    void listCasesReturnsPaginatedRoleScopedDtos() throws Exception {
+        when(service.list(
+                        eq(CaseStatus.INTAKE_COMPLETED),
+                        eq("DISPUTE"),
+                        eq(0),
+                        eq(20),
+                        any()))
+                .thenReturn(new CasePageView(List.of(caseView()), 0, 20, 1, 1));
+
+        mockMvc.perform(
+                        get("/api/v1/cases")
+                                .param("status", "INTAKE_COMPLETED")
+                                .param("case_type", "DISPUTE")
+                                .header(
+                                        HeaderAuthenticationFilter.USER_ID_HEADER,
+                                        "user-1")
+                                .header(
+                                        HeaderAuthenticationFilter.ROLE_HEADER,
+                                        "USER"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.items[0].id").value("CASE_test"))
+                .andExpect(jsonPath("$.data.total_elements").value(1))
+                .andExpect(jsonPath("$.data.page").value(0));
     }
 
     private static CaseView caseView() {

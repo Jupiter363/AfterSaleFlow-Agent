@@ -124,6 +124,45 @@ class CaseApiIntegrationTest {
         assertThat(data(queried).get("order_id")).isEqualTo("order-case-api");
         assertThat(auditLogRepository.countByCaseId(createdData.get("id").toString()))
                 .isEqualTo(1);
+
+        ResponseEntity<Map> userCases =
+                restTemplate.exchange(
+                        url("/api/v1/cases?case_type=DISPUTE&page=0&size=20"),
+                        HttpMethod.GET,
+                        new HttpEntity<>(
+                                actorHeaders("user-case-api", "USER", null)),
+                        Map.class);
+        List<Map<String, Object>> userItems =
+                (List<Map<String, Object>>) data(userCases).get("items");
+        assertThat(userItems)
+                .extracting(item -> item.get("id"))
+                .contains(createdData.get("id"));
+
+        ResponseEntity<Map> outsiderCases =
+                restTemplate.exchange(
+                        url("/api/v1/cases?page=0&size=20"),
+                        HttpMethod.GET,
+                        new HttpEntity<>(
+                                actorHeaders("unrelated-user", "USER", null)),
+                        Map.class);
+        assertThat((List<?>) data(outsiderCases).get("items")).isEmpty();
+
+        ResponseEntity<Map> audit =
+                restTemplate.exchange(
+                        url(
+                                "/api/v1/cases/"
+                                        + createdData.get("id")
+                                        + "/audit-logs"),
+                        HttpMethod.GET,
+                        new HttpEntity<>(
+                                actorHeaders(
+                                        "reviewer-case-api",
+                                        "PLATFORM_REVIEWER",
+                                        null)),
+                        Map.class);
+        assertThat((List<Map<String, Object>>) audit.getBody().get("data"))
+                .extracting(entry -> entry.get("action"))
+                .containsExactly("CASE_CREATED");
     }
 
     @Test

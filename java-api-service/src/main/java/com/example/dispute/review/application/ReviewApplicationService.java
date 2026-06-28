@@ -113,8 +113,15 @@ public class ReviewApplicationService {
                 disputeCase.getIntakeResultJson(),
                 draft==null?"[]":draft.getFactFindingsJson(),
                 draft==null?"[]":draft.getEvidenceAssessmentJson(),
-                draft==null?"{}":write(Map.of("id",draft.getId(),"recommended_decision",draft.getRecommendedDecision(),
-                        "confidence",draft.getConfidence(),"draft_text",draft.getDraftText())),
+                draft==null?"{}":write(Map.of(
+                        "id",draft.getId(),
+                        "recommended_decision",draft.getRecommendedDecision(),
+                        "confidence",draft.getConfidence(),
+                        "draft_text",draft.getDraftText(),
+                        "fact_findings",read(draft.getFactFindingsJson()),
+                        "evidence_assessment",read(draft.getEvidenceAssessmentJson()),
+                        "policy_application",read(draft.getPolicyApplicationJson()),
+                        "reviewer_attention",read(draft.getReviewerAttentionJson()))),
                 write(Map.of("id",plan.getId(),"actions",read(plan.getActionsJson()),
                         "preconditions",read(plan.getPreconditionsJson()),"notifications",read(plan.getNotificationPlanJson()))),
                 write(policy.riskFlags()),SYSTEM.actorId()));

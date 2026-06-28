@@ -9,6 +9,7 @@ public record BuildDossierResult(
         String caseId,
         int version,
         Map<String, Object> summary,
+        List<EvidenceView> evidences,
         List<TimelineEntry> timeline,
         List<Map<String, Object>> matrix) {
 

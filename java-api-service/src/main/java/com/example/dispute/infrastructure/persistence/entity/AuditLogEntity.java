@@ -152,4 +152,52 @@ public class AuditLogEntity extends AbstractEntity {
     public String getTraceId() {
         return traceId;
     }
+
+    public String getCaseId() {
+        return caseId;
+    }
+
+    public String getRequestId() {
+        return requestId;
+    }
+
+    public String getUserId() {
+        return userId;
+    }
+
+    public String getRole() {
+        return role;
+    }
+
+    public String getService() {
+        return service;
+    }
+
+    public String getResourceType() {
+        return resourceType;
+    }
+
+    public String getResourceId() {
+        return resourceId;
+    }
+
+    public String getOutcome() {
+        return outcome;
+    }
+
+    public String getBeforeJson() {
+        return beforeJson;
+    }
+
+    public String getAfterJson() {
+        return afterJson;
+    }
+
+    public String getMetadataJson() {
+        return metadataJson;
+    }
+
+    public OffsetDateTime getCreatedAt() {
+        return createdAt;
+    }
 }

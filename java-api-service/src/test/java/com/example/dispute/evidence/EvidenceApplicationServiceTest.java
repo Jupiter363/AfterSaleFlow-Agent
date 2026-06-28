@@ -9,6 +9,7 @@ import static org.mockito.Mockito.doThrow;
 
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.common.audit.AuditRecorder;
+import com.example.dispute.common.exception.ForbiddenException;
 import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.RiskLevel;
@@ -156,6 +157,33 @@ class EvidenceApplicationServiceTest {
     }
 
     @Test
+    void userCannotClaimThatUploadedEvidenceCameFromThePlatform() {
+        when(caseRepository.findById("CASE_evidence"))
+                .thenReturn(Optional.of(caseEntity()));
+        MockMultipartFile file =
+                new MockMultipartFile(
+                        "file",
+                        "proof.png",
+                        "image/png",
+                        new byte[] {
+                            (byte) 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A
+                        });
+
+        assertThatThrownBy(
+                        () ->
+                                service.upload(
+                                        "CASE_evidence",
+                                        file,
+                                        "OTHER",
+                                        "PLATFORM_UPLOAD",
+                                        "PARTIES",
+                                        null,
+                                        actor()))
+                .isInstanceOf(ForbiddenException.class)
+                .hasMessageContaining("source");
+    }
+
+    @Test
     void buildsVersionedTimelineWithoutResponsibilityOrDecisionFields() {
         FulfillmentCaseEntity disputeCase = caseEntity();
         when(caseRepository.findById("CASE_evidence"))
@@ -172,6 +200,7 @@ class EvidenceApplicationServiceTest {
                 service.buildDossier("CASE_evidence", actor());
 
         assertThat(result.version()).isEqualTo(1);
+        assertThat(result.evidences()).isEmpty();
         assertThat(result.timeline()).isEmpty();
         assertThat(result.summary()).doesNotContainKeys("decision", "responsibility");
         assertThat(disputeCase.getCaseStatus()).isEqualTo(CaseStatus.DOSSIER_BUILT);

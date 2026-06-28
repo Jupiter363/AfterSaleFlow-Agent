@@ -191,6 +191,10 @@ public class WorkflowApplicationService {
                 draft.getRecommendedDecision(),
                 draft.getConfidence(),
                 draft.getDraftText(),
+                readJson(draft.getFactFindingsJson()),
+                readJson(draft.getEvidenceAssessmentJson()),
+                readJson(draft.getPolicyApplicationJson()),
+                readJson(draft.getReviewerAttentionJson()),
                 draft.getDraftStatus());
     }
 
@@ -412,6 +416,14 @@ public class WorkflowApplicationService {
             return objectMapper.writeValueAsString(value);
         } catch (JsonProcessingException exception) {
             throw new IllegalStateException("cannot serialize submission", exception);
+        }
+    }
+
+    private com.fasterxml.jackson.databind.JsonNode readJson(String value) {
+        try {
+            return objectMapper.readTree(value);
+        } catch (JsonProcessingException exception) {
+            throw new IllegalStateException("cannot parse persisted workflow json", exception);
         }
     }
 

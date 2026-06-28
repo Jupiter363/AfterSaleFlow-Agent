@@ -1,6 +1,7 @@
 package com.example.dispute.caseintake.api;
 
 import com.example.dispute.caseintake.application.CaseApplicationService;
+import com.example.dispute.caseintake.application.CasePageView;
 import com.example.dispute.caseintake.application.CaseView;
 import com.example.dispute.common.api.ApiResponse;
 import com.example.dispute.common.trace.TraceIdFilter;
@@ -8,6 +9,8 @@ import com.example.dispute.config.AuthenticatedActor;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.Pattern;
 import java.time.Clock;
 import java.time.Instant;
@@ -21,6 +24,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 @Validated
@@ -71,6 +75,25 @@ public class CaseController {
         String requestId = correlationId(servletRequest, TraceIdFilter.REQUEST_ATTRIBUTE);
         return ApiResponse.success(
                 service.get(caseId, actor(authentication)),
+                requestId,
+                traceId,
+                Instant.now(clock));
+    }
+
+    @GetMapping
+    public ApiResponse<CasePageView> list(
+            @RequestParam(required = false) com.example.dispute.domain.model.CaseStatus status,
+            @RequestParam(name = "case_type", required = false)
+                    @Pattern(regexp = "[A-Z][A-Z0-9_]{1,63}")
+                    String caseType,
+            @RequestParam(defaultValue = "0") @Min(0) int page,
+            @RequestParam(defaultValue = "20") @Min(1) @Max(100) int size,
+            Authentication authentication,
+            HttpServletRequest servletRequest) {
+        String traceId = correlationId(servletRequest, TraceIdFilter.TRACE_ATTRIBUTE);
+        String requestId = correlationId(servletRequest, TraceIdFilter.REQUEST_ATTRIBUTE);
+        return ApiResponse.success(
+                service.list(status, caseType, page, size, actor(authentication)),
                 requestId,
                 traceId,
                 Instant.now(clock));

@@ -19,6 +19,10 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Sort;
+import org.springframework.data.jpa.domain.Specification;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -87,6 +91,67 @@ public class CaseApplicationService {
                                                 Map.of("case_id", caseId)));
         assertCanRead(entity, actor);
         return toView(entity, readSnapshot(entity.getIntakeResultJson()));
+    }
+
+    @Transactional(readOnly = true)
+    public CasePageView list(
+            CaseStatus status,
+            String caseType,
+            int page,
+            int size,
+            AuthenticatedActor actor) {
+        Specification<FulfillmentCaseEntity> specification =
+                (root, query, criteria) ->
+                        criteria.isNull(root.get("deletedAt"));
+        if (status != null) {
+            specification =
+                    specification.and(
+                            (root, query, criteria) ->
+                                    criteria.equal(root.get("caseStatus"), status));
+        }
+        if (caseType != null && !caseType.isBlank()) {
+            specification =
+                    specification.and(
+                            (root, query, criteria) ->
+                                    criteria.equal(root.get("caseType"), caseType));
+        }
+        specification =
+                switch (actor.role()) {
+                    case USER ->
+                            specification.and(
+                                    (root, query, criteria) ->
+                                            criteria.equal(
+                                                    root.get("userId"),
+                                                    actor.actorId()));
+                    case MERCHANT ->
+                            specification.and(
+                                    (root, query, criteria) ->
+                                            criteria.equal(
+                                                    root.get("merchantId"),
+                                                    actor.actorId()));
+                    case CUSTOMER_SERVICE, PLATFORM_REVIEWER, ADMIN, SYSTEM ->
+                            specification;
+                };
+        Page<FulfillmentCaseEntity> result =
+                caseRepository.findAll(
+                        specification,
+                        PageRequest.of(
+                                page,
+                                size,
+                                Sort.by(Sort.Direction.DESC, "createdAt")));
+        return new CasePageView(
+                result.getContent().stream()
+                        .map(
+                                entity ->
+                                        toView(
+                                                entity,
+                                                readSnapshot(
+                                                        entity.getIntakeResultJson())))
+                        .toList(),
+                result.getNumber(),
+                result.getSize(),
+                result.getTotalElements(),
+                result.getTotalPages());
     }
 
     private CaseView createNew(
