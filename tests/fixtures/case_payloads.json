@@ -1,0 +1,23 @@
+{
+  "regular_fulfillment": {
+    "order_id": "ORDER_FIXTURE_REGULAR",
+    "user_id": "smoke-user",
+    "merchant_id": "smoke-merchant",
+    "description": "物流轨迹长时间没有更新，请帮我查询包裹履约状态。",
+    "channel": "WEB"
+  },
+  "rule_based_resolution": {
+    "order_id": "ORDER_FIXTURE_RULE",
+    "user_id": "smoke-user",
+    "merchant_id": "smoke-merchant",
+    "description": "商家尚未发货，用户申请取消订单并按平台规则退款。",
+    "channel": "WEB"
+  },
+  "dispute_hearing": {
+    "order_id": "ORDER_FIXTURE_DISPUTE",
+    "user_id": "smoke-user",
+    "merchant_id": "smoke-merchant",
+    "description": "用户称收到破损商品，商家称发货前质检正常，双方证据存在冲突。",
+    "channel": "WEB"
+  }
+}
