@@ -1,4 +1,4 @@
-FROM mcr.microsoft.com/openjdk/jdk:21-ubuntu AS build
+FROM mcr.microsoft.com/openjdk/jdk:21-ubuntu@sha256:f89b256658018e9a591f64b396a1dd82978af20b9a52605c0185a77c95a10eb0 AS build
 WORKDIR /workspace
 
 COPY .mvn ./.mvn
@@ -9,7 +9,7 @@ RUN ./mvnw -s .mvn/settings.xml -B -ntp dependency:go-offline
 COPY src ./src
 RUN ./mvnw -s .mvn/settings.xml -B -ntp clean package -DskipTests
 
-FROM mcr.microsoft.com/openjdk/jdk:21-ubuntu
+FROM mcr.microsoft.com/openjdk/jdk:21-ubuntu@sha256:f89b256658018e9a591f64b396a1dd82978af20b9a52605c0185a77c95a10eb0
 WORKDIR /home/app
 
 USER root

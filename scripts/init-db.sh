@@ -7,6 +7,8 @@ cd "${ROOT_DIR}"
 docker compose up -d postgresql
 docker compose exec -T postgresql sh -c \
   'until pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"; do sleep 2; done'
-docker compose run --rm java-api-service \
-  java -Dspring.flyway.enabled=true -jar /app/app.jar --spring.main.web-application-type=none
-
+MSYS_NO_PATHCONV=1 docker compose run --rm --entrypoint java \
+  java-api-service \
+  -Dloader.main=com.example.dispute.database.FlywayMigrationMain \
+  -cp /home/app/app.jar \
+  org.springframework.boot.loader.launch.PropertiesLauncher

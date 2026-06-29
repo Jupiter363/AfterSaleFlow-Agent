@@ -44,8 +44,8 @@ def test_reviewer_frontend_is_backend_driven_and_role_gated() -> None:
 
 def test_frontend_container_keeps_application_writable_for_non_root_user() -> None:
     dockerfile = read(ROOT / "frontend" / "Dockerfile")
-    assert "COPY --chown=node:node . ." in dockerfile
-    assert "RUN chown -R node:node /app" in dockerfile
+    assert "AS build" in dockerfile
+    assert "COPY --from=build --chown=node:node /app/dist ./dist" in dockerfile
     assert "USER node" in dockerfile
 
 
@@ -59,5 +59,5 @@ def test_frontend_container_pins_the_runtime_package_manager() -> None:
 def test_frontend_healthchecks_use_the_ipv4_listener() -> None:
     dockerfile = read(ROOT / "frontend" / "Dockerfile")
     compose = read(ROOT / "docker-compose.yml")
-    assert "http://127.0.0.1:5173/" in dockerfile
+    assert "http://127.0.0.1:5173/healthz" in dockerfile
     assert "http://127.0.0.1:5173/" in compose

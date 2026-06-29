@@ -1,17 +1,31 @@
-FROM public.ecr.aws/docker/library/node:22-alpine
+FROM public.ecr.aws/docker/library/node:22-alpine AS build
 WORKDIR /app
 ENV COREPACK_HOME=/opt/corepack
 
+ARG VITE_API_BASE_URL=/api
+ARG VITE_AGENT_API_BASE_URL=/agent-api
+ARG VITE_OCR_API_BASE_URL=/ocr-api
+ENV VITE_API_BASE_URL=$VITE_API_BASE_URL \
+    VITE_AGENT_API_BASE_URL=$VITE_AGENT_API_BASE_URL \
+    VITE_OCR_API_BASE_URL=$VITE_OCR_API_BASE_URL
+
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN corepack enable \
-  && corepack prepare pnpm@11.7.0 --activate \
-  && pnpm install --frozen-lockfile \
-  && chown -R node:node "$COREPACK_HOME"
+    && corepack prepare pnpm@11.7.0 --activate \
+    && pnpm install --frozen-lockfile
 
-COPY --chown=node:node . .
-RUN chown -R node:node /app
+COPY . .
+RUN pnpm run build
+
+FROM public.ecr.aws/docker/library/node:22-alpine
+WORKDIR /app
+ENV NODE_ENV=production
+
+COPY --from=build --chown=node:node /app/dist ./dist
+COPY --chown=node:node server.mjs ./
+
 USER node
 EXPOSE 5173
-HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=10 \
-  CMD wget -qO- http://127.0.0.1:5173/ >/dev/null || exit 1
-CMD ["pnpm", "run", "dev"]
+HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=10 \
+  CMD wget -qO- http://127.0.0.1:5173/healthz | grep ok
+CMD ["node", "server.mjs"]

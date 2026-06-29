@@ -169,10 +169,19 @@ def test_compose_has_persistent_volumes_and_expected_host_ports() -> None:
     volumes = compose["volumes"]
 
     assert {"postgresql_data", "redis_data", "elasticsearch_data", "minio_data"} <= volumes.keys()
-    assert "${JAVA_API_PORT:-18080}:8080" in services["java-api-service"]["ports"]
-    assert "${PYTHON_AGENT_PORT:-18000}:8000" in services["python-agent-service"]["ports"]
-    assert "${OCR_SERVICE_PORT:-18010}:8010" in services["ocr-parser-service"]["ports"]
-    assert "${NGINX_PORT:-8080}:80" in services["nginx"]["ports"]
+    assert (
+        "127.0.0.1:${JAVA_API_PORT:-18080}:8080"
+        in services["java-api-service"]["ports"]
+    )
+    assert (
+        "127.0.0.1:${PYTHON_AGENT_PORT:-18000}:8000"
+        in services["python-agent-service"]["ports"]
+    )
+    assert (
+        "127.0.0.1:${OCR_SERVICE_PORT:-18010}:8010"
+        in services["ocr-parser-service"]["ports"]
+    )
+    assert "127.0.0.1:${NGINX_PORT:-8080}:80" in services["nginx"]["ports"]
 
 
 def test_required_scripts_exist_and_fail_fast() -> None:
@@ -290,8 +299,14 @@ def test_windows_secret_generator_defaults_to_project_root(tmp_path: Path) -> No
 def test_java_service_uses_java_21_multistage_nonroot_image() -> None:
     dockerfile = (ROOT / "java-api-service" / "Dockerfile").read_text(encoding="utf-8")
 
-    assert "FROM mcr.microsoft.com/openjdk/jdk:21-ubuntu AS build" in dockerfile
+    assert (
+        "FROM mcr.microsoft.com/openjdk/jdk:21-ubuntu@sha256:"
+        in dockerfile
+    )
+    assert " AS build" in dockerfile
     assert "RUN ./mvnw" in dockerfile
-    assert "FROM mcr.microsoft.com/openjdk/jdk:21-ubuntu" in dockerfile
+    assert dockerfile.count(
+        "FROM mcr.microsoft.com/openjdk/jdk:21-ubuntu@sha256:"
+    ) == 2
     assert "USER app" in dockerfile
     assert "HEALTHCHECK" in dockerfile
