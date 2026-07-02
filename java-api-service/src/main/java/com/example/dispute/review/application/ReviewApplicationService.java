@@ -26,8 +26,8 @@ import com.example.dispute.infrastructure.persistence.repository.ReviewTaskRepos
 import com.example.dispute.review.domain.ApprovalPolicyDecision;
 import com.example.dispute.review.domain.ApprovalPolicyEngine;
 import com.example.dispute.review.domain.ApprovalPolicyInput;
-import com.example.dispute.workflow.domain.ReviewerWorkflowSignal;
-import com.example.dispute.workflow.temporal.CaseFulfillmentDisputeWorkflow;
+import com.example.dispute.workflow.domain.HumanReviewSignal;
+import com.example.dispute.workflow.temporal.FulfillmentDisputeWorkflow;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -190,8 +190,14 @@ public class ReviewApplicationService {
 
     private void signal(String caseId,AuthenticatedActor actor,ReviewDecisionCommand command){
         try{
-            workflowClient.newWorkflowStub(CaseFulfillmentDisputeWorkflow.class,"CASEWORKFLOW_"+caseId)
-                    .submitReviewerSignal(new ReviewerWorkflowSignal(actor.actorId(),command.decision().name(),command.reason()));
+            workflowClient.newWorkflowStub(FulfillmentDisputeWorkflow.class,"CASEWORKFLOW_"+caseId)
+                    .submitReviewDecision(new HumanReviewSignal(
+                            actor.actorId(),
+                            "PLATFORM_REVIEWER",
+                            command.decision().name(),
+                            1,
+                            "ACTION_HASH_PENDING",
+                            command.reason()));
         }catch(RuntimeException exception){
             throw new BusinessException(ErrorCode.WORKFLOW_SIGNAL_FAILED,"review persisted but workflow signal failed",Map.of("case_id",caseId));
         }

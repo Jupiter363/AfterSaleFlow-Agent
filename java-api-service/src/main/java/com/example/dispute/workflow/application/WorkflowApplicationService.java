@@ -17,10 +17,10 @@ import com.example.dispute.infrastructure.persistence.repository.EvidenceItemRep
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.infrastructure.persistence.repository.HearingStateRepository;
 import com.example.dispute.infrastructure.persistence.repository.PartySubmissionRepository;
-import com.example.dispute.workflow.domain.CaseWorkflowInput;
-import com.example.dispute.workflow.domain.PartyEvidenceSignal;
-import com.example.dispute.workflow.domain.ReviewerWorkflowSignal;
-import com.example.dispute.workflow.temporal.CaseFulfillmentDisputeWorkflow;
+import com.example.dispute.workflow.domain.EvidenceSubmissionSignal;
+import com.example.dispute.workflow.domain.FulfillmentDisputeCommand;
+import com.example.dispute.workflow.domain.HumanReviewSignal;
+import com.example.dispute.workflow.temporal.FulfillmentDisputeWorkflow;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.temporal.client.WorkflowClient;
@@ -96,9 +96,9 @@ public class WorkflowApplicationService {
                             return entity;
                         });
         String workflowId = workflowId(caseId);
-        CaseFulfillmentDisputeWorkflow workflow =
+        FulfillmentDisputeWorkflow workflow =
                 workflowClient.newWorkflowStub(
-                        CaseFulfillmentDisputeWorkflow.class,
+                        FulfillmentDisputeWorkflow.class,
                         WorkflowOptions.newBuilder()
                                 .setWorkflowId(workflowId)
                                 .setTaskQueue(properties.temporal().taskQueue())
@@ -107,12 +107,19 @@ public class WorkflowApplicationService {
         try {
             WorkflowClient.start(
                     workflow::run,
-                    new CaseWorkflowInput(
+                    new FulfillmentDisputeCommand(
                             caseId,
                             workflowId,
                             disputeCase.getRouteType(),
+                            1,
                             evidenceWaitTimeout,
-                            maxEvidenceRounds));
+                            Duration.ofDays(7),
+                            maxEvidenceRounds,
+                            disputeCase.getRouteType()
+                                            == com.example.dispute.domain.model
+                                                    .RouteType.FULL_HEARING
+                                    && !"LOW".equals(
+                                            disputeCase.getRiskLevel().name())));
         } catch (WorkflowExecutionAlreadyStarted ignored) {
             // Deterministic workflow IDs make repeated starts idempotent.
         } catch (RuntimeException exception) {
@@ -270,10 +277,10 @@ public class WorkflowApplicationService {
         signal(
                 workflowId,
                 workflow ->
-                        workflow.submitPartyEvidence(
-                                new PartyEvidenceSignal(
-                                        expectedParty,
+                        workflow.submitEvidence(
+                                new EvidenceSubmissionSignal(
                                         submission.getId(),
+                                        expectedParty,
                                         safeEvidenceIds)));
         return new PartySubmissionView(
                 submission.getId(),
@@ -309,18 +316,23 @@ public class WorkflowApplicationService {
         signal(
                 workflowId,
                 workflow ->
-                        workflow.submitReviewerSignal(
-                                new ReviewerWorkflowSignal(
-                                        actor.actorId(), decision, reason)));
+                        workflow.submitReviewDecision(
+                                new HumanReviewSignal(
+                                        actor.actorId(),
+                                        "PLATFORM_REVIEWER",
+                                        decision,
+                                        1,
+                                        "ACTION_HASH_PENDING",
+                                        reason)));
     }
 
     private void signal(
             String workflowId,
-            java.util.function.Consumer<CaseFulfillmentDisputeWorkflow> action) {
+            java.util.function.Consumer<FulfillmentDisputeWorkflow> action) {
         try {
             action.accept(
                     workflowClient.newWorkflowStub(
-                            CaseFulfillmentDisputeWorkflow.class, workflowId));
+                            FulfillmentDisputeWorkflow.class, workflowId));
         } catch (RuntimeException exception) {
             throw new BusinessException(
                     ErrorCode.WORKFLOW_SIGNAL_FAILED,

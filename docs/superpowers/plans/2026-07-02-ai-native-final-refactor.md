@@ -377,39 +377,44 @@ commits.
 - Modify: worker registration, workflow application service, review signals, and execution integration
 - Retire: `CaseFulfillmentDisputeWorkflow`
 
-- [ ] **Step 1: Write failing main workflow tests**
+- [x] **Step 1: Write failing main workflow tests**
 
 Prove idempotent start, `TRANSFERRED` terminal behavior, simple/full hearing selection, child-workflow orchestration, and mandatory human review.
 
-- [ ] **Step 2: Implement FulfillmentDisputeWorkflow**
+- [x] **Step 2: Implement FulfillmentDisputeWorkflow**
 
 Document with Javadoc that Workflow owns deterministic control but cannot perform open-ended cognition.
 
-- [ ] **Step 3: Write failing hearing workflow tests**
+- [x] **Step 3: Write failing hearing workflow tests**
 
 Cover C1-C6 order, evidence Signal/Timer, bounded rounds, recovery, validation interrupt, and full trace persistence.
 
-- [ ] **Step 4: Implement DisputeHearingWorkflow**
+- [x] **Step 4: Implement DisputeHearingWorkflow**
 
 All model/network/database access stays in Activities.
 
-- [ ] **Step 5: Write and implement Panel workflow tests**
+- [x] **Step 5: Write and implement Panel workflow tests**
 
 Cover risk-based critic selection, frozen inputs, parallel partial failure, major-objection preservation, timeout, and revision/manual paths.
 
-- [ ] **Step 6: Write and implement Human Review workflow tests**
+- [x] **Step 6: Write and implement Human Review workflow tests**
 
 Validate reviewer, role, packet version, action hash, expiry, approve, modify-and-approve, return, reject, and escalate.
 
-- [ ] **Step 7: Write and implement Execution workflow tests**
+- [x] **Step 7: Write and implement Execution workflow tests**
 
 Validate approval snapshot, dependency order, idempotency, unknown external result lookup, bounded retry, and manual handoff.
 
-- [ ] **Step 8: Use new workflow types/task queue**
+- [x] **Step 8: Use new workflow types/task queue**
 
 Do not alter running legacy history in place. Route new final disputes to new workflow types, then retire legacy code after no active legacy runs remain.
 
-- [ ] **Step 9: Run Temporal focused and full Java tests**
+The Worker registers both histories during migration, while
+`WorkflowApplicationService` starts only `FulfillmentDisputeWorkflow` for new
+disputes. Legacy workflow code remains replay-compatible until the final
+legacy cleanup gate confirms there are no active old histories.
+
+- [x] **Step 9: Run Temporal focused and full Java tests**
 
 ---
 

@@ -27,7 +27,7 @@ import com.example.dispute.infrastructure.persistence.repository.ReviewPacketRep
 import com.example.dispute.infrastructure.persistence.repository.ReviewTaskRepository;
 import com.example.dispute.review.application.ReviewApplicationService;
 import com.example.dispute.review.application.ReviewDecisionCommand;
-import com.example.dispute.workflow.temporal.CaseFulfillmentDisputeWorkflow;
+import com.example.dispute.workflow.temporal.FulfillmentDisputeWorkflow;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import io.temporal.client.WorkflowClient;
@@ -64,10 +64,10 @@ class ReviewApplicationServiceIntegrationTest {
     @Autowired RemedyPlanRepository plans; @Autowired ReviewTaskRepository tasks;
     @Autowired ReviewPacketRepository packets; @Autowired ApprovalRecordRepository approvals;
     @MockitoBean AuditRecorder audit; @MockitoBean WorkflowClient workflowClient;
-    @MockitoBean CaseFulfillmentDisputeWorkflow workflow;
+    @MockitoBean FulfillmentDisputeWorkflow workflow;
 
     @BeforeEach void seed(){
-        when(workflowClient.newWorkflowStub(eq(CaseFulfillmentDisputeWorkflow.class),anyString())).thenReturn(workflow);
+        when(workflowClient.newWorkflowStub(eq(FulfillmentDisputeWorkflow.class),anyString())).thenReturn(workflow);
         FulfillmentCaseEntity c=FulfillmentCaseEntity.create("CASE_review","ORDER_review",null,"user-review","merchant-review","CREATE_review","REFUND_REQUEST","Review refund","Refund requires platform review",RiskLevel.HIGH,"user-review");
         c.completeIntake("ITEM_SWAP_DISPUTE",CaseStatus.INTAKE_COMPLETED,RiskLevel.HIGH,"{}","user-review");
         c.markDossierBuilt("user-review");c.applyRoute(RouteType.SIMPLE_HEARING,"user-review");c.markRemedyPlanned("temporal-worker");cases.saveAndFlush(c);
@@ -110,7 +110,7 @@ class ReviewApplicationServiceIntegrationTest {
                         new AuthenticatedActor("reviewer-1", ActorRole.PLATFORM_REVIEWER)))
                 .isInstanceOf(IdempotencyConflictException.class);
         verify(workflow, times(2))
-                .submitReviewerSignal(
+                .submitReviewDecision(
                         org.mockito.ArgumentMatchers.argThat(
                                 signal -> "MODIFY_AND_APPROVE".equals(signal.decision())));
     }
