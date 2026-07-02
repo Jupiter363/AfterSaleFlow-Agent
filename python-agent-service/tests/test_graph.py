@@ -1,8 +1,10 @@
 from contextlib import contextmanager
 
+import pytest
+
 from app.llm import AgentOutputSchemaError, StructuredGeneration
 from app.prompts import PromptRepository
-from app.schemas import HearingAnalyzeRequest
+from app.schemas import HearingAnalyzeRequest, HearingStageRequest
 from app.tracing import AgentTraceContext
 from app.workflow import HearingWorkflow
 
@@ -282,3 +284,54 @@ def test_invalid_node_schema_enters_manual_review_without_a_final_decision() -> 
     assert result.manual_review_reasons == ["AGENT_OUTPUT_SCHEMA_INVALID"]
     assert result.adjudication_draft.draft.is_final_decision is False
     assert result.adjudication_draft.draft.requires_human_review is True
+
+
+@pytest.mark.parametrize(
+    ("stage", "expected_node"),
+    [
+        ("C1_ISSUE_FRAMING", "issue_framing_node"),
+        ("C2_EVIDENCE_GAP", "evidence_gap_request_node"),
+        ("C3_EVIDENCE_REQUEST", "party_liaison_node"),
+        ("C4_EVIDENCE_CROSS_CHECK", "evidence_cross_check_node"),
+        ("C5_RULE_APPLICATION", "rule_application_node"),
+        ("C6_DRAFT_GENERATION", "adjudication_draft_node"),
+    ],
+)
+def test_presiding_judge_stage_runner_executes_exactly_one_node(
+    stage: str,
+    expected_node: str,
+) -> None:
+    tracer = RecordingTrace()
+    workflow = HearingWorkflow(
+        StubLlm(), PromptRepository(), tracer, "test-model", "hearing-v1"
+    )
+    request = HearingStageRequest(
+        case_id="CASE_stage",
+        workflow_id="WORKFLOW_stage",
+        stage=stage,
+        dossier_version=3,
+        claims=[
+            {
+                "claim_id": "CLAIM_stage",
+                "party_type": "USER",
+                "statement": "The parcel was not received.",
+            }
+        ],
+    )
+    context = AgentTraceContext(
+        trace_id="TRACE_stage",
+        request_id="REQ_stage",
+        case_id=request.case_id,
+        workflow_id=request.workflow_id,
+        user_id=None,
+        role="SYSTEM",
+        prompt_version="hearing-v1",
+    )
+
+    result = workflow.run_stage(request, context)
+
+    assert tracer.nodes == [expected_node]
+    assert result.stage == stage
+    assert result.dossier_version == 3
+    assert result.non_final is True
+    assert result.requires_human_review is True

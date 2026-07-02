@@ -303,43 +303,43 @@ Record trace identifiers, versions, tools, validation, risks, interrupt reason, 
 ### Task 4: Migrate and add the six final agent roles
 
 **Files:**
-- Create: `python-agent-service/app/agents/intake_officer.py`
+- Create: `python-agent-service/app/agents/dispute_intake_officer.py`
 - Create: `python-agent-service/app/agents/evidence_clerk.py`
 - Create: `python-agent-service/app/agents/presiding_judge.py`
 - Create: `python-agent-service/app/agents/deliberation_panel.py`
 - Create: `python-agent-service/app/agents/review_copilot.py`
-- Create: `python-agent-service/app/agents/evaluation.py`
+- Create: `python-agent-service/app/agents/evaluation_agent.py`
 - Create: `python-agent-service/app/schemas/`
-- Create: `python-agent-service/app/prompts/{intake,evidence,hearing,critics,review,evaluation}/`
+- Create: final role prompts under `python-agent-service/app/prompts/`
 - Create: `python-agent-service/app/skills/`
 - Modify: existing C1-C6 graph, intake, evaluation, LLM, tracing, and FastAPI routes
 - Test: agent role, schema, permission, prompt injection, citation, and API tests
 
-- [ ] **Step 1: Migrate Intake to Dispute Intake Officer**
+- [x] **Step 1: Migrate Intake to Dispute Intake Officer**
 
 Write failing tests proving it distinguishes dispute vs non-dispute, cites submission text, and has no adjudication/execution authority. Wrap the existing intake prompt and schema in Harness.
 
-- [ ] **Step 2: Implement Evidence Clerk**
+- [x] **Step 2: Implement Evidence Clerk**
 
 Write failing tests for catalog, timeline, claim-issue-evidence matrix, conflicts, gaps, duplicate groups, parser warnings, immutable dossier version, and “no liability conclusion”.
 
-- [ ] **Step 3: Migrate C1-C6 into one Presiding Judge identity**
+- [x] **Step 3: Migrate C1-C6 into one Presiding Judge identity**
 
 Keep stage schemas and prompts, but execute them under one Profile and Harness loop. Stages are not independent agents. Require `non_final=true` for C6.
 
-- [ ] **Step 4: Implement the five Critics**
+- [x] **Step 4: Implement the five Critics**
 
 Write separate failing tests for Evidence, Rule, Risk, Remedy, and Fairness outputs. Freeze common inputs and preserve minority major objections.
 
-- [ ] **Step 5: Implement Panel Aggregator**
+- [x] **Step 5: Implement Panel Aggregator**
 
 Generate `DeliberationReport` with consensus, disagreements, major risks, and required revisions. It cannot create an approval or execution action.
 
-- [ ] **Step 6: Implement Review Copilot**
+- [x] **Step 6: Implement Review Copilot**
 
 Answer only within the current ReviewPacket, cite evidence/rules/panel findings, distinguish fact/inference/suggestion, and expose no approve/execute method.
 
-- [ ] **Step 7: Migrate Evaluation Agent**
+- [x] **Step 7: Migrate Evaluation Agent**
 
 Keep it offline-only and prevent writes to historical case state or automatic publication.
 
@@ -356,7 +356,12 @@ Expose only:
 /internal/agents/evaluation/analyze
 ```
 
-- [ ] **Step 9: Run all Python Agent tests**
+All six final routes are live. Removal of the compatibility
+`/agent-api/v1/...` routes is intentionally combined with the global legacy
+production-path removal in Task 8 so the Java client is not broken between
+commits.
+
+- [x] **Step 9: Run all Python Agent tests**
 
 ---
 

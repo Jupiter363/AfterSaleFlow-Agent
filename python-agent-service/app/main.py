@@ -11,7 +11,18 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from app.agents.critics import build_default_critics
+from app.agents.deliberation_panel import DeliberationPanel
+from app.agents.dispute_intake_officer import DisputeIntakeOfficer
+from app.agents.evaluation_agent import EvaluationAgent
+from app.agents.evidence_clerk import EvidenceClerk
+from app.agents.model_roles import ModelCriticEvaluator, ModelReviewAnswerer
+from app.agents.presiding_judge import PresidingJudge
+from app.agents.review_copilot import ReviewCopilot
+from app.api.final_agents import FinalAgentServices
 from app.config import Settings, get_settings
+from app.harness.guardrails import GuardrailViolation
+from app.harness.validation import CitationValidationError
 from app.llm import AgentServiceUnavailable, LiteLlmProxyClient
 from app.llm import AgentOutputSchemaError
 from app.intake import IntakeWorkflow
@@ -20,10 +31,20 @@ from app.prompts import PromptRepository
 from app.schemas import (
     HearingAnalysisResult,
     HearingAnalyzeRequest,
+    HearingStageRequest,
+    HearingStageResult,
+    DeliberationReport,
+    DeliberationRequest,
+    DisputeIntakeRequest,
+    DisputeIntakeResult,
+    EvidenceBuildRequest,
+    EvidenceDossierResult,
     EvaluationAnalysisResult,
     EvaluationAnalyzeRequest,
     IntakeAnalysisOutput,
     IntakeAnalyzeRequest,
+    ReviewCopilotAnswer,
+    ReviewCopilotRequest,
 )
 from app.tracing import (
     AgentTraceContext,
@@ -44,12 +65,19 @@ def create_app(
     workflow: HearingWorkflow | None = None,
     intake_workflow: IntakeWorkflow | None = None,
     evaluation_workflow: EvaluationWorkflow | None = None,
+    final_agent_services: FinalAgentServices | None = None,
 ) -> FastAPI:
     resolved = settings or get_settings()
     hearing_workflow = workflow or _build_workflow(resolved)
     resolved_intake_workflow = intake_workflow or _build_intake_workflow(resolved)
     resolved_evaluation_workflow = evaluation_workflow or _build_evaluation_workflow(
         resolved
+    )
+    final_services = final_agent_services or _build_final_agent_services(
+        resolved,
+        hearing_workflow,
+        resolved_intake_workflow,
+        resolved_evaluation_workflow,
     )
     app = FastAPI(title="Python Agent Service", version="1.0.0")
 
@@ -108,6 +136,27 @@ def create_app(
             {"node_name": exception.node_name},
         )
 
+    @app.exception_handler(PermissionError)
+    async def permission_error(request: Request, exception: PermissionError):
+        return _error_response(
+            request,
+            403,
+            "AGENT_PERMISSION_DENIED",
+            str(exception),
+            {},
+        )
+
+    @app.exception_handler(CitationValidationError)
+    @app.exception_handler(GuardrailViolation)
+    async def governance_error(request: Request, exception: Exception):
+        return _error_response(
+            request,
+            422,
+            "AGENT_GOVERNANCE_REJECTED",
+            str(exception),
+            {},
+        )
+
     @app.exception_handler(Exception)
     async def unexpected_error(request: Request, exception: Exception):
         return _error_response(
@@ -121,6 +170,125 @@ def create_app(
     @app.get("/health")
     def health() -> dict[str, str]:
         return {"status": "UP", "service": "python-agent-service"}
+
+    @app.post(
+        "/internal/agents/intake/analyze",
+        response_model=DisputeIntakeResult,
+    )
+    async def final_intake(
+        payload: DisputeIntakeRequest,
+        request: Request,
+        x_service_secret: str = Header(alias=SERVICE_SECRET_HEADER),
+        x_role: str = Header(default="SYSTEM", alias="X-Role"),
+        x_case_state: str = Header(default="SUBMITTED", alias="X-Case-State"),
+    ) -> DisputeIntakeResult:
+        _authorize(x_service_secret, resolved.python_agent_service_secret)
+        context = _trace_context(
+            request,
+            case_id=f"CASE_PENDING_{request.state.request_id[-32:]}",
+            workflow_id=f"INTAKE_{request.state.request_id[-32:]}",
+            user_id=None,
+            role=x_role,
+            prompt_version=resolved.prompt_version,
+        )
+        return await run_in_threadpool(
+            final_services.intake.analyze,
+            payload,
+            context,
+            case_state=x_case_state,
+        )
+
+    @app.post(
+        "/internal/agents/evidence/build",
+        response_model=EvidenceDossierResult,
+    )
+    async def final_evidence(
+        payload: EvidenceBuildRequest,
+        x_service_secret: str = Header(alias=SERVICE_SECRET_HEADER),
+    ) -> EvidenceDossierResult:
+        _authorize(x_service_secret, resolved.python_agent_service_secret)
+        return await run_in_threadpool(final_services.evidence.build, payload)
+
+    @app.post(
+        "/internal/agents/hearing/run-stage",
+        response_model=HearingStageResult,
+    )
+    async def final_hearing(
+        payload: HearingStageRequest,
+        request: Request,
+        x_service_secret: str = Header(alias=SERVICE_SECRET_HEADER),
+        x_role: str = Header(default="SYSTEM", alias="X-Role"),
+        x_case_state: str = Header(
+            default="FULL_HEARING",
+            alias="X-Case-State",
+        ),
+    ) -> HearingStageResult:
+        _authorize(x_service_secret, resolved.python_agent_service_secret)
+        context = _trace_context(
+            request,
+            case_id=payload.case_id,
+            workflow_id=payload.workflow_id,
+            user_id=payload.user_id,
+            role=x_role,
+            prompt_version=resolved.prompt_version,
+        )
+        return await run_in_threadpool(
+            final_services.hearing.run_stage,
+            payload,
+            context,
+            case_state=x_case_state,
+        )
+
+    @app.post(
+        "/internal/agents/deliberation/run",
+        response_model=DeliberationReport,
+    )
+    async def final_deliberation(
+        payload: DeliberationRequest,
+        x_service_secret: str = Header(alias=SERVICE_SECRET_HEADER),
+    ) -> DeliberationReport:
+        _authorize(x_service_secret, resolved.python_agent_service_secret)
+        return await run_in_threadpool(final_services.deliberation.run, payload)
+
+    @app.post(
+        "/internal/agents/review-copilot/query",
+        response_model=ReviewCopilotAnswer,
+    )
+    async def final_review_copilot(
+        payload: ReviewCopilotRequest,
+        x_service_secret: str = Header(alias=SERVICE_SECRET_HEADER),
+    ) -> ReviewCopilotAnswer:
+        _authorize(x_service_secret, resolved.python_agent_service_secret)
+        return await run_in_threadpool(
+            final_services.review_copilot.query,
+            payload,
+        )
+
+    @app.post(
+        "/internal/agents/evaluation/analyze",
+        response_model=EvaluationAnalysisResult,
+    )
+    async def final_evaluation(
+        payload: EvaluationAnalyzeRequest,
+        request: Request,
+        x_service_secret: str = Header(alias=SERVICE_SECRET_HEADER),
+        x_role: str = Header(default="SYSTEM", alias="X-Role"),
+    ) -> EvaluationAnalysisResult:
+        _authorize(x_service_secret, resolved.python_agent_service_secret)
+        context = _trace_context(
+            request,
+            case_id=payload.case_id,
+            workflow_id=f"EVALUATION_{payload.case_id}",
+            user_id=None,
+            role=x_role,
+            prompt_version=resolved.evaluation_prompt_version,
+        )
+        return await run_in_threadpool(
+            final_services.evaluation.analyze,
+            payload,
+            context,
+            offline=True,
+        )
 
     @app.post(
         "/agent-api/v1/hearings/analyze",
@@ -243,6 +411,32 @@ def _build_evaluation_workflow(settings: Settings) -> EvaluationWorkflow:
     )
 
 
+def _build_final_agent_services(
+    settings: Settings,
+    hearing_workflow: HearingWorkflow,
+    intake_workflow: IntakeWorkflow,
+    evaluation_workflow: EvaluationWorkflow,
+) -> FinalAgentServices:
+    llm = LiteLlmProxyClient(
+        settings.litellm_base_url,
+        settings.litellm_model,
+        settings.litellm_master_key,
+        settings.llm_timeout_seconds,
+    )
+    prompts = PromptRepository()
+    critic_evaluator = ModelCriticEvaluator(llm, prompts)
+    return FinalAgentServices(
+        intake=DisputeIntakeOfficer(intake_workflow),
+        evidence=EvidenceClerk(),
+        hearing=PresidingJudge(hearing_workflow),
+        deliberation=DeliberationPanel(
+            build_default_critics(critic_evaluator)
+        ),
+        review_copilot=ReviewCopilot(ModelReviewAnswerer(llm, prompts)),
+        evaluation=EvaluationAgent(evaluation_workflow),
+    )
+
+
 def _build_tracer(settings: Settings):
     if not settings.langfuse_enabled:
         return NoOpAgentTracer()
@@ -250,6 +444,26 @@ def _build_tracer(settings: Settings):
         settings.langfuse_public_key,
         settings.langfuse_secret_key,
         settings.langfuse_host,
+    )
+
+
+def _trace_context(
+    request: Request,
+    *,
+    case_id: str,
+    workflow_id: str,
+    user_id: str | None,
+    role: str,
+    prompt_version: str,
+) -> AgentTraceContext:
+    return AgentTraceContext(
+        trace_id=request.state.trace_id,
+        request_id=request.state.request_id,
+        case_id=case_id,
+        workflow_id=workflow_id,
+        user_id=user_id,
+        role=role,
+        prompt_version=prompt_version,
     )
 
 

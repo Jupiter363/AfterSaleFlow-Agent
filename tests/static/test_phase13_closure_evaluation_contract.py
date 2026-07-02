@@ -65,7 +65,7 @@ def test_agent_evaluation_runs_outside_database_transactions() -> None:
 
 
 def test_evaluation_agent_is_closed_case_only_and_read_only() -> None:
-    schemas = read(PYTHON / "schemas.py")
+    schemas = read(PYTHON / "schemas" / "models.py")
     workflow = read(PYTHON / "evaluation.py")
     prompt = read(PYTHON / "prompts" / "evaluation_analyze.md")
     main = read(PYTHON / "main.py")

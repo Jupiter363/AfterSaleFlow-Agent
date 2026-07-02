@@ -35,7 +35,7 @@ def test_all_c1_to_c6_nodes_and_conditional_gap_path_exist() -> None:
 
 
 def test_agent_output_is_non_final_and_forced_to_human_review() -> None:
-    schemas = (APP / "schemas.py").read_text(encoding="utf-8")
+    schemas = (APP / "schemas" / "models.py").read_text(encoding="utf-8")
     assert 'requires_human_review: Literal[True] = True' in schemas
     assert 'is_final_decision: Literal[False] = False' in schemas
     assert 'draft_status: Literal["PENDING_HUMAN_REVIEW"]' in schemas

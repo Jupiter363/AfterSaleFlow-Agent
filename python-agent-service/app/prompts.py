@@ -15,6 +15,12 @@ class PromptRepository:
         "evidence_cross_check_node": "evidence_cross_check_node.md",
         "rule_application_node": "rule_application_node.md",
         "adjudication_draft_node": "adjudication_draft_node.md",
+        "evidence_critic": "evidence_critic.md",
+        "rule_critic": "rule_critic.md",
+        "risk_critic": "risk_critic.md",
+        "remedy_critic": "remedy_critic.md",
+        "fairness_critic": "fairness_critic.md",
+        "review_copilot": "review_copilot.md",
     }
 
     def __init__(self, prompt_dir: Path | None = None) -> None:
