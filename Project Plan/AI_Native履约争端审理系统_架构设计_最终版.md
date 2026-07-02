@@ -214,8 +214,8 @@ DisputeHearingWorkflow
      Admissibility & Hearing Router
        ┌──────────┼──────────┐
        ▼          ▼          ▼
- TRANSFERRED  SIMPLE_HEARING  FULL_HEARING
- 转普通售后      简易审理       完整审理
+ NOT_ADMISSIBLE             ACCEPTED
+ 不予受理并留档               进入房间式争端审理
                               │
                               ▼
                 AI Presiding Judge Agent
@@ -898,7 +898,7 @@ RECEIVED
 → INTAKE_ANALYZING
 → DOSSIER_BUILDING
 → ADMISSIBILITY_ROUTING
-→ TRANSFERRED | SIMPLE_HEARING | FULL_HEARING
+→ NOT_ADMISSIBLE | ACCEPTED
 → WAITING_EVIDENCE
 → DELIBERATING
 → REMEDY_PLANNING
@@ -968,11 +968,11 @@ ESCALATE
 
 ---
 
-## 8. 三类审理路径
+## 8. 受理结果与统一审理路径
 
-### 8.1 TRANSFERRED
+### 8.1 NOT_ADMISSIBLE
 
-不构成履约争端，转普通售后或外部系统。本系统终止。
+不构成履约争端，本系统留档终止。
 
 禁止：
 
@@ -980,27 +980,27 @@ ESCALATE
 生成 RemedyPlan；
 进入 Platform Human Review；
 触发 Tool Executor；
-继续普通售后流程。
+不邀请相对方，不开放证据室与小法庭。
 ```
 
-### 8.2 SIMPLE_HEARING
+### 8.2 ACCEPTED
 
-适用于规则清晰、证据充分、风险较低的争端。
+构成履约争端后，统一进入证据书记官室和小法庭。案件复杂度不再通过两条产品流程分叉，而通过补证轮次、风险策略和按需评审团控制。
 
-仍必须经过：
+所有已受理案件必须经过：
 
 ```text
-EvidenceDossier；
-结构化事实；
+证据书记官室与 EvidenceDossier；
+小法庭与非最终裁决草案；
 Remedy Planner；
 Approval Policy Engine；
 Platform Human Review；
 Tool Executor。
 ```
 
-### 8.3 FULL_HEARING
+### 8.3 风险差异
 
-适用于事实冲突、证据不足、规则不清、高金额或高风险。执行完整 C1-C6，必要时触发 AI 评议团。
+低风险、证据充分且双方一致时可以较早收敛并跳过评审团；事实冲突、证据不足、规则不清、高金额或高风险案件执行更多补证轮次并触发 AI 评议团。二者都使用同一房间、时钟和人审链。
 
 ---
 
@@ -1025,13 +1025,13 @@ Traceable：AI 内容可追踪版本、证据和来源。
 ### 9.2 页面结构
 
 ```text
-/disputes/new                 争端发起入口
-/disputes                     争端案件列表
-/disputes/:caseId             争端案件工作台
-/disputes/:caseId/evidence    AI 证据工作室
-/disputes/:caseId/hearing     AI 审理庭
+/disputes                     争议办理总览
+/disputes/:caseId/intake      争议接待室
+/disputes/:caseId/evidence    证据书记官室
+/disputes/:caseId/hearing     小法庭
+/disputes/:caseId/outcome     最终结果
 /reviews                      平台审核任务
-/reviews/:reviewId            平台审核台
+/reviews/:reviewId            平台终审
 ```
 
 ### 9.3 争端发起入口
@@ -1048,7 +1048,7 @@ Traceable：AI 内容可追踪版本、证据和来源。
 争议接待官受理分析卡；
 缺失信息提示；
 是否进入本系统的说明；
-转普通售后提示。
+不予受理留档提示。
 ```
 
 AI Native 交互：
@@ -1547,7 +1547,7 @@ FulfillmentDisputeCase
 → Dispute Intake Officer Agent
 → Evidence Clerk Agent
 → Admissibility & Hearing Router
-→ SIMPLE_HEARING 或 FULL_HEARING
+→ ACCEPTED 统一房间式审理
 → AI Presiding Judge Agent C1-C6
 → AI Deliberation Panel（按需）
 → Remedy Planner
@@ -1579,9 +1579,111 @@ Frontend 提供 AI Native 人机协作工作空间，而不是传统订单后台
 | Case Intake Agent | Dispute Intake Officer Agent |
 | Evidence Dossier Builder | Evidence Clerk Agent |
 | Dispute Router | Admissibility & Hearing Router |
-| 明确规则流 | SIMPLE_HEARING |
+| 明确规则流 | ACCEPTED 低风险快速收敛 |
 | C1-C6 Agent 集合 | AI Presiding Judge Agent 的 C1-C6 Stage |
 | 无独立评议层 | AI Deliberation Panel |
 | 审核界面 | Platform Human Review + Review Copilot |
 | Agent 公共能力分散 | Agent Runtime Harness |
 | 普通前端后台 | AI Native 争端审理工作空间 |
+
+---
+
+## 18. 房间式协作架构最终定版
+
+### 18.1 总览不是普通订单中心
+
+`/disputes` 是争议办理总览，只读取：
+
+```text
+外部接口导入的争议订单；
+争议接待官创建的争议订单。
+```
+
+桌面端左侧展示当前角色涉及的全部争议订单，右侧展示选中案件的审理游园状态路线。点击订单只切换右侧旅程，点击当前房间节点才进入办理页面。
+
+### 18.2 房间协作层
+
+```mermaid
+flowchart LR
+    O["争议办理总览"] --> I["争议接待室"]
+    I -->|"受理"| E["证据书记官室 · PT2H"]
+    I -->|"不予受理"| N["留档终止"]
+    E --> H["小法庭 · PT3H / 3轮"]
+    H --> S["双确认和解或裁决草案"]
+    S --> D{"是否触发评审团"}
+    D -->|"是"| P["AI 评审团"]
+    D -->|"否"| R["ReviewPacket"]
+    P --> R
+    R --> U["平台终审"]
+    U --> X["确定性执行"]
+```
+
+Java API Service 新增房间协作层，职责包括：
+
+```text
+Case Participant：案件成员与权限；
+Case Room：房间开放、封存和关闭；
+Room Message：不可变对话和附件引用；
+Phase Clock：服务端时钟投影；
+Case Event：可重放 SSE 事件；
+Notification Outbox：传票信箱可靠投递。
+```
+
+Temporal 仍是流程与时钟状态源，PostgreSQL 保存查询投影。浏览器倒计时不能触发业务状态转换。
+
+### 18.3 共享庭审权限
+
+| 行为 | 用户 | 商家 | 平台审核员 |
+|---|---:|---:|---:|
+| 查看共享庭审事件 | 是 | 是 | 是 |
+| 提交陈述与补证 | 是 | 是 | 否 |
+| 创建或确认和解方案 | 是 | 是 | 否 |
+| 查看审核辅助官 | 否 | 否 | ReviewPacket 冻结后 |
+| 做出最终审核决定 | 否 | 否 | 是 |
+
+审核员可以在庭审期间只读旁观，但不得提前改变证据或代表任何一方发言。
+
+### 18.4 时效架构
+
+```text
+EVIDENCE_SUBMISSION：PT2H
+HEARING：PT3H
+MAX_HEARING_ROUNDS：3
+```
+
+举证双方提前完成可以提前开庭。庭审补证不重置三小时时钟。到期或轮次耗尽后必须执行 C6 强制收敛，草案标注超时、缺席、证据缺口和不确定性。
+
+### 18.5 证据与和解
+
+证据目录双方共享，原件按 `PARTIES / PRIVATE / PLATFORM` 授权。可信度采用 `VERIFIED / PLAUSIBLE / SUSPICIOUS / REJECTED / NEEDS_HUMAN_REVIEW`。
+
+和解采用版本化 `settlement_proposal` 与双方 `settlement_confirmation`。只有用户和商家确认同一当前版本才触发和解型裁决草案；该草案仍进入平台终审。
+
+### 18.6 按需评议
+
+评审团触发条件：
+
+```text
+高风险；
+双方未达成一致；
+主审官低置信度；
+重大证据冲突；
+规则适用不确定；
+Guardrail 或 Approval Policy 要求。
+```
+
+条件全部不满足时跳过评议团以控制时延和 Token 成本，但 ReviewPacket、人类终审与 Tool Executor 不得跳过。
+
+### 18.7 实时与通知
+
+房间通过 REST 写入、SSE 读取：
+
+```text
+POST 命令或消息
+→ 数据库事务提交消息与 case_timeline_event
+→ Outbox 生成角色通知
+→ SSE 按 sequence_no 推送
+→ 断线使用 Last-Event-ID 续传
+```
+
+传票信箱只在平台内投递，按角色脱敏并使用业务事件键幂等。

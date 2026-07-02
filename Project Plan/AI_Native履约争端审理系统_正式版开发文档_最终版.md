@@ -101,12 +101,12 @@ AI Fulfillment Dispute Court
 
 ### 1.4 非争端请求处理原则
 
-不构成履约争端的请求应进入 `TRANSFERRED` 终态，并给出转交说明。
+不构成履约争端的请求应进入 `NOT_ADMISSIBLE` 终态，并给出留档说明。
 
 ```text
 非争端请求
 → 争议接待官判断不予受理
-→ 生成转交普通售后/客服说明
+→ 生成不予受理与留档说明
 → 本系统结束
 ```
 
@@ -202,22 +202,17 @@ FulfillmentDisputeCase
 Evidence Clerk Agent
 证据书记官：构建 EvidenceDossier
     ↓
-Admissibility & Hearing Router
-受理 / 简易审理 / 完整审理分流
+Admission Decision
+不予受理 / 进入统一房间式审理
     ↓
 ┌───────────────────────────────┐
-│ 路径一：TRANSFERRED             │
-│ 不予受理 / 转普通售后            │
+│ 路径一：NOT_ADMISSIBLE          │
+│ 不予受理并留档                    │
 └───────────────────────────────┘
 
 ┌───────────────────────────────┐
-│ 路径二：SIMPLE_HEARING          │
-│ 规则明确、证据充分、风险较低      │
-└───────────────────────────────┘
-
-┌───────────────────────────────┐
-│ 路径三：FULL_HEARING            │
-│ AI 主审官 C1-C6 + 可选评议团      │
+│ 路径二：ACCEPTED                │
+│ 证据室 PT2H + 小法庭 PT3H/3轮    │
 └───────────────────────────────┘
     ↓
 Remedy Planner
@@ -473,9 +468,9 @@ ActionRecord
 
 ---
 
-## 5. 受理与审理三路径
+## 5. 受理结果与统一审理路径
 
-### 5.1 TRANSFERRED：不予受理或转普通售后
+### 5.1 NOT_ADMISSIBLE：不予受理并留档
 
 适用：
 
@@ -493,7 +488,7 @@ ActionRecord
 ```text
 不创建完整审理流程。
 记录争议接待官判断。
-生成转交普通售后说明。
+生成不予受理和留档说明。
 本系统终止。
 ```
 
@@ -506,61 +501,45 @@ ActionRecord
 不把普通请求包装成争端。
 ```
 
-### 5.2 SIMPLE_HEARING：简易审理
+### 5.2 ACCEPTED：统一房间式审理
 
-适用：
-
-```text
-双方确有争端，但规则明确。
-证据充分。
-风险较低。
-不需要多轮补证。
-不需要 AI 评议团。
-```
-
-示例：
+适用：构成履约争端并由发起方确认受理信息。
 
 ```text
-订单未发货但商家拒绝退款。
-退货已被商家签收且超过平台处理时限。
-商家在平台聊天中明确同意退款但未执行。
+受理后邀请用户与商家；
+进入证据书记官室；
+双方提前完成或 PT2H 到期后开庭；
+小法庭最多三轮、最长 PT3H；
+生成非最终裁决草案；
+进入平台终审。
 ```
 
-流程：
+低风险案件：
+
+```text
+证据充分；
+双方确认同一和解版本；
+主审官置信度高；
+无重大证据冲突；
+可以跳过 AI 评审团。
+```
+
+高风险或复杂案件：
+
+```text
+证据不足或冲突；
+规则适用不确定；
+主审官低置信度；
+双方未达成一致；
+触发 AI 评审团。
+```
+
+统一流程：
 
 ```text
 争议接待官
 → 证据书记官
-→ 简易审理规则检查
-→ Remedy Planner
-→ Approval Policy Engine
-→ Platform Human Review
-→ Tool Executor
-```
-
-注意：简易审理仍然必须经过人审和执行门控。
-
-### 5.3 FULL_HEARING：完整争端审理
-
-适用：
-
-```text
-签收未收到
-退货掉包
-破损责任不清
-少件错发责任不清
-高价值退款或补发
-用户/商家主张冲突
-证据不完整或相互矛盾
-规则适用存在争议
-```
-
-流程：
-
-```text
-争议接待官
-→ 证据书记官
-→ AI 主审官 C1-C6
+→ AI 主审官受控审理
 → Risk Gate
 → 可选 AI 评议团
 → 草案修订
@@ -569,6 +548,18 @@ ActionRecord
 → Platform Human Review
 → Tool Executor
 ```
+
+### 5.3 不再保留简易/完整双产品流
+
+案件复杂度由三项机制表达：
+
+```text
+是否需要补证以及补证轮次；
+是否触发 AI 评审团；
+Approval Policy 要求的审核等级。
+```
+
+这避免低风险案件绕过小法庭，也避免维护两套页面、API 和 Workflow 语义。
 
 ---
 
@@ -1080,7 +1071,7 @@ final_status
 ```json
 {
   "is_potential_dispute": true,
-  "admissibility_recommendation": "ACCEPTED|NEED_MORE_INFO|TRANSFERRED",
+  "admissibility_recommendation": "ACCEPTED|NEED_MORE_INFO|NOT_ADMISSIBLE",
   "dispute_type": "SIGNED_NOT_RECEIVED|RETURN_SWAP|DAMAGED_GOODS|MISSING_ITEM|REFUND_REJECTION|OTHER",
   "initiator": "USER|MERCHANT",
   "claims": [
@@ -1208,7 +1199,7 @@ max_runtime_seconds: 20
 | 失败 | 策略 |
 |---|---|
 | 无法识别订单 | 返回 NEED_MORE_INFO |
-| 不构成争端 | 返回 TRANSFERRED |
+| 不构成争端 | 返回 NOT_ADMISSIBLE |
 | 输出 Schema 错误 | 最多修复 1 次，失败转人工接待 |
 | 工具查询失败 | 标记不确定，不臆造事实 |
 
@@ -1413,7 +1404,7 @@ AI 主审官是完整争端审理的核心认知 Agent。
 ### 7.3.2 触发时机
 
 ```text
-案件被 Router 判定为 FULL_HEARING。
+案件被接待官与确定性受理规则判定为 ACCEPTED。
 补证完成后继续审理。
 评议团提出重大异议后进行草案修订。
 ```
@@ -2072,9 +2063,9 @@ RECEIVED
 INTAKE_ANALYZING
 DOSSIER_BUILDING
 ADMISSIBILITY_ROUTING
-TRANSFERRED
-SIMPLE_HEARING
-FULL_HEARING
+NOT_ADMISSIBLE
+NOT_ADMISSIBLE
+ACCEPTED
 WAITING_EVIDENCE
 DELIBERATING
 REMEDY_PLANNING
@@ -2092,7 +2083,7 @@ MANUAL_TAKEOVER
 约束：
 
 ```text
-TRANSFERRED 是本系统终态。
+NOT_ADMISSIBLE 是本系统终态。
 APPROVED 只能由 HumanReviewRecord 触发。
 EXECUTING 只能从 APPROVED 进入。
 CLOSED 必须存在执行结果或明确无动作关闭理由。
@@ -2587,13 +2578,13 @@ skill_version
 页面：
 
 ```text
-/disputes/new                 争端发起入口
-/disputes                     争端案件列表
-/disputes/:caseId             争端案件工作台
-/disputes/:caseId/evidence    AI 证据工作室
-/disputes/:caseId/hearing     AI 审理庭
+/disputes                     争议办理总览
+/disputes/:caseId/intake      争议接待室
+/disputes/:caseId/evidence    证据书记官室
+/disputes/:caseId/hearing     小法庭
+/disputes/:caseId/outcome     最终结果
 /reviews                      平台审核任务
-/reviews/:reviewId            平台审核台
+/reviews/:reviewId            平台终审
 ```
 
 ### 12.2 争端发起入口
@@ -2608,7 +2599,7 @@ skill_version
 争议接待官受理分析卡
 缺失信息提示
 提交按钮
-转普通售后提示
+不予受理留档提示
 ```
 
 主提示语：
@@ -2912,7 +2903,7 @@ Evaluation Agent：改进建议可执行率。
 ### 16.5 E2E 场景
 
 ```text
-1. 用户只是查物流 → 转普通售后，本系统终止。
+1. 用户只是查物流 → 不予受理并留档，本系统终止。
 2. 商家已同意退款但未执行 → 简易审理 → 人审 → 执行。
 3. 签收未收到 → 补证 → 完整审理 → 人审 → 执行。
 4. 退货掉包高风险 → AI 主审官 → AI 评议团 → 人审 → 执行。
@@ -2993,7 +2984,7 @@ FulfillmentDisputeCase
 → Dispute Intake Officer Agent
 → Evidence Clerk Agent
 → Admissibility & Hearing Router
-→ SIMPLE_HEARING 或 FULL_HEARING
+→ ACCEPTED 统一房间式审理
 → AI Presiding Judge Agent C1-C6
 → AI Deliberation Panel（按需）
 → Remedy Planner
@@ -3008,4 +2999,285 @@ FulfillmentDisputeCase
 
 ```text
 AI Native 履约争端审理系统不是订单中心，也不是普通客服系统，而是一个以证据卷宗、受控审理、按需 AI 评议团、人审门控和确定性执行为核心的专业化 AI 审理系统。它的技术价值不在于堆叠 Agent 数量，而在于通过 Agent Runtime Harness 精确治理 Agent 的身份、上下文、记忆、工具、Skill、循环、输出、Guardrail、HITL、Trace 和评估闭环。
+```
+
+---
+
+## 20. 房间式数字人协作开发基线
+
+本节是正式版新增开发基线；与前文页面或接口冲突时，以本节为准。
+
+### 20.1 最终路由
+
+```text
+/disputes                         争议办理总览
+/disputes/:caseId/intake          争议接待室
+/disputes/:caseId/evidence        证据书记官室
+/disputes/:caseId/hearing         小法庭
+/disputes/:caseId/outcome         最终结果
+/reviews                          平台审核任务
+/reviews/:reviewId                平台终审
+```
+
+评审团不是用户独立页面。触发后在小法庭和平台终审中作为评议席显示。
+
+### 20.2 案件来源与演示数据
+
+```text
+EXTERNAL_IMPORT
+INTAKE_CREATED
+```
+
+外部导入接口以 `(sourceSystem, externalCaseReference)` 幂等。首版在迁移中创建多个状态的演示争议订单，供 `user-local`、`merchant-local` 和 `reviewer-local` 读取。演示数据只能是争议订单，不得生成普通订单列表。
+
+### 20.3 新增数据对象
+
+```text
+case_participant
+case_room
+room_message
+case_phase_clock
+evidence_verification
+evidence_party_completion
+hearing_round
+settlement_proposal
+settlement_confirmation
+notification
+notification_outbox
+```
+
+`fulfillment_dispute_case` 增加：
+
+```text
+source_type
+source_system
+external_case_ref
+current_room
+current_deadline_at
+```
+
+`case_timeline_event` 增加：
+
+```text
+sequence_no
+room_id
+audience_json
+event_key
+```
+
+关键唯一约束：
+
+```text
+(source_system, external_case_ref)
+(case_id, room_type)
+(proposal_id, participant_role)
+(business_event_key, recipient_id)
+```
+
+### 20.4 房间消息契约
+
+消息类型白名单：
+
+```text
+PARTY_TEXT
+PARTY_EVIDENCE_REFERENCE
+PARTY_CONFIRMATION
+AGENT_MESSAGE
+SYSTEM_EVENT
+REVIEWER_NOTE
+```
+
+消息一经创建不可修改。更正通过新消息或新版本对象表达。每条消息记录：
+
+```text
+caseId
+roomId
+sequenceNo
+senderType
+senderRole
+senderId
+audience
+messageType
+text
+attachmentRefs
+agentRunId
+hearingRound
+createdAt
+traceId
+```
+
+### 20.5 外部 API
+
+#### 争议与接待
+
+```text
+GET  /api/disputes
+POST /api/disputes
+GET  /api/disputes/{caseId}
+POST /api/disputes/{caseId}/intake/start
+POST /api/disputes/{caseId}/intake/analyze
+POST /api/disputes/{caseId}/intake/confirm
+```
+
+#### 房间与消息
+
+```text
+GET  /api/disputes/{caseId}/rooms/{roomType}
+GET  /api/disputes/{caseId}/rooms/{roomType}/messages
+POST /api/disputes/{caseId}/rooms/{roomType}/messages
+GET  /api/disputes/{caseId}/events
+```
+
+SSE 使用单调事件序号；断线客户端携带 `Last-Event-ID`，服务端只补发授权且序号更大的事件。
+
+#### 证据
+
+```text
+GET  /api/disputes/{caseId}/evidence
+POST /api/disputes/{caseId}/evidence
+GET  /api/disputes/{caseId}/evidence-dossiers/{version}
+POST /api/disputes/{caseId}/evidence/complete
+GET  /api/disputes/{caseId}/evidence/completion
+```
+
+#### 庭审与和解
+
+```text
+GET  /api/disputes/{caseId}/hearing
+POST /api/disputes/{caseId}/hearing/statements
+POST /api/disputes/{caseId}/hearing/supplements
+POST /api/disputes/{caseId}/hearing/settlements
+POST /api/disputes/{caseId}/hearing/settlements/{version}/confirm
+GET  /api/disputes/{caseId}/adjudication-drafts/latest
+GET  /api/disputes/{caseId}/deliberation
+```
+
+#### 传票信箱
+
+```text
+GET  /api/notifications
+GET  /api/notifications/unread-count
+POST /api/notifications/{notificationId}/read
+POST /api/notifications/read-all
+```
+
+#### 平台审核
+
+```text
+GET  /api/reviews
+GET  /api/reviews/{reviewId}/packet
+POST /api/reviews/{reviewId}/decision
+POST /api/reviews/{reviewId}/copilot/query
+```
+
+#### 内部导入
+
+```text
+POST /internal/disputes/import
+```
+
+内部导入和 Agent/Parser 接口只接受服务身份。
+
+### 20.6 时钟与 Workflow
+
+```text
+EVIDENCE_WINDOW=PT2H
+HEARING_WINDOW=PT3H
+MAX_HEARING_ROUNDS=3
+```
+
+举证阶段满足以下任一条件后封卷：
+
+```text
+USER 与 MERCHANT 均确认完成；
+PT2H 到期。
+```
+
+庭审满足以下任一条件后进入 C6：
+
+```text
+事实充分；
+双方确认当前和解版本；
+三轮耗尽；
+PT3H 到期。
+```
+
+Temporal 负责 Timer 与 Signal；数据库 `case_phase_clock` 是查询投影。前端倒计时为零时只显示等待服务端确认，不得自行开庭或生成草案。
+
+### 20.7 证据可信度与可见性
+
+```text
+VERIFIED
+PLAUSIBLE
+SUSPICIOUS
+REJECTED
+NEEDS_HUMAN_REVIEW
+```
+
+Java 确定性校验负责哈希、来源签名、MIME、大小、上传主体、时间戳和重复材料。Evidence Clerk 负责内容冲突、异常与可采性建议，但没有确定性来源时不得输出 `VERIFIED`。
+
+共享目录字段双方可见；原件按 `PARTIES / PRIVATE / PLATFORM` 返回角色投影。`REJECTED` 证据保留审计但不进入冻结卷宗。
+
+### 20.8 和解与按需评审团
+
+`settlement_proposal` 每次修改创建新版本并废弃旧确认。只有 USER 与 MERCHANT 确认同一当前版本才触发 `SETTLEMENT_CONFIRMED`。
+
+评审团触发策略是确定性 Java Policy：
+
+```text
+highRisk
+or notSettled
+or lowConfidence
+or majorEvidenceConflict
+or ruleUncertain
+or guardrailRequired
+```
+
+跳过评审团后仍必须创建 ReviewPacket 并等待平台审核员。
+
+### 20.9 传票信箱事件
+
+```text
+INTAKE_ACCEPTED
+DISPUTE_SUMMONS
+EVIDENCE_ROOM_OPENED
+EVIDENCE_DEADLINE_WARNING
+HEARING_OPENED
+SUPPLEMENT_REQUESTED
+SETTLEMENT_CONFIRMATION_REQUIRED
+REVIEW_PENDING
+FINAL_DECISION
+EXECUTION_COMPLETED
+MANUAL_HANDOFF
+```
+
+业务事务先写 `notification_outbox`，发布器再写收件箱。使用 `(business_event_key, recipient_id)` 去重。消息深链只能指向平台内部授权路由。
+
+### 20.10 新增错误码
+
+```text
+ROOM_NOT_OPEN
+ROOM_ALREADY_SEALED
+PHASE_DEADLINE_EXPIRED
+HEARING_ROUND_LIMIT_REACHED
+SETTLEMENT_VERSION_CONFLICT
+SETTLEMENT_CONFIRMATION_CONFLICT
+EVIDENCE_QUARANTINED
+EVENT_CURSOR_EXPIRED
+NOTIFICATION_NOT_VISIBLE
+```
+
+### 20.11 实施顺序
+
+```text
+文档契约
+→ V010-V012 前向迁移与种子
+→ 总览、参与方和接待室
+→ 房间消息、SSE 和传票信箱
+→ 证据可信度与 PT2H
+→ PT3H、三轮和双确认和解
+→ Agent Schema 与 API 收敛
+→ Figma 分页设计
+→ Vue 映射
+→ 联调和最终验收
 ```

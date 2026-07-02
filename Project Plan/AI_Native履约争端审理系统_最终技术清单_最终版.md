@@ -25,7 +25,7 @@ Audit 做追责；
 Evaluation 做改进。
 ```
 
-系统只处理用户或商家主动发起、或平台升级进入的履约争端。不构成履约争端的请求仅转交外部普通售后，本系统不继续处理。
+系统只处理用户或商家主动发起、或外部接口导入的履约争端。不构成履约争端的请求标记为 `NOT_ADMISSIBLE` 并留档，本系统不邀请相对方、不开放后续房间。
 
 ---
 
@@ -1159,3 +1159,82 @@ Evaluation Agent 离线批处理。
 ```text
 以 Temporal 控制可靠流程，以 Agent Runtime Harness 约束 AI 认知协作，以 AI Native 前端呈现证据与审理过程，以平台人审承担最终责任，以 Tool Executor 完成确定性、幂等、可审计执行。
 ```
+
+---
+
+## 17. 房间式数字人协作技术清单
+
+### 17.1 Java 新增模块
+
+- [ ] `casecore` 支持 `EXTERNAL_IMPORT / INTAKE_CREATED` 和幂等外部导入。
+- [ ] `casecore` 输出争议办理总览投影，不查询普通订单。
+- [ ] `room` 管理 `INTAKE / EVIDENCE / HEARING / REVIEW`。
+- [ ] `room` 保存不可变消息、参与方和服务端时钟投影。
+- [ ] `room` 提供带 `Last-Event-ID` 的 SSE。
+- [ ] `notification` 使用事务 Outbox 生成传票信箱。
+- [ ] `evidence` 实现五级可信度和双方举证完成。
+- [ ] `hearing` 实现三轮、和解版本与双方确认。
+
+### 17.2 数据表
+
+- [ ] `case_participant`
+- [ ] `case_room`
+- [ ] `room_message`
+- [ ] `case_phase_clock`
+- [ ] `evidence_verification`
+- [ ] `evidence_party_completion`
+- [ ] `hearing_round`
+- [ ] `settlement_proposal`
+- [ ] `settlement_confirmation`
+- [ ] `notification`
+- [ ] `notification_outbox`
+- [ ] `case_timeline_event` 有单调序号、房间、受众和事件键。
+
+### 17.3 时效
+
+- [ ] `EVIDENCE_WINDOW=PT2H`。
+- [ ] 双方提前完成可以提前封卷。
+- [ ] 举证到期自动封卷并开放小法庭。
+- [ ] `HEARING_WINDOW=PT3H`。
+- [ ] `MAX_HEARING_ROUNDS=3`。
+- [ ] 补证不重置庭审时钟。
+- [ ] 到期或轮次耗尽强制生成非最终草案。
+- [ ] 所有时钟由 Temporal 驱动，前端只是投影。
+
+### 17.4 证据
+
+- [ ] 双方共享证据目录。
+- [ ] 原件按 `PARTIES / PRIVATE / PLATFORM` 授权。
+- [ ] 可信度为 `VERIFIED / PLAUSIBLE / SUSPICIOUS / REJECTED / NEEDS_HUMAN_REVIEW`。
+- [ ] 没有确定性来源证明时，AI 不得输出 `VERIFIED`。
+- [ ] 隔离材料可审计但不进入冻结卷宗。
+
+### 17.5 庭审与评议
+
+- [ ] 用户和商家可以陈述、质证、补证和确认和解。
+- [ ] 审核员在 ReviewPacket 冻结前只读。
+- [ ] `settlement_proposal` 版本变化使旧确认失效。
+- [ ] 双方确认同一当前版本才视为达成一致。
+- [ ] 高风险、未和解、低置信度、重大冲突或规则不确定时触发评审团。
+- [ ] 跳过评审团仍强制平台人审。
+
+### 17.6 传票信箱
+
+- [ ] 只做平台站内通知，不依赖外部短信。
+- [ ] 覆盖受理、传票、举证、开庭、补证、和解、终审和执行事件。
+- [ ] 通知按角色脱敏。
+- [ ] 点击通知进入授权案件房间。
+- [ ] `(business_event_key, recipient_id)` 幂等。
+
+### 17.7 前端与 Figma
+
+- [ ] 总览为左侧争议订单栏 + 右侧审理游园。
+- [ ] 有争议接待室。
+- [ ] 有证据书记官室。
+- [ ] 有共享小法庭。
+- [ ] 有审核员专属终审视图。
+- [ ] 有结果页和传票信箱。
+- [ ] 数字人为 2D 卡通，支持七种运行状态。
+- [ ] 用户和商家看不到审核辅助官。
+- [ ] 所有页面提供减少动画模式。
+- [ ] Vue 实现已与具体 Figma 节点截图对比。

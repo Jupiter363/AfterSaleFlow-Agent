@@ -1104,3 +1104,101 @@ API 路径：正式版不使用 /v2、/v3；
 启动方式：scripts/dev-up.sh；
 验收方式：scripts/smoke-test.sh + 配置验收清单。
 ```
+
+---
+
+## 20. 房间协作与时效配置
+
+### 20.1 环境变量
+
+`.env.example` 必须包含：
+
+```dotenv
+# Room-based dispute workflow
+EVIDENCE_WINDOW=PT2H
+HEARING_WINDOW=PT3H
+MAX_HEARING_ROUNDS=3
+SSE_HEARTBEAT=PT15S
+SSE_EMITTER_TIMEOUT=PT4H
+SEED_DEMO_DISPUTES=true
+NOTIFICATION_OUTBOX_BATCH_SIZE=100
+NOTIFICATION_OUTBOX_POLL_INTERVAL=PT1S
+```
+
+生产默认：
+
+```text
+举证窗口：PT2H；
+庭审窗口：PT3H；
+庭审轮次：3；
+SSE 心跳：PT15S。
+```
+
+自动化测试通过 Spring Profile 或测试构造参数注入秒级 Duration，不得修改生产默认值。
+
+### 20.2 Java 配置
+
+```yaml
+dispute:
+  evidence-window: ${EVIDENCE_WINDOW:PT2H}
+  hearing-window: ${HEARING_WINDOW:PT3H}
+  max-hearing-rounds: ${MAX_HEARING_ROUNDS:3}
+  sse-heartbeat: ${SSE_HEARTBEAT:PT15S}
+  sse-emitter-timeout: ${SSE_EMITTER_TIMEOUT:PT4H}
+  seed-demo-disputes: ${SEED_DEMO_DISPUTES:true}
+  notification-outbox:
+    batch-size: ${NOTIFICATION_OUTBOX_BATCH_SIZE:100}
+    poll-interval: ${NOTIFICATION_OUTBOX_POLL_INTERVAL:PT1S}
+```
+
+配置校验：
+
+```text
+Duration 必须为正；
+MAX_HEARING_ROUNDS 必须在 1..5；
+SSE_EMITTER_TIMEOUT 必须大于 HEARING_WINDOW；
+Outbox batch size 必须在 1..1000。
+```
+
+### 20.3 Nginx SSE
+
+```nginx
+location ~ ^/api/disputes/.*/events$ {
+    proxy_pass http://java-api-service:8080;
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_read_timeout 4h;
+}
+```
+
+SSE 响应禁止压缩缓冲。Nginx 不暴露 `/internal/disputes/import`、内部 Agent、Parser、Temporal 或数据组件。
+
+### 20.4 演示争议数据
+
+`SEED_DEMO_DISPUTES=true` 只用于本地和演示环境，创建：
+
+```text
+INTAKE_PENDING
+EVIDENCE_OPEN
+HEARING_OPEN
+REVIEW_PENDING
+CLOSED
+```
+
+等状态的争议订单。生产环境必须关闭种子开关，真实数据通过内部导入接口或争议接待官创建。
+
+### 20.5 传票信箱
+
+传票信箱不配置外部短信、邮件或推送供应商。通知事实保存在 PostgreSQL，Outbox 发布失败可重试，重复事件按业务键去重。
+
+### 20.6 配置验收
+
+- [ ] `EVIDENCE_WINDOW=PT2H`。
+- [ ] `HEARING_WINDOW=PT3H`。
+- [ ] `MAX_HEARING_ROUNDS=3`。
+- [ ] SSE 心跳与长连接超时合法。
+- [ ] 前端无法通过本地配置改变服务端截止时间。
+- [ ] 演示种子在生产关闭。
+- [ ] Outbox 批量和轮询参数有边界校验。
+- [ ] Nginx 对 SSE 关闭缓冲。
+- [ ] 内部导入与内部 Agent API 不对公网暴露。

@@ -1,16 +1,16 @@
 # AI Native 履约争端审理系统：架构与技术文档改造版
 
-> 文档用途：本文件用于指导 Codex 对现有架构文档与技术方案文档进行改造。  
-> 本次任务范围：**只改架构与技术文档，不改代码，不生成数据库迁移脚本，不实现接口，不调整工程目录。**  
-> 改造目标：将原“订单履约 / 售后履约 / 争议裁决”方向进一步收敛为一个小而专业的 **AI Native 履约争端审理系统**，突出 Agent Harness、AI 审理庭、证据工程、人审门控和按需 AI 评议团。
+> 文档用途：本文件记录最终架构改造原则，并指导 Codex 先统一文档、再完成数据库、后端、Figma、前端和联调。
+> 本次任务范围：**文档先行，随后按最终文档实现接口、迁移、Workflow、Figma 页面、Vue 映射和验收。**
+> 改造目标：将原“订单履约 / 售后履约 / 争议裁决”方向进一步收敛为一个小而专业的 **AI Native 履约争端审理系统**，突出房间式数字人接力、Agent Harness、AI 审理庭、证据工程、人审门控和按需 AI 评议团。
 
 ---
 
 ## 0. 本次改造边界
 
-### 0.1 只做文档改造
+### 0.1 文档先行
 
-Codex 本次只需要完成以下文档层工作：
+Codex 必须先完成以下文档层工作，文档验收通过后才能修改代码：
 
 ```text
 1. 重写产品定位；
@@ -25,22 +25,22 @@ Codex 本次只需要完成以下文档层工作：
 10. 删除或弱化普通订单中心、物流监控、泛售后工作台相关内容。
 ```
 
-### 0.2 不做代码改造
+### 0.2 文档定版后的代码改造
 
-Codex 本次不得执行以下任务：
+文档定版后，Codex 必须按顺序执行以下任务：
 
 ```text
-1. 不修改后端代码；
-2. 不修改前端代码；
-3. 不创建数据库迁移脚本；
-4. 不实现真实 API；
-5. 不生成具体 Java / Python / Vue 代码；
-6. 不引入新依赖；
-7. 不调整 Docker、CI/CD、部署脚本；
-8. 不编写单元测试或集成测试代码。
+1. 创建前向数据库迁移和演示争议订单种子；
+2. 实现参与方、房间、消息、时钟、事件、证据校验、和解和传票信箱；
+3. 补充 Temporal 的 PT2H 举证和 PT3H 庭审时钟；
+4. 补充 Java / Python API 与测试；
+5. 按逐页提示词完成 Figma 设计；
+6. 将通过验收的 Figma 节点映射为 Vue 页面；
+7. 完成前后端联调、E2E 和最终验收；
+8. 删除旧普通履约路径和与最终房间架构冲突的代码。
 ```
 
-如需要表达代码层内容，只允许以“未来实现建议”“模块职责”“伪结构说明”的方式写入文档。
+实现不得绕过强制人审、证据权限、时钟来源或确定性执行边界。
 
 ---
 
@@ -277,7 +277,7 @@ Admissibility & Hearing Router
 受理门控与审理路径判断
         ↓
 ┌──────────────────────────────────────┐
-│ 路径一：不予受理 / 转普通售后           │
+│ 路径一：不予受理并留档                   │
 │ Not Admissible / Transfer             │
 └──────────────────────────────────────┘
         ↓
@@ -321,7 +321,7 @@ Evaluation Agent
 路由节点不再是泛化的 Dispute Router，而是 `Admissibility & Hearing Router`，用于判断：
 
 ```text
-1. 不予受理 / 转普通售后；
+1. 不予受理并留档；
 2. 简易审理；
 3. 完整争端审理。
 ```
@@ -1423,8 +1423,8 @@ INTAKE_PROCESSING
 ADMISSIBILITY_CHECKING
 EVIDENCE_DOSSIER_BUILDING
 HEARING_ROUTING
-SIMPLE_HEARING
-FULL_HEARING
+NOT_ADMISSIBLE
+ACCEPTED
 WAITING_USER_EVIDENCE
 WAITING_MERCHANT_EVIDENCE
 DELIBERATION_PANEL_REVIEW
@@ -1522,7 +1522,7 @@ DeliberationPanelWorkflow
 
 ## 9. 三类审理路径
 
-### 9.1 不予受理 / 转普通售后
+### 9.1 不予受理并留档
 
 适用：
 
@@ -2070,7 +2070,7 @@ Agent 与非 Agent 边界
    7.4 HumanReviewWorkflow
    7.5 ExecutionWorkflow
 8. 三类审理路径
-   8.1 不予受理 / 转普通售后
+   8.1 不予受理并留档
    8.2 简易审理流
    8.3 完整争端审理流
 9. Remedy Planner
@@ -2115,4 +2115,112 @@ AI Native 履约争端审理系统。
 7. Tool Executor 保证真实业务动作确定、可审计、可追责；
 8. Evaluation Agent 离线复盘，形成持续优化闭环。
 ```
+
+---
+
+## 16. 房间式数字人交互架构（最终补充基线）
+
+本节优先级高于本文早期的页面级建议。最终产品不是单一 AI 工作台，而是数字人接力办理的一组业务房间。
+
+### 16.1 最终产品故事
+
+```text
+争议办理总览
+→ 争议接待室
+→ 受理并邀请用户与商家
+→ 证据书记官室（PT2H）
+→ 小法庭（PT3H，最多三轮）
+→ 按需 AI 评审团
+→ 平台终审
+→ Tool Executor
+→ 结果与离线复盘
+```
+
+争议办理总览只展示两类记录：
+
+```text
+EXTERNAL_IMPORT：外部接口导入的争议订单；
+INTAKE_CREATED：通过争议接待官创建的争议订单。
+```
+
+首版允许用数据库种子模拟外部系统已导入的争议订单，但必须保留 `(source_system, external_case_ref)` 幂等导入契约。
+
+### 16.2 业务房间
+
+| 房间 | 数字人 | 参与者 | 主要结果 |
+|---|---|---|---|
+| INTAKE | 争议接待官 | 发起方 | 受理建议、结构化引用、双方主张、诉求、风险 |
+| EVIDENCE | 证据书记官 | 用户、商家、授权平台人员 | 分级证据、可信度、冻结卷宗 |
+| HEARING | 证据书记官、AI 主审官、按需评审团 | 用户、商家、审核员只读旁观 | 三轮庭审、和解或非最终裁决草案 |
+| REVIEW | 审核辅助官 | 平台审核员 | 人类最终决定与审核记录 |
+
+房间状态统一为：
+
+```text
+LOCKED | OPEN | WAITING | SEALED | CLOSED
+```
+
+数字人状态统一为：
+
+```text
+IDLE | LISTENING | THINKING | SPEAKING | COMPLETED | HANDOFF | ERROR
+```
+
+### 16.3 时效与强制收敛
+
+举证时钟：
+
+```text
+EVIDENCE_WINDOW=PT2H
+```
+
+双方都确认“本轮举证完成”时提前封卷；否则两小时到期自动封卷。迟到材料只能作为庭审补证生成新卷宗版本。
+
+庭审时钟与轮次：
+
+```text
+HEARING_WINDOW=PT3H
+MAX_HEARING_ROUNDS=3
+```
+
+补证不得重置三小时时钟。三小时到期、三轮耗尽、事实充分或双方确认同一和解版本时，Workflow 必须强制生成非最终裁决草案并继续后续链路。
+
+### 16.4 证据共享与可信度
+
+双方共享证据目录，但原件按 `PARTIES / PRIVATE / PLATFORM` 分级。证据书记官输出：
+
+```text
+VERIFIED
+PLAUSIBLE
+SUSPICIOUS
+REJECTED
+NEEDS_HUMAN_REVIEW
+```
+
+AI 不得宣称无法被确定性来源证明的材料“绝对真实”。被拒绝或隔离的材料保留审计记录，不进入冻结卷宗。
+
+### 16.5 双确认和解与按需评议
+
+聊天中的一致意见不直接构成和解。系统创建 `settlement_proposal` 版本，由用户和商家分别确认；新版本使旧确认失效。
+
+AI 评审团仅在高风险、未达成一致、低置信度、重大证据冲突、规则不确定或策略要求时介入。跳过评审团不能跳过平台人审。
+
+### 16.6 实时事件与传票信箱
+
+所有房间消息、时钟、确认和状态变化写入不可变案件事件。前端通过 SSE 接收，使用 `Last-Event-ID` 续传并按角色过滤。
+
+传票信箱是平台内通知中心，不接入短信供应商。通知通过事务 Outbox 生成，覆盖受理、传票、举证、开庭、补证、和解、终审和执行结果。
+
+### 16.7 新增工程模块
+
+```text
+casecore：来源、导入、总览投影、参与方；
+room：房间、消息、时钟、SSE 事件；
+notification：传票信箱与 Outbox；
+evidence：可信度与双方完成状态；
+hearing：轮次、和解与停止原因；
+workflow：Temporal 时钟、Signal 与强制收敛。
+```
+
+现有 Agent Harness、六类 Agent、五条 Workflow、ReviewPacket、Approval Policy、Human Review 和 Tool Executor 继续复用。
 
