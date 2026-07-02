@@ -7,4 +7,17 @@ public record ReviewDecisionCommand(
         ApprovalDecisionType decision,
         String reason,
         JsonNode approvedPlan,
-        String idempotencyKey) {}
+        String idempotencyKey) {
+
+    public ReviewDecisionCommand {
+        if (decision == null) {
+            throw new IllegalArgumentException("decision is required");
+        }
+        if (reason == null || reason.isBlank()) {
+            throw new IllegalArgumentException("review reason is required");
+        }
+        if (idempotencyKey == null || idempotencyKey.isBlank()) {
+            throw new IllegalArgumentException("idempotency key is required");
+        }
+    }
+}

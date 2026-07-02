@@ -28,7 +28,8 @@ public class HumanReviewWorkflowImpl implements HumanReviewWorkflow {
                     "RETURN_FOR_REVISION",
                     "REQUEST_MORE_EVIDENCE",
                     "REJECT",
-                    "ESCALATE");
+                    "ESCALATE",
+                    "ESCALATE_MANUAL");
     private static final Map<String, String> STATUSES =
             Map.of(
                     "APPROVE", "APPROVED",
@@ -36,7 +37,8 @@ public class HumanReviewWorkflowImpl implements HumanReviewWorkflow {
                     "RETURN_FOR_REVISION", "RETURNED_FOR_REVISION",
                     "REQUEST_MORE_EVIDENCE", "MORE_EVIDENCE_REQUESTED",
                     "REJECT", "REJECTED",
-                    "ESCALATE", "ESCALATED");
+                    "ESCALATE", "ESCALATED",
+                    "ESCALATE_MANUAL", "ESCALATED");
 
     private final HumanReviewActivities activities =
             Workflow.newActivityStub(

@@ -8,10 +8,12 @@ import com.example.dispute.domain.model.ParseStatus;
 import com.example.dispute.executor.application.ToolExecutorService;
 import com.example.dispute.evaluation.application.CaseClosureService;
 import com.example.dispute.infrastructure.persistence.entity.AdjudicationDraftEntity;
+import com.example.dispute.infrastructure.persistence.entity.AgentRunEntity;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.entity.HearingRecordEntity;
 import com.example.dispute.infrastructure.persistence.entity.HearingStateEntity;
 import com.example.dispute.infrastructure.persistence.repository.AdjudicationDraftRepository;
+import com.example.dispute.infrastructure.persistence.repository.AgentRunRepository;
 import com.example.dispute.infrastructure.persistence.repository.EvidenceItemRepository;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.infrastructure.persistence.repository.HearingRecordRepository;
@@ -52,6 +54,7 @@ public class CaseFulfillmentDisputeActivitiesImpl
     private final HearingStateRepository stateRepository;
     private final HearingRecordRepository recordRepository;
     private final AdjudicationDraftRepository draftRepository;
+    private final AgentRunRepository agentRunRepository;
     private final PartySubmissionRepository submissionRepository;
     private final HearingAgentClient agentClient;
     private final RemedyApplicationService remedyService;
@@ -69,6 +72,7 @@ public class CaseFulfillmentDisputeActivitiesImpl
             HearingStateRepository stateRepository,
             HearingRecordRepository recordRepository,
             AdjudicationDraftRepository draftRepository,
+            AgentRunRepository agentRunRepository,
             PartySubmissionRepository submissionRepository,
             HearingAgentClient agentClient,
             RemedyApplicationService remedyService,
@@ -84,6 +88,7 @@ public class CaseFulfillmentDisputeActivitiesImpl
         this.stateRepository = stateRepository;
         this.recordRepository = recordRepository;
         this.draftRepository = draftRepository;
+        this.agentRunRepository = agentRunRepository;
         this.submissionRepository = submissionRepository;
         this.agentClient = agentClient;
         this.remedyService = remedyService;
@@ -145,17 +150,70 @@ public class CaseFulfillmentDisputeActivitiesImpl
                 transactions.execute(
                         ignored -> buildAgentRequest(command));
         long started = System.nanoTime();
+        OffsetDateTime startedAt = OffsetDateTime.now(ZoneOffset.UTC);
+        String traceId = "TRACE_" + command.workflowId();
         HearingAgentResult result =
                 agentClient.analyze(
                         request,
-                        "TRACE_" + command.workflowId(),
+                        traceId,
                         "REQ_" + command.workflowId() + "_" + command.roundNo());
         long latencyMs = (System.nanoTime() - started) / 1_000_000;
+        String agentRunId = "RUN_" + compactUuid();
         String draftId =
                 transactions.execute(
-                        ignored ->
-                                persistAnalysis(
-                                        command, request, result, latencyMs));
+                        ignored -> {
+                            AgentRunEntity run =
+                                    agentRunRepository.saveAndFlush(
+                                            AgentRunEntity.completed(
+                                                    agentRunId,
+                                                    command.caseId(),
+                                                    command.workflowId(),
+                                                    "presiding-judge",
+                                                    "PRESIDING_JUDGE",
+                                                    "presiding-judge-v1",
+                                                    result.promptVersion(),
+                                                    "dispute-default-v1",
+                                                    "ruleset-current",
+                                                    result.model(),
+                                                    inputRefs(request),
+                                                    null,
+                                                    "{\"schema_valid\":true}",
+                                                    jsonOrDefault(
+                                                            result.raw()
+                                                                    .path(
+                                                                            "manual_review_reasons"),
+                                                            "[]"),
+                                                    null,
+                                                    latencyMs,
+                                                    null,
+                                                    startedAt,
+                                                    traceId,
+                                                    SYSTEM.actorId()));
+                            String persistedDraftId =
+                                    persistAnalysis(
+                                            command,
+                                            request,
+                                            result,
+                                            latencyMs,
+                                            agentRunId);
+                            run.attachOutput(persistedDraftId);
+                            agentRunRepository.save(run);
+                            auditRecorder.record(
+                                    SYSTEM,
+                                    "AGENT_RUN_COMPLETED",
+                                    "AGENT_RUN",
+                                    agentRunId,
+                                    command.caseId(),
+                                    Map.of("run_status", "RUNNING"),
+                                    Map.of(
+                                            "run_status",
+                                            "COMPLETED",
+                                            "trace_id",
+                                            traceId,
+                                            "output_ref",
+                                            persistedDraftId));
+                            return persistedDraftId;
+                        });
         return new HearingAnalysisActivityResult(
                 result.requiresAdditionalEvidence(),
                 result.manualRequired(),
@@ -224,7 +282,8 @@ public class CaseFulfillmentDisputeActivitiesImpl
             HearingAnalysisActivityCommand command,
             JsonNode request,
             HearingAgentResult result,
-            long latencyMs) {
+            long latencyMs,
+            String agentRunId) {
         HearingStateEntity state =
                 stateRepository
                         .findByWorkflowId(command.workflowId())
@@ -313,6 +372,7 @@ public class CaseFulfillmentDisputeActivitiesImpl
                                                                 .asText(),
                                                         "python-agent-service/"
                                                                 + result.model(),
+                                                        agentRunId,
                                                         draft.path("draft_status").asText(
                                                                 "PENDING_HUMAN_REVIEW"),
                                                         SYSTEM.actorId()))
@@ -425,6 +485,15 @@ public class CaseFulfillmentDisputeActivitiesImpl
         return value == null || value.isMissingNode() || value.isNull()
                 ? fallback
                 : value.toString();
+    }
+
+    private String inputRefs(JsonNode request) {
+        ArrayNode refs = objectMapper.createArrayNode();
+        request.path("evidence")
+                .forEach(node -> refs.add(node.path("evidence_id").asText()));
+        request.path("policy_candidates")
+                .forEach(node -> refs.add(node.path("rule_code").asText()));
+        return refs.toString();
     }
 
     private static String compactUuid() {

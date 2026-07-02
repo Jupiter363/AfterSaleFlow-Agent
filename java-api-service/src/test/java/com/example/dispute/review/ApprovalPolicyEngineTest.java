@@ -30,6 +30,12 @@ class ApprovalPolicyEngineTest {
         assertThat(decision.requiredApprovals())
                 .containsExactly("PLATFORM_HUMAN_REVIEW");
         assertThat(decision.autoApprove()).isFalse();
+        assertThat(decision.policyVersion()).isEqualTo("approval-policy-v1");
+        assertThat(decision.requiredReviewCount()).isEqualTo(1);
+        assertThat(decision.allowedActions())
+                .containsExactly("QUERY_LOGISTICS");
+        assertThat(decision.forbiddenActions())
+                .contains("REFUND", "RESHIP", "CLOSE_AFTER_SALE");
     }
 
     @Test
@@ -56,6 +62,9 @@ class ApprovalPolicyEngineTest {
                 .contains(
                         "PLATFORM_HUMAN_REVIEW",
                         "RISK_CONTROL_REVIEW");
+        assertThat(refund.requiredReviewCount()).isEqualTo(1);
+        assertThat(refund.allowedActions()).contains("REFUND");
+        assertThat(refund.forbiddenActions()).doesNotContain("REFUND");
         assertThat(refund.riskFlags())
                 .contains("HIGH_VALUE_REFUND", "ITEM_SWAP_DISPUTE");
         assertThat(reship.riskFlags()).contains("HIGH_VALUE_RESHIP");

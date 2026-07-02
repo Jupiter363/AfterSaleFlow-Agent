@@ -21,6 +21,7 @@ import com.example.dispute.domain.model.RouteType;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.entity.RemedyPlanEntity;
 import com.example.dispute.infrastructure.persistence.repository.ApprovalRecordRepository;
+import com.example.dispute.infrastructure.persistence.repository.ApprovalPolicyDecisionRepository;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.infrastructure.persistence.repository.RemedyPlanRepository;
 import com.example.dispute.infrastructure.persistence.repository.ReviewPacketRepository;
@@ -63,6 +64,7 @@ class ReviewApplicationServiceIntegrationTest {
     @Autowired ReviewApplicationService service; @Autowired FulfillmentCaseRepository cases;
     @Autowired RemedyPlanRepository plans; @Autowired ReviewTaskRepository tasks;
     @Autowired ReviewPacketRepository packets; @Autowired ApprovalRecordRepository approvals;
+    @Autowired ApprovalPolicyDecisionRepository policyDecisions;
     @MockitoBean AuditRecorder audit; @MockitoBean WorkflowClient workflowClient;
     @MockitoBean FulfillmentDisputeWorkflow workflow;
 
@@ -80,7 +82,9 @@ class ReviewApplicationServiceIntegrationTest {
         var packet=service.packet(taskId,new AuthenticatedActor("cs-1",ActorRole.CUSTOMER_SERVICE));
         assertThat(packet.remedy().path("actions")).hasSize(1);
         assertThat(service.list(ReviewTaskStatus.PENDING,new AuthenticatedActor("reviewer-1",ActorRole.PLATFORM_REVIEWER))).hasSize(1);
-        var approved=new ObjectMapper().createObjectNode().put("reviewer_note","amount verified");
+        var approved=packet.remedy().deepCopy();
+        ((com.fasterxml.jackson.databind.node.ObjectNode) approved)
+                .put("reviewer_note","amount verified");
         assertThatThrownBy(()->service.decide(taskId,new ReviewDecisionCommand(ApprovalDecisionType.APPROVE,"approve",null,"cs-key"),new AuthenticatedActor("cs-1",ActorRole.CUSTOMER_SERVICE))).isInstanceOf(ForbiddenException.class);
         var result=service.decide(taskId,new ReviewDecisionCommand(ApprovalDecisionType.MODIFY_AND_APPROVE,"amount verified",approved,"review-key"),new AuthenticatedActor("reviewer-1",ActorRole.PLATFORM_REVIEWER));
         assertThat(result.executionAllowed()).isTrue();
@@ -88,7 +92,20 @@ class ReviewApplicationServiceIntegrationTest {
         assertThat(approvals.findAllByCaseIdOrderByCreatedAtAsc("CASE_review")).singleElement().satisfies(record->{
             assertThat(record.getOriginalPlanJson()).contains("REFUND");
             assertThat(record.getApprovedPlanJson()).contains("amount verified");
+            assertThat(record.getReviewPacketId()).isEqualTo(packet.id());
+            assertThat(record.getReviewPacketVersion()).isEqualTo(packet.packetVersion());
+            assertThat(record.getPolicyVersion()).isEqualTo("approval-policy-v1");
+            assertThat(record.getActionSnapshotHash()).isNotBlank();
         });
+        assertThat(packet.caseVersion()).isPositive();
+        assertThat(packet.dossierVersion()).isPositive();
+        assertThat(packet.promptVersion()).isEqualTo("hearing-v1");
+        assertThat(packet.actionHash()).isNotBlank();
+        assertThat(packet.expiresAt()).isAfter(packet.frozenAt());
+        assertThat(policyDecisions
+                        .findFirstByCaseIdAndPlanIdOrderByCreatedAtDesc(
+                                "CASE_review", "REMEDY_review"))
+                .isPresent();
         var retry =
                 service.decide(
                         taskId,

@@ -57,6 +57,7 @@ class HumanReviewWorkflowTest {
                         "APPROVE",
                         2,
                         "ACTION_HASH_1",
+                        "HUMAN_REVIEW_1",
                         "unauthorized role"));
         workflow.submitDecision(
                 new HumanReviewSignal(
@@ -65,6 +66,7 @@ class HumanReviewWorkflowTest {
                         "APPROVE",
                         1,
                         "ACTION_HASH_1",
+                        "HUMAN_REVIEW_1",
                         "stale packet"));
         workflow.submitDecision(
                 new HumanReviewSignal(
@@ -73,6 +75,7 @@ class HumanReviewWorkflowTest {
                         "APPROVE",
                         2,
                         "WRONG_HASH",
+                        "HUMAN_REVIEW_1",
                         "wrong action hash"));
         workflow.submitDecision(
                 new HumanReviewSignal(
@@ -81,6 +84,7 @@ class HumanReviewWorkflowTest {
                         "APPROVE",
                         2,
                         "ACTION_HASH_1",
+                        "HUMAN_REVIEW_1",
                         "evidence and policy verified"));
 
         HumanReviewResult result =
@@ -134,6 +138,7 @@ class HumanReviewWorkflowTest {
                         decision,
                         2,
                         "ACTION_HASH_1",
+                        "HUMAN_REVIEW_1",
                         "review reason"));
         HumanReviewResult result =
                 io.temporal.client.WorkflowStub.fromTyped(workflow)

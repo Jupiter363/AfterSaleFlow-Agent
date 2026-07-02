@@ -41,6 +41,8 @@ public class AdjudicationDraftEntity extends AbstractEntity {
     private String draftText;
     @Column(name = "created_by_agent", length = 128, nullable = false)
     private String createdByAgent;
+    @Column(name = "created_by_agent_run_id", length = 64)
+    private String createdByAgentRunId;
     @Column(name = "draft_status", length = 32, nullable = false)
     private String draftStatus;
     @Column(name = "created_at", nullable = false, updatable = false)
@@ -62,6 +64,30 @@ public class AdjudicationDraftEntity extends AbstractEntity {
             String policyApplicationJson, String reviewerAttentionJson,
             String recommendedDecision, BigDecimal confidence, String draftText,
             String agent, String draftStatus, String actorId) {
+        return create(
+                id,
+                caseId,
+                hearingStateId,
+                version,
+                factFindingsJson,
+                evidenceAssessmentJson,
+                policyApplicationJson,
+                reviewerAttentionJson,
+                recommendedDecision,
+                confidence,
+                draftText,
+                agent,
+                null,
+                draftStatus,
+                actorId);
+    }
+
+    public static AdjudicationDraftEntity create(
+            String id, String caseId, String hearingStateId, int version,
+            String factFindingsJson, String evidenceAssessmentJson,
+            String policyApplicationJson, String reviewerAttentionJson,
+            String recommendedDecision, BigDecimal confidence, String draftText,
+            String agent, String agentRunId, String draftStatus, String actorId) {
         AdjudicationDraftEntity draft = new AdjudicationDraftEntity(id);
         draft.caseId = caseId;
         draft.hearingStateId = hearingStateId;
@@ -74,6 +100,7 @@ public class AdjudicationDraftEntity extends AbstractEntity {
         draft.confidence = confidence;
         draft.draftText = draftText;
         draft.createdByAgent = agent;
+        draft.createdByAgentRunId = agentRunId;
         draft.draftStatus = draftStatus;
         draft.createdBy = actorId;
         draft.updatedBy = actorId;
@@ -95,4 +122,5 @@ public class AdjudicationDraftEntity extends AbstractEntity {
     public String getEvidenceAssessmentJson() { return evidenceAssessmentJson; }
     public String getPolicyApplicationJson() { return policyApplicationJson; }
     public String getReviewerAttentionJson() { return reviewerAttentionJson; }
+    public String getCreatedByAgentRunId() { return createdByAgentRunId; }
 }

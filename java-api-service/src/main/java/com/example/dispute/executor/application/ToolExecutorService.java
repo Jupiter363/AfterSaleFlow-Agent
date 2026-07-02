@@ -16,10 +16,13 @@ import com.example.dispute.infrastructure.persistence.entity.ActionRecordEntity;
 import com.example.dispute.infrastructure.persistence.entity.ApprovalRecordEntity;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.entity.RemedyPlanEntity;
+import com.example.dispute.infrastructure.persistence.entity.ReviewPacketEntity;
 import com.example.dispute.infrastructure.persistence.repository.ActionRecordRepository;
 import com.example.dispute.infrastructure.persistence.repository.ApprovalRecordRepository;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.infrastructure.persistence.repository.RemedyPlanRepository;
+import com.example.dispute.infrastructure.persistence.repository.ReviewPacketRepository;
+import com.example.dispute.review.domain.ActionSnapshotHasher;
 import com.example.dispute.tool.application.SimulatedExecutionTool;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -32,6 +35,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -47,6 +52,7 @@ public class ToolExecutorService {
     private final FulfillmentCaseRepository caseRepository;
     private final RemedyPlanRepository planRepository;
     private final ApprovalRecordRepository approvalRepository;
+    private final ReviewPacketRepository packetRepository;
     private final ActionRecordRepository actionRepository;
     private final ActionExecutionLock executionLock;
     private final SimulatedExecutionTool tool;
@@ -58,6 +64,7 @@ public class ToolExecutorService {
             FulfillmentCaseRepository caseRepository,
             RemedyPlanRepository planRepository,
             ApprovalRecordRepository approvalRepository,
+            ReviewPacketRepository packetRepository,
             ActionRecordRepository actionRepository,
             ActionExecutionLock executionLock,
             SimulatedExecutionTool tool,
@@ -67,6 +74,7 @@ public class ToolExecutorService {
         this.caseRepository = caseRepository;
         this.planRepository = planRepository;
         this.approvalRepository = approvalRepository;
+        this.packetRepository = packetRepository;
         this.actionRepository = actionRepository;
         this.executionLock = executionLock;
         this.tool = tool;
@@ -169,6 +177,8 @@ public class ToolExecutorService {
                                         denied(
                                                 "approved remedy plan is required",
                                                 Map.of("case_id", caseId)));
+        ReviewPacketEntity packet =
+                validateFrozenApproval(caseId, approval);
         FulfillmentCaseEntity disputeCase =
                 caseRepository
                         .findByIdForUpdate(caseId)
@@ -200,6 +210,19 @@ public class ToolExecutorService {
                     Map.of("case_id", caseId));
         }
         JsonNode approvedPlan = read(approval.getApprovedPlanJson());
+        String calculatedActionHash =
+                ActionSnapshotHasher.hash(objectMapper, approvedPlan);
+        if (!calculatedActionHash.equals(approval.getActionSnapshotHash())) {
+            throw denied(
+                    "approved action snapshot hash does not match human review record",
+                    Map.of("approval_record_id", approval.getId()));
+        }
+        if (approval.getDecisionType() == ApprovalDecisionType.APPROVE
+                && !packet.getActionHash().equals(calculatedActionHash)) {
+            throw denied(
+                    "approved action snapshot does not match frozen review packet",
+                    Map.of("review_packet_id", packet.getId()));
+        }
         if (!plan.getId().equals(approvedPlan.path("id").asText())) {
             throw denied(
                     "approval does not reference the current remedy plan",
@@ -240,7 +263,73 @@ public class ToolExecutorService {
                 plan.getId(),
                 approval.getId(),
                 approval.getReviewerId(),
+                packet.getId(),
+                approval.getActionSnapshotHash(),
+                packet.getEvidenceMatrixJson(),
+                packet.getDraftJson(),
+                packet.getAgentRunRefsJson(),
                 executableActions);
+    }
+
+    private ReviewPacketEntity validateFrozenApproval(
+            String caseId,
+            ApprovalRecordEntity approval) {
+        if (approval.getReviewPacketId() == null
+                || approval.getActionSnapshotHash() == null
+                || approval.getApprovalExpiresAt() == null) {
+            throw denied(
+                    "frozen human review provenance is required",
+                    Map.of("approval_record_id", approval.getId()));
+        }
+        ReviewPacketEntity packet =
+                packetRepository
+                        .findById(approval.getReviewPacketId())
+                        .orElseThrow(
+                                () ->
+                                        denied(
+                                                "frozen review packet does not exist",
+                                                Map.of(
+                                                        "review_packet_id",
+                                                        approval.getReviewPacketId())));
+        ReviewPacketEntity latest =
+                packetRepository
+                        .findFirstByCaseIdAndPlanIdOrderByPacketVersionDesc(
+                                caseId, approval.getPlanId())
+                        .orElseThrow(
+                                () ->
+                                        denied(
+                                                "current review packet does not exist",
+                                                Map.of("case_id", caseId)));
+        if (!packet.isFrozen()) {
+            throw denied(
+                    "review packet is not frozen",
+                    Map.of("review_packet_id", packet.getId()));
+        }
+        if (!packet.getId().equals(latest.getId())
+                || packet.getPacketVersion()
+                        != approval.getReviewPacketVersion()) {
+            throw denied(
+                    "human approval references a stale review packet",
+                    Map.of("review_packet_id", packet.getId()));
+        }
+        if (!caseId.equals(packet.getCaseId())
+                || !approval.getPlanId().equals(packet.getPlanId())) {
+            throw denied(
+                    "review packet, approval, plan, and case do not match",
+                    Map.of("review_packet_id", packet.getId()));
+        }
+        if (!"PLATFORM_REVIEWER".equals(approval.getReviewerRole())) {
+            throw denied(
+                    "approval was not issued by the required reviewer role",
+                    Map.of("reviewer_role", approval.getReviewerRole()));
+        }
+        if (OffsetDateTime.now(ZoneOffset.UTC)
+                .isAfter(approval.getApprovalExpiresAt())) {
+            throw denied(
+                    "human approval has expired",
+                    Map.of("approval_record_id", approval.getId()));
+        }
+        return packet;
     }
 
     private List<ExecutableAction> approvedActions(
@@ -348,7 +437,7 @@ public class ToolExecutorService {
         }
         ActionRecordEntity record =
                 actionRepository.save(
-                        ActionRecordEntity.running(
+                        ActionRecordEntity.runningGoverned(
                                 "ACTION_" + compactUuid(),
                                 snapshot.caseId(),
                                 snapshot.planId(),
@@ -358,7 +447,12 @@ public class ToolExecutorService {
                                 action.idempotencyKey(),
                                 snapshot.approvedBy(),
                                 actor.actorId(),
-                                requestJson));
+                                requestJson,
+                                snapshot.reviewPacketId(),
+                                snapshot.actionSnapshotHash(),
+                                snapshot.evidenceRefsJson(),
+                                snapshot.ruleRefsJson(),
+                                snapshot.agentRunRefsJson()));
         auditStarted(record, actor, false);
         return new PreparedAction(record.getId(), true);
     }
@@ -377,7 +471,7 @@ public class ToolExecutorService {
                                         new IllegalStateException(
                                                 "running action record disappeared"));
         assertRecordMatches(record, snapshot, action);
-        record.succeed(write(result));
+        record.succeed(write(result), result.referenceId());
         actionRepository.save(record);
         auditRecorder.record(
                 actor,
@@ -489,6 +583,12 @@ public class ToolExecutorService {
                 read(record.getResultJson()),
                 record.getErrorCode(),
                 record.getErrorMessage(),
+                record.getReviewPacketId(),
+                record.getActionSnapshotHash(),
+                read(record.getEvidenceRefsJson()),
+                read(record.getRuleRefsJson()),
+                read(record.getAgentRunRefsJson()),
+                record.getExternalResultRef(),
                 record.getExecutionTime(),
                 record.getCreatedAt());
     }
@@ -595,6 +695,11 @@ public class ToolExecutorService {
             String planId,
             String approvalRecordId,
             String approvedBy,
+            String reviewPacketId,
+            String actionSnapshotHash,
+            String evidenceRefsJson,
+            String ruleRefsJson,
+            String agentRunRefsJson,
             List<ExecutableAction> actions) {}
 
     private record PreparedAction(String actionRecordId, boolean invokeTool) {}

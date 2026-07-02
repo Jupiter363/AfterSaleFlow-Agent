@@ -17,6 +17,7 @@ import com.example.dispute.workflow.domain.HearingWorkflowCommand;
 import com.example.dispute.workflow.domain.HumanReviewCommand;
 import com.example.dispute.workflow.domain.HumanReviewSignal;
 import com.example.dispute.workflow.domain.PartyEvidenceSignal;
+import com.example.dispute.workflow.domain.ReviewGateSnapshot;
 import com.example.dispute.workflow.temporal.DeliberationPanelActivities;
 import com.example.dispute.workflow.temporal.DisputeHearingActivities;
 import com.example.dispute.workflow.temporal.ExecutionActivities;
@@ -27,6 +28,13 @@ import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import com.example.dispute.infrastructure.persistence.entity.DeliberationReportEntity;
+import com.example.dispute.infrastructure.persistence.repository.ApprovalRecordRepository;
+import com.example.dispute.infrastructure.persistence.repository.DeliberationReportRepository;
+import com.example.dispute.infrastructure.persistence.repository.ReviewPacketRepository;
+import com.example.dispute.infrastructure.persistence.repository.ReviewTaskRepository;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.stereotype.Component;
 
 /**
@@ -46,12 +54,27 @@ public class FinalWorkflowActivitiesAdapter
                 ExecutionActivities {
 
     private final CaseFulfillmentDisputeActivitiesImpl legacy;
+    private final ApprovalRecordRepository approvalRepository;
+    private final ReviewPacketRepository packetRepository;
+    private final ReviewTaskRepository taskRepository;
+    private final DeliberationReportRepository deliberationRepository;
+    private final ObjectMapper objectMapper;
     private final ConcurrentMap<String, HearingAnalysisActivityResult>
             hearingRounds = new ConcurrentHashMap<>();
 
     public FinalWorkflowActivitiesAdapter(
-            CaseFulfillmentDisputeActivitiesImpl legacy) {
+            CaseFulfillmentDisputeActivitiesImpl legacy,
+            ApprovalRecordRepository approvalRepository,
+            ReviewPacketRepository packetRepository,
+            ReviewTaskRepository taskRepository,
+            DeliberationReportRepository deliberationRepository,
+            ObjectMapper objectMapper) {
         this.legacy = legacy;
+        this.approvalRepository = approvalRepository;
+        this.packetRepository = packetRepository;
+        this.taskRepository = taskRepository;
+        this.deliberationRepository = deliberationRepository;
+        this.objectMapper = objectMapper;
     }
 
     @Override
@@ -69,12 +92,27 @@ public class FinalWorkflowActivitiesAdapter
     }
 
     @Override
-    public String createReviewPacket(
+    public ReviewGateSnapshot createReviewPacket(
             String caseId,
             String draftId,
             String deliberationId,
             String remedyPlanId) {
-        return legacy.createReviewTask(caseId, remedyPlanId);
+        String taskId = legacy.createReviewTask(caseId, remedyPlanId);
+        var task =
+                taskRepository
+                        .findById(taskId)
+                        .orElseThrow(() -> new IllegalStateException("review task not found"));
+        var packet =
+                packetRepository
+                        .findById(task.getPacketId())
+                        .orElseThrow(() -> new IllegalStateException("review packet not found"));
+        return new ReviewGateSnapshot(
+                taskId,
+                packet.getId(),
+                packet.getPacketVersion(),
+                packet.getActionHash(),
+                packet.getExpiresAt().toInstant().toEpochMilli(),
+                task.getRequiredRole());
     }
 
     @Override
@@ -203,12 +241,56 @@ public class FinalWorkflowActivitiesAdapter
             FrozenDeliberationSnapshot snapshot,
             List<CriticActivityResult> reports,
             String panelResult) {
-        return "DELIBERATION_"
-                + UUID.nameUUIDFromBytes(
-                                (command.workflowId() + ":" + snapshot.fingerprint())
-                                        .getBytes(StandardCharsets.UTF_8))
-                        .toString()
-                        .replace("-", "");
+        String id =
+                "DELIBERATION_"
+                        + UUID.nameUUIDFromBytes(
+                                        (command.workflowId()
+                                                        + ":"
+                                                        + snapshot.fingerprint())
+                                                .getBytes(StandardCharsets.UTF_8))
+                                .toString()
+                                .replace("-", "");
+        if (deliberationRepository.existsById(id)) {
+            return id;
+        }
+        int version =
+                deliberationRepository
+                                .findFirstByCaseIdOrderByReportVersionDesc(
+                                        command.caseId())
+                                .map(report -> report.getReportVersion() + 1)
+                                .orElse(1);
+        List<String> majorRisks =
+                reports.stream()
+                        .filter(
+                                report ->
+                                        "HIGH".equals(report.severity())
+                                                || "BLOCKER".equals(
+                                                        report.severity()))
+                        .flatMap(report -> report.blockingIssues().stream())
+                        .distinct()
+                        .toList();
+        deliberationRepository.save(
+                DeliberationReportEntity.record(
+                        id,
+                        command.caseId(),
+                        version,
+                        command.draftId(),
+                        Math.toIntExact(snapshot.dossierVersion()),
+                        write(
+                                java.util.Map.of(
+                                        "panel_result",
+                                        panelResult,
+                                        "frozen_input_fingerprint",
+                                        snapshot.fingerprint(),
+                                        "critic_reports",
+                                        reports)),
+                        write(majorRisks),
+                        "[]",
+                        write(reports),
+                        "[]",
+                        "TRACE_" + command.workflowId(),
+                        "temporal-worker"));
+        return id;
     }
 
     @Override
@@ -225,15 +307,32 @@ public class FinalWorkflowActivitiesAdapter
             HumanReviewSignal signal,
             String status) {
         // The reviewer API persists the authoritative decision before Signal.
-        return "REVIEW_" + command.reviewPacketId();
+        return signal.humanReviewRecordId() == null
+                ? "REVIEW_" + command.reviewPacketId()
+                : signal.humanReviewRecordId();
     }
 
     @Override
     public ApprovalValidationResult validateApproval(
             ExecutionCommand command) {
-        return new ApprovalValidationResult(
-                command.approved(),
-                command.approved() ? null : "APPROVAL_REQUIRED");
+        if (!command.approved()) {
+            return new ApprovalValidationResult(false, "APPROVAL_REQUIRED");
+        }
+        var approval = approvalRepository.findById(command.reviewId());
+        if (approval.isEmpty()) {
+            return new ApprovalValidationResult(false, "HUMAN_REVIEW_RECORD_NOT_FOUND");
+        }
+        var record = approval.get();
+        if (!record.getActionSnapshotHash().equals(command.actionHash())) {
+            return new ApprovalValidationResult(false, "ACTION_HASH_MISMATCH");
+        }
+        if (record.getReviewPacketVersion() != command.reviewPacketVersion()) {
+            return new ApprovalValidationResult(false, "STALE_REVIEW_PACKET");
+        }
+        if (!"PLATFORM_REVIEWER".equals(record.getReviewerRole())) {
+            return new ApprovalValidationResult(false, "UNAUTHORIZED_REVIEWER_ROLE");
+        }
+        return new ApprovalValidationResult(true, null);
     }
 
     @Override
@@ -251,5 +350,14 @@ public class FinalWorkflowActivitiesAdapter
             ExecutionAction action) {
         return new ExecutionActionActivityResult(
                 action.actionId(), "UNKNOWN", null);
+    }
+
+    private String write(Object value) {
+        try {
+            return objectMapper.writeValueAsString(value);
+        } catch (JsonProcessingException exception) {
+            throw new IllegalStateException(
+                    "cannot serialize deliberation report", exception);
+        }
     }
 }

@@ -11,13 +11,17 @@ import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.domain.model.ApprovalDecisionType;
 import com.example.dispute.domain.model.ReviewTaskStatus;
 import com.example.dispute.infrastructure.persistence.entity.AdjudicationDraftEntity;
+import com.example.dispute.infrastructure.persistence.entity.ApprovalPolicyDecisionEntity;
 import com.example.dispute.infrastructure.persistence.entity.ApprovalRecordEntity;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.entity.RemedyPlanEntity;
 import com.example.dispute.infrastructure.persistence.entity.ReviewPacketEntity;
 import com.example.dispute.infrastructure.persistence.entity.ReviewTaskEntity;
 import com.example.dispute.infrastructure.persistence.repository.AdjudicationDraftRepository;
+import com.example.dispute.infrastructure.persistence.repository.ApprovalPolicyDecisionRepository;
 import com.example.dispute.infrastructure.persistence.repository.ApprovalRecordRepository;
+import com.example.dispute.infrastructure.persistence.repository.DeliberationReportRepository;
+import com.example.dispute.infrastructure.persistence.repository.EvidenceDossierRepository;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.infrastructure.persistence.repository.HearingStateRepository;
 import com.example.dispute.infrastructure.persistence.repository.RemedyPlanRepository;
@@ -26,6 +30,8 @@ import com.example.dispute.infrastructure.persistence.repository.ReviewTaskRepos
 import com.example.dispute.review.domain.ApprovalPolicyDecision;
 import com.example.dispute.review.domain.ApprovalPolicyEngine;
 import com.example.dispute.review.domain.ApprovalPolicyInput;
+import com.example.dispute.review.domain.ActionSnapshotHasher;
+import com.example.dispute.review.domain.ReviewPacketVersions;
 import com.example.dispute.workflow.domain.HumanReviewSignal;
 import com.example.dispute.workflow.temporal.FulfillmentDisputeWorkflow;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -57,9 +63,12 @@ public class ReviewApplicationService {
     private final RemedyPlanRepository planRepository;
     private final AdjudicationDraftRepository draftRepository;
     private final HearingStateRepository hearingRepository;
+    private final EvidenceDossierRepository dossierRepository;
     private final ReviewPacketRepository packetRepository;
     private final ReviewTaskRepository taskRepository;
     private final ApprovalRecordRepository approvalRepository;
+    private final DeliberationReportRepository deliberationRepository;
+    private final ApprovalPolicyDecisionRepository policyDecisionRepository;
     private final AuditRecorder auditRecorder;
     private final WorkflowClient workflowClient;
     private final ObjectMapper objectMapper;
@@ -72,9 +81,12 @@ public class ReviewApplicationService {
             RemedyPlanRepository planRepository,
             AdjudicationDraftRepository draftRepository,
             HearingStateRepository hearingRepository,
+            EvidenceDossierRepository dossierRepository,
             ReviewPacketRepository packetRepository,
             ReviewTaskRepository taskRepository,
             ApprovalRecordRepository approvalRepository,
+            DeliberationReportRepository deliberationRepository,
+            ApprovalPolicyDecisionRepository policyDecisionRepository,
             AuditRecorder auditRecorder,
             WorkflowClient workflowClient,
             ObjectMapper objectMapper,
@@ -84,8 +96,12 @@ public class ReviewApplicationService {
             @Value("${app.approval.review-timeout-hours:168}") int reviewTimeoutHours) {
         this.caseRepository=caseRepository; this.planRepository=planRepository;
         this.draftRepository=draftRepository; this.hearingRepository=hearingRepository;
+        this.dossierRepository=dossierRepository;
         this.packetRepository=packetRepository; this.taskRepository=taskRepository;
-        this.approvalRepository=approvalRepository; this.auditRecorder=auditRecorder;
+        this.approvalRepository=approvalRepository;
+        this.deliberationRepository=deliberationRepository;
+        this.policyDecisionRepository=policyDecisionRepository;
+        this.auditRecorder=auditRecorder;
         this.workflowClient=workflowClient; this.objectMapper=objectMapper;
         this.transactions=transactions;
         this.policyEngine=new ApprovalPolicyEngine(refundThreshold,reshipThreshold);
@@ -103,11 +119,70 @@ public class ReviewApplicationService {
         boolean insufficient=hearingRepository.findByCaseId(caseId).map(state->state.isManualRequired()).orElse(false);
         ApprovalPolicyDecision policy=policyEngine.evaluate(new ApprovalPolicyInput(
                 plan.getRiskLevel(),plan.getTotalAmount(),actionTypes,disputeCase.getDisputeType(),insufficient));
+        policyDecisionRepository.save(
+                ApprovalPolicyDecisionEntity.record(
+                        "POLICY_" + id(),
+                        caseId,
+                        planId,
+                        plan.getRiskLevel(),
+                        policy,
+                        write(policy.allowedActions()),
+                        write(policy.forbiddenActions()),
+                        SYSTEM.actorId()));
         int version=packetRepository.findFirstByCaseIdAndPlanIdOrderByPacketVersionDesc(caseId,planId)
                 .map(packet->packet.getPacketVersion()+1).orElse(1);
         AdjudicationDraftEntity draft=draftRepository.findFirstByCaseIdOrderByDraftVersionDesc(caseId).orElse(null);
-        ReviewPacketEntity packet=packetRepository.save(ReviewPacketEntity.create(
+        int dossierVersion =
+                dossierRepository
+                        .findByCaseId(caseId)
+                        .map(item -> item.getDossierVersion())
+                        .orElse(1);
+        int issueVersion =
+                hearingRepository
+                        .findByCaseId(caseId)
+                        .map(item -> Math.max(1, item.getRoundNo() + 1))
+                        .orElse(1);
+        int deliberationVersion =
+                deliberationRepository
+                        .findFirstByCaseIdOrderByReportVersionDesc(caseId)
+                        .map(item -> item.getReportVersion())
+                        .orElse(0);
+        OffsetDateTime frozenAt = OffsetDateTime.now(ZoneOffset.UTC);
+        JsonNode frozenRemedy =
+                read(
+                        write(
+                                Map.of(
+                                        "id",
+                                        plan.getId(),
+                                        "version",
+                                        plan.getPlanVersion(),
+                                        "actions",
+                                        read(plan.getActionsJson()),
+                                        "preconditions",
+                                        read(plan.getPreconditionsJson()),
+                                        "notifications",
+                                        read(plan.getNotificationPlanJson()))));
+        String actionHash = actionHash(frozenRemedy);
+        ReviewPacketEntity packet=packetRepository.save(ReviewPacketEntity.createFrozen(
                 "PACKET_"+id(),caseId,planId,version,
+                new ReviewPacketVersions(
+                        Math.max(1, disputeCase.getVersion()),
+                        dossierVersion,
+                        issueVersion,
+                        draft == null ? 1 : draft.getDraftVersion(),
+                        deliberationVersion,
+                        plan.getPlanVersion(),
+                        "ruleset-current",
+                        "hearing-v1",
+                        "dispute-default-v1",
+                        "presiding-judge-v1"),
+                actionHash,
+                frozenAt,
+                frozenAt.plusHours(reviewTimeoutHours),
+                write(
+                        draft == null || draft.getCreatedByAgentRunId() == null
+                                ? List.of()
+                                : List.of(draft.getCreatedByAgentRunId())),
                 write(Map.of("title",disputeCase.getTitle(),"description",disputeCase.getDescription(),
                         "route_type",disputeCase.getRouteType().name(),"risk_level",disputeCase.getRiskLevel().name())),
                 disputeCase.getIntakeResultJson(),
@@ -122,8 +197,7 @@ public class ReviewApplicationService {
                         "evidence_assessment",read(draft.getEvidenceAssessmentJson()),
                         "policy_application",read(draft.getPolicyApplicationJson()),
                         "reviewer_attention",read(draft.getReviewerAttentionJson()))),
-                write(Map.of("id",plan.getId(),"actions",read(plan.getActionsJson()),
-                        "preconditions",read(plan.getPreconditionsJson()),"notifications",read(plan.getNotificationPlanJson()))),
+                frozenRemedy.toString(),
                 write(policy.riskFlags()),SYSTEM.actorId()));
         ReviewTaskEntity task=taskRepository.save(ReviewTaskEntity.pending(
                 "REVIEW_"+id(),caseId,planId,packet.getId(),policy.priority(),policy.requiredRole(),
@@ -146,6 +220,12 @@ public class ReviewApplicationService {
         ReviewTaskEntity task=taskRepository.findById(taskId).orElseThrow(()->notFound("review task",taskId));
         ReviewPacketEntity p=packetRepository.findById(task.getPacketId()).orElseThrow(()->notFound("review packet",task.getPacketId()));
         return new ReviewPacketView(p.getId(),p.getCaseId(),p.getPlanId(),p.getPacketVersion(),
+                p.getCaseVersion(),p.getDossierVersion(),p.getIssueVersion(),
+                p.getAdjudicationDraftVersion(),p.getDeliberationReportVersion(),
+                p.getRemedyPlanVersion(),p.getRulesetVersion(),p.getPromptVersion(),
+                p.getSkillVersion(),p.getProfileVersion(),p.getActionHash(),
+                read(p.getAgentRunRefsJson()),
+                p.getFrozenAt(),p.getExpiresAt(),
                 read(p.getCaseSummaryJson()),read(p.getClaimsJson()),read(p.getIssuesJson()),
                 read(p.getEvidenceMatrixJson()),read(p.getDraftJson()),read(p.getRemedyJson()),
                 read(p.getRiskFlagsJson()),p.getPacketStatus());
@@ -154,7 +234,14 @@ public class ReviewApplicationService {
     public ReviewDecisionView decide(String taskId,ReviewDecisionCommand command,AuthenticatedActor actor){
         assertCanDecide(actor);
         ReviewDecisionView result=transactions.execute(ignored->persistDecision(taskId,command,actor));
-        signal(result.caseId(),actor,command);
+        ApprovalRecordEntity record =
+                approvalRepository
+                        .findById(result.approvalRecordId())
+                        .orElseThrow(
+                                () ->
+                                        new IllegalStateException(
+                                                "persisted human review record not found"));
+        signal(result.caseId(),actor,command,record);
         return result;
     }
 
@@ -168,6 +255,20 @@ public class ReviewApplicationService {
         }
         if(!isOpen(task.getTaskStatus())) throw new BusinessException(ErrorCode.CASE_STATUS_INVALID,"review task is not open",Map.of("status",task.getTaskStatus().name()));
         RemedyPlanEntity plan=planRepository.findById(task.getPlanId()).orElseThrow(()->notFound("plan",task.getPlanId()));
+        ReviewPacketEntity packet =
+                packetRepository
+                        .findById(task.getPacketId())
+                        .orElseThrow(() -> notFound("review packet", task.getPacketId()));
+        var policyDecision =
+                policyDecisionRepository
+                        .findFirstByCaseIdAndPlanIdOrderByCreatedAtDesc(
+                                task.getCaseId(), task.getPlanId())
+                        .orElseThrow(
+                                () ->
+                                        new BusinessException(
+                                                ErrorCode.CASE_STATUS_INVALID,
+                                                "approval policy decision is required",
+                                                Map.of("plan_id", task.getPlanId())));
         JsonNode original=read(write(Map.of("id",plan.getId(),"version",plan.getPlanVersion(),"actions",read(plan.getActionsJson()),
                 "preconditions",read(plan.getPreconditionsJson()),"notifications",read(plan.getNotificationPlanJson()))));
         JsonNode approved=command.approvedPlan();
@@ -175,28 +276,49 @@ public class ReviewApplicationService {
             throw new IllegalArgumentException("approved_plan is required for modification");
         if(command.decision()==ApprovalDecisionType.APPROVE) approved=original;
         if(approved==null) approved=objectMapper.createObjectNode();
+        if (command.decision() == ApprovalDecisionType.MODIFY_AND_APPROVE
+                && (approved.path("id").asText().isBlank()
+                        || !approved.path("actions").isArray())) {
+            throw new IllegalArgumentException(
+                    "modified approved_plan must retain plan id and actions");
+        }
         String decisionJson=write(Map.of("decision",command.decision().name(),"reason",command.reason(),
                 "original_plan",original,"approved_plan",approved));
         task.decide(command.decision(),actor.actorId(),decisionJson);taskRepository.save(task);
         FulfillmentCaseEntity disputeCase=caseRepository.findByIdForUpdate(task.getCaseId()).orElseThrow(()->notFound("case",task.getCaseId()));
         disputeCase.applyReviewOutcome(command.decision(),actor.actorId());caseRepository.save(disputeCase);
-        ApprovalRecordEntity record=approvalRepository.save(ApprovalRecordEntity.record(
+        String actionSnapshotHash = actionHash(approved);
+        if (command.decision() == ApprovalDecisionType.APPROVE
+                && !packet.getActionHash().equals(actionSnapshotHash)) {
+            throw new BusinessException(
+                    ErrorCode.CASE_STATUS_INVALID,
+                    "frozen review packet action hash does not match approved plan",
+                    Map.of("packet_id", packet.getId()));
+        }
+        ApprovalRecordEntity record=approvalRepository.save(ApprovalRecordEntity.recordFrozen(
                 "APPROVAL_"+id(),task.getCaseId(),taskId,task.getPlanId(),actor.actorId(),actor.role().name(),
-                command.decision(),original.toString(),approved.toString(),command.reason(),hash));
+                command.decision(),original.toString(),approved.toString(),command.reason(),hash,
+                packet.getId(),packet.getPacketVersion(),policyDecision.getPolicyVersion(),
+                actionSnapshotHash,packet.getExpiresAt()));
         auditRecorder.record(actor,"REVIEW_DECIDED","REVIEW_TASK",taskId,task.getCaseId(),
                 Map.of("task_status","PENDING","plan",original),Map.of("task_status",task.getTaskStatus().name(),"approved_plan",approved));
         return decisionView(record,task);
     }
 
-    private void signal(String caseId,AuthenticatedActor actor,ReviewDecisionCommand command){
+    private void signal(
+            String caseId,
+            AuthenticatedActor actor,
+            ReviewDecisionCommand command,
+            ApprovalRecordEntity record){
         try{
             workflowClient.newWorkflowStub(FulfillmentDisputeWorkflow.class,"CASEWORKFLOW_"+caseId)
                     .submitReviewDecision(new HumanReviewSignal(
                             actor.actorId(),
                             "PLATFORM_REVIEWER",
                             command.decision().name(),
-                            1,
-                            "ACTION_HASH_PENDING",
+                            record.getReviewPacketVersion(),
+                            record.getActionSnapshotHash(),
+                            record.getId(),
                             command.reason()));
         }catch(RuntimeException exception){
             throw new BusinessException(ErrorCode.WORKFLOW_SIGNAL_FAILED,"review persisted but workflow signal failed",Map.of("case_id",caseId));
@@ -231,8 +353,11 @@ public class ReviewApplicationService {
     private String write(Object value){try{return objectMapper.writeValueAsString(value);}catch(JsonProcessingException e){throw new IllegalStateException("cannot serialize review JSON",e);}}
     private static boolean isOpen(ReviewTaskStatus status){return status==ReviewTaskStatus.PENDING||status==ReviewTaskStatus.ASSIGNED||status==ReviewTaskStatus.IN_REVIEW;}
     private static void assertCanView(AuthenticatedActor actor){if(actor.role()!=ActorRole.PLATFORM_REVIEWER&&actor.role()!=ActorRole.ADMIN&&actor.role()!=ActorRole.CUSTOMER_SERVICE)throw new ForbiddenException("review role is required");}
-    private static void assertCanDecide(AuthenticatedActor actor){if(actor.role()!=ActorRole.PLATFORM_REVIEWER&&actor.role()!=ActorRole.ADMIN)throw new ForbiddenException("only platform reviewers can decide");}
+    private static void assertCanDecide(AuthenticatedActor actor){if(actor.role()!=ActorRole.PLATFORM_REVIEWER)throw new ForbiddenException("only platform reviewers can decide");}
     private static NotFoundException notFound(String type,String id){return new NotFoundException(ErrorCode.CASE_NOT_FOUND,type+" not found",Map.of("id",id));}
     private static String id(){return UUID.randomUUID().toString().replace("-","");}
     private static String sha256(String value){try{return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8)));}catch(Exception e){throw new IllegalStateException(e);}}
+    private String actionHash(JsonNode plan) {
+        return ActionSnapshotHasher.hash(objectMapper, plan);
+    }
 }

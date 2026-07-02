@@ -6,4 +6,5 @@ public record HumanReviewSignal(
         String decision,
         int reviewPacketVersion,
         String actionHash,
+        String humanReviewRecordId,
         String reason) {}

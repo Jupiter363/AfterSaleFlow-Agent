@@ -18,6 +18,7 @@ EXPECTED_MIGRATIONS = [
     "V006__init_router_flow_tables.sql",
     "V007__final_dispute_core.sql",
     "V008__final_agent_hearing_governance.sql",
+    "V009__freeze_review_and_execution_chain.sql",
 ]
 
 REQUIRED_TABLES = {
@@ -163,3 +164,19 @@ def test_immutable_audit_and_execution_records_have_no_delete_cascade() -> None:
     for table in ("audit_log", "approval_record", "action_record", "hearing_record"):
         body = table_body(sql, table)
         assert "on delete cascade" not in body, table
+
+
+def test_frozen_review_and_execution_provenance_are_migrated() -> None:
+    sql = migration_text()
+
+    for fragment in (
+        "add column frozen boolean not null default true",
+        "add column agent_run_refs_json jsonb not null default '[]'::jsonb",
+        "add column review_packet_id varchar(64)",
+        "add column action_snapshot_hash varchar(128)",
+        "add column approval_expires_at timestamptz",
+        "add column evidence_refs_json jsonb not null default '[]'::jsonb",
+        "add column rule_refs_json jsonb not null default '[]'::jsonb",
+        "add column external_result_ref varchar(256)",
+    ):
+        assert fragment in sql

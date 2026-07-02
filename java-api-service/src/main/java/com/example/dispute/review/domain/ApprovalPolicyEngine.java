@@ -4,8 +4,21 @@ import com.example.dispute.domain.model.RiskLevel;
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.LinkedHashSet;
+import java.util.Set;
 
 public final class ApprovalPolicyEngine {
+
+    private static final Set<String> GOVERNED_ACTIONS =
+            Set.of(
+                    "REFUND",
+                    "RESHIP",
+                    "REPLACE",
+                    "CLOSE_AFTER_SALE",
+                    "REJECT_AFTER_SALE",
+                    "QUERY_LOGISTICS",
+                    "NOTIFY_USER",
+                    "NOTIFY_MERCHANT");
 
     private final BigDecimal refundThreshold;
     private final BigDecimal reshipThreshold;
@@ -48,11 +61,22 @@ public final class ApprovalPolicyEngine {
                 riskReview
                         ? "URGENT"
                         : input.riskLevel() == RiskLevel.MEDIUM ? "HIGH" : "NORMAL";
+        List<String> allowedActions =
+                List.copyOf(new LinkedHashSet<>(input.actionTypes()));
+        List<String> forbiddenActions =
+                GOVERNED_ACTIONS.stream()
+                        .filter(action -> !allowedActions.contains(action))
+                        .sorted()
+                        .toList();
         return new ApprovalPolicyDecision(
+                "approval-policy-v1",
                 "PLATFORM_REVIEWER",
+                1,
                 priority,
                 required,
                 flags,
+                allowedActions,
+                forbiddenActions,
                 false);
     }
 }

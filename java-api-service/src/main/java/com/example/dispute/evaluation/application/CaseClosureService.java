@@ -355,6 +355,20 @@ public class CaseClosureService {
                             "execution_status",
                             action.getExecutionStatus().name());
                     node.put("attempt_count", action.getAttemptCount());
+                    node.put("review_packet_id", action.getReviewPacketId());
+                    node.put(
+                            "action_snapshot_hash",
+                            action.getActionSnapshotHash());
+                    node.set(
+                            "evidence_refs",
+                            read(action.getEvidenceRefsJson()));
+                    node.set("rule_refs", read(action.getRuleRefsJson()));
+                    node.set(
+                            "agent_run_refs",
+                            read(action.getAgentRunRefsJson()));
+                    node.put(
+                            "external_result_ref",
+                            action.getExternalResultRef());
                     node.set("result", read(action.getResultJson()));
                 });
         var evidence =

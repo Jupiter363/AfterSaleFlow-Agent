@@ -13,6 +13,7 @@ import com.example.dispute.workflow.domain.HearingWorkflowCommand;
 import com.example.dispute.workflow.domain.HearingWorkflowResult;
 import com.example.dispute.workflow.domain.HumanReviewCommand;
 import com.example.dispute.workflow.domain.HumanReviewResult;
+import com.example.dispute.workflow.domain.ReviewGateSnapshot;
 import com.example.dispute.workflow.temporal.DeliberationPanelWorkflow;
 import com.example.dispute.workflow.temporal.ExecutionWorkflow;
 import com.example.dispute.workflow.temporal.FulfillmentDisputeActivities;
@@ -220,12 +221,18 @@ class FinalWorkflowOrchestrationTest {
         }
 
         @Override
-        public String createReviewPacket(
+        public ReviewGateSnapshot createReviewPacket(
                 String caseId,
                 String draftId,
                 String deliberationId,
                 String remedyPlanId) {
-            return "PACKET_test";
+            return new ReviewGateSnapshot(
+                    "REVIEW_test",
+                    "PACKET_test",
+                    1,
+                    "ACTION_HASH_test",
+                    System.currentTimeMillis() + Duration.ofDays(7).toMillis(),
+                    "PLATFORM_REVIEWER");
         }
 
         @Override

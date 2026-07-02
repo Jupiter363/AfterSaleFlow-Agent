@@ -54,7 +54,7 @@ class MigrationIntegrationTest {
         MigrateResult first = flyway.migrate();
         MigrateResult second = flyway.migrate();
 
-        assertThat(first.migrationsExecuted).isEqualTo(8);
+        assertThat(first.migrationsExecuted).isEqualTo(9);
         assertThat(second.migrationsExecuted).isZero();
 
         try (Connection connection =
@@ -98,6 +98,24 @@ class MigrationIntegrationTest {
                     .isEqualTo("jsonb");
             assertThat(columnType(connection, "action_record", "execution_time"))
                     .isEqualTo("timestamp with time zone");
+            assertThat(
+                            columnType(
+                                    connection,
+                                    "review_packet",
+                                    "agent_run_refs_json"))
+                    .isEqualTo("jsonb");
+            assertThat(
+                            columnType(
+                                    connection,
+                                    "human_review_record",
+                                    "approval_expires_at"))
+                    .isEqualTo("timestamp with time zone");
+            assertThat(
+                            columnType(
+                                    connection,
+                                    "action_record",
+                                    "external_result_ref"))
+                    .isEqualTo("character varying");
             assertThat(numericDefinition(connection, "remedy_plan", "total_amount"))
                     .isEqualTo("18:2");
             assertThat(loadIndexes(connection))

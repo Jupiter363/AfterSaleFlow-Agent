@@ -29,6 +29,8 @@ import com.example.dispute.infrastructure.persistence.repository.RemedyPlanRepos
 import com.example.dispute.infrastructure.persistence.repository.ReviewPacketRepository;
 import com.example.dispute.infrastructure.persistence.repository.ReviewTaskRepository;
 import com.example.dispute.tool.application.SimulatedExecutionTool;
+import com.example.dispute.review.domain.ActionSnapshotHasher;
+import com.example.dispute.review.domain.ReviewPacketVersions;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import java.util.List;
@@ -46,6 +48,7 @@ import org.springframework.context.annotation.Import;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.test.util.ReflectionTestUtils;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
@@ -104,6 +107,7 @@ class ToolExecutorServiceIntegrationTest {
     @Autowired private ActionRecordRepository actions;
     @Autowired private ReviewPacketRepository packets;
     @Autowired private ReviewTaskRepository reviewTasks;
+    @Autowired private ObjectMapper objectMapper;
     @MockitoBean private AuditRecorder auditRecorder;
     @MockitoBean private ActionExecutionLock executionLock;
 
@@ -144,6 +148,16 @@ class ToolExecutorServiceIntegrationTest {
                         "CASE_success", "COMMAND_success_2", SYSTEM);
 
         assertThat(first.actions()).hasSize(4);
+        assertThat(first.actions())
+                .allSatisfy(
+                        action -> {
+                            assertThat(action.reviewPacketId())
+                                    .isEqualTo("PACKET_success");
+                            assertThat(action.actionSnapshotHash()).isNotBlank();
+                            assertThat(action.agentRunRefs().get(0).asText())
+                                    .isEqualTo("RUN_success");
+                            assertThat(action.externalResultRef()).isNotBlank();
+                        });
         assertThat(retry.actions())
                 .extracting(action -> action.actionRecordId())
                 .containsExactlyElementsOf(
@@ -157,6 +171,12 @@ class ToolExecutorServiceIntegrationTest {
                             assertThat(action.getExecutionStatus())
                                     .isEqualTo(ExecutionStatus.SUCCEEDED);
                             assertThat(action.getAttemptCount()).isEqualTo(1);
+                            assertThat(action.getReviewPacketId())
+                                    .isEqualTo("PACKET_success");
+                            assertThat(action.getActionSnapshotHash()).isNotBlank();
+                            assertThat(action.getAgentRunRefsJson())
+                                    .contains("RUN_success");
+                            assertThat(action.getExternalResultRef()).isNotBlank();
                         });
         assertThat(cases.findById("CASE_success"))
                 .hasValueSatisfying(
@@ -233,6 +253,87 @@ class ToolExecutorServiceIntegrationTest {
         assertThat(
                         actions.findAllByCaseIdOrderByCreatedAtAsc(
                                 "CASE_reviewer_denied"))
+                .isEmpty();
+    }
+
+    @Test
+    void rejectsExpiredUnauthorizedStaleAndHashMismatchedApprovals() {
+        seed("expired_gate", true, false);
+        var expired =
+                approvals
+                        .findById("APPROVAL_expired_gate")
+                        .orElseThrow();
+        ReflectionTestUtils.setField(
+                expired,
+                "approvalExpiresAt",
+                OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(1));
+        approvals.saveAndFlush(expired);
+        assertDenied("expired_gate", "expired");
+
+        seed("role_gate", true, false);
+        var wrongRole =
+                approvals.findById("APPROVAL_role_gate").orElseThrow();
+        ReflectionTestUtils.setField(wrongRole, "reviewerRole", "ADMIN");
+        approvals.saveAndFlush(wrongRole);
+        assertDenied("role_gate", "required reviewer role");
+
+        seed("hash_gate", true, false);
+        var wrongHash =
+                approvals.findById("APPROVAL_hash_gate").orElseThrow();
+        ReflectionTestUtils.setField(
+                wrongHash, "actionSnapshotHash", "WRONG_HASH");
+        approvals.saveAndFlush(wrongHash);
+        assertDenied("hash_gate", "hash");
+
+        seed("stale_gate", true, false);
+        var staleApproval =
+                approvals.findById("APPROVAL_stale_gate").orElseThrow();
+        var oldPacket =
+                packets.findById("PACKET_stale_gate").orElseThrow();
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        packets.saveAndFlush(
+                ReviewPacketEntity.createFrozen(
+                        "PACKET_stale_gate_v2",
+                        "CASE_stale_gate",
+                        "REMEDY_stale_gate",
+                        2,
+                        new ReviewPacketVersions(
+                                2,
+                                1,
+                                1,
+                                1,
+                                0,
+                                1,
+                                "ruleset-test",
+                                "prompt-test",
+                                "skill-test",
+                                "profile-test"),
+                        oldPacket.getActionHash(),
+                        now,
+                        now.plusDays(1),
+                        "{}",
+                        "[]",
+                        "[]",
+                        "[]",
+                        "{}",
+                        staleApproval.getApprovedPlanJson(),
+                        "[]",
+                        "temporal-worker"));
+        assertDenied("stale_gate", "stale");
+    }
+
+    private void assertDenied(String suffix, String message) {
+        assertThatThrownBy(
+                        () ->
+                                service.executeApprovedActions(
+                                        "CASE_" + suffix,
+                                        "COMMAND_" + suffix,
+                                        SYSTEM))
+                .isInstanceOf(ToolExecutionException.class)
+                .hasMessageContaining(message);
+        assertThat(
+                        actions.findAllByCaseIdOrderByCreatedAtAsc(
+                                "CASE_" + suffix))
                 .isEmpty();
     }
 
@@ -337,12 +438,31 @@ class ToolExecutorServiceIntegrationTest {
                             .formatted(planId, approvedActions, notifications);
             String packetId = "PACKET_" + suffix;
             String taskId = "REVIEW_" + suffix;
+            var approvedPlanNode = read(approvedPlan);
+            String actionHash =
+                    ActionSnapshotHasher.hash(objectMapper, approvedPlanNode);
+            OffsetDateTime frozenAt = OffsetDateTime.now(ZoneOffset.UTC);
             packets.saveAndFlush(
-                    ReviewPacketEntity.create(
+                    ReviewPacketEntity.createFrozen(
                             packetId,
                             caseId,
                             planId,
                             1,
+                            new ReviewPacketVersions(
+                                    1,
+                                    1,
+                                    1,
+                                    1,
+                                    0,
+                                    1,
+                                    "ruleset-test",
+                                    "prompt-test",
+                                    "skill-test",
+                                    "profile-test"),
+                            actionHash,
+                            frozenAt,
+                            frozenAt.plusDays(1),
+                            "[\"RUN_" + suffix + "\"]",
                             "{}",
                             "[]",
                             "[]",
@@ -367,7 +487,7 @@ class ToolExecutorServiceIntegrationTest {
                     "{\"decision\":\"APPROVE\"}");
             reviewTasks.saveAndFlush(reviewTask);
             approvals.saveAndFlush(
-                    ApprovalRecordEntity.record(
+                    ApprovalRecordEntity.recordFrozen(
                             "APPROVAL_" + suffix,
                             caseId,
                             taskId,
@@ -378,7 +498,20 @@ class ToolExecutorServiceIntegrationTest {
                             approvedPlan,
                             approvedPlan,
                             "approved for execution",
-                            "HASH_" + suffix));
+                            "HASH_" + suffix,
+                            packetId,
+                            1,
+                            "approval-policy-v1",
+                            actionHash,
+                            frozenAt.plusDays(1)));
+        }
+    }
+
+    private com.fasterxml.jackson.databind.JsonNode read(String value) {
+        try {
+            return objectMapper.readTree(value);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException exception) {
+            throw new IllegalStateException(exception);
         }
     }
 }

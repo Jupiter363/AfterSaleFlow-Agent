@@ -323,6 +323,7 @@ public class WorkflowApplicationService {
                                         decision,
                                         1,
                                         "ACTION_HASH_PENDING",
+                                        null,
                                         reason)));
     }
 

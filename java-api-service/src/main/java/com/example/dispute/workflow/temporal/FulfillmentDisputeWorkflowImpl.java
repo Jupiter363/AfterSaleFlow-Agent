@@ -13,6 +13,7 @@ import com.example.dispute.workflow.domain.HearingWorkflowResult;
 import com.example.dispute.workflow.domain.HumanReviewCommand;
 import com.example.dispute.workflow.domain.HumanReviewResult;
 import com.example.dispute.workflow.domain.HumanReviewSignal;
+import com.example.dispute.workflow.domain.ReviewGateSnapshot;
 import io.temporal.activity.ActivityOptions;
 import io.temporal.common.RetryOptions;
 import io.temporal.workflow.ChildWorkflowOptions;
@@ -114,7 +115,7 @@ public class FulfillmentDisputeWorkflowImpl
                         command.workflowId(),
                         draftId,
                         deliberationId);
-        String reviewPacketId =
+        ReviewGateSnapshot reviewGate =
                 activities.createReviewPacket(
                         command.caseId(),
                         draftId,
@@ -129,13 +130,12 @@ public class FulfillmentDisputeWorkflowImpl
                 reviewWorkflow.run(
                         new HumanReviewCommand(
                                 command.caseId(),
-                                reviewPacketId,
-                                1,
-                                "ACTION_HASH_PENDING",
-                                Workflow.currentTimeMillis()
-                                        + command.reviewWaitTimeout().toMillis(),
+                                reviewGate.reviewPacketId(),
+                                reviewGate.reviewPacketVersion(),
+                                reviewGate.actionHash(),
+                                reviewGate.expiresAtEpochMillis(),
                                 command.reviewWaitTimeout(),
-                                "PLATFORM_REVIEWER"));
+                                reviewGate.requiredRole()));
         if (!review.approved()) {
             return result(
                     command,
@@ -158,11 +158,10 @@ public class FulfillmentDisputeWorkflowImpl
                         new ExecutionCommand(
                                 command.caseId(),
                                 review.reviewId(),
-                                1,
-                                "ACTION_HASH_PENDING",
+                                reviewGate.reviewPacketVersion(),
+                                reviewGate.actionHash(),
                                 true,
-                                Workflow.currentTimeMillis()
-                                        + Duration.ofHours(1).toMillis(),
+                                reviewGate.expiresAtEpochMillis(),
                                 List.of(
                                         new com.example.dispute.workflow.domain
                                                 .ExecutionAction(

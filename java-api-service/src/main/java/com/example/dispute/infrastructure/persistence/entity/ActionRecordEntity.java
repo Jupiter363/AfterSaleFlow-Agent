@@ -66,6 +66,27 @@ public class ActionRecordEntity extends AbstractEntity {
     @Column(name = "execution_time")
     private OffsetDateTime executionTime;
 
+    @Column(name = "review_packet_id", length = 64)
+    private String reviewPacketId;
+
+    @Column(name = "action_snapshot_hash", length = 128)
+    private String actionSnapshotHash;
+
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "evidence_refs_json", nullable = false, columnDefinition = "jsonb")
+    private String evidenceRefsJson;
+
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "rule_refs_json", nullable = false, columnDefinition = "jsonb")
+    private String ruleRefsJson;
+
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "agent_run_refs_json", nullable = false, columnDefinition = "jsonb")
+    private String agentRunRefsJson;
+
+    @Column(name = "external_result_ref", length = 256)
+    private String externalResultRef;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private OffsetDateTime createdAt;
 
@@ -102,7 +123,46 @@ public class ActionRecordEntity extends AbstractEntity {
         record.resultJson = "{}";
         record.executionStatus = ExecutionStatus.RUNNING;
         record.attemptCount = 1;
+        record.evidenceRefsJson = "[]";
+        record.ruleRefsJson = "[]";
+        record.agentRunRefsJson = "[]";
         record.createdBy = executedBy;
+        return record;
+    }
+
+    public static ActionRecordEntity runningGoverned(
+            String id,
+            String caseId,
+            String planId,
+            String approvalRecordId,
+            String actionType,
+            RiskLevel riskLevel,
+            String idempotencyKey,
+            String approvedBy,
+            String executedBy,
+            String requestJson,
+            String reviewPacketId,
+            String actionSnapshotHash,
+            String evidenceRefsJson,
+            String ruleRefsJson,
+            String agentRunRefsJson) {
+        ActionRecordEntity record =
+                running(
+                        id,
+                        caseId,
+                        planId,
+                        approvalRecordId,
+                        actionType,
+                        riskLevel,
+                        idempotencyKey,
+                        approvedBy,
+                        executedBy,
+                        requestJson);
+        record.reviewPacketId = reviewPacketId;
+        record.actionSnapshotHash = actionSnapshotHash;
+        record.evidenceRefsJson = evidenceRefsJson;
+        record.ruleRefsJson = ruleRefsJson;
+        record.agentRunRefsJson = agentRunRefsJson;
         return record;
     }
 
@@ -121,7 +181,12 @@ public class ActionRecordEntity extends AbstractEntity {
     }
 
     public void succeed(String resultJson) {
+        succeed(resultJson, null);
+    }
+
+    public void succeed(String resultJson, String externalResultRef) {
         this.resultJson = resultJson;
+        this.externalResultRef = externalResultRef;
         this.executionStatus = ExecutionStatus.SUCCEEDED;
         this.errorCode = null;
         this.errorMessage = null;
@@ -203,5 +268,29 @@ public class ActionRecordEntity extends AbstractEntity {
 
     public OffsetDateTime getCreatedAt() {
         return createdAt;
+    }
+
+    public String getReviewPacketId() {
+        return reviewPacketId;
+    }
+
+    public String getActionSnapshotHash() {
+        return actionSnapshotHash;
+    }
+
+    public String getEvidenceRefsJson() {
+        return evidenceRefsJson;
+    }
+
+    public String getRuleRefsJson() {
+        return ruleRefsJson;
+    }
+
+    public String getAgentRunRefsJson() {
+        return agentRunRefsJson;
+    }
+
+    public String getExternalResultRef() {
+        return externalResultRef;
     }
 }

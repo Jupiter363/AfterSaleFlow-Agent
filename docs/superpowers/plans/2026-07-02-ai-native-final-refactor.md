@@ -425,31 +425,31 @@ legacy cleanup gate confirms there are no active old histories.
 - Modify: `remedy/`, `review/`, `execution/`, `evaluation/`, and audit modules
 - Test: policy, authority, stale packet, action hash, idempotency, audit, and closure tests
 
-- [ ] **Step 1: Write failing immutable ReviewPacket tests**
+- [x] **Step 1: Write failing immutable ReviewPacket tests**
 
 Require frozen case, dossier, issue, draft, deliberation, remedy, ruleset, prompt, skill, and profile versions.
 
-- [ ] **Step 2: Implement packet and human record versioning**
+- [x] **Step 2: Implement packet and human record versioning**
 
 Comments must explain why packet mutation is forbidden after review begins.
 
-- [ ] **Step 3: Write failing approval tests**
+- [x] **Step 3: Write failing approval tests**
 
 Prove every action has `autoApprove=false`, required reviewer role/count, allowed/forbidden actions, and policy version.
 
-- [ ] **Step 4: Upgrade Tool Executor tests**
+- [x] **Step 4: Upgrade Tool Executor tests**
 
 Reject missing approval, expired approval, unauthorized reviewer, stale packet, action hash mismatch, and duplicate execution.
 
-- [ ] **Step 5: Preserve reusable deterministic adapters**
+- [x] **Step 5: Preserve reusable deterministic adapters**
 
 Keep existing refund/reship/close/notify adapter boundaries while replacing old route-source assumptions.
 
-- [ ] **Step 6: Complete audit and closure**
+- [x] **Step 6: Complete audit and closure**
 
 Every final decision and action must trace to evidence, rule, Agent Run, ReviewPacket, HumanReviewRecord, and external result.
 
-- [ ] **Step 7: Run security, review, execution, closure, and full Java tests**
+- [x] **Step 7: Run security, review, execution, closure, and full Java tests**
 
 ---
 

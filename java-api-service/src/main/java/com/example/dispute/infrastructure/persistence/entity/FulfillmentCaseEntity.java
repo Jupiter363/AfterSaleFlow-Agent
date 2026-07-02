@@ -292,6 +292,10 @@ public class FulfillmentCaseEntity extends AbstractEntity {
         return routeType;
     }
 
+    public long getVersion() {
+        return version;
+    }
+
     public String getOrderId() {
         return orderId;
     }

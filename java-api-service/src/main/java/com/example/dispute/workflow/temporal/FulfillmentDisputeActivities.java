@@ -2,6 +2,7 @@ package com.example.dispute.workflow.temporal;
 
 import io.temporal.activity.ActivityInterface;
 import io.temporal.activity.ActivityMethod;
+import com.example.dispute.workflow.domain.ReviewGateSnapshot;
 
 @ActivityInterface
 public interface FulfillmentDisputeActivities {
@@ -17,7 +18,7 @@ public interface FulfillmentDisputeActivities {
             String deliberationId);
 
     @ActivityMethod
-    String createReviewPacket(
+    ReviewGateSnapshot createReviewPacket(
             String caseId,
             String draftId,
             String deliberationId,

@@ -14,6 +14,7 @@ import com.example.dispute.infrastructure.persistence.entity.HearingRecordEntity
 import com.example.dispute.infrastructure.persistence.entity.HearingStateEntity;
 import com.example.dispute.infrastructure.persistence.entity.PartySubmissionEntity;
 import com.example.dispute.infrastructure.persistence.repository.AdjudicationDraftRepository;
+import com.example.dispute.infrastructure.persistence.repository.AgentRunRepository;
 import com.example.dispute.infrastructure.persistence.repository.EvidenceItemRepository;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.infrastructure.persistence.repository.HearingRecordRepository;
@@ -77,6 +78,7 @@ class HearingPersistenceIntegrationTest {
     @Autowired private HearingStateRepository stateRepository;
     @Autowired private HearingRecordRepository recordRepository;
     @Autowired private AdjudicationDraftRepository draftRepository;
+    @Autowired private AgentRunRepository agentRunRepository;
     @Autowired private PartySubmissionRepository submissionRepository;
     @Autowired private EvidenceItemRepository evidenceRepository;
     @Autowired private PolicyRuleRepository policyRepository;
@@ -229,6 +231,7 @@ class HearingPersistenceIntegrationTest {
                         stateRepository,
                         recordRepository,
                         draftRepository,
+                        agentRunRepository,
                         submissionRepository,
                         (request, traceId, requestId) -> {
                             calledOutsideTransaction.set(
@@ -271,6 +274,13 @@ class HearingPersistenceIntegrationTest {
 
         assertThat(calledOutsideTransaction).isTrue();
         assertThat(result.draftId()).startsWith("DRAFT_");
+        assertThat(agentRunRepository.findAllByCaseIdOrderByCreatedAtAsc(disputeCase.getId()))
+                .singleElement()
+                .satisfies(
+                        run -> {
+                            assertThat(run.getTraceId()).isEqualTo("TRACE_" + workflowId);
+                            assertThat(run.getOutputRef()).isEqualTo(result.draftId());
+                        });
         assertThat(
                         recordRepository.findAllByCaseIdOrderByCreatedAtAsc(
                                 disputeCase.getId()))
