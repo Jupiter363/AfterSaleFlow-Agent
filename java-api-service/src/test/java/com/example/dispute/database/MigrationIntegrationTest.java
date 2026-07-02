@@ -54,7 +54,7 @@ class MigrationIntegrationTest {
         MigrateResult first = flyway.migrate();
         MigrateResult second = flyway.migrate();
 
-        assertThat(first.migrationsExecuted).isEqualTo(9);
+        assertThat(first.migrationsExecuted).isEqualTo(12);
         assertThat(second.migrationsExecuted).isZero();
 
         try (Connection connection =
@@ -93,7 +93,18 @@ class MigrationIntegrationTest {
                             "policy_rule",
                             "evaluation_record",
                             "route_decision",
-                            "flow_conclusion");
+                            "flow_conclusion",
+                            "case_participant",
+                            "case_room",
+                            "room_message",
+                            "case_phase_clock",
+                            "evidence_verification",
+                            "evidence_party_completion",
+                            "hearing_round",
+                            "settlement_proposal",
+                            "settlement_confirmation",
+                            "notification",
+                            "notification_outbox");
             assertThat(columnType(connection, "evidence_item", "metadata_json"))
                     .isEqualTo("jsonb");
             assertThat(columnType(connection, "action_record", "execution_time"))
@@ -130,7 +141,17 @@ class MigrationIntegrationTest {
                             "idx_audit_log_case_id",
                             "uq_policy_rule_code_version",
                             "idx_route_decision_type_created",
-                            "idx_flow_conclusion_status");
+                            "idx_flow_conclusion_status",
+                            "uq_dispute_external_source",
+                            "uq_case_room_type",
+                            "uq_settlement_confirmation_role",
+                            "uq_notification_business_recipient");
+            assertThat(
+                            countRows(
+                                    connection,
+                                    "fulfillment_dispute_case",
+                                    "source_type = 'EXTERNAL_IMPORT'"))
+                    .isZero();
         }
     }
 
@@ -204,5 +225,17 @@ class MigrationIntegrationTest {
             }
         }
         return indexes;
+    }
+
+    private static long countRows(
+            Connection connection, String table, String condition)
+            throws SQLException {
+        try (Statement statement = connection.createStatement();
+                ResultSet result =
+                        statement.executeQuery(
+                                "select count(*) from " + table + " where " + condition)) {
+            assertThat(result.next()).isTrue();
+            return result.getLong(1);
+        }
     }
 }

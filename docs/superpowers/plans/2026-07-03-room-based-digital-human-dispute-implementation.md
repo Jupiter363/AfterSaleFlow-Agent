@@ -273,7 +273,9 @@ Expected: FAIL because V010–V012 and the new tables do not exist.
 
 Add `source_type`, `source_system`, `external_case_ref`, `current_room`, and `current_deadline_at` to `fulfillment_dispute_case`. Create participants, rooms, immutable messages, and phase clocks with check constraints using the shared enums.
 
-Seed six deterministic dispute rows:
+Keep Flyway schema migrations free of business data. Task 3 adds a
+configuration-gated `DemoDisputeSeeder` that inserts six deterministic
+dispute rows only when `SEED_DEMO_DISPUTES=true`:
 
 ```text
 USER: INTAKE_PENDING, EVIDENCE_OPEN, HEARING_OPEN
@@ -307,6 +309,8 @@ D:\miniconda\python.exe -m pytest ..\tests\static\test_final_migration_contract.
 ```
 
 Expected: PASS with Flyway applying V001 through V012 from an empty PostgreSQL database.
+The migrated database contains zero demo disputes until the application seeder
+runs.
 
 Commit:
 
@@ -322,6 +326,7 @@ feat: add room collaboration database model
 - Create: `java-api-service/src/main/java/com/example/dispute/casecore/domain/CaseSourceType.java`
 - Create: `java-api-service/src/main/java/com/example/dispute/casecore/application/DisputeOverviewItemView.java`
 - Create: `java-api-service/src/main/java/com/example/dispute/casecore/application/DisputeImportService.java`
+- Create: `java-api-service/src/main/java/com/example/dispute/casecore/application/DemoDisputeSeeder.java`
 - Create: `java-api-service/src/main/java/com/example/dispute/casecore/api/InternalDisputeImportController.java`
 - Create: `java-api-service/src/main/java/com/example/dispute/room/domain/RoomType.java`
 - Create: `java-api-service/src/main/java/com/example/dispute/room/domain/RoomStatus.java`
@@ -367,6 +372,12 @@ Expected: FAIL because overview fields and internal import do not exist.
 - [ ] **Step 3: Implement import and overview projection**
 
 `DisputeImportService.importDispute` must use `(sourceSystem, externalCaseRef)` as its natural idempotency key and create `INTAKE_PENDING` rows only. `GET /api/disputes` must filter by `case_participant` or the existing user/merchant ownership fields and must never return ordinary orders.
+
+`DemoDisputeSeeder` must call the same import/application services rather than
+executing raw SQL. It runs only when `dispute.seed-demo-disputes=true`, is
+idempotent, and creates six local cases spanning intake, evidence, hearing,
+review, and closed states for `user-local`, `merchant-local`, and
+`reviewer-local`.
 
 - [ ] **Step 4: Write the failing intake transition test**
 

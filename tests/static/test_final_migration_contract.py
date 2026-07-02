@@ -22,6 +22,14 @@ def test_final_forward_migrations_exist() -> None:
     assert (
         MIGRATIONS / "V008__final_agent_hearing_governance.sql"
     ).is_file()
+    assert (MIGRATIONS / "V010__case_rooms_and_participants.sql").is_file()
+    assert (
+        MIGRATIONS
+        / "V011__evidence_verification_and_hearing_settlement.sql"
+    ).is_file()
+    assert (
+        MIGRATIONS / "V012__case_events_and_notification_outbox.sql"
+    ).is_file()
 
 
 def test_final_core_renames_the_business_fact_tables() -> None:
@@ -66,3 +74,37 @@ def test_final_governance_tables_cover_agents_panel_and_versions() -> None:
     assert "auto_approve boolean not null default false" in sql
     assert "action_hash varchar(128)" in sql
     assert "profile_version varchar(64)" in sql
+
+
+def test_room_collaboration_migrations_cover_the_final_product() -> None:
+    rooms = migration("V010__case_rooms_and_participants.sql")
+    evidence_hearing = migration(
+        "V011__evidence_verification_and_hearing_settlement.sql"
+    )
+    events = migration("V012__case_events_and_notification_outbox.sql")
+
+    for table in (
+        "case_participant",
+        "case_room",
+        "room_message",
+        "case_phase_clock",
+    ):
+        assert f"create table {table}" in rooms
+
+    for table in (
+        "evidence_verification",
+        "evidence_party_completion",
+        "hearing_round",
+        "settlement_proposal",
+        "settlement_confirmation",
+    ):
+        assert f"create table {table}" in evidence_hearing
+
+    for table in ("notification", "notification_outbox"):
+        assert f"create table {table}" in events
+
+    assert "source_type" in rooms
+    assert "external_case_ref" in rooms
+    assert "sequence_no" in events
+    assert "audience_json" in events
+    assert "business_event_key" in events
