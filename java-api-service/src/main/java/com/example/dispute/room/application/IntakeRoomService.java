@@ -3,8 +3,12 @@ package com.example.dispute.room.application;
 import com.example.dispute.common.api.ErrorCode;
 import com.example.dispute.common.exception.NotFoundException;
 import com.example.dispute.config.AuthenticatedActor;
+import com.example.dispute.config.ActorRole;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
+import com.example.dispute.notification.application.NotificationCommand;
+import com.example.dispute.notification.application.NotificationService;
+import com.example.dispute.notification.domain.NotificationType;
 import com.example.dispute.room.domain.PhaseClockType;
 import com.example.dispute.room.domain.RoomType;
 import com.example.dispute.room.infrastructure.persistence.entity.CasePhaseClockEntity;
@@ -28,6 +32,7 @@ public class IntakeRoomService {
     private final CaseRoomRepository roomRepository;
     private final CasePhaseClockRepository phaseClockRepository;
     private final ParticipantService participantService;
+    private final NotificationService notificationService;
     private final Clock clock;
 
     public IntakeRoomService(
@@ -35,11 +40,13 @@ public class IntakeRoomService {
             CaseRoomRepository roomRepository,
             CasePhaseClockRepository phaseClockRepository,
             ParticipantService participantService,
+            NotificationService notificationService,
             Clock clock) {
         this.caseRepository = caseRepository;
         this.roomRepository = roomRepository;
         this.phaseClockRepository = phaseClockRepository;
         this.participantService = participantService;
+        this.notificationService = notificationService;
         this.clock = clock;
     }
 
@@ -98,11 +105,34 @@ public class IntakeRoomService {
                 deadline,
                 actor.actorId());
         caseRepository.save(dispute);
+        sendCounterpartySummons(dispute, actor, deadline);
         return new IntakeConfirmationView(
                 caseId,
                 dispute.getCaseStatus(),
                 RoomType.EVIDENCE,
                 deadline);
+    }
+
+    private void sendCounterpartySummons(
+            FulfillmentCaseEntity dispute,
+            AuthenticatedActor initiator,
+            OffsetDateTime deadline) {
+        boolean userInitiated = initiator.role() == ActorRole.USER;
+        String recipientId =
+                userInitiated ? dispute.getMerchantId() : dispute.getUserId();
+        ActorRole recipientRole =
+                userInitiated ? ActorRole.MERCHANT : ActorRole.USER;
+        notificationService.send(
+                new NotificationCommand(
+                        dispute.getId(),
+                        dispute.getId() + ":intake-accepted",
+                        recipientId,
+                        recipientRole,
+                        NotificationType.DISPUTE_SUMMONS,
+                        "争议审理传票",
+                        "订单争议已受理，请在两小时内进入证据书记官室。",
+                        "/disputes/" + dispute.getId() + "/evidence",
+                        "{\"deadline_at\":\"" + deadline + "\"}"));
     }
 
     private static String roomId() {

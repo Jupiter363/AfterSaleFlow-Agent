@@ -12,6 +12,9 @@ import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.RiskLevel;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
+import com.example.dispute.notification.application.NotificationCommand;
+import com.example.dispute.notification.application.NotificationService;
+import com.example.dispute.notification.domain.NotificationType;
 import com.example.dispute.room.application.IntakeConfirmationCommand;
 import com.example.dispute.room.application.IntakeRoomService;
 import com.example.dispute.room.application.ParticipantService;
@@ -47,6 +50,7 @@ class IntakeRoomServiceTest {
     @Mock private CaseParticipantRepository participantRepository;
     @Mock private CaseRoomRepository roomRepository;
     @Mock private CasePhaseClockRepository phaseClockRepository;
+    @Mock private NotificationService notificationService;
 
     private IntakeRoomService service;
 
@@ -59,6 +63,7 @@ class IntakeRoomServiceTest {
                         roomRepository,
                         phaseClockRepository,
                         participants,
+                        notificationService,
                         CLOCK);
         when(caseRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
         when(roomRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
@@ -118,6 +123,14 @@ class IntakeRoomServiceTest {
                 .isEqualTo(PhaseClockType.EVIDENCE_SUBMISSION);
         assertThat(phaseClock.getValue().getDeadlineAt())
                 .isEqualTo(OffsetDateTime.parse("2026-07-03T02:00:00Z"));
+        ArgumentCaptor<NotificationCommand> summons =
+                ArgumentCaptor.forClass(NotificationCommand.class);
+        verify(notificationService).send(summons.capture());
+        assertThat(summons.getValue().recipientId()).isEqualTo("merchant-local");
+        assertThat(summons.getValue().notificationType())
+                .isEqualTo(NotificationType.DISPUTE_SUMMONS);
+        assertThat(summons.getValue().deepLink())
+                .isEqualTo("/disputes/CASE_ACCEPTED/evidence");
     }
 
     @Test
@@ -148,6 +161,7 @@ class IntakeRoomServiceTest {
                 .extracting(CaseParticipantEntity::getParticipantRole)
                 .containsExactly(ActorRole.USER);
         verify(phaseClockRepository, never()).save(any());
+        verify(notificationService, never()).send(any());
 
         ArgumentCaptor<CaseRoomEntity> rooms = ArgumentCaptor.forClass(CaseRoomEntity.class);
         verify(roomRepository).save(rooms.capture());

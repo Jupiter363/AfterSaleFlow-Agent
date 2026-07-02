@@ -8,6 +8,9 @@ import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.RiskLevel;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
+import com.example.dispute.notification.application.NotificationService;
+import com.example.dispute.notification.infrastructure.persistence.repository.NotificationOutboxRepository;
+import com.example.dispute.notification.infrastructure.persistence.repository.NotificationRepository;
 import com.example.dispute.room.application.IntakeConfirmationCommand;
 import com.example.dispute.room.application.IntakeRoomService;
 import com.example.dispute.room.application.ParticipantService;
@@ -40,6 +43,7 @@ import org.testcontainers.utility.DockerImageName;
 @Import({
     IntakeRoomService.class,
     ParticipantService.class,
+    NotificationService.class,
     IntakeRoomServiceIntegrationTest.FixedClockConfiguration.class
 })
 @Testcontainers
@@ -74,6 +78,8 @@ class IntakeRoomServiceIntegrationTest {
     @Autowired private CaseParticipantRepository participantRepository;
     @Autowired private CaseRoomRepository roomRepository;
     @Autowired private CasePhaseClockRepository clockRepository;
+    @Autowired private NotificationRepository notificationRepository;
+    @Autowired private NotificationOutboxRepository outboxRepository;
 
     @Test
     void acceptedIntakePersistsParticipantsRoomsAndTheAuthoritativeDeadline() {
@@ -135,6 +141,17 @@ class IntakeRoomServiceIntegrationTest {
                                             OffsetDateTime.parse(
                                                     "2026-07-03T02:00:00Z"));
                         });
+        assertThat(
+                        notificationRepository
+                                .findAllByRecipientIdOrderByCreatedAtDesc(
+                                        "merchant-local"))
+                .singleElement()
+                .satisfies(
+                        notification ->
+                                assertThat(notification.getDeepLink())
+                                        .isEqualTo(
+                                                "/disputes/CASE_INTEGRATION/evidence"));
+        assertThat(outboxRepository.count()).isEqualTo(1);
     }
 
     @TestConfiguration(proxyBeanMethods = false)
