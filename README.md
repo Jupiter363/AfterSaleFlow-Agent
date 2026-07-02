@@ -1,14 +1,17 @@
-# 订单履约争议裁决系统
+# AI Native 履约争端审理系统
 
-这是一个争议裁决驱动、平台人审门控的订单履约协作系统。Agent 负责理解、归纳、
-证据分析和生成非最终草案；Java Workflow、审批策略、平台审核员与 Tool Executor
-共同保证高风险动作不可绕过人工确认。
+这是一个面向用户与商家履约争端的 AI Native 审理协作系统。Agent Runtime Harness
+约束 Agent 的身份、上下文、记忆、Skill、工具、循环、输出与 Guardrail；Java 与
+Temporal 维护业务事实和可靠流程；Platform Human Review 承担最终责任；
+Tool Executor 只执行经过审批、参数冻结且具备幂等保护的确定性动作。
 
 ## 核心边界
 
-- 所有业务路径最终进入 Remedy Planner、审批、人审和确定性执行。
+- 非争端请求只转交外部系统，并在本系统终止。
+- 简易审理和完整审理最终都进入 Remedy Planner、审批、人审和确定性执行。
 - Agent 不直接退款、补发、驳回或关闭售后。
-- C 层只生成非最终裁决草案，D 层只规划动作。
+- AI 主审官 C1-C6 只生成非最终裁决草案，Remedy Planner 只规划动作。
+- 高风险案件按需启动 AI Deliberation Panel，评议报告不能批准案件。
 - 未审批动作不能执行；执行快照、失败和重试均可追溯。
 - Evaluation Agent 只离线分析 closed case。
 - 当前版本不实现申诉/复审，不引入 Kubernetes、Kafka、MCP 或向量数据库。
