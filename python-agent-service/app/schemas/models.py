@@ -1,3 +1,5 @@
+"""Core final-compatible Agent request and output models."""
+
 from __future__ import annotations
 
 from enum import StrEnum
