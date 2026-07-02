@@ -369,7 +369,7 @@ class CaseClosureServiceIntegrationTest {
                 "user-" + suffix);
         disputeCase.markDossierBuilt("user-" + suffix);
         disputeCase.applyRoute(
-                RouteType.RULE_BASED_RESOLUTION, "user-" + suffix);
+                RouteType.SIMPLE_HEARING, "user-" + suffix);
         disputeCase.markRemedyPlanned("temporal-worker");
         disputeCase.waitForHumanReview("temporal-worker");
         disputeCase.applyReviewOutcome(
@@ -382,7 +382,7 @@ class CaseClosureServiceIntegrationTest {
                         caseId,
                         null,
                         1,
-                        RouteType.RULE_BASED_RESOLUTION,
+                        RouteType.SIMPLE_HEARING,
                         RiskLevel.HIGH,
                         actionJson,
                         "[\"PLATFORM_REVIEW_APPROVED\"]",

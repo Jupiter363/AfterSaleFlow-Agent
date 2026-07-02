@@ -301,7 +301,7 @@ class ToolExecutorServiceIntegrationTest {
                 "{}",
                 "user-" + suffix);
         disputeCase.markDossierBuilt("user-" + suffix);
-        disputeCase.applyRoute(RouteType.RULE_BASED_RESOLUTION, "user-" + suffix);
+        disputeCase.applyRoute(RouteType.SIMPLE_HEARING, "user-" + suffix);
         disputeCase.markRemedyPlanned("temporal-worker");
         if (approved) {
             disputeCase.waitForHumanReview("temporal-worker");
@@ -315,7 +315,7 @@ class ToolExecutorServiceIntegrationTest {
                         caseId,
                         null,
                         1,
-                        RouteType.RULE_BASED_RESOLUTION,
+                        RouteType.SIMPLE_HEARING,
                         RiskLevel.HIGH,
                         actionJson,
                         "[\"PLATFORM_REVIEW_APPROVED\"]",

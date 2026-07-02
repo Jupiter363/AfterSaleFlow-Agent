@@ -54,32 +54,44 @@ class MigrationIntegrationTest {
         MigrateResult first = flyway.migrate();
         MigrateResult second = flyway.migrate();
 
-        assertThat(first.migrationsExecuted).isEqualTo(6);
+        assertThat(first.migrationsExecuted).isEqualTo(8);
         assertThat(second.migrationsExecuted).isZero();
 
         try (Connection connection =
                 DriverManager.getConnection(jdbcUrl, USERNAME, PASSWORD)) {
             assertThat(loadTables(connection))
                     .containsExactlyInAnyOrder(
-                            "fulfillment_case",
+                            "fulfillment_dispute_case",
                             "evidence_dossier",
+                            "evidence_dossier_item",
                             "evidence_item",
                             "party_claim",
                             "issue",
-                            "claim_issue_evidence_matrix",
+                            "claim_issue_evidence_link",
                             "evidence_request",
-                            "party_submission",
+                            "dispute_submission",
+                            "case_timeline_event",
                             "hearing_state",
-                            "hearing_record",
+                            "hearing_stage_record",
                             "adjudication_draft",
+                            "deliberation_report",
+                            "deliberation_finding",
                             "remedy_plan",
+                            "remedy_action",
+                            "approval_policy_decision",
                             "review_packet",
                             "review_task",
-                            "approval_record",
+                            "human_review_record",
                             "action_record",
+                            "agent_run",
+                            "agent_tool_call",
+                            "agent_guardrail_event",
+                            "agent_memory_entry",
+                            "skill_version",
+                            "prompt_version",
                             "audit_log",
                             "policy_rule",
-                            "evaluation_trace",
+                            "evaluation_record",
                             "route_decision",
                             "flow_conclusion");
             assertThat(columnType(connection, "evidence_item", "metadata_json"))
@@ -91,9 +103,12 @@ class MigrationIntegrationTest {
             assertThat(loadIndexes(connection))
                     .contains(
                             "idx_fulfillment_case_user_id",
+                            "idx_fulfillment_dispute_case_status",
                             "idx_evidence_item_case_id",
                             "idx_review_task_status",
                             "idx_action_record_case_id",
+                            "idx_agent_run_case",
+                            "idx_deliberation_case",
                             "idx_audit_log_case_id",
                             "uq_policy_rule_code_version",
                             "idx_route_decision_type_created",

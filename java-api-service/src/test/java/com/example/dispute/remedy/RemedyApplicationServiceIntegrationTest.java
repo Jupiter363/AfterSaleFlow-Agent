@@ -93,13 +93,13 @@ class RemedyApplicationServiceIntegrationTest {
     void generatesIdempotentPlansForRegularRuleAndHearingSources() {
         seedFlow(
                 "CASE_remedyregular",
-                RouteType.REGULAR_FULFILLMENT,
+                RouteType.TRANSFERRED,
                 RiskLevel.LOW,
                 "LOGISTICS_STATUS_READY",
                 "[\"QUERY_LOGISTICS\",\"PREPARE_STATUS_NOTICE\"]");
         seedFlow(
                 "CASE_remedyrule",
-                RouteType.RULE_BASED_RESOLUTION,
+                RouteType.SIMPLE_HEARING,
                 RiskLevel.MEDIUM,
                 "REFUND_OR_CANCEL_RECOMMENDED",
                 "[\"CANCEL_ORDER\",\"REFUND\"]");
@@ -194,7 +194,7 @@ class RemedyApplicationServiceIntegrationTest {
                         "CONCLUSION_" + caseId,
                         caseId,
                         route.getId(),
-                        routeType == RouteType.REGULAR_FULFILLMENT
+                        routeType == RouteType.TRANSFERRED
                                 ? "REGULAR_FLOW"
                                 : "RULE_FLOW",
                         conclusionCode,
@@ -210,7 +210,7 @@ class RemedyApplicationServiceIntegrationTest {
         FulfillmentCaseEntity disputeCase =
                 routedCase(
                         "CASE_remedyhearing",
-                        RouteType.DISPUTE_HEARING,
+                        RouteType.FULL_HEARING,
                         RiskLevel.HIGH);
         disputeCase.startHearing(
                 "CASEWORKFLOW_CASE_remedyhearing", "temporal-worker");
@@ -257,7 +257,7 @@ class RemedyApplicationServiceIntegrationTest {
                         riskLevel,
                         "user-remedy");
         disputeCase.completeIntake(
-                routeType == RouteType.DISPUTE_HEARING
+                routeType == RouteType.FULL_HEARING
                         ? "FULFILLMENT_CONFLICT"
                         : null,
                 CaseStatus.INTAKE_COMPLETED,

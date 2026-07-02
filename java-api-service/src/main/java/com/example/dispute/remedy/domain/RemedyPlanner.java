@@ -22,7 +22,7 @@ public final class RemedyPlanner {
 
     public RemedyPlanDraft plan(RemedyPlanningSource source) {
         List<ActionSeed> seeds =
-                source.sourceRoute() == RouteType.DISPUTE_HEARING
+                source.sourceRoute() == RouteType.FULL_HEARING
                         ? List.of(fromDraft(source.draftRecommendation()))
                         : source.recommendedActions().stream()
                                 .map(action -> new ActionSeed(action, Map.of()))

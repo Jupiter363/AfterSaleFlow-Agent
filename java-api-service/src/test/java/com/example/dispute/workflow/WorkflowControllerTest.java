@@ -55,7 +55,7 @@ class WorkflowControllerTest {
                                 "CASE_test",
                                 "CASEWORKFLOW_CASE_test",
                                 "STARTED",
-                                "DISPUTE_HEARING"));
+                                "FULL_HEARING"));
 
         mockMvc.perform(
                         post("/api/v1/cases/CASE_test/workflow/start")

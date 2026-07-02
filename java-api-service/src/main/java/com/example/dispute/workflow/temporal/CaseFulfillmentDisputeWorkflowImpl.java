@@ -45,7 +45,7 @@ public class CaseFulfillmentDisputeWorkflowImpl
     @Override
     public CaseWorkflowResult run(CaseWorkflowInput input) {
         status = "RUNNING";
-        if (input.routeType() != RouteType.DISPUTE_HEARING) {
+        if (input.routeType() != RouteType.FULL_HEARING) {
             String planId =
                     activities.planRemedy(input.caseId(), input.workflowId());
             return awaitHumanReview(input, null, planId);

@@ -57,7 +57,7 @@ class RemedyControllerTest {
                                 "CASE_remedy",
                                 null,
                                 1,
-                                RouteType.RULE_BASED_RESOLUTION,
+                                RouteType.SIMPLE_HEARING,
                                 "PENDING_APPROVAL",
                                 RiskLevel.HIGH,
                                 new BigDecimal("0.00"),

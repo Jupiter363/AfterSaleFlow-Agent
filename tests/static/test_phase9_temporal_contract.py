@@ -56,9 +56,9 @@ def test_hearing_controller_is_async_and_python_does_not_own_global_state() -> N
 def test_hearing_state_records_drafts_and_submissions_are_real_entities() -> None:
     for name, table in {
         "HearingStateEntity.java": "hearing_state",
-        "HearingRecordEntity.java": "hearing_record",
+        "HearingRecordEntity.java": "hearing_stage_record",
         "AdjudicationDraftEntity.java": "adjudication_draft",
-        "PartySubmissionEntity.java": "party_submission",
+        "PartySubmissionEntity.java": "dispute_submission",
     }.items():
         entity = text(
             JAVA / "infrastructure" / "persistence" / "entity" / name

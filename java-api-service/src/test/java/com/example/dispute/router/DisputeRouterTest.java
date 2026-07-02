@@ -26,7 +26,7 @@ class DisputeRouterTest {
                                 false,
                                 false));
 
-        assertThat(outcome.routeType()).isEqualTo(RouteType.REGULAR_FULFILLMENT);
+        assertThat(outcome.routeType()).isEqualTo(RouteType.TRANSFERRED);
         assertThat(outcome.reasonCode()).isEqualTo("ORDINARY_FULFILLMENT_REQUEST");
     }
 
@@ -42,7 +42,7 @@ class DisputeRouterTest {
                                 false,
                                 true));
 
-        assertThat(outcome.routeType()).isEqualTo(RouteType.RULE_BASED_RESOLUTION);
+        assertThat(outcome.routeType()).isEqualTo(RouteType.SIMPLE_HEARING);
         assertThat(outcome.reasonCode()).isEqualTo("POLICY_MATCHED_AND_EVIDENCE_SUFFICIENT");
     }
 
@@ -58,7 +58,7 @@ class DisputeRouterTest {
                                                 true,
                                                 true))
                                 .routeType())
-                .isEqualTo(RouteType.DISPUTE_HEARING);
+                .isEqualTo(RouteType.FULL_HEARING);
         assertThat(
                         router.decide(
                                         new RoutingContext(
@@ -80,7 +80,7 @@ class DisputeRouterTest {
                                                 false,
                                                 true))
                                 .routeType())
-                .isEqualTo(RouteType.DISPUTE_HEARING);
+                .isEqualTo(RouteType.FULL_HEARING);
     }
 
     @Test
@@ -95,7 +95,7 @@ class DisputeRouterTest {
                                 false,
                                 true));
 
-        assertThat(outcome.routeType()).isEqualTo(RouteType.DISPUTE_HEARING);
+        assertThat(outcome.routeType()).isEqualTo(RouteType.FULL_HEARING);
         assertThat(outcome.requiresAdditionalEvidence()).isTrue();
     }
 
@@ -124,15 +124,15 @@ class DisputeRouterTest {
         org.assertj.core.api.Assertions.assertThatThrownBy(
                         () ->
                                 disputeCase.applyRoute(
-                                        RouteType.REGULAR_FULFILLMENT,
+                                        RouteType.TRANSFERRED,
                                         "USER_route"))
                 .isInstanceOf(IllegalStateException.class);
 
         disputeCase.markDossierBuilt("USER_route");
-        disputeCase.applyRoute(RouteType.REGULAR_FULFILLMENT, "USER_route");
+        disputeCase.applyRoute(RouteType.TRANSFERRED, "USER_route");
 
         assertThat(disputeCase.getCaseStatus()).isEqualTo(CaseStatus.ROUTED);
         assertThat(disputeCase.getRouteType())
-                .isEqualTo(RouteType.REGULAR_FULFILLMENT);
+                .isEqualTo(RouteType.TRANSFERRED);
     }
 }

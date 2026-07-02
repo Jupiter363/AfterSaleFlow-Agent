@@ -64,27 +64,37 @@ class PersistenceModelContractTest {
     void everyRequiredTableHasAnEntityAndRepository() {
         Map<Class<?>, String> mappings =
                 Map.ofEntries(
-                        Map.entry(FulfillmentCaseEntity.class, "fulfillment_case"),
+                        Map.entry(
+                                FulfillmentCaseEntity.class,
+                                "fulfillment_dispute_case"),
                         Map.entry(EvidenceDossierEntity.class, "evidence_dossier"),
                         Map.entry(EvidenceItemEntity.class, "evidence_item"),
                         Map.entry(PartyClaimEntity.class, "party_claim"),
                         Map.entry(IssueEntity.class, "issue"),
                         Map.entry(
                                 ClaimIssueEvidenceMatrixEntity.class,
-                                "claim_issue_evidence_matrix"),
+                                "claim_issue_evidence_link"),
                         Map.entry(EvidenceRequestEntity.class, "evidence_request"),
-                        Map.entry(PartySubmissionEntity.class, "party_submission"),
+                        Map.entry(
+                                PartySubmissionEntity.class,
+                                "dispute_submission"),
                         Map.entry(HearingStateEntity.class, "hearing_state"),
-                        Map.entry(HearingRecordEntity.class, "hearing_record"),
+                        Map.entry(
+                                HearingRecordEntity.class,
+                                "hearing_stage_record"),
                         Map.entry(AdjudicationDraftEntity.class, "adjudication_draft"),
                         Map.entry(RemedyPlanEntity.class, "remedy_plan"),
                         Map.entry(ReviewPacketEntity.class, "review_packet"),
                         Map.entry(ReviewTaskEntity.class, "review_task"),
-                        Map.entry(ApprovalRecordEntity.class, "approval_record"),
+                        Map.entry(
+                                ApprovalRecordEntity.class,
+                                "human_review_record"),
                         Map.entry(ActionRecordEntity.class, "action_record"),
                         Map.entry(AuditLogEntity.class, "audit_log"),
                         Map.entry(PolicyRuleEntity.class, "policy_rule"),
-                        Map.entry(EvaluationTraceEntity.class, "evaluation_trace"),
+                        Map.entry(
+                                EvaluationTraceEntity.class,
+                                "evaluation_record"),
                         Map.entry(RouteDecisionEntity.class, "route_decision"),
                         Map.entry(FlowConclusionEntity.class, "flow_conclusion"));
 
@@ -126,9 +136,9 @@ class PersistenceModelContractTest {
         assertThat(CaseStatus.valueOf("INTAKE_PENDING")).isNotNull();
         assertThat(RouteType.values())
                 .containsExactly(
-                        RouteType.REGULAR_FULFILLMENT,
-                        RouteType.RULE_BASED_RESOLUTION,
-                        RouteType.DISPUTE_HEARING);
+                        RouteType.TRANSFERRED,
+                        RouteType.SIMPLE_HEARING,
+                        RouteType.FULL_HEARING);
         assertThat(RiskLevel.valueOf("CRITICAL")).isNotNull();
         assertThat(ParseStatus.valueOf("FAILED")).isNotNull();
         assertThat(HearingStatus.valueOf("WAITING_EVIDENCE")).isNotNull();

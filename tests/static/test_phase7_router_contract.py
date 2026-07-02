@@ -29,9 +29,9 @@ def test_route_enum_matches_the_three_formal_paths_exactly() -> None:
         / "RouteType.java"
     ).read_text(encoding="utf-8")
     for route in (
-        "REGULAR_FULFILLMENT",
-        "RULE_BASED_RESOLUTION",
-        "DISPUTE_HEARING",
+        "TRANSFERRED",
+        "SIMPLE_HEARING",
+        "FULL_HEARING",
     ):
         assert route in route_enum
     assert "HUMAN_REVIEW" not in route_enum

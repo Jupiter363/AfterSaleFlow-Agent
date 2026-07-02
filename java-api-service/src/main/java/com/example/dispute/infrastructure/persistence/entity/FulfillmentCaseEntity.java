@@ -18,13 +18,13 @@ import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
 
 @Entity
-@Table(name = "fulfillment_case")
+@Table(name = "fulfillment_dispute_case")
 public class FulfillmentCaseEntity extends AbstractEntity {
 
     @Column(name = "order_id", length = 64)
     private String orderId;
 
-    @Column(name = "after_sale_id", length = 64)
+    @Column(name = "after_sales_id", length = 64)
     private String afterSaleId;
 
     @Column(name = "user_id", length = 128, nullable = false)
@@ -47,7 +47,7 @@ public class FulfillmentCaseEntity extends AbstractEntity {
     private CaseStatus caseStatus;
 
     @Enumerated(EnumType.STRING)
-    @Column(name = "route_type", length = 64)
+    @Column(name = "hearing_route", length = 64)
     private RouteType routeType;
 
     @Enumerated(EnumType.STRING)
@@ -187,7 +187,7 @@ public class FulfillmentCaseEntity extends AbstractEntity {
 
     public void startHearing(String workflowId, String actorId) {
         if (caseStatus != CaseStatus.ROUTED
-                || routeType != RouteType.DISPUTE_HEARING) {
+                || routeType != RouteType.FULL_HEARING) {
             throw new IllegalStateException(
                     "hearing cannot start from status "
                             + caseStatus

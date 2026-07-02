@@ -85,7 +85,7 @@ class RouterApplicationServiceTest {
                         new AuthenticatedActor("USER_route", ActorRole.USER),
                         "ROUTE_regular");
 
-        assertThat(decision.routeType()).isEqualTo(RouteType.REGULAR_FULFILLMENT);
+        assertThat(decision.routeType()).isEqualTo(RouteType.TRANSFERRED);
         assertThat(decision.conclusion()).isNotNull();
         assertThat(decision.conclusion().conclusionType()).isEqualTo("REGULAR_FLOW");
         assertThat(decision.conclusion().requiresRemedyPlanning()).isTrue();
@@ -123,7 +123,7 @@ class RouterApplicationServiceTest {
                         new AuthenticatedActor("USER_route", ActorRole.USER),
                         "ROUTE_rule");
 
-        assertThat(decision.routeType()).isEqualTo(RouteType.RULE_BASED_RESOLUTION);
+        assertThat(decision.routeType()).isEqualTo(RouteType.SIMPLE_HEARING);
         assertThat(decision.policyRuleId()).isEqualTo("POLICY_test");
         assertThat(decision.conclusion().policyVersion()).isEqualTo(3);
         assertThat(decision.conclusion().recommendedActions())
@@ -143,7 +143,7 @@ class RouterApplicationServiceTest {
                         new AuthenticatedActor("USER_route", ActorRole.USER),
                         "ROUTE_hearing");
 
-        assertThat(decision.routeType()).isEqualTo(RouteType.DISPUTE_HEARING);
+        assertThat(decision.routeType()).isEqualTo(RouteType.FULL_HEARING);
         assertThat(decision.conclusion()).isNull();
         verify(conclusionRepository, never()).save(any());
     }

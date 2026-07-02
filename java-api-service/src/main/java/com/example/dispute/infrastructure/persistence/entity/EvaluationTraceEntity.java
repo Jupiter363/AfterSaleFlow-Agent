@@ -11,7 +11,7 @@ import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
 
 @Entity
-@Table(name = "evaluation_trace")
+@Table(name = "evaluation_record")
 public class EvaluationTraceEntity extends AbstractEntity {
 
     @Column(name = "case_id", length = 64, nullable = false)

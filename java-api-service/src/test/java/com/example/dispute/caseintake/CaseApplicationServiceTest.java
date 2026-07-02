@@ -115,7 +115,7 @@ class CaseApplicationServiceTest {
         when(agentServiceClient.analyze(any(), any(), any()))
                 .thenReturn(
                         new IntakeAnalysis(
-                                "REGULAR_FULFILLMENT",
+                                "TRANSFERRED",
                                 null,
                                 RiskLevel.LOW,
                                 false,

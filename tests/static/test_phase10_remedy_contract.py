@@ -11,13 +11,13 @@ def read(path: Path) -> str:
 
 def test_remedy_planner_supports_all_routes_and_gates_every_action() -> None:
     planner = read(JAVA / "remedy" / "domain" / "RemedyPlanner.java")
-    assert "REGULAR_FULFILLMENT" in read(
+    assert "TRANSFERRED" in read(
         JAVA / "domain" / "model" / "RouteType.java"
     )
-    assert "RULE_BASED_RESOLUTION" in read(
+    assert "SIMPLE_HEARING" in read(
         JAVA / "domain" / "model" / "RouteType.java"
     )
-    assert "DISPUTE_HEARING" in planner
+    assert "FULL_HEARING" in planner
     assert "PLATFORM_REVIEW_APPROVED" in planner
     assert "requiresApproval" in read(
         JAVA / "remedy" / "domain" / "PlannedRemedyAction.java"

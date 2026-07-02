@@ -69,7 +69,7 @@ public class RemedyApplicationService {
                 caseRepository
                         .findByIdForUpdate(caseId)
                         .orElseThrow(() -> caseNotFound(caseId));
-        if (disputeCase.getRouteType() == RouteType.DISPUTE_HEARING
+        if (disputeCase.getRouteType() == RouteType.FULL_HEARING
                 && !workflowId.equals(disputeCase.getCurrentWorkflowId())) {
             throw new BusinessException(
                     ErrorCode.CASE_STATUS_INVALID,
@@ -149,7 +149,7 @@ public class RemedyApplicationService {
     }
 
     private SourceData sourceFor(FulfillmentCaseEntity disputeCase) {
-        if (disputeCase.getRouteType() == RouteType.DISPUTE_HEARING) {
+        if (disputeCase.getRouteType() == RouteType.FULL_HEARING) {
             var hearing =
                     hearingRepository
                             .findByCaseId(disputeCase.getId())

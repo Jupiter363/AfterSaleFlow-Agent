@@ -129,8 +129,8 @@ class CaseFulfillmentDisputeWorkflowTest {
     void regularAndRuleRoutesGoDirectlyThroughRemedyPlanning() {
         for (RouteType route :
                 List.of(
-                        RouteType.REGULAR_FULFILLMENT,
-                        RouteType.RULE_BASED_RESOLUTION)) {
+                        RouteType.TRANSFERRED,
+                        RouteType.SIMPLE_HEARING)) {
             String suffix = route.name().toLowerCase();
             CaseFulfillmentDisputeWorkflow workflow =
                     newWorkflow("WORKFLOW_" + suffix);
@@ -167,7 +167,7 @@ class CaseFulfillmentDisputeWorkflowTest {
                 new CaseWorkflowInput(
                         "CASE_review_evidence",
                         "WORKFLOW_review_evidence",
-                        RouteType.RULE_BASED_RESOLUTION,
+                        RouteType.SIMPLE_HEARING,
                         Duration.ofHours(24),
                         2));
         workflow.submitReviewerSignal(
@@ -207,7 +207,7 @@ class CaseFulfillmentDisputeWorkflowTest {
         return new CaseWorkflowInput(
                 caseId,
                 workflowId,
-                RouteType.DISPUTE_HEARING,
+                RouteType.FULL_HEARING,
                 timeout,
                 2);
     }

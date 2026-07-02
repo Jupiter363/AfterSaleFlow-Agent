@@ -32,7 +32,7 @@ public record RemedyPlanningSource(
         if (planVersion < 1) {
             throw new IllegalArgumentException("planVersion must be positive");
         }
-        if (sourceRoute == RouteType.DISPUTE_HEARING
+        if (sourceRoute == RouteType.FULL_HEARING
                 && (draftId == null
                         || draftId.isBlank()
                         || draftRecommendation == null

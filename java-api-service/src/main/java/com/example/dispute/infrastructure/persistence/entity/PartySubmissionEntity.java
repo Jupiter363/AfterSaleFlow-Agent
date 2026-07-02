@@ -11,7 +11,7 @@ import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
 
 @Entity
-@Table(name = "party_submission")
+@Table(name = "dispute_submission")
 public class PartySubmissionEntity extends AbstractEntity {
 
     @Column(name = "case_id", length = 64, nullable = false)

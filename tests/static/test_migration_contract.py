@@ -16,6 +16,8 @@ EXPECTED_MIGRATIONS = [
     "V004__init_review_executor_tables.sql",
     "V005__init_policy_audit_tables.sql",
     "V006__init_router_flow_tables.sql",
+    "V007__final_dispute_core.sql",
+    "V008__final_agent_hearing_governance.sql",
 ]
 
 REQUIRED_TABLES = {
@@ -40,6 +42,18 @@ REQUIRED_TABLES = {
     "evaluation_trace",
     "route_decision",
     "flow_conclusion",
+    "evidence_dossier_item",
+    "case_timeline_event",
+    "agent_run",
+    "agent_tool_call",
+    "agent_guardrail_event",
+    "agent_memory_entry",
+    "skill_version",
+    "prompt_version",
+    "deliberation_report",
+    "deliberation_finding",
+    "remedy_action",
+    "approval_policy_decision",
 }
 
 
@@ -82,6 +96,16 @@ def test_business_tables_have_ids_timestamps_and_audit_actors() -> None:
         "approval_record",
         "action_record",
         "route_decision",
+        "evidence_dossier_item",
+        "case_timeline_event",
+        "agent_run",
+        "agent_tool_call",
+        "agent_guardrail_event",
+        "agent_memory_entry",
+        "deliberation_report",
+        "deliberation_finding",
+        "remedy_action",
+        "approval_policy_decision",
     }
 
     for table in REQUIRED_TABLES:

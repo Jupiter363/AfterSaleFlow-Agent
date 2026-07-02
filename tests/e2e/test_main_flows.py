@@ -84,9 +84,9 @@ def test_repository_e2e_flow_coverage_is_not_only_happy_path() -> None:
     )
 
     for required in (
-        "REGULAR_FULFILLMENT",
-        "RULE_BASED_RESOLUTION",
-        "DISPUTE_HEARING",
+        "TRANSFERRED",
+        "SIMPLE_HEARING",
+        "FULL_HEARING",
         "requires_human_review",
         "unapproved",
         "closesExecutedCaseAndCreatesExactlyOneCompletedEvaluation",

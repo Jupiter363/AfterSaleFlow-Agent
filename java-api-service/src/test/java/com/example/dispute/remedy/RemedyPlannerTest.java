@@ -19,7 +19,7 @@ class RemedyPlannerTest {
                 planner.plan(
                         new RemedyPlanningSource(
                                 "CASE_regular",
-                                RouteType.REGULAR_FULFILLMENT,
+                                RouteType.TRANSFERRED,
                                 RiskLevel.LOW,
                                 "LOGISTICS_STATUS_READY",
                                 List.of(
@@ -51,7 +51,7 @@ class RemedyPlannerTest {
                 planner.plan(
                         new RemedyPlanningSource(
                                 "CASE_rule",
-                                RouteType.RULE_BASED_RESOLUTION,
+                                RouteType.SIMPLE_HEARING,
                                 RiskLevel.MEDIUM,
                                 "REFUND_OR_CANCEL_RECOMMENDED",
                                 List.of("CANCEL_ORDER", "REFUND"),
@@ -78,7 +78,7 @@ class RemedyPlannerTest {
                 planner.plan(
                         new RemedyPlanningSource(
                                 "CASE_hearing",
-                                RouteType.DISPUTE_HEARING,
+                                RouteType.FULL_HEARING,
                                 RiskLevel.HIGH,
                                 "ADJUDICATION_DRAFT",
                                 List.of(),

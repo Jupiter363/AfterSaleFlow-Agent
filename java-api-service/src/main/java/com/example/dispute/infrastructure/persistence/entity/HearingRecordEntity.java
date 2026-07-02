@@ -10,7 +10,7 @@ import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
 
 @Entity
-@Table(name = "hearing_record")
+@Table(name = "hearing_stage_record")
 public class HearingRecordEntity extends AbstractEntity {
 
     @Column(name = "case_id", length = 64, nullable = false)

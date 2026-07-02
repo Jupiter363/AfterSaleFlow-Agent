@@ -99,7 +99,7 @@ class RouterApiIntegrationTest {
 
         assertThat(regular.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(data(regular).get("route_type"))
-                .isEqualTo("REGULAR_FULFILLMENT");
+                .isEqualTo("TRANSFERRED");
         Map<String, Object> regularConclusion =
                 (Map<String, Object>) data(regular).get("conclusion");
         assertThat(regularConclusion)
@@ -107,7 +107,7 @@ class RouterApiIntegrationTest {
                 .containsEntry("requires_human_review", true);
 
         assertThat(data(rule).get("route_type"))
-                .isEqualTo("RULE_BASED_RESOLUTION");
+                .isEqualTo("SIMPLE_HEARING");
         assertThat(data(rule).get("policy_rule_id"))
                 .isEqualTo("POLICY_UNSHIPPED_CANCEL_V1");
         assertThat(((Map<?, ?>) data(rule).get("conclusion")).get("policy_version"))
@@ -117,7 +117,7 @@ class RouterApiIntegrationTest {
         assertThat(conflict.getBody().get("code")).isEqualTo("IDEMPOTENCY_CONFLICT");
 
         assertThat(data(hearing).get("route_type"))
-                .isEqualTo("DISPUTE_HEARING");
+                .isEqualTo("FULL_HEARING");
         assertThat(data(hearing).get("conclusion")).isNull();
 
         assertThat(decisionRepository.count()).isEqualTo(3);

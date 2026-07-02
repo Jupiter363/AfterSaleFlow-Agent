@@ -127,7 +127,7 @@ public class RouterApplicationService {
                                         && !disputeCase.getDisputeType().isBlank(),
                                 matchedPolicy != null));
         PolicyRuleEntity appliedPolicy =
-                outcome.routeType() == RouteType.RULE_BASED_RESOLUTION
+                outcome.routeType() == RouteType.SIMPLE_HEARING
                         ? matchedPolicy
                         : null;
         RouteDecisionEntity decision =
@@ -173,11 +173,11 @@ public class RouterApplicationService {
             RouteDecisionEntity decision,
             PolicyRuleEntity policy,
             AuthenticatedActor actor) {
-        if (decision.getRouteType() == RouteType.DISPUTE_HEARING) {
+        if (decision.getRouteType() == RouteType.FULL_HEARING) {
             return null;
         }
         ConclusionData data;
-        if (decision.getRouteType() == RouteType.REGULAR_FULFILLMENT) {
+        if (decision.getRouteType() == RouteType.TRANSFERRED) {
             var regular = regularFlowService.conclude(disputeCase.getCaseType());
             data =
                     new ConclusionData(
@@ -197,7 +197,7 @@ public class RouterApplicationService {
                         "CONCLUSION_" + compactUuid(),
                         disputeCase.getId(),
                         decision.getId(),
-                        decision.getRouteType() == RouteType.REGULAR_FULFILLMENT
+                        decision.getRouteType() == RouteType.TRANSFERRED
                                 ? "REGULAR_FLOW"
                                 : "RULE_FLOW",
                         data.code(),

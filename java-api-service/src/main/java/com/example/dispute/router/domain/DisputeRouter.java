@@ -8,7 +8,7 @@ public final class DisputeRouter {
 
     private static final Set<String> REGULAR_CASE_TYPES =
             Set.of(
-                    "REGULAR_FULFILLMENT",
+                    "TRANSFERRED",
                     "LOGISTICS_QUERY",
                     "DELIVERY_STATUS",
                     "DELIVERY_REMINDER");
@@ -25,13 +25,13 @@ public final class DisputeRouter {
         }
         if (REGULAR_CASE_TYPES.contains(context.caseType())) {
             return new RoutingOutcome(
-                    RouteType.REGULAR_FULFILLMENT,
+                    RouteType.TRANSFERRED,
                     "ORDINARY_FULFILLMENT_REQUEST",
                     false);
         }
         if (context.policyMatched() && context.evidenceSufficient()) {
             return new RoutingOutcome(
-                    RouteType.RULE_BASED_RESOLUTION,
+                    RouteType.SIMPLE_HEARING,
                     "POLICY_MATCHED_AND_EVIDENCE_SUFFICIENT",
                     false);
         }
@@ -44,6 +44,6 @@ public final class DisputeRouter {
 
     private static RoutingOutcome hearing(String reasonCode, boolean requiresEvidence) {
         return new RoutingOutcome(
-                RouteType.DISPUTE_HEARING, reasonCode, requiresEvidence);
+                RouteType.FULL_HEARING, reasonCode, requiresEvidence);
     }
 }

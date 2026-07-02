@@ -13,7 +13,7 @@ import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
 
 @Entity
-@Table(name = "approval_record")
+@Table(name = "human_review_record")
 public class ApprovalRecordEntity extends AbstractEntity {
     @Column(name="case_id",length=64,nullable=false) private String caseId;
     @Column(name="review_task_id",length=64,nullable=false) private String reviewTaskId;
@@ -24,7 +24,7 @@ public class ApprovalRecordEntity extends AbstractEntity {
     @JdbcTypeCode(SqlTypes.JSON) @Column(name="original_plan_json",nullable=false,columnDefinition="jsonb") private String originalPlanJson;
     @JdbcTypeCode(SqlTypes.JSON) @Column(name="approved_plan_json",nullable=false,columnDefinition="jsonb") private String approvedPlanJson;
     @Column(name="decision_reason",columnDefinition="text") private String decisionReason;
-    @Column(name="approval_hash",length=128,nullable=false,unique=true) private String approvalHash;
+    @Column(name="action_hash",length=128,nullable=false,unique=true) private String approvalHash;
     @Column(name="created_at",nullable=false,updatable=false) private OffsetDateTime createdAt;
     @Column(name="created_by",length=128,nullable=false,updatable=false) private String createdBy;
 

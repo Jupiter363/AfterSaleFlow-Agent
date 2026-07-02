@@ -104,7 +104,7 @@ class HearingPersistenceIntegrationTest {
                 "{}",
                 "user-hearing");
         disputeCase.markDossierBuilt("user-hearing");
-        disputeCase.applyRoute(RouteType.DISPUTE_HEARING, "user-hearing");
+        disputeCase.applyRoute(RouteType.FULL_HEARING, "user-hearing");
         disputeCase.startHearing("CASEWORKFLOW_CASE_hearingdb", "temporal-worker");
         caseRepository.saveAndFlush(disputeCase);
 
@@ -258,7 +258,7 @@ class HearingPersistenceIntegrationTest {
                 new CaseWorkflowInput(
                         disputeCase.getId(),
                         workflowId,
-                        RouteType.DISPUTE_HEARING,
+                        RouteType.FULL_HEARING,
                         Duration.ofHours(72),
                         2));
 
@@ -312,7 +312,7 @@ class HearingPersistenceIntegrationTest {
                 "{}",
                 "user-hearing");
         disputeCase.markDossierBuilt("user-hearing");
-        disputeCase.applyRoute(RouteType.DISPUTE_HEARING, "user-hearing");
+        disputeCase.applyRoute(RouteType.FULL_HEARING, "user-hearing");
         return disputeCase;
     }
 }

@@ -1,7 +1,7 @@
 package com.example.dispute.domain.model;
 
 public enum RouteType {
-    REGULAR_FULFILLMENT,
-    RULE_BASED_RESOLUTION,
-    DISPUTE_HEARING
+    TRANSFERRED,
+    SIMPLE_HEARING,
+    FULL_HEARING
 }

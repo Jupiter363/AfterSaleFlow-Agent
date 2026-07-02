@@ -235,7 +235,7 @@ public class CaseApplicationService {
                         ? List.of("ORDER_ID")
                         : List.of();
         return new IntakeAnalysis(
-                dispute ? "DISPUTE" : "REGULAR_FULFILLMENT",
+                dispute ? "DISPUTE" : "TRANSFERRED",
                 dispute ? "FULFILLMENT_CONFLICT" : null,
                 dispute ? RiskLevel.HIGH : RiskLevel.MEDIUM,
                 dispute,
