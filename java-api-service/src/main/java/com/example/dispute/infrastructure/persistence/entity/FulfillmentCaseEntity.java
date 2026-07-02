@@ -1,5 +1,6 @@
 package com.example.dispute.infrastructure.persistence.entity;
 
+import com.example.dispute.casecore.domain.CaseSourceType;
 import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.RiskLevel;
 import com.example.dispute.domain.model.RouteType;
@@ -26,6 +27,9 @@ public class FulfillmentCaseEntity extends AbstractEntity {
 
     @Column(name = "after_sales_id", length = 64)
     private String afterSaleId;
+
+    @Column(name = "logistics_id", length = 64)
+    private String logisticsId;
 
     @Column(name = "user_id", length = 128, nullable = false)
     private String userId;
@@ -93,6 +97,22 @@ public class FulfillmentCaseEntity extends AbstractEntity {
     @Column(name = "updated_by", length = 128, nullable = false)
     private String updatedBy;
 
+    @Enumerated(EnumType.STRING)
+    @Column(name = "source_type", length = 32, nullable = false)
+    private CaseSourceType sourceType;
+
+    @Column(name = "source_system", length = 64)
+    private String sourceSystem;
+
+    @Column(name = "external_case_ref", length = 128)
+    private String externalCaseRef;
+
+    @Column(name = "current_room", length = 32)
+    private String currentRoom;
+
+    @Column(name = "current_deadline_at")
+    private OffsetDateTime currentDeadlineAt;
+
     protected FulfillmentCaseEntity() {}
 
     private FulfillmentCaseEntity(
@@ -121,6 +141,8 @@ public class FulfillmentCaseEntity extends AbstractEntity {
         this.caseStatus = CaseStatus.INTAKE_PENDING;
         this.intakeResultJson = "{}";
         this.metadataJson = "{}";
+        this.sourceType = CaseSourceType.INTAKE_CREATED;
+        this.currentRoom = "INTAKE";
         this.createdBy = required(actorId, "actorId");
         this.updatedBy = actorId;
     }
@@ -149,6 +171,49 @@ public class FulfillmentCaseEntity extends AbstractEntity {
                 description,
                 riskLevel,
                 actorId);
+    }
+
+    public static FulfillmentCaseEntity imported(
+            String id,
+            String orderId,
+            String afterSaleId,
+            String logisticsId,
+            String userId,
+            String merchantId,
+            String creationIdempotencyKey,
+            String disputeType,
+            String title,
+            String description,
+            RiskLevel riskLevel,
+            CaseStatus caseStatus,
+            String currentRoom,
+            OffsetDateTime currentDeadlineAt,
+            String sourceSystem,
+            String externalCaseRef,
+            String actorId) {
+        FulfillmentCaseEntity entity =
+                new FulfillmentCaseEntity(
+                        id,
+                        orderId,
+                        afterSaleId,
+                        userId,
+                        merchantId,
+                        creationIdempotencyKey,
+                        "FULFILLMENT_DISPUTE",
+                        title,
+                        description,
+                        riskLevel,
+                        actorId);
+        entity.logisticsId = blankToNull(logisticsId);
+        entity.disputeType = required(disputeType, "disputeType");
+        entity.caseStatus = Objects.requireNonNull(caseStatus, "caseStatus must not be null");
+        entity.sourceType = CaseSourceType.EXTERNAL_IMPORT;
+        entity.sourceSystem = required(sourceSystem, "sourceSystem");
+        entity.externalCaseRef = required(externalCaseRef, "externalCaseRef");
+        entity.currentRoom = required(currentRoom, "currentRoom");
+        entity.currentDeadlineAt = currentDeadlineAt;
+        entity.intakeResultJson = "{\"potentialDispute\":true,\"missingSlots\":[],\"agentDegraded\":false,\"analyzedAt\":\"2026-07-03T00:00:00Z\"}";
+        return entity;
     }
 
     public void completeIntake(
@@ -280,6 +345,10 @@ public class FulfillmentCaseEntity extends AbstractEntity {
         return value;
     }
 
+    private static String blankToNull(String value) {
+        return value == null || value.isBlank() ? null : value;
+    }
+
     public CaseStatus getCaseStatus() {
         return caseStatus;
     }
@@ -302,6 +371,10 @@ public class FulfillmentCaseEntity extends AbstractEntity {
 
     public String getAfterSaleId() {
         return afterSaleId;
+    }
+
+    public String getLogisticsId() {
+        return logisticsId;
     }
 
     public String getUserId() {
@@ -346,5 +419,25 @@ public class FulfillmentCaseEntity extends AbstractEntity {
 
     public OffsetDateTime getClosedAt() {
         return closedAt;
+    }
+
+    public CaseSourceType getSourceType() {
+        return sourceType;
+    }
+
+    public String getSourceSystem() {
+        return sourceSystem;
+    }
+
+    public String getExternalCaseRef() {
+        return externalCaseRef;
+    }
+
+    public String getCurrentRoom() {
+        return currentRoom;
+    }
+
+    public OffsetDateTime getCurrentDeadlineAt() {
+        return currentDeadlineAt;
     }
 }

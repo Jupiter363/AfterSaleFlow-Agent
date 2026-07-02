@@ -14,6 +14,9 @@ public interface FulfillmentCaseRepository
                 JpaSpecificationExecutor<FulfillmentCaseEntity> {
     Optional<FulfillmentCaseEntity> findByCreationIdempotencyKey(String idempotencyKey);
 
+    Optional<FulfillmentCaseEntity> findBySourceSystemAndExternalCaseRef(
+            String sourceSystem, String externalCaseRef);
+
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select disputeCase from FulfillmentCaseEntity disputeCase where disputeCase.id = :id")
     Optional<FulfillmentCaseEntity> findByIdForUpdate(@Param("id") String id);
