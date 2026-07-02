@@ -295,9 +295,36 @@ public class CaseApplicationService {
                 snapshot.potentialDispute(),
                 snapshot.missingSlots(),
                 snapshot.agentDegraded(),
+                entity.getSourceType(),
+                entity.getSourceSystem(),
+                entity.getExternalCaseRef(),
+                entity.getCurrentRoom(),
+                entity.getCurrentDeadlineAt(),
+                pendingAction(entity.getCaseStatus()),
                 entity.getCreatedAt(),
                 entity.getUpdatedAt(),
                 entity.getClosedAt());
+    }
+
+    private static String pendingAction(CaseStatus status) {
+        return switch (status) {
+            case INTAKE_PENDING,
+                    INTAKE_IN_PROGRESS,
+                    WAITING_SLOT_COMPLETION,
+                    INTAKE_COMPLETED -> "COMPLETE_INTAKE";
+            case EVIDENCE_OPEN, WAITING_EVIDENCE -> "SUBMIT_EVIDENCE";
+            case EVIDENCE_SEALED -> "ENTER_HEARING";
+            case HEARING_OPEN, HEARING -> "PARTICIPATE_HEARING";
+            case SETTLEMENT_PENDING -> "REVIEW_SETTLEMENT";
+            case DRAFT_READY,
+                    DELIBERATION_RUNNING,
+                    REVIEW_PENDING,
+                    WAITING_HUMAN_REVIEW,
+                    REMEDY_PLANNED -> "AWAIT_REVIEW";
+            case APPROVED_FOR_EXECUTION, EXECUTING -> "TRACK_EXECUTION";
+            case CLOSED, CANCELLED, MANUAL_HANDOFF, NOT_ADMISSIBLE -> "VIEW_OUTCOME";
+            default -> "CONTINUE_CASE";
+        };
     }
 
     private IntakeSnapshot readSnapshot(String json) {

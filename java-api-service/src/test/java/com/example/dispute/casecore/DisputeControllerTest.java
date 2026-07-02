@@ -9,6 +9,10 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.example.dispute.casecore.api.DisputeController;
+import com.example.dispute.casecore.api.InternalDisputeImportController;
+import com.example.dispute.casecore.application.DisputeImportService;
+import com.example.dispute.casecore.application.ImportedDisputeView;
+import com.example.dispute.casecore.domain.CaseSourceType;
 import com.example.dispute.caseintake.application.CaseApplicationService;
 import com.example.dispute.caseintake.application.CasePageView;
 import com.example.dispute.caseintake.application.CaseView;
@@ -22,6 +26,10 @@ import com.example.dispute.config.SecurityConfiguration;
 import com.example.dispute.config.SecurityFailureWriter;
 import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.RiskLevel;
+import com.example.dispute.room.api.IntakeRoomController;
+import com.example.dispute.room.application.IntakeConfirmationView;
+import com.example.dispute.room.application.IntakeRoomService;
+import com.example.dispute.room.domain.RoomType;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.OffsetDateTime;
 import java.util.List;
@@ -33,7 +41,11 @@ import org.springframework.http.MediaType;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
-@WebMvcTest(DisputeController.class)
+@WebMvcTest({
+    DisputeController.class,
+    InternalDisputeImportController.class,
+    IntakeRoomController.class
+})
 @Import({
     CommonConfiguration.class,
     TraceIdFilter.class,
@@ -49,6 +61,8 @@ class DisputeControllerTest {
     @Autowired private MockMvc mockMvc;
     @Autowired private ObjectMapper objectMapper;
     @MockitoBean private CaseApplicationService service;
+    @MockitoBean private DisputeImportService importService;
+    @MockitoBean private IntakeRoomService intakeRoomService;
 
     @Test
     void createsDisputeThroughTheUnversionedFinalApi() throws Exception {
@@ -101,7 +115,79 @@ class DisputeControllerTest {
                                 .header(HeaderAuthenticationFilter.USER_ID_HEADER, "user-1")
                                 .header(HeaderAuthenticationFilter.ROLE_HEADER, "USER"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.data.items[0].id").value("CASE_test"));
+                .andExpect(jsonPath("$.data.items[0].id").value("CASE_test"))
+                .andExpect(jsonPath("$.data.items[0].source_type").value("INTAKE_CREATED"))
+                .andExpect(jsonPath("$.data.items[0].current_room").value("INTAKE"))
+                .andExpect(jsonPath("$.data.items[0].deadline_at").isNotEmpty())
+                .andExpect(jsonPath("$.data.items[0].pending_action").value("COMPLETE_INTAKE"));
+    }
+
+    @Test
+    void importsExternalDisputesThroughTheInternalServiceBoundary() throws Exception {
+        when(importService.importDispute(any(), any(), eq("import-ext-1001")))
+                .thenReturn(
+                        new ImportedDisputeView(
+                                "CASE_imported",
+                                "EXTERNAL_IMPORT",
+                                "OMS",
+                                "EXT-1001",
+                                CaseStatus.INTAKE_PENDING,
+                                "INTAKE",
+                                null));
+        mockMvc.perform(
+                        post("/internal/disputes/import")
+                                .header("X-Service-Identity", "external-dispute-adapter")
+                                .header("Idempotency-Key", "import-ext-1001")
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content(
+                                        """
+                                        {
+                                          "source_system": "OMS",
+                                          "external_case_reference": "EXT-1001",
+                                          "order_reference": "ORDER-1001",
+                                          "after_sales_reference": "AFTER-1001",
+                                          "logistics_reference": "LOG-1001",
+                                          "user_id": "user-local",
+                                          "merchant_id": "merchant-local",
+                                          "initiator_role": "USER",
+                                          "dispute_type": "SIGNED_NOT_RECEIVED",
+                                          "title": "签收未收到",
+                                          "description": "用户表示未收到已签收包裹",
+                                          "risk_level": "HIGH"
+                                        }
+                                        """))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.data.source_type").value("EXTERNAL_IMPORT"))
+                .andExpect(jsonPath("$.data.external_case_reference").value("EXT-1001"));
+    }
+
+    @Test
+    void confirmsTheIntakeDecisionThroughTheRoomBasedApi() throws Exception {
+        when(intakeRoomService.confirm(eq("CASE_test"), any(), any()))
+                .thenReturn(
+                        new IntakeConfirmationView(
+                                "CASE_test",
+                                CaseStatus.EVIDENCE_OPEN,
+                                RoomType.EVIDENCE,
+                                OffsetDateTime.parse("2026-07-03T02:00:00Z")));
+        mockMvc.perform(
+                        post("/api/disputes/CASE_test/intake/confirm")
+                                .header(HeaderAuthenticationFilter.USER_ID_HEADER, "user-1")
+                                .header(HeaderAuthenticationFilter.ROLE_HEADER, "USER")
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content(
+                                        """
+                                        {
+                                          "admissible": true,
+                                          "dispute_type": "SIGNED_NOT_RECEIVED",
+                                          "risk_level": "HIGH",
+                                          "confirmation_note": "确认信息无误，同意发起争议审理"
+                                        }
+                                        """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.case_status").value("EVIDENCE_OPEN"))
+                .andExpect(jsonPath("$.data.current_room").value("EVIDENCE"))
+                .andExpect(jsonPath("$.data.deadline_at").isNotEmpty());
     }
 
     private static CaseView disputeView() {
@@ -121,6 +207,12 @@ class DisputeControllerTest {
                 true,
                 List.of(),
                 false,
+                CaseSourceType.INTAKE_CREATED,
+                null,
+                null,
+                "INTAKE",
+                OffsetDateTime.parse("2026-07-03T02:00:00Z"),
+                "COMPLETE_INTAKE",
                 OffsetDateTime.parse("2026-07-02T00:00:00Z"),
                 OffsetDateTime.parse("2026-07-02T00:00:00Z"),
                 null);

@@ -1,5 +1,6 @@
 package com.example.dispute.caseintake.application;
 
+import com.example.dispute.casecore.domain.CaseSourceType;
 import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.RiskLevel;
 import com.example.dispute.domain.model.RouteType;
@@ -22,6 +23,12 @@ public record CaseView(
         boolean potentialDispute,
         List<String> missingSlots,
         boolean agentDegraded,
+        CaseSourceType sourceType,
+        String sourceSystem,
+        String externalCaseReference,
+        String currentRoom,
+        OffsetDateTime deadlineAt,
+        String pendingAction,
         OffsetDateTime createdAt,
         OffsetDateTime updatedAt,
         OffsetDateTime closedAt) {}

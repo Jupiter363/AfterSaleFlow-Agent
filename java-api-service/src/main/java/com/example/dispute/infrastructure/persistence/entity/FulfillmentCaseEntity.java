@@ -229,6 +229,47 @@ public class FulfillmentCaseEntity extends AbstractEntity {
         this.updatedBy = required(actorId, "actorId");
     }
 
+    public void admitToEvidence(
+            String disputeType,
+            RiskLevel riskLevel,
+            String intakeAnalysisJson,
+            OffsetDateTime deadlineAt,
+            String actorId) {
+        assertIntakeCanBeConfirmed();
+        this.disputeType = required(disputeType, "disputeType");
+        this.riskLevel = Objects.requireNonNull(riskLevel, "riskLevel must not be null");
+        this.intakeResultJson = required(intakeAnalysisJson, "intakeAnalysisJson");
+        this.caseStatus = CaseStatus.EVIDENCE_OPEN;
+        this.currentRoom = "EVIDENCE";
+        this.currentDeadlineAt =
+                Objects.requireNonNull(deadlineAt, "deadlineAt must not be null");
+        this.updatedBy = required(actorId, "actorId");
+    }
+
+    public void rejectAsNotAdmissible(
+            String disputeType,
+            RiskLevel riskLevel,
+            String intakeAnalysisJson,
+            String actorId) {
+        assertIntakeCanBeConfirmed();
+        this.disputeType = required(disputeType, "disputeType");
+        this.riskLevel = Objects.requireNonNull(riskLevel, "riskLevel must not be null");
+        this.intakeResultJson = required(intakeAnalysisJson, "intakeAnalysisJson");
+        this.caseStatus = CaseStatus.NOT_ADMISSIBLE;
+        this.currentRoom = null;
+        this.currentDeadlineAt = null;
+        this.updatedBy = required(actorId, "actorId");
+    }
+
+    private void assertIntakeCanBeConfirmed() {
+        if (caseStatus != CaseStatus.INTAKE_PENDING
+                && caseStatus != CaseStatus.INTAKE_IN_PROGRESS
+                && caseStatus != CaseStatus.INTAKE_COMPLETED) {
+            throw new IllegalStateException(
+                    "intake cannot be confirmed from case status " + caseStatus);
+        }
+    }
+
     public void markDossierBuilt(String actorId) {
         if (caseStatus == CaseStatus.WAITING_SLOT_COMPLETION
                 || caseStatus == CaseStatus.CLOSED

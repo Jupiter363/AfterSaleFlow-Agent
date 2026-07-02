@@ -9,6 +9,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.example.dispute.caseintake.api.CaseController;
+import com.example.dispute.casecore.domain.CaseSourceType;
 import com.example.dispute.caseintake.application.CaseApplicationService;
 import com.example.dispute.caseintake.application.CasePageView;
 import com.example.dispute.caseintake.application.CaseView;
@@ -173,6 +174,12 @@ class CaseControllerTest {
                 true,
                 List.of(),
                 false,
+                CaseSourceType.INTAKE_CREATED,
+                null,
+                null,
+                "INTAKE",
+                OffsetDateTime.parse("2026-07-03T02:00:00Z"),
+                "COMPLETE_INTAKE",
                 OffsetDateTime.parse("2026-06-28T00:00:00Z"),
                 OffsetDateTime.parse("2026-06-28T00:00:00Z"),
                 null);

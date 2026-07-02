@@ -18,6 +18,7 @@ public final class HeaderAuthenticationFilter extends OncePerRequestFilter {
 
     public static final String USER_ID_HEADER = "X-User-Id";
     public static final String ROLE_HEADER = "X-Role";
+    public static final String SERVICE_IDENTITY_HEADER = "X-Service-Identity";
 
     private static final Pattern SAFE_ACTOR_ID = Pattern.compile("[A-Za-z0-9][A-Za-z0-9_.-]{0,127}");
 
@@ -27,9 +28,12 @@ public final class HeaderAuthenticationFilter extends OncePerRequestFilter {
             throws ServletException, IOException {
         String actorId = request.getHeader(USER_ID_HEADER);
         String roleValue = request.getHeader(ROLE_HEADER);
+        String serviceIdentity = request.getHeader(SERVICE_IDENTITY_HEADER);
 
         if (isValidActorId(actorId) && roleValue != null) {
             authenticate(actorId, roleValue);
+        } else if (isValidActorId(serviceIdentity)) {
+            authenticate(serviceIdentity, ActorRole.SYSTEM.name());
         }
 
         try {
