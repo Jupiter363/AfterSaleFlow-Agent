@@ -52,14 +52,13 @@ def test_frontend_container_serves_a_production_build_as_non_root() -> None:
     assert 'url.pathname === "/healthz"' in server
 
 
-def test_smoke_test_checks_health_and_creates_a_case_through_nginx() -> None:
+def test_smoke_test_checks_health_and_lists_disputes_through_nginx() -> None:
     smoke = read(ROOT / "scripts" / "smoke-test.sh")
     dev_up = read(ROOT / "scripts" / "dev-up.sh")
     dev_reset = read(ROOT / "scripts" / "dev-reset.sh")
     assert "docker compose config --services" in smoke
-    assert "/api/v1/cases" in smoke
-    assert "Idempotency-Key" in smoke
-    assert "case-create-query-through-nginx" in smoke
+    assert "/api/disputes" in smoke
+    assert "dispute-list-through-nginx" in smoke
     assert "--wait" in dev_up
     assert "./scripts/smoke-test.sh" in dev_up
     assert "./scripts/dev-up.sh" in dev_reset

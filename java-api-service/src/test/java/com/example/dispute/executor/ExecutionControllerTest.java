@@ -63,7 +63,7 @@ class ExecutionControllerTest {
         when(service.actions(eq("CASE_1"), any())).thenReturn(List.of(action));
 
         mvc.perform(
-                        post("/api/v1/cases/CASE_1/execution/execute")
+                        post("/api/disputes/CASE_1/execution/execute")
                                 .header(
                                         HeaderAuthenticationFilter.USER_ID_HEADER,
                                         "admin-1")
@@ -78,7 +78,7 @@ class ExecutionControllerTest {
                                 .value("SUCCEEDED"));
 
         mvc.perform(
-                        get("/api/v1/cases/CASE_1/actions")
+                        get("/api/disputes/CASE_1/actions")
                                 .header(
                                         HeaderAuthenticationFilter.USER_ID_HEADER,
                                         "admin-1")

@@ -18,7 +18,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 @Validated
 @RestController
-@RequestMapping("/api/v1/cases/{caseId}/remedy-plan")
+@RequestMapping("/api/disputes/{caseId}/remedy-plan")
 public class RemedyController {
 
     private final RemedyApplicationService service;

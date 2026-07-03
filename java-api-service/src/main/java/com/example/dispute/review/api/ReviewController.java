@@ -32,7 +32,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 @Validated
 @RestController
-@RequestMapping("/api/v1/review-tasks")
+@RequestMapping("/api/reviews")
 public class ReviewController {
     private final ReviewApplicationService service;
     private final Clock clock;

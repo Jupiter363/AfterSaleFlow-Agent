@@ -1,8 +1,6 @@
-import json
 import os
 import statistics
 import time
-import urllib.error
 import urllib.request
 
 import pytest
@@ -22,39 +20,23 @@ def require_gateway() -> None:
         pytest.skip(f"local acceptance gateway is not running: {exc}")
 
 
-def post_case(index: int) -> float:
-    payload = {
-        "order_id": f"ORDER_LOAD_{int(time.time() * 1000)}_{index}",
-        "user_id": "smoke-user",
-        "merchant_id": "smoke-merchant",
-        "description": "Performance smoke request for ordinary fulfillment query.",
-        "channel": "WEB",
-    }
-    data = json.dumps(payload).encode("utf-8")
+def list_disputes(_: int) -> float:
     req = urllib.request.Request(
-        BASE_URL + "/api/v1/cases",
-        data=data,
-        method="POST",
+        BASE_URL + "/api/disputes?page=0&size=20",
+        method="GET",
         headers={
-            "Content-Type": "application/json",
-            "X-User-Id": "smoke-user",
+            "X-User-Id": "user-local",
             "X-Role": "USER",
-            "Idempotency-Key": f"load-{int(time.time() * 1000)}-{index}",
         },
     )
     start = time.perf_counter()
-    try:
-        with urllib.request.urlopen(req, timeout=60) as response:
-            body = json.loads(response.read().decode("utf-8"))
-            assert response.status == 201
-            assert body["success"] is True
-    except urllib.error.HTTPError as error:
-        pytest.fail(f"load request failed with {error.code}: {error.read().decode('utf-8')}")
+    with urllib.request.urlopen(req, timeout=60) as response:
+        assert response.status == 200
     return (time.perf_counter() - start) * 1000
 
 
-def test_case_creation_p95_smoke_budget() -> None:
+def test_dispute_overview_p95_smoke_budget() -> None:
     require_gateway()
-    durations = [post_case(index) for index in range(REQUESTS)]
+    durations = [list_disputes(index) for index in range(REQUESTS)]
     p95 = max(durations) if len(durations) < 20 else statistics.quantiles(durations, n=20)[18]
     assert p95 < P95_BUDGET_MS, {"p95_ms": p95, "durations_ms": durations}

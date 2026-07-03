@@ -30,7 +30,7 @@ public class RestClientHearingAgentClient implements HearingAgentClient {
         JsonNode response =
                 restClient
                         .post()
-                        .uri("/agent-api/v1/hearings/analyze")
+                        .uri("/internal/agents/legacy/hearing/analyze")
                         .header(TraceIdFilter.TRACE_HEADER, traceId)
                         .header(TraceIdFilter.REQUEST_HEADER, requestId)
                         .header("X-Role", "SYSTEM")
@@ -47,7 +47,9 @@ public class RestClientHearingAgentClient implements HearingAgentClient {
             throw new AgentExecutionException(
                     ErrorCode.AGENT_OUTPUT_SCHEMA_INVALID,
                     "hearing agent returned an invalid schema",
-                    Map.of("endpoint", "/agent-api/v1/hearings/analyze"));
+                    Map.of(
+                            "endpoint",
+                            "/internal/agents/legacy/hearing/analyze"));
         }
         List<String> nodes = new ArrayList<>();
         response.path("executed_nodes").forEach(node -> nodes.add(node.asText()));

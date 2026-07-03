@@ -31,7 +31,7 @@ public class RestClientAgentServiceClient implements AgentServiceClient {
         IntakeResponse response =
                 restClient
                         .post()
-                        .uri("/agent-api/v1/intake/analyze")
+                        .uri("/internal/agents/legacy/intake/analyze")
                         .header(TraceIdFilter.TRACE_HEADER, traceId)
                         .header(TraceIdFilter.REQUEST_HEADER, requestId)
                         .contentType(MediaType.APPLICATION_JSON)
@@ -46,7 +46,7 @@ public class RestClientAgentServiceClient implements AgentServiceClient {
             throw new AgentExecutionException(
                     ErrorCode.AGENT_OUTPUT_SCHEMA_INVALID,
                     "intake agent returned an invalid schema",
-                    Map.of("endpoint", "/agent-api/v1/intake/analyze"));
+                    Map.of("endpoint", "/internal/agents/legacy/intake/analyze"));
         }
         return new IntakeAnalysis(
                 response.caseType(),

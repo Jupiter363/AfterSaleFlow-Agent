@@ -76,7 +76,7 @@ def test_evaluation_agent_is_closed_case_only_and_read_only() -> None:
     assert "reviewer_modification_rate=" in workflow
     assert "Never modify" in prompt
     assert "online case" in prompt
-    assert '"/agent-api/v1/evaluations/analyze"' in main
+    assert '"/internal/agents/evaluation/analyze"' in main
 
 
 def test_workflow_orders_execution_before_closure_and_evaluation() -> None:
@@ -94,7 +94,7 @@ def test_workflow_orders_execution_before_closure_and_evaluation() -> None:
 
 def test_closure_and_evaluation_query_apis_are_exposed() -> None:
     controller = read(JAVA / "evaluation" / "api" / "ClosureController.java")
-    assert '"/cases/{caseId}/close"' in controller
-    assert '"/cases/{caseId}/evaluation"' in controller
-    assert '"/evaluations/metrics"' in controller
+    assert '"/disputes/{caseId}/close"' in controller
+    assert '"/disputes/{caseId}/evaluation"' in controller
+    assert '"/reviews/evaluations/metrics"' in controller
     assert '"Idempotency-Key"' in controller

@@ -1,6 +1,5 @@
 import json
 import os
-import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -43,30 +42,17 @@ def require_gateway() -> None:
         pytest.skip(f"local acceptance gateway is not running: {exc}")
 
 
-def test_three_main_intake_paths_are_accepted_through_nginx() -> None:
+def test_seeded_disputes_are_listed_and_enterable_through_nginx() -> None:
     require_gateway()
-    fixtures = json.loads(
-        (ROOT / "tests/fixtures/case_payloads.json").read_text(encoding="utf-8")
-    )
+    status, response = request("GET", "/api/disputes?page=0&size=20")
+    assert status == 200, response
+    items = response["data"]["items"]
+    assert items
+    assert all(item["case_type"] == "DISPUTE" for item in items)
 
-    created_ids: list[str] = []
-    for name, payload in fixtures.items():
-        status, response = request(
-            "POST",
-            "/api/v1/cases",
-            payload={
-                **payload,
-                "order_id": f"{payload['order_id']}_{int(time.time() * 1000)}",
-            },
-            headers={"Idempotency-Key": f"e2e-{name}-{int(time.time() * 1000)}"},
-        )
-        assert status == 201, response
-        assert response["success"] is True
-        assert response["data"]["id"].startswith("CASE_")
-        created_ids.append(response["data"]["id"])
-
-    for case_id in created_ids:
-        status, response = request("GET", f"/api/v1/cases/{case_id}")
+    for item in items:
+        case_id = item["id"]
+        status, response = request("GET", f"/api/disputes/{case_id}")
         assert status == 200, response
         assert response["data"]["id"] == case_id
 
@@ -74,20 +60,20 @@ def test_three_main_intake_paths_are_accepted_through_nginx() -> None:
 def test_repository_e2e_flow_coverage_is_not_only_happy_path() -> None:
     java_tests = "\n".join(
         [
-            (ROOT / "java-api-service/src/test/java/com/example/dispute/router/RouterApiIntegrationTest.java").read_text(encoding="utf-8"),
-            (ROOT / "java-api-service/src/test/java/com/example/dispute/remedy/RemedyApplicationServiceIntegrationTest.java").read_text(encoding="utf-8"),
+            (ROOT / "java-api-service/src/test/java/com/example/dispute/evidence/EvidenceRoomIntegrationTest.java").read_text(encoding="utf-8"),
+            (ROOT / "java-api-service/src/test/java/com/example/dispute/hearing/HearingCollaborationIntegrationTest.java").read_text(encoding="utf-8"),
             (ROOT / "java-api-service/src/test/java/com/example/dispute/review/ReviewApplicationServiceIntegrationTest.java").read_text(encoding="utf-8"),
             (ROOT / "java-api-service/src/test/java/com/example/dispute/executor/ToolExecutorServiceIntegrationTest.java").read_text(encoding="utf-8"),
             (ROOT / "java-api-service/src/test/java/com/example/dispute/evaluation/CaseClosureServiceIntegrationTest.java").read_text(encoding="utf-8"),
-            (ROOT / "java-api-service/src/test/java/com/example/dispute/workflow/CaseFulfillmentDisputeWorkflowTest.java").read_text(encoding="utf-8"),
+            (ROOT / "java-api-service/src/test/java/com/example/dispute/workflow/DisputeHearingWorkflowTest.java").read_text(encoding="utf-8"),
         ]
     )
 
     for required in (
-        "TRANSFERRED",
-        "SIMPLE_HEARING",
-        "FULL_HEARING",
-        "requires_human_review",
+        "BOTH_PARTIES_COMPLETED",
+        "DEADLINE_EXPIRED",
+        "SETTLEMENT_CONFIRMED",
+        "PLATFORM_REVIEWER",
         "unapproved",
         "closesExecutedCaseAndCreatesExactlyOneCompletedEvaluation",
     ):

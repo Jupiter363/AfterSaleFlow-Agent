@@ -26,7 +26,7 @@ class RestClientOcrTaskClientTest {
                         builder.baseUrl("http://ocr:8010")
                                 .defaultHeader("X-Service-Secret", "ocr-secret")
                                 .build());
-        server.expect(requestTo("http://ocr:8010/ocr-api/v1/parse-tasks"))
+        server.expect(requestTo("http://ocr:8010/internal/evidence/parse-tasks"))
                 .andExpect(method(HttpMethod.POST))
                 .andExpect(header("X-Service-Secret", "ocr-secret"))
                 .andExpect(header("X-Trace-Id", "TRACE_ocr_test"))

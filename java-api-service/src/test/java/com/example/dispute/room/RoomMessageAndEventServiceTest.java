@@ -1,6 +1,7 @@
 package com.example.dispute.room;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -148,6 +149,30 @@ class RoomMessageAndEventServiceTest {
         assertThat(replayed.id()).isEqualTo(message.id());
         verify(messageRepository, org.mockito.Mockito.times(1)).save(any());
         verify(eventRepository, org.mockito.Mockito.times(1)).save(any());
+    }
+
+    @Test
+    void platformReviewerCannotPostAPartyStatement() {
+        FulfillmentCaseEntity dispute = evidenceCase();
+        when(caseRepository.findByIdForUpdate(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+
+        assertThatThrownBy(
+                        () ->
+                                messageService.post(
+                                        dispute.getId(),
+                                        RoomType.EVIDENCE,
+                                        new RoomMessageCommand(
+                                                MessageType.PARTY_TEXT,
+                                                "Reviewer must not impersonate a party.",
+                                                List.of()),
+                                        new AuthenticatedActor(
+                                                "reviewer-local",
+                                                ActorRole.PLATFORM_REVIEWER),
+                                        "reviewer-party-message",
+                                        "TRACE_REVIEWER"))
+                .isInstanceOf(
+                        com.example.dispute.common.exception.ForbiddenException.class);
     }
 
     @Test

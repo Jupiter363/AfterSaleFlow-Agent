@@ -3,6 +3,7 @@ package com.example.dispute.hearing.application;
 import com.example.dispute.common.exception.ForbiddenException;
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
+import com.example.dispute.config.DisputeProperties;
 import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.hearing.domain.HearingStopReason;
 import com.example.dispute.hearing.infrastructure.persistence.entity.HearingRoundEntity;
@@ -24,14 +25,13 @@ import org.springframework.transaction.annotation.Transactional;
 @Service
 public class HearingRoundService {
 
-    public static final int MAX_ROUNDS = 3;
-
     private final FulfillmentCaseRepository caseRepository;
     private final HearingStateRepository hearingStateRepository;
     private final HearingRoundRepository roundRepository;
     private final CaseRoomRepository roomRepository;
     private final CaseEventService eventService;
     private final HearingWorkflowCoordinator workflowCoordinator;
+    private final DisputeProperties disputeProperties;
     private final Clock clock;
 
     public HearingRoundService(
@@ -41,6 +41,7 @@ public class HearingRoundService {
             CaseRoomRepository roomRepository,
             CaseEventService eventService,
             HearingWorkflowCoordinator workflowCoordinator,
+            DisputeProperties disputeProperties,
             Clock clock) {
         this.caseRepository = caseRepository;
         this.hearingStateRepository = hearingStateRepository;
@@ -48,6 +49,7 @@ public class HearingRoundService {
         this.roomRepository = roomRepository;
         this.eventService = eventService;
         this.workflowCoordinator = workflowCoordinator;
+        this.disputeProperties = disputeProperties;
         this.clock = clock;
     }
 
@@ -64,7 +66,8 @@ public class HearingRoundService {
                                 .map(HearingRoundEntity::getRoundNo)
                                 .orElse(0)
                         + 1;
-        if (roundNo > MAX_ROUNDS) {
+        int maxRounds = disputeProperties.maxHearingRounds();
+        if (roundNo > maxRounds) {
             throw new IllegalStateException("hearing round limit reached");
         }
         HearingRoundEntity round =
@@ -82,7 +85,7 @@ public class HearingRoundService {
         HearingStopReason stopReason =
                 command.factsSufficient()
                         ? HearingStopReason.FACTS_SUFFICIENT
-                        : roundNo == MAX_ROUNDS
+                        : roundNo == maxRounds
                                 ? HearingStopReason.MAX_ROUNDS
                                 : null;
         round.complete(
@@ -130,7 +133,10 @@ public class HearingRoundService {
                                                     .findByCaseId(caseId)
                                                     .map(state -> state.getId())
                                                     .orElse(null),
-                                            Math.min(next, MAX_ROUNDS),
+                                            Math.min(
+                                                    next,
+                                                    disputeProperties
+                                                            .maxHearingRounds()),
                                             dossierVersion,
                                             clock.instant(),
                                             actorId);

@@ -331,7 +331,7 @@
 - [ ] 能抽取 initiator_role。
 - [ ] 能抽取 order_reference。
 - [ ] 能抽取 user/merchant claim。
-- [ ] 能识别 requested_remedy。
+- [ ] 能识别 requested_outcome。
 - [ ] 能输出 ACCEPTED、NEED_MORE_INFO、NOT_ADMISSIBLE。
 - [ ] 输出引用提交原文。
 - [ ] 不判断谁对谁错。

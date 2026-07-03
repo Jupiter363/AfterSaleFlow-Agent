@@ -96,24 +96,28 @@ public class CaseApplicationService {
     @Transactional(readOnly = true)
     public CasePageView list(
             CaseStatus status,
-            String caseType,
+            String disputeType,
             int page,
             int size,
             AuthenticatedActor actor) {
         Specification<FulfillmentCaseEntity> specification =
                 (root, query, criteria) ->
-                        criteria.isNull(root.get("deletedAt"));
+                        criteria.and(
+                                criteria.isNull(root.get("deletedAt")),
+                                criteria.equal(root.get("caseType"), "DISPUTE"));
         if (status != null) {
             specification =
                     specification.and(
                             (root, query, criteria) ->
                                     criteria.equal(root.get("caseStatus"), status));
         }
-        if (caseType != null && !caseType.isBlank()) {
+        if (disputeType != null && !disputeType.isBlank()) {
             specification =
                     specification.and(
                             (root, query, criteria) ->
-                                    criteria.equal(root.get("caseType"), caseType));
+                                    criteria.equal(
+                                            root.get("disputeType"),
+                                            disputeType));
         }
         specification =
                 switch (actor.role()) {

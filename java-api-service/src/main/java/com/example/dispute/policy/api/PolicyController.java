@@ -17,7 +17,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 @Validated
 @RestController
-@RequestMapping("/api/v1/policies")
+@RequestMapping("/api/reviews/policies")
 public class PolicyController {
 
     private final PolicyApplicationService service;

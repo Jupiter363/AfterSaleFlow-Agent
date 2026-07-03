@@ -3,7 +3,6 @@ package com.example.dispute.evidence.api;
 import com.example.dispute.common.api.ApiResponse;
 import com.example.dispute.common.trace.TraceIdFilter;
 import com.example.dispute.config.AuthenticatedActor;
-import com.example.dispute.evidence.application.BuildDossierResult;
 import com.example.dispute.evidence.application.EvidenceApplicationService;
 import com.example.dispute.evidence.application.EvidenceCatalogService;
 import com.example.dispute.evidence.application.EvidenceCompletionService;
@@ -41,7 +40,7 @@ import org.springframework.web.multipart.MultipartFile;
 
 @Validated
 @RestController
-@RequestMapping({"/api/disputes/{caseId}", "/api/v1/cases/{caseId}"})
+@RequestMapping("/api/disputes/{caseId}")
 public class EvidenceController {
 
     private final EvidenceApplicationService service;
@@ -67,7 +66,7 @@ public class EvidenceController {
     }
 
     @PostMapping(
-            value = {"/evidence", "/evidences"},
+            value = "/evidence",
             consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public ResponseEntity<ApiResponse<EvidenceView>> upload(
             @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
@@ -146,7 +145,7 @@ public class EvidenceController {
                 completionService.status(caseId, actor(authentication)), request);
     }
 
-    @GetMapping({"/evidence-dossiers/{version}", "/dossiers/{version}"})
+    @GetMapping("/evidence-dossiers/{version}")
     public ApiResponse<FrozenEvidenceDossierView> frozenDossier(
             @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
             @PathVariable int version,
@@ -157,30 +156,13 @@ public class EvidenceController {
                 request);
     }
 
-    @GetMapping("/evidence-dossier")
+    @GetMapping("/evidence-dossiers/latest")
     public ApiResponse<FrozenEvidenceDossierView> latestDossier(
             @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
             Authentication authentication,
             HttpServletRequest request) {
         return success(
                 dossierQueryService.latest(caseId, actor(authentication)), request);
-    }
-
-    @PostMapping("/dossier/build")
-    public ApiResponse<BuildDossierResult> build(
-            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
-            Authentication authentication,
-            HttpServletRequest request) {
-        return success(
-                service.buildDossier(caseId, actor(authentication)), request);
-    }
-
-    @GetMapping("/dossier")
-    public ApiResponse<BuildDossierResult> get(
-            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
-            Authentication authentication,
-            HttpServletRequest request) {
-        return success(service.getDossier(caseId, actor(authentication)), request);
     }
 
     private <T> ApiResponse<T> success(T data, HttpServletRequest request) {

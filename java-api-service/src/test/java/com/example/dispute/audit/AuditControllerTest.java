@@ -70,7 +70,7 @@ class AuditControllerTest {
                                                 "2026-06-28T00:00:00Z"))));
 
         mockMvc.perform(
-                        get("/api/v1/cases/CASE_audit/audit-logs")
+                        get("/api/disputes/CASE_audit/audit-logs")
                                 .header(
                                         HeaderAuthenticationFilter.USER_ID_HEADER,
                                         "reviewer-1")

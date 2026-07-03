@@ -51,7 +51,7 @@ def test_evidence_upload_submission_and_review_are_backend_driven() -> None:
     submission = read(FRONTEND / "views" / "SubmissionView.vue")
     review = read(FRONTEND / "views" / "ReviewWorkbenchView.vue")
     assert 'body.append("file", file)' in cases
-    assert "/submissions/${party}" in cases
+    assert "/rooms/EVIDENCE/messages" in cases
     assert "Idempotency-Key" in cases
     assert "pending_requests_json" in submission
     assert "ElMessageBox.confirm" in review

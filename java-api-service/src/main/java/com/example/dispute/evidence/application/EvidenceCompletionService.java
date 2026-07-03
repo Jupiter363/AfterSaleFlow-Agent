@@ -2,6 +2,7 @@ package com.example.dispute.evidence.application;
 
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
+import com.example.dispute.config.DisputeProperties;
 import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.evidence.infrastructure.persistence.entity.EvidencePartyCompletionEntity;
 import com.example.dispute.evidence.infrastructure.persistence.repository.EvidencePartyCompletionRepository;
@@ -19,7 +20,6 @@ import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity
 import com.example.dispute.room.infrastructure.persistence.repository.CasePhaseClockRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import java.time.Clock;
-import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.Optional;
 import java.util.Map;
@@ -32,8 +32,6 @@ import org.springframework.transaction.annotation.Transactional;
 @Service
 public class EvidenceCompletionService {
 
-    private static final Duration HEARING_WINDOW = Duration.ofHours(3);
-
     private final FulfillmentCaseRepository caseRepository;
     private final EvidencePartyCompletionRepository completionRepository;
     private final CaseRoomRepository roomRepository;
@@ -43,6 +41,7 @@ public class EvidenceCompletionService {
     private final CaseEventService caseEventService;
     private final NotificationService notificationService;
     private final HearingWorkflowCoordinator hearingWorkflowCoordinator;
+    private final DisputeProperties disputeProperties;
     private final Clock clock;
 
     public EvidenceCompletionService(
@@ -55,6 +54,7 @@ public class EvidenceCompletionService {
             CaseEventService caseEventService,
             NotificationService notificationService,
             HearingWorkflowCoordinator hearingWorkflowCoordinator,
+            DisputeProperties disputeProperties,
             Clock clock) {
         this.caseRepository = caseRepository;
         this.completionRepository = completionRepository;
@@ -65,6 +65,7 @@ public class EvidenceCompletionService {
         this.caseEventService = caseEventService;
         this.notificationService = notificationService;
         this.hearingWorkflowCoordinator = hearingWorkflowCoordinator;
+        this.disputeProperties = disputeProperties;
         this.clock = clock;
     }
 
@@ -227,7 +228,8 @@ public class EvidenceCompletionService {
                                                         RoomType.HEARING,
                                                         now,
                                                         actorId)));
-        OffsetDateTime hearingDeadline = now.plus(HEARING_WINDOW);
+        OffsetDateTime hearingDeadline =
+                now.plus(disputeProperties.hearingWindow());
         if (clockRepository
                 .findByCaseIdAndClockType(dispute.getId(), PhaseClockType.HEARING)
                 .isEmpty()) {

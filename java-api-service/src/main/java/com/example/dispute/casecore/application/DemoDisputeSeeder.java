@@ -10,7 +10,7 @@ import java.time.OffsetDateTime;
 import java.util.List;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.stereotype.Component;
 
 /**
@@ -19,10 +19,8 @@ import org.springframework.stereotype.Component;
  * enabled.
  */
 @Component
-@ConditionalOnProperty(
-        prefix = "dispute",
-        name = "seed-demo-disputes",
-        havingValue = "true")
+@ConditionalOnExpression(
+        "${dispute.seed-demo-disputes:true} and ${spring.flyway.enabled:true}")
 public class DemoDisputeSeeder implements ApplicationRunner {
 
     private static final AuthenticatedActor DEMO_ADAPTER =

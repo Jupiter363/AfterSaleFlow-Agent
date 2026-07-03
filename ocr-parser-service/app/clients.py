@@ -39,8 +39,7 @@ class CompositeResultSink:
         self._elasticsearch_url = elasticsearch_url.rstrip("/")
         self._headers = {
             "X-Service-Secret": service_secret,
-            "X-User-Id": "ocr-parser-service",
-            "X-Role": "SYSTEM",
+            "X-Service-Identity": "ocr-parser-service",
         }
 
     def publish_success(
@@ -53,7 +52,7 @@ class CompositeResultSink:
         }
         with httpx.Client(timeout=15.0) as client:
             client.post(
-                f"{self._java_api_url}/internal/v1/evidences/"
+                f"{self._java_api_url}/internal/evidence/"
                 f"{request.evidence_id}/parse-result",
                 headers=self._headers,
                 json=payload,
@@ -74,7 +73,7 @@ class CompositeResultSink:
     def publish_failure(self, request: ParseTaskCreate, error_code: str) -> None:
         with httpx.Client(timeout=15.0) as client:
             client.post(
-                f"{self._java_api_url}/internal/v1/evidences/"
+                f"{self._java_api_url}/internal/evidence/"
                 f"{request.evidence_id}/parse-result",
                 headers=self._headers,
                 json={"status": "FAILED", "error_code": error_code},

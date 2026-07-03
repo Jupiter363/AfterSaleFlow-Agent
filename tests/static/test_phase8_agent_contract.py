@@ -59,8 +59,8 @@ def test_agent_has_no_execution_tool_and_masks_trace_inputs() -> None:
 
 def test_agent_api_and_langfuse_headless_keys_are_wired() -> None:
     main = (APP / "main.py").read_text(encoding="utf-8")
-    assert "/agent-api/v1/intake/analyze" in main
-    assert "/agent-api/v1/hearings/analyze" in main
+    assert "/internal/agents/intake/analyze" in main
+    assert "/internal/agents/hearing/run-stage" in main
     assert "X-Service-Secret" in main
 
     compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")

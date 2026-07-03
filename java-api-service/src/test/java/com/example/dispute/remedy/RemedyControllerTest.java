@@ -78,7 +78,7 @@ class RemedyControllerTest {
                                         "2026-06-28T00:00:00Z")));
 
         mockMvc.perform(
-                        get("/api/v1/cases/CASE_remedy/remedy-plan")
+                        get("/api/disputes/CASE_remedy/remedy-plan")
                                 .header(
                                         HeaderAuthenticationFilter.USER_ID_HEADER,
                                         "user-remedy")

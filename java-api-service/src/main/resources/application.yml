@@ -40,3 +40,10 @@ springdoc:
     path: /v3/api-docs
   swagger-ui:
     path: /swagger-ui.html
+
+dispute:
+  evidence-window: ${EVIDENCE_WINDOW:PT2H}
+  hearing-window: ${HEARING_WINDOW:PT3H}
+  max-hearing-rounds: ${MAX_HEARING_ROUNDS:3}
+  sse-heartbeat: ${SSE_HEARTBEAT:PT15S}
+  seed-demo-disputes: ${SEED_DEMO_DISPUTES:true}

@@ -128,9 +128,9 @@ class RouterApiIntegrationTest {
 
         ResponseEntity<Map> policies =
                 restTemplate.exchange(
-                        url("/api/v1/policies?scope=UNSHIPPED_CANCEL"),
+                        url("/api/reviews/policies?scope=UNSHIPPED_CANCEL"),
                         HttpMethod.GET,
-                        new HttpEntity<>(actorHeaders(null)),
+                                new HttpEntity<>(reviewerHeaders()),
                         Map.class);
         assertThat(policies.getStatusCode()).isEqualTo(HttpStatus.OK);
         List<Map<String, Object>> policyData =
@@ -145,9 +145,9 @@ class RouterApiIntegrationTest {
 
         ResponseEntity<Map> allPolicies =
                 restTemplate.exchange(
-                        url("/api/v1/policies"),
+                        url("/api/reviews/policies"),
                         HttpMethod.GET,
-                        new HttpEntity<>(actorHeaders(null)),
+                                new HttpEntity<>(reviewerHeaders()),
                         Map.class);
         assertThat((List<?>) allPolicies.getBody().get("data")).hasSize(2);
     }
@@ -194,7 +194,7 @@ class RouterApiIntegrationTest {
     private ResponseEntity<Map> route(String caseId, String idempotencyKey) {
         HttpHeaders headers = actorHeaders(idempotencyKey);
         return restTemplate.exchange(
-                url("/api/v1/cases/" + caseId + "/route"),
+                url("/api/disputes/" + caseId + "/route"),
                 HttpMethod.POST,
                 new HttpEntity<>(headers),
                 Map.class);
@@ -208,6 +208,14 @@ class RouterApiIntegrationTest {
         if (idempotencyKey != null) {
             headers.set("Idempotency-Key", idempotencyKey);
         }
+        return headers;
+    }
+
+    private HttpHeaders reviewerHeaders() {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.set(HeaderAuthenticationFilter.USER_ID_HEADER, "reviewer-route-api");
+        headers.set(HeaderAuthenticationFilter.ROLE_HEADER, "PLATFORM_REVIEWER");
         return headers;
     }
 

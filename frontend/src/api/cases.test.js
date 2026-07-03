@@ -24,7 +24,7 @@ describe("caseApi", () => {
     });
 
     expect(fetch).toHaveBeenCalledWith(
-      "/api/v1/cases?status=WAITING_HUMAN_REVIEW&case_type=DISPUTE&page=0&size=20",
+      "/api/disputes?status=WAITING_HUMAN_REVIEW&page=0&size=20",
       expect.objectContaining({
         headers: expect.objectContaining({
           "X-User-Id": "user-1",
@@ -57,11 +57,11 @@ describe("caseApi", () => {
     });
 
     expect(fetch).toHaveBeenCalledWith(
-      "/api/v1/cases/CASE_1/submissions/user",
+      "/api/disputes/CASE_1/rooms/EVIDENCE/messages",
       expect.objectContaining({
         method: "POST",
         headers: expect.objectContaining({
-          "Idempotency-Key": "submission-user-uuid-1",
+          "Idempotency-Key": "message-user-uuid-1",
         }),
       }),
     );

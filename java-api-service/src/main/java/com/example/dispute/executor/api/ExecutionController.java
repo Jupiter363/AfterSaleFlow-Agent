@@ -22,7 +22,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 @Validated
 @RestController
-@RequestMapping("/api/v1/cases/{caseId}")
+@RequestMapping("/api/disputes/{caseId}")
 public class ExecutionController {
 
     private final ToolExecutorService service;

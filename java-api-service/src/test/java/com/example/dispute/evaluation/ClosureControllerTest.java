@@ -87,7 +87,7 @@ class ClosureControllerTest {
                 .thenReturn(new EvaluationMetricsView(4, 4, 0.75, 0.25));
 
         mvc.perform(
-                        post("/api/v1/cases/CASE_1/close")
+                        post("/api/disputes/CASE_1/close")
                                 .header(
                                         HeaderAuthenticationFilter.USER_ID_HEADER,
                                         "admin-1")
@@ -101,7 +101,7 @@ class ClosureControllerTest {
                         jsonPath("$.data.evaluation_status")
                                 .value("COMPLETED"));
         mvc.perform(
-                        get("/api/v1/cases/CASE_1/evaluation")
+                        get("/api/disputes/CASE_1/evaluation")
                                 .header(
                                         HeaderAuthenticationFilter.USER_ID_HEADER,
                                         "admin-1")
@@ -113,7 +113,7 @@ class ClosureControllerTest {
                         jsonPath("$.data.metric_scores.draft_approval_rate")
                                 .value(1.0));
         mvc.perform(
-                        get("/api/v1/evaluations/metrics")
+                        get("/api/reviews/evaluations/metrics")
                                 .header(
                                         HeaderAuthenticationFilter.USER_ID_HEADER,
                                         "admin-1")

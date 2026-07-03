@@ -17,7 +17,7 @@ public class RestClientEvaluationAgentClient
         implements EvaluationAgentClient {
 
     private static final String ENDPOINT =
-            "/agent-api/v1/evaluations/analyze";
+            "/internal/agents/evaluation/analyze";
 
     private final RestClient restClient;
 

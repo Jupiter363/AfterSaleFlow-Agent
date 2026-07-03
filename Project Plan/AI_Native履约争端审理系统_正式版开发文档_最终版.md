@@ -1070,22 +1070,26 @@ final_status
 
 ```json
 {
-  "is_potential_dispute": true,
-  "admissibility_recommendation": "ACCEPTED|NEED_MORE_INFO|NOT_ADMISSIBLE",
+  "admissible": true,
+  "admission_recommendation": "ACCEPTED|NEED_MORE_INFO|NOT_ADMISSIBLE",
   "dispute_type": "SIGNED_NOT_RECEIVED|RETURN_SWAP|DAMAGED_GOODS|MISSING_ITEM|REFUND_REJECTION|OTHER",
-  "initiator": "USER|MERCHANT",
-  "claims": [
+  "initiator_role": "USER|MERCHANT",
+  "order_reference": "O-10086",
+  "after_sales_reference": "AS-10086",
+  "logistics_reference": "L-10086",
+  "party_claims": [
     {
       "party": "USER",
       "claim_text": "物流显示签收但本人未收到",
       "source_ref": "SUB-xxx"
     }
   ],
-  "requested_remedy": "REFUND|REPLACEMENT|RETURN|REJECT_REFUND|OTHER|UNKNOWN",
+  "requested_outcome": "REFUND|REPLACEMENT|RETURN|REJECT_REFUND|OTHER|UNKNOWN",
   "missing_initial_fields": [],
-  "risk_signals": [],
+  "initial_risk_signals": [],
   "confidence": 0.86,
-  "next_step": "BUILD_DOSSIER"
+  "next_step": "BUILD_DOSSIER",
+  "room_utterance": "我已完成初步核对，这项请求建议作为履约争端受理并上报。"
 }
 ```
 
@@ -2339,9 +2343,9 @@ Ruleset version
 | GET | `/api/disputes/{caseId}` | 查询案件 |
 | GET | `/api/disputes` | 查询案件列表 |
 | POST | `/api/disputes/{caseId}/evidence` | 提交证据 |
-| GET | `/api/disputes/{caseId}/dossiers/{version}` | 查询卷宗 |
+| GET | `/api/disputes/{caseId}/evidence-dossiers/{version}` | 查询冻结卷宗 |
+| GET | `/api/disputes/{caseId}/events` | SSE 事件流与断线续传 |
 | GET | `/api/disputes/{caseId}/hearing` | 查询审理状态 |
-| POST | `/api/disputes/{caseId}/cancel` | 取消争端 |
 
 #### POST /api/disputes 请求示例
 
@@ -2372,13 +2376,9 @@ Ruleset version
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
-| GET | `/api/reviews/tasks` | 审核任务列表 |
+| GET | `/api/reviews` | 审核任务列表 |
 | GET | `/api/reviews/{reviewId}/packet` | 获取审核包 |
-| POST | `/api/reviews/{reviewId}/approve` | 批准 |
-| POST | `/api/reviews/{reviewId}/modify-and-approve` | 修改后批准 |
-| POST | `/api/reviews/{reviewId}/return` | 退回补证 |
-| POST | `/api/reviews/{reviewId}/reject` | 拒绝 |
-| POST | `/api/reviews/{reviewId}/escalate` | 升级 |
+| POST | `/api/reviews/{reviewId}/decision` | 批准、修改后批准、退回、拒绝或升级 |
 | POST | `/api/reviews/{reviewId}/copilot/query` | 审核辅助问答 |
 
 审核动作请求必须携带：

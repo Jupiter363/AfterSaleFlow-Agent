@@ -213,6 +213,7 @@ def test_all_six_final_internal_agent_routes_are_authenticated() -> None:
         route.path
         for route in client.app.routes
         if route.path.startswith("/internal/agents/")
+        and "/legacy/" not in route.path
     }
     assert paths == {
         "/internal/agents/intake/analyze",

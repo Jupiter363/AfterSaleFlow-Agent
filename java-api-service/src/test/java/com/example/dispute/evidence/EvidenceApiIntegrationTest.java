@@ -112,7 +112,7 @@ class EvidenceApiIntegrationTest {
     }
 
     @Test
-    void uploadsMetadataAndBuildsQueryableVersionedDossierWhenOcrIsDown() {
+    void uploadsMetadataAndAcceptsTrustedOcrCallbackWhenOcrIsDown() {
         when(storage.storeOriginal(any(), any(), any(), any(), any()))
                 .thenReturn(
                         new EvidenceStorage.StoredObject(
@@ -140,7 +140,7 @@ class EvidenceApiIntegrationTest {
 
         ResponseEntity<Map> uploaded =
                 restTemplate.exchange(
-                        url("/api/v1/cases/CASE_evidenceapi/evidences"),
+                        url("/api/disputes/CASE_evidenceapi/evidence"),
                         HttpMethod.POST,
                         new HttpEntity<>(multipart, headers),
                         Map.class);
@@ -156,7 +156,7 @@ class EvidenceApiIntegrationTest {
         ResponseEntity<Map> callback =
                 restTemplate.exchange(
                         url(
-                                "/internal/v1/evidences/"
+                                "/internal/evidence/"
                                         + evidence.get("id")
                                         + "/parse-result"),
                         HttpMethod.POST,
@@ -175,26 +175,6 @@ class EvidenceApiIntegrationTest {
                                 .getParsedText())
                 .isEqualTo("签收证明解析文本");
 
-        ResponseEntity<Map> built =
-                restTemplate.exchange(
-                        url("/api/v1/cases/CASE_evidenceapi/dossier/build"),
-                        HttpMethod.POST,
-                        new HttpEntity<>(actorHeaders(MediaType.APPLICATION_JSON)),
-                        Map.class);
-        ResponseEntity<Map> queried =
-                restTemplate.exchange(
-                        url("/api/v1/cases/CASE_evidenceapi/dossier"),
-                        HttpMethod.GET,
-                        new HttpEntity<>(actorHeaders(MediaType.APPLICATION_JSON)),
-                        Map.class);
-
-        assertThat(built.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(data(built).get("version")).isEqualTo(1);
-        assertThat(((Map<?, ?>) data(built).get("summary")).get("evidence_count"))
-                .isEqualTo(1);
-        assertThat((java.util.List<?>) data(built).get("matrix")).hasSize(1);
-        assertThat(queried.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(data(queried).get("version")).isEqualTo(1);
     }
 
     private HttpHeaders actorHeaders(MediaType contentType) {
@@ -208,8 +188,9 @@ class EvidenceApiIntegrationTest {
     private HttpHeaders systemHeaders() {
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
-        headers.set(HeaderAuthenticationFilter.USER_ID_HEADER, "ocr-parser-service");
-        headers.set(HeaderAuthenticationFilter.ROLE_HEADER, "SYSTEM");
+        headers.set(
+                HeaderAuthenticationFilter.SERVICE_IDENTITY_HEADER,
+                "ocr-parser-service");
         headers.set("X-Service-Secret", "test-ocr-callback-secret");
         return headers;
     }

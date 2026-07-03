@@ -20,7 +20,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 @Validated
 @RestController
-@RequestMapping("/api/v1/cases/{caseId}/route")
+@RequestMapping("/api/disputes/{caseId}/route")
 public class RouterController {
 
     private final RouterApplicationService service;

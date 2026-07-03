@@ -21,7 +21,7 @@ public class RestClientOcrTaskClient implements OcrTaskClient {
     public void createParseTask(ParseTask task) {
         restClient
                 .post()
-                .uri("/ocr-api/v1/parse-tasks")
+                .uri("/internal/evidence/parse-tasks")
                 .headers(
                         headers -> {
                             setCorrelationHeader(

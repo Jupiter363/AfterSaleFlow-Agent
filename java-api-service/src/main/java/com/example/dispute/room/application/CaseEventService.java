@@ -138,7 +138,7 @@ public class CaseEventService {
         return emitter;
     }
 
-    @Scheduled(fixedDelayString = "${dispute.sse-heartbeat-ms:15000}")
+    @Scheduled(fixedDelayString = "${dispute.sse-heartbeat:PT15S}")
     public void heartbeat() {
         subscriptions.forEach(
                 (caseId, caseSubscriptions) ->

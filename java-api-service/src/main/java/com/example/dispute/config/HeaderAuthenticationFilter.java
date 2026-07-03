@@ -30,7 +30,9 @@ public final class HeaderAuthenticationFilter extends OncePerRequestFilter {
         String roleValue = request.getHeader(ROLE_HEADER);
         String serviceIdentity = request.getHeader(SERVICE_IDENTITY_HEADER);
 
-        if (isValidActorId(actorId) && roleValue != null) {
+        if (isValidActorId(actorId)
+                && roleValue != null
+                && !ActorRole.SYSTEM.name().equals(roleValue)) {
             authenticate(actorId, roleValue);
         } else if (isValidActorId(serviceIdentity)) {
             authenticate(serviceIdentity, ActorRole.SYSTEM.name());

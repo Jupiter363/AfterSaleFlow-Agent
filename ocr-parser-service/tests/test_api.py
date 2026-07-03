@@ -55,7 +55,7 @@ def test_health_is_public() -> None:
 def test_parse_task_requires_service_secret() -> None:
     client, _ = client_with_fakes()
 
-    response = client.post("/ocr-api/v1/parse-tasks", json={})
+    response = client.post("/internal/evidence/parse-tasks", json={})
 
     assert response.status_code == 401
     assert response.json()["code"] == "UNAUTHORIZED"
@@ -72,7 +72,7 @@ def test_create_and_query_parse_task() -> None:
     }
 
     created = client.post(
-        "/ocr-api/v1/parse-tasks",
+        "/internal/evidence/parse-tasks",
         headers={"X-Service-Secret": "test-ocr-secret"},
         json=payload,
     )
@@ -82,7 +82,7 @@ def test_create_and_query_parse_task() -> None:
     assert created.json()["trace_id"].startswith("TRACE_")
     task_id = created.json()["data"]["task_id"]
     queried = client.get(
-        f"/ocr-api/v1/parse-tasks/{task_id}",
+        f"/internal/evidence/parse-tasks/{task_id}",
         headers={"X-Service-Secret": "test-ocr-secret"},
     )
     assert queried.status_code == 200
@@ -95,7 +95,7 @@ def test_invalid_payload_uses_unified_error() -> None:
     client, _ = client_with_fakes()
 
     response = client.post(
-        "/ocr-api/v1/parse-tasks",
+        "/internal/evidence/parse-tasks",
         headers={"X-Service-Secret": "test-ocr-secret"},
         json={"evidence_id": "invalid"},
     )

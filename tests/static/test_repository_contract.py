@@ -102,6 +102,11 @@ REQUIRED_ENV_KEYS = {
     "FEATURE_TOOL_EXECUTOR_SIMULATION",
     "ENABLE_AUDIT_LOG",
     "ENABLE_SENSITIVE_LOG_MASKING",
+    "EVIDENCE_WINDOW",
+    "HEARING_WINDOW",
+    "MAX_HEARING_ROUNDS",
+    "SSE_HEARTBEAT",
+    "SEED_DEMO_DISPUTES",
 }
 
 GENERATED_SECRET_KEYS = {
@@ -224,6 +229,44 @@ def test_gitattributes_preserves_container_and_shell_line_endings() -> None:
         "Dockerfile text eol=lf",
     ):
         assert rule in text
+
+
+def test_java_public_controllers_use_only_final_unversioned_api_roots() -> None:
+    source_root = ROOT / "java-api-service" / "src" / "main" / "java"
+    controller_sources = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in source_root.rglob("*Controller.java")
+    )
+
+    assert "/api/v1" not in controller_sources
+    assert '"/api/disputes' in controller_sources
+    assert '"/api/notifications' in controller_sources
+    assert '"/api/reviews' in controller_sources
+
+
+def test_nginx_supports_replayable_sse_without_exposing_internal_routes() -> None:
+    nginx = (ROOT / "deploy" / "nginx" / "default.conf").read_text(
+        encoding="utf-8"
+    )
+
+    assert "location ~ ^/api/disputes/.*/events$" in nginx
+    assert "proxy_buffering off;" in nginx
+    assert "proxy_cache off;" in nginx
+    assert "proxy_read_timeout 4h;" in nginx
+    assert "location ^~ /internal/" in nginx
+    assert "return 404;" in nginx
+
+
+def test_room_timing_configuration_is_declared_with_final_defaults() -> None:
+    application = (
+        ROOT / "java-api-service" / "src" / "main" / "resources" / "application.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "evidence-window: ${EVIDENCE_WINDOW:PT2H}" in application
+    assert "hearing-window: ${HEARING_WINDOW:PT3H}" in application
+    assert "max-hearing-rounds: ${MAX_HEARING_ROUNDS:3}" in application
+    assert "sse-heartbeat: ${SSE_HEARTBEAT:PT15S}" in application
+    assert "seed-demo-disputes: ${SEED_DEMO_DISPUTES:true}" in application
 
 
 def test_windows_secret_generator_preserves_user_key_and_hides_secrets(

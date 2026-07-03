@@ -291,7 +291,7 @@ def create_app(
         )
 
     @app.post(
-        "/agent-api/v1/hearings/analyze",
+        "/internal/agents/legacy/hearing/analyze",
         response_model=HearingAnalysisResult,
     )
     async def analyze_hearing(
@@ -313,7 +313,7 @@ def create_app(
         return await run_in_threadpool(hearing_workflow.analyze, payload, context)
 
     @app.post(
-        "/agent-api/v1/intake/analyze",
+        "/internal/agents/legacy/intake/analyze",
         response_model=IntakeAnalysisOutput,
     )
     async def analyze_intake(
@@ -334,30 +334,6 @@ def create_app(
         )
         return await run_in_threadpool(
             resolved_intake_workflow.analyze, payload, context
-        )
-
-    @app.post(
-        "/agent-api/v1/evaluations/analyze",
-        response_model=EvaluationAnalysisResult,
-    )
-    async def analyze_evaluation(
-        payload: EvaluationAnalyzeRequest,
-        request: Request,
-        x_service_secret: str = Header(alias=SERVICE_SECRET_HEADER),
-        x_role: str = Header(default="SYSTEM", alias="X-Role"),
-    ) -> EvaluationAnalysisResult:
-        _authorize(x_service_secret, resolved.python_agent_service_secret)
-        context = AgentTraceContext(
-            trace_id=request.state.trace_id,
-            request_id=request.state.request_id,
-            case_id=payload.case_id,
-            workflow_id=f"EVALUATION_{payload.case_id}",
-            user_id=None,
-            role=x_role,
-            prompt_version=resolved.evaluation_prompt_version,
-        )
-        return await run_in_threadpool(
-            resolved_evaluation_workflow.analyze, payload, context
         )
 
     return app

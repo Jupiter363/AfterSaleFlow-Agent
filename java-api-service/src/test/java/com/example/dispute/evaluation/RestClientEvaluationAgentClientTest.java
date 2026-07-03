@@ -25,7 +25,7 @@ class RestClientEvaluationAgentClientTest {
                 MockRestServiceServer.bindTo(builder).build();
         server.expect(
                         requestTo(
-                                "http://agent.test/agent-api/v1/evaluations/analyze"))
+                                "http://agent.test/internal/agents/evaluation/analyze"))
                 .andExpect(header("X-Service-Secret", "secret"))
                 .andExpect(header("X-Trace-Id", "TRACE_evaluation"))
                 .andExpect(header("X-Request-Id", "REQ_evaluation"))

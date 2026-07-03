@@ -3,6 +3,7 @@ import { apiRequest, newIdempotencyKey } from "./client";
 function queryString(filters) {
   const params = new URLSearchParams();
   Object.entries(filters).forEach(([key, value]) => {
+    if (key === "case_type") return;
     if (value !== "" && value !== null && value !== undefined) {
       params.set(key, String(value));
     }
@@ -12,22 +13,22 @@ function queryString(filters) {
 
 export const caseApi = {
   list: (actor, filters = {}) =>
-    apiRequest(`/v1/cases?${queryString(filters)}`, actor),
-  get: (actor, caseId) => apiRequest(`/v1/cases/${caseId}`, actor),
+    apiRequest(`/disputes?${queryString(filters)}`, actor),
+  get: (actor, caseId) => apiRequest(`/disputes/${caseId}`, actor),
   dossier: (actor, caseId) =>
-    apiRequest(`/v1/cases/${caseId}/dossier`, actor),
+    apiRequest(`/disputes/${caseId}/evidence-dossiers/latest`, actor),
   hearing: (actor, caseId) =>
-    apiRequest(`/v1/cases/${caseId}/hearing`, actor),
+    apiRequest(`/disputes/${caseId}/hearing`, actor),
   draft: (actor, caseId) =>
-    apiRequest(`/v1/cases/${caseId}/adjudication-draft`, actor),
+    apiRequest(`/disputes/${caseId}/hearing`, actor),
   remedy: (actor, caseId) =>
-    apiRequest(`/v1/cases/${caseId}/remedy-plan`, actor),
+    apiRequest(`/disputes/${caseId}/remedy-plan`, actor),
   actions: (actor, caseId) =>
-    apiRequest(`/v1/cases/${caseId}/actions`, actor),
+    apiRequest(`/disputes/${caseId}/actions`, actor),
   evaluation: (actor, caseId) =>
-    apiRequest(`/v1/cases/${caseId}/evaluation`, actor),
+    apiRequest(`/disputes/${caseId}/evaluation`, actor),
   auditLogs: (actor, caseId) =>
-    apiRequest(`/v1/cases/${caseId}/audit-logs`, actor),
+    apiRequest(`/disputes/${caseId}/audit-logs`, actor),
   uploadEvidence: (
     actor,
     caseId,
@@ -39,15 +40,19 @@ export const caseApi = {
     body.append("evidence_type", evidenceType);
     body.append("source_type", sourceType);
     body.append("visibility", visibility);
-    return apiRequest(`/v1/cases/${caseId}/evidences`, actor, {
+    return apiRequest(`/disputes/${caseId}/evidence`, actor, {
       method: "POST",
       body,
     });
   },
   submitEvidence: (actor, caseId, party, command) =>
-    apiRequest(`/v1/cases/${caseId}/submissions/${party}`, actor, {
+    apiRequest(`/disputes/${caseId}/rooms/EVIDENCE/messages`, actor, {
       method: "POST",
-      headers: { "Idempotency-Key": newIdempotencyKey(`submission-${party}`) },
-      body: JSON.stringify(command),
+      headers: { "Idempotency-Key": newIdempotencyKey(`message-${party}`) },
+      body: JSON.stringify({
+        message_type: "PARTY_EVIDENCE_REFERENCE",
+        text: command.text ?? command.submission_text ?? "Evidence submitted.",
+        attachment_refs: command.evidence_refs ?? command.evidence_ids ?? [],
+      }),
     }),
 };

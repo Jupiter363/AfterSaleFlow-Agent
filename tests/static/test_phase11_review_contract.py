@@ -38,7 +38,7 @@ def test_reviewer_frontend_is_backend_driven_and_role_gated() -> None:
     assert "CUSTOMER_SERVICE" in actor
     assert "MODIFY_AND_APPROVE" in review
     assert "REQUEST_MORE_EVIDENCE" in review
-    assert "review-tasks" in api
+    assert "/reviews" in api
     assert '"element-plus"' in package and '"vue"' in package
 
 

@@ -21,7 +21,7 @@ describe("reviewApi", () => {
     });
 
     expect(fetch).toHaveBeenCalledWith(
-      "/api/v1/review-tasks/REVIEW_1/decision",
+      "/api/reviews/REVIEW_1/decision",
       expect.objectContaining({
         method: "POST",
         headers: expect.objectContaining({

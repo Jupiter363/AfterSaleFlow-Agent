@@ -1,12 +1,12 @@
 package com.example.dispute.hearing.application;
 
 import com.example.dispute.config.AppProperties;
+import com.example.dispute.config.DisputeProperties;
 import com.example.dispute.workflow.domain.HearingWorkflowCommand;
 import com.example.dispute.workflow.temporal.DisputeHearingWorkflow;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowNotFoundException;
 import io.temporal.client.WorkflowOptions;
-import java.time.Duration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -18,15 +18,17 @@ public class HearingWorkflowCoordinator {
 
     private static final Logger LOGGER =
             LoggerFactory.getLogger(HearingWorkflowCoordinator.class);
-    private static final Duration HEARING_WINDOW = Duration.ofHours(3);
-
     private final WorkflowClient workflowClient;
     private final AppProperties properties;
+    private final DisputeProperties disputeProperties;
 
     public HearingWorkflowCoordinator(
-            WorkflowClient workflowClient, AppProperties properties) {
+            WorkflowClient workflowClient,
+            AppProperties properties,
+            DisputeProperties disputeProperties) {
         this.workflowClient = workflowClient;
         this.properties = properties;
+        this.disputeProperties = disputeProperties;
     }
 
     public void startAfterCommit(String caseId, int dossierVersion) {
@@ -45,10 +47,10 @@ public class HearingWorkflowCoordinator {
                                     caseId,
                                     workflowId(caseId),
                                     dossierVersion,
-                                    HEARING_WINDOW,
+                                    disputeProperties.hearingWindow(),
                                     2,
-                                    HEARING_WINDOW,
-                                    HearingRoundService.MAX_ROUNDS));
+                                    disputeProperties.hearingWindow(),
+                                    disputeProperties.maxHearingRounds()));
                 });
     }
 

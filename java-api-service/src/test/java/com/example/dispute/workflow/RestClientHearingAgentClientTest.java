@@ -23,7 +23,9 @@ class RestClientHearingAgentClientTest {
                         .defaultHeader("X-Service-Secret", "secret");
         MockRestServiceServer server =
                 MockRestServiceServer.bindTo(builder).build();
-        server.expect(requestTo("http://agent.test/agent-api/v1/hearings/analyze"))
+        server.expect(
+                        requestTo(
+                                "http://agent.test/internal/agents/legacy/hearing/analyze"))
                 .andExpect(header("X-Service-Secret", "secret"))
                 .andExpect(header("X-Trace-Id", "TRACE_test"))
                 .andExpect(header("X-Request-Id", "REQ_test"))

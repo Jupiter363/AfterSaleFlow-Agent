@@ -29,7 +29,9 @@ class RestClientAgentServiceClientTest {
                         builder.baseUrl("http://agent:8000")
                                 .defaultHeader("X-Service-Secret", "agent-secret")
                                 .build());
-        server.expect(requestTo("http://agent:8000/agent-api/v1/intake/analyze"))
+        server.expect(
+                        requestTo(
+                                "http://agent:8000/internal/agents/legacy/intake/analyze"))
                 .andExpect(method(HttpMethod.POST))
                 .andExpect(header("X-Service-Secret", "agent-secret"))
                 .andExpect(header("X-Trace-Id", "TRACE_agent_test"))

@@ -43,7 +43,7 @@ class SecurityConfigurationTest {
     @Test
     void anonymousRequestReceivesUnifiedUnauthorizedResponse() {
         ResponseEntity<Map> response =
-                restTemplate.getForEntity(url("/api/v1/security-test"), Map.class);
+                restTemplate.getForEntity(url("/api/disputes/security-test"), Map.class);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
         assertThat(response.getBody())
@@ -62,13 +62,62 @@ class SecurityConfigurationTest {
 
         ResponseEntity<String> response =
                 restTemplate.exchange(
-                        url("/api/v1/security-test"),
+                        url("/api/reviews/security-test"),
                         HttpMethod.GET,
                         new HttpEntity<>(headers),
                         String.class);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(response.getBody()).isEqualTo("ok");
+    }
+
+    @Test
+    void actorHeadersCannotCallInternalServiceRoutes() {
+        HttpHeaders headers = new HttpHeaders();
+        headers.set(HeaderAuthenticationFilter.USER_ID_HEADER, "reviewer_001");
+        headers.set(HeaderAuthenticationFilter.ROLE_HEADER, "PLATFORM_REVIEWER");
+
+        ResponseEntity<Map> response =
+                restTemplate.exchange(
+                        url("/internal/security-test"),
+                        HttpMethod.GET,
+                        new HttpEntity<>(headers),
+                        Map.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+    }
+
+    @Test
+    void serviceIdentityCanCallInternalServiceRoutes() {
+        HttpHeaders headers = new HttpHeaders();
+        headers.set(
+                HeaderAuthenticationFilter.SERVICE_IDENTITY_HEADER,
+                "trusted-platform-adapter");
+
+        ResponseEntity<String> response =
+                restTemplate.exchange(
+                        url("/internal/security-test"),
+                        HttpMethod.GET,
+                        new HttpEntity<>(headers),
+                        String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+    }
+
+    @Test
+    void partyRolesCannotEnterReviewApis() {
+        HttpHeaders headers = new HttpHeaders();
+        headers.set(HeaderAuthenticationFilter.USER_ID_HEADER, "user_001");
+        headers.set(HeaderAuthenticationFilter.ROLE_HEADER, "USER");
+
+        ResponseEntity<Map> response =
+                restTemplate.exchange(
+                        url("/api/reviews/security-test"),
+                        HttpMethod.GET,
+                        new HttpEntity<>(headers),
+                        Map.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
     }
 
     @Test
@@ -79,7 +128,7 @@ class SecurityConfigurationTest {
 
         ResponseEntity<Map> response =
                 restTemplate.exchange(
-                        url("/api/v1/security-test"),
+                        url("/api/disputes/security-test"),
                         HttpMethod.GET,
                         new HttpEntity<>(headers),
                         Map.class);
@@ -104,7 +153,11 @@ class SecurityConfigurationTest {
     @RestController
     static class SecurityTestController {
 
-        @GetMapping("/api/v1/security-test")
+        @GetMapping({
+            "/api/disputes/security-test",
+            "/api/reviews/security-test",
+            "/internal/security-test"
+        })
         String protectedEndpoint() {
             return "ok";
         }

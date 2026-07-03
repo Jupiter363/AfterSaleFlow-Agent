@@ -23,7 +23,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 @Validated
 @RestController
-@RequestMapping("/api/v1")
+@RequestMapping("/api")
 public class ClosureController {
 
     private final CaseClosureService service;
@@ -34,7 +34,7 @@ public class ClosureController {
         this.clock = clock;
     }
 
-    @PostMapping("/cases/{caseId}/close")
+    @PostMapping("/disputes/{caseId}/close")
     public ApiResponse<ClosureView> close(
             @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9_]{1,59}")
                     String caseId,
@@ -59,7 +59,7 @@ public class ClosureController {
                 Instant.now(clock));
     }
 
-    @GetMapping("/cases/{caseId}/evaluation")
+    @GetMapping("/disputes/{caseId}/evaluation")
     public ApiResponse<EvaluationReportView> evaluation(
             @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9_]{1,59}")
                     String caseId,
@@ -69,7 +69,7 @@ public class ClosureController {
                 service.evaluation(caseId, actor(authentication)), request);
     }
 
-    @GetMapping("/evaluations/metrics")
+    @GetMapping("/reviews/evaluations/metrics")
     public ApiResponse<EvaluationMetricsView> metrics(
             Authentication authentication, HttpServletRequest request) {
         return success(service.metrics(actor(authentication)), request);

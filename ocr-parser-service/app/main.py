@@ -114,7 +114,7 @@ def create_app(
         return {"status": "UP", "service": "ocr-parser-service"}
 
     @app.post(
-        "/ocr-api/v1/parse-tasks",
+        "/internal/evidence/parse-tasks",
         status_code=status.HTTP_202_ACCEPTED,
         dependencies=[Depends(authenticate)],
     )
@@ -128,7 +128,7 @@ def create_app(
         return success(task, request_body)
 
     @app.get(
-        "/ocr-api/v1/parse-tasks/{task_id}",
+        "/internal/evidence/parse-tasks/{task_id}",
         dependencies=[Depends(authenticate)],
     )
     def get_task(task_id: str, request: Request) -> dict[str, Any]:

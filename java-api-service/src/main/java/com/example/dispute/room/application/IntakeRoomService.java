@@ -4,6 +4,7 @@ import com.example.dispute.common.api.ErrorCode;
 import com.example.dispute.common.exception.NotFoundException;
 import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.config.ActorRole;
+import com.example.dispute.config.DisputeProperties;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.notification.application.NotificationCommand;
@@ -27,14 +28,13 @@ import org.springframework.transaction.annotation.Transactional;
 @Service
 public class IntakeRoomService {
 
-    private static final Duration EVIDENCE_WINDOW = Duration.ofHours(2);
-
     private final FulfillmentCaseRepository caseRepository;
     private final CaseRoomRepository roomRepository;
     private final CasePhaseClockRepository phaseClockRepository;
     private final ParticipantService participantService;
     private final NotificationService notificationService;
     private final EvidenceWindowCoordinator evidenceWindowCoordinator;
+    private final DisputeProperties disputeProperties;
     private final Clock clock;
 
     public IntakeRoomService(
@@ -44,6 +44,7 @@ public class IntakeRoomService {
             ParticipantService participantService,
             NotificationService notificationService,
             EvidenceWindowCoordinator evidenceWindowCoordinator,
+            DisputeProperties disputeProperties,
             Clock clock) {
         this.caseRepository = caseRepository;
         this.roomRepository = roomRepository;
@@ -51,6 +52,7 @@ public class IntakeRoomService {
         this.participantService = participantService;
         this.notificationService = notificationService;
         this.evidenceWindowCoordinator = evidenceWindowCoordinator;
+        this.disputeProperties = disputeProperties;
         this.clock = clock;
     }
 
@@ -87,7 +89,8 @@ public class IntakeRoomService {
         }
 
         participantService.inviteBoth(dispute, actor, now);
-        OffsetDateTime deadline = now.plus(EVIDENCE_WINDOW);
+        Duration evidenceWindow = disputeProperties.evidenceWindow();
+        OffsetDateTime deadline = now.plus(evidenceWindow);
         CaseRoomEntity evidenceRoom =
                 CaseRoomEntity.open(
                         roomId(), caseId, RoomType.EVIDENCE, now, actor.actorId());
@@ -110,7 +113,7 @@ public class IntakeRoomService {
                 actor.actorId());
         caseRepository.save(dispute);
         sendCounterpartySummons(dispute, actor, deadline);
-        evidenceWindowCoordinator.startAfterCommit(caseId, EVIDENCE_WINDOW);
+        evidenceWindowCoordinator.startAfterCommit(caseId, evidenceWindow);
         return new IntakeConfirmationView(
                 caseId,
                 dispute.getCaseStatus(),

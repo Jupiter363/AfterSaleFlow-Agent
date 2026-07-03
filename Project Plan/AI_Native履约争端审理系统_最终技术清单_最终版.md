@@ -810,17 +810,13 @@ POST /api/disputes
 GET  /api/disputes/{caseId}
 GET  /api/disputes
 POST /api/disputes/{caseId}/evidence
-GET  /api/disputes/{caseId}/dossiers/{version}
+GET  /api/disputes/{caseId}/evidence-dossiers/{version}
+GET  /api/disputes/{caseId}/events
 GET  /api/disputes/{caseId}/hearing
-POST /api/disputes/{caseId}/cancel
 
-GET  /api/reviews/tasks
+GET  /api/reviews
 GET  /api/reviews/{reviewId}/packet
-POST /api/reviews/{reviewId}/approve
-POST /api/reviews/{reviewId}/modify-and-approve
-POST /api/reviews/{reviewId}/return
-POST /api/reviews/{reviewId}/reject
-POST /api/reviews/{reviewId}/escalate
+POST /api/reviews/{reviewId}/decision
 POST /api/reviews/{reviewId}/copilot/query
 ```
 

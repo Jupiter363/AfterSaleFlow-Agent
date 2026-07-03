@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
+import com.example.dispute.config.DisputeProperties;
 import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.RiskLevel;
 import com.example.dispute.evidence.application.EvidenceCompletionService;
@@ -42,6 +43,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
 import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
 import org.springframework.context.annotation.Primary;
@@ -54,6 +56,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
 @DataJpaTest(properties = "spring.jpa.hibernate.ddl-auto=validate")
+@EnableConfigurationProperties(DisputeProperties.class)
 @Import({
     EvidenceCompletionService.class,
     EvidenceDossierFreezer.class,

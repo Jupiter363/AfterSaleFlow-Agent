@@ -118,14 +118,14 @@ def test_hearing_api_requires_secret_and_propagates_correlation_ids() -> None:
     client = TestClient(create_app(settings(), workflow))
 
     unauthorized = client.post(
-        "/agent-api/v1/hearings/analyze",
+        "/internal/agents/legacy/hearing/analyze",
         json=request_payload(),
         headers={"X-Service-Secret": "wrong-secret"},
     )
     assert unauthorized.status_code == 401
 
     response = client.post(
-        "/agent-api/v1/hearings/analyze",
+        "/internal/agents/legacy/hearing/analyze",
         json=request_payload(),
         headers={
             "X-Service-Secret": "test-agent-service-secret",
@@ -148,7 +148,7 @@ def test_intake_api_matches_the_java_client_raw_response_contract() -> None:
     )
 
     response = client.post(
-        "/agent-api/v1/intake/analyze",
+        "/internal/agents/legacy/intake/analyze",
         json={
             "order_id": "ORDER_api",
             "after_sale_id": None,
@@ -198,12 +198,12 @@ def test_evaluation_api_only_accepts_authenticated_closed_case_snapshots() -> No
     }
 
     unauthorized = client.post(
-        "/agent-api/v1/evaluations/analyze",
+        "/internal/agents/evaluation/analyze",
         json=payload,
         headers={"X-Service-Secret": "wrong-secret"},
     )
     response = client.post(
-        "/agent-api/v1/evaluations/analyze",
+        "/internal/agents/evaluation/analyze",
         json=payload,
         headers={"X-Service-Secret": "test-agent-service-secret"},
     )

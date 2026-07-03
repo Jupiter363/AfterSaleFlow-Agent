@@ -8,6 +8,7 @@ import static org.mockito.Mockito.when;
 
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
+import com.example.dispute.config.DisputeProperties;
 import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.RiskLevel;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
@@ -30,6 +31,7 @@ import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRe
 import com.example.dispute.workflow.application.EvidenceWindowCoordinator;
 import java.time.Clock;
 import java.time.Instant;
+import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
@@ -67,6 +69,12 @@ class IntakeRoomServiceTest {
                         participants,
                         notificationService,
                         evidenceWindowCoordinator,
+                        new DisputeProperties(
+                                Duration.ofHours(2),
+                                Duration.ofHours(3),
+                                3,
+                                Duration.ofSeconds(15),
+                                true),
                         CLOCK);
         when(caseRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
         when(roomRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));

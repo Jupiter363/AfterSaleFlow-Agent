@@ -7,13 +7,13 @@ JAVA = ROOT / "java-api-service" / "src" / "main"
 
 def test_phase7_modules_and_route_api_exist() -> None:
     java_root = JAVA / "java" / "com" / "example" / "dispute"
-    for module in ("router", "regularflow", "ruleflow", "policy"):
+    for module in ("router", "policy"):
         assert (java_root / module).is_dir()
 
     controller = (
         java_root / "router" / "api" / "RouterController.java"
     ).read_text(encoding="utf-8")
-    assert '/api/v1/cases/{caseId}/route' in controller
+    assert '/api/disputes/{caseId}/route' in controller
     assert 'RequestHeader("Idempotency-Key")' in controller
 
 

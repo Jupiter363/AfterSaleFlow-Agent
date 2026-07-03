@@ -19,6 +19,9 @@ EXPECTED_MIGRATIONS = [
     "V007__final_dispute_core.sql",
     "V008__final_agent_hearing_governance.sql",
     "V009__freeze_review_and_execution_chain.sql",
+    "V010__case_rooms_and_participants.sql",
+    "V011__evidence_verification_and_hearing_settlement.sql",
+    "V012__case_events_and_notification_outbox.sql",
 ]
 
 REQUIRED_TABLES = {
@@ -55,6 +58,17 @@ REQUIRED_TABLES = {
     "deliberation_finding",
     "remedy_action",
     "approval_policy_decision",
+    "case_participant",
+    "case_room",
+    "room_message",
+    "case_phase_clock",
+    "evidence_verification",
+    "evidence_party_completion",
+    "hearing_round",
+    "settlement_proposal",
+    "settlement_confirmation",
+    "notification",
+    "notification_outbox",
 }
 
 
@@ -107,16 +121,28 @@ def test_business_tables_have_ids_timestamps_and_audit_actors() -> None:
         "deliberation_finding",
         "remedy_action",
         "approval_policy_decision",
+        "room_message",
+        "evidence_verification",
+        "evidence_party_completion",
+        "settlement_confirmation",
+        "notification",
+    }
+    system_managed = {
+        "evidence_verification",
+        "notification",
+        "notification_outbox",
     }
 
     for table in REQUIRED_TABLES:
         body = table_body(sql, table)
         assert re.search(r"\bid\s+varchar\(64\)\s+primary\s+key", body), table
         assert "created_at timestamptz" in body, table
-        assert "created_by varchar(128)" in body, table
+        if table not in system_managed:
+            assert "created_by varchar(128)" in body, table
         if table not in append_only:
             assert "updated_at timestamptz" in body, table
-            assert "updated_by varchar(128)" in body, table
+            if table not in system_managed:
+                assert "updated_by varchar(128)" in body, table
 
 
 def test_json_money_time_and_soft_delete_types_follow_contract() -> None:

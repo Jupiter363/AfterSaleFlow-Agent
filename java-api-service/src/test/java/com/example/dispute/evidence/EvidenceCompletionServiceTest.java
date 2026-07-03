@@ -6,6 +6,7 @@ import static org.mockito.Mockito.when;
 
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
+import com.example.dispute.config.DisputeProperties;
 import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.RiskLevel;
 import com.example.dispute.evidence.application.EvidenceCompletionService;
@@ -28,6 +29,7 @@ import com.example.dispute.workflow.application.EvidenceWindowCoordinator;
 import com.example.dispute.hearing.application.HearingWorkflowCoordinator;
 import java.time.Clock;
 import java.time.Instant;
+import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.Optional;
@@ -72,6 +74,12 @@ class EvidenceCompletionServiceTest {
                         caseEventService,
                         notificationService,
                         hearingWorkflowCoordinator,
+                        new DisputeProperties(
+                                Duration.ofHours(2),
+                                Duration.ofHours(3),
+                                3,
+                                Duration.ofSeconds(15),
+                                true),
                         clock);
         dispute =
                 FulfillmentCaseEntity.imported(

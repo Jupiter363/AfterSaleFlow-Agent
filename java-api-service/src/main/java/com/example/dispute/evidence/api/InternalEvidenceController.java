@@ -24,7 +24,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 @Validated
 @RestController
-@RequestMapping("/internal/v1/evidences")
+@RequestMapping("/internal/evidence")
 public class InternalEvidenceController {
 
     private final EvidenceParseResultService service;

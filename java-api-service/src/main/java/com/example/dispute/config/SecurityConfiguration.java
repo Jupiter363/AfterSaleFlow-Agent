@@ -32,6 +32,13 @@ public class SecurityConfiguration {
                                                 "/swagger-ui.html",
                                                 "/swagger-ui/**")
                                         .permitAll()
+                                        .requestMatchers("/internal/**")
+                                        .hasRole("SYSTEM")
+                                        .requestMatchers("/api/reviews/**")
+                                        .hasAnyRole(
+                                                "PLATFORM_REVIEWER",
+                                                "CUSTOMER_SERVICE",
+                                                "ADMIN")
                                         .anyRequest()
                                         .authenticated())
                 .exceptionHandling(

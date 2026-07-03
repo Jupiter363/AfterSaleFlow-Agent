@@ -31,7 +31,7 @@ def test_temporal_workflow_owns_wait_signal_timeout_and_retry() -> None:
 
 def test_hearing_controller_is_async_and_python_does_not_own_global_state() -> None:
     controller = text(
-        JAVA / "workflow" / "api" / "WorkflowController.java"
+        JAVA / "hearing" / "api" / "HearingCollaborationController.java"
     )
     application = text(
         JAVA
@@ -91,7 +91,7 @@ def test_worker_is_explicitly_enabled_only_in_compose() -> None:
 
 def test_phase9_public_api_and_service_auth_headers_exist() -> None:
     controller = text(
-        JAVA / "workflow" / "api" / "WorkflowController.java"
+        JAVA / "hearing" / "api" / "HearingCollaborationController.java"
     )
     client = text(
         JAVA
@@ -100,14 +100,12 @@ def test_phase9_public_api_and_service_auth_headers_exist() -> None:
         / "RestClientHearingAgentClient.java"
     )
     for route in (
-        "/workflow/start",
-        "/hearing",
-        "/submissions/user",
-        "/submissions/merchant",
-        "/workflow/reviewer-signal",
-        "/adjudication-draft",
+        "/rounds",
+        "/rounds/complete",
+        "/settlements",
+        "/settlements/{version}/confirm",
     ):
         assert route in controller
-    assert "/agent-api/v1/hearings/analyze" in client
+    assert "/internal/agents/legacy/hearing/analyze" in client
     assert '"X-Role", "SYSTEM"' in client
     assert "TraceIdFilter.TRACE_HEADER" in client
