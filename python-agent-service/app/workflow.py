@@ -77,6 +77,17 @@ class HearingWorkflow:
                 ],
                 "evidence_timeout": request.evidence_timeout,
                 "dossier_version": request.dossier_version,
+                "round_no": request.round_no,
+                "stop_reason": request.stop_reason,
+                "deadline_expired": request.deadline_expired,
+                "round_limit_reached": request.round_limit_reached,
+                "latest_frozen_dossier_version": (
+                    request.latest_frozen_dossier_version
+                ),
+                "party_absence_flags": request.party_absence_flags,
+                "current_settlement_version": (
+                    request.current_settlement_version
+                ),
             },
             "prior_outputs": request.previous_stage_outputs,
         }
@@ -112,6 +123,14 @@ class HearingWorkflow:
                 output_schema=output_type.__name__,
                 prompt_version=self._prompt_version,
                 model=generation.model,
+                evidence_gaps=_c6_evidence_gaps(request),
+                uncertainties=_c6_uncertainties(request),
+                reviewer_attention=_c6_reviewer_attention(request),
+                recommended_draft=(
+                    output_data.get("draft")
+                    if request.stage is HearingStage.C6_DRAFT_GENERATION
+                    else None
+                ),
             )
             trace.complete(result.model_dump(mode="json"))
             return result
@@ -193,3 +212,53 @@ class HearingWorkflow:
             prompt_version=self._prompt_version,
             model=self._model,
         )
+
+
+def _c6_evidence_gaps(request: HearingStageRequest) -> list[str]:
+    if request.stage is not HearingStage.C6_DRAFT_GENERATION:
+        return []
+    gap_output = request.previous_stage_outputs.get("C2_EVIDENCE_GAP", {})
+    if not isinstance(gap_output, dict):
+        return ["Prior evidence-gap output was unavailable."]
+    gaps = gap_output.get("gaps", [])
+    if not isinstance(gaps, list):
+        return ["Prior evidence-gap output was malformed."]
+    rendered: list[str] = []
+    for gap in gaps:
+        if isinstance(gap, dict):
+            reason = gap.get("reason")
+            if isinstance(reason, str) and reason:
+                rendered.append(reason)
+    return rendered
+
+
+def _c6_uncertainties(request: HearingStageRequest) -> list[str]:
+    if request.stage is not HearingStage.C6_DRAFT_GENERATION:
+        return []
+    values: list[str] = []
+    if request.deadline_expired:
+        values.append("The hearing deadline expired before voluntary convergence.")
+    if request.round_limit_reached:
+        values.append("The three-round hearing limit was reached.")
+    for role, absent in request.party_absence_flags.items():
+        if absent:
+            values.append(f"{role} was absent from the hearing.")
+    return values
+
+
+def _c6_reviewer_attention(request: HearingStageRequest) -> list[str]:
+    if request.stage is not HearingStage.C6_DRAFT_GENERATION:
+        return []
+    attention = [
+        f"Review forced-convergence reason: {request.stop_reason}.",
+        (
+            "Review frozen dossier version "
+            f"{request.latest_frozen_dossier_version} only."
+        ),
+    ]
+    if request.current_settlement_version is not None:
+        attention.append(
+            "Review settlement proposal version "
+            f"{request.current_settlement_version}."
+        )
+    return attention

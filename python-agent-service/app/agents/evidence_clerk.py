@@ -8,10 +8,12 @@ import hashlib
 from app.agents.profiles import final_agent_profiles
 from app.schemas import (
     ClaimIssueEvidenceLink,
+    DossierEvidenceItem,
     EvidenceBuildRequest,
     EvidenceCatalogEntry,
     EvidenceDossierResult,
     EvidenceTimelineEvent,
+    EvidenceVerificationAssessment,
 )
 
 
@@ -77,6 +79,23 @@ class EvidenceClerk:
         ]
         conflicts = _potential_conflicts(request)
         evidence_refs = [item.evidence_id for item in request.evidence]
+        conflicting_types = {
+            item.evidence_type
+            for item in request.evidence
+            if any(
+                conflict.startswith(f"{item.evidence_type} ")
+                for conflict in conflicts
+            )
+        }
+        verification_recommendations = [
+            _verification_assessment(item, conflicting_types)
+            for item in request.evidence
+        ]
+        visibility_warnings = [
+            item.visibility_warning
+            for item in verification_recommendations
+            if item.visibility_warning is not None
+        ]
         return EvidenceDossierResult(
             case_id=request.case_id,
             dossier_version=(request.current_dossier_version or 0) + 1,
@@ -89,6 +108,9 @@ class EvidenceClerk:
             duplicate_groups=duplicate_groups,
             parser_warnings=parser_warnings,
             source_citations=evidence_refs,
+            deterministic_evidence_refs=evidence_refs,
+            verification_recommendations=verification_recommendations,
+            visibility_warnings=visibility_warnings,
         )
 
 
@@ -121,3 +143,34 @@ def _potential_conflicts(
         for evidence_type, values in assertions.items()
         if len(values) > 1
     ]
+
+
+def _verification_assessment(
+    item: DossierEvidenceItem,
+    conflicting_types: set[str],
+) -> EvidenceVerificationAssessment:
+    evidence_id = item.evidence_id
+    visibility_warning = None
+    if item.source_type in {"USER", "MERCHANT"}:
+        visibility_warning = (
+            f"{evidence_id} may become visible to the opposing party "
+            "under the evidence-room policy."
+        )
+    if item.parser_warning:
+        recommendation = "NEEDS_HUMAN_REVIEW"
+        reasons = [item.parser_warning]
+    elif item.evidence_type in conflicting_types:
+        recommendation = "SUSPICIOUS"
+        reasons = ["Conflicts with another assertion of the same evidence type."]
+    elif item.source_type == "PLATFORM":
+        recommendation = "VERIFIED"
+        reasons = ["Reference and source provenance are platform-controlled."]
+    else:
+        recommendation = "PLAUSIBLE"
+        reasons = ["The submitted content is internally usable but not authenticated."]
+    return EvidenceVerificationAssessment(
+        evidence_ref=evidence_id,
+        recommendation=recommendation,
+        reasons=reasons,
+        visibility_warning=visibility_warning,
+    )

@@ -63,6 +63,7 @@ class DeliberationPanel:
             panel_result=panel_result,
             frozen_input_fingerprint=fingerprint,
             critic_reports=reports,
+            trigger_reasons=request.trigger_reasons,
             major_risks=major_risks,
             consensus=[
                 f"{report.critic.value}: {report.findings[0]}"

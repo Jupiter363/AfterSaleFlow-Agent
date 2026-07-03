@@ -86,20 +86,24 @@ class _LegacyEvaluation:
 class _IntakeAgent:
     def analyze(self, request, context, *, case_state):
         return DisputeIntakeResult(
-            is_potential_dispute=True,
-            admissibility_recommendation="ACCEPTED",
+            admissible=True,
+            admission_recommendation="ACCEPTED",
             dispute_type="SIGNED_NOT_RECEIVED",
-            initiator=request.initiator_role,
-            claims=[
+            initiator_role=request.initiator_role,
+            order_reference=request.order_reference,
+            after_sales_reference=request.after_sales_reference,
+            logistics_reference=request.logistics_reference,
+            party_claims=[
                 {
                     "party": request.initiator_role,
                     "claim_text": request.raw_text,
                     "source_ref": request.submission_id,
                 }
             ],
-            requested_remedy="UNKNOWN",
+            requested_outcome="UNKNOWN",
             confidence=0.8,
             next_step="BUILD_DOSSIER",
+            room_utterance="The dispute intake recommendation is ready.",
         )
 
 
@@ -279,8 +283,11 @@ def test_final_internal_agent_routes_return_strict_non_final_outputs() -> None:
                 "dossier_version": 1,
                 "adjudication_draft_version": 1,
                 "rule_version": "RULE_1",
-                "payload": {},
-            }
+                "frozen_dossier_snapshot": {},
+                "frozen_draft_snapshot": {},
+                "frozen_at_event_sequence": 1,
+            },
+            "trigger_reasons": ["HIGH_RISK"],
         },
         headers=_headers(),
     )
@@ -317,7 +324,7 @@ def test_final_internal_agent_routes_return_strict_non_final_outputs() -> None:
         response.status_code == 200
         for response in [intake, evidence, hearing, panel, copilot, evaluation]
     )
-    assert intake.json()["admissibility_recommendation"] == "ACCEPTED"
+    assert intake.json()["admission_recommendation"] == "ACCEPTED"
     assert evidence.json()["liability_determined"] is False
     assert hearing.json()["non_final"] is True
     assert panel.json()["approval_performed"] is False

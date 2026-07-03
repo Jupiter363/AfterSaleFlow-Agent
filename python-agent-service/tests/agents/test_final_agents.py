@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from app.agents.critics import CriticAgent, build_default_critics
 from app.agents.deliberation_panel import DeliberationPanel
@@ -33,6 +34,47 @@ from app.schemas import (
     ReviewCopilotRequest,
     ReviewStatement,
 )
+
+
+def test_room_agent_contracts_expose_final_intake_and_forced_c6_fields() -> None:
+    from app.schemas import DisputeIntakeResult
+
+    assert set(DisputeIntakeResult.model_fields) >= {
+        "admissible",
+        "initiator_role",
+        "order_reference",
+        "after_sales_reference",
+        "logistics_reference",
+        "party_claims",
+        "requested_outcome",
+        "initial_risk_signals",
+        "admission_recommendation",
+        "room_utterance",
+    }
+
+    forced = HearingStageRequest(
+        case_id="CASE_forced",
+        workflow_id="WORKFLOW_forced",
+        stage="C6_DRAFT_GENERATION",
+        dossier_version=3,
+        latest_frozen_dossier_version=3,
+        round_no=3,
+        stop_reason="DEADLINE_EXPIRED",
+        deadline_expired=True,
+        round_limit_reached=False,
+        party_absence_flags={"USER": False, "MERCHANT": True},
+        current_settlement_version=2,
+        claims=[
+            {
+                "claim_id": "CLAIM_forced",
+                "party_type": "USER",
+                "statement": "Parcel not received.",
+            }
+        ],
+    )
+
+    assert forced.deadline_expired is True
+    assert forced.latest_frozen_dossier_version == forced.dossier_version
 
 
 def test_final_profiles_are_default_deny_and_cannot_approve_or_execute() -> None:
@@ -118,7 +160,7 @@ def test_dispute_intake_officer_reuses_intake_analysis_without_deciding() -> Non
         object(),
         case_state="SUBMITTED",
     )
-    assert transferred.admissibility_recommendation == "TRANSFERRED"
+    assert transferred.admissibility_recommendation == "NOT_ADMISSIBLE"
     assert transferred.next_step == "TRANSFER"
 
     with pytest.raises(PermissionError):
@@ -224,6 +266,19 @@ def test_evidence_clerk_versions_and_preserves_evidence_without_deciding() -> No
     assert result.gaps == ["No evidence linked to claim CLAIM_damage"]
     assert result.liability_determined is False
     assert result.remedy_recommended is False
+    assert {
+        item.recommendation for item in result.verification_recommendations
+    } <= {
+        "VERIFIED",
+        "PLAUSIBLE",
+        "SUSPICIOUS",
+        "REJECTED",
+        "NEEDS_HUMAN_REVIEW",
+    }
+    assert result.authenticity_guaranteed is False
+    assert "not an authenticity guarantee" in result.authenticity_disclaimer
+    assert result.deterministic_evidence_refs == result.source_citations
+    assert result.visibility_warnings
 
 
 def _frozen_input() -> FrozenDeliberationInput:
@@ -234,7 +289,11 @@ def _frozen_input() -> FrozenDeliberationInput:
         adjudication_draft_version=2,
         rule_version="RULE_2026_01",
         remedy_plan_candidate_version=1,
-        payload={"recommended_outcome": "REQUEST_MORE_EVIDENCE"},
+        frozen_dossier_snapshot={"evidence_refs": ["EVIDENCE_tracking"]},
+        frozen_draft_snapshot={
+            "recommended_outcome": "REQUEST_MORE_EVIDENCE"
+        },
+        frozen_at_event_sequence=17,
     )
 
 
@@ -273,7 +332,10 @@ def test_all_critics_receive_the_same_frozen_input_and_blocker_is_preserved() ->
 
     critics = build_default_critics(evaluator)
     report = DeliberationPanel(critics).run(
-        DeliberationRequest(frozen_input=_frozen_input())
+        DeliberationRequest(
+            frozen_input=_frozen_input(),
+            trigger_reasons=["EVIDENCE_CONFLICT"],
+        )
     )
 
     assert len(set(fingerprints)) == 1
@@ -281,8 +343,18 @@ def test_all_critics_receive_the_same_frozen_input_and_blocker_is_preserved() ->
     assert report.revision_required is True
     assert report.major_risks == ["EVIDENCE_CONFLICT"]
     assert report.critic_reports[0].severity is CriticSeverity.BLOCKER
+    assert report.trigger_reasons == ["EVIDENCE_CONFLICT"]
     assert report.approval_performed is False
     assert report.execution_triggered is False
+
+
+def test_panel_contract_rejects_unfrozen_room_messages_or_newer_evidence() -> None:
+    payload = _frozen_input().model_dump(mode="json")
+    payload["room_messages"] = [{"sequence": 18, "content": "new assertion"}]
+    payload["evidence_after_dossier_version"] = ["EVIDENCE_late"]
+
+    with pytest.raises(ValidationError):
+        FrozenDeliberationInput.model_validate(payload)
 
 
 def test_failed_or_timed_out_critic_requires_human_review() -> None:
@@ -298,7 +370,10 @@ def test_failed_or_timed_out_critic_requires_human_review() -> None:
         return CriticDraft(severity=CriticSeverity.NONE)
 
     report = DeliberationPanel(build_default_critics(evaluator)).run(
-        DeliberationRequest(frozen_input=frozen_input)
+        DeliberationRequest(
+            frozen_input=frozen_input,
+            trigger_reasons=["CRITIC_REVIEW_REQUIRED"],
+        )
     )
 
     rule_report = next(

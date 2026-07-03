@@ -7,6 +7,7 @@ from typing import Any
 from app.agents.profiles import final_agent_profiles
 from app.schemas import (
     HearingAnalysisResult,
+    HearingStage,
     HearingStageResult,
 )
 
@@ -46,6 +47,13 @@ class PresidingJudge:
             raise PermissionError(
                 f"presiding judge cannot run in case state {case_state}"
             )
-        return HearingStageResult.model_validate(
+        result = HearingStageResult.model_validate(
             self._workflow.run_stage(request, trace_context)
         )
+        if result.stage is HearingStage.C6_DRAFT_GENERATION and (
+            result.recommended_draft is None or not result.reviewer_attention
+        ):
+            raise PermissionError(
+                "C6 must return a non-final draft and reviewer attention"
+            )
+        return result

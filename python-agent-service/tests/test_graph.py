@@ -317,6 +317,18 @@ def test_presiding_judge_stage_runner_executes_exactly_one_node(
                 "statement": "The parcel was not received.",
             }
         ],
+        **(
+            {
+                "stop_reason": "FACTS_SUFFICIENT",
+                "latest_frozen_dossier_version": 3,
+                "party_absence_flags": {
+                    "USER": False,
+                    "MERCHANT": False,
+                },
+            }
+            if stage == "C6_DRAFT_GENERATION"
+            else {}
+        ),
     )
     context = AgentTraceContext(
         trace_id="TRACE_stage",
@@ -335,3 +347,7 @@ def test_presiding_judge_stage_runner_executes_exactly_one_node(
     assert result.dossier_version == 3
     assert result.non_final is True
     assert result.requires_human_review is True
+    if stage == "C6_DRAFT_GENERATION":
+        assert result.recommended_draft is not None
+        assert result.reviewer_attention
+        assert "version 3 only" in result.reviewer_attention[1]

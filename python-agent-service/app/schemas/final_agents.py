@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Annotated, Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from app.schemas.models import (
     EvidenceItem,
@@ -38,16 +38,13 @@ class IntakeClaim(StrictModel):
 
 
 class DisputeIntakeResult(StrictModel):
-    is_potential_dispute: bool
-    admissibility_recommendation: Literal[
-        "ACCEPTED",
-        "NEED_MORE_INFO",
-        "TRANSFERRED",
-    ]
-    dispute_type: Identifier | None = None
-    initiator: Literal["USER", "MERCHANT"]
-    claims: Annotated[list[IntakeClaim], Field(min_length=1, max_length=20)]
-    requested_remedy: Literal[
+    admissible: bool
+    initiator_role: Literal["USER", "MERCHANT"]
+    order_reference: Identifier | None = None
+    after_sales_reference: Identifier | None = None
+    logistics_reference: Identifier | None = None
+    party_claims: Annotated[list[IntakeClaim], Field(min_length=1, max_length=20)]
+    requested_outcome: Literal[
         "REFUND",
         "REPLACEMENT",
         "RETURN",
@@ -55,16 +52,49 @@ class DisputeIntakeResult(StrictModel):
         "OTHER",
         "UNKNOWN",
     ]
+    initial_risk_signals: list[Identifier] = Field(default_factory=list)
+    admission_recommendation: Literal[
+        "ACCEPTED",
+        "NEED_MORE_INFO",
+        "NOT_ADMISSIBLE",
+    ]
+    dispute_type: Identifier | None = None
     missing_initial_fields: list[Identifier] = Field(default_factory=list)
-    risk_signals: list[Identifier] = Field(default_factory=list)
     confidence: Annotated[float, Field(ge=0, le=1)]
     next_step: Literal[
         "BUILD_DOSSIER",
         "REQUEST_MORE_INFO",
         "TRANSFER",
     ]
+    room_utterance: LongText
     liability_determined: Literal[False] = False
     remedy_promised: Literal[False] = False
+
+    @property
+    def is_potential_dispute(self) -> bool:
+        """Compatibility view for callers migrating to ``admissible``."""
+
+        return self.admissible
+
+    @property
+    def admissibility_recommendation(self) -> str:
+        return self.admission_recommendation
+
+    @property
+    def initiator(self) -> str:
+        return self.initiator_role
+
+    @property
+    def claims(self) -> list[IntakeClaim]:
+        return self.party_claims
+
+    @property
+    def requested_remedy(self) -> str:
+        return self.requested_outcome
+
+    @property
+    def risk_signals(self) -> list[Identifier]:
+        return self.initial_risk_signals
 
 
 class HearingStage(StrEnum):
@@ -91,6 +121,38 @@ class HearingStageRequest(StrictModel):
     )
     previous_stage_outputs: dict[str, object] = Field(default_factory=dict)
     evidence_timeout: bool = False
+    round_no: Annotated[int, Field(ge=1, le=3)] = 1
+    stop_reason: Literal[
+        "FACTS_SUFFICIENT",
+        "SETTLEMENT_CONFIRMED",
+        "MAX_ROUNDS",
+        "DEADLINE_EXPIRED",
+    ] | None = None
+    deadline_expired: bool = False
+    round_limit_reached: bool = False
+    latest_frozen_dossier_version: Annotated[int, Field(ge=1)] | None = None
+    party_absence_flags: dict[Literal["USER", "MERCHANT"], bool] = Field(
+        default_factory=dict
+    )
+    current_settlement_version: Annotated[int, Field(ge=1)] | None = None
+
+    @model_validator(mode="after")
+    def require_forced_convergence_context(self) -> "HearingStageRequest":
+        if self.stage is not HearingStage.C6_DRAFT_GENERATION:
+            return self
+        if self.stop_reason is None or self.latest_frozen_dossier_version is None:
+            raise ValueError(
+                "C6 requires stop_reason and latest_frozen_dossier_version"
+            )
+        if set(self.party_absence_flags) != {"USER", "MERCHANT"}:
+            raise ValueError("C6 requires USER and MERCHANT absence flags")
+        if self.latest_frozen_dossier_version != self.dossier_version:
+            raise ValueError("C6 must use the latest frozen dossier version")
+        if self.stop_reason == "DEADLINE_EXPIRED" and not self.deadline_expired:
+            raise ValueError("deadline stop requires deadline_expired=true")
+        if self.stop_reason == "MAX_ROUNDS" and not self.round_limit_reached:
+            raise ValueError("round-limit stop requires round_limit_reached=true")
+        return self
 
 
 class HearingStageResult(StrictModel):
@@ -102,6 +164,10 @@ class HearingStageResult(StrictModel):
     output_schema: Identifier
     prompt_version: Identifier
     model: Identifier
+    evidence_gaps: list[ShortText] = Field(default_factory=list)
+    uncertainties: list[ShortText] = Field(default_factory=list)
+    reviewer_attention: list[ShortText] = Field(default_factory=list)
+    recommended_draft: dict[str, object] | None = None
     non_final: Literal[True] = True
     requires_human_review: Literal[True] = True
 
@@ -142,6 +208,22 @@ class EvidenceCatalogEntry(StrictModel):
     is_party_statement: bool
 
 
+class EvidenceVerificationRecommendation(StrEnum):
+    VERIFIED = "VERIFIED"
+    PLAUSIBLE = "PLAUSIBLE"
+    SUSPICIOUS = "SUSPICIOUS"
+    REJECTED = "REJECTED"
+    NEEDS_HUMAN_REVIEW = "NEEDS_HUMAN_REVIEW"
+
+
+class EvidenceVerificationAssessment(StrictModel):
+    evidence_ref: Identifier
+    recommendation: EvidenceVerificationRecommendation
+    reasons: list[ShortText] = Field(default_factory=list)
+    visibility_warning: ShortText | None = None
+    authenticity_guaranteed: Literal[False] = False
+
+
 class ClaimIssueEvidenceLink(StrictModel):
     claim_id: Identifier
     issue_id: Identifier | None = None
@@ -172,6 +254,15 @@ class EvidenceDossierResult(StrictModel):
     parser_warnings: list[ShortText] = Field(default_factory=list)
     policy_candidates: list[Identifier] = Field(default_factory=list)
     source_citations: list[Identifier] = Field(default_factory=list)
+    deterministic_evidence_refs: list[Identifier] = Field(default_factory=list)
+    verification_recommendations: list[EvidenceVerificationAssessment] = Field(
+        default_factory=list
+    )
+    visibility_warnings: list[ShortText] = Field(default_factory=list)
+    authenticity_guaranteed: Literal[False] = False
+    authenticity_disclaimer: Literal[
+        "Verification is a risk recommendation, not an authenticity guarantee."
+    ] = "Verification is a risk recommendation, not an authenticity guarantee."
     liability_determined: Literal[False] = False
     remedy_recommended: Literal[False] = False
 
@@ -207,7 +298,9 @@ class FrozenDeliberationInput(StrictModel):
     adjudication_draft_version: Annotated[int, Field(ge=1)]
     rule_version: Identifier
     remedy_plan_candidate_version: Annotated[int, Field(ge=1)] | None = None
-    payload: dict[str, object]
+    frozen_dossier_snapshot: dict[str, object]
+    frozen_draft_snapshot: dict[str, object]
+    frozen_at_event_sequence: Annotated[int, Field(ge=0)]
 
 
 class CriticDraft(StrictModel):
@@ -235,6 +328,7 @@ class CriticReport(StrictModel):
 
 class DeliberationRequest(StrictModel):
     frozen_input: FrozenDeliberationInput
+    trigger_reasons: Annotated[list[Identifier], Field(min_length=1, max_length=30)]
 
 
 class DeliberationReport(StrictModel):
@@ -247,6 +341,7 @@ class DeliberationReport(StrictModel):
     ]
     frozen_input_fingerprint: str
     critic_reports: list[CriticReport]
+    trigger_reasons: list[Identifier] = Field(default_factory=list)
     major_risks: list[Identifier] = Field(default_factory=list)
     consensus: list[ShortText] = Field(default_factory=list)
     disagreements: list[ShortText] = Field(default_factory=list)
