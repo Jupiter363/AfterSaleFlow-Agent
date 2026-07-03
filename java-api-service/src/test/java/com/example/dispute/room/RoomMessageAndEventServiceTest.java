@@ -6,6 +6,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.example.dispute.common.exception.IdempotencyConflictException;
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.domain.model.CaseStatus;
@@ -13,12 +14,14 @@ import com.example.dispute.domain.model.RiskLevel;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.room.application.CaseEventService;
+import com.example.dispute.room.application.CaseEventView;
 import com.example.dispute.room.application.RoomMessageCommand;
 import com.example.dispute.room.application.RoomMessageService;
+import com.example.dispute.room.domain.MessageSenderType;
 import com.example.dispute.room.domain.MessageType;
 import com.example.dispute.room.domain.RoomType;
-import com.example.dispute.room.infrastructure.persistence.entity.CaseTimelineEventEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
+import com.example.dispute.room.infrastructure.persistence.entity.CaseTimelineEventEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.RoomMessageEntity;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseParticipantRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
@@ -30,14 +33,20 @@ import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
+import org.hibernate.annotations.Immutable;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
-import org.hibernate.annotations.Immutable;
+import org.springframework.test.util.ReflectionTestUtils;
+import org.springframework.web.servlet.mvc.method.annotation.ResponseBodyEmitter.DataWithMediaType;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 @ExtendWith(MockitoExtension.class)
 class RoomMessageAndEventServiceTest {
@@ -107,25 +116,29 @@ class RoomMessageAndEventServiceTest {
         when(eventRepository.save(any()))
                 .thenAnswer(invocation -> invocation.getArgument(0));
 
+        RoomMessageCommand command =
+                new RoomMessageCommand(
+                        MessageType.PARTY_TEXT,
+                        "The parcel is marked delivered, but I did not receive it.",
+                        List.of());
         var message =
                 messageService.post(
                         dispute.getId(),
                         RoomType.EVIDENCE,
-                        new RoomMessageCommand(
-                                MessageType.PARTY_TEXT,
-                                "物流显示签收，但我没有收到。",
-                                List.of()),
+                        command,
                         new AuthenticatedActor("user-local", ActorRole.USER),
                         "msg-1",
                         "TRACE_1");
 
         assertThat(message.sequenceNo()).isEqualTo(1);
-        assertThat(message.messageText()).contains("没有收到");
+        assertThat(message.messageText()).contains("did not receive");
         ArgumentCaptor<CaseTimelineEventEntity> event =
                 ArgumentCaptor.forClass(CaseTimelineEventEntity.class);
         verify(eventRepository).save(event.capture());
         assertThat(event.getValue().getSequenceNo()).isEqualTo(1);
         assertThat(event.getValue().getEventType()).isEqualTo("ROOM_MESSAGE_CREATED");
+        verify(caseRepository, org.mockito.Mockito.times(2))
+                .findByIdForUpdate(dispute.getId());
 
         ArgumentCaptor<RoomMessageEntity> persistedMessage =
                 ArgumentCaptor.forClass(RoomMessageEntity.class);
@@ -138,10 +151,7 @@ class RoomMessageAndEventServiceTest {
                 messageService.post(
                         dispute.getId(),
                         RoomType.EVIDENCE,
-                        new RoomMessageCommand(
-                                MessageType.PARTY_TEXT,
-                                "重试请求不应生成第二条消息。",
-                                List.of()),
+                        command,
                         new AuthenticatedActor("user-local", ActorRole.USER),
                         "msg-1",
                         "TRACE_2");
@@ -149,6 +159,51 @@ class RoomMessageAndEventServiceTest {
         assertThat(replayed.id()).isEqualTo(message.id());
         verify(messageRepository, org.mockito.Mockito.times(1)).save(any());
         verify(eventRepository, org.mockito.Mockito.times(1)).save(any());
+    }
+
+    @Test
+    void rejectsReusingAnIdempotencyKeyForDifferentImmutableMessageContent() {
+        FulfillmentCaseEntity dispute = evidenceCase();
+        CaseRoomEntity room =
+                CaseRoomEntity.open(
+                        "ROOM_EVIDENCE",
+                        dispute.getId(),
+                        RoomType.EVIDENCE,
+                        OffsetDateTime.parse("2026-07-03T00:00:00Z"),
+                        "system");
+        RoomMessageEntity existing =
+                roomMessage(
+                        "MESSAGE_EXISTING",
+                        "ROOM_EVIDENCE",
+                        1,
+                        ActorRole.USER,
+                        MessageType.PARTY_TEXT,
+                        "original statement",
+                        "[\"USER\",\"MERCHANT\",\"PLATFORM_REVIEWER\"]");
+        when(caseRepository.findByIdForUpdate(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(
+                        dispute.getId(), RoomType.EVIDENCE))
+                .thenReturn(Optional.of(room));
+        when(messageRepository.findByCaseIdAndIdempotencyKey(
+                        dispute.getId(), "same-key"))
+                .thenReturn(Optional.of(existing));
+
+        assertThatThrownBy(
+                        () ->
+                                messageService.post(
+                                        dispute.getId(),
+                                        RoomType.EVIDENCE,
+                                        new RoomMessageCommand(
+                                                MessageType.PARTY_TEXT,
+                                                "attempted replacement",
+                                                List.of()),
+                                        new AuthenticatedActor(
+                                                "user-local", ActorRole.USER),
+                                        "same-key",
+                                        "TRACE_CONFLICT"))
+                .isInstanceOf(IdempotencyConflictException.class)
+                .hasMessageContaining("different room message");
     }
 
     @Test
@@ -195,9 +250,120 @@ class RoomMessageAndEventServiceTest {
                         new AuthenticatedActor("user-local", ActorRole.USER));
 
         assertThat(replay)
-                .extracting(item -> item.sequenceNo())
+                .extracting(CaseEventView::sequenceNo)
                 .containsExactly(5L);
         assertThat(replay.getFirst().payloadJson()).contains("shared");
+    }
+
+    @Test
+    void subscriptionCatchesUpFromDurableStorageBeforeDeliveringANewerLiveEvent() {
+        FulfillmentCaseEntity dispute = evidenceCase();
+        AtomicInteger replayQueries = new AtomicInteger();
+        CaseTimelineEventEntity historical =
+                event(5, "[\"USER\",\"MERCHANT\"]", "historical");
+        CaseTimelineEventEntity live =
+                event(6, "[\"USER\",\"MERCHANT\"]", "live");
+        when(caseRepository.findById(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+        when(caseRepository.findByIdForUpdate(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+        when(eventRepository.findByCaseIdAndEventKey(
+                        dispute.getId(), "event-6"))
+                .thenReturn(Optional.empty());
+        when(eventRepository.findMaxSequenceByCaseId(dispute.getId())).thenReturn(5L);
+        when(eventRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(eventRepository
+                        .findAllByCaseIdAndSequenceNoGreaterThanOrderBySequenceNoAsc(
+                                dispute.getId(), 4L))
+                .thenAnswer(
+                        invocation -> {
+                            if (replayQueries.getAndIncrement() == 0) {
+                                eventService.recordLifecycleEvent(
+                                        dispute.getId(),
+                                        null,
+                                        live.getEventType(),
+                                        Map.of("text", "live"),
+                                        "event-6",
+                                        "system");
+                                return List.of(historical);
+                            }
+                            return List.of(historical, live);
+                        });
+
+        SseEmitter emitter =
+                eventService.subscribe(
+                        dispute.getId(),
+                        4,
+                        new AuthenticatedActor("user-local", ActorRole.USER));
+
+        @SuppressWarnings("unchecked")
+        Set<DataWithMediaType> earlyEvents =
+                (Set<DataWithMediaType>)
+                        ReflectionTestUtils.getField(emitter, "earlySendAttempts");
+        assertThat(earlyEvents)
+                .isNotNull()
+                .extracting(DataWithMediaType::getData)
+                .filteredOn(CaseEventView.class::isInstance)
+                .map(CaseEventView.class::cast)
+                .extracting(CaseEventView::sequenceNo)
+                .containsExactly(5L, 6L);
+    }
+
+    @Test
+    void roomHistoryFiltersReviewerOnlyMessagesForAParty() {
+        FulfillmentCaseEntity dispute = evidenceCase();
+        CaseRoomEntity room =
+                CaseRoomEntity.open(
+                        "ROOM_EVIDENCE",
+                        dispute.getId(),
+                        RoomType.EVIDENCE,
+                        OffsetDateTime.parse("2026-07-03T00:00:00Z"),
+                        "system");
+        when(caseRepository.findById(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(
+                        dispute.getId(), RoomType.EVIDENCE))
+                .thenReturn(Optional.of(room));
+        when(messageRepository.findAllByRoomIdOrderBySequenceNoAsc(room.getId()))
+                .thenReturn(
+                        List.of(
+                                roomMessage(
+                                        "MESSAGE_SHARED",
+                                        room.getId(),
+                                        1,
+                                        ActorRole.USER,
+                                        MessageType.PARTY_TEXT,
+                                        "shared",
+                                        "[\"USER\",\"MERCHANT\",\"PLATFORM_REVIEWER\"]"),
+                                roomMessage(
+                                        "MESSAGE_REVIEWER",
+                                        room.getId(),
+                                        2,
+                                        ActorRole.PLATFORM_REVIEWER,
+                                        MessageType.REVIEWER_NOTE,
+                                        "reviewer only",
+                                        "[\"PLATFORM_REVIEWER\"]")));
+
+        var history =
+                messageService.list(
+                        dispute.getId(),
+                        RoomType.EVIDENCE,
+                        new AuthenticatedActor("user-local", ActorRole.USER));
+
+        assertThat(history)
+                .extracting(item -> item.messageText())
+                .containsExactly("shared");
+
+        var adminHistory =
+                messageService.list(
+                        dispute.getId(),
+                        RoomType.EVIDENCE,
+                        new AuthenticatedActor("admin-local", ActorRole.ADMIN));
+
+        assertThat(adminHistory)
+                .extracting(item -> item.messageText())
+                .containsExactly("shared", "reviewer only");
     }
 
     private static CaseTimelineEventEntity event(
@@ -216,6 +382,33 @@ class RoomMessageAndEventServiceTest {
                 "system");
     }
 
+    private static RoomMessageEntity roomMessage(
+            String id,
+            String roomId,
+            long sequenceNo,
+            ActorRole senderRole,
+            MessageType messageType,
+            String text,
+            String audienceJson) {
+        return RoomMessageEntity.create(
+                id,
+                "CASE_ROOM_TEST",
+                roomId,
+                sequenceNo,
+                senderRole == ActorRole.PLATFORM_REVIEWER
+                        ? MessageSenderType.REVIEWER
+                        : MessageSenderType.PARTY,
+                senderRole.name(),
+                senderRole == ActorRole.USER ? "user-local" : "reviewer-local",
+                audienceJson,
+                messageType,
+                text,
+                "[]",
+                "idem-" + id,
+                Instant.parse("2026-07-03T00:00:00Z"),
+                "TRACE_" + id);
+    }
+
     private static FulfillmentCaseEntity evidenceCase() {
         return FulfillmentCaseEntity.imported(
                 "CASE_ROOM_TEST",
@@ -226,8 +419,8 @@ class RoomMessageAndEventServiceTest {
                 "merchant-local",
                 "idem-room",
                 "SIGNED_NOT_RECEIVED",
-                "签收未收到",
-                "用户表示没有收到已签收包裹",
+                "Marked delivered but not received",
+                "The user states that the signed parcel was never received.",
                 RiskLevel.HIGH,
                 CaseStatus.EVIDENCE_OPEN,
                 "EVIDENCE",

@@ -22,6 +22,7 @@ EXPECTED_MIGRATIONS = [
     "V010__case_rooms_and_participants.sql",
     "V011__evidence_verification_and_hearing_settlement.sql",
     "V012__case_events_and_notification_outbox.sql",
+    "V013__append_only_room_stream.sql",
 ]
 
 REQUIRED_TABLES = {

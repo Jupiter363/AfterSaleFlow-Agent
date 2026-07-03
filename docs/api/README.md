@@ -21,8 +21,16 @@
 ## SSE 断线续传
 
 `GET /api/disputes/{caseId}/events` 返回 `text/event-stream`。客户端重连时使用
-`Last-Event-ID`，服务端从该序号之后重放可见事件。Nginx 对此路径关闭缓冲和缓存，
-读取超时为四小时。
+`Last-Event-ID`，服务端从该序号之后按 `sequence_no` 重放当前角色可见的事件。
+实时通知只用于唤醒订阅，实际补发始终以数据库事件流为准；心跳也会执行补漏，因此
+建连竞态、短暂断线和进程内通知乱序不会跳过持久化事件。每个 SSE 事件的 `id`
+就是案件级 `sequence_no`。
+
+房间消息与案件事件均为追加写记录：Hibernate 实体不可变，PostgreSQL 触发器同时
+拒绝 `UPDATE`、`DELETE` 与 `TRUNCATE`。重复的 `Idempotency-Key` 只有在房间、
+发送者、消息类型、正文和附件完全一致时才返回原消息，否则返回幂等冲突。
+
+Nginx 对事件流路径关闭缓冲和缓存，读取超时为四小时。
 
 ## OpenAPI
 

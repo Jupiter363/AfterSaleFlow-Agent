@@ -21,6 +21,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicLong;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
@@ -51,6 +52,7 @@ public class CaseEventService {
         this.clock = clock;
     }
 
+    @Transactional
     public CaseTimelineEventEntity recordRoomMessage(
             String caseId,
             String roomId,
@@ -58,6 +60,7 @@ public class CaseEventService {
             String messageText,
             String audienceJson,
             String actorId) {
+        lockCase(caseId);
         long sequence = eventRepository.findMaxSequenceByCaseId(caseId) + 1;
         CaseTimelineEventEntity event =
                 eventRepository.save(
@@ -73,10 +76,11 @@ public class CaseEventService {
                                 audienceJson,
                                 "room-message:" + messageId,
                                 actorId));
-        publishAfterCommit(caseId, event);
+        publishAfterCommit(caseId);
         return event;
     }
 
+    @Transactional
     public CaseTimelineEventEntity recordLifecycleEvent(
             String caseId,
             String roomId,
@@ -84,6 +88,7 @@ public class CaseEventService {
             Map<String, Object> payload,
             String eventKey,
             String actorId) {
+        lockCase(caseId);
         return eventRepository
                 .findByCaseIdAndEventKey(caseId, eventKey)
                 .orElseGet(
@@ -104,7 +109,7 @@ public class CaseEventService {
                                                     "[]",
                                                     eventKey,
                                                     actorId));
-                            publishAfterCommit(caseId, event);
+                            publishAfterCommit(caseId);
                             return event;
                         });
     }
@@ -133,8 +138,7 @@ public class CaseEventService {
         emitter.onCompletion(remove);
         emitter.onTimeout(remove);
         emitter.onError(ignored -> remove.run());
-        replay(caseId, afterSequence, actor)
-                .forEach(event -> send(caseId, subscription, event));
+        catchUp(caseId, subscription);
         return emitter;
     }
 
@@ -144,17 +148,23 @@ public class CaseEventService {
                 (caseId, caseSubscriptions) ->
                         caseSubscriptions.forEach(
                                 subscription -> {
+                                    if (!catchUp(caseId, subscription)) {
+                                        return;
+                                    }
                                     try {
-                                        subscription.emitter().send(
-                                                SseEmitter.event().comment("heartbeat"));
+                                        synchronized (subscription) {
+                                            subscription.emitter().send(
+                                                    SseEmitter.event()
+                                                            .comment("heartbeat"));
+                                        }
                                     } catch (IOException failure) {
                                         remove(caseId, subscription);
                                     }
                                 }));
     }
 
-    private void publishAfterCommit(String caseId, CaseTimelineEventEntity event) {
-        Runnable publish = () -> publish(caseId, event);
+    private void publishAfterCommit(String caseId) {
+        Runnable publish = () -> publish(caseId);
         if (TransactionSynchronizationManager.isActualTransactionActive()) {
             TransactionSynchronizationManager.registerSynchronization(
                     new TransactionSynchronization() {
@@ -168,32 +178,43 @@ public class CaseEventService {
         }
     }
 
-    private void publish(String caseId, CaseTimelineEventEntity event) {
-        CaseEventView view = view(event);
+    private void publish(String caseId) {
         subscriptions.getOrDefault(caseId, new CopyOnWriteArrayList<>())
-                .forEach(
-                        subscription -> {
-                            if (visibleTo(event, subscription.role())) {
-                                send(caseId, subscription, view);
-                            }
-                        });
+                .forEach(subscription -> catchUp(caseId, subscription));
     }
 
-    private void send(String caseId, Subscription subscription, CaseEventView event) {
+    private boolean catchUp(String caseId, Subscription subscription) {
         synchronized (subscription) {
-            if (event.sequenceNo() <= subscription.lastSequence().get()) {
-                return;
-            }
             try {
-                subscription.emitter().send(
-                        SseEmitter.event()
-                                .id(Long.toString(event.sequenceNo()))
-                                .name(event.eventType())
-                                .data(event));
-                subscription.lastSequence().set(event.sequenceNo());
-            } catch (IOException failure) {
+                eventRepository
+                        .findAllByCaseIdAndSequenceNoGreaterThanOrderBySequenceNoAsc(
+                                caseId, subscription.lastSequence().get())
+                        .stream()
+                        .filter(event -> visibleTo(event, subscription.role()))
+                        .map(CaseEventService::view)
+                        .forEach(event -> sendLocked(subscription, event));
+                return true;
+            } catch (RuntimeException failure) {
                 remove(caseId, subscription);
+                subscription.emitter().completeWithError(failure);
+                return false;
             }
+        }
+    }
+
+    private void sendLocked(Subscription subscription, CaseEventView event) {
+        if (event.sequenceNo() <= subscription.lastSequence().get()) {
+            return;
+        }
+        try {
+            subscription.emitter().send(
+                    SseEmitter.event()
+                            .id(Long.toString(event.sequenceNo()))
+                            .name(event.eventType())
+                            .data(event));
+            subscription.lastSequence().set(event.sequenceNo());
+        } catch (IOException failure) {
+            throw new EventDeliveryException(failure);
         }
     }
 
@@ -219,7 +240,16 @@ public class CaseEventService {
         }
     }
 
+    private void lockCase(String caseId) {
+        caseRepository
+                .findByIdForUpdate(caseId)
+                .orElseThrow(() -> new IllegalArgumentException("case not found"));
+    }
+
     private boolean visibleTo(CaseTimelineEventEntity event, ActorRole role) {
+        if (role == ActorRole.ADMIN || role == ActorRole.SYSTEM) {
+            return true;
+        }
         try {
             List<String> audiences =
                     objectMapper.readValue(
@@ -267,4 +297,10 @@ public class CaseEventService {
 
     private record Subscription(
             ActorRole role, SseEmitter emitter, AtomicLong lastSequence) {}
+
+    private static final class EventDeliveryException extends RuntimeException {
+        private EventDeliveryException(IOException cause) {
+            super(cause);
+        }
+    }
 }

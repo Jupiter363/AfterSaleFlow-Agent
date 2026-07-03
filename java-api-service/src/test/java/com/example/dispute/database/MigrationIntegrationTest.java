@@ -54,7 +54,7 @@ class MigrationIntegrationTest {
         MigrateResult first = flyway.migrate();
         MigrateResult second = flyway.migrate();
 
-        assertThat(first.migrationsExecuted).isEqualTo(12);
+        assertThat(first.migrationsExecuted).isEqualTo(13);
         assertThat(second.migrationsExecuted).isZero();
 
         try (Connection connection =
@@ -152,6 +152,11 @@ class MigrationIntegrationTest {
                                     "fulfillment_dispute_case",
                                     "source_type = 'EXTERNAL_IMPORT'"))
                     .isZero();
+            assertThat(loadTriggers(connection))
+                    .contains(
+                            "trg_room_message_append_only",
+                            "trg_case_timeline_event_append_only");
+            assertAppendOnlyTablesRejectMutation(connection);
         }
     }
 
@@ -237,5 +242,91 @@ class MigrationIntegrationTest {
             assertThat(result.next()).isTrue();
             return result.getLong(1);
         }
+    }
+
+    private static Set<String> loadTriggers(Connection connection) throws SQLException {
+        Set<String> triggers = new HashSet<>();
+        try (Statement statement = connection.createStatement();
+                ResultSet result =
+                        statement.executeQuery(
+                                """
+                                select trigger_name
+                                from information_schema.triggers
+                                where trigger_schema = 'public'
+                                """)) {
+            while (result.next()) {
+                triggers.add(result.getString(1));
+            }
+        }
+        return triggers;
+    }
+
+    private static void assertAppendOnlyTablesRejectMutation(Connection connection)
+            throws SQLException {
+        try (Statement statement = connection.createStatement()) {
+            statement.executeUpdate(
+                    """
+                    insert into fulfillment_dispute_case (
+                        id, user_id, merchant_id, creation_idempotency_key,
+                        case_type, case_status, risk_level, title, description,
+                        created_by, updated_by
+                    ) values (
+                        'CASE_APPEND_ONLY', 'user-local', 'merchant-local', 'append-only-case',
+                        'DISPUTE', 'EVIDENCE_OPEN', 'HIGH', 'Append-only test',
+                        'Database immutability test', 'test', 'test'
+                    )
+                    """);
+            statement.executeUpdate(
+                    """
+                    insert into case_room (
+                        id, case_id, room_type, room_status, opened_at,
+                        created_by, updated_by
+                    ) values (
+                        'ROOM_APPEND_ONLY', 'CASE_APPEND_ONLY', 'EVIDENCE', 'OPEN', now(),
+                        'test', 'test'
+                    )
+                    """);
+            statement.executeUpdate(
+                    """
+                    insert into room_message (
+                        id, case_id, room_id, sequence_no, sender_type, sender_role,
+                        sender_id, message_type, message_text, idempotency_key, created_by
+                    ) values (
+                        'MESSAGE_APPEND_ONLY', 'CASE_APPEND_ONLY', 'ROOM_APPEND_ONLY', 1,
+                        'PARTY', 'USER', 'user-local', 'PARTY_TEXT', 'original',
+                        'append-only-message', 'user-local'
+                    )
+                    """);
+            statement.executeUpdate(
+                    """
+                    insert into case_timeline_event (
+                        id, case_id, sequence_no, event_type, event_time, created_by
+                    ) values (
+                        'EVENT_APPEND_ONLY', 'CASE_APPEND_ONLY', 1, 'ROOM_MESSAGE_CREATED',
+                        now(), 'test'
+                    )
+                    """);
+        }
+
+        assertThatSqlFails(
+                connection,
+                "update room_message set message_text = 'mutated' where id = 'MESSAGE_APPEND_ONLY'",
+                "room_message is append-only");
+        assertThatSqlFails(
+                connection,
+                "delete from case_timeline_event where id = 'EVENT_APPEND_ONLY'",
+                "case_timeline_event is append-only");
+    }
+
+    private static void assertThatSqlFails(
+            Connection connection, String sql, String expectedMessage) {
+        org.assertj.core.api.Assertions.assertThatThrownBy(
+                        () -> {
+                            try (Statement statement = connection.createStatement()) {
+                                statement.executeUpdate(sql);
+                            }
+                        })
+                .isInstanceOf(SQLException.class)
+                .hasMessageContaining(expectedMessage);
     }
 }

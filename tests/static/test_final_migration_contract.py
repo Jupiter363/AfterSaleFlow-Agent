@@ -30,6 +30,7 @@ def test_final_forward_migrations_exist() -> None:
     assert (
         MIGRATIONS / "V012__case_events_and_notification_outbox.sql"
     ).is_file()
+    assert (MIGRATIONS / "V013__append_only_room_stream.sql").is_file()
 
 
 def test_final_core_renames_the_business_fact_tables() -> None:
@@ -108,3 +109,11 @@ def test_room_collaboration_migrations_cover_the_final_product() -> None:
     assert "sequence_no" in events
     assert "audience_json" in events
     assert "business_event_key" in events
+
+
+def test_room_messages_and_replay_events_are_database_append_only() -> None:
+    append_only = migration("V013__append_only_room_stream.sql")
+
+    assert "trg_room_message_append_only" in append_only
+    assert "trg_case_timeline_event_append_only" in append_only
+    assert "before update or delete or truncate" in append_only

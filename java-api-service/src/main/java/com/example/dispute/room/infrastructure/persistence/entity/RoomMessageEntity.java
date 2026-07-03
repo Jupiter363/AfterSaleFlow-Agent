@@ -115,6 +115,7 @@ public class RoomMessageEntity extends AbstractEntity {
     public long getSequenceNo() { return sequenceNo; }
     public String getSenderRole() { return senderRole; }
     public String getSenderId() { return senderId; }
+    public String getAudienceJson() { return audienceJson; }
     public MessageType getMessageType() { return messageType; }
     public String getMessageText() { return messageText; }
     public String getAttachmentRefsJson() { return attachmentRefsJson; }

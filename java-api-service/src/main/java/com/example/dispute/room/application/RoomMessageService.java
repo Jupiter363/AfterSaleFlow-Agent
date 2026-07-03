@@ -1,5 +1,6 @@
 package com.example.dispute.room.application;
 
+import com.example.dispute.common.exception.IdempotencyConflictException;
 import com.example.dispute.common.exception.ForbiddenException;
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
@@ -19,6 +20,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.util.List;
+import java.util.Objects;
 import java.util.UUID;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -62,14 +64,23 @@ public class RoomMessageService {
                         .findByIdForUpdate(caseId)
                         .orElseThrow(() -> new IllegalArgumentException("case not found"));
         assertCanPost(dispute, actor, command.messageType());
+        CaseRoomEntity requestedRoom =
+                roomRepository
+                        .findByCaseIdAndRoomType(dispute.getId(), roomType)
+                        .orElseThrow(() -> new IllegalArgumentException("room not found"));
         return messageRepository
                 .findByCaseIdAndIdempotencyKey(caseId, idempotencyKey)
-                .map(this::view)
+                .map(
+                        existing -> {
+                            assertSameImmutableRequest(
+                                    existing, requestedRoom, command, actor);
+                            return view(existing);
+                        })
                 .orElseGet(
                         () ->
                                 create(
                                         dispute,
-                                        roomType,
+                                        requestedRoom,
                                         command,
                                         actor,
                                         idempotencyKey,
@@ -90,21 +101,18 @@ public class RoomMessageService {
                         .orElseThrow(() -> new IllegalArgumentException("room not found"));
         return messageRepository.findAllByRoomIdOrderBySequenceNoAsc(room.getId())
                 .stream()
+                .filter(message -> visibleTo(message, actor.role()))
                 .map(this::view)
                 .toList();
     }
 
     private RoomMessageView create(
             FulfillmentCaseEntity dispute,
-            RoomType roomType,
+            CaseRoomEntity room,
             RoomMessageCommand command,
             AuthenticatedActor actor,
             String idempotencyKey,
             String traceId) {
-        CaseRoomEntity room =
-                roomRepository
-                        .findByCaseIdAndRoomType(dispute.getId(), roomType)
-                        .orElseThrow(() -> new IllegalArgumentException("room not found"));
         if (room.getRoomStatus() != RoomStatus.OPEN) {
             throw new IllegalStateException("room is not open");
         }
@@ -135,6 +143,25 @@ public class RoomMessageService {
                 audienceJson,
                 actor.actorId());
         return view(saved);
+    }
+
+    private void assertSameImmutableRequest(
+            RoomMessageEntity existing,
+            CaseRoomEntity requestedRoom,
+            RoomMessageCommand command,
+            AuthenticatedActor actor) {
+        RoomMessageView existingView = view(existing);
+        boolean sameRequest =
+                existing.getRoomId().equals(requestedRoom.getId())
+                        && existing.getSenderRole().equals(actor.role().name())
+                        && existing.getSenderId().equals(actor.actorId())
+                        && existing.getMessageType() == command.messageType()
+                        && Objects.equals(existing.getMessageText(), command.text())
+                        && existingView.attachmentRefs().equals(command.attachmentRefs());
+        if (!sameRequest) {
+            throw new IdempotencyConflictException(
+                    "Idempotency-Key was already used for a different room message");
+        }
     }
 
     private void assertCanPost(
@@ -195,14 +222,34 @@ public class RoomMessageService {
         }
     }
 
+    private boolean visibleTo(RoomMessageEntity message, ActorRole role) {
+        if (role == ActorRole.ADMIN || role == ActorRole.SYSTEM) {
+            return true;
+        }
+        try {
+            List<String> audiences =
+                    objectMapper.readValue(
+                            message.getAudienceJson(), new TypeReference<>() {});
+            return audiences.isEmpty() || audiences.contains(role.name());
+        } catch (JsonProcessingException exception) {
+            throw new IllegalStateException("invalid message audience", exception);
+        }
+    }
+
     private String audience(MessageType messageType) {
         return messageType == MessageType.REVIEWER_NOTE
-                ? json(List.of(ActorRole.PLATFORM_REVIEWER.name()))
+                ? json(
+                        List.of(
+                                ActorRole.PLATFORM_REVIEWER.name(),
+                                ActorRole.ADMIN.name()))
                 : json(
                         List.of(
                                 ActorRole.USER.name(),
                                 ActorRole.MERCHANT.name(),
-                                ActorRole.PLATFORM_REVIEWER.name()));
+                                ActorRole.CUSTOMER_SERVICE.name(),
+                                ActorRole.PLATFORM_REVIEWER.name(),
+                                ActorRole.ADMIN.name(),
+                                ActorRole.SYSTEM.name()));
     }
 
     private String json(Object value) {
