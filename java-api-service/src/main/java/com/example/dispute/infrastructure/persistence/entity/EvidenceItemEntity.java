@@ -191,6 +191,14 @@ public class EvidenceItemEntity extends AbstractEntity {
         return sourceType;
     }
 
+    public String getSubmittedByRole() {
+        return submittedByRole;
+    }
+
+    public String getSubmittedById() {
+        return submittedById;
+    }
+
     public String getFileBucket() {
         return fileBucket;
     }

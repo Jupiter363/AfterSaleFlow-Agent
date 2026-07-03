@@ -122,6 +122,14 @@ public class CasePhaseClockEntity extends AbstractEntity {
         return deadlineAt;
     }
 
+    public void completeEarly(OffsetDateTime now, String actorId) {
+        if (clockStatus != PhaseClockStatus.RUNNING) return;
+        clockStatus = PhaseClockStatus.COMPLETED_EARLY;
+        completedAt = now;
+        completionReason = "BOTH_PARTIES_COMPLETED";
+        updatedBy = required(actorId, "actorId");
+    }
+
     private static String required(String value, String field) {
         if (value == null || value.isBlank()) {
             throw new IllegalArgumentException(field + " must not be blank");

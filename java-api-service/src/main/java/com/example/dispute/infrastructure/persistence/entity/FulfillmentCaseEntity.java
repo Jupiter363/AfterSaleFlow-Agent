@@ -270,6 +270,17 @@ public class FulfillmentCaseEntity extends AbstractEntity {
         }
     }
 
+    public void openHearing(OffsetDateTime deadlineAt, String actorId) {
+        if (caseStatus != CaseStatus.EVIDENCE_OPEN
+                && caseStatus != CaseStatus.EVIDENCE_SEALED) {
+            throw new IllegalStateException("hearing cannot open from " + caseStatus);
+        }
+        caseStatus = CaseStatus.HEARING_OPEN;
+        currentRoom = "HEARING";
+        currentDeadlineAt = Objects.requireNonNull(deadlineAt, "deadlineAt must not be null");
+        updatedBy = required(actorId, "actorId");
+    }
+
     public void markDossierBuilt(String actorId) {
         if (caseStatus == CaseStatus.WAITING_SLOT_COMPLETION
                 || caseStatus == CaseStatus.CLOSED

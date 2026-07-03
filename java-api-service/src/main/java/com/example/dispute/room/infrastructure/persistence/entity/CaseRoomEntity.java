@@ -129,6 +129,15 @@ public class CaseRoomEntity extends AbstractEntity {
         return roomStatus;
     }
 
+    public void seal(OffsetDateTime now, String actorId) {
+        if (roomStatus != RoomStatus.OPEN && roomStatus != RoomStatus.WAITING) {
+            throw new IllegalStateException("room cannot be sealed from " + roomStatus);
+        }
+        roomStatus = RoomStatus.SEALED;
+        sealedAt = now;
+        updatedBy = required(actorId, "actorId");
+    }
+
     private static String required(String value, String field) {
         if (value == null || value.isBlank()) {
             throw new IllegalArgumentException(field + " must not be blank");
