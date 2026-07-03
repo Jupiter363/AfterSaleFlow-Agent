@@ -14,6 +14,10 @@ import com.example.dispute.notification.infrastructure.persistence.repository.No
 import com.example.dispute.room.application.IntakeConfirmationCommand;
 import com.example.dispute.room.application.IntakeRoomService;
 import com.example.dispute.room.application.ParticipantService;
+import com.example.dispute.room.application.CaseEventService;
+import com.example.dispute.room.application.RoomMessageCommand;
+import com.example.dispute.room.application.RoomMessageService;
+import com.example.dispute.room.domain.MessageType;
 import com.example.dispute.room.domain.PhaseClockStatus;
 import com.example.dispute.room.domain.PhaseClockType;
 import com.example.dispute.room.domain.RoomStatus;
@@ -21,10 +25,14 @@ import com.example.dispute.room.domain.RoomType;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseParticipantRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CasePhaseClockRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
+import com.example.dispute.room.infrastructure.persistence.repository.CaseTimelineEventRepository;
+import com.example.dispute.room.infrastructure.persistence.repository.RoomMessageRepository;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
@@ -44,6 +52,8 @@ import org.testcontainers.utility.DockerImageName;
     IntakeRoomService.class,
     ParticipantService.class,
     NotificationService.class,
+    CaseEventService.class,
+    RoomMessageService.class,
     IntakeRoomServiceIntegrationTest.FixedClockConfiguration.class
 })
 @Testcontainers
@@ -80,6 +90,9 @@ class IntakeRoomServiceIntegrationTest {
     @Autowired private CasePhaseClockRepository clockRepository;
     @Autowired private NotificationRepository notificationRepository;
     @Autowired private NotificationOutboxRepository outboxRepository;
+    @Autowired private RoomMessageService roomMessageService;
+    @Autowired private RoomMessageRepository messageRepository;
+    @Autowired private CaseTimelineEventRepository eventRepository;
 
     @Test
     void acceptedIntakePersistsParticipantsRoomsAndTheAuthoritativeDeadline() {
@@ -152,6 +165,35 @@ class IntakeRoomServiceIntegrationTest {
                                         .isEqualTo(
                                                 "/disputes/CASE_INTEGRATION/evidence"));
         assertThat(outboxRepository.count()).isEqualTo(1);
+
+        var posted =
+                roomMessageService.post(
+                        dispute.getId(),
+                        RoomType.EVIDENCE,
+                        new RoomMessageCommand(
+                                MessageType.PARTY_TEXT,
+                                "补充提交开箱照片。",
+                                List.of("EVIDENCE_1")),
+                        new AuthenticatedActor("user-local", ActorRole.USER),
+                        "msg-integration-1",
+                        "TRACE_integration");
+        caseRepository.flush();
+
+        assertThat(posted.sequenceNo()).isEqualTo(1);
+        assertThat(messageRepository.findAllByRoomIdOrderBySequenceNoAsc(posted.roomId()))
+                .singleElement()
+                .satisfies(
+                        message ->
+                                assertThat(message.getMessageText())
+                                        .isEqualTo("补充提交开箱照片。"));
+        assertThat(
+                        eventRepository
+                                .findAllByCaseIdAndSequenceNoGreaterThanOrderBySequenceNoAsc(
+                                        dispute.getId(), 0))
+                .singleElement()
+                .satisfies(
+                        event ->
+                                assertThat(event.getSequenceNo()).isEqualTo(1));
     }
 
     @TestConfiguration(proxyBeanMethods = false)
@@ -162,6 +204,11 @@ class IntakeRoomServiceIntegrationTest {
         Clock fixedClock() {
             return Clock.fixed(
                     Instant.parse("2026-07-03T00:00:00Z"), ZoneOffset.UTC);
+        }
+
+        @Bean
+        ObjectMapper objectMapper() {
+            return new ObjectMapper().findAndRegisterModules();
         }
     }
 }
