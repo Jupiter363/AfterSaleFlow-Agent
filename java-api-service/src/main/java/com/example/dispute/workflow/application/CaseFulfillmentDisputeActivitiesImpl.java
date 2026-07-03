@@ -118,6 +118,10 @@ public class CaseFulfillmentDisputeActivitiesImpl
                     if (disputeCase.getCaseStatus() == CaseStatus.ROUTED) {
                         disputeCase.startHearing(input.workflowId(), SYSTEM.actorId());
                         caseRepository.save(disputeCase);
+                    } else if (disputeCase.getCaseStatus() == CaseStatus.HEARING_OPEN) {
+                        disputeCase.attachHearingWorkflow(
+                                input.workflowId(), SYSTEM.actorId());
+                        caseRepository.save(disputeCase);
                     } else if (!input.workflowId().equals(
                             disputeCase.getCurrentWorkflowId())) {
                         throw new IllegalStateException(

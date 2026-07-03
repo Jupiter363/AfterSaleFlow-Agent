@@ -1,6 +1,9 @@
 package com.example.dispute.workflow.application;
 
 import com.example.dispute.domain.model.RouteType;
+import com.example.dispute.hearing.application.HearingRoundService;
+import com.example.dispute.room.domain.PhaseClockType;
+import com.example.dispute.room.infrastructure.persistence.repository.CasePhaseClockRepository;
 import com.example.dispute.workflow.domain.ApprovalValidationResult;
 import com.example.dispute.workflow.domain.CaseWorkflowInput;
 import com.example.dispute.workflow.domain.CriticActivityResult;
@@ -24,6 +27,8 @@ import com.example.dispute.workflow.temporal.ExecutionActivities;
 import com.example.dispute.workflow.temporal.FulfillmentDisputeActivities;
 import com.example.dispute.workflow.temporal.HumanReviewActivities;
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -59,6 +64,9 @@ public class FinalWorkflowActivitiesAdapter
     private final ReviewTaskRepository taskRepository;
     private final DeliberationReportRepository deliberationRepository;
     private final ObjectMapper objectMapper;
+    private final HearingRoundService hearingRoundService;
+    private final CasePhaseClockRepository phaseClockRepository;
+    private final Clock clock;
     private final ConcurrentMap<String, HearingAnalysisActivityResult>
             hearingRounds = new ConcurrentHashMap<>();
 
@@ -68,13 +76,19 @@ public class FinalWorkflowActivitiesAdapter
             ReviewPacketRepository packetRepository,
             ReviewTaskRepository taskRepository,
             DeliberationReportRepository deliberationRepository,
-            ObjectMapper objectMapper) {
+            ObjectMapper objectMapper,
+            HearingRoundService hearingRoundService,
+            CasePhaseClockRepository phaseClockRepository,
+            Clock clock) {
         this.legacy = legacy;
         this.approvalRepository = approvalRepository;
         this.packetRepository = packetRepository;
         this.taskRepository = taskRepository;
         this.deliberationRepository = deliberationRepository;
         this.objectMapper = objectMapper;
+        this.hearingRoundService = hearingRoundService;
+        this.phaseClockRepository = phaseClockRepository;
+        this.clock = clock;
     }
 
     @Override
@@ -190,7 +204,29 @@ public class FinalWorkflowActivitiesAdapter
             String workflowId,
             String status,
             boolean manualRequired,
-            boolean evidenceTimedOut) {
+            boolean evidenceTimedOut,
+            long dossierVersion,
+            String stopReason) {
+        if ("DEADLINE_EXPIRED".equals(stopReason)) {
+            hearingRoundService.expire(
+                    caseId, Math.toIntExact(dossierVersion), "temporal-worker");
+        }
+        phaseClockRepository
+                .findByCaseIdAndClockType(caseId, PhaseClockType.HEARING)
+                .ifPresent(
+                        phaseClock -> {
+                            if ("DEADLINE_EXPIRED".equals(stopReason)) {
+                                phaseClock.expire(
+                                        OffsetDateTime.now(clock),
+                                        "temporal-worker");
+                            } else if (stopReason != null) {
+                                phaseClock.complete(
+                                        OffsetDateTime.now(clock),
+                                        stopReason,
+                                        "temporal-worker");
+                            }
+                            phaseClockRepository.save(phaseClock);
+                        });
         legacy.completeHearing(
                 caseId,
                 workflowId,
@@ -280,6 +316,8 @@ public class FinalWorkflowActivitiesAdapter
                                 java.util.Map.of(
                                         "panel_result",
                                         panelResult,
+                                        "trigger_reasons",
+                                        command.triggerReasons(),
                                         "frozen_input_fingerprint",
                                         snapshot.fingerprint(),
                                         "critic_reports",

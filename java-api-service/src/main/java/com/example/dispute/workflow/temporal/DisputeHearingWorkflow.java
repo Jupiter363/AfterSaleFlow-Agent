@@ -15,4 +15,10 @@ public interface DisputeHearingWorkflow {
 
     @SignalMethod
     void submitEvidence(EvidenceSubmissionSignal signal);
+
+    @SignalMethod
+    void hearingRoundCompleted(int roundNo, boolean factsSufficient);
+
+    @SignalMethod
+    void settlementConfirmed(int settlementVersion);
 }

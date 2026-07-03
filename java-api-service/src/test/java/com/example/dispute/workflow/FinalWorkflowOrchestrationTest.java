@@ -153,6 +153,12 @@ class FinalWorkflowOrchestrationTest {
         @Override
         public void submitEvidence(
                 com.example.dispute.workflow.domain.EvidenceSubmissionSignal signal) {}
+
+        @Override
+        public void hearingRoundCompleted(int roundNo, boolean factsSufficient) {}
+
+        @Override
+        public void settlementConfirmed(int settlementVersion) {}
     }
 
     public static final class StubPanelWorkflow

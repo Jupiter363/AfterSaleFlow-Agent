@@ -5,4 +5,21 @@ public record HearingWorkflowResult(
         boolean manualRequired,
         boolean evidenceTimedOut,
         long dossierVersion,
-        String status) {}
+        String status,
+        String stopReason) {
+
+    public HearingWorkflowResult(
+            String draftId,
+            boolean manualRequired,
+            boolean evidenceTimedOut,
+            long dossierVersion,
+            String status) {
+        this(
+                draftId,
+                manualRequired,
+                evidenceTimedOut,
+                dossierVersion,
+                status,
+                null);
+    }
+}

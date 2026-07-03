@@ -127,6 +127,60 @@ class DisputeHearingWorkflowTest {
                 .doesNotContain("C5_RULE_APPLICATION", "C6_DRAFT_GENERATION");
     }
 
+    @Test
+    void threeHourDeadlineAlwaysConvergesThroughC6() {
+        long startedAt = environment.currentTimeMillis();
+
+        HearingWorkflowResult result =
+                workflow("WORKFLOW_shared_hearing_timeout")
+                        .run(
+                                new HearingWorkflowCommand(
+                                        "CASE_shared_hearing_timeout",
+                                        "WORKFLOW_shared_hearing_timeout",
+                                        1,
+                                        Duration.ofHours(24),
+                                        2,
+                                        Duration.ofHours(3),
+                                        3));
+
+        assertThat(result.stopReason()).isEqualTo("DEADLINE_EXPIRED");
+        assertThat(result.draftId()).isEqualTo("DRAFT_final");
+        assertThat(result.manualRequired()).isTrue();
+        assertThat(environment.currentTimeMillis())
+                .isGreaterThanOrEqualTo(
+                        startedAt + Duration.ofHours(3).toMillis());
+        assertThat(activities.stages).contains("C6_DRAFT_GENERATION");
+    }
+
+    @Test
+    void threeCompletedRoundsForceConvergenceBeforeDeadline() {
+        long startedAt = environment.currentTimeMillis();
+        DisputeHearingWorkflow workflow =
+                workflow("WORKFLOW_shared_hearing_rounds");
+        WorkflowClient.start(
+                workflow::run,
+                new HearingWorkflowCommand(
+                        "CASE_shared_hearing_rounds",
+                        "WORKFLOW_shared_hearing_rounds",
+                        1,
+                        Duration.ofHours(24),
+                        2,
+                        Duration.ofHours(3),
+                        3));
+        workflow.hearingRoundCompleted(1, false);
+        workflow.hearingRoundCompleted(2, false);
+        workflow.hearingRoundCompleted(3, false);
+
+        HearingWorkflowResult result =
+                io.temporal.client.WorkflowStub.fromTyped(workflow)
+                        .getResult(HearingWorkflowResult.class);
+
+        assertThat(result.stopReason()).isEqualTo("MAX_ROUNDS");
+        assertThat(result.draftId()).isEqualTo("DRAFT_final");
+        assertThat(environment.currentTimeMillis())
+                .isLessThan(startedAt + Duration.ofHours(3).toMillis());
+    }
+
     private DisputeHearingWorkflow workflow(String workflowId) {
         return client.newWorkflowStub(
                 DisputeHearingWorkflow.class,
@@ -209,6 +263,8 @@ class DisputeHearingWorkflowTest {
                 String workflowId,
                 String status,
                 boolean manualRequired,
-                boolean evidenceTimedOut) {}
+                boolean evidenceTimedOut,
+                long dossierVersion,
+                String stopReason) {}
     }
 }

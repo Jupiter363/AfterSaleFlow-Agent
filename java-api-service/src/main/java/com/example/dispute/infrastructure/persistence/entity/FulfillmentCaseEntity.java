@@ -281,6 +281,22 @@ public class FulfillmentCaseEntity extends AbstractEntity {
         updatedBy = required(actorId, "actorId");
     }
 
+    public void attachHearingWorkflow(String workflowId, String actorId) {
+        if (caseStatus != CaseStatus.HEARING_OPEN
+                && caseStatus != CaseStatus.HEARING) {
+            throw new IllegalStateException(
+                    "hearing workflow cannot attach from " + caseStatus);
+        }
+        if (currentWorkflowId != null
+                && !currentWorkflowId.equals(workflowId)) {
+            throw new IllegalStateException(
+                    "case is already controlled by another workflow");
+        }
+        currentWorkflowId = required(workflowId, "workflowId");
+        caseStatus = CaseStatus.HEARING;
+        updatedBy = required(actorId, "actorId");
+    }
+
     public void markDossierBuilt(String actorId) {
         if (caseStatus == CaseStatus.WAITING_SLOT_COMPLETION
                 || caseStatus == CaseStatus.CLOSED

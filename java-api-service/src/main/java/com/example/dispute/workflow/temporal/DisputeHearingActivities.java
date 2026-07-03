@@ -39,5 +39,7 @@ public interface DisputeHearingActivities {
             String workflowId,
             String status,
             boolean manualRequired,
-            boolean evidenceTimedOut);
+            boolean evidenceTimedOut,
+            long dossierVersion,
+            String stopReason);
 }

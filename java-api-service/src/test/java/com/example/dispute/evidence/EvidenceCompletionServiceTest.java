@@ -25,6 +25,7 @@ import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity
 import com.example.dispute.room.infrastructure.persistence.repository.CasePhaseClockRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import com.example.dispute.workflow.application.EvidenceWindowCoordinator;
+import com.example.dispute.hearing.application.HearingWorkflowCoordinator;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.OffsetDateTime;
@@ -47,6 +48,7 @@ class EvidenceCompletionServiceTest {
     @Mock private EvidenceWindowCoordinator evidenceWindowCoordinator;
     @Mock private CaseEventService caseEventService;
     @Mock private NotificationService notificationService;
+    @Mock private HearingWorkflowCoordinator hearingWorkflowCoordinator;
 
     private EvidenceCompletionService service;
     private FulfillmentCaseEntity dispute;
@@ -69,6 +71,7 @@ class EvidenceCompletionServiceTest {
                         evidenceWindowCoordinator,
                         caseEventService,
                         notificationService,
+                        hearingWorkflowCoordinator,
                         clock);
         dispute =
                 FulfillmentCaseEntity.imported(

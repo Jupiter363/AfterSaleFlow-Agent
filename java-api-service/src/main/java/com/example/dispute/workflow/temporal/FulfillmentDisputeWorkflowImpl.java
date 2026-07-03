@@ -82,7 +82,9 @@ public class FulfillmentDisputeWorkflowImpl
                                     command.workflowId(),
                                     command.dossierVersion(),
                                     command.evidenceWaitTimeout(),
-                                    command.maxEvidenceRounds()));
+                                    command.maxEvidenceRounds(),
+                                    Duration.ofHours(3),
+                                    3));
             draftId = hearing.draftId();
             manualRequired = hearing.manualRequired();
             if (command.deliberationRequired()) {
@@ -102,7 +104,8 @@ public class FulfillmentDisputeWorkflowImpl
                                                 "RULE_CRITIC",
                                                 "RISK_CRITIC",
                                                 "REMEDY_CRITIC",
-                                                "FAIRNESS_CRITIC")));
+                                                "FAIRNESS_CRITIC"),
+                                        List.of("DETERMINISTIC_POLICY_TRIGGER")));
                 deliberationId = deliberation.deliberationId();
                 manualRequired =
                         manualRequired || deliberation.manualRequired();
