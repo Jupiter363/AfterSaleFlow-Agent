@@ -27,6 +27,7 @@ import com.example.dispute.room.infrastructure.persistence.repository.CasePhaseC
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseTimelineEventRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.RoomMessageRepository;
+import com.example.dispute.workflow.application.EvidenceWindowCoordinator;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.time.Instant;
@@ -42,6 +43,7 @@ import org.springframework.context.annotation.Import;
 import org.springframework.context.annotation.Primary;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
@@ -93,6 +95,7 @@ class IntakeRoomServiceIntegrationTest {
     @Autowired private RoomMessageService roomMessageService;
     @Autowired private RoomMessageRepository messageRepository;
     @Autowired private CaseTimelineEventRepository eventRepository;
+    @MockitoBean private EvidenceWindowCoordinator evidenceWindowCoordinator;
 
     @Test
     void acceptedIntakePersistsParticipantsRoomsAndTheAuthoritativeDeadline() {

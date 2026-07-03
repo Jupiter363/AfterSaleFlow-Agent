@@ -55,4 +55,6 @@ public class EvidencePartyCompletionEntity extends AbstractEntity {
 
     public ActorRole getParticipantRole() { return participantRole; }
     public int getDossierVersion() { return dossierVersion; }
+    public String getCaseId() { return caseId; }
+    public String getCompletionStatus() { return completionStatus; }
 }

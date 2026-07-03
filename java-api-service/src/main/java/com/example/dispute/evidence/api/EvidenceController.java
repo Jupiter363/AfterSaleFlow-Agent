@@ -5,8 +5,19 @@ import com.example.dispute.common.trace.TraceIdFilter;
 import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.evidence.application.BuildDossierResult;
 import com.example.dispute.evidence.application.EvidenceApplicationService;
+import com.example.dispute.evidence.application.EvidenceCatalogService;
+import com.example.dispute.evidence.application.EvidenceCompletionService;
+import com.example.dispute.evidence.application.EvidenceCompletionStatusView;
+import com.example.dispute.evidence.application.EvidenceCompletionView;
+import com.example.dispute.evidence.application.EvidenceDossierQueryService;
+import com.example.dispute.evidence.application.EvidenceVerificationCommand;
+import com.example.dispute.evidence.application.EvidenceVerificationService;
+import com.example.dispute.evidence.application.EvidenceVerificationView;
 import com.example.dispute.evidence.application.EvidenceView;
+import com.example.dispute.evidence.application.FrozenEvidenceDossierView;
+import com.example.dispute.evidence.application.RoleScopedEvidenceView;
 import jakarta.servlet.http.HttpServletRequest;
+import jakarta.validation.Valid;
 import jakarta.validation.constraints.Pattern;
 import java.time.Clock;
 import java.time.Instant;
@@ -21,6 +32,8 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RequestPart;
 import org.springframework.web.bind.annotation.RestController;
@@ -28,19 +41,33 @@ import org.springframework.web.multipart.MultipartFile;
 
 @Validated
 @RestController
-@RequestMapping("/api/v1/cases/{caseId}")
+@RequestMapping({"/api/disputes/{caseId}", "/api/v1/cases/{caseId}"})
 public class EvidenceController {
 
     private final EvidenceApplicationService service;
+    private final EvidenceCatalogService catalogService;
+    private final EvidenceVerificationService verificationService;
+    private final EvidenceCompletionService completionService;
+    private final EvidenceDossierQueryService dossierQueryService;
     private final Clock clock;
 
-    public EvidenceController(EvidenceApplicationService service, Clock clock) {
+    public EvidenceController(
+            EvidenceApplicationService service,
+            EvidenceCatalogService catalogService,
+            EvidenceVerificationService verificationService,
+            EvidenceCompletionService completionService,
+            EvidenceDossierQueryService dossierQueryService,
+            Clock clock) {
         this.service = service;
+        this.catalogService = catalogService;
+        this.verificationService = verificationService;
+        this.completionService = completionService;
+        this.dossierQueryService = dossierQueryService;
         this.clock = clock;
     }
 
     @PostMapping(
-            value = "/evidences",
+            value = {"/evidence", "/evidences"},
             consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public ResponseEntity<ApiResponse<EvidenceView>> upload(
             @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
@@ -68,6 +95,75 @@ public class EvidenceController {
                         actor(authentication));
         return ResponseEntity.status(HttpStatus.CREATED)
                 .body(success(result, request));
+    }
+
+    @GetMapping("/evidence")
+    public ApiResponse<RoleScopedEvidenceView> catalog(
+            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
+            Authentication authentication,
+            HttpServletRequest request) {
+        return success(
+                catalogService.catalog(caseId, actor(authentication)), request);
+    }
+
+    @PostMapping("/evidence/{evidenceId}/verify")
+    public ApiResponse<EvidenceVerificationView> verify(
+            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
+            @PathVariable
+                    @Pattern(regexp = "EVIDENCE_[A-Za-z0-9_-]{1,119}")
+                    String evidenceId,
+            @Valid @RequestBody EvidenceVerificationCommand command,
+            Authentication authentication,
+            HttpServletRequest request) {
+        return success(
+                verificationService.verify(
+                        caseId,
+                        evidenceId,
+                        command,
+                        actor(authentication),
+                        correlationId(request, TraceIdFilter.TRACE_ATTRIBUTE)),
+                request);
+    }
+
+    @PostMapping("/evidence/complete")
+    public ApiResponse<EvidenceCompletionView> complete(
+            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
+            @RequestHeader("Idempotency-Key") String idempotencyKey,
+            Authentication authentication,
+            HttpServletRequest request) {
+        return success(
+                completionService.complete(
+                        caseId, actor(authentication), idempotencyKey),
+                request);
+    }
+
+    @GetMapping("/evidence/completion")
+    public ApiResponse<EvidenceCompletionStatusView> completion(
+            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
+            Authentication authentication,
+            HttpServletRequest request) {
+        return success(
+                completionService.status(caseId, actor(authentication)), request);
+    }
+
+    @GetMapping({"/evidence-dossiers/{version}", "/dossiers/{version}"})
+    public ApiResponse<FrozenEvidenceDossierView> frozenDossier(
+            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
+            @PathVariable int version,
+            Authentication authentication,
+            HttpServletRequest request) {
+        return success(
+                dossierQueryService.get(caseId, version, actor(authentication)),
+                request);
+    }
+
+    @GetMapping("/evidence-dossier")
+    public ApiResponse<FrozenEvidenceDossierView> latestDossier(
+            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
+            Authentication authentication,
+            HttpServletRequest request) {
+        return success(
+                dossierQueryService.latest(caseId, actor(authentication)), request);
     }
 
     @PostMapping("/dossier/build")

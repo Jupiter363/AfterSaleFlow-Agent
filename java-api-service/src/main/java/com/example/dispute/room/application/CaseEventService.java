@@ -77,6 +77,38 @@ public class CaseEventService {
         return event;
     }
 
+    public CaseTimelineEventEntity recordLifecycleEvent(
+            String caseId,
+            String roomId,
+            String eventType,
+            Map<String, Object> payload,
+            String eventKey,
+            String actorId) {
+        return eventRepository
+                .findByCaseIdAndEventKey(caseId, eventKey)
+                .orElseGet(
+                        () -> {
+                            long sequence =
+                                    eventRepository.findMaxSequenceByCaseId(caseId) + 1;
+                            CaseTimelineEventEntity event =
+                                    eventRepository.save(
+                                            CaseTimelineEventEntity.create(
+                                                    "EVENT_" + compactUuid(),
+                                                    caseId,
+                                                    roomId,
+                                                    sequence,
+                                                    eventType,
+                                                    clock.instant(),
+                                                    "[]",
+                                                    json(payload),
+                                                    "[]",
+                                                    eventKey,
+                                                    actorId));
+                            publishAfterCommit(caseId, event);
+                            return event;
+                        });
+    }
+
     public List<CaseEventView> replay(
             String caseId, long afterSequence, AuthenticatedActor actor) {
         assertCanAccess(caseId, actor);

@@ -52,7 +52,7 @@ public class EvidenceVerificationService {
                 && actor.role() != ActorRole.ADMIN) {
             throw new SecurityException("evidence verification requires a trusted actor");
         }
-        caseRepository.findById(caseId)
+        caseRepository.findByIdForUpdate(caseId)
                 .orElseThrow(() -> new IllegalArgumentException("case not found"));
         EvidenceItemEntity evidence =
                 evidenceRepository.findById(evidenceId)

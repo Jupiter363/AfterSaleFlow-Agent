@@ -27,6 +27,7 @@ import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity
 import com.example.dispute.room.infrastructure.persistence.repository.CaseParticipantRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CasePhaseClockRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
+import com.example.dispute.workflow.application.EvidenceWindowCoordinator;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.OffsetDateTime;
@@ -51,6 +52,7 @@ class IntakeRoomServiceTest {
     @Mock private CaseRoomRepository roomRepository;
     @Mock private CasePhaseClockRepository phaseClockRepository;
     @Mock private NotificationService notificationService;
+    @Mock private EvidenceWindowCoordinator evidenceWindowCoordinator;
 
     private IntakeRoomService service;
 
@@ -64,6 +66,7 @@ class IntakeRoomServiceTest {
                         phaseClockRepository,
                         participants,
                         notificationService,
+                        evidenceWindowCoordinator,
                         CLOCK);
         when(caseRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
         when(roomRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));

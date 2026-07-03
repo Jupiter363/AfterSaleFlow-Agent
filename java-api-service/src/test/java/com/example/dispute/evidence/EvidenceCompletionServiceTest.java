@@ -9,10 +9,13 @@ import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.RiskLevel;
 import com.example.dispute.evidence.application.EvidenceCompletionService;
+import com.example.dispute.evidence.application.EvidenceDossierFreezer;
 import com.example.dispute.evidence.infrastructure.persistence.entity.EvidencePartyCompletionEntity;
 import com.example.dispute.evidence.infrastructure.persistence.repository.EvidencePartyCompletionRepository;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
+import com.example.dispute.notification.application.NotificationService;
+import com.example.dispute.room.application.CaseEventService;
 import com.example.dispute.room.domain.PhaseClockStatus;
 import com.example.dispute.room.domain.PhaseClockType;
 import com.example.dispute.room.domain.RoomStatus;
@@ -21,6 +24,7 @@ import com.example.dispute.room.infrastructure.persistence.entity.CasePhaseClock
 import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
 import com.example.dispute.room.infrastructure.persistence.repository.CasePhaseClockRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
+import com.example.dispute.workflow.application.EvidenceWindowCoordinator;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.OffsetDateTime;
@@ -39,6 +43,10 @@ class EvidenceCompletionServiceTest {
     @Mock private EvidencePartyCompletionRepository completionRepository;
     @Mock private CaseRoomRepository roomRepository;
     @Mock private CasePhaseClockRepository clockRepository;
+    @Mock private EvidenceDossierFreezer dossierFreezer;
+    @Mock private EvidenceWindowCoordinator evidenceWindowCoordinator;
+    @Mock private CaseEventService caseEventService;
+    @Mock private NotificationService notificationService;
 
     private EvidenceCompletionService service;
     private FulfillmentCaseEntity dispute;
@@ -57,6 +65,10 @@ class EvidenceCompletionServiceTest {
                         completionRepository,
                         roomRepository,
                         clockRepository,
+                        dossierFreezer,
+                        evidenceWindowCoordinator,
+                        caseEventService,
+                        notificationService,
                         clock);
         dispute =
                 FulfillmentCaseEntity.imported(
@@ -96,6 +108,11 @@ class EvidenceCompletionServiceTest {
                         "system");
         when(caseRepository.findByIdForUpdate(dispute.getId()))
                 .thenReturn(Optional.of(dispute));
+        when(dossierFreezer.targetVersion(dispute.getId())).thenReturn(1);
+    }
+
+    @Test
+    void bothPartyCompletionsSealEvidenceEarlyAndOpenTheThreeHourHearing() {
         when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.EVIDENCE))
                 .thenReturn(Optional.of(evidenceRoom));
         when(clockRepository.findByCaseIdAndClockType(
@@ -109,10 +126,6 @@ class EvidenceCompletionServiceTest {
                 .thenAnswer(invocation -> invocation.getArgument(0));
         when(caseRepository.save(any()))
                 .thenAnswer(invocation -> invocation.getArgument(0));
-    }
-
-    @Test
-    void bothPartyCompletionsSealEvidenceEarlyAndOpenTheThreeHourHearing() {
         when(completionRepository.findByCaseIdAndIdempotencyKey(
                         dispute.getId(), "user-complete-1"))
                 .thenReturn(Optional.empty());
@@ -125,13 +138,11 @@ class EvidenceCompletionServiceTest {
 
         service.complete(
                 dispute.getId(),
-                1,
                 new AuthenticatedActor("user-local", ActorRole.USER),
                 "user-complete-1");
         var result =
                 service.complete(
                         dispute.getId(),
-                        1,
                         new AuthenticatedActor("merchant-local", ActorRole.MERCHANT),
                         "merchant-complete-1");
 
@@ -143,5 +154,36 @@ class EvidenceCompletionServiceTest {
         assertThat(dispute.getCurrentRoom()).isEqualTo("HEARING");
         assertThat(dispute.getCurrentDeadlineAt())
                 .isEqualTo(OffsetDateTime.parse("2026-07-03T04:00:00Z"));
+    }
+
+    @Test
+    void repeatedCompletionByTheSameRoleUsesTheExistingPhaseConfirmation() {
+        EvidencePartyCompletionEntity existing =
+                EvidencePartyCompletionEntity.completed(
+                        "EVIDENCE_COMPLETE_EXISTING",
+                        dispute.getId(),
+                        1,
+                        ActorRole.USER,
+                        "user-local",
+                        "user-complete-original",
+                        Instant.parse("2026-07-03T00:30:00Z"));
+        when(completionRepository.findByCaseIdAndIdempotencyKey(
+                        dispute.getId(), "user-complete-retry"))
+                .thenReturn(Optional.empty());
+        when(completionRepository.findByCaseIdAndDossierVersionAndParticipantRole(
+                        dispute.getId(), 1, ActorRole.USER))
+                .thenReturn(Optional.of(existing));
+        when(completionRepository.countByCaseIdAndDossierVersionAndCompletionStatus(
+                        dispute.getId(), 1, "COMPLETED"))
+                .thenReturn(1L);
+
+        var result =
+                service.complete(
+                        dispute.getId(),
+                        new AuthenticatedActor("user-local", ActorRole.USER),
+                        "user-complete-retry");
+
+        assertThat(result.dossierVersion()).isEqualTo(1);
+        assertThat(result.allPartiesCompleted()).isFalse();
     }
 }

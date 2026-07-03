@@ -14,7 +14,7 @@ import org.hibernate.type.SqlTypes;
 @Table(name = "evidence_dossier")
 public class EvidenceDossierEntity extends AbstractEntity {
 
-    @Column(name = "case_id", length = 64, nullable = false, unique = true)
+    @Column(name = "case_id", length = 64, nullable = false)
     private String caseId;
 
     @Column(name = "dossier_status", length = 32, nullable = false)
@@ -100,6 +100,30 @@ public class EvidenceDossierEntity extends AbstractEntity {
         return entity;
     }
 
+    public static EvidenceDossierEntity frozen(
+            String id,
+            String caseId,
+            int version,
+            String actorId,
+            String summaryJson,
+            String timelineJson,
+            String matrixSummaryJson) {
+        if (version < 1) {
+            throw new IllegalArgumentException("frozen dossier version must be positive");
+        }
+        EvidenceDossierEntity entity =
+                new EvidenceDossierEntity(
+                        id,
+                        caseId,
+                        actorId,
+                        summaryJson,
+                        timelineJson,
+                        matrixSummaryJson);
+        entity.dossierStatus = "FROZEN";
+        entity.dossierVersion = version;
+        return entity;
+    }
+
     public void rebuild(
             String actorId,
             String summaryJson,
@@ -132,6 +156,10 @@ public class EvidenceDossierEntity extends AbstractEntity {
 
     public int getDossierVersion() {
         return dossierVersion;
+    }
+
+    public String getDossierStatus() {
+        return dossierStatus;
     }
 
     public String getSummaryJson() {

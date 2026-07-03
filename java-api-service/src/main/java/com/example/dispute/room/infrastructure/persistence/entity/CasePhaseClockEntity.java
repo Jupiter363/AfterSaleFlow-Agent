@@ -130,6 +130,14 @@ public class CasePhaseClockEntity extends AbstractEntity {
         updatedBy = required(actorId, "actorId");
     }
 
+    public void expire(OffsetDateTime now, String actorId) {
+        if (clockStatus != PhaseClockStatus.RUNNING) return;
+        clockStatus = PhaseClockStatus.EXPIRED;
+        completedAt = now;
+        completionReason = "DEADLINE_EXPIRED";
+        updatedBy = required(actorId, "actorId");
+    }
+
     private static String required(String value, String field) {
         if (value == null || value.isBlank()) {
             throw new IllegalArgumentException(field + " must not be blank");

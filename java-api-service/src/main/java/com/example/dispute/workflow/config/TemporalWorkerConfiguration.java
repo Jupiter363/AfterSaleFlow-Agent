@@ -3,10 +3,12 @@ package com.example.dispute.workflow.config;
 import com.example.dispute.config.AppProperties;
 import com.example.dispute.workflow.application.CaseFulfillmentDisputeActivitiesImpl;
 import com.example.dispute.workflow.application.FinalWorkflowActivitiesAdapter;
+import com.example.dispute.workflow.application.EvidenceWindowActivitiesAdapter;
 import com.example.dispute.workflow.temporal.CaseFulfillmentDisputeWorkflowImpl;
 import com.example.dispute.workflow.temporal.DeliberationPanelWorkflowImpl;
 import com.example.dispute.workflow.temporal.DisputeHearingWorkflowImpl;
 import com.example.dispute.workflow.temporal.ExecutionWorkflowImpl;
+import com.example.dispute.workflow.temporal.EvidenceWindowWorkflowImpl;
 import com.example.dispute.workflow.temporal.FulfillmentDisputeWorkflowImpl;
 import com.example.dispute.workflow.temporal.HumanReviewWorkflowImpl;
 import io.temporal.client.WorkflowClient;
@@ -27,7 +29,8 @@ public class TemporalWorkerConfiguration {
             WorkflowClient workflowClient,
             AppProperties properties,
             CaseFulfillmentDisputeActivitiesImpl legacyActivities,
-            FinalWorkflowActivitiesAdapter finalActivities) {
+            FinalWorkflowActivitiesAdapter finalActivities,
+            EvidenceWindowActivitiesAdapter evidenceWindowActivities) {
         WorkerFactory factory = WorkerFactory.newInstance(workflowClient);
         Worker worker = factory.newWorker(properties.temporal().taskQueue());
         worker.registerWorkflowImplementationTypes(
@@ -36,9 +39,10 @@ public class TemporalWorkerConfiguration {
                 DisputeHearingWorkflowImpl.class,
                 DeliberationPanelWorkflowImpl.class,
                 HumanReviewWorkflowImpl.class,
-                ExecutionWorkflowImpl.class);
+                ExecutionWorkflowImpl.class,
+                EvidenceWindowWorkflowImpl.class);
         worker.registerActivitiesImplementations(
-                legacyActivities, finalActivities);
+                legacyActivities, finalActivities, evidenceWindowActivities);
         factory.start();
         return factory;
     }

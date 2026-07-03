@@ -101,7 +101,8 @@ class EvidenceVerificationAndCatalogServiceTest {
         FulfillmentCaseEntity dispute = evidenceCase();
         EvidenceItemEntity item =
                 evidence("EVIDENCE_USER", "USER", "user-local", "PARTIES");
-        when(caseRepository.findById(dispute.getId())).thenReturn(Optional.of(dispute));
+        when(caseRepository.findByIdForUpdate(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
         when(evidenceRepository.findById(item.getId())).thenReturn(Optional.of(item));
         when(verificationRepository
                         .findTopByEvidenceIdOrderByVerificationVersionDesc(item.getId()))

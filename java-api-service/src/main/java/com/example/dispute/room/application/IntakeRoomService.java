@@ -20,6 +20,7 @@ import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.Map;
 import java.util.UUID;
+import com.example.dispute.workflow.application.EvidenceWindowCoordinator;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -33,6 +34,7 @@ public class IntakeRoomService {
     private final CasePhaseClockRepository phaseClockRepository;
     private final ParticipantService participantService;
     private final NotificationService notificationService;
+    private final EvidenceWindowCoordinator evidenceWindowCoordinator;
     private final Clock clock;
 
     public IntakeRoomService(
@@ -41,12 +43,14 @@ public class IntakeRoomService {
             CasePhaseClockRepository phaseClockRepository,
             ParticipantService participantService,
             NotificationService notificationService,
+            EvidenceWindowCoordinator evidenceWindowCoordinator,
             Clock clock) {
         this.caseRepository = caseRepository;
         this.roomRepository = roomRepository;
         this.phaseClockRepository = phaseClockRepository;
         this.participantService = participantService;
         this.notificationService = notificationService;
+        this.evidenceWindowCoordinator = evidenceWindowCoordinator;
         this.clock = clock;
     }
 
@@ -106,6 +110,7 @@ public class IntakeRoomService {
                 actor.actorId());
         caseRepository.save(dispute);
         sendCounterpartySummons(dispute, actor, deadline);
+        evidenceWindowCoordinator.startAfterCommit(caseId, EVIDENCE_WINDOW);
         return new IntakeConfirmationView(
                 caseId,
                 dispute.getCaseStatus(),
