@@ -1,0 +1,196 @@
+import { flushPromises, mount } from "@vue/test-utils";
+import {
+  createMemoryHistory,
+  createRouter,
+} from "vue-router";
+import { describe, expect, it, vi } from "vitest";
+import fs from "node:fs";
+import path from "node:path";
+import { actor } from "../../state/actor";
+import DisputeOverviewView from "./DisputeOverviewView.vue";
+
+const cases = [
+  {
+    id: "CASE_EXT_001",
+    order_id: "ORDER-001",
+    source_type: "EXTERNAL_IMPORT",
+    dispute_type: "SIGNED_NOT_RECEIVED",
+    case_status: "EVIDENCE_OPEN",
+    current_room: "EVIDENCE",
+    deadline_at: "2026-07-03T12:00:00Z",
+    risk_level: "HIGH",
+    pending_action: "SUBMIT_EVIDENCE",
+    title: "签收未收到",
+  },
+  {
+    id: "CASE_EXT_002_LONG_IDENTIFIER_FOR_LAYOUT_TESTING",
+    order_id: "ORDER-002",
+    source_type: "INTAKE_CREATED",
+    dispute_type: "DAMAGED_GOODS",
+    case_status: "HEARING_OPEN",
+    current_room: "HEARING",
+    deadline_at: "2026-07-03T13:00:00Z",
+    risk_level: "MEDIUM",
+    pending_action: "PARTICIPATE_HEARING",
+    title: "到货破损",
+  },
+];
+
+async function mountOverview(createAction = null) {
+  const router = createRouter({
+    history: createMemoryHistory(),
+    routes: [
+      { path: "/disputes", component: { template: "<div />" } },
+      {
+        path: "/disputes/:caseId/:room",
+        component: { template: "<div />" },
+      },
+    ],
+  });
+  await router.push("/disputes");
+  await router.isReady();
+  const wrapper = mount(DisputeOverviewView, {
+    props: {
+      initialCases: cases,
+      serverNow: "2026-07-03T10:00:00Z",
+      createAction,
+    },
+    global: { plugins: [router] },
+  });
+  return { wrapper, router };
+}
+
+describe("DisputeOverviewView", () => {
+  it("switches the selected dispute without navigating", async () => {
+    const { wrapper, router } = await mountOverview();
+
+    await wrapper.get('[data-case-id="CASE_EXT_001"]').trigger("click");
+
+    expect(wrapper.get("[data-hearing-adventure]").text()).toContain(
+      "证据书记官室",
+    );
+    expect(router.currentRoute.value.path).toBe("/disputes");
+  });
+
+  it("translates raw risk, room and pending-action enums into readable labels", async () => {
+    const { wrapper } = await mountOverview();
+
+    const firstTicket = wrapper.get('[data-case-id="CASE_EXT_001"]');
+    expect(firstTicket.text()).toContain("高风险");
+    expect(firstTicket.text()).toContain("证据书记官室");
+    expect(firstTicket.text()).toContain("提交证据");
+    expect(firstTicket.text()).not.toContain("SUBMIT_EVIDENCE");
+  });
+
+  it("keeps long identifiers compact while preserving the full value as a title", async () => {
+    const { wrapper } = await mountOverview();
+
+    const longTicket = wrapper.get(
+      '[data-case-id="CASE_EXT_002_LONG_IDENTIFIER_FOR_LAYOUT_TESTING"]',
+    );
+    expect(longTicket.get("[data-short-case-id]").text()).toContain("…");
+    expect(longTicket.get("[data-short-case-id]").attributes("title")).toBe(
+      "CASE_EXT_002_LONG_IDENTIFIER_FOR_LAYOUT_TESTING",
+    );
+  });
+
+  it("enters the selected dispute's current room", async () => {
+    const { wrapper, router } = await mountOverview();
+
+    await wrapper.get("[data-enter-current-room]").trigger("click");
+    await flushPromises();
+
+    expect(router.currentRoute.value.path).toBe(
+      "/disputes/CASE_EXT_001/evidence",
+    );
+  });
+
+  it("keeps the order rail scrollable while the selected case owns the main journey space", async () => {
+    const { wrapper } = await mountOverview();
+
+    const scrollRail = wrapper.get("[data-dispute-rail-scroll]");
+    expect(scrollRail.findAll(".dispute-ticket")).toHaveLength(cases.length);
+
+    const dashboard = wrapper.get("[data-case-journey-dashboard]");
+    expect(dashboard.text()).toContain("CASE_EXT_001");
+    expect(dashboard.text()).toContain("ORDER-001");
+    expect(dashboard.text()).toContain("EVIDENCE");
+  });
+
+  it("shows the guide card first, then the journey path, then the case dashboard", async () => {
+    const { wrapper } = await mountOverview();
+    const main = wrapper.get("[data-hearing-adventure]");
+    const guide = main.get("[data-overview-guide]");
+    const path = main.get("[data-adventure-path]");
+    const dashboard = main.get("[data-case-journey-dashboard]");
+
+    expect(main.element.compareDocumentPosition(guide.element)).toBe(
+      Node.DOCUMENT_POSITION_CONTAINED_BY | Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    expect(guide.element.compareDocumentPosition(path.element)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    expect(path.element.compareDocumentPosition(dashboard.element)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+  });
+
+  it("keeps the right journey modules balanced without starving the case cards", () => {
+    const source = fs.readFileSync(
+      path.resolve(__dirname, "DisputeOverviewView.vue"),
+      "utf8",
+    );
+
+    expect(source).toContain("--overview-journey-gap");
+    expect(source).toContain("gap: var(--overview-journey-gap)");
+    expect(source).toContain("height: clamp(660px, calc(100vh - 210px), 780px)");
+    expect(source).toContain("grid-template-rows: auto auto minmax(160px, 220px) minmax(160px, 1fr)");
+    expect(source).toContain(".hearing-adventure__sky { position: absolute");
+    expect(source).toContain("min-height: 112px");
+    expect(source).toContain("padding: 8px 0");
+    expect(source).toContain("min-height: 160px");
+    expect(source).toContain("width: 68px");
+  });
+
+  it("places the overview context directly before the intro copy", async () => {
+    const { wrapper } = await mountOverview();
+
+    const lead = wrapper.get("[data-overview-lead]");
+    const leadText = lead.text();
+
+    expect(leadText).toContain("争议办理总览");
+    expect(leadText).toContain("这里只有已经进入争端流程的订单");
+    expect(leadText).not.toContain("AI 建议非最终");
+    expect(leadText.indexOf("争议办理总览")).toBeLessThan(
+      leadText.indexOf("这里只有已经进入争端流程的订单"),
+    );
+  });
+
+  it("creates a minimal dispute ticket before entering the intake room", async () => {
+    actor.id = "user-1";
+    actor.role = "USER";
+    const createAction = vi.fn().mockResolvedValue({ id: "CASE_NEW_1" });
+    const { wrapper, router } = await mountOverview(createAction);
+
+    await wrapper.get("[data-start-dispute]").trigger("click");
+    await wrapper.get("[data-intake-order]").setValue("ORDER-NEW-1");
+    await wrapper.get("[data-intake-merchant]").setValue("merchant-1");
+    await wrapper
+      .get("[data-intake-description]")
+      .setValue("物流显示签收，但我没有收到包裹。");
+    await wrapper.get(".intake-launcher__card").trigger("submit");
+    await flushPromises();
+
+    expect(createAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        initiator_role: "USER",
+        order_reference: "ORDER-NEW-1",
+        user_id: "user-1",
+        merchant_id: "merchant-1",
+      }),
+    );
+    expect(router.currentRoute.value.path).toBe(
+      "/disputes/CASE_NEW_1/intake",
+    );
+  });
+});

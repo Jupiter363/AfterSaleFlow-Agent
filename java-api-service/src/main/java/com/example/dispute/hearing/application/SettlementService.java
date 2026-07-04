@@ -1,6 +1,7 @@
 package com.example.dispute.hearing.application;
 
 import com.example.dispute.common.exception.ForbiddenException;
+import com.example.dispute.common.exception.IdempotencyConflictException;
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.domain.model.CaseStatus;
@@ -120,19 +121,30 @@ public class SettlementService {
                 proposalRepository
                         .findTopByCaseIdOrderByProposalVersionDesc(caseId)
                         .orElseThrow(() -> new IllegalArgumentException("settlement not found"));
+        Optional<SettlementConfirmationEntity> byKey =
+                confirmationRepository.findByCaseIdAndIdempotencyKey(
+                        caseId, idempotencyKey);
+        if (byKey.isPresent()) {
+            SettlementConfirmationEntity existing = byKey.orElseThrow();
+            if (existing.getProposalId().equals(current.getId())
+                    && existing.getProposalVersion() == version
+                    && existing.getParticipantRole() == actor.role()
+                    && existing.getParticipantId().equals(actor.actorId())) {
+                return view(current);
+            }
+            throw new IdempotencyConflictException(
+                    "Idempotency-Key was already used for a different settlement confirmation");
+        }
         if (current.getProposalVersion() != version
                 || current.getProposalStatus()
                         != SettlementStatus.PENDING_CONFIRMATION) {
             throw new SettlementVersionConflictException(
                     caseId, version, current.getProposalVersion());
         }
-        Optional<SettlementConfirmationEntity> byKey =
-                confirmationRepository.findByCaseIdAndIdempotencyKey(
-                        caseId, idempotencyKey);
         Optional<SettlementConfirmationEntity> byRole =
                 confirmationRepository.findByProposalIdAndParticipantRole(
                         current.getId(), actor.role());
-        if (byKey.isEmpty() && byRole.isEmpty()) {
+        if (byRole.isEmpty()) {
             confirmationRepository.save(
                     SettlementConfirmationEntity.confirmed(
                             "SETTLEMENT_CONFIRM_" + compactUuid(),

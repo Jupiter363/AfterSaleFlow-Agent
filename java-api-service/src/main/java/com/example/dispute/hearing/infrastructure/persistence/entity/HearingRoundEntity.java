@@ -29,6 +29,8 @@ public class HearingRoundEntity extends AbstractEntity {
     private int dossierVersion;
     @Column(name = "opened_at", nullable = false)
     private Instant openedAt;
+    @Column(name = "round_deadline_at", nullable = false)
+    private Instant roundDeadlineAt;
     @Column(name = "closed_at")
     private Instant closedAt;
     @Enumerated(EnumType.STRING)
@@ -58,10 +60,11 @@ public class HearingRoundEntity extends AbstractEntity {
             String hearingStateId,
             int roundNo,
             int dossierVersion,
+            Instant roundDeadlineAt,
             Instant now,
             String actorId) {
-        if (roundNo < 1 || roundNo > 3) {
-            throw new IllegalArgumentException("roundNo must be between 1 and 3");
+        if (roundNo < 1 || roundNo > 5) {
+            throw new IllegalArgumentException("roundNo must be between 1 and 5");
         }
         HearingRoundEntity entity = new HearingRoundEntity(id);
         entity.caseId = caseId;
@@ -70,12 +73,23 @@ public class HearingRoundEntity extends AbstractEntity {
         entity.roundStatus = HearingRoundStatus.OPEN;
         entity.dossierVersion = dossierVersion;
         entity.openedAt = now;
+        entity.roundDeadlineAt = roundDeadlineAt;
         entity.summaryJson = "{}";
         entity.createdAt = now;
         entity.updatedAt = now;
         entity.createdBy = actorId;
         entity.updatedBy = actorId;
         return entity;
+    }
+
+    public void waitForCounterparty(Instant now, String actorId) {
+        if (roundStatus != HearingRoundStatus.OPEN
+                && roundStatus != HearingRoundStatus.WAITING) {
+            throw new IllegalStateException("round is already closed");
+        }
+        this.roundStatus = HearingRoundStatus.WAITING;
+        this.updatedAt = now;
+        this.updatedBy = actorId;
     }
 
     public void complete(
@@ -99,11 +113,13 @@ public class HearingRoundEntity extends AbstractEntity {
         this.updatedBy = actorId;
     }
 
+    public String getCaseId() { return caseId; }
     public int getRoundNo() { return roundNo; }
     public HearingRoundStatus getRoundStatus() { return roundStatus; }
     public int getDossierVersion() { return dossierVersion; }
     public HearingStopReason getStopReason() { return stopReason; }
     public String getSummaryJson() { return summaryJson; }
     public Instant getOpenedAt() { return openedAt; }
+    public Instant getRoundDeadlineAt() { return roundDeadlineAt; }
     public Instant getClosedAt() { return closedAt; }
 }

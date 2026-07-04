@@ -59,6 +59,14 @@ public class NotificationController {
                 request);
     }
 
+    @PostMapping("/read-all")
+    public ApiResponse<MarkedCountView> markAllRead(
+            Authentication authentication, HttpServletRequest request) {
+        return response(
+                new MarkedCountView(service.markAllRead(actor(authentication))),
+                request);
+    }
+
     private <T> ApiResponse<T> response(T data, HttpServletRequest request) {
         String traceId = correlationId(request, TraceIdFilter.TRACE_ATTRIBUTE);
         String requestId = correlationId(request, TraceIdFilter.REQUEST_ATTRIBUTE);
@@ -78,4 +86,6 @@ public class NotificationController {
     }
 
     public record UnreadCountView(long unreadCount) {}
+
+    public record MarkedCountView(long markedCount) {}
 }

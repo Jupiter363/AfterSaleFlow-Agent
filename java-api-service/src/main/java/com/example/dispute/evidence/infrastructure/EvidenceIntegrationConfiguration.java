@@ -26,7 +26,10 @@ public class EvidenceIntegrationConfiguration {
         Duration timeout = Duration.ofMillis(timeoutMs);
         JdkClientHttpRequestFactory factory =
                 new JdkClientHttpRequestFactory(
-                        HttpClient.newBuilder().connectTimeout(timeout).build());
+                        HttpClient.newBuilder()
+                                .version(HttpClient.Version.HTTP_1_1)
+                                .connectTimeout(timeout)
+                                .build());
         factory.setReadTimeout(timeout);
         RestClient.Builder builder =
                 RestClient.builder().baseUrl(baseUrl).requestFactory(factory);

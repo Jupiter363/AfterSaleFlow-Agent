@@ -199,7 +199,7 @@ public class FulfillmentCaseEntity extends AbstractEntity {
                         userId,
                         merchantId,
                         creationIdempotencyKey,
-                        "FULFILLMENT_DISPUTE",
+                        "DISPUTE",
                         title,
                         description,
                         riskLevel,
@@ -211,6 +211,9 @@ public class FulfillmentCaseEntity extends AbstractEntity {
         entity.sourceSystem = required(sourceSystem, "sourceSystem");
         entity.externalCaseRef = required(externalCaseRef, "externalCaseRef");
         entity.currentRoom = required(currentRoom, "currentRoom");
+        if (isFullHearingLifecycle(caseStatus, currentRoom)) {
+            entity.routeType = RouteType.FULL_HEARING;
+        }
         entity.currentDeadlineAt = currentDeadlineAt;
         entity.intakeResultJson = "{\"potentialDispute\":true,\"missingSlots\":[],\"agentDegraded\":false,\"analyzedAt\":\"2026-07-03T00:00:00Z\"}";
         return entity;
@@ -237,6 +240,7 @@ public class FulfillmentCaseEntity extends AbstractEntity {
             String actorId) {
         assertIntakeCanBeConfirmed();
         this.disputeType = required(disputeType, "disputeType");
+        this.caseType = "DISPUTE";
         this.riskLevel = Objects.requireNonNull(riskLevel, "riskLevel must not be null");
         this.intakeResultJson = required(intakeAnalysisJson, "intakeAnalysisJson");
         this.caseStatus = CaseStatus.EVIDENCE_OPEN;
@@ -275,6 +279,7 @@ public class FulfillmentCaseEntity extends AbstractEntity {
                 && caseStatus != CaseStatus.EVIDENCE_SEALED) {
             throw new IllegalStateException("hearing cannot open from " + caseStatus);
         }
+        routeType = RouteType.FULL_HEARING;
         caseStatus = CaseStatus.HEARING_OPEN;
         currentRoom = "HEARING";
         currentDeadlineAt = Objects.requireNonNull(deadlineAt, "deadlineAt must not be null");
@@ -287,6 +292,7 @@ public class FulfillmentCaseEntity extends AbstractEntity {
             throw new IllegalStateException(
                     "hearing workflow cannot attach from " + caseStatus);
         }
+        ensureFullHearingRoute(actorId);
         if (currentWorkflowId != null
                 && !currentWorkflowId.equals(workflowId)) {
             throw new IllegalStateException(
@@ -294,6 +300,25 @@ public class FulfillmentCaseEntity extends AbstractEntity {
         }
         currentWorkflowId = required(workflowId, "workflowId");
         caseStatus = CaseStatus.HEARING;
+        updatedBy = required(actorId, "actorId");
+    }
+
+    public void ensureFullHearingRoute(String actorId) {
+        if (routeType == RouteType.FULL_HEARING) {
+            return;
+        }
+        if (routeType != null) {
+            throw new IllegalStateException(
+                    "case route " + routeType + " cannot be controlled by a hearing workflow");
+        }
+        if (!isFullHearingLifecycle(caseStatus, currentRoom)) {
+            throw new IllegalStateException(
+                    "full hearing route cannot be inferred from status "
+                            + caseStatus
+                            + " and room "
+                            + currentRoom);
+        }
+        routeType = RouteType.FULL_HEARING;
         updatedBy = required(actorId, "actorId");
     }
 
@@ -415,6 +440,18 @@ public class FulfillmentCaseEntity extends AbstractEntity {
 
     private static String blankToNull(String value) {
         return value == null || value.isBlank() ? null : value;
+    }
+
+    private static boolean isFullHearingLifecycle(CaseStatus status, String room) {
+        if ("HEARING".equals(room)) {
+            return true;
+        }
+        return status == CaseStatus.HEARING
+                || status == CaseStatus.HEARING_OPEN
+                || status == CaseStatus.WAITING_EVIDENCE
+                || status == CaseStatus.SETTLEMENT_PENDING
+                || status == CaseStatus.DRAFT_READY
+                || status == CaseStatus.DELIBERATION_RUNNING;
     }
 
     public CaseStatus getCaseStatus() {

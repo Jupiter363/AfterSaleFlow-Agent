@@ -18,6 +18,7 @@ class ErrorCodeTest {
                         Map.entry(ErrorCode.CASE_NOT_FOUND, HttpStatus.NOT_FOUND),
                         Map.entry(ErrorCode.ORDER_NOT_FOUND, HttpStatus.NOT_FOUND),
                         Map.entry(ErrorCode.EVIDENCE_NOT_FOUND, HttpStatus.NOT_FOUND),
+                        Map.entry(ErrorCode.RESOURCE_NOT_FOUND, HttpStatus.NOT_FOUND),
                         Map.entry(ErrorCode.CASE_STATUS_INVALID, HttpStatus.CONFLICT),
                         Map.entry(ErrorCode.CASE_DUPLICATED, HttpStatus.CONFLICT),
                         Map.entry(ErrorCode.IDEMPOTENCY_CONFLICT, HttpStatus.CONFLICT),

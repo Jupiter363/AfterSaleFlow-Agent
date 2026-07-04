@@ -4,7 +4,7 @@ import io.temporal.activity.ActivityInterface;
 import io.temporal.activity.ActivityMethod;
 import com.example.dispute.workflow.domain.ReviewGateSnapshot;
 
-@ActivityInterface
+@ActivityInterface(namePrefix = "FinalFulfillment_")
 public interface FulfillmentDisputeActivities {
 
     @ActivityMethod

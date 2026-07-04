@@ -4,5 +4,7 @@ import io.temporal.activity.ActivityInterface;
 
 @ActivityInterface
 public interface EvidenceWindowActivities {
+    void warn(String caseId);
+
     void expire(String caseId);
 }

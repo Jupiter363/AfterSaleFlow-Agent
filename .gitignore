@@ -5,6 +5,7 @@
 logs/
 data/
 tmp/
+.local-dev/
 .idea/
 .vscode/
 .DS_Store
@@ -21,3 +22,4 @@ tmp/
 
 .worktrees/
 
+.superpowers/

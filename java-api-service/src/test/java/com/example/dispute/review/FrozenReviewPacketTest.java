@@ -49,6 +49,7 @@ class FrozenReviewPacketTest {
                         "SYSTEM");
 
         assertThat(packet.isFrozen()).isTrue();
+        assertThat(packet.getPacketStatus()).isEqualTo("FROZEN");
         assertThat(packet.getCaseVersion()).isEqualTo(11);
         assertThat(packet.getDossierVersion()).isEqualTo(4);
         assertThat(packet.getIssueVersion()).isEqualTo(3);

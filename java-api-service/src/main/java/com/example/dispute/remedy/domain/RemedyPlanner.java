@@ -81,6 +81,19 @@ public final class RemedyPlanner {
         } else if (normalized.contains("REPLACE")
                 || normalized.contains("EXCHANGE")) {
             actionType = "REPLACE";
+        } else if (recommendation.contains("退款")
+                || recommendation.contains("退费")
+                || recommendation.contains("返款")) {
+            actionType = "REFUND";
+        } else if (recommendation.contains("补发")
+                || recommendation.contains("重发")
+                || recommendation.contains("重新发")
+                || recommendation.contains("再次发")) {
+            actionType = "RESHIP";
+        } else if (recommendation.contains("换货")
+                || recommendation.contains("更换")
+                || recommendation.contains("调换")) {
+            actionType = "REPLACE";
         } else if (normalized.contains("REJECT")
                 || normalized.contains("DENY")) {
             actionType = "REJECT_AFTER_SALE";

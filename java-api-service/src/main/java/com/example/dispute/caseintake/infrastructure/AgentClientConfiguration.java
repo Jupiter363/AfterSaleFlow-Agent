@@ -15,14 +15,21 @@ public class AgentClientConfiguration {
     RestClient agentRestClient(AppProperties properties) {
         AppProperties.Integration agent = properties.agent();
         Duration timeout = Duration.ofMillis(agent.timeoutMs());
-        JdkClientHttpRequestFactory requestFactory =
-                new JdkClientHttpRequestFactory(
-                        HttpClient.newBuilder().connectTimeout(timeout).build());
-        requestFactory.setReadTimeout(timeout);
         return RestClient.builder()
                 .baseUrl(agent.baseUrl())
                 .defaultHeader("X-Service-Secret", agent.serviceSecret())
-                .requestFactory(requestFactory)
+                .requestFactory(http1RequestFactory(timeout))
                 .build();
+    }
+
+    static JdkClientHttpRequestFactory http1RequestFactory(Duration timeout) {
+        JdkClientHttpRequestFactory requestFactory =
+                new JdkClientHttpRequestFactory(
+                        HttpClient.newBuilder()
+                                .version(HttpClient.Version.HTTP_1_1)
+                                .connectTimeout(timeout)
+                                .build());
+        requestFactory.setReadTimeout(timeout);
+        return requestFactory;
     }
 }

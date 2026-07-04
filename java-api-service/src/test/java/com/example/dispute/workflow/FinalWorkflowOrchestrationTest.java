@@ -3,6 +3,7 @@ package com.example.dispute.workflow;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.example.dispute.domain.model.RouteType;
+import com.example.dispute.workflow.domain.DeliberationInterventionMode;
 import com.example.dispute.workflow.domain.DeliberationPanelCommand;
 import com.example.dispute.workflow.domain.DeliberationPanelResult;
 import com.example.dispute.workflow.domain.ExecutionCommand;
@@ -56,6 +57,7 @@ class FinalWorkflowOrchestrationTest {
         client = environment.getWorkflowClient();
         StubHearingWorkflow.calls.set(0);
         StubPanelWorkflow.calls.set(0);
+        StubPanelWorkflow.lastCommand = null;
         StubReviewWorkflow.calls.set(0);
         StubExecutionWorkflow.calls.set(0);
     }
@@ -110,8 +112,31 @@ class FinalWorkflowOrchestrationTest {
         assertThat(result.deliberationId()).isEqualTo("DELIBERATION_test");
         assertThat(StubHearingWorkflow.calls).hasValue(1);
         assertThat(StubPanelWorkflow.calls).hasValue(1);
+        assertThat(StubPanelWorkflow.lastCommand.scoreThreshold()).isEqualTo(80);
+        assertThat(StubPanelWorkflow.lastCommand.maxRevisionAttempts()).isEqualTo(2);
+        assertThat(StubPanelWorkflow.lastCommand.triggerReasons())
+                .contains("RISK_LEVEL_HIGH", "DELIBERATION_MODE_FINAL_ONLY");
         assertThat(StubReviewWorkflow.calls).hasValue(1);
         assertThat(StubExecutionWorkflow.calls).hasValue(1);
+    }
+
+    @Test
+    void mediumRiskFullHearingSkipsFinalOnlyPanelToControlCost() {
+        FulfillmentDisputeResult result =
+                workflow("WORKFLOW_medium")
+                        .run(
+                                command(
+                                        "CASE_medium",
+                                        "WORKFLOW_medium",
+                                        RouteType.FULL_HEARING,
+                                        "MEDIUM",
+                                        DeliberationInterventionMode.FINAL_ONLY));
+
+        assertThat(result.nextStage()).isEqualTo("EVALUATION_COMPLETE");
+        assertThat(result.draftId()).isEqualTo("DRAFT_test");
+        assertThat(result.deliberationId()).isNull();
+        assertThat(StubHearingWorkflow.calls).hasValue(1);
+        assertThat(StubPanelWorkflow.calls).hasValue(0);
     }
 
     private FulfillmentDisputeWorkflow workflow(String workflowId) {
@@ -139,6 +164,27 @@ class FinalWorkflowOrchestrationTest {
                 deliberationRequired);
     }
 
+    private static FulfillmentDisputeCommand command(
+            String caseId,
+            String workflowId,
+            RouteType routeType,
+            String riskLevel,
+            DeliberationInterventionMode mode) {
+        return new FulfillmentDisputeCommand(
+                caseId,
+                workflowId,
+                routeType,
+                1,
+                Duration.ofHours(24),
+                Duration.ofDays(7),
+                2,
+                riskLevel,
+                mode,
+                "HIGH",
+                80,
+                2);
+    }
+
     public static final class StubHearingWorkflow
             implements DisputeHearingWorkflow {
         static final AtomicInteger calls = new AtomicInteger();
@@ -164,10 +210,12 @@ class FinalWorkflowOrchestrationTest {
     public static final class StubPanelWorkflow
             implements DeliberationPanelWorkflow {
         static final AtomicInteger calls = new AtomicInteger();
+        static volatile DeliberationPanelCommand lastCommand;
 
         @Override
         public DeliberationPanelResult run(DeliberationPanelCommand command) {
             calls.incrementAndGet();
+            lastCommand = command;
             return new DeliberationPanelResult(
                     "DELIBERATION_test",
                     "NO_MAJOR_OBJECTION",

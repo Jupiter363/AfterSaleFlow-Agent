@@ -69,14 +69,15 @@ public class RemedyApplicationService {
                 caseRepository
                         .findByIdForUpdate(caseId)
                         .orElseThrow(() -> caseNotFound(caseId));
-        if (disputeCase.getRouteType() == RouteType.FULL_HEARING
+        RouteType sourceRoute = resolveSourceRoute(disputeCase, workflowId);
+        if (sourceRoute == RouteType.FULL_HEARING
                 && !workflowId.equals(disputeCase.getCurrentWorkflowId())) {
             throw new BusinessException(
                     ErrorCode.CASE_STATUS_INVALID,
                     "workflow does not own this hearing case",
                     Map.of("case_id", caseId));
         }
-        return generate(disputeCase, SYSTEM).getId();
+        return generate(disputeCase, sourceRoute, SYSTEM).getId();
     }
 
     @Transactional(readOnly = true)
@@ -97,7 +98,9 @@ public class RemedyApplicationService {
     }
 
     private RemedyPlanEntity generate(
-            FulfillmentCaseEntity disputeCase, AuthenticatedActor actor) {
+            FulfillmentCaseEntity disputeCase,
+            RouteType sourceRoute,
+            AuthenticatedActor actor) {
         var existing =
                 planRepository.findFirstByCaseIdOrderByPlanVersionDesc(
                         disputeCase.getId());
@@ -105,12 +108,12 @@ public class RemedyApplicationService {
             return existing.get();
         }
         int version = 1;
-        SourceData source = sourceFor(disputeCase);
+        SourceData source = sourceFor(disputeCase, sourceRoute);
         RemedyPlanDraft planned =
                 planner.plan(
                         new RemedyPlanningSource(
                                 disputeCase.getId(),
-                                disputeCase.getRouteType(),
+                                sourceRoute,
                                 disputeCase.getRiskLevel(),
                                 source.conclusionCode(),
                                 source.actions(),
@@ -124,7 +127,7 @@ public class RemedyApplicationService {
                                 disputeCase.getId(),
                                 planned.sourceDraftId(),
                                 version,
-                                disputeCase.getRouteType(),
+                                sourceRoute,
                                 planned.riskLevel(),
                                 writeJson(planned.actions()),
                                 writeJson(planned.preconditions()),
@@ -141,15 +144,39 @@ public class RemedyApplicationService {
                 Map.of("case_status", source.previousCaseStatus()),
                 Map.of(
                         "case_status", "REMEDY_PLANNED",
-                        "source_route", disputeCase.getRouteType().name(),
+                        "source_route", sourceRoute.name(),
                         "risk_level", planned.riskLevel().name(),
                         "requires_human_review", true,
                         "action_count", planned.actions().size()));
         return plan;
     }
 
-    private SourceData sourceFor(FulfillmentCaseEntity disputeCase) {
-        if (disputeCase.getRouteType() == RouteType.FULL_HEARING) {
+    private RouteType resolveSourceRoute(
+            FulfillmentCaseEntity disputeCase, String workflowId) {
+        RouteType routeType = disputeCase.getRouteType();
+        if (routeType != null) {
+            return routeType;
+        }
+        boolean hearingWorkflowOwnsCase =
+                workflowId != null
+                        && workflowId.equals(disputeCase.getCurrentWorkflowId())
+                        && workflowId.startsWith("hearing-window-");
+        boolean hasHearingState =
+                hearingRepository.findByCaseId(disputeCase.getId()).isPresent();
+        if (hearingWorkflowOwnsCase || hasHearingState) {
+            disputeCase.ensureFullHearingRoute(SYSTEM.actorId());
+            caseRepository.save(disputeCase);
+            return RouteType.FULL_HEARING;
+        }
+        throw new BusinessException(
+                ErrorCode.CASE_STATUS_INVALID,
+                "case route is required before remedy planning",
+                Map.of("case_id", disputeCase.getId()));
+    }
+
+    private SourceData sourceFor(
+            FulfillmentCaseEntity disputeCase, RouteType sourceRoute) {
+        if (sourceRoute == RouteType.FULL_HEARING) {
             var hearing =
                     hearingRepository
                             .findByCaseId(disputeCase.getId())

@@ -52,6 +52,7 @@ public class DeliberationPanelWorkflowImpl
         Set<String> unavailable = new LinkedHashSet<>();
         Set<String> majorObjections = new LinkedHashSet<>();
         boolean blocker = false;
+        boolean scoreBelowThreshold = false;
         for (int index = 0; index < promises.size(); index++) {
             String critic = command.selectedCritics().get(index);
             CriticActivityResult report;
@@ -70,6 +71,15 @@ public class DeliberationPanelWorkflowImpl
                 unavailable.add(critic);
                 continue;
             }
+            boolean explicitMajorSeverity =
+                    "BLOCKER".equals(report.severity())
+                            || "HIGH".equals(report.severity());
+            if (!explicitMajorSeverity
+                    && report.score() < command.scoreThreshold()) {
+                scoreBelowThreshold = true;
+                majorObjections.add(
+                        critic + "_SCORE_BELOW_THRESHOLD_" + report.score());
+            }
             if ("BLOCKER".equals(report.severity())) {
                 blocker = true;
                 majorObjections.addAll(report.blockingIssues());
@@ -81,7 +91,7 @@ public class DeliberationPanelWorkflowImpl
         String panelResult;
         if (!unavailable.isEmpty()) {
             panelResult = "MANUAL_REVIEW_REQUIRED";
-        } else if (blocker) {
+        } else if (blocker || scoreBelowThreshold) {
             panelResult = "REVISION_REQUIRED";
         } else {
             panelResult = "NO_MAJOR_OBJECTION";
@@ -95,7 +105,7 @@ public class DeliberationPanelWorkflowImpl
         return new DeliberationPanelResult(
                 deliberationId,
                 panelResult,
-                blocker || !unavailable.isEmpty(),
+                blocker || scoreBelowThreshold || !unavailable.isEmpty(),
                 !unavailable.isEmpty(),
                 List.copyOf(majorObjections),
                 List.copyOf(unavailable));

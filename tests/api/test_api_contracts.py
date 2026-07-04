@@ -16,7 +16,7 @@ def request(method: str, path: str, *, payload: dict | None = None, headers: dic
         method=method,
         headers={
             "Content-Type": "application/json",
-            "X-User-Id": "smoke-user",
+            "X-User-Id": "user-local",
             "X-Role": "USER",
             **(headers or {}),
         },

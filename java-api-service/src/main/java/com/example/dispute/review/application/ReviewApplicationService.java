@@ -27,17 +27,15 @@ import com.example.dispute.infrastructure.persistence.repository.HearingStateRep
 import com.example.dispute.infrastructure.persistence.repository.RemedyPlanRepository;
 import com.example.dispute.infrastructure.persistence.repository.ReviewPacketRepository;
 import com.example.dispute.infrastructure.persistence.repository.ReviewTaskRepository;
+import com.example.dispute.notification.application.CaseLifecycleNotificationService;
 import com.example.dispute.review.domain.ApprovalPolicyDecision;
 import com.example.dispute.review.domain.ApprovalPolicyEngine;
 import com.example.dispute.review.domain.ApprovalPolicyInput;
 import com.example.dispute.review.domain.ActionSnapshotHasher;
 import com.example.dispute.review.domain.ReviewPacketVersions;
-import com.example.dispute.workflow.domain.HumanReviewSignal;
-import com.example.dispute.workflow.temporal.FulfillmentDisputeWorkflow;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.temporal.client.WorkflowClient;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -69,8 +67,9 @@ public class ReviewApplicationService {
     private final ApprovalRecordRepository approvalRepository;
     private final DeliberationReportRepository deliberationRepository;
     private final ApprovalPolicyDecisionRepository policyDecisionRepository;
+    private final CaseLifecycleNotificationService lifecycleNotifications;
     private final AuditRecorder auditRecorder;
-    private final WorkflowClient workflowClient;
+    private final PostReviewOrchestrationService postReviewOrchestration;
     private final ObjectMapper objectMapper;
     private final TransactionTemplate transactions;
     private final ApprovalPolicyEngine policyEngine;
@@ -87,8 +86,9 @@ public class ReviewApplicationService {
             ApprovalRecordRepository approvalRepository,
             DeliberationReportRepository deliberationRepository,
             ApprovalPolicyDecisionRepository policyDecisionRepository,
+            CaseLifecycleNotificationService lifecycleNotifications,
             AuditRecorder auditRecorder,
-            WorkflowClient workflowClient,
+            PostReviewOrchestrationService postReviewOrchestration,
             ObjectMapper objectMapper,
             TransactionTemplate transactions,
             @Value("${app.approval.refund-threshold:500.00}") BigDecimal refundThreshold,
@@ -101,8 +101,9 @@ public class ReviewApplicationService {
         this.approvalRepository=approvalRepository;
         this.deliberationRepository=deliberationRepository;
         this.policyDecisionRepository=policyDecisionRepository;
+        this.lifecycleNotifications=lifecycleNotifications;
         this.auditRecorder=auditRecorder;
-        this.workflowClient=workflowClient; this.objectMapper=objectMapper;
+        this.postReviewOrchestration=postReviewOrchestration; this.objectMapper=objectMapper;
         this.transactions=transactions;
         this.policyEngine=new ApprovalPolicyEngine(refundThreshold,reshipThreshold);
         this.reviewTimeoutHours=reviewTimeoutHours;
@@ -205,6 +206,7 @@ public class ReviewApplicationService {
         disputeCase.waitForHumanReview(SYSTEM.actorId()); caseRepository.save(disputeCase);
         auditRecorder.record(SYSTEM,"REVIEW_TASK_CREATED","REVIEW_TASK",task.getId(),caseId,Map.of(),
                 Map.of("priority",policy.priority(),"required_approvals",policy.requiredApprovals(),"risk_flags",policy.riskFlags()));
+        lifecycleNotifications.reviewPending(disputeCase, task.getId());
         return task.getId();
     }
 
@@ -234,14 +236,8 @@ public class ReviewApplicationService {
     public ReviewDecisionView decide(String taskId,ReviewDecisionCommand command,AuthenticatedActor actor){
         assertCanDecide(actor);
         ReviewDecisionView result=transactions.execute(ignored->persistDecision(taskId,command,actor));
-        ApprovalRecordEntity record =
-                approvalRepository
-                        .findById(result.approvalRecordId())
-                        .orElseThrow(
-                                () ->
-                                        new IllegalStateException(
-                                                "persisted human review record not found"));
-        signal(result.caseId(),actor,command,record);
+        postReviewOrchestration.orchestrate(
+                result.approvalRecordId(), actor, command.idempotencyKey());
         return result;
     }
 
@@ -302,28 +298,20 @@ public class ReviewApplicationService {
                 actionSnapshotHash,packet.getExpiresAt()));
         auditRecorder.record(actor,"REVIEW_DECIDED","REVIEW_TASK",taskId,task.getCaseId(),
                 Map.of("task_status","PENDING","plan",original),Map.of("task_status",task.getTaskStatus().name(),"approved_plan",approved));
+        switch (command.decision()) {
+            case APPROVE, MODIFY_AND_APPROVE ->
+                    lifecycleNotifications.finalDecision(
+                            disputeCase, command.decision().name());
+            case REQUEST_MORE_EVIDENCE ->
+                    lifecycleNotifications.supplementRequested(
+                            disputeCase, "review-" + taskId);
+            case REJECT, ESCALATE_MANUAL ->
+                    lifecycleNotifications.manualHandoff(
+                            disputeCase, command.decision().name());
+        }
         return decisionView(record,task);
     }
 
-    private void signal(
-            String caseId,
-            AuthenticatedActor actor,
-            ReviewDecisionCommand command,
-            ApprovalRecordEntity record){
-        try{
-            workflowClient.newWorkflowStub(FulfillmentDisputeWorkflow.class,"CASEWORKFLOW_"+caseId)
-                    .submitReviewDecision(new HumanReviewSignal(
-                            actor.actorId(),
-                            "PLATFORM_REVIEWER",
-                            command.decision().name(),
-                            record.getReviewPacketVersion(),
-                            record.getActionSnapshotHash(),
-                            record.getId(),
-                            command.reason()));
-        }catch(RuntimeException exception){
-            throw new BusinessException(ErrorCode.WORKFLOW_SIGNAL_FAILED,"review persisted but workflow signal failed",Map.of("case_id",caseId));
-        }
-    }
     private ReviewDecisionView decisionView(ApprovalRecordEntity record,ReviewTaskEntity task){
         boolean allowed=record.getDecisionType()==ApprovalDecisionType.APPROVE||record.getDecisionType()==ApprovalDecisionType.MODIFY_AND_APPROVE;
         String status=allowed?"APPROVED_FOR_EXECUTION":record.getDecisionType()==ApprovalDecisionType.REQUEST_MORE_EVIDENCE?"WAITING_EVIDENCE":"MANUAL_HANDOFF";

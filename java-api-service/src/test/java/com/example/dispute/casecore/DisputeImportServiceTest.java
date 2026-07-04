@@ -18,6 +18,7 @@ import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEnti
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.room.domain.PhaseClockType;
 import com.example.dispute.room.domain.RoomType;
+import com.example.dispute.room.application.ParticipantService;
 import com.example.dispute.room.infrastructure.persistence.entity.CasePhaseClockEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
 import com.example.dispute.room.infrastructure.persistence.repository.CasePhaseClockRepository;
@@ -40,6 +41,7 @@ class DisputeImportServiceTest {
     @Mock private FulfillmentCaseRepository repository;
     @Mock private CaseRoomRepository roomRepository;
     @Mock private CasePhaseClockRepository clockRepository;
+    @Mock private ParticipantService participantService;
 
     private DisputeImportService service;
 
@@ -50,9 +52,11 @@ class DisputeImportServiceTest {
                         repository,
                         roomRepository,
                         clockRepository,
+                        participantService,
                         new DisputeProperties(
                                 Duration.ofHours(2),
                                 Duration.ofHours(3),
+                                Duration.ofMinutes(5),
                                 3,
                                 Duration.ofSeconds(15),
                                 true),
@@ -80,7 +84,15 @@ class DisputeImportServiceTest {
         assertThat(imported.caseStatus()).isEqualTo(CaseStatus.INTAKE_PENDING);
         assertThat(imported.currentRoom()).isEqualTo("INTAKE");
         assertThat(imported.currentDeadlineAt()).isNull();
-        verify(repository).save(any(FulfillmentCaseEntity.class));
+        var savedCase =
+                org.mockito.ArgumentCaptor.forClass(FulfillmentCaseEntity.class);
+        verify(repository).save(savedCase.capture());
+        assertThat(savedCase.getValue().getCaseType()).isEqualTo("DISPUTE");
+        verify(participantService)
+                .ensureImportedParties(
+                        any(FulfillmentCaseEntity.class),
+                        any(AuthenticatedActor.class),
+                        any(OffsetDateTime.class));
         verify(roomRepository).save(any(CaseRoomEntity.class));
     }
 

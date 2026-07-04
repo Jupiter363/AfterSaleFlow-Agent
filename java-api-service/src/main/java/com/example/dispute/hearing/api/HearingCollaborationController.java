@@ -75,6 +75,17 @@ public class HearingCollaborationController {
                 request);
     }
 
+    @PostMapping("/rounds/current/submissions")
+    public ApiResponse<HearingRoundView> submitCurrentRound(
+            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
+            @Valid @RequestBody SubmitHearingRoundRequest body,
+            Authentication authentication,
+            HttpServletRequest request) {
+        return success(
+                roundService.submitParty(caseId, body.toCommand(), actor(authentication)),
+                request);
+    }
+
     @GetMapping("/settlements")
     public ApiResponse<List<SettlementView>> settlements(
             @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,

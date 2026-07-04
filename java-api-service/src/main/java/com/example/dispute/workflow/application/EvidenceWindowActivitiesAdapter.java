@@ -14,6 +14,11 @@ public class EvidenceWindowActivitiesAdapter implements EvidenceWindowActivities
     }
 
     @Override
+    public void warn(String caseId) {
+        completionService.warnDeadline(caseId);
+    }
+
+    @Override
     public void expire(String caseId) {
         completionService.expire(caseId);
     }

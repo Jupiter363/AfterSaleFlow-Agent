@@ -1,99 +1,100 @@
-# 订单履约争议裁决系统：正式版验收报告
+# AI Native 履约争端审理系统：阶段验收报告
 
-## 1. 验收结论
+## 1. 当前结论
 
-- 总体结论：PASS
-- 是否允许进入正式交付：是
-- 是否存在一票否决项：否
-- 一票否决项编号：无
-- 验收时间：2026-06-29 23:30 Asia/Shanghai
-- 验收执行者：Codex
-- 验收提交：`8e16c29b49d3472c9baa450a7fe5b47a1be69602` + Phase 16 验收补充文件
+- 阶段结论：核心实现与本地整栈回归通过。
+- 正式交付结论：暂不签署最终 PASS。
+- 未完成项：Figma 文件受外部 Starter MCP 配额限制，尚未创建和逐页比对节点；专项全链路 E2E 仍需补齐。
+- 验收日期：2026-07-04 Asia/Shanghai。
+- 验收分支：`codex/ai-native-final-refactor`。
+- 主验收清单：`Project Plan/AI_Native履约争端审理系统_正式版验收清单_最终版.md`。
 
-## 2. 验收范围
+本报告只覆盖 AI Native 履约争端审理系统。普通履约流已从本轮产品范围中删除，不再作为验收对象。
 
-- 主控开发文档：`Project Plan/订单履约争议裁决系统_正式版开发文档_Codex主控.md`
-- 统一配置说明：`Project Plan/订单履约争议裁决系统_统一配置说明_Codex执行版.md`
-- 一次性验收清单：`Project Plan/订单履约争议裁决系统_正式版一次性验收清单_Codex.md`
-- 仓库路径：`D:\学习\Project\AfterSaleFlow-Agent`
+## 2. 本轮交付范围
 
-## 3. 总体统计
+- 争议总览、接待室、证据书记官室、共享小法庭、平台终审、结果页与平台内传票信箱。
+- 外部导入和接待官创建两类争议来源。
+- PT2H 举证窗口、PT3H 庭审窗口、三轮庭审上限与服务端超时收敛。
+- 用户、商家、平台客服、审核员和管理员的角色权限。
+- 不可变房间消息、案件时间线和 SSE 断线续传。
+- 生命周期通知、未读数、单条已读、全部已读和房间深链。
+- 人审门控、确定性执行、结果展示和审计链路。
 
-| 类别 | 结论 | 证据 |
+## 3. 自动化验证
+
+| 测试域 | 结果 | 数量 |
+|---|---|---:|
+| Java 单元、集成与 Workflow 测试 | PASS | 178 |
+| Vue/Vitest | PASS | 64 |
+| 静态契约 | PASS | 81 |
+| API/E2E/负载 | PASS | 6 |
+| Python Agent | PASS | 49 |
+| OCR Parser | PASS | 10 |
+| 前端生产构建 | PASS | 仅保留既有 chunk size 警告 |
+
+所有数量均来自 2026-07-04 的完整重跑，不沿用旧报告中的历史数字。
+
+## 4. 本地整栈运行态
+
+使用根目录 `.env` 显式启动 Compose 后，下列服务均达到 `healthy`：
+
+- PostgreSQL、Redis、Temporal、MinIO、Elasticsearch。
+- Langfuse、LiteLLM。
+- Python Agent、OCR Parser、Java API。
+- Vue Frontend、Nginx。
+
+真实网关验证：
+
+| 检查项 | 结果 | 关键证据 |
 |---|---|---|
-| 一票否决项 | PASS | 禁用技术与密钥扫描；Agent/Tool/Human Review 边界测试 |
-| 主控文档 21 章覆盖 | PASS | `README.md`、`docs/*`、`tests/static`、Phase 1-16 commits |
-| 服务与技术栈 | PASS | `docker-compose.yml`、各服务 Dockerfile、Compose healthcheck |
-| 仓库结构 | PASS | `frontend`、`java-api-service`、`python-agent-service`、`ocr-parser-service`、`deploy`、`scripts`、`tests` |
-| Java 后端 | PASS | Java 95/95 tests；controller/application/domain/infrastructure 分层 |
-| Python Agent | PASS | Python Agent 13/13 pytest；C1-C6、Evaluation、Langfuse/LiteLLM 边界 |
-| OCR Parser | PASS | OCR 10/10 pytest；PaddleOCR/MarkItDown/MinIO/ES 边界 |
-| Frontend | PASS | Vitest 7/7；Vite build 通过；生产静态 server + Nginx |
-| Docker 部署 | PASS | `docker compose up -d --build --wait`，所有服务 healthy |
-| API/E2E/load | PASS | `tests/api tests/e2e tests/load` 5/5 against Phase 16 stack |
-| CI/CD 与工程质量 | PASS | `.github/workflows/quality-gate.yml`、`docs/release/README.md` |
+| 网关健康 | PASS | `GET /healthz` 返回 `ok` |
+| 接待受理 | PASS | 案件从 `INTAKE_COMPLETED` 进入 `EVIDENCE_OPEN`，返回服务端 PT2H 截止时间 |
+| 生命周期通知 | PASS | 用户收到证据室开放通知，商家收到传票与证据室开放通知 |
+| 全部已读 | PASS | 浏览器出现未读徽标和“全部已读”；点击后两者消失，服务端未读数为 0 |
+| SSE Header 续传 | PASS | `Last-Event-ID: 1` 只返回事件 2、3 |
+| SSE Query 续传 | PASS | `last_event_id=2` 只返回事件 3 |
+| 房间消息不可变 | PASS | `UPDATE room_message` 被数据库以 `room_message is append-only` 拒绝 |
+| 时间线不可变 | PASS | `DELETE case_timeline_event` 被数据库以 `case_timeline_event is append-only` 拒绝 |
+| 房间和解 E2E | PASS | 独立案件经创建、受理、双方完成举证、开庭和双确认到达 `CONFIRMED` |
+| Agent 内部协议 | PASS | Java 强制 HTTP/1.1 后，Uvicorn 不再拒绝 h2c Upgrade 请求 |
 
-## 4. 一票否决项检查结果
+## 5. 关键业务验收
 
-| 编号 | 结果 | 证据 | 说明 |
-|---|---|---|---|
-| VETO-01 | PASS | `python-agent-service/app/schemas.py`、`java-api-service/src/main/java/.../remedy`、`review` | Agent 输出分析/草案，最终执行前进入 D/Approval/Human Review/Executor |
-| VETO-02 | PASS | `python-agent-service/tests/test_graph.py`、`java-api-service/src/test/.../ToolExecutorServiceIntegrationTest.java` | C 层不执行退款、补发、关闭售后 |
-| VETO-03 | PASS | `java-api-service/src/test/java/com/example/dispute/remedy/RemedyPlannerTest.java` | D 层映射 remedy，不推翻 C 层事实 |
-| VETO-04 | PASS | `ToolExecutorServiceIntegrationTest.java` | 未审批动作拒绝，审批通过后才执行 |
-| VETO-05 | PASS | `ReviewApplicationServiceIntegrationTest.java`、`ExecutionControllerTest.java` | 高风险动作需平台审核员确认 |
-| VETO-06 | PASS | README/docs 与 Phase 1-16 输出 | 未降级为 MVP/Demo |
-| VETO-07 | PASS | `tests/static/test_phase7...` 至 `test_phase16...` | A/B/Router/C/D/Approval/Human Review/Tool Executor/Closure/Evaluation 均覆盖 |
-| VETO-08 | PASS | 禁用技术扫描仅命中文档中的“不引入”说明 | 未引入 Kubernetes、Kafka、MCP、Milvus、Qdrant、OPA、Drools、vLLM、A2A、CrewAI |
-| VETO-09 | PASS | README / 主控文档 / 代码扫描 | 当前版本不实现申诉/复审流程 |
-| VETO-10 | PASS | PostgreSQL 22 public tables；核心表样本存在 | `fulfillment_case`、`hearing_record`、`approval_record`、`action_record`、`evaluation_trace` 等存在 |
-| VETO-11 | PASS | 敏感扫描无命中 | 验证 key 未写入仓库；`.env` 未提交 |
-| VETO-12 | PASS | Java 95/95、Python 13/13、OCR 10/10、Frontend 7/7、Static 63/63、API/E2E/load 5/5 | 全量测试可运行 |
-| VETO-13 | PASS | `docker compose up -d --build --wait --wait-timeout 360` | Phase 16 隔离栈全部 healthy |
-| VETO-14 | PASS | `scripts/smoke-test.sh`、`tests/e2e/test_main_flows.py` | 端到端创建/查询 case 通过，三类 intake 路径通过 Nginx |
-
-## 5. 测试执行结果
-
-| 命令 | 结果 | 输出摘要 |
+| 能力 | 结果 | 主要证据 |
 |---|---|---|
-| `java-api-service ./mvnw ... test` | PASS | Tests run: 95, Failures: 0, Errors: 0, Skipped: 0 |
-| `python-agent-service python -m pytest -q` | PASS | 13 passed |
-| `ocr-parser-service python -m pytest -q` | PASS | 10 passed |
-| `frontend pnpm test` | PASS | 4 files / 7 tests passed |
-| `frontend pnpm build` | PASS | Vite build completed；仅 chunk size warning |
-| `python -m pytest tests/static -q` | PASS | 63 passed |
-| `python -m pytest tests/api tests/e2e tests/load -q` | PASS | 5 passed against Phase 16 stack |
-| `docker compose config --quiet` | PASS | exit 0 |
-| `docker compose up -d --build --wait --wait-timeout 360` | PASS | all services healthy |
-| `./scripts/init-db.sh` | PASS | Flyway current version 006, migrations=0 |
-| `./scripts/smoke-test.sh` | PASS | Nginx/frontend/Java/Python/OCR health + case create/query PASS |
+| 争议来源与总览 | PASS | 只展示外部导入或接待官创建的争议；本地种子覆盖多个状态 |
+| 接待官结构化受理 | PASS | 提取引用、主张、诉求和风险；支持更正、受理与不受理 |
+| 双方参与和传票 | PASS | 受理后邀请双方，平台内通知具备幂等业务键 |
+| 证据室 | PASS | PT2H、提前完成、单方超时、卷宗冻结和可见性策略均有自动化测试 |
+| 小法庭 | PASS | PT3H、固定三轮陈述、每轮提交/超时封存、和解、非最终草案和最终方案后评审团触发均有自动化测试 |
+| 平台终审 | PASS | 审核员审批、修改、退回补证和转人工均有集成测试 |
+| 执行与结果 | PASS | 未审批动作不可执行，执行幂等，结案和结果 API 可追踪 |
+| 前端治理 | PASS | 倒计时不触发业务动作；用户和商家不可见审核辅助官；支持减少动画 |
 
-## 6. 部署与初始化证据
+## 6. 未签署最终 PASS 的原因
 
-- PostgreSQL databases：`dispute_system`、`langfuse`、`litellm`、`postgres`、`temporal`、`temporal_visibility`
-- Flyway：`001`–`006` all success
-- Core public tables：22
-- Core table sample：`fulfillment_case`、`evidence_dossier`、`evidence_item`、`hearing_state`、`hearing_record`、`remedy_plan`、`review_task`、`approval_record`、`action_record`、`audit_log`、`policy_rule`、`evaluation_trace`
-- MinIO buckets：`evidence-original`、`evidence-desensitized`、`ocr-temp`、`policy-files`、`review-exports`
-- Elasticsearch indices：`case_index`、`evidence_index`、`policy_index`
-- Redis auth：unauthenticated request rejected，authenticated `PONG`
-- Temporal namespace：`default` state `Registered`
-- Runtime non-root users：frontend `1000`，java `101`，python-agent `10001`，ocr `10001`
+### 6.1 Figma 外部阻塞
 
-## 7. E2E 流程验收结果
+Figma 文件 `AI Native 履约争端审理系统 — Light Cognitive Field` 已建立，但 Starter MCP 配额阻止继续写入节点。以下项目尚不能验收：
 
-| 流程 | 结果 | 证据 |
-|---|---|---|
-| 普通履约流 | PASS | `RouterApiIntegrationTest`、`RemedyApplicationServiceIntegrationTest`、`tests/e2e/test_main_flows.py` |
-| 明确规则流 | PASS | `RouterApiIntegrationTest`、`ReviewApplicationServiceIntegrationTest`、`ToolExecutorServiceIntegrationTest` |
-| 争议审理流 | PASS | `CaseFulfillmentDisputeWorkflowTest`、`HearingPersistenceIntegrationTest`、Python C1-C6 tests |
-| 审核员要求补证/信号 | PASS | `WorkflowControllerTest`、`CaseFulfillmentDisputeWorkflowTest` |
-| Tool Executor 幂等执行 | PASS | `ToolExecutorServiceIntegrationTest`、`RedisActionExecutionLockTest` |
-| Case Closure + Evaluation | PASS | `CaseClosureServiceIntegrationTest`、`python-agent-service/tests/test_evaluation.py` |
+- 七类关键界面的 Figma 节点。
+- 桌面、移动和角色变体。
+- Vue 页面与 Figma 节点逐页截图比对。
 
-## 8. 最终建议
+### 6.2 专项全链路 E2E
 
-- 是否可以交付：是。
-- 必须修复项：无。
-- 建议优化项：Vite chunk size warning 可在后续通过动态 import / manualChunks 优化；当前不影响验收。
-- 后续演进建议：接入真实订单、物流、支付、退款、补发系统时保持现有 Adapter 边界与 Human Review / Tool Executor 审批门禁不变。
+创建、受理、双方完成举证、开庭、双确认和解已通过连续网关 E2E；最终确认方使用同一幂等键重放也已验证。外部模型服务当前没有可用凭据，调用返回 `503 AGENT_SERVICE_UNAVAILABLE`，系统按治理规则安全转人工且不会伪造裁决。
+
+PT2H 单方缺席、PT3H 超时、三轮耗尽、最终方案后高风险评审团和不予受理均已通过持久化集成测试或 Temporal 场景测试。导入、房间消息、完成确认、通知、和解确认和执行的幂等矩阵也已分别覆盖。
+
+仍缺少的是“外部导入/创建 → 结果”的一条连续网关闭环。当前链路已真实到达双确认和解；后续草案依赖外部模型，而本机配置的是无效占位凭据，因此不能继续到终审、执行和结果。该环境问题不能通过伪造线上 Agent 输出来规避。
+
+在这两组事项完成前，本报告保持“核心实现通过、最终交付未签署”的结论，不把局部测试冒充全链路验收。
+
+## 7. 下一步
+
+1. 补齐专项 E2E 场景并把执行证据写回最终验收清单。
+2. Figma 配额恢复后生成节点、变体和页面映射截图。
+3. 重跑完整测试与本地整栈回归。
+4. 确认不存在一票否决项后，将本报告升级为最终 PASS。

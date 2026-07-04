@@ -71,6 +71,21 @@ public class NotificationService {
         return view(entity);
     }
 
+    @Transactional
+    public long markAllRead(AuthenticatedActor actor) {
+        Instant now = clock.instant();
+        List<NotificationEntity> unread =
+                repository.findAllByRecipientIdOrderByCreatedAtDesc(actor.actorId())
+                        .stream()
+                        .filter(entity -> entity.getReadAt() == null)
+                        .peek(entity -> entity.markRead(now))
+                        .toList();
+        if (!unread.isEmpty()) {
+            repository.saveAll(unread);
+        }
+        return unread.size();
+    }
+
     private NotificationView create(NotificationCommand command) {
         Instant now = clock.instant();
         NotificationEntity saved =

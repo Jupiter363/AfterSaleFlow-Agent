@@ -21,6 +21,7 @@ import com.example.dispute.infrastructure.persistence.repository.EvidenceDossier
 import com.example.dispute.infrastructure.persistence.repository.EvidenceItemRepository;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.notification.application.NotificationService;
+import com.example.dispute.notification.application.CaseLifecycleNotificationService;
 import com.example.dispute.notification.infrastructure.persistence.repository.NotificationRepository;
 import com.example.dispute.room.application.CaseEventService;
 import com.example.dispute.room.domain.PhaseClockStatus;
@@ -61,6 +62,7 @@ import org.testcontainers.utility.DockerImageName;
     EvidenceCompletionService.class,
     EvidenceDossierFreezer.class,
     NotificationService.class,
+    CaseLifecycleNotificationService.class,
     CaseEventService.class,
     EvidenceRoomIntegrationTest.FixedClockConfiguration.class
 })
@@ -133,6 +135,14 @@ class EvidenceRoomIntegrationTest {
                                 .getClockStatus())
                 .isEqualTo(PhaseClockStatus.COMPLETED_EARLY);
         assertThat(
+                        clockRepository
+                                .findByCaseIdAndClockType(
+                                        "CASE_EARLY",
+                                        PhaseClockType.EVIDENCE_SUBMISSION)
+                                .orElseThrow()
+                                .getCompletionReason())
+                .isEqualTo("BOTH_PARTIES_COMPLETED");
+        assertThat(
                         roomRepository
                                 .findByCaseIdAndRoomType("CASE_EARLY", RoomType.EVIDENCE)
                                 .orElseThrow()
@@ -188,6 +198,14 @@ class EvidenceRoomIntegrationTest {
                                 .orElseThrow()
                                 .getClockStatus())
                 .isEqualTo(PhaseClockStatus.EXPIRED);
+        assertThat(
+                        clockRepository
+                                .findByCaseIdAndClockType(
+                                        "CASE_EXPIRED",
+                                        PhaseClockType.EVIDENCE_SUBMISSION)
+                                .orElseThrow()
+                                .getCompletionReason())
+                .isEqualTo("DEADLINE_EXPIRED");
         assertThat(dossierRepository.findByCaseIdAndDossierVersion("CASE_EXPIRED", 1))
                 .hasValueSatisfying(
                         dossier -> assertThat(dossier.getDossierStatus()).isEqualTo("FROZEN"));

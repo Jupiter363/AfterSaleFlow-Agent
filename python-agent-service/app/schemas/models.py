@@ -50,6 +50,14 @@ class PolicyCandidate(StrictModel):
     rule_text: LongText
 
 
+class HearingContext(StrictModel):
+    completed_statement_rounds: Annotated[int, Field(ge=0)] = 0
+    max_statement_rounds: Annotated[int, Field(ge=0)] = 0
+    final_convergence: bool = False
+    must_produce_final_plan: bool = False
+    allow_supplemental_request: bool = True
+
+
 class HearingAnalyzeRequest(StrictModel):
     case_id: Annotated[str, StringConstraints(pattern=r"^CASE_[A-Za-z0-9_]{1,59}$")]
     workflow_id: Identifier
@@ -62,6 +70,7 @@ class HearingAnalyzeRequest(StrictModel):
         default_factory=list
     )
     evidence_timeout: bool = False
+    hearing_context: HearingContext = Field(default_factory=HearingContext)
 
 
 class FramedIssue(StrictModel):

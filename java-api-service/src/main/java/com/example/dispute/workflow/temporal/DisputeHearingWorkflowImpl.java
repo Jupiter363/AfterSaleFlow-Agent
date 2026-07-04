@@ -38,7 +38,6 @@ public class DisputeHearingWorkflowImpl
     private final Deque<EvidenceSubmissionSignal> evidenceSignals =
             new ArrayDeque<>();
     private int completedHearingRounds;
-    private boolean factsSufficient;
     private int confirmedSettlementVersion;
 
     @Override
@@ -48,6 +47,7 @@ public class DisputeHearingWorkflowImpl
         boolean manualRequired = false;
         boolean evidenceTimedOut = false;
         String draftId = null;
+        activities.initialize(command);
         String stopReason = awaitSharedHearing(command);
         if ("DEADLINE_EXPIRED".equals(stopReason)) {
             evidenceTimedOut = true;
@@ -55,7 +55,24 @@ public class DisputeHearingWorkflowImpl
         } else if ("MAX_ROUNDS".equals(stopReason)) {
             manualRequired = true;
         }
-        activities.initialize(command);
+        if ("SETTLEMENT_CONFIRMED".equals(stopReason)) {
+            activities.complete(
+                    command.caseId(),
+                    command.workflowId(),
+                    "SETTLEMENT_CONFIRMED",
+                    false,
+                    false,
+                    dossierVersion,
+                    stopReason);
+            return new HearingWorkflowResult(
+                    null,
+                    false,
+                    false,
+                    dossierVersion,
+                    "SETTLEMENT_CONFIRMED",
+                    stopReason);
+        }
+        round = completedHearingRounds;
         try {
             while (true) {
                 HearingStageActivityResult c1 =
@@ -64,7 +81,8 @@ public class DisputeHearingWorkflowImpl
                                 "C1_ISSUE_FRAMING",
                                 round,
                                 dossierVersion,
-                                evidenceTimedOut);
+                                evidenceTimedOut,
+                                stopReason != null);
                 manualRequired = manualRequired || c1.manualRequired();
                 if (!c1.valid()) {
                     return interrupt(
@@ -79,7 +97,8 @@ public class DisputeHearingWorkflowImpl
                                 "C2_EVIDENCE_GAP",
                                 round,
                                 dossierVersion,
-                                evidenceTimedOut);
+                                evidenceTimedOut,
+                                stopReason != null);
                 manualRequired = manualRequired || c2.manualRequired();
                 if (!c2.valid()) {
                     return interrupt(
@@ -103,6 +122,7 @@ public class DisputeHearingWorkflowImpl
                                 "C3_EVIDENCE_REQUEST",
                                 round,
                                 dossierVersion,
+                                false,
                                 false);
                 manualRequired = manualRequired || c3.manualRequired();
                 if (!c3.valid()) {
@@ -144,7 +164,8 @@ public class DisputeHearingWorkflowImpl
                                 stage,
                                 round,
                                 dossierVersion,
-                                evidenceTimedOut);
+                                evidenceTimedOut,
+                                stopReason != null);
                 manualRequired = manualRequired || result.manualRequired();
                 if (!result.valid()) {
                     return interrupt(
@@ -187,7 +208,8 @@ public class DisputeHearingWorkflowImpl
             String stage,
             int round,
             long dossierVersion,
-            boolean evidenceTimedOut) {
+            boolean evidenceTimedOut,
+            boolean finalConvergence) {
         HearingStageActivityResult result =
                 activities.runStage(
                         command.caseId(),
@@ -195,7 +217,9 @@ public class DisputeHearingWorkflowImpl
                         stage,
                         round,
                         dossierVersion,
-                        evidenceTimedOut);
+                        evidenceTimedOut,
+                        finalConvergence,
+                        command.maxHearingRounds());
         activities.persistStageTrace(
                 command.caseId(),
                 command.workflowId(),
@@ -236,7 +260,6 @@ public class DisputeHearingWorkflowImpl
     @Override
     public void hearingRoundCompleted(int roundNo, boolean factsSufficient) {
         completedHearingRounds = Math.max(completedHearingRounds, roundNo);
-        this.factsSufficient |= factsSufficient;
     }
 
     @Override
@@ -254,13 +277,11 @@ public class DisputeHearingWorkflowImpl
                 Workflow.await(
                         command.hearingWaitTimeout(),
                         () ->
-                                factsSufficient
-                                        || confirmedSettlementVersion > 0
+                                confirmedSettlementVersion > 0
                                         || completedHearingRounds
                                                 >= command.maxHearingRounds());
         if (!stopped) return "DEADLINE_EXPIRED";
         if (confirmedSettlementVersion > 0) return "SETTLEMENT_CONFIRMED";
-        if (factsSufficient) return "FACTS_SUFFICIENT";
         return "MAX_ROUNDS";
     }
 }

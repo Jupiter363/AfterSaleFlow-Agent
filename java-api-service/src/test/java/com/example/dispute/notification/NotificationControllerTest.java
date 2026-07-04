@@ -51,6 +51,7 @@ class NotificationControllerTest {
         when(service.list(any())).thenReturn(List.of(view(false)));
         when(service.unreadCount(any())).thenReturn(1L);
         when(service.markRead(eq("NOTICE_1"), any())).thenReturn(view(true));
+        when(service.markAllRead(any())).thenReturn(2L);
 
         mockMvc.perform(
                         get("/api/notifications")
@@ -73,6 +74,13 @@ class NotificationControllerTest {
                                 .header(HeaderAuthenticationFilter.ROLE_HEADER, "MERCHANT"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.read").value(true));
+
+        mockMvc.perform(
+                        post("/api/notifications/read-all")
+                                .header(HeaderAuthenticationFilter.USER_ID_HEADER, "merchant-local")
+                                .header(HeaderAuthenticationFilter.ROLE_HEADER, "MERCHANT"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.marked_count").value(2));
     }
 
     private static NotificationView view(boolean read) {

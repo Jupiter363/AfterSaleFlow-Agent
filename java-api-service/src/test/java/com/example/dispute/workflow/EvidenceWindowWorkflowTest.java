@@ -63,6 +63,7 @@ class EvidenceWindowWorkflowTest {
 
         assertThat(result.stopReason()).isEqualTo("DEADLINE_EXPIRED");
         assertThat(result.completedRoles()).containsExactly("USER");
+        assertThat(activities.warnedCases).containsExactly("CASE_TIMEOUT");
         assertThat(activities.expiredCases).containsExactly("CASE_TIMEOUT");
         assertThat(environment.currentTimeMillis())
                 .isGreaterThanOrEqualTo(
@@ -71,6 +72,12 @@ class EvidenceWindowWorkflowTest {
 
     static final class RecordingActivities implements EvidenceWindowActivities {
         final List<String> expiredCases = new ArrayList<>();
+        final List<String> warnedCases = new ArrayList<>();
+
+        @Override
+        public void warn(String caseId) {
+            warnedCases.add(caseId);
+        }
 
         @Override
         public void expire(String caseId) {

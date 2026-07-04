@@ -1,64 +1,109 @@
 <script setup>
-import { computed } from "vue";
-import { useRoute } from "vue-router";
+import {
+  computed,
+  onBeforeUnmount,
+  onMounted,
+  watch,
+} from "vue";
+import { useRoute, useRouter } from "vue-router";
+import SummonsMailbox from "./components/notification/SummonsMailbox.vue";
 import { actor, roleLabels } from "./state/actor";
+import {
+  loadNotifications,
+  markAllNotificationsRead,
+  markNotificationRead,
+  notificationStore,
+} from "./stores/notification";
 
 const route = useRoute();
-const showReview = computed(() =>
-  ["CUSTOMER_SERVICE", "PLATFORM_REVIEWER", "ADMIN"].includes(actor.role),
+const router = useRouter();
+const showReview = computed(() => actor.role === "PLATFORM_REVIEWER");
+const notices = computed(() => notificationStore.items.data || []);
+const noticeError = computed(
+  () => notificationStore.items.error?.message || "",
 );
+let notificationTimer;
+
+async function refreshNotifications() {
+  await loadNotifications(actor);
+}
+
+async function openNotification(notification) {
+  if (notification.deep_link) await router.push(notification.deep_link);
+}
+
+async function markRead(notificationId) {
+  await markNotificationRead(actor, notificationId);
+}
+
+async function markAllRead() {
+  await markAllNotificationsRead(actor);
+}
+
+watch(
+  () => [actor.id, actor.role],
+  refreshNotifications,
+  { immediate: true },
+);
+onMounted(() => {
+  notificationTimer = window.setInterval(refreshNotifications, 15_000);
+});
+onBeforeUnmount(() => window.clearInterval(notificationTimer));
 </script>
 
 <template>
   <div class="app-shell">
-    <aside class="side-nav">
-      <router-link class="brand" to="/cases">
-        <span class="brand-mark">衡</span>
-        <span>
-          <strong>履约争议裁决</strong>
-          <small>Human-gated operations</small>
+    <header class="app-header">
+      <router-link class="brand" to="/disputes" aria-label="返回争议订单中心">
+        <span class="brand__mark" aria-hidden="true">
+          <i>⚖</i><b>AI</b>
+        </span>
+        <span class="brand__copy">
+          <strong>履约争议游园会</strong>
+          <small>AI Native Dispute Court</small>
         </span>
       </router-link>
 
-      <nav aria-label="主导航">
-        <router-link to="/cases">
-          <span>案件中心</span>
-          <small>Case workspace</small>
-        </router-link>
-        <router-link v-if="showReview" to="/review">
-          <span>平台审核台</span>
-          <small>Review queue</small>
-        </router-link>
-      </nav>
-
-      <div class="scope-note">
-        <strong>责任边界</strong>
-        <p>前端仅展示后端状态并提交操作，不生成裁决或审批规则。</p>
+      <div class="app-center">
+        <nav class="app-nav" aria-label="主导航">
+          <router-link to="/disputes">争议订单</router-link>
+          <router-link v-if="showReview" to="/reviews">平台终审</router-link>
+          <router-link v-if="showReview" to="/agents">数字人管理中心</router-link>
+        </nav>
       </div>
-    </aside>
 
-    <div class="main-column">
-      <header class="topbar">
-        <div>
-          <p class="eyebrow">ORDER FULFILLMENT DISPUTE SYSTEM</p>
-          <h1>{{ route.meta.title || "案件工作台" }}</h1>
+      <div class="app-tools">
+        <div class="actor-switcher" aria-label="体验身份">
+          <label>
+            <span>身份 ID</span>
+            <input v-model="actor.id" aria-label="身份 ID" />
+          </label>
+          <label>
+            <span>体验角色</span>
+            <select v-model="actor.role" aria-label="体验角色">
+              <option
+                v-for="(label, role) in roleLabels"
+                :key="role"
+                :value="role"
+              >
+                {{ label }}
+              </option>
+            </select>
+          </label>
         </div>
-        <div class="actor-switcher" aria-label="当前访问身份">
-          <el-input v-model="actor.id" aria-label="身份 ID" />
-          <el-select v-model="actor.role" aria-label="角色">
-            <el-option
-              v-for="(label, role) in roleLabels"
-              :key="role"
-              :label="label"
-              :value="role"
-            />
-          </el-select>
-        </div>
-      </header>
+        <SummonsMailbox
+          :notifications="notices"
+          :loading="notificationStore.items.status === 'loading'"
+          :error="noticeError"
+          @open-notification="openNotification"
+          @mark-read="markRead"
+          @mark-all-read="markAllRead"
+        />
+      </div>
+    </header>
 
-      <main class="page">
-        <router-view :key="`${route.fullPath}:${actor.id}:${actor.role}`" />
-      </main>
-    </div>
+    <main class="app-page">
+      <router-view :key="`${route.fullPath}:${actor.id}:${actor.role}`" />
+    </main>
   </div>
 </template>

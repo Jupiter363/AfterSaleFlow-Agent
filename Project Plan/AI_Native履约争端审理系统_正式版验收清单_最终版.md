@@ -444,11 +444,11 @@
 ### 7.3 风险差异
 
 - [ ] 低风险且双方一致可以跳过评审团。
-- [ ] 事实冲突触发评审团。
-- [ ] 低置信度触发评审团。
-- [ ] 规则不清触发评审团。
-- [ ] 高风险触发评审团。
-- [ ] 达到风险条件时触发评议团。
+- [ ] 事实冲突在最终方案后触发评审团。
+- [ ] 低置信度在最终方案后触发评审团。
+- [ ] 规则不清在最终方案后触发评审团。
+- [ ] 高风险在最终方案后强制触发评审团。
+- [ ] 达到风险条件时只在最终方案后触发评议团，不在每轮陈述后介入。
 - [ ] 重大异议进入修订或人工复核。
 
 ---
@@ -1017,70 +1017,73 @@ PASS / FAIL / PARTIAL / BLOCKED
 
 ### 21.1 总览与来源
 
-- [ ] 总览只展示外部导入或接待官创建的争议订单。
-- [ ] 外部导入按来源系统与外部编号幂等。
-- [ ] 本地种子包含多个争议状态并能被对应角色读取。
-- [ ] 左侧订单栏切换右侧审理游园，不立即跳转。
-- [ ] 点击当前房间节点可以进入对应流程。
-- [ ] 不提供普通订单查询、物流大盘或经营分析。
+- [x] 总览只展示外部导入或接待官创建的争议订单。
+- [x] 外部导入按来源系统与外部编号幂等。
+- [x] 本地种子包含多个争议状态并能被对应角色读取。
+- [x] 左侧订单栏切换右侧审理游园，不立即跳转。
+- [x] 点击当前房间节点可以进入对应流程。
+- [x] 不提供普通订单查询、物流大盘或经营分析。
 
 ### 21.2 接待室
 
-- [ ] 争议接待官抽取发起方、订单、售后和物流引用。
-- [ ] 抽取双方主张、诉求、期望结果和初始风险。
-- [ ] 发起方可以确认或更正结构化信息。
-- [ ] 受理后创建双方参与方并发送争议传票。
-- [ ] 不予受理留档，但不邀请另一方、不开放后续房间。
-- [ ] 数字人显示 `IDLE / LISTENING / THINKING / SPEAKING / COMPLETED / HANDOFF / ERROR`。
+- [x] 争议接待官抽取发起方、订单、售后和物流引用。
+- [x] 抽取双方主张、诉求、期望结果和初始风险。
+- [x] 发起方可以确认或更正结构化信息。
+- [x] 受理后创建双方参与方并发送争议传票。
+- [x] 不予受理留档，但不邀请另一方、不开放后续房间。
+- [x] 数字人显示 `IDLE / LISTENING / THINKING / SPEAKING / COMPLETED / HANDOFF / ERROR`。
 
 ### 21.3 证据室
 
-- [ ] 顶部显示服务端 `PT2H` 截止时间。
-- [ ] 双方提前完成时提前封卷并开庭。
-- [ ] 一方未完成时，PT2H 到期自动封卷并开庭。
-- [ ] 迟到证据只能进入庭审补证并创建新卷宗版本。
-- [ ] 双方共享证据目录。
-- [ ] `PRIVATE` 原件不向对方泄露。
-- [ ] `PLATFORM` 原件仅授权平台人员可见。
-- [ ] 可信度五级状态完整。
-- [ ] `REJECTED` 证据可审计但不进入冻结卷宗。
-- [ ] AI 不把启发式判断表述为绝对真实。
+- [x] 顶部显示服务端 `PT2H` 截止时间。
+- [x] 双方提前完成时提前封卷并开庭。
+- [x] 一方未完成时，PT2H 到期自动封卷并开庭。
+- [x] 迟到证据只能进入庭审补证并创建新卷宗版本。
+- [x] 双方共享证据目录。
+- [x] `PRIVATE` 原件不向对方泄露。
+- [x] `PLATFORM` 原件仅授权平台人员可见。
+- [x] 可信度五级状态完整。
+- [x] `REJECTED` 证据可审计但不进入冻结卷宗。
+- [x] AI 不把启发式判断表述为绝对真实。
 
 ### 21.4 小法庭
 
-- [ ] 顶部显示服务端 `PT3H` 截止时间。
-- [ ] 最多三轮，补证不重置庭审时钟。
-- [ ] 书记官先陈列双方有效证据。
-- [ ] 用户与商家可以陈述、质证和补证。
-- [ ] 审核员在 ReviewPacket 冻结前只读。
-- [ ] 三轮耗尽强制生成非最终草案。
-- [ ] PT3H 到期强制生成非最终草案。
-- [ ] 草案记录超时、缺席、证据缺口和不确定性。
-- [ ] 用户和商家界面不显示审核辅助官。
+- [x] 顶部显示服务端 `PT3H` 截止时间。
+- [x] 固定三轮陈述，每轮双方提交或 5 分钟到期后自动封存。
+- [x] 材料补充不重置庭审时钟，也不新增补证主循环。
+- [x] 书记官先陈列双方有效证据。
+- [x] 用户与商家可以陈述、解释证据和确认和解。
+- [x] 审核员在 ReviewPacket 冻结前只读。
+- [x] 三轮耗尽强制生成非最终草案。
+- [x] PT3H 到期强制生成非最终草案。
+- [x] 草案记录超时、缺席、证据缺口和不确定性。
+- [x] 用户和商家界面不显示审核辅助官。
 
 ### 21.5 和解与评审团
 
-- [ ] 和解方案有版本号。
-- [ ] 修改方案使旧确认失效。
-- [ ] 只有 USER 和 MERCHANT 能确认。
-- [ ] 双方确认同一当前版本才视为达成一致。
-- [ ] 和解型草案仍进入平台终审。
-- [ ] 高风险案件触发评审团。
-- [ ] 未和解、低置信度、重大冲突或规则不确定触发评审团。
-- [ ] 低风险且双方一致时可以跳过评审团。
-- [ ] 跳过评审团不能跳过人审。
+- [x] 和解方案有版本号。
+- [x] 修改方案使旧确认失效。
+- [x] 只有 USER 和 MERCHANT 能确认。
+- [x] 双方确认同一当前版本才视为达成一致。
+- [x] 和解型草案仍进入平台终审。
+- [x] 高风险案件在最终方案后强制触发评审团。
+- [x] 低置信度、重大冲突或规则不确定在最终方案后触发评审团。
+- [x] 评审团阈值为 80/100，最多要求 AI 主审官重生成 2 次。
+- [x] 低风险且双方一致时可以跳过评审团。
+- [x] 跳过评审团不能跳过人审。
 
 ### 21.6 SSE 与传票信箱
 
-- [ ] 房间事件按案件单调序号排序。
-- [ ] `Last-Event-ID` 可以续传缺失事件。
-- [ ] 用户和商家只接收授权受众事件。
-- [ ] 断线重连不重复应用事件。
-- [ ] 有争议传票、证据室、临期、开庭、补证、和解、终审和结果通知。
-- [ ] 未读数、单条已读和全部已读正确。
-- [ ] 点击通知进入授权案件房间。
-- [ ] Outbox 重试不生成重复通知。
-- [ ] 不依赖外部短信或邮件供应商。
+- [x] 房间事件按案件单调序号排序。
+- [x] `Last-Event-ID` 可以续传缺失事件。
+- [x] 用户和商家只接收授权受众事件。
+- [x] 断线重连不重复应用事件。
+- [x] 房间消息和案件时间线在 ORM 与数据库层均不可更新、删除或截断。
+- [x] 有争议传票、证据室、临期、开庭、补证、和解、终审和结果通知。
+- [x] 未读数、单条已读和全部已读正确。
+- [x] 点击通知进入授权案件房间。
+- [x] Outbox 重试不生成重复通知。
+- [x] 不依赖外部短信或邮件供应商。
 
 ### 21.7 Figma 与前端
 
@@ -1089,20 +1092,20 @@ PASS / FAIL / PARTIAL / BLOCKED
 - [ ] 视觉明亮、卡通、有轻法庭元素。
 - [ ] 不使用黑金庄严风或传统电商后台布局。
 - [ ] 每个 Vue 页面已与具体 Figma 节点截图对比。
-- [ ] 数字人动画支持减少动画模式。
-- [ ] 倒计时为零不会由浏览器触发业务动作。
-- [ ] 用户、商家、审核员角色视图权限正确。
+- [x] 数字人动画支持减少动画模式。
+- [x] 倒计时为零不会由浏览器触发业务动作。
+- [x] 用户、商家、审核员角色视图权限正确。
 
 ### 21.8 专项 E2E
 
 - [ ] 外部争议导入 → 接待 → 双方传票 → 提前完成举证 → 小法庭 → 双确认和解 → 跳过评审团 → 终审 → 执行 → 结果。
-- [ ] 单方缺席 → PT2H 到期 → 封卷 → 开庭。
-- [ ] PT3H 到期 → 强制草案 → 评审团或人审。
-- [ ] 三轮耗尽 → 强制草案。
-- [ ] 高风险或重大证据冲突 → 评审团介入。
-- [ ] 不予受理 → 留档终止。
-- [ ] SSE 断线续传和角色过滤。
-- [ ] 导入、消息、完成确认、通知、和解确认和执行均幂等。
+- [x] 单方缺席 → PT2H 到期 → 封卷 → 开庭。
+- [x] PT3H 到期 → 强制草案 → 评审团或人审。
+- [x] 三轮耗尽 → 强制草案。
+- [x] 高风险或重大证据冲突 → 最终方案后评审团介入。
+- [x] 不予受理 → 留档终止。
+- [x] SSE 断线续传和角色过滤。
+- [x] 导入、消息、完成确认、通知、和解确认和执行均幂等。
 
 ### 21.9 一票否决补充
 
@@ -1120,3 +1123,70 @@ PT2H 或 PT3H 到期后 Workflow 无限等待；
 SSE 向未授权参与方泄露事件；
 Outbox 重试造成重复传票或重复执行。
 ```
+
+---
+
+## 22. 当前实现复验证据
+
+### 22.1 不可变房间消息与 SSE 断线续传
+
+| 检查项 | 状态 | 证据路径或命令 | 关键输出 | 复验日期 |
+|---|---|---|---|---|
+| 房间消息追加写与幂等 | PASS | `POST /api/disputes/{caseId}/rooms/EVIDENCE/messages`；`RoomMessageAndEventServiceTest` | 同一幂等键同一请求返回原消息；不同请求返回 `409 IDEMPOTENCY_CONFLICT` | 2026-07-04 |
+| 数据库不可变约束 | PASS | `V013__append_only_room_stream.sql`；`MigrationIntegrationTest`；对运行中 PostgreSQL 尝试 `UPDATE room_message` 和 `DELETE case_timeline_event` | 分别返回 `room_message is append-only`、`case_timeline_event is append-only` | 2026-07-04 |
+| SSE 缺失事件续传 | PASS | 运行中 Nginx：以 `Last-Event-ID: 1` 和 `last_event_id=2` 分别重连 | Header 游标只返回 `id:2,3`；查询游标只返回 `id:3`，均未重复返回已确认事件 | 2026-07-04 |
+| 案件级游标隔离 | PASS | `frontend/src/stores/room.test.js` | 切换 `CASE_A → CASE_B → CASE_A` 使用游标 `0 → 0 → 13` | 2026-07-04 |
+| 浏览器断线恢复 | PASS | 本地浏览器刷新证据书记官室 | 重连后仍只有 2 条消息，连接状态为“实时连接” | 2026-07-04 |
+| 自动化回归 | PASS | `mvnw test`；`pnpm test -- --run`；`pytest -q tests/static`；`pytest -q tests/api tests/e2e tests/load` | Java `178/178`、前端 `64/64`、静态契约 `81/81`、API/E2E/负载 `6/6` | 2026-07-04 |
+
+### 22.2 传票信箱与生命周期通知
+
+| 检查项 | 状态 | 证据路径或命令 | 关键输出 | 复验日期 |
+|---|---|---|---|---|
+| 生命周期通知模板 | PASS | `CaseLifecycleNotificationServiceTest`；`ReviewApplicationServiceIntegrationTest`；`CaseClosureServiceIntegrationTest` | 争议传票、证据室开放、临期、开庭、补证、和解确认、终审、最终决定、执行完成和转人工均有真实触发点 | 2026-07-04 |
+| 举证临期调度 | PASS | `EvidenceWindowWorkflowTest` | 两小时窗口在截止前 30 分钟调用 `warn`，到期调用 `expire`；双方提前完成则停止等待 | 2026-07-04 |
+| 未读与已读 | PASS | `NotificationServiceTest`；`NotificationControllerTest`；`notification.test.js`；`SummonsMailbox.test.js` | 未读数、单条已读和全部已读按当前身份隔离，前端与服务端状态一致 | 2026-07-04 |
+| 深链与权限 | PASS | `SummonsMailbox.test.js`；`router/access.test.js`；各房间后端授权测试 | 通知仅生成 `/disputes/{caseId}/{room}` 内部深链，目标房间继续执行案件参与方和角色鉴权 | 2026-07-04 |
+| Outbox 幂等 | PASS | `NotificationServiceTest`；`V012__case_events_and_notification_outbox.sql` | `(business_event_key, recipient_id)` 与 Outbox `business_event_key` 唯一约束；同一业务事件重放不新增信件或 Outbox | 2026-07-04 |
+| 平台内通知 | PASS | Java、Vue 与 Compose 依赖审计 | 通知持久化并展示于平台传票信箱，无短信、邮件或 Push 供应商依赖 | 2026-07-04 |
+| 真实浏览器回归 | PASS | 本地 Nginx `http://127.0.0.1:8080/disputes` | 受理后用户收到 1 条证据室开放未读通知；“全部已读”后徽标与按钮消失，案件路线同步进入证据室并显示服务端倒计时 | 2026-07-04 |
+
+### 22.3 业务房间与治理链路
+
+| 检查项 | 状态 | 证据路径或命令 | 关键输出 | 复验日期 |
+|---|---|---|---|---|
+| 总览与争议来源 | PASS | `DisputeImportServiceTest`；`DemoDisputeSeederTest`；`DisputeOverviewView.test.js` | 仅导入或接待创建的争议进入总览；外部引用幂等；订单栏切换不跳页，当前房间节点可进入 | 2026-07-04 |
+| 接待官结构化受理 | PASS | `test_final_agents.py`；`CaseApplicationServiceTest`；`IntakeRoomServiceTest`；`IntakeRoomView.test.js` | 抽取订单/售后/物流引用、主张、诉求与风险；允许更正；受理邀请双方，不受理留档终止 | 2026-07-04 |
+| 证据室与卷宗 | PASS | `EvidenceRoomIntegrationTest`；`EvidenceVerificationAndCatalogServiceTest`；`EvidenceDossierFreezerTest`；`EvidenceRoomView.test.js` | PT2H、提前完成、到期封卷、角色可见性、五级校验、拒绝证据审计与冻结排除均通过 | 2026-07-04 |
+| 三小时小法庭 | PASS | `DisputeHearingWorkflowTest`；`HearingCollaborationIntegrationTest`；`HearingCourtView.test.js` | PT3H 与固定三轮均强制收敛；每轮提交或 5 分钟到期自动封存；草案保持非最终并记录缺口与不确定性 | 2026-07-04 |
+| 和解与评审团 | PASS | `SettlementServiceTest`；`HearingCollaborationIntegrationTest`；`DeliberationPanelWorkflowTest`；`FinalWorkflowOrchestrationTest` | 和解版本与双确认有效；高风险/冲突只在最终方案后进入评审团；低风险一致可跳过评审团但不可跳过人审 | 2026-07-04 |
+| 前端治理约束 | PASS | `DigitalHuman.test.js`；`PhaseCountdown.test.js`；`router/access.test.js`；`HearingCourtView.test.js` | 减少动画、服务端驱动超时、角色路由和审核辅助官可见性均通过 | 2026-07-04 |
+
+### 22.4 本地整栈运行态
+
+| 检查项 | 状态 | 证据路径或命令 | 关键输出 | 复验日期 |
+|---|---|---|---|---|
+| Compose 服务健康 | PASS | `docker compose --env-file D:\学习\Project\AfterSaleFlow-Agent\.env up -d --no-build`；`docker compose ps` | PostgreSQL、Redis、Temporal、MinIO、Elasticsearch、Langfuse、LiteLLM、Python Agent、OCR、Java、Frontend、Nginx 均为 `healthy` | 2026-07-04 |
+| Nginx 与通知 API | PASS | `GET /healthz`；`GET /api/notifications/unread-count`；`POST /api/notifications/read-all` | 网关返回 `ok`；全部已读后 `unread_count=0` | 2026-07-04 |
+| 受理与通知真实链路 | PASS | `POST /api/disputes/CASE_6a634147a77b44f2a2f5c8cc34a96a12/intake/confirm` | 案件进入 `EVIDENCE_OPEN`，返回证据室与服务端截止时间；用户与商家分别生成授权通知 | 2026-07-04 |
+| 数据库追加写保护 | PASS | 运行中 PostgreSQL 对 `room_message` 执行 `UPDATE`、对 `case_timeline_event` 执行 `DELETE` | 分别抛出 `room_message is append-only` 与 `case_timeline_event is append-only`，记录数保持不变 | 2026-07-04 |
+
+### 22.5 网关 E2E 与幂等矩阵
+
+| 检查项 | 状态 | 证据路径或命令 | 关键输出 | 复验日期 |
+|---|---|---|---|---|
+| 真实房间链路 | PASS | `tests/e2e/test_main_flows.py::test_live_room_flow_reaches_confirmed_settlement_idempotently` | 每次创建独立案件，经受理、双方完成举证、开庭、提案和双确认到达 `CONFIRMED` | 2026-07-04 |
+| 最后一方确认重放 | PASS | `HearingCollaborationIntegrationTest`；真实网关 E2E | 方案变成 `CONFIRMED` 后使用同一幂等键重放仍返回原确认；旧版本键或其他参与方盗用键返回 `IDEMPOTENCY_CONFLICT` | 2026-07-04 |
+| 全资源幂等 | PASS | `DisputeImportServiceTest`；`RoomMessageAndEventServiceTest`；`EvidenceCompletionServiceTest`；`NotificationServiceTest`；`HearingCollaborationIntegrationTest`；`ToolExecutorServiceIntegrationTest` | 导入、消息、完成确认、通知、和解确认和执行均有重复请求与冲突用例 | 2026-07-04 |
+| Agent HTTP 协议 | PASS | `AgentClientConfigurationTest`；运行中 Python Agent 访问日志 | Java 内部客户端强制 HTTP/1.1，Uvicorn 不再收到 h2c Upgrade；原 `400 Invalid HTTP request received` 已消失 | 2026-07-04 |
+| 外部模型降级 | PASS（安全降级） | Temporal 历史与 Java/Python 日志 | 模型服务无可用凭据时返回 `503 AGENT_SERVICE_UNAVAILABLE`，Workflow 转人工且不生成伪裁决、不进入执行 | 2026-07-04 |
+
+### 22.6 专项场景回归
+
+| 场景 | 状态 | 证据 | 关键断言 | 复验日期 |
+|---|---|---|---|---|
+| 单方缺席 PT2H | PASS | `EvidenceRoomIntegrationTest.deadlineExpiryWithOnePartySealsAndOpensHearing`；`EvidenceWindowWorkflowTest` | 时钟记为 `DEADLINE_EXPIRED`，卷宗冻结，证据室封存并开放小法庭 | 2026-07-04 |
+| PT3H 到期 | PASS | `DisputeHearingWorkflowTest.threeHourDeadlineAlwaysConvergesThroughC6` | Temporal 时间跳转三小时后仍执行 C6，草案非最终并标记人工审核 | 2026-07-04 |
+| 三轮耗尽 | PASS | `HearingCollaborationIntegrationTest.theThirdCompletedRoundForcesConvergenceWithoutExtendingTheWindow`；`DisputeHearingWorkflowTest.threeCompletedRoundsForceConvergenceBeforeDeadline` | 第三轮以 `MAX_ROUNDS` 强制收敛，未延长庭审截止时间 | 2026-07-04 |
+| 高风险或冲突评审团 | PASS | `DeliberationTriggerPolicyTest`；`DeliberationPanelWorkflowTest`；`FinalWorkflowOrchestrationTest` | 风险条件只在最终方案后触发并行 Critic 与聚合，之后仍进入人审和执行子工作流 | 2026-07-04 |
+| 不予受理 | PASS | `IntakeRoomServiceIntegrationTest.notAdmissiblePersistsOnlyTheInitiatorAndTerminatesAfterIntake` | 仅保留发起方和接待室留痕，不创建证据时钟、证据室、传票或 Outbox | 2026-07-04 |

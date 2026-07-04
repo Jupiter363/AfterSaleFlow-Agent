@@ -2,7 +2,10 @@ package com.example.dispute.hearing;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 
+import com.example.dispute.common.exception.IdempotencyConflictException;
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.config.DisputeProperties;
@@ -14,9 +17,12 @@ import com.example.dispute.hearing.application.HearingWorkflowCoordinator;
 import com.example.dispute.hearing.application.SettlementProposalCommand;
 import com.example.dispute.hearing.application.SettlementService;
 import com.example.dispute.hearing.application.SettlementVersionConflictException;
+import com.example.dispute.hearing.application.SubmitHearingRoundCommand;
 import com.example.dispute.hearing.domain.HearingRoundStatus;
+import com.example.dispute.hearing.domain.HearingRoundSubmissionSource;
 import com.example.dispute.hearing.domain.HearingStopReason;
 import com.example.dispute.hearing.domain.SettlementStatus;
+import com.example.dispute.hearing.infrastructure.persistence.repository.HearingRoundPartySubmissionRepository;
 import com.example.dispute.hearing.infrastructure.persistence.repository.HearingRoundRepository;
 import com.example.dispute.hearing.infrastructure.persistence.repository.SettlementConfirmationRepository;
 import com.example.dispute.hearing.infrastructure.persistence.repository.SettlementProposalRepository;
@@ -27,11 +33,14 @@ import com.example.dispute.room.application.CaseEventService;
 import com.example.dispute.room.domain.RoomType;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
+import com.example.dispute.room.infrastructure.persistence.repository.CaseTimelineEventRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.OffsetDateTime;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -92,6 +101,9 @@ class HearingCollaborationIntegrationTest {
     @Autowired private SettlementProposalRepository proposalRepository;
     @Autowired private SettlementConfirmationRepository confirmationRepository;
     @Autowired private HearingRoundRepository roundRepository;
+    @Autowired private HearingRoundPartySubmissionRepository submissionRepository;
+    @Autowired private CaseTimelineEventRepository eventRepository;
+    @Autowired private MutableClock mutableClock;
     @MockitoBean private HearingWorkflowCoordinator hearingWorkflowCoordinator;
 
     private AuthenticatedActor user;
@@ -103,6 +115,7 @@ class HearingCollaborationIntegrationTest {
         user = new AuthenticatedActor("user-local", ActorRole.USER);
         merchant = new AuthenticatedActor("merchant-local", ActorRole.MERCHANT);
         system = new AuthenticatedActor("hearing-controller", ActorRole.SYSTEM);
+        mutableClock.set(Instant.parse("2026-07-03T01:00:00Z"));
     }
 
     @Test
@@ -137,6 +150,14 @@ class HearingCollaborationIntegrationTest {
                                         merchant,
                                         "confirm-v1-merchant"))
                 .isInstanceOf(SettlementVersionConflictException.class);
+        assertThatThrownBy(
+                        () ->
+                                settlementService.confirm(
+                                        "CASE_SETTLEMENT",
+                                        v2.version(),
+                                        user,
+                                        "confirm-v1-user"))
+                .isInstanceOf(IdempotencyConflictException.class);
 
         settlementService.confirm(
                 "CASE_SETTLEMENT", v2.version(), user, "confirm-v2-user");
@@ -146,14 +167,38 @@ class HearingCollaborationIntegrationTest {
                         v2.version(),
                         merchant,
                         "confirm-v2-merchant");
+        var replayedFinalConfirmation =
+                settlementService.confirm(
+                        "CASE_SETTLEMENT",
+                        v2.version(),
+                        merchant,
+                        "confirm-v2-merchant");
 
         assertThat(confirmed.status()).isEqualTo(SettlementStatus.CONFIRMED);
+        assertThat(replayedFinalConfirmation.status())
+                .isEqualTo(SettlementStatus.CONFIRMED);
+        assertThatThrownBy(
+                        () ->
+                                settlementService.confirm(
+                                        "CASE_SETTLEMENT",
+                                        v2.version(),
+                                        user,
+                                        "confirm-v2-merchant"))
+                .isInstanceOf(IdempotencyConflictException.class);
         assertThat(confirmed.confirmedRoles())
                 .containsExactlyInAnyOrder(ActorRole.USER, ActorRole.MERCHANT);
         assertThat(proposalRepository.findAllByCaseIdOrderByProposalVersionDesc(
                         "CASE_SETTLEMENT"))
                 .hasSize(2);
         assertThat(confirmationRepository.count()).isEqualTo(3);
+        assertThat(
+                        eventRepository
+                                .findByCaseIdAndEventKey(
+                                        "CASE_SETTLEMENT",
+                                        "settlement-confirmed:2")
+                                .orElseThrow()
+                                .getEventType())
+                .isEqualTo("SETTLEMENT_CONFIRMED");
     }
 
     @Test
@@ -182,6 +227,134 @@ class HearingCollaborationIntegrationTest {
         assertThat(third.status()).isEqualTo(HearingRoundStatus.FORCED_CLOSED);
         assertThat(roundRepository.findAllByCaseIdOrderByRoundNoAsc("CASE_THREE_ROUNDS"))
                 .hasSize(3);
+    }
+
+    @Test
+    void factsSufficientHintDoesNotCloseTheHearingBeforeTheThirdStatementRound() {
+        seedHearing("CASE_FACTS_HINT");
+
+        var first =
+                roundService.completeNext(
+                        "CASE_FACTS_HINT",
+                        new CompleteHearingRoundCommand(1, "{\"round\":1}", true),
+                        system);
+
+        assertThat(first.stopReason()).isNull();
+        assertThat(first.status()).isEqualTo(HearingRoundStatus.COMPLETED);
+        verify(hearingWorkflowCoordinator)
+                .roundCompletedAfterCommit("CASE_FACTS_HINT", 1, false);
+    }
+
+    @Test
+    void partyRoundSubmissionsWaitForBothSidesBeforeTriggeringJudge() {
+        seedHearing("CASE_PARTY_ROUND");
+
+        var userSubmission =
+                roundService.submitParty(
+                        "CASE_PARTY_ROUND",
+                        new SubmitHearingRoundCommand(
+                                2,
+                                "{\"party\":\"USER\",\"statement\":\"我已经完成本轮陈述\"}"),
+                        user);
+
+        assertThat(userSubmission.status()).isEqualTo(HearingRoundStatus.WAITING);
+        assertThat(userSubmission.roundNo()).isEqualTo(1);
+        assertThat(userSubmission.submittedRoles()).containsExactly(ActorRole.USER);
+        assertThat(userSubmission.roundDeadlineAt()).isNotNull();
+        verifyNoInteractions(hearingWorkflowCoordinator);
+
+        var merchantSubmission =
+                roundService.submitParty(
+                        "CASE_PARTY_ROUND",
+                        new SubmitHearingRoundCommand(
+                                2,
+                                "{\"party\":\"MERCHANT\",\"statement\":\"商家也完成本轮答辩\"}"),
+                        merchant);
+
+        assertThat(merchantSubmission.roundNo()).isEqualTo(2);
+        assertThat(merchantSubmission.status()).isEqualTo(HearingRoundStatus.OPEN);
+        assertThat(merchantSubmission.submittedRoles()).isEmpty();
+        var completedRound =
+                roundRepository
+                        .findByCaseIdAndRoundNo("CASE_PARTY_ROUND", 1)
+                        .orElseThrow();
+        assertThat(completedRound.getRoundStatus())
+                .isEqualTo(HearingRoundStatus.COMPLETED);
+        assertThat(completedRound.getSummaryJson()).contains("BOTH_PARTIES_SUBMITTED");
+        verify(hearingWorkflowCoordinator)
+                .roundCompletedAfterCommit("CASE_PARTY_ROUND", 1, false);
+    }
+
+    @Test
+    void bothPartySubmissionsOpenTheNextRoundUntilTheFinalRound() {
+        seedHearing("CASE_PARTY_ROUND_CONTINUES");
+
+        roundService.submitParty(
+                "CASE_PARTY_ROUND_CONTINUES",
+                new SubmitHearingRoundCommand(
+                        2,
+                        "{\"party\":\"USER\",\"statement\":\"first user statement\"}"),
+                user);
+
+        var nextRound =
+                roundService.submitParty(
+                        "CASE_PARTY_ROUND_CONTINUES",
+                        new SubmitHearingRoundCommand(
+                                2,
+                                "{\"party\":\"MERCHANT\",\"statement\":\"first merchant answer\"}"),
+                        merchant);
+
+        assertThat(nextRound.roundNo()).isEqualTo(2);
+        assertThat(nextRound.status()).isEqualTo(HearingRoundStatus.OPEN);
+        assertThat(nextRound.submittedRoles()).isEmpty();
+        assertThat(roundRepository.findAllByCaseIdOrderByRoundNoAsc(
+                        "CASE_PARTY_ROUND_CONTINUES"))
+                .extracting("roundNo", "roundStatus")
+                .containsExactly(
+                        org.assertj.core.groups.Tuple.tuple(
+                                1, HearingRoundStatus.COMPLETED),
+                        org.assertj.core.groups.Tuple.tuple(
+                                2, HearingRoundStatus.OPEN));
+        verify(hearingWorkflowCoordinator)
+                .roundCompletedAfterCommit("CASE_PARTY_ROUND_CONTINUES", 1, false);
+    }
+
+    @Test
+    void dueRoundAutoSubmitsMissingPartyAndTriggersJudgeOnce() {
+        seedHearing("CASE_ROUND_TIMEOUT");
+
+        var userSubmission =
+                roundService.submitParty(
+                        "CASE_ROUND_TIMEOUT",
+                        new SubmitHearingRoundCommand(
+                                2,
+                                "{\"party\":\"USER\",\"statement\":\"ready\"}"),
+                        user);
+
+        assertThat(userSubmission.status()).isEqualTo(HearingRoundStatus.WAITING);
+        verifyNoInteractions(hearingWorkflowCoordinator);
+
+        mutableClock.set(Instant.parse("2026-07-03T01:05:01Z"));
+        int expired = roundService.expireDueRounds();
+
+        assertThat(expired).isEqualTo(1);
+        var closedRound = roundService.list("CASE_ROUND_TIMEOUT", user).get(0);
+        assertThat(closedRound.status()).isEqualTo(HearingRoundStatus.COMPLETED);
+        assertThat(closedRound.submittedRoles())
+                .containsExactlyInAnyOrder(ActorRole.USER, ActorRole.MERCHANT);
+        assertThat(closedRound.summaryJson())
+                .contains("ROUND_DEADLINE_EXPIRED")
+                .contains("AUTO_TIMEOUT");
+        assertThat(
+                        submissionRepository
+                                .findAllByCaseIdAndRoundNoOrderBySubmittedAtAsc(
+                                        "CASE_ROUND_TIMEOUT", 1))
+                .extracting("submissionSource")
+                .containsExactlyInAnyOrder(
+                        HearingRoundSubmissionSource.PARTY_ACTION,
+                        HearingRoundSubmissionSource.AUTO_TIMEOUT);
+        verify(hearingWorkflowCoordinator)
+                .roundCompletedAfterCommit("CASE_ROUND_TIMEOUT", 1, false);
     }
 
     private void seedHearing(String caseId) {
@@ -217,14 +390,43 @@ class HearingCollaborationIntegrationTest {
     static class FixedClockConfiguration {
         @Bean
         @Primary
-        Clock fixedClock() {
-            return Clock.fixed(
+        MutableClock mutableClock() {
+            return new MutableClock(
                     Instant.parse("2026-07-03T01:00:00Z"), ZoneOffset.UTC);
         }
 
         @Bean
         ObjectMapper objectMapper() {
             return new ObjectMapper().findAndRegisterModules();
+        }
+    }
+
+    static final class MutableClock extends Clock {
+        private final AtomicReference<Instant> instant;
+        private final ZoneId zone;
+
+        MutableClock(Instant initial, ZoneId zone) {
+            this.instant = new AtomicReference<>(initial);
+            this.zone = zone;
+        }
+
+        void set(Instant next) {
+            instant.set(next);
+        }
+
+        @Override
+        public ZoneId getZone() {
+            return zone;
+        }
+
+        @Override
+        public Clock withZone(ZoneId zone) {
+            return new MutableClock(instant.get(), zone);
+        }
+
+        @Override
+        public Instant instant() {
+            return instant.get();
         }
     }
 }

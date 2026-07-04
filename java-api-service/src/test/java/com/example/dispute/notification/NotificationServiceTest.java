@@ -17,6 +17,7 @@ import com.example.dispute.notification.infrastructure.persistence.repository.No
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.List;
 import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -141,5 +142,53 @@ class NotificationServiceTest {
         verify(notificationRepository).save(saved.capture());
         assertThat(saved.getValue().getReadAt())
                 .isEqualTo(Instant.parse("2026-07-03T00:00:00Z"));
+    }
+
+    @Test
+    void marksAllUnreadMessagesInTheCurrentRecipientsInbox() {
+        NotificationEntity unread =
+                notification(
+                        "NOTICE_1",
+                        "CASE_1:intake-accepted",
+                        "merchant-local");
+        NotificationEntity alreadyRead =
+                notification(
+                        "NOTICE_2",
+                        "CASE_1:hearing-opened",
+                        "merchant-local");
+        alreadyRead.markRead(Instant.parse("2026-07-02T23:00:00Z"));
+        when(notificationRepository.findAllByRecipientIdOrderByCreatedAtDesc(
+                        "merchant-local"))
+                .thenReturn(List.of(unread, alreadyRead));
+        when(notificationRepository.saveAll(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        long marked =
+                service.markAllRead(
+                        new AuthenticatedActor(
+                                "merchant-local", ActorRole.MERCHANT));
+
+        assertThat(marked).isEqualTo(1);
+        assertThat(unread.getReadAt())
+                .isEqualTo(Instant.parse("2026-07-03T00:00:00Z"));
+        assertThat(alreadyRead.getReadAt())
+                .isEqualTo(Instant.parse("2026-07-02T23:00:00Z"));
+        verify(notificationRepository).saveAll(List.of(unread));
+    }
+
+    private static NotificationEntity notification(
+            String id, String businessEventKey, String recipientId) {
+        return NotificationEntity.create(
+                id,
+                "CASE_1",
+                businessEventKey,
+                recipientId,
+                ActorRole.MERCHANT,
+                NotificationType.DISPUTE_SUMMONS,
+                "争议审理传票",
+                "请进入对应房间",
+                "/disputes/CASE_1",
+                "{}",
+                Instant.parse("2026-07-02T22:00:00Z"));
     }
 }

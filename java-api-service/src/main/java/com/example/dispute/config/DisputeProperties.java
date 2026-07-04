@@ -8,6 +8,7 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
 public record DisputeProperties(
         @DefaultValue("PT2H") Duration evidenceWindow,
         @DefaultValue("PT3H") Duration hearingWindow,
+        @DefaultValue("PT5M") Duration hearingRoundWindow,
         @DefaultValue("3") int maxHearingRounds,
         @DefaultValue("PT15S") Duration sseHeartbeat,
         @DefaultValue("true") boolean seedDemoDisputes) {
@@ -15,6 +16,7 @@ public record DisputeProperties(
     public DisputeProperties {
         requirePositive(evidenceWindow, "evidence-window");
         requirePositive(hearingWindow, "hearing-window");
+        requirePositive(hearingRoundWindow, "hearing-round-window");
         requirePositive(sseHeartbeat, "sse-heartbeat");
         if (maxHearingRounds < 1 || maxHearingRounds > 5) {
             throw new IllegalArgumentException(

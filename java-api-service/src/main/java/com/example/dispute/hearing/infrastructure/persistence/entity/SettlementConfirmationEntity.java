@@ -66,5 +66,19 @@ public class SettlementConfirmationEntity extends AbstractEntity {
         return entity;
     }
 
-    public ActorRole getParticipantRole() { return participantRole; }
+    public String getProposalId() {
+        return proposalId;
+    }
+
+    public int getProposalVersion() {
+        return proposalVersion;
+    }
+
+    public ActorRole getParticipantRole() {
+        return participantRole;
+    }
+
+    public String getParticipantId() {
+        return participantId;
+    }
 }

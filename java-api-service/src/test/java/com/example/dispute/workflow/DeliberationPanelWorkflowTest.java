@@ -84,6 +84,29 @@ class DeliberationPanelWorkflowTest {
     }
 
     @Test
+    void criticScoreBelowThresholdRequiresRevision() {
+        activities.lowScoreCritic = "RISK_CRITIC";
+
+        DeliberationPanelResult result =
+                workflow("WORKFLOW_panel_low_score")
+                        .run(
+                                new DeliberationPanelCommand(
+                                        "CASE_panel",
+                                        "WORKFLOW_panel",
+                                        "DRAFT_panel",
+                                        3,
+                                        List.of("RISK_CRITIC"),
+                                        List.of("HIGH_VALUE_CASE"),
+                                        80,
+                                        2));
+
+        assertThat(result.panelResult()).isEqualTo("REVISION_REQUIRED");
+        assertThat(result.revisionRequired()).isTrue();
+        assertThat(result.majorObjections())
+                .containsExactly("RISK_CRITIC_SCORE_BELOW_THRESHOLD_79");
+    }
+
+    @Test
     void failedOrTimedOutCriticRequiresManualReview() {
         activities.timedOutCritic = "RULE_CRITIC";
 
@@ -128,6 +151,7 @@ class DeliberationPanelWorkflowTest {
                 new CopyOnWriteArrayList<>();
         private volatile String blockingCritic;
         private volatile String timedOutCritic;
+        private volatile String lowScoreCritic;
 
         @Override
         public FrozenDeliberationSnapshot freeze(
@@ -163,6 +187,15 @@ class DeliberationPanelWorkflowTest {
                         "BLOCKER",
                         List.of("UNRESOLVED_EVIDENCE_CONFLICT"),
                         snapshot.fingerprint());
+            }
+            if (critic.equals(lowScoreCritic)) {
+                return new CriticActivityResult(
+                        critic,
+                        "COMPLETED",
+                        "NONE",
+                        List.of(),
+                        snapshot.fingerprint(),
+                        79);
             }
             return new CriticActivityResult(
                     critic,

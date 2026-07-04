@@ -2,6 +2,7 @@ import json
 import os
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 
 import pytest
@@ -19,7 +20,7 @@ def request(method: str, path: str, *, payload: dict | None = None, headers: dic
         method=method,
         headers={
             "Content-Type": "application/json",
-            "X-User-Id": "smoke-user",
+            "X-User-Id": "user-local",
             "X-Role": "USER",
             **(headers or {}),
         },
@@ -78,3 +79,143 @@ def test_repository_e2e_flow_coverage_is_not_only_happy_path() -> None:
         "closesExecutedCaseAndCreatesExactlyOneCompletedEvaluation",
     ):
         assert required in java_tests
+
+
+def test_live_room_flow_reaches_confirmed_settlement_idempotently() -> None:
+    require_gateway()
+    suffix = uuid.uuid4().hex[:16]
+    user_id = f"flow-user-{suffix}"
+    merchant_id = f"flow-merchant-{suffix}"
+    creation_key = f"create-{suffix}"
+    create_payload = {
+        "initiator_role": "USER",
+        "order_reference": f"ORDER-{suffix}",
+        "after_sales_reference": f"AFTER-{suffix}",
+        "logistics_reference": f"LOG-{suffix}",
+        "user_id": user_id,
+        "merchant_id": merchant_id,
+        "description": "签收未收到，双方愿意通过平台争议流程协商",
+        "attachment_ids": [],
+        "channel": "WEB",
+    }
+    user_headers = {"X-User-Id": user_id, "X-Role": "USER"}
+    merchant_headers = {
+        "X-User-Id": merchant_id,
+        "X-Role": "MERCHANT",
+    }
+
+    status, created = request(
+        "POST",
+        "/api/disputes",
+        payload=create_payload,
+        headers={**user_headers, "Idempotency-Key": creation_key},
+    )
+    assert status == 201, created
+    case_id = created["data"]["id"]
+    assert created["data"]["case_status"] == "INTAKE_COMPLETED"
+
+    status, replayed_create = request(
+        "POST",
+        "/api/disputes",
+        payload=create_payload,
+        headers={**user_headers, "Idempotency-Key": creation_key},
+    )
+    assert status == 201, replayed_create
+    assert replayed_create["data"]["id"] == case_id
+
+    status, accepted = request(
+        "POST",
+        f"/api/disputes/{case_id}/intake/confirm",
+        payload={
+            "admissible": True,
+            "dispute_type": "SIGNED_NOT_RECEIVED",
+            "risk_level": "LOW",
+            "confirmation_note": "E2E 受理并进入证据室",
+        },
+        headers=user_headers,
+    )
+    assert status == 200, accepted
+    assert accepted["data"]["case_status"] == "EVIDENCE_OPEN"
+    assert accepted["data"]["current_room"] == "EVIDENCE"
+
+    user_completion_key = f"complete-user-{suffix}"
+    status, user_completion = request(
+        "POST",
+        f"/api/disputes/{case_id}/evidence/complete",
+        headers={
+            **user_headers,
+            "Idempotency-Key": user_completion_key,
+        },
+    )
+    assert status == 200, user_completion
+    status, replayed_user_completion = request(
+        "POST",
+        f"/api/disputes/{case_id}/evidence/complete",
+        headers={
+            **user_headers,
+            "Idempotency-Key": user_completion_key,
+        },
+    )
+    assert status == 200, replayed_user_completion
+    assert replayed_user_completion["data"] == user_completion["data"]
+
+    status, merchant_completion = request(
+        "POST",
+        f"/api/disputes/{case_id}/evidence/complete",
+        headers={
+            **merchant_headers,
+            "Idempotency-Key": f"complete-merchant-{suffix}",
+        },
+    )
+    assert status == 200, merchant_completion
+    assert merchant_completion["data"]["all_parties_completed"] is True
+    assert merchant_completion["data"]["next_room"] == "HEARING"
+
+    status, proposal = request(
+        "POST",
+        f"/api/disputes/{case_id}/hearing/settlements",
+        payload={
+            "proposal_text": "退款 50 元并结束争议",
+            "proposal_json": json.dumps(
+                {"action": "REFUND", "amount": 50, "currency": "CNY"}
+            ),
+        },
+        headers=merchant_headers,
+    )
+    assert status == 200, proposal
+    version = proposal["data"]["version"]
+
+    status, user_confirmation = request(
+        "POST",
+        f"/api/disputes/{case_id}/hearing/settlements/{version}/confirm",
+        headers={
+            **user_headers,
+            "Idempotency-Key": f"settlement-user-{suffix}",
+        },
+    )
+    assert status == 200, user_confirmation
+    assert user_confirmation["data"]["status"] == "PENDING_CONFIRMATION"
+
+    merchant_confirmation_headers = {
+        **merchant_headers,
+        "Idempotency-Key": f"settlement-merchant-{suffix}",
+    }
+    status, merchant_confirmation = request(
+        "POST",
+        f"/api/disputes/{case_id}/hearing/settlements/{version}/confirm",
+        headers=merchant_confirmation_headers,
+    )
+    assert status == 200, merchant_confirmation
+    assert merchant_confirmation["data"]["status"] == "CONFIRMED"
+    assert set(merchant_confirmation["data"]["confirmed_roles"]) == {
+        "USER",
+        "MERCHANT",
+    }
+
+    status, replayed_final_confirmation = request(
+        "POST",
+        f"/api/disputes/{case_id}/hearing/settlements/{version}/confirm",
+        headers=merchant_confirmation_headers,
+    )
+    assert status == 200, replayed_final_confirmation
+    assert replayed_final_confirmation["data"] == merchant_confirmation["data"]

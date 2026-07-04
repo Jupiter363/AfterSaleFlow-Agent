@@ -105,7 +105,15 @@ public class FulfillmentDisputeWorkflowImpl
                                                 "RISK_CRITIC",
                                                 "REMEDY_CRITIC",
                                                 "FAIRNESS_CRITIC"),
-                                        List.of("DETERMINISTIC_POLICY_TRIGGER")));
+                                        List.of(
+                                                "RISK_LEVEL_"
+                                                        + command.riskLevel(),
+                                                "DELIBERATION_MODE_"
+                                                        + command
+                                                                .deliberationMode()
+                                                                .name()),
+                                        command.deliberationScoreThreshold(),
+                                        command.deliberationMaxRegenerations()));
                 deliberationId = deliberation.deliberationId();
                 manualRequired =
                         manualRequired || deliberation.manualRequired();

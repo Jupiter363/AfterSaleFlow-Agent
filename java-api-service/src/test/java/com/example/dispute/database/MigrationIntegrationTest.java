@@ -54,7 +54,7 @@ class MigrationIntegrationTest {
         MigrateResult first = flyway.migrate();
         MigrateResult second = flyway.migrate();
 
-        assertThat(first.migrationsExecuted).isEqualTo(13);
+        assertThat(first.migrationsExecuted).isEqualTo(15);
         assertThat(second.migrationsExecuted).isZero();
 
         try (Connection connection =
@@ -101,6 +101,7 @@ class MigrationIntegrationTest {
                             "evidence_verification",
                             "evidence_party_completion",
                             "hearing_round",
+                            "hearing_round_party_submission",
                             "settlement_proposal",
                             "settlement_confirmation",
                             "notification",
@@ -152,6 +153,7 @@ class MigrationIntegrationTest {
                                     "fulfillment_dispute_case",
                                     "source_type = 'EXTERNAL_IMPORT'"))
                     .isZero();
+            assertHearingRoundFiveIsSupported(connection);
             assertThat(loadTriggers(connection))
                     .contains(
                             "trg_room_message_append_only",
@@ -316,6 +318,50 @@ class MigrationIntegrationTest {
                 connection,
                 "delete from case_timeline_event where id = 'EVENT_APPEND_ONLY'",
                 "case_timeline_event is append-only");
+    }
+
+    private static void assertHearingRoundFiveIsSupported(Connection connection)
+            throws SQLException {
+        try (Statement statement = connection.createStatement()) {
+            statement.executeUpdate(
+                    """
+                    insert into fulfillment_dispute_case (
+                        id, user_id, merchant_id, creation_idempotency_key,
+                        case_type, case_status, hearing_route, risk_level,
+                        title, description, current_room, created_by, updated_by
+                    ) values (
+                        'CASE_ROUND_FIVE', 'user-local', 'merchant-local',
+                        'round-five-case', 'DISPUTE', 'HEARING', 'FULL_HEARING',
+                        'HIGH', 'Round five test',
+                        'Database constraint must match configurable hearing rounds.',
+                        'HEARING', 'test', 'test'
+                    )
+                    """);
+            statement.executeUpdate(
+                    """
+                    insert into hearing_round (
+                        id, case_id, round_no, round_status, dossier_version,
+                        opened_at, round_deadline_at, summary_json,
+                        created_by, updated_by
+                    ) values (
+                        'HROUND_FIVE', 'CASE_ROUND_FIVE', 5, 'OPEN', 1,
+                        now(), now() + interval '5 minutes', '{}',
+                        'test', 'test'
+                    )
+                    """);
+            statement.executeUpdate(
+                    """
+                    insert into hearing_round_party_submission (
+                        id, case_id, round_id, round_no, participant_role,
+                        participant_id, submission_source, submission_json,
+                        submitted_at, created_by, updated_by
+                    ) values (
+                        'HROUND_SUB_FIVE', 'CASE_ROUND_FIVE', 'HROUND_FIVE',
+                        5, 'USER', 'user-local', 'PARTY_ACTION', '{}',
+                        now(), 'user-local', 'user-local'
+                    )
+                    """);
+        }
     }
 
     private static void assertThatSqlFails(

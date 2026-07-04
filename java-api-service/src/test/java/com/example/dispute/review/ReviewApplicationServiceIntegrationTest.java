@@ -3,6 +3,7 @@ package com.example.dispute.review;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -26,12 +27,13 @@ import com.example.dispute.infrastructure.persistence.repository.FulfillmentCase
 import com.example.dispute.infrastructure.persistence.repository.RemedyPlanRepository;
 import com.example.dispute.infrastructure.persistence.repository.ReviewPacketRepository;
 import com.example.dispute.infrastructure.persistence.repository.ReviewTaskRepository;
+import com.example.dispute.notification.application.CaseLifecycleNotificationService;
+import com.example.dispute.review.application.PostReviewOrchestrationResult;
+import com.example.dispute.review.application.PostReviewOrchestrationService;
 import com.example.dispute.review.application.ReviewApplicationService;
 import com.example.dispute.review.application.ReviewDecisionCommand;
-import com.example.dispute.workflow.temporal.FulfillmentDisputeWorkflow;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
-import io.temporal.client.WorkflowClient;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -65,11 +67,19 @@ class ReviewApplicationServiceIntegrationTest {
     @Autowired RemedyPlanRepository plans; @Autowired ReviewTaskRepository tasks;
     @Autowired ReviewPacketRepository packets; @Autowired ApprovalRecordRepository approvals;
     @Autowired ApprovalPolicyDecisionRepository policyDecisions;
-    @MockitoBean AuditRecorder audit; @MockitoBean WorkflowClient workflowClient;
-    @MockitoBean FulfillmentDisputeWorkflow workflow;
+    @MockitoBean AuditRecorder audit;
+    @MockitoBean PostReviewOrchestrationService postReviewOrchestration;
+    @MockitoBean CaseLifecycleNotificationService lifecycleNotifications;
 
     @BeforeEach void seed(){
-        when(workflowClient.newWorkflowStub(eq(FulfillmentDisputeWorkflow.class),anyString())).thenReturn(workflow);
+        when(postReviewOrchestration.orchestrate(anyString(), any(), anyString()))
+                .thenAnswer(invocation -> new PostReviewOrchestrationResult(
+                        invocation.getArgument(0),
+                        "CASE_review",
+                        "CLOSED",
+                        true,
+                        true,
+                        "test orchestration"));
         FulfillmentCaseEntity c=FulfillmentCaseEntity.create("CASE_review","ORDER_review",null,"user-review","merchant-review","CREATE_review","REFUND_REQUEST","Review refund","Refund requires platform review",RiskLevel.HIGH,"user-review");
         c.completeIntake("ITEM_SWAP_DISPUTE",CaseStatus.INTAKE_COMPLETED,RiskLevel.HIGH,"{}","user-review");
         c.markDossierBuilt("user-review");c.applyRoute(RouteType.SIMPLE_HEARING,"user-review");c.markRemedyPlanned("temporal-worker");cases.saveAndFlush(c);
@@ -79,6 +89,10 @@ class ReviewApplicationServiceIntegrationTest {
     }
     @Test void createsPacketAndOnlyReviewerCanModifyApproveWithDiff(){
         String taskId=service.createForWorkflow("CASE_review","REMEDY_review");
+        verify(lifecycleNotifications)
+                .reviewPending(
+                        any(FulfillmentCaseEntity.class),
+                        eq(taskId));
         var packet=service.packet(taskId,new AuthenticatedActor("cs-1",ActorRole.CUSTOMER_SERVICE));
         assertThat(packet.remedy().path("actions")).hasSize(1);
         assertThat(service.list(ReviewTaskStatus.PENDING,new AuthenticatedActor("reviewer-1",ActorRole.PLATFORM_REVIEWER))).hasSize(1);
@@ -87,6 +101,10 @@ class ReviewApplicationServiceIntegrationTest {
                 .put("reviewer_note","amount verified");
         assertThatThrownBy(()->service.decide(taskId,new ReviewDecisionCommand(ApprovalDecisionType.APPROVE,"approve",null,"cs-key"),new AuthenticatedActor("cs-1",ActorRole.CUSTOMER_SERVICE))).isInstanceOf(ForbiddenException.class);
         var result=service.decide(taskId,new ReviewDecisionCommand(ApprovalDecisionType.MODIFY_AND_APPROVE,"amount verified",approved,"review-key"),new AuthenticatedActor("reviewer-1",ActorRole.PLATFORM_REVIEWER));
+        verify(lifecycleNotifications)
+                .finalDecision(
+                        any(FulfillmentCaseEntity.class),
+                        eq("MODIFY_AND_APPROVE"));
         assertThat(result.executionAllowed()).isTrue();
         assertThat(cases.findById("CASE_review")).hasValueSatisfying(c->assertThat(c.getCaseStatus()).isEqualTo(CaseStatus.APPROVED_FOR_EXECUTION));
         assertThat(approvals.findAllByCaseIdOrderByCreatedAtAsc("CASE_review")).singleElement().satisfies(record->{
@@ -126,9 +144,50 @@ class ReviewApplicationServiceIntegrationTest {
                                 "review-key"),
                         new AuthenticatedActor("reviewer-1", ActorRole.PLATFORM_REVIEWER)))
                 .isInstanceOf(IdempotencyConflictException.class);
-        verify(workflow, times(2))
-                .submitReviewDecision(
-                        org.mockito.ArgumentMatchers.argThat(
-                                signal -> "MODIFY_AND_APPROVE".equals(signal.decision())));
+        verify(postReviewOrchestration, times(2))
+                .orchestrate(
+                        eq(result.approvalRecordId()),
+                        any(AuthenticatedActor.class),
+                        eq("review-key"));
+    }
+
+    @Test
+    void requestsSupplementThroughLifecycleNotifications() {
+        String supplementTask =
+                service.createForWorkflow("CASE_review", "REMEDY_review");
+        service.decide(
+                supplementTask,
+                new ReviewDecisionCommand(
+                        ApprovalDecisionType.REQUEST_MORE_EVIDENCE,
+                        "需要补充签收证明",
+                        null,
+                        "review-supplement"),
+                new AuthenticatedActor(
+                        "reviewer-1", ActorRole.PLATFORM_REVIEWER));
+
+        verify(lifecycleNotifications)
+                .supplementRequested(
+                        any(FulfillmentCaseEntity.class),
+                        eq("review-" + supplementTask));
+    }
+
+    @Test
+    void announcesManualHandoffWhenTheReviewerEscalates() {
+        String taskId =
+                service.createForWorkflow("CASE_review", "REMEDY_review");
+        service.decide(
+                taskId,
+                new ReviewDecisionCommand(
+                        ApprovalDecisionType.ESCALATE_MANUAL,
+                        "复杂争议转人工专员",
+                        null,
+                        "review-manual"),
+                new AuthenticatedActor(
+                        "reviewer-1", ActorRole.PLATFORM_REVIEWER));
+
+        verify(lifecycleNotifications)
+                .manualHandoff(
+                        any(FulfillmentCaseEntity.class),
+                        eq("ESCALATE_MANUAL"));
     }
 }

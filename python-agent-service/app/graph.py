@@ -113,6 +113,12 @@ def build_hearing_graph(
 
 
 def _after_evidence_gap(state: HearingGraphState) -> str:
+    hearing_context = state["request"].get("hearing_context") or {}
+    if (
+        hearing_context.get("must_produce_final_plan")
+        or not hearing_context.get("allow_supplemental_request", True)
+    ):
+        return "cross_check"
     if state["evidence_gap"]["requires_supplemental_evidence"]:
         return "request_evidence"
     return "cross_check"

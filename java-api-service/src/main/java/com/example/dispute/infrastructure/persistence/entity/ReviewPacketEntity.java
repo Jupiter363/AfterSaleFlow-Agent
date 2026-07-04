@@ -142,7 +142,7 @@ public class ReviewPacketEntity extends AbstractEntity {
         packet.caseSummaryJson=caseSummaryJson; packet.claimsJson=claimsJson;
         packet.issuesJson=issuesJson; packet.evidenceMatrixJson=evidenceMatrixJson;
         packet.draftJson=draftJson; packet.remedyJson=remedyJson;
-        packet.riskFlagsJson=riskFlagsJson; packet.packetStatus="READY";
+        packet.riskFlagsJson=riskFlagsJson; packet.packetStatus="FROZEN";
         packet.caseVersion=versions.caseVersion();
         packet.dossierVersion=versions.dossierVersion();
         packet.issueVersion=versions.issueVersion();

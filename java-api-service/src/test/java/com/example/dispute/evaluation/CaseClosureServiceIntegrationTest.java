@@ -35,6 +35,7 @@ import com.example.dispute.infrastructure.persistence.repository.FulfillmentCase
 import com.example.dispute.infrastructure.persistence.repository.RemedyPlanRepository;
 import com.example.dispute.infrastructure.persistence.repository.ReviewPacketRepository;
 import com.example.dispute.infrastructure.persistence.repository.ReviewTaskRepository;
+import com.example.dispute.notification.application.CaseLifecycleNotificationService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import java.time.OffsetDateTime;
@@ -112,6 +113,7 @@ class CaseClosureServiceIntegrationTest {
     @Autowired EvaluationTraceRepository evaluations;
     @MockitoBean EvaluationAgentClient evaluationAgent;
     @MockitoBean AuditRecorder auditRecorder;
+    @MockitoBean CaseLifecycleNotificationService lifecycleNotifications;
 
     @BeforeEach
     void configureAgent() throws Exception {
@@ -242,6 +244,8 @@ class CaseClosureServiceIntegrationTest {
                         eq("CASE_success"),
                         any(),
                         any());
+        verify(lifecycleNotifications, times(1))
+                .executionCompleted(any(FulfillmentCaseEntity.class));
     }
 
     @Test

@@ -21,6 +21,7 @@ import com.example.dispute.infrastructure.persistence.repository.ApprovalRecordR
 import com.example.dispute.infrastructure.persistence.repository.EvaluationTraceRepository;
 import com.example.dispute.infrastructure.persistence.repository.EvidenceItemRepository;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
+import com.example.dispute.notification.application.CaseLifecycleNotificationService;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -51,6 +52,7 @@ public class CaseClosureService {
     private final EvidenceItemRepository evidenceRepository;
     private final EvaluationAgentClient evaluationAgent;
     private final AuditRecorder auditRecorder;
+    private final CaseLifecycleNotificationService lifecycleNotifications;
     private final ObjectMapper objectMapper;
     private final TransactionTemplate transactions;
 
@@ -63,6 +65,7 @@ public class CaseClosureService {
             EvidenceItemRepository evidenceRepository,
             EvaluationAgentClient evaluationAgent,
             AuditRecorder auditRecorder,
+            CaseLifecycleNotificationService lifecycleNotifications,
             ObjectMapper objectMapper,
             TransactionTemplate transactions) {
         this.caseRepository = caseRepository;
@@ -73,6 +76,7 @@ public class CaseClosureService {
         this.evidenceRepository = evidenceRepository;
         this.evaluationAgent = evaluationAgent;
         this.auditRecorder = auditRecorder;
+        this.lifecycleNotifications = lifecycleNotifications;
         this.objectMapper = objectMapper;
         this.transactions = transactions;
     }
@@ -240,6 +244,7 @@ public class CaseClosureService {
                 Map.of(
                         "evaluation_status", "PENDING",
                         "evaluation_version", 1));
+        lifecycleNotifications.executionCompleted(disputeCase);
         return new PendingClosure(caseId, trace.getId(), snapshot, true);
     }
 

@@ -1,5 +1,9 @@
 const baseUrl = import.meta.env.VITE_API_BASE_URL || "/api";
 
+export function apiUrl(path) {
+  return `${baseUrl}${path}`;
+}
+
 export function newIdempotencyKey(prefix = "web") {
   return `${prefix}-${crypto.randomUUID()}`;
 }
@@ -13,7 +17,7 @@ export async function apiRequest(path, actor, options = {}) {
   if (options.body && !(options.body instanceof FormData)) {
     headers["Content-Type"] = "application/json";
   }
-  const response = await fetch(`${baseUrl}${path}`, { ...options, headers });
+  const response = await fetch(apiUrl(path), { ...options, headers });
   let payload;
   try {
     payload = await response.json();

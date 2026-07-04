@@ -11,6 +11,7 @@ import java.time.OffsetDateTime;
 import java.util.UUID;
 import com.example.dispute.room.domain.PhaseClockType;
 import com.example.dispute.room.domain.RoomType;
+import com.example.dispute.room.application.ParticipantService;
 import com.example.dispute.room.infrastructure.persistence.entity.CasePhaseClockEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
 import com.example.dispute.room.infrastructure.persistence.repository.CasePhaseClockRepository;
@@ -30,6 +31,7 @@ public class DisputeImportService {
     private final FulfillmentCaseRepository repository;
     private final CaseRoomRepository roomRepository;
     private final CasePhaseClockRepository clockRepository;
+    private final ParticipantService participantService;
     private final DisputeProperties properties;
     private final Clock clock;
 
@@ -37,11 +39,13 @@ public class DisputeImportService {
             FulfillmentCaseRepository repository,
             CaseRoomRepository roomRepository,
             CasePhaseClockRepository clockRepository,
+            ParticipantService participantService,
             DisputeProperties properties,
             Clock clock) {
         this.repository = repository;
         this.roomRepository = roomRepository;
         this.clockRepository = clockRepository;
+        this.participantService = participantService;
         this.properties = properties;
         this.clock = clock;
     }
@@ -61,6 +65,8 @@ public class DisputeImportService {
                 .map(
                         existing -> {
                             materializeCurrentRoom(existing, command, actor.actorId());
+                            participantService.ensureImportedParties(
+                                    existing, actor, OffsetDateTime.now(clock));
                             return view(existing);
                         })
                 .orElseGet(
@@ -86,6 +92,8 @@ public class DisputeImportService {
                                             actor.actorId());
                             FulfillmentCaseEntity saved = repository.save(entity);
                             materializeCurrentRoom(saved, command, actor.actorId());
+                            participantService.ensureImportedParties(
+                                    saved, actor, OffsetDateTime.now(clock));
                             return view(saved);
                         });
     }

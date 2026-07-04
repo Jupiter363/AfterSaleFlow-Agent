@@ -128,6 +128,39 @@ class DisputeHearingWorkflowTest {
     }
 
     @Test
+    void initializesHearingStateBeforeWaitingForStatementRounds() {
+        DisputeHearingWorkflow workflow =
+                workflow("WORKFLOW_shared_hearing_initializes_first");
+        WorkflowClient.start(
+                workflow::run,
+                new HearingWorkflowCommand(
+                        "CASE_shared_hearing_initializes_first",
+                        "WORKFLOW_shared_hearing_initializes_first",
+                        1,
+                        Duration.ofHours(24),
+                        2,
+                        Duration.ofHours(3),
+                        3));
+
+        environment.sleep(Duration.ofSeconds(1));
+
+        assertThat(activities.initializedCases)
+                .containsExactly("CASE_shared_hearing_initializes_first");
+        assertThat(activities.stages).isEmpty();
+
+        workflow.hearingRoundCompleted(1, false);
+        workflow.hearingRoundCompleted(2, false);
+        workflow.hearingRoundCompleted(3, false);
+
+        HearingWorkflowResult result =
+                io.temporal.client.WorkflowStub.fromTyped(workflow)
+                        .getResult(HearingWorkflowResult.class);
+
+        assertThat(result.stopReason()).isEqualTo("MAX_ROUNDS");
+        assertThat(result.draftId()).isEqualTo("DRAFT_final");
+    }
+
+    @Test
     void threeHourDeadlineAlwaysConvergesThroughC6() {
         long startedAt = environment.currentTimeMillis();
 
@@ -177,8 +210,109 @@ class DisputeHearingWorkflowTest {
 
         assertThat(result.stopReason()).isEqualTo("MAX_ROUNDS");
         assertThat(result.draftId()).isEqualTo("DRAFT_final");
+        assertThat(activities.rounds)
+                .containsExactly(3, 3, 3, 3, 3);
+        assertThat(activities.finalConvergences)
+                .containsExactly(true, true, true, true, true);
+        assertThat(activities.maxHearingRounds)
+                .containsExactly(3, 3, 3, 3, 3);
         assertThat(environment.currentTimeMillis())
                 .isLessThan(startedAt + Duration.ofHours(3).toMillis());
+    }
+
+    @Test
+    void factsSufficientSignalDoesNotBypassTheThreeStatementRounds() {
+        DisputeHearingWorkflow workflow =
+                workflow("WORKFLOW_shared_hearing_three_rounds_required");
+        WorkflowClient.start(
+                workflow::run,
+                new HearingWorkflowCommand(
+                        "CASE_shared_hearing_three_rounds_required",
+                        "WORKFLOW_shared_hearing_three_rounds_required",
+                        1,
+                        Duration.ofHours(24),
+                        2,
+                        Duration.ofHours(3),
+                        3));
+
+        workflow.hearingRoundCompleted(1, true);
+        workflow.hearingRoundCompleted(2, false);
+        workflow.hearingRoundCompleted(3, false);
+
+        HearingWorkflowResult result =
+                io.temporal.client.WorkflowStub.fromTyped(workflow)
+                        .getResult(HearingWorkflowResult.class);
+
+        assertThat(result.stopReason()).isEqualTo("MAX_ROUNDS");
+        assertThat(result.draftId()).isEqualTo("DRAFT_final");
+        assertThat(activities.rounds)
+                .containsExactly(3, 3, 3, 3, 3);
+        assertThat(activities.finalConvergences)
+                .containsExactly(true, true, true, true, true);
+    }
+
+    @Test
+    void finalConvergenceDoesNotRequestMoreEvidenceAfterThreeRounds() {
+        activities.alwaysRequireEvidence = true;
+        DisputeHearingWorkflow workflow =
+                workflow("WORKFLOW_shared_hearing_final_no_supplement");
+        WorkflowClient.start(
+                workflow::run,
+                new HearingWorkflowCommand(
+                        "CASE_shared_hearing_final_no_supplement",
+                        "WORKFLOW_shared_hearing_final_no_supplement",
+                        1,
+                        Duration.ofHours(24),
+                        2,
+                        Duration.ofHours(3),
+                        3));
+
+        workflow.hearingRoundCompleted(1, false);
+        workflow.hearingRoundCompleted(2, false);
+        workflow.hearingRoundCompleted(3, false);
+
+        HearingWorkflowResult result =
+                io.temporal.client.WorkflowStub.fromTyped(workflow)
+                        .getResult(HearingWorkflowResult.class);
+
+        assertThat(result.stopReason()).isEqualTo("MAX_ROUNDS");
+        assertThat(result.manualRequired()).isTrue();
+        assertThat(result.draftId()).isEqualTo("DRAFT_final");
+        assertThat(activities.stages)
+                .doesNotContain("C3_EVIDENCE_REQUEST")
+                .endsWith(
+                        "C4_EVIDENCE_CROSS_CHECK",
+                        "C5_RULE_APPLICATION",
+                        "C6_DRAFT_GENERATION");
+    }
+
+    @Test
+    void confirmedSettlementSkipsModelStagesAndCompletesDeterministically() {
+        DisputeHearingWorkflow workflow =
+                workflow("WORKFLOW_shared_hearing_settlement");
+        WorkflowClient.start(
+                workflow::run,
+                new HearingWorkflowCommand(
+                        "CASE_shared_hearing_settlement",
+                        "WORKFLOW_shared_hearing_settlement",
+                        1,
+                        Duration.ofHours(24),
+                        2,
+                        Duration.ofHours(3),
+                        3));
+
+        workflow.settlementConfirmed(1);
+
+        HearingWorkflowResult result =
+                io.temporal.client.WorkflowStub.fromTyped(workflow)
+                        .getResult(HearingWorkflowResult.class);
+
+        assertThat(result.stopReason()).isEqualTo("SETTLEMENT_CONFIRMED");
+        assertThat(result.status()).isEqualTo("SETTLEMENT_CONFIRMED");
+        assertThat(result.manualRequired()).isFalse();
+        assertThat(result.draftId()).isNull();
+        assertThat(activities.stages).isEmpty();
+        assertThat(activities.traces).isEmpty();
     }
 
     private DisputeHearingWorkflow workflow(String workflowId) {
@@ -202,7 +336,11 @@ class DisputeHearingWorkflowTest {
     private static final class RecordingActivities
             implements DisputeHearingActivities {
         private final List<String> stages = new CopyOnWriteArrayList<>();
+        private final List<Integer> rounds = new CopyOnWriteArrayList<>();
+        private final List<Boolean> finalConvergences = new CopyOnWriteArrayList<>();
+        private final List<Integer> maxHearingRounds = new CopyOnWriteArrayList<>();
         private final List<String> traces = new CopyOnWriteArrayList<>();
+        private final List<String> initializedCases = new CopyOnWriteArrayList<>();
         private final List<String> recordedEvidence =
                 new CopyOnWriteArrayList<>();
         private volatile boolean alwaysRequireEvidence;
@@ -210,7 +348,9 @@ class DisputeHearingWorkflowTest {
         private int c2Calls;
 
         @Override
-        public void initialize(HearingWorkflowCommand command) {}
+        public void initialize(HearingWorkflowCommand command) {
+            initializedCases.add(command.caseId());
+        }
 
         @Override
         public HearingStageActivityResult runStage(
@@ -219,8 +359,13 @@ class DisputeHearingWorkflowTest {
                 String stage,
                 int round,
                 long dossierVersion,
-                boolean evidenceTimedOut) {
+                boolean evidenceTimedOut,
+                boolean finalConvergence,
+                int maxHearingRounds) {
             stages.add(stage);
+            rounds.add(round);
+            finalConvergences.add(finalConvergence);
+            this.maxHearingRounds.add(maxHearingRounds);
             boolean valid = !stage.equals(invalidStage);
             boolean requiresEvidence = false;
             if ("C2_EVIDENCE_GAP".equals(stage)) {

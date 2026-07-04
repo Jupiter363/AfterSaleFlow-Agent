@@ -10,6 +10,8 @@ import com.example.dispute.domain.model.RiskLevel;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.notification.application.NotificationService;
+import com.example.dispute.notification.application.CaseLifecycleNotificationService;
+import com.example.dispute.notification.domain.NotificationType;
 import com.example.dispute.notification.infrastructure.persistence.repository.NotificationOutboxRepository;
 import com.example.dispute.notification.infrastructure.persistence.repository.NotificationRepository;
 import com.example.dispute.room.application.IntakeConfirmationCommand;
@@ -57,6 +59,7 @@ import org.testcontainers.utility.DockerImageName;
     IntakeRoomService.class,
     ParticipantService.class,
     NotificationService.class,
+    CaseLifecycleNotificationService.class,
     CaseEventService.class,
     RoomMessageService.class,
     IntakeRoomServiceIntegrationTest.FixedClockConfiguration.class
@@ -164,13 +167,20 @@ class IntakeRoomServiceIntegrationTest {
                         notificationRepository
                                 .findAllByRecipientIdOrderByCreatedAtDesc(
                                         "merchant-local"))
-                .singleElement()
-                .satisfies(
+                .extracting(notification -> notification.getNotificationType())
+                .containsExactlyInAnyOrder(
+                        NotificationType.DISPUTE_SUMMONS,
+                        NotificationType.EVIDENCE_ROOM_OPENED);
+        assertThat(
+                        notificationRepository
+                                .findAllByRecipientIdOrderByCreatedAtDesc(
+                                        "merchant-local"))
+                .allSatisfy(
                         notification ->
                                 assertThat(notification.getDeepLink())
                                         .isEqualTo(
                                                 "/disputes/CASE_INTEGRATION/evidence"));
-        assertThat(outboxRepository.count()).isEqualTo(1);
+        assertThat(outboxRepository.count()).isEqualTo(2);
 
         var posted =
                 roomMessageService.post(
@@ -196,10 +206,72 @@ class IntakeRoomServiceIntegrationTest {
                         eventRepository
                                 .findAllByCaseIdAndSequenceNoGreaterThanOrderBySequenceNoAsc(
                                         dispute.getId(), 0))
-                .singleElement()
-                .satisfies(
+                .extracting(
                         event ->
-                                assertThat(event.getSequenceNo()).isEqualTo(1));
+                                event.getSequenceNo()
+                                        + ":"
+                                        + event.getEventType())
+                .containsExactly(
+                        "1:EVIDENCE_OPENED",
+                        "2:ROOM_MESSAGE_CREATED");
+    }
+
+    @Test
+    void notAdmissiblePersistsOnlyTheInitiatorAndTerminatesAfterIntake() {
+        FulfillmentCaseEntity dispute =
+                FulfillmentCaseEntity.imported(
+                        "CASE_REJECTED_INTEGRATION",
+                        "ORDER-REJECTED-INTEGRATION",
+                        null,
+                        "LOG-REJECTED-INTEGRATION",
+                        "user-local",
+                        "merchant-local",
+                        "idem-rejected-integration",
+                        "FULFILLMENT_CONFLICT",
+                        "查询物流进度",
+                        "用户只是询问物流状态，不构成履约争端",
+                        RiskLevel.LOW,
+                        CaseStatus.INTAKE_PENDING,
+                        "INTAKE",
+                        null,
+                        "OMS",
+                        "EXT-REJECTED-INTEGRATION",
+                        "external-adapter");
+        caseRepository.saveAndFlush(dispute);
+
+        var result =
+                service.confirm(
+                        dispute.getId(),
+                        new AuthenticatedActor("user-local", ActorRole.USER),
+                        new IntakeConfirmationCommand(
+                                false,
+                                "NOT_A_FULFILLMENT_DISPUTE",
+                                RiskLevel.LOW,
+                                "仅为普通物流查询，不予受理"));
+        caseRepository.flush();
+
+        assertThat(result.caseStatus()).isEqualTo(CaseStatus.NOT_ADMISSIBLE);
+        assertThat(result.currentRoom()).isNull();
+        assertThat(result.deadlineAt()).isNull();
+        assertThat(caseRepository.findById(dispute.getId()).orElseThrow().getCaseStatus())
+                .isEqualTo(CaseStatus.NOT_ADMISSIBLE);
+        assertThat(participantRepository.findAllByCaseId(dispute.getId()))
+                .extracting(participant -> participant.getParticipantRole())
+                .containsExactly(ActorRole.USER);
+        assertThat(roomRepository.findAllByCaseId(dispute.getId()))
+                .extracting(room -> room.getRoomType() + ":" + room.getRoomStatus())
+                .containsExactly(RoomType.INTAKE + ":" + RoomStatus.CLOSED);
+        assertThat(clockRepository.findByCaseIdAndClockType(
+                        dispute.getId(), PhaseClockType.EVIDENCE_SUBMISSION))
+                .isEmpty();
+        assertThat(notificationRepository.count()).isZero();
+        assertThat(outboxRepository.count()).isZero();
+        assertThat(
+                        eventRepository.findByCaseIdAndEventKey(
+                                dispute.getId(),
+                                "intake-confirmed:" + dispute.getId()))
+                .hasValueSatisfying(
+                        event -> assertThat(event.getEventType()).isEqualTo("INTAKE_REJECTED"));
     }
 
     @TestConfiguration(proxyBeanMethods = false)

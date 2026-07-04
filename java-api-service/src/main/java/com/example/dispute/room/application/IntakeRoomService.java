@@ -8,6 +8,7 @@ import com.example.dispute.config.DisputeProperties;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.notification.application.NotificationCommand;
+import com.example.dispute.notification.application.CaseLifecycleNotificationService;
 import com.example.dispute.notification.application.NotificationService;
 import com.example.dispute.notification.domain.NotificationType;
 import com.example.dispute.room.domain.PhaseClockType;
@@ -33,7 +34,9 @@ public class IntakeRoomService {
     private final CasePhaseClockRepository phaseClockRepository;
     private final ParticipantService participantService;
     private final NotificationService notificationService;
+    private final CaseLifecycleNotificationService lifecycleNotifications;
     private final EvidenceWindowCoordinator evidenceWindowCoordinator;
+    private final CaseEventService caseEventService;
     private final DisputeProperties disputeProperties;
     private final Clock clock;
 
@@ -43,7 +46,9 @@ public class IntakeRoomService {
             CasePhaseClockRepository phaseClockRepository,
             ParticipantService participantService,
             NotificationService notificationService,
+            CaseLifecycleNotificationService lifecycleNotifications,
             EvidenceWindowCoordinator evidenceWindowCoordinator,
+            CaseEventService caseEventService,
             DisputeProperties disputeProperties,
             Clock clock) {
         this.caseRepository = caseRepository;
@@ -51,7 +56,9 @@ public class IntakeRoomService {
         this.phaseClockRepository = phaseClockRepository;
         this.participantService = participantService;
         this.notificationService = notificationService;
+        this.lifecycleNotifications = lifecycleNotifications;
         this.evidenceWindowCoordinator = evidenceWindowCoordinator;
+        this.caseEventService = caseEventService;
         this.disputeProperties = disputeProperties;
         this.clock = clock;
     }
@@ -72,8 +79,17 @@ public class IntakeRoomService {
                                                 Map.of("case_id", caseId)));
         OffsetDateTime now = OffsetDateTime.now(clock);
         CaseRoomEntity intakeRoom =
-                CaseRoomEntity.closed(
-                        roomId(), caseId, RoomType.INTAKE, now, actor.actorId());
+                roomRepository
+                        .findByCaseIdAndRoomType(caseId, RoomType.INTAKE)
+                        .orElseGet(
+                                () ->
+                                        CaseRoomEntity.closed(
+                                                roomId(),
+                                                caseId,
+                                                RoomType.INTAKE,
+                                                now,
+                                                actor.actorId()));
+        intakeRoom.close(now, actor.actorId());
         roomRepository.save(intakeRoom);
 
         if (!command.admissible()) {
@@ -84,6 +100,13 @@ public class IntakeRoomService {
                     dispute.getIntakeResultJson(),
                     actor.actorId());
             caseRepository.save(dispute);
+            caseEventService.recordLifecycleEvent(
+                    caseId,
+                    intakeRoom.getId(),
+                    "INTAKE_REJECTED",
+                    Map.of("case_status", dispute.getCaseStatus().name()),
+                    "intake-confirmed:" + caseId,
+                    actor.actorId());
             return new IntakeConfirmationView(
                     caseId, dispute.getCaseStatus(), null, null);
         }
@@ -112,7 +135,19 @@ public class IntakeRoomService {
                 deadline,
                 actor.actorId());
         caseRepository.save(dispute);
+        caseEventService.recordLifecycleEvent(
+                caseId,
+                evidenceRoom.getId(),
+                "EVIDENCE_OPENED",
+                Map.of(
+                        "case_status",
+                        dispute.getCaseStatus().name(),
+                        "deadline_at",
+                        deadline.toString()),
+                "intake-confirmed:" + caseId,
+                actor.actorId());
         sendCounterpartySummons(dispute, actor, deadline);
+        lifecycleNotifications.evidenceRoomOpened(dispute, deadline);
         evidenceWindowCoordinator.startAfterCommit(caseId, evidenceWindow);
         return new IntakeConfirmationView(
                 caseId,
@@ -125,11 +160,23 @@ public class IntakeRoomService {
             FulfillmentCaseEntity dispute,
             AuthenticatedActor initiator,
             OffsetDateTime deadline) {
-        boolean userInitiated = initiator.role() == ActorRole.USER;
-        String recipientId =
-                userInitiated ? dispute.getMerchantId() : dispute.getUserId();
-        ActorRole recipientRole =
-                userInitiated ? ActorRole.MERCHANT : ActorRole.USER;
+        if (initiator.role() == ActorRole.USER) {
+            sendSummonsTo(dispute, dispute.getMerchantId(), ActorRole.MERCHANT, deadline);
+            return;
+        }
+        if (initiator.role() == ActorRole.MERCHANT) {
+            sendSummonsTo(dispute, dispute.getUserId(), ActorRole.USER, deadline);
+            return;
+        }
+        sendSummonsTo(dispute, dispute.getUserId(), ActorRole.USER, deadline);
+        sendSummonsTo(dispute, dispute.getMerchantId(), ActorRole.MERCHANT, deadline);
+    }
+
+    private void sendSummonsTo(
+            FulfillmentCaseEntity dispute,
+            String recipientId,
+            ActorRole recipientRole,
+            OffsetDateTime deadline) {
         notificationService.send(
                 new NotificationCommand(
                         dispute.getId(),

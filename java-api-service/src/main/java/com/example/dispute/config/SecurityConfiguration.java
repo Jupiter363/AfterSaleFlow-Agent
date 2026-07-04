@@ -1,5 +1,6 @@
 package com.example.dispute.config;
 
+import jakarta.servlet.DispatcherType;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
@@ -26,6 +27,10 @@ public class SecurityConfiguration {
                 .authorizeHttpRequests(
                         requests ->
                                 requests
+                                        .dispatcherTypeMatchers(
+                                                DispatcherType.ASYNC,
+                                                DispatcherType.ERROR)
+                                        .permitAll()
                                         .requestMatchers(
                                                 "/actuator/health",
                                                 "/v3/api-docs/**",

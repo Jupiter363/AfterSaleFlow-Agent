@@ -1,6 +1,7 @@
 package com.example.dispute.workflow;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.verifyNoInteractions;
 
 import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.RiskLevel;
@@ -251,6 +252,9 @@ class HearingPersistenceIntegrationTest {
                         },
                         org.mockito.Mockito.mock(RemedyApplicationService.class),
                         org.mockito.Mockito.mock(ReviewApplicationService.class),
+                        org.mockito.Mockito.mock(
+                                com.example.dispute.notification.application
+                                        .CaseLifecycleNotificationService.class),
                         org.mockito.Mockito.mock(ToolExecutorService.class),
                         org.mockito.Mockito.mock(CaseClosureService.class),
                         org.mockito.Mockito.mock(AuditRecorder.class),
@@ -298,6 +302,192 @@ class HearingPersistenceIntegrationTest {
                         saved ->
                                 assertThat(saved.getCaseStatus())
                                         .isEqualTo(CaseStatus.HEARING));
+    }
+
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void finalConvergenceRequestSuppressesSupplementalEvidenceAndRequiresPlan()
+            throws Exception {
+        FulfillmentCaseEntity disputeCase =
+                routedCase("CASE_finalconvergence", "idem-final-convergence");
+        caseRepository.saveAndFlush(disputeCase);
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        var raw =
+                mapper.readTree(
+                        """
+                        {
+                          "case_id":"CASE_finalconvergence",
+                          "workflow_id":"CASEWORKFLOW_CASE_finalconvergence",
+                          "workflow_status":"COMPLETED",
+                          "executed_nodes":["issue_framing_node","evidence_gap_request_node","adjudication_draft_node"],
+                          "issue_framing":{"neutral_summary":"dispute","issues":[]},
+                          "evidence_gap":{"requires_supplemental_evidence":true,"gaps":[{"reason":"signature missing"}]},
+                          "evidence_cross_check":{"findings":[]},
+                          "rule_application":{"applications":[]},
+                          "adjudication_draft":{"draft":{
+                            "draft_status":"PENDING_HUMAN_REVIEW",
+                            "recommended_outcome":"REVIEW_WITH_AVAILABLE_EVIDENCE",
+                            "reasoning_summary":"Final convergence must use the available record.",
+                            "issue_findings":[],
+                            "confidence":0.68,
+                            "review_focus":["verify forced convergence"]
+                          }},
+                          "manual_review_reasons":[],
+                          "prompt_version":"hearing-v1",
+                          "model":"test-model"
+                        }
+                        """);
+        var lifecycleNotifications =
+                org.mockito.Mockito.mock(
+                        com.example.dispute.notification.application
+                                .CaseLifecycleNotificationService.class);
+        var activities =
+                new CaseFulfillmentDisputeActivitiesImpl(
+                        caseRepository,
+                        evidenceRepository,
+                        policyRepository,
+                        stateRepository,
+                        recordRepository,
+                        draftRepository,
+                        agentRunRepository,
+                        submissionRepository,
+                        (request, traceId, requestId) -> {
+                            assertThat(request.path("hearing_context")
+                                            .path("completed_statement_rounds")
+                                            .asInt())
+                                    .isEqualTo(3);
+                            assertThat(request.path("hearing_context")
+                                            .path("max_statement_rounds")
+                                            .asInt())
+                                    .isEqualTo(3);
+                            assertThat(request.path("hearing_context")
+                                            .path("final_convergence")
+                                            .asBoolean())
+                                    .isTrue();
+                            assertThat(request.path("hearing_context")
+                                            .path("must_produce_final_plan")
+                                            .asBoolean())
+                                    .isTrue();
+                            assertThat(request.path("hearing_context")
+                                            .path("allow_supplemental_request")
+                                            .asBoolean())
+                                    .isFalse();
+                            return new HearingAgentResult(
+                                    raw,
+                                    true,
+                                    false,
+                                    List.of(
+                                            "issue_framing_node",
+                                            "evidence_gap_request_node",
+                                            "adjudication_draft_node"),
+                                    "hearing-v1",
+                                    "test-model");
+                        },
+                        org.mockito.Mockito.mock(RemedyApplicationService.class),
+                        org.mockito.Mockito.mock(ReviewApplicationService.class),
+                        lifecycleNotifications,
+                        org.mockito.Mockito.mock(ToolExecutorService.class),
+                        org.mockito.Mockito.mock(CaseClosureService.class),
+                        org.mockito.Mockito.mock(AuditRecorder.class),
+                        mapper,
+                        new TransactionTemplate(transactionManager));
+        String workflowId = "CASEWORKFLOW_CASE_finalconvergence";
+        activities.initializeHearing(
+                new CaseWorkflowInput(
+                        disputeCase.getId(),
+                        workflowId,
+                        RouteType.FULL_HEARING,
+                        Duration.ofHours(72),
+                        2));
+
+        var result =
+                activities.analyzeHearing(
+                        new HearingAnalysisActivityCommand(
+                                disputeCase.getId(),
+                                workflowId,
+                                3,
+                                false,
+                                true,
+                                true,
+                                3));
+
+        assertThat(result.requiresAdditionalEvidence()).isFalse();
+        assertThat(result.draftId()).startsWith("DRAFT_");
+        verifyNoInteractions(lifecycleNotifications);
+    }
+
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void hearingAgentFailureFallsBackToManualReviewDraft() {
+        FulfillmentCaseEntity disputeCase =
+                routedCase("CASE_agentfallback", "idem-agent-fallback");
+        caseRepository.saveAndFlush(disputeCase);
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        var activities =
+                new CaseFulfillmentDisputeActivitiesImpl(
+                        caseRepository,
+                        evidenceRepository,
+                        policyRepository,
+                        stateRepository,
+                        recordRepository,
+                        draftRepository,
+                        agentRunRepository,
+                        submissionRepository,
+                        (request, traceId, requestId) -> {
+                            throw new RuntimeException("agent model service unavailable");
+                        },
+                        org.mockito.Mockito.mock(RemedyApplicationService.class),
+                        org.mockito.Mockito.mock(ReviewApplicationService.class),
+                        org.mockito.Mockito.mock(
+                                com.example.dispute.notification.application
+                                        .CaseLifecycleNotificationService.class),
+                        org.mockito.Mockito.mock(ToolExecutorService.class),
+                        org.mockito.Mockito.mock(CaseClosureService.class),
+                        org.mockito.Mockito.mock(AuditRecorder.class),
+                        mapper,
+                        new TransactionTemplate(transactionManager));
+        String workflowId = "CASEWORKFLOW_CASE_agentfallback";
+        activities.initializeHearing(
+                new CaseWorkflowInput(
+                        disputeCase.getId(),
+                        workflowId,
+                        RouteType.FULL_HEARING,
+                        Duration.ofHours(72),
+                        2));
+
+        var result =
+                activities.analyzeHearing(
+                        new HearingAnalysisActivityCommand(
+                                disputeCase.getId(), workflowId, 0, false, false));
+
+        assertThat(result.manualRequired()).isTrue();
+        assertThat(result.requiresAdditionalEvidence()).isFalse();
+        assertThat(result.hearingStatus()).isEqualTo("RUNNING");
+        assertThat(result.draftId()).startsWith("DRAFT_");
+        assertThat(
+                        draftRepository.findFirstByCaseIdOrderByDraftVersionDesc(
+                                disputeCase.getId()))
+                .hasValueSatisfying(
+                        draft -> {
+                            assertThat(draft.getDraftStatus())
+                                    .isEqualTo("PENDING_HUMAN_REVIEW");
+                            assertThat(draft.getRecommendedDecision())
+                                    .isEqualTo("MANUAL_REVIEW_REQUIRED");
+                            assertThat(draft.getDraftText())
+                                    .contains("模型服务暂不可用");
+                        });
+        assertThat(
+                        recordRepository.findAllByCaseIdOrderByCreatedAtAsc(
+                                disputeCase.getId()))
+                .extracting(HearingRecordEntity::getNodeName)
+                .containsExactly("adjudication_draft_node");
+        assertThat(agentRunRepository.findAllByCaseIdOrderByCreatedAtAsc(disputeCase.getId()))
+                .singleElement()
+                .satisfies(
+                        run -> {
+                            assertThat(run.getTraceId()).isEqualTo("TRACE_" + workflowId);
+                            assertThat(run.getOutputRef()).isEqualTo(result.draftId());
+                        });
     }
 
     private static FulfillmentCaseEntity routedCase(

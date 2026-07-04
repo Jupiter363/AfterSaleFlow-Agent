@@ -1,7 +1,11 @@
 package com.example.dispute.workflow.application;
 
 import com.example.dispute.domain.model.RouteType;
+import com.example.dispute.hearing.application.HearingOutcomeOrchestrationService;
 import com.example.dispute.hearing.application.HearingRoundService;
+import com.example.dispute.hearing.domain.SettlementStatus;
+import com.example.dispute.hearing.infrastructure.persistence.repository.SettlementProposalRepository;
+import com.example.dispute.infrastructure.persistence.entity.AdjudicationDraftEntity;
 import com.example.dispute.room.domain.PhaseClockType;
 import com.example.dispute.room.infrastructure.persistence.repository.CasePhaseClockRepository;
 import com.example.dispute.workflow.domain.ApprovalValidationResult;
@@ -27,6 +31,7 @@ import com.example.dispute.workflow.temporal.ExecutionActivities;
 import com.example.dispute.workflow.temporal.FulfillmentDisputeActivities;
 import com.example.dispute.workflow.temporal.HumanReviewActivities;
 import java.nio.charset.StandardCharsets;
+import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.OffsetDateTime;
 import java.util.List;
@@ -34,8 +39,10 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import com.example.dispute.infrastructure.persistence.entity.DeliberationReportEntity;
+import com.example.dispute.infrastructure.persistence.repository.AdjudicationDraftRepository;
 import com.example.dispute.infrastructure.persistence.repository.ApprovalRecordRepository;
 import com.example.dispute.infrastructure.persistence.repository.DeliberationReportRepository;
+import com.example.dispute.infrastructure.persistence.repository.HearingStateRepository;
 import com.example.dispute.infrastructure.persistence.repository.ReviewPacketRepository;
 import com.example.dispute.infrastructure.persistence.repository.ReviewTaskRepository;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -63,8 +70,12 @@ public class FinalWorkflowActivitiesAdapter
     private final ReviewPacketRepository packetRepository;
     private final ReviewTaskRepository taskRepository;
     private final DeliberationReportRepository deliberationRepository;
+    private final AdjudicationDraftRepository draftRepository;
+    private final HearingStateRepository hearingStateRepository;
+    private final SettlementProposalRepository settlementProposalRepository;
     private final ObjectMapper objectMapper;
     private final HearingRoundService hearingRoundService;
+    private final HearingOutcomeOrchestrationService hearingOutcomeOrchestration;
     private final CasePhaseClockRepository phaseClockRepository;
     private final Clock clock;
     private final ConcurrentMap<String, HearingAnalysisActivityResult>
@@ -76,8 +87,12 @@ public class FinalWorkflowActivitiesAdapter
             ReviewPacketRepository packetRepository,
             ReviewTaskRepository taskRepository,
             DeliberationReportRepository deliberationRepository,
+            AdjudicationDraftRepository draftRepository,
+            HearingStateRepository hearingStateRepository,
+            SettlementProposalRepository settlementProposalRepository,
             ObjectMapper objectMapper,
             HearingRoundService hearingRoundService,
+            HearingOutcomeOrchestrationService hearingOutcomeOrchestration,
             CasePhaseClockRepository phaseClockRepository,
             Clock clock) {
         this.legacy = legacy;
@@ -85,8 +100,12 @@ public class FinalWorkflowActivitiesAdapter
         this.packetRepository = packetRepository;
         this.taskRepository = taskRepository;
         this.deliberationRepository = deliberationRepository;
+        this.draftRepository = draftRepository;
+        this.hearingStateRepository = hearingStateRepository;
+        this.settlementProposalRepository = settlementProposalRepository;
         this.objectMapper = objectMapper;
         this.hearingRoundService = hearingRoundService;
+        this.hearingOutcomeOrchestration = hearingOutcomeOrchestration;
         this.phaseClockRepository = phaseClockRepository;
         this.clock = clock;
     }
@@ -152,8 +171,10 @@ public class FinalWorkflowActivitiesAdapter
             String stage,
             int round,
             long dossierVersion,
-            boolean evidenceTimedOut) {
-        String key = workflowId + ":" + round;
+            boolean evidenceTimedOut,
+            boolean finalConvergence,
+            int maxHearingRounds) {
+        String key = workflowId + ":" + round + ":" + finalConvergence;
         HearingAnalysisActivityResult analysis =
                 hearingRounds.computeIfAbsent(
                         key,
@@ -164,7 +185,9 @@ public class FinalWorkflowActivitiesAdapter
                                                 workflowId,
                                                 round,
                                                 evidenceTimedOut,
-                                                round > 0)));
+                                                round > 0,
+                                                finalConvergence,
+                                                maxHearingRounds)));
         return new HearingStageActivityResult(
                 stage,
                 true,
@@ -232,7 +255,61 @@ public class FinalWorkflowActivitiesAdapter
                 workflowId,
                 manualRequired,
                 evidenceTimedOut);
+        if (shouldOpenHumanReviewGate(status)) {
+            if ("SETTLEMENT_CONFIRMED".equals(stopReason)) {
+                ensureSettlementDraft(caseId);
+            }
+            hearingOutcomeOrchestration.orchestrate(caseId, "temporal-worker");
+        }
         hearingRounds.keySet().removeIf(key -> key.startsWith(workflowId + ":"));
+    }
+
+    private void ensureSettlementDraft(String caseId) {
+        var latestDraft = draftRepository.findFirstByCaseIdOrderByDraftVersionDesc(caseId);
+        if (latestDraft
+                .map(AdjudicationDraftEntity::getDraftStatus)
+                .filter("SETTLEMENT_CONFIRMED"::equals)
+                .isPresent()) {
+            return;
+        }
+        var settlement =
+                settlementProposalRepository
+                        .findTopByCaseIdOrderByProposalVersionDesc(caseId)
+                        .filter(
+                                proposal ->
+                                        proposal.getProposalStatus()
+                                                == SettlementStatus.CONFIRMED)
+                        .orElseThrow(
+                                () ->
+                                        new IllegalStateException(
+                                                "confirmed settlement is required"));
+        var hearingState =
+                hearingStateRepository
+                        .findByCaseId(caseId)
+                        .orElseThrow(
+                                () ->
+                                        new IllegalStateException(
+                                                "hearing state not found"));
+        int nextVersion =
+                latestDraft.map(draft -> draft.getDraftVersion() + 1).orElse(1);
+        String proposalText = settlement.getProposalText();
+        draftRepository.save(
+                AdjudicationDraftEntity.create(
+                        "DRAFT_" + UUID.randomUUID().toString().replace("-", ""),
+                        caseId,
+                        hearingState.getId(),
+                        nextVersion,
+                        write(List.of("双方已确认一致方案", proposalText)),
+                        write(List.of("一致方案由用户与商家共同确认，作为非最终裁决草案来源。")),
+                        write(List.of("平台审核员需核验一致方案合法性、可执行性和履约风险。")),
+                        write(List.of("核对一致方案对应的订单、库存、物流和售后执行条件")),
+                        recommendationFromSettlement(proposalText),
+                        new BigDecimal("0.9500"),
+                        "双方已达成一致方案：" + proposalText,
+                        "deterministic-settlement-draft",
+                        null,
+                        "SETTLEMENT_CONFIRMED",
+                        "temporal-worker"));
     }
 
     @Override
@@ -397,5 +474,36 @@ public class FinalWorkflowActivitiesAdapter
             throw new IllegalStateException(
                     "cannot serialize deliberation report", exception);
         }
+    }
+
+    private static String recommendationFromSettlement(String proposalText) {
+        String upper = proposalText.toUpperCase(java.util.Locale.ROOT);
+        if (upper.contains("REFUND")
+                || proposalText.contains("退款")
+                || proposalText.contains("退费")
+                || proposalText.contains("返款")) {
+            return "REFUND_BY_CONFIRMED_SETTLEMENT";
+        }
+        if (upper.contains("RESHIP")
+                || upper.contains("RESEND")
+                || proposalText.contains("补发")
+                || proposalText.contains("重发")
+                || proposalText.contains("重新发")
+                || proposalText.contains("再次发")) {
+            return "RESHIP_BY_CONFIRMED_SETTLEMENT";
+        }
+        if (upper.contains("REPLACE")
+                || upper.contains("EXCHANGE")
+                || proposalText.contains("换货")
+                || proposalText.contains("更换")
+                || proposalText.contains("调换")) {
+            return "REPLACE_BY_CONFIRMED_SETTLEMENT";
+        }
+        return "SETTLEMENT_CONFIRMED";
+    }
+
+    private static boolean shouldOpenHumanReviewGate(String status) {
+        return !"ACTIVITY_INTERRUPTED".equals(status)
+                && !"VALIDATION_INTERRUPTED".equals(status);
     }
 }

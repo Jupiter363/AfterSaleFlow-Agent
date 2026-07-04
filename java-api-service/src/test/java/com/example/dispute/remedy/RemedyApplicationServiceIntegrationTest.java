@@ -22,6 +22,7 @@ import com.example.dispute.infrastructure.persistence.repository.RouteDecisionRe
 import com.example.dispute.remedy.application.RemedyApplicationService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
+import jakarta.persistence.EntityManager;
 import java.math.BigDecimal;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -29,6 +30,7 @@ import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
@@ -87,6 +89,8 @@ class RemedyApplicationServiceIntegrationTest {
     @Autowired private HearingStateRepository hearingRepository;
     @Autowired private AdjudicationDraftRepository draftRepository;
     @Autowired private RemedyPlanRepository planRepository;
+    @Autowired private JdbcTemplate jdbcTemplate;
+    @Autowired private EntityManager entityManager;
     @MockitoBean private AuditRecorder auditRecorder;
 
     @Test
@@ -164,6 +168,67 @@ class RemedyApplicationServiceIntegrationTest {
                         disputeCase ->
                                 assertThat(disputeCase.getCaseStatus())
                                         .isEqualTo(CaseStatus.REMEDY_PLANNED));
+    }
+
+    @Test
+    void legacyRoomHearingWithoutRouteStillPlansFromCompletedDraft() {
+        String caseId = "CASE_legacyroomhearing";
+        String workflowId = "hearing-window-" + caseId;
+        FulfillmentCaseEntity disputeCase =
+                routedCase(
+                        caseId,
+                        RouteType.FULL_HEARING,
+                        RiskLevel.HIGH);
+        disputeCase.startHearing(workflowId, "temporal-worker");
+        caseRepository.saveAndFlush(disputeCase);
+        HearingStateEntity hearing =
+                HearingStateEntity.start(
+                        "HEARING_legacyroom",
+                        caseId,
+                        workflowId,
+                        "temporal-worker");
+        hearing.complete(true, "temporal-worker");
+        hearingRepository.saveAndFlush(hearing);
+        draftRepository.saveAndFlush(
+                AdjudicationDraftEntity.create(
+                        "DRAFT_legacyroom",
+                        caseId,
+                        hearing.getId(),
+                        1,
+                        "[]",
+                        "[]",
+                        "[]",
+                        "[\"verify fallback draft\"]",
+                        "MANUAL_REVIEW_REQUIRED",
+                        new BigDecimal("0.1000"),
+                        "Fallback non-final draft for reviewer confirmation.",
+                        "python-agent-service/fallback",
+                        "PENDING_HUMAN_REVIEW",
+                        "temporal-worker"));
+        entityManager.flush();
+        jdbcTemplate.update(
+                "update fulfillment_dispute_case set hearing_route = null where id = ?",
+                caseId);
+        entityManager.clear();
+
+        String planId = service.generateForWorkflow(caseId, workflowId);
+
+        assertThat(planRepository.findById(planId))
+                .hasValueSatisfying(
+                        plan -> {
+                            assertThat(plan.getSourceRoute())
+                                    .isEqualTo(RouteType.FULL_HEARING);
+                            assertThat(plan.getAdjudicationDraftId())
+                                    .isEqualTo("DRAFT_legacyroom");
+                        });
+        assertThat(caseRepository.findById(caseId))
+                .hasValueSatisfying(
+                        saved -> {
+                            assertThat(saved.getRouteType())
+                                    .isEqualTo(RouteType.FULL_HEARING);
+                            assertThat(saved.getCaseStatus())
+                                    .isEqualTo(CaseStatus.REMEDY_PLANNED);
+                        });
     }
 
     private void seedFlow(

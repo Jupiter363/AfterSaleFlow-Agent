@@ -18,6 +18,7 @@ import com.example.dispute.infrastructure.persistence.repository.FulfillmentCase
 import com.example.dispute.infrastructure.persistence.repository.HearingStateRepository;
 import com.example.dispute.infrastructure.persistence.repository.PartySubmissionRepository;
 import com.example.dispute.workflow.domain.EvidenceSubmissionSignal;
+import com.example.dispute.workflow.domain.DeliberationInterventionMode;
 import com.example.dispute.workflow.domain.FulfillmentDisputeCommand;
 import com.example.dispute.workflow.domain.HumanReviewSignal;
 import com.example.dispute.workflow.temporal.FulfillmentDisputeWorkflow;
@@ -50,6 +51,10 @@ public class WorkflowApplicationService {
     private final TransactionTemplate transactions;
     private final Duration evidenceWaitTimeout;
     private final int maxEvidenceRounds;
+    private final DeliberationInterventionMode deliberationMode;
+    private final String deliberationMinimumRiskLevel;
+    private final int deliberationScoreThreshold;
+    private final int deliberationMaxRegenerations;
 
     public WorkflowApplicationService(
             WorkflowClient workflowClient,
@@ -63,7 +68,11 @@ public class WorkflowApplicationService {
             ObjectMapper objectMapper,
             TransactionTemplate transactions,
             @Value("${app.temporal.evidence-wait-hours:72}") long evidenceWaitHours,
-            @Value("${app.temporal.max-evidence-rounds:2}") int maxEvidenceRounds) {
+            @Value("${app.temporal.max-evidence-rounds:2}") int maxEvidenceRounds,
+            @Value("${app.temporal.deliberation-mode:FINAL_ONLY}") String deliberationMode,
+            @Value("${app.temporal.deliberation-min-risk-level:HIGH}") String deliberationMinimumRiskLevel,
+            @Value("${app.temporal.deliberation-score-threshold:80}") int deliberationScoreThreshold,
+            @Value("${app.temporal.deliberation-max-regenerations:2}") int deliberationMaxRegenerations) {
         this.workflowClient = workflowClient;
         this.properties = properties;
         this.caseRepository = caseRepository;
@@ -76,6 +85,10 @@ public class WorkflowApplicationService {
         this.transactions = transactions;
         this.evidenceWaitTimeout = Duration.ofHours(evidenceWaitHours);
         this.maxEvidenceRounds = maxEvidenceRounds;
+        this.deliberationMode = DeliberationInterventionMode.from(deliberationMode);
+        this.deliberationMinimumRiskLevel = deliberationMinimumRiskLevel;
+        this.deliberationScoreThreshold = deliberationScoreThreshold;
+        this.deliberationMaxRegenerations = deliberationMaxRegenerations;
     }
 
     public WorkflowStartView start(
@@ -115,11 +128,11 @@ public class WorkflowApplicationService {
                             evidenceWaitTimeout,
                             Duration.ofDays(7),
                             maxEvidenceRounds,
-                            disputeCase.getRouteType()
-                                            == com.example.dispute.domain.model
-                                                    .RouteType.FULL_HEARING
-                                    && !"LOW".equals(
-                                            disputeCase.getRiskLevel().name())));
+                            disputeCase.getRiskLevel().name(),
+                            deliberationMode,
+                            deliberationMinimumRiskLevel,
+                            deliberationScoreThreshold,
+                            deliberationMaxRegenerations));
         } catch (WorkflowExecutionAlreadyStarted ignored) {
             // Deterministic workflow IDs make repeated starts idempotent.
         } catch (RuntimeException exception) {

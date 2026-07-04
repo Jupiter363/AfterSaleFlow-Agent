@@ -19,7 +19,9 @@ public interface DisputeHearingActivities {
             String stage,
             int round,
             long dossierVersion,
-            boolean evidenceTimedOut);
+            boolean evidenceTimedOut,
+            boolean finalConvergence,
+            int maxHearingRounds);
 
     @ActivityMethod
     long recordEvidence(EvidenceSubmissionSignal signal);

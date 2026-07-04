@@ -9,6 +9,7 @@ import com.example.dispute.evidence.infrastructure.persistence.repository.Eviden
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.notification.application.NotificationCommand;
+import com.example.dispute.notification.application.CaseLifecycleNotificationService;
 import com.example.dispute.notification.application.NotificationService;
 import com.example.dispute.notification.domain.NotificationType;
 import com.example.dispute.room.application.CaseEventService;
@@ -40,6 +41,7 @@ public class EvidenceCompletionService {
     private final EvidenceWindowCoordinator evidenceWindowCoordinator;
     private final CaseEventService caseEventService;
     private final NotificationService notificationService;
+    private final CaseLifecycleNotificationService lifecycleNotifications;
     private final HearingWorkflowCoordinator hearingWorkflowCoordinator;
     private final DisputeProperties disputeProperties;
     private final Clock clock;
@@ -53,6 +55,7 @@ public class EvidenceCompletionService {
             EvidenceWindowCoordinator evidenceWindowCoordinator,
             CaseEventService caseEventService,
             NotificationService notificationService,
+            CaseLifecycleNotificationService lifecycleNotifications,
             HearingWorkflowCoordinator hearingWorkflowCoordinator,
             DisputeProperties disputeProperties,
             Clock clock) {
@@ -64,9 +67,23 @@ public class EvidenceCompletionService {
         this.evidenceWindowCoordinator = evidenceWindowCoordinator;
         this.caseEventService = caseEventService;
         this.notificationService = notificationService;
+        this.lifecycleNotifications = lifecycleNotifications;
         this.hearingWorkflowCoordinator = hearingWorkflowCoordinator;
         this.disputeProperties = disputeProperties;
         this.clock = clock;
+    }
+
+    @Transactional(readOnly = true)
+    public void warnDeadline(String caseId) {
+        FulfillmentCaseEntity dispute =
+                caseRepository
+                        .findByIdForUpdate(caseId)
+                        .orElseThrow(() -> new IllegalArgumentException("case not found"));
+        if (dispute.getCaseStatus() == CaseStatus.EVIDENCE_OPEN
+                && dispute.getCurrentDeadlineAt() != null) {
+            lifecycleNotifications.evidenceDeadlineWarning(
+                    dispute, dispute.getCurrentDeadlineAt());
+        }
     }
 
     @Transactional

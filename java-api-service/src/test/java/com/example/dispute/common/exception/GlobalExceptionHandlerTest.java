@@ -26,17 +26,23 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.http.MediaType;
+import org.springframework.http.HttpMethod;
+import org.springframework.mock.web.MockHttpServletRequest;
+import org.springframework.web.context.request.async.AsyncRequestNotUsableException;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 class GlobalExceptionHandlerTest {
 
     private MockMvc mockMvc;
+    private GlobalExceptionHandler handler;
 
     @BeforeEach
     void setUp() {
         Clock clock = Clock.fixed(Instant.parse("2026-06-28T10:00:00Z"), ZoneOffset.UTC);
+        handler = new GlobalExceptionHandler(clock);
         mockMvc =
                 MockMvcBuilders.standaloneSetup(new FailingController())
-                        .setControllerAdvice(new GlobalExceptionHandler(clock))
+                        .setControllerAdvice(handler)
                         .addFilters(new TraceIdFilter())
                         .build();
     }
@@ -88,7 +94,16 @@ class GlobalExceptionHandlerTest {
                         event -> {
                             assertThat(event.getFormattedMessage()).doesNotContain("password");
                             assertThat(event.getThrowableProxy()).isNull();
-                        });
+        });
+    }
+
+    @Test
+    void mapsSecurityExceptionToForbidden() throws Exception {
+        mockMvc.perform(get("/test/security"))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("FORBIDDEN"))
+                .andExpect(jsonPath("$.message").value("access denied"))
+                .andExpect(jsonPath("$.details").isEmpty());
     }
 
     @Test
@@ -100,6 +115,48 @@ class GlobalExceptionHandlerTest {
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.code").value("INVALID_ARGUMENT"))
                 .andExpect(jsonPath("$.details.fields.orderId").value("must not be blank"));
+    }
+
+    @Test
+    void treatsDisconnectedSseClientsAsCompletedStreams() throws Exception {
+        ch.qos.logback.classic.Logger logger =
+                (ch.qos.logback.classic.Logger)
+                        org.slf4j.LoggerFactory.getLogger(GlobalExceptionHandler.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+
+        try {
+            var result =
+                    mockMvc.perform(
+                                    get("/test/sse-disconnected")
+                                            .accept(MediaType.TEXT_EVENT_STREAM))
+                            .andReturn();
+
+            assertThat(result.getResponse().getStatus()).isEqualTo(204);
+            assertThat(result.getResponse().getContentAsString()).isEmpty();
+            assertThat(appender.list)
+                    .noneSatisfy(
+                            event ->
+                                    assertThat(event.getLevel().toString())
+                                            .isEqualTo("ERROR"));
+        } finally {
+            logger.detachAppender(appender);
+        }
+    }
+
+    @Test
+    void mapsAnUnknownApiRouteToResourceNotFound() {
+        var response =
+                handler.handleNoResourceFound(
+                        new NoResourceFoundException(
+                                HttpMethod.GET,
+                                "/api/v1/cases"),
+                        new MockHttpServletRequest());
+
+        assertThat(response.getStatusCode().value()).isEqualTo(404);
+        assertThat(response.getBody()).isNotNull();
+        assertThat(response.getBody().code()).isEqualTo("RESOURCE_NOT_FOUND");
     }
 
     @RestController
@@ -118,8 +175,18 @@ class GlobalExceptionHandlerTest {
             throw new IllegalStateException("database password should never leak");
         }
 
+        @GetMapping("/test/security")
+        void security() {
+            throw new SecurityException("intake confirmation requires a case party");
+        }
+
         @PostMapping("/test/validate")
         void validate(@Valid @RequestBody ValidationRequest request) {}
+
+        @GetMapping(value = "/test/sse-disconnected", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+        void sseDisconnected() throws AsyncRequestNotUsableException {
+            throw new AsyncRequestNotUsableException("ServletOutputStream failed to write: Broken pipe");
+        }
     }
 
     record ValidationRequest(

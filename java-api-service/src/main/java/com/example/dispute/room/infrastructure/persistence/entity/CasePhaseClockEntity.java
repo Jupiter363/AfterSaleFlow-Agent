@@ -122,6 +122,10 @@ public class CasePhaseClockEntity extends AbstractEntity {
         return deadlineAt;
     }
 
+    public String getCompletionReason() {
+        return completionReason;
+    }
+
     public void completeEarly(OffsetDateTime now, String actorId) {
         if (clockStatus != PhaseClockStatus.RUNNING) return;
         clockStatus = PhaseClockStatus.COMPLETED_EARLY;

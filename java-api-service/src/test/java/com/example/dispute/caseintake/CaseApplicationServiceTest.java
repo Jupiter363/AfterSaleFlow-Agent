@@ -19,8 +19,12 @@ import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.RiskLevel;
 import com.example.dispute.common.exception.ForbiddenException;
 import com.example.dispute.infrastructure.persistence.entity.AuditLogEntity;
+import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.repository.AuditLogRepository;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
+import com.example.dispute.room.application.ParticipantService;
+import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
+import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.time.Instant;
@@ -40,6 +44,8 @@ class CaseApplicationServiceTest {
     @Mock private FulfillmentCaseRepository caseRepository;
     @Mock private AuditLogRepository auditLogRepository;
     @Mock private AgentServiceClient agentServiceClient;
+    @Mock private CaseRoomRepository roomRepository;
+    @Mock private ParticipantService participantService;
 
     private CaseApplicationService service;
 
@@ -66,6 +72,8 @@ class CaseApplicationServiceTest {
                         caseRepository,
                         auditLogRepository,
                         agentServiceClient,
+                        roomRepository,
+                        participantService,
                         properties,
                         Clock.fixed(Instant.parse("2026-06-28T00:00:00Z"), ZoneOffset.UTC),
                         new ObjectMapper().findAndRegisterModules());
@@ -103,6 +111,12 @@ class CaseApplicationServiceTest {
         assertThat(result.riskLevel()).isEqualTo(RiskLevel.HIGH);
         assertThat(result.agentDegraded()).isFalse();
         assertThat(result.missingSlots()).isEmpty();
+        verify(roomRepository).save(any(CaseRoomEntity.class));
+        verify(participantService)
+                .addInitiator(
+                        any(),
+                        any(AuthenticatedActor.class),
+                        any());
 
         ArgumentCaptor<AuditLogEntity> audit = ArgumentCaptor.forClass(AuditLogEntity.class);
         verify(auditLogRepository).save(audit.capture());
@@ -166,6 +180,58 @@ class CaseApplicationServiceTest {
                                         "TRACE_test",
                                         "REQ_test"))
                 .isInstanceOf(ForbiddenException.class);
+    }
+
+    @Test
+    void normalizesLegacyFulfillmentDisputesToTheFinalPublicCaseType() {
+        FulfillmentCaseEntity legacy =
+                FulfillmentCaseEntity.create(
+                        "CASE_LEGACY",
+                        "ORDER_LEGACY",
+                        null,
+                        "user-1",
+                        "merchant-1",
+                        "legacy-idempotency",
+                        "FULFILLMENT_DISPUTE",
+                        "历史争议订单",
+                        "迁移前创建的履约争议。",
+                        RiskLevel.MEDIUM,
+                        "system");
+        when(caseRepository.findById("CASE_LEGACY"))
+                .thenReturn(Optional.of(legacy));
+
+        CaseView result =
+                service.get(
+                        "CASE_LEGACY",
+                        new AuthenticatedActor("user-1", ActorRole.USER));
+
+        assertThat(result.caseType()).isEqualTo("DISPUTE");
+    }
+
+    @Test
+    void admittingTransferredIntakeCasePromotesItToDispute() {
+        FulfillmentCaseEntity transferred =
+                FulfillmentCaseEntity.create(
+                        "CASE_TRANSFERRED",
+                        "ORDER_TRANSFERRED",
+                        null,
+                        "user-1",
+                        "merchant-1",
+                        "transferred-idempotency",
+                        "TRANSFERRED",
+                        "接待官待判断",
+                        "创建时尚未确定是否构成履约争端。",
+                        RiskLevel.MEDIUM,
+                        "user-1");
+
+        transferred.admitToEvidence(
+                "NON_RECEIPT",
+                RiskLevel.HIGH,
+                "{\"potentialDispute\":true,\"missingSlots\":[],\"agentDegraded\":false,\"analyzedAt\":\"2026-07-03T00:00:00Z\"}",
+                java.time.OffsetDateTime.parse("2026-07-03T14:00:00Z"),
+                "user-1");
+
+        assertThat(transferred.getCaseType()).isEqualTo("DISPUTE");
     }
 
     private static CreateCaseCommand command(String description, String orderId) {

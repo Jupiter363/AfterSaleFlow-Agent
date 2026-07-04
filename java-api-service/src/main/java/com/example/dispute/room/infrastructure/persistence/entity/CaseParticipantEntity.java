@@ -151,6 +151,13 @@ public class CaseParticipantEntity extends AbstractEntity {
         return participantStatus;
     }
 
+    public void activate(OffsetDateTime now, String actorId) {
+        participantStatus = ParticipantStatus.ACTIVE;
+        joinedAt = Objects.requireNonNull(now, "now must not be null");
+        leftAt = null;
+        updatedBy = required(actorId, "actorId");
+    }
+
     private static String required(String value, String field) {
         if (value == null || value.isBlank()) {
             throw new IllegalArgumentException(field + " must not be blank");

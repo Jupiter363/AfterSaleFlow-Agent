@@ -241,6 +241,52 @@ def test_c3_is_skipped_when_no_supplemental_evidence_is_required() -> None:
     assert result.party_liaison is None
 
 
+def test_final_convergence_skips_supplemental_request_even_when_gap_is_detected() -> None:
+    tracer = RecordingTrace()
+    workflow = HearingWorkflow(
+        StubLlm(), PromptRepository(), tracer, "test-model", "hearing-v1"
+    )
+    request = HearingAnalyzeRequest(
+        case_id="CASE_final_convergence",
+        workflow_id="WORKFLOW_final_convergence",
+        claims=[
+            {
+                "claim_id": "CLAIM_final_convergence",
+                "party_type": "USER",
+                "statement": "The third hearing statement round is complete.",
+            }
+        ],
+        hearing_context={
+            "completed_statement_rounds": 3,
+            "max_statement_rounds": 3,
+            "final_convergence": True,
+            "must_produce_final_plan": True,
+            "allow_supplemental_request": False,
+        },
+    )
+    context = AgentTraceContext(
+        trace_id="TRACE_final_convergence",
+        request_id="REQ_final_convergence",
+        case_id=request.case_id,
+        workflow_id=request.workflow_id,
+        user_id=None,
+        role="SYSTEM",
+        prompt_version="hearing-v1",
+    )
+
+    result = workflow.analyze(request, context)
+
+    assert result.workflow_status == "COMPLETED"
+    assert result.executed_nodes == [
+        "issue_framing_node",
+        "evidence_gap_request_node",
+        "evidence_cross_check_node",
+        "rule_application_node",
+        "adjudication_draft_node",
+    ]
+    assert result.party_liaison is None
+
+
 def test_invalid_node_schema_enters_manual_review_without_a_final_decision() -> None:
     class InvalidLlm(StubLlm):
         def generate(self, *, node_name, system_prompt, user_prompt, output_type):

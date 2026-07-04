@@ -3,6 +3,6 @@ import ElementPlus from "element-plus";
 import "element-plus/dist/index.css";
 import "./styles.css";
 import App from "./App.vue";
-import router from "./router";
+import router from "./router/index.js";
 
 createApp(App).use(ElementPlus).use(router).mount("#app");

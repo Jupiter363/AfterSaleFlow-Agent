@@ -99,4 +99,32 @@ class RemedyPlannerTest {
         assertThat(plan.sourceDraftId()).isEqualTo("DRAFT_1");
         assertThat(plan.sourceConclusionCode()).isEqualTo("ADJUDICATION_DRAFT");
     }
+
+    @Test
+    void mapsChineseConfirmedSettlementTextToConcreteFulfillmentAction() {
+        var plan =
+                planner.plan(
+                        new RemedyPlanningSource(
+                                "CASE_settlement",
+                                RouteType.FULL_HEARING,
+                                RiskLevel.MEDIUM,
+                                "SETTLEMENT_CONFIRMED",
+                                List.of(),
+                                "DRAFT_settlement",
+                                "双方一致方案：商家补发正确型号 A-2026 并承担往返运费，用户退回错发商品。",
+                                1));
+
+        assertThat(plan.actions()).singleElement()
+                .satisfies(
+                        action -> {
+                            assertThat(action.actionType()).isEqualTo("RESHIP");
+                            assertThat(action.parameters())
+                                    .containsEntry(
+                                            "source_recommendation",
+                                            "双方一致方案：商家补发正确型号 A-2026 并承担往返运费，用户退回错发商品。");
+                            assertThat(action.preconditions())
+                                    .contains("INVENTORY_AVAILABLE");
+                        });
+        assertThat(plan.sourceConclusionCode()).isEqualTo("SETTLEMENT_CONFIRMED");
+    }
 }

@@ -14,11 +14,13 @@ import com.example.dispute.domain.model.RiskLevel;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.notification.application.NotificationCommand;
+import com.example.dispute.notification.application.CaseLifecycleNotificationService;
 import com.example.dispute.notification.application.NotificationService;
 import com.example.dispute.notification.domain.NotificationType;
 import com.example.dispute.room.application.IntakeConfirmationCommand;
 import com.example.dispute.room.application.IntakeRoomService;
 import com.example.dispute.room.application.ParticipantService;
+import com.example.dispute.room.application.CaseEventService;
 import com.example.dispute.room.domain.PhaseClockType;
 import com.example.dispute.room.domain.RoomStatus;
 import com.example.dispute.room.domain.RoomType;
@@ -54,7 +56,9 @@ class IntakeRoomServiceTest {
     @Mock private CaseRoomRepository roomRepository;
     @Mock private CasePhaseClockRepository phaseClockRepository;
     @Mock private NotificationService notificationService;
+    @Mock private CaseLifecycleNotificationService lifecycleNotifications;
     @Mock private EvidenceWindowCoordinator evidenceWindowCoordinator;
+    @Mock private CaseEventService caseEventService;
 
     private IntakeRoomService service;
 
@@ -68,10 +72,13 @@ class IntakeRoomServiceTest {
                         phaseClockRepository,
                         participants,
                         notificationService,
+                        lifecycleNotifications,
                         evidenceWindowCoordinator,
+                        caseEventService,
                         new DisputeProperties(
                                 Duration.ofHours(2),
                                 Duration.ofHours(3),
+                                Duration.ofMinutes(5),
                                 3,
                                 Duration.ofSeconds(15),
                                 true),
@@ -142,6 +149,95 @@ class IntakeRoomServiceTest {
                 .isEqualTo(NotificationType.DISPUTE_SUMMONS);
         assertThat(summons.getValue().deepLink())
                 .isEqualTo("/disputes/CASE_ACCEPTED/evidence");
+        verify(lifecycleNotifications)
+                .evidenceRoomOpened(
+                        dispute,
+                        OffsetDateTime.parse("2026-07-03T02:00:00Z"));
+        verify(caseEventService)
+                .recordLifecycleEvent(
+                        org.mockito.ArgumentMatchers.eq("CASE_ACCEPTED"),
+                        any(),
+                        org.mockito.ArgumentMatchers.eq("EVIDENCE_OPENED"),
+                        any(),
+                        org.mockito.ArgumentMatchers.eq(
+                                "intake-confirmed:CASE_ACCEPTED"),
+                        org.mockito.ArgumentMatchers.eq("user-local"));
+    }
+
+    @Test
+    void platformReviewerCanAcceptImportedIntakeAndSummonBothParties() {
+        FulfillmentCaseEntity dispute = pendingCase("CASE_PLATFORM_ACCEPTED");
+        when(caseRepository.findByIdForUpdate("CASE_PLATFORM_ACCEPTED"))
+                .thenReturn(Optional.of(dispute));
+        when(phaseClockRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        var result =
+                service.confirm(
+                        "CASE_PLATFORM_ACCEPTED",
+                        new AuthenticatedActor("reviewer-local", ActorRole.PLATFORM_REVIEWER),
+                        new IntakeConfirmationCommand(
+                                true,
+                                "SIGNED_NOT_RECEIVED",
+                                RiskLevel.HIGH,
+                                "confirmed by intake officer"));
+
+        assertThat(result.caseStatus()).isEqualTo(CaseStatus.EVIDENCE_OPEN);
+        assertThat(result.currentRoom()).isEqualTo(RoomType.EVIDENCE);
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Iterable<CaseParticipantEntity>> participants =
+                ArgumentCaptor.forClass(Iterable.class);
+        verify(participantRepository).saveAll(participants.capture());
+        assertThat(participants.getValue())
+                .extracting(CaseParticipantEntity::getParticipantRole)
+                .containsExactlyInAnyOrder(ActorRole.USER, ActorRole.MERCHANT);
+
+        ArgumentCaptor<NotificationCommand> summons =
+                ArgumentCaptor.forClass(NotificationCommand.class);
+        verify(notificationService, org.mockito.Mockito.times(2)).send(summons.capture());
+        assertThat(summons.getAllValues())
+                .extracting(NotificationCommand::recipientId)
+                .containsExactlyInAnyOrder("user-local", "merchant-local");
+        assertThat(summons.getAllValues())
+                .extracting(NotificationCommand::recipientRole)
+                .containsExactlyInAnyOrder(ActorRole.USER, ActorRole.MERCHANT);
+    }
+
+    @Test
+    void acceptedImportedIntakeClosesTheExistingRoomInsteadOfInsertingADuplicate() {
+        FulfillmentCaseEntity dispute = pendingCase("CASE_IMPORTED");
+        CaseRoomEntity existing =
+                CaseRoomEntity.open(
+                        "ROOM_IMPORTED_INTAKE",
+                        "CASE_IMPORTED",
+                        RoomType.INTAKE,
+                        OffsetDateTime.parse("2026-07-02T20:00:00Z"),
+                        "external-adapter");
+        when(caseRepository.findByIdForUpdate("CASE_IMPORTED"))
+                .thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(
+                        "CASE_IMPORTED", RoomType.INTAKE))
+                .thenReturn(Optional.of(existing));
+        when(phaseClockRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        service.confirm(
+                "CASE_IMPORTED",
+                new AuthenticatedActor("user-local", ActorRole.USER),
+                new IntakeConfirmationCommand(
+                        true,
+                        "SIGNED_NOT_RECEIVED",
+                        RiskLevel.HIGH,
+                        "确认受理"));
+
+        ArgumentCaptor<CaseRoomEntity> rooms =
+                ArgumentCaptor.forClass(CaseRoomEntity.class);
+        verify(roomRepository, org.mockito.Mockito.times(2)).save(rooms.capture());
+        assertThat(rooms.getAllValues().get(0).getId())
+                .isEqualTo("ROOM_IMPORTED_INTAKE");
+        assertThat(rooms.getAllValues().get(0).getRoomStatus())
+                .isEqualTo(RoomStatus.CLOSED);
     }
 
     @Test

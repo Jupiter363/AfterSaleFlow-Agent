@@ -12,9 +12,14 @@ import com.example.dispute.infrastructure.persistence.entity.AuditLogEntity;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.repository.AuditLogRepository;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
+import com.example.dispute.room.application.ParticipantService;
+import com.example.dispute.room.domain.RoomType;
+import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
+import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -32,6 +37,8 @@ public class CaseApplicationService {
     private final FulfillmentCaseRepository caseRepository;
     private final AuditLogRepository auditLogRepository;
     private final AgentServiceClient agentServiceClient;
+    private final CaseRoomRepository roomRepository;
+    private final ParticipantService participantService;
     private final AppProperties properties;
     private final Clock clock;
     private final ObjectMapper objectMapper;
@@ -40,12 +47,16 @@ public class CaseApplicationService {
             FulfillmentCaseRepository caseRepository,
             AuditLogRepository auditLogRepository,
             AgentServiceClient agentServiceClient,
+            CaseRoomRepository roomRepository,
+            ParticipantService participantService,
             AppProperties properties,
             Clock clock,
             ObjectMapper objectMapper) {
         this.caseRepository = caseRepository;
         this.auditLogRepository = auditLogRepository;
         this.agentServiceClient = agentServiceClient;
+        this.roomRepository = roomRepository;
+        this.participantService = participantService;
         this.properties = properties;
         this.clock = clock;
         this.objectMapper = objectMapper;
@@ -104,7 +115,13 @@ public class CaseApplicationService {
                 (root, query, criteria) ->
                         criteria.and(
                                 criteria.isNull(root.get("deletedAt")),
-                                criteria.equal(root.get("caseType"), "DISPUTE"));
+                                criteria.or(
+                                        criteria.equal(
+                                                root.get("caseType"),
+                                                "DISPUTE"),
+                                        criteria.equal(
+                                                root.get("caseType"),
+                                                "FULFILLMENT_DISPUTE")));
         if (status != null) {
             specification =
                     specification.and(
@@ -209,6 +226,18 @@ public class CaseApplicationService {
                 snapshotJson,
                 actor.actorId());
         FulfillmentCaseEntity saved = caseRepository.save(entity);
+        OffsetDateTime now = OffsetDateTime.now(clock);
+        roomRepository.save(
+                CaseRoomEntity.open(
+                        "ROOM_" + compactUuid(),
+                        caseId,
+                        RoomType.INTAKE,
+                        now,
+                        actor.actorId()));
+        if (actor.role() == ActorRole.USER
+                || actor.role() == ActorRole.MERCHANT) {
+            participantService.addInitiator(saved, actor, now);
+        }
 
         if (properties.logging().auditEnabled()) {
             auditLogRepository.save(
@@ -289,7 +318,7 @@ public class CaseApplicationService {
                 entity.getAfterSaleId(),
                 entity.getUserId(),
                 entity.getMerchantId(),
-                entity.getCaseType(),
+                publicCaseType(entity.getCaseType()),
                 entity.getDisputeType(),
                 entity.getCaseStatus(),
                 entity.getRouteType(),
@@ -308,6 +337,12 @@ public class CaseApplicationService {
                 entity.getCreatedAt(),
                 entity.getUpdatedAt(),
                 entity.getClosedAt());
+    }
+
+    private static String publicCaseType(String caseType) {
+        return "FULFILLMENT_DISPUTE".equals(caseType)
+                ? "DISPUTE"
+                : caseType;
     }
 
     private static String pendingAction(CaseStatus status) {

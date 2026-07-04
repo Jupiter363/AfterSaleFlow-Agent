@@ -16,6 +16,7 @@ import com.example.dispute.evidence.infrastructure.persistence.repository.Eviden
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.notification.application.NotificationService;
+import com.example.dispute.notification.application.CaseLifecycleNotificationService;
 import com.example.dispute.room.application.CaseEventService;
 import com.example.dispute.room.domain.PhaseClockStatus;
 import com.example.dispute.room.domain.PhaseClockType;
@@ -50,6 +51,7 @@ class EvidenceCompletionServiceTest {
     @Mock private EvidenceWindowCoordinator evidenceWindowCoordinator;
     @Mock private CaseEventService caseEventService;
     @Mock private NotificationService notificationService;
+    @Mock private CaseLifecycleNotificationService lifecycleNotifications;
     @Mock private HearingWorkflowCoordinator hearingWorkflowCoordinator;
 
     private EvidenceCompletionService service;
@@ -73,10 +75,12 @@ class EvidenceCompletionServiceTest {
                         evidenceWindowCoordinator,
                         caseEventService,
                         notificationService,
+                        lifecycleNotifications,
                         hearingWorkflowCoordinator,
                         new DisputeProperties(
                                 Duration.ofHours(2),
                                 Duration.ofHours(3),
+                                Duration.ofMinutes(5),
                                 3,
                                 Duration.ofSeconds(15),
                                 true),
@@ -119,7 +123,9 @@ class EvidenceCompletionServiceTest {
                         "system");
         when(caseRepository.findByIdForUpdate(dispute.getId()))
                 .thenReturn(Optional.of(dispute));
-        when(dossierFreezer.targetVersion(dispute.getId())).thenReturn(1);
+        org.mockito.Mockito.lenient()
+                .when(dossierFreezer.targetVersion(dispute.getId()))
+                .thenReturn(1);
     }
 
     @Test
@@ -196,5 +202,15 @@ class EvidenceCompletionServiceTest {
 
         assertThat(result.dossierVersion()).isEqualTo(1);
         assertThat(result.allPartiesCompleted()).isFalse();
+    }
+
+    @Test
+    void deadlineWarningNotifiesBothPartiesWhileTheEvidenceWindowIsOpen() {
+        service.warnDeadline(dispute.getId());
+
+        org.mockito.Mockito.verify(lifecycleNotifications)
+                .evidenceDeadlineWarning(
+                        dispute,
+                        OffsetDateTime.parse("2026-07-03T02:00:00Z"));
     }
 }

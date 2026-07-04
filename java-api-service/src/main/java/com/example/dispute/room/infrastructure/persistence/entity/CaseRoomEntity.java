@@ -138,6 +138,15 @@ public class CaseRoomEntity extends AbstractEntity {
         updatedBy = required(actorId, "actorId");
     }
 
+    public void close(OffsetDateTime now, String actorId) {
+        if (roomStatus == RoomStatus.CLOSED) {
+            return;
+        }
+        roomStatus = RoomStatus.CLOSED;
+        closedAt = Objects.requireNonNull(now, "now must not be null");
+        updatedBy = required(actorId, "actorId");
+    }
+
     private static String required(String value, String field) {
         if (value == null || value.isBlank()) {
             throw new IllegalArgumentException(field + " must not be blank");

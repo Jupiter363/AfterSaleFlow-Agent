@@ -3,13 +3,18 @@ package com.example.dispute.config;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.example.dispute.common.trace.TraceIdFilter;
+import jakarta.servlet.DispatcherType;
+import jakarta.servlet.Filter;
+import jakarta.servlet.FilterChain;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.boot.test.web.server.LocalServerPort;
+import org.springframework.context.ApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.HttpEntity;
@@ -17,6 +22,9 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.mock.web.MockHttpServletRequest;
+import org.springframework.mock.web.MockHttpServletResponse;
+import org.springframework.scheduling.annotation.ScheduledAnnotationBeanPostProcessor;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -30,7 +38,8 @@ import org.springframework.web.bind.annotation.RestController;
             "spring.flyway.enabled=false",
             "spring.data.redis.repositories.enabled=false",
             "management.health.redis.enabled=false",
-            "management.health.elasticsearch.enabled=false"
+            "management.health.elasticsearch.enabled=false",
+            "dispute.scheduling.enabled=false"
         })
 @Import(SecurityConfigurationTest.TestEndpointConfiguration.class)
 @SuppressWarnings({"rawtypes", "unchecked"})
@@ -39,6 +48,8 @@ class SecurityConfigurationTest {
     @LocalServerPort private int port;
 
     @Autowired private TestRestTemplate restTemplate;
+    @Autowired private Filter springSecurityFilterChain;
+    @Autowired private ApplicationContext applicationContext;
 
     @Test
     void anonymousRequestReceivesUnifiedUnauthorizedResponse() {
@@ -135,6 +146,33 @@ class SecurityConfigurationTest {
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
         assertThat(response.getBody()).containsEntry("code", "UNAUTHORIZED");
+    }
+
+    @Test
+    void asyncSseDispatchBypassesAuthenticationGateAfterResponseHasStarted()
+            throws Exception {
+        MockHttpServletRequest request =
+                new MockHttpServletRequest(
+                        "GET", "/api/disputes/CASE_security_test/events");
+        request.setDispatcherType(DispatcherType.ASYNC);
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        AtomicBoolean reachedApplication = new AtomicBoolean(false);
+        FilterChain terminalChain =
+                (servletRequest, servletResponse) ->
+                        reachedApplication.set(true);
+
+        springSecurityFilterChain.doFilter(request, response, terminalChain);
+
+        assertThat(reachedApplication).isTrue();
+        assertThat(response.getStatus()).isEqualTo(HttpStatus.OK.value());
+    }
+
+    @Test
+    void schedulingCanBeDisabledForFocusedSecurityContexts() {
+        assertThat(
+                        applicationContext.getBeansOfType(
+                                ScheduledAnnotationBeanPostProcessor.class))
+                .isEmpty();
     }
 
     private String url(String path) {

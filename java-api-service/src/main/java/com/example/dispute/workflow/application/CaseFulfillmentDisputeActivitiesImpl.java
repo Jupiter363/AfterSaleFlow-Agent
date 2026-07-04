@@ -20,6 +20,7 @@ import com.example.dispute.infrastructure.persistence.repository.HearingRecordRe
 import com.example.dispute.infrastructure.persistence.repository.HearingStateRepository;
 import com.example.dispute.infrastructure.persistence.repository.PartySubmissionRepository;
 import com.example.dispute.infrastructure.persistence.repository.PolicyRuleRepository;
+import com.example.dispute.notification.application.CaseLifecycleNotificationService;
 import com.example.dispute.workflow.domain.CaseWorkflowInput;
 import com.example.dispute.workflow.domain.HearingAnalysisActivityCommand;
 import com.example.dispute.workflow.domain.HearingAnalysisActivityResult;
@@ -59,6 +60,7 @@ public class CaseFulfillmentDisputeActivitiesImpl
     private final HearingAgentClient agentClient;
     private final RemedyApplicationService remedyService;
     private final ReviewApplicationService reviewService;
+    private final CaseLifecycleNotificationService lifecycleNotifications;
     private final ToolExecutorService toolExecutorService;
     private final CaseClosureService closureService;
     private final AuditRecorder auditRecorder;
@@ -77,6 +79,7 @@ public class CaseFulfillmentDisputeActivitiesImpl
             HearingAgentClient agentClient,
             RemedyApplicationService remedyService,
             ReviewApplicationService reviewService,
+            CaseLifecycleNotificationService lifecycleNotifications,
             ToolExecutorService toolExecutorService,
             CaseClosureService closureService,
             AuditRecorder auditRecorder,
@@ -93,6 +96,7 @@ public class CaseFulfillmentDisputeActivitiesImpl
         this.agentClient = agentClient;
         this.remedyService = remedyService;
         this.reviewService = reviewService;
+        this.lifecycleNotifications = lifecycleNotifications;
         this.toolExecutorService = toolExecutorService;
         this.closureService = closureService;
         this.auditRecorder = auditRecorder;
@@ -156,11 +160,22 @@ public class CaseFulfillmentDisputeActivitiesImpl
         long started = System.nanoTime();
         OffsetDateTime startedAt = OffsetDateTime.now(ZoneOffset.UTC);
         String traceId = "TRACE_" + command.workflowId();
-        HearingAgentResult result =
-                agentClient.analyze(
-                        request,
-                        traceId,
-                        "REQ_" + command.workflowId() + "_" + command.roundNo());
+        HearingAgentResult result;
+        try {
+            result =
+                    agentClient.analyze(
+                            request,
+                            traceId,
+                            "REQ_" + command.workflowId() + "_" + command.roundNo());
+        } catch (RuntimeException failure) {
+            result = fallbackManualReviewResult(command, failure);
+        }
+        boolean requiresAdditionalEvidence =
+                result.requiresAdditionalEvidence()
+                        && command.allowSupplementalRequest();
+        final HearingAgentResult analysisResult = result;
+        final boolean effectiveRequiresAdditionalEvidence =
+                requiresAdditionalEvidence;
         long latencyMs = (System.nanoTime() - started) / 1_000_000;
         String agentRunId = "RUN_" + compactUuid();
         String draftId =
@@ -175,15 +190,15 @@ public class CaseFulfillmentDisputeActivitiesImpl
                                                     "presiding-judge",
                                                     "PRESIDING_JUDGE",
                                                     "presiding-judge-v1",
-                                                    result.promptVersion(),
+                                                    analysisResult.promptVersion(),
                                                     "dispute-default-v1",
                                                     "ruleset-current",
-                                                    result.model(),
+                                                    analysisResult.model(),
                                                     inputRefs(request),
                                                     null,
                                                     "{\"schema_valid\":true}",
                                                     jsonOrDefault(
-                                                            result.raw()
+                                                            analysisResult.raw()
                                                                     .path(
                                                                             "manual_review_reasons"),
                                                             "[]"),
@@ -197,7 +212,8 @@ public class CaseFulfillmentDisputeActivitiesImpl
                                     persistAnalysis(
                                             command,
                                             request,
-                                            result,
+                                            analysisResult,
+                                            effectiveRequiresAdditionalEvidence,
                                             latencyMs,
                                             agentRunId);
                             run.attachOutput(persistedDraftId);
@@ -218,13 +234,73 @@ public class CaseFulfillmentDisputeActivitiesImpl
                                             persistedDraftId));
                             return persistedDraftId;
                         });
+        if (requiresAdditionalEvidence) {
+            FulfillmentCaseEntity dispute =
+                    caseRepository
+                            .findById(command.caseId())
+                            .orElseThrow(
+                                    () ->
+                                            new IllegalStateException(
+                                                    "case not found: "
+                                                            + command.caseId()));
+            lifecycleNotifications.supplementRequested(
+                    dispute, "hearing-round-" + command.roundNo());
+        }
         return new HearingAnalysisActivityResult(
-                result.requiresAdditionalEvidence(),
+                requiresAdditionalEvidence,
                 result.manualRequired(),
                 draftId,
-                result.requiresAdditionalEvidence()
+                requiresAdditionalEvidence
                         ? "WAITING_EVIDENCE"
                         : "RUNNING");
+    }
+
+    private HearingAgentResult fallbackManualReviewResult(
+            HearingAnalysisActivityCommand command, RuntimeException failure) {
+        ObjectNode raw = objectMapper.createObjectNode();
+        raw.put("case_id", command.caseId());
+        raw.put("workflow_id", command.workflowId());
+        raw.put("workflow_status", "MANUAL_REVIEW_REQUIRED");
+        raw.putArray("executed_nodes").add("adjudication_draft_node");
+        raw.putObject("issue_framing")
+                .put(
+                        "neutral_summary",
+                        "庭审模型服务暂不可用，系统进入人工审核兜底流程。")
+                .putArray("issues")
+                .add("模型服务不可用时，需由平台审核员复核当前证据、陈述与一致方案。");
+        raw.putObject("evidence_gap")
+                .put("requires_supplemental_evidence", false)
+                .putArray("gaps");
+        raw.putObject("evidence_cross_check")
+                .putArray("findings")
+                .add("模型服务暂不可用，未执行自动证据交叉核验。");
+        raw.putObject("rule_application")
+                .putArray("applications")
+                .add("模型服务暂不可用，平台规则适用需由审核员人工确认。");
+        ObjectNode draft = raw.putObject("adjudication_draft").putObject("draft");
+        draft.put("draft_status", "PENDING_HUMAN_REVIEW");
+        draft.put("recommended_outcome", "MANUAL_REVIEW_REQUIRED");
+        draft.put(
+                "reasoning_summary",
+                "模型服务暂不可用，系统已将当前证据、庭审陈述和一致方案收敛为非最终草案，等待平台审核员人工确认。");
+        draft.putArray("issue_findings")
+                .add("模型服务暂不可用，需人工核对双方履约主张和证据完整性。");
+        draft.put("confidence", 0.10);
+        draft.putArray("review_focus")
+                .add("模型服务暂不可用，需人工复核")
+                .add("核对双方一致方案、证据完整性和执行动作");
+        raw.putArray("manual_review_reasons")
+                .add("HEARING_AGENT_UNAVAILABLE")
+                .add(safeMessage(failure));
+        raw.put("prompt_version", "hearing-fallback-v1");
+        raw.put("model", "local-manual-review-fallback");
+        return new HearingAgentResult(
+                raw,
+                false,
+                true,
+                List.of("adjudication_draft_node"),
+                "hearing-fallback-v1",
+                "local-manual-review-fallback");
     }
 
     private JsonNode buildAgentRequest(HearingAnalysisActivityCommand command) {
@@ -240,6 +316,15 @@ public class CaseFulfillmentDisputeActivitiesImpl
         request.put("workflow_id", command.workflowId());
         request.put("user_id", disputeCase.getUserId());
         request.put("evidence_timeout", command.evidenceTimedOut());
+        ObjectNode hearingContext = request.putObject("hearing_context");
+        hearingContext.put("completed_statement_rounds", command.roundNo());
+        hearingContext.put("max_statement_rounds", command.maxStatementRounds());
+        hearingContext.put("final_convergence", command.finalConvergence());
+        hearingContext.put(
+                "must_produce_final_plan", command.mustProduceFinalPlan());
+        hearingContext.put(
+                "allow_supplemental_request",
+                command.allowSupplementalRequest());
         ArrayNode claims = request.putArray("claims");
         claims.addObject()
                 .put("claim_id", "CLAIM_" + command.caseId())
@@ -286,6 +371,7 @@ public class CaseFulfillmentDisputeActivitiesImpl
             HearingAnalysisActivityCommand command,
             JsonNode request,
             HearingAgentResult result,
+            boolean requiresAdditionalEvidence,
             long latencyMs,
             String agentRunId) {
         HearingStateEntity state =
@@ -300,7 +386,7 @@ public class CaseFulfillmentDisputeActivitiesImpl
                 command.roundNo(),
                 lastNode(result.executedNodes()),
                 confidence,
-                result.requiresAdditionalEvidence(),
+                requiresAdditionalEvidence,
                 result.manualRequired(),
                 raw.toString(),
                 jsonOrDefault(raw.path("evidence_gap").path("gaps"), "[]"),
@@ -483,6 +569,14 @@ public class CaseFulfillmentDisputeActivitiesImpl
 
     private static String truncate(String value, int max) {
         return value.length() <= max ? value : value.substring(0, max);
+    }
+
+    private static String safeMessage(RuntimeException failure) {
+        String message =
+                failure.getMessage() == null || failure.getMessage().isBlank()
+                        ? failure.getClass().getSimpleName()
+                        : failure.getMessage();
+        return truncate(message, 160);
     }
 
     private static String jsonOrDefault(JsonNode value, String fallback) {

@@ -12,6 +12,8 @@ import java.util.Set;
 
 public class EvidenceWindowWorkflowImpl implements EvidenceWindowWorkflow {
 
+    private static final Duration WARNING_LEAD = Duration.ofMinutes(30);
+
     private final EvidenceWindowActivities activities =
             Workflow.newActivityStub(
                     EvidenceWindowActivities.class,
@@ -27,22 +29,41 @@ public class EvidenceWindowWorkflowImpl implements EvidenceWindowWorkflow {
 
     @Override
     public EvidenceWindowResult run(EvidenceWindowCommand command) {
+        Duration beforeWarning = command.window().minus(WARNING_LEAD);
+        if (beforeWarning.isNegative() || beforeWarning.isZero()) {
+            beforeWarning = Duration.ZERO;
+        }
         boolean completedEarly =
                 Workflow.await(
-                        command.window(),
+                        beforeWarning,
                         () ->
                                 completedRoles.contains("USER")
                                         && completedRoles.contains("MERCHANT"));
         if (completedEarly) {
-            return new EvidenceWindowResult(
-                    command.caseId(),
-                    "BOTH_PARTIES_COMPLETED",
-                    new ArrayList<>(completedRoles));
+            return completed(command.caseId());
+        }
+        activities.warn(command.caseId());
+        Duration remaining = command.window().minus(beforeWarning);
+        completedEarly =
+                Workflow.await(
+                        remaining,
+                        () ->
+                                completedRoles.contains("USER")
+                                        && completedRoles.contains("MERCHANT"));
+        if (completedEarly) {
+            return completed(command.caseId());
         }
         activities.expire(command.caseId());
         return new EvidenceWindowResult(
                 command.caseId(),
                 "DEADLINE_EXPIRED",
+                new ArrayList<>(completedRoles));
+    }
+
+    private EvidenceWindowResult completed(String caseId) {
+        return new EvidenceWindowResult(
+                caseId,
+                "BOTH_PARTIES_COMPLETED",
                 new ArrayList<>(completedRoles));
     }
 

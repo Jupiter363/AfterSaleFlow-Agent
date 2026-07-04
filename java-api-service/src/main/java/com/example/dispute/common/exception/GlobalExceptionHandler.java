@@ -18,6 +18,8 @@ import org.springframework.web.bind.MissingRequestHeaderException;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.context.request.async.AsyncRequestNotUsableException;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 @RestControllerAdvice
 public class GlobalExceptionHandler {
@@ -76,6 +78,38 @@ public class GlobalExceptionHandler {
                         "request validation failed",
                         Map.of("reason", safeReason(exception)),
                         request);
+        return ResponseEntity.status(errorCode.httpStatus()).body(body);
+    }
+
+    @ExceptionHandler(NoResourceFoundException.class)
+    public ResponseEntity<ApiResponse<Void>> handleNoResourceFound(
+            NoResourceFoundException exception,
+            HttpServletRequest request) {
+        ErrorCode errorCode = ErrorCode.RESOURCE_NOT_FOUND;
+        ApiResponse<Void> body =
+                failure(
+                        errorCode,
+                        "resource not found",
+                        Map.of("path", exception.getResourcePath()),
+                request);
+        return ResponseEntity.status(errorCode.httpStatus()).body(body);
+    }
+
+    @ExceptionHandler(AsyncRequestNotUsableException.class)
+    public ResponseEntity<Void> handleDisconnectedAsyncRequest(
+            AsyncRequestNotUsableException exception) {
+        LOGGER.debug(
+                "Async request stream ended before response could be written: exception_type={}",
+                exception.getClass().getName());
+        return ResponseEntity.noContent().build();
+    }
+
+    @ExceptionHandler(SecurityException.class)
+    public ResponseEntity<ApiResponse<Void>> handleSecurityException(
+            SecurityException exception, HttpServletRequest request) {
+        ErrorCode errorCode = ErrorCode.FORBIDDEN;
+        ApiResponse<Void> body =
+                failure(errorCode, "access denied", Map.of(), request);
         return ResponseEntity.status(errorCode.httpStatus()).body(body);
     }
 
