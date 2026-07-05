@@ -38,7 +38,8 @@ class DemoDisputeSeederTest {
                                 "DEMO-1",
                                 CaseStatus.INTAKE_PENDING,
                                 "INTAKE",
-                                null));
+                                null,
+                                "USER"));
 
         new ApplicationContextRunner()
                 .withUserConfiguration(DemoSeederScan.class)

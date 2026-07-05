@@ -71,4 +71,53 @@ describe("dispute API", () => {
     );
     expect(result.case_status).toBe("CANCELLED");
   });
+
+  it("simulates external dispute imports through the internal adapter endpoint", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        success: true,
+        data: {
+          items: [
+            {
+              case_id: "CASE_simulated",
+              source_type: "EXTERNAL_IMPORT",
+              initiator_role: "USER",
+            },
+          ],
+        },
+      }),
+    });
+
+    const result = await disputeApi.simulateExternalImport(actor, {
+      count: 2,
+      scenario: "手表售后争议",
+      risk_level_hint: "MEDIUM",
+      initiator_role_hint: "USER",
+      current_actor_id: "user-local",
+      counterparty_actor_id: "merchant-local",
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/internal/disputes/import/simulate",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          count: 2,
+          scenario: "手表售后争议",
+          risk_level_hint: "MEDIUM",
+          initiator_role_hint: "USER",
+          current_actor_id: "user-local",
+          counterparty_actor_id: "merchant-local",
+        }),
+        headers: expect.objectContaining({
+          "Content-Type": "application/json",
+          "Idempotency-Key": expect.stringMatching(/^external-import-/),
+          "X-Role": "USER",
+          "X-User-Id": "user-local",
+        }),
+      }),
+    );
+    expect(result.items[0].case_id).toBe("CASE_simulated");
+  });
 });

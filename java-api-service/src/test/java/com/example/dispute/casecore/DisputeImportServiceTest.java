@@ -8,7 +8,10 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.example.dispute.casecore.application.DisputeImportService;
+import com.example.dispute.casecore.application.ExternalDisputeSimulationClient;
 import com.example.dispute.casecore.application.ImportDisputeCommand;
+import com.example.dispute.casecore.application.SimulateExternalImportCommand;
+import com.example.dispute.casecore.application.SimulatedExternalDispute;
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.config.DisputeProperties;
@@ -28,6 +31,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.List;
 import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -42,6 +46,7 @@ class DisputeImportServiceTest {
     @Mock private CaseRoomRepository roomRepository;
     @Mock private CasePhaseClockRepository clockRepository;
     @Mock private ParticipantService participantService;
+    @Mock private ExternalDisputeSimulationClient simulationClient;
 
     private DisputeImportService service;
 
@@ -53,6 +58,7 @@ class DisputeImportServiceTest {
                         roomRepository,
                         clockRepository,
                         participantService,
+                        simulationClient,
                         new DisputeProperties(
                                 Duration.ofHours(2),
                                 Duration.ofHours(3),
@@ -84,10 +90,12 @@ class DisputeImportServiceTest {
         assertThat(imported.caseStatus()).isEqualTo(CaseStatus.INTAKE_PENDING);
         assertThat(imported.currentRoom()).isEqualTo("INTAKE");
         assertThat(imported.currentDeadlineAt()).isNull();
+        assertThat(imported.initiatorRole()).isEqualTo("USER");
         var savedCase =
                 org.mockito.ArgumentCaptor.forClass(FulfillmentCaseEntity.class);
         verify(repository).save(savedCase.capture());
         assertThat(savedCase.getValue().getCaseType()).isEqualTo("DISPUTE");
+        assertThat(savedCase.getValue().getInitiatorRole()).isEqualTo(ActorRole.USER);
         verify(participantService)
                 .ensureImportedParties(
                         any(FulfillmentCaseEntity.class),
@@ -171,6 +179,56 @@ class DisputeImportServiceTest {
                                         new AuthenticatedActor("user-local", ActorRole.USER),
                                         "import-ext-1002"))
                 .isInstanceOf(SecurityException.class);
+    }
+
+    @Test
+    void simulatesExternalDisputesWithLlmThenImportsThroughTheOfficialPath() {
+        when(simulationClient.simulate(any(), any(), any()))
+                .thenReturn(
+                        List.of(
+                                new SimulatedExternalDispute(
+                                        "LLM_SIMULATED_OMS",
+                                        "SIM-20260706-001",
+                                        "ORDER-SIM-001",
+                                        "AFTER-SIM-001",
+                                        "LOG-SIM-001",
+                                        "user-local",
+                                        "merchant-local",
+                                        "MERCHANT",
+                                        "QUALITY_DISPUTE",
+                                        "商家发起手表故障争议",
+                                        "商家认为用户提交的故障视频与售后检测结果不一致，需要平台受理。",
+                                        RiskLevel.MEDIUM)));
+        when(repository.findBySourceSystemAndExternalCaseRef(
+                        "LLM_SIMULATED_OMS", "SIM-20260706-001"))
+                .thenReturn(Optional.empty());
+        when(repository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        var result =
+                service.simulateExternalImport(
+                        new SimulateExternalImportCommand(
+                                1,
+                                "手表售后争议",
+                                RiskLevel.MEDIUM,
+                                ActorRole.MERCHANT,
+                                "merchant-local",
+                                "user-local"),
+                        new AuthenticatedActor("external-adapter", ActorRole.SYSTEM),
+                        "simulate-import-001",
+                        "TRACE_SIM",
+                        "REQ_SIM");
+
+        assertThat(result.items()).hasSize(1);
+        assertThat(result.items().get(0).sourceType()).isEqualTo("EXTERNAL_IMPORT");
+        assertThat(result.items().get(0).externalCaseReference())
+                .isEqualTo("SIM-20260706-001");
+        assertThat(result.items().get(0).initiatorRole()).isEqualTo("MERCHANT");
+
+        var savedCase =
+                org.mockito.ArgumentCaptor.forClass(FulfillmentCaseEntity.class);
+        verify(repository).save(savedCase.capture());
+        assertThat(savedCase.getValue().getInitiatorRole()).isEqualTo(ActorRole.MERCHANT);
     }
 
     private static ImportDisputeCommand command(String externalReference) {

@@ -285,6 +285,78 @@ class RoomMessageAndEventServiceTest {
     }
 
     @Test
+    void intakeRoomRejectsTheNonInitiatingPartyBeforeEvidenceRoomOpens() {
+        FulfillmentCaseEntity dispute = intakeCase();
+        when(caseRepository.findByIdForUpdate(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+
+        assertThatThrownBy(
+                        () ->
+                                messageService.post(
+                                        dispute.getId(),
+                                        RoomType.INTAKE,
+                                        new RoomMessageCommand(
+                                                MessageType.PARTY_TEXT,
+                                                "I am the other side and should respond in the evidence room.",
+                                                List.of()),
+                                        new AuthenticatedActor(
+                                                "merchant-local", ActorRole.MERCHANT),
+                                        "intake-merchant-rejected",
+                                        "TRACE_REJECT_NON_INITIATOR"))
+                .isInstanceOf(
+                        com.example.dispute.common.exception.ForbiddenException.class)
+                .hasMessageContaining("only the intake initiator");
+
+        verify(roomRepository, org.mockito.Mockito.never())
+                .findByCaseIdAndRoomType(dispute.getId(), RoomType.INTAKE);
+        verify(messageRepository, org.mockito.Mockito.never()).save(any());
+    }
+
+    @Test
+    void evidenceRoomStillAcceptsBothDisputePartiesAfterAdmission() {
+        FulfillmentCaseEntity dispute = evidenceCase();
+        CaseRoomEntity room =
+                CaseRoomEntity.open(
+                        "ROOM_EVIDENCE",
+                        dispute.getId(),
+                        RoomType.EVIDENCE,
+                        OffsetDateTime.parse("2026-07-03T00:00:00Z"),
+                        "system");
+        when(caseRepository.findByIdForUpdate(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(
+                        dispute.getId(), RoomType.EVIDENCE))
+                .thenReturn(Optional.of(room));
+        when(participantRepository.existsByCaseIdAndActorIdAndParticipantRole(
+                        dispute.getId(), "merchant-local", ActorRole.MERCHANT))
+                .thenReturn(true);
+        when(messageRepository.findByCaseIdAndIdempotencyKey(
+                        dispute.getId(), "merchant-evidence-msg"))
+                .thenReturn(Optional.empty());
+        when(messageRepository.findMaxSequenceByRoomId(room.getId())).thenReturn(0L);
+        when(eventRepository.findMaxSequenceByCaseId(dispute.getId())).thenReturn(0L);
+        when(messageRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(eventRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        var message =
+                messageService.post(
+                        dispute.getId(),
+                        RoomType.EVIDENCE,
+                        new RoomMessageCommand(
+                                MessageType.PARTY_TEXT,
+                                "Merchant uploads the inspection explanation in evidence room.",
+                                List.of()),
+                        new AuthenticatedActor("merchant-local", ActorRole.MERCHANT),
+                        "merchant-evidence-msg",
+                        "TRACE_EVIDENCE_MERCHANT");
+
+        assertThat(message.senderRole()).isEqualTo("MERCHANT");
+        assertThat(message.messageText()).contains("inspection explanation");
+    }
+
+    @Test
     void replayStartsAfterTheCursorAndFiltersMerchantPrivateEventsFromUser() {
         FulfillmentCaseEntity dispute = evidenceCase();
         when(caseRepository.findById(dispute.getId()))
@@ -418,6 +490,31 @@ class RoomMessageAndEventServiceTest {
         assertThat(adminHistory)
                 .extracting(item -> item.messageText())
                 .containsExactly("shared", "reviewer only");
+    }
+
+    @Test
+    void intakeHistoryIsHiddenFromTheNonInitiatingParty() {
+        FulfillmentCaseEntity dispute = intakeCase();
+        CaseRoomEntity room =
+                CaseRoomEntity.open(
+                        "ROOM_INTAKE",
+                        dispute.getId(),
+                        RoomType.INTAKE,
+                        OffsetDateTime.parse("2026-07-03T00:00:00Z"),
+                        "system");
+        when(caseRepository.findById(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(
+                        dispute.getId(), RoomType.INTAKE))
+                .thenReturn(Optional.of(room));
+
+        var history =
+                messageService.list(
+                        dispute.getId(),
+                        RoomType.INTAKE,
+                        new AuthenticatedActor("merchant-local", ActorRole.MERCHANT));
+
+        assertThat(history).isEmpty();
     }
 
     private static CaseTimelineEventEntity event(

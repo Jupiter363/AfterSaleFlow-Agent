@@ -34,6 +34,7 @@ public record CreateDisputeRequest(
                 merchantId,
                 description,
                 attachmentIds,
-                channel);
+                channel,
+                initiatorRole);
     }
 }

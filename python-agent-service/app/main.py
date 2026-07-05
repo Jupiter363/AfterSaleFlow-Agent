@@ -20,6 +20,7 @@ from app.agents.model_roles import ModelCriticEvaluator, ModelReviewAnswerer
 from app.agents.presiding_judge import PresidingJudge
 from app.agents.review_copilot import ReviewCopilot
 from app.business.api.final_agents import FinalAgentServices
+from app.business.simulated_imports import SimulatedExternalImportWorkflow
 from app.config import Settings, get_settings
 from app.harness.guardrails import GuardrailViolation
 from app.harness.model_runner import HarnessModelRunner
@@ -49,6 +50,8 @@ from app.schemas import (
     IntakeTurnResult,
     ReviewCopilotAnswer,
     ReviewCopilotRequest,
+    SimulatedExternalImportRequest,
+    SimulatedExternalImportResult,
 )
 from app.tracing import (
     AgentTraceContext,
@@ -71,6 +74,7 @@ def create_app(
     intake_turn_workflow: IntakeTurnWorkflow | None = None,
     evaluation_workflow: EvaluationWorkflow | None = None,
     final_agent_services: FinalAgentServices | None = None,
+    simulated_import_workflow: SimulatedExternalImportWorkflow | None = None,
 ) -> FastAPI:
     if (
         evaluation_workflow is None
@@ -88,6 +92,9 @@ def create_app(
     )
     resolved_evaluation_workflow = evaluation_workflow or _build_evaluation_workflow(
         resolved
+    )
+    resolved_simulated_import_workflow = (
+        simulated_import_workflow or _build_simulated_import_workflow(resolved)
     )
     final_services = final_agent_services or _build_final_agent_services(
         resolved,
@@ -224,6 +231,20 @@ def create_app(
     ) -> IntakeTurnResult:
         _authorize(x_service_secret, resolved.python_agent_service_secret)
         return await run_in_threadpool(resolved_intake_turn_workflow.run, payload)
+
+    @app.post(
+        "/internal/agents/external-import/simulate",
+        response_model=SimulatedExternalImportResult,
+    )
+    async def simulate_external_import(
+        payload: SimulatedExternalImportRequest,
+        x_service_secret: str = Header(alias=SERVICE_SECRET_HEADER),
+    ) -> SimulatedExternalImportResult:
+        _authorize(x_service_secret, resolved.python_agent_service_secret)
+        return await run_in_threadpool(
+            resolved_simulated_import_workflow.generate,
+            payload,
+        )
 
     @app.post(
         "/internal/agents/evidence/build",
@@ -420,6 +441,23 @@ def _build_evaluation_workflow(settings: Settings) -> EvaluationWorkflow:
         settings.litellm_model,
         settings.litellm_master_key,
         settings.llm_timeout_seconds,
+    )
+
+
+def _build_simulated_import_workflow(
+    settings: Settings,
+) -> SimulatedExternalImportWorkflow:
+    llm = LiteLlmProxyClient(
+        settings.litellm_base_url,
+        settings.litellm_model,
+        settings.litellm_master_key,
+        settings.llm_timeout_seconds,
+    )
+    return SimulatedExternalImportWorkflow(
+        model_runner=HarnessModelRunner(
+            llm=llm,
+            prompts=PromptRepository(),
+        )
     )
     return EvaluationWorkflow(
         llm,

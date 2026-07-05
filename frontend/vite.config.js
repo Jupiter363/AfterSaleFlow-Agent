@@ -10,6 +10,10 @@ export default defineConfig({
         target: process.env.VITE_API_PROXY_TARGET || "http://127.0.0.1:8081",
         changeOrigin: true,
       },
+      "/internal": {
+        target: process.env.VITE_API_PROXY_TARGET || "http://127.0.0.1:8081",
+        changeOrigin: true,
+      },
       "/agent-api": {
         target:
           process.env.VITE_AGENT_API_PROXY_TARGET || "http://127.0.0.1:8000",

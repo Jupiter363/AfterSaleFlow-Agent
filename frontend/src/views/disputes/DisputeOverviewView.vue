@@ -14,6 +14,7 @@ const props = defineProps({
   initialCases: { type: Array, default: () => [] },
   serverNow: { type: String, default: () => new Date().toISOString() },
   createAction: { type: Function, default: null },
+  simulateExternalImportAction: { type: Function, default: null },
 });
 
 const router = useRouter();
@@ -21,7 +22,9 @@ const localCases = ref([...props.initialCases]);
 const selectedId = ref(props.initialCases[0]?.id || null);
 const intakeOpen = ref(false);
 const creating = ref(false);
+const importingExternal = ref(false);
 const createError = ref("");
+const importError = ref("");
 const intakeForm = ref({
   orderReference: "",
   afterSalesReference: "",
@@ -126,6 +129,66 @@ function openIntake() {
   intakeOpen.value = true;
 }
 
+function simulatedCounterpartyId(role) {
+  return role === "MERCHANT" ? "user-local" : "merchant-local";
+}
+
+function normalizeImportedCase(item) {
+  const id = item.id || item.case_id;
+  return {
+    id,
+    order_id: item.order_id || item.order_reference || "ORDER-SIM",
+    source_type: item.source_type || "EXTERNAL_IMPORT",
+    dispute_type: item.dispute_type || "FULFILLMENT_CONFLICT",
+    case_status: item.case_status || "INTAKE_PENDING",
+    current_room: item.current_room || "INTAKE",
+    deadline_at: item.deadline_at || item.current_deadline_at || null,
+    risk_level: item.risk_level || "MEDIUM",
+    pending_action: item.pending_action || "COMPLETE_INTAKE",
+    title: item.title || "LLM 模拟外部导入争议",
+    initiator_role: item.initiator_role,
+  };
+}
+
+async function simulateExternalImport() {
+  const initiatorRole = actor.role === "MERCHANT" ? "MERCHANT" : "USER";
+  const command = {
+    count: 2,
+    scenario: "手表售后争议",
+    risk_level_hint: "MEDIUM",
+    initiator_role_hint: initiatorRole,
+    current_actor_id: ["USER", "MERCHANT"].includes(actor.role)
+      ? actor.id
+      : "user-local",
+    counterparty_actor_id: simulatedCounterpartyId(initiatorRole),
+  };
+  importingExternal.value = true;
+  importError.value = "";
+  try {
+    const result = props.simulateExternalImportAction
+      ? await props.simulateExternalImportAction(command)
+      : await disputeApi.simulateExternalImport(actor, command);
+    const imported = (result.items || []).map(normalizeImportedCase);
+    if (imported.length) {
+      const existing = localCases.value.length ? localCases.value : disputeStore.list.data;
+      const importedIds = new Set(imported.map((item) => item.id));
+      localCases.value = [
+        ...imported,
+        ...existing.filter((item) => !importedIds.has(item.id)),
+      ];
+      selectedId.value = imported[0].id;
+    } else {
+      await loadDisputes(actor);
+      localCases.value = [...disputeStore.list.data];
+      selectedId.value = localCases.value[0]?.id || null;
+    }
+  } catch (failure) {
+    importError.value = failure.message;
+  } finally {
+    importingExternal.value = false;
+  }
+}
+
 async function createDispute() {
   creating.value = true;
   createError.value = "";
@@ -172,16 +235,29 @@ onMounted(async () => {
           这里只有已经进入争端流程的订单。选中案件，右侧路线会告诉你下一步。
         </p>
       </div>
-      <button
-        class="overview-page__start"
-        type="button"
-        data-start-dispute
-        @click="openIntake"
-      >
-        <span aria-hidden="true">＋</span>
-        发起争议审理
-      </button>
+      <div class="overview-page__actions">
+        <button
+          class="overview-page__import"
+          type="button"
+          data-simulate-external-import
+          :disabled="importingExternal"
+          @click="simulateExternalImport"
+        >
+          <span aria-hidden="true">⇢</span>
+          {{ importingExternal ? "外部系统导入中" : "外部导入模拟" }}
+        </button>
+        <button
+          class="overview-page__start"
+          type="button"
+          data-start-dispute
+          @click="openIntake"
+        >
+          <span aria-hidden="true">＋</span>
+          发起争议审理
+        </button>
+      </div>
     </header>
+    <p v-if="importError" class="overview-page__error" role="alert">{{ importError }}</p>
 
     <div v-if="cases.length" class="overview-layout">
       <aside class="dispute-rail" aria-label="争议订单">
@@ -368,6 +444,12 @@ onMounted(async () => {
   gap: 24px;
   align-items: flex-end;
 }
+.overview-page__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+}
 .overview-page__intro > div > span,
 .dispute-rail__heading span,
 .hearing-adventure__header > div > span {
@@ -405,6 +487,7 @@ onMounted(async () => {
   font-style: normal;
 }
 .overview-page__start,
+.overview-page__import,
 .hearing-adventure__next > button {
   display: inline-flex;
   align-items: center;
@@ -426,6 +509,30 @@ onMounted(async () => {
   color: #ff746c;
   background: #fff;
   border-radius: 50%;
+}
+.overview-page__import {
+  color: #38617f;
+  background: linear-gradient(135deg, #dcf3ff, #fff0ce);
+  border: 1px solid #cce5f8;
+  box-shadow: 0 14px 28px #8db6d22b;
+}
+.overview-page__import span {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  color: #fff;
+  background: #73b9ef;
+  border-radius: 50%;
+}
+.overview-page__import:disabled {
+  cursor: progress;
+  opacity: .72;
+}
+.overview-page__error {
+  margin: -8px 0 0;
+  color: #a84451;
+  font-size: 13px;
 }
 .overview-layout {
   display: grid;
@@ -748,7 +855,9 @@ onMounted(async () => {
   .hearing-adventure__header,
   .hearing-adventure__next { grid-template-columns: 1fr; flex-direction: column; align-items: stretch; }
   .overview-page__start,
+  .overview-page__import,
   .hearing-adventure__next > button { justify-content: center; }
+  .overview-page__actions { justify-content: stretch; }
   .hearing-adventure { padding: 18px; }
   .hearing-adventure__case-board { grid-template-columns: 1fr; }
   .intake-launcher__fields { grid-template-columns: 1fr; }

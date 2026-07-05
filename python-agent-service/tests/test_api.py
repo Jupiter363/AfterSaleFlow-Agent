@@ -9,6 +9,8 @@ from app.schemas import (
     EvaluationFinding,
     EvaluationMetricScores,
     IntakeAnalysisOutput,
+    SimulatedExternalImportResult,
+    SimulatedExternalDispute,
 )
 from app.main import create_app
 
@@ -83,6 +85,28 @@ class FakeEvaluationWorkflow:
             prompt_version="evaluation-v1",
             latency_ms=5,
             token_usage=12,
+        )
+
+
+class FakeSimulatedImportWorkflow:
+    def generate(self, request):
+        return SimulatedExternalImportResult(
+            items=[
+                SimulatedExternalDispute(
+                    source_system="LLM_SIMULATED_OMS",
+                    external_case_reference="SIM-20260706-001",
+                    order_reference="ORDER-SIM-001",
+                    after_sales_reference="AFTER-SIM-001",
+                    logistics_reference="LOG-SIM-001",
+                    user_id="user-local",
+                    merchant_id="merchant-local",
+                    initiator_role=request.initiator_role_hint,
+                    dispute_type="QUALITY_DISPUTE",
+                    title="LLM simulated watch dispute",
+                    description="The LLM simulated an imported watch after-sales dispute.",
+                    risk_level=request.risk_level_hint or "MEDIUM",
+                )
+            ]
         )
 
 
@@ -212,3 +236,34 @@ def test_evaluation_api_only_accepts_authenticated_closed_case_snapshots() -> No
     assert response.status_code == 200
     assert response.json()["evaluation_status"] == "COMPLETED"
     assert response.json()["online_case_mutated"] is False
+
+
+def test_simulated_external_import_api_generates_import_dtos() -> None:
+    client = TestClient(
+        create_app(
+            settings(),
+            FakeWorkflow(),
+            FakeIntakeWorkflow(),
+            FakeEvaluationWorkflow(),
+            simulated_import_workflow=FakeSimulatedImportWorkflow(),
+        )
+    )
+
+    response = client.post(
+        "/internal/agents/external-import/simulate",
+        json={
+            "count": 1,
+            "scenario": "手表售后争议",
+            "risk_level_hint": "MEDIUM",
+            "initiator_role_hint": "MERCHANT",
+            "current_actor_id": "merchant-local",
+            "counterparty_actor_id": "user-local",
+        },
+        headers={"X-Service-Secret": "test-agent-service-secret"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["items"][0]["source_system"] == "LLM_SIMULATED_OMS"
+    assert response.json()["items"][0]["initiator_role"] == "MERCHANT"
+    assert response.json()["items"][0]["user_id"] == "user-local"
+    assert response.json()["items"][0]["merchant_id"] == "merchant-local"

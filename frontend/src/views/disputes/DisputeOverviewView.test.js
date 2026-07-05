@@ -36,7 +36,7 @@ const cases = [
   },
 ];
 
-async function mountOverview(createAction = null) {
+async function mountOverview(createAction = null, simulateExternalImportAction = null) {
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [
@@ -54,6 +54,7 @@ async function mountOverview(createAction = null) {
       initialCases: cases,
       serverNow: "2026-07-03T10:00:00Z",
       createAction,
+      simulateExternalImportAction,
     },
     global: { plugins: [router] },
   });
@@ -192,5 +193,42 @@ describe("DisputeOverviewView", () => {
     expect(router.currentRoute.value.path).toBe(
       "/disputes/CASE_NEW_1/intake",
     );
+  });
+
+  it("simulates external imported disputes from the current demo identity", async () => {
+    actor.id = "merchant-local";
+    actor.role = "MERCHANT";
+    const simulateExternalImportAction = vi.fn().mockResolvedValue({
+      items: [
+        {
+          id: "CASE_SIM_1",
+          case_id: "CASE_SIM_1",
+          order_id: "ORDER-SIM-1",
+          title: "LLM 模拟外部导入争议",
+          source_type: "EXTERNAL_IMPORT",
+          dispute_type: "QUALITY_DISPUTE",
+          case_status: "INTAKE_PENDING",
+          current_room: "INTAKE",
+          risk_level: "MEDIUM",
+          pending_action: "COMPLETE_INTAKE",
+          initiator_role: "MERCHANT",
+        },
+      ],
+    });
+    const { wrapper } = await mountOverview(null, simulateExternalImportAction);
+
+    await wrapper.get("[data-simulate-external-import]").trigger("click");
+    await flushPromises();
+
+    expect(simulateExternalImportAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        count: 2,
+        initiator_role_hint: "MERCHANT",
+        current_actor_id: "merchant-local",
+        counterparty_actor_id: "user-local",
+      }),
+    );
+    expect(wrapper.text()).toContain("LLM 模拟外部导入争议");
+    expect(wrapper.get('[data-case-id="CASE_SIM_1"]').exists()).toBe(true);
   });
 });

@@ -10,4 +10,5 @@ public record ImportedDisputeView(
         String externalCaseReference,
         CaseStatus caseStatus,
         String currentRoom,
-        OffsetDateTime currentDeadlineAt) {}
+        OffsetDateTime currentDeadlineAt,
+        String initiatorRole) {}

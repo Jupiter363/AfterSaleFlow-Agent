@@ -1,6 +1,7 @@
 package com.example.dispute.caseintake.application;
 
 import com.example.dispute.casecore.domain.CaseSourceType;
+import com.example.dispute.config.ActorRole;
 import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.RiskLevel;
 import com.example.dispute.domain.model.RouteType;
@@ -31,4 +32,5 @@ public record CaseView(
         String pendingAction,
         OffsetDateTime createdAt,
         OffsetDateTime updatedAt,
-        OffsetDateTime closedAt) {}
+        OffsetDateTime closedAt,
+        ActorRole initiatorRole) {}

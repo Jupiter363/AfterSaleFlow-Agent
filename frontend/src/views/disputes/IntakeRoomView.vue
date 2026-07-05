@@ -1,7 +1,6 @@
 <script setup>
 import {
   computed,
-  nextTick,
   onBeforeUnmount,
   onMounted,
   reactive,
@@ -50,10 +49,6 @@ const resolved = ref(false);
 const error = ref("");
 const eventState = reactive(createRoomState());
 const eventAbortController = new AbortController();
-const conversationPanel = ref(null);
-const dossierPanel = ref(null);
-const syncedPanelHeight = ref("");
-let dossierResizeObserver = null;
 
 const caseId = computed(() => dispute.value?.id || route.params.caseId);
 const caseNoteTitle = computed(() =>
@@ -68,15 +63,25 @@ const caseNoteDescription = computed(() =>
     fallback: "接待官正在整理争议事实，请继续补充订单、证据和处理诉求。",
   }),
 );
-const partyCanChat = computed(() => ["USER", "MERCHANT"].includes(actor.role));
+const partyCanChat = computed(
+  () =>
+    ["USER", "MERCHANT"].includes(actor.role) &&
+    actor.role === normalizedPartyRole(initiatorRoleValue.value),
+);
+const intakeComposerDisabledReason = computed(() => {
+  if (!["USER", "MERCHANT"].includes(actor.role)) {
+    return "当前是平台观察/审核身份。请切换为用户或商家身份，才能继续与争议接待官对话。";
+  }
+  if (!partyCanChat.value) {
+    return "接待室仅由发起方补充；另一方请在证据室完成举证和回应。";
+  }
+  return "";
+});
 const connectionState = computed(() => {
   if (eventState.connected) return "connected";
   if (eventState.reconnecting) return "reconnecting";
   return "offline";
 });
-const conversationPanelStyle = computed(() =>
-  syncedPanelHeight.value ? { height: syncedPanelHeight.value } : {},
-);
 const scrollSnapshot = computed(() => turnMemory.value?.scroll_snapshot || null);
 const currentCaseDossier = computed(() => turnMemory.value?.case_intake_dossier || null);
 const caseDetailDossier = computed(() => {
@@ -150,16 +155,34 @@ const initialRiskSignals = computed(() => {
   return humanizeDossierList(analysis.value?.initial_risk_signals);
 });
 const initiatorRoleValue = computed(() => {
-  const explicitRole =
+  const explicitRole = normalizePartyRoleValue(
     analysis.value?.initiator_role ||
     dispute.value?.initiator_role ||
-    dispute.value?.initiatorRole;
-  if (explicitRole) return explicitRole;
-  return ["USER", "MERCHANT"].includes(actor.role) ? actor.role : "UNKNOWN";
+    dispute.value?.initiatorRole,
+  );
+  if (explicitRole !== "UNKNOWN") return explicitRole;
+
+  const dossierRole = normalizePartyRoleValue(
+    scrollCardValue("initiator_role") ||
+      caseDetailDossier.value?.initiator_role ||
+      caseDetailDossier.value?.initiatorRole,
+  );
+  if (dossierRole !== "UNKNOWN") return dossierRole;
+
+  const firstPartyTurn = messages.value.find(
+    (message) => normalizePartyRoleValue(message.sender_role || message.senderRole) !== "UNKNOWN",
+  );
+  return normalizePartyRoleValue(firstPartyTurn?.sender_role || firstPartyTurn?.senderRole);
 });
 const initiatorRoleCopy = computed(() =>
   roleLabel(initiatorRoleValue.value || "UNKNOWN"),
 );
+const intakeRecipientView = computed(
+  () =>
+    ["USER", "MERCHANT"].includes(actor.role) &&
+    actor.role !== normalizedPartyRole(initiatorRoleValue.value),
+);
+const canManageIntake = computed(() => partyCanChat.value);
 
 function formatReferenceSummary(references = {}) {
   const items = [
@@ -192,6 +215,81 @@ function fallbackReferenceSummary(value) {
     logistics: scrollCardValue("logistics_reference", value.logistics_reference),
   });
 }
+
+function normalizePartyRoleValue(role) {
+  const value = String(role || "").trim().toUpperCase();
+  if (
+    value === "CUSTOMER_SERVICE" ||
+    value === "DISPUTE_INTAKE_OFFICER" ||
+    value === "INTAKE_OFFICER" ||
+    value.includes("SERVICE") ||
+    value.includes("OFFICER") ||
+    value.includes("AGENT")
+  ) {
+    return "UNKNOWN";
+  }
+  if (value === "MERCHANT" || value.includes("MERCHANT") || value.includes("商家")) {
+    return "MERCHANT";
+  }
+  if (
+    value === "USER" ||
+    value === "CUSTOMER" ||
+    value.includes("USER") ||
+    value.includes("用户") ||
+    value.includes("客户")
+  ) {
+    return "USER";
+  }
+  return "UNKNOWN";
+}
+
+function normalizedPartyRole(role) {
+  return normalizePartyRoleValue(role);
+}
+
+function oppositePartyRole(role) {
+  const normalizedRole = normalizedPartyRole(role);
+  if (normalizedRole === "MERCHANT") return "USER";
+  if (normalizedRole === "USER") return "MERCHANT";
+  return "UNKNOWN";
+}
+
+function partyTone(role) {
+  const normalizedRole = normalizedPartyRole(role);
+  if (normalizedRole === "MERCHANT") return "purple";
+  if (normalizedRole === "USER") return "coral";
+  return "slate";
+}
+
+function claimStickerForRole(role) {
+  const targetRole = normalizedPartyRole(role);
+  return liveStickers.value.find((sticker) =>
+    targetRole === "MERCHANT"
+      ? sticker.label === "商家主张"
+      : sticker.label === "用户主张",
+  );
+}
+
+const subjectiveStatementItems = computed(() => {
+  const sourceRole = normalizedPartyRole(initiatorRoleValue.value);
+  const counterRole = oppositePartyRole(sourceRole);
+  const sourceRoleName = roleLabel(sourceRole);
+  const counterRoleName = roleLabel(counterRole);
+  const sourceClaim = claimStickerForRole(sourceRole);
+  const counterClaim = claimStickerForRole(counterRole);
+  return [
+    {
+      label: `${sourceRoleName}自述`,
+      value: sourceClaim?.value || "等待继续补充发起方陈述",
+      tone: partyTone(sourceRole),
+    },
+    {
+      label: `${counterRoleName}情况（${sourceRoleName}转述/待核验）`,
+      value: counterClaim?.value || "等待对方进入流程后确认",
+      tone: partyTone(counterRole),
+    },
+  ];
+});
 
 const liveStickers = computed(() => {
   const value = analysis.value || {};
@@ -309,10 +407,10 @@ const caseDetailMetaSections = computed(() => {
       items: pickStickers(["订单 / 售后 / 物流", "发起方"]),
     },
     {
-      title: "双方说法",
+      title: "单方主观描述",
       type: "party_claims",
       tone: "purple",
-      items: pickStickers(["用户主张", "商家主张"]),
+      items: subjectiveStatementItems.value,
     },
   ];
 });
@@ -379,24 +477,6 @@ function appendOptimisticPartyMessage(command) {
 function removeOptimisticMessage(id) {
   if (!id) return;
   messages.value = messages.value.filter((message) => message.id !== id);
-}
-
-async function syncConversationPanelHeight() {
-  await nextTick();
-  const dossierHeight = dossierPanel.value?.getBoundingClientRect?.().height;
-  syncedPanelHeight.value = dossierHeight ? `${Math.ceil(dossierHeight)}px` : "";
-}
-
-function startPanelHeightSync() {
-  if (typeof ResizeObserver === "undefined" || !dossierPanel.value) {
-    void syncConversationPanelHeight();
-    return;
-  }
-  dossierResizeObserver = new ResizeObserver(() => {
-    void syncConversationPanelHeight();
-  });
-  dossierResizeObserver.observe(dossierPanel.value);
-  void syncConversationPanelHeight();
 }
 
 function startEventStream() {
@@ -492,16 +572,18 @@ async function confirmAdmission() {
   }
 }
 
+async function enterEvidenceRoom() {
+  await router.push(`/disputes/${caseId.value}/evidence`);
+}
+
 onMounted(async () => {
   await load();
   if (props.eventStreamer || props.initialMessages === null) {
     startEventStream();
   }
-  startPanelHeightSync();
 });
 onBeforeUnmount(() => {
   eventAbortController.abort();
-  dossierResizeObserver?.disconnect();
 });
 </script>
 
@@ -527,27 +609,39 @@ onBeforeUnmount(() => {
 
     <div class="intake-room">
       <section
-        ref="conversationPanel"
         class="intake-room__conversation"
-        :style="conversationPanelStyle"
       >
         <div class="intake-room__case-note">
           <span>你正在说明</span>
           <h2>{{ caseNoteTitle }}</h2>
           <p>{{ caseNoteDescription }}</p>
         </div>
-        <ConversationStream
-          :messages="messages"
-          :disabled="submitting || admitted || !partyCanChat"
-          :composer-visible="partyCanChat"
-          disabled-reason="当前是平台观察/审核身份。请切换为用户或商家身份，才能继续与争议接待官对话。"
-          placeholder="补充订单、物流、双方沟通或你的期望…"
-          @submit="postMessage"
-        />
+        <div
+          class="intake-room__conversation-lock-frame"
+          :class="{ 'intake-room__conversation-lock-frame--locked': intakeRecipientView }"
+        >
+          <ConversationStream
+            :messages="intakeRecipientView ? [] : messages"
+            :disabled="submitting || admitted || !partyCanChat"
+            :composer-visible="partyCanChat"
+            :disabled-reason="intakeComposerDisabledReason"
+            placeholder="补充订单、物流、双方沟通或你的期望…"
+            @submit="postMessage"
+          />
+          <div
+            v-if="intakeRecipientView"
+            class="intake-room__locked-chat"
+            data-intake-locked-chat
+            aria-label="仅发起方可查看"
+          >
+            <span aria-hidden="true">🔒</span>
+            <strong>仅发起方可查看</strong>
+            <p>接待室保存的是发起方与接待官的单方事实梳理。你可以查看右侧案件概况，并进入证据室完成正式举证与回应。</p>
+          </div>
+        </div>
       </section>
 
       <section
-        ref="dossierPanel"
         class="intake-dossier"
         aria-label="受理分析卷宗"
       >
@@ -681,7 +775,20 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="intake-dossier__confirm">
-          <div class="intake-dossier__actions intake-dossier__actions--two-column">
+          <div
+            v-if="intakeRecipientView"
+            class="intake-dossier__actions"
+          >
+            <button
+              type="button"
+              data-enter-evidence-room
+              :disabled="submitting"
+              @click="enterEvidenceRoom"
+            >
+              进入证据室
+            </button>
+          </div>
+          <div v-else-if="canManageIntake" class="intake-dossier__actions intake-dossier__actions--two-column">
             <button
               type="button"
               data-confirm-admission
@@ -702,6 +809,9 @@ onBeforeUnmount(() => {
               问题已解决，取消争议
             </button>
           </div>
+          <p v-else class="intake-dossier__readonly-actions" data-intake-actions-readonly>
+            当前身份仅可查看接待室卷宗，发起与取消操作只对接待室发起方开放。
+          </p>
           <div v-if="admitted" class="intake-dossier__stamp">已上报</div>
           <p v-if="resolved">已在平台内取消争议发起，接待室已归档。</p>
           <div v-if="error" class="intake-dossier__error">{{ error }}</div>
@@ -713,13 +823,16 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .intake-room {
+  --intake-panel-height: 740px;
   display: grid;
   grid-template-columns: minmax(520px, 1.05fr) minmax(480px, .95fr);
   gap: 18px;
   align-items: start;
 }
+
 .intake-room__conversation,
 .intake-dossier {
+  height: var(--intake-panel-height);
   min-width: 0;
   box-sizing: border-box;
   padding: 18px;
@@ -736,9 +849,10 @@ onBeforeUnmount(() => {
 }
 .intake-dossier {
   display: grid;
-  grid-template-rows: auto auto auto;
-  align-content: start;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  align-content: stretch;
   gap: 10px;
+  overflow: hidden;
 }
 .intake-room__case-note {
   padding: 16px;
@@ -755,6 +869,70 @@ onBeforeUnmount(() => {
 }
 .intake-room__case-note h2 { margin: 5px 0; color: #34435c; }
 .intake-room__case-note p { margin: 0; color: #6f7d92; line-height: 1.6; }
+.intake-room__conversation-lock-frame {
+  position: relative;
+  display: grid;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+.intake-room__conversation-lock-frame :deep(.conversation-stream) {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+.intake-room__conversation-lock-frame--locked {
+  overflow: hidden;
+  border-radius: 22px;
+  box-shadow:
+    inset 0 0 0 1px #dce7f4,
+    0 20px 55px #526d9430;
+}
+.intake-room__conversation-lock-frame--locked :deep(.conversation-stream) {
+  min-height: 360px;
+  opacity: .38;
+  filter: blur(2px) saturate(.8);
+  pointer-events: none;
+}
+.intake-room__locked-chat {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 10px;
+  padding: 28px;
+  text-align: center;
+  background:
+    radial-gradient(circle at 50% 30%, #ffffffef 0 22%, transparent 46%),
+    linear-gradient(135deg, #f5fbffe8, #fff7ece8);
+  border: 1px solid #dce7f4;
+  border-radius: 22px;
+  backdrop-filter: blur(9px);
+}
+.intake-room__locked-chat span {
+  display: grid;
+  width: 54px;
+  height: 54px;
+  place-items: center;
+  background: #fff;
+  border: 1px solid #d9e7f5;
+  border-radius: 20px;
+  box-shadow: 0 12px 32px #607a9c26;
+  font-size: 24px;
+}
+.intake-room__locked-chat strong {
+  color: #334761;
+  font-size: 18px;
+}
+.intake-room__locked-chat p {
+  max-width: 380px;
+  margin: 0;
+  color: #6e7c91;
+  font-size: 13px;
+  line-height: 1.7;
+}
 .intake-dossier header {
   display: flex;
   justify-content: space-between;
@@ -770,6 +948,7 @@ onBeforeUnmount(() => {
   gap: 10px;
   margin: 4px 0 0;
   padding: 14px;
+  overflow-y: auto;
   background:
     radial-gradient(circle at 12% 12%, #fff7cf 0 10%, transparent 11%),
     linear-gradient(135deg, #fffdf8, #eef7ff);
@@ -997,6 +1176,16 @@ onBeforeUnmount(() => {
   border-radius: 18px;
 }
 .intake-dossier__confirm p { color: #7b718e; font-size: 12px; }
+.intake-dossier__readonly-actions {
+  margin: 0;
+  padding: 13px 14px;
+  color: #71819a;
+  background: #f7fbff;
+  border: 1px dashed #d4e0ee;
+  border-radius: 16px;
+  font-size: 13px;
+  line-height: 1.6;
+}
 .intake-dossier__actions {
   display: grid;
   gap: 10px;

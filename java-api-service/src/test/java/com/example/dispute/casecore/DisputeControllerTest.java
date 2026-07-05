@@ -12,6 +12,7 @@ import com.example.dispute.casecore.api.DisputeController;
 import com.example.dispute.casecore.api.InternalDisputeImportController;
 import com.example.dispute.casecore.application.DisputeImportService;
 import com.example.dispute.casecore.application.ImportedDisputeView;
+import com.example.dispute.casecore.application.SimulatedImportResultView;
 import com.example.dispute.casecore.domain.CaseSourceType;
 import com.example.dispute.caseintake.application.CaseApplicationService;
 import com.example.dispute.caseintake.application.CasePageView;
@@ -133,7 +134,8 @@ class DisputeControllerTest {
                                 "EXT-1001",
                                 CaseStatus.INTAKE_PENDING,
                                 "INTAKE",
-                                null));
+                                null,
+                                "USER"));
         mockMvc.perform(
                         post("/internal/disputes/import")
                                 .header("X-Service-Identity", "external-dispute-adapter")
@@ -158,7 +160,51 @@ class DisputeControllerTest {
                                         """))
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.data.source_type").value("EXTERNAL_IMPORT"))
-                .andExpect(jsonPath("$.data.external_case_reference").value("EXT-1001"));
+                .andExpect(jsonPath("$.data.external_case_reference").value("EXT-1001"))
+                .andExpect(jsonPath("$.data.initiator_role").value("USER"));
+    }
+
+    @Test
+    void simulatesExternalImportThroughTheInternalServiceBoundary() throws Exception {
+        when(importService.simulateExternalImport(
+                        any(),
+                        any(),
+                        eq("simulate-import-001"),
+                        any(),
+                        any()))
+                .thenReturn(
+                        new SimulatedImportResultView(
+                                List.of(
+                                        new ImportedDisputeView(
+                                                "CASE_simulated",
+                                                "EXTERNAL_IMPORT",
+                                                "LLM_SIMULATED_OMS",
+                                                "SIM-20260706-001",
+                                                CaseStatus.INTAKE_PENDING,
+                                                "INTAKE",
+                                                null,
+                                                "MERCHANT"))));
+
+        mockMvc.perform(
+                        post("/internal/disputes/import/simulate")
+                                .header("X-Service-Identity", "external-dispute-adapter")
+                                .header("Idempotency-Key", "simulate-import-001")
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content(
+                                        """
+                                        {
+                                          "count": 1,
+                                          "scenario": "手表售后争议",
+                                          "risk_level_hint": "MEDIUM",
+                                          "initiator_role_hint": "MERCHANT",
+                                          "current_actor_id": "merchant-local",
+                                          "counterparty_actor_id": "user-local"
+                                        }
+                                        """))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.data.items[0].source_type").value("EXTERNAL_IMPORT"))
+                .andExpect(jsonPath("$.data.items[0].source_system").value("LLM_SIMULATED_OMS"))
+                .andExpect(jsonPath("$.data.items[0].initiator_role").value("MERCHANT"));
     }
 
     @Test
@@ -241,6 +287,7 @@ class DisputeControllerTest {
                 "COMPLETE_INTAKE",
                 OffsetDateTime.parse("2026-07-02T00:00:00Z"),
                 OffsetDateTime.parse("2026-07-02T00:00:00Z"),
-                null);
+                null,
+                com.example.dispute.config.ActorRole.USER);
     }
 }

@@ -66,7 +66,7 @@ public class RoomMessageService {
                 caseRepository
                         .findByIdForUpdate(caseId)
                         .orElseThrow(() -> new IllegalArgumentException("case not found"));
-        assertCanPost(dispute, actor, command.messageType());
+        assertCanPost(dispute, roomType, actor, command.messageType());
         CaseRoomEntity requestedRoom =
                 roomRepository
                         .findByCaseIdAndRoomType(dispute.getId(), roomType)
@@ -102,6 +102,11 @@ public class RoomMessageService {
                 roomRepository
                         .findByCaseIdAndRoomType(caseId, roomType)
                         .orElseThrow(() -> new IllegalArgumentException("room not found"));
+        if (roomType == RoomType.INTAKE
+                && isParty(actor.role())
+                && !isIntakeInitiator(dispute, actor)) {
+            return List.of();
+        }
         return messageRepository.findAllByRoomIdOrderBySequenceNoAsc(room.getId())
                 .stream()
                 .filter(message -> visibleTo(message, actor.role()))
@@ -175,8 +180,17 @@ public class RoomMessageService {
     }
 
     private void assertCanPost(
-            FulfillmentCaseEntity dispute, AuthenticatedActor actor, MessageType messageType) {
+            FulfillmentCaseEntity dispute,
+            RoomType roomType,
+            AuthenticatedActor actor,
+            MessageType messageType) {
         assertCanRead(dispute, actor);
+        if (roomType == RoomType.INTAKE
+                && isParty(actor.role())
+                && !isIntakeInitiator(dispute, actor)) {
+            throw new ForbiddenException(
+                    "only the intake initiator can post in the intake room");
+        }
         boolean allowed =
                 switch (actor.role()) {
                     case USER, MERCHANT ->
@@ -276,6 +290,22 @@ public class RoomMessageService {
             case PLATFORM_REVIEWER -> MessageSenderType.REVIEWER;
             case SYSTEM -> MessageSenderType.SYSTEM;
             case CUSTOMER_SERVICE, ADMIN -> MessageSenderType.AGENT;
+        };
+    }
+
+    private static boolean isParty(ActorRole role) {
+        return role == ActorRole.USER || role == ActorRole.MERCHANT;
+    }
+
+    private static boolean isIntakeInitiator(
+            FulfillmentCaseEntity dispute, AuthenticatedActor actor) {
+        if (actor.role() != dispute.getInitiatorRole()) {
+            return false;
+        }
+        return switch (actor.role()) {
+            case USER -> actor.actorId().equals(dispute.getUserId());
+            case MERCHANT -> actor.actorId().equals(dispute.getMerchantId());
+            default -> false;
         };
     }
 

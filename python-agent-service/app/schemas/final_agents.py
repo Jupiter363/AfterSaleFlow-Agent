@@ -97,6 +97,40 @@ class DisputeIntakeResult(StrictModel):
         return self.initial_risk_signals
 
 
+RiskLevelLiteral = Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"]
+
+
+class SimulatedExternalImportRequest(StrictModel):
+    count: Annotated[int, Field(ge=1, le=10)] = 2
+    scenario: ShortText = "履约争议订单"
+    risk_level_hint: RiskLevelLiteral | None = "MEDIUM"
+    initiator_role_hint: Literal["USER", "MERCHANT"]
+    current_actor_id: Identifier
+    counterparty_actor_id: Identifier
+
+
+class SimulatedExternalDispute(StrictModel):
+    source_system: Identifier = "LLM_SIMULATED_OMS"
+    external_case_reference: Identifier
+    order_reference: Identifier
+    after_sales_reference: Identifier | None = None
+    logistics_reference: Identifier | None = None
+    user_id: Identifier
+    merchant_id: Identifier
+    initiator_role: Literal["USER", "MERCHANT"]
+    dispute_type: Identifier
+    title: ShortText
+    description: LongText
+    risk_level: RiskLevelLiteral
+
+
+class SimulatedExternalImportResult(StrictModel):
+    items: Annotated[
+        list[SimulatedExternalDispute],
+        Field(min_length=1, max_length=10),
+    ]
+
+
 class IntakeLobbySeed(StrictModel):
     order_reference: Identifier | None = None
     after_sales_reference: Identifier | None = None

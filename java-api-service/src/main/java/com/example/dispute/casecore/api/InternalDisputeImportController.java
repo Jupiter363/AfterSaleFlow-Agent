@@ -2,6 +2,7 @@ package com.example.dispute.casecore.api;
 
 import com.example.dispute.casecore.application.DisputeImportService;
 import com.example.dispute.casecore.application.ImportedDisputeView;
+import com.example.dispute.casecore.application.SimulatedImportResultView;
 import com.example.dispute.common.api.ApiResponse;
 import com.example.dispute.common.trace.TraceIdFilter;
 import com.example.dispute.config.AuthenticatedActor;
@@ -50,6 +51,33 @@ public class InternalDisputeImportController {
                         request.toCommand(),
                         (AuthenticatedActor) authentication.getPrincipal(),
                         idempotencyKey);
+        return ResponseEntity.status(HttpStatus.CREATED)
+                .body(
+                        ApiResponse.success(
+                                imported,
+                                requestId,
+                                traceId,
+                                Instant.now(clock)));
+    }
+
+    @PostMapping("/import/simulate")
+    public ResponseEntity<ApiResponse<SimulatedImportResultView>> simulateImport(
+            @Valid @RequestBody SimulateImportRequest request,
+            @RequestHeader("Idempotency-Key")
+                    @NotBlank
+                    @Pattern(regexp = "[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
+                    String idempotencyKey,
+            Authentication authentication,
+            HttpServletRequest servletRequest) {
+        String traceId = correlationId(servletRequest, TraceIdFilter.TRACE_ATTRIBUTE);
+        String requestId = correlationId(servletRequest, TraceIdFilter.REQUEST_ATTRIBUTE);
+        SimulatedImportResultView imported =
+                service.simulateExternalImport(
+                        request.toCommand(),
+                        (AuthenticatedActor) authentication.getPrincipal(),
+                        idempotencyKey,
+                        traceId,
+                        requestId);
         return ResponseEntity.status(HttpStatus.CREATED)
                 .body(
                         ApiResponse.success(

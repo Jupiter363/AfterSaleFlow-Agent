@@ -32,6 +32,7 @@ public class DisputeImportService {
     private final CaseRoomRepository roomRepository;
     private final CasePhaseClockRepository clockRepository;
     private final ParticipantService participantService;
+    private final ExternalDisputeSimulationClient simulationClient;
     private final DisputeProperties properties;
     private final Clock clock;
 
@@ -40,12 +41,14 @@ public class DisputeImportService {
             CaseRoomRepository roomRepository,
             CasePhaseClockRepository clockRepository,
             ParticipantService participantService,
+            ExternalDisputeSimulationClient simulationClient,
             DisputeProperties properties,
             Clock clock) {
         this.repository = repository;
         this.roomRepository = roomRepository;
         this.clockRepository = clockRepository;
         this.participantService = participantService;
+        this.simulationClient = simulationClient;
         this.properties = properties;
         this.clock = clock;
     }
@@ -79,6 +82,7 @@ public class DisputeImportService {
                                             command.logisticsReference(),
                                             command.userId(),
                                             command.merchantId(),
+                                            ActorRole.valueOf(command.initiatorRole()),
                                             idempotencyKey,
                                             command.disputeType(),
                                             command.title(),
@@ -96,6 +100,46 @@ public class DisputeImportService {
                                     saved, actor, OffsetDateTime.now(clock));
                             return view(saved);
                         });
+    }
+
+    @Transactional
+    public SimulatedImportResultView simulateExternalImport(
+            SimulateExternalImportCommand command,
+            AuthenticatedActor actor,
+            String idempotencyKey,
+            String traceId,
+            String requestId) {
+        if (actor.role() != ActorRole.SYSTEM) {
+            throw new SecurityException("external dispute simulation requires service identity");
+        }
+        requireText(idempotencyKey, "idempotencyKey");
+        var imported =
+                simulationClient.simulate(command, traceId, requestId).stream()
+                        .map(
+                                simulated ->
+                                        importDispute(
+                                                new ImportDisputeCommand(
+                                                        simulated.sourceSystem(),
+                                                        simulated.externalCaseReference(),
+                                                        simulated.orderReference(),
+                                                        simulated.afterSalesReference(),
+                                                        simulated.logisticsReference(),
+                                                        simulated.userId(),
+                                                        simulated.merchantId(),
+                                                        simulated.initiatorRole(),
+                                                        simulated.disputeType(),
+                                                        simulated.title(),
+                                                        simulated.description(),
+                                                        simulated.riskLevel(),
+                                                        CaseStatus.INTAKE_PENDING,
+                                                        "INTAKE",
+                                                        null),
+                                                actor,
+                                                itemIdempotencyKey(
+                                                        idempotencyKey,
+                                                        simulated.externalCaseReference())))
+                        .toList();
+        return new SimulatedImportResultView(imported);
     }
 
     private void materializeCurrentRoom(
@@ -207,7 +251,17 @@ public class DisputeImportService {
                 entity.getExternalCaseRef(),
                 entity.getCaseStatus(),
                 entity.getCurrentRoom(),
-                entity.getCurrentDeadlineAt());
+                entity.getCurrentDeadlineAt(),
+                entity.getInitiatorRole().name());
+    }
+
+    private static String itemIdempotencyKey(String base, String externalCaseReference) {
+        String normalizedExternal =
+                externalCaseReference == null
+                        ? UUID.randomUUID().toString().replace("-", "")
+                        : externalCaseReference.replaceAll("[^A-Za-z0-9_.:-]", "-");
+        String key = base + ":" + normalizedExternal;
+        return key.length() <= 128 ? key : key.substring(0, 128);
     }
 
     private static String compactUuid() {

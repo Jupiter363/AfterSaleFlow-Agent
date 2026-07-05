@@ -223,6 +223,7 @@ def test_all_final_internal_agent_routes_are_authenticated() -> None:
         "/internal/agents/deliberation/run",
         "/internal/agents/review-copilot/query",
         "/internal/agents/evaluation/analyze",
+        "/internal/agents/external-import/simulate",
     }
 
     unauthorized = client.post(

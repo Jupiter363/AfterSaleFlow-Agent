@@ -80,6 +80,10 @@ class PromptComposer:
             "review_copilot",
             "review_copilot.md",
         ),
+        "external_import_simulator": PromptTemplateRef(
+            "external_import_simulator",
+            "external_import_simulator.md",
+        ),
     }
 
     COMMON_FRAGMENT_FILES: tuple[str, ...] = (

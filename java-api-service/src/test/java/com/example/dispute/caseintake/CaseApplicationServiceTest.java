@@ -112,6 +112,7 @@ class CaseApplicationServiceTest {
                         "REQ_test");
 
         assertThat(result.caseStatus()).isEqualTo(CaseStatus.INTAKE_COMPLETED);
+        assertThat(result.initiatorRole()).isEqualTo(ActorRole.USER);
         assertThat(result.potentialDispute()).isTrue();
         assertThat(result.riskLevel()).isEqualTo(RiskLevel.HIGH);
         assertThat(result.agentDegraded()).isFalse();
@@ -198,6 +199,79 @@ class CaseApplicationServiceTest {
                                         "TRACE_test",
                                         "REQ_test"))
                 .isInstanceOf(ForbiddenException.class);
+    }
+
+    @Test
+    void merchantCreatedDisputePersistsMerchantAsTheSingleIntakeInitiator() {
+        when(agentServiceClient.analyze(any(), any(), any()))
+                .thenReturn(
+                        new IntakeAnalysis(
+                                "DISPUTE",
+                                "QUALITY_DISPUTE",
+                                RiskLevel.MEDIUM,
+                                true,
+                                List.of(),
+                                "商家发起质检争议",
+                                "商家认为用户提交的故障描述与售后检测不一致。"));
+
+        CaseView result =
+                service.create(
+                        new CreateCaseCommand(
+                                "order-merchant",
+                                null,
+                                null,
+                                "user-1",
+                                "merchant-1",
+                                "用户提交故障视频，但商家认为需要平台接待官介入核验。",
+                                List.of(),
+                                "WEB",
+                                ActorRole.MERCHANT),
+                        new AuthenticatedActor("merchant-1", ActorRole.MERCHANT),
+                        "idem-merchant-initiator",
+                        "TRACE_merchant",
+                        "REQ_merchant");
+
+        assertThat(result.initiatorRole()).isEqualTo(ActorRole.MERCHANT);
+        ArgumentCaptor<IntakeLobbySeed> lobbySeed =
+                ArgumentCaptor.forClass(IntakeLobbySeed.class);
+        verify(intakeAgentTurnService)
+                .startInitialTurn(
+                        any(),
+                        any(AuthenticatedActor.class),
+                        lobbySeed.capture(),
+                        eq("TRACE_merchant"),
+                        eq("REQ_merchant"));
+        assertThat(lobbySeed.getValue().initiatorRole()).isEqualTo("MERCHANT");
+    }
+
+    @Test
+    void notifiedCounterpartyCanReadMerchantInitiatedCaseButInitiatorRoleStaysMerchant() {
+        FulfillmentCaseEntity merchantInitiated =
+                FulfillmentCaseEntity.create(
+                        "CASE_MERCHANT_INITIATED",
+                        "ORDER_MERCHANT_INITIATED",
+                        null,
+                        null,
+                        "user-local",
+                        "merchant-local",
+                        ActorRole.MERCHANT,
+                        "merchant-initiated-idempotency",
+                        "DISPUTE",
+                        "商家发起的争议",
+                        "商家认为用户提交的证据需要平台核验。",
+                        RiskLevel.MEDIUM,
+                        "merchant-local");
+        when(caseRepository.findById("CASE_MERCHANT_INITIATED"))
+                .thenReturn(Optional.of(merchantInitiated));
+
+        CaseView result =
+                service.get(
+                        "CASE_MERCHANT_INITIATED",
+                        new AuthenticatedActor("user-local", ActorRole.USER));
+
+        assertThat(result.userId()).isEqualTo("user-local");
+        assertThat(result.merchantId()).isEqualTo("merchant-local");
+        assertThat(result.initiatorRole()).isEqualTo(ActorRole.MERCHANT);
     }
 
     @Test
@@ -329,7 +403,8 @@ class CaseApplicationServiceTest {
                 "merchant-1",
                 description,
                 List.of(),
-                "WEB");
+                "WEB",
+                ActorRole.USER);
     }
 
     private static CreateCaseCommand commandWithLogistics(
@@ -342,6 +417,7 @@ class CaseApplicationServiceTest {
                 "merchant-1",
                 description,
                 List.of(),
-                "WEB");
+                "WEB",
+                ActorRole.USER);
     }
 }

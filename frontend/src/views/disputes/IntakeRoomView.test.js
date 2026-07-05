@@ -71,7 +71,7 @@ async function mountInteractiveView(options = {}) {
     props: {
       initialDispute: dispute,
       initialAnalysis: options.initialAnalysis || analysis,
-      initialMessages: [],
+      initialMessages: options.initialMessages || [],
       initialTurnMemory: options.initialTurnMemory || null,
       postMessageAction: options.postMessageAction,
       messagesLoader: options.messagesLoader,
@@ -409,7 +409,12 @@ describe("IntakeRoomView", () => {
     expect(wrapper.findAll("[data-party-claim-card]").length).toBe(2);
     expect(wrapper.findAll("[data-dossier-section]").length).toBe(0);
     expect(wrapper.text()).toContain("案件索引");
-    expect(wrapper.text()).toContain("双方说法");
+    expect(wrapper.text()).toContain("单方主观描述");
+    expect(wrapper.text()).toContain("用户自述");
+    expect(wrapper.text()).toContain("商家情况（用户转述/待核验）");
+    expect(wrapper.text()).not.toContain("双方说法");
+    expect(wrapper.text()).not.toContain("用户主张");
+    expect(wrapper.text()).not.toContain("商家主张");
     expect(wrapper.text()).toContain("订单 / 售后 / 物流");
     expect(wrapper.text()).toContain("订单：ORDER-1");
     expect(wrapper.text()).toContain("售后：AFTER-1");
@@ -421,20 +426,35 @@ describe("IntakeRoomView", () => {
     expect(wrapper.text()).not.toContain("可继续对话纠正");
   });
 
-  it("uses the current merchant identity as the deterministic initiator when the model slot is missing", async () => {
-    actor.id = "merchant-local";
-    actor.role = "MERCHANT";
+  it("infers the single-party intake initiator from immutable party messages when the model slot is missing", async () => {
+    actor.id = "user-local";
+    actor.role = "USER";
     const { initiator_role: _initiatorRole, ...analysisWithoutInitiator } = analysis;
     const wrapper = await mountInteractiveView({
       initialAnalysis: analysisWithoutInitiator,
+      initialMessages: [
+        {
+          id: "MESSAGE_AGENT_1",
+          sequence_no: 1,
+          sender_role: "CUSTOMER_SERVICE",
+          message_text: "agent prompt",
+          created_at: "2026-07-05T00:00:00Z",
+        },
+        {
+          id: "MESSAGE_MERCHANT_1",
+          sequence_no: 2,
+          sender_role: "MERCHANT",
+          message_text: "merchant intake answer",
+          created_at: "2026-07-05T00:01:00Z",
+        },
+      ],
     });
 
-    const initiatorSticker = wrapper
-      .findAll("[data-intake-sticker]")
-      .find((sticker) => sticker.text().includes("发起方"));
-
-    expect(initiatorSticker?.text()).toContain("商家");
-    expect(initiatorSticker?.text()).not.toContain("待确认");
+    expect(wrapper.find(".conversation-stream__composer").exists()).toBe(false);
+    expect(wrapper.find("[data-intake-locked-chat]").exists()).toBe(true);
+    expect(wrapper.find("[data-confirm-admission]").exists()).toBe(false);
+    expect(wrapper.find("[data-resolve-without-dispute]").exists()).toBe(false);
+    expect(wrapper.find("[data-enter-evidence-room]").exists()).toBe(true);
   });
 
   it("lays out the submit and resolve actions as a two-column action bar", async () => {
@@ -583,16 +603,37 @@ describe("IntakeRoomView", () => {
 
     expect(wrapper.find(".conversation-stream__composer").exists()).toBe(false);
     expect(wrapper.text()).toContain("切换为用户或商家身份");
+    expect(wrapper.find("[data-confirm-admission]").exists()).toBe(false);
+    expect(wrapper.find("[data-resolve-without-dispute]").exists()).toBe(false);
+    expect(wrapper.find("[data-intake-actions-readonly]").exists()).toBe(true);
   });
 
-  it("keeps the conversation column stretched to the dossier height", () => {
+  it("keeps the non-initiating party out of the single-party intake composer", async () => {
+    actor.id = "merchant-local";
+    actor.role = "MERCHANT";
+
+    const wrapper = await mountInteractiveView({
+      initialAnalysis: { ...analysis, initiator_role: "USER" },
+    });
+
+    expect(wrapper.find(".conversation-stream__composer").exists()).toBe(false);
+    expect(wrapper.find("[data-intake-locked-chat]").exists()).toBe(true);
+    expect(wrapper.text()).toContain("仅发起方可查看");
+    expect(wrapper.find("[data-confirm-admission]").exists()).toBe(false);
+    expect(wrapper.find("[data-resolve-without-dispute]").exists()).toBe(false);
+    expect(wrapper.find("[data-enter-evidence-room]").exists()).toBe(true);
+  });
+
+  it("keeps the intake room outer cards at a fixed non-stretching height", () => {
     const source = readFileSync("src/views/disputes/IntakeRoomView.vue", "utf8");
 
     expect(source).toContain("align-items: start;");
-    expect(source).toContain("conversationPanelStyle");
-    expect(source).toContain("ResizeObserver");
+    expect(source).toContain("--intake-panel-height: 740px;");
+    expect(source).toContain("height: var(--intake-panel-height);");
     expect(source).toContain("grid-template-rows: auto minmax(0, 1fr);");
-    expect(source).toContain("grid-template-rows: auto auto auto;");
+    expect(source).toContain(".intake-room__conversation-lock-frame :deep(.conversation-stream)");
+    expect(source).toContain("grid-template-rows: auto minmax(0, 1fr) auto;");
+    expect(source).toContain("overflow-y: auto;");
     expect(source).not.toContain(".intake-case-detail__meta {\n  display: grid;\n  flex: 1;");
   });
 });

@@ -1,6 +1,7 @@
 package com.example.dispute.infrastructure.persistence.entity;
 
 import com.example.dispute.casecore.domain.CaseSourceType;
+import com.example.dispute.config.ActorRole;
 import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.RiskLevel;
 import com.example.dispute.domain.model.RouteType;
@@ -36,6 +37,10 @@ public class FulfillmentCaseEntity extends AbstractEntity {
 
     @Column(name = "merchant_id", length = 128, nullable = false)
     private String merchantId;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "initiator_role", length = 32, nullable = false)
+    private ActorRole initiatorRole;
 
     @Column(name = "creation_idempotency_key", length = 128, nullable = false, unique = true)
     private String creationIdempotencyKey;
@@ -127,11 +132,41 @@ public class FulfillmentCaseEntity extends AbstractEntity {
             String description,
             RiskLevel riskLevel,
             String actorId) {
+        this(
+                id,
+                orderId,
+                afterSaleId,
+                userId,
+                merchantId,
+                inferInitiatorRole(userId, merchantId, actorId, ActorRole.USER),
+                creationIdempotencyKey,
+                caseType,
+                title,
+                description,
+                riskLevel,
+                actorId);
+    }
+
+    private FulfillmentCaseEntity(
+            String id,
+            String orderId,
+            String afterSaleId,
+            String userId,
+            String merchantId,
+            ActorRole initiatorRole,
+            String creationIdempotencyKey,
+            String caseType,
+            String title,
+            String description,
+            RiskLevel riskLevel,
+            String actorId) {
         super(id);
         this.orderId = orderId;
         this.afterSaleId = afterSaleId;
         this.userId = required(userId, "userId");
         this.merchantId = required(merchantId, "merchantId");
+        this.initiatorRole =
+                Objects.requireNonNull(initiatorRole, "initiatorRole must not be null");
         this.creationIdempotencyKey =
                 required(creationIdempotencyKey, "creationIdempotencyKey");
         this.caseType = required(caseType, "caseType");
@@ -203,6 +238,38 @@ public class FulfillmentCaseEntity extends AbstractEntity {
         return entity;
     }
 
+    public static FulfillmentCaseEntity create(
+            String id,
+            String orderId,
+            String afterSaleId,
+            String logisticsId,
+            String userId,
+            String merchantId,
+            ActorRole initiatorRole,
+            String creationIdempotencyKey,
+            String caseType,
+            String title,
+            String description,
+            RiskLevel riskLevel,
+            String actorId) {
+        FulfillmentCaseEntity entity =
+                new FulfillmentCaseEntity(
+                        id,
+                        orderId,
+                        afterSaleId,
+                        userId,
+                        merchantId,
+                        initiatorRole,
+                        creationIdempotencyKey,
+                        caseType,
+                        title,
+                        description,
+                        riskLevel,
+                        actorId);
+        entity.logisticsId = blankToNull(logisticsId);
+        return entity;
+    }
+
     public static FulfillmentCaseEntity imported(
             String id,
             String orderId,
@@ -221,6 +288,46 @@ public class FulfillmentCaseEntity extends AbstractEntity {
             String sourceSystem,
             String externalCaseRef,
             String actorId) {
+        return imported(
+                id,
+                orderId,
+                afterSaleId,
+                logisticsId,
+                userId,
+                merchantId,
+                ActorRole.USER,
+                creationIdempotencyKey,
+                disputeType,
+                title,
+                description,
+                riskLevel,
+                caseStatus,
+                currentRoom,
+                currentDeadlineAt,
+                sourceSystem,
+                externalCaseRef,
+                actorId);
+    }
+
+    public static FulfillmentCaseEntity imported(
+            String id,
+            String orderId,
+            String afterSaleId,
+            String logisticsId,
+            String userId,
+            String merchantId,
+            ActorRole initiatorRole,
+            String creationIdempotencyKey,
+            String disputeType,
+            String title,
+            String description,
+            RiskLevel riskLevel,
+            CaseStatus caseStatus,
+            String currentRoom,
+            OffsetDateTime currentDeadlineAt,
+            String sourceSystem,
+            String externalCaseRef,
+            String actorId) {
         FulfillmentCaseEntity entity =
                 new FulfillmentCaseEntity(
                         id,
@@ -228,6 +335,7 @@ public class FulfillmentCaseEntity extends AbstractEntity {
                         afterSaleId,
                         userId,
                         merchantId,
+                        initiatorRole,
                         creationIdempotencyKey,
                         "DISPUTE",
                         title,
@@ -482,6 +590,17 @@ public class FulfillmentCaseEntity extends AbstractEntity {
         return value == null || value.isBlank() ? null : value;
     }
 
+    private static ActorRole inferInitiatorRole(
+            String userId, String merchantId, String actorId, ActorRole fallback) {
+        if (actorId != null && actorId.equals(userId)) {
+            return ActorRole.USER;
+        }
+        if (actorId != null && actorId.equals(merchantId)) {
+            return ActorRole.MERCHANT;
+        }
+        return fallback;
+    }
+
     private static boolean isFullHearingLifecycle(CaseStatus status, String room) {
         if ("HEARING".equals(room)) {
             return true;
@@ -528,6 +647,10 @@ public class FulfillmentCaseEntity extends AbstractEntity {
 
     public String getMerchantId() {
         return merchantId;
+    }
+
+    public ActorRole getInitiatorRole() {
+        return initiatorRole;
     }
 
     public String getCaseType() {

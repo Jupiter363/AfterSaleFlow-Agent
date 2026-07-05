@@ -227,6 +227,7 @@ public class CaseApplicationService {
                         blankToNull(command.logisticsId()),
                         required(command.userId(), "userId"),
                         required(command.merchantId(), "merchantId"),
+                        command.initiatorRole(),
                         required(idempotencyKey, "idempotencyKey"),
                         required(analysis.caseType(), "caseType"),
                         required(analysis.title(), "title"),
@@ -259,7 +260,7 @@ public class CaseApplicationService {
                         command.orderId(),
                         command.afterSaleId(),
                         command.logisticsId(),
-                        intakeInitiatorRole(actor.role()),
+                        intakeInitiatorRole(actor.role(), command.initiatorRole()),
                         command.description(),
                         null),
                 traceId,
@@ -328,8 +329,13 @@ public class CaseApplicationService {
     }
 
     private static String intakeInitiatorRole(ActorRole role) {
+        return intakeInitiatorRole(role, ActorRole.USER);
+    }
+
+    private static String intakeInitiatorRole(ActorRole role, ActorRole requestedInitiatorRole) {
         return switch (role) {
-            case USER, MERCHANT, CUSTOMER_SERVICE, SYSTEM -> role.name();
+            case USER, MERCHANT -> role.name();
+            case CUSTOMER_SERVICE, SYSTEM -> requestedInitiatorRole.name();
             case PLATFORM_REVIEWER, ADMIN -> ActorRole.SYSTEM.name();
         };
     }
@@ -356,6 +362,10 @@ public class CaseApplicationService {
                 };
         if (!allowed) {
             throw new ForbiddenException("actor cannot create a case for this party");
+        }
+        if ((actor.role() == ActorRole.USER || actor.role() == ActorRole.MERCHANT)
+                && command.initiatorRole() != actor.role()) {
+            throw new ForbiddenException("party actor must be the intake initiator");
         }
     }
 
@@ -384,7 +394,8 @@ public class CaseApplicationService {
                 pendingAction(entity.getCaseStatus()),
                 entity.getCreatedAt(),
                 entity.getUpdatedAt(),
-                entity.getClosedAt());
+                entity.getClosedAt(),
+                entity.getInitiatorRole());
     }
 
     private static String publicCaseType(String caseType) {
