@@ -8,6 +8,7 @@ import com.example.dispute.infrastructure.persistence.repository.FulfillmentCase
 import com.example.dispute.room.domain.RoomType;
 import com.example.dispute.room.infrastructure.persistence.entity.RoomTurnMemoryEntity;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseParticipantRepository;
+import com.example.dispute.room.infrastructure.persistence.repository.CaseIntakeDossierRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.RoomTurnMemoryRepository;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -22,16 +23,19 @@ public class RoomTurnMemoryQueryService {
     private final FulfillmentCaseRepository caseRepository;
     private final CaseParticipantRepository participantRepository;
     private final RoomTurnMemoryRepository memoryRepository;
+    private final CaseIntakeDossierRepository intakeDossierRepository;
     private final ObjectMapper objectMapper;
 
     public RoomTurnMemoryQueryService(
             FulfillmentCaseRepository caseRepository,
             CaseParticipantRepository participantRepository,
             RoomTurnMemoryRepository memoryRepository,
+            CaseIntakeDossierRepository intakeDossierRepository,
             ObjectMapper objectMapper) {
         this.caseRepository = caseRepository;
         this.participantRepository = participantRepository;
         this.memoryRepository = memoryRepository;
+        this.intakeDossierRepository = intakeDossierRepository;
         this.objectMapper = objectMapper;
     }
 
@@ -81,7 +85,25 @@ public class RoomTurnMemoryQueryService {
                 dossierPatch.path("memory_frame").isMissingNode()
                         ? objectMapper.createObjectNode()
                         : dossierPatch.path("memory_frame"),
+                intakeDossierRepository
+                        .findByCaseIdAndRoomType(memory.getCaseId(), RoomType.INTAKE)
+                        .map(this::intakeDossierView)
+                        .orElse(null),
                 memory.getCreatedAt());
+    }
+
+    private CaseIntakeDossierView intakeDossierView(
+            com.example.dispute.room.infrastructure.persistence.entity.CaseIntakeDossierEntity dossier) {
+        return new CaseIntakeDossierView(
+                dossier.getCaseId(),
+                dossier.getRoomType(),
+                dossier.getDossierVersion(),
+                readJson(dossier.getDossierJson(), false),
+                dossier.getQualityScore(),
+                dossier.isReadyForNextStep(),
+                dossier.getAdmissionRecommendation(),
+                dossier.getSourceTurnNo(),
+                dossier.getUpdatedAt());
     }
 
     private JsonNode readJson(String json, boolean arrayDefault) {

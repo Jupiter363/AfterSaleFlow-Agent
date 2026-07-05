@@ -1,4 +1,4 @@
-"""Final Dispute Intake Officer identity over the validated intake workflow."""
+"""Dispute intake officer digital human package."""
 
 from __future__ import annotations
 
@@ -14,6 +14,13 @@ from app.schemas import (
 
 
 class DisputeIntakeOfficer:
+    """Final intake officer facade used by the business API layer.
+
+    The room-turn conversational workflow lives in
+    ``app.agents.dispute_intake_officer.workflow``. This facade preserves the
+    existing one-shot intake analysis contract.
+    """
+
     def __init__(self, workflow: Any) -> None:
         self.profile = final_agent_profiles()["dispute_intake_officer"]
         self._workflow = workflow
@@ -86,7 +93,7 @@ def _requested_outcome(text: str) -> str:
     normalized = text.casefold()
     if any(value in normalized for value in ("reject refund", "拒绝退款")):
         return "REJECT_REFUND"
-    if any(value in normalized for value in ("refund", "退款")):
+    if any(value in normalized for value in ("refund", "退款", "退钱")):
         return "REFUND"
     if any(
         value in normalized

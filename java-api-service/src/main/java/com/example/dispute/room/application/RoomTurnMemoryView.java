@@ -15,4 +15,5 @@ public record RoomTurnMemoryView(
         @JsonProperty("scroll_snapshot") JsonNode scrollSnapshot,
         @JsonProperty("canvas_operations") JsonNode canvasOperations,
         @JsonProperty("memory_frame") JsonNode memoryFrame,
+        @JsonProperty("case_intake_dossier") CaseIntakeDossierView caseIntakeDossier,
         @JsonProperty("created_at") OffsetDateTime createdAt) {}

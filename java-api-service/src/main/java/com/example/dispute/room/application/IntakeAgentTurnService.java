@@ -10,8 +10,10 @@ import com.example.dispute.room.domain.RoomStatus;
 import com.example.dispute.room.domain.RoomType;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.RoomMessageEntity;
+import com.example.dispute.room.infrastructure.persistence.entity.CaseIntakeDossierEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.RoomTurnMemoryEntity;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
+import com.example.dispute.room.infrastructure.persistence.repository.CaseIntakeDossierRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.RoomMessageRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.RoomTurnMemoryRepository;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -42,6 +44,7 @@ public class IntakeAgentTurnService {
     private final FulfillmentCaseRepository caseRepository;
     private final CaseRoomRepository roomRepository;
     private final RoomTurnMemoryRepository memoryRepository;
+    private final CaseIntakeDossierRepository intakeDossierRepository;
     private final RoomMessageRepository messageRepository;
     private final CaseEventService eventService;
     private final IntakeAgentTurnClient client;
@@ -52,6 +55,7 @@ public class IntakeAgentTurnService {
             FulfillmentCaseRepository caseRepository,
             CaseRoomRepository roomRepository,
             RoomTurnMemoryRepository memoryRepository,
+            CaseIntakeDossierRepository intakeDossierRepository,
             RoomMessageRepository messageRepository,
             CaseEventService eventService,
             IntakeAgentTurnClient client,
@@ -60,6 +64,7 @@ public class IntakeAgentTurnService {
         this.caseRepository = caseRepository;
         this.roomRepository = roomRepository;
         this.memoryRepository = memoryRepository;
+        this.intakeDossierRepository = intakeDossierRepository;
         this.messageRepository = messageRepository;
         this.eventService = eventService;
         this.client = client;
@@ -228,6 +233,7 @@ public class IntakeAgentTurnService {
                         json(defaultObject(result.scrollSnapshot())),
                         json(defaultArray(result.canvasOperations())),
                         runId));
+        upsertCurrentDossier(context.dispute().getId(), turnNo, result);
         appendAgentMessage(
                 context.dispute(),
                 context.room(),
@@ -241,6 +247,46 @@ public class IntakeAgentTurnService {
                 Map.of("turn_no", turnNo, "agent_role", AGENT_ROLE),
                 "intake-dossier-updated:" + context.dispute().getId() + ":" + turnNo,
                 AGENT_SENDER_ID);
+    }
+
+    private void upsertCurrentDossier(
+            String caseId,
+            int turnNo,
+            IntakeAgentTurnResult result) {
+        JsonNode dossier = defaultObject(result.scrollSnapshot());
+        int qualityScore = dossier.path("intake_quality").path("score").asInt(0);
+        boolean readyForNextStep =
+                dossier.path("intake_quality").path("ready_for_next_step").asBoolean(false);
+        String recommendation =
+                textOrDefault(
+                        dossier.path("admission").path("recommendation"),
+                        result.admissionRecommendation());
+        String dossierJson = json(dossier);
+        CaseIntakeDossierEntity entity;
+        var existing = intakeDossierRepository.findByCaseIdAndRoomType(caseId, RoomType.INTAKE);
+        if (existing.isPresent()) {
+            entity = existing.orElseThrow();
+            entity.replaceWith(
+                    dossierJson,
+                    qualityScore,
+                    readyForNextStep,
+                    recommendation,
+                    turnNo,
+                    AGENT_SENDER_ID);
+        } else {
+            entity =
+                    CaseIntakeDossierEntity.create(
+                            "INTAKE_DOSSIER_" + compactUuid(),
+                            caseId,
+                            RoomType.INTAKE,
+                            dossierJson,
+                            qualityScore,
+                            readyForNextStep,
+                            recommendation,
+                            turnNo,
+                            AGENT_SENDER_ID);
+        }
+        intakeDossierRepository.save(entity);
     }
 
     private void appendAgentMessage(
@@ -366,6 +412,13 @@ public class IntakeAgentTurnService {
 
     private JsonNode defaultArray(JsonNode node) {
         return node == null || node.isNull() ? objectMapper.createArrayNode() : node;
+    }
+
+    private static String textOrDefault(JsonNode node, String fallback) {
+        if (node == null || node.isMissingNode() || node.isNull() || node.asText().isBlank()) {
+            return fallback;
+        }
+        return node.asText();
     }
 
     private String audienceJson() {

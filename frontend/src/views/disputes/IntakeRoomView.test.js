@@ -203,6 +203,82 @@ describe("IntakeRoomView", () => {
     expect(wrapper.text()).toContain("delivery conflict");
   });
 
+  it("renders the current case-detail dossier as the right-side board", async () => {
+    const wrapper = await mountInteractiveView({
+      initialTurnMemory: {
+        turn_no: 4,
+        case_intake_dossier: {
+          dossier_version: 2,
+          quality_score: 88,
+          ready_for_next_step: true,
+          admission_recommendation: "ACCEPTED",
+          dossier: {
+            schema_version: "intake_case_detail.v1",
+            case_story: {
+              title: "物流显示签收但用户称未收到商品",
+              one_sentence_summary:
+                "用户称订单物流已显示签收，但本人未收到商品，商家暂未提供签收底单。",
+              event_timeline: [
+                {
+                  time_hint: "物流签收后",
+                  event: "用户发现未收到商品",
+                  source: "USER_MESSAGE",
+                },
+              ],
+            },
+            references: {
+              order_reference: "ORDER-1",
+              after_sales_reference: "AFTER-1",
+              logistics_reference: "SF1234567890",
+            },
+            party_positions: {
+              user_claim: "物流显示签收但我没有收到商品。",
+              merchant_claim: "商家要求等待物流核查。",
+              platform_observation: "需要核验签收底单。",
+            },
+            dispute_focus: {
+              core_issue: "SIGNED_NOT_RECEIVED",
+              key_conflicts: ["签收记录与用户未收货陈述冲突"],
+              facts_to_verify: ["签收底单"],
+            },
+            requested_resolution: {
+              requested_outcome: "REFUND",
+              expected_resolution_text: "用户希望退款。",
+            },
+            risk_assessment: {
+              case_grade: "MEDIUM",
+              risk_signals: ["SIGNED_NOT_RECEIVED"],
+              reasoning: "存在签收事实冲突。",
+            },
+            missing_information: {
+              blocking_gaps: [],
+              nice_to_have_gaps: ["签收底单"],
+              next_questions: [],
+            },
+            intake_quality: {
+              score: 88,
+              threshold: 80,
+              ready_for_next_step: true,
+              improvement_reason: "",
+            },
+            admission: {
+              recommendation: "ACCEPTED",
+              reasoning: "接待信息已足够进入证据阶段。",
+              confidence: 0.88,
+            },
+          },
+        },
+      },
+    });
+
+    expect(wrapper.find("[data-case-detail-dossier]").exists()).toBe(true);
+    expect(wrapper.text()).toContain("物流显示签收但用户称未收到商品");
+    expect(wrapper.text()).toContain("用户称订单物流已显示签收");
+    expect(wrapper.text()).toContain("SIGNED_NOT_RECEIVED");
+    expect(wrapper.text()).toContain("88/100");
+    expect(wrapper.text()).toContain("可以进入下一步");
+  });
+
   it("keeps agent memory internals out of the party intake room UI", async () => {
     const wrapper = await mountInteractiveView({
       initialTurnMemory: {

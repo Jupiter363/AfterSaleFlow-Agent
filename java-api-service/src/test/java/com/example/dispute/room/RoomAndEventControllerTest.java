@@ -21,6 +21,7 @@ import com.example.dispute.room.api.CaseEventController;
 import com.example.dispute.room.api.RoomController;
 import com.example.dispute.room.api.RoomTurnMemoryController;
 import com.example.dispute.room.application.CaseEventService;
+import com.example.dispute.room.application.CaseIntakeDossierView;
 import com.example.dispute.room.application.RoomMessageService;
 import com.example.dispute.room.application.RoomMessageView;
 import com.example.dispute.room.application.RoomTurnMemoryQueryService;
@@ -116,6 +117,8 @@ class RoomAndEventControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.turn_no").value(2))
                 .andExpect(jsonPath("$.data.scroll_snapshot.current_outcome").value("REFUND"))
+                .andExpect(jsonPath("$.data.case_intake_dossier.quality_score").value(88))
+                .andExpect(jsonPath("$.data.case_intake_dossier.ready_for_next_step").value(true))
                 .andExpect(jsonPath("$.data.memory_frame.prompt_memory").value("short memory"));
     }
 
@@ -145,6 +148,16 @@ class RoomAndEventControllerTest {
                 nodeFactory.objectNode().put("current_outcome", "REFUND"),
                 nodeFactory.arrayNode().add(nodeFactory.objectNode().put("op", "UPSERT_CARD")),
                 nodeFactory.objectNode().put("prompt_memory", "short memory"),
+                new CaseIntakeDossierView(
+                        "CASE_test",
+                        RoomType.INTAKE,
+                        2,
+                        nodeFactory.objectNode().put("schema_version", "intake_case_detail.v1"),
+                        88,
+                        true,
+                        "ACCEPTED",
+                        2,
+                        OffsetDateTime.parse("2026-07-05T00:00:00Z")),
                 OffsetDateTime.parse("2026-07-05T00:00:00Z"));
     }
 }

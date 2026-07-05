@@ -94,17 +94,83 @@ const stickers = computed(() => {
 });
 
 const scrollSnapshot = computed(() => turnMemory.value?.scroll_snapshot || null);
+const currentCaseDossier = computed(() => turnMemory.value?.case_intake_dossier || null);
+const caseDetailDossier = computed(() => {
+  const current = currentCaseDossier.value?.dossier;
+  if (current?.schema_version === "intake_case_detail.v1") return current;
+  if (scrollSnapshot.value?.schema_version === "intake_case_detail.v1") return scrollSnapshot.value;
+  return null;
+});
+const isCaseDetailDossier = computed(() => Boolean(caseDetailDossier.value));
+const caseDetailQuality = computed(() => {
+  const quality = caseDetailDossier.value?.intake_quality || {};
+  return {
+    score: currentCaseDossier.value?.quality_score ?? quality.score ?? 0,
+    threshold: quality.threshold ?? 80,
+    ready: currentCaseDossier.value?.ready_for_next_step ?? Boolean(quality.ready_for_next_step),
+    reason: quality.improvement_reason || "",
+  };
+});
+const caseDetailReadyCopy = computed(() =>
+  caseDetailQuality.value.ready ? "可以进入下一步" : "继续补充案件信息",
+);
 const scrollCards = computed(() => scrollSnapshot.value?.cards || []);
 function scrollCardValue(key, fallback = "") {
   return scrollCards.value.find((card) => card.key === key)?.value || fallback;
 }
 const riskSignals = computed(() => {
+  const detailSignals = caseDetailDossier.value?.risk_assessment?.risk_signals || [];
+  if (detailSignals.length) return detailSignals;
   const stamps = scrollSnapshot.value?.stamps || [];
   if (stamps.length) return stamps.map((stamp) => stamp.text || stamp.value).filter(Boolean);
   return analysis.value?.initial_risk_signals || ["Waiting for more information"];
 });
 const liveStickers = computed(() => {
   const value = analysis.value || {};
+  const detail = caseDetailDossier.value;
+  if (detail) {
+    return [
+      {
+        label: "References",
+        value: [
+          detail.references?.order_reference,
+          detail.references?.after_sales_reference,
+          detail.references?.logistics_reference,
+        ].filter(Boolean).join(" / "),
+        tone: "blue",
+      },
+      {
+        label: "Initiator",
+        value: value.initiator_role || "Pending",
+        tone: "mint",
+      },
+      {
+        label: "User claim",
+        value: detail.party_positions?.user_claim || value.party_claims?.user,
+        tone: "coral",
+      },
+      {
+        label: "Merchant claim",
+        value: detail.party_positions?.merchant_claim || value.party_claims?.merchant || "Waiting for response",
+        tone: "purple",
+      },
+      {
+        label: "Expected outcome",
+        value: detail.requested_resolution?.requested_outcome || "Pending",
+        tone: "yellow",
+      },
+      {
+        label: "Admission advice",
+        value: detail.admission?.recommendation || currentCaseDossier.value?.admission_recommendation || "Needs more information",
+        tone: "mint",
+      },
+      {
+        label: "Risk signals",
+        value: riskSignals.value.join(" / "),
+        tone: "coral",
+      },
+    ];
+  }
   return [
     {
       label: "References",
@@ -331,6 +397,44 @@ onBeforeUnmount(() => eventAbortController.abort());
           <small>可继续对话纠正</small>
         </header>
 
+        <div
+          v-if="isCaseDetailDossier"
+          class="intake-case-detail"
+          data-case-detail-dossier
+        >
+          <div class="intake-case-detail__score">
+            <span>案件完善度</span>
+            <strong>{{ caseDetailQuality.score }}/100</strong>
+            <i :data-ready="caseDetailQuality.ready">{{ caseDetailReadyCopy }}</i>
+          </div>
+          <div class="intake-case-detail__story">
+            <span>CASE STORY</span>
+            <h3>{{ caseDetailDossier.case_story?.title }}</h3>
+            <p>{{ caseDetailDossier.case_story?.one_sentence_summary }}</p>
+          </div>
+          <div class="intake-case-detail__focus">
+            <span>核心争议</span>
+            <strong>{{ caseDetailDossier.dispute_focus?.core_issue || "UNKNOWN" }}</strong>
+            <p v-if="caseDetailDossier.risk_assessment?.reasoning">
+              {{ caseDetailDossier.risk_assessment.reasoning }}
+            </p>
+          </div>
+          <div
+            v-if="caseDetailDossier.dispute_focus?.facts_to_verify?.length"
+            class="intake-case-detail__chips"
+          >
+            <i
+              v-for="fact in caseDetailDossier.dispute_focus.facts_to_verify"
+              :key="fact"
+            >
+              待核验：{{ fact }}
+            </i>
+          </div>
+          <p v-if="caseDetailQuality.reason" class="intake-case-detail__reason">
+            {{ caseDetailQuality.reason }}
+          </p>
+        </div>
+
         <div class="intake-dossier__stickers">
           <article
             v-for="sticker in liveStickers"
@@ -430,6 +534,91 @@ onBeforeUnmount(() => eventAbortController.abort());
 }
 .intake-dossier header h2 { margin: 5px 0 0; color: #34435c; font-size: 23px; }
 .intake-dossier header small { color: #7384a1; }
+.intake-case-detail {
+  display: grid;
+  gap: 12px;
+  margin: 16px 0;
+  padding: 16px;
+  background:
+    radial-gradient(circle at 12% 12%, #fff7cf 0 12%, transparent 13%),
+    linear-gradient(135deg, #fffdf8, #eef7ff);
+  border: 1px solid #dce9f6;
+  border-radius: 24px;
+  box-shadow: inset 0 1px 0 #ffffff, 0 16px 35px #55739914;
+}
+.intake-case-detail__score {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  background: #ffffffd9;
+  border: 1px solid #e2ebf5;
+  border-radius: 18px;
+}
+.intake-case-detail__score span,
+.intake-case-detail__story span,
+.intake-case-detail__focus span {
+  color: #7788a5;
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: .14em;
+}
+.intake-case-detail__score strong {
+  color: #5b69d8;
+  font-size: 22px;
+}
+.intake-case-detail__score i {
+  padding: 6px 10px;
+  color: #8b6170;
+  background: #fff0f4;
+  border-radius: 999px;
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 800;
+}
+.intake-case-detail__score i[data-ready="true"] {
+  color: #22795e;
+  background: #dff8ec;
+}
+.intake-case-detail__story h3 {
+  margin: 6px 0;
+  color: #2f3e58;
+  font-size: 18px;
+}
+.intake-case-detail__story p,
+.intake-case-detail__focus p,
+.intake-case-detail__reason {
+  margin: 0;
+  color: #68768e;
+  line-height: 1.65;
+}
+.intake-case-detail__focus {
+  display: grid;
+  gap: 5px;
+  padding: 12px;
+  background: #f8fbff;
+  border: 1px dashed #d4e1f0;
+  border-radius: 18px;
+}
+.intake-case-detail__focus strong {
+  color: #ef7c67;
+  letter-spacing: .03em;
+}
+.intake-case-detail__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.intake-case-detail__chips i {
+  padding: 7px 10px;
+  color: #5e6f88;
+  background: #fff;
+  border: 1px solid #e2eaf5;
+  border-radius: 999px;
+  font-size: 12px;
+  font-style: normal;
+}
 .intake-dossier__stickers {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

@@ -22,7 +22,9 @@ import com.example.dispute.room.application.RoomMessageCommand;
 import com.example.dispute.room.domain.MessageType;
 import com.example.dispute.room.domain.RoomType;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
+import com.example.dispute.room.infrastructure.persistence.entity.CaseIntakeDossierEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.RoomTurnMemoryEntity;
+import com.example.dispute.room.infrastructure.persistence.repository.CaseIntakeDossierRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.RoomMessageRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.RoomTurnMemoryRepository;
@@ -50,6 +52,7 @@ class IntakeAgentTurnServiceTest {
     @Mock private FulfillmentCaseRepository caseRepository;
     @Mock private CaseRoomRepository roomRepository;
     @Mock private RoomTurnMemoryRepository memoryRepository;
+    @Mock private CaseIntakeDossierRepository intakeDossierRepository;
     @Mock private RoomMessageRepository messageRepository;
     @Mock private CaseEventService eventService;
     @Mock private IntakeAgentTurnClient client;
@@ -65,6 +68,7 @@ class IntakeAgentTurnServiceTest {
                         caseRepository,
                         roomRepository,
                         memoryRepository,
+                        intakeDossierRepository,
                         messageRepository,
                         eventService,
                         client,
@@ -95,6 +99,10 @@ class IntakeAgentTurnServiceTest {
                                 "我先确认一下：你是说订单显示已签收但没有收到，对吗？",
                                 Map.of("current_outcome", "ASK_FOR_CLARIFICATION")));
         when(memoryRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(intakeDossierRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.INTAKE))
+                .thenReturn(Optional.empty());
+        when(intakeDossierRepository.save(any()))
                 .thenAnswer(invocation -> invocation.getArgument(0));
         when(messageRepository.findByCaseIdAndIdempotencyKey(
                         eq(dispute.getId()), any()))
@@ -134,6 +142,17 @@ class IntakeAgentTurnServiceTest {
         assertThat(memory.getValue().getDossierPatchJson())
                 .contains("\"memory_frame\"")
                 .contains("\"prompt_memory\":\"short memory\"");
+
+        ArgumentCaptor<CaseIntakeDossierEntity> currentDossier =
+                ArgumentCaptor.forClass(CaseIntakeDossierEntity.class);
+        verify(intakeDossierRepository).save(currentDossier.capture());
+        assertThat(currentDossier.getValue().getCaseId()).isEqualTo(dispute.getId());
+        assertThat(currentDossier.getValue().getDossierVersion()).isEqualTo(1);
+        assertThat(currentDossier.getValue().getQualityScore()).isEqualTo(86);
+        assertThat(currentDossier.getValue().isReadyForNextStep()).isTrue();
+        assertThat(currentDossier.getValue().getDossierJson())
+                .contains("intake_case_detail.v1")
+                .contains("ASK_FOR_CLARIFICATION");
     }
 
     @Test
@@ -159,6 +178,10 @@ class IntakeAgentTurnServiceTest {
                                 "我会先补齐缺失的订单、售后和物流引用。",
                                 Map.of("admission_recommendation", "NEED_MORE_INFO")));
         when(memoryRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(intakeDossierRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.INTAKE))
+                .thenReturn(Optional.empty());
+        when(intakeDossierRepository.save(any()))
                 .thenAnswer(invocation -> invocation.getArgument(0));
         when(messageRepository.findByCaseIdAndIdempotencyKey(
                         eq(dispute.getId()), any()))
@@ -225,6 +248,19 @@ class IntakeAgentTurnServiceTest {
                                 Map.of("requested_outcome", "REFUND")));
         when(memoryRepository.save(any()))
                 .thenAnswer(invocation -> invocation.getArgument(0));
+        when(intakeDossierRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.INTAKE))
+                .thenReturn(Optional.of(CaseIntakeDossierEntity.create(
+                        "INTAKE_DOSSIER_EXISTING",
+                        dispute.getId(),
+                        RoomType.INTAKE,
+                        "{\"schema_version\":\"intake_case_detail.v1\"}",
+                        60,
+                        false,
+                        "NEED_MORE_INFO",
+                        1,
+                        "dispute-intake-officer")));
+        when(intakeDossierRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
         when(messageRepository.findByCaseIdAndIdempotencyKey(
                         eq(dispute.getId()), any()))
                 .thenReturn(Optional.empty());
@@ -261,6 +297,12 @@ class IntakeAgentTurnServiceTest {
                 .isEqualTo("DISPUTE_INTAKE_OFFICER");
         assertThat(memories.getAllValues().get(1).getScrollSnapshotJson())
                 .contains("REFUND");
+
+        ArgumentCaptor<CaseIntakeDossierEntity> currentDossier =
+                ArgumentCaptor.forClass(CaseIntakeDossierEntity.class);
+        verify(intakeDossierRepository).save(currentDossier.capture());
+        assertThat(currentDossier.getValue().getDossierVersion()).isEqualTo(2);
+        assertThat(currentDossier.getValue().getSourceTurnNo()).isEqualTo(2);
     }
 
     @Test
@@ -304,6 +346,10 @@ class IntakeAgentTurnServiceTest {
                                 "我会继续补齐缺失的订单、售后和物流引用。",
                                 Map.of("admission_recommendation", "NEED_MORE_INFO")));
         when(memoryRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(intakeDossierRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.INTAKE))
+                .thenReturn(Optional.empty());
+        when(intakeDossierRepository.save(any()))
                 .thenAnswer(invocation -> invocation.getArgument(0));
         when(messageRepository.findByCaseIdAndIdempotencyKey(
                         eq(dispute.getId()), any()))
@@ -366,6 +412,10 @@ class IntakeAgentTurnServiceTest {
                 .thenThrow(new RuntimeException("python returned 422"));
         when(memoryRepository.save(any()))
                 .thenAnswer(invocation -> invocation.getArgument(0));
+        when(intakeDossierRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.INTAKE))
+                .thenReturn(Optional.empty());
+        when(intakeDossierRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
         when(messageRepository.findByCaseIdAndIdempotencyKey(
                         eq(dispute.getId()), any()))
                 .thenReturn(Optional.empty());
@@ -399,10 +449,21 @@ class IntakeAgentTurnServiceTest {
     }
 
     private IntakeAgentTurnResult result(String utterance, Map<String, Object> scrollSnapshot) {
+        Map<String, Object> caseDetail =
+                Map.of(
+                        "schema_version", "intake_case_detail.v1",
+                        "case_story", Map.of("title", "签收未收到"),
+                        "intake_quality",
+                                Map.of(
+                                        "score", 86,
+                                        "threshold", 80,
+                                        "ready_for_next_step", true),
+                        "admission", Map.of("recommendation", "ACCEPTED"),
+                        "legacy", scrollSnapshot);
         return new IntakeAgentTurnResult(
                 utterance,
                 objectMapper.valueToTree(Map.of("summary", utterance)),
-                objectMapper.valueToTree(scrollSnapshot),
+                objectMapper.valueToTree(caseDetail),
                 objectMapper.valueToTree(List.of(Map.of("op", "UPSERT_CARD"))),
                 objectMapper.valueToTree(Map.of("prompt_memory", "short memory")),
                 "CONTINUE",

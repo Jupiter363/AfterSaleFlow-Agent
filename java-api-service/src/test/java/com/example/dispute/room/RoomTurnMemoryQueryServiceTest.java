@@ -13,8 +13,10 @@ import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEnti
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.room.application.RoomTurnMemoryQueryService;
 import com.example.dispute.room.domain.RoomType;
+import com.example.dispute.room.infrastructure.persistence.entity.CaseIntakeDossierEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.RoomTurnMemoryEntity;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseParticipantRepository;
+import com.example.dispute.room.infrastructure.persistence.repository.CaseIntakeDossierRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.RoomTurnMemoryRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.OffsetDateTime;
@@ -31,6 +33,7 @@ class RoomTurnMemoryQueryServiceTest {
     @Mock private FulfillmentCaseRepository caseRepository;
     @Mock private CaseParticipantRepository participantRepository;
     @Mock private RoomTurnMemoryRepository memoryRepository;
+    @Mock private CaseIntakeDossierRepository intakeDossierRepository;
 
     private RoomTurnMemoryQueryService service;
 
@@ -41,6 +44,7 @@ class RoomTurnMemoryQueryServiceTest {
                         caseRepository,
                         participantRepository,
                         memoryRepository,
+                        intakeDossierRepository,
                         new ObjectMapper().findAndRegisterModules());
     }
 
@@ -65,6 +69,17 @@ class RoomTurnMemoryQueryServiceTest {
                                         "{\"current_outcome\":\"REFUND\"}",
                                         "[{\"op\":\"UPSERT_CARD\"}]",
                                         "RUN_3")));
+        when(intakeDossierRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.INTAKE))
+                .thenReturn(Optional.of(CaseIntakeDossierEntity.create(
+                        "INTAKE_DOSSIER_QUERY",
+                        dispute.getId(),
+                        RoomType.INTAKE,
+                        "{\"schema_version\":\"intake_case_detail.v1\",\"intake_quality\":{\"score\":88,\"ready_for_next_step\":true}}",
+                        88,
+                        true,
+                        "ACCEPTED",
+                        3,
+                        "dispute-intake-officer")));
 
         var result =
                 service.latestAgentMemory(
@@ -76,6 +91,8 @@ class RoomTurnMemoryQueryServiceTest {
         assertThat(result.orElseThrow().turnNo()).isEqualTo(3);
         assertThat(result.orElseThrow().scrollSnapshot().path("current_outcome").asText())
                 .isEqualTo("REFUND");
+        assertThat(result.orElseThrow().caseIntakeDossier().qualityScore()).isEqualTo(88);
+        assertThat(result.orElseThrow().caseIntakeDossier().readyForNextStep()).isTrue();
         assertThat(result.orElseThrow().canvasOperations()).hasSize(1);
     }
 
