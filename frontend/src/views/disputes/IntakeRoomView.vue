@@ -216,6 +216,38 @@ function fallbackReferenceSummary(value) {
   });
 }
 
+const caseIndexItems = computed(() => {
+  const value = analysis.value || {};
+  const detail = caseDetailDossier.value;
+  return [
+    {
+      label: "订单号：",
+      value:
+        detail?.references?.order_reference ||
+        scrollCardValue("order_reference", value.order_reference || dispute.value?.order_id),
+    },
+    {
+      label: "售后单号：",
+      value:
+        detail?.references?.after_sales_reference ||
+        scrollCardValue(
+          "after_sales_reference",
+          value.after_sales_reference || dispute.value?.after_sale_id,
+        ),
+    },
+    {
+      label: "物流单号：",
+      value:
+        detail?.references?.logistics_reference ||
+        scrollCardValue("logistics_reference", value.logistics_reference),
+    },
+    {
+      label: "发起方：",
+      value: initiatorRoleCopy.value,
+    },
+  ];
+});
+
 function normalizePartyRoleValue(role) {
   const value = String(role || "").trim().toUpperCase();
   if (
@@ -388,7 +420,7 @@ const caseDetailMetaSections = computed(() => {
       title: "案件索引",
       type: "index",
       tone: "blue",
-      items: pickStickers(["订单 / 售后 / 物流", "发起方"]),
+      items: caseIndexItems.value,
     },
     {
       title: `单方主观描述：${subjectiveStatement.value.titleSuffix}`,
@@ -687,17 +719,6 @@ onBeforeUnmount(() => {
                 {{ humanizeDossierText(caseDetailDossier?.dispute_focus?.core_issue || "UNKNOWN") }}
               </strong>
             </div>
-            <div
-              v-if="caseDetailDossier?.dispute_focus?.facts_to_verify?.length"
-              class="intake-case-detail__chips"
-            >
-              <i
-                v-for="fact in caseDetailDossier?.dispute_focus?.facts_to_verify"
-                :key="fact"
-              >
-                待核验：{{ humanizeDossierText(fact) }}
-              </i>
-            </div>
             <p v-if="caseDetailQuality.reason" class="intake-case-detail__reason">
               {{ caseDetailQuality.reason }}
             </p>
@@ -711,19 +732,18 @@ onBeforeUnmount(() => {
                 <span class="intake-case-detail__meta-title">{{ section.title }}</span>
                 <div
                   v-if="section.type === 'index'"
-                  class="intake-case-detail__index-strip"
-                  data-case-index-strip
+                  class="intake-case-detail__index-list"
+                  data-case-index-list
                 >
                   <article
-                    v-for="sticker in section.items"
-                    :key="`${section.title}-${sticker.label}`"
-                    class="intake-index-chip"
-                    :data-tone="sticker.tone"
-                    data-case-index-chip
+                    v-for="field in section.items"
+                    :key="`${section.title}-${field.label}`"
+                    class="intake-index-field"
+                    data-case-index-field
                     data-intake-sticker
                   >
-                    <span>{{ sticker.label }}</span>
-                    <strong>{{ sticker.value || "待补充" }}</strong>
+                    <span>{{ field.label }}</span>
+                    <strong>{{ field.value || "待补充" }}</strong>
                   </article>
                 </div>
                 <div
@@ -929,7 +949,7 @@ onBeforeUnmount(() => {
   gap: 10px;
   margin: 4px 0 0;
   padding: 14px;
-  overflow-y: auto;
+  overflow: hidden;
   background:
     radial-gradient(circle at 12% 12%, #fff7cf 0 10%, transparent 11%),
     linear-gradient(135deg, #fffdf8, #eef7ff);
@@ -984,12 +1004,17 @@ onBeforeUnmount(() => {
 .intake-case-detail__risk[data-risk="high"] strong { color: #d85b4a; }
 .intake-case-detail__risk[data-risk="medium"] strong { color: #b78b10; }
 .intake-case-detail__risk[data-risk="low"] strong { color: #2f8b64; }
+.intake-case-detail__summary-card {
+  display: grid;
+  gap: 9px;
+  align-content: start;
+}
 .intake-case-detail__meta {
   display: grid;
   align-content: start;
   min-height: 0;
   gap: 8px;
-  padding: 10px;
+  padding: 10px 11px;
   background: #ffffff9e;
   border: 1px solid #e4edf7;
   border-radius: 18px;
@@ -1007,34 +1032,24 @@ onBeforeUnmount(() => {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 9px;
 }
-.intake-case-detail__index-strip {
+.intake-case-detail__index-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px 14px;
+}
+.intake-index-field {
   display: flex;
-  flex-wrap: wrap;
-  gap: 7px;
-}
-.intake-index-chip {
-  display: inline-flex;
-  align-items: center;
+  align-items: baseline;
   min-width: 0;
-  max-width: 100%;
-  gap: 7px;
-  padding: 7px 10px;
   color: #46546e;
-  background: #f8fcff;
-  border: 1px solid #dce8f5;
-  border-radius: 999px;
 }
-.intake-index-chip[data-tone="mint"] {
-  background: #f6fcf8;
-  border-color: #d6eddf;
-}
-.intake-index-chip span {
+.intake-index-field span {
   flex: 0 0 auto;
   color: #74839d;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 800;
 }
-.intake-index-chip strong {
+.intake-index-field strong {
   min-width: 0;
   color: #33415b;
   font-size: 12px;
@@ -1045,14 +1060,16 @@ onBeforeUnmount(() => {
 }
 .intake-case-detail__single-statement {
   display: grid;
-  padding: 2px 4px;
+  padding: 4px 4px 2px;
   color: #3d4860;
-  overflow: hidden;
+  max-height: 112px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .intake-case-detail__single-statement strong {
   color: #34425a;
   font-size: 12px;
-  line-height: 1.55;
+  line-height: 1.58;
   white-space: pre-wrap;
 }
 .intake-case-detail__story h3 {
@@ -1080,20 +1097,6 @@ onBeforeUnmount(() => {
   color: #ef7c67;
   font-size: 13px;
   letter-spacing: .03em;
-}
-.intake-case-detail__chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-.intake-case-detail__chips i {
-  padding: 6px 9px;
-  color: #5e6f88;
-  background: #fff;
-  border: 1px solid #e2eaf5;
-  border-radius: 999px;
-  font-size: 11px;
-  font-style: normal;
 }
 .intake-sticker {
   position: relative;
