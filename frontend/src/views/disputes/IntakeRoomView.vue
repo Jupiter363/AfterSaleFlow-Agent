@@ -1006,22 +1006,31 @@ onBeforeUnmount(() => {
 .intake-case-detail__risk[data-risk="low"] strong { color: #2f8b64; }
 .intake-case-detail__summary-card {
   display: grid;
+  flex: 1 1 auto;
+  min-height: 0;
+  grid-template-rows: auto 96px auto minmax(0, 1fr);
   gap: 9px;
-  align-content: start;
+  align-content: stretch;
 }
 .intake-case-detail__meta {
   display: grid;
-  align-content: start;
+  align-content: stretch;
+  grid-template-rows: auto minmax(0, 1fr);
   min-height: 0;
   gap: 8px;
   padding: 10px 11px;
+  overflow: hidden;
   background: #ffffff9e;
   border: 1px solid #e4edf7;
   border-radius: 18px;
 }
 .intake-case-detail__meta-section {
   display: grid;
+  min-height: 0;
   gap: 6px;
+}
+.intake-case-detail__meta-section[data-tone="purple"] {
+  grid-template-rows: auto minmax(0, 1fr);
 }
 .intake-case-detail__meta-section + .intake-case-detail__meta-section {
   padding-top: 8px;
@@ -1060,9 +1069,11 @@ onBeforeUnmount(() => {
 }
 .intake-case-detail__single-statement {
   display: grid;
+  height: 100%;
+  min-height: 0;
   padding: 4px 4px 2px;
   color: #3d4860;
-  max-height: 112px;
+  max-height: none;
   overflow-y: auto;
   overscroll-behavior: contain;
 }
@@ -1088,14 +1099,18 @@ onBeforeUnmount(() => {
 .intake-case-detail__focus {
   display: grid;
   gap: 4px;
-  padding: 10px;
-  background: #f8fbff;
+  align-content: center;
+  box-sizing: border-box;
+  min-height: 96px;
+  padding: 12px 13px;
+  background: linear-gradient(135deg, #fff9f5, #f6fbff);
   border: 1px dashed #d4e1f0;
   border-radius: 16px;
 }
 .intake-case-detail__focus strong {
   color: #ef7c67;
-  font-size: 13px;
+  font-size: 15px;
+  line-height: 1.45;
   letter-spacing: .03em;
 }
 .intake-sticker {
@@ -1132,10 +1147,10 @@ onBeforeUnmount(() => {
   position: relative;
   display: grid;
   gap: 10px;
-  padding: 12px;
-  background: #f8fbff;
-  border: 1px dashed #cddbec;
-  border-radius: 18px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
 }
 .intake-dossier__confirm p { color: #7b718e; font-size: 12px; }
 .intake-dossier__readonly-actions {
