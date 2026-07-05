@@ -632,10 +632,10 @@ onBeforeUnmount(() => {
             v-if="intakeRecipientView"
             class="intake-room__locked-chat"
             data-intake-locked-chat
-            aria-label="仅发起方可查看"
+            aria-label="只有发起方可以查看哦"
           >
             <span aria-hidden="true">🔒</span>
-            <strong>仅发起方可查看</strong>
+            <strong>只有发起方可以查看哦</strong>
             <p>接待室保存的是发起方与接待官的单方事实梳理。你可以查看右侧案件概况，并进入证据室完成正式举证与回应。</p>
           </div>
         </div>

@@ -618,7 +618,7 @@ describe("IntakeRoomView", () => {
 
     expect(wrapper.find(".conversation-stream__composer").exists()).toBe(false);
     expect(wrapper.find("[data-intake-locked-chat]").exists()).toBe(true);
-    expect(wrapper.text()).toContain("仅发起方可查看");
+    expect(wrapper.text()).toContain("只有发起方可以查看哦");
     expect(wrapper.find("[data-confirm-admission]").exists()).toBe(false);
     expect(wrapper.find("[data-resolve-without-dispute]").exists()).toBe(false);
     expect(wrapper.find("[data-enter-evidence-room]").exists()).toBe(true);
