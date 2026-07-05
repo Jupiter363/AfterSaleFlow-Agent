@@ -19,13 +19,19 @@ import com.example.dispute.config.SecurityConfiguration;
 import com.example.dispute.config.SecurityFailureWriter;
 import com.example.dispute.room.api.CaseEventController;
 import com.example.dispute.room.api.RoomController;
+import com.example.dispute.room.api.RoomTurnMemoryController;
 import com.example.dispute.room.application.CaseEventService;
 import com.example.dispute.room.application.RoomMessageService;
 import com.example.dispute.room.application.RoomMessageView;
+import com.example.dispute.room.application.RoomTurnMemoryQueryService;
+import com.example.dispute.room.application.RoomTurnMemoryView;
 import com.example.dispute.room.domain.MessageType;
 import com.example.dispute.room.domain.RoomType;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import java.time.Instant;
+import java.time.OffsetDateTime;
 import java.util.List;
+import java.util.Optional;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
@@ -35,7 +41,7 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
-@WebMvcTest({RoomController.class, CaseEventController.class})
+@WebMvcTest({RoomController.class, CaseEventController.class, RoomTurnMemoryController.class})
 @Import({
     CommonConfiguration.class,
     TraceIdFilter.class,
@@ -51,6 +57,7 @@ class RoomAndEventControllerTest {
     @Autowired private MockMvc mockMvc;
     @MockitoBean private RoomMessageService messageService;
     @MockitoBean private CaseEventService eventService;
+    @MockitoBean private RoomTurnMemoryQueryService turnMemoryQueryService;
 
     @Test
     void postsAnIdempotentRoomMessageAndReturnsItsSequence() throws Exception {
@@ -96,6 +103,22 @@ class RoomAndEventControllerTest {
                 .andExpect(request().asyncStarted());
     }
 
+    @Test
+    void returnsLatestRoomTurnMemoryForTheIntakeScroll() throws Exception {
+        when(turnMemoryQueryService.latestAgentMemory(
+                        eq("CASE_test"), eq(RoomType.INTAKE), any()))
+                .thenReturn(Optional.of(turnMemory()));
+
+        mockMvc.perform(
+                        get("/api/disputes/CASE_test/rooms/INTAKE/turn-memory/latest")
+                                .header(HeaderAuthenticationFilter.USER_ID_HEADER, "user-local")
+                                .header(HeaderAuthenticationFilter.ROLE_HEADER, "USER"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.turn_no").value(2))
+                .andExpect(jsonPath("$.data.scroll_snapshot.current_outcome").value("REFUND"))
+                .andExpect(jsonPath("$.data.memory_frame.prompt_memory").value("short memory"));
+    }
+
     private static RoomMessageView message() {
         return new RoomMessageView(
                 "MESSAGE_1",
@@ -108,5 +131,20 @@ class RoomAndEventControllerTest {
                 "物流显示签收，但我没有收到。",
                 List.of(),
                 Instant.parse("2026-07-03T00:00:00Z"));
+    }
+
+    private static RoomTurnMemoryView turnMemory() {
+        var nodeFactory = JsonNodeFactory.instance;
+        return new RoomTurnMemoryView(
+                "CASE_test",
+                RoomType.INTAKE,
+                2,
+                "DISPUTE_INTAKE_OFFICER",
+                "我已经更新退款诉求。",
+                nodeFactory.objectNode().put("requested_outcome", "REFUND"),
+                nodeFactory.objectNode().put("current_outcome", "REFUND"),
+                nodeFactory.arrayNode().add(nodeFactory.objectNode().put("op", "UPSERT_CARD")),
+                nodeFactory.objectNode().put("prompt_memory", "short memory"),
+                OffsetDateTime.parse("2026-07-05T00:00:00Z"));
     }
 }

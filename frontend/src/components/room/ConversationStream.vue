@@ -4,6 +4,11 @@ import { computed, ref } from "vue";
 const props = defineProps({
   messages: { type: Array, default: () => [] },
   disabled: { type: Boolean, default: false },
+  composerVisible: { type: Boolean, default: true },
+  disabledReason: {
+    type: String,
+    default: "切换为用户或商家身份后，可以继续与数字人对话。",
+  },
   placeholder: { type: String, default: "把你的情况告诉数字人…" },
 });
 
@@ -57,7 +62,12 @@ function displayMessageText(value) {
       </div>
     </div>
 
-    <form class="conversation-stream__composer" data-send-message @submit.prevent="submit">
+    <form
+      v-if="composerVisible"
+      class="conversation-stream__composer"
+      data-send-message
+      @submit.prevent="submit"
+    >
       <textarea
         v-model="text"
         :disabled="disabled"
@@ -70,6 +80,9 @@ function displayMessageText(value) {
         <button type="submit" :disabled="disabled || !text.trim()">发送陈述</button>
       </div>
     </form>
+    <p v-else class="conversation-stream__readonly" data-room-readonly>
+      {{ disabledReason }}
+    </p>
   </section>
 </template>
 
@@ -138,4 +151,12 @@ function displayMessageText(value) {
   cursor: pointer;
 }
 .conversation-stream__composer button:disabled { opacity: .45; cursor: not-allowed; }
+.conversation-stream__readonly {
+  margin: 0;
+  padding: 14px 16px;
+  color: #6b7890;
+  background: #f7fbff;
+  border: 1px dashed #cddbec;
+  border-radius: 18px;
+}
 </style>

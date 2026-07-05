@@ -29,6 +29,7 @@ public record CreateDisputeRequest(
         return new CreateCaseCommand(
                 orderReference,
                 afterSalesReference,
+                logisticsReference,
                 userId,
                 merchantId,
                 description,

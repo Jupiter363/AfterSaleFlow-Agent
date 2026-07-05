@@ -207,7 +207,7 @@ def _headers() -> dict[str, str]:
     return {"X-Service-Secret": "test-agent-service-secret"}
 
 
-def test_all_six_final_internal_agent_routes_are_authenticated() -> None:
+def test_all_final_internal_agent_routes_are_authenticated() -> None:
     client = _client()
     paths = {
         route.path
@@ -217,6 +217,7 @@ def test_all_six_final_internal_agent_routes_are_authenticated() -> None:
     }
     assert paths == {
         "/internal/agents/intake/analyze",
+        "/internal/agents/intake/turn",
         "/internal/agents/evidence/build",
         "/internal/agents/hearing/run-stage",
         "/internal/agents/deliberation/run",

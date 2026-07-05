@@ -51,6 +51,26 @@ public class IntakeRoomController {
                 Instant.now(clock));
     }
 
+    @PostMapping("/cancel")
+    public ApiResponse<IntakeConfirmationView> cancel(
+            @PathVariable
+                    @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}")
+                    String caseId,
+            @Valid @RequestBody(required = false) IntakeCancelRequest request,
+            Authentication authentication,
+            HttpServletRequest servletRequest) {
+        String traceId = correlationId(servletRequest, TraceIdFilter.TRACE_ATTRIBUTE);
+        String requestId = correlationId(servletRequest, TraceIdFilter.REQUEST_ATTRIBUTE);
+        return ApiResponse.success(
+                service.cancel(
+                        caseId,
+                        (AuthenticatedActor) authentication.getPrincipal(),
+                        request == null ? "" : request.reason()),
+                requestId,
+                traceId,
+                Instant.now(clock));
+    }
+
     private static String correlationId(HttpServletRequest request, String attribute) {
         Object value = request.getAttribute(attribute);
         if (value instanceof String id && !id.isBlank()) {

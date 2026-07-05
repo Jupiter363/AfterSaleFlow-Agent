@@ -97,6 +97,54 @@ class DisputeIntakeResult(StrictModel):
         return self.initial_risk_signals
 
 
+class IntakeLobbySeed(StrictModel):
+    order_reference: Identifier | None = None
+    after_sales_reference: Identifier | None = None
+    logistics_reference: Identifier | None = None
+    initiator_role: Literal["USER", "MERCHANT", "CUSTOMER_SERVICE", "SYSTEM"] = (
+        "USER"
+    )
+    raw_text: LongText
+    requested_outcome_hint: Identifier | None = None
+
+
+class IntakeTurnMessage(StrictModel):
+    message_id: Identifier
+    role: Literal["USER", "MERCHANT", "CUSTOMER_SERVICE", "SYSTEM", "AGENT"]
+    text: LongText
+
+
+class IntakeTurnRequest(StrictModel):
+    case_id: Annotated[
+        str, Field(pattern=r"^CASE_[A-Za-z0-9_]{1,59}$")
+    ]
+    room_type: Literal["INTAKE"]
+    turn_source: Literal["LOBBY_SEED", "USER_MESSAGE"]
+    lobby_seed: IntakeLobbySeed
+    current_user_message: IntakeTurnMessage | None = None
+    latest_scroll_snapshot: dict[str, object] | None = None
+    recent_turns: Annotated[list[dict[str, object]], Field(max_length=20)] = Field(
+        default_factory=list
+    )
+
+
+class IntakeTurnResult(StrictModel):
+    room_utterance: LongText
+    dossier_patch: dict[str, object]
+    scroll_snapshot: dict[str, object]
+    canvas_operations: Annotated[list[dict[str, object]], Field(max_length=100)]
+    memory_frame: dict[str, object] = Field(default_factory=dict)
+    admission_recommendation: Literal[
+        "ACCEPTED",
+        "NEED_MORE_INFO",
+        "NOT_ADMISSIBLE",
+    ]
+    missing_fields: list[Identifier] = Field(default_factory=list)
+    knowledge_query_intent: bool = False
+    knowledge_answer_mode: Literal["NONE", "STUB"] = "NONE"
+    confidence: Annotated[float, Field(ge=0, le=1)]
+
+
 class HearingStage(StrEnum):
     C1_ISSUE_FRAMING = "C1_ISSUE_FRAMING"
     C2_EVIDENCE_GAP = "C2_EVIDENCE_GAP"

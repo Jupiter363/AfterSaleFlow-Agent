@@ -13,6 +13,8 @@ import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEnti
 import com.example.dispute.infrastructure.persistence.repository.AuditLogRepository;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.room.application.ParticipantService;
+import com.example.dispute.room.application.IntakeAgentTurnService;
+import com.example.dispute.room.application.IntakeLobbySeed;
 import com.example.dispute.room.domain.RoomType;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
@@ -39,6 +41,7 @@ public class CaseApplicationService {
     private final AgentServiceClient agentServiceClient;
     private final CaseRoomRepository roomRepository;
     private final ParticipantService participantService;
+    private final IntakeAgentTurnService intakeAgentTurnService;
     private final AppProperties properties;
     private final Clock clock;
     private final ObjectMapper objectMapper;
@@ -49,6 +52,7 @@ public class CaseApplicationService {
             AgentServiceClient agentServiceClient,
             CaseRoomRepository roomRepository,
             ParticipantService participantService,
+            IntakeAgentTurnService intakeAgentTurnService,
             AppProperties properties,
             Clock clock,
             ObjectMapper objectMapper) {
@@ -57,6 +61,7 @@ public class CaseApplicationService {
         this.agentServiceClient = agentServiceClient;
         this.roomRepository = roomRepository;
         this.participantService = participantService;
+        this.intakeAgentTurnService = intakeAgentTurnService;
         this.properties = properties;
         this.clock = clock;
         this.objectMapper = objectMapper;
@@ -211,6 +216,7 @@ public class CaseApplicationService {
                         caseId,
                         blankToNull(command.orderId()),
                         blankToNull(command.afterSaleId()),
+                        blankToNull(command.logisticsId()),
                         required(command.userId(), "userId"),
                         required(command.merchantId(), "merchantId"),
                         required(idempotencyKey, "idempotencyKey"),
@@ -238,6 +244,18 @@ public class CaseApplicationService {
                 || actor.role() == ActorRole.MERCHANT) {
             participantService.addInitiator(saved, actor, now);
         }
+        intakeAgentTurnService.startInitialTurn(
+                saved.getId(),
+                actor,
+                new IntakeLobbySeed(
+                        command.orderId(),
+                        command.afterSaleId(),
+                        command.logisticsId(),
+                        intakeInitiatorRole(actor.role()),
+                        command.description(),
+                        null),
+                traceId,
+                requestId);
 
         if (properties.logging().auditEnabled()) {
             auditLogRepository.save(
@@ -284,6 +302,13 @@ public class CaseApplicationService {
         java.util.ArrayList<String> merged = new java.util.ArrayList<>(slots);
         merged.add("ORDER_ID");
         return List.copyOf(merged);
+    }
+
+    private static String intakeInitiatorRole(ActorRole role) {
+        return switch (role) {
+            case USER, MERCHANT, CUSTOMER_SERVICE, SYSTEM -> role.name();
+            case PLATFORM_REVIEWER, ADMIN -> ActorRole.SYSTEM.name();
+        };
     }
 
     private void assertCanRead(FulfillmentCaseEntity entity, AuthenticatedActor actor) {

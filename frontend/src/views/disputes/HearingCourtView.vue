@@ -39,6 +39,7 @@ const route = useRoute();
 const router = useRouter();
 const hearing = ref(props.initialHearing);
 const agentState = ref("LISTENING");
+const reviewGateOpen = ref(false);
 const error = ref("");
 const confirmingVersion = ref(null);
 const messages = ref([...(props.initialMessages || [])]);
@@ -95,6 +96,12 @@ const evidenceSourceType = computed(() => {
   return "PLATFORM_UPLOAD";
 });
 const partyRoles = ["USER", "MERCHANT"];
+const reviewGateEvents = new Set([
+  "REVIEW_TASK_CREATED",
+  "REVIEW_GATE_READY",
+  "HUMAN_REVIEW_OPENED",
+  "ADJUDICATION_DRAFT_READY",
+]);
 const isCaseParty = computed(() => partyRoles.includes(role.value));
 const submittedRoles = computed(
   () => activeRound.value?.submitted_roles || activeRound.value?.submittedRoles || [],
@@ -111,6 +118,25 @@ const activeRoundClosed = computed(() =>
   ["COMPLETED", "FORCED_CLOSED", "CLOSED"].includes(
     activeRound.value?.status || "",
   ),
+);
+const activeRoundNo = computed(
+  () => activeRound.value?.round_no || activeRound.value?.roundNo || 0,
+);
+const finalRoundSealed = computed(
+  () => activeRoundClosed.value && activeRoundNo.value >= props.roundLimit,
+);
+const reviewHandoffVisible = computed(
+  () => isCaseParty.value && finalRoundSealed.value,
+);
+const reviewHandoffTitle = computed(() =>
+  reviewGateOpen.value
+    ? "裁决草案已送入平台终审"
+    : "三轮陈述已封存，准备进入平台终审",
+);
+const reviewHandoffBody = computed(() =>
+  reviewGateOpen.value
+    ? "平台审核员会基于冻结卷宗完成最终确认。用户和商家不用再留在小法庭等待，新的传票信箱会同步终审与执行结果。"
+    : "本案已经达到三轮陈述上限，双方内容已自动封存。AI 法官会输出确定裁决草案，随后交给平台审核员完成平台终审。",
 );
 const counterpartyLabel = computed(() =>
   role.value === "USER" ? "商家" : "用户",
@@ -317,6 +343,11 @@ function startEventStream() {
     signal: eventAbortController.signal,
     snapshotLoader: refreshHearing,
     applyEvent: async (event) => {
+      if (reviewGateEvents.has(event.event)) {
+        reviewGateOpen.value = true;
+        agentState.value = "HANDOFF";
+        await refreshHearing();
+      }
       if (event.event === "CASE_CLOSED") {
         await router.push(`/disputes/${caseId.value}/outcome`);
       }
@@ -488,6 +519,21 @@ onBeforeUnmount(() => eventAbortController.abort());
               {{ activeRoundClosed ? "本轮已封存" : "已提交本轮" }}
             </strong>
           </div>
+        </section>
+
+        <section
+          v-if="reviewHandoffVisible"
+          class="review-handoff-card"
+          data-review-handoff
+        >
+          <div>
+            <span>REVIEW HANDOFF</span>
+            <h3>{{ reviewHandoffTitle }}</h3>
+            <p>{{ reviewHandoffBody }}</p>
+          </div>
+          <button type="button" @click="router.push('/disputes')">
+            返回争议订单中心
+          </button>
         </section>
 
         <div class="court-actions">
@@ -706,6 +752,47 @@ onBeforeUnmount(() => eventAbortController.abort());
   background: #e1f6e9;
   border: 1px solid #bde8d1;
   border-radius: 14px;
+}
+.review-handoff-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 16px;
+  align-items: center;
+  padding: 16px;
+  margin: 0 0 14px;
+  background:
+    radial-gradient(circle at 10% 0, #ffe4ad 0 12%, transparent 13%),
+    linear-gradient(135deg, #fff9ec, #eef8ff 55%, #f6f0ff);
+  border: 1px solid #f1d7a7;
+  border-radius: 22px;
+  box-shadow: inset 0 1px 0 #ffffff, 0 16px 34px #a8753417;
+}
+.review-handoff-card span {
+  color: #a47333;
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: .16em;
+}
+.review-handoff-card h3 {
+  margin: 4px 0 7px;
+  color: #34455e;
+}
+.review-handoff-card p {
+  max-width: 680px;
+  margin: 0;
+  color: #6d7890;
+  line-height: 1.6;
+}
+.review-handoff-card button {
+  padding: 12px 15px;
+  color: #fff;
+  white-space: nowrap;
+  background: linear-gradient(135deg, #ffb65c, #f07fa3);
+  border: 0;
+  border-radius: 15px;
+  box-shadow: 0 14px 28px #f07fa326;
+  font-weight: 900;
+  cursor: pointer;
 }
 .court-actions { display: flex; gap: 9px; flex-wrap: wrap; }
 .court-actions button, .settlement-card button {

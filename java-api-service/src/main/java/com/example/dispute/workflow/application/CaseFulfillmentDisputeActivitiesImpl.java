@@ -37,6 +37,7 @@ import java.math.BigDecimal;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 import org.springframework.stereotype.Component;
@@ -168,7 +169,7 @@ public class CaseFulfillmentDisputeActivitiesImpl
                             traceId,
                             "REQ_" + command.workflowId() + "_" + command.roundNo());
         } catch (RuntimeException failure) {
-            result = fallbackManualReviewResult(command, failure);
+            result = fallbackManualReviewResult(command, request, failure);
         }
         boolean requiresAdditionalEvidence =
                 result.requiresAdditionalEvidence()
@@ -256,7 +257,16 @@ public class CaseFulfillmentDisputeActivitiesImpl
     }
 
     private HearingAgentResult fallbackManualReviewResult(
-            HearingAnalysisActivityCommand command, RuntimeException failure) {
+            HearingAnalysisActivityCommand command, JsonNode request, RuntimeException failure) {
+        boolean finalPlanRequired = command.mustProduceFinalPlan();
+        String recommendedOutcome =
+                finalPlanRequired
+                        ? deterministicFinalFallbackOutcome(request)
+                        : "MANUAL_REVIEW_REQUIRED";
+        String reasoningSummary =
+                finalPlanRequired
+                        ? deterministicFinalFallbackReasoning(recommendedOutcome)
+                        : "模型服务暂不可用，系统已将当前证据、庭审陈述和一致方案收敛为非最终草案，等待平台审核员人工确认。";
         ObjectNode raw = objectMapper.createObjectNode();
         raw.put("case_id", command.caseId());
         raw.put("workflow_id", command.workflowId());
@@ -273,25 +283,40 @@ public class CaseFulfillmentDisputeActivitiesImpl
                 .putArray("gaps");
         raw.putObject("evidence_cross_check")
                 .putArray("findings")
-                .add("模型服务暂不可用，未执行自动证据交叉核验。");
+                .add(
+                        finalPlanRequired
+                                ? "最终轮次已结束；模型服务暂不可用，系统按现有卷宗生成可审核的确定性兜底方案。"
+                                : "模型服务暂不可用，未执行自动证据交叉核验。");
         raw.putObject("rule_application")
                 .putArray("applications")
-                .add("模型服务暂不可用，平台规则适用需由审核员人工确认。");
+                .add(
+                        finalPlanRequired
+                                ? "平台审核员需核验兜底方案是否符合履约、售后、物流和执行规则。"
+                                : "模型服务暂不可用，平台规则适用需由审核员人工确认。");
         ObjectNode draft = raw.putObject("adjudication_draft").putObject("draft");
         draft.put("draft_status", "PENDING_HUMAN_REVIEW");
-        draft.put("recommended_outcome", "MANUAL_REVIEW_REQUIRED");
-        draft.put(
-                "reasoning_summary",
-                "模型服务暂不可用，系统已将当前证据、庭审陈述和一致方案收敛为非最终草案，等待平台审核员人工确认。");
+        draft.put("recommended_outcome", recommendedOutcome);
+        draft.put("reasoning_summary", reasoningSummary);
         draft.putArray("issue_findings")
-                .add("模型服务暂不可用，需人工核对双方履约主张和证据完整性。");
-        draft.put("confidence", 0.10);
-        draft.putArray("review_focus")
-                .add("模型服务暂不可用，需人工复核")
-                .add("核对双方一致方案、证据完整性和执行动作");
-        raw.putArray("manual_review_reasons")
-                .add("HEARING_AGENT_UNAVAILABLE")
-                .add(safeMessage(failure));
+                .add(
+                        finalPlanRequired
+                                ? "最终轮次已结束，系统不能继续要求补充陈述，需形成可审核的确定性处理方案。"
+                                : "模型服务暂不可用，需人工核对双方履约主张和证据完整性。");
+        draft.put("confidence", finalPlanRequired ? 0.25 : 0.10);
+        ArrayNode reviewFocus = draft.putArray("review_focus");
+        reviewFocus.add("模型服务暂不可用，需人工复核");
+        if (finalPlanRequired) {
+            reviewFocus.add("核验确定性兜底方案的履约依据、执行条件和双方影响");
+            reviewFocus.add("确认是否需要按签收凭证、库存或退款条件调整执行动作");
+        } else {
+            reviewFocus.add("核对双方一致方案、证据完整性和执行动作");
+        }
+        ArrayNode manualReasons = raw.putArray("manual_review_reasons");
+        manualReasons.add("HEARING_AGENT_UNAVAILABLE");
+        if (finalPlanRequired) {
+            manualReasons.add("DETERMINISTIC_FINAL_PLAN_FALLBACK");
+        }
+        manualReasons.add(safeMessage(failure));
         raw.put("prompt_version", "hearing-fallback-v1");
         raw.put("model", "local-manual-review-fallback");
         return new HearingAgentResult(
@@ -301,6 +326,67 @@ public class CaseFulfillmentDisputeActivitiesImpl
                 List.of("adjudication_draft_node"),
                 "hearing-fallback-v1",
                 "local-manual-review-fallback");
+    }
+
+    private static String deterministicFinalFallbackOutcome(JsonNode request) {
+        String context = requestContext(request);
+        String normalized = context.toUpperCase(Locale.ROOT);
+        if (containsAny(normalized, "REFUND")
+                || containsAny(context, "退款", "退费", "返款")) {
+            return "REFUND_AFTER_REVIEW";
+        }
+        if (containsAny(normalized, "DAMAGED", "BROKEN", "MISMATCH", "WRONG ITEM")
+                || containsAny(context, "破损", "损坏", "不一致", "错发", "型号不符")) {
+            return "REPLACE_AFTER_REVIEW";
+        }
+        if (containsAny(normalized, "NOT RECEIVED", "NON_RECEIPT", "SIGNED_NOT_RECEIVED")
+                || containsAny(context, "未收到", "没收到", "签收未收到", "没有收到", "补发")) {
+            return "RESHIP_IF_SIGNATURE_PROOF_MISSING";
+        }
+        return "RESHIP_OR_REMEDY_AFTER_REVIEW";
+    }
+
+    private static String deterministicFinalFallbackReasoning(String recommendedOutcome) {
+        if (recommendedOutcome.contains("REFUND")) {
+            return "最终轮次已结束；模型服务暂不可用，系统按现有卷宗形成退款方向的非最终裁决草案，等待平台审核员核验金额、责任和支付条件。";
+        }
+        if (recommendedOutcome.contains("REPLACE")) {
+            return "最终轮次已结束；模型服务暂不可用，系统按现有卷宗形成换货/更换方向的非最终裁决草案，等待平台审核员核验商品、库存和物流条件。";
+        }
+        return "最终轮次已结束；模型服务暂不可用，系统按现有卷宗形成补发方向的非最终裁决草案，等待平台审核员核验签收证明、库存和履约时限。";
+    }
+
+    private static String requestContext(JsonNode request) {
+        StringBuilder context = new StringBuilder();
+        request.path("claims")
+                .forEach(
+                        claim -> {
+                            appendText(context, claim.path("claim_id").asText());
+                            appendText(context, claim.path("party_type").asText());
+                            appendText(context, claim.path("statement").asText());
+                        });
+        request.path("evidence")
+                .forEach(
+                        evidence -> {
+                            appendText(context, evidence.path("evidence_type").asText());
+                            appendText(context, evidence.path("content").asText());
+                        });
+        return context.toString();
+    }
+
+    private static void appendText(StringBuilder builder, String value) {
+        if (value != null && !value.isBlank()) {
+            builder.append(' ').append(value);
+        }
+    }
+
+    private static boolean containsAny(String value, String... needles) {
+        for (String needle : needles) {
+            if (value.contains(needle)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private JsonNode buildAgentRequest(HearingAnalysisActivityCommand command) {

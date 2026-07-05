@@ -173,6 +173,36 @@ public class FulfillmentCaseEntity extends AbstractEntity {
                 actorId);
     }
 
+    public static FulfillmentCaseEntity create(
+            String id,
+            String orderId,
+            String afterSaleId,
+            String logisticsId,
+            String userId,
+            String merchantId,
+            String creationIdempotencyKey,
+            String caseType,
+            String title,
+            String description,
+            RiskLevel riskLevel,
+            String actorId) {
+        FulfillmentCaseEntity entity =
+                new FulfillmentCaseEntity(
+                        id,
+                        orderId,
+                        afterSaleId,
+                        userId,
+                        merchantId,
+                        creationIdempotencyKey,
+                        caseType,
+                        title,
+                        description,
+                        riskLevel,
+                        actorId);
+        entity.logisticsId = blankToNull(logisticsId);
+        return entity;
+    }
+
     public static FulfillmentCaseEntity imported(
             String id,
             String orderId,
@@ -262,6 +292,15 @@ public class FulfillmentCaseEntity extends AbstractEntity {
         this.caseStatus = CaseStatus.NOT_ADMISSIBLE;
         this.currentRoom = null;
         this.currentDeadlineAt = null;
+        this.updatedBy = required(actorId, "actorId");
+    }
+
+    public void cancelIntake(String actorId, OffsetDateTime now) {
+        assertIntakeCanBeConfirmed();
+        this.caseStatus = CaseStatus.CANCELLED;
+        this.currentRoom = null;
+        this.currentDeadlineAt = null;
+        this.closedAt = Objects.requireNonNull(now, "now must not be null");
         this.updatedBy = required(actorId, "actorId");
     }
 

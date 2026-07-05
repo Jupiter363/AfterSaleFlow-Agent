@@ -22,6 +22,7 @@ public record CreateCaseRequest(
         return new CreateCaseCommand(
                 orderId,
                 afterSaleId,
+                null,
                 userId,
                 merchantId,
                 description,

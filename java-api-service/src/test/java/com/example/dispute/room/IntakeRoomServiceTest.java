@@ -2,6 +2,7 @@ package com.example.dispute.room;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -85,7 +86,7 @@ class IntakeRoomServiceTest {
                         CLOCK);
         when(caseRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
         when(roomRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
-        when(participantRepository.saveAll(any()))
+        lenient().when(participantRepository.saveAll(any()))
                 .thenAnswer(invocation -> invocation.getArgument(0));
     }
 
@@ -275,6 +276,49 @@ class IntakeRoomServiceTest {
         assertThat(rooms.getAllValues())
                 .extracting(CaseRoomEntity::getRoomType)
                 .containsExactly(RoomType.INTAKE);
+    }
+
+    @Test
+    void resolvedIntakeCancellationClosesTheRoomWithoutOpeningEvidence() {
+        FulfillmentCaseEntity dispute = pendingCase("CASE_CANCELLED");
+        CaseRoomEntity existing =
+                CaseRoomEntity.open(
+                        "ROOM_CANCELLED_INTAKE",
+                        "CASE_CANCELLED",
+                        RoomType.INTAKE,
+                        OffsetDateTime.parse("2026-07-02T20:00:00Z"),
+                        "external-adapter");
+        when(caseRepository.findByIdForUpdate("CASE_CANCELLED"))
+                .thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(
+                        "CASE_CANCELLED", RoomType.INTAKE))
+                .thenReturn(Optional.of(existing));
+
+        var result =
+                service.cancel(
+                        "CASE_CANCELLED",
+                        new AuthenticatedActor("user-local", ActorRole.USER),
+                        "user resolved with merchant");
+
+        assertThat(result.caseStatus()).isEqualTo(CaseStatus.CANCELLED);
+        assertThat(result.currentRoom()).isNull();
+        assertThat(result.deadlineAt()).isNull();
+        assertThat(dispute.getCaseStatus()).isEqualTo(CaseStatus.CANCELLED);
+        ArgumentCaptor<CaseRoomEntity> rooms = ArgumentCaptor.forClass(CaseRoomEntity.class);
+        verify(roomRepository).save(rooms.capture());
+        assertThat(rooms.getValue().getRoomStatus()).isEqualTo(RoomStatus.CLOSED);
+        verify(participantRepository, never()).saveAll(any());
+        verify(phaseClockRepository, never()).save(any());
+        verify(notificationService, never()).send(any());
+        verify(caseEventService)
+                .recordLifecycleEvent(
+                        org.mockito.ArgumentMatchers.eq("CASE_CANCELLED"),
+                        org.mockito.ArgumentMatchers.eq("ROOM_CANCELLED_INTAKE"),
+                        org.mockito.ArgumentMatchers.eq("INTAKE_CANCELLED"),
+                        any(),
+                        org.mockito.ArgumentMatchers.eq(
+                                "intake-cancelled:CASE_CANCELLED"),
+                        org.mockito.ArgumentMatchers.eq("user-local"));
     }
 
     private static FulfillmentCaseEntity pendingCase(String id) {

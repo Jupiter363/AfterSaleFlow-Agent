@@ -57,6 +57,7 @@ class RestClientAgentServiceClientTest {
                         new CreateCaseCommand(
                                 "order-1",
                                 null,
+                                null,
                                 "user-1",
                                 "merchant-1",
                                 "物流签收但未收到",

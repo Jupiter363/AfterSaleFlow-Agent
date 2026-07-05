@@ -151,6 +151,30 @@ function draftAttention(draft) {
   return listEntries(draft?.reviewer_attention);
 }
 
+function draftDecision(draft) {
+  return displayValue(
+    draft?.recommended_decision ||
+      draft?.recommendedDecision ||
+      draft?.recommended_outcome ||
+      draft?.recommendedOutcome ||
+      draft?.conclusion ||
+      draft?.decision ||
+      "等待草案",
+  );
+}
+
+function draftReasoning(draft) {
+  return (
+    draft?.draft_text ||
+    draft?.draftText ||
+    draft?.reasoning_summary ||
+    draft?.reasoningSummary ||
+    draft?.reasoning ||
+    draft?.reason ||
+    ""
+  );
+}
+
 function riskLabel(risk) {
   return riskLabels[risk] || risk || "未评估";
 }
@@ -287,9 +311,9 @@ onMounted(load);
           </article>
           <article class="packet-cards__draft">
             <span>AI 裁决草案（非最终）</span>
-            <strong>{{ displayValue(packet.draft?.conclusion || packet.draft?.decision || "等待草案") }}</strong>
-            <p v-if="packet.draft?.reasoning || packet.draft?.reason">
-              {{ displayValue(packet.draft.reasoning || packet.draft.reason) }}
+            <strong>{{ draftDecision(packet.draft) }}</strong>
+            <p v-if="draftReasoning(packet.draft)">
+              {{ displayValue(draftReasoning(packet.draft)) }}
             </p>
             <div v-if="draftAttention(packet.draft).length" class="risk-chips">
               <i v-for="item in draftAttention(packet.draft)" :key="displayValue(item)">

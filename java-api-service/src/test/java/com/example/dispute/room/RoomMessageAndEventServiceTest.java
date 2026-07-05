@@ -3,6 +3,7 @@ package com.example.dispute.room;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -14,6 +15,7 @@ import com.example.dispute.domain.model.RiskLevel;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.room.application.CaseEventService;
+import com.example.dispute.room.application.IntakeAgentTurnService;
 import com.example.dispute.room.application.CaseEventView;
 import com.example.dispute.room.application.RoomMessageCommand;
 import com.example.dispute.room.application.RoomMessageService;
@@ -59,6 +61,7 @@ class RoomMessageAndEventServiceTest {
     @Mock private CaseParticipantRepository participantRepository;
     @Mock private RoomMessageRepository messageRepository;
     @Mock private CaseTimelineEventRepository eventRepository;
+    @Mock private IntakeAgentTurnService intakeAgentTurnService;
 
     private CaseEventService eventService;
     private RoomMessageService messageService;
@@ -79,6 +82,7 @@ class RoomMessageAndEventServiceTest {
                         participantRepository,
                         messageRepository,
                         eventService,
+                        intakeAgentTurnService,
                         CLOCK);
     }
 
@@ -228,6 +232,56 @@ class RoomMessageAndEventServiceTest {
                                         "TRACE_REVIEWER"))
                 .isInstanceOf(
                         com.example.dispute.common.exception.ForbiddenException.class);
+    }
+
+    @Test
+    void intakePartyTextTriggersTheIntakeAgentTurnAfterTheMessageIsPersisted() {
+        FulfillmentCaseEntity dispute = intakeCase();
+        CaseRoomEntity room =
+                CaseRoomEntity.open(
+                        "ROOM_INTAKE",
+                        dispute.getId(),
+                        RoomType.INTAKE,
+                        OffsetDateTime.parse("2026-07-03T00:00:00Z"),
+                        "system");
+        when(caseRepository.findByIdForUpdate(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.INTAKE))
+                .thenReturn(Optional.of(room));
+        when(participantRepository.existsByCaseIdAndActorIdAndParticipantRole(
+                        dispute.getId(), "user-local", ActorRole.USER))
+                .thenReturn(true);
+        when(messageRepository.findByCaseIdAndIdempotencyKey(
+                        dispute.getId(), "intake-msg-1"))
+                .thenReturn(Optional.empty());
+        when(messageRepository.findMaxSequenceByRoomId(room.getId())).thenReturn(0L);
+        when(eventRepository.findMaxSequenceByCaseId(dispute.getId())).thenReturn(0L);
+        when(messageRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(eventRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        RoomMessageCommand command =
+                new RoomMessageCommand(
+                        MessageType.PARTY_TEXT,
+                        "我没有收到包裹，希望退款。",
+                        List.of("PHOTO_1"));
+        messageService.post(
+                dispute.getId(),
+                RoomType.INTAKE,
+                command,
+                new AuthenticatedActor("user-local", ActorRole.USER),
+                "intake-msg-1",
+                "TRACE_INTAKE");
+
+        verify(intakeAgentTurnService)
+                .continueFromParticipantMessage(
+                        eq(dispute.getId()),
+                        eq(RoomType.INTAKE),
+                        eq(new AuthenticatedActor("user-local", ActorRole.USER)),
+                        eq(command),
+                        eq("TRACE_INTAKE"),
+                        eq("TRACE_INTAKE"));
     }
 
     @Test
@@ -427,6 +481,27 @@ class RoomMessageAndEventServiceTest {
                 OffsetDateTime.parse("2026-07-03T02:00:00Z"),
                 "OMS",
                 "EXT-ROOM",
+                "external-adapter");
+    }
+
+    private static FulfillmentCaseEntity intakeCase() {
+        return FulfillmentCaseEntity.imported(
+                "CASE_INTAKE_ROOM_TEST",
+                "ORDER-ROOM",
+                null,
+                "LOG-ROOM",
+                "user-local",
+                "merchant-local",
+                "idem-room-intake",
+                "SIGNED_NOT_RECEIVED",
+                "Marked delivered but not received",
+                "The user states that the signed parcel was never received.",
+                RiskLevel.HIGH,
+                CaseStatus.INTAKE_PENDING,
+                "INTAKE",
+                null,
+                "OMS",
+                "EXT-ROOM-INTAKE",
                 "external-adapter");
     }
 }

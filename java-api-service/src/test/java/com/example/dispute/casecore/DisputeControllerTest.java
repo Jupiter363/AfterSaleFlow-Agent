@@ -190,6 +190,32 @@ class DisputeControllerTest {
                 .andExpect(jsonPath("$.data.deadline_at").isNotEmpty());
     }
 
+    @Test
+    void cancelsTheIntakeWhenTheIssueIsResolvedBeforeAdmission() throws Exception {
+        when(intakeRoomService.cancel(eq("CASE_test"), any(), eq("resolved before admission")))
+                .thenReturn(
+                        new IntakeConfirmationView(
+                                "CASE_test",
+                                CaseStatus.CANCELLED,
+                                null,
+                                null));
+        mockMvc.perform(
+                        post("/api/disputes/CASE_test/intake/cancel")
+                                .header(HeaderAuthenticationFilter.USER_ID_HEADER, "user-1")
+                                .header(HeaderAuthenticationFilter.ROLE_HEADER, "USER")
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content(
+                                        """
+                                        {
+                                          "reason": "resolved before admission"
+                                        }
+                                        """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.case_status").value("CANCELLED"))
+                .andExpect(jsonPath("$.data.current_room").doesNotExist())
+                .andExpect(jsonPath("$.data.deadline_at").doesNotExist());
+    }
+
     private static CaseView disputeView() {
         return new CaseView(
                 "CASE_test",

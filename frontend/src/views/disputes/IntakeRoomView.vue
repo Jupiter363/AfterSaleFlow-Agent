@@ -21,8 +21,13 @@ import {
 const props = defineProps({
   initialDispute: { type: Object, default: null },
   initialAnalysis: { type: Object, default: null },
+  initialTurnMemory: { type: Object, default: null },
   initialMessages: { type: Array, default: null },
+  messagesLoader: { type: Function, default: null },
+  turnMemoryLoader: { type: Function, default: null },
+  postMessageAction: { type: Function, default: null },
   confirmAction: { type: Function, default: null },
+  cancelAction: { type: Function, default: null },
   eventStreamer: { type: Function, default: null },
 });
 
@@ -30,16 +35,19 @@ const route = useRoute();
 const router = useRouter();
 const dispute = ref(props.initialDispute);
 const analysis = ref(props.initialAnalysis);
+const turnMemory = ref(props.initialTurnMemory);
 const messages = ref([...(props.initialMessages || [])]);
 const agentState = ref("LISTENING");
 const confirmationNote = ref("以上信息无误，同意提交争议审理。");
 const submitting = ref(false);
 const admitted = ref(false);
+const resolved = ref(false);
 const error = ref("");
 const eventState = reactive(createRoomState());
 const eventAbortController = new AbortController();
 
 const caseId = computed(() => dispute.value?.id || route.params.caseId);
+const partyCanChat = computed(() => ["USER", "MERCHANT"].includes(actor.role));
 const connectionState = computed(() => {
   if (eventState.connected) return "connected";
   if (eventState.reconnecting) return "reconnecting";
@@ -85,13 +93,71 @@ const stickers = computed(() => {
   ];
 });
 
+const scrollSnapshot = computed(() => turnMemory.value?.scroll_snapshot || null);
+const scrollCards = computed(() => scrollSnapshot.value?.cards || []);
+function scrollCardValue(key, fallback = "") {
+  return scrollCards.value.find((card) => card.key === key)?.value || fallback;
+}
+const riskSignals = computed(() => {
+  const stamps = scrollSnapshot.value?.stamps || [];
+  if (stamps.length) return stamps.map((stamp) => stamp.text || stamp.value).filter(Boolean);
+  return analysis.value?.initial_risk_signals || ["Waiting for more information"];
+});
+const liveStickers = computed(() => {
+  const value = analysis.value || {};
+  return [
+    {
+      label: "References",
+      value: [
+        scrollCardValue("order_reference", value.order_reference || dispute.value?.order_id),
+        scrollCardValue("after_sales_reference", value.after_sales_reference || dispute.value?.after_sale_id),
+        scrollCardValue("logistics_reference", value.logistics_reference),
+      ].filter(Boolean).join(" / "),
+      tone: "blue",
+    },
+    {
+      label: "Initiator",
+      value: scrollCardValue("initiator_role", value.initiator_role || "Pending"),
+      tone: "mint",
+    },
+    {
+      label: "User claim",
+      value: scrollCardValue("user_claim", value.party_claims?.user || dispute.value?.description),
+      tone: "coral",
+    },
+    {
+      label: "Merchant claim",
+      value: scrollCardValue("merchant_claim", value.party_claims?.merchant || "Waiting for response"),
+      tone: "purple",
+    },
+    {
+      label: "Expected outcome",
+      value: scrollCardValue("requested_outcome", value.requested_outcome || "Pending"),
+      tone: "yellow",
+    },
+    {
+      label: "Admission advice",
+      value: scrollSnapshot.value?.admission_recommendation || value.admission_recommendation || "Needs more information",
+      tone: "mint",
+    },
+    {
+      label: "Risk signals",
+      value: riskSignals.value.join(" / "),
+      tone: "coral",
+    },
+  ];
+});
+
 async function load() {
   try {
     if (!dispute.value) {
       dispute.value = await disputeApi.get(actor, caseId.value);
     }
     if (props.initialMessages === null) {
-      messages.value = await roomApi.messages(actor, caseId.value, "INTAKE");
+      messages.value = await loadMessages();
+    }
+    if (props.initialTurnMemory === null && props.initialMessages === null) {
+      await refreshTurnMemory();
     }
   } catch (failure) {
     error.value = failure.message;
@@ -100,11 +166,25 @@ async function load() {
 }
 
 async function refreshMessages() {
-  messages.value = await roomApi.messages(
-    actor,
-    caseId.value,
-    "INTAKE",
-  );
+  messages.value = await loadMessages();
+}
+
+async function loadMessages() {
+  const loader =
+    props.messagesLoader ||
+    (() => roomApi.messages(actor, caseId.value, "INTAKE"));
+  return loader();
+}
+
+async function refreshTurnMemory() {
+  const loader =
+    props.turnMemoryLoader ||
+    (() => roomApi.latestTurnMemory(actor, caseId.value, "INTAKE"));
+  turnMemory.value = await loader();
+}
+
+async function refreshRoomSnapshot() {
+  await Promise.all([refreshMessages(), refreshTurnMemory()]);
 }
 
 function startEventStream() {
@@ -115,7 +195,7 @@ function startEventStream() {
     roomType: "INTAKE",
     state: eventState,
     signal: eventAbortController.signal,
-    snapshotLoader: refreshMessages,
+    snapshotLoader: refreshRoomSnapshot,
     applyEvent: async (event) => {
       if (event.event === "EVIDENCE_OPENED") {
         await router.push(`/disputes/${caseId.value}/evidence`);
@@ -126,14 +206,48 @@ function startEventStream() {
 
 async function postMessage(command) {
   agentState.value = "THINKING";
-  const saved = await roomApi.postMessage(
-    actor,
-    caseId.value,
-    "INTAKE",
-    command,
-  );
-  messages.value.push(saved);
-  agentState.value = "SPEAKING";
+  error.value = "";
+  try {
+    const submit =
+      props.postMessageAction ||
+      ((payload) => roomApi.postMessage(actor, caseId.value, "INTAKE", payload));
+    await submit(command);
+    await refreshRoomSnapshot();
+    agentState.value = "SPEAKING";
+  } catch (failure) {
+    error.value = failure.message;
+    agentState.value = "ERROR";
+  }
+}
+
+async function resolveWithoutDispute() {
+  submitting.value = true;
+  error.value = "";
+  agentState.value = "THINKING";
+  const command = {
+    reason: "resolved_before_admission",
+  };
+  try {
+    const cancel =
+      props.cancelAction ||
+      ((payload) => disputeApi.cancelIntake(actor, caseId.value, payload.reason));
+    const result = await cancel(command);
+    if (result) {
+      dispute.value = {
+        ...(dispute.value || {}),
+        ...result,
+        id: result.case_id || result.caseId || dispute.value?.id || caseId.value,
+      };
+    }
+    resolved.value = true;
+    admitted.value = true;
+    agentState.value = "HANDOFF";
+  } catch (failure) {
+    error.value = failure.message;
+    agentState.value = "ERROR";
+  } finally {
+    submitting.value = false;
+  }
 }
 
 async function confirmAdmission() {
@@ -200,7 +314,9 @@ onBeforeUnmount(() => eventAbortController.abort());
         </div>
         <ConversationStream
           :messages="messages"
-          :disabled="submitting || admitted"
+          :disabled="submitting || admitted || !partyCanChat"
+          :composer-visible="partyCanChat"
+          disabled-reason="当前是平台观察/审核身份。请切换为用户或商家身份，才能继续与争议接待官对话。"
           placeholder="补充订单、物流、双方沟通或你的期望…"
           @submit="postMessage"
         />
@@ -217,7 +333,7 @@ onBeforeUnmount(() => eventAbortController.abort());
 
         <div class="intake-dossier__stickers">
           <article
-            v-for="sticker in stickers"
+            v-for="sticker in liveStickers"
             :key="sticker.label"
             class="intake-sticker"
             :data-tone="sticker.tone"
@@ -260,6 +376,16 @@ onBeforeUnmount(() => eventAbortController.abort());
             <span v-else>确认发起并上报</span>
           </button>
           <div v-if="admitted" class="intake-dossier__stamp">已上报</div>
+          <button
+            type="button"
+            class="intake-dossier__secondary"
+            data-resolve-without-dispute
+            :disabled="submitting || admitted"
+            @click="resolveWithoutDispute"
+          >
+            问题已解决，取消争议
+          </button>
+          <p v-if="resolved">已在平台内取消争议发起，接待室已归档。</p>
           <div v-if="error" class="intake-dossier__error">{{ error }}</div>
         </div>
       </section>
@@ -365,6 +491,11 @@ onBeforeUnmount(() => eventAbortController.abort());
   font-weight: 800;
 }
 .intake-dossier__confirm button:disabled { opacity: .7; }
+.intake-dossier__confirm .intake-dossier__secondary {
+  margin-top: 9px;
+  color: #69758a;
+  background: #edf4fb;
+}
 .intake-dossier__stamp {
   position: absolute;
   right: 25px;

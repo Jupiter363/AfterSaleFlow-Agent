@@ -1,0 +1,392 @@
+package com.example.dispute.room.application;
+
+import com.example.dispute.config.ActorRole;
+import com.example.dispute.config.AuthenticatedActor;
+import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
+import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
+import com.example.dispute.room.domain.MessageSenderType;
+import com.example.dispute.room.domain.MessageType;
+import com.example.dispute.room.domain.RoomStatus;
+import com.example.dispute.room.domain.RoomType;
+import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
+import com.example.dispute.room.infrastructure.persistence.entity.RoomMessageEntity;
+import com.example.dispute.room.infrastructure.persistence.entity.RoomTurnMemoryEntity;
+import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
+import com.example.dispute.room.infrastructure.persistence.repository.RoomMessageRepository;
+import com.example.dispute.room.infrastructure.persistence.repository.RoomTurnMemoryRepository;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.time.Clock;
+import java.time.Instant;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+@Service
+public class IntakeAgentTurnService {
+
+    public static final String AGENT_ROLE = "DISPUTE_INTAKE_OFFICER";
+    private static final String AGENT_SENDER_ROLE = "CUSTOMER_SERVICE";
+    private static final String AGENT_SENDER_ID = "dispute-intake-officer";
+    private static final String DEGRADED_REASON_AGENT_CALL_FAILED = "AGENT_CALL_FAILED";
+    private static final String DEGRADED_REASON_AGENT_OUTPUT_EMPTY = "AGENT_OUTPUT_EMPTY";
+    private static final Logger log = LoggerFactory.getLogger(IntakeAgentTurnService.class);
+
+    private final FulfillmentCaseRepository caseRepository;
+    private final CaseRoomRepository roomRepository;
+    private final RoomTurnMemoryRepository memoryRepository;
+    private final RoomMessageRepository messageRepository;
+    private final CaseEventService eventService;
+    private final IntakeAgentTurnClient client;
+    private final ObjectMapper objectMapper;
+    private final Clock clock;
+
+    public IntakeAgentTurnService(
+            FulfillmentCaseRepository caseRepository,
+            CaseRoomRepository roomRepository,
+            RoomTurnMemoryRepository memoryRepository,
+            RoomMessageRepository messageRepository,
+            CaseEventService eventService,
+            IntakeAgentTurnClient client,
+            ObjectMapper objectMapper,
+            Clock clock) {
+        this.caseRepository = caseRepository;
+        this.roomRepository = roomRepository;
+        this.memoryRepository = memoryRepository;
+        this.messageRepository = messageRepository;
+        this.eventService = eventService;
+        this.client = client;
+        this.objectMapper = objectMapper;
+        this.clock = clock;
+    }
+
+    @Transactional
+    public void startInitialTurn(
+            String caseId,
+            AuthenticatedActor actor,
+            IntakeLobbySeed lobbySeed,
+            String traceId,
+            String requestId) {
+        TurnContext context = prepare(caseId, RoomType.INTAKE);
+        int turnNo = memoryRepository.findMaxTurnNo(caseId, RoomType.INTAKE) + 1;
+        JsonNode previousScrollSnapshot = latestScrollSnapshot(caseId);
+        IntakeAgentTurnCommand command =
+                new IntakeAgentTurnCommand(
+                        caseId,
+                        RoomType.INTAKE,
+                        "LOBBY_SEED",
+                        lobbySeed,
+                        null,
+                        previousScrollSnapshot,
+                        recentTurns(caseId));
+        IntakeAgentTurnResult result =
+                safeRun(command, previousScrollSnapshot, traceId, requestId);
+        persistAgentTurn(context, turnNo, result, traceId);
+    }
+
+    @Transactional
+    public void continueFromParticipantMessage(
+            String caseId,
+            RoomType roomType,
+            AuthenticatedActor actor,
+            RoomMessageCommand message,
+            String traceId,
+            String requestId) {
+        if (roomType != RoomType.INTAKE
+                || message.messageType() != MessageType.PARTY_TEXT
+                || !isParty(actor.role())) {
+            return;
+        }
+        TurnContext context = prepare(caseId, RoomType.INTAKE);
+        int turnNo = memoryRepository.findMaxTurnNo(caseId, RoomType.INTAKE) + 1;
+        memoryRepository.save(
+                RoomTurnMemoryEntity.participantTurn(
+                        "MEMORY_" + compactUuid(),
+                        caseId,
+                        RoomType.INTAKE,
+                        turnNo,
+                        actor.actorId(),
+                        actor.role().name(),
+                        message.text()));
+        JsonNode previousScrollSnapshot = latestScrollSnapshot(caseId);
+        IntakeAgentTurnCommand command =
+                new IntakeAgentTurnCommand(
+                        caseId,
+                        RoomType.INTAKE,
+                        "USER_MESSAGE",
+                        seedFromDispute(context.dispute(), actor),
+                        new IntakeParticipantMessage(
+                                "INTAKE_TURN_" + turnNo,
+                                actor.role().name(),
+                                message.text()),
+                        previousScrollSnapshot,
+                        recentTurns(caseId));
+        IntakeAgentTurnResult result =
+                safeRun(command, previousScrollSnapshot, traceId, requestId);
+        persistAgentTurn(context, turnNo, result, traceId);
+    }
+
+    private TurnContext prepare(String caseId, RoomType roomType) {
+        FulfillmentCaseEntity dispute =
+                caseRepository
+                        .findByIdForUpdate(caseId)
+                        .orElseThrow(() -> new IllegalArgumentException("case not found"));
+        CaseRoomEntity room =
+                roomRepository
+                        .findByCaseIdAndRoomType(caseId, roomType)
+                        .orElseThrow(() -> new IllegalArgumentException("room not found"));
+        if (room.getRoomStatus() != RoomStatus.OPEN) {
+            throw new IllegalStateException("intake room is not open");
+        }
+        return new TurnContext(dispute, room);
+    }
+
+    private IntakeAgentTurnResult safeRun(
+            IntakeAgentTurnCommand command,
+            JsonNode previousScrollSnapshot,
+            String traceId,
+            String requestId) {
+        try {
+            IntakeAgentTurnResult result = client.run(command, traceId, requestId);
+            if (result == null || blank(result.roomUtterance())) {
+                log.warn(
+                        "Intake agent turn degraded because output was empty: case_id={}, room_type={}, turn_source={}, trace_id={}, request_id={}",
+                        command.caseId(),
+                        command.roomType(),
+                        command.turnSource(),
+                        traceId,
+                        requestId);
+                return degraded(
+                        previousScrollSnapshot,
+                        DEGRADED_REASON_AGENT_OUTPUT_EMPTY,
+                        traceId);
+            }
+            return result;
+        } catch (RuntimeException failure) {
+            log.warn(
+                    "Intake agent turn degraded after agent call failure: case_id={}, room_type={}, turn_source={}, trace_id={}, request_id={}, failure_type={}, failure_message={}",
+                    command.caseId(),
+                    command.roomType(),
+                    command.turnSource(),
+                    traceId,
+                    requestId,
+                    failure.getClass().getName(),
+                    failure.getMessage(),
+                    failure);
+            return degraded(
+                    previousScrollSnapshot,
+                    DEGRADED_REASON_AGENT_CALL_FAILED,
+                    traceId);
+        }
+    }
+
+    private IntakeLobbySeed seedFromDispute(
+            FulfillmentCaseEntity dispute, AuthenticatedActor actor) {
+        return new IntakeLobbySeed(
+                dispute.getOrderId(),
+                dispute.getAfterSaleId(),
+                dispute.getLogisticsId(),
+                actor.role().name(),
+                dispute.getDescription(),
+                null);
+    }
+
+    private void persistAgentTurn(
+            TurnContext context,
+            int turnNo,
+            IntakeAgentTurnResult result,
+            String traceId) {
+        String runId = "INTAKE_RUN_" + compactUuid();
+        memoryRepository.save(
+                RoomTurnMemoryEntity.agentTurn(
+                        "MEMORY_" + compactUuid(),
+                        context.dispute().getId(),
+                        RoomType.INTAKE,
+                        turnNo,
+                        AGENT_SENDER_ID,
+                        AGENT_ROLE,
+                        result.roomUtterance(),
+                        json(dossierPatchWithMemoryFrame(result)),
+                        json(defaultObject(result.scrollSnapshot())),
+                        json(defaultArray(result.canvasOperations())),
+                        runId));
+        appendAgentMessage(
+                context.dispute(),
+                context.room(),
+                result.roomUtterance(),
+                turnNo,
+                traceId);
+        eventService.recordLifecycleEvent(
+                context.dispute().getId(),
+                context.room().getId(),
+                "INTAKE_DOSSIER_UPDATED",
+                Map.of("turn_no", turnNo, "agent_role", AGENT_ROLE),
+                "intake-dossier-updated:" + context.dispute().getId() + ":" + turnNo,
+                AGENT_SENDER_ID);
+    }
+
+    private void appendAgentMessage(
+            FulfillmentCaseEntity dispute,
+            CaseRoomEntity room,
+            String utterance,
+            int turnNo,
+            String traceId) {
+        String idempotencyKey = "agent-intake-turn:" + turnNo;
+        if (messageRepository.findByCaseIdAndIdempotencyKey(dispute.getId(), idempotencyKey)
+                .isPresent()) {
+            return;
+        }
+        long sequence = messageRepository.findMaxSequenceByRoomId(room.getId()) + 1;
+        RoomMessageEntity saved =
+                messageRepository.save(
+                        RoomMessageEntity.create(
+                                "MESSAGE_" + compactUuid(),
+                                dispute.getId(),
+                                room.getId(),
+                                sequence,
+                                MessageSenderType.AGENT,
+                                AGENT_SENDER_ROLE,
+                                AGENT_SENDER_ID,
+                                audienceJson(),
+                                MessageType.AGENT_MESSAGE,
+                                utterance,
+                                "[]",
+                                idempotencyKey,
+                                Instant.now(clock),
+                                traceId));
+        eventService.recordRoomMessage(
+                dispute.getId(),
+                room.getId(),
+                saved.getId(),
+                saved.getMessageText(),
+                saved.getAudienceJson(),
+                AGENT_SENDER_ID);
+    }
+
+    private JsonNode latestScrollSnapshot(String caseId) {
+        return memoryRepository
+                .findTopByCaseIdAndRoomTypeAndAgentRoleIsNotNullOrderByTurnNoDesc(
+                        caseId, RoomType.INTAKE)
+                .map(RoomTurnMemoryEntity::getScrollSnapshotJson)
+                .map(this::readJson)
+                .orElseGet(objectMapper::createObjectNode);
+    }
+
+    private List<IntakeRecentTurn> recentTurns(String caseId) {
+        return memoryRepository
+                .findTop10ByCaseIdAndRoomTypeOrderByTurnNoDesc(caseId, RoomType.INTAKE)
+                .stream()
+                .sorted(Comparator.comparingInt(RoomTurnMemoryEntity::getTurnNo))
+                .map(
+                        memory ->
+                                new IntakeRecentTurn(
+                                        memory.getTurnNo(),
+                                        memory.getActorId(),
+                                        memory.getAnswerRole(),
+                                        memory.getAnswerContent(),
+                                        memory.getAgentRole(),
+                                        memory.getAgentResponse(),
+                                        readJson(memory.getScrollSnapshotJson())))
+                .toList();
+    }
+
+    private IntakeAgentTurnResult degraded(
+            JsonNode previousScrollSnapshot, String reason, String traceId) {
+        JsonNode scroll =
+                previousScrollSnapshot == null || previousScrollSnapshot.isNull()
+                        ? objectMapper.createObjectNode()
+                        : previousScrollSnapshot;
+        return new IntakeAgentTurnResult(
+                "接待官暂时没有完成智能整理，但你的发言已经安全保存。你可以继续补充订单、售后、物流和诉求信息。",
+                objectMapper.valueToTree(
+                        Map.of(
+                                "agent_degraded",
+                                true,
+                                "agent_degraded_reason",
+                                reason,
+                                "trace_id",
+                                traceId,
+                                "next_best_action",
+                                "CONTINUE_INTAKE_DIALOG")),
+                scroll,
+                objectMapper.valueToTree(List.of()),
+                objectMapper.createObjectNode(),
+                "CONTINUE",
+                List.of(),
+                false,
+                "STUB",
+                0.0);
+    }
+
+    private JsonNode readJson(String json) {
+        if (json == null || json.isBlank()) {
+            return objectMapper.createObjectNode();
+        }
+        try {
+            return objectMapper.readTree(json);
+        } catch (JsonProcessingException exception) {
+            return objectMapper.createObjectNode();
+        }
+    }
+
+    private JsonNode defaultObject(JsonNode node) {
+        return node == null || node.isNull() ? objectMapper.createObjectNode() : node;
+    }
+
+    private JsonNode dossierPatchWithMemoryFrame(IntakeAgentTurnResult result) {
+        JsonNode source = defaultObject(result.dossierPatch());
+        ObjectNode patch =
+                source.isObject()
+                        ? ((ObjectNode) source).deepCopy()
+                        : objectMapper.createObjectNode();
+        JsonNode memoryFrame = defaultObject(result.memoryFrame());
+        if (!memoryFrame.isEmpty()) {
+            patch.set("memory_frame", memoryFrame);
+        }
+        return patch;
+    }
+
+    private JsonNode defaultArray(JsonNode node) {
+        return node == null || node.isNull() ? objectMapper.createArrayNode() : node;
+    }
+
+    private String audienceJson() {
+        return json(
+                List.of(
+                        ActorRole.USER.name(),
+                        ActorRole.MERCHANT.name(),
+                        ActorRole.CUSTOMER_SERVICE.name(),
+                        ActorRole.PLATFORM_REVIEWER.name(),
+                        ActorRole.ADMIN.name(),
+                        ActorRole.SYSTEM.name()));
+    }
+
+    private String json(Object value) {
+        try {
+            return objectMapper.writeValueAsString(value);
+        } catch (JsonProcessingException exception) {
+            throw new IllegalStateException("cannot serialize intake agent turn", exception);
+        }
+    }
+
+    private static boolean isParty(ActorRole role) {
+        return role == ActorRole.USER || role == ActorRole.MERCHANT;
+    }
+
+    private static boolean blank(String value) {
+        return value == null || value.isBlank();
+    }
+
+    private static String compactUuid() {
+        return UUID.randomUUID().toString().replace("-", "");
+    }
+
+    private record TurnContext(FulfillmentCaseEntity dispute, CaseRoomEntity room) {}
+}

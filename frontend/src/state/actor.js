@@ -10,7 +10,14 @@ export const roleLabels = {
 
 function storedActor() {
   try {
-    return JSON.parse(localStorage.getItem("dispute-actor") || "null");
+    const parsed = JSON.parse(localStorage.getItem("dispute-actor") || "null");
+    if (
+      parsed?.id === "reviewer-local" &&
+      parsed?.role === "PLATFORM_REVIEWER"
+    ) {
+      return null;
+    }
+    return parsed;
   } catch {
     localStorage.removeItem("dispute-actor");
     return null;
@@ -18,7 +25,7 @@ function storedActor() {
 }
 
 export const actor = reactive(
-  storedActor() || { id: "reviewer-local", role: "PLATFORM_REVIEWER" },
+  storedActor() || { id: "user-local", role: "USER" },
 );
 
 watch(

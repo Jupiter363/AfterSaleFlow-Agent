@@ -487,6 +487,76 @@ class HearingPersistenceIntegrationTest {
                         run -> {
                             assertThat(run.getTraceId()).isEqualTo("TRACE_" + workflowId);
                             assertThat(run.getOutputRef()).isEqualTo(result.draftId());
+                    });
+    }
+
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void finalConvergenceAgentFailureStillProducesConcreteReviewablePlan() {
+        FulfillmentCaseEntity disputeCase =
+                routedCase("CASE_finalfallback", "idem-final-fallback");
+        caseRepository.saveAndFlush(disputeCase);
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        var activities =
+                new CaseFulfillmentDisputeActivitiesImpl(
+                        caseRepository,
+                        evidenceRepository,
+                        policyRepository,
+                        stateRepository,
+                        recordRepository,
+                        draftRepository,
+                        agentRunRepository,
+                        submissionRepository,
+                        (request, traceId, requestId) -> {
+                            throw new RuntimeException("agent model service unavailable");
+                        },
+                        org.mockito.Mockito.mock(RemedyApplicationService.class),
+                        org.mockito.Mockito.mock(ReviewApplicationService.class),
+                        org.mockito.Mockito.mock(
+                                com.example.dispute.notification.application
+                                        .CaseLifecycleNotificationService.class),
+                        org.mockito.Mockito.mock(ToolExecutorService.class),
+                        org.mockito.Mockito.mock(CaseClosureService.class),
+                        org.mockito.Mockito.mock(AuditRecorder.class),
+                        mapper,
+                        new TransactionTemplate(transactionManager));
+        String workflowId = "CASEWORKFLOW_CASE_finalfallback";
+        activities.initializeHearing(
+                new CaseWorkflowInput(
+                        disputeCase.getId(),
+                        workflowId,
+                        RouteType.FULL_HEARING,
+                        Duration.ofHours(72),
+                        2));
+
+        var result =
+                activities.analyzeHearing(
+                        new HearingAnalysisActivityCommand(
+                                disputeCase.getId(),
+                                workflowId,
+                                3,
+                                false,
+                                true,
+                                true,
+                                3));
+
+        assertThat(result.manualRequired()).isTrue();
+        assertThat(result.requiresAdditionalEvidence()).isFalse();
+        assertThat(result.draftId()).startsWith("DRAFT_");
+        assertThat(
+                        draftRepository.findFirstByCaseIdOrderByDraftVersionDesc(
+                                disputeCase.getId()))
+                .hasValueSatisfying(
+                        draft -> {
+                            assertThat(draft.getDraftStatus())
+                                    .isEqualTo("PENDING_HUMAN_REVIEW");
+                            assertThat(draft.getRecommendedDecision())
+                                    .contains("RESHIP");
+                            assertThat(draft.getRecommendedDecision())
+                                    .doesNotContain("MANUAL_REVIEW_REQUIRED");
+                            assertThat(draft.getDraftText())
+                                    .contains("最终轮次")
+                                    .contains("补发");
                         });
     }
 

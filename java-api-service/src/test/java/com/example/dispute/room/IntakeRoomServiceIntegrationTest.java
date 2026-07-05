@@ -16,6 +16,7 @@ import com.example.dispute.notification.infrastructure.persistence.repository.No
 import com.example.dispute.notification.infrastructure.persistence.repository.NotificationRepository;
 import com.example.dispute.room.application.IntakeConfirmationCommand;
 import com.example.dispute.room.application.IntakeRoomService;
+import com.example.dispute.room.application.IntakeAgentTurnService;
 import com.example.dispute.room.application.ParticipantService;
 import com.example.dispute.room.application.CaseEventService;
 import com.example.dispute.room.application.RoomMessageCommand;
@@ -102,6 +103,7 @@ class IntakeRoomServiceIntegrationTest {
     @Autowired private RoomMessageRepository messageRepository;
     @Autowired private CaseTimelineEventRepository eventRepository;
     @MockitoBean private EvidenceWindowCoordinator evidenceWindowCoordinator;
+    @MockitoBean private IntakeAgentTurnService intakeAgentTurnService;
 
     @Test
     void acceptedIntakePersistsParticipantsRoomsAndTheAuthoritativeDeadline() {

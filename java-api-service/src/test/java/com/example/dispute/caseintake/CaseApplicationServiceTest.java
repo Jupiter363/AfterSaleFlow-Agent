@@ -3,9 +3,10 @@ package com.example.dispute.caseintake;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
-import static org.mockito.Mockito.lenient;
 
 import com.example.dispute.caseintake.application.AgentServiceClient;
 import com.example.dispute.caseintake.application.CaseApplicationService;
@@ -23,6 +24,8 @@ import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEnti
 import com.example.dispute.infrastructure.persistence.repository.AuditLogRepository;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.room.application.ParticipantService;
+import com.example.dispute.room.application.IntakeAgentTurnService;
+import com.example.dispute.room.application.IntakeLobbySeed;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -46,6 +49,7 @@ class CaseApplicationServiceTest {
     @Mock private AgentServiceClient agentServiceClient;
     @Mock private CaseRoomRepository roomRepository;
     @Mock private ParticipantService participantService;
+    @Mock private IntakeAgentTurnService intakeAgentTurnService;
 
     private CaseApplicationService service;
 
@@ -74,6 +78,7 @@ class CaseApplicationServiceTest {
                         agentServiceClient,
                         roomRepository,
                         participantService,
+                        intakeAgentTurnService,
                         properties,
                         Clock.fixed(Instant.parse("2026-06-28T00:00:00Z"), ZoneOffset.UTC),
                         new ObjectMapper().findAndRegisterModules());
@@ -117,6 +122,18 @@ class CaseApplicationServiceTest {
                         any(),
                         any(AuthenticatedActor.class),
                         any());
+        ArgumentCaptor<IntakeLobbySeed> lobbySeed =
+                ArgumentCaptor.forClass(IntakeLobbySeed.class);
+        verify(intakeAgentTurnService)
+                .startInitialTurn(
+                        any(),
+                        any(AuthenticatedActor.class),
+                        lobbySeed.capture(),
+                        eq("TRACE_test"),
+                        eq("REQ_test"));
+        assertThat(lobbySeed.getValue().orderReference()).isEqualTo("order-1");
+        assertThat(lobbySeed.getValue().initiatorRole()).isEqualTo("USER");
+        assertThat(lobbySeed.getValue().rawText()).contains("order-1");
 
         ArgumentCaptor<AuditLogEntity> audit = ArgumentCaptor.forClass(AuditLogEntity.class);
         verify(auditLogRepository).save(audit.capture());
@@ -183,6 +200,74 @@ class CaseApplicationServiceTest {
     }
 
     @Test
+    void privilegedCreatorIsMappedToSystemForTheIntakeTurnContract() {
+        when(agentServiceClient.analyze(any(), any(), any()))
+                .thenReturn(
+                        new IntakeAnalysis(
+                                "DISPUTE",
+                                "NON_RECEIPT",
+                                RiskLevel.MEDIUM,
+                                true,
+                                List.of(),
+                                "平台代创建争议",
+                                "用户通过客服发起争议。"));
+
+        service.create(
+                command("customer service creates an intake case", "order-admin"),
+                new AuthenticatedActor("reviewer-1", ActorRole.PLATFORM_REVIEWER),
+                "idem-reviewer-created",
+                "TRACE_reviewer",
+                "REQ_reviewer");
+
+        ArgumentCaptor<IntakeLobbySeed> lobbySeed =
+                ArgumentCaptor.forClass(IntakeLobbySeed.class);
+        verify(intakeAgentTurnService)
+                .startInitialTurn(
+                        any(),
+                        any(AuthenticatedActor.class),
+                        lobbySeed.capture(),
+                        eq("TRACE_reviewer"),
+                        eq("REQ_reviewer"));
+        assertThat(lobbySeed.getValue().initiatorRole()).isEqualTo("SYSTEM");
+    }
+
+    @Test
+    void passesLogisticsReferenceIntoTheIntakeTurnSeed() {
+        when(agentServiceClient.analyze(any(), any(), any()))
+                .thenReturn(
+                        new IntakeAnalysis(
+                                "DISPUTE",
+                                "SIGNED_NOT_RECEIVED",
+                                RiskLevel.MEDIUM,
+                                true,
+                                List.of(),
+                                "物流签收争议",
+                                "物流显示签收但用户未收到。"));
+
+        service.create(
+                commandWithLogistics(
+                        "物流显示签收，但我没有收到包裹。",
+                        "order-with-logistics",
+                        "LOG-TRACK-1"),
+                new AuthenticatedActor("user-1", ActorRole.USER),
+                "idem-logistics",
+                "TRACE_logistics",
+                "REQ_logistics");
+
+        ArgumentCaptor<IntakeLobbySeed> lobbySeed =
+                ArgumentCaptor.forClass(IntakeLobbySeed.class);
+        verify(intakeAgentTurnService)
+                .startInitialTurn(
+                        any(),
+                        any(AuthenticatedActor.class),
+                        lobbySeed.capture(),
+                        eq("TRACE_logistics"),
+                        eq("REQ_logistics"));
+        assertThat(lobbySeed.getValue().logisticsReference()).isEqualTo("LOG-TRACK-1");
+    }
+
+
+    @Test
     void normalizesLegacyFulfillmentDisputesToTheFinalPublicCaseType() {
         FulfillmentCaseEntity legacy =
                 FulfillmentCaseEntity.create(
@@ -238,6 +323,20 @@ class CaseApplicationServiceTest {
         return new CreateCaseCommand(
                 orderId,
                 null,
+                null,
+                "user-1",
+                "merchant-1",
+                description,
+                List.of(),
+                "WEB");
+    }
+
+    private static CreateCaseCommand commandWithLogistics(
+            String description, String orderId, String logisticsId) {
+        return new CreateCaseCommand(
+                orderId,
+                null,
+                logisticsId,
                 "user-1",
                 "merchant-1",
                 description,

@@ -4,6 +4,9 @@ export const roomApi = {
   messages: (actor, caseId, roomType) =>
     apiRequest(`/disputes/${caseId}/rooms/${roomType}/messages`, actor),
 
+  latestTurnMemory: (actor, caseId, roomType) =>
+    apiRequest(`/disputes/${caseId}/rooms/${roomType}/turn-memory/latest`, actor),
+
   postMessage: (
     actor,
     caseId,

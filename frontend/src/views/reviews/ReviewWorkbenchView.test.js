@@ -90,6 +90,24 @@ describe("ReviewWorkbenchView", () => {
     expect(remedyCard.text()).not.toContain("未提供");
   });
 
+  it("renders backend snake_case adjudication draft fields instead of waiting copy", async () => {
+    const { wrapper } = await mountView({
+      initialPacket: {
+        ...packet,
+        draft: {
+          recommended_decision: "RESHIP_IF_SIGNATURE_PROOF_MISSING",
+          draft_text: "最终轮次已结束，系统形成补发方向的非最终裁决草案。",
+          reviewer_attention: ["核验签收证明与库存条件"],
+        },
+      },
+    });
+
+    const draftCard = wrapper.get(".packet-cards__draft");
+    expect(draftCard.text()).toContain("RESHIP_IF_SIGNATURE_PROOF_MISSING");
+    expect(draftCard.text()).toContain("最终轮次已结束");
+    expect(draftCard.text()).not.toContain("等待草案");
+  });
+
   it("requires a reason and explicit second confirmation before a final decision", async () => {
     const decideAction = vi.fn().mockResolvedValue({
       decision: "APPROVE",

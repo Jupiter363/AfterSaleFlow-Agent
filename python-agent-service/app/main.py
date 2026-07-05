@@ -26,6 +26,7 @@ from app.harness.validation import CitationValidationError
 from app.llm import AgentServiceUnavailable, LiteLlmProxyClient
 from app.llm import AgentOutputSchemaError
 from app.intake import IntakeWorkflow
+from app.intake_turn import IntakeTurnWorkflow
 from app.evaluation import EvaluationWorkflow
 from app.prompts import PromptRepository
 from app.schemas import (
@@ -43,6 +44,8 @@ from app.schemas import (
     EvaluationAnalyzeRequest,
     IntakeAnalysisOutput,
     IntakeAnalyzeRequest,
+    IntakeTurnRequest,
+    IntakeTurnResult,
     ReviewCopilotAnswer,
     ReviewCopilotRequest,
 )
@@ -64,12 +67,14 @@ def create_app(
     settings: Settings | None = None,
     workflow: HearingWorkflow | None = None,
     intake_workflow: IntakeWorkflow | None = None,
+    intake_turn_workflow: IntakeTurnWorkflow | None = None,
     evaluation_workflow: EvaluationWorkflow | None = None,
     final_agent_services: FinalAgentServices | None = None,
 ) -> FastAPI:
     resolved = settings or get_settings()
     hearing_workflow = workflow or _build_workflow(resolved)
     resolved_intake_workflow = intake_workflow or _build_intake_workflow(resolved)
+    resolved_intake_turn_workflow = intake_turn_workflow or IntakeTurnWorkflow()
     resolved_evaluation_workflow = evaluation_workflow or _build_evaluation_workflow(
         resolved
     )
@@ -197,6 +202,17 @@ def create_app(
             context,
             case_state=x_case_state,
         )
+
+    @app.post(
+        "/internal/agents/intake/turn",
+        response_model=IntakeTurnResult,
+    )
+    async def intake_turn(
+        payload: IntakeTurnRequest,
+        x_service_secret: str = Header(alias=SERVICE_SECRET_HEADER),
+    ) -> IntakeTurnResult:
+        _authorize(x_service_secret, resolved.python_agent_service_secret)
+        return await run_in_threadpool(resolved_intake_turn_workflow.run, payload)
 
     @app.post(
         "/internal/agents/evidence/build",

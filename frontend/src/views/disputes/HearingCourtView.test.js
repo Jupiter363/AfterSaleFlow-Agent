@@ -186,6 +186,41 @@ describe("HearingCourtView", () => {
     expect(wrapper.text()).not.toContain("等待用户");
   });
 
+  it("hands the parties off to platform review after the final hearing round is sealed", async () => {
+    const { wrapper } = await mountView({
+      viewerRole: "USER",
+      initialHearing: {
+        ...hearing,
+        rounds: [
+          hearing.rounds[0],
+          {
+            ...hearing.rounds[1],
+            status: "COMPLETED",
+            submitted_roles: ["USER", "MERCHANT"],
+            current_actor_submitted: true,
+          },
+          {
+            round_id: "ROUND_3",
+            round_no: 3,
+            status: "FORCED_CLOSED",
+            dossier_version: 3,
+            stop_reason: "MAX_ROUNDS",
+            submitted_roles: ["USER", "MERCHANT"],
+            current_actor_submitted: true,
+            summary_json: JSON.stringify({
+              trigger: "MAX_ROUNDS_REACHED",
+              judge: "第三轮陈述已封存，正在生成最终裁决草案。",
+            }),
+          },
+        ],
+      },
+    });
+
+    expect(wrapper.find("[data-review-handoff]").exists()).toBe(true);
+    expect(wrapper.get("[data-review-handoff]").text()).toContain("平台终审");
+    expect(wrapper.find("[data-submit-hearing-round]").exists()).toBe(false);
+  });
+
   it("does not expose party round submission to platform reviewers", async () => {
     const { wrapper } = await mountView({ viewerRole: "PLATFORM_REVIEWER" });
 

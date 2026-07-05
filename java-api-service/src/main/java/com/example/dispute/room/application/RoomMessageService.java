@@ -33,6 +33,7 @@ public class RoomMessageService {
     private final CaseParticipantRepository participantRepository;
     private final RoomMessageRepository messageRepository;
     private final CaseEventService eventService;
+    private final IntakeAgentTurnService intakeAgentTurnService;
     private final Clock clock;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -42,12 +43,14 @@ public class RoomMessageService {
             CaseParticipantRepository participantRepository,
             RoomMessageRepository messageRepository,
             CaseEventService eventService,
+            IntakeAgentTurnService intakeAgentTurnService,
             Clock clock) {
         this.caseRepository = caseRepository;
         this.roomRepository = roomRepository;
         this.participantRepository = participantRepository;
         this.messageRepository = messageRepository;
         this.eventService = eventService;
+        this.intakeAgentTurnService = intakeAgentTurnService;
         this.clock = clock;
     }
 
@@ -142,6 +145,13 @@ public class RoomMessageService {
                 saved.getMessageText(),
                 audienceJson,
                 actor.actorId());
+        intakeAgentTurnService.continueFromParticipantMessage(
+                dispute.getId(),
+                room.getRoomType(),
+                actor,
+                command,
+                traceId,
+                traceId);
         return view(saved);
     }
 

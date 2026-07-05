@@ -156,6 +156,50 @@ public class IntakeRoomService {
                 deadline);
     }
 
+    @Transactional
+    public IntakeConfirmationView cancel(
+            String caseId,
+            AuthenticatedActor actor,
+            String reason) {
+        FulfillmentCaseEntity dispute =
+                caseRepository
+                        .findByIdForUpdate(caseId)
+                        .orElseThrow(
+                                () ->
+                                        new NotFoundException(
+                                                ErrorCode.CASE_NOT_FOUND,
+                                                "case not found",
+                                                Map.of("case_id", caseId)));
+        OffsetDateTime now = OffsetDateTime.now(clock);
+        CaseRoomEntity intakeRoom =
+                roomRepository
+                        .findByCaseIdAndRoomType(caseId, RoomType.INTAKE)
+                        .orElseGet(
+                                () ->
+                                        CaseRoomEntity.closed(
+                                                roomId(),
+                                                caseId,
+                                                RoomType.INTAKE,
+                                                now,
+                                                actor.actorId()));
+        intakeRoom.close(now, actor.actorId());
+        roomRepository.save(intakeRoom);
+        dispute.cancelIntake(actor.actorId(), now);
+        caseRepository.save(dispute);
+        caseEventService.recordLifecycleEvent(
+                caseId,
+                intakeRoom.getId(),
+                "INTAKE_CANCELLED",
+                Map.of(
+                        "case_status",
+                        dispute.getCaseStatus().name(),
+                        "reason",
+                        reason == null ? "" : reason),
+                "intake-cancelled:" + caseId,
+                actor.actorId());
+        return new IntakeConfirmationView(caseId, dispute.getCaseStatus(), null, null);
+    }
+
     private void sendCounterpartySummons(
             FulfillmentCaseEntity dispute,
             AuthenticatedActor initiator,

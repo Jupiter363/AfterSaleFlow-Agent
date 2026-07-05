@@ -37,6 +37,32 @@ describe("room API", () => {
       }),
     );
   });
+
+  it("loads the latest agent turn memory for a room", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        success: true,
+        data: {
+          turn_no: 2,
+          scroll_snapshot: { current_outcome: "REFUND" },
+        },
+      }),
+    });
+
+    const memory = await roomApi.latestTurnMemory(actor, "CASE_1", "INTAKE");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/disputes/CASE_1/rooms/INTAKE/turn-memory/latest",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          "X-Role": "USER",
+          "X-User-Id": "user-local",
+        }),
+      }),
+    );
+    expect(memory.scroll_snapshot.current_outcome).toBe("REFUND");
+  });
 });
 
 describe("SSE resume", () => {

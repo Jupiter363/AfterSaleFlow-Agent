@@ -5,6 +5,7 @@ import java.util.List;
 public record CreateCaseCommand(
         String orderId,
         String afterSaleId,
+        String logisticsId,
         String userId,
         String merchantId,
         String description,
