@@ -20,6 +20,7 @@ import {
 import {
   humanizeDossierList,
   humanizeDossierText,
+  roleLabel,
 } from "../../utils/displayText";
 
 const props = defineProps({
@@ -68,46 +69,6 @@ const connectionState = computed(() => {
   if (eventState.reconnecting) return "reconnecting";
   return "offline";
 });
-const stickers = computed(() => {
-  const value = analysis.value || {};
-  return [
-    {
-      label: "关联引用",
-      value: [
-        value.order_reference || dispute.value?.order_id,
-        value.after_sales_reference || dispute.value?.after_sale_id,
-        value.logistics_reference,
-      ].filter(Boolean).join(" · "),
-      tone: "blue",
-    },
-    {
-      label: "发起方",
-      value: value.initiator_role || "待确认",
-      tone: "mint",
-    },
-    {
-      label: "用户主张",
-      value: value.party_claims?.user || dispute.value?.description,
-      tone: "coral",
-    },
-    {
-      label: "商家主张",
-      value: value.party_claims?.merchant || "等待传票送达后回应",
-      tone: "purple",
-    },
-    {
-      label: "期望结果",
-      value: value.requested_outcome || "等待进一步确认",
-      tone: "yellow",
-    },
-    {
-      label: "受理建议",
-      value: value.admission_recommendation || "建议结合补充信息判断",
-      tone: "mint",
-    },
-  ];
-});
-
 const scrollSnapshot = computed(() => turnMemory.value?.scroll_snapshot || null);
 const currentCaseDossier = computed(() => turnMemory.value?.case_intake_dossier || null);
 const caseDetailDossier = computed(() => {
@@ -180,23 +141,63 @@ const riskSignals = computed(() => {
 const initialRiskSignals = computed(() => {
   return humanizeDossierList(analysis.value?.initial_risk_signals);
 });
+const initiatorRoleValue = computed(() => {
+  const explicitRole =
+    analysis.value?.initiator_role ||
+    dispute.value?.initiator_role ||
+    dispute.value?.initiatorRole;
+  if (explicitRole) return explicitRole;
+  return ["USER", "MERCHANT"].includes(actor.role) ? actor.role : "UNKNOWN";
+});
+const initiatorRoleCopy = computed(() =>
+  roleLabel(initiatorRoleValue.value || "UNKNOWN"),
+);
+
+function formatReferenceSummary(references = {}) {
+  const items = [
+    ["订单", references.order],
+    ["售后", references.afterSales],
+    ["物流", references.logistics],
+  ].filter(([, value]) => Boolean(value));
+  if (!items.length) return "待补充";
+  return items.map(([label, value]) => `${label}：${value}`).join(" / ");
+}
+
+function detailReferenceSummary(detail, value) {
+  return formatReferenceSummary({
+    order: detail?.references?.order_reference || value.order_reference || dispute.value?.order_id,
+    afterSales:
+      detail?.references?.after_sales_reference ||
+      value.after_sales_reference ||
+      dispute.value?.after_sale_id,
+    logistics: detail?.references?.logistics_reference || value.logistics_reference,
+  });
+}
+
+function fallbackReferenceSummary(value) {
+  return formatReferenceSummary({
+    order: scrollCardValue("order_reference", value.order_reference || dispute.value?.order_id),
+    afterSales: scrollCardValue(
+      "after_sales_reference",
+      value.after_sales_reference || dispute.value?.after_sale_id,
+    ),
+    logistics: scrollCardValue("logistics_reference", value.logistics_reference),
+  });
+}
+
 const liveStickers = computed(() => {
   const value = analysis.value || {};
   const detail = caseDetailDossier.value;
   if (detail) {
     return [
       {
-        label: "关联引用",
-        value: [
-          detail.references?.order_reference,
-          detail.references?.after_sales_reference,
-          detail.references?.logistics_reference,
-        ].filter(Boolean).join(" / "),
+        label: "订单 / 售后 / 物流",
+        value: detailReferenceSummary(detail, value),
         tone: "blue",
       },
       {
         label: "发起方",
-        value: humanizeDossierText(value.initiator_role || "Pending"),
+        value: initiatorRoleCopy.value,
         tone: "mint",
       },
       {
@@ -241,17 +242,16 @@ const liveStickers = computed(() => {
   }
   return [
     {
-      label: "关联引用",
-      value: [
-        scrollCardValue("order_reference", value.order_reference || dispute.value?.order_id),
-        scrollCardValue("after_sales_reference", value.after_sales_reference || dispute.value?.after_sale_id),
-        scrollCardValue("logistics_reference", value.logistics_reference),
-      ].filter(Boolean).join(" / "),
+      label: "订单 / 售后 / 物流",
+      value: fallbackReferenceSummary(value),
       tone: "blue",
     },
     {
       label: "发起方",
-      value: humanizeDossierText(scrollCardValue("initiator_role", value.initiator_role || "Pending")),
+      value: humanizeDossierText(
+        scrollCardValue("initiator_role", initiatorRoleValue.value),
+        { fallback: "待确认" },
+      ),
       tone: "mint",
     },
     {
@@ -297,7 +297,7 @@ const caseDetailMetaSections = computed(() => {
     {
       title: "案件索引",
       tone: "blue",
-      items: pickStickers(["关联引用", "发起方"]),
+      items: pickStickers(["订单 / 售后 / 物流", "发起方"]),
     },
     {
       title: "双方说法",
@@ -533,7 +533,7 @@ onBeforeUnmount(() => eventAbortController.abort());
               :data-risk="caseRiskGradeTone"
               data-case-risk-grade
             >
-              <span>风险分类</span>
+              <span>接待官初评风险</span>
               <strong>{{ caseRiskGradeCopy }}</strong>
             </div>
           </div>

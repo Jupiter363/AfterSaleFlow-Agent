@@ -70,7 +70,7 @@ async function mountInteractiveView(options = {}) {
   return mount(IntakeRoomView, {
     props: {
       initialDispute: dispute,
-      initialAnalysis: analysis,
+      initialAnalysis: options.initialAnalysis || analysis,
       initialMessages: [],
       initialTurnMemory: options.initialTurnMemory || null,
       postMessageAction: options.postMessageAction,
@@ -406,10 +406,31 @@ describe("IntakeRoomView", () => {
     expect(wrapper.findAll("[data-dossier-section]").length).toBe(0);
     expect(wrapper.text()).toContain("案件索引");
     expect(wrapper.text()).toContain("双方说法");
+    expect(wrapper.text()).toContain("订单 / 售后 / 物流");
+    expect(wrapper.text()).toContain("订单：ORDER-1");
+    expect(wrapper.text()).toContain("售后：AFTER-1");
+    expect(wrapper.text()).toContain("物流：SF1234567890");
+    expect(wrapper.text()).not.toContain("关联引用");
     expect(wrapper.text()).not.toContain("处理判断");
     expect(wrapper.get("[data-case-risk-grade]").text()).toContain("中风险");
     expect(wrapper.get("[data-dossier-progress-hint]").text()).toBe("可以进入下一步");
     expect(wrapper.text()).not.toContain("可继续对话纠正");
+  });
+
+  it("uses the current merchant identity as the deterministic initiator when the model slot is missing", async () => {
+    actor.id = "merchant-local";
+    actor.role = "MERCHANT";
+    const { initiator_role: _initiatorRole, ...analysisWithoutInitiator } = analysis;
+    const wrapper = await mountInteractiveView({
+      initialAnalysis: analysisWithoutInitiator,
+    });
+
+    const initiatorSticker = wrapper
+      .findAll("[data-intake-sticker]")
+      .find((sticker) => sticker.text().includes("发起方"));
+
+    expect(initiatorSticker?.text()).toContain("商家");
+    expect(initiatorSticker?.text()).not.toContain("待确认");
   });
 
   it("lays out the submit and resolve actions as a two-column action bar", async () => {

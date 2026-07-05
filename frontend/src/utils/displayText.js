@@ -78,7 +78,7 @@ const ENGLISH_PHRASE_LABELS = {
   "User claim": "用户主张",
   "Merchant claim": "商家主张",
   "Initiator": "发起方",
-  "References": "关联引用",
+  "References": "订单 / 售后 / 物流",
   "delivery conflict": "物流履约冲突",
   "The user reports that the watch is broken. No additional details or evidence provided.":
     "用户反馈手表损坏，仍需补充故障细节、证据和双方处理意见。",
