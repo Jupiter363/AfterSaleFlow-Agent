@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from fastapi.testclient import TestClient
 
 from app.config import Settings
+from app.intake_turn import IntakeTurnWorkflow
 from app.main import create_app
+from app.schemas import IntakeTurnRequest
 
 
 def _settings() -> Settings:
@@ -17,7 +21,12 @@ def _settings() -> Settings:
 
 
 def _client() -> TestClient:
-    return TestClient(create_app(_settings()))
+    return TestClient(
+        create_app(
+            _settings(),
+            intake_turn_workflow=IntakeTurnWorkflow(),
+        )
+    )
 
 
 def _headers() -> dict[str, str]:
@@ -25,6 +34,126 @@ def _headers() -> dict[str, str]:
         "X-Service-Secret": "test-agent-service-secret",
         "X-Role": "SYSTEM",
     }
+
+
+class FakeIntakeTurnRunner:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def invoke_structured(self, *, node_name, case_data, output_type, context_sections):
+        self.calls.append(
+            {
+                "node_name": node_name,
+                "case_data": case_data,
+                "context_sections": context_sections,
+            }
+        )
+        return SimpleNamespace(
+            value=output_type(
+                room_utterance="我是接待官小衡，已根据你的补充重新整理右侧争议轮廓。",
+                dossier_patch={
+                    "initiator_role": "USER",
+                    "party_claims": {"user": "用户称物流签收但未收到。"},
+                    "requested_outcome": "REFUND",
+                    "missing_initial_fields": [],
+                    "initial_risk_signals": ["SIGNED_NOT_RECEIVED"],
+                    "logistics_reference": "SF1234567890",
+                },
+                scroll_snapshot={
+                    "cards": [
+                        {
+                            "key": "user_claim",
+                            "label": "用户主张",
+                            "value": "用户称物流签收但未收到。",
+                            "status": "updated",
+                        }
+                    ],
+                    "stamps": [
+                        {
+                            "type": "risk",
+                            "text": "SIGNED_NOT_RECEIVED",
+                            "level": "MEDIUM",
+                        }
+                    ],
+                    "next_questions": [],
+                    "admission_recommendation": "ACCEPTED",
+                },
+                canvas_operations=[
+                    {
+                        "type": "UPSERT_CARD",
+                        "target_key": "user_claim",
+                        "animation": "glow",
+                        "value": "用户称物流签收但未收到。",
+                    }
+                ],
+                admission_recommendation="ACCEPTED",
+                missing_fields=[],
+                knowledge_query_intent=False,
+                knowledge_answer_mode="NONE",
+                confidence=0.91,
+            )
+        )
+
+
+def test_intake_turn_workflow_prefers_llm_runner_output_when_available() -> None:
+    runner = FakeIntakeTurnRunner()
+    workflow = IntakeTurnWorkflow(model_runner=runner)
+
+    result = workflow.run(
+        IntakeTurnRequest.model_validate(
+            {
+                "case_id": "CASE_intake_turn_llm",
+                "room_type": "INTAKE",
+                "turn_source": "USER_MESSAGE",
+                "lobby_seed": {
+                    "order_reference": "ORDER_123",
+                    "after_sales_reference": "AS_456",
+                    "initiator_role": "USER",
+                    "raw_text": "物流显示签收但我没收到。",
+                },
+                "current_user_message": {
+                    "message_id": "MESSAGE_llm",
+                    "role": "USER",
+                    "text": "物流单号 SF1234567890，我希望退款。",
+                },
+                "latest_scroll_snapshot": {
+                    "cards": [
+                        {
+                            "key": "requested_outcome",
+                            "label": "期望结果",
+                            "value": "UNKNOWN",
+                            "status": "confirmed",
+                        }
+                    ],
+                    "stamps": [],
+                    "next_questions": [],
+                },
+                "recent_turns": [
+                    {
+                        "turn_no": 1,
+                        "actor_id": "user-local",
+                        "answer_role": "USER",
+                        "answer_content": "之前说过没有收到包裹。",
+                        "agent_role": None,
+                        "agent_response": None,
+                        "scroll_snapshot": {},
+                    }
+                ],
+            }
+        )
+    )
+
+    assert result.room_utterance.startswith("我是接待官小衡")
+    assert result.dossier_patch["logistics_reference"] == "SF1234567890"
+    assert result.scroll_snapshot["cards"][0]["value"] == "用户称物流签收但未收到。"
+    assert result.canvas_operations[0]["target_key"] == "user_claim"
+    assert result.admission_recommendation == "ACCEPTED"
+    assert result.confidence == 0.91
+    assert runner.calls[0]["node_name"] == "intake_turn_dialogue"
+    section_names = {
+        section.name for section in runner.calls[0]["context_sections"]  # type: ignore[index]
+    }
+    assert {"memeo_memory", "latest_scroll_snapshot"} <= section_names
 
 
 def test_lobby_seed_turn_generates_readable_first_question_and_scroll_snapshot() -> None:

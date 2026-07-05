@@ -22,6 +22,7 @@ from app.agents.review_copilot import ReviewCopilot
 from app.business.api.final_agents import FinalAgentServices
 from app.config import Settings, get_settings
 from app.harness.guardrails import GuardrailViolation
+from app.harness.model_runner import HarnessModelRunner
 from app.harness.validation import CitationValidationError
 from app.llm import AgentServiceUnavailable, LiteLlmProxyClient
 from app.llm import AgentOutputSchemaError
@@ -82,7 +83,9 @@ def create_app(
     resolved = settings or get_settings()
     hearing_workflow = workflow or _build_workflow(resolved)
     resolved_intake_workflow = intake_workflow or _build_intake_workflow(resolved)
-    resolved_intake_turn_workflow = intake_turn_workflow or IntakeTurnWorkflow()
+    resolved_intake_turn_workflow = intake_turn_workflow or _build_intake_turn_workflow(
+        resolved
+    )
     resolved_evaluation_workflow = evaluation_workflow or _build_evaluation_workflow(
         resolved
     )
@@ -393,6 +396,21 @@ def _build_intake_workflow(settings: Settings) -> IntakeWorkflow:
         PromptRepository(),
         tracer,
         settings.litellm_model,
+    )
+
+
+def _build_intake_turn_workflow(settings: Settings) -> IntakeTurnWorkflow:
+    llm = LiteLlmProxyClient(
+        settings.litellm_base_url,
+        settings.litellm_model,
+        settings.litellm_master_key,
+        settings.llm_timeout_seconds,
+    )
+    return IntakeTurnWorkflow(
+        model_runner=HarnessModelRunner(
+            llm=llm,
+            prompts=PromptRepository(),
+        )
     )
 
 

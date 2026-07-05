@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import json
+import logging
 import operator
 import re
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from langgraph.graph import END, START, StateGraph
+from pydantic import BaseModel, ConfigDict, Field
 from typing_extensions import NotRequired, TypedDict
 
+from app.harness.context_window import PromptSection
 from app.harness.memory import MemeoMemoryAssembler
 from app.schemas import IntakeTurnRequest, IntakeTurnResult
 
@@ -19,6 +23,7 @@ _KNOWN_CARRIER_REFERENCE_RE = re.compile(
     r"\b(?:SF|EMS|JD|JT|YTO|ZTO|STO|YD|YZ|DBL|HTKY|LOG|TRACK)[-_]?[A-Z0-9]{5,32}\b",
     re.IGNORECASE,
 )
+LOGGER = logging.getLogger(__name__)
 
 
 class IntakeTurnGraphState(TypedDict):
@@ -36,6 +41,25 @@ class IntakeTurnGraphState(TypedDict):
     admission_recommendation: NotRequired[str]
     missing_fields: NotRequired[list[str]]
     confidence: NotRequired[float]
+    llm_answered: NotRequired[bool]
+
+
+class IntakeTurnLlmOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    room_utterance: str = Field(min_length=1, max_length=20_000)
+    dossier_patch: dict[str, object]
+    scroll_snapshot: dict[str, object]
+    canvas_operations: list[dict[str, object]] = Field(max_length=100)
+    admission_recommendation: Literal[
+        "ACCEPTED",
+        "NEED_MORE_INFO",
+        "NOT_ADMISSIBLE",
+    ]
+    missing_fields: list[str] = Field(default_factory=list)
+    knowledge_query_intent: bool = False
+    knowledge_answer_mode: Literal["NONE", "STUB"] = "NONE"
+    confidence: float = Field(ge=0, le=1)
 
 
 class IntakeTurnWorkflow:
@@ -47,8 +71,8 @@ class IntakeTurnWorkflow:
     node and the knowledge node with RAG/MCP without changing the API shape.
     """
 
-    def __init__(self) -> None:
-        self._graph = build_intake_turn_graph()
+    def __init__(self, model_runner: Any | None = None) -> None:
+        self._graph = build_intake_turn_graph(model_runner)
 
     def run(self, request: IntakeTurnRequest) -> IntakeTurnResult:
         initial_state: IntakeTurnGraphState = {
@@ -75,11 +99,16 @@ class IntakeTurnWorkflow:
         )
 
 
-def build_intake_turn_graph():
+def build_intake_turn_graph(model_runner: Any | None = None):
     builder = StateGraph(IntakeTurnGraphState)
     builder.add_node("load_context", _load_context)
     builder.add_node("classify_intent", _classify_intent)
-    builder.add_node("intake_reasoning", _intake_reasoning)
+    builder.add_node(
+        "intake_reasoning",
+        _llm_intake_reasoning_node(model_runner)
+        if model_runner is not None
+        else _intake_reasoning,
+    )
     builder.add_node("knowledge_qa_stub", _knowledge_qa_stub)
     builder.add_node("dossier_canvas", _dossier_canvas)
     builder.add_node("validate_output", _validate_output)
@@ -91,6 +120,75 @@ def build_intake_turn_graph():
     builder.add_edge("dossier_canvas", "validate_output")
     builder.add_edge("validate_output", END)
     return builder.compile()
+
+
+def _llm_intake_reasoning_node(model_runner: Any):
+    def run_llm_intake_reasoning(state: IntakeTurnGraphState) -> dict[str, Any]:
+        request = state["request"]
+        try:
+            generation = model_runner.invoke_structured(
+                node_name="intake_turn_dialogue",
+                case_data={
+                    "case_id": request.get("case_id"),
+                    "room_type": request.get("room_type"),
+                    "turn_source": request.get("turn_source"),
+                    "actor_role": state["actor_role"],
+                    "lobby_seed": request.get("lobby_seed") or {},
+                    "current_user_message": request.get("current_user_message"),
+                    "latest_scroll_snapshot": request.get("latest_scroll_snapshot")
+                    or {},
+                },
+                output_type=IntakeTurnLlmOutput,
+                context_sections=[
+                    PromptSection(
+                        name="memeo_memory",
+                        content=str(state["memory_frame"].get("prompt_memory") or ""),
+                        priority=90,
+                        required=False,
+                    ),
+                    PromptSection(
+                        name="latest_scroll_snapshot",
+                        content=json.dumps(
+                            request.get("latest_scroll_snapshot") or {},
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ),
+                        priority=80,
+                        required=False,
+                    ),
+                ],
+            )
+            output = generation.value
+            return {
+                "dossier_patch": dict(output.dossier_patch),
+                "room_utterance": output.room_utterance,
+                "scroll_snapshot": dict(output.scroll_snapshot),
+                "canvas_operations": list(output.canvas_operations),
+                "admission_recommendation": output.admission_recommendation,
+                "missing_fields": list(output.missing_fields),
+                "knowledge_query_intent": output.knowledge_query_intent,
+                "knowledge_answer_mode": output.knowledge_answer_mode,
+                "confidence": output.confidence,
+                "llm_answered": True,
+                "executed_nodes": ["llm_intake_reasoning"],
+            }
+        except Exception as failure:
+            LOGGER.warning(
+                "intake turn LLM reasoning degraded: case_id=%s turn_source=%s error_type=%s error=%s",
+                request.get("case_id"),
+                request.get("turn_source"),
+                type(failure).__name__,
+                failure,
+                exc_info=True,
+            )
+            fallback = _intake_reasoning(state)
+            return {
+                **fallback,
+                "llm_answered": False,
+                "executed_nodes": ["llm_intake_reasoning_fallback"],
+            }
+
+    return run_llm_intake_reasoning
 
 
 def _load_context(state: IntakeTurnGraphState) -> dict[str, Any]:
@@ -191,6 +289,11 @@ def _intake_reasoning(state: IntakeTurnGraphState) -> dict[str, Any]:
 
 
 def _knowledge_qa_stub(state: IntakeTurnGraphState) -> dict[str, Any]:
+    if state.get("llm_answered"):
+        return {
+            "knowledge_answer_mode": state.get("knowledge_answer_mode", "NONE"),
+            "executed_nodes": ["knowledge_qa_stub"],
+        }
     if not state["knowledge_query_intent"]:
         return {
             "knowledge_answer_mode": "NONE",
@@ -209,6 +312,8 @@ def _knowledge_qa_stub(state: IntakeTurnGraphState) -> dict[str, Any]:
 
 
 def _dossier_canvas(state: IntakeTurnGraphState) -> dict[str, Any]:
+    if state.get("scroll_snapshot") and state.get("canvas_operations"):
+        return {"executed_nodes": ["dossier_canvas"]}
     request = state["request"]
     previous = request.get("latest_scroll_snapshot") or {}
     previous_cards = _cards_by_key(previous)
