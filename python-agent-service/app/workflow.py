@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from app.graph import OUTPUT_TYPES, build_hearing_graph
 from app.llm import AgentOutputSchemaError, StructuredLlmClient
-from app.prompts import PromptRepository
+from app.harness.prompt_composer import PromptRepository
 from app.schemas import (
     AdjudicationDraft,
     AdjudicationDraftOutput,

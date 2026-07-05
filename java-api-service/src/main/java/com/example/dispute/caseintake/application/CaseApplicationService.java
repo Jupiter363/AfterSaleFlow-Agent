@@ -3,6 +3,7 @@ package com.example.dispute.caseintake.application;
 import com.example.dispute.common.api.ErrorCode;
 import com.example.dispute.common.exception.ForbiddenException;
 import com.example.dispute.common.exception.NotFoundException;
+import com.example.dispute.casecore.domain.CaseSourceType;
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AppProperties;
 import com.example.dispute.config.AuthenticatedActor;
@@ -126,7 +127,14 @@ public class CaseApplicationService {
                                                 "DISPUTE"),
                                         criteria.equal(
                                                 root.get("caseType"),
-                                                "FULFILLMENT_DISPUTE")));
+                                                "FULFILLMENT_DISPUTE"),
+                                        criteria.and(
+                                                criteria.equal(
+                                                        root.get("caseType"),
+                                                        "TRANSFERRED"),
+                                                criteria.equal(
+                                                        root.get("sourceType"),
+                                                        CaseSourceType.INTAKE_CREATED))));
         if (status != null) {
             specification =
                     specification.and(
@@ -192,9 +200,9 @@ public class CaseApplicationService {
             analysis =
                     properties.feature().agentIntakeEnabled()
                             ? agentServiceClient.analyze(command, traceId, requestId)
-                            : fallback(command);
+                            : disputeFallback(command);
         } catch (RuntimeException failure) {
-            analysis = fallback(command);
+            analysis = disputeFallback(command);
             degraded = true;
         }
 
@@ -269,6 +277,21 @@ public class CaseApplicationService {
                             writeJson(Map.of("case_status", status.name()))));
         }
         return toView(saved, snapshot);
+    }
+
+    private static IntakeAnalysis disputeFallback(CreateCaseCommand command) {
+        List<String> missing =
+                command.orderId() == null || command.orderId().isBlank()
+                        ? List.of("ORDER_ID")
+                        : List.of();
+        return new IntakeAnalysis(
+                "DISPUTE",
+                "FULFILLMENT_CONFLICT",
+                RiskLevel.MEDIUM,
+                true,
+                missing,
+                "履约争议待核实",
+                required(command.description(), "description"));
     }
 
     private static IntakeAnalysis fallback(CreateCaseCommand command) {

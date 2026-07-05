@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import operator
+import re
 from typing import Annotated, Any
 
 from langgraph.graph import END, START, StateGraph
@@ -8,6 +9,16 @@ from typing_extensions import NotRequired, TypedDict
 
 from app.harness.memory import MemeoMemoryAssembler
 from app.schemas import IntakeTurnRequest, IntakeTurnResult
+
+_CONTEXTUAL_LOGISTICS_REFERENCE_RE = re.compile(
+    r"(?:物流单号|物流号|快递单号|运单号|tracking(?:\s+number)?|waybill)"
+    r"[^\w]{0,12}([A-Za-z]{1,8}[-_]?[A-Za-z0-9]{6,32})",
+    re.IGNORECASE,
+)
+_KNOWN_CARRIER_REFERENCE_RE = re.compile(
+    r"\b(?:SF|EMS|JD|JT|YTO|ZTO|STO|YD|YZ|DBL|HTKY|LOG|TRACK)[-_]?[A-Z0-9]{5,32}\b",
+    re.IGNORECASE,
+)
 
 
 class IntakeTurnGraphState(TypedDict):
@@ -125,13 +136,19 @@ def _intake_reasoning(state: IntakeTurnGraphState) -> dict[str, Any]:
     normalized = _normalized(source_text)
     actor_role = state["actor_role"]
     outcome = _requested_outcome(source_text, seed.get("requested_outcome_hint"))
+    latest_scroll_snapshot = request.get("latest_scroll_snapshot") or {}
+    effective_seed = {
+        **seed,
+        "logistics_reference": seed.get("logistics_reference")
+        or _extract_logistics_reference(source_text),
+    }
     missing_fields = _missing_fields(
         normalized,
-        seed,
-        request.get("latest_scroll_snapshot") or {},
+        effective_seed,
+        latest_scroll_snapshot,
         state["memory_frame"].get("prompt_memory", ""),
     )
-    recommendation = "ACCEPTED" if _can_accept(seed, missing_fields) else "NEED_MORE_INFO"
+    recommendation = "ACCEPTED" if _can_accept(effective_seed, missing_fields) else "NEED_MORE_INFO"
     risk_signals = _risk_signals(normalized)
 
     claim_key = "merchant" if actor_role == "MERCHANT" else "user"
@@ -147,8 +164,8 @@ def _intake_reasoning(state: IntakeTurnGraphState) -> dict[str, Any]:
         "after_sales_reference",
         "logistics_reference",
     ):
-        if seed.get(key):
-            dossier_patch[key] = seed[key]
+        if effective_seed.get(key):
+            dossier_patch[key] = effective_seed[key]
 
     if request.get("turn_source") == "LOBBY_SEED":
         prefix = "我已收到大厅表单，并先把订单引用、售后引用、物流引用和你的核心诉求整理成右侧卷轴。"
@@ -351,6 +368,19 @@ def _requested_outcome(text: str, hint: str | None) -> str:
     if any(term in normalized for term in ("退货", "return")):
         return "RETURN"
     return "UNKNOWN"
+
+
+def _extract_logistics_reference(text: str) -> str | None:
+    if not text:
+        return None
+    contextual_match = _CONTEXTUAL_LOGISTICS_REFERENCE_RE.search(text)
+    if contextual_match:
+        return contextual_match.group(1).upper()
+    if _mentions_logistics_dispute(_normalized(text)):
+        carrier_match = _KNOWN_CARRIER_REFERENCE_RE.search(text)
+        if carrier_match:
+            return carrier_match.group(0).upper()
+    return None
 
 
 def _missing_fields(

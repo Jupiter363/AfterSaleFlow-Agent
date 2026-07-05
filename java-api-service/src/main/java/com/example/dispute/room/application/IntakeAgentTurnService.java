@@ -82,7 +82,7 @@ public class IntakeAgentTurnService {
                         caseId,
                         RoomType.INTAKE,
                         "LOBBY_SEED",
-                        lobbySeed,
+                        sanitizeLobbySeed(lobbySeed),
                         null,
                         previousScrollSnapshot,
                         recentTurns(caseId));
@@ -189,13 +189,24 @@ public class IntakeAgentTurnService {
 
     private IntakeLobbySeed seedFromDispute(
             FulfillmentCaseEntity dispute, AuthenticatedActor actor) {
+        return sanitizeLobbySeed(
+                new IntakeLobbySeed(
+                        dispute.getOrderId(),
+                        dispute.getAfterSaleId(),
+                        dispute.getLogisticsId(),
+                        actor.role().name(),
+                        dispute.getDescription(),
+                        null));
+    }
+
+    private IntakeLobbySeed sanitizeLobbySeed(IntakeLobbySeed seed) {
         return new IntakeLobbySeed(
-                dispute.getOrderId(),
-                dispute.getAfterSaleId(),
-                dispute.getLogisticsId(),
-                actor.role().name(),
-                dispute.getDescription(),
-                null);
+                validIdentifierOrNull(seed.orderReference()),
+                validIdentifierOrNull(seed.afterSalesReference()),
+                validIdentifierOrNull(seed.logisticsReference()),
+                seed.initiatorRole(),
+                seed.rawText(),
+                validIdentifierOrNull(seed.requestedOutcomeHint()));
     }
 
     private void persistAgentTurn(
@@ -382,6 +393,14 @@ public class IntakeAgentTurnService {
 
     private static boolean blank(String value) {
         return value == null || value.isBlank();
+    }
+
+    private static String validIdentifierOrNull(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        String normalized = value.trim();
+        return normalized.length() >= 3 ? normalized : null;
     }
 
     private static String compactUuid() {

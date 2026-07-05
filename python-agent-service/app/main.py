@@ -19,7 +19,7 @@ from app.agents.evidence_clerk import EvidenceClerk
 from app.agents.model_roles import ModelCriticEvaluator, ModelReviewAnswerer
 from app.agents.presiding_judge import PresidingJudge
 from app.agents.review_copilot import ReviewCopilot
-from app.api.final_agents import FinalAgentServices
+from app.business.api.final_agents import FinalAgentServices
 from app.config import Settings, get_settings
 from app.harness.guardrails import GuardrailViolation
 from app.harness.validation import CitationValidationError
@@ -28,7 +28,7 @@ from app.llm import AgentOutputSchemaError
 from app.intake import IntakeWorkflow
 from app.intake_turn import IntakeTurnWorkflow
 from app.evaluation import EvaluationWorkflow
-from app.prompts import PromptRepository
+from app.harness.prompt_composer import PromptRepository
 from app.schemas import (
     HearingAnalysisResult,
     HearingAnalyzeRequest,
@@ -71,6 +71,14 @@ def create_app(
     evaluation_workflow: EvaluationWorkflow | None = None,
     final_agent_services: FinalAgentServices | None = None,
 ) -> FastAPI:
+    if (
+        evaluation_workflow is None
+        and intake_turn_workflow is not None
+        and hasattr(intake_turn_workflow, "analyze")
+        and not hasattr(intake_turn_workflow, "run")
+    ):
+        evaluation_workflow = intake_turn_workflow  # type: ignore[assignment]
+        intake_turn_workflow = None
     resolved = settings or get_settings()
     hearing_workflow = workflow or _build_workflow(resolved)
     resolved_intake_workflow = intake_workflow or _build_intake_workflow(resolved)

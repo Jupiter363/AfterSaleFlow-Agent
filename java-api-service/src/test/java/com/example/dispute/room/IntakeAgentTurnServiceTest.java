@@ -137,6 +137,58 @@ class IntakeAgentTurnServiceTest {
     }
 
     @Test
+    void initialTurnOmitsShortLobbySeedReferencesBeforeCallingAgent() {
+        FulfillmentCaseEntity dispute = intakeCase();
+        CaseRoomEntity room = intakeRoom(dispute);
+        when(caseRepository.findByIdForUpdate(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.INTAKE))
+                .thenReturn(Optional.of(room));
+        when(memoryRepository.findMaxTurnNo(dispute.getId(), RoomType.INTAKE))
+                .thenReturn(0);
+        when(memoryRepository
+                        .findTopByCaseIdAndRoomTypeAndAgentRoleIsNotNullOrderByTurnNoDesc(
+                                dispute.getId(), RoomType.INTAKE))
+                .thenReturn(Optional.empty());
+        when(memoryRepository.findTop10ByCaseIdAndRoomTypeOrderByTurnNoDesc(
+                        dispute.getId(), RoomType.INTAKE))
+                .thenReturn(List.of());
+        when(client.run(any(), eq("TRACE_SHORT_INITIAL"), eq("REQ_SHORT_INITIAL")))
+                .thenReturn(
+                        result(
+                                "我会先补齐缺失的订单、售后和物流引用。",
+                                Map.of("admission_recommendation", "NEED_MORE_INFO")));
+        when(memoryRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(messageRepository.findByCaseIdAndIdempotencyKey(
+                        eq(dispute.getId()), any()))
+                .thenReturn(Optional.empty());
+        when(messageRepository.findMaxSequenceByRoomId(room.getId())).thenReturn(0L);
+        when(messageRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        service.startInitialTurn(
+                dispute.getId(),
+                new AuthenticatedActor("user-local", ActorRole.USER),
+                new IntakeLobbySeed(
+                        "2",
+                        "2",
+                        "2",
+                        "USER",
+                        "物流显示签收，但我没有收到包裹。",
+                        null),
+                "TRACE_SHORT_INITIAL",
+                "REQ_SHORT_INITIAL");
+
+        ArgumentCaptor<IntakeAgentTurnCommand> command =
+                ArgumentCaptor.forClass(IntakeAgentTurnCommand.class);
+        verify(client).run(command.capture(), eq("TRACE_SHORT_INITIAL"), eq("REQ_SHORT_INITIAL"));
+        assertThat(command.getValue().lobbySeed().orderReference()).isNull();
+        assertThat(command.getValue().lobbySeed().afterSalesReference()).isNull();
+        assertThat(command.getValue().lobbySeed().logisticsReference()).isNull();
+    }
+
+    @Test
     void participantTurnPersistsUserAnswerAndSendsPreviousScrollSnapshotToAgent() {
         FulfillmentCaseEntity dispute = intakeCase();
         CaseRoomEntity room = intakeRoom(dispute);
@@ -209,6 +261,75 @@ class IntakeAgentTurnServiceTest {
                 .isEqualTo("DISPUTE_INTAKE_OFFICER");
         assertThat(memories.getAllValues().get(1).getScrollSnapshotJson())
                 .contains("REFUND");
+    }
+
+    @Test
+    void participantTurnOmitsShortExternalReferencesBeforeCallingAgent() {
+        FulfillmentCaseEntity dispute =
+                FulfillmentCaseEntity.imported(
+                        "CASE_INTAKE_SHORT_REFS",
+                        "2",
+                        "2",
+                        "2",
+                        "user-local",
+                        "merchant-local",
+                        "idem-short-refs",
+                        "SIGNED_NOT_RECEIVED",
+                        "履约问题待处理",
+                        "物流显示签收，但我没有收到包裹。",
+                        RiskLevel.MEDIUM,
+                        CaseStatus.INTAKE_PENDING,
+                        "INTAKE",
+                        null,
+                        "OMS",
+                        "EXT-short-refs",
+                        "system");
+        CaseRoomEntity room = intakeRoom(dispute);
+        when(caseRepository.findByIdForUpdate(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.INTAKE))
+                .thenReturn(Optional.of(room));
+        when(memoryRepository.findMaxTurnNo(dispute.getId(), RoomType.INTAKE))
+                .thenReturn(0);
+        when(memoryRepository
+                        .findTopByCaseIdAndRoomTypeAndAgentRoleIsNotNullOrderByTurnNoDesc(
+                                dispute.getId(), RoomType.INTAKE))
+                .thenReturn(Optional.empty());
+        when(memoryRepository.findTop10ByCaseIdAndRoomTypeOrderByTurnNoDesc(
+                        dispute.getId(), RoomType.INTAKE))
+                .thenReturn(List.of());
+        when(client.run(any(), eq("TRACE_SHORT"), eq("REQ_SHORT")))
+                .thenReturn(
+                        result(
+                                "我会继续补齐缺失的订单、售后和物流引用。",
+                                Map.of("admission_recommendation", "NEED_MORE_INFO")));
+        when(memoryRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(messageRepository.findByCaseIdAndIdempotencyKey(
+                        eq(dispute.getId()), any()))
+                .thenReturn(Optional.empty());
+        when(messageRepository.findMaxSequenceByRoomId(room.getId())).thenReturn(1L);
+        when(messageRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        service.continueFromParticipantMessage(
+                dispute.getId(),
+                RoomType.INTAKE,
+                new AuthenticatedActor("user-local", ActorRole.USER),
+                new RoomMessageCommand(
+                        MessageType.PARTY_TEXT,
+                        "我补充：希望平台核实物流并退款。",
+                        List.of()),
+                "TRACE_SHORT",
+                "REQ_SHORT");
+
+        ArgumentCaptor<IntakeAgentTurnCommand> command =
+                ArgumentCaptor.forClass(IntakeAgentTurnCommand.class);
+        verify(client).run(command.capture(), eq("TRACE_SHORT"), eq("REQ_SHORT"));
+        assertThat(command.getValue().lobbySeed().orderReference()).isNull();
+        assertThat(command.getValue().lobbySeed().afterSalesReference()).isNull();
+        assertThat(command.getValue().lobbySeed().logisticsReference()).isNull();
+        assertThat(command.getValue().lobbySeed().rawText()).contains("物流显示签收");
     }
 
     @Test

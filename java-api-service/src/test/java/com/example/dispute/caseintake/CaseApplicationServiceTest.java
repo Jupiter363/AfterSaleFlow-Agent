@@ -181,9 +181,10 @@ class CaseApplicationServiceTest {
                         "REQ_test");
 
         assertThat(result.agentDegraded()).isTrue();
+        assertThat(result.caseType()).isEqualTo("DISPUTE");
         assertThat(result.caseStatus()).isEqualTo(CaseStatus.INTAKE_COMPLETED);
         assertThat(result.riskLevel()).isEqualTo(RiskLevel.MEDIUM);
-        assertThat(result.potentialDispute()).isFalse();
+        assertThat(result.potentialDispute()).isTrue();
     }
 
     @Test

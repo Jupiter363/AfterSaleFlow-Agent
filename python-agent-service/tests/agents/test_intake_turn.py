@@ -133,6 +133,48 @@ def test_user_message_turn_merges_previous_scroll_snapshot_as_memory() -> None:
     )
 
 
+def test_user_message_turn_extracts_logistics_reference_from_current_message() -> None:
+    client = _client()
+
+    response = client.post(
+        "/internal/agents/intake/turn",
+        headers=_headers(),
+        json={
+            "case_id": "CASE_intake_turn_logistics_ref",
+            "room_type": "INTAKE",
+            "turn_source": "USER_MESSAGE",
+            "lobby_seed": {
+                "order_reference": "ORDER_123",
+                "after_sales_reference": "AS_456",
+                "initiator_role": "USER",
+                "raw_text": "Package shows signed but I did not receive it.",
+            },
+            "current_user_message": {
+                "message_id": "MESSAGE_logistics_ref",
+                "role": "USER",
+                "text": (
+                    "I found the tracking number SF1234567890. "
+                    "The merchant replied that I should wait for logistics verification."
+                ),
+            },
+            "latest_scroll_snapshot": None,
+            "recent_turns": [],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    cards = {card["key"]: card for card in payload["scroll_snapshot"]["cards"]}
+    assert payload["dossier_patch"]["logistics_reference"] == "SF1234567890"
+    assert cards["logistics_reference"]["value"] == "SF1234567890"
+    assert "LOGISTICS_REFERENCE" not in payload["missing_fields"]
+    assert any(
+        operation["target_key"] == "logistics_reference"
+        and operation["type"] == "UPSERT_CARD"
+        for operation in payload["canvas_operations"]
+    )
+
+
 def test_user_message_turn_does_not_repeat_delivery_proof_when_memory_already_has_it() -> None:
     client = _client()
 

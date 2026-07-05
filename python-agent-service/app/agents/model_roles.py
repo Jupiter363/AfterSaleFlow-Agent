@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from app.llm import StructuredLlmClient
-from app.prompts import PromptRepository
+from app.harness.prompt_composer import PromptRepository
 from app.schemas import (
     CriticDraft,
     CriticType,

@@ -7,7 +7,7 @@ from langgraph.graph import END, START, StateGraph
 from typing_extensions import NotRequired, TypedDict
 
 from app.llm import StructuredLlmClient
-from app.prompts import PromptRepository
+from app.harness.prompt_composer import PromptRepository
 from app.schemas import (
     AdjudicationDraftOutput,
     EvidenceCrossCheckOutput,
