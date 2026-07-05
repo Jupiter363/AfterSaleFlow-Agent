@@ -1,10 +1,11 @@
 package com.example.dispute.casecore.api;
 
 import com.example.dispute.casecore.application.DisputeImportService;
-import com.example.dispute.casecore.application.ImportedDisputeView;
 import com.example.dispute.casecore.application.SimulatedImportResultView;
 import com.example.dispute.common.api.ApiResponse;
+import com.example.dispute.common.exception.ForbiddenException;
 import com.example.dispute.common.trace.TraceIdFilter;
+import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
@@ -22,45 +23,30 @@ import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+/**
+ * Public demo adapter for importing externally-originated dispute cases.
+ *
+ * <p>The browser should never call the internal import boundary directly. This controller validates
+ * the current demo actor and then delegates to the internal import workflow with a system service
+ * identity, matching how a trusted OMS/after-sale adapter would enter the platform.
+ */
 @Validated
 @RestController
-@RequestMapping("/internal/disputes")
-public class InternalDisputeImportController {
+@RequestMapping("/api/disputes/import")
+public class DisputeImportSimulationController {
+
+    private static final AuthenticatedActor SYSTEM_IMPORT_ACTOR =
+            new AuthenticatedActor("external-import-simulator", ActorRole.SYSTEM);
 
     private final DisputeImportService service;
     private final Clock clock;
 
-    public InternalDisputeImportController(DisputeImportService service, Clock clock) {
+    public DisputeImportSimulationController(DisputeImportService service, Clock clock) {
         this.service = service;
         this.clock = clock;
     }
 
-    @PostMapping("/import")
-    public ResponseEntity<ApiResponse<ImportedDisputeView>> importDispute(
-            @Valid @RequestBody ImportDisputeRequest request,
-            @RequestHeader("Idempotency-Key")
-                    @NotBlank
-                    @Pattern(regexp = "[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
-                    String idempotencyKey,
-            Authentication authentication,
-            HttpServletRequest servletRequest) {
-        String traceId = correlationId(servletRequest, TraceIdFilter.TRACE_ATTRIBUTE);
-        String requestId = correlationId(servletRequest, TraceIdFilter.REQUEST_ATTRIBUTE);
-        ImportedDisputeView imported =
-                service.importDispute(
-                        request.toCommand(),
-                        (AuthenticatedActor) authentication.getPrincipal(),
-                        idempotencyKey);
-        return ResponseEntity.status(HttpStatus.CREATED)
-                .body(
-                        ApiResponse.success(
-                                imported,
-                                requestId,
-                                traceId,
-                                Instant.now(clock)));
-    }
-
-    @PostMapping("/import/simulate")
+    @PostMapping("/simulate")
     public ResponseEntity<ApiResponse<SimulatedImportResultView>> simulateImport(
             @Valid @RequestBody SimulateImportRequest request,
             @RequestHeader("Idempotency-Key")
@@ -69,22 +55,32 @@ public class InternalDisputeImportController {
                     String idempotencyKey,
             Authentication authentication,
             HttpServletRequest servletRequest) {
+        AuthenticatedActor actor = (AuthenticatedActor) authentication.getPrincipal();
+        assertCanSimulateForCurrentIdentity(request, actor);
         String traceId = correlationId(servletRequest, TraceIdFilter.TRACE_ATTRIBUTE);
         String requestId = correlationId(servletRequest, TraceIdFilter.REQUEST_ATTRIBUTE);
         SimulatedImportResultView imported =
                 service.simulateExternalImport(
                         request.toCommand(idempotencyKey),
-                        (AuthenticatedActor) authentication.getPrincipal(),
+                        SYSTEM_IMPORT_ACTOR,
                         idempotencyKey,
                         traceId,
                         requestId);
         return ResponseEntity.status(HttpStatus.CREATED)
-                .body(
-                        ApiResponse.success(
-                                imported,
-                                requestId,
-                                traceId,
-                                Instant.now(clock)));
+                .body(ApiResponse.success(imported, requestId, traceId, Instant.now(clock)));
+    }
+
+    private static void assertCanSimulateForCurrentIdentity(
+            SimulateImportRequest request, AuthenticatedActor actor) {
+        if (actor.role() != ActorRole.USER && actor.role() != ActorRole.MERCHANT) {
+            throw new ForbiddenException("only user or merchant demo identities can simulate import");
+        }
+        if (request.initiatorRoleHint() != actor.role()) {
+            throw new ForbiddenException("initiator role must match the current demo identity");
+        }
+        if (!actor.actorId().equals(request.currentActorId())) {
+            throw new ForbiddenException("current actor id must match the current demo identity");
+        }
     }
 
     private static String correlationId(HttpServletRequest request, String attribute) {

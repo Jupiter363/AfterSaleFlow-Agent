@@ -45,10 +45,7 @@ class SimulatedExternalImportWorkflow:
                 item.model_copy(
                     update={
                         "source_system": item.source_system or "LLM_SIMULATED_OMS",
-                        "external_case_reference": (
-                            item.external_case_reference
-                            or self._reference(request, index)
-                        ),
+                        "external_case_reference": self._reference(request, index),
                         "user_id": user_id,
                         "merchant_id": merchant_id,
                         "initiator_role": request.initiator_role_hint,
@@ -120,6 +117,7 @@ class SimulatedExternalImportWorkflow:
     def _suffix(request: SimulatedExternalImportRequest, index: int) -> str:
         raw = (
             f"{request.scenario}|{request.initiator_role_hint}|"
-            f"{request.current_actor_id}|{request.counterparty_actor_id}|{index}"
+            f"{request.current_actor_id}|{request.counterparty_actor_id}|"
+            f"{request.simulation_batch_id or 'default-batch'}|{index}"
         )
         return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12].upper()

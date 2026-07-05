@@ -9,7 +9,25 @@ public record SimulateExternalImportCommand(
         RiskLevel riskLevelHint,
         ActorRole initiatorRoleHint,
         String currentActorId,
-        String counterpartyActorId) {
+        String counterpartyActorId,
+        String simulationBatchId) {
+
+    public SimulateExternalImportCommand(
+            int count,
+            String scenario,
+            RiskLevel riskLevelHint,
+            ActorRole initiatorRoleHint,
+            String currentActorId,
+            String counterpartyActorId) {
+        this(
+                count,
+                scenario,
+                riskLevelHint,
+                initiatorRoleHint,
+                currentActorId,
+                counterpartyActorId,
+                "default");
+    }
 
     public SimulateExternalImportCommand {
         if (count < 1 || count > 10) {
@@ -29,6 +47,9 @@ public record SimulateExternalImportCommand(
         }
         if (counterpartyActorId == null || counterpartyActorId.isBlank()) {
             throw new IllegalArgumentException("counterpartyActorId must not be blank");
+        }
+        if (simulationBatchId == null || simulationBatchId.isBlank()) {
+            simulationBatchId = "default";
         }
     }
 }

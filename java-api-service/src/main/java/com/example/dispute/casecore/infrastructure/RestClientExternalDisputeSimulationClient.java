@@ -6,6 +6,10 @@ import com.example.dispute.casecore.application.SimulatedExternalDispute;
 import com.example.dispute.common.api.ErrorCode;
 import com.example.dispute.common.exception.AgentExecutionException;
 import com.example.dispute.common.trace.TraceIdFilter;
+import com.example.dispute.config.ActorRole;
+import com.example.dispute.domain.model.RiskLevel;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import java.util.List;
 import java.util.Map;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -38,7 +42,7 @@ public class RestClientExternalDisputeSimulationClient
                         .header(TraceIdFilter.TRACE_HEADER, traceId)
                         .header(TraceIdFilter.REQUEST_HEADER, requestId)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .body(command)
+                        .body(AgentSimulationRequest.from(command))
                         .retrieve()
                         .body(SimulationResponse.class);
         if (response == null || response.items() == null || response.items().isEmpty()) {
@@ -47,8 +51,61 @@ public class RestClientExternalDisputeSimulationClient
                     "external import simulator returned an empty schema",
                     Map.of("endpoint", ENDPOINT));
         }
-        return response.items();
+        return response.items().stream().map(AgentSimulatedExternalDispute::toDomain).toList();
     }
 
-    private record SimulationResponse(List<SimulatedExternalDispute> items) {}
+    private record AgentSimulationRequest(
+            @JsonProperty("count") int count,
+            @JsonProperty("scenario") String scenario,
+            @JsonProperty("risk_level_hint") RiskLevel riskLevelHint,
+            @JsonProperty("initiator_role_hint") ActorRole initiatorRoleHint,
+            @JsonProperty("current_actor_id") String currentActorId,
+            @JsonProperty("counterparty_actor_id") String counterpartyActorId,
+            @JsonProperty("simulation_batch_id") String simulationBatchId) {
+
+        static AgentSimulationRequest from(SimulateExternalImportCommand command) {
+            return new AgentSimulationRequest(
+                    command.count(),
+                    command.scenario(),
+                    command.riskLevelHint(),
+                    command.initiatorRoleHint(),
+                    command.currentActorId(),
+                    command.counterpartyActorId(),
+                    command.simulationBatchId());
+        }
+    }
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    private record AgentSimulatedExternalDispute(
+            @JsonProperty("source_system") String sourceSystem,
+            @JsonProperty("external_case_reference") String externalCaseReference,
+            @JsonProperty("order_reference") String orderReference,
+            @JsonProperty("after_sales_reference") String afterSalesReference,
+            @JsonProperty("logistics_reference") String logisticsReference,
+            @JsonProperty("user_id") String userId,
+            @JsonProperty("merchant_id") String merchantId,
+            @JsonProperty("initiator_role") String initiatorRole,
+            @JsonProperty("dispute_type") String disputeType,
+            @JsonProperty("title") String title,
+            @JsonProperty("description") String description,
+            @JsonProperty("risk_level") RiskLevel riskLevel) {
+
+        SimulatedExternalDispute toDomain() {
+            return new SimulatedExternalDispute(
+                    sourceSystem,
+                    externalCaseReference,
+                    orderReference,
+                    afterSalesReference,
+                    logisticsReference,
+                    userId,
+                    merchantId,
+                    initiatorRole,
+                    disputeType,
+                    title,
+                    description,
+                    riskLevel);
+        }
+    }
+
+    private record SimulationResponse(List<AgentSimulatedExternalDispute> items) {}
 }

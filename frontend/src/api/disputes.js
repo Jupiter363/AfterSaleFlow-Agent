@@ -32,10 +32,15 @@ export const disputeApi = {
       method: "POST",
       body: JSON.stringify({ reason }),
     }),
-  simulateExternalImport: (actor, command) =>
-    apiRequest("/internal/disputes/import/simulate", actor, {
+  simulateExternalImport: (actor, command) => {
+    const idempotencyKey = newIdempotencyKey("external-import");
+    return apiRequest("/disputes/import/simulate", actor, {
       method: "POST",
-      headers: { "Idempotency-Key": newIdempotencyKey("external-import") },
-      body: JSON.stringify(command),
-    }),
+      headers: { "Idempotency-Key": idempotencyKey },
+      body: JSON.stringify({
+        ...command,
+        simulation_batch_id: command.simulation_batch_id || idempotencyKey,
+      }),
+    });
+  },
 };

@@ -107,6 +107,7 @@ class SimulatedExternalImportRequest(StrictModel):
     initiator_role_hint: Literal["USER", "MERCHANT"]
     current_actor_id: Identifier
     counterparty_actor_id: Identifier
+    simulation_batch_id: Identifier | None = None
 
 
 class SimulatedExternalDispute(StrictModel):

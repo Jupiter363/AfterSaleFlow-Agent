@@ -9,6 +9,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.example.dispute.casecore.api.DisputeController;
+import com.example.dispute.casecore.api.DisputeImportSimulationController;
 import com.example.dispute.casecore.api.InternalDisputeImportController;
 import com.example.dispute.casecore.application.DisputeImportService;
 import com.example.dispute.casecore.application.ImportedDisputeView;
@@ -44,6 +45,7 @@ import org.springframework.test.web.servlet.MockMvc;
 
 @WebMvcTest({
     DisputeController.class,
+    DisputeImportSimulationController.class,
     InternalDisputeImportController.class,
     IntakeRoomController.class
 })
@@ -205,6 +207,72 @@ class DisputeControllerTest {
                 .andExpect(jsonPath("$.data.items[0].source_type").value("EXTERNAL_IMPORT"))
                 .andExpect(jsonPath("$.data.items[0].source_system").value("LLM_SIMULATED_OMS"))
                 .andExpect(jsonPath("$.data.items[0].initiator_role").value("MERCHANT"));
+    }
+
+    @Test
+    void simulatesExternalImportFromThePublicDemoExperience() throws Exception {
+        when(importService.simulateExternalImport(
+                        any(),
+                        any(),
+                        eq("simulate-import-public-001"),
+                        any(),
+                        any()))
+                .thenReturn(
+                        new SimulatedImportResultView(
+                                List.of(
+                                        new ImportedDisputeView(
+                                                "CASE_public_simulated",
+                                                "EXTERNAL_IMPORT",
+                                                "LLM_SIMULATED_OMS",
+                                                "SIM-PUBLIC-20260706-001",
+                                                CaseStatus.INTAKE_PENDING,
+                                                "INTAKE",
+                                                null,
+                                                "MERCHANT"))));
+
+        mockMvc.perform(
+                        post("/api/disputes/import/simulate")
+                                .header(HeaderAuthenticationFilter.USER_ID_HEADER, "merchant-local")
+                                .header(HeaderAuthenticationFilter.ROLE_HEADER, "MERCHANT")
+                                .header("Idempotency-Key", "simulate-import-public-001")
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content(
+                                        """
+                                        {
+                                          "count": 1,
+                                          "scenario": "手表售后争议",
+                                          "risk_level_hint": "MEDIUM",
+                                          "initiator_role_hint": "MERCHANT",
+                                          "current_actor_id": "merchant-local",
+                                          "counterparty_actor_id": "user-local"
+                                        }
+                                        """))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.data.items[0].id").value("CASE_public_simulated"))
+                .andExpect(jsonPath("$.data.items[0].source_type").value("EXTERNAL_IMPORT"))
+                .andExpect(jsonPath("$.data.items[0].initiator_role").value("MERCHANT"));
+    }
+
+    @Test
+    void rejectsPublicExternalImportWhenTheActorDoesNotMatchTheRequestedInitiator() throws Exception {
+        mockMvc.perform(
+                        post("/api/disputes/import/simulate")
+                                .header(HeaderAuthenticationFilter.USER_ID_HEADER, "merchant-local")
+                                .header(HeaderAuthenticationFilter.ROLE_HEADER, "MERCHANT")
+                                .header("Idempotency-Key", "simulate-import-public-forbidden")
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content(
+                                        """
+                                        {
+                                          "count": 1,
+                                          "scenario": "手表售后争议",
+                                          "risk_level_hint": "MEDIUM",
+                                          "initiator_role_hint": "USER",
+                                          "current_actor_id": "user-local",
+                                          "counterparty_actor_id": "merchant-local"
+                                        }
+                                        """))
+                .andExpect(status().isForbidden());
     }
 
     @Test
