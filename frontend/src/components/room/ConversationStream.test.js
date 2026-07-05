@@ -57,4 +57,30 @@ describe("ConversationStream", () => {
     expect(wrapper.text()).toContain("历史消息编码异常");
     expect(wrapper.text()).not.toContain("????????");
   });
+
+  it("renders sender roles as user-facing Chinese labels", () => {
+    const wrapper = mount(ConversationStream, {
+      props: {
+        messages: [
+          {
+            id: "MESSAGE_AGENT",
+            sequence_no: 1,
+            sender_role: "CUSTOMER_SERVICE",
+            message_text: "请继续补充证据。",
+          },
+          {
+            id: "MESSAGE_MERCHANT",
+            sequence_no: 2,
+            sender_role: "MERCHANT",
+            message_text: "我方需要核对售后记录。",
+          },
+        ],
+      },
+    });
+
+    expect(wrapper.text()).toContain("争议接待官");
+    expect(wrapper.text()).toContain("商家");
+    expect(wrapper.text()).not.toContain("CUSTOMER_SERVICE");
+    expect(wrapper.text()).not.toContain("MERCHANT");
+  });
 });

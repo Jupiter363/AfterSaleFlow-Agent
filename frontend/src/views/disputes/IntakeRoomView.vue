@@ -17,6 +17,10 @@ import {
   createRoomState,
   streamRoomEvents,
 } from "../../stores/room";
+import {
+  humanizeDossierList,
+  humanizeDossierText,
+} from "../../utils/displayText";
 
 const props = defineProps({
   initialDispute: { type: Object, default: null },
@@ -38,7 +42,6 @@ const analysis = ref(props.initialAnalysis);
 const turnMemory = ref(props.initialTurnMemory);
 const messages = ref([...(props.initialMessages || [])]);
 const agentState = ref("LISTENING");
-const confirmationNote = ref("以上信息无误，同意提交争议审理。");
 const submitting = ref(false);
 const admitted = ref(false);
 const resolved = ref(false);
@@ -47,6 +50,18 @@ const eventState = reactive(createRoomState());
 const eventAbortController = new AbortController();
 
 const caseId = computed(() => dispute.value?.id || route.params.caseId);
+const caseNoteTitle = computed(() =>
+  humanizeDossierText(dispute.value?.title || "履约争端", {
+    kind: "title",
+    fallback: "履约争端",
+  }),
+);
+const caseNoteDescription = computed(() =>
+  humanizeDossierText(dispute.value?.description || "", {
+    kind: "summary",
+    fallback: "接待官正在整理争议事实，请继续补充订单、证据和处理诉求。",
+  }),
+);
 const partyCanChat = computed(() => ["USER", "MERCHANT"].includes(actor.role));
 const connectionState = computed(() => {
   if (eventState.connected) return "connected";
@@ -108,22 +123,46 @@ const caseDetailQuality = computed(() => {
     score: currentCaseDossier.value?.quality_score ?? quality.score ?? 0,
     threshold: quality.threshold ?? 80,
     ready: currentCaseDossier.value?.ready_for_next_step ?? Boolean(quality.ready_for_next_step),
-    reason: quality.improvement_reason || "",
+    reason: humanizeDossierText(quality.improvement_reason || "", { fallback: "" }),
   };
 });
 const caseDetailReadyCopy = computed(() =>
   caseDetailQuality.value.ready ? "可以进入下一步" : "继续补充案件信息",
 );
+const handoffRemarkSticker = computed(() => {
+  const notes = caseDetailDossier.value?.handoff_notes;
+  if (!notes) return null;
+  const latestRemark = humanizeDossierText(notes.latest_remark || "", {
+    fallback: "",
+  });
+  const status = notes.remark_status === "NO_EXTRA_REMARKS"
+    ? "无额外备注"
+    : "待随案件详情提交";
+  const value = latestRemark || status;
+  if (!value) return null;
+  return {
+    label: "下一轮备注",
+    value,
+    tone: "purple",
+  };
+});
 const scrollCards = computed(() => scrollSnapshot.value?.cards || []);
 function scrollCardValue(key, fallback = "") {
   return scrollCards.value.find((card) => card.key === key)?.value || fallback;
 }
 const riskSignals = computed(() => {
   const detailSignals = caseDetailDossier.value?.risk_assessment?.risk_signals || [];
-  if (detailSignals.length) return detailSignals;
+  if (detailSignals.length) return humanizeDossierList(detailSignals);
   const stamps = scrollSnapshot.value?.stamps || [];
-  if (stamps.length) return stamps.map((stamp) => stamp.text || stamp.value).filter(Boolean);
-  return analysis.value?.initial_risk_signals || ["Waiting for more information"];
+  if (stamps.length) {
+    return humanizeDossierList(
+      stamps.map((stamp) => stamp.text || stamp.value).filter(Boolean),
+    );
+  }
+  return humanizeDossierList(analysis.value?.initial_risk_signals);
+});
+const initialRiskSignals = computed(() => {
+  return humanizeDossierList(analysis.value?.initial_risk_signals);
 });
 const liveStickers = computed(() => {
   const value = analysis.value || {};
@@ -131,7 +170,7 @@ const liveStickers = computed(() => {
   if (detail) {
     return [
       {
-        label: "References",
+        label: "关联引用",
         value: [
           detail.references?.order_reference,
           detail.references?.after_sales_reference,
@@ -140,32 +179,45 @@ const liveStickers = computed(() => {
         tone: "blue",
       },
       {
-        label: "Initiator",
-        value: value.initiator_role || "Pending",
+        label: "发起方",
+        value: humanizeDossierText(value.initiator_role || "Pending"),
         tone: "mint",
       },
       {
-        label: "User claim",
-        value: detail.party_positions?.user_claim || value.party_claims?.user,
+        label: "用户主张",
+        value: humanizeDossierText(detail.party_positions?.user_claim || value.party_claims?.user),
         tone: "coral",
       },
       {
-        label: "Merchant claim",
-        value: detail.party_positions?.merchant_claim || value.party_claims?.merchant || "Waiting for response",
+        label: "商家主张",
+        value: humanizeDossierText(
+          detail.party_positions?.merchant_claim ||
+            value.party_claims?.merchant ||
+            "Waiting for response",
+        ),
         tone: "purple",
       },
       {
-        label: "Expected outcome",
-        value: detail.requested_resolution?.requested_outcome || "Pending",
+        label: "期望处理结果",
+        value: humanizeDossierText(
+          detail.requested_resolution?.expected_resolution_text ||
+            detail.requested_resolution?.requested_outcome ||
+            "Pending",
+        ),
         tone: "yellow",
       },
       {
-        label: "Admission advice",
-        value: detail.admission?.recommendation || currentCaseDossier.value?.admission_recommendation || "Needs more information",
+        label: "受理建议",
+        value: humanizeDossierText(
+          detail.admission?.recommendation ||
+            currentCaseDossier.value?.admission_recommendation ||
+            "Needs more information",
+        ),
         tone: "mint",
       },
+      ...(handoffRemarkSticker.value ? [handoffRemarkSticker.value] : []),
       {
-        label: "Risk signals",
+        label: "风险信号",
         value: riskSignals.value.join(" / "),
         tone: "coral",
       },
@@ -173,7 +225,7 @@ const liveStickers = computed(() => {
   }
   return [
     {
-      label: "References",
+      label: "关联引用",
       value: [
         scrollCardValue("order_reference", value.order_reference || dispute.value?.order_id),
         scrollCardValue("after_sales_reference", value.after_sales_reference || dispute.value?.after_sale_id),
@@ -182,34 +234,75 @@ const liveStickers = computed(() => {
       tone: "blue",
     },
     {
-      label: "Initiator",
-      value: scrollCardValue("initiator_role", value.initiator_role || "Pending"),
+      label: "发起方",
+      value: humanizeDossierText(scrollCardValue("initiator_role", value.initiator_role || "Pending")),
       tone: "mint",
     },
     {
-      label: "User claim",
-      value: scrollCardValue("user_claim", value.party_claims?.user || dispute.value?.description),
+      label: "用户主张",
+      value: humanizeDossierText(scrollCardValue("user_claim", value.party_claims?.user || dispute.value?.description)),
       tone: "coral",
     },
     {
-      label: "Merchant claim",
-      value: scrollCardValue("merchant_claim", value.party_claims?.merchant || "Waiting for response"),
+      label: "商家主张",
+      value: humanizeDossierText(scrollCardValue("merchant_claim", value.party_claims?.merchant || "Waiting for response")),
       tone: "purple",
     },
     {
-      label: "Expected outcome",
-      value: scrollCardValue("requested_outcome", value.requested_outcome || "Pending"),
+      label: "期望处理结果",
+      value: humanizeDossierText(scrollCardValue("requested_outcome", value.requested_outcome || "Pending")),
       tone: "yellow",
     },
     {
-      label: "Admission advice",
-      value: scrollSnapshot.value?.admission_recommendation || value.admission_recommendation || "Needs more information",
+      label: "受理建议",
+      value: humanizeDossierText(
+        scrollSnapshot.value?.admission_recommendation ||
+          value.admission_recommendation ||
+          "Needs more information",
+      ),
       tone: "mint",
     },
     {
-      label: "Risk signals",
+      label: "风险信号",
       value: riskSignals.value.join(" / "),
       tone: "coral",
+    },
+  ];
+});
+
+function pickStickers(labels) {
+  return labels
+    .map((label) => liveStickers.value.find((sticker) => sticker.label === label))
+    .filter(Boolean);
+}
+
+const dossierSections = computed(() => {
+  const initialRiskSticker = {
+    label: "初始风险信号",
+    value: initialRiskSignals.value.join(" / "),
+    tone: "coral",
+  };
+  return [
+    {
+      title: "案件索引",
+      subtitle: "先锁定订单、身份和硬引用",
+      tone: "blue",
+      items: pickStickers(["关联引用", "发起方"]),
+    },
+    {
+      title: "双方说法",
+      subtitle: "把用户与商家的主张分开看",
+      tone: "purple",
+      items: pickStickers(["用户主张", "商家主张"]),
+    },
+    {
+      title: "处理判断",
+      subtitle: "诉求、受理建议、备注和风险",
+      tone: "coral",
+      items: [
+        ...pickStickers(["期望处理结果", "受理建议", "下一轮备注", "风险信号"]),
+        initialRiskSticker,
+      ],
     },
   ];
 });
@@ -253,6 +346,31 @@ async function refreshRoomSnapshot() {
   await Promise.all([refreshMessages(), refreshTurnMemory()]);
 }
 
+function nextLocalSequenceNo() {
+  return Math.max(0, ...messages.value.map((message) => message.sequence_no || 0)) + 1;
+}
+
+function appendOptimisticPartyMessage(command) {
+  if (!command?.text?.trim()) return "";
+  const id = `PENDING_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+  messages.value = [
+    ...messages.value,
+    {
+      id,
+      sequence_no: nextLocalSequenceNo(),
+      sender_role: actor.role,
+      message_text: command.text.trim(),
+      pending: true,
+    },
+  ];
+  return id;
+}
+
+function removeOptimisticMessage(id) {
+  if (!id) return;
+  messages.value = messages.value.filter((message) => message.id !== id);
+}
+
 function startEventStream() {
   const streamer = props.eventStreamer || streamRoomEvents;
   void streamer({
@@ -272,7 +390,9 @@ function startEventStream() {
 
 async function postMessage(command) {
   agentState.value = "THINKING";
+  submitting.value = true;
   error.value = "";
+  const optimisticId = appendOptimisticPartyMessage(command);
   try {
     const submit =
       props.postMessageAction ||
@@ -281,8 +401,11 @@ async function postMessage(command) {
     await refreshRoomSnapshot();
     agentState.value = "SPEAKING";
   } catch (failure) {
+    removeOptimisticMessage(optimisticId);
     error.value = failure.message;
     agentState.value = "ERROR";
+  } finally {
+    submitting.value = false;
   }
 }
 
@@ -324,7 +447,6 @@ async function confirmAdmission() {
     admissible: true,
     dispute_type: dispute.value?.dispute_type || "OTHER",
     risk_level: dispute.value?.risk_level || "MEDIUM",
-    confirmation_note: confirmationNote.value,
   };
   try {
     const confirm =
@@ -375,8 +497,8 @@ onBeforeUnmount(() => eventAbortController.abort());
       <section class="intake-room__conversation">
         <div class="intake-room__case-note">
           <span>你正在说明</span>
-          <h2>{{ dispute?.title || "履约争端" }}</h2>
-          <p>{{ dispute?.description }}</p>
+          <h2>{{ caseNoteTitle }}</h2>
+          <p>{{ caseNoteDescription }}</p>
         </div>
         <ConversationStream
           :messages="messages"
@@ -408,15 +530,31 @@ onBeforeUnmount(() => eventAbortController.abort());
             <i :data-ready="caseDetailQuality.ready">{{ caseDetailReadyCopy }}</i>
           </div>
           <div class="intake-case-detail__story">
-            <span>CASE STORY</span>
-            <h3>{{ caseDetailDossier.case_story?.title }}</h3>
-            <p>{{ caseDetailDossier.case_story?.one_sentence_summary }}</p>
+            <span>案件故事</span>
+            <h3>
+              {{
+                humanizeDossierText(caseDetailDossier.case_story?.title, {
+                  kind: "title",
+                  fallback: "争议事件待梳理",
+                })
+              }}
+            </h3>
+            <p>
+              {{
+                humanizeDossierText(caseDetailDossier.case_story?.one_sentence_summary, {
+                  kind: "summary",
+                  fallback: "接待官正在整理争议事实，请继续补充订单、证据和处理诉求。",
+                })
+              }}
+            </p>
           </div>
           <div class="intake-case-detail__focus">
             <span>核心争议</span>
-            <strong>{{ caseDetailDossier.dispute_focus?.core_issue || "UNKNOWN" }}</strong>
+            <strong>
+              {{ humanizeDossierText(caseDetailDossier.dispute_focus?.core_issue || "UNKNOWN") }}
+            </strong>
             <p v-if="caseDetailDossier.risk_assessment?.reasoning">
-              {{ caseDetailDossier.risk_assessment.reasoning }}
+              {{ humanizeDossierText(caseDetailDossier.risk_assessment.reasoning) }}
             </p>
           </div>
           <div
@@ -427,7 +565,7 @@ onBeforeUnmount(() => eventAbortController.abort());
               v-for="fact in caseDetailDossier.dispute_focus.facts_to_verify"
               :key="fact"
             >
-              待核验：{{ fact }}
+              待核验：{{ humanizeDossierText(fact) }}
             </i>
           </div>
           <p v-if="caseDetailQuality.reason" class="intake-case-detail__reason">
@@ -435,60 +573,56 @@ onBeforeUnmount(() => eventAbortController.abort());
           </p>
         </div>
 
-        <div class="intake-dossier__stickers">
-          <article
-            v-for="sticker in liveStickers"
-            :key="sticker.label"
-            class="intake-sticker"
-            :data-tone="sticker.tone"
-            data-intake-sticker
+        <div class="intake-dossier__sections">
+          <section
+            v-for="section in dossierSections"
+            :key="section.title"
+            class="intake-dossier-section"
+            :data-tone="section.tone"
+            data-dossier-section
           >
-            <span>{{ sticker.label }}</span>
-            <strong>{{ sticker.value || "待补充" }}</strong>
-          </article>
-          <article
-            class="intake-sticker intake-sticker--wide"
-            data-tone="coral"
-            data-intake-sticker
-          >
-            <span>初始风险信号</span>
-            <div class="intake-sticker__chips">
-              <i
-                v-for="signal in analysis?.initial_risk_signals || ['等待更多信息']"
-                :key="signal"
-              >
-                {{ signal }}
-              </i>
+            <div class="intake-dossier-section__header">
+              <span>{{ section.title }}</span>
+              <small>{{ section.subtitle }}</small>
             </div>
-          </article>
+            <div class="intake-dossier-section__grid">
+              <article
+                v-for="sticker in section.items"
+                :key="`${section.title}-${sticker.label}`"
+                class="intake-sticker"
+                :data-tone="sticker.tone"
+                data-intake-sticker
+              >
+                <span>{{ sticker.label }}</span>
+                <strong>{{ sticker.value || "待补充" }}</strong>
+              </article>
+            </div>
+          </section>
         </div>
 
         <div class="intake-dossier__confirm">
-          <label>
-            最终确认说明
-            <textarea v-model="confirmationNote" rows="3" />
-          </label>
-          <p>AI 受理建议非最终；确认后双方会收到平台传票。</p>
-          <button
-            type="button"
-            data-confirm-admission
-            :disabled="submitting || admitted"
-            @click="confirmAdmission"
-          >
-            <span v-if="admitted">已上报</span>
-            <span v-else-if="submitting">正在盖章…</span>
-            <span v-else>确认发起并上报</span>
-          </button>
+          <div class="intake-dossier__actions intake-dossier__actions--two-column">
+            <button
+              type="button"
+              data-confirm-admission
+              :disabled="submitting || admitted"
+              @click="confirmAdmission"
+            >
+              <span v-if="admitted">已上报</span>
+              <span v-else-if="submitting">正在盖章…</span>
+              <span v-else>确认发起并上报</span>
+            </button>
+            <button
+              type="button"
+              class="intake-dossier__secondary"
+              data-resolve-without-dispute
+              :disabled="submitting || admitted"
+              @click="resolveWithoutDispute"
+            >
+              问题已解决，取消争议
+            </button>
+          </div>
           <div v-if="admitted" class="intake-dossier__stamp">已上报</div>
-          <button
-            type="button"
-            class="intake-dossier__secondary"
-            data-resolve-without-dispute
-            :disabled="submitting || admitted"
-            @click="resolveWithoutDispute"
-          >
-            问题已解决，取消争议
-          </button>
           <p v-if="resolved">已在平台内取消争议发起，接待室已归档。</p>
           <div v-if="error" class="intake-dossier__error">{{ error }}</div>
         </div>
@@ -500,16 +634,22 @@ onBeforeUnmount(() => eventAbortController.abort());
 <style scoped>
 .intake-room {
   display: grid;
-  grid-template-columns: minmax(330px, .9fr) minmax(480px, 1.2fr);
+  grid-template-columns: minmax(520px, 1.05fr) minmax(480px, .95fr);
   gap: 18px;
+  align-items: stretch;
 }
 .intake-room__conversation,
 .intake-dossier {
+  min-width: 0;
   padding: 20px;
   background: #ffffffbf;
   border: 1px solid #dfe8f4;
   border-radius: 28px;
   box-shadow: 0 20px 55px #556d9512;
+}
+.intake-room__conversation {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
 }
 .intake-room__case-note {
   padding: 16px;
@@ -619,56 +759,102 @@ onBeforeUnmount(() => eventAbortController.abort());
   font-size: 12px;
   font-style: normal;
 }
-.intake-dossier__stickers {
+.intake-dossier__sections {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
   margin: 18px 0;
 }
-.intake-sticker {
+.intake-dossier-section {
   display: grid;
-  gap: 8px;
-  min-height: 104px;
-  padding: 15px;
-  color: #3c4760;
-  background: #eaf6ff;
-  border: 1px solid #d4e9f7;
-  border-radius: 8px 22px 22px 22px;
-  transform: rotate(-.35deg);
+  gap: 10px;
+  padding: 13px;
+  background: #ffffffd6;
+  border: 1px solid #e1eaf5;
+  border-radius: 20px;
+  box-shadow: 0 10px 24px #546b8a0d;
 }
-.intake-sticker:nth-child(even) { transform: rotate(.45deg); }
-.intake-sticker[data-tone="mint"] { background: #e7f8ef; border-color: #cdebdc; }
-.intake-sticker[data-tone="coral"] { background: #fff0e9; border-color: #f4d9ce; }
-.intake-sticker[data-tone="purple"] { background: #f2edff; border-color: #e0d8f8; }
-.intake-sticker[data-tone="yellow"] { background: #fff7d9; border-color: #efe2af; }
+.intake-dossier-section[data-tone="blue"] {
+  background: linear-gradient(135deg, #f5fbff, #ffffff);
+  border-color: #d8eaf8;
+}
+.intake-dossier-section[data-tone="purple"] {
+  background: linear-gradient(135deg, #fbf8ff, #ffffff);
+  border-color: #e5dcfb;
+}
+.intake-dossier-section[data-tone="coral"] {
+  background: linear-gradient(135deg, #fffaf7, #ffffff);
+  border-color: #f3ded6;
+}
+.intake-dossier-section__header {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+}
+.intake-dossier-section__header span {
+  color: #40506d;
+  font-size: 13px;
+  font-weight: 900;
+}
+.intake-dossier-section__header small {
+  color: #8492a8;
+  font-size: 11px;
+}
+.intake-dossier-section__grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.intake-dossier-section[data-tone="coral"] .intake-dossier-section__grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.intake-sticker {
+  position: relative;
+  display: grid;
+  gap: 7px;
+  min-height: 82px;
+  padding: 13px 13px 13px 15px;
+  color: #3c4760;
+  background: #fff;
+  border: 1px solid #e3ebf5;
+  border-radius: 16px;
+  overflow: hidden;
+}
+.intake-sticker::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 5px;
+  background: #83c6f5;
+}
+.intake-sticker[data-tone="mint"]::before { background: #75ce9e; }
+.intake-sticker[data-tone="coral"]::before { background: #ff9a7e; }
+.intake-sticker[data-tone="purple"]::before { background: #a491f1; }
+.intake-sticker[data-tone="yellow"]::before { background: #efc84c; }
+.intake-sticker[data-tone="blue"] { background: #f8fcff; }
+.intake-sticker[data-tone="mint"] { background: #f7fdf9; }
+.intake-sticker[data-tone="coral"] { background: #fff9f6; }
+.intake-sticker[data-tone="purple"] { background: #fbf9ff; }
+.intake-sticker[data-tone="yellow"] { background: #fffdf4; }
 .intake-sticker > span { color: #738099; font-size: 11px; }
 .intake-sticker > strong { line-height: 1.55; }
-.intake-sticker--wide { grid-column: 1 / -1; min-height: auto; }
-.intake-sticker__chips { display: flex; flex-wrap: wrap; gap: 8px; }
-.intake-sticker__chips i {
-  padding: 6px 9px;
-  color: #a24f4f;
-  background: #fff;
-  border-radius: 999px;
-  font-size: 12px;
-  font-style: normal;
-}
 .intake-dossier__confirm {
   position: relative;
+  display: grid;
+  gap: 10px;
   padding: 16px;
   background: #f8fbff;
   border: 1px dashed #cddbec;
   border-radius: 20px;
 }
-.intake-dossier__confirm label { display: grid; gap: 7px; color: #58657b; font-size: 13px; }
-.intake-dossier__confirm textarea {
-  padding: 10px;
-  color: #2f3e58;
-  background: #fff;
-  border: 1px solid #dce5f1;
-  border-radius: 12px;
-}
 .intake-dossier__confirm p { color: #7b718e; font-size: 12px; }
+.intake-dossier__actions {
+  display: grid;
+  gap: 10px;
+}
+.intake-dossier__actions--two-column {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
 .intake-dossier__confirm button {
   width: 100%;
   padding: 13px;
@@ -681,14 +867,12 @@ onBeforeUnmount(() => eventAbortController.abort());
 }
 .intake-dossier__confirm button:disabled { opacity: .7; }
 .intake-dossier__confirm .intake-dossier__secondary {
-  margin-top: 9px;
   color: #69758a;
   background: #edf4fb;
 }
 .intake-dossier__stamp {
-  position: absolute;
-  right: 25px;
-  bottom: 64px;
+  justify-self: end;
+  width: fit-content;
   padding: 8px 13px;
   color: #e45d55;
   border: 3px double #e45d55;
@@ -701,7 +885,10 @@ onBeforeUnmount(() => eventAbortController.abort());
   .intake-room { grid-template-columns: 1fr; }
 }
 @media (max-width: 580px) {
-  .intake-dossier__stickers { grid-template-columns: 1fr; }
-  .intake-sticker--wide { grid-column: auto; }
+  .intake-dossier-section__grid,
+  .intake-dossier-section[data-tone="coral"] .intake-dossier-section__grid,
+  .intake-dossier__actions--two-column {
+    grid-template-columns: 1fr;
+  }
 }
 </style>

@@ -18,6 +18,22 @@ LOGISTICS_REFERENCE_RE = re.compile(
     re.IGNORECASE,
 )
 
+FIELD_DISPLAY_LABELS = {
+    "ORDER_REFERENCE": "订单号",
+    "AFTER_SALES_REFERENCE": "售后单号",
+    "LOGISTICS_REFERENCE": "物流单号",
+    "order_reference_confirmation": "订单号核对",
+    "after_sales_reference_confirmation": "售后单号核对",
+    "logistics_reference_confirmation": "物流单号核对",
+    "product_issue_details": "故障细节",
+    "product_quality_details": "商品质量细节",
+    "user_statement": "用户原始陈述",
+    "merchant_statement": "商家原始陈述",
+    "merchant_requested_outcome": "商家期望处理方案",
+    "requested_outcome": "期望处理结果",
+    "evidence_attachments": "证据材料",
+}
+
 
 @dataclass(frozen=True)
 class DossierRenderResult:
@@ -64,6 +80,7 @@ class CaseDetailDossierSkill:
             )
 
         previous = request.latest_scroll_snapshot or {}
+        previous_ready = _case_detail_ready(previous) if isinstance(previous, dict) else False
         detail = self._default_case_detail(request)
         detail = _deep_merge(detail, previous if _is_case_detail(previous) else {})
         detail = _deep_merge(detail, llm_case_detail or {})
@@ -88,14 +105,22 @@ class CaseDetailDossierSkill:
         quality["threshold"] = self.readiness_threshold
         quality["ready_for_next_step"] = bool(score >= self.readiness_threshold and not missing)
         if missing:
-            quality["improvement_reason"] = "仍缺少可信的" + "、".join(missing)
+            quality["improvement_reason"] = "仍缺少可信的" + "、".join(
+                _human_missing_fields(missing)
+            )
 
         missing_info = _ensure_dict(detail, "missing_information")
-        missing_info["blocking_gaps"] = missing
+        missing_info["blocking_gaps"] = _human_missing_fields(missing)
         if quality["ready_for_next_step"]:
             missing_info.setdefault("next_questions", [])
+            _ensure_handoff_notes(detail)
         elif not missing_info.get("next_questions"):
             missing_info["next_questions"] = [_question_for_missing(missing)]
+        _record_handoff_remark_if_needed(
+            detail,
+            request,
+            previous_ready=previous_ready,
+        )
 
         admission = _ensure_dict(detail, "admission")
         if quality["ready_for_next_step"]:
@@ -252,6 +277,12 @@ class CaseDetailDossierSkill:
                 "reasoning": "",
                 "confidence": 0.0,
             },
+            "handoff_notes": {
+                "remark_status": "NOT_READY",
+                "latest_remark": "",
+                "remarks": [],
+                "instruction": "案件详情达标后，接待官会询问是否有备注需要交接给证据书记官。",
+            },
         }
 
 
@@ -269,6 +300,76 @@ def _deep_merge(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
 
 def _is_case_detail(value: dict[str, Any]) -> bool:
     return value.get("schema_version") == CaseDetailDossierSkill.schema_version
+
+
+def _case_detail_ready(value: dict[str, Any]) -> bool:
+    if not _is_case_detail(value):
+        return False
+    quality = value.get("intake_quality")
+    return isinstance(quality, dict) and quality.get("ready_for_next_step") is True
+
+
+def _ensure_handoff_notes(detail: dict[str, Any]) -> dict[str, Any]:
+    notes = _ensure_dict(detail, "handoff_notes")
+    if not notes.get("remark_status") or notes.get("remark_status") == "NOT_READY":
+        notes["remark_status"] = "WAITING_FOR_REMARK"
+    notes.setdefault("latest_remark", "")
+    remarks = notes.get("remarks")
+    if not isinstance(remarks, list):
+        notes["remarks"] = []
+    notes.setdefault("instruction", "如有备注，将随案件详情提交给证据书记官。")
+    return notes
+
+
+def _record_handoff_remark_if_needed(
+    detail: dict[str, Any],
+    request: IntakeTurnRequest,
+    *,
+    previous_ready: bool,
+) -> None:
+    current = request.current_user_message
+    if not previous_ready or current is None or not current.text.strip():
+        return
+
+    notes = _ensure_handoff_notes(detail)
+    text = current.text.strip()
+    if _is_no_extra_remark(text):
+        notes["remark_status"] = "NO_EXTRA_REMARKS"
+        notes["latest_remark"] = "无额外备注。"
+        return
+
+    notes["remark_status"] = "HAS_REMARKS"
+    notes["latest_remark"] = text
+    remarks = notes["remarks"]
+    source_message_id = current.message_id
+    if not any(
+        isinstance(item, dict) and item.get("source_message_id") == source_message_id
+        for item in remarks
+    ):
+        remarks.append(
+            {
+                "role": current.role,
+                "text": text,
+                "source_message_id": source_message_id,
+                "turn_source": request.turn_source,
+            }
+        )
+
+
+def _is_no_extra_remark(text: str) -> bool:
+    normalized = re.sub(r"\s+", "", text or "").casefold()
+    return normalized in {
+        "没有",
+        "无",
+        "没有补充",
+        "无补充",
+        "没有备注",
+        "无备注",
+        "不用备注",
+        "no",
+        "nothingelse",
+        "noadditionalnotes",
+    }
 
 
 def _ensure_dict(container: dict[str, Any], key: str) -> dict[str, Any]:
@@ -300,9 +401,20 @@ def _clamp_confidence(value: Any) -> float:
     return max(0.0, min(1.0, number))
 
 
+def _human_field_label(field: str) -> str:
+    return FIELD_DISPLAY_LABELS.get(field, field)
+
+
+def _human_missing_fields(missing: list[str]) -> list[str]:
+    return [_human_field_label(field) for field in missing]
+
+
 def _question_for_missing(missing: list[str]) -> str:
     questions = {
         "ORDER_REFERENCE": "请补充订单号或平台可识别的订单引用。",
         "LOGISTICS_REFERENCE": "请补充物流单号或平台可识别的物流引用。",
     }
-    return " ".join(questions.get(field, field) for field in missing)
+    return " ".join(
+        questions.get(field, f"请补充{_human_field_label(field)}。")
+        for field in missing
+    )

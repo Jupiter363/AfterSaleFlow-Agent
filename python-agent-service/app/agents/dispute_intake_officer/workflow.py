@@ -194,12 +194,20 @@ def _validate_readiness(state: IntakeTurnGraphState) -> dict[str, Any]:
         return {"executed_nodes": ["validate_legacy_readiness"]}
     quality = snapshot.get("intake_quality")
     ready = isinstance(quality, dict) and quality.get("ready_for_next_step") is True
-    if ready and "已了解" not in state["room_utterance"]:
+    if ready:
+        additions: list[str] = []
+        utterance = state["room_utterance"]
+        if "已了解" not in utterance:
+            additions.append("我已了解本案情况，可以进入下一步。")
+        if "备注" not in utterance:
+            additions.append(
+                "请问还有没有需要备注给证据书记官或后续审理环节的内容？"
+                "如果没有，可以直接回复“没有补充”。"
+            )
+        if not additions:
+            return {"executed_nodes": ["validate_readiness"]}
         return {
-            "room_utterance": (
-                state["room_utterance"]
-                + " 我已了解本案情况，右侧案件详情已达到可进入下一步的标准。"
-            ),
+            "room_utterance": utterance + " " + " ".join(additions),
             "executed_nodes": ["validate_readiness"],
         }
     return {"executed_nodes": ["validate_readiness"]}

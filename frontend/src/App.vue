@@ -7,7 +7,7 @@ import {
 } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import SummonsMailbox from "./components/notification/SummonsMailbox.vue";
-import { actor, roleLabels } from "./state/actor";
+import { actor, demoActors, switchDemoActor } from "./state/actor";
 import {
   loadNotifications,
   markAllNotificationsRead,
@@ -38,6 +38,13 @@ async function markRead(notificationId) {
 
 async function markAllRead() {
   await markAllNotificationsRead(actor);
+}
+
+async function switchIdentity(role) {
+  switchDemoActor(role);
+  if (route.path !== "/disputes") {
+    await router.push("/disputes");
+  }
 }
 
 watch(
@@ -76,17 +83,21 @@ onBeforeUnmount(() => window.clearInterval(notificationTimer));
         <div class="actor-switcher" aria-label="体验身份">
           <label>
             <span>身份 ID</span>
-            <input v-model="actor.id" aria-label="身份 ID" />
+            <input :value="actor.id" aria-label="身份 ID" readonly />
           </label>
           <label>
             <span>体验角色</span>
-            <select v-model="actor.role" aria-label="体验角色">
+            <select
+              :value="actor.role"
+              aria-label="体验角色"
+              @change="switchIdentity($event.target.value)"
+            >
               <option
-                v-for="(label, role) in roleLabels"
-                :key="role"
-                :value="role"
+                v-for="demoActor in demoActors"
+                :key="demoActor.role"
+                :value="demoActor.role"
               >
-                {{ label }}
+                {{ demoActor.label }}
               </option>
             </select>
           </label>

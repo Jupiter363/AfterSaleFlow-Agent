@@ -1,4 +1,5 @@
 import { flushPromises, mount } from "@vue/test-utils";
+import { readFileSync } from "node:fs";
 import {
   createMemoryHistory,
   createRouter,
@@ -95,7 +96,10 @@ describe("IntakeRoomView", () => {
     expect(wrapper.text()).toContain("ORDER-1");
     expect(wrapper.text()).toContain("未收到包裹");
     expect(wrapper.text()).toContain("签收人与收件人不一致");
-    expect(wrapper.text()).toContain("AI 受理建议非最终");
+    expect(wrapper.text()).not.toContain("最终确认说明");
+    expect(wrapper.text()).not.toContain("AI 受理建议非最终");
+    expect(wrapper.find(".intake-dossier__confirm textarea").exists()).toBe(false);
+    expect(wrapper.find(".intake-dossier__actions").exists()).toBe(true);
     expect(wrapper.findAll("[data-intake-sticker]").length).toBeGreaterThan(3);
   });
 
@@ -115,6 +119,7 @@ describe("IntakeRoomView", () => {
         dispute_type: "SIGNED_NOT_RECEIVED",
       }),
     );
+    expect(confirmAction.mock.calls[0][0]).not.toHaveProperty("confirmation_note");
     expect(wrapper.text()).toContain("已上报");
     expect(router.currentRoute.value.path).toBe(
       "/disputes/CASE_INTAKE_1/evidence",
@@ -199,8 +204,128 @@ describe("IntakeRoomView", () => {
     expect(messagesLoader).toHaveBeenCalled();
     expect(turnMemoryLoader).toHaveBeenCalled();
     expect(wrapper.text()).toContain("Refund request recorded.");
-    expect(wrapper.text()).toContain("REFUND");
-    expect(wrapper.text()).toContain("delivery conflict");
+    expect(wrapper.text()).toContain("退款");
+    expect(wrapper.text()).toContain("物流履约冲突");
+    expect(wrapper.text()).not.toContain("REFUND");
+    expect(wrapper.text()).not.toContain("delivery conflict");
+  });
+
+  it("shows the party statement immediately while the intake officer is thinking", async () => {
+    let resolvePost;
+    const postMessageAction = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          resolvePost = resolve;
+        }),
+    );
+    const messagesLoader = vi.fn().mockResolvedValue([
+      {
+        id: "MESSAGE_USER_1",
+        sequence_no: 1,
+        sender_role: "USER",
+        message_text: "我希望退款。",
+      },
+      {
+        id: "MESSAGE_AGENT_2",
+        sequence_no: 2,
+        sender_role: "CUSTOMER_SERVICE",
+        message_text: "我已记录你的退款诉求。",
+      },
+    ]);
+    const turnMemoryLoader = vi.fn().mockResolvedValue({ turn_no: 2 });
+    const wrapper = await mountInteractiveView({
+      postMessageAction,
+      messagesLoader,
+      turnMemoryLoader,
+    });
+
+    await wrapper
+      .get(".conversation-stream__composer textarea")
+      .setValue("我希望退款。");
+    await wrapper.get("[data-send-message]").trigger("submit");
+    await wrapper.vm.$nextTick();
+
+    expect(wrapper.text()).toContain("我希望退款。");
+    expect(messagesLoader).not.toHaveBeenCalled();
+
+    resolvePost({
+      id: "MESSAGE_USER_1",
+      sequence_no: 1,
+      sender_role: "USER",
+      message_text: "我希望退款。",
+    });
+    await flushPromises();
+
+    expect(messagesLoader).toHaveBeenCalled();
+    expect(wrapper.text()).toContain("我已记录你的退款诉求。");
+  });
+
+  it("maps backend enum values and missing slot keys into Chinese dossier copy", async () => {
+    const wrapper = await mountInteractiveView({
+      initialTurnMemory: {
+        turn_no: 4,
+        case_intake_dossier: {
+          dossier_version: 2,
+          quality_score: 45,
+          ready_for_next_step: false,
+          admission_recommendation: "NEED_MORE_INFO",
+          dossier: {
+            schema_version: "intake_case_detail.v1",
+            case_story: {
+              title: "Broken watch quality issue",
+              one_sentence_summary:
+                "The user reports that the watch is broken. No additional details or evidence provided.",
+            },
+            references: {
+              order_reference: "123456",
+              after_sales_reference: "123123",
+              logistics_reference: "123123",
+            },
+            party_positions: {
+              user_claim:
+                "The user reports that the watch is broken. No additional details or evidence provided.",
+              merchant_claim: "",
+            },
+            dispute_focus: {
+              core_issue: "UNKNOWN",
+              facts_to_verify: ["product_issue_details", "user_statement"],
+            },
+            requested_resolution: {
+              requested_outcome: "UNKNOWN",
+            },
+            risk_assessment: {
+              risk_signals: ["ORDER_REFERENCE_CONFLICT"],
+              reasoning:
+                "仍缺少可信的product_issue_details、user_statement、merchant_requested_outcome、order_reference_confirmation",
+            },
+            intake_quality: {
+              score: 45,
+              threshold: 80,
+              ready_for_next_step: false,
+              improvement_reason:
+                "仍缺少可信的product_issue_details、user_statement、merchant_requested_outcome、order_reference_confirmation",
+            },
+            admission: {
+              recommendation: "NEED_MORE_INFO",
+            },
+          },
+        },
+      },
+    });
+
+    expect(wrapper.text()).toContain("手表质量争议");
+    expect(wrapper.text()).toContain("用户反馈手表损坏");
+    expect(wrapper.text()).toContain("故障细节");
+    expect(wrapper.text()).toContain("用户原始陈述");
+    expect(wrapper.text()).toContain("商家期望处理方案");
+    expect(wrapper.text()).toContain("订单号核对");
+    expect(wrapper.text()).toContain("继续补充信息");
+    expect(wrapper.text()).toContain("待确认");
+    expect(wrapper.text()).not.toContain("Expected outcome");
+    expect(wrapper.text()).not.toContain("NEED_MORE_INFO");
+    expect(wrapper.text()).not.toContain("product_issue_details");
+    expect(wrapper.text()).not.toContain("Broken watch quality issue");
+    expect(wrapper.text()).not.toContain("The user reports");
   });
 
   it("renders the current case-detail dossier as the right-side board", async () => {
@@ -277,6 +402,88 @@ describe("IntakeRoomView", () => {
     expect(wrapper.text()).toContain("SIGNED_NOT_RECEIVED");
     expect(wrapper.text()).toContain("88/100");
     expect(wrapper.text()).toContain("可以进入下一步");
+    expect(wrapper.find("[data-case-detail-dossier]").exists()).toBe(true);
+    expect(wrapper.findAll("[data-dossier-section]").length).toBe(3);
+    expect(wrapper.text()).toContain("案件索引");
+    expect(wrapper.text()).toContain("双方说法");
+    expect(wrapper.text()).toContain("处理判断");
+  });
+
+  it("lays out the submit and resolve actions as a two-column action bar", async () => {
+    const { wrapper } = await mountView();
+
+    const actions = wrapper.get(".intake-dossier__actions");
+
+    expect(actions.find("[data-confirm-admission]").exists()).toBe(true);
+    expect(actions.find("[data-resolve-without-dispute]").exists()).toBe(true);
+    expect(actions.classes()).toContain("intake-dossier__actions--two-column");
+  });
+
+  it("shows persisted handoff remarks as a compact right-side card without adding a second input box", async () => {
+    const wrapper = await mountInteractiveView({
+      initialTurnMemory: {
+        turn_no: 5,
+        case_intake_dossier: {
+          dossier_version: 3,
+          quality_score: 91,
+          ready_for_next_step: true,
+          admission_recommendation: "ACCEPTED",
+          dossier: {
+            schema_version: "intake_case_detail.v1",
+            case_story: {
+              title: "签收未收到争议",
+              one_sentence_summary: "用户补充了进入下一轮前需要带给证据书记官的备注。",
+            },
+            references: {
+              order_reference: "ORDER-1",
+              after_sales_reference: "AFTER-1",
+              logistics_reference: "SF1234567890",
+            },
+            party_positions: {
+              user_claim: "物流显示签收但我没有收到商品。",
+              merchant_claim: "商家要求等待物流核查。",
+            },
+            dispute_focus: {
+              core_issue: "SIGNED_NOT_RECEIVED",
+              facts_to_verify: [],
+            },
+            requested_resolution: {
+              requested_outcome: "REFUND",
+              expected_resolution_text: "用户希望退款。",
+            },
+            risk_assessment: {
+              case_grade: "MEDIUM",
+              risk_signals: [],
+              reasoning: "",
+            },
+            handoff_notes: {
+              remark_status: "HAS_REMARKS",
+              latest_remark: "请证据书记官重点核查快递柜取件记录。",
+              remarks: [
+                {
+                  role: "USER",
+                  text: "请证据书记官重点核查快递柜取件记录。",
+                  source_message_id: "MESSAGE_REMARK_1",
+                },
+              ],
+            },
+            intake_quality: {
+              score: 91,
+              threshold: 80,
+              ready_for_next_step: true,
+              improvement_reason: "",
+            },
+            admission: {
+              recommendation: "ACCEPTED",
+            },
+          },
+        },
+      },
+    });
+
+    expect(wrapper.text()).toContain("下一轮备注");
+    expect(wrapper.text()).toContain("请证据书记官重点核查快递柜取件记录。");
+    expect(wrapper.find(".intake-dossier__confirm textarea").exists()).toBe(false);
   });
 
   it("keeps agent memory internals out of the party intake room UI", async () => {
@@ -348,5 +555,12 @@ describe("IntakeRoomView", () => {
 
     expect(wrapper.find(".conversation-stream__composer").exists()).toBe(false);
     expect(wrapper.text()).toContain("切换为用户或商家身份");
+  });
+
+  it("keeps the conversation column stretched to the dossier height", () => {
+    const source = readFileSync("src/views/disputes/IntakeRoomView.vue", "utf8");
+
+    expect(source).toContain("align-items: stretch;");
+    expect(source).toContain("grid-template-rows: auto minmax(0, 1fr);");
   });
 });

@@ -8,15 +8,23 @@ export const roleLabels = {
   ADMIN: "管理员",
 };
 
+export const demoActors = [
+  { id: "user-local", role: "USER", label: "用户" },
+  { id: "merchant-local", role: "MERCHANT", label: "商家" },
+  { id: "reviewer-local", role: "PLATFORM_REVIEWER", label: "平台审核员" },
+];
+
+const demoActorByRole = Object.fromEntries(
+  demoActors.map((demoActor) => [demoActor.role, demoActor]),
+);
+
 function storedActor() {
   try {
     const parsed = JSON.parse(localStorage.getItem("dispute-actor") || "null");
-    if (
-      parsed?.id === "reviewer-local" &&
-      parsed?.role === "PLATFORM_REVIEWER"
-    ) {
-      return null;
-    }
+    if (!parsed) return null;
+    const demoActor = demoActorByRole[parsed.role];
+    if (!demoActor) return null;
+    if (demoActor.id !== parsed.id) return demoActor;
     return parsed;
   } catch {
     localStorage.removeItem("dispute-actor");
@@ -25,8 +33,14 @@ function storedActor() {
 }
 
 export const actor = reactive(
-  storedActor() || { id: "user-local", role: "USER" },
+  storedActor() || demoActors[0],
 );
+
+export function switchDemoActor(role) {
+  const demoActor = demoActorByRole[role] || demoActors[0];
+  actor.id = demoActor.id;
+  actor.role = demoActor.role;
+}
 
 watch(
   actor,

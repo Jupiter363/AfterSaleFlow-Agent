@@ -1,5 +1,6 @@
 <script setup>
 import { computed, ref } from "vue";
+import { roleLabel } from "../../utils/displayText";
 
 const props = defineProps({
   messages: { type: Array, default: () => [] },
@@ -52,7 +53,7 @@ function displayMessageText(value) {
         data-room-message
       >
         <header>
-          <strong>{{ message.sender_role }}</strong>
+          <strong>{{ roleLabel(message.sender_role) }}</strong>
           <small>#{{ message.sequence_no }}</small>
         </header>
         <p>{{ displayMessageText(message.message_text) }}</p>
@@ -87,12 +88,18 @@ function displayMessageText(value) {
 </template>
 
 <style scoped>
-.conversation-stream { display: grid; gap: 14px; min-height: 0; }
+.conversation-stream {
+  display: grid;
+  grid-template-rows: minmax(360px, 1fr) auto;
+  gap: 14px;
+  width: 100%;
+  min-height: 0;
+}
 .conversation-stream__messages {
   display: grid;
   align-content: start;
   gap: 10px;
-  max-height: 430px;
+  min-height: 360px;
   padding: 8px;
   overflow-y: auto;
 }
@@ -118,6 +125,8 @@ function displayMessageText(value) {
   border-radius: 18px;
 }
 .conversation-stream__composer {
+  box-sizing: border-box;
+  width: 100%;
   padding: 12px;
   background: #fff;
   border: 1px solid #dde6f2;
@@ -125,6 +134,7 @@ function displayMessageText(value) {
   box-shadow: 0 12px 34px #536b9412;
 }
 .conversation-stream__composer textarea {
+  box-sizing: border-box;
   width: 100%;
   padding: 10px;
   resize: vertical;

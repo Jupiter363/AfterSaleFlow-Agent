@@ -153,3 +153,61 @@ def test_intake_case_detail_readiness_is_gated_by_score_and_required_references(
     assert result.admission_recommendation == "NEED_MORE_INFO"
     assert "ORDER_REFERENCE" in result.missing_fields
     assert "LOGISTICS_REFERENCE" in result.missing_fields
+
+    quality = result.scroll_snapshot["intake_quality"]
+    assert "订单号" in quality["improvement_reason"]
+    assert "物流单号" in quality["improvement_reason"]
+    assert "ORDER_REFERENCE" not in quality["improvement_reason"]
+    assert "LOGISTICS_REFERENCE" not in quality["improvement_reason"]
+    assert "订单号" in result.scroll_snapshot["missing_information"]["next_questions"][0]
+
+
+def test_ready_intake_turn_asks_for_handoff_remark_before_next_room() -> None:
+    from app.agents.dispute_intake_officer.workflow import IntakeTurnWorkflow
+
+    runner = CaseDetailRunner(score=86)
+    result = IntakeTurnWorkflow(model_runner=runner).run(_request())
+
+    assert "已了解本案情况" in result.room_utterance
+    assert "备注" in result.room_utterance
+    assert "证据书记官" in result.room_utterance
+
+
+def test_handoff_remark_is_persisted_when_previous_board_is_ready() -> None:
+    from app.agents.dispute_intake_officer.workflow import IntakeTurnWorkflow
+
+    remark = "请证据书记官重点核查快递柜取件记录。"
+    runner = CaseDetailRunner(score=88)
+    request = _request(
+        current_user_message={
+            "message_id": "MESSAGE_REMARK_1",
+            "role": "USER",
+            "text": remark,
+        },
+        latest_scroll_snapshot={
+            "schema_version": "intake_case_detail.v1",
+            "references": {
+                "order_reference": "ORDER_1001",
+                "after_sales_reference": "AS_1001",
+                "logistics_reference": "SF1001001001",
+            },
+            "intake_quality": {
+                "score": 86,
+                "threshold": 80,
+                "ready_for_next_step": True,
+            },
+            "handoff_notes": {
+                "remark_status": "WAITING_FOR_REMARK",
+                "remarks": [],
+            },
+        },
+    )
+
+    result = IntakeTurnWorkflow(model_runner=runner).run(request)
+
+    notes = result.scroll_snapshot["handoff_notes"]
+    assert notes["remark_status"] == "HAS_REMARKS"
+    assert notes["latest_remark"] == remark
+    assert notes["remarks"][-1]["role"] == "USER"
+    assert notes["remarks"][-1]["text"] == remark
+    assert notes["remarks"][-1]["source_message_id"] == "MESSAGE_REMARK_1"
