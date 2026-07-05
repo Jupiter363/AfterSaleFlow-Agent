@@ -242,6 +242,47 @@ class IntakeRoomServiceTest {
     }
 
     @Test
+    void acceptedSlotCompletionIntakeCanBeConfirmedAfterTheAgentDossierIsReady() {
+        FulfillmentCaseEntity dispute =
+                FulfillmentCaseEntity.imported(
+                        "CASE_SLOT_COMPLETION_ACCEPTED",
+                        "ORDER-CASE_SLOT_COMPLETION_ACCEPTED",
+                        null,
+                        "LOG-CASE_SLOT_COMPLETION_ACCEPTED",
+                        "user-local",
+                        "merchant-local",
+                        "idem-CASE_SLOT_COMPLETION_ACCEPTED",
+                        "PRODUCT_QUALITY",
+                        "Smart watch screen crack dispute",
+                        "The intake officer has gathered enough dossier details.",
+                        RiskLevel.MEDIUM,
+                        CaseStatus.WAITING_SLOT_COMPLETION,
+                        "INTAKE",
+                        null,
+                        "OMS",
+                        "EXT-CASE_SLOT_COMPLETION_ACCEPTED",
+                        "external-adapter");
+        when(caseRepository.findByIdForUpdate("CASE_SLOT_COMPLETION_ACCEPTED"))
+                .thenReturn(Optional.of(dispute));
+        when(phaseClockRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        var result =
+                service.confirm(
+                        "CASE_SLOT_COMPLETION_ACCEPTED",
+                        new AuthenticatedActor("user-local", ActorRole.USER),
+                        new IntakeConfirmationCommand(
+                                true,
+                                "PRODUCT_QUALITY",
+                                RiskLevel.MEDIUM,
+                                "AI 接待官已整理完整，确认发起争议审理"));
+
+        assertThat(result.caseStatus()).isEqualTo(CaseStatus.EVIDENCE_OPEN);
+        assertThat(result.currentRoom()).isEqualTo(RoomType.EVIDENCE);
+        assertThat(dispute.getCaseStatus()).isEqualTo(CaseStatus.EVIDENCE_OPEN);
+    }
+
+    @Test
     void notAdmissibleEndsAfterIntakeWithoutInvitingMerchantOrOpeningEvidence() {
         FulfillmentCaseEntity dispute = pendingCase("CASE_REJECTED");
         when(caseRepository.findByIdForUpdate("CASE_REJECTED"))

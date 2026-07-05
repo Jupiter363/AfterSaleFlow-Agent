@@ -307,6 +307,7 @@ public class FulfillmentCaseEntity extends AbstractEntity {
     private void assertIntakeCanBeConfirmed() {
         if (caseStatus != CaseStatus.INTAKE_PENDING
                 && caseStatus != CaseStatus.INTAKE_IN_PROGRESS
+                && caseStatus != CaseStatus.WAITING_SLOT_COMPLETION
                 && caseStatus != CaseStatus.INTAKE_COMPLETED) {
             throw new IllegalStateException(
                     "intake cannot be confirmed from case status " + caseStatus);
