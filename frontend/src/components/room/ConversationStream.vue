@@ -1,5 +1,11 @@
 <script setup>
-import { computed, ref } from "vue";
+import {
+  computed,
+  nextTick,
+  onMounted,
+  ref,
+  watch,
+} from "vue";
 import { roleLabel } from "../../utils/displayText";
 
 const props = defineProps({
@@ -15,11 +21,19 @@ const props = defineProps({
 
 const emit = defineEmits(["submit"]);
 const text = ref("");
+const messagesRail = ref(null);
 const orderedMessages = computed(() =>
   [...props.messages].sort(
     (left, right) => (left.sequence_no ?? 0) - (right.sequence_no ?? 0),
   ),
 );
+const PARTY_ROLES = new Set(["USER", "MERCHANT"]);
+const AGENT_ROLES = new Set([
+  "CUSTOMER_SERVICE",
+  "DISPUTE_INTAKE_OFFICER",
+  "INTAKE_OFFICER",
+  "SYSTEM",
+]);
 
 function submit() {
   const value = text.value.trim();
@@ -40,16 +54,51 @@ function displayMessageText(value) {
   }
   return value;
 }
+
+function messageLane(role) {
+  if (PARTY_ROLES.has(role)) return "right";
+  if (AGENT_ROLES.has(role)) return "left";
+  return "left";
+}
+
+function messageLaneClass(role) {
+  return messageLane(role) === "right"
+    ? "conversation-stream__message--party"
+    : "conversation-stream__message--agent";
+}
+
+async function scrollToLatestMessage() {
+  await nextTick();
+  const rail = messagesRail.value;
+  if (!rail) return;
+  rail.scrollTop = rail.scrollHeight;
+}
+
+watch(orderedMessages, () => {
+  void scrollToLatestMessage();
+}, { deep: true });
+
+onMounted(() => {
+  void scrollToLatestMessage();
+});
 </script>
 
 <template>
   <section class="conversation-stream" aria-label="房间对话">
-    <div class="conversation-stream__messages" aria-live="polite">
+    <div
+      ref="messagesRail"
+      class="conversation-stream__messages"
+      aria-live="polite"
+    >
       <article
         v-for="message in orderedMessages"
         :key="message.id"
         class="conversation-stream__message"
-        :class="`conversation-stream__message--${message.sender_role?.toLowerCase()}`"
+        :class="[
+          `conversation-stream__message--${message.sender_role?.toLowerCase()}`,
+          messageLaneClass(message.sender_role),
+        ]"
+        :data-message-lane="messageLane(message.sender_role)"
         data-room-message
       >
         <header>
@@ -90,7 +139,7 @@ function displayMessageText(value) {
 <style scoped>
 .conversation-stream {
   display: grid;
-  grid-template-rows: minmax(360px, 1fr) auto;
+  grid-template-rows: minmax(0, 1fr) auto;
   gap: 14px;
   width: 100%;
   min-height: 0;
@@ -99,7 +148,7 @@ function displayMessageText(value) {
   display: grid;
   align-content: start;
   gap: 10px;
-  min-height: 360px;
+  min-height: 0;
   padding: 8px;
   overflow-y: auto;
 }
@@ -110,8 +159,19 @@ function displayMessageText(value) {
   border: 1px solid #e1e8f4;
   border-radius: 18px 18px 18px 6px;
 }
-.conversation-stream__message--user { justify-self: end; background: #eaf6ff; border-radius: 18px 18px 6px; }
+.conversation-stream__message--agent {
+  justify-self: start;
+  border-radius: 18px 18px 18px 6px;
+}
+.conversation-stream__message--party {
+  justify-self: end;
+  border-radius: 18px 18px 6px;
+}
+.conversation-stream__message--user { background: #eaf6ff; }
 .conversation-stream__message--merchant { background: #effaef; }
+.conversation-stream__message--customer_service,
+.conversation-stream__message--dispute_intake_officer,
+.conversation-stream__message--intake_officer { background: #fffaf1; }
 .conversation-stream__message--platform_reviewer { background: #f4efff; }
 .conversation-stream__message header { display: flex; justify-content: space-between; gap: 12px; }
 .conversation-stream__message small { color: #8a96aa; }

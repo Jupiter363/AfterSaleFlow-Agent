@@ -1,6 +1,7 @@
 <script setup>
 import {
   computed,
+  nextTick,
   onBeforeUnmount,
   onMounted,
   reactive,
@@ -49,6 +50,10 @@ const resolved = ref(false);
 const error = ref("");
 const eventState = reactive(createRoomState());
 const eventAbortController = new AbortController();
+const conversationPanel = ref(null);
+const dossierPanel = ref(null);
+const syncedPanelHeight = ref("");
+let dossierResizeObserver = null;
 
 const caseId = computed(() => dispute.value?.id || route.params.caseId);
 const caseNoteTitle = computed(() =>
@@ -69,6 +74,9 @@ const connectionState = computed(() => {
   if (eventState.reconnecting) return "reconnecting";
   return "offline";
 });
+const conversationPanelStyle = computed(() =>
+  syncedPanelHeight.value ? { height: syncedPanelHeight.value } : {},
+);
 const scrollSnapshot = computed(() => turnMemory.value?.scroll_snapshot || null);
 const currentCaseDossier = computed(() => turnMemory.value?.case_intake_dossier || null);
 const caseDetailDossier = computed(() => {
@@ -373,6 +381,24 @@ function removeOptimisticMessage(id) {
   messages.value = messages.value.filter((message) => message.id !== id);
 }
 
+async function syncConversationPanelHeight() {
+  await nextTick();
+  const dossierHeight = dossierPanel.value?.getBoundingClientRect?.().height;
+  syncedPanelHeight.value = dossierHeight ? `${Math.ceil(dossierHeight)}px` : "";
+}
+
+function startPanelHeightSync() {
+  if (typeof ResizeObserver === "undefined" || !dossierPanel.value) {
+    void syncConversationPanelHeight();
+    return;
+  }
+  dossierResizeObserver = new ResizeObserver(() => {
+    void syncConversationPanelHeight();
+  });
+  dossierResizeObserver.observe(dossierPanel.value);
+  void syncConversationPanelHeight();
+}
+
 function startEventStream() {
   const streamer = props.eventStreamer || streamRoomEvents;
   void streamer({
@@ -471,8 +497,12 @@ onMounted(async () => {
   if (props.eventStreamer || props.initialMessages === null) {
     startEventStream();
   }
+  startPanelHeightSync();
 });
-onBeforeUnmount(() => eventAbortController.abort());
+onBeforeUnmount(() => {
+  eventAbortController.abort();
+  dossierResizeObserver?.disconnect();
+});
 </script>
 
 <template>
@@ -496,7 +526,11 @@ onBeforeUnmount(() => eventAbortController.abort());
     </template>
 
     <div class="intake-room">
-      <section class="intake-room__conversation">
+      <section
+        ref="conversationPanel"
+        class="intake-room__conversation"
+        :style="conversationPanelStyle"
+      >
         <div class="intake-room__case-note">
           <span>你正在说明</span>
           <h2>{{ caseNoteTitle }}</h2>
@@ -512,7 +546,11 @@ onBeforeUnmount(() => eventAbortController.abort());
         />
       </section>
 
-      <section class="intake-dossier" aria-label="受理分析卷宗">
+      <section
+        ref="dossierPanel"
+        class="intake-dossier"
+        aria-label="受理分析卷宗"
+      >
         <header>
           <div>
             <span>LIVE DOSSIER</span>
@@ -678,7 +716,7 @@ onBeforeUnmount(() => eventAbortController.abort());
   display: grid;
   grid-template-columns: minmax(520px, 1.05fr) minmax(480px, .95fr);
   gap: 18px;
-  align-items: stretch;
+  align-items: start;
 }
 .intake-room__conversation,
 .intake-dossier {
@@ -693,11 +731,13 @@ onBeforeUnmount(() => eventAbortController.abort());
 .intake-room__conversation {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
+  min-height: 0;
+  overflow: hidden;
 }
 .intake-dossier {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
-  align-content: stretch;
+  grid-template-rows: auto auto auto;
+  align-content: start;
   gap: 10px;
 }
 .intake-room__case-note {
@@ -726,7 +766,6 @@ onBeforeUnmount(() => eventAbortController.abort());
 .intake-case-detail {
   display: flex;
   flex-direction: column;
-  align-self: stretch;
   min-height: 0;
   gap: 10px;
   margin: 4px 0 0;
@@ -787,7 +826,6 @@ onBeforeUnmount(() => eventAbortController.abort());
 .intake-case-detail__risk[data-risk="low"] strong { color: #2f8b64; }
 .intake-case-detail__meta {
   display: grid;
-  flex: 1;
   align-content: start;
   min-height: 0;
   gap: 8px;

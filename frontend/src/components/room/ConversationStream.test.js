@@ -1,4 +1,5 @@
 import { mount } from "@vue/test-utils";
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import ConversationStream from "./ConversationStream.vue";
 
@@ -82,5 +83,49 @@ describe("ConversationStream", () => {
     expect(wrapper.text()).toContain("商家");
     expect(wrapper.text()).not.toContain("CUSTOMER_SERVICE");
     expect(wrapper.text()).not.toContain("MERCHANT");
+  });
+
+  it("places intake officer messages on the left and party messages on the right", () => {
+    const wrapper = mount(ConversationStream, {
+      props: {
+        messages: [
+          {
+            id: "MESSAGE_AGENT",
+            sequence_no: 1,
+            sender_role: "CUSTOMER_SERVICE",
+            message_text: "请继续补充证据。",
+          },
+          {
+            id: "MESSAGE_MERCHANT",
+            sequence_no: 2,
+            sender_role: "MERCHANT",
+            message_text: "我方需要核对售后记录。",
+          },
+        ],
+      },
+    });
+
+    const [agentMessage, merchantMessage] = wrapper.findAll("[data-room-message]");
+
+    expect(agentMessage.classes()).toContain("conversation-stream__message--agent");
+    expect(agentMessage.attributes("data-message-lane")).toBe("left");
+    expect(merchantMessage.classes()).toContain("conversation-stream__message--party");
+    expect(merchantMessage.attributes("data-message-lane")).toBe("right");
+  });
+
+  it("keeps history inside a scrollable message rail", () => {
+    const source = readFileSync("src/components/room/ConversationStream.vue", "utf8");
+
+    expect(source).toContain("grid-template-rows: minmax(0, 1fr) auto;");
+    expect(source).toContain("overflow-y: auto;");
+  });
+
+  it("automatically scrolls to the latest message when history changes", () => {
+    const source = readFileSync("src/components/room/ConversationStream.vue", "utf8");
+
+    expect(source).toContain("messagesRail");
+    expect(source).toContain("scrollToLatestMessage");
+    expect(source).toContain("watch(orderedMessages");
+    expect(source).toContain("rail.scrollTop = rail.scrollHeight;");
   });
 });

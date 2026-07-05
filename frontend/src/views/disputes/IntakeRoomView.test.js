@@ -588,7 +588,11 @@ describe("IntakeRoomView", () => {
   it("keeps the conversation column stretched to the dossier height", () => {
     const source = readFileSync("src/views/disputes/IntakeRoomView.vue", "utf8");
 
-    expect(source).toContain("align-items: stretch;");
+    expect(source).toContain("align-items: start;");
+    expect(source).toContain("conversationPanelStyle");
+    expect(source).toContain("ResizeObserver");
     expect(source).toContain("grid-template-rows: auto minmax(0, 1fr);");
+    expect(source).toContain("grid-template-rows: auto auto auto;");
+    expect(source).not.toContain(".intake-case-detail__meta {\n  display: grid;\n  flex: 1;");
   });
 });
