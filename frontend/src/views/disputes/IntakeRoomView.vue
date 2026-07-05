@@ -127,8 +127,24 @@ const caseDetailQuality = computed(() => {
   };
 });
 const caseDetailReadyCopy = computed(() =>
-  caseDetailQuality.value.ready ? "可以进入下一步" : "继续补充案件信息",
+  caseDetailQuality.value.ready ? "可以进入下一步" : "继续完善案件信息",
 );
+const caseRiskGradeValue = computed(() =>
+  caseDetailDossier.value?.risk_assessment?.case_grade ||
+  dispute.value?.risk_level ||
+  analysis.value?.risk_level ||
+  "UNKNOWN",
+);
+const caseRiskGradeCopy = computed(() =>
+  humanizeDossierText(caseRiskGradeValue.value, { fallback: "风险待确认" }),
+);
+const caseRiskGradeTone = computed(() => {
+  const value = String(caseRiskGradeValue.value || "").toUpperCase();
+  if (value.includes("HIGH") || value.includes("高")) return "high";
+  if (value.includes("MEDIUM") || value.includes("中")) return "medium";
+  if (value.includes("LOW") || value.includes("低")) return "low";
+  return "unknown";
+});
 const handoffRemarkSticker = computed(() => {
   const notes = caseDetailDossier.value?.handoff_notes;
   if (!notes) return null;
@@ -276,33 +292,17 @@ function pickStickers(labels) {
     .filter(Boolean);
 }
 
-const dossierSections = computed(() => {
-  const initialRiskSticker = {
-    label: "初始风险信号",
-    value: initialRiskSignals.value.join(" / "),
-    tone: "coral",
-  };
+const caseDetailMetaSections = computed(() => {
   return [
     {
       title: "案件索引",
-      subtitle: "先锁定订单、身份和硬引用",
       tone: "blue",
       items: pickStickers(["关联引用", "发起方"]),
     },
     {
       title: "双方说法",
-      subtitle: "把用户与商家的主张分开看",
       tone: "purple",
       items: pickStickers(["用户主张", "商家主张"]),
-    },
-    {
-      title: "处理判断",
-      subtitle: "诉求、受理建议、备注和风险",
-      tone: "coral",
-      items: [
-        ...pickStickers(["期望处理结果", "受理建议", "下一轮备注", "风险信号"]),
-        initialRiskSticker,
-      ],
     },
   ];
 });
@@ -516,24 +516,32 @@ onBeforeUnmount(() => eventAbortController.abort());
             <span>LIVE DOSSIER</span>
             <h2>接待官整理出的争议轮廓</h2>
           </div>
-          <small>可继续对话纠正</small>
+          <small data-dossier-progress-hint>{{ caseDetailReadyCopy }}</small>
         </header>
 
         <div
-          v-if="isCaseDetailDossier"
           class="intake-case-detail"
           data-case-detail-dossier
         >
-          <div class="intake-case-detail__score">
-            <span>案件完善度</span>
-            <strong>{{ caseDetailQuality.score }}/100</strong>
-            <i :data-ready="caseDetailQuality.ready">{{ caseDetailReadyCopy }}</i>
+          <div class="intake-case-detail__score-row">
+            <div class="intake-case-detail__score">
+              <span>案件完善度</span>
+              <strong>{{ caseDetailQuality.score }}/100</strong>
+            </div>
+            <div
+              class="intake-case-detail__risk"
+              :data-risk="caseRiskGradeTone"
+              data-case-risk-grade
+            >
+              <span>风险分类</span>
+              <strong>{{ caseRiskGradeCopy }}</strong>
+            </div>
           </div>
           <div class="intake-case-detail__story">
             <span>案件故事</span>
             <h3>
               {{
-                humanizeDossierText(caseDetailDossier.case_story?.title, {
+                humanizeDossierText(caseDetailDossier?.case_story?.title || caseNoteTitle, {
                   kind: "title",
                   fallback: "争议事件待梳理",
                 })
@@ -541,28 +549,28 @@ onBeforeUnmount(() => eventAbortController.abort());
             </h3>
             <p>
               {{
-                humanizeDossierText(caseDetailDossier.case_story?.one_sentence_summary, {
+                humanizeDossierText(caseDetailDossier?.case_story?.one_sentence_summary || caseNoteDescription, {
                   kind: "summary",
                   fallback: "接待官正在整理争议事实，请继续补充订单、证据和处理诉求。",
                 })
               }}
             </p>
           </div>
-          <div class="intake-case-detail__focus">
+          <div
+            v-if="isCaseDetailDossier"
+            class="intake-case-detail__focus"
+          >
             <span>核心争议</span>
             <strong>
-              {{ humanizeDossierText(caseDetailDossier.dispute_focus?.core_issue || "UNKNOWN") }}
+              {{ humanizeDossierText(caseDetailDossier?.dispute_focus?.core_issue || "UNKNOWN") }}
             </strong>
-            <p v-if="caseDetailDossier.risk_assessment?.reasoning">
-              {{ humanizeDossierText(caseDetailDossier.risk_assessment.reasoning) }}
-            </p>
           </div>
           <div
-            v-if="caseDetailDossier.dispute_focus?.facts_to_verify?.length"
+            v-if="caseDetailDossier?.dispute_focus?.facts_to_verify?.length"
             class="intake-case-detail__chips"
           >
             <i
-              v-for="fact in caseDetailDossier.dispute_focus.facts_to_verify"
+              v-for="fact in caseDetailDossier?.dispute_focus?.facts_to_verify"
               :key="fact"
             >
               待核验：{{ humanizeDossierText(fact) }}
@@ -571,32 +579,27 @@ onBeforeUnmount(() => eventAbortController.abort());
           <p v-if="caseDetailQuality.reason" class="intake-case-detail__reason">
             {{ caseDetailQuality.reason }}
           </p>
-        </div>
-
-        <div class="intake-dossier__sections">
-          <section
-            v-for="section in dossierSections"
-            :key="section.title"
-            class="intake-dossier-section"
-            :data-tone="section.tone"
-            data-dossier-section
-          >
-            <div class="intake-dossier-section__header">
+          <section class="intake-case-detail__meta" data-case-detail-meta>
+            <article
+              v-for="section in caseDetailMetaSections"
+              :key="section.title"
+              class="intake-case-detail__meta-section"
+              :data-tone="section.tone"
+            >
               <span>{{ section.title }}</span>
-              <small>{{ section.subtitle }}</small>
-            </div>
-            <div class="intake-dossier-section__grid">
-              <article
-                v-for="sticker in section.items"
-                :key="`${section.title}-${sticker.label}`"
-                class="intake-sticker"
-                :data-tone="sticker.tone"
-                data-intake-sticker
-              >
-                <span>{{ sticker.label }}</span>
-                <strong>{{ sticker.value || "待补充" }}</strong>
-              </article>
-            </div>
+              <div class="intake-case-detail__meta-grid">
+                <article
+                  v-for="sticker in section.items"
+                  :key="`${section.title}-${sticker.label}`"
+                  class="intake-sticker"
+                  :data-tone="sticker.tone"
+                  data-intake-sticker
+                >
+                  <span>{{ sticker.label }}</span>
+                  <strong>{{ sticker.value || "待补充" }}</strong>
+                </article>
+              </div>
+            </article>
           </section>
         </div>
 
@@ -686,40 +689,69 @@ onBeforeUnmount(() => eventAbortController.abort());
   border-radius: 24px;
   box-shadow: inset 0 1px 0 #ffffff, 0 16px 35px #55739914;
 }
-.intake-case-detail__score {
-  display: flex;
+.intake-case-detail__score-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(150px, .72fr);
   gap: 10px;
-  align-items: center;
-  justify-content: space-between;
+}
+.intake-case-detail__score,
+.intake-case-detail__risk {
+  display: grid;
+  gap: 10px;
   padding: 10px 12px;
   background: #ffffffd9;
   border: 1px solid #e2ebf5;
   border-radius: 18px;
 }
+.intake-case-detail__risk {
+  background: linear-gradient(135deg, #fff7f1, #fff);
+}
+.intake-case-detail__risk[data-risk="high"] {
+  background: linear-gradient(135deg, #fff0ec, #fff);
+  border-color: #ffd7ce;
+}
+.intake-case-detail__risk[data-risk="medium"] {
+  background: linear-gradient(135deg, #fff8dc, #fff);
+  border-color: #eadca1;
+}
+.intake-case-detail__risk[data-risk="low"] {
+  background: linear-gradient(135deg, #e9faef, #fff);
+  border-color: #cdebd8;
+}
 .intake-case-detail__score span,
+.intake-case-detail__risk span,
 .intake-case-detail__story span,
-.intake-case-detail__focus span {
+.intake-case-detail__focus span,
+.intake-case-detail__meta-section > span {
   color: #7788a5;
   font-size: 10px;
   font-weight: 900;
   letter-spacing: .14em;
 }
-.intake-case-detail__score strong {
+.intake-case-detail__score strong,
+.intake-case-detail__risk strong {
   color: #5b69d8;
   font-size: 22px;
 }
-.intake-case-detail__score i {
-  padding: 6px 10px;
-  color: #8b6170;
-  background: #fff0f4;
-  border-radius: 999px;
-  font-size: 12px;
-  font-style: normal;
-  font-weight: 800;
+.intake-case-detail__risk[data-risk="high"] strong { color: #d85b4a; }
+.intake-case-detail__risk[data-risk="medium"] strong { color: #b78b10; }
+.intake-case-detail__risk[data-risk="low"] strong { color: #2f8b64; }
+.intake-case-detail__meta {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  background: #ffffffa8;
+  border: 1px solid #e4edf7;
+  border-radius: 20px;
 }
-.intake-case-detail__score i[data-ready="true"] {
-  color: #22795e;
-  background: #dff8ec;
+.intake-case-detail__meta-section {
+  display: grid;
+  gap: 8px;
+}
+.intake-case-detail__meta-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
 }
 .intake-case-detail__story h3 {
   margin: 6px 0;
@@ -758,55 +790,6 @@ onBeforeUnmount(() => eventAbortController.abort());
   border-radius: 999px;
   font-size: 12px;
   font-style: normal;
-}
-.intake-dossier__sections {
-  display: grid;
-  gap: 12px;
-  margin: 18px 0;
-}
-.intake-dossier-section {
-  display: grid;
-  gap: 10px;
-  padding: 13px;
-  background: #ffffffd6;
-  border: 1px solid #e1eaf5;
-  border-radius: 20px;
-  box-shadow: 0 10px 24px #546b8a0d;
-}
-.intake-dossier-section[data-tone="blue"] {
-  background: linear-gradient(135deg, #f5fbff, #ffffff);
-  border-color: #d8eaf8;
-}
-.intake-dossier-section[data-tone="purple"] {
-  background: linear-gradient(135deg, #fbf8ff, #ffffff);
-  border-color: #e5dcfb;
-}
-.intake-dossier-section[data-tone="coral"] {
-  background: linear-gradient(135deg, #fffaf7, #ffffff);
-  border-color: #f3ded6;
-}
-.intake-dossier-section__header {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-  justify-content: space-between;
-}
-.intake-dossier-section__header span {
-  color: #40506d;
-  font-size: 13px;
-  font-weight: 900;
-}
-.intake-dossier-section__header small {
-  color: #8492a8;
-  font-size: 11px;
-}
-.intake-dossier-section__grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-}
-.intake-dossier-section[data-tone="coral"] .intake-dossier-section__grid {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 .intake-sticker {
   position: relative;
@@ -885,8 +868,8 @@ onBeforeUnmount(() => eventAbortController.abort());
   .intake-room { grid-template-columns: 1fr; }
 }
 @media (max-width: 580px) {
-  .intake-dossier-section__grid,
-  .intake-dossier-section[data-tone="coral"] .intake-dossier-section__grid,
+  .intake-case-detail__score-row,
+  .intake-case-detail__meta-grid,
   .intake-dossier__actions--two-column {
     grid-template-columns: 1fr;
   }

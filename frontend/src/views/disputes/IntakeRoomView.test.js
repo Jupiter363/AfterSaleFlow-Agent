@@ -95,7 +95,8 @@ describe("IntakeRoomView", () => {
     expect(wrapper.text()).toContain("争议接待官");
     expect(wrapper.text()).toContain("ORDER-1");
     expect(wrapper.text()).toContain("未收到包裹");
-    expect(wrapper.text()).toContain("签收人与收件人不一致");
+    expect(wrapper.text()).toContain("高风险");
+    expect(wrapper.text()).not.toContain("签收人与收件人不一致");
     expect(wrapper.text()).not.toContain("最终确认说明");
     expect(wrapper.text()).not.toContain("AI 受理建议非最终");
     expect(wrapper.find(".intake-dossier__confirm textarea").exists()).toBe(false);
@@ -204,8 +205,6 @@ describe("IntakeRoomView", () => {
     expect(messagesLoader).toHaveBeenCalled();
     expect(turnMemoryLoader).toHaveBeenCalled();
     expect(wrapper.text()).toContain("Refund request recorded.");
-    expect(wrapper.text()).toContain("退款");
-    expect(wrapper.text()).toContain("物流履约冲突");
     expect(wrapper.text()).not.toContain("REFUND");
     expect(wrapper.text()).not.toContain("delivery conflict");
   });
@@ -319,7 +318,7 @@ describe("IntakeRoomView", () => {
     expect(wrapper.text()).toContain("用户原始陈述");
     expect(wrapper.text()).toContain("商家期望处理方案");
     expect(wrapper.text()).toContain("订单号核对");
-    expect(wrapper.text()).toContain("继续补充信息");
+    expect(wrapper.text()).toContain("继续完善案件信息");
     expect(wrapper.text()).toContain("待确认");
     expect(wrapper.text()).not.toContain("Expected outcome");
     expect(wrapper.text()).not.toContain("NEED_MORE_INFO");
@@ -403,10 +402,14 @@ describe("IntakeRoomView", () => {
     expect(wrapper.text()).toContain("88/100");
     expect(wrapper.text()).toContain("可以进入下一步");
     expect(wrapper.find("[data-case-detail-dossier]").exists()).toBe(true);
-    expect(wrapper.findAll("[data-dossier-section]").length).toBe(3);
+    expect(wrapper.find("[data-case-detail-meta]").exists()).toBe(true);
+    expect(wrapper.findAll("[data-dossier-section]").length).toBe(0);
     expect(wrapper.text()).toContain("案件索引");
     expect(wrapper.text()).toContain("双方说法");
-    expect(wrapper.text()).toContain("处理判断");
+    expect(wrapper.text()).not.toContain("处理判断");
+    expect(wrapper.get("[data-case-risk-grade]").text()).toContain("中风险");
+    expect(wrapper.get("[data-dossier-progress-hint]").text()).toBe("可以进入下一步");
+    expect(wrapper.text()).not.toContain("可继续对话纠正");
   });
 
   it("lays out the submit and resolve actions as a two-column action bar", async () => {
@@ -419,7 +422,7 @@ describe("IntakeRoomView", () => {
     expect(actions.classes()).toContain("intake-dossier__actions--two-column");
   });
 
-  it("shows persisted handoff remarks as a compact right-side card without adding a second input box", async () => {
+  it("keeps persisted handoff remarks out of the right-side judgment area without adding a second input box", async () => {
     const wrapper = await mountInteractiveView({
       initialTurnMemory: {
         turn_no: 5,
@@ -481,8 +484,8 @@ describe("IntakeRoomView", () => {
       },
     });
 
-    expect(wrapper.text()).toContain("下一轮备注");
-    expect(wrapper.text()).toContain("请证据书记官重点核查快递柜取件记录。");
+    expect(wrapper.text()).not.toContain("下一轮备注");
+    expect(wrapper.text()).not.toContain("请证据书记官重点核查快递柜取件记录。");
     expect(wrapper.find(".intake-dossier__confirm textarea").exists()).toBe(false);
   });
 
