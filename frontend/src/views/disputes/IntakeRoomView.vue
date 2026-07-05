@@ -247,13 +247,6 @@ function normalizedPartyRole(role) {
   return normalizePartyRoleValue(role);
 }
 
-function oppositePartyRole(role) {
-  const normalizedRole = normalizedPartyRole(role);
-  if (normalizedRole === "MERCHANT") return "USER";
-  if (normalizedRole === "USER") return "MERCHANT";
-  return "UNKNOWN";
-}
-
 function partyTone(role) {
   const normalizedRole = normalizedPartyRole(role);
   if (normalizedRole === "MERCHANT") return "purple";
@@ -270,25 +263,16 @@ function claimStickerForRole(role) {
   );
 }
 
-const subjectiveStatementItems = computed(() => {
+const subjectiveStatement = computed(() => {
   const sourceRole = normalizedPartyRole(initiatorRoleValue.value);
-  const counterRole = oppositePartyRole(sourceRole);
   const sourceRoleName = roleLabel(sourceRole);
-  const counterRoleName = roleLabel(counterRole);
   const sourceClaim = claimStickerForRole(sourceRole);
-  const counterClaim = claimStickerForRole(counterRole);
-  return [
-    {
-      label: `${sourceRoleName}自述`,
-      value: sourceClaim?.value || "等待继续补充发起方陈述",
-      tone: partyTone(sourceRole),
-    },
-    {
-      label: `${counterRoleName}情况（${sourceRoleName}转述/待核验）`,
-      value: counterClaim?.value || "等待对方进入流程后确认",
-      tone: partyTone(counterRole),
-    },
-  ];
+  return {
+    titleSuffix: `${sourceRoleName}自述`,
+    label: "用户描述",
+    value: sourceClaim?.value || "等待继续补充发起方陈述",
+    tone: partyTone(sourceRole),
+  };
 });
 
 const liveStickers = computed(() => {
@@ -407,10 +391,10 @@ const caseDetailMetaSections = computed(() => {
       items: pickStickers(["订单 / 售后 / 物流", "发起方"]),
     },
     {
-      title: "单方主观描述",
-      type: "party_claims",
+      title: `单方主观描述：${subjectiveStatement.value.titleSuffix}`,
+      type: "single_statement",
       tone: "purple",
-      items: subjectiveStatementItems.value,
+      item: subjectiveStatement.value,
     },
   ];
 });
@@ -671,106 +655,103 @@ onBeforeUnmount(() => {
               <strong>{{ caseRiskGradeCopy }}</strong>
             </div>
           </div>
-          <div class="intake-case-detail__story">
-            <span>案件故事</span>
-            <h3>
-              {{
-                humanizeDossierText(caseDetailDossier?.case_story?.title || caseNoteTitle, {
-                  kind: "title",
-                  fallback: "争议事件待梳理",
-                })
-              }}
-            </h3>
-            <p>
-              {{
-                humanizeDossierText(caseDetailDossier?.case_story?.one_sentence_summary || caseNoteDescription, {
-                  kind: "summary",
-                  fallback: "接待官正在整理争议事实，请继续补充订单、证据和处理诉求。",
-                })
-              }}
+          <section
+            class="intake-case-detail__summary-card"
+            data-case-detail-summary-card
+          >
+            <div class="intake-case-detail__story">
+              <span>案件故事</span>
+              <h3>
+                {{
+                  humanizeDossierText(caseDetailDossier?.case_story?.title || caseNoteTitle, {
+                    kind: "title",
+                    fallback: "争议事件待梳理",
+                  })
+                }}
+              </h3>
+              <p>
+                {{
+                  humanizeDossierText(caseDetailDossier?.case_story?.one_sentence_summary || caseNoteDescription, {
+                    kind: "summary",
+                    fallback: "接待官正在整理争议事实，请继续补充订单、证据和处理诉求。",
+                  })
+                }}
+              </p>
+            </div>
+            <div
+              v-if="isCaseDetailDossier"
+              class="intake-case-detail__focus"
+            >
+              <span>核心争议</span>
+              <strong>
+                {{ humanizeDossierText(caseDetailDossier?.dispute_focus?.core_issue || "UNKNOWN") }}
+              </strong>
+            </div>
+            <div
+              v-if="caseDetailDossier?.dispute_focus?.facts_to_verify?.length"
+              class="intake-case-detail__chips"
+            >
+              <i
+                v-for="fact in caseDetailDossier?.dispute_focus?.facts_to_verify"
+                :key="fact"
+              >
+                待核验：{{ humanizeDossierText(fact) }}
+              </i>
+            </div>
+            <p v-if="caseDetailQuality.reason" class="intake-case-detail__reason">
+              {{ caseDetailQuality.reason }}
             </p>
-          </div>
-          <div
-            v-if="isCaseDetailDossier"
-            class="intake-case-detail__focus"
-          >
-            <span>核心争议</span>
-            <strong>
-              {{ humanizeDossierText(caseDetailDossier?.dispute_focus?.core_issue || "UNKNOWN") }}
-            </strong>
-          </div>
-          <div
-            v-if="caseDetailDossier?.dispute_focus?.facts_to_verify?.length"
-            class="intake-case-detail__chips"
-          >
-            <i
-              v-for="fact in caseDetailDossier?.dispute_focus?.facts_to_verify"
-              :key="fact"
-            >
-              待核验：{{ humanizeDossierText(fact) }}
-            </i>
-          </div>
-          <p v-if="caseDetailQuality.reason" class="intake-case-detail__reason">
-            {{ caseDetailQuality.reason }}
-          </p>
-          <section class="intake-case-detail__meta" data-case-detail-meta>
-            <article
-              v-for="section in caseDetailMetaSections"
-              :key="section.title"
-              class="intake-case-detail__meta-section"
-              :data-tone="section.tone"
-            >
-              <span class="intake-case-detail__meta-title">{{ section.title }}</span>
-              <div
-                v-if="section.type === 'index'"
-                class="intake-case-detail__index-strip"
-                data-case-index-strip
+            <section class="intake-case-detail__meta" data-case-detail-meta>
+              <article
+                v-for="section in caseDetailMetaSections"
+                :key="section.title"
+                class="intake-case-detail__meta-section"
+                :data-tone="section.tone"
               >
-                <article
-                  v-for="sticker in section.items"
-                  :key="`${section.title}-${sticker.label}`"
-                  class="intake-index-chip"
-                  :data-tone="sticker.tone"
-                  data-case-index-chip
+                <span class="intake-case-detail__meta-title">{{ section.title }}</span>
+                <div
+                  v-if="section.type === 'index'"
+                  class="intake-case-detail__index-strip"
+                  data-case-index-strip
+                >
+                  <article
+                    v-for="sticker in section.items"
+                    :key="`${section.title}-${sticker.label}`"
+                    class="intake-index-chip"
+                    :data-tone="sticker.tone"
+                    data-case-index-chip
+                    data-intake-sticker
+                  >
+                    <span>{{ sticker.label }}</span>
+                    <strong>{{ sticker.value || "待补充" }}</strong>
+                  </article>
+                </div>
+                <div
+                  v-else-if="section.type === 'single_statement'"
+                  class="intake-case-detail__single-statement"
+                  :data-tone="section.item.tone"
+                  data-single-party-statement
                   data-intake-sticker
                 >
-                  <span>{{ sticker.label }}</span>
-                  <strong>{{ sticker.value || "待补充" }}</strong>
-                </article>
-              </div>
-              <div
-                v-else-if="section.type === 'party_claims'"
-                class="intake-case-detail__party-claims"
-                data-party-claims-grid
-              >
-                <article
-                  v-for="sticker in section.items"
-                  :key="`${section.title}-${sticker.label}`"
-                  class="intake-party-claim-card"
-                  :data-tone="sticker.tone"
-                  data-party-claim-card
-                  data-intake-sticker
+                  <strong>{{ section.item.value || "待补充" }}</strong>
+                </div>
+                <div
+                  v-else
+                  class="intake-case-detail__meta-grid"
                 >
-                  <span>{{ sticker.label }}</span>
-                  <strong>{{ sticker.value || "待补充" }}</strong>
-                </article>
-              </div>
-              <div
-                v-else
-                class="intake-case-detail__meta-grid"
-              >
-                <article
-                  v-for="sticker in section.items"
-                  :key="`${section.title}-${sticker.label}`"
-                  class="intake-sticker"
-                  :data-tone="sticker.tone"
-                  data-intake-sticker
-                >
-                  <span>{{ sticker.label }}</span>
-                  <strong>{{ sticker.value || "待补充" }}</strong>
-                </article>
-              </div>
-            </article>
+                  <article
+                    v-for="sticker in section.items"
+                    :key="`${section.title}-${sticker.label}`"
+                    class="intake-sticker"
+                    :data-tone="sticker.tone"
+                    data-intake-sticker
+                  >
+                    <span>{{ sticker.label }}</span>
+                    <strong>{{ sticker.value || "待补充" }}</strong>
+                  </article>
+                </div>
+              </article>
+            </section>
           </section>
         </div>
 
@@ -1017,6 +998,10 @@ onBeforeUnmount(() => {
   display: grid;
   gap: 6px;
 }
+.intake-case-detail__meta-section + .intake-case-detail__meta-section {
+  padding-top: 8px;
+  border-top: 1px dashed #dbe6f3;
+}
 .intake-case-detail__meta-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1058,43 +1043,17 @@ onBeforeUnmount(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.intake-case-detail__party-claims {
+.intake-case-detail__single-statement {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-}
-.intake-party-claim-card {
-  position: relative;
-  display: grid;
-  gap: 5px;
-  min-height: 74px;
-  padding: 9px 10px 9px 12px;
+  padding: 2px 4px;
   color: #3d4860;
-  background: #fff;
-  border: 1px solid #e4ebf5;
-  border-radius: 14px;
   overflow: hidden;
 }
-.intake-party-claim-card::before {
-  content: "";
-  position: absolute;
-  inset: 0 auto 0 0;
-  width: 4px;
-  background: #ff9a7e;
-}
-.intake-party-claim-card[data-tone="purple"]::before { background: #a491f1; }
-.intake-party-claim-card[data-tone="coral"] { background: #fff9f6; }
-.intake-party-claim-card[data-tone="purple"] { background: #fbf9ff; }
-.intake-party-claim-card span {
-  color: #74839d;
-  font-size: 10px;
-  font-weight: 900;
-  letter-spacing: .08em;
-}
-.intake-party-claim-card strong {
+.intake-case-detail__single-statement strong {
   color: #34425a;
   font-size: 12px;
-  line-height: 1.5;
+  line-height: 1.55;
+  white-space: pre-wrap;
 }
 .intake-case-detail__story h3 {
   margin: 5px 0;

@@ -101,7 +101,8 @@ describe("IntakeRoomView", () => {
     expect(wrapper.text()).not.toContain("AI 受理建议非最终");
     expect(wrapper.find(".intake-dossier__confirm textarea").exists()).toBe(false);
     expect(wrapper.find(".intake-dossier__actions").exists()).toBe(true);
-    expect(wrapper.findAll("[data-intake-sticker]").length).toBeGreaterThan(3);
+    expect(wrapper.findAll("[data-intake-sticker]").length).toBeGreaterThanOrEqual(3);
+    expect(wrapper.find("[data-single-party-statement]").exists()).toBe(true);
   });
 
   it("opens the evidence room only after the server confirms admission", async () => {
@@ -329,6 +330,10 @@ describe("IntakeRoomView", () => {
 
   it("renders the current case-detail dossier as the right-side board", async () => {
     const wrapper = await mountInteractiveView({
+      initialAnalysis: {
+        ...analysis,
+        initiator_role: "MERCHANT",
+      },
       initialTurnMemory: {
         turn_no: 4,
         case_intake_dossier: {
@@ -383,7 +388,7 @@ describe("IntakeRoomView", () => {
               score: 88,
               threshold: 80,
               ready_for_next_step: true,
-              improvement_reason: "",
+              improvement_reason: "仍缺少可信的用户原始陈述与商家质检视频。",
             },
             admission: {
               recommendation: "ACCEPTED",
@@ -396,8 +401,14 @@ describe("IntakeRoomView", () => {
     });
 
     expect(wrapper.find("[data-case-detail-dossier]").exists()).toBe(true);
+    const summaryCard = wrapper.get("[data-case-detail-summary-card]");
+    expect(summaryCard.find(".intake-case-detail__story").exists()).toBe(true);
+    expect(summaryCard.find(".intake-case-detail__focus").exists()).toBe(true);
+    expect(summaryCard.find(".intake-case-detail__reason").exists()).toBe(true);
+    expect(summaryCard.find("[data-case-detail-meta]").exists()).toBe(true);
     expect(wrapper.text()).toContain("物流显示签收但用户称未收到商品");
     expect(wrapper.text()).toContain("用户称订单物流已显示签收");
+    expect(summaryCard.text()).toContain("仍缺少可信的用户原始陈述与商家质检视频。");
     expect(wrapper.text()).toContain("SIGNED_NOT_RECEIVED");
     expect(wrapper.text()).toContain("88/100");
     expect(wrapper.text()).toContain("可以进入下一步");
@@ -405,13 +416,17 @@ describe("IntakeRoomView", () => {
     expect(wrapper.find("[data-case-detail-meta]").exists()).toBe(true);
     expect(wrapper.find("[data-case-index-strip]").exists()).toBe(true);
     expect(wrapper.findAll("[data-case-index-chip]").length).toBe(2);
-    expect(wrapper.find("[data-party-claims-grid]").exists()).toBe(true);
-    expect(wrapper.findAll("[data-party-claim-card]").length).toBe(2);
+    expect(wrapper.find("[data-party-claims-grid]").exists()).toBe(false);
+    expect(wrapper.findAll("[data-party-claim-card]").length).toBe(0);
+    expect(wrapper.find("[data-single-party-statement]").exists()).toBe(true);
     expect(wrapper.findAll("[data-dossier-section]").length).toBe(0);
     expect(wrapper.text()).toContain("案件索引");
-    expect(wrapper.text()).toContain("单方主观描述");
-    expect(wrapper.text()).toContain("用户自述");
-    expect(wrapper.text()).toContain("商家情况（用户转述/待核验）");
+    expect(wrapper.text()).toContain("单方主观描述：商家自述");
+    expect(wrapper.find("[data-single-party-statement-label]").exists()).toBe(false);
+    expect(wrapper.text()).toContain("商家要求等待物流核查。");
+    expect(wrapper.text()).not.toContain("用户描述商家要求等待物流核查。");
+    expect(wrapper.text()).not.toContain("用户描述：商家自述");
+    expect(wrapper.text()).not.toContain("商家情况（用户转述/待核验）");
     expect(wrapper.text()).not.toContain("双方说法");
     expect(wrapper.text()).not.toContain("用户主张");
     expect(wrapper.text()).not.toContain("商家主张");
@@ -635,5 +650,8 @@ describe("IntakeRoomView", () => {
     expect(source).toContain("grid-template-rows: auto minmax(0, 1fr) auto;");
     expect(source).toContain("overflow-y: auto;");
     expect(source).not.toContain(".intake-case-detail__meta {\n  display: grid;\n  flex: 1;");
+    expect(source).not.toContain(".intake-case-detail__meta-section {\n  display: grid;\n  gap: 6px;\n  padding");
+    expect(source).not.toContain(".intake-case-detail__single-statement::before");
+    expect(source).not.toContain("data-single-party-statement-label");
   });
 });
