@@ -403,6 +403,10 @@ describe("IntakeRoomView", () => {
     expect(wrapper.text()).toContain("可以进入下一步");
     expect(wrapper.find("[data-case-detail-dossier]").exists()).toBe(true);
     expect(wrapper.find("[data-case-detail-meta]").exists()).toBe(true);
+    expect(wrapper.find("[data-case-index-strip]").exists()).toBe(true);
+    expect(wrapper.findAll("[data-case-index-chip]").length).toBe(2);
+    expect(wrapper.find("[data-party-claims-grid]").exists()).toBe(true);
+    expect(wrapper.findAll("[data-party-claim-card]").length).toBe(2);
     expect(wrapper.findAll("[data-dossier-section]").length).toBe(0);
     expect(wrapper.text()).toContain("案件索引");
     expect(wrapper.text()).toContain("双方说法");

@@ -296,11 +296,13 @@ const caseDetailMetaSections = computed(() => {
   return [
     {
       title: "案件索引",
+      type: "index",
       tone: "blue",
       items: pickStickers(["订单 / 售后 / 物流", "发起方"]),
     },
     {
       title: "双方说法",
+      type: "party_claims",
       tone: "purple",
       items: pickStickers(["用户主张", "商家主张"]),
     },
@@ -586,8 +588,45 @@ onBeforeUnmount(() => eventAbortController.abort());
               class="intake-case-detail__meta-section"
               :data-tone="section.tone"
             >
-              <span>{{ section.title }}</span>
-              <div class="intake-case-detail__meta-grid">
+              <span class="intake-case-detail__meta-title">{{ section.title }}</span>
+              <div
+                v-if="section.type === 'index'"
+                class="intake-case-detail__index-strip"
+                data-case-index-strip
+              >
+                <article
+                  v-for="sticker in section.items"
+                  :key="`${section.title}-${sticker.label}`"
+                  class="intake-index-chip"
+                  :data-tone="sticker.tone"
+                  data-case-index-chip
+                  data-intake-sticker
+                >
+                  <span>{{ sticker.label }}</span>
+                  <strong>{{ sticker.value || "待补充" }}</strong>
+                </article>
+              </div>
+              <div
+                v-else-if="section.type === 'party_claims'"
+                class="intake-case-detail__party-claims"
+                data-party-claims-grid
+              >
+                <article
+                  v-for="sticker in section.items"
+                  :key="`${section.title}-${sticker.label}`"
+                  class="intake-party-claim-card"
+                  :data-tone="sticker.tone"
+                  data-party-claim-card
+                  data-intake-sticker
+                >
+                  <span>{{ sticker.label }}</span>
+                  <strong>{{ sticker.value || "待补充" }}</strong>
+                </article>
+              </div>
+              <div
+                v-else
+                class="intake-case-detail__meta-grid"
+              >
                 <article
                   v-for="sticker in section.items"
                   :key="`${section.title}-${sticker.label}`"
@@ -644,7 +683,8 @@ onBeforeUnmount(() => eventAbortController.abort());
 .intake-room__conversation,
 .intake-dossier {
   min-width: 0;
-  padding: 20px;
+  box-sizing: border-box;
+  padding: 18px;
   background: #ffffffbf;
   border: 1px solid #dfe8f4;
   border-radius: 28px;
@@ -653,6 +693,12 @@ onBeforeUnmount(() => eventAbortController.abort());
 .intake-room__conversation {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
+}
+.intake-dossier {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  align-content: stretch;
+  gap: 10px;
 }
 .intake-room__case-note {
   padding: 16px;
@@ -678,15 +724,18 @@ onBeforeUnmount(() => eventAbortController.abort());
 .intake-dossier header h2 { margin: 5px 0 0; color: #34435c; font-size: 23px; }
 .intake-dossier header small { color: #7384a1; }
 .intake-case-detail {
-  display: grid;
-  gap: 12px;
-  margin: 16px 0;
-  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  align-self: stretch;
+  min-height: 0;
+  gap: 10px;
+  margin: 4px 0 0;
+  padding: 14px;
   background:
-    radial-gradient(circle at 12% 12%, #fff7cf 0 12%, transparent 13%),
+    radial-gradient(circle at 12% 12%, #fff7cf 0 10%, transparent 11%),
     linear-gradient(135deg, #fffdf8, #eef7ff);
   border: 1px solid #dce9f6;
-  border-radius: 24px;
+  border-radius: 22px;
   box-shadow: inset 0 1px 0 #ffffff, 0 16px 35px #55739914;
 }
 .intake-case-detail__score-row {
@@ -697,11 +746,11 @@ onBeforeUnmount(() => eventAbortController.abort());
 .intake-case-detail__score,
 .intake-case-detail__risk {
   display: grid;
-  gap: 10px;
-  padding: 10px 12px;
+  gap: 6px;
+  padding: 9px 12px;
   background: #ffffffd9;
   border: 1px solid #e2ebf5;
-  border-radius: 18px;
+  border-radius: 16px;
 }
 .intake-case-detail__risk {
   background: linear-gradient(135deg, #fff7f1, #fff);
@@ -722,7 +771,7 @@ onBeforeUnmount(() => eventAbortController.abort());
 .intake-case-detail__risk span,
 .intake-case-detail__story span,
 .intake-case-detail__focus span,
-.intake-case-detail__meta-section > span {
+.intake-case-detail__meta-title {
   color: #7788a5;
   font-size: 10px;
   font-weight: 900;
@@ -731,64 +780,143 @@ onBeforeUnmount(() => eventAbortController.abort());
 .intake-case-detail__score strong,
 .intake-case-detail__risk strong {
   color: #5b69d8;
-  font-size: 22px;
+  font-size: 20px;
 }
 .intake-case-detail__risk[data-risk="high"] strong { color: #d85b4a; }
 .intake-case-detail__risk[data-risk="medium"] strong { color: #b78b10; }
 .intake-case-detail__risk[data-risk="low"] strong { color: #2f8b64; }
 .intake-case-detail__meta {
   display: grid;
-  gap: 10px;
-  padding: 12px;
-  background: #ffffffa8;
+  flex: 1;
+  align-content: start;
+  min-height: 0;
+  gap: 8px;
+  padding: 10px;
+  background: #ffffff9e;
   border: 1px solid #e4edf7;
-  border-radius: 20px;
+  border-radius: 18px;
 }
 .intake-case-detail__meta-section {
   display: grid;
-  gap: 8px;
+  gap: 6px;
 }
 .intake-case-detail__meta-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 9px;
 }
+.intake-case-detail__index-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+.intake-index-chip {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  max-width: 100%;
+  gap: 7px;
+  padding: 7px 10px;
+  color: #46546e;
+  background: #f8fcff;
+  border: 1px solid #dce8f5;
+  border-radius: 999px;
+}
+.intake-index-chip[data-tone="mint"] {
+  background: #f6fcf8;
+  border-color: #d6eddf;
+}
+.intake-index-chip span {
+  flex: 0 0 auto;
+  color: #74839d;
+  font-size: 10px;
+  font-weight: 800;
+}
+.intake-index-chip strong {
+  min-width: 0;
+  color: #33415b;
+  font-size: 12px;
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.intake-case-detail__party-claims {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.intake-party-claim-card {
+  position: relative;
+  display: grid;
+  gap: 5px;
+  min-height: 74px;
+  padding: 9px 10px 9px 12px;
+  color: #3d4860;
+  background: #fff;
+  border: 1px solid #e4ebf5;
+  border-radius: 14px;
+  overflow: hidden;
+}
+.intake-party-claim-card::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 4px;
+  background: #ff9a7e;
+}
+.intake-party-claim-card[data-tone="purple"]::before { background: #a491f1; }
+.intake-party-claim-card[data-tone="coral"] { background: #fff9f6; }
+.intake-party-claim-card[data-tone="purple"] { background: #fbf9ff; }
+.intake-party-claim-card span {
+  color: #74839d;
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: .08em;
+}
+.intake-party-claim-card strong {
+  color: #34425a;
+  font-size: 12px;
+  line-height: 1.5;
+}
 .intake-case-detail__story h3 {
-  margin: 6px 0;
+  margin: 5px 0;
   color: #2f3e58;
-  font-size: 18px;
+  font-size: 17px;
 }
 .intake-case-detail__story p,
 .intake-case-detail__focus p,
 .intake-case-detail__reason {
   margin: 0;
   color: #68768e;
-  line-height: 1.65;
+  font-size: 13px;
+  line-height: 1.55;
 }
 .intake-case-detail__focus {
   display: grid;
-  gap: 5px;
-  padding: 12px;
+  gap: 4px;
+  padding: 10px;
   background: #f8fbff;
   border: 1px dashed #d4e1f0;
-  border-radius: 18px;
+  border-radius: 16px;
 }
 .intake-case-detail__focus strong {
   color: #ef7c67;
+  font-size: 13px;
   letter-spacing: .03em;
 }
 .intake-case-detail__chips {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 6px;
 }
 .intake-case-detail__chips i {
-  padding: 7px 10px;
+  padding: 6px 9px;
   color: #5e6f88;
   background: #fff;
   border: 1px solid #e2eaf5;
   border-radius: 999px;
-  font-size: 12px;
+  font-size: 11px;
   font-style: normal;
 }
 .intake-sticker {
@@ -825,10 +953,10 @@ onBeforeUnmount(() => eventAbortController.abort());
   position: relative;
   display: grid;
   gap: 10px;
-  padding: 16px;
+  padding: 12px;
   background: #f8fbff;
   border: 1px dashed #cddbec;
-  border-radius: 20px;
+  border-radius: 18px;
 }
 .intake-dossier__confirm p { color: #7b718e; font-size: 12px; }
 .intake-dossier__actions {
@@ -840,7 +968,7 @@ onBeforeUnmount(() => eventAbortController.abort());
 }
 .intake-dossier__confirm button {
   width: 100%;
-  padding: 13px;
+  padding: 11px 12px;
   color: white;
   background: linear-gradient(135deg, #ff8c72, #8e8bef);
   border: 0;
