@@ -1,4 +1,4 @@
-"""Final AI Presiding Judge identity over the validated C1-C6 workflow."""
+"""Final AI Presiding Judge identity over hearing workflows."""
 
 from __future__ import annotations
 
@@ -57,3 +57,6 @@ class PresidingJudge:
                 "C6 must return a non-final draft and reviewer attention"
             )
         return result
+
+
+__all__ = ["PresidingJudge"]

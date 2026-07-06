@@ -9,6 +9,7 @@ from app.schemas import (
     EvaluationFinding,
     EvaluationMetricScores,
     IntakeAnalysisOutput,
+    HearingRoundTurnResult,
     SimulatedExternalImportResult,
     SimulatedExternalDispute,
 )
@@ -85,6 +86,23 @@ class FakeEvaluationWorkflow:
             prompt_version="evaluation-v1",
             latency_ms=5,
             token_usage=12,
+        )
+
+
+class FakeHearingRoundTurnWorkflow:
+    def run(self, request):
+        return HearingRoundTurnResult(
+            speaker_role="JUDGE",
+            message_text="第一轮事实陈述已封存。请进入第二轮定向说明。",
+            round_summary="双方围绕签收未收到进行第一轮陈述。",
+            questions_for_user=["请补充签收现场情况。"],
+            questions_for_merchant=["请补充物流交接记录。"],
+            court_event_type="JUDGE_NEXT_QUESTIONS_READY",
+            round_no=request.round_no,
+            next_round_no=request.round_no + 1,
+            final_draft_required=False,
+            prompt_version="hearing-round-turn-v1",
+            model="fake-round-model",
         )
 
 
@@ -267,3 +285,54 @@ def test_simulated_external_import_api_generates_import_dtos() -> None:
     assert response.json()["items"][0]["initiator_role"] == "MERCHANT"
     assert response.json()["items"][0]["user_id"] == "user-local"
     assert response.json()["items"][0]["merchant_id"] == "merchant-local"
+
+
+def test_hearing_round_turn_api_matches_java_court_adapter_contract() -> None:
+    client = TestClient(
+        create_app(
+            settings(),
+            FakeWorkflow(),
+            FakeIntakeWorkflow(),
+            FakeEvaluationWorkflow(),
+            hearing_round_turn_workflow=FakeHearingRoundTurnWorkflow(),
+        )
+    )
+
+    response = client.post(
+        "/internal/agents/hearing/round-turn",
+        json={
+            "case_id": "CASE_COURT",
+            "workflow_id": "WORKFLOW_COURT",
+            "order_id": "ORDER_COURT",
+            "after_sale_id": "AS_COURT",
+            "logistics_id": "LOG_COURT",
+            "dispute_type": "SIGNED_NOT_RECEIVED",
+            "title": "物流显示签收但用户称未收到",
+            "case_description": "用户称物流显示已签收但本人未收到包裹。",
+            "risk_level": "HIGH",
+            "round_no": 1,
+            "dossier_version": 2,
+            "final_round": False,
+            "round_status": "COMPLETED",
+            "round_summary_json": "{\"trigger\":\"BOTH_PARTIES_SUBMITTED\"}",
+            "party_submissions": [
+                {
+                    "participant_role": "USER",
+                    "participant_id": "user-local",
+                    "submission_source": "PARTY_ACTION",
+                    "submission_json": "{\"statement\":\"用户陈述\"}",
+                }
+            ],
+        },
+        headers={
+            "X-Service-Secret": "test-agent-service-secret",
+            "X-Trace-Id": "TRACE_round",
+            "X-Request-Id": "REQ_round",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["speaker_role"] == "JUDGE"
+    assert response.json()["court_event_type"] == "JUDGE_NEXT_QUESTIONS_READY"
+    assert response.json()["next_round_no"] == 2
+    assert response.headers["X-Trace-Id"] == "TRACE_round"

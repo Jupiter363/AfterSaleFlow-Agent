@@ -66,6 +66,22 @@ _CONTRACTS: dict[str, AgentContextContract] = {
             *_COMMON_DISPLAY_ONLY,
         ),
     ),
+    "hearing_round_turn": AgentContextContract(
+        node_name="hearing_round_turn",
+        configuration_profile_key="PRESIDING_JUDGE_ROUND_CONTEXT_PACK_V1",
+        sections=(
+            ContextSectionSpec("current_turn", 100, True, "java_filtered"),
+            ContextSectionSpec("case_identity", 95, True, "java_filtered"),
+            ContextSectionSpec("canonical_case_dossier", 95, True, "java_filtered"),
+            ContextSectionSpec("hearing_round_submissions", 90, False, "java_filtered"),
+            ContextSectionSpec("prior_judge_messages", 85, False, "session_scoped"),
+            ContextSectionSpec("compressed_summary", 80, False, "session_scoped"),
+            ContextSectionSpec("actor_visible_evidence", 78, False, "java_filtered"),
+            ContextSectionSpec("round_control_policy", 75, True, "java_filtered"),
+            ContextSectionSpec("tool_results", 70, False, "tool_result"),
+            *_COMMON_DISPLAY_ONLY,
+        ),
+    ),
 }
 
 

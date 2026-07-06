@@ -600,6 +600,7 @@ public class EvidenceAgentTurnService {
                     entity.getMessageType(),
                     entity.getMessageText(),
                     attachments,
+                    entity.getHearingRound(),
                     entity.getCreatedAt());
         } catch (JsonProcessingException exception) {
             throw new IllegalStateException("invalid evidence opening message attachments", exception);

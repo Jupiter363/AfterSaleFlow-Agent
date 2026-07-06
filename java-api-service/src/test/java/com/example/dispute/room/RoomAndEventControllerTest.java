@@ -108,6 +108,7 @@ class RoomAndEventControllerTest {
                                 MessageType.AGENT_MESSAGE,
                                 "请先补充与案情匹配的证据材料。",
                                 List.of(),
+                                null,
                                 Instant.parse("2026-07-03T00:01:00Z")));
 
         mockMvc.perform(
@@ -164,6 +165,7 @@ class RoomAndEventControllerTest {
                 MessageType.PARTY_TEXT,
                 "物流显示签收，但我没有收到。",
                 List.of(),
+                null,
                 Instant.parse("2026-07-03T00:00:00Z"));
     }
 

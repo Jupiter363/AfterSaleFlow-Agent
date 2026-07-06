@@ -60,6 +60,10 @@ class PromptComposer:
             "presiding_judge",
             "adjudication_draft_node.md",
         ),
+        "hearing_round_turn": PromptTemplateRef(
+            "presiding_judge",
+            "hearing_round_turn.md",
+        ),
         "evidence_critic": PromptTemplateRef(
             "deliberation_panel",
             "evidence_critic.md",

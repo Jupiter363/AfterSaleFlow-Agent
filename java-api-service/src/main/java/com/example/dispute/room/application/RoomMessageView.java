@@ -14,4 +14,5 @@ public record RoomMessageView(
         MessageType messageType,
         String messageText,
         List<String> attachmentRefs,
+        Integer hearingRound,
         Instant createdAt) {}

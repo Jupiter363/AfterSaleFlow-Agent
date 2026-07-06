@@ -116,6 +116,52 @@ class RoomMessageAndEventServiceTest {
     }
 
     @Test
+    void roomMessageViewCarriesTheHearingRoundForCourtTimelineGrouping() {
+        RoomMessageEntity judgeMessage =
+                RoomMessageEntity.create(
+                        "MESSAGE_JUDGE_ROUND_1",
+                        "CASE_ROOM_TEST",
+                        "ROOM_HEARING",
+                        7,
+                        MessageSenderType.AGENT,
+                        "JUDGE",
+                        "presiding-judge",
+                        "[\"USER\",\"MERCHANT\",\"PLATFORM_REVIEWER\",\"ADMIN\",\"SYSTEM\"]",
+                        "[]",
+                        MessageType.AGENT_MESSAGE,
+                        "第一轮陈述已封存，法官将提出下一轮定向问题。",
+                        "[]",
+                        "judge-round-turn:CASE_ROOM_TEST:1",
+                        1,
+                        Instant.parse("2026-07-03T00:00:00Z"),
+                        "TRACE_JUDGE_ROUND_1");
+        when(caseRepository.findById(evidenceCase().getId()))
+                .thenReturn(Optional.of(evidenceCase()));
+        when(roomRepository.findByCaseIdAndRoomType(
+                        evidenceCase().getId(), RoomType.HEARING))
+                .thenReturn(
+                        Optional.of(
+                                CaseRoomEntity.open(
+                                        "ROOM_HEARING",
+                                        evidenceCase().getId(),
+                                        RoomType.HEARING,
+                                        OffsetDateTime.parse("2026-07-03T00:00:00Z"),
+                                        "system")));
+        when(messageRepository.findAllByRoomIdOrderBySequenceNoAsc("ROOM_HEARING"))
+                .thenReturn(List.of(judgeMessage));
+
+        List<RoomMessageView> messages =
+                messageService.list(
+                        evidenceCase().getId(),
+                        RoomType.HEARING,
+                        new AuthenticatedActor("user-local", ActorRole.USER));
+
+        assertThat(messages).hasSize(1);
+        assertThat(messages.getFirst().senderRole()).isEqualTo("JUDGE");
+        assertThat(messages.getFirst().hearingRound()).isEqualTo(1);
+    }
+
+    @Test
     void writesAnImmutableIdempotentMessageAndMonotonicCaseEventTogether() {
         FulfillmentCaseEntity dispute = evidenceCase();
         CaseRoomEntity room =

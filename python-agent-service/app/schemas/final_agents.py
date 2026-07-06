@@ -379,6 +379,61 @@ class HearingStageResult(StrictModel):
     requires_human_review: Literal[True] = True
 
 
+class HearingRoundPartySubmission(StrictModel):
+    participant_role: Literal["USER", "MERCHANT"]
+    participant_id: Identifier
+    submission_source: Identifier
+    submission_json: LongText
+
+
+class HearingRoundTurnRequest(StrictModel):
+    case_id: Annotated[
+        str, Field(pattern=r"^CASE_[A-Za-z0-9_]{1,59}$")
+    ]
+    workflow_id: Identifier
+    order_id: Identifier | None = None
+    after_sale_id: Identifier | None = None
+    logistics_id: Identifier | None = None
+    dispute_type: Identifier | None = None
+    title: ShortText
+    case_description: LongText
+    risk_level: RiskLevelLiteral = "MEDIUM"
+    round_no: Annotated[int, Field(ge=1, le=3)]
+    dossier_version: Annotated[int, Field(ge=1)]
+    final_round: bool = False
+    round_status: Identifier
+    stop_reason: Identifier | None = None
+    round_summary_json: LongText = "{}"
+    party_submissions: Annotated[
+        list[HearingRoundPartySubmission],
+        Field(max_length=10),
+    ] = Field(default_factory=list)
+
+
+class HearingRoundTurnResult(StrictModel):
+    speaker_role: Literal["JUDGE"] = "JUDGE"
+    message_text: LongText
+    round_summary: LongText
+    questions_for_user: Annotated[list[ShortText], Field(max_length=10)] = Field(
+        default_factory=list
+    )
+    questions_for_merchant: Annotated[list[ShortText], Field(max_length=10)] = Field(
+        default_factory=list
+    )
+    court_event_type: Literal[
+        "JUDGE_OPENING_READY",
+        "JUDGE_NEXT_QUESTIONS_READY",
+        "FINAL_DRAFT_REQUIRED",
+    ]
+    round_no: Annotated[int, Field(ge=1, le=3)]
+    next_round_no: Annotated[int, Field(ge=1, le=3)] | None = None
+    final_draft_required: bool = False
+    prompt_version: Identifier = "hearing-round-turn-v1"
+    model: Identifier = "unknown"
+    non_final: Literal[True] = True
+    requires_human_review: Literal[True] = True
+
+
 class EvidenceBuildRequest(StrictModel):
     case_id: Identifier
     case_version: Annotated[int, Field(ge=1)]

@@ -88,6 +88,7 @@ class EvidenceSubmissionServiceTest {
                                 MessageType.PARTY_EVIDENCE_REFERENCE,
                                 "submitted",
                                 List.of("EVIDENCE_ONE", "EVIDENCE_TWO"),
+                                null,
                                 Instant.parse("2026-07-06T08:00:00Z")));
 
         var result =

@@ -37,6 +37,7 @@ public class HearingRoundService {
     private final CaseRoomRepository roomRepository;
     private final CaseEventService eventService;
     private final HearingWorkflowCoordinator workflowCoordinator;
+    private final HearingCourtOrchestrator courtOrchestrator;
     private final DisputeProperties disputeProperties;
     private final Clock clock;
 
@@ -48,6 +49,7 @@ public class HearingRoundService {
             CaseRoomRepository roomRepository,
             CaseEventService eventService,
             HearingWorkflowCoordinator workflowCoordinator,
+            HearingCourtOrchestrator courtOrchestrator,
             DisputeProperties disputeProperties,
             Clock clock) {
         this.caseRepository = caseRepository;
@@ -57,6 +59,7 @@ public class HearingRoundService {
         this.roomRepository = roomRepository;
         this.eventService = eventService;
         this.workflowCoordinator = workflowCoordinator;
+        this.courtOrchestrator = courtOrchestrator;
         this.disputeProperties = disputeProperties;
         this.clock = clock;
     }
@@ -112,7 +115,12 @@ public class HearingRoundService {
                         "stop_reason",
                                 stopReason == null ? "CONTINUE" : stopReason.name()),
                 "hearing-round-completed:" + roundNo,
-                actor.actorId());
+                        actor.actorId());
+        courtOrchestrator.afterRoundClosedAfterCommit(
+                caseId,
+                roundNo,
+                stopReason != null,
+                traceId(roundNo));
         workflowCoordinator.roundCompletedAfterCommit(caseId, roundNo, false);
         return view(caseId, saved, actor);
     }
@@ -194,6 +202,11 @@ public class HearingRoundService {
                             : stopReason.name()),
                     "hearing-round-completed:" + round.getRoundNo(),
                     "hearing-controller");
+            courtOrchestrator.afterRoundClosedAfterCommit(
+                    caseId,
+                    round.getRoundNo(),
+                    stopReason != null,
+                    traceId(round.getRoundNo()));
             HearingRoundEntity responseRound = round;
             if (stopReason == null) {
                 responseRound =
@@ -414,6 +427,11 @@ public class HearingRoundService {
                                 : stopReason.name()),
                 "hearing-round-completed:" + round.getRoundNo(),
                 actorId);
+        courtOrchestrator.afterRoundClosedAfterCommit(
+                dispute.getId(),
+                round.getRoundNo(),
+                stopReason != null,
+                traceId(round.getRoundNo()));
         if (stopReason == null) {
             responseRound = openNextRound(dispute, saved, now, actorId);
         }
@@ -604,5 +622,9 @@ public class HearingRoundService {
 
     private static String compactUuid() {
         return UUID.randomUUID().toString().replace("-", "");
+    }
+
+    private static String traceId(int roundNo) {
+        return "TRACE_HEARING_ROUND_" + roundNo;
     }
 }

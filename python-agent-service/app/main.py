@@ -19,6 +19,7 @@ from app.agents.evidence_clerk import EvidenceClerk
 from app.agents.evidence_clerk.workflow import EvidenceTurnWorkflow
 from app.agents.model_roles import ModelCriticEvaluator, ModelReviewAnswerer
 from app.agents.presiding_judge import PresidingJudge
+from app.agents.presiding_judge.round_workflow import HearingRoundTurnWorkflow
 from app.agents.review_copilot import ReviewCopilot
 from app.business.api.final_agents import FinalAgentServices
 from app.business.simulated_imports import SimulatedExternalImportWorkflow
@@ -37,6 +38,8 @@ from app.schemas import (
     HearingAnalyzeRequest,
     HearingStageRequest,
     HearingStageResult,
+    HearingRoundTurnRequest,
+    HearingRoundTurnResult,
     DeliberationReport,
     DeliberationRequest,
     DisputeIntakeRequest,
@@ -79,6 +82,7 @@ def create_app(
     evaluation_workflow: EvaluationWorkflow | None = None,
     final_agent_services: FinalAgentServices | None = None,
     simulated_import_workflow: SimulatedExternalImportWorkflow | None = None,
+    hearing_round_turn_workflow: HearingRoundTurnWorkflow | None = None,
 ) -> FastAPI:
     if (
         evaluation_workflow is None
@@ -102,6 +106,9 @@ def create_app(
     )
     resolved_simulated_import_workflow = (
         simulated_import_workflow or _build_simulated_import_workflow(resolved)
+    )
+    resolved_hearing_round_turn_workflow = (
+        hearing_round_turn_workflow or _build_hearing_round_turn_workflow(resolved)
     )
     final_services = final_agent_services or _build_final_agent_services(
         resolved,
@@ -306,6 +313,20 @@ def create_app(
         )
 
     @app.post(
+        "/internal/agents/hearing/round-turn",
+        response_model=HearingRoundTurnResult,
+    )
+    async def hearing_round_turn(
+        payload: HearingRoundTurnRequest,
+        x_service_secret: str = Header(alias=SERVICE_SECRET_HEADER),
+    ) -> HearingRoundTurnResult:
+        _authorize(x_service_secret, resolved.python_agent_service_secret)
+        return await run_in_threadpool(
+            resolved_hearing_round_turn_workflow.run,
+            payload,
+        )
+
+    @app.post(
         "/internal/agents/deliberation/run",
         response_model=DeliberationReport,
     )
@@ -463,6 +484,16 @@ def _build_simulated_import_workflow(
 ) -> SimulatedExternalImportWorkflow:
     llm = _build_llm_client(settings)
     return SimulatedExternalImportWorkflow(
+        model_runner=HarnessModelRunner(
+            llm=llm,
+            prompts=PromptRepository(),
+        )
+    )
+
+
+def _build_hearing_round_turn_workflow(settings: Settings) -> HearingRoundTurnWorkflow:
+    llm = _build_llm_client(settings)
+    return HearingRoundTurnWorkflow(
         model_runner=HarnessModelRunner(
             llm=llm,
             prompts=PromptRepository(),

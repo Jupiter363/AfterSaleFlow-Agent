@@ -12,6 +12,7 @@ import com.example.dispute.config.DisputeProperties;
 import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.RiskLevel;
 import com.example.dispute.hearing.application.CompleteHearingRoundCommand;
+import com.example.dispute.hearing.application.HearingCourtOrchestrator;
 import com.example.dispute.hearing.application.HearingRoundService;
 import com.example.dispute.hearing.application.HearingWorkflowCoordinator;
 import com.example.dispute.hearing.application.SettlementProposalCommand;
@@ -29,7 +30,9 @@ import com.example.dispute.hearing.infrastructure.persistence.repository.Settlem
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.notification.application.NotificationService;
+import com.example.dispute.room.application.AccessSessionResolver;
 import com.example.dispute.room.application.CaseEventService;
+import com.example.dispute.room.application.SessionPermissionService;
 import com.example.dispute.room.domain.RoomType;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
@@ -105,6 +108,9 @@ class HearingCollaborationIntegrationTest {
     @Autowired private CaseTimelineEventRepository eventRepository;
     @Autowired private MutableClock mutableClock;
     @MockitoBean private HearingWorkflowCoordinator hearingWorkflowCoordinator;
+    @MockitoBean private HearingCourtOrchestrator hearingCourtOrchestrator;
+    @MockitoBean private AccessSessionResolver accessSessionResolver;
+    @MockitoBean private SessionPermissionService sessionPermissionService;
 
     private AuthenticatedActor user;
     private AuthenticatedActor merchant;
@@ -281,6 +287,9 @@ class HearingCollaborationIntegrationTest {
         assertThat(completedRound.getRoundStatus())
                 .isEqualTo(HearingRoundStatus.COMPLETED);
         assertThat(completedRound.getSummaryJson()).contains("BOTH_PARTIES_SUBMITTED");
+        verify(hearingCourtOrchestrator)
+                .afterRoundClosedAfterCommit(
+                        "CASE_PARTY_ROUND", 1, false, "TRACE_HEARING_ROUND_1");
         verify(hearingWorkflowCoordinator)
                 .roundCompletedAfterCommit("CASE_PARTY_ROUND", 1, false);
     }

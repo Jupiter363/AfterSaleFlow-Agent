@@ -110,6 +110,7 @@ public class RoomMessageEntity extends AbstractEntity {
                 messageText,
                 attachmentRefsJson,
                 idempotencyKey,
+                null,
                 createdAt,
                 traceId);
     }
@@ -128,6 +129,7 @@ public class RoomMessageEntity extends AbstractEntity {
             String messageText,
             String attachmentRefsJson,
             String idempotencyKey,
+            Integer hearingRound,
             Instant createdAt,
             String traceId) {
         RoomMessageEntity entity = new RoomMessageEntity(required(id, "id"));
@@ -143,10 +145,46 @@ public class RoomMessageEntity extends AbstractEntity {
         entity.messageText = messageText;
         entity.attachmentRefsJson = required(attachmentRefsJson, "attachmentRefsJson");
         entity.idempotencyKey = required(idempotencyKey, "idempotencyKey");
+        entity.hearingRound = hearingRound;
         entity.createdAt = Objects.requireNonNull(createdAt);
         entity.traceId = traceId;
         entity.createdBy = senderId;
         return entity;
+    }
+
+    public static RoomMessageEntity create(
+            String id,
+            String caseId,
+            String roomId,
+            long sequenceNo,
+            MessageSenderType senderType,
+            String senderRole,
+            String senderId,
+            String audienceJson,
+            String audienceActorIdsJson,
+            MessageType messageType,
+            String messageText,
+            String attachmentRefsJson,
+            String idempotencyKey,
+            Instant createdAt,
+            String traceId) {
+        return create(
+                id,
+                caseId,
+                roomId,
+                sequenceNo,
+                senderType,
+                senderRole,
+                senderId,
+                audienceJson,
+                audienceActorIdsJson,
+                messageType,
+                messageText,
+                attachmentRefsJson,
+                idempotencyKey,
+                null,
+                createdAt,
+                traceId);
     }
 
     public String getCaseId() { return caseId; }
@@ -159,6 +197,7 @@ public class RoomMessageEntity extends AbstractEntity {
     public MessageType getMessageType() { return messageType; }
     public String getMessageText() { return messageText; }
     public String getAttachmentRefsJson() { return attachmentRefsJson; }
+    public Integer getHearingRound() { return hearingRound; }
     public String getIdempotencyKey() { return idempotencyKey; }
     public Instant getCreatedAt() { return createdAt; }
 

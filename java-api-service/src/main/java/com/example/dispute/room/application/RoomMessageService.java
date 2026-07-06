@@ -282,6 +282,7 @@ public class RoomMessageService {
                     entity.getMessageType(),
                     entity.getMessageText(),
                     attachments,
+                    entity.getHearingRound(),
                     entity.getCreatedAt());
         } catch (JsonProcessingException exception) {
             throw new IllegalStateException("invalid message attachments", exception);
