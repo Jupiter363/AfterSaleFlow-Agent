@@ -12,6 +12,8 @@ import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.RiskLevel;
+import com.example.dispute.evidence.infrastructure.persistence.entity.EvidenceVerificationEntity;
+import com.example.dispute.evidence.infrastructure.persistence.repository.EvidenceVerificationRepository;
 import com.example.dispute.infrastructure.persistence.entity.EvidenceItemEntity;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.repository.EvidenceItemRepository;
@@ -66,6 +68,7 @@ class EvidenceAgentTurnServiceTest {
     @Mock private RoomTurnMemoryRepository memoryRepository;
     @Mock private CaseIntakeDossierRepository intakeDossierRepository;
     @Mock private EvidenceItemRepository evidenceItemRepository;
+    @Mock private EvidenceVerificationRepository verificationRepository;
     @Mock private RoomMessageRepository messageRepository;
     @Mock private CaseEventService eventService;
     @Mock private AccessSessionResolver accessSessionResolver;
@@ -86,6 +89,7 @@ class EvidenceAgentTurnServiceTest {
                         memoryRepository,
                         intakeDossierRepository,
                         evidenceItemRepository,
+                        verificationRepository,
                         messageRepository,
                         eventService,
                         accessSessionResolver,
@@ -199,12 +203,23 @@ class EvidenceAgentTurnServiceTest {
                                 "I can help organize this evidence. Please add any carrier response if available.",
                                 objectMapper.readTree("{\"next_best_action\":\"ADD_CARRIER_RESPONSE\"}"),
                                 objectMapper.readTree("[]"),
-                                List.of("EVIDENCE_SHARED"),
+                                List.of("EVIDENCE_USER_PRIVATE"),
+                                List.of(
+                                        new EvidenceAgentTurnResult.EvidenceVerificationSuggestion(
+                                                "EVIDENCE_USER_PRIVATE",
+                                                "The user-private delivery material is relevant but still needs carrier corroboration.",
+                                                0.62)),
+                                List.of(),
                                 false,
                                 false,
                                 "STUB",
                                 0.78));
+        when(verificationRepository.findTopByEvidenceIdOrderByVerificationVersionDesc(
+                        "EVIDENCE_USER_PRIVATE"))
+                .thenReturn(Optional.empty());
         when(memoryRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(verificationRepository.save(any()))
                 .thenAnswer(invocation -> invocation.getArgument(0));
         when(messageRepository.findByCaseIdAndIdempotencyKey(eq(dispute.getId()), any()))
                 .thenReturn(Optional.empty());
@@ -243,7 +258,7 @@ class EvidenceAgentTurnServiceTest {
                 .isEqualTo("intake_case_detail.v1");
         assertThat(command.getValue().availableEvidence())
                 .extracting(EvidenceAgentTurnCommand.AvailableEvidence::evidenceId)
-                .containsExactly("EVIDENCE_USER_PRIVATE", "EVIDENCE_SHARED");
+                .containsExactly("EVIDENCE_USER_PRIVATE");
         assertThat(command.getValue().recentTurns())
                 .extracting(turn -> turn.agentRole())
                 .contains("EVIDENCE_CLERK");
@@ -258,6 +273,15 @@ class EvidenceAgentTurnServiceTest {
         assertThat(commandJson.has("current_message")).isFalse();
         assertThat(commandJson.has("case_intake_dossier")).isTrue();
         assertThat(commandJson.has("latest_case_intake_dossier")).isFalse();
+        ArgumentCaptor<EvidenceVerificationEntity> verification =
+                ArgumentCaptor.forClass(EvidenceVerificationEntity.class);
+        verify(verificationRepository).save(verification.capture());
+        assertThat(verification.getValue().getEvidenceId())
+                .isEqualTo("EVIDENCE_USER_PRIVATE");
+        assertThat(verification.getValue().getVerificationVersion()).isEqualTo(1);
+        assertThat(verification.getValue().getAgentFindingsJson())
+                .contains("carrier corroboration")
+                .contains("\"confidence_score\":0.62");
         assertThat(commandJson.path("current_party_message").path("message_type").asText())
                 .isEqualTo("PARTY_TEXT");
         JsonNode serializedEvidence = commandJson.path("available_evidence").get(0);
@@ -1012,7 +1036,8 @@ class EvidenceAgentTurnServiceTest {
 
     private static EvidenceItemEntity evidenceItem(
             String id, String submittedByRole, String submittedById, String visibility) {
-        return EvidenceItemEntity.uploaded(
+        EvidenceItemEntity item =
+                EvidenceItemEntity.uploaded(
                 id,
                 "CASE_EVIDENCE_AGENT",
                 "DOSSIER_1",
@@ -1028,6 +1053,11 @@ class EvidenceAgentTurnServiceTest {
                 128L,
                 visibility,
                 OffsetDateTime.parse("2026-07-06T00:00:00Z"));
+        item.markSubmitted(
+                "BATCH_" + id,
+                OffsetDateTime.parse("2026-07-06T00:05:00Z"),
+                submittedById);
+        return item;
     }
 
     private static FulfillmentCaseEntity evidenceCase() {

@@ -50,24 +50,21 @@ public class EvidenceCatalogService {
     }
 
     private static boolean canSeeCatalogItem(EvidenceItemEntity item, AuthenticatedActor actor) {
-        if ("PARTIES".equals(item.getVisibility())) {
+        if (actor.role().name().equals(item.getSubmittedByRole())
+                && actor.actorId().equals(item.getSubmittedById())) {
             return true;
         }
-        if (actor.role().name().equals(item.getSubmittedByRole())) {
-            return true;
-        }
-        return isPrivilegedEvidenceViewer(actor.role())
-                || "PLATFORM".equals(item.getVisibility())
-                        && actor.role() == ActorRole.CUSTOMER_SERVICE;
+        return isPrivilegedEvidenceViewer(actor.role());
     }
 
     private RoleScopedEvidenceView.Item project(
             String caseId, EvidenceItemEntity item, AuthenticatedActor actor) {
         boolean privileged = isPrivilegedEvidenceViewer(actor.role());
-        boolean owns = actor.role().name().equals(item.getSubmittedByRole());
+        boolean owns =
+                actor.role().name().equals(item.getSubmittedByRole())
+                        && actor.actorId().equals(item.getSubmittedById());
         boolean visible =
                 privileged
-                        || "PARTIES".equals(item.getVisibility())
                         || owns
                         || "PLATFORM".equals(item.getVisibility())
                                 && actor.role() == ActorRole.CUSTOMER_SERVICE;
@@ -107,7 +104,10 @@ public class EvidenceCatalogService {
                 verificationFeedback(agentFindings, reasons),
                 item.getSourceType(),
                 item.getOriginalFilename(),
-                item.getParsedText());
+                item.getParsedText(),
+                item.getSubmissionStatus().name(),
+                item.getSubmittedAt(),
+                item.getSubmissionBatchId());
     }
 
     private JsonNode readJson(String json) {

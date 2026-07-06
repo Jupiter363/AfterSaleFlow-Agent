@@ -4,11 +4,14 @@ import com.example.dispute.common.api.ApiResponse;
 import com.example.dispute.common.trace.TraceIdFilter;
 import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.evidence.application.EvidenceApplicationService;
+import com.example.dispute.evidence.application.EvidenceContentView;
 import com.example.dispute.evidence.application.EvidenceCatalogService;
 import com.example.dispute.evidence.application.EvidenceCompletionService;
 import com.example.dispute.evidence.application.EvidenceCompletionStatusView;
 import com.example.dispute.evidence.application.EvidenceCompletionView;
 import com.example.dispute.evidence.application.EvidenceDossierQueryService;
+import com.example.dispute.evidence.application.EvidenceSubmissionService;
+import com.example.dispute.evidence.application.EvidenceSubmissionView;
 import com.example.dispute.evidence.application.EvidenceVerificationCommand;
 import com.example.dispute.evidence.application.EvidenceVerificationService;
 import com.example.dispute.evidence.application.EvidenceVerificationView;
@@ -22,11 +25,14 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import org.springframework.format.annotation.DateTimeFormat;
+import org.springframework.http.ContentDisposition;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
 import org.springframework.validation.annotation.Validated;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -48,6 +54,7 @@ public class EvidenceController {
     private final EvidenceVerificationService verificationService;
     private final EvidenceCompletionService completionService;
     private final EvidenceDossierQueryService dossierQueryService;
+    private final EvidenceSubmissionService submissionService;
     private final Clock clock;
 
     public EvidenceController(
@@ -56,12 +63,14 @@ public class EvidenceController {
             EvidenceVerificationService verificationService,
             EvidenceCompletionService completionService,
             EvidenceDossierQueryService dossierQueryService,
+            EvidenceSubmissionService submissionService,
             Clock clock) {
         this.service = service;
         this.catalogService = catalogService;
         this.verificationService = verificationService;
         this.completionService = completionService;
         this.dossierQueryService = dossierQueryService;
+        this.submissionService = submissionService;
         this.clock = clock;
     }
 
@@ -103,6 +112,64 @@ public class EvidenceController {
             HttpServletRequest request) {
         return success(
                 catalogService.catalog(caseId, actor(authentication)), request);
+    }
+
+    @PostMapping("/evidence/submissions")
+    public ApiResponse<EvidenceSubmissionView> submitBatch(
+            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
+            @Valid @RequestBody EvidenceSubmissionRequest command,
+            @RequestHeader("Idempotency-Key") String idempotencyKey,
+            Authentication authentication,
+            HttpServletRequest request) {
+        return success(
+                submissionService.submit(
+                        caseId,
+                        command.toCommand(),
+                        actor(authentication),
+                        idempotencyKey,
+                        correlationId(request, TraceIdFilter.TRACE_ATTRIBUTE)),
+                request);
+    }
+
+    @DeleteMapping("/evidence/{evidenceId}")
+    public ApiResponse<Void> deletePending(
+            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
+            @PathVariable
+                    @Pattern(regexp = "EVIDENCE_[A-Za-z0-9_-]{1,119}")
+                    String evidenceId,
+            Authentication authentication,
+            HttpServletRequest request) {
+        submissionService.deletePending(caseId, evidenceId, actor(authentication));
+        return success(null, request);
+    }
+
+    @GetMapping("/evidence/{evidenceId}/content")
+    public ResponseEntity<byte[]> content(
+            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
+            @PathVariable
+                    @Pattern(regexp = "EVIDENCE_[A-Za-z0-9_-]{1,119}")
+                    String evidenceId,
+            Authentication authentication) {
+        EvidenceContentView content =
+                service.content(caseId, evidenceId, actor(authentication));
+        String filename =
+                content.filename() == null || content.filename().isBlank()
+                        ? evidenceId
+                        : content.filename();
+        return ResponseEntity.ok()
+                .header(
+                        HttpHeaders.CONTENT_DISPOSITION,
+                        ContentDisposition.attachment()
+                                .filename(filename, java.nio.charset.StandardCharsets.UTF_8)
+                                .build()
+                                .toString())
+                .contentType(
+                        MediaType.parseMediaType(
+                                content.contentType() == null
+                                                || content.contentType().isBlank()
+                                        ? MediaType.APPLICATION_OCTET_STREAM_VALUE
+                                        : content.contentType()))
+                .body(content.content());
     }
 
     @PostMapping("/evidence/{evidenceId}/verify")

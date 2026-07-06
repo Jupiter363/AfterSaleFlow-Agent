@@ -66,7 +66,7 @@ class EvidenceApplicationServiceTest {
     void uploadsOriginalWithHashAndMetadataEvenWhenOcrTriggerFails() throws Exception {
         FulfillmentCaseEntity disputeCase = caseEntity();
         when(caseRepository.findById("CASE_evidence")).thenReturn(Optional.of(disputeCase));
-        when(evidenceRepository.findByCaseIdAndFileHashAndSourceType(
+        when(evidenceRepository.findFirstByCaseIdAndFileHashAndSourceTypeAndDeletedAtIsNullOrderByCreatedAtDesc(
                         any(), any(), any()))
                 .thenReturn(Optional.empty());
         when(evidenceRepository.save(any()))
@@ -82,7 +82,7 @@ class EvidenceApplicationServiceTest {
         MockMultipartFile file =
                 new MockMultipartFile(
                         "file",
-                        "签收证明.png",
+                        "绛炬敹璇佹槑.png",
                         "image/png",
                         new byte[] {
                             (byte) 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A
@@ -101,6 +101,7 @@ class EvidenceApplicationServiceTest {
         assertThat(result.fileHash()).matches("[0-9a-f]{64}");
         assertThat(result.fileBucket()).isEqualTo("evidence-original");
         assertThat(result.parseStatus()).isEqualTo("PENDING");
+        assertThat(result.submissionStatus()).isEqualTo("PENDING_SUBMISSION");
         assertThat(result.desensitized()).isFalse();
         verify(storage).storeOriginal(any(), any(), any(), any(), any());
         verify(searchIndexer).indexMetadata(any());
@@ -110,7 +111,7 @@ class EvidenceApplicationServiceTest {
     void uploadsMarkdownEvidenceAsTextParseableMaterial() throws Exception {
         FulfillmentCaseEntity disputeCase = caseEntity();
         when(caseRepository.findById("CASE_evidence")).thenReturn(Optional.of(disputeCase));
-        when(evidenceRepository.findByCaseIdAndFileHashAndSourceType(
+        when(evidenceRepository.findFirstByCaseIdAndFileHashAndSourceTypeAndDeletedAtIsNullOrderByCreatedAtDesc(
                         any(), any(), any()))
                 .thenReturn(Optional.empty());
         when(evidenceRepository.save(any()))
@@ -126,9 +127,7 @@ class EvidenceApplicationServiceTest {
                         "chat-record.md",
                         "text/markdown",
                         """
-                        # 沟通记录
-                        用户称签收后发现表盘划痕。
-                        """
+                        # 娌熼€氳褰?                        鐢ㄦ埛绉扮鏀跺悗鍙戠幇琛ㄧ洏鍒掔棔銆?                        """
                                 .getBytes(java.nio.charset.StandardCharsets.UTF_8));
 
         EvidenceView result =
@@ -144,8 +143,66 @@ class EvidenceApplicationServiceTest {
         assertThat(result.originalFilename()).isEqualTo("chat-record.md");
         assertThat(result.contentType()).isEqualTo("text/markdown");
         assertThat(result.parseStatus()).isEqualTo("PENDING");
+        assertThat(result.submissionStatus()).isEqualTo("PENDING_SUBMISSION");
         verify(storage).storeOriginal(any(), any(), any(), any(), any());
         verify(ocrTaskClient).createParseTask(any());
+    }
+
+    @Test
+    void reuploadingVoidedPendingEvidenceCreatesFreshPendingEvidence() throws Exception {
+        FulfillmentCaseEntity disputeCase = caseEntity();
+        EvidenceItemEntity voided =
+                EvidenceItemEntity.uploaded(
+                        "EVIDENCE_voided",
+                        "CASE_evidence",
+                        "DOSSIER_existing",
+                        "DOCUMENT",
+                        "USER_UPLOAD",
+                        ActorRole.USER.name(),
+                        "user-evidence",
+                        "evidence-original",
+                        "CASE_evidence/EVIDENCE_voided/proof.md",
+                        "same-hash",
+                        "proof.md",
+                        "text/markdown",
+                        8,
+                        "PRIVATE",
+                        null);
+        voided.deletePending(java.time.OffsetDateTime.now(), "user-evidence");
+        when(caseRepository.findById("CASE_evidence")).thenReturn(Optional.of(disputeCase));
+        when(evidenceRepository.findFirstByCaseIdAndFileHashAndSourceTypeAndDeletedAtIsNullOrderByCreatedAtDesc(
+                        any(), any(), any()))
+                .thenReturn(Optional.empty());
+        when(dossierRepository.findByCaseId("CASE_evidence"))
+                .thenReturn(Optional.of(EvidenceDossierEntity.collecting(
+                        "DOSSIER_existing", "CASE_evidence", "user-evidence")));
+        when(evidenceRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(storage.storeOriginal(any(), any(), any(), any(), any()))
+                .thenReturn(
+                        new EvidenceStorage.StoredObject(
+                                "evidence-original",
+                                "CASE_evidence/EVIDENCE_fresh/proof.md"));
+        MockMultipartFile file =
+                new MockMultipartFile(
+                        "file",
+                        "proof.md",
+                        "text/markdown",
+                        "evidence".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+
+        EvidenceView result =
+                service.upload(
+                        "CASE_evidence",
+                        file,
+                        "DOCUMENT",
+                        "USER_UPLOAD",
+                        "PRIVATE",
+                        null,
+                        actor());
+
+        assertThat(result.id()).isNotEqualTo("EVIDENCE_voided");
+        assertThat(result.submissionStatus()).isEqualTo("PENDING_SUBMISSION");
+        verify(storage).storeOriginal(any(), any(), any(), any(), any());
     }
 
     @Test
@@ -262,8 +319,8 @@ class EvidenceApplicationServiceTest {
                         "merchant-evidence",
                         "idem-evidence",
                         "DISPUTE",
-                        "物流争议",
-                        "签收状态存在争议",
+                        "LOGISTICS_DISPUTE",
+                        "signed status is disputed",
                         RiskLevel.HIGH,
                         "user-evidence");
         entity.completeIntake(

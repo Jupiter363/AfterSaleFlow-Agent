@@ -27,6 +27,21 @@ export const evidenceApi = {
       method: "POST",
       body: JSON.stringify(command),
     }),
+  submitBatch: (
+    actor,
+    caseId,
+    command,
+    idempotencyKey = newIdempotencyKey("evidence-batch"),
+  ) =>
+    apiRequest(`/disputes/${caseId}/evidence/submissions`, actor, {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey },
+      body: JSON.stringify(command),
+    }),
+  deletePending: (actor, caseId, evidenceId) =>
+    apiRequest(`/disputes/${caseId}/evidence/${evidenceId}`, actor, {
+      method: "DELETE",
+    }),
   complete: (actor, caseId, idempotencyKey = newIdempotencyKey("evidence")) =>
     apiRequest(`/disputes/${caseId}/evidence/complete`, actor, {
       method: "POST",

@@ -63,7 +63,7 @@ class EvidenceVerificationAndCatalogServiceTest {
     }
 
     @Test
-    void privateEvidenceIsHiddenFromCounterpartyButVisibleToReviewer() {
+    void partyCatalogIsLimitedToOwnEvidenceButReviewerCanSeeAllOriginals() {
         FulfillmentCaseEntity dispute = evidenceCase();
         EvidenceItemEntity merchantPrivate =
                 evidence(
@@ -71,6 +71,10 @@ class EvidenceVerificationAndCatalogServiceTest {
                         "MERCHANT",
                         "merchant-local",
                         "PRIVATE");
+        merchantPrivate.markSubmitted(
+                "BATCH_MERCHANT",
+                OffsetDateTime.parse("2026-07-03T00:30:00Z"),
+                "merchant-local");
         when(caseRepository.findById(dispute.getId())).thenReturn(Optional.of(dispute));
         when(evidenceRepository
                         .findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(

@@ -1,6 +1,7 @@
 package com.example.dispute.evidence.application;
 
 import com.example.dispute.evidence.domain.EvidenceVerificationStatus;
+import com.example.dispute.evidence.domain.EvidenceSubmissionStatus;
 import com.example.dispute.evidence.infrastructure.persistence.entity.EvidenceDossierItemEntity;
 import com.example.dispute.evidence.infrastructure.persistence.repository.EvidenceDossierItemRepository;
 import com.example.dispute.evidence.infrastructure.persistence.repository.EvidenceVerificationRepository;
@@ -75,6 +76,7 @@ public class EvidenceDossierFreezer {
                         .findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(
                                 caseId)
                         .stream()
+                        .filter(item -> item.getSubmissionStatus() == EvidenceSubmissionStatus.SUBMITTED)
                         .map(this::withLatestStatus)
                         .filter(
                                 item ->

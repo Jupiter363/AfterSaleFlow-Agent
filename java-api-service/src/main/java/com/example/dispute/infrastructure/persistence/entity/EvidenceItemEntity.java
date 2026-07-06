@@ -1,6 +1,7 @@
 package com.example.dispute.infrastructure.persistence.entity;
 
 import com.example.dispute.domain.model.ParseStatus;
+import com.example.dispute.evidence.domain.EvidenceSubmissionStatus;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
@@ -86,6 +87,16 @@ public class EvidenceItemEntity extends AbstractEntity {
     @Column(name = "deleted_at")
     private OffsetDateTime deletedAt;
 
+    @Enumerated(EnumType.STRING)
+    @Column(name = "submission_status", length = 32, nullable = false)
+    private EvidenceSubmissionStatus submissionStatus;
+
+    @Column(name = "submitted_at")
+    private OffsetDateTime submittedAt;
+
+    @Column(name = "submission_batch_id", length = 64)
+    private String submissionBatchId;
+
     @Column(name = "created_by", length = 128, nullable = false, updatable = false)
     private String createdBy;
 
@@ -129,6 +140,7 @@ public class EvidenceItemEntity extends AbstractEntity {
         this.metadataJson = "{}";
         this.extractionJson = "{}";
         this.occurredAt = occurredAt;
+        this.submissionStatus = EvidenceSubmissionStatus.PENDING_SUBMISSION;
         this.createdBy = submittedById;
         this.updatedBy = submittedById;
     }
@@ -243,6 +255,24 @@ public class EvidenceItemEntity extends AbstractEntity {
         return createdAt;
     }
 
+    public OffsetDateTime getDeletedAt() {
+        return deletedAt;
+    }
+
+    public EvidenceSubmissionStatus getSubmissionStatus() {
+        return submissionStatus == null
+                ? EvidenceSubmissionStatus.SUBMITTED
+                : submissionStatus;
+    }
+
+    public OffsetDateTime getSubmittedAt() {
+        return submittedAt;
+    }
+
+    public String getSubmissionBatchId() {
+        return submissionBatchId;
+    }
+
     public String getParsedText() {
         return parsedText;
     }
@@ -266,6 +296,28 @@ public class EvidenceItemEntity extends AbstractEntity {
         this.parsedText = null;
         this.extractionJson = extractionJson;
         this.parseStatus = ParseStatus.FAILED;
+        this.updatedBy = actorId;
+    }
+
+    public void markSubmitted(String batchId, OffsetDateTime submittedAt, String actorId) {
+        if (deletedAt != null) {
+            throw new IllegalStateException("deleted evidence cannot be submitted");
+        }
+        if (getSubmissionStatus() == EvidenceSubmissionStatus.SUBMITTED) {
+            throw new IllegalStateException("evidence has already been submitted");
+        }
+        this.submissionStatus = EvidenceSubmissionStatus.SUBMITTED;
+        this.submissionBatchId = batchId;
+        this.submittedAt = submittedAt;
+        this.updatedBy = actorId;
+    }
+
+    public void deletePending(OffsetDateTime deletedAt, String actorId) {
+        if (getSubmissionStatus() == EvidenceSubmissionStatus.SUBMITTED) {
+            throw new IllegalStateException("submitted evidence cannot be deleted");
+        }
+        this.submissionStatus = EvidenceSubmissionStatus.VOIDED;
+        this.deletedAt = deletedAt;
         this.updatedBy = actorId;
     }
 }

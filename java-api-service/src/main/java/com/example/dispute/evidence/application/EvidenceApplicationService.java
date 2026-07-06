@@ -4,7 +4,9 @@ import com.example.dispute.common.api.ErrorCode;
 import com.example.dispute.common.audit.AuditRecorder;
 import com.example.dispute.common.exception.ForbiddenException;
 import com.example.dispute.common.exception.NotFoundException;
+import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
+import com.example.dispute.evidence.domain.EvidenceSubmissionStatus;
 import com.example.dispute.infrastructure.persistence.entity.EvidenceDossierEntity;
 import com.example.dispute.infrastructure.persistence.entity.EvidenceItemEntity;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
@@ -90,8 +92,9 @@ public class EvidenceApplicationService {
         validateSignature(file.getContentType(), content);
         String hash = sha256(content);
         var duplicate =
-                evidenceRepository.findByCaseIdAndFileHashAndSourceType(
-                        caseId, hash, sourceType);
+                evidenceRepository
+                        .findFirstByCaseIdAndFileHashAndSourceTypeAndDeletedAtIsNullOrderByCreatedAtDesc(
+                                caseId, hash, sourceType);
         if (duplicate.isPresent()) {
             return toView(duplicate.get());
         }
@@ -157,7 +160,10 @@ public class EvidenceApplicationService {
         List<EvidenceItemEntity> items =
                 evidenceRepository
                         .findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(
-                                caseId);
+                                caseId)
+                        .stream()
+                        .filter(EvidenceApplicationService::isSubmittedEvidence)
+                        .toList();
         List<BuildDossierResult.TimelineEntry> timeline =
                 items.stream()
                         .map(
@@ -263,6 +269,7 @@ public class EvidenceApplicationService {
                         .findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(
                                 caseId)
                         .stream()
+                        .filter(EvidenceApplicationService::isSubmittedEvidence)
                         .map(this::toView)
                         .toList();
         return new BuildDossierResult(
@@ -438,7 +445,51 @@ public class EvidenceApplicationService {
                 entity.getVisibility(),
                 entity.isDesensitized(),
                 entity.getOccurredAt(),
-                entity.getCreatedAt());
+                entity.getCreatedAt(),
+                entity.getSubmissionStatus().name(),
+                entity.getSubmittedAt(),
+                entity.getSubmissionBatchId());
+    }
+
+    @Transactional(readOnly = true)
+    public EvidenceContentView content(
+            String caseId,
+            String evidenceId,
+            AuthenticatedActor actor) {
+        FulfillmentCaseEntity dispute = authorizedCase(caseId, actor);
+        EvidenceItemEntity item =
+                evidenceRepository
+                        .findById(evidenceId)
+                        .filter(evidence -> evidence.getCaseId().equals(dispute.getId()))
+                        .filter(evidence -> evidence.getDeletedAt() == null)
+                        .orElseThrow(
+                                () ->
+                                        new NotFoundException(
+                                                ErrorCode.EVIDENCE_NOT_FOUND,
+                                                "evidence not found",
+                                                Map.of("evidence_id", evidenceId)));
+        if (!canReadContent(item, actor)) {
+            throw new ForbiddenException("actor cannot read evidence content");
+        }
+        return new EvidenceContentView(
+                item.getOriginalFilename(),
+                item.getContentType(),
+                storage.loadOriginal(item.getFileBucket(), item.getFileObjectKey()));
+    }
+
+    private static boolean canReadContent(EvidenceItemEntity item, AuthenticatedActor actor) {
+        if (actor.role() == ActorRole.ADMIN
+                || actor.role() == ActorRole.SYSTEM
+                || actor.role() == ActorRole.PLATFORM_REVIEWER
+                || actor.role() == ActorRole.CUSTOMER_SERVICE) {
+            return true;
+        }
+        return actor.role().name().equals(item.getSubmittedByRole())
+                && actor.actorId().equals(item.getSubmittedById());
+    }
+
+    private static boolean isSubmittedEvidence(EvidenceItemEntity item) {
+        return item.getSubmissionStatus() == EvidenceSubmissionStatus.SUBMITTED;
     }
 
     private String writeJson(Object value) {

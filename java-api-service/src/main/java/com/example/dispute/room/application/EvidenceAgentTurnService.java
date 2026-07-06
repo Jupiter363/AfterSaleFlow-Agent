@@ -2,6 +2,10 @@ package com.example.dispute.room.application;
 
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
+import com.example.dispute.evidence.domain.EvidenceSubmissionStatus;
+import com.example.dispute.evidence.domain.EvidenceVerificationStatus;
+import com.example.dispute.evidence.infrastructure.persistence.entity.EvidenceVerificationEntity;
+import com.example.dispute.evidence.infrastructure.persistence.repository.EvidenceVerificationRepository;
 import com.example.dispute.infrastructure.persistence.entity.EvidenceItemEntity;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.repository.EvidenceItemRepository;
@@ -62,6 +66,7 @@ public class EvidenceAgentTurnService {
     private final RoomTurnMemoryRepository memoryRepository;
     private final CaseIntakeDossierRepository intakeDossierRepository;
     private final EvidenceItemRepository evidenceItemRepository;
+    private final EvidenceVerificationRepository verificationRepository;
     private final RoomMessageRepository messageRepository;
     private final CaseEventService eventService;
     private final AccessSessionResolver accessSessionResolver;
@@ -77,6 +82,7 @@ public class EvidenceAgentTurnService {
             RoomTurnMemoryRepository memoryRepository,
             CaseIntakeDossierRepository intakeDossierRepository,
             EvidenceItemRepository evidenceItemRepository,
+            EvidenceVerificationRepository verificationRepository,
             RoomMessageRepository messageRepository,
             CaseEventService eventService,
             AccessSessionResolver accessSessionResolver,
@@ -90,6 +96,7 @@ public class EvidenceAgentTurnService {
         this.memoryRepository = memoryRepository;
         this.intakeDossierRepository = intakeDossierRepository;
         this.evidenceItemRepository = evidenceItemRepository;
+        this.verificationRepository = verificationRepository;
         this.messageRepository = messageRepository;
         this.eventService = eventService;
         this.accessSessionResolver = accessSessionResolver;
@@ -329,6 +336,154 @@ public class EvidenceAgentTurnService {
                 turnNo,
                 traceId,
                 turnIdempotencyKey(context.dispute(), session.agentSession(), audienceParty, turnNo));
+        persistEvidenceVerificationSuggestions(
+                context.dispute().getId(),
+                session.accessSession(),
+                result,
+                runId,
+                traceId);
+    }
+
+    private void persistEvidenceVerificationSuggestions(
+            String caseId,
+            CaseAccessSessionEntity accessSession,
+            EvidenceAgentTurnResult result,
+            String runId,
+            String traceId) {
+        List<EvidenceAgentTurnResult.EvidenceVerificationSuggestion> suggestions =
+                normalizedVerificationSuggestions(result);
+        if (suggestions.isEmpty()) {
+            return;
+        }
+        Set<String> visibleEvidenceIds =
+                evidenceItemRepository
+                        .findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(
+                                caseId)
+                        .stream()
+                        .filter(item -> evidenceVisibleToSession(item, accessSession))
+                        .map(EvidenceItemEntity::getId)
+                        .collect(Collectors.toSet());
+        for (EvidenceAgentTurnResult.EvidenceVerificationSuggestion suggestion : suggestions) {
+            if (blank(suggestion.evidenceId()) || !visibleEvidenceIds.contains(suggestion.evidenceId())) {
+                continue;
+            }
+            int version =
+                    verificationRepository
+                            .findTopByEvidenceIdOrderByVerificationVersionDesc(
+                                    suggestion.evidenceId())
+                            .map(EvidenceVerificationEntity::getVerificationVersion)
+                            .orElse(0)
+                            + 1;
+            double score = clamp01(suggestion.confidenceScore());
+            verificationRepository.save(
+                    EvidenceVerificationEntity.create(
+                            "VERIFY_" + compactUuid(),
+                            caseId,
+                            suggestion.evidenceId(),
+                            version,
+                            verificationStatus(score),
+                            json(
+                                    Map.of(
+                                            "checks",
+                                            List.of(
+                                                    "agent_batch_submission",
+                                                    "source_time_authenticity_relevance"))),
+                            json(
+                                    Map.of(
+                                            "agent_run_id",
+                                            runId,
+                                            "confidence_score",
+                                            score,
+                                            "confidence_level",
+                                            confidenceLevel(score),
+                                            "verification_feedback",
+                                            safeText(suggestion.suggestion()),
+                                            "room_utterance",
+                                            safeText(result.roomUtterance()))),
+                            json(
+                                    Map.of(
+                                            "summary",
+                                            safeText(suggestion.suggestion()),
+                                            "authenticity_flags",
+                                            authenticityFlagsForEvidence(
+                                                    result, suggestion.evidenceId()))),
+                            score < 0.45,
+                            Instant.now(clock),
+                            AGENT_SENDER_ID,
+                            traceId));
+        }
+    }
+
+    private List<EvidenceAgentTurnResult.EvidenceVerificationSuggestion>
+            normalizedVerificationSuggestions(EvidenceAgentTurnResult result) {
+        if (!result.verificationSuggestions().isEmpty()) {
+            return result.verificationSuggestions();
+        }
+        if (result.referencedEvidenceIds().isEmpty()) {
+            return List.of();
+        }
+        return result.referencedEvidenceIds().stream()
+                .map(
+                        evidenceId ->
+                                new EvidenceAgentTurnResult.EvidenceVerificationSuggestion(
+                                        evidenceId,
+                                        result.roomUtterance(),
+                                        result.confidence()))
+                .toList();
+    }
+
+    private boolean evidenceVisibleToSession(
+            EvidenceItemEntity item, CaseAccessSessionEntity accessSession) {
+        if (accessSession.privileged()) {
+            return true;
+        }
+        return accessSession.getActorRole().name().equals(item.getSubmittedByRole())
+                && accessSession.getActorId().equals(item.getSubmittedById())
+                && item.getSubmissionStatus() == EvidenceSubmissionStatus.SUBMITTED;
+    }
+
+    private static EvidenceVerificationStatus verificationStatus(double score) {
+        if (score >= 0.75) {
+            return EvidenceVerificationStatus.PLAUSIBLE;
+        }
+        if (score >= 0.45) {
+            return EvidenceVerificationStatus.SUSPICIOUS;
+        }
+        return EvidenceVerificationStatus.NEEDS_HUMAN_REVIEW;
+    }
+
+    private static String confidenceLevel(double score) {
+        if (score >= 0.8) {
+            return "HIGH";
+        }
+        if (score >= 0.5) {
+            return "MEDIUM";
+        }
+        return "LOW";
+    }
+
+    private static double clamp01(double value) {
+        if (Double.isNaN(value) || Double.isInfinite(value)) {
+            return 0.0;
+        }
+        return Math.max(0.0, Math.min(1.0, value));
+    }
+
+    private static String safeText(String value) {
+        return value == null ? "" : value;
+    }
+
+    private List<Map<String, String>> authenticityFlagsForEvidence(
+            EvidenceAgentTurnResult result, String evidenceId) {
+        return result.authenticityFlags().stream()
+                .filter(flag -> blank(flag.evidenceId()) || evidenceId.equals(flag.evidenceId()))
+                .map(
+                        flag ->
+                                Map.of(
+                                        "flag_type", safeText(flag.flagType()),
+                                        "description", safeText(flag.description()),
+                                        "severity", safeText(flag.severity())))
+                .toList();
     }
 
     private RoomMessageEntity appendAgentMessage(
@@ -724,8 +879,8 @@ public class EvidenceAgentTurnService {
             return "PARTIES".equals(item.getVisibility()) || "PLATFORM".equals(item.getVisibility());
         }
         return role.name().equals(item.getSubmittedByRole())
-                        && actor.actorId().equals(item.getSubmittedById())
-                || "PARTIES".equals(item.getVisibility());
+                && actor.actorId().equals(item.getSubmittedById())
+                && item.getSubmissionStatus() == EvidenceSubmissionStatus.SUBMITTED;
     }
 
     private static boolean isEvidenceTurnMessage(MessageType messageType) {

@@ -9,5 +9,7 @@ public interface EvidenceStorage {
             String contentType,
             byte[] content);
 
+    byte[] loadOriginal(String bucket, String objectKey);
+
     record StoredObject(String bucket, String objectKey) {}
 }

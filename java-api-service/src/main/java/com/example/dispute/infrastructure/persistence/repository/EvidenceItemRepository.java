@@ -6,7 +6,8 @@ import java.util.Optional;
 import org.springframework.data.jpa.repository.JpaRepository;
 
 public interface EvidenceItemRepository extends JpaRepository<EvidenceItemEntity, String> {
-    Optional<EvidenceItemEntity> findByCaseIdAndFileHashAndSourceType(
+    Optional<EvidenceItemEntity>
+            findFirstByCaseIdAndFileHashAndSourceTypeAndDeletedAtIsNullOrderByCreatedAtDesc(
             String caseId, String fileHash, String sourceType);
 
     List<EvidenceItemEntity>

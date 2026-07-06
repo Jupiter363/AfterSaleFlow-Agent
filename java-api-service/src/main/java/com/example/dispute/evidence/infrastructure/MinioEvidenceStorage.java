@@ -5,6 +5,7 @@ import com.example.dispute.common.exception.ExternalServiceException;
 import com.example.dispute.config.AppProperties;
 import com.example.dispute.evidence.application.EvidenceStorage;
 import io.minio.MinioClient;
+import io.minio.GetObjectArgs;
 import io.minio.PutObjectArgs;
 import java.io.ByteArrayInputStream;
 import java.util.Map;
@@ -43,6 +44,23 @@ public class MinioEvidenceStorage implements EvidenceStorage {
                     ErrorCode.EVIDENCE_UPLOAD_FAILED,
                     "evidence object storage failed",
                     Map.of("case_id", caseId, "evidence_id", evidenceId));
+        }
+    }
+
+    @Override
+    public byte[] loadOriginal(String bucket, String objectKey) {
+        try (var input =
+                minioClient.getObject(
+                        GetObjectArgs.builder()
+                                .bucket(bucket)
+                                .object(objectKey)
+                                .build())) {
+            return input.readAllBytes();
+        } catch (Exception exception) {
+            throw new ExternalServiceException(
+                    ErrorCode.EVIDENCE_NOT_FOUND,
+                    "evidence object not found",
+                    Map.of("bucket", bucket, "object_key", objectKey));
         }
     }
 }

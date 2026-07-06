@@ -26,6 +26,7 @@ import com.example.dispute.evidence.application.EvidenceCompletionView;
 import com.example.dispute.evidence.application.EvidenceDossierQueryService;
 import com.example.dispute.evidence.application.EvidenceVerificationService;
 import com.example.dispute.evidence.application.RoleScopedEvidenceView;
+import com.example.dispute.evidence.application.EvidenceSubmissionService;
 import java.time.OffsetDateTime;
 import java.util.List;
 import org.junit.jupiter.api.Test;
@@ -54,6 +55,7 @@ class EvidenceRoomControllerTest {
     @MockitoBean private EvidenceVerificationService verificationService;
     @MockitoBean private EvidenceCompletionService completionService;
     @MockitoBean private EvidenceDossierQueryService dossierQueryService;
+    @MockitoBean private EvidenceSubmissionService submissionService;
 
     @Test
     void exposesTheRoleScopedCatalogOnTheFinalUnversionedApi() throws Exception {
@@ -74,6 +76,9 @@ class EvidenceRoomControllerTest {
                                                 null,
                                                 null,
                                                 null,
+                                                null,
+                                                null,
+                                                "SUBMITTED",
                                                 null,
                                                 null))));
 

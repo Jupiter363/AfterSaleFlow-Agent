@@ -8,6 +8,7 @@ import {
   watch,
 } from "vue";
 import { useRoute, useRouter } from "vue-router";
+import { newIdempotencyKey } from "../../api/client";
 import { evidenceApi } from "../../api/evidence";
 import { roomApi } from "../../api/rooms";
 import DigitalHuman from "../../components/avatar/DigitalHuman.vue";
@@ -39,12 +40,15 @@ const router = useRouter();
 const catalog = ref(props.initialCatalog);
 const completion = ref(props.initialCompletion);
 const uploading = ref(false);
+const submittingBatch = ref(false);
 const completing = ref(false);
 const error = ref("");
 const agentState = ref("LISTENING");
 const fileInput = ref(null);
 const messages = ref([...(props.initialMessages || [])]);
 const selectedEvidence = ref(null);
+const expandedEvidenceGroup = ref(null);
+const deletingEvidenceIds = ref(new Set());
 const eventState = reactive(createRoomState());
 let eventAbortController = new AbortController();
 let eventStreamActive = false;
@@ -77,15 +81,21 @@ const displayedMessages = computed(() => {
   return messages.value.filter((message) => !isSupersededOpeningMessage(message));
 });
 const items = computed(() => catalog.value?.items || []);
-const privateItems = computed(() =>
+const actorOwnedItems = computed(() =>
   items.value.filter(
     (item) =>
-      item.visibility === "PRIVATE" &&
       item.submitted_by_role === role.value,
   ),
 );
-const sharedItems = computed(() =>
-  items.value.filter((item) => item.visibility === "PARTIES"),
+const pendingItems = computed(() =>
+  actorOwnedItems.value.filter(
+    (item) => evidenceSubmissionStatus(item) === "PENDING_SUBMISSION",
+  ),
+);
+const submittedItems = computed(() =>
+  actorOwnedItems.value.filter(
+    (item) => evidenceSubmissionStatus(item) === "SUBMITTED",
+  ),
 );
 const effectiveDeadline = computed(
   () =>
@@ -155,6 +165,28 @@ function evidenceField(item, snakeCaseKey, camelCaseKey, fallback = "") {
   return item?.[snakeCaseKey] ?? item?.[camelCaseKey] ?? fallback;
 }
 
+function evidenceId(item) {
+  return evidenceField(item, "evidence_id", "evidenceId", "");
+}
+
+function evidenceSubmissionStatus(item) {
+  return String(
+    evidenceField(item, "submission_status", "submissionStatus", "SUBMITTED"),
+  ).toUpperCase();
+}
+
+function evidenceSubmissionStatusLabel(item) {
+  const status = evidenceSubmissionStatus(item);
+  if (status === "PENDING_SUBMISSION") return "待提交";
+  if (status === "SUBMITTED") return "已提交";
+  if (status === "VOIDED") return "已作废";
+  return status || "待确认";
+}
+
+function isDeletingEvidence(item) {
+  return deletingEvidenceIds.value.has(evidenceId(item));
+}
+
 function evidenceConfidenceScore(item) {
   const raw = evidenceField(item, "confidence_score", "confidenceScore", null);
   if (raw === null || raw === undefined || raw === "") return null;
@@ -215,6 +247,24 @@ function openEvidenceDetail(item) {
 function closeEvidenceDetail() {
   selectedEvidence.value = null;
 }
+
+function openEvidenceGroup(group) {
+  expandedEvidenceGroup.value = group;
+}
+
+function closeEvidenceGroup() {
+  expandedEvidenceGroup.value = null;
+}
+
+const expandedEvidenceItems = computed(() => {
+  if (expandedEvidenceGroup.value === "pending") return pendingItems.value;
+  if (expandedEvidenceGroup.value === "submitted") return submittedItems.value;
+  return [];
+});
+
+const expandedEvidenceTitle = computed(() =>
+  expandedEvidenceGroup.value === "pending" ? "本批待提交" : "我的原件匣",
+);
 
 async function load() {
   const generation = workspaceGeneration;
@@ -488,17 +538,66 @@ async function uploadFiles(event) {
           ? "VIDEO"
           : "OTHER",
         sourceType: evidenceSourceType.value,
-        visibility: "PARTIES",
+        visibility: "PRIVATE",
       });
     }
     await refreshWorkspace();
-    agentState.value = "SPEAKING";
+    agentState.value = "LISTENING";
   } catch (failure) {
     error.value = failure.message;
     agentState.value = "ERROR";
   } finally {
     uploading.value = false;
     if (fileInput.value) fileInput.value.value = "";
+  }
+}
+
+async function submitPendingBatch() {
+  if (!pendingItems.value.length || submittingBatch.value) return;
+  submittingBatch.value = true;
+  error.value = "";
+  agentState.value = "THINKING";
+  const evidenceIds = pendingItems.value.map((item) => evidenceId(item));
+  try {
+    const result = await evidenceApi.submitBatch(
+      effectiveActor.value,
+      caseId.value,
+      {
+        evidence_ids: evidenceIds,
+        batch_note: "",
+      },
+      newIdempotencyKey("evidence-batch"),
+    );
+    if (result?.room_message) {
+      upsertMessage(result.room_message);
+    }
+    await refreshUntilAgentReply(
+      result?.room_message?.sequence_no || nextLocalSequence() - 1,
+    );
+    agentState.value = "SPEAKING";
+  } catch (failure) {
+    error.value = failure.message;
+    agentState.value = "ERROR";
+  } finally {
+    submittingBatch.value = false;
+  }
+}
+
+async function deletePendingEvidence(item) {
+  const id = evidenceId(item);
+  if (!id || deletingEvidenceIds.value.has(id)) return;
+  deletingEvidenceIds.value = new Set([...deletingEvidenceIds.value, id]);
+  error.value = "";
+  try {
+    await evidenceApi.deletePending(effectiveActor.value, caseId.value, id);
+    await refreshWorkspace();
+  } catch (failure) {
+    error.value = failure.message;
+    agentState.value = "ERROR";
+  } finally {
+    const next = new Set(deletingEvidenceIds.value);
+    next.delete(id);
+    deletingEvidenceIds.value = next;
   }
 }
 
@@ -604,8 +703,8 @@ onBeforeUnmount(() => eventAbortController.abort());
         role="证据书记官"
         :message="
           isMerchant
-            ? '商家证据方你好。我会检查材料的来源、完整性和可采性，并为双方生成脱敏共享目录。'
-            : '用户证据方你好。图片、视频、文档都可以交给我；原件归你保管，共享目录只展示案件所需内容。'
+            ? '商家证据方你好。我会围绕案情核验你方原件的来源、完整性和关联性；本房间只处理单方提交。'
+            : '用户证据方你好。图片、视频、文档都可以先放入待提交区；确认后我只读取你提交的这一批。'
         "
       />
     </template>
@@ -622,7 +721,7 @@ onBeforeUnmount(() => eventAbortController.abort());
         <div class="evidence-room__conversation-frame">
           <ConversationStream
             :messages="displayedMessages"
-            :disabled="uploading || completing"
+            :disabled="uploading || submittingBatch || completing"
             agent-label="证据书记官"
             placeholder="告诉书记官这份证据从哪里来、形成于何时、能证明什么…"
             @submit="postMessage"
@@ -664,7 +763,58 @@ onBeforeUnmount(() => eventAbortController.abort());
         </section>
 
         <div class="evidence-board__list" data-evidence-list-scroll>
-          <section class="evidence-library evidence-library--private" data-evidence-private>
+          <section class="evidence-library evidence-library--pending" data-evidence-pending>
+            <header>
+              <div>
+                <span class="evidence-kicker">STAGING</span>
+                <h3>本批待提交</h3>
+              </div>
+              <span class="privacy-seal">{{ pendingItems.length }} 个待提交</span>
+            </header>
+            <p v-if="!pendingItems.length" class="evidence-empty">选择材料后，会先进入这里；提交前可以删除。</p>
+            <article
+              v-for="item in pendingItems"
+              :key="evidenceId(item)"
+              class="evidence-card evidence-card--pending"
+              data-evidence-card
+              @click="openEvidenceDetail(item)"
+            >
+              <button
+                type="button"
+                class="evidence-card__remove"
+                data-delete-pending-evidence
+                :disabled="isDeletingEvidence(item)"
+                @click.stop="deletePendingEvidence(item)"
+              >
+                ×
+              </button>
+              <span class="evidence-card__icon">📥</span>
+              <span class="evidence-card__main">
+                <strong>{{ evidenceTypeLabels[item.evidence_type] || item.evidence_type }}</strong>
+                <small>{{ evidenceOriginalFilename(item) || evidenceId(item) }}</small>
+                <em>{{ evidenceSubmissionStatusLabel(item) }}</em>
+              </span>
+              <span class="evidence-card__meta">
+                <span class="verification-pill" data-verification="PENDING">待提交</span>
+                <span class="confidence-pill" data-confidence="unknown">书记官尚未核验</span>
+              </span>
+            </article>
+            <div v-if="pendingItems.length" class="evidence-library__actions">
+              <button type="button" data-expand-pending-evidence @click="openEvidenceGroup('pending')">
+                展开
+              </button>
+              <button
+                type="button"
+                data-submit-evidence-batch
+                :disabled="submittingBatch"
+                @click="submitPendingBatch"
+              >
+                {{ submittingBatch ? "提交中…" : "提交本批给书记官" }}
+              </button>
+            </div>
+          </section>
+
+          <section class="evidence-library evidence-library--private" data-evidence-originals>
             <header>
               <div>
                 <span class="evidence-kicker">MY ORIGINALS</span>
@@ -672,10 +822,10 @@ onBeforeUnmount(() => eventAbortController.abort());
               </div>
               <span class="privacy-seal">仅当前一方可见</span>
             </header>
-            <p v-if="!privateItems.length" class="evidence-empty">还没有仅自己可见的原件。</p>
+            <p v-if="!submittedItems.length" class="evidence-empty">正式提交后，材料会锁定进入我的原件匣。</p>
             <button
-              v-for="item in privateItems"
-              :key="item.evidence_id"
+              v-for="item in submittedItems"
+              :key="evidenceId(item)"
               type="button"
               class="evidence-card"
               data-evidence-card
@@ -684,7 +834,7 @@ onBeforeUnmount(() => eventAbortController.abort());
               <span class="evidence-card__icon">🔐</span>
               <span class="evidence-card__main">
                 <strong>{{ evidenceTypeLabels[item.evidence_type] || item.evidence_type }}</strong>
-                <small>{{ item.evidence_id }}</small>
+                <small>{{ evidenceOriginalFilename(item) || evidenceId(item) }}</small>
                 <em>{{ evidenceOwnerLabel(item) }}</em>
               </span>
               <span class="evidence-card__meta">
@@ -703,52 +853,13 @@ onBeforeUnmount(() => eventAbortController.abort());
                 </span>
               </span>
             </button>
-          </section>
-
-          <section class="evidence-library evidence-library--shared" data-evidence-shared>
-            <header>
-              <div>
-                <span class="evidence-kicker">SHARED DOSSIER</span>
-                <h3>双方共享证据墙</h3>
-              </div>
-              <span class="shared-seal">已按权限脱敏</span>
-            </header>
-            <p v-if="!sharedItems.length" class="evidence-empty">共享目录仍在等待材料。</p>
-            <div class="evidence-grid">
-              <button
-                v-for="item in sharedItems"
-                :key="item.evidence_id"
-                type="button"
-                class="evidence-card"
-                data-evidence-card
-                @click="openEvidenceDetail(item)"
-              >
-                <span class="evidence-card__icon">
-                  {{ item.submitted_by_role === "MERCHANT" ? "🏪" : "🧑" }}
-                </span>
-                <span class="evidence-card__main">
-                  <strong>{{ evidenceTypeLabels[item.evidence_type] || item.evidence_type }}</strong>
-                  <small>{{ item.evidence_id }}</small>
-                  <em>{{ item.redacted ? "已脱敏副本" : evidenceOwnerLabel(item) }}</em>
-                </span>
-                <span class="evidence-card__meta">
-                  <span
-                    class="verification-pill"
-                    :data-verification="item.verification_status || 'PENDING'"
-                  >
-                    {{ statusLabels[item.verification_status] || item.verification_status || "待核验" }}
-                  </span>
-                  <span
-                    class="confidence-pill"
-                    :data-confidence="evidenceConfidenceTone(item)"
-                    data-evidence-confidence
-                  >
-                    {{ evidenceConfidenceCopy(item) }}
-                  </span>
-                </span>
+            <div v-if="submittedItems.length" class="evidence-library__actions evidence-library__actions--right">
+              <button type="button" data-expand-submitted-evidence @click="openEvidenceGroup('submitted')">
+                展开原件匣
               </button>
             </div>
           </section>
+
         </div>
 
         <footer class="evidence-footer">
@@ -799,7 +910,7 @@ onBeforeUnmount(() => eventAbortController.abort());
         <header>
           <div>
             <span class="evidence-kicker">EVIDENCE DETAIL</span>
-            <h2>{{ selectedEvidence.evidence_id }}</h2>
+            <h2>{{ evidenceId(selectedEvidence) }}</h2>
             <p>{{ evidenceTypeLabels[selectedEvidence.evidence_type] || selectedEvidence.evidence_type }}</p>
           </div>
           <button type="button" data-close-evidence-modal @click="closeEvidenceDetail">
@@ -826,11 +937,60 @@ onBeforeUnmount(() => eventAbortController.abort());
           v-if="selectedEvidence.content_url"
           class="evidence-modal__link"
           :href="selectedEvidence.content_url"
+          :download="evidenceOriginalFilename(selectedEvidence) || evidenceId(selectedEvidence)"
+          data-download-evidence
           target="_blank"
           rel="noreferrer"
         >
-          打开原始材料
+          下载原始材料
         </a>
+      </section>
+    </div>
+
+    <div
+      v-if="expandedEvidenceGroup"
+      class="evidence-modal"
+      data-evidence-gallery-modal
+      role="dialog"
+      aria-modal="true"
+      aria-label="证据文件列表"
+      @click.self="closeEvidenceGroup"
+    >
+      <section class="evidence-modal__panel evidence-modal__panel--gallery">
+        <header>
+          <div>
+            <span class="evidence-kicker">EVIDENCE FILES</span>
+            <h2>{{ expandedEvidenceTitle }}</h2>
+            <p>点击卡片查看详情；下载请使用卡片里的下载入口。</p>
+          </div>
+          <button type="button" data-close-evidence-gallery @click="closeEvidenceGroup">
+            关闭
+          </button>
+        </header>
+        <div class="evidence-gallery-grid">
+          <article
+            v-for="item in expandedEvidenceItems"
+            :key="evidenceId(item)"
+            class="evidence-gallery-card"
+            data-evidence-gallery-card
+            @click="openEvidenceDetail(item)"
+          >
+            <span class="evidence-card__icon">
+              {{ evidenceSubmissionStatus(item) === "SUBMITTED" ? "🔒" : "📥" }}
+            </span>
+            <strong>{{ evidenceOriginalFilename(item) || evidenceId(item) }}</strong>
+            <small>{{ evidenceSubmissionStatusLabel(item) }} · {{ statusLabels[item.verification_status] || item.verification_status || "待核验" }}</small>
+            <a
+              v-if="item.content_url"
+              :href="item.content_url"
+              :download="evidenceOriginalFilename(item) || evidenceId(item)"
+              data-gallery-download-evidence
+              @click.stop
+            >
+              下载
+            </a>
+          </article>
+        </div>
       </section>
     </div>
   </RoomShell>
@@ -1015,6 +1175,11 @@ onBeforeUnmount(() => eventAbortController.abort());
   background: linear-gradient(160deg, #f5f0ff, #fff);
 }
 
+.evidence-library--pending {
+  background: linear-gradient(160deg, #fff7dd, #fff);
+  border-color: #f1dfad;
+}
+
 .evidence-library--shared {
   background: linear-gradient(160deg, #eaf8ff, #fff);
 }
@@ -1047,6 +1212,7 @@ onBeforeUnmount(() => eventAbortController.abort());
 }
 
 .evidence-card {
+  position: relative;
   display: grid;
   width: 100%;
   grid-template-columns: auto minmax(0, 1fr) auto;
@@ -1062,10 +1228,37 @@ onBeforeUnmount(() => eventAbortController.abort());
   transition: transform .16s ease, box-shadow .16s ease, border-color .16s ease;
 }
 
+.evidence-card--pending {
+  padding-right: 34px;
+}
+
 .evidence-card:hover {
   transform: translateY(-1px);
   border-color: #c9d8ef;
   box-shadow: 0 12px 26px #536e9017;
+}
+
+.evidence-card__remove {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  color: #a04f58;
+  background: #fff0f2;
+  border: 1px solid #ffd7dc;
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: 15px;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.evidence-card__remove:disabled {
+  cursor: default;
+  opacity: .55;
 }
 
 .evidence-card__icon {
@@ -1137,6 +1330,39 @@ onBeforeUnmount(() => eventAbortController.abort());
   font-size: 13px;
 }
 
+.evidence-library__actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.evidence-library__actions--right {
+  justify-content: flex-end;
+}
+
+.evidence-library__actions button {
+  padding: 8px 11px;
+  color: #50668b;
+  background: #f5f8fc;
+  border: 1px solid #dfe8f4;
+  border-radius: 12px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.evidence-library__actions [data-submit-evidence-batch] {
+  color: #fff;
+  background: linear-gradient(135deg, #55b8df, #8585ef);
+  border-color: transparent;
+}
+
+.evidence-library__actions button:disabled {
+  cursor: default;
+  opacity: .6;
+}
+
 .evidence-footer {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -1204,6 +1430,47 @@ onBeforeUnmount(() => eventAbortController.abort());
   border: 1px solid #dce7f4;
   border-radius: 26px;
   box-shadow: 0 28px 80px #22304740;
+}
+
+.evidence-modal__panel--gallery {
+  width: min(760px, 100%);
+}
+
+.evidence-gallery-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 12px;
+}
+
+.evidence-gallery-card {
+  display: grid;
+  gap: 8px;
+  align-content: start;
+  min-height: 146px;
+  padding: 14px;
+  color: #40506a;
+  background: #ffffffd9;
+  border: 1px solid #e2ebf6;
+  border-radius: 18px;
+  cursor: pointer;
+}
+
+.evidence-gallery-card strong,
+.evidence-gallery-card small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.evidence-gallery-card a {
+  width: max-content;
+  padding: 7px 9px;
+  color: #5f6fd8;
+  background: #eef3ff;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 900;
+  text-decoration: none;
 }
 
 .evidence-modal__panel header {

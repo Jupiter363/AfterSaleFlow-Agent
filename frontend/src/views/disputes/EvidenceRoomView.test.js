@@ -10,6 +10,8 @@ vi.mock("../../api/evidence", () => ({
     catalog: vi.fn(),
     completion: vi.fn(),
     upload: vi.fn(),
+    submitBatch: vi.fn(),
+    deletePending: vi.fn(),
     complete: vi.fn(),
   },
 }));
@@ -37,43 +39,57 @@ const catalog = {
       confidence_level: "HIGH",
       verification_feedback: "原始截图来源清晰，时间线可核对。",
       original_filename: "user-original.png",
+      submission_status: "SUBMITTED",
+      submitted_at: "2026-07-03T00:30:00Z",
+      submission_batch_id: "BATCH_USER_1",
       parsed_text: "用户开箱时拍摄的表盘划痕照片。",
     },
     {
-      evidence_id: "EVIDENCE_USER_SHARED",
+      evidence_id: "EVIDENCE_USER_PENDING",
       evidence_type: "LOGISTICS_PROOF",
       submitted_by_role: "USER",
-      visibility: "PARTIES",
-      content_url: "/objects/logistics-redacted.png",
-      redacted: true,
-      verification_status: "PLAUSIBLE",
+      visibility: "PRIVATE",
+      content_url: "/objects/logistics-pending.png",
+      redacted: false,
+      verification_status: "PENDING",
+      original_filename: "logistics-pending.png",
+      submission_status: "PENDING_SUBMISSION",
     },
     {
-      evidence_id: "EVIDENCE_MERCHANT_SHARED",
+      evidence_id: "EVIDENCE_MERCHANT_SUBMITTED",
       evidence_type: "DELIVERY_RECORD",
       submitted_by_role: "MERCHANT",
-      visibility: "PARTIES",
+      visibility: "PRIVATE",
       content_url: "/objects/merchant-delivery.pdf",
       redacted: false,
       verification_status: "SUSPICIOUS",
+      submission_status: "SUBMITTED",
+      submitted_at: "2026-07-03T00:40:00Z",
+      submission_batch_id: "BATCH_MERCHANT_1",
     },
     {
       evidence_id: "EVIDENCE_REJECTED",
       evidence_type: "OTHER",
       submitted_by_role: "USER",
-      visibility: "PARTIES",
+      visibility: "PRIVATE",
       content_url: null,
       redacted: false,
       verification_status: "REJECTED",
+      submission_status: "SUBMITTED",
+      submitted_at: "2026-07-03T00:45:00Z",
+      submission_batch_id: "BATCH_USER_2",
     },
     {
       evidence_id: "EVIDENCE_REVIEW",
       evidence_type: "VIDEO",
-      submitted_by_role: "MERCHANT",
-      visibility: "PARTIES",
+      submitted_by_role: "USER",
+      visibility: "PRIVATE",
       content_url: null,
       redacted: false,
       verification_status: "NEEDS_HUMAN_REVIEW",
+      submission_status: "SUBMITTED",
+      submitted_at: "2026-07-03T00:50:00Z",
+      submission_batch_id: "BATCH_USER_3",
     },
   ],
 };
@@ -129,10 +145,23 @@ async function mountView(overrides = {}) {
 
 describe("EvidenceRoomView", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     evidenceApi.catalog.mockResolvedValue(catalog);
     evidenceApi.completion.mockResolvedValue(initialCompletion);
     evidenceApi.upload.mockResolvedValue({});
+    evidenceApi.submitBatch.mockResolvedValue({
+      batch_id: "EVIDENCE_BATCH_1",
+      evidence_ids: ["EVIDENCE_USER_PENDING"],
+      room_message: {
+        id: "BATCH_MESSAGE",
+        sequence_no: 3,
+        sender_role: "USER",
+        message_type: "PARTY_EVIDENCE_REFERENCE",
+        message_text: "用户提交了 1 份证据材料。",
+        attachment_refs: ["EVIDENCE_USER_PENDING"],
+      },
+    });
+    evidenceApi.deletePending.mockResolvedValue({});
     roomApi.ensureOpening.mockResolvedValue({
       id: "EVIDENCE_OPENING",
       sequence_no: 1,
@@ -184,7 +213,9 @@ describe("EvidenceRoomView", () => {
   it("opens a submitted evidence detail modal from a card", async () => {
     const { wrapper } = await mountView();
 
-    await wrapper.get("[data-evidence-card]").trigger("click");
+    await wrapper
+      .get("[data-evidence-originals] [data-evidence-card]")
+      .trigger("click");
 
     const modal = wrapper.get("[data-evidence-detail-modal]");
     expect(modal.text()).toContain("EVIDENCE_USER_PRIVATE");
@@ -375,23 +406,25 @@ describe("EvidenceRoomView", () => {
     expect(wrapper.find('[role="alert"]').exists()).toBe(false);
   });
 
-  it("separates my originals from the shared dossier and renders all verification states", async () => {
+  it("separates pending evidence from submitted originals and removes the shared wall", async () => {
     const { wrapper } = await mountView();
 
     expect(wrapper.text()).toContain("证据书记官");
-    expect(wrapper.get("[data-evidence-private]").text()).toContain(
-      "EVIDENCE_USER_PRIVATE",
+    expect(wrapper.get("[data-evidence-pending]").text()).toContain(
+      "logistics-pending.png",
     );
-    expect(wrapper.get("[data-evidence-shared]").text()).not.toContain(
-      "EVIDENCE_USER_PRIVATE",
+    expect(wrapper.get("[data-evidence-originals]").text()).toContain(
+      "user-original.png",
     );
-    expect(wrapper.get("[data-evidence-shared]").text()).toContain(
-      "EVIDENCE_MERCHANT_SHARED",
+    expect(wrapper.get("[data-evidence-originals]").text()).not.toContain(
+      "logistics-pending.png",
+    );
+    expect(wrapper.find("[data-evidence-shared]").exists()).toBe(false);
+    expect(wrapper.text()).not.toContain(
+      "EVIDENCE_MERCHANT_SUBMITTED",
     );
     for (const status of [
       "VERIFIED",
-      "PLAUSIBLE",
-      "SUSPICIOUS",
       "REJECTED",
       "NEEDS_HUMAN_REVIEW",
     ]) {
@@ -400,7 +433,7 @@ describe("EvidenceRoomView", () => {
     expect(wrapper.get("[data-evidence-countdown]").text()).toContain("02:00:00");
   });
 
-  it("keeps platform-only evidence out of the party shared dossier", async () => {
+  it("keeps platform-only evidence out of the party evidence room", async () => {
     const platformCatalog = {
       ...catalog,
       items: [
@@ -413,12 +446,13 @@ describe("EvidenceRoomView", () => {
           content_url: null,
           redacted: false,
           verification_status: "PENDING",
+          submission_status: "SUBMITTED",
         },
       ],
     };
     const { wrapper } = await mountView({ initialCatalog: platformCatalog });
 
-    expect(wrapper.get("[data-evidence-shared]").text()).not.toContain(
+    expect(wrapper.text()).not.toContain(
       "EVIDENCE_PLATFORM_ONLY",
     );
   });
@@ -468,7 +502,7 @@ describe("EvidenceRoomView", () => {
     const { wrapper } = await mountView({ viewerRole: "MERCHANT" });
 
     expect(wrapper.text()).toContain("商家证据方");
-    expect(wrapper.get("[data-evidence-private]").text()).not.toContain(
+    expect(wrapper.get("[data-evidence-originals]").text()).not.toContain(
       "EVIDENCE_USER_PRIVATE",
     );
   });
@@ -531,7 +565,7 @@ describe("EvidenceRoomView", () => {
     expect(wrapper.text()).toContain("这张照片由我在开箱时拍摄。");
   });
 
-  it("refreshes catalog, completion and evidence messages after a successful upload", async () => {
+  it("uploads into the pending batch card without interrupting the evidence clerk", async () => {
     const refreshedCatalog = {
       ...catalog,
       items: [
@@ -540,28 +574,21 @@ describe("EvidenceRoomView", () => {
           evidence_id: "EVIDENCE_MARKDOWN_UPLOAD",
           evidence_type: "OTHER",
           submitted_by_role: "MERCHANT",
-          visibility: "PARTIES",
+          visibility: "PRIVATE",
           content_url: "/objects/merchant-notes.md",
-          redacted: true,
+          redacted: false,
           verification_status: "PENDING",
+          submission_status: "PENDING_SUBMISSION",
+          original_filename: "merchant-notes.md",
         },
       ],
     };
-    const clerkMessages = [
-      {
-        id: "CLERK_AFTER_UPLOAD",
-        sequence_no: 2,
-        sender_role: "CUSTOMER_SERVICE",
-        message_type: "AGENT_MESSAGE",
-        message_text: "Markdown evidence has been indexed by the clerk.",
-      },
-    ];
     evidenceApi.catalog.mockResolvedValueOnce(refreshedCatalog);
     evidenceApi.completion.mockResolvedValueOnce({
       ...initialCompletion,
       merchant_completed: false,
     });
-    roomApi.messages.mockResolvedValueOnce(clerkMessages);
+    roomApi.messages.mockResolvedValueOnce([]);
     const { wrapper } = await mountView({ viewerRole: "MERCHANT" });
     const input = wrapper.get('input[type="file"]');
     const file = new File(["# delivery notes"], "delivery-notes.md", {
@@ -579,7 +606,7 @@ describe("EvidenceRoomView", () => {
     expect(uploadCommand.file).toBe(file);
     expect(["OTHER", "DOCUMENT"]).toContain(uploadCommand.evidenceType);
     expect(uploadCommand.sourceType).toBe("MERCHANT_UPLOAD");
-    expect(uploadCommand.visibility).toBe("PARTIES");
+    expect(uploadCommand.visibility).toBe("PRIVATE");
     expect(evidenceApi.catalog).toHaveBeenCalledWith(
       expect.objectContaining({ role: "MERCHANT" }),
       "CASE_EVIDENCE_1",
@@ -593,8 +620,89 @@ describe("EvidenceRoomView", () => {
       "CASE_EVIDENCE_1",
       "EVIDENCE",
     );
-    expect(wrapper.text()).toContain("EVIDENCE_MARKDOWN_UPLOAD");
-    expect(wrapper.text()).toContain("Markdown evidence has been indexed by the clerk.");
+    expect(wrapper.get("[data-evidence-pending]").text()).toContain("merchant-notes.md");
+    expect(wrapper.text()).not.toContain("Markdown evidence has been indexed by the clerk.");
+  });
+
+  it("submits pending evidence as a batch and then waits for the clerk feedback", async () => {
+    const afterSubmitCatalog = {
+      ...catalog,
+      items: catalog.items.map((item) =>
+        item.evidence_id === "EVIDENCE_USER_PENDING"
+          ? {
+              ...item,
+              submission_status: "SUBMITTED",
+              submitted_at: "2026-07-03T01:00:00Z",
+              submission_batch_id: "EVIDENCE_BATCH_1",
+            }
+          : item,
+      ),
+    };
+    const batchMessage = {
+      id: "BATCH_MESSAGE",
+      sequence_no: 3,
+      sender_role: "USER",
+      message_type: "PARTY_EVIDENCE_REFERENCE",
+      message_text: "用户提交了 1 份证据材料。",
+      attachment_refs: ["EVIDENCE_USER_PENDING"],
+    };
+    const clerkReply = {
+      id: "CLERK_AFTER_BATCH",
+      sequence_no: 4,
+      sender_role: "CUSTOMER_SERVICE",
+      message_type: "AGENT_MESSAGE",
+      message_text: "书记官已读取本批材料，请补充形成时间。",
+    };
+    evidenceApi.catalog.mockResolvedValue(afterSubmitCatalog);
+    evidenceApi.completion.mockResolvedValue(initialCompletion);
+    roomApi.messages
+      .mockResolvedValueOnce([batchMessage])
+      .mockResolvedValueOnce([batchMessage, clerkReply]);
+    const { wrapper } = await mountView({
+      agentReplyPollAttempts: 1,
+      agentReplyPollDelayMs: 0,
+    });
+
+    await wrapper.get("[data-submit-evidence-batch]").trigger("click");
+    await flushPromises();
+    await flushPromises();
+
+    expect(evidenceApi.submitBatch).toHaveBeenCalledWith(
+      expect.objectContaining({ role: "USER" }),
+      "CASE_EVIDENCE_1",
+      { evidence_ids: ["EVIDENCE_USER_PENDING"], batch_note: "" },
+      expect.any(String),
+    );
+    expect(wrapper.get("[data-evidence-originals]").text()).toContain(
+      "logistics-pending.png",
+    );
+    expect(wrapper.text()).toContain("书记官已读取本批材料");
+  });
+
+  it("deletes only pending evidence from the staging card", async () => {
+    const afterDeleteCatalog = {
+      ...catalog,
+      items: catalog.items.filter((item) => item.evidence_id !== "EVIDENCE_USER_PENDING"),
+    };
+    evidenceApi.catalog.mockResolvedValueOnce(afterDeleteCatalog);
+    evidenceApi.completion.mockResolvedValueOnce(initialCompletion);
+    roomApi.messages.mockResolvedValueOnce([]);
+    const { wrapper } = await mountView();
+
+    await wrapper.get("[data-delete-pending-evidence]").trigger("click");
+    await flushPromises();
+
+    expect(evidenceApi.deletePending).toHaveBeenCalledWith(
+      expect.objectContaining({ role: "USER" }),
+      "CASE_EVIDENCE_1",
+      "EVIDENCE_USER_PENDING",
+    );
+    expect(wrapper.find("[data-evidence-pending]").text()).not.toContain(
+      "EVIDENCE_USER_PENDING",
+    );
+    expect(wrapper.get("[data-evidence-originals]").text()).toContain(
+      "user-original.png",
+    );
   });
 
   it("refreshes evidence messages after sending an explanation and shows the clerk reply", async () => {
@@ -844,7 +952,7 @@ describe("EvidenceRoomView", () => {
         file,
         evidenceType: "OTHER",
         sourceType: "USER_UPLOAD",
-        visibility: "PARTIES",
+        visibility: "PRIVATE",
       }),
     );
   });
