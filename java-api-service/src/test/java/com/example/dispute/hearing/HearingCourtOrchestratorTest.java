@@ -1,11 +1,13 @@
 package com.example.dispute.hearing;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.example.dispute.common.transaction.PostCommitSideEffectExecutor;
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.RiskLevel;
@@ -70,7 +72,91 @@ class HearingCourtOrchestratorTest {
                         eventService,
                         agentClient,
                         new ObjectMapper(),
-                        CLOCK);
+                        CLOCK,
+                        new PostCommitSideEffectExecutor(Runnable::run));
+    }
+
+    @Test
+    void afterCommitRoundTurnFailuresDoNotPropagateToTheBusinessRequest() {
+        assertThatCode(
+                        () ->
+                                orchestrator.afterRoundClosedAfterCommit(
+                                        "CASE_COURT", 1, false, "TRACE_COURT_ROUND_1"))
+                .doesNotThrowAnyException();
+    }
+
+    @Test
+    void afterRoundOpenedAppendsOpeningJudgeMessage() {
+        FulfillmentCaseEntity dispute = hearingCase();
+        CaseRoomEntity room =
+                CaseRoomEntity.open(
+                        "ROOM_HEARING_CASE_COURT",
+                        dispute.getId(),
+                        RoomType.HEARING,
+                        OffsetDateTime.parse("2026-07-07T01:00:00Z"),
+                        "system");
+        HearingRoundEntity round =
+                HearingRoundEntity.open(
+                        "HEARING_ROUND_1",
+                        dispute.getId(),
+                        null,
+                        1,
+                        2,
+                        Instant.parse("2026-07-07T01:05:00Z"),
+                        Instant.parse("2026-07-07T01:00:00Z"),
+                        "system");
+        when(caseRepository.findById(dispute.getId())).thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.HEARING))
+                .thenReturn(Optional.of(room));
+        when(roundRepository.findByCaseIdAndRoundNo(dispute.getId(), 1))
+                .thenReturn(Optional.of(round));
+        when(submissionRepository.findAllByCaseIdAndRoundNoOrderBySubmittedAtAsc(
+                        dispute.getId(), 1))
+                .thenReturn(List.of());
+        when(messageRepository.findByCaseIdAndIdempotencyKey(
+                        dispute.getId(), "judge-round-opening:" + dispute.getId() + ":1"))
+                .thenReturn(Optional.empty());
+        when(messageRepository.findMaxSequenceByRoomId(room.getId())).thenReturn(0L);
+        when(messageRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(agentClient.generateRoundTurn(any(), eq("TRACE_COURT_OPENING_1"), any()))
+                .thenReturn(
+                        new HearingCourtAgentResult(
+                                "JUDGE",
+                                "小法庭现在开庭。第 1 轮请双方先围绕接待室卷宗和证据室材料说明关键事实。",
+                                "法官已打开第 1 轮事实陈述。",
+                                List.of("请用户说明争议发生经过。"),
+                                List.of("请商家说明履约记录。"),
+                                "JUDGE_OPENING_READY",
+                                1,
+                                1,
+                                false,
+                                "hearing-round-opening-v1",
+                                "deepseek-v4-flash"));
+
+        orchestrator.afterRoundOpened(dispute.getId(), 1, "TRACE_COURT_OPENING_1");
+
+        ArgumentCaptor<HearingCourtAgentCommand> command =
+                ArgumentCaptor.forClass(HearingCourtAgentCommand.class);
+        verify(agentClient).generateRoundTurn(command.capture(), eq("TRACE_COURT_OPENING_1"), any());
+        assertThat(command.getValue().roundStatus()).isEqualTo("OPEN");
+        assertThat(command.getValue().partySubmissions()).isEmpty();
+
+        ArgumentCaptor<RoomMessageEntity> savedMessage =
+                ArgumentCaptor.forClass(RoomMessageEntity.class);
+        verify(messageRepository).save(savedMessage.capture());
+        assertThat(savedMessage.getValue().getSequenceNo()).isEqualTo(1);
+        assertThat(savedMessage.getValue().getSenderRole()).isEqualTo("JUDGE");
+        assertThat(savedMessage.getValue().getHearingRound()).isEqualTo(1);
+        assertThat(savedMessage.getValue().getMessageText()).contains("小法庭现在开庭");
+        verify(eventService)
+                .recordLifecycleEvent(
+                        eq(dispute.getId()),
+                        eq(room.getId()),
+                        eq("JUDGE_OPENING_READY"),
+                        any(),
+                        eq("judge-round-opening-ready:" + dispute.getId() + ":1"),
+                        eq("presiding-judge"));
     }
 
     @Test

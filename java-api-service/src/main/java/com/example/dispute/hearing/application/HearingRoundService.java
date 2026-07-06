@@ -65,6 +65,52 @@ public class HearingRoundService {
     }
 
     @Transactional
+    public HearingRoundView ensureInitialRoundOpen(
+            String caseId,
+            int dossierVersion,
+            String actorId) {
+        lockedHearing(caseId);
+        return roundRepository
+                .findTopByCaseIdOrderByRoundNoDesc(caseId)
+                .map(existing -> view(caseId, existing, null))
+                .orElseGet(
+                        () -> {
+                            Instant now = clock.instant();
+                            HearingRoundEntity round =
+                                    roundRepository.save(
+                                            HearingRoundEntity.open(
+                                                    "HEARING_ROUND_" + compactUuid(),
+                                                    caseId,
+                                                    hearingStateRepository
+                                                            .findByCaseId(caseId)
+                                                            .map(state -> state.getId())
+                                                            .orElse(null),
+                                                    1,
+                                                    dossierVersion,
+                                                    now.plus(
+                                                            disputeProperties
+                                                                    .hearingRoundWindow()),
+                                                    now,
+                                                    actorId));
+                            recordRoundEvent(
+                                    caseId,
+                                    "HEARING_ROUND_OPENED",
+                                    Map.of(
+                                            "round_no",
+                                            1,
+                                            "dossier_version",
+                                            dossierVersion,
+                                            "round_deadline_at",
+                                            round.getRoundDeadlineAt().toString()),
+                                    "hearing-round-opened:1",
+                                    actorId);
+                            courtOrchestrator.afterRoundOpenedAfterCommit(
+                                    caseId, 1, traceId(1));
+                            return view(caseId, round, null);
+                        });
+    }
+
+    @Transactional
     public HearingRoundView completeNext(
             String caseId,
             CompleteHearingRoundCommand command,
@@ -186,7 +232,7 @@ public class HearingRoundService {
                             ? HearingStopReason.MAX_ROUNDS
                             : null;
             round.complete(
-                    submittedRoundSummary(submissions),
+                    submittedRoundSummaryV2(submissions),
                     stopReason,
                     now,
                     "hearing-controller");
@@ -402,7 +448,7 @@ public class HearingRoundService {
                         ? HearingStopReason.MAX_ROUNDS
                         : null;
         round.complete(
-                timeoutRoundSummary(submissions),
+                timeoutRoundSummaryV2(submissions),
                 stopReason,
                 now,
                 actorId);
@@ -499,7 +545,7 @@ public class HearingRoundService {
                 role,
                 participantId,
                 HearingRoundSubmissionSource.AUTO_TIMEOUT,
-                autoTimeoutJson(round, role),
+                autoTimeoutJsonV2(round, role),
                 now);
     }
 
@@ -579,6 +625,36 @@ public class HearingRoundService {
                 payload,
                 eventKey,
                 actorId);
+    }
+
+    private static String submittedRoundSummaryV2(
+            List<HearingRoundPartySubmissionEntity> submissions) {
+        String userJson = submissionJson(submissions, ActorRole.USER);
+        String merchantJson = submissionJson(submissions, ActorRole.MERCHANT);
+        return """
+                {"trigger":"BOTH_PARTIES_SUBMITTED","clerk":"双方本轮陈述已提交并封存。","judge":"本轮材料已入卷；如未到第三轮，系统会开放下一轮陈述，第三轮结束后由 AI 法官生成非最终裁决方案草案。","user_submission":%s,"merchant_submission":%s}
+                """
+                .formatted(userJson, merchantJson)
+                .strip();
+    }
+
+    private static String timeoutRoundSummaryV2(
+            List<HearingRoundPartySubmissionEntity> submissions) {
+        String userJson = submissionJson(submissions, ActorRole.USER);
+        String merchantJson = submissionJson(submissions, ActorRole.MERCHANT);
+        return """
+                {"trigger":"ROUND_DEADLINE_EXPIRED","clerk":"本轮提交时效已届满，系统已自动封存双方当前材料。","judge":"本轮按时效自动入卷；如未到第三轮，系统会开放下一轮陈述，第三轮结束后由 AI 法官生成非最终裁决方案草案。","user_submission":%s,"merchant_submission":%s}
+                """
+                .formatted(userJson, merchantJson)
+                .strip();
+    }
+
+    private static String autoTimeoutJsonV2(HearingRoundEntity round, ActorRole role) {
+        return """
+                {"trigger":"ROUND_DEADLINE_EXPIRED","source":"AUTO_TIMEOUT","participant_role":"%s","round_no":%d,"statement":"本轮时效届满前未主动提交，系统按当前已留存内容自动提交。"}
+                """
+                .formatted(role.name(), round.getRoundNo())
+                .strip();
     }
 
     private static String submittedRoundSummary(

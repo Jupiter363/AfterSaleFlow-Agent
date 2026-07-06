@@ -1,5 +1,6 @@
 package com.example.dispute.hearing.application;
 
+import com.example.dispute.common.transaction.PostCommitSideEffectExecutor;
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.hearing.infrastructure.persistence.entity.HearingRoundEntity;
 import com.example.dispute.hearing.infrastructure.persistence.entity.HearingRoundPartySubmissionEntity;
@@ -26,8 +27,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.transaction.support.TransactionSynchronization;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 @Service
 public class HearingCourtOrchestrator {
@@ -46,6 +45,7 @@ public class HearingCourtOrchestrator {
     private final HearingCourtAgentClient agentClient;
     private final ObjectMapper objectMapper;
     private final Clock clock;
+    private final PostCommitSideEffectExecutor postCommit;
 
     public HearingCourtOrchestrator(
             FulfillmentCaseRepository caseRepository,
@@ -56,7 +56,8 @@ public class HearingCourtOrchestrator {
             CaseEventService eventService,
             HearingCourtAgentClient agentClient,
             ObjectMapper objectMapper,
-            Clock clock) {
+            Clock clock,
+            PostCommitSideEffectExecutor postCommit) {
         this.caseRepository = caseRepository;
         this.roomRepository = roomRepository;
         this.roundRepository = roundRepository;
@@ -66,28 +67,54 @@ public class HearingCourtOrchestrator {
         this.agentClient = agentClient;
         this.objectMapper = objectMapper;
         this.clock = clock;
+        this.postCommit = postCommit;
+    }
+
+    public void afterRoundOpenedAfterCommit(String caseId, int roundNo, String traceId) {
+        postCommit.execute(
+                "hearing-court-round-opened",
+                Map.of("case_id", caseId, "round_no", roundNo),
+                () -> afterRoundOpened(caseId, roundNo, traceId));
     }
 
     public void afterRoundClosedAfterCommit(
             String caseId, int roundNo, boolean finalRound, String traceId) {
-        Runnable action = () -> afterRoundClosed(caseId, roundNo, finalRound, traceId);
-        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
-            action.run();
-            return;
-        }
-        TransactionSynchronizationManager.registerSynchronization(
-                new TransactionSynchronization() {
-                    @Override
-                    public void afterCommit() {
-                        action.run();
-                    }
-                });
+        postCommit.execute(
+                "hearing-court-round-closed",
+                Map.of("case_id", caseId, "round_no", roundNo, "final_round", finalRound),
+                () -> afterRoundClosed(caseId, roundNo, finalRound, traceId));
+    }
+
+    @Transactional
+    public void afterRoundOpened(String caseId, int roundNo, String traceId) {
+        appendJudgeTurnIfAbsent(
+                caseId,
+                roundNo,
+                false,
+                judgeRoundOpeningKey(caseId, roundNo),
+                "judge-round-opening-ready:" + caseId + ":" + roundNo,
+                traceId);
     }
 
     @Transactional
     public void afterRoundClosed(
             String caseId, int roundNo, boolean finalRound, String traceId) {
-        String idempotencyKey = judgeRoundTurnKey(caseId, roundNo);
+        appendJudgeTurnIfAbsent(
+                caseId,
+                roundNo,
+                finalRound,
+                judgeRoundTurnKey(caseId, roundNo),
+                "judge-round-turn-ready:" + caseId + ":" + roundNo,
+                traceId);
+    }
+
+    private void appendJudgeTurnIfAbsent(
+            String caseId,
+            int roundNo,
+            boolean finalRound,
+            String idempotencyKey,
+            String lifecycleEventKey,
+            String traceId) {
         if (messageRepository.findByCaseIdAndIdempotencyKey(caseId, idempotencyKey).isPresent()) {
             return;
         }
@@ -106,10 +133,10 @@ public class HearingCourtOrchestrator {
         List<HearingRoundPartySubmissionEntity> submissions =
                 submissionRepository.findAllByCaseIdAndRoundNoOrderBySubmittedAtAsc(
                         caseId, roundNo);
-        HearingCourtAgentCommand command =
-                command(dispute, round, submissions, finalRound);
+        HearingCourtAgentCommand command = command(dispute, round, submissions, finalRound);
         HearingCourtAgentResult result = safeGenerate(command, traceId);
-        RoomMessageEntity saved = appendJudgeMessage(dispute, room, roundNo, result, idempotencyKey, traceId);
+        RoomMessageEntity saved =
+                appendJudgeMessage(dispute, room, roundNo, result, idempotencyKey, traceId);
         eventService.recordRoomMessage(
                 dispute.getId(),
                 room.getId(),
@@ -131,7 +158,7 @@ public class HearingCourtOrchestrator {
                         "questions_for_merchant", result.questionsForMerchant(),
                         "prompt_version", result.promptVersion(),
                         "model", result.model()),
-                "judge-round-turn-ready:" + dispute.getId() + ":" + roundNo,
+                lifecycleEventKey,
                 JUDGE_SENDER_ID);
     }
 
@@ -185,21 +212,49 @@ public class HearingCourtOrchestrator {
     }
 
     private HearingCourtAgentResult fallback(HearingCourtAgentCommand command) {
+        boolean opening =
+                command.partySubmissions().isEmpty()
+                        && "OPEN".equals(command.roundStatus())
+                        && command.stopReason() == null;
         boolean finalRound = command.finalRound();
-        String message =
-                finalRound
-                        ? "第三轮陈述已封存。AI 法官将基于当前案情、证据和双方陈述形成非最终裁决草案，并提交平台审核员终审。"
-                        : "本轮庭审陈述已封存。下一轮将继续围绕争议焦点进行定向说明，双方可分别补充与本案事实和证据相关的陈述。";
+        if (opening) {
+            return new HearingCourtAgentResult(
+                    JUDGE_SENDER_ROLE,
+                    "小法庭现在开庭。第 1 轮请双方先围绕接待室卷宗和证据室材料说明关键事实：用户侧请说明争议发生经过、签收或验货情况以及希望平台核验的重点；商家侧请说明履约记录、发货/物流交接情况以及与用户主张不一致的部分。",
+                    "法官已打开第 1 轮事实陈述，等待用户和商家分别提交本轮说明。",
+                    List.of("请说明争议发生经过、签收或验货情况，以及希望平台优先核验的事实。"),
+                    List.of("请说明履约记录、发货/物流交接情况，以及与用户主张不一致的事实。"),
+                    "JUDGE_OPENING_READY",
+                    command.roundNo(),
+                    command.roundNo(),
+                    false,
+                    "hearing-round-opening-fallback-v1",
+                    "local-fallback");
+        }
+        if (finalRound) {
+            return new HearingCourtAgentResult(
+                    JUDGE_SENDER_ROLE,
+                    "第 3 轮陈述已封存。AI 法官将基于当前案情、证据和双方陈述形成非最终裁决草案，并提交平台审核员终审。",
+                    "模型暂不可用，系统已封存最终轮材料并进入裁决草案生成路径。",
+                    List.of(),
+                    List.of(),
+                    "FINAL_DRAFT_REQUIRED",
+                    command.roundNo(),
+                    null,
+                    true,
+                    "hearing-round-turn-fallback-v1",
+                    "local-fallback");
+        }
         return new HearingCourtAgentResult(
                 JUDGE_SENDER_ROLE,
-                message,
-                "模型暂不可用，系统已封存本轮材料并按结构化庭审流程继续。",
-                finalRound ? List.of() : List.of("请围绕法官上一轮问题补充客观事实、证据来源和时间线。"),
-                finalRound ? List.of() : List.of("请围绕履约记录、证据来源和与用户主张的差异补充说明。"),
-                finalRound ? "FINAL_DRAFT_REQUIRED" : "JUDGE_NEXT_QUESTIONS_READY",
+                "本轮庭审陈述已封存。下一轮将继续围绕争议焦点进行定向说明，双方可分别补充与本案事实和证据相关的陈述。",
+                "模型暂不可用，系统已按结构化庭审流程封存本轮材料。",
+                List.of("请围绕法官上一轮问题补充客观事实、证据来源和时间线。"),
+                List.of("请围绕履约记录、证据来源和与用户主张的差异补充说明。"),
+                "JUDGE_NEXT_QUESTIONS_READY",
                 command.roundNo(),
-                finalRound ? null : command.roundNo() + 1,
-                finalRound,
+                command.roundNo() + 1,
+                false,
                 "hearing-round-turn-fallback-v1",
                 "local-fallback");
     }
@@ -261,6 +316,10 @@ public class HearingCourtOrchestrator {
 
     private static String defaultText(String value, String fallback) {
         return value == null || value.isBlank() ? fallback : value;
+    }
+
+    private static String judgeRoundOpeningKey(String caseId, int roundNo) {
+        return "judge-round-opening:" + caseId + ":" + roundNo;
     }
 
     private static String judgeRoundTurnKey(String caseId, int roundNo) {

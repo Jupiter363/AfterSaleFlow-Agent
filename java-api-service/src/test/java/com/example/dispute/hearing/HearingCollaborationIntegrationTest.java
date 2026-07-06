@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.times;
 
 import com.example.dispute.common.exception.IdempotencyConflictException;
 import com.example.dispute.config.ActorRole;
@@ -249,6 +250,40 @@ class HearingCollaborationIntegrationTest {
         assertThat(first.status()).isEqualTo(HearingRoundStatus.COMPLETED);
         verify(hearingWorkflowCoordinator)
                 .roundCompletedAfterCommit("CASE_FACTS_HINT", 1, false);
+    }
+
+    @Test
+    void openingHearingCreatesInitialRoundAndAsksJudgeForOpeningOnce() {
+        seedHearing("CASE_OPENING");
+
+        var first =
+                roundService.ensureInitialRoundOpen(
+                        "CASE_OPENING",
+                        2,
+                        "hearing-controller");
+        var replayed =
+                roundService.ensureInitialRoundOpen(
+                        "CASE_OPENING",
+                        2,
+                        "hearing-controller");
+
+        assertThat(first.roundNo()).isEqualTo(1);
+        assertThat(first.status()).isEqualTo(HearingRoundStatus.OPEN);
+        assertThat(first.submittedRoles()).isEmpty();
+        assertThat(replayed.roundId()).isEqualTo(first.roundId());
+        assertThat(roundRepository.findAllByCaseIdOrderByRoundNoAsc("CASE_OPENING"))
+                .hasSize(1);
+        verify(hearingCourtOrchestrator, times(1))
+                .afterRoundOpenedAfterCommit(
+                        "CASE_OPENING", 1, "TRACE_HEARING_ROUND_1");
+        assertThat(
+                        eventRepository
+                                .findByCaseIdAndEventKey(
+                                        "CASE_OPENING",
+                                        "hearing-round-opened:1")
+                                .orElseThrow()
+                                .getEventType())
+                .isEqualTo("HEARING_ROUND_OPENED");
     }
 
     @Test

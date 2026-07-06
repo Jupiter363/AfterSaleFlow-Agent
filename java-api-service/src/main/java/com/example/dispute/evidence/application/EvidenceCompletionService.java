@@ -26,6 +26,7 @@ import java.util.Optional;
 import java.util.Map;
 import java.util.UUID;
 import com.example.dispute.workflow.application.EvidenceWindowCoordinator;
+import com.example.dispute.hearing.application.HearingRoundService;
 import com.example.dispute.hearing.application.HearingWorkflowCoordinator;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -42,6 +43,7 @@ public class EvidenceCompletionService {
     private final CaseEventService caseEventService;
     private final NotificationService notificationService;
     private final CaseLifecycleNotificationService lifecycleNotifications;
+    private final HearingRoundService hearingRoundService;
     private final HearingWorkflowCoordinator hearingWorkflowCoordinator;
     private final DisputeProperties disputeProperties;
     private final Clock clock;
@@ -56,6 +58,7 @@ public class EvidenceCompletionService {
             CaseEventService caseEventService,
             NotificationService notificationService,
             CaseLifecycleNotificationService lifecycleNotifications,
+            HearingRoundService hearingRoundService,
             HearingWorkflowCoordinator hearingWorkflowCoordinator,
             DisputeProperties disputeProperties,
             Clock clock) {
@@ -68,6 +71,7 @@ public class EvidenceCompletionService {
         this.caseEventService = caseEventService;
         this.notificationService = notificationService;
         this.lifecycleNotifications = lifecycleNotifications;
+        this.hearingRoundService = hearingRoundService;
         this.hearingWorkflowCoordinator = hearingWorkflowCoordinator;
         this.disputeProperties = disputeProperties;
         this.clock = clock;
@@ -134,6 +138,8 @@ public class EvidenceCompletionService {
         if (transitioning) {
             announceHearingOpened(
                     dispute, hearingRoom, dossierVersion, "BOTH_PARTIES_COMPLETED");
+            hearingRoundService.ensureInitialRoundOpen(
+                    caseId, dossierVersion, actor.actorId());
             hearingWorkflowCoordinator.startAfterCommit(caseId, dossierVersion);
         }
         return new EvidenceCompletionView(
@@ -196,6 +202,8 @@ public class EvidenceCompletionService {
                             false);
             announceHearingOpened(
                     dispute, hearingRoom, dossierVersion, "DEADLINE_EXPIRED");
+            hearingRoundService.ensureInitialRoundOpen(
+                    caseId, dossierVersion, "evidence-deadline");
             hearingWorkflowCoordinator.startAfterCommit(caseId, dossierVersion);
         }
         return status(caseId, new AuthenticatedActor("evidence-deadline", ActorRole.SYSTEM));
