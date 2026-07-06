@@ -13,7 +13,11 @@ import com.example.dispute.room.infrastructure.persistence.repository.RoomTurnMe
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.util.Comparator;
+import java.util.List;
 import java.util.Optional;
+import java.util.Set;
+import java.util.stream.Collectors;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -47,10 +51,33 @@ public class RoomTurnMemoryQueryService {
                         .findById(caseId)
                         .orElseThrow(() -> new IllegalArgumentException("case not found"));
         assertCanRead(dispute, actor);
+        if (roomType == RoomType.EVIDENCE && isParty(actor.role())) {
+            return latestEvidenceAgentMemoryForParty(caseId, actor.role()).map(this::view);
+        }
         return memoryRepository
                 .findTopByCaseIdAndRoomTypeAndAgentRoleIsNotNullOrderByTurnNoDesc(
                         caseId, roomType)
                 .map(this::view);
+    }
+
+    private Optional<RoomTurnMemoryEntity> latestEvidenceAgentMemoryForParty(
+            String caseId, ActorRole partyRole) {
+        List<RoomTurnMemoryEntity> recentMemories =
+                memoryRepository
+                        .findTop50ByCaseIdAndRoomTypeOrderByTurnNoDesc(caseId, RoomType.EVIDENCE);
+        Set<Integer> partyTurnNos =
+                recentMemories.stream()
+                        .filter(memory -> partyRole.name().equals(memory.getAnswerRole()))
+                        .map(RoomTurnMemoryEntity::getTurnNo)
+                        .collect(Collectors.toSet());
+        return recentMemories.stream()
+                .filter(memory -> memory.getAgentRole() != null)
+                .filter(memory -> partyTurnNos.contains(memory.getTurnNo()))
+                .max(Comparator.comparingInt(RoomTurnMemoryEntity::getTurnNo));
+    }
+
+    private static boolean isParty(ActorRole role) {
+        return role == ActorRole.USER || role == ActorRole.MERCHANT;
     }
 
     private void assertCanRead(FulfillmentCaseEntity dispute, AuthenticatedActor actor) {

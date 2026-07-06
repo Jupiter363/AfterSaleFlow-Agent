@@ -17,6 +17,9 @@ public interface RoomTurnMemoryRepository
     List<RoomTurnMemoryEntity> findTop10ByCaseIdAndRoomTypeOrderByTurnNoDesc(
             String caseId, RoomType roomType);
 
+    List<RoomTurnMemoryEntity> findTop50ByCaseIdAndRoomTypeOrderByTurnNoDesc(
+            String caseId, RoomType roomType);
+
     @Query(
             "select coalesce(max(memory.turnNo), 0) from RoomTurnMemoryEntity memory "
                     + "where memory.caseId = :caseId and memory.roomType = :roomType")

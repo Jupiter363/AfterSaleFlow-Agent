@@ -19,6 +19,7 @@ import com.example.dispute.room.application.EvidenceAgentTurnClient;
 import com.example.dispute.room.application.EvidenceAgentTurnCommand;
 import com.example.dispute.room.application.EvidenceAgentTurnResult;
 import com.example.dispute.room.application.EvidenceAgentTurnService;
+import com.example.dispute.room.application.IntakeRecentTurn;
 import com.example.dispute.room.application.RoomMessageCommand;
 import com.example.dispute.room.domain.MessageType;
 import com.example.dispute.room.domain.RoomType;
@@ -86,9 +87,18 @@ class EvidenceAgentTurnServiceTest {
             throws Exception {
         FulfillmentCaseEntity dispute = evidenceCase();
         CaseRoomEntity room = evidenceRoom(dispute);
-        RoomTurnMemoryEntity previousTurn =
+        RoomTurnMemoryEntity previousParticipantTurn =
+                RoomTurnMemoryEntity.participantTurn(
+                        "MEMORY_PREVIOUS_PARTY",
+                        dispute.getId(),
+                        RoomType.EVIDENCE,
+                        2,
+                        "user-local",
+                        "USER",
+                        "I previously described the missing parcel.");
+        RoomTurnMemoryEntity previousClerkTurn =
                 RoomTurnMemoryEntity.agentTurn(
-                        "MEMORY_PREVIOUS",
+                        "MEMORY_PREVIOUS_CLERK",
                         dispute.getId(),
                         RoomType.EVIDENCE,
                         2,
@@ -137,9 +147,9 @@ class EvidenceAgentTurnServiceTest {
                                         "MERCHANT",
                                         "merchant-local",
                                         "PARTIES")));
-        when(memoryRepository.findTop10ByCaseIdAndRoomTypeOrderByTurnNoDesc(
+        when(memoryRepository.findTop50ByCaseIdAndRoomTypeOrderByTurnNoDesc(
                         dispute.getId(), RoomType.EVIDENCE))
-                .thenReturn(List.of(previousTurn));
+                .thenReturn(List.of(previousClerkTurn, previousParticipantTurn));
         when(client.run(any(), eq("TRACE_EVIDENCE"), eq("REQ_EVIDENCE")))
                 .thenReturn(
                         new EvidenceAgentTurnResult(
@@ -188,7 +198,7 @@ class EvidenceAgentTurnServiceTest {
                 .containsExactly("EVIDENCE_USER_PRIVATE", "EVIDENCE_SHARED");
         assertThat(command.getValue().recentTurns())
                 .extracting(turn -> turn.agentRole())
-                .containsExactly("EVIDENCE_CLERK");
+                .contains("EVIDENCE_CLERK");
         JsonNode commandJson = objectMapper.valueToTree(command.getValue());
         assertThat(commandJson.has("current_party_message")).isTrue();
         assertThat(commandJson.has("current_message")).isFalse();
@@ -252,6 +262,116 @@ class EvidenceAgentTurnServiceTest {
     }
 
     @Test
+    void evidenceAgentRecentTurnsAreScopedToTheSpeakingParty() throws Exception {
+        FulfillmentCaseEntity dispute = evidenceCase();
+        CaseRoomEntity room = evidenceRoom(dispute);
+        RoomTurnMemoryEntity userParticipant =
+                RoomTurnMemoryEntity.participantTurn(
+                        "MEMORY_USER_PARTY",
+                        dispute.getId(),
+                        RoomType.EVIDENCE,
+                        1,
+                        "user-local",
+                        "USER",
+                        "用户侧私聊：门口监控显示没有投递。");
+        RoomTurnMemoryEntity userClerk =
+                RoomTurnMemoryEntity.agentTurn(
+                        "MEMORY_USER_CLERK",
+                        dispute.getId(),
+                        RoomType.EVIDENCE,
+                        1,
+                        "evidence-clerk",
+                        "EVIDENCE_CLERK",
+                        "用户侧书记官回复：请补充门口监控原视频。",
+                        "{}",
+                        "{}",
+                        "[]",
+                        "EVIDENCE_RUN_USER");
+        RoomTurnMemoryEntity merchantParticipant =
+                RoomTurnMemoryEntity.participantTurn(
+                        "MEMORY_MERCHANT_PARTY",
+                        dispute.getId(),
+                        RoomType.EVIDENCE,
+                        2,
+                        "merchant-local",
+                        "MERCHANT",
+                        "商家侧私聊：发货质检视频显示完好。");
+        RoomTurnMemoryEntity merchantClerk =
+                RoomTurnMemoryEntity.agentTurn(
+                        "MEMORY_MERCHANT_CLERK",
+                        dispute.getId(),
+                        RoomType.EVIDENCE,
+                        2,
+                        "evidence-clerk",
+                        "EVIDENCE_CLERK",
+                        "商家侧书记官回复：请补充质检视频原文件。",
+                        "{}",
+                        "{}",
+                        "[]",
+                        "EVIDENCE_RUN_MERCHANT");
+        when(caseRepository.findByIdForUpdate(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.EVIDENCE))
+                .thenReturn(Optional.of(room));
+        when(memoryRepository.findMaxTurnNo(dispute.getId(), RoomType.EVIDENCE))
+                .thenReturn(2);
+        when(intakeDossierRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.INTAKE))
+                .thenReturn(Optional.empty());
+        when(evidenceItemRepository.findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(
+                        dispute.getId()))
+                .thenReturn(List.of());
+        when(memoryRepository.findTop50ByCaseIdAndRoomTypeOrderByTurnNoDesc(
+                        dispute.getId(), RoomType.EVIDENCE))
+                .thenReturn(List.of(merchantClerk, merchantParticipant, userClerk, userParticipant));
+        when(client.run(any(), eq("TRACE_USER_SCOPED"), eq("REQ_USER_SCOPED")))
+                .thenReturn(
+                        new EvidenceAgentTurnResult(
+                                "我会继续围绕用户侧材料核验，不判断责任。",
+                                objectMapper.createObjectNode(),
+                                objectMapper.createArrayNode(),
+                                List.of(),
+                                false,
+                                false,
+                                "STUB",
+                                0.75));
+        when(memoryRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(messageRepository.findByCaseIdAndIdempotencyKey(eq(dispute.getId()), any()))
+                .thenReturn(Optional.empty());
+        when(messageRepository.findMaxSequenceByRoomId(room.getId())).thenReturn(5L);
+        when(messageRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        service.continueFromParticipantMessage(
+                dispute.getId(),
+                RoomType.EVIDENCE,
+                new AuthenticatedActor("user-local", ActorRole.USER),
+                new RoomMessageCommand(
+                        MessageType.PARTY_TEXT,
+                        "用户侧本轮：我可以补充监控原视频。",
+                        List.of()),
+                "TRACE_USER_SCOPED",
+                "REQ_USER_SCOPED");
+
+        ArgumentCaptor<EvidenceAgentTurnCommand> command =
+                ArgumentCaptor.forClass(EvidenceAgentTurnCommand.class);
+        verify(client).run(command.capture(), eq("TRACE_USER_SCOPED"), eq("REQ_USER_SCOPED"));
+
+        assertThat(command.getValue().recentTurns())
+                .extracting(IntakeRecentTurn::answerContent)
+                .doesNotContain("商家侧私聊：发货质检视频显示完好。");
+        assertThat(command.getValue().recentTurns())
+                .extracting(IntakeRecentTurn::agentResponse)
+                .doesNotContain("商家侧书记官回复：请补充质检视频原文件。");
+        assertThat(command.getValue().recentTurns())
+                .extracting(IntakeRecentTurn::answerContent)
+                .contains("用户侧私聊：门口监控显示没有投递。");
+        assertThat(command.getValue().recentTurns())
+                .extracting(IntakeRecentTurn::agentResponse)
+                .contains("用户侧书记官回复：请补充门口监控原视频。");
+    }
+
+    @Test
     void partyEvidenceReferenceUsesAttachmentRefsWhenTextIsBlank() {
         FulfillmentCaseEntity dispute = evidenceCase();
         CaseRoomEntity room = evidenceRoom(dispute);
@@ -266,7 +386,7 @@ class EvidenceAgentTurnServiceTest {
         when(evidenceItemRepository.findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(
                         dispute.getId()))
                 .thenReturn(List.of());
-        when(memoryRepository.findTop10ByCaseIdAndRoomTypeOrderByTurnNoDesc(
+        when(memoryRepository.findTop50ByCaseIdAndRoomTypeOrderByTurnNoDesc(
                         dispute.getId(), RoomType.EVIDENCE))
                 .thenReturn(List.of());
         when(client.run(any(), eq("TRACE_REFERENCE"), eq("REQ_REFERENCE")))
@@ -336,7 +456,7 @@ class EvidenceAgentTurnServiceTest {
         when(evidenceItemRepository.findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(
                         dispute.getId()))
                 .thenReturn(List.of());
-        when(memoryRepository.findTop10ByCaseIdAndRoomTypeOrderByTurnNoDesc(
+        when(memoryRepository.findTop50ByCaseIdAndRoomTypeOrderByTurnNoDesc(
                         dispute.getId(), RoomType.EVIDENCE))
                 .thenReturn(List.of());
         when(client.run(any(), eq("TRACE_DEGRADED"), eq("REQ_DEGRADED")))

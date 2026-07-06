@@ -63,7 +63,7 @@ class EvidenceVerificationAndCatalogServiceTest {
     }
 
     @Test
-    void privateMerchantOriginalIsRedactedFromUserButDirectoryMetadataRemainsVisible() {
+    void privateEvidenceIsHiddenFromCounterpartyButVisibleToReviewer() {
         FulfillmentCaseEntity dispute = evidenceCase();
         EvidenceItemEntity merchantPrivate =
                 evidence(
@@ -86,13 +86,20 @@ class EvidenceVerificationAndCatalogServiceTest {
                         dispute.getId(),
                         new AuthenticatedActor("user-local", ActorRole.USER));
 
-        assertThat(catalog.items()).singleElement().satisfies(
+        assertThat(catalog.items()).isEmpty();
+
+        var reviewerCatalog =
+                catalogService.catalog(
+                        dispute.getId(),
+                        new AuthenticatedActor("reviewer-local", ActorRole.PLATFORM_REVIEWER));
+
+        assertThat(reviewerCatalog.items()).singleElement().satisfies(
                 item -> {
                     assertThat(item.evidenceId()).isEqualTo("EVIDENCE_MERCHANT");
                     assertThat(item.submittedByRole()).isEqualTo("MERCHANT");
                     assertThat(item.visibility()).isEqualTo("PRIVATE");
-                    assertThat(item.contentUrl()).isNull();
-                    assertThat(item.redacted()).isTrue();
+                    assertThat(item.contentUrl()).contains("/content");
+                    assertThat(item.redacted()).isFalse();
                 });
     }
 

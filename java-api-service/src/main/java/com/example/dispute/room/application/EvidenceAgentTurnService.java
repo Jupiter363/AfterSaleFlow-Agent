@@ -26,7 +26,9 @@ import java.time.Instant;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -117,7 +119,7 @@ public class EvidenceAgentTurnService {
                                 message.attachmentRefs()),
                         latestCaseIntakeDossier(caseId),
                         availableEvidence(caseId, actor.role()),
-                        recentTurns(caseId));
+                        recentTurns(caseId, actor.role()));
         EvidenceAgentTurnResult result = safeRun(command, traceId, requestId);
         persistAgentTurn(context, turnNo, actor.role(), result, traceId);
     }
@@ -273,22 +275,42 @@ public class EvidenceAgentTurnService {
                 item.getOriginalFilename());
     }
 
-    private List<IntakeRecentTurn> recentTurns(String caseId) {
-        return memoryRepository
-                .findTop10ByCaseIdAndRoomTypeOrderByTurnNoDesc(caseId, RoomType.EVIDENCE)
-                .stream()
-                .sorted(Comparator.comparingInt(RoomTurnMemoryEntity::getTurnNo))
-                .map(
-                        memory ->
-                                new IntakeRecentTurn(
-                                        memory.getTurnNo(),
-                                        memory.getActorId(),
-                                        memory.getAnswerRole(),
-                                        memory.getAnswerContent(),
-                                        memory.getAgentRole(),
-                                        memory.getAgentResponse(),
-                                        readJson(memory.getScrollSnapshotJson())))
-                .toList();
+    private List<IntakeRecentTurn> recentTurns(String caseId, ActorRole partyRole) {
+        List<RoomTurnMemoryEntity> recentMemories =
+                memoryRepository
+                        .findTop50ByCaseIdAndRoomTypeOrderByTurnNoDesc(caseId, RoomType.EVIDENCE);
+        Set<Integer> partyTurnNos =
+                recentMemories.stream()
+                        .filter(memory -> partyRole.name().equals(memory.getAnswerRole()))
+                        .map(RoomTurnMemoryEntity::getTurnNo)
+                        .collect(Collectors.toSet());
+        List<IntakeRecentTurn> scopedTurns =
+                recentMemories.stream()
+                        .filter(memory -> visibleToPartyMemory(memory, partyRole, partyTurnNos))
+                        .sorted(Comparator.comparingInt(RoomTurnMemoryEntity::getTurnNo))
+                        .map(
+                                memory ->
+                                        new IntakeRecentTurn(
+                                                memory.getTurnNo(),
+                                                memory.getActorId(),
+                                                memory.getAnswerRole(),
+                                                memory.getAnswerContent(),
+                                                memory.getAgentRole(),
+                                                memory.getAgentResponse(),
+                                                readJson(memory.getScrollSnapshotJson())))
+                        .toList();
+        if (scopedTurns.size() <= 10) {
+            return scopedTurns;
+        }
+        return scopedTurns.subList(scopedTurns.size() - 10, scopedTurns.size());
+    }
+
+    private static boolean visibleToPartyMemory(
+            RoomTurnMemoryEntity memory, ActorRole partyRole, Set<Integer> partyTurnNos) {
+        if (partyRole.name().equals(memory.getAnswerRole())) {
+            return true;
+        }
+        return memory.getAgentRole() != null && partyTurnNos.contains(memory.getTurnNo());
     }
 
     private EvidenceAgentTurnResult degraded(String reason, String traceId) {

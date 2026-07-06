@@ -37,17 +37,27 @@ public class EvidenceCatalogService {
                 evidenceRepository
                         .findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(caseId)
                         .stream()
+                        .filter(item -> canSeeCatalogItem(item, actor))
                         .map(item -> project(caseId, item, actor))
                         .toList();
         return new RoleScopedEvidenceView(caseId, items);
     }
 
+    private static boolean canSeeCatalogItem(EvidenceItemEntity item, AuthenticatedActor actor) {
+        if ("PARTIES".equals(item.getVisibility())) {
+            return true;
+        }
+        if (actor.role().name().equals(item.getSubmittedByRole())) {
+            return true;
+        }
+        return isPrivilegedEvidenceViewer(actor.role())
+                || "PLATFORM".equals(item.getVisibility())
+                        && actor.role() == ActorRole.CUSTOMER_SERVICE;
+    }
+
     private RoleScopedEvidenceView.Item project(
             String caseId, EvidenceItemEntity item, AuthenticatedActor actor) {
-        boolean privileged =
-                actor.role() == ActorRole.PLATFORM_REVIEWER
-                        || actor.role() == ActorRole.ADMIN
-                        || actor.role() == ActorRole.SYSTEM;
+        boolean privileged = isPrivilegedEvidenceViewer(actor.role());
         boolean owns = actor.role().name().equals(item.getSubmittedByRole());
         boolean visible =
                 privileged
@@ -72,6 +82,12 @@ public class EvidenceCatalogService {
                 contentUrl,
                 !visible,
                 status);
+    }
+
+    private static boolean isPrivilegedEvidenceViewer(ActorRole role) {
+        return role == ActorRole.PLATFORM_REVIEWER
+                || role == ActorRole.ADMIN
+                || role == ActorRole.SYSTEM;
     }
 
     private static void assertCanAccess(

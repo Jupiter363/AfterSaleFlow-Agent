@@ -20,6 +20,7 @@ import com.example.dispute.room.infrastructure.persistence.repository.CaseIntake
 import com.example.dispute.room.infrastructure.persistence.repository.RoomTurnMemoryRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.OffsetDateTime;
+import java.util.List;
 import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -112,6 +113,71 @@ class RoomTurnMemoryQueryServiceTest {
                                         new AuthenticatedActor(
                                                 "other-user", ActorRole.USER)))
                 .isInstanceOf(ForbiddenException.class);
+    }
+
+    @Test
+    void latestEvidenceAgentMemoryIsScopedToTheRequestingParty() {
+        FulfillmentCaseEntity dispute = intakeCase();
+        RoomTurnMemoryEntity userParticipant =
+                RoomTurnMemoryEntity.participantTurn(
+                        "MEMORY_EVIDENCE_USER_PARTY",
+                        dispute.getId(),
+                        RoomType.EVIDENCE,
+                        1,
+                        "user-local",
+                        "USER",
+                        "用户侧只说明了签收异常。");
+        RoomTurnMemoryEntity userClerk =
+                RoomTurnMemoryEntity.agentTurn(
+                        "MEMORY_EVIDENCE_USER_CLERK",
+                        dispute.getId(),
+                        RoomType.EVIDENCE,
+                        1,
+                        "evidence-clerk",
+                        "EVIDENCE_CLERK",
+                        "用户侧书记官：请补充开箱照片原图。",
+                        "{\"memory_frame\":{\"side\":\"USER\"}}",
+                        "{\"side\":\"USER\"}",
+                        "[]",
+                        "RUN_USER");
+        RoomTurnMemoryEntity merchantParticipant =
+                RoomTurnMemoryEntity.participantTurn(
+                        "MEMORY_EVIDENCE_MERCHANT_PARTY",
+                        dispute.getId(),
+                        RoomType.EVIDENCE,
+                        2,
+                        "merchant-local",
+                        "MERCHANT",
+                        "商家侧只说明了质检视频。");
+        RoomTurnMemoryEntity merchantClerk =
+                RoomTurnMemoryEntity.agentTurn(
+                        "MEMORY_EVIDENCE_MERCHANT_CLERK",
+                        dispute.getId(),
+                        RoomType.EVIDENCE,
+                        2,
+                        "evidence-clerk",
+                        "EVIDENCE_CLERK",
+                        "商家侧书记官：请补充发货质检视频原件。",
+                        "{\"memory_frame\":{\"side\":\"MERCHANT\"}}",
+                        "{\"side\":\"MERCHANT\"}",
+                        "[]",
+                        "RUN_MERCHANT");
+        when(caseRepository.findById(dispute.getId())).thenReturn(Optional.of(dispute));
+        when(memoryRepository.findTop50ByCaseIdAndRoomTypeOrderByTurnNoDesc(
+                        dispute.getId(), RoomType.EVIDENCE))
+                .thenReturn(List.of(merchantClerk, merchantParticipant, userClerk, userParticipant));
+
+        var result =
+                service.latestAgentMemory(
+                        dispute.getId(),
+                        RoomType.EVIDENCE,
+                        new AuthenticatedActor("user-local", ActorRole.USER));
+
+        assertThat(result).isPresent();
+        assertThat(result.orElseThrow().turnNo()).isEqualTo(1);
+        assertThat(result.orElseThrow().agentResponse()).contains("用户侧书记官");
+        assertThat(result.orElseThrow().agentResponse()).doesNotContain("商家侧书记官");
+        assertThat(result.orElseThrow().memoryFrame().path("side").asText()).isEqualTo("USER");
     }
 
     private static FulfillmentCaseEntity intakeCase() {

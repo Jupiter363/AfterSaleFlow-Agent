@@ -80,6 +80,16 @@ const initialCompletion = {
   next_room: null,
 };
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((innerResolve, innerReject) => {
+    resolve = innerResolve;
+    reject = innerReject;
+  });
+  return { promise, resolve, reject };
+}
+
 function routerForEvidence() {
   return createRouter({
     history: createMemoryHistory(),
@@ -149,6 +159,29 @@ describe("EvidenceRoomView", () => {
       expect(wrapper.find(`[data-verification="${status}"]`).exists()).toBe(true);
     }
     expect(wrapper.get("[data-evidence-countdown]").text()).toContain("02:00:00");
+  });
+
+  it("keeps platform-only evidence out of the party shared dossier", async () => {
+    const platformCatalog = {
+      ...catalog,
+      items: [
+        ...catalog.items,
+        {
+          evidence_id: "EVIDENCE_PLATFORM_ONLY",
+          evidence_type: "OTHER",
+          submitted_by_role: "PLATFORM_REVIEWER",
+          visibility: "PLATFORM",
+          content_url: null,
+          redacted: false,
+          verification_status: "PENDING",
+        },
+      ],
+    };
+    const { wrapper } = await mountView({ initialCatalog: platformCatalog });
+
+    expect(wrapper.get("[data-evidence-shared]").text()).not.toContain(
+      "EVIDENCE_PLATFORM_ONLY",
+    );
   });
 
   it("waits for the server completion result before exposing the hearing entrance", async () => {
@@ -479,6 +512,78 @@ describe("EvidenceRoomView", () => {
     );
     expect(wrapper.text()).not.toContain("User-only evidence explanation thread.");
     expect(wrapper.text()).toContain("Merchant-only evidence explanation thread.");
+  });
+
+  it("clears the previous party thread immediately when the viewer role changes", async () => {
+    const stalledRefresh = deferred();
+    roomApi.messages.mockReturnValueOnce(stalledRefresh.promise);
+    const { wrapper } = await mountView({
+      viewerRole: "USER",
+      initialMessages: [
+        {
+          id: "USER_THREAD_MESSAGE",
+          sequence_no: 1,
+          sender_role: "USER",
+          message_text: "User-only evidence explanation thread.",
+        },
+      ],
+    });
+
+    expect(wrapper.text()).toContain("User-only evidence explanation thread.");
+
+    await wrapper.setProps({ viewerRole: "MERCHANT" });
+
+    expect(wrapper.text()).not.toContain("User-only evidence explanation thread.");
+
+    stalledRefresh.resolve([]);
+    await flushPromises();
+  });
+
+  it("ignores stale evidence refresh results from the previous actor", async () => {
+    const merchantMessages = deferred();
+    const userMessages = deferred();
+    roomApi.messages
+      .mockReturnValueOnce(merchantMessages.promise)
+      .mockReturnValueOnce(userMessages.promise);
+    const { wrapper } = await mountView({
+      viewerRole: "USER",
+      initialMessages: [
+        {
+          id: "USER_INITIAL",
+          sequence_no: 1,
+          sender_role: "USER",
+          message_text: "Initial user thread.",
+        },
+      ],
+    });
+
+    await wrapper.setProps({ viewerRole: "MERCHANT" });
+    await wrapper.setProps({ viewerRole: "USER" });
+
+    merchantMessages.resolve([
+      {
+        id: "MERCHANT_STALE",
+        sequence_no: 1,
+        sender_role: "MERCHANT",
+        message_text: "Stale merchant thread must not overwrite user view.",
+      },
+    ]);
+    await flushPromises();
+
+    expect(wrapper.text()).not.toContain("Stale merchant thread must not overwrite user view.");
+
+    userMessages.resolve([
+      {
+        id: "USER_FRESH",
+        sequence_no: 2,
+        sender_role: "USER",
+        message_text: "Fresh user thread wins.",
+      },
+    ]);
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("Fresh user thread wins.");
+    expect(wrapper.text()).not.toContain("Stale merchant thread must not overwrite user view.");
   });
 
   it("uploads user evidence with the backend actor-specific source type", async () => {

@@ -45,7 +45,9 @@ const agentState = ref("LISTENING");
 const fileInput = ref(null);
 const messages = ref([...(props.initialMessages || [])]);
 const eventState = reactive(createRoomState());
-const eventAbortController = new AbortController();
+let eventAbortController = new AbortController();
+let eventStreamActive = false;
+let workspaceGeneration = 0;
 
 const caseId = computed(
   () => catalog.value?.case_id || route.params.caseId,
@@ -74,7 +76,7 @@ const privateItems = computed(() =>
   ),
 );
 const sharedItems = computed(() =>
-  items.value.filter((item) => item.visibility !== "PRIVATE"),
+  items.value.filter((item) => item.visibility === "PARTIES"),
 );
 const effectiveDeadline = computed(
   () =>
@@ -132,35 +134,61 @@ const evidenceTypeLabels = {
 };
 
 async function load() {
+  const generation = workspaceGeneration;
+  const actorSnapshot = { ...effectiveActor.value };
+  const caseSnapshot = caseId.value;
   try {
     if (catalog.value === null) {
-      catalog.value = await evidenceApi.catalog(effectiveActor.value, caseId.value);
+      const nextCatalog = await evidenceApi.catalog(actorSnapshot, caseSnapshot);
+      if (!isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) return;
+      catalog.value = nextCatalog;
     }
     if (completion.value === null) {
-      completion.value = await evidenceApi.completion(effectiveActor.value, caseId.value);
+      const nextCompletion = await evidenceApi.completion(actorSnapshot, caseSnapshot);
+      if (!isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) return;
+      completion.value = nextCompletion;
     }
     if (props.initialMessages === null) {
-      messages.value = await roomApi.messages(
-        effectiveActor.value,
-        caseId.value,
+      const nextMessages = await roomApi.messages(
+        actorSnapshot,
+        caseSnapshot,
         "EVIDENCE",
       );
+      if (!isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) return;
+      messages.value = nextMessages;
     }
   } catch (failure) {
+    if (!isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) return;
     error.value = failure.message;
     agentState.value = "ERROR";
   }
 }
 
-async function refreshWorkspace() {
+function isCurrentWorkspace(generation, actorSnapshot, caseSnapshot) {
+  return (
+    generation === workspaceGeneration &&
+    caseSnapshot === caseId.value &&
+    actorSnapshot.id === effectiveActor.value.id &&
+    actorSnapshot.role === effectiveActor.value.role
+  );
+}
+
+async function refreshWorkspace(options = {}) {
+  const generation = options.generation ?? workspaceGeneration;
+  const actorSnapshot = { ...effectiveActor.value };
+  const caseSnapshot = caseId.value;
   const [nextCatalog, nextCompletion, nextMessages] = await Promise.all([
-    evidenceApi.catalog(effectiveActor.value, caseId.value),
-    evidenceApi.completion(effectiveActor.value, caseId.value),
-    roomApi.messages(effectiveActor.value, caseId.value, "EVIDENCE"),
+    evidenceApi.catalog(actorSnapshot, caseSnapshot),
+    evidenceApi.completion(actorSnapshot, caseSnapshot),
+    roomApi.messages(actorSnapshot, caseSnapshot, "EVIDENCE"),
   ]);
+  if (!isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) {
+    return false;
+  }
   catalog.value = nextCatalog;
   completion.value = nextCompletion;
   messages.value = nextMessages;
+  return true;
 }
 
 function nextLocalSequence() {
@@ -243,15 +271,24 @@ async function postMessage(command) {
 }
 
 function startEventStream() {
+  if (eventStreamActive) {
+    eventAbortController.abort();
+    eventAbortController = new AbortController();
+  }
+  eventStreamActive = true;
   const streamer = props.eventStreamer || streamRoomEvents;
+  const generation = workspaceGeneration;
+  const actorSnapshot = { ...effectiveActor.value };
+  const caseSnapshot = caseId.value;
   void streamer({
-    actor: effectiveActor.value,
-    caseId: caseId.value,
+    actor: actorSnapshot,
+    caseId: caseSnapshot,
     roomType: "EVIDENCE",
     state: eventState,
     signal: eventAbortController.signal,
-    snapshotLoader: refreshWorkspace,
+    snapshotLoader: () => refreshWorkspace({ generation }),
     applyEvent: async (event) => {
+      if (!isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) return;
       if (event.event === "HEARING_OPENED") {
         completion.value = {
           ...(completion.value || {}),
@@ -347,12 +384,21 @@ onMounted(async () => {
 });
 watch(role, async (nextRole, previousRole) => {
   if (!previousRole || nextRole === previousRole) return;
+  workspaceGeneration += 1;
+  const generation = workspaceGeneration;
   error.value = "";
   agentState.value = "THINKING";
+  catalog.value = null;
+  completion.value = null;
+  messages.value = [];
+  if (eventStreamActive) {
+    startEventStream();
+  }
   try {
-    await refreshWorkspace();
+    await refreshWorkspace({ generation });
     agentState.value = "LISTENING";
   } catch (failure) {
+    if (generation !== workspaceGeneration) return;
     error.value = failure.message;
     agentState.value = "ERROR";
   }

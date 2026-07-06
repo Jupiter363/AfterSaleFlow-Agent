@@ -1,5 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
-import { createRoomState, resumeRoomEvents } from "./room";
+import { createRoomState, resumeRoomEvents, streamRoomEvents } from "./room";
+
+vi.mock("../api/rooms", () => ({
+  consumeCaseEvents: vi.fn(),
+  roomApi: {
+    messages: vi.fn(),
+  },
+}));
+
+import { consumeCaseEvents } from "../api/rooms";
 
 describe("room event recovery", () => {
   it("reloads the authoritative snapshot before applying replayed events", async () => {
@@ -83,5 +92,70 @@ describe("room event recovery", () => {
 
     expect(consumedCursors).toEqual([0, 0, 13]);
     expect(state.lastEventIds).toEqual({ CASE_A: 13, CASE_B: 2 });
+  });
+
+  it("isolates durable cursors by case, room and actor for room streams", async () => {
+    const state = createRoomState();
+    const consumedCursors = [];
+    const userAbort = new AbortController();
+    const merchantAbort = new AbortController();
+    const userAgainAbort = new AbortController();
+    consumeCaseEvents
+      .mockImplementationOnce(async ({ lastEventId, onEvent }) => {
+        consumedCursors.push(lastEventId);
+        await onEvent({ id: 17, event: "ROOM_MESSAGE_CREATED", data: {} });
+        return 17;
+      })
+      .mockImplementationOnce(async ({ lastEventId, onEvent }) => {
+        consumedCursors.push(lastEventId);
+        await onEvent({ id: 3, event: "ROOM_MESSAGE_CREATED", data: {} });
+        return 3;
+      })
+      .mockImplementationOnce(async ({ lastEventId }) => {
+        consumedCursors.push(lastEventId);
+        userAgainAbort.abort();
+        return 17;
+      });
+    const snapshotLoader = vi.fn();
+    const runOnce = (abortController) => async () => {
+      abortController.abort();
+    };
+
+    await streamRoomEvents({
+      actor: { id: "user-local", role: "USER" },
+      caseId: "CASE_A",
+      roomType: "EVIDENCE",
+      state,
+      signal: userAbort.signal,
+      snapshotLoader,
+      applyEvent: runOnce(userAbort),
+      retryDelayMs: 0,
+    });
+    await streamRoomEvents({
+      actor: { id: "merchant-local", role: "MERCHANT" },
+      caseId: "CASE_A",
+      roomType: "EVIDENCE",
+      state,
+      signal: merchantAbort.signal,
+      snapshotLoader,
+      applyEvent: runOnce(merchantAbort),
+      retryDelayMs: 0,
+    });
+    await streamRoomEvents({
+      actor: { id: "user-local", role: "USER" },
+      caseId: "CASE_A",
+      roomType: "EVIDENCE",
+      state,
+      signal: userAgainAbort.signal,
+      snapshotLoader,
+      applyEvent: runOnce(userAgainAbort),
+      retryDelayMs: 0,
+    });
+
+    expect(consumedCursors).toEqual([0, 0, 17]);
+    expect(state.lastEventIds).toEqual({
+      "CASE_A:EVIDENCE:user-local:USER": 17,
+      "CASE_A:EVIDENCE:merchant-local:MERCHANT": 3,
+    });
   });
 });

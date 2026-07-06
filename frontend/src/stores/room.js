@@ -68,6 +68,9 @@ export async function streamRoomEvents({
   snapshotLoader,
   retryDelayMs = 1200,
 }) {
+  const cursorKey = [caseId, roomType, actor?.id, actor?.role]
+    .filter(Boolean)
+    .join(":");
   while (!signal?.aborted) {
     try {
       await resumeRoomEvents({
@@ -81,9 +84,9 @@ export async function streamRoomEvents({
             caseId,
             signal,
             ...options,
-          }),
+        }),
         applyEvent,
-        cursorKey: caseId,
+        cursorKey,
       });
     } catch (error) {
       if (signal?.aborted) break;
