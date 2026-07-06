@@ -161,6 +161,23 @@ const confidenceLabels = {
   UNKNOWN: "待评分",
 };
 
+const fileIconCatalog = {
+  pdf: { kind: "pdf", badge: "PDF", label: "PDF 文档材料" },
+  word: { kind: "word", badge: "DOC", label: "Word 文档材料" },
+  markdown: { kind: "markdown", badge: "MD", label: "Markdown 文档材料" },
+  text: { kind: "text", badge: "TXT", label: "文本材料" },
+  document: { kind: "document", badge: "DOC", label: "文档材料" },
+  image: { kind: "image", badge: "IMG", label: "图片材料" },
+  video: { kind: "video", badge: "VID", label: "视频材料" },
+  other: { kind: "other", badge: "FILE", label: "其他材料" },
+};
+
+const imageExtensions = new Set(["png", "jpg", "jpeg", "webp", "gif", "bmp", "svg"]);
+const videoExtensions = new Set(["mp4", "mov", "avi", "webm", "mkv", "m4v"]);
+const wordExtensions = new Set(["doc", "docx"]);
+const markdownExtensions = new Set(["md", "markdown"]);
+const textExtensions = new Set(["txt", "csv", "log"]);
+
 function evidenceField(item, snakeCaseKey, camelCaseKey, fallback = "") {
   return item?.[snakeCaseKey] ?? item?.[camelCaseKey] ?? fallback;
 }
@@ -238,6 +255,41 @@ function evidenceParsedText(item) {
 
 function evidenceOriginalFilename(item) {
   return evidenceField(item, "original_filename", "originalFilename", "");
+}
+
+function evidenceFileSourceName(item) {
+  return evidenceOriginalFilename(item) || evidenceField(item, "content_url", "contentUrl", "");
+}
+
+function fileExtension(value) {
+  const cleanValue = String(value || "").split(/[?#]/)[0];
+  const fileName = cleanValue.split(/[\\/]/).pop() || "";
+  const lastDotIndex = fileName.lastIndexOf(".");
+  if (lastDotIndex <= 0 || lastDotIndex === fileName.length - 1) return "";
+  return fileName.slice(lastDotIndex + 1).toLowerCase();
+}
+
+function evidenceFileIcon(item) {
+  const extension = fileExtension(evidenceFileSourceName(item));
+  const evidenceType = String(evidenceField(item, "evidence_type", "evidenceType", "")).toUpperCase();
+  if (extension === "pdf") return fileIconCatalog.pdf;
+  if (wordExtensions.has(extension)) return fileIconCatalog.word;
+  if (markdownExtensions.has(extension)) return fileIconCatalog.markdown;
+  if (textExtensions.has(extension)) return fileIconCatalog.text;
+  if (imageExtensions.has(extension) || ["IMAGE", "CHAT_SCREENSHOT"].includes(evidenceType)) {
+    return fileIconCatalog.image;
+  }
+  if (videoExtensions.has(extension) || evidenceType === "VIDEO") return fileIconCatalog.video;
+  if (["DOCUMENT", "DELIVERY_RECORD", "LOGISTICS_PROOF"].includes(evidenceType)) {
+    return fileIconCatalog.document;
+  }
+  return fileIconCatalog.other;
+}
+
+function evidenceFileIconStatusClass(item) {
+  return evidenceSubmissionStatus(item) === "PENDING_SUBMISSION"
+    ? "evidence-file-icon--pending"
+    : "evidence-file-icon--submitted";
 }
 
 function openEvidenceDetail(item) {
@@ -788,7 +840,21 @@ onBeforeUnmount(() => eventAbortController.abort());
               >
                 ×
               </button>
-              <span class="evidence-card__icon">📥</span>
+              <span
+                class="evidence-card__icon evidence-file-icon"
+                :class="evidenceFileIconStatusClass(item)"
+                :data-file-kind="evidenceFileIcon(item).kind"
+                :aria-label="evidenceFileIcon(item).label"
+              >
+                <span class="evidence-file-icon__body" aria-hidden="true">
+                  <span class="evidence-file-icon__landscape"></span>
+                  <span class="evidence-file-icon__play"></span>
+                  <span class="evidence-file-icon__lines"></span>
+                </span>
+                <span class="evidence-file-icon__badge" data-file-badge>
+                  {{ evidenceFileIcon(item).badge }}
+                </span>
+              </span>
               <span class="evidence-card__main">
                 <strong>{{ evidenceTypeLabels[item.evidence_type] || item.evidence_type }}</strong>
                 <small>{{ evidenceOriginalFilename(item) || evidenceId(item) }}</small>
@@ -831,7 +897,22 @@ onBeforeUnmount(() => eventAbortController.abort());
               data-evidence-card
               @click="openEvidenceDetail(item)"
             >
-              <span class="evidence-card__icon">🔐</span>
+              <span
+                class="evidence-card__icon evidence-file-icon"
+                :class="evidenceFileIconStatusClass(item)"
+                :data-file-kind="evidenceFileIcon(item).kind"
+                :aria-label="evidenceFileIcon(item).label"
+              >
+                <span class="evidence-file-icon__body" aria-hidden="true">
+                  <span class="evidence-file-icon__landscape"></span>
+                  <span class="evidence-file-icon__play"></span>
+                  <span class="evidence-file-icon__lines"></span>
+                </span>
+                <span class="evidence-file-icon__badge" data-file-badge>
+                  {{ evidenceFileIcon(item).badge }}
+                </span>
+                <span class="evidence-file-icon__lock" aria-hidden="true"></span>
+              </span>
               <span class="evidence-card__main">
                 <strong>{{ evidenceTypeLabels[item.evidence_type] || item.evidence_type }}</strong>
                 <small>{{ evidenceOriginalFilename(item) || evidenceId(item) }}</small>
@@ -975,8 +1056,25 @@ onBeforeUnmount(() => eventAbortController.abort());
             data-evidence-gallery-card
             @click="openEvidenceDetail(item)"
           >
-            <span class="evidence-card__icon">
-              {{ evidenceSubmissionStatus(item) === "SUBMITTED" ? "🔒" : "📥" }}
+            <span
+              class="evidence-card__icon evidence-file-icon evidence-file-icon--large"
+              :class="evidenceFileIconStatusClass(item)"
+              :data-file-kind="evidenceFileIcon(item).kind"
+              :aria-label="evidenceFileIcon(item).label"
+            >
+              <span class="evidence-file-icon__body" aria-hidden="true">
+                <span class="evidence-file-icon__landscape"></span>
+                <span class="evidence-file-icon__play"></span>
+                <span class="evidence-file-icon__lines"></span>
+              </span>
+              <span class="evidence-file-icon__badge" data-file-badge>
+                {{ evidenceFileIcon(item).badge }}
+              </span>
+              <span
+                v-if="evidenceSubmissionStatus(item) === 'SUBMITTED'"
+                class="evidence-file-icon__lock"
+                aria-hidden="true"
+              ></span>
             </span>
             <strong>{{ evidenceOriginalFilename(item) || evidenceId(item) }}</strong>
             <small>{{ evidenceSubmissionStatusLabel(item) }} · {{ statusLabels[item.verification_status] || item.verification_status || "待核验" }}</small>
@@ -1262,13 +1360,195 @@ onBeforeUnmount(() => eventAbortController.abort());
 }
 
 .evidence-card__icon {
+  position: relative;
   display: grid;
   place-items: center;
-  width: 36px;
-  height: 36px;
-  background: #f4f7fb;
-  border-radius: 12px;
-  font-size: 18px;
+  width: 42px;
+  height: 44px;
+  overflow: visible;
+  background: linear-gradient(145deg, var(--file-tint, #f4f7fb), #fff);
+  border: 1px solid var(--file-border, #dbe5f1);
+  border-radius: 15px;
+  box-shadow: inset 0 1px 0 #ffffffd9, 0 8px 18px #5b749014;
+}
+
+.evidence-file-icon--pending {
+  border-style: dashed;
+}
+
+.evidence-file-icon--large {
+  width: 58px;
+  height: 62px;
+  margin-bottom: 2px;
+  justify-self: start;
+}
+
+.evidence-file-icon[data-file-kind="pdf"] {
+  --file-accent: #e86d54;
+  --file-tint: #fff0ec;
+  --file-border: #ffd0c6;
+}
+
+.evidence-file-icon[data-file-kind="word"] {
+  --file-accent: #4d83df;
+  --file-tint: #edf5ff;
+  --file-border: #caddff;
+}
+
+.evidence-file-icon[data-file-kind="markdown"],
+.evidence-file-icon[data-file-kind="text"],
+.evidence-file-icon[data-file-kind="document"] {
+  --file-accent: #7766d8;
+  --file-tint: #f2efff;
+  --file-border: #ddd6ff;
+}
+
+.evidence-file-icon[data-file-kind="image"] {
+  --file-accent: #30a99b;
+  --file-tint: #eafbf6;
+  --file-border: #bfeee2;
+}
+
+.evidence-file-icon[data-file-kind="video"] {
+  --file-accent: #d56a9c;
+  --file-tint: #fff0f7;
+  --file-border: #ffd0e3;
+}
+
+.evidence-file-icon[data-file-kind="other"] {
+  --file-accent: #7890aa;
+  --file-tint: #f3f7fb;
+  --file-border: #dbe5ef;
+}
+
+.evidence-file-icon__body {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 25px;
+  height: 30px;
+  overflow: hidden;
+  background: #fff;
+  border: 1px solid color-mix(in srgb, var(--file-accent, #7890aa) 28%, #ffffff);
+  border-radius: 7px 7px 8px 8px;
+}
+
+.evidence-file-icon__body::before {
+  position: absolute;
+  top: -1px;
+  right: -1px;
+  width: 9px;
+  height: 9px;
+  content: "";
+  background: linear-gradient(135deg, #ffffff 0 48%, var(--file-accent, #7890aa) 50% 100%);
+  border-left: 1px solid color-mix(in srgb, var(--file-accent, #7890aa) 24%, #ffffff);
+  border-bottom: 1px solid color-mix(in srgb, var(--file-accent, #7890aa) 24%, #ffffff);
+  border-radius: 0 0 0 4px;
+}
+
+.evidence-file-icon__lines {
+  display: grid;
+  width: 14px;
+  height: 12px;
+  gap: 3px;
+}
+
+.evidence-file-icon__lines::before,
+.evidence-file-icon__lines::after {
+  display: block;
+  height: 2px;
+  content: "";
+  background: color-mix(in srgb, var(--file-accent, #7890aa) 70%, #ffffff);
+  border-radius: 999px;
+}
+
+.evidence-file-icon__landscape,
+.evidence-file-icon__play {
+  display: none;
+}
+
+.evidence-file-icon[data-file-kind="image"] .evidence-file-icon__body,
+.evidence-file-icon[data-file-kind="video"] .evidence-file-icon__body {
+  width: 28px;
+  height: 24px;
+  border-radius: 8px;
+}
+
+.evidence-file-icon[data-file-kind="image"] .evidence-file-icon__body::before,
+.evidence-file-icon[data-file-kind="video"] .evidence-file-icon__body::before {
+  display: none;
+}
+
+.evidence-file-icon[data-file-kind="image"] .evidence-file-icon__lines,
+.evidence-file-icon[data-file-kind="video"] .evidence-file-icon__lines {
+  display: none;
+}
+
+.evidence-file-icon[data-file-kind="image"] .evidence-file-icon__landscape {
+  position: absolute;
+  inset: 5px;
+  display: block;
+  background:
+    radial-gradient(circle at 78% 25%, #ffd36f 0 3px, transparent 4px),
+    linear-gradient(135deg, transparent 48%, color-mix(in srgb, var(--file-accent) 78%, #ffffff) 49% 72%, transparent 73%),
+    linear-gradient(45deg, transparent 34%, color-mix(in srgb, var(--file-accent) 55%, #ffffff) 35% 62%, transparent 63%);
+  border-radius: 5px;
+}
+
+.evidence-file-icon[data-file-kind="video"] .evidence-file-icon__body {
+  background:
+    repeating-linear-gradient(90deg, #ffffff 0 5px, color-mix(in srgb, var(--file-accent) 12%, #ffffff) 5px 8px),
+    #fff;
+}
+
+.evidence-file-icon[data-file-kind="video"] .evidence-file-icon__play {
+  display: block;
+  width: 0;
+  height: 0;
+  margin-left: 2px;
+  border-top: 6px solid transparent;
+  border-bottom: 6px solid transparent;
+  border-left: 10px solid var(--file-accent, #d56a9c);
+}
+
+.evidence-file-icon__badge {
+  position: absolute;
+  right: -4px;
+  bottom: -4px;
+  padding: 2px 4px;
+  color: #fff;
+  background: var(--file-accent, #7890aa);
+  border: 1px solid #ffffffd9;
+  border-radius: 7px;
+  box-shadow: 0 4px 10px #33435c1a;
+  font-size: 8px;
+  font-weight: 900;
+  letter-spacing: .02em;
+  line-height: 1;
+}
+
+.evidence-file-icon__lock {
+  position: absolute;
+  top: -4px;
+  right: -3px;
+  width: 12px;
+  height: 10px;
+  background: #fff;
+  border: 1px solid color-mix(in srgb, var(--file-accent, #7890aa) 35%, #ffffff);
+  border-radius: 3px;
+  box-shadow: 0 3px 8px #445b781a;
+}
+
+.evidence-file-icon__lock::before {
+  position: absolute;
+  left: 2px;
+  top: -7px;
+  width: 6px;
+  height: 8px;
+  content: "";
+  border: 1.5px solid color-mix(in srgb, var(--file-accent, #7890aa) 72%, #ffffff);
+  border-bottom: 0;
+  border-radius: 999px 999px 0 0;
 }
 
 .evidence-card__main,

@@ -141,6 +141,9 @@ onMounted(() => {
 
 <style scoped>
 .conversation-stream {
+  --conversation-message-font-size: 13px;
+  --conversation-message-body-font-size: 12.5px;
+  --conversation-message-meta-font-size: 10.5px;
   display: grid;
   grid-template-rows: minmax(0, 1fr) auto;
   gap: 14px;
@@ -158,6 +161,7 @@ onMounted(() => {
 .conversation-stream__message {
   max-width: 82%;
   padding: 13px 15px;
+  font-size: var(--conversation-message-font-size);
   background: #fff;
   border: 1px solid #e1e8f4;
   border-radius: 18px 18px 18px 6px;
@@ -177,8 +181,12 @@ onMounted(() => {
 .conversation-stream__message--intake_officer { background: #fffaf1; }
 .conversation-stream__message--platform_reviewer { background: #f4efff; }
 .conversation-stream__message header { display: flex; justify-content: space-between; gap: 12px; }
-.conversation-stream__message small { color: #8a96aa; }
-.conversation-stream__message p { margin: 7px 0 0; line-height: 1.6; }
+.conversation-stream__message small { color: #8a96aa; font-size: var(--conversation-message-meta-font-size); }
+.conversation-stream__message p {
+  margin: 7px 0 0;
+  font-size: var(--conversation-message-body-font-size);
+  line-height: 1.55;
+}
 .conversation-stream__empty {
   padding: 28px;
   text-align: center;
@@ -201,6 +209,8 @@ onMounted(() => {
   width: 100%;
   padding: 10px;
   resize: vertical;
+  font-size: 13px;
+  line-height: 1.5;
   color: #25344c;
   background: #f8fbff;
   border: 0;

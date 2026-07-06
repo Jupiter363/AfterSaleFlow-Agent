@@ -227,6 +227,61 @@ describe("EvidenceRoomView", () => {
     expect(wrapper.find("[data-evidence-detail-modal]").exists()).toBe(false);
   });
 
+  it("uses reusable document image and video icons for evidence files", async () => {
+    const iconCatalog = {
+      ...catalog,
+      items: [
+        {
+          ...catalog.items[0],
+          evidence_id: "EVIDENCE_ICON_PDF",
+          evidence_type: "DOCUMENT",
+          original_filename: "物流签收证明.pdf",
+          content_url: "/objects/delivery-proof.pdf",
+        },
+        {
+          ...catalog.items[0],
+          evidence_id: "EVIDENCE_ICON_WORD",
+          evidence_type: "DOCUMENT",
+          original_filename: "商家质检说明.docx",
+          content_url: "/objects/merchant-qc.docx",
+        },
+        {
+          ...catalog.items[0],
+          evidence_id: "EVIDENCE_ICON_MD",
+          evidence_type: "DOCUMENT",
+          original_filename: "客服对话记录.md",
+          content_url: "/objects/chat-record.md",
+        },
+        {
+          ...catalog.items[0],
+          evidence_id: "EVIDENCE_ICON_IMAGE",
+          evidence_type: "IMAGE",
+          original_filename: "开箱划痕照片.png",
+          content_url: "/objects/scratch-photo.png",
+        },
+        {
+          ...catalog.items[0],
+          evidence_id: "EVIDENCE_ICON_VIDEO",
+          evidence_type: "VIDEO",
+          original_filename: "发货质检视频.mp4",
+          content_url: "/objects/qc-video.mp4",
+        },
+      ],
+    };
+    const { wrapper } = await mountView({ initialCatalog: iconCatalog });
+
+    expect(wrapper.find('[data-file-kind="pdf"]').exists()).toBe(true);
+    expect(wrapper.find('[data-file-kind="word"]').exists()).toBe(true);
+    expect(wrapper.find('[data-file-kind="markdown"]').exists()).toBe(true);
+    expect(wrapper.find('[data-file-kind="image"]').exists()).toBe(true);
+    expect(wrapper.find('[data-file-kind="video"]').exists()).toBe(true);
+    expect(
+      wrapper
+        .findAll("[data-file-badge]")
+        .map((node) => node.text()),
+    ).toEqual(expect.arrayContaining(["PDF", "DOC", "MD", "IMG", "VID"]));
+  });
+
   it("ensures the evidence clerk opens the first actor-scoped turn only for an empty thread", async () => {
     roomApi.messages.mockResolvedValueOnce([]);
     roomApi.messages.mockResolvedValueOnce([

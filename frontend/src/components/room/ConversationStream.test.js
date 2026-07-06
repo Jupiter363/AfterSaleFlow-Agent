@@ -159,6 +159,13 @@ describe("ConversationStream", () => {
     expect(source).toContain("overflow-y: auto;");
   });
 
+  it("uses a compact message typography scale for dense room conversations", () => {
+    const source = readFileSync("src/components/room/ConversationStream.vue", "utf8");
+
+    expect(source).toContain("--conversation-message-font-size: 13px;");
+    expect(source).toContain("--conversation-message-body-font-size: 12.5px;");
+  });
+
   it("automatically scrolls to the latest message when history changes", () => {
     const source = readFileSync("src/components/room/ConversationStream.vue", "utf8");
 
