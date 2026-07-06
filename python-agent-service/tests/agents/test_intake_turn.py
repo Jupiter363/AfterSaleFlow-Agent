@@ -36,16 +36,71 @@ def _headers() -> dict[str, str]:
     }
 
 
+def _agent_context(
+    case_id: str,
+    *,
+    actor_id: str = "USER_local_1",
+    actor_role: str = "USER",
+    agent_session_id: str | None = None,
+) -> dict[str, object]:
+    resolved_session_id = agent_session_id or f"SESSION_{case_id}_user_intake"
+    access_session_id = f"ACCESS_{case_id}_{actor_role}"
+    prompt_profile_id = f"DISPUTE_INTAKE_OFFICER:{actor_role}:v1"
+    return {
+        "tenant_id": "default",
+        "case_id": case_id,
+        "room_type": "INTAKE",
+        "actor_id": actor_id,
+        "actor_role": actor_role,
+        "access_session_id": access_session_id,
+        "permission_level": "PARTY_USER" if actor_role == "USER" else "PARTY_MERCHANT",
+        "permission_scopes": [],
+        "agent_key": "DISPUTE_INTAKE_OFFICER",
+        "agent_invocation_id": f"INVOCATION_{case_id}",
+        "agent_session_id": resolved_session_id,
+        "conversation_scope": (
+            f"default:{case_id}:INTAKE:{actor_id}:{actor_role}:"
+            f"DISPUTE_INTAKE_OFFICER:{prompt_profile_id}:{access_session_id}"
+        ),
+        "scope_type": "INTAKE_INITIATOR_PRIVATE",
+        "allowed_actor_ids": [actor_id],
+        "allowed_actor_roles": [actor_role],
+        "prompt_profile_id": prompt_profile_id,
+        "memory_policy_id": "MEMORY_POLICY_INTAKE_V1",
+    }
+
+
+def _with_agent_context(payload: dict[str, object]) -> dict[str, object]:
+    context = _agent_context(str(payload["case_id"]))
+    payload["agent_context"] = context
+    for turn in payload.get("recent_turns") or []:
+        if isinstance(turn, dict):
+            turn.setdefault("agent_session_id", context["agent_session_id"])
+            turn.setdefault("conversation_scope", context["conversation_scope"])
+    return payload
+
+
 class FakeCaseDetailRunner:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
 
-    def invoke_structured(self, *, node_name, case_data, output_type, context_sections):
+    def invoke_structured(
+        self,
+        *,
+        node_name,
+        case_data,
+        output_type,
+        context_sections,
+        agent_context=None,
+        prompt_profile_id=None,
+    ):
         self.calls.append(
             {
                 "node_name": node_name,
                 "case_data": case_data,
                 "context_sections": context_sections,
+                "agent_context": agent_context,
+                "prompt_profile_id": prompt_profile_id,
             }
         )
         return SimpleNamespace(
@@ -124,7 +179,8 @@ def test_intake_turn_workflow_uses_agent_case_detail_node_and_memory_context() -
 
     result = workflow.run(
         IntakeTurnRequest.model_validate(
-            {
+            _with_agent_context(
+                {
                 "case_id": "CASE_intake_turn_llm",
                 "room_type": "INTAKE",
                 "turn_source": "USER_MESSAGE",
@@ -151,11 +207,16 @@ def test_intake_turn_workflow_uses_agent_case_detail_node_and_memory_context() -
                         "scroll_snapshot": {},
                     }
                 ],
-            }
+                }
+            )
         )
     )
 
     assert runner.calls[0]["node_name"] == "intake_turn_case_detail"
+    assert runner.calls[0]["agent_context"]["agent_session_id"] == (
+        "SESSION_CASE_intake_turn_llm_user_intake"
+    )
+    assert runner.calls[0]["prompt_profile_id"] == "DISPUTE_INTAKE_OFFICER:USER:v1"
     section_names = {
         section.name for section in runner.calls[0]["context_sections"]  # type: ignore[index]
     }
@@ -171,7 +232,7 @@ def test_fallback_lobby_seed_turn_generates_case_detail_board() -> None:
     response = client.post(
         "/internal/agents/intake/turn",
         headers=_headers(),
-        json={
+        json=_with_agent_context({
             "case_id": "CASE_intake_turn_seed",
             "room_type": "INTAKE",
             "turn_source": "LOBBY_SEED",
@@ -186,7 +247,7 @@ def test_fallback_lobby_seed_turn_generates_case_detail_board() -> None:
             "current_user_message": None,
             "latest_scroll_snapshot": None,
             "recent_turns": [],
-        },
+        }),
     )
 
     assert response.status_code == 200
@@ -207,7 +268,7 @@ def test_user_message_turn_merges_previous_case_detail_board() -> None:
     response = client.post(
         "/internal/agents/intake/turn",
         headers=_headers(),
-        json={
+        json=_with_agent_context({
             "case_id": "CASE_intake_turn_memory",
             "room_type": "INTAKE",
             "turn_source": "USER_MESSAGE",
@@ -234,7 +295,7 @@ def test_user_message_turn_merges_previous_case_detail_board() -> None:
                 },
             },
             "recent_turns": [],
-        },
+        }),
     )
 
     assert response.status_code == 200
@@ -250,7 +311,7 @@ def test_user_message_turn_extracts_logistics_reference_from_current_message() -
     response = client.post(
         "/internal/agents/intake/turn",
         headers=_headers(),
-        json={
+        json=_with_agent_context({
             "case_id": "CASE_intake_turn_logistics_ref",
             "room_type": "INTAKE",
             "turn_source": "USER_MESSAGE",
@@ -270,7 +331,7 @@ def test_user_message_turn_extracts_logistics_reference_from_current_message() -
             },
             "latest_scroll_snapshot": None,
             "recent_turns": [],
-        },
+        }),
     )
 
     assert response.status_code == 200
@@ -313,7 +374,7 @@ def test_intake_turn_response_exposes_memeo_memory_frame() -> None:
     response = client.post(
         "/internal/agents/intake/turn",
         headers=_headers(),
-        json={
+        json=_with_agent_context({
             "case_id": "CASE_intake_turn_memory_frame",
             "room_type": "INTAKE",
             "turn_source": "USER_MESSAGE",
@@ -329,7 +390,7 @@ def test_intake_turn_response_exposes_memeo_memory_frame() -> None:
             },
             "latest_scroll_snapshot": None,
             "recent_turns": recent_turns,
-        },
+        }),
     )
 
     assert response.status_code == 200
@@ -352,7 +413,7 @@ def test_process_question_marks_knowledge_query_intent_without_real_rag() -> Non
     response = client.post(
         "/internal/agents/intake/turn",
         headers=_headers(),
-        json={
+        json=_with_agent_context({
             "case_id": "CASE_intake_turn_qa",
             "room_type": "INTAKE",
             "turn_source": "USER_MESSAGE",
@@ -367,7 +428,7 @@ def test_process_question_marks_knowledge_query_intent_without_real_rag() -> Non
             },
             "latest_scroll_snapshot": None,
             "recent_turns": [],
-        },
+        }),
     )
 
     assert response.status_code == 200
@@ -383,7 +444,7 @@ def test_intake_turn_route_requires_service_secret() -> None:
     response = client.post(
         "/internal/agents/intake/turn",
         headers={"X-Service-Secret": "wrong-secret"},
-        json={
+        json=_with_agent_context({
             "case_id": "CASE_intake_turn_auth",
             "room_type": "INTAKE",
             "turn_source": "LOBBY_SEED",
@@ -394,7 +455,7 @@ def test_intake_turn_route_requires_service_secret() -> None:
             "current_user_message": None,
             "latest_scroll_snapshot": None,
             "recent_turns": [],
-        },
+        }),
     )
 
     assert response.status_code == 401

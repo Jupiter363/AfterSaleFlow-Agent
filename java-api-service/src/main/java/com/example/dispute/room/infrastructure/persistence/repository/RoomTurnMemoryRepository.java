@@ -14,14 +14,29 @@ public interface RoomTurnMemoryRepository
             findTopByCaseIdAndRoomTypeAndAgentRoleIsNotNullOrderByTurnNoDesc(
                     String caseId, RoomType roomType);
 
+    Optional<RoomTurnMemoryEntity>
+            findTopByAgentSessionIdAndAgentRoleIsNotNullOrderByTurnNoDesc(
+                    String agentSessionId);
+
     List<RoomTurnMemoryEntity> findTop10ByCaseIdAndRoomTypeOrderByTurnNoDesc(
             String caseId, RoomType roomType);
 
     List<RoomTurnMemoryEntity> findTop50ByCaseIdAndRoomTypeOrderByTurnNoDesc(
             String caseId, RoomType roomType);
 
+    List<RoomTurnMemoryEntity> findTop10ByAgentSessionIdOrderByTurnNoDesc(
+            String agentSessionId);
+
+    List<RoomTurnMemoryEntity> findTop50ByAgentSessionIdOrderByTurnNoDesc(
+            String agentSessionId);
+
     @Query(
             "select coalesce(max(memory.turnNo), 0) from RoomTurnMemoryEntity memory "
                     + "where memory.caseId = :caseId and memory.roomType = :roomType")
     int findMaxTurnNo(String caseId, RoomType roomType);
+
+    @Query(
+            "select coalesce(max(memory.turnNo), 0) from RoomTurnMemoryEntity memory "
+                    + "where memory.agentSessionId = :agentSessionId")
+    int findMaxTurnNoByAgentSessionId(String agentSessionId);
 }

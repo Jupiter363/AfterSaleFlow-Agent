@@ -8,8 +8,10 @@ import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEnti
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.room.domain.MessageSenderType;
 import com.example.dispute.room.domain.MessageType;
+import com.example.dispute.room.domain.PermissionScope;
 import com.example.dispute.room.domain.RoomStatus;
 import com.example.dispute.room.domain.RoomType;
+import com.example.dispute.room.infrastructure.persistence.entity.CaseAccessSessionEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.RoomMessageEntity;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseParticipantRepository;
@@ -35,6 +37,8 @@ public class RoomMessageService {
     private final CaseEventService eventService;
     private final IntakeAgentTurnService intakeAgentTurnService;
     private final EvidenceAgentTurnService evidenceAgentTurnService;
+    private final AccessSessionResolver accessSessionResolver;
+    private final SessionPermissionService permissionService;
     private final Clock clock;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -46,6 +50,8 @@ public class RoomMessageService {
             CaseEventService eventService,
             IntakeAgentTurnService intakeAgentTurnService,
             EvidenceAgentTurnService evidenceAgentTurnService,
+            AccessSessionResolver accessSessionResolver,
+            SessionPermissionService permissionService,
             Clock clock) {
         this.caseRepository = caseRepository;
         this.roomRepository = roomRepository;
@@ -54,6 +60,8 @@ public class RoomMessageService {
         this.eventService = eventService;
         this.intakeAgentTurnService = intakeAgentTurnService;
         this.evidenceAgentTurnService = evidenceAgentTurnService;
+        this.accessSessionResolver = accessSessionResolver;
+        this.permissionService = permissionService;
         this.clock = clock;
     }
 
@@ -69,6 +77,9 @@ public class RoomMessageService {
                 caseRepository
                         .findByIdForUpdate(caseId)
                         .orElseThrow(() -> new IllegalArgumentException("case not found"));
+        CaseAccessSessionEntity accessSession = accessSessionResolver.resolve(caseId, actor);
+        permissionService.requireRoomRead(accessSession, roomType);
+        permissionService.require(accessSession, PermissionScope.ROOM_MESSAGE_WRITE);
         assertCanPost(dispute, roomType, actor, command.messageType());
         CaseRoomEntity requestedRoom =
                 roomRepository
@@ -100,6 +111,9 @@ public class RoomMessageService {
                 caseRepository
                         .findById(caseId)
                         .orElseThrow(() -> new IllegalArgumentException("case not found"));
+        CaseAccessSessionEntity accessSession = accessSessionResolver.resolve(caseId, actor);
+        permissionService.requireRoomRead(accessSession, roomType);
+        permissionService.require(accessSession, PermissionScope.ROOM_MESSAGE_READ);
         assertCanRead(dispute, actor);
         CaseRoomEntity room =
                 roomRepository
@@ -112,7 +126,7 @@ public class RoomMessageService {
         }
         return messageRepository.findAllByRoomIdOrderBySequenceNoAsc(room.getId())
                 .stream()
-                .filter(message -> visibleTo(message, actor.role()))
+                .filter(message -> visibleTo(message, accessSession))
                 .map(this::view)
                 .toList();
     }
@@ -128,6 +142,8 @@ public class RoomMessageService {
             throw new IllegalStateException("room is not open");
         }
         String audienceJson = audience(room.getRoomType(), actor.role(), command.messageType());
+        String audienceActorIdsJson =
+                audienceActorIds(room.getRoomType(), actor, command.messageType());
         long sequence = messageRepository.findMaxSequenceByRoomId(room.getId()) + 1;
         RoomMessageEntity saved =
                 messageRepository.save(
@@ -140,6 +156,7 @@ public class RoomMessageService {
                                 actor.role().name(),
                                 actor.actorId(),
                                 audienceJson,
+                                audienceActorIdsJson,
                                 command.messageType(),
                                 command.text(),
                                 json(command.attachmentRefs()),
@@ -152,6 +169,7 @@ public class RoomMessageService {
                 saved.getId(),
                 saved.getMessageText(),
                 audienceJson,
+                audienceActorIdsJson,
                 actor.actorId());
         intakeAgentTurnService.continueFromParticipantMessage(
                 dispute.getId(),
@@ -256,15 +274,22 @@ public class RoomMessageService {
         }
     }
 
-    private boolean visibleTo(RoomMessageEntity message, ActorRole role) {
-        if (role == ActorRole.ADMIN || role == ActorRole.SYSTEM) {
+    private boolean visibleTo(RoomMessageEntity message, CaseAccessSessionEntity accessSession) {
+        if (accessSession.getActorRole() == ActorRole.ADMIN
+                || accessSession.getActorRole() == ActorRole.SYSTEM) {
             return true;
         }
         try {
             List<String> audiences =
                     objectMapper.readValue(
                             message.getAudienceJson(), new TypeReference<>() {});
-            return audiences.isEmpty() || audiences.contains(role.name());
+            if (!audiences.isEmpty() && !audiences.contains(accessSession.getActorRole().name())) {
+                return false;
+            }
+            List<String> audienceActorIds =
+                    objectMapper.readValue(
+                            message.getAudienceActorIdsJson(), new TypeReference<>() {});
+            return permissionService.canReadActorAudience(accessSession, audienceActorIds);
         } catch (JsonProcessingException exception) {
             throw new IllegalStateException("invalid message audience", exception);
         }
@@ -296,6 +321,19 @@ public class RoomMessageService {
                         ActorRole.PLATFORM_REVIEWER.name(),
                         ActorRole.ADMIN.name(),
                         ActorRole.SYSTEM.name()));
+    }
+
+    private String audienceActorIds(
+            RoomType roomType, AuthenticatedActor sender, MessageType messageType) {
+        if (roomType == RoomType.INTAKE && isParty(sender.role())) {
+            return json(List.of(sender.actorId()));
+        }
+        if (roomType == RoomType.EVIDENCE
+                && isParty(sender.role())
+                && isEvidencePrivatePartyMessage(messageType)) {
+            return json(List.of(sender.actorId()));
+        }
+        return "[]";
     }
 
     private String json(Object value) {

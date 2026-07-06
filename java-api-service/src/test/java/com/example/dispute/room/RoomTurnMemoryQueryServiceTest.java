@@ -3,6 +3,8 @@ package com.example.dispute.room;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.lenient;
+import static org.mockito.ArgumentMatchers.any;
 
 import com.example.dispute.common.exception.ForbiddenException;
 import com.example.dispute.config.ActorRole;
@@ -11,8 +13,14 @@ import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.RiskLevel;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
+import com.example.dispute.room.application.AccessSessionResolver;
+import com.example.dispute.room.application.AgentSessionResolver;
 import com.example.dispute.room.application.RoomTurnMemoryQueryService;
+import com.example.dispute.room.application.SessionPermissionService;
+import com.example.dispute.room.domain.PermissionLevel;
 import com.example.dispute.room.domain.RoomType;
+import com.example.dispute.room.infrastructure.persistence.entity.AgentConversationSessionEntity;
+import com.example.dispute.room.infrastructure.persistence.entity.CaseAccessSessionEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseIntakeDossierEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.RoomTurnMemoryEntity;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseParticipantRepository;
@@ -35,6 +43,9 @@ class RoomTurnMemoryQueryServiceTest {
     @Mock private CaseParticipantRepository participantRepository;
     @Mock private RoomTurnMemoryRepository memoryRepository;
     @Mock private CaseIntakeDossierRepository intakeDossierRepository;
+    @Mock private AccessSessionResolver accessSessionResolver;
+    @Mock private AgentSessionResolver agentSessionResolver;
+    @Mock private SessionPermissionService permissionService;
 
     private RoomTurnMemoryQueryService service;
 
@@ -46,7 +57,27 @@ class RoomTurnMemoryQueryServiceTest {
                         participantRepository,
                         memoryRepository,
                         intakeDossierRepository,
+                        accessSessionResolver,
+                        agentSessionResolver,
+                        permissionService,
                         new ObjectMapper().findAndRegisterModules());
+        lenient()
+                .when(accessSessionResolver.resolve(any(), any()))
+                .thenAnswer(
+                        invocation ->
+                                accessSession(
+                                        invocation.getArgument(0),
+                                        invocation.getArgument(1)));
+        lenient()
+                .when(agentSessionResolver.resolve(any(), any(), any(), any(), any()))
+                .thenAnswer(
+                        invocation ->
+                                agentSession(
+                                        invocation.getArgument(0),
+                                        invocation.getArgument(1),
+                                        invocation.getArgument(2),
+                                        invocation.getArgument(3),
+                                        invocation.getArgument(4)));
     }
 
     @Test
@@ -54,8 +85,7 @@ class RoomTurnMemoryQueryServiceTest {
         FulfillmentCaseEntity dispute = intakeCase();
         when(caseRepository.findById(dispute.getId())).thenReturn(Optional.of(dispute));
         when(memoryRepository
-                        .findTopByCaseIdAndRoomTypeAndAgentRoleIsNotNullOrderByTurnNoDesc(
-                                dispute.getId(), RoomType.INTAKE))
+                        .findTopByAgentSessionIdAndAgentRoleIsNotNullOrderByTurnNoDesc(any()))
                 .thenReturn(
                         Optional.of(
                                 RoomTurnMemoryEntity.agentTurn(
@@ -101,9 +131,9 @@ class RoomTurnMemoryQueryServiceTest {
     void latestAgentMemoryRejectsActorsOutsideTheDispute() {
         FulfillmentCaseEntity dispute = intakeCase();
         when(caseRepository.findById(dispute.getId())).thenReturn(Optional.of(dispute));
-        when(participantRepository.existsByCaseIdAndActorIdAndParticipantRole(
-                        dispute.getId(), "other-user", ActorRole.USER))
-                .thenReturn(false);
+        when(accessSessionResolver.resolve(
+                        dispute.getId(), new AuthenticatedActor("other-user", ActorRole.USER)))
+                .thenThrow(new ForbiddenException("actor cannot create access session for this case"));
 
         assertThatThrownBy(
                         () ->
@@ -163,9 +193,8 @@ class RoomTurnMemoryQueryServiceTest {
                         "[]",
                         "RUN_MERCHANT");
         when(caseRepository.findById(dispute.getId())).thenReturn(Optional.of(dispute));
-        when(memoryRepository.findTop50ByCaseIdAndRoomTypeOrderByTurnNoDesc(
-                        dispute.getId(), RoomType.EVIDENCE))
-                .thenReturn(List.of(merchantClerk, merchantParticipant, userClerk, userParticipant));
+        when(memoryRepository.findTopByAgentSessionIdAndAgentRoleIsNotNullOrderByTurnNoDesc(any()))
+                .thenReturn(Optional.of(userClerk));
 
         var result =
                 service.latestAgentMemory(
@@ -178,6 +207,37 @@ class RoomTurnMemoryQueryServiceTest {
         assertThat(result.orElseThrow().agentResponse()).contains("用户侧书记官");
         assertThat(result.orElseThrow().agentResponse()).doesNotContain("商家侧书记官");
         assertThat(result.orElseThrow().memoryFrame().path("side").asText()).isEqualTo("USER");
+    }
+
+    private static CaseAccessSessionEntity accessSession(String caseId, AuthenticatedActor actor) {
+        PermissionLevel level =
+                actor.role() == ActorRole.MERCHANT
+                        ? PermissionLevel.PARTY_MERCHANT
+                        : PermissionLevel.PARTY_USER;
+        return CaseAccessSessionEntity.create(
+                "ACCESS_" + actor.actorId(),
+                "default",
+                caseId,
+                actor.actorId(),
+                actor.role(),
+                level,
+                actor.actorId());
+    }
+
+    private static AgentConversationSessionEntity agentSession(
+            CaseAccessSessionEntity accessSession,
+            RoomType roomType,
+            String agentKey,
+            String promptProfileId,
+            String memoryPolicyId) {
+        return AgentConversationSessionEntity.create(
+                "AGENT_SESSION_" + accessSession.getActorId() + "_" + roomType.name(),
+                accessSession,
+                roomType,
+                agentKey,
+                promptProfileId,
+                memoryPolicyId,
+                accessSession.getActorId());
     }
 
     private static FulfillmentCaseEntity intakeCase() {

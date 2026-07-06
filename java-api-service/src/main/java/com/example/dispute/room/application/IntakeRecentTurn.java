@@ -10,4 +10,6 @@ public record IntakeRecentTurn(
         @JsonProperty("answer_content") String answerContent,
         @JsonProperty("agent_role") String agentRole,
         @JsonProperty("agent_response") String agentResponse,
-        @JsonProperty("scroll_snapshot") JsonNode scrollSnapshot) {}
+        @JsonProperty("scroll_snapshot") JsonNode scrollSnapshot,
+        @JsonProperty("agent_session_id") String agentSessionId,
+        @JsonProperty("conversation_scope") String conversationScope) {}

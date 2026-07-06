@@ -15,7 +15,8 @@ public record EvidenceAgentTurnCommand(
         @JsonProperty("current_party_message") Message currentMessage,
         @JsonProperty("case_intake_dossier") JsonNode latestCaseIntakeDossier,
         @JsonProperty("available_evidence") List<AvailableEvidence> availableEvidence,
-        @JsonProperty("recent_turns") List<IntakeRecentTurn> recentTurns) {
+        @JsonProperty("recent_turns") List<IntakeRecentTurn> recentTurns,
+        @JsonProperty("agent_context") AgentInvocationContext agentContext) {
 
     public EvidenceAgentTurnCommand {
         availableEvidence =

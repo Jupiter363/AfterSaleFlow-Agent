@@ -42,6 +42,10 @@ public class RoomMessageEntity extends AbstractEntity {
     @Column(name = "audience_json", nullable = false, columnDefinition = "jsonb")
     private String audienceJson;
 
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "audience_actor_ids_json", nullable = false, columnDefinition = "jsonb")
+    private String audienceActorIdsJson;
+
     @Enumerated(EnumType.STRING)
     @Column(name = "message_type", length = 64, nullable = false)
     private MessageType messageType;
@@ -92,6 +96,40 @@ public class RoomMessageEntity extends AbstractEntity {
             String idempotencyKey,
             Instant createdAt,
             String traceId) {
+        return create(
+                id,
+                caseId,
+                roomId,
+                sequenceNo,
+                senderType,
+                senderRole,
+                senderId,
+                audienceJson,
+                "[]",
+                messageType,
+                messageText,
+                attachmentRefsJson,
+                idempotencyKey,
+                createdAt,
+                traceId);
+    }
+
+    public static RoomMessageEntity create(
+            String id,
+            String caseId,
+            String roomId,
+            long sequenceNo,
+            MessageSenderType senderType,
+            String senderRole,
+            String senderId,
+            String audienceJson,
+            String audienceActorIdsJson,
+            MessageType messageType,
+            String messageText,
+            String attachmentRefsJson,
+            String idempotencyKey,
+            Instant createdAt,
+            String traceId) {
         RoomMessageEntity entity = new RoomMessageEntity(required(id, "id"));
         entity.caseId = required(caseId, "caseId");
         entity.roomId = required(roomId, "roomId");
@@ -100,6 +138,7 @@ public class RoomMessageEntity extends AbstractEntity {
         entity.senderRole = required(senderRole, "senderRole");
         entity.senderId = required(senderId, "senderId");
         entity.audienceJson = required(audienceJson, "audienceJson");
+        entity.audienceActorIdsJson = required(audienceActorIdsJson, "audienceActorIdsJson");
         entity.messageType = Objects.requireNonNull(messageType);
         entity.messageText = messageText;
         entity.attachmentRefsJson = required(attachmentRefsJson, "attachmentRefsJson");
@@ -116,6 +155,7 @@ public class RoomMessageEntity extends AbstractEntity {
     public String getSenderRole() { return senderRole; }
     public String getSenderId() { return senderId; }
     public String getAudienceJson() { return audienceJson; }
+    public String getAudienceActorIdsJson() { return audienceActorIdsJson == null ? "[]" : audienceActorIdsJson; }
     public MessageType getMessageType() { return messageType; }
     public String getMessageText() { return messageText; }
     public String getAttachmentRefsJson() { return attachmentRefsJson; }

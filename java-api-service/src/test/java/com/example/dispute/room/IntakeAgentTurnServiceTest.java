@@ -3,6 +3,7 @@ package com.example.dispute.room;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -13,14 +14,20 @@ import com.example.dispute.domain.model.RiskLevel;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.room.application.CaseEventService;
+import com.example.dispute.room.application.AccessSessionResolver;
+import com.example.dispute.room.application.AgentSessionResolver;
 import com.example.dispute.room.application.IntakeAgentTurnClient;
 import com.example.dispute.room.application.IntakeAgentTurnCommand;
 import com.example.dispute.room.application.IntakeAgentTurnResult;
 import com.example.dispute.room.application.IntakeAgentTurnService;
 import com.example.dispute.room.application.IntakeLobbySeed;
 import com.example.dispute.room.application.RoomMessageCommand;
+import com.example.dispute.room.application.SessionPermissionService;
+import com.example.dispute.room.domain.PermissionLevel;
 import com.example.dispute.room.domain.MessageType;
 import com.example.dispute.room.domain.RoomType;
+import com.example.dispute.room.infrastructure.persistence.entity.AgentConversationSessionEntity;
+import com.example.dispute.room.infrastructure.persistence.entity.CaseAccessSessionEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseIntakeDossierEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.RoomTurnMemoryEntity;
@@ -57,6 +64,9 @@ class IntakeAgentTurnServiceTest {
     @Mock private CaseIntakeDossierRepository intakeDossierRepository;
     @Mock private RoomMessageRepository messageRepository;
     @Mock private CaseEventService eventService;
+    @Mock private AccessSessionResolver accessSessionResolver;
+    @Mock private AgentSessionResolver agentSessionResolver;
+    @Mock private SessionPermissionService permissionService;
     @Mock private IntakeAgentTurnClient client;
 
     private ObjectMapper objectMapper;
@@ -73,9 +83,29 @@ class IntakeAgentTurnServiceTest {
                         intakeDossierRepository,
                         messageRepository,
                         eventService,
+                        accessSessionResolver,
+                        agentSessionResolver,
+                        permissionService,
                         client,
                         objectMapper,
                         CLOCK);
+        lenient()
+                .when(accessSessionResolver.resolve(any(), any()))
+                .thenAnswer(
+                        invocation ->
+                                accessSession(
+                                        invocation.getArgument(0),
+                                        invocation.getArgument(1)));
+        lenient()
+                .when(agentSessionResolver.resolve(any(), any(), any(), any(), any()))
+                .thenAnswer(
+                        invocation ->
+                                agentSession(
+                                        invocation.getArgument(0),
+                                        invocation.getArgument(1),
+                                        invocation.getArgument(2),
+                                        invocation.getArgument(3),
+                                        invocation.getArgument(4)));
     }
 
     @Test
@@ -86,14 +116,12 @@ class IntakeAgentTurnServiceTest {
                 .thenReturn(Optional.of(dispute));
         when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.INTAKE))
                 .thenReturn(Optional.of(room));
-        when(memoryRepository.findMaxTurnNo(dispute.getId(), RoomType.INTAKE))
+        when(memoryRepository.findMaxTurnNoByAgentSessionId(any()))
                 .thenReturn(0);
         when(memoryRepository
-                        .findTopByCaseIdAndRoomTypeAndAgentRoleIsNotNullOrderByTurnNoDesc(
-                                dispute.getId(), RoomType.INTAKE))
+                        .findTopByAgentSessionIdAndAgentRoleIsNotNullOrderByTurnNoDesc(any()))
                 .thenReturn(Optional.empty());
-        when(memoryRepository.findTop10ByCaseIdAndRoomTypeOrderByTurnNoDesc(
-                        dispute.getId(), RoomType.INTAKE))
+        when(memoryRepository.findTop10ByAgentSessionIdOrderByTurnNoDesc(any()))
                 .thenReturn(List.of());
         when(client.run(any(), eq("TRACE_1"), eq("REQ_1")))
                 .thenReturn(
@@ -133,6 +161,13 @@ class IntakeAgentTurnServiceTest {
         assertThat(command.getValue().turnSource()).isEqualTo("LOBBY_SEED");
         assertThat(command.getValue().lobbySeed().rawText()).contains("签收");
         assertThat(command.getValue().latestScrollSnapshot().isObject()).isTrue();
+        assertThat(command.getValue().agentContext().actorId()).isEqualTo("user-local");
+        assertThat(command.getValue().agentContext().actorRole()).isEqualTo("USER");
+        assertThat(command.getValue().agentContext().agentKey())
+                .isEqualTo("DISPUTE_INTAKE_OFFICER");
+        assertThat(command.getValue().agentContext().agentSessionId()).isNotBlank();
+        assertThat(command.getValue().agentContext().scopeType())
+                .isEqualTo("INTAKE_INITIATOR_PRIVATE");
 
         ArgumentCaptor<RoomTurnMemoryEntity> memory =
                 ArgumentCaptor.forClass(RoomTurnMemoryEntity.class);
@@ -183,14 +218,12 @@ class IntakeAgentTurnServiceTest {
                 .thenReturn(Optional.of(dispute));
         when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.INTAKE))
                 .thenReturn(Optional.of(room));
-        when(memoryRepository.findMaxTurnNo(dispute.getId(), RoomType.INTAKE))
+        when(memoryRepository.findMaxTurnNoByAgentSessionId(any()))
                 .thenReturn(0);
         when(memoryRepository
-                        .findTopByCaseIdAndRoomTypeAndAgentRoleIsNotNullOrderByTurnNoDesc(
-                                dispute.getId(), RoomType.INTAKE))
+                        .findTopByAgentSessionIdAndAgentRoleIsNotNullOrderByTurnNoDesc(any()))
                 .thenReturn(Optional.empty());
-        when(memoryRepository.findTop10ByCaseIdAndRoomTypeOrderByTurnNoDesc(
-                        dispute.getId(), RoomType.INTAKE))
+        when(memoryRepository.findTop10ByAgentSessionIdOrderByTurnNoDesc(any()))
                 .thenReturn(List.of());
         when(client.run(any(), eq("TRACE_SHORT_INITIAL"), eq("REQ_SHORT_INITIAL")))
                 .thenReturn(
@@ -252,14 +285,12 @@ class IntakeAgentTurnServiceTest {
                 .thenReturn(Optional.of(dispute));
         when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.INTAKE))
                 .thenReturn(Optional.of(room));
-        when(memoryRepository.findMaxTurnNo(dispute.getId(), RoomType.INTAKE))
+        when(memoryRepository.findMaxTurnNoByAgentSessionId(any()))
                 .thenReturn(1);
         when(memoryRepository
-                        .findTopByCaseIdAndRoomTypeAndAgentRoleIsNotNullOrderByTurnNoDesc(
-                                dispute.getId(), RoomType.INTAKE))
+                        .findTopByAgentSessionIdAndAgentRoleIsNotNullOrderByTurnNoDesc(any()))
                 .thenReturn(Optional.of(previous));
-        when(memoryRepository.findTop10ByCaseIdAndRoomTypeOrderByTurnNoDesc(
-                        dispute.getId(), RoomType.INTAKE))
+        when(memoryRepository.findTop10ByAgentSessionIdOrderByTurnNoDesc(any()))
                 .thenReturn(List.of(previous));
         when(client.run(any(), eq("TRACE_2"), eq("REQ_2")))
                 .thenReturn(
@@ -307,6 +338,12 @@ class IntakeAgentTurnServiceTest {
         assertThat(command.getValue().currentUserMessage().text()).contains("退款");
         assertThat(command.getValue().latestScrollSnapshot().path("current_outcome").asText())
                 .isEqualTo("ASK_FOR_CLARIFICATION");
+        assertThat(command.getValue().recentTurns())
+                .allSatisfy(
+                        turn -> {
+                            assertThat(turn.agentSessionId()).isNotBlank();
+                            assertThat(turn.conversationScope()).isNotBlank();
+                        });
 
         ArgumentCaptor<RoomTurnMemoryEntity> memories =
                 ArgumentCaptor.forClass(RoomTurnMemoryEntity.class);
@@ -351,14 +388,12 @@ class IntakeAgentTurnServiceTest {
                 .thenReturn(Optional.of(dispute));
         when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.INTAKE))
                 .thenReturn(Optional.of(room));
-        when(memoryRepository.findMaxTurnNo(dispute.getId(), RoomType.INTAKE))
+        when(memoryRepository.findMaxTurnNoByAgentSessionId(any()))
                 .thenReturn(0);
         when(memoryRepository
-                        .findTopByCaseIdAndRoomTypeAndAgentRoleIsNotNullOrderByTurnNoDesc(
-                                dispute.getId(), RoomType.INTAKE))
+                        .findTopByAgentSessionIdAndAgentRoleIsNotNullOrderByTurnNoDesc(any()))
                 .thenReturn(Optional.empty());
-        when(memoryRepository.findTop10ByCaseIdAndRoomTypeOrderByTurnNoDesc(
-                        dispute.getId(), RoomType.INTAKE))
+        when(memoryRepository.findTop10ByAgentSessionIdOrderByTurnNoDesc(any()))
                 .thenReturn(List.of());
         when(client.run(any(), eq("TRACE_SHORT"), eq("REQ_SHORT")))
                 .thenReturn(
@@ -419,14 +454,12 @@ class IntakeAgentTurnServiceTest {
                 .thenReturn(Optional.of(dispute));
         when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.INTAKE))
                 .thenReturn(Optional.of(room));
-        when(memoryRepository.findMaxTurnNo(dispute.getId(), RoomType.INTAKE))
+        when(memoryRepository.findMaxTurnNoByAgentSessionId(any()))
                 .thenReturn(1);
         when(memoryRepository
-                        .findTopByCaseIdAndRoomTypeAndAgentRoleIsNotNullOrderByTurnNoDesc(
-                                dispute.getId(), RoomType.INTAKE))
+                        .findTopByAgentSessionIdAndAgentRoleIsNotNullOrderByTurnNoDesc(any()))
                 .thenReturn(Optional.of(previous));
-        when(memoryRepository.findTop10ByCaseIdAndRoomTypeOrderByTurnNoDesc(
-                        dispute.getId(), RoomType.INTAKE))
+        when(memoryRepository.findTop10ByAgentSessionIdOrderByTurnNoDesc(any()))
                 .thenReturn(List.of(previous));
         when(client.run(any(), eq("TRACE_FAIL"), eq("REQ_FAIL")))
                 .thenThrow(new RuntimeException("python returned 422"));
@@ -491,6 +524,37 @@ class IntakeAgentTurnServiceTest {
                 false,
                 "STUB",
                 0.86);
+    }
+
+    private static CaseAccessSessionEntity accessSession(String caseId, AuthenticatedActor actor) {
+        PermissionLevel level =
+                actor.role() == ActorRole.MERCHANT
+                        ? PermissionLevel.PARTY_MERCHANT
+                        : PermissionLevel.PARTY_USER;
+        return CaseAccessSessionEntity.create(
+                "ACCESS_" + actor.actorId(),
+                "default",
+                caseId,
+                actor.actorId(),
+                actor.role(),
+                level,
+                actor.actorId());
+    }
+
+    private static AgentConversationSessionEntity agentSession(
+            CaseAccessSessionEntity accessSession,
+            RoomType roomType,
+            String agentKey,
+            String promptProfileId,
+            String memoryPolicyId) {
+        return AgentConversationSessionEntity.create(
+                "AGENT_SESSION_" + accessSession.getActorId() + "_" + roomType.name(),
+                accessSession,
+                roomType,
+                agentKey,
+                promptProfileId,
+                memoryPolicyId,
+                accessSession.getActorId());
     }
 
     private static FulfillmentCaseEntity intakeCase() {

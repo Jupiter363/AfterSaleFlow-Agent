@@ -6,6 +6,8 @@ import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.room.domain.RoomType;
+import com.example.dispute.room.infrastructure.persistence.entity.AgentConversationSessionEntity;
+import com.example.dispute.room.infrastructure.persistence.entity.CaseAccessSessionEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.RoomTurnMemoryEntity;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseParticipantRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseIntakeDossierRepository;
@@ -28,6 +30,9 @@ public class RoomTurnMemoryQueryService {
     private final CaseParticipantRepository participantRepository;
     private final RoomTurnMemoryRepository memoryRepository;
     private final CaseIntakeDossierRepository intakeDossierRepository;
+    private final AccessSessionResolver accessSessionResolver;
+    private final AgentSessionResolver agentSessionResolver;
+    private final SessionPermissionService permissionService;
     private final ObjectMapper objectMapper;
 
     public RoomTurnMemoryQueryService(
@@ -35,11 +40,17 @@ public class RoomTurnMemoryQueryService {
             CaseParticipantRepository participantRepository,
             RoomTurnMemoryRepository memoryRepository,
             CaseIntakeDossierRepository intakeDossierRepository,
+            AccessSessionResolver accessSessionResolver,
+            AgentSessionResolver agentSessionResolver,
+            SessionPermissionService permissionService,
             ObjectMapper objectMapper) {
         this.caseRepository = caseRepository;
         this.participantRepository = participantRepository;
         this.memoryRepository = memoryRepository;
         this.intakeDossierRepository = intakeDossierRepository;
+        this.accessSessionResolver = accessSessionResolver;
+        this.agentSessionResolver = agentSessionResolver;
+        this.permissionService = permissionService;
         this.objectMapper = objectMapper;
     }
 
@@ -50,9 +61,20 @@ public class RoomTurnMemoryQueryService {
                 caseRepository
                         .findById(caseId)
                         .orElseThrow(() -> new IllegalArgumentException("case not found"));
-        assertCanRead(dispute, actor);
-        if (roomType == RoomType.EVIDENCE && isParty(actor.role())) {
-            return latestEvidenceAgentMemoryForParty(caseId, actor.role()).map(this::view);
+        CaseAccessSessionEntity accessSession = accessSessionResolver.resolve(caseId, actor);
+        permissionService.requireRoomRead(accessSession, roomType);
+        if (isParty(actor.role()) && supportsPrivateAgentSession(roomType)) {
+            AgentConversationSessionEntity agentSession =
+                    agentSessionResolver.resolve(
+                            accessSession,
+                            roomType,
+                            agentKey(roomType),
+                            promptProfileId(roomType, actor.role()),
+                            "MEMEO_DEFAULT");
+            return memoryRepository
+                    .findTopByAgentSessionIdAndAgentRoleIsNotNullOrderByTurnNoDesc(
+                            agentSession.getId())
+                    .map(this::view);
         }
         return memoryRepository
                 .findTopByCaseIdAndRoomTypeAndAgentRoleIsNotNullOrderByTurnNoDesc(
@@ -60,24 +82,25 @@ public class RoomTurnMemoryQueryService {
                 .map(this::view);
     }
 
-    private Optional<RoomTurnMemoryEntity> latestEvidenceAgentMemoryForParty(
-            String caseId, ActorRole partyRole) {
-        List<RoomTurnMemoryEntity> recentMemories =
-                memoryRepository
-                        .findTop50ByCaseIdAndRoomTypeOrderByTurnNoDesc(caseId, RoomType.EVIDENCE);
-        Set<Integer> partyTurnNos =
-                recentMemories.stream()
-                        .filter(memory -> partyRole.name().equals(memory.getAnswerRole()))
-                        .map(RoomTurnMemoryEntity::getTurnNo)
-                        .collect(Collectors.toSet());
-        return recentMemories.stream()
-                .filter(memory -> memory.getAgentRole() != null)
-                .filter(memory -> partyTurnNos.contains(memory.getTurnNo()))
-                .max(Comparator.comparingInt(RoomTurnMemoryEntity::getTurnNo));
-    }
-
     private static boolean isParty(ActorRole role) {
         return role == ActorRole.USER || role == ActorRole.MERCHANT;
+    }
+
+    private static boolean supportsPrivateAgentSession(RoomType roomType) {
+        return roomType == RoomType.INTAKE || roomType == RoomType.EVIDENCE;
+    }
+
+    private static String agentKey(RoomType roomType) {
+        return switch (roomType) {
+            case INTAKE -> IntakeAgentTurnService.AGENT_ROLE;
+            case EVIDENCE -> EvidenceAgentTurnService.AGENT_ROLE;
+            case HEARING -> "PRESIDING_JUDGE";
+            case REVIEW -> "REVIEW_COPILOT";
+        };
+    }
+
+    private static String promptProfileId(RoomType roomType, ActorRole role) {
+        return agentKey(roomType) + ":" + role.name() + ":v1";
     }
 
     private void assertCanRead(FulfillmentCaseEntity dispute, AuthenticatedActor actor) {

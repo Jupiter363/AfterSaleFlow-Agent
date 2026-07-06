@@ -83,12 +83,21 @@ def build_intake_turn_graph(model_runner: Any | None = None):
 
 def _load_context(state: IntakeTurnGraphState) -> dict[str, Any]:
     request = state["request"]
+    agent_context = request["agent_context"]
     current = request.get("current_user_message") or {}
     seed = request["lobby_seed"]
     source_text = str(current.get("text") or seed.get("raw_text") or "")
-    actor_role = str(current.get("role") or seed.get("initiator_role") or "USER")
+    actor_role = str(
+        agent_context.get("actor_role")
+        or current.get("role")
+        or seed.get("initiator_role")
+        or "USER"
+    )
     memory_frame = MemeoMemoryAssembler().assemble(
-        request.get("recent_turns") or []
+        request.get("recent_turns") or [],
+        expected_agent_session_id=str(agent_context.get("agent_session_id") or ""),
+        expected_conversation_scope=str(agent_context.get("conversation_scope") or ""),
+        strict_scope=True,
     ).model_dump(mode="json")
     return {
         "source_text": source_text,
@@ -101,6 +110,7 @@ def _load_context(state: IntakeTurnGraphState) -> dict[str, Any]:
 def _reason_with_llm_node(model_runner: Any | None):
     def reason_with_llm(state: IntakeTurnGraphState) -> dict[str, Any]:
         request = state["request"]
+        agent_context = request["agent_context"]
         if model_runner is None:
             return {
                 "llm_output": _fallback_output(state),
@@ -114,12 +124,16 @@ def _reason_with_llm_node(model_runner: Any | None):
                     "room_type": request.get("room_type"),
                     "turn_source": request.get("turn_source"),
                     "actor_role": state["actor_role"],
+                    "agent_key": agent_context.get("agent_key"),
+                    "prompt_profile_id": agent_context.get("prompt_profile_id"),
                     "lobby_seed": request.get("lobby_seed") or {},
                     "current_user_message": request.get("current_user_message"),
                     "latest_scroll_snapshot": request.get("latest_scroll_snapshot")
                     or {},
                 },
                 output_type=IntakeCaseDetailLlmOutput,
+                agent_context=agent_context,
+                prompt_profile_id=agent_context.get("prompt_profile_id"),
                 context_sections=[
                     PromptSection(
                         name="memeo_memory",
@@ -145,9 +159,11 @@ def _reason_with_llm_node(model_runner: Any | None):
             }
         except Exception as failure:
             LOGGER.warning(
-                "intake turn LLM reasoning degraded: case_id=%s turn_source=%s error_type=%s error=%s",
+                "intake turn LLM reasoning degraded: case_id=%s turn_source=%s "
+                "agent_invocation_id=%s error_type=%s error=%s",
                 request.get("case_id"),
                 request.get("turn_source"),
+                agent_context.get("agent_invocation_id"),
                 type(failure).__name__,
                 failure,
                 exc_info=True,

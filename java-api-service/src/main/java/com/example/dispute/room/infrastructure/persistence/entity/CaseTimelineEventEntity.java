@@ -35,6 +35,9 @@ public class CaseTimelineEventEntity extends AbstractEntity {
     @JdbcTypeCode(SqlTypes.JSON)
     @Column(name = "audience_json", nullable = false, columnDefinition = "jsonb")
     private String audienceJson;
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "audience_actor_ids_json", nullable = false, columnDefinition = "jsonb")
+    private String audienceActorIdsJson;
     @Column(name = "event_key", length = 128)
     private String eventKey;
     @Column(name = "created_at", nullable = false, updatable = false)
@@ -49,6 +52,25 @@ public class CaseTimelineEventEntity extends AbstractEntity {
             String id, String caseId, String roomId, long sequenceNo, String eventType,
             Instant eventTime, String sourceRefsJson, String eventJson, String audienceJson,
             String eventKey, String createdBy) {
+        return create(
+                id,
+                caseId,
+                roomId,
+                sequenceNo,
+                eventType,
+                eventTime,
+                sourceRefsJson,
+                eventJson,
+                audienceJson,
+                "[]",
+                eventKey,
+                createdBy);
+    }
+
+    public static CaseTimelineEventEntity create(
+            String id, String caseId, String roomId, long sequenceNo, String eventType,
+            Instant eventTime, String sourceRefsJson, String eventJson, String audienceJson,
+            String audienceActorIdsJson, String eventKey, String createdBy) {
         CaseTimelineEventEntity entity = new CaseTimelineEventEntity(id);
         entity.caseId = caseId;
         entity.roomId = roomId;
@@ -58,6 +80,7 @@ public class CaseTimelineEventEntity extends AbstractEntity {
         entity.sourceRefsJson = sourceRefsJson;
         entity.eventJson = eventJson;
         entity.audienceJson = audienceJson;
+        entity.audienceActorIdsJson = audienceActorIdsJson;
         entity.eventKey = eventKey;
         entity.createdAt = eventTime;
         entity.createdBy = createdBy;
@@ -69,5 +92,6 @@ public class CaseTimelineEventEntity extends AbstractEntity {
     public String getRoomId() { return roomId; }
     public String getEventJson() { return eventJson; }
     public String getAudienceJson() { return audienceJson; }
+    public String getAudienceActorIdsJson() { return audienceActorIdsJson == null ? "[]" : audienceActorIdsJson; }
     public Instant getEventTime() { return eventTime; }
 }

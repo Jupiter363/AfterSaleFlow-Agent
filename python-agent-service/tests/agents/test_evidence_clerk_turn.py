@@ -24,11 +24,47 @@ def _headers() -> dict[str, str]:
     return {"X-Service-Secret": "test-agent-service-secret"}
 
 
-def _evidence_turn_payload() -> dict[str, object]:
+def _agent_context(
+    case_id: str,
+    *,
+    actor_id: str = "USER_local_1",
+    actor_role: str = "USER",
+) -> dict[str, object]:
+    access_session_id = f"ACCESS_{case_id}_{actor_role}"
+    prompt_profile_id = f"EVIDENCE_CLERK:{actor_role}:v1"
+    agent_session_id = f"SESSION_{case_id}_{actor_role}_evidence"
     return {
-        "case_id": "CASE_evidence_turn_llm",
+        "tenant_id": "default",
+        "case_id": case_id,
+        "room_type": "EVIDENCE",
+        "actor_id": actor_id,
+        "actor_role": actor_role,
+        "access_session_id": access_session_id,
+        "permission_level": "PARTY_USER" if actor_role == "USER" else "PARTY_MERCHANT",
+        "permission_scopes": [],
+        "agent_key": "EVIDENCE_CLERK",
+        "agent_invocation_id": f"INVOCATION_{case_id}",
+        "agent_session_id": agent_session_id,
+        "conversation_scope": (
+            f"default:{case_id}:EVIDENCE:{actor_id}:{actor_role}:"
+            f"EVIDENCE_CLERK:{prompt_profile_id}:{access_session_id}"
+        ),
+        "scope_type": "EVIDENCE_PARTY_PRIVATE",
+        "allowed_actor_ids": [actor_id],
+        "allowed_actor_roles": [actor_role],
+        "prompt_profile_id": prompt_profile_id,
+        "memory_policy_id": "MEMORY_POLICY_EVIDENCE_V1",
+    }
+
+
+def _evidence_turn_payload() -> dict[str, object]:
+    case_id = "CASE_evidence_turn_llm"
+    agent_context = _agent_context(case_id)
+    return {
+        "case_id": case_id,
         "room_type": "EVIDENCE",
         "actor_role": "USER",
+        "actor_id": "USER_local_1",
         "current_party_message": {
             "message_id": "MESSAGE_evidence_turn",
             "role": "USER",
@@ -60,14 +96,17 @@ def _evidence_turn_payload() -> dict[str, object]:
         "recent_turns": [
             {
                 "turn_no": 1,
-                "actor_id": "merchant-local",
-                "answer_role": "MERCHANT",
-                "answer_content": "商家要求核对签收底单和物流证明。",
+                "actor_id": "USER_local_1",
+                "answer_role": "USER",
+                "answer_content": "user evidence memory asks about signature proof",
                 "agent_role": None,
                 "agent_response": None,
                 "scroll_snapshot": {},
+                "agent_session_id": agent_context["agent_session_id"],
+                "conversation_scope": agent_context["conversation_scope"],
             }
         ],
+        "agent_context": agent_context,
     }
 
 
@@ -112,13 +151,24 @@ class FakeEvidenceRunner:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
 
-    def invoke_structured(self, *, node_name, case_data, output_type, context_sections):
+    def invoke_structured(
+        self,
+        *,
+        node_name,
+        case_data,
+        output_type,
+        context_sections,
+        agent_context=None,
+        prompt_profile_id=None,
+    ):
         self.calls.append(
             {
                 "node_name": node_name,
                 "case_data": case_data,
                 "output_type": output_type,
                 "context_sections": context_sections,
+                "agent_context": agent_context,
+                "prompt_profile_id": prompt_profile_id,
             }
         )
         return SimpleNamespace(
@@ -173,9 +223,13 @@ def test_evidence_turn_workflow_uses_harness_node_with_memory_dossier_and_eviden
     assert {"memeo_memory", "case_intake_dossier", "available_evidence"} <= set(
         section_by_name
     )
-    assert "商家要求核对签收底单" in section_by_name["memeo_memory"]
+    assert "user evidence memory asks about signature proof" in section_by_name["memeo_memory"]
     assert "SIGNED_NOT_RECEIVED" in section_by_name["case_intake_dossier"]
     assert "EVIDENCE_signature_photo" in section_by_name["available_evidence"]
+    assert runner.calls[0]["agent_context"]["agent_session_id"] == (
+        "SESSION_CASE_evidence_turn_llm_USER_evidence"
+    )
+    assert runner.calls[0]["prompt_profile_id"] == "EVIDENCE_CLERK:USER:v1"
     assert result.non_final is True
     assert result.liability_determined is False
     assert result.remedy_recommended is False

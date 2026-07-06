@@ -71,8 +71,10 @@ async function mountInteractiveView(options = {}) {
     props: {
       initialDispute: dispute,
       initialAnalysis: options.initialAnalysis || analysis,
-      initialMessages: options.initialMessages || [],
-      initialTurnMemory: options.initialTurnMemory || null,
+      initialMessages: Object.hasOwn(options, "initialMessages") ? options.initialMessages : [],
+      initialTurnMemory: Object.hasOwn(options, "initialTurnMemory")
+        ? options.initialTurnMemory
+        : null,
       postMessageAction: options.postMessageAction,
       messagesLoader: options.messagesLoader,
       turnMemoryLoader: options.turnMemoryLoader,
@@ -642,6 +644,110 @@ describe("IntakeRoomView", () => {
     expect(wrapper.find("[data-confirm-admission]").exists()).toBe(false);
     expect(wrapper.find("[data-resolve-without-dispute]").exists()).toBe(false);
     expect(wrapper.find("[data-enter-evidence-room]").exists()).toBe(true);
+  });
+
+  it("clears intake messages and latest memory immediately when actor changes in-place", async () => {
+    const wrapper = await mountInteractiveView({
+      initialMessages: [
+        {
+          id: "MESSAGE_USER_PRIVATE",
+          sequence_no: 1,
+          sender_role: "USER",
+          message_text: "USER private intake chat should vanish",
+        },
+      ],
+      initialTurnMemory: {
+        turn_no: 3,
+        case_intake_dossier: {
+          quality_score: 88,
+          ready_for_next_step: true,
+          dossier: {
+            schema_version: "intake_case_detail.v1",
+            case_story: {
+              title: "USER private right board",
+              one_sentence_summary: "USER-only dossier text",
+            },
+            party_positions: {
+              user_claim: "USER-only dossier text",
+            },
+            intake_quality: {
+              score: 88,
+              ready_for_next_step: true,
+            },
+          },
+        },
+      },
+    });
+
+    expect(wrapper.text()).toContain("USER private intake chat should vanish");
+    expect(wrapper.text()).toContain("用户-only dossier text");
+
+    actor.id = "user-other";
+    actor.role = "USER";
+    await wrapper.vm.$nextTick();
+
+    expect(wrapper.text()).not.toContain("USER private intake chat should vanish");
+    expect(wrapper.text()).not.toContain("USER-only dossier text");
+  });
+
+  it("ignores stale intake refresh results from the previous actor", async () => {
+    let resolveUserMemory;
+    const messagesLoader = vi
+      .fn()
+      .mockResolvedValueOnce([
+        {
+          id: "MESSAGE_USER_INITIAL",
+          sequence_no: 1,
+          sender_role: "USER",
+          message_text: "USER initial intake chat",
+        },
+      ])
+      .mockResolvedValue([
+        {
+          id: "MESSAGE_MERCHANT_CURRENT",
+          sequence_no: 1,
+          sender_role: "MERCHANT",
+          message_text: "MERCHANT current intake chat",
+        },
+      ]);
+    const turnMemoryLoader = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveUserMemory = resolve;
+          }),
+      )
+      .mockResolvedValue({ turn_no: 1 });
+
+    const wrapper = await mountInteractiveView({
+      initialMessages: null,
+      initialTurnMemory: null,
+      messagesLoader,
+      turnMemoryLoader,
+    });
+    await flushPromises();
+
+    actor.id = "user-other";
+    actor.role = "USER";
+    await wrapper.vm.$nextTick();
+
+    resolveUserMemory({
+      turn_no: 9,
+      case_intake_dossier: {
+        dossier: {
+          schema_version: "intake_case_detail.v1",
+          case_story: {
+            title: "USER stale right board",
+            one_sentence_summary: "USER stale right board",
+          },
+        },
+      },
+    });
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("MERCHANT current intake chat");
+    expect(wrapper.text()).not.toContain("USER stale right board");
   });
 
   it("keeps the intake room outer cards at a fixed non-stretching height", () => {

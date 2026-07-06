@@ -47,10 +47,16 @@ class HarnessModelRunner:
         output_type: type[T],
         context_sections: list[PromptSection] | None = None,
         max_input_tokens: int | None = None,
+        agent_context: Any | None = None,
+        prompt_profile_id: str | None = None,
     ) -> HarnessGeneration[T]:
         assembled_context = self._context_window.assemble(
             context_sections or [],
             max_input_tokens=max_input_tokens,
+        )
+        trusted_agent_context = _trusted_agent_context_payload(agent_context)
+        resolved_prompt_profile_id = prompt_profile_id or trusted_agent_context.get(
+            "prompt_profile_id"
         )
         enriched_case_data = {
             **case_data,
@@ -60,6 +66,8 @@ class HarnessModelRunner:
             node_name,
             enriched_case_data,
             output_type.model_json_schema(),
+            prompt_profile_id=resolved_prompt_profile_id,
+            trusted_agent_context=trusted_agent_context or None,
         )
         messages = tuple(
             ChatPromptTemplate.from_messages(
@@ -86,3 +94,33 @@ class HarnessModelRunner:
             context=assembled_context,
             messages=messages,
         )
+
+
+def _trusted_agent_context_payload(agent_context: Any | None) -> dict[str, Any]:
+    if agent_context is None:
+        return {}
+    if isinstance(agent_context, BaseModel):
+        raw_context = agent_context.model_dump(mode="json")
+    elif isinstance(agent_context, dict):
+        raw_context = dict(agent_context)
+    else:
+        return {}
+
+    allowed_fields = (
+        "case_id",
+        "room_type",
+        "actor_id",
+        "actor_role",
+        "agent_key",
+        "agent_invocation_id",
+        "agent_session_id",
+        "scope_type",
+        "allowed_actor_ids",
+        "allowed_actor_roles",
+        "prompt_profile_id",
+    )
+    return {
+        field: raw_context[field]
+        for field in allowed_fields
+        if raw_context.get(field) is not None
+    }

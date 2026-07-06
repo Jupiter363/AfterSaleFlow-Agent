@@ -10,7 +10,9 @@ import com.example.dispute.room.domain.RoomStatus;
 import com.example.dispute.room.domain.RoomType;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.RoomMessageEntity;
+import com.example.dispute.room.infrastructure.persistence.entity.AgentConversationSessionEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseIntakeDossierEntity;
+import com.example.dispute.room.infrastructure.persistence.entity.CaseAccessSessionEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.RoomTurnMemoryEntity;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseIntakeDossierRepository;
@@ -47,6 +49,9 @@ public class IntakeAgentTurnService {
     private final CaseIntakeDossierRepository intakeDossierRepository;
     private final RoomMessageRepository messageRepository;
     private final CaseEventService eventService;
+    private final AccessSessionResolver accessSessionResolver;
+    private final AgentSessionResolver agentSessionResolver;
+    private final SessionPermissionService permissionService;
     private final IntakeAgentTurnClient client;
     private final ObjectMapper objectMapper;
     private final Clock clock;
@@ -58,6 +63,9 @@ public class IntakeAgentTurnService {
             CaseIntakeDossierRepository intakeDossierRepository,
             RoomMessageRepository messageRepository,
             CaseEventService eventService,
+            AccessSessionResolver accessSessionResolver,
+            AgentSessionResolver agentSessionResolver,
+            SessionPermissionService permissionService,
             IntakeAgentTurnClient client,
             ObjectMapper objectMapper,
             Clock clock) {
@@ -67,6 +75,9 @@ public class IntakeAgentTurnService {
         this.intakeDossierRepository = intakeDossierRepository;
         this.messageRepository = messageRepository;
         this.eventService = eventService;
+        this.accessSessionResolver = accessSessionResolver;
+        this.agentSessionResolver = agentSessionResolver;
+        this.permissionService = permissionService;
         this.client = client;
         this.objectMapper = objectMapper;
         this.clock = clock;
@@ -80,8 +91,9 @@ public class IntakeAgentTurnService {
             String traceId,
             String requestId) {
         TurnContext context = prepare(caseId, RoomType.INTAKE);
-        int turnNo = memoryRepository.findMaxTurnNo(caseId, RoomType.INTAKE) + 1;
-        JsonNode previousScrollSnapshot = latestScrollSnapshot(caseId);
+        SessionContext session = resolveSession(caseId, actor, RoomType.INTAKE);
+        int turnNo = memoryRepository.findMaxTurnNoByAgentSessionId(session.agentSession().getId()) + 1;
+        JsonNode previousScrollSnapshot = latestScrollSnapshot(session.agentSession().getId());
         IntakeAgentTurnCommand command =
                 new IntakeAgentTurnCommand(
                         caseId,
@@ -90,10 +102,11 @@ public class IntakeAgentTurnService {
                         sanitizeLobbySeed(lobbySeed),
                         null,
                         previousScrollSnapshot,
-                        recentTurns(caseId));
+                        recentTurns(session.agentSession()),
+                        session.agentContext());
         IntakeAgentTurnResult result =
                 safeRun(command, previousScrollSnapshot, traceId, requestId);
-        persistAgentTurn(context, turnNo, result, traceId);
+        persistAgentTurn(context, session, turnNo, result, traceId);
     }
 
     @Transactional
@@ -110,7 +123,8 @@ public class IntakeAgentTurnService {
             return;
         }
         TurnContext context = prepare(caseId, RoomType.INTAKE);
-        int turnNo = memoryRepository.findMaxTurnNo(caseId, RoomType.INTAKE) + 1;
+        SessionContext session = resolveSession(caseId, actor, RoomType.INTAKE);
+        int turnNo = memoryRepository.findMaxTurnNoByAgentSessionId(session.agentSession().getId()) + 1;
         memoryRepository.save(
                 RoomTurnMemoryEntity.participantTurn(
                         "MEMORY_" + compactUuid(),
@@ -119,8 +133,11 @@ public class IntakeAgentTurnService {
                         turnNo,
                         actor.actorId(),
                         actor.role().name(),
-                        message.text()));
-        JsonNode previousScrollSnapshot = latestScrollSnapshot(caseId);
+                        message.text(),
+                        session.agentSession(),
+                        session.accessSession(),
+                        "{}"));
+        JsonNode previousScrollSnapshot = latestScrollSnapshot(session.agentSession().getId());
         IntakeAgentTurnCommand command =
                 new IntakeAgentTurnCommand(
                         caseId,
@@ -132,10 +149,32 @@ public class IntakeAgentTurnService {
                                 actor.role().name(),
                                 message.text()),
                         previousScrollSnapshot,
-                        recentTurns(caseId));
+                        recentTurns(session.agentSession()),
+                        session.agentContext());
         IntakeAgentTurnResult result =
                 safeRun(command, previousScrollSnapshot, traceId, requestId);
-        persistAgentTurn(context, turnNo, result, traceId);
+        persistAgentTurn(context, session, turnNo, result, traceId);
+    }
+
+    private SessionContext resolveSession(
+            String caseId, AuthenticatedActor actor, RoomType roomType) {
+        CaseAccessSessionEntity accessSession = accessSessionResolver.resolve(caseId, actor);
+        permissionService.requireRoomRead(accessSession, roomType);
+        AgentConversationSessionEntity agentSession =
+                agentSessionResolver.resolve(
+                        accessSession,
+                        roomType,
+                        AGENT_ROLE,
+                        promptProfileId(actor.role()),
+                        "MEMEO_DEFAULT");
+        return new SessionContext(
+                accessSession,
+                agentSession,
+                AgentInvocationContext.partyPrivate(
+                        accessSession,
+                        agentSession,
+                        roomType,
+                        "INTAKE_INITIATOR_PRIVATE"));
     }
 
     private TurnContext prepare(String caseId, RoomType roomType) {
@@ -216,6 +255,7 @@ public class IntakeAgentTurnService {
 
     private void persistAgentTurn(
             TurnContext context,
+            SessionContext session,
             int turnNo,
             IntakeAgentTurnResult result,
             String traceId) {
@@ -232,11 +272,15 @@ public class IntakeAgentTurnService {
                         json(dossierPatchWithMemoryFrame(result)),
                         json(defaultObject(result.scrollSnapshot())),
                         json(defaultArray(result.canvasOperations())),
-                        runId));
+                        runId,
+                        session.agentSession(),
+                        session.accessSession(),
+                        "{}"));
         upsertCurrentDossier(context.dispute().getId(), turnNo, result);
         appendAgentMessage(
                 context.dispute(),
                 context.room(),
+                session.agentSession(),
                 result.roomUtterance(),
                 turnNo,
                 traceId);
@@ -245,7 +289,12 @@ public class IntakeAgentTurnService {
                 context.room().getId(),
                 "INTAKE_DOSSIER_UPDATED",
                 Map.of("turn_no", turnNo, "agent_role", AGENT_ROLE),
-                "intake-dossier-updated:" + context.dispute().getId() + ":" + turnNo,
+                "intake-dossier-updated:"
+                        + context.dispute().getId()
+                        + ":"
+                        + session.agentSession().getId()
+                        + ":"
+                        + turnNo,
                 AGENT_SENDER_ID);
     }
 
@@ -292,14 +341,16 @@ public class IntakeAgentTurnService {
     private void appendAgentMessage(
             FulfillmentCaseEntity dispute,
             CaseRoomEntity room,
+            AgentConversationSessionEntity agentSession,
             String utterance,
             int turnNo,
             String traceId) {
-        String idempotencyKey = "agent-intake-turn:" + turnNo;
+        String idempotencyKey = "agent-intake-turn:" + agentSession.getId() + ":" + turnNo;
         if (messageRepository.findByCaseIdAndIdempotencyKey(dispute.getId(), idempotencyKey)
                 .isPresent()) {
             return;
         }
+        String audienceActorIdsJson = json(List.of(agentSession.getActorId()));
         long sequence = messageRepository.findMaxSequenceByRoomId(room.getId()) + 1;
         RoomMessageEntity saved =
                 messageRepository.save(
@@ -312,6 +363,7 @@ public class IntakeAgentTurnService {
                                 AGENT_SENDER_ROLE,
                                 AGENT_SENDER_ID,
                                 audienceJson(),
+                                audienceActorIdsJson,
                                 MessageType.AGENT_MESSAGE,
                                 utterance,
                                 "[]",
@@ -324,22 +376,23 @@ public class IntakeAgentTurnService {
                 saved.getId(),
                 saved.getMessageText(),
                 saved.getAudienceJson(),
+                audienceActorIdsJson,
                 AGENT_SENDER_ID);
     }
 
-    private JsonNode latestScrollSnapshot(String caseId) {
+    private JsonNode latestScrollSnapshot(String agentSessionId) {
         return memoryRepository
-                .findTopByCaseIdAndRoomTypeAndAgentRoleIsNotNullOrderByTurnNoDesc(
-                        caseId, RoomType.INTAKE)
+                .findTopByAgentSessionIdAndAgentRoleIsNotNullOrderByTurnNoDesc(agentSessionId)
                 .map(RoomTurnMemoryEntity::getScrollSnapshotJson)
                 .map(this::readJson)
                 .orElseGet(objectMapper::createObjectNode);
     }
 
-    private List<IntakeRecentTurn> recentTurns(String caseId) {
+    private List<IntakeRecentTurn> recentTurns(AgentConversationSessionEntity agentSession) {
         return memoryRepository
-                .findTop10ByCaseIdAndRoomTypeOrderByTurnNoDesc(caseId, RoomType.INTAKE)
+                .findTop10ByAgentSessionIdOrderByTurnNoDesc(agentSession.getId())
                 .stream()
+                .filter(memory -> agentSession.getId().equals(memory.getAgentSessionId()))
                 .sorted(Comparator.comparingInt(RoomTurnMemoryEntity::getTurnNo))
                 .map(
                         memory ->
@@ -350,7 +403,11 @@ public class IntakeAgentTurnService {
                                         memory.getAnswerContent(),
                                         memory.getAgentRole(),
                                         memory.getAgentResponse(),
-                                        readJson(memory.getScrollSnapshotJson())))
+                                        readJson(memory.getScrollSnapshotJson()),
+                                        textOrDefault(memory.getAgentSessionId(), agentSession.getId()),
+                                        textOrDefault(
+                                                memory.getConversationScope(),
+                                                agentSession.getConversationScope())))
                 .toList();
     }
 
@@ -421,6 +478,13 @@ public class IntakeAgentTurnService {
         return node.asText();
     }
 
+    private static String textOrDefault(String value, String fallback) {
+        if (value == null || value.isBlank()) {
+            return fallback;
+        }
+        return value;
+    }
+
     private String audienceJson() {
         return json(
                 List.of(
@@ -460,5 +524,14 @@ public class IntakeAgentTurnService {
         return UUID.randomUUID().toString().replace("-", "");
     }
 
+    private static String promptProfileId(ActorRole role) {
+        return AGENT_ROLE + ":" + role.name() + ":v1";
+    }
+
     private record TurnContext(FulfillmentCaseEntity dispute, CaseRoomEntity room) {}
+
+    private record SessionContext(
+            CaseAccessSessionEntity accessSession,
+            AgentConversationSessionEntity agentSession,
+            AgentInvocationContext agentContext) {}
 }

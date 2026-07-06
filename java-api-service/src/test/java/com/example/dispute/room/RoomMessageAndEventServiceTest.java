@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -17,12 +18,17 @@ import com.example.dispute.infrastructure.persistence.repository.FulfillmentCase
 import com.example.dispute.room.application.CaseEventService;
 import com.example.dispute.room.application.EvidenceAgentTurnService;
 import com.example.dispute.room.application.IntakeAgentTurnService;
+import com.example.dispute.room.application.AccessSessionResolver;
 import com.example.dispute.room.application.CaseEventView;
 import com.example.dispute.room.application.RoomMessageCommand;
 import com.example.dispute.room.application.RoomMessageService;
+import com.example.dispute.room.application.RoomMessageView;
+import com.example.dispute.room.application.SessionPermissionService;
 import com.example.dispute.room.domain.MessageSenderType;
 import com.example.dispute.room.domain.MessageType;
+import com.example.dispute.room.domain.PermissionLevel;
 import com.example.dispute.room.domain.RoomType;
+import com.example.dispute.room.infrastructure.persistence.entity.CaseAccessSessionEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseTimelineEventEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.RoomMessageEntity;
@@ -64,9 +70,11 @@ class RoomMessageAndEventServiceTest {
     @Mock private CaseTimelineEventRepository eventRepository;
     @Mock private IntakeAgentTurnService intakeAgentTurnService;
     @Mock private EvidenceAgentTurnService evidenceAgentTurnService;
+    @Mock private AccessSessionResolver accessSessionResolver;
 
     private CaseEventService eventService;
     private RoomMessageService messageService;
+    private final SessionPermissionService permissionService = new SessionPermissionService();
 
     @BeforeEach
     void setUp() {
@@ -75,6 +83,8 @@ class RoomMessageAndEventServiceTest {
                         eventRepository,
                         caseRepository,
                         participantRepository,
+                        accessSessionResolver,
+                        permissionService,
                         new ObjectMapper(),
                         CLOCK);
         messageService =
@@ -86,7 +96,17 @@ class RoomMessageAndEventServiceTest {
                         eventService,
                         intakeAgentTurnService,
                         evidenceAgentTurnService,
+                        accessSessionResolver,
+                        permissionService,
                         CLOCK);
+        lenient()
+                .when(accessSessionResolver.resolve(any(), any()))
+                .thenAnswer(
+                        invocation -> {
+                            String caseId = invocation.getArgument(0);
+                            AuthenticatedActor actor = invocation.getArgument(1);
+                            return accessSession(caseId, actor);
+                        });
     }
 
     @Test
@@ -585,6 +605,95 @@ class RoomMessageAndEventServiceTest {
     }
 
     @Test
+    void roomHistoryFiltersPrivateMessagesByExactActorWithinTheSameRole() {
+        FulfillmentCaseEntity dispute = evidenceCase();
+        CaseRoomEntity room =
+                CaseRoomEntity.open(
+                        "ROOM_EVIDENCE",
+                        dispute.getId(),
+                        RoomType.EVIDENCE,
+                        OffsetDateTime.parse("2026-07-03T00:00:00Z"),
+                        "system");
+        when(caseRepository.findById(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(
+                        dispute.getId(), RoomType.EVIDENCE))
+                .thenReturn(Optional.of(room));
+        when(participantRepository.existsByCaseIdAndActorIdAndParticipantRole(
+                        dispute.getId(), "user-local", ActorRole.USER))
+                .thenReturn(true);
+        when(messageRepository.findAllByRoomIdOrderBySequenceNoAsc(room.getId()))
+                .thenReturn(
+                        List.of(
+                                roomMessage(
+                                        "MESSAGE_USER_OTHER_PRIVATE",
+                                        room.getId(),
+                                        1,
+                                        ActorRole.USER,
+                                        "user-other",
+                                        MessageType.PARTY_TEXT,
+                                        "same role but different user must not see this",
+                                        "[\"USER\",\"PLATFORM_REVIEWER\"]",
+                                        "[\"user-other\"]"),
+                                roomMessage(
+                                        "MESSAGE_USER_LOCAL_PRIVATE",
+                                        room.getId(),
+                                        2,
+                                        ActorRole.USER,
+                                        "user-local",
+                                        MessageType.PARTY_TEXT,
+                                        "current user's private evidence chat",
+                                        "[\"USER\",\"PLATFORM_REVIEWER\"]",
+                                        "[\"user-local\"]")));
+
+        var history =
+                messageService.list(
+                        dispute.getId(),
+                        RoomType.EVIDENCE,
+                        new AuthenticatedActor("user-local", ActorRole.USER));
+
+        assertThat(history)
+                .extracting(RoomMessageView::messageText)
+                .containsExactly("current user's private evidence chat");
+    }
+
+    @Test
+    void replayFiltersPrivateEventsByExactActorWithinTheSameRole() {
+        FulfillmentCaseEntity dispute = evidenceCase();
+        when(caseRepository.findById(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+        when(participantRepository.existsByCaseIdAndActorIdAndParticipantRole(
+                        dispute.getId(), "user-local", ActorRole.USER))
+                .thenReturn(true);
+        when(eventRepository
+                        .findAllByCaseIdAndSequenceNoGreaterThanOrderBySequenceNoAsc(
+                                dispute.getId(), 4L))
+                .thenReturn(
+                        List.of(
+                                event(
+                                        5,
+                                        "[\"USER\",\"PLATFORM_REVIEWER\"]",
+                                        "[\"user-other\"]",
+                                        "same-role-other-private"),
+                                event(
+                                        6,
+                                        "[\"USER\",\"PLATFORM_REVIEWER\"]",
+                                        "[\"user-local\"]",
+                                        "current-user-private")));
+
+        var replay =
+                eventService.replay(
+                        dispute.getId(),
+                        4,
+                        new AuthenticatedActor("user-local", ActorRole.USER));
+
+        assertThat(replay)
+                .extracting(CaseEventView::sequenceNo)
+                .containsExactly(6L);
+        assertThat(replay.getFirst().payloadJson()).contains("current-user-private");
+    }
+
+    @Test
     void subscriptionCatchesUpFromDurableStorageBeforeDeliveringANewerLiveEvent() {
         FulfillmentCaseEntity dispute = evidenceCase();
         AtomicInteger replayQueries = new AtomicInteger();
@@ -722,6 +831,11 @@ class RoomMessageAndEventServiceTest {
 
     private static CaseTimelineEventEntity event(
             long sequenceNo, String audienceJson, String payload) {
+        return event(sequenceNo, audienceJson, "[]", payload);
+    }
+
+    private static CaseTimelineEventEntity event(
+            long sequenceNo, String audienceJson, String audienceActorIdsJson, String payload) {
         return CaseTimelineEventEntity.create(
                 "EVENT_" + sequenceNo,
                 "CASE_ROOM_TEST",
@@ -732,6 +846,7 @@ class RoomMessageAndEventServiceTest {
                 "[]",
                 "{\"text\":\"" + payload + "\"}",
                 audienceJson,
+                audienceActorIdsJson,
                 "event-" + sequenceNo,
                 "system");
     }
@@ -744,6 +859,28 @@ class RoomMessageAndEventServiceTest {
             MessageType messageType,
             String text,
             String audienceJson) {
+        return roomMessage(
+                id,
+                roomId,
+                sequenceNo,
+                senderRole,
+                senderRole == ActorRole.USER ? "user-local" : "reviewer-local",
+                messageType,
+                text,
+                audienceJson,
+                "[]");
+    }
+
+    private static RoomMessageEntity roomMessage(
+            String id,
+            String roomId,
+            long sequenceNo,
+            ActorRole senderRole,
+            String senderId,
+            MessageType messageType,
+            String text,
+            String audienceJson,
+            String audienceActorIdsJson) {
         return RoomMessageEntity.create(
                 id,
                 "CASE_ROOM_TEST",
@@ -753,14 +890,37 @@ class RoomMessageAndEventServiceTest {
                         ? MessageSenderType.REVIEWER
                         : MessageSenderType.PARTY,
                 senderRole.name(),
-                senderRole == ActorRole.USER ? "user-local" : "reviewer-local",
+                senderId,
                 audienceJson,
+                audienceActorIdsJson,
                 messageType,
                 text,
                 "[]",
                 "idem-" + id,
                 Instant.parse("2026-07-03T00:00:00Z"),
                 "TRACE_" + id);
+    }
+
+    private static CaseAccessSessionEntity accessSession(String caseId, AuthenticatedActor actor) {
+        return CaseAccessSessionEntity.create(
+                "ACCESS_" + caseId + "_" + actor.role().name() + "_" + actor.actorId(),
+                "default",
+                caseId,
+                actor.actorId(),
+                actor.role(),
+                permissionLevel(actor.role()),
+                "test");
+    }
+
+    private static PermissionLevel permissionLevel(ActorRole role) {
+        return switch (role) {
+            case USER -> PermissionLevel.PARTY_USER;
+            case MERCHANT -> PermissionLevel.PARTY_MERCHANT;
+            case CUSTOMER_SERVICE -> PermissionLevel.SERVICE_ASSIST;
+            case PLATFORM_REVIEWER -> PermissionLevel.REVIEWER_ALL;
+            case ADMIN -> PermissionLevel.ADMIN_ALL;
+            case SYSTEM -> PermissionLevel.SYSTEM_ALL;
+        };
     }
 
     private static FulfillmentCaseEntity evidenceCase() {

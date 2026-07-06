@@ -117,17 +117,52 @@ class PromptComposer:
         node_name: str,
         case_data: dict[str, Any],
         output_schema: dict[str, Any],
+        *,
+        prompt_profile_id: str | None = None,
+        allow_profile_fallback: bool = False,
+        trusted_agent_context: dict[str, Any] | None = None,
     ) -> tuple[str, str]:
-        system_prompt = self.render_system_prompt(node_name)
+        system_prompt = self.render_system_prompt(
+            node_name,
+            prompt_profile_id=prompt_profile_id,
+            allow_profile_fallback=allow_profile_fallback,
+            trusted_agent_context=trusted_agent_context,
+        )
         user_prompt = self.render_user_prompt(case_data, output_schema)
         return system_prompt, user_prompt
 
-    def render_system_prompt(self, node_name: str) -> str:
+    def render_system_prompt(
+        self,
+        node_name: str,
+        *,
+        prompt_profile_id: str | None = None,
+        allow_profile_fallback: bool = False,
+        trusted_agent_context: dict[str, Any] | None = None,
+    ) -> str:
         fragments = [
             self._read_required(self._harness_prompt_dir / filename)
             for filename in self.COMMON_FRAGMENT_FILES
         ]
-        fragments.append(self._read_required(self._absolute_template_path(node_name)))
+        if trusted_agent_context:
+            fragments.append(
+                "<trusted_agent_context>\n"
+                + json.dumps(
+                    trusted_agent_context,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n</trusted_agent_context>"
+            )
+        base_template_path = self._base_template_path(node_name)
+        selected_template_path = self._absolute_template_path(
+            node_name,
+            prompt_profile_id=prompt_profile_id,
+            allow_profile_fallback=allow_profile_fallback,
+        )
+        fragments.append(self._read_required(base_template_path))
+        if selected_template_path != base_template_path:
+            fragments.append(self._read_required(selected_template_path))
         return "\n\n".join(fragment.strip() for fragment in fragments if fragment.strip())
 
     def render_user_prompt(
@@ -144,10 +179,48 @@ class PromptComposer:
             + "\n</required_output_schema>"
         )
 
-    def template_path(self, node_name: str) -> Path:
-        return self._absolute_template_path(node_name).relative_to(self._app_root.parent)
+    def template_path(
+        self,
+        node_name: str,
+        *,
+        prompt_profile_id: str | None = None,
+        allow_profile_fallback: bool = False,
+    ) -> Path:
+        return self._absolute_template_path(
+            node_name,
+            prompt_profile_id=prompt_profile_id,
+            allow_profile_fallback=allow_profile_fallback,
+        ).relative_to(self._app_root.parent)
 
-    def _absolute_template_path(self, node_name: str) -> Path:
+    def _absolute_template_path(
+        self,
+        node_name: str,
+        *,
+        prompt_profile_id: str | None = None,
+        allow_profile_fallback: bool = False,
+    ) -> Path:
+        ref = self.NODE_TEMPLATES.get(node_name)
+        if ref is None:
+            raise KeyError(f"unknown prompt node: {node_name}")
+        base_path = self._agent_prompt_root / ref.agent_key / ref.filename
+        if not prompt_profile_id:
+            return base_path
+
+        profile_path = self._profile_template_path(base_path, prompt_profile_id)
+        if profile_path.exists():
+            return profile_path
+        if allow_profile_fallback:
+            return base_path
+        raise FileNotFoundError(f"profile prompt template not found: {profile_path}")
+
+    @staticmethod
+    def _profile_template_path(base_path: Path, prompt_profile_id: str) -> Path:
+        parts = prompt_profile_id.split(":")
+        role_segment = parts[1] if len(parts) >= 2 else prompt_profile_id
+        suffix = role_segment.strip().lower()
+        return base_path.with_name(f"{base_path.stem}.{suffix}{base_path.suffix}")
+
+    def _base_template_path(self, node_name: str) -> Path:
         ref = self.NODE_TEMPLATES.get(node_name)
         if ref is None:
             raise KeyError(f"unknown prompt node: {node_name}")

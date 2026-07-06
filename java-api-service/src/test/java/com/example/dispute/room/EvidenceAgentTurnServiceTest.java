@@ -3,6 +3,7 @@ package com.example.dispute.room;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -15,14 +16,20 @@ import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEnti
 import com.example.dispute.infrastructure.persistence.repository.EvidenceItemRepository;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.room.application.CaseEventService;
+import com.example.dispute.room.application.AccessSessionResolver;
+import com.example.dispute.room.application.AgentSessionResolver;
 import com.example.dispute.room.application.EvidenceAgentTurnClient;
 import com.example.dispute.room.application.EvidenceAgentTurnCommand;
 import com.example.dispute.room.application.EvidenceAgentTurnResult;
 import com.example.dispute.room.application.EvidenceAgentTurnService;
 import com.example.dispute.room.application.IntakeRecentTurn;
 import com.example.dispute.room.application.RoomMessageCommand;
+import com.example.dispute.room.application.SessionPermissionService;
+import com.example.dispute.room.domain.PermissionLevel;
 import com.example.dispute.room.domain.MessageType;
 import com.example.dispute.room.domain.RoomType;
+import com.example.dispute.room.infrastructure.persistence.entity.AgentConversationSessionEntity;
+import com.example.dispute.room.infrastructure.persistence.entity.CaseAccessSessionEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseIntakeDossierEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.RoomMessageEntity;
@@ -60,6 +67,9 @@ class EvidenceAgentTurnServiceTest {
     @Mock private EvidenceItemRepository evidenceItemRepository;
     @Mock private RoomMessageRepository messageRepository;
     @Mock private CaseEventService eventService;
+    @Mock private AccessSessionResolver accessSessionResolver;
+    @Mock private AgentSessionResolver agentSessionResolver;
+    @Mock private SessionPermissionService permissionService;
     @Mock private EvidenceAgentTurnClient client;
 
     private ObjectMapper objectMapper;
@@ -77,9 +87,29 @@ class EvidenceAgentTurnServiceTest {
                         evidenceItemRepository,
                         messageRepository,
                         eventService,
+                        accessSessionResolver,
+                        agentSessionResolver,
+                        permissionService,
                         client,
                         objectMapper,
                         CLOCK);
+        lenient()
+                .when(accessSessionResolver.resolve(any(), any()))
+                .thenAnswer(
+                        invocation ->
+                                accessSession(
+                                        invocation.getArgument(0),
+                                        invocation.getArgument(1)));
+        lenient()
+                .when(agentSessionResolver.resolve(any(), any(), any(), any(), any()))
+                .thenAnswer(
+                        invocation ->
+                                agentSession(
+                                        invocation.getArgument(0),
+                                        invocation.getArgument(1),
+                                        invocation.getArgument(2),
+                                        invocation.getArgument(3),
+                                        invocation.getArgument(4)));
     }
 
     @Test
@@ -87,6 +117,13 @@ class EvidenceAgentTurnServiceTest {
             throws Exception {
         FulfillmentCaseEntity dispute = evidenceCase();
         CaseRoomEntity room = evidenceRoom(dispute);
+        AgentConversationSessionEntity userSession =
+                agentSession(
+                        accessSession(dispute.getId(), new AuthenticatedActor("user-local", ActorRole.USER)),
+                        RoomType.EVIDENCE,
+                        "EVIDENCE_CLERK",
+                        "EVIDENCE_CLERK:USER:v1",
+                        "MEMEO_DEFAULT");
         RoomTurnMemoryEntity previousParticipantTurn =
                 RoomTurnMemoryEntity.participantTurn(
                         "MEMORY_PREVIOUS_PARTY",
@@ -95,7 +132,10 @@ class EvidenceAgentTurnServiceTest {
                         2,
                         "user-local",
                         "USER",
-                        "I previously described the missing parcel.");
+                        "I previously described the missing parcel.",
+                        userSession,
+                        accessSession(dispute.getId(), new AuthenticatedActor("user-local", ActorRole.USER)),
+                        "{}");
         RoomTurnMemoryEntity previousClerkTurn =
                 RoomTurnMemoryEntity.agentTurn(
                         "MEMORY_PREVIOUS_CLERK",
@@ -108,12 +148,15 @@ class EvidenceAgentTurnServiceTest {
                         "{}",
                         "{}",
                         "[]",
-                        "EVIDENCE_RUN_1");
+                        "EVIDENCE_RUN_1",
+                        userSession,
+                        accessSession(dispute.getId(), new AuthenticatedActor("user-local", ActorRole.USER)),
+                        "{}");
         when(caseRepository.findByIdForUpdate(dispute.getId()))
                 .thenReturn(Optional.of(dispute));
         when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.EVIDENCE))
                 .thenReturn(Optional.of(room));
-        when(memoryRepository.findMaxTurnNo(dispute.getId(), RoomType.EVIDENCE))
+        when(memoryRepository.findMaxTurnNoByAgentSessionId(any()))
                 .thenReturn(2);
         when(intakeDossierRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.INTAKE))
                 .thenReturn(
@@ -147,8 +190,7 @@ class EvidenceAgentTurnServiceTest {
                                         "MERCHANT",
                                         "merchant-local",
                                         "PARTIES")));
-        when(memoryRepository.findTop50ByCaseIdAndRoomTypeOrderByTurnNoDesc(
-                        dispute.getId(), RoomType.EVIDENCE))
+        when(memoryRepository.findTop50ByAgentSessionIdOrderByTurnNoDesc(any()))
                 .thenReturn(List.of(previousClerkTurn, previousParticipantTurn));
         when(client.run(any(), eq("TRACE_EVIDENCE"), eq("REQ_EVIDENCE")))
                 .thenReturn(
@@ -188,6 +230,11 @@ class EvidenceAgentTurnServiceTest {
         assertThat(command.getValue().turnSource()).isEqualTo("PARTY_MESSAGE");
         assertThat(command.getValue().actorRole()).isEqualTo("USER");
         assertThat(command.getValue().actorId()).isEqualTo("user-local");
+        assertThat(command.getValue().agentContext().actorId()).isEqualTo("user-local");
+        assertThat(command.getValue().agentContext().actorRole()).isEqualTo("USER");
+        assertThat(command.getValue().agentContext().agentKey()).isEqualTo("EVIDENCE_CLERK");
+        assertThat(command.getValue().agentContext().scopeType())
+                .isEqualTo("EVIDENCE_PARTY_PRIVATE");
         assertThat(command.getValue().currentMessage().messageType())
                 .isEqualTo(MessageType.PARTY_TEXT);
         assertThat(command.getValue().currentMessage().text()).contains("front door camera");
@@ -199,6 +246,12 @@ class EvidenceAgentTurnServiceTest {
         assertThat(command.getValue().recentTurns())
                 .extracting(turn -> turn.agentRole())
                 .contains("EVIDENCE_CLERK");
+        assertThat(command.getValue().recentTurns())
+                .allSatisfy(
+                        turn -> {
+                            assertThat(turn.agentSessionId()).isNotBlank();
+                            assertThat(turn.conversationScope()).isNotBlank();
+                        });
         JsonNode commandJson = objectMapper.valueToTree(command.getValue());
         assertThat(commandJson.has("current_party_message")).isTrue();
         assertThat(commandJson.has("current_message")).isFalse();
@@ -251,6 +304,11 @@ class EvidenceAgentTurnServiceTest {
                         "ADMIN",
                         "SYSTEM");
         assertThat(audience).doesNotContain("MERCHANT");
+        List<String> audienceActorIds =
+                objectMapper.readValue(
+                        agentMessage.getValue().getAudienceActorIdsJson(),
+                        new TypeReference<>() {});
+        assertThat(audienceActorIds).containsExactly("user-local");
         verify(eventService)
                 .recordRoomMessage(
                         eq(dispute.getId()),
@@ -258,6 +316,7 @@ class EvidenceAgentTurnServiceTest {
                         eq(agentMessage.getValue().getId()),
                         eq(agentMessage.getValue().getMessageText()),
                         eq(agentMessage.getValue().getAudienceJson()),
+                        eq(agentMessage.getValue().getAudienceActorIdsJson()),
                         eq("evidence-clerk"));
     }
 
@@ -313,15 +372,14 @@ class EvidenceAgentTurnServiceTest {
                 .thenReturn(Optional.of(dispute));
         when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.EVIDENCE))
                 .thenReturn(Optional.of(room));
-        when(memoryRepository.findMaxTurnNo(dispute.getId(), RoomType.EVIDENCE))
+        when(memoryRepository.findMaxTurnNoByAgentSessionId(any()))
                 .thenReturn(2);
         when(intakeDossierRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.INTAKE))
                 .thenReturn(Optional.empty());
         when(evidenceItemRepository.findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(
                         dispute.getId()))
                 .thenReturn(List.of());
-        when(memoryRepository.findTop50ByCaseIdAndRoomTypeOrderByTurnNoDesc(
-                        dispute.getId(), RoomType.EVIDENCE))
+        when(memoryRepository.findTop50ByAgentSessionIdOrderByTurnNoDesc(any()))
                 .thenReturn(List.of(merchantClerk, merchantParticipant, userClerk, userParticipant));
         when(client.run(any(), eq("TRACE_USER_SCOPED"), eq("REQ_USER_SCOPED")))
                 .thenReturn(
@@ -379,15 +437,14 @@ class EvidenceAgentTurnServiceTest {
                 .thenReturn(Optional.of(dispute));
         when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.EVIDENCE))
                 .thenReturn(Optional.of(room));
-        when(memoryRepository.findMaxTurnNo(dispute.getId(), RoomType.EVIDENCE))
+        when(memoryRepository.findMaxTurnNoByAgentSessionId(any()))
                 .thenReturn(0);
         when(intakeDossierRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.INTAKE))
                 .thenReturn(Optional.empty());
         when(evidenceItemRepository.findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(
                         dispute.getId()))
                 .thenReturn(List.of());
-        when(memoryRepository.findTop50ByCaseIdAndRoomTypeOrderByTurnNoDesc(
-                        dispute.getId(), RoomType.EVIDENCE))
+        when(memoryRepository.findTop50ByAgentSessionIdOrderByTurnNoDesc(any()))
                 .thenReturn(List.of());
         when(client.run(any(), eq("TRACE_REFERENCE"), eq("REQ_REFERENCE")))
                 .thenReturn(
@@ -449,15 +506,14 @@ class EvidenceAgentTurnServiceTest {
                 .thenReturn(Optional.of(dispute));
         when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.EVIDENCE))
                 .thenReturn(Optional.of(room));
-        when(memoryRepository.findMaxTurnNo(dispute.getId(), RoomType.EVIDENCE))
+        when(memoryRepository.findMaxTurnNoByAgentSessionId(any()))
                 .thenReturn(0);
         when(intakeDossierRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.INTAKE))
                 .thenReturn(Optional.empty());
         when(evidenceItemRepository.findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(
                         dispute.getId()))
                 .thenReturn(List.of());
-        when(memoryRepository.findTop50ByCaseIdAndRoomTypeOrderByTurnNoDesc(
-                        dispute.getId(), RoomType.EVIDENCE))
+        when(memoryRepository.findTop50ByAgentSessionIdOrderByTurnNoDesc(any()))
                 .thenReturn(List.of());
         when(client.run(any(), eq("TRACE_DEGRADED"), eq("REQ_DEGRADED")))
                 .thenThrow(new IllegalStateException("agent endpoint missing"));
@@ -487,6 +543,37 @@ class EvidenceAgentTurnServiceTest {
                 .contains("证据书记官")
                 .contains("已经安全保存")
                 .doesNotContain("temporarily unavailable");
+    }
+
+    private static CaseAccessSessionEntity accessSession(String caseId, AuthenticatedActor actor) {
+        PermissionLevel level =
+                actor.role() == ActorRole.MERCHANT
+                        ? PermissionLevel.PARTY_MERCHANT
+                        : PermissionLevel.PARTY_USER;
+        return CaseAccessSessionEntity.create(
+                "ACCESS_" + actor.actorId(),
+                "default",
+                caseId,
+                actor.actorId(),
+                actor.role(),
+                level,
+                actor.actorId());
+    }
+
+    private static AgentConversationSessionEntity agentSession(
+            CaseAccessSessionEntity accessSession,
+            RoomType roomType,
+            String agentKey,
+            String promptProfileId,
+            String memoryPolicyId) {
+        return AgentConversationSessionEntity.create(
+                "AGENT_SESSION_" + accessSession.getActorId() + "_" + roomType.name(),
+                accessSession,
+                roomType,
+                agentKey,
+                promptProfileId,
+                memoryPolicyId,
+                accessSession.getActorId());
     }
 
     private static EvidenceItemEntity evidenceItem(

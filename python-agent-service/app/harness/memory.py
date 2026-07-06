@@ -14,6 +14,10 @@ class MemoryScope(StrEnum):
     EXPERIENCE = "EXPERIENCE"
 
 
+class MemoryScopeViolation(ValueError):
+    """Raised when backend-supplied turn memory crosses an agent session boundary."""
+
+
 class MemoryEntry(BaseModel):
     """A versioned memory item with explicit promotion approval.
 
@@ -111,9 +115,18 @@ class MemeoMemoryAssembler:
         *,
         config: MemeoMemoryConfig | None = None,
         long_term_preview: list[dict[str, Any]] | None = None,
+        expected_agent_session_id: str | None = None,
+        expected_conversation_scope: str | None = None,
+        strict_scope: bool = False,
     ) -> MemeoMemoryFrame:
         cfg = config or MemeoMemoryConfig()
-        rounds = _rounds_from_turn_memory(recent_turns)
+        scoped_turns = _validate_recent_turn_scope(
+            recent_turns,
+            expected_agent_session_id=expected_agent_session_id,
+            expected_conversation_scope=expected_conversation_scope,
+            strict_scope=strict_scope,
+        )
+        rounds = _rounds_from_turn_memory(scoped_turns)
         latest_short_term = (
             tuple(rounds[-cfg.short_term_round_limit :])
             if cfg.short_term_enabled and cfg.short_term_round_limit > 0
@@ -157,6 +170,47 @@ class MemeoMemoryAssembler:
             prompt_memory_estimated_tokens=_estimate_tokens(prompt_memory),
             long_term_slots=slots,
         )
+
+
+def _validate_recent_turn_scope(
+    recent_turns: list[dict[str, Any]],
+    *,
+    expected_agent_session_id: str | None,
+    expected_conversation_scope: str | None,
+    strict_scope: bool,
+) -> list[dict[str, Any]]:
+    if not strict_scope:
+        return recent_turns
+    if not _has_text(expected_agent_session_id):
+        raise MemoryScopeViolation("expected_agent_session_id is required in strict scope")
+
+    accepted: list[dict[str, Any]] = []
+    for index, item in enumerate(recent_turns):
+        if not isinstance(item, dict):
+            raise MemoryScopeViolation(f"recent_turns[{index}] must be an object")
+        agent_session_id = item.get("agent_session_id")
+        if not _has_text(agent_session_id):
+            raise MemoryScopeViolation(f"recent_turns[{index}] missing agent_session_id")
+        if str(agent_session_id) != expected_agent_session_id:
+            raise MemoryScopeViolation(
+                "agent_session_id mismatch: "
+                f"expected {expected_agent_session_id}, got {agent_session_id}"
+            )
+        if expected_conversation_scope is not None:
+            conversation_scope = item.get("conversation_scope")
+            if not _has_text(conversation_scope):
+                raise MemoryScopeViolation(f"recent_turns[{index}] missing conversation_scope")
+            if str(conversation_scope) != expected_conversation_scope:
+                raise MemoryScopeViolation(
+                    "conversation_scope mismatch: "
+                    f"expected {expected_conversation_scope}, got {conversation_scope}"
+                )
+        accepted.append(item)
+    return accepted
+
+
+def _has_text(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip())
 
 
 def _rounds_from_turn_memory(recent_turns: list[dict[str, Any]]) -> list[MemeoMemoryRound]:

@@ -7,6 +7,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field, model_validator
 
+from app.harness.invocation_context import AgentInvocationContext
 from app.schemas.models import (
     Confidence,
     EvidenceItem,
@@ -162,6 +163,15 @@ class IntakeTurnRequest(StrictModel):
     recent_turns: Annotated[list[dict[str, object]], Field(max_length=20)] = Field(
         default_factory=list
     )
+    agent_context: AgentInvocationContext
+
+    @model_validator(mode="after")
+    def enforce_agent_context_scope(self) -> "IntakeTurnRequest":
+        if self.case_id != self.agent_context.case_id:
+            raise ValueError("case_id must match agent_context.case_id")
+        if self.room_type != self.agent_context.room_type:
+            raise ValueError("room_type must match agent_context.room_type")
+        return self
 
 
 class IntakeTurnResult(StrictModel):
@@ -272,6 +282,19 @@ class EvidenceTurnRequest(StrictModel):
     recent_turns: Annotated[list[dict[str, object]], Field(max_length=20)] = Field(
         default_factory=list
     )
+    agent_context: AgentInvocationContext
+
+    @model_validator(mode="after")
+    def enforce_agent_context_scope(self) -> "EvidenceTurnRequest":
+        if self.case_id != self.agent_context.case_id:
+            raise ValueError("case_id must match agent_context.case_id")
+        if self.room_type != self.agent_context.room_type:
+            raise ValueError("room_type must match agent_context.room_type")
+        if self.actor_id is not None and self.actor_id != self.agent_context.actor_id:
+            raise ValueError("actor_id must match agent_context.actor_id")
+        if self.actor_role != self.agent_context.actor_role:
+            raise ValueError("actor_role must match agent_context.actor_role")
+        return self
 
 
 class EvidenceTurnResult(EvidenceTurnLlmOutput):

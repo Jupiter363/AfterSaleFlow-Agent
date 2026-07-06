@@ -71,8 +71,12 @@ def build_evidence_turn_graph(model_runner: Any | None = None):
 
 def _load_context(state: EvidenceTurnGraphState) -> dict[str, Any]:
     request = state["request"]
+    agent_context = request["agent_context"]
     memory_frame = MemeoMemoryAssembler().assemble(
-        request.get("recent_turns") or []
+        request.get("recent_turns") or [],
+        expected_agent_session_id=str(agent_context.get("agent_session_id") or ""),
+        expected_conversation_scope=str(agent_context.get("conversation_scope") or ""),
+        strict_scope=True,
     ).model_dump(mode="json")
     return {
         "memory_frame": memory_frame,
@@ -83,6 +87,7 @@ def _load_context(state: EvidenceTurnGraphState) -> dict[str, Any]:
 def _reason_with_llm_node(model_runner: Any | None):
     def reason_with_llm(state: EvidenceTurnGraphState) -> dict[str, Any]:
         request = state["request"]
+        agent_context = request["agent_context"]
         if model_runner is None:
             return {
                 "llm_output": _fallback_output(state),
@@ -95,9 +100,13 @@ def _reason_with_llm_node(model_runner: Any | None):
                     "case_id": request.get("case_id"),
                     "room_type": request.get("room_type"),
                     "actor_role": request.get("actor_role"),
+                    "agent_key": agent_context.get("agent_key"),
+                    "prompt_profile_id": agent_context.get("prompt_profile_id"),
                     "current_party_message": request.get("current_party_message") or {},
                 },
                 output_type=EvidenceTurnLlmOutput,
+                agent_context=agent_context,
+                prompt_profile_id=agent_context.get("prompt_profile_id"),
                 context_sections=[
                     PromptSection(
                         name="memeo_memory",
@@ -133,9 +142,11 @@ def _reason_with_llm_node(model_runner: Any | None):
             }
         except Exception as failure:
             LOGGER.warning(
-                "evidence clerk LLM turn degraded: case_id=%s actor_role=%s error_type=%s error=%s",
+                "evidence clerk LLM turn degraded: case_id=%s actor_role=%s "
+                "agent_invocation_id=%s error_type=%s error=%s",
                 request.get("case_id"),
                 request.get("actor_role"),
+                agent_context.get("agent_invocation_id"),
                 type(failure).__name__,
                 failure,
                 exc_info=True,

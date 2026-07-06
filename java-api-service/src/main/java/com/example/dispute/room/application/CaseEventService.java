@@ -5,6 +5,7 @@ import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
+import com.example.dispute.room.infrastructure.persistence.entity.CaseAccessSessionEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseTimelineEventEntity;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseParticipantRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseTimelineEventRepository;
@@ -34,6 +35,8 @@ public class CaseEventService {
     private final CaseTimelineEventRepository eventRepository;
     private final FulfillmentCaseRepository caseRepository;
     private final CaseParticipantRepository participantRepository;
+    private final AccessSessionResolver accessSessionResolver;
+    private final SessionPermissionService permissionService;
     private final ObjectMapper objectMapper;
     private final Clock clock;
     private final Map<String, CopyOnWriteArrayList<Subscription>> subscriptions =
@@ -43,11 +46,15 @@ public class CaseEventService {
             CaseTimelineEventRepository eventRepository,
             FulfillmentCaseRepository caseRepository,
             CaseParticipantRepository participantRepository,
+            AccessSessionResolver accessSessionResolver,
+            SessionPermissionService permissionService,
             ObjectMapper objectMapper,
             Clock clock) {
         this.eventRepository = eventRepository;
         this.caseRepository = caseRepository;
         this.participantRepository = participantRepository;
+        this.accessSessionResolver = accessSessionResolver;
+        this.permissionService = permissionService;
         this.objectMapper = objectMapper;
         this.clock = clock;
     }
@@ -59,6 +66,7 @@ public class CaseEventService {
             String messageId,
             String messageText,
             String audienceJson,
+            String audienceActorIdsJson,
             String actorId) {
         lockCase(caseId);
         long sequence = eventRepository.findMaxSequenceByCaseId(caseId) + 1;
@@ -74,6 +82,7 @@ public class CaseEventService {
                                 json(List.of(messageId)),
                                 json(Map.of("message_id", messageId, "text", nullToEmpty(messageText))),
                                 audienceJson,
+                                audienceActorIdsJson,
                                 "room-message:" + messageId,
                                 actorId));
         publishAfterCommit(caseId);
@@ -107,6 +116,7 @@ public class CaseEventService {
                                                     "[]",
                                                     json(payload),
                                                     "[]",
+                                                    "[]",
                                                     eventKey,
                                                     actorId));
                             publishAfterCommit(caseId);
@@ -117,11 +127,12 @@ public class CaseEventService {
     public List<CaseEventView> replay(
             String caseId, long afterSequence, AuthenticatedActor actor) {
         assertCanAccess(caseId, actor);
+        CaseAccessSessionEntity accessSession = accessSession(caseId, actor);
         return eventRepository
                 .findAllByCaseIdAndSequenceNoGreaterThanOrderBySequenceNoAsc(
                         caseId, afterSequence)
                 .stream()
-                .filter(event -> visibleTo(event, actor.role()))
+                .filter(event -> visibleTo(event, accessSession))
                 .map(CaseEventService::view)
                 .toList();
     }
@@ -129,9 +140,10 @@ public class CaseEventService {
     public SseEmitter subscribe(
             String caseId, long afterSequence, AuthenticatedActor actor) {
         assertCanAccess(caseId, actor);
+        CaseAccessSessionEntity accessSession = accessSession(caseId, actor);
         SseEmitter emitter = new SseEmitter(EMITTER_TIMEOUT_MS);
         Subscription subscription =
-                new Subscription(actor.role(), emitter, new AtomicLong(afterSequence));
+                new Subscription(accessSession, emitter, new AtomicLong(afterSequence));
         subscriptions.computeIfAbsent(caseId, ignored -> new CopyOnWriteArrayList<>())
                 .add(subscription);
         Runnable remove = () -> remove(caseId, subscription);
@@ -190,7 +202,7 @@ public class CaseEventService {
                         .findAllByCaseIdAndSequenceNoGreaterThanOrderBySequenceNoAsc(
                                 caseId, subscription.lastSequence().get())
                         .stream()
-                        .filter(event -> visibleTo(event, subscription.role()))
+                        .filter(event -> visibleTo(event, subscription.accessSession()))
                         .map(CaseEventService::view)
                         .forEach(event -> sendLocked(subscription, event));
                 return true;
@@ -246,15 +258,28 @@ public class CaseEventService {
                 .orElseThrow(() -> new IllegalArgumentException("case not found"));
     }
 
-    private boolean visibleTo(CaseTimelineEventEntity event, ActorRole role) {
-        if (role == ActorRole.ADMIN || role == ActorRole.SYSTEM) {
+    private CaseAccessSessionEntity accessSession(String caseId, AuthenticatedActor actor) {
+        CaseAccessSessionEntity accessSession = accessSessionResolver.resolve(caseId, actor);
+        permissionService.requireCaseRead(accessSession);
+        return accessSession;
+    }
+
+    private boolean visibleTo(CaseTimelineEventEntity event, CaseAccessSessionEntity accessSession) {
+        if (accessSession.getActorRole() == ActorRole.ADMIN
+                || accessSession.getActorRole() == ActorRole.SYSTEM) {
             return true;
         }
         try {
             List<String> audiences =
                     objectMapper.readValue(
                             event.getAudienceJson(), new TypeReference<>() {});
-            return audiences.isEmpty() || audiences.contains(role.name());
+            if (!audiences.isEmpty() && !audiences.contains(accessSession.getActorRole().name())) {
+                return false;
+            }
+            List<String> audienceActorIds =
+                    objectMapper.readValue(
+                            event.getAudienceActorIdsJson(), new TypeReference<>() {});
+            return permissionService.canReadActorAudience(accessSession, audienceActorIds);
         } catch (JsonProcessingException exception) {
             throw new IllegalStateException("invalid event audience", exception);
         }
@@ -296,7 +321,7 @@ public class CaseEventService {
     }
 
     private record Subscription(
-            ActorRole role, SseEmitter emitter, AtomicLong lastSequence) {}
+            CaseAccessSessionEntity accessSession, SseEmitter emitter, AtomicLong lastSequence) {}
 
     private static final class EventDeliveryException extends RuntimeException {
         private EventDeliveryException(IOException cause) {

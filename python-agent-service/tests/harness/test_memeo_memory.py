@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from app.harness.memory import MemeoMemoryAssembler, MemeoMemoryConfig
+import pytest
+
+from app.harness.memory import (
+    MemeoMemoryAssembler,
+    MemeoMemoryConfig,
+    MemoryScopeViolation,
+)
 
 
 def _participant(turn_no: int, text: str) -> dict[str, object]:
@@ -24,6 +30,14 @@ def _agent(turn_no: int, text: str) -> dict[str, object]:
         "agent_role": "DISPUTE_INTAKE_OFFICER",
         "agent_response": text,
         "scroll_snapshot": {},
+    }
+
+
+def _scoped(turn: dict[str, object], session_id: str = "SESSION_A") -> dict[str, object]:
+    return {
+        **turn,
+        "agent_session_id": session_id,
+        "conversation_scope": f"default:CASE_memory:INTAKE:USER_local:USER:AGENT:v1:{session_id}",
     }
 
 
@@ -125,3 +139,70 @@ def test_memeo_memory_modes_are_configurable_for_future_agent_center() -> None:
     assert long_term_enabled.memory_modes.long_term_enabled is True
     assert long_term_enabled.long_term_slots[0].enabled is True
     assert long_term_enabled.long_term_slots[0].prompt_included is False
+
+
+def test_strict_memeo_memory_rejects_turn_from_different_agent_session() -> None:
+    turns = [
+        _scoped(_participant(1, "current actor private memory"), "SESSION_A"),
+        _scoped(_agent(2, "polluted counterparty memory"), "SESSION_B"),
+    ]
+
+    with pytest.raises(MemoryScopeViolation) as failure:
+        MemeoMemoryAssembler().assemble(
+            turns,
+            expected_agent_session_id="SESSION_A",
+            strict_scope=True,
+        )
+
+    assert "agent_session_id mismatch" in str(failure.value)
+
+
+def test_strict_memeo_memory_rejects_turn_without_agent_session_id() -> None:
+    with pytest.raises(MemoryScopeViolation) as failure:
+        MemeoMemoryAssembler().assemble(
+            [_participant(1, "legacy unscoped memory")],
+            expected_agent_session_id="SESSION_A",
+            strict_scope=True,
+        )
+
+    assert "missing agent_session_id" in str(failure.value)
+
+
+def test_strict_memeo_memory_rejects_conversation_scope_mismatch() -> None:
+    turns = [
+        {
+            **_scoped(_participant(1, "current actor private memory"), "SESSION_A"),
+            "conversation_scope": (
+                "default:CASE_memory:INTAKE:USER_other:USER:AGENT:v1:SESSION_A"
+            ),
+        }
+    ]
+
+    with pytest.raises(MemoryScopeViolation) as failure:
+        MemeoMemoryAssembler().assemble(
+            turns,
+            expected_agent_session_id="SESSION_A",
+            expected_conversation_scope=(
+                "default:CASE_memory:INTAKE:USER_local:USER:AGENT:v1:SESSION_A"
+            ),
+            strict_scope=True,
+        )
+
+    assert "conversation_scope mismatch" in str(failure.value)
+
+
+def test_strict_memeo_memory_accepts_only_matching_session_turns() -> None:
+    frame = MemeoMemoryAssembler().assemble(
+        [
+            _scoped(_participant(1, "current actor private memory"), "SESSION_A"),
+            _scoped(_agent(1, "agent private response"), "SESSION_A"),
+        ],
+        expected_agent_session_id="SESSION_A",
+        expected_conversation_scope=(
+            "default:CASE_memory:INTAKE:USER_local:USER:AGENT:v1:SESSION_A"
+        ),
+        strict_scope=True,
+    )
+
+    assert "current actor private memory" in frame.prompt_memory
+    assert "agent private response" in frame.prompt_memory

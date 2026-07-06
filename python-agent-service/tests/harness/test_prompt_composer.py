@@ -29,6 +29,35 @@ def test_prompt_repository_resolves_agent_owned_template_path() -> None:
     assert path == Path("app/agents/prompts/dispute_intake_officer/intake_analyze.md")
 
 
+def test_prompt_repository_resolves_role_specific_profile_template_path() -> None:
+    repo = PromptRepository()
+
+    assert repo.template_path(
+        "evidence_turn",
+        prompt_profile_id="EVIDENCE_CLERK:USER:v1",
+    ) == Path("app/agents/prompts/evidence_clerk/evidence_turn.user.md")
+    assert repo.template_path(
+        "evidence_turn",
+        prompt_profile_id="EVIDENCE_CLERK:MERCHANT:v1",
+    ) == Path("app/agents/prompts/evidence_clerk/evidence_turn.merchant.md")
+
+
+def test_prompt_repository_falls_back_for_unknown_profile_only_when_allowed() -> None:
+    repo = PromptRepository()
+
+    with pytest.raises(FileNotFoundError):
+        repo.template_path(
+            "evidence_turn",
+            prompt_profile_id="EVIDENCE_CLERK:REVIEWER:v1",
+        )
+
+    assert repo.template_path(
+        "evidence_turn",
+        prompt_profile_id="EVIDENCE_CLERK:REVIEWER:v1",
+        allow_profile_fallback=True,
+    ) == Path("app/agents/prompts/evidence_clerk/evidence_turn.md")
+
+
 def test_prompt_repository_rejects_unknown_node() -> None:
     repo = PromptRepository()
 

@@ -10,6 +10,8 @@ import com.example.dispute.room.domain.MessageSenderType;
 import com.example.dispute.room.domain.MessageType;
 import com.example.dispute.room.domain.RoomStatus;
 import com.example.dispute.room.domain.RoomType;
+import com.example.dispute.room.infrastructure.persistence.entity.AgentConversationSessionEntity;
+import com.example.dispute.room.infrastructure.persistence.entity.CaseAccessSessionEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseIntakeDossierEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.RoomMessageEntity;
@@ -51,6 +53,9 @@ public class EvidenceAgentTurnService {
     private final EvidenceItemRepository evidenceItemRepository;
     private final RoomMessageRepository messageRepository;
     private final CaseEventService eventService;
+    private final AccessSessionResolver accessSessionResolver;
+    private final AgentSessionResolver agentSessionResolver;
+    private final SessionPermissionService permissionService;
     private final EvidenceAgentTurnClient client;
     private final ObjectMapper objectMapper;
     private final Clock clock;
@@ -63,6 +68,9 @@ public class EvidenceAgentTurnService {
             EvidenceItemRepository evidenceItemRepository,
             RoomMessageRepository messageRepository,
             CaseEventService eventService,
+            AccessSessionResolver accessSessionResolver,
+            AgentSessionResolver agentSessionResolver,
+            SessionPermissionService permissionService,
             EvidenceAgentTurnClient client,
             ObjectMapper objectMapper,
             Clock clock) {
@@ -73,6 +81,9 @@ public class EvidenceAgentTurnService {
         this.evidenceItemRepository = evidenceItemRepository;
         this.messageRepository = messageRepository;
         this.eventService = eventService;
+        this.accessSessionResolver = accessSessionResolver;
+        this.agentSessionResolver = agentSessionResolver;
+        this.permissionService = permissionService;
         this.client = client;
         this.objectMapper = objectMapper;
         this.clock = clock;
@@ -93,7 +104,8 @@ public class EvidenceAgentTurnService {
         }
 
         TurnContext context = prepare(caseId, RoomType.EVIDENCE);
-        int turnNo = memoryRepository.findMaxTurnNo(caseId, RoomType.EVIDENCE) + 1;
+        SessionContext session = resolveSession(caseId, actor, RoomType.EVIDENCE);
+        int turnNo = memoryRepository.findMaxTurnNoByAgentSessionId(session.agentSession().getId()) + 1;
         memoryRepository.save(
                 RoomTurnMemoryEntity.participantTurn(
                         "MEMORY_" + compactUuid(),
@@ -102,7 +114,10 @@ public class EvidenceAgentTurnService {
                         turnNo,
                         actor.actorId(),
                         actor.role().name(),
-                        participantAnswerContent(message)));
+                        participantAnswerContent(message),
+                        session.agentSession(),
+                        session.accessSession(),
+                        "{}"));
 
         EvidenceAgentTurnCommand command =
                 new EvidenceAgentTurnCommand(
@@ -118,10 +133,33 @@ public class EvidenceAgentTurnService {
                                 participantAnswerContent(message),
                                 message.attachmentRefs()),
                         latestCaseIntakeDossier(caseId),
-                        availableEvidence(caseId, actor.role()),
-                        recentTurns(caseId, actor.role()));
+                        availableEvidence(caseId, actor),
+                        recentTurns(session.agentSession()),
+                        session.agentContext());
         EvidenceAgentTurnResult result = safeRun(command, traceId, requestId);
-        persistAgentTurn(context, turnNo, actor.role(), result, traceId);
+        persistAgentTurn(context, session, turnNo, actor.role(), result, traceId);
+    }
+
+    private SessionContext resolveSession(
+            String caseId, AuthenticatedActor actor, RoomType roomType) {
+        CaseAccessSessionEntity accessSession = accessSessionResolver.resolve(caseId, actor);
+        permissionService.requireRoomRead(accessSession, roomType);
+        permissionService.requireEvidenceSubmit(accessSession);
+        AgentConversationSessionEntity agentSession =
+                agentSessionResolver.resolve(
+                        accessSession,
+                        roomType,
+                        AGENT_ROLE,
+                        promptProfileId(actor.role()),
+                        "MEMEO_DEFAULT");
+        return new SessionContext(
+                accessSession,
+                agentSession,
+                AgentInvocationContext.partyPrivate(
+                        accessSession,
+                        agentSession,
+                        roomType,
+                        "EVIDENCE_PARTY_PRIVATE"));
     }
 
     private TurnContext prepare(String caseId, RoomType roomType) {
@@ -172,6 +210,7 @@ public class EvidenceAgentTurnService {
 
     private void persistAgentTurn(
             TurnContext context,
+            SessionContext session,
             int turnNo,
             ActorRole audienceParty,
             EvidenceAgentTurnResult result,
@@ -189,10 +228,14 @@ public class EvidenceAgentTurnService {
                         json(defaultObject(result.memoryPatch())),
                         "{}",
                         json(defaultArray(result.canvasOperations())),
-                        runId));
+                        runId,
+                        session.agentSession(),
+                        session.accessSession(),
+                        "{}"));
         appendAgentMessage(
                 context.dispute(),
                 context.room(),
+                session.agentSession(),
                 audienceParty,
                 result.roomUtterance(),
                 turnNo,
@@ -202,17 +245,26 @@ public class EvidenceAgentTurnService {
     private void appendAgentMessage(
             FulfillmentCaseEntity dispute,
             CaseRoomEntity room,
+            AgentConversationSessionEntity agentSession,
             ActorRole audienceParty,
             String utterance,
             int turnNo,
             String traceId) {
         String idempotencyKey =
-                "agent-evidence-turn:" + dispute.getId() + ":" + audienceParty.name() + ":" + turnNo;
+                "agent-evidence-turn:"
+                        + dispute.getId()
+                        + ":"
+                        + agentSession.getId()
+                        + ":"
+                        + audienceParty.name()
+                        + ":"
+                        + turnNo;
         if (messageRepository.findByCaseIdAndIdempotencyKey(dispute.getId(), idempotencyKey)
                 .isPresent()) {
             return;
         }
         String audienceJson = audienceJson(audienceParty);
+        String audienceActorIdsJson = json(List.of(agentSession.getActorId()));
         long sequence = messageRepository.findMaxSequenceByRoomId(room.getId()) + 1;
         RoomMessageEntity saved =
                 messageRepository.save(
@@ -225,6 +277,7 @@ public class EvidenceAgentTurnService {
                                 AGENT_SENDER_ROLE,
                                 AGENT_SENDER_ID,
                                 audienceJson,
+                                audienceActorIdsJson,
                                 MessageType.AGENT_MESSAGE,
                                 utterance,
                                 "[]",
@@ -237,6 +290,7 @@ public class EvidenceAgentTurnService {
                 saved.getId(),
                 saved.getMessageText(),
                 saved.getAudienceJson(),
+                audienceActorIdsJson,
                 AGENT_SENDER_ID);
     }
 
@@ -249,11 +303,11 @@ public class EvidenceAgentTurnService {
     }
 
     private List<EvidenceAgentTurnCommand.AvailableEvidence> availableEvidence(
-            String caseId, ActorRole role) {
+            String caseId, AuthenticatedActor actor) {
         return evidenceItemRepository
                 .findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(caseId)
                 .stream()
-                .filter(item -> visibleEvidenceTo(item, role))
+                .filter(item -> visibleEvidenceTo(item, actor))
                 .map(item -> availableEvidence(caseId, item))
                 .toList();
     }
@@ -275,18 +329,23 @@ public class EvidenceAgentTurnService {
                 item.getOriginalFilename());
     }
 
-    private List<IntakeRecentTurn> recentTurns(String caseId, ActorRole partyRole) {
-        List<RoomTurnMemoryEntity> recentMemories =
-                memoryRepository
-                        .findTop50ByCaseIdAndRoomTypeOrderByTurnNoDesc(caseId, RoomType.EVIDENCE);
-        Set<Integer> partyTurnNos =
-                recentMemories.stream()
-                        .filter(memory -> partyRole.name().equals(memory.getAnswerRole()))
+    private List<IntakeRecentTurn> recentTurns(AgentConversationSessionEntity agentSession) {
+        List<RoomTurnMemoryEntity> memories =
+                memoryRepository.findTop50ByAgentSessionIdOrderByTurnNoDesc(agentSession.getId());
+        Set<Integer> legacyPartyTurnNos =
+                memories.stream()
+                        .filter(memory -> !hasText(memory.getAgentSessionId()))
+                        .filter(
+                                memory ->
+                                        agentSession
+                                                .getActorRole()
+                                                .name()
+                                                .equals(memory.getAnswerRole()))
                         .map(RoomTurnMemoryEntity::getTurnNo)
                         .collect(Collectors.toSet());
         List<IntakeRecentTurn> scopedTurns =
-                recentMemories.stream()
-                        .filter(memory -> visibleToPartyMemory(memory, partyRole, partyTurnNos))
+                memories.stream()
+                        .filter(memory -> visibleToAgentSession(memory, agentSession, legacyPartyTurnNos))
                         .sorted(Comparator.comparingInt(RoomTurnMemoryEntity::getTurnNo))
                         .map(
                                 memory ->
@@ -297,7 +356,11 @@ public class EvidenceAgentTurnService {
                                                 memory.getAnswerContent(),
                                                 memory.getAgentRole(),
                                                 memory.getAgentResponse(),
-                                                readJson(memory.getScrollSnapshotJson())))
+                                                readJson(memory.getScrollSnapshotJson()),
+                                                textOrDefault(memory.getAgentSessionId(), agentSession.getId()),
+                                                textOrDefault(
+                                                        memory.getConversationScope(),
+                                                        agentSession.getConversationScope())))
                         .toList();
         if (scopedTurns.size() <= 10) {
             return scopedTurns;
@@ -305,12 +368,17 @@ public class EvidenceAgentTurnService {
         return scopedTurns.subList(scopedTurns.size() - 10, scopedTurns.size());
     }
 
-    private static boolean visibleToPartyMemory(
-            RoomTurnMemoryEntity memory, ActorRole partyRole, Set<Integer> partyTurnNos) {
-        if (partyRole.name().equals(memory.getAnswerRole())) {
+    private static boolean visibleToAgentSession(
+            RoomTurnMemoryEntity memory,
+            AgentConversationSessionEntity agentSession,
+            Set<Integer> legacyPartyTurnNos) {
+        if (hasText(memory.getAgentSessionId())) {
+            return agentSession.getId().equals(memory.getAgentSessionId());
+        }
+        if (agentSession.getActorRole().name().equals(memory.getAnswerRole())) {
             return true;
         }
-        return memory.getAgentRole() != null && partyTurnNos.contains(memory.getTurnNo());
+        return memory.getAgentRole() != null && legacyPartyTurnNos.contains(memory.getTurnNo());
     }
 
     private EvidenceAgentTurnResult degraded(String reason, String traceId) {
@@ -371,7 +439,15 @@ public class EvidenceAgentTurnService {
         }
     }
 
-    private static boolean visibleEvidenceTo(EvidenceItemEntity item, ActorRole role) {
+    private static String textOrDefault(String value, String fallback) {
+        if (value == null || value.isBlank()) {
+            return fallback;
+        }
+        return value;
+    }
+
+    private static boolean visibleEvidenceTo(EvidenceItemEntity item, AuthenticatedActor actor) {
+        ActorRole role = actor.role();
         if (role == ActorRole.PLATFORM_REVIEWER
                 || role == ActorRole.ADMIN
                 || role == ActorRole.SYSTEM) {
@@ -381,6 +457,7 @@ public class EvidenceAgentTurnService {
             return "PARTIES".equals(item.getVisibility()) || "PLATFORM".equals(item.getVisibility());
         }
         return role.name().equals(item.getSubmittedByRole())
+                        && actor.actorId().equals(item.getSubmittedById())
                 || "PARTIES".equals(item.getVisibility());
     }
 
@@ -414,9 +491,22 @@ public class EvidenceAgentTurnService {
         return value == null || value.isBlank();
     }
 
+    private static boolean hasText(String value) {
+        return value != null && !value.isBlank();
+    }
+
     private static String compactUuid() {
         return UUID.randomUUID().toString().replace("-", "");
     }
 
+    private static String promptProfileId(ActorRole role) {
+        return AGENT_ROLE + ":" + role.name() + ":v1";
+    }
+
     private record TurnContext(FulfillmentCaseEntity dispute, CaseRoomEntity room) {}
+
+    private record SessionContext(
+            CaseAccessSessionEntity accessSession,
+            AgentConversationSessionEntity agentSession,
+            AgentInvocationContext agentContext) {}
 }

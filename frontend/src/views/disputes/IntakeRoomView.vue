@@ -5,6 +5,7 @@ import {
   onMounted,
   reactive,
   ref,
+  watch,
 } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { disputeApi } from "../../api/disputes";
@@ -48,7 +49,8 @@ const admitted = ref(false);
 const resolved = ref(false);
 const error = ref("");
 const eventState = reactive(createRoomState());
-const eventAbortController = new AbortController();
+const workspaceGeneration = ref(0);
+let eventAbortController = new AbortController();
 
 const caseId = computed(() => dispute.value?.id || route.params.caseId);
 const caseNoteTitle = computed(() =>
@@ -183,6 +185,41 @@ const intakeRecipientView = computed(
     actor.role !== normalizedPartyRole(initiatorRoleValue.value),
 );
 const canManageIntake = computed(() => partyCanChat.value);
+
+function currentWorkspaceSnapshot() {
+  return {
+    generation: workspaceGeneration.value,
+    caseId: caseId.value,
+    actor: {
+      id: actor.id,
+      role: actor.role,
+    },
+  };
+}
+
+function isCurrentWorkspace(snapshot) {
+  return (
+    snapshot &&
+    snapshot.generation === workspaceGeneration.value &&
+    snapshot.caseId === caseId.value &&
+    snapshot.actor?.id === actor.id &&
+    snapshot.actor?.role === actor.role
+  );
+}
+
+function resetWorkspaceForActorChange() {
+  workspaceGeneration.value += 1;
+  messages.value = [];
+  turnMemory.value = null;
+  error.value = "";
+  agentState.value = "LISTENING";
+  submitting.value = false;
+  eventAbortController.abort();
+  eventAbortController = new AbortController();
+  eventState.connected = false;
+  eventState.reconnecting = false;
+  eventState.streamError = null;
+}
 
 function formatReferenceSummary(references = {}) {
   const items = [
@@ -431,50 +468,59 @@ const caseDetailMetaSections = computed(() => {
   ];
 });
 
-async function load() {
+async function load(snapshot = currentWorkspaceSnapshot()) {
   try {
     if (!dispute.value) {
-      dispute.value = await disputeApi.get(actor, caseId.value);
+      const loadedDispute = await disputeApi.get(snapshot.actor, snapshot.caseId);
+      if (!isCurrentWorkspace(snapshot)) return;
+      dispute.value = loadedDispute;
     }
     if (props.initialMessages === null) {
-      messages.value = await loadMessages();
+      await refreshMessages(snapshot);
     }
     if (props.initialTurnMemory === null && props.initialMessages === null) {
-      await refreshTurnMemory();
+      await refreshTurnMemory(snapshot);
     }
   } catch (failure) {
+    if (!isCurrentWorkspace(snapshot)) return;
     error.value = failure.message;
     agentState.value = "ERROR";
   }
 }
 
-async function refreshMessages() {
-  messages.value = await loadMessages();
+async function refreshMessages(snapshot = currentWorkspaceSnapshot()) {
+  const loadedMessages = await loadMessages(snapshot);
+  if (isCurrentWorkspace(snapshot)) {
+    messages.value = loadedMessages;
+  }
 }
 
-async function loadMessages() {
+async function loadMessages(snapshot = currentWorkspaceSnapshot()) {
   const loader =
     props.messagesLoader ||
-    (() => roomApi.messages(actor, caseId.value, "INTAKE"));
-  return loader();
+    (() => roomApi.messages(snapshot.actor, snapshot.caseId, "INTAKE"));
+  return loader(snapshot);
 }
 
-async function refreshTurnMemory() {
+async function refreshTurnMemory(snapshot = currentWorkspaceSnapshot()) {
   const loader =
     props.turnMemoryLoader ||
-    (() => roomApi.latestTurnMemory(actor, caseId.value, "INTAKE"));
-  turnMemory.value = await loader();
+    (() => roomApi.latestTurnMemory(snapshot.actor, snapshot.caseId, "INTAKE"));
+  const loadedMemory = await loader(snapshot);
+  if (isCurrentWorkspace(snapshot)) {
+    turnMemory.value = loadedMemory;
+  }
 }
 
-async function refreshRoomSnapshot() {
-  await Promise.all([refreshMessages(), refreshTurnMemory()]);
+async function refreshRoomSnapshot(snapshot = currentWorkspaceSnapshot()) {
+  await Promise.all([refreshMessages(snapshot), refreshTurnMemory(snapshot)]);
 }
 
 function nextLocalSequenceNo() {
   return Math.max(0, ...messages.value.map((message) => message.sequence_no || 0)) + 1;
 }
 
-function appendOptimisticPartyMessage(command) {
+function appendOptimisticPartyMessage(command, snapshot = currentWorkspaceSnapshot()) {
   if (!command?.text?.trim()) return "";
   const id = `PENDING_${Date.now()}_${Math.random().toString(16).slice(2)}`;
   messages.value = [
@@ -482,7 +528,7 @@ function appendOptimisticPartyMessage(command) {
     {
       id,
       sequence_no: nextLocalSequenceNo(),
-      sender_role: actor.role,
+      sender_role: snapshot.actor.role,
       message_text: command.text.trim(),
       pending: true,
     },
@@ -495,45 +541,53 @@ function removeOptimisticMessage(id) {
   messages.value = messages.value.filter((message) => message.id !== id);
 }
 
-function startEventStream() {
+function startEventStream(snapshot = currentWorkspaceSnapshot()) {
   const streamer = props.eventStreamer || streamRoomEvents;
   void streamer({
-    actor,
-    caseId: caseId.value,
+    actor: snapshot.actor,
+    caseId: snapshot.caseId,
     roomType: "INTAKE",
     state: eventState,
     signal: eventAbortController.signal,
-    snapshotLoader: refreshRoomSnapshot,
+    snapshotLoader: () => refreshRoomSnapshot(snapshot),
     applyEvent: async (event) => {
+      if (!isCurrentWorkspace(snapshot)) return;
       if (event.event === "EVIDENCE_OPENED") {
-        await router.push(`/disputes/${caseId.value}/evidence`);
+        await router.push(`/disputes/${snapshot.caseId}/evidence`);
       }
     },
   });
 }
 
 async function postMessage(command) {
+  const snapshot = currentWorkspaceSnapshot();
   agentState.value = "THINKING";
   submitting.value = true;
   error.value = "";
-  const optimisticId = appendOptimisticPartyMessage(command);
+  const optimisticId = appendOptimisticPartyMessage(command, snapshot);
   try {
     const submit =
       props.postMessageAction ||
-      ((payload) => roomApi.postMessage(actor, caseId.value, "INTAKE", payload));
+      ((payload) => roomApi.postMessage(snapshot.actor, snapshot.caseId, "INTAKE", payload));
     await submit(command);
-    await refreshRoomSnapshot();
-    agentState.value = "SPEAKING";
+    await refreshRoomSnapshot(snapshot);
+    if (isCurrentWorkspace(snapshot)) {
+      agentState.value = "SPEAKING";
+    }
   } catch (failure) {
+    if (!isCurrentWorkspace(snapshot)) return;
     removeOptimisticMessage(optimisticId);
     error.value = failure.message;
     agentState.value = "ERROR";
   } finally {
-    submitting.value = false;
+    if (isCurrentWorkspace(snapshot)) {
+      submitting.value = false;
+    }
   }
 }
 
 async function resolveWithoutDispute() {
+  const snapshot = currentWorkspaceSnapshot();
   submitting.value = true;
   error.value = "";
   agentState.value = "THINKING";
@@ -543,27 +597,32 @@ async function resolveWithoutDispute() {
   try {
     const cancel =
       props.cancelAction ||
-      ((payload) => disputeApi.cancelIntake(actor, caseId.value, payload.reason));
+      ((payload) => disputeApi.cancelIntake(snapshot.actor, snapshot.caseId, payload.reason));
     const result = await cancel(command);
+    if (!isCurrentWorkspace(snapshot)) return;
     if (result) {
       dispute.value = {
         ...(dispute.value || {}),
         ...result,
-        id: result.case_id || result.caseId || dispute.value?.id || caseId.value,
+        id: result.case_id || result.caseId || dispute.value?.id || snapshot.caseId,
       };
     }
     resolved.value = true;
     admitted.value = true;
     agentState.value = "HANDOFF";
   } catch (failure) {
+    if (!isCurrentWorkspace(snapshot)) return;
     error.value = failure.message;
     agentState.value = "ERROR";
   } finally {
-    submitting.value = false;
+    if (isCurrentWorkspace(snapshot)) {
+      submitting.value = false;
+    }
   }
 }
 
 async function confirmAdmission() {
+  const snapshot = currentWorkspaceSnapshot();
   submitting.value = true;
   error.value = "";
   agentState.value = "THINKING";
@@ -575,16 +634,20 @@ async function confirmAdmission() {
   try {
     const confirm =
       props.confirmAction ||
-      ((payload) => disputeApi.confirmIntake(actor, caseId.value, payload));
+      ((payload) => disputeApi.confirmIntake(snapshot.actor, snapshot.caseId, payload));
     await confirm(command);
+    if (!isCurrentWorkspace(snapshot)) return;
     admitted.value = true;
     agentState.value = "HANDOFF";
-    await router.push(`/disputes/${caseId.value}/evidence`);
+    await router.push(`/disputes/${snapshot.caseId}/evidence`);
   } catch (failure) {
+    if (!isCurrentWorkspace(snapshot)) return;
     error.value = failure.message;
     agentState.value = "ERROR";
   } finally {
-    submitting.value = false;
+    if (isCurrentWorkspace(snapshot)) {
+      submitting.value = false;
+    }
   }
 }
 
@@ -593,11 +656,25 @@ async function enterEvidenceRoom() {
 }
 
 onMounted(async () => {
-  await load();
+  const snapshot = currentWorkspaceSnapshot();
+  await load(snapshot);
   if (props.eventStreamer || props.initialMessages === null) {
-    startEventStream();
+    startEventStream(snapshot);
   }
 });
+watch(
+  () => [caseId.value, actor.id, actor.role],
+  async () => {
+    resetWorkspaceForActorChange();
+    const snapshot = currentWorkspaceSnapshot();
+    if (props.initialMessages === null) {
+      await refreshRoomSnapshot(snapshot);
+    }
+    if (props.eventStreamer || props.initialMessages === null) {
+      startEventStream(snapshot);
+    }
+  },
+);
 onBeforeUnmount(() => {
   eventAbortController.abort();
 });

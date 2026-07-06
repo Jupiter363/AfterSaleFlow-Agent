@@ -74,6 +74,43 @@ def test_model_runner_composes_prompt_with_managed_context_window() -> None:
     assert "很早之前的历史。" not in str(call["user_prompt"])
 
 
+def test_model_runner_passes_prompt_profile_and_trusted_agent_context() -> None:
+    llm = RecordingLlm()
+    runner = HarnessModelRunner(
+        llm=llm,
+        prompts=PromptRepository(),
+    )
+    agent_context = {
+        "agent_key": "EVIDENCE_CLERK",
+        "actor_id": "USER_local_1",
+        "actor_role": "USER",
+        "agent_session_id": "SESSION_evidence_user",
+        "scope_type": "EVIDENCE_PARTY_PRIVATE",
+        "allowed_actor_ids": ["USER_local_1"],
+        "prompt_profile_id": "EVIDENCE_CLERK:USER:v1",
+        "case_id": "CASE_model_runner",
+        "room_type": "EVIDENCE",
+        "agent_invocation_id": "INVOCATION_model_runner",
+    }
+
+    runner.invoke_structured(
+        node_name="evidence_turn",
+        case_data={
+            "agent_context": {"actor_id": "MALICIOUS_CASE_DATA"},
+            "message_text": "Please inspect this signature screenshot.",
+        },
+        output_type=RunnerOutput,
+        agent_context=agent_context,
+    )
+
+    call = llm.calls[0]
+    assert "Evidence Clerk" in str(call["system_prompt"])
+    assert "SESSION_evidence_user" in str(call["system_prompt"])
+    assert "EVIDENCE_CLERK:USER:v1" in str(call["system_prompt"])
+    assert "MALICIOUS_CASE_DATA" not in str(call["system_prompt"])
+    assert "MALICIOUS_CASE_DATA" in str(call["user_prompt"])
+
+
 def test_context_window_rejects_required_section_that_cannot_fit() -> None:
     manager = ContextWindowManager(default_max_input_tokens=10)
 

@@ -12,7 +12,8 @@ public record IntakeAgentTurnCommand(
         @JsonProperty("lobby_seed") IntakeLobbySeed lobbySeed,
         @JsonProperty("current_user_message") IntakeParticipantMessage currentUserMessage,
         @JsonProperty("latest_scroll_snapshot") JsonNode latestScrollSnapshot,
-        @JsonProperty("recent_turns") List<IntakeRecentTurn> recentTurns) {
+        @JsonProperty("recent_turns") List<IntakeRecentTurn> recentTurns,
+        @JsonProperty("agent_context") AgentInvocationContext agentContext) {
 
     public IntakeAgentTurnCommand {
         recentTurns = recentTurns == null ? List.of() : List.copyOf(recentTurns);

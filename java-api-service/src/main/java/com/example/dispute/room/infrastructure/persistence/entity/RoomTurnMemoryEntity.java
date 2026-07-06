@@ -31,6 +31,24 @@ public class RoomTurnMemoryEntity extends AbstractEntity {
     @Column(name = "actor_id", length = 128, nullable = false)
     private String actorId;
 
+    @Column(name = "agent_session_id", length = 64)
+    private String agentSessionId;
+
+    @Column(name = "access_session_id", length = 64)
+    private String accessSessionId;
+
+    @Column(name = "conversation_scope", length = 512)
+    private String conversationScope;
+
+    @Column(name = "session_actor_id", length = 128)
+    private String sessionActorId;
+
+    @Column(name = "session_actor_role", length = 64)
+    private String sessionActorRole;
+
+    @Column(name = "prompt_profile_id", length = 128)
+    private String promptProfileId;
+
     @Column(name = "answer_role", length = 64)
     private String answerRole;
 
@@ -54,6 +72,13 @@ public class RoomTurnMemoryEntity extends AbstractEntity {
     @JdbcTypeCode(SqlTypes.JSON)
     @Column(name = "canvas_operations_json", nullable = false, columnDefinition = "jsonb")
     private String canvasOperationsJson;
+
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(
+            name = "memory_policy_snapshot_json",
+            nullable = false,
+            columnDefinition = "jsonb")
+    private String memoryPolicySnapshotJson;
 
     @Column(name = "agent_run_id", length = 64)
     private String agentRunId;
@@ -84,6 +109,24 @@ public class RoomTurnMemoryEntity extends AbstractEntity {
         entity.dossierPatchJson = "{}";
         entity.scrollSnapshotJson = "{}";
         entity.canvasOperationsJson = "[]";
+        entity.memoryPolicySnapshotJson = "{}";
+        return entity;
+    }
+
+    public static RoomTurnMemoryEntity participantTurn(
+            String id,
+            String caseId,
+            RoomType roomType,
+            int turnNo,
+            String actorId,
+            String answerRole,
+            String answerContent,
+            AgentConversationSessionEntity agentSession,
+            CaseAccessSessionEntity accessSession,
+            String memoryPolicySnapshotJson) {
+        RoomTurnMemoryEntity entity =
+                participantTurn(id, caseId, roomType, turnNo, actorId, answerRole, answerContent);
+        entity.attachSession(agentSession, accessSession, memoryPolicySnapshotJson);
         return entity;
     }
 
@@ -105,8 +148,57 @@ public class RoomTurnMemoryEntity extends AbstractEntity {
         entity.dossierPatchJson = required(dossierPatchJson, "dossierPatchJson");
         entity.scrollSnapshotJson = required(scrollSnapshotJson, "scrollSnapshotJson");
         entity.canvasOperationsJson = required(canvasOperationsJson, "canvasOperationsJson");
+        entity.memoryPolicySnapshotJson = "{}";
         entity.agentRunId = agentRunId;
         return entity;
+    }
+
+    public static RoomTurnMemoryEntity agentTurn(
+            String id,
+            String caseId,
+            RoomType roomType,
+            int turnNo,
+            String actorId,
+            String agentRole,
+            String agentResponse,
+            String dossierPatchJson,
+            String scrollSnapshotJson,
+            String canvasOperationsJson,
+            String agentRunId,
+            AgentConversationSessionEntity agentSession,
+            CaseAccessSessionEntity accessSession,
+            String memoryPolicySnapshotJson) {
+        RoomTurnMemoryEntity entity =
+                agentTurn(
+                        id,
+                        caseId,
+                        roomType,
+                        turnNo,
+                        actorId,
+                        agentRole,
+                        agentResponse,
+                        dossierPatchJson,
+                        scrollSnapshotJson,
+                        canvasOperationsJson,
+                        agentRunId);
+        entity.attachSession(agentSession, accessSession, memoryPolicySnapshotJson);
+        return entity;
+    }
+
+    private void attachSession(
+            AgentConversationSessionEntity agentSession,
+            CaseAccessSessionEntity accessSession,
+            String memoryPolicySnapshotJson) {
+        this.agentSessionId = required(agentSession.getId(), "agentSessionId");
+        this.accessSessionId = required(accessSession.getId(), "accessSessionId");
+        this.conversationScope = required(agentSession.getConversationScope(), "conversationScope");
+        this.sessionActorId = required(agentSession.getActorId(), "sessionActorId");
+        this.sessionActorRole = required(agentSession.getActorRole().name(), "sessionActorRole");
+        this.promptProfileId = required(agentSession.getPromptProfileId(), "promptProfileId");
+        this.memoryPolicySnapshotJson =
+                memoryPolicySnapshotJson == null || memoryPolicySnapshotJson.isBlank()
+                        ? "{}"
+                        : memoryPolicySnapshotJson;
     }
 
     private static RoomTurnMemoryEntity base(
@@ -140,6 +232,30 @@ public class RoomTurnMemoryEntity extends AbstractEntity {
         return actorId;
     }
 
+    public String getAgentSessionId() {
+        return agentSessionId;
+    }
+
+    public String getAccessSessionId() {
+        return accessSessionId;
+    }
+
+    public String getConversationScope() {
+        return conversationScope;
+    }
+
+    public String getSessionActorId() {
+        return sessionActorId;
+    }
+
+    public String getSessionActorRole() {
+        return sessionActorRole;
+    }
+
+    public String getPromptProfileId() {
+        return promptProfileId;
+    }
+
     public String getAnswerRole() {
         return answerRole;
     }
@@ -166,6 +282,10 @@ public class RoomTurnMemoryEntity extends AbstractEntity {
 
     public String getCanvasOperationsJson() {
         return canvasOperationsJson;
+    }
+
+    public String getMemoryPolicySnapshotJson() {
+        return memoryPolicySnapshotJson;
     }
 
     public String getAgentRunId() {

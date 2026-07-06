@@ -6,6 +6,7 @@ logs/
 data/
 tmp/
 .local-dev/
+.codex-run/
 .idea/
 .vscode/
 .DS_Store
