@@ -23,6 +23,47 @@ def test_prompt_repository_loads_common_fragments_and_agent_prompt() -> None:
     assert "<required_output_schema>" in user_prompt
 
 
+def test_intake_officer_prompt_declares_context_pack_workflow_contract() -> None:
+    system_prompt, _ = PromptRepository().render(
+        "intake_turn_case_detail",
+        {"case_id": "CASE_prompt_contract"},
+        {"type": "object"},
+    )
+
+    assert "Context Pack 读取契约" in system_prompt
+    assert "current_turn" in system_prompt
+    assert "intake_initial_form" in system_prompt
+    assert "latest_canvas_snapshot" in system_prompt
+    assert "short_term_memory" in system_prompt
+    assert "compressed_summary" in system_prompt
+    assert "接待室是单方参与房间" in system_prompt
+    assert "raw_statement" in system_prompt
+    assert "platform_statement" in system_prompt
+    assert "不要把上一轮展板丢掉重写" in system_prompt
+    assert "WAITING_FOR_REMARK" in system_prompt
+    assert "HAS_REMARKS" in system_prompt
+
+
+def test_evidence_clerk_prompt_declares_context_pack_and_party_isolation_contract() -> None:
+    system_prompt, _ = PromptRepository().render(
+        "evidence_turn",
+        {"case_id": "CASE_prompt_contract"},
+        {"type": "object"},
+    )
+
+    assert "Context Pack 读取契约" in system_prompt
+    assert "current_turn" in system_prompt
+    assert "canonical_case_dossier" in system_prompt
+    assert "actor_private_memory" in system_prompt
+    assert "actor_visible_evidence" in system_prompt
+    assert "evidence_gap_plan" in system_prompt
+    assert "只读取当前 actor_id / agent_session_id 对应的私有上下文" in system_prompt
+    assert "不得引用另一方私聊" in system_prompt
+    assert "ROOM_OPENING" in system_prompt
+    assert "PARTY_MESSAGE" in system_prompt
+    assert "证据不足也不阻止进入小法庭" in system_prompt
+
+
 def test_prompt_repository_resolves_agent_owned_template_path() -> None:
     repo = PromptRepository()
 
