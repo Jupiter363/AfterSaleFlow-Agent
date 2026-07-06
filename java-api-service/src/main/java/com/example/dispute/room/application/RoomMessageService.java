@@ -34,6 +34,7 @@ public class RoomMessageService {
     private final RoomMessageRepository messageRepository;
     private final CaseEventService eventService;
     private final IntakeAgentTurnService intakeAgentTurnService;
+    private final EvidenceAgentTurnService evidenceAgentTurnService;
     private final Clock clock;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -44,6 +45,7 @@ public class RoomMessageService {
             RoomMessageRepository messageRepository,
             CaseEventService eventService,
             IntakeAgentTurnService intakeAgentTurnService,
+            EvidenceAgentTurnService evidenceAgentTurnService,
             Clock clock) {
         this.caseRepository = caseRepository;
         this.roomRepository = roomRepository;
@@ -51,6 +53,7 @@ public class RoomMessageService {
         this.messageRepository = messageRepository;
         this.eventService = eventService;
         this.intakeAgentTurnService = intakeAgentTurnService;
+        this.evidenceAgentTurnService = evidenceAgentTurnService;
         this.clock = clock;
     }
 
@@ -124,7 +127,7 @@ public class RoomMessageService {
         if (room.getRoomStatus() != RoomStatus.OPEN) {
             throw new IllegalStateException("room is not open");
         }
-        String audienceJson = audience(command.messageType());
+        String audienceJson = audience(room.getRoomType(), actor.role(), command.messageType());
         long sequence = messageRepository.findMaxSequenceByRoomId(room.getId()) + 1;
         RoomMessageEntity saved =
                 messageRepository.save(
@@ -151,6 +154,13 @@ public class RoomMessageService {
                 audienceJson,
                 actor.actorId());
         intakeAgentTurnService.continueFromParticipantMessage(
+                dispute.getId(),
+                room.getRoomType(),
+                actor,
+                command,
+                traceId,
+                traceId);
+        evidenceAgentTurnService.continueFromParticipantMessage(
                 dispute.getId(),
                 room.getRoomType(),
                 actor,
@@ -260,20 +270,32 @@ public class RoomMessageService {
         }
     }
 
-    private String audience(MessageType messageType) {
-        return messageType == MessageType.REVIEWER_NOTE
-                ? json(
-                        List.of(
-                                ActorRole.PLATFORM_REVIEWER.name(),
-                                ActorRole.ADMIN.name()))
-                : json(
-                        List.of(
-                                ActorRole.USER.name(),
-                                ActorRole.MERCHANT.name(),
-                                ActorRole.CUSTOMER_SERVICE.name(),
-                                ActorRole.PLATFORM_REVIEWER.name(),
-                                ActorRole.ADMIN.name(),
-                                ActorRole.SYSTEM.name()));
+    private String audience(RoomType roomType, ActorRole senderRole, MessageType messageType) {
+        if (messageType == MessageType.REVIEWER_NOTE) {
+            return json(
+                    List.of(
+                            ActorRole.PLATFORM_REVIEWER.name(),
+                            ActorRole.ADMIN.name()));
+        }
+        if (roomType == RoomType.EVIDENCE
+                && isParty(senderRole)
+                && isEvidencePrivatePartyMessage(messageType)) {
+            return json(
+                    List.of(
+                            senderRole.name(),
+                            ActorRole.CUSTOMER_SERVICE.name(),
+                            ActorRole.PLATFORM_REVIEWER.name(),
+                            ActorRole.ADMIN.name(),
+                            ActorRole.SYSTEM.name()));
+        }
+        return json(
+                List.of(
+                        ActorRole.USER.name(),
+                        ActorRole.MERCHANT.name(),
+                        ActorRole.CUSTOMER_SERVICE.name(),
+                        ActorRole.PLATFORM_REVIEWER.name(),
+                        ActorRole.ADMIN.name(),
+                        ActorRole.SYSTEM.name()));
     }
 
     private String json(Object value) {
@@ -295,6 +317,11 @@ public class RoomMessageService {
 
     private static boolean isParty(ActorRole role) {
         return role == ActorRole.USER || role == ActorRole.MERCHANT;
+    }
+
+    private static boolean isEvidencePrivatePartyMessage(MessageType messageType) {
+        return messageType == MessageType.PARTY_TEXT
+                || messageType == MessageType.PARTY_EVIDENCE_REFERENCE;
     }
 
     private static boolean isIntakeInitiator(

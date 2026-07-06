@@ -9,10 +9,17 @@ public record IntakeConfirmationRequest(
         boolean admissible,
         @NotBlank String disputeType,
         @NotNull RiskLevel riskLevel,
-        @NotBlank String confirmationNote) {
+        String confirmationNote) {
 
     IntakeConfirmationCommand toCommand() {
         return new IntakeConfirmationCommand(
-                admissible, disputeType, riskLevel, confirmationNote);
+                admissible, disputeType, riskLevel, normalizedConfirmationNote());
+    }
+
+    private String normalizedConfirmationNote() {
+        if (confirmationNote == null || confirmationNote.isBlank()) {
+            return "确认发起并上报，进入证据书记官室";
+        }
+        return confirmationNote;
     }
 }

@@ -5,6 +5,7 @@ import {
   onMounted,
   reactive,
   ref,
+  watch,
 } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { evidenceApi } from "../../api/evidence";
@@ -29,6 +30,8 @@ const props = defineProps({
   completeAction: { type: Function, default: null },
   eventStreamer: { type: Function, default: null },
   messageAction: { type: Function, default: null },
+  agentReplyPollAttempts: { type: Number, default: 5 },
+  agentReplyPollDelayMs: { type: Number, default: 1500 },
 });
 
 const route = useRoute();
@@ -48,6 +51,19 @@ const caseId = computed(
   () => catalog.value?.case_id || route.params.caseId,
 );
 const role = computed(() => props.viewerRole || actor.role);
+const demoActorIds = {
+  USER: "user-local",
+  MERCHANT: "merchant-local",
+  PLATFORM_REVIEWER: "reviewer-local",
+};
+const effectiveActor = computed(() => {
+  if (actor.role === role.value) return actor;
+  return {
+    ...actor,
+    id: demoActorIds[role.value] || actor.id,
+    role: role.value,
+  };
+});
 const isMerchant = computed(() => role.value === "MERCHANT");
 const items = computed(() => catalog.value?.items || []);
 const privateItems = computed(() =>
@@ -118,14 +134,14 @@ const evidenceTypeLabels = {
 async function load() {
   try {
     if (catalog.value === null) {
-      catalog.value = await evidenceApi.catalog(actor, caseId.value);
+      catalog.value = await evidenceApi.catalog(effectiveActor.value, caseId.value);
     }
     if (completion.value === null) {
-      completion.value = await evidenceApi.completion(actor, caseId.value);
+      completion.value = await evidenceApi.completion(effectiveActor.value, caseId.value);
     }
     if (props.initialMessages === null) {
       messages.value = await roomApi.messages(
-        actor,
+        effectiveActor.value,
         caseId.value,
         "EVIDENCE",
       );
@@ -138,30 +154,89 @@ async function load() {
 
 async function refreshWorkspace() {
   const [nextCatalog, nextCompletion, nextMessages] = await Promise.all([
-    evidenceApi.catalog(actor, caseId.value),
-    evidenceApi.completion(actor, caseId.value),
-    roomApi.messages(actor, caseId.value, "EVIDENCE"),
+    evidenceApi.catalog(effectiveActor.value, caseId.value),
+    evidenceApi.completion(effectiveActor.value, caseId.value),
+    roomApi.messages(effectiveActor.value, caseId.value, "EVIDENCE"),
   ]);
   catalog.value = nextCatalog;
   completion.value = nextCompletion;
   messages.value = nextMessages;
 }
 
+function nextLocalSequence() {
+  return Math.max(0, ...messages.value.map((message) => message.sequence_no || 0)) + 1;
+}
+
+function upsertMessage(message) {
+  const existingIndex = messages.value.findIndex((item) => item.id === message.id);
+  if (existingIndex >= 0) {
+    messages.value.splice(existingIndex, 1, message);
+    return;
+  }
+  messages.value.push(message);
+}
+
+function removeMessage(messageId) {
+  messages.value = messages.value.filter((message) => message.id !== messageId);
+}
+
+function hasAgentReplyAfter(sequenceNo) {
+  return messages.value.some(
+    (message) =>
+      message.message_type === "AGENT_MESSAGE" &&
+      (message.sequence_no || 0) > sequenceNo,
+  );
+}
+
+function delay(ms) {
+  if (ms <= 0) return Promise.resolve();
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+async function refreshUntilAgentReply(afterSequenceNo) {
+  await refreshWorkspace();
+  if (hasAgentReplyAfter(afterSequenceNo)) return;
+  for (let attempt = 0; attempt < props.agentReplyPollAttempts; attempt += 1) {
+    await delay(props.agentReplyPollDelayMs);
+    await refreshWorkspace();
+    if (hasAgentReplyAfter(afterSequenceNo)) return;
+  }
+}
+
 async function postMessage(command) {
   error.value = "";
   agentState.value = "THINKING";
+  const pendingId = `LOCAL_PENDING_${Date.now()}`;
+  const pendingMessage = {
+    id: pendingId,
+    case_id: caseId.value,
+    sequence_no: nextLocalSequence(),
+    sender_role: role.value,
+    message_type: command.message_type,
+    message_text: command.text,
+    attachment_refs: command.attachment_refs || [],
+    pending: true,
+  };
+  messages.value.push(pendingMessage);
   try {
     const saved = props.messageAction
       ? await props.messageAction(command)
       : await roomApi.postMessage(
-          actor,
+          effectiveActor.value,
           caseId.value,
           "EVIDENCE",
           command,
         );
-    messages.value.push(saved);
+    if (saved) {
+      removeMessage(pendingId);
+      upsertMessage(saved);
+    }
+    if (!props.messageAction) {
+      await refreshUntilAgentReply(saved?.sequence_no || pendingMessage.sequence_no);
+    }
     agentState.value = "SPEAKING";
   } catch (failure) {
+    removeMessage(pendingId);
     error.value = failure.message;
     agentState.value = "ERROR";
   }
@@ -170,7 +245,7 @@ async function postMessage(command) {
 function startEventStream() {
   const streamer = props.eventStreamer || streamRoomEvents;
   void streamer({
-    actor,
+    actor: effectiveActor.value,
     caseId: caseId.value,
     roomType: "EVIDENCE",
     state: eventState,
@@ -197,7 +272,7 @@ async function uploadFiles(event) {
   agentState.value = "THINKING";
   try {
     for (const file of files) {
-      await evidenceApi.upload(actor, caseId.value, {
+      await evidenceApi.upload(effectiveActor.value, caseId.value, {
         file,
         evidenceType: file.type.startsWith("video/")
           ? "VIDEO"
@@ -206,7 +281,7 @@ async function uploadFiles(event) {
         visibility: "PARTIES",
       });
     }
-    catalog.value = await evidenceApi.catalog(actor, caseId.value);
+    await refreshWorkspace();
     agentState.value = "SPEAKING";
   } catch (failure) {
     error.value = failure.message;
@@ -224,7 +299,7 @@ async function completeEvidence() {
   try {
     const result = props.completeAction
       ? await props.completeAction()
-      : await evidenceApi.complete(actor, caseId.value);
+      : await evidenceApi.complete(effectiveActor.value, caseId.value);
     completion.value = mergeCompletionResult(completion.value, result);
     agentState.value = completion.value.sealed ? "HANDOFF" : "SPEAKING";
   } catch (failure) {
@@ -268,6 +343,18 @@ onMounted(async () => {
     props.initialCompletion === null
   ) {
     startEventStream();
+  }
+});
+watch(role, async (nextRole, previousRole) => {
+  if (!previousRole || nextRole === previousRole) return;
+  error.value = "";
+  agentState.value = "THINKING";
+  try {
+    await refreshWorkspace();
+    agentState.value = "LISTENING";
+  } catch (failure) {
+    error.value = failure.message;
+    agentState.value = "ERROR";
   }
 });
 onBeforeUnmount(() => eventAbortController.abort());
@@ -334,6 +421,7 @@ onBeforeUnmount(() => eventAbortController.abort());
         <ConversationStream
           :messages="messages"
           :disabled="uploading || completing"
+          agent-label="证据书记官"
           placeholder="告诉书记官这份证据从哪里来、能证明什么…"
           @submit="postMessage"
         />

@@ -107,6 +107,48 @@ class EvidenceApplicationServiceTest {
     }
 
     @Test
+    void uploadsMarkdownEvidenceAsTextParseableMaterial() throws Exception {
+        FulfillmentCaseEntity disputeCase = caseEntity();
+        when(caseRepository.findById("CASE_evidence")).thenReturn(Optional.of(disputeCase));
+        when(evidenceRepository.findByCaseIdAndFileHashAndSourceType(
+                        any(), any(), any()))
+                .thenReturn(Optional.empty());
+        when(evidenceRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(storage.storeOriginal(any(), any(), any(), any(), any()))
+                .thenReturn(
+                        new EvidenceStorage.StoredObject(
+                                "evidence-original",
+                                "CASE_evidence/EVIDENCE_test/chat-record.md"));
+        MockMultipartFile file =
+                new MockMultipartFile(
+                        "file",
+                        "chat-record.md",
+                        "text/markdown",
+                        """
+                        # 沟通记录
+                        用户称签收后发现表盘划痕。
+                        """
+                                .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+
+        EvidenceView result =
+                service.upload(
+                        "CASE_evidence",
+                        file,
+                        "CHAT_SCREENSHOT",
+                        "USER_UPLOAD",
+                        "PARTIES",
+                        null,
+                        actor());
+
+        assertThat(result.originalFilename()).isEqualTo("chat-record.md");
+        assertThat(result.contentType()).isEqualTo("text/markdown");
+        assertThat(result.parseStatus()).isEqualTo("PENDING");
+        verify(storage).storeOriginal(any(), any(), any(), any(), any());
+        verify(ocrTaskClient).createParseTask(any());
+    }
+
+    @Test
     void rejectsExecutableContentBeforeCallingStorage() {
         when(caseRepository.findById("CASE_evidence"))
                 .thenReturn(Optional.of(caseEntity()));

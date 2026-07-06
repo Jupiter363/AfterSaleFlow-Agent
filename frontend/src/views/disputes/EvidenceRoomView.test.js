@@ -3,6 +3,7 @@ import { createMemoryHistory, createRouter } from "vue-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import EvidenceRoomView from "./EvidenceRoomView.vue";
 import { evidenceApi } from "../../api/evidence";
+import { roomApi } from "../../api/rooms";
 
 vi.mock("../../api/evidence", () => ({
   evidenceApi: {
@@ -10,6 +11,13 @@ vi.mock("../../api/evidence", () => ({
     completion: vi.fn(),
     upload: vi.fn(),
     complete: vi.fn(),
+  },
+}));
+
+vi.mock("../../api/rooms", () => ({
+  roomApi: {
+    messages: vi.fn(),
+    postMessage: vi.fn(),
   },
 }));
 
@@ -64,6 +72,14 @@ const catalog = {
   ],
 };
 
+const initialCompletion = {
+  case_id: "CASE_EVIDENCE_1",
+  user_completed: false,
+  merchant_completed: false,
+  sealed: false,
+  next_room: null,
+};
+
 function routerForEvidence() {
   return createRouter({
     history: createMemoryHistory(),
@@ -82,13 +98,7 @@ async function mountView(overrides = {}) {
   const wrapper = mount(EvidenceRoomView, {
     props: {
       initialCatalog: catalog,
-      initialCompletion: {
-        case_id: "CASE_EVIDENCE_1",
-        user_completed: false,
-        merchant_completed: false,
-        sealed: false,
-        next_room: null,
-      },
+      initialCompletion,
       deadlineAt: "2026-07-03T14:00:00+08:00",
       serverNow: "2026-07-03T12:00:00+08:00",
       viewerRole: "USER",
@@ -105,7 +115,15 @@ describe("EvidenceRoomView", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     evidenceApi.catalog.mockResolvedValue(catalog);
+    evidenceApi.completion.mockResolvedValue(initialCompletion);
     evidenceApi.upload.mockResolvedValue({});
+    roomApi.messages.mockResolvedValue([]);
+    roomApi.postMessage.mockResolvedValue({
+      id: "MESSAGE_POSTED",
+      sequence_no: 1,
+      sender_role: "USER",
+      message_text: "posted",
+    });
   });
 
   it("separates my originals from the shared dossier and renders all verification states", async () => {
@@ -204,6 +222,20 @@ describe("EvidenceRoomView", () => {
     expect(wrapper.get("[data-enter-hearing]").text()).toContain("进入小法庭");
   });
 
+  it("keeps the evidence conversation composer enabled while evidence is not uploading or completing", async () => {
+    const { wrapper } = await mountView();
+    const textarea = wrapper.get('[data-send-message] textarea');
+    const submitButton = wrapper.get('[data-send-message] button[type="submit"]');
+
+    expect(textarea.element.disabled).toBe(false);
+    expect(submitButton.element.disabled).toBe(true);
+
+    await textarea.setValue("Composer should accept evidence explanations.");
+
+    expect(textarea.element.disabled).toBe(false);
+    expect(submitButton.element.disabled).toBe(false);
+  });
+
   it("records evidence explanations through the immutable clerk conversation", async () => {
     const messageAction = vi.fn().mockResolvedValue({
       id: "MESSAGE_EVIDENCE_1",
@@ -227,6 +259,228 @@ describe("EvidenceRoomView", () => {
     expect(wrapper.text()).toContain("这张照片由我在开箱时拍摄。");
   });
 
+  it("refreshes catalog, completion and evidence messages after a successful upload", async () => {
+    const refreshedCatalog = {
+      ...catalog,
+      items: [
+        ...catalog.items,
+        {
+          evidence_id: "EVIDENCE_MARKDOWN_UPLOAD",
+          evidence_type: "OTHER",
+          submitted_by_role: "MERCHANT",
+          visibility: "PARTIES",
+          content_url: "/objects/merchant-notes.md",
+          redacted: true,
+          verification_status: "PENDING",
+        },
+      ],
+    };
+    const clerkMessages = [
+      {
+        id: "CLERK_AFTER_UPLOAD",
+        sequence_no: 2,
+        sender_role: "CUSTOMER_SERVICE",
+        message_type: "AGENT_MESSAGE",
+        message_text: "Markdown evidence has been indexed by the clerk.",
+      },
+    ];
+    evidenceApi.catalog.mockResolvedValueOnce(refreshedCatalog);
+    evidenceApi.completion.mockResolvedValueOnce({
+      ...initialCompletion,
+      merchant_completed: false,
+    });
+    roomApi.messages.mockResolvedValueOnce(clerkMessages);
+    const { wrapper } = await mountView({ viewerRole: "MERCHANT" });
+    const input = wrapper.get('input[type="file"]');
+    const file = new File(["# delivery notes"], "delivery-notes.md", {
+      type: "text/markdown",
+    });
+    Object.defineProperty(input.element, "files", {
+      value: [file],
+      configurable: true,
+    });
+
+    await input.trigger("change");
+    await flushPromises();
+
+    const uploadCommand = evidenceApi.upload.mock.calls[0][2];
+    expect(uploadCommand.file).toBe(file);
+    expect(["OTHER", "DOCUMENT"]).toContain(uploadCommand.evidenceType);
+    expect(uploadCommand.sourceType).toBe("MERCHANT_UPLOAD");
+    expect(uploadCommand.visibility).toBe("PARTIES");
+    expect(evidenceApi.catalog).toHaveBeenCalledWith(
+      expect.objectContaining({ role: "MERCHANT" }),
+      "CASE_EVIDENCE_1",
+    );
+    expect(evidenceApi.completion).toHaveBeenCalledWith(
+      expect.objectContaining({ role: "MERCHANT" }),
+      "CASE_EVIDENCE_1",
+    );
+    expect(roomApi.messages).toHaveBeenCalledWith(
+      expect.objectContaining({ role: "MERCHANT" }),
+      "CASE_EVIDENCE_1",
+      "EVIDENCE",
+    );
+    expect(wrapper.text()).toContain("EVIDENCE_MARKDOWN_UPLOAD");
+    expect(wrapper.text()).toContain("Markdown evidence has been indexed by the clerk.");
+  });
+
+  it("refreshes evidence messages after sending an explanation and shows the clerk reply", async () => {
+    const refreshedMessages = [
+      {
+        id: "USER_EXPLANATION",
+        sequence_no: 1,
+        sender_role: "USER",
+        message_type: "PARTY_TEXT",
+        message_text: "This photo was taken when I opened the package.",
+      },
+      {
+        id: "CLERK_REPLY",
+        sequence_no: 2,
+        sender_role: "CUSTOMER_SERVICE",
+        message_type: "AGENT_MESSAGE",
+        message_text: "I have linked the photo to the packaging timeline.",
+      },
+    ];
+    roomApi.postMessage.mockResolvedValue({
+      id: "USER_EXPLANATION",
+      sequence_no: 1,
+      sender_role: "USER",
+      message_text: "This photo was taken when I opened the package.",
+    });
+    roomApi.messages.mockResolvedValueOnce(refreshedMessages);
+    const { wrapper } = await mountView();
+
+    await wrapper
+      .get('[data-send-message] textarea')
+      .setValue("This photo was taken when I opened the package.");
+    await wrapper.get("[data-send-message]").trigger("submit");
+    await flushPromises();
+
+    expect(roomApi.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ role: "USER" }),
+      "CASE_EVIDENCE_1",
+      "EVIDENCE",
+      {
+        message_type: "PARTY_TEXT",
+        text: "This photo was taken when I opened the package.",
+        attachment_refs: [],
+      },
+    );
+    expect(roomApi.messages).toHaveBeenCalledWith(
+      expect.objectContaining({ role: "USER" }),
+      "CASE_EVIDENCE_1",
+      "EVIDENCE",
+    );
+    expect(wrapper.text()).toContain("This photo was taken when I opened the package.");
+    expect(wrapper.text()).toContain("I have linked the photo to the packaging timeline.");
+  });
+
+  it("shows the party statement immediately while the evidence clerk turn is running", async () => {
+    let resolvePost;
+    const savedMessage = {
+      id: "USER_EXPLANATION_CONFIRMED",
+      sequence_no: 7,
+      sender_role: "USER",
+      message_type: "PARTY_TEXT",
+      message_text: "Please verify this markdown evidence.",
+    };
+    roomApi.postMessage.mockReturnValue(
+      new Promise((resolve) => {
+        resolvePost = resolve;
+      }),
+    );
+    roomApi.messages.mockResolvedValueOnce([savedMessage]);
+    const { wrapper } = await mountView({
+      agentReplyPollAttempts: 0,
+      agentReplyPollDelayMs: 0,
+    });
+
+    await wrapper
+      .get('[data-send-message] textarea')
+      .setValue("Please verify this markdown evidence.");
+    await wrapper.get("[data-send-message]").trigger("submit");
+
+    expect(wrapper.text()).toContain("Please verify this markdown evidence.");
+
+    resolvePost(savedMessage);
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("Please verify this markdown evidence.");
+  });
+
+  it("continues refreshing after send until the evidence clerk reply appears", async () => {
+    const savedMessage = {
+      id: "USER_EXPLANATION_CONFIRMED",
+      sequence_no: 7,
+      sender_role: "USER",
+      message_type: "PARTY_TEXT",
+      message_text: "Please verify this markdown evidence.",
+    };
+    const clerkReply = {
+      id: "EVIDENCE_CLERK_REPLY",
+      sequence_no: 8,
+      sender_role: "CUSTOMER_SERVICE",
+      message_type: "AGENT_MESSAGE",
+      message_text: "证据书记官：请补充原始文件哈希和形成时间。",
+    };
+    roomApi.postMessage.mockResolvedValue(savedMessage);
+    roomApi.messages
+      .mockResolvedValueOnce([savedMessage])
+      .mockResolvedValueOnce([savedMessage, clerkReply]);
+    const { wrapper } = await mountView({
+      agentReplyPollAttempts: 2,
+      agentReplyPollDelayMs: 0,
+    });
+
+    await wrapper
+      .get('[data-send-message] textarea')
+      .setValue("Please verify this markdown evidence.");
+    await wrapper.get("[data-send-message]").trigger("submit");
+    await flushPromises();
+    await flushPromises();
+
+    expect(roomApi.messages).toHaveBeenCalledTimes(2);
+    expect(wrapper.text()).toContain("证据书记官：请补充原始文件哈希和形成时间。");
+  });
+
+  it("reloads actor-scoped evidence data when the viewer role changes", async () => {
+    const userThread = [
+      {
+        id: "USER_THREAD_MESSAGE",
+        sequence_no: 1,
+        sender_role: "USER",
+        message_text: "User-only evidence explanation thread.",
+      },
+    ];
+    const merchantThread = [
+      {
+        id: "MERCHANT_THREAD_MESSAGE",
+        sequence_no: 1,
+        sender_role: "MERCHANT",
+        message_text: "Merchant-only evidence explanation thread.",
+      },
+    ];
+    roomApi.messages.mockResolvedValueOnce(merchantThread);
+    const { wrapper } = await mountView({
+      viewerRole: "USER",
+      initialMessages: userThread,
+    });
+
+    expect(wrapper.text()).toContain("User-only evidence explanation thread.");
+
+    await wrapper.setProps({ viewerRole: "MERCHANT" });
+    await flushPromises();
+
+    expect(roomApi.messages).toHaveBeenCalledWith(
+      expect.objectContaining({ role: "MERCHANT" }),
+      "CASE_EVIDENCE_1",
+      "EVIDENCE",
+    );
+    expect(wrapper.text()).not.toContain("User-only evidence explanation thread.");
+    expect(wrapper.text()).toContain("Merchant-only evidence explanation thread.");
+  });
+
   it("uploads user evidence with the backend actor-specific source type", async () => {
     const { wrapper } = await mountView({ viewerRole: "USER" });
     const input = wrapper.get('input[type="file"]');
@@ -244,6 +498,7 @@ describe("EvidenceRoomView", () => {
       "CASE_EVIDENCE_1",
       expect.objectContaining({
         file,
+        evidenceType: "OTHER",
         sourceType: "USER_UPLOAD",
         visibility: "PARTIES",
       }),

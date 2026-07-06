@@ -16,6 +16,7 @@ from app.agents.deliberation_panel import DeliberationPanel
 from app.agents.dispute_intake_officer import DisputeIntakeOfficer
 from app.agents.evaluation_agent import EvaluationAgent
 from app.agents.evidence_clerk import EvidenceClerk
+from app.agents.evidence_clerk.workflow import EvidenceTurnWorkflow
 from app.agents.model_roles import ModelCriticEvaluator, ModelReviewAnswerer
 from app.agents.presiding_judge import PresidingJudge
 from app.agents.review_copilot import ReviewCopilot
@@ -42,6 +43,8 @@ from app.schemas import (
     DisputeIntakeResult,
     EvidenceBuildRequest,
     EvidenceDossierResult,
+    EvidenceTurnRequest,
+    EvidenceTurnResult,
     EvaluationAnalysisResult,
     EvaluationAnalyzeRequest,
     IntakeAnalysisOutput,
@@ -72,6 +75,7 @@ def create_app(
     workflow: HearingWorkflow | None = None,
     intake_workflow: IntakeWorkflow | None = None,
     intake_turn_workflow: IntakeTurnWorkflow | None = None,
+    evidence_turn_workflow: EvidenceTurnWorkflow | None = None,
     evaluation_workflow: EvaluationWorkflow | None = None,
     final_agent_services: FinalAgentServices | None = None,
     simulated_import_workflow: SimulatedExternalImportWorkflow | None = None,
@@ -88,6 +92,9 @@ def create_app(
     hearing_workflow = workflow or _build_workflow(resolved)
     resolved_intake_workflow = intake_workflow or _build_intake_workflow(resolved)
     resolved_intake_turn_workflow = intake_turn_workflow or _build_intake_turn_workflow(
+        resolved
+    )
+    resolved_evidence_turn_workflow = evidence_turn_workflow or _build_evidence_turn_workflow(
         resolved
     )
     resolved_evaluation_workflow = evaluation_workflow or _build_evaluation_workflow(
@@ -231,6 +238,17 @@ def create_app(
     ) -> IntakeTurnResult:
         _authorize(x_service_secret, resolved.python_agent_service_secret)
         return await run_in_threadpool(resolved_intake_turn_workflow.run, payload)
+
+    @app.post(
+        "/internal/agents/evidence/turn",
+        response_model=EvidenceTurnResult,
+    )
+    async def evidence_turn(
+        payload: EvidenceTurnRequest,
+        x_service_secret: str = Header(alias=SERVICE_SECRET_HEADER),
+    ) -> EvidenceTurnResult:
+        _authorize(x_service_secret, resolved.python_agent_service_secret)
+        return await run_in_threadpool(resolved_evidence_turn_workflow.run, payload)
 
     @app.post(
         "/internal/agents/external-import/simulate",
@@ -388,45 +406,30 @@ def create_app(
 
 
 def _build_workflow(settings: Settings) -> HearingWorkflow:
-    llm = LiteLlmProxyClient(
-        settings.litellm_base_url,
-        settings.litellm_model,
-        settings.litellm_master_key,
-        settings.llm_timeout_seconds,
-    )
+    llm = _build_llm_client(settings)
     tracer = _build_tracer(settings)
     return HearingWorkflow(
         llm,
         PromptRepository(),
         tracer,
-        settings.litellm_model,
+        settings.resolved_llm_model,
         settings.prompt_version,
     )
 
 
 def _build_intake_workflow(settings: Settings) -> IntakeWorkflow:
-    llm = LiteLlmProxyClient(
-        settings.litellm_base_url,
-        settings.litellm_model,
-        settings.litellm_master_key,
-        settings.llm_timeout_seconds,
-    )
+    llm = _build_llm_client(settings)
     tracer = _build_tracer(settings)
     return IntakeWorkflow(
         llm,
         PromptRepository(),
         tracer,
-        settings.litellm_model,
+        settings.resolved_llm_model,
     )
 
 
 def _build_intake_turn_workflow(settings: Settings) -> IntakeTurnWorkflow:
-    llm = LiteLlmProxyClient(
-        settings.litellm_base_url,
-        settings.litellm_model,
-        settings.litellm_master_key,
-        settings.llm_timeout_seconds,
-    )
+    llm = _build_llm_client(settings)
     return IntakeTurnWorkflow(
         model_runner=HarnessModelRunner(
             llm=llm,
@@ -435,35 +438,35 @@ def _build_intake_turn_workflow(settings: Settings) -> IntakeTurnWorkflow:
     )
 
 
+def _build_evidence_turn_workflow(settings: Settings) -> EvidenceTurnWorkflow:
+    llm = _build_llm_client(settings)
+    return EvidenceTurnWorkflow(
+        model_runner=HarnessModelRunner(
+            llm=llm,
+            prompts=PromptRepository(),
+        )
+    )
+
+
 def _build_evaluation_workflow(settings: Settings) -> EvaluationWorkflow:
-    llm = LiteLlmProxyClient(
-        settings.litellm_base_url,
-        settings.litellm_model,
-        settings.litellm_master_key,
-        settings.llm_timeout_seconds,
+    llm = _build_llm_client(settings)
+    return EvaluationWorkflow(
+        llm,
+        PromptRepository(),
+        _build_tracer(settings),
+        settings.evaluation_prompt_version,
     )
 
 
 def _build_simulated_import_workflow(
     settings: Settings,
 ) -> SimulatedExternalImportWorkflow:
-    llm = LiteLlmProxyClient(
-        settings.litellm_base_url,
-        settings.litellm_model,
-        settings.litellm_master_key,
-        settings.llm_timeout_seconds,
-    )
+    llm = _build_llm_client(settings)
     return SimulatedExternalImportWorkflow(
         model_runner=HarnessModelRunner(
             llm=llm,
             prompts=PromptRepository(),
         )
-    )
-    return EvaluationWorkflow(
-        llm,
-        PromptRepository(),
-        _build_tracer(settings),
-        settings.evaluation_prompt_version,
     )
 
 
@@ -473,12 +476,7 @@ def _build_final_agent_services(
     intake_workflow: IntakeWorkflow,
     evaluation_workflow: EvaluationWorkflow,
 ) -> FinalAgentServices:
-    llm = LiteLlmProxyClient(
-        settings.litellm_base_url,
-        settings.litellm_model,
-        settings.litellm_master_key,
-        settings.llm_timeout_seconds,
-    )
+    llm = _build_llm_client(settings)
     prompts = PromptRepository()
     critic_evaluator = ModelCriticEvaluator(llm, prompts)
     return FinalAgentServices(
@@ -490,6 +488,15 @@ def _build_final_agent_services(
         ),
         review_copilot=ReviewCopilot(ModelReviewAnswerer(llm, prompts)),
         evaluation=EvaluationAgent(evaluation_workflow),
+    )
+
+
+def _build_llm_client(settings: Settings) -> LiteLlmProxyClient:
+    return LiteLlmProxyClient(
+        settings.resolved_llm_base_url,
+        settings.resolved_llm_model,
+        settings.resolved_llm_api_key,
+        settings.llm_timeout_seconds,
     )
 
 

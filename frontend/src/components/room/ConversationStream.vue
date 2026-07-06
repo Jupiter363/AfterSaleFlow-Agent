@@ -11,6 +11,7 @@ import { roleLabel } from "../../utils/displayText";
 const props = defineProps({
   messages: { type: Array, default: () => [] },
   disabled: { type: Boolean, default: false },
+  agentLabel: { type: String, default: "" },
   composerVisible: { type: Boolean, default: true },
   disabledReason: {
     type: String,
@@ -67,6 +68,17 @@ function messageLaneClass(role) {
     : "conversation-stream__message--agent";
 }
 
+function displaySenderLabel(message) {
+  if (
+    props.agentLabel &&
+    message.message_type === "AGENT_MESSAGE" &&
+    AGENT_ROLES.has(message.sender_role)
+  ) {
+    return props.agentLabel;
+  }
+  return roleLabel(message.sender_role);
+}
+
 async function scrollToLatestMessage() {
   await nextTick();
   const rail = messagesRail.value;
@@ -102,7 +114,7 @@ onMounted(() => {
         data-room-message
       >
         <header>
-          <strong>{{ roleLabel(message.sender_role) }}</strong>
+          <strong>{{ displaySenderLabel(message) }}</strong>
           <small>#{{ message.sequence_no }}</small>
         </header>
         <p>{{ displayMessageText(message.message_text) }}</p>

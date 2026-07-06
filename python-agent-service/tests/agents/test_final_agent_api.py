@@ -219,6 +219,7 @@ def test_all_final_internal_agent_routes_are_authenticated() -> None:
         "/internal/agents/intake/analyze",
         "/internal/agents/intake/turn",
         "/internal/agents/evidence/build",
+        "/internal/agents/evidence/turn",
         "/internal/agents/hearing/run-stage",
         "/internal/agents/deliberation/run",
         "/internal/agents/review-copilot/query",

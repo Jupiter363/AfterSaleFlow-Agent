@@ -27,9 +27,11 @@ import com.example.dispute.room.domain.RoomStatus;
 import com.example.dispute.room.domain.RoomType;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseParticipantEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.CasePhaseClockEntity;
+import com.example.dispute.room.infrastructure.persistence.entity.CaseIntakeDossierEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseParticipantRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CasePhaseClockRepository;
+import com.example.dispute.room.infrastructure.persistence.repository.CaseIntakeDossierRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import com.example.dispute.workflow.application.EvidenceWindowCoordinator;
 import java.time.Clock;
@@ -56,6 +58,7 @@ class IntakeRoomServiceTest {
     @Mock private CaseParticipantRepository participantRepository;
     @Mock private CaseRoomRepository roomRepository;
     @Mock private CasePhaseClockRepository phaseClockRepository;
+    @Mock private CaseIntakeDossierRepository intakeDossierRepository;
     @Mock private NotificationService notificationService;
     @Mock private CaseLifecycleNotificationService lifecycleNotifications;
     @Mock private EvidenceWindowCoordinator evidenceWindowCoordinator;
@@ -71,6 +74,7 @@ class IntakeRoomServiceTest {
                         caseRepository,
                         roomRepository,
                         phaseClockRepository,
+                        intakeDossierRepository,
                         participants,
                         notificationService,
                         lifecycleNotifications,
@@ -360,6 +364,43 @@ class IntakeRoomServiceTest {
                         org.mockito.ArgumentMatchers.eq(
                                 "intake-cancelled:CASE_CANCELLED"),
                         org.mockito.ArgumentMatchers.eq("user-local"));
+    }
+
+    @Test
+    void acceptedIntakeSnapshotsTheLatestAgentDossierIntoTheCase() {
+        FulfillmentCaseEntity dispute = pendingCase("CASE_DOSSIER_ACCEPTED");
+        String dossierJson =
+                "{\"schema_version\":\"intake_case_detail.v1\",\"case_story\":{\"title\":\"商家质检与签收划痕争议\"},\"intake_quality\":{\"score\":88,\"ready_for_next_step\":true}}";
+        when(caseRepository.findByIdForUpdate("CASE_DOSSIER_ACCEPTED"))
+                .thenReturn(Optional.of(dispute));
+        when(intakeDossierRepository.findByCaseIdAndRoomType(
+                        "CASE_DOSSIER_ACCEPTED", RoomType.INTAKE))
+                .thenReturn(
+                        Optional.of(
+                                CaseIntakeDossierEntity.create(
+                                        "INTAKE_DOSSIER_CASE_DOSSIER_ACCEPTED",
+                                        "CASE_DOSSIER_ACCEPTED",
+                                        RoomType.INTAKE,
+                                        dossierJson,
+                                        88,
+                                        true,
+                                        "ACCEPTED",
+                                        3,
+                                        "dispute-intake-officer")));
+        when(phaseClockRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        service.confirm(
+                "CASE_DOSSIER_ACCEPTED",
+                new AuthenticatedActor("merchant-local", ActorRole.MERCHANT),
+                new IntakeConfirmationCommand(
+                        true,
+                        "PRODUCT_QUALITY",
+                        RiskLevel.MEDIUM,
+                        "确认发起并上报"));
+
+        assertThat(dispute.getIntakeResultJson()).isEqualTo(dossierJson);
+        assertThat(dispute.getCaseStatus()).isEqualTo(CaseStatus.EVIDENCE_OPEN);
     }
 
     private static FulfillmentCaseEntity pendingCase(String id) {

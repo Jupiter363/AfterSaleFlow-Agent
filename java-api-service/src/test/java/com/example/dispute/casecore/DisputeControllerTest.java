@@ -127,16 +127,26 @@ class DisputeControllerTest {
 
     @Test
     void importsExternalDisputesThroughTheInternalServiceBoundary() throws Exception {
-        when(importService.importDispute(any(), any(), eq("import-ext-1001")))
+        when(importService.importDispute(any(), any(), eq("import-ext-1001"), any(), any()))
                 .thenReturn(
                         new ImportedDisputeView(
                                 "CASE_imported",
+                                "ORDER-1001",
+                                "AFTER-1001",
+                                "LOG-1001",
+                                "user-local",
+                                "merchant-local",
+                                "SIGNED_NOT_RECEIVED",
                                 "EXTERNAL_IMPORT",
                                 "OMS",
                                 "EXT-1001",
+                                RiskLevel.HIGH,
+                                "签收未收到",
+                                "用户表示未收到已签收包裹",
                                 CaseStatus.INTAKE_PENDING,
                                 "INTAKE",
                                 null,
+                                "COMPLETE_INTAKE",
                                 "USER"));
         mockMvc.perform(
                         post("/internal/disputes/import")
@@ -179,12 +189,22 @@ class DisputeControllerTest {
                                 List.of(
                                         new ImportedDisputeView(
                                                 "CASE_simulated",
+                                                "ORDER-20260706-4201",
+                                                "AS-20260706-4201",
+                                                "SF-20260706-4201",
+                                                "user-local",
+                                                "merchant-local",
+                                                "QUALITY_DISPUTE",
                                                 "EXTERNAL_IMPORT",
                                                 "LLM_SIMULATED_OMS",
-                                                "SIM-20260706-001",
+                                                "EXT-20260706-001",
+                                                RiskLevel.MEDIUM,
+                                                "商家发起手表故障争议",
+                                                "商家认为用户提交的故障视频与售后检测结果不一致，需要平台受理。",
                                                 CaseStatus.INTAKE_PENDING,
                                                 "INTAKE",
                                                 null,
+                                                "COMPLETE_INTAKE",
                                                 "MERCHANT"))));
 
         mockMvc.perform(
@@ -222,12 +242,22 @@ class DisputeControllerTest {
                                 List.of(
                                         new ImportedDisputeView(
                                                 "CASE_public_simulated",
+                                                "ORDER-20260706-4202",
+                                                "AS-20260706-4202",
+                                                "SF-20260706-4202",
+                                                "user-local",
+                                                "merchant-local",
+                                                "QUALITY_DISPUTE",
                                                 "EXTERNAL_IMPORT",
                                                 "LLM_SIMULATED_OMS",
-                                                "SIM-PUBLIC-20260706-001",
+                                                "EXT-PUBLIC-20260706-001",
+                                                RiskLevel.MEDIUM,
+                                                "高价值手表售后责任争议",
+                                                "商家认为检测照片、维修记录和使用说明存在冲突，需要平台先核实争议。",
                                                 CaseStatus.INTAKE_PENDING,
                                                 "INTAKE",
                                                 null,
+                                                "COMPLETE_INTAKE",
                                                 "MERCHANT"))));
 
         mockMvc.perform(

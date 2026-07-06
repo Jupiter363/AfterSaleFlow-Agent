@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 from urllib.parse import urlparse
 
 import httpx
 
 from app.models import ParseTaskCreate, ParsedDocument
+
+LOGGER = logging.getLogger(__name__)
 
 
 class MinioObjectStorage:
@@ -45,6 +48,7 @@ class CompositeResultSink:
     def publish_success(
         self, request: ParseTaskCreate, document: ParsedDocument
     ) -> None:
+        callback_url = self._parse_result_url(request)
         payload = {
             "status": "SUCCEEDED",
             "text": document.text,
@@ -52,29 +56,43 @@ class CompositeResultSink:
         }
         with httpx.Client(timeout=15.0) as client:
             client.post(
-                f"{self._java_api_url}/internal/evidence/"
-                f"{request.evidence_id}/parse-result",
+                callback_url,
                 headers=self._headers,
                 json=payload,
             ).raise_for_status()
-            client.put(
-                f"{self._elasticsearch_url}/evidence_index/_doc/"
-                f"{request.evidence_id}",
-                json={
-                    "evidence_id": request.evidence_id,
-                    "case_id": request.case_id,
-                    "content_type": request.content_type,
-                    "parsed_text": document.text,
-                    "parse_status": "SUCCEEDED",
-                    "extraction": document.metadata,
-                },
-            ).raise_for_status()
+            try:
+                client.put(
+                    f"{self._elasticsearch_url}/evidence_index/_doc/"
+                    f"{request.evidence_id}",
+                    json={
+                        "evidence_id": request.evidence_id,
+                        "case_id": request.case_id,
+                        "content_type": request.content_type,
+                        "parsed_text": document.text,
+                        "parse_status": "SUCCEEDED",
+                        "extraction": document.metadata,
+                    },
+                ).raise_for_status()
+            except httpx.HTTPError as exception:
+                LOGGER.warning(
+                    "Evidence parsed text indexing deferred: evidence_id=%s, error_type=%s",
+                    request.evidence_id,
+                    exception.__class__.__name__,
+                )
 
     def publish_failure(self, request: ParseTaskCreate, error_code: str) -> None:
+        callback_url = self._parse_result_url(request)
         with httpx.Client(timeout=15.0) as client:
             client.post(
-                f"{self._java_api_url}/internal/evidence/"
-                f"{request.evidence_id}/parse-result",
+                callback_url,
                 headers=self._headers,
                 json={"status": "FAILED", "error_code": error_code},
             ).raise_for_status()
+
+    def _parse_result_url(self, request: ParseTaskCreate) -> str:
+        if request.callback_url:
+            return request.callback_url
+        return (
+            f"{self._java_api_url}/internal/evidence/"
+            f"{request.evidence_id}/parse-result"
+        )

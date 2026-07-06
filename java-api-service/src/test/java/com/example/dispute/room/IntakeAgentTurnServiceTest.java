@@ -42,6 +42,8 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
 
 @ExtendWith(MockitoExtension.class)
 class IntakeAgentTurnServiceTest {
@@ -153,6 +155,24 @@ class IntakeAgentTurnServiceTest {
         assertThat(currentDossier.getValue().getDossierJson())
                 .contains("intake_case_detail.v1")
                 .contains("ASK_FOR_CLARIFICATION");
+    }
+
+    @Test
+    void initialTurnParticipatesInTheCallerTransactionSoFreshCasesCanBeSeeded()
+            throws NoSuchMethodException {
+        Transactional transactional =
+                IntakeAgentTurnService.class
+                        .getMethod(
+                                "startInitialTurn",
+                                String.class,
+                                AuthenticatedActor.class,
+                                IntakeLobbySeed.class,
+                                String.class,
+                                String.class)
+                        .getAnnotation(Transactional.class);
+
+        assertThat(transactional).isNotNull();
+        assertThat(transactional.propagation()).isEqualTo(Propagation.REQUIRED);
     }
 
     @Test

@@ -174,3 +174,6 @@ def _verification_assessment(
         reasons=reasons,
         visibility_warning=visibility_warning,
     )
+
+
+__all__ = ["EvidenceClerk"]

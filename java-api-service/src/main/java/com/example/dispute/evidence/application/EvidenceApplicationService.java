@@ -42,6 +42,7 @@ public class EvidenceApplicationService {
                     "image/jpeg",
                     "application/pdf",
                     "text/plain",
+                    "text/markdown",
                     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
 
@@ -382,7 +383,7 @@ public class EvidenceApplicationService {
                     case "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" ->
                             startsWith(content, new byte[] {'P', 'K', 0x03, 0x04});
-                    case "text/plain" ->
+                    case "text/plain", "text/markdown" ->
                             java.util.stream.IntStream.range(0, content.length)
                                     .noneMatch(index -> content[index] == 0);
                     default -> false;

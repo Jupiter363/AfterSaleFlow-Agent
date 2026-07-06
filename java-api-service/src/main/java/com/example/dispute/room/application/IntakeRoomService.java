@@ -16,6 +16,7 @@ import com.example.dispute.room.domain.RoomType;
 import com.example.dispute.room.infrastructure.persistence.entity.CasePhaseClockEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
 import com.example.dispute.room.infrastructure.persistence.repository.CasePhaseClockRepository;
+import com.example.dispute.room.infrastructure.persistence.repository.CaseIntakeDossierRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import java.time.Clock;
 import java.time.Duration;
@@ -32,6 +33,7 @@ public class IntakeRoomService {
     private final FulfillmentCaseRepository caseRepository;
     private final CaseRoomRepository roomRepository;
     private final CasePhaseClockRepository phaseClockRepository;
+    private final CaseIntakeDossierRepository intakeDossierRepository;
     private final ParticipantService participantService;
     private final NotificationService notificationService;
     private final CaseLifecycleNotificationService lifecycleNotifications;
@@ -44,6 +46,7 @@ public class IntakeRoomService {
             FulfillmentCaseRepository caseRepository,
             CaseRoomRepository roomRepository,
             CasePhaseClockRepository phaseClockRepository,
+            CaseIntakeDossierRepository intakeDossierRepository,
             ParticipantService participantService,
             NotificationService notificationService,
             CaseLifecycleNotificationService lifecycleNotifications,
@@ -54,6 +57,7 @@ public class IntakeRoomService {
         this.caseRepository = caseRepository;
         this.roomRepository = roomRepository;
         this.phaseClockRepository = phaseClockRepository;
+        this.intakeDossierRepository = intakeDossierRepository;
         this.participantService = participantService;
         this.notificationService = notificationService;
         this.lifecycleNotifications = lifecycleNotifications;
@@ -128,10 +132,11 @@ public class IntakeRoomService {
                         deadline,
                         "evidence-window-" + caseId,
                         actor.actorId()));
+        String acceptedIntakeResultJson = acceptedIntakeResultJson(dispute);
         dispute.admitToEvidence(
                 command.disputeType(),
                 command.riskLevel(),
-                dispute.getIntakeResultJson(),
+                acceptedIntakeResultJson,
                 deadline,
                 actor.actorId());
         caseRepository.save(dispute);
@@ -154,6 +159,14 @@ public class IntakeRoomService {
                 dispute.getCaseStatus(),
                 RoomType.EVIDENCE,
                 deadline);
+    }
+
+    private String acceptedIntakeResultJson(FulfillmentCaseEntity dispute) {
+        return intakeDossierRepository
+                .findByCaseIdAndRoomType(dispute.getId(), RoomType.INTAKE)
+                .map(dossier -> dossier.getDossierJson())
+                .filter(json -> json != null && !json.isBlank())
+                .orElse(dispute.getIntakeResultJson());
     }
 
     @Transactional

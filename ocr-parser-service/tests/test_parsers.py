@@ -53,6 +53,19 @@ def test_plain_text_is_decoded_without_external_engine() -> None:
     assert result.metadata["engine"] == "plain-text"
 
 
+def test_markdown_is_decoded_without_external_engine() -> None:
+    parser = DocumentParser(FakePaddle(), FakeMarkItDown())
+
+    result = parser.parse(
+        "# 证据说明\n签收后发现表盘划痕。".encode(),
+        "text/markdown",
+        "statement.md",
+    )
+
+    assert "表盘划痕" in result.text
+    assert result.metadata["engine"] == "markdown-text"
+
+
 def test_paddleocr_disables_mkldnn_for_cpu_compatibility(monkeypatch) -> None:
     captured: dict[str, object] = {}
 

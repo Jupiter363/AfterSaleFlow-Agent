@@ -223,6 +223,10 @@ services:
       LITELLM_BASE_URL: http://litellm-proxy:4000
       LITELLM_MODEL: deepseek-v4-flash
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
+      DEFAULT_LLM_PROVIDER: ${DEFAULT_LLM_PROVIDER:-litellm}
+      DEFAULT_LLM_MODEL: ${DEFAULT_LLM_MODEL:-deepseek-v4-flash}
+      DEFAULT_LLM_API_BASE: ${DEFAULT_LLM_API_BASE:-https://api.deepseek.com}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       LANGFUSE_HOST: http://langfuse:3000
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY}

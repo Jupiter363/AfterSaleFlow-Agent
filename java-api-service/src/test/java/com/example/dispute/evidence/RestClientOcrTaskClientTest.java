@@ -25,7 +25,8 @@ class RestClientOcrTaskClientTest {
                 new RestClientOcrTaskClient(
                         builder.baseUrl("http://ocr:8010")
                                 .defaultHeader("X-Service-Secret", "ocr-secret")
-                                .build());
+                                .build(),
+                        "http://host.docker.internal:8081");
         server.expect(requestTo("http://ocr:8010/internal/evidence/parse-tasks"))
                 .andExpect(method(HttpMethod.POST))
                 .andExpect(header("X-Service-Secret", "ocr-secret"))
@@ -33,6 +34,11 @@ class RestClientOcrTaskClientTest {
                 .andExpect(header("X-Request-Id", "REQ_ocr_test"))
                 .andExpect(jsonPath("$.evidence_id").value("EVIDENCE_ocr"))
                 .andExpect(jsonPath("$.object_key").value("case/evidence/proof.pdf"))
+                .andExpect(
+                        jsonPath("$.callback_url")
+                                .value(
+                                        "http://host.docker.internal:8081/internal/evidence/"
+                                                + "EVIDENCE_ocr/parse-result"))
                 .andRespond(withSuccess("{}", MediaType.APPLICATION_JSON));
 
         try {

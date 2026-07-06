@@ -32,6 +32,18 @@ FIELD_DISPLAY_LABELS = {
     "merchant_requested_outcome": "商家期望处理方案",
     "requested_outcome": "期望处理结果",
     "evidence_attachments": "证据材料",
+    "buyer_evidence": "买家证据材料",
+    "user_evidence": "用户证据材料",
+    "merchant_evidence": "商家证据材料",
+    "merchant_outbound_photos": "商家发货前照片",
+    "merchant_outbound_records": "商家发货前记录",
+    "merchant_quality_inspection": "商家质检记录",
+    "buyer_photos": "买家照片",
+    "user_photos": "用户照片",
+    "unboxing_video": "开箱视频",
+    "opening_video": "开箱视频",
+    "delivery_record": "物流派送记录",
+    "proof_of_delivery": "签收凭证",
 }
 
 
@@ -93,8 +105,12 @@ class CaseDetailDossierSkill:
             "logistics_reference": trusted_refs.get("logistics_reference") or "",
         }
 
+        llm_missing_from_detail = _list_values(
+            _ensure_dict(detail, "missing_information").get("blocking_gaps")
+        )
         missing = self._hard_missing_fields(trusted_refs)
         missing.extend(field for field in llm_missing_fields if field not in missing)
+        missing.extend(field for field in llm_missing_from_detail if field not in missing)
         score = _clamp_score(
             detail.get("intake_quality", {}).get("score")
             if isinstance(detail.get("intake_quality"), dict)
@@ -107,6 +123,10 @@ class CaseDetailDossierSkill:
         if missing:
             quality["improvement_reason"] = "仍缺少可信的" + "、".join(
                 _human_missing_fields(missing)
+            )
+        else:
+            quality["improvement_reason"] = _humanize_internal_tokens(
+                str(quality.get("improvement_reason") or "")
             )
 
         missing_info = _ensure_dict(detail, "missing_information")
@@ -402,11 +422,40 @@ def _clamp_confidence(value: Any) -> float:
 
 
 def _human_field_label(field: str) -> str:
-    return FIELD_DISPLAY_LABELS.get(field, field)
+    if field in FIELD_DISPLAY_LABELS:
+        return FIELD_DISPLAY_LABELS[field]
+    normalized = str(field or "").strip()
+    if normalized in FIELD_DISPLAY_LABELS:
+        return FIELD_DISPLAY_LABELS[normalized]
+    lower = normalized.lower()
+    if lower in FIELD_DISPLAY_LABELS:
+        return FIELD_DISPLAY_LABELS[lower]
+    if re.search(r"[A-Za-z_]{3,}", normalized):
+        return "相关补充材料"
+    return normalized or "相关补充材料"
 
 
 def _human_missing_fields(missing: list[str]) -> list[str]:
     return [_human_field_label(field) for field in missing]
+
+
+def _humanize_internal_tokens(text: str) -> str:
+    output = text
+    for token, label in sorted(
+        FIELD_DISPLAY_LABELS.items(), key=lambda item: len(item[0]), reverse=True
+    ):
+        output = output.replace(token, label)
+    return output
+
+
+def _list_values(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item or "").strip()]
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return []
 
 
 def _question_for_missing(missing: list[str]) -> str:

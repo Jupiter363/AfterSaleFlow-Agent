@@ -11,6 +11,7 @@ import com.example.dispute.casecore.application.DisputeImportService;
 import com.example.dispute.casecore.application.ImportDisputeCommand;
 import com.example.dispute.casecore.application.ImportedDisputeView;
 import com.example.dispute.domain.model.CaseStatus;
+import com.example.dispute.domain.model.RiskLevel;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -33,12 +34,22 @@ class DemoDisputeSeederTest {
                 .thenReturn(
                         new ImportedDisputeView(
                                 "CASE_DEMO",
+                                "ORDER-DEMO-1",
+                                "AS-DEMO-1",
+                                "SF-DEMO-1",
+                                "user-local",
+                                "merchant-local",
+                                "SIGNED_NOT_RECEIVED",
                                 "EXTERNAL_IMPORT",
                                 "DEMO",
                                 "DEMO-1",
+                                RiskLevel.MEDIUM,
+                                "签收未收到",
+                                "用户表示未收到已签收包裹",
                                 CaseStatus.INTAKE_PENDING,
                                 "INTAKE",
                                 null,
+                                "COMPLETE_INTAKE",
                                 "USER"));
 
         new ApplicationContextRunner()

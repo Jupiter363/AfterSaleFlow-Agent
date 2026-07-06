@@ -11,6 +11,8 @@ import java.time.OffsetDateTime;
 import java.util.UUID;
 import com.example.dispute.room.domain.PhaseClockType;
 import com.example.dispute.room.domain.RoomType;
+import com.example.dispute.room.application.IntakeAgentTurnService;
+import com.example.dispute.room.application.IntakeLobbySeed;
 import com.example.dispute.room.application.ParticipantService;
 import com.example.dispute.room.infrastructure.persistence.entity.CasePhaseClockEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
@@ -18,6 +20,8 @@ import com.example.dispute.room.infrastructure.persistence.repository.CasePhaseC
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 /**
  * Idempotently imports dispute candidates from trusted platform adapters.
@@ -32,6 +36,7 @@ public class DisputeImportService {
     private final CaseRoomRepository roomRepository;
     private final CasePhaseClockRepository clockRepository;
     private final ParticipantService participantService;
+    private final IntakeAgentTurnService intakeAgentTurnService;
     private final ExternalDisputeSimulationClient simulationClient;
     private final DisputeProperties properties;
     private final Clock clock;
@@ -41,6 +46,7 @@ public class DisputeImportService {
             CaseRoomRepository roomRepository,
             CasePhaseClockRepository clockRepository,
             ParticipantService participantService,
+            IntakeAgentTurnService intakeAgentTurnService,
             ExternalDisputeSimulationClient simulationClient,
             DisputeProperties properties,
             Clock clock) {
@@ -48,6 +54,7 @@ public class DisputeImportService {
         this.roomRepository = roomRepository;
         this.clockRepository = clockRepository;
         this.participantService = participantService;
+        this.intakeAgentTurnService = intakeAgentTurnService;
         this.simulationClient = simulationClient;
         this.properties = properties;
         this.clock = clock;
@@ -58,10 +65,26 @@ public class DisputeImportService {
             ImportDisputeCommand command,
             AuthenticatedActor actor,
             String idempotencyKey) {
+        return importDispute(
+                command,
+                actor,
+                idempotencyKey,
+                directImportTraceId(idempotencyKey),
+                directImportRequestId(idempotencyKey));
+    }
+
+    @Transactional
+    public ImportedDisputeView importDispute(
+            ImportDisputeCommand command,
+            AuthenticatedActor actor,
+            String idempotencyKey,
+            String traceId,
+            String requestId) {
         if (actor.role() != ActorRole.SYSTEM) {
             throw new SecurityException("external dispute import requires service identity");
         }
         requireText(idempotencyKey, "idempotencyKey");
+        ActorRole initiatorRole = partyInitiatorRole(command.initiatorRole());
         return repository
                 .findBySourceSystemAndExternalCaseRef(
                         command.sourceSystem(), command.externalCaseReference())
@@ -82,7 +105,7 @@ public class DisputeImportService {
                                             command.logisticsReference(),
                                             command.userId(),
                                             command.merchantId(),
-                                            ActorRole.valueOf(command.initiatorRole()),
+                                            initiatorRole,
                                             idempotencyKey,
                                             command.disputeType(),
                                             command.title(),
@@ -98,6 +121,7 @@ public class DisputeImportService {
                             materializeCurrentRoom(saved, command, actor.actorId());
                             participantService.ensureImportedParties(
                                     saved, actor, OffsetDateTime.now(clock));
+                            startIntakeIfNeeded(saved, command, initiatorRole, traceId, requestId);
                             return view(saved);
                         });
     }
@@ -137,9 +161,58 @@ public class DisputeImportService {
                                                 actor,
                                                 itemIdempotencyKey(
                                                         idempotencyKey,
-                                                        simulated.externalCaseReference())))
+                                                        simulated.externalCaseReference()),
+                                                traceId,
+                                                requestId))
                         .toList();
         return new SimulatedImportResultView(imported);
+    }
+
+    private void startIntakeIfNeeded(
+            FulfillmentCaseEntity saved,
+            ImportDisputeCommand command,
+            ActorRole initiatorRole,
+            String traceId,
+            String requestId) {
+        if (isTerminal(command.caseStatus()) || currentRoom(command) != RoomType.INTAKE) {
+            return;
+        }
+        AuthenticatedActor intakeActor =
+                new AuthenticatedActor(
+                        initiatorRole == ActorRole.MERCHANT
+                                ? command.merchantId()
+                                : command.userId(),
+                        initiatorRole);
+        IntakeLobbySeed seed =
+                new IntakeLobbySeed(
+                        command.orderReference(),
+                        command.afterSalesReference(),
+                        command.logisticsReference(),
+                        initiatorRole.name(),
+                        command.description(),
+                        null);
+        afterCommit(
+                () ->
+                        intakeAgentTurnService.startInitialTurn(
+                                saved.getId(),
+                                intakeActor,
+                                seed,
+                                traceId,
+                                requestId));
+    }
+
+    private static void afterCommit(Runnable action) {
+        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            action.run();
+            return;
+        }
+        TransactionSynchronizationManager.registerSynchronization(
+                new TransactionSynchronization() {
+                    @Override
+                    public void afterCommit() {
+                        action.run();
+                    }
+                });
     }
 
     private void materializeCurrentRoom(
@@ -246,13 +319,68 @@ public class DisputeImportService {
     private static ImportedDisputeView view(FulfillmentCaseEntity entity) {
         return new ImportedDisputeView(
                 entity.getId(),
+                entity.getOrderId(),
+                entity.getAfterSaleId(),
+                entity.getLogisticsId(),
+                entity.getUserId(),
+                entity.getMerchantId(),
+                entity.getDisputeType(),
                 entity.getSourceType().name(),
                 entity.getSourceSystem(),
                 entity.getExternalCaseRef(),
+                entity.getRiskLevel(),
+                entity.getTitle(),
+                entity.getDescription(),
                 entity.getCaseStatus(),
                 entity.getCurrentRoom(),
                 entity.getCurrentDeadlineAt(),
+                pendingAction(entity.getCaseStatus()),
                 entity.getInitiatorRole().name());
+    }
+
+    private static String pendingAction(CaseStatus status) {
+        return switch (status) {
+            case INTAKE_PENDING,
+                    INTAKE_IN_PROGRESS,
+                    WAITING_SLOT_COMPLETION,
+                    INTAKE_COMPLETED -> "COMPLETE_INTAKE";
+            case EVIDENCE_OPEN, WAITING_EVIDENCE -> "SUBMIT_EVIDENCE";
+            case EVIDENCE_SEALED -> "ENTER_HEARING";
+            case HEARING_OPEN, HEARING -> "PARTICIPATE_HEARING";
+            case SETTLEMENT_PENDING -> "REVIEW_SETTLEMENT";
+            case DRAFT_READY,
+                    DELIBERATION_RUNNING,
+                    REVIEW_PENDING,
+                    WAITING_HUMAN_REVIEW,
+                    REMEDY_PLANNED -> "AWAIT_REVIEW";
+            case APPROVED_FOR_EXECUTION, EXECUTING -> "TRACK_EXECUTION";
+            case CLOSED, CANCELLED, MANUAL_HANDOFF, NOT_ADMISSIBLE -> "VIEW_OUTCOME";
+            default -> "CONTINUE_CASE";
+        };
+    }
+
+    private static ActorRole partyInitiatorRole(String role) {
+        ActorRole parsed = ActorRole.valueOf(role);
+        if (parsed != ActorRole.USER && parsed != ActorRole.MERCHANT) {
+            throw new IllegalArgumentException("imported dispute initiator must be USER or MERCHANT");
+        }
+        return parsed;
+    }
+
+    private static String directImportTraceId(String idempotencyKey) {
+        return "direct-import-trace-" + compactImportKey(idempotencyKey);
+    }
+
+    private static String directImportRequestId(String idempotencyKey) {
+        return "direct-import-request-" + compactImportKey(idempotencyKey);
+    }
+
+    private static String compactImportKey(String value) {
+        String normalized =
+                value == null || value.isBlank()
+                        ? UUID.randomUUID().toString().replace("-", "")
+                        : value.replaceAll("[^A-Za-z0-9_.:-]", "-");
+        return normalized.length() <= 80 ? normalized : normalized.substring(0, 80);
     }
 
     private static String itemIdempotencyKey(String base, String externalCaseReference) {

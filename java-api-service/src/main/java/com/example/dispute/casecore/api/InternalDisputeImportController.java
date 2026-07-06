@@ -50,7 +50,9 @@ public class InternalDisputeImportController {
                 service.importDispute(
                         request.toCommand(),
                         (AuthenticatedActor) authentication.getPrincipal(),
-                        idempotencyKey);
+                        idempotencyKey,
+                        traceId,
+                        requestId);
         return ResponseEntity.status(HttpStatus.CREATED)
                 .body(
                         ApiResponse.success(

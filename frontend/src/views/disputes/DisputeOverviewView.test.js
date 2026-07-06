@@ -201,10 +201,10 @@ describe("DisputeOverviewView", () => {
     const simulateExternalImportAction = vi.fn().mockResolvedValue({
       items: [
         {
-          id: "CASE_SIM_1",
-          case_id: "CASE_SIM_1",
-          order_id: "ORDER-SIM-1",
-          title: "LLM 模拟外部导入争议",
+          id: "CASE_IMPORT_1",
+          case_id: "CASE_IMPORT_1",
+          order_id: "ORDER-20260706-4201",
+          title: "商家发起手表故障争议",
           source_type: "EXTERNAL_IMPORT",
           dispute_type: "QUALITY_DISPUTE",
           case_status: "INTAKE_PENDING",
@@ -228,7 +228,34 @@ describe("DisputeOverviewView", () => {
         counterparty_actor_id: "user-local",
       }),
     );
-    expect(wrapper.text()).toContain("LLM 模拟外部导入争议");
-    expect(wrapper.get('[data-case-id="CASE_SIM_1"]').exists()).toBe(true);
+    expect(wrapper.text()).toContain("商家发起手表故障争议");
+    expect(wrapper.text()).not.toContain("LLM 模拟外部导入争议");
+    expect(wrapper.text()).not.toContain("ORDER-SIM");
+    expect(wrapper.get('[data-case-id="CASE_IMPORT_1"]').exists()).toBe(true);
+  });
+
+  it("does not expose simulation wording when an imported item lacks optional display fields", async () => {
+    actor.id = "user-local";
+    actor.role = "USER";
+    const simulateExternalImportAction = vi.fn().mockResolvedValue({
+      items: [
+        {
+          id: "CASE_IMPORT_MINIMAL",
+          source_type: "EXTERNAL_IMPORT",
+          case_status: "INTAKE_PENDING",
+          current_room: "INTAKE",
+          initiator_role: "USER",
+        },
+      ],
+    });
+    const { wrapper } = await mountOverview(null, simulateExternalImportAction);
+
+    await wrapper.get("[data-simulate-external-import]").trigger("click");
+    await flushPromises();
+
+    const ticketText = wrapper.get('[data-case-id="CASE_IMPORT_MINIMAL"]').text();
+    expect(ticketText).toContain("外部导入争议");
+    expect(ticketText).not.toContain("模拟");
+    expect(ticketText).not.toContain("ORDER-SIM");
   });
 });

@@ -85,6 +85,26 @@ describe("ConversationStream", () => {
     expect(wrapper.text()).not.toContain("MERCHANT");
   });
 
+  it("can override generic agent messages with a room-specific digital human label", () => {
+    const wrapper = mount(ConversationStream, {
+      props: {
+        agentLabel: "证据书记官",
+        messages: [
+          {
+            id: "MESSAGE_EVIDENCE_CLERK",
+            sequence_no: 1,
+            sender_role: "CUSTOMER_SERVICE",
+            message_type: "AGENT_MESSAGE",
+            message_text: "请补充原始文件。",
+          },
+        ],
+      },
+    });
+
+    expect(wrapper.text()).toContain("证据书记官");
+    expect(wrapper.text()).not.toContain("争议接待官");
+  });
+
   it("places intake officer messages on the left and party messages on the right", () => {
     const wrapper = mount(ConversationStream, {
       props: {

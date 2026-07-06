@@ -28,6 +28,10 @@ class PromptComposer:
             "dispute_intake_officer",
             "intake_turn_case_detail.md",
         ),
+        "evidence_turn": PromptTemplateRef(
+            "evidence_clerk",
+            "evidence_turn.md",
+        ),
         "evaluation_analyze": PromptTemplateRef(
             "evaluation_agent",
             "evaluation_analyze.md",

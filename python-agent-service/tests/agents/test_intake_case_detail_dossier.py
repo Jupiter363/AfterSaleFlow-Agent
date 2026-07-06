@@ -162,6 +162,42 @@ def test_intake_case_detail_readiness_is_gated_by_score_and_required_references(
     assert "订单号" in result.scroll_snapshot["missing_information"]["next_questions"][0]
 
 
+def test_intake_case_detail_translates_llm_missing_field_codes_before_persisting() -> None:
+    from app.agents.dispute_intake_officer.workflow import IntakeTurnWorkflow
+
+    class RunnerWithFieldCodes(CaseDetailRunner):
+        def invoke_structured(self, *, node_name, case_data, output_type, context_sections):
+            generation = super().invoke_structured(
+                node_name=node_name,
+                case_data=case_data,
+                output_type=output_type,
+                context_sections=context_sections,
+            )
+            generation.value.case_detail["intake_quality"]["score"] = 70
+            generation.value.case_detail["intake_quality"][
+                "improvement_reason"
+            ] = "仍缺少可信的buyer_evidence、merchant_outbound_photos"
+            generation.value.case_detail["missing_information"]["blocking_gaps"] = [
+                "buyer_evidence",
+                "merchant_outbound_photos",
+            ]
+            generation.value.missing_fields = [
+                "buyer_evidence",
+                "merchant_outbound_photos",
+            ]
+            return generation
+
+    result = IntakeTurnWorkflow(model_runner=RunnerWithFieldCodes()).run(_request())
+
+    quality_reason = result.scroll_snapshot["intake_quality"]["improvement_reason"]
+    blocking_gaps = result.scroll_snapshot["missing_information"]["blocking_gaps"]
+    assert "买家证据材料" in quality_reason
+    assert "商家发货前照片" in quality_reason
+    assert "buyer_evidence" not in quality_reason
+    assert "merchant_outbound_photos" not in quality_reason
+    assert blocking_gaps == ["买家证据材料", "商家发货前照片"]
+
+
 def test_ready_intake_turn_asks_for_handoff_remark_before_next_room() -> None:
     from app.agents.dispute_intake_officer.workflow import IntakeTurnWorkflow
 

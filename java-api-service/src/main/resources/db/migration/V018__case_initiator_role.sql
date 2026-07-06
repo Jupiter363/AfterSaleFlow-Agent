@@ -7,7 +7,8 @@ set initiator_role = case
     when created_by = merchant_id then 'MERCHANT'
     else 'USER'
 end
-where initiator_role is null;
+where initiator_role is null
+   or initiator_role not in ('USER', 'MERCHANT');
 
 alter table fulfillment_dispute_case
     alter column initiator_role set not null;

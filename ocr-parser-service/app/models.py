@@ -14,6 +14,12 @@ class ParseTaskCreate(BaseModel):
     bucket: str = Field(min_length=3, max_length=128)
     object_key: str = Field(min_length=3, max_length=512)
     content_type: str = Field(min_length=3, max_length=128)
+    callback_url: str | None = Field(
+        default=None,
+        min_length=8,
+        max_length=512,
+        pattern=r"^https?://",
+    )
 
 
 class ParsedDocument(BaseModel):

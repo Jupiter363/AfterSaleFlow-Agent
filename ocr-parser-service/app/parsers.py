@@ -37,10 +37,11 @@ class DocumentParser:
             return self._paddle.extract(content)
         if content_type in self.DOCUMENT_TYPES:
             return self._markitdown.extract(content, Path(filename).suffix.lower())
-        if content_type == "text/plain":
+        if content_type in {"text/plain", "text/markdown"}:
+            engine = "markdown-text" if content_type == "text/markdown" else "plain-text"
             return ParsedDocument(
                 text=content.decode("utf-8-sig"),
-                metadata={"engine": "plain-text"},
+                metadata={"engine": engine},
             )
         raise ValueError("unsupported content type")
 

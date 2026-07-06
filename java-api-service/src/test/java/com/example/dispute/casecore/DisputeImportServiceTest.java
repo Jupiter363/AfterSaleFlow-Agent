@@ -21,6 +21,8 @@ import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEnti
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.room.domain.PhaseClockType;
 import com.example.dispute.room.domain.RoomType;
+import com.example.dispute.room.application.IntakeAgentTurnService;
+import com.example.dispute.room.application.IntakeLobbySeed;
 import com.example.dispute.room.application.ParticipantService;
 import com.example.dispute.room.infrastructure.persistence.entity.CasePhaseClockEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
@@ -36,8 +38,11 @@ import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 @ExtendWith(MockitoExtension.class)
 class DisputeImportServiceTest {
@@ -46,6 +51,7 @@ class DisputeImportServiceTest {
     @Mock private CaseRoomRepository roomRepository;
     @Mock private CasePhaseClockRepository clockRepository;
     @Mock private ParticipantService participantService;
+    @Mock private IntakeAgentTurnService intakeAgentTurnService;
     @Mock private ExternalDisputeSimulationClient simulationClient;
 
     private DisputeImportService service;
@@ -58,6 +64,7 @@ class DisputeImportServiceTest {
                         roomRepository,
                         clockRepository,
                         participantService,
+                        intakeAgentTurnService,
                         simulationClient,
                         new DisputeProperties(
                                 Duration.ofHours(2),
@@ -91,6 +98,14 @@ class DisputeImportServiceTest {
         assertThat(imported.currentRoom()).isEqualTo("INTAKE");
         assertThat(imported.currentDeadlineAt()).isNull();
         assertThat(imported.initiatorRole()).isEqualTo("USER");
+        assertThat(imported.orderId()).isEqualTo("ORDER-1001");
+        assertThat(imported.afterSaleId()).isEqualTo("AFTER-1001");
+        assertThat(imported.logisticsId()).isEqualTo("LOG-1001");
+        assertThat(imported.disputeType()).isEqualTo("SIGNED_NOT_RECEIVED");
+        assertThat(imported.riskLevel()).isEqualTo(RiskLevel.HIGH);
+        assertThat(imported.title()).isEqualTo("签收未收到");
+        assertThat(imported.description()).isEqualTo("用户表示未收到已签收包裹");
+        assertThat(imported.pendingAction()).isEqualTo("COMPLETE_INTAKE");
         var savedCase =
                 org.mockito.ArgumentCaptor.forClass(FulfillmentCaseEntity.class);
         verify(repository).save(savedCase.capture());
@@ -102,6 +117,65 @@ class DisputeImportServiceTest {
                         any(AuthenticatedActor.class),
                         any(OffsetDateTime.class));
         verify(roomRepository).save(any(CaseRoomEntity.class));
+        ArgumentCaptor<AuthenticatedActor> intakeActor =
+                ArgumentCaptor.forClass(AuthenticatedActor.class);
+        ArgumentCaptor<IntakeLobbySeed> seed = ArgumentCaptor.forClass(IntakeLobbySeed.class);
+        verify(intakeAgentTurnService)
+                .startInitialTurn(
+                        any(String.class),
+                        intakeActor.capture(),
+                        seed.capture(),
+                        any(String.class),
+                        any(String.class));
+        assertThat(intakeActor.getValue().actorId()).isEqualTo("user-local");
+        assertThat(intakeActor.getValue().role()).isEqualTo(ActorRole.USER);
+        assertThat(seed.getValue().orderReference()).isEqualTo("ORDER-1001");
+        assertThat(seed.getValue().afterSalesReference()).isEqualTo("AFTER-1001");
+        assertThat(seed.getValue().logisticsReference()).isEqualTo("LOG-1001");
+        assertThat(seed.getValue().initiatorRole()).isEqualTo("USER");
+        assertThat(seed.getValue().rawText()).isEqualTo("用户表示未收到已签收包裹");
+    }
+
+    @Test
+    void defersInitialIntakeTurnUntilTheImportTransactionCommits() {
+        when(repository.findBySourceSystemAndExternalCaseRef("OMS", "EXT-1003"))
+                .thenReturn(Optional.empty());
+        when(repository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        TransactionSynchronizationManager.initSynchronization();
+        List<TransactionSynchronization> synchronizations;
+        try {
+            service.importDispute(
+                    command("EXT-1003"),
+                    new AuthenticatedActor("external-adapter", ActorRole.SYSTEM),
+                    "import-ext-1003");
+
+            verify(intakeAgentTurnService, never())
+                    .startInitialTurn(
+                            any(String.class),
+                            any(AuthenticatedActor.class),
+                            any(IntakeLobbySeed.class),
+                            any(String.class),
+                            any(String.class));
+            synchronizations = TransactionSynchronizationManager.getSynchronizations();
+        } finally {
+            TransactionSynchronizationManager.clearSynchronization();
+        }
+
+        assertThat(synchronizations).isNotEmpty();
+        synchronizations.forEach(TransactionSynchronization::afterCommit);
+
+        ArgumentCaptor<AuthenticatedActor> intakeActor =
+                ArgumentCaptor.forClass(AuthenticatedActor.class);
+        verify(intakeAgentTurnService)
+                .startInitialTurn(
+                        any(String.class),
+                        intakeActor.capture(),
+                        any(IntakeLobbySeed.class),
+                        any(String.class),
+                        any(String.class));
+        assertThat(intakeActor.getValue().actorId()).isEqualTo("user-local");
     }
 
     @Test
@@ -168,6 +242,13 @@ class DisputeImportServiceTest {
 
         assertThat(imported.id()).isEqualTo("CASE_EXISTING");
         verify(repository, never()).save(any());
+        verify(intakeAgentTurnService, never())
+                .startInitialTurn(
+                        any(String.class),
+                        any(AuthenticatedActor.class),
+                        any(IntakeLobbySeed.class),
+                        any(String.class),
+                        any(String.class));
     }
 
     @Test
@@ -189,9 +270,9 @@ class DisputeImportServiceTest {
                                 new SimulatedExternalDispute(
                                         "LLM_SIMULATED_OMS",
                                         "SIM-20260706-001",
-                                        "ORDER-SIM-001",
-                                        "AFTER-SIM-001",
-                                        "LOG-SIM-001",
+                                        "ORDER-20260706-4201",
+                                        "AS-20260706-4201",
+                                        "SF-20260706-4201",
                                         "user-local",
                                         "merchant-local",
                                         "MERCHANT",
@@ -224,11 +305,24 @@ class DisputeImportServiceTest {
         assertThat(result.items().get(0).externalCaseReference())
                 .isEqualTo("SIM-20260706-001");
         assertThat(result.items().get(0).initiatorRole()).isEqualTo("MERCHANT");
+        assertThat(result.items().get(0).title()).isEqualTo("商家发起手表故障争议");
+        assertThat(result.items().get(0).orderId()).isEqualTo("ORDER-20260706-4201");
 
         var savedCase =
                 org.mockito.ArgumentCaptor.forClass(FulfillmentCaseEntity.class);
         verify(repository).save(savedCase.capture());
         assertThat(savedCase.getValue().getInitiatorRole()).isEqualTo(ActorRole.MERCHANT);
+        ArgumentCaptor<AuthenticatedActor> intakeActor =
+                ArgumentCaptor.forClass(AuthenticatedActor.class);
+        verify(intakeAgentTurnService)
+                .startInitialTurn(
+                        any(String.class),
+                        intakeActor.capture(),
+                        any(IntakeLobbySeed.class),
+                        any(String.class),
+                        any(String.class));
+        assertThat(intakeActor.getValue().actorId()).isEqualTo("merchant-local");
+        assertThat(intakeActor.getValue().role()).isEqualTo(ActorRole.MERCHANT);
     }
 
     private static ImportDisputeCommand command(String externalReference) {

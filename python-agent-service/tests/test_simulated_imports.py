@@ -34,3 +34,29 @@ def test_simulated_import_batch_id_changes_external_references() -> None:
     assert len(first_refs) == 2
     assert len(second_refs) == 2
     assert first_refs.isdisjoint(second_refs)
+
+
+def test_simulated_import_generates_real_dispute_copy_without_visible_simulation_labels() -> None:
+    workflow = SimulatedExternalImportWorkflow()
+
+    result = workflow.generate(
+        SimulatedExternalImportRequest(
+            count=3,
+            scenario="手表售后争议",
+            risk_level_hint="MEDIUM",
+            initiator_role_hint="MERCHANT",
+            current_actor_id="merchant-local",
+            counterparty_actor_id="user-local",
+            simulation_batch_id="external-import-batch-real-copy",
+        )
+    )
+
+    assert len(result.items) == 3
+    for item in result.items:
+        visible_copy = f"{item.title} {item.description} {item.order_reference}"
+        assert "模拟" not in visible_copy
+        assert "SIM" not in item.order_reference
+        assert any(
+            keyword in visible_copy
+            for keyword in ["签收", "退款", "手表", "售后", "履约", "检测"]
+        )

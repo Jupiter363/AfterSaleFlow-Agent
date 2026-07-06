@@ -15,6 +15,7 @@ import com.example.dispute.domain.model.RiskLevel;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.room.application.CaseEventService;
+import com.example.dispute.room.application.EvidenceAgentTurnService;
 import com.example.dispute.room.application.IntakeAgentTurnService;
 import com.example.dispute.room.application.CaseEventView;
 import com.example.dispute.room.application.RoomMessageCommand;
@@ -62,6 +63,7 @@ class RoomMessageAndEventServiceTest {
     @Mock private RoomMessageRepository messageRepository;
     @Mock private CaseTimelineEventRepository eventRepository;
     @Mock private IntakeAgentTurnService intakeAgentTurnService;
+    @Mock private EvidenceAgentTurnService evidenceAgentTurnService;
 
     private CaseEventService eventService;
     private RoomMessageService messageService;
@@ -83,6 +85,7 @@ class RoomMessageAndEventServiceTest {
                         messageRepository,
                         eventService,
                         intakeAgentTurnService,
+                        evidenceAgentTurnService,
                         CLOCK);
     }
 
@@ -285,6 +288,148 @@ class RoomMessageAndEventServiceTest {
     }
 
     @Test
+    void evidencePartyEvidenceReferenceTriggersTheEvidenceAgentTurnAfterTheMessageIsPersisted() {
+        FulfillmentCaseEntity dispute = evidenceCase();
+        CaseRoomEntity room =
+                CaseRoomEntity.open(
+                        "ROOM_EVIDENCE",
+                        dispute.getId(),
+                        RoomType.EVIDENCE,
+                        OffsetDateTime.parse("2026-07-03T00:00:00Z"),
+                        "system");
+        when(caseRepository.findByIdForUpdate(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.EVIDENCE))
+                .thenReturn(Optional.of(room));
+        when(participantRepository.existsByCaseIdAndActorIdAndParticipantRole(
+                        dispute.getId(), "merchant-local", ActorRole.MERCHANT))
+                .thenReturn(true);
+        when(messageRepository.findByCaseIdAndIdempotencyKey(
+                        dispute.getId(), "evidence-reference-msg"))
+                .thenReturn(Optional.empty());
+        when(messageRepository.findMaxSequenceByRoomId(room.getId())).thenReturn(0L);
+        when(eventRepository.findMaxSequenceByCaseId(dispute.getId())).thenReturn(0L);
+        when(messageRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(eventRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        RoomMessageCommand command =
+                new RoomMessageCommand(
+                        MessageType.PARTY_EVIDENCE_REFERENCE,
+                        null,
+                        List.of("EVIDENCE_UPLOAD_1"));
+        messageService.post(
+                dispute.getId(),
+                RoomType.EVIDENCE,
+                command,
+                new AuthenticatedActor("merchant-local", ActorRole.MERCHANT),
+                "evidence-reference-msg",
+                "TRACE_EVIDENCE_REFERENCE");
+
+        verify(evidenceAgentTurnService)
+                .continueFromParticipantMessage(
+                        eq(dispute.getId()),
+                        eq(RoomType.EVIDENCE),
+                        eq(new AuthenticatedActor("merchant-local", ActorRole.MERCHANT)),
+                        eq(command),
+                        eq("TRACE_EVIDENCE_REFERENCE"),
+                        eq("TRACE_EVIDENCE_REFERENCE"));
+    }
+
+    @Test
+    void evidencePartyTextAndReferenceMessagesAreVisibleOnlyToSamePartyAndTrustedRoles()
+            throws Exception {
+        FulfillmentCaseEntity dispute = evidenceCase();
+        CaseRoomEntity room =
+                CaseRoomEntity.open(
+                        "ROOM_EVIDENCE",
+                        dispute.getId(),
+                        RoomType.EVIDENCE,
+                        OffsetDateTime.parse("2026-07-03T00:00:00Z"),
+                        "system");
+        when(caseRepository.findByIdForUpdate(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.EVIDENCE))
+                .thenReturn(Optional.of(room));
+        when(participantRepository.existsByCaseIdAndActorIdAndParticipantRole(
+                        dispute.getId(), "user-local", ActorRole.USER))
+                .thenReturn(true);
+        when(participantRepository.existsByCaseIdAndActorIdAndParticipantRole(
+                        dispute.getId(), "merchant-local", ActorRole.MERCHANT))
+                .thenReturn(true);
+        when(messageRepository.findByCaseIdAndIdempotencyKey(
+                        dispute.getId(), "user-evidence-text"))
+                .thenReturn(Optional.empty());
+        when(messageRepository.findByCaseIdAndIdempotencyKey(
+                        dispute.getId(), "merchant-evidence-reference"))
+                .thenReturn(Optional.empty());
+        when(messageRepository.findMaxSequenceByRoomId(room.getId()))
+                .thenReturn(0L, 1L);
+        when(eventRepository.findMaxSequenceByCaseId(dispute.getId()))
+                .thenReturn(0L, 1L);
+        when(messageRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(eventRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        messageService.post(
+                dispute.getId(),
+                RoomType.EVIDENCE,
+                new RoomMessageCommand(
+                        MessageType.PARTY_TEXT,
+                        "User private evidence-room note for the clerk.",
+                        List.of()),
+                new AuthenticatedActor("user-local", ActorRole.USER),
+                "user-evidence-text",
+                "TRACE_USER_EVIDENCE_TEXT");
+        messageService.post(
+                dispute.getId(),
+                RoomType.EVIDENCE,
+                new RoomMessageCommand(
+                        MessageType.PARTY_EVIDENCE_REFERENCE,
+                        null,
+                        List.of("EVIDENCE_MERCHANT_PRIVATE")),
+                new AuthenticatedActor("merchant-local", ActorRole.MERCHANT),
+                "merchant-evidence-reference",
+                "TRACE_MERCHANT_EVIDENCE_REFERENCE");
+
+        ArgumentCaptor<RoomMessageEntity> messages =
+                ArgumentCaptor.forClass(RoomMessageEntity.class);
+        verify(messageRepository, org.mockito.Mockito.times(2)).save(messages.capture());
+
+        List<String> userAudience =
+                List.of(
+                        new ObjectMapper()
+                                .readValue(
+                                        messages.getAllValues().get(0).getAudienceJson(),
+                                        String[].class));
+        assertThat(userAudience)
+                .containsExactly(
+                        "USER",
+                        "CUSTOMER_SERVICE",
+                        "PLATFORM_REVIEWER",
+                        "ADMIN",
+                        "SYSTEM");
+        assertThat(userAudience).doesNotContain("MERCHANT");
+
+        List<String> merchantAudience =
+                List.of(
+                        new ObjectMapper()
+                                .readValue(
+                                        messages.getAllValues().get(1).getAudienceJson(),
+                                        String[].class));
+        assertThat(merchantAudience)
+                .containsExactly(
+                        "MERCHANT",
+                        "CUSTOMER_SERVICE",
+                        "PLATFORM_REVIEWER",
+                        "ADMIN",
+                        "SYSTEM");
+        assertThat(merchantAudience).doesNotContain("USER");
+    }
+
+    @Test
     void intakeRoomRejectsTheNonInitiatingPartyBeforeEvidenceRoomOpens() {
         FulfillmentCaseEntity dispute = intakeCase();
         when(caseRepository.findByIdForUpdate(dispute.getId()))
@@ -354,6 +499,64 @@ class RoomMessageAndEventServiceTest {
 
         assertThat(message.senderRole()).isEqualTo("MERCHANT");
         assertThat(message.messageText()).contains("inspection explanation");
+    }
+
+    @Test
+    void evidenceRoomPartyMessagesAreScopedToTheSpeakingPartyAndTrustedPlatformRoles() {
+        FulfillmentCaseEntity dispute = evidenceCase();
+        CaseRoomEntity room =
+                CaseRoomEntity.open(
+                        "ROOM_EVIDENCE",
+                        dispute.getId(),
+                        RoomType.EVIDENCE,
+                        OffsetDateTime.parse("2026-07-03T00:00:00Z"),
+                        "system");
+        when(caseRepository.findByIdForUpdate(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(
+                        dispute.getId(), RoomType.EVIDENCE))
+                .thenReturn(Optional.of(room));
+        when(participantRepository.existsByCaseIdAndActorIdAndParticipantRole(
+                        dispute.getId(), "merchant-local", ActorRole.MERCHANT))
+                .thenReturn(true);
+        when(messageRepository.findByCaseIdAndIdempotencyKey(
+                        dispute.getId(), "merchant-private-evidence-chat"))
+                .thenReturn(Optional.empty());
+        when(messageRepository.findMaxSequenceByRoomId(room.getId())).thenReturn(0L);
+        when(eventRepository.findMaxSequenceByCaseId(dispute.getId())).thenReturn(0L);
+        when(messageRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(eventRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        messageService.post(
+                dispute.getId(),
+                RoomType.EVIDENCE,
+                new RoomMessageCommand(
+                        MessageType.PARTY_TEXT,
+                        "This is a merchant-only explanation to the evidence clerk.",
+                        List.of()),
+                new AuthenticatedActor("merchant-local", ActorRole.MERCHANT),
+                "merchant-private-evidence-chat",
+                "TRACE_EVIDENCE_PRIVATE");
+
+        ArgumentCaptor<RoomMessageEntity> savedMessage =
+                ArgumentCaptor.forClass(RoomMessageEntity.class);
+        verify(messageRepository).save(savedMessage.capture());
+        assertThat(savedMessage.getValue().getAudienceJson())
+                .contains("MERCHANT")
+                .contains("CUSTOMER_SERVICE")
+                .contains("PLATFORM_REVIEWER")
+                .doesNotContain("USER");
+
+        ArgumentCaptor<CaseTimelineEventEntity> savedEvent =
+                ArgumentCaptor.forClass(CaseTimelineEventEntity.class);
+        verify(eventRepository).save(savedEvent.capture());
+        assertThat(savedEvent.getValue().getAudienceJson())
+                .contains("MERCHANT")
+                .contains("CUSTOMER_SERVICE")
+                .contains("PLATFORM_REVIEWER")
+                .doesNotContain("USER");
     }
 
     @Test

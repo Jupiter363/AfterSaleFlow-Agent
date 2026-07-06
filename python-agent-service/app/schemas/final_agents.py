@@ -8,6 +8,7 @@ from typing import Annotated, Literal
 from pydantic import Field, model_validator
 
 from app.schemas.models import (
+    Confidence,
     EvidenceItem,
     Identifier,
     LongText,
@@ -178,6 +179,106 @@ class IntakeTurnResult(StrictModel):
     knowledge_query_intent: bool = False
     knowledge_answer_mode: Literal["NONE", "STUB"] = "NONE"
     confidence: Annotated[float, Field(ge=0, le=1)]
+
+
+class EvidenceTurnMessage(StrictModel):
+    message_id: Identifier
+    role: Literal["USER", "MERCHANT"]
+    message_type: Identifier | None = None
+    text: LongText
+    attachment_refs: Annotated[list[Identifier], Field(max_length=50)] = Field(
+        default_factory=list
+    )
+
+
+class EvidenceTurnEvidenceItem(StrictModel):
+    evidence_id: Identifier
+    evidence_type: Identifier
+    source_type: Identifier
+    content: LongText
+    parsed_text: LongText | None = None
+    agent_summary: LongText | None = None
+    occurred_at: ShortText | None = None
+    related_claim_ids: Annotated[list[Identifier], Field(max_length=50)] = Field(
+        default_factory=list
+    )
+    parser_warning: ShortText | None = None
+    submitted_by_role: Literal["USER", "MERCHANT", "PLATFORM", "CUSTOMER_SERVICE"] | None = None
+    visibility: Identifier | None = None
+    content_url: ShortText | None = None
+    parse_status: Identifier | None = None
+    original_filename: ShortText | None = None
+    redacted: bool = False
+
+
+class EvidenceTurnQuestion(StrictModel):
+    question_id: Identifier
+    target_evidence_id: Identifier | None = None
+    question: LongText
+    reason: ShortText
+
+
+class EvidenceVerificationSuggestion(StrictModel):
+    evidence_id: Identifier
+    suggestion: LongText
+    confidence_score: Annotated[
+        float,
+        Field(
+            ge=0,
+            le=1,
+            description="0.0-1.0 confidence score for this evidence-verification suggestion.",
+        ),
+    ]
+
+
+class EvidenceAuthenticityFlag(StrictModel):
+    evidence_id: Identifier | None = None
+    flag_type: Identifier
+    description: ShortText
+    severity: Literal["LOW", "MEDIUM", "HIGH"] = "LOW"
+
+
+class EvidenceTurnLlmOutput(StrictModel):
+    room_utterance: LongText
+    evidence_requests: Annotated[
+        list[EvidenceTurnQuestion],
+        Field(max_length=30),
+    ] = Field(default_factory=list)
+    verification_suggestions: Annotated[
+        list[EvidenceVerificationSuggestion],
+        Field(max_length=100),
+    ] = Field(default_factory=list)
+    authenticity_flags: Annotated[
+        list[EvidenceAuthenticityFlag],
+        Field(max_length=100),
+    ] = Field(default_factory=list)
+    confidence: Confidence
+
+
+class EvidenceTurnRequest(StrictModel):
+    case_id: Annotated[
+        str, Field(pattern=r"^CASE_[A-Za-z0-9_]{1,59}$")
+    ]
+    room_type: Literal["EVIDENCE"]
+    turn_source: Identifier | None = None
+    actor_role: Literal["USER", "MERCHANT"]
+    actor_id: Identifier | None = None
+    current_party_message: EvidenceTurnMessage
+    case_intake_dossier: dict[str, object] = Field(default_factory=dict)
+    available_evidence: Annotated[
+        list[EvidenceTurnEvidenceItem],
+        Field(max_length=200),
+    ] = Field(default_factory=list)
+    recent_turns: Annotated[list[dict[str, object]], Field(max_length=20)] = Field(
+        default_factory=list
+    )
+
+
+class EvidenceTurnResult(EvidenceTurnLlmOutput):
+    memory_frame: dict[str, object] = Field(default_factory=dict)
+    non_final: Literal[True] = True
+    liability_determined: Literal[False] = False
+    remedy_recommended: Literal[False] = False
 
 
 class HearingStage(StrEnum):

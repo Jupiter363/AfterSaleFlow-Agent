@@ -137,16 +137,26 @@ function normalizeImportedCase(item) {
   const id = item.id || item.case_id;
   return {
     id,
-    order_id: item.order_id || item.order_reference || "ORDER-SIM",
-    source_type: item.source_type || "EXTERNAL_IMPORT",
-    dispute_type: item.dispute_type || "FULFILLMENT_CONFLICT",
-    case_status: item.case_status || "INTAKE_PENDING",
-    current_room: item.current_room || "INTAKE",
-    deadline_at: item.deadline_at || item.current_deadline_at || null,
-    risk_level: item.risk_level || "MEDIUM",
-    pending_action: item.pending_action || "COMPLETE_INTAKE",
-    title: item.title || "LLM 模拟外部导入争议",
-    initiator_role: item.initiator_role,
+    order_id:
+      item.order_id ||
+      item.order_reference ||
+      item.orderId ||
+      item.orderReference ||
+      "外部订单待同步",
+    source_type: item.source_type || item.sourceType || "EXTERNAL_IMPORT",
+    dispute_type: item.dispute_type || item.disputeType || "FULFILLMENT_CONFLICT",
+    case_status: item.case_status || item.caseStatus || "INTAKE_PENDING",
+    current_room: item.current_room || item.currentRoom || "INTAKE",
+    deadline_at:
+      item.deadline_at ||
+      item.current_deadline_at ||
+      item.deadlineAt ||
+      item.currentDeadlineAt ||
+      null,
+    risk_level: item.risk_level || item.riskLevel || "MEDIUM",
+    pending_action: item.pending_action || item.pendingAction || "COMPLETE_INTAKE",
+    title: item.title || "外部导入争议",
+    initiator_role: item.initiator_role || item.initiatorRole,
   };
 }
 
@@ -244,7 +254,7 @@ onMounted(async () => {
           @click="simulateExternalImport"
         >
           <span aria-hidden="true">⇢</span>
-          {{ importingExternal ? "外部系统导入中" : "外部导入模拟" }}
+          {{ importingExternal ? "外部系统导入中" : "导入外部争议" }}
         </button>
         <button
           class="overview-page__start"

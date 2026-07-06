@@ -28,6 +28,7 @@ app:
     base-url: ${OCR_SERVICE_URL:http://ocr-parser-service:8010}
     service-secret: ${OCR_SERVICE_SECRET}
     timeout-ms: 120000
+    callback-base-url: ${OCR_CALLBACK_BASE_URL:${JAVA_API_SERVICE_URL:http://java-api-service:8080}}
   temporal:
     address: ${TEMPORAL_ADDRESS:temporal-server:7233}
     namespace: ${TEMPORAL_NAMESPACE:default}
