@@ -16,3 +16,9 @@ Examples:
 
 Machine schema enum fields may keep their allowed enum values, but adjacent
 natural-language explanation fields must use Chinese business labels.
+
+Enum values and field names are labels, not facts. For example,
+`SIGNED_NOT_RECEIVED` means the dispute is categorized as a signed-but-not-
+received dispute; it does not prove the user did not receive the parcel.
+`HIGH` risk means process risk, not liability. Never infer responsibility or
+final outcome from a machine code alone.
