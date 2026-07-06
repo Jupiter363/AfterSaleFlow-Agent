@@ -12,12 +12,19 @@ public record IntakeConfirmationCommand(
     public IntakeConfirmationCommand {
         requireText(disputeType, "disputeType");
         Objects.requireNonNull(riskLevel, "riskLevel must not be null");
-        requireText(confirmationNote, "confirmationNote");
+        confirmationNote = optionalText(confirmationNote);
     }
 
     private static void requireText(String value, String field) {
         if (value == null || value.isBlank()) {
             throw new IllegalArgumentException(field + " must not be blank");
         }
+    }
+
+    private static String optionalText(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        return value.trim();
     }
 }

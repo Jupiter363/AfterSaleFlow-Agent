@@ -80,6 +80,6 @@ class IntakeRoomControllerTest {
         ArgumentCaptor<IntakeConfirmationCommand> command =
                 ArgumentCaptor.forClass(IntakeConfirmationCommand.class);
         verify(service).confirm(eq("CASE_test"), any(), command.capture());
-        assertThat(command.getValue().confirmationNote()).isNotBlank();
+        assertThat(command.getValue().confirmationNote()).isNull();
     }
 }

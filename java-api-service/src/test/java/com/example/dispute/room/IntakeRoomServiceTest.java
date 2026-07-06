@@ -403,6 +403,61 @@ class IntakeRoomServiceTest {
         assertThat(dispute.getCaseStatus()).isEqualTo(CaseStatus.EVIDENCE_OPEN);
     }
 
+    @Test
+    void acceptedIntakeAllowsEmptyConfirmationNoteAndKeepsHandoffRemarkFromDossier() {
+        FulfillmentCaseEntity dispute = pendingCase("CASE_DOSSIER_REMARK");
+        String dossierJson =
+                """
+                {
+                  "schema_version": "intake_case_detail.v1",
+                  "case_story": {"title": "商家质检与签收划痕争议"},
+                  "intake_quality": {"score": 88, "ready_for_next_step": true},
+                  "handoff_notes": {
+                    "remark_status": "HAS_REMARKS",
+                    "latest_remark": "请证据书记官重点核查快递柜取件记录。",
+                    "remarks": [
+                      {
+                        "role": "USER",
+                        "text": "请证据书记官重点核查快递柜取件记录。",
+                        "source_message_id": "MESSAGE_REMARK_1"
+                      }
+                    ]
+                  }
+                }
+                """;
+        when(caseRepository.findByIdForUpdate("CASE_DOSSIER_REMARK"))
+                .thenReturn(Optional.of(dispute));
+        when(intakeDossierRepository.findByCaseIdAndRoomType(
+                        "CASE_DOSSIER_REMARK", RoomType.INTAKE))
+                .thenReturn(
+                        Optional.of(
+                                CaseIntakeDossierEntity.create(
+                                        "INTAKE_DOSSIER_CASE_DOSSIER_REMARK",
+                                        "CASE_DOSSIER_REMARK",
+                                        RoomType.INTAKE,
+                                        dossierJson,
+                                        88,
+                                        true,
+                                        "ACCEPTED",
+                                        4,
+                                        "dispute-intake-officer")));
+        when(phaseClockRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        service.confirm(
+                "CASE_DOSSIER_REMARK",
+                new AuthenticatedActor("user-local", ActorRole.USER),
+                new IntakeConfirmationCommand(
+                        true,
+                        "PRODUCT_QUALITY",
+                        RiskLevel.MEDIUM,
+                        null));
+
+        assertThat(dispute.getIntakeResultJson()).isEqualTo(dossierJson);
+        assertThat(dispute.getIntakeResultJson()).contains("请证据书记官重点核查快递柜取件记录。");
+        assertThat(dispute.getCaseStatus()).isEqualTo(CaseStatus.EVIDENCE_OPEN);
+    }
+
     private static FulfillmentCaseEntity pendingCase(String id) {
         return FulfillmentCaseEntity.imported(
                 id,

@@ -197,6 +197,21 @@ def _validate_readiness(state: IntakeTurnGraphState) -> dict[str, Any]:
     if ready:
         additions: list[str] = []
         utterance = state["room_utterance"]
+        handoff_notes = snapshot.get("handoff_notes")
+        remark_status = (
+            str(handoff_notes.get("remark_status") or "")
+            if isinstance(handoff_notes, dict)
+            else ""
+        )
+        if remark_status in {"HAS_REMARKS", "NO_EXTRA_REMARKS"}:
+            if "收到备注" not in utterance and "已收到" not in utterance:
+                additions.append("已收到备注，我会把这部分一起交接给证据书记官。")
+            if not additions:
+                return {"executed_nodes": ["validate_readiness"]}
+            return {
+                "room_utterance": utterance + " " + " ".join(additions),
+                "executed_nodes": ["validate_readiness"],
+            }
         if "已了解" not in utterance:
             additions.append("我已了解本案情况，可以进入下一步。")
         if "备注" not in utterance:

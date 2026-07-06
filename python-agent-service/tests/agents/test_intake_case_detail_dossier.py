@@ -209,7 +209,7 @@ def test_ready_intake_turn_asks_for_handoff_remark_before_next_room() -> None:
     assert "证据书记官" in result.room_utterance
 
 
-def test_handoff_remark_is_persisted_when_previous_board_is_ready() -> None:
+def test_handoff_remark_is_persisted_when_officer_is_waiting_for_remark() -> None:
     from app.agents.dispute_intake_officer.workflow import IntakeTurnWorkflow
 
     remark = "请证据书记官重点核查快递柜取件记录。"
@@ -247,3 +247,43 @@ def test_handoff_remark_is_persisted_when_previous_board_is_ready() -> None:
     assert notes["remarks"][-1]["role"] == "USER"
     assert notes["remarks"][-1]["text"] == remark
     assert notes["remarks"][-1]["source_message_id"] == "MESSAGE_REMARK_1"
+    assert "已收到备注" in result.room_utterance
+
+
+def test_ready_board_does_not_treat_regular_followup_as_remark_before_officer_asks() -> None:
+    from app.agents.dispute_intake_officer.workflow import IntakeTurnWorkflow
+
+    runner = CaseDetailRunner(score=88)
+    request = _request(
+        current_user_message={
+            "message_id": "MESSAGE_FOLLOWUP_1",
+            "role": "USER",
+            "text": "我再补充一下，商家当时说要等物流回复。",
+        },
+        latest_scroll_snapshot={
+            "schema_version": "intake_case_detail.v1",
+            "references": {
+                "order_reference": "ORDER_1001",
+                "after_sales_reference": "AS_1001",
+                "logistics_reference": "SF1001001001",
+            },
+            "intake_quality": {
+                "score": 86,
+                "threshold": 80,
+                "ready_for_next_step": True,
+            },
+            "handoff_notes": {
+                "remark_status": "NOT_READY",
+                "latest_remark": "",
+                "remarks": [],
+            },
+        },
+    )
+
+    result = IntakeTurnWorkflow(model_runner=runner).run(request)
+
+    notes = result.scroll_snapshot["handoff_notes"]
+    assert notes["remark_status"] == "WAITING_FOR_REMARK"
+    assert notes["latest_remark"] == ""
+    assert notes["remarks"] == []
+    assert "还有没有需要备注" in result.room_utterance

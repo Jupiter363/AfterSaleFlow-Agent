@@ -92,7 +92,11 @@ class CaseDetailDossierSkill:
             )
 
         previous = request.latest_scroll_snapshot or {}
-        previous_ready = _case_detail_ready(previous) if isinstance(previous, dict) else False
+        previous_waiting_for_remark = (
+            _handoff_remark_status(previous) == "WAITING_FOR_REMARK"
+            if isinstance(previous, dict)
+            else False
+        )
         detail = self._default_case_detail(request)
         detail = _deep_merge(detail, previous if _is_case_detail(previous) else {})
         detail = _deep_merge(detail, llm_case_detail or {})
@@ -139,7 +143,7 @@ class CaseDetailDossierSkill:
         _record_handoff_remark_if_needed(
             detail,
             request,
-            previous_ready=previous_ready,
+            previous_waiting_for_remark=previous_waiting_for_remark,
         )
 
         admission = _ensure_dict(detail, "admission")
@@ -329,6 +333,13 @@ def _case_detail_ready(value: dict[str, Any]) -> bool:
     return isinstance(quality, dict) and quality.get("ready_for_next_step") is True
 
 
+def _handoff_remark_status(value: dict[str, Any]) -> str:
+    notes = value.get("handoff_notes")
+    if not isinstance(notes, dict):
+        return ""
+    return str(notes.get("remark_status") or "")
+
+
 def _ensure_handoff_notes(detail: dict[str, Any]) -> dict[str, Any]:
     notes = _ensure_dict(detail, "handoff_notes")
     if not notes.get("remark_status") or notes.get("remark_status") == "NOT_READY":
@@ -345,10 +356,10 @@ def _record_handoff_remark_if_needed(
     detail: dict[str, Any],
     request: IntakeTurnRequest,
     *,
-    previous_ready: bool,
+    previous_waiting_for_remark: bool,
 ) -> None:
     current = request.current_user_message
-    if not previous_ready or current is None or not current.text.strip():
+    if not previous_waiting_for_remark or current is None or not current.text.strip():
         return
 
     notes = _ensure_handoff_notes(detail)

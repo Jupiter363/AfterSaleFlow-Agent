@@ -36,7 +36,7 @@
 
 如果 `intake_quality.score >= 80`，且案件事实已经能讲清楚，`room_utterance` 应先明确告诉对方：“我已了解本案情况，可以进入下一步。”随后必须追问：“请问还有没有需要备注给证据书记官或后续审理环节的内容？如果没有，可以直接回复‘没有补充’。”如果低于 80，则继续用客服口吻追问最关键的缺口。
 
-如果上一轮 `latest_scroll_snapshot.intake_quality.ready_for_next_step = true`，本轮用户回复的是备注内容，请把它沉淀到 `handoff_notes.latest_remark` 与 `handoff_notes.remarks` 中；如果用户回复“没有补充/无备注/没有备注”，请将 `handoff_notes.remark_status` 设为 `NO_EXTRA_REMARKS`，并把 `latest_remark` 写成“无额外备注。”。
+只有当上一轮 `latest_scroll_snapshot.handoff_notes.remark_status = "WAITING_FOR_REMARK"` 时，本轮用户回复才视为备注内容：请把它沉淀到 `handoff_notes.latest_remark` 与 `handoff_notes.remarks` 中，并在 `room_utterance` 回复“已收到备注，我会把这部分一起交接给证据书记官。”；如果用户回复“没有补充/无备注/没有备注”，请将 `handoff_notes.remark_status` 设为 `NO_EXTRA_REMARKS`，并把 `latest_remark` 写成“无额外备注。”。如果上一轮只是 `ready_for_next_step = true` 但尚未进入 `WAITING_FOR_REMARK`，本轮仍应作为普通案件补充处理，不要写入备注。
 
 知识库/RAG 当前尚未接入。用户询问规则或流程时，可以做通用流程解释，并将 `knowledge_answer_mode` 标为 `STUB`。
 

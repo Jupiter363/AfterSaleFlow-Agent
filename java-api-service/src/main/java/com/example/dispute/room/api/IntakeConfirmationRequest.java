@@ -13,13 +13,6 @@ public record IntakeConfirmationRequest(
 
     IntakeConfirmationCommand toCommand() {
         return new IntakeConfirmationCommand(
-                admissible, disputeType, riskLevel, normalizedConfirmationNote());
-    }
-
-    private String normalizedConfirmationNote() {
-        if (confirmationNote == null || confirmationNote.isBlank()) {
-            return "确认发起并上报，进入证据书记官室";
-        }
-        return confirmationNote;
+                admissible, disputeType, riskLevel, confirmationNote);
     }
 }
