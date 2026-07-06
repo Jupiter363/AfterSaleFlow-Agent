@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 import operator
 from typing import Annotated, Any
@@ -12,8 +11,9 @@ from app.agents.dispute_intake_officer.schemas import IntakeCaseDetailLlmOutput
 from app.agents.dispute_intake_officer.skills.dossier.dossier_skill import (
     CaseDetailDossierSkill,
 )
-from app.harness.context_window import PromptSection
+from app.harness.context_pack import build_context_pack
 from app.harness.memory import MemeoMemoryAssembler
+from app.harness.narrative_policy import rewrite_platform_narrative
 from app.schemas import IntakeTurnRequest, IntakeTurnResult
 
 
@@ -117,6 +117,22 @@ def _reason_with_llm_node(model_runner: Any | None):
                 "executed_nodes": ["fallback_reasoning"],
             }
         try:
+            context_pack = build_context_pack(
+                "intake_turn_case_detail",
+                {
+                    "current_turn": _current_turn_context(request, state),
+                    "intake_initial_form": request.get("lobby_seed") or {},
+                    "case_identity": _case_identity_context(request, state),
+                    "latest_canvas_snapshot": request.get("latest_scroll_snapshot") or {},
+                    "short_term_memory": str(
+                        state["memory_frame"].get("prompt_memory") or ""
+                    ),
+                    "compressed_summary": str(
+                        state["memory_frame"].get("compressed_summary") or ""
+                    ),
+                },
+                actor_role=state["actor_role"],
+            )
             generation = model_runner.invoke_structured(
                 node_name="intake_turn_case_detail",
                 case_data={
@@ -134,24 +150,7 @@ def _reason_with_llm_node(model_runner: Any | None):
                 output_type=IntakeCaseDetailLlmOutput,
                 agent_context=agent_context,
                 prompt_profile_id=agent_context.get("prompt_profile_id"),
-                context_sections=[
-                    PromptSection(
-                        name="memeo_memory",
-                        content=str(state["memory_frame"].get("prompt_memory") or ""),
-                        priority=90,
-                        required=False,
-                    ),
-                    PromptSection(
-                        name="latest_case_detail_board",
-                        content=json.dumps(
-                            request.get("latest_scroll_snapshot") or {},
-                            ensure_ascii=False,
-                            separators=(",", ":"),
-                        ),
-                        priority=85,
-                        required=False,
-                    ),
-                ],
+                context_pack=context_pack,
             )
             return {
                 "llm_output": generation.value,
@@ -247,6 +246,10 @@ def _validate_readiness(state: IntakeTurnGraphState) -> dict[str, Any]:
 def _fallback_output(state: IntakeTurnGraphState) -> IntakeCaseDetailLlmOutput:
     request = state["request"]
     source_text = state["source_text"]
+    platform_text = rewrite_platform_narrative(
+        source_text,
+        actor_role=state["actor_role"],
+    )
     seed = request.get("lobby_seed") or {}
     requested_outcome = seed.get("requested_outcome_hint") or _requested_outcome_from_text(
         source_text
@@ -267,11 +270,11 @@ def _fallback_output(state: IntakeTurnGraphState) -> IntakeCaseDetailLlmOutput:
             "schema_version": CaseDetailDossierSkill.schema_version,
             "case_story": {
                 "title": "待完善履约争议",
-                "one_sentence_summary": source_text,
+                "one_sentence_summary": platform_text,
                 "event_timeline": [
                     {
                         "time_hint": "接待室当前轮次",
-                        "event": source_text,
+                        "event": platform_text,
                         "source": request.get("turn_source") or "USER_MESSAGE",
                     }
                 ],
@@ -282,8 +285,9 @@ def _fallback_output(state: IntakeTurnGraphState) -> IntakeCaseDetailLlmOutput:
                 "logistics_reference": seed.get("logistics_reference") or "",
             },
             "party_positions": {
-                "user_claim": source_text if state["actor_role"] != "MERCHANT" else "",
-                "merchant_claim": source_text if state["actor_role"] == "MERCHANT" else "",
+                "user_claim": platform_text if state["actor_role"] != "MERCHANT" else "",
+                "merchant_claim": platform_text if state["actor_role"] == "MERCHANT" else "",
+                "raw_statement": source_text,
                 "platform_observation": "",
             },
             "dispute_focus": {
@@ -362,3 +366,42 @@ def _requested_outcome_from_text(text: str) -> str:
     if any(term in normalized for term in ("退货", "return")):
         return "RETURN"
     return "UNKNOWN"
+
+
+def _current_turn_context(
+    request: dict[str, Any],
+    state: IntakeTurnGraphState,
+) -> dict[str, Any]:
+    current = request.get("current_user_message") or {}
+    seed = request.get("lobby_seed") or {}
+    return {
+        "turn_source": request.get("turn_source"),
+        "role": state["actor_role"],
+        "text": current.get("text") or seed.get("raw_text") or "",
+        "message_id": current.get("message_id"),
+        "is_lobby_seed": not bool(current),
+        "remark_status": (
+            (request.get("latest_scroll_snapshot") or {})
+            .get("handoff_notes", {})
+            .get("remark_status")
+            if isinstance(request.get("latest_scroll_snapshot") or {}, dict)
+            else ""
+        ),
+    }
+
+
+def _case_identity_context(
+    request: dict[str, Any],
+    state: IntakeTurnGraphState,
+) -> dict[str, Any]:
+    seed = request.get("lobby_seed") or {}
+    return {
+        "case_id": request.get("case_id"),
+        "room_type": request.get("room_type"),
+        "actor_role": state["actor_role"],
+        "order_reference": seed.get("order_reference") or "",
+        "after_sales_reference": seed.get("after_sales_reference") or "",
+        "logistics_reference": seed.get("logistics_reference") or "",
+        "initiator_role": seed.get("initiator_role") or state["actor_role"],
+        "risk_level": seed.get("risk_level") or "",
+    }

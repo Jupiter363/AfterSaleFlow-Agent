@@ -9,9 +9,11 @@ class PromptSection:
     content: str
     priority: int = 50
     required: bool = False
+    trust_level: str = "untrusted"
+    prompt_included: bool = True
 
     def estimated_tokens(self) -> int:
-        if not self.content:
+        if not self.content or not self.prompt_included:
             return 0
         return max(1, (len(self.name) + len(self.content) + 3) // 4)
 
@@ -29,6 +31,9 @@ class AssembledPromptContext:
                     "name": section.name,
                     "content": section.content,
                     "estimated_tokens": section.estimated_tokens(),
+                    "priority": section.priority,
+                    "required": section.required,
+                    "trust_level": section.trust_level,
                 }
                 for section in self.sections
             ],
@@ -59,7 +64,11 @@ class ContextWindowManager:
         omitted: list[str] = []
         used = 0
         ordered = sorted(
-            [section for section in sections if section.content],
+            [
+                section
+                for section in sections
+                if section.content and section.prompt_included
+            ],
             key=lambda section: (
                 not section.required,
                 -section.priority,

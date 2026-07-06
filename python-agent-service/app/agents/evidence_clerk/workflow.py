@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 import operator
 from typing import Annotated, Any
@@ -9,7 +8,8 @@ from langgraph.graph import END, START, StateGraph
 from typing_extensions import NotRequired, TypedDict
 
 from app.agents.evidence_clerk.skills.authenticity import EvidenceAuthenticitySkill
-from app.harness.context_window import PromptSection
+from app.harness.context_pack import build_context_pack
+from app.harness.localization_policy import localize_internal_text
 from app.harness.memory import MemeoMemoryAssembler
 from app.schemas import (
     EvidenceAuthenticityFlag,
@@ -21,17 +21,6 @@ from app.schemas import (
 
 
 LOGGER = logging.getLogger(__name__)
-
-
-INTERNAL_CODE_LABELS = {
-    "SIGNED_NOT_RECEIVED": "物流显示签收但用户称未收到包裹",
-    "DAMAGED_OR_DEFECTIVE": "商品破损或质量问题",
-    "SCRATCHED_WATCH_AFTER_DELIVERY": "签收后发现手表划痕",
-    "SCRATCHED_WATCH": "手表划痕争议",
-    "QUALITY_DISPUTE": "商品质量争议",
-    "NON_RECEIPT": "用户称未收到包裹",
-    "OPENING_EVIDENCE_GAPS": "首轮举证材料缺口",
-}
 
 
 class EvidenceTurnGraphState(TypedDict):
@@ -107,6 +96,22 @@ def _reason_with_llm_node(model_runner: Any | None):
                 "executed_nodes": ["fallback_reasoning"],
             }
         try:
+            context_pack = build_context_pack(
+                "evidence_turn",
+                {
+                    "current_turn": _current_turn_context(request),
+                    "case_identity": _case_identity_context(request),
+                    "canonical_case_dossier": request.get("case_intake_dossier") or {},
+                    "actor_private_memory": str(
+                        state["memory_frame"].get("prompt_memory") or ""
+                    ),
+                    "compressed_summary": str(
+                        state["memory_frame"].get("compressed_summary") or ""
+                    ),
+                    "actor_visible_evidence": request.get("available_evidence") or [],
+                },
+                actor_role=str(request.get("actor_role") or ""),
+            )
             generation = model_runner.invoke_structured(
                 node_name="evidence_turn",
                 case_data={
@@ -121,34 +126,7 @@ def _reason_with_llm_node(model_runner: Any | None):
                 output_type=EvidenceTurnLlmOutput,
                 agent_context=agent_context,
                 prompt_profile_id=agent_context.get("prompt_profile_id"),
-                context_sections=[
-                    PromptSection(
-                        name="memeo_memory",
-                        content=str(state["memory_frame"].get("prompt_memory") or ""),
-                        priority=90,
-                        required=False,
-                    ),
-                    PromptSection(
-                        name="case_intake_dossier",
-                        content=json.dumps(
-                            _dossier_for_prompt(request.get("case_intake_dossier") or {}),
-                            ensure_ascii=False,
-                            separators=(",", ":"),
-                        ),
-                        priority=88,
-                        required=False,
-                    ),
-                    PromptSection(
-                        name="available_evidence",
-                        content=json.dumps(
-                            request.get("available_evidence") or [],
-                            ensure_ascii=False,
-                            separators=(",", ":"),
-                        ),
-                        priority=86,
-                        required=False,
-                    ),
-                ],
+                context_pack=context_pack,
             )
             return {
                 "llm_output": generation.value,
@@ -197,7 +175,7 @@ def _apply_authenticity_guardrails(state: EvidenceTurnGraphState) -> dict[str, A
     )
     authenticity_flags = _localize_model_text_fields(
         output.authenticity_flags or baseline.authenticity_flags,
-        ("flag_type", "description", "severity"),
+        ("flag_type", "description"),
     )
     return {
         "room_utterance": _sanitize_non_final(
@@ -389,10 +367,7 @@ def _localized_core_issue(dispute_focus: dict[str, Any]) -> str:
 
 
 def _localize_internal_text(text: str) -> str:
-    output = str(text or "")
-    for code, label in INTERNAL_CODE_LABELS.items():
-        output = output.replace(code, label)
-    return output
+    return localize_internal_text(text)
 
 
 def _localize_model_text_fields(items: list[Any], fields: tuple[str, ...]) -> list[Any]:
@@ -407,25 +382,26 @@ def _localize_model_text_fields(items: list[Any], fields: tuple[str, ...]) -> li
     return localized
 
 
-def _dossier_for_prompt(value: Any) -> Any:
-    if not isinstance(value, dict):
-        return value
-    dossier = dict(value)
-    dispute_focus = _dict_value(dossier.get("dispute_focus"))
-    if dispute_focus:
-        localized_focus = dict(dispute_focus)
-        raw_core_issue = str(dispute_focus.get("core_issue") or "").strip()
-        label = _localized_core_issue(dispute_focus)
-        if raw_core_issue and raw_core_issue != label:
-            localized_focus["core_issue_code"] = raw_core_issue
-        localized_focus["core_issue"] = label
-        localized_focus["core_issue_label"] = label
-        localized_focus["facts_to_verify"] = [
-            _localize_internal_text(fact)
-            for fact in _string_list(dispute_focus.get("facts_to_verify"))
-        ]
-        dossier["dispute_focus"] = localized_focus
-    return dossier
+def _current_turn_context(request: dict[str, Any]) -> dict[str, Any]:
+    message = request.get("current_party_message") or {}
+    return {
+        "turn_source": request.get("turn_source"),
+        "role": request.get("actor_role") or message.get("role"),
+        "actor_id": request.get("actor_id"),
+        "message_id": message.get("message_id"),
+        "message_type": message.get("message_type"),
+        "text": message.get("text") or "",
+        "attachment_refs": message.get("attachment_refs") or [],
+    }
+
+
+def _case_identity_context(request: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "case_id": request.get("case_id"),
+        "room_type": request.get("room_type"),
+        "actor_role": request.get("actor_role"),
+        "actor_id": request.get("actor_id"),
+    }
 
 
 def _normalize_sentence(text: str) -> str:

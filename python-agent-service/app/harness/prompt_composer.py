@@ -92,6 +92,8 @@ class PromptComposer:
 
     COMMON_FRAGMENT_FILES: tuple[str, ...] = (
         "safety_boundary.md",
+        "business_code_localization.md",
+        "case_narration_rules.md",
         "json_output_rules.md",
     )
 

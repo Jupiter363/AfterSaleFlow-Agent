@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -193,16 +194,21 @@ class FakeEvidenceRunner:
         node_name,
         case_data,
         output_type,
-        context_sections,
+        context_sections=None,
+        context_pack=None,
         agent_context=None,
         prompt_profile_id=None,
     ):
+        resolved_sections = (
+            context_pack.prompt_sections() if context_pack is not None else context_sections
+        )
         self.calls.append(
             {
                 "node_name": node_name,
                 "case_data": case_data,
                 "output_type": output_type,
-                "context_sections": context_sections,
+                "context_sections": resolved_sections,
+                "context_pack": context_pack,
                 "agent_context": agent_context,
                 "prompt_profile_id": prompt_profile_id,
             }
@@ -248,7 +254,8 @@ class GenericOpeningRunner:
         node_name,
         case_data,
         output_type,
-        context_sections,
+        context_sections=None,
+        context_pack=None,
         agent_context=None,
         prompt_profile_id=None,
     ):
@@ -274,16 +281,33 @@ def test_evidence_turn_workflow_uses_harness_node_with_memory_dossier_and_eviden
 
     assert runner.calls[0]["node_name"] == "evidence_turn"
     assert runner.calls[0]["output_type"].__name__ == "EvidenceTurnLlmOutput"
+    context_pack = runner.calls[0]["context_pack"]
+    assert context_pack.configuration_profile_key == "EVIDENCE_CLERK_CONTEXT_PACK_V1"
     section_by_name = {
         section.name: section.content
         for section in runner.calls[0]["context_sections"]  # type: ignore[index]
     }
-    assert {"memeo_memory", "case_intake_dossier", "available_evidence"} <= set(
-        section_by_name
+    assert {
+        "current_turn",
+        "actor_private_memory",
+        "canonical_case_dossier",
+        "actor_visible_evidence",
+    } <= set(section_by_name)
+    assert (
+        "user evidence memory asks about signature proof"
+        in section_by_name["actor_private_memory"]
     )
-    assert "user evidence memory asks about signature proof" in section_by_name["memeo_memory"]
-    assert "SIGNED_NOT_RECEIVED" in section_by_name["case_intake_dossier"]
-    assert "EVIDENCE_signature_photo" in section_by_name["available_evidence"]
+    current_turn = json.loads(section_by_name["current_turn"])
+    assert current_turn["raw_statement"] == (
+        "我上传了签收页截图，但图片有点糊，想证明我没有收到包裹。"
+    )
+    assert current_turn["platform_statement"].startswith("用户称")
+    assert "我上传" not in current_turn["platform_statement"]
+    assert "物流显示签收但用户称未收到包裹" in section_by_name["canonical_case_dossier"]
+    assert "SIGNED_NOT_RECEIVED" not in section_by_name["canonical_case_dossier"]
+    actor_visible_evidence = json.loads(section_by_name["actor_visible_evidence"])
+    assert actor_visible_evidence[0]["evidence_id"] == "EVIDENCE_signature_photo"
+    assert actor_visible_evidence[0]["source_type"] == "用户"
     assert runner.calls[0]["agent_context"]["agent_session_id"] == (
         "SESSION_CASE_evidence_turn_llm_USER_evidence"
     )

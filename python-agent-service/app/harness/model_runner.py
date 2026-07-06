@@ -8,6 +8,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel
 
 from app.harness.context_window import AssembledPromptContext, ContextWindowManager, PromptSection
+from app.harness.context_pack import ContextPack
 from app.harness.prompt_composer import PromptRepository
 from app.llm import StructuredGeneration, StructuredLlmClient
 
@@ -46,12 +47,13 @@ class HarnessModelRunner:
         case_data: dict[str, Any],
         output_type: type[T],
         context_sections: list[PromptSection] | None = None,
+        context_pack: ContextPack | None = None,
         max_input_tokens: int | None = None,
         agent_context: Any | None = None,
         prompt_profile_id: str | None = None,
     ) -> HarnessGeneration[T]:
         assembled_context = self._context_window.assemble(
-            context_sections or [],
+            context_pack.prompt_sections() if context_pack is not None else context_sections or [],
             max_input_tokens=max_input_tokens,
         )
         trusted_agent_context = _trusted_agent_context_payload(agent_context)
@@ -62,6 +64,15 @@ class HarnessModelRunner:
             **case_data,
             "harness_context": assembled_context.as_prompt_payload(),
         }
+        if context_pack is not None:
+            enriched_case_data["harness_context_pack"] = {
+                "node_name": context_pack.node_name,
+                "configuration_profile_key": context_pack.configuration_profile_key,
+                "configuration_source": context_pack.configuration_source,
+                "display_only_section_names": list(
+                    context_pack.display_only_section_names
+                ),
+            }
         system_prompt, user_prompt = self._prompts.render(
             node_name,
             enriched_case_data,

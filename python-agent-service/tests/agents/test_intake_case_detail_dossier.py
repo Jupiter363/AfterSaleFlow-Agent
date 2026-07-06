@@ -5,6 +5,35 @@ from types import SimpleNamespace
 from app.schemas import IntakeTurnRequest
 
 
+def _agent_context(case_id: str) -> dict[str, object]:
+    prompt_profile_id = "DISPUTE_INTAKE_OFFICER:USER:v1"
+    access_session_id = f"ACCESS_{case_id}_USER"
+    actor_id = "USER_local_1"
+    actor_role = "USER"
+    return {
+        "tenant_id": "default",
+        "case_id": case_id,
+        "room_type": "INTAKE",
+        "actor_id": actor_id,
+        "actor_role": actor_role,
+        "access_session_id": access_session_id,
+        "permission_level": "PARTY_USER",
+        "permission_scopes": [],
+        "agent_key": "DISPUTE_INTAKE_OFFICER",
+        "agent_invocation_id": f"INVOCATION_{case_id}",
+        "agent_session_id": f"SESSION_{case_id}_user_intake",
+        "conversation_scope": (
+            f"default:{case_id}:INTAKE:{actor_id}:{actor_role}:"
+            f"DISPUTE_INTAKE_OFFICER:{prompt_profile_id}:{access_session_id}"
+        ),
+        "scope_type": "INTAKE_INITIATOR_PRIVATE",
+        "allowed_actor_ids": [actor_id],
+        "allowed_actor_roles": [actor_role],
+        "prompt_profile_id": prompt_profile_id,
+        "memory_policy_id": "MEMORY_POLICY_INTAKE_V1",
+    }
+
+
 def _request(**overrides):
     payload = {
         "case_id": "CASE_intake_case_detail",
@@ -27,6 +56,7 @@ def _request(**overrides):
         "recent_turns": [],
     }
     payload.update(overrides)
+    payload.setdefault("agent_context", _agent_context(str(payload["case_id"])))
     return IntakeTurnRequest.model_validate(payload)
 
 
@@ -35,12 +65,29 @@ class CaseDetailRunner:
         self.score = score
         self.calls: list[dict[str, object]] = []
 
-    def invoke_structured(self, *, node_name, case_data, output_type, context_sections):
+    def invoke_structured(
+        self,
+        *,
+        node_name,
+        case_data,
+        output_type,
+        context_sections=None,
+        context_pack=None,
+        agent_context=None,
+        prompt_profile_id=None,
+    ):
         self.calls.append(
             {
                 "node_name": node_name,
                 "case_data": case_data,
-                "context_sections": context_sections,
+                "context_sections": (
+                    context_pack.prompt_sections()
+                    if context_pack is not None
+                    else context_sections
+                ),
+                "context_pack": context_pack,
+                "agent_context": agent_context,
+                "prompt_profile_id": prompt_profile_id,
             }
         )
         return SimpleNamespace(
@@ -166,12 +213,25 @@ def test_intake_case_detail_translates_llm_missing_field_codes_before_persisting
     from app.agents.dispute_intake_officer.workflow import IntakeTurnWorkflow
 
     class RunnerWithFieldCodes(CaseDetailRunner):
-        def invoke_structured(self, *, node_name, case_data, output_type, context_sections):
+        def invoke_structured(
+            self,
+            *,
+            node_name,
+            case_data,
+            output_type,
+            context_sections=None,
+            context_pack=None,
+            agent_context=None,
+            prompt_profile_id=None,
+        ):
             generation = super().invoke_structured(
                 node_name=node_name,
                 case_data=case_data,
                 output_type=output_type,
                 context_sections=context_sections,
+                context_pack=context_pack,
+                agent_context=agent_context,
+                prompt_profile_id=prompt_profile_id,
             )
             generation.value.case_detail["intake_quality"]["score"] = 70
             generation.value.case_detail["intake_quality"][

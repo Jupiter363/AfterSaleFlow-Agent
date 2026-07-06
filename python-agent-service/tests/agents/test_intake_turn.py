@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
@@ -90,15 +91,20 @@ class FakeCaseDetailRunner:
         node_name,
         case_data,
         output_type,
-        context_sections,
+        context_sections=None,
+        context_pack=None,
         agent_context=None,
         prompt_profile_id=None,
     ):
+        resolved_sections = (
+            context_pack.prompt_sections() if context_pack is not None else context_sections
+        )
         self.calls.append(
             {
                 "node_name": node_name,
                 "case_data": case_data,
-                "context_sections": context_sections,
+                "context_sections": resolved_sections,
+                "context_pack": context_pack,
                 "agent_context": agent_context,
                 "prompt_profile_id": prompt_profile_id,
             }
@@ -217,10 +223,26 @@ def test_intake_turn_workflow_uses_agent_case_detail_node_and_memory_context() -
         "SESSION_CASE_intake_turn_llm_user_intake"
     )
     assert runner.calls[0]["prompt_profile_id"] == "DISPUTE_INTAKE_OFFICER:USER:v1"
-    section_names = {
-        section.name for section in runner.calls[0]["context_sections"]  # type: ignore[index]
+    context_pack = runner.calls[0]["context_pack"]
+    assert context_pack.configuration_profile_key == "DISPUTE_INTAKE_CONTEXT_PACK_V1"
+    section_by_name = {
+        section.name: section
+        for section in runner.calls[0]["context_sections"]  # type: ignore[index]
     }
-    assert {"memeo_memory", "latest_case_detail_board"} <= section_names
+    section_names = set(section_by_name)
+    assert {
+        "current_turn",
+        "case_identity",
+        "short_term_memory",
+        "latest_canvas_snapshot",
+    } <= section_names
+    current_turn = json.loads(section_by_name["current_turn"].content)
+    assert current_turn["raw_statement"] == "物流单号 SF1234567890，我希望退款。"
+    assert current_turn["platform_statement"].startswith("用户称")
+    assert "我希望" not in current_turn["platform_statement"]
+    case_identity = json.loads(section_by_name["case_identity"].content)
+    assert case_identity["case_id"] == "CASE_intake_turn_llm"
+    assert case_identity["order_reference"] == "ORDER_123"
     assert result.scroll_snapshot["schema_version"] == "intake_case_detail.v1"
     assert result.scroll_snapshot["intake_quality"]["ready_for_next_step"] is True
     assert result.admission_recommendation == "ACCEPTED"
@@ -257,6 +279,13 @@ def test_fallback_lobby_seed_turn_generates_case_detail_board() -> None:
     assert detail["references"]["order_reference"] == "ORDER_123"
     assert detail["references"]["logistics_reference"] == "SF789000111"
     assert detail["requested_resolution"]["requested_outcome"] == "REFUND"
+    assert detail["case_story"]["one_sentence_summary"].startswith("用户称")
+    assert "我没有" not in detail["case_story"]["one_sentence_summary"]
+    assert "本人没有收到包裹" in detail["case_story"]["one_sentence_summary"]
+    assert "我没有" not in detail["party_positions"]["user_claim"]
+    assert detail["party_positions"]["raw_statement"] == (
+        "物流显示签收，但我没有收到包裹，希望退款。"
+    )
     assert detail["intake_quality"]["score"] < 80
     assert detail["intake_quality"]["ready_for_next_step"] is False
     assert payload["admission_recommendation"] == "NEED_MORE_INFO"

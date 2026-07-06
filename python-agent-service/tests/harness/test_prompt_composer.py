@@ -15,6 +15,8 @@ def test_prompt_repository_loads_common_fragments_and_agent_prompt() -> None:
     )
 
     assert "Common AI Native harness safety boundary" in system_prompt
+    assert "Harness business code localization rules" in system_prompt
+    assert "Harness case narration rules" in system_prompt
     assert "neutral Dispute Intake Officer" in system_prompt
     assert "<untrusted_case_data>" in user_prompt
     assert "物流显示签收但用户未收到" in user_prompt
