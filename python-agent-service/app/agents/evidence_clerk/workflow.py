@@ -23,6 +23,17 @@ from app.schemas import (
 LOGGER = logging.getLogger(__name__)
 
 
+INTERNAL_CODE_LABELS = {
+    "SIGNED_NOT_RECEIVED": "物流显示签收但用户称未收到包裹",
+    "DAMAGED_OR_DEFECTIVE": "商品破损或质量问题",
+    "SCRATCHED_WATCH_AFTER_DELIVERY": "签收后发现手表划痕",
+    "SCRATCHED_WATCH": "手表划痕争议",
+    "QUALITY_DISPUTE": "商品质量争议",
+    "NON_RECEIPT": "用户称未收到包裹",
+    "OPENING_EVIDENCE_GAPS": "首轮举证材料缺口",
+}
+
+
 class EvidenceTurnGraphState(TypedDict):
     request: dict[str, Any]
     executed_nodes: Annotated[list[str], operator.add]
@@ -120,7 +131,7 @@ def _reason_with_llm_node(model_runner: Any | None):
                     PromptSection(
                         name="case_intake_dossier",
                         content=json.dumps(
-                            request.get("case_intake_dossier") or {},
+                            _dossier_for_prompt(request.get("case_intake_dossier") or {}),
                             ensure_ascii=False,
                             separators=(",", ":"),
                         ),
@@ -173,13 +184,25 @@ def _apply_authenticity_guardrails(state: EvidenceTurnGraphState) -> dict[str, A
     if opening_baseline is not None:
         output = _coerce_room_opening_output(output, opening_baseline, request)
     baseline = opening_baseline or EvidenceAuthenticitySkill().draft(request)
-    evidence_requests = output.evidence_requests or baseline.evidence_requests
+    evidence_requests = _localize_model_text_fields(
+        output.evidence_requests or baseline.evidence_requests,
+        ("question", "reason"),
+    )
     verification_suggestions = (
         output.verification_suggestions or baseline.verification_suggestions
     )
-    authenticity_flags = output.authenticity_flags or baseline.authenticity_flags
+    verification_suggestions = _localize_model_text_fields(
+        verification_suggestions,
+        ("suggestion",),
+    )
+    authenticity_flags = _localize_model_text_fields(
+        output.authenticity_flags or baseline.authenticity_flags,
+        ("flag_type", "description", "severity"),
+    )
     return {
-        "room_utterance": _sanitize_non_final(output.room_utterance),
+        "room_utterance": _sanitize_non_final(
+            _localize_internal_text(output.room_utterance)
+        ),
         "evidence_requests": [
             item.model_dump(mode="json") for item in evidence_requests[:10]
         ],
@@ -234,6 +257,9 @@ def _opening_dossier_anchors(request: EvidenceTurnRequest) -> list[str]:
     core_issue = str(dispute_focus.get("core_issue") or "").strip()
     if core_issue:
         anchors.append(core_issue)
+    core_issue_label = _localized_core_issue(dispute_focus)
+    if core_issue_label:
+        anchors.append(core_issue_label)
     anchors.extend(_string_list(dispute_focus.get("facts_to_verify")))
     summary = str(case_story.get("one_sentence_summary") or "").strip()
     if summary:
@@ -288,8 +314,11 @@ def _opening_fallback_output(request: EvidenceTurnRequest) -> EvidenceTurnLlmOut
     dossier = request.case_intake_dossier or {}
     dispute_focus = _dict_value(dossier.get("dispute_focus"))
     case_story = _dict_value(dossier.get("case_story"))
-    core_issue = str(dispute_focus.get("core_issue") or "争议焦点待确认")
-    facts = _string_list(dispute_focus.get("facts_to_verify"))
+    core_issue = _localized_core_issue(dispute_focus)
+    facts = [
+        _localize_internal_text(fact)
+        for fact in _string_list(dispute_focus.get("facts_to_verify"))
+    ]
     if not facts:
         facts = [
             "原始证据文件",
@@ -297,7 +326,9 @@ def _opening_fallback_output(request: EvidenceTurnRequest) -> EvidenceTurnLlmOut
             "证据来源路径",
             "与接待室案情的关联事实",
         ]
-    summary = _normalize_sentence(str(case_story.get("one_sentence_summary") or ""))
+    summary = _normalize_sentence(
+        _localize_internal_text(str(case_story.get("one_sentence_summary") or ""))
+    )
     facts_text = "、".join(facts)
     story_text = f"。接待室案情摘要：{summary}" if summary else "。"
     room_utterance = (
@@ -347,6 +378,54 @@ def _string_list(value: Any) -> list[str]:
         if text:
             result.append(text)
     return result
+
+
+def _localized_core_issue(dispute_focus: dict[str, Any]) -> str:
+    for key in ("core_issue_label", "core_issue_text", "core_issue"):
+        value = str(dispute_focus.get(key) or "").strip()
+        if value:
+            return _localize_internal_text(value)
+    return "争议焦点待确认"
+
+
+def _localize_internal_text(text: str) -> str:
+    output = str(text or "")
+    for code, label in INTERNAL_CODE_LABELS.items():
+        output = output.replace(code, label)
+    return output
+
+
+def _localize_model_text_fields(items: list[Any], fields: tuple[str, ...]) -> list[Any]:
+    localized: list[Any] = []
+    for item in items:
+        updates: dict[str, str] = {}
+        for field in fields:
+            value = getattr(item, field, None)
+            if isinstance(value, str) and value:
+                updates[field] = _localize_internal_text(value)
+        localized.append(item.model_copy(update=updates) if updates else item)
+    return localized
+
+
+def _dossier_for_prompt(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return value
+    dossier = dict(value)
+    dispute_focus = _dict_value(dossier.get("dispute_focus"))
+    if dispute_focus:
+        localized_focus = dict(dispute_focus)
+        raw_core_issue = str(dispute_focus.get("core_issue") or "").strip()
+        label = _localized_core_issue(dispute_focus)
+        if raw_core_issue and raw_core_issue != label:
+            localized_focus["core_issue_code"] = raw_core_issue
+        localized_focus["core_issue"] = label
+        localized_focus["core_issue_label"] = label
+        localized_focus["facts_to_verify"] = [
+            _localize_internal_text(fact)
+            for fact in _string_list(dispute_focus.get("facts_to_verify"))
+        ]
+        dossier["dispute_focus"] = localized_focus
+    return dossier
 
 
 def _normalize_sentence(text: str) -> str:

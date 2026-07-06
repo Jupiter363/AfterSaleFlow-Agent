@@ -59,6 +59,25 @@ describe("ConversationStream", () => {
     expect(wrapper.text()).not.toContain("????????");
   });
 
+  it("renders internal dispute enum codes as Chinese labels in immutable messages", () => {
+    const wrapper = mount(ConversationStream, {
+      props: {
+        messages: [
+          {
+            id: "MESSAGE_INTERNAL_CODE",
+            sequence_no: 1,
+            sender_role: "CUSTOMER_SERVICE",
+            message_text:
+              "本案当前争议焦点是 SIGNED_NOT_RECEIVED，请补充物流签收记录。",
+          },
+        ],
+      },
+    });
+
+    expect(wrapper.text()).toContain("物流显示签收但用户称未收到包裹");
+    expect(wrapper.text()).not.toContain("SIGNED_NOT_RECEIVED");
+  });
+
   it("renders sender roles as user-facing Chinese labels", () => {
     const wrapper = mount(ConversationStream, {
       props: {

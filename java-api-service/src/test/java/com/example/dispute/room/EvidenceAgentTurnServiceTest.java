@@ -654,7 +654,11 @@ class EvidenceAgentTurnServiceTest {
         assertThat(dossier.path("case_story").path("one_sentence_summary").asText())
                 .contains("parcel was marked signed but never arrived");
         assertThat(dossier.path("dispute_focus").path("core_issue").asText())
+                .isEqualTo("物流显示签收但用户称未收到包裹");
+        assertThat(dossier.path("dispute_focus").path("core_issue_code").asText())
                 .isEqualTo("SIGNED_NOT_RECEIVED");
+        assertThat(dossier.path("dispute_focus").path("core_issue_label").asText())
+                .isEqualTo("物流显示签收但用户称未收到包裹");
         assertThat(dossier.path("dispute_focus").path("facts_to_verify").toString())
                 .contains("物流签收记录")
                 .contains("投递轨迹")

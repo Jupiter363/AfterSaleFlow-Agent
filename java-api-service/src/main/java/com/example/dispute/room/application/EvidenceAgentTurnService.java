@@ -509,7 +509,11 @@ public class EvidenceAgentTurnService {
         caseStory.put("title", textOrDefault(dispute.getTitle(), "履约争议待核验"));
 
         ObjectNode disputeFocus = root.putObject("dispute_focus");
-        disputeFocus.put("core_issue", textOrDefault(dispute.getDisputeType(), dispute.getCaseType()));
+        String coreIssueCode = textOrDefault(dispute.getDisputeType(), dispute.getCaseType());
+        String coreIssueLabel = disputeTypeLabel(coreIssueCode);
+        disputeFocus.put("core_issue", coreIssueLabel);
+        disputeFocus.put("core_issue_code", coreIssueCode);
+        disputeFocus.put("core_issue_label", coreIssueLabel);
         ArrayNode facts = disputeFocus.putArray("facts_to_verify");
         for (String fact : fallbackFactsToVerify(dispute.getDisputeType())) {
             facts.add(fact);
@@ -520,6 +524,25 @@ public class EvidenceAgentTurnService {
                 "instruction",
                 "接待室结构化卷宗缺失，证据书记官应先基于案件主表摘要和争议类型提出首轮补证问题。");
         return root;
+    }
+
+    private static String disputeTypeLabel(String disputeType) {
+        if (disputeType == null || disputeType.isBlank()) {
+            return "争议焦点待确认";
+        }
+        return switch (disputeType) {
+            case "SIGNED_NOT_RECEIVED" -> "物流显示签收但用户称未收到包裹";
+            case "DAMAGED_OR_DEFECTIVE" -> "商品破损或质量问题";
+            case "SCRATCHED_WATCH_AFTER_DELIVERY" -> "签收后发现手表划痕";
+            case "SCRATCHED_WATCH" -> "手表划痕争议";
+            case "QUALITY_DISPUTE" -> "商品质量争议";
+            case "NON_RECEIPT" -> "用户称未收到包裹";
+            default -> looksLikeInternalCode(disputeType) ? "履约争议待核验" : disputeType;
+        };
+    }
+
+    private static boolean looksLikeInternalCode(String value) {
+        return value.matches("[A-Z][A-Z0-9_]{2,}");
     }
 
     private static List<String> fallbackFactsToVerify(String disputeType) {

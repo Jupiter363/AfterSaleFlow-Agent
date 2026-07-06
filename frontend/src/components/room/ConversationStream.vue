@@ -6,7 +6,7 @@ import {
   ref,
   watch,
 } from "vue";
-import { roleLabel } from "../../utils/displayText";
+import { displayRoomMessageText, roleLabel } from "../../utils/displayText";
 
 const props = defineProps({
   messages: { type: Array, default: () => [] },
@@ -45,15 +45,6 @@ function submit() {
     attachment_refs: [],
   });
   text.value = "";
-}
-
-function displayMessageText(value) {
-  if (!value) return "";
-  const questionMarks = (value.match(/\?/g) || []).length;
-  if (questionMarks >= 6 && questionMarks / value.length > 0.35) {
-    return "历史消息编码异常，原始内容已按不可变记录留存。";
-  }
-  return value;
 }
 
 function messageLane(role) {
@@ -117,7 +108,7 @@ onMounted(() => {
           <strong>{{ displaySenderLabel(message) }}</strong>
           <small>#{{ message.sequence_no }}</small>
         </header>
-        <p>{{ displayMessageText(message.message_text) }}</p>
+        <p>{{ displayRoomMessageText(message.message_text) }}</p>
       </article>
       <div v-if="!orderedMessages.length" class="conversation-stream__empty">
         对话还没有开始。数字人会先听你完整说明。

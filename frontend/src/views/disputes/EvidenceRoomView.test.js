@@ -335,7 +335,8 @@ describe("EvidenceRoomView", () => {
       "EVIDENCE",
     );
     expect(wrapper.text()).not.toContain("您好！我是您的证据书记官");
-    expect(wrapper.text()).toContain("SIGNED_NOT_RECEIVED");
+    expect(wrapper.text()).toContain("物流显示签收但用户称未收到包裹");
+    expect(wrapper.text()).not.toContain("SIGNED_NOT_RECEIVED");
     expect(wrapper.text()).toContain("物流签收记录");
   });
 

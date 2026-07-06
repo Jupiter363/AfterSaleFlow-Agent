@@ -329,10 +329,36 @@ def test_evidence_opening_fallback_asks_dossier_specific_evidence_questions() ->
     assert "factory QC video" in combined
     assert "unboxing photo original file" in combined
     assert "logistics handling record" in combined
-    assert "SCRATCHED_WATCH_AFTER_DELIVERY" in combined
+    assert "签收后发现手表划痕" in combined
     assert result.non_final is True
     assert result.liability_determined is False
     assert result.remedy_recommended is False
+
+
+def test_evidence_opening_fallback_localizes_internal_dispute_codes() -> None:
+    from app.agents.evidence_clerk.workflow import EvidenceTurnWorkflow
+    from app.schemas import EvidenceTurnRequest
+
+    payload = _java_evidence_opening_command_payload()
+    payload["case_intake_dossier"]["case_story"][
+        "one_sentence_summary"
+    ] = "物流系统显示包裹已签收，但用户反馈本人没有收到。"
+    payload["case_intake_dossier"]["dispute_focus"] = {
+        "core_issue": "SIGNED_NOT_RECEIVED",
+        "facts_to_verify": ["物流签收记录", "投递轨迹或快递柜/驿站记录"],
+    }
+    workflow = EvidenceTurnWorkflow()
+
+    result = workflow.run(EvidenceTurnRequest.model_validate(payload))
+
+    combined = " ".join(
+        [result.room_utterance]
+        + [item.question for item in result.evidence_requests]
+        + [item.reason for item in result.evidence_requests]
+        + [item.description for item in result.authenticity_flags]
+    )
+    assert "SIGNED_NOT_RECEIVED" not in combined
+    assert "物流显示签收但用户称未收到包裹" in combined
 
 
 def test_evidence_opening_fallback_normalizes_summary_punctuation() -> None:
@@ -371,7 +397,7 @@ def test_evidence_opening_replaces_generic_llm_welcome_with_dossier_questions() 
     assert "factory QC video" in combined
     assert "unboxing photo original file" in combined
     assert "logistics handling record" in combined
-    assert "SCRATCHED_WATCH_AFTER_DELIVERY" in combined
+    assert "签收后发现手表划痕" in combined
 
 
 def test_evidence_turn_fallback_asks_authenticity_and_relevance_questions_without_deciding() -> None:

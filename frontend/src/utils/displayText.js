@@ -76,6 +76,12 @@ const VALUE_LABELS = {
   SIGNATURE_MISMATCH: "签收人与收件人不一致",
   HIGH_VALUE_ORDER: "高价值订单",
   EVIDENCE_CONFLICT: "双方证据出入较大",
+  SIGNED_NOT_RECEIVED: "物流显示签收但用户称未收到包裹",
+  DAMAGED_OR_DEFECTIVE: "商品破损或质量问题",
+  SCRATCHED_WATCH_AFTER_DELIVERY: "签收后发现手表划痕",
+  SCRATCHED_WATCH: "手表划痕争议",
+  QUALITY_DISPUTE: "商品质量争议",
+  NON_RECEIPT: "用户称未收到包裹",
 };
 
 const ENGLISH_PHRASE_LABELS = {
@@ -145,6 +151,16 @@ export function humanizeDossierList(values, fallback = "等待补充更多信息
     .map((value) => humanizeDossierText(value, { fallback: "" }))
     .filter(Boolean);
   return mapped.length ? mapped : [fallback];
+}
+
+export function displayRoomMessageText(value) {
+  if (!value) return "";
+  const raw = String(value);
+  const questionMarks = (raw.match(/\?/g) || []).length;
+  if (questionMarks >= 6 && questionMarks / raw.length > 0.35) {
+    return "历史消息编码异常，原始内容已按不可变记录留存。";
+  }
+  return replaceInternalTokens(raw);
 }
 
 function humanizeTitle(raw, fallback) {
