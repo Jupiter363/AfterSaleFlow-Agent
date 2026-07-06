@@ -23,7 +23,9 @@ import com.example.dispute.infrastructure.persistence.repository.FulfillmentCase
 import com.example.dispute.notification.application.NotificationService;
 import com.example.dispute.notification.application.CaseLifecycleNotificationService;
 import com.example.dispute.notification.infrastructure.persistence.repository.NotificationRepository;
+import com.example.dispute.room.application.AccessSessionResolver;
 import com.example.dispute.room.application.CaseEventService;
+import com.example.dispute.room.application.SessionPermissionService;
 import com.example.dispute.room.domain.PhaseClockStatus;
 import com.example.dispute.room.domain.PhaseClockType;
 import com.example.dispute.room.domain.RoomStatus;
@@ -106,6 +108,8 @@ class EvidenceRoomIntegrationTest {
     @Autowired private CaseTimelineEventRepository eventRepository;
     @MockitoBean private EvidenceWindowCoordinator evidenceWindowCoordinator;
     @MockitoBean private HearingWorkflowCoordinator hearingWorkflowCoordinator;
+    @MockitoBean private AccessSessionResolver accessSessionResolver;
+    @MockitoBean private SessionPermissionService sessionPermissionService;
 
     @Test
     void bothPartiesFreezeExactlyOneVersionAndRejectedEvidenceIsExcluded() {
@@ -273,7 +277,7 @@ class EvidenceRoomIntegrationTest {
             String caseId, String evidenceId, EvidenceVerificationStatus status) {
         EvidenceDossierEntity collecting =
                 dossierRepository.findByCaseIdAndDossierVersion(caseId, 0).orElseThrow();
-        evidenceRepository.saveAndFlush(
+        EvidenceItemEntity evidence =
                 EvidenceItemEntity.uploaded(
                         evidenceId,
                         caseId,
@@ -289,7 +293,12 @@ class EvidenceRoomIntegrationTest {
                         "image/png",
                         12,
                         "PARTIES",
-                        OffsetDateTime.parse("2026-07-03T00:00:00Z")));
+                        OffsetDateTime.parse("2026-07-03T00:00:00Z"));
+        evidence.markSubmitted(
+                "EVIDENCE_BATCH_" + evidenceId,
+                OffsetDateTime.parse("2026-07-03T00:10:00Z"),
+                "user-local");
+        evidenceRepository.saveAndFlush(evidence);
         verificationRepository.saveAndFlush(
                 EvidenceVerificationEntity.create(
                         "VERIFY_" + evidenceId,

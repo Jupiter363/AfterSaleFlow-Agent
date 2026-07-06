@@ -2,16 +2,16 @@ package com.example.dispute.hearing.application;
 
 import com.example.dispute.config.AppProperties;
 import com.example.dispute.config.DisputeProperties;
+import com.example.dispute.common.transaction.PostCommitSideEffectExecutor;
 import com.example.dispute.workflow.domain.HearingWorkflowCommand;
 import com.example.dispute.workflow.temporal.DisputeHearingWorkflow;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowNotFoundException;
 import io.temporal.client.WorkflowOptions;
+import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.support.TransactionSynchronization;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 @Service
 public class HearingWorkflowCoordinator {
@@ -21,18 +21,26 @@ public class HearingWorkflowCoordinator {
     private final WorkflowClient workflowClient;
     private final AppProperties properties;
     private final DisputeProperties disputeProperties;
+    private final PostCommitSideEffectExecutor postCommit;
 
     public HearingWorkflowCoordinator(
             WorkflowClient workflowClient,
             AppProperties properties,
-            DisputeProperties disputeProperties) {
+            DisputeProperties disputeProperties,
+            PostCommitSideEffectExecutor postCommit) {
         this.workflowClient = workflowClient;
         this.properties = properties;
         this.disputeProperties = disputeProperties;
+        this.postCommit = postCommit;
     }
 
     public void startAfterCommit(String caseId, int dossierVersion) {
-        afterCommit(
+        postCommit.execute(
+                "hearing-workflow-start",
+                Map.of(
+                        "case_id", caseId,
+                        "workflow_id", workflowId(caseId),
+                        "dossier_version", dossierVersion),
                 () -> {
                     DisputeHearingWorkflow workflow =
                             workflowClient.newWorkflowStub(
@@ -71,7 +79,9 @@ public class HearingWorkflowCoordinator {
     private void signalAfterCommit(
             String caseId,
             java.util.function.Consumer<DisputeHearingWorkflow> signal) {
-        afterCommit(
+        postCommit.execute(
+                "hearing-workflow-signal",
+                Map.of("case_id", caseId, "workflow_id", workflowId(caseId)),
                 () -> {
                     try {
                         signal.accept(
@@ -82,20 +92,6 @@ public class HearingWorkflowCoordinator {
                         LOGGER.warn(
                                 "Hearing workflow is not running: case_id={}",
                                 caseId);
-                    }
-                });
-    }
-
-    private static void afterCommit(Runnable action) {
-        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
-            action.run();
-            return;
-        }
-        TransactionSynchronizationManager.registerSynchronization(
-                new TransactionSynchronization() {
-                    @Override
-                    public void afterCommit() {
-                        action.run();
                     }
                 });
     }
