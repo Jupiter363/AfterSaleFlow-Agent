@@ -131,6 +131,20 @@ public class RoomMessageService {
                 .toList();
     }
 
+    @Transactional
+    public RoomMessageView ensureOpening(
+            String caseId,
+            RoomType roomType,
+            AuthenticatedActor actor,
+            String traceId,
+            String requestId) {
+        if (roomType == RoomType.EVIDENCE) {
+            return evidenceAgentTurnService.ensureOpening(
+                    caseId, roomType, actor, traceId, requestId);
+        }
+        throw new IllegalArgumentException("room opening is not supported for " + roomType);
+    }
+
     private RoomMessageView create(
             FulfillmentCaseEntity dispute,
             CaseRoomEntity room,

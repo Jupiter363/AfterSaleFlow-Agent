@@ -147,6 +147,42 @@ def _java_evidence_turn_command_payload() -> dict[str, object]:
     return payload
 
 
+def _java_evidence_opening_command_payload() -> dict[str, object]:
+    payload = _java_evidence_turn_command_payload()
+    payload.update(
+        {
+            "turn_source": "ROOM_OPENING",
+            "current_party_message": {
+                "message_id": "EVIDENCE_OPENING_1",
+                "message_type": "AGENT_MESSAGE",
+                "role": "USER",
+                "text": "请根据接待室收敛案情，向当前一方提出首轮证据补充与真实性核验问题。",
+                "attachment_refs": [],
+            },
+            "case_intake_dossier": {
+                "schema_version": "intake_case_detail.v1",
+                "case_story": {
+                    "one_sentence_summary": (
+                        "The merchant says the watch was intact before shipment; "
+                        "the user says the dial was scratched after receipt."
+                    )
+                },
+                "dispute_focus": {
+                    "core_issue": "SCRATCHED_WATCH_AFTER_DELIVERY",
+                    "facts_to_verify": [
+                        "factory QC video",
+                        "unboxing photo original file",
+                        "logistics handling record",
+                    ],
+                },
+            },
+            "available_evidence": [],
+            "recent_turns": [],
+        }
+    )
+    return payload
+
+
 class FakeEvidenceRunner:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
@@ -205,6 +241,28 @@ class FakeEvidenceRunner:
         )
 
 
+class GenericOpeningRunner:
+    def invoke_structured(
+        self,
+        *,
+        node_name,
+        case_data,
+        output_type,
+        context_sections,
+        agent_context=None,
+        prompt_profile_id=None,
+    ):
+        return SimpleNamespace(
+            value=output_type(
+                room_utterance="您好！我是您的证据书记官，请上传与本案相关的证据材料。",
+                evidence_requests=[],
+                verification_suggestions=[],
+                authenticity_flags=[],
+                confidence=0.31,
+            )
+        )
+
+
 def test_evidence_turn_workflow_uses_harness_node_with_memory_dossier_and_evidence_context() -> None:
     from app.agents.evidence_clerk.workflow import EvidenceTurnWorkflow
     from app.schemas import EvidenceTurnRequest
@@ -236,6 +294,84 @@ def test_evidence_turn_workflow_uses_harness_node_with_memory_dossier_and_eviden
     assert result.evidence_requests[0].target_evidence_id == "EVIDENCE_signature_photo"
     assert result.verification_suggestions[0].evidence_id == "EVIDENCE_signature_photo"
     assert 0 <= result.verification_suggestions[0].confidence_score <= 1
+
+
+def test_evidence_opening_turn_passes_source_to_llm_context() -> None:
+    from app.agents.evidence_clerk.workflow import EvidenceTurnWorkflow
+    from app.schemas import EvidenceTurnRequest
+
+    runner = FakeEvidenceRunner()
+    workflow = EvidenceTurnWorkflow(model_runner=runner)
+
+    workflow.run(EvidenceTurnRequest.model_validate(_java_evidence_opening_command_payload()))
+
+    assert runner.calls[0]["case_data"]["turn_source"] == "ROOM_OPENING"
+    assert runner.calls[0]["case_data"]["current_party_message"]["message_id"] == (
+        "EVIDENCE_OPENING_1"
+    )
+
+
+def test_evidence_opening_fallback_asks_dossier_specific_evidence_questions() -> None:
+    from app.agents.evidence_clerk.workflow import EvidenceTurnWorkflow
+    from app.schemas import EvidenceTurnRequest
+
+    workflow = EvidenceTurnWorkflow()
+
+    result = workflow.run(
+        EvidenceTurnRequest.model_validate(_java_evidence_opening_command_payload())
+    )
+
+    combined = " ".join(
+        [result.room_utterance]
+        + [item.question for item in result.evidence_requests]
+        + [item.reason for item in result.evidence_requests]
+    )
+    assert "factory QC video" in combined
+    assert "unboxing photo original file" in combined
+    assert "logistics handling record" in combined
+    assert "SCRATCHED_WATCH_AFTER_DELIVERY" in combined
+    assert result.non_final is True
+    assert result.liability_determined is False
+    assert result.remedy_recommended is False
+
+
+def test_evidence_opening_fallback_normalizes_summary_punctuation() -> None:
+    from app.agents.evidence_clerk.workflow import EvidenceTurnWorkflow
+    from app.schemas import EvidenceTurnRequest
+
+    payload = _java_evidence_opening_command_payload()
+    payload["case_intake_dossier"]["case_story"][
+        "one_sentence_summary"
+    ] = "物流显示签收，但用户称没有收到包裹。"
+    workflow = EvidenceTurnWorkflow()
+
+    result = workflow.run(EvidenceTurnRequest.model_validate(payload))
+
+    assert "。。" not in result.room_utterance
+    assert "物流显示签收，但用户称没有收到包裹。" in result.room_utterance
+
+
+def test_evidence_opening_replaces_generic_llm_welcome_with_dossier_questions() -> None:
+    from app.agents.evidence_clerk.workflow import EvidenceTurnWorkflow
+    from app.schemas import EvidenceTurnRequest
+
+    workflow = EvidenceTurnWorkflow(model_runner=GenericOpeningRunner())
+
+    result = workflow.run(
+        EvidenceTurnRequest.model_validate(_java_evidence_opening_command_payload())
+    )
+
+    combined = " ".join(
+        [result.room_utterance]
+        + [item.question for item in result.evidence_requests]
+        + [item.reason for item in result.evidence_requests]
+    )
+    assert "您好！我是您的证据书记官" not in result.room_utterance
+    assert "接待室收敛的案情" in result.room_utterance
+    assert "factory QC video" in combined
+    assert "unboxing photo original file" in combined
+    assert "logistics handling record" in combined
+    assert "SCRATCHED_WATCH_AFTER_DELIVERY" in combined
 
 
 def test_evidence_turn_fallback_asks_authenticity_and_relevance_questions_without_deciding() -> None:

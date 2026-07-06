@@ -38,6 +38,34 @@ describe("room API", () => {
     );
   });
 
+  it("posts an idempotent room opening request", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        success: true,
+        data: { id: "MESSAGE_OPENING", sequence_no: 1 },
+      }),
+    });
+
+    const opening = await roomApi.ensureOpening(
+      actor,
+      "CASE_1",
+      "EVIDENCE",
+      "room-opening-1",
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/disputes/CASE_1/rooms/EVIDENCE/messages/opening",
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({
+          "Idempotency-Key": "room-opening-1",
+        }),
+      }),
+    );
+    expect(opening.id).toBe("MESSAGE_OPENING");
+  });
+
   it("loads the latest agent turn memory for a room", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue({
       ok: true,

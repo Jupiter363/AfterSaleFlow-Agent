@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -318,6 +319,435 @@ class EvidenceAgentTurnServiceTest {
                         eq(agentMessage.getValue().getAudienceJson()),
                         eq(agentMessage.getValue().getAudienceActorIdsJson()),
                         eq("evidence-clerk"));
+    }
+
+    @Test
+    void ensureOpeningCreatesOneActorScopedClerkMessageAndReusesIt()
+            throws Exception {
+        FulfillmentCaseEntity dispute = evidenceCase();
+        CaseRoomEntity room = evidenceRoom(dispute);
+        RoomMessageEntity existingOpening =
+                RoomMessageEntity.create(
+                        "MESSAGE_EXISTING_OPENING",
+                        dispute.getId(),
+                        room.getId(),
+                        9,
+                        com.example.dispute.room.domain.MessageSenderType.AGENT,
+                        "CUSTOMER_SERVICE",
+                        "evidence-clerk",
+                        "[\"USER\",\"CUSTOMER_SERVICE\",\"PLATFORM_REVIEWER\",\"ADMIN\",\"SYSTEM\"]",
+                        "[\"user-local\"]",
+                        MessageType.AGENT_MESSAGE,
+                        "Existing opening question.",
+                        "[]",
+                        "agent-evidence-opening:" + dispute.getId() + ":AGENT_SESSION_user-local_EVIDENCE",
+                        Instant.parse("2026-07-06T00:01:00Z"),
+                        "TRACE_OPENING");
+        when(caseRepository.findByIdForUpdate(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.EVIDENCE))
+                .thenReturn(Optional.of(room));
+        when(messageRepository.findByCaseIdAndIdempotencyKey(eq(dispute.getId()), any()))
+                .thenReturn(Optional.empty())
+                .thenReturn(Optional.empty())
+                .thenReturn(Optional.of(existingOpening));
+        when(messageRepository.findAllByRoomIdOrderBySequenceNoAsc(room.getId()))
+                .thenReturn(List.of());
+        when(memoryRepository.findMaxTurnNoByAgentSessionId(any()))
+                .thenReturn(0);
+        when(intakeDossierRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.INTAKE))
+                .thenReturn(
+                        Optional.of(
+                                CaseIntakeDossierEntity.create(
+                                        "INTAKE_DOSSIER_OPENING",
+                                        dispute.getId(),
+                                        RoomType.INTAKE,
+                                        "{\"schema_version\":\"intake_case_detail.v1\",\"dispute_focus\":{\"core_issue\":\"SCRATCHED_WATCH\"}}",
+                                        86,
+                                        true,
+                                        "ACCEPTED",
+                                        1,
+                                        "dispute-intake-officer")));
+        when(evidenceItemRepository.findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(
+                        dispute.getId()))
+                .thenReturn(
+                        List.of(
+                                evidenceItem(
+                                        "EVIDENCE_USER_OPENING",
+                                        "USER",
+                                        "user-local",
+                                        "PARTIES")));
+        when(memoryRepository.findTop50ByAgentSessionIdOrderByTurnNoDesc(any()))
+                .thenReturn(List.of());
+        when(client.run(any(), eq("TRACE_OPENING"), eq("REQ_OPENING")))
+                .thenReturn(
+                        new EvidenceAgentTurnResult(
+                                "请先补充手表划痕照片原图、拍摄时间、物流签收记录和商家质检视频。",
+                                objectMapper.createObjectNode(),
+                                objectMapper.createArrayNode(),
+                                List.of("EVIDENCE_USER_OPENING"),
+                                false,
+                                false,
+                                "LLM",
+                                0.81));
+        when(memoryRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(messageRepository.findMaxSequenceByRoomId(room.getId())).thenReturn(8L);
+        when(messageRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        var created =
+                service.ensureOpening(
+                        dispute.getId(),
+                        RoomType.EVIDENCE,
+                        new AuthenticatedActor("user-local", ActorRole.USER),
+                        "TRACE_OPENING",
+                        "REQ_OPENING");
+        var reused =
+                service.ensureOpening(
+                        dispute.getId(),
+                        RoomType.EVIDENCE,
+                        new AuthenticatedActor("user-local", ActorRole.USER),
+                        "TRACE_OPENING",
+                        "REQ_OPENING");
+
+        ArgumentCaptor<EvidenceAgentTurnCommand> command =
+                ArgumentCaptor.forClass(EvidenceAgentTurnCommand.class);
+        verify(client, org.mockito.Mockito.times(1))
+                .run(command.capture(), eq("TRACE_OPENING"), eq("REQ_OPENING"));
+        assertThat(command.getValue().turnSource()).isEqualTo("ROOM_OPENING");
+        assertThat(command.getValue().actorId()).isEqualTo("user-local");
+        assertThat(command.getValue().currentMessage().messageId())
+                .startsWith("EVIDENCE_OPENING_");
+        assertThat(command.getValue().latestCaseIntakeDossier()
+                        .path("dispute_focus")
+                        .path("core_issue")
+                        .asText())
+                .isEqualTo("SCRATCHED_WATCH");
+        assertThat(command.getValue().availableEvidence())
+                .extracting(EvidenceAgentTurnCommand.AvailableEvidence::evidenceId)
+                .containsExactly("EVIDENCE_USER_OPENING");
+
+        ArgumentCaptor<RoomMessageEntity> savedMessage =
+                ArgumentCaptor.forClass(RoomMessageEntity.class);
+        verify(messageRepository, org.mockito.Mockito.times(1)).save(savedMessage.capture());
+        assertThat(savedMessage.getValue().getIdempotencyKey())
+                .isEqualTo(
+                        "agent-evidence-opening:dossier-v3:"
+                                + dispute.getId()
+                                + ":AGENT_SESSION_user-local_EVIDENCE");
+        assertThat(savedMessage.getValue().getAudienceJson())
+                .contains("USER")
+                .doesNotContain("MERCHANT");
+        assertThat(savedMessage.getValue().getAudienceActorIdsJson())
+                .contains("user-local");
+        assertThat(created.messageText()).contains("划痕照片原图");
+        assertThat(reused.id()).isEqualTo("MESSAGE_EXISTING_OPENING");
+    }
+
+    @Test
+    void ensureOpeningReusesExistingActorScopedConversationInsteadOfAppendingLateOpening()
+            throws Exception {
+        FulfillmentCaseEntity dispute = evidenceCase();
+        CaseRoomEntity room = evidenceRoom(dispute);
+        RoomMessageEntity existingUserMessage =
+                RoomMessageEntity.create(
+                        "MESSAGE_EXISTING_USER_THREAD",
+                        dispute.getId(),
+                        room.getId(),
+                        4,
+                        com.example.dispute.room.domain.MessageSenderType.PARTY,
+                        "USER",
+                        "user-local",
+                        "[\"USER\",\"CUSTOMER_SERVICE\",\"PLATFORM_REVIEWER\",\"ADMIN\",\"SYSTEM\"]",
+                        "[\"user-local\"]",
+                        MessageType.PARTY_TEXT,
+                        "I already started this evidence conversation.",
+                        "[]",
+                        "room-message-existing-user",
+                        Instant.parse("2026-07-06T00:04:00Z"),
+                        "TRACE_EXISTING_THREAD");
+        when(caseRepository.findByIdForUpdate(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.EVIDENCE))
+                .thenReturn(Optional.of(room));
+        when(messageRepository.findByCaseIdAndIdempotencyKey(eq(dispute.getId()), any()))
+                .thenReturn(Optional.empty());
+        when(messageRepository.findAllByRoomIdOrderBySequenceNoAsc(room.getId()))
+                .thenReturn(List.of(existingUserMessage));
+        lenient().when(memoryRepository.findMaxTurnNoByAgentSessionId(any()))
+                .thenReturn(4);
+        lenient().when(intakeDossierRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.INTAKE))
+                .thenReturn(Optional.empty());
+        lenient().when(evidenceItemRepository.findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(
+                        dispute.getId()))
+                .thenReturn(List.of());
+        lenient().when(memoryRepository.findTop50ByAgentSessionIdOrderByTurnNoDesc(any()))
+                .thenReturn(List.of());
+        lenient().when(client.run(any(), eq("TRACE_EXISTING"), eq("REQ_EXISTING")))
+                .thenReturn(
+                        new EvidenceAgentTurnResult(
+                                "This late opening should not be appended.",
+                                objectMapper.createObjectNode(),
+                                objectMapper.createArrayNode(),
+                                List.of(),
+                                false,
+                                false,
+                                "LLM",
+                                0.8));
+        lenient().when(messageRepository.findMaxSequenceByRoomId(room.getId())).thenReturn(4L);
+        lenient().when(messageRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        var reused =
+                service.ensureOpening(
+                        dispute.getId(),
+                        RoomType.EVIDENCE,
+                        new AuthenticatedActor("user-local", ActorRole.USER),
+                        "TRACE_EXISTING",
+                        "REQ_EXISTING");
+
+        assertThat(reused.id()).isEqualTo("MESSAGE_EXISTING_USER_THREAD");
+        verify(client, never()).run(any(), any(), any());
+        verify(messageRepository, never()).save(any(RoomMessageEntity.class));
+    }
+
+    @Test
+    void ensureOpeningSupersedesOnlyGenericWelcomeOpeningWithDossierSpecificOpening()
+            throws Exception {
+        FulfillmentCaseEntity dispute = evidenceCase();
+        CaseRoomEntity room = evidenceRoom(dispute);
+        RoomMessageEntity staleGenericOpening =
+                RoomMessageEntity.create(
+                        "MESSAGE_STALE_GENERIC_OPENING",
+                        dispute.getId(),
+                        room.getId(),
+                        1,
+                        com.example.dispute.room.domain.MessageSenderType.AGENT,
+                        "CUSTOMER_SERVICE",
+                        "evidence-clerk",
+                        "[\"USER\",\"CUSTOMER_SERVICE\",\"PLATFORM_REVIEWER\",\"ADMIN\",\"SYSTEM\"]",
+                        "[\"user-local\"]",
+                        MessageType.AGENT_MESSAGE,
+                        "您好！我是您的证据书记官，请上传与本案相关的证据材料。",
+                        "[]",
+                        "agent-evidence-opening:" + dispute.getId() + ":AGENT_SESSION_user-local_EVIDENCE",
+                        Instant.parse("2026-07-06T00:01:00Z"),
+                        "TRACE_STALE_OPENING");
+        when(caseRepository.findByIdForUpdate(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.EVIDENCE))
+                .thenReturn(Optional.of(room));
+        when(messageRepository.findByCaseIdAndIdempotencyKey(eq(dispute.getId()), any()))
+                .thenReturn(Optional.empty());
+        when(messageRepository.findAllByRoomIdOrderBySequenceNoAsc(room.getId()))
+                .thenReturn(List.of(staleGenericOpening));
+        when(permissionService.canReadActorAudience(any(), eq(List.of("user-local"))))
+                .thenReturn(true);
+        when(memoryRepository.findMaxTurnNoByAgentSessionId(any()))
+                .thenReturn(1);
+        when(intakeDossierRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.INTAKE))
+                .thenReturn(
+                        Optional.of(
+                                CaseIntakeDossierEntity.create(
+                                        "INTAKE_DOSSIER_STALE_OPENING",
+                                        dispute.getId(),
+                                        RoomType.INTAKE,
+                                        "{\"schema_version\":\"intake_case_detail.v1\",\"dispute_focus\":{\"core_issue\":\"SCRATCHED_WATCH\",\"facts_to_verify\":[\"商家质检视频\",\"用户划痕原图\",\"物流签收记录\"]}}",
+                                        84,
+                                        true,
+                                        "ACCEPTED",
+                                        1,
+                                        "dispute-intake-officer")));
+        when(evidenceItemRepository.findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(
+                        dispute.getId()))
+                .thenReturn(List.of());
+        when(memoryRepository.findTop50ByAgentSessionIdOrderByTurnNoDesc(any()))
+                .thenReturn(List.of());
+        when(client.run(any(), eq("TRACE_STALE"), eq("REQ_STALE")))
+                .thenReturn(
+                        new EvidenceAgentTurnResult(
+                                "我先根据接待室收敛的案情开始举证核对。本案当前争议焦点是 SCRATCHED_WATCH，请补充商家质检视频、用户划痕原图和物流签收记录。",
+                                objectMapper.createObjectNode(),
+                                objectMapper.createArrayNode(),
+                                List.of(),
+                                false,
+                                false,
+                                "LLM",
+                                0.86));
+        when(memoryRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(messageRepository.findMaxSequenceByRoomId(room.getId())).thenReturn(1L);
+        when(messageRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        var created =
+                service.ensureOpening(
+                        dispute.getId(),
+                        RoomType.EVIDENCE,
+                        new AuthenticatedActor("user-local", ActorRole.USER),
+                        "TRACE_STALE",
+                        "REQ_STALE");
+
+        assertThat(created.messageText()).contains("接待室收敛的案情");
+        assertThat(created.messageText()).contains("SCRATCHED_WATCH");
+        verify(client).run(any(), eq("TRACE_STALE"), eq("REQ_STALE"));
+        ArgumentCaptor<RoomMessageEntity> savedMessage =
+                ArgumentCaptor.forClass(RoomMessageEntity.class);
+        verify(messageRepository).save(savedMessage.capture());
+        assertThat(savedMessage.getValue().getSequenceNo()).isEqualTo(2);
+        assertThat(savedMessage.getValue().getIdempotencyKey()).contains("dossier-v3");
+    }
+
+    @Test
+    void ensureOpeningBuildsFallbackDossierFromCaseWhenIntakeDossierIsMissing()
+            throws Exception {
+        FulfillmentCaseEntity dispute = evidenceCase();
+        CaseRoomEntity room = evidenceRoom(dispute);
+        when(caseRepository.findByIdForUpdate(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.EVIDENCE))
+                .thenReturn(Optional.of(room));
+        when(messageRepository.findByCaseIdAndIdempotencyKey(eq(dispute.getId()), any()))
+                .thenReturn(Optional.empty());
+        when(messageRepository.findAllByRoomIdOrderBySequenceNoAsc(room.getId()))
+                .thenReturn(List.of());
+        when(memoryRepository.findMaxTurnNoByAgentSessionId(any()))
+                .thenReturn(0);
+        when(intakeDossierRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.INTAKE))
+                .thenReturn(Optional.empty());
+        when(evidenceItemRepository.findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(
+                        dispute.getId()))
+                .thenReturn(List.of());
+        when(memoryRepository.findTop50ByAgentSessionIdOrderByTurnNoDesc(any()))
+                .thenReturn(List.of());
+        when(client.run(any(), eq("TRACE_FALLBACK_DOSSIER"), eq("REQ_FALLBACK_DOSSIER")))
+                .thenReturn(
+                        new EvidenceAgentTurnResult(
+                                "请围绕签收未收到争议补充物流签收记录、门牌照片和投递轨迹。",
+                                objectMapper.createObjectNode(),
+                                objectMapper.createArrayNode(),
+                                List.of(),
+                                false,
+                                false,
+                                "LLM",
+                                0.8));
+        when(memoryRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(messageRepository.findMaxSequenceByRoomId(room.getId())).thenReturn(0L);
+        when(messageRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        service.ensureOpening(
+                dispute.getId(),
+                RoomType.EVIDENCE,
+                new AuthenticatedActor("user-local", ActorRole.USER),
+                "TRACE_FALLBACK_DOSSIER",
+                "REQ_FALLBACK_DOSSIER");
+
+        ArgumentCaptor<EvidenceAgentTurnCommand> command =
+                ArgumentCaptor.forClass(EvidenceAgentTurnCommand.class);
+        verify(client).run(command.capture(), eq("TRACE_FALLBACK_DOSSIER"), eq("REQ_FALLBACK_DOSSIER"));
+        JsonNode dossier = command.getValue().latestCaseIntakeDossier();
+        assertThat(dossier.path("schema_version").asText())
+                .isEqualTo("intake_case_detail.fallback.v1");
+        assertThat(dossier.path("case_story").path("one_sentence_summary").asText())
+                .contains("parcel was marked signed but never arrived");
+        assertThat(dossier.path("dispute_focus").path("core_issue").asText())
+                .isEqualTo("SIGNED_NOT_RECEIVED");
+        assertThat(dossier.path("dispute_focus").path("facts_to_verify").toString())
+                .contains("物流签收记录")
+                .contains("投递轨迹")
+                .contains("收货地址");
+        assertThat(dossier.path("case_index").path("order_reference").asText())
+                .isEqualTo("ORDER-EVIDENCE");
+    }
+
+    @Test
+    void ensureOpeningSupersedesOpeningOnlyThreadWithPendingFocusFallback()
+            throws Exception {
+        FulfillmentCaseEntity dispute = evidenceCase();
+        CaseRoomEntity room = evidenceRoom(dispute);
+        RoomMessageEntity staleGenericOpening =
+                RoomMessageEntity.create(
+                        "MESSAGE_STALE_GENERIC_OPENING",
+                        dispute.getId(),
+                        room.getId(),
+                        1,
+                        com.example.dispute.room.domain.MessageSenderType.AGENT,
+                        "CUSTOMER_SERVICE",
+                        "evidence-clerk",
+                        "[\"USER\",\"CUSTOMER_SERVICE\",\"PLATFORM_REVIEWER\",\"ADMIN\",\"SYSTEM\"]",
+                        "[\"user-local\"]",
+                        MessageType.AGENT_MESSAGE,
+                        "您好！我是您的证据书记官，请上传与本案相关的证据材料。",
+                        "[]",
+                        "agent-evidence-opening:legacy",
+                        Instant.parse("2026-07-06T00:01:00Z"),
+                        "TRACE_STALE_OPENING");
+        RoomMessageEntity stalePendingFocusOpening =
+                RoomMessageEntity.create(
+                        "MESSAGE_STALE_PENDING_FOCUS_OPENING",
+                        dispute.getId(),
+                        room.getId(),
+                        2,
+                        com.example.dispute.room.domain.MessageSenderType.AGENT,
+                        "CUSTOMER_SERVICE",
+                        "evidence-clerk",
+                        "[\"USER\",\"CUSTOMER_SERVICE\",\"PLATFORM_REVIEWER\",\"ADMIN\",\"SYSTEM\"]",
+                        "[\"user-local\"]",
+                        MessageType.AGENT_MESSAGE,
+                        "我先根据接待室收敛的案情开始举证核对。本案当前争议焦点是 争议焦点待确认，首轮请围绕这些材料补充证据：原始证据文件、证据形成时间、证据来源路径。",
+                        "[]",
+                        "agent-evidence-opening:dossier-v2:stale",
+                        Instant.parse("2026-07-06T00:02:00Z"),
+                        "TRACE_STALE_OPENING");
+        when(caseRepository.findByIdForUpdate(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.EVIDENCE))
+                .thenReturn(Optional.of(room));
+        when(messageRepository.findByCaseIdAndIdempotencyKey(eq(dispute.getId()), any()))
+                .thenReturn(Optional.empty());
+        when(messageRepository.findAllByRoomIdOrderBySequenceNoAsc(room.getId()))
+                .thenReturn(List.of(staleGenericOpening, stalePendingFocusOpening));
+        when(permissionService.canReadActorAudience(any(), eq(List.of("user-local"))))
+                .thenReturn(true);
+        when(memoryRepository.findMaxTurnNoByAgentSessionId(any()))
+                .thenReturn(2);
+        when(intakeDossierRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.INTAKE))
+                .thenReturn(Optional.empty());
+        when(evidenceItemRepository.findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(
+                        dispute.getId()))
+                .thenReturn(List.of());
+        when(memoryRepository.findTop50ByAgentSessionIdOrderByTurnNoDesc(any()))
+                .thenReturn(List.of());
+        when(client.run(any(), eq("TRACE_STALE_STACK"), eq("REQ_STALE_STACK")))
+                .thenReturn(
+                        new EvidenceAgentTurnResult(
+                                "我先根据接待室收敛的案情开始举证核对。本案当前争议焦点是 SIGNED_NOT_RECEIVED，请补充物流签收记录、投递轨迹和收货地址匹配记录。",
+                                objectMapper.createObjectNode(),
+                                objectMapper.createArrayNode(),
+                                List.of(),
+                                false,
+                                false,
+                                "LLM",
+                                0.82));
+        when(memoryRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(messageRepository.findMaxSequenceByRoomId(room.getId())).thenReturn(2L);
+        when(messageRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        var created =
+                service.ensureOpening(
+                        dispute.getId(),
+                        RoomType.EVIDENCE,
+                        new AuthenticatedActor("user-local", ActorRole.USER),
+                        "TRACE_STALE_STACK",
+                        "REQ_STALE_STACK");
+
+        assertThat(created.messageText()).contains("SIGNED_NOT_RECEIVED");
+        verify(client).run(any(), eq("TRACE_STALE_STACK"), eq("REQ_STALE_STACK"));
     }
 
     @Test

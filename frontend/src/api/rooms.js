@@ -7,6 +7,17 @@ export const roomApi = {
   latestTurnMemory: (actor, caseId, roomType) =>
     apiRequest(`/disputes/${caseId}/rooms/${roomType}/turn-memory/latest`, actor),
 
+  ensureOpening: (
+    actor,
+    caseId,
+    roomType,
+    idempotencyKey = newIdempotencyKey("room-opening"),
+  ) =>
+    apiRequest(`/disputes/${caseId}/rooms/${roomType}/messages/opening`, actor, {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey },
+    }),
+
   postMessage: (
     actor,
     caseId,

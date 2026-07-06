@@ -65,6 +65,21 @@ public class RoomController {
                                 message, requestId, traceId, Instant.now(clock)));
     }
 
+    @PostMapping("/opening")
+    public ApiResponse<RoomMessageView> opening(
+            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
+            @PathVariable RoomType roomType,
+            Authentication authentication,
+            HttpServletRequest servletRequest) {
+        String traceId = correlationId(servletRequest, TraceIdFilter.TRACE_ATTRIBUTE);
+        String requestId = correlationId(servletRequest, TraceIdFilter.REQUEST_ATTRIBUTE);
+        return ApiResponse.success(
+                service.ensureOpening(caseId, roomType, actor(authentication), traceId, requestId),
+                requestId,
+                traceId,
+                Instant.now(clock));
+    }
+
     @GetMapping
     public ApiResponse<List<RoomMessageView>> list(
             @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,

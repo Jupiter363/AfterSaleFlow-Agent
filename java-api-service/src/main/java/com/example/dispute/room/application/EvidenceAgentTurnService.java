@@ -21,13 +21,17 @@ import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRe
 import com.example.dispute.room.infrastructure.persistence.repository.RoomMessageRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.RoomTurnMemoryRepository;
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
@@ -42,8 +46,15 @@ public class EvidenceAgentTurnService {
     public static final String AGENT_ROLE = "EVIDENCE_CLERK";
     private static final String AGENT_SENDER_ROLE = "CUSTOMER_SERVICE";
     private static final String AGENT_SENDER_ID = "evidence-clerk";
+    private static final String OPENING_IDEMPOTENCY_VERSION = "dossier-v3";
     private static final String DEGRADED_REASON_AGENT_CALL_FAILED = "AGENT_CALL_FAILED";
     private static final String DEGRADED_REASON_AGENT_OUTPUT_EMPTY = "AGENT_OUTPUT_EMPTY";
+    private static final List<String> SUPERSEDED_GENERIC_OPENING_MARKERS =
+            List.of(
+                    "您好！我是您的证据书记官",
+                    "请上传与本案相关的证据材料",
+                    "争议焦点待确认",
+                    "原始证据文件、证据形成时间、证据来源路径");
     private static final Logger log = LoggerFactory.getLogger(EvidenceAgentTurnService.class);
 
     private final FulfillmentCaseRepository caseRepository;
@@ -132,12 +143,89 @@ public class EvidenceAgentTurnService {
                                 actor.role().name(),
                                 participantAnswerContent(message),
                                 message.attachmentRefs()),
-                        latestCaseIntakeDossier(caseId),
+                        latestCaseIntakeDossier(context.dispute()),
                         availableEvidence(caseId, actor),
                         recentTurns(session.agentSession()),
                         session.agentContext());
         EvidenceAgentTurnResult result = safeRun(command, traceId, requestId);
         persistAgentTurn(context, session, turnNo, actor.role(), result, traceId);
+    }
+
+    @Transactional
+    public RoomMessageView ensureOpening(
+            String caseId,
+            RoomType roomType,
+            AuthenticatedActor actor,
+            String traceId,
+            String requestId) {
+        if (roomType != RoomType.EVIDENCE) {
+            throw new IllegalArgumentException("opening is only supported for evidence room");
+        }
+        if (!isParty(actor.role())) {
+            throw new IllegalArgumentException("evidence opening is only created for party actors");
+        }
+
+        TurnContext context = prepare(caseId, RoomType.EVIDENCE);
+        SessionContext session = resolveSession(caseId, actor, RoomType.EVIDENCE);
+        String idempotencyKey = openingIdempotencyKey(caseId, session.agentSession());
+        var existing =
+                messageRepository.findByCaseIdAndIdempotencyKey(caseId, idempotencyKey);
+        if (existing.isPresent()) {
+            return view(existing.get());
+        }
+        List<RoomMessageEntity> visibleConversation =
+                visibleActorScopedConversationMessages(context.room(), session.accessSession());
+        if (!visibleConversation.isEmpty()
+                && !isOnlySupersededOpeningMessages(visibleConversation)) {
+            return view(visibleConversation.getFirst());
+        }
+
+        int turnNo = memoryRepository.findMaxTurnNoByAgentSessionId(session.agentSession().getId()) + 1;
+        EvidenceAgentTurnCommand command =
+                new EvidenceAgentTurnCommand(
+                        caseId,
+                        RoomType.EVIDENCE,
+                        "ROOM_OPENING",
+                        actor.role().name(),
+                        actor.actorId(),
+                        new EvidenceAgentTurnCommand.Message(
+                                "EVIDENCE_OPENING_" + turnNo,
+                                MessageType.AGENT_MESSAGE,
+                                actor.role().name(),
+                                "请根据接待室收敛案情，向当前一方提出首轮证据补充与真实性核验问题。",
+                                List.of()),
+                        latestCaseIntakeDossier(context.dispute()),
+                        availableEvidence(caseId, actor),
+                        recentTurns(session.agentSession()),
+                        session.agentContext());
+        EvidenceAgentTurnResult result = safeRun(command, traceId, requestId);
+        memoryRepository.save(
+                RoomTurnMemoryEntity.agentTurn(
+                        "MEMORY_" + compactUuid(),
+                        context.dispute().getId(),
+                        RoomType.EVIDENCE,
+                        turnNo,
+                        AGENT_SENDER_ID,
+                        AGENT_ROLE,
+                        result.roomUtterance(),
+                        json(defaultObject(result.memoryPatch())),
+                        "{}",
+                        json(defaultArray(result.canvasOperations())),
+                        "EVIDENCE_RUN_" + compactUuid(),
+                        session.agentSession(),
+                        session.accessSession(),
+                        "{}"));
+        RoomMessageEntity saved =
+                appendAgentMessage(
+                        context.dispute(),
+                        context.room(),
+                        session.agentSession(),
+                        actor.role(),
+                        result.roomUtterance(),
+                        turnNo,
+                        traceId,
+                        idempotencyKey);
+        return view(saved);
     }
 
     private SessionContext resolveSession(
@@ -239,29 +327,23 @@ public class EvidenceAgentTurnService {
                 audienceParty,
                 result.roomUtterance(),
                 turnNo,
-                traceId);
+                traceId,
+                turnIdempotencyKey(context.dispute(), session.agentSession(), audienceParty, turnNo));
     }
 
-    private void appendAgentMessage(
+    private RoomMessageEntity appendAgentMessage(
             FulfillmentCaseEntity dispute,
             CaseRoomEntity room,
             AgentConversationSessionEntity agentSession,
             ActorRole audienceParty,
             String utterance,
             int turnNo,
-            String traceId) {
-        String idempotencyKey =
-                "agent-evidence-turn:"
-                        + dispute.getId()
-                        + ":"
-                        + agentSession.getId()
-                        + ":"
-                        + audienceParty.name()
-                        + ":"
-                        + turnNo;
-        if (messageRepository.findByCaseIdAndIdempotencyKey(dispute.getId(), idempotencyKey)
-                .isPresent()) {
-            return;
+            String traceId,
+            String idempotencyKey) {
+        var existing =
+                messageRepository.findByCaseIdAndIdempotencyKey(dispute.getId(), idempotencyKey);
+        if (existing.isPresent()) {
+            return existing.get();
         }
         String audienceJson = audienceJson(audienceParty);
         String audienceActorIdsJson = json(List.of(agentSession.getActorId()));
@@ -292,14 +374,176 @@ public class EvidenceAgentTurnService {
                 saved.getAudienceJson(),
                 audienceActorIdsJson,
                 AGENT_SENDER_ID);
+        return saved;
     }
 
-    private JsonNode latestCaseIntakeDossier(String caseId) {
+    private List<RoomMessageEntity> visibleActorScopedConversationMessages(
+            CaseRoomEntity room, CaseAccessSessionEntity accessSession) {
+        return messageRepository.findAllByRoomIdOrderBySequenceNoAsc(room.getId()).stream()
+                .filter(message -> visibleToAccessSession(message, accessSession))
+                .toList();
+    }
+
+    private static boolean isOnlySupersededOpeningMessages(
+            List<RoomMessageEntity> visibleConversation) {
+        return !visibleConversation.isEmpty()
+                && visibleConversation.stream()
+                        .allMatch(EvidenceAgentTurnService::isSupersededOpeningMessage);
+    }
+
+    private static boolean isSupersededOpeningMessage(RoomMessageEntity message) {
+        if (message.getMessageType() != MessageType.AGENT_MESSAGE
+                || !AGENT_SENDER_ROLE.equals(message.getSenderRole())
+                || !AGENT_SENDER_ID.equals(message.getSenderId())) {
+            return false;
+        }
+        String text = message.getMessageText();
+        return text != null
+                && SUPERSEDED_GENERIC_OPENING_MARKERS.stream().anyMatch(text::contains);
+    }
+
+    private boolean visibleToAccessSession(
+            RoomMessageEntity message, CaseAccessSessionEntity accessSession) {
+        if (accessSession.privileged()) {
+            return true;
+        }
+        if (isParty(accessSession.getActorRole()) && isPartySender(message)) {
+            return accessSession.getActorRole().name().equals(message.getSenderRole())
+                    && accessSession.getActorId().equals(message.getSenderId());
+        }
+        List<String> audiences = readStringList(message.getAudienceJson());
+        if (!audiences.isEmpty() && !audiences.contains(accessSession.getActorRole().name())) {
+            return false;
+        }
+        return permissionService.canReadActorAudience(
+                accessSession, readStringList(message.getAudienceActorIdsJson()));
+    }
+
+    private List<String> readStringList(String json) {
+        if (json == null || json.isBlank()) {
+            return List.of();
+        }
+        try {
+            return objectMapper.readValue(json, new TypeReference<>() {});
+        } catch (JsonProcessingException exception) {
+            throw new IllegalStateException("invalid message audience", exception);
+        }
+    }
+
+    private RoomMessageView view(RoomMessageEntity entity) {
+        try {
+            List<String> attachments =
+                    objectMapper.readValue(
+                            entity.getAttachmentRefsJson(), new TypeReference<>() {});
+            return new RoomMessageView(
+                    entity.getId(),
+                    entity.getCaseId(),
+                    entity.getRoomId(),
+                    entity.getSequenceNo(),
+                    entity.getSenderRole(),
+                    entity.getSenderId(),
+                    entity.getMessageType(),
+                    entity.getMessageText(),
+                    attachments,
+                    entity.getCreatedAt());
+        } catch (JsonProcessingException exception) {
+            throw new IllegalStateException("invalid evidence opening message attachments", exception);
+        }
+    }
+
+    private static String openingIdempotencyKey(
+            String caseId, AgentConversationSessionEntity agentSession) {
+        return "agent-evidence-opening:"
+                + OPENING_IDEMPOTENCY_VERSION
+                + ":"
+                + caseId
+                + ":"
+                + agentSession.getId();
+    }
+
+    private static String turnIdempotencyKey(
+            FulfillmentCaseEntity dispute,
+            AgentConversationSessionEntity agentSession,
+            ActorRole audienceParty,
+            int turnNo) {
+        return "agent-evidence-turn:"
+                + dispute.getId()
+                + ":"
+                + agentSession.getId()
+                + ":"
+                + audienceParty.name()
+                + ":"
+                + turnNo;
+    }
+
+    private JsonNode latestCaseIntakeDossier(FulfillmentCaseEntity dispute) {
         return intakeDossierRepository
-                .findByCaseIdAndRoomType(caseId, RoomType.INTAKE)
+                .findByCaseIdAndRoomType(dispute.getId(), RoomType.INTAKE)
                 .map(CaseIntakeDossierEntity::getDossierJson)
                 .map(this::readJson)
-                .orElseGet(objectMapper::createObjectNode);
+                .orElseGet(() -> fallbackCaseIntakeDossier(dispute));
+    }
+
+    private ObjectNode fallbackCaseIntakeDossier(FulfillmentCaseEntity dispute) {
+        ObjectNode root = objectMapper.createObjectNode();
+        root.put("schema_version", "intake_case_detail.fallback.v1");
+        root.put("source", "fulfillment_case");
+
+        ObjectNode caseIndex = root.putObject("case_index");
+        caseIndex.put("order_reference", textOrDefault(dispute.getOrderId(), "待确认"));
+        caseIndex.put("after_sales_reference", textOrDefault(dispute.getAfterSaleId(), "待确认"));
+        caseIndex.put("logistics_reference", textOrDefault(dispute.getLogisticsId(), "待确认"));
+        caseIndex.put(
+                "initiator_role",
+                dispute.getInitiatorRole() == null ? "待确认" : dispute.getInitiatorRole().name());
+        caseIndex.put(
+                "risk_level",
+                dispute.getRiskLevel() == null ? "MEDIUM" : dispute.getRiskLevel().name());
+
+        ObjectNode caseStory = root.putObject("case_story");
+        caseStory.put(
+                "one_sentence_summary",
+                textOrDefault(
+                        dispute.getDescription(),
+                        textOrDefault(dispute.getTitle(), "接待室案情摘要缺失，请围绕案件主表信息补证。")));
+        caseStory.put("title", textOrDefault(dispute.getTitle(), "履约争议待核验"));
+
+        ObjectNode disputeFocus = root.putObject("dispute_focus");
+        disputeFocus.put("core_issue", textOrDefault(dispute.getDisputeType(), dispute.getCaseType()));
+        ArrayNode facts = disputeFocus.putArray("facts_to_verify");
+        for (String fact : fallbackFactsToVerify(dispute.getDisputeType())) {
+            facts.add(fact);
+        }
+
+        ObjectNode handoffNotes = root.putObject("handoff_notes");
+        handoffNotes.put(
+                "instruction",
+                "接待室结构化卷宗缺失，证据书记官应先基于案件主表摘要和争议类型提出首轮补证问题。");
+        return root;
+    }
+
+    private static List<String> fallbackFactsToVerify(String disputeType) {
+        if ("SIGNED_NOT_RECEIVED".equals(disputeType)) {
+            return List.of(
+                    "物流签收记录",
+                    "投递轨迹或快递柜/驿站记录",
+                    "收货地址、门牌或签收照片匹配记录",
+                    "用户未收到包裹的原始陈述或沟通记录");
+        }
+        if ("DAMAGED_OR_DEFECTIVE".equals(disputeType)
+                || "SCRATCHED_WATCH_AFTER_DELIVERY".equals(disputeType)
+                || "QUALITY_DISPUTE".equals(disputeType)) {
+            return List.of(
+                    "用户拍摄的商品问题原图或视频",
+                    "商家发货前质检视频或照片",
+                    "物流运输破损记录",
+                    "签收时外包装状态记录");
+        }
+        return List.of(
+                "原始证据文件",
+                "证据形成时间",
+                "证据来源路径",
+                "与接待室案情的关联事实");
     }
 
     private List<EvidenceAgentTurnCommand.AvailableEvidence> availableEvidence(
@@ -468,6 +712,11 @@ public class EvidenceAgentTurnService {
 
     private static boolean isParty(ActorRole role) {
         return role == ActorRole.USER || role == ActorRole.MERCHANT;
+    }
+
+    private static boolean isPartySender(RoomMessageEntity message) {
+        return ActorRole.USER.name().equals(message.getSenderRole())
+                || ActorRole.MERCHANT.name().equals(message.getSenderRole());
     }
 
     private static String participantAnswerContent(RoomMessageCommand message) {

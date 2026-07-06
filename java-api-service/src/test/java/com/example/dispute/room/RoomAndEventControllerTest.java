@@ -90,6 +90,37 @@ class RoomAndEventControllerTest {
     }
 
     @Test
+    void ensuresAnIdempotentEvidenceOpeningMessage() throws Exception {
+        when(messageService.ensureOpening(
+                        eq("CASE_test"),
+                        eq(RoomType.EVIDENCE),
+                        any(),
+                        any(),
+                        any()))
+                .thenReturn(
+                        new RoomMessageView(
+                                "MESSAGE_OPENING",
+                                "CASE_test",
+                                "ROOM_1",
+                                2,
+                                "CUSTOMER_SERVICE",
+                                "evidence-clerk",
+                                MessageType.AGENT_MESSAGE,
+                                "请先补充与案情匹配的证据材料。",
+                                List.of(),
+                                Instant.parse("2026-07-03T00:01:00Z")));
+
+        mockMvc.perform(
+                        post("/api/disputes/CASE_test/rooms/EVIDENCE/messages/opening")
+                                .header(HeaderAuthenticationFilter.USER_ID_HEADER, "user-local")
+                                .header(HeaderAuthenticationFilter.ROLE_HEADER, "USER")
+                                .header("Idempotency-Key", "room-opening-1"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.id").value("MESSAGE_OPENING"))
+                .andExpect(jsonPath("$.data.sender_role").value("CUSTOMER_SERVICE"));
+    }
+
+    @Test
     void startsAnSseSubscriptionAfterTheLastEventIdCursor() throws Exception {
         when(eventService.subscribe(eq("CASE_test"), eq(4L), any()))
                 .thenReturn(new SseEmitter(60_000L));

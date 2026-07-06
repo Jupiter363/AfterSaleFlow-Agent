@@ -76,6 +76,9 @@ public class EvidenceVerificationEntity extends AbstractEntity {
     public String getEvidenceId() { return evidenceId; }
     public int getVerificationVersion() { return verificationVersion; }
     public EvidenceVerificationStatus getVerificationStatus() { return verificationStatus; }
+    public String getDeterministicChecksJson() { return deterministicChecksJson; }
+    public String getAgentFindingsJson() { return agentFindingsJson; }
+    public String getReasonsJson() { return reasonsJson; }
     public boolean isRequiresHumanReview() { return requiresHumanReview; }
     public Instant getVerifiedAt() { return verifiedAt; }
 }

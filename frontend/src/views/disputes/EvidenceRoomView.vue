@@ -44,6 +44,7 @@ const error = ref("");
 const agentState = ref("LISTENING");
 const fileInput = ref(null);
 const messages = ref([...(props.initialMessages || [])]);
+const selectedEvidence = ref(null);
 const eventState = reactive(createRoomState());
 let eventAbortController = new AbortController();
 let eventStreamActive = false;
@@ -67,6 +68,14 @@ const effectiveActor = computed(() => {
   };
 });
 const isMerchant = computed(() => role.value === "MERCHANT");
+const shouldEnsureOpening = computed(() => ["USER", "MERCHANT"].includes(role.value));
+const displayedMessages = computed(() => {
+  const hasDossierSpecificOpening = messages.value.some((message) =>
+    isDossierSpecificOpeningMessage(message),
+  );
+  if (!hasDossierSpecificOpening) return messages.value;
+  return messages.value.filter((message) => !isSupersededOpeningMessage(message));
+});
 const items = computed(() => catalog.value?.items || []);
 const privateItems = computed(() =>
   items.value.filter(
@@ -130,8 +139,82 @@ const evidenceTypeLabels = {
   LOGISTICS_PROOF: "物流凭证",
   DELIVERY_RECORD: "履约记录",
   VIDEO: "视频证据",
+  IMAGE: "图片证据",
+  DOCUMENT: "文档材料",
   OTHER: "其他材料",
 };
+
+const confidenceLabels = {
+  HIGH: "高置信",
+  MEDIUM: "中置信",
+  LOW: "低置信",
+  UNKNOWN: "待评分",
+};
+
+function evidenceField(item, snakeCaseKey, camelCaseKey, fallback = "") {
+  return item?.[snakeCaseKey] ?? item?.[camelCaseKey] ?? fallback;
+}
+
+function evidenceConfidenceScore(item) {
+  const raw = evidenceField(item, "confidence_score", "confidenceScore", null);
+  if (raw === null || raw === undefined || raw === "") return null;
+  const numeric = Number(raw);
+  if (!Number.isFinite(numeric)) return null;
+  return numeric <= 1 ? Math.round(numeric * 100) : Math.round(numeric);
+}
+
+function evidenceConfidenceLevel(item) {
+  const value = String(
+    evidenceField(item, "confidence_level", "confidenceLevel", "UNKNOWN"),
+  ).toUpperCase();
+  return confidenceLabels[value] || confidenceLabels.UNKNOWN;
+}
+
+function evidenceConfidenceTone(item) {
+  const value = String(
+    evidenceField(item, "confidence_level", "confidenceLevel", "UNKNOWN"),
+  ).toLowerCase();
+  if (["high", "medium", "low"].includes(value)) return value;
+  const score = evidenceConfidenceScore(item);
+  if (score === null) return "unknown";
+  if (score >= 80) return "high";
+  if (score >= 50) return "medium";
+  return "low";
+}
+
+function evidenceConfidenceCopy(item) {
+  const score = evidenceConfidenceScore(item);
+  const label = evidenceConfidenceLevel(item);
+  return score === null ? label : `${score}% · ${label}`;
+}
+
+function evidenceOwnerLabel(item) {
+  const owner = evidenceField(item, "submitted_by_role", "submittedByRole", "");
+  if (owner === "MERCHANT") return "商家提交";
+  if (owner === "USER") return "用户提交";
+  if (owner === "PLATFORM_REVIEWER") return "平台提交";
+  return owner || "来源待确认";
+}
+
+function evidenceFeedback(item) {
+  return evidenceField(item, "verification_feedback", "verificationFeedback", "");
+}
+
+function evidenceParsedText(item) {
+  return evidenceField(item, "parsed_text", "parsedText", "");
+}
+
+function evidenceOriginalFilename(item) {
+  return evidenceField(item, "original_filename", "originalFilename", "");
+}
+
+function openEvidenceDetail(item) {
+  selectedEvidence.value = item;
+}
+
+function closeEvidenceDetail() {
+  selectedEvidence.value = null;
+}
 
 async function load() {
   const generation = workspaceGeneration;
@@ -139,7 +222,7 @@ async function load() {
   const caseSnapshot = caseId.value;
   try {
     if (catalog.value === null) {
-      const nextCatalog = await evidenceApi.catalog(actorSnapshot, caseSnapshot);
+      const nextCatalog = await loadCatalogOrEmpty(actorSnapshot, caseSnapshot);
       if (!isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) return;
       catalog.value = nextCatalog;
     }
@@ -149,12 +232,13 @@ async function load() {
       completion.value = nextCompletion;
     }
     if (props.initialMessages === null) {
-      const nextMessages = await roomApi.messages(
+      const nextMessages = await loadActorScopedMessages(
+        generation,
         actorSnapshot,
         caseSnapshot,
-        "EVIDENCE",
+        { ensureOpening: shouldEnsureOpening.value },
       );
-      if (!isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) return;
+      if (nextMessages === null) return;
       messages.value = nextMessages;
     }
   } catch (failure) {
@@ -173,16 +257,105 @@ function isCurrentWorkspace(generation, actorSnapshot, caseSnapshot) {
   );
 }
 
+async function loadActorScopedMessages(
+  generation,
+  actorSnapshot,
+  caseSnapshot,
+  options = {},
+) {
+  const firstMessages = await roomApi.messages(
+    actorSnapshot,
+    caseSnapshot,
+    "EVIDENCE",
+  );
+  if (!isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) {
+    return null;
+  }
+  if (!shouldRequestEvidenceOpening(options.ensureOpening, firstMessages)) {
+    return firstMessages;
+  }
+  await roomApi.ensureOpening(actorSnapshot, caseSnapshot, "EVIDENCE");
+  if (!isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) {
+    return null;
+  }
+  const openedMessages = await roomApi.messages(
+    actorSnapshot,
+    caseSnapshot,
+    "EVIDENCE",
+  );
+  if (!isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) {
+    return null;
+  }
+  return openedMessages;
+}
+
+function shouldRequestEvidenceOpening(ensureOpening, firstMessages) {
+  if (!ensureOpening) return false;
+  return (
+    firstMessages.length === 0 ||
+    containsOnlySupersededOpeningMessages(firstMessages)
+  );
+}
+
+function containsOnlySupersededOpeningMessages(firstMessages) {
+  return (
+    firstMessages.length > 0 &&
+    firstMessages.every((message) => isSupersededOpeningMessage(message))
+  );
+}
+
+function isSupersededOpeningMessage(message) {
+  const text = message?.message_text || "";
+  return (
+    message?.sender_role === "CUSTOMER_SERVICE" &&
+    message?.message_type === "AGENT_MESSAGE" &&
+    (text.includes("您好！我是您的证据书记官") ||
+      text.includes("请上传与本案相关的证据材料") ||
+      text.includes("争议焦点待确认") ||
+      text.includes("原始证据文件、证据形成时间、证据来源路径"))
+  );
+}
+
+function isDossierSpecificOpeningMessage(message) {
+  const text = message?.message_text || "";
+  return (
+    message?.sender_role === "CUSTOMER_SERVICE" &&
+    message?.message_type === "AGENT_MESSAGE" &&
+    text.includes("接待室收敛的案情") &&
+    !isSupersededOpeningMessage(message)
+  );
+}
+
+async function loadCatalogOrEmpty(actorSnapshot, caseSnapshot) {
+  try {
+    return await evidenceApi.catalog(actorSnapshot, caseSnapshot);
+  } catch (failure) {
+    if (isMissingEvidenceCatalog(failure)) {
+      return { case_id: caseSnapshot, items: [] };
+    }
+    throw failure;
+  }
+}
+
+function isMissingEvidenceCatalog(failure) {
+  return ["EVIDENCE_NOT_FOUND", "RESOURCE_NOT_FOUND"].includes(failure?.code);
+}
+
 async function refreshWorkspace(options = {}) {
   const generation = options.generation ?? workspaceGeneration;
   const actorSnapshot = { ...effectiveActor.value };
   const caseSnapshot = caseId.value;
   const [nextCatalog, nextCompletion, nextMessages] = await Promise.all([
-    evidenceApi.catalog(actorSnapshot, caseSnapshot),
+    loadCatalogOrEmpty(actorSnapshot, caseSnapshot),
     evidenceApi.completion(actorSnapshot, caseSnapshot),
-    roomApi.messages(actorSnapshot, caseSnapshot, "EVIDENCE"),
+    loadActorScopedMessages(generation, actorSnapshot, caseSnapshot, {
+      ensureOpening: options.ensureOpening && shouldEnsureOpening.value,
+    }),
   ]);
   if (!isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) {
+    return false;
+  }
+  if (nextMessages === null) {
     return false;
   }
   catalog.value = nextCatalog;
@@ -390,12 +563,13 @@ watch(role, async (nextRole, previousRole) => {
   agentState.value = "THINKING";
   catalog.value = null;
   completion.value = null;
+  selectedEvidence.value = null;
   messages.value = [];
   if (eventStreamActive) {
     startEventStream();
   }
   try {
-    await refreshWorkspace({ generation });
+    await refreshWorkspace({ generation, ensureOpening: props.initialMessages === null });
     agentState.value = "LISTENING";
   } catch (failure) {
     if (generation !== workspaceGeneration) return;
@@ -436,243 +610,566 @@ onBeforeUnmount(() => eventAbortController.abort());
       />
     </template>
 
-    <div class="evidence-room">
-      <section class="evidence-uploader">
-        <div class="evidence-uploader__illustration" aria-hidden="true">
-          <span>📎</span><span>🖼️</span><span>🎞️</span>
+    <div class="evidence-room" data-evidence-room-layout>
+      <section class="evidence-room__conversation" data-evidence-chat-panel>
+        <div class="evidence-room__case-note">
+          <span>书记官正在核对</span>
+          <h2>围绕接待室收敛的案情补充证据</h2>
+          <p>
+            只说明证据来源、形成时间、真实性和关联事实；证据不足也不会阻塞进入小法庭。
+          </p>
         </div>
-        <div>
-          <span class="evidence-kicker">MULTIMODAL DESK</span>
-          <h2>把证据放进书记官的文件篮</h2>
-          <p>支持图片、视频与文档。上传后将自动查重、验真、脱敏并进入案件证据库。</p>
-        </div>
-        <label class="evidence-uploader__button">
-          {{ uploading ? "正在核验材料…" : "选择证据材料" }}
-          <input
-            ref="fileInput"
-            type="file"
-            multiple
-            :disabled="uploading"
-            @change="uploadFiles"
+        <div class="evidence-room__conversation-frame">
+          <ConversationStream
+            :messages="displayedMessages"
+            :disabled="uploading || completing"
+            agent-label="证据书记官"
+            placeholder="告诉书记官这份证据从哪里来、形成于何时、能证明什么…"
+            @submit="postMessage"
           />
-        </label>
-      </section>
-
-      <section class="evidence-dialogue">
-        <div>
-          <span class="evidence-kicker">CLERK CONVERSATION</span>
-          <h2>和书记官核对证据</h2>
-          <p>说明证据来源、形成时间与想证明的事实；每次陈述都会成为不可变房间记录。</p>
         </div>
-        <ConversationStream
-          :messages="messages"
-          :disabled="uploading || completing"
-          agent-label="证据书记官"
-          placeholder="告诉书记官这份证据从哪里来、能证明什么…"
-          @submit="postMessage"
-        />
       </section>
 
-      <div class="evidence-libraries">
-        <section class="evidence-library evidence-library--private" data-evidence-private>
-          <header>
-            <div>
-              <span class="evidence-kicker">MY ORIGINALS</span>
-              <h2>我的原件匣</h2>
-            </div>
-            <span class="privacy-seal">仅当前一方可见</span>
-          </header>
-          <p v-if="!privateItems.length" class="evidence-empty">还没有仅自己可见的原件。</p>
-          <article
-            v-for="item in privateItems"
-            :key="item.evidence_id"
-            class="evidence-card"
-          >
-            <div class="evidence-card__icon">🔐</div>
-            <div>
-              <strong>{{ evidenceTypeLabels[item.evidence_type] || item.evidence_type }}</strong>
-              <small>{{ item.evidence_id }}</small>
-            </div>
-            <span
-              class="verification-pill"
-              :data-verification="item.verification_status || 'PENDING'"
-            >
-              {{ statusLabels[item.verification_status] || item.verification_status || "待核验" }}
-            </span>
-          </article>
+      <section class="evidence-board" data-evidence-board-panel>
+        <header class="evidence-board__header">
+          <div>
+            <span class="evidence-kicker">EVIDENCE BOARD</span>
+            <h2>已提交证据</h2>
+            <p>点击任意证据卡片查看解析文本、核验反馈和置信度。</p>
+          </div>
+          <span class="evidence-board__badge">
+            {{ isMerchant ? "商家证据方" : "用户证据方" }}
+          </span>
+        </header>
+
+        <section class="evidence-uploader">
+          <div class="evidence-uploader__illustration" aria-hidden="true">
+            <span>📎</span><span>🖼️</span><span>🎞️</span>
+          </div>
+          <div>
+            <span class="evidence-kicker">MULTIMODAL DESK</span>
+            <strong>上传图片、视频、Markdown 或文档</strong>
+            <small>OCR/解析后会进入证据库，并由书记官给出核验建议。</small>
+          </div>
+          <label class="evidence-uploader__button">
+            {{ uploading ? "核验中…" : "选择材料" }}
+            <input
+              ref="fileInput"
+              type="file"
+              multiple
+              :disabled="uploading"
+              @change="uploadFiles"
+            />
+          </label>
         </section>
 
-        <section class="evidence-library evidence-library--shared" data-evidence-shared>
-          <header>
-            <div>
-              <span class="evidence-kicker">SHARED DOSSIER</span>
-              <h2>双方共享证据墙</h2>
-            </div>
-            <span class="shared-seal">已按权限脱敏</span>
-          </header>
-          <p v-if="!sharedItems.length" class="evidence-empty">共享目录仍在等待材料。</p>
-          <div class="evidence-grid">
-            <article
-              v-for="item in sharedItems"
-              :key="item.evidence_id"
-              class="evidence-card"
-            >
-              <div class="evidence-card__icon">
-                {{ item.submitted_by_role === "MERCHANT" ? "🏪" : "🧑" }}
-              </div>
+        <div class="evidence-board__list" data-evidence-list-scroll>
+          <section class="evidence-library evidence-library--private" data-evidence-private>
+            <header>
               <div>
+                <span class="evidence-kicker">MY ORIGINALS</span>
+                <h3>我的原件匣</h3>
+              </div>
+              <span class="privacy-seal">仅当前一方可见</span>
+            </header>
+            <p v-if="!privateItems.length" class="evidence-empty">还没有仅自己可见的原件。</p>
+            <button
+              v-for="item in privateItems"
+              :key="item.evidence_id"
+              type="button"
+              class="evidence-card"
+              data-evidence-card
+              @click="openEvidenceDetail(item)"
+            >
+              <span class="evidence-card__icon">🔐</span>
+              <span class="evidence-card__main">
                 <strong>{{ evidenceTypeLabels[item.evidence_type] || item.evidence_type }}</strong>
                 <small>{{ item.evidence_id }}</small>
-                <em v-if="item.redacted">已脱敏副本</em>
-              </div>
-              <span
-                class="verification-pill"
-                :data-verification="item.verification_status || 'PENDING'"
-              >
-                {{ statusLabels[item.verification_status] || item.verification_status || "待核验" }}
+                <em>{{ evidenceOwnerLabel(item) }}</em>
               </span>
-            </article>
-          </div>
-        </section>
-      </div>
+              <span class="evidence-card__meta">
+                <span
+                  class="verification-pill"
+                  :data-verification="item.verification_status || 'PENDING'"
+                >
+                  {{ statusLabels[item.verification_status] || item.verification_status || "待核验" }}
+                </span>
+                <span
+                  class="confidence-pill"
+                  :data-confidence="evidenceConfidenceTone(item)"
+                  data-evidence-confidence
+                >
+                  {{ evidenceConfidenceCopy(item) }}
+                </span>
+              </span>
+            </button>
+          </section>
 
-      <footer class="evidence-footer">
-        <div>
-          <strong>{{ isMerchant ? "商家证据方" : "用户证据方" }}</strong>
-          <span>{{ completionStatusMessage }}</span>
+          <section class="evidence-library evidence-library--shared" data-evidence-shared>
+            <header>
+              <div>
+                <span class="evidence-kicker">SHARED DOSSIER</span>
+                <h3>双方共享证据墙</h3>
+              </div>
+              <span class="shared-seal">已按权限脱敏</span>
+            </header>
+            <p v-if="!sharedItems.length" class="evidence-empty">共享目录仍在等待材料。</p>
+            <div class="evidence-grid">
+              <button
+                v-for="item in sharedItems"
+                :key="item.evidence_id"
+                type="button"
+                class="evidence-card"
+                data-evidence-card
+                @click="openEvidenceDetail(item)"
+              >
+                <span class="evidence-card__icon">
+                  {{ item.submitted_by_role === "MERCHANT" ? "🏪" : "🧑" }}
+                </span>
+                <span class="evidence-card__main">
+                  <strong>{{ evidenceTypeLabels[item.evidence_type] || item.evidence_type }}</strong>
+                  <small>{{ item.evidence_id }}</small>
+                  <em>{{ item.redacted ? "已脱敏副本" : evidenceOwnerLabel(item) }}</em>
+                </span>
+                <span class="evidence-card__meta">
+                  <span
+                    class="verification-pill"
+                    :data-verification="item.verification_status || 'PENDING'"
+                  >
+                    {{ statusLabels[item.verification_status] || item.verification_status || "待核验" }}
+                  </span>
+                  <span
+                    class="confidence-pill"
+                    :data-confidence="evidenceConfidenceTone(item)"
+                    data-evidence-confidence
+                  >
+                    {{ evidenceConfidenceCopy(item) }}
+                  </span>
+                </span>
+              </button>
+            </div>
+          </section>
         </div>
-        <button
-          v-if="completion?.sealed"
-          type="button"
-          data-enter-hearing
-          @click="enterHearing"
-        >
-          进入小法庭
-        </button>
-        <div
-          v-else-if="currentPartyCompleted"
-          class="evidence-completed"
-          data-evidence-completed
-        >
-          <strong>已封入证据袋</strong>
-          <span>等待{{ waitingCounterpartyLabel }}或举证时效结束</span>
+
+        <footer class="evidence-footer">
+          <div>
+            <strong>举证状态</strong>
+            <span>{{ completionStatusMessage }}</span>
+          </div>
+          <button
+            v-if="completion?.sealed"
+            type="button"
+            data-enter-hearing
+            @click="enterHearing"
+          >
+            进入小法庭
+          </button>
+          <div
+            v-else-if="currentPartyCompleted"
+            class="evidence-completed"
+            data-evidence-completed
+          >
+            <strong>已封入证据袋</strong>
+            <span>等待{{ waitingCounterpartyLabel }}或举证时效结束</span>
+          </div>
+          <button
+            v-else
+            type="button"
+            data-complete-evidence
+            :disabled="completing"
+            @click="completeEvidence"
+          >
+            {{ completing ? "正在封入证据袋…" : "我方举证完成" }}
+          </button>
+        </footer>
+        <p v-if="error" class="evidence-error" role="alert">{{ error }}</p>
+      </section>
+    </div>
+
+    <div
+      v-if="selectedEvidence"
+      class="evidence-modal"
+      data-evidence-detail-modal
+      role="dialog"
+      aria-modal="true"
+      aria-label="证据详情"
+      @click.self="closeEvidenceDetail"
+    >
+      <section class="evidence-modal__panel">
+        <header>
+          <div>
+            <span class="evidence-kicker">EVIDENCE DETAIL</span>
+            <h2>{{ selectedEvidence.evidence_id }}</h2>
+            <p>{{ evidenceTypeLabels[selectedEvidence.evidence_type] || selectedEvidence.evidence_type }}</p>
+          </div>
+          <button type="button" data-close-evidence-modal @click="closeEvidenceDetail">
+            关闭
+          </button>
+        </header>
+        <div class="evidence-modal__facts">
+          <span>提交方：{{ evidenceOwnerLabel(selectedEvidence) }}</span>
+          <span>核验状态：{{ statusLabels[selectedEvidence.verification_status] || selectedEvidence.verification_status || "待核验" }}</span>
+          <span>置信度：{{ evidenceConfidenceCopy(selectedEvidence) }}</span>
+          <span v-if="evidenceOriginalFilename(selectedEvidence)">
+            原始文件：{{ evidenceOriginalFilename(selectedEvidence) }}
+          </span>
         </div>
-        <button
-          v-else
-          type="button"
-          data-complete-evidence
-          :disabled="completing"
-          @click="completeEvidence"
+        <article v-if="evidenceFeedback(selectedEvidence)">
+          <strong>书记官核验反馈</strong>
+          <p>{{ evidenceFeedback(selectedEvidence) }}</p>
+        </article>
+        <article v-if="evidenceParsedText(selectedEvidence)">
+          <strong>解析文本 / OCR</strong>
+          <p>{{ evidenceParsedText(selectedEvidence) }}</p>
+        </article>
+        <a
+          v-if="selectedEvidence.content_url"
+          class="evidence-modal__link"
+          :href="selectedEvidence.content_url"
+          target="_blank"
+          rel="noreferrer"
         >
-          {{ completing ? "正在封入证据袋…" : "我方举证完成" }}
-        </button>
-      </footer>
-      <p v-if="error" class="evidence-error" role="alert">{{ error }}</p>
+          打开原始材料
+        </a>
+      </section>
     </div>
   </RoomShell>
 </template>
 
 <style scoped>
-.evidence-room { display: grid; gap: 18px; }
-.evidence-dialogue {
+.evidence-room {
+  --evidence-panel-height: 740px;
   display: grid;
-  grid-template-columns: minmax(210px, .55fr) minmax(0, 1.45fr);
+  grid-template-columns: minmax(520px, 1.05fr) minmax(480px, .95fr);
   gap: 18px;
-  padding: 19px;
-  background: #ffffffcf;
-  border: 1px solid #e0e8f2;
-  border-radius: 25px;
+  align-items: start;
 }
-.evidence-dialogue h2 { margin: 5px 0; color: #34445d; }
-.evidence-dialogue p { margin: 0; color: #748196; line-height: 1.6; }
+
+.evidence-room__conversation,
+.evidence-board {
+  height: var(--evidence-panel-height);
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 18px;
+  overflow: hidden;
+  background: #ffffffbf;
+  border: 1px solid #dfe8f4;
+  border-radius: 28px;
+  box-shadow: 0 20px 55px #556d9512;
+}
+
+.evidence-room__conversation {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 0;
+}
+
+.evidence-room__case-note {
+  padding: 16px;
+  margin-bottom: 14px;
+  background: linear-gradient(135deg, #eef8ff, #fff5df);
+  border-radius: 20px;
+}
+
+.evidence-room__case-note span,
+.evidence-kicker {
+  color: #7186aa;
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: .16em;
+}
+
+.evidence-room__case-note h2 {
+  margin: 5px 0;
+  color: #34435c;
+  font-size: 21px;
+}
+
+.evidence-room__case-note p {
+  margin: 0;
+  color: #6f7d92;
+  line-height: 1.6;
+}
+
+.evidence-room__conversation-frame {
+  display: grid;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.evidence-room__conversation-frame :deep(.conversation-stream) {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.evidence-board {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto auto;
+  gap: 10px;
+}
+
+.evidence-board__header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.evidence-board__header h2 {
+  margin: 5px 0 2px;
+  color: #34435c;
+  font-size: 23px;
+}
+
+.evidence-board__header p {
+  margin: 0;
+  color: #718096;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.evidence-board__badge,
+.privacy-seal,
+.shared-seal {
+  height: max-content;
+  padding: 6px 9px;
+  color: #6179a0;
+  background: #fff;
+  border: 1px solid #e2ebf6;
+  border-radius: 999px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
 .evidence-uploader {
   display: grid;
-  grid-template-columns: auto 1fr auto;
-  gap: 18px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 12px;
   align-items: center;
-  padding: 20px 22px;
+  padding: 12px;
   background: linear-gradient(135deg, #fff9df, #edfbf4 52%, #edf6ff);
   border: 1px solid #dce9e4;
-  border-radius: 28px;
+  border-radius: 18px;
 }
-.evidence-uploader__illustration { display: flex; gap: 4px; font-size: 26px; }
-.evidence-uploader h2, .evidence-library h2 { margin: 4px 0; color: #31405a; }
-.evidence-uploader p { margin: 0; color: #6f7c90; }
-.evidence-kicker { color: #6f84a6; font-size: 10px; font-weight: 900; letter-spacing: .16em; }
-.evidence-uploader__button, .evidence-footer button {
-  padding: 12px 16px;
+
+.evidence-uploader__illustration {
+  display: flex;
+  gap: 2px;
+  font-size: 20px;
+}
+
+.evidence-uploader strong {
+  display: block;
+  color: #33435c;
+  font-size: 13px;
+}
+
+.evidence-uploader small {
+  display: block;
+  color: #718096;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.evidence-uploader__button,
+.evidence-footer button {
+  padding: 10px 13px;
   color: white;
   background: linear-gradient(135deg, #55b8df, #8585ef);
   border: 0;
-  border-radius: 14px;
+  border-radius: 13px;
   cursor: pointer;
-  font-weight: 800;
+  font-size: 12px;
+  font-weight: 900;
+  white-space: nowrap;
 }
-.evidence-uploader__button input { position: absolute; width: 1px; height: 1px; opacity: 0; }
-.evidence-libraries { display: grid; grid-template-columns: .8fr 1.2fr; gap: 16px; }
+
+.evidence-uploader__button input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.evidence-board__list {
+  display: grid;
+  min-height: 0;
+  gap: 10px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 4px;
+}
+
 .evidence-library {
   min-width: 0;
-  padding: 19px;
+  padding: 13px;
   background: #ffffffd9;
   border: 1px solid #e0e8f2;
-  border-radius: 26px;
-  box-shadow: 0 18px 45px #5b74910d;
+  border-radius: 20px;
+  box-shadow: 0 14px 30px #5b74910d;
 }
-.evidence-library--private { background: linear-gradient(160deg, #f5f0ff, #fff); }
-.evidence-library--shared { background: linear-gradient(160deg, #eaf8ff, #fff); }
-.evidence-library header { display: flex; justify-content: space-between; gap: 12px; }
-.privacy-seal, .shared-seal {
-  height: max-content;
-  padding: 6px 9px;
+
+.evidence-library--private {
+  background: linear-gradient(160deg, #f5f0ff, #fff);
+}
+
+.evidence-library--shared {
+  background: linear-gradient(160deg, #eaf8ff, #fff);
+}
+
+.evidence-library header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+  margin-bottom: 8px;
+}
+
+.evidence-library h3 {
+  margin: 3px 0 0;
+  color: #31405a;
+  font-size: 16px;
+}
+
+.privacy-seal {
   color: #725e98;
-  background: #fff;
-  border-radius: 999px;
-  font-size: 11px;
 }
-.shared-seal { color: #2e7b72; }
-.evidence-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+
+.shared-seal {
+  color: #2e7b72;
+}
+
+.evidence-grid {
+  display: grid;
+  gap: 9px;
+}
+
 .evidence-card {
   display: grid;
+  width: 100%;
   grid-template-columns: auto minmax(0, 1fr) auto;
   gap: 10px;
   align-items: center;
-  padding: 13px;
-  margin-top: 10px;
+  padding: 11px;
+  margin-top: 8px;
+  text-align: left;
   background: #fff;
   border: 1px solid #e4eaf2;
-  border-radius: 17px;
+  border-radius: 16px;
+  cursor: pointer;
+  transition: transform .16s ease, box-shadow .16s ease, border-color .16s ease;
 }
-.evidence-card__icon { display: grid; place-items: center; width: 38px; height: 38px; background: #f4f7fb; border-radius: 12px; }
-.evidence-card div:nth-child(2) { display: grid; min-width: 0; gap: 3px; }
-.evidence-card strong { overflow: hidden; color: #3b4960; text-overflow: ellipsis; }
-.evidence-card small { overflow: hidden; color: #8a96a8; text-overflow: ellipsis; }
-.evidence-card em { color: #647fb0; font-size: 10px; font-style: normal; }
-.verification-pill { padding: 5px 7px; border-radius: 999px; font-size: 10px; white-space: nowrap; }
+
+.evidence-card:hover {
+  transform: translateY(-1px);
+  border-color: #c9d8ef;
+  box-shadow: 0 12px 26px #536e9017;
+}
+
+.evidence-card__icon {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  background: #f4f7fb;
+  border-radius: 12px;
+  font-size: 18px;
+}
+
+.evidence-card__main,
+.evidence-card__meta {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.evidence-card__meta {
+  justify-items: end;
+}
+
+.evidence-card strong {
+  overflow: hidden;
+  color: #3b4960;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.evidence-card small {
+  overflow: hidden;
+  color: #8a96a8;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.evidence-card em {
+  color: #647fb0;
+  font-size: 10px;
+  font-style: normal;
+}
+
+.verification-pill,
+.confidence-pill {
+  padding: 5px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
 .verification-pill[data-verification="VERIFIED"] { color: #25704e; background: #dcf5e8; }
 .verification-pill[data-verification="PENDING"] { color: #68778e; background: #eef3f8; }
 .verification-pill[data-verification="PLAUSIBLE"] { color: #39708e; background: #e0f2ff; }
 .verification-pill[data-verification="SUSPICIOUS"] { color: #9b671b; background: #fff0c9; }
 .verification-pill[data-verification="REJECTED"] { color: #a34b55; background: #ffeaed; }
 .verification-pill[data-verification="NEEDS_HUMAN_REVIEW"] { color: #6e5799; background: #eee7ff; }
-.evidence-empty { color: #8b96a8; font-size: 13px; }
-.evidence-footer {
-  display: flex;
-  justify-content: space-between;
-  gap: 20px;
-  align-items: center;
-  padding: 16px 20px;
-  background: #fff;
-  border: 1px dashed #cfdaea;
-  border-radius: 20px;
+.confidence-pill[data-confidence="high"] { color: #287552; background: #e2f7eb; }
+.confidence-pill[data-confidence="medium"] { color: #a07816; background: #fff3c4; }
+.confidence-pill[data-confidence="low"] { color: #a04f58; background: #ffeaee; }
+.confidence-pill[data-confidence="unknown"] { color: #68778e; background: #eef3f8; }
+
+.evidence-empty {
+  margin: 8px 0 0;
+  color: #8b96a8;
+  font-size: 13px;
 }
-.evidence-footer div { display: grid; gap: 4px; color: #40506a; }
-.evidence-footer span { color: #7a879b; font-size: 12px; }
-.evidence-footer button { background: linear-gradient(135deg, #ff8b70, #ef6e91); }
-.evidence-footer button:disabled { cursor: default; opacity: .6; }
-.evidence-completed {
+
+.evidence-footer {
   display: grid;
-  min-width: 178px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: center;
+  padding-top: 10px;
+  border-top: 1px dashed #d7e2ef;
+}
+
+.evidence-footer div {
+  display: grid;
+  min-width: 0;
   gap: 4px;
+  color: #40506a;
+}
+
+.evidence-footer span {
+  color: #7a879b;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.evidence-footer button {
+  background: linear-gradient(135deg, #ff8b70, #ef6e91);
+}
+
+.evidence-footer button:disabled {
+  cursor: default;
+  opacity: .6;
+}
+
+.evidence-completed {
+  min-width: 178px;
   padding: 10px 14px;
   color: #357052;
   background: linear-gradient(135deg, #e2f7eb, #eef7ff);
@@ -680,17 +1177,101 @@ onBeforeUnmount(() => eventAbortController.abort());
   border-radius: 16px;
   text-align: center;
 }
+
 .evidence-completed strong { color: #2d6d4f; }
 .evidence-completed span { color: #5c7a6b; }
-.evidence-error { color: #a84552; }
-@media (max-width: 980px) {
-  .evidence-libraries { grid-template-columns: 1fr; }
-  .evidence-uploader { grid-template-columns: auto 1fr; }
-  .evidence-uploader__button { grid-column: 1 / -1; text-align: center; }
-  .evidence-dialogue { grid-template-columns: 1fr; }
+.evidence-error { margin: 0; color: #a84552; font-size: 12px; }
+
+.evidence-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: #25354a66;
+  backdrop-filter: blur(8px);
 }
+
+.evidence-modal__panel {
+  display: grid;
+  width: min(680px, 100%);
+  max-height: min(720px, 88vh);
+  gap: 14px;
+  padding: 22px;
+  overflow-y: auto;
+  background: linear-gradient(135deg, #ffffff, #f4f9ff);
+  border: 1px solid #dce7f4;
+  border-radius: 26px;
+  box-shadow: 0 28px 80px #22304740;
+}
+
+.evidence-modal__panel header {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.evidence-modal__panel h2 {
+  margin: 5px 0;
+  color: #2f3f58;
+  font-size: 20px;
+}
+
+.evidence-modal__panel p {
+  margin: 0;
+  color: #66758d;
+  line-height: 1.7;
+}
+
+.evidence-modal__panel button,
+.evidence-modal__link {
+  height: max-content;
+  padding: 9px 12px;
+  color: #5f6fd8;
+  background: #eef3ff;
+  border: 0;
+  border-radius: 12px;
+  cursor: pointer;
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.evidence-modal__facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.evidence-modal__facts span,
+.evidence-modal__panel article {
+  padding: 11px 12px;
+  color: #43526c;
+  background: #ffffffd9;
+  border: 1px solid #e2ebf6;
+  border-radius: 14px;
+}
+
+.evidence-modal__panel article strong {
+  display: block;
+  margin-bottom: 6px;
+  color: #33435c;
+}
+
+@media (max-width: 980px) {
+  .evidence-room { grid-template-columns: 1fr; }
+}
+
 @media (max-width: 620px) {
-  .evidence-grid { grid-template-columns: 1fr; }
-  .evidence-footer { align-items: stretch; flex-direction: column; }
+  .evidence-uploader,
+  .evidence-footer,
+  .evidence-modal__facts {
+    grid-template-columns: 1fr;
+  }
+
+  .evidence-uploader__button,
+  .evidence-footer button {
+    text-align: center;
+  }
 }
 </style>

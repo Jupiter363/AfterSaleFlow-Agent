@@ -12,6 +12,8 @@ from app.agents.evidence_clerk.skills.authenticity import EvidenceAuthenticitySk
 from app.harness.context_window import PromptSection
 from app.harness.memory import MemeoMemoryAssembler
 from app.schemas import (
+    EvidenceAuthenticityFlag,
+    EvidenceTurnQuestion,
     EvidenceTurnLlmOutput,
     EvidenceTurnRequest,
     EvidenceTurnResult,
@@ -99,6 +101,7 @@ def _reason_with_llm_node(model_runner: Any | None):
                 case_data={
                     "case_id": request.get("case_id"),
                     "room_type": request.get("room_type"),
+                    "turn_source": request.get("turn_source"),
                     "actor_role": request.get("actor_role"),
                     "agent_key": agent_context.get("agent_key"),
                     "prompt_profile_id": agent_context.get("prompt_profile_id"),
@@ -162,7 +165,14 @@ def _reason_with_llm_node(model_runner: Any | None):
 def _apply_authenticity_guardrails(state: EvidenceTurnGraphState) -> dict[str, Any]:
     output = state["llm_output"]
     request = EvidenceTurnRequest.model_validate(state["request"])
-    baseline = EvidenceAuthenticitySkill().draft(request)
+    opening_baseline = (
+        _opening_fallback_output(request)
+        if request.turn_source == "ROOM_OPENING"
+        else None
+    )
+    if opening_baseline is not None:
+        output = _coerce_room_opening_output(output, opening_baseline, request)
+    baseline = opening_baseline or EvidenceAuthenticitySkill().draft(request)
     evidence_requests = output.evidence_requests or baseline.evidence_requests
     verification_suggestions = (
         output.verification_suggestions or baseline.verification_suggestions
@@ -184,8 +194,83 @@ def _apply_authenticity_guardrails(state: EvidenceTurnGraphState) -> dict[str, A
     }
 
 
+def _coerce_room_opening_output(
+    output: EvidenceTurnLlmOutput,
+    baseline: EvidenceTurnLlmOutput,
+    request: EvidenceTurnRequest,
+) -> EvidenceTurnLlmOutput:
+    """Make the first evidence-room turn dossier-driven even if the LLM is generic."""
+
+    if _contains_opening_dossier_anchor(output.room_utterance, request):
+        room_utterance = output.room_utterance
+    else:
+        room_utterance = baseline.room_utterance
+    return EvidenceTurnLlmOutput(
+        room_utterance=room_utterance,
+        evidence_requests=_dedupe_questions(
+            [*baseline.evidence_requests, *output.evidence_requests]
+        ),
+        verification_suggestions=output.verification_suggestions,
+        authenticity_flags=_dedupe_flags(
+            [*baseline.authenticity_flags, *output.authenticity_flags]
+        ),
+        confidence=max(float(output.confidence), float(baseline.confidence)),
+    )
+
+
+def _contains_opening_dossier_anchor(
+    text: str,
+    request: EvidenceTurnRequest,
+) -> bool:
+    normalized = text.casefold()
+    return any(anchor.casefold() in normalized for anchor in _opening_dossier_anchors(request))
+
+
+def _opening_dossier_anchors(request: EvidenceTurnRequest) -> list[str]:
+    dossier = request.case_intake_dossier or {}
+    dispute_focus = _dict_value(dossier.get("dispute_focus"))
+    case_story = _dict_value(dossier.get("case_story"))
+    anchors: list[str] = []
+    core_issue = str(dispute_focus.get("core_issue") or "").strip()
+    if core_issue:
+        anchors.append(core_issue)
+    anchors.extend(_string_list(dispute_focus.get("facts_to_verify")))
+    summary = str(case_story.get("one_sentence_summary") or "").strip()
+    if summary:
+        anchors.append(summary[:32])
+    return [anchor for anchor in anchors if len(anchor) >= 4]
+
+
+def _dedupe_questions(
+    questions: list[EvidenceTurnQuestion],
+) -> list[EvidenceTurnQuestion]:
+    result: list[EvidenceTurnQuestion] = []
+    seen: set[str] = set()
+    for question in questions:
+        key = question.question.strip().casefold()
+        if key and key not in seen:
+            result.append(question)
+            seen.add(key)
+    return result
+
+
+def _dedupe_flags(
+    flags: list[EvidenceAuthenticityFlag],
+) -> list[EvidenceAuthenticityFlag]:
+    result: list[EvidenceAuthenticityFlag] = []
+    seen: set[tuple[str | None, str, str]] = set()
+    for flag in flags:
+        key = (flag.evidence_id, flag.flag_type, flag.description)
+        if key not in seen:
+            result.append(flag)
+            seen.add(key)
+    return result
+
+
 def _fallback_output(state: EvidenceTurnGraphState) -> EvidenceTurnLlmOutput:
     request = EvidenceTurnRequest.model_validate(state["request"])
+    if request.turn_source == "ROOM_OPENING":
+        return _opening_fallback_output(request)
     draft = EvidenceAuthenticitySkill().draft(request)
     return EvidenceTurnLlmOutput(
         room_utterance=(
@@ -197,6 +282,76 @@ def _fallback_output(state: EvidenceTurnGraphState) -> EvidenceTurnLlmOutput:
         authenticity_flags=draft.authenticity_flags,
         confidence=draft.confidence,
     )
+
+
+def _opening_fallback_output(request: EvidenceTurnRequest) -> EvidenceTurnLlmOutput:
+    dossier = request.case_intake_dossier or {}
+    dispute_focus = _dict_value(dossier.get("dispute_focus"))
+    case_story = _dict_value(dossier.get("case_story"))
+    core_issue = str(dispute_focus.get("core_issue") or "争议焦点待确认")
+    facts = _string_list(dispute_focus.get("facts_to_verify"))
+    if not facts:
+        facts = [
+            "原始证据文件",
+            "证据形成时间",
+            "证据来源路径",
+            "与接待室案情的关联事实",
+        ]
+    summary = _normalize_sentence(str(case_story.get("one_sentence_summary") or ""))
+    facts_text = "、".join(facts)
+    story_text = f"。接待室案情摘要：{summary}" if summary else "。"
+    room_utterance = (
+        f"我先根据接待室收敛的案情开始举证核对。本案当前争议焦点是 {core_issue}，"
+        f"首轮请围绕这些材料补充证据：{facts_text}{story_text}"
+        "你可以上传文件，也可以先说明证据来源、形成时间、保存方式和能证明的事实；"
+        "证据不足不会阻止进入小法庭，但我会标出置信度和待核验点。"
+    )
+    evidence_requests = [
+        EvidenceTurnQuestion(
+            question_id=f"QUESTION_OPENING_FACT_{index}",
+            target_evidence_id=None,
+            question=(
+                f"请补充或说明「{fact}」对应的原始材料、形成时间、来源路径，"
+                f"以及它如何关联争议焦点 {core_issue}。"
+            ),
+            reason=f"接待室案情把「{fact}」列为首轮需要核验的事实材料。",
+        )
+        for index, fact in enumerate(facts, start=1)
+    ]
+    return EvidenceTurnLlmOutput(
+        room_utterance=room_utterance,
+        evidence_requests=evidence_requests[:10],
+        verification_suggestions=[],
+        authenticity_flags=[
+            EvidenceAuthenticityFlag(
+                evidence_id=None,
+                flag_type="OPENING_EVIDENCE_GAPS",
+                description=f"首轮举证需要围绕 {core_issue} 补齐：{facts_text}。",
+                severity="MEDIUM",
+            )
+        ],
+        confidence=0.42,
+    )
+
+
+def _dict_value(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    for item in value:
+        text = str(item).strip()
+        if text:
+            result.append(text)
+    return result
+
+
+def _normalize_sentence(text: str) -> str:
+    stripped = text.strip()
+    return stripped.rstrip("。.!！?？") + "。" if stripped else ""
 
 
 def _sanitize_non_final(text: str) -> str:

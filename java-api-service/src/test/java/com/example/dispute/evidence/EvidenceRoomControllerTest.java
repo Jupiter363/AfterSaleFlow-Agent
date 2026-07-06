@@ -69,6 +69,12 @@ class EvidenceRoomControllerTest {
                                                 "PRIVATE",
                                                 null,
                                                 true,
+                                                null,
+                                                null,
+                                                null,
+                                                null,
+                                                null,
+                                                null,
                                                 null))));
 
         mockMvc.perform(

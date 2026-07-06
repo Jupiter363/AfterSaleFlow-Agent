@@ -16,6 +16,7 @@ vi.mock("../../api/evidence", () => ({
 
 vi.mock("../../api/rooms", () => ({
   roomApi: {
+    ensureOpening: vi.fn(),
     messages: vi.fn(),
     postMessage: vi.fn(),
   },
@@ -32,6 +33,11 @@ const catalog = {
       content_url: "/objects/user-original.png",
       redacted: false,
       verification_status: "VERIFIED",
+      confidence_score: 0.92,
+      confidence_level: "HIGH",
+      verification_feedback: "原始截图来源清晰，时间线可核对。",
+      original_filename: "user-original.png",
+      parsed_text: "用户开箱时拍摄的表盘划痕照片。",
     },
     {
       evidence_id: "EVIDENCE_USER_SHARED",
@@ -127,6 +133,13 @@ describe("EvidenceRoomView", () => {
     evidenceApi.catalog.mockResolvedValue(catalog);
     evidenceApi.completion.mockResolvedValue(initialCompletion);
     evidenceApi.upload.mockResolvedValue({});
+    roomApi.ensureOpening.mockResolvedValue({
+      id: "EVIDENCE_OPENING",
+      sequence_no: 1,
+      sender_role: "CUSTOMER_SERVICE",
+      message_type: "AGENT_MESSAGE",
+      message_text: "请先补充与接待室案情匹配的证据来源、形成时间和原件。",
+    });
     roomApi.messages.mockResolvedValue([]);
     roomApi.postMessage.mockResolvedValue({
       id: "MESSAGE_POSTED",
@@ -134,6 +147,231 @@ describe("EvidenceRoomView", () => {
       sender_role: "USER",
       message_text: "posted",
     });
+  });
+
+  it("renders an intake-like fixed two-panel evidence room", async () => {
+    const { wrapper } = await mountView();
+
+    expect(wrapper.get("[data-evidence-room-layout]").exists()).toBe(true);
+    expect(wrapper.get("[data-evidence-chat-panel]").exists()).toBe(true);
+    expect(wrapper.get("[data-evidence-board-panel]").exists()).toBe(true);
+    expect(wrapper.get("[data-evidence-list-scroll]").exists()).toBe(true);
+    expect(
+      wrapper.get("[data-evidence-board-panel]").find(".evidence-uploader").exists(),
+    ).toBe(true);
+  });
+
+  it("shows confidence feedback and keeps completion available for low confidence evidence", async () => {
+    const lowConfidenceCatalog = {
+      ...catalog,
+      items: [
+        {
+          ...catalog.items[0],
+          confidence_score: 0.31,
+          confidence_level: "LOW",
+          verification_feedback: "证据来源仍需补充，当前只能作为低置信参考。",
+          verification_status: "SUSPICIOUS",
+        },
+      ],
+    };
+    const { wrapper } = await mountView({ initialCatalog: lowConfidenceCatalog });
+
+    expect(wrapper.get("[data-evidence-confidence]").text()).toContain("31%");
+    expect(wrapper.get("[data-evidence-confidence]").text()).toContain("低置信");
+    expect(wrapper.get("[data-complete-evidence]").element.disabled).toBe(false);
+  });
+
+  it("opens a submitted evidence detail modal from a card", async () => {
+    const { wrapper } = await mountView();
+
+    await wrapper.get("[data-evidence-card]").trigger("click");
+
+    const modal = wrapper.get("[data-evidence-detail-modal]");
+    expect(modal.text()).toContain("EVIDENCE_USER_PRIVATE");
+    expect(modal.text()).toContain("92%");
+    expect(modal.text()).toContain("原始截图来源清晰");
+    expect(modal.text()).toContain("user-original.png");
+
+    await modal.get("[data-close-evidence-modal]").trigger("click");
+    expect(wrapper.find("[data-evidence-detail-modal]").exists()).toBe(false);
+  });
+
+  it("ensures the evidence clerk opens the first actor-scoped turn only for an empty thread", async () => {
+    roomApi.messages.mockResolvedValueOnce([]);
+    roomApi.messages.mockResolvedValueOnce([
+      {
+        id: "EVIDENCE_OPENING",
+        sequence_no: 1,
+        sender_role: "CUSTOMER_SERVICE",
+        message_type: "AGENT_MESSAGE",
+        message_text: "请根据接待室案情先补充质检视频、物流记录和原图。",
+      },
+    ]);
+
+    const { wrapper } = await mountView({ initialMessages: null });
+    await flushPromises();
+
+    expect(roomApi.ensureOpening).toHaveBeenCalledWith(
+      expect.objectContaining({ role: "USER" }),
+      "CASE_EVIDENCE_1",
+      "EVIDENCE",
+    );
+    expect(roomApi.messages).toHaveBeenCalledWith(
+      expect.objectContaining({ role: "USER" }),
+      "CASE_EVIDENCE_1",
+      "EVIDENCE",
+    );
+    expect(wrapper.text()).toContain("请根据接待室案情先补充质检视频");
+  });
+
+  it("does not append a clerk opening when the actor already has an evidence conversation", async () => {
+    roomApi.messages.mockResolvedValueOnce([
+      {
+        id: "USER_EXISTING_EVIDENCE_TURN",
+        sequence_no: 4,
+        sender_role: "USER",
+        message_type: "PARTY_TEXT",
+        message_text: "I already started this evidence conversation.",
+      },
+    ]);
+
+    const { wrapper } = await mountView({ initialMessages: null });
+    await flushPromises();
+
+    expect(roomApi.ensureOpening).not.toHaveBeenCalled();
+    expect(wrapper.text()).toContain("I already started this evidence conversation.");
+  });
+
+  it("requests a dossier-specific opening upgrade for a stale generic clerk welcome", async () => {
+    roomApi.messages.mockResolvedValueOnce([
+      {
+        id: "STALE_GENERIC_OPENING",
+        sequence_no: 1,
+        sender_role: "CUSTOMER_SERVICE",
+        message_type: "AGENT_MESSAGE",
+        message_text: "您好！我是您的证据书记官，请上传与本案相关的证据材料。",
+      },
+    ]);
+    roomApi.messages.mockResolvedValueOnce([
+      {
+        id: "STALE_GENERIC_OPENING",
+        sequence_no: 1,
+        sender_role: "CUSTOMER_SERVICE",
+        message_type: "AGENT_MESSAGE",
+        message_text: "您好！我是您的证据书记官，请上传与本案相关的证据材料。",
+      },
+      {
+        id: "DOSSIER_OPENING",
+        sequence_no: 2,
+        sender_role: "CUSTOMER_SERVICE",
+        message_type: "AGENT_MESSAGE",
+        message_text:
+          "我先根据接待室收敛的案情开始举证核对，请补充商家质检视频、用户划痕原图和物流签收记录。",
+      },
+    ]);
+
+    const { wrapper } = await mountView({ initialMessages: null });
+    await flushPromises();
+
+    expect(roomApi.ensureOpening).toHaveBeenCalledWith(
+      expect.objectContaining({ role: "USER" }),
+      "CASE_EVIDENCE_1",
+      "EVIDENCE",
+    );
+    expect(wrapper.text()).toContain("接待室收敛的案情");
+    expect(wrapper.text()).toContain("商家质检视频");
+  });
+
+  it("requests an opening upgrade when earlier fallback openings still have no case focus", async () => {
+    roomApi.messages.mockResolvedValueOnce([
+      {
+        id: "STALE_GENERIC_OPENING",
+        sequence_no: 1,
+        sender_role: "CUSTOMER_SERVICE",
+        message_type: "AGENT_MESSAGE",
+        message_text: "您好！我是您的证据书记官，请上传与本案相关的证据材料。",
+      },
+      {
+        id: "STALE_PENDING_FOCUS_OPENING",
+        sequence_no: 2,
+        sender_role: "CUSTOMER_SERVICE",
+        message_type: "AGENT_MESSAGE",
+        message_text:
+          "我先根据接待室收敛的案情开始举证核对。本案当前争议焦点是 争议焦点待确认，首轮请围绕这些材料补充证据：原始证据文件、证据形成时间、证据来源路径。",
+      },
+    ]);
+    roomApi.messages.mockResolvedValueOnce([
+      {
+        id: "STALE_GENERIC_OPENING",
+        sequence_no: 1,
+        sender_role: "CUSTOMER_SERVICE",
+        message_type: "AGENT_MESSAGE",
+        message_text: "您好！我是您的证据书记官，请上传与本案相关的证据材料。",
+      },
+      {
+        id: "STALE_PENDING_FOCUS_OPENING",
+        sequence_no: 2,
+        sender_role: "CUSTOMER_SERVICE",
+        message_type: "AGENT_MESSAGE",
+        message_text:
+          "我先根据接待室收敛的案情开始举证核对。本案当前争议焦点是 争议焦点待确认，首轮请围绕这些材料补充证据：原始证据文件、证据形成时间、证据来源路径。",
+      },
+      {
+        id: "DOSSIER_OPENING",
+        sequence_no: 3,
+        sender_role: "CUSTOMER_SERVICE",
+        message_type: "AGENT_MESSAGE",
+        message_text:
+          "我先根据接待室收敛的案情开始举证核对。本案当前争议焦点是 SIGNED_NOT_RECEIVED，请补充物流签收记录、投递轨迹和收货地址匹配记录。",
+      },
+    ]);
+
+    const { wrapper } = await mountView({ initialMessages: null });
+    await flushPromises();
+
+    expect(roomApi.ensureOpening).toHaveBeenCalledWith(
+      expect.objectContaining({ role: "USER" }),
+      "CASE_EVIDENCE_1",
+      "EVIDENCE",
+    );
+    expect(wrapper.text()).not.toContain("您好！我是您的证据书记官");
+    expect(wrapper.text()).toContain("SIGNED_NOT_RECEIVED");
+    expect(wrapper.text()).toContain("物流签收记录");
+  });
+
+  it("still opens the evidence clerk conversation when the evidence catalog is not created yet", async () => {
+    const missingCatalog = new Error("catalog not found");
+    missingCatalog.code = "EVIDENCE_NOT_FOUND";
+    evidenceApi.catalog.mockRejectedValueOnce(missingCatalog);
+    roomApi.messages
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          id: "EVIDENCE_OPENING_WITH_EMPTY_CATALOG",
+          sequence_no: 1,
+          sender_role: "CUSTOMER_SERVICE",
+          message_type: "AGENT_MESSAGE",
+          message_text: "Please provide evidence source, timestamp and original file.",
+        },
+      ]);
+
+    const { wrapper } = await mountView({
+      initialCatalog: null,
+      initialMessages: null,
+      eventStreamer: vi.fn(async () => {}),
+    });
+    await flushPromises();
+    await flushPromises();
+
+    expect(roomApi.ensureOpening).toHaveBeenCalledWith(
+      expect.objectContaining({ role: "USER" }),
+      "CASE_EVIDENCE_1",
+      "EVIDENCE",
+    );
+    expect(wrapper.text()).toContain(
+      "Please provide evidence source, timestamp and original file.",
+    );
+    expect(wrapper.find('[role="alert"]').exists()).toBe(false);
   });
 
   it("separates my originals from the shared dossier and renders all verification states", async () => {

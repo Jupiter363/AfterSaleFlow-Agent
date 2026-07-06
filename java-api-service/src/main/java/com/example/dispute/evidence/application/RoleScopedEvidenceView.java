@@ -11,5 +11,11 @@ public record RoleScopedEvidenceView(String caseId, List<Item> items) {
             String visibility,
             String contentUrl,
             boolean redacted,
-            EvidenceVerificationStatus verificationStatus) {}
+            EvidenceVerificationStatus verificationStatus,
+            Double confidenceScore,
+            String confidenceLevel,
+            String verificationFeedback,
+            String sourceType,
+            String originalFilename,
+            String parsedText) {}
 }

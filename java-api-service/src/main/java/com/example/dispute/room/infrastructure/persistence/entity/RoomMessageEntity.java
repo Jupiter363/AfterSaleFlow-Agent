@@ -159,6 +159,7 @@ public class RoomMessageEntity extends AbstractEntity {
     public MessageType getMessageType() { return messageType; }
     public String getMessageText() { return messageText; }
     public String getAttachmentRefsJson() { return attachmentRefsJson; }
+    public String getIdempotencyKey() { return idempotencyKey; }
     public Instant getCreatedAt() { return createdAt; }
 
     private static String required(String value, String field) {

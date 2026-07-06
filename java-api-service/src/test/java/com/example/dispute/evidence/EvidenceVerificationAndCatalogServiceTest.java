@@ -104,6 +104,51 @@ class EvidenceVerificationAndCatalogServiceTest {
     }
 
     @Test
+    void catalogIncludesLatestVerificationConfidenceFeedback() {
+        FulfillmentCaseEntity dispute = evidenceCase();
+        EvidenceItemEntity sharedEvidence =
+                evidence("EVIDENCE_CONFIDENCE", "USER", "user-local", "PARTIES");
+        EvidenceVerificationEntity latestVerification =
+                EvidenceVerificationEntity.create(
+                        "VERIFY_CONFIDENCE",
+                        dispute.getId(),
+                        sharedEvidence.getId(),
+                        3,
+                        EvidenceVerificationStatus.PLAUSIBLE,
+                        "{}",
+                        "{\"confidence_score\":0.82,\"confidence_level\":\"HIGH\",\"verification_feedback\":\"原始图片时间线与物流节点基本一致。\"}",
+                        "{\"summary\":\"OCR 与物流签收时间可互相印证\"}",
+                        false,
+                        Instant.parse("2026-07-03T01:00:00Z"),
+                        "evidence-clerk",
+                        "TRACE_CONFIDENCE");
+        when(caseRepository.findById(dispute.getId())).thenReturn(Optional.of(dispute));
+        when(evidenceRepository
+                        .findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(
+                                dispute.getId()))
+                .thenReturn(List.of(sharedEvidence));
+        when(verificationRepository
+                        .findTopByEvidenceIdOrderByVerificationVersionDesc(
+                                sharedEvidence.getId()))
+                .thenReturn(Optional.of(latestVerification));
+
+        var catalog =
+                catalogService.catalog(
+                        dispute.getId(),
+                        new AuthenticatedActor("user-local", ActorRole.USER));
+
+        assertThat(catalog.items()).singleElement().satisfies(
+                item -> {
+                    assertThat(item.evidenceId()).isEqualTo("EVIDENCE_CONFIDENCE");
+                    assertThat(item.verificationStatus()).isEqualTo(EvidenceVerificationStatus.PLAUSIBLE);
+                    assertThat(item.confidenceScore()).isEqualTo(0.82);
+                    assertThat(item.confidenceLevel()).isEqualTo("HIGH");
+                    assertThat(item.verificationFeedback())
+                            .isEqualTo("原始图片时间线与物流节点基本一致。");
+                });
+    }
+
+    @Test
     void deterministicProvenanceCanVerifyButInvalidMimeIsRejectedAndRemainsAuditable() {
         FulfillmentCaseEntity dispute = evidenceCase();
         EvidenceItemEntity item =
