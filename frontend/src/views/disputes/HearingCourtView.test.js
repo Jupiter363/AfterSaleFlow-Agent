@@ -142,8 +142,10 @@ describe("HearingCourtView", () => {
     expect(wrapper.get("[data-court-transcript]").text()).toContain("主审法官");
     expect(wrapper.get("[data-court-transcript]").text()).not.toContain("庭审记录大屏");
     expect(wrapper.get('[data-court-message="judge"]').classes()).toContain("court-message--judge-bench-card");
+    expect(wrapper.get('[data-court-message="judge"]').classes()).toContain("court-message--tall-narrow-card");
     expect(wrapper.get('[data-court-message="judge"]').text()).toContain("法官宣读");
     expect(wrapper.get('[data-court-message="jury"]').classes()).toContain("court-message--jury-review-card");
+    expect(wrapper.get('[data-court-message="jury"]').classes()).toContain("court-message--tall-narrow-card");
     expect(wrapper.get('[data-court-message="jury"]').text()).toContain("评审团观察");
     expect(wrapper.get("[data-round-input-bar]").text()).toContain(
       "本轮陈述输入台",

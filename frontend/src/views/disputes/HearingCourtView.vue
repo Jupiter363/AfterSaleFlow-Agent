@@ -805,6 +805,7 @@ onBeforeUnmount(() => eventAbortController.abort());
                 `court-message--${item.type}`,
                 item.type === 'judge' ? 'court-message--judge-bench-card' : '',
                 item.type === 'jury' ? 'court-message--jury-review-card' : '',
+                ['judge', 'jury'].includes(item.type) ? 'court-message--tall-narrow-card' : '',
               ]"
               :data-court-message="item.type"
             >
@@ -1905,7 +1906,6 @@ onBeforeUnmount(() => eventAbortController.abort());
 }
 .court-message--judge {
   justify-self: center;
-  width: 66%;
   background:
     radial-gradient(circle at 9% 12%, #ffe8a8 0 18%, transparent 19%),
     linear-gradient(135deg, #fffdf6 0%, #f4fbff 52%, #fff7e7 100%);
@@ -1920,7 +1920,6 @@ onBeforeUnmount(() => eventAbortController.abort());
   content: "⚖";
 }
 .court-message--judge-bench-card {
-  width: min(78%, 640px);
   padding: 14px 18px 15px;
   border-radius: 22px 22px 26px 26px;
 }
@@ -1955,8 +1954,7 @@ onBeforeUnmount(() => eventAbortController.abort());
   border: 1px solid #f3d8bc;
 }
 .court-message--jury {
-  justify-self: stretch;
-  max-width: 100%;
+  justify-self: center;
   background:
     radial-gradient(circle at 7% 0, #efe8ff 0 18%, transparent 19%),
     linear-gradient(135deg, #fbf8ff 0%, #f1fbf7 48%, #fffdf4 100%);
@@ -1970,6 +1968,16 @@ onBeforeUnmount(() => eventAbortController.abort());
   gap: 8px;
   padding: 13px 16px;
   border-radius: 24px;
+}
+.court-message--tall-narrow-card {
+  box-sizing: border-box;
+  align-content: start;
+  width: min(52%, 430px);
+  max-width: min(52%, 430px);
+  min-height: 176px;
+}
+.court-message--tall-narrow-card p {
+  max-width: 92%;
 }
 .court-message--jury-review-card header small {
   color: #6b5ac5;
