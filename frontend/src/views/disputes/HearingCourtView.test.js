@@ -84,6 +84,7 @@ describe("HearingCourtView", () => {
     expect(statusDock.text()).toContain("第 2 轮");
     expect(statusDock.text()).not.toContain("HEARING STAGE DOCK");
     expect(statusDock.classes()).toContain("hearing-stage-dock--fixed-dashboard");
+    expect(statusDock.classes()).toContain("hearing-stage-dock--short");
     expect(statusDock.find(".hearing-stage-dock__copy p").exists()).toBe(false);
     expect(statusDock.find(".hearing-stage-dock__copy").classes()).toContain(
       "hearing-stage-dock__copy--single-line",

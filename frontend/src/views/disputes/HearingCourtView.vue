@@ -757,7 +757,7 @@ onBeforeUnmount(() => eventAbortController.abort());
 
       <section class="courtroom-center">
         <section
-          class="hearing-stage-dock hearing-stage-dock--fixed-dashboard"
+          class="hearing-stage-dock hearing-stage-dock--fixed-dashboard hearing-stage-dock--short"
           :class="`hearing-stage-dock--${stageDockMode}`"
           data-hearing-stage-dock
         >
@@ -1436,13 +1436,13 @@ onBeforeUnmount(() => eventAbortController.abort());
   box-sizing: border-box;
   position: relative;
   display: grid;
-  grid-template-rows: minmax(0, 1fr) 56px;
+  grid-template-rows: 30px 56px;
   gap: 0;
   width: 100%;
-  height: 134px;
-  min-height: 134px;
-  max-height: 134px;
-  padding: 10px 16px 7px;
+  height: 106px;
+  min-height: 106px;
+  max-height: 106px;
+  padding: 8px 16px 7px;
   overflow: hidden;
   background:
     radial-gradient(circle at 7% 0, #fff3cf 0 15%, transparent 16%),
@@ -1468,9 +1468,9 @@ onBeforeUnmount(() => eventAbortController.abort());
 .hearing-stage-dock::after {
   position: absolute;
   right: 16px;
-  bottom: 46px;
-  width: 118px;
-  height: 118px;
+  bottom: 20px;
+  width: 96px;
+  height: 96px;
   pointer-events: none;
   content: "";
   background:
@@ -1500,6 +1500,7 @@ onBeforeUnmount(() => eventAbortController.abort());
   align-items: flex-start;
   min-width: 0;
   min-height: 0;
+  height: 30px;
 }
 .hearing-stage-dock__copy {
   position: relative;
@@ -1537,7 +1538,7 @@ onBeforeUnmount(() => eventAbortController.abort());
   display: grid;
   gap: 2px;
   justify-items: end;
-  padding-top: 2px;
+  padding-top: 0;
   white-space: nowrap;
 }
 .hearing-stage-dock__clock span {
@@ -1548,7 +1549,7 @@ onBeforeUnmount(() => eventAbortController.abort());
 }
 .hearing-stage-dock__clock strong {
   color: #1598d5;
-  font-size: 24px;
+  font-size: 21px;
   line-height: 1;
   letter-spacing: .02em;
 }
