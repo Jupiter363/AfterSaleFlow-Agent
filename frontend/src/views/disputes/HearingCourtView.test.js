@@ -149,6 +149,8 @@ describe("HearingCourtView", () => {
     expect(wrapper.get('[data-court-message="jury"]').classes()).toContain("court-message--tall-narrow-card");
     expect(wrapper.get('[data-court-message="jury"]').classes()).toContain("court-message--extended-length-card");
     expect(wrapper.get('[data-court-message="jury"]').text()).toContain("评审团观察");
+    expect(wrapper.get('[data-court-message="user"]').classes()).toContain("court-message--party-statement-card");
+    expect(wrapper.get('[data-court-message="merchant"]').classes()).toContain("court-message--party-statement-card");
     expect(wrapper.get("[data-round-input-bar]").text()).toContain(
       "本轮陈述输入台",
     );

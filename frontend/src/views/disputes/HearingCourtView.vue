@@ -807,6 +807,7 @@ onBeforeUnmount(() => eventAbortController.abort());
                 item.type === 'jury' ? 'court-message--jury-review-card' : '',
                 ['judge', 'jury'].includes(item.type) ? 'court-message--tall-narrow-card' : '',
                 ['judge', 'jury'].includes(item.type) ? 'court-message--extended-length-card' : '',
+                ['user', 'merchant'].includes(item.type) ? 'court-message--party-statement-card' : '',
               ]"
               :data-court-message="item.type"
             >
@@ -1946,13 +1947,36 @@ onBeforeUnmount(() => eventAbortController.abort());
 }
 .court-message--user {
   justify-self: start;
-  background: #eef9ff;
+  background:
+    radial-gradient(circle at 8% 0, #dff6ff 0 17%, transparent 18%),
+    linear-gradient(135deg, #eef9ff 0%, #f9fdff 100%);
   border: 1px solid #cde9f8;
 }
 .court-message--merchant {
   justify-self: end;
-  background: #fff6ec;
+  background:
+    radial-gradient(circle at 92% 0, #ffe7c2 0 16%, transparent 17%),
+    linear-gradient(135deg, #fffaf3 0%, #fff6ec 100%);
   border: 1px solid #f3d8bc;
+}
+.court-message--party-statement-card {
+  box-sizing: border-box;
+  width: min(62%, 520px);
+  max-width: min(62%, 520px);
+  min-height: 92px;
+  padding: 15px 18px;
+  border-radius: 24px;
+  box-shadow:
+    inset 0 1px 0 #fff,
+    0 12px 26px #506c9412;
+}
+.court-message--party-statement-card header {
+  font-size: 11px;
+}
+.court-message--party-statement-card p {
+  color: #465a74;
+  font-size: 13px;
+  line-height: 1.72;
 }
 .court-message--jury {
   justify-self: center;
