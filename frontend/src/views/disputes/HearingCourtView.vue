@@ -762,7 +762,7 @@ onBeforeUnmount(() => eventAbortController.abort());
           data-hearing-stage-dock
         >
           <header class="hearing-stage-dock__header">
-            <div class="hearing-stage-dock__copy">
+            <div class="hearing-stage-dock__copy hearing-stage-dock__copy--single-line">
               <span>当前庭审状态</span>
               <h2>{{ stageDockTitle }}</h2>
             </div>
@@ -1436,13 +1436,13 @@ onBeforeUnmount(() => eventAbortController.abort());
   box-sizing: border-box;
   position: relative;
   display: grid;
-  grid-template-rows: minmax(0, 1fr) 60px;
-  gap: 2px;
+  grid-template-rows: minmax(0, 1fr) 56px;
+  gap: 0;
   width: 100%;
-  height: 150px;
-  min-height: 150px;
-  max-height: 150px;
-  padding: 12px 16px 7px;
+  height: 134px;
+  min-height: 134px;
+  max-height: 134px;
+  padding: 10px 16px 7px;
   overflow: hidden;
   background:
     radial-gradient(circle at 7% 0, #fff3cf 0 15%, transparent 16%),
@@ -1507,22 +1507,29 @@ onBeforeUnmount(() => eventAbortController.abort());
   min-width: 0;
   max-width: min(520px, calc(100% - 170px));
 }
+.hearing-stage-dock__copy--single-line {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  max-width: min(610px, calc(100% - 170px));
+  white-space: nowrap;
+}
 .hearing-stage-dock__copy span {
+  flex: 0 0 auto;
   color: #7590ad;
   font-size: 10px;
   font-weight: 900;
   letter-spacing: .14em;
 }
 .hearing-stage-dock__copy h2 {
-  display: -webkit-box;
+  display: block;
   overflow: hidden;
   margin: 2px 0 0;
   color: #30415c;
-  font-size: 18.5px;
+  font-size: 18px;
   line-height: 1.12;
   text-overflow: ellipsis;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+  white-space: nowrap;
 }
 .hearing-stage-dock__clock {
   position: relative;
@@ -1573,8 +1580,8 @@ onBeforeUnmount(() => eventAbortController.abort());
   gap: 0;
   align-self: end;
   align-items: end;
-  height: 60px;
-  padding: 4px 18px 0;
+  height: 56px;
+  padding: 2px 18px 0;
   overflow: visible;
   background: transparent;
   border: 0;
@@ -1588,7 +1595,7 @@ onBeforeUnmount(() => eventAbortController.abort());
   gap: 6px;
   align-items: start;
   min-width: 0;
-  height: 52px;
+  height: 50px;
   padding: 0;
   overflow: visible;
   color: #91a0b4;
