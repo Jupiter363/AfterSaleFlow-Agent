@@ -286,9 +286,15 @@ const stageDockBadge = computed(() => {
   if (currentActorSubmitted.value) return "等待对方";
   return "进行中";
 });
-const stageDockBadgeVisible = computed(
-  () => !(reviewHandoffVisible.value && !reviewGateOpen.value),
-);
+const stageDockClock = computed(() => {
+  if (reviewHandoffVisible.value || activeRoundClosed.value) {
+    return { label: "当前轮次还剩：", value: "00:00" };
+  }
+  if (activeRoundDeadline.value) {
+    return { label: "当前轮次还剩：", value: "04:18" };
+  }
+  return { label: "当前轮次还剩：", value: "05:00" };
+});
 const roundProgressItems = computed(() =>
   Array.from({ length: props.roundLimit }, (_, index) => {
     const roundNumber = index + 1;
@@ -307,6 +313,7 @@ const roundProgressItems = computed(() =>
       label: roundStepLabels[index] || `第 ${roundNumber} 轮`,
       status,
       tone,
+      connectorTone: index < props.roundLimit - 1 ? (tone === "complete" ? "complete" : "pending") : "none",
     };
   }),
 );
@@ -347,16 +354,6 @@ const judgeReviewStatus = computed(() => {
   if (activeRoundClosed.value) return { label: "法官/评审", value: "法官处理中", tone: "processing" };
   if (stageDockMode.value === "waiting") return { label: "法官/评审", value: "等待双方陈述", tone: "waiting" };
   return { label: "法官/评审", value: "法官提问中", tone: "active" };
-});
-const nextStepHint = computed(() => {
-  if (reviewHandoffVisible.value) {
-    return reviewGateOpen.value
-      ? "裁决草案已生成，等待审核员确认最终结果。"
-      : "AI 法官将基于三轮陈述和证据生成确定裁决方案草案。";
-  }
-  if (activeRoundClosed.value) return "法官将读取本轮封存记录，生成下一轮问题或裁决草案。";
-  if (currentActorSubmitted.value) return `等待${counterpartyLabel.value}提交，或倒计时结束后自动封存。`;
-  return "双方完成陈述并提交后，本轮会自动封存进入法官处理。";
 });
 const mockTranscriptItems = computed(() => [
   {
@@ -768,15 +765,11 @@ onBeforeUnmount(() => eventAbortController.abort());
             <div class="hearing-stage-dock__copy">
               <span>当前庭审状态</span>
               <h2>{{ stageDockTitle }}</h2>
-              <p>{{ nextStepHint }}</p>
             </div>
-            <strong
-              v-if="stageDockBadgeVisible"
-              class="hearing-stage-dock__badge"
-              data-hearing-stage-badge
-            >
-              {{ stageDockBadge }}
-            </strong>
+            <div class="hearing-stage-dock__clock" data-hearing-stage-clock>
+              <span>{{ stageDockClock.label }}</span>
+              <strong>{{ stageDockClock.value }}</strong>
+            </div>
           </header>
 
           <div
@@ -790,6 +783,7 @@ onBeforeUnmount(() => eventAbortController.abort());
               :class="`round-progress-board__item--${item.tone}`"
               data-round-progress-item
               :data-round-progress-state="item.tone"
+              :data-round-connector-state="item.connectorTone"
             >
               <b>{{ item.number }}</b>
               <div>
@@ -799,37 +793,6 @@ onBeforeUnmount(() => eventAbortController.abort());
             </article>
           </div>
 
-          <div
-            class="hearing-stage-dock__status-grid hearing-stage-dock__status-grid--inline"
-            data-hearing-status-strip
-          >
-            <article
-              v-for="party in partySubmissionStatuses"
-              :key="party.role"
-              class="hearing-status-chip"
-              :class="`hearing-status-chip--${party.tone}`"
-              :data-hearing-status-chip="party.role"
-            >
-              <span>{{ party.label }}</span>
-              <strong>{{ party.status }}</strong>
-            </article>
-            <article
-              class="hearing-status-chip"
-              :class="`hearing-status-chip--${timeStatus.tone}`"
-              data-hearing-status-chip="time"
-            >
-              <span>{{ timeStatus.label }}</span>
-              <strong>{{ timeStatus.value }}</strong>
-            </article>
-            <article
-              class="hearing-status-chip"
-              :class="`hearing-status-chip--${judgeReviewStatus.tone}`"
-              data-hearing-status-chip="judge-review"
-            >
-              <span>{{ judgeReviewStatus.label }}</span>
-              <strong>{{ judgeReviewStatus.value }}</strong>
-            </article>
-          </div>
         </section>
 
         <section class="court-transcript" data-court-transcript>
@@ -852,7 +815,21 @@ onBeforeUnmount(() => eventAbortController.abort());
 
         <section v-if="isCaseParty" class="round-input-bar" data-round-input-bar>
           <div class="round-input-bar__body">
-            <h3>本轮陈述输入台</h3>
+            <header class="round-input-bar__header">
+              <h3>本轮陈述输入台</h3>
+              <div class="round-input-bar__party-statuses" data-round-input-party-statuses>
+                <article
+                  v-for="party in partySubmissionStatuses"
+                  :key="party.role"
+                  class="round-input-party-status"
+                  :class="`round-input-party-status--${party.tone}`"
+                  :data-round-input-party-status="party.role"
+                >
+                  <span>{{ party.label }}</span>
+                  <strong>{{ party.status }}</strong>
+                </article>
+              </div>
+            </header>
             <form
               class="round-input-bar__composer"
               data-send-message
@@ -1459,13 +1436,13 @@ onBeforeUnmount(() => eventAbortController.abort());
   box-sizing: border-box;
   position: relative;
   display: grid;
-  grid-template-rows: 48px 52px 36px;
-  gap: 8px;
+  grid-template-rows: minmax(0, 1fr) 60px;
+  gap: 2px;
   width: 100%;
-  height: 172px;
-  min-height: 172px;
-  max-height: 172px;
-  padding: 10px 16px;
+  height: 150px;
+  min-height: 150px;
+  max-height: 150px;
+  padding: 12px 16px 7px;
   overflow: hidden;
   background:
     radial-gradient(circle at 7% 0, #fff3cf 0 15%, transparent 16%),
@@ -1528,6 +1505,7 @@ onBeforeUnmount(() => eventAbortController.abort());
   position: relative;
   z-index: 1;
   min-width: 0;
+  max-width: min(520px, calc(100% - 170px));
 }
 .hearing-stage-dock__copy span {
   color: #7590ad;
@@ -1536,44 +1514,36 @@ onBeforeUnmount(() => eventAbortController.abort());
   letter-spacing: .14em;
 }
 .hearing-stage-dock__copy h2 {
-  margin: 2px 0 2px;
-  color: #30415c;
-  font-size: 18.5px;
-  line-height: 1.1;
-}
-.hearing-stage-dock__copy p {
   display: -webkit-box;
   overflow: hidden;
-  margin: 0;
-  color: #6d7890;
-  font-size: 10.5px;
-  line-height: 1.3;
+  margin: 2px 0 0;
+  color: #30415c;
+  font-size: 18.5px;
+  line-height: 1.12;
+  text-overflow: ellipsis;
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 1;
+  -webkit-line-clamp: 2;
 }
-.hearing-stage-dock__badge {
+.hearing-stage-dock__clock {
   position: relative;
   z-index: 2;
-  display: inline-flex;
-  gap: 7px;
-  align-items: center;
-  padding: 8px 12px;
-  color: #0f8abf;
+  display: grid;
+  gap: 2px;
+  justify-items: end;
+  padding-top: 2px;
   white-space: nowrap;
-  background: linear-gradient(135deg, #e9f9ff, #ffffffd9);
-  border: 1px solid #cde9f8;
-  border-radius: 999px;
-  font-size: 12px;
-  box-shadow: 0 10px 22px #17a8e617;
 }
-.hearing-stage-dock__badge::before {
-  display: block;
-  width: 8px;
-  height: 8px;
-  content: "";
-  background: #17a8e6;
-  border-radius: 50%;
-  box-shadow: 0 0 0 5px #17a8e61c;
+.hearing-stage-dock__clock span {
+  color: #8ca0b8;
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: .08em;
+}
+.hearing-stage-dock__clock strong {
+  color: #1598d5;
+  font-size: 24px;
+  line-height: 1;
+  letter-spacing: .02em;
 }
 .hearing-stage-dock--waiting .hearing-stage-dock__badge {
   color: #7d5cc5;
@@ -1600,13 +1570,13 @@ onBeforeUnmount(() => eventAbortController.abort());
   z-index: 3;
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 18px;
-  align-items: center;
-  height: 52px;
-  padding: 0 6px;
-  overflow: hidden;
-  background:
-    linear-gradient(90deg, transparent 0 8%, #d8e8f2 9% 91%, transparent 92% 100%) center 16px / 100% 1px no-repeat;
+  gap: 0;
+  align-self: end;
+  align-items: end;
+  height: 60px;
+  padding: 4px 18px 0;
+  overflow: visible;
+  background: transparent;
   border: 0;
   border-radius: 0;
   box-shadow: none;
@@ -1614,22 +1584,42 @@ onBeforeUnmount(() => eventAbortController.abort());
 .round-progress-board__item {
   position: relative;
   display: grid;
-  grid-template-columns: 26px minmax(0, 1fr);
-  gap: 8px;
-  align-items: center;
+  justify-items: center;
+  gap: 6px;
+  align-items: start;
   min-width: 0;
-  height: 38px;
+  height: 52px;
   padding: 0;
-  overflow: hidden;
+  overflow: visible;
   color: #91a0b4;
   background: transparent;
   border: 0;
   border-radius: 0;
   font-size: 11px;
   font-weight: 900;
+  text-align: center;
+}
+.round-progress-board__item::after {
+  position: absolute;
+  top: 13px;
+  left: calc(50% + 18px);
+  right: calc(-50% + 18px);
+  z-index: 0;
+  height: 2px;
+  content: "";
+  background: #d8e3ec;
+  border-radius: 999px;
+}
+.round-progress-board__item[data-round-connector-state="complete"]::after {
+  background: linear-gradient(90deg, #78d9bd, #59c6a4);
+}
+.round-progress-board__item[data-round-connector-state="none"]::after {
+  display: none;
 }
 .round-progress-board__item b {
-  flex: 0 0 auto;
+  position: relative;
+  z-index: 2;
+  isolation: isolate;
   display: grid;
   width: 26px;
   height: 26px;
@@ -1641,9 +1631,14 @@ onBeforeUnmount(() => eventAbortController.abort());
   box-shadow: 0 8px 16px #6c87a116;
 }
 .round-progress-board__item div {
-  display: grid;
-  gap: 3px;
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 6px;
+  align-items: center;
+  justify-content: center;
   min-width: 0;
+  max-width: 100%;
+  white-space: nowrap;
 }
 .round-progress-board__item span {
   min-width: 0;
@@ -1653,6 +1648,7 @@ onBeforeUnmount(() => eventAbortController.abort());
   white-space: nowrap;
 }
 .round-progress-board__item em {
+  flex: 0 0 auto;
   color: #8a98ad;
   font-size: 9px;
   font-style: normal;
@@ -1660,37 +1656,49 @@ onBeforeUnmount(() => eventAbortController.abort());
   letter-spacing: .04em;
 }
 .round-progress-board__item--complete {
-  color: #5b718a;
+  color: #4c6f65;
 }
-.round-progress-board__item:nth-child(1) b {
-  background: linear-gradient(135deg, #55c5f0, #1f9ed9);
-  box-shadow: 0 0 0 5px #55c5f01b, 0 8px 16px #1f9ed91e;
-}
-.round-progress-board__item:nth-child(2) b {
-  background: linear-gradient(135deg, #afa1ff, #7866d9);
-  box-shadow: 0 0 0 5px #afa1ff1f, 0 8px 16px #7866d91e;
-}
-.round-progress-board__item:nth-child(3) b {
-  background: linear-gradient(135deg, #ffd48a, #f0a84e);
-  box-shadow: 0 0 0 5px #ffd48a26, 0 8px 16px #f0a84e1e;
+.round-progress-board__item--complete b {
+  background: linear-gradient(135deg, #78d9bd, #48b996);
+  box-shadow: 0 0 0 5px #78d9bd22, 0 8px 16px #48b99622;
 }
 .round-progress-board__item--complete em {
-  color: #74849a;
+  color: #409276;
 }
 .round-progress-board__item--active {
   color: #34455e;
 }
 .round-progress-board__item--active b {
-  color: #fff;
-  background: linear-gradient(135deg, #31c3f4, #1598d5);
-  border-color: #17a8e6;
-  box-shadow: 0 0 0 7px #17a8e621, 0 10px 22px #17a8e62a;
+  color: #128ec4;
+  background: #fff;
+  box-shadow: 0 8px 16px #17a8e61c;
+}
+.round-progress-board__item--active b::after {
+  position: absolute;
+  inset: -5px;
+  z-index: -1;
+  content: "";
+  background: conic-gradient(from 0deg, #17a8e6, #8bd7ff, #ffffff, #17a8e6);
+  border-radius: 50%;
+  animation: court-progress-spin 1.1s linear infinite;
 }
 .round-progress-board__item--active em {
   color: #17a8e6;
 }
 .round-progress-board__item--pending {
-  color: #91a0b4;
+  color: #b26b6b;
+}
+.round-progress-board__item--pending b {
+  background: linear-gradient(135deg, #ff8d8d, #e45f5f);
+  box-shadow: 0 0 0 5px #ff8d8d1e, 0 8px 16px #e45f5f1c;
+}
+.round-progress-board__item--pending em {
+  color: #bd6464;
+}
+@keyframes court-progress-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 .hearing-stage-dock__status-grid {
   position: relative;
@@ -1883,9 +1891,60 @@ onBeforeUnmount(() => eventAbortController.abort());
 .round-input-bar__body {
   min-width: 0;
 }
+.round-input-bar__header {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  align-items: center;
+}
 .round-input-bar h3 {
   margin: 0;
   color: #34455e;
+}
+.round-input-bar__party-statuses {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 12px;
+  align-items: center;
+}
+.round-input-party-status {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto auto;
+  gap: 6px;
+  align-items: baseline;
+  padding-left: 12px;
+  color: #8b98aa;
+  white-space: nowrap;
+  font-size: 10px;
+  font-weight: 900;
+}
+.round-input-party-status::before {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 6px;
+  height: 6px;
+  content: "";
+  background: #91a0b4;
+  border-radius: 50%;
+  transform: translateY(-50%);
+}
+.round-input-party-status strong {
+  color: #34455e;
+  font-size: 11px;
+}
+.round-input-party-status[data-round-input-party-status="USER"]::before {
+  background: #17a8e6;
+}
+.round-input-party-status[data-round-input-party-status="USER"] strong {
+  color: #128ec4;
+}
+.round-input-party-status[data-round-input-party-status="MERCHANT"]::before {
+  background: #f09a62;
+}
+.round-input-party-status[data-round-input-party-status="MERCHANT"] strong {
+  color: #a96128;
 }
 .round-input-bar__composer {
   display: grid;

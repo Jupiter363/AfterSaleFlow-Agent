@@ -84,14 +84,24 @@ describe("HearingCourtView", () => {
     expect(statusDock.text()).toContain("第 2 轮");
     expect(statusDock.text()).not.toContain("HEARING STAGE DOCK");
     expect(statusDock.classes()).toContain("hearing-stage-dock--fixed-dashboard");
-    expect(wrapper.get("[data-hearing-stage-badge]").text()).toContain("进行中");
+    expect(statusDock.find(".hearing-stage-dock__copy p").exists()).toBe(false);
+    expect(wrapper.get("[data-hearing-stage-clock]").text()).toContain("当前轮次还剩");
+    expect(wrapper.get("[data-hearing-stage-clock]").text()).toContain("04:18");
     expect(wrapper.find("[data-hearing-progress-track]").exists()).toBe(true);
-    expect(wrapper.find("[data-hearing-status-strip]").exists()).toBe(true);
-    expect(wrapper.findAll("[data-round-progress-item]")).toHaveLength(3);
-    expect(wrapper.get('[data-hearing-status-chip="USER"]').text()).toContain("用户提交");
-    expect(wrapper.get('[data-hearing-status-chip="MERCHANT"]').text()).toContain("商家提交");
-    expect(wrapper.get('[data-hearing-status-chip="time"]').text()).toContain("本轮倒计时");
-    expect(wrapper.get('[data-hearing-status-chip="judge-review"]').text()).toContain("法官/评审");
+    expect(wrapper.find("[data-hearing-status-strip]").exists()).toBe(false);
+    const progressItems = wrapper.findAll("[data-round-progress-item]");
+    expect(progressItems).toHaveLength(3);
+    expect(progressItems[0].attributes("data-round-progress-state")).toBe("complete");
+    expect(progressItems[1].attributes("data-round-progress-state")).toBe("active");
+    expect(progressItems[2].attributes("data-round-progress-state")).toBe("pending");
+    expect(progressItems[0].attributes("data-round-connector-state")).toBe("complete");
+    expect(progressItems[1].attributes("data-round-connector-state")).toBe("pending");
+    expect(statusDock.find('[data-hearing-status-chip="USER"]').exists()).toBe(false);
+    expect(statusDock.find('[data-hearing-status-chip="MERCHANT"]').exists()).toBe(false);
+    expect(statusDock.text()).not.toContain("时间/封存");
+    expect(statusDock.text()).not.toContain("法官/评审");
+    expect(wrapper.get("[data-round-input-party-statuses]").text()).toContain("用户提交");
+    expect(wrapper.get("[data-round-input-party-statuses]").text()).toContain("商家提交");
     expect(wrapper.get("[data-hearing-countdown]").text()).toContain("庭审时效");
     await wrapper.get("[data-open-court-ledger]").trigger("click");
     expect(wrapper.get("[data-court-ledger-drawer]").text()).toContain(
@@ -260,8 +270,8 @@ describe("HearingCourtView", () => {
 
     expect(wrapper.find("[data-submit-hearing-round]").exists()).toBe(false);
     expect(wrapper.get("[data-hearing-stage-dock]").text()).toContain("本轮已封存");
-    expect(wrapper.get('[data-hearing-status-chip="USER"]').text()).toContain("已封存");
-    expect(wrapper.get('[data-hearing-status-chip="MERCHANT"]').text()).toContain("已封存");
+    expect(wrapper.get('[data-round-input-party-status="USER"]').text()).toContain("已封存");
+    expect(wrapper.get('[data-round-input-party-status="MERCHANT"]').text()).toContain("已封存");
     expect(wrapper.text()).not.toContain("等待用户");
   });
 
@@ -300,13 +310,14 @@ describe("HearingCourtView", () => {
     expect(statusDock.text()).toContain("等待裁决草案");
     expect(statusDock.text()).not.toContain("平台终审");
     expect(statusDock.text()).not.toContain("进入平台终审，等待审核员确认最终结果");
-    expect(statusDock.find("[data-hearing-stage-badge]").exists()).toBe(false);
+    expect(statusDock.get("[data-hearing-stage-clock]").text()).toContain("当前轮次还剩");
+    expect(statusDock.get("[data-hearing-stage-clock]").text()).toContain("00:00");
     expect(wrapper.find("[data-hearing-progress-track]").classes()).toContain(
       "round-progress-board--timeline",
     );
-    expect(wrapper.find("[data-hearing-status-strip]").classes()).toContain(
-      "hearing-stage-dock__status-grid--inline",
-    );
+    expect(statusDock.find("[data-hearing-status-strip]").exists()).toBe(false);
+    expect(wrapper.get("[data-round-input-party-statuses]").text()).toContain("用户提交");
+    expect(wrapper.get("[data-round-input-party-statuses]").text()).toContain("商家提交");
     expect(wrapper.find("[data-submit-hearing-round]").exists()).toBe(false);
     expect(wrapper.find("[data-round-input-bar]").exists()).toBe(true);
     expect(wrapper.get("[data-round-input-bar]").text()).toContain("本轮已封存");
