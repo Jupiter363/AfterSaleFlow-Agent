@@ -76,11 +76,19 @@ describe("HearingCourtView", () => {
     const { wrapper } = await mountView();
 
     expect(wrapper.text()).toContain("小法庭");
-    expect(wrapper.text()).toContain("证据书记官");
+    expect(wrapper.text()).not.toContain("证据书记官已宣读双方材料");
     expect(wrapper.text()).toContain("AI 法官");
     expect(wrapper.text()).toContain("AI 评审团");
-    expect(wrapper.text()).toContain("第 2 / 3 轮");
-    expect(wrapper.get("[data-hearing-countdown]").text()).toContain("03:00:00");
+    const statusDock = wrapper.get("[data-hearing-stage-dock]");
+    expect(statusDock.text()).toContain("当前庭审状态");
+    expect(statusDock.text()).toContain("第 2 轮");
+    expect(statusDock.text()).not.toContain("HEARING STAGE DOCK");
+    expect(wrapper.findAll("[data-round-progress-item]")).toHaveLength(3);
+    expect(wrapper.get('[data-hearing-status-chip="USER"]').text()).toContain("用户提交");
+    expect(wrapper.get('[data-hearing-status-chip="MERCHANT"]').text()).toContain("商家提交");
+    expect(wrapper.get('[data-hearing-status-chip="time"]').text()).toContain("本轮倒计时");
+    expect(wrapper.get('[data-hearing-status-chip="judge-review"]').text()).toContain("法官/评审");
+    expect(wrapper.get("[data-hearing-countdown]").text()).toContain("庭审时效");
     await wrapper.get("[data-open-court-ledger]").trigger("click");
     expect(wrapper.get("[data-court-ledger-drawer]").text()).toContain(
       "物流签收凭证仍需交叉核验",
@@ -94,18 +102,23 @@ describe("HearingCourtView", () => {
     const { wrapper } = await mountView();
 
     expect(wrapper.get("[data-hearing-courtroom-page]").exists()).toBe(true);
-    expect(wrapper.get("[data-judge-bench]").text()).toContain("主审法官");
+    expect(wrapper.get("[data-court-agent-strip]").text()).not.toContain("COURT AGENTS");
+    expect(wrapper.get("[data-court-agent-strip]").text()).not.toContain("法官与 AI 评审团");
+    expect(wrapper.findAll("[data-court-agent-card]")).toHaveLength(3);
+    expect(wrapper.get('[data-court-agent-card="judge"]').text()).toContain("衡衡");
+    expect(wrapper.get('[data-court-agent-card="jury-a"]').text()).toContain("评审 A");
+    expect(wrapper.get('[data-court-agent-card="jury-b"]').text()).toContain("评审 B");
+    expect(wrapper.get("[data-hearing-stage-dock]").text()).toContain("第 2 轮");
     expect(wrapper.get('[data-party-evidence-rail="user"]').text()).toContain(
       "用户证据原件匣",
     );
     expect(wrapper.get('[data-party-evidence-rail="merchant"]').text()).toContain(
       "商家证据原件匣",
     );
-    expect(wrapper.get("[data-court-transcript]").text()).toContain(
-      "庭审记录大屏",
-    );
+    expect(wrapper.get("[data-court-transcript]").text()).toContain("主审法官");
+    expect(wrapper.get("[data-court-transcript]").text()).not.toContain("庭审记录大屏");
     expect(wrapper.get("[data-round-input-bar]").text()).toContain(
-      "提交本轮陈述",
+      "本轮陈述输入台",
     );
     expect(wrapper.get('[data-party-evidence-rail="user"]').text()).not.toContain(
       "用户代表",
@@ -116,12 +129,41 @@ describe("HearingCourtView", () => {
     expect(wrapper.get("[data-open-court-ledger]").text()).toContain(
       "查看庭审卷轴",
     );
+    expect(wrapper.get('[data-rail-position="right"]').text()).toContain(
+      "庭审完成",
+    );
   });
 
   it("keeps the audit aide out of the hearing page even for a platform reviewer", async () => {
     const { wrapper } = await mountView({ viewerRole: "PLATFORM_REVIEWER" });
 
     expect(wrapper.text()).not.toContain("审核解释官");
+  });
+
+  it("puts the current party evidence rail on the left and keeps the counterparty read-only on the right", async () => {
+    const { wrapper } = await mountView({ viewerRole: "MERCHANT" });
+
+    const leftRail = wrapper.get('[data-rail-position="left"]');
+    const rightRail = wrapper.get('[data-rail-position="right"]');
+
+    expect(leftRail.attributes("data-party-evidence-rail")).toBe("merchant");
+    expect(leftRail.text()).toContain("商家证据原件匣");
+    expect(leftRail.text()).toContain("补充商家证据");
+    expect(rightRail.attributes("data-party-evidence-rail")).toBe("user");
+    expect(rightRail.text()).toContain("用户证据原件匣");
+    expect(rightRail.text()).not.toContain("补充用户证据");
+  });
+
+  it("keeps hearing-level actions below the right evidence card instead of inside it", async () => {
+    const { wrapper } = await mountView();
+
+    const rightColumn = wrapper.get('[data-rail-position="right"]');
+    const rightEvidenceCard = rightColumn.get(".party-evidence-rail");
+
+    expect(rightColumn.text()).toContain("查看庭审卷轴");
+    expect(rightColumn.text()).toContain("庭审完成");
+    expect(rightEvidenceCard.text()).not.toContain("查看庭审卷轴");
+    expect(rightEvidenceCard.text()).not.toContain("庭审完成");
   });
 
   it("sends a settlement confirmation to the server before changing its state", async () => {
@@ -213,7 +255,9 @@ describe("HearingCourtView", () => {
     });
 
     expect(wrapper.find("[data-submit-hearing-round]").exists()).toBe(false);
-    expect(wrapper.text()).toContain("双方已提交本轮");
+    expect(wrapper.get("[data-hearing-stage-dock]").text()).toContain("本轮已封存");
+    expect(wrapper.get('[data-hearing-status-chip="USER"]').text()).toContain("已封存");
+    expect(wrapper.get('[data-hearing-status-chip="MERCHANT"]').text()).toContain("已封存");
     expect(wrapper.text()).not.toContain("等待用户");
   });
 
@@ -247,10 +291,14 @@ describe("HearingCourtView", () => {
       },
     });
 
-    expect(wrapper.find("[data-review-handoff]").exists()).toBe(true);
-    expect(wrapper.get("[data-review-handoff]").text()).toContain("平台终审");
+    expect(wrapper.find("[data-review-handoff]").exists()).toBe(false);
+    expect(wrapper.get("[data-hearing-stage-dock]").text()).toContain("平台终审");
     expect(wrapper.find("[data-submit-hearing-round]").exists()).toBe(false);
-    expect(wrapper.find("[data-round-input-bar]").exists()).toBe(false);
+    expect(wrapper.find("[data-round-input-bar]").exists()).toBe(true);
+    expect(wrapper.get("[data-round-input-bar]").text()).toContain("本轮已封存");
+    expect(wrapper.get("[data-round-input-bar]").text()).not.toContain("ROUND INPUT DOCK");
+    expect(wrapper.get("[data-round-input-bar]").text()).not.toContain("等待平台终审");
+    expect(wrapper.get('[data-send-message] textarea').attributes("disabled")).toBeDefined();
   });
 
   it("does not expose party round submission to platform reviewers", async () => {
@@ -279,6 +327,17 @@ describe("HearingCourtView", () => {
     );
   });
 
+  it("lets parties leave the hearing through the right evidence rail completion button", async () => {
+    const { wrapper, router } = await mountView();
+
+    await wrapper.get("[data-complete-hearing]").trigger("click");
+    await flushPromises();
+
+    expect(router.currentRoute.value.path).toBe(
+      "/disputes/CASE_HEARING_1/outcome",
+    );
+  });
+
   it("records party statements and creates a server-backed settlement card", async () => {
     const messageAction = vi.fn().mockResolvedValue({
       id: "MESSAGE_HEARING_1",
@@ -302,7 +361,7 @@ describe("HearingCourtView", () => {
     await wrapper
       .get('[data-send-message] textarea')
       .setValue("我愿意接受退款方案。");
-    await wrapper.get("[data-send-message]").trigger("submit");
+    await wrapper.get("[data-send-hearing-statement]").trigger("click");
     await wrapper.get("[data-open-settlement]").trigger("click");
     await wrapper
       .get("[data-settlement-proposal]")
