@@ -183,7 +183,7 @@ describe("HearingCourtView", () => {
 
     expect(confirmSettlementAction).toHaveBeenCalledWith(1);
     expect(wrapper.text()).toContain("双方已达成一致");
-    expect(wrapper.text()).toContain("等待平台终审");
+    expect(wrapper.text()).toContain("等待审核确认");
   });
 
   it("lets the current party submit their side of the active hearing round", async () => {
@@ -296,7 +296,17 @@ describe("HearingCourtView", () => {
     });
 
     expect(wrapper.find("[data-review-handoff]").exists()).toBe(false);
-    expect(wrapper.get("[data-hearing-stage-dock]").text()).toContain("平台终审");
+    const statusDock = wrapper.get("[data-hearing-stage-dock]");
+    expect(statusDock.text()).toContain("等待裁决草案");
+    expect(statusDock.text()).not.toContain("平台终审");
+    expect(statusDock.text()).not.toContain("进入平台终审，等待审核员确认最终结果");
+    expect(statusDock.find("[data-hearing-stage-badge]").exists()).toBe(false);
+    expect(wrapper.find("[data-hearing-progress-track]").classes()).toContain(
+      "round-progress-board--timeline",
+    );
+    expect(wrapper.find("[data-hearing-status-strip]").classes()).toContain(
+      "hearing-stage-dock__status-grid--inline",
+    );
     expect(wrapper.find("[data-submit-hearing-round]").exists()).toBe(false);
     expect(wrapper.find("[data-round-input-bar]").exists()).toBe(true);
     expect(wrapper.get("[data-round-input-bar]").text()).toContain("本轮已封存");

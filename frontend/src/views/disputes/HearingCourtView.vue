@@ -131,13 +131,13 @@ const reviewHandoffVisible = computed(
 );
 const reviewHandoffTitle = computed(() =>
   reviewGateOpen.value
-    ? "裁决草案已送入平台终审"
-    : "三轮陈述已封存，准备进入平台终审",
+    ? "裁决草案已生成，等待审核确认"
+    : "三轮陈述已封存，等待裁决草案",
 );
 const reviewHandoffBody = computed(() =>
   reviewGateOpen.value
-    ? "平台审核员会基于冻结卷宗完成最终确认。用户和商家不用再留在小法庭等待，新的传票信箱会同步终审与执行结果。"
-    : "本案已经达到三轮陈述上限，双方内容已自动封存。AI 法官会输出确定裁决草案，随后交给平台审核员完成平台终审。",
+    ? "AI 法官已生成裁决草案，后续由审核员基于冻结卷宗完成最终确认。"
+    : "本案已经达到三轮陈述上限，双方内容已自动封存。AI 法官会基于庭审记录和证据架输出确定裁决方案草案。",
 );
 const counterpartyLabel = computed(() =>
   role.value === "USER" ? "商家" : "用户",
@@ -281,11 +281,14 @@ const stageDockBody = computed(() => {
   return "请双方围绕法官问题完成本轮陈述。双方都提交，或 5 分钟倒计时届满后，本轮会自动封存。";
 });
 const stageDockBadge = computed(() => {
-  if (reviewHandoffVisible.value) return "平台终审";
+  if (reviewHandoffVisible.value) return reviewGateOpen.value ? "草案待核验" : "庭审封存";
   if (activeRoundClosed.value) return "本轮已封存";
   if (currentActorSubmitted.value) return "等待对方";
   return "进行中";
 });
+const stageDockBadgeVisible = computed(
+  () => !(reviewHandoffVisible.value && !reviewGateOpen.value),
+);
 const roundProgressItems = computed(() =>
   Array.from({ length: props.roundLimit }, (_, index) => {
     const roundNumber = index + 1;
@@ -322,19 +325,35 @@ const partySubmissionStatuses = computed(() =>
   }),
 );
 const timeStatus = computed(() => {
-  if (reviewHandoffVisible.value) return { label: "时间/封存", value: "等待平台终审", tone: "sealed" };
+  if (reviewHandoffVisible.value) {
+    return {
+      label: "时间/封存",
+      value: reviewGateOpen.value ? "等待审核确认" : "等待裁决草案",
+      tone: "waiting",
+    };
+  }
   if (activeRoundClosed.value) return { label: "时间/封存", value: "已封存", tone: "sealed" };
   if (activeRoundDeadline.value) return { label: "本轮倒计时", value: "04:18", tone: "active" };
   return { label: "时间/封存", value: "等待法官处理", tone: "waiting" };
 });
 const judgeReviewStatus = computed(() => {
-  if (reviewHandoffVisible.value) return { label: "法官/评审", value: "评审通过", tone: "complete" };
+  if (reviewHandoffVisible.value) {
+    return {
+      label: "法官/评审",
+      value: reviewGateOpen.value ? "草案待评审" : "法官处理中",
+      tone: "processing",
+    };
+  }
   if (activeRoundClosed.value) return { label: "法官/评审", value: "法官处理中", tone: "processing" };
   if (stageDockMode.value === "waiting") return { label: "法官/评审", value: "等待双方陈述", tone: "waiting" };
   return { label: "法官/评审", value: "法官提问中", tone: "active" };
 });
 const nextStepHint = computed(() => {
-  if (reviewHandoffVisible.value) return "进入平台终审，等待审核员确认最终结果。";
+  if (reviewHandoffVisible.value) {
+    return reviewGateOpen.value
+      ? "裁决草案已生成，等待审核员确认最终结果。"
+      : "AI 法官将基于三轮陈述和证据生成确定裁决方案草案。";
+  }
   if (activeRoundClosed.value) return "法官将读取本轮封存记录，生成下一轮问题或裁决草案。";
   if (currentActorSubmitted.value) return `等待${counterpartyLabel.value}提交，或倒计时结束后自动封存。`;
   return "双方完成陈述并提交后，本轮会自动封存进入法官处理。";
@@ -751,12 +770,19 @@ onBeforeUnmount(() => eventAbortController.abort());
               <h2>{{ stageDockTitle }}</h2>
               <p>{{ nextStepHint }}</p>
             </div>
-            <strong class="hearing-stage-dock__badge" data-hearing-stage-badge>
+            <strong
+              v-if="stageDockBadgeVisible"
+              class="hearing-stage-dock__badge"
+              data-hearing-stage-badge
+            >
               {{ stageDockBadge }}
             </strong>
           </header>
 
-          <div class="round-progress-board" data-hearing-progress-track>
+          <div
+            class="round-progress-board round-progress-board--timeline"
+            data-hearing-progress-track
+          >
             <article
               v-for="item in roundProgressItems"
               :key="item.number"
@@ -773,7 +799,10 @@ onBeforeUnmount(() => eventAbortController.abort());
             </article>
           </div>
 
-          <div class="hearing-stage-dock__status-grid" data-hearing-status-strip>
+          <div
+            class="hearing-stage-dock__status-grid hearing-stage-dock__status-grid--inline"
+            data-hearing-status-strip
+          >
             <article
               v-for="party in partySubmissionStatuses"
               :key="party.role"
@@ -834,7 +863,7 @@ onBeforeUnmount(() => eventAbortController.abort());
                 :disabled="statementInputDisabled"
                 :placeholder="
                   reviewHandoffVisible
-                    ? '庭审已封存，等待平台终审'
+                    ? '庭审已封存，等待裁决草案'
                     : '输入本轮陈述、证据解释或和解意向…'
                 "
                 rows="3"
@@ -910,7 +939,7 @@ onBeforeUnmount(() => eventAbortController.abort());
           </div>
           <template v-if="activeSettlement.status === 'CONFIRMED'">
             <strong class="settlement-card__confirmed">双方已达成一致</strong>
-            <small>一致方案已作为裁决草案，等待平台终审。</small>
+            <small>一致方案已作为裁决草案，等待审核确认。</small>
           </template>
           <button
             v-else
@@ -1015,7 +1044,7 @@ onBeforeUnmount(() => eventAbortController.abort());
           <div>
             <span>TRACEABLE ROUND LEDGER</span>
             <h2>庭审卷轴</h2>
-            <p>这里保存每一轮封存后的可追溯记录，用于后续复核、申诉和平台终审。</p>
+            <p>这里保存每一轮封存后的可追溯记录，用于后续复核、申诉和审核确认。</p>
           </div>
           <button
             type="button"
@@ -1571,22 +1600,21 @@ onBeforeUnmount(() => eventAbortController.abort());
   z-index: 3;
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 14px;
+  gap: 18px;
   align-items: center;
   height: 52px;
-  padding: 0 10px;
+  padding: 0 6px;
   overflow: hidden;
   background:
-    linear-gradient(90deg, transparent 0 6%, #cfe7f4 7% 93%, transparent 94% 100%) center 17px / 100% 2px no-repeat,
-    linear-gradient(180deg, #ffffffbf, #ffffff73);
-  border: 1px solid #e3eef7;
-  border-radius: 18px;
-  box-shadow: inset 0 1px 0 #fff;
+    linear-gradient(90deg, transparent 0 8%, #d8e8f2 9% 91%, transparent 92% 100%) center 16px / 100% 1px no-repeat;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
 }
 .round-progress-board__item {
   position: relative;
   display: grid;
-  grid-template-columns: 32px minmax(0, 1fr);
+  grid-template-columns: 26px minmax(0, 1fr);
   gap: 8px;
   align-items: center;
   min-width: 0;
@@ -1603,14 +1631,14 @@ onBeforeUnmount(() => eventAbortController.abort());
 .round-progress-board__item b {
   flex: 0 0 auto;
   display: grid;
-  width: 32px;
-  height: 32px;
+  width: 26px;
+  height: 26px;
   place-items: center;
-  color: #91a0b4;
-  background: linear-gradient(180deg, #fff, #f4f8fc);
-  border: 1px solid #d8e7f2;
+  color: #fff;
+  background: #9fb2c7;
+  border: 0;
   border-radius: 50%;
-  box-shadow: 0 8px 18px #6c87a114;
+  box-shadow: 0 8px 16px #6c87a116;
 }
 .round-progress-board__item div {
   display: grid;
@@ -1632,16 +1660,22 @@ onBeforeUnmount(() => eventAbortController.abort());
   letter-spacing: .04em;
 }
 .round-progress-board__item--complete {
-  color: #4e8f7f;
+  color: #5b718a;
 }
-.round-progress-board__item--complete b {
-  color: #fff;
-  background: linear-gradient(135deg, #78d9bd, #59c6a4);
-  border-color: #78d9bd;
-  box-shadow: 0 0 0 6px #78d9bd1c, 0 10px 18px #59c6a421;
+.round-progress-board__item:nth-child(1) b {
+  background: linear-gradient(135deg, #55c5f0, #1f9ed9);
+  box-shadow: 0 0 0 5px #55c5f01b, 0 8px 16px #1f9ed91e;
+}
+.round-progress-board__item:nth-child(2) b {
+  background: linear-gradient(135deg, #afa1ff, #7866d9);
+  box-shadow: 0 0 0 5px #afa1ff1f, 0 8px 16px #7866d91e;
+}
+.round-progress-board__item:nth-child(3) b {
+  background: linear-gradient(135deg, #ffd48a, #f0a84e);
+  box-shadow: 0 0 0 5px #ffd48a26, 0 8px 16px #f0a84e1e;
 }
 .round-progress-board__item--complete em {
-  color: #4b9b83;
+  color: #74849a;
 }
 .round-progress-board__item--active {
   color: #34455e;
@@ -1663,7 +1697,7 @@ onBeforeUnmount(() => eventAbortController.abort());
   z-index: 3;
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
+  gap: 0;
   height: 36px;
 }
 .hearing-status-chip {
@@ -1674,22 +1708,32 @@ onBeforeUnmount(() => eventAbortController.abort());
   gap: 2px;
   min-width: 0;
   min-height: 0;
-  padding: 5px 8px 5px 23px;
-  background: #ffffffa6;
-  border: 1px solid #e4edf6;
-  border-radius: 14px;
-  box-shadow: inset 0 1px 0 #fff, 0 8px 18px #516b8a0b;
+  padding: 2px 12px 2px 17px;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
 }
 .hearing-status-chip::before {
   position: absolute;
-  top: 13px;
-  left: 10px;
-  width: 7px;
-  height: 7px;
+  top: 14px;
+  left: 4px;
+  width: 5px;
+  height: 18px;
   content: "";
   background: #91a0b4;
-  border-radius: 50%;
-  box-shadow: 0 0 0 4px #91a0b41b;
+  border-radius: 999px;
+  box-shadow: none;
+  transform: translateY(-50%);
+}
+.hearing-status-chip:not(:last-child)::after {
+  position: absolute;
+  top: 7px;
+  right: 0;
+  bottom: 7px;
+  width: 1px;
+  content: "";
+  background: linear-gradient(180deg, transparent, #dbe8f2, transparent);
 }
 .hearing-status-chip span {
   overflow: hidden;
@@ -1709,12 +1753,10 @@ onBeforeUnmount(() => eventAbortController.abort());
 }
 .hearing-status-chip--pending::before {
   background: #a6b4c7;
-  box-shadow: 0 0 0 4px #a6b4c722;
 }
 .hearing-status-chip--submitted::before,
 .hearing-status-chip--active::before {
   background: #17a8e6;
-  box-shadow: 0 0 0 4px #17a8e622;
 }
 .hearing-status-chip--submitted strong,
 .hearing-status-chip--active strong {
@@ -1723,24 +1765,45 @@ onBeforeUnmount(() => eventAbortController.abort());
 .hearing-status-chip--sealed::before,
 .hearing-status-chip--complete::before {
   background: #78d9bd;
-  box-shadow: 0 0 0 4px #78d9bd25;
 }
 .hearing-status-chip--sealed strong,
 .hearing-status-chip--complete strong {
-  color: #4b9b83;
+  color: #5a718a;
 }
 .hearing-status-chip--waiting::before {
   background: #f6bf62;
-  box-shadow: 0 0 0 4px #f6bf6228;
 }
 .hearing-status-chip--waiting strong {
   color: #a56e13;
 }
 .hearing-status-chip--processing::before {
   background: #afa1ff;
-  box-shadow: 0 0 0 4px #afa1ff28;
 }
 .hearing-status-chip--processing strong {
+  color: #7460d7;
+}
+.hearing-status-chip[data-hearing-status-chip="USER"]::before {
+  background: #17a8e6;
+}
+.hearing-status-chip[data-hearing-status-chip="USER"] strong {
+  color: #128ec4;
+}
+.hearing-status-chip[data-hearing-status-chip="MERCHANT"]::before {
+  background: #f09a62;
+}
+.hearing-status-chip[data-hearing-status-chip="MERCHANT"] strong {
+  color: #a96128;
+}
+.hearing-status-chip[data-hearing-status-chip="time"]::before {
+  background: #f6bf62;
+}
+.hearing-status-chip[data-hearing-status-chip="time"] strong {
+  color: #a56e13;
+}
+.hearing-status-chip[data-hearing-status-chip="judge-review"]::before {
+  background: #afa1ff;
+}
+.hearing-status-chip[data-hearing-status-chip="judge-review"] strong {
   color: #7460d7;
 }
 .court-transcript {
