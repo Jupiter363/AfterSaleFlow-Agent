@@ -117,6 +117,7 @@ const TOKEN_REPLACEMENTS = Object.entries(TOKEN_LABELS).sort(
 
 const CHINESE_RE = /[\u3400-\u9fff]/;
 const LATIN_RE = /[A-Za-z]{3,}/;
+const EVIDENCE_MATRIX_JSON_RE = /\{[^{}]*"evidence_id"[^{}]*\}/g;
 
 export function roleLabel(role) {
   if (!role) return "未知身份";
@@ -160,7 +161,90 @@ export function displayRoomMessageText(value) {
   if (questionMarks >= 6 && questionMarks / raw.length > 0.35) {
     return "历史消息编码异常，原始内容已按不可变记录留存。";
   }
-  return replaceInternalTokens(raw);
+  return replaceInternalTokens(summarizeEvidenceMatrixJson(raw));
+}
+
+function summarizeEvidenceMatrixJson(raw) {
+  return raw.replace(EVIDENCE_MATRIX_JSON_RE, (jsonText) => {
+    try {
+      const row = JSON.parse(jsonText);
+      return localizedEvidenceMatrixRow(row);
+    } catch {
+      return "证据材料尚未映射到具体争议事实，当前核验状态为待核验";
+    }
+  });
+}
+
+function localizedEvidenceMatrixRow(row) {
+  const relation = localizedRelationType(row?.relation_type);
+  const verification = localizedVerificationStatus(row?.verification_status);
+  const strength = localizedEvidenceStrength(row?.evidence_strength);
+  const parts = [`证据材料${relation || "已入卷，但尚未形成明确证明方向"}`];
+  if (verification) parts.push(`当前核验状态为${verification}`);
+  if (strength) parts.push(`证明强度为${strength}`);
+  return `${parts.join("，")}，庭审中需继续说明其对应的争议事实、形成时间和来源链路`;
+}
+
+function localizedRelationType(value) {
+  switch (String(value || "").toUpperCase()) {
+    case "UNMAPPED":
+    case "UNKNOWN":
+    case "":
+      return "尚未映射到具体争议事实";
+    case "SUPPORTS":
+    case "SUPPORTING":
+    case "SUPPORT":
+      return "支持相关争议事实";
+    case "OPPOSES":
+    case "OPPOSING":
+    case "REFUTES":
+      return "反驳相关争议事实";
+    case "PARTIAL":
+    case "PARTIALLY_SUPPORTS":
+      return "与相关争议事实存在部分关联";
+    default:
+      return "已关联到争议事实";
+  }
+}
+
+function localizedVerificationStatus(value) {
+  switch (String(value || "").toUpperCase()) {
+    case "UNVERIFIED":
+    case "PENDING":
+    case "UNKNOWN":
+    case "":
+      return "待核验";
+    case "VERIFIED":
+      return "已核验";
+    case "PARTIALLY_VERIFIED":
+      return "部分核验";
+    case "QUESTIONABLE":
+    case "SUSPICIOUS":
+      return "存疑，需人工复核";
+    case "REJECTED":
+      return "未采纳";
+    default:
+      return "待复核";
+  }
+}
+
+function localizedEvidenceStrength(value) {
+  switch (String(value || "").toUpperCase()) {
+    case "HIGH":
+    case "STRONG":
+      return "较强";
+    case "MEDIUM":
+      return "中等";
+    case "LOW":
+    case "WEAK":
+      return "较弱";
+    case "NONE":
+    case "UNKNOWN":
+    case "":
+      return "";
+    default:
+      return "待评估";
+  }
 }
 
 function humanizeTitle(raw, fallback) {

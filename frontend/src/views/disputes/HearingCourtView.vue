@@ -18,6 +18,7 @@ import {
   createRoomState,
   streamRoomEvents,
 } from "../../stores/room";
+import { displayRoomMessageText } from "../../utils/displayText";
 
 const props = defineProps({
   initialHearing: { type: Object, default: null },
@@ -148,6 +149,9 @@ const canSubmitRound = computed(
     !currentActorSubmitted.value &&
     !activeRoundClosed.value,
 );
+const canSubmitStatement = computed(
+  () => isCaseParty.value && !activeRoundClosed.value,
+);
 const activeRoundDeadline = computed(
   () => activeRound.value?.round_deadline_at || activeRound.value?.roundDeadlineAt || "",
 );
@@ -256,7 +260,7 @@ const roundSubmitDescription = computed(() => {
   return "当前陈述、证据解释和和解意向会被封装为本轮立场。双方都点击提交，或 5 分钟时效届满后，系统自动封存并推进流程。";
 });
 const statementInputDisabled = computed(
-  () => !isCaseParty.value || currentActorSubmitted.value || activeRoundClosed.value,
+  () => !canSubmitStatement.value,
 );
 const stageDockMode = computed(() => {
   if (reviewHandoffVisible.value) return "handoff";
@@ -389,6 +393,71 @@ const mockTranscriptItems = computed(() => [
       "中风险 · 当前可信分 75/100 · 建议核验物流轨迹定位与签收凭证。",
   },
 ]);
+const liveTranscriptItems = computed(() =>
+  messages.value
+    .map((message, index) => {
+      const rawText = message.message_text || message.text || message.content || "";
+      if (!rawText) return null;
+      const text = displayRoomMessageText(rawText);
+      const senderRole = message.sender_role || message.senderRole || "";
+      return {
+        id: message.id || `live-message-${message.sequence_no || index}`,
+        type: transcriptTypeForRole(senderRole),
+        speaker: transcriptSpeakerForRole(senderRole),
+        badge: transcriptBadgeForRole(senderRole),
+        time: transcriptTime(message.created_at || message.createdAt),
+        text,
+      };
+    })
+    .filter(Boolean),
+);
+const courtTranscriptItems = computed(() =>
+  liveTranscriptItems.value.length ? liveTranscriptItems.value : mockTranscriptItems.value,
+);
+
+const transcriptRoleProfiles = {
+  INTAKE_OFFICER: { type: "intake", speaker: "案情接待官", badge: "案情接待" },
+  EVIDENCE_CLERK: { type: "clerk", speaker: "证据书记官", badge: "证据归档" },
+  JUDGE: { type: "judge", speaker: "主审法官", badge: "法官宣读" },
+  JURY: { type: "jury", speaker: "AI 评审团", badge: "评审团观察" },
+  AI_JURY: { type: "jury", speaker: "AI 评审团", badge: "评审团观察" },
+  USER: { type: "user", speaker: "用户陈述", badge: "" },
+  MERCHANT: { type: "merchant", speaker: "商家陈述", badge: "" },
+};
+
+function transcriptProfileForRole(senderRole) {
+  return transcriptRoleProfiles[senderRole] || transcriptRoleProfiles.JUDGE;
+}
+
+function transcriptTypeForRole(senderRole) {
+  return transcriptProfileForRole(senderRole).type;
+}
+
+function transcriptSpeakerForRole(senderRole) {
+  return transcriptProfileForRole(senderRole).speaker;
+}
+
+function transcriptBadgeForRole(senderRole) {
+  return transcriptProfileForRole(senderRole).badge;
+}
+
+function transcriptBadgeForItem(item) {
+  if (item.badge) return item.badge;
+  if (item.type === "judge") return "法官宣读";
+  if (item.type === "jury") return "评审团观察";
+  return "";
+}
+
+function transcriptTime(value) {
+  if (!value) return "刚刚";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "刚刚";
+  return date.toLocaleTimeString("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+}
 
 function evidenceTypeLabel(type) {
   return {
@@ -451,21 +520,23 @@ async function postMessage(command) {
         );
     messages.value.push(saved);
     agentState.value = "SPEAKING";
+    return saved;
   } catch (failure) {
     error.value = failure.message;
     agentState.value = "ERROR";
+    return null;
   }
 }
 
 async function submitStatementInput() {
   const text = statementText.value.trim();
   if (!text || statementInputDisabled.value) return;
-  await postMessage({
+  const saved = await postMessage({
     message_type: "PARTY_TEXT",
     text,
     attachment_refs: [],
   });
-  statementText.value = "";
+  if (saved) statementText.value = "";
 }
 
 async function proposeSettlement() {
@@ -785,10 +856,17 @@ onBeforeUnmount(() => eventAbortController.abort());
               :data-round-progress-state="item.tone"
               :data-round-connector-state="item.connectorTone"
             >
-              <b>{{ item.number }}</b>
+              <b :aria-label="`${item.label}：${item.status}`">
+                <span
+                  v-if="item.tone === 'active'"
+                  class="round-progress-board__active-spinner"
+                  data-round-active-spinner
+                  aria-hidden="true"
+                ></span>
+              </b>
               <div>
-                <span>{{ item.label }}</span>
-                <em>{{ item.status }}</em>
+                <span class="round-progress-board__label">{{ item.label }}</span>
+                <em class="round-progress-board__status">{{ item.status }}</em>
               </div>
             </article>
           </div>
@@ -798,25 +876,25 @@ onBeforeUnmount(() => eventAbortController.abort());
         <section class="court-transcript" data-court-transcript>
           <div class="court-transcript__messages">
             <article
-              v-for="item in mockTranscriptItems"
+              v-for="item in courtTranscriptItems"
               :key="item.id"
               class="court-message"
               :class="[
                 `court-message--${item.type}`,
                 item.type === 'judge' ? 'court-message--judge-bench-card' : '',
                 item.type === 'jury' ? 'court-message--jury-review-card' : '',
+                ['intake', 'clerk'].includes(item.type) ? 'court-message--court-staff-card' : '',
                 ['judge', 'jury'].includes(item.type) ? 'court-message--tall-narrow-card' : '',
                 ['judge', 'jury'].includes(item.type) ? 'court-message--extended-length-card' : '',
                 ['user', 'merchant'].includes(item.type) ? 'court-message--party-statement-card' : '',
                 ['user', 'merchant'].includes(item.type) ? 'court-message--soft-party-card' : '',
-                ['judge', 'jury', 'user', 'merchant'].includes(item.type) ? 'court-message--flexible-height-card' : '',
+                ['judge', 'jury', 'intake', 'clerk', 'user', 'merchant'].includes(item.type) ? 'court-message--flexible-height-card' : '',
               ]"
               :data-court-message="item.type"
             >
               <header>
                 <strong>
-                  <small v-if="item.type === 'judge'">法官宣读</small>
-                  <small v-else-if="item.type === 'jury'">评审团观察</small>
+                  <small v-if="transcriptBadgeForItem(item)">{{ transcriptBadgeForItem(item) }}</small>
                   {{ item.speaker }}
                 </strong>
                 <span>{{ item.time }}</span>
@@ -833,7 +911,7 @@ onBeforeUnmount(() => eventAbortController.abort());
           </div>
         </section>
 
-        <section v-if="isCaseParty" class="round-input-bar" data-round-input-bar>
+        <section v-if="isCaseParty" class="round-input-bar round-input-bar--fixed-dock" data-round-input-bar>
           <div class="round-input-bar__body">
             <header class="round-input-bar__header">
               <h3>本轮陈述输入台</h3>
@@ -867,12 +945,6 @@ onBeforeUnmount(() => eventAbortController.abort());
                 aria-label="本轮陈述"
               ></textarea>
               <div class="round-input-bar__submit-column">
-                <PhaseCountdown
-                  v-if="activeRoundDeadline && !activeRoundClosed"
-                  label="本轮提交时效"
-                  :deadline-at="activeRoundDeadline"
-                  :server-now="effectiveServerNow"
-                />
                 <button
                   v-if="activeRoundClosed || reviewHandoffVisible"
                   type="button"
@@ -882,24 +954,14 @@ onBeforeUnmount(() => eventAbortController.abort());
                   🔒 本轮已封存
                 </button>
                 <button
-                  v-else
-                  type="button"
-                  class="round-input-bar__send-button"
-                  data-send-hearing-statement
-                  :disabled="statementInputDisabled || !statementText.trim()"
-                  @click="submitStatementInput()"
-                >
-                  发送陈述
-                </button>
-                <button
-                  v-if="canSubmitRound"
+                  v-if="canSubmitStatement"
                   type="button"
                   class="round-input-bar__round-submit"
-                  data-submit-hearing-round
-                  :disabled="submittingRound"
-                  @click="submitCurrentRound"
+                  data-send-hearing-statement
+                  :disabled="statementInputDisabled || submittingRound || !statementText.trim()"
+                  @click="submitStatementInput()"
                 >
-                  {{ submittingRound ? "正在提交本轮…" : "提交本轮陈述" }}
+                  提交陈述
                 </button>
                 <button
                   v-if="!reviewHandoffVisible && !activeRoundClosed"
@@ -910,9 +972,6 @@ onBeforeUnmount(() => eventAbortController.abort());
                 >
                   提出一致方案
                 </button>
-                <strong v-if="!canSubmitRound && !activeRoundClosed" class="round-input-bar__submitted">
-                  已提交，等待对方或倒计时结束
-                </strong>
               </div>
             </form>
           </div>
@@ -1638,9 +1697,9 @@ onBeforeUnmount(() => eventAbortController.abort());
 }
 .round-progress-board__item::after {
   position: absolute;
-  top: 13px;
-  left: calc(50% + 18px);
-  right: calc(-50% + 18px);
+  top: 7px;
+  left: calc(50% + 11px);
+  right: calc(-50% + 11px);
   z-index: 0;
   height: 2px;
   content: "";
@@ -1656,16 +1715,15 @@ onBeforeUnmount(() => eventAbortController.abort());
 .round-progress-board__item b {
   position: relative;
   z-index: 2;
-  isolation: isolate;
   display: grid;
-  width: 26px;
-  height: 26px;
+  width: 16px;
+  height: 16px;
   place-items: center;
   color: #fff;
   background: #9fb2c7;
   border: 0;
   border-radius: 50%;
-  box-shadow: 0 8px 16px #6c87a116;
+  box-shadow: 0 6px 14px #6c87a114;
 }
 .round-progress-board__item div {
   display: flex;
@@ -1677,14 +1735,14 @@ onBeforeUnmount(() => eventAbortController.abort());
   max-width: 100%;
   white-space: nowrap;
 }
-.round-progress-board__item span {
+.round-progress-board__label {
   min-width: 0;
   overflow: hidden;
-  color: inherit;
+  color: #34455e;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.round-progress-board__item em {
+.round-progress-board__status {
   flex: 0 0 auto;
   color: #8a98ad;
   font-size: 9px;
@@ -1696,43 +1754,57 @@ onBeforeUnmount(() => eventAbortController.abort());
   color: #4c6f65;
 }
 .round-progress-board__item--complete b {
-  background: linear-gradient(135deg, #78d9bd, #48b996);
-  box-shadow: 0 0 0 5px #78d9bd22, 0 8px 16px #48b99622;
+  background: linear-gradient(135deg, #a8ded1, #78cbb6);
+  box-shadow: 0 0 0 4px #a8ded124, 0 8px 16px #78cbb61a;
 }
-.round-progress-board__item--complete em {
-  color: #409276;
+.round-progress-board__item--complete .round-progress-board__status {
+  color: #5f9f8e;
 }
 .round-progress-board__item--active {
   color: #34455e;
 }
 .round-progress-board__item--active b {
   color: #128ec4;
-  background: #fff;
-  box-shadow: 0 8px 16px #17a8e61c;
+  background: #edf8ff;
+  box-shadow: 0 0 0 4px #e7f5ff, 0 8px 16px #4eb9e51a;
 }
-.round-progress-board__item--active b::after {
+.round-progress-board__active-spinner {
   position: absolute;
-  inset: -5px;
-  z-index: -1;
-  content: "";
-  background: conic-gradient(from 0deg, #17a8e6, #8bd7ff, #ffffff, #17a8e6);
+  inset: 3px;
+  z-index: 1;
+  box-sizing: border-box;
+  background: #edf8ff;
+  border: 1.5px solid #bfe6f8;
+  border-top-color: #4eb9e5;
   border-radius: 50%;
-  animation: court-progress-spin 1.1s linear infinite;
+  animation: court-progress-inner-spin .82s linear infinite;
 }
-.round-progress-board__item--active em {
-  color: #17a8e6;
+.round-progress-board__active-spinner::after {
+  position: absolute;
+  top: -2px;
+  left: 50%;
+  width: 3px;
+  height: 3px;
+  content: "";
+  background: #4eb9e5;
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px #4eb9e526;
+  transform: translateX(-50%);
+}
+.round-progress-board__item--active .round-progress-board__status {
+  color: #3f9fc9;
 }
 .round-progress-board__item--pending {
-  color: #b26b6b;
+  color: #9d7580;
 }
 .round-progress-board__item--pending b {
-  background: linear-gradient(135deg, #ff8d8d, #e45f5f);
-  box-shadow: 0 0 0 5px #ff8d8d1e, 0 8px 16px #e45f5f1c;
+  background: linear-gradient(135deg, #e8c6cf, #d9aebb);
+  box-shadow: 0 0 0 4px #e8c6cf22, 0 8px 16px #d9aebb18;
 }
-.round-progress-board__item--pending em {
-  color: #bd6464;
+.round-progress-board__item--pending .round-progress-board__status {
+  color: #a97987;
 }
-@keyframes court-progress-spin {
+@keyframes court-progress-inner-spin {
   to {
     transform: rotate(360deg);
   }
@@ -1950,6 +2022,57 @@ onBeforeUnmount(() => eventAbortController.abort());
     radial-gradient(circle, transparent 0 44%, #8bd7ff36 45% 47%, transparent 48%),
     radial-gradient(circle, #ffd8892b 0 30%, transparent 31%);
 }
+.court-message--intake,
+.court-message--clerk {
+  justify-self: center;
+  background:
+    radial-gradient(circle at 10% 6%, #e7f7ff 0 16%, transparent 17%),
+    linear-gradient(135deg, #fbfeff 0%, #f6fbff 55%, #fffdf7 100%);
+  border: 1px solid #d5e8f3;
+  box-shadow:
+    inset 0 1px 0 #fff,
+    0 10px 24px #58718e12;
+}
+.court-message--intake {
+  border-color: #c9e8f6;
+}
+.court-message--clerk {
+  border-color: #d8e1f1;
+  background:
+    radial-gradient(circle at 10% 6%, #f0f5ff 0 16%, transparent 17%),
+    linear-gradient(135deg, #fcfdff 0%, #f7faff 55%, #fffdf7 100%);
+}
+.court-message--intake header strong::before,
+.court-message--clerk header strong::before {
+  margin-right: 6px;
+  color: #4e94b3;
+  content: "◉";
+}
+.court-message--clerk header strong::before {
+  color: #6d7fc6;
+  content: "✎";
+}
+.court-message--court-staff-card {
+  box-sizing: border-box;
+  width: min(58%, 480px);
+  max-width: min(58%, 480px);
+  min-height: 118px;
+  padding: 13px 17px;
+  border-radius: 24px;
+}
+.court-message--court-staff-card.court-message--flexible-height-card {
+  --court-message-min-height: 118px;
+}
+.court-message--court-staff-card header small {
+  color: #347da0;
+  background: #eef9ff;
+  border-color: #cbeaf7;
+}
+.court-message--clerk header small {
+  color: #6473bf;
+  background: #f3f5ff;
+  border-color: #dfe4ff;
+}
 .court-message--user {
   justify-self: start;
   background: transparent;
@@ -2071,8 +2194,21 @@ onBeforeUnmount(() => eventAbortController.abort());
   border-radius: 24px;
   box-shadow: inset 0 1px 0 #fff, 0 14px 34px #5b769216;
 }
+.round-input-bar--fixed-dock {
+  box-sizing: border-box;
+  height: 154px;
+  min-height: 154px;
+  max-height: 154px;
+  overflow: hidden;
+}
 .round-input-bar__body {
   min-width: 0;
+}
+.round-input-bar--fixed-dock .round-input-bar__body {
+  display: grid;
+  grid-template-rows: 24px 1fr;
+  height: 100%;
+  min-height: 0;
 }
 .round-input-bar__header {
   display: flex;
@@ -2136,6 +2272,11 @@ onBeforeUnmount(() => eventAbortController.abort());
   align-items: stretch;
   margin-top: 10px;
 }
+.round-input-bar--fixed-dock .round-input-bar__composer {
+  height: 100px;
+  min-height: 0;
+  margin-top: 8px;
+}
 .round-input-bar__composer textarea {
   box-sizing: border-box;
   width: 100%;
@@ -2150,6 +2291,12 @@ onBeforeUnmount(() => eventAbortController.abort());
   font-size: 13px;
   line-height: 1.6;
 }
+.round-input-bar--fixed-dock .round-input-bar__composer textarea {
+  height: 94px;
+  min-height: 94px;
+  max-height: 94px;
+  overflow: auto;
+}
 .round-input-bar__composer textarea:disabled {
   color: #7f8ca0;
   background: #f3f7fb;
@@ -2160,8 +2307,9 @@ onBeforeUnmount(() => eventAbortController.abort());
   gap: 8px;
   align-content: stretch;
 }
-.round-input-bar__submit-column :deep(.phase-countdown) {
-  min-height: auto;
+.round-input-bar--fixed-dock .round-input-bar__submit-column {
+  grid-auto-rows: 44px;
+  align-content: start;
 }
 .round-input-bar__send-button,
 .round-input-bar__lock-button,

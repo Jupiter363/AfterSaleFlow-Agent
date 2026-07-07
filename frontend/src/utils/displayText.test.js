@@ -21,4 +21,18 @@ describe("display text helpers", () => {
     expect(text).toContain("物流显示签收但用户称未收到包裹");
     expect(text).not.toContain("SIGNED_NOT_RECEIVED");
   });
+
+  it("summarizes raw evidence matrix json in immutable room messages", () => {
+    const text = displayRoomMessageText(
+      '证据书记官宣读证据卷宗：核心证明矩阵显示：{"evidence_id":"EVIDENCE_001","relation_type":"UNMAPPED","verification_status":"UNVERIFIED"}。',
+    );
+
+    expect(text).toContain("证据材料尚未映射到具体争议事实");
+    expect(text).toContain("待核验");
+    expect(text).not.toContain("evidence_id");
+    expect(text).not.toContain("relation_type");
+    expect(text).not.toContain("verification_status");
+    expect(text).not.toContain("UNMAPPED");
+    expect(text).not.toContain("UNVERIFIED");
+  });
 });

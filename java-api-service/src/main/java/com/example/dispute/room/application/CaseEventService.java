@@ -170,7 +170,9 @@ public class CaseEventService {
                                                             .comment("heartbeat"));
                                         }
                                     } catch (IOException failure) {
-                                        remove(caseId, subscription);
+                                        removeDisconnected(caseId, subscription, failure);
+                                    } catch (RuntimeException failure) {
+                                        removeDisconnected(caseId, subscription, failure);
                                     }
                                 }));
     }
@@ -207,8 +209,7 @@ public class CaseEventService {
                         .forEach(event -> sendLocked(subscription, event));
                 return true;
             } catch (RuntimeException failure) {
-                remove(caseId, subscription);
-                subscription.emitter().completeWithError(failure);
+                removeDisconnected(caseId, subscription, failure);
                 return false;
             }
         }
@@ -292,6 +293,18 @@ public class CaseEventService {
             if (caseSubscriptions.isEmpty()) {
                 subscriptions.remove(caseId);
             }
+        }
+    }
+
+    private void removeDisconnected(
+            String caseId, Subscription subscription, Throwable deliveryFailure) {
+        remove(caseId, subscription);
+        try {
+            subscription.emitter().completeWithError(deliveryFailure);
+        } catch (RuntimeException ignored) {
+            // The servlet container may already have closed the response. At that point the
+            // important part is that the stale subscription has been removed so future
+            // heartbeats do not keep surfacing the same disconnect.
         }
     }
 

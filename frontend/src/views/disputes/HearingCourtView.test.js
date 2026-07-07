@@ -106,6 +106,21 @@ describe("HearingCourtView", () => {
     expect(progressItems[2].attributes("data-round-progress-state")).toBe("pending");
     expect(progressItems[0].attributes("data-round-connector-state")).toBe("complete");
     expect(progressItems[1].attributes("data-round-connector-state")).toBe("pending");
+    expect(progressItems[0].find("[data-round-active-spinner]").exists()).toBe(false);
+    expect(progressItems[1].find("[data-round-active-spinner]").exists()).toBe(true);
+    expect(progressItems[2].find("[data-round-active-spinner]").exists()).toBe(false);
+    expect(progressItems[0].find(".round-progress-board__number").exists()).toBe(false);
+    expect(progressItems[1].find(".round-progress-board__number").exists()).toBe(false);
+    expect(progressItems[2].find(".round-progress-board__number").exists()).toBe(false);
+    expect(progressItems[0].get("b").text()).toBe("");
+    expect(progressItems[1].get("b").text()).toBe("");
+    expect(progressItems[2].get("b").text()).toBe("");
+    expect(progressItems[0].get(".round-progress-board__label").text()).toBe("事实陈述");
+    expect(progressItems[1].get(".round-progress-board__label").text()).toBe("证据解释");
+    expect(progressItems[2].get(".round-progress-board__label").text()).toBe("方案确认");
+    expect(progressItems[0].get(".round-progress-board__status").text()).toBe("已封存");
+    expect(progressItems[1].get(".round-progress-board__status").text()).toBe("进行中");
+    expect(progressItems[2].get(".round-progress-board__status").text()).toBe("未开始");
     expect(statusDock.find('[data-hearing-status-chip="USER"]').exists()).toBe(false);
     expect(statusDock.find('[data-hearing-status-chip="MERCHANT"]').exists()).toBe(false);
     expect(statusDock.text()).not.toContain("时间/封存");
@@ -161,6 +176,29 @@ describe("HearingCourtView", () => {
     expect(wrapper.get("[data-round-input-bar]").text()).toContain(
       "本轮陈述输入台",
     );
+    expect(wrapper.get("[data-round-input-bar]").classes()).toContain(
+      "round-input-bar--fixed-dock",
+    );
+    expect(wrapper.get("[data-round-input-bar]").text()).toContain(
+      "提交陈述",
+    );
+    expect(wrapper.get("[data-round-input-bar]").text()).not.toContain(
+      "发送陈述",
+    );
+    expect(wrapper.get("[data-round-input-bar]").text()).not.toContain(
+      "发送本轮陈述",
+    );
+    expect(wrapper.get("[data-round-input-bar]").text()).not.toContain(
+      "提交本轮陈述",
+    );
+    expect(wrapper.get("[data-round-input-bar]").text()).not.toContain(
+      "本轮提交时效",
+    );
+    expect(wrapper.get("[data-round-input-bar]").text()).not.toContain(
+      "等待服务端确认下一阶段",
+    );
+    expect(wrapper.find("[data-send-hearing-statement]").exists()).toBe(true);
+    expect(wrapper.find("[data-submit-hearing-round]").exists()).toBe(false);
     expect(wrapper.get('[data-party-evidence-rail="user"]').text()).not.toContain(
       "用户代表",
     );
@@ -172,6 +210,68 @@ describe("HearingCourtView", () => {
     );
     expect(wrapper.get('[data-rail-position="right"]').text()).toContain(
       "庭审完成",
+    );
+  });
+
+  it("renders bootstrap room messages with courtroom role labels instead of backend sender roles", async () => {
+    const { wrapper } = await mountView({
+      initialMessages: [
+        {
+          id: "MESSAGE_INTAKE_1",
+          sequence_no: 1,
+          sender_role: "INTAKE_OFFICER",
+          message_text: "已受理本次售后争议。",
+          created_at: "2026-07-03T12:01:00+08:00",
+        },
+        {
+          id: "MESSAGE_CLERK_1",
+          sequence_no: 2,
+          sender_role: "EVIDENCE_CLERK",
+          message_text:
+            '证据书记官宣读证据卷宗：核心证明矩阵显示：{"evidence_id":"EVIDENCE_001","relation_type":"UNMAPPED","verification_status":"UNVERIFIED"}。',
+          created_at: "2026-07-03T12:02:00+08:00",
+        },
+        {
+          id: "MESSAGE_JUDGE_1",
+          sequence_no: 3,
+          sender_role: "JUDGE",
+          message_text: "现在开始围绕签收争议进行审理。",
+          created_at: "2026-07-03T12:03:00+08:00",
+        },
+      ],
+    });
+
+    const transcript = wrapper.get("[data-court-transcript]");
+    expect(transcript.text()).toContain("案情接待官");
+    expect(transcript.text()).toContain("证据书记官");
+    expect(transcript.text()).toContain("主审法官");
+    expect(transcript.text()).not.toContain("INTAKE_OFFICER");
+    expect(transcript.text()).not.toContain("EVIDENCE_CLERK");
+    expect(transcript.text()).not.toContain("JUDGE");
+    expect(transcript.text()).not.toContain("中风险 · 当前可信分");
+    const intakeMessage = wrapper.get('[data-court-message="intake"]');
+    const clerkMessage = wrapper.get('[data-court-message="clerk"]');
+    const bootstrapJudgeMessage = wrapper
+      .findAll('[data-court-message="judge"]')
+      .find((message) => message.text().includes("现在开始围绕签收争议进行审理。"));
+    expect(intakeMessage.text()).toContain("已受理本次售后争议。");
+    expect(clerkMessage.text()).toContain("证据材料尚未映射到具体争议事实");
+    expect(clerkMessage.text()).toContain("待核验");
+    expect(clerkMessage.text()).not.toContain("evidence_id");
+    expect(clerkMessage.text()).not.toContain("relation_type");
+    expect(clerkMessage.text()).not.toContain("verification_status");
+    expect(clerkMessage.text()).not.toContain("UNMAPPED");
+    expect(clerkMessage.text()).not.toContain("UNVERIFIED");
+    expect(bootstrapJudgeMessage).toBeDefined();
+    expect(bootstrapJudgeMessage.text()).toContain("主审法官");
+    expect(intakeMessage.classes()).toContain(
+      "court-message--court-staff-card",
+    );
+    expect(clerkMessage.classes()).toContain(
+      "court-message--court-staff-card",
+    );
+    expect(bootstrapJudgeMessage.classes()).toContain(
+      "court-message--judge-bench-card",
     );
   });
 
@@ -223,37 +323,41 @@ describe("HearingCourtView", () => {
     expect(wrapper.text()).toContain("等待审核确认");
   });
 
-  it("lets the current party submit their side of the active hearing round", async () => {
-    const submitRoundAction = vi.fn().mockResolvedValue({
-      round_id: "ROUND_2",
-      round_no: 2,
-      status: "WAITING",
-      dossier_version: 2,
-      round_deadline_at: "2026-07-03T12:05:00+08:00",
-      submitted_roles: ["USER"],
-      current_actor_submitted: true,
-      summary_json: JSON.stringify({
-        clerk: "用户已提交本轮陈述。",
-        judge: "等待商家提交后再生成本轮判断。",
-      }),
+  it("lets the current party submit a statement without closing the active hearing round", async () => {
+    const messageAction = vi.fn().mockResolvedValue({
+      id: "MESSAGE_ROUND_TEXT_1",
+      sequence_no: 1,
+      sender_role: "USER",
+      message_text: "用户补充本轮陈述内容。",
     });
+    const submitRoundAction = vi.fn();
     const { wrapper } = await mountView({
+      messageAction,
       submitRoundAction,
     });
 
-    await wrapper.get("[data-submit-hearing-round]").trigger("click");
+    await wrapper
+      .get('[data-send-message] textarea')
+      .setValue("用户补充本轮陈述内容。");
+    await wrapper.get("[data-send-hearing-statement]").trigger("click");
     await flushPromises();
 
-    expect(submitRoundAction).toHaveBeenCalledWith(
+    expect(messageAction).toHaveBeenCalledWith(
       expect.objectContaining({
-        dossier_version: 2,
-        statement_json: expect.stringContaining('"submitted_by_role":"USER"'),
+        message_type: "PARTY_TEXT",
+        text: "用户补充本轮陈述内容。",
       }),
     );
-    expect(wrapper.text()).toContain("已提交本轮，等待商家");
+    expect(submitRoundAction).not.toHaveBeenCalled();
+    expect(wrapper.get('[data-send-message] textarea').element.value).toBe("");
+    expect(wrapper.get("[data-court-transcript]").text()).toContain(
+      "用户补充本轮陈述内容。",
+    );
+    expect(wrapper.get("[data-send-hearing-statement]").exists()).toBe(true);
+    expect(wrapper.get("[data-send-hearing-statement]").text()).toBe("提交陈述");
   });
 
-  it("hides the party submit button after that party has submitted", async () => {
+  it("keeps the statement button available after that party has already spoken in an open round", async () => {
     const { wrapper } = await mountView({
       viewerRole: "MERCHANT",
       initialHearing: {
@@ -271,6 +375,9 @@ describe("HearingCourtView", () => {
     });
 
     expect(wrapper.find("[data-submit-hearing-round]").exists()).toBe(false);
+    expect(wrapper.get("[data-send-hearing-statement]").exists()).toBe(true);
+    expect(wrapper.get("[data-send-hearing-statement]").text()).toBe("提交陈述");
+    expect(wrapper.get('[data-send-message] textarea').attributes("disabled")).toBeUndefined();
     expect(wrapper.text()).toContain("已提交本轮，等待用户");
   });
 
@@ -390,13 +497,7 @@ describe("HearingCourtView", () => {
     );
   });
 
-  it("records party statements and creates a server-backed settlement card", async () => {
-    const messageAction = vi.fn().mockResolvedValue({
-      id: "MESSAGE_HEARING_1",
-      sequence_no: 1,
-      sender_role: "USER",
-      message_text: "我愿意接受退款方案。",
-    });
+  it("creates a server-backed settlement card", async () => {
     const proposeSettlementAction = vi.fn().mockResolvedValue({
       settlement_id: "SETTLEMENT_2",
       version: 2,
@@ -406,14 +507,9 @@ describe("HearingCourtView", () => {
       confirmed_roles: ["USER"],
     });
     const { wrapper } = await mountView({
-      messageAction,
       proposeSettlementAction,
     });
 
-    await wrapper
-      .get('[data-send-message] textarea')
-      .setValue("我愿意接受退款方案。");
-    await wrapper.get("[data-send-hearing-statement]").trigger("click");
     await wrapper.get("[data-open-settlement]").trigger("click");
     await wrapper
       .get("[data-settlement-proposal]")
@@ -421,9 +517,6 @@ describe("HearingCourtView", () => {
     await wrapper.get(".settlement-dialog form").trigger("submit");
     await flushPromises();
 
-    expect(messageAction).toHaveBeenCalledWith(
-      expect.objectContaining({ message_type: "PARTY_TEXT" }),
-    );
     expect(proposeSettlementAction).toHaveBeenCalledWith(
       expect.objectContaining({
         proposal_text: "商家退款 299 元，用户不再主张额外赔偿。",

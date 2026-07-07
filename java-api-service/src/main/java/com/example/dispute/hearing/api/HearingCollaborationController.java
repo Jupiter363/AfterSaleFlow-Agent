@@ -3,6 +3,7 @@ package com.example.dispute.hearing.api;
 import com.example.dispute.common.api.ApiResponse;
 import com.example.dispute.common.trace.TraceIdFilter;
 import com.example.dispute.config.AuthenticatedActor;
+import com.example.dispute.hearing.application.HearingCourtBootstrapService;
 import com.example.dispute.hearing.application.HearingRoundService;
 import com.example.dispute.hearing.application.HearingRoundView;
 import com.example.dispute.hearing.application.SettlementService;
@@ -31,14 +32,17 @@ public class HearingCollaborationController {
 
     private final HearingRoundService roundService;
     private final SettlementService settlementService;
+    private final HearingCourtBootstrapService bootstrapService;
     private final Clock clock;
 
     public HearingCollaborationController(
             HearingRoundService roundService,
             SettlementService settlementService,
+            HearingCourtBootstrapService bootstrapService,
             Clock clock) {
         this.roundService = roundService;
         this.settlementService = settlementService;
+        this.bootstrapService = bootstrapService;
         this.clock = clock;
     }
 
@@ -48,6 +52,8 @@ public class HearingCollaborationController {
             Authentication authentication,
             HttpServletRequest request) {
         AuthenticatedActor actor = actor(authentication);
+        bootstrapService.bootstrap(
+                caseId, actor, correlationId(request, TraceIdFilter.TRACE_ATTRIBUTE));
         return success(
                 Map.of(
                         "rounds", roundService.list(caseId, actor),

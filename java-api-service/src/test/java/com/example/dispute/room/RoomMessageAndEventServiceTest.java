@@ -1,6 +1,7 @@
 package com.example.dispute.room;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
@@ -46,6 +47,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import org.hibernate.annotations.Immutable;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -795,6 +797,35 @@ class RoomMessageAndEventServiceTest {
     }
 
     @Test
+    void heartbeatRemovesDisconnectedSseSubscriptionWhenSendThrowsRuntimeException()
+            throws ReflectiveOperationException {
+        FulfillmentCaseEntity dispute = evidenceCase();
+        AuthenticatedActor actor = new AuthenticatedActor("user-local", ActorRole.USER);
+        CaseAccessSessionEntity accessSession = accessSession(dispute.getId(), actor);
+        Object subscription =
+                subscription(
+                        accessSession,
+                        new ThrowingSseEmitter(
+                                new IllegalStateException("client disconnected")),
+                        0L);
+        @SuppressWarnings({"rawtypes", "unchecked"})
+        Map<String, java.util.concurrent.CopyOnWriteArrayList> subscriptions =
+                (Map<String, java.util.concurrent.CopyOnWriteArrayList>)
+                        ReflectionTestUtils.getField(eventService, "subscriptions");
+        subscriptions.put(
+                dispute.getId(),
+                new java.util.concurrent.CopyOnWriteArrayList<>(List.of(subscription)));
+        when(eventRepository
+                        .findAllByCaseIdAndSequenceNoGreaterThanOrderBySequenceNoAsc(
+                                dispute.getId(), 0L))
+                .thenReturn(List.of());
+
+        assertThatCode(() -> eventService.heartbeat()).doesNotThrowAnyException();
+
+        assertThat(subscriptions).doesNotContainKey(dispute.getId());
+    }
+
+    @Test
     void roomHistoryFiltersReviewerOnlyMessagesForAParty() {
         FulfillmentCaseEntity dispute = evidenceCase();
         CaseRoomEntity room =
@@ -956,6 +987,40 @@ class RoomMessageAndEventServiceTest {
                 actor.role(),
                 permissionLevel(actor.role()),
                 "test");
+    }
+
+    private static Object subscription(
+            CaseAccessSessionEntity accessSession, SseEmitter emitter, long lastSequence)
+            throws ReflectiveOperationException {
+        Class<?> subscriptionType = null;
+        for (Class<?> nestedType : CaseEventService.class.getDeclaredClasses()) {
+            if ("Subscription".equals(nestedType.getSimpleName())) {
+                subscriptionType = nestedType;
+                break;
+            }
+        }
+        if (subscriptionType == null) {
+            throw new IllegalStateException("CaseEventService.Subscription not found");
+        }
+        var constructor =
+                subscriptionType.getDeclaredConstructor(
+                        CaseAccessSessionEntity.class, SseEmitter.class, AtomicLong.class);
+        constructor.setAccessible(true);
+        return constructor.newInstance(accessSession, emitter, new AtomicLong(lastSequence));
+    }
+
+    private static final class ThrowingSseEmitter extends SseEmitter {
+        private final RuntimeException failure;
+
+        private ThrowingSseEmitter(RuntimeException failure) {
+            super(60_000L);
+            this.failure = failure;
+        }
+
+        @Override
+        public void send(SseEventBuilder builder) throws java.io.IOException {
+            throw failure;
+        }
     }
 
     private static PermissionLevel permissionLevel(ActorRole role) {
