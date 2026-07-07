@@ -15,6 +15,7 @@ import com.example.dispute.infrastructure.persistence.entity.EvidenceDossierEnti
 import com.example.dispute.infrastructure.persistence.entity.EvidenceItemEntity;
 import com.example.dispute.infrastructure.persistence.repository.EvidenceDossierRepository;
 import com.example.dispute.infrastructure.persistence.repository.EvidenceItemRepository;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.time.Instant;
@@ -27,6 +28,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.test.util.ReflectionTestUtils;
 
 @ExtendWith(MockitoExtension.class)
 class EvidenceDossierFreezerTest {
@@ -83,23 +85,123 @@ class EvidenceDossierFreezerTest {
                         "CASE_FREEZE");
     }
 
+    @Test
+    void frozenDossierContainsEvidenceItemsPartySummaryAndFactEvidenceMatrix()
+            throws Exception {
+        Clock clock =
+                Clock.fixed(Instant.parse("2026-07-03T01:00:00Z"), ZoneOffset.UTC);
+        ObjectMapper objectMapper = new ObjectMapper().findAndRegisterModules();
+        EvidenceDossierFreezer freezer =
+                new EvidenceDossierFreezer(
+                        dossierRepository,
+                        dossierItemRepository,
+                        evidenceRepository,
+                        verificationRepository,
+                        objectMapper,
+                        clock);
+        EvidenceItemEntity userLogisticsProof = evidence("EVIDENCE_USER_LOGISTICS");
+        userLogisticsProof.applyParseSuccess(
+                "用户上传的物流详情显示包裹已签收，但签收人身份与投递位置仍需核验。",
+                "{\"ocr\":\"物流详情\"}",
+                "parser");
+        when(dossierRepository.findByCaseIdAndDossierVersion("CASE_FREEZE", 2))
+                .thenReturn(Optional.empty());
+        when(evidenceRepository
+                        .findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(
+                                "CASE_FREEZE"))
+                .thenReturn(List.of(userLogisticsProof));
+        when(verificationRepository
+                        .findTopByEvidenceIdOrderByVerificationVersionDesc(
+                                "EVIDENCE_USER_LOGISTICS"))
+                .thenReturn(
+                        Optional.of(
+                                verification(
+                                        userLogisticsProof,
+                                        EvidenceVerificationStatus.VERIFIED)));
+        when(dossierRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        EvidenceDossierEntity frozen = freezer.freeze("CASE_FREEZE", 2, "system");
+
+        JsonNode summary = objectMapper.readTree(frozen.getSummaryJson());
+        assertThat(summary.path("evidence_items")).hasSize(1);
+        assertThat(summary.path("evidence_items").get(0).path("file_name").asText())
+                .isEqualTo("proof.png");
+        assertThat(summary.path("evidence_items").get(0).path("authenticity_score").asDouble())
+                .isGreaterThanOrEqualTo(0.8);
+        assertThat(summary.path("party_evidence_summary").path("USER").path("strong_points"))
+                .hasSize(1);
+        assertThat(summary.path("overall_confidence_score").asInt()).isGreaterThan(0);
+
+        JsonNode matrix = objectMapper.readTree(frozen.getMatrixSummaryJson());
+        assertThat(matrix.path("fact_evidence_matrix")).hasSize(1);
+        assertThat(matrix.path("fact_evidence_matrix").get(0).path("supporting_evidence"))
+                .hasSize(1);
+        assertThat(matrix.toString()).doesNotContain("UNMAPPED");
+    }
+
+    @Test
+    void freezeToleratesLegacyEvidenceWithoutParseStatus() {
+        Clock clock =
+                Clock.fixed(Instant.parse("2026-07-03T01:00:00Z"), ZoneOffset.UTC);
+        EvidenceDossierFreezer freezer =
+                new EvidenceDossierFreezer(
+                        dossierRepository,
+                        dossierItemRepository,
+                        evidenceRepository,
+                        verificationRepository,
+                        new ObjectMapper().findAndRegisterModules(),
+                        clock);
+        EvidenceItemEntity legacyEvidence = evidence("EVIDENCE_LEGACY_PARSE_STATUS");
+        ReflectionTestUtils.setField(legacyEvidence, "parseStatus", null);
+        when(dossierRepository.findByCaseIdAndDossierVersion("CASE_FREEZE", 3))
+                .thenReturn(Optional.empty());
+        when(evidenceRepository
+                        .findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(
+                                "CASE_FREEZE"))
+                .thenReturn(List.of(legacyEvidence));
+        when(verificationRepository
+                        .findTopByEvidenceIdOrderByVerificationVersionDesc(
+                                "EVIDENCE_LEGACY_PARSE_STATUS"))
+                .thenReturn(Optional.empty());
+        when(dossierRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        EvidenceDossierEntity frozen = freezer.freeze("CASE_FREEZE", 3, "system");
+
+        assertThat(frozen.getDossierStatus()).isEqualTo("FROZEN");
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<EvidenceDossierItemEntity>> snapshots =
+                ArgumentCaptor.forClass(List.class);
+        verify(dossierItemRepository).saveAll(snapshots.capture());
+        assertThat(snapshots.getValue())
+                .extracting(EvidenceDossierItemEntity::getEvidenceId)
+                .containsExactly("EVIDENCE_LEGACY_PARSE_STATUS");
+    }
+
     private static EvidenceItemEntity evidence(String id) {
-        return EvidenceItemEntity.uploaded(
-                id,
-                "CASE_FREEZE",
-                "DOSSIER_COLLECTING",
-                "LOGISTICS_PROOF",
-                "USER_UPLOAD",
-                "USER",
-                "user-local",
-                "evidence-original",
-                "CASE_FREEZE/" + id + "/proof.png",
-                "hash-" + id,
-                "proof.png",
-                "image/png",
-                12,
-                "PARTIES",
-                OffsetDateTime.parse("2026-07-03T00:00:00Z"));
+        EvidenceItemEntity evidence =
+                EvidenceItemEntity.uploaded(
+                        id,
+                        "CASE_FREEZE",
+                        "DOSSIER_COLLECTING",
+                        "LOGISTICS_PROOF",
+                        "USER_UPLOAD",
+                        "USER",
+                        "user-local",
+                        "evidence-original",
+                        "CASE_FREEZE/" + id + "/proof.png",
+                        "hash-" + id,
+                        "proof.png",
+                        "image/png",
+                        12,
+                        "PARTIES",
+                        OffsetDateTime.parse("2026-07-03T00:00:00Z"));
+        evidence.markSubmitted(
+                "BATCH_" + id,
+                OffsetDateTime.parse("2026-07-03T00:10:00Z"),
+                "user-local");
+        return evidence;
     }
 
     private static EvidenceVerificationEntity verification(

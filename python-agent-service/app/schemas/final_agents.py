@@ -404,6 +404,7 @@ class HearingRoundTurnRequest(StrictModel):
     round_status: Identifier
     stop_reason: Identifier | None = None
     round_summary_json: LongText = "{}"
+    courtroom_context: dict[str, object] = Field(default_factory=dict)
     party_submissions: Annotated[
         list[HearingRoundPartySubmission],
         Field(max_length=10),

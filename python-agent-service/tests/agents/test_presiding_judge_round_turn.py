@@ -68,6 +68,29 @@ def request(**overrides) -> HearingRoundTurnRequest:
         "final_round": False,
         "round_status": "COMPLETED",
         "round_summary_json": '{"trigger":"BOTH_PARTIES_SUBMITTED"}',
+        "courtroom_context": {
+            "schema_version": "hearing_bootstrap_dossier.v1",
+            "intake_dossier": {
+                "case_story": "用户称物流显示已签收但本人未收到包裹。",
+                "disputed_facts": [
+                    {
+                        "fact": "用户是否实际收到商品",
+                        "user_position": "用户称未收到",
+                        "merchant_position": "商家称物流已签收",
+                    }
+                ],
+            },
+            "evidence_dossier": {
+                "fact_evidence_matrix": [
+                    {
+                        "fact": "物流显示已签收",
+                        "supporting_evidence": ["EVIDENCE_LOGISTICS"],
+                        "evidence_strength": "MEDIUM",
+                    }
+                ],
+                "overall_confidence_score": 76,
+            },
+        },
         "party_submissions": [
             {
                 "participant_role": "USER",
@@ -118,6 +141,15 @@ def test_round_turn_workflow_uses_context_pack_and_returns_judge_message() -> No
     context_pack = runner.calls[0]["context_pack"]
     assert context_pack is not None
     assert context_pack.node_name == "hearing_round_turn"
+    canonical = next(
+        section for section in context_pack.sections if section.name == "canonical_case_dossier"
+    )
+    evidence = next(
+        section for section in context_pack.sections if section.name == "actor_visible_evidence"
+    )
+    assert "用户称物流显示已签收但本人未收到包裹" in canonical.content
+    assert "fact_evidence_matrix" in evidence.content
+    assert "EVIDENCE_LOGISTICS" in evidence.content
 
 
 def test_open_round_is_guarded_as_judge_opening_instead_of_sealed_turn() -> None:
@@ -140,6 +172,14 @@ def test_open_round_is_guarded_as_judge_opening_instead_of_sealed_turn() -> None
             round_status="OPEN",
             round_summary_json="{}",
             party_submissions=[],
+            courtroom_context={
+                "courtroom_opening_messages": [
+                    {
+                        "sender_role": "JUDGE",
+                        "content": "小法庭现在开庭。根据接待室卷宗和证据证明矩阵，请双方围绕签收争议说明。",
+                    }
+                ]
+            },
         )
     )
 
@@ -148,6 +188,7 @@ def test_open_round_is_guarded_as_judge_opening_instead_of_sealed_turn() -> None
     assert result.next_round_no == 1
     assert result.final_draft_required is False
     assert "开庭" in result.message_text
+    assert "证据证明矩阵" in result.message_text
     assert "已封存" not in result.message_text
     assert "已入卷" not in result.message_text
     context_pack = runner.calls[0]["context_pack"]

@@ -8,6 +8,7 @@ import com.example.dispute.hearing.infrastructure.persistence.repository.Hearing
 import com.example.dispute.hearing.infrastructure.persistence.repository.HearingRoundRepository;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
+import com.example.dispute.infrastructure.persistence.repository.HearingRecordRepository;
 import com.example.dispute.room.application.CaseEventService;
 import com.example.dispute.room.domain.MessageSenderType;
 import com.example.dispute.room.domain.MessageType;
@@ -40,6 +41,7 @@ public class HearingCourtOrchestrator {
     private final CaseRoomRepository roomRepository;
     private final HearingRoundRepository roundRepository;
     private final HearingRoundPartySubmissionRepository submissionRepository;
+    private final HearingRecordRepository hearingRecordRepository;
     private final RoomMessageRepository messageRepository;
     private final CaseEventService eventService;
     private final HearingCourtAgentClient agentClient;
@@ -52,6 +54,7 @@ public class HearingCourtOrchestrator {
             CaseRoomRepository roomRepository,
             HearingRoundRepository roundRepository,
             HearingRoundPartySubmissionRepository submissionRepository,
+            HearingRecordRepository hearingRecordRepository,
             RoomMessageRepository messageRepository,
             CaseEventService eventService,
             HearingCourtAgentClient agentClient,
@@ -62,6 +65,7 @@ public class HearingCourtOrchestrator {
         this.roomRepository = roomRepository;
         this.roundRepository = roundRepository;
         this.submissionRepository = submissionRepository;
+        this.hearingRecordRepository = hearingRecordRepository;
         this.messageRepository = messageRepository;
         this.eventService = eventService;
         this.agentClient = agentClient;
@@ -183,6 +187,7 @@ public class HearingCourtOrchestrator {
                 round.getRoundStatus().name(),
                 round.getStopReason() == null ? null : round.getStopReason().name(),
                 defaultText(round.getSummaryJson(), "{}"),
+                courtroomContextJson(dispute.getId()),
                 submissions.stream()
                         .map(
                                 submission ->
@@ -192,6 +197,27 @@ public class HearingCourtOrchestrator {
                                                 submission.getSubmissionSource().name(),
                                                 defaultText(submission.getSubmissionJson(), "{}")))
                         .toList());
+    }
+
+    private String courtroomContextJson(String caseId) {
+        String contextJson =
+                hearingRecordRepository
+                        .findTopByCaseIdAndNodeNameAndRoundNoAndRecordTypeOrderByCreatedAtDesc(
+                                caseId,
+                                HearingCourtBootstrapService.BOOTSTRAP_NODE,
+                                HearingCourtBootstrapService.OPENING_ROUND_NO,
+                                HearingCourtBootstrapService.SNAPSHOT_RECORD_TYPE)
+                        .map(record -> defaultText(record.getOutputJson(), ""))
+                        .orElseThrow(
+                                () ->
+                                        new IllegalStateException(
+                                                "hearing bootstrap snapshot not found for case "
+                                                        + caseId));
+        if (contextJson.isBlank()) {
+            throw new IllegalStateException(
+                    "hearing bootstrap snapshot not found for case " + caseId);
+        }
+        return contextJson;
     }
 
     private HearingCourtAgentResult safeGenerate(HearingCourtAgentCommand command, String traceId) {

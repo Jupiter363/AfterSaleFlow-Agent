@@ -9,6 +9,7 @@ import com.example.dispute.infrastructure.persistence.repository.EvidenceDossier
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.List;
 import java.util.Map;
@@ -64,7 +65,7 @@ public class EvidenceDossierQueryService {
                 dossier.getDossierStatus(),
                 readMap(dossier.getSummaryJson()),
                 readList(dossier.getTimelineJson()),
-                readList(dossier.getMatrixSummaryJson()),
+                readMatrix(dossier.getMatrixSummaryJson()),
                 itemRepository
                         .findAllByDossierIdOrderBySequenceNo(dossier.getId())
                         .stream()
@@ -100,6 +101,19 @@ public class EvidenceDossierQueryService {
         try {
             return objectMapper.readValue(json, new TypeReference<>() {});
         } catch (JsonProcessingException exception) {
+            throw new IllegalStateException("invalid dossier projection", exception);
+        }
+    }
+
+    private List<Map<String, Object>> readMatrix(String json) {
+        try {
+            JsonNode node = objectMapper.readTree(json);
+            JsonNode matrix =
+                    node.isObject() && node.path("fact_evidence_matrix").isArray()
+                            ? node.path("fact_evidence_matrix")
+                            : node;
+            return objectMapper.convertValue(matrix, new TypeReference<>() {});
+        } catch (IllegalArgumentException | JsonProcessingException exception) {
             throw new IllegalStateException("invalid dossier projection", exception);
         }
     }

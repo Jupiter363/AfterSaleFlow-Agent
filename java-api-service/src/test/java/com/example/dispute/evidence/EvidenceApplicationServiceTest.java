@@ -305,6 +305,22 @@ class EvidenceApplicationServiceTest {
         assertThat(disputeCase.getCaseStatus()).isEqualTo(CaseStatus.DOSSIER_BUILT);
     }
 
+    @Test
+    void getsFrozenDossierWithObjectShapedEvidenceMatrix() {
+        when(caseRepository.findById("CASE_evidence")).thenReturn(Optional.of(caseEntity()));
+        when(dossierRepository.findByCaseId("CASE_evidence"))
+                .thenReturn(Optional.of(frozenDossier()));
+        when(evidenceRepository
+                        .findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(
+                                "CASE_evidence"))
+                .thenReturn(List.of());
+
+        BuildDossierResult result = service.getDossier("CASE_evidence", actor());
+
+        assertThat(result.matrix()).hasSize(1);
+        assertThat(result.matrix().get(0).get("fact")).isEqualTo("物流显示已签收");
+    }
+
     private static AuthenticatedActor actor() {
         return new AuthenticatedActor("user-evidence", ActorRole.USER);
     }
@@ -333,5 +349,27 @@ class EvidenceApplicationServiceTest {
                 """,
                 "user-evidence");
         return entity;
+    }
+
+    private static EvidenceDossierEntity frozenDossier() {
+        return EvidenceDossierEntity.frozen(
+                "DOSSIER_FROZEN",
+                "CASE_evidence",
+                2,
+                "system",
+                "{\"evidence_count\":1}",
+                "[]",
+                """
+                {
+                  "fact_evidence_matrix": [
+                    {
+                      "fact_id": "FACT_SIGNED",
+                      "fact": "物流显示已签收",
+                      "supporting_evidence": ["EVIDENCE_LOGISTICS"]
+                    }
+                  ],
+                  "unmapped_evidence": []
+                }
+                """);
     }
 }

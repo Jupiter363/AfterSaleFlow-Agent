@@ -29,6 +29,10 @@ class RestClientHearingCourtAgentClientTest {
                 .andExpect(header("X-Request-Id", "REQ_round"))
                 .andExpect(jsonPath("$.case_id").value("CASE_COURT"))
                 .andExpect(jsonPath("$.round_no").value(1))
+                .andExpect(jsonPath("$.courtroom_context.intake_dossier.case_story")
+                        .value("用户称物流显示已签收但本人未收到包裹。"))
+                .andExpect(jsonPath("$.courtroom_context.evidence_dossier.fact_evidence_matrix[0].fact")
+                        .value("物流显示已签收"))
                 .andRespond(
                         withSuccess(
                                 """
@@ -67,6 +71,21 @@ class RestClientHearingCourtAgentClientTest {
                                 "COMPLETED",
                                 null,
                                 "{\"trigger\":\"BOTH_PARTIES_SUBMITTED\"}",
+                                """
+                                {
+                                  "intake_dossier": {
+                                    "case_story": "用户称物流显示已签收但本人未收到包裹。"
+                                  },
+                                  "evidence_dossier": {
+                                    "fact_evidence_matrix": [
+                                      {
+                                        "fact": "物流显示已签收",
+                                        "supporting_evidence": ["EVIDENCE_LOGISTICS"]
+                                      }
+                                    ]
+                                  }
+                                }
+                                """,
                                 List.of(
                                         new HearingCourtAgentCommand.PartySubmission(
                                                 "USER",

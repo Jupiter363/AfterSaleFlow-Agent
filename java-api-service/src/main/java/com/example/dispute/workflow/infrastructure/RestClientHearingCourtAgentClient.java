@@ -6,7 +6,9 @@ import com.example.dispute.common.trace.TraceIdFilter;
 import com.example.dispute.hearing.application.HearingCourtAgentClient;
 import com.example.dispute.hearing.application.HearingCourtAgentCommand;
 import com.example.dispute.hearing.application.HearingCourtAgentResult;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -20,6 +22,7 @@ import org.springframework.web.client.RestClient;
 public class RestClientHearingCourtAgentClient implements HearingCourtAgentClient {
 
     private static final String ENDPOINT = "/internal/agents/hearing/round-turn";
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     private final RestClient restClient;
 
@@ -101,6 +104,7 @@ public class RestClientHearingCourtAgentClient implements HearingCourtAgentClien
         put(body, "round_status", command.roundStatus());
         put(body, "stop_reason", command.stopReason());
         put(body, "round_summary_json", command.roundSummaryJson());
+        body.put("courtroom_context", courtroomContext(command.courtroomContextJson()));
         body.put(
                 "party_submissions",
                 command.partySubmissions().stream()
@@ -122,6 +126,17 @@ public class RestClientHearingCourtAgentClient implements HearingCourtAgentClien
     private static void put(Map<String, Object> body, String key, Object value) {
         if (value != null) {
             body.put(key, value);
+        }
+    }
+
+    private static JsonNode courtroomContext(String courtroomContextJson) {
+        try {
+            return OBJECT_MAPPER.readTree(
+                    courtroomContextJson == null || courtroomContextJson.isBlank()
+                            ? "{}"
+                            : courtroomContextJson);
+        } catch (JsonProcessingException exception) {
+            return OBJECT_MAPPER.createObjectNode();
         }
     }
 }

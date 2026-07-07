@@ -15,6 +15,7 @@ import com.example.dispute.infrastructure.persistence.repository.EvidenceItemRep
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.security.MessageDigest;
@@ -518,8 +519,13 @@ public class EvidenceApplicationService {
 
     private List<Map<String, Object>> readMatrix(String json) {
         try {
-            return objectMapper.readValue(json, new TypeReference<>() {});
-        } catch (JsonProcessingException exception) {
+            JsonNode node = objectMapper.readTree(json);
+            JsonNode matrix =
+                    node.isObject() && node.path("fact_evidence_matrix").isArray()
+                            ? node.path("fact_evidence_matrix")
+                            : node;
+            return objectMapper.convertValue(matrix, new TypeReference<>() {});
+        } catch (IllegalArgumentException | JsonProcessingException exception) {
             throw new IllegalStateException("invalid dossier matrix", exception);
         }
     }

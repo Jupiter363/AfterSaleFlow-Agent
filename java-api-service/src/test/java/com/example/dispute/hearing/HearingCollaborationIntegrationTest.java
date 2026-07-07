@@ -2,9 +2,10 @@ package com.example.dispute.hearing;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
-import static org.mockito.Mockito.times;
 
 import com.example.dispute.common.exception.IdempotencyConflictException;
 import com.example.dispute.config.ActorRole;
@@ -253,7 +254,7 @@ class HearingCollaborationIntegrationTest {
     }
 
     @Test
-    void openingHearingCreatesInitialRoundAndAsksJudgeForOpeningOnce() {
+    void openingHearingCreatesInitialRoundWithoutAskingJudgeBeforeBootstrap() {
         seedHearing("CASE_OPENING");
 
         var first =
@@ -273,7 +274,7 @@ class HearingCollaborationIntegrationTest {
         assertThat(replayed.roundId()).isEqualTo(first.roundId());
         assertThat(roundRepository.findAllByCaseIdOrderByRoundNoAsc("CASE_OPENING"))
                 .hasSize(1);
-        verify(hearingCourtOrchestrator, times(1))
+        verify(hearingCourtOrchestrator, never())
                 .afterRoundOpenedAfterCommit(
                         "CASE_OPENING", 1, "TRACE_HEARING_ROUND_1");
         assertThat(

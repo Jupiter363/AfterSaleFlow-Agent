@@ -2,9 +2,11 @@ package com.example.dispute.hearing;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import com.example.dispute.common.transaction.PostCommitSideEffectExecutor;
@@ -20,8 +22,10 @@ import com.example.dispute.hearing.infrastructure.persistence.entity.HearingRoun
 import com.example.dispute.hearing.infrastructure.persistence.entity.HearingRoundPartySubmissionEntity;
 import com.example.dispute.hearing.infrastructure.persistence.repository.HearingRoundPartySubmissionRepository;
 import com.example.dispute.hearing.infrastructure.persistence.repository.HearingRoundRepository;
+import com.example.dispute.infrastructure.persistence.entity.HearingRecordEntity;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
+import com.example.dispute.infrastructure.persistence.repository.HearingRecordRepository;
 import com.example.dispute.room.application.CaseEventService;
 import com.example.dispute.room.domain.MessageSenderType;
 import com.example.dispute.room.domain.MessageType;
@@ -54,6 +58,7 @@ class HearingCourtOrchestratorTest {
     @Mock private CaseRoomRepository roomRepository;
     @Mock private HearingRoundRepository roundRepository;
     @Mock private HearingRoundPartySubmissionRepository submissionRepository;
+    @Mock private HearingRecordRepository hearingRecordRepository;
     @Mock private RoomMessageRepository messageRepository;
     @Mock private CaseEventService eventService;
     @Mock private HearingCourtAgentClient agentClient;
@@ -68,6 +73,7 @@ class HearingCourtOrchestratorTest {
                         roomRepository,
                         roundRepository,
                         submissionRepository,
+                        hearingRecordRepository,
                         messageRepository,
                         eventService,
                         agentClient,
@@ -113,6 +119,13 @@ class HearingCourtOrchestratorTest {
         when(submissionRepository.findAllByCaseIdAndRoundNoOrderBySubmittedAtAsc(
                         dispute.getId(), 1))
                 .thenReturn(List.of());
+        when(hearingRecordRepository
+                        .findTopByCaseIdAndNodeNameAndRoundNoAndRecordTypeOrderByCreatedAtDesc(
+                                dispute.getId(),
+                                "C0_COURT_BOOTSTRAP",
+                                1,
+                                "BOOTSTRAP_DOSSIER_SNAPSHOT"))
+                .thenReturn(Optional.of(bootstrapSnapshot(dispute.getId())));
         when(messageRepository.findByCaseIdAndIdempotencyKey(
                         dispute.getId(), "judge-round-opening:" + dispute.getId() + ":1"))
                 .thenReturn(Optional.empty());
@@ -141,6 +154,9 @@ class HearingCourtOrchestratorTest {
         verify(agentClient).generateRoundTurn(command.capture(), eq("TRACE_COURT_OPENING_1"), any());
         assertThat(command.getValue().roundStatus()).isEqualTo("OPEN");
         assertThat(command.getValue().partySubmissions()).isEmpty();
+        assertThat(command.getValue().courtroomContextJson())
+                .contains("fact_evidence_matrix")
+                .contains("物流显示已签收");
 
         ArgumentCaptor<RoomMessageEntity> savedMessage =
                 ArgumentCaptor.forClass(RoomMessageEntity.class);
@@ -214,6 +230,13 @@ class HearingCourtOrchestratorTest {
         when(submissionRepository.findAllByCaseIdAndRoundNoOrderBySubmittedAtAsc(
                         dispute.getId(), 1))
                 .thenReturn(List.of(userSubmission, merchantSubmission));
+        when(hearingRecordRepository
+                        .findTopByCaseIdAndNodeNameAndRoundNoAndRecordTypeOrderByCreatedAtDesc(
+                                dispute.getId(),
+                                "C0_COURT_BOOTSTRAP",
+                                1,
+                                "BOOTSTRAP_DOSSIER_SNAPSHOT"))
+                .thenReturn(Optional.of(bootstrapSnapshot(dispute.getId())));
         when(messageRepository.findByCaseIdAndIdempotencyKey(
                         dispute.getId(), "judge-round-turn:" + dispute.getId() + ":1"))
                 .thenReturn(Optional.empty());
@@ -246,6 +269,10 @@ class HearingCourtOrchestratorTest {
         assertThat(command.getValue().partySubmissions())
                 .extracting(HearingCourtAgentCommand.PartySubmission::participantRole)
                 .containsExactly("USER", "MERCHANT");
+        assertThat(command.getValue().courtroomContextJson())
+                .contains("intake_dossier")
+                .contains("evidence_dossier")
+                .contains("fact_evidence_matrix");
 
         ArgumentCaptor<RoomMessageEntity> savedMessage =
                 ArgumentCaptor.forClass(RoomMessageEntity.class);
@@ -281,6 +308,59 @@ class HearingCourtOrchestratorTest {
         assertThat(savedMessage.getValue().getAudienceActorIdsJson()).isEqualTo("[]");
     }
 
+    @Test
+    void afterRoundClosedRequiresFrozenCourtroomContext() {
+        FulfillmentCaseEntity dispute = hearingCase();
+        CaseRoomEntity room =
+                CaseRoomEntity.open(
+                        "ROOM_HEARING_CASE_COURT",
+                        dispute.getId(),
+                        RoomType.HEARING,
+                        OffsetDateTime.parse("2026-07-07T01:00:00Z"),
+                        "system");
+        HearingRoundEntity round =
+                HearingRoundEntity.open(
+                        "HEARING_ROUND_1",
+                        dispute.getId(),
+                        null,
+                        1,
+                        2,
+                        Instant.parse("2026-07-07T01:05:00Z"),
+                        Instant.parse("2026-07-07T01:00:00Z"),
+                        "system");
+        round.complete(
+                "{\"trigger\":\"BOTH_PARTIES_SUBMITTED\"}",
+                null,
+                Instant.parse("2026-07-07T01:04:00Z"),
+                "hearing-controller");
+        when(caseRepository.findById(dispute.getId())).thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.HEARING))
+                .thenReturn(Optional.of(room));
+        when(roundRepository.findByCaseIdAndRoundNo(dispute.getId(), 1))
+                .thenReturn(Optional.of(round));
+        when(submissionRepository.findAllByCaseIdAndRoundNoOrderBySubmittedAtAsc(
+                        dispute.getId(), 1))
+                .thenReturn(List.of());
+        when(hearingRecordRepository
+                        .findTopByCaseIdAndNodeNameAndRoundNoAndRecordTypeOrderByCreatedAtDesc(
+                                dispute.getId(),
+                                "C0_COURT_BOOTSTRAP",
+                                1,
+                                "BOOTSTRAP_DOSSIER_SNAPSHOT"))
+                .thenReturn(Optional.empty());
+        when(messageRepository.findByCaseIdAndIdempotencyKey(
+                        dispute.getId(), "judge-round-turn:" + dispute.getId() + ":1"))
+                .thenReturn(Optional.empty());
+
+        assertThatThrownBy(
+                        () ->
+                                orchestrator.afterRoundClosed(
+                                        dispute.getId(), 1, false, "TRACE_COURT_ROUND_1"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("hearing bootstrap snapshot not found");
+        verifyNoInteractions(agentClient);
+    }
+
     private static FulfillmentCaseEntity hearingCase() {
         return FulfillmentCaseEntity.imported(
                 "CASE_COURT",
@@ -300,5 +380,41 @@ class HearingCourtOrchestratorTest {
                 "OMS",
                 "EXT-COURT",
                 "external-adapter");
+    }
+
+    private static HearingRecordEntity bootstrapSnapshot(String caseId) {
+        return HearingRecordEntity.record(
+                "HREC_BOOTSTRAP",
+                caseId,
+                "HEARING_STATE_BOOTSTRAP",
+                "hearing-window-" + caseId,
+                "C0_COURT_BOOTSTRAP",
+                1,
+                "BOOTSTRAP_DOSSIER_SNAPSHOT",
+                "{\"source\":\"test\"}",
+                """
+                {
+                  "schema_version": "hearing_bootstrap_dossier.v1",
+                  "intake_dossier": {
+                    "case_story": "用户称物流显示已签收但本人未收到包裹。"
+                  },
+                  "evidence_dossier": {
+                    "fact_evidence_matrix": [
+                      {
+                        "fact_id": "FACT_SIGNED",
+                        "fact": "物流显示已签收",
+                        "supporting_evidence": ["EVIDENCE_LOGISTICS"],
+                        "evidence_strength": "MEDIUM"
+                      }
+                    ]
+                  }
+                }
+                """,
+                "{}",
+                "hearing-bootstrap-v1",
+                "java-deterministic-bootstrap",
+                null,
+                null,
+                "hearing-bootstrap");
     }
 }

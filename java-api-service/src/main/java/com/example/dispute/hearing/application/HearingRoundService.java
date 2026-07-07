@@ -104,8 +104,6 @@ public class HearingRoundService {
                                             round.getRoundDeadlineAt().toString()),
                                     "hearing-round-opened:1",
                                     actorId);
-                            courtOrchestrator.afterRoundOpenedAfterCommit(
-                                    caseId, 1, traceId(1));
                             return view(caseId, round, null);
                         });
     }

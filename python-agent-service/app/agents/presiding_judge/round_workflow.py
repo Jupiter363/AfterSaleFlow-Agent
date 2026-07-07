@@ -66,6 +66,7 @@ def _reason_with_llm_node(model_runner: Any | None):
                     "hearing_round_submissions": [
                         item.model_dump(mode="json") for item in request.party_submissions
                     ],
+                    "actor_visible_evidence": _actor_visible_evidence(request),
                     "round_control_policy": _round_control_policy(request),
                 },
             )
@@ -212,6 +213,7 @@ def _current_turn_context(request: HearingRoundTurnRequest) -> dict[str, Any]:
         "round_status": request.round_status,
         "stop_reason": request.stop_reason,
         "round_summary_json": request.round_summary_json,
+        "has_frozen_courtroom_context": bool(request.courtroom_context),
     }
 
 
@@ -229,6 +231,17 @@ def _case_identity_context(request: HearingRoundTurnRequest) -> dict[str, Any]:
 
 
 def _canonical_case_dossier(request: HearingRoundTurnRequest) -> dict[str, Any]:
+    intake_dossier = request.courtroom_context.get("intake_dossier")
+    if isinstance(intake_dossier, dict) and intake_dossier:
+        return {
+            "source": "hearing_bootstrap_context",
+            "intake_dossier": intake_dossier,
+            "case_identity": request.courtroom_context.get("case_identity") or {},
+            "courtroom_opening_messages": request.courtroom_context.get(
+                "courtroom_opening_messages"
+            )
+            or [],
+        }
     return {
         "case_story": {
             "title": request.title,
@@ -238,6 +251,22 @@ def _canonical_case_dossier(request: HearingRoundTurnRequest) -> dict[str, Any]:
             "core_issue": request.dispute_type or "履约争议",
             "risk_level": request.risk_level,
         },
+    }
+
+
+def _actor_visible_evidence(request: HearingRoundTurnRequest) -> dict[str, Any]:
+    evidence_dossier = request.courtroom_context.get("evidence_dossier")
+    if isinstance(evidence_dossier, dict) and evidence_dossier:
+        return {
+            "source": "hearing_bootstrap_context",
+            "evidence_dossier": evidence_dossier,
+            "fact_evidence_matrix": evidence_dossier.get("fact_evidence_matrix") or [],
+            "overall_confidence_score": evidence_dossier.get("overall_confidence_score"),
+            "handoff_notes": evidence_dossier.get("handoff_notes"),
+        }
+    return {
+        "source": "not_available",
+        "fact_evidence_matrix": [],
     }
 
 
@@ -296,6 +325,9 @@ def _is_opening_turn(request: HearingRoundTurnRequest) -> bool:
 
 
 def _opening_message(request: HearingRoundTurnRequest) -> str:
+    bootstrap_message = _bootstrap_judge_opening_message(request)
+    if bootstrap_message:
+        return bootstrap_message
     round_name = {
         1: "事实陈述轮",
         2: "证据解释与定向回应轮",
@@ -308,6 +340,20 @@ def _opening_message(request: HearingRoundTurnRequest) -> str:
         "请用户和商家分别提交本轮说明；双方在本轮内并行陈述，不进行自由辩论。"
         "本轮双方都提交或 5 分钟时效届满后，系统会自动封存本轮材料。"
     )
+
+
+def _bootstrap_judge_opening_message(request: HearingRoundTurnRequest) -> str:
+    messages = request.courtroom_context.get("courtroom_opening_messages")
+    if not isinstance(messages, list):
+        return ""
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        sender_role = str(message.get("sender_role") or "").upper()
+        content = localize_internal_text(str(message.get("content") or "").strip())
+        if sender_role == "JUDGE" and content:
+            return content
+    return ""
 
 
 def _opening_questions_for_user(request: HearingRoundTurnRequest) -> list[str]:

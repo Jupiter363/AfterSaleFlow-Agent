@@ -18,9 +18,14 @@ public record HearingCourtAgentCommand(
         String roundStatus,
         String stopReason,
         String roundSummaryJson,
+        String courtroomContextJson,
         List<PartySubmission> partySubmissions) {
 
     public HearingCourtAgentCommand {
+        courtroomContextJson =
+                courtroomContextJson == null || courtroomContextJson.isBlank()
+                        ? "{}"
+                        : courtroomContextJson;
         partySubmissions = partySubmissions == null ? List.of() : List.copyOf(partySubmissions);
     }
 
