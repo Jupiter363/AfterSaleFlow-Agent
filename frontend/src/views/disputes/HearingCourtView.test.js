@@ -89,6 +89,9 @@ describe("HearingCourtView", () => {
     expect(statusDock.find(".hearing-stage-dock__copy").classes()).toContain(
       "hearing-stage-dock__copy--stacked",
     );
+    expect(statusDock.find(".hearing-stage-dock__copy").classes()).toContain(
+      "hearing-stage-dock__copy--breathing",
+    );
     expect(wrapper.get("[data-hearing-stage-clock]").classes()).toContain(
       "hearing-stage-dock__clock--centered",
     );

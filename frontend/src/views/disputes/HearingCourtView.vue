@@ -762,7 +762,7 @@ onBeforeUnmount(() => eventAbortController.abort());
           data-hearing-stage-dock
         >
           <header class="hearing-stage-dock__header">
-            <div class="hearing-stage-dock__copy hearing-stage-dock__copy--stacked">
+            <div class="hearing-stage-dock__copy hearing-stage-dock__copy--stacked hearing-stage-dock__copy--breathing">
               <span>当前庭审状态</span>
               <h2>{{ stageDockTitle }}</h2>
             </div>
@@ -1436,12 +1436,12 @@ onBeforeUnmount(() => eventAbortController.abort());
   box-sizing: border-box;
   position: relative;
   display: grid;
-  grid-template-rows: 36px 56px;
+  grid-template-rows: 46px 56px;
   gap: 0;
   width: 100%;
-  height: 112px;
-  min-height: 112px;
-  max-height: 112px;
+  height: 122px;
+  min-height: 122px;
+  max-height: 122px;
   padding: 7px 16px 7px;
   overflow: hidden;
   background:
@@ -1500,7 +1500,7 @@ onBeforeUnmount(() => eventAbortController.abort());
   align-items: flex-start;
   min-width: 0;
   min-height: 0;
-  height: 36px;
+  height: 46px;
 }
 .hearing-stage-dock__copy {
   position: relative;
@@ -1513,6 +1513,9 @@ onBeforeUnmount(() => eventAbortController.abort());
   gap: 1px;
   align-content: start;
   max-width: min(610px, calc(100% - 170px));
+}
+.hearing-stage-dock__copy--breathing {
+  gap: 8px;
 }
 .hearing-stage-dock__copy span {
   color: #7590ad;
