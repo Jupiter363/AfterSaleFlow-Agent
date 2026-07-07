@@ -801,12 +801,27 @@ onBeforeUnmount(() => eventAbortController.abort());
               v-for="item in mockTranscriptItems"
               :key="item.id"
               class="court-message"
-              :class="`court-message--${item.type}`"
+              :class="[
+                `court-message--${item.type}`,
+                item.type === 'judge' ? 'court-message--judge-bench-card' : '',
+                item.type === 'jury' ? 'court-message--jury-review-card' : '',
+              ]"
+              :data-court-message="item.type"
             >
               <header>
-                <strong>{{ item.speaker }}</strong>
+                <strong>
+                  <small v-if="item.type === 'judge'">法官宣读</small>
+                  <small v-else-if="item.type === 'jury'">评审团观察</small>
+                  {{ item.speaker }}
+                </strong>
                 <span>{{ item.time }}</span>
               </header>
+              <div v-if="item.type === 'jury'" class="court-message__jury-tags" aria-label="评审团辅助指标">
+                <span>风险等级</span>
+                <strong>中风险</strong>
+                <span>可信分</span>
+                <strong>75/100</strong>
+              </div>
               <p>{{ item.text }}</p>
             </article>
 
@@ -1844,14 +1859,18 @@ onBeforeUnmount(() => eventAbortController.abort());
   overflow: auto;
 }
 .court-message {
+  position: relative;
   display: grid;
   gap: 6px;
   max-width: 72%;
   padding: 12px 15px;
+  overflow: hidden;
   border-radius: 20px;
   box-shadow: 0 8px 20px #506c940d;
 }
 .court-message header {
+  position: relative;
+  z-index: 1;
   display: flex;
   justify-content: space-between;
   gap: 12px;
@@ -1859,7 +1878,26 @@ onBeforeUnmount(() => eventAbortController.abort());
   font-size: 10px;
   font-weight: 900;
 }
+.court-message header strong {
+  display: inline-flex;
+  gap: 7px;
+  align-items: center;
+}
+.court-message header small {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  color: #9a6a18;
+  background: #fff4d8;
+  border: 1px solid #f0d7a7;
+  border-radius: 999px;
+  font-size: 9px;
+  letter-spacing: .08em;
+}
 .court-message p {
+  position: relative;
+  z-index: 1;
   margin: 0;
   color: #516178;
   font-size: 12px;
@@ -1868,12 +1906,43 @@ onBeforeUnmount(() => eventAbortController.abort());
 .court-message--judge {
   justify-self: center;
   width: 66%;
-  background: #f4fbff;
-  border: 1px solid #cde9f8;
+  background:
+    radial-gradient(circle at 9% 12%, #ffe8a8 0 18%, transparent 19%),
+    linear-gradient(135deg, #fffdf6 0%, #f4fbff 52%, #fff7e7 100%);
+  border: 1px solid #ecd7a8;
+  box-shadow:
+    inset 0 1px 0 #fff,
+    0 14px 30px #92764717;
 }
 .court-message--judge header strong::before {
   margin-right: 6px;
+  color: #b37a1f;
   content: "⚖";
+}
+.court-message--judge-bench-card {
+  width: min(78%, 640px);
+  padding: 14px 18px 15px;
+  border-radius: 22px 22px 26px 26px;
+}
+.court-message--judge-bench-card::before {
+  position: absolute;
+  inset: 8px 10px auto;
+  height: 2px;
+  content: "";
+  background: linear-gradient(90deg, transparent, #e4bd6f, #89d5ef, transparent);
+  border-radius: 999px;
+}
+.court-message--judge-bench-card::after {
+  position: absolute;
+  right: 14px;
+  bottom: 12px;
+  width: 78px;
+  height: 78px;
+  pointer-events: none;
+  content: "";
+  background:
+    radial-gradient(circle, transparent 0 44%, #8bd7ff36 45% 47%, transparent 48%),
+    radial-gradient(circle, #ffd8892b 0 30%, transparent 31%);
 }
 .court-message--user {
   justify-self: start;
@@ -1888,8 +1957,48 @@ onBeforeUnmount(() => eventAbortController.abort());
 .court-message--jury {
   justify-self: stretch;
   max-width: 100%;
-  background: #f5f2ff;
-  border: 1px solid #e1daff;
+  background:
+    radial-gradient(circle at 7% 0, #efe8ff 0 18%, transparent 19%),
+    linear-gradient(135deg, #fbf8ff 0%, #f1fbf7 48%, #fffdf4 100%);
+  border: 1px solid #ded8ff;
+  box-shadow:
+    inset 0 1px 0 #fff,
+    0 12px 28px #6c5db319;
+}
+.court-message--jury-review-card {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+  padding: 13px 16px;
+  border-radius: 24px;
+}
+.court-message--jury-review-card header small {
+  color: #6b5ac5;
+  background: #f0ebff;
+  border-color: #ded6ff;
+}
+.court-message--jury-review-card header strong::before {
+  color: #6b5ac5;
+  content: "✦";
+}
+.court-message__jury-tags {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: auto auto auto auto;
+  gap: 7px;
+  align-items: center;
+  justify-content: start;
+  width: fit-content;
+  padding: 5px 8px;
+  color: #7d86a0;
+  background: #ffffffa8;
+  border: 1px solid #e5ecf2;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 900;
+}
+.court-message__jury-tags strong {
+  color: #25a883;
 }
 .round-input-bar {
   display: grid;
