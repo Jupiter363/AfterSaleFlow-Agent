@@ -87,6 +87,25 @@ describe("HearingCourtView", () => {
     expect(wrapper.text()).not.toContain("审核解释官");
   });
 
+  it("uses the AI-native courtroom layout with party evidence rails and digital humans", async () => {
+    const { wrapper } = await mountView();
+
+    expect(wrapper.get("[data-hearing-courtroom-page]").exists()).toBe(true);
+    expect(wrapper.get("[data-judge-bench]").text()).toContain("主审法官");
+    expect(wrapper.get('[data-party-evidence-rail="user"]').text()).toContain(
+      "用户证据原件匣",
+    );
+    expect(wrapper.get('[data-party-evidence-rail="merchant"]').text()).toContain(
+      "商家证据原件匣",
+    );
+    expect(wrapper.get("[data-court-transcript]").text()).toContain(
+      "庭审记录大屏",
+    );
+    expect(wrapper.get("[data-round-input-bar]").text()).toContain(
+      "提交本轮陈述",
+    );
+  });
+
   it("shows the audit aide only to a platform reviewer", async () => {
     const { wrapper } = await mountView({ viewerRole: "PLATFORM_REVIEWER" });
 

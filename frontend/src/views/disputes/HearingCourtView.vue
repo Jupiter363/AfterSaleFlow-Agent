@@ -150,6 +150,128 @@ const canSubmitRound = computed(
 const activeRoundDeadline = computed(
   () => activeRound.value?.round_deadline_at || activeRound.value?.roundDeadlineAt || "",
 );
+const roleLabels = {
+  USER: "用户",
+  MERCHANT: "商家",
+  PLATFORM_REVIEWER: "平台审核员",
+};
+const roundStepLabels = ["事实陈述", "证据解释", "方案确认"];
+const mockEvidenceRails = {
+  user: [
+    {
+      id: "user-door-camera",
+      type: "image",
+      title: "门口监控截图.jpg",
+      subtitle: "图片证据 · OCR 已提取",
+      confidence: 95,
+      status: "已核验",
+      tone: "blue",
+    },
+    {
+      id: "user-statement",
+      type: "text",
+      title: "未收到货说明.pdf",
+      subtitle: "文本证据 · 已解析",
+      confidence: 88,
+      status: "待复核",
+      tone: "purple",
+    },
+    {
+      id: "user-call-record",
+      type: "video",
+      title: "物业通话录音.mp4",
+      subtitle: "视频/音频 · 待核验",
+      confidence: 62,
+      status: "待核验",
+      tone: "gold",
+    },
+  ],
+  merchant: [
+    {
+      id: "merchant-waybill",
+      type: "text",
+      title: "物流签收底单.pdf",
+      subtitle: "文本证据 · 已解析",
+      confidence: 90,
+      status: "已核验",
+      tone: "purple",
+    },
+    {
+      id: "merchant-package-photo",
+      type: "image",
+      title: "打包交接照片.jpg",
+      subtitle: "图片证据 · OCR 已提取",
+      confidence: 84,
+      status: "待复核",
+      tone: "blue",
+    },
+    {
+      id: "merchant-scan-log",
+      type: "text",
+      title: "出库扫描记录.md",
+      subtitle: "文本记录 · 已解析",
+      confidence: 79,
+      status: "已核验",
+      tone: "mint",
+    },
+  ],
+};
+const activeRoundSummary = computed(() => summary(activeRound.value));
+const currentRoleLabel = computed(() => roleLabels[role.value] || "体验身份");
+const currentRoundLabel = computed(
+  () => roundStepLabels[Math.min(currentRound.value, roundStepLabels.length) - 1] || "庭审陈述",
+);
+const roundSubmitDescription = computed(() => {
+  if (activeRoundClosed.value) {
+    return "双方已提交本轮，本轮陈述已封存；第三轮结束后，AI 法官会统一生成确定的裁决方案草案。";
+  }
+  if (currentActorSubmitted.value) {
+    return `已提交本轮，等待${counterpartyLabel.value}。双方都提交后，系统会自动封存本轮陈述并开放下一轮。`;
+  }
+  return "当前陈述、证据解释和和解意向会被封装为本轮立场。双方都点击提交，或 5 分钟时效届满后，系统自动封存并推进流程。";
+});
+const mockTranscriptItems = computed(() => [
+  {
+    id: "judge-opening",
+    type: "judge",
+    speaker: "主审法官",
+    time: "14:00:00",
+    text:
+      activeRoundSummary.value.judge ||
+      "根据现有案情，物流记录显示包裹已签收，但用户称未实际收到商品。请用户补充未收到包裹的具体情况，请商家说明发货、物流交接及签收记录。",
+  },
+  {
+    id: "user-statement",
+    type: "user",
+    speaker: "用户陈述",
+    time: "14:02:15",
+    text: "用户称门口监控未见快递员投递，并已提交截图用于核验包裹实际去向。",
+  },
+  {
+    id: "merchant-statement",
+    type: "merchant",
+    speaker: "商家陈述",
+    time: "待提交",
+    text: "商家需说明发货记录、物流交接、签收底单与异常工单处理记录。",
+  },
+  {
+    id: "jury-review",
+    type: "jury",
+    speaker: "AI 评审团",
+    time: "裁决辅助分析",
+    text:
+      activeRoundSummary.value.jury ||
+      "中风险 · 当前可信分 75/100 · 建议核验物流轨迹定位与签收凭证。",
+  },
+]);
+
+function evidenceTypeLabel(type) {
+  return {
+    image: "图片",
+    video: "视频",
+    text: "文本",
+  }[type] || "文件";
+}
 
 function summary(round) {
   try {
@@ -399,8 +521,8 @@ onBeforeUnmount(() => eventAbortController.abort());
 
 <template>
   <RoomShell
-    eyebrow="COLLABORATIVE COURT"
-    title="履约争端小法庭"
+    eyebrow="AI NATIVE COURTROOM"
+    title="AI 小法庭 · 履约争端庭审"
     :case-id="caseId"
     :connection-state="connectionState"
   >
@@ -415,91 +537,173 @@ onBeforeUnmount(() => eventAbortController.abort());
     </template>
 
     <template #agent>
-      <div class="court-agents">
-        <DigitalHuman
-          state="SPEAKING"
-          name="小册"
-          role="证据书记官"
-          message="我负责依次宣读双方证据，并标记本轮新增材料。"
-        />
-        <DigitalHuman
-          :state="agentState"
-          name="衡衡"
-          role="AI 法官"
-          message="我会主持固定三轮陈述，并在第三轮后生成裁决方案草案；草案仍需平台审核员确认。"
-        />
-        <DigitalHuman
-          state="THINKING"
-          name="圆桌团"
-          role="AI 评审团"
-          message="我们只在最终方案后，从事实完整性、规则一致性与双方可接受度三个角度复核草案。"
-        />
-        <DigitalHuman
-          v-if="isReviewer"
-          state="LISTENING"
-          name="小译"
-          role="审核解释官"
-          message="我只向平台审核员转述争点、证据与草案，不代替审核员作出终审。"
-        />
-      </div>
+      <p class="court-agent-note">
+        三轮结构化庭审 · 单轮 5 分钟 · 双方提交或超时后自动封存 · AI 建议非最终
+      </p>
     </template>
 
-    <div class="hearing-court">
-      <section class="court-stage">
-        <header class="court-stage__header">
+    <main class="hearing-courtroom-page" data-hearing-courtroom-page>
+      <aside
+        class="party-evidence-rail party-evidence-rail--user"
+        data-party-evidence-rail="user"
+      >
+        <header class="party-evidence-rail__header">
           <div>
-            <span>LIVE HEARING</span>
-            <h2>第 {{ currentRound }} / {{ roundLimit }} 轮</h2>
+            <span>USER EVIDENCE</span>
+            <h2>用户证据原件匣</h2>
+            <p>固定高度展示，更多材料在内部滚动。</p>
           </div>
-          <div class="round-dots" aria-label="庭审轮次">
-            <i
+          <b>用户侧</b>
+        </header>
+
+        <section class="party-avatar-card">
+          <DigitalHuman
+            state="LISTENING"
+            name="用户代表"
+            role="路线引导员 · 用户"
+            message="用户可围绕签收事实、未收货经过和已提交证据进行陈述。"
+          />
+        </section>
+
+        <div class="evidence-pocket" aria-label="用户已提交证据">
+          <article
+            v-for="item in mockEvidenceRails.user"
+            :key="item.id"
+            class="evidence-file-card"
+            :class="`evidence-file-card--${item.tone}`"
+          >
+            <i class="evidence-file-card__icon" :data-type="item.type">
+              {{ evidenceTypeLabel(item.type) }}
+            </i>
+            <div>
+              <strong>{{ item.title }}</strong>
+              <small>{{ item.subtitle }}</small>
+              <footer>
+                <span>置信度 {{ item.confidence }}%</span>
+                <em>{{ item.status }}</em>
+              </footer>
+            </div>
+          </article>
+        </div>
+
+        <button class="evidence-expand-button" type="button">
+          展开证据预览
+          <span aria-hidden="true">↗</span>
+        </button>
+      </aside>
+
+      <section class="courtroom-center">
+        <section class="judge-bench" data-judge-bench>
+          <div class="jury-seat jury-seat--left">
+            <DigitalHuman
+              state="THINKING"
+              name="评审 A"
+              role="AI 评审团"
+              message="我关注事实完整性、证据冲突和风险信号。"
+            />
+            <strong class="jury-seat__label">评审 A · 风险评分</strong>
+          </div>
+
+          <div class="judge-seat">
+            <div class="judge-seat__avatar">
+              <DigitalHuman
+                :state="agentState"
+                name="衡衡"
+                role="AI 法官"
+                message="我会主持三轮陈述，并在第三轮后生成非最终裁决草案。"
+              />
+            </div>
+            <div class="judge-seat__desk" aria-hidden="true">
+              <span class="judge-seat__book">法典</span>
+              <span class="judge-seat__gavel">法槌</span>
+            </div>
+            <strong>主审法官席</strong>
+            <p>{{ activeRoundSummary.judge || "正在核对证据链、归纳本轮争点，并准备提出下一轮问题。" }}</p>
+          </div>
+
+          <div class="jury-seat jury-seat--right">
+            <DigitalHuman
+              state="LISTENING"
+              name="评审 B"
+              role="AI 评审团"
+              message="我关注裁决草案是否符合平台规则和双方可接受度。"
+            />
+            <strong class="jury-seat__label">评审 B · 方案复核</strong>
+          </div>
+
+          <div class="round-progress-board">
+            <article
               v-for="roundNumber in roundLimit"
               :key="roundNumber"
               :class="{
                 complete: roundNumber < currentRound,
                 active: roundNumber === currentRound,
               }"
+            >
+              <b>{{ roundNumber }}</b>
+              <span>{{ roundStepLabels[roundNumber - 1] || `第 ${roundNumber} 轮` }}</span>
+            </article>
+            <div class="round-progress-board__timer">
+              <small>本轮倒计时</small>
+              <strong>04:18</strong>
+            </div>
+          </div>
+        </section>
+
+        <section class="court-transcript" data-court-transcript>
+          <header class="court-transcript__header">
+            <div>
+              <span>COURT TRANSCRIPT</span>
+              <h2>庭审记录大屏</h2>
+            </div>
+            <small>证据书记官已宣读双方材料 · 第 {{ currentRound }} / {{ roundLimit }} 轮 · {{ currentRoundLabel }} · 内部滚动</small>
+          </header>
+
+          <div class="court-transcript__messages">
+            <article
+              v-for="item in mockTranscriptItems"
+              :key="item.id"
+              class="court-message"
+              :class="`court-message--${item.type}`"
+            >
+              <header>
+                <strong>{{ item.speaker }}</strong>
+                <span>{{ item.time }}</span>
+              </header>
+              <p>{{ item.text }}</p>
+            </article>
+
+            <ConversationStream
+              :messages="messages"
+              placeholder="回应当前争点，或说明新证据与和解意愿…"
+              @submit="postMessage"
             />
           </div>
-        </header>
+        </section>
 
-        <div class="courtroom" aria-label="协作小法庭">
-          <div class="courtroom__bench">
-            <span aria-hidden="true">⚖️</span>
-            <strong>AI 法官席</strong>
-            <p>{{ summary(activeRound).judge || "正在核对证据链、归纳本轮争点，并为第三轮后的最终方案做准备。" }}</p>
-          </div>
-          <div class="courtroom__party courtroom__party--user">
-            <span>🧑</span><strong>用户席</strong><small>可陈述、解释证据、确认和解</small>
-          </div>
-          <div class="courtroom__clerk">
-            <span>📚</span><strong>证据书记官</strong>
-            <p>{{ summary(activeRound).clerk || "本轮证据已按序摆上证据台。" }}</p>
-          </div>
-          <div class="courtroom__party courtroom__party--merchant">
-            <span>🏪</span><strong>商家席</strong><small>可答辩、解释证据、确认和解</small>
-          </div>
-          <div class="courtroom__jury">
-            <span>💬</span><strong>AI 评审团</strong>
-            <p>{{ summary(activeRound).jury || "等待裁决草案后进行一致性复核。" }}</p>
-          </div>
-        </div>
+        <section v-if="isReviewer" class="review-aide-agent-card">
+          <DigitalHuman
+            state="LISTENING"
+            name="小译"
+            role="审核解释官"
+            message="我只向平台审核员转述争点、证据与草案，不代替审核员作出终审。"
+          />
+          <p>
+            审核员视角已开启：可查看庭审归纳、陪审团评分与裁决草案交接信息。
+          </p>
+        </section>
 
-        <section v-if="isCaseParty" class="round-submit-card">
-          <div class="round-submit-card__copy">
-            <span>ROUND COMMITMENT</span>
-            <h3>本轮双方确认提交</h3>
-            <p v-if="activeRoundClosed">
-              双方已提交本轮，本轮陈述已封存；第三轮结束后，AI 法官会统一生成确定的裁决方案草案。
-            </p>
-            <p v-else-if="currentActorSubmitted">
-              已提交本轮，等待{{ counterpartyLabel }}。双方都提交后，系统会自动封存本轮陈述并开放下一轮。
-            </p>
-            <p v-else>
-              当前陈述、证据解释和和解意向会被封装为本轮立场。双方都点击提交，或 5 分钟时效届满后，系统自动封存并推进流程。
-            </p>
+        <section
+          v-if="isCaseParty"
+          class="round-input-bar"
+          data-round-input-bar
+        >
+          <div>
+            <span>ROUND STATEMENT PODIUM</span>
+            <h3>本轮陈述发言台</h3>
+            <p>{{ roundSubmitDescription }}</p>
           </div>
-          <div class="round-submit-card__control">
+          <div class="round-input-bar__controls">
             <PhaseCountdown
               v-if="activeRoundDeadline && !activeRoundClosed"
               label="本轮提交时效"
@@ -515,10 +719,16 @@ onBeforeUnmount(() => eventAbortController.abort());
             >
               {{ submittingRound ? "正在提交本轮…" : "提交本轮陈述" }}
             </button>
-            <strong v-else class="round-submit-card__submitted">
-              {{ activeRoundClosed ? "本轮已封存" : "已提交本轮" }}
+            <strong v-else class="round-input-bar__submitted">
+              {{ activeRoundClosed ? "本轮已封存" : "已提交，等待对方或倒计时结束" }}
             </strong>
           </div>
+          <footer>
+            <i>用户提交</i>
+            <i>商家提交</i>
+            <i>法官处理中</i>
+            <i>下一轮状态</i>
+          </footer>
         </section>
 
         <section
@@ -553,18 +763,6 @@ onBeforeUnmount(() => eventAbortController.abort());
             提出一致方案
           </button>
         </div>
-
-        <section ref="hearingDialogue" class="hearing-dialogue">
-          <header>
-            <span>COURT DIALOGUE</span>
-            <h3>双方庭审陈述</h3>
-          </header>
-          <ConversationStream
-            :messages="messages"
-            placeholder="回应当前争点，或说明新证据与和解意愿…"
-            @submit="postMessage"
-          />
-        </section>
       </section>
 
       <aside class="hearing-ledger">
@@ -619,7 +817,55 @@ onBeforeUnmount(() => eventAbortController.abort());
         </section>
         <p v-if="error" class="hearing-error" role="alert">{{ error }}</p>
       </aside>
-    </div>
+      <aside
+        class="party-evidence-rail party-evidence-rail--merchant"
+        data-party-evidence-rail="merchant"
+      >
+        <header class="party-evidence-rail__header">
+          <div>
+            <span>MERCHANT EVIDENCE</span>
+            <h2>商家证据原件匣</h2>
+            <p>正式提交后进入庭审可见证据架。</p>
+          </div>
+          <b>商家侧</b>
+        </header>
+
+        <section class="party-avatar-card">
+          <DigitalHuman
+            state="SPEAKING"
+            name="商家代表"
+            role="路线引导员 · 商家履约代表"
+            message="商家可围绕发货、物流交接、签收凭证和异常工单进行说明。"
+          />
+        </section>
+
+        <div class="evidence-pocket" aria-label="商家已提交证据">
+          <article
+            v-for="item in mockEvidenceRails.merchant"
+            :key="item.id"
+            class="evidence-file-card"
+            :class="`evidence-file-card--${item.tone}`"
+          >
+            <i class="evidence-file-card__icon" :data-type="item.type">
+              {{ evidenceTypeLabel(item.type) }}
+            </i>
+            <div>
+              <strong>{{ item.title }}</strong>
+              <small>{{ item.subtitle }}</small>
+              <footer>
+                <span>置信度 {{ item.confidence }}%</span>
+                <em>{{ item.status }}</em>
+              </footer>
+            </div>
+          </article>
+        </div>
+
+        <button class="evidence-expand-button" type="button">
+          展开证据预览
+          <span aria-hidden="true">↗</span>
+        </button>
+      </aside>
+    </main>
 
     <div v-if="settlementOpen" class="settlement-dialog" role="dialog" aria-modal="true">
       <form @submit.prevent="proposeSettlement">
@@ -649,102 +895,639 @@ onBeforeUnmount(() => eventAbortController.abort());
 </template>
 
 <style scoped>
-.court-agents {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px;
+.court-agent-note {
+  width: max-content;
+  max-width: 100%;
+  padding: 7px 12px;
+  margin: 0;
+  color: #6f6388;
+  background: #f4efff;
+  border: 1px solid #e7dcff;
+  border-radius: 14px;
+  font-size: 11px;
+  font-weight: 800;
 }
-.hearing-court { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(300px, .65fr); gap: 18px; }
-.court-stage, .hearing-ledger {
-  padding: 20px;
-  background: #ffffffd9;
-  border: 1px solid #dfe8f2;
-  border-radius: 28px;
-  box-shadow: 0 22px 56px #536c8b10;
+:deep(.room-shell) {
+  gap: 8px;
+  min-height: auto;
 }
-.court-stage__header { display: flex; justify-content: space-between; align-items: center; }
-.court-stage__header span, .hearing-ledger header span, .settlement-card > span {
-  color: #7486a3; font-size: 10px; font-weight: 900; letter-spacing: .16em;
-}
-.court-stage h2, .hearing-ledger h2 { margin: 5px 0; color: #33435c; }
-.round-dots { display: flex; gap: 7px; }
-.round-dots i { width: 11px; height: 11px; background: #e0e6ef; border-radius: 50%; }
-.round-dots i.complete { background: #75d0a3; }
-.round-dots i.active { background: #ff8f71; box-shadow: 0 0 0 5px #ff8f7126; }
-.courtroom {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  grid-template-areas:
-    ". bench ."
-    "user clerk merchant"
-    ". jury .";
-  gap: 13px;
-  padding: 22px;
-  margin: 16px 0;
-  background:
-    radial-gradient(circle at 50% 0, #fff4cc 0 11%, transparent 12%),
-    linear-gradient(180deg, #edf8ff, #f7f1ff);
-  border: 2px solid #fff;
-  border-radius: 32px 32px 18px 18px;
-}
-.courtroom > div { padding: 14px; text-align: center; border-radius: 18px; }
-.courtroom span { display: block; margin-bottom: 5px; font-size: 24px; }
-.courtroom p, .courtroom small { display: block; margin: 5px 0 0; color: #6f7d92; line-height: 1.5; }
-.courtroom__bench { grid-area: bench; background: #fff5d8; border: 1px solid #f0dfaa; }
-.courtroom__party--user { grid-area: user; background: #e5f6ff; }
-.courtroom__clerk { grid-area: clerk; background: #fff; border: 1px dashed #d9dfea; }
-.courtroom__party--merchant { grid-area: merchant; background: #e8f8ef; }
-.courtroom__jury { grid-area: jury; background: #f0ebff; }
-.round-submit-card {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(220px, .46fr);
-  gap: 14px;
+:deep(.room-shell__header) {
   align-items: center;
-  padding: 16px;
-  margin: 0 0 14px;
-  background:
-    radial-gradient(circle at 8% 0, #fff5c5 0 14%, transparent 15%),
-    linear-gradient(135deg, #fff, #f2fbff 48%, #fff4f8);
-  border: 1px solid #dfe8f2;
-  border-radius: 22px;
-  box-shadow: inset 0 1px 0 #ffffff, 0 14px 34px #5b769216;
 }
-.round-submit-card__copy span {
+:deep(.room-shell__header h1) {
+  margin: 3px 0 0;
+  font-size: clamp(24px, 2.4vw, 30px);
+  line-height: 1.16;
+}
+:deep(.room-shell__header p) {
+  display: none;
+}
+:deep(.room-shell__boundary) {
+  display: none;
+}
+:global(.app-page:has(.hearing-courtroom-page)) {
+  padding-bottom: 18px;
+}
+.hearing-courtroom-page {
+  position: relative;
+  display: grid;
+  grid-template-columns: 282px minmax(620px, 1fr) 282px;
+  grid-template-rows: minmax(0, 1fr) 106px;
+  gap: 14px 18px;
+  height: clamp(560px, calc(100vh - 285px), 615px);
+  min-height: 0;
+}
+.party-evidence-rail,
+.courtroom-center,
+.hearing-ledger {
+  min-width: 0;
+  background: #ffffffdf;
+  border: 1px solid #dfe9f4;
+  box-shadow: 0 22px 56px #536c8b12;
+  backdrop-filter: blur(18px);
+}
+.party-evidence-rail {
+  position: sticky;
+  top: 96px;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  gap: 10px;
+  height: 100%;
+  padding: 16px;
+  border-radius: 28px;
+}
+.party-evidence-rail--user {
+  grid-row: 1 / span 2;
+  grid-column: 1;
+}
+.party-evidence-rail--merchant {
+  grid-row: 1 / span 2;
+  grid-column: 3;
+}
+.party-evidence-rail__header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+.party-evidence-rail__header span,
+.court-transcript__header span,
+.round-input-bar span,
+.hearing-ledger header span,
+.settlement-card > span,
+.settlement-dialog form header span {
   color: #7486a3;
   font-size: 10px;
   font-weight: 900;
   letter-spacing: .16em;
 }
-.round-submit-card__copy h3 {
-  margin: 4px 0 7px;
-  color: #34455e;
+.party-evidence-rail__header h2,
+.court-transcript__header h2,
+.hearing-ledger h2 {
+  margin: 5px 0 4px;
+  color: #30415c;
 }
-.round-submit-card__copy p {
+.party-evidence-rail__header p {
   margin: 0;
-  color: #6d7890;
-  line-height: 1.6;
+  color: #8996a8;
+  font-size: 11px;
+  line-height: 1.45;
 }
-.round-submit-card__control {
-  display: grid;
-  gap: 9px;
-  align-content: center;
+.party-evidence-rail__header b {
+  flex: 0 0 auto;
+  padding: 7px 13px;
+  color: #53619a;
+  background: #edf7ff;
+  border: 1px solid #cfe8f7;
+  border-radius: 999px;
+  font-size: 11px;
 }
-.round-submit-card__control button {
-  width: 100%;
-  padding: 12px 14px;
-  color: #fff;
-  background: linear-gradient(135deg, #6b8cff, #f07fa3);
+.party-evidence-rail--merchant .party-evidence-rail__header b {
+  background: #fff3e9;
+  border-color: #f4d7c8;
+}
+.party-avatar-card {
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 18% 18%, #eaf8ff 0 22%, transparent 23%),
+    linear-gradient(135deg, #f8fcff, #fff);
+  border: 1px solid #dcecf6;
+  border-radius: 24px;
+}
+.party-evidence-rail--merchant .party-avatar-card {
+  background:
+    radial-gradient(circle at 18% 18%, #fff2e7 0 22%, transparent 23%),
+    linear-gradient(135deg, #fff8f2, #fff);
+  border-color: #f3decf;
+}
+.party-avatar-card :deep(.digital-human) {
+  grid-template-columns: 78px minmax(0, 1fr);
+  gap: 10px;
+  min-height: 0;
+  padding: 10px;
+  background: transparent;
   border: 0;
-  border-radius: 15px;
-  box-shadow: 0 14px 28px #6b8cff28;
+  box-shadow: none;
+}
+.party-avatar-card :deep(.digital-human__portrait) {
+  width: 78px;
+  height: 78px;
+}
+.party-avatar-card :deep(.digital-human__portrait svg) {
+  width: 78px;
+  height: 78px;
+}
+.party-avatar-card :deep(.digital-human__identity) {
+  display: grid;
+  gap: 4px;
+}
+.party-avatar-card :deep(.digital-human__identity strong),
+.party-avatar-card :deep(.digital-human__identity span) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.party-avatar-card :deep(.digital-human__identity strong) {
+  font-size: 15px;
+}
+.party-avatar-card :deep(.digital-human__identity span) {
+  font-size: 10px;
+}
+.party-avatar-card :deep(.digital-human__identity small) {
+  width: max-content;
+  padding: 4px 7px;
+  font-size: 10px;
+}
+.party-avatar-card :deep(.digital-human__copy p) {
+  -webkit-line-clamp: 2;
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  font-size: 11px;
+  line-height: 1.4;
+  margin: 6px 0 0;
+}
+.party-avatar-card :deep(.digital-human__boundary) {
+  display: none;
+}
+.evidence-pocket {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  min-height: 0;
+  overflow: auto;
+  padding: 2px 3px 10px 0;
+}
+.evidence-pocket::-webkit-scrollbar,
+.court-transcript__messages::-webkit-scrollbar {
+  width: 8px;
+}
+.evidence-pocket::-webkit-scrollbar-thumb,
+.court-transcript__messages::-webkit-scrollbar-thumb {
+  background: #cbd8e8;
+  border-radius: 999px;
+}
+.evidence-file-card {
+  position: relative;
+  display: grid;
+  grid-template-columns: 46px minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  min-height: 72px;
+  padding: 10px 10px 10px 14px;
+  overflow: hidden;
+  background: #fff;
+  border: 1px solid #ddeaf4;
+  border-radius: 20px;
+  box-shadow: 0 8px 20px #506c9410;
+}
+.evidence-file-card::before {
+  position: absolute;
+  top: 18px;
+  bottom: 18px;
+  left: 0;
+  width: 4px;
+  content: "";
+  background: #17a8e6;
+  border-radius: 0 999px 999px 0;
+}
+.evidence-file-card--purple::before { background: #afa1ff; }
+.evidence-file-card--gold::before { background: #f6bf62; }
+.evidence-file-card--mint::before { background: #78d9bd; }
+.evidence-file-card__icon {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  color: transparent;
+  background: #eaf8ff;
+  border-radius: 14px;
+  font-style: normal;
+}
+.evidence-file-card__icon::before {
+  color: #17a8e6;
+  font-size: 13px;
+  font-weight: 900;
+  content: attr(data-type);
+}
+.evidence-file-card__icon[data-type="text"] { background: #f5f2ff; }
+.evidence-file-card__icon[data-type="text"]::before { color: #7f70dd; content: "TXT"; }
+.evidence-file-card__icon[data-type="image"]::before { content: "IMG"; }
+.evidence-file-card__icon[data-type="video"] {
+  background: #fff4e5;
+}
+.evidence-file-card__icon[data-type="video"]::before {
+  color: #bd7b15;
+  content: "VID";
+}
+.evidence-file-card strong {
+  display: block;
+  overflow: hidden;
+  color: #33435c;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.evidence-file-card small {
+  display: block;
+  margin-top: 5px;
+  color: #8492a7;
+  font-size: 10px;
+  font-weight: 700;
+}
+.evidence-file-card footer {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 8px;
+}
+.evidence-file-card footer span,
+.evidence-file-card footer em {
+  padding: 3px 8px;
+  color: #2fa870;
+  background: #e9fff8;
+  border-radius: 999px;
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 900;
+}
+.evidence-file-card footer em {
+  color: #8190a3;
+  background: #f4fbff;
+}
+.evidence-expand-button {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  align-items: center;
+  height: 38px;
+  color: #53619a;
+  background: #f6fafd;
+  border: 1px solid #e0e7f0;
+  border-radius: 999px;
   font-weight: 900;
   cursor: pointer;
 }
-.round-submit-card__control button:disabled {
+.courtroom-center {
+  grid-row: 1;
+  grid-column: 2;
+  display: grid;
+  grid-template-rows: 150px minmax(0, 1fr) auto auto;
+  gap: 10px;
+  height: 100%;
+  overflow: hidden;
+  padding: 14px 16px;
+  border-radius: 30px;
+}
+.judge-bench {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(110px, .56fr) minmax(240px, 1fr) minmax(110px, .56fr);
+  gap: 14px;
+  min-height: 0;
+  padding: 7px 18px 46px;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 50% 0, #fff0c9 0 16%, transparent 17%),
+    linear-gradient(180deg, #ffffffee, #f7fbffdc);
+  border: 1px solid #ddeaf4;
+  border-radius: 28px;
+}
+.judge-bench::after {
+  position: absolute;
+  right: 44px;
+  bottom: 66px;
+  left: 44px;
+  height: 42px;
+  pointer-events: none;
+  content: "";
+  border: 1px dashed #a9c5df80;
+  border-top: 0;
+  border-radius: 0 0 50% 50%;
+}
+.jury-seat,
+.judge-seat {
+  position: relative;
+  display: grid;
+  justify-items: center;
+  text-align: center;
+}
+.jury-seat :deep(.digital-human) {
+  width: 100%;
+  padding: 8px;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+}
+.jury-seat :deep(.digital-human__portrait) {
+  width: 70px;
+  height: 70px;
+}
+.jury-seat :deep(.digital-human__portrait svg) {
+  width: 70px;
+  height: 70px;
+}
+.jury-seat :deep(.digital-human__copy p),
+.jury-seat :deep(.digital-human__copy),
+.jury-seat :deep(.digital-human__boundary) {
+  display: none;
+}
+.jury-seat__label {
+  padding: 5px 9px;
+  margin-top: -4px;
+  color: #53619a;
+  background: #ffffffd9;
+  border: 1px solid #dfe8f2;
+  border-radius: 999px;
+  font-size: 11px;
+  box-shadow: 0 8px 18px #536c8b12;
+}
+.judge-seat {
+  z-index: 1;
+  align-self: start;
+}
+.judge-seat__avatar :deep(.digital-human) {
+  width: 214px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+}
+.judge-seat__avatar :deep(.digital-human__portrait) {
+  width: 100px;
+  height: 100px;
+  margin: 0 auto -12px;
+}
+.judge-seat__avatar :deep(.digital-human__portrait svg) {
+  width: 100px;
+  height: 100px;
+}
+.judge-seat__avatar :deep(.digital-human__copy) {
+  display: none;
+}
+.judge-seat__desk {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  justify-content: space-between;
+  width: 214px;
+  height: 36px;
+  padding: 9px 24px 0;
+  margin-top: -20px;
+  background: linear-gradient(135deg, #f7d59a, #d79c4e);
+  border: 1px solid #c58b3c;
+  border-radius: 22px 22px 16px 16px;
+  box-shadow: 0 16px 24px #a46d2a20;
+}
+.judge-seat__book,
+.judge-seat__gavel {
+  color: #fff3da;
+  font-size: 11px;
+  font-weight: 900;
+}
+.judge-seat > strong {
+  margin-top: 6px;
+  color: #34455e;
+}
+.judge-seat > p {
+  max-width: 320px;
+  margin: 4px 0 0;
+  color: #7b8798;
+  font-size: 11px;
+  display: -webkit-box;
+  overflow: hidden;
+  line-height: 1.3;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.round-progress-board {
+  position: absolute;
+  right: 16px;
+  bottom: 10px;
+  left: 16px;
+  z-index: 3;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) 118px;
+  gap: 8px;
+  padding: 8px 10px;
+  background: #ffffffed;
+  border: 1px solid #ddeaf4;
+  border-radius: 22px;
+  box-shadow: 0 14px 28px #506c9412;
+}
+.round-progress-board article {
+  display: flex;
+  gap: 9px;
+  align-items: center;
+  color: #91a0b4;
+  font-size: 12px;
+  font-weight: 900;
+}
+.round-progress-board article b {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  color: #91a0b4;
+  background: #fff;
+  border: 1px solid #ddeaf4;
+  border-radius: 50%;
+}
+.round-progress-board article.complete b {
+  color: #fff;
+  background: #78d9bd;
+}
+.round-progress-board article.active {
+  color: #34455e;
+}
+.round-progress-board article.active b {
+  color: #fff;
+  background: #17a8e6;
+  box-shadow: 0 0 0 6px #17a8e621;
+}
+.round-progress-board__timer {
+  display: grid;
+  justify-items: end;
+}
+.round-progress-board__timer small {
+  color: #91a0b4;
+  font-size: 9px;
+  font-weight: 900;
+}
+.round-progress-board__timer strong {
+  color: #17a8e6;
+  font-size: 26px;
+  line-height: 1;
+}
+.court-transcript {
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+  background:
+    linear-gradient(90deg, #8bd7ff00, #8bd7ff70 18%, #ffd48a70 82%, #ffd48a00),
+    linear-gradient(180deg, #fff, #f7fcff 55%, #fff8ee);
+  background-size: 100% 4px, 100% 100%;
+  background-repeat: no-repeat;
+  background-position: top 18px center, 0 0;
+  border: 1px solid #ddeaf4;
+  border-radius: 26px;
+  box-shadow: inset 0 1px 0 #fff, 0 18px 40px #506c9412;
+}
+.court-transcript__header {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  align-items: center;
+  padding: 12px 20px 6px;
+}
+.court-transcript__header h2 {
+  margin-bottom: 0;
+  font-size: 18px;
+}
+.court-transcript__header small {
+  padding: 6px 10px;
+  color: #7d8a9f;
+  background: #f6fafd;
+  border: 1px solid #e4edf6;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 900;
+}
+.court-transcript__messages {
+  display: grid;
+  gap: 12px;
+  max-height: calc(100% - 52px);
+  padding: 4px 20px 12px;
+  overflow: auto;
+}
+.court-message {
+  display: grid;
+  gap: 6px;
+  max-width: 72%;
+  padding: 12px 15px;
+  border-radius: 20px;
+  box-shadow: 0 8px 20px #506c940d;
+}
+.court-message header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: #7c899e;
+  font-size: 10px;
+  font-weight: 900;
+}
+.court-message p {
+  margin: 0;
+  color: #516178;
+  font-size: 12px;
+  line-height: 1.65;
+}
+.court-message--judge {
+  justify-self: center;
+  width: 66%;
+  background: #f4fbff;
+  border: 1px solid #cde9f8;
+}
+.court-message--judge header strong::before {
+  margin-right: 6px;
+  content: "⚖";
+}
+.court-message--user {
+  justify-self: start;
+  background: #eef9ff;
+  border: 1px solid #cde9f8;
+}
+.court-message--merchant {
+  justify-self: end;
+  background: #fff6ec;
+  border: 1px solid #f3d8bc;
+}
+.court-message--jury {
+  justify-self: stretch;
+  max-width: 100%;
+  background: #f5f2ff;
+  border: 1px solid #e1daff;
+}
+.court-transcript :deep(.conversation-stream) {
+  padding-top: 4px;
+  background: transparent;
+  border: 0;
+}
+.court-transcript :deep(.conversation-stream__messages) {
+  max-height: 120px;
+}
+.court-transcript :deep(.conversation-stream__composer) {
+  background: #ffffffc9;
+  border-radius: 18px;
+}
+.round-input-bar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(180px, .32fr);
+  gap: 8px 12px;
+  align-items: center;
+  padding: 9px 14px 8px;
+  background:
+    radial-gradient(circle at 8% 0, #fff5c5 0 14%, transparent 15%),
+    linear-gradient(135deg, #fff, #f2fbff 48%, #fff4f8);
+  border: 1px solid #dfe8f2;
+  border-radius: 24px;
+  box-shadow: inset 0 1px 0 #fff, 0 14px 34px #5b769216;
+}
+.round-input-bar h3 {
+  margin: 3px 0 5px;
+  color: #34455e;
+}
+.round-input-bar p {
+  display: -webkit-box;
+  overflow: hidden;
+  margin: 0;
+  color: #6d7890;
+  font-size: 11px;
+  line-height: 1.35;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.round-input-bar__controls {
+  display: grid;
+  gap: 6px;
+  align-content: center;
+}
+.round-input-bar__controls button {
+  width: 100%;
+  padding: 10px 12px;
+  color: #fff;
+  background: linear-gradient(135deg, #20b8f0, #1097d3);
+  border: 0;
+  border-radius: 16px;
+  box-shadow: 0 14px 28px #20a7df26;
+  font-weight: 900;
+  cursor: pointer;
+}
+.round-input-bar__controls button:disabled {
   cursor: wait;
   opacity: .72;
 }
-.round-submit-card__submitted {
+.round-input-bar__submitted {
   justify-self: stretch;
   padding: 11px 14px;
   color: #267152;
@@ -752,6 +1535,52 @@ onBeforeUnmount(() => eventAbortController.abort());
   background: #e1f6e9;
   border: 1px solid #bde8d1;
   border-radius: 14px;
+}
+.round-input-bar footer {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: 10px;
+  color: #8b98aa;
+  font-size: 9px;
+  font-weight: 900;
+}
+.round-input-bar footer i {
+  font-style: normal;
+}
+.round-input-bar footer i::before {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 6px;
+  content: "";
+  background: #17a8e6;
+  border-radius: 50%;
+}
+.round-input-bar footer i:nth-child(2)::before { background: #f6bf62; }
+.round-input-bar footer i:nth-child(3)::before { background: #afa1ff; }
+.round-input-bar footer i:nth-child(4)::before { background: #78d9bd; }
+.review-aide-agent-card {
+  display: grid;
+  grid-template-columns: minmax(210px, .42fr) minmax(0, 1fr);
+  gap: 14px;
+  align-items: center;
+  padding: 9px 12px;
+  background:
+    radial-gradient(circle at 6% 0, #efe9ff 0 16%, transparent 17%),
+    linear-gradient(135deg, #fbfaff, #f4fbff 60%, #fff8ef);
+  border: 1px solid #e5defa;
+  border-radius: 22px;
+  box-shadow: inset 0 1px 0 #fff, 0 12px 28px #7157b914;
+}
+.review-aide-agent-card :deep(.digital-human) {
+  min-height: 0;
+}
+.review-aide-agent-card p {
+  margin: 0;
+  color: #65748a;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.7;
 }
 .review-handoff-card {
   display: grid;
@@ -794,13 +1623,13 @@ onBeforeUnmount(() => eventAbortController.abort());
   font-weight: 900;
   cursor: pointer;
 }
-.court-actions { display: flex; gap: 9px; flex-wrap: wrap; }
+.court-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .court-actions button, .settlement-card button {
-  padding: 10px 13px; color: #4c5d76; background: #f3f7fb; border: 1px solid #dae4ef; border-radius: 12px; cursor: pointer;
+  padding: 8px 12px; color: #4c5d76; background: #f3f7fb; border: 1px solid #dae4ef; border-radius: 12px; cursor: pointer;
 }
 .court-actions__upload {
   position: relative;
-  padding: 10px 13px;
+  padding: 8px 12px;
   color: #4c5d76;
   background: #f3f7fb;
   border: 1px solid #dae4ef;
@@ -809,25 +1638,47 @@ onBeforeUnmount(() => eventAbortController.abort());
 }
 .court-actions__upload input { position: absolute; width: 1px; height: 1px; opacity: 0; }
 .court-actions .court-actions__settle { color: #8b5272; background: #fff0f4; border-color: #f2d7df; }
-.hearing-dialogue { padding: 15px; margin-top: 15px; background: #f8fbff; border: 1px solid #e1e9f2; border-radius: 20px; }
-.hearing-dialogue header span, .settlement-dialog form header span { color: #7486a3; font-size: 10px; font-weight: 900; letter-spacing: .16em; }
-.hearing-dialogue h3 { margin: 4px 0 10px; color: #3d4d65; }
-.hearing-ledger ol { display: grid; gap: 10px; padding: 0; list-style: none; }
-.hearing-ledger li { padding: 13px; background: #f7f9fc; border-radius: 15px; }
+.hearing-ledger {
+  grid-row: 2;
+  grid-column: 2;
+  height: 100%;
+  padding: 12px 14px;
+  overflow: auto;
+  border-radius: 24px;
+}
+.hearing-ledger header {
+  display: flex;
+  justify-content: space-between;
+  align-items: end;
+  gap: 12px;
+}
+.hearing-ledger header h2 {
+  margin: 3px 0 0;
+  font-size: 16px;
+}
+.hearing-ledger ol {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  padding: 0;
+  margin: 8px 0 0;
+  list-style: none;
+}
+.hearing-ledger li { padding: 10px; background: #f7f9fc; border-radius: 15px; }
 .hearing-ledger li div { display: flex; justify-content: space-between; gap: 8px; }
 .hearing-ledger li span { color: #657a9b; font-size: 10px; }
 .hearing-ledger li p { margin: 7px 0 0; color: #6d798d; font-size: 12px; line-height: 1.55; }
 .hearing-ledger__empty {
   display: grid;
-  gap: 8px;
-  padding: 18px;
+  gap: 4px;
+  padding: 10px;
   color: #6d7890;
   text-align: center;
   background: #f7f9fc;
   border: 1px dashed #d8e2ee;
   border-radius: 18px;
 }
-.hearing-ledger__empty span { font-size: 28px; }
+.hearing-ledger__empty span { font-size: 22px; }
 .hearing-ledger__empty strong { color: #3f4d64; line-height: 1.5; }
 .hearing-ledger__empty small { color: #8390a2; line-height: 1.5; }
 .settlement-card { padding: 15px; background: linear-gradient(135deg, #fff6d9, #fff0ea); border: 1px solid #f0dfbd; border-radius: 20px; }
@@ -856,14 +1707,41 @@ onBeforeUnmount(() => eventAbortController.abort());
 .settlement-dialog p { color: #7d7170; font-size: 11px; }
 .settlement-dialog form > button { width: 100%; padding: 12px; color: #fff; background: linear-gradient(135deg, #ff8d70, #e8759a); border: 0; border-radius: 13px; font-weight: 800; }
 @media (max-width: 1180px) {
-  .court-agents { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-}
-@media (max-width: 940px) {
-  .hearing-court { grid-template-columns: 1fr; }
+  .hearing-courtroom-page {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .party-evidence-rail,
+  .courtroom-center,
+  .hearing-ledger {
+    grid-column: 1;
+    grid-row: auto;
+    position: static;
+    height: auto;
+  }
+  .party-evidence-rail {
+    max-height: none;
+  }
+  .evidence-pocket {
+    max-height: 360px;
+  }
 }
 @media (max-width: 680px) {
-  .court-agents { grid-template-columns: 1fr; }
-  .courtroom { grid-template-columns: 1fr; grid-template-areas: "bench" "user" "clerk" "merchant" "jury"; }
-  .round-submit-card { grid-template-columns: 1fr; }
+  .judge-bench,
+  .round-input-bar {
+    grid-template-columns: 1fr;
+  }
+  .round-progress-board {
+    position: static;
+    grid-template-columns: 1fr;
+    margin-top: 12px;
+  }
+  .court-message,
+  .court-message--judge {
+    width: auto;
+    max-width: 100%;
+  }
+  .hearing-ledger ol {
+    grid-template-columns: 1fr;
+  }
 }
 </style>
