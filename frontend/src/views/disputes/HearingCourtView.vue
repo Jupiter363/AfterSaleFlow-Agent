@@ -741,19 +741,22 @@ onBeforeUnmount(() => eventAbortController.abort());
 
       <section class="courtroom-center">
         <section
-          class="hearing-stage-dock"
+          class="hearing-stage-dock hearing-stage-dock--fixed-dashboard"
           :class="`hearing-stage-dock--${stageDockMode}`"
           data-hearing-stage-dock
         >
-          <div class="hearing-stage-dock__copy">
-            <span>当前庭审状态</span>
-            <h2>{{ stageDockTitle }}</h2>
-            <p>{{ nextStepHint }}</p>
-          </div>
-          <div class="hearing-stage-dock__meta">
-            <strong class="hearing-stage-dock__badge">{{ stageDockBadge }}</strong>
-          </div>
-          <div class="round-progress-board">
+          <header class="hearing-stage-dock__header">
+            <div class="hearing-stage-dock__copy">
+              <span>当前庭审状态</span>
+              <h2>{{ stageDockTitle }}</h2>
+              <p>{{ nextStepHint }}</p>
+            </div>
+            <strong class="hearing-stage-dock__badge" data-hearing-stage-badge>
+              {{ stageDockBadge }}
+            </strong>
+          </header>
+
+          <div class="round-progress-board" data-hearing-progress-track>
             <article
               v-for="item in roundProgressItems"
               :key="item.number"
@@ -763,11 +766,14 @@ onBeforeUnmount(() => eventAbortController.abort());
               :data-round-progress-state="item.tone"
             >
               <b>{{ item.number }}</b>
-              <span>{{ item.label }}</span>
-              <em>{{ item.status }}</em>
+              <div>
+                <span>{{ item.label }}</span>
+                <em>{{ item.status }}</em>
+              </div>
             </article>
           </div>
-          <div class="hearing-stage-dock__status-grid">
+
+          <div class="hearing-stage-dock__status-grid" data-hearing-status-strip>
             <article
               v-for="party in partySubmissionStatuses"
               :key="party.role"
@@ -1413,7 +1419,7 @@ onBeforeUnmount(() => eventAbortController.abort());
 .courtroom-center {
   grid-column: 2;
   display: grid;
-  grid-template-rows: 180px minmax(352px, 1fr) auto auto;
+  grid-template-rows: 172px minmax(360px, 1fr) auto auto;
   gap: 12px;
   height: 100%;
   overflow: hidden;
@@ -1421,42 +1427,73 @@ onBeforeUnmount(() => eventAbortController.abort());
   border-radius: 30px;
 }
 .hearing-stage-dock {
+  box-sizing: border-box;
   position: relative;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 9px 14px;
-  align-content: start;
-  align-items: start;
-  min-height: 0;
-  padding: 12px 14px;
+  grid-template-rows: 48px 52px 36px;
+  gap: 8px;
+  width: 100%;
+  height: 172px;
+  min-height: 172px;
+  max-height: 172px;
+  padding: 10px 16px;
   overflow: hidden;
   background:
-    radial-gradient(circle at 10% 0, #fff1c7 0 16%, transparent 17%),
-    linear-gradient(135deg, #ffffffef, #f6fbff 52%, #fff8ef);
-  border: 1px solid #ddeaf4;
+    radial-gradient(circle at 7% 0, #fff3cf 0 15%, transparent 16%),
+    radial-gradient(circle at 95% 12%, #c9f2ff85 0 14%, transparent 15%),
+    linear-gradient(135deg, #fffdf8 0%, #f4fbff 48%, #fff8ef 100%);
+  border: 1px solid #d9e8f4;
   border-radius: 26px;
-  box-shadow: inset 0 1px 0 #fff, 0 16px 34px #506c9412;
+  box-shadow:
+    inset 0 1px 0 #fff,
+    0 18px 38px #4f6d8d14;
+}
+.hearing-stage-dock--fixed-dashboard { flex: 0 0 auto; }
+.hearing-stage-dock::before {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  content: "";
+  background:
+    linear-gradient(110deg, transparent 0 9%, #ffffff92 10% 13%, transparent 14% 100%),
+    linear-gradient(180deg, #ffffffb8 0%, transparent 54%);
+  opacity: .9;
 }
 .hearing-stage-dock::after {
   position: absolute;
-  inset: 8px 10px auto auto;
-  width: 90px;
-  height: 90px;
+  right: 16px;
+  bottom: 46px;
+  width: 118px;
+  height: 118px;
   pointer-events: none;
   content: "";
-  background: radial-gradient(circle, #8bd7ff35 0 44%, transparent 45%);
+  background:
+    radial-gradient(circle, #ffffff00 0 44%, #8bd7ff2e 45% 47%, transparent 48%),
+    radial-gradient(circle, #ffd88922 0 30%, transparent 31%);
 }
 .hearing-stage-dock--waiting {
   background:
-    radial-gradient(circle at 10% 0, #f3e9ff 0 16%, transparent 17%),
-    linear-gradient(135deg, #ffffffef, #f8f4ff 52%, #eefaff);
+    radial-gradient(circle at 7% 0, #f1e9ff 0 15%, transparent 16%),
+    radial-gradient(circle at 94% 10%, #d7f4ff8a 0 14%, transparent 15%),
+    linear-gradient(135deg, #ffffff 0%, #f7f3ff 48%, #eefaff 100%);
 }
 .hearing-stage-dock--sealed,
 .hearing-stage-dock--handoff {
   background:
-    radial-gradient(circle at 10% 0, #ffe6b6 0 16%, transparent 17%),
-    linear-gradient(135deg, #fff9ec, #eef8ff 55%, #f6f0ff);
+    radial-gradient(circle at 7% 0, #ffe4ad 0 15%, transparent 16%),
+    radial-gradient(circle at 94% 10%, #d7f4ff8a 0 14%, transparent 15%),
+    linear-gradient(135deg, #fff9ec 0%, #f2fbff 52%, #f6f0ff 100%);
   border-color: #f0d7a7;
+}
+.hearing-stage-dock__header {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+  min-width: 0;
+  min-height: 0;
 }
 .hearing-stage-dock__copy {
   position: relative;
@@ -1464,103 +1501,121 @@ onBeforeUnmount(() => eventAbortController.abort());
   min-width: 0;
 }
 .hearing-stage-dock__copy span {
-  color: #7486a3;
+  color: #7590ad;
   font-size: 10px;
   font-weight: 900;
-  letter-spacing: .08em;
+  letter-spacing: .14em;
 }
 .hearing-stage-dock__copy h2 {
-  margin: 3px 0 4px;
+  margin: 2px 0 2px;
   color: #30415c;
-  font-size: 19px;
-  line-height: 1.15;
+  font-size: 18.5px;
+  line-height: 1.1;
 }
 .hearing-stage-dock__copy p {
   display: -webkit-box;
   overflow: hidden;
   margin: 0;
   color: #6d7890;
-  font-size: 11.5px;
-  line-height: 1.45;
+  font-size: 10.5px;
+  line-height: 1.3;
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+  -webkit-line-clamp: 1;
 }
 .hearing-stage-dock__badge {
   position: relative;
-  z-index: 1;
-  padding: 7px 11px;
+  z-index: 2;
+  display: inline-flex;
+  gap: 7px;
+  align-items: center;
+  padding: 8px 12px;
   color: #0f8abf;
   white-space: nowrap;
-  background: #e9f9ff;
+  background: linear-gradient(135deg, #e9f9ff, #ffffffd9);
   border: 1px solid #cde9f8;
   border-radius: 999px;
   font-size: 12px;
+  box-shadow: 0 10px 22px #17a8e617;
 }
-.hearing-stage-dock__meta {
-  position: relative;
-  z-index: 1;
-  display: grid;
-  gap: 8px;
-  justify-items: end;
+.hearing-stage-dock__badge::before {
+  display: block;
+  width: 8px;
+  height: 8px;
+  content: "";
+  background: #17a8e6;
+  border-radius: 50%;
+  box-shadow: 0 0 0 5px #17a8e61c;
 }
 .hearing-stage-dock--waiting .hearing-stage-dock__badge {
   color: #7d5cc5;
-  background: #f1ebff;
+  background: linear-gradient(135deg, #f1ebff, #ffffffd9);
   border-color: #dfd3ff;
+}
+.hearing-stage-dock--waiting .hearing-stage-dock__badge::before {
+  background: #afa1ff;
+  box-shadow: 0 0 0 5px #afa1ff24;
 }
 .hearing-stage-dock--sealed .hearing-stage-dock__badge,
 .hearing-stage-dock--handoff .hearing-stage-dock__badge {
   color: #9a6a18;
-  background: #fff3d5;
+  background: linear-gradient(135deg, #fff3d5, #ffffffd9);
   border-color: #efd5a2;
+}
+.hearing-stage-dock--sealed .hearing-stage-dock__badge::before,
+.hearing-stage-dock--handoff .hearing-stage-dock__badge::before {
+  background: #78d9bd;
+  box-shadow: 0 0 0 5px #78d9bd24;
 }
 .round-progress-board {
   position: relative;
-  grid-column: 1 / -1;
   z-index: 3;
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-  padding: 8px;
-  background: #ffffffed;
-  border: 1px solid #ddeaf4;
-  border-radius: 20px;
-  box-shadow: 0 14px 28px #506c9412;
+  gap: 14px;
+  align-items: center;
+  height: 52px;
+  padding: 0 10px;
+  overflow: hidden;
+  background:
+    linear-gradient(90deg, transparent 0 6%, #cfe7f4 7% 93%, transparent 94% 100%) center 17px / 100% 2px no-repeat,
+    linear-gradient(180deg, #ffffffbf, #ffffff73);
+  border: 1px solid #e3eef7;
+  border-radius: 18px;
+  box-shadow: inset 0 1px 0 #fff;
 }
 .round-progress-board__item {
   position: relative;
-  display: flex;
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
   gap: 8px;
   align-items: center;
   min-width: 0;
-  padding: 6px 7px;
+  height: 38px;
+  padding: 0;
   overflow: hidden;
   color: #91a0b4;
-  background: #f8fbff;
-  border: 1px solid #e8f0f8;
-  border-radius: 16px;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
   font-size: 11px;
   font-weight: 900;
-}
-.round-progress-board__item:not(:last-child)::after {
-  position: absolute;
-  top: 50%;
-  right: -9px;
-  width: 10px;
-  height: 2px;
-  content: "";
-  background: #d7e6f1;
 }
 .round-progress-board__item b {
   flex: 0 0 auto;
   display: grid;
-  width: 24px;
-  height: 24px;
+  width: 32px;
+  height: 32px;
   place-items: center;
   color: #91a0b4;
-  background: #fff;
-  border: 1px solid #ddeaf4;
+  background: linear-gradient(180deg, #fff, #f4f8fc);
+  border: 1px solid #d8e7f2;
   border-radius: 50%;
+  box-shadow: 0 8px 18px #6c87a114;
+}
+.round-progress-board__item div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
 }
 .round-progress-board__item span {
   min-width: 0;
@@ -1570,73 +1625,64 @@ onBeforeUnmount(() => eventAbortController.abort());
   white-space: nowrap;
 }
 .round-progress-board__item em {
-  flex: 0 0 auto;
-  padding: 3px 6px;
   color: #8a98ad;
-  background: #fff;
-  border: 1px solid #e4edf6;
-  border-radius: 999px;
   font-size: 9px;
   font-style: normal;
   font-weight: 900;
+  letter-spacing: .04em;
 }
 .round-progress-board__item--complete {
   color: #4e8f7f;
-  background: linear-gradient(135deg, #f1fff8, #f6fffb);
-  border-color: #cfeee2;
 }
 .round-progress-board__item--complete b {
   color: #fff;
-  background: #78d9bd;
+  background: linear-gradient(135deg, #78d9bd, #59c6a4);
   border-color: #78d9bd;
+  box-shadow: 0 0 0 6px #78d9bd1c, 0 10px 18px #59c6a421;
 }
 .round-progress-board__item--complete em {
   color: #4b9b83;
-  background: #eafff5;
-  border-color: #ccefe2;
 }
 .round-progress-board__item--active {
   color: #34455e;
-  background: linear-gradient(135deg, #eefaff, #fff);
-  border-color: #cfeaf8;
 }
 .round-progress-board__item--active b {
   color: #fff;
-  background: #17a8e6;
+  background: linear-gradient(135deg, #31c3f4, #1598d5);
   border-color: #17a8e6;
-  box-shadow: 0 0 0 6px #17a8e621;
+  box-shadow: 0 0 0 7px #17a8e621, 0 10px 22px #17a8e62a;
 }
 .round-progress-board__item--active em {
   color: #17a8e6;
-  background: #eaf9ff;
-  border-color: #ccebf8;
 }
 .round-progress-board__item--pending {
   color: #91a0b4;
 }
 .hearing-stage-dock__status-grid {
   position: relative;
-  grid-column: 1 / -1;
   z-index: 3;
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
+  height: 36px;
 }
 .hearing-status-chip {
   position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: 3px;
+  align-content: center;
+  gap: 2px;
   min-width: 0;
-  padding: 7px 9px 7px 23px;
-  background: #ffffffb8;
+  min-height: 0;
+  padding: 5px 8px 5px 23px;
+  background: #ffffffa6;
   border: 1px solid #e4edf6;
-  border-radius: 16px;
-  box-shadow: inset 0 1px 0 #fff;
+  border-radius: 14px;
+  box-shadow: inset 0 1px 0 #fff, 0 8px 18px #516b8a0b;
 }
 .hearing-status-chip::before {
   position: absolute;
-  top: 12px;
+  top: 13px;
   left: 10px;
   width: 7px;
   height: 7px;
@@ -1652,13 +1698,14 @@ onBeforeUnmount(() => eventAbortController.abort());
   white-space: nowrap;
   font-size: 9px;
   font-weight: 900;
+  letter-spacing: .05em;
 }
 .hearing-status-chip strong {
   overflow: hidden;
   color: #34455e;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 12px;
+  font-size: 10.5px;
 }
 .hearing-status-chip--pending::before {
   background: #a6b4c7;

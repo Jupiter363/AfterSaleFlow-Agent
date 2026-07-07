@@ -83,6 +83,10 @@ describe("HearingCourtView", () => {
     expect(statusDock.text()).toContain("当前庭审状态");
     expect(statusDock.text()).toContain("第 2 轮");
     expect(statusDock.text()).not.toContain("HEARING STAGE DOCK");
+    expect(statusDock.classes()).toContain("hearing-stage-dock--fixed-dashboard");
+    expect(wrapper.get("[data-hearing-stage-badge]").text()).toContain("进行中");
+    expect(wrapper.find("[data-hearing-progress-track]").exists()).toBe(true);
+    expect(wrapper.find("[data-hearing-status-strip]").exists()).toBe(true);
     expect(wrapper.findAll("[data-round-progress-item]")).toHaveLength(3);
     expect(wrapper.get('[data-hearing-status-chip="USER"]').text()).toContain("用户提交");
     expect(wrapper.get('[data-hearing-status-chip="MERCHANT"]').text()).toContain("商家提交");
