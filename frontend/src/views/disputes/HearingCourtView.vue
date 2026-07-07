@@ -755,7 +755,7 @@ onBeforeUnmount(() => eventAbortController.abort());
         </button>
       </aside>
 
-      <section class="courtroom-center">
+      <section class="courtroom-center courtroom-center--compact-stage">
         <section
           class="hearing-stage-dock hearing-stage-dock--fixed-dashboard hearing-stage-dock--short"
           :class="`hearing-stage-dock--${stageDockMode}`"
@@ -808,6 +808,8 @@ onBeforeUnmount(() => eventAbortController.abort());
                 ['judge', 'jury'].includes(item.type) ? 'court-message--tall-narrow-card' : '',
                 ['judge', 'jury'].includes(item.type) ? 'court-message--extended-length-card' : '',
                 ['user', 'merchant'].includes(item.type) ? 'court-message--party-statement-card' : '',
+                ['user', 'merchant'].includes(item.type) ? 'court-message--soft-party-card' : '',
+                ['judge', 'jury', 'user', 'merchant'].includes(item.type) ? 'court-message--flexible-height-card' : '',
               ]"
               :data-court-message="item.type"
             >
@@ -1443,12 +1445,15 @@ onBeforeUnmount(() => eventAbortController.abort());
 .courtroom-center {
   grid-column: 2;
   display: grid;
-  grid-template-rows: 172px minmax(360px, 1fr) auto auto;
-  gap: 12px;
+  grid-template-rows: auto minmax(360px, 1fr) auto auto;
+  gap: 10px;
   height: 100%;
   overflow: hidden;
   padding: 14px 16px;
   border-radius: 30px;
+}
+.courtroom-center--compact-stage {
+  align-content: stretch;
 }
 .hearing-stage-dock {
   box-sizing: border-box;
@@ -1867,7 +1872,7 @@ onBeforeUnmount(() => eventAbortController.abort());
   gap: 6px;
   max-width: 72%;
   padding: 12px 15px;
-  overflow: hidden;
+  overflow: visible;
   border-radius: 20px;
   box-shadow: 0 8px 20px #506c940d;
 }
@@ -1947,17 +1952,15 @@ onBeforeUnmount(() => eventAbortController.abort());
 }
 .court-message--user {
   justify-self: start;
-  background:
-    radial-gradient(circle at 8% 0, #dff6ff 0 17%, transparent 18%),
-    linear-gradient(135deg, #eef9ff 0%, #f9fdff 100%);
+  background: transparent;
   border: 1px solid #cde9f8;
+  border-left: 3px solid #8dddf7;
 }
 .court-message--merchant {
   justify-self: end;
-  background:
-    radial-gradient(circle at 92% 0, #ffe7c2 0 16%, transparent 17%),
-    linear-gradient(135deg, #fffaf3 0%, #fff6ec 100%);
+  background: transparent;
   border: 1px solid #f3d8bc;
+  border-right: 3px solid #efc28c;
 }
 .court-message--party-statement-card {
   box-sizing: border-box;
@@ -1967,8 +1970,18 @@ onBeforeUnmount(() => eventAbortController.abort());
   padding: 15px 18px;
   border-radius: 24px;
   box-shadow:
-    inset 0 1px 0 #fff,
-    0 12px 26px #506c9412;
+    0 8px 18px #506c9408;
+}
+.court-message--soft-party-card {
+  box-shadow:
+    inset 0 1px 0 #ffffffd8,
+    0 8px 18px #506c9408;
+}
+.court-message--user.court-message--soft-party-card {
+  background: linear-gradient(135deg, #fbfeff 0%, #f3fbff 100%);
+}
+.court-message--merchant.court-message--soft-party-card {
+  background: linear-gradient(135deg, #fffefd 0%, #fff8f0 100%);
 }
 .court-message--party-statement-card header {
   font-size: 11px;
@@ -2000,6 +2013,16 @@ onBeforeUnmount(() => eventAbortController.abort());
   width: min(52%, 430px);
   max-width: min(52%, 430px);
   min-height: 176px;
+}
+.court-message--flexible-height-card {
+  height: auto;
+  min-height: var(--court-message-min-height, auto);
+}
+.court-message--party-statement-card.court-message--flexible-height-card {
+  --court-message-min-height: 92px;
+}
+.court-message--tall-narrow-card.court-message--flexible-height-card {
+  --court-message-min-height: 176px;
 }
 .court-message--extended-length-card {
   width: min(65%, 538px);

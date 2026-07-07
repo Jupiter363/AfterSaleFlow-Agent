@@ -128,6 +128,7 @@ describe("HearingCourtView", () => {
     expect(wrapper.get("[data-hearing-courtroom-page]").exists()).toBe(true);
     expect(wrapper.get("[data-court-agent-strip]").text()).not.toContain("COURT AGENTS");
     expect(wrapper.get("[data-court-agent-strip]").text()).not.toContain("法官与 AI 评审团");
+    expect(wrapper.get(".courtroom-center").classes()).toContain("courtroom-center--compact-stage");
     expect(wrapper.findAll("[data-court-agent-card]")).toHaveLength(3);
     expect(wrapper.get('[data-court-agent-card="judge"]').text()).toContain("衡衡");
     expect(wrapper.get('[data-court-agent-card="jury-a"]').text()).toContain("评审 A");
@@ -144,13 +145,19 @@ describe("HearingCourtView", () => {
     expect(wrapper.get('[data-court-message="judge"]').classes()).toContain("court-message--judge-bench-card");
     expect(wrapper.get('[data-court-message="judge"]').classes()).toContain("court-message--tall-narrow-card");
     expect(wrapper.get('[data-court-message="judge"]').classes()).toContain("court-message--extended-length-card");
+    expect(wrapper.get('[data-court-message="judge"]').classes()).toContain("court-message--flexible-height-card");
     expect(wrapper.get('[data-court-message="judge"]').text()).toContain("法官宣读");
     expect(wrapper.get('[data-court-message="jury"]').classes()).toContain("court-message--jury-review-card");
     expect(wrapper.get('[data-court-message="jury"]').classes()).toContain("court-message--tall-narrow-card");
     expect(wrapper.get('[data-court-message="jury"]').classes()).toContain("court-message--extended-length-card");
+    expect(wrapper.get('[data-court-message="jury"]').classes()).toContain("court-message--flexible-height-card");
     expect(wrapper.get('[data-court-message="jury"]').text()).toContain("评审团观察");
     expect(wrapper.get('[data-court-message="user"]').classes()).toContain("court-message--party-statement-card");
+    expect(wrapper.get('[data-court-message="user"]').classes()).toContain("court-message--soft-party-card");
+    expect(wrapper.get('[data-court-message="user"]').classes()).toContain("court-message--flexible-height-card");
     expect(wrapper.get('[data-court-message="merchant"]').classes()).toContain("court-message--party-statement-card");
+    expect(wrapper.get('[data-court-message="merchant"]').classes()).toContain("court-message--soft-party-card");
+    expect(wrapper.get('[data-court-message="merchant"]').classes()).toContain("court-message--flexible-height-card");
     expect(wrapper.get("[data-round-input-bar]").text()).toContain(
       "本轮陈述输入台",
     );
