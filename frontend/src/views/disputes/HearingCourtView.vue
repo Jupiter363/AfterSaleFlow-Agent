@@ -806,6 +806,7 @@ onBeforeUnmount(() => eventAbortController.abort());
                 item.type === 'judge' ? 'court-message--judge-bench-card' : '',
                 item.type === 'jury' ? 'court-message--jury-review-card' : '',
                 ['judge', 'jury'].includes(item.type) ? 'court-message--tall-narrow-card' : '',
+                ['judge', 'jury'].includes(item.type) ? 'court-message--extended-length-card' : '',
               ]"
               :data-court-message="item.type"
             >
@@ -1975,6 +1976,10 @@ onBeforeUnmount(() => eventAbortController.abort());
   width: min(52%, 430px);
   max-width: min(52%, 430px);
   min-height: 176px;
+}
+.court-message--extended-length-card {
+  width: min(65%, 538px);
+  max-width: min(65%, 538px);
 }
 .court-message--tall-narrow-card p {
   max-width: 92%;
