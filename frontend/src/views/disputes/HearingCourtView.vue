@@ -44,6 +44,7 @@ const error = ref("");
 const confirmingVersion = ref(null);
 const messages = ref([...(props.initialMessages || [])]);
 const settlementOpen = ref(false);
+const ledgerOpen = ref(false);
 const proposalText = ref("");
 const proposing = ref(false);
 const supplementing = ref(false);
@@ -150,11 +151,6 @@ const canSubmitRound = computed(
 const activeRoundDeadline = computed(
   () => activeRound.value?.round_deadline_at || activeRound.value?.roundDeadlineAt || "",
 );
-const roleLabels = {
-  USER: "用户",
-  MERCHANT: "商家",
-  PLATFORM_REVIEWER: "平台审核员",
-};
 const roundStepLabels = ["事实陈述", "证据解释", "方案确认"];
 const mockEvidenceRails = {
   user: [
@@ -217,7 +213,6 @@ const mockEvidenceRails = {
   ],
 };
 const activeRoundSummary = computed(() => summary(activeRound.value));
-const currentRoleLabel = computed(() => roleLabels[role.value] || "体验身份");
 const currentRoundLabel = computed(
   () => roundStepLabels[Math.min(currentRound.value, roundStepLabels.length) - 1] || "庭审陈述",
 );
@@ -556,15 +551,6 @@ onBeforeUnmount(() => eventAbortController.abort());
           <b>用户侧</b>
         </header>
 
-        <section class="party-avatar-card">
-          <DigitalHuman
-            state="LISTENING"
-            name="用户代表"
-            role="路线引导员 · 用户"
-            message="用户可围绕签收事实、未收货经过和已提交证据进行陈述。"
-          />
-        </section>
-
         <div class="evidence-pocket" aria-label="用户已提交证据">
           <article
             v-for="item in mockEvidenceRails.user"
@@ -681,20 +667,8 @@ onBeforeUnmount(() => eventAbortController.abort());
           </div>
         </section>
 
-        <section v-if="isReviewer" class="review-aide-agent-card">
-          <DigitalHuman
-            state="LISTENING"
-            name="小译"
-            role="审核解释官"
-            message="我只向平台审核员转述争点、证据与草案，不代替审核员作出终审。"
-          />
-          <p>
-            审核员视角已开启：可查看庭审归纳、陪审团评分与裁决草案交接信息。
-          </p>
-        </section>
-
         <section
-          v-if="isCaseParty"
+          v-if="isCaseParty && !reviewHandoffVisible"
           class="round-input-bar"
           data-round-input-bar
         >
@@ -762,30 +736,17 @@ onBeforeUnmount(() => eventAbortController.abort());
           >
             提出一致方案
           </button>
-        </div>
-      </section>
-
-      <aside class="hearing-ledger">
-        <header>
-          <span>ROUND LEDGER</span>
-          <h2>庭审卷轴</h2>
-        </header>
-        <ol>
-          <li v-for="round in rounds" :key="round.round_id">
-            <div>
-              <strong>第 {{ round.round_no }} 轮</strong>
-              <span :data-round-status="round.status">{{ roundStatusLabel(round.status) }}</span>
-            </div>
-            <p>{{ summary(round).judge || summary(round).clerk || "本轮记录已封存。" }}</p>
-          </li>
-        </ol>
-        <div v-if="!rounds.length" class="hearing-ledger__empty" data-round-ledger-empty>
-          <span aria-hidden="true">📜</span>
-          <strong>第一轮庭审记录生成后，书记官会把卷轴挂在这里。</strong>
-          <small>目前双方仍可先陈述、解释证据或提出一致方案。</small>
+          <button
+            type="button"
+            class="court-actions__ledger"
+            data-open-court-ledger
+            @click="ledgerOpen = true"
+          >
+            查看庭审卷轴
+          </button>
         </div>
 
-        <section v-if="activeSettlement" class="settlement-card">
+        <section v-if="activeSettlement" class="settlement-card settlement-card--dock">
           <span>CONSENSUS CARD</span>
           <h3>双方一致方案</h3>
           <p>{{ activeSettlement.proposal_text }}</p>
@@ -816,7 +777,8 @@ onBeforeUnmount(() => eventAbortController.abort());
           </button>
         </section>
         <p v-if="error" class="hearing-error" role="alert">{{ error }}</p>
-      </aside>
+      </section>
+
       <aside
         class="party-evidence-rail party-evidence-rail--merchant"
         data-party-evidence-rail="merchant"
@@ -829,15 +791,6 @@ onBeforeUnmount(() => eventAbortController.abort());
           </div>
           <b>商家侧</b>
         </header>
-
-        <section class="party-avatar-card">
-          <DigitalHuman
-            state="SPEAKING"
-            name="商家代表"
-            role="路线引导员 · 商家履约代表"
-            message="商家可围绕发货、物流交接、签收凭证和异常工单进行说明。"
-          />
-        </section>
 
         <div class="evidence-pocket" aria-label="商家已提交证据">
           <article
@@ -866,6 +819,47 @@ onBeforeUnmount(() => eventAbortController.abort());
         </button>
       </aside>
     </main>
+
+    <div
+      v-if="ledgerOpen"
+      class="court-ledger-backdrop"
+      data-court-ledger-drawer
+      role="dialog"
+      aria-modal="true"
+      aria-label="庭审卷轴"
+      @click.self="ledgerOpen = false"
+    >
+      <aside class="hearing-ledger">
+        <header>
+          <div>
+            <span>TRACEABLE ROUND LEDGER</span>
+            <h2>庭审卷轴</h2>
+            <p>这里保存每一轮封存后的可追溯记录，用于后续复核、申诉和平台终审。</p>
+          </div>
+          <button
+            type="button"
+            aria-label="关闭庭审卷轴"
+            @click="ledgerOpen = false"
+          >
+            ×
+          </button>
+        </header>
+        <ol>
+          <li v-for="round in rounds" :key="round.round_id">
+            <div>
+              <strong>第 {{ round.round_no }} 轮</strong>
+              <span :data-round-status="round.status">{{ roundStatusLabel(round.status) }}</span>
+            </div>
+            <p>{{ summary(round).judge || summary(round).clerk || "本轮记录已封存。" }}</p>
+          </li>
+        </ol>
+        <div v-if="!rounds.length" class="hearing-ledger__empty" data-round-ledger-empty>
+          <span aria-hidden="true">📜</span>
+          <strong>第一轮庭审记录生成后，书记官会把卷轴挂在这里。</strong>
+          <small>目前双方仍可先陈述、解释证据或提出一致方案。</small>
+        </div>
+      </aside>
+    </div>
 
     <div v-if="settlementOpen" class="settlement-dialog" role="dialog" aria-modal="true">
       <form @submit.prevent="proposeSettlement">
@@ -926,20 +920,18 @@ onBeforeUnmount(() => eventAbortController.abort());
   display: none;
 }
 :global(.app-page:has(.hearing-courtroom-page)) {
-  padding-bottom: 18px;
+  padding-bottom: 42px;
 }
 .hearing-courtroom-page {
   position: relative;
   display: grid;
   grid-template-columns: 282px minmax(620px, 1fr) 282px;
-  grid-template-rows: minmax(0, 1fr) 106px;
-  gap: 14px 18px;
-  height: clamp(560px, calc(100vh - 285px), 615px);
+  gap: 18px;
+  height: clamp(720px, calc(100vh - 150px), 820px);
   min-height: 0;
 }
 .party-evidence-rail,
-.courtroom-center,
-.hearing-ledger {
+.courtroom-center {
   min-width: 0;
   background: #ffffffdf;
   border: 1px solid #dfe9f4;
@@ -950,18 +942,16 @@ onBeforeUnmount(() => eventAbortController.abort());
   position: sticky;
   top: 96px;
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
-  gap: 10px;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 12px;
   height: 100%;
   padding: 16px;
   border-radius: 28px;
 }
 .party-evidence-rail--user {
-  grid-row: 1 / span 2;
   grid-column: 1;
 }
 .party-evidence-rail--merchant {
-  grid-row: 1 / span 2;
   grid-column: 3;
 }
 .party-evidence-rail__header {
@@ -1005,70 +995,6 @@ onBeforeUnmount(() => eventAbortController.abort());
 .party-evidence-rail--merchant .party-evidence-rail__header b {
   background: #fff3e9;
   border-color: #f4d7c8;
-}
-.party-avatar-card {
-  overflow: hidden;
-  background:
-    radial-gradient(circle at 18% 18%, #eaf8ff 0 22%, transparent 23%),
-    linear-gradient(135deg, #f8fcff, #fff);
-  border: 1px solid #dcecf6;
-  border-radius: 24px;
-}
-.party-evidence-rail--merchant .party-avatar-card {
-  background:
-    radial-gradient(circle at 18% 18%, #fff2e7 0 22%, transparent 23%),
-    linear-gradient(135deg, #fff8f2, #fff);
-  border-color: #f3decf;
-}
-.party-avatar-card :deep(.digital-human) {
-  grid-template-columns: 78px minmax(0, 1fr);
-  gap: 10px;
-  min-height: 0;
-  padding: 10px;
-  background: transparent;
-  border: 0;
-  box-shadow: none;
-}
-.party-avatar-card :deep(.digital-human__portrait) {
-  width: 78px;
-  height: 78px;
-}
-.party-avatar-card :deep(.digital-human__portrait svg) {
-  width: 78px;
-  height: 78px;
-}
-.party-avatar-card :deep(.digital-human__identity) {
-  display: grid;
-  gap: 4px;
-}
-.party-avatar-card :deep(.digital-human__identity strong),
-.party-avatar-card :deep(.digital-human__identity span) {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.party-avatar-card :deep(.digital-human__identity strong) {
-  font-size: 15px;
-}
-.party-avatar-card :deep(.digital-human__identity span) {
-  font-size: 10px;
-}
-.party-avatar-card :deep(.digital-human__identity small) {
-  width: max-content;
-  padding: 4px 7px;
-  font-size: 10px;
-}
-.party-avatar-card :deep(.digital-human__copy p) {
-  -webkit-line-clamp: 2;
-  display: -webkit-box;
-  overflow: hidden;
-  -webkit-box-orient: vertical;
-  font-size: 11px;
-  line-height: 1.4;
-  margin: 6px 0 0;
-}
-.party-avatar-card :deep(.digital-human__boundary) {
-  display: none;
 }
 .evidence-pocket {
   display: grid;
@@ -1189,11 +1115,10 @@ onBeforeUnmount(() => eventAbortController.abort());
   cursor: pointer;
 }
 .courtroom-center {
-  grid-row: 1;
   grid-column: 2;
   display: grid;
-  grid-template-rows: 150px minmax(0, 1fr) auto auto;
-  gap: 10px;
+  grid-template-rows: 170px minmax(320px, 1fr) auto auto auto;
+  gap: 12px;
   height: 100%;
   overflow: hidden;
   padding: 14px 16px;
@@ -1205,7 +1130,7 @@ onBeforeUnmount(() => eventAbortController.abort());
   grid-template-columns: minmax(110px, .56fr) minmax(240px, 1fr) minmax(110px, .56fr);
   gap: 14px;
   min-height: 0;
-  padding: 7px 18px 46px;
+  padding: 10px 18px 52px;
   overflow: hidden;
   background:
     radial-gradient(circle at 50% 0, #fff0c9 0 16%, transparent 17%),
@@ -1559,36 +1484,13 @@ onBeforeUnmount(() => eventAbortController.abort());
 .round-input-bar footer i:nth-child(2)::before { background: #f6bf62; }
 .round-input-bar footer i:nth-child(3)::before { background: #afa1ff; }
 .round-input-bar footer i:nth-child(4)::before { background: #78d9bd; }
-.review-aide-agent-card {
-  display: grid;
-  grid-template-columns: minmax(210px, .42fr) minmax(0, 1fr);
-  gap: 14px;
-  align-items: center;
-  padding: 9px 12px;
-  background:
-    radial-gradient(circle at 6% 0, #efe9ff 0 16%, transparent 17%),
-    linear-gradient(135deg, #fbfaff, #f4fbff 60%, #fff8ef);
-  border: 1px solid #e5defa;
-  border-radius: 22px;
-  box-shadow: inset 0 1px 0 #fff, 0 12px 28px #7157b914;
-}
-.review-aide-agent-card :deep(.digital-human) {
-  min-height: 0;
-}
-.review-aide-agent-card p {
-  margin: 0;
-  color: #65748a;
-  font-size: 12px;
-  font-weight: 800;
-  line-height: 1.7;
-}
 .review-handoff-card {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 16px;
   align-items: center;
-  padding: 16px;
-  margin: 0 0 14px;
+  padding: 18px 20px;
+  margin: 0;
   background:
     radial-gradient(circle at 10% 0, #ffe4ad 0 12%, transparent 13%),
     linear-gradient(135deg, #fff9ec, #eef8ff 55%, #f6f0ff);
@@ -1605,6 +1507,7 @@ onBeforeUnmount(() => eventAbortController.abort());
 .review-handoff-card h3 {
   margin: 4px 0 7px;
   color: #34455e;
+  font-size: 20px;
 }
 .review-handoff-card p {
   max-width: 680px;
@@ -1638,33 +1541,69 @@ onBeforeUnmount(() => eventAbortController.abort());
 }
 .court-actions__upload input { position: absolute; width: 1px; height: 1px; opacity: 0; }
 .court-actions .court-actions__settle { color: #8b5272; background: #fff0f4; border-color: #f2d7df; }
+.court-actions .court-actions__ledger { color: #58648a; background: #f3f0ff; border-color: #dfd7fb; }
+.court-ledger-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 68;
+  display: flex;
+  justify-content: flex-end;
+  padding: 18px;
+  background: #42557536;
+  backdrop-filter: blur(10px);
+}
 .hearing-ledger {
-  grid-row: 2;
-  grid-column: 2;
+  width: min(520px, 100%);
+  min-width: 0;
   height: 100%;
-  padding: 12px 14px;
+  padding: 18px;
   overflow: auto;
-  border-radius: 24px;
+  background:
+    radial-gradient(circle at 14% 0, #fff1c7 0 16%, transparent 17%),
+    linear-gradient(145deg, #ffffff, #f6fbff 58%, #fff7ec);
+  border: 1px solid #dfe9f4;
+  border-radius: 28px;
+  box-shadow: 0 28px 80px #33445f30;
 }
 .hearing-ledger header {
   display: flex;
   justify-content: space-between;
-  align-items: end;
+  align-items: flex-start;
   gap: 12px;
+}
+.hearing-ledger header p {
+  max-width: 360px;
+  margin: 4px 0 0;
+  color: #7c899e;
+  font-size: 12px;
+  line-height: 1.55;
+}
+.hearing-ledger header button {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  flex: 0 0 auto;
+  place-items: center;
+  color: #53617a;
+  background: #f3f7fb;
+  border: 1px solid #dce5ef;
+  border-radius: 50%;
+  cursor: pointer;
+  font-size: 20px;
 }
 .hearing-ledger header h2 {
   margin: 3px 0 0;
-  font-size: 16px;
+  font-size: 24px;
 }
 .hearing-ledger ol {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: 1fr;
   gap: 10px;
   padding: 0;
-  margin: 8px 0 0;
+  margin: 16px 0 0;
   list-style: none;
 }
-.hearing-ledger li { padding: 10px; background: #f7f9fc; border-radius: 15px; }
+.hearing-ledger li { padding: 14px; background: #f7f9fc; border: 1px solid #e2eaf3; border-radius: 18px; }
 .hearing-ledger li div { display: flex; justify-content: space-between; gap: 8px; }
 .hearing-ledger li span { color: #657a9b; font-size: 10px; }
 .hearing-ledger li p { margin: 7px 0 0; color: #6d798d; font-size: 12px; line-height: 1.55; }
@@ -1682,6 +1621,33 @@ onBeforeUnmount(() => eventAbortController.abort());
 .hearing-ledger__empty strong { color: #3f4d64; line-height: 1.5; }
 .hearing-ledger__empty small { color: #8390a2; line-height: 1.5; }
 .settlement-card { padding: 15px; background: linear-gradient(135deg, #fff6d9, #fff0ea); border: 1px solid #f0dfbd; border-radius: 20px; }
+.settlement-card--dock {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px 14px;
+  align-items: center;
+  padding: 10px 12px;
+}
+.settlement-card--dock > span,
+.settlement-card--dock .settlement-card__parties,
+.settlement-card--dock small {
+  display: none;
+}
+.settlement-card--dock h3,
+.settlement-card--dock p {
+  margin: 0;
+}
+.settlement-card--dock p {
+  overflow: hidden;
+  color: #756b69;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.settlement-card--dock button {
+  width: auto;
+  white-space: nowrap;
+}
 .settlement-card h3 { margin: 5px 0; color: #594e4d; }
 .settlement-card p { color: #756b69; line-height: 1.55; }
 .settlement-card__parties { display: flex; gap: 7px; margin: 10px 0; }
@@ -1711,8 +1677,7 @@ onBeforeUnmount(() => eventAbortController.abort());
     grid-template-columns: minmax(0, 1fr);
   }
   .party-evidence-rail,
-  .courtroom-center,
-  .hearing-ledger {
+  .courtroom-center {
     grid-column: 1;
     grid-row: auto;
     position: static;
