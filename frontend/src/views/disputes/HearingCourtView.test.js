@@ -87,7 +87,10 @@ describe("HearingCourtView", () => {
     expect(statusDock.classes()).toContain("hearing-stage-dock--short");
     expect(statusDock.find(".hearing-stage-dock__copy p").exists()).toBe(false);
     expect(statusDock.find(".hearing-stage-dock__copy").classes()).toContain(
-      "hearing-stage-dock__copy--single-line",
+      "hearing-stage-dock__copy--stacked",
+    );
+    expect(wrapper.get("[data-hearing-stage-clock]").classes()).toContain(
+      "hearing-stage-dock__clock--centered",
     );
     expect(wrapper.get("[data-hearing-stage-clock]").text()).toContain("当前轮次还剩");
     expect(wrapper.get("[data-hearing-stage-clock]").text()).toContain("04:18");

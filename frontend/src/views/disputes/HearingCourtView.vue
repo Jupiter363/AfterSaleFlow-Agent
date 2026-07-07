@@ -762,11 +762,11 @@ onBeforeUnmount(() => eventAbortController.abort());
           data-hearing-stage-dock
         >
           <header class="hearing-stage-dock__header">
-            <div class="hearing-stage-dock__copy hearing-stage-dock__copy--single-line">
+            <div class="hearing-stage-dock__copy hearing-stage-dock__copy--stacked">
               <span>当前庭审状态</span>
               <h2>{{ stageDockTitle }}</h2>
             </div>
-            <div class="hearing-stage-dock__clock" data-hearing-stage-clock>
+            <div class="hearing-stage-dock__clock hearing-stage-dock__clock--centered" data-hearing-stage-clock>
               <span>{{ stageDockClock.label }}</span>
               <strong>{{ stageDockClock.value }}</strong>
             </div>
@@ -1436,13 +1436,13 @@ onBeforeUnmount(() => eventAbortController.abort());
   box-sizing: border-box;
   position: relative;
   display: grid;
-  grid-template-rows: 30px 56px;
+  grid-template-rows: 36px 56px;
   gap: 0;
   width: 100%;
-  height: 106px;
-  min-height: 106px;
-  max-height: 106px;
-  padding: 8px 16px 7px;
+  height: 112px;
+  min-height: 112px;
+  max-height: 112px;
+  padding: 7px 16px 7px;
   overflow: hidden;
   background:
     radial-gradient(circle at 7% 0, #fff3cf 0 15%, transparent 16%),
@@ -1500,7 +1500,7 @@ onBeforeUnmount(() => eventAbortController.abort());
   align-items: flex-start;
   min-width: 0;
   min-height: 0;
-  height: 30px;
+  height: 36px;
 }
 .hearing-stage-dock__copy {
   position: relative;
@@ -1508,24 +1508,23 @@ onBeforeUnmount(() => eventAbortController.abort());
   min-width: 0;
   max-width: min(520px, calc(100% - 170px));
 }
-.hearing-stage-dock__copy--single-line {
-  display: flex;
-  gap: 10px;
-  align-items: baseline;
+.hearing-stage-dock__copy--stacked {
+  display: grid;
+  gap: 1px;
+  align-content: start;
   max-width: min(610px, calc(100% - 170px));
-  white-space: nowrap;
 }
 .hearing-stage-dock__copy span {
-  flex: 0 0 auto;
   color: #7590ad;
   font-size: 10px;
+  line-height: 1;
   font-weight: 900;
   letter-spacing: .14em;
 }
 .hearing-stage-dock__copy h2 {
   display: block;
   overflow: hidden;
-  margin: 2px 0 0;
+  margin: 0;
   color: #30415c;
   font-size: 18px;
   line-height: 1.12;
@@ -1540,6 +1539,10 @@ onBeforeUnmount(() => eventAbortController.abort());
   justify-items: end;
   padding-top: 0;
   white-space: nowrap;
+}
+.hearing-stage-dock__clock--centered {
+  justify-items: center;
+  text-align: center;
 }
 .hearing-stage-dock__clock span {
   color: #8ca0b8;
