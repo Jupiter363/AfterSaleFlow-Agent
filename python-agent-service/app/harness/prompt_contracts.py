@@ -79,6 +79,7 @@ _CONTRACTS: dict[str, AgentContextContract] = {
             ContextSectionSpec("actor_visible_evidence", 78, False, "java_filtered"),
             ContextSectionSpec("jury_a2a_notes", 77, False, "system_audit_only"),
             ContextSectionSpec("round_control_policy", 75, True, "java_filtered"),
+            ContextSectionSpec("execution_tool_intentions", 68, False, "java_tool_catalog"),
             ContextSectionSpec("tool_results", 70, False, "tool_result"),
             *_COMMON_DISPLAY_ONLY,
         ),

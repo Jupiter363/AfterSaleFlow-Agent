@@ -171,6 +171,44 @@ def test_round_turn_workflow_uses_context_pack_and_returns_judge_message() -> No
     assert "不是和解协议" in round_policy.content
 
 
+def test_round_turn_context_can_include_execution_tool_intentions_without_backend_names() -> None:
+    runner = FakeRoundModelRunner()
+
+    HearingRoundTurnWorkflow(model_runner=runner).run(
+        request(
+            courtroom_context={
+                "execution_tool_declarations": [
+                    {
+                        "action_type": "REFUND",
+                        "tool_name": "after_sale_tool",
+                        "operation": "refund",
+                        "display_name": "模拟退款",
+                        "description": "仅在平台审核通过后模拟退款动作，不直接调用真实支付下游。",
+                        "risk_level": "HIGH",
+                        "simulated": True,
+                        "requires_approved_plan": True,
+                    }
+                ]
+            }
+        )
+    )
+
+    context_pack = runner.calls[0]["context_pack"]
+    execution_tools = next(
+        section
+        for section in context_pack.sections
+        if section.name == "execution_tool_intentions"
+    )
+
+    assert execution_tools.trust_level == "java_tool_catalog"
+    assert "ONLY_PROPOSE_EXECUTION_INTENT" in execution_tools.content
+    assert "REFUND" in execution_tools.content
+    assert "不得直接执行" in execution_tools.content
+    assert "tool_name" not in execution_tools.content
+    assert "after_sale_tool" not in execution_tools.content
+    assert "operation" not in execution_tools.content
+
+
 def test_open_round_is_guarded_as_judge_opening_instead_of_sealed_turn() -> None:
     runner = FakeRoundModelRunner(
         generated=HearingRoundTurnResult(

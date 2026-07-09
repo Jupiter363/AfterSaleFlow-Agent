@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import operator
 from typing import Annotated, Any
@@ -8,6 +9,10 @@ from langgraph.graph import END, START, StateGraph
 from typing_extensions import NotRequired, TypedDict
 
 from app.harness.context_pack import build_context_pack
+from app.harness.execution_tools import (
+    ExecutionToolDeclaration,
+    build_execution_tool_intention_section,
+)
 from app.harness.localization_policy import localize_internal_text
 from app.schemas import HearingRoundTurnRequest, HearingRoundTurnResult
 
@@ -57,20 +62,21 @@ def _reason_with_llm_node(model_runner: Any | None):
                 "executed_nodes": ["fallback_reasoning"],
             }
         try:
-            context_pack = build_context_pack(
-                "hearing_round_turn",
-                {
-                    "current_turn": _current_turn_context(request),
-                    "case_identity": _case_identity_context(request),
-                    "canonical_case_dossier": _canonical_case_dossier(request),
-                    "hearing_round_submissions": [
-                        item.model_dump(mode="json") for item in request.party_submissions
-                    ],
-                    "actor_visible_evidence": _actor_visible_evidence(request),
-                    "jury_a2a_notes": _jury_a2a_notes(request),
-                    "round_control_policy": _round_control_policy(request),
-                },
-            )
+            sources = {
+                "current_turn": _current_turn_context(request),
+                "case_identity": _case_identity_context(request),
+                "canonical_case_dossier": _canonical_case_dossier(request),
+                "hearing_round_submissions": [
+                    item.model_dump(mode="json") for item in request.party_submissions
+                ],
+                "actor_visible_evidence": _actor_visible_evidence(request),
+                "jury_a2a_notes": _jury_a2a_notes(request),
+                "round_control_policy": _round_control_policy(request),
+            }
+            execution_tool_intentions = _execution_tool_intentions(request)
+            if execution_tool_intentions is not None:
+                sources["execution_tool_intentions"] = execution_tool_intentions
+            context_pack = build_context_pack("hearing_round_turn", sources)
             generation = model_runner.invoke_structured(
                 node_name="hearing_round_turn",
                 case_data={
@@ -306,6 +312,30 @@ def _round_control_policy(request: HearingRoundTurnRequest) -> dict[str, Any]:
         "non_final_ai_advice": True,
         "human_reviewer_final_decision": True,
     }
+
+
+def _execution_tool_intentions(request: HearingRoundTurnRequest) -> dict[str, Any] | None:
+    raw_declarations = request.courtroom_context.get("execution_tool_declarations")
+    if not isinstance(raw_declarations, list) or not raw_declarations:
+        return None
+    try:
+        declarations = [
+            ExecutionToolDeclaration.model_validate(item)
+            for item in raw_declarations
+            if isinstance(item, dict)
+        ]
+    except Exception as failure:
+        LOGGER.warning(
+            "execution tool declarations ignored: case_id=%s error_type=%s error=%s",
+            request.case_id,
+            type(failure).__name__,
+            failure,
+        )
+        return None
+    if not declarations:
+        return None
+    section = build_execution_tool_intention_section(declarations)
+    return json.loads(section.content)
 
 
 def _sanitize_judge_message(text: str, *, final_round: bool) -> str:
