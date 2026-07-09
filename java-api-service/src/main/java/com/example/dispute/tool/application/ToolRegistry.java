@@ -17,6 +17,12 @@ public class ToolRegistry {
         this.adapters = List.copyOf(adapters);
     }
 
+    public List<ToolDefinition> definitions() {
+        return adapters.stream()
+                .flatMap(adapter -> adapter.definitions().stream())
+                .toList();
+    }
+
     public ToolExecutionResult execute(ExecutableAction action) {
         return adapters.stream()
                 .filter(adapter -> adapter.supports(action.actionType()))
