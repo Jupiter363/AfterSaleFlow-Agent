@@ -14,7 +14,12 @@ const router = useRouter();
 const outcome = ref(props.initialOutcome);
 const error = ref("");
 const reviewReason = ref("审核员确认 AI 裁决草案。");
-const reviewPlanDraft = ref({ id: "", actions: [] });
+const reviewPlanDraft = ref({
+  id: "",
+  handling_direction: "",
+  execution_plan: "",
+  actions: [],
+});
 const reviewBusy = ref(false);
 const reviewStatus = ref("");
 const executionAssistantState = ref("idle");
@@ -64,7 +69,11 @@ const shouldShowExecutionAssistant = computed(
     Boolean(rawDecision.value?.human_confirmed || rawDecision.value?.humanConfirmed),
 );
 const canModifyReviewPlan = computed(
-  () => (reviewPlanDraft.value.actions || []).length > 0,
+  () =>
+    Boolean(
+      String(reviewPlanDraft.value.handling_direction || "").trim() ||
+        String(reviewPlanDraft.value.execution_plan || "").trim(),
+    ),
 );
 const decision = computed(() => {
   const source = rawDecision.value || {};
@@ -417,26 +426,34 @@ function defaultApprovedPlan() {
   if (plan) return plan;
   return {
     id: draft.plan_id || draft.planId || "",
+    handling_direction:
+      draft.recommended_decision || draft.recommendedDecision || "",
+    execution_plan: "",
     actions: [],
-  };
-}
-
-function normalizeReviewAction(action = {}) {
-  return {
-    ...action,
-    action_type: action.action_type || action.actionType || action.type || "REFUND",
-    amount: action.amount ?? "",
   };
 }
 
 function normalizeApprovedPlan(plan) {
   const source = plan && typeof plan === "object" ? plan : {};
+  const firstAction = Array.isArray(source.actions) ? source.actions[0] : null;
   return {
-    ...source,
     id: source.id || source.plan_id || source.planId || "",
-    actions: Array.isArray(source.actions)
-      ? source.actions.map(normalizeReviewAction)
-      : [],
+    handling_direction:
+      source.handling_direction ||
+      source.handlingDirection ||
+      source.main_direction ||
+      source.mainDirection ||
+      firstAction?.action_type ||
+      firstAction?.actionType ||
+      "",
+    execution_plan:
+      source.execution_plan ||
+      source.executionPlan ||
+      source.plan_summary ||
+      source.planSummary ||
+      source.description ||
+      "",
+    actions: [],
   };
 }
 
@@ -444,8 +461,8 @@ function syncReviewPlanDraft(force = false) {
   if (
     !force &&
     (reviewPlanDraft.value.id ||
-      (Array.isArray(reviewPlanDraft.value.actions) &&
-        reviewPlanDraft.value.actions.length > 0))
+      reviewPlanDraft.value.handling_direction ||
+      reviewPlanDraft.value.execution_plan)
   ) {
     return;
   }
@@ -500,33 +517,11 @@ async function modifyOutcomeDraftFromStructuredPlan() {
 
 function buildApprovedPlan() {
   return {
-    ...reviewPlanDraft.value,
-    actions: (reviewPlanDraft.value.actions || []).map((action) => {
-      const amount = String(action.amount ?? "").trim();
-      return {
-        ...action,
-        action_type: action.action_type || "REFUND",
-        ...(amount === ""
-          ? {}
-          : {
-              amount: Number.isFinite(Number(amount)) ? Number(amount) : amount,
-            }),
-      };
-    }),
+    id: reviewPlanDraft.value.id,
+    handling_direction: reviewPlanDraft.value.handling_direction,
+    execution_plan: reviewPlanDraft.value.execution_plan,
+    actions: [],
   };
-}
-
-function addReviewPlanAction() {
-  reviewPlanDraft.value.actions = [
-    ...(reviewPlanDraft.value.actions || []),
-    { action_type: "REFUND", amount: "" },
-  ];
-}
-
-function removeReviewPlanAction(index) {
-  reviewPlanDraft.value.actions = (reviewPlanDraft.value.actions || []).filter(
-    (_, actionIndex) => actionIndex !== index,
-  );
 }
 
 function clearExecutionAssistantTimer() {
@@ -775,46 +770,38 @@ onBeforeUnmount(clearExecutionAssistantTimer);
             placeholder="PLAN_1"
           />
         </label>
-        <div v-if="reviewPlanDraft.actions.length" class="review-plan-editor__actions">
-          <article
-            v-for="(action, index) in reviewPlanDraft.actions"
-            :key="`review-plan-action-${index}`"
+        <label>
+          <span>主处理方向</span>
+          <select
+            v-model="reviewPlanDraft.handling_direction"
+            data-review-handling-direction
           >
-            <label>
-              <span>动作类型</span>
-              <select v-model="action.action_type" data-review-action-type>
-                <option value="REFUND">退款</option>
-                <option value="RESHIP">补发</option>
-                <option value="COMPENSATE">赔付</option>
-                <option value="NOTIFY_USER">通知用户</option>
-                <option value="NOTIFY_MERCHANT">通知商家</option>
-                <option value="CLOSE_CASE">关闭案件</option>
-              </select>
-            </label>
-            <label>
-              <span>金额</span>
-              <input
-                v-model="action.amount"
-                data-review-action-amount
-                inputmode="decimal"
-                placeholder="可留空"
-              />
-            </label>
-            <button
-              type="button"
-              data-review-remove-action
-              @click="removeReviewPlanAction(index)"
-            >
-              删除
-            </button>
-          </article>
-        </div>
-        <p v-else class="review-plan-editor__empty">
-          暂无执行动作。可直接确认草案，或新增动作后“修改并确认”。
+            <option value="">请选择处理方向</option>
+            <option value="REFUND">退款</option>
+            <option value="RETURN_REFUND">退货退款</option>
+            <option value="RESHIP">补发</option>
+            <option value="REPLACE_OR_REPAIR">换货 / 维修</option>
+            <option value="COMPENSATION">赔付</option>
+            <option value="CANCEL_ORDER">取消订单</option>
+            <option value="REJECT_AFTER_SALE">驳回售后</option>
+            <option value="VERIFY_OR_EXPLAIN_ONLY">仅核验 / 解释</option>
+            <option value="MANUAL_REVIEW">转人工重点复核</option>
+            <option value="OTHER">其他</option>
+          </select>
+        </label>
+        <label>
+          <span>执行方案说明</span>
+          <textarea
+            v-model="reviewPlanDraft.execution_plan"
+            data-review-execution-plan
+            rows="4"
+            maxlength="3000"
+            placeholder="说明本次裁决如何落地，例如金额、商品、时效、前置条件、风险和注意事项。"
+          />
+        </label>
+        <p class="review-plan-editor__empty">
+          当前只确认主处理方向和方案说明；具体工具拆分后续由执行专员助手处理。
         </p>
-        <button type="button" data-review-add-action @click="addReviewPlanAction">
-          新增执行动作
-        </button>
       </div>
       <div class="outcome-review-panel__actions">
         <button
@@ -1168,7 +1155,8 @@ onBeforeUnmount(clearExecutionAssistantTimer);
   border-radius: 14px;
 }
 .review-plan-editor input,
-.review-plan-editor select {
+.review-plan-editor select,
+.review-plan-editor textarea {
   width: 100%;
   box-sizing: border-box;
   padding: 10px 11px;
@@ -1181,9 +1169,15 @@ onBeforeUnmount(clearExecutionAssistantTimer);
   outline: none;
 }
 .review-plan-editor input:focus,
-.review-plan-editor select:focus {
+.review-plan-editor select:focus,
+.review-plan-editor textarea:focus {
   border-color: #8ab7e6;
   box-shadow: 0 0 0 3px #8ab7e633;
+}
+.review-plan-editor textarea {
+  min-height: 92px;
+  resize: vertical;
+  line-height: 1.6;
 }
 .review-plan-editor button {
   width: max-content;

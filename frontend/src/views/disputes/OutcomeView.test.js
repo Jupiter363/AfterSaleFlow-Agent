@@ -428,7 +428,7 @@ describe("OutcomeView", () => {
     expect(wrapper.get("[data-review-confirm]").text()).toContain("确认草案");
   });
 
-  it("lets platform reviewers modify and confirm the AI draft from the outcome room", async () => {
+  it("lets platform reviewers modify the high-level handling direction and execution plan", async () => {
     actor.id = "reviewer-local";
     actor.role = "PLATFORM_REVIEWER";
     const modify = vi
@@ -436,14 +436,16 @@ describe("OutcomeView", () => {
       .mockResolvedValue({ decision: "MODIFY_AND_APPROVE", execution_allowed: true });
     vi.spyOn(disputeApi, "outcome").mockResolvedValue(draftOutcome);
     const wrapper = await mountOutcome(draftOutcome);
-    const plan = {
-      id: "PLAN_1",
-      actions: [{ action_type: "REFUND", amount: 188 }],
-    };
 
     expect(wrapper.find("[data-review-approved-plan]").exists()).toBe(false);
-    expect(wrapper.get("[data-review-plan-editor]").text()).toContain("退款");
-    await wrapper.get("[data-review-action-amount]").setValue("188");
+    expect(wrapper.get("[data-review-plan-editor]").text()).toContain("主处理方向");
+    expect(wrapper.get("[data-review-plan-editor]").text()).toContain("执行方案说明");
+    expect(wrapper.text()).not.toContain("新增执行动作");
+    expect(wrapper.text()).not.toContain("动作类型");
+    await wrapper.get("[data-review-handling-direction]").setValue("RESHIP");
+    await wrapper
+      .get("[data-review-execution-plan]")
+      .setValue("审核员建议补发一件同款商品，并向双方同步方案进度。");
     await wrapper.get("[data-review-modify]").trigger("click");
     await flushPromises();
 
@@ -451,17 +453,18 @@ describe("OutcomeView", () => {
       expect.objectContaining({ role: "PLATFORM_REVIEWER" }),
       "CASE_OUTCOME_1",
       expect.stringContaining("审核员"),
-      plan,
+      {
+        id: "PLAN_1",
+        handling_direction: "RESHIP",
+        execution_plan: "审核员建议补发一件同款商品，并向双方同步方案进度。",
+        actions: [],
+      },
     );
   });
 
-  it("lets platform reviewers add a structured action when the draft has no actions", async () => {
+  it("disables modifying until a high-level direction or execution plan is provided", async () => {
     actor.id = "reviewer-local";
     actor.role = "PLATFORM_REVIEWER";
-    const modify = vi
-      .spyOn(disputeApi, "modifyOutcomeDraft")
-      .mockResolvedValue({ decision: "MODIFY_AND_APPROVE", execution_allowed: true });
-    vi.spyOn(disputeApi, "outcome").mockResolvedValue(draftOutcome);
     const wrapper = await mountOutcome({
       ...draftOutcome,
       adjudication_draft: {
@@ -471,37 +474,9 @@ describe("OutcomeView", () => {
     });
 
     expect(wrapper.find("[data-review-approved-plan-raw]").exists()).toBe(false);
-    expect(wrapper.get("[data-review-plan-editor]").text()).toContain("暂无执行动作");
-    await wrapper.get("[data-review-add-action]").trigger("click");
-    await wrapper.get("[data-review-action-type]").setValue("COMPENSATE");
-    await wrapper.get("[data-review-action-amount]").setValue("30");
-    await wrapper.get("[data-review-modify]").trigger("click");
-    await flushPromises();
-
-    expect(modify).toHaveBeenCalledWith(
-      expect.objectContaining({ role: "PLATFORM_REVIEWER" }),
-      "CASE_OUTCOME_1",
-      expect.stringContaining("审核员"),
-      {
-        id: "PLAN_EMPTY",
-        actions: [{ action_type: "COMPENSATE", amount: 30 }],
-      },
-    );
-  });
-
-  it("disables modifying an empty structured plan until an action is added", async () => {
-    actor.id = "reviewer-local";
-    actor.role = "PLATFORM_REVIEWER";
-    const wrapper = await mountOutcome({
-      ...draftOutcome,
-      adjudication_draft: {
-        ...draftOutcome.adjudication_draft,
-        approved_plan: { id: "PLAN_EMPTY", actions: [] },
-      },
-    });
-
+    expect(wrapper.text()).not.toContain("暂无执行动作");
     expect(wrapper.get("[data-review-modify]").attributes("disabled")).toBeDefined();
-    await wrapper.get("[data-review-add-action]").trigger("click");
+    await wrapper.get("[data-review-handling-direction]").setValue("COMPENSATION");
 
     expect(wrapper.get("[data-review-modify]").attributes("disabled")).toBeUndefined();
   });
