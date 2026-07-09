@@ -413,9 +413,9 @@ describe("OutcomeView", () => {
       actions: [{ action_type: "REFUND", amount: 188 }],
     };
 
-    await wrapper
-      .get("[data-review-approved-plan]")
-      .setValue(JSON.stringify(plan, null, 2));
+    expect(wrapper.find("[data-review-approved-plan]").exists()).toBe(false);
+    expect(wrapper.get("[data-review-plan-editor]").text()).toContain("退款");
+    await wrapper.get("[data-review-action-amount]").setValue("188");
     await wrapper.get("[data-review-modify]").trigger("click");
     await flushPromises();
 

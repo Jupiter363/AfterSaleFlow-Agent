@@ -14,6 +14,7 @@ const router = useRouter();
 const outcome = ref(props.initialOutcome);
 const error = ref("");
 const reviewReason = ref("审核员确认 AI 裁决草案。");
+const reviewPlanDraft = ref({ id: "", actions: [] });
 const reviewApprovedPlanText = ref("");
 const reviewBusy = ref(false);
 const reviewStatus = ref("");
@@ -402,15 +403,41 @@ function defaultApprovedPlan() {
   };
 }
 
-function syncReviewPlanText() {
-  if (reviewApprovedPlanText.value.trim()) return;
-  reviewApprovedPlanText.value = JSON.stringify(defaultApprovedPlan(), null, 2);
+function normalizeReviewAction(action = {}) {
+  return {
+    ...action,
+    action_type: action.action_type || action.actionType || action.type || "REFUND",
+    amount: action.amount ?? "",
+  };
+}
+
+function normalizeApprovedPlan(plan) {
+  const source = plan && typeof plan === "object" ? plan : {};
+  return {
+    ...source,
+    id: source.id || source.plan_id || source.planId || "",
+    actions: Array.isArray(source.actions)
+      ? source.actions.map(normalizeReviewAction)
+      : [],
+  };
+}
+
+function syncReviewPlanDraft(force = false) {
+  if (
+    !force &&
+    (reviewPlanDraft.value.id ||
+      (Array.isArray(reviewPlanDraft.value.actions) &&
+        reviewPlanDraft.value.actions.length > 0))
+  ) {
+    return;
+  }
+  reviewPlanDraft.value = normalizeApprovedPlan(defaultApprovedPlan());
 }
 
 async function refreshOutcomeAfterReview(message) {
   outcome.value = await disputeApi.outcome(actor, caseId.value);
   reviewStatus.value = message;
-  syncReviewPlanText();
+  syncReviewPlanDraft(true);
 }
 
 async function confirmOutcomeDraft() {
@@ -459,10 +486,62 @@ async function modifyOutcomeDraft() {
   }
 }
 
+async function modifyOutcomeDraftFromStructuredPlan() {
+  if (reviewBusy.value) return;
+  error.value = "";
+  reviewStatus.value = "";
+  const approvedPlan = buildApprovedPlan();
+  reviewBusy.value = true;
+  try {
+    await disputeApi.modifyOutcomeDraft(
+      actor,
+      caseId.value,
+      reviewReason.value || "审核员修改并确认 AI 裁决草案。",
+      approvedPlan,
+    );
+    await refreshOutcomeAfterReview("已按修改方案确认草案，最终处理状态已刷新。");
+  } catch (failure) {
+    error.value = failure.message;
+  } finally {
+    reviewBusy.value = false;
+  }
+}
+
+function buildApprovedPlan() {
+  return {
+    ...reviewPlanDraft.value,
+    actions: (reviewPlanDraft.value.actions || []).map((action) => {
+      const amount = String(action.amount ?? "").trim();
+      return {
+        ...action,
+        action_type: action.action_type || "REFUND",
+        ...(amount === ""
+          ? {}
+          : {
+              amount: Number.isFinite(Number(amount)) ? Number(amount) : amount,
+            }),
+      };
+    }),
+  };
+}
+
+function addReviewPlanAction() {
+  reviewPlanDraft.value.actions = [
+    ...(reviewPlanDraft.value.actions || []),
+    { action_type: "REFUND", amount: "" },
+  ];
+}
+
+function removeReviewPlanAction(index) {
+  reviewPlanDraft.value.actions = (reviewPlanDraft.value.actions || []).filter(
+    (_, actionIndex) => actionIndex !== index,
+  );
+}
+
 watch(
   adjudicationDraft,
   () => {
-    syncReviewPlanText();
+    syncReviewPlanDraft();
   },
   { immediate: true },
 );
@@ -660,12 +739,62 @@ onMounted(load);
         <span>修改后的执行方案（JSON）</span>
         <textarea
           v-model="reviewApprovedPlanText"
-          data-review-approved-plan
+          data-review-approved-plan-raw
           rows="7"
           spellcheck="false"
           placeholder='例如：{"id":"PLAN_1","actions":[{"action_type":"REFUND","amount":199}]}'
         />
       </label>
+      <div class="review-plan-editor" data-review-plan-editor>
+        <label>
+          <span>方案编号</span>
+          <input
+            v-model="reviewPlanDraft.id"
+            data-review-plan-id
+            placeholder="PLAN_1"
+          />
+        </label>
+        <div v-if="reviewPlanDraft.actions.length" class="review-plan-editor__actions">
+          <article
+            v-for="(action, index) in reviewPlanDraft.actions"
+            :key="`review-plan-action-${index}`"
+          >
+            <label>
+              <span>动作类型</span>
+              <select v-model="action.action_type" data-review-action-type>
+                <option value="REFUND">退款</option>
+                <option value="RESHIP">补发</option>
+                <option value="COMPENSATE">赔付</option>
+                <option value="NOTIFY_USER">通知用户</option>
+                <option value="NOTIFY_MERCHANT">通知商家</option>
+                <option value="CLOSE_CASE">关闭案件</option>
+              </select>
+            </label>
+            <label>
+              <span>金额</span>
+              <input
+                v-model="action.amount"
+                data-review-action-amount
+                inputmode="decimal"
+                placeholder="可留空"
+              />
+            </label>
+            <button
+              type="button"
+              data-review-remove-action
+              @click="removeReviewPlanAction(index)"
+            >
+              删除
+            </button>
+          </article>
+        </div>
+        <p v-else class="review-plan-editor__empty">
+          暂无执行动作。可直接确认草案，或新增动作后“修改并确认”。
+        </p>
+        <button type="button" data-review-add-action @click="addReviewPlanAction">
+          新增执行动作
+        </button>
+      </div>
       <div class="outcome-review-panel__actions">
         <button
           type="button"
@@ -679,7 +808,7 @@ onMounted(load);
           type="button"
           data-review-modify
           :disabled="reviewBusy"
-          @click="modifyOutcomeDraft"
+          @click="modifyOutcomeDraftFromStructuredPlan"
         >
           修改并确认
         </button>
@@ -970,6 +1099,64 @@ onMounted(load);
   color: #4f6078;
   font-size: 12px;
   font-weight: 900;
+}
+.outcome-review-panel label:has([data-review-approved-plan-raw]) {
+  display: none;
+}
+.review-plan-editor {
+  display: grid;
+  gap: 10px;
+  padding: 13px;
+  background: #ffffff9e;
+  border: 1px solid #dce7f4;
+  border-radius: 18px;
+}
+.review-plan-editor__actions {
+  display: grid;
+  gap: 9px;
+}
+.review-plan-editor__actions article {
+  display: grid;
+  grid-template-columns: minmax(150px, .8fr) minmax(100px, .45fr) auto;
+  gap: 10px;
+  align-items: end;
+  padding: 10px;
+  background: #f7fbff;
+  border: 1px solid #e2ebf6;
+  border-radius: 14px;
+}
+.review-plan-editor input,
+.review-plan-editor select {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 11px;
+  color: #34445d;
+  background: #fff;
+  border: 1px solid #dce7f4;
+  border-radius: 12px;
+  font: inherit;
+  font-weight: 600;
+  outline: none;
+}
+.review-plan-editor input:focus,
+.review-plan-editor select:focus {
+  border-color: #8ab7e6;
+  box-shadow: 0 0 0 3px #8ab7e633;
+}
+.review-plan-editor button {
+  width: max-content;
+  padding: 9px 11px;
+  color: #35506d;
+  background: #fff;
+  border: 1px solid #d7e4f2;
+  border-radius: 12px;
+  cursor: pointer;
+  font-weight: 900;
+}
+.review-plan-editor__empty {
+  margin: 0;
+  color: #75869d;
+  font-size: 12px;
 }
 .outcome-review-panel textarea {
   width: 100%;
