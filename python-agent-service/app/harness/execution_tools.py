@@ -31,6 +31,16 @@ class ExecutionToolDeclaration(BaseModel):
     requires_approved_plan: bool
 
 
+class ExecutionToolEventObservation(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    action_type: str = Field(min_length=1, max_length=128)
+    execution_status: str = Field(min_length=1, max_length=64)
+    reference_id: str | None = Field(default=None, max_length=256)
+    simulated: bool = False
+    observed_at: str | None = Field(default=None, max_length=128)
+
+
 class _JavaCatalogResponse(BaseModel):
     model_config = ConfigDict(extra="ignore", frozen=True)
 
@@ -101,5 +111,38 @@ def build_execution_tool_intention_section(
         priority=60,
         required=False,
         trust_level="java_tool_catalog",
+        prompt_included=True,
+    )
+
+
+def build_execution_tool_event_observation_section(
+    events: Iterable[ExecutionToolEventObservation],
+) -> PromptSection:
+    """Render Java execution events as read-only Agent observations."""
+
+    event_items = [
+        {
+            "action_type": event.action_type,
+            "execution_status": event.execution_status,
+            "reference_id": event.reference_id,
+            "simulated": event.simulated,
+            "observed_at": event.observed_at,
+        }
+        for event in events
+    ]
+    content = {
+        "allowed_use": "OBSERVE_EXECUTION_EVENTS_ONLY",
+        "governance_note": (
+            "这些事件只能作为 Java 执行业务工具后的只读观察记录，"
+            "不得直接执行、不得重试、不得绕过 Java 审核、幂等和审计链路。"
+        ),
+        "events": event_items,
+    }
+    return PromptSection(
+        name="execution_tool_event_observations",
+        content=json.dumps(content, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        priority=55,
+        required=False,
+        trust_level="java_execution_events",
         prompt_included=True,
     )

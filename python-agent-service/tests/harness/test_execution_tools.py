@@ -5,7 +5,9 @@ import json
 import httpx
 
 from app.harness.execution_tools import (
+    ExecutionToolEventObservation,
     JavaExecutionToolCatalogClient,
+    build_execution_tool_event_observation_section,
     build_execution_tool_intention_section,
 )
 
@@ -84,3 +86,33 @@ def test_execution_tool_intention_section_is_prompt_safe_and_non_executable() ->
     assert content["tools"][0]["display_name"] == "模拟退款"
     assert "tool_name" not in content["tools"][0]
     assert "operation" not in content["tools"][0]
+
+
+def test_execution_tool_event_observation_section_is_read_only() -> None:
+    section = build_execution_tool_event_observation_section(
+        [
+            ExecutionToolEventObservation(
+                action_type="REFUND",
+                execution_status="SUCCEEDED",
+                reference_id="SIM_REFUND_1",
+                simulated=True,
+                observed_at="2026-07-10T02:00:00+08:00",
+            )
+        ]
+    )
+    content = json.loads(section.content)
+
+    assert section.name == "execution_tool_event_observations"
+    assert section.trust_level == "java_execution_events"
+    assert content["allowed_use"] == "OBSERVE_EXECUTION_EVENTS_ONLY"
+    assert "不得直接执行" in content["governance_note"]
+    assert "不得重试" in content["governance_note"]
+    assert content["events"] == [
+        {
+            "action_type": "REFUND",
+            "execution_status": "SUCCEEDED",
+            "reference_id": "SIM_REFUND_1",
+            "simulated": True,
+            "observed_at": "2026-07-10T02:00:00+08:00",
+        }
+    ]
