@@ -1,23 +1,14 @@
 package com.example.dispute.review;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.when;
 
 import com.example.dispute.common.audit.AuditRecorder;
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.domain.model.ApprovalDecisionType;
 import com.example.dispute.domain.model.CaseStatus;
-import com.example.dispute.domain.model.ExecutionStatus;
 import com.example.dispute.domain.model.RiskLevel;
 import com.example.dispute.domain.model.RouteType;
-import com.example.dispute.evaluation.application.CaseClosureService;
-import com.example.dispute.evaluation.application.EvaluationAgentClient;
-import com.example.dispute.evaluation.application.EvaluationAgentResult;
-import com.example.dispute.executor.application.ActionExecutionLock;
-import com.example.dispute.executor.application.ToolExecutorService;
 import com.example.dispute.infrastructure.persistence.entity.ApprovalRecordEntity;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.entity.RemedyPlanEntity;
@@ -30,12 +21,9 @@ import com.example.dispute.infrastructure.persistence.repository.FulfillmentCase
 import com.example.dispute.infrastructure.persistence.repository.RemedyPlanRepository;
 import com.example.dispute.infrastructure.persistence.repository.ReviewPacketRepository;
 import com.example.dispute.infrastructure.persistence.repository.ReviewTaskRepository;
-import com.example.dispute.notification.application.CaseLifecycleNotificationService;
 import com.example.dispute.review.application.PostReviewOrchestrationService;
 import com.example.dispute.review.domain.ActionSnapshotHasher;
 import com.example.dispute.review.domain.ReviewPacketVersions;
-import com.example.dispute.tool.application.SimulatedExecutionTool;
-import com.example.dispute.tool.application.ToolRegistry;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -62,10 +50,6 @@ import org.testcontainers.utility.DockerImageName;
 @DataJpaTest(properties = "spring.jpa.hibernate.ddl-auto=validate")
 @Import({
     PostReviewOrchestrationService.class,
-    ToolExecutorService.class,
-    CaseClosureService.class,
-    ToolRegistry.class,
-    SimulatedExecutionTool.class,
     PostReviewOrchestrationServiceIntegrationTest.JacksonConfig.class
 })
 @Testcontainers
@@ -118,10 +102,7 @@ class PostReviewOrchestrationServiceIntegrationTest {
     @Autowired ActionRecordRepository actions;
     @Autowired EvaluationTraceRepository evaluations;
     @Autowired ObjectMapper objectMapper;
-    @MockitoBean ActionExecutionLock executionLock;
-    @MockitoBean EvaluationAgentClient evaluationAgent;
     @MockitoBean AuditRecorder auditRecorder;
-    @MockitoBean CaseLifecycleNotificationService lifecycleNotifications;
 
     @BeforeEach
     void resetDataAndMocks() {
@@ -132,60 +113,29 @@ class PostReviewOrchestrationServiceIntegrationTest {
         packets.deleteAllInBatch();
         plans.deleteAllInBatch();
         cases.deleteAllInBatch();
-        when(executionLock.acquire(anyString())).thenReturn("test-lock-owner");
-        when(evaluationAgent.analyze(any(), any(), any()))
-                .thenAnswer(
-                        invocation -> {
-                            JsonNode snapshot = invocation.getArgument(0);
-                            var report =
-                                    (com.fasterxml.jackson.databind.node.ObjectNode)
-                                            objectMapper.readTree(
-                                                    """
-                                                    {
-                                                      "evaluation_status":"COMPLETED",
-                                                      "metric_scores":{
-                                                        "draft_approval_rate":1.0,
-                                                        "reviewer_modification_rate":0.0,
-                                                        "overall_quality_score":0.9
-                                                      },
-                                                      "findings":[],
-                                                      "automatic_changes_applied":false,
-                                                      "online_case_mutated":false
-                                                    }
-                                                    """);
-                            report.put("case_id", snapshot.path("case_id").asText());
-                            return new EvaluationAgentResult(
-                                    report, "evaluation-model", "evaluation-v1", 8, 21);
-                        });
     }
 
     @Test
-    void approvedReviewExecutesApprovedActionsAndClosesCase() {
+    void approvedReviewHandsOffToExecutionAssistantWithoutExecutingActions() {
         seed("approved", ApprovalDecisionType.APPROVE);
 
         var result =
                 service.orchestrate(
                         "APPROVAL_approved", REVIEWER, "post-review-approved");
 
-        assertThat(result.status()).isEqualTo("CLOSED");
-        assertThat(result.executionAttempted()).isTrue();
-        assertThat(result.closureAttempted()).isTrue();
+        assertThat(result.status()).isEqualTo("EXECUTION_ASSISTANT_HANDOFF");
+        assertThat(result.executionAttempted()).isFalse();
+        assertThat(result.closureAttempted()).isFalse();
+        assertThat(result.message())
+                .isEqualTo("final decision confirmed and handed off to execution assistant");
         assertThat(cases.findById("CASE_approved"))
                 .hasValueSatisfying(
                         disputeCase ->
                                 assertThat(disputeCase.getCaseStatus())
-                                        .isEqualTo(CaseStatus.CLOSED));
+                                        .isEqualTo(CaseStatus.APPROVED_FOR_EXECUTION));
         assertThat(actions.findAllByCaseIdOrderByCreatedAtAsc("CASE_approved"))
-                .hasSize(2)
-                .allSatisfy(
-                        action ->
-                                assertThat(action.getExecutionStatus())
-                                        .isEqualTo(ExecutionStatus.SUCCEEDED));
-        assertThat(evaluations.findAll()).singleElement()
-                .satisfies(
-                        trace ->
-                                assertThat(trace.getEvaluationStatus())
-                                        .isEqualTo("COMPLETED"));
+                .isEmpty();
+        assertThat(evaluations.findAll()).isEmpty();
     }
 
     @Test
