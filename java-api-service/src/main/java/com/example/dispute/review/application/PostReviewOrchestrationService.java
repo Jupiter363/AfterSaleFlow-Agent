@@ -8,6 +8,7 @@ import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.domain.model.ApprovalDecisionType;
 import com.example.dispute.infrastructure.persistence.entity.ApprovalRecordEntity;
 import com.example.dispute.infrastructure.persistence.repository.ApprovalRecordRepository;
+import com.example.dispute.room.application.CaseEventService;
 import java.util.Map;
 import org.springframework.stereotype.Service;
 
@@ -21,12 +22,15 @@ public class PostReviewOrchestrationService {
 
     private final ApprovalRecordRepository approvalRepository;
     private final AuditRecorder auditRecorder;
+    private final CaseEventService caseEventService;
 
     public PostReviewOrchestrationService(
             ApprovalRecordRepository approvalRepository,
-            AuditRecorder auditRecorder) {
+            AuditRecorder auditRecorder,
+            CaseEventService caseEventService) {
         this.approvalRepository = approvalRepository;
         this.auditRecorder = auditRecorder;
+        this.caseEventService = caseEventService;
     }
 
     public PostReviewOrchestrationResult orchestrate(
@@ -64,6 +68,23 @@ public class PostReviewOrchestrationService {
                 reviewer,
                 EXECUTION_ASSISTANT_HANDOFF,
                 null);
+        caseEventService.recordLifecycleEvent(
+                approval.getCaseId(),
+                null,
+                EXECUTION_ASSISTANT_HANDOFF,
+                Map.of(
+                        "approval_record_id",
+                        approvalRecordId,
+                        "decision",
+                        decision.name(),
+                        "status",
+                        EXECUTION_ASSISTANT_HANDOFF,
+                        "reviewer_id",
+                        reviewer.actorId(),
+                        "message",
+                        "final decision confirmed and handed off to execution assistant"),
+                "post-review-execution-assistant:" + approvalRecordId,
+                reviewer.actorId());
         return new PostReviewOrchestrationResult(
                 approvalRecordId,
                 approval.getCaseId(),

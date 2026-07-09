@@ -1,6 +1,10 @@
 package com.example.dispute.review;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.verify;
 
 import com.example.dispute.common.audit.AuditRecorder;
 import com.example.dispute.config.ActorRole;
@@ -24,6 +28,7 @@ import com.example.dispute.infrastructure.persistence.repository.ReviewTaskRepos
 import com.example.dispute.review.application.PostReviewOrchestrationService;
 import com.example.dispute.review.domain.ActionSnapshotHasher;
 import com.example.dispute.review.domain.ReviewPacketVersions;
+import com.example.dispute.room.application.CaseEventService;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -103,6 +108,7 @@ class PostReviewOrchestrationServiceIntegrationTest {
     @Autowired EvaluationTraceRepository evaluations;
     @Autowired ObjectMapper objectMapper;
     @MockitoBean AuditRecorder auditRecorder;
+    @MockitoBean CaseEventService caseEventService;
 
     @BeforeEach
     void resetDataAndMocks() {
@@ -136,6 +142,22 @@ class PostReviewOrchestrationServiceIntegrationTest {
         assertThat(actions.findAllByCaseIdOrderByCreatedAtAsc("CASE_approved"))
                 .isEmpty();
         assertThat(evaluations.findAll()).isEmpty();
+        verify(caseEventService)
+                .recordLifecycleEvent(
+                        eq("CASE_approved"),
+                        isNull(),
+                        eq("EXECUTION_ASSISTANT_HANDOFF"),
+                        argThat(
+                                payload ->
+                                        "APPROVAL_approved"
+                                                        .equals(payload.get("approval_record_id"))
+                                                && "APPROVE".equals(payload.get("decision"))
+                                                && "EXECUTION_ASSISTANT_HANDOFF"
+                                                        .equals(payload.get("status"))
+                                                && REVIEWER.actorId()
+                                                        .equals(payload.get("reviewer_id"))),
+                        eq("post-review-execution-assistant:APPROVAL_approved"),
+                        eq(REVIEWER.actorId()));
     }
 
     @Test

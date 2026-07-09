@@ -127,6 +127,9 @@ const courtMessages = [
 ];
 
 async function mountView(overrides = {}) {
+  if (!vi.isMockFunction(roomApi.events)) {
+    vi.spyOn(roomApi, "events").mockResolvedValue(overrides.initialEvents || []);
+  }
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [
@@ -147,6 +150,7 @@ async function mountView(overrides = {}) {
       serverNow: "2026-07-03T12:00:00+08:00",
       roundLimit: 3,
       confirmSettlementAction,
+      initialEvents: [],
       initialMessages: courtMessages,
       ...overrides,
     },
@@ -1080,6 +1084,48 @@ describe("HearingCourtView", () => {
     expect(ledger).toContain("评审团建议法官在草案中说明证据缺口");
     expect(ledger).not.toContain("active_version");
     expect(ledger).not.toContain("JURY_REVIEW_REPORT");
+  });
+
+  it("adds final draft, reviewer handoff and execution assistant events to the hearing ledger", async () => {
+    const { wrapper } = await mountView({
+      initialEvents: [
+        {
+          sequence_no: 21,
+          event_type: "FINAL_DRAFT_REQUIRED",
+          payload_json: JSON.stringify({ round_no: 3 }),
+        },
+        {
+          sequence_no: 22,
+          event_type: "HEARING_PHASE_CHANGED",
+          payload_json: JSON.stringify({
+            current_round_no: 3,
+            phase_label: "裁决草案已生成",
+            next_step_hint: "可以进入结果页查看裁决草案，并等待后续确认。",
+          }),
+        },
+        {
+          sequence_no: 23,
+          event_type: "EXECUTION_ASSISTANT_HANDOFF",
+          payload_json: JSON.stringify({
+            status: "EXECUTION_ASSISTANT_HANDOFF",
+            approval_record_id: "APPROVAL_1",
+            reviewer_id: "reviewer-local",
+          }),
+        },
+      ],
+    });
+
+    await wrapper.get("[data-open-court-ledger]").trigger("click");
+    const ledger = wrapper.get("[data-court-ledger-drawer]").text();
+
+    expect(ledger).toContain("法官进入裁决草案生成");
+    expect(ledger).toContain("草案生成中");
+    expect(ledger).toContain("裁决草案状态更新");
+    expect(ledger).toContain("裁决草案已生成");
+    expect(ledger).toContain("执行专员助手");
+    expect(ledger).toContain("裁决已确认，方案已移交给执行专员助手处理");
+    expect(ledger).not.toContain("approval_record_id");
+    expect(ledger).not.toContain("EXECUTION_ASSISTANT_HANDOFF");
   });
 
   it("shows a friendly empty ledger when no hearing rounds have started", async () => {

@@ -30,6 +30,7 @@ const props = defineProps({
   roundLimit: { type: Number, default: 3 },
   confirmSettlementAction: { type: Function, default: null },
   eventStreamer: { type: Function, default: null },
+  initialEvents: { type: Array, default: null },
   initialMessages: { type: Array, default: null },
   messageAction: { type: Function, default: null },
   proposeSettlementAction: { type: Function, default: null },
@@ -48,6 +49,7 @@ const reviewGateOpen = ref(false);
 const error = ref("");
 const confirmingVersion = ref(null);
 const messages = ref([...(props.initialMessages || [])]);
+const caseEvents = ref([...(props.initialEvents || [])]);
 const settlementOpen = ref(false);
 const ledgerOpen = ref(false);
 const proposalText = ref("");
@@ -491,7 +493,10 @@ const courtLedgerItems = computed(() => {
     .filter((message) => !isSystemAuditOnlyMessage(message))
     .map((message) => ledgerItemForMessage(message))
     .filter(Boolean);
-  return [...roundItems, ...messageItems].sort((left, right) => {
+  const eventItems = caseEvents.value
+    .map((event) => ledgerItemForCaseEvent(event))
+    .filter(Boolean);
+  return [...roundItems, ...messageItems, ...eventItems].sort((left, right) => {
     const leftRound = left.roundNo || 0;
     const rightRound = right.roundNo || 0;
     if (leftRound !== rightRound) return leftRound - rightRound;
@@ -869,6 +874,133 @@ function ledgerItemForMessage(message) {
   return null;
 }
 
+function caseEventType(event) {
+  return event?.event_type || event?.eventType || event?.event || "";
+}
+
+function caseEventSequence(event) {
+  return event?.sequence_no || event?.sequenceNo || event?.id || 0;
+}
+
+function caseEventPayload(event) {
+  const raw =
+    event?.payload_json ||
+    event?.payloadJson ||
+    event?.event_json ||
+    event?.eventJson ||
+    event?.payload ||
+    {};
+  if (typeof raw === "string") {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return {};
+    }
+  }
+  return raw && typeof raw === "object" ? raw : {};
+}
+
+function participantRoleLabel(roleValue) {
+  return {
+    USER: "用户",
+    MERCHANT: "商家",
+    PLATFORM_REVIEWER: "审核员",
+    SYSTEM: "系统",
+  }[String(roleValue || "").toUpperCase()] || "当事人";
+}
+
+function stopReasonLabel(reasonValue) {
+  const value = String(reasonValue || "").toUpperCase();
+  if (value === "BOTH_PARTIES_SUBMITTED") return "双方已提交";
+  if (value === "ROUND_DEADLINE_EXPIRED") return "超时自动封存";
+  if (value === "MAX_ROUNDS") return "三轮已封存";
+  if (value === "CONTINUE") return "继续下一轮";
+  return "已封存";
+}
+
+function ledgerItemForCaseEvent(event) {
+  const type = caseEventType(event);
+  const payload = caseEventPayload(event);
+  const sequenceNo = caseEventSequence(event);
+  const roundNo = payload.round_no || payload.current_round_no || 99;
+  if (type === "HEARING_ROUND_PARTY_SUBMITTED") {
+    const roleLabel = participantRoleLabel(payload.participant_role);
+    return {
+      id: `event-${sequenceNo}`,
+      title: `第 ${payload.round_no || "本"} 轮陈述提交`,
+      status: `${roleLabel}已提交`,
+      text: `${roleLabel}提交了本轮庭审陈述，系统已将该立场写入审理档案。`,
+      statusCode: type,
+      roundNo,
+      sequenceNo,
+      tone: "round",
+    };
+  }
+  if (type === "HEARING_ROUND_COMPLETED") {
+    return {
+      id: `event-${sequenceNo}`,
+      title: `第 ${payload.round_no || "本"} 轮封存`,
+      status: stopReasonLabel(payload.stop_reason),
+      text: "本轮双方材料已封存，后续法官、证据书记官和评审团会基于封存材料继续处理。",
+      statusCode: type,
+      roundNo,
+      sequenceNo,
+      tone: "round",
+    };
+  }
+  if (type === "FINAL_DRAFT_REQUIRED") {
+    return {
+      id: `event-${sequenceNo}`,
+      title: "法官进入裁决草案生成",
+      status: "草案生成中",
+      text: "三轮庭审已封存，法官将结合案情卷宗、最新证据矩阵和复核意见生成裁决草案。",
+      statusCode: type,
+      roundNo,
+      sequenceNo,
+      tone: "judge",
+    };
+  }
+  if (type === "JURY_REVIEW_REPORT_READY") {
+    return {
+      id: `event-${sequenceNo}`,
+      title: "评审团复核完成",
+      status: "已交法官",
+      text: "评审团复核报告已通过 A2A 通信交给法官，用于修订或确认裁决草案。",
+      statusCode: type,
+      roundNo,
+      sequenceNo,
+      tone: "jury",
+    };
+  }
+  if (type === "HEARING_PHASE_CHANGED") {
+    return {
+      id: `event-${sequenceNo}`,
+      title: "裁决草案状态更新",
+      status: sanitizeHearingCopy(displayRoomMessageText(payload.phase_label || "草案已生成")),
+      text: sanitizeHearingCopy(
+        displayRoomMessageText(payload.next_step_hint || "裁决草案已生成，可进入结果页查看。"),
+      ),
+      statusCode: type,
+      roundNo,
+      sequenceNo,
+      tone: "judge",
+    };
+  }
+  if (type === "EXECUTION_ASSISTANT_HANDOFF") {
+    return {
+      id: `event-${sequenceNo}`,
+      title: "执行专员助手",
+      status: "已移交",
+      text: "裁决已确认，方案已移交给执行专员助手处理；当前不触发真实下游业务工具。",
+      statusCode: type,
+      roundNo,
+      sequenceNo,
+      tone: "matrix",
+    };
+  }
+  return null;
+}
+
 function roundStatusLabel(status) {
   return roundStatusLabels[status] || status || "待开始";
 }
@@ -889,6 +1021,9 @@ async function load() {
         "HEARING",
       );
     }
+    if (props.initialEvents === null) {
+      caseEvents.value = await roomApi.events(actorSnapshot, caseId.value, 0);
+    }
   } catch (failure) {
     error.value = failure.message;
     agentState.value = "ERROR";
@@ -897,7 +1032,7 @@ async function load() {
 
 async function refreshHearing() {
   const actorSnapshot = effectiveActor.value;
-  const [nextHearing, nextMessages, nextEvidenceCatalog] = await Promise.all([
+  const [nextHearing, nextMessages, nextEvidenceCatalog, nextEvents] = await Promise.all([
     hearingApi.hearing(actorSnapshot, caseId.value),
     roomApi.messages(actorSnapshot, caseId.value, "HEARING"),
     evidenceApi.catalog(actorSnapshot, caseId.value).catch((failure) => {
@@ -906,10 +1041,12 @@ async function refreshHearing() {
       }
       throw failure;
     }),
+    roomApi.events(actorSnapshot, caseId.value, 0),
   ]);
   hearing.value = nextHearing;
   messages.value = nextMessages;
   evidenceCatalog.value = nextEvidenceCatalog;
+  caseEvents.value = nextEvents;
 }
 
 async function postMessage(command) {
