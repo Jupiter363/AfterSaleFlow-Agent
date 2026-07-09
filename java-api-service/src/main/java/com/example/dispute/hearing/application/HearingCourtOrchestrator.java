@@ -181,6 +181,7 @@ public class HearingCourtOrchestrator {
                         "model", result.model()),
                 lifecycleEventKey,
                 JUDGE_SENDER_ID);
+        appendFormalJuryReportIfNeeded(dispute, room, roundNo, result, saved.getSequenceNo(), traceId);
     }
 
     private HearingCourtAgentCommand command(
@@ -508,6 +509,103 @@ public class HearingCourtOrchestrator {
         return normalized + "。";
     }
 
+    private void appendFormalJuryReportIfNeeded(
+            FulfillmentCaseEntity dispute,
+            CaseRoomEntity room,
+            int roundNo,
+            HearingCourtAgentResult judgeResult,
+            long judgeSequenceNo,
+            String traceId) {
+        if (!judgeResult.finalDraftRequired() || roundNo < 3) {
+            return;
+        }
+        String idempotencyKey = juryReviewReportKey(dispute.getId(), roundNo);
+        if (messageRepository.findByCaseIdAndIdempotencyKey(dispute.getId(), idempotencyKey).isPresent()) {
+            return;
+        }
+        Map<String, Object> inputRefs =
+                Map.of(
+                        "round_no", roundNo,
+                        "judge_event_type", judgeResult.courtEventType(),
+                        "review_focus_signal", judgeResult.reviewFocusSignal(),
+                        "prompt_version", judgeResult.promptVersion());
+        Map<String, Object> payload = juryReviewPayload(judgeResult.reviewFocusSignal());
+        a2aMessageService.record(
+                new AgentA2ACommand(
+                        dispute.getId(),
+                        roundNo,
+                        "JURY_PANEL",
+                        AgentA2AMessageService.PRESIDING_JUDGE,
+                        "JURY_REVIEW_REPORT",
+                        inputRefs,
+                        payload,
+                        "REVIEWER_VISIBLE",
+                        null));
+        RoomMessageEntity saved =
+                messageRepository.save(
+                        RoomMessageEntity.create(
+                                "MESSAGE_" + compactUuid(),
+                                dispute.getId(),
+                                room.getId(),
+                                judgeSequenceNo + 1,
+                                MessageSenderType.AGENT,
+                                "JURY",
+                                "jury-panel",
+                                sharedCourtAudienceJson(),
+                                "[]",
+                                MessageType.JURY_REVIEW_REPORT,
+                                json(payload),
+                                "[]",
+                                idempotencyKey,
+                                roundNo,
+                                Instant.now(clock),
+                                traceId));
+        eventService.recordRoomMessage(
+                dispute.getId(),
+                room.getId(),
+                saved.getId(),
+                saved.getMessageText(),
+                saved.getAudienceJson(),
+                saved.getAudienceActorIdsJson(),
+                "jury-panel");
+        eventService.recordLifecycleEvent(
+                dispute.getId(),
+                room.getId(),
+                "JURY_REVIEW_REPORT_READY",
+                Map.of(
+                        "round_no", roundNo,
+                        "visibility", "REVIEWER_VISIBLE",
+                        "review_focus_signal", judgeResult.reviewFocusSignal(),
+                        "risk_level", payload.get("risk_level"),
+                        "confidence_score", payload.get("confidence_score")),
+                "jury-review-report-ready:" + dispute.getId() + ":" + roundNo,
+                "jury-panel");
+    }
+
+    private Map<String, Object> juryReviewPayload(List<String> reviewFocusSignal) {
+        List<String> focus =
+                reviewFocusSignal == null || reviewFocusSignal.isEmpty()
+                        ? List.of("第三轮未形成明确异议，仍需法官在草案中说明事实采信和证据依据。")
+                        : List.copyOf(reviewFocusSignal);
+        return Map.of(
+                "summary",
+                "评审团已完成第三轮复核，报告已交由法官生成裁决草案时参考。",
+                "risk_level",
+                focus.size() >= 3 ? "HIGH" : "MEDIUM",
+                "confidence_score",
+                75,
+                "review_focus_signal",
+                focus,
+                "recommendations",
+                List.of(
+                        "请法官在裁决草案中逐项回应第三轮复核关注点。",
+                        "请避免直接采纳单方自然语言意见，应结合案情卷宗和证据矩阵复核。"),
+                "review_notes",
+                "评审团复核报告是风险和遗漏视野补充，不是二次裁决主体。",
+                "visibility",
+                "REVIEWER_VISIBLE");
+    }
+
     private RoomMessageEntity appendJudgeMessage(
             FulfillmentCaseEntity dispute,
             CaseRoomEntity room,
@@ -573,6 +671,10 @@ public class HearingCourtOrchestrator {
 
     private static String judgeRoundTurnKey(String caseId, int roundNo) {
         return "judge-round-turn:" + caseId + ":" + roundNo;
+    }
+
+    private static String juryReviewReportKey(String caseId, int roundNo) {
+        return "jury-review-report:" + caseId + ":" + roundNo;
     }
 
     private static String compactUuid() {

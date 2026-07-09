@@ -17,6 +17,8 @@ import com.example.dispute.domain.model.RiskLevel;
 import com.example.dispute.domain.model.RouteType;
 import com.example.dispute.evidence.application.EvidenceDossierRevisionService;
 import com.example.dispute.hearing.application.CompleteHearingRoundCommand;
+import com.example.dispute.hearing.application.AgentA2ACommand;
+import com.example.dispute.hearing.application.AgentA2AMessageService;
 import com.example.dispute.hearing.application.HearingCourtOrchestrator;
 import com.example.dispute.hearing.application.HearingFinalDraftService;
 import com.example.dispute.hearing.application.HearingRoundService;
@@ -59,6 +61,7 @@ import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseTimelineEventRepository;
 import com.example.dispute.workflow.application.HearingAgentClient;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.time.Clock;
@@ -67,6 +70,8 @@ import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -76,6 +81,7 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
 import org.springframework.context.annotation.Primary;
+import org.mockito.ArgumentCaptor;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
@@ -90,6 +96,7 @@ import org.testcontainers.utility.DockerImageName;
     SettlementService.class,
     HearingRoundService.class,
     HearingFinalDraftService.class,
+    AgentA2AMessageService.class,
     EvidenceDossierRevisionService.class,
     NotificationService.class,
     CaseEventService.class,
@@ -124,6 +131,7 @@ class HearingCollaborationIntegrationTest {
 
     @Autowired private SettlementService settlementService;
     @Autowired private HearingRoundService roundService;
+    @Autowired private AgentA2AMessageService a2aMessageService;
     @Autowired private FulfillmentCaseRepository caseRepository;
     @Autowired private CaseRoomRepository roomRepository;
     @Autowired private SettlementProposalRepository proposalRepository;
@@ -528,6 +536,66 @@ class HearingCollaborationIntegrationTest {
                         draft -> "CASE_FINAL_DRAFT_COMPLETION".equals(draft.getCaseId()))
                 .hasSize(1);
         verify(hearingAgentClient, times(1)).analyze(any(), any(), any());
+    }
+
+    @Test
+    void finalDraftRequestIncludesFormalJuryA2AReport() {
+        seedHearing("CASE_FINAL_DRAFT_JURY_REPORT");
+        hearingStateRepository.saveAndFlush(
+                HearingStateEntity.start(
+                        "HEARING_CASE_FINAL_DRAFT_JURY_REPORT",
+                        "CASE_FINAL_DRAFT_JURY_REPORT",
+                        "hearing-window-CASE_FINAL_DRAFT_JURY_REPORT",
+                        "hearing-bootstrap"));
+        roundService.completeNext(
+                "CASE_FINAL_DRAFT_JURY_REPORT",
+                new CompleteHearingRoundCommand(2, "{\"round\":1}", false),
+                system);
+        roundService.completeNext(
+                "CASE_FINAL_DRAFT_JURY_REPORT",
+                new CompleteHearingRoundCommand(2, "{\"round\":2}", false),
+                system);
+        roundService.completeNext(
+                "CASE_FINAL_DRAFT_JURY_REPORT",
+                new CompleteHearingRoundCommand(2, "{\"round\":3}", false),
+                system);
+        a2aMessageService.record(
+                new AgentA2ACommand(
+                        "CASE_FINAL_DRAFT_JURY_REPORT",
+                        3,
+                        "JURY_PANEL",
+                        AgentA2AMessageService.PRESIDING_JUDGE,
+                        "JURY_REVIEW_REPORT",
+                        Map.of(
+                                "round_no",
+                                3,
+                                "review_focus_signal",
+                                List.of("用户要求复核签收人身份。")),
+                        Map.of(
+                                "summary",
+                                "评审团认为签收人身份和签收地点仍需重点核对。",
+                                "risk_level",
+                                "MEDIUM",
+                                "confidence_score",
+                                75,
+                                "review_focus_signal",
+                                List.of("用户要求复核签收人身份。")),
+                        "REVIEWER_VISIBLE",
+                        "RUN_JURY_REPORT_3"));
+
+        roundService.completeHearing("CASE_FINAL_DRAFT_JURY_REPORT", user);
+
+        ArgumentCaptor<JsonNode> request = ArgumentCaptor.forClass(JsonNode.class);
+        verify(hearingAgentClient).analyze(request.capture(), any(), any());
+        JsonNode courtroomContext =
+                request.getValue().path("hearing_context").path("courtroom_context");
+        assertThat(courtroomContext.path("jury_review_report").path("payload").path("summary").asText())
+                .contains("签收人身份和签收地点");
+        assertThat(courtroomContext.path("jury_a2a_notes").get(0).path("message_type").asText())
+                .isEqualTo("JURY_REVIEW_REPORT");
+        assertThat(courtroomContext.toString())
+                .contains("用户要求复核签收人身份")
+                .doesNotContain("SYSTEM_AUDIT_ONLY");
     }
 
     @Test

@@ -50,6 +50,7 @@ public class HearingFinalDraftService {
     private final HearingRecordRepository recordRepository;
     private final AdjudicationDraftRepository draftRepository;
     private final AgentRunRepository agentRunRepository;
+    private final AgentA2AMessageService a2aMessageService;
     private final HearingAgentClient agentClient;
     private final ObjectMapper objectMapper;
     private final Clock clock;
@@ -62,6 +63,7 @@ public class HearingFinalDraftService {
             HearingRecordRepository recordRepository,
             AdjudicationDraftRepository draftRepository,
             AgentRunRepository agentRunRepository,
+            AgentA2AMessageService a2aMessageService,
             HearingAgentClient agentClient,
             ObjectMapper objectMapper,
             Clock clock) {
@@ -72,6 +74,7 @@ public class HearingFinalDraftService {
         this.recordRepository = recordRepository;
         this.draftRepository = draftRepository;
         this.agentRunRepository = agentRunRepository;
+        this.a2aMessageService = a2aMessageService;
         this.agentClient = agentClient;
         this.objectMapper = objectMapper;
         this.clock = clock;
@@ -267,7 +270,7 @@ public class HearingFinalDraftService {
         hearingContext.put("final_convergence", true);
         hearingContext.put("must_produce_final_plan", true);
         hearingContext.put("allow_supplemental_request", false);
-        hearingContext.set("courtroom_context", courtroomContext(dispute.getId()));
+        hearingContext.set("courtroom_context", courtroomContext(dispute.getId(), finalRoundNo));
         ArrayNode sealedRounds = hearingContext.putArray("sealed_rounds");
         roundRepository.findAllByCaseIdOrderByRoundNoAsc(dispute.getId())
                 .forEach(round -> sealedRounds.add(sealedRound(dispute.getId(), round)));
@@ -309,8 +312,9 @@ public class HearingFinalDraftService {
         return node;
     }
 
-    private JsonNode courtroomContext(String caseId) {
-        return recordRepository
+    private JsonNode courtroomContext(String caseId, int finalRoundNo) {
+        ObjectNode context =
+                recordRepository
                 .findTopByCaseIdAndNodeNameAndRoundNoAndRecordTypeOrderByCreatedAtDesc(
                         caseId,
                         HearingCourtBootstrapService.BOOTSTRAP_NODE,
@@ -326,6 +330,34 @@ public class HearingFinalDraftService {
                             fallback.put("warning", "hearing bootstrap snapshot missing");
                             return fallback;
                         });
+        attachJuryA2AReports(context, caseId, finalRoundNo);
+        return context;
+    }
+
+    private void attachJuryA2AReports(ObjectNode context, String caseId, int finalRoundNo) {
+        ArrayNode notes = objectMapper.createArrayNode();
+        ObjectNode latestFormalReport = null;
+        for (AgentA2AMessageView message : a2aMessageService.findForJudge(caseId, finalRoundNo)) {
+            ObjectNode note = notes.addObject();
+            note.put("a2a_message_id", message.a2aMessageId());
+            note.put("round_no", message.roundNo());
+            note.put("from_agent", message.fromAgent());
+            note.put("to_agent", message.toAgent());
+            note.put("message_type", message.messageType());
+            note.set("input_refs", readJson(message.inputRefsJson()));
+            note.set("payload", readJson(message.payloadJson()));
+            note.put("visibility", message.visibility());
+            if (message.agentRunId() != null && !message.agentRunId().isBlank()) {
+                note.put("agent_run_id", message.agentRunId());
+            }
+            if ("JURY_REVIEW_REPORT".equals(message.messageType())) {
+                latestFormalReport = note.deepCopy();
+            }
+        }
+        context.set("jury_a2a_notes", notes);
+        if (latestFormalReport != null) {
+            context.set("jury_review_report", latestFormalReport);
+        }
     }
 
     private HearingAgentResult generateDraftResult(
@@ -450,12 +482,20 @@ public class HearingFinalDraftService {
                         actorId));
     }
 
-    private JsonNode readJsonObject(String json) {
+    private ObjectNode readJsonObject(String json) {
         try {
             JsonNode node = objectMapper.readTree(json);
-            return node.isObject() ? node : objectMapper.createObjectNode();
+            return node.isObject() ? (ObjectNode) node : objectMapper.createObjectNode();
         } catch (JsonProcessingException exception) {
             throw new IllegalStateException("invalid hearing courtroom context json", exception);
+        }
+    }
+
+    private JsonNode readJson(String json) {
+        try {
+            return objectMapper.readTree(json == null || json.isBlank() ? "{}" : json);
+        } catch (JsonProcessingException exception) {
+            return objectMapper.createObjectNode();
         }
     }
 

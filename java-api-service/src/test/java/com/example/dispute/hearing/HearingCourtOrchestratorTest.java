@@ -8,6 +8,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.times;
 
 import com.example.dispute.common.transaction.PostCommitSideEffectExecutor;
 import com.example.dispute.config.ActorRole;
@@ -17,6 +18,7 @@ import com.example.dispute.hearing.application.HearingCourtAgentClient;
 import com.example.dispute.hearing.application.HearingCourtAgentCommand;
 import com.example.dispute.hearing.application.HearingCourtAgentResult;
 import com.example.dispute.hearing.application.HearingCourtOrchestrator;
+import com.example.dispute.hearing.application.AgentA2ACommand;
 import com.example.dispute.hearing.application.AgentA2AMessageService;
 import com.example.dispute.hearing.application.AgentA2AMessageView;
 import com.example.dispute.hearing.domain.HearingRoundSubmissionSource;
@@ -382,6 +384,9 @@ class HearingCourtOrchestratorTest {
         when(messageRepository.findByCaseIdAndIdempotencyKey(
                         dispute.getId(), "judge-round-turn:" + dispute.getId() + ":3"))
                 .thenReturn(Optional.empty());
+        when(messageRepository.findByCaseIdAndIdempotencyKey(
+                        dispute.getId(), "jury-review-report:" + dispute.getId() + ":3"))
+                .thenReturn(Optional.empty());
         when(messageRepository.findMaxSequenceByRoomId(room.getId())).thenReturn(8L);
         when(messageRepository.save(any()))
                 .thenAnswer(invocation -> invocation.getArgument(0));
@@ -444,6 +449,36 @@ class HearingCourtOrchestratorTest {
                 .containsEntry(
                         "review_focus_signal",
                         List.of("用户认可退款方向，但要求复核签收人身份是否已核验清楚。"));
+
+        ArgumentCaptor<AgentA2ACommand> a2aCommand =
+                ArgumentCaptor.forClass(AgentA2ACommand.class);
+        verify(a2aMessageService).record(a2aCommand.capture());
+        assertThat(a2aCommand.getValue().roundNo()).isEqualTo(3);
+        assertThat(a2aCommand.getValue().fromAgent()).isEqualTo("JURY_PANEL");
+        assertThat(a2aCommand.getValue().toAgent()).isEqualTo("PRESIDING_JUDGE");
+        assertThat(a2aCommand.getValue().messageType()).isEqualTo("JURY_REVIEW_REPORT");
+        assertThat(a2aCommand.getValue().visibility()).isEqualTo("REVIEWER_VISIBLE");
+        assertThat(a2aCommand.getValue().inputRefs())
+                .containsEntry(
+                        "review_focus_signal",
+                        List.of("用户认可退款方向，但要求复核签收人身份是否已核验清楚。"));
+        assertThat(a2aCommand.getValue().payload())
+                .containsEntry("risk_level", "MEDIUM")
+                .containsEntry("confidence_score", 75);
+        assertThat(a2aCommand.getValue().payload().get("summary").toString())
+                .contains("评审团已完成第三轮复核");
+
+        ArgumentCaptor<RoomMessageEntity> savedMessages =
+                ArgumentCaptor.forClass(RoomMessageEntity.class);
+        verify(messageRepository, times(2)).save(savedMessages.capture());
+        RoomMessageEntity juryMessage = savedMessages.getAllValues().get(1);
+        assertThat(juryMessage.getSenderRole()).isEqualTo("JURY");
+        assertThat(juryMessage.getSenderId()).isEqualTo("jury-panel");
+        assertThat(juryMessage.getMessageType()).isEqualTo(MessageType.JURY_REVIEW_REPORT);
+        assertThat(juryMessage.getMessageText())
+                .contains("评审团已完成第三轮复核")
+                .contains("review_focus_signal")
+                .doesNotContain("a2a_message_id");
     }
 
     @Test
