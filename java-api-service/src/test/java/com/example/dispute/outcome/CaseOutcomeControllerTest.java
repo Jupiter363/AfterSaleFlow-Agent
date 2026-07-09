@@ -82,7 +82,9 @@ class CaseOutcomeControllerTest {
                                                 "[{\"assessment\":\"商家证据不足以证明用户本人签收\"}]"),
                                         objectMapper.readTree(
                                                 "[{\"rule\":\"签收争议举证责任\"}]"),
-                                        objectMapper.readTree("[\"核验签收人身份\"]")),
+                                        objectMapper.readTree("[\"核验签收人身份\"]"),
+                                        objectMapper.readTree(
+                                                "{\"id\":\"PLAN_1\",\"actions\":[{\"action_type\":\"REFUND\",\"amount\":199}]}")),
                                 List.of()));
 
         mockMvc.perform(
@@ -109,6 +111,12 @@ class CaseOutcomeControllerTest {
                 .andExpect(
                         jsonPath("$.data.adjudication_draft.reviewer_attention[0]")
                                 .value("核验签收人身份"))
+                .andExpect(
+                        jsonPath("$.data.adjudication_draft.approved_plan.id")
+                                .value("PLAN_1"))
+                .andExpect(
+                        jsonPath("$.data.adjudication_draft.approved_plan.actions[0].action_type")
+                                .value("REFUND"))
                 .andExpect(jsonPath("$.data.actions").isArray());
     }
 

@@ -11,15 +11,18 @@ import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.domain.model.ApprovalDecisionType;
 import com.example.dispute.domain.model.RiskLevel;
+import com.example.dispute.domain.model.RouteType;
 import com.example.dispute.executor.application.ToolExecutorService;
 import com.example.dispute.infrastructure.persistence.entity.AdjudicationDraftEntity;
 import com.example.dispute.infrastructure.persistence.entity.ApprovalRecordEntity;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
+import com.example.dispute.infrastructure.persistence.entity.RemedyPlanEntity;
 import com.example.dispute.infrastructure.persistence.entity.ReviewTaskEntity;
 import com.example.dispute.infrastructure.persistence.repository.AdjudicationDraftRepository;
 import com.example.dispute.infrastructure.persistence.repository.ApprovalRecordRepository;
 import com.example.dispute.infrastructure.persistence.repository.FlowConclusionRepository;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
+import com.example.dispute.infrastructure.persistence.repository.RemedyPlanRepository;
 import com.example.dispute.infrastructure.persistence.repository.ReviewTaskRepository;
 import com.example.dispute.outcome.application.CaseOutcomeService;
 import com.example.dispute.outcome.application.CaseOutcomeView;
@@ -46,6 +49,7 @@ class CaseOutcomeServiceTest {
     @Mock private AdjudicationDraftRepository draftRepository;
     @Mock private FlowConclusionRepository conclusionRepository;
     @Mock private ToolExecutorService executorService;
+    @Mock private RemedyPlanRepository remedyPlanRepository;
     @Mock private ReviewTaskRepository reviewTaskRepository;
     @Mock private ReviewApplicationService reviewApplicationService;
     private CaseOutcomeService service;
@@ -59,6 +63,7 @@ class CaseOutcomeServiceTest {
                         draftRepository,
                         conclusionRepository,
                         executorService,
+                        remedyPlanRepository,
                         reviewTaskRepository,
                         reviewApplicationService,
                         new ObjectMapper());
@@ -137,6 +142,70 @@ class CaseOutcomeServiceTest {
     }
 
     @Test
+    void exposesLatestPendingRemedyPlanOnTheAdjudicationDraftForReviewerPrefill() {
+        FulfillmentCaseEntity dispute = dispute();
+        AdjudicationDraftEntity draft =
+                AdjudicationDraftEntity.create(
+                        "DRAFT_PREFILL",
+                        dispute.getId(),
+                        "HEARING_1",
+                        3,
+                        "[]",
+                        "[]",
+                        "[]",
+                        "[]",
+                        "SUPPORT_REFUND",
+                        new BigDecimal("0.8100"),
+                        "AI 法官已形成非最终裁决草案。",
+                        "adjudication-agent",
+                        "READY",
+                        "system");
+        RemedyPlanEntity plan =
+                RemedyPlanEntity.pendingApproval(
+                        "PLAN_PREFILL",
+                        dispute.getId(),
+                        draft.getId(),
+                        1,
+                        RouteType.SIMPLE_HEARING,
+                        RiskLevel.MEDIUM,
+                        "[{\"action_type\":\"REFUND\",\"amount\":188}]",
+                        "[\"审核员确认后执行\"]",
+                        "[\"通知用户和商家\"]",
+                        "system");
+
+        when(caseRepository.findById(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+        when(approvalRepository.findAllByCaseIdOrderByCreatedAtAsc(dispute.getId()))
+                .thenReturn(List.of());
+        when(draftRepository.findFirstByCaseIdOrderByDraftVersionDesc(dispute.getId()))
+                .thenReturn(Optional.of(draft));
+        when(conclusionRepository.findByCaseId(dispute.getId()))
+                .thenReturn(Optional.empty());
+        when(remedyPlanRepository.findFirstByCaseIdOrderByPlanVersionDesc(dispute.getId()))
+                .thenReturn(Optional.of(plan));
+        when(executorService.actions(
+                        dispute.getId(),
+                        new AuthenticatedActor("reviewer-local", ActorRole.PLATFORM_REVIEWER)))
+                .thenReturn(List.of());
+
+        CaseOutcomeView outcome =
+                service.get(
+                        dispute.getId(),
+                        new AuthenticatedActor(
+                                "reviewer-local",
+                                ActorRole.PLATFORM_REVIEWER));
+
+        assertThat(outcome.adjudicationDraft().approvedPlan().path("id").asText())
+                .isEqualTo("PLAN_PREFILL");
+        assertThat(outcome.adjudicationDraft().approvedPlan().path("version").asInt())
+                .isEqualTo(1);
+        assertThat(outcome.adjudicationDraft().approvedPlan().at("/actions/0/action_type").asText())
+                .isEqualTo("REFUND");
+        assertThat(outcome.adjudicationDraft().approvedPlan().at("/actions/0/amount").asInt())
+                .isEqualTo(188);
+    }
+
+    @Test
     void rejectsAUserWhoDoesNotOwnTheDispute() {
         FulfillmentCaseEntity dispute = dispute();
         when(caseRepository.findById(dispute.getId()))
@@ -155,6 +224,7 @@ class CaseOutcomeServiceTest {
                 draftRepository,
                 conclusionRepository,
                 executorService,
+                remedyPlanRepository,
                 reviewTaskRepository,
                 reviewApplicationService);
     }

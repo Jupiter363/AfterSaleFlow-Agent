@@ -13,4 +13,5 @@ public record AdjudicationDraftView(
         JsonNode factFindings,
         JsonNode evidenceAssessment,
         JsonNode policyApplication,
-        JsonNode reviewerAttention) {}
+        JsonNode reviewerAttention,
+        JsonNode approvedPlan) {}

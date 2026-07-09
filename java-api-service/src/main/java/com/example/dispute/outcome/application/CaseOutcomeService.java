@@ -10,10 +10,12 @@ import com.example.dispute.infrastructure.persistence.entity.AdjudicationDraftEn
 import com.example.dispute.infrastructure.persistence.entity.ApprovalRecordEntity;
 import com.example.dispute.infrastructure.persistence.entity.FlowConclusionEntity;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
+import com.example.dispute.infrastructure.persistence.entity.RemedyPlanEntity;
 import com.example.dispute.infrastructure.persistence.repository.AdjudicationDraftRepository;
 import com.example.dispute.infrastructure.persistence.repository.ApprovalRecordRepository;
 import com.example.dispute.infrastructure.persistence.repository.FlowConclusionRepository;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
+import com.example.dispute.infrastructure.persistence.repository.RemedyPlanRepository;
 import com.example.dispute.infrastructure.persistence.repository.ReviewTaskRepository;
 import com.example.dispute.review.application.ReviewApplicationService;
 import com.example.dispute.review.application.ReviewDecisionCommand;
@@ -34,6 +36,7 @@ public class CaseOutcomeService {
     private final AdjudicationDraftRepository draftRepository;
     private final FlowConclusionRepository conclusionRepository;
     private final ToolExecutorService executorService;
+    private final RemedyPlanRepository remedyPlanRepository;
     private final ReviewTaskRepository reviewTaskRepository;
     private final ReviewApplicationService reviewApplicationService;
     private final ObjectMapper objectMapper;
@@ -44,6 +47,7 @@ public class CaseOutcomeService {
             AdjudicationDraftRepository draftRepository,
             FlowConclusionRepository conclusionRepository,
             ToolExecutorService executorService,
+            RemedyPlanRepository remedyPlanRepository,
             ReviewTaskRepository reviewTaskRepository,
             ReviewApplicationService reviewApplicationService,
             ObjectMapper objectMapper) {
@@ -52,6 +56,7 @@ public class CaseOutcomeService {
         this.draftRepository = draftRepository;
         this.conclusionRepository = conclusionRepository;
         this.executorService = executorService;
+        this.remedyPlanRepository = remedyPlanRepository;
         this.reviewTaskRepository = reviewTaskRepository;
         this.reviewApplicationService = reviewApplicationService;
         this.objectMapper = objectMapper;
@@ -77,6 +82,10 @@ public class CaseOutcomeService {
                         .orElse(null);
         FlowConclusionEntity flowConclusion =
                 conclusionRepository.findByCaseId(caseId).orElse(null);
+        RemedyPlanEntity remedyPlan =
+                remedyPlanRepository
+                        .findFirstByCaseIdOrderByPlanVersionDesc(caseId)
+                        .orElse(null);
 
         return new CaseOutcomeView(
                 caseId,
@@ -84,7 +93,7 @@ public class CaseOutcomeService {
                 dispute.getCaseStatus(),
                 dispute.getClosedAt(),
                 finalDecision(dispute, approval, draft, flowConclusion),
-                adjudicationDraft(draft),
+                adjudicationDraft(draft, remedyPlan),
                 executorService.actions(caseId, actor));
     }
 
@@ -121,7 +130,8 @@ public class CaseOutcomeService {
                 actor);
     }
 
-    private AdjudicationDraftView adjudicationDraft(AdjudicationDraftEntity draft) {
+    private AdjudicationDraftView adjudicationDraft(
+            AdjudicationDraftEntity draft, RemedyPlanEntity remedyPlan) {
         if (draft == null) {
             return null;
         }
@@ -135,7 +145,26 @@ public class CaseOutcomeService {
                 json(draft.getFactFindingsJson()),
                 json(draft.getEvidenceAssessmentJson()),
                 json(draft.getPolicyApplicationJson()),
-                json(draft.getReviewerAttentionJson()));
+                json(draft.getReviewerAttentionJson()),
+                approvedPlan(remedyPlan));
+    }
+
+    private JsonNode approvedPlan(RemedyPlanEntity plan) {
+        if (plan == null) {
+            return null;
+        }
+        return objectMapper.valueToTree(
+                Map.of(
+                        "id",
+                        plan.getId(),
+                        "version",
+                        plan.getPlanVersion(),
+                        "actions",
+                        json(plan.getActionsJson()),
+                        "preconditions",
+                        json(plan.getPreconditionsJson()),
+                        "notifications",
+                        json(plan.getNotificationPlanJson())));
     }
 
     private FinalDecisionView finalDecision(
