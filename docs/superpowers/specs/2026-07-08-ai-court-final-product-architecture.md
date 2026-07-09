@@ -1548,7 +1548,54 @@ System prompt 四层：
 
 ---
 
-## 12. 推荐下一步
+## 12. 2026-07-10 Task 10 复核记录
+
+本节是十点任务完成后的统一复核记录，不另开分散方案文件。复核目标是确认当前分支 `codex/hearing-a2a-active-dossier` 已按“完成一项、验证一次、提交并推送一次”的节奏推进，并对剩余缺口做最后检查。
+
+### 12.1 已推送任务证据
+
+- Task 1：`3882a98 docs: register AI court implementation tasks`
+- Task 2：`37d7111 fix: hand off approved reviews without auto execution`
+- Task 3：`a259c7d feat: simulate execution assistant handoff`
+- Task 4：`001c42f feat: simplify reviewer outcome plan editor`
+- Task 5：`ba7003d feat: add read-only execution event observations`
+- Task 6：`ca0a37c feat: capture third round review focus signals`
+- Task 7：`1d0a636 feat: add formal jury A2A review reports`
+- Task 8：`497be33 test: guard evidence dossier revision failure`
+- Task 9：`4fd5555 feat: enrich hearing ledger event trail`
+
+### 12.2 本轮复核命令
+
+- Java targeted suite：
+  `.\mvnw.cmd "-Dtest=RestClientHearingCourtAgentClientTest,HearingCourtOrchestratorTest,AgentA2AMessageServiceTest,HearingCollaborationIntegrationTest,PostReviewOrchestrationServiceIntegrationTest,CaseEventControllerTest,EvidenceDossierRevisionServiceTest" test`
+  结果：26 tests, 0 failures, 0 errors。
+- Frontend targeted suite：
+  `pnpm --dir frontend exec vitest run src/api/rooms.test.js src/views/disputes/HearingCourtView.test.js src/views/disputes/OutcomeView.test.js`
+  结果：47 tests, 0 failures。
+- Python agent contract：
+  `python -m pytest tests/test_api.py tests/agents/test_presiding_judge_round_turn.py -q`
+  结果：12 passed, 1 warning。
+
+### 12.3 十点任务复核结论
+
+1. 总方案文档：已登记 D1-D7 与十点任务，后续方案变更继续在本文维护。
+2. 审核确认链路：审核员确认后不再自动执行真实工具，转为执行专员助手移交状态。
+3. Outcome 执行专员助手：前端已模拟“裁决已确认 → 已移交 → 处理中 → 执行成功”。
+4. 审核员操作台：Outcome 审核员侧收敛为主处理方向和执行方案说明。
+5. ToolRegistry / MCP 边界：Java 业务层持有执行工具，Python 只能观察 catalog / event，不直接执行业务副作用。
+6. 第三轮意见轮：自然语言意见被提取为 `review_focus_signal`，进入陪审团复核范围，不直接采纳为裁决。
+7. 陪审团 A2A：正式 `JURY_REVIEW_REPORT` 通过 A2A 写入，法官最终草案上下文读取该报告。
+8. 第二轮证据矩阵 v2：第二轮封存后更新 active evidence dossier；损坏矩阵会失败关闭，不静默回退 v1。
+9. 庭审卷轴：已合并 room messages 与 durable lifecycle events，覆盖补证、证据矩阵更新、陪审团报告、草案生成、审核确认/执行助手移交。
+10. 全链路复核：本节记录了 Java / Frontend / Python 三组 targeted suite；当前未发现需要继续补齐的十点任务缺项。
+
+### 12.4 当前非本轮遗留工作树
+
+复核时工作树仍存在以下非本轮改动，未纳入 Task 10 提交：`deploy/nginx/default.conf`、`frontend/src/views/disputes/IntakeRoomView.vue`、`frontend/src/views/disputes/IntakeRoomView.test.js`、`tests/static/test_repository_contract.py`、`.codex/`、`frontend/src/viteProxyConfig.test.js`。这些属于之前/并行 UI 或配置改动，未作为十点任务收尾的一部分提交。
+
+---
+
+## 13. 推荐下一步
 
 优先顺序：
 
