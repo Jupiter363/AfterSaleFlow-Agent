@@ -38,6 +38,8 @@ import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity
 import com.example.dispute.room.infrastructure.persistence.entity.RoomMessageEntity;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.RoomMessageRepository;
+import com.example.dispute.tool.application.ToolDefinition;
+import com.example.dispute.tool.application.ToolRegistry;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.time.Instant;
@@ -69,6 +71,7 @@ class HearingCourtOrchestratorTest {
     @Mock private CaseEventService eventService;
     @Mock private HearingCourtAgentClient agentClient;
     @Mock private AgentA2AMessageService a2aMessageService;
+    @Mock private ToolRegistry toolRegistry;
 
     private HearingCourtOrchestrator orchestrator;
 
@@ -86,6 +89,7 @@ class HearingCourtOrchestratorTest {
                         eventService,
                         agentClient,
                         a2aMessageService,
+                        toolRegistry,
                         new ObjectMapper(),
                         CLOCK,
                         new PostCommitSideEffectExecutor(Runnable::run));
@@ -266,6 +270,18 @@ class HearingCourtOrchestratorTest {
                                 false,
                                 "hearing-round-turn-v1",
                                 "deepseek-v4-flash"));
+        when(toolRegistry.definitions())
+                .thenReturn(
+                        List.of(
+                                new ToolDefinition(
+                                        "REFUND",
+                                        "after_sale_tool",
+                                        "refund",
+                                        "模拟退款",
+                                        "仅在平台审核通过后模拟退款动作，不直接调用真实支付下游。",
+                                        RiskLevel.HIGH,
+                                        true,
+                                        true)));
 
         orchestrator.afterRoundClosed(dispute.getId(), 1, false, "TRACE_COURT_ROUND_1");
 
@@ -281,7 +297,11 @@ class HearingCourtOrchestratorTest {
         assertThat(command.getValue().courtroomContextJson())
                 .contains("intake_dossier")
                 .contains("evidence_dossier")
-                .contains("fact_evidence_matrix");
+                .contains("fact_evidence_matrix")
+                .contains("execution_tool_declarations")
+                .contains("\"action_type\":\"REFUND\"")
+                .contains("\"tool_name\":\"after_sale_tool\"")
+                .contains("\"requires_approved_plan\":true");
 
         ArgumentCaptor<RoomMessageEntity> savedMessage =
                 ArgumentCaptor.forClass(RoomMessageEntity.class);

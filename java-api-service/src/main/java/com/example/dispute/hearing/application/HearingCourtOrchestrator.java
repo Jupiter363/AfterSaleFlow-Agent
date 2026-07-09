@@ -19,6 +19,8 @@ import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity
 import com.example.dispute.room.infrastructure.persistence.entity.RoomMessageEntity;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.RoomMessageRepository;
+import com.example.dispute.tool.application.ToolDefinition;
+import com.example.dispute.tool.application.ToolRegistry;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -52,6 +54,7 @@ public class HearingCourtOrchestrator {
     private final CaseEventService eventService;
     private final HearingCourtAgentClient agentClient;
     private final AgentA2AMessageService a2aMessageService;
+    private final ToolRegistry toolRegistry;
     private final ObjectMapper objectMapper;
     private final Clock clock;
     private final PostCommitSideEffectExecutor postCommit;
@@ -67,6 +70,7 @@ public class HearingCourtOrchestrator {
             CaseEventService eventService,
             HearingCourtAgentClient agentClient,
             AgentA2AMessageService a2aMessageService,
+            ToolRegistry toolRegistry,
             ObjectMapper objectMapper,
             Clock clock,
             PostCommitSideEffectExecutor postCommit) {
@@ -80,6 +84,7 @@ public class HearingCourtOrchestrator {
         this.eventService = eventService;
         this.agentClient = agentClient;
         this.a2aMessageService = a2aMessageService;
+        this.toolRegistry = toolRegistry;
         this.objectMapper = objectMapper;
         this.clock = clock;
         this.postCommit = postCommit;
@@ -256,7 +261,28 @@ public class HearingCourtOrchestrator {
                     context.set("evidence_dossier", evidenceDossierContext(dossier));
                 });
         context.set("jury_a2a_notes", juryA2ANotes(caseId, roundNo));
+        context.set("execution_tool_declarations", executionToolDeclarations());
         return json(context);
+    }
+
+    private ArrayNode executionToolDeclarations() {
+        ArrayNode tools = objectMapper.createArrayNode();
+        List<ToolDefinition> definitions = toolRegistry.definitions();
+        if (definitions == null) {
+            return tools;
+        }
+        for (ToolDefinition definition : definitions) {
+            ObjectNode tool = tools.addObject();
+            tool.put("action_type", definition.actionType());
+            tool.put("tool_name", definition.toolName());
+            tool.put("operation", definition.operation());
+            tool.put("display_name", definition.displayName());
+            tool.put("description", definition.description());
+            tool.put("risk_level", definition.riskLevel().name());
+            tool.put("simulated", definition.simulated());
+            tool.put("requires_approved_plan", definition.requiresApprovedPlan());
+        }
+        return tools;
     }
 
     private ArrayNode juryA2ANotes(String caseId, int roundNo) {
