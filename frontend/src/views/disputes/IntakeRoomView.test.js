@@ -413,7 +413,8 @@ describe("IntakeRoomView", () => {
     expect(wrapper.text()).toContain("用户称订单物流已显示签收");
     expect(summaryCard.text()).toContain("仍缺少可信的用户原始陈述与商家质检视频。");
     expect(summaryCard.text()).not.toContain("待核验：签收底单");
-    expect(wrapper.text()).toContain("SIGNED_NOT_RECEIVED");
+    expect(wrapper.text()).toContain("物流显示签收但用户称未收到包裹");
+    expect(wrapper.text()).not.toContain("SIGNED_NOT_RECEIVED");
     expect(wrapper.text()).toContain("88/100");
     expect(wrapper.text()).toContain("可以进入下一步");
     expect(wrapper.find("[data-case-detail-dossier]").exists()).toBe(true);
@@ -446,6 +447,86 @@ describe("IntakeRoomView", () => {
     expect(wrapper.get("[data-case-risk-grade]").text()).toContain("中风险");
     expect(wrapper.get("[data-dossier-progress-hint]").text()).toBe("可以进入下一步");
     expect(wrapper.text()).not.toContain("可继续对话纠正");
+  });
+
+  it("renders the claim and respondent attitude state from the intake dossier", async () => {
+    const wrapper = await mountInteractiveView({
+      initialTurnMemory: {
+        turn_no: 2,
+        case_intake_dossier: {
+          dossier_version: 1,
+          quality_score: 82,
+          ready_for_next_step: true,
+          admission_recommendation: "ACCEPTED",
+          dossier: {
+            schema_version: "intake_case_detail.v1",
+            case_story: {
+              title: "签收未收到争议",
+              one_sentence_summary: "物流显示签收，但用户称本人未收到包裹。",
+            },
+            references: {
+              order_reference: "ORDER-CLAIM-1",
+              logistics_reference: "SF123456789",
+            },
+            party_positions: {
+              user_claim: "用户称本人未收到包裹。",
+              merchant_claim: "",
+            },
+            requested_resolution: {
+              requested_outcome: "REFUND",
+              expected_resolution_text: "用户请求退款。",
+            },
+            claim_resolution: {
+              initiator_role: "USER",
+              requested_resolution: "REFUND",
+              requested_amount: 299,
+              requested_items: "儿童手表 1 件",
+              request_reason: "用户称物流显示签收但本人未收到包裹，希望退款。",
+              original_statement: "我没收到包裹，希望退款",
+              normalized_statement: "用户称未实际收到包裹，并请求退款。",
+            },
+            respondent_attitude: {
+              respondent_role: "MERCHANT",
+              attitude: "NOT_RESPONDED",
+              position: "商家尚未在接待室表达态度。",
+              source: "尚未回应",
+              confidence: 0.5,
+            },
+            dispute_core_state: {
+              core_conflict: "用户请求退款，但商家态度尚待补充。",
+              conflict_type: "CLAIM_UNANSWERED",
+              facts_in_dispute: ["用户是否实际收到商品"],
+              next_verification_focus: ["签收人身份", "物流投递轨迹"],
+            },
+            dispute_focus: {
+              core_issue: "SIGNED_NOT_RECEIVED",
+              facts_to_verify: ["签收人身份"],
+            },
+            risk_assessment: {
+              case_grade: "MEDIUM",
+              risk_signals: [],
+            },
+            intake_quality: {
+              score: 82,
+              threshold: 80,
+              ready_for_next_step: true,
+            },
+            admission: {
+              recommendation: "ACCEPTED",
+            },
+          },
+        },
+      },
+    });
+
+    const claimStatus = wrapper.get("[data-case-claim-status]");
+    expect(claimStatus.text()).toContain("诉求与回应状态");
+    expect(claimStatus.text()).toContain("用户请求退款");
+    expect(claimStatus.text()).toContain("商家尚未在接待室表达态度");
+    expect(claimStatus.text()).toContain("用户请求退款，但商家态度尚待补充");
+    expect(claimStatus.text()).toContain("签收人身份");
+    expect(claimStatus.text()).not.toContain("REFUND");
+    expect(claimStatus.text()).not.toContain("NOT_RESPONDED");
   });
 
   it("infers the single-party intake initiator from immutable party messages when the model slot is missing", async () => {
@@ -679,14 +760,14 @@ describe("IntakeRoomView", () => {
       },
     });
 
-    expect(wrapper.text()).toContain("USER private intake chat should vanish");
+    expect(wrapper.text()).toContain("用户 private intake chat should vanish");
     expect(wrapper.text()).toContain("用户-only dossier text");
 
     actor.id = "user-other";
     actor.role = "USER";
     await wrapper.vm.$nextTick();
 
-    expect(wrapper.text()).not.toContain("USER private intake chat should vanish");
+    expect(wrapper.text()).not.toContain("用户 private intake chat should vanish");
     expect(wrapper.text()).not.toContain("USER-only dossier text");
   });
 
@@ -746,7 +827,7 @@ describe("IntakeRoomView", () => {
     });
     await flushPromises();
 
-    expect(wrapper.text()).toContain("MERCHANT current intake chat");
+    expect(wrapper.text()).toContain("商家 current intake chat");
     expect(wrapper.text()).not.toContain("USER stale right board");
   });
 

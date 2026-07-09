@@ -31,8 +31,23 @@ const intakeForm = ref({
   logisticsReference: "",
   userId: "",
   merchantId: "",
+  requestedResolution: "VERIFY_OR_EXPLAIN_ONLY",
+  requestedAmount: "",
+  requestedItems: "",
+  requestReason: "",
   description: "",
 });
+
+const claimResolutionOptions = [
+  { value: "REFUND", label: "退款" },
+  { value: "RETURN_REFUND", label: "退货退款" },
+  { value: "RESHIP", label: "补发" },
+  { value: "REPLACE_OR_REPAIR", label: "换货 / 维修" },
+  { value: "COMPENSATION", label: "赔付" },
+  { value: "CANCEL_ORDER", label: "取消订单" },
+  { value: "VERIFY_OR_EXPLAIN_ONLY", label: "仅要求核验 / 解释" },
+  { value: "OTHER", label: "其他" },
+];
 
 const cases = computed(() =>
   localCases.value.length ? localCases.value : disputeStore.list.data,
@@ -125,6 +140,10 @@ function openIntake() {
   intakeForm.value.userId = actor.role === "USER" ? actor.id : "";
   intakeForm.value.merchantId =
     actor.role === "MERCHANT" ? actor.id : "";
+  intakeForm.value.requestedResolution = "VERIFY_OR_EXPLAIN_ONLY";
+  intakeForm.value.requestedAmount = "";
+  intakeForm.value.requestedItems = "";
+  intakeForm.value.requestReason = "";
   createError.value = "";
   intakeOpen.value = true;
 }
@@ -202,6 +221,7 @@ async function simulateExternalImport() {
 async function createDispute() {
   creating.value = true;
   createError.value = "";
+  const requestedAmount = Number.parseFloat(intakeForm.value.requestedAmount);
   const command = {
     initiator_role: actor.role,
     order_reference: intakeForm.value.orderReference || null,
@@ -210,6 +230,14 @@ async function createDispute() {
     user_id: intakeForm.value.userId,
     merchant_id: intakeForm.value.merchantId,
     description: intakeForm.value.description,
+    claim_resolution_seed: {
+      initiator_role: actor.role,
+      requested_resolution: intakeForm.value.requestedResolution,
+      requested_amount: Number.isFinite(requestedAmount) ? requestedAmount : null,
+      requested_items: intakeForm.value.requestedItems || null,
+      request_reason: intakeForm.value.requestReason || intakeForm.value.description,
+      original_statement: intakeForm.value.description,
+    },
     attachment_ids: [],
     channel: "WEB",
   };
@@ -423,6 +451,51 @@ onMounted(async () => {
             商家 ID
             <input v-model="intakeForm.merchantId" data-intake-merchant required />
           </label>
+          <section class="intake-launcher__claim" data-claim-resolution-section>
+            <div class="intake-launcher__claim-copy">
+              <span>初始诉求</span>
+              <p>这里记录的是发起方主张，不代表系统已执行退款、补发或赔付。</p>
+            </div>
+            <label>
+              初始诉求类型
+              <select v-model="intakeForm.requestedResolution" data-claim-resolution-type required>
+                <option
+                  v-for="option in claimResolutionOptions"
+                  :key="option.value"
+                  :value="option.value"
+                >
+                  {{ option.label }}
+                </option>
+              </select>
+            </label>
+            <label>
+              诉求金额
+              <input
+                v-model="intakeForm.requestedAmount"
+                data-claim-requested-amount
+                inputmode="decimal"
+                placeholder="可选，例如 299"
+              />
+            </label>
+            <label>
+              涉及商品 / 数量
+              <input
+                v-model="intakeForm.requestedItems"
+                data-claim-requested-items
+                placeholder="可选，例如 儿童手表 1 件"
+              />
+            </label>
+            <label class="intake-launcher__claim-reason">
+              诉求原因说明
+              <textarea
+                v-model="intakeForm.requestReason"
+                data-claim-request-reason
+                rows="3"
+                required
+                placeholder="例如：物流显示签收但本人未收到，希望平台核验后退款"
+              />
+            </label>
+          </section>
           <label class="intake-launcher__story">
             发生了什么
             <textarea
@@ -821,8 +894,47 @@ onMounted(async () => {
 .intake-launcher__card header > button { width: 38px; height: 38px; color: #62728a; background: #edf4fb; border: 0; border-radius: 50%; cursor: pointer; font-size: 22px; }
 .intake-launcher__fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 11px; }
 .intake-launcher__fields label { display: grid; gap: 6px; color: #607089; font-size: 12px; }
-.intake-launcher__fields input, .intake-launcher__fields textarea {
+.intake-launcher__fields input,
+.intake-launcher__fields select,
+.intake-launcher__fields textarea {
   width: 100%; padding: 10px 11px; color: #3d4c63; background: #fff; border: 1px solid #dce5ef; border-radius: 12px;
+}
+.intake-launcher__fields select {
+  appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, #6f83a4 50%), linear-gradient(135deg, #6f83a4 50%, transparent 50%);
+  background-position: calc(100% - 18px) 50%, calc(100% - 12px) 50%;
+  background-repeat: no-repeat;
+  background-size: 6px 6px, 6px 6px;
+}
+.intake-launcher__claim {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 11px;
+  padding: 14px;
+  border: 1px solid rgba(114, 139, 184, .28);
+  border-radius: 22px;
+  background: linear-gradient(135deg, rgba(244, 249, 255, .96), rgba(255, 249, 235, .9));
+}
+.intake-launcher__claim-copy,
+.intake-launcher__claim-reason {
+  grid-column: 1 / -1;
+}
+.intake-launcher__claim-copy {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: center;
+}
+.intake-launcher__claim-copy span {
+  color: #31527d;
+  font-weight: 900;
+  letter-spacing: .08em;
+}
+.intake-launcher__claim-copy p {
+  margin: 0;
+  color: #7b879a;
+  font-size: 12px;
 }
 .intake-launcher__story { grid-column: 1 / -1; }
 .intake-launcher__card footer { display: flex; justify-content: space-between; gap: 18px; align-items: center; margin-top: 15px; }
@@ -871,6 +983,8 @@ onMounted(async () => {
   .hearing-adventure { padding: 18px; }
   .hearing-adventure__case-board { grid-template-columns: 1fr; }
   .intake-launcher__fields { grid-template-columns: 1fr; }
+  .intake-launcher__claim { grid-template-columns: 1fr; }
+  .intake-launcher__claim-copy { align-items: flex-start; flex-direction: column; }
   .intake-launcher__story { grid-column: auto; }
   .intake-launcher__card footer { align-items: stretch; flex-direction: column; }
 }

@@ -190,7 +190,9 @@ public class DisputeImportService {
                         command.logisticsReference(),
                         initiatorRole.name(),
                         command.description(),
-                        null);
+                        command.requestedOutcomeHint(),
+                        command.claimResolutionSeed(),
+                        command.respondentAttitudeSeed());
         afterCommit(
                 () ->
                         intakeAgentTurnService.startInitialTurn(

@@ -195,6 +195,44 @@ describe("DisputeOverviewView", () => {
     );
   });
 
+  it("submits the initiator claim resolution as a claim seed, not an execution action", async () => {
+    actor.id = "user-1";
+    actor.role = "USER";
+    const createAction = vi.fn().mockResolvedValue({ id: "CASE_CLAIM_1" });
+    const { wrapper } = await mountOverview(createAction);
+
+    await wrapper.get("[data-start-dispute]").trigger("click");
+    expect(wrapper.get("[data-claim-resolution-section]").text()).toContain("初始诉求");
+    expect(wrapper.get("[data-claim-resolution-section]").text()).toContain("主张，不代表系统已执行");
+
+    await wrapper.get("[data-intake-order]").setValue("ORDER-CLAIM-1");
+    await wrapper.get("[data-intake-merchant]").setValue("merchant-1");
+    await wrapper.get("[data-claim-resolution-type]").setValue("REFUND");
+    await wrapper.get("[data-claim-requested-amount]").setValue("299");
+    await wrapper.get("[data-claim-requested-items]").setValue("儿童手表 1 件");
+    await wrapper
+      .get("[data-claim-request-reason]")
+      .setValue("物流显示签收但用户本人没有收到包裹，希望退款。");
+    await wrapper
+      .get("[data-intake-description]")
+      .setValue("我没收到包裹，希望退款");
+    await wrapper.get(".intake-launcher__card").trigger("submit");
+    await flushPromises();
+
+    expect(createAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        claim_resolution_seed: {
+          initiator_role: "USER",
+          requested_resolution: "REFUND",
+          requested_amount: 299,
+          requested_items: "儿童手表 1 件",
+          request_reason: "物流显示签收但用户本人没有收到包裹，希望退款。",
+          original_statement: "我没收到包裹，希望退款",
+        },
+      }),
+    );
+  });
+
   it("simulates external imported disputes from the current demo identity", async () => {
     actor.id = "merchant-local";
     actor.role = "MERCHANT";

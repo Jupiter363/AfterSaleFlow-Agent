@@ -121,6 +121,58 @@ const caseRiskGradeTone = computed(() => {
   if (value.includes("LOW") || value.includes("低")) return "low";
   return "unknown";
 });
+const claimResolutionLabels = {
+  REFUND: "退款",
+  RETURN_REFUND: "退货退款",
+  RESHIP: "补发",
+  REPLACE_OR_REPAIR: "换货 / 维修",
+  REPLACEMENT: "换货 / 维修",
+  REPAIR: "换货 / 维修",
+  COMPENSATION: "赔付",
+  CANCEL_ORDER: "取消订单",
+  VERIFY_OR_EXPLAIN_ONLY: "核验 / 解释",
+  OTHER: "其他诉求",
+  UNKNOWN: "待确认诉求",
+};
+const respondentAttitudeLabels = {
+  NOT_RESPONDED: "尚未回应",
+  AGREE: "同意",
+  PARTIALLY_AGREE: "部分同意",
+  DISAGREE: "不同意",
+  ALTERNATIVE_PROPOSED: "提出替代方案",
+  NEED_MORE_INFO: "要求补充信息",
+  PLATFORM_UNKNOWN: "平台暂未识别",
+};
+const claimStatus = computed(() => {
+  const detail = caseDetailDossier.value;
+  if (!detail?.claim_resolution && !detail?.respondent_attitude && !detail?.dispute_core_state) {
+    return null;
+  }
+  const claim = detail.claim_resolution || {};
+  const attitude = detail.respondent_attitude || {};
+  const core = detail.dispute_core_state || {};
+  const initiator = roleLabel(claim.initiator_role || initiatorRoleValue.value || "UNKNOWN");
+  const respondent = roleLabel(attitude.respondent_role || oppositePartyRole(claim.initiator_role || initiatorRoleValue.value));
+  const resolution = claimResolutionLabels[String(claim.requested_resolution || "UNKNOWN").toUpperCase()] || "待确认诉求";
+  const amount = claim.requested_amount || claim.requestedAmount;
+  const amountText = amount ? `，金额 ${amount}` : "";
+  const requestedItems = claim.requested_items || claim.requestedItems || "";
+  const itemText = requestedItems ? `，涉及${requestedItems}` : "";
+  return {
+    claimSummary:
+      claim.normalized_statement ||
+      claim.request_reason ||
+      `${initiator}请求${resolution}${amountText}${itemText}。`,
+    claimMeta: `${initiator}主张${resolution}${amountText}${itemText}`,
+    attitudeSummary:
+      attitude.position ||
+      `${respondent}${respondentAttitudeLabels[String(attitude.attitude || "NOT_RESPONDED").toUpperCase()] || "态度待确认"}。`,
+    attitudeMeta: `${respondent}：${respondentAttitudeLabels[String(attitude.attitude || "NOT_RESPONDED").toUpperCase()] || "态度待确认"}`,
+    coreConflict: core.core_conflict || "诉求与回应的核心冲突仍待接待官整理。",
+    factsInDispute: humanizeDossierList(core.facts_in_dispute || [], "").filter(Boolean),
+    nextFocus: humanizeDossierList(core.next_verification_focus || [], "").filter(Boolean),
+  };
+});
 const handoffRemarkSticker = computed(() => {
   const notes = caseDetailDossier.value?.handoff_notes;
   if (!notes) return null;
@@ -309,6 +361,13 @@ function normalizePartyRoleValue(role) {
   ) {
     return "USER";
   }
+  return "UNKNOWN";
+}
+
+function oppositePartyRole(role) {
+  const normalizedRole = normalizePartyRoleValue(role);
+  if (normalizedRole === "USER") return "MERCHANT";
+  if (normalizedRole === "MERCHANT") return "USER";
   return "UNKNOWN";
 }
 
@@ -796,6 +855,33 @@ onBeforeUnmount(() => {
                 {{ humanizeDossierText(caseDetailDossier?.dispute_focus?.core_issue || "UNKNOWN") }}
               </strong>
             </div>
+            <section
+              v-if="claimStatus"
+              class="intake-case-detail__claim-status"
+              data-case-claim-status
+            >
+              <div class="intake-case-detail__claim-heading">
+                <span>诉求与回应状态</span>
+                <small>{{ claimStatus.claimMeta }}</small>
+              </div>
+              <p>{{ claimStatus.claimSummary }}</p>
+              <p>{{ claimStatus.attitudeSummary }}</p>
+              <strong>{{ claimStatus.coreConflict }}</strong>
+              <div class="intake-case-detail__claim-tags">
+                <span
+                  v-for="fact in claimStatus.factsInDispute"
+                  :key="`fact-${fact}`"
+                >
+                  {{ fact }}
+                </span>
+                <span
+                  v-for="focus in claimStatus.nextFocus"
+                  :key="`focus-${focus}`"
+                >
+                  {{ focus }}
+                </span>
+              </div>
+            </section>
             <p v-if="caseDetailQuality.reason" class="intake-case-detail__reason">
               {{ caseDetailQuality.reason }}
             </p>
@@ -1189,6 +1275,52 @@ onBeforeUnmount(() => {
   font-size: 15px;
   line-height: 1.45;
   letter-spacing: .03em;
+}
+.intake-case-detail__claim-status {
+  display: grid;
+  gap: 8px;
+  padding: 13px 14px;
+  border: 1px solid rgba(96, 125, 170, .24);
+  border-radius: 18px;
+  background: linear-gradient(135deg, rgba(244, 250, 255, .96), rgba(255, 249, 234, .9));
+}
+.intake-case-detail__claim-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+}
+.intake-case-detail__claim-heading span {
+  color: #2f4f79;
+  font-size: 12px;
+  font-weight: 900;
+}
+.intake-case-detail__claim-heading small {
+  color: #7a8798;
+  font-size: 11px;
+}
+.intake-case-detail__claim-status p,
+.intake-case-detail__claim-status strong {
+  margin: 0;
+  color: #465a75;
+  font-size: 12px;
+  line-height: 1.65;
+}
+.intake-case-detail__claim-status strong {
+  color: #314765;
+}
+.intake-case-detail__claim-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.intake-case-detail__claim-tags span {
+  padding: 5px 8px;
+  color: #5a6f8a;
+  background: #ffffffb8;
+  border: 1px solid #dce7f3;
+  border-radius: 999px;
+  font-size: 11px;
 }
 .intake-sticker {
   position: relative;

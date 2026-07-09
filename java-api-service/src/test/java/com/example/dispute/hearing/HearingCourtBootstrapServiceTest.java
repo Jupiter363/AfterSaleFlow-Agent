@@ -106,6 +106,28 @@ class HearingCourtBootstrapServiceTest {
                             "one_sentence_summary": "接待室确认：物流签收但用户未实际收到。"
                           },
                           "dispute_focus": {"summary": "签收真实性与实际收货状态"},
+                          "claim_resolution": {
+                            "initiator_role": "USER",
+                            "requested_resolution": "REFUND",
+                            "requested_amount": 299,
+                            "requested_items": "儿童手表 1 件",
+                            "request_reason": "用户称物流显示签收但本人未收到包裹，希望退款。",
+                            "original_statement": "我没收到包裹，希望退款",
+                            "normalized_statement": "用户称未实际收到包裹，并请求退款。"
+                          },
+                          "respondent_attitude": {
+                            "respondent_role": "MERCHANT",
+                            "attitude": "NOT_RESPONDED",
+                            "position": "商家尚未在接待室表达态度。",
+                            "source": "尚未回应",
+                            "confidence": 0.5
+                          },
+                          "dispute_core_state": {
+                            "core_conflict": "用户请求退款，但商家态度尚待补充。",
+                            "conflict_type": "CLAIM_UNANSWERED",
+                            "facts_in_dispute": ["用户是否实际收到商品"],
+                            "next_verification_focus": ["签收人身份"]
+                          },
                           "intake_quality": {"score": 86}
                         }
                         """,
@@ -164,6 +186,15 @@ class HearingCourtBootstrapServiceTest {
         assertThat(snapshot.path("round_stage").asText()).isEqualTo("FACT_STATEMENT");
         assertThat(snapshot.path("intake_dossier").path("case_story").asText())
                 .contains("接待室确认");
+        assertThat(snapshot.path("intake_dossier").path("claim_resolution")
+                        .path("requested_resolution").asText())
+                .isEqualTo("REFUND");
+        assertThat(snapshot.path("intake_dossier").path("respondent_attitude")
+                        .path("attitude").asText())
+                .isEqualTo("NOT_RESPONDED");
+        assertThat(snapshot.path("intake_dossier").path("dispute_core_state")
+                        .path("core_conflict").asText())
+                .contains("用户请求退款");
         assertThat(snapshot.path("evidence_dossier").path("fact_evidence_matrix").get(0)
                         .path("fact").asText())
                 .contains("用户是否实际收到商品");

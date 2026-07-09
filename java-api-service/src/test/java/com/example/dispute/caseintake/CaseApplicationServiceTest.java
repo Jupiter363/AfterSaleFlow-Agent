@@ -29,6 +29,7 @@ import com.example.dispute.room.application.IntakeLobbySeed;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -140,6 +141,55 @@ class CaseApplicationServiceTest {
         verify(auditLogRepository).save(audit.capture());
         assertThat(audit.getValue().getAction()).isEqualTo("CASE_CREATED");
         assertThat(audit.getValue().getTraceId()).isEqualTo("TRACE_test");
+    }
+
+    @Test
+    void structuredClaimResolutionSeedIsPassedToTheIntakeAgentWithoutExecutingTools() {
+        when(agentServiceClient.analyze(any(), any(), any()))
+                .thenReturn(
+                        new IntakeAnalysis(
+                                "DISPUTE",
+                                "SIGNED_NOT_RECEIVED",
+                                RiskLevel.HIGH,
+                                true,
+                                List.of(),
+                                "签收未收到争议",
+                                "用户称物流显示签收但本人未收到包裹，希望退款。"));
+
+        service.create(
+                commandWithClaim(
+                        "我没收到包裹，希望退款",
+                        "ORDER-CLAIM-1",
+                        new IntakeLobbySeed.ClaimResolutionSeed(
+                                "USER",
+                                "REFUND",
+                                new BigDecimal("299"),
+                                "儿童手表 1 件",
+                                "物流显示签收但用户本人没有收到包裹，希望退款。",
+                                "我没收到包裹，希望退款")),
+                new AuthenticatedActor("user-1", ActorRole.USER),
+                "idem-claim-seed",
+                "TRACE_claim",
+                "REQ_claim");
+
+        ArgumentCaptor<IntakeLobbySeed> lobbySeed =
+                ArgumentCaptor.forClass(IntakeLobbySeed.class);
+        verify(intakeAgentTurnService)
+                .startInitialTurn(
+                        any(),
+                        any(AuthenticatedActor.class),
+                        lobbySeed.capture(),
+                        eq("TRACE_claim"),
+                        eq("REQ_claim"));
+
+        assertThat(lobbySeed.getValue().requestedOutcomeHint()).isEqualTo("REFUND");
+        assertThat(lobbySeed.getValue().claimResolutionSeed().requestedResolution())
+                .isEqualTo("REFUND");
+        assertThat(lobbySeed.getValue().claimResolutionSeed().requestedAmount())
+                .isEqualByComparingTo("299");
+        assertThat(lobbySeed.getValue().claimResolutionSeed().originalStatement())
+                .isEqualTo("我没收到包裹，希望退款");
+        assertThat(lobbySeed.getValue().respondentAttitudeSeed()).isNull();
     }
 
     @Test
@@ -419,5 +469,23 @@ class CaseApplicationServiceTest {
                 List.of(),
                 "WEB",
                 ActorRole.USER);
+    }
+
+    private static CreateCaseCommand commandWithClaim(
+            String description,
+            String orderId,
+            IntakeLobbySeed.ClaimResolutionSeed claimResolutionSeed) {
+        return new CreateCaseCommand(
+                orderId,
+                null,
+                null,
+                "user-1",
+                "merchant-1",
+                description,
+                List.of(),
+                "WEB",
+                ActorRole.USER,
+                claimResolutionSeed,
+                null);
     }
 }

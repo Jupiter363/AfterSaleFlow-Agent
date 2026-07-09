@@ -178,6 +178,10 @@ def test_intake_turn_workflow_lives_under_agent_package_and_outputs_case_detail(
     assert result.scroll_snapshot["intake_quality"]["score"] == 86
     assert result.scroll_snapshot["intake_quality"]["ready_for_next_step"] is True
     assert result.admission_recommendation == "ACCEPTED"
+    assert result.scroll_snapshot["claim_resolution"]["requested_resolution"] == "REFUND"
+    assert result.scroll_snapshot["claim_resolution"]["initiator_role"] == "USER"
+    assert result.scroll_snapshot["respondent_attitude"]["attitude"] == "NOT_RESPONDED"
+    assert result.scroll_snapshot["dispute_core_state"]["conflict_type"] == "CLAIM_UNANSWERED"
     assert result.dossier_patch["case_detail"]["case_story"]["title"] == "物流显示签收但用户称未收到商品"
     assert "已了解本案" in result.room_utterance
 

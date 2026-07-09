@@ -179,6 +179,36 @@ class DisputeImportServiceTest {
     }
 
     @Test
+    void importedDisputePassesClaimResolutionSeedIntoTheIntakeLobby() {
+        when(repository.findBySourceSystemAndExternalCaseRef("OMS", "EXT-CLAIM"))
+                .thenReturn(Optional.empty());
+        when(repository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        service.importDispute(
+                commandWithClaimSeed("EXT-CLAIM"),
+                new AuthenticatedActor("external-adapter", ActorRole.SYSTEM),
+                "import-ext-claim");
+
+        ArgumentCaptor<IntakeLobbySeed> seed = ArgumentCaptor.forClass(IntakeLobbySeed.class);
+        verify(intakeAgentTurnService)
+                .startInitialTurn(
+                        any(String.class),
+                        any(AuthenticatedActor.class),
+                        seed.capture(),
+                        any(String.class),
+                        any(String.class));
+
+        assertThat(seed.getValue().requestedOutcomeHint()).isEqualTo("REFUND");
+        assertThat(seed.getValue().claimResolutionSeed().requestedResolution())
+                .isEqualTo("REFUND");
+        assertThat(seed.getValue().claimResolutionSeed().requestedItems())
+                .isEqualTo("儿童手表 1 件");
+        assertThat(seed.getValue().respondentAttitudeSeed().attitude())
+                .isEqualTo("NOT_RESPONDED");
+    }
+
+    @Test
     void importedEvidenceStateHasAnEnterableRoomAndAuthoritativeClock() {
         when(repository.findBySourceSystemAndExternalCaseRef("OMS", "EXT-2001"))
                 .thenReturn(Optional.empty());
@@ -354,5 +384,38 @@ class DisputeImportServiceTest {
                 status,
                 room,
                 deadline);
+    }
+
+    private static ImportDisputeCommand commandWithClaimSeed(String externalReference) {
+        return new ImportDisputeCommand(
+                "OMS",
+                externalReference,
+                "ORDER-1001",
+                "AFTER-1001",
+                "LOG-1001",
+                "user-local",
+                "merchant-local",
+                "USER",
+                "SIGNED_NOT_RECEIVED",
+                "签收未收到",
+                "用户表示未收到已签收包裹",
+                RiskLevel.HIGH,
+                CaseStatus.INTAKE_PENDING,
+                "INTAKE",
+                null,
+                "REFUND",
+                new IntakeLobbySeed.ClaimResolutionSeed(
+                        "USER",
+                        "REFUND",
+                        null,
+                        "儿童手表 1 件",
+                        "用户称物流签收但本人未收到包裹，希望退款。",
+                        "我没收到包裹，希望退款"),
+                new IntakeLobbySeed.RespondentAttitudeSeed(
+                        "MERCHANT",
+                        "NOT_RESPONDED",
+                        "商家尚未在接待室表达态度。",
+                        "尚未回应",
+                        0.5));
     }
 }

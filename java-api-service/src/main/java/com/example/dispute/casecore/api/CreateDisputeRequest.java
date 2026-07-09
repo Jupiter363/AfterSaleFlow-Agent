@@ -2,6 +2,9 @@ package com.example.dispute.casecore.api;
 
 import com.example.dispute.caseintake.application.CreateCaseCommand;
 import com.example.dispute.config.ActorRole;
+import com.example.dispute.room.application.IntakeLobbySeed;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
@@ -16,6 +19,10 @@ public record CreateDisputeRequest(
         @NotBlank @Size(max = 128) String userId,
         @NotBlank @Size(max = 128) String merchantId,
         @NotBlank @Size(max = 4000) String description,
+        @JsonProperty("claim_resolution_seed")
+                @Valid IntakeLobbySeed.ClaimResolutionSeed claimResolutionSeed,
+        @JsonProperty("respondent_attitude_seed")
+                @Valid IntakeLobbySeed.RespondentAttitudeSeed respondentAttitudeSeed,
         @Size(max = 50) List<@Size(max = 128) String> attachmentIds,
         @Size(max = 32) String channel) {
 
@@ -35,6 +42,8 @@ public record CreateDisputeRequest(
                 description,
                 attachmentIds,
                 channel,
-                initiatorRole);
+                initiatorRole,
+                claimResolutionSeed,
+                respondentAttitudeSeed);
     }
 }

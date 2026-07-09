@@ -203,6 +203,19 @@ public class HearingCourtBootstrapService {
         map.put("initiator_role", dispute.getInitiatorRole().name());
         map.put("respondent_role", respondentRole(dispute.getInitiatorRole()).name());
         map.set("claim", objectOrDefault(source.path("claim"), defaultClaim(source)));
+        map.set(
+                "claim_resolution",
+                objectOrDefault(source.path("claim_resolution"), defaultClaimResolution(dispute, source)));
+        map.set(
+                "respondent_attitude",
+                objectOrDefault(
+                        source.path("respondent_attitude"),
+                        defaultRespondentAttitude(dispute)));
+        map.set(
+                "dispute_core_state",
+                objectOrDefault(
+                        source.path("dispute_core_state"),
+                        defaultDisputeCoreState(dispute)));
         map.set("timeline", arrayOrEmpty(source.path("timeline")));
         map.set("known_facts", arrayOrDefault(source.path("known_facts"), defaultKnownFacts(dispute)));
         map.set(
@@ -581,6 +594,51 @@ public class HearingCourtBootstrapService {
         claim.putNull("amount");
         claim.put("non_monetary_request", "核验争议事实与证据链路");
         return claim;
+    }
+
+    private ObjectNode defaultClaimResolution(FulfillmentCaseEntity dispute, JsonNode source) {
+        ObjectNode claim = objectMapper.createObjectNode();
+        String initiator = dispute.getInitiatorRole().name();
+        String requestedResolution =
+                firstText(source, "UNKNOWN", "requested_resolution", "resolution");
+        claim.put("initiator_role", initiator);
+        claim.put("requested_resolution", requestedResolution);
+        claim.putNull("requested_amount");
+        claim.put("requested_items", "");
+        claim.put("request_reason", dispute.getDescription());
+        claim.put("original_statement", dispute.getDescription());
+        claim.put(
+                "normalized_statement",
+                roleLabel(initiator) + "称" + dispute.getDescription());
+        return claim;
+    }
+
+    private ObjectNode defaultRespondentAttitude(FulfillmentCaseEntity dispute) {
+        String respondent = respondentRole(dispute.getInitiatorRole()).name();
+        ObjectNode attitude = objectMapper.createObjectNode();
+        attitude.put("respondent_role", respondent);
+        attitude.put("attitude", "NOT_RESPONDED");
+        attitude.put("position", roleLabel(respondent) + "尚未在接待室表达态度。");
+        attitude.put("source", "尚未回应");
+        attitude.put("confidence", 0.5);
+        return attitude;
+    }
+
+    private ObjectNode defaultDisputeCoreState(FulfillmentCaseEntity dispute) {
+        String initiator = dispute.getInitiatorRole().name();
+        String respondent = respondentRole(dispute.getInitiatorRole()).name();
+        ObjectNode state = objectMapper.createObjectNode();
+        state.put(
+                "core_conflict",
+                roleLabel(initiator) + "提出处理诉求，但" + roleLabel(respondent) + "态度尚待补充。");
+        state.put("conflict_type", "CLAIM_UNANSWERED");
+        state.set("facts_in_dispute", objectMapper.createArrayNode());
+        state.set("next_verification_focus", objectMapper.createArrayNode());
+        return state;
+    }
+
+    private static String roleLabel(String role) {
+        return "MERCHANT".equalsIgnoreCase(role) ? "商家" : "用户";
     }
 
     private ArrayNode defaultKnownFacts(FulfillmentCaseEntity dispute) {

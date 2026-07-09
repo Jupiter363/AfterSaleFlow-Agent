@@ -134,6 +134,23 @@ class SimulatedExternalImportResult(StrictModel):
     ]
 
 
+class IntakeClaimResolutionSeed(StrictModel):
+    initiator_role: Literal["USER", "MERCHANT"] | None = None
+    requested_resolution: Identifier | None = None
+    requested_amount: float | None = None
+    requested_items: ShortText | None = None
+    request_reason: LongText | None = None
+    original_statement: LongText | None = None
+
+
+class IntakeRespondentAttitudeSeed(StrictModel):
+    respondent_role: Literal["USER", "MERCHANT"] | None = None
+    attitude: Identifier | None = None
+    position: LongText | None = None
+    source: ShortText | None = None
+    confidence: Confidence | None = None
+
+
 class IntakeLobbySeed(StrictModel):
     order_reference: Identifier | None = None
     after_sales_reference: Identifier | None = None
@@ -143,6 +160,8 @@ class IntakeLobbySeed(StrictModel):
     )
     raw_text: LongText
     requested_outcome_hint: Identifier | None = None
+    claim_resolution_seed: IntakeClaimResolutionSeed | None = None
+    respondent_attitude_seed: IntakeRespondentAttitudeSeed | None = None
 
 
 class IntakeTurnMessage(StrictModel):
