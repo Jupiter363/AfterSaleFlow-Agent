@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { disputeApi } from "../../api/disputes";
 import { actor } from "../../state/actor";
@@ -17,6 +17,9 @@ const reviewReason = ref("审核员确认 AI 裁决草案。");
 const reviewPlanDraft = ref({ id: "", actions: [] });
 const reviewBusy = ref(false);
 const reviewStatus = ref("");
+const executionAssistantState = ref("idle");
+let executionAssistantTimer = null;
+let executionAssistantCaseId = "";
 const caseId = computed(
   () => outcome.value?.case_id || route.params.caseId,
 );
@@ -53,6 +56,12 @@ const isDraftOutcome = computed(
 );
 const canReviewOutcomeDraft = computed(
   () => actor.role === "PLATFORM_REVIEWER" && isDraftOutcome.value,
+);
+const shouldShowExecutionAssistant = computed(
+  () =>
+    isFinalOutcome.value &&
+    actions.value.length === 0 &&
+    Boolean(rawDecision.value?.human_confirmed || rawDecision.value?.humanConfirmed),
 );
 const canModifyReviewPlan = computed(
   () => (reviewPlanDraft.value.actions || []).length > 0,
@@ -130,9 +139,16 @@ const executionBoardKicker = computed(() =>
 const executionBoardTitle = computed(() =>
   isFinalOutcome.value ? "裁决落地轨迹" : "确认与执行轨迹",
 );
-const executionBoardCountText = computed(() =>
-  isFinalOutcome.value ? `${actions.value.length} 项执行动作` : `${actions.value.length} 项后续动作`,
-);
+const executionBoardCountText = computed(() => {
+  if (shouldShowExecutionAssistant.value) {
+    return executionAssistantState.value === "succeeded"
+      ? "模拟执行完成"
+      : "执行专员助手";
+  }
+  return isFinalOutcome.value
+    ? `${actions.value.length} 项执行动作`
+    : `${actions.value.length} 项后续动作`;
+});
 const executionBoardEmptyText = computed(() =>
   isFinalOutcome.value
     ? "执行回执正在路上，请稍后刷新。"
@@ -513,11 +529,50 @@ function removeReviewPlanAction(index) {
   );
 }
 
+function clearExecutionAssistantTimer() {
+  if (executionAssistantTimer) {
+    clearTimeout(executionAssistantTimer);
+    executionAssistantTimer = null;
+  }
+}
+
+function scheduleExecutionAssistantSuccess() {
+  clearExecutionAssistantTimer();
+  executionAssistantTimer = setTimeout(() => {
+    executionAssistantState.value = "succeeded";
+    executionAssistantTimer = null;
+  }, 3000);
+}
+
+function syncExecutionAssistantState() {
+  if (!shouldShowExecutionAssistant.value) {
+    clearExecutionAssistantTimer();
+    executionAssistantState.value = "idle";
+    executionAssistantCaseId = "";
+    return;
+  }
+  if (
+    executionAssistantCaseId === caseId.value &&
+    executionAssistantState.value !== "idle"
+  ) {
+    return;
+  }
+  executionAssistantCaseId = caseId.value;
+  executionAssistantState.value = "processing";
+  scheduleExecutionAssistantSuccess();
+}
+
 watch(
   adjudicationDraft,
   () => {
     syncReviewPlanDraft();
   },
+  { immediate: true },
+);
+
+watch(
+  [shouldShowExecutionAssistant, caseId],
+  syncExecutionAssistantState,
   { immediate: true },
 );
 
@@ -532,6 +587,7 @@ async function load() {
 }
 
 onMounted(load);
+onBeforeUnmount(clearExecutionAssistantTimer);
 </script>
 
 <template>
@@ -819,6 +875,30 @@ onMounted(load);
             {{ action.execution_status === "SUCCEEDED" ? "✓" : "…" }}
           </i>
         </article>
+      </div>
+      <div
+        v-else-if="shouldShowExecutionAssistant"
+        class="execution-assistant"
+        data-execution-assistant
+      >
+        <div
+          class="execution-assistant__indicator"
+          :data-state="executionAssistantState"
+          aria-hidden="true"
+        >
+          <span />
+        </div>
+        <div>
+          <span>裁决已确认</span>
+          <h3>方案已移交给执行专员助手处理</h3>
+          <p>
+            {{
+              executionAssistantState === "succeeded"
+                ? "方案执行成功"
+                : "执行专员助手处理中"
+            }}
+          </p>
+        </div>
       </div>
       <div v-else class="execution-board__empty">{{ executionBoardEmptyText }}</div>
     </section>
@@ -1183,6 +1263,77 @@ onMounted(load);
 .execution-result dd { margin: 0; overflow-wrap: anywhere; color: #405069; font-size: 11px; }
 .execution-board article > i { display: grid; place-items: center; width: 27px; height: 27px; color: #267252; background: #def5e8; border-radius: 50%; font-style: normal; }
 .execution-board article > i:not([data-status="SUCCEEDED"]) { color: #9a6d25; background: #fff0cc; }
+.execution-assistant {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 14px;
+  align-items: center;
+  margin-top: 15px;
+  padding: 18px;
+  background:
+    radial-gradient(circle at 6% 10%, #e7fff1 0 12%, transparent 13%),
+    linear-gradient(135deg, #f8fffb, #f3f8ff);
+  border: 1px solid #dcebe6;
+  border-radius: 20px;
+}
+.execution-assistant__indicator {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  color: #2f7b55;
+  background: #e7f8ef;
+  border-radius: 50%;
+}
+.execution-assistant__indicator::before {
+  content: "";
+  position: absolute;
+  inset: 5px;
+  border: 3px solid #bddfcd;
+  border-top-color: #5dbb92;
+  border-radius: 50%;
+  animation: execution-spin .9s linear infinite;
+}
+.execution-assistant__indicator span {
+  width: 10px;
+  height: 10px;
+  background: currentColor;
+  border-radius: 50%;
+}
+.execution-assistant__indicator[data-state="succeeded"]::before {
+  border-color: #7cc89e;
+  animation: none;
+}
+.execution-assistant__indicator[data-state="succeeded"] span {
+  width: 18px;
+  height: 18px;
+  background: transparent;
+}
+.execution-assistant__indicator[data-state="succeeded"] span::before {
+  content: "✓";
+  color: #2f7b55;
+  font-size: 18px;
+  font-weight: 900;
+}
+.execution-assistant span {
+  color: #5d7890;
+  font-size: 11px;
+  font-weight: 900;
+}
+.execution-assistant h3 {
+  margin: 4px 0;
+  color: #34445d;
+}
+.execution-assistant p {
+  margin: 0;
+  color: #2f7b55;
+  font-size: 13px;
+  font-weight: 900;
+}
+@keyframes execution-spin {
+  to { transform: rotate(360deg); }
+}
 .execution-board__empty { padding: 35px; color: #8290a3; text-align: center; }
 .outcome-footer { display: flex; justify-content: space-between; gap: 20px; align-items: center; padding: 17px 20px; background: #fff5dc; border: 1px solid #efdfb8; border-radius: 20px; }
 .outcome-footer div { display: flex; gap: 10px; align-items: center; color: #6f665f; }

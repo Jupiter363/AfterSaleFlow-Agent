@@ -77,6 +77,7 @@ describe("OutcomeView", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
   });
 
@@ -89,6 +90,33 @@ describe("OutcomeView", () => {
     expect(wrapper.findAll("[data-execution-receipt]")).toHaveLength(2);
     expect(wrapper.text()).toContain("裁决已生效");
     expect(wrapper.text()).toContain("审核员确认现有证据链完整");
+  });
+
+  it("simulates execution assistant handoff for final decisions without real action receipts", async () => {
+    vi.useFakeTimers();
+    const wrapper = await mountOutcome({
+      ...outcome,
+      case_status: "APPROVED_FOR_EXECUTION",
+      closed_at: null,
+      final_decision: {
+        conclusion: "审核员已确认草案",
+        explanation: "最终裁决已确认，后续执行由执行专员助手处理。",
+        review_reason: "审核员确认裁决草案。",
+        source: "HUMAN_REVIEW",
+        human_confirmed: true,
+      },
+      actions: [],
+    });
+
+    expect(wrapper.text()).toContain("裁决已确认");
+    expect(wrapper.text()).toContain("方案已移交给执行专员助手处理");
+    expect(wrapper.text()).toContain("执行专员助手处理中");
+    expect(wrapper.text()).not.toContain("方案执行成功");
+
+    vi.advanceTimersByTime(3000);
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("方案执行成功");
   });
 
   it("formats nested execution result payloads instead of dumping raw JSON", async () => {
