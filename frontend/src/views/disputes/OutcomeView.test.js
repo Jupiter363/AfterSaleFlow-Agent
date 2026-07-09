@@ -426,4 +426,38 @@ describe("OutcomeView", () => {
       plan,
     );
   });
+
+  it("lets platform reviewers add a structured action when the draft has no actions", async () => {
+    actor.id = "reviewer-local";
+    actor.role = "PLATFORM_REVIEWER";
+    const modify = vi
+      .spyOn(disputeApi, "modifyOutcomeDraft")
+      .mockResolvedValue({ decision: "MODIFY_AND_APPROVE", execution_allowed: true });
+    vi.spyOn(disputeApi, "outcome").mockResolvedValue(draftOutcome);
+    const wrapper = await mountOutcome({
+      ...draftOutcome,
+      adjudication_draft: {
+        ...draftOutcome.adjudication_draft,
+        approved_plan: { id: "PLAN_EMPTY", actions: [] },
+      },
+    });
+
+    expect(wrapper.find("[data-review-approved-plan-raw]").exists()).toBe(false);
+    expect(wrapper.get("[data-review-plan-editor]").text()).toContain("暂无执行动作");
+    await wrapper.get("[data-review-add-action]").trigger("click");
+    await wrapper.get("[data-review-action-type]").setValue("COMPENSATE");
+    await wrapper.get("[data-review-action-amount]").setValue("30");
+    await wrapper.get("[data-review-modify]").trigger("click");
+    await flushPromises();
+
+    expect(modify).toHaveBeenCalledWith(
+      expect.objectContaining({ role: "PLATFORM_REVIEWER" }),
+      "CASE_OUTCOME_1",
+      expect.stringContaining("审核员"),
+      {
+        id: "PLAN_EMPTY",
+        actions: [{ action_type: "COMPENSATE", amount: 30 }],
+      },
+    );
+  });
 });

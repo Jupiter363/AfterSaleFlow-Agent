@@ -15,7 +15,6 @@ const outcome = ref(props.initialOutcome);
 const error = ref("");
 const reviewReason = ref("审核员确认 AI 裁决草案。");
 const reviewPlanDraft = ref({ id: "", actions: [] });
-const reviewApprovedPlanText = ref("");
 const reviewBusy = ref(false);
 const reviewStatus = ref("");
 const caseId = computed(
@@ -459,33 +458,6 @@ async function confirmOutcomeDraft() {
   }
 }
 
-async function modifyOutcomeDraft() {
-  if (reviewBusy.value) return;
-  error.value = "";
-  reviewStatus.value = "";
-  let approvedPlan;
-  try {
-    approvedPlan = JSON.parse(reviewApprovedPlanText.value || "{}");
-  } catch {
-    error.value = "修改方案不是合法 JSON，请检查后再提交。";
-    return;
-  }
-  reviewBusy.value = true;
-  try {
-    await disputeApi.modifyOutcomeDraft(
-      actor,
-      caseId.value,
-      reviewReason.value || "审核员修改并确认 AI 裁决草案。",
-      approvedPlan,
-    );
-    await refreshOutcomeAfterReview("已按修改方案确认草案，最终处理状态已刷新。");
-  } catch (failure) {
-    error.value = failure.message;
-  } finally {
-    reviewBusy.value = false;
-  }
-}
-
 async function modifyOutcomeDraftFromStructuredPlan() {
   if (reviewBusy.value) return;
   error.value = "";
@@ -733,16 +705,6 @@ onMounted(load);
           rows="3"
           maxlength="2000"
           placeholder="请填写确认或修改理由"
-        />
-      </label>
-      <label>
-        <span>修改后的执行方案（JSON）</span>
-        <textarea
-          v-model="reviewApprovedPlanText"
-          data-review-approved-plan-raw
-          rows="7"
-          spellcheck="false"
-          placeholder='例如：{"id":"PLAN_1","actions":[{"action_type":"REFUND","amount":199}]}'
         />
       </label>
       <div class="review-plan-editor" data-review-plan-editor>
@@ -1099,9 +1061,6 @@ onMounted(load);
   color: #4f6078;
   font-size: 12px;
   font-weight: 900;
-}
-.outcome-review-panel label:has([data-review-approved-plan-raw]) {
-  display: none;
 }
 .review-plan-editor {
   display: grid;
