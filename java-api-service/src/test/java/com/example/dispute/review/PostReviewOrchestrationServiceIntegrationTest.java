@@ -35,6 +35,7 @@ import com.example.dispute.review.application.PostReviewOrchestrationService;
 import com.example.dispute.review.domain.ActionSnapshotHasher;
 import com.example.dispute.review.domain.ReviewPacketVersions;
 import com.example.dispute.tool.application.SimulatedExecutionTool;
+import com.example.dispute.tool.application.ToolRegistry;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -63,6 +64,7 @@ import org.testcontainers.utility.DockerImageName;
     PostReviewOrchestrationService.class,
     ToolExecutorService.class,
     CaseClosureService.class,
+    ToolRegistry.class,
     SimulatedExecutionTool.class,
     PostReviewOrchestrationServiceIntegrationTest.JacksonConfig.class
 })

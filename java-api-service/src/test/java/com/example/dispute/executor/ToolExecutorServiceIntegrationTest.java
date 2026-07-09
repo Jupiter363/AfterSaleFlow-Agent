@@ -29,6 +29,7 @@ import com.example.dispute.infrastructure.persistence.repository.RemedyPlanRepos
 import com.example.dispute.infrastructure.persistence.repository.ReviewPacketRepository;
 import com.example.dispute.infrastructure.persistence.repository.ReviewTaskRepository;
 import com.example.dispute.tool.application.SimulatedExecutionTool;
+import com.example.dispute.tool.application.ToolRegistry;
 import com.example.dispute.review.domain.ActionSnapshotHasher;
 import com.example.dispute.review.domain.ReviewPacketVersions;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -57,6 +58,7 @@ import org.testcontainers.utility.DockerImageName;
 @DataJpaTest(properties = "spring.jpa.hibernate.ddl-auto=validate")
 @Import({
     ToolExecutorService.class,
+    ToolRegistry.class,
     SimulatedExecutionTool.class,
     ToolExecutorServiceIntegrationTest.JacksonConfig.class
 })

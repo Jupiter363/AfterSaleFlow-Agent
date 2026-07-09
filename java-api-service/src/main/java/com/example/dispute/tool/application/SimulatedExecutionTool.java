@@ -11,7 +11,7 @@ import java.util.Map;
 import org.springframework.stereotype.Component;
 
 @Component
-public class SimulatedExecutionTool {
+public class SimulatedExecutionTool implements ToolAdapter {
 
     private static final Map<String, ToolOperation> OPERATIONS =
             Map.ofEntries(
@@ -41,6 +41,12 @@ public class SimulatedExecutionTool {
                             "AUDIT_EXECUTION_RESULT",
                             new ToolOperation("audit_tool", "record_execution")));
 
+    @Override
+    public boolean supports(String actionType) {
+        return OPERATIONS.containsKey(actionType);
+    }
+
+    @Override
     public ToolExecutionResult execute(ExecutableAction action) {
         ToolOperation operation = OPERATIONS.get(action.actionType());
         if (operation == null) {
