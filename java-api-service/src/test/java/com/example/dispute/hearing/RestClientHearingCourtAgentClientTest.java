@@ -52,6 +52,7 @@ class RestClientHearingCourtAgentClientTest {
                                   "round_no":1,
                                   "next_round_no":2,
                                   "final_draft_required":false,
+                                  "review_focus_signal":["用户关注签收人身份核验。"],
                                   "prompt_version":"hearing-round-turn-v1",
                                   "model":"deepseek-v4-flash"
                                 }
@@ -111,6 +112,7 @@ class RestClientHearingCourtAgentClientTest {
         assertThat(result.courtEventType()).isEqualTo("JUDGE_NEXT_QUESTIONS_READY");
         assertThat(result.nextRoundNo()).isEqualTo(2);
         assertThat(result.finalDraftRequired()).isFalse();
+        assertThat(result.reviewFocusSignal()).containsExactly("用户关注签收人身份核验。");
         server.verify();
     }
 }

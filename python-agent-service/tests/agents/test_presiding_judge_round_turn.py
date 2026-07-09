@@ -133,6 +133,8 @@ def test_hearing_round_turn_prompt_is_registered_with_harness_fragments() -> Non
     assert "方案确认轮" in system_prompt
     assert "双方一致" in system_prompt
     assert "不是和解协议" in system_prompt
+    assert "review_focus_signal" in system_prompt
+    assert "不直接采纳" in system_prompt
     assert "<untrusted_case_data>" in user_prompt
 
 
@@ -286,3 +288,48 @@ def test_final_round_is_guarded_to_final_draft_path() -> None:
     assert "后续确认" in result.message_text
     assert "平台审核员" not in result.message_text
     assert "终审" not in result.message_text
+
+
+def test_final_round_party_opinions_become_review_focus_signal() -> None:
+    runner = FakeRoundModelRunner(
+        generated=HearingRoundTurnResult(
+            speaker_role="JUDGE",
+            message_text="第三轮陈述已封存，AI 法官将生成非最终裁决草案。",
+            round_summary="第三轮双方围绕拟处理方向表达确认和异议。",
+            court_event_type="FINAL_DRAFT_REQUIRED",
+            round_no=3,
+            next_round_no=None,
+            final_draft_required=True,
+            prompt_version="hearing-round-turn-v1",
+            model="fake-round-model",
+        )
+    )
+
+    result = HearingRoundTurnWorkflow(model_runner=runner).run(
+        request(
+            round_no=3,
+            final_round=True,
+            party_submissions=[
+                {
+                    "participant_role": "USER",
+                    "participant_id": "user-local",
+                    "submission_source": "PARTY_ACTION",
+                    "submission_json": '{"statement":"我认可退款方向，但担心签收人身份还没有核验清楚。"}',
+                },
+                {
+                    "participant_role": "MERCHANT",
+                    "participant_id": "merchant-local",
+                    "submission_source": "PARTY_ACTION",
+                    "submission_json": '{"statement":"不同意退款，物流签收记录已经足以证明商家完成履约。"}',
+                },
+            ],
+        )
+    )
+
+    assert result.final_draft_required is True
+    assert result.review_focus_signal == [
+        "用户认可退款方向，但要求复核签收人身份是否已核验清楚。",
+        "商家不同意退款，主张物流签收记录足以证明已履约。",
+    ]
+    assert "非最终裁决草案" in result.message_text
+    assert "直接采纳用户意见" not in result.message_text

@@ -68,6 +68,7 @@ public class RestClientHearingCourtAgentClient implements HearingCourtAgentClien
                 response.path("round_no").asInt(),
                 nextRound.isMissingNode() || nextRound.isNull() ? null : nextRound.asInt(),
                 response.path("final_draft_required").asBoolean(false),
+                textArray(response.path("review_focus_signal")),
                 response.path("prompt_version").asText(),
                 response.path("model").asText());
     }

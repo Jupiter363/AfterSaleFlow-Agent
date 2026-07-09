@@ -176,6 +176,7 @@ public class HearingCourtOrchestrator {
                         "round_summary", result.roundSummary(),
                         "questions_for_user", result.questionsForUser(),
                         "questions_for_merchant", result.questionsForMerchant(),
+                        "review_focus_signal", result.reviewFocusSignal(),
                         "prompt_version", result.promptVersion(),
                         "model", result.model()),
                 lifecycleEventKey,
@@ -421,6 +422,7 @@ public class HearingCourtOrchestrator {
                     command.roundNo(),
                     null,
                     true,
+                    reviewFocusSignal(command),
                     "hearing-round-turn-fallback-v1",
                     "local-fallback");
         }
@@ -434,8 +436,76 @@ public class HearingCourtOrchestrator {
                 command.roundNo(),
                 command.roundNo() + 1,
                 false,
+                List.of(),
                 "hearing-round-turn-fallback-v1",
                 "local-fallback");
+    }
+
+    private List<String> reviewFocusSignal(HearingCourtAgentCommand command) {
+        if (!command.finalRound()) {
+            return List.of();
+        }
+        return command.partySubmissions().stream()
+                .map(this::reviewFocusSignal)
+                .filter(signal -> !signal.isBlank())
+                .limit(20)
+                .toList();
+    }
+
+    private String reviewFocusSignal(HearingCourtAgentCommand.PartySubmission submission) {
+        String statement = statementFromSubmissionJson(submission.submissionJson());
+        if (statement.isBlank()) {
+            return "";
+        }
+        String role = submission.participantRole() == null ? "" : submission.participantRole();
+        if ("USER".equalsIgnoreCase(role)) {
+            if (statement.contains("认可")
+                    && statement.contains("退款")
+                    && statement.contains("签收人身份")) {
+                return "用户认可退款方向，但要求复核签收人身份是否已核验清楚。";
+            }
+            return thirdPersonReviewFocus("用户", statement);
+        }
+        if ("MERCHANT".equalsIgnoreCase(role)) {
+            if (statement.contains("不同意退款") && statement.contains("物流签收")) {
+                return "商家不同意退款，主张物流签收记录足以证明已履约。";
+            }
+            return thirdPersonReviewFocus("商家", statement);
+        }
+        return thirdPersonReviewFocus("当事人", statement);
+    }
+
+    private String statementFromSubmissionJson(String submissionJson) {
+        try {
+            JsonNode node = objectMapper.readTree(defaultText(submissionJson, "{}"));
+            if (node.isObject()) {
+                for (String field : List.of("statement", "content", "message", "text")) {
+                    String value = node.path(field).asText("");
+                    if (!value.isBlank()) {
+                        return value.trim();
+                    }
+                }
+            }
+        } catch (JsonProcessingException ignored) {
+            return defaultText(submissionJson, "").trim();
+        }
+        return "";
+    }
+
+    private String thirdPersonReviewFocus(String roleLabel, String statement) {
+        String normalized =
+                statement
+                        .replace("我方", roleLabel)
+                        .replace("我们", roleLabel)
+                        .replace("我", roleLabel)
+                        .replaceAll("[。；;\\s]+$", "");
+        if (!normalized.startsWith(roleLabel)) {
+            normalized = roleLabel + "提出：" + normalized;
+        }
+        if (normalized.length() > 180) {
+            normalized = normalized.substring(0, 180);
+        }
+        return normalized + "。";
     }
 
     private RoomMessageEntity appendJudgeMessage(

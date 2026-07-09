@@ -12,6 +12,7 @@ public record HearingCourtAgentResult(
         int roundNo,
         Integer nextRoundNo,
         boolean finalDraftRequired,
+        List<String> reviewFocusSignal,
         String promptVersion,
         String model) {
 
@@ -22,6 +23,8 @@ public record HearingCourtAgentResult(
         questionsForUser = questionsForUser == null ? List.of() : List.copyOf(questionsForUser);
         questionsForMerchant =
                 questionsForMerchant == null ? List.of() : List.copyOf(questionsForMerchant);
+        reviewFocusSignal =
+                reviewFocusSignal == null ? List.of() : List.copyOf(reviewFocusSignal);
         courtEventType =
                 blankToDefault(
                         courtEventType,
@@ -30,6 +33,33 @@ public record HearingCourtAgentResult(
                                 : "JUDGE_NEXT_QUESTIONS_READY");
         promptVersion = blankToDefault(promptVersion, "hearing-round-turn-unknown");
         model = blankToDefault(model, "unknown");
+    }
+
+    public HearingCourtAgentResult(
+            String speakerRole,
+            String messageText,
+            String roundSummary,
+            List<String> questionsForUser,
+            List<String> questionsForMerchant,
+            String courtEventType,
+            int roundNo,
+            Integer nextRoundNo,
+            boolean finalDraftRequired,
+            String promptVersion,
+            String model) {
+        this(
+                speakerRole,
+                messageText,
+                roundSummary,
+                questionsForUser,
+                questionsForMerchant,
+                courtEventType,
+                roundNo,
+                nextRoundNo,
+                finalDraftRequired,
+                List.of(),
+                promptVersion,
+                model);
     }
 
     private static String blankToDefault(String value, String fallback) {

@@ -397,6 +397,7 @@ class HearingCourtOrchestratorTest {
                                 3,
                                 null,
                                 true,
+                                List.of("用户认可退款方向，但要求复核签收人身份是否已核验清楚。"),
                                 "hearing-round-turn-v1",
                                 "deepseek-v4-flash"));
         when(a2aMessageService.findForJudge(dispute.getId(), 3))
@@ -428,6 +429,21 @@ class HearingCourtOrchestratorTest {
                 .contains("\"jury_a2a_notes\"")
                 .contains("签收人身份仍需关注")
                 .doesNotContain("\"dossier_version\":1,\"dossier_status\":\"FROZEN\"");
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> lifecyclePayload =
+                ArgumentCaptor.forClass((Class) Map.class);
+        verify(eventService)
+                .recordLifecycleEvent(
+                        eq(dispute.getId()),
+                        eq(room.getId()),
+                        eq("FINAL_DRAFT_REQUIRED"),
+                        lifecyclePayload.capture(),
+                        eq("judge-round-turn-ready:" + dispute.getId() + ":3"),
+                        eq("presiding-judge"));
+        assertThat(lifecyclePayload.getValue())
+                .containsEntry(
+                        "review_focus_signal",
+                        List.of("用户认可退款方向，但要求复核签收人身份是否已核验清楚。"));
     }
 
     @Test

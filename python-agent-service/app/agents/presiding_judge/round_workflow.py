@@ -134,6 +134,7 @@ def _apply_court_guardrails(state: HearingRoundTurnGraphState) -> dict[str, Any]
         questions_for_user = []
         questions_for_merchant = []
         round_summary = _sanitize_round_summary(output.round_summary)
+        review_focus_signal = _review_focus_signal(request, output)
     else:
         expected_event = "JUDGE_NEXT_QUESTIONS_READY"
         message_text = _sanitize_judge_message(
@@ -144,6 +145,9 @@ def _apply_court_guardrails(state: HearingRoundTurnGraphState) -> dict[str, Any]
         questions_for_user = output.questions_for_user
         questions_for_merchant = output.questions_for_merchant
         round_summary = _sanitize_round_summary(output.round_summary)
+        review_focus_signal = []
+    if opening_turn:
+        review_focus_signal = []
     result = output.model_copy(
         update={
             "speaker_role": "JUDGE",
@@ -155,6 +159,7 @@ def _apply_court_guardrails(state: HearingRoundTurnGraphState) -> dict[str, Any]
             "round_no": request.round_no,
             "next_round_no": next_round_no,
             "final_draft_required": final_round and not opening_turn,
+            "review_focus_signal": review_focus_signal,
             "non_final": True,
             "requires_human_review": True,
         }
@@ -192,6 +197,7 @@ def _fallback_result(request: HearingRoundTurnRequest) -> HearingRoundTurnResult
             round_no=request.round_no,
             next_round_no=None,
             final_draft_required=True,
+            review_focus_signal=_derived_review_focus_signal(request),
             prompt_version="hearing-round-turn-fallback-v1",
             model="local-fallback",
         )
@@ -207,9 +213,82 @@ def _fallback_result(request: HearingRoundTurnRequest) -> HearingRoundTurnResult
         round_no=request.round_no,
         next_round_no=request.round_no + 1,
         final_draft_required=False,
+        review_focus_signal=[],
         prompt_version="hearing-round-turn-fallback-v1",
         model="local-fallback",
     )
+
+
+def _review_focus_signal(
+    request: HearingRoundTurnRequest,
+    output: HearingRoundTurnResult,
+) -> list[str]:
+    provided = [
+        localize_internal_text(str(item or "").strip())
+        for item in output.review_focus_signal
+        if str(item or "").strip()
+    ]
+    if provided:
+        return provided[:20]
+    return _derived_review_focus_signal(request)
+
+
+def _derived_review_focus_signal(request: HearingRoundTurnRequest) -> list[str]:
+    if request.round_no < 3 and not request.final_round:
+        return []
+    signals: list[str] = []
+    for submission in request.party_submissions:
+        statement = _submission_statement(submission.submission_json)
+        signal = _normalize_review_focus(submission.participant_role, statement)
+        if signal:
+            signals.append(signal)
+    return signals[:20]
+
+
+def _submission_statement(submission_json: str) -> str:
+    try:
+        payload = json.loads(submission_json or "{}")
+    except json.JSONDecodeError:
+        return localize_internal_text(submission_json.strip())
+    if isinstance(payload, dict):
+        for key in ("statement", "content", "message", "text"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return localize_internal_text(value.strip())
+    return ""
+
+
+def _normalize_review_focus(participant_role: str, statement: str) -> str:
+    text = localize_internal_text(statement).strip()
+    if not text:
+        return ""
+    role = participant_role.upper()
+    if role == "USER":
+        if "认可" in text and "退款" in text and "签收人身份" in text:
+            return "用户认可退款方向，但要求复核签收人身份是否已核验清楚。"
+        return _third_person_review_focus("用户", text)
+    if role == "MERCHANT":
+        if "不同意退款" in text and "物流签收" in text:
+            return "商家不同意退款，主张物流签收记录足以证明已履约。"
+        return _third_person_review_focus("商家", text)
+    return _third_person_review_focus("当事人", text)
+
+
+def _third_person_review_focus(role_label: str, text: str) -> str:
+    normalized = text
+    replacements = {
+        "我方": role_label,
+        "我们": role_label,
+        "我": role_label,
+    }
+    for source, target in replacements.items():
+        normalized = normalized.replace(source, target)
+    normalized = normalized.strip("。；; ")
+    if not normalized:
+        return ""
+    if not normalized.startswith(role_label):
+        normalized = f"{role_label}提出：{normalized}"
+    return normalized[:180].rstrip("，,；; ") + "。"
 
 
 def _current_turn_context(request: HearingRoundTurnRequest) -> dict[str, Any]:

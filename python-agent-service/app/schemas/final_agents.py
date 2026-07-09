@@ -448,6 +448,9 @@ class HearingRoundTurnResult(StrictModel):
     round_no: Annotated[int, Field(ge=1, le=3)]
     next_round_no: Annotated[int, Field(ge=1, le=3)] | None = None
     final_draft_required: bool = False
+    review_focus_signal: Annotated[list[ShortText], Field(max_length=20)] = Field(
+        default_factory=list
+    )
     prompt_version: Identifier = "hearing-round-turn-v1"
     model: Identifier = "unknown"
     non_final: Literal[True] = True
