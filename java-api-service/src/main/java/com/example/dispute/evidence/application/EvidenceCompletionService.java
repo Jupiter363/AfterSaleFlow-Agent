@@ -3,10 +3,13 @@ package com.example.dispute.evidence.application;
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.config.DisputeProperties;
+import com.example.dispute.common.exception.BadRequestException;
 import com.example.dispute.domain.model.CaseStatus;
+import com.example.dispute.evidence.domain.EvidenceSubmissionStatus;
 import com.example.dispute.evidence.infrastructure.persistence.entity.EvidencePartyCompletionEntity;
 import com.example.dispute.evidence.infrastructure.persistence.repository.EvidencePartyCompletionRepository;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
+import com.example.dispute.infrastructure.persistence.repository.EvidenceItemRepository;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.notification.application.NotificationCommand;
 import com.example.dispute.notification.application.CaseLifecycleNotificationService;
@@ -36,6 +39,7 @@ public class EvidenceCompletionService {
 
     private final FulfillmentCaseRepository caseRepository;
     private final EvidencePartyCompletionRepository completionRepository;
+    private final EvidenceItemRepository evidenceRepository;
     private final CaseRoomRepository roomRepository;
     private final CasePhaseClockRepository clockRepository;
     private final EvidenceDossierFreezer dossierFreezer;
@@ -51,6 +55,7 @@ public class EvidenceCompletionService {
     public EvidenceCompletionService(
             FulfillmentCaseRepository caseRepository,
             EvidencePartyCompletionRepository completionRepository,
+            EvidenceItemRepository evidenceRepository,
             CaseRoomRepository roomRepository,
             CasePhaseClockRepository clockRepository,
             EvidenceDossierFreezer dossierFreezer,
@@ -64,6 +69,7 @@ public class EvidenceCompletionService {
             Clock clock) {
         this.caseRepository = caseRepository;
         this.completionRepository = completionRepository;
+        this.evidenceRepository = evidenceRepository;
         this.roomRepository = roomRepository;
         this.clockRepository = clockRepository;
         this.dossierFreezer = dossierFreezer;
@@ -100,6 +106,7 @@ public class EvidenceCompletionService {
                         .findByIdForUpdate(caseId)
                         .orElseThrow(() -> new IllegalArgumentException("case not found"));
         assertParty(dispute, actor);
+        assertInitiatorHasSubmittedEvidence(dispute);
         int dossierVersion =
                 isEvidenceOpen(dispute)
                         ? completionVersion(caseId)
@@ -193,6 +200,7 @@ public class EvidenceCompletionService {
         int dossierVersion = completionVersion(caseId);
         if (dispute.getCaseStatus() == CaseStatus.EVIDENCE_OPEN
                 || dispute.getCaseStatus() == CaseStatus.EVIDENCE_SEALED) {
+            assertInitiatorHasSubmittedEvidence(dispute);
             dossierFreezer.freeze(caseId, dossierVersion, "evidence-deadline");
             CaseRoomEntity hearingRoom =
                     sealEvidenceAndOpenHearing(
@@ -285,6 +293,25 @@ public class EvidenceCompletionService {
                         || actor.role() == ActorRole.MERCHANT
                                 && actor.actorId().equals(dispute.getMerchantId());
         if (!allowed) throw new SecurityException("only case parties can complete evidence");
+    }
+
+    private void assertInitiatorHasSubmittedEvidence(FulfillmentCaseEntity dispute) {
+        ActorRole initiatorRole = dispute.getInitiatorRole();
+        long submitted =
+                evidenceRepository
+                        .countByCaseIdAndSubmittedByRoleAndSubmissionStatusAndDeletedAtIsNull(
+                                dispute.getId(),
+                                initiatorRole.name(),
+                                EvidenceSubmissionStatus.SUBMITTED);
+        if (submitted > 0) {
+            return;
+        }
+        throw new BadRequestException(
+                "发起争议方需先正式提交至少 1 份相关证据，当前证据栏为空，暂不能进入下一步。",
+                Map.of(
+                        "case_id", dispute.getId(),
+                        "initiator_role", initiatorRole.name(),
+                        "required_submission_status", EvidenceSubmissionStatus.SUBMITTED.name()));
     }
 
     private static void assertCanAccess(

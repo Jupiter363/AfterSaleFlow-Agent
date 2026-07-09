@@ -3,6 +3,10 @@ import { apiRequest, newIdempotencyKey } from "./client";
 export const hearingApi = {
   hearing: (actor, caseId) =>
     apiRequest(`/disputes/${caseId}/hearing`, actor),
+  complete: (actor, caseId) =>
+    apiRequest(`/disputes/${caseId}/hearing/complete`, actor, {
+      method: "POST",
+    }),
   rounds: (actor, caseId) =>
     apiRequest(`/disputes/${caseId}/hearing/rounds`, actor),
   completeRound: (actor, caseId, command) =>

@@ -17,13 +17,17 @@ import com.example.dispute.hearing.application.HearingCourtAgentClient;
 import com.example.dispute.hearing.application.HearingCourtAgentCommand;
 import com.example.dispute.hearing.application.HearingCourtAgentResult;
 import com.example.dispute.hearing.application.HearingCourtOrchestrator;
+import com.example.dispute.hearing.application.AgentA2AMessageService;
+import com.example.dispute.hearing.application.AgentA2AMessageView;
 import com.example.dispute.hearing.domain.HearingRoundSubmissionSource;
 import com.example.dispute.hearing.infrastructure.persistence.entity.HearingRoundEntity;
 import com.example.dispute.hearing.infrastructure.persistence.entity.HearingRoundPartySubmissionEntity;
 import com.example.dispute.hearing.infrastructure.persistence.repository.HearingRoundPartySubmissionRepository;
 import com.example.dispute.hearing.infrastructure.persistence.repository.HearingRoundRepository;
+import com.example.dispute.infrastructure.persistence.entity.EvidenceDossierEntity;
 import com.example.dispute.infrastructure.persistence.entity.HearingRecordEntity;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
+import com.example.dispute.infrastructure.persistence.repository.EvidenceDossierRepository;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.infrastructure.persistence.repository.HearingRecordRepository;
 import com.example.dispute.room.application.CaseEventService;
@@ -41,6 +45,7 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
+import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -59,9 +64,11 @@ class HearingCourtOrchestratorTest {
     @Mock private HearingRoundRepository roundRepository;
     @Mock private HearingRoundPartySubmissionRepository submissionRepository;
     @Mock private HearingRecordRepository hearingRecordRepository;
+    @Mock private EvidenceDossierRepository evidenceDossierRepository;
     @Mock private RoomMessageRepository messageRepository;
     @Mock private CaseEventService eventService;
     @Mock private HearingCourtAgentClient agentClient;
+    @Mock private AgentA2AMessageService a2aMessageService;
 
     private HearingCourtOrchestrator orchestrator;
 
@@ -74,9 +81,11 @@ class HearingCourtOrchestratorTest {
                         roundRepository,
                         submissionRepository,
                         hearingRecordRepository,
+                        evidenceDossierRepository,
                         messageRepository,
                         eventService,
                         agentClient,
+                        a2aMessageService,
                         new ObjectMapper(),
                         CLOCK,
                         new PostCommitSideEffectExecutor(Runnable::run));
@@ -309,6 +318,99 @@ class HearingCourtOrchestratorTest {
     }
 
     @Test
+    void afterRoundClosedComposesJudgeContextFromActiveEvidenceDossierVersion() {
+        FulfillmentCaseEntity dispute = hearingCase();
+        CaseRoomEntity room =
+                CaseRoomEntity.open(
+                        "ROOM_HEARING_CASE_COURT",
+                        dispute.getId(),
+                        RoomType.HEARING,
+                        OffsetDateTime.parse("2026-07-07T01:00:00Z"),
+                        "system");
+        HearingRoundEntity round =
+                HearingRoundEntity.open(
+                        "HEARING_ROUND_3",
+                        dispute.getId(),
+                        null,
+                        3,
+                        1,
+                        Instant.parse("2026-07-07T01:05:00Z"),
+                        Instant.parse("2026-07-07T01:00:00Z"),
+                        "system");
+        round.complete(
+                "{\"trigger\":\"BOTH_PARTIES_SUBMITTED\"}",
+                null,
+                Instant.parse("2026-07-07T01:04:00Z"),
+                "hearing-controller");
+        when(caseRepository.findById(dispute.getId())).thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.HEARING))
+                .thenReturn(Optional.of(room));
+        when(roundRepository.findByCaseIdAndRoundNo(dispute.getId(), 3))
+                .thenReturn(Optional.of(round));
+        when(submissionRepository.findAllByCaseIdAndRoundNoOrderBySubmittedAtAsc(
+                        dispute.getId(), 3))
+                .thenReturn(List.of());
+        when(hearingRecordRepository
+                        .findTopByCaseIdAndNodeNameAndRoundNoAndRecordTypeOrderByCreatedAtDesc(
+                                dispute.getId(),
+                                "C0_COURT_BOOTSTRAP",
+                                1,
+                                "BOOTSTRAP_DOSSIER_SNAPSHOT"))
+                .thenReturn(Optional.of(bootstrapSnapshot(dispute.getId())));
+        when(evidenceDossierRepository.findTopByCaseIdOrderByDossierVersionDesc(dispute.getId()))
+                .thenReturn(Optional.of(activeEvidenceDossierV2(dispute.getId())));
+        when(messageRepository.findByCaseIdAndIdempotencyKey(
+                        dispute.getId(), "judge-round-turn:" + dispute.getId() + ":3"))
+                .thenReturn(Optional.empty());
+        when(messageRepository.findMaxSequenceByRoomId(room.getId())).thenReturn(8L);
+        when(messageRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(agentClient.generateRoundTurn(any(), eq("TRACE_COURT_ROUND_3"), any()))
+                .thenReturn(
+                        new HearingCourtAgentResult(
+                                "JUDGE",
+                                "第 3 轮方案确认已封存，AI 法官将生成裁决草案。",
+                                "第三轮双方已完成方案确认或异议说明。",
+                                List.of(),
+                                List.of(),
+                                "FINAL_DRAFT_REQUIRED",
+                                3,
+                                null,
+                                true,
+                                "hearing-round-turn-v1",
+                                "deepseek-v4-flash"));
+        when(a2aMessageService.findForJudge(dispute.getId(), 3))
+                .thenReturn(
+                        List.of(
+                                new AgentA2AMessageView(
+                                        "A2A_JURY_2",
+                                        dispute.getId(),
+                                        2,
+                                        "JURY_PANEL",
+                                        "PRESIDING_JUDGE",
+                                        "JURY_SILENT_NOTE",
+                                        "{\"evidence_dossier_version\":2}",
+                                        "{\"judge_attention\":[\"签收人身份仍需关注\"]}",
+                                        "SYSTEM_AUDIT_ONLY",
+                                        "RUN_JURY_2",
+                                        Instant.parse("2026-07-07T01:04:30Z"))));
+
+        orchestrator.afterRoundClosed(dispute.getId(), 3, true, "TRACE_COURT_ROUND_3");
+
+        ArgumentCaptor<HearingCourtAgentCommand> command =
+                ArgumentCaptor.forClass(HearingCourtAgentCommand.class);
+        verify(agentClient).generateRoundTurn(command.capture(), eq("TRACE_COURT_ROUND_3"), any());
+        assertThat(command.getValue().courtroomContextJson())
+                .contains("\"baseline_version\":1")
+                .contains("\"active_version\":2")
+                .contains("\"dossier_version\":2")
+                .contains("第 2 轮证据解释后更新的签收证明矩阵")
+                .contains("\"jury_a2a_notes\"")
+                .contains("签收人身份仍需关注")
+                .doesNotContain("\"dossier_version\":1,\"dossier_status\":\"FROZEN\"");
+    }
+
+    @Test
     void afterRoundClosedRequiresFrozenCourtroomContext() {
         FulfillmentCaseEntity dispute = hearingCase();
         CaseRoomEntity room =
@@ -395,10 +497,16 @@ class HearingCourtOrchestratorTest {
                 """
                 {
                   "schema_version": "hearing_bootstrap_dossier.v1",
+                  "evidence_dossier_version": 1,
+                  "source_versions": {
+                    "evidence_dossier_version": 1
+                  },
                   "intake_dossier": {
                     "case_story": "用户称物流显示已签收但本人未收到包裹。"
                   },
                   "evidence_dossier": {
+                    "dossier_version": 1,
+                    "dossier_status": "FROZEN",
                     "fact_evidence_matrix": [
                       {
                         "fact_id": "FACT_SIGNED",
@@ -416,5 +524,35 @@ class HearingCourtOrchestratorTest {
                 null,
                 null,
                 "hearing-bootstrap");
+    }
+
+    private static EvidenceDossierEntity activeEvidenceDossierV2(String caseId) {
+        return EvidenceDossierEntity.frozen(
+                "EVIDENCE_DOSSIER_ACTIVE_V2",
+                caseId,
+                2,
+                "evidence-clerk",
+                """
+                {
+                  "overall_confidence_score": 76,
+                  "handoff_notes": "第 2 轮证据解释后更新的签收证明矩阵"
+                }
+                """,
+                "[]",
+                """
+                {
+                  "updated_after_round": 2,
+                  "supersedes_version": 1,
+                  "active_version": 2,
+                  "fact_evidence_matrix": [
+                    {
+                      "fact_id": "FACT_SIGNED",
+                      "fact": "第 2 轮证据解释后更新的签收证明矩阵",
+                      "supporting_evidence": ["EVIDENCE_LOGISTICS_V2"],
+                      "evidence_strength": "MEDIUM"
+                    }
+                  ]
+                }
+                """);
     }
 }

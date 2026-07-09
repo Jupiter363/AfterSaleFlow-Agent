@@ -125,6 +125,66 @@ class EvidenceSubmissionServiceTest {
     }
 
     @Test
+    void submitsHearingSupplementEvidenceToTheHearingRoom() {
+        FulfillmentCaseEntity dispute = hearingCase();
+        EvidenceItemEntity item = evidence("EVIDENCE_HEARING_SUPPLEMENT");
+        when(caseRepository.findByIdForUpdate(dispute.getId())).thenReturn(Optional.of(dispute));
+        when(batchRepository.findByCaseIdAndIdempotencyKey(dispute.getId(), "submit-hearing-1"))
+                .thenReturn(Optional.empty());
+        when(evidenceRepository.findAllById(List.of("EVIDENCE_HEARING_SUPPLEMENT")))
+                .thenReturn(List.of(item));
+        when(batchRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(roomMessageService.post(
+                        eq(dispute.getId()),
+                        eq(RoomType.HEARING),
+                        any(),
+                        any(),
+                        any(),
+                        eq("TRACE_HEARING")))
+                .thenReturn(
+                        new RoomMessageView(
+                                "MESSAGE_HEARING_BATCH",
+                                dispute.getId(),
+                                "ROOM_HEARING",
+                                8,
+                                "USER",
+                                "user-local",
+                                MessageType.PARTY_EVIDENCE_REFERENCE,
+                                "submitted",
+                                List.of("EVIDENCE_HEARING_SUPPLEMENT"),
+                                1,
+                                Instant.parse("2026-07-06T08:00:00Z")));
+
+        var result =
+                service.submit(
+                        dispute.getId(),
+                        new EvidenceSubmissionCommand(
+                                List.of("EVIDENCE_HEARING_SUPPLEMENT"),
+                                "庭审补充证据"),
+                        new AuthenticatedActor("user-local", ActorRole.USER),
+                        "submit-hearing-1",
+                        "TRACE_HEARING");
+
+        assertThat(result.roomMessage().roomId()).isEqualTo("ROOM_HEARING");
+        assertThat(item.getSubmissionStatus().name()).isEqualTo("SUBMITTED");
+
+        ArgumentCaptor<RoomMessageCommand> commandCaptor =
+                ArgumentCaptor.forClass(RoomMessageCommand.class);
+        verify(roomMessageService)
+                .post(
+                        eq(dispute.getId()),
+                        eq(RoomType.HEARING),
+                        commandCaptor.capture(),
+                        any(),
+                        eq("evidence-batch-message:submit-hearing-1"),
+                        eq("TRACE_HEARING"));
+        assertThat(commandCaptor.getValue().messageType())
+                .isEqualTo(MessageType.PARTY_EVIDENCE_REFERENCE);
+        assertThat(commandCaptor.getValue().attachmentRefs())
+                .containsExactly("EVIDENCE_HEARING_SUPPLEMENT");
+    }
+
+    @Test
     void deletesOnlyPendingEvidenceOwnedByCurrentActor() {
         FulfillmentCaseEntity dispute = evidenceCase();
         EvidenceItemEntity pending = evidence("EVIDENCE_PENDING");
@@ -197,6 +257,27 @@ class EvidenceSubmissionServiceTest {
                 OffsetDateTime.parse("2026-07-06T10:00:00Z"),
                 "OMS",
                 "EXT-EVIDENCE",
+                "external-adapter");
+    }
+
+    private static FulfillmentCaseEntity hearingCase() {
+        return FulfillmentCaseEntity.imported(
+                "CASE_EVIDENCE_ROOM",
+                "ORDER-EVIDENCE",
+                null,
+                "LOG-EVIDENCE",
+                "user-local",
+                "merchant-local",
+                "idem-evidence-hearing",
+                "SIGNED_NOT_RECEIVED",
+                "签收未收到",
+                "案件已经进入庭审阶段",
+                RiskLevel.HIGH,
+                CaseStatus.HEARING_OPEN,
+                "HEARING",
+                OffsetDateTime.parse("2026-07-06T10:00:00Z"),
+                "OMS",
+                "EXT-EVIDENCE-HEARING",
                 "external-adapter");
     }
 }

@@ -4,8 +4,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -16,6 +18,7 @@ import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.RiskLevel;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
+import com.example.dispute.hearing.application.HearingRoundService;
 import com.example.dispute.room.application.CaseEventService;
 import com.example.dispute.room.application.EvidenceAgentTurnService;
 import com.example.dispute.room.application.IntakeAgentTurnService;
@@ -72,6 +75,7 @@ class RoomMessageAndEventServiceTest {
     @Mock private CaseTimelineEventRepository eventRepository;
     @Mock private IntakeAgentTurnService intakeAgentTurnService;
     @Mock private EvidenceAgentTurnService evidenceAgentTurnService;
+    @Mock private HearingRoundService hearingRoundService;
     @Mock private AccessSessionResolver accessSessionResolver;
 
     private CaseEventService eventService;
@@ -98,6 +102,7 @@ class RoomMessageAndEventServiceTest {
                         eventService,
                         intakeAgentTurnService,
                         evidenceAgentTurnService,
+                        hearingRoundService,
                         accessSessionResolver,
                         permissionService,
                         CLOCK);
@@ -161,6 +166,110 @@ class RoomMessageAndEventServiceTest {
         assertThat(messages).hasSize(1);
         assertThat(messages.getFirst().senderRole()).isEqualTo("JUDGE");
         assertThat(messages.getFirst().hearingRound()).isEqualTo(1);
+    }
+
+    @Test
+    void hearingPartyTextIsBoundToTheCurrentRoundAndRegisteredAsRoundStatement() {
+        FulfillmentCaseEntity dispute = evidenceCase();
+        CaseRoomEntity room =
+                CaseRoomEntity.open(
+                        "ROOM_HEARING",
+                        dispute.getId(),
+                        RoomType.HEARING,
+                        OffsetDateTime.parse("2026-07-03T00:00:00Z"),
+                        "system");
+        AuthenticatedActor user = new AuthenticatedActor("user-local", ActorRole.USER);
+        when(caseRepository.findByIdForUpdate(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(
+                        dispute.getId(), RoomType.HEARING))
+                .thenReturn(Optional.of(room));
+        when(participantRepository.existsByCaseIdAndActorIdAndParticipantRole(
+                        dispute.getId(), "user-local", ActorRole.USER))
+                .thenReturn(true);
+        when(messageRepository.findByCaseIdAndIdempotencyKey(
+                        dispute.getId(), "hearing-msg-1"))
+                .thenReturn(Optional.empty());
+        when(messageRepository.findMaxSequenceByRoomId(room.getId())).thenReturn(4L);
+        when(eventRepository.findMaxSequenceByCaseId(dispute.getId())).thenReturn(8L);
+        when(messageRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(eventRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(hearingRoundService.currentOpenRoundNoForPartyMessage(dispute.getId(), user))
+                .thenReturn(2);
+
+        RoomMessageCommand command =
+                new RoomMessageCommand(
+                        MessageType.PARTY_TEXT,
+                        "用户补充：请核验签收位置和投递照片。",
+                        List.of());
+
+        RoomMessageView message =
+                messageService.post(
+                        dispute.getId(),
+                        RoomType.HEARING,
+                        command,
+                        user,
+                        "hearing-msg-1",
+                        "TRACE_HEARING_MSG");
+
+        assertThat(message.hearingRound()).isEqualTo(2);
+        verify(hearingRoundService)
+                .recordPartyMessageSubmission(
+                        eq(dispute.getId()),
+                        eq(2),
+                        eq(message.id()),
+                        eq("用户补充：请核验签收位置和投递照片。"),
+                        eq(user));
+    }
+
+    @Test
+    void hearingEvidenceReferenceIsBoundToTheCurrentRoundWithoutCountingAsRoundStatement() {
+        FulfillmentCaseEntity dispute = evidenceCase();
+        CaseRoomEntity room =
+                CaseRoomEntity.open(
+                        "ROOM_HEARING",
+                        dispute.getId(),
+                        RoomType.HEARING,
+                        OffsetDateTime.parse("2026-07-03T00:00:00Z"),
+                        "system");
+        AuthenticatedActor user = new AuthenticatedActor("user-local", ActorRole.USER);
+        when(caseRepository.findByIdForUpdate(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(
+                        dispute.getId(), RoomType.HEARING))
+                .thenReturn(Optional.of(room));
+        when(participantRepository.existsByCaseIdAndActorIdAndParticipantRole(
+                        dispute.getId(), "user-local", ActorRole.USER))
+                .thenReturn(true);
+        when(messageRepository.findByCaseIdAndIdempotencyKey(
+                        dispute.getId(), "hearing-evidence-ref-1"))
+                .thenReturn(Optional.empty());
+        when(messageRepository.findMaxSequenceByRoomId(room.getId())).thenReturn(4L);
+        when(eventRepository.findMaxSequenceByCaseId(dispute.getId())).thenReturn(8L);
+        when(messageRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(eventRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(hearingRoundService.currentOpenRoundNoForPartyMessage(dispute.getId(), user))
+                .thenReturn(2);
+
+        RoomMessageView message =
+                messageService.post(
+                        dispute.getId(),
+                        RoomType.HEARING,
+                        new RoomMessageCommand(
+                                MessageType.PARTY_EVIDENCE_REFERENCE,
+                                "用户补充提交 1 份庭审证据。",
+                                List.of("EVIDENCE_HEARING_SUPPLEMENT_1")),
+                        user,
+                        "hearing-evidence-ref-1",
+                        "TRACE_HEARING_EVIDENCE_REF");
+
+        assertThat(message.hearingRound()).isEqualTo(2);
+        verify(hearingRoundService, never())
+                .recordPartyMessageSubmission(any(), anyInt(), any(), any(), any());
     }
 
     @Test

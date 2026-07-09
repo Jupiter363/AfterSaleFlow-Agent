@@ -5,6 +5,7 @@ import {
   onMounted,
   reactive,
   ref,
+  watch,
 } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { hearingApi } from "../../api/hearing";
@@ -22,6 +23,7 @@ import { displayRoomMessageText } from "../../utils/displayText";
 
 const props = defineProps({
   initialHearing: { type: Object, default: null },
+  initialEvidenceCatalog: { type: Object, default: null },
   viewerRole: { type: String, default: "" },
   deadlineAt: { type: String, default: "" },
   serverNow: { type: String, default: "" },
@@ -32,12 +34,15 @@ const props = defineProps({
   messageAction: { type: Function, default: null },
   proposeSettlementAction: { type: Function, default: null },
   supplementAction: { type: Function, default: null },
+  submitEvidenceBatchAction: { type: Function, default: null },
   submitRoundAction: { type: Function, default: null },
+  completeHearingAction: { type: Function, default: null },
 });
 
 const route = useRoute();
 const router = useRouter();
 const hearing = ref(props.initialHearing);
+const evidenceCatalog = ref(props.initialEvidenceCatalog);
 const agentState = ref("LISTENING");
 const reviewGateOpen = ref(false);
 const error = ref("");
@@ -54,9 +59,23 @@ const eventState = reactive(createRoomState());
 const eventAbortController = new AbortController();
 const caseId = computed(() => route.params.caseId);
 const role = computed(() => props.viewerRole || actor.role);
+const demoActorIds = {
+  USER: "user-local",
+  MERCHANT: "merchant-local",
+  PLATFORM_REVIEWER: "reviewer-local",
+};
+const effectiveActor = computed(() => {
+  if (actor.role === role.value) return actor;
+  return {
+    ...actor,
+    id: demoActorIds[role.value] || actor.id,
+    role: role.value,
+  };
+});
 const isReviewer = computed(() => role.value === "PLATFORM_REVIEWER");
 const rounds = computed(() => hearing.value?.rounds || []);
 const settlements = computed(() => hearing.value?.settlements || []);
+const hearingStatus = computed(() => hearing.value?.status || {});
 const currentRound = computed(
   () => Math.max(1, ...rounds.value.map((round) => round.round_no || 1)),
 );
@@ -79,6 +98,27 @@ const effectiveDeadline = computed(
 const effectiveServerNow = computed(
   () => props.serverNow || new Date().toISOString(),
 );
+const stageClockLocalNow = ref(Date.now());
+const stageClockAnchorLocal = ref(Date.now());
+const stageClockAnchorServer = ref(Date.parse(effectiveServerNow.value));
+
+watch(
+  effectiveServerNow,
+  (value) => {
+    const parsed = Date.parse(value);
+    stageClockAnchorServer.value = Number.isFinite(parsed) ? parsed : Date.now();
+    stageClockAnchorLocal.value = Date.now();
+    stageClockLocalNow.value = Date.now();
+  },
+  { immediate: true },
+);
+
+const estimatedServerNowMs = computed(
+  () => stageClockAnchorServer.value + (stageClockLocalNow.value - stageClockAnchorLocal.value),
+);
+const stageClockTimer = setInterval(() => {
+  stageClockLocalNow.value = Date.now();
+}, 1000);
 const connectionState = computed(() => {
   if (eventState.connected) return "connected";
   if (eventState.reconnecting) return "reconnecting";
@@ -99,6 +139,7 @@ const evidenceSourceType = computed(() => {
 });
 const partyRoles = ["USER", "MERCHANT"];
 const reviewGateEvents = new Set([
+  "HEARING_PHASE_CHANGED",
   "REVIEW_TASK_CREATED",
   "REVIEW_GATE_READY",
   "HUMAN_REVIEW_OPENED",
@@ -113,7 +154,8 @@ const currentActorSubmitted = computed(
     Boolean(
       activeRound.value?.current_actor_submitted ||
         activeRound.value?.currentActorSubmitted ||
-        submittedRoles.value.includes(role.value),
+        submittedRoles.value.includes(role.value) ||
+        partyHasSpokenInActiveRound(role.value),
     ),
 );
 const activeRoundClosed = computed(() =>
@@ -124,21 +166,93 @@ const activeRoundClosed = computed(() =>
 const activeRoundNo = computed(
   () => activeRound.value?.round_no || activeRound.value?.roundNo || 0,
 );
+function messageRoundNo(message) {
+  const raw =
+    message?.hearing_round ??
+    message?.hearingRound ??
+    message?.round_no ??
+    message?.roundNo ??
+    activeRoundNo.value;
+  const numeric = Number(raw);
+  return Number.isFinite(numeric) ? numeric : 0;
+}
+
+function messageSenderRole(message) {
+  return message?.sender_role || message?.senderRole || "";
+}
+
+function messageType(message) {
+  return String(message?.message_type || message?.messageType || "").toUpperCase();
+}
+
+function partyHasSpokenInActiveRound(partyRole) {
+  const roundNo = Number(activeRoundNo.value);
+  if (!roundNo || !partyRole) return false;
+  return messages.value.some(
+    (message) =>
+      messageSenderRole(message) === partyRole &&
+      messageType(message) === "PARTY_TEXT" &&
+      messageRoundNo(message) === roundNo,
+  );
+}
+const allPartiesSubmittedInActiveRound = computed(() =>
+  partyRoles.every(
+    (partyRole) =>
+      submittedRoles.value.includes(partyRole) ||
+      partyHasSpokenInActiveRound(partyRole),
+  ),
+);
 const finalRoundSealed = computed(
-  () => activeRoundClosed.value && activeRoundNo.value >= props.roundLimit,
+  () =>
+    Boolean(statusField("final_round_sealed", "finalRoundSealed", false)) ||
+    (activeRoundClosed.value && activeRoundNo.value >= props.roundLimit),
 );
 const reviewHandoffVisible = computed(
   () => isCaseParty.value && finalRoundSealed.value,
 );
+const hearingPhase = computed(() =>
+  statusField("hearing_phase", "hearingPhase", ""),
+);
+const serverPhaseLabel = computed(() =>
+  sanitizeHearingCopy(statusField("phase_label", "phaseLabel", "")),
+);
+const serverNextStepHint = computed(() =>
+  sanitizeHearingCopy(statusField("next_step_hint", "nextStepHint", "")),
+);
+const serverCanCompleteHearing = computed(() =>
+  Boolean(statusField("can_complete_hearing", "canCompleteHearing", false)),
+);
+const serverReviewGateReady = computed(
+  () =>
+    Boolean(statusField("review_gate_ready", "reviewGateReady", false)) ||
+    hearingPhase.value === "REVIEW_GATE_READY",
+);
+const draftReadyForResult = computed(
+  () =>
+    serverCanCompleteHearing.value ||
+    ["DRAFT_READY", "REVIEW_GATE_READY"].includes(hearingPhase.value),
+);
+const completeHearingHint = computed(
+  () =>
+    serverNextStepHint.value ||
+    (serverCanCompleteHearing.value
+      ? "AI 法官已生成裁决草案，可进入结果页查看草案说明。"
+      : "三轮陈述封存后，需要等待 AI 法官生成裁决草案。"),
+);
+const completeHearingButtonLabel = computed(() =>
+  serverCanCompleteHearing.value ? "查看裁决草案" : "等待裁决草案",
+);
 const reviewHandoffTitle = computed(() =>
-  reviewGateOpen.value
-    ? "裁决草案已生成，等待审核确认"
-    : "三轮陈述已封存，等待裁决草案",
+  serverPhaseLabel.value ||
+  (draftReadyForResult.value || serverReviewGateReady.value
+    ? "裁决草案已生成"
+    : "三轮陈述已封存，等待裁决草案"),
 );
 const reviewHandoffBody = computed(() =>
-  reviewGateOpen.value
-    ? "AI 法官已生成裁决草案，后续由审核员基于冻结卷宗完成最终确认。"
-    : "本案已经达到三轮陈述上限，双方内容已自动封存。AI 法官会基于庭审记录和证据架输出确定裁决方案草案。",
+  serverNextStepHint.value ||
+  (draftReadyForResult.value || serverReviewGateReady.value
+    ? "AI 法官已生成裁决草案，可进入结果页查看草案说明。"
+    : "本案已经达到三轮陈述上限，双方内容已自动封存。AI 法官会基于庭审记录和证据架输出确定裁决方案草案。"),
 );
 const counterpartyLabel = computed(() =>
   role.value === "USER" ? "商家" : "用户",
@@ -156,66 +270,6 @@ const activeRoundDeadline = computed(
   () => activeRound.value?.round_deadline_at || activeRound.value?.roundDeadlineAt || "",
 );
 const roundStepLabels = ["事实陈述", "证据解释", "方案确认"];
-const mockEvidenceRails = {
-  user: [
-    {
-      id: "user-door-camera",
-      type: "image",
-      title: "门口监控截图.jpg",
-      subtitle: "图片证据 · OCR 已提取",
-      confidence: 95,
-      status: "已核验",
-      tone: "blue",
-    },
-    {
-      id: "user-statement",
-      type: "text",
-      title: "未收到货说明.pdf",
-      subtitle: "文本证据 · 已解析",
-      confidence: 88,
-      status: "待复核",
-      tone: "purple",
-    },
-    {
-      id: "user-call-record",
-      type: "video",
-      title: "物业通话录音.mp4",
-      subtitle: "视频/音频 · 待核验",
-      confidence: 62,
-      status: "待核验",
-      tone: "gold",
-    },
-  ],
-  merchant: [
-    {
-      id: "merchant-waybill",
-      type: "text",
-      title: "物流签收底单.pdf",
-      subtitle: "文本证据 · 已解析",
-      confidence: 90,
-      status: "已核验",
-      tone: "purple",
-    },
-    {
-      id: "merchant-package-photo",
-      type: "image",
-      title: "打包交接照片.jpg",
-      subtitle: "图片证据 · OCR 已提取",
-      confidence: 84,
-      status: "待复核",
-      tone: "blue",
-    },
-    {
-      id: "merchant-scan-log",
-      type: "text",
-      title: "出库扫描记录.md",
-      subtitle: "文本记录 · 已解析",
-      confidence: 79,
-      status: "已核验",
-      tone: "mint",
-    },
-  ],
-};
 const evidenceRailProfiles = {
   user: {
     key: "user",
@@ -246,6 +300,13 @@ const rightEvidenceRail = computed(() =>
     ? evidenceRailProfiles.user
     : evidenceRailProfiles.merchant,
 );
+const evidenceItems = computed(() => evidenceCatalog.value?.items || []);
+const leftEvidenceItems = computed(() =>
+  evidenceItemsForRole(leftEvidenceRail.value.role),
+);
+const rightEvidenceItems = computed(() =>
+  evidenceItemsForRole(rightEvidenceRail.value.role),
+);
 const activeRoundSummary = computed(() => summary(activeRound.value));
 const currentRoundLabel = computed(
   () => roundStepLabels[Math.min(currentRound.value, roundStepLabels.length) - 1] || "庭审陈述",
@@ -254,10 +315,13 @@ const roundSubmitDescription = computed(() => {
   if (activeRoundClosed.value) {
     return "双方已提交本轮，本轮陈述已封存；第三轮结束后，AI 法官会统一生成确定的裁决方案草案。";
   }
+  if (allPartiesSubmittedInActiveRound.value) {
+    return "双方本轮陈述均已入卷，等待 AI 法官收束本轮并推进庭审流程。";
+  }
   if (currentActorSubmitted.value) {
     return `已提交本轮，等待${counterpartyLabel.value}。双方都提交后，系统会自动封存本轮陈述并开放下一轮。`;
   }
-  return "当前陈述、证据解释和和解意向会被封装为本轮立场。双方都点击提交，或 5 分钟时效届满后，系统自动封存并推进流程。";
+  return "当前陈述、证据解释或对法官拟处理方向的确认或说明异议会被封装为本轮立场。双方都点击提交，或 5 分钟时效届满后，系统自动封存并推进流程。";
 });
 const statementInputDisabled = computed(
   () => !canSubmitStatement.value,
@@ -265,12 +329,14 @@ const statementInputDisabled = computed(
 const stageDockMode = computed(() => {
   if (reviewHandoffVisible.value) return "handoff";
   if (activeRoundClosed.value) return "sealed";
+  if (allPartiesSubmittedInActiveRound.value) return "waiting";
   if (currentActorSubmitted.value) return "waiting";
   return "active";
 });
 const stageDockTitle = computed(() => {
   if (reviewHandoffVisible.value) return reviewHandoffTitle.value;
   if (activeRoundClosed.value) return "本轮已封存";
+  if (allPartiesSubmittedInActiveRound.value) return "双方已陈述，等待法官收束";
   if (currentActorSubmitted.value) return `已提交本轮，等待${counterpartyLabel.value}`;
   return `第 ${currentRound.value} 轮 · ${currentRoundLabel.value}`;
 });
@@ -279,23 +345,43 @@ const stageDockBody = computed(() => {
   if (activeRoundClosed.value) {
     return "双方已提交本轮，陈述已经封存。AI 法官会读取庭审记录和证据架，生成本轮判断或推进到下一轮。";
   }
+  if (allPartiesSubmittedInActiveRound.value) {
+    return "双方本轮陈述均已进入庭审记录，等待 AI 法官收束本轮并决定是否推进下一阶段。";
+  }
   if (currentActorSubmitted.value) {
     return `你的本轮立场已经入卷，系统会在${counterpartyLabel.value}提交或倒计时结束后自动封存。`;
   }
   return "请双方围绕法官问题完成本轮陈述。双方都提交，或 5 分钟倒计时届满后，本轮会自动封存。";
 });
 const stageDockBadge = computed(() => {
-  if (reviewHandoffVisible.value) return reviewGateOpen.value ? "草案待核验" : "庭审封存";
+  if (reviewHandoffVisible.value) return draftReadyForResult.value || serverReviewGateReady.value ? "草案已生成" : "庭审封存";
   if (activeRoundClosed.value) return "本轮已封存";
+  if (allPartiesSubmittedInActiveRound.value) return "等待法官";
   if (currentActorSubmitted.value) return "等待对方";
   return "进行中";
 });
+function formatStageClock(deadlineAt) {
+  const deadlineMs = Date.parse(deadlineAt || "");
+  if (!Number.isFinite(deadlineMs)) return "05:00";
+  const totalSeconds = Math.max(
+    0,
+    Math.floor((deadlineMs - estimatedServerNowMs.value) / 1000),
+  );
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const parts =
+    hours > 0
+      ? [hours, minutes, seconds]
+      : [minutes, seconds];
+  return parts.map((value) => String(value).padStart(2, "0")).join(":");
+}
 const stageDockClock = computed(() => {
   if (reviewHandoffVisible.value || activeRoundClosed.value) {
     return { label: "当前轮次还剩：", value: "00:00" };
   }
   if (activeRoundDeadline.value) {
-    return { label: "当前轮次还剩：", value: "04:18" };
+    return { label: "当前轮次还剩：", value: formatStageClock(activeRoundDeadline.value) };
   }
   return { label: "当前轮次还剩：", value: "05:00" };
 });
@@ -329,7 +415,10 @@ const partySubmissionStatuses = computed(() =>
     if (activeRoundClosed.value) {
       return { ...party, status: "已封存", tone: "sealed" };
     }
-    if (submittedRoles.value.includes(party.role)) {
+    if (
+      submittedRoles.value.includes(party.role) ||
+      partyHasSpokenInActiveRound(party.role)
+    ) {
       return { ...party, status: "已提交", tone: "submitted" };
     }
     return { ...party, status: "未提交", tone: "pending" };
@@ -339,19 +428,25 @@ const timeStatus = computed(() => {
   if (reviewHandoffVisible.value) {
     return {
       label: "时间/封存",
-      value: reviewGateOpen.value ? "等待审核确认" : "等待裁决草案",
+      value: draftReadyForResult.value || serverReviewGateReady.value ? "草案已生成" : "等待裁决草案",
       tone: "waiting",
     };
   }
   if (activeRoundClosed.value) return { label: "时间/封存", value: "已封存", tone: "sealed" };
-  if (activeRoundDeadline.value) return { label: "本轮倒计时", value: "04:18", tone: "active" };
+  if (activeRoundDeadline.value) {
+    return {
+      label: "本轮倒计时",
+      value: formatStageClock(activeRoundDeadline.value),
+      tone: "active",
+    };
+  }
   return { label: "时间/封存", value: "等待法官处理", tone: "waiting" };
 });
 const judgeReviewStatus = computed(() => {
   if (reviewHandoffVisible.value) {
     return {
       label: "法官/评审",
-      value: reviewGateOpen.value ? "草案待评审" : "法官处理中",
+      value: draftReadyForResult.value || serverReviewGateReady.value ? "草案已生成" : "法官处理中",
       tone: "processing",
     };
   }
@@ -359,61 +454,50 @@ const judgeReviewStatus = computed(() => {
   if (stageDockMode.value === "waiting") return { label: "法官/评审", value: "等待双方陈述", tone: "waiting" };
   return { label: "法官/评审", value: "法官提问中", tone: "active" };
 });
-const mockTranscriptItems = computed(() => [
-  {
-    id: "judge-opening",
-    type: "judge",
-    speaker: "主审法官",
-    time: "14:00:00",
-    text:
-      activeRoundSummary.value.judge ||
-      "根据现有案情，物流记录显示包裹已签收，但用户称未实际收到商品。请用户补充未收到包裹的具体情况，请商家说明发货、物流交接及签收记录。",
-  },
-  {
-    id: "user-statement",
-    type: "user",
-    speaker: "用户陈述",
-    time: "14:02:15",
-    text: "用户称门口监控未见快递员投递，并已提交截图用于核验包裹实际去向。",
-  },
-  {
-    id: "merchant-statement",
-    type: "merchant",
-    speaker: "商家陈述",
-    time: "待提交",
-    text: "商家需说明发货记录、物流交接、签收底单与异常工单处理记录。",
-  },
-  {
-    id: "jury-review",
-    type: "jury",
-    speaker: "AI 评审团",
-    time: "裁决辅助分析",
-    text:
-      activeRoundSummary.value.jury ||
-      "中风险 · 当前可信分 75/100 · 建议核验物流轨迹定位与签收凭证。",
-  },
-]);
 const liveTranscriptItems = computed(() =>
   messages.value
+    .filter((message) => !isSystemAuditOnlyMessage(message))
     .map((message, index) => {
       const rawText = message.message_text || message.text || message.content || "";
       if (!rawText) return null;
-      const text = displayRoomMessageText(rawText);
+      const type = messageType(message);
+      const text = transcriptTextForMessage(message);
       const senderRole = message.sender_role || message.senderRole || "";
       return {
         id: message.id || `live-message-${message.sequence_no || index}`,
         type: transcriptTypeForRole(senderRole),
         speaker: transcriptSpeakerForRole(senderRole),
-        badge: transcriptBadgeForRole(senderRole),
+        badge: transcriptBadgeForMessage(message),
         time: transcriptTime(message.created_at || message.createdAt),
         text,
+        riskLevel: juryRiskLabel(messagePayload(message)?.risk_level),
+        confidenceScore: juryConfidenceLabel(messagePayload(message)?.confidence_score),
+        isFormalJuryReport: type === "JURY_REVIEW_REPORT",
       };
     })
     .filter(Boolean),
 );
-const courtTranscriptItems = computed(() =>
-  liveTranscriptItems.value.length ? liveTranscriptItems.value : mockTranscriptItems.value,
-);
+const courtTranscriptItems = computed(() => liveTranscriptItems.value);
+const courtLedgerItems = computed(() => {
+  const roundItems = rounds.value.map((round) => ({
+    id: round.round_id || `round-${round.round_no}`,
+    title: `第 ${round.round_no} 轮`,
+    status: roundStatusLabel(round.status),
+    text: ledgerRoundText(round),
+    statusCode: round.status,
+    tone: "round",
+  }));
+  const messageItems = messages.value
+    .filter((message) => !isSystemAuditOnlyMessage(message))
+    .map((message) => ledgerItemForMessage(message))
+    .filter(Boolean);
+  return [...roundItems, ...messageItems].sort((left, right) => {
+    const leftRound = left.roundNo || 0;
+    const rightRound = right.roundNo || 0;
+    if (leftRound !== rightRound) return leftRound - rightRound;
+    return (left.sequenceNo || 0) - (right.sequenceNo || 0);
+  });
+});
 
 const transcriptRoleProfiles = {
   INTAKE_OFFICER: { type: "intake", speaker: "案情接待官", badge: "案情接待" },
@@ -441,11 +525,100 @@ function transcriptBadgeForRole(senderRole) {
   return transcriptProfileForRole(senderRole).badge;
 }
 
+function transcriptBadgeForMessage(message) {
+  if (messageType(message) === "JURY_REVIEW_REPORT") return "评审团复核报告";
+  return transcriptBadgeForRole(messageSenderRole(message));
+}
+
 function transcriptBadgeForItem(item) {
   if (item.badge) return item.badge;
   if (item.type === "judge") return "法官宣读";
   if (item.type === "jury") return "评审团观察";
   return "";
+}
+
+function rawMessageText(message) {
+  return message?.message_text || message?.messageText || message?.text || message?.content || "";
+}
+
+function messagePayload(message) {
+  const rawText = rawMessageText(message);
+  if (!rawText || typeof rawText !== "string") return null;
+  const trimmed = rawText.trim();
+  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return null;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+}
+
+function messageVisibility(message) {
+  return String(
+    message?.visibility ||
+      message?.visibility_scope ||
+      message?.visibilityScope ||
+      messagePayload(message)?.visibility ||
+      "",
+  ).toUpperCase();
+}
+
+function isSystemAuditOnlyMessage(message) {
+  return messageVisibility(message) === "SYSTEM_AUDIT_ONLY";
+}
+
+function juryRiskLabel(value) {
+  const normalized = String(value || "").toUpperCase();
+  return {
+    LOW: "低风险",
+    MEDIUM: "中风险",
+    HIGH: "高风险",
+  }[normalized] || "中风险";
+}
+
+function juryConfidenceLabel(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return "75/100";
+  const score = numeric <= 1 ? numeric * 100 : numeric;
+  return `${Math.round(score)}/100`;
+}
+
+function transcriptTextForMessage(message) {
+  if (messageType(message) === "JURY_REVIEW_REPORT") {
+    return formatJuryReviewReport(messagePayload(message), rawMessageText(message));
+  }
+  return stripTranscriptPreamble(
+    sanitizeHearingCopy(displayRoomMessageText(rawMessageText(message))),
+  );
+}
+
+function formatJuryReviewReport(payload, fallbackText = "") {
+  if (!payload) {
+    return stripTranscriptPreamble(
+      sanitizeHearingCopy(displayRoomMessageText(fallbackText)),
+    );
+  }
+  const parts = [];
+  if (payload.summary) parts.push(sanitizeHearingCopy(displayRoomMessageText(payload.summary)));
+  const recommendations = Array.isArray(payload.recommendations)
+    ? payload.recommendations
+    : payload.recommendation
+      ? [payload.recommendation]
+      : [];
+  if (recommendations.length) {
+    parts.push(`建议：${recommendations.map((item) => sanitizeHearingCopy(displayRoomMessageText(item))).join("；")}`);
+  }
+  if (payload.review_notes) {
+    parts.push(sanitizeHearingCopy(displayRoomMessageText(payload.review_notes)));
+  }
+  return parts.filter(Boolean).join(" ") || "评审团已完成复核，报告已交由法官参考。";
+}
+
+function stripTranscriptPreamble(text) {
+  return String(text || "").replace(
+    /^(案情接待官宣读案情卷宗|证据书记官宣读证据卷宗)[：:]\s*/u,
+    "",
+  );
 }
 
 function transcriptTime(value) {
@@ -467,6 +640,174 @@ function evidenceTypeLabel(type) {
   }[type] || "文件";
 }
 
+function evidenceItemsForRole(partyRole) {
+  return evidenceItems.value.filter(
+    (item) =>
+      evidenceSubmittedByRole(item) === partyRole &&
+      evidenceSubmissionStatus(item) === "SUBMITTED",
+  );
+}
+
+function evidenceField(item, snakeCaseKey, camelCaseKey, fallback = "") {
+  return item?.[snakeCaseKey] ?? item?.[camelCaseKey] ?? fallback;
+}
+
+function statusField(snakeCaseKey, camelCaseKey, fallback = "") {
+  return hearingStatus.value?.[snakeCaseKey] ?? hearingStatus.value?.[camelCaseKey] ?? fallback;
+}
+
+function sanitizeHearingCopy(value) {
+  return String(value || "")
+    .replace(
+      "裁决草案已经进入平台审核入口，可查看结果页并等待审核员确认。",
+      "裁决草案已生成，可进入结果页查看草案说明。",
+    )
+    .replace("裁决草案已经进入平台审核入口", "裁决草案已生成")
+    .replace("进入平台终审，等待审核员确认最终结果", "查看裁决草案并等待后续确认")
+    .replace("最终由平台审核员确认", "后续进入确认流程")
+    .replace("最终结果仍需平台审核确认", "最终结果以后续确认为准")
+    .replace("最终结果仍需平台审核员确认", "最终结果以后续确认为准")
+    .replace("等待平台审核员确认", "等待后续确认")
+    .replace("希望平台审核员给出", "希望后续确认环节给出")
+    .replaceAll("平台审核员确认", "后续确认")
+    .replaceAll("审核员确认", "后续确认")
+    .replaceAll("平台审核确认", "后续确认")
+    .replaceAll("平台审核员", "后续确认环节")
+    .replaceAll("平台终审", "后续确认")
+    .replaceAll("审核员终审", "后续确认")
+    .replaceAll("人类终审", "后续确认");
+}
+
+function statusAllowsCompletion(status) {
+  return Boolean(status?.can_complete_hearing ?? status?.canCompleteHearing);
+}
+
+function evidenceSubmittedByRole(item) {
+  return evidenceField(item, "submitted_by_role", "submittedByRole", "");
+}
+
+function evidenceId(item) {
+  return (
+    evidenceField(item, "evidence_id", "evidenceId", "") ||
+    evidenceField(item, "id", "id", "")
+  );
+}
+
+function evidenceOriginalFilename(item) {
+  return evidenceField(item, "original_filename", "originalFilename", "");
+}
+
+function evidenceFilename(item) {
+  return evidenceOriginalFilename(item) || evidenceId(item) || "未命名证据";
+}
+
+function evidenceSubmissionStatus(item) {
+  return String(
+    evidenceField(item, "submission_status", "submissionStatus", "SUBMITTED"),
+  ).toUpperCase();
+}
+
+function evidenceSubmissionStatusLabel(item) {
+  const status = evidenceSubmissionStatus(item);
+  if (status === "PENDING_SUBMISSION") return "待提交";
+  if (status === "SUBMITTED") return "已提交";
+  if (status === "VOIDED") return "已作废";
+  if (["LOCKED", "ADMITTED", "IN_DOSSIER"].includes(status)) return "已入卷";
+  return status || "待确认";
+}
+
+function fileExtension(value) {
+  const cleanValue = String(value || "").split(/[?#]/)[0];
+  const fileName = cleanValue.split(/[\\/]/).pop() || "";
+  const lastDotIndex = fileName.lastIndexOf(".");
+  if (lastDotIndex <= 0 || lastDotIndex === fileName.length - 1) return "";
+  return fileName.slice(lastDotIndex + 1).toLowerCase();
+}
+
+function evidenceCardType(item) {
+  const extension = fileExtension(
+    evidenceOriginalFilename(item) ||
+      evidenceField(item, "content_url", "contentUrl", ""),
+  );
+  const evidenceType = String(
+    evidenceField(item, "evidence_type", "evidenceType", ""),
+  ).toUpperCase();
+  if (
+    ["mp4", "mov", "avi", "webm", "mkv", "m4v"].includes(extension) ||
+    evidenceType === "VIDEO"
+  ) {
+    return "video";
+  }
+  if (
+    ["png", "jpg", "jpeg", "webp", "gif", "bmp", "svg"].includes(extension) ||
+    ["IMAGE", "CHAT_SCREENSHOT"].includes(evidenceType)
+  ) {
+    return "image";
+  }
+  return "text";
+}
+
+function evidenceCardTone(item) {
+  const extension = fileExtension(evidenceOriginalFilename(item));
+  const type = evidenceCardType(item);
+  if (type === "video") return "gold";
+  if (type === "image") return "blue";
+  if (["md", "markdown"].includes(extension)) return "mint";
+  return "purple";
+}
+
+function evidenceTypeCopy(item) {
+  const type = evidenceCardType(item);
+  if (type === "image") return "图片材料";
+  if (type === "video") return "视频材料";
+  return "文本材料";
+}
+
+function evidenceVerificationLabel(item) {
+  const status = String(
+    evidenceField(item, "verification_status", "verificationStatus", "PENDING"),
+  ).toUpperCase();
+  return {
+    PENDING: "待核验",
+    VERIFIED: "已核验",
+    PLAUSIBLE: "基本可信",
+    SUSPICIOUS: "存在疑点",
+    REJECTED: "不予采纳",
+    NEEDS_HUMAN_REVIEW: "待人工复核",
+    PARTIALLY_VERIFIED: "部分核验",
+    UNVERIFIED: "待核验",
+  }[status] || "待核验";
+}
+
+function evidenceConfidence(item) {
+  const raw = evidenceField(item, "confidence_score", "confidenceScore", null);
+  if (raw === null || raw === undefined || raw === "") return "待评分";
+  const numeric = Number(raw);
+  if (!Number.isFinite(numeric)) return "待评分";
+  const percentage = numeric <= 1 ? Math.round(numeric * 100) : Math.round(numeric);
+  return `${percentage}%`;
+}
+
+function isMissingEvidenceCatalog(failure) {
+  return ["EVIDENCE_NOT_FOUND", "RESOURCE_NOT_FOUND"].includes(failure?.code);
+}
+
+async function loadEvidenceCatalog(actorSnapshot = effectiveActor.value) {
+  try {
+    evidenceCatalog.value = await evidenceApi.catalog(actorSnapshot, caseId.value);
+  } catch (failure) {
+    if (isMissingEvidenceCatalog(failure)) {
+      evidenceCatalog.value = { case_id: caseId.value, items: [] };
+      return;
+    }
+    throw failure;
+  }
+}
+
+function uploadedEvidenceId(uploaded) {
+  return uploaded?.evidence_id || uploaded?.evidenceId || uploaded?.id || "";
+}
+
 function summary(round) {
   try {
     return JSON.parse(round?.summary_json || "{}");
@@ -475,18 +816,75 @@ function summary(round) {
   }
 }
 
+function ledgerRoundText(round) {
+  const value = summary(round);
+  return sanitizeHearingCopy(
+    displayRoomMessageText(value.judge || value.clerk || value.jury || "本轮记录已封存。"),
+  );
+}
+
+function ledgerItemForMessage(message) {
+  const type = messageType(message);
+  if (type === "PARTY_EVIDENCE_REFERENCE") {
+    return {
+      id: message.id || `evidence-${message.sequence_no || ""}`,
+      title: `第 ${messageRoundNo(message)} 轮补充证据`,
+      status: "已入卷",
+      text: sanitizeHearingCopy(displayRoomMessageText(rawMessageText(message))),
+      statusCode: "EVIDENCE_SUPPLEMENT",
+      roundNo: messageRoundNo(message),
+      sequenceNo: message.sequence_no || message.sequenceNo || 0,
+      tone: "evidence",
+    };
+  }
+  if (type === "EVIDENCE_DOSSIER_REVISED") {
+    const payload = messagePayload(message) || {};
+    const previous = payload.supersedes_version ?? payload.previous_version ?? payload.baseline_version;
+    const active = payload.active_version ?? payload.dossier_version;
+    const versionText = previous && active ? `v${previous} → v${active}` : "版本已更新";
+    const reason = payload.revision_reason || payload.reason || "证据书记官已根据补证和双方解释更新证据矩阵。";
+    return {
+      id: message.id || `matrix-${message.sequence_no || ""}`,
+      title: "证据矩阵更新",
+      status: versionText,
+      text: sanitizeHearingCopy(displayRoomMessageText(reason)),
+      statusCode: "EVIDENCE_DOSSIER_REVISED",
+      roundNo: messageRoundNo(message),
+      sequenceNo: message.sequence_no || message.sequenceNo || 0,
+      tone: "matrix",
+    };
+  }
+  if (type === "JURY_REVIEW_REPORT") {
+    return {
+      id: message.id || `jury-${message.sequence_no || ""}`,
+      title: `第 ${messageRoundNo(message)} 轮评审团复核报告`,
+      status: "已交法官",
+      text: formatJuryReviewReport(messagePayload(message), rawMessageText(message)),
+      statusCode: "JURY_REVIEW_REPORT",
+      roundNo: messageRoundNo(message),
+      sequenceNo: message.sequence_no || message.sequenceNo || 0,
+      tone: "jury",
+    };
+  }
+  return null;
+}
+
 function roundStatusLabel(status) {
   return roundStatusLabels[status] || status || "待开始";
 }
 
 async function load() {
   try {
+    const actorSnapshot = effectiveActor.value;
     if (hearing.value === null) {
-      hearing.value = await hearingApi.hearing(actor, caseId.value);
+      hearing.value = await hearingApi.hearing(actorSnapshot, caseId.value);
+    }
+    if (evidenceCatalog.value === null) {
+      await loadEvidenceCatalog(actorSnapshot);
     }
     if (props.initialMessages === null) {
       messages.value = await roomApi.messages(
-        actor,
+        actorSnapshot,
         caseId.value,
         "HEARING",
       );
@@ -498,12 +896,20 @@ async function load() {
 }
 
 async function refreshHearing() {
-  const [nextHearing, nextMessages] = await Promise.all([
-    hearingApi.hearing(actor, caseId.value),
-    roomApi.messages(actor, caseId.value, "HEARING"),
+  const actorSnapshot = effectiveActor.value;
+  const [nextHearing, nextMessages, nextEvidenceCatalog] = await Promise.all([
+    hearingApi.hearing(actorSnapshot, caseId.value),
+    roomApi.messages(actorSnapshot, caseId.value, "HEARING"),
+    evidenceApi.catalog(actorSnapshot, caseId.value).catch((failure) => {
+      if (isMissingEvidenceCatalog(failure)) {
+        return { case_id: caseId.value, items: [] };
+      }
+      throw failure;
+    }),
   ]);
   hearing.value = nextHearing;
   messages.value = nextMessages;
+  evidenceCatalog.value = nextEvidenceCatalog;
 }
 
 async function postMessage(command) {
@@ -513,7 +919,7 @@ async function postMessage(command) {
     const saved = props.messageAction
       ? await props.messageAction(command)
       : await roomApi.postMessage(
-          actor,
+          effectiveActor.value,
           caseId.value,
           "HEARING",
           command,
@@ -556,7 +962,7 @@ async function proposeSettlement() {
     const saved = props.proposeSettlementAction
       ? await props.proposeSettlementAction(command)
       : await hearingApi.proposeSettlement(
-          actor,
+          effectiveActor.value,
           caseId.value,
           command,
         );
@@ -595,16 +1001,42 @@ async function supplementEvidence(event) {
       sourceType: evidenceSourceType.value,
       visibility: "PARTIES",
     };
-    if (props.supplementAction) {
-      await props.supplementAction(command);
+    const uploaded = props.supplementAction
+      ? await props.supplementAction(command)
+      : await evidenceApi.upload(effectiveActor.value, caseId.value, command);
+    const attachmentId = uploadedEvidenceId(uploaded);
+    if (attachmentId) {
+      const batchCommand = {
+        evidence_ids: [attachmentId],
+        batch_note: `庭审补充证据：${file.name}`,
+      };
+      const submittedBatch = props.submitEvidenceBatchAction
+        ? await props.submitEvidenceBatchAction(batchCommand)
+        : await evidenceApi.submitBatch(
+            effectiveActor.value,
+            caseId.value,
+            batchCommand,
+          );
+      const roomMessage =
+        submittedBatch?.room_message || submittedBatch?.roomMessage || null;
+      if (roomMessage) {
+        messages.value.push(roomMessage);
+        agentState.value = "SPEAKING";
+      } else {
+        await postMessage({
+          message_type: "PARTY_EVIDENCE_REFERENCE",
+          text: `已补充证据：${file.name}`,
+          attachment_refs: [attachmentId],
+        });
+      }
     } else {
-      await evidenceApi.upload(actor, caseId.value, command);
+      await postMessage({
+        message_type: "PARTY_TEXT",
+        text: `已补充证据：${file.name}`,
+        attachment_refs: [],
+      });
     }
-    await postMessage({
-      message_type: "PARTY_TEXT",
-      text: `已补充证据：${file.name}`,
-      attachment_refs: [],
-    });
+    await loadEvidenceCatalog(effectiveActor.value);
   } catch (failure) {
     error.value = failure.message;
     agentState.value = "ERROR";
@@ -633,7 +1065,7 @@ async function submitCurrentRound() {
   try {
     const saved = props.submitRoundAction
       ? await props.submitRoundAction(command)
-      : await hearingApi.submitRound(actor, caseId.value, command);
+      : await hearingApi.submitRound(effectiveActor.value, caseId.value, command);
     if (!props.submitRoundAction) {
       await refreshHearing();
       agentState.value = saved.status === "COMPLETED" ? "THINKING" : "SPEAKING";
@@ -665,23 +1097,35 @@ async function submitCurrentRound() {
 function startEventStream() {
   const streamer = props.eventStreamer || streamRoomEvents;
   void streamer({
-    actor,
+    actor: effectiveActor.value,
     caseId: caseId.value,
     roomType: "HEARING",
     state: eventState,
     signal: eventAbortController.signal,
     snapshotLoader: refreshHearing,
     applyEvent: async (event) => {
-      if (reviewGateEvents.has(event.event)) {
+      const eventType = roomEventType(event);
+      if (reviewGateEvents.has(eventType)) {
         reviewGateOpen.value = true;
         agentState.value = "HANDOFF";
         await refreshHearing();
       }
-      if (event.event === "CASE_CLOSED") {
+      if (eventType === "CASE_CLOSED") {
         await router.push(`/disputes/${caseId.value}/outcome`);
       }
     },
   });
+}
+
+function roomEventType(event) {
+  return (
+    event?.event ||
+    event?.eventType ||
+    event?.event_type ||
+    event?.data?.event_type ||
+    event?.data?.eventType ||
+    ""
+  );
 }
 
 async function confirmSettlement(version) {
@@ -691,7 +1135,7 @@ async function confirmSettlement(version) {
   try {
     const result = props.confirmSettlementAction
       ? await props.confirmSettlementAction(version)
-      : await hearingApi.confirmSettlement(actor, caseId.value, version);
+      : await hearingApi.confirmSettlement(effectiveActor.value, caseId.value, version);
     const index = settlements.value.findIndex(
       (settlement) => settlement.version === version,
     );
@@ -713,6 +1157,29 @@ async function confirmSettlement(version) {
   }
 }
 
+async function completeHearing() {
+  if (!serverCanCompleteHearing.value) return;
+  error.value = "";
+  agentState.value = "THINKING";
+  try {
+    const status = props.completeHearingAction
+      ? await props.completeHearingAction()
+      : await hearingApi.complete(effectiveActor.value, caseId.value);
+    hearing.value = {
+      ...(hearing.value || {}),
+      status,
+    };
+    if (statusAllowsCompletion(status)) {
+      await router.push(`/disputes/${caseId.value}/outcome`);
+      return;
+    }
+    agentState.value = "HANDOFF";
+  } catch (failure) {
+    error.value = failure.message;
+    agentState.value = "ERROR";
+  }
+}
+
 onMounted(async () => {
   await load();
   if (
@@ -723,7 +1190,10 @@ onMounted(async () => {
     startEventStream();
   }
 });
-onBeforeUnmount(() => eventAbortController.abort());
+onBeforeUnmount(() => {
+  eventAbortController.abort();
+  clearInterval(stageClockTimer);
+});
 </script>
 
 <template>
@@ -791,23 +1261,31 @@ onBeforeUnmount(() => eventAbortController.abort());
 
         <div class="evidence-pocket" :aria-label="leftEvidenceRail.ariaLabel">
           <article
-            v-for="item in mockEvidenceRails[leftEvidenceRail.key]"
-            :key="item.id"
+            v-for="item in leftEvidenceItems"
+            :key="evidenceId(item)"
             class="evidence-file-card"
-            :class="`evidence-file-card--${item.tone}`"
+            :class="`evidence-file-card--${evidenceCardTone(item)}`"
           >
-            <i class="evidence-file-card__icon" :data-type="item.type">
-              {{ evidenceTypeLabel(item.type) }}
+            <i class="evidence-file-card__icon" :data-type="evidenceCardType(item)">
+              {{ evidenceTypeLabel(evidenceCardType(item)) }}
             </i>
             <div>
-              <strong>{{ item.title }}</strong>
-              <small>{{ item.subtitle }}</small>
+              <strong>{{ evidenceFilename(item) }}</strong>
+              <small>{{ evidenceTypeCopy(item) }} · {{ evidenceSubmissionStatusLabel(item) }}</small>
               <footer>
-                <span>置信度 {{ item.confidence }}%</span>
-                <em>{{ item.status }}</em>
+                <span>{{ evidenceConfidence(item) }}</span>
+                <em>{{ evidenceVerificationLabel(item) }}</em>
               </footer>
             </div>
           </article>
+          <div
+            v-if="!leftEvidenceItems.length"
+            class="evidence-pocket__empty"
+            data-evidence-empty="left"
+          >
+            <strong>暂无已提交证据</strong>
+            <small>当前一侧尚未形成可展示的正式证据材料。</small>
+          </div>
         </div>
 
         <label
@@ -884,8 +1362,9 @@ onBeforeUnmount(() => eventAbortController.abort());
                 item.type === 'judge' ? 'court-message--judge-bench-card' : '',
                 item.type === 'jury' ? 'court-message--jury-review-card' : '',
                 ['intake', 'clerk'].includes(item.type) ? 'court-message--court-staff-card' : '',
-                ['judge', 'jury'].includes(item.type) ? 'court-message--tall-narrow-card' : '',
-                ['judge', 'jury'].includes(item.type) ? 'court-message--extended-length-card' : '',
+                ['judge', 'jury', 'intake', 'clerk'].includes(item.type) ? 'court-message--tall-narrow-card' : '',
+                ['judge', 'jury', 'intake', 'clerk'].includes(item.type) ? 'court-message--extended-length-card' : '',
+                ['judge', 'jury', 'intake', 'clerk'].includes(item.type) ? 'court-message--authority-card' : '',
                 ['user', 'merchant'].includes(item.type) ? 'court-message--party-statement-card' : '',
                 ['user', 'merchant'].includes(item.type) ? 'court-message--soft-party-card' : '',
                 ['judge', 'jury', 'intake', 'clerk', 'user', 'merchant'].includes(item.type) ? 'court-message--flexible-height-card' : '',
@@ -896,25 +1375,35 @@ onBeforeUnmount(() => eventAbortController.abort());
                 <strong>
                   <small v-if="transcriptBadgeForItem(item)">{{ transcriptBadgeForItem(item) }}</small>
                   {{ item.speaker }}
+                  <span v-if="item.type === 'jury'" class="court-message__jury-tags" aria-label="评审团辅助指标">
+                    <span>风险等级</span>
+                    <em>{{ item.riskLevel }}</em>
+                    <span>可信分</span>
+                    <em>{{ item.confidenceScore }}</em>
+                  </span>
                 </strong>
                 <span>{{ item.time }}</span>
               </header>
-              <div v-if="item.type === 'jury'" class="court-message__jury-tags" aria-label="评审团辅助指标">
-                <span>风险等级</span>
-                <strong>中风险</strong>
-                <span>可信分</span>
-                <strong>75/100</strong>
-              </div>
               <p>{{ item.text }}</p>
             </article>
 
+            <div
+              v-if="!courtTranscriptItems.length"
+              class="court-transcript__empty"
+              data-court-transcript-empty
+            >
+              <strong>等待开庭消息</strong>
+              <small>当前庭审记录尚未写入可追溯消息；系统不会用示例陈述代替真实案卷。</small>
+            </div>
           </div>
         </section>
 
         <section v-if="isCaseParty" class="round-input-bar round-input-bar--fixed-dock" data-round-input-bar>
           <div class="round-input-bar__body">
-            <header class="round-input-bar__header">
-              <h3>本轮陈述输入台</h3>
+            <header class="round-input-bar__header" data-round-input-header>
+              <div>
+                <h3>本轮陈述输入台</h3>
+              </div>
               <div class="round-input-bar__party-statuses" data-round-input-party-statuses>
                 <article
                   v-for="party in partySubmissionStatuses"
@@ -928,31 +1417,43 @@ onBeforeUnmount(() => eventAbortController.abort());
                 </article>
               </div>
             </header>
+            <div
+              v-if="reviewHandoffVisible"
+              class="round-input-bar__final-status"
+              data-round-input-final-status
+            >
+              <span>🔒</span>
+              <div>
+                <strong>庭审已封存，等待裁决草案</strong>
+                <small>当前输入区已锁定，可在右侧查看裁决草案入口状态。</small>
+              </div>
+            </div>
+            <div
+              v-else-if="activeRoundClosed"
+              class="round-input-bar__sealed-status"
+              data-round-input-sealed
+            >
+              <span>🔒</span>
+              <div>
+                <strong>本轮已封存</strong>
+                <small>本轮陈述已锁定，等待法官处理并开启下一阶段。</small>
+              </div>
+            </div>
             <form
+              v-else
               class="round-input-bar__composer"
+              data-round-input-composer
               data-send-message
               @submit.prevent="submitStatementInput"
             >
               <textarea
                 v-model="statementText"
                 :disabled="statementInputDisabled"
-                :placeholder="
-                  reviewHandoffVisible
-                    ? '庭审已封存，等待裁决草案'
-                    : '输入本轮陈述、证据解释或和解意向…'
-                "
+                placeholder="输入本轮陈述、证据解释或对拟处理方向的确认或说明异议…"
                 rows="3"
                 aria-label="本轮陈述"
               ></textarea>
               <div class="round-input-bar__submit-column">
-                <button
-                  v-if="activeRoundClosed || reviewHandoffVisible"
-                  type="button"
-                  class="round-input-bar__lock-button"
-                  disabled
-                >
-                  🔒 本轮已封存
-                </button>
                 <button
                   v-if="canSubmitStatement"
                   type="button"
@@ -963,50 +1464,11 @@ onBeforeUnmount(() => eventAbortController.abort());
                 >
                   提交陈述
                 </button>
-                <button
-                  v-if="!reviewHandoffVisible && !activeRoundClosed"
-                  type="button"
-                  class="round-input-bar__settlement-button"
-                  data-open-settlement
-                  @click="settlementOpen = true"
-                >
-                  提出一致方案
-                </button>
               </div>
             </form>
           </div>
         </section>
 
-        <section v-if="activeSettlement" class="settlement-card settlement-card--dock">
-          <span>CONSENSUS CARD</span>
-          <h3>双方一致方案</h3>
-          <p>{{ activeSettlement.proposal_text }}</p>
-          <div class="settlement-card__parties">
-            <i
-              :class="{
-                confirmed: activeSettlement.confirmed_roles?.includes('USER'),
-              }"
-            >用户</i>
-            <i
-              :class="{
-                confirmed: activeSettlement.confirmed_roles?.includes('MERCHANT'),
-              }"
-            >商家</i>
-          </div>
-          <template v-if="activeSettlement.status === 'CONFIRMED'">
-            <strong class="settlement-card__confirmed">双方已达成一致</strong>
-            <small>一致方案已作为裁决草案，等待审核确认。</small>
-          </template>
-          <button
-            v-else
-            type="button"
-            data-confirm-settlement
-            :disabled="confirmingVersion !== null"
-            @click="confirmSettlement(activeSettlement.version)"
-          >
-            {{ confirmingVersion ? "正在签署…" : "确认这份一致方案" }}
-          </button>
-        </section>
         <p v-if="error" class="hearing-error" role="alert">{{ error }}</p>
       </section>
 
@@ -1030,23 +1492,31 @@ onBeforeUnmount(() => eventAbortController.abort());
 
           <div class="evidence-pocket" :aria-label="rightEvidenceRail.ariaLabel">
             <article
-              v-for="item in mockEvidenceRails[rightEvidenceRail.key]"
-              :key="item.id"
+              v-for="item in rightEvidenceItems"
+              :key="evidenceId(item)"
               class="evidence-file-card"
-              :class="`evidence-file-card--${item.tone}`"
+              :class="`evidence-file-card--${evidenceCardTone(item)}`"
             >
-              <i class="evidence-file-card__icon" :data-type="item.type">
-                {{ evidenceTypeLabel(item.type) }}
+              <i class="evidence-file-card__icon" :data-type="evidenceCardType(item)">
+                {{ evidenceTypeLabel(evidenceCardType(item)) }}
               </i>
               <div>
-                <strong>{{ item.title }}</strong>
-                <small>{{ item.subtitle }}</small>
+                <strong>{{ evidenceFilename(item) }}</strong>
+                <small>{{ evidenceTypeCopy(item) }} · {{ evidenceSubmissionStatusLabel(item) }}</small>
                 <footer>
-                  <span>置信度 {{ item.confidence }}%</span>
-                  <em>{{ item.status }}</em>
+                  <span>{{ evidenceConfidence(item) }}</span>
+                  <em>{{ evidenceVerificationLabel(item) }}</em>
                 </footer>
               </div>
             </article>
+            <div
+              v-if="!rightEvidenceItems.length"
+              class="evidence-pocket__empty"
+              data-evidence-empty="right"
+            >
+              <strong>暂无已提交证据</strong>
+              <small>当前一侧尚未形成可展示的正式证据材料。</small>
+            </div>
           </div>
 
           <label
@@ -1074,13 +1544,17 @@ onBeforeUnmount(() => eventAbortController.abort());
           >
             查看庭审卷轴
           </button>
+          <small class="hearing-side-actions__hint" data-complete-hearing-hint>
+            {{ completeHearingHint }}
+          </small>
           <button
             type="button"
             class="evidence-complete-button"
             data-complete-hearing
-            @click="router.push(`/disputes/${caseId}/outcome`)"
+            :disabled="!serverCanCompleteHearing"
+            @click="completeHearing"
           >
-            庭审完成
+            {{ completeHearingButtonLabel }}
           </button>
         </div>
       </div>
@@ -1111,45 +1585,24 @@ onBeforeUnmount(() => eventAbortController.abort());
           </button>
         </header>
         <ol>
-          <li v-for="round in rounds" :key="round.round_id">
+          <li
+            v-for="item in courtLedgerItems"
+            :key="item.id"
+            :class="`hearing-ledger__item--${item.tone}`"
+          >
             <div>
-              <strong>第 {{ round.round_no }} 轮</strong>
-              <span :data-round-status="round.status">{{ roundStatusLabel(round.status) }}</span>
+              <strong>{{ item.title }}</strong>
+              <span :data-round-status="item.statusCode">{{ item.status }}</span>
             </div>
-            <p>{{ summary(round).judge || summary(round).clerk || "本轮记录已封存。" }}</p>
+            <p>{{ item.text }}</p>
           </li>
         </ol>
-        <div v-if="!rounds.length" class="hearing-ledger__empty" data-round-ledger-empty>
+        <div v-if="!courtLedgerItems.length" class="hearing-ledger__empty" data-round-ledger-empty>
           <span aria-hidden="true">📜</span>
           <strong>第一轮庭审记录生成后，书记官会把卷轴挂在这里。</strong>
-          <small>目前双方仍可先陈述、解释证据或提出一致方案。</small>
+          <small>目前双方仍可先完成事实陈述、证据解释或方案确认。</small>
         </div>
       </aside>
-    </div>
-
-    <div v-if="settlementOpen" class="settlement-dialog" role="dialog" aria-modal="true">
-      <form @submit.prevent="proposeSettlement">
-        <header>
-          <div>
-            <span>CONSENSUS PROPOSAL</span>
-            <h2>把一致方案写成双方都读得懂的话</h2>
-          </div>
-          <button type="button" aria-label="关闭一致方案窗口" @click="settlementOpen = false">×</button>
-        </header>
-        <label>
-          一致方案
-          <textarea
-            v-model="proposalText"
-            data-settlement-proposal
-            rows="5"
-            placeholder="例如：商家退款 299 元，用户确认不再主张额外赔偿。"
-          />
-        </label>
-        <p>另一方确认后，该方案会成为法官草案，仍需平台审核员终审。</p>
-        <button type="submit" data-submit-settlement :disabled="proposing || !proposalText.trim()">
-          {{ proposing ? "正在生成签署卡…" : "提交一致方案" }}
-        </button>
-      </form>
     </div>
   </RoomShell>
 </template>
@@ -1347,6 +1800,29 @@ onBeforeUnmount(() => eventAbortController.abort());
   background: #cbd8e8;
   border-radius: 999px;
 }
+.evidence-pocket__empty {
+  display: grid;
+  gap: 7px;
+  align-content: center;
+  min-height: 132px;
+  padding: 18px;
+  color: #71809a;
+  text-align: center;
+  background:
+    radial-gradient(circle at 50% 0, #ffffff 0 28%, transparent 29%),
+    linear-gradient(145deg, #f8fbff, #fffdf8);
+  border: 1px dashed #cedbea;
+  border-radius: 22px;
+}
+.evidence-pocket__empty strong {
+  color: #40516d;
+  font-size: 13px;
+}
+.evidence-pocket__empty small {
+  color: #8b98aa;
+  font-size: 11px;
+  line-height: 1.5;
+}
 .evidence-file-card {
   position: relative;
   display: grid;
@@ -1500,6 +1976,18 @@ onBeforeUnmount(() => eventAbortController.abort());
   background: linear-gradient(135deg, #62cda6, #4aa7d3);
   border-color: transparent;
   box-shadow: 0 12px 24px #4aa7d322;
+}
+.evidence-complete-button:disabled {
+  color: #7890a4;
+  background: #eef4f8;
+  box-shadow: none;
+  cursor: not-allowed;
+}
+.hearing-side-actions__hint {
+  color: #75879a;
+  font-size: 10px;
+  line-height: 1.45;
+  text-align: center;
 }
 .courtroom-center {
   grid-column: 2;
@@ -1932,15 +2420,44 @@ onBeforeUnmount(() => eventAbortController.abort());
   box-shadow: none;
 }
 .court-transcript__messages {
-  display: grid;
-  gap: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  align-items: stretch;
   height: 100%;
   padding: 2px 4px 10px;
   overflow: auto;
 }
+.court-transcript__empty {
+  display: grid;
+  flex: 1 1 auto;
+  gap: 8px;
+  place-content: center;
+  min-height: 260px;
+  padding: 28px;
+  color: #7b8ca6;
+  text-align: center;
+  background:
+    radial-gradient(circle at 50% 0, #fff7db 0 18%, transparent 19%),
+    linear-gradient(145deg, #fbfdff, #fffaf0);
+  border: 1px dashed #d7e3ef;
+  border-radius: 26px;
+}
+.court-transcript__empty strong {
+  color: #344762;
+  font-size: 16px;
+}
+.court-transcript__empty small {
+  max-width: 460px;
+  color: #8795a9;
+  font-size: 12px;
+  line-height: 1.6;
+}
 .court-message {
   position: relative;
-  display: grid;
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
   gap: 6px;
   max-width: 72%;
   padding: 12px 15px;
@@ -1952,6 +2469,7 @@ onBeforeUnmount(() => eventAbortController.abort());
   position: relative;
   z-index: 1;
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 12px;
   color: #7c899e;
@@ -1978,15 +2496,15 @@ onBeforeUnmount(() => eventAbortController.abort());
 .court-message p {
   position: relative;
   z-index: 1;
-  margin: 0;
+  margin: 0 0 4px;
   color: #516178;
   font-size: 12px;
   line-height: 1.65;
 }
 .court-message--judge {
-  justify-self: center;
+  align-self: center;
   background:
-    radial-gradient(circle at 9% 12%, #ffe8a8 0 18%, transparent 19%),
+    radial-gradient(circle at 8% 8%, #ffe8a8b8 0 12%, transparent 13%),
     linear-gradient(135deg, #fffdf6 0%, #f4fbff 52%, #fff7e7 100%);
   border: 1px solid #ecd7a8;
   box-shadow:
@@ -1999,7 +2517,7 @@ onBeforeUnmount(() => eventAbortController.abort());
   content: "⚖";
 }
 .court-message--judge-bench-card {
-  padding: 14px 18px 15px;
+  padding: 14px 18px 14px;
   border-radius: 22px 22px 26px 26px;
 }
 .court-message--judge-bench-card::before {
@@ -2014,73 +2532,87 @@ onBeforeUnmount(() => eventAbortController.abort());
   position: absolute;
   right: 14px;
   bottom: 12px;
-  width: 78px;
-  height: 78px;
+  width: 52px;
+  height: 52px;
   pointer-events: none;
   content: "";
   background:
     radial-gradient(circle, transparent 0 44%, #8bd7ff36 45% 47%, transparent 48%),
     radial-gradient(circle, #ffd8892b 0 30%, transparent 31%);
+  opacity: .65;
 }
 .court-message--intake,
 .court-message--clerk {
-  justify-self: center;
-  background:
-    radial-gradient(circle at 10% 6%, #e7f7ff 0 16%, transparent 17%),
-    linear-gradient(135deg, #fbfeff 0%, #f6fbff 55%, #fffdf7 100%);
-  border: 1px solid #d5e8f3;
+  align-self: center;
   box-shadow:
     inset 0 1px 0 #fff,
     0 10px 24px #58718e12;
 }
 .court-message--intake {
-  border-color: #c9e8f6;
+  color: #294937;
+  background:
+    radial-gradient(circle at 10% 6%, #dff8e7 0 16%, transparent 17%),
+    linear-gradient(135deg, #fbfff8 0%, #eefbf2 52%, #fffaf0 100%);
+  border: 1px solid #bfe7ca;
+  box-shadow:
+    inset 0 1px 0 #ffffff,
+    0 12px 26px #3a9c6514;
 }
 .court-message--clerk {
-  border-color: #d8e1f1;
+  color: #ecf2f8;
   background:
-    radial-gradient(circle at 10% 6%, #f0f5ff 0 16%, transparent 17%),
-    linear-gradient(135deg, #fcfdff 0%, #f7faff 55%, #fffdf7 100%);
+    radial-gradient(circle at 10% 6%, #496f9f 0 15%, transparent 16%),
+    linear-gradient(135deg, #10284f 0%, #1d3f70 52%, #0d2346 100%);
+  border: 1px solid #315d91;
+  box-shadow:
+    inset 0 1px 0 #ffffff1c,
+    0 14px 30px #102b5530;
 }
 .court-message--intake header strong::before,
 .court-message--clerk header strong::before {
   margin-right: 6px;
-  color: #4e94b3;
-  content: "◉";
+  color: #2e9c62;
+  content: "◆";
 }
 .court-message--clerk header strong::before {
-  color: #6d7fc6;
+  color: #d6b470;
   content: "✎";
+}
+.court-message--intake header {
+  color: #5f806f;
+}
+.court-message--intake p {
+  color: #385945;
+}
+.court-message--clerk header {
+  color: #c4d9f2;
+}
+.court-message--clerk p {
+  color: #f0f6ff;
 }
 .court-message--court-staff-card {
   box-sizing: border-box;
-  width: min(58%, 480px);
-  max-width: min(58%, 480px);
-  min-height: 118px;
-  padding: 13px 17px;
+  padding: 13px 17px 14px;
   border-radius: 24px;
 }
-.court-message--court-staff-card.court-message--flexible-height-card {
-  --court-message-min-height: 118px;
-}
 .court-message--court-staff-card header small {
-  color: #347da0;
-  background: #eef9ff;
-  border-color: #cbeaf7;
+  color: #2f8055;
+  background: #edfff3;
+  border-color: #bde8c9;
 }
 .court-message--clerk header small {
-  color: #6473bf;
-  background: #f3f5ff;
-  border-color: #dfe4ff;
+  color: #cce6ff;
+  background: #ffffff16;
+  border-color: #78a9dc70;
 }
 .court-message--user {
-  justify-self: start;
+  align-self: flex-start;
   background: transparent;
   border: 1px solid #cde9f8;
   border-left: 3px solid #8dddf7;
 }
 .court-message--merchant {
-  justify-self: end;
+  align-self: flex-end;
   background: transparent;
   border: 1px solid #f3d8bc;
   border-right: 3px solid #efc28c;
@@ -2090,7 +2622,7 @@ onBeforeUnmount(() => eventAbortController.abort());
   width: min(62%, 520px);
   max-width: min(62%, 520px);
   min-height: 92px;
-  padding: 15px 18px;
+  padding: 15px 18px 14px;
   border-radius: 24px;
   box-shadow:
     0 8px 18px #506c9408;
@@ -2115,9 +2647,9 @@ onBeforeUnmount(() => eventAbortController.abort());
   line-height: 1.72;
 }
 .court-message--jury {
-  justify-self: center;
+  align-self: center;
   background:
-    radial-gradient(circle at 7% 0, #efe8ff 0 18%, transparent 19%),
+    radial-gradient(circle at 7% 0, #efe8ffb8 0 12%, transparent 13%),
     linear-gradient(135deg, #fbf8ff 0%, #f1fbf7 48%, #fffdf4 100%);
   border: 1px solid #ded8ff;
   box-shadow:
@@ -2127,15 +2659,15 @@ onBeforeUnmount(() => eventAbortController.abort());
 .court-message--jury-review-card {
   grid-template-columns: minmax(0, 1fr);
   gap: 8px;
-  padding: 13px 16px;
+  padding: 13px 16px 14px;
   border-radius: 24px;
 }
 .court-message--tall-narrow-card {
   box-sizing: border-box;
   align-content: start;
-  width: min(52%, 430px);
-  max-width: min(52%, 430px);
-  min-height: 176px;
+  width: min(58%, 600px);
+  max-width: min(58%, 600px);
+  min-height: 96px;
 }
 .court-message--flexible-height-card {
   height: auto;
@@ -2144,15 +2676,39 @@ onBeforeUnmount(() => eventAbortController.abort());
 .court-message--party-statement-card.court-message--flexible-height-card {
   --court-message-min-height: 92px;
 }
+.court-message--user.court-message--flexible-height-card {
+  --court-message-min-height: 123px;
+}
+.court-message--merchant.court-message--flexible-height-card {
+  --court-message-min-height: 101px;
+}
 .court-message--tall-narrow-card.court-message--flexible-height-card {
-  --court-message-min-height: 176px;
+  --court-message-min-height: 143px;
+}
+.court-message--jury.court-message--flexible-height-card {
+  --court-message-min-height: 149px;
+}
+.court-message--authority-card {
+  align-self: center;
+  display: flex;
+  flex-direction: column;
+  height: auto;
+  max-height: none;
+  overflow: visible;
+  padding-bottom: 18px;
 }
 .court-message--extended-length-card {
-  width: min(65%, 538px);
-  max-width: min(65%, 538px);
+  width: min(58%, 600px);
+  max-width: min(58%, 600px);
 }
 .court-message--tall-narrow-card p {
-  max-width: 92%;
+  max-width: 100%;
+}
+.court-message--authority-card p {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 .court-message--jury-review-card header small {
   color: #6b5ac5;
@@ -2166,22 +2722,22 @@ onBeforeUnmount(() => eventAbortController.abort());
 .court-message__jury-tags {
   position: relative;
   z-index: 1;
-  display: grid;
-  grid-template-columns: auto auto auto auto;
-  gap: 7px;
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 5px;
   align-items: center;
-  justify-content: start;
-  width: fit-content;
-  padding: 5px 8px;
+  width: auto;
+  padding: 3px 7px;
   color: #7d86a0;
   background: #ffffffa8;
   border: 1px solid #e5ecf2;
   border-radius: 999px;
-  font-size: 10px;
+  font-size: 9px;
   font-weight: 900;
 }
-.court-message__jury-tags strong {
+.court-message__jury-tags em {
   color: #25a883;
+  font-style: normal;
 }
 .round-input-bar {
   display: grid;
@@ -2270,12 +2826,51 @@ onBeforeUnmount(() => eventAbortController.abort());
   grid-template-columns: minmax(0, 1fr) 180px;
   gap: 12px;
   align-items: stretch;
-  margin-top: 10px;
+  margin-top: 0;
 }
 .round-input-bar--fixed-dock .round-input-bar__composer {
   height: 100px;
   min-height: 0;
   margin-top: 8px;
+}
+.round-input-bar__sealed-status,
+.round-input-bar__final-status {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  min-height: 82px;
+  margin-top: 8px;
+  padding: 16px 18px;
+  color: #31445d;
+  background: linear-gradient(135deg, #f8fbff, #eef7ff);
+  border: 1px solid #dce7f3;
+  border-radius: 18px;
+}
+.round-input-bar__sealed-status > span,
+.round-input-bar__final-status > span {
+  display: grid;
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  background: #e6f5ee;
+  border: 1px solid #c5ead6;
+  border-radius: 50%;
+}
+.round-input-bar__sealed-status strong,
+.round-input-bar__final-status strong {
+  display: block;
+  color: #28415d;
+  font-size: 14px;
+  font-weight: 900;
+}
+.round-input-bar__sealed-status small,
+.round-input-bar__final-status small {
+  display: block;
+  margin-top: 4px;
+  color: #7d8ba0;
+  font-size: 11px;
+  font-weight: 700;
 }
 .round-input-bar__composer textarea {
   box-sizing: border-box;

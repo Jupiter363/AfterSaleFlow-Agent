@@ -14,6 +14,10 @@ import com.example.dispute.infrastructure.persistence.repository.AdjudicationDra
 import com.example.dispute.infrastructure.persistence.repository.ApprovalRecordRepository;
 import com.example.dispute.infrastructure.persistence.repository.FlowConclusionRepository;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
+import com.example.dispute.infrastructure.persistence.repository.ReviewTaskRepository;
+import com.example.dispute.review.application.ReviewApplicationService;
+import com.example.dispute.review.application.ReviewDecisionCommand;
+import com.example.dispute.review.application.ReviewDecisionView;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -30,6 +34,8 @@ public class CaseOutcomeService {
     private final AdjudicationDraftRepository draftRepository;
     private final FlowConclusionRepository conclusionRepository;
     private final ToolExecutorService executorService;
+    private final ReviewTaskRepository reviewTaskRepository;
+    private final ReviewApplicationService reviewApplicationService;
     private final ObjectMapper objectMapper;
 
     public CaseOutcomeService(
@@ -38,12 +44,16 @@ public class CaseOutcomeService {
             AdjudicationDraftRepository draftRepository,
             FlowConclusionRepository conclusionRepository,
             ToolExecutorService executorService,
+            ReviewTaskRepository reviewTaskRepository,
+            ReviewApplicationService reviewApplicationService,
             ObjectMapper objectMapper) {
         this.caseRepository = caseRepository;
         this.approvalRepository = approvalRepository;
         this.draftRepository = draftRepository;
         this.conclusionRepository = conclusionRepository;
         this.executorService = executorService;
+        this.reviewTaskRepository = reviewTaskRepository;
+        this.reviewApplicationService = reviewApplicationService;
         this.objectMapper = objectMapper;
     }
 
@@ -74,7 +84,58 @@ public class CaseOutcomeService {
                 dispute.getCaseStatus(),
                 dispute.getClosedAt(),
                 finalDecision(dispute, approval, draft, flowConclusion),
+                adjudicationDraft(draft),
                 executorService.actions(caseId, actor));
+    }
+
+    public ReviewDecisionView confirmDraft(
+            String caseId,
+            String reason,
+            String idempotencyKey,
+            AuthenticatedActor actor) {
+        String taskId = latestReviewTaskId(caseId);
+        return reviewApplicationService.decide(
+                taskId,
+                new ReviewDecisionCommand(
+                        ApprovalDecisionType.APPROVE,
+                        reason,
+                        null,
+                        idempotencyKey),
+                actor);
+    }
+
+    public ReviewDecisionView modifyDraft(
+            String caseId,
+            String reason,
+            JsonNode approvedPlan,
+            String idempotencyKey,
+            AuthenticatedActor actor) {
+        String taskId = latestReviewTaskId(caseId);
+        return reviewApplicationService.decide(
+                taskId,
+                new ReviewDecisionCommand(
+                        ApprovalDecisionType.MODIFY_AND_APPROVE,
+                        reason,
+                        approvedPlan,
+                        idempotencyKey),
+                actor);
+    }
+
+    private AdjudicationDraftView adjudicationDraft(AdjudicationDraftEntity draft) {
+        if (draft == null) {
+            return null;
+        }
+        return new AdjudicationDraftView(
+                draft.getId(),
+                draft.getDraftVersion(),
+                draft.getRecommendedDecision(),
+                draft.getConfidence(),
+                draft.getDraftText(),
+                draft.getDraftStatus(),
+                json(draft.getFactFindingsJson()),
+                json(draft.getEvidenceAssessmentJson()),
+                json(draft.getPolicyApplicationJson()),
+                json(draft.getReviewerAttentionJson()));
     }
 
     private FinalDecisionView finalDecision(
@@ -140,5 +201,17 @@ public class CaseOutcomeService {
         if (!allowed) {
             throw new ForbiddenException("actor cannot view case outcome");
         }
+    }
+
+    private String latestReviewTaskId(String caseId) {
+        return reviewTaskRepository
+                .findFirstByCaseIdOrderByCreatedAtDesc(caseId)
+                .orElseThrow(
+                        () ->
+                                new NotFoundException(
+                                        ErrorCode.CASE_NOT_FOUND,
+                                        "review task not found",
+                                        Map.of("case_id", caseId)))
+                .getId();
     }
 }

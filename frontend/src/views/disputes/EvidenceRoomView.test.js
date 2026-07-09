@@ -210,6 +210,31 @@ describe("EvidenceRoomView", () => {
     expect(wrapper.get("[data-complete-evidence]").element.disabled).toBe(false);
   });
 
+  it("blocks the dispute initiator from completing evidence when no submitted evidence exists", async () => {
+    const emptyInitiatorCatalog = {
+      ...catalog,
+      initiator_role: "USER",
+      items: catalog.items.filter(
+        (item) =>
+          item.submitted_by_role !== "USER" ||
+          item.submission_status !== "SUBMITTED",
+      ),
+    };
+    const completeAction = vi.fn();
+    const { wrapper } = await mountView({
+      initialCatalog: emptyInitiatorCatalog,
+      completeAction,
+    });
+
+    await wrapper.get("[data-complete-evidence]").trigger("click");
+    await flushPromises();
+
+    expect(completeAction).not.toHaveBeenCalled();
+    expect(wrapper.get('[role="alert"]').text()).toContain(
+      "发起争议方需先正式提交至少 1 份相关证据",
+    );
+  });
+
   it("opens a submitted evidence detail modal from a card", async () => {
     const { wrapper } = await mountView();
 

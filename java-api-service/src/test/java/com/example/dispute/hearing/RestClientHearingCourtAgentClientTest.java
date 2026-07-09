@@ -33,6 +33,12 @@ class RestClientHearingCourtAgentClientTest {
                         .value("用户称物流显示已签收但本人未收到包裹。"))
                 .andExpect(jsonPath("$.courtroom_context.evidence_dossier.fact_evidence_matrix[0].fact")
                         .value("物流显示已签收"))
+                .andExpect(jsonPath("$.courtroom_context.evidence_dossier_ref.baseline_version")
+                        .value(1))
+                .andExpect(jsonPath("$.courtroom_context.evidence_dossier_ref.active_version")
+                        .value(2))
+                .andExpect(jsonPath("$.courtroom_context.evidence_dossier.dossier_version")
+                        .value(2))
                 .andRespond(
                         withSuccess(
                                 """
@@ -77,12 +83,17 @@ class RestClientHearingCourtAgentClientTest {
                                     "case_story": "用户称物流显示已签收但本人未收到包裹。"
                                   },
                                   "evidence_dossier": {
+                                    "dossier_version": 2,
                                     "fact_evidence_matrix": [
                                       {
                                         "fact": "物流显示已签收",
                                         "supporting_evidence": ["EVIDENCE_LOGISTICS"]
                                       }
                                     ]
+                                  },
+                                  "evidence_dossier_ref": {
+                                    "baseline_version": 1,
+                                    "active_version": 2
                                   }
                                 }
                                 """,

@@ -67,6 +67,7 @@ def _reason_with_llm_node(model_runner: Any | None):
                         item.model_dump(mode="json") for item in request.party_submissions
                     ],
                     "actor_visible_evidence": _actor_visible_evidence(request),
+                    "jury_a2a_notes": _jury_a2a_notes(request),
                     "round_control_policy": _round_control_policy(request),
                 },
             )
@@ -176,7 +177,7 @@ def _fallback_result(request: HearingRoundTurnRequest) -> HearingRoundTurnResult
     if final_round:
         message = (
             "第三轮陈述已封存。AI 法官将基于当前案情、证据和双方陈述形成非最终裁决草案，"
-            "并提交平台审核员终审。"
+            "并进入裁决草案与后续确认路径。"
         )
         return HearingRoundTurnResult(
             message_text=message,
@@ -270,6 +271,21 @@ def _actor_visible_evidence(request: HearingRoundTurnRequest) -> dict[str, Any]:
     }
 
 
+def _jury_a2a_notes(request: HearingRoundTurnRequest) -> dict[str, Any]:
+    notes = request.courtroom_context.get("jury_a2a_notes")
+    if isinstance(notes, list) and notes:
+        return {
+            "source": "agent_a2a_message",
+            "visibility": "SYSTEM_AUDIT_ONLY",
+            "usage_rule": "陪审团仅通过 A2A 给法官提供风险、遗漏证据和一致性关注点；法官仍是唯一裁决草案生成主体。",
+            "notes": notes,
+        }
+    return {
+        "source": "not_available",
+        "notes": [],
+    }
+
+
 def _round_control_policy(request: HearingRoundTurnRequest) -> dict[str, Any]:
     return {
         "structure": "法官主持的三轮结构化庭审",
@@ -277,7 +293,13 @@ def _round_control_policy(request: HearingRoundTurnRequest) -> dict[str, Any]:
         "round_names": {
             "1": "事实陈述轮",
             "2": "证据解释/定向回应轮",
-            "3": "方案确认轮",
+            "3": "方案确认轮：确认法官拟处理方向或说明异议",
+        },
+        "third_round_confirmation_policy": {
+            "purpose": "双方对法官拟处理方向确认或说明异议",
+            "parties_aligned_label": "双方一致",
+            "not_settlement_agreement": "方案确认不是和解协议，也不是双方自行提出一致方案",
+            "disagreement_capture": "任一方异议时，提取异议理由、待补信息和后续确认关注点",
         },
         "final_round_must_generate_draft": request.final_round or request.round_no >= 3,
         "free_debate_allowed": False,
@@ -302,13 +324,21 @@ def _sanitize_judge_message(text: str, *, final_round: bool) -> str:
             )
         ).message_text
     if final_round and _looks_like_more_questions(localized):
-        localized = "第三轮陈述已封存。AI 法官将基于当前案情、证据和双方陈述形成非最终裁决草案，并提交平台审核员终审。"
+        localized = "第三轮陈述已封存。AI 法官将基于当前案情、证据和双方陈述形成非最终裁决草案，并进入裁决草案与后续确认路径。"
     if "最终裁决" in localized and "非最终裁决" not in localized:
         localized = localized.replace("最终裁决", "非最终裁决草案")
     if final_round and "非最终裁决草案" not in localized:
         localized = localized.rstrip("。") + "，并进入非最终裁决草案生成路径。"
-    if "人类终审" not in localized and "审核员终审" not in localized and "平台审核员" not in localized:
-        localized = localized.rstrip("。") + "。AI 法官意见为非最终建议，最终由平台审核员确认。"
+    localized = (
+        localized.replace("并提交平台审核员终审", "并进入裁决草案与后续确认路径")
+        .replace("提交平台审核员终审", "进入裁决草案与后续确认路径")
+        .replace("由平台审核员终审", "进入后续确认")
+        .replace("平台审核员终审", "后续确认")
+        .replace("审核员终审", "后续确认")
+        .replace("人类终审", "后续确认")
+    )
+    if "后续确认" not in localized:
+        localized = localized.rstrip("。") + "。AI 法官意见为非最终建议，后续仍需按平台流程确认。"
     return localized
 
 

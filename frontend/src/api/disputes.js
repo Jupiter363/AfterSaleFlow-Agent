@@ -20,6 +20,21 @@ export const disputeApi = {
   get: (actor, caseId) => apiRequest(`/disputes/${caseId}`, actor),
   outcome: (actor, caseId) =>
     apiRequest(`/disputes/${caseId}/outcome`, actor),
+  confirmOutcomeDraft: (actor, caseId, reason) =>
+    apiRequest(`/disputes/${caseId}/outcome/review/confirm`, actor, {
+      method: "POST",
+      headers: { "Idempotency-Key": newIdempotencyKey("outcome-confirm") },
+      body: JSON.stringify({ reason }),
+    }),
+  modifyOutcomeDraft: (actor, caseId, reason, approvedPlan) =>
+    apiRequest(`/disputes/${caseId}/outcome/review/modify`, actor, {
+      method: "POST",
+      headers: { "Idempotency-Key": newIdempotencyKey("outcome-modify") },
+      body: JSON.stringify({
+        reason,
+        approved_plan: approvedPlan,
+      }),
+    }),
   actions: (actor, caseId) =>
     apiRequest(`/disputes/${caseId}/actions`, actor),
   confirmIntake: (actor, caseId, command) =>

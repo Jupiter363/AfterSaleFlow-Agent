@@ -152,7 +152,7 @@ public class EvidenceSubmissionService {
         RoomMessageView message =
                 roomMessageService.post(
                         dispute.getId(),
-                        RoomType.EVIDENCE,
+                        submissionRoom(dispute),
                         new RoomMessageCommand(
                                 MessageType.PARTY_EVIDENCE_REFERENCE,
                                 submissionMessage(actor, evidenceIds, command.batchNote()),
@@ -172,6 +172,13 @@ public class EvidenceSubmissionService {
                         "evidence_count", evidenceIds.size(),
                         "room_message_id", message.id()));
         return view(batch, message);
+    }
+
+    private static RoomType submissionRoom(FulfillmentCaseEntity dispute) {
+        if (RoomType.HEARING.name().equals(dispute.getCurrentRoom())) {
+            return RoomType.HEARING;
+        }
+        return RoomType.EVIDENCE;
     }
 
     private static void assertParty(FulfillmentCaseEntity dispute, AuthenticatedActor actor) {

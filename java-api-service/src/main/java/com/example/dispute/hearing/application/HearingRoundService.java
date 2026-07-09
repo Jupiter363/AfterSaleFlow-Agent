@@ -5,6 +5,7 @@ import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.config.DisputeProperties;
 import com.example.dispute.domain.model.CaseStatus;
+import com.example.dispute.evidence.application.EvidenceDossierRevisionService;
 import com.example.dispute.hearing.domain.HearingRoundSubmissionSource;
 import com.example.dispute.hearing.domain.HearingRoundStatus;
 import com.example.dispute.hearing.domain.HearingStopReason;
@@ -13,14 +14,17 @@ import com.example.dispute.hearing.infrastructure.persistence.entity.HearingRoun
 import com.example.dispute.hearing.infrastructure.persistence.repository.HearingRoundPartySubmissionRepository;
 import com.example.dispute.hearing.infrastructure.persistence.repository.HearingRoundRepository;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
+import com.example.dispute.infrastructure.persistence.repository.AdjudicationDraftRepository;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.infrastructure.persistence.repository.HearingStateRepository;
+import com.example.dispute.infrastructure.persistence.repository.ReviewTaskRepository;
 import com.example.dispute.room.application.CaseEventService;
 import com.example.dispute.room.domain.RoomType;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import java.time.Clock;
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -32,34 +36,46 @@ public class HearingRoundService {
 
     private final FulfillmentCaseRepository caseRepository;
     private final HearingStateRepository hearingStateRepository;
+    private final AdjudicationDraftRepository draftRepository;
+    private final ReviewTaskRepository reviewTaskRepository;
     private final HearingRoundRepository roundRepository;
     private final HearingRoundPartySubmissionRepository submissionRepository;
     private final CaseRoomRepository roomRepository;
     private final CaseEventService eventService;
     private final HearingWorkflowCoordinator workflowCoordinator;
     private final HearingCourtOrchestrator courtOrchestrator;
+    private final HearingFinalDraftService finalDraftService;
+    private final EvidenceDossierRevisionService evidenceDossierRevisionService;
     private final DisputeProperties disputeProperties;
     private final Clock clock;
 
     public HearingRoundService(
             FulfillmentCaseRepository caseRepository,
             HearingStateRepository hearingStateRepository,
+            AdjudicationDraftRepository draftRepository,
+            ReviewTaskRepository reviewTaskRepository,
             HearingRoundRepository roundRepository,
             HearingRoundPartySubmissionRepository submissionRepository,
             CaseRoomRepository roomRepository,
             CaseEventService eventService,
             HearingWorkflowCoordinator workflowCoordinator,
             HearingCourtOrchestrator courtOrchestrator,
+            HearingFinalDraftService finalDraftService,
+            EvidenceDossierRevisionService evidenceDossierRevisionService,
             DisputeProperties disputeProperties,
             Clock clock) {
         this.caseRepository = caseRepository;
         this.hearingStateRepository = hearingStateRepository;
+        this.draftRepository = draftRepository;
+        this.reviewTaskRepository = reviewTaskRepository;
         this.roundRepository = roundRepository;
         this.submissionRepository = submissionRepository;
         this.roomRepository = roomRepository;
         this.eventService = eventService;
         this.workflowCoordinator = workflowCoordinator;
         this.courtOrchestrator = courtOrchestrator;
+        this.finalDraftService = finalDraftService;
+        this.evidenceDossierRevisionService = evidenceDossierRevisionService;
         this.disputeProperties = disputeProperties;
         this.clock = clock;
     }
@@ -160,6 +176,7 @@ public class HearingRoundService {
                                 stopReason == null ? "CONTINUE" : stopReason.name()),
                 "hearing-round-completed:" + roundNo,
                         actor.actorId());
+        reviseEvidenceDossierAfterRoundIfNeeded(caseId, roundNo, actor.actorId());
         courtOrchestrator.afterRoundClosedAfterCommit(
                 caseId,
                 roundNo,
@@ -246,6 +263,8 @@ public class HearingRoundService {
                             : stopReason.name()),
                     "hearing-round-completed:" + round.getRoundNo(),
                     "hearing-controller");
+            reviseEvidenceDossierAfterRoundIfNeeded(
+                    caseId, round.getRoundNo(), "evidence-clerk");
             courtOrchestrator.afterRoundClosedAfterCommit(
                     caseId,
                     round.getRoundNo(),
@@ -264,6 +283,57 @@ public class HearingRoundService {
     }
 
     @Transactional
+    public int currentOpenRoundNoForPartyMessage(String caseId, AuthenticatedActor actor) {
+        FulfillmentCaseEntity dispute = lockedHearing(caseId);
+        assertCaseParty(dispute, actor);
+        return currentWritableRound(caseId).getRoundNo();
+    }
+
+    @Transactional
+    public HearingRoundView recordPartyMessageSubmission(
+            String caseId,
+            int roundNo,
+            String messageId,
+            String statement,
+            AuthenticatedActor actor) {
+        FulfillmentCaseEntity dispute = lockedHearing(caseId);
+        assertCaseParty(dispute, actor);
+        HearingRoundEntity round =
+                roundRepository
+                        .findByCaseIdAndRoundNo(caseId, roundNo)
+                        .orElseThrow(() -> new IllegalArgumentException("hearing round not found"));
+        assertWritableRound(round);
+        if (submissionRepository
+                .findByCaseIdAndRoundNoAndParticipantRole(caseId, roundNo, actor.role())
+                .isEmpty()) {
+            submissionRepository.save(
+                    HearingRoundPartySubmissionEntity.submit(
+                            "HEARING_ROUND_SUBMISSION_" + compactUuid(),
+                            caseId,
+                            round.getId(),
+                            round.getRoundNo(),
+                            actor.role(),
+                            actor.actorId(),
+                            HearingRoundSubmissionSource.PARTY_ACTION,
+                            roomMessageSubmissionJson(round, actor.role(), messageId, statement),
+                            clock.instant()));
+            recordRoundEvent(
+                    caseId,
+                    "HEARING_ROUND_PARTY_MESSAGE_RECORDED",
+                    Map.of(
+                            "round_no", round.getRoundNo(),
+                            "participant_role", actor.role().name(),
+                            "message_id", messageId),
+                    "hearing-round-party-message-recorded:"
+                            + round.getRoundNo()
+                            + ":"
+                            + actor.role().name(),
+                    actor.actorId());
+        }
+        return view(caseId, round, actor);
+    }
+
+    @Transactional
     public int expireDueRounds() {
         Instant now = clock.instant();
         List<HearingRoundEntity> dueRounds =
@@ -275,7 +345,10 @@ public class HearingRoundService {
                                 now);
         int expired = 0;
         for (HearingRoundEntity candidate : dueRounds) {
-            FulfillmentCaseEntity dispute = lockedHearing(candidate.getCaseId());
+            FulfillmentCaseEntity dispute = lockedHearingForExpiry(candidate.getCaseId());
+            if (dispute == null) {
+                continue;
+            }
             HearingRoundEntity round =
                     roundRepository
                             .findById(candidate.getId())
@@ -349,6 +422,186 @@ public class HearingRoundService {
                 .toList();
     }
 
+    @Transactional(readOnly = true)
+    public HearingStatusView status(String caseId, AuthenticatedActor actor) {
+        FulfillmentCaseEntity dispute =
+                caseRepository
+                        .findById(caseId)
+                        .orElseThrow(() -> new IllegalArgumentException("case not found"));
+        assertCanAccess(dispute, actor);
+        var latestRound = roundRepository.findTopByCaseIdOrderByRoundNoDesc(caseId);
+        var latestDraft = draftRepository.findFirstByCaseIdOrderByDraftVersionDesc(caseId);
+        var latestReviewTask = reviewTaskRepository.findFirstByCaseIdOrderByCreatedAtDesc(caseId);
+        String latestDraftId = latestDraft.map(item -> item.getId()).orElse(null);
+        String reviewTaskId = latestReviewTask.map(item -> item.getId()).orElse(null);
+        boolean reviewGateReady = reviewTaskId != null;
+
+        if (latestRound.isEmpty()) {
+            return new HearingStatusView(
+                    caseId,
+                    "BOOTSTRAPPING",
+                    "等待开庭装卷",
+                    "系统正在装订接待室案情卷宗和证据室证据卷宗，稍后会开启第 1 轮庭审。",
+                    false,
+                    reviewGateReady,
+                    latestDraftId,
+                    reviewTaskId,
+                    null,
+                    null,
+                    null,
+                    null,
+                    false);
+        }
+
+        HearingRoundEntity round = latestRound.get();
+        boolean closed =
+                round.getClosedAt() != null
+                        || round.getRoundStatus() == HearingRoundStatus.COMPLETED
+                        || round.getRoundStatus() == HearingRoundStatus.FORCED_CLOSED;
+        boolean finalRoundSealed = closed && round.getRoundNo() >= disputeProperties.maxHearingRounds();
+        String finalDraftId =
+                finalRoundSealed
+                        ? draftRepository
+                                .findByCaseIdAndDraftVersion(caseId, round.getRoundNo() + 1)
+                                .map(item -> item.getId())
+                                .orElse(null)
+                        : latestDraftId;
+        List<ActorRole> submittedRoles =
+                submissionRepository
+                        .findAllByCaseIdAndRoundNoOrderBySubmittedAtAsc(caseId, round.getRoundNo())
+                        .stream()
+                        .map(HearingRoundPartySubmissionEntity::getParticipantRole)
+                        .distinct()
+                        .toList();
+        boolean bothPartiesSubmitted =
+                submittedRoles.contains(ActorRole.USER) && submittedRoles.contains(ActorRole.MERCHANT);
+
+        if (reviewGateReady) {
+            return statusView(
+                    caseId,
+                    round,
+                    "REVIEW_GATE_READY",
+                    "裁决草案已生成",
+                    "裁决草案已生成，可进入结果页查看草案说明。",
+                    true,
+                    true,
+                    finalDraftId,
+                    reviewTaskId,
+                    finalRoundSealed);
+        }
+        if (finalRoundSealed && finalDraftId != null) {
+            return statusView(
+                    caseId,
+                    round,
+                    "DRAFT_READY",
+                    "裁决草案已生成",
+                    "AI 法官已生成裁决草案，点击庭审完成后进入结果页查看草案说明。",
+                    true,
+                    false,
+                    finalDraftId,
+                    null,
+                    true);
+        }
+        if (finalRoundSealed) {
+            return statusView(
+                    caseId,
+                    round,
+                    "JUDGE_DRAFTING",
+                    "等待裁决草案",
+                    "第 3 轮方案确认已封存，双方对法官拟处理方向的确认或说明异议已入卷，等待 AI 法官生成裁决草案。",
+                    false,
+                    false,
+                    null,
+                    null,
+                    true);
+        }
+        if (closed) {
+            return statusView(
+                    caseId,
+                    round,
+                    "JUDGE_PROCESSING",
+                    "法官处理中",
+                    "本轮陈述已封存，等待 AI 法官生成下一轮问题。",
+                    false,
+                    false,
+                    latestDraftId,
+                    null,
+                    false);
+        }
+        if (bothPartiesSubmitted) {
+            return statusView(
+                    caseId,
+                    round,
+                    "WAITING_JUDGE",
+                    "等待法官处理",
+                    "双方已完成本轮陈述，等待 AI 法官收束本轮并推进庭审。",
+                    false,
+                    false,
+                    latestDraftId,
+                    null,
+                    false);
+        }
+        return statusView(
+                caseId,
+                round,
+                "ROUND_OPEN",
+                "本轮陈述中",
+                "请双方围绕法官问题完成本轮陈述；双方提交或倒计时结束后，本轮会自动封存。",
+                false,
+                false,
+                latestDraftId,
+                null,
+                false);
+    }
+
+    @Transactional
+    public HearingStatusView completeHearing(String caseId, AuthenticatedActor actor) {
+        HearingStatusView current = status(caseId, actor);
+        if ("JUDGE_DRAFTING".equals(current.hearingPhase())
+                && current.finalRoundSealed()
+                && current.currentRoundNo() != null) {
+            finalDraftService.ensureDraftForFinalSealedRound(
+                    caseId,
+                    current.currentRoundNo(),
+                    disputeProperties.maxHearingRounds(),
+                    actor.actorId());
+            HearingStatusView updated = status(caseId, actor);
+            recordHearingPhaseChanged(caseId, updated, actor.actorId());
+            return updated;
+        }
+        recordHearingPhaseChanged(caseId, current, actor.actorId());
+        return current;
+    }
+
+    private void recordHearingPhaseChanged(
+            String caseId, HearingStatusView status, String actorId) {
+        if (!"DRAFT_READY".equals(status.hearingPhase())
+                && !"REVIEW_GATE_READY".equals(status.hearingPhase())) {
+            return;
+        }
+        if (status.latestDraftId() == null || status.latestDraftId().isBlank()) {
+            return;
+        }
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("hearing_phase", status.hearingPhase());
+        payload.put("phase_label", status.phaseLabel());
+        payload.put("next_step_hint", status.nextStepHint());
+        payload.put("can_complete_hearing", status.canCompleteHearing());
+        payload.put("review_gate_ready", status.reviewGateReady());
+        payload.put("latest_draft_id", status.latestDraftId());
+        payload.put("current_round_no", status.currentRoundNo());
+        payload.put("final_round_sealed", status.finalRoundSealed());
+        if (status.reviewTaskId() != null && !status.reviewTaskId().isBlank()) {
+            payload.put("review_task_id", status.reviewTaskId());
+        }
+        recordRoundEvent(
+                caseId,
+                "HEARING_PHASE_CHANGED",
+                payload,
+                "hearing-phase-changed:" + status.hearingPhase() + ":" + status.latestDraftId(),
+                actorId);
+    }
+
     private HearingRoundEntity activeOrNextRound(
             String caseId, int dossierVersion, Instant now, String actorId) {
         return roundRepository
@@ -382,17 +635,85 @@ public class HearingRoundService {
                         });
     }
 
+    private static HearingStatusView statusView(
+            String caseId,
+            HearingRoundEntity round,
+            String hearingPhase,
+            String phaseLabel,
+            String nextStepHint,
+            boolean canCompleteHearing,
+            boolean reviewGateReady,
+            String latestDraftId,
+            String reviewTaskId,
+            boolean finalRoundSealed) {
+        return new HearingStatusView(
+                caseId,
+                hearingPhase,
+                phaseLabel,
+                nextStepHint,
+                canCompleteHearing,
+                reviewGateReady,
+                latestDraftId,
+                reviewTaskId,
+                round.getRoundNo(),
+                roundStageFor(round.getRoundNo()),
+                round.getRoundStatus().name(),
+                round.getRoundDeadlineAt(),
+                finalRoundSealed);
+    }
+
+    private static String roundStageFor(int roundNo) {
+        return switch (roundNo) {
+            case 1 -> "FACT_STATEMENT";
+            case 2 -> "EVIDENCE_EXPLANATION";
+            case 3 -> "REMEDY_CONFIRMATION";
+            default -> "ROUND_" + roundNo;
+        };
+    }
+
+    private HearingRoundEntity currentWritableRound(String caseId) {
+        HearingRoundEntity round =
+                roundRepository
+                        .findTopByCaseIdOrderByRoundNoDesc(caseId)
+                        .orElseThrow(() -> new IllegalStateException("hearing round not open"));
+        assertWritableRound(round);
+        return round;
+    }
+
+    private void assertWritableRound(HearingRoundEntity round) {
+        if (round.getClosedAt() != null
+                || round.getRoundStatus() == HearingRoundStatus.COMPLETED
+                || round.getRoundStatus() == HearingRoundStatus.FORCED_CLOSED) {
+            throw new IllegalStateException("hearing round is already sealed");
+        }
+        if (!round.getRoundDeadlineAt().isAfter(clock.instant())) {
+            throw new IllegalStateException("hearing round deadline has expired");
+        }
+    }
+
     private FulfillmentCaseEntity lockedHearing(String caseId) {
         FulfillmentCaseEntity dispute =
                 caseRepository
                         .findByIdForUpdate(caseId)
                         .orElseThrow(() -> new IllegalArgumentException("case not found"));
-        if (dispute.getCaseStatus() != CaseStatus.HEARING_OPEN
-                && dispute.getCaseStatus() != CaseStatus.HEARING) {
+        if (!hearingRoundAvailable(dispute)) {
             throw new IllegalStateException(
                     "hearing round is unavailable from " + dispute.getCaseStatus());
         }
         return dispute;
+    }
+
+    private FulfillmentCaseEntity lockedHearingForExpiry(String caseId) {
+        FulfillmentCaseEntity dispute =
+                caseRepository
+                        .findByIdForUpdate(caseId)
+                        .orElseThrow(() -> new IllegalArgumentException("case not found"));
+        return hearingRoundAvailable(dispute) ? dispute : null;
+    }
+
+    private static boolean hearingRoundAvailable(FulfillmentCaseEntity dispute) {
+        return dispute.getCaseStatus() == CaseStatus.HEARING_OPEN
+                || dispute.getCaseStatus() == CaseStatus.HEARING;
     }
 
     private HearingRoundView completeRoundAfterTimeout(
@@ -471,6 +792,7 @@ public class HearingRoundService {
                                 : stopReason.name()),
                 "hearing-round-completed:" + round.getRoundNo(),
                 actorId);
+        reviseEvidenceDossierAfterRoundIfNeeded(dispute.getId(), round.getRoundNo(), "evidence-clerk");
         courtOrchestrator.afterRoundClosedAfterCommit(
                 dispute.getId(),
                 round.getRoundNo(),
@@ -482,6 +804,21 @@ public class HearingRoundService {
         workflowCoordinator.roundCompletedAfterCommit(
                 dispute.getId(), round.getRoundNo(), false);
         return view(dispute.getId(), responseRound, null);
+    }
+
+    private void reviseEvidenceDossierAfterRoundIfNeeded(
+            String caseId, int roundNo, String actorId) {
+        if (roundNo != EvidenceDossierRevisionService.EVIDENCE_EXPLANATION_ROUND) {
+            return;
+        }
+        List<HearingRoundPartySubmissionEntity> submissions =
+                submissionRepository.findAllByCaseIdAndRoundNoOrderBySubmittedAtAsc(
+                        caseId, roundNo);
+        evidenceDossierRevisionService.reviseAfterRoundIfNeeded(
+                caseId,
+                roundNo,
+                submissions,
+                actorId);
     }
 
     private HearingRoundEntity openNextRound(
@@ -655,6 +992,19 @@ public class HearingRoundService {
                 .strip();
     }
 
+    private static String roomMessageSubmissionJson(
+            HearingRoundEntity round, ActorRole role, String messageId, String statement) {
+        return """
+                {"source":"ROOM_MESSAGE","participant_role":"%s","round_no":%d,"message_id":"%s","statement":"%s"}
+                """
+                .formatted(
+                        role.name(),
+                        round.getRoundNo(),
+                        jsonEscape(messageId),
+                        jsonEscape(statement))
+                .strip();
+    }
+
     private static String submittedRoundSummary(
             List<HearingRoundPartySubmissionEntity> submissions) {
         String userJson = submissionJson(submissions, ActorRole.USER);
@@ -692,6 +1042,23 @@ public class HearingRoundService {
                 .findFirst()
                 .map(HearingRoundPartySubmissionEntity::getSubmissionJson)
                 .orElse("{}");
+    }
+
+    private static String jsonEscape(String value) {
+        if (value == null) return "";
+        StringBuilder escaped = new StringBuilder();
+        for (int index = 0; index < value.length(); index++) {
+            char character = value.charAt(index);
+            switch (character) {
+                case '\\' -> escaped.append("\\\\");
+                case '"' -> escaped.append("\\\"");
+                case '\n' -> escaped.append("\\n");
+                case '\r' -> escaped.append("\\r");
+                case '\t' -> escaped.append("\\t");
+                default -> escaped.append(character);
+            }
+        }
+        return escaped.toString();
     }
 
     private static String compactUuid() {

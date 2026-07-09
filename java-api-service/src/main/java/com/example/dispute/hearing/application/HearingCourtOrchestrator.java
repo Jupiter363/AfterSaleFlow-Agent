@@ -6,7 +6,9 @@ import com.example.dispute.hearing.infrastructure.persistence.entity.HearingRoun
 import com.example.dispute.hearing.infrastructure.persistence.entity.HearingRoundPartySubmissionEntity;
 import com.example.dispute.hearing.infrastructure.persistence.repository.HearingRoundPartySubmissionRepository;
 import com.example.dispute.hearing.infrastructure.persistence.repository.HearingRoundRepository;
+import com.example.dispute.infrastructure.persistence.entity.EvidenceDossierEntity;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
+import com.example.dispute.infrastructure.persistence.repository.EvidenceDossierRepository;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.infrastructure.persistence.repository.HearingRecordRepository;
 import com.example.dispute.room.application.CaseEventService;
@@ -18,7 +20,10 @@ import com.example.dispute.room.infrastructure.persistence.entity.RoomMessageEnt
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.RoomMessageRepository;
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.List;
@@ -42,9 +47,11 @@ public class HearingCourtOrchestrator {
     private final HearingRoundRepository roundRepository;
     private final HearingRoundPartySubmissionRepository submissionRepository;
     private final HearingRecordRepository hearingRecordRepository;
+    private final EvidenceDossierRepository evidenceDossierRepository;
     private final RoomMessageRepository messageRepository;
     private final CaseEventService eventService;
     private final HearingCourtAgentClient agentClient;
+    private final AgentA2AMessageService a2aMessageService;
     private final ObjectMapper objectMapper;
     private final Clock clock;
     private final PostCommitSideEffectExecutor postCommit;
@@ -55,9 +62,11 @@ public class HearingCourtOrchestrator {
             HearingRoundRepository roundRepository,
             HearingRoundPartySubmissionRepository submissionRepository,
             HearingRecordRepository hearingRecordRepository,
+            EvidenceDossierRepository evidenceDossierRepository,
             RoomMessageRepository messageRepository,
             CaseEventService eventService,
             HearingCourtAgentClient agentClient,
+            AgentA2AMessageService a2aMessageService,
             ObjectMapper objectMapper,
             Clock clock,
             PostCommitSideEffectExecutor postCommit) {
@@ -66,9 +75,11 @@ public class HearingCourtOrchestrator {
         this.roundRepository = roundRepository;
         this.submissionRepository = submissionRepository;
         this.hearingRecordRepository = hearingRecordRepository;
+        this.evidenceDossierRepository = evidenceDossierRepository;
         this.messageRepository = messageRepository;
         this.eventService = eventService;
         this.agentClient = agentClient;
+        this.a2aMessageService = a2aMessageService;
         this.objectMapper = objectMapper;
         this.clock = clock;
         this.postCommit = postCommit;
@@ -187,7 +198,7 @@ public class HearingCourtOrchestrator {
                 round.getRoundStatus().name(),
                 round.getStopReason() == null ? null : round.getStopReason().name(),
                 defaultText(round.getSummaryJson(), "{}"),
-                courtroomContextJson(dispute.getId()),
+                courtroomContextJson(dispute.getId(), round.getRoundNo()),
                 submissions.stream()
                         .map(
                                 submission ->
@@ -199,7 +210,7 @@ public class HearingCourtOrchestrator {
                         .toList());
     }
 
-    private String courtroomContextJson(String caseId) {
+    private String courtroomContextJson(String caseId, int roundNo) {
         String contextJson =
                 hearingRecordRepository
                         .findTopByCaseIdAndNodeNameAndRoundNoAndRecordTypeOrderByCreatedAtDesc(
@@ -217,7 +228,123 @@ public class HearingCourtOrchestrator {
             throw new IllegalStateException(
                     "hearing bootstrap snapshot not found for case " + caseId);
         }
-        return contextJson;
+        return activeCourtroomContextJson(caseId, roundNo, contextJson);
+    }
+
+    private String activeCourtroomContextJson(String caseId, int roundNo, String bootstrapContextJson) {
+        ObjectNode context = readObject(bootstrapContextJson, "hearing bootstrap snapshot");
+        int baselineVersion =
+                context.path("source_versions")
+                        .path("evidence_dossier_version")
+                        .asInt(context.path("evidence_dossier_version").asInt(0));
+        var active = evidenceDossierRepository.findTopByCaseIdOrderByDossierVersionDesc(caseId);
+        int activeVersion = active.map(EvidenceDossierEntity::getDossierVersion).orElse(baselineVersion);
+        if (baselineVersion <= 0) {
+            baselineVersion = activeVersion;
+        }
+
+        ObjectNode sourceVersions = context.withObjectProperty("source_versions");
+        sourceVersions.put("evidence_dossier_version", baselineVersion);
+        ObjectNode ref = context.putObject("evidence_dossier_ref");
+        ref.put("baseline_version", baselineVersion);
+        ref.put("active_version", activeVersion);
+        active.ifPresent(
+                dossier -> {
+                    ref.put("active_dossier_id", dossier.getId());
+                    ref.put("active_status", dossier.getDossierStatus());
+                    context.put("evidence_dossier_version", activeVersion);
+                    context.set("evidence_dossier", evidenceDossierContext(dossier));
+                });
+        context.set("jury_a2a_notes", juryA2ANotes(caseId, roundNo));
+        return json(context);
+    }
+
+    private ArrayNode juryA2ANotes(String caseId, int roundNo) {
+        ArrayNode notes = objectMapper.createArrayNode();
+        List<AgentA2AMessageView> messages = a2aMessageService.findForJudge(caseId, roundNo);
+        if (messages == null) {
+            return notes;
+        }
+        for (AgentA2AMessageView message : messages) {
+            ObjectNode note = notes.addObject();
+            note.put("a2a_message_id", message.a2aMessageId());
+            note.put("round_no", message.roundNo());
+            note.put("from_agent", message.fromAgent());
+            note.put("to_agent", message.toAgent());
+            note.put("message_type", message.messageType());
+            note.set("input_refs", readJson(message.inputRefsJson(), "A2A input refs"));
+            note.set("payload", readJson(message.payloadJson(), "A2A payload"));
+            note.put("visibility", message.visibility());
+            if (message.agentRunId() != null && !message.agentRunId().isBlank()) {
+                note.put("agent_run_id", message.agentRunId());
+            }
+        }
+        return notes;
+    }
+
+    private ObjectNode evidenceDossierContext(EvidenceDossierEntity dossier) {
+        JsonNode summary = readJson(dossier.getSummaryJson(), "active evidence summary");
+        JsonNode timeline = readJson(dossier.getTimelineJson(), "active evidence timeline");
+        JsonNode matrix = readJson(dossier.getMatrixSummaryJson(), "active evidence matrix");
+        ObjectNode context = objectMapper.createObjectNode();
+        context.put("source", "active_evidence_dossier");
+        context.put("dossier_id", dossier.getId());
+        context.put("dossier_version", dossier.getDossierVersion());
+        context.put("dossier_status", dossier.getDossierStatus());
+        context.set("summary", summary.isObject() ? summary.deepCopy() : objectMapper.createObjectNode());
+        context.set("evidence_items", arrayOrEmpty(summary.path("evidence_items")));
+        context.set("timeline", arrayOrEmpty(timeline));
+        context.set(
+                "fact_evidence_matrix",
+                matrix.path("fact_evidence_matrix").isArray()
+                        ? matrix.path("fact_evidence_matrix").deepCopy()
+                        : arrayOrEmpty(matrix));
+        context.set(
+                "party_evidence_summary",
+                summary.path("party_evidence_summary").isObject()
+                        ? summary.path("party_evidence_summary").deepCopy()
+                        : objectMapper.createObjectNode());
+        context.set("verified_facts", arrayOrEmpty(summary.path("verified_facts")));
+        context.set("contested_facts", arrayOrEmpty(summary.path("contested_facts")));
+        context.set("evidence_gaps", arrayOrEmpty(summary.path("evidence_gaps")));
+        context.set("authenticity_flags", arrayOrEmpty(summary.path("authenticity_flags")));
+        context.put(
+                "overall_confidence_score",
+                summary.path("overall_confidence_score").asInt(
+                        summary.path("confidence_score").asInt(0)));
+        context.put(
+                "handoff_notes",
+                defaultText(
+                        summary.path("handoff_notes").asText(null),
+                        matrix.path("handoff_notes").asText(
+                                "证据书记官尚未提供可宣读的 active 证据矩阵交接备注。")));
+        ObjectNode rawProjection = context.putObject("raw_projection");
+        rawProjection.set("summary_json", summary.deepCopy());
+        rawProjection.set("timeline_json", timeline.deepCopy());
+        rawProjection.set("matrix_summary_json", matrix.deepCopy());
+        return context;
+    }
+
+    private ObjectNode readObject(String json, String label) {
+        JsonNode node = readJson(json, label);
+        if (!node.isObject()) {
+            throw new IllegalStateException(label + " must be a JSON object");
+        }
+        return node.deepCopy();
+    }
+
+    private JsonNode readJson(String json, String label) {
+        try {
+            return objectMapper.readTree(json == null || json.isBlank() ? "{}" : json);
+        } catch (JsonProcessingException exception) {
+            throw new IllegalStateException("invalid " + label, exception);
+        }
+    }
+
+    private ArrayNode arrayOrEmpty(JsonNode node) {
+        return node != null && node.isArray()
+                ? node.deepCopy()
+                : objectMapper.createArrayNode();
     }
 
     private HearingCourtAgentResult safeGenerate(HearingCourtAgentCommand command, String traceId) {
@@ -260,7 +387,7 @@ public class HearingCourtOrchestrator {
         if (finalRound) {
             return new HearingCourtAgentResult(
                     JUDGE_SENDER_ROLE,
-                    "第 3 轮陈述已封存。AI 法官将基于当前案情、证据和双方陈述形成非最终裁决草案，并提交平台审核员终审。",
+                    "第 3 轮陈述已封存。AI 法官将基于当前案情、证据和双方陈述形成非最终裁决草案，并进入裁决草案与后续确认路径。",
                     "模型暂不可用，系统已封存最终轮材料并进入裁决草案生成路径。",
                     List.of(),
                     List.of(),

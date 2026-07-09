@@ -90,6 +90,12 @@ def request(**overrides) -> HearingRoundTurnRequest:
                 ],
                 "overall_confidence_score": 76,
             },
+            "jury_a2a_notes": [
+                {
+                    "message_type": "JURY_SILENT_NOTE",
+                    "payload": {"judge_attention": ["签收人身份仍需关注"]},
+                }
+            ],
         },
         "party_submissions": [
             {
@@ -124,6 +130,9 @@ def test_hearing_round_turn_prompt_is_registered_with_harness_fragments() -> Non
     assert "三轮结构化庭审" in system_prompt
     assert "JUDGE_OPENING_READY" in system_prompt
     assert "庭审刚打开" in system_prompt
+    assert "方案确认轮" in system_prompt
+    assert "双方一致" in system_prompt
+    assert "不是和解协议" in system_prompt
     assert "<untrusted_case_data>" in user_prompt
 
 
@@ -147,9 +156,19 @@ def test_round_turn_workflow_uses_context_pack_and_returns_judge_message() -> No
     evidence = next(
         section for section in context_pack.sections if section.name == "actor_visible_evidence"
     )
+    round_policy = next(
+        section for section in context_pack.sections if section.name == "round_control_policy"
+    )
+    jury_notes = next(
+        section for section in context_pack.sections if section.name == "jury_a2a_notes"
+    )
     assert "用户称物流显示已签收但本人未收到包裹" in canonical.content
     assert "fact_evidence_matrix" in evidence.content
     assert "EVIDENCE_LOGISTICS" in evidence.content
+    assert "签收人身份仍需关注" in jury_notes.content
+    assert "方案确认轮" in round_policy.content
+    assert "双方一致" in round_policy.content
+    assert "不是和解协议" in round_policy.content
 
 
 def test_open_round_is_guarded_as_judge_opening_instead_of_sealed_turn() -> None:
@@ -226,4 +245,6 @@ def test_final_round_is_guarded_to_final_draft_path() -> None:
     assert result.questions_for_user == []
     assert result.questions_for_merchant == []
     assert "非最终裁决草案" in result.message_text
-    assert "平台审核员" in result.message_text
+    assert "后续确认" in result.message_text
+    assert "平台审核员" not in result.message_text
+    assert "终审" not in result.message_text

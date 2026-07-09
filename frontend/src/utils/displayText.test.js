@@ -22,6 +22,14 @@ describe("display text helpers", () => {
     expect(text).not.toContain("SIGNED_NOT_RECEIVED");
   });
 
+  it("maps adjudication recommendation enum codes to readable Chinese", () => {
+    const text = humanizeDossierText("RESHIP_OR_REFUND_AFTER_SIGNATURE_REVIEW");
+
+    expect(text).toContain("补发");
+    expect(text).toContain("退款");
+    expect(text).not.toContain("RESHIP_OR_REFUND_AFTER_SIGNATURE_REVIEW");
+  });
+
   it("summarizes raw evidence matrix json in immutable room messages", () => {
     const text = displayRoomMessageText(
       '证据书记官宣读证据卷宗：核心证明矩阵显示：{"evidence_id":"EVIDENCE_001","relation_type":"UNMAPPED","verification_status":"UNVERIFIED"}。',

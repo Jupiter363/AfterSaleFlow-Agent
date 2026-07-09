@@ -11,6 +11,8 @@ public interface CaseTimelineEventRepository extends JpaRepository<CaseTimelineE
     List<CaseTimelineEventEntity> findAllByCaseIdAndSequenceNoGreaterThanOrderBySequenceNoAsc(
             String caseId, long sequenceNo);
 
+    List<CaseTimelineEventEntity> findAllByCaseIdOrderBySequenceNoAsc(String caseId);
+
     @Query("select coalesce(max(event.sequenceNo), 0) from CaseTimelineEventEntity event where event.caseId = :caseId")
     long findMaxSequenceByCaseId(@Param("caseId") String caseId);
 

@@ -3,6 +3,7 @@ package com.example.dispute.evidence.application;
 import com.example.dispute.common.exception.ForbiddenException;
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
+import com.example.dispute.evidence.domain.EvidenceSubmissionStatus;
 import com.example.dispute.evidence.infrastructure.persistence.repository.EvidenceVerificationRepository;
 import com.example.dispute.evidence.infrastructure.persistence.entity.EvidenceVerificationEntity;
 import com.example.dispute.infrastructure.persistence.entity.EvidenceItemEntity;
@@ -43,22 +44,29 @@ public class EvidenceCatalogService {
                 evidenceRepository
                         .findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(caseId)
                         .stream()
-                        .filter(item -> canSeeCatalogItem(item, actor))
-                        .map(item -> project(caseId, item, actor))
+                        .filter(item -> canSeeCatalogItem(dispute, item, actor))
+                        .map(item -> project(caseId, dispute, item, actor))
                         .toList();
-        return new RoleScopedEvidenceView(caseId, items);
+        return new RoleScopedEvidenceView(caseId, dispute.getInitiatorRole().name(), items);
     }
 
-    private static boolean canSeeCatalogItem(EvidenceItemEntity item, AuthenticatedActor actor) {
+    private static boolean canSeeCatalogItem(
+            FulfillmentCaseEntity dispute, EvidenceItemEntity item, AuthenticatedActor actor) {
         if (actor.role().name().equals(item.getSubmittedByRole())
                 && actor.actorId().equals(item.getSubmittedById())) {
+            return true;
+        }
+        if (isHearingPartySharedEvidence(dispute, item, actor)) {
             return true;
         }
         return isPrivilegedEvidenceViewer(actor.role());
     }
 
     private RoleScopedEvidenceView.Item project(
-            String caseId, EvidenceItemEntity item, AuthenticatedActor actor) {
+            String caseId,
+            FulfillmentCaseEntity dispute,
+            EvidenceItemEntity item,
+            AuthenticatedActor actor) {
         boolean privileged = isPrivilegedEvidenceViewer(actor.role());
         boolean owns =
                 actor.role().name().equals(item.getSubmittedByRole())
@@ -66,6 +74,7 @@ public class EvidenceCatalogService {
         boolean visible =
                 privileged
                         || owns
+                        || isHearingPartySharedEvidence(dispute, item, actor)
                         || "PLATFORM".equals(item.getVisibility())
                                 && actor.role() == ActorRole.CUSTOMER_SERVICE;
         String contentUrl =
@@ -188,6 +197,21 @@ public class EvidenceCatalogService {
         return role == ActorRole.PLATFORM_REVIEWER
                 || role == ActorRole.ADMIN
                 || role == ActorRole.SYSTEM;
+    }
+
+    private static boolean isHearingPartySharedEvidence(
+            FulfillmentCaseEntity dispute, EvidenceItemEntity item, AuthenticatedActor actor) {
+        if (actor.role() != ActorRole.USER && actor.role() != ActorRole.MERCHANT) {
+            return false;
+        }
+        if (actor.role().name().equals(item.getSubmittedByRole())
+                && actor.actorId().equals(item.getSubmittedById())) {
+            return true;
+        }
+        boolean hearingRoom = "HEARING".equalsIgnoreCase(dispute.getCurrentRoom());
+        return hearingRoom
+                && "PARTIES".equals(item.getVisibility())
+                && item.getSubmissionStatus() == EvidenceSubmissionStatus.SUBMITTED;
     }
 
     private static void assertCanAccess(

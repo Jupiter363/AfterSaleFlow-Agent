@@ -56,6 +56,10 @@ class HearingContext(StrictModel):
     final_convergence: bool = False
     must_produce_final_plan: bool = False
     allow_supplemental_request: bool = True
+    courtroom_context: dict[str, object] = Field(default_factory=dict)
+    sealed_rounds: Annotated[list[dict[str, object]], Field(max_length=20)] = Field(
+        default_factory=list
+    )
 
 
 class HearingAnalyzeRequest(StrictModel):

@@ -182,6 +182,10 @@ class HearingCourtBootstrapServiceTest {
                 .containsOnly(1);
         assertThat(messages.getAllValues().get(0).getMessageText())
                 .contains("现在开庭");
+        assertThat(messages.getAllValues().get(0).getMessageText())
+                .doesNotContain("平台审核")
+                .doesNotContain("审核员")
+                .contains("后续确认");
         assertThat(messages.getAllValues().get(1).getMessageText())
                 .contains("案情接待官宣读");
         assertThat(messages.getAllValues().get(2).getMessageText())
@@ -218,6 +222,7 @@ class HearingCourtBootstrapServiceTest {
                 .thenReturn(true);
         when(messageRepository.findByCaseIdAndIdempotencyKey(eq(CASE_ID), any()))
                 .thenReturn(Optional.of(existingMessage(room, "JUDGE")));
+        when(evidenceDossierRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
 
         service.bootstrap(
                 CASE_ID,
@@ -228,6 +233,84 @@ class HearingCourtBootstrapServiceTest {
         verify(messageRepository, never()).save(any());
         verify(hearingRoundService)
                 .ensureInitialRoundOpen(CASE_ID, 1, "hearing-bootstrap");
+    }
+
+    @Test
+    void bootstrapCreatesAnEmptyEvidenceBaselineWhenNoEvidenceDossierExists() {
+        FulfillmentCaseEntity dispute = hearingCase();
+        CaseRoomEntity room = hearingRoom();
+        HearingStateEntity state =
+                HearingStateEntity.start(
+                        "HEARING_STATE_BOOTSTRAP",
+                        CASE_ID,
+                        "hearing-bootstrap-" + CASE_ID,
+                        "hearing-bootstrap");
+        when(caseRepository.findByIdForUpdate(CASE_ID)).thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(CASE_ID, RoomType.HEARING))
+                .thenReturn(Optional.of(room));
+        when(hearingStateRepository.findByCaseId(CASE_ID)).thenReturn(Optional.of(state));
+        when(intakeDossierRepository.findByCaseIdAndRoomType(CASE_ID, RoomType.INTAKE))
+                .thenReturn(Optional.empty());
+        when(evidenceDossierRepository.findTopByCaseIdOrderByDossierVersionDesc(CASE_ID))
+                .thenReturn(Optional.empty());
+        when(hearingRecordRepository.existsByWorkflowIdAndNodeNameAndRoundNoAndRecordType(
+                        state.getWorkflowId(),
+                        "C0_COURT_BOOTSTRAP",
+                        1,
+                        "BOOTSTRAP_DOSSIER_SNAPSHOT"))
+                .thenReturn(false);
+        when(messageRepository.findByCaseIdAndIdempotencyKey(eq(CASE_ID), any()))
+                .thenReturn(Optional.empty());
+        when(messageRepository.findMaxSequenceByRoomId(room.getId())).thenReturn(0L, 1L, 2L, 3L);
+        when(evidenceDossierRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(hearingRecordRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(messageRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+
+        service.bootstrap(
+                CASE_ID,
+                new AuthenticatedActor("user-local", ActorRole.USER),
+                "TRACE_BOOTSTRAP_EMPTY_EVIDENCE");
+
+        ArgumentCaptor<EvidenceDossierEntity> baseline =
+                ArgumentCaptor.forClass(EvidenceDossierEntity.class);
+        verify(evidenceDossierRepository).save(baseline.capture());
+        assertThat(baseline.getValue().getCaseId()).isEqualTo(CASE_ID);
+        assertThat(baseline.getValue().getDossierVersion()).isEqualTo(1);
+        assertThat(baseline.getValue().getDossierStatus()).isEqualTo("FROZEN");
+        assertThat(baseline.getValue().getSummaryJson())
+                .contains("\"evidence_count\":0")
+                .contains("evidence_items");
+        assertThat(baseline.getValue().getMatrixSummaryJson())
+                .contains("fact_evidence_matrix")
+                .contains("evidence_gaps");
+        verify(hearingRoundService)
+                .ensureInitialRoundOpen(CASE_ID, 1, "hearing-bootstrap");
+    }
+
+    @Test
+    void alreadyBootstrappedPostHearingCasesRemainReadableWithoutOpeningANewCourtSession() {
+        FulfillmentCaseEntity dispute = postHearingReviewCase();
+        when(caseRepository.findByIdForUpdate(CASE_ID)).thenReturn(Optional.of(dispute));
+        when(hearingStateRepository.findByCaseId(CASE_ID))
+                .thenReturn(
+                        Optional.of(
+                                HearingStateEntity.start(
+                                        "HEARING_STATE_BOOTSTRAP",
+                                        CASE_ID,
+                                        "hearing-bootstrap-" + CASE_ID,
+                                        "hearing-bootstrap")));
+
+        service.bootstrap(
+                CASE_ID,
+                new AuthenticatedActor("merchant-local", ActorRole.MERCHANT),
+                "TRACE_BOOTSTRAP_REVIEW_READ");
+
+        verify(roomRepository, never()).findByCaseIdAndRoomType(any(), any());
+        verify(intakeDossierRepository, never()).findByCaseIdAndRoomType(any(), any());
+        verify(evidenceDossierRepository, never()).findTopByCaseIdOrderByDossierVersionDesc(any());
+        verify(hearingRecordRepository, never()).save(any());
+        verify(messageRepository, never()).save(any());
+        verify(hearingRoundService, never()).ensureInitialRoundOpen(any(), any(int.class), any());
     }
 
     @Test
@@ -318,6 +401,27 @@ class HearingCourtBootstrapServiceTest {
                 OffsetDateTime.parse("2026-07-08T04:00:00Z"),
                 "OMS",
                 "EXT-BOOTSTRAP",
+                "external-adapter");
+    }
+
+    private static FulfillmentCaseEntity postHearingReviewCase() {
+        return FulfillmentCaseEntity.imported(
+                CASE_ID,
+                "ORDER-BOOTSTRAP",
+                "AS-BOOTSTRAP",
+                "LOG-BOOTSTRAP",
+                "user-local",
+                "merchant-local",
+                "idem-bootstrap-review",
+                "SIGNED_NOT_RECEIVED",
+                "鐗╂祦绛炬敹浜夎",
+                "鐗╂祦璁板綍鏄剧ず鍖呰９宸茬鏀讹紝浣嗙敤鎴风О鏈汉鏈敹鍒板晢鍝併€?",
+                RiskLevel.MEDIUM,
+                CaseStatus.WAITING_HUMAN_REVIEW,
+                "HEARING",
+                OffsetDateTime.parse("2026-07-08T04:00:00Z"),
+                "OMS",
+                "EXT-BOOTSTRAP-REVIEW",
                 "external-adapter");
     }
 

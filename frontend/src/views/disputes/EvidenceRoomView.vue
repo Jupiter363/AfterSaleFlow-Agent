@@ -97,6 +97,13 @@ const submittedItems = computed(() =>
     (item) => evidenceSubmissionStatus(item) === "SUBMITTED",
   ),
 );
+const initiatorRole = computed(
+  () => catalog.value?.initiator_role || catalog.value?.initiatorRole || "USER",
+);
+const currentActorIsInitiator = computed(() => role.value === initiatorRole.value);
+const canCompleteEvidenceLocally = computed(
+  () => !currentActorIsInitiator.value || submittedItems.value.length > 0,
+);
 const effectiveDeadline = computed(
   () =>
     props.deadlineAt ||
@@ -654,6 +661,11 @@ async function deletePendingEvidence(item) {
 }
 
 async function completeEvidence() {
+  if (!canCompleteEvidenceLocally.value) {
+    error.value = "发起争议方需先正式提交至少 1 份相关证据，当前证据栏为空，暂不能进入下一步。";
+    agentState.value = "ERROR";
+    return;
+  }
   completing.value = true;
   error.value = "";
   agentState.value = "THINKING";
