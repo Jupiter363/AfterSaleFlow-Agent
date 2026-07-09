@@ -54,6 +54,9 @@ const isDraftOutcome = computed(
 const canReviewOutcomeDraft = computed(
   () => actor.role === "PLATFORM_REVIEWER" && isDraftOutcome.value,
 );
+const canModifyReviewPlan = computed(
+  () => (reviewPlanDraft.value.actions || []).length > 0,
+);
 const decision = computed(() => {
   const source = rawDecision.value || {};
   if (!isDraftOutcome.value) return source;
@@ -769,7 +772,7 @@ onMounted(load);
         <button
           type="button"
           data-review-modify
-          :disabled="reviewBusy"
+          :disabled="reviewBusy || !canModifyReviewPlan"
           @click="modifyOutcomeDraftFromStructuredPlan"
         >
           修改并确认

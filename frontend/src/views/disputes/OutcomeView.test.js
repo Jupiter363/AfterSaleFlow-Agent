@@ -460,4 +460,21 @@ describe("OutcomeView", () => {
       },
     );
   });
+
+  it("disables modifying an empty structured plan until an action is added", async () => {
+    actor.id = "reviewer-local";
+    actor.role = "PLATFORM_REVIEWER";
+    const wrapper = await mountOutcome({
+      ...draftOutcome,
+      adjudication_draft: {
+        ...draftOutcome.adjudication_draft,
+        approved_plan: { id: "PLAN_EMPTY", actions: [] },
+      },
+    });
+
+    expect(wrapper.get("[data-review-modify]").attributes("disabled")).toBeDefined();
+    await wrapper.get("[data-review-add-action]").trigger("click");
+
+    expect(wrapper.get("[data-review-modify]").attributes("disabled")).toBeUndefined();
+  });
 });
