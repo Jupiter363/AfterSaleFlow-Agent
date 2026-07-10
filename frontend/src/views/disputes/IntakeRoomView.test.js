@@ -8,6 +8,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { actor } from "../../state/actor";
 import IntakeRoomView from "./IntakeRoomView.vue";
 
+function readUtf8Source(path) {
+  return readFileSync(path, "utf8").replace(/\r\n/g, "\n");
+}
+
 const dispute = {
   id: "CASE_INTAKE_1",
   order_id: "ORDER-1",
@@ -869,7 +873,7 @@ describe("IntakeRoomView", () => {
     expect(wrapper.get("[data-origin-statement-text]").attributes("title")).toBe(longStatement);
     expect(wrapper.findAll("[data-verification-gap-item]").length).toBeLessThanOrEqual(4);
 
-    const source = readFileSync("src/views/disputes/IntakeRoomView.vue", "utf8");
+    const source = readUtf8Source("src/views/disputes/IntakeRoomView.vue");
     expect(source).toContain("@supports (-webkit-line-clamp: 1)");
     expect(source).toContain("--cover-summary-lines: 7");
     expect(source).toContain("--summary-note-min-height: 132px");
@@ -1187,7 +1191,7 @@ describe("IntakeRoomView", () => {
   });
 
   it("keeps the intake room outer cards at a fixed non-stretching height", () => {
-    const source = readFileSync("src/views/disputes/IntakeRoomView.vue", "utf8");
+    const source = readUtf8Source("src/views/disputes/IntakeRoomView.vue");
 
     expect(source).toContain("align-items: start;");
     expect(source).toContain("--intake-panel-height: 740px;");
