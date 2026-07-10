@@ -32,6 +32,7 @@
 4. **导入只接受固定演示双方账号。** `USER=user-local`、`MERCHANT=merchant-local`。直接导入中的 `user_id` / `merchant_id` 不匹配时返回 400，不做静默改写；public/internal simulate 的 current/counterparty actor 也必须与 initiator role 按这两个固定账号严格对应。
 5. **当前审核侧只有唯一系统审核员。** 只有 `actor_id=reviewer-local` 且 `role=PLATFORM_REVIEWER` 可以确认、修改或提交审核决定；其他账号即使声明 `PLATFORM_REVIEWER` 角色，也必须返回 403。决定权限要在查询 review task、draft 或其他案件审核资源之前校验，避免通过 404/响应差异泄漏任务是否存在。审核列表与审核包的查看权限继续沿用既有角色规则，本轮不扩展多审核员分配模型。
 6. **固定账号建立在可信本地演示认证边界上。** 当前 `X-User-Id` / `X-Role` 头仅用于本地调试和固定三账号角色切换，不构成面向公网的强身份认证。Docker 服务对外发布前，必须由可信认证网关或签名会话提供并覆盖身份，不能允许外部客户端自行声明这两个头；本轮不把完整登录、多用户、审核员分配引入庭审主线。
+7. **dev-local 调试边界。** 本地联调以 `scripts/dev-local.ps1` 启动 Java API `8080` 与 Vite `5173`；Docker 只承担依赖服务和最终部署形态，不作为日常前后端热调试入口。
 
 ---
 
@@ -953,6 +954,41 @@ Browser verification:
 - Verified draft page contains `AI 裁决草案` and `解释员复盘`.
 - Verified `hasFallback=false`.
 - Verified party-visible leak scan returned an empty list for `issue_id`, `policy_basis`, `evidence_basis`, `suggested_finding`, `supported_by`, `contradicted_by`, `missing_evidence`, `neutral_analysis`, `NEEDS_HUMAN_REVIEW`, `SIGNED_NOT_RECEIVED`, `SYSTEM_AUDIT_ONLY`, `evidence_dossier_version`, `JURY_REVIEW_REPORT`, `A2A_INTERNAL`, `sealed_rounds`, `courtroom_context`。
+
+### 2026-07-10 Final round recovery / live boundary evidence
+
+后端恢复修复已提交：
+
+- `e09f9e0 fix: recover final hearing rounds from initial cursor`
+
+Fresh Java verification:
+
+```powershell
+cd java-api-service
+.\mvnw.cmd "-Dtest=HearingFinalRoundRecoveryServiceTest,HearingPersistenceIntegrationTest#finalRoundRecoveryQuerySupportsInitialNullCursorOnPostgresql" test
+```
+
+Result:
+
+```text
+6 tests, 0 failures, BUILD SUCCESS
+```
+
+Live E2E identifiers:
+
+- case: `CASE_671ac52627874756b548d2fb501fab65`
+- draft: `DRAFT_8abe897d74104073bc123c96ad35d7c0`
+- review task: `REVIEW_1e8e70da3af84f3d8ab89093db81c290`
+- packet: `PACKET_ba72a5f1dda3438695d6717d23917146`
+- remedy: `REMEDY_59a2a3b17678492590f848d399aec5b6`
+
+Boundary checks:
+
+- Fixed demo actors are `user-local`, `merchant-local`, `reviewer-local`; simulate import remains `count=1` single-case only.
+- `reviewer-local` can `GET /api/reviews?status=PENDING`; `user-local` and `merchant-local` receive 403 for that reviewer list.
+- Outcome does not leak reviewer controls to party views, and reviewer outcome view does not leak party-only controls.
+- If initiator evidence is empty, evidence completion returns 400 and hearing admission is blocked.
+- Third-round natural-language feedback is kept as jury review focus only; it is not directly adopted as the adjudication result. Review and evidence-matrix updates remain A2A context inputs.
 
 ## Self-review
 
