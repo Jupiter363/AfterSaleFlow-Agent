@@ -1603,9 +1603,12 @@ System prompt 四层：
 - 证据空校验：发起方证据为空时 evidence complete 返回 400，不能进入开庭。
 - 语义边界复核：第三轮自然语言意见只作为陪审复核 focus，不直接采纳为裁决；评审/证据矩阵更新作为 A2A 上下文输入进入法官草案链路。
 
-### 12.5 当前非本轮遗留工作树
+### 12.5 合并前工作树归属处理
 
-复核时工作树仍存在以下非本轮改动，未纳入 Task 10 提交：`deploy/nginx/default.conf`、`frontend/src/views/disputes/IntakeRoomView.vue`、`frontend/src/views/disputes/IntakeRoomView.test.js`、`tests/static/test_repository_contract.py`、`.codex/`、`frontend/src/viteProxyConfig.test.js`。这些属于之前/并行 UI 或配置改动，未作为十点任务收尾的一部分提交。
+- `IntakeRoomView.vue` 与对应测试属于接待室右侧展板的已确认 UI 收口，按独立前端提交纳入。
+- `viteProxyConfig.test.js` 用于锁定本地 Vite 将 `/api` 代理到 Java `8080` 的 dev-local 边界，按独立测试提交纳入。
+- `deploy/nginx/default.conf` 必须保留全量 Docker 环境的 `frontend:5173` 与 `java-api-service:8080` 容器 upstream；宿主机 Vite 代理实验不进入生产配置。
+- `.codex/figma-previews/` 是本机生成的设计预览缓存，通过精确 `.gitignore` 规则排除，不纳入版本控制。
 
 ---
 
