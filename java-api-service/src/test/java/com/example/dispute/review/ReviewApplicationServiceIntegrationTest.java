@@ -89,6 +89,11 @@ class ReviewApplicationServiceIntegrationTest {
     }
     @Test void createsPacketAndOnlyReviewerCanModifyApproveWithDiff(){
         String taskId=service.createForWorkflow("CASE_review","REMEDY_review");
+        assertThat(tasks.findById(taskId))
+                .hasValueSatisfying(
+                        task ->
+                                assertThat(task.getAssignedReviewerId())
+                                        .isEqualTo("reviewer-local"));
         verify(lifecycleNotifications)
                 .reviewPending(
                         any(FulfillmentCaseEntity.class),

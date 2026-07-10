@@ -201,8 +201,9 @@ public class ReviewApplicationService {
                         "reviewer_attention",read(draft.getReviewerAttentionJson()))),
                 frozenRemedy.toString(),
                 write(policy.riskFlags()),SYSTEM.actorId()));
-        ReviewTaskEntity task=taskRepository.save(ReviewTaskEntity.pending(
+        ReviewTaskEntity task=taskRepository.save(ReviewTaskEntity.pendingAssigned(
                 "REVIEW_"+id(),caseId,planId,packet.getId(),policy.priority(),policy.requiredRole(),
+                PlatformReviewerAuthorization.SYSTEM_REVIEWER_ID,
                 OffsetDateTime.now(ZoneOffset.UTC).plusHours(reviewTimeoutHours),SYSTEM.actorId()));
         disputeCase.waitForHumanReview(SYSTEM.actorId()); caseRepository.save(disputeCase);
         auditRecorder.record(SYSTEM,"REVIEW_TASK_CREATED","REVIEW_TASK",task.getId(),caseId,Map.of(),

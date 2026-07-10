@@ -42,6 +42,13 @@ public class ReviewTaskEntity extends AbstractEntity {
         task.requiredRole=requiredRole;task.dueAt=dueAt;task.decisionJson="{}";
         task.createdBy=actorId;task.updatedBy=actorId;return task;
     }
+    public static ReviewTaskEntity pendingAssigned(
+            String id,String caseId,String planId,String packetId,String priority,
+            String requiredRole,String assignedReviewerId,OffsetDateTime dueAt,String actorId){
+        ReviewTaskEntity task=pending(
+                id,caseId,planId,packetId,priority,requiredRole,dueAt,actorId);
+        task.assignedReviewerId=assignedReviewerId;return task;
+    }
     public void decide(ApprovalDecisionType decision,String reviewerId,String json){
         assignedReviewerId=reviewerId;decisionJson=json;updatedBy=reviewerId;
         taskStatus=switch(decision){
