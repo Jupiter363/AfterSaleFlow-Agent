@@ -32,6 +32,7 @@ public record ImportDisputeCommand(
         requireText(orderReference, "orderReference");
         requireText(userId, "userId");
         requireText(merchantId, "merchantId");
+        DemoImportActors.requireImportedParties(userId, merchantId);
         requireText(initiatorRole, "initiatorRole");
         requireText(disputeType, "disputeType");
         requireText(title, "title");

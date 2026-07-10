@@ -45,13 +45,30 @@ public class RestClientExternalDisputeSimulationClient
                         .body(AgentSimulationRequest.from(command))
                         .retrieve()
                         .body(SimulationResponse.class);
-        if (response == null || response.items() == null || response.items().isEmpty()) {
+        int itemCount =
+                response == null || response.items() == null
+                        ? 0
+                        : response.items().size();
+        if (itemCount != 1) {
             throw new AgentExecutionException(
                     ErrorCode.AGENT_OUTPUT_SCHEMA_INVALID,
-                    "external import simulator returned an empty schema",
-                    Map.of("endpoint", ENDPOINT));
+                    "external import simulator must return exactly one item",
+                    Map.of("endpoint", ENDPOINT, "item_count", itemCount));
         }
-        return response.items().stream().map(AgentSimulatedExternalDispute::toDomain).toList();
+        try {
+            return response.items().stream()
+                    .map(AgentSimulatedExternalDispute::toDomain)
+                    .toList();
+        } catch (IllegalArgumentException invalidItem) {
+            throw new AgentExecutionException(
+                    ErrorCode.AGENT_OUTPUT_SCHEMA_INVALID,
+                    "external import simulator returned an invalid item",
+                    Map.of(
+                            "endpoint",
+                            ENDPOINT,
+                            "validation_error",
+                            invalidItem.getMessage()));
+        }
     }
 
     private record AgentSimulationRequest(

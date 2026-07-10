@@ -2,6 +2,7 @@ package com.example.dispute.casecore;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -177,6 +178,35 @@ class DisputeControllerTest {
     }
 
     @Test
+    void rejectsExternalImportsForNonDemoPartyIds() throws Exception {
+        mockMvc.perform(
+                        post("/internal/disputes/import")
+                                .header("X-Service-Identity", "external-dispute-adapter")
+                                .header("Idempotency-Key", "import-wrong-party")
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content(
+                                        """
+                                        {
+                                          "source_system": "OMS",
+                                          "external_case_reference": "EXT-WRONG-PARTY",
+                                          "order_reference": "ORDER-WRONG-PARTY",
+                                          "user_id": "user-1",
+                                          "merchant_id": "merchant-local",
+                                          "initiator_role": "USER",
+                                          "dispute_type": "SIGNED_NOT_RECEIVED",
+                                          "title": "Imported dispute",
+                                          "description": "Imported dispute description",
+                                          "risk_level": "MEDIUM"
+                                        }
+                                        """))
+                .andExpect(status().isBadRequest())
+                .andExpect(
+                        jsonPath("$.details.reason")
+                                .value("userId must be user-local"));
+        verifyNoInteractions(importService);
+    }
+
+    @Test
     void simulatesExternalImportThroughTheInternalServiceBoundary() throws Exception {
         when(importService.simulateExternalImport(
                         any(),
@@ -227,6 +257,28 @@ class DisputeControllerTest {
                 .andExpect(jsonPath("$.data.items[0].source_type").value("EXTERNAL_IMPORT"))
                 .andExpect(jsonPath("$.data.items[0].source_system").value("LLM_SIMULATED_OMS"))
                 .andExpect(jsonPath("$.data.items[0].initiator_role").value("MERCHANT"));
+    }
+
+    @Test
+    void rejectsSimulatedImportCountsAboveOne() throws Exception {
+        mockMvc.perform(
+                        post("/internal/disputes/import/simulate")
+                                .header("X-Service-Identity", "external-dispute-adapter")
+                                .header("Idempotency-Key", "simulate-import-too-many")
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content(
+                                        """
+                                        {
+                                          "count": 2,
+                                          "scenario": "watch dispute",
+                                          "risk_level_hint": "MEDIUM",
+                                          "initiator_role_hint": "USER",
+                                          "current_actor_id": "user-local",
+                                          "counterparty_actor_id": "merchant-local"
+                                        }
+                                        """))
+                .andExpect(status().isBadRequest());
+        verifyNoInteractions(importService);
     }
 
     @Test
@@ -281,6 +333,32 @@ class DisputeControllerTest {
                 .andExpect(jsonPath("$.data.items[0].id").value("CASE_public_simulated"))
                 .andExpect(jsonPath("$.data.items[0].source_type").value("EXTERNAL_IMPORT"))
                 .andExpect(jsonPath("$.data.items[0].initiator_role").value("MERCHANT"));
+    }
+
+    @Test
+    void publicSimulationRejectsNonDemoCounterpartyIds() throws Exception {
+        mockMvc.perform(
+                        post("/api/disputes/import/simulate")
+                                .header(HeaderAuthenticationFilter.USER_ID_HEADER, "user-local")
+                                .header(HeaderAuthenticationFilter.ROLE_HEADER, "USER")
+                                .header("Idempotency-Key", "simulate-wrong-counterparty")
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content(
+                                        """
+                                        {
+                                          "count": 1,
+                                          "scenario": "watch dispute",
+                                          "risk_level_hint": "MEDIUM",
+                                          "initiator_role_hint": "USER",
+                                          "current_actor_id": "user-local",
+                                          "counterparty_actor_id": "merchant-1"
+                                        }
+                                        """))
+                .andExpect(status().isBadRequest())
+                .andExpect(
+                        jsonPath("$.details.reason")
+                                .value("counterpartyActorId must be merchant-local"));
+        verifyNoInteractions(importService);
     }
 
     @Test

@@ -30,8 +30,8 @@ public record SimulateExternalImportCommand(
     }
 
     public SimulateExternalImportCommand {
-        if (count < 1 || count > 10) {
-            throw new IllegalArgumentException("count must be between 1 and 10");
+        if (count != 1) {
+            throw new IllegalArgumentException("count must be 1");
         }
         if (scenario == null || scenario.isBlank()) {
             scenario = "履约争议订单";
@@ -48,6 +48,8 @@ public record SimulateExternalImportCommand(
         if (counterpartyActorId == null || counterpartyActorId.isBlank()) {
             throw new IllegalArgumentException("counterpartyActorId must not be blank");
         }
+        DemoImportActors.requireSimulationParties(
+                initiatorRoleHint, currentActorId, counterpartyActorId);
         if (simulationBatchId == null || simulationBatchId.isBlank()) {
             simulationBatchId = "default";
         }

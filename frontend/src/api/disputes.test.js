@@ -168,7 +168,7 @@ describe("dispute API", () => {
     });
 
     const result = await disputeApi.simulateExternalImport(actor, {
-      count: 2,
+      count: 1,
       scenario: "手表售后争议",
       risk_level_hint: "MEDIUM",
       initiator_role_hint: "USER",
@@ -193,7 +193,7 @@ describe("dispute API", () => {
     );
     expect(requestBody).toEqual(
       expect.objectContaining({
-        count: 2,
+        count: 1,
         scenario: "手表售后争议",
         risk_level_hint: "MEDIUM",
         initiator_role_hint: "USER",

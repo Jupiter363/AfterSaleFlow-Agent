@@ -2,68 +2,44 @@ package com.example.dispute.casecore.application;
 
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
-import com.example.dispute.config.DisputeProperties;
+import com.example.dispute.common.api.ErrorCode;
+import com.example.dispute.common.exception.AgentExecutionException;
 import com.example.dispute.domain.model.CaseStatus;
-import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
-import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
-import java.time.Clock;
-import java.time.OffsetDateTime;
+import java.util.List;
+import java.util.Map;
 import java.util.UUID;
-import com.example.dispute.room.domain.PhaseClockType;
-import com.example.dispute.room.domain.RoomType;
-import com.example.dispute.room.application.IntakeAgentTurnService;
-import com.example.dispute.room.application.IntakeLobbySeed;
-import com.example.dispute.room.application.ParticipantService;
-import com.example.dispute.room.infrastructure.persistence.entity.CasePhaseClockEntity;
-import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
-import com.example.dispute.room.infrastructure.persistence.repository.CasePhaseClockRepository;
-import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * Idempotently imports dispute candidates from trusted platform adapters.
+ * Facade for direct and simulated external imports.
  *
- * <p>The external source pair is the business idempotency key; request keys may
- * change across adapter retries and therefore cannot be the sole identity.
+ * <p>A fair process-wide gate is acquired before the transactional bean, so
+ * waiting never consumes a database transaction.
  */
 @Service
+@Transactional(propagation = Propagation.NOT_SUPPORTED)
 public class DisputeImportService {
 
-    private final FulfillmentCaseRepository repository;
-    private final CaseRoomRepository roomRepository;
-    private final CasePhaseClockRepository clockRepository;
-    private final ParticipantService participantService;
-    private final IntakeAgentTurnService intakeAgentTurnService;
+    private final ExternalCaseImportTransactionService transactionService;
     private final ExternalDisputeSimulationClient simulationClient;
-    private final DisputeProperties properties;
-    private final Clock clock;
+    private final SingleInstanceImportGate importGate;
 
     public DisputeImportService(
-            FulfillmentCaseRepository repository,
-            CaseRoomRepository roomRepository,
-            CasePhaseClockRepository clockRepository,
-            ParticipantService participantService,
-            IntakeAgentTurnService intakeAgentTurnService,
+            ExternalCaseImportTransactionService transactionService,
             ExternalDisputeSimulationClient simulationClient,
-            DisputeProperties properties,
-            Clock clock) {
-        this.repository = repository;
-        this.roomRepository = roomRepository;
-        this.clockRepository = clockRepository;
-        this.participantService = participantService;
-        this.intakeAgentTurnService = intakeAgentTurnService;
+            SingleInstanceImportGate importGate) {
+        this.transactionService = transactionService;
         this.simulationClient = simulationClient;
-        this.properties = properties;
-        this.clock = clock;
+        this.importGate = importGate;
     }
 
-    @Transactional
     public ImportedDisputeView importDispute(
             ImportDisputeCommand command,
             AuthenticatedActor actor,
             String idempotencyKey) {
-        return importDispute(
+        return importOne(
                 command,
                 actor,
                 idempotencyKey,
@@ -71,60 +47,15 @@ public class DisputeImportService {
                 directImportRequestId(idempotencyKey));
     }
 
-    @Transactional
     public ImportedDisputeView importDispute(
             ImportDisputeCommand command,
             AuthenticatedActor actor,
             String idempotencyKey,
             String traceId,
             String requestId) {
-        if (actor.role() != ActorRole.SYSTEM) {
-            throw new SecurityException("external dispute import requires service identity");
-        }
-        requireText(idempotencyKey, "idempotencyKey");
-        ActorRole initiatorRole = partyInitiatorRole(command.initiatorRole());
-        return repository
-                .findBySourceSystemAndExternalCaseRef(
-                        command.sourceSystem(), command.externalCaseReference())
-                .map(
-                        existing -> {
-                            materializeCurrentRoom(existing, command, actor.actorId());
-                            participantService.ensureImportedParties(
-                                    existing, actor, OffsetDateTime.now(clock));
-                            return view(existing);
-                        })
-                .orElseGet(
-                        () -> {
-                            FulfillmentCaseEntity entity =
-                                    FulfillmentCaseEntity.imported(
-                                            "CASE_" + compactUuid(),
-                                            command.orderReference(),
-                                            command.afterSalesReference(),
-                                            command.logisticsReference(),
-                                            command.userId(),
-                                            command.merchantId(),
-                                            initiatorRole,
-                                            idempotencyKey,
-                                            command.disputeType(),
-                                            command.title(),
-                                            command.description(),
-                                            command.riskLevel(),
-                                            command.caseStatus(),
-                                            command.currentRoom(),
-                                            command.currentDeadlineAt(),
-                                            command.sourceSystem(),
-                                            command.externalCaseReference(),
-                                            actor.actorId());
-                            FulfillmentCaseEntity saved = repository.save(entity);
-                            materializeCurrentRoom(saved, command, actor.actorId());
-                            participantService.ensureImportedParties(
-                                    saved, actor, OffsetDateTime.now(clock));
-                            startIntakeIfNeeded(saved, command, initiatorRole, traceId, requestId);
-                            return view(saved);
-                        });
+        return importOne(command, actor, idempotencyKey, traceId, requestId);
     }
 
-    @Transactional
     public SimulatedImportResultView simulateExternalImport(
             SimulateExternalImportCommand command,
             AuthenticatedActor actor,
@@ -135,220 +66,51 @@ public class DisputeImportService {
             throw new SecurityException("external dispute simulation requires service identity");
         }
         requireText(idempotencyKey, "idempotencyKey");
-        var imported =
-                simulationClient.simulate(command, traceId, requestId).stream()
-                        .map(
-                                simulated ->
-                                        importDispute(
-                                                new ImportDisputeCommand(
-                                                        simulated.sourceSystem(),
-                                                        simulated.externalCaseReference(),
-                                                        simulated.orderReference(),
-                                                        simulated.afterSalesReference(),
-                                                        simulated.logisticsReference(),
-                                                        simulated.userId(),
-                                                        simulated.merchantId(),
-                                                        simulated.initiatorRole(),
-                                                        simulated.disputeType(),
-                                                        simulated.title(),
-                                                        simulated.description(),
-                                                        simulated.riskLevel(),
-                                                        CaseStatus.INTAKE_PENDING,
-                                                        "INTAKE",
-                                                        null),
-                                                actor,
-                                                itemIdempotencyKey(
-                                                        idempotencyKey,
-                                                        simulated.externalCaseReference()),
-                                                traceId,
-                                                requestId))
-                        .toList();
-        return new SimulatedImportResultView(imported);
+        List<SimulatedExternalDispute> simulatedItems =
+                simulationClient.simulate(command, traceId, requestId);
+        int itemCount = simulatedItems == null ? 0 : simulatedItems.size();
+        if (itemCount != 1) {
+            throw new AgentExecutionException(
+                    ErrorCode.AGENT_OUTPUT_SCHEMA_INVALID,
+                    "external import simulator must return exactly one item",
+                    Map.of("item_count", itemCount));
+        }
+        SimulatedExternalDispute simulated = simulatedItems.getFirst();
+        ImportedDisputeView imported =
+                importOne(
+                        new ImportDisputeCommand(
+                                simulated.sourceSystem(),
+                                simulated.externalCaseReference(),
+                                simulated.orderReference(),
+                                simulated.afterSalesReference(),
+                                simulated.logisticsReference(),
+                                simulated.userId(),
+                                simulated.merchantId(),
+                                simulated.initiatorRole(),
+                                simulated.disputeType(),
+                                simulated.title(),
+                                simulated.description(),
+                                simulated.riskLevel(),
+                                CaseStatus.INTAKE_PENDING,
+                                "INTAKE",
+                                null),
+                        actor,
+                        idempotencyKey,
+                        traceId,
+                        requestId);
+        return new SimulatedImportResultView(List.of(imported));
     }
 
-    private void startIntakeIfNeeded(
-            FulfillmentCaseEntity saved,
+    private ImportedDisputeView importOne(
             ImportDisputeCommand command,
-            ActorRole initiatorRole,
+            AuthenticatedActor actor,
+            String idempotencyKey,
             String traceId,
             String requestId) {
-        if (isTerminal(command.caseStatus()) || currentRoom(command) != RoomType.INTAKE) {
-            return;
-        }
-        AuthenticatedActor intakeActor =
-                new AuthenticatedActor(
-                        initiatorRole == ActorRole.MERCHANT
-                                ? command.merchantId()
-                                : command.userId(),
-                        initiatorRole);
-        IntakeLobbySeed seed =
-                new IntakeLobbySeed(
-                        command.orderReference(),
-                        command.afterSalesReference(),
-                        command.logisticsReference(),
-                        initiatorRole.name(),
-                        command.description(),
-                        command.requestedOutcomeHint(),
-                        command.claimResolutionSeed(),
-                        command.respondentAttitudeSeed());
-        intakeAgentTurnService.startInitialTurn(
-                saved.getId(),
-                intakeActor,
-                seed,
-                traceId,
-                requestId);
-    }
-
-    private void materializeCurrentRoom(
-            FulfillmentCaseEntity dispute,
-            ImportDisputeCommand command,
-            String actorId) {
-        RoomType roomType = currentRoom(command);
-        OffsetDateTime now = OffsetDateTime.now(clock);
-        CaseRoomEntity room =
-                roomRepository
-                        .findByCaseIdAndRoomType(dispute.getId(), roomType)
-                        .orElseGet(
-                                () ->
-                                        roomRepository.save(
-                                                isTerminal(command.caseStatus())
-                                                        ? CaseRoomEntity.closed(
-                                                                roomId(),
-                                                                dispute.getId(),
-                                                                roomType,
-                                                                now,
-                                                                actorId)
-                                                        : CaseRoomEntity.open(
-                                                                roomId(),
-                                                                dispute.getId(),
-                                                                roomType,
-                                                                now,
-                                                                actorId)));
-        PhaseClockType clockType = phaseClock(roomType);
-        if (clockType == null
-                || clockRepository
-                        .findByCaseIdAndClockType(dispute.getId(), clockType)
-                        .isPresent()) {
-            return;
-        }
-        OffsetDateTime deadline =
-                command.currentDeadlineAt() == null
-                        ? now.plus(
-                                clockType == PhaseClockType.EVIDENCE_SUBMISSION
-                                        ? properties.evidenceWindow()
-                                        : properties.hearingWindow())
-                        : command.currentDeadlineAt();
-        if (!deadline.isAfter(now)) {
-            deadline =
-                    now.plus(
-                            clockType == PhaseClockType.EVIDENCE_SUBMISSION
-                                    ? properties.evidenceWindow()
-                                    : properties.hearingWindow());
-        }
-        clockRepository.save(
-                CasePhaseClockEntity.running(
-                        clockId(),
-                        dispute.getId(),
-                        room.getId(),
-                        clockType,
-                        now,
-                        deadline,
-                        workflowId(clockType, dispute.getId()),
-                        actorId));
-    }
-
-    private static RoomType currentRoom(ImportDisputeCommand command) {
-        if (command.currentRoom() != null && !command.currentRoom().isBlank()) {
-            return RoomType.valueOf(command.currentRoom());
-        }
-        return switch (command.caseStatus()) {
-            case INTAKE_PENDING, INTAKE_IN_PROGRESS, INTAKE_COMPLETED, NOT_ADMISSIBLE ->
-                    RoomType.INTAKE;
-            case EVIDENCE_OPEN, EVIDENCE_SEALED, DOSSIER_BUILDING, DOSSIER_BUILT ->
-                    RoomType.EVIDENCE;
-            case HEARING, HEARING_OPEN, WAITING_EVIDENCE, SETTLEMENT_PENDING,
-                    DRAFT_READY, DELIBERATION_RUNNING -> RoomType.HEARING;
-            default -> RoomType.REVIEW;
-        };
-    }
-
-    private static PhaseClockType phaseClock(RoomType roomType) {
-        return switch (roomType) {
-            case EVIDENCE -> PhaseClockType.EVIDENCE_SUBMISSION;
-            case HEARING -> PhaseClockType.HEARING;
-            case INTAKE, REVIEW -> null;
-        };
-    }
-
-    private static boolean isTerminal(CaseStatus status) {
-        return status == CaseStatus.CLOSED
-                || status == CaseStatus.CANCELLED
-                || status == CaseStatus.NOT_ADMISSIBLE;
-    }
-
-    private static String workflowId(PhaseClockType type, String caseId) {
-        return type == PhaseClockType.EVIDENCE_SUBMISSION
-                ? "evidence-window-" + caseId
-                : "hearing-window-" + caseId;
-    }
-
-    private static String roomId() {
-        return "ROOM_" + compactUuid();
-    }
-
-    private static String clockId() {
-        return "CLOCK_" + compactUuid();
-    }
-
-    private static ImportedDisputeView view(FulfillmentCaseEntity entity) {
-        return new ImportedDisputeView(
-                entity.getId(),
-                entity.getOrderId(),
-                entity.getAfterSaleId(),
-                entity.getLogisticsId(),
-                entity.getUserId(),
-                entity.getMerchantId(),
-                entity.getDisputeType(),
-                entity.getSourceType().name(),
-                entity.getSourceSystem(),
-                entity.getExternalCaseRef(),
-                entity.getRiskLevel(),
-                entity.getTitle(),
-                entity.getDescription(),
-                entity.getCaseStatus(),
-                entity.getCurrentRoom(),
-                entity.getCurrentDeadlineAt(),
-                pendingAction(entity.getCaseStatus()),
-                entity.getInitiatorRole().name());
-    }
-
-    private static String pendingAction(CaseStatus status) {
-        return switch (status) {
-            case INTAKE_PENDING,
-                    INTAKE_IN_PROGRESS,
-                    WAITING_SLOT_COMPLETION,
-                    INTAKE_COMPLETED -> "COMPLETE_INTAKE";
-            case EVIDENCE_OPEN, WAITING_EVIDENCE -> "SUBMIT_EVIDENCE";
-            case EVIDENCE_SEALED -> "ENTER_HEARING";
-            case HEARING_OPEN, HEARING -> "PARTICIPATE_HEARING";
-            case SETTLEMENT_PENDING -> "REVIEW_SETTLEMENT";
-            case DRAFT_READY,
-                    DELIBERATION_RUNNING,
-                    REVIEW_PENDING,
-                    WAITING_HUMAN_REVIEW,
-                    REMEDY_PLANNED -> "AWAIT_REVIEW";
-            case APPROVED_FOR_EXECUTION, EXECUTING -> "TRACK_EXECUTION";
-            case CLOSED, CANCELLED, MANUAL_HANDOFF, NOT_ADMISSIBLE -> "VIEW_OUTCOME";
-            default -> "CONTINUE_CASE";
-        };
-    }
-
-    private static ActorRole partyInitiatorRole(String role) {
-        ActorRole parsed = ActorRole.valueOf(role);
-        if (parsed != ActorRole.USER && parsed != ActorRole.MERCHANT) {
-            throw new IllegalArgumentException("imported dispute initiator must be USER or MERCHANT");
-        }
-        return parsed;
+        return importGate.execute(
+                () ->
+                        transactionService.importDispute(
+                                command, actor, idempotencyKey, traceId, requestId));
     }
 
     private static String directImportTraceId(String idempotencyKey) {
@@ -365,19 +127,6 @@ public class DisputeImportService {
                         ? UUID.randomUUID().toString().replace("-", "")
                         : value.replaceAll("[^A-Za-z0-9_.:-]", "-");
         return normalized.length() <= 80 ? normalized : normalized.substring(0, 80);
-    }
-
-    private static String itemIdempotencyKey(String base, String externalCaseReference) {
-        String normalizedExternal =
-                externalCaseReference == null
-                        ? UUID.randomUUID().toString().replace("-", "")
-                        : externalCaseReference.replaceAll("[^A-Za-z0-9_.:-]", "-");
-        String key = base + ":" + normalizedExternal;
-        return key.length() <= 128 ? key : key.substring(0, 128);
-    }
-
-    private static String compactUuid() {
-        return UUID.randomUUID().toString().replace("-", "");
     }
 
     private static void requireText(String value, String field) {

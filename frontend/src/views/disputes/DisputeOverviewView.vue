@@ -186,7 +186,7 @@ function normalizeImportedCase(item) {
 async function simulateExternalImport() {
   const initiatorRole = actor.role === "MERCHANT" ? "MERCHANT" : "USER";
   const command = {
-    count: 2,
+    count: 1,
     scenario: "手表售后争议",
     risk_level_hint: "MEDIUM",
     initiator_role_hint: initiatorRole,

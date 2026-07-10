@@ -312,7 +312,7 @@ describe("DisputeOverviewView", () => {
 
     expect(simulateExternalImportAction).toHaveBeenCalledWith(
       expect.objectContaining({
-        count: 2,
+        count: 1,
         initiator_role_hint: "MERCHANT",
         current_actor_id: "merchant-local",
         counterparty_actor_id: "user-local",

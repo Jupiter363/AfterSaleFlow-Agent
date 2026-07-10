@@ -103,13 +103,33 @@ RiskLevelLiteral = Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"]
 
 
 class SimulatedExternalImportRequest(StrictModel):
-    count: Annotated[int, Field(ge=1, le=10)] = 2
+    count: Annotated[int, Field(ge=1, le=1)] = 1
     scenario: ShortText = "履约争议订单"
     risk_level_hint: RiskLevelLiteral | None = "MEDIUM"
     initiator_role_hint: Literal["USER", "MERCHANT"]
     current_actor_id: Identifier
     counterparty_actor_id: Identifier
     simulation_batch_id: Identifier | None = None
+
+    @model_validator(mode="after")
+    def validate_fixed_demo_parties(self) -> "SimulatedExternalImportRequest":
+        expected_current = (
+            "user-local"
+            if self.initiator_role_hint == "USER"
+            else "merchant-local"
+        )
+        expected_counterparty = (
+            "merchant-local"
+            if self.initiator_role_hint == "USER"
+            else "user-local"
+        )
+        if self.current_actor_id != expected_current:
+            raise ValueError(f"current_actor_id must be {expected_current}")
+        if self.counterparty_actor_id != expected_counterparty:
+            raise ValueError(
+                f"counterparty_actor_id must be {expected_counterparty}"
+            )
+        return self
 
 
 class SimulatedExternalDispute(StrictModel):
@@ -130,7 +150,7 @@ class SimulatedExternalDispute(StrictModel):
 class SimulatedExternalImportResult(StrictModel):
     items: Annotated[
         list[SimulatedExternalDispute],
-        Field(min_length=1, max_length=10),
+        Field(min_length=1, max_length=1),
     ]
 
 
