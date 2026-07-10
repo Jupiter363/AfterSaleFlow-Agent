@@ -237,7 +237,8 @@ describe("EvidenceRoomView", () => {
     expect(evidenceRoomSource).not.toMatch(
       /\.evidence-library\s*\{[^}]*overflow(?:-y)?:\s*(?:auto|scroll)/s,
     );
-    expect(evidenceRoomSource).toMatch(/@media \(max-width: 1120px\)/);
+    expect(evidenceRoomSource).toMatch(/@media \(max-width: 1119px\)/);
+    expect(evidenceRoomSource).not.toMatch(/@media \(max-width: 1120px\)/);
     expect(evidenceRoomSource).toMatch(/@media \(max-width: 360px\)/);
     expect(evidenceRoomSource).toMatch(
       /grid-template-rows:\s*88px 96px minmax\(0, 1fr\) 72px/,
@@ -262,6 +263,12 @@ describe("EvidenceRoomView", () => {
     );
     expect(compactStyles).not.toMatch(
       /\.evidence-footer[^}]*grid-template-columns:\s*1fr/s,
+    );
+    expect(compactStyles).toMatch(
+      /\.evidence-uploader\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\) auto/s,
+    );
+    expect(compactStyles).toMatch(
+      /\.evidence-uploader__illustration,\s*\.evidence-uploader \.evidence-kicker\s*\{[^}]*display:\s*none/s,
     );
     expect(evidenceRoomSource).toMatch(
       /\.evidence-error\s*\{[^}]*position:\s*absolute/s,
@@ -308,6 +315,9 @@ describe("EvidenceRoomView", () => {
     await card.trigger("click");
 
     expect(wrapper.get("[data-evidence-detail-modal]").text()).toContain(filename);
+    expect(evidenceRoomSource).toMatch(
+      /\.evidence-modal__facts span\s*\{[^}]*min-width:\s*0[^}]*overflow-wrap:\s*anywhere[^}]*word-break:\s*break-word/s,
+    );
   });
 
   it("keeps the narrow room header, countdown, AI notice, and conversation chain wrap-safe", () => {

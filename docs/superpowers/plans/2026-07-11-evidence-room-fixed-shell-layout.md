@@ -21,7 +21,7 @@ The 740px evidence board uses `box-sizing: border-box`, 18px top/bottom padding,
 
 Breakpoints:
 
-- `max-width: 1120px`: stack the two fixed 740px panels so the page owns vertical scrolling.
+- `max-width: 1119px`: stack the two fixed 740px panels so the page owns vertical scrolling; exactly 1120px and wider remains double-column.
 - `max-width: 620px`: retain a horizontal `minmax(0, 1fr) auto` footer; simplify the uploader without stacking the footer.
 - `max-width: 360px`: use the 88/96/flexible/72 row budget, hide decorative file/uploader art, place card status fields under file information, and locally restyle the room header into title / case-and-countdown / wrapping AI notice rows.
 
@@ -64,13 +64,14 @@ Add tests that require:
 expect(source).toContain("--evidence-panel-height: 740px");
 expect(source).toMatch(/grid-template-rows:\s*76px 86px minmax\(0, 1fr\) 60px/);
 expect(source).toMatch(/\.evidence-board__list\s*\{[^}]*overflow-y:\s*auto/s);
-expect(source).toMatch(/@media \(max-width: 1120px\)/);
+expect(source).toMatch(/@media \(max-width: 1119px\)/);
+expect(source).not.toMatch(/@media \(max-width: 1120px\)/);
 expect(source).toMatch(/@media \(max-width: 360px\)/);
 expect(source).toMatch(/grid-template-rows:\s*88px 96px minmax\(0, 1fr\) 72px/);
 expect(source).toMatch(/:deep\(\.room-shell__header\)/);
 ```
 
-Mount 100 evidence items for both `USER` and `MERCHANT` and assert all 100 cards are rendered inside `[data-evidence-list-scroll]`, while the fixed footer stays outside that scroll node. Mount a 200-character unbroken filename and long verification feedback, assert the filename has a complete `title`, the feedback occupies `[data-evidence-description]`, and opening the existing detail modal exposes the full filename. Assert each evidence card contains a wrap-capable `[data-evidence-status-row]` containing submission status, verification status, and confidence.
+Mount 100 evidence items for both `USER` and `MERCHANT` and assert all 100 cards are rendered inside `[data-evidence-list-scroll]`, while the fixed footer stays outside that scroll node. Mount a 200-character unbroken filename and long verification feedback, assert the filename has a complete `title`, the feedback occupies `[data-evidence-description]`, and opening the existing detail modal exposes the full filename. Require every `.evidence-modal__facts span` to use `min-width: 0`, `overflow-wrap: anywhere`, and `word-break: break-word`. Assert each evidence card contains a wrap-capable `[data-evidence-status-row]` containing submission status, verification status, and confidence. In the 620px block, require an uploader `minmax(0, 1fr) auto` grid with its illustration/kicker hidden while the footer remains horizontal.
 
 - [x] **Step 3: Run the target test and capture RED**
 
@@ -78,7 +79,7 @@ Mount 100 evidence items for both `USER` and `MERCHANT` and assert all 100 cards
 corepack pnpm exec vitest run src/views/disputes/EvidenceRoomView.test.js
 ```
 
-Expected: FAIL because the explicit row budgets, 1120/360 breakpoints, local narrow-header contract, full filename title, description row, and status-row markers do not yet exist.
+Expected: FAIL because the explicit row budgets, strict 1120px boundary, 360px narrow-header contract, full filename/detail-facts wrapping, 620px uploader simplification, description row, and status-row markers do not yet exist.
 
 ## Task 3: Implement the minimal fixed-shell layout
 
@@ -101,7 +102,7 @@ Keep `.evidence-board__list` as the only normal right-board `overflow-y: auto` r
 
 - [x] **Step 3: Implement responsive contracts**
 
-Replace the 980px stacking breakpoint with 1120px. Below 620px, simplify the uploader but keep the footer horizontal. At 360px and below, apply the 88/96/flexible/72 grid rows, hide decorative uploader/file art, move card metadata below file information, remove fixed minimum width from the completed-state control, and use local `:deep()` rules to give the shared room header, AI notice, countdown, and evidence-room conversation descendants `min-width: 0` and wrap-safe behavior.
+Replace the 980px stacking breakpoint with `max-width: 1119px`, preserving double columns from 1120px upward. At 620px and below, change the uploader to `minmax(0, 1fr) auto`, hide its decorative illustration/kicker, and keep the footer horizontal. At 360px and below, apply the 88/96/flexible/72 grid rows, hide decorative file art, move card metadata below file information, remove fixed minimum width from the completed-state control, and use local `:deep()` rules to give the shared room header, AI notice, countdown, and evidence-room conversation descendants `min-width: 0` and wrap-safe behavior. Apply the same wrap-safe contract to every detail-modal fact cell.
 
 - [x] **Step 4: Run the target test and capture GREEN**
 
@@ -143,7 +144,7 @@ git commit -m "feat: harden evidence room fixed-shell layout"
 
 ## Plan self-review
 
-- Spec coverage: fixed 740px panels, single list scroll rail, 1120px fallback stacking, 320px multi-line header, 100 evidence items, 200-character unbroken filename, long AI/verification text, horizontal narrow footer, and USER/MERCHANT behavior are each tied to a test and implementation step.
+- Spec coverage: fixed 740px panels, single list scroll rail, strict double columns at 1120px and above, 320px multi-line header, 100 evidence items, 200-character unbroken filename in cards and detail facts, long AI/verification text, simplified 620px uploader, horizontal narrow footer, and USER/MERCHANT behavior are each tied to a test and implementation step.
 - Scope: only the evidence-room view, its test, and this plan are writable; shared shell/conversation behavior is handled with evidence-room-local deep selectors.
 - Browser coverage: deferred because this branch is forbidden from adding the shared Playwright/package/CI foundation; Vitest DOM/source contracts remain deterministic and reproducible.
 - Placeholder scan: no TBD/TODO or unspecified implementation steps remain.
@@ -157,3 +158,4 @@ git commit -m "feat: harden evidence room fixed-shell layout"
 - Full verification: frontend Vitest passed 30 files and 209 tests; Vite production build exited 0 with only the pre-existing large-chunk advisory; `git diff --check` exited 0 with only the repository's LF-to-CRLF conversion warning.
 - Scope audit: only this plan, `EvidenceRoomView.vue`, and `EvidenceRoomView.test.js` changed. No package, lockfile, CI, Playwright, global style, shared room component, or unrelated page was modified.
 - Review handoff: an independent reviewer was requested, but all collaboration slots were occupied by the parallel room rollout. The parent task explicitly directed this branch to proceed after self-review and will run cross-agent specification/quality review after commit.
+- Review follow-up RED/GREEN: on committed baseline `b59c4db`, the three new review contracts produced 3 failures and 32 passes: detail-modal fact wrapping, 620px uploader simplification, and the strict 1120px double-column boundary. Each focused test passed after its isolated fix; the final target suite passed 35/35, the full frontend suite passed 30 files/209 tests, the production build exited 0, and `git diff --check` exited 0.
