@@ -9,6 +9,27 @@ export const GLOBAL_CASE_IDS = {
 
 export const GLOBAL_REVIEW_ID = "REVIEW_GLOBAL";
 
+const GLOBAL_ROOM_MESSAGE_ENDPOINTS = {
+  [GLOBAL_CASE_IDS.intake]: "INTAKE",
+  [GLOBAL_CASE_IDS.evidence]: "EVIDENCE",
+  [GLOBAL_CASE_IDS.hearing]: "HEARING",
+};
+
+export function assertGlobalRoomMessageEndpoint(caseId, roomType) {
+  const expectedRoomType = GLOBAL_ROOM_MESSAGE_ENDPOINTS[caseId];
+  if (!expectedRoomType) {
+    throw new Error(
+      `Global width fixture case ${caseId} does not expose a room messages endpoint.`,
+    );
+  }
+  if (expectedRoomType !== roomType) {
+    throw new Error(
+      `Global width fixture case ${caseId} maps to ${expectedRoomType} room messages, not ${roomType}.`,
+    );
+  }
+  return expectedRoomType;
+}
+
 const actors = {
   USER: { id: "user-local", role: "USER", label: "用户" },
   PLATFORM_REVIEWER: {
@@ -337,8 +358,12 @@ export async function installGlobalWidthFixture(page, options = {}) {
     const roomMessage = path.match(
       /^\/api\/disputes\/([^/]+)\/rooms\/(INTAKE|EVIDENCE|HEARING)\/messages$/,
     );
-    if (method === "GET" && roomMessage && isKnownCaseId(roomMessage[1])) {
-      return fulfillJson(route, roomMessages(roomMessage[2]));
+    if (method === "GET" && roomMessage) {
+      const roomType = assertGlobalRoomMessageEndpoint(
+        roomMessage[1],
+        roomMessage[2],
+      );
+      return fulfillJson(route, roomMessages(roomType));
     }
 
     if (

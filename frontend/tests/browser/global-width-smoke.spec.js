@@ -106,10 +106,6 @@ for (const viewport of compactViewports) {
     test(`${route.name} has no document overflow at ${viewport.width}px`, async ({
       page,
     }) => {
-      test.fail(
-        route.name === "outcome" && viewport.width === 320,
-        "Tracked by room-by-room rollout Task 5: Outcome still has a 320px width floor.",
-      );
       const pageErrors = [];
       page.on("pageerror", (error) => pageErrors.push(error.message));
       await page.setViewportSize(viewport);
@@ -123,13 +119,17 @@ for (const viewport of compactViewports) {
           ),
       );
 
+      await expect(page.locator(route.ready)).toBeVisible();
+
+      const report = await horizontalOverflowReport(page);
       expect(
         pageErrors,
         `${route.path} emitted page errors at ${viewport.width}px`,
       ).toEqual([]);
-      await expect(page.locator(route.ready)).toBeVisible();
-
-      const report = await horizontalOverflowReport(page);
+      test.fail(
+        route.name === "outcome" && viewport.width === 320,
+        "Tracked by room-by-room rollout Task 5: Outcome still has a 320px width floor.",
+      );
       expect(
         report.scrollWidth <= report.viewportWidth + 1,
         `${route.path} overflowed at ${viewport.width}px:\n${JSON.stringify(

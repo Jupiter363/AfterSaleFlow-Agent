@@ -236,9 +236,10 @@ test("holds the 122px status and 154px input slots while the message rail scroll
 
 test("returns the input-dock space to the reviewer transcript", async ({
   browser,
+  baseURL,
 }) => {
   const contextOptions = {
-    baseURL: "http://127.0.0.1:4173",
+    baseURL,
     viewport: { width: 1024, height: 600 },
     locale: "zh-CN",
     colorScheme: "light",
