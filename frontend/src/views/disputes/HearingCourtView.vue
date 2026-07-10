@@ -3562,6 +3562,7 @@ onBeforeUnmount(() => {
   .hearing-courtroom-page {
     grid-template-columns: minmax(0, 1fr);
     gap: 0;
+    overflow: clip;
   }
   .courtroom-center {
     grid-column: 1;

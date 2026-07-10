@@ -688,6 +688,18 @@ describe("HearingCourtView", () => {
     expect(componentSource).not.toContain("@media (max-width: 1180px)");
   });
 
+  it("clips translated inactive evidence drawers at the narrow canvas boundary", () => {
+    expect(componentSource).toContain(
+      "transform: translateX(calc(-100% - 20px));",
+    );
+    expect(componentSource).toContain(
+      "transform: translateX(calc(100% + 20px));",
+    );
+    expect(componentSource).toMatch(
+      /@container hearing-court \(max-width: 1219px\)\s*{\s*\.hearing-courtroom-page\s*{[^}]*overflow:\s*(?:clip|hidden);/,
+    );
+  });
+
   it("keeps user, merchant, and reviewer role shells semantically stable", async () => {
     for (const viewerRole of ["USER", "MERCHANT", "PLATFORM_REVIEWER"]) {
       const { wrapper } = await mountView({ viewerRole });
