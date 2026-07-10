@@ -875,12 +875,27 @@ onBeforeUnmount(() => eventAbortController.abort());
               </span>
               <span class="evidence-card__main">
                 <strong>{{ evidenceTypeLabels[item.evidence_type] || item.evidence_type }}</strong>
-                <small>{{ evidenceOriginalFilename(item) || evidenceId(item) }}</small>
-                <em>{{ evidenceSubmissionStatusLabel(item) }}</em>
+                <small
+                  class="evidence-card__filename"
+                  data-evidence-filename
+                  :title="evidenceOriginalFilename(item) || evidenceId(item)"
+                >
+                  {{ evidenceOriginalFilename(item) || evidenceId(item) }}
+                </small>
               </span>
-              <span class="evidence-card__meta">
+              <span class="evidence-card__meta" data-evidence-status-row>
+                <em class="evidence-card__status">
+                  {{ evidenceSubmissionStatusLabel(item) }}
+                </em>
                 <span class="verification-pill" data-verification="PENDING">待提交</span>
                 <span class="confidence-pill" data-confidence="unknown">书记官尚未核验</span>
+              </span>
+              <span
+                v-if="evidenceFeedback(item)"
+                class="evidence-card__description"
+                data-evidence-description
+              >
+                {{ evidenceFeedback(item) }}
               </span>
             </article>
             <div v-if="pendingItems.length" class="evidence-library__actions">
@@ -933,10 +948,19 @@ onBeforeUnmount(() => eventAbortController.abort());
               </span>
               <span class="evidence-card__main">
                 <strong>{{ evidenceTypeLabels[item.evidence_type] || item.evidence_type }}</strong>
-                <small>{{ evidenceOriginalFilename(item) || evidenceId(item) }}</small>
-                <em>{{ evidenceOwnerLabel(item) }}</em>
+                <small
+                  class="evidence-card__filename"
+                  data-evidence-filename
+                  :title="evidenceOriginalFilename(item) || evidenceId(item)"
+                >
+                  {{ evidenceOriginalFilename(item) || evidenceId(item) }}
+                </small>
               </span>
-              <span class="evidence-card__meta">
+              <span class="evidence-card__meta" data-evidence-status-row>
+                <em class="evidence-card__status">
+                  {{ evidenceSubmissionStatusLabel(item) }}
+                </em>
+                <em class="evidence-card__status">{{ evidenceOwnerLabel(item) }}</em>
                 <span
                   class="verification-pill"
                   :data-verification="item.verification_status || 'PENDING'"
@@ -950,6 +974,13 @@ onBeforeUnmount(() => eventAbortController.abort());
                 >
                   {{ evidenceConfidenceCopy(item) }}
                 </span>
+              </span>
+              <span
+                v-if="evidenceFeedback(item)"
+                class="evidence-card__description"
+                data-evidence-description
+              >
+                {{ evidenceFeedback(item) }}
               </span>
             </button>
             <div v-if="submittedItems.length" class="evidence-library__actions evidence-library__actions--right">
@@ -1141,12 +1172,14 @@ onBeforeUnmount(() => eventAbortController.abort());
   grid-template-columns: minmax(520px, 1.05fr) minmax(480px, .95fr);
   gap: 18px;
   align-items: start;
+  min-width: 0;
 }
 
 .evidence-room__conversation,
 .evidence-board {
   height: var(--evidence-panel-height);
   min-width: 0;
+  min-height: 0;
   box-sizing: border-box;
   padding: 18px;
   overflow: hidden;
@@ -1198,13 +1231,49 @@ onBeforeUnmount(() => eventAbortController.abort());
 
 .evidence-room__conversation-frame :deep(.conversation-stream) {
   height: 100%;
+  min-width: 0;
   min-height: 0;
   overflow: hidden;
 }
 
+.evidence-room__conversation-frame :deep(.conversation-stream__messages),
+.evidence-room__conversation-frame :deep(.conversation-stream__composer),
+.evidence-room__conversation-frame :deep(.conversation-stream__composer > div) {
+  min-width: 0;
+}
+
+.evidence-room__conversation-frame :deep(.conversation-stream__message) {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.evidence-room__conversation-frame :deep(.conversation-stream__message header),
+.evidence-room__conversation-frame :deep(.conversation-stream__message p) {
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+:deep(.room-shell__header),
+:deep(.room-shell__header > div),
+:deep(.room-shell__status),
+:deep(.room-shell__boundary) {
+  min-width: 0;
+}
+
+:deep(.room-shell__boundary) {
+  width: auto;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 .evidence-board {
+  position: relative;
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr) auto auto;
+  grid-template-rows: 76px 86px minmax(0, 1fr) 60px;
   gap: 10px;
 }
 
@@ -1213,6 +1282,12 @@ onBeforeUnmount(() => eventAbortController.abort());
   justify-content: space-between;
   gap: 12px;
   align-items: flex-start;
+  min-width: 0;
+  min-height: 0;
+}
+
+.evidence-board__header > div {
+  min-width: 0;
 }
 
 .evidence-board__header h2 {
@@ -1226,6 +1301,9 @@ onBeforeUnmount(() => eventAbortController.abort());
   color: #718096;
   font-size: 13px;
   line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .evidence-board__badge,
@@ -1246,10 +1324,17 @@ onBeforeUnmount(() => eventAbortController.abort());
   grid-template-columns: auto minmax(0, 1fr) auto;
   gap: 12px;
   align-items: center;
+  min-width: 0;
+  min-height: 0;
+  box-sizing: border-box;
   padding: 12px;
   background: linear-gradient(135deg, #fff9df, #edfbf4 52%, #edf6ff);
   border: 1px solid #dce9e4;
   border-radius: 18px;
+}
+
+.evidence-uploader > div {
+  min-width: 0;
 }
 
 .evidence-uploader__illustration {
@@ -1262,6 +1347,8 @@ onBeforeUnmount(() => eventAbortController.abort());
   display: block;
   color: #33435c;
   font-size: 13px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .evidence-uploader small {
@@ -1269,6 +1356,8 @@ onBeforeUnmount(() => eventAbortController.abort());
   color: #718096;
   font-size: 11px;
   line-height: 1.4;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .evidence-uploader__button,
@@ -1293,10 +1382,13 @@ onBeforeUnmount(() => eventAbortController.abort());
 
 .evidence-board__list {
   display: grid;
+  align-content: start;
+  min-width: 0;
   min-height: 0;
   gap: 10px;
   overflow-y: auto;
   overscroll-behavior: contain;
+  scrollbar-gutter: stable;
   padding-right: 4px;
 }
 
@@ -1353,9 +1445,14 @@ onBeforeUnmount(() => eventAbortController.abort());
   position: relative;
   display: grid;
   width: 100%;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  min-width: 0;
+  box-sizing: border-box;
+  grid-template-columns: auto minmax(0, 1fr) minmax(132px, auto);
+  grid-template-areas:
+    "icon main meta"
+    "description description description";
   gap: 10px;
-  align-items: center;
+  align-items: start;
   padding: 11px;
   margin-top: 8px;
   text-align: left;
@@ -1402,6 +1499,7 @@ onBeforeUnmount(() => eventAbortController.abort());
 .evidence-card__icon {
   position: relative;
   display: grid;
+  grid-area: icon;
   place-items: center;
   width: 42px;
   height: 44px;
@@ -1591,15 +1689,21 @@ onBeforeUnmount(() => eventAbortController.abort());
   border-radius: 999px 999px 0 0;
 }
 
-.evidence-card__main,
-.evidence-card__meta {
+.evidence-card__main {
+  grid-area: main;
   display: grid;
   min-width: 0;
   gap: 4px;
 }
 
 .evidence-card__meta {
-  justify-items: end;
+  grid-area: meta;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  min-width: 0;
+  gap: 6px;
 }
 
 .evidence-card strong {
@@ -1610,7 +1714,9 @@ onBeforeUnmount(() => eventAbortController.abort());
   white-space: nowrap;
 }
 
-.evidence-card small {
+.evidence-card__filename {
+  display: block;
+  min-width: 0;
   overflow: hidden;
   color: #8a96a8;
   font-size: 11px;
@@ -1618,10 +1724,28 @@ onBeforeUnmount(() => eventAbortController.abort());
   white-space: nowrap;
 }
 
-.evidence-card em {
+.evidence-card__status {
+  padding: 5px 7px;
   color: #647fb0;
+  background: #edf3fb;
+  border-radius: 999px;
   font-size: 10px;
   font-style: normal;
+  line-height: 1;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.evidence-card__description {
+  grid-column: 1 / -1;
+  grid-area: description;
+  min-width: 0;
+  color: #63728a;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .verification-pill,
@@ -1630,7 +1754,8 @@ onBeforeUnmount(() => eventAbortController.abort());
   border-radius: 999px;
   font-size: 10px;
   line-height: 1;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .verification-pill[data-verification="VERIFIED"] { color: #25704e; background: #dcf5e8; }
@@ -1688,6 +1813,9 @@ onBeforeUnmount(() => eventAbortController.abort());
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 14px;
   align-items: center;
+  min-width: 0;
+  min-height: 0;
+  box-sizing: border-box;
   padding-top: 10px;
   border-top: 1px dashed #d7e2ef;
 }
@@ -1726,7 +1854,24 @@ onBeforeUnmount(() => eventAbortController.abort());
 
 .evidence-completed strong { color: #2d6d4f; }
 .evidence-completed span { color: #5c7a6b; }
-.evidence-error { margin: 0; color: #a84552; font-size: 12px; }
+.evidence-error {
+  position: absolute;
+  left: 18px;
+  right: 18px;
+  bottom: 76px;
+  z-index: 2;
+  margin: 0;
+  padding: 9px 11px;
+  color: #a84552;
+  background: #fff1f3f2;
+  border: 1px solid #ffd5db;
+  border-radius: 12px;
+  box-shadow: 0 10px 28px #7e43501f;
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
 
 .evidence-modal {
   position: fixed;
@@ -1854,13 +1999,11 @@ onBeforeUnmount(() => eventAbortController.abort());
   color: #33435c;
 }
 
-@media (max-width: 980px) {
+@media (max-width: 1120px) {
   .evidence-room { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 620px) {
-  .evidence-uploader,
-  .evidence-footer,
   .evidence-modal__facts {
     grid-template-columns: 1fr;
   }
@@ -1868,6 +2011,168 @@ onBeforeUnmount(() => eventAbortController.abort());
   .evidence-uploader__button,
   .evidence-footer button {
     text-align: center;
+  }
+
+  .evidence-footer {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+  }
+}
+
+@media (max-width: 360px) {
+  :deep(.room-shell__header) {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 4px 8px;
+    align-items: end;
+  }
+
+  :deep(.room-shell__header > div:first-child),
+  :deep(.room-shell__status) {
+    display: contents;
+  }
+
+  :deep(.room-shell__eyebrow),
+  :deep(.room-shell__status > span) {
+    display: none;
+  }
+
+  :deep(.room-shell__header h1) {
+    grid-column: 1 / -1;
+    grid-row: 1;
+    min-width: 0;
+    margin: 0;
+    font-size: 26px;
+    line-height: 1.15;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
+  :deep(.room-shell__header p) {
+    grid-column: 1;
+    grid-row: 2;
+    min-width: 0;
+    margin: 0;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
+  :deep([data-evidence-countdown]) {
+    grid-column: 2;
+    grid-row: 2;
+    min-width: 0;
+    white-space: nowrap;
+  }
+
+  :deep(.room-shell__boundary) {
+    align-items: flex-start;
+    line-height: 1.45;
+  }
+
+  .evidence-board {
+    grid-template-rows: 88px 96px minmax(0, 1fr) 72px;
+    gap: 12px;
+  }
+
+  .evidence-board__header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "title badge"
+      "copy copy";
+    gap: 4px 8px;
+    align-items: start;
+  }
+
+  .evidence-board__header > div {
+    display: contents;
+  }
+
+  .evidence-board__header .evidence-kicker {
+    display: none;
+  }
+
+  .evidence-board__header h2 {
+    grid-area: title;
+    margin: 0;
+    font-size: 21px;
+    line-height: 1.25;
+  }
+
+  .evidence-board__header p {
+    grid-area: copy;
+    font-size: 12px;
+    line-height: 1.4;
+  }
+
+  .evidence-board__badge {
+    grid-area: badge;
+    padding: 5px 7px;
+  }
+
+  .evidence-uploader {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    padding: 10px;
+  }
+
+  .evidence-uploader__illustration,
+  .evidence-uploader .evidence-kicker,
+  .evidence-card__icon {
+    display: none;
+  }
+
+  .evidence-uploader__button {
+    padding: 9px 10px;
+  }
+
+  .evidence-card {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      "main"
+      "meta"
+      "description";
+    gap: 7px;
+    padding: 10px;
+  }
+
+  .evidence-card--pending {
+    padding-right: 34px;
+  }
+
+  .evidence-card__meta {
+    justify-content: flex-start;
+  }
+
+  .evidence-footer {
+    gap: 8px;
+    padding-top: 8px;
+  }
+
+  .evidence-footer div {
+    gap: 2px;
+  }
+
+  .evidence-footer span {
+    font-size: 11px;
+    line-height: 1.35;
+  }
+
+  .evidence-footer button {
+    padding: 9px 10px;
+  }
+
+  .evidence-completed {
+    min-width: 0;
+    padding: 8px 10px;
+  }
+
+  .evidence-error {
+    left: 18px;
+    right: 18px;
+    bottom: 90px;
   }
 }
 </style>

@@ -1,9 +1,16 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { flushPromises, mount } from "@vue/test-utils";
 import { createMemoryHistory, createRouter } from "vue-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import EvidenceRoomView from "./EvidenceRoomView.vue";
 import { evidenceApi } from "../../api/evidence";
 import { roomApi } from "../../api/rooms";
+
+const evidenceRoomSource = readFileSync(
+  resolve(process.cwd(), "src/views/disputes/EvidenceRoomView.vue"),
+  "utf8",
+);
 
 vi.mock("../../api/evidence", () => ({
   evidenceApi: {
@@ -93,6 +100,32 @@ const catalog = {
     },
   ],
 };
+
+function stressCatalog(role, count = 100, filenameFactory = null) {
+  return {
+    case_id: "CASE_EVIDENCE_1",
+    initiator_role: role,
+    items: Array.from({ length: count }, (_, index) => ({
+      evidence_id: `EVIDENCE_${role}_${String(index + 1).padStart(3, "0")}`,
+      evidence_type: index % 2 === 0 ? "DELIVERY_RECORD" : "CHAT_SCREENSHOT",
+      submitted_by_role: role,
+      visibility: "PRIVATE",
+      content_url: null,
+      redacted: false,
+      verification_status: index % 3 === 0 ? "NEEDS_HUMAN_REVIEW" : "VERIFIED",
+      confidence_score: 0.88,
+      confidence_level: "HIGH",
+      verification_feedback:
+        `书记官核验说明 ${index + 1}：` + "来源完整性与时间线需要逐项核对。".repeat(8),
+      original_filename: filenameFactory
+        ? filenameFactory(index)
+        : `${role.toLowerCase()}-evidence-${index + 1}.pdf`,
+      submission_status: "SUBMITTED",
+      submitted_at: "2026-07-03T00:30:00Z",
+      submission_batch_id: `BATCH_${role}_${index + 1}`,
+    })),
+  };
+}
 
 const initialCompletion = {
   case_id: "CASE_EVIDENCE_1",
@@ -190,6 +223,105 @@ describe("EvidenceRoomView", () => {
     ).toBe(true);
     expect(wrapper.get(".evidence-room__case-note").text()).toContain(
       "发起争议方须至少正式提交 1 份相关证据；另一方可提交材料，或等待举证时效结束。",
+    );
+  });
+
+  it("encodes the fixed board budget, single list scroll rail, and approved breakpoints", () => {
+    expect(evidenceRoomSource).toContain("--evidence-panel-height: 740px");
+    expect(evidenceRoomSource).toMatch(
+      /grid-template-rows:\s*76px 86px minmax\(0, 1fr\) 60px/,
+    );
+    expect(evidenceRoomSource).toMatch(
+      /\.evidence-board__list\s*\{[^}]*overflow-y:\s*auto/s,
+    );
+    expect(evidenceRoomSource).not.toMatch(
+      /\.evidence-library\s*\{[^}]*overflow(?:-y)?:\s*(?:auto|scroll)/s,
+    );
+    expect(evidenceRoomSource).toMatch(/@media \(max-width: 1120px\)/);
+    expect(evidenceRoomSource).toMatch(/@media \(max-width: 360px\)/);
+    expect(evidenceRoomSource).toMatch(
+      /grid-template-rows:\s*88px 96px minmax\(0, 1fr\) 72px/,
+    );
+    expect(evidenceRoomSource).toMatch(/:deep\(\.room-shell__header\)/);
+    expect(evidenceRoomSource).toMatch(
+      /:deep\(\.room-shell__boundary\)[^{]*\{[^}]*overflow-wrap:\s*anywhere/s,
+    );
+    expect(evidenceRoomSource).toMatch(
+      /\.evidence-footer\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\) auto/s,
+    );
+  });
+
+  it("keeps compact footer controls horizontal and overlays errors outside the board tracks", () => {
+    const compactStyles = evidenceRoomSource.match(
+      /@media \(max-width: 620px\)([\s\S]*?)@media \(max-width: 360px\)/,
+    )?.[1];
+
+    expect(compactStyles).toBeTruthy();
+    expect(compactStyles).toMatch(
+      /\.evidence-footer\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\) auto/s,
+    );
+    expect(compactStyles).not.toMatch(
+      /\.evidence-footer[^}]*grid-template-columns:\s*1fr/s,
+    );
+    expect(evidenceRoomSource).toMatch(
+      /\.evidence-error\s*\{[^}]*position:\s*absolute/s,
+    );
+  });
+
+  it.each(["USER", "MERCHANT"])(
+    "renders 100 %s evidence cards inside the single list rail without moving the footer",
+    async (viewerRole) => {
+      const { wrapper } = await mountView({
+        viewerRole,
+        initialCatalog: stressCatalog(viewerRole),
+      });
+
+      const listRail = wrapper.get("[data-evidence-list-scroll]");
+      expect(listRail.findAll("[data-evidence-card]")).toHaveLength(100);
+      expect(listRail.find(".evidence-footer").exists()).toBe(false);
+      expect(wrapper.get("[data-evidence-board-panel] > .evidence-footer").exists()).toBe(true);
+      expect(wrapper.findAll("[data-evidence-status-row]")).toHaveLength(100);
+      expect(wrapper.get("[data-evidence-status-row]").text()).toContain("已提交");
+      expect(wrapper.get("[data-evidence-status-row]").text()).toContain("88% · 高置信");
+    },
+  );
+
+  it("keeps a 200-character unbroken filename inspectable and long verification text on its own row", async () => {
+    const filename = `${"证据原件无空格长文件名".repeat(20).slice(0, 200)}.pdf`;
+    const longCatalog = stressCatalog("USER", 1, () => filename);
+    const { wrapper } = await mountView({ initialCatalog: longCatalog });
+
+    const card = wrapper.get("[data-evidence-card]");
+    const filenameNode = card.get("[data-evidence-filename]");
+    const description = card.get("[data-evidence-description]");
+
+    expect(filenameNode.attributes("title")).toBe(filename);
+    expect(filenameNode.text()).toBe(filename);
+    expect(description.text()).toContain("来源完整性与时间线需要逐项核对");
+    expect(evidenceRoomSource).toMatch(
+      /\.evidence-card__description\s*\{[^}]*grid-column:\s*1\s*\/\s*-1[^}]*overflow-wrap:\s*anywhere/s,
+    );
+    expect(evidenceRoomSource).toMatch(
+      /\.evidence-card__filename\s*\{[^}]*text-overflow:\s*ellipsis[^}]*white-space:\s*nowrap/s,
+    );
+
+    await card.trigger("click");
+
+    expect(wrapper.get("[data-evidence-detail-modal]").text()).toContain(filename);
+  });
+
+  it("keeps the narrow room header, countdown, AI notice, and conversation chain wrap-safe", () => {
+    expect(evidenceRoomSource).toMatch(
+      /@media \(max-width: 360px\)[\s\S]*:deep\(\.room-shell__header\)[\s\S]*grid-template-columns:\s*minmax\(0, 1fr\) auto/,
+    );
+    expect(evidenceRoomSource).toMatch(
+      /:deep\(\[data-evidence-countdown\]\)[^{]*\{[^}]*white-space:\s*nowrap/s,
+    );
+    expect(evidenceRoomSource).toMatch(
+      /:deep\(\.conversation-stream__message\)[^{]*\{[^}]*min-width:\s*0[^}]*overflow-wrap:\s*anywhere/s,
+    );
+    expect(evidenceRoomSource).toMatch(
+      /\.evidence-card__meta\s*\{[^}]*flex-wrap:\s*wrap/s,
     );
   });
 
