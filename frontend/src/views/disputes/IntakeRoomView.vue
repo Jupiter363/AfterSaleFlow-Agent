@@ -682,7 +682,11 @@ async function openDossierFulltext(payload) {
   dossierFulltextReturnFocus = document.activeElement;
   dossierFulltext.value = payload;
   await nextTick();
-  dossierFulltextDialog.value?.focus();
+  const dialog = dossierFulltextDialog.value;
+  if (typeof dialog?.showModal === "function" && !dialog.open) {
+    dialog.showModal();
+  }
+  dialog?.focus();
 }
 
 async function openVerificationGaps() {
@@ -692,13 +696,25 @@ async function openVerificationGaps() {
     items: allVerificationGaps.value,
   };
   await nextTick();
-  dossierFulltextDialog.value?.focus();
+  const dialog = dossierFulltextDialog.value;
+  if (typeof dialog?.showModal === "function" && !dialog.open) {
+    dialog.showModal();
+  }
+  dialog?.focus();
 }
 
 async function closeDossierFulltext() {
+  const dialog = dossierFulltextDialog.value;
+  const returnFocus = dossierFulltextReturnFocus;
+  dossierFulltextReturnFocus = null;
+  if (typeof dialog?.close === "function" && dialog.open) {
+    dialog.close();
+  }
   dossierFulltext.value = null;
   await nextTick();
-  dossierFulltextReturnFocus?.focus();
+  if (returnFocus?.isConnected) {
+    returnFocus.focus();
+  }
 }
 
 async function load(snapshot = currentWorkspaceSnapshot()) {
@@ -917,6 +933,11 @@ watch(
 );
 onBeforeUnmount(() => {
   eventAbortController.abort();
+  const dialog = dossierFulltextDialog.value;
+  if (typeof dialog?.close === "function" && dialog.open) {
+    dialog.close();
+  }
+  dossierFulltextReturnFocus = null;
 });
 </script>
 
@@ -1210,7 +1231,7 @@ onBeforeUnmount(() => {
         </div>
       </section>
     </div>
-    <div
+    <dialog
       v-if="dossierFulltext"
       ref="dossierFulltextDialog"
       class="intake-fulltext-dialog"
@@ -1219,7 +1240,7 @@ onBeforeUnmount(() => {
       aria-modal="true"
       aria-labelledby="intake-fulltext-title"
       tabindex="-1"
-      @keydown.esc="closeDossierFulltext"
+      @cancel.prevent="closeDossierFulltext"
     >
       <section class="intake-fulltext-dialog__card">
         <h3 id="intake-fulltext-title">{{ dossierFulltext.label }}</h3>
@@ -1235,7 +1256,7 @@ onBeforeUnmount(() => {
           关闭
         </button>
       </section>
-    </div>
+    </dialog>
     <div
       v-if="error"
       class="intake-error-dialog"
@@ -1899,12 +1920,21 @@ onBeforeUnmount(() => {
   text-align: center;
 }
 .intake-fulltext-dialog {
-  position: fixed;
-  inset: 0;
-  z-index: 50;
+  width: 100dvw;
+  max-width: none;
+  height: 100dvh;
+  max-height: none;
+  margin: 0;
+  border: 0;
+  box-sizing: border-box;
+  background: transparent;
+}
+.intake-fulltext-dialog[open] {
   display: grid;
   place-items: center;
   padding: 16px;
+}
+.intake-fulltext-dialog::backdrop {
   background: #25354a66;
   backdrop-filter: blur(8px);
 }

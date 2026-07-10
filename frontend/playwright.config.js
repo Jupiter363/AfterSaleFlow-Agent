@@ -1,7 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
 
-const playwrightPort = process.env.PLAYWRIGHT_PORT || "4173";
-const playwrightBaseURL = `http://127.0.0.1:${playwrightPort}`;
+const port = Number.parseInt(process.env.PLAYWRIGHT_PORT || "4173", 10);
+const baseURL = `http://127.0.0.1:${port}`;
 
 export default defineConfig({
   testDir: "./tests/browser",
@@ -16,7 +16,7 @@ export default defineConfig({
       ]
     : "list",
   use: {
-    baseURL: playwrightBaseURL,
+    baseURL,
     locale: "zh-CN",
     colorScheme: "light",
     reducedMotion: "reduce",
@@ -25,9 +25,9 @@ export default defineConfig({
     video: "retain-on-failure",
   },
   webServer: {
-    command: `pnpm exec vite --host 127.0.0.1 --port ${playwrightPort} --strictPort`,
-    url: playwrightBaseURL,
-    reuseExistingServer: !process.env.CI,
+    command: `pnpm exec vite --host 127.0.0.1 --port ${port} --strictPort`,
+    url: baseURL,
+    reuseExistingServer: false,
     timeout: 120_000,
   },
   projects: [

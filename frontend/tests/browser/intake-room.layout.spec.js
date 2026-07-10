@@ -231,32 +231,134 @@ for (const viewport of [
   });
 }
 
-test("keeps the message rail as the only scrolling region under pressure", async ({
+for (const viewport of [
+  { width: 390, height: 844 },
+  { width: 320, height: 568 },
+]) {
+  test(`keeps the message rail as the only scrolling region under pressure at ${viewport.width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize(viewport);
+    await installIntakeRoomFixture(page, {
+      messages: { count: 20, unbrokenLength: 1000 },
+    });
+    await page.goto(`/disputes/${CASE_ID}/intake`);
+
+    const shell = page.locator(".intake-room__conversation");
+    const rail = page.locator(".conversation-stream__messages");
+    const composer = page.locator(".conversation-stream__composer");
+    const textarea = composer.locator("textarea");
+    const actionRow = composer.locator(":scope > div");
+
+    await expect(shell).toHaveCSS("height", "740px");
+    await expect(composer).toHaveCSS("height", "132px");
+    expect(
+      await rail.evaluate(
+        (element) => element.scrollHeight > element.clientHeight,
+      ),
+    ).toBe(true);
+    expect(await textarea.evaluate((element) => element.clientHeight)).toBe(72);
+    const composerMetrics = await composer.evaluate((element) => {
+      const action = element.querySelector(":scope > div");
+      const text = action?.querySelector("span");
+      const button = action?.querySelector("button");
+      const box = (node) => ({
+        clientHeight: node?.clientHeight ?? null,
+        scrollHeight: node?.scrollHeight ?? null,
+        clientWidth: node?.clientWidth ?? null,
+        scrollWidth: node?.scrollWidth ?? null,
+        textContent: node?.textContent?.trim() ?? null,
+        lineHeight: node ? getComputedStyle(node).lineHeight : null,
+        padding: node ? getComputedStyle(node).padding : null,
+        whiteSpace: node ? getComputedStyle(node).whiteSpace : null,
+        flexShrink: node ? getComputedStyle(node).flexShrink : null,
+      });
+      return {
+        composer: box(element),
+        action: box(action),
+        text: box(text),
+        button: box(button),
+      };
+    });
+    expect(
+      composerMetrics.composer.scrollHeight <=
+        composerMetrics.composer.clientHeight + 1,
+      JSON.stringify(composerMetrics, null, 2),
+    ).toBe(true);
+    expect(
+      composerMetrics.action.scrollHeight <=
+          composerMetrics.action.clientHeight + 1 &&
+        composerMetrics.action.scrollWidth <=
+          composerMetrics.action.clientWidth + 1,
+      JSON.stringify(composerMetrics, null, 2),
+    ).toBe(true);
+    await assertInside(actionRow, composer);
+    await assertInside(actionRow.locator("span"), actionRow);
+    await assertInside(actionRow.locator("button"), actionRow);
+    await assertInside(composer, shell);
+    expect(await pageHasHorizontalOverflow(page)).toBe(false);
+  });
+}
+
+test("confines native modal keyboard traversal and restores the trigger", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await installIntakeRoomFixture(page, {
-    messages: { count: 20, unbrokenLength: 1000 },
+    dossier: { summaryLength: 300, statementLength: 300, gapCount: 10 },
   });
   await page.goto(`/disputes/${CASE_ID}/intake`);
 
-  const shell = page.locator(".intake-room__conversation");
-  const rail = page.locator(".conversation-stream__messages");
-  const composer = page.locator(".conversation-stream__composer");
-  const textarea = composer.locator("textarea");
+  const trigger = page.locator(
+    '[data-dossier-fulltext-trigger="summary"] [data-expandable-trigger]',
+  );
+  await trigger.click();
 
-  await expect(shell).toHaveCSS("height", "740px");
+  const dialog = page.locator("[data-dossier-fulltext-dialog]");
+  await expect(dialog).toBeVisible();
+  expect(await dialog.evaluate((element) => element.tagName)).toBe("DIALOG");
+  expect(await dialog.evaluate((element) => element.open)).toBe(true);
   expect(
-    await rail.evaluate(
-      (element) => element.scrollHeight > element.clientHeight,
+    await dialog.evaluate((element) => element.contains(document.activeElement)),
+  ).toBe(true);
+
+  await page.keyboard.press("Tab");
+  await expect(dialog.locator("[data-dismiss-dossier-fulltext]")).toBeFocused();
+  await page.keyboard.press("Tab");
+  expect(
+    await dialog.evaluate(
+      (element) =>
+        element.ownerDocument.activeElement === element.ownerDocument.body,
     ),
   ).toBe(true);
-  const composerHeight = await composer.evaluate(
-    (element) => element.clientHeight,
-  );
-  expect(composerHeight).toBeGreaterThanOrEqual(126);
-  expect(composerHeight).toBeLessThanOrEqual(138);
-  expect(await textarea.evaluate((element) => element.clientHeight)).toBe(72);
-  await assertInside(composer, shell);
-  expect(await pageHasHorizontalOverflow(page)).toBe(false);
+  await expect(trigger).not.toBeFocused();
+
+  await page.keyboard.press("Tab");
+  await expect(dialog.locator("[data-dismiss-dossier-fulltext]")).toBeFocused();
+
+  await page.keyboard.press("Shift+Tab");
+  expect(
+    await dialog.evaluate(
+      (element) =>
+        element.ownerDocument.activeElement === element.ownerDocument.body,
+    ),
+  ).toBe(true);
+  await expect(trigger).not.toBeFocused();
+
+  await page.keyboard.press("Shift+Tab");
+  await expect(dialog.locator("[data-dismiss-dossier-fulltext]")).toBeFocused();
+
+  expect(
+    await dialog.evaluate((element) => {
+      const backgroundControl = element.ownerDocument.querySelector(
+        ".conversation-stream__composer textarea",
+      );
+      backgroundControl?.focus();
+      return element.ownerDocument.activeElement !== backgroundControl;
+    }),
+  ).toBe(true);
+
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+  await expect(trigger).toBeFocused();
 });

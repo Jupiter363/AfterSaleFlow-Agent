@@ -206,10 +206,13 @@ onMounted(() => {
   border-radius: 18px;
 }
 .conversation-stream__composer {
+  display: grid;
+  grid-template-rows: 72px minmax(0, 1fr);
+  gap: 6px;
   box-sizing: border-box;
   width: 100%;
   height: 132px;
-  padding: 12px;
+  padding: 8px 10px;
   overflow: hidden;
   background: #fff;
   border: 1px solid #dde6f2;
@@ -238,11 +241,18 @@ onMounted(() => {
   justify-content: space-between;
   gap: 12px;
   align-items: center;
-  margin-top: 8px;
+  min-width: 0;
 }
-.conversation-stream__composer span { color: #8994a6; font-size: 11px; }
+.conversation-stream__composer span {
+  min-width: 0;
+  color: #8994a6;
+  font-size: 11px;
+  line-height: 1.35;
+}
 .conversation-stream__composer button {
-  padding: 10px 16px;
+  flex: 0 0 auto;
+  padding: 7px 12px;
+  white-space: nowrap;
   color: white;
   background: #4b9fe1;
   border: 0;

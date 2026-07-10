@@ -915,7 +915,26 @@ describe("IntakeRoomView", () => {
     }
 
     vi.stubGlobal("ResizeObserver", ResizeObserverMock);
-    const wrapper = await mountInteractiveView({
+    const dialogPrototype = globalThis.HTMLDialogElement.prototype;
+    const originalShowModal = dialogPrototype.showModal;
+    const originalClose = dialogPrototype.close;
+    const showModal = vi.fn(function showModalMock() {
+      this.open = true;
+    });
+    const close = vi.fn(function closeMock() {
+      this.open = false;
+    });
+    Object.defineProperty(dialogPrototype, "showModal", {
+      configurable: true,
+      writable: true,
+      value: showModal,
+    });
+    Object.defineProperty(dialogPrototype, "close", {
+      configurable: true,
+      writable: true,
+      value: close,
+    });
+    let wrapper = await mountInteractiveView({
       attachTo: document.body,
       initialTurnMemory: {
         turn_no: 3,
@@ -1015,11 +1034,15 @@ describe("IntakeRoomView", () => {
       await flushPromises();
 
       let dialog = wrapper.get("[data-dossier-fulltext-dialog]");
+      expect(dialog.element.tagName).toBe("DIALOG");
+      expect(dialog.element.open).toBe(true);
+      expect(showModal).toHaveBeenCalledTimes(1);
       expect(dialog.text()).toContain(longSummary);
       expect(document.activeElement).toBe(dialog.element);
 
       await wrapper.get("[data-dismiss-dossier-fulltext]").trigger("click");
       await flushPromises();
+      expect(close).toHaveBeenCalledTimes(1);
       expect(document.activeElement).toBe(summaryTrigger.element);
 
       const originTrigger = wrapper.get(
@@ -1030,16 +1053,44 @@ describe("IntakeRoomView", () => {
       await flushPromises();
 
       dialog = wrapper.get("[data-dossier-fulltext-dialog]");
+      expect(dialog.element.open).toBe(true);
+      expect(showModal).toHaveBeenCalledTimes(2);
       expect(dialog.text()).toContain(longStatement);
       expect(document.activeElement).toBe(dialog.element);
 
-      await dialog.trigger("keydown", { key: "Escape" });
+      await dialog.trigger("cancel");
       await flushPromises();
+      expect(close).toHaveBeenCalledTimes(2);
       expect(wrapper.find("[data-dossier-fulltext-dialog]").exists()).toBe(false);
       expect(document.activeElement).toBe(originTrigger.element);
-    } finally {
+
+      await originTrigger.trigger("click");
+      await flushPromises();
+      expect(showModal).toHaveBeenCalledTimes(3);
       wrapper.unmount();
+      wrapper = null;
+      expect(close).toHaveBeenCalledTimes(3);
+    } finally {
+      wrapper?.unmount();
       document.body.innerHTML = "";
+      if (originalShowModal === undefined) {
+        delete dialogPrototype.showModal;
+      } else {
+        Object.defineProperty(dialogPrototype, "showModal", {
+          configurable: true,
+          writable: true,
+          value: originalShowModal,
+        });
+      }
+      if (originalClose === undefined) {
+        delete dialogPrototype.close;
+      } else {
+        Object.defineProperty(dialogPrototype, "close", {
+          configurable: true,
+          writable: true,
+          value: originalClose,
+        });
+      }
       vi.unstubAllGlobals();
     }
   });

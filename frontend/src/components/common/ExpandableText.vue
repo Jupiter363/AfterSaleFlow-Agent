@@ -83,6 +83,7 @@ onBeforeUnmount(() => observer?.disconnect());
   position: absolute;
   right: 0;
   bottom: 0;
+  z-index: 1;
   padding: 2px 0 2px 14px;
   color: #5f6fd8;
   background: linear-gradient(90deg, transparent, #fff 24%);
