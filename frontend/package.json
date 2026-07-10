@@ -7,7 +7,11 @@
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
-    "test": "vitest run"
+    "test": "vitest run --exclude \"tests/browser/**\"",
+    "test:browser": "playwright test",
+    "test:browser:intake": "playwright test tests/browser/intake-room.layout.spec.js",
+    "test:browser:ui": "playwright test --ui",
+    "test:browser:debug": "playwright test --debug"
   },
   "dependencies": {
     "element-plus": "2.9.5",
@@ -15,6 +19,7 @@
     "vue-router": "4.5.1"
   },
   "devDependencies": {
+    "@playwright/test": "1.61.1",
     "@vitejs/plugin-vue": "5.2.3",
     "@vue/test-utils": "2.4.6",
     "jsdom": "26.0.0",

@@ -149,6 +149,7 @@ onMounted(() => {
   gap: 14px;
   width: 100%;
   min-height: 0;
+  overflow: hidden;
 }
 .conversation-stream__messages {
   display: grid;
@@ -156,10 +157,16 @@ onMounted(() => {
   gap: 10px;
   min-height: 0;
   padding: 8px;
+  overflow-x: hidden;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 .conversation-stream__message {
+  height: auto;
+  min-width: 0;
   max-width: 82%;
+  max-height: none;
   padding: 13px 15px;
   font-size: var(--conversation-message-font-size);
   background: #fff;
@@ -186,6 +193,9 @@ onMounted(() => {
   margin: 7px 0 0;
   font-size: var(--conversation-message-body-font-size);
   line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 .conversation-stream__empty {
   padding: 28px;
@@ -198,7 +208,9 @@ onMounted(() => {
 .conversation-stream__composer {
   box-sizing: border-box;
   width: 100%;
+  height: 132px;
   padding: 12px;
+  overflow: hidden;
   background: #fff;
   border: 1px solid #dde6f2;
   border-radius: 20px;
@@ -207,8 +219,12 @@ onMounted(() => {
 .conversation-stream__composer textarea {
   box-sizing: border-box;
   width: 100%;
+  height: 72px;
+  min-height: 72px;
+  max-height: 72px;
   padding: 10px;
-  resize: vertical;
+  resize: none;
+  overflow-y: auto;
   font-size: 13px;
   line-height: 1.5;
   color: #25344c;
@@ -241,5 +257,11 @@ onMounted(() => {
   background: #f7fbff;
   border: 1px dashed #cddbec;
   border-radius: 18px;
+}
+
+@media (max-width: 620px) {
+  .conversation-stream__message {
+    max-width: 94%;
+  }
 }
 </style>

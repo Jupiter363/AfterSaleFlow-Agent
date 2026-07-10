@@ -86,6 +86,7 @@ async function mountInteractiveView(options = {}) {
       cancelAction: options.cancelAction,
     },
     global: { plugins: [router] },
+    attachTo: options.attachTo,
   });
 }
 
@@ -322,7 +323,7 @@ describe("IntakeRoomView", () => {
     });
 
     expect(wrapper.find("[data-dispute-detail-title]").exists()).toBe(false);
-    expect(wrapper.get("[data-dispute-detail-summary]").element.tagName).toBe("STRONG");
+    expect(wrapper.get("[data-dispute-detail-summary]").element.tagName).toBe("DIV");
     expect(wrapper.text()).toContain("用户反馈手表损坏");
     expect(wrapper.text()).toContain("故障细节");
     expect(wrapper.text()).toContain("用户原始陈述");
@@ -422,7 +423,7 @@ describe("IntakeRoomView", () => {
     expect(summaryCard.find(".intake-case-detail__chips").exists()).toBe(false);
     expect(summaryCard.find("[data-dispute-detail-title]").exists()).toBe(false);
     expect(summaryCard.find("[data-dispute-detail-focus]").exists()).toBe(false);
-    expect(summaryCard.get("[data-dispute-detail-summary]").element.tagName).toBe("STRONG");
+    expect(summaryCard.get("[data-dispute-detail-summary]").element.tagName).toBe("DIV");
     expect(wrapper.text()).toContain("用户称订单物流已显示签收");
     expect(summaryCard.text()).not.toContain("仍缺少可信的用户原始陈述与商家质检视频。");
     expect(wrapper.get("[data-verification-gaps]").text()).toContain("下一步核验重点");
@@ -543,7 +544,7 @@ describe("IntakeRoomView", () => {
     const disputeDetail = wrapper.get("[data-dispute-detail-card]");
     expect(disputeDetail.text()).toContain("争议详情");
     expect(disputeDetail.find("[data-dispute-detail-title]").exists()).toBe(false);
-    expect(disputeDetail.get("[data-dispute-detail-summary]").element.tagName).toBe("STRONG");
+    expect(disputeDetail.get("[data-dispute-detail-summary]").element.tagName).toBe("DIV");
     expect(disputeDetail.get("[data-dispute-detail-summary]").text()).toContain("物流显示签收");
     expect(disputeDetail.get("[data-dispute-detail-claim]").text()).toContain("用户称未实际收到包裹，并请求退款");
     expect(disputeDetail.get("[data-dispute-detail-claim]").text()).toContain("¥299");
@@ -875,17 +876,172 @@ describe("IntakeRoomView", () => {
 
     const source = readUtf8Source("src/views/disputes/IntakeRoomView.vue");
     expect(source).toContain("@supports (-webkit-line-clamp: 1)");
-    expect(source).toContain("--cover-summary-lines: 7");
-    expect(source).toContain("--summary-note-min-height: 132px");
-    expect(source).toContain("--detail-field-lines: 2");
+    expect(source).toContain("import ExpandableText");
+    expect(source).toContain('data-dossier-fulltext-trigger="summary"');
+    expect(source).toContain('data-dossier-fulltext-trigger="origin"');
+    expect(source).toContain(':lines="5"');
+    expect(source).toContain(':lines="4"');
     expect(source).toContain(".intake-case-detail__summary-note");
+    expect(source).toContain("height: 110px;");
     expect(source).toContain("align-content: center;");
     expect(source).toContain(".intake-case-detail__origin-card");
-    expect(source).toContain("overflow-y: auto;");
+    expect(source).toContain("height: 108px;");
+    expect(source).toMatch(
+      /\.intake-case-detail__single-statement\s*\{[\s\S]*?overflow: hidden;/,
+    );
     expect(source).not.toContain("data-dispute-detail-title");
     expect(source).not.toContain("background: #ffffffad;");
     expect(source).not.toContain("border: 1px solid #e1ebf7;");
     expect(source).toContain("data-origin-statement-text");
+  });
+
+  it("keeps four verification previews and opens complete dossier text accessibly", async () => {
+    const longSummary = "摘".repeat(300);
+    const longStatement = "原".repeat(500);
+    const verificationItems = Array.from(
+      { length: 10 },
+      (_, index) => `核验事项 ${index + 1}`,
+    );
+    const resizeCallbacks = [];
+
+    class ResizeObserverMock {
+      constructor(callback) {
+        resizeCallbacks.push(callback);
+      }
+
+      observe() {}
+
+      disconnect() {}
+    }
+
+    vi.stubGlobal("ResizeObserver", ResizeObserverMock);
+    const wrapper = await mountInteractiveView({
+      attachTo: document.body,
+      initialTurnMemory: {
+        turn_no: 3,
+        case_intake_dossier: {
+          dossier_version: 2,
+          quality_score: 72,
+          ready_for_next_step: false,
+          admission_recommendation: "NEED_MORE_INFO",
+          dossier: {
+            schema_version: "intake_case_detail.v1",
+            case_story: {
+              title: "复杂售后争议",
+              one_sentence_summary: longSummary,
+            },
+            references: {
+              order_reference: "ORDER-1",
+              after_sales_reference: "AFTER-1",
+              logistics_reference: "LOG-1",
+            },
+            party_positions: {
+              user_claim: longStatement,
+              merchant_claim: "商家已明确回应。",
+            },
+            claim_resolution: {
+              initiator_role: "USER",
+              requested_resolution: "REFUND",
+              normalized_statement: "用户请求退款。",
+              original_statement: longStatement,
+            },
+            respondent_attitude: {
+              respondent_role: "MERCHANT",
+              attitude: "AGREE",
+              position: "商家同意退款。",
+            },
+            dispute_core_state: {
+              core_conflict: "退款执行细节仍待确认。",
+              facts_in_dispute: [],
+              next_verification_focus: verificationItems,
+            },
+            dispute_focus: {
+              core_issue: "退款执行细节",
+              facts_to_verify: verificationItems,
+            },
+            missing_information: {
+              blocking_gaps: verificationItems,
+              nice_to_have_gaps: [],
+              next_questions: [],
+            },
+            risk_assessment: {
+              case_grade: "MEDIUM",
+              risk_signals: [],
+            },
+            intake_quality: {
+              score: 72,
+              threshold: 80,
+              ready_for_next_step: false,
+              improvement_reason: "",
+            },
+            admission: {
+              recommendation: "NEED_MORE_INFO",
+            },
+          },
+        },
+      },
+    });
+
+    try {
+      const summaryContent = wrapper.get(
+        '[data-dossier-fulltext-trigger="summary"] [data-expandable-content]',
+      ).element;
+      const originContent = wrapper.get(
+        '[data-dossier-fulltext-trigger="origin"] [data-expandable-content]',
+      ).element;
+      for (const element of [summaryContent, originContent]) {
+        Object.defineProperty(element, "clientHeight", {
+          value: 72,
+          configurable: true,
+        });
+        Object.defineProperty(element, "scrollHeight", {
+          value: 160,
+          configurable: true,
+        });
+      }
+      resizeCallbacks.forEach((callback) => callback());
+      await wrapper.vm.$nextTick();
+
+      expect(wrapper.findAll("[data-verification-gap-item]")).toHaveLength(4);
+      expect(wrapper.get("[data-verification-gap-overflow]").text()).toContain(
+        "另有 6 项",
+      );
+
+      const summaryTrigger = wrapper.get(
+        '[data-dossier-fulltext-trigger="summary"] [data-expandable-trigger]',
+      );
+      summaryTrigger.element.focus();
+      await summaryTrigger.trigger("click");
+      await flushPromises();
+
+      let dialog = wrapper.get("[data-dossier-fulltext-dialog]");
+      expect(dialog.text()).toContain(longSummary);
+      expect(document.activeElement).toBe(dialog.element);
+
+      await wrapper.get("[data-dismiss-dossier-fulltext]").trigger("click");
+      await flushPromises();
+      expect(document.activeElement).toBe(summaryTrigger.element);
+
+      const originTrigger = wrapper.get(
+        '[data-dossier-fulltext-trigger="origin"] [data-expandable-trigger]',
+      );
+      originTrigger.element.focus();
+      await originTrigger.trigger("click");
+      await flushPromises();
+
+      dialog = wrapper.get("[data-dossier-fulltext-dialog]");
+      expect(dialog.text()).toContain(longStatement);
+      expect(document.activeElement).toBe(dialog.element);
+
+      await dialog.trigger("keydown", { key: "Escape" });
+      await flushPromises();
+      expect(wrapper.find("[data-dossier-fulltext-dialog]").exists()).toBe(false);
+      expect(document.activeElement).toBe(originTrigger.element);
+    } finally {
+      wrapper.unmount();
+      document.body.innerHTML = "";
+      vi.unstubAllGlobals();
+    }
   });
 
   it("infers the single-party intake initiator from immutable party messages when the model slot is missing", async () => {
@@ -1054,7 +1210,10 @@ describe("IntakeRoomView", () => {
     expect(router.currentRoute.value.path).toBe(
       "/disputes/CASE_INTAKE_1/intake",
     );
-    expect(wrapper.get("[data-resolve-without-dispute]").attributes("disabled")).toBeDefined();
+    expect(wrapper.find("[data-resolve-without-dispute]").exists()).toBe(false);
+    expect(wrapper.get("[data-intake-result]").text()).toContain(
+      "争议已取消，接待室已归档",
+    );
   });
 
   it("keeps reviewer identities from sending party dialogue to the intake agent", async () => {
@@ -1193,59 +1352,27 @@ describe("IntakeRoomView", () => {
   it("keeps the intake room outer cards at a fixed non-stretching height", () => {
     const source = readUtf8Source("src/views/disputes/IntakeRoomView.vue");
 
-    expect(source).toContain("align-items: start;");
     expect(source).toContain("--intake-panel-height: 740px;");
-    expect(source).toContain("height: var(--intake-panel-height);");
-    expect(source).toContain("grid-template-rows: auto minmax(0, 1fr);");
-    expect(source).toContain(".intake-room__conversation-lock-frame :deep(.conversation-stream)");
-    expect(source).toContain("grid-template-rows: auto minmax(0, 1fr) auto;");
-    expect(source).toContain("overflow: hidden;");
-    expect(source).toContain(".intake-case-detail__summary-card");
-    expect(source).toContain(".intake-case-detail__status-rail");
-    expect(source).toContain("data-dossier-status-pill");
-    expect(source).toContain("data-dossier-status-hint");
-    expect(source).toContain("justify-content: flex-start;");
-    expect(source).toContain(".intake-case-detail__status-copy strong {\n  display: inline-flex;");
-    expect(source).toContain(".intake-case-detail__risk {\n  display: flex;");
-    expect(source).toContain("align-items: center;\n  justify-content: center;");
-    expect(source).toContain(".intake-case-detail__quality-track");
-    expect(source).toContain("grid-template-rows: 48px minmax(0, 1fr) minmax(92px, .22fr);");
-    expect(source).toMatch(/\.intake-case-detail\s*\{[\s\S]*?padding: 0;[\s\S]*?background: transparent;[\s\S]*?border: 0;[\s\S]*?border-radius: 0;[\s\S]*?box-shadow: none;/);
-    expect(source).toContain(".intake-case-detail__summary-card {\n  display: contents;");
-    expect(source).toContain(".intake-case-detail__dispute");
-    expect(source).toContain("grid-template-rows: auto var(--summary-note-min-height) var(--detail-meta-rows-height) minmax(0, 1fr);");
-    expect(source).toContain(".intake-case-detail__field");
-    expect(source).toContain("--detail-meta-row-height: 46px;");
-    expect(source).toContain("--detail-meta-rows-height: 138px;");
-    expect(source).toContain("data-dispute-detail-meta-rows");
-    expect(source).toContain(".intake-case-detail__meta-rows");
-    expect(source).toContain("height: var(--detail-meta-rows-height);");
-    expect(source).toContain("grid-template-rows: repeat(3, 1fr);");
-    expect(source).toContain(".intake-case-detail__field,\n.intake-case-detail__index-strip {");
-    expect(source).toContain("height: var(--detail-meta-row-height);");
-    expect(source).toContain(".intake-case-detail__todo-list");
-    expect(source).toContain(".intake-case-detail__origin-card");
-    expect(source).toContain(".intake-case-detail__index-strip");
-    expect(source).toMatch(/\.intake-case-detail__index-strip\s*\{\n  display: grid;[\s\S]*?border-bottom: 1px dashed #dce8f3;/);
-    expect(source).toMatch(/\.intake-case-detail__origin-card\s*\{\n  position: relative;[\s\S]*?border-top: 0;/);
-    expect(source).toContain(".intake-case-detail__todo-text");
-    expect(source).toContain("data-verification-gap-text");
-    expect(source).toContain("data-verification-gap-count");
-    expect(source).toContain(".intake-case-detail__todo-heading");
-    expect(source).not.toContain(".intake-case-detail__origin-card::before");
-    expect(source).not.toContain(".intake-case-detail__origin-note");
-    expect(source).toContain("height: 100%;");
-    expect(source).toContain("overflow-y: auto;");
-    expect(source).toContain(".intake-case-detail {\n  --cover-summary-lines: 7;");
-    expect(source).toContain("overflow: hidden;");
-    expect(source).toContain(".intake-dossier__confirm {\n  position: relative;\n  display: grid;\n  gap: 10px;\n  padding: 0;\n  background: transparent;\n  border: 0;");
-    expect(source).not.toContain("border: 1px dashed #cddbec;");
-    expect(source).not.toContain("background: linear-gradient(135deg, #fffdf4, #fff9fb);");
-    expect(source).not.toContain("border: 1px solid #eee4c8;");
-    expect(source).not.toContain(".intake-case-detail__meta {\n  display: grid;\n  flex: 1;");
-    expect(source).not.toContain(".intake-case-detail__meta-section {\n  display: grid;\n  gap: 6px;\n  padding");
-    expect(source).not.toContain(".intake-case-detail__single-statement::before");
-    expect(source).not.toContain("max-height: 112px;");
-    expect(source).not.toContain("intake-case-detail__chips");
+    expect(source).toContain(
+      "grid-template-rows: 44px minmax(0, 1fr) 52px;",
+    );
+    expect(source).toContain("grid-template-rows: 44px 412px 112px;");
+    expect(source).toContain(
+      "grid-template-columns: repeat(2, minmax(0, 1fr));",
+    );
+    expect(source).toContain(
+      "grid-template-columns: repeat(3, minmax(0, 1fr));",
+    );
+    expect(source).toContain(
+      "grid-template-columns: repeat(2, minmax(0, 1fr));",
+    );
+    expect(source).toContain("-webkit-line-clamp: 2;");
+    expect(source).toContain(
+      "@container room-workspace (min-width: 1060px)",
+    );
+    expect(source).not.toContain("@media (max-width: 980px)");
+    expect(source).not.toMatch(
+      /@media \(max-width: 580px\)[\s\S]*?intake-dossier__actions--two-column[\s\S]*?grid-template-columns: 1fr/,
+    );
   });
 });

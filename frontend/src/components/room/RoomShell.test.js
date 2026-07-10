@@ -1,4 +1,5 @@
 import { mount } from "@vue/test-utils";
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import RoomShell from "./RoomShell.vue";
 
@@ -37,5 +38,11 @@ describe("RoomShell", () => {
     expect(wrapper.get("[data-room-case-id]").attributes("title")).toBe(
       "CASE_adcb56b853f248cd8c0cbfed4a2daf8a",
     );
+  });
+
+  it("exposes the workspace as an inline-size container for room layouts", () => {
+    const source = readFileSync("src/components/room/RoomShell.vue", "utf8");
+
+    expect(source).toContain("container: room-workspace / inline-size;");
   });
 });

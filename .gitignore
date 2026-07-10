@@ -21,6 +21,9 @@ tmp/
 **/dist/
 **/.venv/
 **/coverage/
+**/playwright-report/
+**/test-results/
+**/blob-report/
 
 .worktrees/
 

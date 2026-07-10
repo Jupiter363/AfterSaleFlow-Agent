@@ -157,6 +157,38 @@ describe("ConversationStream", () => {
 
     expect(source).toContain("grid-template-rows: minmax(0, 1fr) auto;");
     expect(source).toContain("overflow-y: auto;");
+    expect(source).toContain("overflow-x: hidden;");
+    expect(source).toContain("overscroll-behavior: contain;");
+    expect(source).toContain("scrollbar-gutter: stable;");
+    expect(source).toContain("height: 132px;");
+    expect(source).toContain("height: 72px;");
+    expect(source).toContain("max-height: 72px;");
+    expect(source).toContain("resize: none;");
+    expect(source).toContain("overflow-wrap: anywhere;");
+    expect(source).toContain("word-break: break-word;");
+    expect(source).toContain("white-space: pre-wrap;");
+    expect(source).toMatch(
+      /@media \(max-width: 620px\)[\s\S]*?max-width: 94%;/,
+    );
+  });
+
+  it("keeps a complete unbroken long message in the document", () => {
+    const longMessage = "A".repeat(1000);
+    const wrapper = mount(ConversationStream, {
+      props: {
+        messages: [
+          {
+            id: "MESSAGE_LONG",
+            sequence_no: 1,
+            sender_role: "USER",
+            message_type: "PARTY_TEXT",
+            message_text: longMessage,
+          },
+        ],
+      },
+    });
+
+    expect(wrapper.get("[data-room-message] p").text()).toBe(longMessage);
   });
 
   it("uses a compact message typography scale for dense room conversations", () => {

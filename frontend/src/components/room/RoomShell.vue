@@ -56,6 +56,7 @@ const shortCaseId = computed(() =>
 <style scoped>
 .room-shell {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 18px;
   min-height: calc(100vh - 130px);
 }
@@ -101,8 +102,11 @@ const shortCaseId = computed(() =>
   border-radius: 12px;
   font-size: 12px;
 }
-.room-shell__agent,
+.room-shell__agent {
+  min-width: 0;
+}
 .room-shell__workspace {
+  container: room-workspace / inline-size;
   min-width: 0;
 }
 @media (max-width: 760px) {

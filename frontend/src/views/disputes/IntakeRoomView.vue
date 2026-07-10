@@ -1,6 +1,7 @@
 <script setup>
 import {
   computed,
+  nextTick,
   onBeforeUnmount,
   onMounted,
   reactive,
@@ -11,6 +12,7 @@ import { useRoute, useRouter } from "vue-router";
 import { disputeApi } from "../../api/disputes";
 import { roomApi } from "../../api/rooms";
 import DigitalHuman from "../../components/avatar/DigitalHuman.vue";
+import ExpandableText from "../../components/common/ExpandableText.vue";
 import ConversationStream from "../../components/room/ConversationStream.vue";
 import RoomShell from "../../components/room/RoomShell.vue";
 import { actor } from "../../state/actor";
@@ -48,6 +50,9 @@ const submitting = ref(false);
 const admitted = ref(false);
 const resolved = ref(false);
 const error = ref("");
+const dossierFulltext = ref(null);
+const dossierFulltextDialog = ref(null);
+let dossierFulltextReturnFocus = null;
 const eventState = reactive(createRoomState());
 const workspaceGeneration = ref(0);
 let eventAbortController = new AbortController();
@@ -505,10 +510,13 @@ function qualityReasonToGaps(reason) {
     .map((item) => item.trim())
     .filter(Boolean);
 }
-const verificationGaps = computed(() => {
+const allVerificationGaps = computed(() => {
   const detail = caseDetailDossier.value || {};
   const missing = detail.missing_information || {};
-  const respondentRole = resolveRespondentRole(detail, detail.respondent_attitude || {});
+  const respondentRole = resolveRespondentRole(
+    detail,
+    detail.respondent_attitude || {},
+  );
   const respondentState = inferRespondentAttitude(
     detail,
     detail.respondent_attitude || {},
@@ -518,10 +526,16 @@ const verificationGaps = computed(() => {
     ...(Array.isArray(missing.blocking_gaps) ? missing.blocking_gaps : []),
     ...(Array.isArray(missing.nice_to_have_gaps) ? missing.nice_to_have_gaps : []),
     ...(Array.isArray(missing.next_questions) ? missing.next_questions : []),
-    ...(Array.isArray(detail.dispute_focus?.facts_to_verify) ? detail.dispute_focus.facts_to_verify : []),
+    ...(Array.isArray(detail.dispute_focus?.facts_to_verify)
+      ? detail.dispute_focus.facts_to_verify
+      : []),
     ...qualityReasonToGaps(caseDetailQuality.value.reason),
     ...(claimStatus.value?.nextFocus || []),
-    ...fallbackVerificationGaps(detail, respondentState.hasResponse, respondentRole),
+    ...fallbackVerificationGaps(
+      detail,
+      respondentState.hasResponse,
+      respondentRole,
+    ),
   ];
   const seen = new Set();
   return humanizeDossierList(candidates, "")
@@ -530,9 +544,12 @@ const verificationGaps = computed(() => {
       if (!item || seen.has(item)) return false;
       seen.add(item);
       return true;
-    })
-    .slice(0, 4);
+    });
 });
+const verificationGaps = computed(() => allVerificationGaps.value.slice(0, 4));
+const hiddenVerificationGapCount = computed(() =>
+  Math.max(0, allVerificationGaps.value.length - verificationGaps.value.length),
+);
 const scrollCards = computed(() => scrollSnapshot.value?.cards || []);
 function scrollCardValue(key, fallback = "") {
   return scrollCards.value.find((card) => card.key === key)?.value || fallback;
@@ -660,6 +677,29 @@ const subjectiveStatement = computed(() => {
     ),
   };
 });
+
+async function openDossierFulltext(payload) {
+  dossierFulltextReturnFocus = document.activeElement;
+  dossierFulltext.value = payload;
+  await nextTick();
+  dossierFulltextDialog.value?.focus();
+}
+
+async function openVerificationGaps() {
+  dossierFulltextReturnFocus = document.activeElement;
+  dossierFulltext.value = {
+    label: "下一步核验重点",
+    items: allVerificationGaps.value,
+  };
+  await nextTick();
+  dossierFulltextDialog.value?.focus();
+}
+
+async function closeDossierFulltext() {
+  dossierFulltext.value = null;
+  await nextTick();
+  dossierFulltextReturnFocus?.focus();
+}
 
 async function load(snapshot = currentWorkspaceSnapshot()) {
   try {
@@ -987,12 +1027,16 @@ onBeforeUnmount(() => {
             >
               <span>争议详情</span>
               <div class="intake-case-detail__summary-note">
-                <strong
+                <ExpandableText
+                  data-dossier-fulltext-trigger="summary"
                   data-dispute-detail-summary
+                  :text="caseCover.summary"
                   :title="caseCover.summary"
-                >
-                  {{ caseCover.summary }}
-                </strong>
+                  label="案情摘要"
+                  :lines="5"
+                  :expanded="dossierFulltext?.label === '案情摘要'"
+                  @open="openDossierFulltext"
+                />
               </div>
               <div
                 class="intake-case-detail__meta-rows"
@@ -1062,12 +1106,16 @@ onBeforeUnmount(() => {
                   class="intake-case-detail__single-statement"
                   data-single-party-statement
                 >
-                  <strong
+                  <ExpandableText
+                    data-dossier-fulltext-trigger="origin"
                     data-origin-statement-text
+                    :text="subjectiveStatement.value || '待补充'"
                     :title="subjectiveStatement.value || '待补充'"
-                  >
-                    {{ subjectiveStatement.value || "待补充" }}
-                  </strong>
+                    label="原始陈述"
+                    :lines="4"
+                    :expanded="dossierFulltext?.label === '原始陈述'"
+                    @open="openDossierFulltext"
+                  />
                 </div>
               </section>
             </article>
@@ -1078,7 +1126,17 @@ onBeforeUnmount(() => {
             >
               <div class="intake-case-detail__todo-heading">
                 <span>下一步核验重点</span>
-                <small data-verification-gap-count>{{ verificationGaps.length }} 项</small>
+                <div>
+                  <small data-verification-gap-count>{{ verificationGaps.length }} 项</small>
+                  <button
+                    v-if="hiddenVerificationGapCount"
+                    type="button"
+                    data-verification-gap-overflow
+                    @click="openVerificationGaps"
+                  >
+                    另有 {{ hiddenVerificationGapCount }} 项
+                  </button>
+                </div>
               </div>
               <ol>
                 <li
@@ -1113,6 +1171,13 @@ onBeforeUnmount(() => {
               进入证据室
             </button>
           </div>
+          <div
+            v-else-if="resolved"
+            class="intake-dossier__result"
+            data-intake-result
+          >
+            争议已取消，接待室已归档
+          </div>
           <div v-else-if="canManageIntake" class="intake-dossier__actions intake-dossier__actions--two-column">
             <button
               type="button"
@@ -1134,12 +1199,41 @@ onBeforeUnmount(() => {
               问题已解决，取消争议
             </button>
           </div>
-          <p v-else class="intake-dossier__readonly-actions" data-intake-actions-readonly>
-            当前身份仅可查看接待室卷宗，发起与取消操作只对接待室发起方开放。
+          <p
+            v-else
+            class="intake-dossier__readonly-actions"
+            data-intake-actions-readonly
+            title="当前身份仅可查看接待室卷宗，发起与取消操作只对接待室发起方开放。"
+          >
+            当前身份仅可查看接待室卷宗
           </p>
-          <div v-if="admitted" class="intake-dossier__stamp">已上报</div>
-          <p v-if="resolved">已在平台内取消争议发起，接待室已归档。</p>
         </div>
+      </section>
+    </div>
+    <div
+      v-if="dossierFulltext"
+      ref="dossierFulltextDialog"
+      class="intake-fulltext-dialog"
+      data-dossier-fulltext-dialog
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="intake-fulltext-title"
+      tabindex="-1"
+      @keydown.esc="closeDossierFulltext"
+    >
+      <section class="intake-fulltext-dialog__card">
+        <h3 id="intake-fulltext-title">{{ dossierFulltext.label }}</h3>
+        <p v-if="dossierFulltext.text">{{ dossierFulltext.text }}</p>
+        <ol v-else>
+          <li v-for="item in dossierFulltext.items" :key="item">{{ item }}</li>
+        </ol>
+        <button
+          type="button"
+          data-dismiss-dossier-fulltext
+          @click="closeDossierFulltext"
+        >
+          关闭
+        </button>
       </section>
     </div>
     <div
@@ -1170,17 +1264,17 @@ onBeforeUnmount(() => {
 .intake-room {
   --intake-panel-height: 740px;
   display: grid;
-  grid-template-columns: minmax(520px, 1.05fr) minmax(480px, .95fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 18px;
   align-items: start;
 }
 
 .intake-room__conversation,
 .intake-dossier {
+  box-sizing: border-box;
   height: var(--intake-panel-height);
   min-width: 0;
-  box-sizing: border-box;
-  padding: 18px;
+  overflow: hidden;
   background: #ffffffbf;
   border: 1px solid #dfe8f4;
   border-radius: 28px;
@@ -1188,20 +1282,27 @@ onBeforeUnmount(() => {
 }
 .intake-room__conversation {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: 120px minmax(0, 1fr);
   min-height: 0;
-  overflow: hidden;
+  padding: 18px;
 }
 .intake-dossier {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
-  align-content: stretch;
-  gap: 10px;
-  overflow: hidden;
+  grid-template-rows: 44px minmax(0, 1fr) 52px;
+  gap: 8px;
+  padding: 14px 18px;
+}
+@container room-workspace (min-width: 1060px) {
+  .intake-room {
+    grid-template-columns: minmax(0, 1.05fr) minmax(0, .95fr);
+  }
 }
 .intake-room__case-note {
+  box-sizing: border-box;
+  height: 120px;
   padding: 16px;
-  margin-bottom: 14px;
+  margin: 0;
+  overflow: hidden;
   background: linear-gradient(135deg, #e8f6ff, #f4efff);
   border-radius: 20px;
 }
@@ -1213,7 +1314,16 @@ onBeforeUnmount(() => {
   letter-spacing: .16em;
 }
 .intake-room__case-note h2 { margin: 5px 0; color: #34435c; }
-.intake-room__case-note p { margin: 0; color: #6f7d92; line-height: 1.6; }
+.intake-room__case-note p {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  color: #6f7d92;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
 .intake-room__conversation-lock-frame {
   position: relative;
   display: grid;
@@ -1283,23 +1393,19 @@ onBeforeUnmount(() => {
   justify-content: space-between;
   gap: 14px;
   align-items: flex-start;
+  height: 44px;
+  min-width: 0;
+  overflow: hidden;
 }
 .intake-dossier header h2 { margin: 5px 0 0; color: #34435c; font-size: 23px; }
 .intake-dossier header small { color: #7384a1; }
 .intake-case-detail {
-  --cover-summary-lines: 7;
-  --summary-note-min-height: 132px;
-  --detail-meta-row-height: 46px;
-  --detail-meta-rows-height: 138px;
-  --detail-field-lines: 2;
   display: grid;
-  grid-template-rows: 48px minmax(0, 1fr) minmax(92px, .22fr);
-  align-self: stretch;
-  height: 100%;
+  grid-template-rows: 44px 412px 112px;
+  gap: 8px;
+  height: auto;
   min-height: 0;
-  max-height: 100%;
-  gap: 10px;
-  margin: 4px 0 0;
+  margin: 0;
   padding: 0;
   overflow: hidden;
   background: transparent;
@@ -1308,7 +1414,9 @@ onBeforeUnmount(() => {
   box-shadow: none;
 }
 .intake-case-detail__status-rail {
+  box-sizing: border-box;
   display: grid;
+  height: 44px;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 5px 10px;
   align-items: center;
@@ -1388,15 +1496,17 @@ onBeforeUnmount(() => {
   display: grid;
   height: 100%;
   min-height: 0;
-  padding: 0 4px 0 2px;
+  padding: 0;
   color: #3d4860;
-  overflow-y: auto;
-  overscroll-behavior: contain;
+  overflow: hidden;
   background: transparent;
   border: 0;
   border-radius: 0;
 }
-.intake-case-detail__single-statement strong {
+.intake-case-detail__single-statement :deep(.expandable-text) {
+  height: 100%;
+}
+.intake-case-detail__single-statement :deep(.expandable-text__content) {
   color: #34425a;
   font-size: 12px;
   line-height: 1.52;
@@ -1404,11 +1514,13 @@ onBeforeUnmount(() => {
 }
 .intake-case-detail__dispute {
   position: relative;
+  box-sizing: border-box;
   display: grid;
-  grid-template-rows: auto var(--summary-note-min-height) var(--detail-meta-rows-height) minmax(0, 1fr);
-  gap: 10px;
+  height: 412px;
+  grid-template-rows: 18px 110px 112px 108px;
+  gap: 6px;
   min-height: 0;
-  padding: 14px 14px 12px;
+  padding: 12px 14px;
   overflow: hidden;
   background:
     linear-gradient(90deg, rgba(255, 255, 255, .9), rgba(247, 251, 255, .94)),
@@ -1433,7 +1545,7 @@ onBeforeUnmount(() => {
   transform: rotate(8deg);
   pointer-events: none;
 }
-.intake-case-detail__summary-note strong,
+.intake-case-detail__summary-note :deep(.expandable-text__content),
 .intake-case-detail__field strong,
 .intake-case-detail__todo-list li {
   display: -webkit-box;
@@ -1447,9 +1559,11 @@ onBeforeUnmount(() => {
 .intake-case-detail__summary-note {
   position: relative;
   display: grid;
-  min-height: var(--summary-note-min-height);
+  box-sizing: border-box;
+  height: 110px;
+  min-height: 0;
   align-content: center;
-  padding: 18px 18px 16px 20px;
+  padding: 12px 16px;
   overflow: hidden;
   background:
     linear-gradient(90deg, rgba(126, 196, 240, .45), transparent 36%) left top / 4px 100% no-repeat,
@@ -1469,43 +1583,45 @@ onBeforeUnmount(() => {
   line-height: 1;
   pointer-events: none;
 }
-.intake-case-detail__summary-note strong {
+.intake-case-detail__summary-note :deep(.expandable-text) {
+  z-index: 1;
+  height: 100%;
+}
+.intake-case-detail__summary-note :deep(.expandable-text__content) {
   position: relative;
   z-index: 1;
   color: #314765;
   font-size: 13px;
   font-weight: 900;
-  -webkit-line-clamp: var(--cover-summary-lines);
-  max-height: calc(1.55em * var(--cover-summary-lines));
 }
 .intake-case-detail__meta-rows {
   display: grid;
-  height: var(--detail-meta-rows-height);
-  grid-template-rows: repeat(3, 1fr);
+  height: 112px;
+  grid-template-rows: 70px 42px;
   gap: 0;
   min-height: 0;
   border-top: 1px dashed #dce8f3;
 }
 .intake-case-detail__fields {
-  display: contents;
+  display: grid;
+  height: 70px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  min-width: 0;
 }
 .intake-case-detail__field {
   display: grid;
-  grid-template-columns: 74px minmax(0, 1fr);
-  gap: 9px;
-  align-items: center;
-  min-height: 0;
-  padding: 0;
-  border-bottom: 1px dashed #dce8f3;
-}
-.intake-case-detail__field,
-.intake-case-detail__index-strip {
-  height: var(--detail-meta-row-height);
-  align-items: center;
   box-sizing: border-box;
+  height: 70px;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 4px;
+  min-height: 0;
+  min-width: 0;
+  padding: 7px 10px;
+  border-bottom: 1px dashed #dce8f3;
 }
 .intake-case-detail__field:last-child {
   border-bottom: 1px dashed #dce8f3;
+  border-left: 1px dashed #dce8f3;
 }
 .intake-case-detail__field span {
   color: #7a8798;
@@ -1514,8 +1630,8 @@ onBeforeUnmount(() => {
 }
 .intake-case-detail__field strong {
   color: #2d4d70;
-  -webkit-line-clamp: var(--detail-field-lines);
-  max-height: calc(1.5em * var(--detail-field-lines));
+  -webkit-line-clamp: 2;
+  max-height: 3em;
 }
 .intake-case-detail__field em,
 .intake-case-detail__field small {
@@ -1539,7 +1655,9 @@ onBeforeUnmount(() => {
   font-weight: 800;
 }
 .intake-case-detail__index-strip {
+  box-sizing: border-box;
   display: grid;
+  height: 42px;
   grid-template-columns: 58px minmax(0, 1fr);
   gap: 10px;
   align-items: center;
@@ -1584,11 +1702,13 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 .intake-case-detail__todo-list {
+  box-sizing: border-box;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  height: 112px;
+  grid-template-rows: 20px minmax(0, 1fr);
   gap: 6px;
   min-height: 0;
-  padding: 9px 11px;
+  padding: 8px 10px;
   overflow: hidden;
   background:
     linear-gradient(135deg, rgba(255, 253, 247, .74), rgba(250, 252, 255, .58));
@@ -1597,10 +1717,16 @@ onBeforeUnmount(() => {
 }
 .intake-case-detail__todo-heading {
   display: flex;
+  height: 20px;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
   min-width: 0;
+}
+.intake-case-detail__todo-heading > div {
+  display: flex;
+  gap: 5px;
+  align-items: center;
 }
 .intake-case-detail__todo-heading small {
   display: inline-flex;
@@ -1614,9 +1740,24 @@ onBeforeUnmount(() => {
   font-weight: 900;
   white-space: nowrap;
 }
+.intake-case-detail__todo-heading button {
+  min-height: 18px;
+  padding: 0 7px;
+  color: #6b72c9;
+  background: #f1efff;
+  border: 0;
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 900;
+  white-space: nowrap;
+}
 .intake-case-detail__todo-list ol {
   display: grid;
-  gap: 4px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+  gap: 4px 8px;
+  min-height: 0;
   overflow: hidden;
   margin: 0;
   padding: 0;
@@ -1625,16 +1766,20 @@ onBeforeUnmount(() => {
 }
 .intake-case-detail__todo-list li {
   display: flex;
-  gap: 7px;
-  align-items: baseline;
+  gap: 5px;
+  align-items: flex-start;
   min-width: 0;
 }
 .intake-case-detail__todo-text {
   display: -webkit-box;
   min-width: 0;
   overflow: hidden;
+  font-size: 11px;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+  word-break: break-word;
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 1;
+  -webkit-line-clamp: 2;
 }
 .intake-case-detail__todo-list li::before {
   counter-increment: intake-gaps;
@@ -1652,11 +1797,13 @@ onBeforeUnmount(() => {
 }
 .intake-case-detail__origin-card {
   position: relative;
+  box-sizing: border-box;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  height: 108px;
+  min-height: 108px;
+  grid-template-rows: 18px minmax(0, 1fr);
   gap: 6px;
-  min-height: 0;
-  padding: 8px 0 0;
+  padding: 4px 0 0;
   overflow: hidden;
   background: transparent;
   border: 0;
@@ -1664,7 +1811,6 @@ onBeforeUnmount(() => {
   border-radius: 0;
 }
 @supports (-webkit-line-clamp: 1) {
-  .intake-case-detail__summary-note strong,
   .intake-case-detail__field strong,
   .intake-case-detail__todo-text {
     display: -webkit-box;
@@ -1672,69 +1818,118 @@ onBeforeUnmount(() => {
     -webkit-box-orient: vertical;
   }
 
-  .intake-case-detail__summary-note strong {
-    -webkit-line-clamp: var(--cover-summary-lines);
-  }
-
   .intake-case-detail__field strong {
-    -webkit-line-clamp: var(--detail-field-lines);
+    -webkit-line-clamp: 2;
   }
 
   .intake-case-detail__todo-text {
-    -webkit-line-clamp: 1;
+    -webkit-line-clamp: 2;
   }
 }
 .intake-dossier__confirm {
   position: relative;
   display: grid;
-  gap: 10px;
+  height: 52px;
+  min-height: 52px;
   padding: 0;
+  overflow: hidden;
   background: transparent;
   border: 0;
   border-radius: 0;
 }
 .intake-dossier__confirm p { color: #7b718e; font-size: 12px; }
 .intake-dossier__readonly-actions {
+  display: grid;
+  box-sizing: border-box;
+  height: 52px;
+  min-height: 52px;
+  place-items: center;
   margin: 0;
-  padding: 13px 14px;
+  padding: 7px 10px;
+  overflow: hidden;
   color: #71819a;
   background: #f7fbff;
   border: 1px dashed #d4e0ee;
   border-radius: 16px;
   font-size: 13px;
-  line-height: 1.6;
+  line-height: 1.3;
+  text-align: center;
 }
 .intake-dossier__actions {
   display: grid;
+  height: 52px;
+  min-height: 52px;
   gap: 10px;
 }
 .intake-dossier__actions--two-column {
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 .intake-dossier__confirm button {
+  box-sizing: border-box;
   width: 100%;
-  padding: 11px 12px;
+  min-width: 0;
+  min-height: 52px;
+  padding: 7px 10px;
   color: white;
   background: linear-gradient(135deg, #ff8c72, #8e8bef);
   border: 0;
   border-radius: 14px;
   cursor: pointer;
   font-weight: 800;
+  white-space: normal;
 }
 .intake-dossier__confirm button:disabled { opacity: .7; }
 .intake-dossier__confirm .intake-dossier__secondary {
   color: #69758a;
   background: #edf4fb;
 }
-.intake-dossier__stamp {
-  justify-self: end;
-  width: fit-content;
-  padding: 8px 13px;
-  color: #e45d55;
-  border: 3px double #e45d55;
-  border-radius: 9px;
-  transform: rotate(-8deg);
+.intake-dossier__result {
+  display: grid;
+  box-sizing: border-box;
+  height: 52px;
+  min-height: 52px;
+  place-items: center;
+  padding: 7px 10px;
+  color: #6e5a84;
+  background: linear-gradient(135deg, #fff4ec, #f2efff);
+  border: 1px solid #eadde9;
+  border-radius: 16px;
+  font-size: 13px;
   font-weight: 900;
+  text-align: center;
+}
+.intake-fulltext-dialog {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: #25354a66;
+  backdrop-filter: blur(8px);
+}
+.intake-fulltext-dialog__card {
+  display: grid;
+  width: min(620px, calc(100dvw - 32px));
+  max-height: min(680px, calc(100dvh - 32px));
+  gap: 12px;
+  padding: 20px;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+  background: #fff;
+  border-radius: 22px;
+}
+.intake-fulltext-dialog__card h3,
+.intake-fulltext-dialog__card p {
+  margin: 0;
+}
+.intake-fulltext-dialog__card p {
+  white-space: pre-wrap;
+}
+.intake-fulltext-dialog__card button {
+  min-width: 88px;
+  min-height: 44px;
+  justify-self: end;
 }
 .intake-error-dialog {
   position: fixed;
@@ -1791,12 +1986,49 @@ onBeforeUnmount(() => {
   cursor: pointer;
   font-weight: 900;
 }
-@media (max-width: 980px) {
-  .intake-room { grid-template-columns: 1fr; }
-}
-@media (max-width: 580px) {
-  .intake-dossier__actions--two-column {
-    grid-template-columns: 1fr;
+
+@container room-workspace (max-width: 419px) {
+  .intake-dossier > header > div,
+  .intake-case-detail__status-copy {
+    min-width: 0;
+  }
+
+  .intake-dossier > header > small,
+  .intake-case-detail__status-copy [data-dossier-status-hint] {
+    display: none;
+  }
+
+  .intake-dossier header h2 {
+    overflow: hidden;
+    font-size: 16px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .intake-case-detail__dispute {
+    grid-template-rows: 18px 96px 126px 108px;
+  }
+
+  .intake-case-detail__dispute::before {
+    display: none;
+  }
+
+  .intake-case-detail__summary-note {
+    height: 96px;
+  }
+
+  .intake-case-detail__meta-rows {
+    height: 126px;
+    grid-template-rows: 84px 42px;
+  }
+
+  .intake-case-detail__fields,
+  .intake-case-detail__field {
+    height: 84px;
+  }
+
+  .intake-case-detail__origin-card {
+    height: 108px;
   }
 }
 </style>
