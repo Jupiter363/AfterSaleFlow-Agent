@@ -50,6 +50,12 @@ const error = ref("");
 const confirmingVersion = ref(null);
 const messages = ref([...(props.initialMessages || [])]);
 const caseEvents = ref([...(props.initialEvents || [])]);
+const loadingState = reactive({
+  hearing: props.initialHearing === null,
+  evidence: props.initialEvidenceCatalog === null,
+  messages: props.initialMessages === null,
+  events: props.initialEvents === null,
+});
 const settlementOpen = ref(false);
 const ledgerOpen = ref(false);
 const proposalText = ref("");
@@ -261,12 +267,16 @@ const counterpartyLabel = computed(() =>
 );
 const canSubmitRound = computed(
   () =>
+    !loadingState.hearing &&
     isCaseParty.value &&
     !currentActorSubmitted.value &&
     !activeRoundClosed.value,
 );
 const canSubmitStatement = computed(
-  () => isCaseParty.value && !activeRoundClosed.value,
+  () =>
+    !loadingState.hearing &&
+    isCaseParty.value &&
+    !activeRoundClosed.value,
 );
 const activeRoundDeadline = computed(
   () => activeRound.value?.round_deadline_at || activeRound.value?.roundDeadlineAt || "",
@@ -1009,22 +1019,34 @@ async function load() {
   try {
     const actorSnapshot = effectiveActor.value;
     if (hearing.value === null) {
+      loadingState.hearing = true;
       hearing.value = await hearingApi.hearing(actorSnapshot, caseId.value);
+      loadingState.hearing = false;
     }
     if (evidenceCatalog.value === null) {
+      loadingState.evidence = true;
       await loadEvidenceCatalog(actorSnapshot);
+      loadingState.evidence = false;
     }
     if (props.initialMessages === null) {
+      loadingState.messages = true;
       messages.value = await roomApi.messages(
         actorSnapshot,
         caseId.value,
         "HEARING",
       );
+      loadingState.messages = false;
     }
     if (props.initialEvents === null) {
+      loadingState.events = true;
       caseEvents.value = await roomApi.events(actorSnapshot, caseId.value, 0);
+      loadingState.events = false;
     }
   } catch (failure) {
+    loadingState.hearing = false;
+    loadingState.evidence = false;
+    loadingState.messages = false;
+    loadingState.events = false;
     error.value = failure.message;
     agentState.value = "ERROR";
   }
@@ -1416,7 +1438,15 @@ onBeforeUnmount(() => {
             </div>
           </article>
           <div
-            v-if="!leftEvidenceItems.length"
+            v-if="loadingState.evidence"
+            class="evidence-pocket__empty evidence-pocket__empty--loading"
+            data-evidence-loading
+          >
+            <strong>证据材料加载中</strong>
+            <small>正在读取双方已提交的庭审证据，请稍候。</small>
+          </div>
+          <div
+            v-else-if="!leftEvidenceItems.length"
             class="evidence-pocket__empty"
             data-evidence-empty="left"
           >
@@ -1525,7 +1555,15 @@ onBeforeUnmount(() => {
             </article>
 
             <div
-              v-if="!courtTranscriptItems.length"
+              v-if="loadingState.messages"
+              class="court-transcript__empty court-transcript__empty--loading"
+              data-court-transcript-loading
+            >
+              <strong>庭审记录加载中</strong>
+              <small>正在读取开庭消息和双方陈述，请稍候。</small>
+            </div>
+            <div
+              v-else-if="!courtTranscriptItems.length"
               class="court-transcript__empty"
               data-court-transcript-empty
             >
@@ -1647,7 +1685,15 @@ onBeforeUnmount(() => {
               </div>
             </article>
             <div
-              v-if="!rightEvidenceItems.length"
+              v-if="loadingState.evidence"
+              class="evidence-pocket__empty evidence-pocket__empty--loading"
+              data-evidence-loading
+            >
+              <strong>证据材料加载中</strong>
+              <small>正在读取双方已提交的庭审证据，请稍候。</small>
+            </div>
+            <div
+              v-else-if="!rightEvidenceItems.length"
               class="evidence-pocket__empty"
               data-evidence-empty="right"
             >

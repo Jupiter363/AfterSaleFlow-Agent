@@ -160,6 +160,27 @@ async function mountView(overrides = {}) {
 }
 
 describe("HearingCourtView", () => {
+  it("shows loading placeholders instead of false empty states while the hearing snapshot is still loading", async () => {
+    vi.spyOn(hearingApi, "hearing").mockReturnValue(new Promise(() => {}));
+    vi.spyOn(evidenceApi, "catalog").mockReturnValue(new Promise(() => {}));
+    vi.spyOn(roomApi, "messages").mockReturnValue(new Promise(() => {}));
+
+    const { wrapper } = await mountView({
+      initialHearing: null,
+      initialEvidenceCatalog: null,
+      initialMessages: null,
+    });
+
+    expect(wrapper.find("[data-court-transcript-loading]").exists()).toBe(true);
+    expect(wrapper.findAll("[data-evidence-loading]")).toHaveLength(2);
+    expect(wrapper.find("[data-court-transcript-empty]").exists()).toBe(false);
+    expect(wrapper.findAll("[data-evidence-empty]")).toHaveLength(0);
+    expect(wrapper.text()).not.toContain("等待开庭消息");
+    expect(wrapper.text()).not.toContain("暂无已提交证据");
+    expect(wrapper.get('textarea[aria-label="本轮陈述"]').attributes("disabled")).toBeDefined();
+    expect(wrapper.find("[data-send-hearing-statement]").exists()).toBe(false);
+  });
+
   it("renders a collaborative little court with agents, rounds and a three-hour clock", async () => {
     const { wrapper } = await mountView();
 
