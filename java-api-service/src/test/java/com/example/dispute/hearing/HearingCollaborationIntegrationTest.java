@@ -357,21 +357,39 @@ class HearingCollaborationIntegrationTest {
                 "商家说明订单已发货并有物流签收记录，请核验签收底单。",
                 merchant);
 
-        HearingStatusView waitingJudge = roundService.status("CASE_STATUS_VIEW", user);
+        HearingStatusView secondRoundOpen = roundService.status("CASE_STATUS_VIEW", user);
 
-        assertThat(waitingJudge.hearingPhase()).isEqualTo("WAITING_JUDGE");
-        assertThat(waitingJudge.phaseLabel()).isEqualTo("等待法官处理");
-        assertThat(waitingJudge.canCompleteHearing()).isFalse();
-        assertThat(waitingJudge.nextStepHint()).contains("等待 AI 法官收束本轮");
+        assertThat(secondRoundOpen.hearingPhase()).isEqualTo("ROUND_OPEN");
+        assertThat(secondRoundOpen.phaseLabel()).isEqualTo("本轮陈述中");
+        assertThat(secondRoundOpen.canCompleteHearing()).isFalse();
+        assertThat(secondRoundOpen.currentRoundNo()).isEqualTo(2);
+        assertThat(secondRoundOpen.roundStage()).isEqualTo("EVIDENCE_EXPLANATION");
+        assertThat(secondRoundOpen.nextStepHint()).contains("完成本轮陈述");
 
-        roundService.completeNext(
+        roundService.submitParty(
                 "CASE_STATUS_VIEW",
-                new CompleteHearingRoundCommand(2, "{\"round\":2}", false),
-                system);
-        roundService.completeNext(
+                new SubmitHearingRoundCommand(
+                        2,
+                        "{\"party\":\"USER\",\"statement\":\"第二轮：用户解释补充证据与签收争议的关系。\"}"),
+                user);
+        roundService.submitParty(
                 "CASE_STATUS_VIEW",
-                new CompleteHearingRoundCommand(2, "{\"round\":3}", false),
-                system);
+                new SubmitHearingRoundCommand(
+                        2,
+                        "{\"party\":\"MERCHANT\",\"statement\":\"第二轮：商家解释物流签收凭证和发货记录。\"}"),
+                merchant);
+        roundService.submitParty(
+                "CASE_STATUS_VIEW",
+                new SubmitHearingRoundCommand(
+                        2,
+                        "{\"party\":\"USER\",\"statement\":\"第三轮：用户说明不认可仅凭签收记录驳回退款。\"}"),
+                user);
+        roundService.submitParty(
+                "CASE_STATUS_VIEW",
+                new SubmitHearingRoundCommand(
+                        2,
+                        "{\"party\":\"MERCHANT\",\"statement\":\"第三轮：商家请求按物流签收记录维持不退款。\"}"),
+                merchant);
 
         HearingStatusView waitingDraft = roundService.status("CASE_STATUS_VIEW", user);
 
@@ -782,7 +800,7 @@ class HearingCollaborationIntegrationTest {
     }
 
     @Test
-    void roomMessageStatementCountsAsRoundSubmissionWithoutClosingTheRound() {
+    void roomMessageStatementsFromBothPartiesCloseRoundAndOpenNextRound() {
         seedHearing("CASE_ROOM_STATEMENT");
         roundService.ensureInitialRoundOpen(
                 "CASE_ROOM_STATEMENT",
@@ -797,7 +815,7 @@ class HearingCollaborationIntegrationTest {
                         "用户补充：请核验签收人身份和投递照片。",
                         user);
 
-        assertThat(afterUserMessage.status()).isEqualTo(HearingRoundStatus.OPEN);
+        assertThat(afterUserMessage.status()).isEqualTo(HearingRoundStatus.WAITING);
         assertThat(afterUserMessage.submittedRoles()).containsExactly(ActorRole.USER);
         assertThat(afterUserMessage.currentActorSubmitted()).isTrue();
         assertThat(
@@ -805,21 +823,30 @@ class HearingCollaborationIntegrationTest {
                                 .findByCaseIdAndRoundNo("CASE_ROOM_STATEMENT", 1)
                                 .orElseThrow()
                                 .getRoundStatus())
-                .isEqualTo(HearingRoundStatus.OPEN);
+                .isEqualTo(HearingRoundStatus.WAITING);
         verifyNoInteractions(hearingWorkflowCoordinator);
 
-        mutableClock.set(Instant.parse("2026-07-03T01:05:01Z"));
-        int expired = roundService.expireDueRounds();
+        var afterMerchantMessage =
+                roundService.recordPartyMessageSubmission(
+                        "CASE_ROOM_STATEMENT",
+                        1,
+                        "MESSAGE_MERCHANT_HEARING_TEXT",
+                        "商家补充：需要物流公司出具签收底单和投递照片。",
+                        merchant);
 
-        assertThat(expired).isEqualTo(1);
-        var closedRound = roundService.list("CASE_ROOM_STATEMENT", user).get(0);
-        assertThat(closedRound.status()).isEqualTo(HearingRoundStatus.COMPLETED);
-        assertThat(closedRound.submittedRoles())
-                .containsExactlyInAnyOrder(ActorRole.USER, ActorRole.MERCHANT);
-        assertThat(closedRound.summaryJson())
+        assertThat(afterMerchantMessage.roundNo()).isEqualTo(2);
+        assertThat(afterMerchantMessage.status()).isEqualTo(HearingRoundStatus.OPEN);
+        assertThat(afterMerchantMessage.submittedRoles()).isEmpty();
+        var closedRound =
+                roundRepository
+                        .findByCaseIdAndRoundNo("CASE_ROOM_STATEMENT", 1)
+                        .orElseThrow();
+        assertThat(closedRound.getRoundStatus()).isEqualTo(HearingRoundStatus.COMPLETED);
+        assertThat(closedRound.getSummaryJson())
+                .contains("BOTH_PARTIES_SUBMITTED")
                 .contains("MESSAGE_USER_HEARING_TEXT")
-                .contains("用户补充：请核验签收人身份和投递照片。")
-                .contains("AUTO_TIMEOUT");
+                .contains("MESSAGE_MERCHANT_HEARING_TEXT")
+                .doesNotContain("AUTO_TIMEOUT");
         assertThat(
                         submissionRepository
                                 .findAllByCaseIdAndRoundNoOrderBySubmittedAtAsc(
@@ -827,7 +854,10 @@ class HearingCollaborationIntegrationTest {
                 .extracting("submissionSource")
                 .containsExactlyInAnyOrder(
                         HearingRoundSubmissionSource.PARTY_ACTION,
-                        HearingRoundSubmissionSource.AUTO_TIMEOUT);
+                        HearingRoundSubmissionSource.PARTY_ACTION);
+        verify(hearingCourtOrchestrator)
+                .afterRoundClosedAfterCommit(
+                        "CASE_ROOM_STATEMENT", 1, false, "TRACE_HEARING_ROUND_1");
         verify(hearingWorkflowCoordinator)
                 .roundCompletedAfterCommit("CASE_ROOM_STATEMENT", 1, false);
     }

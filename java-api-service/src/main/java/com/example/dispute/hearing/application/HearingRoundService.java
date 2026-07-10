@@ -233,53 +233,7 @@ public class HearingRoundService {
                             + actor.role().name(),
                     actor.actorId());
         }
-        List<HearingRoundPartySubmissionEntity> submissions =
-                submissionRepository
-                        .findAllByCaseIdAndRoundNoOrderBySubmittedAtAsc(
-                                caseId, round.getRoundNo());
-        if (submissions.size() < 2) {
-            round.waitForCounterparty(now, actor.actorId());
-            return view(caseId, roundRepository.save(round), actor);
-        }
-        if (round.getClosedAt() == null) {
-            HearingStopReason stopReason =
-                    round.getRoundNo() == disputeProperties.maxHearingRounds()
-                            ? HearingStopReason.MAX_ROUNDS
-                            : null;
-            round.complete(
-                    submittedRoundSummaryV2(submissions),
-                    stopReason,
-                    now,
-                    "hearing-controller");
-            roundRepository.save(round);
-            recordRoundEvent(
-                    caseId,
-                    "HEARING_ROUND_COMPLETED",
-                    Map.of(
-                            "round_no", round.getRoundNo(),
-                            "stop_reason",
-                            stopReason == null
-                                    ? "BOTH_PARTIES_SUBMITTED"
-                            : stopReason.name()),
-                    "hearing-round-completed:" + round.getRoundNo(),
-                    "hearing-controller");
-            reviseEvidenceDossierAfterRoundIfNeeded(
-                    caseId, round.getRoundNo(), "evidence-clerk");
-            courtOrchestrator.afterRoundClosedAfterCommit(
-                    caseId,
-                    round.getRoundNo(),
-                    stopReason != null,
-                    traceId(round.getRoundNo()));
-            HearingRoundEntity responseRound = round;
-            if (stopReason == null) {
-                responseRound =
-                        openNextRound(dispute, round, now, "hearing-controller");
-            }
-            workflowCoordinator.roundCompletedAfterCommit(
-                    caseId, round.getRoundNo(), false);
-            return view(caseId, responseRound, actor);
-        }
-        return view(caseId, round, actor);
+        return advanceAfterPartySubmissionIfReady(dispute, round, now, actor);
     }
 
     @Transactional
@@ -330,7 +284,7 @@ public class HearingRoundService {
                             + actor.role().name(),
                     actor.actorId());
         }
-        return view(caseId, round, actor);
+        return advanceAfterPartySubmissionIfReady(dispute, round, clock.instant(), actor);
     }
 
     @Transactional
@@ -819,6 +773,57 @@ public class HearingRoundService {
                 roundNo,
                 submissions,
                 actorId);
+    }
+
+    private HearingRoundView advanceAfterPartySubmissionIfReady(
+            FulfillmentCaseEntity dispute,
+            HearingRoundEntity round,
+            Instant now,
+            AuthenticatedActor actor) {
+        List<HearingRoundPartySubmissionEntity> submissions =
+                submissionRepository
+                        .findAllByCaseIdAndRoundNoOrderBySubmittedAtAsc(
+                                dispute.getId(), round.getRoundNo());
+        if (submissions.size() < 2) {
+            round.waitForCounterparty(now, actor.actorId());
+            return view(dispute.getId(), roundRepository.save(round), actor);
+        }
+        if (round.getClosedAt() != null) {
+            return view(dispute.getId(), round, actor);
+        }
+        HearingStopReason stopReason =
+                round.getRoundNo() == disputeProperties.maxHearingRounds()
+                        ? HearingStopReason.MAX_ROUNDS
+                        : null;
+        round.complete(
+                submittedRoundSummaryV2(submissions),
+                stopReason,
+                now,
+                "hearing-controller");
+        HearingRoundEntity saved = roundRepository.save(round);
+        recordRoundEvent(
+                dispute.getId(),
+                "HEARING_ROUND_COMPLETED",
+                Map.of(
+                        "round_no", round.getRoundNo(),
+                        "stop_reason",
+                        stopReason == null ? "BOTH_PARTIES_SUBMITTED" : stopReason.name()),
+                "hearing-round-completed:" + round.getRoundNo(),
+                "hearing-controller");
+        reviseEvidenceDossierAfterRoundIfNeeded(
+                dispute.getId(), round.getRoundNo(), "evidence-clerk");
+        courtOrchestrator.afterRoundClosedAfterCommit(
+                dispute.getId(),
+                round.getRoundNo(),
+                stopReason != null,
+                traceId(round.getRoundNo()));
+        HearingRoundEntity responseRound = saved;
+        if (stopReason == null) {
+            responseRound = openNextRound(dispute, saved, now, "hearing-controller");
+        }
+        workflowCoordinator.roundCompletedAfterCommit(
+                dispute.getId(), round.getRoundNo(), false);
+        return view(dispute.getId(), responseRound, actor);
     }
 
     private HearingRoundEntity openNextRound(
