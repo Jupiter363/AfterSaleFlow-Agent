@@ -147,7 +147,7 @@ public class EvidenceSubmissionService {
         batchRepository.save(batch);
         OffsetDateTime submittedOffset = OffsetDateTime.ofInstant(submittedAt, ZoneOffset.UTC);
         for (EvidenceItemEntity item : evidences) {
-            item.markSubmitted(batch.getId(), submittedOffset, actor.actorId());
+            item.markSubmittedForParties(batch.getId(), submittedOffset, actor.actorId());
         }
         RoomMessageView message =
                 roomMessageService.post(

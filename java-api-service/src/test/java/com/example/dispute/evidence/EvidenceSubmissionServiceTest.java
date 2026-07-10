@@ -107,6 +107,8 @@ class EvidenceSubmissionServiceTest {
                 .containsExactly("EVIDENCE_ONE", "EVIDENCE_TWO");
         assertThat(one.getSubmissionStatus().name()).isEqualTo("SUBMITTED");
         assertThat(two.getSubmissionStatus().name()).isEqualTo("SUBMITTED");
+        assertThat(one.getVisibility()).isEqualTo("PARTIES");
+        assertThat(two.getVisibility()).isEqualTo("PARTIES");
 
         ArgumentCaptor<RoomMessageCommand> commandCaptor =
                 ArgumentCaptor.forClass(RoomMessageCommand.class);

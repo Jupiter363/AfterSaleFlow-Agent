@@ -312,6 +312,12 @@ public class EvidenceItemEntity extends AbstractEntity {
         this.updatedBy = actorId;
     }
 
+    public void markSubmittedForParties(
+            String batchId, OffsetDateTime submittedAt, String actorId) {
+        markSubmitted(batchId, submittedAt, actorId);
+        this.visibility = "PARTIES";
+    }
+
     public void deletePending(OffsetDateTime deletedAt, String actorId) {
         if (getSubmissionStatus() == EvidenceSubmissionStatus.SUBMITTED) {
             throw new IllegalStateException("submitted evidence cannot be deleted");

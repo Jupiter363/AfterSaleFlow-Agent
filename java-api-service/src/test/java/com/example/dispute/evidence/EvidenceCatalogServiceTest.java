@@ -81,29 +81,50 @@ class EvidenceCatalogServiceTest {
         assertThat(catalog.items()).isEmpty();
     }
 
+    @Test
+    void hearingCatalogKeepsPendingCounterpartyEvidenceHidden() {
+        FulfillmentCaseEntity dispute = dispute(CaseStatus.HEARING, "HEARING");
+        EvidenceItemEntity pendingUserEvidence = evidence("PARTIES");
+        when(caseRepository.findById(dispute.getId())).thenReturn(Optional.of(dispute));
+        when(evidenceRepository
+                        .findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(
+                                dispute.getId()))
+                .thenReturn(List.of(pendingUserEvidence));
+
+        var catalog =
+                service.catalog(
+                        dispute.getId(),
+                        new AuthenticatedActor("merchant-local", ActorRole.MERCHANT));
+
+        assertThat(catalog.items()).isEmpty();
+    }
+
     private static EvidenceItemEntity submittedEvidence(String visibility) {
-        EvidenceItemEntity evidence =
-                EvidenceItemEntity.uploaded(
-                        "EVIDENCE_SHARED",
-                        "CASE_CATALOG_TEST",
-                        "DOSSIER_1",
-                        "LOGISTICS_PROOF",
-                        "USER_UPLOAD",
-                        "USER",
-                        "user-local",
-                        "evidence-original",
-                        "cases/CASE_CATALOG_TEST/EVIDENCE_SHARED.md",
-                        "hash-shared",
-                        "shared-logistics.md",
-                        "text/markdown",
-                        128,
-                        visibility,
-                        OffsetDateTime.parse("2026-07-08T00:00:00Z"));
+        EvidenceItemEntity evidence = evidence(visibility);
         evidence.markSubmitted(
                 "EVIDENCE_BATCH_SHARED",
                 OffsetDateTime.parse("2026-07-08T00:01:00Z"),
                 "user-local");
         return evidence;
+    }
+
+    private static EvidenceItemEntity evidence(String visibility) {
+        return EvidenceItemEntity.uploaded(
+                "EVIDENCE_SHARED",
+                "CASE_CATALOG_TEST",
+                "DOSSIER_1",
+                "LOGISTICS_PROOF",
+                "USER_UPLOAD",
+                "USER",
+                "user-local",
+                "evidence-original",
+                "cases/CASE_CATALOG_TEST/EVIDENCE_SHARED.md",
+                "hash-shared",
+                "shared-logistics.md",
+                "text/markdown",
+                128,
+                visibility,
+                OffsetDateTime.parse("2026-07-08T00:00:00Z"));
     }
 
     private static FulfillmentCaseEntity dispute(CaseStatus status, String currentRoom) {
