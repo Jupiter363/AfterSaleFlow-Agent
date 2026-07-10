@@ -20,8 +20,6 @@ import com.example.dispute.room.infrastructure.persistence.repository.CasePhaseC
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.transaction.support.TransactionSynchronization;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 /**
  * Idempotently imports dispute candidates from trusted platform adapters.
@@ -193,28 +191,12 @@ public class DisputeImportService {
                         command.requestedOutcomeHint(),
                         command.claimResolutionSeed(),
                         command.respondentAttitudeSeed());
-        afterCommit(
-                () ->
-                        intakeAgentTurnService.startInitialTurn(
-                                saved.getId(),
-                                intakeActor,
-                                seed,
-                                traceId,
-                                requestId));
-    }
-
-    private static void afterCommit(Runnable action) {
-        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
-            action.run();
-            return;
-        }
-        TransactionSynchronizationManager.registerSynchronization(
-                new TransactionSynchronization() {
-                    @Override
-                    public void afterCommit() {
-                        action.run();
-                    }
-                });
+        intakeAgentTurnService.startInitialTurn(
+                saved.getId(),
+                intakeActor,
+                seed,
+                traceId,
+                requestId);
     }
 
     private void materializeCurrentRoom(

@@ -3,6 +3,7 @@ package com.example.dispute.casecore;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -41,7 +42,6 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
-import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 @ExtendWith(MockitoExtension.class)
@@ -137,45 +137,65 @@ class DisputeImportServiceTest {
     }
 
     @Test
-    void defersInitialIntakeTurnUntilTheImportTransactionCommits() {
+    void startsInitialIntakeTurnInsideTheImportTransaction() {
         when(repository.findBySourceSystemAndExternalCaseRef("OMS", "EXT-1003"))
                 .thenReturn(Optional.empty());
         when(repository.save(any()))
                 .thenAnswer(invocation -> invocation.getArgument(0));
 
         TransactionSynchronizationManager.initSynchronization();
-        List<TransactionSynchronization> synchronizations;
         try {
             service.importDispute(
                     command("EXT-1003"),
                     new AuthenticatedActor("external-adapter", ActorRole.SYSTEM),
                     "import-ext-1003");
 
-            verify(intakeAgentTurnService, never())
+            ArgumentCaptor<AuthenticatedActor> intakeActor =
+                    ArgumentCaptor.forClass(AuthenticatedActor.class);
+            verify(intakeAgentTurnService)
                     .startInitialTurn(
                             any(String.class),
-                            any(AuthenticatedActor.class),
+                            intakeActor.capture(),
                             any(IntakeLobbySeed.class),
                             any(String.class),
                             any(String.class));
-            synchronizations = TransactionSynchronizationManager.getSynchronizations();
+            assertThat(intakeActor.getValue().actorId()).isEqualTo("user-local");
+            assertThat(TransactionSynchronizationManager.getSynchronizations()).isEmpty();
         } finally {
             TransactionSynchronizationManager.clearSynchronization();
         }
+    }
 
-        assertThat(synchronizations).isNotEmpty();
-        synchronizations.forEach(TransactionSynchronization::afterCommit);
-
-        ArgumentCaptor<AuthenticatedActor> intakeActor =
-                ArgumentCaptor.forClass(AuthenticatedActor.class);
-        verify(intakeAgentTurnService)
+    @Test
+    void intakePersistenceFailureAbortsTheImportInsteadOfLeavingAPartialCase() {
+        when(repository.findBySourceSystemAndExternalCaseRef("OMS", "EXT-POST-COMMIT-FAILURE"))
+                .thenReturn(Optional.empty());
+        when(repository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        doThrow(new org.springframework.dao.InvalidDataAccessApiUsageException("transaction closed"))
+                .when(intakeAgentTurnService)
                 .startInitialTurn(
                         any(String.class),
-                        intakeActor.capture(),
+                        any(AuthenticatedActor.class),
                         any(IntakeLobbySeed.class),
                         any(String.class),
                         any(String.class));
-        assertThat(intakeActor.getValue().actorId()).isEqualTo("user-local");
+
+        TransactionSynchronizationManager.initSynchronization();
+        try {
+            assertThatThrownBy(
+                            () ->
+                                    service.importDispute(
+                                            command("EXT-POST-COMMIT-FAILURE"),
+                                            new AuthenticatedActor(
+                                                    "external-adapter", ActorRole.SYSTEM),
+                                            "import-ext-post-commit-failure"))
+                    .isInstanceOf(
+                            org.springframework.dao.InvalidDataAccessApiUsageException.class)
+                    .hasMessage("transaction closed");
+        } finally {
+            TransactionSynchronizationManager.clearSynchronization();
+        }
     }
 
     @Test
