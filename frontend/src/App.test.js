@@ -53,6 +53,31 @@ async function mountApp() {
 }
 
 describe("App shell", () => {
+  it("only exposes reviewer navigation entries to the platform reviewer", async () => {
+    actor.id = "user-local";
+    actor.role = "USER";
+    const partyWrapper = await mountApp();
+
+    const partyHrefs = partyWrapper
+      .findAll(".app-nav a")
+      .map((link) => link.attributes("href"));
+    expect(partyHrefs).toContain("/disputes");
+    expect(partyHrefs).not.toContain("/reviews");
+    expect(partyHrefs).not.toContain("/agents");
+    partyWrapper.unmount();
+
+    actor.id = "reviewer-local";
+    actor.role = "PLATFORM_REVIEWER";
+    const reviewerWrapper = await mountApp();
+
+    const reviewerHrefs = reviewerWrapper
+      .findAll(".app-nav a")
+      .map((link) => link.attributes("href"));
+    expect(reviewerHrefs).toContain("/disputes");
+    expect(reviewerHrefs).toContain("/reviews");
+    expect(reviewerHrefs).toContain("/agents");
+  });
+
   it("keeps global context copy out of the fixed top navigation and separate rows", async () => {
     const wrapper = await mountApp();
 
