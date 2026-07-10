@@ -57,7 +57,8 @@ public class HearingCollaborationController {
         return success(
                 Map.of(
                         "rounds", roundService.list(caseId, actor),
-                        "settlements", settlementService.list(caseId, actor)),
+                        "settlements", settlementService.list(caseId, actor),
+                        "status", roundService.status(caseId, actor)),
                 request);
     }
 
@@ -67,6 +68,14 @@ public class HearingCollaborationController {
             Authentication authentication,
             HttpServletRequest request) {
         return success(roundService.list(caseId, actor(authentication)), request);
+    }
+
+    @PostMapping("/complete")
+    public ApiResponse<com.example.dispute.hearing.application.HearingStatusView> complete(
+            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
+            Authentication authentication,
+            HttpServletRequest request) {
+        return success(roundService.completeHearing(caseId, actor(authentication)), request);
     }
 
     @PostMapping("/rounds/complete")

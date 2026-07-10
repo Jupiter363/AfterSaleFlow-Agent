@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import operator
 from typing import Annotated, Any
@@ -8,6 +9,10 @@ from langgraph.graph import END, START, StateGraph
 from typing_extensions import NotRequired, TypedDict
 
 from app.harness.context_pack import build_context_pack
+from app.harness.execution_tools import (
+    ExecutionToolDeclaration,
+    build_execution_tool_intention_section,
+)
 from app.harness.localization_policy import localize_internal_text
 from app.schemas import HearingRoundTurnRequest, HearingRoundTurnResult
 
@@ -57,19 +62,21 @@ def _reason_with_llm_node(model_runner: Any | None):
                 "executed_nodes": ["fallback_reasoning"],
             }
         try:
-            context_pack = build_context_pack(
-                "hearing_round_turn",
-                {
-                    "current_turn": _current_turn_context(request),
-                    "case_identity": _case_identity_context(request),
-                    "canonical_case_dossier": _canonical_case_dossier(request),
-                    "hearing_round_submissions": [
-                        item.model_dump(mode="json") for item in request.party_submissions
-                    ],
-                    "actor_visible_evidence": _actor_visible_evidence(request),
-                    "round_control_policy": _round_control_policy(request),
-                },
-            )
+            sources = {
+                "current_turn": _current_turn_context(request),
+                "case_identity": _case_identity_context(request),
+                "canonical_case_dossier": _canonical_case_dossier(request),
+                "hearing_round_submissions": [
+                    item.model_dump(mode="json") for item in request.party_submissions
+                ],
+                "actor_visible_evidence": _actor_visible_evidence(request),
+                "jury_a2a_notes": _jury_a2a_notes(request),
+                "round_control_policy": _round_control_policy(request),
+            }
+            execution_tool_intentions = _execution_tool_intentions(request)
+            if execution_tool_intentions is not None:
+                sources["execution_tool_intentions"] = execution_tool_intentions
+            context_pack = build_context_pack("hearing_round_turn", sources)
             generation = model_runner.invoke_structured(
                 node_name="hearing_round_turn",
                 case_data={
@@ -127,6 +134,7 @@ def _apply_court_guardrails(state: HearingRoundTurnGraphState) -> dict[str, Any]
         questions_for_user = []
         questions_for_merchant = []
         round_summary = _sanitize_round_summary(output.round_summary)
+        review_focus_signal = _review_focus_signal(request, output)
     else:
         expected_event = "JUDGE_NEXT_QUESTIONS_READY"
         message_text = _sanitize_judge_message(
@@ -137,6 +145,9 @@ def _apply_court_guardrails(state: HearingRoundTurnGraphState) -> dict[str, Any]
         questions_for_user = output.questions_for_user
         questions_for_merchant = output.questions_for_merchant
         round_summary = _sanitize_round_summary(output.round_summary)
+        review_focus_signal = []
+    if opening_turn:
+        review_focus_signal = []
     result = output.model_copy(
         update={
             "speaker_role": "JUDGE",
@@ -148,6 +159,7 @@ def _apply_court_guardrails(state: HearingRoundTurnGraphState) -> dict[str, Any]
             "round_no": request.round_no,
             "next_round_no": next_round_no,
             "final_draft_required": final_round and not opening_turn,
+            "review_focus_signal": review_focus_signal,
             "non_final": True,
             "requires_human_review": True,
         }
@@ -176,7 +188,7 @@ def _fallback_result(request: HearingRoundTurnRequest) -> HearingRoundTurnResult
     if final_round:
         message = (
             "第三轮陈述已封存。AI 法官将基于当前案情、证据和双方陈述形成非最终裁决草案，"
-            "并提交平台审核员终审。"
+            "并进入裁决草案与后续确认路径。"
         )
         return HearingRoundTurnResult(
             message_text=message,
@@ -185,6 +197,7 @@ def _fallback_result(request: HearingRoundTurnRequest) -> HearingRoundTurnResult
             round_no=request.round_no,
             next_round_no=None,
             final_draft_required=True,
+            review_focus_signal=_derived_review_focus_signal(request),
             prompt_version="hearing-round-turn-fallback-v1",
             model="local-fallback",
         )
@@ -200,9 +213,82 @@ def _fallback_result(request: HearingRoundTurnRequest) -> HearingRoundTurnResult
         round_no=request.round_no,
         next_round_no=request.round_no + 1,
         final_draft_required=False,
+        review_focus_signal=[],
         prompt_version="hearing-round-turn-fallback-v1",
         model="local-fallback",
     )
+
+
+def _review_focus_signal(
+    request: HearingRoundTurnRequest,
+    output: HearingRoundTurnResult,
+) -> list[str]:
+    provided = [
+        localize_internal_text(str(item or "").strip())
+        for item in output.review_focus_signal
+        if str(item or "").strip()
+    ]
+    if provided:
+        return provided[:20]
+    return _derived_review_focus_signal(request)
+
+
+def _derived_review_focus_signal(request: HearingRoundTurnRequest) -> list[str]:
+    if request.round_no < 3 and not request.final_round:
+        return []
+    signals: list[str] = []
+    for submission in request.party_submissions:
+        statement = _submission_statement(submission.submission_json)
+        signal = _normalize_review_focus(submission.participant_role, statement)
+        if signal:
+            signals.append(signal)
+    return signals[:20]
+
+
+def _submission_statement(submission_json: str) -> str:
+    try:
+        payload = json.loads(submission_json or "{}")
+    except json.JSONDecodeError:
+        return localize_internal_text(submission_json.strip())
+    if isinstance(payload, dict):
+        for key in ("statement", "content", "message", "text"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return localize_internal_text(value.strip())
+    return ""
+
+
+def _normalize_review_focus(participant_role: str, statement: str) -> str:
+    text = localize_internal_text(statement).strip()
+    if not text:
+        return ""
+    role = participant_role.upper()
+    if role == "USER":
+        if "认可" in text and "退款" in text and "签收人身份" in text:
+            return "用户认可退款方向，但要求复核签收人身份是否已核验清楚。"
+        return _third_person_review_focus("用户", text)
+    if role == "MERCHANT":
+        if "不同意退款" in text and "物流签收" in text:
+            return "商家不同意退款，主张物流签收记录足以证明已履约。"
+        return _third_person_review_focus("商家", text)
+    return _third_person_review_focus("当事人", text)
+
+
+def _third_person_review_focus(role_label: str, text: str) -> str:
+    normalized = text
+    replacements = {
+        "我方": role_label,
+        "我们": role_label,
+        "我": role_label,
+    }
+    for source, target in replacements.items():
+        normalized = normalized.replace(source, target)
+    normalized = normalized.strip("。；; ")
+    if not normalized:
+        return ""
+    if not normalized.startswith(role_label):
+        normalized = f"{role_label}提出：{normalized}"
+    return normalized[:180].rstrip("，,；; ") + "。"
 
 
 def _current_turn_context(request: HearingRoundTurnRequest) -> dict[str, Any]:
@@ -270,6 +356,21 @@ def _actor_visible_evidence(request: HearingRoundTurnRequest) -> dict[str, Any]:
     }
 
 
+def _jury_a2a_notes(request: HearingRoundTurnRequest) -> dict[str, Any]:
+    notes = request.courtroom_context.get("jury_a2a_notes")
+    if isinstance(notes, list) and notes:
+        return {
+            "source": "agent_a2a_message",
+            "visibility": "SYSTEM_AUDIT_ONLY",
+            "usage_rule": "陪审团仅通过 A2A 给法官提供风险、遗漏证据和一致性关注点；法官仍是唯一裁决草案生成主体。",
+            "notes": notes,
+        }
+    return {
+        "source": "not_available",
+        "notes": [],
+    }
+
+
 def _round_control_policy(request: HearingRoundTurnRequest) -> dict[str, Any]:
     return {
         "structure": "法官主持的三轮结构化庭审",
@@ -277,13 +378,43 @@ def _round_control_policy(request: HearingRoundTurnRequest) -> dict[str, Any]:
         "round_names": {
             "1": "事实陈述轮",
             "2": "证据解释/定向回应轮",
-            "3": "方案确认轮",
+            "3": "方案确认轮：确认法官拟处理方向或说明异议",
+        },
+        "third_round_confirmation_policy": {
+            "purpose": "双方对法官拟处理方向确认或说明异议",
+            "parties_aligned_label": "双方一致",
+            "not_settlement_agreement": "方案确认不是和解协议，也不是双方自行提出一致方案",
+            "disagreement_capture": "任一方异议时，提取异议理由、待补信息和后续确认关注点",
         },
         "final_round_must_generate_draft": request.final_round or request.round_no >= 3,
         "free_debate_allowed": False,
         "non_final_ai_advice": True,
         "human_reviewer_final_decision": True,
     }
+
+
+def _execution_tool_intentions(request: HearingRoundTurnRequest) -> dict[str, Any] | None:
+    raw_declarations = request.courtroom_context.get("execution_tool_declarations")
+    if not isinstance(raw_declarations, list) or not raw_declarations:
+        return None
+    try:
+        declarations = [
+            ExecutionToolDeclaration.model_validate(item)
+            for item in raw_declarations
+            if isinstance(item, dict)
+        ]
+    except Exception as failure:
+        LOGGER.warning(
+            "execution tool declarations ignored: case_id=%s error_type=%s error=%s",
+            request.case_id,
+            type(failure).__name__,
+            failure,
+        )
+        return None
+    if not declarations:
+        return None
+    section = build_execution_tool_intention_section(declarations)
+    return json.loads(section.content)
 
 
 def _sanitize_judge_message(text: str, *, final_round: bool) -> str:
@@ -302,13 +433,21 @@ def _sanitize_judge_message(text: str, *, final_round: bool) -> str:
             )
         ).message_text
     if final_round and _looks_like_more_questions(localized):
-        localized = "第三轮陈述已封存。AI 法官将基于当前案情、证据和双方陈述形成非最终裁决草案，并提交平台审核员终审。"
+        localized = "第三轮陈述已封存。AI 法官将基于当前案情、证据和双方陈述形成非最终裁决草案，并进入裁决草案与后续确认路径。"
     if "最终裁决" in localized and "非最终裁决" not in localized:
         localized = localized.replace("最终裁决", "非最终裁决草案")
     if final_round and "非最终裁决草案" not in localized:
         localized = localized.rstrip("。") + "，并进入非最终裁决草案生成路径。"
-    if "人类终审" not in localized and "审核员终审" not in localized and "平台审核员" not in localized:
-        localized = localized.rstrip("。") + "。AI 法官意见为非最终建议，最终由平台审核员确认。"
+    localized = (
+        localized.replace("并提交平台审核员终审", "并进入裁决草案与后续确认路径")
+        .replace("提交平台审核员终审", "进入裁决草案与后续确认路径")
+        .replace("由平台审核员终审", "进入后续确认")
+        .replace("平台审核员终审", "后续确认")
+        .replace("审核员终审", "后续确认")
+        .replace("人类终审", "后续确认")
+    )
+    if "后续确认" not in localized:
+        localized = localized.rstrip("。") + "。AI 法官意见为非最终建议，后续仍需按平台流程确认。"
     return localized
 
 

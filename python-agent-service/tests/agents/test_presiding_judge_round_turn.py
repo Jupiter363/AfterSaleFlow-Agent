@@ -90,6 +90,12 @@ def request(**overrides) -> HearingRoundTurnRequest:
                 ],
                 "overall_confidence_score": 76,
             },
+            "jury_a2a_notes": [
+                {
+                    "message_type": "JURY_SILENT_NOTE",
+                    "payload": {"judge_attention": ["签收人身份仍需关注"]},
+                }
+            ],
         },
         "party_submissions": [
             {
@@ -124,6 +130,11 @@ def test_hearing_round_turn_prompt_is_registered_with_harness_fragments() -> Non
     assert "三轮结构化庭审" in system_prompt
     assert "JUDGE_OPENING_READY" in system_prompt
     assert "庭审刚打开" in system_prompt
+    assert "方案确认轮" in system_prompt
+    assert "双方一致" in system_prompt
+    assert "不是和解协议" in system_prompt
+    assert "review_focus_signal" in system_prompt
+    assert "不直接采纳" in system_prompt
     assert "<untrusted_case_data>" in user_prompt
 
 
@@ -147,9 +158,57 @@ def test_round_turn_workflow_uses_context_pack_and_returns_judge_message() -> No
     evidence = next(
         section for section in context_pack.sections if section.name == "actor_visible_evidence"
     )
+    round_policy = next(
+        section for section in context_pack.sections if section.name == "round_control_policy"
+    )
+    jury_notes = next(
+        section for section in context_pack.sections if section.name == "jury_a2a_notes"
+    )
     assert "用户称物流显示已签收但本人未收到包裹" in canonical.content
     assert "fact_evidence_matrix" in evidence.content
     assert "EVIDENCE_LOGISTICS" in evidence.content
+    assert "签收人身份仍需关注" in jury_notes.content
+    assert "方案确认轮" in round_policy.content
+    assert "双方一致" in round_policy.content
+    assert "不是和解协议" in round_policy.content
+
+
+def test_round_turn_context_can_include_execution_tool_intentions_without_backend_names() -> None:
+    runner = FakeRoundModelRunner()
+
+    HearingRoundTurnWorkflow(model_runner=runner).run(
+        request(
+            courtroom_context={
+                "execution_tool_declarations": [
+                    {
+                        "action_type": "REFUND",
+                        "tool_name": "after_sale_tool",
+                        "operation": "refund",
+                        "display_name": "模拟退款",
+                        "description": "仅在平台审核通过后模拟退款动作，不直接调用真实支付下游。",
+                        "risk_level": "HIGH",
+                        "simulated": True,
+                        "requires_approved_plan": True,
+                    }
+                ]
+            }
+        )
+    )
+
+    context_pack = runner.calls[0]["context_pack"]
+    execution_tools = next(
+        section
+        for section in context_pack.sections
+        if section.name == "execution_tool_intentions"
+    )
+
+    assert execution_tools.trust_level == "java_tool_catalog"
+    assert "ONLY_PROPOSE_EXECUTION_INTENT" in execution_tools.content
+    assert "REFUND" in execution_tools.content
+    assert "不得直接执行" in execution_tools.content
+    assert "tool_name" not in execution_tools.content
+    assert "after_sale_tool" not in execution_tools.content
+    assert "operation" not in execution_tools.content
 
 
 def test_open_round_is_guarded_as_judge_opening_instead_of_sealed_turn() -> None:
@@ -226,4 +285,51 @@ def test_final_round_is_guarded_to_final_draft_path() -> None:
     assert result.questions_for_user == []
     assert result.questions_for_merchant == []
     assert "非最终裁决草案" in result.message_text
-    assert "平台审核员" in result.message_text
+    assert "后续确认" in result.message_text
+    assert "平台审核员" not in result.message_text
+    assert "终审" not in result.message_text
+
+
+def test_final_round_party_opinions_become_review_focus_signal() -> None:
+    runner = FakeRoundModelRunner(
+        generated=HearingRoundTurnResult(
+            speaker_role="JUDGE",
+            message_text="第三轮陈述已封存，AI 法官将生成非最终裁决草案。",
+            round_summary="第三轮双方围绕拟处理方向表达确认和异议。",
+            court_event_type="FINAL_DRAFT_REQUIRED",
+            round_no=3,
+            next_round_no=None,
+            final_draft_required=True,
+            prompt_version="hearing-round-turn-v1",
+            model="fake-round-model",
+        )
+    )
+
+    result = HearingRoundTurnWorkflow(model_runner=runner).run(
+        request(
+            round_no=3,
+            final_round=True,
+            party_submissions=[
+                {
+                    "participant_role": "USER",
+                    "participant_id": "user-local",
+                    "submission_source": "PARTY_ACTION",
+                    "submission_json": '{"statement":"我认可退款方向，但担心签收人身份还没有核验清楚。"}',
+                },
+                {
+                    "participant_role": "MERCHANT",
+                    "participant_id": "merchant-local",
+                    "submission_source": "PARTY_ACTION",
+                    "submission_json": '{"statement":"不同意退款，物流签收记录已经足以证明商家完成履约。"}',
+                },
+            ],
+        )
+    )
+
+    assert result.final_draft_required is True
+    assert result.review_focus_signal == [
+        "用户认可退款方向，但要求复核签收人身份是否已核验清楚。",
+        "商家不同意退款，主张物流签收记录足以证明已履约。",
+    ]
+    assert "非最终裁决草案" in result.message_text
+    assert "直接采纳用户意见" not in result.message_text

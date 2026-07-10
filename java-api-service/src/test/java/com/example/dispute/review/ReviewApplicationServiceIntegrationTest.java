@@ -89,18 +89,23 @@ class ReviewApplicationServiceIntegrationTest {
     }
     @Test void createsPacketAndOnlyReviewerCanModifyApproveWithDiff(){
         String taskId=service.createForWorkflow("CASE_review","REMEDY_review");
+        assertThat(tasks.findById(taskId))
+                .hasValueSatisfying(
+                        task ->
+                                assertThat(task.getAssignedReviewerId())
+                                        .isEqualTo("reviewer-local"));
         verify(lifecycleNotifications)
                 .reviewPending(
                         any(FulfillmentCaseEntity.class),
                         eq(taskId));
         var packet=service.packet(taskId,new AuthenticatedActor("cs-1",ActorRole.CUSTOMER_SERVICE));
         assertThat(packet.remedy().path("actions")).hasSize(1);
-        assertThat(service.list(ReviewTaskStatus.PENDING,new AuthenticatedActor("reviewer-1",ActorRole.PLATFORM_REVIEWER))).hasSize(1);
+        assertThat(service.list(ReviewTaskStatus.PENDING,new AuthenticatedActor("reviewer-local",ActorRole.PLATFORM_REVIEWER))).hasSize(1);
         var approved=packet.remedy().deepCopy();
         ((com.fasterxml.jackson.databind.node.ObjectNode) approved)
                 .put("reviewer_note","amount verified");
         assertThatThrownBy(()->service.decide(taskId,new ReviewDecisionCommand(ApprovalDecisionType.APPROVE,"approve",null,"cs-key"),new AuthenticatedActor("cs-1",ActorRole.CUSTOMER_SERVICE))).isInstanceOf(ForbiddenException.class);
-        var result=service.decide(taskId,new ReviewDecisionCommand(ApprovalDecisionType.MODIFY_AND_APPROVE,"amount verified",approved,"review-key"),new AuthenticatedActor("reviewer-1",ActorRole.PLATFORM_REVIEWER));
+        var result=service.decide(taskId,new ReviewDecisionCommand(ApprovalDecisionType.MODIFY_AND_APPROVE,"amount verified",approved,"review-key"),new AuthenticatedActor("reviewer-local",ActorRole.PLATFORM_REVIEWER));
         verify(lifecycleNotifications)
                 .finalDecision(
                         any(FulfillmentCaseEntity.class),
@@ -132,7 +137,7 @@ class ReviewApplicationServiceIntegrationTest {
                                 "amount verified",
                                 approved,
                                 "review-key"),
-                        new AuthenticatedActor("reviewer-1", ActorRole.PLATFORM_REVIEWER));
+                        new AuthenticatedActor("reviewer-local", ActorRole.PLATFORM_REVIEWER));
         assertThat(retry.approvalRecordId()).isEqualTo(result.approvalRecordId());
         assertThat(approvals.findAllByCaseIdOrderByCreatedAtAsc("CASE_review")).hasSize(1);
         assertThatThrownBy(() -> service.decide(
@@ -142,13 +147,45 @@ class ReviewApplicationServiceIntegrationTest {
                                 "reuse key with different payload",
                                 null,
                                 "review-key"),
-                        new AuthenticatedActor("reviewer-1", ActorRole.PLATFORM_REVIEWER)))
+                        new AuthenticatedActor("reviewer-local", ActorRole.PLATFORM_REVIEWER)))
                 .isInstanceOf(IdempotencyConflictException.class);
         verify(postReviewOrchestration, times(2))
                 .orchestrate(
                         eq(result.approvalRecordId()),
                         any(AuthenticatedActor.class),
                         eq("review-key"));
+    }
+
+    @Test
+    void rejectsAPlatformReviewerWhoseIdentityIsNotTheSystemReviewer() {
+        assertThatThrownBy(
+                        () ->
+                                service.decide(
+                                        "REVIEW_missing",
+                                        new ReviewDecisionCommand(
+                                                ApprovalDecisionType.APPROVE,
+                                                "attempted by another reviewer",
+                                                null,
+                                                "reviewer-identity"),
+                                        new AuthenticatedActor(
+                                                "reviewer-1",
+                                                ActorRole.PLATFORM_REVIEWER)))
+                .isInstanceOf(ForbiddenException.class);
+    }
+
+    @Test
+    void anotherPlatformReviewerRetainsReadOnlyReviewAccess() {
+        String taskId = service.createForWorkflow("CASE_review", "REMEDY_review");
+        AuthenticatedActor anotherReviewer =
+                new AuthenticatedActor(
+                        "reviewer-1",
+                        ActorRole.PLATFORM_REVIEWER);
+
+        assertThat(service.list(ReviewTaskStatus.PENDING, anotherReviewer))
+                .extracting(task -> task.id())
+                .contains(taskId);
+        assertThat(service.packet(taskId, anotherReviewer).caseId())
+                .isEqualTo("CASE_review");
     }
 
     @Test
@@ -163,7 +200,7 @@ class ReviewApplicationServiceIntegrationTest {
                         null,
                         "review-supplement"),
                 new AuthenticatedActor(
-                        "reviewer-1", ActorRole.PLATFORM_REVIEWER));
+                        "reviewer-local", ActorRole.PLATFORM_REVIEWER));
 
         verify(lifecycleNotifications)
                 .supplementRequested(
@@ -183,7 +220,7 @@ class ReviewApplicationServiceIntegrationTest {
                         null,
                         "review-manual"),
                 new AuthenticatedActor(
-                        "reviewer-1", ActorRole.PLATFORM_REVIEWER));
+                        "reviewer-local", ActorRole.PLATFORM_REVIEWER));
 
         verify(lifecycleNotifications)
                 .manualHandoff(

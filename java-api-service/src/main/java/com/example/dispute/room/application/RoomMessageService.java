@@ -4,6 +4,7 @@ import com.example.dispute.common.exception.IdempotencyConflictException;
 import com.example.dispute.common.exception.ForbiddenException;
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
+import com.example.dispute.hearing.application.HearingRoundService;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.room.domain.MessageSenderType;
@@ -37,6 +38,7 @@ public class RoomMessageService {
     private final CaseEventService eventService;
     private final IntakeAgentTurnService intakeAgentTurnService;
     private final EvidenceAgentTurnService evidenceAgentTurnService;
+    private final HearingRoundService hearingRoundService;
     private final AccessSessionResolver accessSessionResolver;
     private final SessionPermissionService permissionService;
     private final Clock clock;
@@ -50,6 +52,7 @@ public class RoomMessageService {
             CaseEventService eventService,
             IntakeAgentTurnService intakeAgentTurnService,
             EvidenceAgentTurnService evidenceAgentTurnService,
+            HearingRoundService hearingRoundService,
             AccessSessionResolver accessSessionResolver,
             SessionPermissionService permissionService,
             Clock clock) {
@@ -60,6 +63,7 @@ public class RoomMessageService {
         this.eventService = eventService;
         this.intakeAgentTurnService = intakeAgentTurnService;
         this.evidenceAgentTurnService = evidenceAgentTurnService;
+        this.hearingRoundService = hearingRoundService;
         this.accessSessionResolver = accessSessionResolver;
         this.permissionService = permissionService;
         this.clock = clock;
@@ -158,6 +162,7 @@ public class RoomMessageService {
         String audienceJson = audience(room.getRoomType(), actor.role(), command.messageType());
         String audienceActorIdsJson =
                 audienceActorIds(room.getRoomType(), actor, command.messageType());
+        Integer hearingRound = hearingRoundForPartyMessage(dispute, room, command, actor);
         long sequence = messageRepository.findMaxSequenceByRoomId(room.getId()) + 1;
         RoomMessageEntity saved =
                 messageRepository.save(
@@ -175,8 +180,17 @@ public class RoomMessageService {
                                 command.text(),
                                 json(command.attachmentRefs()),
                                 idempotencyKey,
+                                hearingRound,
                                 clock.instant(),
                                 traceId));
+        if (hearingRound != null && command.messageType() == MessageType.PARTY_TEXT) {
+            hearingRoundService.recordPartyMessageSubmission(
+                    dispute.getId(),
+                    hearingRound,
+                    saved.getId(),
+                    saved.getMessageText(),
+                    actor);
+        }
         eventService.recordRoomMessage(
                 dispute.getId(),
                 room.getId(),
@@ -200,6 +214,19 @@ public class RoomMessageService {
                 traceId,
                 traceId);
         return view(saved);
+    }
+
+    private Integer hearingRoundForPartyMessage(
+            FulfillmentCaseEntity dispute,
+            CaseRoomEntity room,
+            RoomMessageCommand command,
+            AuthenticatedActor actor) {
+        if (room.getRoomType() != RoomType.HEARING
+                || !isHearingPartyRoundMessage(command.messageType())
+                || !isParty(actor.role())) {
+            return null;
+        }
+        return hearingRoundService.currentOpenRoundNoForPartyMessage(dispute.getId(), actor);
     }
 
     private void assertSameImmutableRequest(
@@ -373,6 +400,11 @@ public class RoomMessageService {
     }
 
     private static boolean isEvidencePrivatePartyMessage(MessageType messageType) {
+        return messageType == MessageType.PARTY_TEXT
+                || messageType == MessageType.PARTY_EVIDENCE_REFERENCE;
+    }
+
+    private static boolean isHearingPartyRoundMessage(MessageType messageType) {
         return messageType == MessageType.PARTY_TEXT
                 || messageType == MessageType.PARTY_EVIDENCE_REFERENCE;
     }

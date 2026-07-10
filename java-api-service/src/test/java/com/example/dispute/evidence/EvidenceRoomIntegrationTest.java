@@ -1,10 +1,12 @@
 package com.example.dispute.evidence;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.config.DisputeProperties;
+import com.example.dispute.common.exception.BadRequestException;
 import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.RiskLevel;
 import com.example.dispute.evidence.application.EvidenceCompletionService;
@@ -186,6 +188,7 @@ class EvidenceRoomIntegrationTest {
     @Test
     void deadlineExpiryWithOnePartySealsAndOpensHearing() {
         seedEvidenceCase("CASE_EXPIRED");
+        addEvidence("CASE_EXPIRED", "EVIDENCE_EXPIRED_INITIATOR", EvidenceVerificationStatus.VERIFIED);
         completionService.complete(
                 "CASE_EXPIRED",
                 new AuthenticatedActor("user-local", ActorRole.USER),
@@ -218,16 +221,20 @@ class EvidenceRoomIntegrationTest {
     }
 
     @Test
-    void deadlineExpiryWithNoSubmissionsStillReportsTheFrozenVersion() {
+    void deadlineExpiryWithoutInitiatorEvidenceDoesNotOpenHearing() {
         seedEvidenceCase("CASE_NO_SUBMISSIONS");
 
-        var status = completionService.expire("CASE_NO_SUBMISSIONS");
+        assertThatThrownBy(() -> completionService.expire("CASE_NO_SUBMISSIONS"))
+                .isInstanceOf(BadRequestException.class)
+                .hasMessageContaining("发起争议方需先正式提交至少 1 份相关证据");
         caseRepository.flush();
 
-        assertThat(status.dossierVersion()).isEqualTo(1);
-        assertThat(status.userCompleted()).isFalse();
-        assertThat(status.merchantCompleted()).isFalse();
-        assertThat(status.nextRoom()).isEqualTo("HEARING");
+        FulfillmentCaseEntity dispute =
+                caseRepository.findById("CASE_NO_SUBMISSIONS").orElseThrow();
+        assertThat(dispute.getCaseStatus()).isEqualTo(CaseStatus.EVIDENCE_OPEN);
+        assertThat(dispute.getCurrentRoom()).isEqualTo("EVIDENCE");
+        assertThat(roomRepository.findByCaseIdAndRoomType("CASE_NO_SUBMISSIONS", RoomType.HEARING))
+                .isEmpty();
     }
 
     private void seedEvidenceCase(String caseId) {

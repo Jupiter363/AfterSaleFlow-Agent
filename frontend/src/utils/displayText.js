@@ -82,6 +82,8 @@ const VALUE_LABELS = {
   SCRATCHED_WATCH: "手表划痕争议",
   QUALITY_DISPUTE: "商品质量争议",
   NON_RECEIPT: "用户称未收到包裹",
+  RESHIP_OR_REFUND_AFTER_SIGNATURE_REVIEW: "先核验签收凭证；若签收依据不足，建议补发或退款",
+  RESHIP_IF_SIGNATURE_PROOF_MISSING: "若签收凭证缺失，建议补发",
 };
 
 const ENGLISH_PHRASE_LABELS = {

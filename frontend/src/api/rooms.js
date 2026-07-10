@@ -7,6 +7,9 @@ export const roomApi = {
   latestTurnMemory: (actor, caseId, roomType) =>
     apiRequest(`/disputes/${caseId}/rooms/${roomType}/turn-memory/latest`, actor),
 
+  events: (actor, caseId, afterSequence = 0) =>
+    apiRequest(`/disputes/${caseId}/events/replay?after_sequence=${afterSequence}`, actor),
+
   ensureOpening: (
     actor,
     caseId,

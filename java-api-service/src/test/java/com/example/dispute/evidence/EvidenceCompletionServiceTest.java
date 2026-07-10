@@ -1,12 +1,14 @@
 package com.example.dispute.evidence;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
 
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.config.DisputeProperties;
+import com.example.dispute.common.exception.BadRequestException;
 import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.RiskLevel;
 import com.example.dispute.evidence.application.EvidenceCompletionService;
@@ -26,6 +28,7 @@ import com.example.dispute.room.infrastructure.persistence.entity.CasePhaseClock
 import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
 import com.example.dispute.room.infrastructure.persistence.repository.CasePhaseClockRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
+import com.example.dispute.infrastructure.persistence.repository.EvidenceItemRepository;
 import com.example.dispute.workflow.application.EvidenceWindowCoordinator;
 import com.example.dispute.hearing.application.HearingRoundService;
 import com.example.dispute.hearing.application.HearingWorkflowCoordinator;
@@ -46,6 +49,7 @@ class EvidenceCompletionServiceTest {
 
     @Mock private FulfillmentCaseRepository caseRepository;
     @Mock private EvidencePartyCompletionRepository completionRepository;
+    @Mock private EvidenceItemRepository evidenceRepository;
     @Mock private CaseRoomRepository roomRepository;
     @Mock private CasePhaseClockRepository clockRepository;
     @Mock private EvidenceDossierFreezer dossierFreezer;
@@ -71,6 +75,7 @@ class EvidenceCompletionServiceTest {
                 new EvidenceCompletionService(
                         caseRepository,
                         completionRepository,
+                        evidenceRepository,
                         roomRepository,
                         clockRepository,
                         dossierFreezer,
@@ -133,6 +138,9 @@ class EvidenceCompletionServiceTest {
 
     @Test
     void bothPartyCompletionsSealEvidenceEarlyAndOpenTheThreeHourHearing() {
+        when(evidenceRepository.countByCaseIdAndSubmittedByRoleAndSubmissionStatusAndDeletedAtIsNull(
+                        dispute.getId(), "USER", com.example.dispute.evidence.domain.EvidenceSubmissionStatus.SUBMITTED))
+                .thenReturn(1L);
         when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.EVIDENCE))
                 .thenReturn(Optional.of(evidenceRoom));
         when(clockRepository.findByCaseIdAndClockType(
@@ -178,6 +186,9 @@ class EvidenceCompletionServiceTest {
 
     @Test
     void repeatedCompletionByTheSameRoleUsesTheExistingPhaseConfirmation() {
+        when(evidenceRepository.countByCaseIdAndSubmittedByRoleAndSubmissionStatusAndDeletedAtIsNull(
+                        dispute.getId(), "USER", com.example.dispute.evidence.domain.EvidenceSubmissionStatus.SUBMITTED))
+                .thenReturn(1L);
         EvidencePartyCompletionEntity existing =
                 EvidencePartyCompletionEntity.completed(
                         "EVIDENCE_COMPLETE_EXISTING",
@@ -205,6 +216,22 @@ class EvidenceCompletionServiceTest {
 
         assertThat(result.dossierVersion()).isEqualTo(1);
         assertThat(result.allPartiesCompleted()).isFalse();
+    }
+
+    @Test
+    void initiatorCannotCompleteEvidenceWithoutSubmittedEvidence() {
+        when(evidenceRepository.countByCaseIdAndSubmittedByRoleAndSubmissionStatusAndDeletedAtIsNull(
+                        dispute.getId(), "USER", com.example.dispute.evidence.domain.EvidenceSubmissionStatus.SUBMITTED))
+                .thenReturn(0L);
+
+        assertThatThrownBy(
+                        () ->
+                                service.complete(
+                                        dispute.getId(),
+                                        new AuthenticatedActor("user-local", ActorRole.USER),
+                                        "user-complete-without-evidence"))
+                .isInstanceOf(BadRequestException.class)
+                .hasMessageContaining("发起争议方需先正式提交至少 1 份相关证据");
     }
 
     @Test

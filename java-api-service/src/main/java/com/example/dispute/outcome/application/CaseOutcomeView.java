@@ -11,4 +11,5 @@ public record CaseOutcomeView(
         CaseStatus caseStatus,
         OffsetDateTime closedAt,
         FinalDecisionView finalDecision,
+        AdjudicationDraftView adjudicationDraft,
         List<ActionRecordView> actions) {}

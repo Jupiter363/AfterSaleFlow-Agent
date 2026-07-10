@@ -91,6 +91,35 @@ describe("room API", () => {
     );
     expect(memory.scroll_snapshot.current_outcome).toBe("REFUND");
   });
+
+  it("replays durable case events for audit ledger rebuild", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        success: true,
+        data: [
+          {
+            sequence_no: 12,
+            event_type: "EXECUTION_ASSISTANT_HANDOFF",
+            payload_json: "{\"status\":\"EXECUTION_ASSISTANT_HANDOFF\"}",
+          },
+        ],
+      }),
+    });
+
+    const events = await roomApi.events(actor, "CASE_1", 7);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/disputes/CASE_1/events/replay?after_sequence=7",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          "X-Role": "USER",
+          "X-User-Id": "user-local",
+        }),
+      }),
+    );
+    expect(events[0].event_type).toBe("EXECUTION_ASSISTANT_HANDOFF");
+  });
 });
 
 describe("SSE resume", () => {

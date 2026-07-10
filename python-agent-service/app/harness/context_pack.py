@@ -83,6 +83,8 @@ def _normalize_section_value(
 ) -> Any:
     if name == "current_turn":
         return _normalize_current_turn(value, actor_role=actor_role)
+    if name == "execution_tool_intentions":
+        return value
     localized = localize_context_tree(value)
     if name in {
         "canonical_case_dossier",

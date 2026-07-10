@@ -195,6 +195,96 @@ describe("DisputeOverviewView", () => {
     );
   });
 
+  it("submits the initiator claim resolution as a claim seed, not an execution action", async () => {
+    actor.id = "user-1";
+    actor.role = "USER";
+    const createAction = vi.fn().mockResolvedValue({ id: "CASE_CLAIM_1" });
+    const { wrapper } = await mountOverview(createAction);
+
+    await wrapper.get("[data-start-dispute]").trigger("click");
+    expect(wrapper.get("[data-claim-resolution-section]").text()).toContain("初始诉求");
+    expect(wrapper.get("[data-claim-resolution-section]").text()).toContain("主张，不代表系统已执行");
+
+    await wrapper.get("[data-intake-order]").setValue("ORDER-CLAIM-1");
+    await wrapper.get("[data-intake-merchant]").setValue("merchant-1");
+    await wrapper.get("[data-claim-resolution-type]").setValue("REFUND");
+    await wrapper.get("[data-claim-requested-amount]").setValue("299");
+    await wrapper.get("[data-claim-requested-items]").setValue("儿童手表 1 件");
+    await wrapper
+      .get("[data-claim-request-reason]")
+      .setValue("物流显示签收但用户本人没有收到包裹，希望退款。");
+    await wrapper
+      .get("[data-intake-description]")
+      .setValue("我没收到包裹，希望退款");
+    await wrapper.get(".intake-launcher__card").trigger("submit");
+    await flushPromises();
+
+    expect(createAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        claim_resolution_seed: {
+          initiator_role: "USER",
+          requested_resolution: "REFUND",
+          requested_amount: 299,
+          requested_items: "儿童手表 1 件",
+          request_reason: "物流显示签收但用户本人没有收到包裹，希望退款。",
+          original_statement: "我没收到包裹，希望退款",
+        },
+      }),
+    );
+  });
+
+  it("keeps dispute initiation available to merchants", async () => {
+    actor.id = "merchant-1";
+    actor.role = "MERCHANT";
+    const { wrapper } = await mountOverview();
+
+    expect(wrapper.find("[data-start-dispute]").exists()).toBe(true);
+
+    await wrapper.get("[data-start-dispute]").trigger("click");
+
+    expect(wrapper.find(".intake-launcher").exists()).toBe(true);
+    expect(wrapper.get("[data-intake-merchant]").element.value).toBe("merchant-1");
+  });
+
+  it("does not expose dispute initiation to platform reviewers", async () => {
+    actor.id = "reviewer-local";
+    actor.role = "PLATFORM_REVIEWER";
+    const { wrapper } = await mountOverview();
+
+    expect(wrapper.find("[data-start-dispute]").exists()).toBe(false);
+    expect(wrapper.find(".intake-launcher").exists()).toBe(false);
+  });
+
+  it("does not open intake when a stale party action is triggered after switching to reviewer", async () => {
+    actor.id = "user-local";
+    actor.role = "USER";
+    const { wrapper } = await mountOverview();
+    const staleStartAction = wrapper.get("[data-start-dispute]");
+
+    actor.id = "reviewer-local";
+    actor.role = "PLATFORM_REVIEWER";
+    await flushPromises();
+    await staleStartAction.trigger("click");
+
+    expect(wrapper.find(".intake-launcher").exists()).toBe(false);
+  });
+
+  it("does not create a dispute when the actor becomes a reviewer after opening intake", async () => {
+    actor.id = "user-local";
+    actor.role = "USER";
+    const createAction = vi.fn().mockResolvedValue({ id: "CASE_FORBIDDEN" });
+    const { wrapper, router } = await mountOverview(createAction);
+
+    await wrapper.get("[data-start-dispute]").trigger("click");
+    actor.id = "reviewer-local";
+    actor.role = "PLATFORM_REVIEWER";
+    await wrapper.get(".intake-launcher__card").trigger("submit");
+    await flushPromises();
+
+    expect(createAction).not.toHaveBeenCalled();
+    expect(router.currentRoute.value.path).toBe("/disputes");
+  });
+
   it("simulates external imported disputes from the current demo identity", async () => {
     actor.id = "merchant-local";
     actor.role = "MERCHANT";
@@ -222,7 +312,7 @@ describe("DisputeOverviewView", () => {
 
     expect(simulateExternalImportAction).toHaveBeenCalledWith(
       expect.objectContaining({
-        count: 2,
+        count: 1,
         initiator_role_hint: "MERCHANT",
         current_actor_id: "merchant-local",
         counterparty_actor_id: "user-local",

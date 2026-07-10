@@ -54,7 +54,7 @@ class MigrationIntegrationTest {
         MigrateResult first = flyway.migrate();
         MigrateResult second = flyway.migrate();
 
-        assertThat(first.migrationsExecuted).isEqualTo(15);
+        assertThat(first.migrationsExecuted).isEqualTo(26);
         assertThat(second.migrationsExecuted).isZero();
 
         try (Connection connection =
@@ -105,7 +105,14 @@ class MigrationIntegrationTest {
                             "settlement_proposal",
                             "settlement_confirmation",
                             "notification",
-                            "notification_outbox");
+                            "notification_outbox",
+                            "room_turn_memory",
+                            "case_intake_dossier",
+                            "case_access_session",
+                            "agent_conversation_session",
+                            "agent_session_dossier",
+                            "evidence_submission_batch",
+                            "agent_a2a_message");
             assertThat(columnType(connection, "evidence_item", "metadata_json"))
                     .isEqualTo("jsonb");
             assertThat(columnType(connection, "action_record", "execution_time"))
@@ -146,7 +153,8 @@ class MigrationIntegrationTest {
                             "uq_dispute_external_source",
                             "uq_case_room_type",
                             "uq_settlement_confirmation_role",
-                            "uq_notification_business_recipient");
+                            "uq_notification_business_recipient",
+                            "uq_agent_a2a_jury_review_report");
             assertThat(
                             countRows(
                                     connection,
@@ -158,6 +166,7 @@ class MigrationIntegrationTest {
                     .contains(
                             "trg_room_message_append_only",
                             "trg_case_timeline_event_append_only");
+            assertFormalJuryReportUniqueness(connection);
             assertAppendOnlyTablesRejectMutation(connection);
         }
     }
@@ -270,11 +279,11 @@ class MigrationIntegrationTest {
                     """
                     insert into fulfillment_dispute_case (
                         id, user_id, merchant_id, creation_idempotency_key,
-                        case_type, case_status, risk_level, title, description,
+                        case_type, case_status, initiator_role, risk_level, title, description,
                         created_by, updated_by
                     ) values (
                         'CASE_APPEND_ONLY', 'user-local', 'merchant-local', 'append-only-case',
-                        'DISPUTE', 'EVIDENCE_OPEN', 'HIGH', 'Append-only test',
+                        'DISPUTE', 'EVIDENCE_OPEN', 'USER', 'HIGH', 'Append-only test',
                         'Database immutability test', 'test', 'test'
                     )
                     """);
@@ -327,11 +336,11 @@ class MigrationIntegrationTest {
                     """
                     insert into fulfillment_dispute_case (
                         id, user_id, merchant_id, creation_idempotency_key,
-                        case_type, case_status, hearing_route, risk_level,
+                        case_type, case_status, initiator_role, hearing_route, risk_level,
                         title, description, current_room, created_by, updated_by
                     ) values (
                         'CASE_ROUND_FIVE', 'user-local', 'merchant-local',
-                        'round-five-case', 'DISPUTE', 'HEARING', 'FULL_HEARING',
+                        'round-five-case', 'DISPUTE', 'HEARING', 'USER', 'FULL_HEARING',
                         'HIGH', 'Round five test',
                         'Database constraint must match configurable hearing rounds.',
                         'HEARING', 'test', 'test'
@@ -360,6 +369,70 @@ class MigrationIntegrationTest {
                         5, 'USER', 'user-local', 'PARTY_ACTION', '{}',
                         now(), 'user-local', 'user-local'
                     )
+                    """);
+        }
+    }
+
+    private static void assertFormalJuryReportUniqueness(Connection connection)
+            throws SQLException {
+        try (Statement statement = connection.createStatement()) {
+            statement.executeUpdate(
+                    """
+                    insert into fulfillment_dispute_case (
+                        id, user_id, merchant_id, creation_idempotency_key,
+                        case_type, case_status, initiator_role, risk_level, title, description,
+                        created_by, updated_by
+                    ) values (
+                        'CASE_A2A_UNIQUENESS', 'user-local', 'merchant-local',
+                        'a2a-uniqueness-case', 'DISPUTE', 'HEARING', 'USER', 'HIGH',
+                        'A2A uniqueness test', 'Formal jury reports must be unique.',
+                        'test', 'test'
+                    )
+                    """);
+            statement.executeUpdate(
+                    """
+                    insert into agent_a2a_message (
+                        id, case_id, round_no, from_agent, to_agent, message_type,
+                        input_refs_json, payload_json, visibility, created_at, created_by
+                    ) values (
+                        'A2A_JURY_REPORT_1', 'CASE_A2A_UNIQUENESS', 3,
+                        'JURY_PANEL', 'PRESIDING_JUDGE', 'JURY_REVIEW_REPORT',
+                        '{}', '{}', 'REVIEWER_VISIBLE', now(), 'jury-panel'
+                    )
+                    """);
+        }
+
+        assertThatSqlFails(
+                connection,
+                """
+                insert into agent_a2a_message (
+                    id, case_id, round_no, from_agent, to_agent, message_type,
+                    input_refs_json, payload_json, visibility, created_at, created_by
+                ) values (
+                    'A2A_JURY_REPORT_2', 'CASE_A2A_UNIQUENESS', 3,
+                    'JURY_PANEL', 'PRESIDING_JUDGE', 'JURY_REVIEW_REPORT',
+                    '{}', '{}', 'REVIEWER_VISIBLE', now(), 'jury-panel'
+                )
+                """,
+                "uq_agent_a2a_jury_review_report");
+
+        try (Statement statement = connection.createStatement()) {
+            statement.executeUpdate(
+                    """
+                    insert into agent_a2a_message (
+                        id, case_id, round_no, from_agent, to_agent, message_type,
+                        input_refs_json, payload_json, visibility, created_at, created_by
+                    ) values
+                        (
+                            'A2A_SILENT_NOTE_1', 'CASE_A2A_UNIQUENESS', 2,
+                            'JURY_PANEL', 'PRESIDING_JUDGE', 'JURY_SILENT_NOTE',
+                            '{}', '{}', 'SYSTEM_AUDIT_ONLY', now(), 'jury-panel'
+                        ),
+                        (
+                            'A2A_SILENT_NOTE_2', 'CASE_A2A_UNIQUENESS', 2,
+                            'JURY_PANEL', 'PRESIDING_JUDGE', 'JURY_SILENT_NOTE',
+                            '{}', '{}', 'SYSTEM_AUDIT_ONLY', now(), 'jury-panel'
+                        )
                     """);
         }
     }

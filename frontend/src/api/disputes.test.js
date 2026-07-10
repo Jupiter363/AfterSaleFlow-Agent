@@ -38,6 +38,84 @@ describe("dispute API", () => {
     expect(outcome.final_decision.human_confirmed).toBe(true);
   });
 
+  it("confirms an outcome draft through the case-scoped reviewer endpoint", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        success: true,
+        data: {
+          task_id: "REVIEW_1",
+          decision: "APPROVE",
+          execution_allowed: true,
+        },
+      }),
+    });
+
+    const result = await disputeApi.confirmOutcomeDraft(
+      { id: "reviewer-local", role: "PLATFORM_REVIEWER" },
+      "CASE_outcome",
+      "审核员确认 AI 裁决草案。",
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/disputes/CASE_outcome/outcome/review/confirm",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ reason: "审核员确认 AI 裁决草案。" }),
+        headers: expect.objectContaining({
+          "Content-Type": "application/json",
+          "Idempotency-Key": expect.stringMatching(/^outcome-confirm-/),
+          "X-Role": "PLATFORM_REVIEWER",
+          "X-User-Id": "reviewer-local",
+        }),
+      }),
+    );
+    expect(result.execution_allowed).toBe(true);
+  });
+
+  it("modifies an outcome draft through the case-scoped reviewer endpoint", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        success: true,
+        data: {
+          task_id: "REVIEW_2",
+          decision: "MODIFY_AND_APPROVE",
+          execution_allowed: true,
+        },
+      }),
+    });
+    const approvedPlan = {
+      id: "PLAN_2",
+      actions: [{ action_type: "REFUND", amount: 199 }],
+    };
+
+    const result = await disputeApi.modifyOutcomeDraft(
+      { id: "reviewer-local", role: "PLATFORM_REVIEWER" },
+      "CASE_outcome",
+      "审核员调整退款金额。",
+      approvedPlan,
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/disputes/CASE_outcome/outcome/review/modify",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          reason: "审核员调整退款金额。",
+          approved_plan: approvedPlan,
+        }),
+        headers: expect.objectContaining({
+          "Content-Type": "application/json",
+          "Idempotency-Key": expect.stringMatching(/^outcome-modify-/),
+          "X-Role": "PLATFORM_REVIEWER",
+          "X-User-Id": "reviewer-local",
+        }),
+      }),
+    );
+    expect(result.decision).toBe("MODIFY_AND_APPROVE");
+  });
+
   it("cancels intake when the issue is resolved before admission", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue({
       ok: true,
@@ -90,7 +168,7 @@ describe("dispute API", () => {
     });
 
     const result = await disputeApi.simulateExternalImport(actor, {
-      count: 2,
+      count: 1,
       scenario: "手表售后争议",
       risk_level_hint: "MEDIUM",
       initiator_role_hint: "USER",
@@ -115,7 +193,7 @@ describe("dispute API", () => {
     );
     expect(requestBody).toEqual(
       expect.objectContaining({
-        count: 2,
+        count: 1,
         scenario: "手表售后争议",
         risk_level_hint: "MEDIUM",
         initiator_role_hint: "USER",

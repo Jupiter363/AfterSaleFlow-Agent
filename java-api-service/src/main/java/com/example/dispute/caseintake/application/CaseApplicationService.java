@@ -262,7 +262,9 @@ public class CaseApplicationService {
                         command.logisticsId(),
                         intakeInitiatorRole(actor.role(), command.initiatorRole()),
                         command.description(),
-                        null),
+                        null,
+                        command.claimResolutionSeed(),
+                        command.respondentAttitudeSeed()),
                 traceId,
                 requestId);
 

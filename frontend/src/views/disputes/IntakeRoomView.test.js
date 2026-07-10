@@ -78,7 +78,7 @@ async function mountInteractiveView(options = {}) {
       postMessageAction: options.postMessageAction,
       messagesLoader: options.messagesLoader,
       turnMemoryLoader: options.turnMemoryLoader,
-      confirmAction: vi.fn(),
+      confirmAction: options.confirmAction || vi.fn(),
       cancelAction: options.cancelAction,
     },
     global: { plugins: [router] },
@@ -95,15 +95,17 @@ describe("IntakeRoomView", () => {
     const { wrapper } = await mountView();
 
     expect(wrapper.text()).toContain("争议接待官");
-    expect(wrapper.text()).toContain("ORDER-1");
+    expect(wrapper.get("[data-dispute-detail-card]").text()).toContain("争议详情");
     expect(wrapper.text()).toContain("未收到包裹");
+    expect(wrapper.get("[data-dispute-detail-respondent]").text()).toContain("商家尚未回应");
+    expect(wrapper.get("[data-verification-gaps]").text()).toContain("下一步核验重点");
     expect(wrapper.text()).toContain("高风险");
     expect(wrapper.text()).not.toContain("签收人与收件人不一致");
     expect(wrapper.text()).not.toContain("最终确认说明");
     expect(wrapper.text()).not.toContain("AI 受理建议非最终");
     expect(wrapper.find(".intake-dossier__confirm textarea").exists()).toBe(false);
     expect(wrapper.find(".intake-dossier__actions").exists()).toBe(true);
-    expect(wrapper.findAll("[data-intake-sticker]").length).toBeGreaterThanOrEqual(3);
+    expect(wrapper.find("[data-origin-statement-card]").exists()).toBe(true);
     expect(wrapper.find("[data-single-party-statement]").exists()).toBe(true);
   });
 
@@ -315,7 +317,8 @@ describe("IntakeRoomView", () => {
       },
     });
 
-    expect(wrapper.text()).toContain("手表质量争议");
+    expect(wrapper.find("[data-dispute-detail-title]").exists()).toBe(false);
+    expect(wrapper.get("[data-dispute-detail-summary]").element.tagName).toBe("STRONG");
     expect(wrapper.text()).toContain("用户反馈手表损坏");
     expect(wrapper.text()).toContain("故障细节");
     expect(wrapper.text()).toContain("用户原始陈述");
@@ -404,31 +407,46 @@ describe("IntakeRoomView", () => {
 
     expect(wrapper.find("[data-case-detail-dossier]").exists()).toBe(true);
     const summaryCard = wrapper.get("[data-case-detail-summary-card]");
-    expect(summaryCard.find(".intake-case-detail__story").exists()).toBe(true);
-    expect(summaryCard.find(".intake-case-detail__focus").exists()).toBe(true);
-    expect(summaryCard.find(".intake-case-detail__reason").exists()).toBe(true);
+    expect(wrapper.find("[data-dossier-status-rail]").exists()).toBe(true);
+    expect(wrapper.get("[data-dossier-status-rail]").text()).toContain("完善度 88%");
+    expect(wrapper.get("[data-dossier-status-rail]").text()).toContain("中风险");
+    expect(summaryCard.find("[data-dispute-detail-card]").exists()).toBe(true);
+    expect(summaryCard.find("[data-dispute-detail-card]").text()).toContain("争议详情");
+    expect(summaryCard.find(".intake-case-detail__story").exists()).toBe(false);
+    expect(summaryCard.find(".intake-case-detail__focus").exists()).toBe(false);
+    expect(summaryCard.find(".intake-case-detail__reason").exists()).toBe(false);
     expect(summaryCard.find(".intake-case-detail__chips").exists()).toBe(false);
-    expect(summaryCard.find("[data-case-detail-meta]").exists()).toBe(true);
-    expect(wrapper.text()).toContain("物流显示签收但用户称未收到商品");
+    expect(summaryCard.find("[data-dispute-detail-title]").exists()).toBe(false);
+    expect(summaryCard.find("[data-dispute-detail-focus]").exists()).toBe(false);
+    expect(summaryCard.get("[data-dispute-detail-summary]").element.tagName).toBe("STRONG");
     expect(wrapper.text()).toContain("用户称订单物流已显示签收");
-    expect(summaryCard.text()).toContain("仍缺少可信的用户原始陈述与商家质检视频。");
-    expect(summaryCard.text()).not.toContain("待核验：签收底单");
-    expect(wrapper.text()).toContain("SIGNED_NOT_RECEIVED");
-    expect(wrapper.text()).toContain("88/100");
+    expect(summaryCard.text()).not.toContain("仍缺少可信的用户原始陈述与商家质检视频。");
+    expect(wrapper.get("[data-verification-gaps]").text()).toContain("下一步核验重点");
+    expect(wrapper.get("[data-verification-gaps]").text()).toContain("签收底单");
+    expect(wrapper.text()).not.toContain("SIGNED_NOT_RECEIVED");
+    expect(wrapper.text()).not.toContain("88/100");
     expect(wrapper.text()).toContain("可以进入下一步");
     expect(wrapper.find("[data-case-detail-dossier]").exists()).toBe(true);
-    expect(wrapper.find("[data-case-detail-meta]").exists()).toBe(true);
-    expect(wrapper.find("[data-case-index-strip]").exists()).toBe(false);
+    expect(wrapper.find("[data-case-detail-meta]").exists()).toBe(false);
+    expect(wrapper.find("[data-case-index-strip]").exists()).toBe(true);
+    expect([...summaryCard.element.children].some((child) => child.hasAttribute("data-case-index-strip"))).toBe(false);
+    expect(summaryCard.get("[data-dispute-detail-card] [data-case-index-strip]").exists()).toBe(true);
+    expect(summaryCard.get("[data-dispute-detail-card] [data-origin-statement-card]").exists()).toBe(true);
     expect(wrapper.findAll("[data-case-index-chip]").length).toBe(0);
     expect(wrapper.find("[data-case-index-list]").exists()).toBe(true);
-    expect(wrapper.findAll("[data-case-index-field]").length).toBe(4);
+    expect(wrapper.findAll("[data-case-index-field]").length).toBe(3);
+    expect(wrapper.get("[data-case-index-strip]").text()).toContain("ORDER-1");
+    expect(wrapper.get("[data-case-index-strip]").text()).toContain("AFTER-1");
+    expect(wrapper.get("[data-case-index-strip]").text()).toContain("SF1234567890");
     expect(wrapper.find("[data-party-claims-grid]").exists()).toBe(false);
     expect(wrapper.findAll("[data-party-claim-card]").length).toBe(0);
+    expect(wrapper.find("[data-origin-statement-card]").exists()).toBe(true);
     expect(wrapper.find("[data-single-party-statement]").exists()).toBe(true);
     expect(wrapper.findAll("[data-dossier-section]").length).toBe(0);
     expect(wrapper.text()).toContain("案件索引");
-    expect(wrapper.text()).toContain("单方主观描述：商家自述");
-    expect(wrapper.find("[data-single-party-statement-label]").exists()).toBe(false);
+    expect(wrapper.text()).toContain("原始陈述");
+    expect(wrapper.find("[data-origin-statement-note]").exists()).toBe(false);
+    expect(wrapper.find("[data-single-party-statement-label]").exists()).toBe(true);
     expect(wrapper.text()).toContain("商家要求等待物流核查。");
     expect(wrapper.text()).not.toContain("用户描述商家要求等待物流核查。");
     expect(wrapper.text()).not.toContain("用户描述：商家自述");
@@ -437,15 +455,433 @@ describe("IntakeRoomView", () => {
     expect(wrapper.text()).not.toContain("用户主张");
     expect(wrapper.text()).not.toContain("商家主张");
     expect(wrapper.text()).not.toContain("订单 / 售后 / 物流");
-    expect(wrapper.text()).toContain("订单号：ORDER-1");
-    expect(wrapper.text()).toContain("售后单号：AFTER-1");
-    expect(wrapper.text()).toContain("物流单号：SF1234567890");
-    expect(wrapper.text()).toContain("发起方：商家");
+    expect(wrapper.text()).toContain("ORDER-1");
+    expect(wrapper.text()).toContain("AFTER-1");
+    expect(wrapper.text()).toContain("SF1234567890");
+    expect(wrapper.text()).not.toContain("发起方：商家");
     expect(wrapper.text()).not.toContain("关联引用");
     expect(wrapper.text()).not.toContain("处理判断");
     expect(wrapper.get("[data-case-risk-grade]").text()).toContain("中风险");
     expect(wrapper.get("[data-dossier-progress-hint]").text()).toBe("可以进入下一步");
     expect(wrapper.text()).not.toContain("可继续对话纠正");
+  });
+
+  it("renders the claim and respondent attitude state from the intake dossier", async () => {
+    const wrapper = await mountInteractiveView({
+      initialTurnMemory: {
+        turn_no: 2,
+        case_intake_dossier: {
+          dossier_version: 1,
+          quality_score: 82,
+          ready_for_next_step: true,
+          admission_recommendation: "ACCEPTED",
+          dossier: {
+            schema_version: "intake_case_detail.v1",
+            case_story: {
+              title: "签收未收到争议",
+              one_sentence_summary: "物流显示签收，但用户称本人未收到包裹。",
+            },
+            references: {
+              order_reference: "ORDER-CLAIM-1",
+              logistics_reference: "SF123456789",
+            },
+            party_positions: {
+              user_claim: "用户称本人未收到包裹。",
+              merchant_claim: "",
+            },
+            requested_resolution: {
+              requested_outcome: "REFUND",
+              expected_resolution_text: "用户请求退款。",
+            },
+            claim_resolution: {
+              initiator_role: "USER",
+              requested_resolution: "REFUND",
+              requested_amount: 299,
+              requested_items: "儿童手表 1 件",
+              request_reason: "用户称物流显示签收但本人未收到包裹，希望退款。",
+              original_statement: "我没收到包裹，希望退款",
+              normalized_statement: "用户称未实际收到包裹，并请求退款。",
+            },
+            respondent_attitude: {
+              respondent_role: "MERCHANT",
+              attitude: "NOT_RESPONDED",
+              position: "商家尚未在接待室表达态度。",
+              source: "尚未回应",
+              confidence: 0.5,
+            },
+            dispute_core_state: {
+              core_conflict: "用户请求退款，但商家态度尚待补充。",
+              conflict_type: "CLAIM_UNANSWERED",
+              facts_in_dispute: ["用户是否实际收到商品"],
+              next_verification_focus: ["签收人身份", "物流投递轨迹"],
+            },
+            dispute_focus: {
+              core_issue: "SIGNED_NOT_RECEIVED",
+              facts_to_verify: ["签收人身份"],
+            },
+            risk_assessment: {
+              case_grade: "MEDIUM",
+              risk_signals: [],
+            },
+            intake_quality: {
+              score: 82,
+              threshold: 80,
+              ready_for_next_step: true,
+            },
+            admission: {
+              recommendation: "ACCEPTED",
+            },
+          },
+        },
+      },
+    });
+
+    const disputeDetail = wrapper.get("[data-dispute-detail-card]");
+    expect(disputeDetail.text()).toContain("争议详情");
+    expect(disputeDetail.find("[data-dispute-detail-title]").exists()).toBe(false);
+    expect(disputeDetail.get("[data-dispute-detail-summary]").element.tagName).toBe("STRONG");
+    expect(disputeDetail.get("[data-dispute-detail-summary]").text()).toContain("物流显示签收");
+    expect(disputeDetail.get("[data-dispute-detail-claim]").text()).toContain("用户称未实际收到包裹，并请求退款");
+    expect(disputeDetail.get("[data-dispute-detail-claim]").text()).toContain("¥299");
+    expect(disputeDetail.get("[data-dispute-detail-claim]").text()).toContain("儿童手表 1 件");
+    expect(disputeDetail.get("[data-dispute-detail-respondent]").text()).toContain("商家尚未回应");
+    expect(disputeDetail.get("[data-dispute-detail-respondent]").text()).not.toContain("商家尚未在接待室表达态度");
+    expect(disputeDetail.find("[data-dispute-detail-focus]").exists()).toBe(false);
+    expect(wrapper.get("[data-verification-gaps]").text()).toContain("签收人身份");
+    expect(wrapper.find("[data-case-claim-status]").exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("REFUND");
+    expect(wrapper.text()).not.toContain("NOT_RESPONDED");
+  });
+
+  it("shows claim status and verification gaps for legacy case-detail dossiers without structured claim fields", async () => {
+    const wrapper = await mountInteractiveView({
+      initialAnalysis: {
+        ...analysis,
+        order_reference: "ORDER-FE-31029016",
+        after_sales_reference: "",
+        logistics_reference: "",
+      },
+      initialTurnMemory: {
+        turn_no: 2,
+        case_intake_dossier: {
+          dossier_version: 1,
+          quality_score: 0,
+          ready_for_next_step: false,
+          admission_recommendation: "NEED_MORE_INFO",
+          dossier: {
+            schema_version: "intake_case_detail.v1",
+            case_story: {
+              title: "履约争议待核实",
+              one_sentence_summary: "物流显示签收，但我没有收到包裹。我希望平台核实后退款。",
+            },
+            references: {
+              order_reference: "ORDER-FE-31029016",
+              after_sales_reference: "",
+              logistics_reference: "",
+            },
+            party_positions: {
+              user_claim: "物流显示签收，但我没有收到包裹。我希望平台核实后退款。",
+              merchant_claim: "",
+            },
+            requested_resolution: {
+              requested_outcome: "REFUND",
+              expected_resolution_text: "用户请求退款。",
+            },
+            risk_assessment: {
+              case_grade: "HIGH",
+              risk_signals: [],
+            },
+            intake_quality: {
+              score: 0,
+              threshold: 80,
+              ready_for_next_step: false,
+            },
+            admission: {
+              recommendation: "NEED_MORE_INFO",
+            },
+          },
+        },
+      },
+    });
+
+    const disputeDetail = wrapper.get("[data-dispute-detail-card]");
+    expect(disputeDetail.text()).toContain("争议详情");
+    expect(disputeDetail.get("[data-dispute-detail-claim]").text()).toContain("用户请求退款");
+    expect(disputeDetail.get("[data-dispute-detail-respondent]").text()).toContain("商家尚未回应");
+    expect(disputeDetail.find("[data-dispute-detail-focus]").exists()).toBe(false);
+    expect(disputeDetail.text()).not.toContain("REFUND");
+    expect(disputeDetail.text()).not.toContain("UNKNOWN");
+
+    const gaps = wrapper.get("[data-verification-gaps]");
+    expect(gaps.text()).toContain("下一步核验重点");
+    expect(gaps.text()).toContain("物流单号或平台可识别的物流引用");
+    expect(gaps.text()).toContain("签收截图、取件记录或未收到凭证");
+    expect(gaps.text()).toContain("商家对诉求的明确回应");
+  });
+
+  it("uses the user position as the respondent response when the merchant initiated the dispute", async () => {
+    const wrapper = await mountInteractiveView({
+      initialAnalysis: {
+        ...analysis,
+        initiator_role: "MERCHANT",
+        party_claims: {
+          merchant: "商家请求平台驳回退款。",
+          user: "用户不同意驳回，仍要求退款。",
+        },
+      },
+      initialTurnMemory: {
+        turn_no: 2,
+        case_intake_dossier: {
+          dossier_version: 1,
+          dossier: {
+            schema_version: "intake_case_detail.v1",
+            claim_resolution: {
+              initiator_role: "MERCHANT",
+              requested_resolution: "OTHER",
+              normalized_statement: "商家请求平台驳回退款。",
+            },
+            party_positions: {
+              merchant_claim: "商家请求平台驳回退款。",
+              user_claim: "用户不同意驳回，仍要求退款。",
+            },
+          },
+        },
+      },
+    });
+
+    const respondent = wrapper.get("[data-dispute-detail-respondent]");
+    expect(respondent.text()).toContain("用户不同意驳回，仍要求退款");
+    expect(respondent.text()).not.toContain("商家请求平台驳回退款");
+  });
+
+  it("asks for the user response when a merchant-initiated dispute has no respondent position", async () => {
+    const wrapper = await mountInteractiveView({
+      initialAnalysis: {
+        ...analysis,
+        initiator_role: "MERCHANT",
+        party_claims: {
+          merchant: "商家请求平台核验用户退款理由。",
+          user: "",
+        },
+      },
+      initialTurnMemory: {
+        turn_no: 1,
+        case_intake_dossier: {
+          dossier_version: 1,
+          dossier: {
+            schema_version: "intake_case_detail.v1",
+            claim_resolution: {
+              initiator_role: "MERCHANT",
+              requested_resolution: "VERIFY_OR_EXPLAIN_ONLY",
+            },
+            party_positions: {
+              merchant_claim: "商家请求平台核验用户退款理由。",
+              user_claim: "",
+            },
+          },
+        },
+      },
+    });
+
+    expect(wrapper.get("[data-dispute-detail-respondent]").text()).toContain("用户尚未回应");
+    expect(wrapper.get("[data-verification-gaps]").text()).toContain("用户对诉求的明确回应");
+    expect(wrapper.get("[data-verification-gaps]").text()).not.toContain("商家对诉求的明确回应");
+  });
+
+  it("preserves external reference identifiers without translating enum-like tokens", async () => {
+    const wrapper = await mountInteractiveView({
+      initialAnalysis: {
+        ...analysis,
+        order_reference: "ORDER_MERCHANT_INITIATED",
+        after_sales_reference: "AFTER_USER_HIGH",
+        logistics_reference: "LOGISTICS_MEDIUM_USER",
+      },
+    });
+
+    const index = wrapper.get("[data-case-index-strip]");
+    expect(index.text()).toContain("ORDER_MERCHANT_INITIATED");
+    expect(index.text()).toContain("AFTER_USER_HIGH");
+    expect(index.text()).toContain("LOGISTICS_MEDIUM_USER");
+  });
+
+  it("keeps a claim status placeholder visible when the intake memory has no case-detail schema yet", async () => {
+    const wrapper = await mountInteractiveView({
+      initialAnalysis: {
+        ...analysis,
+        initiator_role: "USER",
+        requested_outcome: "",
+        party_claims: {
+          user: "",
+          merchant: "",
+        },
+      },
+      initialTurnMemory: {
+        turn_no: 1,
+        case_intake_dossier: {
+          dossier_version: 0,
+          quality_score: 0,
+          ready_for_next_step: false,
+          dossier: {
+            schema_version: "legacy_intake_summary.v1",
+          },
+        },
+      },
+    });
+
+    const disputeDetail = wrapper.get("[data-dispute-detail-card]");
+    expect(disputeDetail.text()).toContain("争议详情");
+    expect(disputeDetail.get("[data-dispute-detail-claim]").text()).toContain("诉求待确认");
+    expect(disputeDetail.get("[data-dispute-detail-claim]").text()).not.toContain("请求待确认诉求");
+    expect(disputeDetail.get("[data-dispute-detail-claim]").text()).not.toContain("待确认诉求待确认");
+    expect(disputeDetail.get("[data-dispute-detail-respondent]").text()).toContain("商家尚未回应");
+    expect(disputeDetail.text()).not.toContain("UNKNOWN");
+  });
+
+  it("does not duplicate unknown role and unknown resolution in the claim placeholder", async () => {
+    const wrapper = await mountInteractiveView({
+      initialAnalysis: {
+        ...analysis,
+        initiator_role: "UNKNOWN",
+        requested_outcome: "",
+        party_claims: {
+          user: "",
+          merchant: "",
+        },
+      },
+      initialTurnMemory: {
+        turn_no: 1,
+        case_intake_dossier: {
+          dossier_version: 0,
+          quality_score: 0,
+          ready_for_next_step: false,
+          dossier: {
+            schema_version: "legacy_intake_summary.v1",
+          },
+        },
+      },
+    });
+
+    const disputeDetail = wrapper.get("[data-dispute-detail-card]");
+    expect(disputeDetail.get("[data-dispute-detail-claim]").text()).toContain("诉求待确认");
+    expect(disputeDetail.get("[data-dispute-detail-claim]").text()).not.toContain("待确认诉求待确认");
+    expect(disputeDetail.get("[data-dispute-detail-respondent]").text()).toContain("对方尚未回应");
+    expect(disputeDetail.get("[data-dispute-detail-respondent]").text()).not.toContain("待确认尚未回应");
+    expect(disputeDetail.text()).not.toContain("待确认尚未");
+    expect(disputeDetail.text()).not.toContain("待确认的具体诉求");
+    expect(disputeDetail.text()).not.toContain("待确认诉求与待确认回应");
+  });
+
+  it("shows service errors in a modal notice instead of embedding them in the right dossier card", async () => {
+    const wrapper = await mountInteractiveView({
+      confirmAction: vi.fn().mockRejectedValue(new Error("服务返回了不可解析的响应（HTTP 502）")),
+    });
+
+    await wrapper.get("[data-confirm-admission]").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.find(".intake-dossier__error").exists()).toBe(false);
+    const notice = wrapper.get("[data-intake-error-dialog]");
+    expect(notice.attributes("role")).toBe("alertdialog");
+    expect(notice.text()).toContain("服务暂时不可用");
+    expect(notice.text()).toContain("HTTP 502");
+    expect(wrapper.get("[data-case-detail-dossier]").text()).not.toContain("HTTP 502");
+  });
+
+  it("keeps long dossier text bounded while preserving full content for inspection", async () => {
+    const longTitle = "物流显示签收但用户称本人、家人、同住人和门岗均未收到商品且商家坚持以系统签收记录拒绝退款的复杂履约争议";
+    const longSummary =
+      "用户称订单物流在系统中显示签收，但本人没有收到包裹，快递柜也没有取件记录，门岗和家人均表示未代收；商家客服要求用户自行联系平台，暂未提供签收底单、投递照片或签收人身份信息。";
+    const longConflict =
+      "用户请求退款并要求核验签收真实性，但商家暂未明确同意退款，双方争议集中在物流签收记录是否足以证明用户本人或其授权人员已经实际收到商品。";
+    const longStatement =
+      "我没有收到包裹。系统显示签收，但快递柜没有记录，门岗也说没有帮我签收，家里人也没有收到。商家客服让我找平台处理，我希望平台核验签收真实性后给我退款。";
+    const wrapper = await mountInteractiveView({
+      initialTurnMemory: {
+        turn_no: 2,
+        case_intake_dossier: {
+          dossier_version: 2,
+          quality_score: 63,
+          ready_for_next_step: false,
+          admission_recommendation: "NEED_MORE_INFO",
+          dossier: {
+            schema_version: "intake_case_detail.v1",
+            case_story: {
+              title: longTitle,
+              one_sentence_summary: longSummary,
+            },
+            references: {
+              order_reference: "ORDER-WITH-A-VERY-LONG-REFERENCE-202607090001",
+              after_sales_reference: "AFTER-SALE-LONG-ID-202607090001",
+              logistics_reference: "SF-VERY-LONG-LOGISTICS-TRACKING-NUMBER-202607090001",
+            },
+            party_positions: {
+              user_claim: longStatement,
+              merchant_claim: "商家尚未给出明确退款态度，只要求用户等待物流核查。",
+            },
+            claim_resolution: {
+              initiator_role: "USER",
+              requested_resolution: "REFUND",
+              requested_amount: 299,
+              requested_items: "儿童手表 1 件，订单内还包含表带和保护膜，需要确认是否整体退款",
+              normalized_statement: "用户称未实际收到包裹，并请求退款。",
+            },
+            respondent_attitude: {
+              respondent_role: "MERCHANT",
+              attitude: "NOT_RESPONDED",
+              position: "商家尚未在接待室表达明确态度，仅要求用户等待物流核查，未说明是否接受退款。",
+            },
+            dispute_core_state: {
+              core_conflict: longConflict,
+              facts_in_dispute: ["用户是否实际收到商品", "签收记录是否足以证明本人收货"],
+              next_verification_focus: [
+                "签收人身份、签收位置和签收时间需要进一步核验",
+                "物流投递照片、快递柜记录或门岗代收记录需要补充",
+              ],
+            },
+            dispute_focus: {
+              core_issue: "物流签收记录与用户未收到陈述之间的事实冲突，需要核验签收人身份、签收位置和投递链路",
+              facts_to_verify: ["签收人身份", "签收位置", "物流投递轨迹"],
+            },
+            risk_assessment: {
+              case_grade: "MEDIUM",
+              risk_signals: [],
+            },
+            intake_quality: {
+              score: 63,
+              threshold: 80,
+              ready_for_next_step: false,
+              improvement_reason:
+                "仍缺少可信的签收人身份、签收位置、物流投递照片、商家是否接受退款的明确态度。",
+            },
+            admission: {
+              recommendation: "NEED_MORE_INFO",
+            },
+          },
+        },
+      },
+    });
+
+    const detailCard = wrapper.get("[data-dispute-detail-card]");
+    expect(detailCard.find("[data-dispute-detail-title]").exists()).toBe(false);
+    expect(detailCard.get("[data-dispute-detail-summary]").attributes("title")).toBe(longSummary);
+    expect(detailCard.find("[data-dispute-detail-focus]").exists()).toBe(false);
+    expect(detailCard.find("[data-dispute-detail-facts]").exists()).toBe(false);
+    expect(wrapper.get("[data-origin-statement-text]").attributes("title")).toBe(longStatement);
+    expect(wrapper.findAll("[data-verification-gap-item]").length).toBeLessThanOrEqual(4);
+
+    const source = readFileSync("src/views/disputes/IntakeRoomView.vue", "utf8");
+    expect(source).toContain("@supports (-webkit-line-clamp: 1)");
+    expect(source).toContain("--cover-summary-lines: 7");
+    expect(source).toContain("--summary-note-min-height: 132px");
+    expect(source).toContain("--detail-field-lines: 2");
+    expect(source).toContain(".intake-case-detail__summary-note");
+    expect(source).toContain("align-content: center;");
+    expect(source).toContain(".intake-case-detail__origin-card");
+    expect(source).toContain("overflow-y: auto;");
+    expect(source).not.toContain("data-dispute-detail-title");
+    expect(source).not.toContain("background: #ffffffad;");
+    expect(source).not.toContain("border: 1px solid #e1ebf7;");
+    expect(source).toContain("data-origin-statement-text");
   });
 
   it("infers the single-party intake initiator from immutable party messages when the model slot is missing", async () => {
@@ -679,14 +1115,14 @@ describe("IntakeRoomView", () => {
       },
     });
 
-    expect(wrapper.text()).toContain("USER private intake chat should vanish");
+    expect(wrapper.text()).toContain("用户 private intake chat should vanish");
     expect(wrapper.text()).toContain("用户-only dossier text");
 
     actor.id = "user-other";
     actor.role = "USER";
     await wrapper.vm.$nextTick();
 
-    expect(wrapper.text()).not.toContain("USER private intake chat should vanish");
+    expect(wrapper.text()).not.toContain("用户 private intake chat should vanish");
     expect(wrapper.text()).not.toContain("USER-only dossier text");
   });
 
@@ -746,7 +1182,7 @@ describe("IntakeRoomView", () => {
     });
     await flushPromises();
 
-    expect(wrapper.text()).toContain("MERCHANT current intake chat");
+    expect(wrapper.text()).toContain("商家 current intake chat");
     expect(wrapper.text()).not.toContain("USER stale right board");
   });
 
@@ -761,21 +1197,51 @@ describe("IntakeRoomView", () => {
     expect(source).toContain("grid-template-rows: auto minmax(0, 1fr) auto;");
     expect(source).toContain("overflow: hidden;");
     expect(source).toContain(".intake-case-detail__summary-card");
-    expect(source).toContain("flex: 1 1 auto;");
-    expect(source).toContain("grid-template-rows: auto 96px auto minmax(0, 1fr);");
-    expect(source).toContain("grid-template-rows: auto minmax(0, 1fr);");
-    expect(source).toContain("min-height: 96px;");
+    expect(source).toContain(".intake-case-detail__status-rail");
+    expect(source).toContain("data-dossier-status-pill");
+    expect(source).toContain("data-dossier-status-hint");
+    expect(source).toContain("justify-content: flex-start;");
+    expect(source).toContain(".intake-case-detail__status-copy strong {\n  display: inline-flex;");
+    expect(source).toContain(".intake-case-detail__risk {\n  display: flex;");
+    expect(source).toContain("align-items: center;\n  justify-content: center;");
+    expect(source).toContain(".intake-case-detail__quality-track");
+    expect(source).toContain("grid-template-rows: 48px minmax(0, 1fr) minmax(92px, .22fr);");
+    expect(source).toMatch(/\.intake-case-detail\s*\{[\s\S]*?padding: 0;[\s\S]*?background: transparent;[\s\S]*?border: 0;[\s\S]*?border-radius: 0;[\s\S]*?box-shadow: none;/);
+    expect(source).toContain(".intake-case-detail__summary-card {\n  display: contents;");
+    expect(source).toContain(".intake-case-detail__dispute");
+    expect(source).toContain("grid-template-rows: auto var(--summary-note-min-height) var(--detail-meta-rows-height) minmax(0, 1fr);");
+    expect(source).toContain(".intake-case-detail__field");
+    expect(source).toContain("--detail-meta-row-height: 46px;");
+    expect(source).toContain("--detail-meta-rows-height: 138px;");
+    expect(source).toContain("data-dispute-detail-meta-rows");
+    expect(source).toContain(".intake-case-detail__meta-rows");
+    expect(source).toContain("height: var(--detail-meta-rows-height);");
+    expect(source).toContain("grid-template-rows: repeat(3, 1fr);");
+    expect(source).toContain(".intake-case-detail__field,\n.intake-case-detail__index-strip {");
+    expect(source).toContain("height: var(--detail-meta-row-height);");
+    expect(source).toContain(".intake-case-detail__todo-list");
+    expect(source).toContain(".intake-case-detail__origin-card");
+    expect(source).toContain(".intake-case-detail__index-strip");
+    expect(source).toMatch(/\.intake-case-detail__index-strip\s*\{\n  display: grid;[\s\S]*?border-bottom: 1px dashed #dce8f3;/);
+    expect(source).toMatch(/\.intake-case-detail__origin-card\s*\{\n  position: relative;[\s\S]*?border-top: 0;/);
+    expect(source).toContain(".intake-case-detail__todo-text");
+    expect(source).toContain("data-verification-gap-text");
+    expect(source).toContain("data-verification-gap-count");
+    expect(source).toContain(".intake-case-detail__todo-heading");
+    expect(source).not.toContain(".intake-case-detail__origin-card::before");
+    expect(source).not.toContain(".intake-case-detail__origin-note");
     expect(source).toContain("height: 100%;");
-    expect(source).toContain("max-height: none;");
     expect(source).toContain("overflow-y: auto;");
+    expect(source).toContain(".intake-case-detail {\n  --cover-summary-lines: 7;");
+    expect(source).toContain("overflow: hidden;");
     expect(source).toContain(".intake-dossier__confirm {\n  position: relative;\n  display: grid;\n  gap: 10px;\n  padding: 0;\n  background: transparent;\n  border: 0;");
     expect(source).not.toContain("border: 1px dashed #cddbec;");
+    expect(source).not.toContain("background: linear-gradient(135deg, #fffdf4, #fff9fb);");
+    expect(source).not.toContain("border: 1px solid #eee4c8;");
     expect(source).not.toContain(".intake-case-detail__meta {\n  display: grid;\n  flex: 1;");
     expect(source).not.toContain(".intake-case-detail__meta-section {\n  display: grid;\n  gap: 6px;\n  padding");
     expect(source).not.toContain(".intake-case-detail__single-statement::before");
     expect(source).not.toContain("max-height: 112px;");
     expect(source).not.toContain("intake-case-detail__chips");
-    expect(source).not.toContain("intake-index-chip");
-    expect(source).not.toContain("data-single-party-statement-label");
   });
 });

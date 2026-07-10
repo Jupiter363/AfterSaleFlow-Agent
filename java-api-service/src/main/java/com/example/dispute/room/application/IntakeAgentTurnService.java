@@ -250,7 +250,32 @@ public class IntakeAgentTurnService {
                 validIdentifierOrNull(seed.logisticsReference()),
                 seed.initiatorRole(),
                 seed.rawText(),
-                validIdentifierOrNull(seed.requestedOutcomeHint()));
+                validIdentifierOrNull(seed.requestedOutcomeHint()),
+                sanitizeClaimResolutionSeed(seed.claimResolutionSeed()),
+                sanitizeRespondentAttitudeSeed(seed.respondentAttitudeSeed()));
+    }
+
+    private static IntakeLobbySeed.ClaimResolutionSeed sanitizeClaimResolutionSeed(
+            IntakeLobbySeed.ClaimResolutionSeed seed) {
+        if (seed == null) return null;
+        return new IntakeLobbySeed.ClaimResolutionSeed(
+                validIdentifierOrNull(seed.initiatorRole()),
+                validIdentifierOrNull(seed.requestedResolution()),
+                seed.requestedAmount(),
+                blankToNull(seed.requestedItems()),
+                blankToNull(seed.requestReason()),
+                blankToNull(seed.originalStatement()));
+    }
+
+    private static IntakeLobbySeed.RespondentAttitudeSeed sanitizeRespondentAttitudeSeed(
+            IntakeLobbySeed.RespondentAttitudeSeed seed) {
+        if (seed == null) return null;
+        return new IntakeLobbySeed.RespondentAttitudeSeed(
+                validIdentifierOrNull(seed.respondentRole()),
+                validIdentifierOrNull(seed.attitude()),
+                blankToNull(seed.position()),
+                blankToNull(seed.source()),
+                seed.confidence());
     }
 
     private void persistAgentTurn(
@@ -510,6 +535,10 @@ public class IntakeAgentTurnService {
 
     private static boolean blank(String value) {
         return value == null || value.isBlank();
+    }
+
+    private static String blankToNull(String value) {
+        return value == null || value.isBlank() ? null : value.trim();
     }
 
     private static String validIdentifierOrNull(String value) {

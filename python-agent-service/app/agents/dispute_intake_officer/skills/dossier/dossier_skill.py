@@ -272,6 +272,15 @@ class CaseDetailDossierSkill:
                 "requested_outcome": request.lobby_seed.requested_outcome_hint or "UNKNOWN",
                 "expected_resolution_text": "",
             },
+            "claim_resolution": _default_claim_resolution(
+                request.lobby_seed,
+                source_text,
+            ),
+            "respondent_attitude": _default_respondent_attitude(request.lobby_seed),
+            "dispute_core_state": _default_dispute_core_state(
+                request.lobby_seed,
+                source_text,
+            ),
             "risk_assessment": {
                 "case_grade": "LOW",
                 "risk_signals": [],
@@ -320,6 +329,148 @@ def _deep_merge(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
                 continue
             merged[key] = copy.deepcopy(value)
     return merged
+
+
+CLAIM_RESOLUTION_LABELS = {
+    "REFUND": "退款",
+    "RETURN_REFUND": "退货退款",
+    "RESHIP": "补发",
+    "REPLACE_OR_REPAIR": "换货或维修",
+    "REPLACEMENT": "换货或维修",
+    "REPAIR": "换货或维修",
+    "COMPENSATION": "赔付",
+    "CANCEL_ORDER": "取消订单",
+    "VERIFY_OR_EXPLAIN_ONLY": "核验或解释",
+    "OTHER": "其他处理",
+    "UNKNOWN": "待确认处理",
+}
+
+
+def _default_claim_resolution(lobby_seed: Any, source_text: str) -> dict[str, Any]:
+    seed = getattr(lobby_seed, "claim_resolution_seed", None)
+    initiator_role = (
+        getattr(seed, "initiator_role", None)
+        or _party_role_or_default(getattr(lobby_seed, "initiator_role", None))
+    )
+    requested_resolution = (
+        getattr(seed, "requested_resolution", None)
+        or getattr(lobby_seed, "requested_outcome_hint", None)
+        or "UNKNOWN"
+    )
+    request_reason = getattr(seed, "request_reason", None) or source_text
+    original_statement = getattr(seed, "original_statement", None) or source_text
+    return {
+        "initiator_role": initiator_role,
+        "requested_resolution": requested_resolution,
+        "requested_amount": getattr(seed, "requested_amount", None),
+        "requested_items": getattr(seed, "requested_items", None) or "",
+        "request_reason": request_reason,
+        "original_statement": original_statement,
+        "normalized_statement": _normalized_claim_statement(
+            initiator_role,
+            requested_resolution,
+            request_reason,
+        ),
+    }
+
+
+def _default_respondent_attitude(lobby_seed: Any) -> dict[str, Any]:
+    seed = getattr(lobby_seed, "respondent_attitude_seed", None)
+    initiator_role = _party_role_or_default(getattr(lobby_seed, "initiator_role", None))
+    respondent_role = getattr(seed, "respondent_role", None) or _opposite_party(initiator_role)
+    attitude = getattr(seed, "attitude", None) or "NOT_RESPONDED"
+    return {
+        "respondent_role": respondent_role,
+        "attitude": attitude,
+        "position": getattr(seed, "position", None) or f"{_role_label(respondent_role)}尚未在接待室表达态度。",
+        "source": getattr(seed, "source", None) or "尚未回应",
+        "confidence": (
+            getattr(seed, "confidence", None)
+            if getattr(seed, "confidence", None) is not None
+            else 0.5
+        ),
+    }
+
+
+def _default_dispute_core_state(lobby_seed: Any, source_text: str) -> dict[str, Any]:
+    claim = _default_claim_resolution(lobby_seed, source_text)
+    attitude = _default_respondent_attitude(lobby_seed)
+    resolution_label = CLAIM_RESOLUTION_LABELS.get(
+        str(claim["requested_resolution"] or "UNKNOWN").upper(),
+        "相关处理",
+    )
+    initiator = _role_label(claim["initiator_role"])
+    respondent = _role_label(attitude["respondent_role"])
+    if attitude["attitude"] == "NOT_RESPONDED":
+        conflict_type = "CLAIM_UNANSWERED"
+        core_conflict = f"{initiator}请求{resolution_label}，但{respondent}态度尚待补充。"
+    elif attitude["attitude"] == "DISAGREE":
+        conflict_type = "CLAIM_REJECTED_WITH_FACT_DISPUTE"
+        core_conflict = f"{initiator}请求{resolution_label}，但{respondent}不同意该诉求。"
+    else:
+        conflict_type = "CLAIM_WITH_EVIDENCE_GAP"
+        core_conflict = f"{initiator}请求{resolution_label}，{respondent}回应状态仍需结合证据核验。"
+    return {
+        "core_conflict": core_conflict,
+        "conflict_type": conflict_type,
+        "facts_in_dispute": [],
+        "next_verification_focus": _verification_focus_for_text(source_text),
+    }
+
+
+def _normalized_claim_statement(
+    initiator_role: str,
+    requested_resolution: str,
+    request_reason: str,
+) -> str:
+    role = _role_label(initiator_role)
+    resolution = CLAIM_RESOLUTION_LABELS.get(
+        str(requested_resolution or "UNKNOWN").upper(),
+        "相关处理",
+    )
+    statement = _third_person_text(request_reason, initiator_role)
+    if resolution in statement:
+        return f"{role}称{statement}"
+    return f"{role}称{statement}，并请求{resolution}。"
+
+
+def _third_person_text(text: str, initiator_role: str) -> str:
+    role = _role_label(initiator_role)
+    normalized = (text or "").strip("。 ")
+    replacements = {
+        "我方": role,
+        "我们": role,
+        "我": role,
+        "本人": f"{role}本人",
+        "本店": role,
+    }
+    for source, target in replacements.items():
+        normalized = normalized.replace(source, target)
+    return normalized or "争议发起方提出处理诉求"
+
+
+def _verification_focus_for_text(text: str) -> list[str]:
+    focus: list[str] = []
+    if "签收" in text or "物流" in text:
+        focus.extend(["签收人身份", "签收位置", "物流投递轨迹"])
+    if "未收到" in text or "没收到" in text:
+        focus.append("用户未收货证明")
+    return focus
+
+
+def _party_role_or_default(value: str | None) -> str:
+    value = str(value or "").upper()
+    if value == "MERCHANT":
+        return "MERCHANT"
+    return "USER"
+
+
+def _opposite_party(value: str | None) -> str:
+    return "USER" if str(value or "").upper() == "MERCHANT" else "MERCHANT"
+
+
+def _role_label(value: str | None) -> str:
+    return "商家" if str(value or "").upper() == "MERCHANT" else "用户"
 
 
 def _is_case_detail(value: dict[str, Any]) -> bool:

@@ -23,7 +23,7 @@ import com.example.dispute.infrastructure.persistence.repository.FulfillmentCase
 import com.example.dispute.infrastructure.persistence.repository.RemedyPlanRepository;
 import com.example.dispute.infrastructure.persistence.repository.ReviewPacketRepository;
 import com.example.dispute.review.domain.ActionSnapshotHasher;
-import com.example.dispute.tool.application.SimulatedExecutionTool;
+import com.example.dispute.tool.application.ToolRegistry;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -55,7 +55,7 @@ public class ToolExecutorService {
     private final ReviewPacketRepository packetRepository;
     private final ActionRecordRepository actionRepository;
     private final ActionExecutionLock executionLock;
-    private final SimulatedExecutionTool tool;
+    private final ToolRegistry toolRegistry;
     private final AuditRecorder auditRecorder;
     private final ObjectMapper objectMapper;
     private final TransactionTemplate transactions;
@@ -67,7 +67,7 @@ public class ToolExecutorService {
             ReviewPacketRepository packetRepository,
             ActionRecordRepository actionRepository,
             ActionExecutionLock executionLock,
-            SimulatedExecutionTool tool,
+            ToolRegistry toolRegistry,
             AuditRecorder auditRecorder,
             ObjectMapper objectMapper,
             TransactionTemplate transactions) {
@@ -77,7 +77,7 @@ public class ToolExecutorService {
         this.packetRepository = packetRepository;
         this.actionRepository = actionRepository;
         this.executionLock = executionLock;
-        this.tool = tool;
+        this.toolRegistry = toolRegistry;
         this.auditRecorder = auditRecorder;
         this.objectMapper = objectMapper;
         this.transactions = transactions;
@@ -136,7 +136,7 @@ public class ToolExecutorService {
             return;
         }
         try {
-            ToolExecutionResult result = tool.execute(action);
+            ToolExecutionResult result = toolRegistry.execute(action);
             transactions.executeWithoutResult(
                     ignored ->
                             completeSuccess(snapshot, action, result, actor));

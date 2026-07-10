@@ -33,6 +33,12 @@ class RestClientHearingCourtAgentClientTest {
                         .value("用户称物流显示已签收但本人未收到包裹。"))
                 .andExpect(jsonPath("$.courtroom_context.evidence_dossier.fact_evidence_matrix[0].fact")
                         .value("物流显示已签收"))
+                .andExpect(jsonPath("$.courtroom_context.evidence_dossier_ref.baseline_version")
+                        .value(1))
+                .andExpect(jsonPath("$.courtroom_context.evidence_dossier_ref.active_version")
+                        .value(2))
+                .andExpect(jsonPath("$.courtroom_context.evidence_dossier.dossier_version")
+                        .value(2))
                 .andRespond(
                         withSuccess(
                                 """
@@ -46,6 +52,7 @@ class RestClientHearingCourtAgentClientTest {
                                   "round_no":1,
                                   "next_round_no":2,
                                   "final_draft_required":false,
+                                  "review_focus_signal":["用户关注签收人身份核验。"],
                                   "prompt_version":"hearing-round-turn-v1",
                                   "model":"deepseek-v4-flash"
                                 }
@@ -77,12 +84,17 @@ class RestClientHearingCourtAgentClientTest {
                                     "case_story": "用户称物流显示已签收但本人未收到包裹。"
                                   },
                                   "evidence_dossier": {
+                                    "dossier_version": 2,
                                     "fact_evidence_matrix": [
                                       {
                                         "fact": "物流显示已签收",
                                         "supporting_evidence": ["EVIDENCE_LOGISTICS"]
                                       }
                                     ]
+                                  },
+                                  "evidence_dossier_ref": {
+                                    "baseline_version": 1,
+                                    "active_version": 2
                                   }
                                 }
                                 """,
@@ -100,6 +112,7 @@ class RestClientHearingCourtAgentClientTest {
         assertThat(result.courtEventType()).isEqualTo("JUDGE_NEXT_QUESTIONS_READY");
         assertThat(result.nextRoundNo()).isEqualTo(2);
         assertThat(result.finalDraftRequired()).isFalse();
+        assertThat(result.reviewFocusSignal()).containsExactly("用户关注签收人身份核验。");
         server.verify();
     }
 }

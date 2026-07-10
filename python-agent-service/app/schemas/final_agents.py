@@ -103,13 +103,33 @@ RiskLevelLiteral = Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"]
 
 
 class SimulatedExternalImportRequest(StrictModel):
-    count: Annotated[int, Field(ge=1, le=10)] = 2
+    count: Annotated[int, Field(ge=1, le=1)] = 1
     scenario: ShortText = "履约争议订单"
     risk_level_hint: RiskLevelLiteral | None = "MEDIUM"
     initiator_role_hint: Literal["USER", "MERCHANT"]
     current_actor_id: Identifier
     counterparty_actor_id: Identifier
     simulation_batch_id: Identifier | None = None
+
+    @model_validator(mode="after")
+    def validate_fixed_demo_parties(self) -> "SimulatedExternalImportRequest":
+        expected_current = (
+            "user-local"
+            if self.initiator_role_hint == "USER"
+            else "merchant-local"
+        )
+        expected_counterparty = (
+            "merchant-local"
+            if self.initiator_role_hint == "USER"
+            else "user-local"
+        )
+        if self.current_actor_id != expected_current:
+            raise ValueError(f"current_actor_id must be {expected_current}")
+        if self.counterparty_actor_id != expected_counterparty:
+            raise ValueError(
+                f"counterparty_actor_id must be {expected_counterparty}"
+            )
+        return self
 
 
 class SimulatedExternalDispute(StrictModel):
@@ -130,8 +150,25 @@ class SimulatedExternalDispute(StrictModel):
 class SimulatedExternalImportResult(StrictModel):
     items: Annotated[
         list[SimulatedExternalDispute],
-        Field(min_length=1, max_length=10),
+        Field(min_length=1, max_length=1),
     ]
+
+
+class IntakeClaimResolutionSeed(StrictModel):
+    initiator_role: Literal["USER", "MERCHANT"] | None = None
+    requested_resolution: Identifier | None = None
+    requested_amount: float | None = None
+    requested_items: ShortText | None = None
+    request_reason: LongText | None = None
+    original_statement: LongText | None = None
+
+
+class IntakeRespondentAttitudeSeed(StrictModel):
+    respondent_role: Literal["USER", "MERCHANT"] | None = None
+    attitude: Identifier | None = None
+    position: LongText | None = None
+    source: ShortText | None = None
+    confidence: Confidence | None = None
 
 
 class IntakeLobbySeed(StrictModel):
@@ -143,6 +180,8 @@ class IntakeLobbySeed(StrictModel):
     )
     raw_text: LongText
     requested_outcome_hint: Identifier | None = None
+    claim_resolution_seed: IntakeClaimResolutionSeed | None = None
+    respondent_attitude_seed: IntakeRespondentAttitudeSeed | None = None
 
 
 class IntakeTurnMessage(StrictModel):
@@ -429,6 +468,9 @@ class HearingRoundTurnResult(StrictModel):
     round_no: Annotated[int, Field(ge=1, le=3)]
     next_round_no: Annotated[int, Field(ge=1, le=3)] | None = None
     final_draft_required: bool = False
+    review_focus_signal: Annotated[list[ShortText], Field(max_length=20)] = Field(
+        default_factory=list
+    )
     prompt_version: Identifier = "hearing-round-turn-v1"
     model: Identifier = "unknown"
     non_final: Literal[True] = True

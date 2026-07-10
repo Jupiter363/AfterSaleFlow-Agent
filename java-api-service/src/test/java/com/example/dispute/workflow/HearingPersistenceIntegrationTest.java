@@ -7,15 +7,31 @@ import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.RiskLevel;
 import com.example.dispute.domain.model.RouteType;
 import com.example.dispute.common.audit.AuditRecorder;
+import com.example.dispute.common.transaction.PostCommitSideEffectExecutor;
+import com.example.dispute.config.ActorRole;
 import com.example.dispute.executor.application.ToolExecutorService;
 import com.example.dispute.evaluation.application.CaseClosureService;
+import com.example.dispute.hearing.application.ActiveCourtroomContextAssembler;
+import com.example.dispute.hearing.application.AgentA2AMessageService;
+import com.example.dispute.hearing.application.HearingCourtOrchestrator;
+import com.example.dispute.hearing.domain.HearingRoundSubmissionSource;
+import com.example.dispute.hearing.domain.HearingRoundStatus;
+import com.example.dispute.hearing.domain.HearingStopReason;
+import com.example.dispute.hearing.infrastructure.persistence.entity.AgentA2AMessageEntity;
+import com.example.dispute.hearing.infrastructure.persistence.entity.HearingRoundEntity;
+import com.example.dispute.hearing.infrastructure.persistence.entity.HearingRoundPartySubmissionEntity;
+import com.example.dispute.hearing.infrastructure.persistence.repository.AgentA2AMessageRepository;
+import com.example.dispute.hearing.infrastructure.persistence.repository.HearingRoundPartySubmissionRepository;
+import com.example.dispute.hearing.infrastructure.persistence.repository.HearingRoundRepository;
 import com.example.dispute.infrastructure.persistence.entity.AdjudicationDraftEntity;
+import com.example.dispute.infrastructure.persistence.entity.EvidenceDossierEntity;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.entity.HearingRecordEntity;
 import com.example.dispute.infrastructure.persistence.entity.HearingStateEntity;
 import com.example.dispute.infrastructure.persistence.entity.PartySubmissionEntity;
 import com.example.dispute.infrastructure.persistence.repository.AdjudicationDraftRepository;
 import com.example.dispute.infrastructure.persistence.repository.AgentRunRepository;
+import com.example.dispute.infrastructure.persistence.repository.EvidenceDossierRepository;
 import com.example.dispute.infrastructure.persistence.repository.EvidenceItemRepository;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.infrastructure.persistence.repository.HearingRecordRepository;
@@ -28,14 +44,27 @@ import com.example.dispute.workflow.domain.CaseWorkflowInput;
 import com.example.dispute.workflow.domain.HearingAnalysisActivityCommand;
 import com.example.dispute.remedy.application.RemedyApplicationService;
 import com.example.dispute.review.application.ReviewApplicationService;
+import com.example.dispute.room.application.CaseEventService;
+import com.example.dispute.room.domain.MessageSenderType;
+import com.example.dispute.room.domain.MessageType;
+import com.example.dispute.room.domain.RoomType;
+import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
+import com.example.dispute.room.infrastructure.persistence.entity.RoomMessageEntity;
+import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
+import com.example.dispute.room.infrastructure.persistence.repository.RoomMessageRepository;
+import com.example.dispute.tool.application.ToolRegistry;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.time.Duration;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -83,6 +112,12 @@ class HearingPersistenceIntegrationTest {
     @Autowired private PartySubmissionRepository submissionRepository;
     @Autowired private EvidenceItemRepository evidenceRepository;
     @Autowired private PolicyRuleRepository policyRepository;
+    @Autowired private EvidenceDossierRepository evidenceDossierRepository;
+    @Autowired private HearingRoundRepository hearingRoundRepository;
+    @Autowired private HearingRoundPartySubmissionRepository hearingRoundSubmissionRepository;
+    @Autowired private AgentA2AMessageRepository agentA2AMessageRepository;
+    @Autowired private CaseRoomRepository caseRoomRepository;
+    @Autowired private RoomMessageRepository roomMessageRepository;
     @Autowired private PlatformTransactionManager transactionManager;
 
     @Test
@@ -234,6 +269,7 @@ class HearingPersistenceIntegrationTest {
                         draftRepository,
                         agentRunRepository,
                         submissionRepository,
+                        activeContextAssembler(mapper),
                         (request, traceId, requestId) -> {
                             calledOutsideTransaction.set(
                                     !org.springframework.transaction.support
@@ -268,7 +304,6 @@ class HearingPersistenceIntegrationTest {
                         RouteType.FULL_HEARING,
                         Duration.ofHours(72),
                         2));
-
         var result =
                 activities.analyzeHearing(
                         new HearingAnalysisActivityCommand(
@@ -351,6 +386,7 @@ class HearingPersistenceIntegrationTest {
                         draftRepository,
                         agentRunRepository,
                         submissionRepository,
+                        activeContextAssembler(mapper),
                         (request, traceId, requestId) -> {
                             assertThat(request.path("hearing_context")
                                             .path("completed_statement_rounds")
@@ -372,6 +408,30 @@ class HearingPersistenceIntegrationTest {
                                             .path("allow_supplemental_request")
                                             .asBoolean())
                                     .isFalse();
+                            var courtroomContext =
+                                    request.path("hearing_context").path("courtroom_context");
+                            assertThat(courtroomContext.path("evidence_dossier_ref")
+                                            .path("active_version")
+                                            .asInt())
+                                    .isEqualTo(2);
+                            assertThat(courtroomContext.path("evidence_dossier")
+                                            .path("dossier_version")
+                                            .asInt())
+                                    .isEqualTo(2);
+                            assertThat(courtroomContext.path("jury_review_report")
+                                            .path("message_type")
+                                            .asText())
+                                    .isEqualTo("JURY_REVIEW_REPORT");
+                            assertThat(request.path("hearing_context").path("sealed_rounds"))
+                                    .hasSize(3);
+                            assertThat(request.path("hearing_context")
+                                            .path("sealed_rounds")
+                                            .get(2)
+                                            .path("party_submissions"))
+                                    .hasSize(2);
+                            assertThat(request.toString())
+                                    .contains("review signature identity and notification gap")
+                                    .contains("merchant maintains completed delivery");
                             return new HearingAgentResult(
                                     raw,
                                     true,
@@ -399,6 +459,7 @@ class HearingPersistenceIntegrationTest {
                         RouteType.FULL_HEARING,
                         Duration.ofHours(72),
                         2));
+        seedFinalCourtroomContext(disputeCase.getId(), workflowId);
 
         var result =
                 activities.analyzeHearing(
@@ -433,6 +494,7 @@ class HearingPersistenceIntegrationTest {
                         draftRepository,
                         agentRunRepository,
                         submissionRepository,
+                        activeContextAssembler(mapper),
                         (request, traceId, requestId) -> {
                             throw new RuntimeException("agent model service unavailable");
                         },
@@ -507,6 +569,7 @@ class HearingPersistenceIntegrationTest {
                         draftRepository,
                         agentRunRepository,
                         submissionRepository,
+                        activeContextAssembler(mapper),
                         (request, traceId, requestId) -> {
                             throw new RuntimeException("agent model service unavailable");
                         },
@@ -528,6 +591,7 @@ class HearingPersistenceIntegrationTest {
                         RouteType.FULL_HEARING,
                         Duration.ofHours(72),
                         2));
+        seedFinalCourtroomContext(disputeCase.getId(), workflowId);
 
         var result =
                 activities.analyzeHearing(
@@ -558,6 +622,284 @@ class HearingPersistenceIntegrationTest {
                                     .contains("最终轮次")
                                     .contains("补发");
                         });
+    }
+
+    @Test
+    void finalRoundRecoveryQuerySupportsInitialNullCursorOnPostgresql() {
+        FulfillmentCaseEntity disputeCase =
+                routedCase("CASE_finalcursor", "idem-final-cursor");
+        caseRepository.saveAndFlush(disputeCase);
+        HearingRoundEntity round =
+                HearingRoundEntity.open(
+                        "HEARING_ROUND_finalcursor_3",
+                        disputeCase.getId(),
+                        null,
+                        3,
+                        1,
+                        Instant.parse("2026-07-07T01:05:00Z"),
+                        Instant.parse("2026-07-07T01:00:00Z"),
+                        "hearing-controller");
+        round.complete(
+                "{\"trigger\":\"BOTH_PARTIES_SUBMITTED\"}",
+                HearingStopReason.MAX_ROUNDS,
+                Instant.parse("2026-07-07T01:04:00Z"),
+                "hearing-controller");
+        hearingRoundRepository.saveAndFlush(round);
+
+        List<HearingRoundEntity> candidates =
+                hearingRoundRepository.findFinalRoundsWithoutDraft(
+                        3,
+                        4,
+                        List.of(HearingRoundStatus.COMPLETED, HearingRoundStatus.FORCED_CLOSED),
+                        PageRequest.of(0, 10));
+
+        assertThat(candidates)
+                .extracting(HearingRoundEntity::getCaseId)
+                .contains("CASE_finalcursor");
+    }
+
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void juryRepairUsesTheNextLockedRoomSequenceWhenASequenceBlockerAlreadyExists()
+            throws Exception {
+        String caseId = "CASE_jurytxrollback";
+        FulfillmentCaseEntity disputeCase = routedCase(caseId, "idem-jury-tx-rollback");
+        caseRepository.saveAndFlush(disputeCase);
+        CaseRoomEntity room =
+                caseRoomRepository.saveAndFlush(
+                        CaseRoomEntity.open(
+                                "ROOM_" + caseId,
+                                caseId,
+                                RoomType.HEARING,
+                                OffsetDateTime.parse("2026-07-10T08:00:00Z"),
+                                "hearing-controller"));
+        HearingRoundEntity round =
+                HearingRoundEntity.open(
+                        "ROUND_" + caseId + "_3",
+                        caseId,
+                        null,
+                        3,
+                        1,
+                        Instant.parse("2026-07-10T08:05:00Z"),
+                        Instant.parse("2026-07-10T08:00:00Z"),
+                        "hearing-controller");
+        round.complete(
+                "{\"trigger\":\"BOTH_PARTIES_SUBMITTED\"}",
+                null,
+                Instant.parse("2026-07-10T08:04:00Z"),
+                "hearing-controller");
+        hearingRoundRepository.saveAndFlush(round);
+        roomMessageRepository.saveAndFlush(
+                RoomMessageEntity.create(
+                        "MESSAGE_" + caseId + "_JUDGE",
+                        caseId,
+                        room.getId(),
+                        9,
+                        MessageSenderType.AGENT,
+                        "JUDGE",
+                        "presiding-judge",
+                        "[\"USER\",\"MERCHANT\"]",
+                        "[]",
+                        MessageType.AGENT_MESSAGE,
+                        "第三轮法官收束已经写入。",
+                        "[]",
+                        "judge-round-turn:" + caseId + ":3",
+                        3,
+                        Instant.parse("2026-07-10T08:04:30Z"),
+                        "TRACE_JURY_TX_ROLLBACK"));
+        RoomMessageEntity sequenceBlocker =
+                roomMessageRepository.saveAndFlush(
+                        RoomMessageEntity.create(
+                                "MESSAGE_" + caseId + "_BLOCKER",
+                                caseId,
+                                room.getId(),
+                                10,
+                                MessageSenderType.SYSTEM,
+                                "SYSTEM",
+                                "hearing-controller",
+                                "[\"SYSTEM\"]",
+                                "[]",
+                                MessageType.SYSTEM_EVENT,
+                                "{\"event\":\"sequence occupied\"}",
+                                "[]",
+                                "sequence-blocker:" + caseId,
+                                3,
+                                Instant.parse("2026-07-10T08:04:31Z"),
+                                "TRACE_JURY_TX_ROLLBACK"));
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        AgentA2AMessageService a2aMessageService =
+                new AgentA2AMessageService(
+                        agentA2AMessageRepository, mapper, Clock.systemUTC());
+        HearingCourtOrchestrator orchestrator =
+                new HearingCourtOrchestrator(
+                        caseRepository,
+                        caseRoomRepository,
+                        hearingRoundRepository,
+                        hearingRoundSubmissionRepository,
+                        roomMessageRepository,
+                        org.mockito.Mockito.mock(CaseEventService.class),
+                        org.mockito.Mockito.mock(
+                                com.example.dispute.hearing.application
+                                        .HearingCourtAgentClient.class),
+                        a2aMessageService,
+                        activeContextAssembler(mapper),
+                        mapper,
+                        Clock.systemUTC(),
+                        new PostCommitSideEffectExecutor(Runnable::run),
+                        new TransactionTemplate(transactionManager));
+        AtomicBoolean completionCalled = new AtomicBoolean();
+
+        orchestrator.afterRoundClosedAfterCommit(
+                caseId,
+                3,
+                true,
+                "TRACE_JURY_TX_ROLLBACK",
+                () -> completionCalled.set(true));
+
+        assertThat(completionCalled).isTrue();
+        var formalReports =
+                agentA2AMessageRepository
+                        .findAllByCaseIdAndToAgentAndRoundNoLessThanEqualOrderByRoundNoAscCreatedAtAsc(
+                                caseId,
+                                AgentA2AMessageService.PRESIDING_JUDGE,
+                                3);
+        assertThat(formalReports).singleElement();
+        var roomReport =
+                roomMessageRepository
+                        .findByCaseIdAndIdempotencyKey(
+                                caseId, "jury-review-report:" + caseId + ":3")
+                        .orElseThrow();
+        assertThat(roomReport.getSequenceNo()).isEqualTo(11);
+        assertThat(mapper.readTree(roomReport.getMessageText()))
+                .isEqualTo(mapper.readTree(formalReports.getFirst().getPayloadJson()));
+        assertThat(roomMessageRepository.findById(sequenceBlocker.getId())).isPresent();
+    }
+
+    private ActiveCourtroomContextAssembler activeContextAssembler(ObjectMapper mapper) {
+        return new ActiveCourtroomContextAssembler(
+                recordRepository,
+                evidenceDossierRepository,
+                hearingRoundRepository,
+                hearingRoundSubmissionRepository,
+                new AgentA2AMessageService(
+                        agentA2AMessageRepository, mapper, Clock.systemUTC()),
+                new ToolRegistry(List.of()),
+                mapper);
+    }
+
+    private void seedFinalCourtroomContext(String caseId, String workflowId) {
+        HearingStateEntity state = stateRepository.findByWorkflowId(workflowId).orElseThrow();
+        recordRepository.saveAndFlush(
+                HearingRecordEntity.record(
+                        "HREC_BOOTSTRAP_" + caseId,
+                        caseId,
+                        state.getId(),
+                        workflowId,
+                        "C0_COURT_BOOTSTRAP",
+                        1,
+                        "BOOTSTRAP_DOSSIER_SNAPSHOT",
+                        "{}",
+                        """
+                        {
+                          "schema_version":"hearing_bootstrap_dossier.v1",
+                          "evidence_dossier_version":1,
+                          "source_versions":{"evidence_dossier_version":1},
+                          "intake_dossier":{"case_story":"Package marked delivered but user disputes receipt."},
+                          "evidence_dossier":{"dossier_version":1,"fact_evidence_matrix":[]}
+                        }
+                        """,
+                        "{}",
+                        "hearing-bootstrap-v1",
+                        "java-deterministic-bootstrap",
+                        null,
+                        null,
+                        "hearing-bootstrap"));
+        evidenceDossierRepository.saveAndFlush(
+                EvidenceDossierEntity.frozen(
+                        "EVIDENCE_DOSSIER_" + caseId + "_V2",
+                        caseId,
+                        2,
+                        "evidence-clerk",
+                        """
+                        {
+                          "overall_confidence_score":76,
+                          "handoff_notes":"Round 2 evidence review updated the delivery proof matrix."
+                        }
+                        """,
+                        "[]",
+                        """
+                        {
+                          "active_version":2,
+                          "updated_after_round":2,
+                          "fact_evidence_matrix":[{
+                            "fact_id":"FACT_RECEIPT",
+                            "fact":"Whether the user actually received the package",
+                            "supporting_evidence":["EVIDENCE_LOGISTICS"],
+                            "opposing_evidence":["EVIDENCE_USER_NOTICE_GAP"],
+                            "evidence_strength":"MEDIUM"
+                          }]
+                        }
+                        """));
+
+        Instant base = Instant.parse("2026-07-07T01:00:00Z");
+        for (int roundNo = 1; roundNo <= 3; roundNo++) {
+            HearingRoundEntity round =
+                    HearingRoundEntity.open(
+                            "HEARING_ROUND_" + caseId + "_" + roundNo,
+                            caseId,
+                            state.getId(),
+                            roundNo,
+                            1,
+                            base.plusSeconds(roundNo * 600L),
+                            base.plusSeconds(roundNo * 60L),
+                            "hearing-controller");
+            round.complete(
+                    "{\"round\":" + roundNo + "}",
+                    roundNo == 3 ? HearingStopReason.MAX_ROUNDS : null,
+                    base.plusSeconds(roundNo * 120L),
+                    "hearing-controller");
+            hearingRoundRepository.saveAndFlush(round);
+            hearingRoundSubmissionRepository.saveAndFlush(
+                    HearingRoundPartySubmissionEntity.submit(
+                            "HEARING_SUBMISSION_" + caseId + "_" + roundNo + "_USER",
+                            caseId,
+                            round.getId(),
+                            roundNo,
+                            ActorRole.USER,
+                            "user-hearing",
+                            HearingRoundSubmissionSource.PARTY_ACTION,
+                            roundNo == 3
+                                    ? "{\"statement\":\"review signature identity and notification gap\"}"
+                                    : "{\"statement\":\"user round " + roundNo + "\"}",
+                            base.plusSeconds(roundNo * 120L + 1)));
+            hearingRoundSubmissionRepository.saveAndFlush(
+                    HearingRoundPartySubmissionEntity.submit(
+                            "HEARING_SUBMISSION_" + caseId + "_" + roundNo + "_MERCHANT",
+                            caseId,
+                            round.getId(),
+                            roundNo,
+                            ActorRole.MERCHANT,
+                            "merchant-hearing",
+                            HearingRoundSubmissionSource.PARTY_ACTION,
+                            roundNo == 3
+                                    ? "{\"statement\":\"merchant maintains completed delivery\"}"
+                                    : "{\"statement\":\"merchant round " + roundNo + "\"}",
+                            base.plusSeconds(roundNo * 120L + 2)));
+        }
+        agentA2AMessageRepository.saveAndFlush(
+                AgentA2AMessageEntity.create(
+                        "A2A_" + caseId + "_JURY_REPORT",
+                        caseId,
+                        3,
+                        "JURY_PANEL",
+                        AgentA2AMessageService.PRESIDING_JUDGE,
+                        "JURY_REVIEW_REPORT",
+                        "{\"evidence_dossier_version\":2}",
+                        "{\"summary\":\"Review signature identity and notification gaps before drafting.\"}",
+                        "REVIEWER_VISIBLE",
+                        "RUN_JURY_" + caseId,
+                        base.plusSeconds(500),
+                        "jury-panel"));
     }
 
     private static FulfillmentCaseEntity routedCase(

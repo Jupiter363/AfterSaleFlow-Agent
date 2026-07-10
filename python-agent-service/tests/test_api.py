@@ -184,6 +184,64 @@ def test_hearing_api_requires_secret_and_propagates_correlation_ids() -> None:
     assert workflow.context.trace_id == "TRACE_api"
 
 
+def test_hearing_api_accepts_courtroom_bootstrap_context_from_java() -> None:
+    workflow = FakeWorkflow()
+    client = TestClient(create_app(settings(), workflow))
+    payload = request_payload()
+    payload["hearing_context"] = {
+        "completed_statement_rounds": 3,
+        "max_statement_rounds": 3,
+        "final_convergence": True,
+        "must_produce_final_plan": True,
+        "allow_supplemental_request": False,
+        "courtroom_context": {
+            "schema_version": "hearing_bootstrap_dossier.v1",
+            "case_id": "CASE_api",
+            "intake_dossier": {
+                "case_story": "物流记录显示包裹已签收，但用户称本人未收到商品。"
+            },
+            "evidence_dossier": {
+                "fact_evidence_matrix": [
+                    {
+                        "fact_id": "FACT_SIGNED",
+                        "fact": "物流显示已签收",
+                        "evidence_strength": "MEDIUM",
+                    }
+                ]
+            },
+            "courtroom_opening_messages": [
+                {
+                    "sender_role": "INTAKE_OFFICER",
+                    "message_text": "案情接待官已宣读案情卷宗。",
+                }
+            ],
+        },
+        "sealed_rounds": [
+            {
+                "round_no": 3,
+                "round_status": "COMPLETED",
+                "summary_json": "{\"trigger\":\"BOTH_PARTIES_SUBMITTED\"}",
+                "party_submissions": [
+                    {
+                        "participant_role": "USER",
+                        "submission_source": "PARTY_ACTION",
+                        "submission_json": "{\"statement\":\"用户坚持称本人未收到包裹。\"}",
+                    }
+                ],
+            }
+        ],
+    }
+
+    response = client.post(
+        "/internal/agents/legacy/hearing/analyze",
+        json=payload,
+        headers={"X-Service-Secret": "test-agent-service-secret"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["adjudication_draft"]["draft"]["is_final_decision"] is False
+
+
 def test_intake_api_matches_the_java_client_raw_response_contract() -> None:
     client = TestClient(
         create_app(settings(), FakeWorkflow(), FakeIntakeWorkflow())

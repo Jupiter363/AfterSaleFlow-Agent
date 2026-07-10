@@ -43,6 +43,7 @@ const uploading = ref(false);
 const submittingBatch = ref(false);
 const completing = ref(false);
 const error = ref("");
+const evidenceGateError = ref("");
 const agentState = ref("LISTENING");
 const fileInput = ref(null);
 const messages = ref([...(props.initialMessages || [])]);
@@ -96,6 +97,13 @@ const submittedItems = computed(() =>
   actorOwnedItems.value.filter(
     (item) => evidenceSubmissionStatus(item) === "SUBMITTED",
   ),
+);
+const initiatorRole = computed(
+  () => catalog.value?.initiator_role || catalog.value?.initiatorRole || "USER",
+);
+const currentActorIsInitiator = computed(() => role.value === initiatorRole.value);
+const canCompleteEvidenceLocally = computed(
+  () => !currentActorIsInitiator.value || submittedItems.value.length > 0,
 );
 const effectiveDeadline = computed(
   () =>
@@ -654,6 +662,11 @@ async function deletePendingEvidence(item) {
 }
 
 async function completeEvidence() {
+  if (!canCompleteEvidenceLocally.value) {
+    evidenceGateError.value = "发起争议方需先正式提交至少 1 份相关证据，当前证据栏为空，暂不能进入下一步。";
+    agentState.value = "ERROR";
+    return;
+  }
   completing.value = true;
   error.value = "";
   agentState.value = "THINKING";
@@ -690,6 +703,11 @@ function mergeCompletionResult(previous, result) {
     next.merchant_completed = true;
   }
   return next;
+}
+
+function dismissEvidenceGate() {
+  evidenceGateError.value = "";
+  agentState.value = "LISTENING";
 }
 
 function enterHearing() {
@@ -767,7 +785,7 @@ onBeforeUnmount(() => eventAbortController.abort());
           <span>书记官正在核对</span>
           <h2>围绕接待室收敛的案情补充证据</h2>
           <p>
-            只说明证据来源、形成时间、真实性和关联事实；证据不足也不会阻塞进入小法庭。
+            发起争议方须至少正式提交 1 份相关证据；另一方可提交材料，或等待举证时效结束。
           </p>
         </div>
         <div class="evidence-room__conversation-frame">
@@ -975,6 +993,28 @@ onBeforeUnmount(() => eventAbortController.abort());
           </button>
         </footer>
         <p v-if="error" class="evidence-error" role="alert">{{ error }}</p>
+      </section>
+    </div>
+
+    <div
+      v-if="evidenceGateError"
+      class="evidence-modal"
+      data-evidence-gate-modal
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="evidence-gate-title"
+    >
+      <section class="evidence-modal__panel evidence-modal__panel--notice">
+        <span class="evidence-kicker">EVIDENCE REQUIRED</span>
+        <h2 id="evidence-gate-title">暂不能完成举证</h2>
+        <p>{{ evidenceGateError }}</p>
+        <button
+          type="button"
+          data-dismiss-evidence-gate
+          @click="dismissEvidenceGate"
+        >
+          我知道了
+        </button>
       </section>
     </div>
 
@@ -1710,6 +1750,15 @@ onBeforeUnmount(() => eventAbortController.abort());
   border: 1px solid #dce7f4;
   border-radius: 26px;
   box-shadow: 0 28px 80px #22304740;
+}
+
+.evidence-modal__panel--notice {
+  width: min(420px, 100%);
+  gap: 12px;
+}
+
+.evidence-modal__panel--notice > button {
+  justify-self: end;
 }
 
 .evidence-modal__panel--gallery {

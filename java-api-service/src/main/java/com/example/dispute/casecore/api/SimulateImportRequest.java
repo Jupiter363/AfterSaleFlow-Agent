@@ -11,7 +11,7 @@ import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 
 public record SimulateImportRequest(
-        @Min(1) @Max(10) int count,
+        @Min(1) @Max(1) int count,
         @Size(max = 256) String scenario,
         RiskLevel riskLevelHint,
         @NotNull ActorRole initiatorRoleHint,

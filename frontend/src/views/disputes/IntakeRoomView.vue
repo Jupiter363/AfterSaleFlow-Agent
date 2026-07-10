@@ -102,8 +102,21 @@ const caseDetailQuality = computed(() => {
     reason: humanizeDossierText(quality.improvement_reason || "", { fallback: "" }),
   };
 });
+const dossierQualityPercent = computed(() => {
+  const score = Number(caseDetailQuality.value.score || 0);
+  if (!Number.isFinite(score)) return 0;
+  return Math.max(0, Math.min(100, Math.round(score)));
+});
 const caseDetailReadyCopy = computed(() =>
   caseDetailQuality.value.ready ? "可以进入下一步" : "继续完善案件信息",
+);
+const errorDialogTitle = computed(() => {
+  if (!error.value) return "";
+  if (/HTTP\s*5\d\d|不可解析|服务/i.test(error.value)) return "服务暂时不可用";
+  return "操作没有成功";
+});
+const errorDialogDetail = computed(() =>
+  error.value || "请稍后重试，或刷新页面后再次操作。",
 );
 const caseRiskGradeValue = computed(() =>
   caseDetailDossier.value?.risk_assessment?.case_grade ||
@@ -121,41 +134,409 @@ const caseRiskGradeTone = computed(() => {
   if (value.includes("LOW") || value.includes("低")) return "low";
   return "unknown";
 });
-const handoffRemarkSticker = computed(() => {
-  const notes = caseDetailDossier.value?.handoff_notes;
-  if (!notes) return null;
-  const latestRemark = humanizeDossierText(notes.latest_remark || "", {
-    fallback: "",
-  });
-  const status = notes.remark_status === "NO_EXTRA_REMARKS"
-    ? "无额外备注"
-    : "待随案件详情提交";
-  const value = latestRemark || status;
-  if (!value) return null;
+const caseCover = computed(() => {
+  const detail = caseDetailDossier.value;
   return {
-    label: "下一轮备注",
-    value,
-    tone: "purple",
+    title: humanizeDossierText(detail?.case_story?.title || caseNoteTitle.value, {
+      kind: "title",
+      fallback: "争议事件待梳理",
+    }),
+    summary: humanizeDossierText(detail?.case_story?.one_sentence_summary || caseNoteDescription.value, {
+      kind: "summary",
+      fallback: "接待官正在整理争议事实，请继续补充订单、证据和处理诉求。",
+    }),
+    coreIssue: humanizeDossierText(detail?.dispute_focus?.core_issue || "UNKNOWN"),
   };
+});
+function displayReferenceValue(...values) {
+  const value = values.find((item) => hasReferenceValue(item));
+  if (!value) return "待补充";
+  return String(value).trim();
+}
+const caseIndexItems = computed(() => {
+  const detail = caseDetailDossier.value || {};
+  const refs = detail.references || {};
+  return [
+    {
+      key: "order",
+      label: "订单",
+      value: displayReferenceValue(
+        refs.order_reference,
+        refs.orderReference,
+        analysis.value?.order_reference,
+        analysis.value?.orderReference,
+        dispute.value?.order_id,
+        dispute.value?.orderId,
+      ),
+    },
+    {
+      key: "after-sale",
+      label: "售后",
+      value: displayReferenceValue(
+        refs.after_sales_reference,
+        refs.afterSalesReference,
+        analysis.value?.after_sales_reference,
+        analysis.value?.afterSalesReference,
+        dispute.value?.after_sale_id,
+        dispute.value?.afterSaleId,
+      ),
+    },
+    {
+      key: "logistics",
+      label: "物流",
+      value: displayReferenceValue(
+        refs.logistics_reference,
+        refs.logisticsReference,
+        analysis.value?.logistics_reference,
+        analysis.value?.logisticsReference,
+        dispute.value?.logistics_id,
+        dispute.value?.logisticsId,
+      ),
+    },
+  ];
+});
+const claimResolutionLabels = {
+  REFUND: "退款",
+  RETURN_REFUND: "退货退款",
+  RESHIP: "补发",
+  REPLACE_OR_REPAIR: "换货 / 维修",
+  REPLACEMENT: "换货 / 维修",
+  REPAIR: "换货 / 维修",
+  COMPENSATION: "赔付",
+  CANCEL_ORDER: "取消订单",
+  VERIFY_OR_EXPLAIN_ONLY: "核验 / 解释",
+  OTHER: "其他诉求",
+  UNKNOWN: "待确认诉求",
+};
+const respondentAttitudeLabels = {
+  NOT_RESPONDED: "尚未回应",
+  AGREE: "同意",
+  PARTIALLY_AGREE: "部分同意",
+  DISAGREE: "不同意",
+  ALTERNATIVE_PROPOSED: "提出替代方案",
+  NEED_MORE_INFO: "要求补充信息",
+  PLATFORM_UNKNOWN: "平台暂未识别",
+};
+function compactText(...values) {
+  return values
+    .flat()
+    .map((value) => String(value || "").trim())
+    .filter(Boolean)
+    .join(" ");
+}
+function legacyDossierSignalText(detail) {
+  const detailSignal = compactText(
+    detail?.case_story?.title,
+    detail?.case_story?.one_sentence_summary,
+    detail?.party_positions?.user_claim,
+    detail?.party_positions?.merchant_claim,
+    detail?.requested_resolution?.expected_resolution_text,
+    detail?.requested_resolution?.requested_outcome,
+  );
+  if (detailSignal) return detailSignal;
+  return compactText(
+    analysis.value?.requested_outcome,
+    analysis.value?.party_claims?.user,
+    analysis.value?.party_claims?.merchant,
+    dispute.value?.title,
+    dispute.value?.description,
+  );
+}
+function inferResolutionCode(detail, claim = {}) {
+  const explicit =
+    claim.requested_resolution ||
+    claim.requestedResolution ||
+    detail?.requested_resolution?.requested_outcome ||
+    detail?.requested_resolution?.requestedResolution ||
+    analysis.value?.claim_resolution_seed?.requested_resolution ||
+    analysis.value?.claimResolutionSeed?.requested_resolution;
+  const explicitCode = String(explicit || "").trim().toUpperCase();
+  if (claimResolutionLabels[explicitCode]) return explicitCode;
+
+  const signal = legacyDossierSignalText(detail);
+  if (/退货退款/.test(signal)) return "RETURN_REFUND";
+  if (/退款|退钱|原路退回/.test(signal)) return "REFUND";
+  if (/补发|重发|重新发/.test(signal)) return "RESHIP";
+  if (/换货|维修|修理/.test(signal)) return "REPLACE_OR_REPAIR";
+  if (/赔付|赔偿|补偿/.test(signal)) return "COMPENSATION";
+  if (/取消订单|撤销订单/.test(signal)) return "CANCEL_ORDER";
+  if (/核验|核实|解释|说明/.test(signal)) return "VERIFY_OR_EXPLAIN_ONLY";
+  return "UNKNOWN";
+}
+function meaningfulResponseText(value) {
+  const text = humanizeDossierText(value || "", { fallback: "" }).trim();
+  if (!text) return "";
+  if (/^(待补充|待确认|等待对方回应|等待商家回应|等待用户回应|尚未回应|无|暂无)$/u.test(text)) {
+    return "";
+  }
+  if (/^(用户|商家|对方)?尚未在接待室表达(明确)?态度[。.]?$/u.test(text)) {
+    return "";
+  }
+  return text;
+}
+function resolveRespondentRole(detail, attitude = {}) {
+  const explicitRole = normalizePartyRoleValue(
+    attitude.respondent_role || attitude.respondentRole,
+  );
+  if (explicitRole !== "UNKNOWN") return explicitRole;
+
+  const initiatorRole = normalizePartyRoleValue(
+    detail?.claim_resolution?.initiator_role ||
+      detail?.claimResolution?.initiatorRole ||
+      analysis.value?.initiator_role ||
+      dispute.value?.initiator_role ||
+      dispute.value?.initiatorRole ||
+      initiatorRoleValue.value,
+  );
+  return oppositePartyRole(initiatorRole);
+}
+function partyPositionForRole(detail, role) {
+  if (role === "USER") {
+    return detail?.party_positions?.user_claim || analysis.value?.party_claims?.user;
+  }
+  if (role === "MERCHANT") {
+    return detail?.party_positions?.merchant_claim || analysis.value?.party_claims?.merchant;
+  }
+  return "";
+}
+function inferRespondentAttitude(
+  detail,
+  attitude = {},
+  respondentRole = resolveRespondentRole(detail, attitude),
+) {
+  const structuredLabel =
+    respondentAttitudeLabels[String(attitude.attitude || "").toUpperCase()] || "";
+  const positionSummary = meaningfulResponseText(attitude.position);
+  if (structuredLabel || positionSummary) {
+    const hasStructuredResponse =
+      structuredLabel &&
+      ![respondentAttitudeLabels.NOT_RESPONDED, respondentAttitudeLabels.PLATFORM_UNKNOWN].includes(structuredLabel);
+    return {
+      label: structuredLabel || "态度待确认",
+      summary: positionSummary || `${roleLabel(attitude.respondent_role || "UNKNOWN")}${structuredLabel || "态度待确认"}。`,
+      hasResponse: Boolean(positionSummary || hasStructuredResponse),
+      showSummary: Boolean(positionSummary),
+    };
+  }
+
+  const respondentPosition = meaningfulResponseText(
+    partyPositionForRole(detail, respondentRole),
+  );
+  if (!respondentPosition) {
+    return {
+      label: respondentAttitudeLabels.NOT_RESPONDED,
+      summary: respondentNoResponseText(roleLabel(respondentRole)),
+      hasResponse: false,
+      showSummary: false,
+    };
+  }
+
+  let label = "态度待确认";
+  if (/不同意|不支持|拒绝|驳回/.test(respondentPosition)) label = respondentAttitudeLabels.DISAGREE;
+  else if (/部分同意|部分接受/.test(respondentPosition)) label = respondentAttitudeLabels.PARTIALLY_AGREE;
+  else if (/同意|接受/.test(respondentPosition)) label = respondentAttitudeLabels.AGREE;
+  else if (/补发|换货|维修|替代方案|另行/.test(respondentPosition)) label = respondentAttitudeLabels.ALTERNATIVE_PROPOSED;
+  else if (/补充|核验|核实|等待/.test(respondentPosition)) label = respondentAttitudeLabels.NEED_MORE_INFO;
+
+  return {
+    label,
+    summary: respondentPosition,
+    hasResponse: true,
+    showSummary: true,
+  };
+}
+function isSignedNotReceivedContext(detail) {
+  return /物流|签收|未收到|没收到|包裹|快递/u.test(legacyDossierSignalText(detail));
+}
+function hasReferenceValue(value) {
+  const text = String(value || "").trim();
+  return Boolean(text && !/^(待补充|待确认|UNKNOWN|PENDING)$/i.test(text));
+}
+function fallbackFactsInDispute(detail) {
+  if (!isSignedNotReceivedContext(detail)) return [];
+  return ["用户是否实际收到商品", "签收记录是否足以证明本人收货"];
+}
+function fallbackVerificationGaps(
+  detail,
+  hasRespondentResponse = true,
+  respondentRole = resolveRespondentRole(detail),
+) {
+  const refs = detail?.references || {};
+  const gaps = [];
+  const logisticsReference =
+    refs.logistics_reference ||
+    refs.logisticsReference ||
+    analysis.value?.logistics_reference ||
+    analysis.value?.logisticsReference;
+
+  if (!hasReferenceValue(logisticsReference) && isSignedNotReceivedContext(detail)) {
+    gaps.push("物流单号或平台可识别的物流引用");
+  }
+  if (isSignedNotReceivedContext(detail)) {
+    gaps.push("签收截图、取件记录或未收到凭证");
+    gaps.push("签收人身份、签收位置或投递轨迹");
+  }
+  if (!hasRespondentResponse) {
+    gaps.push(`${partySubject(roleLabel(respondentRole), "对方")}对诉求的明确回应`);
+  }
+  return gaps;
+}
+function hasKnownPartyLabel(label) {
+  return Boolean(label && !["待确认", "未知身份"].includes(label));
+}
+function claimActionTextFor(initiator, resolution) {
+  if (resolution === "待确认诉求") return hasKnownPartyLabel(initiator) ? `${initiator}诉求待确认` : "诉求待确认";
+  return hasKnownPartyLabel(initiator) ? `${initiator}请求${resolution}` : `请求${resolution}`;
+}
+function attitudeActionTextFor(respondent, attitudeLabel) {
+  return hasKnownPartyLabel(respondent) ? `${respondent}${attitudeLabel}` : `对方${attitudeLabel}`;
+}
+function partySubject(label, fallback) {
+  return hasKnownPartyLabel(label) ? label : fallback;
+}
+function respondentNoResponseText(respondent) {
+  return `${partySubject(respondent, "对方")}尚未回应`;
+}
+const claimStatus = computed(() => {
+  const detail = caseDetailDossier.value;
+  if (!detail) {
+    return null;
+  }
+  const claim = detail.claim_resolution || {};
+  const attitude = detail.respondent_attitude || {};
+  const core = detail.dispute_core_state || {};
+  const initiatorRole = normalizePartyRoleValue(
+    claim.initiator_role || initiatorRoleValue.value,
+  );
+  const respondentRole = resolveRespondentRole(detail, attitude);
+  const initiator = roleLabel(initiatorRole);
+  const respondent = roleLabel(respondentRole);
+  const resolutionCode = inferResolutionCode(detail, claim);
+  const resolution = claimResolutionLabels[resolutionCode] || "待确认诉求";
+  const amount =
+    claim.requested_amount ||
+    claim.requestedAmount ||
+    detail.requested_resolution?.requested_amount ||
+    detail.requested_resolution?.requestedAmount;
+  const amountText = amount ? `，金额 ${amount}` : "";
+  const amountDisplay = amount ? `¥${amount}` : "";
+  const requestedItems =
+    claim.requested_items ||
+    claim.requestedItems ||
+    detail.requested_resolution?.requested_items ||
+    detail.requested_resolution?.requestedItems ||
+    "";
+  const itemText = requestedItems ? `，涉及${requestedItems}` : "";
+  const inferredAttitude = inferRespondentAttitude(detail, attitude, respondentRole);
+  const fallbackFocus = fallbackVerificationGaps(
+    detail,
+    inferredAttitude.hasResponse,
+    respondentRole,
+  );
+  const fallbackFacts = fallbackFactsInDispute(detail);
+  const attitudeSummary =
+    inferredAttitude.hasResponse || inferredAttitude.showSummary
+      ? inferredAttitude.summary
+      : respondentNoResponseText(respondent);
+  return {
+    initiator,
+    respondent,
+    resolution,
+    resolutionActionText: claimActionTextFor(initiator, resolution),
+    requestedItems,
+    amountDisplay,
+    attitudeLabel: inferredAttitude.label,
+    attitudeActionText: attitudeActionTextFor(respondent, inferredAttitude.label),
+    claimSummary:
+      claim.normalized_statement ||
+      claim.request_reason ||
+      detail.requested_resolution?.expected_resolution_text ||
+      `${initiator}请求${resolution}${amountText}${itemText}。`,
+    claimMeta: `${initiator}主张${resolution}${amountText}${itemText}`,
+    attitudeSummary,
+    showAttitudeSummary: inferredAttitude.showSummary,
+    attitudeMeta: `${respondent}：${inferredAttitude.label}`,
+    coreConflict:
+      core.core_conflict ||
+      (inferredAttitude.hasResponse
+        ? `${initiator}请求${resolution}，${respondent}已表达回应，核心争议仍待接待官继续归纳。`
+        : `${initiator}请求${resolution}，但${respondent}态度尚待补充。`),
+    factsInDispute: humanizeDossierList(core.facts_in_dispute || fallbackFacts, "").filter(Boolean),
+    nextFocus: humanizeDossierList(core.next_verification_focus || fallbackFocus, "").filter(Boolean),
+  };
+});
+const visibleClaimStatus = computed(() => {
+  if (claimStatus.value) return claimStatus.value;
+  const detail = caseDetailDossier.value || {};
+  const initiator = roleLabel(initiatorRoleValue.value || "UNKNOWN");
+  const respondent = roleLabel(oppositePartyRole(initiatorRoleValue.value));
+  const resolution = claimResolutionLabels[inferResolutionCode(detail, {})] || "待确认诉求";
+  return {
+    initiator,
+    respondent,
+    resolution,
+    resolutionActionText: claimActionTextFor(initiator, resolution),
+    requestedItems: "",
+    amountDisplay: "",
+    attitudeLabel: respondentAttitudeLabels.NOT_RESPONDED,
+    attitudeActionText: attitudeActionTextFor(respondent, respondentAttitudeLabels.NOT_RESPONDED),
+    claimSummary:
+      resolution === "待确认诉求"
+        ? "诉求待确认"
+        : `${initiator}请求${resolution}。`,
+    claimMeta: `${initiator}主张${resolution}`,
+    attitudeSummary: respondentNoResponseText(respondent),
+    showAttitudeSummary: false,
+    attitudeMeta: `${respondent}：${respondentAttitudeLabels.NOT_RESPONDED}`,
+    coreConflict: `${partySubject(initiator, "发起方")}诉求与${partySubject(respondent, "对方")}回应的核心冲突仍待补齐。`,
+    factsInDispute: [],
+    nextFocus: [`${partySubject(respondent, "对方")}对诉求的明确回应`],
+  };
+});
+function qualityReasonToGaps(reason) {
+  const normalized = String(reason || "")
+    .replace(/^仍缺少可信的/, "")
+    .replace(/^仍缺少/, "")
+    .replace(/[。.]$/u, "")
+    .trim();
+  if (!normalized) return [];
+  return normalized
+    .split(/[、,，/]/u)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+const verificationGaps = computed(() => {
+  const detail = caseDetailDossier.value || {};
+  const missing = detail.missing_information || {};
+  const respondentRole = resolveRespondentRole(detail, detail.respondent_attitude || {});
+  const respondentState = inferRespondentAttitude(
+    detail,
+    detail.respondent_attitude || {},
+    respondentRole,
+  );
+  const candidates = [
+    ...(Array.isArray(missing.blocking_gaps) ? missing.blocking_gaps : []),
+    ...(Array.isArray(missing.nice_to_have_gaps) ? missing.nice_to_have_gaps : []),
+    ...(Array.isArray(missing.next_questions) ? missing.next_questions : []),
+    ...(Array.isArray(detail.dispute_focus?.facts_to_verify) ? detail.dispute_focus.facts_to_verify : []),
+    ...qualityReasonToGaps(caseDetailQuality.value.reason),
+    ...(claimStatus.value?.nextFocus || []),
+    ...fallbackVerificationGaps(detail, respondentState.hasResponse, respondentRole),
+  ];
+  const seen = new Set();
+  return humanizeDossierList(candidates, "")
+    .map((item) => String(item || "").trim())
+    .filter((item) => {
+      if (!item || seen.has(item)) return false;
+      seen.add(item);
+      return true;
+    })
+    .slice(0, 4);
 });
 const scrollCards = computed(() => scrollSnapshot.value?.cards || []);
 function scrollCardValue(key, fallback = "") {
   return scrollCards.value.find((card) => card.key === key)?.value || fallback;
 }
-const riskSignals = computed(() => {
-  const detailSignals = caseDetailDossier.value?.risk_assessment?.risk_signals || [];
-  if (detailSignals.length) return humanizeDossierList(detailSignals);
-  const stamps = scrollSnapshot.value?.stamps || [];
-  if (stamps.length) {
-    return humanizeDossierList(
-      stamps.map((stamp) => stamp.text || stamp.value).filter(Boolean),
-    );
-  }
-  return humanizeDossierList(analysis.value?.initial_risk_signals);
-});
-const initialRiskSignals = computed(() => {
-  return humanizeDossierList(analysis.value?.initial_risk_signals);
-});
 const initiatorRoleValue = computed(() => {
   const explicitRole = normalizePartyRoleValue(
     analysis.value?.initiator_role ||
@@ -221,70 +602,6 @@ function resetWorkspaceForActorChange() {
   eventState.streamError = null;
 }
 
-function formatReferenceSummary(references = {}) {
-  const items = [
-    ["订单", references.order],
-    ["售后", references.afterSales],
-    ["物流", references.logistics],
-  ].filter(([, value]) => Boolean(value));
-  if (!items.length) return "待补充";
-  return items.map(([label, value]) => `${label}：${value}`).join(" / ");
-}
-
-function detailReferenceSummary(detail, value) {
-  return formatReferenceSummary({
-    order: detail?.references?.order_reference || value.order_reference || dispute.value?.order_id,
-    afterSales:
-      detail?.references?.after_sales_reference ||
-      value.after_sales_reference ||
-      dispute.value?.after_sale_id,
-    logistics: detail?.references?.logistics_reference || value.logistics_reference,
-  });
-}
-
-function fallbackReferenceSummary(value) {
-  return formatReferenceSummary({
-    order: scrollCardValue("order_reference", value.order_reference || dispute.value?.order_id),
-    afterSales: scrollCardValue(
-      "after_sales_reference",
-      value.after_sales_reference || dispute.value?.after_sale_id,
-    ),
-    logistics: scrollCardValue("logistics_reference", value.logistics_reference),
-  });
-}
-
-const caseIndexItems = computed(() => {
-  const value = analysis.value || {};
-  const detail = caseDetailDossier.value;
-  return [
-    {
-      label: "订单号：",
-      value:
-        detail?.references?.order_reference ||
-        scrollCardValue("order_reference", value.order_reference || dispute.value?.order_id),
-    },
-    {
-      label: "售后单号：",
-      value:
-        detail?.references?.after_sales_reference ||
-        scrollCardValue(
-          "after_sales_reference",
-          value.after_sales_reference || dispute.value?.after_sale_id,
-        ),
-    },
-    {
-      label: "物流单号：",
-      value:
-        detail?.references?.logistics_reference ||
-        scrollCardValue("logistics_reference", value.logistics_reference),
-    },
-    {
-      label: "发起方：",
-      value: initiatorRoleCopy.value,
-    },
-  ];
-});
-
 function normalizePartyRoleValue(role) {
   const value = String(role || "").trim().toUpperCase();
   if (
@@ -312,160 +629,36 @@ function normalizePartyRoleValue(role) {
   return "UNKNOWN";
 }
 
+function oppositePartyRole(role) {
+  const normalizedRole = normalizePartyRoleValue(role);
+  if (normalizedRole === "USER") return "MERCHANT";
+  if (normalizedRole === "MERCHANT") return "USER";
+  return "UNKNOWN";
+}
+
 function normalizedPartyRole(role) {
   return normalizePartyRoleValue(role);
 }
 
-function partyTone(role) {
-  const normalizedRole = normalizedPartyRole(role);
-  if (normalizedRole === "MERCHANT") return "purple";
-  if (normalizedRole === "USER") return "coral";
-  return "slate";
-}
-
-function claimStickerForRole(role) {
-  const targetRole = normalizedPartyRole(role);
-  return liveStickers.value.find((sticker) =>
-    targetRole === "MERCHANT"
-      ? sticker.label === "商家主张"
-      : sticker.label === "用户主张",
-  );
-}
-
 const subjectiveStatement = computed(() => {
+  const detail = caseDetailDossier.value;
+  const claim = detail?.claim_resolution || {};
   const sourceRole = normalizedPartyRole(initiatorRoleValue.value);
   const sourceRoleName = roleLabel(sourceRole);
-  const sourceClaim = claimStickerForRole(sourceRole);
+  const fallbackPartyStatement =
+    sourceRole === "MERCHANT"
+      ? detail?.party_positions?.merchant_claim || analysis.value?.party_claims?.merchant
+      : detail?.party_positions?.user_claim || analysis.value?.party_claims?.user || dispute.value?.description;
   return {
-    titleSuffix: `${sourceRoleName}自述`,
-    label: "用户描述",
-    value: sourceClaim?.value || "等待继续补充发起方陈述",
-    tone: partyTone(sourceRole),
+    titleSuffix: `${sourceRoleName}原话`,
+    label: "原始陈述",
+    value: humanizeDossierText(
+      claim.original_statement ||
+        claim.originalStatement ||
+        fallbackPartyStatement ||
+        "等待继续补充发起方陈述",
+    ),
   };
-});
-
-const liveStickers = computed(() => {
-  const value = analysis.value || {};
-  const detail = caseDetailDossier.value;
-  if (detail) {
-    return [
-      {
-        label: "订单 / 售后 / 物流",
-        value: detailReferenceSummary(detail, value),
-        tone: "blue",
-      },
-      {
-        label: "发起方",
-        value: initiatorRoleCopy.value,
-        tone: "mint",
-      },
-      {
-        label: "用户主张",
-        value: humanizeDossierText(detail.party_positions?.user_claim || value.party_claims?.user),
-        tone: "coral",
-      },
-      {
-        label: "商家主张",
-        value: humanizeDossierText(
-          detail.party_positions?.merchant_claim ||
-            value.party_claims?.merchant ||
-            "Waiting for response",
-        ),
-        tone: "purple",
-      },
-      {
-        label: "期望处理结果",
-        value: humanizeDossierText(
-          detail.requested_resolution?.expected_resolution_text ||
-            detail.requested_resolution?.requested_outcome ||
-            "Pending",
-        ),
-        tone: "yellow",
-      },
-      {
-        label: "受理建议",
-        value: humanizeDossierText(
-          detail.admission?.recommendation ||
-            currentCaseDossier.value?.admission_recommendation ||
-            "Needs more information",
-        ),
-        tone: "mint",
-      },
-      ...(handoffRemarkSticker.value ? [handoffRemarkSticker.value] : []),
-      {
-        label: "风险信号",
-        value: riskSignals.value.join(" / "),
-        tone: "coral",
-      },
-    ];
-  }
-  return [
-    {
-      label: "订单 / 售后 / 物流",
-      value: fallbackReferenceSummary(value),
-      tone: "blue",
-    },
-    {
-      label: "发起方",
-      value: humanizeDossierText(
-        scrollCardValue("initiator_role", initiatorRoleValue.value),
-        { fallback: "待确认" },
-      ),
-      tone: "mint",
-    },
-    {
-      label: "用户主张",
-      value: humanizeDossierText(scrollCardValue("user_claim", value.party_claims?.user || dispute.value?.description)),
-      tone: "coral",
-    },
-    {
-      label: "商家主张",
-      value: humanizeDossierText(scrollCardValue("merchant_claim", value.party_claims?.merchant || "Waiting for response")),
-      tone: "purple",
-    },
-    {
-      label: "期望处理结果",
-      value: humanizeDossierText(scrollCardValue("requested_outcome", value.requested_outcome || "Pending")),
-      tone: "yellow",
-    },
-    {
-      label: "受理建议",
-      value: humanizeDossierText(
-        scrollSnapshot.value?.admission_recommendation ||
-          value.admission_recommendation ||
-          "Needs more information",
-      ),
-      tone: "mint",
-    },
-    {
-      label: "风险信号",
-      value: riskSignals.value.join(" / "),
-      tone: "coral",
-    },
-  ];
-});
-
-function pickStickers(labels) {
-  return labels
-    .map((label) => liveStickers.value.find((sticker) => sticker.label === label))
-    .filter(Boolean);
-}
-
-const caseDetailMetaSections = computed(() => {
-  return [
-    {
-      title: "案件索引",
-      type: "index",
-      tone: "blue",
-      items: caseIndexItems.value,
-    },
-    {
-      title: `单方主观描述：${subjectiveStatement.value.titleSuffix}`,
-      type: "single_statement",
-      tone: "purple",
-      item: subjectiveStatement.value,
-    },
-  ];
 });
 
 async function load(snapshot = currentWorkspaceSnapshot()) {
@@ -655,6 +848,13 @@ async function enterEvidenceRoom() {
   await router.push(`/disputes/${caseId.value}/evidence`);
 }
 
+function dismissError() {
+  error.value = "";
+  if (agentState.value === "ERROR") {
+    agentState.value = "LISTENING";
+  }
+}
+
 onMounted(async () => {
   const snapshot = currentWorkspaceSnapshot();
   await load(snapshot);
@@ -750,17 +950,30 @@ onBeforeUnmount(() => {
           class="intake-case-detail"
           data-case-detail-dossier
         >
-          <div class="intake-case-detail__score-row">
-            <div class="intake-case-detail__score">
-              <span>案件完善度</span>
-              <strong>{{ caseDetailQuality.score }}/100</strong>
+          <div
+            class="intake-case-detail__status-rail"
+            data-dossier-status-rail
+          >
+            <div class="intake-case-detail__status-copy">
+              <strong data-dossier-status-pill>完善度 {{ dossierQualityPercent }}%</strong>
+              <span data-dossier-status-hint>{{ caseDetailReadyCopy }}</span>
+            </div>
+            <div
+              class="intake-case-detail__quality-track"
+              role="progressbar"
+              :aria-valuenow="dossierQualityPercent"
+              aria-valuemin="0"
+              aria-valuemax="100"
+              aria-label="案件完善度"
+            >
+              <i :style="{ width: `${dossierQualityPercent}%` }" />
             </div>
             <div
               class="intake-case-detail__risk"
               :data-risk="caseRiskGradeTone"
               data-case-risk-grade
             >
-              <span>接待官初评风险</span>
+              <span>风险</span>
               <strong>{{ caseRiskGradeCopy }}</strong>
             </div>
           </div>
@@ -768,86 +981,120 @@ onBeforeUnmount(() => {
             class="intake-case-detail__summary-card"
             data-case-detail-summary-card
           >
-            <div class="intake-case-detail__story">
-              <span>案件故事</span>
-              <h3>
-                {{
-                  humanizeDossierText(caseDetailDossier?.case_story?.title || caseNoteTitle, {
-                    kind: "title",
-                    fallback: "争议事件待梳理",
-                  })
-                }}
-              </h3>
-              <p>
-                {{
-                  humanizeDossierText(caseDetailDossier?.case_story?.one_sentence_summary || caseNoteDescription, {
-                    kind: "summary",
-                    fallback: "接待官正在整理争议事实，请继续补充订单、证据和处理诉求。",
-                  })
-                }}
-              </p>
-            </div>
-            <div
-              v-if="isCaseDetailDossier"
-              class="intake-case-detail__focus"
+            <article
+              class="intake-case-detail__dispute"
+              data-dispute-detail-card
             >
-              <span>核心争议</span>
-              <strong>
-                {{ humanizeDossierText(caseDetailDossier?.dispute_focus?.core_issue || "UNKNOWN") }}
-              </strong>
-            </div>
-            <p v-if="caseDetailQuality.reason" class="intake-case-detail__reason">
-              {{ caseDetailQuality.reason }}
-            </p>
-            <section class="intake-case-detail__meta" data-case-detail-meta>
-              <article
-                v-for="section in caseDetailMetaSections"
-                :key="section.title"
-                class="intake-case-detail__meta-section"
-                :data-tone="section.tone"
+              <span>争议详情</span>
+              <div class="intake-case-detail__summary-note">
+                <strong
+                  data-dispute-detail-summary
+                  :title="caseCover.summary"
+                >
+                  {{ caseCover.summary }}
+                </strong>
+              </div>
+              <div
+                class="intake-case-detail__meta-rows"
+                data-dispute-detail-meta-rows
               >
-                <span class="intake-case-detail__meta-title">{{ section.title }}</span>
+                <div class="intake-case-detail__fields">
+                <article
+                  class="intake-case-detail__field"
+                  data-dispute-detail-claim
+                >
+                  <span>发起方诉求</span>
+                  <strong
+                    :title="[
+                      visibleClaimStatus.claimSummary,
+                      visibleClaimStatus.amountDisplay,
+                      visibleClaimStatus.requestedItems,
+                    ].filter(Boolean).join(' · ')"
+                  >
+                    {{ visibleClaimStatus.claimSummary }}
+                    <em v-if="visibleClaimStatus.amountDisplay">{{ visibleClaimStatus.amountDisplay }}</em>
+                    <small v-if="visibleClaimStatus.requestedItems">{{ visibleClaimStatus.requestedItems }}</small>
+                  </strong>
+                </article>
+                <article
+                  class="intake-case-detail__field"
+                  data-dispute-detail-respondent
+                >
+                  <span>对方回应</span>
+                  <strong :title="visibleClaimStatus.attitudeSummary">
+                    {{ visibleClaimStatus.attitudeSummary }}
+                  </strong>
+                </article>
+              </div>
+              <section
+                class="intake-case-detail__index-strip"
+                data-case-index-strip
+              >
+                <span>案件索引</span>
                 <div
-                  v-if="section.type === 'index'"
                   class="intake-case-detail__index-list"
                   data-case-index-list
                 >
                   <article
-                    v-for="field in section.items"
-                    :key="`${section.title}-${field.label}`"
-                    class="intake-index-field"
+                    v-for="item in caseIndexItems"
+                    :key="item.key"
+                    class="intake-case-detail__index-field"
                     data-case-index-field
-                    data-intake-sticker
+                    :title="`${item.label}：${item.value}`"
                   >
-                    <span>{{ field.label }}</span>
-                    <strong>{{ field.value || "待补充" }}</strong>
+                    <small>{{ item.label }}</small>
+                    <strong>{{ item.value }}</strong>
                   </article>
                 </div>
+              </section>
+              </div>
+              <section
+                class="intake-case-detail__origin-card"
+                data-origin-statement-card
+              >
+                <span
+                  class="intake-case-detail__meta-title"
+                  data-single-party-statement-label
+                >
+                  原始陈述
+                </span>
                 <div
-                  v-else-if="section.type === 'single_statement'"
                   class="intake-case-detail__single-statement"
-                  :data-tone="section.item.tone"
                   data-single-party-statement
-                  data-intake-sticker
                 >
-                  <strong>{{ section.item.value || "待补充" }}</strong>
-                </div>
-                <div
-                  v-else
-                  class="intake-case-detail__meta-grid"
-                >
-                  <article
-                    v-for="sticker in section.items"
-                    :key="`${section.title}-${sticker.label}`"
-                    class="intake-sticker"
-                    :data-tone="sticker.tone"
-                    data-intake-sticker
+                  <strong
+                    data-origin-statement-text
+                    :title="subjectiveStatement.value || '待补充'"
                   >
-                    <span>{{ sticker.label }}</span>
-                    <strong>{{ sticker.value || "待补充" }}</strong>
-                  </article>
+                    {{ subjectiveStatement.value || "待补充" }}
+                  </strong>
                 </div>
-              </article>
+              </section>
+            </article>
+            <section
+              v-if="verificationGaps.length"
+              class="intake-case-detail__todo-list"
+              data-verification-gaps
+            >
+              <div class="intake-case-detail__todo-heading">
+                <span>下一步核验重点</span>
+                <small data-verification-gap-count>{{ verificationGaps.length }} 项</small>
+              </div>
+              <ol>
+                <li
+                  v-for="gap in verificationGaps"
+                  :key="gap"
+                  data-verification-gap-item
+                  :title="gap"
+                >
+                  <span
+                    class="intake-case-detail__todo-text"
+                    data-verification-gap-text
+                  >
+                    {{ gap }}
+                  </span>
+                </li>
+              </ol>
             </section>
           </section>
         </div>
@@ -892,9 +1139,29 @@ onBeforeUnmount(() => {
           </p>
           <div v-if="admitted" class="intake-dossier__stamp">已上报</div>
           <p v-if="resolved">已在平台内取消争议发起，接待室已归档。</p>
-          <div v-if="error" class="intake-dossier__error">{{ error }}</div>
         </div>
       </section>
+    </div>
+    <div
+      v-if="error"
+      class="intake-error-dialog"
+      data-intake-error-dialog
+      role="alertdialog"
+      aria-modal="true"
+      aria-labelledby="intake-error-dialog-title"
+    >
+      <div class="intake-error-dialog__card">
+        <span aria-hidden="true">!</span>
+        <h3 id="intake-error-dialog-title">{{ errorDialogTitle }}</h3>
+        <p>{{ errorDialogDetail }}</p>
+        <button
+          type="button"
+          data-dismiss-intake-error
+          @click="dismissError"
+        >
+          我知道了
+        </button>
+      </div>
     </div>
   </RoomShell>
 </template>
@@ -1020,206 +1287,403 @@ onBeforeUnmount(() => {
 .intake-dossier header h2 { margin: 5px 0 0; color: #34435c; font-size: 23px; }
 .intake-dossier header small { color: #7384a1; }
 .intake-case-detail {
-  display: flex;
-  flex-direction: column;
+  --cover-summary-lines: 7;
+  --summary-note-min-height: 132px;
+  --detail-meta-row-height: 46px;
+  --detail-meta-rows-height: 138px;
+  --detail-field-lines: 2;
+  display: grid;
+  grid-template-rows: 48px minmax(0, 1fr) minmax(92px, .22fr);
+  align-self: stretch;
+  height: 100%;
   min-height: 0;
+  max-height: 100%;
   gap: 10px;
   margin: 4px 0 0;
-  padding: 14px;
+  padding: 0;
   overflow: hidden;
-  background:
-    radial-gradient(circle at 12% 12%, #fff7cf 0 10%, transparent 11%),
-    linear-gradient(135deg, #fffdf8, #eef7ff);
-  border: 1px solid #dce9f6;
-  border-radius: 22px;
-  box-shadow: inset 0 1px 0 #ffffff, 0 16px 35px #55739914;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
 }
-.intake-case-detail__score-row {
+.intake-case-detail__status-rail {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(150px, .72fr);
-  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 5px 10px;
+  align-items: center;
+  min-height: 0;
+  padding: 7px 9px;
+  background: linear-gradient(135deg, rgba(255, 255, 255, .82), rgba(248, 252, 255, .68));
+  border: 1px solid rgba(219, 232, 246, .95);
+  border-radius: 15px;
+  box-shadow: inset 0 1px 0 #fff, 0 8px 18px #58779b0d;
 }
-.intake-case-detail__score,
-.intake-case-detail__risk {
-  display: grid;
-  gap: 6px;
-  padding: 9px 12px;
-  background: #ffffffd9;
-  border: 1px solid #e2ebf5;
-  border-radius: 16px;
+.intake-case-detail__status-copy {
+  display: flex;
+  min-width: 0;
+  justify-content: flex-start;
+  gap: 8px;
+  align-items: center;
 }
-.intake-case-detail__risk {
-  background: linear-gradient(135deg, #fff7f1, #fff);
-}
-.intake-case-detail__risk[data-risk="high"] {
-  background: linear-gradient(135deg, #fff0ec, #fff);
-  border-color: #ffd7ce;
-}
-.intake-case-detail__risk[data-risk="medium"] {
-  background: linear-gradient(135deg, #fff8dc, #fff);
-  border-color: #eadca1;
-}
-.intake-case-detail__risk[data-risk="low"] {
-  background: linear-gradient(135deg, #e9faef, #fff);
-  border-color: #cdebd8;
-}
-.intake-case-detail__score span,
+.intake-case-detail__status-copy span,
 .intake-case-detail__risk span,
-.intake-case-detail__story span,
-.intake-case-detail__focus span,
+.intake-case-detail__dispute > span,
+.intake-case-detail__todo-heading span,
 .intake-case-detail__meta-title {
   color: #7788a5;
   font-size: 10px;
   font-weight: 900;
   letter-spacing: .14em;
 }
-.intake-case-detail__score strong,
+.intake-case-detail__status-copy strong {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 10px;
+  color: #40536f;
+  background: #f7fbff;
+  border: 1px solid #e4edf7;
+  border-radius: 999px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.intake-case-detail__quality-track {
+  position: relative;
+  grid-column: 1 / 2;
+  height: 5px;
+  overflow: hidden;
+  background: linear-gradient(90deg, #edf4fb, #f6f1ff);
+  border-radius: 999px;
+}
+.intake-case-detail__quality-track i {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, #7fc4f0, #87d7ad, #f2c95c);
+  border-radius: inherit;
+}
 .intake-case-detail__risk strong {
   color: #5b69d8;
-  font-size: 20px;
+  font-size: 13px;
+}
+.intake-case-detail__risk {
+  display: flex;
+  grid-row: 1 / span 2;
+  grid-column: 2 / 3;
+  gap: 7px;
+  align-items: center;
+  justify-content: center;
+  padding: 5px 8px;
+  background: #f7fbff;
+  border: 1px solid #e4edf7;
+  border-radius: 999px;
 }
 .intake-case-detail__risk[data-risk="high"] strong { color: #d85b4a; }
-.intake-case-detail__risk[data-risk="medium"] strong { color: #b78b10; }
+.intake-case-detail__risk[data-risk="medium"] strong { color: #b1871d; }
 .intake-case-detail__risk[data-risk="low"] strong { color: #2f8b64; }
 .intake-case-detail__summary-card {
-  display: grid;
-  flex: 1 1 auto;
-  min-height: 0;
-  grid-template-rows: auto 96px auto minmax(0, 1fr);
-  gap: 9px;
-  align-content: stretch;
-}
-.intake-case-detail__meta {
-  display: grid;
-  align-content: stretch;
-  grid-template-rows: auto minmax(0, 1fr);
-  min-height: 0;
-  gap: 8px;
-  padding: 10px 11px;
-  overflow: hidden;
-  background: #ffffff9e;
-  border: 1px solid #e4edf7;
-  border-radius: 18px;
-}
-.intake-case-detail__meta-section {
-  display: grid;
-  min-height: 0;
-  gap: 6px;
-}
-.intake-case-detail__meta-section[data-tone="purple"] {
-  grid-template-rows: auto minmax(0, 1fr);
-}
-.intake-case-detail__meta-section + .intake-case-detail__meta-section {
-  padding-top: 8px;
-  border-top: 1px dashed #dbe6f3;
-}
-.intake-case-detail__meta-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 9px;
-}
-.intake-case-detail__index-list {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 5px 14px;
-}
-.intake-index-field {
-  display: flex;
-  align-items: baseline;
-  min-width: 0;
-  color: #46546e;
-}
-.intake-index-field span {
-  flex: 0 0 auto;
-  color: #74839d;
-  font-size: 11px;
-  font-weight: 800;
-}
-.intake-index-field strong {
-  min-width: 0;
-  color: #33415b;
-  font-size: 12px;
-  line-height: 1.35;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  display: contents;
 }
 .intake-case-detail__single-statement {
   display: grid;
   height: 100%;
   min-height: 0;
-  padding: 4px 4px 2px;
+  padding: 0 4px 0 2px;
   color: #3d4860;
-  max-height: none;
   overflow-y: auto;
   overscroll-behavior: contain;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
 }
 .intake-case-detail__single-statement strong {
   color: #34425a;
   font-size: 12px;
-  line-height: 1.58;
+  line-height: 1.52;
   white-space: pre-wrap;
 }
-.intake-case-detail__story h3 {
-  margin: 5px 0;
-  color: #2f3e58;
-  font-size: 17px;
-}
-.intake-case-detail__story p,
-.intake-case-detail__focus p,
-.intake-case-detail__reason {
-  margin: 0;
-  color: #68768e;
-  font-size: 13px;
-  line-height: 1.55;
-}
-.intake-case-detail__focus {
-  display: grid;
-  gap: 4px;
-  align-content: center;
-  box-sizing: border-box;
-  min-height: 96px;
-  padding: 12px 13px;
-  background: linear-gradient(135deg, #fff9f5, #f6fbff);
-  border: 1px dashed #d4e1f0;
-  border-radius: 16px;
-}
-.intake-case-detail__focus strong {
-  color: #ef7c67;
-  font-size: 15px;
-  line-height: 1.45;
-  letter-spacing: .03em;
-}
-.intake-sticker {
+.intake-case-detail__dispute {
   position: relative;
   display: grid;
-  gap: 7px;
-  min-height: 82px;
-  padding: 13px 13px 13px 15px;
-  color: #3c4760;
-  background: #fff;
-  border: 1px solid #e3ebf5;
-  border-radius: 16px;
+  grid-template-rows: auto var(--summary-note-min-height) var(--detail-meta-rows-height) minmax(0, 1fr);
+  gap: 10px;
+  min-height: 0;
+  padding: 14px 14px 12px;
   overflow: hidden;
+  background:
+    linear-gradient(90deg, rgba(255, 255, 255, .9), rgba(247, 251, 255, .94)),
+    radial-gradient(circle at 94% 16%, rgba(242, 201, 92, .15) 0 16%, transparent 34%),
+    radial-gradient(circle at 8% 92%, rgba(126, 196, 240, .14) 0 18%, transparent 36%);
+  border: 1px solid #dde9f5;
+  border-radius: 19px;
+  box-shadow: 0 12px 28px #52779a10;
 }
-.intake-sticker::before {
+.intake-case-detail__dispute::before {
   content: "";
   position: absolute;
-  inset: 0 auto 0 0;
-  width: 5px;
-  background: #83c6f5;
+  right: 16px;
+  top: 16px;
+  width: 42px;
+  height: 42px;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, .62), rgba(255, 242, 202, .42)),
+    linear-gradient(135deg, rgba(126, 196, 240, .18), rgba(242, 201, 92, .14));
+  border: 1px solid rgba(221, 233, 245, .85);
+  border-radius: 14px;
+  transform: rotate(8deg);
+  pointer-events: none;
 }
-.intake-sticker[data-tone="mint"]::before { background: #75ce9e; }
-.intake-sticker[data-tone="coral"]::before { background: #ff9a7e; }
-.intake-sticker[data-tone="purple"]::before { background: #a491f1; }
-.intake-sticker[data-tone="yellow"]::before { background: #efc84c; }
-.intake-sticker[data-tone="blue"] { background: #f8fcff; }
-.intake-sticker[data-tone="mint"] { background: #f7fdf9; }
-.intake-sticker[data-tone="coral"] { background: #fff9f6; }
-.intake-sticker[data-tone="purple"] { background: #fbf9ff; }
-.intake-sticker[data-tone="yellow"] { background: #fffdf4; }
-.intake-sticker > span { color: #738099; font-size: 11px; }
-.intake-sticker > strong { line-height: 1.55; }
+.intake-case-detail__summary-note strong,
+.intake-case-detail__field strong,
+.intake-case-detail__todo-list li {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  margin: 0;
+  color: #68768e;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.intake-case-detail__summary-note {
+  position: relative;
+  display: grid;
+  min-height: var(--summary-note-min-height);
+  align-content: center;
+  padding: 18px 18px 16px 20px;
+  overflow: hidden;
+  background:
+    linear-gradient(90deg, rgba(126, 196, 240, .45), transparent 36%) left top / 4px 100% no-repeat,
+    radial-gradient(circle at 94% 18%, rgba(126, 196, 240, .18) 0 17%, transparent 30%),
+    linear-gradient(135deg, rgba(255, 255, 255, .94), rgba(247, 252, 255, .76));
+  border: 1px solid rgba(218, 232, 246, .92);
+  border-radius: 16px;
+}
+.intake-case-detail__summary-note::after {
+  content: "摘";
+  position: absolute;
+  right: 14px;
+  bottom: -5px;
+  color: rgba(126, 151, 182, .11);
+  font-size: 46px;
+  font-weight: 900;
+  line-height: 1;
+  pointer-events: none;
+}
+.intake-case-detail__summary-note strong {
+  position: relative;
+  z-index: 1;
+  color: #314765;
+  font-size: 13px;
+  font-weight: 900;
+  -webkit-line-clamp: var(--cover-summary-lines);
+  max-height: calc(1.55em * var(--cover-summary-lines));
+}
+.intake-case-detail__meta-rows {
+  display: grid;
+  height: var(--detail-meta-rows-height);
+  grid-template-rows: repeat(3, 1fr);
+  gap: 0;
+  min-height: 0;
+  border-top: 1px dashed #dce8f3;
+}
+.intake-case-detail__fields {
+  display: contents;
+}
+.intake-case-detail__field {
+  display: grid;
+  grid-template-columns: 74px minmax(0, 1fr);
+  gap: 9px;
+  align-items: center;
+  min-height: 0;
+  padding: 0;
+  border-bottom: 1px dashed #dce8f3;
+}
+.intake-case-detail__field,
+.intake-case-detail__index-strip {
+  height: var(--detail-meta-row-height);
+  align-items: center;
+  box-sizing: border-box;
+}
+.intake-case-detail__field:last-child {
+  border-bottom: 1px dashed #dce8f3;
+}
+.intake-case-detail__field span {
+  color: #7a8798;
+  font-size: 11px;
+  font-weight: 900;
+}
+.intake-case-detail__field strong {
+  color: #2d4d70;
+  -webkit-line-clamp: var(--detail-field-lines);
+  max-height: calc(1.5em * var(--detail-field-lines));
+}
+.intake-case-detail__field em,
+.intake-case-detail__field small {
+  display: inline-block;
+  margin-left: 6px;
+  vertical-align: 1px;
+}
+.intake-case-detail__field em {
+  width: fit-content;
+  padding: 2px 7px;
+  color: #9b6b19;
+  background: #fff5d9;
+  border-radius: 999px;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 900;
+}
+.intake-case-detail__field small {
+  color: #68768e;
+  font-size: 11px;
+  font-weight: 800;
+}
+.intake-case-detail__index-strip {
+  display: grid;
+  grid-template-columns: 58px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px dashed #dce8f3;
+  border-radius: 0;
+}
+.intake-case-detail__index-strip > span {
+  color: #7788a5;
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: .12em;
+}
+.intake-case-detail__index-list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+}
+.intake-case-detail__index-field {
+  display: grid;
+  align-content: center;
+  min-width: 0;
+  gap: 2px;
+}
+.intake-case-detail__index-field small {
+  color: #8b97aa;
+  font-size: 10px;
+  font-weight: 900;
+}
+.intake-case-detail__index-field strong {
+  overflow: hidden;
+  color: #40536f;
+  font-size: 11px;
+  font-weight: 900;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.intake-case-detail__todo-list {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 6px;
+  min-height: 0;
+  padding: 9px 11px;
+  overflow: hidden;
+  background:
+    linear-gradient(135deg, rgba(255, 253, 247, .74), rgba(250, 252, 255, .58));
+  border: 1px solid rgba(236, 226, 200, .9);
+  border-radius: 15px;
+}
+.intake-case-detail__todo-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+.intake-case-detail__todo-heading small {
+  display: inline-flex;
+  align-items: center;
+  min-height: 18px;
+  padding: 0 7px;
+  color: #8b6c24;
+  background: #fff4ce;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 900;
+  white-space: nowrap;
+}
+.intake-case-detail__todo-list ol {
+  display: grid;
+  gap: 4px;
+  overflow: hidden;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: intake-gaps;
+}
+.intake-case-detail__todo-list li {
+  display: flex;
+  gap: 7px;
+  align-items: baseline;
+  min-width: 0;
+}
+.intake-case-detail__todo-text {
+  display: -webkit-box;
+  min-width: 0;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+}
+.intake-case-detail__todo-list li::before {
+  counter-increment: intake-gaps;
+  content: counter(intake-gaps);
+  display: grid;
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  place-items: center;
+  color: #8b6c24;
+  background: #fff4ce;
+  border-radius: 50%;
+  font-size: 11px;
+  font-weight: 900;
+}
+.intake-case-detail__origin-card {
+  position: relative;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 6px;
+  min-height: 0;
+  padding: 8px 0 0;
+  overflow: hidden;
+  background: transparent;
+  border: 0;
+  border-top: 0;
+  border-radius: 0;
+}
+@supports (-webkit-line-clamp: 1) {
+  .intake-case-detail__summary-note strong,
+  .intake-case-detail__field strong,
+  .intake-case-detail__todo-text {
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+  }
+
+  .intake-case-detail__summary-note strong {
+    -webkit-line-clamp: var(--cover-summary-lines);
+  }
+
+  .intake-case-detail__field strong {
+    -webkit-line-clamp: var(--detail-field-lines);
+  }
+
+  .intake-case-detail__todo-text {
+    -webkit-line-clamp: 1;
+  }
+}
 .intake-dossier__confirm {
   position: relative;
   display: grid;
@@ -1272,13 +1736,65 @@ onBeforeUnmount(() => {
   transform: rotate(-8deg);
   font-weight: 900;
 }
-.intake-dossier__error { margin-top: 10px; color: #ad4853; }
+.intake-error-dialog {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(38, 49, 73, .28);
+  backdrop-filter: blur(6px);
+}
+.intake-error-dialog__card {
+  display: grid;
+  gap: 10px;
+  width: min(420px, 100%);
+  padding: 20px;
+  text-align: center;
+  background: linear-gradient(135deg, #fffaf6, #f7fbff);
+  border: 1px solid #f1d6cf;
+  border-radius: 24px;
+  box-shadow: 0 30px 80px #3e526633;
+}
+.intake-error-dialog__card span {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  justify-self: center;
+  color: #bd4b4b;
+  background: #fff0ec;
+  border: 1px solid #ffd5ce;
+  border-radius: 50%;
+  font-weight: 900;
+}
+.intake-error-dialog__card h3 {
+  margin: 0;
+  color: #34435c;
+  font-size: 18px;
+}
+.intake-error-dialog__card p {
+  margin: 0;
+  color: #6d7890;
+  font-size: 13px;
+  line-height: 1.65;
+}
+.intake-error-dialog__card button {
+  justify-self: center;
+  min-width: 120px;
+  padding: 10px 16px;
+  color: #fff;
+  background: linear-gradient(135deg, #ff8c72, #8e8bef);
+  border: 0;
+  border-radius: 999px;
+  cursor: pointer;
+  font-weight: 900;
+}
 @media (max-width: 980px) {
   .intake-room { grid-template-columns: 1fr; }
 }
 @media (max-width: 580px) {
-  .intake-case-detail__score-row,
-  .intake-case-detail__meta-grid,
   .intake-dossier__actions--two-column {
     grid-template-columns: 1fr;
   }

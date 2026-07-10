@@ -313,7 +313,8 @@ def _opening_fallback_output(request: EvidenceTurnRequest) -> EvidenceTurnLlmOut
         f"我先根据接待室收敛的案情开始举证核对。本案当前争议焦点是 {core_issue}，"
         f"首轮请围绕这些材料补充证据：{facts_text}{story_text}"
         "你可以上传文件，也可以先说明证据来源、形成时间、保存方式和能证明的事实；"
-        "证据不足不会阻止进入小法庭，但我会标出置信度和待核验点。"
+        "发起争议方须至少正式提交 1 份相关证据后才能完成举证；"
+        "另一方可补充材料，或等待举证时效结束。"
     )
     evidence_requests = [
         EvidenceTurnQuestion(

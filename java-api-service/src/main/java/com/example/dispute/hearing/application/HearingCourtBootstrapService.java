@@ -3,6 +3,7 @@ package com.example.dispute.hearing.application;
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.domain.model.CaseStatus;
+import com.example.dispute.domain.model.RouteType;
 import com.example.dispute.infrastructure.persistence.entity.EvidenceDossierEntity;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.entity.HearingRecordEntity;
@@ -86,7 +87,15 @@ public class HearingCourtBootstrapService {
                 caseRepository
                         .findByIdForUpdate(caseId)
                         .orElseThrow(() -> new IllegalArgumentException("case not found"));
-        assertCanAccess(dispute, actor);
+        assertActorCanAccess(dispute, actor);
+        if (!canOpenOrRefreshBootstrap(dispute)) {
+            if (canReadExistingBootstrappedCourt(dispute)
+                    && hearingStateRepository.findByCaseId(caseId).isPresent()) {
+                return;
+            }
+            throw new IllegalStateException(
+                    "hearing bootstrap is unavailable from " + dispute.getCaseStatus());
+        }
         CaseRoomEntity hearingRoom =
                 roomRepository
                         .findByCaseIdAndRoomType(caseId, RoomType.HEARING)
@@ -94,12 +103,11 @@ public class HearingCourtBootstrapService {
         HearingStateEntity hearingState = ensureHearingState(dispute);
         Optional<CaseIntakeDossierEntity> intake =
                 intakeDossierRepository.findByCaseIdAndRoomType(caseId, RoomType.INTAKE);
-        Optional<EvidenceDossierEntity> evidence =
-                evidenceDossierRepository.findTopByCaseIdOrderByDossierVersionDesc(caseId);
-        int evidenceDossierVersion = evidence.map(EvidenceDossierEntity::getDossierVersion).orElse(1);
+        EvidenceDossierEntity evidence = ensureEvidenceBaseline(caseId);
+        int evidenceDossierVersion = evidence.getDossierVersion();
 
         ObjectNode intakeFactMap = intakeFactMap(dispute, intake);
-        ObjectNode evidenceMatrix = evidenceMatrix(evidence);
+        ObjectNode evidenceMatrix = evidenceMatrix(Optional.of(evidence));
         String judgeOpening = judgeOpeningText(dispute);
         String intakeAnnouncement = intakeAnnouncementText(intakeFactMap);
         String evidenceAnnouncement = evidenceAnnouncementText(evidenceMatrix);
@@ -195,6 +203,19 @@ public class HearingCourtBootstrapService {
         map.put("initiator_role", dispute.getInitiatorRole().name());
         map.put("respondent_role", respondentRole(dispute.getInitiatorRole()).name());
         map.set("claim", objectOrDefault(source.path("claim"), defaultClaim(source)));
+        map.set(
+                "claim_resolution",
+                objectOrDefault(source.path("claim_resolution"), defaultClaimResolution(dispute, source)));
+        map.set(
+                "respondent_attitude",
+                objectOrDefault(
+                        source.path("respondent_attitude"),
+                        defaultRespondentAttitude(dispute)));
+        map.set(
+                "dispute_core_state",
+                objectOrDefault(
+                        source.path("dispute_core_state"),
+                        defaultDisputeCoreState(dispute)));
         map.set("timeline", arrayOrEmpty(source.path("timeline")));
         map.set("known_facts", arrayOrDefault(source.path("known_facts"), defaultKnownFacts(dispute)));
         map.set(
@@ -271,6 +292,48 @@ public class HearingCourtBootstrapService {
         rawProjection.set("timeline_json", timeline.deepCopy());
         rawProjection.set("matrix_summary_json", matrix.deepCopy());
         return dossier;
+    }
+
+    private EvidenceDossierEntity ensureEvidenceBaseline(String caseId) {
+        return evidenceDossierRepository
+                .findTopByCaseIdOrderByDossierVersionDesc(caseId)
+                .orElseGet(() -> evidenceDossierRepository.save(emptyEvidenceBaseline(caseId)));
+    }
+
+    private EvidenceDossierEntity emptyEvidenceBaseline(String caseId) {
+        ObjectNode summary = objectMapper.createObjectNode();
+        summary.put("evidence_count", 0);
+        summary.putArray("evidence_items");
+        summary.putArray("verification_statuses");
+        summary.set("party_evidence_summary", defaultPartyEvidenceSummary());
+        summary.putArray("verified_facts");
+        summary.putArray("contested_facts");
+        ArrayNode gaps = summary.putArray("evidence_gaps");
+        gaps.add("USER 尚未形成有效证据材料");
+        gaps.add("MERCHANT 尚未形成有效证据材料");
+        summary.putArray("authenticity_flags");
+        summary.put("overall_confidence_score", 0);
+        summary.put(
+                "handoff_notes",
+                "证据室尚未收到正式提交的有效证据，庭审应提醒双方围绕争议事实进行说明。");
+        summary.put("frozen", true);
+        summary.put("baseline_empty", true);
+
+        ObjectNode matrixSummary = objectMapper.createObjectNode();
+        matrixSummary.putArray("fact_evidence_matrix");
+        matrixSummary.putArray("unmapped_evidence");
+        matrixSummary.set("evidence_gaps", gaps.deepCopy());
+        matrixSummary.put("handoff_notes", summary.path("handoff_notes").asText());
+        matrixSummary.put("baseline_empty", true);
+
+        return EvidenceDossierEntity.frozen(
+                "EVIDENCE_DOSSIER_" + compactUuid(),
+                caseId,
+                1,
+                BOOTSTRAP_ACTOR_ID,
+                json(summary),
+                "[]",
+                json(matrixSummary));
     }
 
     private ObjectNode courtroomContext(
@@ -405,7 +468,7 @@ public class HearingCourtBootstrapService {
         return "现在开庭。小法庭将基于接待室案情卷宗、证据室证据卷宗和双方庭审陈述进行三轮结构化审理。"
                 + "本案当前争议为："
                 + dispute.getTitle()
-                + "。AI 法官输出为裁决方案草案，最终结果仍需平台审核确认。";
+                + "。AI 法官输出为裁决方案草案，最终结果以后续确认为准。";
     }
 
     private static String intakeAnnouncementText(ObjectNode intakeFactMap) {
@@ -531,6 +594,51 @@ public class HearingCourtBootstrapService {
         claim.putNull("amount");
         claim.put("non_monetary_request", "核验争议事实与证据链路");
         return claim;
+    }
+
+    private ObjectNode defaultClaimResolution(FulfillmentCaseEntity dispute, JsonNode source) {
+        ObjectNode claim = objectMapper.createObjectNode();
+        String initiator = dispute.getInitiatorRole().name();
+        String requestedResolution =
+                firstText(source, "UNKNOWN", "requested_resolution", "resolution");
+        claim.put("initiator_role", initiator);
+        claim.put("requested_resolution", requestedResolution);
+        claim.putNull("requested_amount");
+        claim.put("requested_items", "");
+        claim.put("request_reason", dispute.getDescription());
+        claim.put("original_statement", dispute.getDescription());
+        claim.put(
+                "normalized_statement",
+                roleLabel(initiator) + "称" + dispute.getDescription());
+        return claim;
+    }
+
+    private ObjectNode defaultRespondentAttitude(FulfillmentCaseEntity dispute) {
+        String respondent = respondentRole(dispute.getInitiatorRole()).name();
+        ObjectNode attitude = objectMapper.createObjectNode();
+        attitude.put("respondent_role", respondent);
+        attitude.put("attitude", "NOT_RESPONDED");
+        attitude.put("position", roleLabel(respondent) + "尚未在接待室表达态度。");
+        attitude.put("source", "尚未回应");
+        attitude.put("confidence", 0.5);
+        return attitude;
+    }
+
+    private ObjectNode defaultDisputeCoreState(FulfillmentCaseEntity dispute) {
+        String initiator = dispute.getInitiatorRole().name();
+        String respondent = respondentRole(dispute.getInitiatorRole()).name();
+        ObjectNode state = objectMapper.createObjectNode();
+        state.put(
+                "core_conflict",
+                roleLabel(initiator) + "提出处理诉求，但" + roleLabel(respondent) + "态度尚待补充。");
+        state.put("conflict_type", "CLAIM_UNANSWERED");
+        state.set("facts_in_dispute", objectMapper.createArrayNode());
+        state.set("next_verification_focus", objectMapper.createArrayNode());
+        return state;
+    }
+
+    private static String roleLabel(String role) {
+        return "MERCHANT".equalsIgnoreCase(role) ? "商家" : "用户";
     }
 
     private ArrayNode defaultKnownFacts(FulfillmentCaseEntity dispute) {
@@ -662,7 +770,7 @@ public class HearingCourtBootstrapService {
         }
     }
 
-    private static void assertCanAccess(
+    private static void assertActorCanAccess(
             FulfillmentCaseEntity dispute, AuthenticatedActor actor) {
         boolean allowed =
                 switch (actor.role()) {
@@ -673,11 +781,32 @@ public class HearingCourtBootstrapService {
         if (!allowed) {
             throw new SecurityException("actor cannot bootstrap hearing");
         }
-        if (dispute.getCaseStatus() != CaseStatus.HEARING_OPEN
-                && dispute.getCaseStatus() != CaseStatus.HEARING) {
-            throw new IllegalStateException(
-                    "hearing bootstrap is unavailable from " + dispute.getCaseStatus());
+    }
+
+    private static boolean canOpenOrRefreshBootstrap(FulfillmentCaseEntity dispute) {
+        return dispute.getCaseStatus() == CaseStatus.HEARING_OPEN
+                || dispute.getCaseStatus() == CaseStatus.HEARING;
+    }
+
+    private static boolean canReadExistingBootstrappedCourt(FulfillmentCaseEntity dispute) {
+        if (dispute.getRouteType() != RouteType.FULL_HEARING
+                && !"HEARING".equals(dispute.getCurrentRoom())) {
+            return false;
         }
+        return switch (dispute.getCaseStatus()) {
+            case WAITING_EVIDENCE,
+                    SETTLEMENT_PENDING,
+                    DRAFT_READY,
+                    DELIBERATION_RUNNING,
+                    REVIEW_PENDING,
+                    REMEDY_PLANNED,
+                    WAITING_HUMAN_REVIEW,
+                    MANUAL_HANDOFF,
+                    APPROVED_FOR_EXECUTION,
+                    EXECUTING,
+                    CLOSED -> true;
+            default -> false;
+        };
     }
 
     private static ActorRole respondentRole(ActorRole initiatorRole) {

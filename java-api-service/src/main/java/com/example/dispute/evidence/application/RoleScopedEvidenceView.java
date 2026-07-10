@@ -3,7 +3,12 @@ package com.example.dispute.evidence.application;
 import com.example.dispute.evidence.domain.EvidenceVerificationStatus;
 import java.util.List;
 
-public record RoleScopedEvidenceView(String caseId, List<Item> items) {
+public record RoleScopedEvidenceView(String caseId, String initiatorRole, List<Item> items) {
+
+    public RoleScopedEvidenceView(String caseId, List<Item> items) {
+        this(caseId, null, items);
+    }
+
     public record Item(
             String evidenceId,
             String evidenceType,

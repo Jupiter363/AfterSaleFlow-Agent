@@ -265,6 +265,14 @@ def test_fallback_lobby_seed_turn_generates_case_detail_board() -> None:
                 "initiator_role": "USER",
                 "raw_text": "物流显示签收，但我没有收到包裹，希望退款。",
                 "requested_outcome_hint": "REFUND",
+                "claim_resolution_seed": {
+                    "initiator_role": "USER",
+                    "requested_resolution": "REFUND",
+                    "requested_amount": 299,
+                    "requested_items": "儿童手表 1 件",
+                    "request_reason": "物流显示签收但用户本人没有收到包裹，希望退款。",
+                    "original_statement": "我没收到包裹，希望退款",
+                },
             },
             "current_user_message": None,
             "latest_scroll_snapshot": None,
@@ -279,6 +287,17 @@ def test_fallback_lobby_seed_turn_generates_case_detail_board() -> None:
     assert detail["references"]["order_reference"] == "ORDER_123"
     assert detail["references"]["logistics_reference"] == "SF789000111"
     assert detail["requested_resolution"]["requested_outcome"] == "REFUND"
+    assert detail["claim_resolution"]["requested_resolution"] == "REFUND"
+    assert detail["claim_resolution"]["requested_amount"] == 299
+    assert detail["claim_resolution"]["requested_items"] == "儿童手表 1 件"
+    assert detail["claim_resolution"]["original_statement"] == "我没收到包裹，希望退款"
+    assert detail["claim_resolution"]["normalized_statement"].startswith("用户")
+    assert "我" not in detail["claim_resolution"]["normalized_statement"]
+    assert detail["respondent_attitude"]["respondent_role"] == "MERCHANT"
+    assert detail["respondent_attitude"]["attitude"] == "NOT_RESPONDED"
+    assert "尚未" in detail["respondent_attitude"]["position"]
+    assert detail["dispute_core_state"]["conflict_type"] == "CLAIM_UNANSWERED"
+    assert "退款" in detail["dispute_core_state"]["core_conflict"]
     assert detail["case_story"]["one_sentence_summary"].startswith("用户称")
     assert "我没有" not in detail["case_story"]["one_sentence_summary"]
     assert "本人没有收到包裹" in detail["case_story"]["one_sentence_summary"]
