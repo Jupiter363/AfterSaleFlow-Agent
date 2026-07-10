@@ -15,6 +15,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
@@ -88,5 +89,46 @@ class AgentA2AMessageServiceTest {
                 .thenReturn(true);
 
         assertThat(service.hasFormalJuryReviewReport("CASE_A2A", 3)).isTrue();
+    }
+
+    @Test
+    void loadsTheFormalJuryReportSoRepairCanReuseItsExactPayload() {
+        AgentA2AMessageService service =
+                new AgentA2AMessageService(
+                        repository,
+                        new ObjectMapper(),
+                        Clock.fixed(Instant.parse("2026-07-08T02:00:00Z"), ZoneOffset.UTC));
+        AgentA2AMessageEntity report =
+                AgentA2AMessageEntity.create(
+                        "A2A_FORMAL",
+                        "CASE_A2A",
+                        3,
+                        "JURY_PANEL",
+                        AgentA2AMessageService.PRESIDING_JUDGE,
+                        "JURY_REVIEW_REPORT",
+                        "{\"source\":\"surviving-a2a\"}",
+                        "{\"summary\":\"reuse this exact conclusion\",\"confidence_score\":91}",
+                        "REVIEWER_VISIBLE",
+                        "RUN_FORMAL",
+                        Instant.parse("2026-07-08T02:00:00Z"),
+                        "jury-panel");
+        when(repository
+                        .findFirstByCaseIdAndRoundNoAndFromAgentAndToAgentAndMessageTypeOrderByCreatedAtAsc(
+                                "CASE_A2A",
+                                3,
+                                "JURY_PANEL",
+                                AgentA2AMessageService.PRESIDING_JUDGE,
+                                "JURY_REVIEW_REPORT"))
+                .thenReturn(Optional.of(report));
+
+        assertThat(service.findFormalJuryReviewReport("CASE_A2A", 3))
+                .hasValueSatisfying(
+                        view -> {
+                            assertThat(view.inputRefsJson())
+                                    .isEqualTo("{\"source\":\"surviving-a2a\"}");
+                            assertThat(view.payloadJson())
+                                    .isEqualTo(
+                                            "{\"summary\":\"reuse this exact conclusion\",\"confidence_score\":91}");
+                        });
     }
 }

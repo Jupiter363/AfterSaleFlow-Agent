@@ -174,6 +174,15 @@ public class FinalWorkflowActivitiesAdapter
             boolean evidenceTimedOut,
             boolean finalConvergence,
             int maxHearingRounds) {
+        if (finalConvergence && !"C6_DRAFT_GENERATION".equals(stage)) {
+            return new HearingStageActivityResult(
+                    stage,
+                    true,
+                    false,
+                    false,
+                    null,
+                    "FINAL_CONVERGENCE_DEFERRED_TO_C6_" + stage);
+        }
         String key = workflowId + ":" + round + ":" + finalConvergence;
         HearingAnalysisActivityResult analysis =
                 hearingRounds.computeIfAbsent(

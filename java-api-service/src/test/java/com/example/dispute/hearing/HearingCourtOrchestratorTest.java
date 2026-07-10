@@ -4,6 +4,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -48,6 +50,7 @@ import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRe
 import com.example.dispute.room.infrastructure.persistence.repository.RoomMessageRepository;
 import com.example.dispute.tool.application.ToolDefinition;
 import com.example.dispute.tool.application.ToolRegistry;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.time.Instant;
@@ -65,6 +68,11 @@ import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.transaction.TransactionStatus;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.AbstractPlatformTransactionManager;
+import org.springframework.transaction.support.DefaultTransactionStatus;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.support.TransactionCallback;
 import org.springframework.transaction.support.TransactionTemplate;
 
 @ExtendWith(MockitoExtension.class)
@@ -100,7 +108,52 @@ class HearingCourtOrchestratorTest {
                         })
                 .when(courtTransaction)
                 .executeWithoutResult(any());
+        lenient()
+                .when(courtTransaction.execute(any(TransactionCallback.class)))
+                .thenAnswer(
+                        invocation -> {
+                            TransactionCallback<?> callback = invocation.getArgument(0);
+                            return callback.doInTransaction(mock(TransactionStatus.class));
+                        });
+        lenient()
+                .when(caseRepository.findByIdForUpdate(anyString()))
+                .thenAnswer(
+                        invocation ->
+                                caseRepository.findById(invocation.getArgument(0)));
+        lenient()
+                .when(roomRepository.findByCaseIdAndRoomTypeForUpdate(
+                        anyString(), eq(RoomType.HEARING)))
+                .thenAnswer(
+                        invocation ->
+                                roomRepository.findByCaseIdAndRoomType(
+                                        invocation.getArgument(0), RoomType.HEARING));
+        lenient()
+                .when(roundRepository.findByCaseIdAndRoundNoForUpdate(
+                        anyString(), anyInt()))
+                .thenAnswer(
+                        invocation ->
+                                roundRepository.findByCaseIdAndRoundNo(
+                                        invocation.getArgument(0),
+                                        invocation.getArgument(1)));
         ObjectMapper objectMapper = new ObjectMapper();
+        lenient()
+                .when(a2aMessageService.record(any()))
+                .thenAnswer(
+                        invocation -> {
+                            AgentA2ACommand command = invocation.getArgument(0);
+                            return new AgentA2AMessageView(
+                                    "A2A_TEST_FORMAL",
+                                    command.caseId(),
+                                    command.roundNo(),
+                                    command.fromAgent(),
+                                    command.toAgent(),
+                                    command.messageType(),
+                                    objectMapper.writeValueAsString(command.inputRefs()),
+                                    objectMapper.writeValueAsString(command.payload()),
+                                    command.visibility(),
+                                    command.agentRunId(),
+                                    CLOCK.instant());
+                        });
         courtroomContextAssembler =
                 new ActiveCourtroomContextAssembler(
                         hearingRecordRepository,
@@ -218,6 +271,75 @@ class HearingCourtOrchestratorTest {
                         any(),
                         eq("judge-round-opening-ready:" + dispute.getId() + ":1"),
                         eq("presiding-judge"));
+    }
+
+    @Test
+    void invokesTheRemoteCourtAgentOutsideAnyActiveCourtTransaction() {
+        FulfillmentCaseEntity dispute = hearingCase();
+        CaseRoomEntity room =
+                CaseRoomEntity.open(
+                        "ROOM_HEARING_CASE_COURT",
+                        dispute.getId(),
+                        RoomType.HEARING,
+                        OffsetDateTime.parse("2026-07-07T01:00:00Z"),
+                        "system");
+        HearingRoundEntity round =
+                HearingRoundEntity.open(
+                        "HEARING_ROUND_1",
+                        dispute.getId(),
+                        null,
+                        1,
+                        2,
+                        Instant.parse("2026-07-07T01:05:00Z"),
+                        Instant.parse("2026-07-07T01:00:00Z"),
+                        "system");
+        when(caseRepository.findById(dispute.getId())).thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.HEARING))
+                .thenReturn(Optional.of(room));
+        when(roundRepository.findByCaseIdAndRoundNo(dispute.getId(), 1))
+                .thenReturn(Optional.of(round));
+        when(submissionRepository.findAllByCaseIdAndRoundNoOrderBySubmittedAtAsc(
+                        dispute.getId(), 1))
+                .thenReturn(List.of());
+        when(hearingRecordRepository
+                        .findTopByCaseIdAndNodeNameAndRoundNoAndRecordTypeOrderByCreatedAtDesc(
+                                dispute.getId(),
+                                "C0_COURT_BOOTSTRAP",
+                                1,
+                                "BOOTSTRAP_DOSSIER_SNAPSHOT"))
+                .thenReturn(Optional.of(bootstrapSnapshot(dispute.getId())));
+        when(messageRepository.findByCaseIdAndIdempotencyKey(
+                        dispute.getId(), "judge-round-opening:" + dispute.getId() + ":1"))
+                .thenReturn(Optional.empty());
+        when(messageRepository.findMaxSequenceByRoomId(room.getId())).thenReturn(0L);
+        when(messageRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(agentClient.generateRoundTurn(any(), eq("TRACE_COURT_OPENING_1"), any()))
+                .thenAnswer(
+                        invocation -> {
+                            assertThat(TransactionSynchronizationManager
+                                            .isActualTransactionActive())
+                                    .isFalse();
+                            return openingResult();
+                        });
+        HearingCourtOrchestrator transactionAwareOrchestrator =
+                new HearingCourtOrchestrator(
+                        caseRepository,
+                        roomRepository,
+                        roundRepository,
+                        submissionRepository,
+                        messageRepository,
+                        eventService,
+                        agentClient,
+                        a2aMessageService,
+                        courtroomContextAssembler,
+                        new ObjectMapper(),
+                        CLOCK,
+                        new PostCommitSideEffectExecutor(Runnable::run),
+                        new TransactionTemplate(new TrackingTransactionManager()));
+
+        transactionAwareOrchestrator.afterRoundOpened(
+                dispute.getId(), 1, "TRACE_COURT_OPENING_1");
     }
 
     @Test
@@ -418,8 +540,8 @@ class HearingCourtOrchestratorTest {
                         dispute.getId(), "jury-review-report:" + dispute.getId() + ":3"))
                 .thenReturn(Optional.empty(), Optional.of(mock(RoomMessageEntity.class)));
         when(a2aMessageService.hasFormalJuryReviewReport(dispute.getId(), 3))
-                .thenReturn(false, true);
-        when(messageRepository.findMaxSequenceByRoomId(room.getId())).thenReturn(8L);
+                .thenReturn(true);
+        when(messageRepository.findMaxSequenceByRoomId(room.getId())).thenReturn(8L, 9L);
         when(messageRepository.save(any()))
                 .thenAnswer(invocation -> invocation.getArgument(0));
         when(agentClient.generateRoundTurn(any(), eq("TRACE_COURT_ROUND_3"), any()))
@@ -571,7 +693,7 @@ class HearingCourtOrchestratorTest {
                         Optional.empty(),
                         Optional.of(mock(RoomMessageEntity.class)));
         when(a2aMessageService.hasFormalJuryReviewReport(dispute.getId(), 3))
-                .thenReturn(false, true);
+                .thenReturn(true);
         when(caseRepository.findById(dispute.getId())).thenReturn(Optional.of(dispute));
         when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.HEARING))
                 .thenReturn(Optional.of(room));
@@ -600,7 +722,8 @@ class HearingCourtOrchestratorTest {
     }
 
     @Test
-    void finalRoundRetryRepairsMissingA2AWhenTheJuryRoomMessageAlreadyExists() {
+    void finalRoundRetryRepairsMissingA2AWhenTheJuryRoomMessageAlreadyExists()
+            throws Exception {
         FulfillmentCaseEntity dispute = hearingCase();
         CaseRoomEntity room =
                 CaseRoomEntity.open(
@@ -667,7 +790,7 @@ class HearingCourtOrchestratorTest {
                         dispute.getId(), "jury-review-report:" + dispute.getId() + ":3"))
                 .thenReturn(Optional.of(existingJuryReport));
         when(a2aMessageService.hasFormalJuryReviewReport(dispute.getId(), 3))
-                .thenReturn(false, false, true);
+                .thenReturn(false, true);
         when(caseRepository.findById(dispute.getId())).thenReturn(Optional.of(dispute));
         when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.HEARING))
                 .thenReturn(Optional.of(room));
@@ -681,9 +804,107 @@ class HearingCourtOrchestratorTest {
         orchestrator.afterRoundClosedAfterCommit(
                 dispute.getId(), 3, true, "TRACE_COURT_ROUND_3", completion);
 
-        verify(a2aMessageService).record(any());
+        ArgumentCaptor<AgentA2ACommand> repairedA2A =
+                ArgumentCaptor.forClass(AgentA2ACommand.class);
+        verify(a2aMessageService).record(repairedA2A.capture());
+        JsonNode repairedPayload =
+                new ObjectMapper().valueToTree(repairedA2A.getValue().payload());
+        assertThat(repairedPayload)
+                .isEqualTo(new ObjectMapper().readTree(existingJuryReport.getMessageText()));
         verify(messageRepository, never()).save(any());
         verify(completion).run();
+        verifyNoInteractions(agentClient);
+    }
+
+    @Test
+    void finalRoundRetryReusesTheSurvivingA2APayloadWhenRepairingTheRoomCard()
+            throws Exception {
+        FulfillmentCaseEntity dispute = hearingCase();
+        CaseRoomEntity room =
+                CaseRoomEntity.open(
+                        "ROOM_HEARING_CASE_COURT",
+                        dispute.getId(),
+                        RoomType.HEARING,
+                        OffsetDateTime.parse("2026-07-07T01:00:00Z"),
+                        "system");
+        HearingRoundEntity round =
+                HearingRoundEntity.open(
+                        "HEARING_ROUND_3",
+                        dispute.getId(),
+                        null,
+                        3,
+                        2,
+                        Instant.parse("2026-07-07T01:05:00Z"),
+                        Instant.parse("2026-07-07T01:00:00Z"),
+                        "system");
+        round.complete(
+                "{\"trigger\":\"BOTH_PARTIES_SUBMITTED\"}",
+                null,
+                Instant.parse("2026-07-07T01:04:00Z"),
+                "hearing-controller");
+        RoomMessageEntity existingJudge =
+                RoomMessageEntity.create(
+                        "MESSAGE_EXISTING_JUDGE_3",
+                        dispute.getId(),
+                        room.getId(),
+                        9,
+                        MessageSenderType.AGENT,
+                        "JUDGE",
+                        "presiding-judge",
+                        "[\"USER\",\"MERCHANT\"]",
+                        "[]",
+                        MessageType.AGENT_MESSAGE,
+                        "第三轮法官收束已经写入。",
+                        "[]",
+                        "judge-round-turn:" + dispute.getId() + ":3",
+                        3,
+                        Instant.parse("2026-07-07T01:04:30Z"),
+                        "TRACE_COURT_ROUND_3");
+        AgentA2AMessageView survivingA2A =
+                new AgentA2AMessageView(
+                        "A2A_EXISTING_JURY_3",
+                        dispute.getId(),
+                        3,
+                        "JURY_PANEL",
+                        "PRESIDING_JUDGE",
+                        "JURY_REVIEW_REPORT",
+                        "{\"source\":\"surviving-a2a\",\"round_no\":3}",
+                        "{\"summary\":\"必须复用的正式复核结论\",\"confidence_score\":91}",
+                        "REVIEWER_VISIBLE",
+                        "RUN_JURY_3",
+                        Instant.parse("2026-07-07T01:04:31Z"));
+        when(messageRepository.findByCaseIdAndIdempotencyKey(
+                        dispute.getId(), "judge-round-turn:" + dispute.getId() + ":3"))
+                .thenReturn(Optional.of(existingJudge));
+        when(messageRepository.findByCaseIdAndIdempotencyKey(
+                        dispute.getId(), "jury-review-report:" + dispute.getId() + ":3"))
+                .thenReturn(Optional.empty(), Optional.empty(), Optional.of(mock()));
+        when(a2aMessageService.hasFormalJuryReviewReport(dispute.getId(), 3))
+                .thenReturn(true, true);
+        when(a2aMessageService.findFormalJuryReviewReport(dispute.getId(), 3))
+                .thenReturn(Optional.of(survivingA2A));
+        when(caseRepository.findById(dispute.getId())).thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.HEARING))
+                .thenReturn(Optional.of(room));
+        when(roundRepository.findByCaseIdAndRoundNo(dispute.getId(), 3))
+                .thenReturn(Optional.of(round));
+        when(submissionRepository.findAllByCaseIdAndRoundNoOrderBySubmittedAtAsc(
+                        dispute.getId(), 3))
+                .thenReturn(List.of());
+        when(messageRepository.findMaxSequenceByRoomId(room.getId())).thenReturn(12L);
+        when(messageRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        orchestrator.afterRoundClosed(
+                dispute.getId(), 3, true, "TRACE_COURT_ROUND_3");
+
+        ArgumentCaptor<RoomMessageEntity> repairedRoomCard =
+                ArgumentCaptor.forClass(RoomMessageEntity.class);
+        verify(messageRepository).save(repairedRoomCard.capture());
+        assertThat(repairedRoomCard.getValue().getSequenceNo()).isEqualTo(13);
+        assertThat(new ObjectMapper().readTree(repairedRoomCard.getValue().getMessageText()))
+                .isEqualTo(new ObjectMapper().readTree(survivingA2A.payloadJson()));
+        verify(a2aMessageService, never()).record(any());
         verifyNoInteractions(agentClient);
     }
 
@@ -735,8 +956,6 @@ class HearingCourtOrchestratorTest {
                 Instant.parse("2026-07-07T01:04:00Z"),
                 "hearing-controller");
         when(caseRepository.findById(dispute.getId())).thenReturn(Optional.of(dispute));
-        when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.HEARING))
-                .thenReturn(Optional.of(room));
         when(roundRepository.findByCaseIdAndRoundNo(dispute.getId(), 1))
                 .thenReturn(Optional.of(round));
         when(submissionRepository.findAllByCaseIdAndRoundNoOrderBySubmittedAtAsc(
@@ -853,5 +1072,38 @@ class HearingCourtOrchestratorTest {
                   ]
                 }
                 """);
+    }
+
+    private static HearingCourtAgentResult openingResult() {
+        return new HearingCourtAgentResult(
+                "JUDGE",
+                "小法庭现在开庭。",
+                "法官已打开第一轮事实陈述。",
+                List.of("请用户说明争议事实。"),
+                List.of("请商家说明履约记录。"),
+                "JUDGE_OPENING_READY",
+                1,
+                1,
+                false,
+                "hearing-round-opening-v1",
+                "test-model");
+    }
+
+    private static final class TrackingTransactionManager
+            extends AbstractPlatformTransactionManager {
+
+        @Override
+        protected Object doGetTransaction() {
+            return new Object();
+        }
+
+        @Override
+        protected void doBegin(Object transaction, TransactionDefinition definition) {}
+
+        @Override
+        protected void doCommit(DefaultTransactionStatus status) {}
+
+        @Override
+        protected void doRollback(DefaultTransactionStatus status) {}
     }
 }

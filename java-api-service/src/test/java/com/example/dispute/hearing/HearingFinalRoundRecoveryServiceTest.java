@@ -3,6 +3,7 @@ package com.example.dispute.hearing;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -19,6 +20,7 @@ import com.example.dispute.hearing.infrastructure.persistence.repository.Hearing
 import com.example.dispute.infrastructure.persistence.repository.AdjudicationDraftRepository;
 import java.util.List;
 import java.util.Optional;
+import java.time.Instant;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -53,10 +55,12 @@ class HearingFinalRoundRecoveryServiceTest {
     @Test
     void repairsFormalJuryReportBeforeResignalingFinalRound() {
         HearingRoundEntity round = finalRound("CASE_RECOVER");
-        when(roundRepository.findFinalRoundsWithoutDraft(
+        when(roundRepository.findFinalRoundsWithoutDraftAfter(
                         eq(3),
                         eq(4),
                         eq(List.of(HearingRoundStatus.COMPLETED, HearingRoundStatus.FORCED_CLOSED)),
+                        isNull(),
+                        eq(""),
                         any(Pageable.class)))
                 .thenReturn(List.of(round));
         when(draftRepository.findByCaseIdAndDraftVersion("CASE_RECOVER", 4))
@@ -80,10 +84,12 @@ class HearingFinalRoundRecoveryServiceTest {
     @Test
     void doesNotSignalWhenFormalJuryReportStillCannotBePersisted() {
         HearingRoundEntity round = finalRound("CASE_REPORT_MISSING");
-        when(roundRepository.findFinalRoundsWithoutDraft(
+        when(roundRepository.findFinalRoundsWithoutDraftAfter(
                         eq(3),
                         eq(4),
                         eq(List.of(HearingRoundStatus.COMPLETED, HearingRoundStatus.FORCED_CLOSED)),
+                        isNull(),
+                        eq(""),
                         any(Pageable.class)))
                 .thenReturn(List.of(round));
         when(draftRepository.findByCaseIdAndDraftVersion("CASE_REPORT_MISSING", 4))
@@ -100,10 +106,12 @@ class HearingFinalRoundRecoveryServiceTest {
     @Test
     void doesNotSignalWhenOnlyTheJuryRoomCardExistsWithoutFormalA2A() {
         HearingRoundEntity round = finalRound("CASE_A2A_MISSING");
-        when(roundRepository.findFinalRoundsWithoutDraft(
+        when(roundRepository.findFinalRoundsWithoutDraftAfter(
                         eq(3),
                         eq(4),
                         eq(List.of(HearingRoundStatus.COMPLETED, HearingRoundStatus.FORCED_CLOSED)),
+                        isNull(),
+                        eq(""),
                         any(Pageable.class)))
                 .thenReturn(List.of(round));
         when(draftRepository.findByCaseIdAndDraftVersion("CASE_A2A_MISSING", 4))
@@ -120,10 +128,12 @@ class HearingFinalRoundRecoveryServiceTest {
     @Test
     void skipsFinalRoundsThatAlreadyHaveTheExactFinalDraftVersion() {
         HearingRoundEntity round = finalRound("CASE_ALREADY_DRAFTED");
-        when(roundRepository.findFinalRoundsWithoutDraft(
+        when(roundRepository.findFinalRoundsWithoutDraftAfter(
                         eq(3),
                         eq(4),
                         eq(List.of(HearingRoundStatus.COMPLETED, HearingRoundStatus.FORCED_CLOSED)),
+                        isNull(),
+                        eq(""),
                         any(Pageable.class)))
                 .thenReturn(List.of(round));
         when(draftRepository.findByCaseIdAndDraftVersion("CASE_ALREADY_DRAFTED", 4))
@@ -138,18 +148,33 @@ class HearingFinalRoundRecoveryServiceTest {
     }
 
     @Test
-    void continuesScanningAfterAnEarlierCandidateFailsUntilRecoveryLimitIsReached() {
-        HearingRoundEntity permanentlyFailing = finalRound("CASE_PERMANENT_FAILURE");
-        HearingRoundEntity recoverable = finalRound("CASE_RECOVERABLE");
-        when(roundRepository.findFinalRoundsWithoutDraft(
+    void rotatesTheKeysetCursorSoAPermanentFailureCannotStarveTheNextCandidate() {
+        HearingRoundEntity permanentlyFailing =
+                finalRound(
+                        "ROUND_PERMANENT_FAILURE",
+                        "CASE_PERMANENT_FAILURE",
+                        Instant.parse("2026-07-10T01:00:00Z"));
+        HearingRoundEntity recoverable =
+                finalRound(
+                        "ROUND_RECOVERABLE",
+                        "CASE_RECOVERABLE",
+                        Instant.parse("2026-07-10T01:01:00Z"));
+        when(roundRepository.findFinalRoundsWithoutDraftAfter(
                         eq(3),
                         eq(4),
                         eq(List.of(HearingRoundStatus.COMPLETED, HearingRoundStatus.FORCED_CLOSED)),
+                        isNull(),
+                        eq(""),
                         any(Pageable.class)))
-                .thenReturn(
-                        List.of(permanentlyFailing),
-                        List.of(recoverable),
-                        List.of());
+                .thenReturn(List.of(permanentlyFailing));
+        when(roundRepository.findFinalRoundsWithoutDraftAfter(
+                        eq(3),
+                        eq(4),
+                        eq(List.of(HearingRoundStatus.COMPLETED, HearingRoundStatus.FORCED_CLOSED)),
+                        eq(Instant.parse("2026-07-10T01:00:00Z")),
+                        eq("ROUND_PERMANENT_FAILURE"),
+                        any(Pageable.class)))
+                .thenReturn(List.of(recoverable));
         when(draftRepository.findByCaseIdAndDraftVersion("CASE_PERMANENT_FAILURE", 4))
                 .thenReturn(Optional.empty());
         when(draftRepository.findByCaseIdAndDraftVersion("CASE_RECOVERABLE", 4))
@@ -166,6 +191,7 @@ class HearingFinalRoundRecoveryServiceTest {
         when(workflowCoordinator.roundCompletedNow("CASE_RECOVERABLE", 3, false))
                 .thenReturn(true);
 
+        assertThat(service.recoverFinalRoundsWithoutDraft(1)).isZero();
         assertThat(service.recoverFinalRoundsWithoutDraft(1)).isEqualTo(1);
 
         verify(courtOrchestrator)
@@ -179,8 +205,18 @@ class HearingFinalRoundRecoveryServiceTest {
     }
 
     private static HearingRoundEntity finalRound(String caseId) {
+        return finalRound(
+                "ROUND_" + caseId,
+                caseId,
+                Instant.parse("2026-07-10T01:00:00Z"));
+    }
+
+    private static HearingRoundEntity finalRound(
+            String roundId, String caseId, Instant closedAt) {
         HearingRoundEntity round = mock(HearingRoundEntity.class);
+        when(round.getId()).thenReturn(roundId);
         when(round.getCaseId()).thenReturn(caseId);
+        when(round.getClosedAt()).thenReturn(closedAt);
         return round;
     }
 }

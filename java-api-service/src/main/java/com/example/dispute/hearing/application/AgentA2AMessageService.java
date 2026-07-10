@@ -6,6 +6,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -68,6 +69,19 @@ public class AgentA2AMessageService {
                 "JURY_PANEL",
                 PRESIDING_JUDGE,
                 "JURY_REVIEW_REPORT");
+    }
+
+    @Transactional(readOnly = true)
+    public Optional<AgentA2AMessageView> findFormalJuryReviewReport(
+            String caseId, int roundNo) {
+        return repository
+                .findFirstByCaseIdAndRoundNoAndFromAgentAndToAgentAndMessageTypeOrderByCreatedAtAsc(
+                        caseId,
+                        roundNo,
+                        "JURY_PANEL",
+                        PRESIDING_JUDGE,
+                        "JURY_REVIEW_REPORT")
+                .map(AgentA2AMessageService::view);
     }
 
     private String json(Object value) {

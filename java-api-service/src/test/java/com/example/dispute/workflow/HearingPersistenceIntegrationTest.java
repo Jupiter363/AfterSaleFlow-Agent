@@ -624,7 +624,8 @@ class HearingPersistenceIntegrationTest {
 
     @Test
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
-    void juryRoomMessageConstraintFailureRollsBackA2AAndSkipsCompletion() {
+    void juryRepairUsesTheNextLockedRoomSequenceWhenASequenceBlockerAlreadyExists()
+            throws Exception {
         String caseId = "CASE_jurytxrollback";
         FulfillmentCaseEntity disputeCase = routedCase(caseId, "idem-jury-tx-rollback");
         caseRepository.saveAndFlush(disputeCase);
@@ -719,18 +720,22 @@ class HearingPersistenceIntegrationTest {
                 "TRACE_JURY_TX_ROLLBACK",
                 () -> completionCalled.set(true));
 
-        assertThat(completionCalled).isFalse();
-        assertThat(
-                        agentA2AMessageRepository
-                                .findAllByCaseIdAndToAgentAndRoundNoLessThanEqualOrderByRoundNoAscCreatedAtAsc(
-                                        caseId,
-                                        AgentA2AMessageService.PRESIDING_JUDGE,
-                                        3))
-                .isEmpty();
-        assertThat(
-                        roomMessageRepository.findByCaseIdAndIdempotencyKey(
-                                caseId, "jury-review-report:" + caseId + ":3"))
-                .isEmpty();
+        assertThat(completionCalled).isTrue();
+        var formalReports =
+                agentA2AMessageRepository
+                        .findAllByCaseIdAndToAgentAndRoundNoLessThanEqualOrderByRoundNoAscCreatedAtAsc(
+                                caseId,
+                                AgentA2AMessageService.PRESIDING_JUDGE,
+                                3);
+        assertThat(formalReports).singleElement();
+        var roomReport =
+                roomMessageRepository
+                        .findByCaseIdAndIdempotencyKey(
+                                caseId, "jury-review-report:" + caseId + ":3")
+                        .orElseThrow();
+        assertThat(roomReport.getSequenceNo()).isEqualTo(11);
+        assertThat(mapper.readTree(roomReport.getMessageText()))
+                .isEqualTo(mapper.readTree(formalReports.getFirst().getPayloadJson()));
         assertThat(roomMessageRepository.findById(sequenceBlocker.getId())).isPresent();
     }
 

@@ -144,7 +144,6 @@ class HearingCollaborationIntegrationTest {
 
     @Autowired private SettlementService settlementService;
     @Autowired private HearingRoundService roundService;
-    @Autowired private HearingFinalDraftService finalDraftService;
     @Autowired private AgentA2AMessageService a2aMessageService;
     @Autowired private FulfillmentCaseRepository caseRepository;
     @Autowired private CaseRoomRepository roomRepository;
@@ -156,7 +155,6 @@ class HearingCollaborationIntegrationTest {
     @Autowired private HearingStateRepository hearingStateRepository;
     @Autowired private AdjudicationDraftRepository draftRepository;
     @Autowired private EvidenceDossierRepository evidenceDossierRepository;
-    @Autowired private AgentRunRepository agentRunRepository;
     @Autowired private RemedyPlanRepository remedyPlanRepository;
     @Autowired private ReviewPacketRepository reviewPacketRepository;
     @Autowired private ReviewTaskRepository reviewTaskRepository;
@@ -559,8 +557,7 @@ class HearingCollaborationIntegrationTest {
         assertThat(waitingDraft.hearingPhase()).isEqualTo("JUDGE_DRAFTING");
         assertThat(waitingDraft.canCompleteHearing()).isFalse();
 
-        finalDraftService.ensureDraftForFinalSealedRound(
-                "CASE_FINAL_DRAFT_COMPLETION", 3, 3, "temporal-worker");
+        seedTemporalFinalDraft("CASE_FINAL_DRAFT_COMPLETION");
         HearingStatusView completed = roundService.completeHearing("CASE_FINAL_DRAFT_COMPLETION", user);
 
         assertThat(completed.canCompleteHearing()).isTrue();
@@ -581,11 +578,6 @@ class HearingCollaborationIntegrationTest {
                                 .getHearingStatus()
                                 .name())
                 .isEqualTo("COMPLETED");
-        assertThat(agentRunRepository.findAllByCaseIdOrderByCreatedAtAsc(
-                        "CASE_FINAL_DRAFT_COMPLETION"))
-                .hasSize(1)
-                .extracting("outputRef")
-                .containsExactly(completed.latestDraftId());
         assertThat(
                         eventRepository
                                 .findByCaseIdAndEventKey(
@@ -602,7 +594,7 @@ class HearingCollaborationIntegrationTest {
                             assertThat(event.getEventJson())
                                     .contains("\"review_task_id\":\"" + completed.reviewTaskId() + "\"");
                         });
-        verify(hearingAgentClient, times(1)).analyze(any(), any(), any());
+        verifyNoInteractions(hearingAgentClient);
 
         HearingStatusView replay = roundService.completeHearing("CASE_FINAL_DRAFT_COMPLETION", user);
 
@@ -610,7 +602,7 @@ class HearingCollaborationIntegrationTest {
         assertThat(draftRepository.findAll()).filteredOn(
                         draft -> "CASE_FINAL_DRAFT_COMPLETION".equals(draft.getCaseId()))
                 .hasSize(1);
-        verify(hearingAgentClient, times(1)).analyze(any(), any(), any());
+        verifyNoInteractions(hearingAgentClient);
     }
 
     @Test
@@ -636,8 +628,7 @@ class HearingCollaborationIntegrationTest {
                 new CompleteHearingRoundCommand(2, "{\"round\":3}", false),
                 system);
 
-        finalDraftService.ensureDraftForFinalSealedRound(
-                "CASE_FINAL_REVIEW_GATE_SYNC", 3, 3, "temporal-worker");
+        seedTemporalFinalDraft("CASE_FINAL_REVIEW_GATE_SYNC");
         HearingStatusView completed = roundService.completeHearing("CASE_FINAL_REVIEW_GATE_SYNC", user);
 
         assertThat(completed.hearingPhase()).isEqualTo("REVIEW_GATE_READY");
@@ -727,7 +718,7 @@ class HearingCollaborationIntegrationTest {
     }
 
     @Test
-    void finalDraftRequestIncludesFormalJuryA2AReport() {
+    void seededTemporalFinalDraftCanBeAdoptedAfterFormalJuryA2AReport() {
         seedHearing("CASE_FINAL_DRAFT_JURY_REPORT");
         hearingStateRepository.saveAndFlush(
                 HearingStateEntity.start(
@@ -772,21 +763,18 @@ class HearingCollaborationIntegrationTest {
                         "REVIEWER_VISIBLE",
                         "RUN_JURY_REPORT_3"));
 
-        finalDraftService.ensureDraftForFinalSealedRound(
-                "CASE_FINAL_DRAFT_JURY_REPORT", 3, 3, "temporal-worker");
-        roundService.completeHearing("CASE_FINAL_DRAFT_JURY_REPORT", user);
+        seedTemporalFinalDraft("CASE_FINAL_DRAFT_JURY_REPORT");
+        HearingStatusView completed =
+                roundService.completeHearing("CASE_FINAL_DRAFT_JURY_REPORT", user);
 
-        ArgumentCaptor<JsonNode> request = ArgumentCaptor.forClass(JsonNode.class);
-        verify(hearingAgentClient).analyze(request.capture(), any(), any());
-        JsonNode courtroomContext =
-                request.getValue().path("hearing_context").path("courtroom_context");
-        assertThat(courtroomContext.path("jury_review_report").path("payload").path("summary").asText())
-                .contains("签收人身份和签收地点");
-        assertThat(courtroomContext.path("jury_a2a_notes").get(0).path("message_type").asText())
-                .isEqualTo("JURY_REVIEW_REPORT");
-        assertThat(courtroomContext.toString())
-                .contains("用户要求复核签收人身份")
-                .doesNotContain("SYSTEM_AUDIT_ONLY");
+        assertThat(completed.hearingPhase()).isEqualTo("REVIEW_GATE_READY");
+        assertThat(a2aMessageService.findFormalJuryReviewReport(
+                        "CASE_FINAL_DRAFT_JURY_REPORT", 3))
+                .hasValueSatisfying(
+                        report ->
+                                assertThat(report.payloadJson())
+                                        .contains("签收人身份和签收地点"));
+        verifyNoInteractions(hearingAgentClient);
     }
 
     @Test
@@ -835,8 +823,7 @@ class HearingCollaborationIntegrationTest {
         assertThat(waitingDraft.latestDraftId()).isNull();
         assertThat(waitingDraft.canCompleteHearing()).isFalse();
 
-        finalDraftService.ensureDraftForFinalSealedRound(
-                "CASE_FINAL_DRAFT_VERSION", 3, 3, "temporal-worker");
+        seedTemporalFinalDraft("CASE_FINAL_DRAFT_VERSION");
         HearingStatusView completed = roundService.completeHearing("CASE_FINAL_DRAFT_VERSION", user);
 
         assertThat(completed.canCompleteHearing()).isTrue();
@@ -1220,6 +1207,34 @@ class HearingCollaborationIntegrationTest {
         FulfillmentCaseEntity dispute = caseRepository.findById(caseId).orElseThrow();
         dispute.attachHearingWorkflow("hearing-window-" + caseId, "hearing-bootstrap");
         caseRepository.saveAndFlush(dispute);
+    }
+
+    private String seedTemporalFinalDraft(String caseId) {
+        HearingStateEntity hearingState =
+                hearingStateRepository
+                        .findByCaseId(caseId)
+                        .orElseThrow(
+                                () ->
+                                        new IllegalStateException(
+                                                "hearing state must be seeded before final draft"));
+        String draftId = "DRAFT_TEMPORAL_C6_" + caseId;
+        draftRepository.saveAndFlush(
+                AdjudicationDraftEntity.create(
+                        draftId,
+                        caseId,
+                        hearingState.getId(),
+                        4,
+                        "[\"三轮庭审已经完整封存\"]",
+                        "[\"证据矩阵已由证据书记官复核\"]",
+                        "[\"平台规则将在人工审核阶段最终确认\"]",
+                        "[\"审核员复核事实采信与执行可行性\"]",
+                        "REVIEWABLE_FINAL_DRAFT",
+                        new BigDecimal("0.7500"),
+                        "Temporal C6 已生成裁决草案，等待平台审核员确认。",
+                        "python-agent-service/presiding-judge",
+                        "PENDING_HUMAN_REVIEW",
+                        "temporal-worker"));
+        return draftId;
     }
 
     private void completeCourtOrchestration(String caseId, int roundNo, boolean finalRound) {

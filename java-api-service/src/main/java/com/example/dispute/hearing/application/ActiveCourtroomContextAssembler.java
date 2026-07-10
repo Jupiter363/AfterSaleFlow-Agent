@@ -1,5 +1,7 @@
 package com.example.dispute.hearing.application;
 
+import com.example.dispute.config.ActorRole;
+import com.example.dispute.hearing.domain.HearingRoundStatus;
 import com.example.dispute.hearing.infrastructure.persistence.entity.HearingRoundEntity;
 import com.example.dispute.hearing.infrastructure.persistence.entity.HearingRoundPartySubmissionEntity;
 import com.example.dispute.hearing.infrastructure.persistence.repository.HearingRoundPartySubmissionRepository;
@@ -14,7 +16,11 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.util.EnumSet;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -92,25 +98,100 @@ public class ActiveCourtroomContextAssembler {
 
     @Transactional(readOnly = true)
     public ObjectNode assembleFinalConvergence(String caseId, int throughRoundNo) {
-        ObjectNode context = assemble(caseId, throughRoundNo);
-        if (!context.path("jury_review_report").isObject()) {
-            throw new IllegalStateException(
-                    "formal jury review report is required for final convergence");
+        if (throughRoundNo < 1) {
+            throw new IllegalArgumentException(
+                    "final convergence round number must be positive");
         }
+        ObjectNode context = assemble(caseId, throughRoundNo);
+        JsonNode formalReport = context.path("jury_review_report");
+        if (!formalReport.isObject()) {
+            throw new IllegalStateException(
+                    "formal jury review report for round "
+                            + throughRoundNo
+                            + " is required for final convergence");
+        }
+        if (formalReport.path("round_no").asInt(-1) != throughRoundNo) {
+            throw new IllegalStateException(
+                    "formal jury review report for round "
+                            + throughRoundNo
+                            + " is required for final convergence");
+        }
+        if (!"JURY_REVIEW_REPORT".equals(
+                        formalReport.path("message_type").asText())
+                || !"JURY_PANEL".equals(formalReport.path("from_agent").asText())
+                || !AgentA2AMessageService.PRESIDING_JUDGE.equals(
+                        formalReport.path("to_agent").asText())) {
+            throw new IllegalStateException(
+                    "formal jury review report must be sent from JURY_PANEL to PRESIDING_JUDGE");
+        }
+        validatedSealedRounds(caseId, throughRoundNo);
         return context;
     }
 
     @Transactional(readOnly = true)
     public ArrayNode sealedRounds(String caseId, int throughRoundNo) {
+        return validatedSealedRounds(caseId, throughRoundNo);
+    }
+
+    private ArrayNode validatedSealedRounds(String caseId, int throughRoundNo) {
         ArrayNode sealedRounds = objectMapper.createArrayNode();
-        roundRepository.findAllByCaseIdOrderByRoundNoAsc(caseId).stream()
-                .filter(round -> round.getRoundNo() <= throughRoundNo)
-                .map(round -> sealedRound(caseId, round))
-                .forEach(sealedRounds::add);
+        Map<Integer, HearingRoundEntity> roundsByNumber = new HashMap<>();
+        for (HearingRoundEntity round :
+                roundRepository.findAllByCaseIdOrderByRoundNoAsc(caseId)) {
+            if (round.getRoundNo() <= throughRoundNo) {
+                HearingRoundEntity duplicate =
+                        roundsByNumber.put(round.getRoundNo(), round);
+                if (duplicate != null) {
+                    throw new IllegalStateException(
+                            "duplicate hearing round "
+                                    + round.getRoundNo()
+                                    + " in final convergence");
+                }
+            }
+        }
+        for (int expectedRoundNo = 1;
+                expectedRoundNo <= throughRoundNo;
+                expectedRoundNo++) {
+            HearingRoundEntity round = roundsByNumber.get(expectedRoundNo);
+            if (round == null) {
+                throw new IllegalStateException(
+                        "hearing round "
+                                + expectedRoundNo
+                                + " is missing from final convergence");
+            }
+            boolean terminal =
+                    round.getRoundStatus() == HearingRoundStatus.COMPLETED
+                            || round.getRoundStatus()
+                                    == HearingRoundStatus.FORCED_CLOSED;
+            if (!terminal || round.getClosedAt() == null) {
+                throw new IllegalStateException(
+                        "hearing round "
+                                + expectedRoundNo
+                                + " is not sealed for final convergence");
+            }
+            List<HearingRoundPartySubmissionEntity> submissions =
+                    submissionRepository
+                            .findAllByCaseIdAndRoundNoOrderBySubmittedAtAsc(
+                                    caseId, expectedRoundNo);
+            Set<ActorRole> participantRoles = EnumSet.noneOf(ActorRole.class);
+            submissions.forEach(
+                    submission ->
+                            participantRoles.add(submission.getParticipantRole()));
+            if (!participantRoles.contains(ActorRole.USER)
+                    || !participantRoles.contains(ActorRole.MERCHANT)) {
+                throw new IllegalStateException(
+                        "hearing round "
+                                + expectedRoundNo
+                                + " requires USER and MERCHANT submissions for final convergence");
+            }
+            sealedRounds.add(sealedRound(round, submissions));
+        }
         return sealedRounds;
     }
 
-    private ObjectNode sealedRound(String caseId, HearingRoundEntity round) {
+    private ObjectNode sealedRound(
+            HearingRoundEntity round,
+            List<HearingRoundPartySubmissionEntity> roundSubmissions) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("round_no", round.getRoundNo());
         node.put("round_status", round.getRoundStatus().name());
@@ -120,9 +201,7 @@ public class ActiveCourtroomContextAssembler {
                 round.getStopReason() == null ? "" : round.getStopReason().name());
         node.set("summary", readJson(round.getSummaryJson(), "hearing round summary"));
         ArrayNode submissions = node.putArray("party_submissions");
-        submissionRepository
-                .findAllByCaseIdAndRoundNoOrderBySubmittedAtAsc(caseId, round.getRoundNo())
-                .stream()
+        roundSubmissions.stream()
                 .map(this::submissionNode)
                 .forEach(submissions::add);
         return node;

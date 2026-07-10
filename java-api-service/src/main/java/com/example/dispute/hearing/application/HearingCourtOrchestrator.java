@@ -17,12 +17,15 @@ import com.example.dispute.room.infrastructure.persistence.entity.RoomMessageEnt
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.RoomMessageRepository;
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -108,55 +111,78 @@ public class HearingCourtOrchestrator {
     }
 
     public void afterRoundOpened(String caseId, int roundNo, String traceId) {
-        courtTransaction.executeWithoutResult(
-                ignored ->
-                        appendJudgeTurnIfAbsent(
-                                caseId,
-                                roundNo,
-                                false,
-                                judgeRoundOpeningKey(caseId, roundNo),
-                                "judge-round-opening-ready:" + caseId + ":" + roundNo,
-                                traceId));
+        processJudgeTurn(
+                caseId,
+                roundNo,
+                false,
+                judgeRoundOpeningKey(caseId, roundNo),
+                "judge-round-opening-ready:" + caseId + ":" + roundNo,
+                traceId);
     }
 
     public void afterRoundClosed(
             String caseId, int roundNo, boolean finalRound, String traceId) {
-        courtTransaction.executeWithoutResult(
-                ignored ->
-                        appendJudgeTurnIfAbsent(
-                                caseId,
-                                roundNo,
-                                finalRound,
-                                judgeRoundTurnKey(caseId, roundNo),
-                                "judge-round-turn-ready:" + caseId + ":" + roundNo,
-                                traceId));
+        processJudgeTurn(
+                caseId,
+                roundNo,
+                finalRound,
+                judgeRoundTurnKey(caseId, roundNo),
+                "judge-round-turn-ready:" + caseId + ":" + roundNo,
+                traceId);
         if (finalRound && !hasCompleteFormalJuryReport(caseId, roundNo)) {
             throw new IllegalStateException(
                     "final hearing convergence requires both formal jury A2A and room report");
         }
     }
 
-    private void appendJudgeTurnIfAbsent(
+    private void processJudgeTurn(
             String caseId,
             int roundNo,
             boolean finalRound,
             String idempotencyKey,
             String lifecycleEventKey,
             String traceId) {
+        TurnPreparation preparation =
+                courtTransaction.execute(
+                        ignored ->
+                                prepareJudgeTurn(
+                                        caseId,
+                                        roundNo,
+                                        finalRound,
+                                        idempotencyKey,
+                                        lifecycleEventKey));
+        if (preparation == null || preparation.complete()) {
+            return;
+        }
+        HearingCourtAgentResult generated =
+                preparation.command() == null
+                        ? null
+                        : safeGenerate(preparation.command(), traceId);
+        courtTransaction.executeWithoutResult(
+                ignored -> persistJudgeTurn(preparation, generated, traceId));
+    }
+
+    private TurnPreparation prepareJudgeTurn(
+            String caseId,
+            int roundNo,
+            boolean finalRound,
+            String idempotencyKey,
+            String lifecycleEventKey) {
         var existingJudgeMessage =
                 messageRepository.findByCaseIdAndIdempotencyKey(caseId, idempotencyKey);
         if (existingJudgeMessage.isPresent()
                 && (!finalRound || hasCompleteFormalJuryReport(caseId, roundNo))) {
-            return;
+            return TurnPreparation.completed(
+                    caseId,
+                    roundNo,
+                    finalRound,
+                    idempotencyKey,
+                    lifecycleEventKey);
         }
         FulfillmentCaseEntity dispute =
                 caseRepository
-                        .findById(caseId)
+                        .findByIdForUpdate(caseId)
                         .orElseThrow(() -> new IllegalArgumentException("case not found"));
-        CaseRoomEntity room =
-                roomRepository
-                        .findByCaseIdAndRoomType(caseId, RoomType.HEARING)
-                        .orElseThrow(() -> new IllegalArgumentException("hearing room not found"));
         HearingRoundEntity round =
                 roundRepository
                         .findByCaseIdAndRoundNo(caseId, roundNo)
@@ -165,56 +191,108 @@ public class HearingCourtOrchestrator {
                 submissionRepository.findAllByCaseIdAndRoundNoOrderBySubmittedAtAsc(
                         caseId, roundNo);
         if (existingJudgeMessage.isPresent()) {
-            appendFormalJuryReportIfNeeded(
-                    dispute,
-                    room,
+            return TurnPreparation.repair(
+                    caseId,
                     roundNo,
-                    true,
-                    "FINAL_DRAFT_REQUIRED",
-                    reviewFocusSignal(submissions),
-                    "hearing-round-recovery-v1",
-                    existingJudgeMessage.orElseThrow().getSequenceNo(),
-                    traceId);
-            return;
+                    finalRound,
+                    idempotencyKey,
+                    lifecycleEventKey,
+                    reviewFocusSignal(submissions));
         }
         HearingCourtAgentCommand command = command(dispute, round, submissions, finalRound);
-        HearingCourtAgentResult result = safeGenerate(command, traceId);
-        RoomMessageEntity saved =
-                appendJudgeMessage(dispute, room, roundNo, result, idempotencyKey, traceId);
-        eventService.recordRoomMessage(
-                dispute.getId(),
-                room.getId(),
-                saved.getId(),
-                saved.getMessageText(),
-                saved.getAudienceJson(),
-                saved.getAudienceActorIdsJson(),
-                JUDGE_SENDER_ID);
-        eventService.recordLifecycleEvent(
-                dispute.getId(),
-                room.getId(),
-                result.courtEventType(),
-                Map.of(
-                        "round_no", result.roundNo(),
-                        "next_round_no", result.nextRoundNo() == null ? "" : result.nextRoundNo(),
-                        "final_draft_required", result.finalDraftRequired(),
-                        "round_summary", result.roundSummary(),
-                        "questions_for_user", result.questionsForUser(),
-                        "questions_for_merchant", result.questionsForMerchant(),
-                        "review_focus_signal", result.reviewFocusSignal(),
-                        "prompt_version", result.promptVersion(),
-                        "model", result.model()),
+        return TurnPreparation.generate(
+                caseId,
+                roundNo,
+                finalRound,
+                idempotencyKey,
                 lifecycleEventKey,
-                JUDGE_SENDER_ID);
+                command);
+    }
+
+    private void persistJudgeTurn(
+            TurnPreparation preparation,
+            HearingCourtAgentResult generated,
+            String traceId) {
+        FulfillmentCaseEntity dispute =
+                caseRepository
+                        .findByIdForUpdate(preparation.caseId())
+                        .orElseThrow(() -> new IllegalArgumentException("case not found"));
+        CaseRoomEntity room =
+                roomRepository
+                        .findByCaseIdAndRoomTypeForUpdate(
+                                preparation.caseId(), RoomType.HEARING)
+                        .orElseThrow(() -> new IllegalArgumentException("hearing room not found"));
+        roundRepository
+                .findByCaseIdAndRoundNoForUpdate(
+                        preparation.caseId(), preparation.roundNo())
+                .orElseThrow(() -> new IllegalArgumentException("hearing round not found"));
+
+        Optional<RoomMessageEntity> existingJudgeMessage =
+                messageRepository.findByCaseIdAndIdempotencyKey(
+                        preparation.caseId(), preparation.idempotencyKey());
+        HearingCourtAgentResult effectiveResult = generated;
+        if (existingJudgeMessage.isEmpty()) {
+            if (effectiveResult == null) {
+                throw new IllegalStateException("judge turn disappeared during repair");
+            }
+            RoomMessageEntity saved =
+                    appendJudgeMessage(
+                            dispute,
+                            room,
+                            preparation.roundNo(),
+                            effectiveResult,
+                            preparation.idempotencyKey(),
+                            traceId);
+            eventService.recordRoomMessage(
+                    dispute.getId(),
+                    room.getId(),
+                    saved.getId(),
+                    saved.getMessageText(),
+                    saved.getAudienceJson(),
+                    saved.getAudienceActorIdsJson(),
+                    JUDGE_SENDER_ID);
+            eventService.recordLifecycleEvent(
+                    dispute.getId(),
+                    room.getId(),
+                    effectiveResult.courtEventType(),
+                    judgeLifecyclePayload(effectiveResult),
+                    preparation.lifecycleEventKey(),
+                    JUDGE_SENDER_ID);
+        }
+
+        boolean finalDraftRequired =
+                preparation.finalRound()
+                        || effectiveResult != null && effectiveResult.finalDraftRequired();
+        if (!finalDraftRequired) {
+            return;
+        }
         appendFormalJuryReportIfNeeded(
                 dispute,
                 room,
-                roundNo,
-                finalRound || result.finalDraftRequired(),
-                result.courtEventType(),
-                result.reviewFocusSignal(),
-                result.promptVersion(),
-                saved.getSequenceNo(),
+                preparation.roundNo(),
+                effectiveResult == null
+                        ? "FINAL_DRAFT_REQUIRED"
+                        : effectiveResult.courtEventType(),
+                effectiveResult == null
+                        ? preparation.recoveryReviewFocus()
+                        : effectiveResult.reviewFocusSignal(),
+                effectiveResult == null
+                        ? "hearing-round-recovery-v1"
+                        : effectiveResult.promptVersion(),
                 traceId);
+    }
+
+    private Map<String, Object> judgeLifecyclePayload(HearingCourtAgentResult result) {
+        return Map.of(
+                "round_no", result.roundNo(),
+                "next_round_no", result.nextRoundNo() == null ? "" : result.nextRoundNo(),
+                "final_draft_required", result.finalDraftRequired(),
+                "round_summary", result.roundSummary(),
+                "questions_for_user", result.questionsForUser(),
+                "questions_for_merchant", result.questionsForMerchant(),
+                "review_focus_signal", result.reviewFocusSignal(),
+                "prompt_version", result.promptVersion(),
+                "model", result.model());
     }
 
     private HearingCourtAgentCommand command(
@@ -408,62 +486,76 @@ public class HearingCourtOrchestrator {
             FulfillmentCaseEntity dispute,
             CaseRoomEntity room,
             int roundNo,
-            boolean finalDraftRequired,
             String judgeEventType,
             List<String> reviewFocusSignal,
             String promptVersion,
-            long judgeSequenceNo,
             String traceId) {
-        if (!finalDraftRequired || roundNo < 3) {
+        if (roundNo < 3) {
             return;
         }
         String idempotencyKey = juryReviewReportKey(dispute.getId(), roundNo);
-        boolean roomReportExists =
+        Optional<RoomMessageEntity> roomReport =
                 messageRepository
-                        .findByCaseIdAndIdempotencyKey(dispute.getId(), idempotencyKey)
-                        .isPresent();
-        boolean a2aReportExists =
-                a2aMessageService.hasFormalJuryReviewReport(dispute.getId(), roundNo);
-        if (roomReportExists && a2aReportExists) {
+                        .findByCaseIdAndIdempotencyKey(dispute.getId(), idempotencyKey);
+        Optional<AgentA2AMessageView> a2aReport =
+                a2aMessageService.findFormalJuryReviewReport(dispute.getId(), roundNo);
+        if (roomReport.isPresent() && a2aReport.isPresent()) {
             return;
         }
-        Map<String, Object> inputRefs =
+        Map<String, Object> generatedInputRefs =
                 Map.of(
                         "round_no", roundNo,
                         "judge_event_type", judgeEventType,
                         "review_focus_signal", reviewFocusSignal,
                         "prompt_version", promptVersion);
-        Map<String, Object> payload = juryReviewPayload(reviewFocusSignal);
-        if (!a2aReportExists) {
-            a2aMessageService.record(
+        AgentA2AMessageView survivingA2A =
+                a2aReport.orElseGet(
+                        () -> {
+                            Map<String, Object> payload =
+                                    roomReport
+                                            .map(
+                                                    message ->
+                                                            jsonObject(
+                                                                    message.getMessageText(),
+                                                                    "jury room report"))
+                                            .orElseGet(
+                                                    () ->
+                                                            juryReviewPayload(
+                                                                    reviewFocusSignal));
+                            return a2aMessageService.record(
                     new AgentA2ACommand(
                             dispute.getId(),
                             roundNo,
                             "JURY_PANEL",
                             AgentA2AMessageService.PRESIDING_JUDGE,
                             "JURY_REVIEW_REPORT",
-                            inputRefs,
+                                            generatedInputRefs,
                             payload,
                             "REVIEWER_VISIBLE",
-                            null));
-        }
-        if (roomReportExists) {
+                                            null));
+                        });
+        if (roomReport.isPresent()) {
             return;
         }
+        Map<String, Object> persistedInputRefs =
+                jsonObject(survivingA2A.inputRefsJson(), "formal jury A2A input refs");
+        Map<String, Object> persistedPayload =
+                jsonObject(survivingA2A.payloadJson(), "formal jury A2A payload");
+        long sequence = messageRepository.findMaxSequenceByRoomId(room.getId()) + 1;
         RoomMessageEntity saved =
                 messageRepository.save(
                         RoomMessageEntity.create(
                                 "MESSAGE_" + compactUuid(),
                                 dispute.getId(),
                                 room.getId(),
-                                judgeSequenceNo + 1,
+                                sequence,
                                 MessageSenderType.AGENT,
                                 "JURY",
                                 "jury-panel",
                                 sharedCourtAudienceJson(),
                                 "[]",
                                 MessageType.JURY_REVIEW_REPORT,
-                                json(payload),
+                                survivingA2A.payloadJson(),
                                 "[]",
                                 idempotencyKey,
                                 roundNo,
@@ -477,16 +569,26 @@ public class HearingCourtOrchestrator {
                 saved.getAudienceJson(),
                 saved.getAudienceActorIdsJson(),
                 "jury-panel");
+        Object reviewFocus =
+                persistedInputRefs.getOrDefault(
+                        "review_focus_signal",
+                        persistedPayload.getOrDefault(
+                                "review_focus_signal", List.of()));
+        Map<String, Object> lifecyclePayload = new LinkedHashMap<>();
+        lifecyclePayload.put("round_no", roundNo);
+        lifecyclePayload.put("visibility", survivingA2A.visibility());
+        lifecyclePayload.put("review_focus_signal", reviewFocus);
+        lifecyclePayload.put(
+                "risk_level",
+                persistedPayload.getOrDefault("risk_level", "MEDIUM"));
+        lifecyclePayload.put(
+                "confidence_score",
+                persistedPayload.getOrDefault("confidence_score", 0));
         eventService.recordLifecycleEvent(
                 dispute.getId(),
                 room.getId(),
                 "JURY_REVIEW_REPORT_READY",
-                Map.of(
-                        "round_no", roundNo,
-                        "visibility", "REVIEWER_VISIBLE",
-                        "review_focus_signal", reviewFocusSignal,
-                        "risk_level", payload.get("risk_level"),
-                        "confidence_score", payload.get("confidence_score")),
+                lifecyclePayload,
                 "jury-review-report-ready:" + dispute.getId() + ":" + roundNo,
                 "jury-panel");
     }
@@ -521,6 +623,19 @@ public class HearingCourtOrchestrator {
                 "评审团复核报告是风险和遗漏视野补充，不是二次裁决主体。",
                 "visibility",
                 "REVIEWER_VISIBLE");
+    }
+
+    private Map<String, Object> jsonObject(String value, String label) {
+        try {
+            JsonNode node = objectMapper.readTree(defaultText(value, "{}"));
+            if (!node.isObject()) {
+                throw new IllegalStateException(label + " must be a JSON object");
+            }
+            return objectMapper.convertValue(
+                    node, new TypeReference<Map<String, Object>>() {});
+        } catch (JsonProcessingException exception) {
+            throw new IllegalStateException("invalid " + label, exception);
+        }
     }
 
     private RoomMessageEntity appendJudgeMessage(
@@ -596,5 +711,69 @@ public class HearingCourtOrchestrator {
 
     private static String compactUuid() {
         return UUID.randomUUID().toString().replace("-", "");
+    }
+
+    private record TurnPreparation(
+            String caseId,
+            int roundNo,
+            boolean finalRound,
+            String idempotencyKey,
+            String lifecycleEventKey,
+            HearingCourtAgentCommand command,
+            List<String> recoveryReviewFocus,
+            boolean complete) {
+
+        private static TurnPreparation completed(
+                String caseId,
+                int roundNo,
+                boolean finalRound,
+                String idempotencyKey,
+                String lifecycleEventKey) {
+            return new TurnPreparation(
+                    caseId,
+                    roundNo,
+                    finalRound,
+                    idempotencyKey,
+                    lifecycleEventKey,
+                    null,
+                    List.of(),
+                    true);
+        }
+
+        private static TurnPreparation repair(
+                String caseId,
+                int roundNo,
+                boolean finalRound,
+                String idempotencyKey,
+                String lifecycleEventKey,
+                List<String> recoveryReviewFocus) {
+            return new TurnPreparation(
+                    caseId,
+                    roundNo,
+                    finalRound,
+                    idempotencyKey,
+                    lifecycleEventKey,
+                    null,
+                    List.copyOf(recoveryReviewFocus),
+                    false);
+        }
+
+        private static TurnPreparation generate(
+                String caseId,
+                int roundNo,
+                boolean finalRound,
+                String idempotencyKey,
+                String lifecycleEventKey,
+                HearingCourtAgentCommand command) {
+            return new TurnPreparation(
+                    caseId,
+                    roundNo,
+                    finalRound,
+                    idempotencyKey,
+                    lifecycleEventKey,
+                    command,
+                    List.of(),
+                    false);
+        }
     }
 }
