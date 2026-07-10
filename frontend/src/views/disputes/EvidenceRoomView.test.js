@@ -188,6 +188,9 @@ describe("EvidenceRoomView", () => {
     expect(
       wrapper.get("[data-evidence-board-panel]").find(".evidence-uploader").exists(),
     ).toBe(true);
+    expect(wrapper.get(".evidence-room__case-note").text()).toContain(
+      "发起争议方须至少正式提交 1 份相关证据；另一方可提交材料，或等待举证时效结束。",
+    );
   });
 
   it("shows confidence feedback and keeps completion available for low confidence evidence", async () => {
@@ -210,7 +213,7 @@ describe("EvidenceRoomView", () => {
     expect(wrapper.get("[data-complete-evidence]").element.disabled).toBe(false);
   });
 
-  it("blocks the dispute initiator from completing evidence when no submitted evidence exists", async () => {
+  it("shows a dismissible modal when the dispute initiator has no submitted evidence", async () => {
     const emptyInitiatorCatalog = {
       ...catalog,
       initiator_role: "USER",
@@ -230,9 +233,44 @@ describe("EvidenceRoomView", () => {
     await flushPromises();
 
     expect(completeAction).not.toHaveBeenCalled();
-    expect(wrapper.get('[role="alert"]').text()).toContain(
-      "发起争议方需先正式提交至少 1 份相关证据",
+    const modal = wrapper.get("[data-evidence-gate-modal]");
+    expect(modal.attributes("role")).toBe("dialog");
+    expect(modal.attributes("aria-modal")).toBe("true");
+    expect(modal.text()).toContain("暂不能完成举证");
+    expect(modal.text()).toContain(
+      "发起争议方需先正式提交至少 1 份相关证据，当前证据栏为空，暂不能进入下一步。",
     );
+    expect(wrapper.find('.evidence-board [role="alert"]').exists()).toBe(false);
+
+    await modal.get("[data-dismiss-evidence-gate]").trigger("click");
+
+    expect(wrapper.find("[data-evidence-gate-modal]").exists()).toBe(false);
+  });
+
+  it("allows a non-initiating party to complete without submitted evidence", async () => {
+    const emptyMerchantCatalog = {
+      ...catalog,
+      initiator_role: "USER",
+      items: catalog.items.filter(
+        (item) => item.submitted_by_role !== "MERCHANT",
+      ),
+    };
+    const completeAction = vi.fn().mockResolvedValue({
+      completed_role: "MERCHANT",
+      all_parties_completed: false,
+      next_room: "EVIDENCE",
+    });
+    const { wrapper } = await mountView({
+      initialCatalog: emptyMerchantCatalog,
+      viewerRole: "MERCHANT",
+      completeAction,
+    });
+
+    await wrapper.get("[data-complete-evidence]").trigger("click");
+    await flushPromises();
+
+    expect(completeAction).toHaveBeenCalledOnce();
+    expect(wrapper.find("[data-evidence-gate-modal]").exists()).toBe(false);
   });
 
   it("opens a submitted evidence detail modal from a card", async () => {
