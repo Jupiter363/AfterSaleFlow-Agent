@@ -1951,12 +1951,20 @@ onBeforeUnmount(() => eventAbortController.abort());
   display: flex;
   justify-content: space-between;
   gap: 16px;
+  min-width: 0;
+}
+
+.evidence-modal__panel header > div {
+  min-width: 0;
 }
 
 .evidence-modal__panel h2 {
   margin: 5px 0;
   color: #2f3f58;
   font-size: 20px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .evidence-modal__panel p {
@@ -2006,7 +2014,7 @@ onBeforeUnmount(() => eventAbortController.abort());
   color: #33435c;
 }
 
-@media (max-width: 1119px) {
+@container room-workspace (max-width: 1119px) {
   .evidence-room { grid-template-columns: 1fr; }
 }
 

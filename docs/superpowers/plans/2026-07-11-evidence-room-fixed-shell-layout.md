@@ -4,7 +4,7 @@
 
 **Goal:** Keep both evidence-room panels at a fixed 740px height while making the right-hand evidence list its only routine scroll rail and preserving readable evidence metadata at desktop and 320px widths for USER and MERCHANT actors.
 
-**Architecture:** Keep the change inside `EvidenceRoomView.vue` and its colocated Vitest file. The right evidence board becomes an explicit four-row grid (header, uploader, flexible evidence list, footer); errors are overlaid rather than inserted as a fifth layout row. Responsive behavior uses the approved viewport fallback: two columns at 1120px and above, stacked 740px panels below it, plus evidence-room-local `:deep()` overrides for the shared shell and conversation descendants at 360px and below.
+**Architecture:** Keep the change inside `EvidenceRoomView.vue` and its colocated Vitest file. The right evidence board becomes an explicit four-row grid (header, uploader, flexible evidence list, footer); errors are overlaid rather than inserted as a fifth layout row. Responsive behavior follows the actual `room-workspace` container: two columns at 1120px and above, stacked 740px panels below it, plus evidence-room-local `:deep()` overrides for the shared shell and conversation descendants at 360px and below.
 
 **Tech Stack:** Vue 3 SFC, scoped CSS, Vue Test Utils, Vitest/jsdom, pnpm/Vite.
 
@@ -21,7 +21,7 @@ The 740px evidence board uses `box-sizing: border-box`, 18px top/bottom padding,
 
 Breakpoints:
 
-- `max-width: 1119px`: stack the two fixed 740px panels so the page owns vertical scrolling; exactly 1120px and wider remains double-column.
+- `@container room-workspace (max-width: 1119px)`: stack the two fixed 740px panels so the page owns vertical scrolling; exactly 1120px and wider remains double-column.
 - `max-width: 620px`: retain a horizontal `minmax(0, 1fr) auto` footer; simplify the uploader without stacking the footer.
 - `max-width: 360px`: use the 88/96/flexible/72 row budget, hide decorative file/uploader art, place card status fields under file information, and locally restyle the room header into title / case-and-countdown / wrapping AI notice rows.
 
@@ -64,8 +64,8 @@ Add tests that require:
 expect(source).toContain("--evidence-panel-height: 740px");
 expect(source).toMatch(/grid-template-rows:\s*76px 86px minmax\(0, 1fr\) 60px/);
 expect(source).toMatch(/\.evidence-board__list\s*\{[^}]*overflow-y:\s*auto/s);
-expect(source).toMatch(/@media \(max-width: 1119px\)/);
-expect(source).not.toMatch(/@media \(max-width: 1120px\)/);
+expect(source).toMatch(/@container room-workspace \(max-width: 1119px\)/);
+expect(source).not.toMatch(/@media \(max-width: 1119px\)/);
 expect(source).toMatch(/@media \(max-width: 360px\)/);
 expect(source).toMatch(/grid-template-rows:\s*88px 96px minmax\(0, 1fr\) 72px/);
 expect(source).toMatch(/:deep\(\.room-shell__header\)/);
@@ -102,7 +102,7 @@ Keep `.evidence-board__list` as the only normal right-board `overflow-y: auto` r
 
 - [x] **Step 3: Implement responsive contracts**
 
-Replace the 980px stacking breakpoint with `max-width: 1119px`, preserving double columns from 1120px upward. At 620px and below, change the uploader to `minmax(0, 1fr) auto`, hide its decorative illustration/kicker, and keep the footer horizontal. At 360px and below, apply the 88/96/flexible/72 grid rows, hide decorative file art, move card metadata below file information, remove fixed minimum width from the completed-state control, and use local `:deep()` rules to give the shared room header, AI notice, countdown, and evidence-room conversation descendants `min-width: 0` and wrap-safe behavior. Apply the same wrap-safe contract to every detail-modal fact cell.
+Replace the 980px viewport stacking breakpoint with `@container room-workspace (max-width: 1119px)`, preserving double columns from 1120px of actual workspace width upward. At 620px and below, change the uploader to `minmax(0, 1fr) auto`, hide its decorative illustration/kicker, and keep the footer horizontal. At 360px and below, apply the 88/96/flexible/72 grid rows, hide decorative file art, move card metadata below file information, remove fixed minimum width from the completed-state control, and use local `:deep()` rules to give the shared room header, AI notice, countdown, and evidence-room conversation descendants `min-width: 0` and wrap-safe behavior. Apply the same wrap-safe contract to every detail-modal fact cell and long detail heading.
 
 - [x] **Step 4: Run the target test and capture GREEN**
 
