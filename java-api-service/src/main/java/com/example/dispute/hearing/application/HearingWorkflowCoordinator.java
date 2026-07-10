@@ -71,6 +71,15 @@ public class HearingWorkflowCoordinator {
                                 roundNo, factsSufficient));
     }
 
+    public boolean roundCompletedNow(
+            String caseId, int roundNo, boolean factsSufficient) {
+        return signalNow(
+                caseId,
+                workflow ->
+                        workflow.hearingRoundCompleted(
+                                roundNo, factsSufficient));
+    }
+
     public void settlementConfirmedAfterCommit(String caseId, int version) {
         signalAfterCommit(
                 caseId, workflow -> workflow.settlementConfirmed(version));
@@ -82,18 +91,24 @@ public class HearingWorkflowCoordinator {
         postCommit.execute(
                 "hearing-workflow-signal",
                 Map.of("case_id", caseId, "workflow_id", workflowId(caseId)),
-                () -> {
-                    try {
-                        signal.accept(
-                                workflowClient.newWorkflowStub(
-                                        DisputeHearingWorkflow.class,
-                                        workflowId(caseId)));
-                    } catch (WorkflowNotFoundException missing) {
-                        LOGGER.warn(
-                                "Hearing workflow is not running: case_id={}",
-                                caseId);
-                    }
-                });
+                () -> signalNow(caseId, signal));
+    }
+
+    private boolean signalNow(
+            String caseId,
+            java.util.function.Consumer<DisputeHearingWorkflow> signal) {
+        try {
+            signal.accept(
+                    workflowClient.newWorkflowStub(
+                            DisputeHearingWorkflow.class,
+                            workflowId(caseId)));
+            return true;
+        } catch (WorkflowNotFoundException missing) {
+            LOGGER.warn(
+                    "Hearing workflow is not running: case_id={}",
+                    caseId);
+            return false;
+        }
     }
 
     private static String workflowId(String caseId) {

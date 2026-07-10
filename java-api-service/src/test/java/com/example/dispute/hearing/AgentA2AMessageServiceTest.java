@@ -70,4 +70,23 @@ class AgentA2AMessageServiceTest {
                             assertThat(note.visibility()).isEqualTo("SYSTEM_AUDIT_ONLY");
                         });
     }
+
+    @Test
+    void checksTheExactFormalJuryReportForTheFinalRound() {
+        AgentA2AMessageService service =
+                new AgentA2AMessageService(
+                        repository,
+                        new ObjectMapper(),
+                        Clock.fixed(Instant.parse("2026-07-08T02:00:00Z"), ZoneOffset.UTC));
+        when(repository
+                        .existsByCaseIdAndRoundNoAndFromAgentAndToAgentAndMessageType(
+                                "CASE_A2A",
+                                3,
+                                "JURY_PANEL",
+                                AgentA2AMessageService.PRESIDING_JUDGE,
+                                "JURY_REVIEW_REPORT"))
+                .thenReturn(true);
+
+        assertThat(service.hasFormalJuryReviewReport("CASE_A2A", 3)).isTrue();
+    }
 }

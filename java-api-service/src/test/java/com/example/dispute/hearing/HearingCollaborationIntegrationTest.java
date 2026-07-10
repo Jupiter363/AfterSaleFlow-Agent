@@ -3,6 +3,7 @@ package com.example.dispute.hearing;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -14,6 +15,7 @@ import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.config.DisputeProperties;
 import com.example.dispute.domain.model.CaseStatus;
+import com.example.dispute.domain.model.HearingStatus;
 import com.example.dispute.domain.model.RiskLevel;
 import com.example.dispute.domain.model.RouteType;
 import com.example.dispute.evidence.application.EvidenceDossierRevisionService;
@@ -142,6 +144,7 @@ class HearingCollaborationIntegrationTest {
 
     @Autowired private SettlementService settlementService;
     @Autowired private HearingRoundService roundService;
+    @Autowired private HearingFinalDraftService finalDraftService;
     @Autowired private AgentA2AMessageService a2aMessageService;
     @Autowired private FulfillmentCaseRepository caseRepository;
     @Autowired private CaseRoomRepository roomRepository;
@@ -302,6 +305,7 @@ class HearingCollaborationIntegrationTest {
 
         assertThat(first.stopReason()).isNull();
         assertThat(first.status()).isEqualTo(HearingRoundStatus.COMPLETED);
+        completeCourtOrchestration("CASE_FACTS_HINT", 1, false);
         verify(hearingWorkflowCoordinator)
                 .roundCompletedAfterCommit("CASE_FACTS_HINT", 1, false);
     }
@@ -495,7 +499,41 @@ class HearingCollaborationIntegrationTest {
     }
 
     @Test
-    void completeHearingGeneratesAReviewableDraftOnceAfterTheFinalRoundIsSealed() {
+    void completeHearingDoesNotGenerateADraftWhileTemporalIsDrafting() {
+        seedHearing("CASE_TEMPORAL_FINAL_DRAFT_OWNER");
+        hearingStateRepository.saveAndFlush(
+                HearingStateEntity.start(
+                        "HEARING_CASE_TEMPORAL_FINAL_DRAFT_OWNER",
+                        "CASE_TEMPORAL_FINAL_DRAFT_OWNER",
+                        "hearing-window-CASE_TEMPORAL_FINAL_DRAFT_OWNER",
+                        "hearing-bootstrap"));
+        attachHearingWorkflow("CASE_TEMPORAL_FINAL_DRAFT_OWNER");
+        roundService.completeNext(
+                "CASE_TEMPORAL_FINAL_DRAFT_OWNER",
+                new CompleteHearingRoundCommand(2, "{\"round\":1}", false),
+                system);
+        roundService.completeNext(
+                "CASE_TEMPORAL_FINAL_DRAFT_OWNER",
+                new CompleteHearingRoundCommand(2, "{\"round\":2}", false),
+                system);
+        roundService.completeNext(
+                "CASE_TEMPORAL_FINAL_DRAFT_OWNER",
+                new CompleteHearingRoundCommand(2, "{\"round\":3}", false),
+                system);
+
+        HearingStatusView completed =
+                roundService.completeHearing("CASE_TEMPORAL_FINAL_DRAFT_OWNER", user);
+
+        assertThat(completed.hearingPhase()).isEqualTo("JUDGE_DRAFTING");
+        assertThat(completed.latestDraftId()).isNull();
+        assertThat(draftRepository.findFirstByCaseIdOrderByDraftVersionDesc(
+                        "CASE_TEMPORAL_FINAL_DRAFT_OWNER"))
+                .isEmpty();
+        verifyNoInteractions(hearingAgentClient);
+    }
+
+    @Test
+    void completeHearingOrchestratesAnExistingTemporalDraftOnlyOnce() {
         seedHearing("CASE_FINAL_DRAFT_COMPLETION");
         hearingStateRepository.saveAndFlush(
                 HearingStateEntity.start(
@@ -521,6 +559,8 @@ class HearingCollaborationIntegrationTest {
         assertThat(waitingDraft.hearingPhase()).isEqualTo("JUDGE_DRAFTING");
         assertThat(waitingDraft.canCompleteHearing()).isFalse();
 
+        finalDraftService.ensureDraftForFinalSealedRound(
+                "CASE_FINAL_DRAFT_COMPLETION", 3, 3, "temporal-worker");
         HearingStatusView completed = roundService.completeHearing("CASE_FINAL_DRAFT_COMPLETION", user);
 
         assertThat(completed.canCompleteHearing()).isTrue();
@@ -596,6 +636,8 @@ class HearingCollaborationIntegrationTest {
                 new CompleteHearingRoundCommand(2, "{\"round\":3}", false),
                 system);
 
+        finalDraftService.ensureDraftForFinalSealedRound(
+                "CASE_FINAL_REVIEW_GATE_SYNC", 3, 3, "temporal-worker");
         HearingStatusView completed = roundService.completeHearing("CASE_FINAL_REVIEW_GATE_SYNC", user);
 
         assertThat(completed.hearingPhase()).isEqualTo("REVIEW_GATE_READY");
@@ -661,15 +703,27 @@ class HearingCollaborationIntegrationTest {
         HearingStatusView draftReady =
                 roundService.status("CASE_FINAL_REVIEW_GATE_DRAFT_READY", user);
         assertThat(draftReady.hearingPhase()).isEqualTo("DRAFT_READY");
+        assertThat(draftReady.finalRoundSealed()).isTrue();
+        assertThat(draftReady.currentRoundNo()).isEqualTo(3);
+        assertThat(hearingStateRepository.findByCaseId("CASE_FINAL_REVIEW_GATE_DRAFT_READY"))
+                .hasValueSatisfying(
+                        state -> assertThat(state.getHearingStatus()).isEqualTo(HearingStatus.RUNNING));
         assertThat(reviewTaskRepository.findFirstByCaseIdOrderByCreatedAtDesc(
                         "CASE_FINAL_REVIEW_GATE_DRAFT_READY"))
                 .isEmpty();
+        clearInvocations(hearingAgentClient);
 
         HearingStatusView completed =
                 roundService.completeHearing("CASE_FINAL_REVIEW_GATE_DRAFT_READY", user);
 
         assertThat(completed.hearingPhase()).isEqualTo("REVIEW_GATE_READY");
         assertThat(completed.reviewTaskId()).isNotBlank();
+        assertThat(hearingStateRepository.findByCaseId("CASE_FINAL_REVIEW_GATE_DRAFT_READY"))
+                .hasValueSatisfying(
+                        state ->
+                                assertThat(state.getHearingStatus())
+                                        .isEqualTo(HearingStatus.COMPLETED));
+        verifyNoInteractions(hearingAgentClient);
     }
 
     @Test
@@ -718,6 +772,8 @@ class HearingCollaborationIntegrationTest {
                         "REVIEWER_VISIBLE",
                         "RUN_JURY_REPORT_3"));
 
+        finalDraftService.ensureDraftForFinalSealedRound(
+                "CASE_FINAL_DRAFT_JURY_REPORT", 3, 3, "temporal-worker");
         roundService.completeHearing("CASE_FINAL_DRAFT_JURY_REPORT", user);
 
         ArgumentCaptor<JsonNode> request = ArgumentCaptor.forClass(JsonNode.class);
@@ -779,6 +835,8 @@ class HearingCollaborationIntegrationTest {
         assertThat(waitingDraft.latestDraftId()).isNull();
         assertThat(waitingDraft.canCompleteHearing()).isFalse();
 
+        finalDraftService.ensureDraftForFinalSealedRound(
+                "CASE_FINAL_DRAFT_VERSION", 3, 3, "temporal-worker");
         HearingStatusView completed = roundService.completeHearing("CASE_FINAL_DRAFT_VERSION", user);
 
         assertThat(completed.canCompleteHearing()).isTrue();
@@ -790,6 +848,32 @@ class HearingCollaborationIntegrationTest {
                                 .orElseThrow()
                                 .getDraftVersion())
                 .isEqualTo(4);
+    }
+
+    @Test
+    void workflowSignalWaitsUntilCourtOrchestrationCompletes() {
+        seedHearing("CASE_COURT_SIGNAL_ORDER");
+        attachHearingWorkflow("CASE_COURT_SIGNAL_ORDER");
+
+        roundService.completeNext(
+                "CASE_COURT_SIGNAL_ORDER",
+                new CompleteHearingRoundCommand(2, "{\"round\":1}", false),
+                system);
+
+        ArgumentCaptor<Runnable> completion = ArgumentCaptor.forClass(Runnable.class);
+        verify(hearingCourtOrchestrator)
+                .afterRoundClosedAfterCommit(
+                        org.mockito.ArgumentMatchers.eq("CASE_COURT_SIGNAL_ORDER"),
+                        org.mockito.ArgumentMatchers.eq(1),
+                        org.mockito.ArgumentMatchers.eq(false),
+                        org.mockito.ArgumentMatchers.any(),
+                        completion.capture());
+        verifyNoInteractions(hearingWorkflowCoordinator);
+
+        completion.getValue().run();
+
+        verify(hearingWorkflowCoordinator)
+                .roundCompletedAfterCommit("CASE_COURT_SIGNAL_ORDER", 1, false);
     }
 
     @Test
@@ -836,9 +920,7 @@ class HearingCollaborationIntegrationTest {
                 .doesNotContain("�")
                 .doesNotContain("鍙")
                 .doesNotContain("鏈");
-        verify(hearingCourtOrchestrator)
-                .afterRoundClosedAfterCommit(
-                        "CASE_PARTY_ROUND", 1, false, "TRACE_HEARING_ROUND_1");
+        completeCourtOrchestration("CASE_PARTY_ROUND", 1, false);
         verify(hearingWorkflowCoordinator)
                 .roundCompletedAfterCommit("CASE_PARTY_ROUND", 1, false);
     }
@@ -873,6 +955,7 @@ class HearingCollaborationIntegrationTest {
                                 1, HearingRoundStatus.COMPLETED),
                         org.assertj.core.groups.Tuple.tuple(
                                 2, HearingRoundStatus.OPEN));
+        completeCourtOrchestration("CASE_PARTY_ROUND_CONTINUES", 1, false);
         verify(hearingWorkflowCoordinator)
                 .roundCompletedAfterCommit("CASE_PARTY_ROUND_CONTINUES", 1, false);
     }
@@ -913,6 +996,7 @@ class HearingCollaborationIntegrationTest {
                 .containsExactlyInAnyOrder(
                         HearingRoundSubmissionSource.PARTY_ACTION,
                         HearingRoundSubmissionSource.AUTO_TIMEOUT);
+        completeCourtOrchestration("CASE_ROUND_TIMEOUT", 1, false);
         verify(hearingWorkflowCoordinator)
                 .roundCompletedAfterCommit("CASE_ROUND_TIMEOUT", 1, false);
     }
@@ -973,9 +1057,7 @@ class HearingCollaborationIntegrationTest {
                 .containsExactlyInAnyOrder(
                         HearingRoundSubmissionSource.PARTY_ACTION,
                         HearingRoundSubmissionSource.PARTY_ACTION);
-        verify(hearingCourtOrchestrator)
-                .afterRoundClosedAfterCommit(
-                        "CASE_ROOM_STATEMENT", 1, false, "TRACE_HEARING_ROUND_1");
+        completeCourtOrchestration("CASE_ROOM_STATEMENT", 1, false);
         verify(hearingWorkflowCoordinator)
                 .roundCompletedAfterCommit("CASE_ROOM_STATEMENT", 1, false);
     }
@@ -1138,6 +1220,19 @@ class HearingCollaborationIntegrationTest {
         FulfillmentCaseEntity dispute = caseRepository.findById(caseId).orElseThrow();
         dispute.attachHearingWorkflow("hearing-window-" + caseId, "hearing-bootstrap");
         caseRepository.saveAndFlush(dispute);
+    }
+
+    private void completeCourtOrchestration(String caseId, int roundNo, boolean finalRound) {
+        ArgumentCaptor<Runnable> completion = ArgumentCaptor.forClass(Runnable.class);
+        verify(hearingCourtOrchestrator)
+                .afterRoundClosedAfterCommit(
+                        org.mockito.ArgumentMatchers.eq(caseId),
+                        org.mockito.ArgumentMatchers.eq(roundNo),
+                        org.mockito.ArgumentMatchers.eq(finalRound),
+                        org.mockito.ArgumentMatchers.eq("TRACE_HEARING_ROUND_" + roundNo),
+                        completion.capture());
+        verifyNoInteractions(hearingWorkflowCoordinator);
+        completion.getValue().run();
     }
 
     @TestConfiguration(proxyBeanMethods = false)

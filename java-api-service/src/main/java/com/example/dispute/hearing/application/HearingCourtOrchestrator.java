@@ -6,11 +6,8 @@ import com.example.dispute.hearing.infrastructure.persistence.entity.HearingRoun
 import com.example.dispute.hearing.infrastructure.persistence.entity.HearingRoundPartySubmissionEntity;
 import com.example.dispute.hearing.infrastructure.persistence.repository.HearingRoundPartySubmissionRepository;
 import com.example.dispute.hearing.infrastructure.persistence.repository.HearingRoundRepository;
-import com.example.dispute.infrastructure.persistence.entity.EvidenceDossierEntity;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
-import com.example.dispute.infrastructure.persistence.repository.EvidenceDossierRepository;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
-import com.example.dispute.infrastructure.persistence.repository.HearingRecordRepository;
 import com.example.dispute.room.application.CaseEventService;
 import com.example.dispute.room.domain.MessageSenderType;
 import com.example.dispute.room.domain.MessageType;
@@ -19,13 +16,9 @@ import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity
 import com.example.dispute.room.infrastructure.persistence.entity.RoomMessageEntity;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.RoomMessageRepository;
-import com.example.dispute.tool.application.ToolDefinition;
-import com.example.dispute.tool.application.ToolRegistry;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.List;
@@ -34,7 +27,7 @@ import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 @Service
 public class HearingCourtOrchestrator {
@@ -48,46 +41,43 @@ public class HearingCourtOrchestrator {
     private final CaseRoomRepository roomRepository;
     private final HearingRoundRepository roundRepository;
     private final HearingRoundPartySubmissionRepository submissionRepository;
-    private final HearingRecordRepository hearingRecordRepository;
-    private final EvidenceDossierRepository evidenceDossierRepository;
     private final RoomMessageRepository messageRepository;
     private final CaseEventService eventService;
     private final HearingCourtAgentClient agentClient;
     private final AgentA2AMessageService a2aMessageService;
-    private final ToolRegistry toolRegistry;
+    private final ActiveCourtroomContextAssembler courtroomContextAssembler;
     private final ObjectMapper objectMapper;
     private final Clock clock;
     private final PostCommitSideEffectExecutor postCommit;
+    private final TransactionTemplate courtTransaction;
 
     public HearingCourtOrchestrator(
             FulfillmentCaseRepository caseRepository,
             CaseRoomRepository roomRepository,
             HearingRoundRepository roundRepository,
             HearingRoundPartySubmissionRepository submissionRepository,
-            HearingRecordRepository hearingRecordRepository,
-            EvidenceDossierRepository evidenceDossierRepository,
             RoomMessageRepository messageRepository,
             CaseEventService eventService,
             HearingCourtAgentClient agentClient,
             AgentA2AMessageService a2aMessageService,
-            ToolRegistry toolRegistry,
+            ActiveCourtroomContextAssembler courtroomContextAssembler,
             ObjectMapper objectMapper,
             Clock clock,
-            PostCommitSideEffectExecutor postCommit) {
+            PostCommitSideEffectExecutor postCommit,
+            TransactionTemplate courtTransaction) {
         this.caseRepository = caseRepository;
         this.roomRepository = roomRepository;
         this.roundRepository = roundRepository;
         this.submissionRepository = submissionRepository;
-        this.hearingRecordRepository = hearingRecordRepository;
-        this.evidenceDossierRepository = evidenceDossierRepository;
         this.messageRepository = messageRepository;
         this.eventService = eventService;
         this.agentClient = agentClient;
         this.a2aMessageService = a2aMessageService;
-        this.toolRegistry = toolRegistry;
+        this.courtroomContextAssembler = courtroomContextAssembler;
         this.objectMapper = objectMapper;
         this.clock = clock;
         this.postCommit = postCommit;
+        this.courtTransaction = courtTransaction;
     }
 
     public void afterRoundOpenedAfterCommit(String caseId, int roundNo, String traceId) {
@@ -99,33 +89,51 @@ public class HearingCourtOrchestrator {
 
     public void afterRoundClosedAfterCommit(
             String caseId, int roundNo, boolean finalRound, String traceId) {
+        afterRoundClosedAfterCommit(caseId, roundNo, finalRound, traceId, () -> {});
+    }
+
+    public void afterRoundClosedAfterCommit(
+            String caseId,
+            int roundNo,
+            boolean finalRound,
+            String traceId,
+            Runnable completion) {
         postCommit.execute(
                 "hearing-court-round-closed",
                 Map.of("case_id", caseId, "round_no", roundNo, "final_round", finalRound),
-                () -> afterRoundClosed(caseId, roundNo, finalRound, traceId));
+                () -> {
+                    afterRoundClosed(caseId, roundNo, finalRound, traceId);
+                    completion.run();
+                });
     }
 
-    @Transactional
     public void afterRoundOpened(String caseId, int roundNo, String traceId) {
-        appendJudgeTurnIfAbsent(
-                caseId,
-                roundNo,
-                false,
-                judgeRoundOpeningKey(caseId, roundNo),
-                "judge-round-opening-ready:" + caseId + ":" + roundNo,
-                traceId);
+        courtTransaction.executeWithoutResult(
+                ignored ->
+                        appendJudgeTurnIfAbsent(
+                                caseId,
+                                roundNo,
+                                false,
+                                judgeRoundOpeningKey(caseId, roundNo),
+                                "judge-round-opening-ready:" + caseId + ":" + roundNo,
+                                traceId));
     }
 
-    @Transactional
     public void afterRoundClosed(
             String caseId, int roundNo, boolean finalRound, String traceId) {
-        appendJudgeTurnIfAbsent(
-                caseId,
-                roundNo,
-                finalRound,
-                judgeRoundTurnKey(caseId, roundNo),
-                "judge-round-turn-ready:" + caseId + ":" + roundNo,
-                traceId);
+        courtTransaction.executeWithoutResult(
+                ignored ->
+                        appendJudgeTurnIfAbsent(
+                                caseId,
+                                roundNo,
+                                finalRound,
+                                judgeRoundTurnKey(caseId, roundNo),
+                                "judge-round-turn-ready:" + caseId + ":" + roundNo,
+                                traceId));
+        if (finalRound && !hasCompleteFormalJuryReport(caseId, roundNo)) {
+            throw new IllegalStateException(
+                    "final hearing convergence requires both formal jury A2A and room report");
+        }
     }
 
     private void appendJudgeTurnIfAbsent(
@@ -135,7 +143,10 @@ public class HearingCourtOrchestrator {
             String idempotencyKey,
             String lifecycleEventKey,
             String traceId) {
-        if (messageRepository.findByCaseIdAndIdempotencyKey(caseId, idempotencyKey).isPresent()) {
+        var existingJudgeMessage =
+                messageRepository.findByCaseIdAndIdempotencyKey(caseId, idempotencyKey);
+        if (existingJudgeMessage.isPresent()
+                && (!finalRound || hasCompleteFormalJuryReport(caseId, roundNo))) {
             return;
         }
         FulfillmentCaseEntity dispute =
@@ -153,6 +164,19 @@ public class HearingCourtOrchestrator {
         List<HearingRoundPartySubmissionEntity> submissions =
                 submissionRepository.findAllByCaseIdAndRoundNoOrderBySubmittedAtAsc(
                         caseId, roundNo);
+        if (existingJudgeMessage.isPresent()) {
+            appendFormalJuryReportIfNeeded(
+                    dispute,
+                    room,
+                    roundNo,
+                    true,
+                    "FINAL_DRAFT_REQUIRED",
+                    reviewFocusSignal(submissions),
+                    "hearing-round-recovery-v1",
+                    existingJudgeMessage.orElseThrow().getSequenceNo(),
+                    traceId);
+            return;
+        }
         HearingCourtAgentCommand command = command(dispute, round, submissions, finalRound);
         HearingCourtAgentResult result = safeGenerate(command, traceId);
         RoomMessageEntity saved =
@@ -181,7 +205,16 @@ public class HearingCourtOrchestrator {
                         "model", result.model()),
                 lifecycleEventKey,
                 JUDGE_SENDER_ID);
-        appendFormalJuryReportIfNeeded(dispute, room, roundNo, result, saved.getSequenceNo(), traceId);
+        appendFormalJuryReportIfNeeded(
+                dispute,
+                room,
+                roundNo,
+                finalRound || result.finalDraftRequired(),
+                result.courtEventType(),
+                result.reviewFocusSignal(),
+                result.promptVersion(),
+                saved.getSequenceNo(),
+                traceId);
     }
 
     private HearingCourtAgentCommand command(
@@ -218,161 +251,7 @@ public class HearingCourtOrchestrator {
     }
 
     private String courtroomContextJson(String caseId, int roundNo) {
-        String contextJson =
-                hearingRecordRepository
-                        .findTopByCaseIdAndNodeNameAndRoundNoAndRecordTypeOrderByCreatedAtDesc(
-                                caseId,
-                                HearingCourtBootstrapService.BOOTSTRAP_NODE,
-                                HearingCourtBootstrapService.OPENING_ROUND_NO,
-                                HearingCourtBootstrapService.SNAPSHOT_RECORD_TYPE)
-                        .map(record -> defaultText(record.getOutputJson(), ""))
-                        .orElseThrow(
-                                () ->
-                                        new IllegalStateException(
-                                                "hearing bootstrap snapshot not found for case "
-                                                        + caseId));
-        if (contextJson.isBlank()) {
-            throw new IllegalStateException(
-                    "hearing bootstrap snapshot not found for case " + caseId);
-        }
-        return activeCourtroomContextJson(caseId, roundNo, contextJson);
-    }
-
-    private String activeCourtroomContextJson(String caseId, int roundNo, String bootstrapContextJson) {
-        ObjectNode context = readObject(bootstrapContextJson, "hearing bootstrap snapshot");
-        int baselineVersion =
-                context.path("source_versions")
-                        .path("evidence_dossier_version")
-                        .asInt(context.path("evidence_dossier_version").asInt(0));
-        var active = evidenceDossierRepository.findTopByCaseIdOrderByDossierVersionDesc(caseId);
-        int activeVersion = active.map(EvidenceDossierEntity::getDossierVersion).orElse(baselineVersion);
-        if (baselineVersion <= 0) {
-            baselineVersion = activeVersion;
-        }
-
-        ObjectNode sourceVersions = context.withObjectProperty("source_versions");
-        sourceVersions.put("evidence_dossier_version", baselineVersion);
-        ObjectNode ref = context.putObject("evidence_dossier_ref");
-        ref.put("baseline_version", baselineVersion);
-        ref.put("active_version", activeVersion);
-        active.ifPresent(
-                dossier -> {
-                    ref.put("active_dossier_id", dossier.getId());
-                    ref.put("active_status", dossier.getDossierStatus());
-                    context.put("evidence_dossier_version", activeVersion);
-                    context.set("evidence_dossier", evidenceDossierContext(dossier));
-                });
-        context.set("jury_a2a_notes", juryA2ANotes(caseId, roundNo));
-        context.set("execution_tool_declarations", executionToolDeclarations());
-        return json(context);
-    }
-
-    private ArrayNode executionToolDeclarations() {
-        ArrayNode tools = objectMapper.createArrayNode();
-        List<ToolDefinition> definitions = toolRegistry.definitions();
-        if (definitions == null) {
-            return tools;
-        }
-        for (ToolDefinition definition : definitions) {
-            ObjectNode tool = tools.addObject();
-            tool.put("action_type", definition.actionType());
-            tool.put("tool_name", definition.toolName());
-            tool.put("operation", definition.operation());
-            tool.put("display_name", definition.displayName());
-            tool.put("description", definition.description());
-            tool.put("risk_level", definition.riskLevel().name());
-            tool.put("simulated", definition.simulated());
-            tool.put("requires_approved_plan", definition.requiresApprovedPlan());
-        }
-        return tools;
-    }
-
-    private ArrayNode juryA2ANotes(String caseId, int roundNo) {
-        ArrayNode notes = objectMapper.createArrayNode();
-        List<AgentA2AMessageView> messages = a2aMessageService.findForJudge(caseId, roundNo);
-        if (messages == null) {
-            return notes;
-        }
-        for (AgentA2AMessageView message : messages) {
-            ObjectNode note = notes.addObject();
-            note.put("a2a_message_id", message.a2aMessageId());
-            note.put("round_no", message.roundNo());
-            note.put("from_agent", message.fromAgent());
-            note.put("to_agent", message.toAgent());
-            note.put("message_type", message.messageType());
-            note.set("input_refs", readJson(message.inputRefsJson(), "A2A input refs"));
-            note.set("payload", readJson(message.payloadJson(), "A2A payload"));
-            note.put("visibility", message.visibility());
-            if (message.agentRunId() != null && !message.agentRunId().isBlank()) {
-                note.put("agent_run_id", message.agentRunId());
-            }
-        }
-        return notes;
-    }
-
-    private ObjectNode evidenceDossierContext(EvidenceDossierEntity dossier) {
-        JsonNode summary = readJson(dossier.getSummaryJson(), "active evidence summary");
-        JsonNode timeline = readJson(dossier.getTimelineJson(), "active evidence timeline");
-        JsonNode matrix = readJson(dossier.getMatrixSummaryJson(), "active evidence matrix");
-        ObjectNode context = objectMapper.createObjectNode();
-        context.put("source", "active_evidence_dossier");
-        context.put("dossier_id", dossier.getId());
-        context.put("dossier_version", dossier.getDossierVersion());
-        context.put("dossier_status", dossier.getDossierStatus());
-        context.set("summary", summary.isObject() ? summary.deepCopy() : objectMapper.createObjectNode());
-        context.set("evidence_items", arrayOrEmpty(summary.path("evidence_items")));
-        context.set("timeline", arrayOrEmpty(timeline));
-        context.set(
-                "fact_evidence_matrix",
-                matrix.path("fact_evidence_matrix").isArray()
-                        ? matrix.path("fact_evidence_matrix").deepCopy()
-                        : arrayOrEmpty(matrix));
-        context.set(
-                "party_evidence_summary",
-                summary.path("party_evidence_summary").isObject()
-                        ? summary.path("party_evidence_summary").deepCopy()
-                        : objectMapper.createObjectNode());
-        context.set("verified_facts", arrayOrEmpty(summary.path("verified_facts")));
-        context.set("contested_facts", arrayOrEmpty(summary.path("contested_facts")));
-        context.set("evidence_gaps", arrayOrEmpty(summary.path("evidence_gaps")));
-        context.set("authenticity_flags", arrayOrEmpty(summary.path("authenticity_flags")));
-        context.put(
-                "overall_confidence_score",
-                summary.path("overall_confidence_score").asInt(
-                        summary.path("confidence_score").asInt(0)));
-        context.put(
-                "handoff_notes",
-                defaultText(
-                        summary.path("handoff_notes").asText(null),
-                        matrix.path("handoff_notes").asText(
-                                "证据书记官尚未提供可宣读的 active 证据矩阵交接备注。")));
-        ObjectNode rawProjection = context.putObject("raw_projection");
-        rawProjection.set("summary_json", summary.deepCopy());
-        rawProjection.set("timeline_json", timeline.deepCopy());
-        rawProjection.set("matrix_summary_json", matrix.deepCopy());
-        return context;
-    }
-
-    private ObjectNode readObject(String json, String label) {
-        JsonNode node = readJson(json, label);
-        if (!node.isObject()) {
-            throw new IllegalStateException(label + " must be a JSON object");
-        }
-        return node.deepCopy();
-    }
-
-    private JsonNode readJson(String json, String label) {
-        try {
-            return objectMapper.readTree(json == null || json.isBlank() ? "{}" : json);
-        } catch (JsonProcessingException exception) {
-            throw new IllegalStateException("invalid " + label, exception);
-        }
-    }
-
-    private ArrayNode arrayOrEmpty(JsonNode node) {
-        return node != null && node.isArray()
-                ? node.deepCopy()
-                : objectMapper.createArrayNode();
+        return json(courtroomContextAssembler.assemble(caseId, roundNo));
     }
 
     private HearingCourtAgentResult safeGenerate(HearingCourtAgentCommand command, String traceId) {
@@ -453,6 +332,22 @@ public class HearingCourtOrchestrator {
                 .toList();
     }
 
+    private List<String> reviewFocusSignal(
+            List<HearingRoundPartySubmissionEntity> submissions) {
+        return submissions.stream()
+                .map(
+                        submission ->
+                                new HearingCourtAgentCommand.PartySubmission(
+                                        submission.getParticipantRole().name(),
+                                        "",
+                                        submission.getSubmissionSource().name(),
+                                        defaultText(submission.getSubmissionJson(), "{}")))
+                .map(this::reviewFocusSignal)
+                .filter(signal -> !signal.isBlank())
+                .limit(20)
+                .toList();
+    }
+
     private String reviewFocusSignal(HearingCourtAgentCommand.PartySubmission submission) {
         String statement = statementFromSubmissionJson(submission.submissionJson());
         if (statement.isBlank()) {
@@ -513,34 +408,48 @@ public class HearingCourtOrchestrator {
             FulfillmentCaseEntity dispute,
             CaseRoomEntity room,
             int roundNo,
-            HearingCourtAgentResult judgeResult,
+            boolean finalDraftRequired,
+            String judgeEventType,
+            List<String> reviewFocusSignal,
+            String promptVersion,
             long judgeSequenceNo,
             String traceId) {
-        if (!judgeResult.finalDraftRequired() || roundNo < 3) {
+        if (!finalDraftRequired || roundNo < 3) {
             return;
         }
         String idempotencyKey = juryReviewReportKey(dispute.getId(), roundNo);
-        if (messageRepository.findByCaseIdAndIdempotencyKey(dispute.getId(), idempotencyKey).isPresent()) {
+        boolean roomReportExists =
+                messageRepository
+                        .findByCaseIdAndIdempotencyKey(dispute.getId(), idempotencyKey)
+                        .isPresent();
+        boolean a2aReportExists =
+                a2aMessageService.hasFormalJuryReviewReport(dispute.getId(), roundNo);
+        if (roomReportExists && a2aReportExists) {
             return;
         }
         Map<String, Object> inputRefs =
                 Map.of(
                         "round_no", roundNo,
-                        "judge_event_type", judgeResult.courtEventType(),
-                        "review_focus_signal", judgeResult.reviewFocusSignal(),
-                        "prompt_version", judgeResult.promptVersion());
-        Map<String, Object> payload = juryReviewPayload(judgeResult.reviewFocusSignal());
-        a2aMessageService.record(
-                new AgentA2ACommand(
-                        dispute.getId(),
-                        roundNo,
-                        "JURY_PANEL",
-                        AgentA2AMessageService.PRESIDING_JUDGE,
-                        "JURY_REVIEW_REPORT",
-                        inputRefs,
-                        payload,
-                        "REVIEWER_VISIBLE",
-                        null));
+                        "judge_event_type", judgeEventType,
+                        "review_focus_signal", reviewFocusSignal,
+                        "prompt_version", promptVersion);
+        Map<String, Object> payload = juryReviewPayload(reviewFocusSignal);
+        if (!a2aReportExists) {
+            a2aMessageService.record(
+                    new AgentA2ACommand(
+                            dispute.getId(),
+                            roundNo,
+                            "JURY_PANEL",
+                            AgentA2AMessageService.PRESIDING_JUDGE,
+                            "JURY_REVIEW_REPORT",
+                            inputRefs,
+                            payload,
+                            "REVIEWER_VISIBLE",
+                            null));
+        }
+        if (roomReportExists) {
+            return;
+        }
         RoomMessageEntity saved =
                 messageRepository.save(
                         RoomMessageEntity.create(
@@ -575,11 +484,19 @@ public class HearingCourtOrchestrator {
                 Map.of(
                         "round_no", roundNo,
                         "visibility", "REVIEWER_VISIBLE",
-                        "review_focus_signal", judgeResult.reviewFocusSignal(),
+                        "review_focus_signal", reviewFocusSignal,
                         "risk_level", payload.get("risk_level"),
                         "confidence_score", payload.get("confidence_score")),
                 "jury-review-report-ready:" + dispute.getId() + ":" + roundNo,
                 "jury-panel");
+    }
+
+    public boolean hasCompleteFormalJuryReport(String caseId, int roundNo) {
+        return messageRepository
+                        .findByCaseIdAndIdempotencyKey(
+                                caseId, juryReviewReportKey(caseId, roundNo))
+                        .isPresent()
+                && a2aMessageService.hasFormalJuryReviewReport(caseId, roundNo);
     }
 
     private Map<String, Object> juryReviewPayload(List<String> reviewFocusSignal) {

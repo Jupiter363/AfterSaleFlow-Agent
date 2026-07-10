@@ -7,6 +7,7 @@ import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.ParseStatus;
 import com.example.dispute.executor.application.ToolExecutorService;
 import com.example.dispute.evaluation.application.CaseClosureService;
+import com.example.dispute.hearing.application.ActiveCourtroomContextAssembler;
 import com.example.dispute.infrastructure.persistence.entity.AdjudicationDraftEntity;
 import com.example.dispute.infrastructure.persistence.entity.AgentRunEntity;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
@@ -58,6 +59,7 @@ public class CaseFulfillmentDisputeActivitiesImpl
     private final AdjudicationDraftRepository draftRepository;
     private final AgentRunRepository agentRunRepository;
     private final PartySubmissionRepository submissionRepository;
+    private final ActiveCourtroomContextAssembler courtroomContextAssembler;
     private final HearingAgentClient agentClient;
     private final RemedyApplicationService remedyService;
     private final ReviewApplicationService reviewService;
@@ -77,6 +79,7 @@ public class CaseFulfillmentDisputeActivitiesImpl
             AdjudicationDraftRepository draftRepository,
             AgentRunRepository agentRunRepository,
             PartySubmissionRepository submissionRepository,
+            ActiveCourtroomContextAssembler courtroomContextAssembler,
             HearingAgentClient agentClient,
             RemedyApplicationService remedyService,
             ReviewApplicationService reviewService,
@@ -94,6 +97,7 @@ public class CaseFulfillmentDisputeActivitiesImpl
         this.draftRepository = draftRepository;
         this.agentRunRepository = agentRunRepository;
         this.submissionRepository = submissionRepository;
+        this.courtroomContextAssembler = courtroomContextAssembler;
         this.agentClient = agentClient;
         this.remedyService = remedyService;
         this.reviewService = reviewService;
@@ -155,6 +159,10 @@ public class CaseFulfillmentDisputeActivitiesImpl
     @Override
     public HearingAnalysisActivityResult analyzeHearing(
             HearingAnalysisActivityCommand command) {
+        if (command.finalConvergence() && command.roundNo() <= 0) {
+            throw new IllegalStateException(
+                    "final convergence requires sealed hearing rounds and formal jury review report");
+        }
         JsonNode request =
                 transactions.execute(
                         ignored -> buildAgentRequest(command));
@@ -411,6 +419,16 @@ public class CaseFulfillmentDisputeActivitiesImpl
         hearingContext.put(
                 "allow_supplemental_request",
                 command.allowSupplementalRequest());
+        if (command.finalConvergence()) {
+            hearingContext.set(
+                    "courtroom_context",
+                    courtroomContextAssembler.assembleFinalConvergence(
+                            command.caseId(), command.roundNo()));
+            hearingContext.set(
+                    "sealed_rounds",
+                    courtroomContextAssembler.sealedRounds(
+                            command.caseId(), command.roundNo()));
+        }
         ArrayNode claims = request.putArray("claims");
         claims.addObject()
                 .put("claim_id", "CLAIM_" + command.caseId())

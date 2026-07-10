@@ -180,12 +180,7 @@ public class HearingRoundService {
                 "hearing-round-completed:" + roundNo,
                         actor.actorId());
         reviseEvidenceDossierAfterRoundIfNeeded(caseId, roundNo, actor.actorId());
-        courtOrchestrator.afterRoundClosedAfterCommit(
-                caseId,
-                roundNo,
-                stopReason != null,
-                traceId(roundNo));
-        workflowCoordinator.roundCompletedAfterCommit(caseId, roundNo, false);
+        dispatchRoundClosedAfterCommit(caseId, roundNo, stopReason != null);
         return view(caseId, saved, actor);
     }
 
@@ -514,11 +509,10 @@ public class HearingRoundService {
     @Transactional
     public HearingStatusView completeHearing(String caseId, AuthenticatedActor actor) {
         HearingStatusView current = status(caseId, actor);
-        if (("JUDGE_DRAFTING".equals(current.hearingPhase())
-                        || "DRAFT_READY".equals(current.hearingPhase()))
+        if ("DRAFT_READY".equals(current.hearingPhase())
                 && current.finalRoundSealed()
                 && current.currentRoundNo() != null) {
-            finalDraftService.ensureDraftForFinalSealedRound(
+            finalDraftService.adoptExistingDraftForFinalSealedRound(
                     caseId,
                     current.currentRoundNo(),
                     disputeProperties.maxHearingRounds(),
@@ -752,16 +746,11 @@ public class HearingRoundService {
                 "hearing-round-completed:" + round.getRoundNo(),
                 actorId);
         reviseEvidenceDossierAfterRoundIfNeeded(dispute.getId(), round.getRoundNo(), "evidence-clerk");
-        courtOrchestrator.afterRoundClosedAfterCommit(
-                dispute.getId(),
-                round.getRoundNo(),
-                stopReason != null,
-                traceId(round.getRoundNo()));
+        dispatchRoundClosedAfterCommit(
+                dispute.getId(), round.getRoundNo(), stopReason != null);
         if (stopReason == null) {
             responseRound = openNextRound(dispute, saved, now, actorId);
         }
-        workflowCoordinator.roundCompletedAfterCommit(
-                dispute.getId(), round.getRoundNo(), false);
         return view(dispute.getId(), responseRound, null);
     }
 
@@ -817,18 +806,23 @@ public class HearingRoundService {
                 "hearing-controller");
         reviseEvidenceDossierAfterRoundIfNeeded(
                 dispute.getId(), round.getRoundNo(), "evidence-clerk");
-        courtOrchestrator.afterRoundClosedAfterCommit(
-                dispute.getId(),
-                round.getRoundNo(),
-                stopReason != null,
-                traceId(round.getRoundNo()));
+        dispatchRoundClosedAfterCommit(
+                dispute.getId(), round.getRoundNo(), stopReason != null);
         HearingRoundEntity responseRound = saved;
         if (stopReason == null) {
             responseRound = openNextRound(dispute, saved, now, "hearing-controller");
         }
-        workflowCoordinator.roundCompletedAfterCommit(
-                dispute.getId(), round.getRoundNo(), false);
         return view(dispute.getId(), responseRound, actor);
+    }
+
+    private void dispatchRoundClosedAfterCommit(
+            String caseId, int roundNo, boolean finalRound) {
+        courtOrchestrator.afterRoundClosedAfterCommit(
+                caseId,
+                roundNo,
+                finalRound,
+                traceId(roundNo),
+                () -> workflowCoordinator.roundCompletedAfterCommit(caseId, roundNo, false));
     }
 
     private HearingRoundEntity openNextRound(

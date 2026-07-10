@@ -60,6 +60,16 @@ public class AgentA2AMessageService {
                 .toList();
     }
 
+    @Transactional(readOnly = true)
+    public boolean hasFormalJuryReviewReport(String caseId, int roundNo) {
+        return repository.existsByCaseIdAndRoundNoAndFromAgentAndToAgentAndMessageType(
+                caseId,
+                roundNo,
+                "JURY_PANEL",
+                PRESIDING_JUDGE,
+                "JURY_REVIEW_REPORT");
+    }
+
     private String json(Object value) {
         try {
             return objectMapper.writeValueAsString(value);

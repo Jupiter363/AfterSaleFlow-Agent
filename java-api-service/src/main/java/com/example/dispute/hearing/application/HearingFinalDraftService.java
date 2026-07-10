@@ -190,6 +190,26 @@ public class HearingFinalDraftService {
         return persisted.getId();
     }
 
+    @Transactional
+    public String adoptExistingDraftForFinalSealedRound(
+            String caseId, int finalRoundNo, int maxStatementRounds, String actorId) {
+        int draftVersion = finalRoundNo + 1;
+        AdjudicationDraftEntity existing =
+                draftRepository
+                        .findByCaseIdAndDraftVersion(caseId, draftVersion)
+                        .orElseThrow(
+                                () ->
+                                        new IllegalStateException(
+                                                "final adjudication draft is not available"));
+        HearingRoundEntity finalRound =
+                roundRepository
+                        .findByCaseIdAndRoundNo(caseId, finalRoundNo)
+                        .orElseThrow(() -> new IllegalStateException("final hearing round not found"));
+        assertFinalRoundSealed(finalRound, finalRoundNo, maxStatementRounds);
+        completeStateIfNeeded(caseId, finalRoundNo, existing, actorId);
+        return existing.getId();
+    }
+
     private void completeStateIfNeeded(
             String caseId, int finalRoundNo, AdjudicationDraftEntity draft, String actorId) {
         stateRepository
