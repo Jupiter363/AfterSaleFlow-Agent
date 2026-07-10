@@ -359,6 +359,27 @@ def test_evidence_opening_fallback_asks_dossier_specific_evidence_questions() ->
     assert result.remedy_recommended is False
 
 
+def test_evidence_opening_fallback_states_initiator_evidence_gate_without_deciding() -> None:
+    from app.agents.evidence_clerk.workflow import EvidenceTurnWorkflow
+    from app.schemas import EvidenceTurnRequest
+
+    workflow = EvidenceTurnWorkflow()
+
+    result = workflow.run(
+        EvidenceTurnRequest.model_validate(_java_evidence_opening_command_payload())
+    )
+
+    assert (
+        "发起争议方须至少正式提交 1 份相关证据后才能完成举证"
+        in result.room_utterance
+    )
+    assert "另一方可补充材料，或等待举证时效结束" in result.room_utterance
+    assert "证据不足不会阻止进入小法庭" not in result.room_utterance
+    assert result.non_final is True
+    assert result.liability_determined is False
+    assert result.remedy_recommended is False
+
+
 def test_evidence_opening_fallback_localizes_internal_dispute_codes() -> None:
     from app.agents.evidence_clerk.workflow import EvidenceTurnWorkflow
     from app.schemas import EvidenceTurnRequest
@@ -525,3 +546,18 @@ def test_prompt_repository_registers_evidence_turn_prompt() -> None:
     assert PromptRepository().template_path("evidence_turn") == Path(
         "app/agents/prompts/evidence_clerk/evidence_turn.md"
     )
+
+
+def test_evidence_turn_prompt_treats_initiator_evidence_as_admission_gate() -> None:
+    prompt = Path(
+        "app/agents/prompts/evidence_clerk/evidence_turn.md"
+    ).read_text(encoding="utf-8")
+
+    assert "发起争议方须至少正式提交 1 份相关证据后才能完成举证" in prompt
+    assert "另一方可补充材料，或等待举证时效结束" in prompt
+    assert "受理门槛" in prompt
+    assert "不是证据强弱或责任评价" in prompt
+    assert "不得宣称无证据、证据不足仍可开庭或进入小法庭" in prompt
+    assert "证据不足也不阻止进入小法庭" not in prompt
+    assert "只做证据核验" in prompt
+    assert "不判断责任" in prompt
