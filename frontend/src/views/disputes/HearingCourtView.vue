@@ -1,6 +1,7 @@
 <script setup>
 import {
   computed,
+  nextTick,
   onBeforeUnmount,
   onMounted,
   reactive,
@@ -58,6 +59,14 @@ const loadingState = reactive({
 });
 const settlementOpen = ref(false);
 const ledgerOpen = ref(false);
+const evidenceDrawerSide = ref(null);
+const expandedTranscriptIds = ref([]);
+const leftEvidenceDrawer = ref(null);
+const rightEvidenceDrawer = ref(null);
+const leftEvidenceDrawerTrigger = ref(null);
+const rightEvidenceDrawerTrigger = ref(null);
+const leftEvidenceDrawerClose = ref(null);
+const rightEvidenceDrawerClose = ref(null);
 const proposalText = ref("");
 const statementText = ref("");
 const proposing = ref(false);
@@ -65,6 +74,8 @@ const supplementing = ref(false);
 const submittingRound = ref(false);
 const eventState = reactive(createRoomState());
 const eventAbortController = new AbortController();
+const LONG_TRANSCRIPT_THRESHOLD = 1500;
+const LONG_TRANSCRIPT_PREVIEW_LENGTH = 900;
 const caseId = computed(() => route.params.caseId);
 const role = computed(() => props.viewerRole || actor.role);
 const demoActorIds = {
@@ -550,6 +561,89 @@ function transcriptBadgeForItem(item) {
   if (item.type === "judge") return "法官宣读";
   if (item.type === "jury") return "评审团观察";
   return "";
+}
+
+function transcriptCharacters(text) {
+  return Array.from(String(text || ""));
+}
+
+function isLongTranscript(item) {
+  return transcriptCharacters(item?.text).length >= LONG_TRANSCRIPT_THRESHOLD;
+}
+
+function isTranscriptExpanded(item) {
+  return expandedTranscriptIds.value.includes(item?.id);
+}
+
+function visibleTranscriptText(item) {
+  if (!isLongTranscript(item) || isTranscriptExpanded(item)) return item?.text || "";
+  return `${transcriptCharacters(item?.text)
+    .slice(0, LONG_TRANSCRIPT_PREVIEW_LENGTH)
+    .join("")}…`;
+}
+
+function toggleTranscript(item) {
+  if (!item?.id || !isLongTranscript(item)) return;
+  expandedTranscriptIds.value = isTranscriptExpanded(item)
+    ? expandedTranscriptIds.value.filter((id) => id !== item.id)
+    : [...expandedTranscriptIds.value, item.id];
+}
+
+function evidenceDrawerElement(side) {
+  return side === "left" ? leftEvidenceDrawer.value : rightEvidenceDrawer.value;
+}
+
+function evidenceDrawerCloseButton(side) {
+  return side === "left"
+    ? leftEvidenceDrawerClose.value
+    : rightEvidenceDrawerClose.value;
+}
+
+function evidenceDrawerTrigger(side) {
+  return side === "left"
+    ? leftEvidenceDrawerTrigger.value
+    : rightEvidenceDrawerTrigger.value;
+}
+
+async function openEvidenceDrawer(side) {
+  if (!["left", "right"].includes(side)) return;
+  evidenceDrawerSide.value = side;
+  await nextTick();
+  evidenceDrawerCloseButton(side)?.focus();
+}
+
+async function closeEvidenceDrawer({ restoreFocus = true } = {}) {
+  const closingSide = evidenceDrawerSide.value;
+  if (!closingSide) return;
+  evidenceDrawerSide.value = null;
+  await nextTick();
+  if (restoreFocus) evidenceDrawerTrigger(closingSide)?.focus();
+}
+
+function trapEvidenceDrawerFocus(event) {
+  if (event.key !== "Tab" || !evidenceDrawerSide.value) return;
+  const drawer = evidenceDrawerElement(evidenceDrawerSide.value);
+  if (!drawer || event.currentTarget !== drawer) return;
+  const focusable = [...drawer.querySelectorAll(
+    'button:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
+  )].filter((element) => !element.hasAttribute("hidden"));
+  if (!focusable.length) return;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
+function handleEvidenceDrawerKeydown(event) {
+  if (event.key === "Escape" && evidenceDrawerSide.value) {
+    event.preventDefault();
+    void closeEvidenceDrawer();
+  }
 }
 
 function rawMessageText(message) {
@@ -1340,6 +1434,7 @@ async function completeHearing() {
 }
 
 onMounted(async () => {
+  window.addEventListener("keydown", handleEvidenceDrawerKeydown);
   await load();
   if (
     props.eventStreamer ||
@@ -1350,6 +1445,7 @@ onMounted(async () => {
   }
 });
 onBeforeUnmount(() => {
+  window.removeEventListener("keydown", handleEvidenceDrawerKeydown);
   eventAbortController.abort();
   clearInterval(stageClockTimer);
 });
@@ -1402,23 +1498,79 @@ onBeforeUnmount(() => {
       </section>
     </template>
 
-    <main class="hearing-courtroom-page" data-hearing-courtroom-page>
+    <main
+      class="hearing-courtroom-page"
+      data-hearing-courtroom-page
+      :data-viewer-role="role"
+    >
+      <nav class="evidence-drawer-launchers" aria-label="庭审证据抽屉">
+        <button
+          ref="leftEvidenceDrawerTrigger"
+          type="button"
+          data-open-evidence-drawer="left"
+          aria-controls="hearing-evidence-drawer-left"
+          :aria-expanded="evidenceDrawerSide === 'left'"
+          @click="openEvidenceDrawer('left')"
+        >
+          {{ leftEvidenceRail.title }}
+        </button>
+        <button
+          ref="rightEvidenceDrawerTrigger"
+          type="button"
+          data-open-evidence-drawer="right"
+          aria-controls="hearing-evidence-drawer-right"
+          :aria-expanded="evidenceDrawerSide === 'right'"
+          @click="openEvidenceDrawer('right')"
+        >
+          {{ rightEvidenceRail.title }}
+        </button>
+      </nav>
+      <div
+        v-if="evidenceDrawerSide"
+        class="evidence-drawer-backdrop"
+        aria-hidden="true"
+        @click="closeEvidenceDrawer()"
+      ></div>
       <aside
+        id="hearing-evidence-drawer-left"
+        ref="leftEvidenceDrawer"
         class="party-evidence-rail party-evidence-rail--left"
-        :class="`party-evidence-rail--${leftEvidenceRail.key}`"
+        :class="[
+          `party-evidence-rail--${leftEvidenceRail.key}`,
+          { 'party-evidence-rail--drawer-open': evidenceDrawerSide === 'left' },
+        ]"
         :data-party-evidence-rail="leftEvidenceRail.key"
+        :data-evidence-drawer-open="evidenceDrawerSide === 'left' ? 'left' : undefined"
         data-rail-position="left"
+        :role="evidenceDrawerSide === 'left' ? 'dialog' : undefined"
+        :aria-modal="evidenceDrawerSide === 'left' ? 'true' : undefined"
+        aria-labelledby="hearing-evidence-drawer-left-title"
+        @keydown="trapEvidenceDrawerFocus"
       >
         <header class="party-evidence-rail__header">
           <div>
             <span>{{ leftEvidenceRail.eyebrow }}</span>
-            <h2>{{ leftEvidenceRail.title }}</h2>
+            <h2 id="hearing-evidence-drawer-left-title">{{ leftEvidenceRail.title }}</h2>
             <p>{{ leftEvidenceRail.description }}</p>
           </div>
-          <b>{{ leftEvidenceRail.badge }}</b>
+          <b>{{ leftEvidenceRail.badge }} · {{ leftEvidenceItems.length }} 份</b>
+          <button
+            ref="leftEvidenceDrawerClose"
+            class="evidence-drawer-close"
+            type="button"
+            data-close-evidence-drawer="left"
+            :aria-label="`关闭${leftEvidenceRail.title}`"
+            @click="closeEvidenceDrawer()"
+          >
+            ×
+          </button>
         </header>
 
-        <div class="evidence-pocket" :aria-label="leftEvidenceRail.ariaLabel">
+        <div
+          class="evidence-pocket"
+          :aria-label="leftEvidenceRail.ariaLabel"
+          data-evidence-scroll-rail="true"
+        >
           <article
             v-for="item in leftEvidenceItems"
             :key="evidenceId(item)"
@@ -1429,7 +1581,7 @@ onBeforeUnmount(() => {
               {{ evidenceTypeLabel(evidenceCardType(item)) }}
             </i>
             <div>
-              <strong>{{ evidenceFilename(item) }}</strong>
+              <strong :title="evidenceFilename(item)">{{ evidenceFilename(item) }}</strong>
               <small>{{ evidenceTypeCopy(item) }} · {{ evidenceSubmissionStatusLabel(item) }}</small>
               <footer>
                 <span>{{ evidenceConfidence(item) }}</span>
@@ -1455,23 +1607,29 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <label
-          v-if="isCaseParty && leftEvidenceRail.role === role"
-          class="evidence-supplement-button"
-          :class="{ 'evidence-supplement-button--merchant': leftEvidenceRail.key === 'merchant' }"
-          :data-supplement-evidence="leftEvidenceRail.key"
-        >
-          {{ supplementing ? "正在补入卷宗…" : leftEvidenceRail.supplementLabel }}
-          <input type="file" :disabled="supplementing" @change="supplementEvidence" />
-        </label>
+        <footer class="party-evidence-rail__footer">
+          <label
+            v-if="isCaseParty && leftEvidenceRail.role === role"
+            class="evidence-supplement-button"
+            :class="{ 'evidence-supplement-button--merchant': leftEvidenceRail.key === 'merchant' }"
+            :data-supplement-evidence="leftEvidenceRail.key"
+          >
+            {{ supplementing ? "正在补入卷宗…" : leftEvidenceRail.supplementLabel }}
+            <input type="file" :disabled="supplementing" @change="supplementEvidence" />
+          </label>
 
-        <button class="evidence-expand-button" type="button">
-          展开证据预览
-          <span aria-hidden="true">↗</span>
-        </button>
+          <button class="evidence-expand-button" type="button">
+            展开证据预览
+            <span aria-hidden="true">↗</span>
+          </button>
+        </footer>
       </aside>
 
-      <section class="courtroom-center courtroom-center--compact-stage">
+      <section
+        class="courtroom-center courtroom-center--compact-stage"
+        :class="{ 'courtroom-center--without-input': !isCaseParty }"
+        :data-has-input-dock="isCaseParty"
+      >
         <section
           class="hearing-stage-dock hearing-stage-dock--fixed-dashboard hearing-stage-dock--short"
           :class="`hearing-stage-dock--${stageDockMode}`"
@@ -1519,7 +1677,10 @@ onBeforeUnmount(() => {
         </section>
 
         <section class="court-transcript" data-court-transcript>
-          <div class="court-transcript__messages">
+          <div
+            class="court-transcript__messages"
+            data-transcript-scroll-rail="true"
+          >
             <article
               v-for="item in courtTranscriptItems"
               :key="item.id"
@@ -1537,6 +1698,8 @@ onBeforeUnmount(() => {
                 ['judge', 'jury', 'intake', 'clerk', 'user', 'merchant'].includes(item.type) ? 'court-message--flexible-height-card' : '',
               ]"
               :data-court-message="item.type"
+              :data-court-message-id="item.id"
+              :data-long-transcript="isLongTranscript(item)"
             >
               <header>
                 <strong>
@@ -1551,7 +1714,17 @@ onBeforeUnmount(() => {
                 </strong>
                 <span>{{ item.time }}</span>
               </header>
-              <p>{{ item.text }}</p>
+              <p>{{ visibleTranscriptText(item) }}</p>
+              <button
+                v-if="isLongTranscript(item)"
+                type="button"
+                class="court-message__expand"
+                data-expand-transcript
+                :aria-expanded="isTranscriptExpanded(item)"
+                @click="toggleTranscript(item)"
+              >
+                {{ isTranscriptExpanded(item) ? "收起长报告" : "查看完整长报告" }}
+              </button>
             </article>
 
             <div
@@ -1648,9 +1821,19 @@ onBeforeUnmount(() => {
       </section>
 
       <div
+        id="hearing-evidence-drawer-right"
+        ref="rightEvidenceDrawer"
         class="evidence-rail-column evidence-rail-column--right"
+        :class="{
+          'evidence-rail-column--drawer-open': evidenceDrawerSide === 'right',
+        }"
         :data-party-evidence-rail="rightEvidenceRail.key"
+        :data-evidence-drawer-open="evidenceDrawerSide === 'right' ? 'right' : undefined"
         data-rail-position="right"
+        :role="evidenceDrawerSide === 'right' ? 'dialog' : undefined"
+        :aria-modal="evidenceDrawerSide === 'right' ? 'true' : undefined"
+        aria-labelledby="hearing-evidence-drawer-right-title"
+        @keydown="trapEvidenceDrawerFocus"
       >
         <aside
           class="party-evidence-rail party-evidence-rail--right"
@@ -1659,13 +1842,27 @@ onBeforeUnmount(() => {
           <header class="party-evidence-rail__header">
             <div>
               <span>{{ rightEvidenceRail.eyebrow }}</span>
-              <h2>{{ rightEvidenceRail.title }}</h2>
+              <h2 id="hearing-evidence-drawer-right-title">{{ rightEvidenceRail.title }}</h2>
               <p>{{ rightEvidenceRail.description }}</p>
             </div>
-            <b>{{ rightEvidenceRail.badge }}</b>
+            <b>{{ rightEvidenceRail.badge }} · {{ rightEvidenceItems.length }} 份</b>
+            <button
+              ref="rightEvidenceDrawerClose"
+              class="evidence-drawer-close"
+              type="button"
+              data-close-evidence-drawer="right"
+              :aria-label="`关闭${rightEvidenceRail.title}`"
+              @click="closeEvidenceDrawer()"
+            >
+              ×
+            </button>
           </header>
 
-          <div class="evidence-pocket" :aria-label="rightEvidenceRail.ariaLabel">
+          <div
+            class="evidence-pocket"
+            :aria-label="rightEvidenceRail.ariaLabel"
+            data-evidence-scroll-rail="true"
+          >
             <article
               v-for="item in rightEvidenceItems"
               :key="evidenceId(item)"
@@ -1676,7 +1873,7 @@ onBeforeUnmount(() => {
                 {{ evidenceTypeLabel(evidenceCardType(item)) }}
               </i>
               <div>
-                <strong>{{ evidenceFilename(item) }}</strong>
+                <strong :title="evidenceFilename(item)">{{ evidenceFilename(item) }}</strong>
                 <small>{{ evidenceTypeCopy(item) }} · {{ evidenceSubmissionStatusLabel(item) }}</small>
                 <footer>
                   <span>{{ evidenceConfidence(item) }}</span>
@@ -1702,20 +1899,6 @@ onBeforeUnmount(() => {
             </div>
           </div>
 
-          <label
-            v-if="isCaseParty && rightEvidenceRail.role === role"
-            class="evidence-supplement-button"
-            :class="{ 'evidence-supplement-button--merchant': rightEvidenceRail.key === 'merchant' }"
-            :data-supplement-evidence="rightEvidenceRail.key"
-          >
-            {{ supplementing ? "正在补入卷宗…" : rightEvidenceRail.supplementLabel }}
-            <input type="file" :disabled="supplementing" @change="supplementEvidence" />
-          </label>
-
-          <button class="evidence-expand-button" type="button">
-            展开证据预览
-            <span aria-hidden="true">↗</span>
-          </button>
         </aside>
 
         <div class="hearing-side-actions">
@@ -1735,6 +1918,7 @@ onBeforeUnmount(() => {
             class="evidence-complete-button"
             data-complete-hearing
             :disabled="!serverCanCompleteHearing"
+            :title="completeHearingHint"
             @click="completeHearing"
           >
             {{ completeHearingButtonLabel }}
@@ -1878,20 +2062,29 @@ onBeforeUnmount(() => {
 :deep(.room-shell__boundary) {
   display: none;
 }
+:deep(.room-shell__workspace) {
+  container: hearing-court / inline-size;
+  min-width: 0;
+}
 :global(.app-page:has(.hearing-courtroom-page)) {
   padding-bottom: 42px;
 }
 .hearing-courtroom-page {
+  box-sizing: border-box;
   position: relative;
   display: grid;
   grid-template-columns: 282px minmax(620px, 1fr) 282px;
   gap: 18px;
-  height: clamp(720px, calc(100vh - 150px), 820px);
-  min-height: 0;
+  height: clamp(720px, calc(100dvh - 150px), 820px);
+  min-width: 0;
+  min-height: 720px;
+  max-height: 820px;
 }
 .party-evidence-rail,
 .courtroom-center {
+  box-sizing: border-box;
   min-width: 0;
+  min-height: 0;
   background: #ffffffdf;
   border: 1px solid #dfe9f4;
   box-shadow: 0 22px 56px #536c8b12;
@@ -1901,25 +2094,29 @@ onBeforeUnmount(() => {
   position: sticky;
   top: 96px;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
-  gap: 12px;
+  grid-template-rows: 88px minmax(0, 1fr) 48px;
+  gap: 10px;
   height: 100%;
-  padding: 16px;
+  padding: 14px;
+  overflow: hidden;
   border-radius: 28px;
 }
 .party-evidence-rail--left {
   grid-column: 1;
 }
 .evidence-rail-column--right {
+  box-sizing: border-box;
   grid-column: 3;
   display: grid;
-  grid-template-rows: minmax(0, 1fr) auto;
+  grid-template-rows: minmax(0, 1fr) 48px;
   gap: 10px;
   min-width: 0;
+  min-height: 0;
   height: 100%;
 }
 .evidence-rail-column--right .party-evidence-rail {
   position: static;
+  grid-template-rows: 88px minmax(0, 1fr);
   height: 100%;
   min-height: 0;
 }
@@ -1927,10 +2124,17 @@ onBeforeUnmount(() => {
   gap: 9px;
 }
 .party-evidence-rail__header {
+  position: relative;
   display: flex;
   justify-content: space-between;
   gap: 12px;
   align-items: flex-start;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.party-evidence-rail__header > div {
+  min-width: 0;
 }
 .party-evidence-rail__header span,
 .round-input-bar span,
@@ -1961,10 +2165,16 @@ onBeforeUnmount(() => {
   border: 1px solid #cfe8f7;
   border-radius: 999px;
   font-size: 11px;
+  white-space: nowrap;
 }
 .party-evidence-rail--merchant .party-evidence-rail__header b {
   background: #fff3e9;
   border-color: #f4d7c8;
+}
+.evidence-drawer-launchers,
+.evidence-drawer-backdrop,
+.evidence-drawer-close {
+  display: none;
 }
 .evidence-pocket {
   display: grid;
@@ -1973,6 +2183,8 @@ onBeforeUnmount(() => {
   min-height: 0;
   overflow: auto;
   padding: 2px 3px 10px 0;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 .evidence-pocket::-webkit-scrollbar,
 .court-transcript__messages::-webkit-scrollbar {
@@ -2012,7 +2224,7 @@ onBeforeUnmount(() => {
   grid-template-columns: 46px minmax(0, 1fr);
   gap: 12px;
   align-items: center;
-  min-height: 72px;
+  min-height: 78px;
   padding: 10px 10px 10px 14px;
   overflow: hidden;
   background: #fff;
@@ -2097,7 +2309,7 @@ onBeforeUnmount(() => {
 .party-evidence-rail--right .evidence-file-card {
   grid-template-columns: 40px minmax(0, 1fr);
   gap: 10px;
-  min-height: 62px;
+  min-height: 78px;
   padding: 8px 9px 8px 12px;
 }
 .party-evidence-rail--right .evidence-file-card__icon {
@@ -2110,6 +2322,13 @@ onBeforeUnmount(() => {
 }
 .party-evidence-rail--right .evidence-file-card footer {
   margin-top: 5px;
+}
+.party-evidence-rail__footer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px;
+  min-width: 0;
+  min-height: 0;
 }
 .evidence-supplement-button,
 .evidence-expand-button,
@@ -2128,6 +2347,17 @@ onBeforeUnmount(() => {
   font-weight: 900;
   cursor: pointer;
 }
+.party-evidence-rail__footer .evidence-supplement-button,
+.party-evidence-rail__footer .evidence-expand-button {
+  width: 100%;
+  min-width: 0;
+  height: 48px;
+  padding: 0 10px;
+  text-align: center;
+}
+.party-evidence-rail__footer > :only-child {
+  grid-column: 1 / -1;
+}
 .evidence-supplement-button {
   color: #0f8abf;
   background: #eaf8ff;
@@ -2137,6 +2367,10 @@ onBeforeUnmount(() => {
   color: #9a681c;
   background: #fff5e6;
   border-color: #f1d9ae;
+}
+.evidence-supplement-button:focus-within {
+  outline: 3px solid #7ec8ff80;
+  outline-offset: 2px;
 }
 .evidence-supplement-button input {
   position: absolute;
@@ -2151,8 +2385,19 @@ onBeforeUnmount(() => {
   border-color: #dfd7fb;
 }
 .hearing-side-actions {
+  position: relative;
   display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 8px;
+  min-width: 0;
+  height: 48px;
+  min-height: 48px;
+}
+.hearing-side-actions .evidence-ledger-button,
+.hearing-side-actions .evidence-complete-button {
+  width: 100%;
+  min-width: 0;
+  height: 48px;
 }
 .evidence-complete-button {
   color: #fff;
@@ -2167,20 +2412,29 @@ onBeforeUnmount(() => {
   cursor: not-allowed;
 }
 .hearing-side-actions__hint {
-  color: #75879a;
-  font-size: 10px;
-  line-height: 1.45;
-  text-align: center;
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 .courtroom-center {
+  position: relative;
   grid-column: 2;
   display: grid;
-  grid-template-rows: auto minmax(360px, 1fr) auto auto;
+  grid-template-rows: 122px minmax(0, 1fr) 154px;
   gap: 10px;
   height: 100%;
   overflow: hidden;
   padding: 14px 16px;
   border-radius: 30px;
+}
+.courtroom-center--without-input {
+  grid-template-rows: 122px minmax(0, 1fr);
 }
 .courtroom-center--compact-stage {
   align-content: stretch;
@@ -2597,7 +2851,7 @@ onBeforeUnmount(() => {
 .court-transcript {
   min-height: 0;
   height: 100%;
-  overflow: visible;
+  overflow: hidden;
   background: transparent;
   border: 0;
   box-shadow: none;
@@ -2610,6 +2864,8 @@ onBeforeUnmount(() => {
   height: 100%;
   padding: 2px 4px 10px;
   overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 .court-transcript__empty {
   display: grid;
@@ -2683,6 +2939,21 @@ onBeforeUnmount(() => {
   color: #516178;
   font-size: 12px;
   line-height: 1.65;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.court-message__expand {
+  align-self: flex-start;
+  min-height: 36px;
+  padding: 7px 11px;
+  color: #536c91;
+  background: #f2f7fc;
+  border: 1px solid #d9e5f0;
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 900;
 }
 .court-message--judge {
   align-self: center;
@@ -3254,7 +3525,24 @@ onBeforeUnmount(() => {
 .settlement-card button { width: 100%; color: white; background: linear-gradient(135deg, #ff8d70, #e9779d); border: 0; font-weight: 800; }
 .settlement-card__confirmed { display: block; color: #277154; }
 .settlement-card small { display: block; margin-top: 5px; color: #7d7280; }
-.hearing-error { color: #a94552; }
+.hearing-error {
+  position: absolute;
+  right: 22px;
+  bottom: 176px;
+  left: 22px;
+  z-index: 12;
+  max-width: calc(100% - 44px);
+  padding: 10px 14px;
+  margin: 0;
+  color: #a94552;
+  background: #fff1f2ed;
+  border: 1px solid #f1c9ce;
+  border-radius: 14px;
+  box-shadow: 0 12px 28px #9b40551c;
+}
+.courtroom-center--without-input .hearing-error {
+  bottom: 14px;
+}
 .settlement-dialog {
   position: fixed; inset: 0; z-index: 70; display: grid; place-items: center; padding: 20px;
   background: #42557540; backdrop-filter: blur(10px);
@@ -3270,40 +3558,166 @@ onBeforeUnmount(() => {
 .settlement-dialog textarea { padding: 11px; color: #4c464d; background: #fff; border: 1px solid #e5d9bf; border-radius: 13px; resize: vertical; }
 .settlement-dialog p { color: #7d7170; font-size: 11px; }
 .settlement-dialog form > button { width: 100%; padding: 12px; color: #fff; background: linear-gradient(135deg, #ff8d70, #e8759a); border: 0; border-radius: 13px; font-weight: 800; }
-@media (max-width: 1180px) {
+@container hearing-court (max-width: 1219px) {
   .hearing-courtroom-page {
     grid-template-columns: minmax(0, 1fr);
+    gap: 0;
   }
-  .party-evidence-rail,
-  .evidence-rail-column--right,
   .courtroom-center {
     grid-column: 1;
-    grid-row: auto;
-    position: static;
-    height: auto;
+    z-index: 1;
+    width: 100%;
   }
-  .party-evidence-rail {
+  .evidence-drawer-launchers {
+    position: absolute;
+    top: 136px;
+    right: 10px;
+    left: 10px;
+    z-index: 20;
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    pointer-events: none;
+  }
+  .evidence-drawer-launchers button {
+    width: min(210px, 46%);
+    min-width: 0;
+    min-height: 44px;
+    padding: 8px 12px;
+    overflow: hidden;
+    color: #536786;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    background: #ffffffef;
+    border: 1px solid #d9e6f2;
+    border-radius: 999px;
+    box-shadow: 0 12px 28px #405c8020;
+    cursor: pointer;
+    pointer-events: auto;
+    font-size: 11px;
+    font-weight: 900;
+  }
+  .evidence-drawer-backdrop {
+    position: absolute;
+    inset: 0;
+    z-index: 38;
+    display: block;
+    background: #4055744a;
+    border-radius: 30px;
+    backdrop-filter: blur(7px);
+  }
+  .party-evidence-rail--left,
+  .evidence-rail-column--right {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    z-index: 40;
+    width: min(360px, calc(100% - 24px));
+    height: 100%;
     max-height: none;
+    visibility: hidden;
+    pointer-events: none;
+    transition: transform .2s ease, visibility .2s ease;
   }
-  .evidence-pocket {
-    max-height: 360px;
+  .party-evidence-rail--left {
+    left: 0;
+    grid-column: 1;
+    transform: translateX(calc(-100% - 20px));
+  }
+  .evidence-rail-column--right {
+    right: 0;
+    grid-column: 1;
+    transform: translateX(calc(100% + 20px));
+  }
+  .party-evidence-rail--left[data-evidence-drawer-open="left"],
+  .evidence-rail-column--right[data-evidence-drawer-open="right"] {
+    visibility: visible;
+    pointer-events: auto;
+    transform: translateX(0);
+  }
+  .evidence-drawer-close {
+    position: absolute;
+    top: 0;
+    right: 0;
+    z-index: 4;
+    display: grid;
+    width: 44px;
+    height: 44px;
+    place-items: center;
+    color: #53617a;
+    background: #f4f8fc;
+    border: 1px solid #dce6ef;
+    border-radius: 50%;
+    cursor: pointer;
+    font-size: 20px;
+  }
+  .party-evidence-rail__header b {
+    margin-right: 48px;
+  }
+  .court-transcript__messages {
+    padding-top: 56px;
   }
 }
 @media (max-width: 680px) {
-  .court-agent-strip,
-  .hearing-stage-dock,
-  .round-input-bar {
+  .court-agent-strip {
     grid-template-columns: 1fr;
   }
+  .hearing-stage-dock {
+    padding-right: 10px;
+    padding-left: 10px;
+  }
+  .hearing-stage-dock__copy--stacked {
+    max-width: calc(100% - 112px);
+  }
+  .hearing-stage-dock__copy h2 {
+    font-size: 15px;
+  }
+  .hearing-stage-dock__clock strong {
+    font-size: 17px;
+  }
   .round-progress-board {
-    position: static;
-    grid-template-columns: 1fr;
-    margin-top: 12px;
+    padding-right: 4px;
+    padding-left: 4px;
+  }
+  .round-progress-board__item div {
+    display: grid;
+    gap: 1px;
+    justify-items: center;
+    white-space: normal;
+  }
+  .round-progress-board__label,
+  .round-progress-board__status {
+    max-width: 100%;
+    text-align: center;
+    white-space: normal;
   }
   .court-message,
   .court-message--judge {
-    width: auto;
-    max-width: 100%;
+    width: 94%;
+    max-width: 94%;
+  }
+  .round-input-bar__header {
+    gap: 8px;
+  }
+  .round-input-bar h3 {
+    font-size: 14px;
+  }
+  .round-input-bar__party-statuses {
+    gap: 4px;
+  }
+  .round-input-party-status {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 0;
+    padding-left: 9px;
+    white-space: normal;
+  }
+  .round-input-bar__composer {
+    grid-template-columns: minmax(0, 1fr) 104px;
+    gap: 8px;
+  }
+  .round-input-bar--fixed-dock .round-input-bar__composer textarea {
+    padding: 11px 12px;
   }
   .hearing-ledger ol {
     grid-template-columns: 1fr;

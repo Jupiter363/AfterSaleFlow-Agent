@@ -127,6 +127,7 @@ const courtMessages = [
 ];
 
 async function mountView(overrides = {}) {
+  const { attachTo, ...propOverrides } = overrides;
   if (!vi.isMockFunction(roomApi.events)) {
     vi.spyOn(roomApi, "events").mockResolvedValue(overrides.initialEvents || []);
   }
@@ -152,11 +153,45 @@ async function mountView(overrides = {}) {
       confirmSettlementAction,
       initialEvents: [],
       initialMessages: courtMessages,
-      ...overrides,
+      ...propOverrides,
     },
+    attachTo,
     global: { plugins: [router] },
   });
   return { wrapper, router, confirmSettlementAction };
+}
+
+function makeTranscriptMessage(index, text, senderRole = "USER") {
+  return {
+    id: `MESSAGE_STRESS_${index}`,
+    sequence_no: index,
+    sender_role: senderRole,
+    message_type: senderRole === "JURY" ? "JURY_REVIEW_REPORT" : "PARTY_TEXT",
+    message_text:
+      senderRole === "JURY"
+        ? JSON.stringify({
+            risk_level: "MEDIUM",
+            confidence_score: 0.78,
+            summary: text,
+          })
+        : text,
+    created_at: `2026-07-03T12:${String(index % 60).padStart(2, "0")}:00+08:00`,
+  };
+}
+
+function makeEvidence(index, submittedByRole) {
+  return {
+    evidence_id: `EVIDENCE_${submittedByRole}_${index}`,
+    evidence_type: index % 3 === 0 ? "IMAGE" : "DOCUMENT",
+    submitted_by_role: submittedByRole,
+    visibility: "PARTIES",
+    content_url: `/api/evidence/${submittedByRole}/${index}`,
+    verification_status: index % 2 === 0 ? "VERIFIED" : "PLAUSIBLE",
+    confidence_score: 0.8,
+    source_type: `${submittedByRole}_UPLOAD`,
+    original_filename: `${submittedByRole === "USER" ? "用户" : "商家"}庭审证据-${index}-${"长文件名".repeat(8)}.pdf`,
+    submission_status: "SUBMITTED",
+  };
 }
 
 describe("HearingCourtView", () => {
@@ -476,6 +511,194 @@ describe("HearingCourtView", () => {
     expect(componentSource).toContain("white-space: pre-wrap");
     expect(componentSource).toContain("overflow-wrap: anywhere");
     expect(componentSource).not.toContain("contain: layout paint");
+  });
+
+  it("uses explicit fixed rows and returns the input dock space to reviewers", async () => {
+    const { wrapper: partyWrapper } = await mountView({ viewerRole: "USER" });
+    const { wrapper: reviewerWrapper } = await mountView({
+      viewerRole: "PLATFORM_REVIEWER",
+    });
+
+    expect(
+      partyWrapper.get(".courtroom-center").attributes("data-has-input-dock"),
+    ).toBe("true");
+    expect(
+      reviewerWrapper.get(".courtroom-center").attributes("data-has-input-dock"),
+    ).toBe("false");
+    expect(reviewerWrapper.get(".courtroom-center").classes()).toContain(
+      "courtroom-center--without-input",
+    );
+    expect(reviewerWrapper.find("[data-round-input-bar]").exists()).toBe(false);
+    expect(componentSource).toContain(
+      "height: clamp(720px, calc(100dvh - 150px), 820px);",
+    );
+    expect(componentSource).toContain(
+      "grid-template-rows: 122px minmax(0, 1fr) 154px;",
+    );
+    expect(componentSource).toMatch(
+      /\.courtroom-center--without-input\s*{\s*grid-template-rows:\s*122px minmax\(0, 1fr\);/,
+    );
+    expect(componentSource).toContain("min-height: 720px;");
+    expect(componentSource).toContain("max-height: 820px;");
+  });
+
+  it("keeps all three hearing stages horizontal at the narrow breakpoint", async () => {
+    const { wrapper } = await mountView();
+
+    expect(wrapper.findAll("[data-round-progress-item]")).toHaveLength(3);
+    expect(componentSource).toContain(
+      "grid-template-columns: repeat(3, minmax(0, 1fr));",
+    );
+    expect(componentSource).not.toMatch(
+      /\.round-progress-board\s*{[^}]*grid-template-columns:\s*1fr/,
+    );
+    expect(componentSource).toMatch(
+      /@media \(max-width: 680px\)[\s\S]*?\.round-progress-board__item div\s*{\s*display:\s*grid;/,
+    );
+  });
+
+  it("switches to abnormal-report mode at exactly 1500 Unicode characters", async () => {
+    const text1499 = "陈".repeat(1499);
+    const text1500 = "陈".repeat(1500);
+    const text2000 = "陈".repeat(2000);
+    const { wrapper } = await mountView({
+      initialMessages: [
+        makeTranscriptMessage(1499, text1499, "USER"),
+        makeTranscriptMessage(1500, text1500, "JUDGE"),
+        makeTranscriptMessage(2000, text2000, "MERCHANT"),
+      ],
+    });
+
+    const normalCard = wrapper.get(
+      '[data-court-message-id="MESSAGE_STRESS_1499"]',
+    );
+    const thresholdCard = wrapper.get(
+      '[data-court-message-id="MESSAGE_STRESS_1500"]',
+    );
+    const oversizedCard = wrapper.get(
+      '[data-court-message-id="MESSAGE_STRESS_2000"]',
+    );
+
+    expect(normalCard.attributes("data-long-transcript")).toBe("false");
+    expect(normalCard.get("p").text()).toBe(text1499);
+    expect(normalCard.find("[data-expand-transcript]").exists()).toBe(false);
+    expect(thresholdCard.attributes("data-long-transcript")).toBe("true");
+    expect(thresholdCard.get("p").text()).not.toBe(text1500);
+    expect(oversizedCard.attributes("data-long-transcript")).toBe("true");
+
+    const expandButton = thresholdCard.get("[data-expand-transcript]");
+    expect(expandButton.attributes("aria-expanded")).toBe("false");
+    await expandButton.trigger("click");
+    expect(expandButton.attributes("aria-expanded")).toBe("true");
+    expect(thresholdCard.get("p").text()).toBe(text1500);
+  });
+
+  it("keeps fifty naturally-sized messages inside the one transcript scroll rail", async () => {
+    const roles = ["USER", "MERCHANT", "JUDGE", "JURY"];
+    const initialMessages = Array.from({ length: 50 }, (_, index) =>
+      makeTranscriptMessage(
+        index + 1,
+        `第 ${index + 1} 条庭审记录：${"自然增长正文".repeat((index % 5) + 1)}`,
+        roles[index % roles.length],
+      ),
+    );
+    const { wrapper } = await mountView({ initialMessages });
+    const transcriptRail = wrapper.get(".court-transcript__messages");
+
+    expect(wrapper.findAll("[data-court-message]")).toHaveLength(50);
+    expect(transcriptRail.attributes("data-transcript-scroll-rail")).toBe(
+      "true",
+    );
+    expect(wrapper.findAll('[data-court-message="user"]').length).toBeGreaterThan(0);
+    expect(wrapper.findAll('[data-court-message="merchant"]').length).toBeGreaterThan(0);
+    expect(wrapper.findAll('[data-court-message="judge"]').length).toBeGreaterThan(0);
+    expect(wrapper.findAll('[data-court-message="jury"]').length).toBeGreaterThan(0);
+    expect(componentSource).toContain("scrollbar-gutter: stable;");
+    expect(componentSource).toContain("overscroll-behavior: contain;");
+  });
+
+  it("keeps one hundred evidence records in the two dedicated evidence scroll rails", async () => {
+    const items = [
+      ...Array.from({ length: 50 }, (_, index) => makeEvidence(index + 1, "USER")),
+      ...Array.from({ length: 50 }, (_, index) => makeEvidence(index + 1, "MERCHANT")),
+    ];
+    const { wrapper } = await mountView({
+      initialEvidenceCatalog: { case_id: "CASE_HEARING_1", items },
+    });
+    const leftRail = wrapper.get('[data-rail-position="left"]');
+    const rightRail = wrapper.get('[data-rail-position="right"]');
+
+    expect(leftRail.findAll(".evidence-file-card")).toHaveLength(50);
+    expect(rightRail.findAll(".evidence-file-card")).toHaveLength(50);
+    expect(leftRail.get(".evidence-pocket").attributes("data-evidence-scroll-rail")).toBe("true");
+    expect(rightRail.get(".evidence-pocket").attributes("data-evidence-scroll-rail")).toBe("true");
+    expect(leftRail.get(".evidence-file-card strong").attributes("title")).toContain(
+      "用户庭审证据-1",
+    );
+    expect(rightRail.get(".evidence-file-card strong").attributes("title")).toContain(
+      "商家庭审证据-1",
+    );
+  });
+
+  it("opens only one accessible evidence drawer and restores launcher focus on Escape", async () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const { wrapper } = await mountView({ attachTo: host });
+
+    try {
+      const leftLauncher = wrapper.get('[data-open-evidence-drawer="left"]');
+      const rightLauncher = wrapper.get('[data-open-evidence-drawer="right"]');
+      expect(leftLauncher.attributes("aria-controls")).toBe("hearing-evidence-drawer-left");
+      expect(rightLauncher.attributes("aria-controls")).toBe("hearing-evidence-drawer-right");
+
+      await leftLauncher.trigger("click");
+      await flushPromises();
+      const leftDrawer = wrapper.get('[data-evidence-drawer-open="left"]');
+      expect(leftDrawer.attributes("role")).toBe("dialog");
+      expect(leftDrawer.attributes("aria-modal")).toBe("true");
+      expect(document.activeElement).toBe(
+        leftDrawer.get('[data-close-evidence-drawer="left"]').element,
+      );
+
+      await rightLauncher.trigger("click");
+      await flushPromises();
+      expect(wrapper.find('[data-evidence-drawer-open="left"]').exists()).toBe(false);
+      expect(wrapper.get('[data-evidence-drawer-open="right"]').exists()).toBe(true);
+
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+      await flushPromises();
+      expect(wrapper.find("[data-evidence-drawer-open]").exists()).toBe(false);
+      expect(document.activeElement).toBe(rightLauncher.element);
+    } finally {
+      wrapper.unmount();
+      host.remove();
+    }
+  });
+
+  it("declares the 1220px evidence-drawer breakpoint and fixed rail rows", () => {
+    expect(componentSource).toContain(
+      "container: hearing-court / inline-size;",
+    );
+    expect(componentSource).toContain(
+      "@container hearing-court (max-width: 1219px)",
+    );
+    expect(componentSource).toContain(
+      "grid-template-rows: 88px minmax(0, 1fr) 48px;",
+    );
+    expect(componentSource).not.toContain("@media (max-width: 1180px)");
+  });
+
+  it("keeps user, merchant, and reviewer role shells semantically stable", async () => {
+    for (const viewerRole of ["USER", "MERCHANT", "PLATFORM_REVIEWER"]) {
+      const { wrapper } = await mountView({ viewerRole });
+      expect(
+        wrapper.get("[data-hearing-courtroom-page]").attributes("data-viewer-role"),
+      ).toBe(viewerRole);
+      expect(wrapper.find("[data-round-input-bar]").exists()).toBe(
+        viewerRole !== "PLATFORM_REVIEWER",
+      );
+      wrapper.unmount();
+    }
   });
 
   it("puts the current party evidence rail on the left and keeps the counterparty read-only on the right", async () => {
