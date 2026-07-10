@@ -58,6 +58,9 @@ const selectedCase = computed(
     cases.value[0] ||
     null,
 );
+const canInitiateDispute = computed(() =>
+  ["USER", "MERCHANT"].includes(actor.role),
+);
 
 const journey = [
   { room: "INTAKE", label: "争议接待室", icon: "☁" },
@@ -137,6 +140,7 @@ function pendingActionLabel(action) {
 }
 
 function openIntake() {
+  if (!canInitiateDispute.value) return;
   intakeForm.value.userId = actor.role === "USER" ? actor.id : "";
   intakeForm.value.merchantId =
     actor.role === "MERCHANT" ? actor.id : "";
@@ -219,6 +223,7 @@ async function simulateExternalImport() {
 }
 
 async function createDispute() {
+  if (!canInitiateDispute.value) return;
   creating.value = true;
   createError.value = "";
   const requestedAmount = Number.parseFloat(intakeForm.value.requestedAmount);
@@ -285,6 +290,7 @@ onMounted(async () => {
           {{ importingExternal ? "外部系统导入中" : "导入外部争议" }}
         </button>
         <button
+          v-if="canInitiateDispute"
           class="overview-page__start"
           type="button"
           data-start-dispute

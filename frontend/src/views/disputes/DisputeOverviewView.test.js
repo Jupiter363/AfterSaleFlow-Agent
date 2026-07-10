@@ -233,6 +233,58 @@ describe("DisputeOverviewView", () => {
     );
   });
 
+  it("keeps dispute initiation available to merchants", async () => {
+    actor.id = "merchant-1";
+    actor.role = "MERCHANT";
+    const { wrapper } = await mountOverview();
+
+    expect(wrapper.find("[data-start-dispute]").exists()).toBe(true);
+
+    await wrapper.get("[data-start-dispute]").trigger("click");
+
+    expect(wrapper.find(".intake-launcher").exists()).toBe(true);
+    expect(wrapper.get("[data-intake-merchant]").element.value).toBe("merchant-1");
+  });
+
+  it("does not expose dispute initiation to platform reviewers", async () => {
+    actor.id = "reviewer-local";
+    actor.role = "PLATFORM_REVIEWER";
+    const { wrapper } = await mountOverview();
+
+    expect(wrapper.find("[data-start-dispute]").exists()).toBe(false);
+    expect(wrapper.find(".intake-launcher").exists()).toBe(false);
+  });
+
+  it("does not open intake when a stale party action is triggered after switching to reviewer", async () => {
+    actor.id = "user-local";
+    actor.role = "USER";
+    const { wrapper } = await mountOverview();
+    const staleStartAction = wrapper.get("[data-start-dispute]");
+
+    actor.id = "reviewer-local";
+    actor.role = "PLATFORM_REVIEWER";
+    await flushPromises();
+    await staleStartAction.trigger("click");
+
+    expect(wrapper.find(".intake-launcher").exists()).toBe(false);
+  });
+
+  it("does not create a dispute when the actor becomes a reviewer after opening intake", async () => {
+    actor.id = "user-local";
+    actor.role = "USER";
+    const createAction = vi.fn().mockResolvedValue({ id: "CASE_FORBIDDEN" });
+    const { wrapper, router } = await mountOverview(createAction);
+
+    await wrapper.get("[data-start-dispute]").trigger("click");
+    actor.id = "reviewer-local";
+    actor.role = "PLATFORM_REVIEWER";
+    await wrapper.get(".intake-launcher__card").trigger("submit");
+    await flushPromises();
+
+    expect(createAction).not.toHaveBeenCalled();
+    expect(router.currentRoute.value.path).toBe("/disputes");
+  });
+
   it("simulates external imported disputes from the current demo identity", async () => {
     actor.id = "merchant-local";
     actor.role = "MERCHANT";
