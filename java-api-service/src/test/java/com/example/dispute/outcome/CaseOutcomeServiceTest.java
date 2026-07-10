@@ -230,6 +230,43 @@ class CaseOutcomeServiceTest {
     }
 
     @Test
+    void rejectsAnotherPlatformReviewerBeforeLookingUpTheDraftToConfirm() {
+        AuthenticatedActor anotherReviewer =
+                new AuthenticatedActor(
+                        "reviewer-1",
+                        ActorRole.PLATFORM_REVIEWER);
+
+        assertThatThrownBy(
+                        () ->
+                                service.confirmDraft(
+                                        "CASE_outcome",
+                                        "attempted by another reviewer",
+                                        "outcome-confirm-forbidden",
+                                        anotherReviewer))
+                .isInstanceOf(ForbiddenException.class);
+        verifyNoInteractions(reviewTaskRepository, reviewApplicationService);
+    }
+
+    @Test
+    void rejectsAnotherPlatformReviewerBeforeLookingUpTheDraftToModify() {
+        AuthenticatedActor anotherReviewer =
+                new AuthenticatedActor(
+                        "reviewer-1",
+                        ActorRole.PLATFORM_REVIEWER);
+
+        assertThatThrownBy(
+                        () ->
+                                service.modifyDraft(
+                                        "CASE_outcome",
+                                        "attempted by another reviewer",
+                                        new ObjectMapper().createObjectNode(),
+                                        "outcome-modify-forbidden",
+                                        anotherReviewer))
+                .isInstanceOf(ForbiddenException.class);
+        verifyNoInteractions(reviewTaskRepository, reviewApplicationService);
+    }
+
+    @Test
     void reviewerConfirmsLatestDraftByCaseReviewTask() {
         ReviewTaskEntity task =
                 ReviewTaskEntity.pending(

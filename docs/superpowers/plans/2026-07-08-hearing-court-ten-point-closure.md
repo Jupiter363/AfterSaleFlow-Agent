@@ -24,6 +24,15 @@
 8. **A2A 可视化分层。** 陪审团静默观察报告写入数据库但不在法庭界面展示；正式复核报告以中文卡片进入聊天/庭审记录，同时该正式报告也要注入法官上下文，用于下一轮问题或最终裁决草案生成。
 9. **继续增强庭审卷轴。** 卷轴需要记录轮次开启/封存时间、双方提交状态、超时/自动封存原因、补证引用、证据矩阵版本变化摘要、法官问题/小结、陪审团正式复核报告、裁决草案引用，形成后续审核和申诉可追溯档案。
 
+## 2026-07-10 单实例导入与固定演示账号边界
+
+1. **当前部署边界是单个 Java 实例。** 所有直接导入和模拟导入共用一个进程内公平全局门闩；门闩等待发生在单项数据库事务之外，进入后只执行一条 `case + room + participants + initial intake turn` 原子导入。
+2. **当前不使用 PostgreSQL advisory lock、分布式锁、3 秒冷却或 429 限流。** 这个方案只保证同一 Java 进程内全局串行；未来扩展到多个 Java 实例前，必须升级为数据库锁或分布式协调，不能沿用进程内门闩宣称跨实例安全。
+3. **每次请求只能导入一条。** `SimulateImportRequest`、Java application command 和 Python simulator contract 的 `count` 固定为 `1`；Python/其他 simulation client 若返回非 1 条，Java 必须按输出 schema 异常明确拒绝，不能截断或静默批量导入。
+4. **导入只接受固定演示双方账号。** `USER=user-local`、`MERCHANT=merchant-local`。直接导入中的 `user_id` / `merchant_id` 不匹配时返回 400，不做静默改写；public/internal simulate 的 current/counterparty actor 也必须与 initiator role 按这两个固定账号严格对应。
+5. **当前审核侧只有唯一系统审核员。** 只有 `actor_id=reviewer-local` 且 `role=PLATFORM_REVIEWER` 可以确认、修改或提交审核决定；其他账号即使声明 `PLATFORM_REVIEWER` 角色，也必须返回 403。决定权限要在查询 review task、draft 或其他案件审核资源之前校验，避免通过 404/响应差异泄漏任务是否存在。审核列表与审核包的查看权限继续沿用既有角色规则，本轮不扩展多审核员分配模型。
+6. **固定账号建立在可信本地演示认证边界上。** 当前 `X-User-Id` / `X-Role` 头仅用于本地调试和固定三账号角色切换，不构成面向公网的强身份认证。Docker 服务对外发布前，必须由可信认证网关或签名会话提供并覆盖身份，不能允许外部客户端自行声明这两个头；本轮不把完整登录、多用户、审核员分配引入庭审主线。
+
 ---
 
 ## 十点覆盖矩阵

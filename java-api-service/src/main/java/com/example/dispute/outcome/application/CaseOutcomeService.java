@@ -4,6 +4,7 @@ import com.example.dispute.common.api.ErrorCode;
 import com.example.dispute.common.exception.ForbiddenException;
 import com.example.dispute.common.exception.NotFoundException;
 import com.example.dispute.config.AuthenticatedActor;
+import com.example.dispute.config.PlatformReviewerAuthorization;
 import com.example.dispute.domain.model.ApprovalDecisionType;
 import com.example.dispute.executor.application.ToolExecutorService;
 import com.example.dispute.infrastructure.persistence.entity.AdjudicationDraftEntity;
@@ -102,6 +103,7 @@ public class CaseOutcomeService {
             String reason,
             String idempotencyKey,
             AuthenticatedActor actor) {
+        PlatformReviewerAuthorization.requireDecisionAccess(actor);
         String taskId = latestReviewTaskId(caseId);
         return reviewApplicationService.decide(
                 taskId,
@@ -119,6 +121,7 @@ public class CaseOutcomeService {
             JsonNode approvedPlan,
             String idempotencyKey,
             AuthenticatedActor actor) {
+        PlatformReviewerAuthorization.requireDecisionAccess(actor);
         String taskId = latestReviewTaskId(caseId);
         return reviewApplicationService.decide(
                 taskId,

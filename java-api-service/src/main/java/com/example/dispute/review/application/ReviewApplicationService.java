@@ -8,6 +8,7 @@ import com.example.dispute.common.exception.IdempotencyConflictException;
 import com.example.dispute.common.exception.NotFoundException;
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
+import com.example.dispute.config.PlatformReviewerAuthorization;
 import com.example.dispute.domain.model.ApprovalDecisionType;
 import com.example.dispute.domain.model.ReviewTaskStatus;
 import com.example.dispute.infrastructure.persistence.entity.AdjudicationDraftEntity;
@@ -234,7 +235,7 @@ public class ReviewApplicationService {
     }
 
     public ReviewDecisionView decide(String taskId,ReviewDecisionCommand command,AuthenticatedActor actor){
-        assertCanDecide(actor);
+        PlatformReviewerAuthorization.requireDecisionAccess(actor);
         ReviewDecisionView result=transactions.execute(ignored->persistDecision(taskId,command,actor));
         postReviewOrchestration.orchestrate(
                 result.approvalRecordId(), actor, command.idempotencyKey());
@@ -341,7 +342,6 @@ public class ReviewApplicationService {
     private String write(Object value){try{return objectMapper.writeValueAsString(value);}catch(JsonProcessingException e){throw new IllegalStateException("cannot serialize review JSON",e);}}
     private static boolean isOpen(ReviewTaskStatus status){return status==ReviewTaskStatus.PENDING||status==ReviewTaskStatus.ASSIGNED||status==ReviewTaskStatus.IN_REVIEW;}
     private static void assertCanView(AuthenticatedActor actor){if(actor.role()!=ActorRole.PLATFORM_REVIEWER&&actor.role()!=ActorRole.ADMIN&&actor.role()!=ActorRole.CUSTOMER_SERVICE)throw new ForbiddenException("review role is required");}
-    private static void assertCanDecide(AuthenticatedActor actor){if(actor.role()!=ActorRole.PLATFORM_REVIEWER)throw new ForbiddenException("only platform reviewers can decide");}
     private static NotFoundException notFound(String type,String id){return new NotFoundException(ErrorCode.CASE_NOT_FOUND,type+" not found",Map.of("id",id));}
     private static String id(){return UUID.randomUUID().toString().replace("-","");}
     private static String sha256(String value){try{return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8)));}catch(Exception e){throw new IllegalStateException(e);}}
