@@ -45,6 +45,7 @@ public class HearingRoundService {
     private final HearingWorkflowCoordinator workflowCoordinator;
     private final HearingCourtOrchestrator courtOrchestrator;
     private final HearingFinalDraftService finalDraftService;
+    private final HearingOutcomeOrchestrationService outcomeOrchestrationService;
     private final EvidenceDossierRevisionService evidenceDossierRevisionService;
     private final DisputeProperties disputeProperties;
     private final Clock clock;
@@ -61,6 +62,7 @@ public class HearingRoundService {
             HearingWorkflowCoordinator workflowCoordinator,
             HearingCourtOrchestrator courtOrchestrator,
             HearingFinalDraftService finalDraftService,
+            HearingOutcomeOrchestrationService outcomeOrchestrationService,
             EvidenceDossierRevisionService evidenceDossierRevisionService,
             DisputeProperties disputeProperties,
             Clock clock) {
@@ -75,6 +77,7 @@ public class HearingRoundService {
         this.workflowCoordinator = workflowCoordinator;
         this.courtOrchestrator = courtOrchestrator;
         this.finalDraftService = finalDraftService;
+        this.outcomeOrchestrationService = outcomeOrchestrationService;
         this.evidenceDossierRevisionService = evidenceDossierRevisionService;
         this.disputeProperties = disputeProperties;
         this.clock = clock;
@@ -511,7 +514,8 @@ public class HearingRoundService {
     @Transactional
     public HearingStatusView completeHearing(String caseId, AuthenticatedActor actor) {
         HearingStatusView current = status(caseId, actor);
-        if ("JUDGE_DRAFTING".equals(current.hearingPhase())
+        if (("JUDGE_DRAFTING".equals(current.hearingPhase())
+                        || "DRAFT_READY".equals(current.hearingPhase()))
                 && current.finalRoundSealed()
                 && current.currentRoundNo() != null) {
             finalDraftService.ensureDraftForFinalSealedRound(
@@ -519,6 +523,7 @@ public class HearingRoundService {
                     current.currentRoundNo(),
                     disputeProperties.maxHearingRounds(),
                     actor.actorId());
+            outcomeOrchestrationService.orchestrate(caseId, actor.actorId());
             HearingStatusView updated = status(caseId, actor);
             recordHearingPhaseChanged(caseId, updated, actor.actorId());
             return updated;
