@@ -15,6 +15,7 @@ import com.example.dispute.hearing.application.ActiveCourtroomContextAssembler;
 import com.example.dispute.hearing.application.AgentA2AMessageService;
 import com.example.dispute.hearing.application.HearingCourtOrchestrator;
 import com.example.dispute.hearing.domain.HearingRoundSubmissionSource;
+import com.example.dispute.hearing.domain.HearingRoundStatus;
 import com.example.dispute.hearing.domain.HearingStopReason;
 import com.example.dispute.hearing.infrastructure.persistence.entity.AgentA2AMessageEntity;
 import com.example.dispute.hearing.infrastructure.persistence.entity.HearingRoundEntity;
@@ -63,6 +64,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -620,6 +622,40 @@ class HearingPersistenceIntegrationTest {
                                     .contains("最终轮次")
                                     .contains("补发");
                         });
+    }
+
+    @Test
+    void finalRoundRecoveryQuerySupportsInitialNullCursorOnPostgresql() {
+        FulfillmentCaseEntity disputeCase =
+                routedCase("CASE_finalcursor", "idem-final-cursor");
+        caseRepository.saveAndFlush(disputeCase);
+        HearingRoundEntity round =
+                HearingRoundEntity.open(
+                        "HEARING_ROUND_finalcursor_3",
+                        disputeCase.getId(),
+                        null,
+                        3,
+                        1,
+                        Instant.parse("2026-07-07T01:05:00Z"),
+                        Instant.parse("2026-07-07T01:00:00Z"),
+                        "hearing-controller");
+        round.complete(
+                "{\"trigger\":\"BOTH_PARTIES_SUBMITTED\"}",
+                HearingStopReason.MAX_ROUNDS,
+                Instant.parse("2026-07-07T01:04:00Z"),
+                "hearing-controller");
+        hearingRoundRepository.saveAndFlush(round);
+
+        List<HearingRoundEntity> candidates =
+                hearingRoundRepository.findFinalRoundsWithoutDraft(
+                        3,
+                        4,
+                        List.of(HearingRoundStatus.COMPLETED, HearingRoundStatus.FORCED_CLOSED),
+                        PageRequest.of(0, 10));
+
+        assertThat(candidates)
+                .extracting(HearingRoundEntity::getCaseId)
+                .contains("CASE_finalcursor");
     }
 
     @Test

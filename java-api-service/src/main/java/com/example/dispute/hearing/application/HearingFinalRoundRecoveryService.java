@@ -57,13 +57,19 @@ public class HearingFinalRoundRecoveryService {
         while (scanned < limit) {
             int pageSize = limit - scanned;
             var candidates =
-                    roundRepository.findFinalRoundsWithoutDraftAfter(
-                            finalRoundNo,
-                            finalRoundNo + 1,
-                            SEALED_STATUSES,
-                            current.closedAt(),
-                            current.roundId(),
-                            PageRequest.of(0, pageSize));
+                    current.isStart()
+                            ? roundRepository.findFinalRoundsWithoutDraft(
+                                    finalRoundNo,
+                                    finalRoundNo + 1,
+                                    SEALED_STATUSES,
+                                    PageRequest.of(0, pageSize))
+                            : roundRepository.findFinalRoundsWithoutDraftAfter(
+                                    finalRoundNo,
+                                    finalRoundNo + 1,
+                                    SEALED_STATUSES,
+                                    current.closedAt(),
+                                    current.roundId(),
+                                    PageRequest.of(0, pageSize));
             if (candidates.isEmpty()) {
                 if (!current.isStart() && !wrapped) {
                     current = RecoveryCursor.start();

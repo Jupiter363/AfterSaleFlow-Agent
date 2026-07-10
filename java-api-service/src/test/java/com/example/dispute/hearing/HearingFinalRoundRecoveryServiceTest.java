@@ -3,7 +3,6 @@ package com.example.dispute.hearing;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -55,12 +54,10 @@ class HearingFinalRoundRecoveryServiceTest {
     @Test
     void repairsFormalJuryReportBeforeResignalingFinalRound() {
         HearingRoundEntity round = finalRound("CASE_RECOVER");
-        when(roundRepository.findFinalRoundsWithoutDraftAfter(
+        when(roundRepository.findFinalRoundsWithoutDraft(
                         eq(3),
                         eq(4),
                         eq(List.of(HearingRoundStatus.COMPLETED, HearingRoundStatus.FORCED_CLOSED)),
-                        isNull(),
-                        eq(""),
                         any(Pageable.class)))
                 .thenReturn(List.of(round));
         when(draftRepository.findByCaseIdAndDraftVersion("CASE_RECOVER", 4))
@@ -84,12 +81,10 @@ class HearingFinalRoundRecoveryServiceTest {
     @Test
     void doesNotSignalWhenFormalJuryReportStillCannotBePersisted() {
         HearingRoundEntity round = finalRound("CASE_REPORT_MISSING");
-        when(roundRepository.findFinalRoundsWithoutDraftAfter(
+        when(roundRepository.findFinalRoundsWithoutDraft(
                         eq(3),
                         eq(4),
                         eq(List.of(HearingRoundStatus.COMPLETED, HearingRoundStatus.FORCED_CLOSED)),
-                        isNull(),
-                        eq(""),
                         any(Pageable.class)))
                 .thenReturn(List.of(round));
         when(draftRepository.findByCaseIdAndDraftVersion("CASE_REPORT_MISSING", 4))
@@ -106,12 +101,10 @@ class HearingFinalRoundRecoveryServiceTest {
     @Test
     void doesNotSignalWhenOnlyTheJuryRoomCardExistsWithoutFormalA2A() {
         HearingRoundEntity round = finalRound("CASE_A2A_MISSING");
-        when(roundRepository.findFinalRoundsWithoutDraftAfter(
+        when(roundRepository.findFinalRoundsWithoutDraft(
                         eq(3),
                         eq(4),
                         eq(List.of(HearingRoundStatus.COMPLETED, HearingRoundStatus.FORCED_CLOSED)),
-                        isNull(),
-                        eq(""),
                         any(Pageable.class)))
                 .thenReturn(List.of(round));
         when(draftRepository.findByCaseIdAndDraftVersion("CASE_A2A_MISSING", 4))
@@ -128,12 +121,10 @@ class HearingFinalRoundRecoveryServiceTest {
     @Test
     void skipsFinalRoundsThatAlreadyHaveTheExactFinalDraftVersion() {
         HearingRoundEntity round = finalRound("CASE_ALREADY_DRAFTED");
-        when(roundRepository.findFinalRoundsWithoutDraftAfter(
+        when(roundRepository.findFinalRoundsWithoutDraft(
                         eq(3),
                         eq(4),
                         eq(List.of(HearingRoundStatus.COMPLETED, HearingRoundStatus.FORCED_CLOSED)),
-                        isNull(),
-                        eq(""),
                         any(Pageable.class)))
                 .thenReturn(List.of(round));
         when(draftRepository.findByCaseIdAndDraftVersion("CASE_ALREADY_DRAFTED", 4))
@@ -159,12 +150,10 @@ class HearingFinalRoundRecoveryServiceTest {
                         "ROUND_RECOVERABLE",
                         "CASE_RECOVERABLE",
                         Instant.parse("2026-07-10T01:01:00Z"));
-        when(roundRepository.findFinalRoundsWithoutDraftAfter(
+        when(roundRepository.findFinalRoundsWithoutDraft(
                         eq(3),
                         eq(4),
                         eq(List.of(HearingRoundStatus.COMPLETED, HearingRoundStatus.FORCED_CLOSED)),
-                        isNull(),
-                        eq(""),
                         any(Pageable.class)))
                 .thenReturn(List.of(permanentlyFailing));
         when(roundRepository.findFinalRoundsWithoutDraftAfter(

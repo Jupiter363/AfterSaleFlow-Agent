@@ -32,9 +32,28 @@ public interface HearingRoundRepository extends JpaRepository<HearingRoundEntity
              where hearingRound.roundNo = :roundNo
                and hearingRound.roundStatus in :statuses
                and hearingRound.closedAt is not null
+               and not exists (
+                   select draft.id
+                     from AdjudicationDraftEntity draft
+                    where draft.caseId = hearingRound.caseId
+                      and draft.draftVersion = :draftVersion
+               )
+             order by hearingRound.closedAt asc, hearingRound.id asc
+            """)
+    List<HearingRoundEntity> findFinalRoundsWithoutDraft(
+            @Param("roundNo") int roundNo,
+            @Param("draftVersion") int draftVersion,
+            @Param("statuses") List<HearingRoundStatus> statuses,
+            Pageable pageable);
+
+    @Query("""
+            select hearingRound
+              from HearingRoundEntity hearingRound
+             where hearingRound.roundNo = :roundNo
+               and hearingRound.roundStatus in :statuses
+               and hearingRound.closedAt is not null
                and (
-                   :afterClosedAt is null
-                   or hearingRound.closedAt > :afterClosedAt
+                   hearingRound.closedAt > :afterClosedAt
                    or (
                        hearingRound.closedAt = :afterClosedAt
                        and hearingRound.id > :afterId
