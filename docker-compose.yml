@@ -232,7 +232,7 @@ services:
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY}
       LANGFUSE_ENABLED: "true"
       PROMPT_VERSION: hearing-v1
-      JAVA_API_SERVICE_URL: http://java-api-service:8080
+      JAVA_API_SERVICE_URL: ${JAVA_API_SERVICE_URL:-http://java-api-service:8080}
       PYTHON_AGENT_SERVICE_SECRET: ${PYTHON_AGENT_SERVICE_SECRET}
       ENABLE_SENSITIVE_LOG_MASKING: ${ENABLE_SENSITIVE_LOG_MASKING:-true}
     ports:
@@ -261,7 +261,7 @@ services:
       MINIO_BUCKET_EVIDENCE_ORIGINAL: ${MINIO_BUCKET_EVIDENCE_ORIGINAL:-evidence-original}
       MINIO_BUCKET_EVIDENCE_DESENSITIZED: ${MINIO_BUCKET_EVIDENCE_DESENSITIZED:-evidence-desensitized}
       ELASTICSEARCH_URL: http://elasticsearch:9200
-      JAVA_API_SERVICE_URL: http://java-api-service:8080
+      JAVA_API_SERVICE_URL: ${JAVA_API_SERVICE_URL:-http://java-api-service:8080}
       OCR_SERVICE_SECRET: ${OCR_SERVICE_SECRET}
       OCR_TEMP_DIR: /var/lib/ocr-parser
       LOG_LEVEL: ${LOG_LEVEL:-INFO}

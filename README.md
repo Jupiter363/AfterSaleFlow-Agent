@@ -21,7 +21,7 @@ Tool Executor 只执行经过审批、参数冻结且具备幂等保护的确定
 | 服务 | 职责 | 本地端口 |
 |---|---|---:|
 | `frontend` | Case、补证、证据、审核、执行与审计页面 | 5173 |
-| `java-api-service` | 业务事实源、REST API、Temporal Worker、审批和执行 | 18080 |
+| `java-api-service` | 业务事实源、REST API、Temporal Worker、审批和执行 | 8080（本地 dev）/ 18080（Docker） |
 | `python-agent-service` | Intake、C1-C6、Evaluation Agent | 18000 |
 | `ocr-parser-service` | 图片、PDF、Word、Excel 解析 | 18010 |
 | `postgresql` | 业务、审计、Temporal、Langfuse、LiteLLM 数据 | 15432 |
@@ -31,7 +31,7 @@ Tool Executor 只执行经过审批、参数冻结且具备幂等保护的确定
 | `temporal-server` | 长流程、Signal、超时和重试 | 7233 |
 | `langfuse` | Agent Trace | 13000 |
 | `litellm-proxy` | 唯一 LLM 网关 | 14000 |
-| `nginx` | 统一入口 | 8080 |
+| `nginx` | Docker 全量环境统一入口 | 8080 |
 
 所有端口默认仅绑定 `127.0.0.1`。
 
@@ -49,6 +49,31 @@ cp .env.example .env
 ```bash
 ./scripts/dev-down.sh
 ```
+
+Windows 下进行 Java/前端快速开发时，保留基础依赖在 Docker 中，让 Spring Boot
+直接运行在 `8080`，避免每次修改 Java 后端都重新构建镜像：
+
+```powershell
+.\scripts\dev-local.ps1
+```
+
+该命令会停止 Docker 中的 `nginx` 和 `java-api-service`，本地启动 Java API 与
+Vite，并让 Python Agent/OCR 容器回调宿主机 `8080`。停止本地进程：
+
+```powershell
+.\scripts\dev-local.ps1 -Stop
+```
+
+本地调试只改变当前开发运行方式，不改变 Docker 的默认服务拓扑。最终部署或需要
+恢复全量 Docker 环境时，先停止本地进程，再构建并启动全部容器：
+
+```powershell
+.\scripts\dev-local.ps1 -Stop
+docker compose up -d --build
+```
+
+全量 Docker 环境中，nginx 使用宿主机 `8080`，Python Agent/OCR 默认通过
+`http://java-api-service:8080` 访问容器内 Java API。
 
 详细说明见：
 
