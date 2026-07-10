@@ -29,6 +29,12 @@ describe("Playwright worktree isolation", () => {
     expect(config.webServer.command).toContain("--port 43173 --strictPort");
   });
 
+  test("starts this worktree's Vite server instead of reusing another one", async () => {
+    const { default: config } = await import("./playwright.config.js");
+
+    expect(config.webServer.reuseExistingServer).toBe(false);
+  });
+
   test("layout specs inherit the configured base URL instead of pinning a port", async () => {
     const source = await readFile(
       path.join(
