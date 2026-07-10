@@ -119,6 +119,68 @@ test("keeps 740px shells and switches by the 1060px workspace contract", async (
 });
 
 for (const viewport of [
+  { width: 1121, height: 900 },
+  { width: 1120, height: 900 },
+  { width: 1061, height: 900 },
+  { width: 1060, height: 900 },
+  { width: 981, height: 900 },
+  { width: 980, height: 900 },
+  { width: 621, height: 843 },
+  { width: 620, height: 843 },
+  { width: 1024, height: 600 },
+]) {
+  test(`keeps the intake contract at ${viewport.width}x${viewport.height}`, async ({
+    page,
+  }) => {
+    await page.setViewportSize(viewport);
+    await installIntakeRoomFixture(page, {
+      dossier: { summaryLength: 150, statementLength: 160, gapCount: 4 },
+    });
+    await page.goto(`/disputes/${CASE_ID}/intake`);
+
+    const workspace = page.locator(".room-shell__workspace");
+    const room = page.locator(".intake-room");
+    const conversation = page.locator(".intake-room__conversation");
+    const dossier = page.locator(".intake-dossier");
+    const origin = page.locator("[data-origin-statement-card]");
+    const actions = page.locator(".intake-dossier__actions--two-column");
+
+    await expect(conversation).toHaveCSS("height", "740px");
+    await expect(dossier).toHaveCSS("height", "740px");
+    await assertInside(origin, dossier);
+    await assertInside(actions, dossier);
+
+    const [workspaceWidth, columns] = await Promise.all([
+      workspace.evaluate((element) => element.clientWidth),
+      room.evaluate(
+        (element) => getComputedStyle(element).gridTemplateColumns,
+      ),
+    ]);
+    expect(columns.split(" ")).toHaveLength(workspaceWidth >= 1060 ? 2 : 1);
+
+    if (viewport.height === 600) {
+      expect(
+        await page.evaluate(
+          () =>
+            document.documentElement.scrollHeight >
+            document.documentElement.clientHeight,
+        ),
+      ).toBe(true);
+    }
+
+    const hasHorizontalOverflow = await pageHasHorizontalOverflow(page);
+    expect(
+      hasHorizontalOverflow,
+      JSON.stringify(
+        hasHorizontalOverflow ? await horizontalOverflowReport(page) : {},
+        null,
+        2,
+      ),
+    ).toBe(false);
+  });
+}
+
+for (const viewport of [
   { width: 581, height: 843 },
   { width: 580, height: 843 },
   { width: 390, height: 844 },
