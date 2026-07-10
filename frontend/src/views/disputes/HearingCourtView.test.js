@@ -675,6 +675,110 @@ describe("HearingCourtView", () => {
     }
   });
 
+  it("clears an open evidence drawer without restoring focus when the courtroom grows past the drawer breakpoint", async () => {
+    let resizeCallback;
+    const observe = vi.fn();
+    const disconnect = vi.fn();
+    class ResizeObserverMock {
+      constructor(callback) {
+        resizeCallback = callback;
+      }
+
+      observe = observe;
+      disconnect = disconnect;
+    }
+    vi.stubGlobal("ResizeObserver", ResizeObserverMock);
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const { wrapper } = await mountView({ attachTo: host });
+
+    try {
+      await flushPromises();
+      const courtroomContainer = wrapper.get(".room-shell__workspace");
+      const leftLauncher = wrapper.get('[data-open-evidence-drawer="left"]');
+      const launcherFocus = vi.spyOn(leftLauncher.element, "focus");
+      expect(observe).toHaveBeenCalledWith(courtroomContainer.element);
+
+      await leftLauncher.trigger("click");
+      await flushPromises();
+      const leftDrawer = wrapper.get('[data-rail-position="left"]');
+      expect(leftDrawer.attributes("role")).toBe("dialog");
+      expect(leftDrawer.attributes("aria-modal")).toBe("true");
+
+      resizeCallback([
+        {
+          target: courtroomContainer.element,
+          contentRect: { width: 1219 },
+        },
+      ]);
+      await flushPromises();
+      expect(leftDrawer.attributes("role")).toBe("dialog");
+
+      resizeCallback([
+        {
+          target: courtroomContainer.element,
+          contentRect: { width: 1220 },
+        },
+      ]);
+      await flushPromises();
+
+      expect(wrapper.find("[data-evidence-drawer-open]").exists()).toBe(false);
+      expect(leftDrawer.attributes("role")).toBeUndefined();
+      expect(leftDrawer.attributes("aria-modal")).toBeUndefined();
+      expect(launcherFocus).not.toHaveBeenCalled();
+
+      wrapper.unmount();
+      expect(disconnect).toHaveBeenCalledTimes(1);
+    } finally {
+      if (wrapper.exists()) wrapper.unmount();
+      host.remove();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("uses a cleaned-up window resize fallback when ResizeObserver is unavailable", async () => {
+    vi.stubGlobal("ResizeObserver", undefined);
+    const addEventListener = vi.spyOn(window, "addEventListener");
+    const removeEventListener = vi.spyOn(window, "removeEventListener");
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const { wrapper } = await mountView({ attachTo: host });
+
+    try {
+      await flushPromises();
+      const courtroomContainer = wrapper.get(".room-shell__workspace");
+      let containerWidth = 0;
+      vi.spyOn(courtroomContainer.element, "getBoundingClientRect").mockImplementation(
+        () => ({ width: containerWidth }),
+      );
+      const resizeRegistration = addEventListener.mock.calls.find(
+        ([eventName]) => eventName === "resize",
+      );
+      expect(resizeRegistration).toBeDefined();
+
+      await wrapper.get('[data-open-evidence-drawer="right"]').trigger("click");
+      await flushPromises();
+      expect(wrapper.get('[data-rail-position="right"]').attributes("role")).toBe(
+        "dialog",
+      );
+
+      containerWidth = 1220;
+      window.dispatchEvent(new Event("resize"));
+      await flushPromises();
+      expect(wrapper.find("[data-evidence-drawer-open]").exists()).toBe(false);
+
+      wrapper.unmount();
+      expect(removeEventListener).toHaveBeenCalledWith(
+        "resize",
+        resizeRegistration[1],
+      );
+    } finally {
+      if (wrapper.exists()) wrapper.unmount();
+      host.remove();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("declares the 1220px evidence-drawer breakpoint and fixed rail rows", () => {
     expect(componentSource).toContain(
       "container: hearing-court / inline-size;",

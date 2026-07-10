@@ -61,6 +61,7 @@ const settlementOpen = ref(false);
 const ledgerOpen = ref(false);
 const evidenceDrawerSide = ref(null);
 const expandedTranscriptIds = ref([]);
+const hearingCourtroomPage = ref(null);
 const leftEvidenceDrawer = ref(null);
 const rightEvidenceDrawer = ref(null);
 const leftEvidenceDrawerTrigger = ref(null);
@@ -74,8 +75,11 @@ const supplementing = ref(false);
 const submittingRound = ref(false);
 const eventState = reactive(createRoomState());
 const eventAbortController = new AbortController();
+const EVIDENCE_DRAWER_BREAKPOINT = 1220;
 const LONG_TRANSCRIPT_THRESHOLD = 1500;
 const LONG_TRANSCRIPT_PREVIEW_LENGTH = 900;
+let evidenceDrawerResizeObserver = null;
+let evidenceDrawerWindowResizeHandler = null;
 const caseId = computed(() => route.params.caseId);
 const role = computed(() => props.viewerRole || actor.role);
 const demoActorIds = {
@@ -618,6 +622,56 @@ async function closeEvidenceDrawer({ restoreFocus = true } = {}) {
   evidenceDrawerSide.value = null;
   await nextTick();
   if (restoreFocus) evidenceDrawerTrigger(closingSide)?.focus();
+}
+
+function evidenceDrawerContainer() {
+  return (
+    hearingCourtroomPage.value?.closest?.(".room-shell__workspace") ||
+    hearingCourtroomPage.value
+  );
+}
+
+function evidenceDrawerContainerWidth(entry) {
+  const contentBoxSize = entry?.contentBoxSize;
+  if (Array.isArray(contentBoxSize)) {
+    return Number(contentBoxSize[0]?.inlineSize) || 0;
+  }
+  if (contentBoxSize && typeof contentBoxSize === "object") {
+    return Number(contentBoxSize.inlineSize) || 0;
+  }
+  return Number(entry?.contentRect?.width) || 0;
+}
+
+function clearEvidenceDrawerForWideLayout(width) {
+  if (width < EVIDENCE_DRAWER_BREAKPOINT || !evidenceDrawerSide.value) return;
+  void closeEvidenceDrawer({ restoreFocus: false });
+}
+
+function startEvidenceDrawerBreakpointObserver() {
+  const container = evidenceDrawerContainer();
+  if (!container) return;
+  if (typeof globalThis.ResizeObserver === "function") {
+    evidenceDrawerResizeObserver = new globalThis.ResizeObserver((entries) => {
+      const entry = entries.find((item) => item.target === container) || entries[0];
+      clearEvidenceDrawerForWideLayout(evidenceDrawerContainerWidth(entry));
+    });
+    evidenceDrawerResizeObserver.observe(container);
+    return;
+  }
+  evidenceDrawerWindowResizeHandler = () => {
+    clearEvidenceDrawerForWideLayout(container.getBoundingClientRect().width);
+  };
+  window.addEventListener("resize", evidenceDrawerWindowResizeHandler);
+  evidenceDrawerWindowResizeHandler();
+}
+
+function stopEvidenceDrawerBreakpointObserver() {
+  evidenceDrawerResizeObserver?.disconnect();
+  evidenceDrawerResizeObserver = null;
+  if (evidenceDrawerWindowResizeHandler) {
+    window.removeEventListener("resize", evidenceDrawerWindowResizeHandler);
+    evidenceDrawerWindowResizeHandler = null;
+  }
 }
 
 function trapEvidenceDrawerFocus(event) {
@@ -1435,6 +1489,7 @@ async function completeHearing() {
 
 onMounted(async () => {
   window.addEventListener("keydown", handleEvidenceDrawerKeydown);
+  startEvidenceDrawerBreakpointObserver();
   await load();
   if (
     props.eventStreamer ||
@@ -1446,6 +1501,7 @@ onMounted(async () => {
 });
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", handleEvidenceDrawerKeydown);
+  stopEvidenceDrawerBreakpointObserver();
   eventAbortController.abort();
   clearInterval(stageClockTimer);
 });
@@ -1499,6 +1555,7 @@ onBeforeUnmount(() => {
     </template>
 
     <main
+      ref="hearingCourtroomPage"
       class="hearing-courtroom-page"
       data-hearing-courtroom-page
       :data-viewer-role="role"
