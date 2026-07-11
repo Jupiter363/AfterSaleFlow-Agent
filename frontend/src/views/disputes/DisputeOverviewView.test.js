@@ -9,6 +9,9 @@ import path from "node:path";
 import { actor } from "../../state/actor";
 import DisputeOverviewView from "./DisputeOverviewView.vue";
 
+const longCaseId = "CASE_EXT_002_LONG_IDENTIFIER_FOR_LAYOUT_TESTING";
+const longOrderId = "ORDER_EXT_002_LONG_IDENTIFIER_FOR_LAYOUT_TESTING";
+
 const cases = [
   {
     id: "CASE_EXT_001",
@@ -23,8 +26,8 @@ const cases = [
     title: "签收未收到",
   },
   {
-    id: "CASE_EXT_002_LONG_IDENTIFIER_FOR_LAYOUT_TESTING",
-    order_id: "ORDER-002",
+    id: longCaseId,
+    order_id: longOrderId,
     source_type: "INTAKE_CREATED",
     dispute_type: "DAMAGED_GOODS",
     case_status: "HEARING_OPEN",
@@ -87,12 +90,29 @@ describe("DisputeOverviewView", () => {
     const { wrapper } = await mountOverview();
 
     const longTicket = wrapper.get(
-      '[data-case-id="CASE_EXT_002_LONG_IDENTIFIER_FOR_LAYOUT_TESTING"]',
+      `[data-case-id="${longCaseId}"]`,
     );
     expect(longTicket.get("[data-short-case-id]").text()).toContain("…");
     expect(longTicket.get("[data-short-case-id]").attributes("title")).toBe(
-      "CASE_EXT_002_LONG_IDENTIFIER_FOR_LAYOUT_TESTING",
+      longCaseId,
     );
+  });
+
+  it("exposes the full case and order values from the compact 2x2 case index", async () => {
+    const { wrapper } = await mountOverview();
+
+    await wrapper.get(`[data-case-id="${longCaseId}"]`).trigger("click");
+
+    const caseValue = wrapper.get("[data-case-file-value]");
+    const orderValue = wrapper.get("[data-order-value]");
+    expect(caseValue.attributes()).toMatchObject({
+      title: longCaseId,
+      "aria-label": longCaseId,
+    });
+    expect(orderValue.attributes()).toMatchObject({
+      title: longOrderId,
+      "aria-label": longOrderId,
+    });
   });
 
   it("enters the selected dispute's current room", async () => {
@@ -136,7 +156,7 @@ describe("DisputeOverviewView", () => {
     );
   });
 
-  it("keeps the right journey modules balanced without starving the case cards", () => {
+  it("declares the fixed overview frame, horizontal track and 2x2 case-index contracts", () => {
     const source = fs.readFileSync(
       path.resolve(__dirname, "DisputeOverviewView.vue"),
       "utf8",
@@ -144,13 +164,25 @@ describe("DisputeOverviewView", () => {
 
     expect(source).toContain("--overview-journey-gap");
     expect(source).toContain("gap: var(--overview-journey-gap)");
-    expect(source).toContain("height: clamp(660px, calc(100vh - 210px), 780px)");
-    expect(source).toContain("grid-template-rows: auto auto minmax(160px, 220px) minmax(160px, 1fr)");
+    expect(source).toContain(
+      "height: clamp(720px, calc(100dvh - 170px), 780px)",
+    );
+    expect(source).toContain("height: 810px");
+    expect(source).toContain("height: 880px");
+    expect(source).toContain("height: 940px");
+    expect(source).toMatch(
+      /\.hearing-adventure__case-board\s*\{[^}]*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/,
+    );
+    expect(source).toMatch(
+      /\.adventure-path\s*\{[^}]*overflow-x: auto/,
+    );
     expect(source).toContain(".hearing-adventure__sky { position: absolute");
-    expect(source).toContain("min-height: 112px");
-    expect(source).toContain("padding: 8px 0");
-    expect(source).toContain("min-height: 160px");
-    expect(source).toContain("width: 68px");
+    expect(source).not.toContain(
+      ".adventure-path { grid-template-columns: 1fr",
+    );
+    expect(source).not.toContain(
+      ".hearing-adventure__case-board { grid-template-columns: 1fr; }",
+    );
   });
 
   it("places the overview context directly before the intro copy", async () => {

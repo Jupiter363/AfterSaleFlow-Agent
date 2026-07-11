@@ -329,9 +329,9 @@ onMounted(async () => {
             </span>
             <strong>{{ item.title }}</strong>
             <span class="dispute-ticket__id">
-              <span :title="item.order_id">{{ shortId(item.order_id) }}</span>
+              <span :title="item.order_id" :aria-label="item.order_id">{{ shortId(item.order_id) }}</span>
               ·
-              <span data-short-case-id :title="item.id">{{ shortId(item.id) }}</span>
+              <span data-short-case-id :title="item.id" :aria-label="item.id">{{ shortId(item.id) }}</span>
             </span>
             <span class="dispute-ticket__room">
               <i aria-hidden="true" />
@@ -349,7 +349,7 @@ onMounted(async () => {
         <header class="hearing-adventure__header">
           <div>
             <span>CASE JOURNEY</span>
-            <h2>{{ selectedCase?.title }}</h2>
+            <h2 :title="selectedCase?.title" :aria-label="selectedCase?.title">{{ selectedCase?.title }}</h2>
             <p>{{ pendingActionLabel(selectedCase?.pending_action) }}</p>
           </div>
           <PhaseCountdown
@@ -360,7 +360,11 @@ onMounted(async () => {
           />
         </header>
 
-        <div class="hearing-adventure__next" data-overview-guide>
+        <div
+          class="hearing-adventure__next"
+          data-overview-guide
+          :aria-label="pendingActionLabel(selectedCase?.pending_action)"
+        >
           <DigitalHuman
             state="HANDOFF"
             name="小衡"
@@ -398,12 +402,20 @@ onMounted(async () => {
         >
           <article>
             <span>CASE FILE</span>
-            <strong>{{ selectedCase?.id }}</strong>
+            <strong
+              data-case-file-value
+              :title="selectedCase?.id"
+              :aria-label="selectedCase?.id"
+            >{{ selectedCase?.id }}</strong>
             <small>案件编号</small>
           </article>
           <article>
             <span>ORDER</span>
-            <strong>{{ selectedCase?.order_id || "未关联订单" }}</strong>
+            <strong
+              data-order-value
+              :title="selectedCase?.order_id || '未关联订单'"
+              :aria-label="selectedCase?.order_id || '未关联订单'"
+            >{{ selectedCase?.order_id || "未关联订单" }}</strong>
             <small>{{ sourceLabel(selectedCase?.source_type) }}</small>
           </article>
           <article>
@@ -413,7 +425,11 @@ onMounted(async () => {
           </article>
           <article>
             <span>NEXT ACTION</span>
-            <strong>{{ pendingActionLabel(selectedCase?.pending_action) }}</strong>
+            <strong
+              data-next-action-value
+              :title="pendingActionLabel(selectedCase?.pending_action)"
+              :aria-label="pendingActionLabel(selectedCase?.pending_action)"
+            >{{ pendingActionLabel(selectedCase?.pending_action) }}</strong>
             <small>{{ riskLabel(selectedCase?.risk_level) }}</small>
           </article>
         </section>
@@ -526,16 +542,22 @@ onMounted(async () => {
 </template>
 
 <style scoped>
-.overview-page { display: grid; gap: 24px; }
+.overview-page {
+  display: grid;
+  gap: 24px;
+  min-width: 0;
+}
 .overview-page__intro {
   display: flex;
   justify-content: space-between;
   gap: 24px;
   align-items: flex-end;
 }
+.overview-page__intro > div { min-width: 0; }
 .overview-page__actions {
   display: flex;
-  flex-wrap: wrap;
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
   justify-content: flex-end;
   gap: 10px;
 }
@@ -549,9 +571,11 @@ onMounted(async () => {
 }
 .overview-page__intro h1 {
   margin: 7px 0 8px;
+  min-width: 0;
   color: #263754;
   font-size: clamp(32px, 5vw, 56px);
   line-height: 1.05;
+  overflow-wrap: anywhere;
 }
 .overview-page__lead {
   display: flex;
@@ -559,7 +583,9 @@ onMounted(async () => {
   gap: 6px 8px;
   align-items: center;
   margin: 0;
+  min-width: 0;
   color: #738097;
+  overflow-wrap: anywhere;
 }
 .overview-page__context {
   display: inline-flex;
@@ -626,7 +652,8 @@ onMounted(async () => {
 .overview-layout {
   display: grid;
   grid-template-columns: minmax(300px, 350px) minmax(0, 1fr);
-  height: clamp(660px, calc(100vh - 210px), 780px);
+  height: clamp(720px, calc(100dvh - 170px), 780px);
+  min-width: 0;
   min-height: 0;
   overflow: hidden;
   background: #f7fbff;
@@ -639,12 +666,14 @@ onMounted(async () => {
   grid-template-rows: auto minmax(0, 1fr);
   gap: 8px;
   padding: 20px;
+  min-width: 0;
   min-height: 0;
   overflow: hidden;
   background: linear-gradient(180deg, #f0f8ff, #fff8f2);
   border-right: 1px solid #dde8f5;
 }
 .dispute-rail__scroll {
+  min-width: 0;
   min-height: 0;
   padding: 2px 5px 6px 0;
   overflow-x: hidden;
@@ -664,7 +693,9 @@ onMounted(async () => {
   justify-content: space-between;
   align-items: center;
   margin-bottom: 14px;
+  min-width: 0;
 }
+.dispute-rail__heading > div { min-width: 0; }
 .dispute-rail__heading h2 { margin: 4px 0 0; color: #34435e; font-size: 20px; }
 .dispute-rail__heading strong {
   display: grid;
@@ -678,6 +709,7 @@ onMounted(async () => {
 .dispute-ticket {
   display: grid;
   width: 100%;
+  min-width: 0;
   gap: 7px;
   margin-top: 10px;
   padding: 15px;
@@ -714,11 +746,18 @@ onMounted(async () => {
   margin-top: 4px;
   overflow: hidden;
   font-size: 16px;
+  overflow-wrap: anywhere;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
 }
 .dispute-ticket > span,
 .dispute-ticket > small { color: #7a879b; }
+.dispute-ticket > small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .dispute-ticket__id {
   display: flex;
   gap: 4px;
@@ -734,12 +773,12 @@ onMounted(async () => {
 .dispute-ticket__room { display: flex; align-items: center; gap: 7px; font-weight: 800; }
 .dispute-ticket__room i { width: 8px; height: 8px; background: #61c997; border-radius: 50%; }
 .hearing-adventure {
-  --overview-journey-gap: 16px;
+  --overview-journey-gap: 12px;
   position: relative;
   display: grid;
-  grid-template-rows: auto auto minmax(160px, 220px) minmax(160px, 1fr);
+  grid-template-rows: auto auto minmax(112px, 1fr) 218px;
   gap: var(--overview-journey-gap);
-  padding: 28px;
+  padding: 24px;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
@@ -759,23 +798,48 @@ onMounted(async () => {
   justify-content: space-between;
   gap: 20px;
   align-items: flex-start;
+  min-width: 0;
 }
-.hearing-adventure__header h2 { margin: 5px 0; color: #2c3e5b; font-size: 28px; }
-.hearing-adventure__header p { margin: 0; color: #748298; }
+.hearing-adventure__header > div { min-width: 0; }
+.hearing-adventure__header h2,
+.hearing-adventure__header p {
+  display: -webkit-box;
+  min-width: 0;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.hearing-adventure__header h2 {
+  margin: 5px 0;
+  color: #2c3e5b;
+  font-size: 28px;
+  line-height: 1.18;
+}
+.hearing-adventure__header p {
+  margin: 0;
+  color: #748298;
+  line-height: 1.45;
+}
 .hearing-adventure__case-board {
   position: relative;
   z-index: 1;
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: repeat(2, minmax(0, 1fr));
   gap: 12px;
-  align-self: end;
+  min-width: 0;
+  min-height: 0;
 }
 .hearing-adventure__case-board article {
   display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
   gap: 5px;
-  min-height: 160px;
+  align-content: center;
   min-width: 0;
-  padding: 16px;
+  min-height: 0;
+  padding: 12px 14px;
+  overflow: hidden;
   background: #ffffffc9;
   border: 1px solid #dce8f3;
   border-radius: 22px;
@@ -788,29 +852,58 @@ onMounted(async () => {
   letter-spacing: .14em;
 }
 .hearing-adventure__case-board strong {
+  align-self: center;
   min-width: 0;
   overflow: hidden;
   color: #2d3e5c;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.hearing-adventure__case-board small { color: #73839a; }
+.hearing-adventure__case-board strong[data-next-action-value] {
+  display: -webkit-box;
+  max-height: 2.9em;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
+  line-height: 1.45;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.hearing-adventure__case-board small {
+  min-width: 0;
+  overflow: hidden;
+  color: #73839a;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .adventure-path {
   position: relative;
   z-index: 1;
   display: grid;
-  grid-template-columns: repeat(5, minmax(115px, 1fr));
+  width: 100%;
+  grid-template-columns: repeat(5, minmax(128px, 1fr));
   align-items: center;
   gap: 4px;
   align-self: stretch;
   margin: 0;
+  min-width: 0;
   min-height: 112px;
-  padding: 8px 0;
+  padding: 14px 0 8px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-inline: contain;
+  scrollbar-width: thin;
   list-style: none;
+}
+.adventure-path::-webkit-scrollbar { height: 7px; }
+.adventure-path::-webkit-scrollbar-thumb {
+  background: #b9d7ec;
+  border-radius: 999px;
 }
 .adventure-path li {
   position: relative;
   display: grid;
+  min-width: 0;
   justify-items: center;
   gap: 10px;
   text-align: center;
@@ -859,6 +952,18 @@ onMounted(async () => {
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: var(--overview-journey-gap);
+  min-width: 0;
+  min-height: 0;
+}
+.hearing-adventure__next > button { min-width: 0; }
+.hearing-adventure__next :deep(.digital-human) { min-width: 0; }
+.hearing-adventure__next :deep(.digital-human__copy p) {
+  display: -webkit-box;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  line-height: 1.45;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 .overview-empty {
   display: grid;
@@ -952,46 +1057,162 @@ onMounted(async () => {
 @media (max-width: 1020px) {
   .overview-layout {
     grid-template-columns: 1fr;
-    height: auto;
-    min-height: 0;
-    overflow: visible;
+    grid-template-rows: 160px minmax(0, 1fr);
+    height: 810px;
   }
   .dispute-rail {
-    grid-template-rows: auto auto;
-    overflow: hidden;
+    grid-template-columns: 150px minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+    gap: 12px;
+    padding: 14px;
     border-right: 0;
     border-bottom: 1px solid #dde8f5;
   }
   .dispute-rail__scroll {
     display: flex;
     gap: 12px;
+    height: 100%;
+    padding: 0 4px 0 0;
     overflow-x: auto;
     overflow-y: hidden;
     scroll-snap-type: x proximity;
   }
-  .dispute-rail__heading { min-width: 180px; }
-  .dispute-ticket { min-width: 270px; margin: 0; }
-  .hearing-adventure__case-board { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .adventure-path { grid-template-columns: 1fr; align-items: stretch; padding-left: 10px; }
-  .adventure-path li { grid-template-columns: 68px 1fr; justify-items: start; text-align: left; }
-  .adventure-path__node { width: 58px; height: 58px; border-radius: 21px; }
-  .adventure-path__connector { top: 50%; left: 28px; width: 7px; height: 100%; }
-  .adventure-path li div { align-self: center; }
+  .dispute-rail__heading {
+    gap: 8px;
+    align-items: flex-start;
+    margin: 0;
+  }
+  .dispute-rail__heading h2 { font-size: 18px; line-height: 1.15; }
+  .dispute-rail__heading strong { flex: 0 0 auto; }
+  .dispute-ticket {
+    height: 100%;
+    min-width: 230px;
+    gap: 3px;
+    margin: 0;
+    padding: 8px 10px;
+    overflow: hidden;
+  }
+  .dispute-ticket__topline { font-size: 10px; }
+  .dispute-ticket__topline small:first-child { padding: 2px 6px; }
+  .dispute-ticket > strong {
+    margin-top: 0;
+    font-size: 14px;
+    -webkit-line-clamp: 1;
+  }
+  .dispute-ticket__id,
+  .dispute-ticket__room,
+  .dispute-ticket > small { font-size: 11px; }
+  .hearing-adventure {
+    --overview-journey-gap: 10px;
+    grid-template-rows: auto auto minmax(104px, 1fr) 200px;
+    padding: 18px;
+  }
+  .hearing-adventure__case-board { gap: 10px; }
+  .hearing-adventure__case-board article {
+    padding: 10px 12px;
+    border-radius: 18px;
+  }
+  .hearing-adventure__next :deep(.digital-human) {
+    grid-template-columns: 104px minmax(0, 1fr);
+    gap: 12px;
+    padding: 12px;
+    border-radius: 22px;
+  }
+  .hearing-adventure__next :deep(.digital-human__portrait) { min-height: 104px; }
+  .hearing-adventure__next :deep(.digital-human__portrait svg) {
+    width: 104px;
+    height: 104px;
+  }
+  .hearing-adventure__next :deep(.digital-human__identity strong) { font-size: 17px; }
+  .hearing-adventure__next :deep(.digital-human__copy p) { margin: 8px 0; }
 }
 @media (max-width: 680px) {
-  .overview-page__intro,
-  .hearing-adventure__header,
-  .hearing-adventure__next { grid-template-columns: 1fr; flex-direction: column; align-items: stretch; }
+  .overview-page__intro {
+    flex-direction: column;
+    gap: 14px;
+    align-items: stretch;
+  }
+  .overview-page__actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
   .overview-page__start,
   .overview-page__import,
-  .hearing-adventure__next > button { justify-content: center; }
-  .overview-page__actions { justify-content: stretch; }
-  .hearing-adventure { padding: 18px; }
-  .hearing-adventure__case-board { grid-template-columns: 1fr; }
+  .hearing-adventure__next > button {
+    min-width: 0;
+    min-height: 44px;
+    justify-content: center;
+    gap: 6px;
+    padding: 10px 8px;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+  .overview-page__start span,
+  .overview-page__import span {
+    width: 20px;
+    height: 20px;
+  }
+  .overview-layout {
+    grid-template-rows: 160px minmax(0, 1fr);
+    height: 880px;
+  }
+  .dispute-rail {
+    grid-template-columns: 104px minmax(0, 1fr);
+    gap: 10px;
+    padding: 12px;
+  }
+  .dispute-rail__heading {
+    flex-direction: column;
+    justify-content: center;
+  }
+  .dispute-rail__heading h2 { font-size: 15px; }
+  .dispute-ticket { min-width: 210px; }
+  .hearing-adventure {
+    grid-template-rows: auto auto minmax(104px, 1fr) 208px;
+    padding: 14px;
+  }
+  .hearing-adventure__header {
+    flex-direction: column;
+    gap: 6px;
+    align-items: stretch;
+  }
+  .hearing-adventure__header h2 { font-size: 22px; }
+  .hearing-adventure__next { grid-template-columns: 1fr; }
+  .hearing-adventure__next :deep(.digital-human) {
+    grid-template-columns: 84px minmax(0, 1fr);
+    gap: 8px;
+    padding: 10px;
+    border-radius: 18px;
+  }
+  .hearing-adventure__next :deep(.digital-human__portrait) { min-height: 84px; }
+  .hearing-adventure__next :deep(.digital-human__portrait svg) {
+    width: 84px;
+    height: 84px;
+  }
+  .hearing-adventure__case-board { gap: 8px; }
+  .hearing-adventure__case-board article { padding: 9px 10px; }
   .intake-launcher__fields { grid-template-columns: 1fr; }
   .intake-launcher__claim { grid-template-columns: 1fr; }
   .intake-launcher__claim-copy { align-items: flex-start; flex-direction: column; }
   .intake-launcher__story { grid-column: auto; }
   .intake-launcher__card footer { align-items: stretch; flex-direction: column; }
+}
+@media (max-width: 360px) {
+  .overview-page__actions { grid-template-columns: 1fr; }
+  .overview-layout { height: 940px; }
+  .dispute-rail {
+    grid-template-columns: 88px minmax(0, 1fr);
+    gap: 8px;
+    padding: 10px;
+  }
+  .dispute-rail__heading h2 { font-size: 14px; }
+  .dispute-rail__heading strong {
+    width: 30px;
+    height: 30px;
+  }
+  .dispute-ticket { min-width: 196px; }
+  .hearing-adventure { padding: 12px; }
+  .hearing-adventure__header h2 { font-size: 20px; }
 }
 </style>
