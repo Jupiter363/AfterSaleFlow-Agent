@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { disputeApi } from "../../api/disputes";
 import DigitalHuman from "../../components/avatar/DigitalHuman.vue";
@@ -55,6 +55,22 @@ const claimResolutionOptions = [
 
 const cases = computed(() =>
   localCases.value.length ? localCases.value : disputeStore.list.data,
+);
+
+function reconcileCases(nextCases) {
+  const refreshed = Array.isArray(nextCases) ? [...nextCases] : [];
+  localCases.value = refreshed;
+  if (!refreshed.some((item) => item.id === selectedId.value)) {
+    selectedId.value = refreshed[0]?.id || null;
+  }
+}
+
+watch(
+  () => disputeStore.list.updatedAt,
+  () => {
+    if (props.initialCases.length) return;
+    reconcileCases(disputeStore.list.data);
+  },
 );
 const selectedCase = computed(
   () =>
@@ -297,6 +313,10 @@ async function confirmDeleteCase() {
     );
     selectedId.value = nextSelection?.id || null;
     deleteCandidate.value = null;
+    await loadDisputes(actor);
+    if (!props.initialCases.length) {
+      reconcileCases(disputeStore.list.data);
+    }
   } catch (failure) {
     deleteError.value = failure?.message || "删除失败，请稍后重试";
   } finally {

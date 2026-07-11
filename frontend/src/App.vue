@@ -8,8 +8,13 @@ import {
 } from "vue";
 import { ElMessage } from "element-plus";
 import { useRoute, useRouter } from "vue-router";
+import { disputeApi } from "./api/disputes";
 import SummonsMailbox from "./components/notification/SummonsMailbox.vue";
 import { actor, demoActors, switchDemoActor } from "./state/actor";
+import {
+  disputeStore,
+  loadDisputes,
+} from "./stores/dispute";
 import {
   deleteNotification,
   loadNotifications,
@@ -27,9 +32,37 @@ const noticeError = computed(
 );
 const deletingNotificationIds = ref([]);
 let notificationTimer;
+let caseSyncTimer;
+let caseSyncRunning = false;
+const CASE_SYNC_INTERVAL_MS = 3_000;
 
 async function refreshNotifications() {
   await loadNotifications(actor);
+}
+
+async function refreshCaseState() {
+  if (caseSyncRunning) return;
+  caseSyncRunning = true;
+  const actorSnapshot = { id: actor.id, role: actor.role };
+  try {
+    await loadDisputes(actorSnapshot);
+    const caseId = route.params.caseId;
+    if (!caseId || typeof caseId !== "string") return;
+    await disputeApi.get(actorSnapshot, caseId);
+  } catch (error) {
+    const caseId = route.params.caseId;
+    if (
+      error?.code === "CASE_NOT_FOUND" &&
+      typeof caseId === "string"
+    ) {
+      disputeStore.current.data = null;
+      disputeStore.current.status = "empty";
+      await router.replace("/disputes");
+      ElMessage.warning("该案例已被审核员删除，已返回争议总览");
+    }
+  } finally {
+    caseSyncRunning = false;
+  }
 }
 
 async function openNotification(notification) {
@@ -70,13 +103,22 @@ async function switchIdentity(role) {
 
 watch(
   () => [actor.id, actor.role],
-  refreshNotifications,
+  () => {
+    refreshNotifications();
+    refreshCaseState();
+  },
   { immediate: true },
 );
 onMounted(() => {
   notificationTimer = window.setInterval(refreshNotifications, 15_000);
+  caseSyncTimer = window.setInterval(refreshCaseState, CASE_SYNC_INTERVAL_MS);
+  window.addEventListener("focus", refreshCaseState);
 });
-onBeforeUnmount(() => window.clearInterval(notificationTimer));
+onBeforeUnmount(() => {
+  window.clearInterval(notificationTimer);
+  window.clearInterval(caseSyncTimer);
+  window.removeEventListener("focus", refreshCaseState);
+});
 </script>
 
 <template>

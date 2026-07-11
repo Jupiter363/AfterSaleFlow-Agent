@@ -7,6 +7,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import { actor } from "../../state/actor";
+import { disputeApi } from "../../api/disputes";
+import { disputeStore } from "../../stores/dispute";
 import DisputeOverviewView from "./DisputeOverviewView.vue";
 
 const longCaseId = "CASE_EXT_002_LONG_IDENTIFIER_FOR_LAYOUT_TESTING";
@@ -63,6 +65,7 @@ async function mountOverview(
   createAction = null,
   simulateExternalImportAction = null,
   deleteSimulatedCaseAction = null,
+  initialCases = cases,
 ) {
   const router = createRouter({
     history: createMemoryHistory(),
@@ -78,7 +81,7 @@ async function mountOverview(
   await router.isReady();
   const wrapper = mount(DisputeOverviewView, {
     props: {
-      initialCases: cases,
+      initialCases,
       serverNow: "2026-07-03T10:00:00Z",
       createAction,
       simulateExternalImportAction,
@@ -90,6 +93,31 @@ async function mountOverview(
 }
 
 describe("DisputeOverviewView", () => {
+  it("reconciles a reviewer deletion from the server into another actor's open overview", async () => {
+    actor.id = "merchant-local";
+    actor.role = "MERCHANT";
+    vi.spyOn(disputeApi, "list").mockResolvedValue({ items: cases });
+    disputeStore.list.data = [];
+    disputeStore.list.updatedAt = null;
+    const { wrapper } = await mountOverview(null, null, null, []);
+    await flushPromises();
+    expect(wrapper.find('[data-case-id="CASE_EXT_001"]').exists()).toBe(true);
+
+    disputeStore.list.data = cases.filter((item) => item.id !== "CASE_EXT_001");
+    disputeStore.list.updatedAt = "2026-07-11T18:00:01.000Z";
+    await flushPromises();
+
+    expect(wrapper.find('[data-case-id="CASE_EXT_001"]').exists()).toBe(false);
+    expect(wrapper.get(`[data-case-id="${longCaseId}"]`).classes()).toContain(
+      "dispute-ticket--active",
+    );
+
+    disputeStore.list.data = [];
+    disputeStore.list.updatedAt = "2026-07-11T18:00:02.000Z";
+    await flushPromises();
+    expect(wrapper.find("[data-case-id]").exists()).toBe(false);
+  });
+
   it("switches the selected dispute without navigating", async () => {
     const { wrapper, router } = await mountOverview();
 

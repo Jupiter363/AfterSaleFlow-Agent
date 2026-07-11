@@ -266,7 +266,7 @@ def test_room_timing_configuration_is_declared_with_final_defaults() -> None:
     assert "hearing-window: ${HEARING_WINDOW:PT3H}" in application
     assert "max-hearing-rounds: ${MAX_HEARING_ROUNDS:3}" in application
     assert "sse-heartbeat: ${SSE_HEARTBEAT:PT15S}" in application
-    assert "seed-demo-disputes: ${SEED_DEMO_DISPUTES:true}" in application
+    assert "seed-demo-disputes: ${SEED_DEMO_DISPUTES:false}" in application
 
 
 def test_windows_secret_generator_preserves_user_key_and_hides_secrets(

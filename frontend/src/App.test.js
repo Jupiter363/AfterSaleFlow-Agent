@@ -3,9 +3,25 @@ import {
   createMemoryHistory,
   createRouter,
 } from "vue-router";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "./App.vue";
+import { disputeApi } from "./api/disputes";
 import { actor } from "./state/actor";
+import { disputeStore, loadDisputes } from "./stores/dispute";
+
+vi.mock("./api/disputes", () => ({
+  disputeApi: {
+    get: vi.fn(() => Promise.resolve({ id: "CASE_1" })),
+  },
+}));
+
+vi.mock("./stores/dispute", () => ({
+  disputeStore: {
+    list: { data: [], status: "idle", error: null, updatedAt: null },
+    current: { data: null, status: "idle", error: null, updatedAt: null },
+  },
+  loadDisputes: vi.fn(() => Promise.resolve([])),
+}));
 
 vi.mock("./stores/notification", () => ({
   notificationStore: {
@@ -20,6 +36,14 @@ vi.mock("./stores/notification", () => ({
   markNotificationRead: vi.fn(() => Promise.resolve()),
   deleteNotification: vi.fn(() => Promise.resolve()),
 }));
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.clearAllMocks();
+  disputeApi.get.mockResolvedValue({ id: "CASE_1" });
+  disputeStore.current.data = null;
+  disputeStore.current.status = "idle";
+});
 
 async function mountApp() {
   const router = createRouter({
@@ -107,5 +131,30 @@ describe("App shell", () => {
     expect(actor.role).toBe("MERCHANT");
     expect(idInput.element.value).toBe("merchant-local");
     expect(router.currentRoute.value.path).toBe("/disputes");
+  });
+
+  it("redirects every actor away from a case removed by the reviewer", async () => {
+    vi.useFakeTimers();
+    actor.id = "user-local";
+    actor.role = "USER";
+    const wrapper = await mountApp();
+    const router = wrapper.vm.$router;
+    await flushPromises();
+    await router.push("/disputes/CASE_1/intake");
+    await router.isReady();
+    disputeStore.current.data = { id: "CASE_1" };
+    disputeStore.current.status = "ready";
+    const notFound = new Error("case was not found");
+    notFound.code = "CASE_NOT_FOUND";
+    disputeApi.get.mockRejectedValueOnce(notFound);
+
+    await vi.advanceTimersByTimeAsync(3_000);
+    await flushPromises();
+
+    expect(loadDisputes).toHaveBeenCalled();
+    expect(router.currentRoute.value.path).toBe("/disputes");
+    expect(disputeStore.current.data).toBeNull();
+    expect(disputeStore.current.status).toBe("empty");
+    wrapper.unmount();
   });
 });

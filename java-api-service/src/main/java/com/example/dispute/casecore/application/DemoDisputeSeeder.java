@@ -20,7 +20,7 @@ import org.springframework.stereotype.Component;
  */
 @Component
 @ConditionalOnExpression(
-        "${dispute.seed-demo-disputes:true} and ${spring.flyway.enabled:true}")
+        "${dispute.seed-demo-disputes:false} and ${spring.flyway.enabled:true}")
 public class DemoDisputeSeeder implements ApplicationRunner {
 
     private static final AuthenticatedActor DEMO_ADAPTER =
