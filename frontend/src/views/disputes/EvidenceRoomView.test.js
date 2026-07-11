@@ -155,7 +155,7 @@ function routerForEvidence() {
   });
 }
 
-async function mountView(overrides = {}) {
+async function mountView(overrides = {}, mountOptions = {}) {
   const router = routerForEvidence();
   await router.push("/disputes/CASE_EVIDENCE_1/evidence");
   await router.isReady();
@@ -172,6 +172,7 @@ async function mountView(overrides = {}) {
       ...overrides,
     },
     global: { plugins: [router] },
+    ...mountOptions,
   });
   return { wrapper, router, completeAction };
 }
@@ -278,6 +279,15 @@ describe("EvidenceRoomView", () => {
     );
     expect(evidenceRoomSource).toMatch(
       /\.evidence-error\s*\{[^}]*position:\s*absolute/s,
+    );
+  });
+
+  it("reserves a real 44px touch target for uploader, footer, and modal actions", () => {
+    expect(evidenceRoomSource).toMatch(
+      /\.evidence-uploader__button,\s*\.evidence-footer button\s*\{[^}]*min-height:\s*44px[^}]*display:\s*inline-flex/s,
+    );
+    expect(evidenceRoomSource).toMatch(
+      /\.evidence-modal__panel button,\s*\.evidence-modal__link\s*\{[^}]*min-height:\s*44px[^}]*display:\s*inline-flex/s,
     );
   });
 
@@ -404,6 +414,62 @@ describe("EvidenceRoomView", () => {
     expect(wrapper.find("[data-evidence-gate-modal]").exists()).toBe(false);
   });
 
+  it("moves focus into the evidence gate, traps Tab, closes on Escape, and restores the completion trigger", async () => {
+    const emptyInitiatorCatalog = {
+      ...catalog,
+      initiator_role: "USER",
+      items: catalog.items.filter(
+        (item) =>
+          item.submitted_by_role !== "USER" ||
+          item.submission_status !== "SUBMITTED",
+      ),
+    };
+    const { wrapper } = await mountView(
+      { initialCatalog: emptyInitiatorCatalog },
+      { attachTo: document.body },
+    );
+    const trigger = wrapper.get("[data-complete-evidence]").element;
+    trigger.focus();
+
+    await wrapper.get("[data-complete-evidence]").trigger("click");
+    await flushPromises();
+
+    const dismiss = wrapper.get("[data-dismiss-evidence-gate]").element;
+    expect(document.activeElement).toBe(dismiss);
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Tab",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(document.activeElement).toBe(dismiss);
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Tab",
+        shiftKey: true,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(document.activeElement).toBe(dismiss);
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Escape",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    await flushPromises();
+
+    expect(wrapper.find("[data-evidence-gate-modal]").exists()).toBe(false);
+    expect(document.activeElement).toBe(trigger);
+    wrapper.unmount();
+  });
+
   it("allows a non-initiating party to complete without submitted evidence", async () => {
     const emptyMerchantCatalog = {
       ...catalog,
@@ -445,6 +511,157 @@ describe("EvidenceRoomView", () => {
 
     await modal.get("[data-close-evidence-modal]").trigger("click");
     expect(wrapper.find("[data-evidence-detail-modal]").exists()).toBe(false);
+  });
+
+  it("does not open evidence detail when keyboard activation comes from nested actions", async () => {
+    const { wrapper } = await mountView({}, { attachTo: document.body });
+
+    await wrapper.get("[data-delete-pending-evidence]").trigger("keydown", {
+      key: "Enter",
+    });
+    expect(wrapper.find("[data-evidence-detail-modal]").exists()).toBe(false);
+
+    await wrapper.get("[data-expand-submitted-evidence]").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-gallery-download-evidence]").trigger("keydown", {
+      key: "Enter",
+    });
+
+    expect(wrapper.find("[data-evidence-detail-modal]").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("keeps gallery and detail as a focus-restoring modal stack", async () => {
+    const { wrapper } = await mountView({}, { attachTo: document.body });
+    const galleryTrigger = wrapper.get("[data-expand-submitted-evidence]").element;
+    galleryTrigger.focus();
+
+    await wrapper.get("[data-expand-submitted-evidence]").trigger("click");
+    await flushPromises();
+
+    const gallery = wrapper.get("[data-evidence-gallery-modal]");
+    const galleryClose = gallery.get("[data-close-evidence-gallery]").element;
+    expect(document.activeElement).toBe(galleryClose);
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Tab",
+        shiftKey: true,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(document.activeElement).toBe(
+      gallery.findAll("[data-evidence-gallery-card]").at(-1).element,
+    );
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Tab",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(document.activeElement).toBe(galleryClose);
+
+    const galleryCard = gallery.get("[data-evidence-gallery-card]");
+    await galleryCard.trigger("click");
+    await flushPromises();
+
+    const detail = wrapper.get("[data-evidence-detail-modal]");
+    const detailClose = detail.get("[data-close-evidence-modal]").element;
+    const detailDownload = detail.get("[data-download-evidence]").element;
+    expect(document.activeElement).toBe(detailClose);
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Tab",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(document.activeElement).toBe(detailDownload);
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Tab",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(document.activeElement).toBe(detailClose);
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Tab",
+        shiftKey: true,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(document.activeElement).toBe(detailDownload);
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Tab",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(document.activeElement).toBe(detailClose);
+    expect(Number(detail.attributes("data-modal-depth"))).toBeGreaterThan(
+      Number(gallery.attributes("data-modal-depth")),
+    );
+    expect(gallery.attributes("aria-hidden")).toBe("true");
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Escape",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    await flushPromises();
+
+    expect(wrapper.find("[data-evidence-detail-modal]").exists()).toBe(false);
+    expect(wrapper.find("[data-evidence-gallery-modal]").exists()).toBe(true);
+    expect(document.activeElement).toBe(galleryCard.element);
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Escape",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    await flushPromises();
+
+    expect(wrapper.find("[data-evidence-gallery-modal]").exists()).toBe(false);
+    expect(document.activeElement).toBe(galleryTrigger);
+    wrapper.unmount();
+  });
+
+  it("removes the modal keyboard listener when the view unmounts", async () => {
+    const addSpy = vi.spyOn(document, "addEventListener");
+    const removeSpy = vi.spyOn(document, "removeEventListener");
+    const { wrapper } = await mountView({}, { attachTo: document.body });
+
+    await wrapper.get("[data-expand-submitted-evidence]").trigger("click");
+    await flushPromises();
+
+    const keydownRegistration = addSpy.mock.calls.find(
+      ([eventName]) => eventName === "keydown",
+    );
+    expect(keydownRegistration).toBeTruthy();
+
+    wrapper.unmount();
+
+    expect(removeSpy).toHaveBeenCalledWith(
+      "keydown",
+      keydownRegistration[1],
+    );
+    addSpy.mockRestore();
+    removeSpy.mockRestore();
   });
 
   it("uses reusable document image and video icons for evidence files", async () => {

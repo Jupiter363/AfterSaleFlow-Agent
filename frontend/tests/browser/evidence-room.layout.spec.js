@@ -59,6 +59,12 @@ async function assertNoDocumentHorizontalOverflow(page) {
   );
 }
 
+async function assertTouchHeight(locator) {
+  const box = await locator.boundingBox();
+  expect(box).not.toBeNull();
+  expect(box.height).toBeGreaterThanOrEqual(44);
+}
+
 async function openEvidenceRoom(page, options = {}) {
   await installEvidenceRoomFixture(page, options);
   await page.goto(`/disputes/${CASE_ID}/evidence`);
@@ -249,6 +255,117 @@ test("keeps the compact uploader and footer horizontal at 620/619px", async ({
     await assertInside(footer, board);
     await assertNoDocumentHorizontalOverflow(page);
   }
+});
+
+test("keeps uploader and completion controls at least 44px tall without changing the 740px board", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 320, height: 568 });
+  await openEvidenceRoom(page, { role: "USER", count: 4 });
+
+  const board = page.locator("[data-evidence-board-panel]");
+  await expect(board).toHaveCSS("height", "740px");
+  await assertTouchHeight(page.locator(".evidence-uploader__button"));
+  await assertTouchHeight(page.locator("[data-complete-evidence]"));
+  await assertInside(page.locator(".evidence-footer"), board);
+});
+
+test("keeps the hearing entrance at least 44px tall inside the sealed footer", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 320, height: 568 });
+  await openEvidenceRoom(page, {
+    role: "USER",
+    count: 4,
+    sealed: true,
+  });
+
+  const board = page.locator("[data-evidence-board-panel]");
+  const enterHearing = page.locator("[data-enter-hearing]");
+  await expect(board).toHaveCSS("height", "740px");
+  await expect(enterHearing).toBeVisible();
+  await assertTouchHeight(enterHearing);
+  await assertInside(page.locator(".evidence-footer"), board);
+});
+
+test("traps the evidence gate focus and restores the completion trigger on Escape", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await openEvidenceRoom(page, {
+    role: "USER",
+    count: 0,
+    initiatorRole: "USER",
+  });
+
+  const completionTrigger = page.locator("[data-complete-evidence]");
+  await completionTrigger.focus();
+  await completionTrigger.click();
+
+  const modal = page.locator("[data-evidence-gate-modal]");
+  const dismiss = modal.locator("[data-dismiss-evidence-gate]");
+  await expect(modal).toBeVisible();
+  await expect(dismiss).toBeFocused();
+  await assertTouchHeight(dismiss);
+
+  await page.keyboard.press("Tab");
+  await expect(dismiss).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(dismiss).toBeFocused();
+  await page.keyboard.press("Escape");
+
+  await expect(modal).toBeHidden();
+  await expect(completionTrigger).toBeFocused();
+});
+
+test("keeps detail above gallery and unwinds focus one modal at a time", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await openEvidenceRoom(page, { role: "USER", count: 4 });
+
+  const galleryTrigger = page.locator("[data-expand-submitted-evidence]");
+  await galleryTrigger.focus();
+  await galleryTrigger.click();
+
+  const gallery = page.locator("[data-evidence-gallery-modal]");
+  const galleryClose = gallery.locator("[data-close-evidence-gallery]");
+  await expect(gallery).toBeVisible();
+  await expect(galleryClose).toBeFocused();
+  await assertTouchHeight(galleryClose);
+
+  await page.keyboard.press("Shift+Tab");
+  await expect(
+    gallery.locator("[data-evidence-gallery-card]").last(),
+  ).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(galleryClose).toBeFocused();
+
+  const galleryCard = gallery.locator("[data-evidence-gallery-card]").first();
+  await galleryCard.click();
+
+  const detail = page.locator("[data-evidence-detail-modal]");
+  const detailClose = detail.locator("[data-close-evidence-modal]");
+  await expect(detail).toBeVisible();
+  await expect(detailClose).toBeFocused();
+  await assertTouchHeight(detailClose);
+  await page.keyboard.press("Tab");
+  await expect(detailClose).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(detailClose).toBeFocused();
+  expect(Number(await detail.getAttribute("data-modal-depth"))).toBeGreaterThan(
+    Number(await gallery.getAttribute("data-modal-depth")),
+  );
+  await expect(gallery).toHaveAttribute("aria-hidden", "true");
+
+  await page.keyboard.press("Escape");
+  await expect(detail).toBeHidden();
+  await expect(gallery).toBeVisible();
+  await expect(galleryCard).toBeFocused();
+
+  await page.keyboard.press("Escape");
+  await expect(gallery).toBeHidden();
+  await expect(galleryTrigger).toBeFocused();
 });
 
 for (const scenario of [

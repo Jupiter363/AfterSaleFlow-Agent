@@ -61,13 +61,14 @@ function buildEvidenceCatalog({
   };
 }
 
-function buildCompletion() {
+function buildCompletion(options = {}) {
+  const sealed = Boolean(options.sealed);
   return {
     case_id: CASE_ID,
-    user_completed: false,
-    merchant_completed: false,
-    sealed: false,
-    next_room: "EVIDENCE",
+    user_completed: sealed,
+    merchant_completed: sealed,
+    sealed,
+    next_room: sealed ? "HEARING" : "EVIDENCE",
     deadline_at: "2099-01-01T00:00:00Z",
   };
 }
@@ -112,7 +113,7 @@ export async function installEvidenceRoomFixture(page, options = {}) {
     count: options.count,
     initiatorRole: options.initiatorRole,
   });
-  const completion = buildCompletion();
+  const completion = buildCompletion(options);
   const messages = buildMessages(role);
 
   await page.addInitScript((value) => {

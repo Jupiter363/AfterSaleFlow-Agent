@@ -1,6 +1,7 @@
 <script setup>
 import {
   computed,
+  nextTick,
   onBeforeUnmount,
   onMounted,
   reactive,
@@ -49,11 +50,17 @@ const fileInput = ref(null);
 const messages = ref([...(props.initialMessages || [])]);
 const selectedEvidence = ref(null);
 const expandedEvidenceGroup = ref(null);
+const evidenceGateModal = ref(null);
+const evidenceDetailModal = ref(null);
+const evidenceGalleryModal = ref(null);
+const modalStack = ref([]);
 const deletingEvidenceIds = ref(new Set());
 const eventState = reactive(createRoomState());
+const modalTriggers = new Map();
 let eventAbortController = new AbortController();
 let eventStreamActive = false;
 let workspaceGeneration = 0;
+let modalKeydownAttached = false;
 
 const caseId = computed(
   () => catalog.value?.case_id || route.params.caseId,
@@ -300,20 +307,157 @@ function evidenceFileIconStatusClass(item) {
     : "evidence-file-icon--submitted";
 }
 
-function openEvidenceDetail(item) {
+function modalRoot(modalName) {
+  if (modalName === "gate") return evidenceGateModal.value;
+  if (modalName === "detail") return evidenceDetailModal.value;
+  if (modalName === "gallery") return evidenceGalleryModal.value;
+  return null;
+}
+
+function modalDepth(modalName) {
+  const index = modalStack.value.indexOf(modalName);
+  return 40 + Math.max(index, 0);
+}
+
+function isTopModal(modalName) {
+  return modalStack.value.at(-1) === modalName;
+}
+
+function isModalCovered(modalName) {
+  const index = modalStack.value.indexOf(modalName);
+  return index >= 0 && index < modalStack.value.length - 1;
+}
+
+function modalTrigger(event) {
+  const eventTarget = event?.currentTarget;
+  if (eventTarget instanceof HTMLElement) return eventTarget;
+  return document.activeElement instanceof HTMLElement
+    ? document.activeElement
+    : null;
+}
+
+function modalFocusableElements(modalName) {
+  const root = modalRoot(modalName);
+  if (!root) return [];
+  return [...root.querySelectorAll(
+    'button:not([disabled]), a[href], input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+  )].filter(
+    (element) =>
+      element instanceof HTMLElement &&
+      element.getAttribute("aria-hidden") !== "true" &&
+      !element.closest("[inert]"),
+  );
+}
+
+function focusModal(modalName) {
+  const root = modalRoot(modalName);
+  if (!root || !isTopModal(modalName)) return;
+  const initialFocus = root.querySelector("[data-modal-initial-focus]");
+  const target = initialFocus || modalFocusableElements(modalName)[0] || root;
+  if (target instanceof HTMLElement) target.focus();
+}
+
+function attachModalKeydown() {
+  if (modalKeydownAttached) return;
+  document.addEventListener("keydown", handleModalKeydown);
+  modalKeydownAttached = true;
+}
+
+function detachModalKeydown() {
+  if (!modalKeydownAttached) return;
+  document.removeEventListener("keydown", handleModalKeydown);
+  modalKeydownAttached = false;
+}
+
+function openModal(modalName, event) {
+  const trigger = modalTrigger(event);
+  if (trigger) modalTriggers.set(modalName, trigger);
+  modalStack.value = [
+    ...modalStack.value.filter((name) => name !== modalName),
+    modalName,
+  ];
+  attachModalKeydown();
+  void nextTick(() => focusModal(modalName));
+}
+
+function closeModal(modalName, options = {}) {
+  const wasTopModal = isTopModal(modalName);
+  const trigger = modalTriggers.get(modalName);
+  modalTriggers.delete(modalName);
+  modalStack.value = modalStack.value.filter((name) => name !== modalName);
+  if (!modalStack.value.length) detachModalKeydown();
+  if (!wasTopModal || options.restoreFocus === false) return;
+  void nextTick(() => {
+    if (trigger?.isConnected) {
+      trigger.focus();
+      return;
+    }
+    const nextModal = modalStack.value.at(-1);
+    if (nextModal) focusModal(nextModal);
+  });
+}
+
+function trapModalFocus(event, modalName) {
+  const focusableElements = modalFocusableElements(modalName);
+  if (!focusableElements.length) {
+    event.preventDefault();
+    focusModal(modalName);
+    return;
+  }
+  const currentIndex = focusableElements.indexOf(document.activeElement);
+  const nextIndex = event.shiftKey
+    ? currentIndex <= 0
+      ? focusableElements.length - 1
+      : currentIndex - 1
+    : currentIndex < 0 || currentIndex === focusableElements.length - 1
+      ? 0
+      : currentIndex + 1;
+  event.preventDefault();
+  focusableElements[nextIndex].focus();
+}
+
+function closeTopModal() {
+  const topModal = modalStack.value.at(-1);
+  if (topModal === "detail") closeEvidenceDetail();
+  if (topModal === "gallery") closeEvidenceGroup();
+  if (topModal === "gate") dismissEvidenceGate();
+}
+
+function handleModalKeydown(event) {
+  const topModal = modalStack.value.at(-1);
+  if (!topModal) return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeTopModal();
+    return;
+  }
+  if (event.key === "Tab") trapModalFocus(event, topModal);
+}
+
+function resetModalController() {
+  modalStack.value = [];
+  modalTriggers.clear();
+  detachModalKeydown();
+}
+
+function openEvidenceDetail(item, event) {
   selectedEvidence.value = item;
+  openModal("detail", event);
 }
 
 function closeEvidenceDetail() {
   selectedEvidence.value = null;
+  closeModal("detail");
 }
 
-function openEvidenceGroup(group) {
+function openEvidenceGroup(group, event) {
   expandedEvidenceGroup.value = group;
+  openModal("gallery", event);
 }
 
 function closeEvidenceGroup() {
   expandedEvidenceGroup.value = null;
+  closeModal("gallery");
 }
 
 const expandedEvidenceItems = computed(() => {
@@ -661,10 +805,11 @@ async function deletePendingEvidence(item) {
   }
 }
 
-async function completeEvidence() {
+async function completeEvidence(event) {
   if (!canCompleteEvidenceLocally.value) {
     evidenceGateError.value = "发起争议方需先正式提交至少 1 份相关证据，当前证据栏为空，暂不能进入下一步。";
     agentState.value = "ERROR";
+    openModal("gate", event);
     return;
   }
   completing.value = true;
@@ -708,6 +853,7 @@ function mergeCompletionResult(previous, result) {
 function dismissEvidenceGate() {
   evidenceGateError.value = "";
   agentState.value = "LISTENING";
+  closeModal("gate");
 }
 
 function enterHearing() {
@@ -733,6 +879,9 @@ watch(role, async (nextRole, previousRole) => {
   catalog.value = null;
   completion.value = null;
   selectedEvidence.value = null;
+  expandedEvidenceGroup.value = null;
+  evidenceGateError.value = "";
+  resetModalController();
   messages.value = [];
   if (eventStreamActive) {
     startEventStream();
@@ -746,7 +895,10 @@ watch(role, async (nextRole, previousRole) => {
     agentState.value = "ERROR";
   }
 });
-onBeforeUnmount(() => eventAbortController.abort());
+onBeforeUnmount(() => {
+  eventAbortController.abort();
+  resetModalController();
+});
 </script>
 
 <template>
@@ -847,7 +999,10 @@ onBeforeUnmount(() => eventAbortController.abort());
               :key="evidenceId(item)"
               class="evidence-card evidence-card--pending"
               data-evidence-card
-              @click="openEvidenceDetail(item)"
+              tabindex="0"
+              @click="openEvidenceDetail(item, $event)"
+              @keydown.enter.self.prevent="openEvidenceDetail(item, $event)"
+              @keydown.space.self.prevent="openEvidenceDetail(item, $event)"
             >
               <button
                 type="button"
@@ -899,7 +1054,7 @@ onBeforeUnmount(() => eventAbortController.abort());
               </span>
             </article>
             <div v-if="pendingItems.length" class="evidence-library__actions">
-              <button type="button" data-expand-pending-evidence @click="openEvidenceGroup('pending')">
+              <button type="button" data-expand-pending-evidence @click="openEvidenceGroup('pending', $event)">
                 展开
               </button>
               <button
@@ -928,7 +1083,7 @@ onBeforeUnmount(() => eventAbortController.abort());
               type="button"
               class="evidence-card"
               data-evidence-card
-              @click="openEvidenceDetail(item)"
+              @click="openEvidenceDetail(item, $event)"
             >
               <span
                 class="evidence-card__icon evidence-file-icon"
@@ -984,7 +1139,7 @@ onBeforeUnmount(() => eventAbortController.abort());
               </span>
             </button>
             <div v-if="submittedItems.length" class="evidence-library__actions evidence-library__actions--right">
-              <button type="button" data-expand-submitted-evidence @click="openEvidenceGroup('submitted')">
+              <button type="button" data-expand-submitted-evidence @click="openEvidenceGroup('submitted', $event)">
                 展开原件匣
               </button>
             </div>
@@ -1029,10 +1184,15 @@ onBeforeUnmount(() => eventAbortController.abort());
 
     <div
       v-if="evidenceGateError"
+      ref="evidenceGateModal"
       class="evidence-modal"
       data-evidence-gate-modal
+      :data-modal-depth="modalDepth('gate')"
+      :style="{ zIndex: modalDepth('gate') }"
       role="dialog"
-      aria-modal="true"
+      :aria-modal="isTopModal('gate') ? 'true' : 'false'"
+      :aria-hidden="isModalCovered('gate') ? 'true' : undefined"
+      :inert="isModalCovered('gate') ? true : undefined"
       aria-labelledby="evidence-gate-title"
     >
       <section class="evidence-modal__panel evidence-modal__panel--notice">
@@ -1042,6 +1202,7 @@ onBeforeUnmount(() => eventAbortController.abort());
         <button
           type="button"
           data-dismiss-evidence-gate
+          data-modal-initial-focus
           @click="dismissEvidenceGate"
         >
           我知道了
@@ -1051,10 +1212,15 @@ onBeforeUnmount(() => eventAbortController.abort());
 
     <div
       v-if="selectedEvidence"
+      ref="evidenceDetailModal"
       class="evidence-modal"
       data-evidence-detail-modal
+      :data-modal-depth="modalDepth('detail')"
+      :style="{ zIndex: modalDepth('detail') }"
       role="dialog"
-      aria-modal="true"
+      :aria-modal="isTopModal('detail') ? 'true' : 'false'"
+      :aria-hidden="isModalCovered('detail') ? 'true' : undefined"
+      :inert="isModalCovered('detail') ? true : undefined"
       aria-label="证据详情"
       @click.self="closeEvidenceDetail"
     >
@@ -1065,7 +1231,12 @@ onBeforeUnmount(() => eventAbortController.abort());
             <h2>{{ evidenceId(selectedEvidence) }}</h2>
             <p>{{ evidenceTypeLabels[selectedEvidence.evidence_type] || selectedEvidence.evidence_type }}</p>
           </div>
-          <button type="button" data-close-evidence-modal @click="closeEvidenceDetail">
+          <button
+            type="button"
+            data-close-evidence-modal
+            data-modal-initial-focus
+            @click="closeEvidenceDetail"
+          >
             关闭
           </button>
         </header>
@@ -1101,10 +1272,15 @@ onBeforeUnmount(() => eventAbortController.abort());
 
     <div
       v-if="expandedEvidenceGroup"
+      ref="evidenceGalleryModal"
       class="evidence-modal"
       data-evidence-gallery-modal
+      :data-modal-depth="modalDepth('gallery')"
+      :style="{ zIndex: modalDepth('gallery') }"
       role="dialog"
-      aria-modal="true"
+      :aria-modal="isTopModal('gallery') ? 'true' : 'false'"
+      :aria-hidden="isModalCovered('gallery') ? 'true' : undefined"
+      :inert="isModalCovered('gallery') ? true : undefined"
       aria-label="证据文件列表"
       @click.self="closeEvidenceGroup"
     >
@@ -1115,7 +1291,12 @@ onBeforeUnmount(() => eventAbortController.abort());
             <h2>{{ expandedEvidenceTitle }}</h2>
             <p>点击卡片查看详情；下载请使用卡片里的下载入口。</p>
           </div>
-          <button type="button" data-close-evidence-gallery @click="closeEvidenceGroup">
+          <button
+            type="button"
+            data-close-evidence-gallery
+            data-modal-initial-focus
+            @click="closeEvidenceGroup"
+          >
             关闭
           </button>
         </header>
@@ -1125,7 +1306,10 @@ onBeforeUnmount(() => eventAbortController.abort());
             :key="evidenceId(item)"
             class="evidence-gallery-card"
             data-evidence-gallery-card
-            @click="openEvidenceDetail(item)"
+            tabindex="0"
+            @click="openEvidenceDetail(item, $event)"
+            @keydown.enter.self.prevent="openEvidenceDetail(item, $event)"
+            @keydown.space.self.prevent="openEvidenceDetail(item, $event)"
           >
             <span
               class="evidence-card__icon evidence-file-icon evidence-file-icon--large"
@@ -1362,6 +1546,11 @@ onBeforeUnmount(() => eventAbortController.abort());
 
 .evidence-uploader__button,
 .evidence-footer button {
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
   padding: 10px 13px;
   color: white;
   background: linear-gradient(135deg, #55b8df, #8585ef);
@@ -1979,7 +2168,11 @@ onBeforeUnmount(() => eventAbortController.abort());
 
 .evidence-modal__panel button,
 .evidence-modal__link {
-  height: max-content;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
   padding: 9px 12px;
   color: #5f6fd8;
   background: #eef3ff;
