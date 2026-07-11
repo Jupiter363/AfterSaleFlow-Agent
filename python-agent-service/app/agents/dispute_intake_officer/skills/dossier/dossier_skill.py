@@ -164,6 +164,7 @@ class CaseDetailDossierSkill:
             _ensure_handoff_notes(detail)
         elif not missing_info.get("next_questions"):
             missing_info["next_questions"] = [_question_for_missing(missing)]
+        _normalize_next_verification_focus(detail)
         _record_handoff_remark_if_needed(
             detail,
             request,
@@ -670,6 +671,134 @@ def _verification_focus_for_text(text: str) -> list[str]:
     if "未收到" in text or "没收到" in text:
         focus.append("用户未收货证明")
     return focus
+
+
+_VERIFICATION_FOCUS_RULES: tuple[tuple[str, re.Pattern[str], str], ...] = (
+    (
+        "product-page",
+        re.compile(r"商品.{0,8}(页面|详情|描述)|页面.{0,8}(截图|快照|描述)|详情页|商品链接"),
+        "核对商品页面完整描述、截图或快照",
+    ),
+    (
+        "communication",
+        re.compile(
+            r"沟通记录|聊天记录|聊天截图|客服记录|协商记录|"
+            r"与商家.{0,8}(沟通|聊天)|与用户.{0,8}(沟通|聊天)"
+        ),
+        "核验用户与商家的完整沟通记录",
+    ),
+    (
+        "product-condition",
+        re.compile(
+            r"开箱|拆箱|磨损|划痕|破损|损坏|外观|瑕疵|"
+            r"商品.{0,6}(照片|图片|视频)|(照片|图片|视频).{0,6}(磨损|划痕|破损|损坏|瑕疵)"
+        ),
+        "核验商品异常照片或开箱视频，确认商品状态及形成时间",
+    ),
+    (
+        "logistics-signoff",
+        re.compile(r"物流|签收|投递|派送|收货|验货|快递|包裹|开包|打开检查|开启包裹"),
+        "核验物流签收及投递记录，确认签收人身份、位置、时间与开箱检查间隔",
+    ),
+    (
+        "order",
+        re.compile(r"订单号|订单信息|涉案商品|商品数量"),
+        "核对订单信息与涉案商品",
+    ),
+    (
+        "after-sale",
+        re.compile(r"售后单|售后申请|售后记录|处理记录"),
+        "核对售后申请与处理记录",
+    ),
+    (
+        "respondent-attitude",
+        re.compile(
+            r"对方.{0,8}(回应|态度)|商家.{0,8}(回应|态度)|"
+            r"用户.{0,8}(回应|态度)|是否接受.{0,8}(退款|诉求)"
+        ),
+        "核实对方对诉求的明确回应",
+    ),
+)
+
+
+def _clean_verification_focus(value: Any) -> str:
+    text = str(value or "")
+    substitutions = (
+        (r"^[\s·•\-—]+", ""),
+        (r"^(仍然|仍|目前)?缺少(可信的|完整的|相关的)?", ""),
+        (r"^(请问)?(您|你)?是否有", ""),
+        (r"^(能否|是否可以|可否)(请)?(提供|补充)?", ""),
+        (r"^(请|麻烦)(您|你)?(提供|补充|说明|确认|核实|核对)?", ""),
+        (r"(是否可以提供|是否能提供|可以提供吗|能提供吗)$", ""),
+        (r"[？?。；;，,\s]+$", ""),
+    )
+    for pattern, replacement in substitutions:
+        text = re.sub(pattern, replacement, text)
+    return text.strip()
+
+
+def _generic_verification_action(value: Any) -> str:
+    text = _clean_verification_focus(value)
+    if not text:
+        return ""
+    text = re.sub(r"^(获取|收集|补充|提供)", "核验", text)
+    if re.match(r"^(核验|核对|核实|确认)", text):
+        return text
+    return f"核验{text}"
+
+
+def _canonical_verification_focus(values: list[Any]) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    sources = [source for value in values if (source := _clean_verification_focus(value))]
+    has_product_condition_context = any(
+        re.search(r"开箱|拆箱|磨损|划痕|破损|损坏|外观|瑕疵", source)
+        for source in sources
+    )
+    for source in sources:
+        rule = next(
+            (candidate for candidate in _VERIFICATION_FOCUS_RULES if candidate[1].search(source)),
+            None,
+        )
+        if (
+            rule is None
+            and has_product_condition_context
+            and re.fullmatch(r"照片|图片|视频", source)
+        ):
+            rule = next(
+                candidate
+                for candidate in _VERIFICATION_FOCUS_RULES
+                if candidate[0] == "product-condition"
+            )
+        text = rule[2] if rule is not None else _generic_verification_action(source)
+        if rule is not None and rule[0] == "respondent-attitude":
+            party_match = re.search(r"商家|用户", source)
+            party = party_match.group(0) if party_match is not None else "对方"
+            text = f"核实{party}对诉求的明确回应"
+        key = (
+            rule[0]
+            if rule is not None
+            else re.sub(r"[\s、，,。；;：:]", "", text)
+        )
+        if not text or key in seen:
+            continue
+        seen.add(key)
+        normalized.append(text)
+    return normalized
+
+
+def _normalize_next_verification_focus(detail: dict[str, Any]) -> None:
+    core = _ensure_dict(detail, "dispute_core_state")
+    dispute_focus = _ensure_dict(detail, "dispute_focus")
+    missing = _ensure_dict(detail, "missing_information")
+    candidates = [
+        *_list_values(core.get("next_verification_focus")),
+        *_list_values(dispute_focus.get("facts_to_verify")),
+        *_list_values(missing.get("blocking_gaps")),
+        *_list_values(missing.get("nice_to_have_gaps")),
+        *_list_values(missing.get("next_questions")),
+    ]
+    core["next_verification_focus"] = _canonical_verification_focus(candidates)
 
 
 def _party_role_or_default(value: str | None) -> str:

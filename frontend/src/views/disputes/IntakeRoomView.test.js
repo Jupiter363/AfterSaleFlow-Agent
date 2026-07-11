@@ -328,7 +328,7 @@ describe("IntakeRoomView", () => {
     expect(wrapper.text()).toContain("故障细节");
     expect(wrapper.text()).toContain("用户原始陈述");
     expect(wrapper.text()).toContain("商家期望处理方案");
-    expect(wrapper.text()).toContain("订单号核对");
+    expect(wrapper.text()).toContain("核对订单信息与涉案商品");
     expect(wrapper.text()).toContain("继续完善案件信息");
     expect(wrapper.text()).toContain("待确认");
     expect(wrapper.text()).not.toContain("Expected outcome");
@@ -432,7 +432,7 @@ describe("IntakeRoomView", () => {
     expect(wrapper.text()).toContain("用户称订单物流已显示签收");
     expect(summaryCard.text()).not.toContain("仍缺少可信的用户原始陈述与商家质检视频。");
     expect(wrapper.get("[data-verification-gaps]").text()).toContain("下一步核验重点");
-    expect(wrapper.get("[data-verification-gaps]").text()).toContain("签收底单");
+    expect(wrapper.get("[data-verification-gaps]").text()).toContain("物流签收及投递记录");
     expect(wrapper.text()).not.toContain("SIGNED_NOT_RECEIVED");
     expect(wrapper.text()).not.toContain("88/100");
     expect(wrapper.text()).toContain("可以进入下一步");
@@ -725,9 +725,9 @@ describe("IntakeRoomView", () => {
 
     const gaps = wrapper.get("[data-verification-gaps]");
     expect(gaps.text()).toContain("下一步核验重点");
-    expect(gaps.text()).toContain("物流单号或平台可识别的物流引用");
-    expect(gaps.text()).toContain("签收截图、取件记录或未收到凭证");
+    expect(gaps.text()).toContain("物流签收及投递记录");
     expect(gaps.text()).toContain("商家对诉求的明确回应");
+    expect(gaps.findAll("[data-verification-gap-item]")).toHaveLength(2);
   });
 
   it("uses the user position as the respondent response when the merchant initiated the dispute", async () => {

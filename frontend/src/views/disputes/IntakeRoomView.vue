@@ -25,6 +25,7 @@ import {
   humanizeDossierText,
   roleLabel,
 } from "../../utils/displayText";
+import { normalizeVerificationFocus } from "../../utils/verificationFocus";
 
 const props = defineProps({
   initialDispute: { type: Object, default: null },
@@ -549,14 +550,7 @@ const allVerificationGaps = computed(() => {
       respondentRole,
     ),
   ];
-  const seen = new Set();
-  return humanizeDossierList(candidates, "")
-    .map((item) => String(item || "").trim())
-    .filter((item) => {
-      if (!item || seen.has(item)) return false;
-      seen.add(item);
-      return true;
-    });
+  return normalizeVerificationFocus(humanizeDossierList(candidates, ""));
 });
 const verificationGaps = computed(() => allVerificationGaps.value.slice(0, 4));
 const hiddenVerificationGapCount = computed(() =>
