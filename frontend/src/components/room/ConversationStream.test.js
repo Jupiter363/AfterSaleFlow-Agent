@@ -161,13 +161,14 @@ describe("ConversationStream", () => {
     expect(source).toContain("overscroll-behavior: contain;");
     expect(source).toContain("scrollbar-gutter: stable;");
     expect(source).toContain("height: 132px;");
-    expect(source).toContain("grid-template-rows: 72px minmax(0, 1fr);");
-    expect(source).toContain("gap: 6px;");
-    expect(source).toContain("padding: 8px 10px;");
+    expect(source).toContain("grid-template-rows: 72px minmax(44px, 1fr);");
+    expect(source).toContain("gap: 2px;");
+    expect(source).toContain("padding: 6px 10px;");
     expect(source).toContain("height: 72px;");
     expect(source).toContain("max-height: 72px;");
     expect(source).toContain("resize: none;");
     expect(source).toContain("flex: 0 0 auto;");
+    expect(source).toContain("min-height: 44px;");
     expect(source).toContain("white-space: nowrap;");
     expect(source).toContain("overflow-wrap: anywhere;");
     expect(source).toContain("word-break: break-word;");

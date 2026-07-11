@@ -207,12 +207,12 @@ onMounted(() => {
 }
 .conversation-stream__composer {
   display: grid;
-  grid-template-rows: 72px minmax(0, 1fr);
-  gap: 6px;
+  grid-template-rows: 72px minmax(44px, 1fr);
+  gap: 2px;
   box-sizing: border-box;
   width: 100%;
   height: 132px;
-  padding: 8px 10px;
+  padding: 6px 10px;
   overflow: hidden;
   background: #fff;
   border: 1px solid #dde6f2;
@@ -251,6 +251,8 @@ onMounted(() => {
 }
 .conversation-stream__composer button {
   flex: 0 0 auto;
+  box-sizing: border-box;
+  min-height: 44px;
   padding: 7px 12px;
   white-space: nowrap;
   color: white;

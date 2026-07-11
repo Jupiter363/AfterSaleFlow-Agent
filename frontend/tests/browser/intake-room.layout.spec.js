@@ -249,6 +249,7 @@ for (const viewport of [
     const composer = page.locator(".conversation-stream__composer");
     const textarea = composer.locator("textarea");
     const actionRow = composer.locator(":scope > div");
+    const sendButton = actionRow.locator("button");
 
     await expect(shell).toHaveCSS("height", "740px");
     await expect(composer).toHaveCSS("height", "132px");
@@ -257,7 +258,20 @@ for (const viewport of [
         (element) => element.scrollHeight > element.clientHeight,
       ),
     ).toBe(true);
-    expect(await textarea.evaluate((element) => element.clientHeight)).toBe(72);
+    const [composerBox, textareaBox, actionBox, buttonBox] = await Promise.all([
+      composer.boundingBox(),
+      textarea.boundingBox(),
+      actionRow.boundingBox(),
+      sendButton.boundingBox(),
+    ]);
+    expect(composerBox).not.toBeNull();
+    expect(textareaBox).not.toBeNull();
+    expect(actionBox).not.toBeNull();
+    expect(buttonBox).not.toBeNull();
+    expect(composerBox.height).toBe(132);
+    expect(textareaBox.height).toBe(72);
+    expect(buttonBox.height).toBeGreaterThanOrEqual(44);
+    expect(actionBox.height).toBeGreaterThanOrEqual(44);
     const composerMetrics = await composer.evaluate((element) => {
       const action = element.querySelector(":scope > div");
       const text = action?.querySelector("span");
@@ -290,6 +304,13 @@ for (const viewport of [
           composerMetrics.action.clientHeight + 1 &&
         composerMetrics.action.scrollWidth <=
           composerMetrics.action.clientWidth + 1,
+      JSON.stringify(composerMetrics, null, 2),
+    ).toBe(true);
+    expect(
+      composerMetrics.button.scrollHeight <=
+          composerMetrics.button.clientHeight + 1 &&
+        composerMetrics.button.scrollWidth <=
+          composerMetrics.button.clientWidth + 1,
       JSON.stringify(composerMetrics, null, 2),
     ).toBe(true);
     await assertInside(actionRow, composer);
