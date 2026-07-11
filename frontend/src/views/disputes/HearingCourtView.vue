@@ -68,6 +68,9 @@ const leftEvidenceDrawerTrigger = ref(null);
 const rightEvidenceDrawerTrigger = ref(null);
 const leftEvidenceDrawerClose = ref(null);
 const rightEvidenceDrawerClose = ref(null);
+const courtLedgerTrigger = ref(null);
+const courtLedgerDrawer = ref(null);
+const courtLedgerCloseButton = ref(null);
 const proposalText = ref("");
 const statementText = ref("");
 const proposing = ref(false);
@@ -80,6 +83,7 @@ const LONG_TRANSCRIPT_THRESHOLD = 1500;
 const LONG_TRANSCRIPT_PREVIEW_LENGTH = 900;
 let evidenceDrawerResizeObserver = null;
 let evidenceDrawerWindowResizeHandler = null;
+let courtLedgerReturnFocus = null;
 const caseId = computed(() => route.params.caseId);
 const role = computed(() => props.viewerRole || actor.role);
 const demoActorIds = {
@@ -693,8 +697,53 @@ function trapEvidenceDrawerFocus(event) {
   }
 }
 
-function handleEvidenceDrawerKeydown(event) {
-  if (event.key === "Escape" && evidenceDrawerSide.value) {
+async function openCourtLedger(event) {
+  courtLedgerReturnFocus =
+    event?.currentTarget || courtLedgerTrigger.value || document.activeElement;
+  ledgerOpen.value = true;
+  await nextTick();
+  courtLedgerCloseButton.value?.focus();
+}
+
+async function closeCourtLedger({ restoreFocus = true } = {}) {
+  if (!ledgerOpen.value) return;
+  const returnFocus = courtLedgerReturnFocus;
+  ledgerOpen.value = false;
+  courtLedgerReturnFocus = null;
+  await nextTick();
+  if (restoreFocus && returnFocus?.isConnected) returnFocus.focus();
+}
+
+function trapCourtLedgerFocus(event) {
+  if (event.key !== "Tab" || !ledgerOpen.value) return;
+  const drawer = courtLedgerDrawer.value;
+  if (!drawer) return;
+  const focusable = [...drawer.querySelectorAll(
+    'button:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
+  )].filter((element) => !element.hasAttribute("hidden"));
+  if (!focusable.length) return;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (!drawer.contains(document.activeElement)) {
+    event.preventDefault();
+    (event.shiftKey ? last : first).focus();
+  } else if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
+function handleCourtroomKeydown(event) {
+  if (event.key !== "Escape") return;
+  if (ledgerOpen.value) {
+    event.preventDefault();
+    void closeCourtLedger();
+    return;
+  }
+  if (evidenceDrawerSide.value) {
     event.preventDefault();
     void closeEvidenceDrawer();
   }
@@ -1488,7 +1537,7 @@ async function completeHearing() {
 }
 
 onMounted(async () => {
-  window.addEventListener("keydown", handleEvidenceDrawerKeydown);
+  window.addEventListener("keydown", handleCourtroomKeydown);
   startEvidenceDrawerBreakpointObserver();
   await load();
   if (
@@ -1500,7 +1549,8 @@ onMounted(async () => {
   }
 });
 onBeforeUnmount(() => {
-  window.removeEventListener("keydown", handleEvidenceDrawerKeydown);
+  window.removeEventListener("keydown", handleCourtroomKeydown);
+  courtLedgerReturnFocus = null;
   stopEvidenceDrawerBreakpointObserver();
   eventAbortController.abort();
   clearInterval(stageClockTimer);
@@ -1960,10 +2010,11 @@ onBeforeUnmount(() => {
 
         <div class="hearing-side-actions">
           <button
+            ref="courtLedgerTrigger"
             type="button"
             class="evidence-ledger-button"
             data-open-court-ledger
-            @click="ledgerOpen = true"
+            @click="openCourtLedger"
           >
             查看庭审卷轴
           </button>
@@ -1986,12 +2037,14 @@ onBeforeUnmount(() => {
 
     <div
       v-if="ledgerOpen"
+      ref="courtLedgerDrawer"
       class="court-ledger-backdrop"
       data-court-ledger-drawer
       role="dialog"
       aria-modal="true"
       aria-label="庭审卷轴"
-      @click.self="ledgerOpen = false"
+      @keydown="trapCourtLedgerFocus"
+      @click.self="closeCourtLedger()"
     >
       <aside class="hearing-ledger">
         <header>
@@ -2001,9 +2054,11 @@ onBeforeUnmount(() => {
             <p>这里保存每一轮封存后的可追溯记录，用于后续复核、申诉和审核确认。</p>
           </div>
           <button
+            ref="courtLedgerCloseButton"
             type="button"
+            data-close-court-ledger
             aria-label="关闭庭审卷轴"
-            @click="ledgerOpen = false"
+            @click="closeCourtLedger()"
           >
             ×
           </button>

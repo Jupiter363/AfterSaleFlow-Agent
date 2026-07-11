@@ -675,6 +675,92 @@ describe("HearingCourtView", () => {
     }
   });
 
+  it("moves focus into the court ledger, traps Tab, and restores the opener for explicit closes", async () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const { wrapper } = await mountView({ attachTo: host });
+
+    try {
+      const opener = wrapper.get("[data-open-court-ledger]");
+      opener.element.focus();
+      await opener.trigger("click");
+      await flushPromises();
+
+      const ledger = wrapper.get("[data-court-ledger-drawer]");
+      const closeButton = ledger.get('button[aria-label="关闭庭审卷轴"]');
+      expect(document.activeElement).toBe(closeButton.element);
+
+      const tabEvent = new KeyboardEvent("keydown", {
+        key: "Tab",
+        bubbles: true,
+        cancelable: true,
+      });
+      closeButton.element.dispatchEvent(tabEvent);
+      expect(tabEvent.defaultPrevented).toBe(true);
+      expect(document.activeElement).toBe(closeButton.element);
+
+      await closeButton.trigger("click");
+      await flushPromises();
+      expect(wrapper.find("[data-court-ledger-drawer]").exists()).toBe(false);
+      expect(document.activeElement).toBe(opener.element);
+
+      await opener.trigger("click");
+      await flushPromises();
+      await wrapper.get("[data-court-ledger-drawer]").trigger("click");
+      await flushPromises();
+      expect(wrapper.find("[data-court-ledger-drawer]").exists()).toBe(false);
+      expect(document.activeElement).toBe(opener.element);
+    } finally {
+      wrapper.unmount();
+      host.remove();
+    }
+  });
+
+  it("closes the stacked court ledger before the evidence drawer on consecutive Escape presses", async () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const { wrapper } = await mountView({ attachTo: host });
+
+    try {
+      const evidenceLauncher = wrapper.get('[data-open-evidence-drawer="right"]');
+      await evidenceLauncher.trigger("click");
+      await flushPromises();
+      expect(wrapper.get('[data-evidence-drawer-open="right"]').exists()).toBe(true);
+
+      const ledgerLauncher = wrapper.get("[data-open-court-ledger]");
+      ledgerLauncher.element.focus();
+      await ledgerLauncher.trigger("click");
+      await flushPromises();
+
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+      await flushPromises();
+      expect(wrapper.find("[data-court-ledger-drawer]").exists()).toBe(false);
+      expect(wrapper.get('[data-evidence-drawer-open="right"]').exists()).toBe(true);
+      expect(document.activeElement).toBe(ledgerLauncher.element);
+
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+      await flushPromises();
+      expect(wrapper.find("[data-evidence-drawer-open]").exists()).toBe(false);
+      expect(document.activeElement).toBe(evidenceLauncher.element);
+    } finally {
+      wrapper.unmount();
+      host.remove();
+    }
+  });
+
+  it("removes the shared courtroom keydown listener when the view unmounts", async () => {
+    const addListener = vi.spyOn(window, "addEventListener");
+    const removeListener = vi.spyOn(window, "removeEventListener");
+    const { wrapper } = await mountView();
+    const keydownHandler = addListener.mock.calls.find(
+      ([eventName]) => eventName === "keydown",
+    )?.[1];
+
+    expect(keydownHandler).toEqual(expect.any(Function));
+    wrapper.unmount();
+    expect(removeListener).toHaveBeenCalledWith("keydown", keydownHandler);
+  });
+
   it("clears an open evidence drawer without restoring focus when the courtroom grows past the drawer breakpoint", async () => {
     let resizeCallback;
     const observe = vi.fn();

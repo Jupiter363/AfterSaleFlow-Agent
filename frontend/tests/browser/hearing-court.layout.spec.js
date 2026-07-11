@@ -352,6 +352,59 @@ test("clears drawer dialog state without restoring hidden launcher focus when th
   await expectNoDocumentHorizontalOverflow(page);
 });
 
+test("keeps court ledger focus modal and restores its opener after button and backdrop closes", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await openHearingCourt(page);
+  await page.locator('[data-open-evidence-drawer="right"]').click();
+  const ledgerTrigger = page.locator("[data-open-court-ledger]");
+  const ledger = page.locator("[data-court-ledger-drawer]");
+  const closeButton = ledger.getByRole("button", { name: "关闭庭审卷轴" });
+
+  await ledgerTrigger.click();
+  await expect(ledger).toBeVisible();
+  await expect(closeButton).toBeFocused();
+
+  await page.keyboard.press("Tab");
+  await expect(closeButton).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(closeButton).toBeFocused();
+
+  await closeButton.click();
+  await expect(ledger).toHaveCount(0);
+  await expect(ledgerTrigger).toBeFocused();
+  await expectOnlyDrawerOpen(page, "right");
+
+  await ledgerTrigger.click();
+  await expect(closeButton).toBeFocused();
+  await ledger.click({ position: { x: 5, y: 5 } });
+  await expect(ledger).toHaveCount(0);
+  await expect(ledgerTrigger).toBeFocused();
+  await expectOnlyDrawerOpen(page, "right");
+});
+
+test("closes a stacked court ledger before its underlying evidence drawer", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await openHearingCourt(page);
+  const evidenceTrigger = page.locator('[data-open-evidence-drawer="right"]');
+  await evidenceTrigger.click();
+  const ledgerTrigger = page.locator("[data-open-court-ledger]");
+  await ledgerTrigger.click();
+  await expect(page.locator("[data-court-ledger-drawer]")).toBeVisible();
+
+  await page.keyboard.press("Escape");
+  await expect(page.locator("[data-court-ledger-drawer]")).toHaveCount(0);
+  await expectOnlyDrawerOpen(page, "right");
+  await expect(ledgerTrigger).toBeFocused();
+
+  await page.keyboard.press("Escape");
+  await expect(page.locator("[data-evidence-drawer-open]")).toHaveCount(0);
+  await expect(evidenceTrigger).toBeFocused();
+});
+
 test("keeps the hearing ledger close target at least 44px square", async ({
   page,
 }) => {
