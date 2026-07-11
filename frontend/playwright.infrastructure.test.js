@@ -85,7 +85,7 @@ describe("global width fixture room routing", () => {
   );
 });
 
-test("the known Outcome 320 xfail is applied only after strict page health checks", async () => {
+test("global width smoke keeps strict page health checks without expected failures", async () => {
   const source = await readFile(
     path.join(process.cwd(), "tests/browser/global-width-smoke.spec.js"),
     "utf8",
@@ -99,7 +99,6 @@ test("the known Outcome 320 xfail is applied only after strict page health check
   const pageErrorIndex = source.indexOf(
     '`${route.path} emitted page errors at ${viewport.width}px`,',
   );
-  const expectedFailureIndex = source.indexOf("test.fail(");
   const widthAssertionIndex = source.indexOf(
     "report.scrollWidth <= report.viewportWidth + 1",
   );
@@ -107,6 +106,6 @@ test("the known Outcome 320 xfail is applied only after strict page health check
   expect(readyIndex).toBeGreaterThan(-1);
   expect(measurementIndex).toBeGreaterThan(readyIndex);
   expect(pageErrorIndex).toBeGreaterThan(measurementIndex);
-  expect(expectedFailureIndex).toBeGreaterThan(pageErrorIndex);
-  expect(widthAssertionIndex).toBeGreaterThan(expectedFailureIndex);
+  expect(widthAssertionIndex).toBeGreaterThan(pageErrorIndex);
+  expect(source).not.toContain("test.fail(");
 });
