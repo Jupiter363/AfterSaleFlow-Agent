@@ -223,11 +223,29 @@ const strategies = [
 <style scoped>
 .agent-console {
   display: grid;
+  width: 100%;
+  min-width: 0;
   gap: 18px;
+  box-sizing: border-box;
+}
+
+.agent-console,
+.agent-console * {
+  box-sizing: border-box;
+}
+
+.agent-console :where(header, aside, main, section, article, div, button, span, strong, small, i, p, h1, h2, h3, dl, dt, dd, b) {
+  min-width: 0;
+}
+
+.agent-console :where(span, strong, small, i, p, h1, h2, h3, dt, dd, b) {
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .agent-console__intro {
   display: flex;
+  min-width: 0;
   justify-content: space-between;
   gap: 24px;
   align-items: end;
@@ -264,7 +282,9 @@ const strategies = [
 .agent-console__intro > strong,
 .agent-panel__header > strong {
   flex: 0 0 auto;
+  max-width: 100%;
   padding: 10px 13px;
+  overflow-wrap: anywhere;
   color: #8b5272;
   background: #fff0f4;
   border: 1px solid #f2d7df;
@@ -274,6 +294,7 @@ const strategies = [
 
 .agent-console__layout {
   display: grid;
+  min-width: 0;
   grid-template-columns: 300px minmax(0, 1fr);
   gap: 18px;
 }
@@ -282,6 +303,7 @@ const strategies = [
 .agent-panel,
 .prompt-card,
 .court-mapping {
+  min-width: 0;
   background: #ffffffd9;
   border: 1px solid #dfe8f2;
   border-radius: 28px;
@@ -302,7 +324,8 @@ const strategies = [
 
 .agent-ticket {
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  min-width: 0;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   gap: 12px;
   align-items: center;
   width: 100%;
@@ -348,7 +371,9 @@ const strategies = [
 }
 
 .agent-ticket i {
+  max-width: 100%;
   padding: 5px 7px;
+  overflow-wrap: anywhere;
   color: #657a9b;
   background: #fff;
   border: 1px solid #e1e9f2;
@@ -356,11 +381,12 @@ const strategies = [
   font-size: 10px;
   font-style: normal;
   font-weight: 900;
-  white-space: nowrap;
+  white-space: normal;
 }
 
 .agent-workbench {
   display: grid;
+  min-width: 0;
   gap: 18px;
 }
 
@@ -370,6 +396,7 @@ const strategies = [
 
 .agent-panel__header {
   display: flex;
+  min-width: 0;
   justify-content: space-between;
   gap: 18px;
   align-items: start;
@@ -378,12 +405,14 @@ const strategies = [
 
 .agent-config-tabs {
   display: grid;
+  min-width: 0;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
   margin-bottom: 16px;
 }
 
 .agent-config-tabs article {
+  min-width: 0;
   padding: 13px;
   background: #f7f9fc;
   border: 1px solid #e2e9f1;
@@ -404,6 +433,7 @@ const strategies = [
 
 .jury-strategies {
   display: grid;
+  min-width: 0;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
 }
@@ -411,6 +441,7 @@ const strategies = [
 .jury-strategy {
   position: relative;
   min-height: 230px;
+  min-width: 0;
   padding: 16px;
   overflow: hidden;
   background: #ffffffd9;
@@ -447,6 +478,7 @@ const strategies = [
 
 .jury-strategy__node {
   padding: 8px 10px;
+  overflow-wrap: anywhere;
   border-radius: 14px;
   font-size: 12px;
   font-weight: 800;
@@ -480,6 +512,7 @@ const strategies = [
 
 .agent-console__preview {
   display: grid;
+  min-width: 0;
   grid-template-columns: 1.1fr .9fr;
   gap: 16px;
 }
@@ -527,13 +560,16 @@ const strategies = [
 
 .skill-badges {
   display: flex;
+  min-width: 0;
   gap: 8px;
   flex-wrap: wrap;
   margin-top: 12px;
 }
 
 .skill-badges span {
+  max-width: 100%;
   padding: 7px 9px;
+  overflow-wrap: anywhere;
   color: #53619a;
   background: #edf6ff;
   border: 1px solid #dce6f3;
@@ -544,7 +580,8 @@ const strategies = [
 
 .court-preview {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  min-width: 0;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   grid-template-areas:
     ". judge ."
     "user clerk merchant"
@@ -560,7 +597,9 @@ const strategies = [
 }
 
 .court-preview b {
+  min-width: 0;
   padding: 11px;
+  overflow-wrap: anywhere;
   text-align: center;
   border-radius: 16px;
   font-size: 12px;
