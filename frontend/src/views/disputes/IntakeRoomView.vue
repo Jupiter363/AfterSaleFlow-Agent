@@ -2000,10 +2000,14 @@ onBeforeUnmount(() => {
   font-size: 18px;
 }
 .intake-error-dialog__card p {
+  min-width: 0;
   margin: 0;
   color: #6d7890;
   font-size: 13px;
   line-height: 1.65;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 .intake-error-dialog__card button {
   justify-self: center;

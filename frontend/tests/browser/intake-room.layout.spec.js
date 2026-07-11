@@ -362,3 +362,43 @@ test("confines native modal keyboard traversal and restores the trigger", async 
   await expect(dialog).toHaveCount(0);
   await expect(trigger).toBeFocused();
 });
+
+test("wraps a 200-character unbroken error detail inside the intake dialog", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 320, height: 568 });
+  const longUnbrokenError = `https://errors.example.test/#${"a".repeat(200)}`;
+  await installIntakeRoomFixture(page, {
+    confirmErrorDetail: longUnbrokenError,
+  });
+  await page.goto(`/disputes/${CASE_ID}/intake`);
+
+  await page.locator("[data-confirm-admission]").click();
+
+  const dialog = page.locator("[data-intake-error-dialog]");
+  const detail = dialog.locator(".intake-error-dialog__card p");
+  await expect(dialog).toBeVisible();
+  await expect(detail).toHaveText(longUnbrokenError);
+  const detailMetrics = await detail.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return {
+      clientWidth: element.clientWidth,
+      scrollWidth: element.scrollWidth,
+      minWidth: style.minWidth,
+      whiteSpace: style.whiteSpace,
+      overflowWrap: style.overflowWrap,
+      wordBreak: style.wordBreak,
+    };
+  });
+  expect(detailMetrics).toMatchObject({
+    minWidth: "0px",
+    whiteSpace: "pre-wrap",
+    overflowWrap: "anywhere",
+    wordBreak: "break-word",
+  });
+  expect(
+    detailMetrics.scrollWidth <= detailMetrics.clientWidth + 1,
+    JSON.stringify(detailMetrics, null, 2),
+  ).toBe(true);
+  expect(await pageHasHorizontalOverflow(page)).toBe(false);
+});

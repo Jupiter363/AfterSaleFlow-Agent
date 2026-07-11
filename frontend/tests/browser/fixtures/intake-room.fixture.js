@@ -195,6 +195,20 @@ export async function installIntakeRoomFixture(page, options = {}) {
         body: ": deterministic-playwright-heartbeat\n\n",
       });
     }
+    if (
+      request.method() === "POST" &&
+      url.pathname === `/api/disputes/${CASE_ID}/intake/confirm` &&
+      options.confirmErrorDetail
+    ) {
+      return route.fulfill({
+        status: 502,
+        contentType: "application/json",
+        body: JSON.stringify({
+          success: false,
+          message: options.confirmErrorDetail,
+        }),
+      });
+    }
     throw new Error(
       `Unhandled browser-test API request: ${request.method()} ${url.pathname}${url.search}`,
     );
