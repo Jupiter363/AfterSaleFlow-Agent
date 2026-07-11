@@ -1,6 +1,13 @@
 import { defineConfig, devices } from "@playwright/test";
 
-const port = Number.parseInt(process.env.PLAYWRIGHT_PORT || "4173", 10);
+const playwrightPort = process.env.PLAYWRIGHT_PORT ?? "4173";
+if (!/^\d+$/.test(playwrightPort)) {
+  throw new Error("PLAYWRIGHT_PORT must be an integer between 1 and 65535");
+}
+const port = Number(playwrightPort);
+if (!Number.isSafeInteger(port) || port < 1 || port > 65535) {
+  throw new Error("PLAYWRIGHT_PORT must be an integer between 1 and 65535");
+}
 const baseURL = `http://127.0.0.1:${port}`;
 
 export default defineConfig({

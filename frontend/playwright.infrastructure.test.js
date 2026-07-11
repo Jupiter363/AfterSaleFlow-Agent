@@ -29,6 +29,18 @@ describe("Playwright worktree isolation", () => {
     expect(config.webServer.command).toContain("--port 43173 --strictPort");
   });
 
+  test.each(["not-a-port", "0", "65536", "4173suffix"])(
+    "rejects an invalid PLAYWRIGHT_PORT value: %s",
+    async (value) => {
+      process.env.PLAYWRIGHT_PORT = value;
+      vi.resetModules();
+
+      await expect(import("./playwright.config.js")).rejects.toThrow(
+        /PLAYWRIGHT_PORT must be an integer between 1 and 65535/,
+      );
+    },
+  );
+
   test("starts this worktree's Vite server instead of reusing another one", async () => {
     const { default: config } = await import("./playwright.config.js");
 
