@@ -55,6 +55,21 @@ function Set-GeneratedValue {
 }
 
 $lines = [System.IO.File]::ReadAllLines($EnvFile)
+$existingKeys = @{}
+foreach ($line in $lines) {
+    if ($line -match '^([A-Za-z_][A-Za-z0-9_]*)=') {
+        $existingKeys[$Matches[1]] = $true
+    }
+}
+foreach ($line in [System.IO.File]::ReadAllLines($ExampleFile)) {
+    if (
+        $line -match '^([A-Za-z_][A-Za-z0-9_]*)=' -and
+        -not $existingKeys.ContainsKey($Matches[1])
+    ) {
+        $lines += $line
+        $existingKeys[$Matches[1]] = $true
+    }
+}
 
 Set-GeneratedValue "POSTGRES_USER" ("user_" + (New-SecureHex 4))
 Set-GeneratedValue "POSTGRES_PASSWORD" (New-SecureHex 24)
@@ -76,4 +91,4 @@ $utf8WithoutBom = New-Object System.Text.UTF8Encoding($false)
 [System.IO.File]::WriteAllLines($EnvFile, $lines, $utf8WithoutBom)
 
 Write-Output "Local .env generated or updated; secret values were not printed."
-Write-Output "Set DEEPSEEK_API_KEY in .env before starting services."
+Write-Output "Set DASHSCOPE_API_KEY in .env before starting services."

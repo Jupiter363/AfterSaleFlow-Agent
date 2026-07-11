@@ -11,12 +11,12 @@ def test_litellm_proxy_contract_and_structured_response_validation() -> None:
         assert request.url == "http://litellm:4000/v1/chat/completions"
         assert request.headers["Authorization"] == "Bearer test-master-key"
         body = json.loads(request.content)
-        assert body["model"] == "deepseek-v4-flash"
+        assert body["model"] == "qwen3.7-plus"
         assert body["response_format"] == {"type": "json_object"}
         return httpx.Response(
             200,
             json={
-                "model": "deepseek-v4-flash",
+                "model": "qwen3.7-plus",
                 "choices": [
                     {
                         "message": {
@@ -39,7 +39,7 @@ def test_litellm_proxy_contract_and_structured_response_validation() -> None:
 
     client = LiteLlmProxyClient(
         "http://litellm:4000",
-        "deepseek-v4-flash",
+        "qwen3.7-plus",
         "test-master-key",
         transport=httpx.MockTransport(handler),
     )
@@ -66,7 +66,7 @@ def test_litellm_proxy_repairs_empty_structured_content_with_plain_json_retry() 
             return httpx.Response(
                 200,
                 json={
-                    "model": "deepseek-v4-flash",
+                    "model": "qwen3.7-plus",
                     "choices": [{"message": {"content": ""}}],
                 },
             )
@@ -74,7 +74,7 @@ def test_litellm_proxy_repairs_empty_structured_content_with_plain_json_retry() 
         return httpx.Response(
             200,
             json={
-                "model": "deepseek-v4-flash",
+                "model": "qwen3.7-plus",
                 "choices": [
                     {
                         "message": {
@@ -95,7 +95,7 @@ def test_litellm_proxy_repairs_empty_structured_content_with_plain_json_retry() 
 
     client = LiteLlmProxyClient(
         "http://litellm:4000",
-        "deepseek-v4-flash",
+        "qwen3.7-plus",
         "test-master-key",
         transport=httpx.MockTransport(handler),
     )
@@ -128,7 +128,7 @@ def test_litellm_proxy_retries_without_json_mode_when_provider_rejects_response_
         return httpx.Response(
             200,
             json={
-                "model": "deepseek-v4-flash",
+                "model": "qwen3.7-plus",
                 "choices": [
                     {
                         "message": {
@@ -149,7 +149,7 @@ def test_litellm_proxy_retries_without_json_mode_when_provider_rejects_response_
 
     client = LiteLlmProxyClient(
         "http://litellm:4000",
-        "deepseek-v4-flash",
+        "qwen3.7-plus",
         "test-master-key",
         transport=httpx.MockTransport(handler),
     )
@@ -164,3 +164,49 @@ def test_litellm_proxy_retries_without_json_mode_when_provider_rejects_response_
     assert len(calls) == 2
     assert result.value.requires_supplemental_evidence is False
     assert result.token_usage["total"] == 18
+
+
+def test_dashscope_v1_base_url_does_not_duplicate_version_segment() -> None:
+    endpoint = (
+        "https://ws-veazvl2fycrurdmv.cn-beijing.maas.aliyuncs.com/"
+        "compatible-mode/v1/chat/completions"
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == endpoint
+        body = json.loads(request.content)
+        assert body["model"] == "qwen3.7-plus"
+        return httpx.Response(
+            200,
+            json={
+                "model": "qwen3.7-plus",
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "requires_supplemental_evidence": False,
+                                    "gaps": [],
+                                }
+                            )
+                        }
+                    }
+                ],
+            },
+        )
+
+    client = LiteLlmProxyClient(
+        endpoint.removesuffix("/chat/completions"),
+        "qwen3.7-plus",
+        "test-dashscope-key",
+        transport=httpx.MockTransport(handler),
+    )
+
+    result = client.generate(
+        node_name="evidence_gap_request_node",
+        system_prompt="system",
+        user_prompt="user",
+        output_type=EvidenceGapOutput,
+    )
+
+    assert result.model == "qwen3.7-plus"

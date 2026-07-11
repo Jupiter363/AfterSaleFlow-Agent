@@ -98,6 +98,6 @@ def test_deployment_document_covers_start_stop_security_and_troubleshooting() ->
         "127.0.0.1",
         "镜像覆盖",
         "故障排查",
-        "DEEPSEEK_API_KEY",
+        "DASHSCOPE_API_KEY",
     ):
         assert contract in deployment

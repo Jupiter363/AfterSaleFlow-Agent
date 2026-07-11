@@ -35,7 +35,7 @@ jobs:
 
       - name: Secret scan / secret scanning
         run: |
-          ! grep -RInE 'sk-(phase[0-9]+|live|prod)|BEGIN PRIVATE KEY|DEEPSEEK_API_KEY=sk-' \
+          ! grep -RInE 'sk-(phase[0-9]+|live|prod)|BEGIN PRIVATE KEY|(DEEPSEEK|DASHSCOPE)_API_KEY=sk-' \
             --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=target --exclude-dir=dist .
 
       - name: Static repository contracts
@@ -94,12 +94,12 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build and start Compose stack
         env:
-          DEEPSEEK_API_KEY: sk-ci-placeholder
+          DASHSCOPE_API_KEY: ci-placeholder-not-a-real-key
           DEFAULT_LLM_API_BASE: http://127.0.0.1:9
         run: docker compose up -d --build --wait --wait-timeout 360
       - name: Smoke test
         env:
-          DEEPSEEK_API_KEY: sk-ci-placeholder
+          DASHSCOPE_API_KEY: ci-placeholder-not-a-real-key
           DEFAULT_LLM_API_BASE: http://127.0.0.1:9
         run: ./scripts/smoke-test.sh
       - name: API, E2E, and load smoke tests

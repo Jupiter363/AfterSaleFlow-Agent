@@ -47,7 +47,7 @@ Evaluation 做改进。
 |---|---|---|---|
 | Workflow | Temporal | 长流程、Signal、Timer、重试、恢复 | 不做开放式认知 |
 | 模型代理 | LiteLLM Proxy | 唯一 LLM 网关 | 应用不直连模型厂商 |
-| 模型 | deepseek-v4-flash | 统一 LLM 模型 | 仅通过 LiteLLM 调用 |
+| 模型 | qwen3.7-plus | 统一 LLM 模型 | 仅通过 LiteLLM 调用 |
 | Agent 观测 | Langfuse | Prompt/Agent Trace、成本、评估关联 | 不保存业务最终状态 |
 
 ### 2.3 数据与基础设施
@@ -135,7 +135,7 @@ Frontend API。
 不能把模型草案当最终决定；
 不能让 Agent 绕过状态机；
 不能执行无有效人审记录的动作；
-不能直接调用 DeepSeek；
+不能直接调用 Qwen 3.7 Plus；
 不能读取模型厂商 API Key；
 不能让前端绕过 Java 访问内部 Agent。
 ```
@@ -240,10 +240,11 @@ Workflow History。
 约束：
 
 ```text
-唯一默认模型 deepseek-v4-flash；
+唯一默认模型 qwen3.7-plus；
 应用服务只调用 LiteLLM；
+Qwen 思考模式由 LiteLLM 统一设置 enable_thinking=true；
 模型供应商密钥不进入前端、Prompt、日志或数据库；
-Java 不直接调用 LiteLLM 或 DeepSeek。
+Java 不直接调用 LiteLLM 或 Qwen 3.7 Plus。
 ```
 
 ### 3.7 langfuse
@@ -1009,10 +1010,10 @@ Agent 预算超限率；
 ### 12.1 统一模型配置
 
 ```text
-DEFAULT_LLM_MODEL=deepseek-v4-flash
-LITELLM_DEFAULT_MODEL=deepseek-v4-flash
-AGENT_LLM_MODEL=deepseek-v4-flash
-EVALUATION_LLM_MODEL=deepseek-v4-flash
+DEFAULT_LLM_MODEL=qwen3.7-plus
+LITELLM_DEFAULT_MODEL=qwen3.7-plus
+AGENT_LLM_MODEL=qwen3.7-plus
+EVALUATION_LLM_MODEL=qwen3.7-plus
 ```
 
 所有 LLM 调用必须经过 LiteLLM。

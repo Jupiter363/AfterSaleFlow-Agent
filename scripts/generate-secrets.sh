@@ -9,6 +9,15 @@ if [[ ! -f "${ENV_FILE}" ]]; then
   cp "${EXAMPLE_FILE}" "${ENV_FILE}"
 fi
 
+while IFS= read -r line; do
+  if [[ "${line}" =~ ^([A-Za-z_][A-Za-z0-9_]*)= ]]; then
+    key="${BASH_REMATCH[1]}"
+    if ! grep -q "^${key}=" "${ENV_FILE}"; then
+      printf '%s\n' "${line}" >> "${ENV_FILE}"
+    fi
+  fi
+done < "${EXAMPLE_FILE}"
+
 generate_secret() {
   openssl rand -hex 24
 }
@@ -46,5 +55,4 @@ replace_if_placeholder "PYTHON_AGENT_SERVICE_SECRET" "$(generate_secret)"
 replace_if_placeholder "OCR_SERVICE_SECRET" "$(generate_secret)"
 
 echo "Local .env generated or updated; secret values were not printed."
-echo "Set DEEPSEEK_API_KEY in .env before starting services."
-
+echo "Set DASHSCOPE_API_KEY in .env before starting services."

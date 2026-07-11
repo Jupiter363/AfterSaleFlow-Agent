@@ -6,7 +6,7 @@
 - Docker Compose v2 可用。
 - 至少 12 GB 可用内存、25 GB 可用磁盘空间。
 - 本地安装 Bash、curl 和 Python 3，用于执行脚本与 smoke test。
-- 已获得有效的 DeepSeek API Key。密钥只写入被 Git 忽略的 `.env`。
+- 已获得有效的百炼 DASHSCOPE API Key。密钥只写入被 Git 忽略的 `.env`。
 
 Windows 默认 Docker Desktop 路径可为
 `C:\Program Files\Docker\Docker`，项目本身只依赖 `docker` CLI。
@@ -18,7 +18,7 @@ cp .env.example .env
 ./scripts/generate-secrets.sh
 ```
 
-将 `.env` 中的 `DEEPSEEK_API_KEY` 替换为真实值，然后执行：
+将 `.env` 中的 `DASHSCOPE_API_KEY` 替换为真实值，然后执行：
 
 ```bash
 ./scripts/dev-up.sh
@@ -27,7 +27,7 @@ cp .env.example .env
 `dev-up.sh` 会依次完成：
 
 1. 补齐本地随机密钥。
-2. 校验 DeepSeek Key 未保留占位值。
+2. 校验 DASHSCOPE Key 未保留占位值。
 3. 校验 Compose 配置。
 4. 构建 Java、Python、OCR、Frontend 镜像。
 5. 启动并等待所有服务健康。

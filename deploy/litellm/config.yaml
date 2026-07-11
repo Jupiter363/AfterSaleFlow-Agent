@@ -1,9 +1,11 @@
 model_list:
-  - model_name: deepseek-v4-flash
+  - model_name: qwen3.7-plus
     litellm_params:
-      model: openai/deepseek-v4-flash
-      api_key: os.environ/DEEPSEEK_API_KEY
+      model: openai/qwen3.7-plus
+      api_key: os.environ/DASHSCOPE_API_KEY
       api_base: os.environ/DEFAULT_LLM_API_BASE
+      extra_body:
+        enable_thinking: true
 
 litellm_settings:
   drop_params: true
@@ -14,4 +16,3 @@ litellm_settings:
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
   database_url: os.environ/DATABASE_URL
-

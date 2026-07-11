@@ -6,9 +6,13 @@ cd "${ROOT_DIR}"
 
 ./scripts/generate-secrets.sh
 
-if grep -q '^DEEPSEEK_API_KEY=__PASTE_YOUR_DEEPSEEK_API_KEY_HERE__$' .env \
-    && [[ "${DEEPSEEK_API_KEY:-}" != sk-* ]]; then
-  echo "DEEPSEEK_API_KEY is not configured in .env." >&2
+dashscope_api_key="${DASHSCOPE_API_KEY:-}"
+if [[ -z "${dashscope_api_key}" ]]; then
+  dashscope_api_key="$(sed -n 's/^DASHSCOPE_API_KEY=//p' .env | tail -n 1)"
+fi
+if [[ -z "${dashscope_api_key}" \
+    || "${dashscope_api_key}" == "__PASTE_YOUR_DASHSCOPE_API_KEY_HERE__" ]]; then
+  echo "DASHSCOPE_API_KEY is not configured in .env." >&2
   exit 1
 fi
 

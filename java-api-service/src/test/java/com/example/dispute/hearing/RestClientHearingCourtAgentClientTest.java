@@ -54,7 +54,7 @@ class RestClientHearingCourtAgentClientTest {
                                   "final_draft_required":false,
                                   "review_focus_signal":["用户关注签收人身份核验。"],
                                   "prompt_version":"hearing-round-turn-v1",
-                                  "model":"deepseek-v4-flash"
+                                  "model":"qwen3.7-plus"
                                 }
                                 """,
                                 MediaType.APPLICATION_JSON));

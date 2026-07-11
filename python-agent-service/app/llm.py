@@ -144,7 +144,7 @@ class LiteLlmProxyClient:
         if json_mode:
             request_body["response_format"] = {"type": "json_object"}
         response = client.post(
-            f"{self._base_url}/v1/chat/completions",
+            self._chat_completions_url(),
             headers={"Authorization": f"Bearer {self._api_key}"},
             json=request_body,
         )
@@ -154,6 +154,11 @@ class LiteLlmProxyClient:
         except ValueError as exception:
             raise AgentServiceUnavailable("LiteLLM proxy returned invalid JSON") from exception
         return payload
+
+    def _chat_completions_url(self) -> str:
+        if self._base_url.endswith("/v1"):
+            return f"{self._base_url}/chat/completions"
+        return f"{self._base_url}/v1/chat/completions"
 
     @staticmethod
     def _parse_structured_payload(

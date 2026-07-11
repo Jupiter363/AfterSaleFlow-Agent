@@ -243,7 +243,7 @@ class HearingCourtOrchestratorTest {
                                 1,
                                 false,
                                 "hearing-round-opening-v1",
-                                "deepseek-v4-flash"));
+                                "qwen3.7-plus"));
 
         orchestrator.afterRoundOpened(dispute.getId(), 1, "TRACE_COURT_OPENING_1");
 
@@ -423,7 +423,7 @@ class HearingCourtOrchestratorTest {
                                 2,
                                 false,
                                 "hearing-round-turn-v1",
-                                "deepseek-v4-flash"));
+                                "qwen3.7-plus"));
         when(toolRegistry.definitions())
                 .thenReturn(
                         List.of(
@@ -558,7 +558,7 @@ class HearingCourtOrchestratorTest {
                                 false,
                                 List.of("用户认可退款方向，但要求复核签收人身份是否已核验清楚。"),
                                 "hearing-round-turn-v1",
-                                "deepseek-v4-flash"));
+                                "qwen3.7-plus"));
         when(a2aMessageService.findForJudge(dispute.getId(), 3))
                 .thenReturn(
                         List.of(

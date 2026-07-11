@@ -40,7 +40,7 @@ Tool Executor 只执行经过审批、参数冻结且具备幂等保护的确定
 ```bash
 cp .env.example .env
 ./scripts/generate-secrets.sh
-# 将 DeepSeek Key 写入本地 .env；不要提交该文件
+# 将百炼 DASHSCOPE_API_KEY 写入本地 .env；不要提交该文件
 ./scripts/dev-up.sh
 ```
 

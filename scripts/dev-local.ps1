@@ -232,7 +232,14 @@ if ($Stop) {
     exit 0
 }
 
+& (Join-Path $PSScriptRoot "generate-secrets.ps1") | Out-Host
 Import-DotEnv -Path (Join-Path $projectRoot ".env")
+if (
+    [string]::IsNullOrWhiteSpace($env:DASHSCOPE_API_KEY) -or
+    $env:DASHSCOPE_API_KEY -eq "__PASTE_YOUR_DASHSCOPE_API_KEY_HERE__"
+) {
+    throw "DASHSCOPE_API_KEY is not configured in .env."
+}
 New-Item -ItemType Directory -Path $stateDir -Force | Out-Null
 
 Push-Location $projectRoot

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 
@@ -65,10 +67,11 @@ REQUIRED_ENV_KEYS = {
     "COMPOSE_PROJECT_NAME",
     "APP_ENV",
     "TZ",
-    "DEEPSEEK_API_KEY",
+    "DASHSCOPE_API_KEY",
     "DEFAULT_LLM_PROVIDER",
     "DEFAULT_LLM_MODEL",
     "DEFAULT_LLM_API_BASE",
+    "LLM_ENABLE_THINKING",
     "LITELLM_MASTER_KEY",
     "LITELLM_SALT_KEY",
     "LITELLM_BASE_URL",
@@ -153,9 +156,11 @@ def test_env_example_is_complete_and_contains_only_placeholders() -> None:
     values = parse_env_example()
 
     assert REQUIRED_ENV_KEYS <= values.keys()
-    assert values["DEEPSEEK_API_KEY"] == "__PASTE_YOUR_DEEPSEEK_API_KEY_HERE__"
-    assert values["DEFAULT_LLM_MODEL"] == "deepseek-v4-flash"
-    assert values["LITELLM_DEFAULT_MODEL"] == "deepseek-v4-flash"
+    assert values["DASHSCOPE_API_KEY"] == "__PASTE_YOUR_DASHSCOPE_API_KEY_HERE__"
+    assert values["DEFAULT_LLM_PROVIDER"] == "litellm"
+    assert values["DEFAULT_LLM_MODEL"] == "qwen3.7-plus"
+    assert values["LITELLM_DEFAULT_MODEL"] == "qwen3.7-plus"
+    assert values["LLM_ENABLE_THINKING"] == "true"
     for key in GENERATED_SECRET_KEYS:
         assert values[key] == "__GENERATED_BY_CODEX__", key
 
@@ -166,6 +171,24 @@ def test_compose_declares_every_required_service_with_healthchecks() -> None:
 
     assert REQUIRED_SERVICES <= services.keys()
     assert all("healthcheck" in services[name] for name in REQUIRED_SERVICES)
+
+
+def test_qwen_credentials_stop_at_litellm_gateway() -> None:
+    compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
+    services = compose["services"]
+    proxy_environment = services["litellm-proxy"]["environment"]
+    agent_environment = services["python-agent-service"]["environment"]
+    litellm_config = yaml.safe_load(
+        (ROOT / "deploy" / "litellm" / "config.yaml").read_text(encoding="utf-8")
+    )
+
+    assert "DASHSCOPE_API_KEY" in proxy_environment
+    assert "DASHSCOPE_API_KEY" not in agent_environment
+    assert agent_environment["LITELLM_MODEL"] == "${LITELLM_DEFAULT_MODEL:-qwen3.7-plus}"
+    model = litellm_config["model_list"][0]
+    assert model["model_name"] == "qwen3.7-plus"
+    assert model["litellm_params"]["model"] == "openai/qwen3.7-plus"
+    assert model["litellm_params"]["extra_body"] == {"enable_thinking": True}
 
 
 def test_compose_has_persistent_volumes_and_expected_host_ports() -> None:
@@ -272,6 +295,8 @@ def test_room_timing_configuration_is_declared_with_final_defaults() -> None:
 def test_windows_secret_generator_preserves_user_key_and_hides_secrets(
     tmp_path: Path,
 ) -> None:
+    if shutil.which("powershell.exe") is None:
+        pytest.skip("Windows PowerShell is not available")
     example = tmp_path / ".env.example"
     destination = tmp_path / ".env"
     example.write_text((ROOT / ".env.example").read_text(encoding="utf-8"), encoding="utf-8")
@@ -302,12 +327,14 @@ def test_windows_secret_generator_preserves_user_key_and_hides_secrets(
         for line in generated.splitlines()
         if line and not line.startswith("#")
     )
-    assert values["DEEPSEEK_API_KEY"] == "__PASTE_YOUR_DEEPSEEK_API_KEY_HERE__"
+    assert values["DASHSCOPE_API_KEY"] == "__PASTE_YOUR_DASHSCOPE_API_KEY_HERE__"
     assert all(values[key] != "__GENERATED_BY_CODEX__" for key in GENERATED_SECRET_KEYS)
     assert all(values[key] not in result.stdout for key in GENERATED_SECRET_KEYS)
 
 
 def test_windows_secret_generator_defaults_to_project_root(tmp_path: Path) -> None:
+    if shutil.which("powershell.exe") is None:
+        pytest.skip("Windows PowerShell is not available")
     project = tmp_path / "project"
     scripts = project / "scripts"
     scripts.mkdir(parents=True)

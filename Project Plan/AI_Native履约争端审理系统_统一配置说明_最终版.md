@@ -36,7 +36,7 @@ Agent Harness 配置；
 本项目所有 LLM 调用统一使用：
 
 ```text
-deepseek-v4-flash
+qwen3.7-plus
 ```
 
 所有 Agent、证据分析、争点归纳、规则适用、裁决草案、AI 评议团、审核辅助官和 Evaluation Agent 的 LLM 调用，都必须通过 LiteLLM Proxy 访问该模型。
@@ -57,7 +57,7 @@ Prompt 文件写入 API Key；
 
 ### 2.2 API Key 配置原则
 
-真实 DeepSeek API Key 只能写入本地 `.env` 文件，不得进入仓库。
+真实 Qwen 3.7 Plus API Key 只能写入本地 `.env` 文件，不得进入仓库。
 
 要求：
 
@@ -73,17 +73,17 @@ Prompt 文件写入 API Key；
 `.env.example` 写法：
 
 ```env
-DEEPSEEK_API_KEY=__PASTE_YOUR_DEEPSEEK_API_KEY_HERE__
-DEFAULT_LLM_MODEL=deepseek-v4-flash
-DEFAULT_LLM_API_BASE=https://api.deepseek.com
+DASHSCOPE_API_KEY=__PASTE_YOUR_DASHSCOPE_API_KEY_HERE__
+DEFAULT_LLM_MODEL=qwen3.7-plus
+DEFAULT_LLM_API_BASE=https://ws-veazvl2fycrurdmv.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
 ```
 
 本地 `.env` 写法：
 
 ```env
-DEEPSEEK_API_KEY=<填入真实 DeepSeek API Key>
-DEFAULT_LLM_MODEL=deepseek-v4-flash
-DEFAULT_LLM_API_BASE=https://api.deepseek.com
+DASHSCOPE_API_KEY=<填入真实 Qwen 3.7 Plus API Key>
+DEFAULT_LLM_MODEL=qwen3.7-plus
+DEFAULT_LLM_API_BASE=https://ws-veazvl2fycrurdmv.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
 ```
 
 ### 2.3 正式版 API 路径原则
@@ -132,17 +132,17 @@ APP_ENV=local
 TZ=Asia/Shanghai
 
 # =========================================================
-# LLM / DeepSeek / LiteLLM
+# LLM / Qwen 3.7 Plus / LiteLLM
 # =========================================================
-DEEPSEEK_API_KEY=__PASTE_YOUR_DEEPSEEK_API_KEY_HERE__
-DEFAULT_LLM_PROVIDER=deepseek
-DEFAULT_LLM_MODEL=deepseek-v4-flash
-DEFAULT_LLM_API_BASE=https://api.deepseek.com
+DASHSCOPE_API_KEY=__PASTE_YOUR_DASHSCOPE_API_KEY_HERE__
+DEFAULT_LLM_PROVIDER=litellm
+DEFAULT_LLM_MODEL=qwen3.7-plus
+DEFAULT_LLM_API_BASE=https://ws-veazvl2fycrurdmv.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
 
 LITELLM_MASTER_KEY=__GENERATED_BY_CODEX__
 LITELLM_SALT_KEY=__GENERATED_BY_CODEX__
 LITELLM_BASE_URL=http://litellm-proxy:4000
-LITELLM_DEFAULT_MODEL=deepseek-v4-flash
+LITELLM_DEFAULT_MODEL=qwen3.7-plus
 
 # =========================================================
 # Agent Harness Versioning
@@ -348,7 +348,7 @@ secret 长度：32-64 位；
 不使用固定默认密码；
 不使用 admin/admin、root/root、test/test；
 生成后写入 .env；
-如果 .env 已存在，不覆盖用户已填写的 DEEPSEEK_API_KEY；
+如果 .env 已存在，不覆盖用户已填写的 DASHSCOPE_API_KEY；
 输出时不得打印完整密钥。
 ```
 
@@ -359,7 +359,7 @@ secret 长度：32-64 位；
 ```text
 .env 不存在时从 .env.example 复制；
 只替换 __GENERATED_BY_CODEX__ 占位符；
-不替换 DEEPSEEK_API_KEY 占位符，提示人工填写；
+不替换 DASHSCOPE_API_KEY 占位符，提示人工填写；
 生成后删除临时 bak 文件；
 终端只输出生成成功，不输出完整密钥。
 ```
@@ -526,8 +526,8 @@ healthcheck 必须存在。
 要求：
 
 ```text
-读取 DEEPSEEK_API_KEY；
-默认模型 deepseek-v4-flash；
+读取 DASHSCOPE_API_KEY；
+默认模型 qwen3.7-plus；
 对 Python Agent Service 提供 OpenAI-compatible 接口；
 配置 master key；
 日志不得打印 API Key；
@@ -561,11 +561,13 @@ deploy/litellm/config.yaml
 
 ```yaml
 model_list:
-  - model_name: deepseek-v4-flash
+  - model_name: qwen3.7-plus
     litellm_params:
-      model: openai/deepseek-v4-flash
-      api_key: os.environ/DEEPSEEK_API_KEY
+      model: openai/qwen3.7-plus
+      api_key: os.environ/DASHSCOPE_API_KEY
       api_base: os.environ/DEFAULT_LLM_API_BASE
+      extra_body:
+        enable_thinking: true
 
 litellm_settings:
   drop_params: true
@@ -579,14 +581,14 @@ general_settings:
 要求：
 
 ```text
-model_name 必须是 deepseek-v4-flash；
+model_name 必须是 qwen3.7-plus；
 api_key 必须从环境变量读取；
 api_base 必须从环境变量读取；
 不允许在 YAML 写真实 Key；
 不允许配置其他默认模型。
 ```
 
-如果 LiteLLM 对 DeepSeek 有更推荐 provider 写法，Codex 可以适配，但对系统暴露模型名称仍必须是 `deepseek-v4-flash`。
+如果 LiteLLM 对 Qwen 3.7 Plus 有更推荐 provider 写法，Codex 可以适配，但对系统暴露模型名称仍必须是 `qwen3.7-plus`。
 
 ---
 
@@ -650,8 +652,8 @@ Java 服务边界：
 可以调用 Python Agent Service；
 可以调用 OCR Parser Service；
 可以调用 PostgreSQL、Redis、MinIO、Elasticsearch、Temporal；
-不可以直接调用 DeepSeek；
-不可以直接读取 DEEPSEEK_API_KEY；
+不可以直接调用 Qwen 3.7 Plus；
+不可以直接读取 DASHSCOPE_API_KEY；
 不可以把模型 API Key 返回前端。
 ```
 
@@ -664,7 +666,7 @@ Java 服务边界：
 ```env
 APP_ENV=local
 LITELLM_BASE_URL=http://litellm-proxy:4000
-LITELLM_MODEL=deepseek-v4-flash
+LITELLM_MODEL=qwen3.7-plus
 LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
 
 LANGFUSE_HOST=http://langfuse:3000
@@ -704,7 +706,7 @@ Prompt 文件不写配置；
 base_url 使用 LITELLM_BASE_URL；
 model 使用 LITELLM_MODEL；
 key 使用 LITELLM_MASTER_KEY；
-不直接调用 https://api.deepseek.com；
+不直接调用 https://ws-veazvl2fycrurdmv.cn-beijing.maas.aliyuncs.com/compatible-mode/v1；
 所有调用记录 Langfuse Trace。
 ```
 
@@ -761,7 +763,7 @@ VITE_ENABLE_DELIBERATION_PANEL_VIEW=true
 前端禁止出现：
 
 ```text
-DeepSeek API Key；
+Qwen 3.7 Plus API Key；
 LiteLLM Master Key；
 Langfuse Secret Key；
 MinIO Secret Key；
@@ -859,7 +861,7 @@ scripts/smoke-test.sh
 检查 Docker；
 检查 .env；
 提示生成 secrets；
-检查 DEEPSEEK_API_KEY 是否占位符；
+检查 DASHSCOPE_API_KEY 是否占位符；
 拉取镜像；
 构建应用镜像；
 启动 compose；
@@ -900,7 +902,7 @@ chmod +x scripts/*.sh
 手动编辑 `.env`：
 
 ```bash
-DEEPSEEK_API_KEY=<填入真实 DeepSeek API Key>
+DASHSCOPE_API_KEY=<填入真实 Qwen 3.7 Plus API Key>
 ```
 
 启动：
@@ -947,7 +949,7 @@ Codex 需要根据本文档完成配置体系落地：
 修改 Java / Python / OCR / Frontend 配置读取；
 确保所有中间件通过 Docker 自动部署；
 确保所有缺失运行依赖自动安装；
-确保所有模型调用统一走 deepseek-v4-flash；
+确保所有模型调用统一走 qwen3.7-plus；
 确保正式版 API 路径不包含 /v2 或 /v3。
 ```
 
@@ -956,12 +958,12 @@ Codex 需要根据本文档完成配置体系落地：
 Codex 不允许：
 
 ```text
-把真实 DeepSeek API Key 写入仓库；
+把真实 Qwen 3.7 Plus API Key 写入仓库；
 把 API Key 写入 README；
 把 API Key 写入 Dockerfile；
 把 API Key 写入 docker-compose.yml 明文字段；
 把 API Key 写入 LiteLLM config 明文；
-让 Java 直接调用 DeepSeek；
+让 Java 直接调用 Qwen 3.7 Plus；
 让前端读取任何服务密钥；
 引入非必要中间件；
 使用宿主机手动安装代替 Docker；
@@ -990,11 +992,11 @@ Codex 不允许：
 
 ### 17.2 模型统一
 
-- [ ] `DEFAULT_LLM_MODEL=deepseek-v4-flash`。
-- [ ] `LITELLM_DEFAULT_MODEL=deepseek-v4-flash`。
-- [ ] `LITELLM_MODEL=deepseek-v4-flash`。
+- [ ] `DEFAULT_LLM_MODEL=qwen3.7-plus`。
+- [ ] `LITELLM_DEFAULT_MODEL=qwen3.7-plus`。
+- [ ] `LITELLM_MODEL=qwen3.7-plus`。
 - [ ] Python Agent Service 只调用 LiteLLM。
-- [ ] Java API Service 不直接调用 DeepSeek。
+- [ ] Java API Service 不直接调用 Qwen 3.7 Plus。
 - [ ] 所有 Agent 默认模型一致。
 - [ ] Evaluation Agent 默认模型一致。
 
@@ -1038,9 +1040,9 @@ Codex 不允许：
 请严格按照《AI Native 履约争端审理系统：统一配置说明（最终版）》执行。
 
 任务目标：
-1. 统一所有模型调用为 deepseek-v4-flash。
-2. 通过 LiteLLM Proxy 统一代理 DeepSeek。
-3. DeepSeek API Key 只能从 .env 读取，不允许写入仓库。
+1. 统一所有模型调用为 qwen3.7-plus。
+2. 通过 LiteLLM Proxy 统一代理 Qwen 3.7 Plus。
+3. Qwen 3.7 Plus API Key 只能从 .env 读取，不允许写入仓库。
 4. 所有数据库和中间件都必须使用 Docker Compose 部署。
 5. PostgreSQL、Redis、Elasticsearch、MinIO、Temporal、Langfuse、LiteLLM、Nginx 等服务必须可一键启动。
 6. 用户名、密码、secret、salt、service token 由 scripts/generate-secrets.sh 自动生成。
@@ -1052,10 +1054,10 @@ Codex 不允许：
 12. Agent Harness 配置必须包含 Profile、Prompt、Skill、Ruleset、Loop、Guardrail 和 Trace 相关版本与开关。
 
 禁止事项：
-- 不得把真实 DeepSeek API Key 写入任何仓库文件。
+- 不得把真实 Qwen 3.7 Plus API Key 写入任何仓库文件。
 - 不得把 API Key 打印到日志。
 - 不得让前端读取任何服务密钥。
-- 不得让 Java 直接调用 DeepSeek。
+- 不得让 Java 直接调用 Qwen 3.7 Plus。
 - 不得绕过 LiteLLM。
 - 不得要求宿主机手动安装 PostgreSQL、Redis、MinIO、Elasticsearch、Temporal、Langfuse、LiteLLM、PaddleOCR 或 MarkItDown。
 - 不得引入 Kafka、MCP、Milvus、Qdrant、OPA、Drools、Kubernetes、自部署大模型。
@@ -1079,9 +1081,9 @@ Codex 不允许：
 - .env.example 不包含真实密钥。
 - docker compose up 可启动所有服务。
 - 所有 healthcheck 正常。
-- LiteLLM 默认模型为 deepseek-v4-flash。
-- Python Agent Service 可通过 LiteLLM 调用 deepseek-v4-flash。
-- Java API Service 不直接调用 DeepSeek。
+- LiteLLM 默认模型为 qwen3.7-plus。
+- Python Agent Service 可通过 LiteLLM 调用 qwen3.7-plus。
+- Java API Service 不直接调用 Qwen 3.7 Plus。
 - 前端不包含任何服务密钥。
 - smoke-test.sh 通过。
 ```
@@ -1093,7 +1095,7 @@ Codex 不允许：
 本项目配置体系最终定版为：
 
 ```text
-统一模型：deepseek-v4-flash；
+统一模型：qwen3.7-plus；
 统一模型代理：LiteLLM Proxy；
 模型 API Key：仅写入本地 .env，不进入仓库；
 中间件部署：全部 Docker Compose 部署；

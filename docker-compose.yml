@@ -196,8 +196,8 @@ services:
       postgresql:
         condition: service_healthy
     environment:
-      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
-      DEFAULT_LLM_API_BASE: ${DEFAULT_LLM_API_BASE:-https://api.deepseek.com}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY}
+      DEFAULT_LLM_API_BASE: ${DEFAULT_LLM_API_BASE:-https://ws-veazvl2fycrurdmv.cn-beijing.maas.aliyuncs.com/compatible-mode/v1}
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
       LITELLM_SALT_KEY: ${LITELLM_SALT_KEY}
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgresql:5432/${LITELLM_DB_NAME:-litellm}
@@ -221,12 +221,8 @@ services:
     environment:
       APP_ENV: ${APP_ENV:-local}
       LITELLM_BASE_URL: http://litellm-proxy:4000
-      LITELLM_MODEL: deepseek-v4-flash
+      LITELLM_MODEL: ${LITELLM_DEFAULT_MODEL:-qwen3.7-plus}
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
-      DEFAULT_LLM_PROVIDER: ${DEFAULT_LLM_PROVIDER:-litellm}
-      DEFAULT_LLM_MODEL: ${DEFAULT_LLM_MODEL:-deepseek-v4-flash}
-      DEFAULT_LLM_API_BASE: ${DEFAULT_LLM_API_BASE:-https://api.deepseek.com}
-      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       LANGFUSE_HOST: http://langfuse:3000
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY}
