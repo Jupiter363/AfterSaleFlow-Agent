@@ -21,11 +21,11 @@ app:
   security:
     service-secret: ${JAVA_SERVICE_SECRET}
   agent:
-    base-url: ${PYTHON_AGENT_SERVICE_URL:http://127.0.0.1:8000}
+    base-url: ${PYTHON_AGENT_SERVICE_URL:http://127.0.0.1:18000}
     service-secret: ${PYTHON_AGENT_SERVICE_SECRET}
     timeout-ms: 120000
   ocr:
-    base-url: ${OCR_SERVICE_URL:http://ocr-parser-service:8010}
+    base-url: ${OCR_SERVICE_URL:http://127.0.0.1:18010}
     service-secret: ${OCR_SERVICE_SECRET}
     timeout-ms: 120000
     callback-base-url: ${OCR_CALLBACK_BASE_URL:${JAVA_API_SERVICE_URL:http://java-api-service:8080}}

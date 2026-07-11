@@ -1,9 +1,12 @@
 package com.example.dispute.casecore.application;
 
+import com.example.dispute.casecore.infrastructure.persistence.entity.SimulatedImportTemplateCursorEntity;
+import com.example.dispute.casecore.infrastructure.persistence.repository.SimulatedImportTemplateCursorRepository;
+import com.example.dispute.common.transaction.PostCommitSideEffectExecutor;
+import com.example.dispute.common.exception.IdempotencyConflictException;
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.config.DisputeProperties;
-import com.example.dispute.common.exception.IdempotencyConflictException;
 import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
@@ -16,8 +19,13 @@ import com.example.dispute.room.infrastructure.persistence.entity.CasePhaseClock
 import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
 import com.example.dispute.room.infrastructure.persistence.repository.CasePhaseClockRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
 import java.time.OffsetDateTime;
+import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 import org.springframework.stereotype.Service;
@@ -37,6 +45,9 @@ public class ExternalCaseImportTransactionService {
     private final CasePhaseClockRepository clockRepository;
     private final ParticipantService participantService;
     private final IntakeAgentTurnService intakeAgentTurnService;
+    private final SimulatedImportTemplateCursorRepository simulatedImportCursorRepository;
+    private final SimulatedExternalDisputeTemplateCatalog simulatedImportTemplates;
+    private final PostCommitSideEffectExecutor postCommit;
     private final DisputeProperties properties;
     private final Clock clock;
 
@@ -46,6 +57,9 @@ public class ExternalCaseImportTransactionService {
             CasePhaseClockRepository clockRepository,
             ParticipantService participantService,
             IntakeAgentTurnService intakeAgentTurnService,
+            SimulatedImportTemplateCursorRepository simulatedImportCursorRepository,
+            SimulatedExternalDisputeTemplateCatalog simulatedImportTemplates,
+            PostCommitSideEffectExecutor postCommit,
             DisputeProperties properties,
             Clock clock) {
         this.repository = repository;
@@ -53,8 +67,51 @@ public class ExternalCaseImportTransactionService {
         this.clockRepository = clockRepository;
         this.participantService = participantService;
         this.intakeAgentTurnService = intakeAgentTurnService;
+        this.simulatedImportCursorRepository = simulatedImportCursorRepository;
+        this.simulatedImportTemplates = simulatedImportTemplates;
+        this.postCommit = postCommit;
         this.properties = properties;
         this.clock = clock;
+    }
+
+    /**
+     * Imports the next deterministic demo case and advances the shared cursor atomically.
+     *
+     * <p>Creation-key replay is resolved before locking the cursor, so retries return the
+     * original case without consuming another template.
+     */
+    @Transactional
+    public SimulatedImportResultView simulateExternalImport(
+            SimulateExternalImportCommand command,
+            AuthenticatedActor actor,
+            String idempotencyKey,
+            String traceId,
+            String requestId) {
+        if (actor.role() != ActorRole.SYSTEM) {
+            throw new SecurityException("external dispute simulation requires service identity");
+        }
+        requireText(idempotencyKey, "idempotencyKey");
+        var replay = repository.findByCreationIdempotencyKey(idempotencyKey);
+        if (replay.isPresent()) {
+            return new SimulatedImportResultView(List.of(restoreExisting(replay.orElseThrow(), actor)));
+        }
+
+        SimulatedImportTemplateCursorEntity cursor =
+                simulatedImportCursorRepository
+                        .findByIdForUpdate(SimulatedImportTemplateCursorEntity.CURSOR_ID)
+                        .orElseThrow(
+                                () ->
+                                        new IllegalStateException(
+                                                "simulated import template cursor is missing"));
+        SimulatedExternalDisputeTemplate template =
+                simulatedImportTemplates.get(cursor.getNextTemplateNo());
+        ImportDisputeCommand importCommand = simulatedCommand(command, template, idempotencyKey);
+        ImportedDisputeView imported =
+                importDispute(importCommand, actor, idempotencyKey, traceId, requestId);
+
+        cursor.advance(simulatedImportTemplates.size());
+        simulatedImportCursorRepository.save(cursor);
+        return new SimulatedImportResultView(List.of(imported));
     }
 
     @Transactional
@@ -153,12 +210,20 @@ public class ExternalCaseImportTransactionService {
                         command.requestedOutcomeHint(),
                         command.claimResolutionSeed(),
                         command.respondentAttitudeSeed());
-        intakeAgentTurnService.startInitialTurn(
-                saved.getId(),
-                intakeActor,
-                seed,
-                traceId,
-                requestId);
+        String caseId = saved.getId();
+        postCommit.execute(
+                "intake-initial-turn",
+                Map.of(
+                        "case_id", caseId,
+                        "trace_id", traceId,
+                        "request_id", requestId),
+                () ->
+                        intakeAgentTurnService.startInitialTurn(
+                                caseId,
+                                intakeActor,
+                                seed,
+                                traceId,
+                                requestId));
     }
 
     private void materializeCurrentRoom(
@@ -346,6 +411,66 @@ public class ExternalCaseImportTransactionService {
 
     private static String compactUuid() {
         return UUID.randomUUID().toString().replace("-", "");
+    }
+
+    private static ImportDisputeCommand simulatedCommand(
+            SimulateExternalImportCommand request,
+            SimulatedExternalDisputeTemplate template,
+            String idempotencyKey) {
+        ActorRole initiatorRole = request.initiatorRoleHint();
+        ActorRole respondentRole =
+                initiatorRole == ActorRole.USER ? ActorRole.MERCHANT : ActorRole.USER;
+        String stableKey = stableReferenceKey(idempotencyKey);
+        String templatePrefix = "T%02d-".formatted(template.templateNo());
+        IntakeLobbySeed.ClaimResolutionSeed claim =
+                new IntakeLobbySeed.ClaimResolutionSeed(
+                        initiatorRole.name(),
+                        template.requestedResolution(),
+                        template.requestedAmount(),
+                        template.requestedItems(),
+                        template.requestReason(),
+                        template.description());
+        IntakeLobbySeed.RespondentAttitudeSeed attitude =
+                new IntakeLobbySeed.RespondentAttitudeSeed(
+                        respondentRole.name(),
+                        template.respondentAttitude(),
+                        template.respondentPosition(),
+                        "模拟外部订单模板",
+                        0.95);
+        return new ImportDisputeCommand(
+                SimulatedExternalDisputeTemplateCatalog.SOURCE_SYSTEM,
+                "SIM-" + templatePrefix + stableKey,
+                "ORDER-" + templatePrefix + stableKey,
+                "AFTER-" + templatePrefix + stableKey,
+                "LOG-" + templatePrefix + stableKey,
+                DemoImportActors.USER_ID,
+                DemoImportActors.MERCHANT_ID,
+                initiatorRole.name(),
+                template.disputeType(),
+                template.title(),
+                template.description(),
+                template.riskLevel(),
+                CaseStatus.INTAKE_PENDING,
+                "INTAKE",
+                null,
+                template.requestedResolution(),
+                claim,
+                attitude);
+    }
+
+    private static String stableReferenceKey(String idempotencyKey) {
+        try {
+            byte[] digest =
+                    MessageDigest.getInstance("SHA-256")
+                            .digest(idempotencyKey.getBytes(StandardCharsets.UTF_8));
+            StringBuilder value = new StringBuilder(24);
+            for (int index = 0; index < 12; index++) {
+                value.append("%02x".formatted(digest[index]));
+            }
+            return value.toString().toUpperCase(java.util.Locale.ROOT);
+        } catch (NoSuchAlgorithmException impossible) {
+            throw new IllegalStateException("SHA-256 is not available", impossible);
+        }
     }
 
     private static void requireText(String value, String field) {

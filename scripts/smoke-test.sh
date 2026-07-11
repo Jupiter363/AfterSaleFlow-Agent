@@ -4,8 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
 
-NGINX_BASE_URL="${NGINX_BASE_URL:-http://localhost:8080}"
-JAVA_BASE_URL="${JAVA_BASE_URL:-http://localhost:18080}"
+NGINX_BASE_URL="${NGINX_BASE_URL:-http://localhost:18080}"
+JAVA_BASE_URL="${JAVA_BASE_URL:-http://localhost:8080}"
 AGENT_BASE_URL="${AGENT_BASE_URL:-http://localhost:18000}"
 OCR_BASE_URL="${OCR_BASE_URL:-http://localhost:18010}"
 SMOKE_USER_ID="${SMOKE_USER_ID:-user-local}"

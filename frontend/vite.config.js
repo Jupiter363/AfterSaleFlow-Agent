@@ -12,7 +12,7 @@ export default defineConfig({
       },
       "/agent-api": {
         target:
-          process.env.VITE_AGENT_API_PROXY_TARGET || "http://127.0.0.1:8000",
+          process.env.VITE_AGENT_API_PROXY_TARGET || "http://127.0.0.1:18000",
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/agent-api/, ""),
       },

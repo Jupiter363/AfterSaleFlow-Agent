@@ -54,7 +54,7 @@ class MigrationIntegrationTest {
         MigrateResult first = flyway.migrate();
         MigrateResult second = flyway.migrate();
 
-        assertThat(first.migrationsExecuted).isEqualTo(26);
+        assertThat(first.migrationsExecuted).isEqualTo(28);
         assertThat(second.migrationsExecuted).isZero();
 
         try (Connection connection =
@@ -112,7 +112,15 @@ class MigrationIntegrationTest {
                             "agent_conversation_session",
                             "agent_session_dossier",
                             "evidence_submission_batch",
-                            "agent_a2a_message");
+                            "agent_a2a_message",
+                            "simulated_import_template_cursor",
+                            "demo_case_purge_audit");
+            assertThat(
+                            countRows(
+                                    connection,
+                                    "simulated_import_template_cursor",
+                                    "id = 'external-case-template' and next_template_no = 1"))
+                    .isOne();
             assertThat(columnType(connection, "evidence_item", "metadata_json"))
                     .isEqualTo("jsonb");
             assertThat(columnType(connection, "action_record", "execution_time"))

@@ -2,11 +2,6 @@ package com.example.dispute.casecore.application;
 
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
-import com.example.dispute.common.api.ErrorCode;
-import com.example.dispute.common.exception.AgentExecutionException;
-import com.example.dispute.domain.model.CaseStatus;
-import java.util.List;
-import java.util.Map;
 import java.util.UUID;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
@@ -23,15 +18,12 @@ import org.springframework.transaction.annotation.Transactional;
 public class DisputeImportService {
 
     private final ExternalCaseImportTransactionService transactionService;
-    private final ExternalDisputeSimulationClient simulationClient;
     private final SingleInstanceImportGate importGate;
 
     public DisputeImportService(
             ExternalCaseImportTransactionService transactionService,
-            ExternalDisputeSimulationClient simulationClient,
             SingleInstanceImportGate importGate) {
         this.transactionService = transactionService;
-        this.simulationClient = simulationClient;
         this.importGate = importGate;
     }
 
@@ -66,39 +58,10 @@ public class DisputeImportService {
             throw new SecurityException("external dispute simulation requires service identity");
         }
         requireText(idempotencyKey, "idempotencyKey");
-        List<SimulatedExternalDispute> simulatedItems =
-                simulationClient.simulate(command, traceId, requestId);
-        int itemCount = simulatedItems == null ? 0 : simulatedItems.size();
-        if (itemCount != 1) {
-            throw new AgentExecutionException(
-                    ErrorCode.AGENT_OUTPUT_SCHEMA_INVALID,
-                    "external import simulator must return exactly one item",
-                    Map.of("item_count", itemCount));
-        }
-        SimulatedExternalDispute simulated = simulatedItems.getFirst();
-        ImportedDisputeView imported =
-                importOne(
-                        new ImportDisputeCommand(
-                                simulated.sourceSystem(),
-                                simulated.externalCaseReference(),
-                                simulated.orderReference(),
-                                simulated.afterSalesReference(),
-                                simulated.logisticsReference(),
-                                simulated.userId(),
-                                simulated.merchantId(),
-                                simulated.initiatorRole(),
-                                simulated.disputeType(),
-                                simulated.title(),
-                                simulated.description(),
-                                simulated.riskLevel(),
-                                CaseStatus.INTAKE_PENDING,
-                                "INTAKE",
-                                null),
-                        actor,
-                        idempotencyKey,
-                        traceId,
-                        requestId);
-        return new SimulatedImportResultView(List.of(imported));
+        return importGate.execute(
+                () ->
+                        transactionService.simulateExternalImport(
+                                command, actor, idempotencyKey, traceId, requestId));
     }
 
     private ImportedDisputeView importOne(

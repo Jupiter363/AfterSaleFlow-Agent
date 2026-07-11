@@ -10,10 +10,12 @@ import static org.mockito.Mockito.verify;
 
 import com.example.dispute.casecore.application.DisputeImportService;
 import com.example.dispute.casecore.application.ExternalCaseImportTransactionService;
-import com.example.dispute.casecore.application.ExternalDisputeSimulationClient;
 import com.example.dispute.casecore.application.ImportDisputeCommand;
 import com.example.dispute.casecore.application.ImportedDisputeView;
+import com.example.dispute.casecore.application.SimulateExternalImportCommand;
+import com.example.dispute.casecore.application.SimulatedExternalDisputeTemplateCatalog;
 import com.example.dispute.casecore.application.SingleInstanceImportGate;
+import com.example.dispute.casecore.infrastructure.persistence.repository.SimulatedImportTemplateCursorRepository;
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.config.DisputeProperties;
@@ -74,6 +76,7 @@ import org.testcontainers.utility.DockerImageName;
     DisputeImportService.class,
     ExternalCaseImportTransactionService.class,
     SingleInstanceImportGate.class,
+    SimulatedExternalDisputeTemplateCatalog.class,
     ParticipantService.class,
     DisputeImportServiceIntegrationTest.FixedClockConfiguration.class,
     DisputeImportServiceIntegrationTest.EmptyLookupBarrierConfiguration.class,
@@ -108,6 +111,8 @@ class DisputeImportServiceIntegrationTest {
 
     @Autowired private DisputeImportService service;
     @Autowired private FulfillmentCaseRepository caseRepository;
+    @Autowired private ExternalCaseImportTransactionService transactionService;
+    @Autowired private SimulatedImportTemplateCursorRepository cursorRepository;
     @Autowired private CaseRoomRepository roomRepository;
     @Autowired private CaseParticipantRepository participantRepository;
     @Autowired private CasePhaseClockRepository clockRepository;
@@ -116,7 +121,6 @@ class DisputeImportServiceIntegrationTest {
     @Autowired private ObservingImportGate observingImportGate;
     @Autowired private PlatformTransactionManager transactionManager;
     @MockitoBean private IntakeAgentTurnService intakeAgentTurnService;
-    @MockitoBean private ExternalDisputeSimulationClient simulationClient;
 
     @Test
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
@@ -261,6 +265,101 @@ class DisputeImportServiceIntegrationTest {
                         any(String.class));
     }
 
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void simulatedImportRollsBackTheCaseAndTemplateCursorWhenIntakeFails() {
+        jdbcTemplate.update(
+                "update simulated_import_template_cursor set next_template_no = 1"
+                        + " where id = 'external-case-template'");
+        String creationKey = "template-rollback-case";
+        doAnswer(
+                        invocation -> {
+                            throw new InvalidDataAccessApiUsageException(
+                                    "simulated template intake failure");
+                        })
+                .when(intakeAgentTurnService)
+                .startInitialTurn(
+                        any(String.class),
+                        any(AuthenticatedActor.class),
+                        any(IntakeLobbySeed.class),
+                        any(String.class),
+                        any(String.class));
+
+        assertThatThrownBy(
+                        () ->
+                                service.simulateExternalImport(
+                                        simulationCommand(),
+                                        systemActor(),
+                                        creationKey,
+                                        "template-rollback-trace",
+                                        "template-rollback-request"))
+                .isInstanceOf(InvalidDataAccessApiUsageException.class)
+                .hasMessage("simulated template intake failure");
+
+        assertThat(caseRepository.findByCreationIdempotencyKey(creationKey)).isEmpty();
+        assertThat(
+                        cursorRepository
+                                .findById("external-case-template")
+                                .orElseThrow()
+                                .getNextTemplateNo())
+                .isEqualTo(1);
+    }
+
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void concurrentTransactionalSimulationsConsumeAdjacentTemplates() throws Exception {
+        jdbcTemplate.update(
+                "update simulated_import_template_cursor set next_template_no = 1"
+                        + " where id = 'external-case-template'");
+        CyclicBarrier requestStart = new CyclicBarrier(2);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<String> first =
+                    executor.submit(
+                            () -> {
+                                requestStart.await(5, TimeUnit.SECONDS);
+                                return transactionService
+                                        .simulateExternalImport(
+                                                simulationCommand(),
+                                                systemActor(),
+                                                "template-concurrent-first",
+                                                "trace-template-first",
+                                                "request-template-first")
+                                        .items()
+                                        .getFirst()
+                                        .title();
+                            });
+            Future<String> second =
+                    executor.submit(
+                            () -> {
+                                requestStart.await(5, TimeUnit.SECONDS);
+                                return transactionService
+                                        .simulateExternalImport(
+                                                simulationCommand(),
+                                                systemActor(),
+                                                "template-concurrent-second",
+                                                "trace-template-second",
+                                                "request-template-second")
+                                        .items()
+                                        .getFirst()
+                                        .title();
+                            });
+
+            assertThat(java.util.List.of(getTitle(first), getTitle(second)))
+                    .containsExactlyInAnyOrder(
+                            "物流显示签收但本人未收到",
+                            "到货商品破损影响使用");
+            assertThat(
+                            cursorRepository
+                                    .findById("external-case-template")
+                                    .orElseThrow()
+                                    .getNextTemplateNo())
+                    .isEqualTo(3);
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
     private Callable<ImportedDisputeView> concurrentImport(
             CyclicBarrier requestStart,
             String externalReference,
@@ -277,6 +376,21 @@ class DisputeImportServiceIntegrationTest {
     private static ImportedDisputeView get(Future<ImportedDisputeView> future)
             throws InterruptedException, ExecutionException, TimeoutException {
         return future.get(10, TimeUnit.SECONDS);
+    }
+
+    private static String getTitle(Future<String> future)
+            throws InterruptedException, ExecutionException, TimeoutException {
+        return future.get(10, TimeUnit.SECONDS);
+    }
+
+    private static SimulateExternalImportCommand simulationCommand() {
+        return new SimulateExternalImportCommand(
+                1,
+                "电商售后争议",
+                RiskLevel.MEDIUM,
+                ActorRole.USER,
+                "user-local",
+                "merchant-local");
     }
 
     private static ImportDisputeCommand command(String externalReference) {

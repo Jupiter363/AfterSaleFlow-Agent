@@ -45,10 +45,11 @@ RUN_SMOKE_TEST=false ./scripts/dev-up.sh
 
 | 服务 | 地址 |
 |---|---|
-| 统一入口 | `http://localhost:8080` |
-| Java health | `http://localhost:18080/actuator/health` |
+| 前端静态容器（不代理 API） | `http://localhost:5173` |
+| Java health | `http://localhost:8080/actuator/health` |
 | Python Agent health | `http://localhost:18000/health` |
 | OCR health | `http://localhost:18010/health` |
+| Docker 应用统一入口 | `http://localhost:18080` |
 | Langfuse | `http://localhost:13000` |
 | LiteLLM | `http://localhost:14000` |
 | MinIO API / Console | `http://localhost:19000` / `http://localhost:19001` |
@@ -61,6 +62,10 @@ RUN_SMOKE_TEST=false ./scripts/dev-up.sh
 - OCR：`/ocr-api`
 - Langfuse：`/observability`
 - LiteLLM：`/llm-admin`
+
+本地 Vite 开发服务器使用 `5173`，并将 `/api` 直接代理到 Java API `8080`。
+Docker 全量部署时必须通过 Nginx `18080` 使用完整应用；Docker 前端容器的
+`5173` 仅提供静态资源，不承担 `/api` 代理。
 
 ## 镜像覆盖
 

@@ -6,7 +6,6 @@ OUTPUT="${ROOT_DIR}/docs/api/openapi.json"
 mkdir -p "$(dirname "${OUTPUT}")"
 
 curl --fail --silent --show-error \
-  "${JAVA_BASE_URL:-http://localhost:18080}/v3/api-docs" \
+  "${JAVA_BASE_URL:-http://localhost:8080}/v3/api-docs" \
   --output "${OUTPUT}"
 echo "OpenAPI written to ${OUTPUT}."
-

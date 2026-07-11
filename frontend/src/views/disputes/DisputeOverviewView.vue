@@ -15,6 +15,7 @@ const props = defineProps({
   serverNow: { type: String, default: () => new Date().toISOString() },
   createAction: { type: Function, default: null },
   simulateExternalImportAction: { type: Function, default: null },
+  deleteSimulatedCaseAction: { type: Function, default: null },
 });
 
 const router = useRouter();
@@ -23,8 +24,11 @@ const selectedId = ref(props.initialCases[0]?.id || null);
 const intakeOpen = ref(false);
 const creating = ref(false);
 const importingExternal = ref(false);
+const deletingCase = ref(false);
+const deleteCandidate = ref(null);
 const createError = ref("");
 const importError = ref("");
+const deleteError = ref("");
 const intakeForm = ref({
   orderReference: "",
   afterSalesReference: "",
@@ -60,6 +64,26 @@ const selectedCase = computed(
 );
 const canInitiateDispute = computed(() =>
   ["USER", "MERCHANT"].includes(actor.role),
+);
+const canImportExternal = computed(() =>
+  ["USER", "MERCHANT"].includes(actor.role),
+);
+const simulatedSourceSystems = new Set([
+  "TEMPLATE_SIMULATED_OMS",
+  "LLM_SIMULATED_OMS",
+]);
+
+function isDeletableSimulatedCase(dispute) {
+  return Boolean(
+    dispute &&
+      dispute.source_type === "EXTERNAL_IMPORT" &&
+      simulatedSourceSystems.has(dispute.source_system),
+  );
+}
+
+const canDeleteSelectedCase = computed(() =>
+  actor.role === "PLATFORM_REVIEWER" &&
+  isDeletableSimulatedCase(selectedCase.value),
 );
 
 const journey = [
@@ -167,6 +191,9 @@ function normalizeImportedCase(item) {
       item.orderReference ||
       "外部订单待同步",
     source_type: item.source_type || item.sourceType || "EXTERNAL_IMPORT",
+    source_system: item.source_system || item.sourceSystem || null,
+    external_case_reference:
+      item.external_case_reference || item.externalCaseReference || null,
     dispute_type: item.dispute_type || item.disputeType || "FULFILLMENT_CONFLICT",
     case_status: item.case_status || item.caseStatus || "INTAKE_PENDING",
     current_room: item.current_room || item.currentRoom || "INTAKE",
@@ -184,6 +211,7 @@ function normalizeImportedCase(item) {
 }
 
 async function simulateExternalImport() {
+  if (!canImportExternal.value || importingExternal.value) return;
   const initiatorRole = actor.role === "MERCHANT" ? "MERCHANT" : "USER";
   const command = {
     count: 1,
@@ -219,6 +247,60 @@ async function simulateExternalImport() {
     importError.value = failure.message;
   } finally {
     importingExternal.value = false;
+  }
+}
+
+function openDeleteCaseConfirmation() {
+  if (!canDeleteSelectedCase.value) return;
+  deleteCandidate.value = selectedCase.value;
+  deleteError.value = "";
+}
+
+function closeDeleteCaseConfirmation() {
+  if (deletingCase.value) return;
+  deleteCandidate.value = null;
+  deleteError.value = "";
+}
+
+async function confirmDeleteCase() {
+  if (deletingCase.value) return;
+  const candidate = deleteCandidate.value;
+  if (
+    actor.role !== "PLATFORM_REVIEWER" ||
+    !isDeletableSimulatedCase(candidate)
+  ) {
+    deleteError.value = "当前角色无权删除该案例";
+    return;
+  }
+
+  deletingCase.value = true;
+  deleteError.value = "";
+  try {
+    if (props.deleteSimulatedCaseAction) {
+      await props.deleteSimulatedCaseAction(candidate.id);
+    } else {
+      await disputeApi.deleteSimulatedCase(actor, candidate.id);
+    }
+
+    const snapshot = [...cases.value];
+    const deletedIndex = snapshot.findIndex((item) => item.id === candidate.id);
+    const remaining = snapshot.filter((item) => item.id !== candidate.id);
+    const nextSelection =
+      remaining[deletedIndex] ||
+      remaining[deletedIndex - 1] ||
+      remaining[0] ||
+      null;
+
+    localCases.value = remaining;
+    disputeStore.list.data = disputeStore.list.data.filter(
+      (item) => item.id !== candidate.id,
+    );
+    selectedId.value = nextSelection?.id || null;
+    deleteCandidate.value = null;
+  } catch (failure) {
+    deleteError.value = failure?.message || "删除失败，请稍后重试";
+  } finally {
+    deletingCase.value = false;
   }
 }
 
@@ -280,6 +362,7 @@ onMounted(async () => {
       </div>
       <div class="overview-page__actions">
         <button
+          v-if="canImportExternal"
           class="overview-page__import"
           type="button"
           data-simulate-external-import
@@ -288,6 +371,16 @@ onMounted(async () => {
         >
           <span aria-hidden="true">⇢</span>
           {{ importingExternal ? "外部系统导入中" : "导入外部争议" }}
+        </button>
+        <button
+          v-if="canDeleteSelectedCase"
+          class="overview-page__delete"
+          type="button"
+          data-delete-simulated-case
+          @click="openDeleteCaseConfirmation"
+        >
+          <span aria-hidden="true">×</span>
+          删除模拟案例
         </button>
         <button
           v-if="canInitiateDispute"
@@ -321,6 +414,7 @@ onMounted(async () => {
             class="dispute-ticket"
             :class="{ 'dispute-ticket--active': item.id === selectedCase?.id }"
             :data-case-id="item.id"
+            :data-source-system="item.source_system || undefined"
             @click="selectedId = item.id"
           >
             <span class="dispute-ticket__topline">
@@ -538,6 +632,46 @@ onMounted(async () => {
         </footer>
       </form>
     </div>
+
+    <div
+      v-if="deleteCandidate"
+      class="delete-case-modal"
+      data-delete-case-modal
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="delete-case-title"
+      @click.self="closeDeleteCaseConfirmation"
+    >
+      <section class="delete-case-modal__card">
+        <span class="delete-case-modal__eyebrow">SIMULATED CASE CLEANUP</span>
+        <h2 id="delete-case-title">确认删除这个模拟案例？</h2>
+        <p>
+          将永久删除“{{ deleteCandidate.title }}”（{{ deleteCandidate.id }}）及其案例数据，
+          <strong>删除后不可恢复</strong>。
+        </p>
+        <p v-if="deleteError" class="delete-case-modal__error" role="alert">
+          {{ deleteError }}
+        </p>
+        <footer>
+          <button
+            type="button"
+            data-cancel-delete-case
+            :disabled="deletingCase"
+            @click="closeDeleteCaseConfirmation"
+          >
+            取消
+          </button>
+          <button
+            type="button"
+            data-confirm-delete-case
+            :disabled="deletingCase"
+            @click="confirmDeleteCase"
+          >
+            {{ deletingCase ? "正在删除…" : "确认永久删除" }}
+          </button>
+        </footer>
+      </section>
+    </div>
   </section>
 </template>
 
@@ -603,6 +737,7 @@ onMounted(async () => {
 }
 .overview-page__start,
 .overview-page__import,
+.overview-page__delete,
 .hearing-adventure__next > button {
   display: inline-flex;
   align-items: center;
@@ -639,6 +774,23 @@ onMounted(async () => {
   color: #fff;
   background: #73b9ef;
   border-radius: 50%;
+}
+.overview-page__delete {
+  color: #9a4652;
+  background: linear-gradient(135deg, #fff2f1, #ffe7df);
+  border: 1px solid #f1c8c5;
+  box-shadow: 0 14px 28px #bd686326;
+}
+.overview-page__delete span {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  color: #fff;
+  background: #d76c71;
+  border-radius: 50%;
+  font-size: 18px;
+  line-height: 1;
 }
 .overview-page__import:disabled {
   cursor: progress;
@@ -1054,6 +1206,73 @@ onMounted(async () => {
   padding: 11px 16px; color: #fff; background: linear-gradient(135deg, #ff8a70, #8a86ee); border: 0; border-radius: 13px; cursor: pointer; font-weight: 800;
 }
 .intake-launcher__error { color: #a84451; }
+.delete-case-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: #4054754d;
+  backdrop-filter: blur(10px);
+}
+.delete-case-modal__card {
+  width: min(480px, 100%);
+  padding: 26px;
+  color: #48566d;
+  background: linear-gradient(145deg, #fff, #fff7f3);
+  border: 1px solid #f0d2ca;
+  border-radius: 27px;
+  box-shadow: 0 30px 90px #3e55753d;
+}
+.delete-case-modal__eyebrow {
+  color: #b26b70;
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: .16em;
+}
+.delete-case-modal__card h2 {
+  margin: 7px 0 10px;
+  color: #3b485f;
+}
+.delete-case-modal__card p {
+  margin: 0;
+  color: #68758a;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+.delete-case-modal__card p strong { color: #aa4652; }
+.delete-case-modal__error {
+  margin-top: 12px !important;
+  padding: 10px 12px;
+  color: #a84451 !important;
+  background: #fff0ef;
+  border-radius: 12px;
+}
+.delete-case-modal__card footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 22px;
+}
+.delete-case-modal__card footer button {
+  min-height: 42px;
+  padding: 10px 15px;
+  color: #66748a;
+  background: #f2f5f8;
+  border: 0;
+  border-radius: 13px;
+  cursor: pointer;
+  font-weight: 800;
+}
+.delete-case-modal__card footer button:last-child {
+  color: #fff;
+  background: linear-gradient(135deg, #dc7772, #be5864);
+}
+.delete-case-modal__card footer button:disabled {
+  cursor: progress;
+  opacity: .65;
+}
 @media (max-width: 1020px) {
   .overview-layout {
     grid-template-columns: 1fr;
@@ -1139,6 +1358,7 @@ onMounted(async () => {
   }
   .overview-page__start,
   .overview-page__import,
+  .overview-page__delete,
   .hearing-adventure__next > button {
     min-width: 0;
     min-height: 44px;
@@ -1149,7 +1369,8 @@ onMounted(async () => {
     white-space: nowrap;
   }
   .overview-page__start span,
-  .overview-page__import span {
+  .overview-page__import span,
+  .overview-page__delete span {
     width: 20px;
     height: 20px;
   }

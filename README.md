@@ -21,7 +21,7 @@ Tool Executor 只执行经过审批、参数冻结且具备幂等保护的确定
 | 服务 | 职责 | 本地端口 |
 |---|---|---:|
 | `frontend` | Case、补证、证据、审核、执行与审计页面 | 5173 |
-| `java-api-service` | 业务事实源、REST API、Temporal Worker、审批和执行 | 8080（本地 dev）/ 18080（Docker） |
+| `java-api-service` | 业务事实源、REST API、Temporal Worker、审批和执行 | 8080 |
 | `python-agent-service` | Intake、C1-C6、Evaluation Agent | 18000 |
 | `ocr-parser-service` | 图片、PDF、Word、Excel 解析 | 18010 |
 | `postgresql` | 业务、审计、Temporal、Langfuse、LiteLLM 数据 | 15432 |
@@ -31,7 +31,7 @@ Tool Executor 只执行经过审批、参数冻结且具备幂等保护的确定
 | `temporal-server` | 长流程、Signal、超时和重试 | 7233 |
 | `langfuse` | Agent Trace | 13000 |
 | `litellm-proxy` | 唯一 LLM 网关 | 14000 |
-| `nginx` | Docker 全量环境统一入口 | 8080 |
+| `nginx` | Docker 全量环境应用入口 | 18080 |
 
 所有端口默认仅绑定 `127.0.0.1`。
 
@@ -72,8 +72,10 @@ Vite，并让 Python Agent/OCR 容器回调宿主机 `8080`。停止本地进程
 docker compose up -d --build
 ```
 
-全量 Docker 环境中，nginx 使用宿主机 `8080`，Python Agent/OCR 默认通过
-`http://java-api-service:8080` 访问容器内 Java API。
+全量 Docker 环境中，Java API 仍使用宿主机 `8080`，应用统一从 nginx
+宿主机 `18080` 进入；Python Agent/OCR 默认通过 `http://java-api-service:8080`
+访问容器内 Java API。Docker 前端的 `5173` 是静态服务端口，不承担 API
+代理；本地 Vite 开发服务器 `5173` 才会直连并代理 Java API `8080`。
 
 详细说明见：
 

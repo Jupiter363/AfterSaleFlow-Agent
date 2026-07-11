@@ -38,7 +38,7 @@ def test_host_ports_are_local_only_and_every_runtime_is_health_checked() -> None
     compose = read(ROOT / "docker-compose.yml")
     assert compose.count('127.0.0.1:${') >= 13
     assert compose.count("healthcheck:") >= 14
-    assert '127.0.0.1:${NGINX_PORT:-8080}:80' in compose
+    assert '127.0.0.1:${NGINX_PORT:-18080}:80' in compose
 
 
 def test_frontend_container_serves_a_production_build_as_non_root() -> None:

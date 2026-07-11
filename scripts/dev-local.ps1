@@ -142,15 +142,17 @@ function Wait-ForHttp {
     param(
         [Parameter(Mandatory = $true)][string]$Url,
         [Parameter(Mandatory = $true)][string]$Name,
-        [Parameter(Mandatory = $true)][System.Diagnostics.Process]$Process,
+        [System.Diagnostics.Process]$Process,
         [int]$TimeoutSeconds = 180
     )
 
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     do {
-        $Process.Refresh()
-        if ($Process.HasExited) {
-            throw "$Name exited before becoming ready. Exit code: $($Process.ExitCode)."
+        if ($null -ne $Process) {
+            $Process.Refresh()
+            if ($Process.HasExited) {
+                throw "$Name exited before becoming ready. Exit code: $($Process.ExitCode)."
+            }
         }
         try {
             $response = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 5
@@ -236,10 +238,16 @@ New-Item -ItemType Directory -Path $stateDir -Force | Out-Null
 Push-Location $projectRoot
 try {
     docker compose stop nginx java-api-service | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to stop Docker nginx/java-api-service before local dev startup."
+    }
 
     $env:JAVA_API_SERVICE_URL = "http://host.docker.internal:8080"
     docker compose up -d --no-build --force-recreate `
         python-agent-service ocr-parser-service | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to start Docker Python Agent/OCR dependencies for local dev."
+    }
 }
 finally {
     Pop-Location
@@ -297,6 +305,9 @@ $frontendProcess =
 [System.IO.File]::WriteAllText($frontendPidFile, $frontendProcess.Id.ToString())
 
 try {
+    Wait-ForHttp `
+        -Url "http://127.0.0.1:$($env:PYTHON_AGENT_PORT)/health" `
+        -Name "Python Agent"
     Wait-ForJavaHealth -Process $javaProcess
     Wait-ForHttp `
         -Url "http://127.0.0.1:5173/@vite/client" `

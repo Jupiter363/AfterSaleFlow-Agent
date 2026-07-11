@@ -1,6 +1,7 @@
 package com.example.dispute.casecore;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
@@ -9,19 +10,18 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import com.example.dispute.casecore.application.DisputeImportService;
 import com.example.dispute.casecore.application.ExternalCaseImportTransactionService;
-import com.example.dispute.casecore.application.ExternalDisputeSimulationClient;
 import com.example.dispute.casecore.application.ImportDisputeCommand;
 import com.example.dispute.casecore.application.ImportedDisputeView;
 import com.example.dispute.casecore.application.SimulateExternalImportCommand;
-import com.example.dispute.casecore.application.SimulatedExternalDispute;
+import com.example.dispute.casecore.application.SimulatedExternalDisputeTemplateCatalog;
 import com.example.dispute.casecore.application.SingleInstanceImportGate;
-import com.example.dispute.common.exception.AgentExecutionException;
 import com.example.dispute.common.exception.IdempotencyConflictException;
+import com.example.dispute.casecore.infrastructure.persistence.repository.SimulatedImportTemplateCursorRepository;
+import com.example.dispute.common.transaction.PostCommitSideEffectExecutor;
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.config.DisputeProperties;
@@ -60,6 +60,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 @ExtendWith(MockitoExtension.class)
@@ -70,7 +71,7 @@ class DisputeImportServiceTest {
     @Mock private CasePhaseClockRepository clockRepository;
     @Mock private ParticipantService participantService;
     @Mock private IntakeAgentTurnService intakeAgentTurnService;
-    @Mock private ExternalDisputeSimulationClient simulationClient;
+    @Mock private SimulatedImportTemplateCursorRepository simulatedImportCursorRepository;
 
     private DisputeImportService service;
     private ExternalCaseImportTransactionService transactionService;
@@ -84,6 +85,9 @@ class DisputeImportServiceTest {
                         clockRepository,
                         participantService,
                         intakeAgentTurnService,
+                        simulatedImportCursorRepository,
+                        new SimulatedExternalDisputeTemplateCatalog(),
+                        new PostCommitSideEffectExecutor(Runnable::run),
                         new DisputeProperties(
                                 Duration.ofHours(2),
                                 Duration.ofHours(3),
@@ -95,10 +99,7 @@ class DisputeImportServiceTest {
                                 Instant.parse("2026-07-03T00:00:00Z"),
                                 ZoneOffset.UTC));
         service =
-                new DisputeImportService(
-                        transactionService,
-                        simulationClient,
-                        new SingleInstanceImportGate());
+                new DisputeImportService(transactionService, new SingleInstanceImportGate());
     }
 
     @Test
@@ -160,7 +161,7 @@ class DisputeImportServiceTest {
     }
 
     @Test
-    void startsInitialIntakeTurnInsideTheImportTransaction() {
+    void startsInitialIntakeTurnOnlyAfterTheImportTransactionCommits() {
         when(repository.findBySourceSystemAndExternalCaseRef("OMS", "EXT-1003"))
                 .thenReturn(Optional.empty());
         when(repository.save(any()))
@@ -173,6 +174,20 @@ class DisputeImportServiceTest {
                     new AuthenticatedActor("external-adapter", ActorRole.SYSTEM),
                     "import-ext-1003");
 
+            verify(intakeAgentTurnService, never())
+                    .startInitialTurn(
+                            any(String.class),
+                            any(AuthenticatedActor.class),
+                            any(IntakeLobbySeed.class),
+                            any(String.class),
+                            any(String.class));
+            assertThat(TransactionSynchronizationManager.getSynchronizations()).hasSize(1);
+
+            for (TransactionSynchronization synchronization :
+                    TransactionSynchronizationManager.getSynchronizations()) {
+                synchronization.afterCommit();
+            }
+
             ArgumentCaptor<AuthenticatedActor> intakeActor =
                     ArgumentCaptor.forClass(AuthenticatedActor.class);
             verify(intakeAgentTurnService)
@@ -183,14 +198,13 @@ class DisputeImportServiceTest {
                             any(String.class),
                             any(String.class));
             assertThat(intakeActor.getValue().actorId()).isEqualTo("user-local");
-            assertThat(TransactionSynchronizationManager.getSynchronizations()).isEmpty();
         } finally {
             TransactionSynchronizationManager.clearSynchronization();
         }
     }
 
     @Test
-    void intakePersistenceFailureAbortsTheImportInsteadOfLeavingAPartialCase() {
+    void intakePersistenceFailureAfterCommitDoesNotRollBackTheImportedCase() {
         when(repository.findBySourceSystemAndExternalCaseRef("OMS", "EXT-POST-COMMIT-FAILURE"))
                 .thenReturn(Optional.empty());
         when(repository.save(any()))
@@ -206,16 +220,24 @@ class DisputeImportServiceTest {
 
         TransactionSynchronizationManager.initSynchronization();
         try {
-            assertThatThrownBy(
+            assertThatCode(
                             () ->
                                     service.importDispute(
                                             command("EXT-POST-COMMIT-FAILURE"),
                                             new AuthenticatedActor(
                                                     "external-adapter", ActorRole.SYSTEM),
                                             "import-ext-post-commit-failure"))
-                    .isInstanceOf(
-                            org.springframework.dao.InvalidDataAccessApiUsageException.class)
-                    .hasMessage("transaction closed");
+                    .doesNotThrowAnyException();
+
+            assertThatCode(
+                            () -> {
+                                for (TransactionSynchronization synchronization :
+                                        TransactionSynchronizationManager.getSynchronizations()) {
+                                    synchronization.afterCommit();
+                                }
+                            })
+                    .doesNotThrowAnyException();
+            verify(repository).save(any(FulfillmentCaseEntity.class));
         } finally {
             TransactionSynchronizationManager.clearSynchronization();
         }
@@ -428,69 +450,6 @@ class DisputeImportServiceTest {
     }
 
     @Test
-    void simulatesExternalDisputesWithLlmThenImportsThroughTheOfficialPath() {
-        when(simulationClient.simulate(any(), any(), any()))
-                .thenReturn(
-                        List.of(
-                                new SimulatedExternalDispute(
-                                        "LLM_SIMULATED_OMS",
-                                        "SIM-20260706-001",
-                                        "ORDER-20260706-4201",
-                                        "AS-20260706-4201",
-                                        "SF-20260706-4201",
-                                        "user-local",
-                                        "merchant-local",
-                                        "MERCHANT",
-                                        "QUALITY_DISPUTE",
-                                        "商家发起手表故障争议",
-                                        "商家认为用户提交的故障视频与售后检测结果不一致，需要平台受理。",
-                                        RiskLevel.MEDIUM)));
-        when(repository.findBySourceSystemAndExternalCaseRef(
-                        "LLM_SIMULATED_OMS", "SIM-20260706-001"))
-                .thenReturn(Optional.empty());
-        when(repository.save(any()))
-                .thenAnswer(invocation -> invocation.getArgument(0));
-
-        var result =
-                service.simulateExternalImport(
-                        new SimulateExternalImportCommand(
-                                1,
-                                "手表售后争议",
-                                RiskLevel.MEDIUM,
-                                ActorRole.MERCHANT,
-                                "merchant-local",
-                                "user-local"),
-                        new AuthenticatedActor("external-adapter", ActorRole.SYSTEM),
-                        "simulate-import-001",
-                        "TRACE_SIM",
-                        "REQ_SIM");
-
-        assertThat(result.items()).hasSize(1);
-        assertThat(result.items().get(0).sourceType()).isEqualTo("EXTERNAL_IMPORT");
-        assertThat(result.items().get(0).externalCaseReference())
-                .isEqualTo("SIM-20260706-001");
-        assertThat(result.items().get(0).initiatorRole()).isEqualTo("MERCHANT");
-        assertThat(result.items().get(0).title()).isEqualTo("商家发起手表故障争议");
-        assertThat(result.items().get(0).orderId()).isEqualTo("ORDER-20260706-4201");
-
-        var savedCase =
-                org.mockito.ArgumentCaptor.forClass(FulfillmentCaseEntity.class);
-        verify(repository).save(savedCase.capture());
-        assertThat(savedCase.getValue().getInitiatorRole()).isEqualTo(ActorRole.MERCHANT);
-        ArgumentCaptor<AuthenticatedActor> intakeActor =
-                ArgumentCaptor.forClass(AuthenticatedActor.class);
-        verify(intakeAgentTurnService)
-                .startInitialTurn(
-                        any(String.class),
-                        intakeActor.capture(),
-                        any(IntakeLobbySeed.class),
-                        any(String.class),
-                        any(String.class));
-        assertThat(intakeActor.getValue().actorId()).isEqualTo("merchant-local");
-        assertThat(intakeActor.getValue().role()).isEqualTo(ActorRole.MERCHANT);
-    }
-
-    @Test
     void simulatedBatchDoesNotOwnATransactionThatAccumulatesItemLocks()
             throws NoSuchMethodException {
         var method =
@@ -506,25 +465,22 @@ class DisputeImportServiceTest {
     }
 
     @Test
-    void simulatedImportDelegatesTheSingleItemToTheTransactionalImportBoundary()
+    void simulatedImportDelegatesToTheTransactionalTemplateBoundary()
             throws NoSuchMethodException {
         ExternalCaseImportTransactionService transactionalImporter =
                 mock(ExternalCaseImportTransactionService.class);
         DisputeImportService facade =
-                new DisputeImportService(
-                        transactionalImporter,
-                        simulationClient,
-                        new SingleInstanceImportGate());
-        when(transactionalImporter.importDispute(
-                        any(ImportDisputeCommand.class),
+                new DisputeImportService(transactionalImporter, new SingleInstanceImportGate());
+        when(transactionalImporter.simulateExternalImport(
+                        any(SimulateExternalImportCommand.class),
                         any(AuthenticatedActor.class),
                         any(String.class),
                         any(String.class),
                         any(String.class)))
-                .thenReturn(mock(ImportedDisputeView.class));
-        when(simulationClient.simulate(any(), any(), any()))
                 .thenReturn(
-                        List.of(simulatedExternalDispute("SIM-BATCH-001")));
+                        mock(
+                                com.example.dispute.casecore.application
+                                        .SimulatedImportResultView.class));
 
         facade.simulateExternalImport(
                 new SimulateExternalImportCommand(
@@ -539,23 +495,18 @@ class DisputeImportServiceTest {
                 "TRACE_BATCH",
                 "REQ_BATCH");
 
-        ArgumentCaptor<ImportDisputeCommand> commands =
-                ArgumentCaptor.forClass(ImportDisputeCommand.class);
         verify(transactionalImporter)
-                .importDispute(
-                        commands.capture(),
+                .simulateExternalImport(
+                        any(SimulateExternalImportCommand.class),
                         any(AuthenticatedActor.class),
-                        any(String.class),
-                        any(String.class),
-                        any(String.class));
-        assertThat(commands.getAllValues())
-                .extracting(ImportDisputeCommand::externalCaseReference)
-                .containsExactly("SIM-BATCH-001");
+                        org.mockito.ArgumentMatchers.eq("simulate-batch"),
+                        org.mockito.ArgumentMatchers.eq("TRACE_BATCH"),
+                        org.mockito.ArgumentMatchers.eq("REQ_BATCH"));
         assertThat(
                         ExternalCaseImportTransactionService.class
                                 .getMethod(
-                                        "importDispute",
-                                        ImportDisputeCommand.class,
+                                        "simulateExternalImport",
+                                        SimulateExternalImportCommand.class,
                                         AuthenticatedActor.class,
                                         String.class,
                                         String.class,
@@ -565,25 +516,21 @@ class DisputeImportServiceTest {
     }
 
     @Test
-    void simulatedImportReusesTheOriginalRequestKeyWhenTheSimulatorReturnsAnotherCase() {
+    void simulatedImportReusesTheOriginalRequestKeyForTransactionalReplay() {
         ExternalCaseImportTransactionService transactionalImporter =
                 mock(ExternalCaseImportTransactionService.class);
         DisputeImportService facade =
-                new DisputeImportService(
-                        transactionalImporter,
-                        simulationClient,
-                        new SingleInstanceImportGate());
-        when(transactionalImporter.importDispute(
-                        any(ImportDisputeCommand.class),
+                new DisputeImportService(transactionalImporter, new SingleInstanceImportGate());
+        when(transactionalImporter.simulateExternalImport(
+                        any(SimulateExternalImportCommand.class),
                         any(AuthenticatedActor.class),
                         any(String.class),
                         any(String.class),
                         any(String.class)))
-                .thenReturn(mock(ImportedDisputeView.class));
-        when(simulationClient.simulate(any(), any(), any()))
                 .thenReturn(
-                        List.of(simulatedExternalDispute("SIM-RETRY-FIRST")),
-                        List.of(simulatedExternalDispute("SIM-RETRY-SECOND")));
+                        mock(
+                                com.example.dispute.casecore.application
+                                        .SimulatedImportResultView.class));
 
         SimulateExternalImportCommand command =
                 new SimulateExternalImportCommand(
@@ -612,8 +559,8 @@ class DisputeImportServiceTest {
         ArgumentCaptor<String> creationKeys =
                 ArgumentCaptor.forClass(String.class);
         verify(transactionalImporter, times(2))
-                .importDispute(
-                        any(ImportDisputeCommand.class),
+                .simulateExternalImport(
+                        any(SimulateExternalImportCommand.class),
                         any(AuthenticatedActor.class),
                         creationKeys.capture(),
                         any(String.class),
@@ -628,10 +575,7 @@ class DisputeImportServiceTest {
         ExternalCaseImportTransactionService transactionalImporter =
                 mock(ExternalCaseImportTransactionService.class);
         DisputeImportService facade =
-                new DisputeImportService(
-                        transactionalImporter,
-                        simulationClient,
-                        new SingleInstanceImportGate());
+                new DisputeImportService(transactionalImporter, new SingleInstanceImportGate());
         ImportedDisputeView imported = mock(ImportedDisputeView.class);
         CyclicBarrier requestStart = new CyclicBarrier(2);
         CyclicBarrier transactionOverlap = new CyclicBarrier(2);
@@ -694,10 +638,7 @@ class DisputeImportServiceTest {
         ExternalCaseImportTransactionService transactionalImporter =
                 mock(ExternalCaseImportTransactionService.class);
         DisputeImportService facade =
-                new DisputeImportService(
-                        transactionalImporter,
-                        simulationClient,
-                        new SingleInstanceImportGate());
+                new DisputeImportService(transactionalImporter, new SingleInstanceImportGate());
         ImportedDisputeView imported = mock(ImportedDisputeView.class);
         when(transactionalImporter.importDispute(
                         any(ImportDisputeCommand.class),
@@ -725,41 +666,6 @@ class DisputeImportServiceTest {
                                         "external-adapter", ActorRole.SYSTEM),
                                 "gate-recovery"))
                 .isSameAs(imported);
-    }
-
-    @Test
-    void rejectsSimulationClientResponsesThatDoNotContainExactlyOneItem() {
-        ExternalCaseImportTransactionService transactionalImporter =
-                mock(ExternalCaseImportTransactionService.class);
-        DisputeImportService facade =
-                new DisputeImportService(
-                        transactionalImporter,
-                        simulationClient,
-                        new SingleInstanceImportGate());
-        when(simulationClient.simulate(any(), any(), any()))
-                .thenReturn(
-                        List.of(
-                                simulatedExternalDispute("SIM-TOO-MANY-001"),
-                                simulatedExternalDispute("SIM-TOO-MANY-002")));
-
-        assertThatThrownBy(
-                        () ->
-                                facade.simulateExternalImport(
-                                        new SimulateExternalImportCommand(
-                                                1,
-                                                "watch dispute",
-                                                RiskLevel.MEDIUM,
-                                                ActorRole.USER,
-                                                "user-local",
-                                                "merchant-local"),
-                                        new AuthenticatedActor(
-                                                "external-adapter", ActorRole.SYSTEM),
-                                        "simulate-too-many",
-                                        "TRACE_TOO_MANY",
-                                        "REQ_TOO_MANY"))
-                .isInstanceOf(AgentExecutionException.class)
-                .hasMessageContaining("exactly one");
-        verifyNoInteractions(transactionalImporter);
     }
 
     @Test
@@ -904,20 +810,4 @@ class DisputeImportServiceTest {
                         0.5));
     }
 
-    private static SimulatedExternalDispute simulatedExternalDispute(
-            String externalReference) {
-        return new SimulatedExternalDispute(
-                "LLM_SIMULATED_OMS",
-                externalReference,
-                "ORDER-" + externalReference,
-                "AFTER-" + externalReference,
-                "LOG-" + externalReference,
-                "user-local",
-                "merchant-local",
-                "USER",
-                "SIGNED_NOT_RECEIVED",
-                "Imported dispute",
-                "Imported dispute description",
-                RiskLevel.MEDIUM);
-    }
 }

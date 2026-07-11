@@ -51,6 +51,7 @@ export const disputeApi = {
     const idempotencyKey = newIdempotencyKey("external-import");
     return apiRequest("/disputes/import/simulate", actor, {
       method: "POST",
+      timeoutMs: 15_000,
       headers: { "Idempotency-Key": idempotencyKey },
       body: JSON.stringify({
         ...command,
@@ -58,4 +59,8 @@ export const disputeApi = {
       }),
     });
   },
+  deleteSimulatedCase: (actor, caseId) =>
+    apiRequest(`/disputes/${encodeURIComponent(caseId)}`, actor, {
+      method: "DELETE",
+    }),
 };

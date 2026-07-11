@@ -175,7 +175,7 @@ def test_compose_has_persistent_volumes_and_expected_host_ports() -> None:
 
     assert {"postgresql_data", "redis_data", "elasticsearch_data", "minio_data"} <= volumes.keys()
     assert (
-        "127.0.0.1:${JAVA_API_PORT:-18080}:8080"
+        "127.0.0.1:${JAVA_API_PORT:-8080}:8080"
         in services["java-api-service"]["ports"]
     )
     assert (
@@ -186,7 +186,7 @@ def test_compose_has_persistent_volumes_and_expected_host_ports() -> None:
         "127.0.0.1:${OCR_SERVICE_PORT:-18010}:8010"
         in services["ocr-parser-service"]["ports"]
     )
-    assert "127.0.0.1:${NGINX_PORT:-8080}:80" in services["nginx"]["ports"]
+    assert "127.0.0.1:${NGINX_PORT:-18080}:80" in services["nginx"]["ports"]
 
 
 def test_required_scripts_exist_and_fail_fast() -> None:

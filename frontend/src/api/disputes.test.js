@@ -4,6 +4,7 @@ import { disputeApi } from "./disputes";
 const actor = { id: "user-local", role: "USER" };
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -206,5 +207,67 @@ describe("dispute API", () => {
       requestOptions.headers["Idempotency-Key"],
     );
     expect(result.items[0].case_id).toBe("CASE_simulated");
+  });
+
+  it("times out simulated external imports after 15 seconds without leaking timeoutMs to fetch", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(
+      (_url, options) =>
+        new Promise((_resolve, reject) => {
+          if (!options.signal) {
+            reject(new Error("fetch did not receive an AbortSignal"));
+            return;
+          }
+          options.signal.addEventListener(
+            "abort",
+            () => reject(new DOMException("The request was aborted", "AbortError")),
+            { once: true },
+          );
+        }),
+    );
+
+    const requestError = disputeApi
+      .simulateExternalImport(actor, { count: 1 })
+      .catch((error) => error);
+    const [, requestOptions] = fetchMock.mock.calls[0];
+
+    expect(requestOptions).not.toHaveProperty("timeoutMs");
+    expect(requestOptions.signal?.aborted).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(14_999);
+    expect(requestOptions.signal?.aborted).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(await requestError).toMatchObject({ code: "REQUEST_TIMEOUT" });
+    expect(requestOptions.signal.aborted).toBe(true);
+  });
+
+  it("deletes an imported simulation through the reviewer-only case endpoint", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        success: true,
+        data: { case_id: "CASE_template_01", deleted: true },
+      }),
+    });
+
+    const reviewer = { id: "reviewer-local", role: "PLATFORM_REVIEWER" };
+    const result = await disputeApi.deleteSimulatedCase(
+      reviewer,
+      "CASE_template_01",
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/disputes/CASE_template_01",
+      expect.objectContaining({
+        method: "DELETE",
+        headers: expect.objectContaining({
+          "X-Role": "PLATFORM_REVIEWER",
+          "X-User-Id": "reviewer-local",
+        }),
+      }),
+    );
+    expect(result).toEqual({ case_id: "CASE_template_01", deleted: true });
   });
 });

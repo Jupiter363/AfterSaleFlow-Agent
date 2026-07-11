@@ -3,7 +3,7 @@ import {
   createMemoryHistory,
   createRouter,
 } from "vue-router";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import { actor } from "../../state/actor";
@@ -11,12 +11,15 @@ import DisputeOverviewView from "./DisputeOverviewView.vue";
 
 const longCaseId = "CASE_EXT_002_LONG_IDENTIFIER_FOR_LAYOUT_TESTING";
 const longOrderId = "ORDER_EXT_002_LONG_IDENTIFIER_FOR_LAYOUT_TESTING";
+const formalExternalCaseId = "CASE_REAL_OMS_003";
 
 const cases = [
   {
     id: "CASE_EXT_001",
     order_id: "ORDER-001",
     source_type: "EXTERNAL_IMPORT",
+    source_system: "TEMPLATE_SIMULATED_OMS",
+    external_case_reference: "TPL-001",
     dispute_type: "SIGNED_NOT_RECEIVED",
     case_status: "EVIDENCE_OPEN",
     current_room: "EVIDENCE",
@@ -37,9 +40,30 @@ const cases = [
     pending_action: "PARTICIPATE_HEARING",
     title: "到货破损",
   },
+  {
+    id: formalExternalCaseId,
+    order_id: "ORDER-REAL-003",
+    source_type: "EXTERNAL_IMPORT",
+    source_system: "PRODUCTION_OMS",
+    dispute_type: "QUALITY_DISPUTE",
+    case_status: "INTAKE_PENDING",
+    current_room: "INTAKE",
+    risk_level: "LOW",
+    pending_action: "COMPLETE_INTAKE",
+    title: "正式外部订单争议",
+  },
 ];
 
-async function mountOverview(createAction = null, simulateExternalImportAction = null) {
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
+
+async function mountOverview(
+  createAction = null,
+  simulateExternalImportAction = null,
+  deleteSimulatedCaseAction = null,
+) {
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [
@@ -58,6 +82,7 @@ async function mountOverview(createAction = null, simulateExternalImportAction =
       serverNow: "2026-07-03T10:00:00Z",
       createAction,
       simulateExternalImportAction,
+      deleteSimulatedCaseAction,
     },
     global: { plugins: [router] },
   });
@@ -284,7 +309,98 @@ describe("DisputeOverviewView", () => {
     const { wrapper } = await mountOverview();
 
     expect(wrapper.find("[data-start-dispute]").exists()).toBe(false);
+    expect(wrapper.find("[data-simulate-external-import]").exists()).toBe(false);
     expect(wrapper.find(".intake-launcher").exists()).toBe(false);
+  });
+
+  it.each([
+    ["USER", "user-local"],
+    ["MERCHANT", "merchant-local"],
+  ])("does not expose simulation deletion to %s actors", async (role, id) => {
+    actor.id = id;
+    actor.role = role;
+    const { wrapper } = await mountOverview();
+
+    expect(wrapper.find("[data-delete-simulated-case]").exists()).toBe(false);
+    expect(wrapper.find("[data-simulate-external-import]").exists()).toBe(true);
+  });
+
+  it("shows deletion only for a reviewer selecting an approved simulated source", async () => {
+    actor.id = "reviewer-local";
+    actor.role = "PLATFORM_REVIEWER";
+    const { wrapper } = await mountOverview();
+
+    expect(wrapper.find("[data-delete-simulated-case]").exists()).toBe(true);
+
+    await wrapper.get(`[data-case-id="${longCaseId}"]`).trigger("click");
+
+    expect(wrapper.find("[data-delete-simulated-case]").exists()).toBe(false);
+
+    await wrapper.get(`[data-case-id="${formalExternalCaseId}"]`).trigger("click");
+
+    expect(wrapper.find("[data-delete-simulated-case]").exists()).toBe(false);
+  });
+
+  it("cancels simulated-case deletion without calling the API", async () => {
+    actor.id = "reviewer-local";
+    actor.role = "PLATFORM_REVIEWER";
+    const deleteAction = vi.fn();
+    const { wrapper } = await mountOverview(null, null, deleteAction);
+
+    await wrapper.get("[data-delete-simulated-case]").trigger("click");
+    const modal = wrapper.get("[data-delete-case-modal]");
+    expect(modal.text()).toContain("删除后不可恢复");
+
+    await modal.get("[data-cancel-delete-case]").trigger("click");
+
+    expect(deleteAction).not.toHaveBeenCalled();
+    expect(wrapper.find("[data-delete-case-modal]").exists()).toBe(false);
+  });
+
+  it("deletes a simulated case once, updates the list and selects the next case", async () => {
+    actor.id = "reviewer-local";
+    actor.role = "PLATFORM_REVIEWER";
+    let resolveDelete;
+    const pendingDelete = new Promise((resolve) => {
+      resolveDelete = resolve;
+    });
+    const deleteAction = vi.fn(() => pendingDelete);
+    const { wrapper } = await mountOverview(null, null, deleteAction);
+
+    await wrapper.get("[data-delete-simulated-case]").trigger("click");
+    const confirmButton = wrapper.get("[data-confirm-delete-case]");
+    const firstClick = confirmButton.trigger("click");
+    const duplicateClick = confirmButton.trigger("click");
+    await Promise.all([firstClick, duplicateClick]);
+
+    expect(deleteAction).toHaveBeenCalledTimes(1);
+    expect(deleteAction).toHaveBeenCalledWith("CASE_EXT_001");
+    expect(wrapper.get("[data-confirm-delete-case]").attributes("disabled")).toBeDefined();
+
+    resolveDelete({ case_id: "CASE_EXT_001", deleted: true });
+    await flushPromises();
+
+    expect(wrapper.find('[data-case-id="CASE_EXT_001"]').exists()).toBe(false);
+    expect(wrapper.get(`[data-case-id="${longCaseId}"]`).classes()).toContain(
+      "dispute-ticket--active",
+    );
+    expect(wrapper.find("[data-delete-case-modal]").exists()).toBe(false);
+  });
+
+  it("keeps confirmation open and restores actions when deletion fails", async () => {
+    actor.id = "reviewer-local";
+    actor.role = "PLATFORM_REVIEWER";
+    const deleteAction = vi.fn().mockRejectedValue(new Error("删除服务暂不可用"));
+    const { wrapper } = await mountOverview(null, null, deleteAction);
+
+    await wrapper.get("[data-delete-simulated-case]").trigger("click");
+    await wrapper.get("[data-confirm-delete-case]").trigger("click");
+    await flushPromises();
+
+    const modal = wrapper.get("[data-delete-case-modal]");
+    expect(modal.get("[role=alert]").text()).toContain("删除服务暂不可用");
+    expect(modal.get("[data-confirm-delete-case]").attributes("disabled")).toBeUndefined();
+    expect(wrapper.find('[data-case-id="CASE_EXT_001"]').exists()).toBe(true);
   });
 
   it("does not open intake when a stale party action is triggered after switching to reviewer", async () => {
@@ -328,6 +444,7 @@ describe("DisputeOverviewView", () => {
           order_id: "ORDER-20260706-4201",
           title: "商家发起手表故障争议",
           source_type: "EXTERNAL_IMPORT",
+          source_system: "TEMPLATE_SIMULATED_OMS",
           dispute_type: "QUALITY_DISPUTE",
           case_status: "INTAKE_PENDING",
           current_room: "INTAKE",
@@ -353,7 +470,70 @@ describe("DisputeOverviewView", () => {
     expect(wrapper.text()).toContain("商家发起手表故障争议");
     expect(wrapper.text()).not.toContain("LLM 模拟外部导入争议");
     expect(wrapper.text()).not.toContain("ORDER-SIM");
-    expect(wrapper.get('[data-case-id="CASE_IMPORT_1"]').exists()).toBe(true);
+    const importedTicket = wrapper.get('[data-case-id="CASE_IMPORT_1"]');
+    expect(importedTicket.exists()).toBe(true);
+    expect(importedTicket.attributes("data-source-system")).toBe(
+      "TEMPLATE_SIMULATED_OMS",
+    );
+  });
+
+  it("ignores duplicate import triggers while an import is pending", async () => {
+    actor.id = "user-local";
+    actor.role = "USER";
+    let resolveImport;
+    const pendingImport = new Promise((resolve) => {
+      resolveImport = resolve;
+    });
+    const simulateExternalImportAction = vi.fn(() => pendingImport);
+    const { wrapper } = await mountOverview(null, simulateExternalImportAction);
+    const importButton = wrapper.get("[data-simulate-external-import]");
+
+    const firstTrigger = importButton.trigger("click");
+    const duplicateTrigger = importButton.trigger("click");
+    await Promise.all([firstTrigger, duplicateTrigger]);
+    const requestCountWhilePending = simulateExternalImportAction.mock.calls.length;
+
+    resolveImport({
+      items: [
+        {
+          id: "CASE_IMPORT_DEDUPED",
+          source_type: "EXTERNAL_IMPORT",
+          case_status: "INTAKE_PENDING",
+          current_room: "INTAKE",
+          initiator_role: "USER",
+        },
+      ],
+    });
+    await flushPromises();
+
+    expect(requestCountWhilePending).toBe(1);
+  });
+
+  it("re-enables the import button after the API request times out", async () => {
+    vi.useFakeTimers();
+    actor.id = "user-local";
+    actor.role = "USER";
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      (_url, options) =>
+        new Promise((_resolve, reject) => {
+          options.signal?.addEventListener(
+            "abort",
+            () => reject(new DOMException("The request was aborted", "AbortError")),
+            { once: true },
+          );
+        }),
+    );
+    const { wrapper } = await mountOverview();
+    const importButton = wrapper.get("[data-simulate-external-import]");
+
+    await importButton.trigger("click");
+    expect(importButton.attributes("disabled")).toBeDefined();
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    await flushPromises();
+
+    expect(importButton.attributes("disabled")).toBeUndefined();
+    expect(importButton.text()).toContain("导入外部争议");
   });
 
   it("does not expose simulation wording when an imported item lacks optional display fields", async () => {
