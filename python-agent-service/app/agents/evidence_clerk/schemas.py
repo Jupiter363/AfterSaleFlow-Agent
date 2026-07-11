@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from app.schemas import (
     EvidenceAuthenticityFlag,
+    EvidenceContextEnvelopeV1,
     EvidenceTurnEvidenceItem,
     EvidenceTurnQuestion,
     EvidenceTurnLlmOutput,
@@ -14,6 +15,7 @@ from app.schemas import (
 
 __all__ = [
     "EvidenceAuthenticityFlag",
+    "EvidenceContextEnvelopeV1",
     "EvidenceTurnEvidenceItem",
     "EvidenceTurnQuestion",
     "EvidenceTurnLlmOutput",

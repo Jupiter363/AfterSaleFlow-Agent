@@ -3,10 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable
 
+from app.harness.evidence_context_assembler import EvidenceTurnWorkingSet
 from app.schemas import (
     EvidenceAuthenticityFlag,
     EvidenceTurnQuestion,
-    EvidenceTurnRequest,
     EvidenceVerificationSuggestion,
 )
 
@@ -27,7 +27,7 @@ class EvidenceAuthenticitySkill:
     integrity, and relevance. It never decides liability or remedy.
     """
 
-    def draft(self, request: EvidenceTurnRequest) -> EvidenceAuthenticityDraft:
+    def draft(self, request: EvidenceTurnWorkingSet) -> EvidenceAuthenticityDraft:
         questions: list[EvidenceTurnQuestion] = []
         suggestions: list[EvidenceVerificationSuggestion] = []
         flags: list[EvidenceAuthenticityFlag] = []
@@ -91,7 +91,7 @@ class EvidenceAuthenticitySkill:
 
         return EvidenceAuthenticityDraft(
             evidence_requests=questions[:10],
-            verification_suggestions=suggestions,
+            verification_suggestions=suggestions[:100],
             authenticity_flags=flags[:20],
             confidence=round(sum(confidences) / max(len(confidences), 1), 2),
         )

@@ -64,29 +64,79 @@ def _intake_payload() -> dict[str, object]:
 
 def _evidence_payload() -> dict[str, object]:
     case_id = "CASE_context_evidence"
+    agent_context = _agent_context(
+        case_id=case_id,
+        room_type="EVIDENCE",
+        actor_id="USER_local_1",
+        actor_role="USER",
+        agent_key="EVIDENCE_CLERK",
+        agent_session_id="SESSION_context_evidence_user",
+        prompt_profile_id="EVIDENCE_CLERK:USER:v1",
+    )
     return {
-        "case_id": case_id,
-        "room_type": "EVIDENCE",
-        "turn_source": "PARTY_MESSAGE",
-        "actor_role": "USER",
-        "actor_id": "USER_local_1",
-        "current_party_message": {
-            "message_id": "MESSAGE_context_evidence",
-            "role": "USER",
-            "text": "I uploaded a signature screenshot.",
+        "context_envelope": {
+            "schema_version": "evidence_context_envelope.v1",
+            "captured_at": "2026-07-11T10:00:00+08:00",
+            "case_snapshot": {
+                "case_id": case_id,
+                "case_version": 1,
+                "case_status": "EVIDENCE_IN_PROGRESS",
+                "case_type": "AFTER_SALE_DISPUTE",
+                "dispute_type": None,
+                "title": "Evidence context test",
+                "description": "Evidence context test description",
+                "risk_level": "MEDIUM",
+                "route_type": None,
+                "order_id": None,
+                "after_sale_id": None,
+                "logistics_id": None,
+                "source_type": "LOCAL",
+                "initiator_role": "USER",
+                "source_system": None,
+                "external_case_ref": None,
+                "current_room": "EVIDENCE",
+                "current_deadline_at": None,
+            },
+            "intake_dossier_snapshot": None,
+            "actor_snapshot": {
+                "actor_id": "USER_local_1",
+                "actor_role": "USER",
+                "initiator_role": "USER",
+                "access_session_id": agent_context["access_session_id"],
+                "agent_session_id": agent_context["agent_session_id"],
+                "conversation_scope": agent_context["conversation_scope"],
+                "prompt_profile_id": agent_context["prompt_profile_id"],
+                "memory_policy_id": agent_context["memory_policy_id"],
+            },
+            "current_event": {
+                "event_id": "MESSAGE_context_evidence",
+                "event_type": "PARTY_MESSAGE",
+                "message_type": "PARTY_TEXT",
+                "actor_id": "USER_local_1",
+                "actor_role": "USER",
+                "text": "I uploaded a signature screenshot.",
+                "attachment_refs": [],
+                "turn_no": 1,
+                "occurred_at": "2026-07-11T10:00:00+08:00",
+            },
+            "visible_evidence": [],
+            "private_conversation": {
+                "agent_session_id": agent_context["agent_session_id"],
+                "conversation_scope": agent_context["conversation_scope"],
+                "source_count": 0,
+                "truncated": False,
+                "recent_turns": [],
+            },
+            "room_policy": {
+                "room_id": "ROOM_context_evidence",
+                "room_type": "EVIDENCE",
+                "room_status": "OPEN",
+                "current_deadline_at": None,
+                "initiator_role": "USER",
+                "initiator_evidence_required": True,
+            },
         },
-        "case_intake_dossier": {},
-        "available_evidence": [],
-        "recent_turns": [],
-        "agent_context": _agent_context(
-            case_id=case_id,
-            room_type="EVIDENCE",
-            actor_id="USER_local_1",
-            actor_role="USER",
-            agent_key="EVIDENCE_CLERK",
-            agent_session_id="SESSION_context_evidence_user",
-            prompt_profile_id="EVIDENCE_CLERK:USER:v1",
-        ),
+        "agent_context": agent_context,
     }
 
 
@@ -112,7 +162,7 @@ def test_evidence_turn_request_requires_agent_context() -> None:
 
 def test_evidence_turn_request_rejects_actor_id_mismatch() -> None:
     payload = _evidence_payload()
-    payload["actor_id"] = "USER_other"
+    payload["context_envelope"]["actor_snapshot"]["actor_id"] = "USER_other"
 
     with pytest.raises(ValidationError) as failure:
         EvidenceTurnRequest.model_validate(payload)
@@ -122,7 +172,7 @@ def test_evidence_turn_request_rejects_actor_id_mismatch() -> None:
 
 def test_evidence_turn_request_rejects_actor_role_mismatch() -> None:
     payload = _evidence_payload()
-    payload["actor_role"] = "MERCHANT"
+    payload["context_envelope"]["actor_snapshot"]["actor_role"] = "MERCHANT"
 
     with pytest.raises(ValidationError) as failure:
         EvidenceTurnRequest.model_validate(payload)
@@ -146,12 +196,71 @@ def test_request_rejects_case_id_and_room_type_mismatch() -> None:
     evidence_payload["agent_context"] = {
         **evidence_payload["agent_context"],  # type: ignore[arg-type]
         "room_type": "INTAKE",
-        "scope_type": "INTAKE_INITIATOR_PRIVATE",
     }
     with pytest.raises(ValidationError) as evidence_failure:
         EvidenceTurnRequest.model_validate(evidence_payload)
 
-    assert "room_type must match agent_context.room_type" in str(evidence_failure.value)
+    assert "room_policy.room_type must match agent_context.room_type" in str(
+        evidence_failure.value
+    )
+
+
+def test_evidence_turn_request_rejects_legacy_and_mixed_payloads() -> None:
+    legacy_payload = {
+        "case_id": "CASE_context_evidence",
+        "room_type": "EVIDENCE",
+        "turn_source": "PARTY_MESSAGE",
+        "actor_role": "USER",
+        "actor_id": "USER_local_1",
+        "current_party_message": {
+            "message_id": "MESSAGE_context_evidence",
+            "role": "USER",
+            "text": "I uploaded a signature screenshot.",
+        },
+        "case_intake_dossier": {},
+        "available_evidence": [],
+        "recent_turns": [],
+        "agent_context": _evidence_payload()["agent_context"],
+    }
+
+    with pytest.raises(ValidationError) as legacy_failure:
+        EvidenceTurnRequest.model_validate(legacy_payload)
+
+    assert "context_envelope" in str(legacy_failure.value)
+    assert "Extra inputs are not permitted" in str(legacy_failure.value)
+
+    mixed_payload = _evidence_payload()
+    mixed_payload["case_id"] = "CASE_context_evidence"
+
+    with pytest.raises(ValidationError) as mixed_failure:
+        EvidenceTurnRequest.model_validate(mixed_payload)
+
+    assert "case_id" in str(mixed_failure.value)
+    assert "Extra inputs are not permitted" in str(mixed_failure.value)
+
+
+def test_evidence_turn_request_rejects_wrong_envelope_version_and_opening_text() -> None:
+    wrong_version = _evidence_payload()
+    wrong_version["context_envelope"]["schema_version"] = "evidence_context_envelope.v2"
+
+    with pytest.raises(ValidationError) as version_failure:
+        EvidenceTurnRequest.model_validate(wrong_version)
+
+    assert "evidence_context_envelope.v1" in str(version_failure.value)
+
+    invalid_opening = _evidence_payload()
+    invalid_opening["context_envelope"]["current_event"].update(
+        {
+            "event_type": "ROOM_OPENING",
+            "message_type": "AGENT_MESSAGE",
+            "text": "fake opening text",
+        }
+    )
+
+    with pytest.raises(ValidationError) as opening_failure:
+        EvidenceTurnRequest.model_validate(invalid_opening)
+
+    assert "ROOM_OPENING text must be null" in str(opening_failure.value)
 
 
 def test_agent_context_rejects_blank_agent_session_id() -> None:

@@ -47,7 +47,7 @@ def test_prompt_contract_declares_standard_sections_and_configuration_center_slo
     assert specs["current_turn"].required is True
     assert specs["canonical_case_dossier"].priority == 95
     assert specs["actor_private_memory"].trust_level == "session_scoped"
-    assert specs["actor_visible_evidence"].trust_level == "java_filtered"
+    assert specs["actor_visible_evidence"].trust_level == "harness_assembled"
     assert specs["long_term_memory_preview"].prompt_included is False
     assert contract.configuration_source == "code"
     assert contract.configuration_profile_key == "EVIDENCE_CLERK_CONTEXT_PACK_V1"

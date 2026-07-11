@@ -195,6 +195,10 @@ public class EvidenceItemEntity extends AbstractEntity {
         return caseId;
     }
 
+    public String getDossierId() {
+        return dossierId;
+    }
+
     public String getEvidenceType() {
         return evidenceType;
     }
@@ -279,6 +283,10 @@ public class EvidenceItemEntity extends AbstractEntity {
 
     public String getExtractionJson() {
         return extractionJson;
+    }
+
+    public String getMetadataJson() {
+        return metadataJson;
     }
 
     public void applyParseSuccess(

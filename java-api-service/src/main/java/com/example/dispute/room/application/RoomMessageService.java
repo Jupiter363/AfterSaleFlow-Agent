@@ -211,6 +211,8 @@ public class RoomMessageService {
                 room.getRoomType(),
                 actor,
                 command,
+                saved.getId(),
+                saved.getCreatedAt(),
                 traceId,
                 traceId);
         return view(saved);

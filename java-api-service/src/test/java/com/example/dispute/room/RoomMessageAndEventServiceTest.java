@@ -510,6 +510,8 @@ class RoomMessageAndEventServiceTest {
                         eq(RoomType.EVIDENCE),
                         eq(new AuthenticatedActor("merchant-local", ActorRole.MERCHANT)),
                         eq(command),
+                        any(String.class),
+                        eq(CLOCK.instant()),
                         eq("TRACE_EVIDENCE_REFERENCE"),
                         eq("TRACE_EVIDENCE_REFERENCE"));
     }

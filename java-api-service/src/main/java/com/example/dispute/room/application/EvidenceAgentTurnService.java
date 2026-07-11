@@ -1,5 +1,7 @@
 package com.example.dispute.room.application;
 
+import com.example.dispute.common.api.ErrorCode;
+import com.example.dispute.common.exception.AgentExecutionException;
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.evidence.domain.EvidenceSubmissionStatus;
@@ -16,11 +18,9 @@ import com.example.dispute.room.domain.RoomStatus;
 import com.example.dispute.room.domain.RoomType;
 import com.example.dispute.room.infrastructure.persistence.entity.AgentConversationSessionEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseAccessSessionEntity;
-import com.example.dispute.room.infrastructure.persistence.entity.CaseIntakeDossierEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.RoomMessageEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.RoomTurnMemoryEntity;
-import com.example.dispute.room.infrastructure.persistence.repository.CaseIntakeDossierRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.RoomMessageRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.RoomTurnMemoryRepository;
@@ -28,11 +28,8 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.time.Clock;
 import java.time.Instant;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -64,7 +61,6 @@ public class EvidenceAgentTurnService {
     private final FulfillmentCaseRepository caseRepository;
     private final CaseRoomRepository roomRepository;
     private final RoomTurnMemoryRepository memoryRepository;
-    private final CaseIntakeDossierRepository intakeDossierRepository;
     private final EvidenceItemRepository evidenceItemRepository;
     private final EvidenceVerificationRepository verificationRepository;
     private final RoomMessageRepository messageRepository;
@@ -72,6 +68,7 @@ public class EvidenceAgentTurnService {
     private final AccessSessionResolver accessSessionResolver;
     private final AgentSessionResolver agentSessionResolver;
     private final SessionPermissionService permissionService;
+    private final EvidenceContextEnvelopeFactory contextEnvelopeFactory;
     private final EvidenceAgentTurnClient client;
     private final ObjectMapper objectMapper;
     private final Clock clock;
@@ -80,7 +77,6 @@ public class EvidenceAgentTurnService {
             FulfillmentCaseRepository caseRepository,
             CaseRoomRepository roomRepository,
             RoomTurnMemoryRepository memoryRepository,
-            CaseIntakeDossierRepository intakeDossierRepository,
             EvidenceItemRepository evidenceItemRepository,
             EvidenceVerificationRepository verificationRepository,
             RoomMessageRepository messageRepository,
@@ -88,13 +84,13 @@ public class EvidenceAgentTurnService {
             AccessSessionResolver accessSessionResolver,
             AgentSessionResolver agentSessionResolver,
             SessionPermissionService permissionService,
+            EvidenceContextEnvelopeFactory contextEnvelopeFactory,
             EvidenceAgentTurnClient client,
             ObjectMapper objectMapper,
             Clock clock) {
         this.caseRepository = caseRepository;
         this.roomRepository = roomRepository;
         this.memoryRepository = memoryRepository;
-        this.intakeDossierRepository = intakeDossierRepository;
         this.evidenceItemRepository = evidenceItemRepository;
         this.verificationRepository = verificationRepository;
         this.messageRepository = messageRepository;
@@ -102,6 +98,7 @@ public class EvidenceAgentTurnService {
         this.accessSessionResolver = accessSessionResolver;
         this.agentSessionResolver = agentSessionResolver;
         this.permissionService = permissionService;
+        this.contextEnvelopeFactory = contextEnvelopeFactory;
         this.client = client;
         this.objectMapper = objectMapper;
         this.clock = clock;
@@ -113,6 +110,8 @@ public class EvidenceAgentTurnService {
             RoomType roomType,
             AuthenticatedActor actor,
             RoomMessageCommand message,
+            String sourceMessageId,
+            Instant sourceMessageCreatedAt,
             String traceId,
             String requestId) {
         if (roomType != RoomType.EVIDENCE
@@ -132,27 +131,26 @@ public class EvidenceAgentTurnService {
                         turnNo,
                         actor.actorId(),
                         actor.role().name(),
-                        participantAnswerContent(message),
+                        participantMemoryContent(message),
                         session.agentSession(),
                         session.accessSession(),
                         "{}"));
 
         EvidenceAgentTurnCommand command =
                 new EvidenceAgentTurnCommand(
-                        caseId,
-                        RoomType.EVIDENCE,
-                        "PARTY_MESSAGE",
-                        actor.role().name(),
-                        actor.actorId(),
-                        new EvidenceAgentTurnCommand.Message(
-                                "EVIDENCE_TURN_" + turnNo,
+                        contextEnvelopeFactory.create(
+                                context.dispute(),
+                                context.room(),
+                                actor,
+                                session.accessSession(),
+                                session.agentSession(),
+                                "PARTY_MESSAGE",
+                                sourceMessageId,
                                 message.messageType(),
-                                actor.role().name(),
-                                participantAnswerContent(message),
-                                message.attachmentRefs()),
-                        latestCaseIntakeDossier(context.dispute()),
-                        availableEvidence(caseId, actor),
-                        recentTurns(session.agentSession()),
+                                message.text(),
+                                message.attachmentRefs(),
+                                turnNo,
+                                sourceMessageCreatedAt),
                         session.agentContext());
         EvidenceAgentTurnResult result = safeRun(command, traceId, requestId);
         persistAgentTurn(context, session, turnNo, actor.role(), result, traceId);
@@ -190,20 +188,19 @@ public class EvidenceAgentTurnService {
         int turnNo = memoryRepository.findMaxTurnNoByAgentSessionId(session.agentSession().getId()) + 1;
         EvidenceAgentTurnCommand command =
                 new EvidenceAgentTurnCommand(
-                        caseId,
-                        RoomType.EVIDENCE,
-                        "ROOM_OPENING",
-                        actor.role().name(),
-                        actor.actorId(),
-                        new EvidenceAgentTurnCommand.Message(
+                        contextEnvelopeFactory.create(
+                                context.dispute(),
+                                context.room(),
+                                actor,
+                                session.accessSession(),
+                                session.agentSession(),
+                                "ROOM_OPENING",
                                 "EVIDENCE_OPENING_" + turnNo,
                                 MessageType.AGENT_MESSAGE,
-                                actor.role().name(),
-                                "请根据接待室收敛案情，向当前一方提出首轮证据补充与真实性核验问题。",
-                                List.of()),
-                        latestCaseIntakeDossier(context.dispute()),
-                        availableEvidence(caseId, actor),
-                        recentTurns(session.agentSession()),
+                                null,
+                                List.of(),
+                                turnNo,
+                                clock.instant()),
                         session.agentContext());
         EvidenceAgentTurnResult result = safeRun(command, traceId, requestId);
         memoryRepository.save(
@@ -282,25 +279,48 @@ public class EvidenceAgentTurnService {
                     || result.remedyRecommended()) {
                 log.warn(
                         "Evidence agent turn degraded because output was empty or unsafe: case_id={}, room_type={}, trace_id={}, request_id={}",
-                        command.caseId(),
-                        command.roomType(),
+                        command.contextEnvelope().caseSnapshot().caseId(),
+                        command.contextEnvelope().roomPolicy().roomType(),
                         traceId,
                         requestId);
                 return degraded(DEGRADED_REASON_AGENT_OUTPUT_EMPTY, traceId);
             }
             return result;
+        } catch (AgentExecutionException failure) {
+            if (failure.errorCode() == ErrorCode.AGENT_OUTPUT_SCHEMA_INVALID) {
+                log.error(
+                        "Evidence agent contract mismatch: case_id={}, room_type={}, trace_id={}, request_id={}, failure_message={}, validation_errors={}",
+                        command.contextEnvelope().caseSnapshot().caseId(),
+                        command.contextEnvelope().roomPolicy().roomType(),
+                        traceId,
+                        requestId,
+                        failure.getMessage(),
+                        failure.details().getOrDefault("validation_errors", List.of()),
+                        failure);
+                throw failure;
+            }
+            logAgentFailure(command, traceId, requestId, failure);
+            return degraded(DEGRADED_REASON_AGENT_CALL_FAILED, traceId);
         } catch (RuntimeException failure) {
-            log.warn(
-                    "Evidence agent turn degraded after agent call failure: case_id={}, room_type={}, trace_id={}, request_id={}, failure_type={}, failure_message={}",
-                    command.caseId(),
-                    command.roomType(),
-                    traceId,
-                    requestId,
-                    failure.getClass().getName(),
-                    failure.getMessage(),
-                    failure);
+            logAgentFailure(command, traceId, requestId, failure);
             return degraded(DEGRADED_REASON_AGENT_CALL_FAILED, traceId);
         }
+    }
+
+    private void logAgentFailure(
+            EvidenceAgentTurnCommand command,
+            String traceId,
+            String requestId,
+            RuntimeException failure) {
+        log.warn(
+                "Evidence agent turn degraded after agent call failure: case_id={}, room_type={}, trace_id={}, request_id={}, failure_type={}, failure_message={}",
+                command.contextEnvelope().caseSnapshot().caseId(),
+                command.contextEnvelope().roomPolicy().roomType(),
+                traceId,
+                requestId,
+                failure.getClass().getName(),
+                failure.getMessage(),
+                failure);
     }
 
     private void persistAgentTurn(
@@ -632,178 +652,6 @@ public class EvidenceAgentTurnService {
                 + turnNo;
     }
 
-    private JsonNode latestCaseIntakeDossier(FulfillmentCaseEntity dispute) {
-        return intakeDossierRepository
-                .findByCaseIdAndRoomType(dispute.getId(), RoomType.INTAKE)
-                .map(CaseIntakeDossierEntity::getDossierJson)
-                .map(this::readJson)
-                .orElseGet(() -> fallbackCaseIntakeDossier(dispute));
-    }
-
-    private ObjectNode fallbackCaseIntakeDossier(FulfillmentCaseEntity dispute) {
-        ObjectNode root = objectMapper.createObjectNode();
-        root.put("schema_version", "intake_case_detail.fallback.v1");
-        root.put("source", "fulfillment_case");
-
-        ObjectNode caseIndex = root.putObject("case_index");
-        caseIndex.put("order_reference", textOrDefault(dispute.getOrderId(), "待确认"));
-        caseIndex.put("after_sales_reference", textOrDefault(dispute.getAfterSaleId(), "待确认"));
-        caseIndex.put("logistics_reference", textOrDefault(dispute.getLogisticsId(), "待确认"));
-        caseIndex.put(
-                "initiator_role",
-                dispute.getInitiatorRole() == null ? "待确认" : dispute.getInitiatorRole().name());
-        caseIndex.put(
-                "risk_level",
-                dispute.getRiskLevel() == null ? "MEDIUM" : dispute.getRiskLevel().name());
-
-        ObjectNode caseStory = root.putObject("case_story");
-        caseStory.put(
-                "one_sentence_summary",
-                textOrDefault(
-                        dispute.getDescription(),
-                        textOrDefault(dispute.getTitle(), "接待室案情摘要缺失，请围绕案件主表信息补证。")));
-        caseStory.put("title", textOrDefault(dispute.getTitle(), "履约争议待核验"));
-
-        ObjectNode disputeFocus = root.putObject("dispute_focus");
-        String coreIssueCode = textOrDefault(dispute.getDisputeType(), dispute.getCaseType());
-        String coreIssueLabel = disputeTypeLabel(coreIssueCode);
-        disputeFocus.put("core_issue", coreIssueLabel);
-        disputeFocus.put("core_issue_code", coreIssueCode);
-        disputeFocus.put("core_issue_label", coreIssueLabel);
-        ArrayNode facts = disputeFocus.putArray("facts_to_verify");
-        for (String fact : fallbackFactsToVerify(dispute.getDisputeType())) {
-            facts.add(fact);
-        }
-
-        ObjectNode handoffNotes = root.putObject("handoff_notes");
-        handoffNotes.put(
-                "instruction",
-                "接待室结构化卷宗缺失，证据书记官应先基于案件主表摘要和争议类型提出首轮补证问题。");
-        return root;
-    }
-
-    private static String disputeTypeLabel(String disputeType) {
-        if (disputeType == null || disputeType.isBlank()) {
-            return "争议焦点待确认";
-        }
-        return switch (disputeType) {
-            case "SIGNED_NOT_RECEIVED" -> "物流显示签收但用户称未收到包裹";
-            case "DAMAGED_OR_DEFECTIVE" -> "商品破损或质量问题";
-            case "SCRATCHED_WATCH_AFTER_DELIVERY" -> "签收后发现手表划痕";
-            case "SCRATCHED_WATCH" -> "手表划痕争议";
-            case "QUALITY_DISPUTE" -> "商品质量争议";
-            case "NON_RECEIPT" -> "用户称未收到包裹";
-            default -> looksLikeInternalCode(disputeType) ? "履约争议待核验" : disputeType;
-        };
-    }
-
-    private static boolean looksLikeInternalCode(String value) {
-        return value.matches("[A-Z][A-Z0-9_]{2,}");
-    }
-
-    private static List<String> fallbackFactsToVerify(String disputeType) {
-        if ("SIGNED_NOT_RECEIVED".equals(disputeType)) {
-            return List.of(
-                    "物流签收记录",
-                    "投递轨迹或快递柜/驿站记录",
-                    "收货地址、门牌或签收照片匹配记录",
-                    "用户未收到包裹的原始陈述或沟通记录");
-        }
-        if ("DAMAGED_OR_DEFECTIVE".equals(disputeType)
-                || "SCRATCHED_WATCH_AFTER_DELIVERY".equals(disputeType)
-                || "QUALITY_DISPUTE".equals(disputeType)) {
-            return List.of(
-                    "用户拍摄的商品问题原图或视频",
-                    "商家发货前质检视频或照片",
-                    "物流运输破损记录",
-                    "签收时外包装状态记录");
-        }
-        return List.of(
-                "原始证据文件",
-                "证据形成时间",
-                "证据来源路径",
-                "与接待室案情的关联事实");
-    }
-
-    private List<EvidenceAgentTurnCommand.AvailableEvidence> availableEvidence(
-            String caseId, AuthenticatedActor actor) {
-        return evidenceItemRepository
-                .findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(caseId)
-                .stream()
-                .filter(item -> visibleEvidenceTo(item, actor))
-                .map(item -> availableEvidence(caseId, item))
-                .toList();
-    }
-
-    private EvidenceAgentTurnCommand.AvailableEvidence availableEvidence(
-            String caseId, EvidenceItemEntity item) {
-        return new EvidenceAgentTurnCommand.AvailableEvidence(
-                item.getId(),
-                item.getEvidenceType(),
-                item.getSourceType(),
-                evidenceContent(item),
-                item.getParsedText(),
-                item.getOccurredAt() == null ? null : item.getOccurredAt().toString(),
-                item.getSubmittedByRole(),
-                item.getVisibility(),
-                "/api/disputes/" + caseId + "/evidence/" + item.getId() + "/content",
-                false,
-                item.getParseStatus().name(),
-                item.getOriginalFilename());
-    }
-
-    private List<IntakeRecentTurn> recentTurns(AgentConversationSessionEntity agentSession) {
-        List<RoomTurnMemoryEntity> memories =
-                memoryRepository.findTop50ByAgentSessionIdOrderByTurnNoDesc(agentSession.getId());
-        Set<Integer> legacyPartyTurnNos =
-                memories.stream()
-                        .filter(memory -> !hasText(memory.getAgentSessionId()))
-                        .filter(
-                                memory ->
-                                        agentSession
-                                                .getActorRole()
-                                                .name()
-                                                .equals(memory.getAnswerRole()))
-                        .map(RoomTurnMemoryEntity::getTurnNo)
-                        .collect(Collectors.toSet());
-        List<IntakeRecentTurn> scopedTurns =
-                memories.stream()
-                        .filter(memory -> visibleToAgentSession(memory, agentSession, legacyPartyTurnNos))
-                        .sorted(Comparator.comparingInt(RoomTurnMemoryEntity::getTurnNo))
-                        .map(
-                                memory ->
-                                        new IntakeRecentTurn(
-                                                memory.getTurnNo(),
-                                                memory.getActorId(),
-                                                memory.getAnswerRole(),
-                                                memory.getAnswerContent(),
-                                                memory.getAgentRole(),
-                                                memory.getAgentResponse(),
-                                                readJson(memory.getScrollSnapshotJson()),
-                                                textOrDefault(memory.getAgentSessionId(), agentSession.getId()),
-                                                textOrDefault(
-                                                        memory.getConversationScope(),
-                                                        agentSession.getConversationScope())))
-                        .toList();
-        if (scopedTurns.size() <= 10) {
-            return scopedTurns;
-        }
-        return scopedTurns.subList(scopedTurns.size() - 10, scopedTurns.size());
-    }
-
-    private static boolean visibleToAgentSession(
-            RoomTurnMemoryEntity memory,
-            AgentConversationSessionEntity agentSession,
-            Set<Integer> legacyPartyTurnNos) {
-        if (hasText(memory.getAgentSessionId())) {
-            return agentSession.getId().equals(memory.getAgentSessionId());
-        }
-        if (agentSession.getActorRole().name().equals(memory.getAnswerRole())) {
-            return true;
-        }
-        return memory.getAgentRole() != null && legacyPartyTurnNos.contains(memory.getTurnNo());
-    }
-
     private EvidenceAgentTurnResult degraded(String reason, String traceId) {
         return new EvidenceAgentTurnResult(
                 "证据书记官暂时没有完成智能核验，但你的发言已经安全保存。你可以继续补充证据来源、形成时间、原始文件和关联说明。",
@@ -823,17 +671,6 @@ public class EvidenceAgentTurnService {
                 false,
                 "STUB",
                 0.0);
-    }
-
-    private JsonNode readJson(String json) {
-        if (json == null || json.isBlank()) {
-            return objectMapper.createObjectNode();
-        }
-        try {
-            return objectMapper.readTree(json);
-        } catch (JsonProcessingException exception) {
-            return objectMapper.createObjectNode();
-        }
     }
 
     private JsonNode defaultObject(JsonNode node) {
@@ -862,28 +699,6 @@ public class EvidenceAgentTurnService {
         }
     }
 
-    private static String textOrDefault(String value, String fallback) {
-        if (value == null || value.isBlank()) {
-            return fallback;
-        }
-        return value;
-    }
-
-    private static boolean visibleEvidenceTo(EvidenceItemEntity item, AuthenticatedActor actor) {
-        ActorRole role = actor.role();
-        if (role == ActorRole.PLATFORM_REVIEWER
-                || role == ActorRole.ADMIN
-                || role == ActorRole.SYSTEM) {
-            return true;
-        }
-        if (role == ActorRole.CUSTOMER_SERVICE) {
-            return "PARTIES".equals(item.getVisibility()) || "PLATFORM".equals(item.getVisibility());
-        }
-        return role.name().equals(item.getSubmittedByRole())
-                && actor.actorId().equals(item.getSubmittedById())
-                && item.getSubmissionStatus() == EvidenceSubmissionStatus.SUBMITTED;
-    }
-
     private static boolean isEvidenceTurnMessage(MessageType messageType) {
         return messageType == MessageType.PARTY_TEXT
                 || messageType == MessageType.PARTY_EVIDENCE_REFERENCE;
@@ -898,29 +713,15 @@ public class EvidenceAgentTurnService {
                 || ActorRole.MERCHANT.name().equals(message.getSenderRole());
     }
 
-    private static String participantAnswerContent(RoomMessageCommand message) {
+    private String participantMemoryContent(RoomMessageCommand message) {
         if (message.text() != null && !message.text().isBlank()) {
             return message.text();
         }
-        return "Evidence references: " + message.attachmentRefs();
-    }
-
-    private static String evidenceContent(EvidenceItemEntity item) {
-        if (item.getParsedText() != null && !item.getParsedText().isBlank()) {
-            return item.getParsedText();
-        }
-        if (item.getOriginalFilename() != null && !item.getOriginalFilename().isBlank()) {
-            return "Uploaded evidence file: " + item.getOriginalFilename();
-        }
-        return "Uploaded evidence item: " + item.getId();
+        return json(Map.of("attachment_refs", message.attachmentRefs()));
     }
 
     private static boolean blank(String value) {
         return value == null || value.isBlank();
-    }
-
-    private static boolean hasText(String value) {
-        return value != null && !value.isBlank();
     }
 
     private static String compactUuid() {

@@ -598,6 +598,135 @@ stateDiagram-v2
 - 将上传材料映射到争议事实。
 - 标记证据缺口和法官注意事项。
 
+### Java–Python Harness 上下文边界
+
+证据书记官调用统一使用版本化的 `EvidenceContextEnvelope`。Java 不直接编写面向模型的案情解释、核验重点或 Prompt 文案，只交付经过权限过滤且满足合同的数据包；Python Harness 再基于该数据包构造语义 Context Pack。
+
+```json
+{
+  "context_envelope": {
+    "schema_version": "evidence_context_envelope.v1",
+    "captured_at": "2026-07-11T10:00:00Z",
+    "case_snapshot": {
+      "case_id": "CASE_xxx",
+      "case_version": 3,
+      "case_status": "EVIDENCE_OPEN",
+      "case_type": "AFTER_SALE_DISPUTE",
+      "dispute_type": "SIGNED_NOT_RECEIVED",
+      "initiator_role": "USER",
+      "title": "案件标题",
+      "description": "案件原始描述",
+      "risk_level": "MEDIUM",
+      "route_type": "FULL_HEARING",
+      "order_id": "ORDER_xxx",
+      "after_sale_id": null,
+      "logistics_id": "LOGISTICS_xxx",
+      "source_type": "INTAKE_CREATED",
+      "source_system": null,
+      "external_case_ref": null,
+      "current_room": "EVIDENCE",
+      "current_deadline_at": null
+    },
+    "intake_dossier_snapshot": {
+      "dossier_id": "DOSSIER_xxx",
+      "schema_version": "intake_case_detail.v1",
+      "dossier_version": 3,
+      "source_turn_no": 5,
+      "quality_score": 82,
+      "ready_for_next_step": true,
+      "admission_recommendation": "ACCEPTED",
+      "updated_at": "2026-07-11T09:55:00Z",
+      "payload": {}
+    },
+    "actor_snapshot": {
+      "actor_id": "user-local",
+      "actor_role": "USER",
+      "initiator_role": "USER",
+      "access_session_id": "ACCESS_xxx",
+      "agent_session_id": "AGENT_SESSION_xxx",
+      "conversation_scope": "CASE_xxx:EVIDENCE:USER:user-local",
+      "prompt_profile_id": "EVIDENCE_CLERK:USER:v1",
+      "memory_policy_id": "MEMEO_DEFAULT"
+    },
+    "current_event": {
+      "event_id": "MESSAGE_xxx",
+      "event_type": "PARTY_MESSAGE",
+      "message_type": "PARTY_TEXT",
+      "actor_id": "user-local",
+      "actor_role": "USER",
+      "text": "当事人本轮原始输入",
+      "attachment_refs": [],
+      "turn_no": 2,
+      "occurred_at": "2026-07-11T10:00:00Z"
+    },
+    "visible_evidence": [],
+    "private_conversation": {
+      "agent_session_id": "AGENT_SESSION_xxx",
+      "conversation_scope": "CASE_xxx:EVIDENCE:USER:user-local",
+      "source_count": 0,
+      "truncated": false,
+      "recent_turns": []
+    },
+    "room_policy": {
+      "room_id": "ROOM_xxx",
+      "room_type": "EVIDENCE",
+      "room_status": "OPEN",
+      "current_deadline_at": null,
+      "initiator_role": "USER",
+      "initiator_evidence_required": true
+    }
+  },
+  "agent_context": {
+    "tenant_id": "default",
+    "case_id": "CASE_xxx",
+    "room_type": "EVIDENCE",
+    "actor_id": "user-local",
+    "actor_role": "USER",
+    "access_session_id": "ACCESS_xxx",
+    "permission_level": "PARTY_USER",
+    "permission_scopes": [
+      "CASE_READ",
+      "ROOM_MESSAGE_READ",
+      "ROOM_MESSAGE_WRITE",
+      "EVIDENCE_READ",
+      "EVIDENCE_SUBMIT",
+      "EVIDENCE_PRIVATE_READ",
+      "AGENT_SESSION_READ",
+      "AGENT_SESSION_WRITE"
+    ],
+    "agent_key": "EVIDENCE_CLERK",
+    "agent_invocation_id": "AGENT_INVOCATION_xxx",
+    "agent_session_id": "AGENT_SESSION_xxx",
+    "conversation_scope": "CASE_xxx:EVIDENCE:USER:user-local",
+    "scope_type": "EVIDENCE_PARTY_PRIVATE",
+    "allowed_actor_ids": ["user-local"],
+    "allowed_actor_roles": ["USER"],
+    "prompt_profile_id": "EVIDENCE_CLERK:USER:v1",
+    "memory_policy_id": "MEMEO_DEFAULT"
+  }
+}
+```
+
+Java 业务层负责：
+
+- 校验 actor/session 权限，并按证据可见性过滤 `visible_evidence`。
+- 提供案件主表原始字段、当前有效案情卷宗及版本、证据原始解析结果和当前事件。
+- 所有时间字段在 envelope 中固定为 ISO-8601 字符串，不能依赖 Jackson 的时间戳数组或数字序列化配置。
+- `private_conversation` 只读取与当前 `agent_session_id` 精确匹配的正式记忆；无 session 的历史记录和其他会话记录一律不进入 envelope。
+- 保证幂等、事务、审计、持久化以及房间和案件状态推进。
+- 通过 Java 强类型 DTO 构造固定版本 envelope；完整运行时合同由 Python 严格校验。Java 不把争议类型翻译成面向 Agent 的事实结论。
+
+Python Harness 负责：
+
+- 通过 `EvidenceContextAssembler` 将 envelope 组装为 `current_turn`、`case_identity`、`canonical_case_dossier`、私有记忆和可见证据等 Context Pack 分区。
+- 在案情卷宗缺失或字段不足时生成仅供模型推理使用的语义补充，不回写或冒充正式案情事实。
+- 执行 token 预算、历史压缩、Prompt 契约和结构化输出校验；模型可见证据按“当前引用优先、其余最近材料”生成有界预览，原始 hash、owner id、content URL、metadata 和 extraction 不直接进入 Prompt。
+- 只接受 `evidence_context_envelope.v1`，不保留旧版扁平 evidence turn payload 的兼容分支；未知版本或旧结构直接返回合同校验错误。
+
+本轮结构调整不引入 `relevance_status`、证据排除决定或新的举证完成门槛；不相关证据如何识别、如何进入矩阵以及是否阻断流程，必须在后续证据校验方案中单独定稿。
+
+由于正式版不保留旧合同兼容层，Java 与 Python 必须原子升级；Python 返回 422 时 Java 将其作为 `AGENT_OUTPUT_SCHEMA_INVALID` 显式失败并告警，不得伪装成普通书记官降级回复。告警只记录校验字段路径、错误类型和错误描述，不记录 Pydantic 返回的原始输入内容。
+
 ### 证据矩阵版本化规则
 
 开庭装卷时，`HearingCourtBootstrapService` 只冻结“开庭基线版本”，例如 `evidence_dossier_version=1`。这个基线用于证明开庭时法官看到过哪些证据，并写入庭审卷轴，不代表后续证据矩阵永远固定。

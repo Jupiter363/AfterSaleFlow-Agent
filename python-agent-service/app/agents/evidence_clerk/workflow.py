@@ -9,8 +9,12 @@ from typing_extensions import NotRequired, TypedDict
 
 from app.agents.evidence_clerk.skills.authenticity import EvidenceAuthenticitySkill
 from app.harness.context_pack import build_context_pack
+from app.harness.evidence_context_assembler import (
+    AssembledEvidenceContext,
+    EvidenceContextAssembler,
+    EvidenceTurnWorkingSet,
+)
 from app.harness.localization_policy import localize_internal_text
-from app.harness.memory import MemeoMemoryAssembler
 from app.schemas import (
     EvidenceAuthenticityFlag,
     EvidenceTurnQuestion,
@@ -27,6 +31,7 @@ class EvidenceTurnGraphState(TypedDict):
     request: dict[str, Any]
     executed_nodes: Annotated[list[str], operator.add]
     memory_frame: dict[str, Any]
+    assembled_context: NotRequired[AssembledEvidenceContext]
     llm_output: NotRequired[EvidenceTurnLlmOutput]
     room_utterance: NotRequired[str]
     evidence_requests: NotRequired[list[dict[str, Any]]]
@@ -72,60 +77,37 @@ def build_evidence_turn_graph(model_runner: Any | None = None):
 
 
 def _load_context(state: EvidenceTurnGraphState) -> dict[str, Any]:
-    request = state["request"]
-    agent_context = request["agent_context"]
-    memory_frame = MemeoMemoryAssembler().assemble(
-        request.get("recent_turns") or [],
-        expected_agent_session_id=str(agent_context.get("agent_session_id") or ""),
-        expected_conversation_scope=str(agent_context.get("conversation_scope") or ""),
-        strict_scope=True,
-    ).model_dump(mode="json")
+    request = EvidenceTurnRequest.model_validate(state["request"])
+    assembled_context = EvidenceContextAssembler().assemble(request)
     return {
-        "memory_frame": memory_frame,
+        "assembled_context": assembled_context,
+        "memory_frame": assembled_context.memory_frame,
         "executed_nodes": ["load_context"],
     }
 
 
 def _reason_with_llm_node(model_runner: Any | None):
     def reason_with_llm(state: EvidenceTurnGraphState) -> dict[str, Any]:
-        request = state["request"]
-        agent_context = request["agent_context"]
+        assembled = state["assembled_context"]
+        working_set = assembled.working_set
+        agent_context = assembled.agent_context
         if model_runner is None:
             return {
-                "llm_output": _fallback_output(state),
+                "llm_output": _fallback_output(working_set),
                 "executed_nodes": ["fallback_reasoning"],
             }
         try:
             context_pack = build_context_pack(
                 "evidence_turn",
-                {
-                    "current_turn": _current_turn_context(request),
-                    "case_identity": _case_identity_context(request),
-                    "canonical_case_dossier": request.get("case_intake_dossier") or {},
-                    "actor_private_memory": str(
-                        state["memory_frame"].get("prompt_memory") or ""
-                    ),
-                    "compressed_summary": str(
-                        state["memory_frame"].get("compressed_summary") or ""
-                    ),
-                    "actor_visible_evidence": request.get("available_evidence") or [],
-                },
-                actor_role=str(request.get("actor_role") or ""),
+                assembled.context_sources,
+                actor_role=working_set.actor_role,
             )
             generation = model_runner.invoke_structured(
                 node_name="evidence_turn",
-                case_data={
-                    "case_id": request.get("case_id"),
-                    "room_type": request.get("room_type"),
-                    "turn_source": request.get("turn_source"),
-                    "actor_role": request.get("actor_role"),
-                    "agent_key": agent_context.get("agent_key"),
-                    "prompt_profile_id": agent_context.get("prompt_profile_id"),
-                    "current_party_message": request.get("current_party_message") or {},
-                },
+                case_data=assembled.case_data,
                 output_type=EvidenceTurnLlmOutput,
-                agent_context=agent_context,
-                prompt_profile_id=agent_context.get("prompt_profile_id"),
+                agent_context=agent_context.model_dump(mode="json"),
+                prompt_profile_id=agent_context.prompt_profile_id,
                 context_pack=context_pack,
             )
             return {
@@ -136,15 +118,15 @@ def _reason_with_llm_node(model_runner: Any | None):
             LOGGER.warning(
                 "evidence clerk LLM turn degraded: case_id=%s actor_role=%s "
                 "agent_invocation_id=%s error_type=%s error=%s",
-                request.get("case_id"),
-                request.get("actor_role"),
-                agent_context.get("agent_invocation_id"),
+                working_set.case_id,
+                working_set.actor_role,
+                agent_context.agent_invocation_id,
                 type(failure).__name__,
                 failure,
                 exc_info=True,
             )
             return {
-                "llm_output": _fallback_output(state),
+                "llm_output": _fallback_output(working_set),
                 "executed_nodes": ["fallback_reasoning_after_llm_error"],
             }
 
@@ -153,7 +135,7 @@ def _reason_with_llm_node(model_runner: Any | None):
 
 def _apply_authenticity_guardrails(state: EvidenceTurnGraphState) -> dict[str, Any]:
     output = state["llm_output"]
-    request = EvidenceTurnRequest.model_validate(state["request"])
+    request = state["assembled_context"].working_set
     opening_baseline = (
         _opening_fallback_output(request)
         if request.turn_source == "ROOM_OPENING"
@@ -198,7 +180,7 @@ def _apply_authenticity_guardrails(state: EvidenceTurnGraphState) -> dict[str, A
 def _coerce_room_opening_output(
     output: EvidenceTurnLlmOutput,
     baseline: EvidenceTurnLlmOutput,
-    request: EvidenceTurnRequest,
+    request: EvidenceTurnWorkingSet,
 ) -> EvidenceTurnLlmOutput:
     """Make the first evidence-room turn dossier-driven even if the LLM is generic."""
 
@@ -210,24 +192,24 @@ def _coerce_room_opening_output(
         room_utterance=room_utterance,
         evidence_requests=_dedupe_questions(
             [*baseline.evidence_requests, *output.evidence_requests]
-        ),
+        )[:30],
         verification_suggestions=output.verification_suggestions,
         authenticity_flags=_dedupe_flags(
             [*baseline.authenticity_flags, *output.authenticity_flags]
-        ),
+        )[:100],
         confidence=max(float(output.confidence), float(baseline.confidence)),
     )
 
 
 def _contains_opening_dossier_anchor(
     text: str,
-    request: EvidenceTurnRequest,
+    request: EvidenceTurnWorkingSet,
 ) -> bool:
     normalized = text.casefold()
     return any(anchor.casefold() in normalized for anchor in _opening_dossier_anchors(request))
 
 
-def _opening_dossier_anchors(request: EvidenceTurnRequest) -> list[str]:
+def _opening_dossier_anchors(request: EvidenceTurnWorkingSet) -> list[str]:
     dossier = request.case_intake_dossier or {}
     dispute_focus = _dict_value(dossier.get("dispute_focus"))
     case_story = _dict_value(dossier.get("case_story"))
@@ -271,8 +253,7 @@ def _dedupe_flags(
     return result
 
 
-def _fallback_output(state: EvidenceTurnGraphState) -> EvidenceTurnLlmOutput:
-    request = EvidenceTurnRequest.model_validate(state["request"])
+def _fallback_output(request: EvidenceTurnWorkingSet) -> EvidenceTurnLlmOutput:
     if request.turn_source == "ROOM_OPENING":
         return _opening_fallback_output(request)
     draft = EvidenceAuthenticitySkill().draft(request)
@@ -288,7 +269,7 @@ def _fallback_output(state: EvidenceTurnGraphState) -> EvidenceTurnLlmOutput:
     )
 
 
-def _opening_fallback_output(request: EvidenceTurnRequest) -> EvidenceTurnLlmOutput:
+def _opening_fallback_output(request: EvidenceTurnWorkingSet) -> EvidenceTurnLlmOutput:
     dossier = request.case_intake_dossier or {}
     dispute_focus = _dict_value(dossier.get("dispute_focus"))
     case_story = _dict_value(dossier.get("case_story"))
@@ -381,28 +362,6 @@ def _localize_model_text_fields(items: list[Any], fields: tuple[str, ...]) -> li
                 updates[field] = _localize_internal_text(value)
         localized.append(item.model_copy(update=updates) if updates else item)
     return localized
-
-
-def _current_turn_context(request: dict[str, Any]) -> dict[str, Any]:
-    message = request.get("current_party_message") or {}
-    return {
-        "turn_source": request.get("turn_source"),
-        "role": request.get("actor_role") or message.get("role"),
-        "actor_id": request.get("actor_id"),
-        "message_id": message.get("message_id"),
-        "message_type": message.get("message_type"),
-        "text": message.get("text") or "",
-        "attachment_refs": message.get("attachment_refs") or [],
-    }
-
-
-def _case_identity_context(request: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "case_id": request.get("case_id"),
-        "room_type": request.get("room_type"),
-        "actor_role": request.get("actor_role"),
-        "actor_id": request.get("actor_id"),
-    }
 
 
 def _normalize_sentence(text: str) -> str:

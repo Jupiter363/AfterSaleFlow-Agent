@@ -4,7 +4,9 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from app.config import Settings
 from app.harness.prompt_composer import PromptRepository
@@ -61,88 +63,146 @@ def _agent_context(
 def _evidence_turn_payload() -> dict[str, object]:
     case_id = "CASE_evidence_turn_llm"
     agent_context = _agent_context(case_id)
+    dossier = {
+        "schema_version": "intake_case_detail.v1",
+        "case_story": {
+            "one_sentence_summary": "物流显示签收，但用户称未收到包裹。"
+        },
+        "dispute_focus": {
+            "core_issue": "SIGNED_NOT_RECEIVED",
+            "facts_to_verify": ["签收底单", "物流轨迹", "收件人身份"],
+        },
+    }
     return {
-        "case_id": case_id,
-        "room_type": "EVIDENCE",
-        "actor_role": "USER",
-        "actor_id": "USER_local_1",
-        "current_party_message": {
-            "message_id": "MESSAGE_evidence_turn",
-            "role": "USER",
-            "text": "我上传了签收页截图，但图片有点糊，想证明我没有收到包裹。",
-        },
-        "case_intake_dossier": {
-            "schema_version": "intake_case_detail.v1",
-            "case_story": {
-                "one_sentence_summary": "物流显示签收，但用户称未收到包裹。"
+        "context_envelope": {
+            "schema_version": "evidence_context_envelope.v1",
+            "captured_at": "2026-07-11T10:00:00+08:00",
+            "case_snapshot": {
+                "case_id": case_id,
+                "case_version": 7,
+                "case_status": "EVIDENCE_IN_PROGRESS",
+                "case_type": "AFTER_SALE_DISPUTE",
+                "dispute_type": "SIGNED_NOT_RECEIVED",
+                "title": "签收未收到争议",
+                "description": "物流显示签收，但用户称未收到包裹。",
+                "risk_level": "MEDIUM",
+                "route_type": "NORMAL_HEARING",
+                "order_id": "ORDER_evidence_turn",
+                "after_sale_id": None,
+                "logistics_id": "LOGISTICS_evidence_turn",
+                "source_type": "LOCAL",
+                "initiator_role": "USER",
+                "source_system": None,
+                "external_case_ref": None,
+                "current_room": "EVIDENCE",
+                "current_deadline_at": "2026-07-11T10:05:00+08:00",
             },
-            "dispute_focus": {
-                "core_issue": "SIGNED_NOT_RECEIVED",
-                "facts_to_verify": ["签收底单", "物流轨迹", "收件人身份"],
+            "intake_dossier_snapshot": {
+                "dossier_id": "DOSSIER_evidence_turn",
+                "schema_version": "intake_case_detail.v1",
+                "dossier_version": 2,
+                "source_turn_no": 3,
+                "quality_score": 84,
+                "ready_for_next_step": True,
+                "admission_recommendation": "ACCEPTED",
+                "updated_at": "2026-07-11T09:55:00+08:00",
+                "payload": dossier,
             },
-        },
-        "available_evidence": [
-            {
-                "evidence_id": "EVIDENCE_signature_photo",
-                "evidence_type": "IMAGE",
-                "source_type": "USER",
-                "content": "签收页截图，文字较模糊。",
-                "parsed_text": "疑似签收时间 2026-07-01 10:30",
-                "agent_summary": "用户提供的签收页截图。",
-                "occurred_at": "2026-07-01T10:30:00+08:00",
-                "related_claim_ids": ["CLAIM_receipt"],
-                "parser_warning": "OCR 置信度较低，部分文字不可读。",
-            }
-        ],
-        "recent_turns": [
-            {
-                "turn_no": 1,
+            "actor_snapshot": {
                 "actor_id": "USER_local_1",
-                "answer_role": "USER",
-                "answer_content": "user evidence memory asks about signature proof",
-                "agent_role": None,
-                "agent_response": None,
-                "scroll_snapshot": {},
+                "actor_role": "USER",
+                "initiator_role": "USER",
+                "access_session_id": agent_context["access_session_id"],
                 "agent_session_id": agent_context["agent_session_id"],
                 "conversation_scope": agent_context["conversation_scope"],
-            }
-        ],
+                "prompt_profile_id": agent_context["prompt_profile_id"],
+                "memory_policy_id": agent_context["memory_policy_id"],
+            },
+            "current_event": {
+                "event_id": "MESSAGE_evidence_turn",
+                "event_type": "PARTY_MESSAGE",
+                "message_type": "PARTY_TEXT",
+                "actor_id": "USER_local_1",
+                "actor_role": "USER",
+                "text": "我上传了签收页截图，但图片有点糊，想证明我没有收到包裹。",
+                "attachment_refs": [],
+                "turn_no": 2,
+                "occurred_at": "2026-07-11T10:00:00+08:00",
+            },
+            "visible_evidence": [_visible_signature_evidence()],
+            "private_conversation": {
+                "agent_session_id": agent_context["agent_session_id"],
+                "conversation_scope": agent_context["conversation_scope"],
+                "source_count": 1,
+                "truncated": False,
+                "recent_turns": [
+                    {
+                        "turn_no": 1,
+                        "actor_id": "USER_local_1",
+                        "answer_role": "USER",
+                        "answer_content": (
+                            "user evidence memory asks about signature proof"
+                        ),
+                        "agent_role": None,
+                        "agent_response": None,
+                        "scroll_snapshot": {},
+                        "agent_session_id": agent_context["agent_session_id"],
+                        "conversation_scope": agent_context["conversation_scope"],
+                    }
+                ],
+            },
+            "room_policy": {
+                "room_id": "ROOM_evidence_turn",
+                "room_type": "EVIDENCE",
+                "room_status": "OPEN",
+                "current_deadline_at": "2026-07-11T10:05:00+08:00",
+                "initiator_role": "USER",
+                "initiator_evidence_required": True,
+            },
+        },
         "agent_context": agent_context,
+    }
+
+
+def _visible_signature_evidence() -> dict[str, object]:
+    return {
+        "evidence_id": "EVIDENCE_signature_photo",
+        "dossier_id": "DOSSIER_evidence_turn",
+        "evidence_type": "IMAGE",
+        "source_type": "USER",
+        "submitted_by_role": "USER",
+        "submitted_by_id": "USER_local_1",
+        "original_filename": "signature-page.jpg",
+        "content_type": "image/jpeg",
+        "file_size": 1024,
+        "file_hash": "sha256-signature-photo",
+        "parsed_text": "签收时间 2026-07-01 10:30，签收人字段不清晰。",
+        "parse_status": "SUCCEEDED",
+        "visibility": "PARTIES",
+        "desensitized": False,
+        "metadata": {},
+        "extraction": {},
+        "occurred_at": "2026-07-01T10:30:00+08:00",
+        "created_at": "2026-07-11T09:58:00+08:00",
+        "submitted_at": "2026-07-11T09:59:00+08:00",
+        "submission_status": "SUBMITTED",
+        "submission_batch_id": "BATCH_signature",
+        "content_url": (
+            "/api/disputes/CASE_evidence_turn_llm/evidence/"
+            "EVIDENCE_signature_photo/content"
+        ),
     }
 
 
 def _java_evidence_turn_command_payload() -> dict[str, object]:
     payload = _evidence_turn_payload()
-    payload.update(
+    event = payload["context_envelope"]["current_event"]
+    event.update(
         {
-            "turn_source": "PARTY_MESSAGE",
-            "actor_id": "USER_local_1",
-            "current_party_message": {
-                "message_id": "EVIDENCE_TURN_2",
-                "message_type": "PARTY_EVIDENCE_REFERENCE",
-                "role": "USER",
-                "text": "我补充这张签收页截图，请帮我看还缺什么证据说明。",
-                "attachment_refs": ["EVIDENCE_signature_photo"],
-            },
-            "available_evidence": [
-                {
-                    "evidence_id": "EVIDENCE_signature_photo",
-                    "evidence_type": "IMAGE",
-                    "source_type": "USER",
-                    "content": "签收页截图，OCR 显示疑似 2026-07-01 10:30 签收。",
-                    "parsed_text": "签收时间 2026-07-01 10:30，签收人字段不清晰。",
-                    "occurred_at": "2026-07-01T10:30:00+08:00",
-                    "submitted_by_role": "USER",
-                    "visibility": "PARTIES",
-                    "content_url": (
-                        "/api/disputes/CASE_evidence_turn_llm/evidence/"
-                        "EVIDENCE_signature_photo/content"
-                    ),
-                    "redacted": False,
-                    "parse_status": "PARSED",
-                    "original_filename": "signature-page.jpg",
-                }
-            ],
+            "event_id": "MESSAGE_evidence_turn_2",
+            "message_type": "PARTY_EVIDENCE_REFERENCE",
+            "text": "",
+            "attachment_refs": ["EVIDENCE_signature_photo"],
         }
     )
     return payload
@@ -150,37 +210,38 @@ def _java_evidence_turn_command_payload() -> dict[str, object]:
 
 def _java_evidence_opening_command_payload() -> dict[str, object]:
     payload = _java_evidence_turn_command_payload()
-    payload.update(
-        {
-            "turn_source": "ROOM_OPENING",
-            "current_party_message": {
-                "message_id": "EVIDENCE_OPENING_1",
-                "message_type": "AGENT_MESSAGE",
-                "role": "USER",
-                "text": "请根据接待室收敛案情，向当前一方提出首轮证据补充与真实性核验问题。",
-                "attachment_refs": [],
-            },
-            "case_intake_dossier": {
-                "schema_version": "intake_case_detail.v1",
-                "case_story": {
-                    "one_sentence_summary": (
-                        "The merchant says the watch was intact before shipment; "
-                        "the user says the dial was scratched after receipt."
-                    )
-                },
-                "dispute_focus": {
-                    "core_issue": "SCRATCHED_WATCH_AFTER_DELIVERY",
-                    "facts_to_verify": [
-                        "factory QC video",
-                        "unboxing photo original file",
-                        "logistics handling record",
-                    ],
-                },
-            },
-            "available_evidence": [],
-            "recent_turns": [],
-        }
-    )
+    envelope = payload["context_envelope"]
+    envelope["current_event"] = {
+        "event_id": "EVIDENCE_OPENING_1",
+        "event_type": "ROOM_OPENING",
+        "message_type": "AGENT_MESSAGE",
+        "actor_id": "USER_local_1",
+        "actor_role": "USER",
+        "text": None,
+        "attachment_refs": [],
+        "turn_no": 1,
+        "occurred_at": "2026-07-11T09:57:00+08:00",
+    }
+    envelope["intake_dossier_snapshot"]["payload"] = {
+        "schema_version": "intake_case_detail.v1",
+        "case_story": {
+            "one_sentence_summary": (
+                "The merchant says the watch was intact before shipment; "
+                "the user says the dial was scratched after receipt."
+            )
+        },
+        "dispute_focus": {
+            "core_issue": "SCRATCHED_WATCH_AFTER_DELIVERY",
+            "facts_to_verify": [
+                "factory QC video",
+                "unboxing photo original file",
+                "logistics handling record",
+            ],
+        },
+    }
+    envelope["visible_evidence"] = []
+    envelope["private_conversation"]["source_count"] = 0
+    envelope["private_conversation"]["recent_turns"] = []
     return payload
 
 
@@ -270,6 +331,45 @@ class GenericOpeningRunner:
         )
 
 
+class MaximalOpeningRunner:
+    def invoke_structured(
+        self,
+        *,
+        node_name,
+        case_data,
+        output_type,
+        context_sections=None,
+        context_pack=None,
+        agent_context=None,
+        prompt_profile_id=None,
+    ):
+        return SimpleNamespace(
+            value=output_type(
+                room_utterance="请补充证据材料。",
+                evidence_requests=[
+                    {
+                        "question_id": f"QUESTION_MAX_{index}",
+                        "target_evidence_id": None,
+                        "question": f"第 {index} 项证据问题。",
+                        "reason": f"第 {index} 项核验原因。",
+                    }
+                    for index in range(30)
+                ],
+                verification_suggestions=[],
+                authenticity_flags=[
+                    {
+                        "evidence_id": None,
+                        "flag_type": f"FLAG_MAX_{index}",
+                        "description": f"第 {index} 项风险提示。",
+                        "severity": "LOW",
+                    }
+                    for index in range(100)
+                ],
+                confidence=0.8,
+            )
+        )
+
+
 def test_evidence_turn_workflow_uses_harness_node_with_memory_dossier_and_evidence_context() -> None:
     from app.agents.evidence_clerk.workflow import EvidenceTurnWorkflow
     from app.schemas import EvidenceTurnRequest
@@ -306,8 +406,10 @@ def test_evidence_turn_workflow_uses_harness_node_with_memory_dossier_and_eviden
     assert "物流显示签收但用户称未收到包裹" in section_by_name["canonical_case_dossier"]
     assert "SIGNED_NOT_RECEIVED" not in section_by_name["canonical_case_dossier"]
     actor_visible_evidence = json.loads(section_by_name["actor_visible_evidence"])
-    assert actor_visible_evidence[0]["evidence_id"] == "EVIDENCE_signature_photo"
-    assert actor_visible_evidence[0]["source_type"] == "用户"
+    assert actor_visible_evidence["items"][0]["evidence_id"] == (
+        "EVIDENCE_signature_photo"
+    )
+    assert actor_visible_evidence["items"][0]["source_type"] == "用户"
     assert runner.calls[0]["agent_context"]["agent_session_id"] == (
         "SESSION_CASE_evidence_turn_llm_USER_evidence"
     )
@@ -330,9 +432,7 @@ def test_evidence_opening_turn_passes_source_to_llm_context() -> None:
     workflow.run(EvidenceTurnRequest.model_validate(_java_evidence_opening_command_payload()))
 
     assert runner.calls[0]["case_data"]["turn_source"] == "ROOM_OPENING"
-    assert runner.calls[0]["case_data"]["current_party_message"]["message_id"] == (
-        "EVIDENCE_OPENING_1"
-    )
+    assert runner.calls[0]["case_data"]["event_id"] == "EVIDENCE_OPENING_1"
 
 
 def test_evidence_opening_fallback_asks_dossier_specific_evidence_questions() -> None:
@@ -385,10 +485,11 @@ def test_evidence_opening_fallback_localizes_internal_dispute_codes() -> None:
     from app.schemas import EvidenceTurnRequest
 
     payload = _java_evidence_opening_command_payload()
-    payload["case_intake_dossier"]["case_story"][
+    dossier = payload["context_envelope"]["intake_dossier_snapshot"]["payload"]
+    dossier["case_story"][
         "one_sentence_summary"
     ] = "物流系统显示包裹已签收，但用户反馈本人没有收到。"
-    payload["case_intake_dossier"]["dispute_focus"] = {
+    dossier["dispute_focus"] = {
         "core_issue": "SIGNED_NOT_RECEIVED",
         "facts_to_verify": ["物流签收记录", "投递轨迹或快递柜/驿站记录"],
     }
@@ -411,7 +512,8 @@ def test_evidence_opening_fallback_normalizes_summary_punctuation() -> None:
     from app.schemas import EvidenceTurnRequest
 
     payload = _java_evidence_opening_command_payload()
-    payload["case_intake_dossier"]["case_story"][
+    dossier = payload["context_envelope"]["intake_dossier_snapshot"]["payload"]
+    dossier["case_story"][
         "one_sentence_summary"
     ] = "物流显示签收，但用户称没有收到包裹。"
     workflow = EvidenceTurnWorkflow()
@@ -445,6 +547,20 @@ def test_evidence_opening_replaces_generic_llm_welcome_with_dossier_questions() 
     assert "签收后发现手表划痕" in combined
 
 
+def test_evidence_opening_coerce_bounds_merged_model_and_baseline_output() -> None:
+    from app.agents.evidence_clerk.workflow import EvidenceTurnWorkflow
+    from app.schemas import EvidenceTurnRequest
+
+    workflow = EvidenceTurnWorkflow(model_runner=MaximalOpeningRunner())
+
+    result = workflow.run(
+        EvidenceTurnRequest.model_validate(_java_evidence_opening_command_payload())
+    )
+
+    assert len(result.evidence_requests) <= 10
+    assert len(result.authenticity_flags) <= 20
+
+
 def test_evidence_turn_fallback_asks_authenticity_and_relevance_questions_without_deciding() -> None:
     from app.agents.evidence_clerk.workflow import EvidenceTurnWorkflow
     from app.schemas import EvidenceTurnRequest
@@ -459,7 +575,6 @@ def test_evidence_turn_fallback_asks_authenticity_and_relevance_questions_withou
     )
     assert "来源" in combined_questions
     assert "时间" in combined_questions
-    assert "可读" in combined_questions or "OCR" in combined_questions
     assert "关联" in result.room_utterance
     assert "责任在" not in result.room_utterance
     assert "应当退款" not in result.room_utterance
@@ -469,6 +584,177 @@ def test_evidence_turn_fallback_asks_authenticity_and_relevance_questions_withou
     assert result.non_final is True
     assert result.liability_determined is False
     assert result.remedy_recommended is False
+
+
+def test_evidence_context_assembler_preserves_null_parsed_text_and_adds_notice() -> None:
+    from app.harness.evidence_context_assembler import EvidenceContextAssembler
+    from app.schemas import EvidenceTurnRequest
+
+    payload = _evidence_turn_payload()
+    evidence = payload["context_envelope"]["visible_evidence"][0]
+    evidence["parsed_text"] = None
+    evidence["parse_status"] = "PROCESSING"
+
+    assembled = EvidenceContextAssembler().assemble(
+        EvidenceTurnRequest.model_validate(payload)
+    )
+
+    evidence_context = assembled.context_sources["actor_visible_evidence"]
+    model_evidence = evidence_context["items"][0]
+    assert "parsed_text" not in model_evidence
+    assert model_evidence["content_preview"] == (
+        "证据内容正在解析，当前仅可核对文件元数据。"
+    )
+    assert model_evidence["parse_notice"] == model_evidence["content_preview"]
+    assert model_evidence["content_char_count"] == 0
+    assert model_evidence["has_file_hash"] is True
+    assert "file_hash" not in model_evidence
+    assert "submitted_by_id" not in model_evidence
+    assert "content_url" not in model_evidence
+    assert "metadata" not in model_evidence
+    assert "extraction" not in model_evidence
+    assert assembled.working_set.available_evidence[0].parsed_text is None
+    assert assembled.working_set.available_evidence[0].content == (
+        "证据内容正在解析，当前仅可核对文件元数据。"
+    )
+
+
+def test_evidence_context_assembler_prioritizes_current_attachments_and_budgets() -> None:
+    from app.harness.evidence_context_assembler import EvidenceContextAssembler
+    from app.schemas import EvidenceTurnRequest
+
+    payload = _java_evidence_turn_command_payload()
+    items = []
+    for index in range(25):
+        item = dict(_visible_signature_evidence())
+        item["evidence_id"] = f"EVIDENCE_budget_{index:02d}"
+        item["file_hash"] = f"sha256-budget-{index:02d}"
+        item["parsed_text"] = "证据解析正文" * 10_000
+        item["submitted_at"] = f"2026-07-11T09:{index:02d}:00+08:00"
+        items.append(item)
+    payload["context_envelope"]["visible_evidence"] = items
+    payload["context_envelope"]["current_event"]["attachment_refs"] = [
+        "EVIDENCE_budget_00"
+    ]
+
+    assembled = EvidenceContextAssembler().assemble(
+        EvidenceTurnRequest.model_validate(payload)
+    )
+    evidence_context = assembled.context_sources["actor_visible_evidence"]
+
+    assert evidence_context["source_count"] == 25
+    assert evidence_context["included_count"] == 20
+    assert evidence_context["truncated"] is True
+    assert evidence_context["items"][0]["evidence_id"] == "EVIDENCE_budget_00"
+    assert len(evidence_context["items"][0]["content_preview"]) == 3_000
+    assert evidence_context["items"][0]["preview_truncated"] is True
+    assert len(assembled.working_set.available_evidence) == 25
+    assert assembled.working_set.available_evidence[0].parsed_text is None
+    assert len(assembled.working_set.available_evidence[0].content) == 3_000
+    assert len(assembled.raw_envelope.visible_evidence[0].parsed_text or "") > 20_000
+
+
+def test_evidence_fallback_bounds_deterministic_output_above_one_hundred_items() -> None:
+    from app.agents.evidence_clerk.skills.authenticity import EvidenceAuthenticitySkill
+    from app.agents.evidence_clerk.workflow import EvidenceTurnWorkflow
+    from app.harness.evidence_context_assembler import EvidenceContextAssembler
+    from app.schemas import EvidenceTurnRequest
+
+    payload = _evidence_turn_payload()
+    items = []
+    for index in range(125):
+        item = dict(_visible_signature_evidence())
+        item["evidence_id"] = f"EVIDENCE_scale_{index:03d}"
+        item["file_hash"] = f"sha256-scale-{index:03d}"
+        item["parsed_text"] = f"第 {index} 份证据解析文本。"
+        item["submitted_at"] = f"2026-07-11T{index // 60:02d}:{index % 60:02d}:00+08:00"
+        items.append(item)
+    payload["context_envelope"]["visible_evidence"] = items
+    request = EvidenceTurnRequest.model_validate(payload)
+    assembled = EvidenceContextAssembler().assemble(request)
+
+    draft = EvidenceAuthenticitySkill().draft(assembled.working_set)
+    result = EvidenceTurnWorkflow().run(request)
+
+    assert len(draft.evidence_requests) == 10
+    assert len(draft.verification_suggestions) == 100
+    assert len(draft.authenticity_flags) <= 20
+    assert len(result.evidence_requests) <= 10
+    assert len(result.verification_suggestions) == 20
+    assert len(result.authenticity_flags) <= 20
+
+
+def test_evidence_context_assembler_uses_raw_case_when_intake_dossier_is_missing() -> None:
+    from app.harness.evidence_context_assembler import EvidenceContextAssembler
+    from app.schemas import EvidenceTurnRequest
+
+    payload = _evidence_turn_payload()
+    payload["context_envelope"]["intake_dossier_snapshot"] = None
+    payload["context_envelope"]["case_snapshot"]["description"] = "案情描述" * 10_000
+
+    assembled = EvidenceContextAssembler().assemble(
+        EvidenceTurnRequest.model_validate(payload)
+    )
+    dossier = assembled.context_sources["canonical_case_dossier"]
+
+    assert len(dossier["case_story"]["one_sentence_summary"]) == 4_000
+    assert dossier["case_story"]["summary_truncated"] is True
+    assert dossier["case_story"]["summary_char_count"] == 40_000
+    assert dossier["case_snapshot"]["case_version"] == 7
+    assert dossier["intake_dossier_provenance"]["available"] is False
+    assert len(assembled.raw_envelope.case_snapshot.description) == 40_000
+    assert assembled.context_sources["room_deadline"][
+        "initiator_evidence_required"
+    ] is True
+
+
+def test_evidence_envelope_accepts_short_external_business_references() -> None:
+    from app.schemas import EvidenceTurnRequest
+
+    payload = _evidence_turn_payload()
+    snapshot = payload["context_envelope"]["case_snapshot"]
+    snapshot.update(
+        {
+            "order_id": "O",
+            "after_sale_id": "A2",
+            "logistics_id": "L",
+            "source_system": "X",
+            "external_case_ref": "E2",
+        }
+    )
+
+    request = EvidenceTurnRequest.model_validate(payload)
+
+    assert request.context_envelope.case_snapshot.order_id == "O"
+    assert request.context_envelope.case_snapshot.source_system == "X"
+
+
+def test_evidence_envelope_rejects_cross_actor_or_unknown_attachment_evidence() -> None:
+    from app.schemas import EvidenceTurnRequest
+
+    wrong_owner = _java_evidence_turn_command_payload()
+    wrong_owner["context_envelope"]["visible_evidence"][0][
+        "submitted_by_id"
+    ] = "USER_other"
+
+    with pytest.raises(ValidationError) as owner_failure:
+        EvidenceTurnRequest.model_validate(wrong_owner)
+
+    assert "submitted_by_id must match actor_snapshot.actor_id" in str(
+        owner_failure.value
+    )
+
+    unknown_attachment = _java_evidence_turn_command_payload()
+    unknown_attachment["context_envelope"]["current_event"][
+        "attachment_refs"
+    ] = ["EVIDENCE_not_visible"]
+
+    with pytest.raises(ValidationError) as attachment_failure:
+        EvidenceTurnRequest.model_validate(unknown_attachment)
+
+    assert "attachment_refs must reference visible_evidence" in str(
+        attachment_failure.value
+    )
 
 
 def test_evidence_turn_api_requires_service_secret_and_returns_fallback_payload() -> None:
@@ -502,6 +788,42 @@ def test_evidence_turn_api_requires_service_secret_and_returns_fallback_payload(
         "EVIDENCE_signature_photo"
     )
     assert payload["memory_frame"]["short_term_rounds"][0]["turn_no"] == 1
+
+
+def test_evidence_turn_api_rejects_legacy_and_mixed_transport_contracts() -> None:
+    from app.agents.evidence_clerk.workflow import EvidenceTurnWorkflow
+
+    client = TestClient(
+        create_app(
+            _settings(),
+            evidence_turn_workflow=EvidenceTurnWorkflow(),
+        )
+    )
+    valid = _evidence_turn_payload()
+    legacy = {
+        "case_id": "CASE_evidence_turn_llm",
+        "room_type": "EVIDENCE",
+        "turn_source": "PARTY_MESSAGE",
+        "actor_role": "USER",
+        "current_party_message": {},
+        "agent_context": valid["agent_context"],
+    }
+
+    legacy_response = client.post(
+        "/internal/agents/evidence/turn",
+        headers=_headers(),
+        json=legacy,
+    )
+    assert legacy_response.status_code == 422
+
+    mixed = _evidence_turn_payload()
+    mixed["case_id"] = "CASE_evidence_turn_llm"
+    mixed_response = client.post(
+        "/internal/agents/evidence/turn",
+        headers=_headers(),
+        json=mixed,
+    )
+    assert mixed_response.status_code == 422
 
 
 def test_evidence_turn_endpoint_accepts_java_command_payload_without_degrading() -> None:

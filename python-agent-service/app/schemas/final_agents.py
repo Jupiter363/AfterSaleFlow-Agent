@@ -100,6 +100,14 @@ class DisputeIntakeResult(StrictModel):
 
 
 RiskLevelLiteral = Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"]
+RawTransportText = Annotated[
+    str,
+    Field(min_length=1, max_length=2_000_000),
+]
+RawReference = Annotated[
+    str,
+    Field(min_length=1, max_length=128),
+]
 
 
 class SimulatedExternalImportRequest(StrictModel):
@@ -256,6 +264,188 @@ class EvidenceTurnMessage(StrictModel):
     )
 
 
+class EvidenceCaseSnapshotV1(StrictModel):
+    """Raw, trusted case data supplied by the Java business boundary."""
+
+    case_id: Annotated[str, Field(pattern=r"^CASE_[A-Za-z0-9_]{1,59}$")]
+    case_version: Annotated[int, Field(ge=0)]
+    case_status: Identifier
+    case_type: Identifier
+    dispute_type: Identifier | None
+    title: ShortText
+    description: RawTransportText
+    risk_level: Identifier
+    route_type: Identifier | None
+    order_id: RawReference | None
+    after_sale_id: RawReference | None
+    logistics_id: RawReference | None
+    source_type: Identifier
+    initiator_role: Literal["USER", "MERCHANT"]
+    source_system: RawReference | None
+    external_case_ref: RawReference | None
+    current_room: Identifier | None
+    current_deadline_at: ShortText | None
+
+
+class EvidenceIntakeDossierSnapshotV1(StrictModel):
+    dossier_id: Identifier
+    schema_version: Identifier | None
+    dossier_version: Annotated[int, Field(ge=1)]
+    source_turn_no: Annotated[int, Field(ge=1)]
+    quality_score: Annotated[int, Field(ge=0, le=100)]
+    ready_for_next_step: bool
+    admission_recommendation: Identifier
+    updated_at: ShortText
+    payload: dict[str, object]
+
+
+class EvidenceActorSnapshotV1(StrictModel):
+    actor_id: Identifier
+    actor_role: Literal["USER", "MERCHANT"]
+    initiator_role: Literal["USER", "MERCHANT"]
+    access_session_id: Identifier
+    agent_session_id: Identifier
+    conversation_scope: Annotated[str, Field(min_length=10, max_length=512)]
+    prompt_profile_id: Identifier
+    memory_policy_id: Identifier
+
+
+class EvidenceCurrentEventV1(StrictModel):
+    event_id: Identifier
+    event_type: Literal["ROOM_OPENING", "PARTY_MESSAGE"]
+    message_type: Literal[
+        "AGENT_MESSAGE",
+        "PARTY_TEXT",
+        "PARTY_EVIDENCE_REFERENCE",
+    ]
+    actor_id: Identifier
+    actor_role: Literal["USER", "MERCHANT"]
+    text: Annotated[str, Field(max_length=2_000_000)] | None
+    attachment_refs: Annotated[list[Identifier], Field(max_length=50)]
+    turn_no: Annotated[int, Field(ge=1)]
+    occurred_at: ShortText
+
+    @model_validator(mode="after")
+    def validate_event_shape(self) -> "EvidenceCurrentEventV1":
+        if self.event_type == "ROOM_OPENING":
+            if self.message_type != "AGENT_MESSAGE":
+                raise ValueError("ROOM_OPENING message_type must be AGENT_MESSAGE")
+            if self.text is not None:
+                raise ValueError("ROOM_OPENING text must be null")
+            if self.attachment_refs:
+                raise ValueError("ROOM_OPENING attachment_refs must be empty")
+            return self
+        if self.message_type not in {"PARTY_TEXT", "PARTY_EVIDENCE_REFERENCE"}:
+            raise ValueError(
+                "PARTY_MESSAGE message_type must be PARTY_TEXT or "
+                "PARTY_EVIDENCE_REFERENCE"
+            )
+        if not (self.text and self.text.strip()) and not self.attachment_refs:
+            raise ValueError("PARTY_MESSAGE requires text or attachment_refs")
+        return self
+
+
+class EvidenceVisibleEvidenceItemV1(StrictModel):
+    evidence_id: Identifier
+    dossier_id: Identifier
+    evidence_type: Identifier
+    source_type: Identifier
+    submitted_by_role: Literal[
+        "USER",
+        "MERCHANT",
+        "PLATFORM",
+        "CUSTOMER_SERVICE",
+    ]
+    submitted_by_id: Identifier
+    original_filename: ShortText | None
+    content_type: ShortText | None
+    file_size: Annotated[int, Field(ge=0)] | None
+    file_hash: ShortText | None
+    parsed_text: RawTransportText | None
+    parse_status: Identifier
+    visibility: Identifier
+    desensitized: bool
+    metadata: dict[str, object]
+    extraction: dict[str, object]
+    occurred_at: ShortText | None
+    created_at: ShortText
+    submitted_at: ShortText | None
+    submission_status: Literal["SUBMITTED"]
+    submission_batch_id: Identifier | None
+    content_url: ShortText
+
+
+class EvidencePrivateConversationTurnV1(StrictModel):
+    turn_no: Annotated[int, Field(ge=0)]
+    actor_id: Identifier | None
+    answer_role: Identifier | None
+    answer_content: RawTransportText | None
+    agent_role: Identifier | None
+    agent_response: RawTransportText | None
+    scroll_snapshot: dict[str, object]
+    agent_session_id: Identifier
+    conversation_scope: Annotated[str, Field(min_length=10, max_length=512)]
+
+
+class EvidencePrivateConversationV1(StrictModel):
+    agent_session_id: Identifier
+    conversation_scope: Annotated[str, Field(min_length=10, max_length=512)]
+    source_count: Annotated[int, Field(ge=0)]
+    truncated: bool
+    recent_turns: Annotated[
+        list[EvidencePrivateConversationTurnV1],
+        Field(max_length=20),
+    ]
+
+
+class EvidenceRoomPolicyV1(StrictModel):
+    room_id: Identifier
+    room_type: Literal["EVIDENCE"]
+    room_status: Identifier
+    current_deadline_at: ShortText | None
+    initiator_role: Literal["USER", "MERCHANT"]
+    initiator_evidence_required: bool
+
+
+class EvidenceContextEnvelopeV1(StrictModel):
+    """Versioned Java-to-Harness evidence context boundary."""
+
+    schema_version: Literal["evidence_context_envelope.v1"]
+    captured_at: ShortText
+    case_snapshot: EvidenceCaseSnapshotV1
+    intake_dossier_snapshot: EvidenceIntakeDossierSnapshotV1 | None
+    actor_snapshot: EvidenceActorSnapshotV1
+    current_event: EvidenceCurrentEventV1
+    visible_evidence: list[EvidenceVisibleEvidenceItemV1]
+    private_conversation: EvidencePrivateConversationV1
+    room_policy: EvidenceRoomPolicyV1
+
+    @model_validator(mode="after")
+    def validate_visible_evidence_scope(self) -> "EvidenceContextEnvelopeV1":
+        actor = self.actor_snapshot
+        visible_ids: set[str] = set()
+        for item in self.visible_evidence:
+            if item.submitted_by_role != actor.actor_role:
+                raise ValueError(
+                    "visible_evidence submitted_by_role must match "
+                    "actor_snapshot.actor_role"
+                )
+            if item.submitted_by_id != actor.actor_id:
+                raise ValueError(
+                    "visible_evidence submitted_by_id must match "
+                    "actor_snapshot.actor_id"
+                )
+            if item.evidence_id in visible_ids:
+                raise ValueError("visible_evidence evidence_id values must be unique")
+            visible_ids.add(item.evidence_id)
+        unknown_attachments = set(self.current_event.attachment_refs) - visible_ids
+        if unknown_attachments:
+            raise ValueError(
+                "current_event.attachment_refs must reference visible_evidence"
+            )
+        return self
+
+
 class EvidenceTurnEvidenceItem(StrictModel):
     evidence_id: Identifier
     evidence_type: Identifier
@@ -321,35 +511,146 @@ class EvidenceTurnLlmOutput(StrictModel):
 
 
 class EvidenceTurnRequest(StrictModel):
-    case_id: Annotated[
-        str, Field(pattern=r"^CASE_[A-Za-z0-9_]{1,59}$")
-    ]
-    room_type: Literal["EVIDENCE"]
-    turn_source: Identifier | None = None
-    actor_role: Literal["USER", "MERCHANT"]
-    actor_id: Identifier | None = None
-    current_party_message: EvidenceTurnMessage
-    case_intake_dossier: dict[str, object] = Field(default_factory=dict)
-    available_evidence: Annotated[
-        list[EvidenceTurnEvidenceItem],
-        Field(max_length=200),
-    ] = Field(default_factory=list)
-    recent_turns: Annotated[list[dict[str, object]], Field(max_length=20)] = Field(
-        default_factory=list
-    )
+    context_envelope: EvidenceContextEnvelopeV1
     agent_context: AgentInvocationContext
 
     @model_validator(mode="after")
     def enforce_agent_context_scope(self) -> "EvidenceTurnRequest":
-        if self.case_id != self.agent_context.case_id:
-            raise ValueError("case_id must match agent_context.case_id")
-        if self.room_type != self.agent_context.room_type:
-            raise ValueError("room_type must match agent_context.room_type")
-        if self.actor_id is not None and self.actor_id != self.agent_context.actor_id:
-            raise ValueError("actor_id must match agent_context.actor_id")
-        if self.actor_role != self.agent_context.actor_role:
-            raise ValueError("actor_role must match agent_context.actor_role")
+        self._validate_context_envelope_scope()
         return self
+
+    def _validate_context_envelope_scope(self) -> None:
+        envelope = self.context_envelope
+        case_snapshot = envelope.case_snapshot
+        actor_snapshot = envelope.actor_snapshot
+        current_event = envelope.current_event
+        conversation = envelope.private_conversation
+        room_policy = envelope.room_policy
+        context = self.agent_context
+
+        if context.agent_key != "EVIDENCE_CLERK":
+            raise ValueError("agent_context.agent_key must be EVIDENCE_CLERK")
+        if context.scope_type != "EVIDENCE_PARTY_PRIVATE":
+            raise ValueError(
+                "agent_context.scope_type must be EVIDENCE_PARTY_PRIVATE"
+            )
+        if case_snapshot.case_id != context.case_id:
+            raise ValueError(
+                "context_envelope.case_snapshot.case_id must match "
+                "agent_context.case_id"
+            )
+        if room_policy.room_type != context.room_type:
+            raise ValueError(
+                "context_envelope.room_policy.room_type must match "
+                "agent_context.room_type"
+            )
+        if (
+            case_snapshot.current_room is not None
+            and case_snapshot.current_room != room_policy.room_type
+        ):
+            raise ValueError(
+                "context_envelope.case_snapshot.current_room must match "
+                "room_policy.room_type"
+            )
+        if (
+            case_snapshot.current_deadline_at is not None
+            and room_policy.current_deadline_at is not None
+            and case_snapshot.current_deadline_at != room_policy.current_deadline_at
+        ):
+            raise ValueError(
+                "context_envelope case and room deadline snapshots must match"
+            )
+        if actor_snapshot.actor_id != context.actor_id:
+            raise ValueError(
+                "context_envelope.actor_snapshot.actor_id must match agent_context.actor_id"
+            )
+        if actor_snapshot.actor_role != context.actor_role:
+            raise ValueError(
+                "context_envelope.actor_snapshot.actor_role must match "
+                "agent_context.actor_role"
+            )
+        if actor_snapshot.actor_id not in context.allowed_actor_ids:
+            raise ValueError(
+                "context_envelope.actor_snapshot.actor_id must be present in "
+                "agent_context.allowed_actor_ids"
+            )
+        if actor_snapshot.actor_role not in context.allowed_actor_roles:
+            raise ValueError(
+                "context_envelope.actor_snapshot.actor_role must be present in "
+                "agent_context.allowed_actor_roles"
+            )
+        expected_permission = (
+            "PARTY_USER" if actor_snapshot.actor_role == "USER" else "PARTY_MERCHANT"
+        )
+        if context.permission_level != expected_permission:
+            raise ValueError(
+                "agent_context.permission_level must match actor_snapshot.actor_role"
+            )
+        if actor_snapshot.access_session_id != context.access_session_id:
+            raise ValueError(
+                "context_envelope.actor_snapshot.access_session_id must match "
+                "agent_context.access_session_id"
+            )
+        if actor_snapshot.agent_session_id != context.agent_session_id:
+            raise ValueError(
+                "context_envelope.actor_snapshot.agent_session_id must match "
+                "agent_context.agent_session_id"
+            )
+        if actor_snapshot.conversation_scope != context.conversation_scope:
+            raise ValueError(
+                "context_envelope.actor_snapshot.conversation_scope must match "
+                "agent_context.conversation_scope"
+            )
+        if actor_snapshot.prompt_profile_id != context.prompt_profile_id:
+            raise ValueError(
+                "context_envelope.actor_snapshot.prompt_profile_id must match "
+                "agent_context.prompt_profile_id"
+            )
+        if actor_snapshot.memory_policy_id != context.memory_policy_id:
+            raise ValueError(
+                "context_envelope.actor_snapshot.memory_policy_id must match "
+                "agent_context.memory_policy_id"
+            )
+        if current_event.actor_id != actor_snapshot.actor_id:
+            raise ValueError(
+                "context_envelope.current_event.actor_id must match actor_snapshot.actor_id"
+            )
+        if current_event.actor_role != actor_snapshot.actor_role:
+            raise ValueError(
+                "context_envelope.current_event.actor_role must match "
+                "actor_snapshot.actor_role"
+            )
+        if actor_snapshot.initiator_role != case_snapshot.initiator_role:
+            raise ValueError(
+                "context_envelope.actor_snapshot.initiator_role must match "
+                "case_snapshot.initiator_role"
+            )
+        if room_policy.initiator_role != case_snapshot.initiator_role:
+            raise ValueError(
+                "context_envelope.room_policy.initiator_role must match "
+                "case_snapshot.initiator_role"
+            )
+        if conversation.agent_session_id != actor_snapshot.agent_session_id:
+            raise ValueError(
+                "context_envelope.private_conversation.agent_session_id must match "
+                "actor_snapshot.agent_session_id"
+            )
+        if conversation.conversation_scope != actor_snapshot.conversation_scope:
+            raise ValueError(
+                "context_envelope.private_conversation.conversation_scope must match "
+                "actor_snapshot.conversation_scope"
+            )
+        for turn in conversation.recent_turns:
+            if turn.agent_session_id != conversation.agent_session_id:
+                raise ValueError(
+                    "context_envelope.private_conversation.recent_turns agent_session_id "
+                    "must match private_conversation.agent_session_id"
+                )
+            if turn.conversation_scope != conversation.conversation_scope:
+                raise ValueError(
+                    "context_envelope.private_conversation.recent_turns "
+                    "conversation_scope must match private_conversation.conversation_scope"
+                )
 
 
 class EvidenceTurnResult(EvidenceTurnLlmOutput):

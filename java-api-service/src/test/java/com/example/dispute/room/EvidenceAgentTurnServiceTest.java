@@ -1,6 +1,7 @@
 package com.example.dispute.room;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.lenient;
@@ -10,6 +11,9 @@ import static org.mockito.Mockito.when;
 
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
+import com.example.dispute.common.exception.ForbiddenException;
+import com.example.dispute.common.api.ErrorCode;
+import com.example.dispute.common.exception.AgentExecutionException;
 import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.RiskLevel;
 import com.example.dispute.evidence.infrastructure.persistence.entity.EvidenceVerificationEntity;
@@ -25,6 +29,8 @@ import com.example.dispute.room.application.EvidenceAgentTurnClient;
 import com.example.dispute.room.application.EvidenceAgentTurnCommand;
 import com.example.dispute.room.application.EvidenceAgentTurnResult;
 import com.example.dispute.room.application.EvidenceAgentTurnService;
+import com.example.dispute.room.application.EvidenceContextEnvelopeFactory;
+import com.example.dispute.room.application.EvidenceContextEnvelopeV1;
 import com.example.dispute.room.application.IntakeRecentTurn;
 import com.example.dispute.room.application.RoomMessageCommand;
 import com.example.dispute.room.application.SessionPermissionService;
@@ -49,8 +55,10 @@ import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
+import org.springframework.test.util.ReflectionTestUtils;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
@@ -82,12 +90,18 @@ class EvidenceAgentTurnServiceTest {
     @BeforeEach
     void setUp() {
         objectMapper = new ObjectMapper().findAndRegisterModules();
+        EvidenceContextEnvelopeFactory contextEnvelopeFactory =
+                new EvidenceContextEnvelopeFactory(
+                        intakeDossierRepository,
+                        evidenceItemRepository,
+                        memoryRepository,
+                        objectMapper,
+                        CLOCK);
         service =
                 new EvidenceAgentTurnService(
                         caseRepository,
                         roomRepository,
                         memoryRepository,
-                        intakeDossierRepository,
                         evidenceItemRepository,
                         verificationRepository,
                         messageRepository,
@@ -95,6 +109,7 @@ class EvidenceAgentTurnServiceTest {
                         accessSessionResolver,
                         agentSessionResolver,
                         permissionService,
+                        contextEnvelopeFactory,
                         client,
                         objectMapper,
                         CLOCK);
@@ -157,6 +172,15 @@ class EvidenceAgentTurnServiceTest {
                         userSession,
                         accessSession(dispute.getId(), new AuthenticatedActor("user-local", ActorRole.USER)),
                         "{}");
+        RoomTurnMemoryEntity unscopedHistoricalTurn =
+                RoomTurnMemoryEntity.participantTurn(
+                        "MEMORY_UNSCOPED_HISTORICAL",
+                        dispute.getId(),
+                        RoomType.EVIDENCE,
+                        1,
+                        "user-local",
+                        "USER",
+                        "This unscoped historical payload must not enter the formal envelope.");
         when(caseRepository.findByIdForUpdate(dispute.getId()))
                 .thenReturn(Optional.of(dispute));
         when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.EVIDENCE))
@@ -196,7 +220,11 @@ class EvidenceAgentTurnServiceTest {
                                         "merchant-local",
                                         "PARTIES")));
         when(memoryRepository.findTop50ByAgentSessionIdOrderByTurnNoDesc(any()))
-                .thenReturn(List.of(previousClerkTurn, previousParticipantTurn));
+                .thenReturn(
+                        List.of(
+                                previousClerkTurn,
+                                previousParticipantTurn,
+                                unscopedHistoricalTurn));
         when(client.run(any(), eq("TRACE_EVIDENCE"), eq("REQ_EVIDENCE")))
                 .thenReturn(
                         new EvidenceAgentTurnResult(
@@ -234,45 +262,56 @@ class EvidenceAgentTurnServiceTest {
                 new RoomMessageCommand(
                         MessageType.PARTY_TEXT,
                         "The parcel status says signed, but my front door camera shows no delivery.",
-                        List.of("PHOTO_DOOR_CAMERA")),
+                        List.of("EVIDENCE_USER_PRIVATE")),
+                "MESSAGE_EVIDENCE",
+                CLOCK.instant(),
                 "TRACE_EVIDENCE",
                 "REQ_EVIDENCE");
 
         ArgumentCaptor<EvidenceAgentTurnCommand> command =
                 ArgumentCaptor.forClass(EvidenceAgentTurnCommand.class);
         verify(client).run(command.capture(), eq("TRACE_EVIDENCE"), eq("REQ_EVIDENCE"));
-        assertThat(command.getValue().caseId()).isEqualTo(dispute.getId());
-        assertThat(command.getValue().roomType()).isEqualTo(RoomType.EVIDENCE);
-        assertThat(command.getValue().turnSource()).isEqualTo("PARTY_MESSAGE");
-        assertThat(command.getValue().actorRole()).isEqualTo("USER");
-        assertThat(command.getValue().actorId()).isEqualTo("user-local");
+        EvidenceContextEnvelopeV1 envelope = command.getValue().contextEnvelope();
+        assertThat(envelope.schemaVersion())
+                .isEqualTo(EvidenceContextEnvelopeV1.SCHEMA_VERSION);
+        assertThat(envelope.capturedAt()).isEqualTo(CLOCK.instant().toString());
+        assertThat(envelope.caseSnapshot().caseId()).isEqualTo(dispute.getId());
+        assertThat(envelope.roomPolicy().roomType()).isEqualTo(RoomType.EVIDENCE);
+        assertThat(envelope.currentEvent().eventType()).isEqualTo("PARTY_MESSAGE");
+        assertThat(envelope.currentEvent().eventId()).isEqualTo("MESSAGE_EVIDENCE");
+        assertThat(envelope.actorSnapshot().actorRole()).isEqualTo("USER");
+        assertThat(envelope.actorSnapshot().actorId()).isEqualTo("user-local");
         assertThat(command.getValue().agentContext().actorId()).isEqualTo("user-local");
         assertThat(command.getValue().agentContext().actorRole()).isEqualTo("USER");
         assertThat(command.getValue().agentContext().agentKey()).isEqualTo("EVIDENCE_CLERK");
         assertThat(command.getValue().agentContext().scopeType())
                 .isEqualTo("EVIDENCE_PARTY_PRIVATE");
-        assertThat(command.getValue().currentMessage().messageType())
+        assertThat(envelope.currentEvent().messageType())
                 .isEqualTo(MessageType.PARTY_TEXT);
-        assertThat(command.getValue().currentMessage().text()).contains("front door camera");
-        assertThat(command.getValue().latestCaseIntakeDossier().path("schema_version").asText())
+        assertThat(envelope.currentEvent().text()).contains("front door camera");
+        assertThat(envelope.intakeDossierSnapshot().payload().path("schema_version").asText())
                 .isEqualTo("intake_case_detail.v1");
-        assertThat(command.getValue().availableEvidence())
-                .extracting(EvidenceAgentTurnCommand.AvailableEvidence::evidenceId)
+        assertThat(envelope.visibleEvidence())
+                .extracting(EvidenceContextEnvelopeV1.VisibleEvidence::evidenceId)
                 .containsExactly("EVIDENCE_USER_PRIVATE");
-        assertThat(command.getValue().recentTurns())
+        assertThat(envelope.privateConversation().recentTurns())
                 .extracting(turn -> turn.agentRole())
                 .contains("EVIDENCE_CLERK");
-        assertThat(command.getValue().recentTurns())
+        assertThat(envelope.privateConversation().sourceCount()).isEqualTo(2);
+        assertThat(envelope.privateConversation().truncated()).isFalse();
+        assertThat(envelope.privateConversation().recentTurns())
                 .allSatisfy(
                         turn -> {
                             assertThat(turn.agentSessionId()).isNotBlank();
                             assertThat(turn.conversationScope()).isNotBlank();
                         });
         JsonNode commandJson = objectMapper.valueToTree(command.getValue());
-        assertThat(commandJson.has("current_party_message")).isTrue();
-        assertThat(commandJson.has("current_message")).isFalse();
-        assertThat(commandJson.has("case_intake_dossier")).isTrue();
-        assertThat(commandJson.has("latest_case_intake_dossier")).isFalse();
+        assertThat(commandJson.fieldNames()).toIterable()
+                .containsExactlyInAnyOrder("context_envelope", "agent_context");
+        assertThat(commandJson.path("context_envelope").path("schema_version").asText())
+                .isEqualTo("evidence_context_envelope.v1");
+        assertThat(commandJson.path("context_envelope").has("case_intake_dossier"))
+                .isFalse();
         ArgumentCaptor<EvidenceVerificationEntity> verification =
                 ArgumentCaptor.forClass(EvidenceVerificationEntity.class);
         verify(verificationRepository).save(verification.capture());
@@ -282,17 +321,21 @@ class EvidenceAgentTurnServiceTest {
         assertThat(verification.getValue().getAgentFindingsJson())
                 .contains("carrier corroboration")
                 .contains("\"confidence_score\":0.62");
-        assertThat(commandJson.path("current_party_message").path("message_type").asText())
+        assertThat(commandJson.path("context_envelope")
+                        .path("current_event")
+                        .path("message_type")
+                        .asText())
                 .isEqualTo("PARTY_TEXT");
-        JsonNode serializedEvidence = commandJson.path("available_evidence").get(0);
+        JsonNode serializedEvidence =
+                commandJson.path("context_envelope").path("visible_evidence").get(0);
         assertThat(serializedEvidence.path("evidence_id").asText())
                 .isEqualTo("EVIDENCE_USER_PRIVATE");
-        assertThat(serializedEvidence.path("content").asText())
-                .contains("EVIDENCE_USER_PRIVATE.jpg");
+        assertThat(serializedEvidence.has("content")).isFalse();
         assertThat(serializedEvidence.has("submitted_by_role")).isTrue();
         assertThat(serializedEvidence.has("content_url")).isTrue();
         assertThat(serializedEvidence.has("parse_status")).isTrue();
-        assertThat(serializedEvidence.has("redacted")).isTrue();
+        assertThat(serializedEvidence.has("metadata")).isTrue();
+        assertThat(serializedEvidence.has("extraction")).isTrue();
         assertThat(serializedEvidence.has("evidenceId")).isFalse();
 
         ArgumentCaptor<RoomTurnMemoryEntity> memories =
@@ -439,17 +482,20 @@ class EvidenceAgentTurnServiceTest {
                 ArgumentCaptor.forClass(EvidenceAgentTurnCommand.class);
         verify(client, org.mockito.Mockito.times(1))
                 .run(command.capture(), eq("TRACE_OPENING"), eq("REQ_OPENING"));
-        assertThat(command.getValue().turnSource()).isEqualTo("ROOM_OPENING");
-        assertThat(command.getValue().actorId()).isEqualTo("user-local");
-        assertThat(command.getValue().currentMessage().messageId())
+        EvidenceContextEnvelopeV1 envelope = command.getValue().contextEnvelope();
+        assertThat(envelope.currentEvent().eventType()).isEqualTo("ROOM_OPENING");
+        assertThat(envelope.actorSnapshot().actorId()).isEqualTo("user-local");
+        assertThat(envelope.currentEvent().eventId())
                 .startsWith("EVIDENCE_OPENING_");
-        assertThat(command.getValue().latestCaseIntakeDossier()
+        assertThat(envelope.currentEvent().text()).isNull();
+        assertThat(envelope.intakeDossierSnapshot()
+                        .payload()
                         .path("dispute_focus")
                         .path("core_issue")
                         .asText())
                 .isEqualTo("SCRATCHED_WATCH");
-        assertThat(command.getValue().availableEvidence())
-                .extracting(EvidenceAgentTurnCommand.AvailableEvidence::evidenceId)
+        assertThat(envelope.visibleEvidence())
+                .extracting(EvidenceContextEnvelopeV1.VisibleEvidence::evidenceId)
                 .containsExactly("EVIDENCE_USER_OPENING");
 
         ArgumentCaptor<RoomMessageEntity> savedMessage =
@@ -624,7 +670,7 @@ class EvidenceAgentTurnServiceTest {
     }
 
     @Test
-    void ensureOpeningBuildsFallbackDossierFromCaseWhenIntakeDossierIsMissing()
+    void ensureOpeningKeepsIntakeSnapshotNullWhenIntakeDossierIsMissing()
             throws Exception {
         FulfillmentCaseEntity dispute = evidenceCase();
         CaseRoomEntity room = evidenceRoom(dispute);
@@ -672,23 +718,13 @@ class EvidenceAgentTurnServiceTest {
         ArgumentCaptor<EvidenceAgentTurnCommand> command =
                 ArgumentCaptor.forClass(EvidenceAgentTurnCommand.class);
         verify(client).run(command.capture(), eq("TRACE_FALLBACK_DOSSIER"), eq("REQ_FALLBACK_DOSSIER"));
-        JsonNode dossier = command.getValue().latestCaseIntakeDossier();
-        assertThat(dossier.path("schema_version").asText())
-                .isEqualTo("intake_case_detail.fallback.v1");
-        assertThat(dossier.path("case_story").path("one_sentence_summary").asText())
+        EvidenceContextEnvelopeV1 envelope = command.getValue().contextEnvelope();
+        assertThat(envelope.intakeDossierSnapshot()).isNull();
+        assertThat(envelope.caseSnapshot().description())
                 .contains("parcel was marked signed but never arrived");
-        assertThat(dossier.path("dispute_focus").path("core_issue").asText())
-                .isEqualTo("物流显示签收但用户称未收到包裹");
-        assertThat(dossier.path("dispute_focus").path("core_issue_code").asText())
+        assertThat(envelope.caseSnapshot().disputeType())
                 .isEqualTo("SIGNED_NOT_RECEIVED");
-        assertThat(dossier.path("dispute_focus").path("core_issue_label").asText())
-                .isEqualTo("物流显示签收但用户称未收到包裹");
-        assertThat(dossier.path("dispute_focus").path("facts_to_verify").toString())
-                .contains("物流签收记录")
-                .contains("投递轨迹")
-                .contains("收货地址");
-        assertThat(dossier.path("case_index").path("order_reference").asText())
-                .isEqualTo("ORDER-EVIDENCE");
+        assertThat(envelope.caseSnapshot().orderId()).isEqualTo("ORDER-EVIDENCE");
     }
 
     @Test
@@ -782,6 +818,28 @@ class EvidenceAgentTurnServiceTest {
     void evidenceAgentRecentTurnsAreScopedToTheSpeakingParty() throws Exception {
         FulfillmentCaseEntity dispute = evidenceCase();
         CaseRoomEntity room = evidenceRoom(dispute);
+        CaseAccessSessionEntity userAccess =
+                accessSession(
+                        dispute.getId(),
+                        new AuthenticatedActor("user-local", ActorRole.USER));
+        AgentConversationSessionEntity userSession =
+                agentSession(
+                        userAccess,
+                        RoomType.EVIDENCE,
+                        "EVIDENCE_CLERK",
+                        "EVIDENCE_CLERK:USER:v1",
+                        "MEMEO_DEFAULT");
+        CaseAccessSessionEntity merchantAccess =
+                accessSession(
+                        dispute.getId(),
+                        new AuthenticatedActor("merchant-local", ActorRole.MERCHANT));
+        AgentConversationSessionEntity merchantSession =
+                agentSession(
+                        merchantAccess,
+                        RoomType.EVIDENCE,
+                        "EVIDENCE_CLERK",
+                        "EVIDENCE_CLERK:MERCHANT:v1",
+                        "MEMEO_DEFAULT");
         RoomTurnMemoryEntity userParticipant =
                 RoomTurnMemoryEntity.participantTurn(
                         "MEMORY_USER_PARTY",
@@ -826,6 +884,10 @@ class EvidenceAgentTurnServiceTest {
                         "{}",
                         "[]",
                         "EVIDENCE_RUN_MERCHANT");
+        attachSessionScope(userParticipant, userSession);
+        attachSessionScope(userClerk, userSession);
+        attachSessionScope(merchantParticipant, merchantSession);
+        attachSessionScope(merchantClerk, merchantSession);
         when(caseRepository.findByIdForUpdate(dispute.getId()))
                 .thenReturn(Optional.of(dispute));
         when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.EVIDENCE))
@@ -866,6 +928,8 @@ class EvidenceAgentTurnServiceTest {
                         MessageType.PARTY_TEXT,
                         "用户侧本轮：我可以补充监控原视频。",
                         List.of()),
+                "MESSAGE_USER_SCOPED",
+                CLOCK.instant(),
                 "TRACE_USER_SCOPED",
                 "REQ_USER_SCOPED");
 
@@ -873,16 +937,16 @@ class EvidenceAgentTurnServiceTest {
                 ArgumentCaptor.forClass(EvidenceAgentTurnCommand.class);
         verify(client).run(command.capture(), eq("TRACE_USER_SCOPED"), eq("REQ_USER_SCOPED"));
 
-        assertThat(command.getValue().recentTurns())
+        assertThat(command.getValue().contextEnvelope().privateConversation().recentTurns())
                 .extracting(IntakeRecentTurn::answerContent)
                 .doesNotContain("商家侧私聊：发货质检视频显示完好。");
-        assertThat(command.getValue().recentTurns())
+        assertThat(command.getValue().contextEnvelope().privateConversation().recentTurns())
                 .extracting(IntakeRecentTurn::agentResponse)
                 .doesNotContain("商家侧书记官回复：请补充质检视频原文件。");
-        assertThat(command.getValue().recentTurns())
+        assertThat(command.getValue().contextEnvelope().privateConversation().recentTurns())
                 .extracting(IntakeRecentTurn::answerContent)
                 .contains("用户侧私聊：门口监控显示没有投递。");
-        assertThat(command.getValue().recentTurns())
+        assertThat(command.getValue().contextEnvelope().privateConversation().recentTurns())
                 .extracting(IntakeRecentTurn::agentResponse)
                 .contains("用户侧书记官回复：请补充门口监控原视频。");
     }
@@ -901,7 +965,13 @@ class EvidenceAgentTurnServiceTest {
                 .thenReturn(Optional.empty());
         when(evidenceItemRepository.findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(
                         dispute.getId()))
-                .thenReturn(List.of());
+                .thenReturn(
+                        List.of(
+                                evidenceItem(
+                                        "EVIDENCE_UPLOAD_1",
+                                        "MERCHANT",
+                                        "merchant-local",
+                                        "PRIVATE")));
         when(memoryRepository.findTop50ByAgentSessionIdOrderByTurnNoDesc(any()))
                 .thenReturn(List.of());
         when(client.run(any(), eq("TRACE_REFERENCE"), eq("REQ_REFERENCE")))
@@ -931,15 +1001,17 @@ class EvidenceAgentTurnServiceTest {
                         MessageType.PARTY_EVIDENCE_REFERENCE,
                         null,
                         List.of("EVIDENCE_UPLOAD_1")),
+                "MESSAGE_REFERENCE",
+                CLOCK.instant(),
                 "TRACE_REFERENCE",
                 "REQ_REFERENCE");
 
         ArgumentCaptor<EvidenceAgentTurnCommand> command =
                 ArgumentCaptor.forClass(EvidenceAgentTurnCommand.class);
         verify(client).run(command.capture(), eq("TRACE_REFERENCE"), eq("REQ_REFERENCE"));
-        assertThat(command.getValue().currentMessage().messageType())
+        assertThat(command.getValue().contextEnvelope().currentEvent().messageType())
                 .isEqualTo(MessageType.PARTY_EVIDENCE_REFERENCE);
-        assertThat(command.getValue().currentMessage().attachmentRefs())
+        assertThat(command.getValue().contextEnvelope().currentEvent().attachmentRefs())
                 .containsExactly("EVIDENCE_UPLOAD_1");
 
         ArgumentCaptor<RoomTurnMemoryEntity> memories =
@@ -954,6 +1026,51 @@ class EvidenceAgentTurnServiceTest {
         assertThat(agentMessage.getValue().getAudienceJson())
                 .contains("MERCHANT")
                 .doesNotContain("USER");
+    }
+
+    @Test
+    void rejectsEvidenceReferenceThatIsNotVisibleToTheCurrentActor() {
+        FulfillmentCaseEntity dispute = evidenceCase();
+        CaseRoomEntity room = evidenceRoom(dispute);
+        when(caseRepository.findByIdForUpdate(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.EVIDENCE))
+                .thenReturn(Optional.of(room));
+        when(memoryRepository.findMaxTurnNoByAgentSessionId(any()))
+                .thenReturn(0);
+        when(intakeDossierRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.INTAKE))
+                .thenReturn(Optional.empty());
+        when(evidenceItemRepository.findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(
+                        dispute.getId()))
+                .thenReturn(
+                        List.of(
+                                evidenceItem(
+                                        "EVIDENCE_MERCHANT_PRIVATE",
+                                        "MERCHANT",
+                                        "merchant-local",
+                                        "PRIVATE")));
+        when(memoryRepository.findTop50ByAgentSessionIdOrderByTurnNoDesc(any()))
+                .thenReturn(List.of());
+        when(memoryRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        assertThatThrownBy(
+                        () ->
+                                service.continueFromParticipantMessage(
+                                        dispute.getId(),
+                                        RoomType.EVIDENCE,
+                                        new AuthenticatedActor("user-local", ActorRole.USER),
+                                        new RoomMessageCommand(
+                                                MessageType.PARTY_EVIDENCE_REFERENCE,
+                                                null,
+                                                List.of("EVIDENCE_MERCHANT_PRIVATE")),
+                                        "MESSAGE_UNAUTHORIZED_REFERENCE",
+                                        CLOCK.instant(),
+                                        "TRACE_UNAUTHORIZED_REFERENCE",
+                                        "REQ_UNAUTHORIZED_REFERENCE"))
+                .isInstanceOf(ForbiddenException.class)
+                .hasMessageContaining("not visible");
+        verify(client, never()).run(any(), any(), any());
     }
 
     @Test
@@ -991,6 +1108,8 @@ class EvidenceAgentTurnServiceTest {
                         MessageType.PARTY_TEXT,
                         "我会上传开箱照片原图。",
                         List.of()),
+                "MESSAGE_DEGRADED",
+                CLOCK.instant(),
                 "TRACE_DEGRADED",
                 "REQ_DEGRADED");
 
@@ -1001,6 +1120,51 @@ class EvidenceAgentTurnServiceTest {
                 .contains("证据书记官")
                 .contains("已经安全保存")
                 .doesNotContain("temporarily unavailable");
+    }
+
+    @Test
+    void agentContractMismatchIsNotSilentlyDegraded() {
+        FulfillmentCaseEntity dispute = evidenceCase();
+        CaseRoomEntity room = evidenceRoom(dispute);
+        when(caseRepository.findByIdForUpdate(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.EVIDENCE))
+                .thenReturn(Optional.of(room));
+        when(memoryRepository.findMaxTurnNoByAgentSessionId(any()))
+                .thenReturn(0);
+        when(intakeDossierRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.INTAKE))
+                .thenReturn(Optional.empty());
+        when(evidenceItemRepository.findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(
+                        dispute.getId()))
+                .thenReturn(List.of());
+        when(memoryRepository.findTop50ByAgentSessionIdOrderByTurnNoDesc(any()))
+                .thenReturn(List.of());
+        when(memoryRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        AgentExecutionException mismatch =
+                new AgentExecutionException(
+                        ErrorCode.AGENT_OUTPUT_SCHEMA_INVALID,
+                        "contract mismatch",
+                        Map.of("http_status", 422));
+        when(client.run(any(), eq("TRACE_CONTRACT"), eq("REQ_CONTRACT")))
+                .thenThrow(mismatch);
+
+        assertThatThrownBy(
+                        () ->
+                                service.continueFromParticipantMessage(
+                                        dispute.getId(),
+                                        RoomType.EVIDENCE,
+                                        new AuthenticatedActor("user-local", ActorRole.USER),
+                                        new RoomMessageCommand(
+                                                MessageType.PARTY_TEXT,
+                                                "补充说明",
+                                                List.of()),
+                                        "MESSAGE_CONTRACT",
+                                        CLOCK.instant(),
+                                        "TRACE_CONTRACT",
+                                        "REQ_CONTRACT"))
+                .isSameAs(mismatch);
+        verify(messageRepository, never()).save(any());
     }
 
     private static CaseAccessSessionEntity accessSession(String caseId, AuthenticatedActor actor) {
@@ -1032,6 +1196,14 @@ class EvidenceAgentTurnServiceTest {
                 promptProfileId,
                 memoryPolicyId,
                 accessSession.getActorId());
+    }
+
+    private static void attachSessionScope(
+            RoomTurnMemoryEntity memory,
+            AgentConversationSessionEntity agentSession) {
+        ReflectionTestUtils.setField(memory, "agentSessionId", agentSession.getId());
+        ReflectionTestUtils.setField(
+                memory, "conversationScope", agentSession.getConversationScope());
     }
 
     private static EvidenceItemEntity evidenceItem(
