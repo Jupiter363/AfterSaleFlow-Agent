@@ -126,10 +126,6 @@ for (const viewport of compactViewports) {
         pageErrors,
         `${route.path} emitted page errors at ${viewport.width}px`,
       ).toEqual([]);
-      test.fail(
-        route.name === "outcome" && viewport.width === 320,
-        "Tracked by room-by-room rollout Task 5: Outcome still has a 320px width floor.",
-      );
       expect(
         report.scrollWidth <= report.viewportWidth + 1,
         `${route.path} overflowed at ${viewport.width}px:\n${JSON.stringify(

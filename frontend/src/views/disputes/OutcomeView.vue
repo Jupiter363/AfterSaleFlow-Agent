@@ -902,8 +902,29 @@ onBeforeUnmount(clearExecutionAssistantTimer);
 </template>
 
 <style scoped>
-.outcome-page { display: grid; gap: 14px; max-width: 1120px; margin: 0 auto; padding-bottom: 20px; }
+.outcome-page {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  gap: 14px;
+  box-sizing: border-box;
+  max-width: 1120px;
+  margin: 0 auto;
+  padding-bottom: 20px;
+}
+.outcome-page,
+.outcome-page * {
+  box-sizing: border-box;
+}
+.outcome-page :where(section, header, article, div, dl, ul, li, p, h1, h2, h3, span, strong, small, dt, dd, footer, label, input, select, textarea, button) {
+  min-width: 0;
+}
+.outcome-page :where(p, h1, h2, h3, span, strong, small, dt, dd, li, label, input, select, textarea, button) {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
 .outcome-hero {
+  min-width: 0;
   display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 16px; align-items: center;
   padding: 22px; background: linear-gradient(135deg, #e7f8ef, #eaf6ff 55%, #f1ebff);
   border: 1px solid #d7e8e4; border-radius: 28px;
@@ -917,13 +938,36 @@ onBeforeUnmount(clearExecutionAssistantTimer);
 .outcome-hero p { margin: 0; overflow-wrap: anywhere; color: #728097; }
 .outcome-hero__status { display: grid; gap: 5px; padding: 13px; color: #267251; background: #fff; border-radius: 16px; }
 .outcome-hero__status small { color: #7f8c9d; }
-.verdict-card { padding: 20px; background: #ffffffde; border: 1px solid #e1e8f1; border-radius: 24px; text-align: left; }
-.verdict-card h2 { margin: 9px 0; overflow-wrap: anywhere; word-break: break-word; color: #34445d; font-size: clamp(19px, 2.1vw, 26px); line-height: 1.45; }
-.verdict-card > p { max-width: none; margin: 0; overflow-wrap: anywhere; word-break: break-word; color: #64738a; line-height: 1.72; }
+.verdict-card { min-width: 0; padding: 20px; background: #ffffffde; border: 1px solid #e1e8f1; border-radius: 24px; text-align: left; }
+.verdict-card h2 {
+  max-height: 8.7em;
+  margin: 9px 0;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  color: #34445d;
+  font-size: clamp(19px, 2.1vw, 26px);
+  line-height: 1.45;
+  scrollbar-color: #c8d8e8 transparent;
+  scrollbar-width: thin;
+}
+.verdict-card > p {
+  max-width: none;
+  max-height: 10.4em;
+  margin: 0;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  color: #64738a;
+  line-height: 1.72;
+  scrollbar-color: #c8d8e8 transparent;
+  scrollbar-width: thin;
+}
 .verdict-card__review { margin-top: 10px !important; color: #526b86 !important; font-size: 12px; }
 .verdict-card__boundary { width: max-content; max-width: 100%; padding: 8px 12px; margin: 14px 0 0; color: #725f8d; background: #f1edff; border-radius: 999px; font-size: 11px; }
 .adjudication-draft-card {
   display: grid;
+  min-width: 0;
   gap: 16px;
   padding: 22px;
   background:
@@ -945,10 +989,15 @@ onBeforeUnmount(clearExecutionAssistantTimer);
 }
 .adjudication-draft-card header p {
   max-width: 760px;
+  max-height: 8.5em;
+  overflow: auto;
   margin: 0;
+  padding-right: 4px;
   color: #65758d;
   font-size: 13px;
   line-height: 1.7;
+  scrollbar-color: #c8d8e8 transparent;
+  scrollbar-width: thin;
 }
 .adjudication-draft-card dl {
   display: grid;
@@ -1033,6 +1082,7 @@ onBeforeUnmount(clearExecutionAssistantTimer);
 }
 .explanation-officer-card {
   display: grid;
+  min-width: 0;
   gap: 14px;
   padding: 22px;
   background:
@@ -1068,6 +1118,10 @@ onBeforeUnmount(clearExecutionAssistantTimer);
 }
 .explanation-officer-card article {
   min-width: 0;
+  max-height: 260px;
+  overflow: auto;
+  scrollbar-color: #c8d8e8 transparent;
+  scrollbar-width: thin;
   padding: 14px;
   background: #ffffffc8;
   border: 1px solid #dcefe3;
@@ -1092,6 +1146,7 @@ onBeforeUnmount(clearExecutionAssistantTimer);
 }
 .outcome-review-panel {
   display: grid;
+  min-width: 0;
   gap: 14px;
   padding: 22px;
   background:
@@ -1134,6 +1189,7 @@ onBeforeUnmount(clearExecutionAssistantTimer);
 }
 .review-plan-editor {
   display: grid;
+  min-width: 0;
   gap: 10px;
   padding: 13px;
   background: #ffffff9e;
@@ -1241,12 +1297,12 @@ onBeforeUnmount(clearExecutionAssistantTimer);
   font-size: 12px;
   font-weight: 900;
 }
-.execution-board { padding: 21px; background: #ffffffce; border: 1px solid #e1e8f1; border-radius: 28px; }
+.execution-board { min-width: 0; padding: 21px; background: #ffffffce; border: 1px solid #e1e8f1; border-radius: 28px; }
 .execution-board header { display: flex; justify-content: space-between; gap: 16px; }
 .execution-board h2 { margin: 5px 0; color: #34445d; }
 .execution-board header > span { height: max-content; padding: 6px 9px; color: #5a738f; background: #edf5fb; border-radius: 999px; font-size: 11px; }
 .execution-board__grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 15px; }
-.execution-board article { display: grid; grid-template-columns: auto 1fr auto; gap: 12px; padding: 15px; background: linear-gradient(145deg, #f8fbff, #fff); border: 1px solid #e3eaf2; border-radius: 18px; }
+.execution-board article { display: grid; min-width: 0; grid-template-columns: auto minmax(0, 1fr) auto; gap: 12px; padding: 15px; background: linear-gradient(145deg, #f8fbff, #fff); border: 1px solid #e3eaf2; border-radius: 18px; }
 .execution-receipt__step { display: grid; place-items: center; width: 34px; height: 34px; color: #fff; background: #7f8fe0; border-radius: 11px; font-weight: 900; }
 .execution-board article span { color: #7a889c; font-size: 10px; }
 .execution-board article h3 { margin: 4px 0; color: #405069; }
@@ -1329,7 +1385,7 @@ onBeforeUnmount(clearExecutionAssistantTimer);
   to { transform: rotate(360deg); }
 }
 .execution-board__empty { padding: 35px; color: #8290a3; text-align: center; }
-.outcome-footer { display: flex; justify-content: space-between; gap: 20px; align-items: center; padding: 17px 20px; background: #fff5dc; border: 1px solid #efdfb8; border-radius: 20px; }
+.outcome-footer { display: flex; min-width: 0; justify-content: space-between; gap: 20px; align-items: center; padding: 17px 20px; background: #fff5dc; border: 1px solid #efdfb8; border-radius: 20px; }
 .outcome-footer div { display: flex; gap: 10px; align-items: center; color: #6f665f; }
 .outcome-footer p { margin: 0; }
 .outcome-footer button { padding: 10px 14px; color: white; background: linear-gradient(135deg, #5dbb92, #5aa8c9); border: 0; border-radius: 12px; cursor: pointer; font-weight: 800; }
@@ -1355,6 +1411,7 @@ onBeforeUnmount(clearExecutionAssistantTimer);
   .verdict-card,
   .adjudication-draft-card,
   .explanation-officer-card,
+  .outcome-review-panel,
   .execution-board {
     padding: 16px;
     border-radius: 22px;
@@ -1378,6 +1435,11 @@ onBeforeUnmount(clearExecutionAssistantTimer);
   }
   .execution-board__empty { padding: 26px 12px; }
   .execution-board__grid { grid-template-columns: 1fr; }
+  .execution-board header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 8px;
+  }
   .outcome-footer { align-items: stretch; flex-direction: column; }
 }
 @media (max-width: 520px) {
@@ -1386,9 +1448,21 @@ onBeforeUnmount(clearExecutionAssistantTimer);
     grid-template-columns: 1fr;
   }
   .explanation-officer-card__body article:last-child { grid-column: auto; }
+  .outcome-review-panel header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .review-plan-editor__actions article {
+    grid-template-columns: 1fr;
+  }
 }
 @media (max-width: 460px) {
   .adjudication-draft-card dl { grid-template-columns: 1fr; }
   .explanation-officer-card header { align-items: start; flex-direction: column; }
+  .execution-result div { grid-template-columns: minmax(0, .44fr) minmax(0, 1fr); }
+  .execution-board article { gap: 8px; padding: 12px; }
+  .execution-receipt__step { width: 30px; height: 30px; }
+  .execution-board article > i { width: 24px; height: 24px; }
 }
 </style>
