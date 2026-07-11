@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 import {
   CASE_ID,
   LONG_FILENAME,
+  LONG_UNBROKEN_TEXT,
   installEvidenceRoomFixture,
 } from "./fixtures/evidence-room.fixture.js";
 
@@ -64,39 +65,110 @@ async function openEvidenceRoom(page, options = {}) {
   await expect(page.locator("[data-evidence-board-panel]")).toBeVisible();
 }
 
-test("switches columns at 1120/1119px of actual workspace width", async ({
+async function assertEvidenceGeometry(page, expectedColumns) {
+  const room = page.locator("[data-evidence-room-layout]");
+  const chat = page.locator("[data-evidence-chat-panel]");
+  const board = page.locator("[data-evidence-board-panel]");
+  const list = page.locator("[data-evidence-list-scroll]");
+  const uploader = page.locator(".evidence-uploader");
+  const uploadButton = uploader.locator(".evidence-uploader__button");
+  const footer = page.locator(".evidence-footer");
+  const completeButton = page.locator("[data-complete-evidence]");
+
+  await expect(chat).toHaveCSS("height", "740px");
+  await expect(board).toHaveCSS("height", "740px");
+  expect(
+    gridTrackCount(
+      await room.evaluate(
+        (element) => getComputedStyle(element).gridTemplateColumns,
+      ),
+    ),
+  ).toBe(expectedColumns);
+  expect(
+    await list.evaluate(
+      (element) => element.scrollHeight > element.clientHeight + 1,
+    ),
+  ).toBe(true);
+  await expect(uploader).toBeVisible();
+  await expect(uploadButton).toBeVisible();
+  await expect(completeButton).toBeVisible();
+  await assertInside(list, board);
+  await assertInside(uploader, board);
+  await assertInside(uploadButton, uploader);
+  await assertInside(footer, board);
+
+  const scrollingRegions = await board.evaluate((element) =>
+    [...element.querySelectorAll("*")]
+      .filter((candidate) => {
+        const style = getComputedStyle(candidate);
+        return (
+          ["auto", "scroll"].includes(style.overflowY) &&
+          candidate.scrollHeight > candidate.clientHeight + 1
+        );
+      })
+      .map((candidate) => candidate.className),
+  );
+  expect(scrollingRegions).toEqual(["evidence-board__list"]);
+  await assertNoDocumentHorizontalOverflow(page);
+}
+
+test("switches columns at 1060/1059px of actual workspace width", async ({
   page,
 }) => {
-  await openEvidenceRoom(page, { role: "USER", count: 8 });
+  await openEvidenceRoom(page, { role: "USER", count: 100 });
   const workspace = page.locator(".room-shell__workspace");
-  const room = page.locator("[data-evidence-room-layout]");
 
-  await page.addStyleTag({ content: ".app-page{width:1120px!important}" });
+  await page.addStyleTag({ content: ".app-page{width:1060px!important}" });
   await expect
     .poll(() => workspace.evaluate((element) => element.clientWidth))
-    .toBe(1120);
-  expect(
-    gridTrackCount(
-      await room.evaluate(
-        (element) => getComputedStyle(element).gridTemplateColumns,
-      ),
-    ),
-  ).toBe(2);
+    .toBe(1060);
+  await assertEvidenceGeometry(page, 2);
 
-  await page.addStyleTag({ content: ".app-page{width:1119px!important}" });
+  await page.addStyleTag({ content: ".app-page{width:1059px!important}" });
   await expect
     .poll(() => workspace.evaluate((element) => element.clientWidth))
-    .toBe(1119);
-  expect(
-    gridTrackCount(
-      await room.evaluate(
-        (element) => getComputedStyle(element).gridTemplateColumns,
-      ),
-    ),
-  ).toBe(1);
-  await assertNoDocumentHorizontalOverflow(page);
+    .toBe(1059);
+  await assertEvidenceGeometry(page, 1);
 });
 
+for (const [index, viewport] of [
+  { width: 1121, height: 900 },
+  { width: 1120, height: 900 },
+  { width: 1061, height: 900 },
+  { width: 1060, height: 900 },
+  { width: 981, height: 900 },
+  { width: 980, height: 900 },
+  { width: 581, height: 843 },
+  { width: 580, height: 843 },
+  { width: 390, height: 844 },
+  { width: 320, height: 568 },
+  { width: 1024, height: 600 },
+].entries()) {
+  test(`keeps fixed evidence geometry and actions at ${viewport.width}x${viewport.height}`, async ({
+    page,
+  }) => {
+    await page.setViewportSize(viewport);
+    await openEvidenceRoom(page, {
+      role: index % 2 === 0 ? "USER" : "MERCHANT",
+      count: 100,
+    });
+
+    const workspaceWidth = await page
+      .locator(".room-shell__workspace")
+      .evaluate((element) => element.clientWidth);
+    await assertEvidenceGeometry(page, workspaceWidth >= 1060 ? 2 : 1);
+
+    if (viewport.height === 600) {
+      expect(
+        await page.evaluate(
+          () =>
+            document.documentElement.scrollHeight >
+            document.documentElement.clientHeight,
+        ),
+      ).toBe(true);
+    }
+  });
+}
 for (const role of ["USER", "MERCHANT"]) {
   test(`keeps 100 ${role} evidence cards in the sole right-board scroll rail`, async ({
     page,
@@ -210,11 +282,15 @@ for (const scenario of [
     await firstCard.click();
     const modal = page.locator("[data-evidence-detail-modal]");
     const panel = modal.locator(".evidence-modal__panel");
+    const longParagraphs = modal.locator("article p");
     const filenameFact = modal
       .locator(".evidence-modal__facts span")
       .filter({ hasText: "原始文件：" });
     await expect(modal).toBeVisible();
     await expect(filenameFact).toContainText(LONG_FILENAME);
+    await expect(longParagraphs).toHaveCount(2);
+    await expect(longParagraphs.nth(0)).toContainText(LONG_UNBROKEN_TEXT);
+    await expect(longParagraphs.nth(1)).toContainText(LONG_UNBROKEN_TEXT);
     expect(
       await panel.evaluate(
         (element) => element.scrollWidth <= element.clientWidth + 1,
@@ -225,6 +301,18 @@ for (const scenario of [
         (element) => element.scrollWidth <= element.clientWidth + 1,
       ),
     ).toBe(true);
+    expect(
+      await modal.evaluate(
+        (element) => element.scrollWidth <= element.clientWidth + 1,
+      ),
+    ).toBe(true);
+    for (const paragraph of await longParagraphs.all()) {
+      expect(
+        await paragraph.evaluate(
+          (element) => element.scrollWidth <= element.clientWidth + 1,
+        ),
+      ).toBe(true);
+    }
     await assertNoDocumentHorizontalOverflow(page);
   });
 }

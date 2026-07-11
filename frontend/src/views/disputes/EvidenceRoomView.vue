@@ -1968,9 +1968,13 @@ onBeforeUnmount(() => eventAbortController.abort());
 }
 
 .evidence-modal__panel p {
+  min-width: 0;
   margin: 0;
   color: #66758d;
   line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .evidence-modal__panel button,
@@ -2014,7 +2018,7 @@ onBeforeUnmount(() => eventAbortController.abort());
   color: #33435c;
 }
 
-@container room-workspace (max-width: 1119px) {
+@container room-workspace (max-width: 1059px) {
   .evidence-room { grid-template-columns: 1fr; }
 }
 

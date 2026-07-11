@@ -238,10 +238,13 @@ describe("EvidenceRoomView", () => {
       /\.evidence-library\s*\{[^}]*overflow(?:-y)?:\s*(?:auto|scroll)/s,
     );
     expect(evidenceRoomSource).toMatch(
+      /@container room-workspace \(max-width: 1059px\)/,
+    );
+    expect(evidenceRoomSource).not.toMatch(
       /@container room-workspace \(max-width: 1119px\)/,
     );
-    expect(evidenceRoomSource).not.toMatch(/@media \(max-width: 1119px\)/);
-    expect(evidenceRoomSource).not.toMatch(/@media \(max-width: 1120px\)/);
+    expect(evidenceRoomSource).not.toMatch(/@media \(max-width: 1059px\)/);
+    expect(evidenceRoomSource).not.toMatch(/@media \(max-width: 1060px\)/);
     expect(evidenceRoomSource).toMatch(/@media \(max-width: 360px\)/);
     expect(evidenceRoomSource).toMatch(
       /grid-template-rows:\s*88px 96px minmax\(0, 1fr\) 72px/,
@@ -326,6 +329,9 @@ describe("EvidenceRoomView", () => {
     );
     expect(evidenceRoomSource).toMatch(
       /\.evidence-modal__panel h2\s*\{[^}]*overflow-wrap:\s*anywhere[^}]*word-break:\s*break-word/s,
+    );
+    expect(evidenceRoomSource).toMatch(
+      /\.evidence-modal__panel p\s*\{[^}]*min-width:\s*0[^}]*white-space:\s*pre-wrap[^}]*overflow-wrap:\s*anywhere[^}]*word-break:\s*break-word/s,
     );
   });
 

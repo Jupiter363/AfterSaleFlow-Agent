@@ -2,6 +2,7 @@ import { expect } from "@playwright/test";
 
 export const CASE_ID = "CASE_EVIDENCE_LAYOUT";
 export const LONG_FILENAME = `${"F".repeat(196)}.pdf`;
+export const LONG_UNBROKEN_TEXT = "OCRTOKEN".repeat(30);
 
 const actors = {
   USER: { id: "user-local", role: "USER", label: "用户" },
@@ -34,10 +35,13 @@ function buildEvidenceCatalog({
           index % 3 === 0 ? "NEEDS_HUMAN_REVIEW" : "VERIFIED",
         confidence_score: index % 4 === 0 ? 0.62 : 0.91,
         confidence_level: index % 4 === 0 ? "MEDIUM" : "HIGH",
-        verification_feedback: repeatToLength(
-          `第${sequence}份证据的来源完整性、形成时间、提交主体与争议事实关联性仍需逐项核验。`,
-          220,
-        ),
+        verification_feedback:
+          index === 0
+            ? LONG_UNBROKEN_TEXT
+            : repeatToLength(
+                `第${sequence}份证据的来源完整性、形成时间、提交主体与争议事实关联性仍需逐项核验。`,
+                220,
+              ),
         original_filename:
           index === 0
             ? LONG_FILENAME
@@ -45,10 +49,13 @@ function buildEvidenceCatalog({
         submission_status: "SUBMITTED",
         submitted_at: `2026-07-11T10:${String(sequence % 60).padStart(2, "0")}:00+08:00`,
         submission_batch_id: `BATCH_${role}_${sequence}`,
-        parsed_text: repeatToLength(
-          `证据${sequence}的解析文本用于确定性浏览器布局测试。`,
-          120,
-        ),
+        parsed_text:
+          index === 0
+            ? LONG_UNBROKEN_TEXT
+            : repeatToLength(
+                `证据${sequence}的解析文本用于确定性浏览器布局测试。`,
+                120,
+              ),
       };
     }),
   };
