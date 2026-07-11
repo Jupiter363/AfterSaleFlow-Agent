@@ -44,3 +44,20 @@ export async function markAllNotificationsRead(actor) {
   notificationStore.unreadCount = 0;
   return result;
 }
+
+export async function deleteNotification(actor, notificationId) {
+  const existing = notificationStore.items.data.find(
+    (item) => item.id === notificationId,
+  );
+  const result = await notificationApi.dismiss(actor, notificationId);
+  notificationStore.items.data = notificationStore.items.data.filter(
+    (item) => item.id !== notificationId,
+  );
+  if (existing && !existing.read) {
+    notificationStore.unreadCount = Math.max(
+      0,
+      notificationStore.unreadCount - 1,
+    );
+  }
+  return result;
+}

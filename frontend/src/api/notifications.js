@@ -11,4 +11,8 @@ export const notificationApi = {
     apiRequest("/notifications/read-all", actor, {
       method: "POST",
     }),
+  dismiss: (actor, notificationId) =>
+    apiRequest(`/notifications/${encodeURIComponent(notificationId)}`, actor, {
+      method: "DELETE",
+    }),
 };

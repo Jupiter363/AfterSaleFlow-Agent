@@ -66,4 +66,27 @@ describe("notification API", () => {
       expect.objectContaining({ method: "POST" }),
     );
   });
+
+  it("deletes one notification from the current actor's inbox", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        success: true,
+        data: { notification_id: "NOTICE_1", deleted: true },
+      }),
+    });
+
+    await notificationApi.dismiss(actor, "NOTICE_1");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/notifications/NOTICE_1",
+      expect.objectContaining({
+        method: "DELETE",
+        headers: expect.objectContaining({
+          "X-Role": "USER",
+          "X-User-Id": "user-local",
+        }),
+      }),
+    );
+  });
 });

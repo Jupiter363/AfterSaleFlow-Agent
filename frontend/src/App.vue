@@ -3,12 +3,15 @@ import {
   computed,
   onBeforeUnmount,
   onMounted,
+  ref,
   watch,
 } from "vue";
+import { ElMessage } from "element-plus";
 import { useRoute, useRouter } from "vue-router";
 import SummonsMailbox from "./components/notification/SummonsMailbox.vue";
 import { actor, demoActors, switchDemoActor } from "./state/actor";
 import {
+  deleteNotification,
   loadNotifications,
   markAllNotificationsRead,
   markNotificationRead,
@@ -22,6 +25,7 @@ const notices = computed(() => notificationStore.items.data || []);
 const noticeError = computed(
   () => notificationStore.items.error?.message || "",
 );
+const deletingNotificationIds = ref([]);
 let notificationTimer;
 
 async function refreshNotifications() {
@@ -38,6 +42,23 @@ async function markRead(notificationId) {
 
 async function markAllRead() {
   await markAllNotificationsRead(actor);
+}
+
+async function deleteNotice(notificationId) {
+  if (deletingNotificationIds.value.includes(notificationId)) return;
+  deletingNotificationIds.value = [
+    ...deletingNotificationIds.value,
+    notificationId,
+  ];
+  try {
+    await deleteNotification(actor, notificationId);
+  } catch (error) {
+    ElMessage.error(error?.message || "通知删除失败，请稍后重试");
+  } finally {
+    deletingNotificationIds.value = deletingNotificationIds.value.filter(
+      (id) => id !== notificationId,
+    );
+  }
 }
 
 async function switchIdentity(role) {
@@ -104,11 +125,13 @@ onBeforeUnmount(() => window.clearInterval(notificationTimer));
         </div>
         <SummonsMailbox
           :notifications="notices"
+          :deleting-notification-ids="deletingNotificationIds"
           :loading="notificationStore.items.status === 'loading'"
           :error="noticeError"
           @open-notification="openNotification"
           @mark-read="markRead"
           @mark-all-read="markAllRead"
+          @delete-notification="deleteNotice"
         />
       </div>
     </header>

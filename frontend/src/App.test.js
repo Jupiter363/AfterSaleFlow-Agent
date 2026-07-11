@@ -18,6 +18,7 @@ vi.mock("./stores/notification", () => ({
   loadNotifications: vi.fn(() => Promise.resolve()),
   markAllNotificationsRead: vi.fn(() => Promise.resolve()),
   markNotificationRead: vi.fn(() => Promise.resolve()),
+  deleteNotification: vi.fn(() => Promise.resolve()),
 }));
 
 async function mountApp() {

@@ -12,6 +12,7 @@ import java.time.Instant;
 import java.util.List;
 import org.springframework.security.core.Authentication;
 import org.springframework.validation.annotation.Validated;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -67,6 +68,19 @@ public class NotificationController {
                 request);
     }
 
+    @DeleteMapping("/{notificationId}")
+    public ApiResponse<DeletedNotificationView> dismiss(
+            @PathVariable
+                    @Pattern(regexp = "NOTICE_[A-Za-z0-9]{1,58}")
+                    String notificationId,
+            Authentication authentication,
+            HttpServletRequest request) {
+        service.dismiss(notificationId, actor(authentication));
+        return response(
+                new DeletedNotificationView(notificationId, true),
+                request);
+    }
+
     private <T> ApiResponse<T> response(T data, HttpServletRequest request) {
         String traceId = correlationId(request, TraceIdFilter.TRACE_ATTRIBUTE);
         String requestId = correlationId(request, TraceIdFilter.REQUEST_ATTRIBUTE);
@@ -88,4 +102,6 @@ public class NotificationController {
     public record UnreadCountView(long unreadCount) {}
 
     public record MarkedCountView(long markedCount) {}
+
+    public record DeletedNotificationView(String notificationId, boolean deleted) {}
 }

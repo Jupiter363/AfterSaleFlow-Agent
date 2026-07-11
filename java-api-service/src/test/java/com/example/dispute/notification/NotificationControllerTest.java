@@ -3,6 +3,8 @@ package com.example.dispute.notification;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.verify;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -81,6 +83,32 @@ class NotificationControllerTest {
                                 .header(HeaderAuthenticationFilter.ROLE_HEADER, "MERCHANT"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.marked_count").value(2));
+    }
+
+    @Test
+    void allowsEveryInboxRoleToDismissOnlyThroughItsAuthenticatedActor() throws Exception {
+        String[][] actors = {
+            {"user-local", "USER"},
+            {"merchant-local", "MERCHANT"},
+            {"reviewer-local", "PLATFORM_REVIEWER"}
+        };
+
+        for (String[] actor : actors) {
+            mockMvc.perform(
+                            delete("/api/notifications/NOTICE_1")
+                                    .header(
+                                            HeaderAuthenticationFilter.USER_ID_HEADER,
+                                            actor[0])
+                                    .header(
+                                            HeaderAuthenticationFilter.ROLE_HEADER,
+                                            actor[1]))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.data.notification_id").value("NOTICE_1"))
+                    .andExpect(jsonPath("$.data.deleted").value(true));
+        }
+
+        verify(service, org.mockito.Mockito.times(3))
+                .dismiss(eq("NOTICE_1"), any());
     }
 
     private static NotificationView view(boolean read) {

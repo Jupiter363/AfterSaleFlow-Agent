@@ -1,6 +1,7 @@
 package com.example.dispute.notification;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -126,7 +127,7 @@ class NotificationServiceTest {
                         "/disputes/CASE_1/evidence",
                         "{}",
                         Instant.parse("2026-07-03T00:00:00Z"));
-        when(notificationRepository.findByIdAndRecipientId(
+        when(notificationRepository.findByIdAndRecipientIdAndDismissedAtIsNull(
                         "NOTICE_1", "merchant-local"))
                 .thenReturn(Optional.of(existing));
 
@@ -157,8 +158,9 @@ class NotificationServiceTest {
                         "CASE_1:hearing-opened",
                         "merchant-local");
         alreadyRead.markRead(Instant.parse("2026-07-02T23:00:00Z"));
-        when(notificationRepository.findAllByRecipientIdOrderByCreatedAtDesc(
-                        "merchant-local"))
+        when(notificationRepository
+                        .findAllByRecipientIdAndDismissedAtIsNullOrderByCreatedAtDesc(
+                                "merchant-local"))
                 .thenReturn(List.of(unread, alreadyRead));
         when(notificationRepository.saveAll(any()))
                 .thenAnswer(invocation -> invocation.getArgument(0));
@@ -174,6 +176,44 @@ class NotificationServiceTest {
         assertThat(alreadyRead.getReadAt())
                 .isEqualTo(Instant.parse("2026-07-02T23:00:00Z"));
         verify(notificationRepository).saveAll(List.of(unread));
+    }
+
+    @Test
+    void dismissesOnlyTheCurrentRecipientsOwnNotification() {
+        NotificationEntity own =
+                notification(
+                        "NOTICE_1",
+                        "CASE_1:hearing-opened",
+                        "user-local");
+        when(notificationRepository.findByIdAndRecipientIdAndDismissedAtIsNull(
+                        "NOTICE_1", "user-local"))
+                .thenReturn(Optional.of(own));
+
+        service.dismiss(
+                "NOTICE_1",
+                new AuthenticatedActor("user-local", ActorRole.USER));
+
+        assertThat(own.getDismissedAt())
+                .isEqualTo(Instant.parse("2026-07-03T00:00:00Z"));
+        verify(notificationRepository).save(own);
+    }
+
+    @Test
+    void doesNotExposeAnotherRecipientsNotificationForDeletion() {
+        when(notificationRepository.findByIdAndRecipientIdAndDismissedAtIsNull(
+                        "NOTICE_1", "merchant-local"))
+                .thenReturn(Optional.empty());
+
+        assertThatThrownBy(
+                        () ->
+                                service.dismiss(
+                                        "NOTICE_1",
+                                        new AuthenticatedActor(
+                                                "merchant-local",
+                                                ActorRole.MERCHANT)))
+                .hasMessageContaining("notification not visible");
+
+        verify(notificationRepository, never()).save(any());
     }
 
     private static NotificationEntity notification(

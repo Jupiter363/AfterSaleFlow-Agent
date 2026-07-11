@@ -6,12 +6,14 @@ const props = defineProps({
   loading: { type: Boolean, default: false },
   error: { type: String, default: "" },
   defaultOpen: { type: Boolean, default: false },
+  deletingNotificationIds: { type: Array, default: () => [] },
 });
 
 const emit = defineEmits([
   "open-notification",
   "mark-read",
   "mark-all-read",
+  "delete-notification",
 ]);
 const open = ref(props.defaultOpen);
 const unreadCount = computed(
@@ -21,6 +23,10 @@ const unreadCount = computed(
 function select(item) {
   if (!item.read) emit("mark-read", item.id);
   emit("open-notification", item);
+}
+
+function isDeleting(notificationId) {
+  return props.deletingNotificationIds.includes(notificationId);
 }
 
 function displayTime(value) {
@@ -96,26 +102,42 @@ function shortId(value) {
         <small>案件状态变化时，盖章传票会出现在这里。</small>
       </div>
       <div v-else class="summons-mailbox__list">
-        <button
+        <article
           v-for="item in notifications"
           :key="item.id"
-          type="button"
           class="summons-mailbox__notice"
           :class="{ 'summons-mailbox__notice--unread': !item.read }"
           :data-notification-id="item.id"
-          @click="select(item)"
         >
-          <span class="summons-mailbox__stamp" aria-hidden="true">传</span>
-          <span class="summons-mailbox__notice-copy">
-            <span class="summons-mailbox__notice-meta">
-              <small data-case-label :title="item.case_id">{{ shortId(item.case_id) }}</small>
-              <time>{{ displayTime(item.created_at) }}</time>
+          <button
+            type="button"
+            class="summons-mailbox__notice-main"
+            data-open-notification
+            @click="select(item)"
+          >
+            <span class="summons-mailbox__stamp" aria-hidden="true">传</span>
+            <span class="summons-mailbox__notice-copy">
+              <span class="summons-mailbox__notice-meta">
+                <small data-case-label :title="item.case_id">{{ shortId(item.case_id) }}</small>
+                <time>{{ displayTime(item.created_at) }}</time>
+              </span>
+              <strong>{{ item.title }}</strong>
+              <span>{{ item.body }}</span>
+              <small class="summons-mailbox__deep-link">进入对应房间 →</small>
             </span>
-            <strong>{{ item.title }}</strong>
-            <span>{{ item.body }}</span>
-            <small class="summons-mailbox__deep-link">进入对应房间 →</small>
-          </span>
-        </button>
+          </button>
+          <button
+            type="button"
+            class="summons-mailbox__delete"
+            :aria-label="`删除通知：${item.title}`"
+            :disabled="isDeleting(item.id)"
+            :data-delete-notification="item.id"
+            @click="emit('delete-notification', item.id)"
+          >
+            <span v-if="isDeleting(item.id)" aria-hidden="true">…</span>
+            <span v-else aria-hidden="true">×</span>
+          </button>
+        </article>
       </div>
     </aside>
   </div>
@@ -221,16 +243,46 @@ function shortId(value) {
 .summons-mailbox__list { display: grid; gap: 12px; }
 .summons-mailbox__notice {
   display: grid;
-  grid-template-columns: 42px 1fr;
-  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) 34px;
+  gap: 6px;
   width: 100%;
-  padding: 15px;
-  text-align: left;
   color: inherit;
   background: #ffffffc9;
   border: 1px solid #e2e8f2;
   border-radius: 20px;
+  overflow: hidden;
+}
+.summons-mailbox__notice-main {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  gap: 12px;
+  min-width: 0;
+  padding: 15px 4px 15px 15px;
+  text-align: left;
+  color: inherit;
+  background: transparent;
+  border: 0;
   cursor: pointer;
+}
+.summons-mailbox__delete {
+  align-self: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  color: #8a6670;
+  background: #fff0f1;
+  border: 1px solid #f2d6d9;
+  border-radius: 50%;
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+}
+.summons-mailbox__delete:hover { color: #b44552; background: #ffe5e7; }
+.summons-mailbox__delete:disabled { cursor: wait; opacity: .58; }
+.summons-mailbox__delete:focus-visible,
+.summons-mailbox__notice-main:focus-visible {
+  outline: 2px solid #58aaf0;
+  outline-offset: -2px;
 }
 .summons-mailbox__notice--unread {
   background: #fff;

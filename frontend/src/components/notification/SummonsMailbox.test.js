@@ -41,7 +41,9 @@ describe("SummonsMailbox", () => {
       "CASE_adcb56b853f248cd8c0cbfed4a2daf8a",
     );
 
-    await wrapper.get('[data-notification-id="NOTICE_1"]').trigger("click");
+    await wrapper
+      .get('[data-notification-id="NOTICE_1"] [data-open-notification]')
+      .trigger("click");
 
     expect(wrapper.emitted("open-notification")?.[0]?.[0]).toEqual(
       notifications[0],
@@ -50,6 +52,30 @@ describe("SummonsMailbox", () => {
 
     await wrapper.get("[data-mark-all-read]").trigger("click");
     expect(wrapper.emitted("mark-all-read")).toHaveLength(1);
+
+    await wrapper.get('[data-delete-notification="NOTICE_1"]').trigger("click");
+    expect(wrapper.emitted("delete-notification")?.[0]).toEqual(["NOTICE_1"]);
+  });
+
+  it("disables only the notification currently being deleted", () => {
+    const wrapper = mount(SummonsMailbox, {
+      props: {
+        notifications,
+        defaultOpen: true,
+        deletingNotificationIds: ["NOTICE_1"],
+      },
+    });
+
+    expect(
+      wrapper.get('[data-delete-notification="NOTICE_1"]').attributes(
+        "disabled",
+      ),
+    ).toBeDefined();
+    expect(
+      wrapper.get('[data-delete-notification="NOTICE_2"]').attributes(
+        "disabled",
+      ),
+    ).toBeUndefined();
   });
 
   it("renders loading, empty and error states", async () => {

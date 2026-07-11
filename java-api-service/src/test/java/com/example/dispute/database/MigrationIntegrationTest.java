@@ -54,7 +54,7 @@ class MigrationIntegrationTest {
         MigrateResult first = flyway.migrate();
         MigrateResult second = flyway.migrate();
 
-        assertThat(first.migrationsExecuted).isEqualTo(28);
+        assertThat(first.migrationsExecuted).isEqualTo(29);
         assertThat(second.migrationsExecuted).isZero();
 
         try (Connection connection =
@@ -143,6 +143,8 @@ class MigrationIntegrationTest {
                                     "action_record",
                                     "external_result_ref"))
                     .isEqualTo("character varying");
+            assertThat(columnType(connection, "notification", "dismissed_at"))
+                    .isEqualTo("timestamp with time zone");
             assertThat(numericDefinition(connection, "remedy_plan", "total_amount"))
                     .isEqualTo("18:2");
             assertThat(loadIndexes(connection))
@@ -162,6 +164,7 @@ class MigrationIntegrationTest {
                             "uq_case_room_type",
                             "uq_settlement_confirmation_role",
                             "uq_notification_business_recipient",
+                            "idx_notification_recipient_visible",
                             "uq_agent_a2a_jury_review_report");
             assertThat(
                             countRows(

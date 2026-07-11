@@ -10,9 +10,13 @@ public interface NotificationRepository extends JpaRepository<NotificationEntity
     Optional<NotificationEntity> findByBusinessEventKeyAndRecipientId(
             String businessEventKey, String recipientId);
 
-    Optional<NotificationEntity> findByIdAndRecipientId(String id, String recipientId);
+    Optional<NotificationEntity> findByIdAndRecipientIdAndDismissedAtIsNull(
+            String id, String recipientId);
 
     List<NotificationEntity> findAllByRecipientIdOrderByCreatedAtDesc(String recipientId);
 
-    long countByRecipientIdAndReadAtIsNull(String recipientId);
+    List<NotificationEntity> findAllByRecipientIdAndDismissedAtIsNullOrderByCreatedAtDesc(
+            String recipientId);
+
+    long countByRecipientIdAndReadAtIsNullAndDismissedAtIsNull(String recipientId);
 }

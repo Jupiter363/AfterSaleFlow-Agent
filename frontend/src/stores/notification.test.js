@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { notificationApi } from "../api/notifications";
 import {
+  deleteNotification,
   loadNotifications,
   markAllNotificationsRead,
   mergeNotification,
@@ -57,6 +58,29 @@ describe("notification event merge", () => {
 
     expect(result).toEqual({ marked_count: 1 });
     expect(notificationStore.items.data.every((item) => item.read)).toBe(true);
+    expect(notificationStore.unreadCount).toBe(0);
+  });
+
+  it("removes a deleted unread notification without touching other inbox items", async () => {
+    notificationStore.items.data = [
+      { id: "NOTICE_1", read: false },
+      { id: "NOTICE_2", read: true },
+    ];
+    notificationStore.unreadCount = 1;
+    vi.spyOn(notificationApi, "dismiss").mockResolvedValue({
+      notification_id: "NOTICE_1",
+      deleted: true,
+    });
+
+    const result = await deleteNotification(
+      { id: "reviewer-local", role: "PLATFORM_REVIEWER" },
+      "NOTICE_1",
+    );
+
+    expect(result.deleted).toBe(true);
+    expect(notificationStore.items.data).toEqual([
+      { id: "NOTICE_2", read: true },
+    ]);
     expect(notificationStore.unreadCount).toBe(0);
   });
 });

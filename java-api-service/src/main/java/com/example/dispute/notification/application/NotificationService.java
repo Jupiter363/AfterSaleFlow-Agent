@@ -42,7 +42,9 @@ public class NotificationService {
 
     @Transactional(readOnly = true)
     public List<NotificationView> list(AuthenticatedActor actor) {
-        return repository.findAllByRecipientIdOrderByCreatedAtDesc(actor.actorId())
+        return repository
+                .findAllByRecipientIdAndDismissedAtIsNullOrderByCreatedAtDesc(
+                        actor.actorId())
                 .stream()
                 .map(NotificationService::view)
                 .toList();
@@ -50,14 +52,16 @@ public class NotificationService {
 
     @Transactional(readOnly = true)
     public long unreadCount(AuthenticatedActor actor) {
-        return repository.countByRecipientIdAndReadAtIsNull(actor.actorId());
+        return repository.countByRecipientIdAndReadAtIsNullAndDismissedAtIsNull(
+                actor.actorId());
     }
 
     @Transactional
     public NotificationView markRead(String notificationId, AuthenticatedActor actor) {
         NotificationEntity entity =
                 repository
-                        .findByIdAndRecipientId(notificationId, actor.actorId())
+                        .findByIdAndRecipientIdAndDismissedAtIsNull(
+                                notificationId, actor.actorId())
                         .orElseThrow(
                                 () ->
                                         new NotFoundException(
@@ -75,7 +79,9 @@ public class NotificationService {
     public long markAllRead(AuthenticatedActor actor) {
         Instant now = clock.instant();
         List<NotificationEntity> unread =
-                repository.findAllByRecipientIdOrderByCreatedAtDesc(actor.actorId())
+                repository
+                        .findAllByRecipientIdAndDismissedAtIsNullOrderByCreatedAtDesc(
+                                actor.actorId())
                         .stream()
                         .filter(entity -> entity.getReadAt() == null)
                         .peek(entity -> entity.markRead(now))
@@ -84,6 +90,24 @@ public class NotificationService {
             repository.saveAll(unread);
         }
         return unread.size();
+    }
+
+    @Transactional
+    public void dismiss(String notificationId, AuthenticatedActor actor) {
+        NotificationEntity entity =
+                repository
+                        .findByIdAndRecipientIdAndDismissedAtIsNull(
+                                notificationId, actor.actorId())
+                        .orElseThrow(
+                                () ->
+                                        new NotFoundException(
+                                                ErrorCode.CASE_NOT_FOUND,
+                                                "notification not visible",
+                                                Map.of(
+                                                        "notification_id",
+                                                        notificationId)));
+        entity.dismiss(clock.instant());
+        repository.save(entity);
     }
 
     private NotificationView create(NotificationCommand command) {

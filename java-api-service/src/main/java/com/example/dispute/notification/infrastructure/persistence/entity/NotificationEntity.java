@@ -50,6 +50,9 @@ public class NotificationEntity extends AbstractEntity {
     @Column(name = "read_at")
     private Instant readAt;
 
+    @Column(name = "dismissed_at")
+    private Instant dismissedAt;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 
@@ -96,6 +99,12 @@ public class NotificationEntity extends AbstractEntity {
         }
     }
 
+    public void dismiss(Instant now) {
+        if (dismissedAt == null) {
+            dismissedAt = Objects.requireNonNull(now, "now must not be null");
+        }
+    }
+
     public String getCaseId() {
         return caseId;
     }
@@ -130,6 +139,10 @@ public class NotificationEntity extends AbstractEntity {
 
     public Instant getReadAt() {
         return readAt;
+    }
+
+    public Instant getDismissedAt() {
+        return dismissedAt;
     }
 
     public Instant getCreatedAt() {
