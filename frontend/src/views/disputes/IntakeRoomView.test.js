@@ -335,7 +335,12 @@ describe("IntakeRoomView", () => {
     expect(wrapper.text()).not.toContain("NEED_MORE_INFO");
     expect(wrapper.text()).not.toContain("product_issue_details");
     expect(wrapper.text()).not.toContain("Broken watch quality issue");
-    expect(wrapper.text()).not.toContain("The user reports");
+    expect(wrapper.get("[data-dispute-detail-summary]").text()).not.toContain(
+      "The user reports",
+    );
+    expect(wrapper.get("[data-origin-statement-text]").attributes("title")).toBe(
+      "The user reports that the watch is broken. No additional details or evidence provided.",
+    );
   });
 
   it("renders the current case-detail dossier as the right-side board", async () => {
@@ -556,6 +561,107 @@ describe("IntakeRoomView", () => {
     expect(wrapper.find("[data-case-claim-status]").exists()).toBe(false);
     expect(wrapper.text()).not.toContain("REFUND");
     expect(wrapper.text()).not.toContain("NOT_RESPONDED");
+  });
+
+  it("marks an extracted respondent attitude as the initiator's subjective account", async () => {
+    const wrapper = await mountInteractiveView({
+      initialTurnMemory: {
+        turn_no: 2,
+        case_intake_dossier: {
+          dossier: {
+            schema_version: "intake_case_detail.v1",
+            case_story: {
+              one_sentence_summary: "用户称配件缺失，并表示商家此前拒绝补发。",
+            },
+            claim_resolution: {
+              initiator_role: "USER",
+              requested_resolution: "RESHIP",
+              normalized_statement: "用户请求补发缺失配件。",
+              original_statement: "商家说不给我补发。",
+            },
+            respondent_attitude: {
+              respondent_role: "MERCHANT",
+              attitude: "DISAGREE",
+              position: "商家不支持补发。",
+              source: "发起方单方陈述（主观）",
+              confidence: 0.9,
+            },
+            intake_quality: {
+              score: 60,
+              ready_for_next_step: false,
+            },
+          },
+        },
+      },
+    });
+
+    expect(wrapper.get("[data-dispute-detail-respondent]").text()).toContain(
+      "商家不支持补发（主观）",
+    );
+  });
+
+  it("marks a legacy party-position fallback as a subjective account", async () => {
+    const wrapper = await mountInteractiveView({
+      initialTurnMemory: {
+        turn_no: 2,
+        case_intake_dossier: {
+          dossier: {
+            schema_version: "intake_case_detail.v1",
+            case_story: {
+              one_sentence_summary: "用户称配件缺失，并转述商家拒绝补发。",
+            },
+            claim_resolution: {
+              initiator_role: "USER",
+              requested_resolution: "RESHIP",
+              normalized_statement: "用户请求补发缺失配件。",
+              original_statement: "商家说不给我补发。",
+            },
+            party_positions: {
+              user_claim: "用户请求补发缺失配件。",
+              merchant_claim: "商家不支持补发。",
+            },
+            intake_quality: {
+              score: 60,
+              ready_for_next_step: false,
+            },
+          },
+        },
+      },
+    });
+
+    expect(wrapper.get("[data-dispute-detail-respondent]").text()).toContain(
+      "商家不支持补发（主观）",
+    );
+  });
+
+  it("renders the original statement without trimming or replacing internal-looking tokens", async () => {
+    const originalStatement = "  我原话里写了 REFUND 和 UNKNOWN。\n\n请保持原样。  ";
+    const wrapper = await mountInteractiveView({
+      initialTurnMemory: {
+        turn_no: 2,
+        case_intake_dossier: {
+          dossier: {
+            schema_version: "intake_case_detail.v1",
+            case_story: {
+              one_sentence_summary: "接待官已将发起方诉求整理为完整事件摘要。",
+            },
+            claim_resolution: {
+              initiator_role: "USER",
+              requested_resolution: "OTHER",
+              original_statement: originalStatement,
+            },
+            intake_quality: {
+              score: 60,
+              ready_for_next_step: false,
+            },
+          },
+        },
+      },
+    });
+
+    expect(wrapper.get("[data-origin-statement-text]").attributes("title")).toBe(
+      originalStatement,
+    );
   });
 
   it("shows claim status and verification gaps for legacy case-detail dossiers without structured claim fields", async () => {
@@ -1405,9 +1511,10 @@ describe("IntakeRoomView", () => {
 
     expect(source).toContain("--intake-panel-height: 740px;");
     expect(source).toContain(
-      "grid-template-rows: 44px minmax(0, 1fr) 52px;",
+      "grid-template-rows: 60px minmax(0, 1fr) 52px;",
     );
-    expect(source).toContain("grid-template-rows: 44px 412px 112px;");
+    expect(source).toContain("grid-template-rows: 44px 412px 96px;");
+    expect(source).toContain("line-height: 1.2;");
     expect(source).toContain(
       "grid-template-columns: repeat(2, minmax(0, 1fr));",
     );

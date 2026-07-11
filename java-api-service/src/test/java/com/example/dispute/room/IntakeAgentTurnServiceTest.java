@@ -40,6 +40,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -141,6 +142,7 @@ class IntakeAgentTurnServiceTest {
         when(messageRepository.save(any()))
                 .thenAnswer(invocation -> invocation.getArgument(0));
 
+        String originalStatement = "  我没有收到这个包裹，请核验签收记录。\n";
         service.startInitialTurn(
                 dispute.getId(),
                 new AuthenticatedActor("user-local", ActorRole.USER),
@@ -149,7 +151,15 @@ class IntakeAgentTurnServiceTest {
                         "AFTER-1",
                         "LOG-1",
                         "USER",
-                        "显示签收但我没有收到包裹",
+                        "物流轨迹显示订单已签收，但发起方表示未收到包裹。",
+                        null,
+                        new IntakeLobbySeed.ClaimResolutionSeed(
+                                "USER",
+                                "REFUND",
+                                null,
+                                "蓝牙耳机 1 件",
+                                "未收到商品，希望退款。",
+                                originalStatement),
                         null),
                 "TRACE_1",
                 "REQ_1");
@@ -160,6 +170,14 @@ class IntakeAgentTurnServiceTest {
         assertThat(command.getValue().caseId()).isEqualTo(dispute.getId());
         assertThat(command.getValue().turnSource()).isEqualTo("LOBBY_SEED");
         assertThat(command.getValue().lobbySeed().rawText()).contains("签收");
+        assertThat(command.getValue().initiatorStatementTranscript())
+                .singleElement()
+                .satisfies(
+                        statement -> {
+                            assertThat(statement.messageId()).isEqualTo("INTAKE_TURN_1");
+                            assertThat(statement.role()).isEqualTo("USER");
+                            assertThat(statement.text()).isEqualTo(originalStatement);
+                        });
         assertThat(command.getValue().latestScrollSnapshot().isObject()).isTrue();
         assertThat(command.getValue().agentContext().actorId()).isEqualTo("user-local");
         assertThat(command.getValue().agentContext().actorRole()).isEqualTo("USER");
@@ -171,12 +189,16 @@ class IntakeAgentTurnServiceTest {
 
         ArgumentCaptor<RoomTurnMemoryEntity> memory =
                 ArgumentCaptor.forClass(RoomTurnMemoryEntity.class);
-        verify(memoryRepository).save(memory.capture());
-        assertThat(memory.getValue().getAgentRole()).isEqualTo("DISPUTE_INTAKE_OFFICER");
-        assertThat(memory.getValue().getTurnNo()).isEqualTo(1);
-        assertThat(memory.getValue().getScrollSnapshotJson())
+        verify(memoryRepository, org.mockito.Mockito.times(2)).save(memory.capture());
+        assertThat(memory.getAllValues().get(0).getAnswerRole()).isEqualTo("USER");
+        assertThat(memory.getAllValues().get(0).getAnswerContent())
+                .isEqualTo(originalStatement);
+        assertThat(memory.getAllValues().get(1).getAgentRole())
+                .isEqualTo("DISPUTE_INTAKE_OFFICER");
+        assertThat(memory.getAllValues().get(1).getTurnNo()).isEqualTo(1);
+        assertThat(memory.getAllValues().get(1).getScrollSnapshotJson())
                 .contains("ASK_FOR_CLARIFICATION");
-        assertThat(memory.getValue().getDossierPatchJson())
+        assertThat(memory.getAllValues().get(1).getDossierPatchJson())
                 .contains("\"memory_frame\"")
                 .contains("\"prompt_memory\":\"short memory\"");
 
@@ -262,6 +284,12 @@ class IntakeAgentTurnServiceTest {
         assertThat(command.getValue().lobbySeed().orderReference()).isNull();
         assertThat(command.getValue().lobbySeed().afterSalesReference()).isNull();
         assertThat(command.getValue().lobbySeed().logisticsReference()).isNull();
+        assertThat(command.getValue().initiatorStatementTranscript())
+                .singleElement()
+                .satisfies(
+                        statement ->
+                                assertThat(statement.text())
+                                        .isEqualTo("物流显示签收，但我没有收到包裹。"));
     }
 
     @Test
@@ -360,6 +388,116 @@ class IntakeAgentTurnServiceTest {
         verify(intakeDossierRepository).save(currentDossier.capture());
         assertThat(currentDossier.getValue().getDossierVersion()).isEqualTo(2);
         assertThat(currentDossier.getValue().getSourceTurnNo()).isEqualTo(2);
+    }
+
+    @Test
+    void participantTurnSendsTheCompleteOrderedTranscriptBeyondTheRecentTurnWindow() {
+        FulfillmentCaseEntity dispute = intakeCase();
+        CaseRoomEntity room = intakeRoom(dispute);
+        AuthenticatedActor actor = new AuthenticatedActor("user-local", ActorRole.USER);
+        CaseAccessSessionEntity accessSession = accessSession(dispute.getId(), actor);
+        AgentConversationSessionEntity agentSession =
+                agentSession(
+                        accessSession,
+                        RoomType.INTAKE,
+                        "DISPUTE_INTAKE_OFFICER",
+                        "intake-user-v1",
+                        "MEMEO_DEFAULT");
+        List<RoomTurnMemoryEntity> participantMemories = new ArrayList<>();
+        List<String> expectedStatements = new ArrayList<>();
+        for (int turnNo = 1; turnNo <= 11; turnNo++) {
+            String statement = "第 " + turnNo + " 条发起方原始输入";
+            expectedStatements.add(statement);
+            participantMemories.add(
+                    RoomTurnMemoryEntity.participantTurn(
+                            "MEMORY_HISTORY_" + turnNo,
+                            dispute.getId(),
+                            RoomType.INTAKE,
+                            turnNo,
+                            actor.actorId(),
+                            actor.role().name(),
+                            statement,
+                            agentSession,
+                            accessSession,
+                            "{}"));
+        }
+        when(caseRepository.findByIdForUpdate(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.INTAKE))
+                .thenReturn(Optional.of(room));
+        when(memoryRepository.findMaxTurnNoByAgentSessionId(any()))
+                .thenReturn(11);
+        when(memoryRepository
+                        .findTopByAgentSessionIdAndAgentRoleIsNotNullOrderByTurnNoDesc(any()))
+                .thenReturn(Optional.empty());
+        when(memoryRepository.findTop10ByAgentSessionIdOrderByTurnNoDesc(any()))
+                .thenReturn(List.copyOf(participantMemories.subList(1, 11)));
+        when(memoryRepository
+                        .findAllByAgentSessionIdAndAnswerContentIsNotNullOrderByTurnNoAsc(any()))
+                .thenAnswer(invocation -> List.copyOf(participantMemories));
+        when(client.run(any(), eq("TRACE_TRANSCRIPT"), eq("REQ_TRANSCRIPT")))
+                .thenReturn(
+                        result(
+                                "已记录全部原始陈述。",
+                                Map.of("requested_outcome", "REFUND")));
+        when(memoryRepository.save(any()))
+                .thenAnswer(
+                        invocation -> {
+                            RoomTurnMemoryEntity saved = invocation.getArgument(0);
+                            if (saved.getAnswerContent() != null) {
+                                participantMemories.add(saved);
+                            }
+                            return saved;
+                        });
+        when(intakeDossierRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.INTAKE))
+                .thenReturn(Optional.empty());
+        when(intakeDossierRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(messageRepository.findByCaseIdAndIdempotencyKey(
+                        eq(dispute.getId()), any()))
+                .thenReturn(Optional.empty());
+        when(messageRepository.findMaxSequenceByRoomId(room.getId())).thenReturn(1L);
+        when(messageRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        String latestStatement = "\n我的第 12 条原始补充，保留首尾空白。  ";
+        expectedStatements.add(latestStatement);
+        service.continueFromParticipantMessage(
+                dispute.getId(),
+                RoomType.INTAKE,
+                actor,
+                new RoomMessageCommand(
+                        MessageType.PARTY_TEXT,
+                        latestStatement,
+                        List.of()),
+                "TRACE_TRANSCRIPT",
+                "REQ_TRANSCRIPT");
+
+        ArgumentCaptor<IntakeAgentTurnCommand> command =
+                ArgumentCaptor.forClass(IntakeAgentTurnCommand.class);
+        verify(client).run(command.capture(), eq("TRACE_TRANSCRIPT"), eq("REQ_TRANSCRIPT"));
+        assertThat(command.getValue().recentTurns()).hasSize(10);
+        assertThat(command.getValue().initiatorStatementTranscript())
+                .hasSize(12)
+                .extracting(message -> message.text())
+                .containsExactlyElementsOf(expectedStatements);
+        assertThat(command.getValue().initiatorStatementTranscript())
+                .extracting(message -> message.messageId())
+                .containsExactly(
+                        "INTAKE_TURN_1",
+                        "INTAKE_TURN_2",
+                        "INTAKE_TURN_3",
+                        "INTAKE_TURN_4",
+                        "INTAKE_TURN_5",
+                        "INTAKE_TURN_6",
+                        "INTAKE_TURN_7",
+                        "INTAKE_TURN_8",
+                        "INTAKE_TURN_9",
+                        "INTAKE_TURN_10",
+                        "INTAKE_TURN_11",
+                        "INTAKE_TURN_12");
+        assertThat(command.getValue().initiatorStatementTranscript())
+                .allSatisfy(message -> assertThat(message.role()).isEqualTo("USER"));
     }
 
     @Test

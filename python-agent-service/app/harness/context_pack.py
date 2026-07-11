@@ -83,6 +83,10 @@ def _normalize_section_value(
 ) -> Any:
     if name == "current_turn":
         return _normalize_current_turn(value, actor_role=actor_role)
+    if name == "initiator_statement_transcript":
+        # This is a Java-filtered, unilateral audit transcript. Its text is
+        # intentionally kept byte-for-byte for raw-statement traceability.
+        return value
     if name == "execution_tool_intentions":
         return value
     localized = localize_context_tree(value)
@@ -127,6 +131,7 @@ def _restore_raw_statement_fields(
 ) -> None:
     raw_keys = (
         "raw_statement",
+        "original_statement",
         "user_original_statement",
         "merchant_original_statement",
         "latest_party_message",

@@ -37,6 +37,12 @@ _CONTRACTS: dict[str, AgentContextContract] = {
         configuration_profile_key="DISPUTE_INTAKE_CONTEXT_PACK_V1",
         sections=(
             ContextSectionSpec("current_turn", 100, True, "java_filtered"),
+            ContextSectionSpec(
+                "initiator_statement_transcript",
+                98,
+                False,
+                "participant_raw_untrusted",
+            ),
             ContextSectionSpec("intake_initial_form", 96, False, "java_filtered"),
             ContextSectionSpec("case_identity", 95, False, "java_filtered"),
             ContextSectionSpec("latest_canvas_snapshot", 90, False, "java_filtered"),

@@ -18,6 +18,23 @@ LOGISTICS_REFERENCE_RE = re.compile(
     re.IGNORECASE,
 )
 
+ORIGINAL_STATEMENT_SEPARATOR = "\n\n"
+ORIGINAL_STATEMENT_MISSING = "外部系统未提供发起方原话"
+ORIGINAL_STATEMENT_POLICY = "INITIATOR_INPUTS_V1"
+SUBJECTIVE_RESPONDENT_SOURCE = "发起方单方陈述（主观）"
+SUBJECTIVE_RESPONDENT_CONFIDENCE_NOTE = (
+    "仅表示从发起方单方陈述中提取态度的明确度，不代表事实真实性。"
+)
+RESPONDENT_ATTITUDE_CODES = {
+    "NOT_RESPONDED",
+    "AGREE",
+    "PARTIALLY_AGREE",
+    "DISAGREE",
+    "ALTERNATIVE_PROPOSED",
+    "NEED_MORE_INFO",
+    "PLATFORM_UNKNOWN",
+}
+
 FIELD_DISPLAY_LABELS = {
     "ORDER_REFERENCE": "订单号",
     "AFTER_SALES_REFERENCE": "售后单号",
@@ -101,6 +118,13 @@ class CaseDetailDossierSkill:
         detail = _deep_merge(detail, previous if _is_case_detail(previous) else {})
         detail = _deep_merge(detail, llm_case_detail or {})
         detail["schema_version"] = self.schema_version
+        _enforce_original_statement(detail, request, previous)
+        _enforce_respondent_attitude_source(
+            detail,
+            request.lobby_seed,
+            previous,
+            llm_case_detail,
+        )
 
         trusted_refs = self._trusted_references(request)
         detail["references"] = {
@@ -358,7 +382,7 @@ def _default_claim_resolution(lobby_seed: Any, source_text: str) -> dict[str, An
         or "UNKNOWN"
     )
     request_reason = getattr(seed, "request_reason", None) or source_text
-    original_statement = getattr(seed, "original_statement", None) or source_text
+    original_statement = _initial_original_statement(lobby_seed, source_text)
     return {
         "initiator_role": initiator_role,
         "requested_resolution": requested_resolution,
@@ -374,21 +398,211 @@ def _default_claim_resolution(lobby_seed: Any, source_text: str) -> dict[str, An
     }
 
 
+def _enforce_original_statement(
+    detail: dict[str, Any],
+    request: IntakeTurnRequest,
+    previous: dict[str, Any],
+) -> None:
+    """Pin the display statement to the unilateral participant's verbatim inputs.
+
+    The LLM owns the normalized summary, but never the raw statement. A prior
+    deterministic snapshot is the accumulator for long conversations; on a
+    legacy snapshot, the seed and durable recent turns rebuild the statement.
+    """
+
+    claim = _ensure_dict(detail, "claim_resolution")
+    transcript_statements = [
+        message.text
+        for message in request.initiator_statement_transcript
+    ]
+    if transcript_statements:
+        claim["original_statement"] = ORIGINAL_STATEMENT_SEPARATOR.join(
+            transcript_statements
+        )
+        claim["original_statement_provenance"] = {
+            "policy": ORIGINAL_STATEMENT_POLICY,
+            "last_message_id": request.initiator_statement_transcript[-1].message_id,
+            "submission_count": len(transcript_statements),
+            "separator": "BLANK_LINE",
+            "source": "INITIATOR_STATEMENT_TRANSCRIPT",
+        }
+        return
+
+    previous_claim = (
+        previous.get("claim_resolution") if isinstance(previous, dict) else None
+    )
+    if not isinstance(previous_claim, dict):
+        previous_claim = {}
+    previous_provenance = previous_claim.get("original_statement_provenance")
+    if not isinstance(previous_provenance, dict):
+        previous_provenance = {}
+
+    current = request.current_user_message
+    current_message_id = current.message_id if current is not None else ""
+    current_text = current.text if current is not None else ""
+    prior_is_trusted = (
+        previous_provenance.get("policy") == ORIGINAL_STATEMENT_POLICY
+        and isinstance(previous_claim.get("original_statement"), str)
+        and bool(previous_claim.get("original_statement"))
+    )
+
+    if prior_is_trusted:
+        statements = [str(previous_claim["original_statement"])]
+        last_message_id = str(previous_provenance.get("last_message_id") or "")
+        if current_text and current_message_id != last_message_id:
+            statements.append(current_text)
+        submission_count = _non_negative_int(
+            previous_provenance.get("submission_count")
+        ) + (1 if len(statements) > 1 else 0)
+    else:
+        statements = [
+            _initial_original_statement(
+                request.lobby_seed,
+                request.lobby_seed.raw_text,
+            )
+        ]
+        recent_statements = _recent_participant_statements(request.recent_turns)
+        statements.extend(recent_statements)
+        if current_text and (not recent_statements or recent_statements[-1] != current_text):
+            statements.append(current_text)
+        submission_count = (
+            (0 if statements[0] == ORIGINAL_STATEMENT_MISSING else 1)
+            + len(statements)
+            - 1
+        )
+
+    claim["original_statement"] = ORIGINAL_STATEMENT_SEPARATOR.join(statements)
+    claim["original_statement_provenance"] = {
+        "policy": ORIGINAL_STATEMENT_POLICY,
+        "last_message_id": current_message_id,
+        "submission_count": submission_count,
+        "separator": "BLANK_LINE",
+        "source": "LEGACY_COMPATIBILITY",
+    }
+
+
+def _initial_original_statement(lobby_seed: Any, source_text: str) -> str:
+    seed = getattr(lobby_seed, "claim_resolution_seed", None)
+    if seed is not None:
+        original_statement = getattr(seed, "original_statement", None)
+        if isinstance(original_statement, str) and original_statement.strip():
+            return original_statement
+        return ORIGINAL_STATEMENT_MISSING
+    return source_text
+
+
+def _recent_participant_statements(recent_turns: list[dict[str, object]]) -> list[str]:
+    statements: list[str] = []
+    for turn in recent_turns:
+        if not isinstance(turn, dict):
+            continue
+        content = turn.get("answer_content")
+        if isinstance(content, str) and content.strip():
+            statements.append(content)
+    return statements
+
+
+def _non_negative_int(value: Any) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _enforce_respondent_attitude_source(
+    detail: dict[str, Any],
+    lobby_seed: Any,
+    previous: dict[str, Any],
+    llm_case_detail: dict[str, Any] | None,
+) -> None:
+    """Persist only attitudes reported by the initiator in this private room.
+
+    A formal response belongs to a shared or respondent-authored room, not the
+    intake room. Legacy snapshots and external seeds with formal provenance are
+    therefore discarded instead of being relabelled as a subjective report.
+    """
+
+    llm_attitude = _nested_attitude(llm_case_detail)
+    previous_attitude = (
+        previous.get("respondent_attitude") if isinstance(previous, dict) else None
+    )
+    if not isinstance(previous_attitude, dict):
+        previous_attitude = {}
+
+    candidate = _reported_attitude(llm_attitude)
+    if candidate is None:
+        candidate = _subjective_attitude(previous_attitude)
+    if candidate is None:
+        detail["respondent_attitude"] = _default_respondent_attitude(lobby_seed)
+        return
+
+    initiator_role = _party_role_or_default(getattr(lobby_seed, "initiator_role", None))
+    detail["respondent_attitude"] = {
+        "respondent_role": _opposite_party(initiator_role),
+        "attitude": candidate["attitude"],
+        "position": candidate["position"],
+        "source": SUBJECTIVE_RESPONDENT_SOURCE,
+        "confidence": _clamp_confidence(candidate.get("confidence", 0.5)),
+        "confidence_note": SUBJECTIVE_RESPONDENT_CONFIDENCE_NOTE,
+    }
+
+
+def _nested_attitude(case_detail: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(case_detail, dict):
+        return {}
+    attitude = case_detail.get("respondent_attitude")
+    return attitude if isinstance(attitude, dict) else {}
+
+
+def _reported_attitude(candidate: dict[str, Any]) -> dict[str, Any] | None:
+    attitude_code = str(candidate.get("attitude") or "NOT_RESPONDED").upper()
+    position = str(candidate.get("position") or "").strip()
+    if (
+        attitude_code not in RESPONDENT_ATTITUDE_CODES
+        or attitude_code == "NOT_RESPONDED"
+        or not position
+    ):
+        return None
+    return {
+        "attitude": attitude_code,
+        "position": position,
+        "confidence": candidate.get("confidence", 0.5),
+    }
+
+
+def _subjective_attitude(candidate: dict[str, Any]) -> dict[str, Any] | None:
+    if str(candidate.get("source") or "").strip() != SUBJECTIVE_RESPONDENT_SOURCE:
+        return None
+    return _reported_attitude(candidate)
+
+
 def _default_respondent_attitude(lobby_seed: Any) -> dict[str, Any]:
     seed = getattr(lobby_seed, "respondent_attitude_seed", None)
     initiator_role = _party_role_or_default(getattr(lobby_seed, "initiator_role", None))
-    respondent_role = getattr(seed, "respondent_role", None) or _opposite_party(initiator_role)
-    attitude = getattr(seed, "attitude", None) or "NOT_RESPONDED"
+    respondent_role = _opposite_party(initiator_role)
+    seed_values = (
+        seed.model_dump(mode="python")
+        if seed is not None and hasattr(seed, "model_dump")
+        else {}
+    )
+    subjective_seed = _subjective_attitude(seed_values)
+    if subjective_seed is not None:
+        return {
+            "respondent_role": respondent_role,
+            "attitude": subjective_seed["attitude"],
+            "position": subjective_seed["position"],
+            "source": SUBJECTIVE_RESPONDENT_SOURCE,
+            "confidence": _clamp_confidence(
+                subjective_seed.get("confidence", 0.5)
+            ),
+            "confidence_note": SUBJECTIVE_RESPONDENT_CONFIDENCE_NOTE,
+        }
     return {
         "respondent_role": respondent_role,
-        "attitude": attitude,
-        "position": getattr(seed, "position", None) or f"{_role_label(respondent_role)}尚未在接待室表达态度。",
-        "source": getattr(seed, "source", None) or "尚未回应",
-        "confidence": (
-            getattr(seed, "confidence", None)
-            if getattr(seed, "confidence", None) is not None
-            else 0.5
-        ),
+        "attitude": "NOT_RESPONDED",
+        "position": f"{_role_label(respondent_role)}尚未在接待室表达态度。",
+        "source": "尚未回应",
+        "confidence": 0.5,
     }
 
 

@@ -1047,8 +1047,8 @@ Update the final layout contract test in `IntakeRoomView.test.js` to require:
 
 ```js
 expect(source).toContain("--intake-panel-height: 740px;");
-expect(source).toContain("grid-template-rows: 44px minmax(0, 1fr) 52px;");
-expect(source).toContain("grid-template-rows: 44px 412px 112px;");
+expect(source).toContain("grid-template-rows: 60px minmax(0, 1fr) 52px;");
+expect(source).toContain("grid-template-rows: 44px 412px 96px;");
 expect(source).toContain("grid-template-columns: repeat(2, minmax(0, 1fr));");
 expect(source).toContain("grid-template-columns: repeat(3, minmax(0, 1fr));");
 expect(source).toContain("grid-template-columns: repeat(2, minmax(0, 1fr));");
@@ -1144,13 +1144,13 @@ In `IntakeRoomView.vue` use:
 }
 .intake-dossier {
   display: grid;
-  grid-template-rows: 44px minmax(0, 1fr) 52px;
+  grid-template-rows: 60px minmax(0, 1fr) 52px;
   gap: 8px;
   padding: 14px 18px;
 }
 .intake-case-detail {
   display: grid;
-  grid-template-rows: 44px 412px 112px;
+  grid-template-rows: 44px 412px 96px;
   gap: 8px;
   height: auto;
   min-height: 0;

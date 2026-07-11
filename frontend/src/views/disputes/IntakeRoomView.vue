@@ -402,6 +402,14 @@ function partySubject(label, fallback) {
 function respondentNoResponseText(respondent) {
   return `${partySubject(respondent, "对方")}尚未回应`;
 }
+function markSubjectiveAttitude(summary, source) {
+  const text = String(summary || "").trim();
+  const sourceText = String(source || "").trim();
+  if (!text || !/主观|单方陈述|发起方陈述/u.test(sourceText) || /（主观）$/u.test(text)) {
+    return text;
+  }
+  return `${text.replace(/[。.]$/u, "")}（主观）`;
+}
 const claimStatus = computed(() => {
   const detail = caseDetailDossier.value;
   if (!detail) {
@@ -439,10 +447,14 @@ const claimStatus = computed(() => {
     respondentRole,
   );
   const fallbackFacts = fallbackFactsInDispute(detail);
-  const attitudeSummary =
+  const attitudeSummary = markSubjectiveAttitude(
     inferredAttitude.hasResponse || inferredAttitude.showSummary
       ? inferredAttitude.summary
-      : respondentNoResponseText(respondent);
+      : respondentNoResponseText(respondent),
+    inferredAttitude.hasResponse
+      ? "发起方单方陈述（主观）"
+      : attitude.source,
+  );
   return {
     initiator,
     respondent,
@@ -666,15 +678,17 @@ const subjectiveStatement = computed(() => {
     sourceRole === "MERCHANT"
       ? detail?.party_positions?.merchant_claim || analysis.value?.party_claims?.merchant
       : detail?.party_positions?.user_claim || analysis.value?.party_claims?.user || dispute.value?.description;
+  const originalStatement =
+    claim.original_statement ||
+    claim.originalStatement ||
+    fallbackPartyStatement;
   return {
     titleSuffix: `${sourceRoleName}原话`,
     label: "原始陈述",
-    value: humanizeDossierText(
-      claim.original_statement ||
-        claim.originalStatement ||
-        fallbackPartyStatement ||
-        "等待继续补充发起方陈述",
-    ),
+    value:
+      typeof originalStatement === "string" && originalStatement.trim()
+        ? originalStatement
+        : "等待继续补充发起方陈述",
   };
 });
 
@@ -1309,7 +1323,7 @@ onBeforeUnmount(() => {
 }
 .intake-dossier {
   display: grid;
-  grid-template-rows: 44px minmax(0, 1fr) 52px;
+  grid-template-rows: 60px minmax(0, 1fr) 52px;
   gap: 8px;
   padding: 14px 18px;
 }
@@ -1414,15 +1428,20 @@ onBeforeUnmount(() => {
   justify-content: space-between;
   gap: 14px;
   align-items: flex-start;
-  height: 44px;
+  height: 60px;
   min-width: 0;
   overflow: hidden;
 }
-.intake-dossier header h2 { margin: 5px 0 0; color: #34435c; font-size: 23px; }
+.intake-dossier header h2 {
+  margin: 5px 0 0;
+  color: #34435c;
+  font-size: 23px;
+  line-height: 1.2;
+}
 .intake-dossier header small { color: #7384a1; }
 .intake-case-detail {
   display: grid;
-  grid-template-rows: 44px 412px 112px;
+  grid-template-rows: 44px 412px 96px;
   gap: 8px;
   height: auto;
   min-height: 0;
@@ -1725,7 +1744,7 @@ onBeforeUnmount(() => {
 .intake-case-detail__todo-list {
   box-sizing: border-box;
   display: grid;
-  height: 112px;
+  height: 96px;
   grid-template-rows: 20px minmax(0, 1fr);
   gap: 6px;
   min-height: 0;

@@ -9,9 +9,10 @@ import com.example.dispute.room.domain.PermissionLevel;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseAccessSessionEntity;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseAccessSessionRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseParticipantRepository;
-import java.util.UUID;
+import java.util.Optional;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 @Service
 public class AccessSessionResolver {
@@ -21,14 +22,17 @@ public class AccessSessionResolver {
     private final FulfillmentCaseRepository caseRepository;
     private final CaseParticipantRepository participantRepository;
     private final CaseAccessSessionRepository accessSessionRepository;
+    private final AccessSessionInitializer accessSessionInitializer;
 
     public AccessSessionResolver(
             FulfillmentCaseRepository caseRepository,
             CaseParticipantRepository participantRepository,
-            CaseAccessSessionRepository accessSessionRepository) {
+            CaseAccessSessionRepository accessSessionRepository,
+            AccessSessionInitializer accessSessionInitializer) {
         this.caseRepository = caseRepository;
         this.participantRepository = participantRepository;
         this.accessSessionRepository = accessSessionRepository;
+        this.accessSessionInitializer = accessSessionInitializer;
     }
 
     @Transactional
@@ -38,24 +42,31 @@ public class AccessSessionResolver {
                         .findById(caseId)
                         .orElseThrow(() -> new IllegalArgumentException("case not found"));
         PermissionLevel permissionLevel = permissionLevelFor(dispute, actor);
+        return find(dispute.getId(), actor, permissionLevel)
+                .orElseGet(
+                        () ->
+                                initialize(dispute.getId(), actor, permissionLevel));
+    }
+
+    private CaseAccessSessionEntity initialize(
+            String caseId, AuthenticatedActor actor, PermissionLevel permissionLevel) {
+        if (TransactionSynchronizationManager.isCurrentTransactionReadOnly()) {
+            return accessSessionInitializer.initializeInNewTransaction(
+                    caseId, actor, permissionLevel);
+        }
+        return accessSessionInitializer.initializeInCurrentTransaction(
+                caseId, actor, permissionLevel);
+    }
+
+    private Optional<CaseAccessSessionEntity> find(
+            String caseId, AuthenticatedActor actor, PermissionLevel permissionLevel) {
         return accessSessionRepository
                 .findByTenantIdAndCaseIdAndActorIdAndActorRoleAndPermissionLevel(
                         DEFAULT_TENANT,
-                        dispute.getId(),
+                        caseId,
                         actor.actorId(),
                         actor.role(),
-                        permissionLevel)
-                .orElseGet(
-                        () ->
-                                accessSessionRepository.save(
-                                        CaseAccessSessionEntity.create(
-                                                "ACCESS_" + compactUuid(),
-                                                DEFAULT_TENANT,
-                                                dispute.getId(),
-                                                actor.actorId(),
-                                                actor.role(),
-                                                permissionLevel,
-                                                actor.actorId())));
+                        permissionLevel);
     }
 
     private PermissionLevel permissionLevelFor(
@@ -91,9 +102,5 @@ public class AccessSessionResolver {
         if (!participant) {
             throw new ForbiddenException("actor cannot create access session for this case");
         }
-    }
-
-    private static String compactUuid() {
-        return UUID.randomUUID().toString().replace("-", "");
     }
 }

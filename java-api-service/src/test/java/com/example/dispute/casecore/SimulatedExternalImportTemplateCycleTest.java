@@ -173,7 +173,7 @@ class SimulatedExternalImportTemplateCycleTest {
     }
 
     @Test
-    void mapsTemplateClaimAndRespondentAttitudeIntoTheIntakeSeed() {
+    void mapsUserInitiatedTemplateClaimAndMerchantAttitudeIntoTheIntakeSeed() {
         facade.simulateExternalImport(
                 command(ActorRole.USER),
                 systemActor(),
@@ -194,10 +194,65 @@ class SimulatedExternalImportTemplateCycleTest {
                 .isEqualTo(catalog.get(1).requestedResolution());
         assertThat(seed.getValue().claimResolutionSeed().requestedAmount())
                 .isEqualByComparingTo(catalog.get(1).requestedAmount());
+        assertThat(seed.getValue().claimResolutionSeed().originalStatement())
+                .isEqualTo(catalog.get(1).originalStatement())
+                .isNotEqualTo(catalog.get(1).description());
         assertThat(seed.getValue().respondentAttitudeSeed().respondentRole())
                 .isEqualTo("MERCHANT");
         assertThat(seed.getValue().respondentAttitudeSeed().attitude())
                 .isEqualTo(catalog.get(1).respondentAttitude());
+        assertThat(seed.getValue().respondentAttitudeSeed().source())
+                .isEqualTo("发起方单方陈述（主观）");
+        assertThat(seed.getValue().respondentAttitudeSeed().confidence())
+                .isEqualTo(0.85);
+    }
+
+    @Test
+    void mapsMerchantInitiatedTemplateClaimAndUserAttitudeIntoTheIntakeSeed() {
+        facade.simulateExternalImport(
+                command(ActorRole.MERCHANT),
+                systemActor(),
+                "merchant-seed-contract-key",
+                "trace-merchant-seed",
+                "request-merchant-seed");
+
+        ArgumentCaptor<IntakeLobbySeed> seed = ArgumentCaptor.forClass(IntakeLobbySeed.class);
+        verify(intakeAgentTurnService)
+                .startInitialTurn(
+                        anyString(),
+                        any(AuthenticatedActor.class),
+                        seed.capture(),
+                        anyString(),
+                        anyString());
+
+        SimulatedExternalDisputeTemplate template = catalog.get(1);
+        SimulatedExternalDisputeTemplate.InitiatorPerspective merchantPerspective =
+                template.forInitiator(ActorRole.MERCHANT);
+        assertThat(seed.getValue().claimResolutionSeed().initiatorRole())
+                .isEqualTo("MERCHANT");
+        assertThat(seed.getValue().claimResolutionSeed().requestedResolution())
+                .isEqualTo("VERIFY_OR_EXPLAIN_ONLY")
+                .isEqualTo(merchantPerspective.requestedResolution());
+        assertThat(seed.getValue().claimResolutionSeed().requestedAmount()).isNull();
+        assertThat(seed.getValue().claimResolutionSeed().requestReason())
+                .startsWith("我们认为物流已完成签收")
+                .doesNotContain("未实际收到商品，希望");
+        assertThat(seed.getValue().claimResolutionSeed().originalStatement())
+                .startsWith("我们认为物流已完成签收")
+                .contains("用户的诉求是：未实际收到商品")
+                .doesNotStartWith("物流显示已签收，但我和同住人员");
+        assertThat(seed.getValue().respondentAttitudeSeed().respondentRole())
+                .isEqualTo("USER");
+        assertThat(seed.getValue().respondentAttitudeSeed().attitude())
+                .isEqualTo("DISAGREE");
+        assertThat(seed.getValue().respondentAttitudeSeed().position())
+                .isEqualTo("对方主张：未实际收到商品，希望在核验物流交接链路后退款。");
+        assertThat(seed.getValue().respondentAttitudeSeed().position())
+                .doesNotContain(template.respondentPosition());
+        assertThat(seed.getValue().respondentAttitudeSeed().source())
+                .isEqualTo("发起方单方陈述（主观）");
+        assertThat(seed.getValue().respondentAttitudeSeed().confidence())
+                .isEqualTo(0.85);
     }
 
     @Test

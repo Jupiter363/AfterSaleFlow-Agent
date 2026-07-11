@@ -107,6 +107,7 @@ _PRESERVED_VALUE_KEYS = {
     "content_url",
     "original_filename",
     "raw_statement",
+    "original_statement",
     "user_original_statement",
     "merchant_original_statement",
     "latest_party_message",

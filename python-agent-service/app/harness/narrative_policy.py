@@ -23,6 +23,7 @@ PLATFORM_NARRATIVE_KEYS = {
 
 RAW_STATEMENT_KEYS = {
     "raw_statement",
+    "original_statement",
     "user_original_statement",
     "merchant_original_statement",
     "latest_party_message",

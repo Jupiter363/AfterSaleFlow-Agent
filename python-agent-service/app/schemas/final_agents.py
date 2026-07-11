@@ -164,11 +164,24 @@ class IntakeClaimResolutionSeed(StrictModel):
 
 
 class IntakeRespondentAttitudeSeed(StrictModel):
+    """Optional extraction hint from the initiator's unilateral statement.
+
+    The intake workflow ignores seeds carrying formal/external provenance. A
+    non-empty attitude is only eligible when ``source`` is exactly
+    ``发起方单方陈述（主观）``.
+    """
+
     respondent_role: Literal["USER", "MERCHANT"] | None = None
     attitude: Identifier | None = None
     position: LongText | None = None
-    source: ShortText | None = None
-    confidence: Confidence | None = None
+    source: ShortText | None = Field(
+        default=None,
+        description="仅允许表示发起方单方陈述（主观）的提取来源。",
+    )
+    confidence: Confidence | None = Field(
+        default=None,
+        description="仅表示主观态度提取的明确度，不表示真实性。",
+    )
 
 
 class IntakeLobbySeed(StrictModel):
@@ -199,6 +212,9 @@ class IntakeTurnRequest(StrictModel):
     lobby_seed: IntakeLobbySeed
     current_user_message: IntakeTurnMessage | None = None
     latest_scroll_snapshot: dict[str, object] | None = None
+    initiator_statement_transcript: list[IntakeTurnMessage] = Field(
+        default_factory=list
+    )
     recent_turns: Annotated[list[dict[str, object]], Field(max_length=20)] = Field(
         default_factory=list
     )

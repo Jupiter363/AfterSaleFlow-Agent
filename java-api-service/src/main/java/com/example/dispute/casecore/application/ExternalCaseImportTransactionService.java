@@ -420,23 +420,25 @@ public class ExternalCaseImportTransactionService {
         ActorRole initiatorRole = request.initiatorRoleHint();
         ActorRole respondentRole =
                 initiatorRole == ActorRole.USER ? ActorRole.MERCHANT : ActorRole.USER;
+        SimulatedExternalDisputeTemplate.InitiatorPerspective perspective =
+                template.forInitiator(initiatorRole);
         String stableKey = stableReferenceKey(idempotencyKey);
         String templatePrefix = "T%02d-".formatted(template.templateNo());
         IntakeLobbySeed.ClaimResolutionSeed claim =
                 new IntakeLobbySeed.ClaimResolutionSeed(
                         initiatorRole.name(),
-                        template.requestedResolution(),
-                        template.requestedAmount(),
-                        template.requestedItems(),
-                        template.requestReason(),
-                        template.description());
+                        perspective.requestedResolution(),
+                        perspective.requestedAmount(),
+                        perspective.requestedItems(),
+                        perspective.requestReason(),
+                        perspective.originalStatement());
         IntakeLobbySeed.RespondentAttitudeSeed attitude =
                 new IntakeLobbySeed.RespondentAttitudeSeed(
                         respondentRole.name(),
-                        template.respondentAttitude(),
-                        template.respondentPosition(),
-                        "模拟外部订单模板",
-                        0.95);
+                        perspective.respondentAttitude(),
+                        perspective.respondentPosition(),
+                        "发起方单方陈述（主观）",
+                        0.85);
         return new ImportDisputeCommand(
                 SimulatedExternalDisputeTemplateCatalog.SOURCE_SYSTEM,
                 "SIM-" + templatePrefix + stableKey,
@@ -453,7 +455,7 @@ public class ExternalCaseImportTransactionService {
                 CaseStatus.INTAKE_PENDING,
                 "INTAKE",
                 null,
-                template.requestedResolution(),
+                perspective.requestedResolution(),
                 claim,
                 attitude);
     }

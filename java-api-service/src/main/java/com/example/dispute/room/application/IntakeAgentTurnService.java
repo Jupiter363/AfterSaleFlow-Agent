@@ -93,14 +93,30 @@ public class IntakeAgentTurnService {
         TurnContext context = prepare(caseId, RoomType.INTAKE);
         SessionContext session = resolveSession(caseId, actor, RoomType.INTAKE);
         int turnNo = memoryRepository.findMaxTurnNoByAgentSessionId(session.agentSession().getId()) + 1;
+        IntakeLobbySeed sanitizedLobbySeed = sanitizeLobbySeed(lobbySeed);
+        String initialStatement = initialStatement(sanitizedLobbySeed);
+        RoomTurnMemoryEntity initialStatementMemory =
+                RoomTurnMemoryEntity.participantTurn(
+                        "MEMORY_" + compactUuid(),
+                        caseId,
+                        RoomType.INTAKE,
+                        turnNo,
+                        actor.actorId(),
+                        textOrDefault(sanitizedLobbySeed.initiatorRole(), actor.role().name()),
+                        initialStatement,
+                        session.agentSession(),
+                        session.accessSession(),
+                        "{}");
+        memoryRepository.save(initialStatementMemory);
         JsonNode previousScrollSnapshot = latestScrollSnapshot(session.agentSession().getId());
         IntakeAgentTurnCommand command =
                 new IntakeAgentTurnCommand(
                         caseId,
                         RoomType.INTAKE,
                         "LOBBY_SEED",
-                        sanitizeLobbySeed(lobbySeed),
+                        sanitizedLobbySeed,
                         null,
+                        List.of(toParticipantMessage(initialStatementMemory)),
                         previousScrollSnapshot,
                         recentTurns(session.agentSession()),
                         session.agentContext());
@@ -148,6 +164,7 @@ public class IntakeAgentTurnService {
                                 "INTAKE_TURN_" + turnNo,
                                 actor.role().name(),
                                 message.text()),
+                        initiatorStatementTranscript(session.agentSession()),
                         previousScrollSnapshot,
                         recentTurns(session.agentSession()),
                         session.agentContext());
@@ -264,7 +281,7 @@ public class IntakeAgentTurnService {
                 seed.requestedAmount(),
                 blankToNull(seed.requestedItems()),
                 blankToNull(seed.requestReason()),
-                blankToNull(seed.originalStatement()));
+                blankToNullPreservingText(seed.originalStatement()));
     }
 
     private static IntakeLobbySeed.RespondentAttitudeSeed sanitizeRespondentAttitudeSeed(
@@ -436,6 +453,32 @@ public class IntakeAgentTurnService {
                 .toList();
     }
 
+    private List<IntakeParticipantMessage> initiatorStatementTranscript(
+            AgentConversationSessionEntity agentSession) {
+        return memoryRepository
+                .findAllByAgentSessionIdAndAnswerContentIsNotNullOrderByTurnNoAsc(
+                        agentSession.getId())
+                .stream()
+                .map(IntakeAgentTurnService::toParticipantMessage)
+                .toList();
+    }
+
+    private static IntakeParticipantMessage toParticipantMessage(
+            RoomTurnMemoryEntity memory) {
+        return new IntakeParticipantMessage(
+                "INTAKE_TURN_" + memory.getTurnNo(),
+                memory.getAnswerRole(),
+                memory.getAnswerContent());
+    }
+
+    private static String initialStatement(IntakeLobbySeed seed) {
+        if (seed.claimResolutionSeed() != null
+                && !blank(seed.claimResolutionSeed().originalStatement())) {
+            return seed.claimResolutionSeed().originalStatement();
+        }
+        return seed.rawText();
+    }
+
     private IntakeAgentTurnResult degraded(
             JsonNode previousScrollSnapshot, String reason, String traceId) {
         JsonNode scroll =
@@ -539,6 +582,10 @@ public class IntakeAgentTurnService {
 
     private static String blankToNull(String value) {
         return value == null || value.isBlank() ? null : value.trim();
+    }
+
+    private static String blankToNullPreservingText(String value) {
+        return value == null || value.isBlank() ? null : value;
     }
 
     private static String validIdentifierOrNull(String value) {

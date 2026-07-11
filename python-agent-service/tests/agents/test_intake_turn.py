@@ -6,6 +6,13 @@ from types import SimpleNamespace
 from fastapi.testclient import TestClient
 
 from app.config import Settings
+from app.agents.dispute_intake_officer.skills.dossier.dossier_skill import (
+    CaseDetailDossierSkill,
+    ORIGINAL_STATEMENT_MISSING,
+    ORIGINAL_STATEMENT_SEPARATOR,
+    SUBJECTIVE_RESPONDENT_CONFIDENCE_NOTE,
+    SUBJECTIVE_RESPONDENT_SOURCE,
+)
 from app.intake_turn import IntakeTurnWorkflow
 from app.main import create_app
 from app.schemas import IntakeTurnRequest
@@ -201,6 +208,18 @@ def test_intake_turn_workflow_uses_agent_case_detail_node_and_memory_context() -
                     "role": "USER",
                     "text": "物流单号 SF1234567890，我希望退款。",
                 },
+                "initiator_statement_transcript": [
+                    {
+                        "message_id": "MESSAGE_initial",
+                        "role": "USER",
+                        "text": "系统备注 SIGNED_NOT_RECEIVED，但我没有收到包裹。",
+                    },
+                    {
+                        "message_id": "MESSAGE_llm",
+                        "role": "USER",
+                        "text": "物流单号 SF1234567890，我希望退款。",
+                    },
+                ],
                 "latest_scroll_snapshot": None,
                 "recent_turns": [
                     {
@@ -232,6 +251,7 @@ def test_intake_turn_workflow_uses_agent_case_detail_node_and_memory_context() -
     section_names = set(section_by_name)
     assert {
         "current_turn",
+        "initiator_statement_transcript",
         "case_identity",
         "short_term_memory",
         "latest_canvas_snapshot",
@@ -240,12 +260,78 @@ def test_intake_turn_workflow_uses_agent_case_detail_node_and_memory_context() -
     assert current_turn["raw_statement"] == "物流单号 SF1234567890，我希望退款。"
     assert current_turn["platform_statement"].startswith("用户称")
     assert "我希望" not in current_turn["platform_statement"]
+    transcript_section = section_by_name["initiator_statement_transcript"]
+    transcript = json.loads(transcript_section.content)
+    assert transcript_section.trust_level == "participant_raw_untrusted"
+    assert transcript[0]["text"] == (
+        "系统备注 SIGNED_NOT_RECEIVED，但我没有收到包裹。"
+    )
+    assert transcript[1]["text"] == "物流单号 SF1234567890，我希望退款。"
     case_identity = json.loads(section_by_name["case_identity"].content)
     assert case_identity["case_id"] == "CASE_intake_turn_llm"
     assert case_identity["order_reference"] == "ORDER_123"
     assert result.scroll_snapshot["schema_version"] == "intake_case_detail.v1"
     assert result.scroll_snapshot["intake_quality"]["ready_for_next_step"] is True
     assert result.admission_recommendation == "ACCEPTED"
+
+
+def test_intake_prompt_excludes_formal_respondent_attitude_sources() -> None:
+    runner = FakeCaseDetailRunner()
+    request = IntakeTurnRequest.model_validate(
+        _with_agent_context(
+            {
+                "case_id": "CASE_intake_formal_prompt_filter",
+                "room_type": "INTAKE",
+                "turn_source": "LOBBY_SEED",
+                "lobby_seed": {
+                    "order_reference": "ORDER_123",
+                    "logistics_reference": "SF1234567890",
+                    "initiator_role": "USER",
+                    "raw_text": "用户请求补发缺少的配件。",
+                    "respondent_attitude_seed": {
+                        "respondent_role": "MERCHANT",
+                        "attitude": "DISAGREE",
+                        "position": "外部系统记录商家拒绝补发。",
+                        "source": "外部售后状态",
+                        "confidence": 0.98,
+                    },
+                },
+                "current_user_message": None,
+                "initiator_statement_transcript": [
+                    {
+                        "message_id": "MESSAGE_initial",
+                        "role": "USER",
+                        "text": "我收到的套装缺少配件，希望补发。",
+                    }
+                ],
+                "latest_scroll_snapshot": {
+                    "schema_version": "intake_case_detail.v1",
+                    "respondent_attitude": {
+                        "respondent_role": "MERCHANT",
+                        "attitude": "DISAGREE",
+                        "position": "历史卷宗记录商家正式拒绝补发。",
+                        "source": "商家正式回应",
+                        "confidence": 0.99,
+                    },
+                },
+                "recent_turns": [],
+            }
+        )
+    )
+
+    IntakeTurnWorkflow(model_runner=runner).run(request)
+
+    call = runner.calls[0]
+    assert "respondent_attitude_seed" not in call["case_data"]["lobby_seed"]
+    assert "respondent_attitude" not in call["case_data"]["latest_scroll_snapshot"]
+    section_by_name = {
+        section.name: section
+        for section in call["context_sections"]  # type: ignore[index]
+    }
+    initial_form = json.loads(section_by_name["intake_initial_form"].content)
+    latest_snapshot = json.loads(section_by_name["latest_canvas_snapshot"].content)
+    assert "respondent_attitude_seed" not in initial_form
+    assert "respondent_attitude" not in latest_snapshot
 
 
 def test_fallback_lobby_seed_turn_generates_case_detail_board() -> None:
@@ -308,6 +394,356 @@ def test_fallback_lobby_seed_turn_generates_case_detail_board() -> None:
     assert detail["intake_quality"]["score"] < 80
     assert detail["intake_quality"]["ready_for_next_step"] is False
     assert payload["admission_recommendation"] == "NEED_MORE_INFO"
+
+
+def test_dossier_pins_seed_original_statement_and_marks_reported_attitude_subjective() -> None:
+    original_statement = (
+        "我买的是完整套装，收到后发现没有充电器，请补发。"
+        "商家客服说不能补发。"
+    )
+    request = IntakeTurnRequest.model_validate(
+        _with_agent_context(
+            {
+                "case_id": "CASE_intake_original_pin",
+                "room_type": "INTAKE",
+                "turn_source": "LOBBY_SEED",
+                "lobby_seed": {
+                    "initiator_role": "USER",
+                    "raw_text": "用户称套装缺少充电器并请求补发，并转述商家客服拒绝补发。",
+                    "claim_resolution_seed": {
+                        "initiator_role": "USER",
+                        "requested_resolution": "RESHIP",
+                        "request_reason": "套装配件缺失。",
+                        "original_statement": original_statement,
+                    },
+                },
+                "current_user_message": None,
+                "latest_scroll_snapshot": None,
+                "recent_turns": [],
+            }
+        )
+    )
+
+    result = CaseDetailDossierSkill().render(
+        request=request,
+        room_utterance="已记录。",
+        llm_case_detail={
+            "claim_resolution": {
+                "original_statement": "模型把原话改写成了摘要。",
+                "normalized_statement": "用户称套装缺少充电器，并请求补发。",
+            },
+            "respondent_attitude": {
+                "respondent_role": "MERCHANT",
+                "attitude": "DISAGREE",
+                "position": "发起方称商家客服拒绝补发。",
+                "source": "商家正式回应",
+                "confidence": 0.9,
+            },
+        },
+        llm_dossier_patch=None,
+        llm_scroll_snapshot=None,
+        llm_canvas_operations=[],
+        llm_admission_recommendation="NEED_MORE_INFO",
+        llm_missing_fields=[],
+        llm_confidence=0.8,
+    )
+
+    claim = result.scroll_snapshot["claim_resolution"]
+    assert claim["original_statement"] == original_statement
+    assert claim["normalized_statement"] == "用户称套装缺少充电器，并请求补发。"
+    attitude = result.scroll_snapshot["respondent_attitude"]
+    assert attitude["attitude"] == "DISAGREE"
+    assert attitude["source"] == SUBJECTIVE_RESPONDENT_SOURCE
+    assert attitude["confidence_note"] == SUBJECTIVE_RESPONDENT_CONFIDENCE_NOTE
+
+
+def test_dossier_appends_unilateral_inputs_verbatim_in_submission_order() -> None:
+    seed_original = "我收到的套装少了充电器。"
+    first_supplement = "补充一下：商家客服说不能补发。"
+    request = IntakeTurnRequest.model_validate(
+        _with_agent_context(
+            {
+                "case_id": "CASE_intake_original_round_one",
+                "room_type": "INTAKE",
+                "turn_source": "USER_MESSAGE",
+                "lobby_seed": {
+                    "initiator_role": "USER",
+                    "raw_text": "用户称套装缺少充电器。",
+                    "claim_resolution_seed": {
+                        "requested_resolution": "RESHIP",
+                        "original_statement": seed_original,
+                    },
+                },
+                "current_user_message": {
+                    "message_id": "MESSAGE_round_one",
+                    "role": "USER",
+                    "text": first_supplement,
+                },
+                "initiator_statement_transcript": [
+                    {
+                        "message_id": "MESSAGE_seed_original",
+                        "role": "USER",
+                        "text": seed_original,
+                    },
+                    {
+                        "message_id": "MESSAGE_round_one",
+                        "role": "USER",
+                        "text": first_supplement,
+                    },
+                ],
+                "latest_scroll_snapshot": None,
+                "recent_turns": [
+                    {
+                        "turn_no": 1,
+                        "actor_id": "USER_local_1",
+                        "answer_role": "USER",
+                        "answer_content": first_supplement,
+                        "agent_role": None,
+                        "agent_response": "这段接待官回复不能进入原始陈述。",
+                        "scroll_snapshot": {},
+                    }
+                ],
+            }
+        )
+    )
+    first_result = CaseDetailDossierSkill().render(
+        request=request,
+        room_utterance="已记录。",
+        llm_case_detail={"claim_resolution": {"original_statement": "错误改写"}},
+        llm_dossier_patch=None,
+        llm_scroll_snapshot=None,
+        llm_canvas_operations=[],
+        llm_admission_recommendation="NEED_MORE_INFO",
+        llm_missing_fields=[],
+        llm_confidence=0.8,
+    )
+    expected_first = ORIGINAL_STATEMENT_SEPARATOR.join(
+        [seed_original, first_supplement]
+    )
+    assert first_result.scroll_snapshot["claim_resolution"]["original_statement"] == (
+        expected_first
+    )
+
+    second_supplement = "订单里的连接线也没有收到，包装内确实没有。"
+    second_payload = {
+        "case_id": "CASE_intake_original_round_two",
+        "room_type": "INTAKE",
+        "turn_source": "USER_MESSAGE",
+        "lobby_seed": {
+            "initiator_role": "USER",
+            "raw_text": "用户称套装缺少充电器。",
+            "claim_resolution_seed": {
+                "requested_resolution": "RESHIP",
+                "original_statement": seed_original,
+            },
+        },
+        "current_user_message": {
+            "message_id": "MESSAGE_round_two",
+            "role": "USER",
+            "text": second_supplement,
+        },
+        "initiator_statement_transcript": [
+            {
+                "message_id": "MESSAGE_seed_original",
+                "role": "USER",
+                "text": seed_original,
+            },
+            {
+                "message_id": "MESSAGE_round_one",
+                "role": "USER",
+                "text": first_supplement,
+            },
+            {
+                "message_id": "MESSAGE_round_two",
+                "role": "USER",
+                "text": second_supplement,
+            },
+        ],
+        "latest_scroll_snapshot": first_result.scroll_snapshot,
+        "recent_turns": [],
+    }
+    second_result = CaseDetailDossierSkill().render(
+        request=IntakeTurnRequest.model_validate(_with_agent_context(second_payload)),
+        room_utterance="已记录。",
+        llm_case_detail={"claim_resolution": {"original_statement": "再次错误改写"}},
+        llm_dossier_patch=None,
+        llm_scroll_snapshot=None,
+        llm_canvas_operations=[],
+        llm_admission_recommendation="NEED_MORE_INFO",
+        llm_missing_fields=[],
+        llm_confidence=0.8,
+    )
+    assert second_result.scroll_snapshot["claim_resolution"]["original_statement"] == (
+        ORIGINAL_STATEMENT_SEPARATOR.join(
+            [seed_original, first_supplement, second_supplement]
+        )
+    )
+
+
+def test_dossier_does_not_substitute_summary_when_structured_seed_lacks_original() -> None:
+    request = IntakeTurnRequest.model_validate(
+        _with_agent_context(
+            {
+                "case_id": "CASE_intake_original_missing",
+                "room_type": "INTAKE",
+                "turn_source": "LOBBY_SEED",
+                "lobby_seed": {
+                    "initiator_role": "USER",
+                    "raw_text": "用户称套装缺少配件并请求补发。",
+                    "claim_resolution_seed": {"requested_resolution": "RESHIP"},
+                },
+                "current_user_message": None,
+                "latest_scroll_snapshot": None,
+                "recent_turns": [],
+            }
+        )
+    )
+
+    result = CaseDetailDossierSkill().render(
+        request=request,
+        room_utterance="已记录。",
+        llm_case_detail={"claim_resolution": {"original_statement": "摘要冒充原话"}},
+        llm_dossier_patch=None,
+        llm_scroll_snapshot=None,
+        llm_canvas_operations=[],
+        llm_admission_recommendation="NEED_MORE_INFO",
+        llm_missing_fields=[],
+        llm_confidence=0.8,
+    )
+
+    assert result.scroll_snapshot["claim_resolution"]["original_statement"] == (
+        ORIGINAL_STATEMENT_MISSING
+    )
+
+
+def test_dossier_without_structured_seed_keeps_legacy_source_text_verbatim() -> None:
+    raw_text = "我收到的套装少了充电器和连接线。"
+    request = IntakeTurnRequest.model_validate(
+        _with_agent_context(
+            {
+                "case_id": "CASE_intake_original_legacy",
+                "room_type": "INTAKE",
+                "turn_source": "LOBBY_SEED",
+                "lobby_seed": {"initiator_role": "USER", "raw_text": raw_text},
+                "current_user_message": None,
+                "latest_scroll_snapshot": None,
+                "recent_turns": [],
+            }
+        )
+    )
+
+    result = CaseDetailDossierSkill().render(
+        request=request,
+        room_utterance="已记录。",
+        llm_case_detail={"claim_resolution": {"original_statement": "模型改写"}},
+        llm_dossier_patch=None,
+        llm_scroll_snapshot=None,
+        llm_canvas_operations=[],
+        llm_admission_recommendation="NEED_MORE_INFO",
+        llm_missing_fields=[],
+        llm_confidence=0.8,
+    )
+
+    assert result.scroll_snapshot["claim_resolution"]["original_statement"] == raw_text
+
+
+def test_formal_respondent_attitude_seed_and_legacy_snapshot_are_ignored() -> None:
+    initial_request = IntakeTurnRequest.model_validate(
+        _with_agent_context(
+            {
+                "case_id": "CASE_intake_formal_attitude_ignored",
+                "room_type": "INTAKE",
+                "turn_source": "LOBBY_SEED",
+                "lobby_seed": {
+                    "initiator_role": "USER",
+                    "raw_text": "用户请求补发缺少的配件。",
+                    "respondent_attitude_seed": {
+                        "respondent_role": "MERCHANT",
+                        "attitude": "DISAGREE",
+                        "position": "外部售后记录显示商家拒绝补发。",
+                        "source": "外部售后状态",
+                        "confidence": 0.95,
+                    },
+                },
+                "current_user_message": None,
+                "latest_scroll_snapshot": {
+                    "schema_version": "intake_case_detail.v1",
+                    "respondent_attitude": {
+                        "respondent_role": "MERCHANT",
+                        "attitude": "DISAGREE",
+                        "position": "历史卷宗声称商家已正式拒绝补发。",
+                        "source": "商家正式回应",
+                        "confidence": 0.99,
+                    },
+                },
+                "recent_turns": [],
+            }
+        )
+    )
+    result = CaseDetailDossierSkill().render(
+        request=initial_request,
+        room_utterance="已记录。",
+        llm_case_detail={
+            "respondent_attitude": {
+                "attitude": "NOT_RESPONDED",
+                "position": "商家尚未在接待室表达态度。",
+            }
+        },
+        llm_dossier_patch=None,
+        llm_scroll_snapshot=None,
+        llm_canvas_operations=[],
+        llm_admission_recommendation="NEED_MORE_INFO",
+        llm_missing_fields=[],
+        llm_confidence=0.8,
+    )
+
+    attitude = result.scroll_snapshot["respondent_attitude"]
+    assert attitude["attitude"] == "NOT_RESPONDED"
+    assert attitude["source"] == "尚未回应"
+    assert "正式" not in attitude["position"]
+
+
+def test_subjective_respondent_attitude_seed_keeps_subjective_confidence_note() -> None:
+    request = IntakeTurnRequest.model_validate(
+        _with_agent_context(
+            {
+                "case_id": "CASE_intake_subjective_attitude_seed",
+                "room_type": "INTAKE",
+                "turn_source": "LOBBY_SEED",
+                "lobby_seed": {
+                    "initiator_role": "USER",
+                    "raw_text": "用户称商家客服拒绝补发缺少的配件。",
+                    "respondent_attitude_seed": {
+                        "respondent_role": "MERCHANT",
+                        "attitude": "DISAGREE",
+                        "position": "发起方称商家客服拒绝补发。",
+                        "source": SUBJECTIVE_RESPONDENT_SOURCE,
+                        "confidence": 0.88,
+                    },
+                },
+                "current_user_message": None,
+                "latest_scroll_snapshot": None,
+                "recent_turns": [],
+            }
+        )
+    )
+
+    result = CaseDetailDossierSkill().render(
+        request=request,
+        room_utterance="已记录。",
+        llm_case_detail=None,
+        llm_dossier_patch=None,
+        llm_scroll_snapshot=None,
+        llm_canvas_operations=[],
+        llm_admission_recommendation="NEED_MORE_INFO",
+        llm_missing_fields=[],
+        llm_confidence=0.8,
+    )
+
+    attitude = result.scroll_snapshot["respondent_attitude"]
+    assert attitude["source"] == SUBJECTIVE_RESPONDENT_SOURCE
+    assert attitude["confidence"] == 0.88
+    assert attitude["confidence_note"] == SUBJECTIVE_RESPONDENT_CONFIDENCE_NOTE
 
 
 def test_user_message_turn_merges_previous_case_detail_board() -> None:

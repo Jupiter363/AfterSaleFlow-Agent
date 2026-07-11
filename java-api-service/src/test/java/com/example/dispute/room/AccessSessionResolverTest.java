@@ -2,7 +2,6 @@ package com.example.dispute.room;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -13,6 +12,7 @@ import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.RiskLevel;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
+import com.example.dispute.room.application.AccessSessionInitializer;
 import com.example.dispute.room.application.AccessSessionResolver;
 import com.example.dispute.room.domain.PermissionLevel;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseAccessSessionEntity;
@@ -23,9 +23,9 @@ import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 @ExtendWith(MockitoExtension.class)
 class AccessSessionResolverTest {
@@ -33,6 +33,7 @@ class AccessSessionResolverTest {
     @Mock private FulfillmentCaseRepository caseRepository;
     @Mock private CaseParticipantRepository participantRepository;
     @Mock private CaseAccessSessionRepository accessSessionRepository;
+    @Mock private AccessSessionInitializer accessSessionInitializer;
 
     private AccessSessionResolver resolver;
 
@@ -40,7 +41,10 @@ class AccessSessionResolverTest {
     void setUp() {
         resolver =
                 new AccessSessionResolver(
-                        caseRepository, participantRepository, accessSessionRepository);
+                        caseRepository,
+                        participantRepository,
+                        accessSessionRepository,
+                        accessSessionInitializer);
     }
 
     @Test
@@ -55,8 +59,20 @@ class AccessSessionResolverTest {
                                 ActorRole.USER,
                                 PermissionLevel.PARTY_USER))
                 .thenReturn(Optional.empty());
-        when(accessSessionRepository.save(any()))
-                .thenAnswer(invocation -> invocation.getArgument(0));
+        CaseAccessSessionEntity created =
+                CaseAccessSessionEntity.create(
+                        "ACCESS_CREATED_USER",
+                        "default",
+                        dispute.getId(),
+                        "user-local",
+                        ActorRole.USER,
+                        PermissionLevel.PARTY_USER,
+                        "user-local");
+        when(accessSessionInitializer.initializeInCurrentTransaction(
+                        dispute.getId(),
+                        new AuthenticatedActor("user-local", ActorRole.USER),
+                        PermissionLevel.PARTY_USER))
+                .thenReturn(created);
 
         CaseAccessSessionEntity session =
                 resolver.resolve(
@@ -64,10 +80,50 @@ class AccessSessionResolverTest {
 
         assertThat(session.getActorId()).isEqualTo("user-local");
         assertThat(session.getPermissionLevel()).isEqualTo(PermissionLevel.PARTY_USER);
-        ArgumentCaptor<CaseAccessSessionEntity> saved =
-                ArgumentCaptor.forClass(CaseAccessSessionEntity.class);
-        verify(accessSessionRepository).save(saved.capture());
-        assertThat(saved.getValue().getCaseId()).isEqualTo(dispute.getId());
+        verify(accessSessionInitializer)
+                .initializeInCurrentTransaction(
+                        dispute.getId(),
+                        new AuthenticatedActor("user-local", ActorRole.USER),
+                        PermissionLevel.PARTY_USER);
+    }
+
+    @Test
+    void initializesMissingSessionInIndependentTransactionWhenCallerIsReadOnly() {
+        FulfillmentCaseEntity dispute = dispute();
+        AuthenticatedActor actor = new AuthenticatedActor("user-local", ActorRole.USER);
+        CaseAccessSessionEntity created =
+                CaseAccessSessionEntity.create(
+                        "ACCESS_CREATED_READ_ONLY",
+                        "default",
+                        dispute.getId(),
+                        actor.actorId(),
+                        actor.role(),
+                        PermissionLevel.PARTY_USER,
+                        actor.actorId());
+        when(caseRepository.findById(dispute.getId())).thenReturn(Optional.of(dispute));
+        when(accessSessionRepository
+                        .findByTenantIdAndCaseIdAndActorIdAndActorRoleAndPermissionLevel(
+                                "default",
+                                dispute.getId(),
+                                actor.actorId(),
+                                actor.role(),
+                                PermissionLevel.PARTY_USER))
+                .thenReturn(Optional.empty());
+        when(accessSessionInitializer.initializeInNewTransaction(
+                        dispute.getId(), actor, PermissionLevel.PARTY_USER))
+                .thenReturn(created);
+
+        TransactionSynchronizationManager.setCurrentTransactionReadOnly(true);
+        try {
+            assertThat(resolver.resolve(dispute.getId(), actor).getId())
+                    .isEqualTo("ACCESS_CREATED_READ_ONLY");
+        } finally {
+            TransactionSynchronizationManager.setCurrentTransactionReadOnly(false);
+        }
+
+        verify(accessSessionInitializer)
+                .initializeInNewTransaction(
+                        dispute.getId(), actor, PermissionLevel.PARTY_USER);
     }
 
     @Test

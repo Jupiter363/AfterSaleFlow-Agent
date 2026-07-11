@@ -43,6 +43,9 @@ def test_intake_officer_prompt_declares_context_pack_workflow_contract() -> None
     assert "claim_resolution" in system_prompt
     assert "respondent_attitude" in system_prompt
     assert "dispute_core_state" in system_prompt
+    assert "只能表达“发起方所转述的另一方态度”" in system_prompt
+    assert "外部正式回应状态会在进入模型前被移除" in system_prompt
+    assert '"source": "发起方单方陈述（主观） / 尚未回应"' in system_prompt
 
 
 def test_evidence_clerk_prompt_declares_context_pack_and_party_isolation_contract() -> None:

@@ -3,7 +3,7 @@ Harness case narration rules
 Separate raw party statements from platform narration.
 
 1. Raw statement fields may preserve the party's first-person wording. Examples:
-   `raw_statement`, `user_original_statement`, `merchant_original_statement`,
+   `raw_statement`, `original_statement`, `user_original_statement`, `merchant_original_statement`,
    `latest_party_message`, and `quote`.
 
 2. Platform narration must use third-person, neutral wording. This includes case

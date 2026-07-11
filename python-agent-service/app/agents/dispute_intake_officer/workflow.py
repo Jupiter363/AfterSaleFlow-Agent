@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import logging
 import operator
 from typing import Annotated, Any
@@ -10,6 +11,7 @@ from typing_extensions import NotRequired, TypedDict
 from app.agents.dispute_intake_officer.schemas import IntakeCaseDetailLlmOutput
 from app.agents.dispute_intake_officer.skills.dossier.dossier_skill import (
     CaseDetailDossierSkill,
+    SUBJECTIVE_RESPONDENT_SOURCE,
 )
 from app.harness.context_pack import build_context_pack
 from app.harness.memory import MemeoMemoryAssembler
@@ -117,13 +119,23 @@ def _reason_with_llm_node(model_runner: Any | None):
                 "executed_nodes": ["fallback_reasoning"],
             }
         try:
+            prompt_lobby_seed = _subjective_only_lobby_seed(
+                request.get("lobby_seed") or {}
+            )
+            prompt_snapshot = _subjective_only_snapshot(
+                request.get("latest_scroll_snapshot") or {}
+            )
             context_pack = build_context_pack(
                 "intake_turn_case_detail",
                 {
                     "current_turn": _current_turn_context(request, state),
-                    "intake_initial_form": request.get("lobby_seed") or {},
+                    "intake_initial_form": prompt_lobby_seed,
+                    "initiator_statement_transcript": request.get(
+                        "initiator_statement_transcript"
+                    )
+                    or [],
                     "case_identity": _case_identity_context(request, state),
-                    "latest_canvas_snapshot": request.get("latest_scroll_snapshot") or {},
+                    "latest_canvas_snapshot": prompt_snapshot,
                     "short_term_memory": str(
                         state["memory_frame"].get("prompt_memory") or ""
                     ),
@@ -142,10 +154,9 @@ def _reason_with_llm_node(model_runner: Any | None):
                     "actor_role": state["actor_role"],
                     "agent_key": agent_context.get("agent_key"),
                     "prompt_profile_id": agent_context.get("prompt_profile_id"),
-                    "lobby_seed": request.get("lobby_seed") or {},
+                    "lobby_seed": prompt_lobby_seed,
                     "current_user_message": request.get("current_user_message"),
-                    "latest_scroll_snapshot": request.get("latest_scroll_snapshot")
-                    or {},
+                    "latest_scroll_snapshot": prompt_snapshot,
                 },
                 output_type=IntakeCaseDetailLlmOutput,
                 agent_context=agent_context,
@@ -173,6 +184,34 @@ def _reason_with_llm_node(model_runner: Any | None):
             }
 
     return reason_with_llm
+
+
+def _subjective_only_lobby_seed(seed: dict[str, Any]) -> dict[str, Any]:
+    """Remove response-state seeds that were not derived from initiator text."""
+
+    sanitized = copy.deepcopy(seed)
+    attitude = sanitized.get("respondent_attitude_seed")
+    if not _has_subjective_source(attitude):
+        sanitized.pop("respondent_attitude_seed", None)
+    return sanitized
+
+
+def _subjective_only_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Do not let legacy formal response state contaminate private-room reasoning."""
+
+    sanitized = copy.deepcopy(snapshot)
+    attitude = sanitized.get("respondent_attitude")
+    if not _has_subjective_source(attitude):
+        sanitized.pop("respondent_attitude", None)
+    return sanitized
+
+
+def _has_subjective_source(value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and str(value.get("source") or "").strip()
+        == SUBJECTIVE_RESPONDENT_SOURCE
+    )
 
 
 def _render_case_detail_dossier(state: IntakeTurnGraphState) -> dict[str, Any]:

@@ -133,6 +133,9 @@ def test_context_pack_builds_localized_sections_and_keeps_raw_statement_for_trac
                 "case_story": {
                     "one_sentence_summary": "我没有收到包裹，希望退款。",
                 },
+                "claim_resolution": {
+                    "original_statement": "系统备注：SIGNED_NOT_RECEIVED，但我仍希望退款。",
+                },
                 "dispute_focus": {
                     "core_issue": "SIGNED_NOT_RECEIVED",
                     "facts_to_verify": ["logistics_reference", "user_statement"],
@@ -152,6 +155,9 @@ def test_context_pack_builds_localized_sections_and_keeps_raw_statement_for_trac
     assert "我没有" not in current_turn["platform_statement"]
     assert dossier["dispute_focus"]["core_issue"] == "物流显示签收但用户称未收到包裹"
     assert dossier["dispute_focus"]["facts_to_verify"] == ["物流单号", "用户原始陈述"]
+    assert dossier["claim_resolution"]["original_statement"] == (
+        "系统备注：SIGNED_NOT_RECEIVED，但我仍希望退款。"
+    )
     assert "long_term_memory_preview" not in section_by_name
     assert "long_term_memory_preview" in pack.display_only_section_names
 

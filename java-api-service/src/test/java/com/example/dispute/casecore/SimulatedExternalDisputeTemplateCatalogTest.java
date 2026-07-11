@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.example.dispute.casecore.application.SimulatedExternalDisputeTemplate;
 import com.example.dispute.casecore.application.SimulatedExternalDisputeTemplateCatalog;
+import com.example.dispute.config.ActorRole;
 import java.util.stream.IntStream;
 import org.junit.jupiter.api.Test;
 
@@ -31,6 +32,11 @@ class SimulatedExternalDisputeTemplateCatalogTest {
                 .allSatisfy(
                         template -> {
                             assertThat(template.description()).isNotBlank();
+                            assertThat(template.originalStatement())
+                                    .isNotBlank()
+                                    .isNotEqualTo(template.description())
+                                    .contains("我")
+                                    .containsAnyOf("商家", "客服", "对方");
                             assertThat(template.riskLevel()).isNotNull();
                             assertThat(template.requestedResolution())
                                     .isIn(
@@ -54,6 +60,33 @@ class SimulatedExternalDisputeTemplateCatalogTest {
                                             "NEED_MORE_INFO",
                                             "PLATFORM_UNKNOWN");
                             assertThat(template.respondentPosition()).isNotBlank();
+
+                            SimulatedExternalDisputeTemplate.InitiatorPerspective user =
+                                    template.forInitiator(ActorRole.USER);
+                            assertThat(user.originalStatement())
+                                    .isEqualTo(template.originalStatement());
+                            assertThat(user.requestedResolution())
+                                    .isEqualTo(template.requestedResolution());
+                            assertThat(user.respondentPosition())
+                                    .isEqualTo(template.respondentPosition());
+
+                            SimulatedExternalDisputeTemplate.InitiatorPerspective merchant =
+                                    template.forInitiator(ActorRole.MERCHANT);
+                            assertThat(merchant.originalStatement())
+                                    .startsWith("我们")
+                                    .contains("用户的诉求是：")
+                                    .contains(template.requestReason())
+                                    .isNotEqualTo(template.originalStatement());
+                            assertThat(merchant.requestReason())
+                                    .startsWith("我们")
+                                    .contains("希望平台核验");
+                            assertThat(merchant.respondentPosition())
+                                    .isEqualTo("对方主张：" + template.requestReason())
+                                    .doesNotContain(template.respondentPosition());
+                            assertThat(merchant.requestedResolution())
+                                    .isIn(
+                                            template.requestedResolution(),
+                                            "VERIFY_OR_EXPLAIN_ONLY");
                         });
     }
 }
