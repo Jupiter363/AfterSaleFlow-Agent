@@ -4,9 +4,9 @@
 
 **Goal:** Harden the shared hearing court so its 720–820px canvas preserves fixed status and input docks, gives the transcript the only flexible center space, and replaces narrow-screen evidence columns with accessible overlay drawers.
 
-**Architecture:** Keep all business state and API orchestration in `HearingCourtView.vue`. Rework only its hearing-specific markup and scoped styles: the central court becomes an explicit two- or three-row grid, the existing evidence rails become desktop columns or narrow overlay drawers without duplicating data, and abnormal transcript expansion is driven by a Unicode-character threshold in the view. Vitest mounts the real view with deterministic role, message, and evidence fixtures; browser breakpoint geometry is left as an explicit shared-Playwright handoff because that foundation is absent on this branch.
+**Architecture:** Keep all business state and API orchestration in `HearingCourtView.vue`. Rework only its hearing-specific markup and scoped styles: the central court becomes an explicit two- or three-row grid, the existing evidence rails become desktop columns or narrow overlay drawers without duplicating data, and abnormal transcript expansion is driven by a Unicode-character threshold in the view. Vitest mounts the real view with deterministic role, message, and evidence fixtures; the hearing-only Playwright fixture/spec now exercises rendered Chromium geometry through the shared browser-test foundation.
 
-**Tech Stack:** Vue 3.5, Vue Test Utils 2.4, Vitest 3, jsdom 26, scoped CSS, pnpm 11.7.
+**Tech Stack:** Vue 3.5, Vue Test Utils 2.4, Vitest 3, jsdom 26, Playwright 1.61, scoped CSS, pnpm 11.7.
 
 ---
 
@@ -16,13 +16,17 @@
 - RED: `corepack pnpm exec vitest run src/views/disputes/HearingCourtView.test.js` reported 36 tests with 8 expected failures. The failures were the eight newly added groups: fixed party/reviewer rows, narrow horizontal stages, 1499/1500/2000 threshold behavior, 50-message scroll responsibility, 100-evidence rail responsibility, accessible evidence drawers, the 1220px container breakpoint, and three-role shell semantics.
 - GREEN: after the minimum hearing-specific implementation, the target command reported 36/36 passing. One intermediate 35/36 run exposed an over-broad CSS test regex that crossed rule boundaries; narrowing the assertion to a single CSS block restored the intended test without changing production behavior.
 - Full verification: `corepack pnpm test` reported 30 files and 211 tests passing. `corepack pnpm build` completed successfully; Vite retained the repository's existing large-chunk warning.
-- Shared browser handoff: no Playwright package/configuration exists on this branch, so the required real-browser breakpoint matrix remains an integration item rather than an unverified completion claim.
+- Browser verification follow-up: added `frontend/tests/browser/fixtures/hearing-court.fixture.js` and `frontend/tests/browser/hearing-court.layout.spec.js`, then exercised them through the shared Playwright foundation. The Chromium matrix covers 1260/1259, 1221/1220/1219, 1181/1180, 681/680, 390, 320, and 1024×600; it checks fixed-canvas containment, the three-stage and input-dock geometry, document-level horizontal overflow, exclusive evidence drawers, Tab/Shift+Tab focus looping, Escape focus restoration, and drawer-state cleanup when the workspace expands back to 1220px.
+- Accessibility/error follow-up: the hearing ledger and retained settlement-dialog close controls now expose 44×44px targets. A 200-character unbroken error is rendered and verified without alert or document horizontal overflow.
+- Follow-up verification: the final HearingCourtView target run reported 41/41 Vitest cases passing, the hearing-only Chromium run reported 18/18 Playwright cases passing, and the production Vite build completed successfully with only the repository's existing large-chunk warning.
 
 ## File map
 
 - Create: `docs/superpowers/plans/2026-07-11-hearing-court-fixed-shell-layout.md`
 - Modify: `frontend/src/views/disputes/HearingCourtView.test.js`
 - Modify: `frontend/src/views/disputes/HearingCourtView.vue`
+- Create: `frontend/tests/browser/fixtures/hearing-court.fixture.js`
+- Create: `frontend/tests/browser/hearing-court.layout.spec.js`
 
 No shared room component, global stylesheet, package manifest, lockfile, CI, Playwright configuration, intake room, evidence room, overview, or outcome file is in scope.
 
@@ -227,14 +231,14 @@ git diff --check
 
 ```powershell
 git status --short
-git diff -- frontend/src/views/disputes/HearingCourtView.vue frontend/src/views/disputes/HearingCourtView.test.js docs/superpowers/plans/2026-07-11-hearing-court-fixed-shell-layout.md
+git diff -- frontend/src/views/disputes/HearingCourtView.vue frontend/src/views/disputes/HearingCourtView.test.js frontend/tests/browser/hearing-court.layout.spec.js frontend/tests/browser/fixtures/hearing-court.fixture.js docs/superpowers/plans/2026-07-11-hearing-court-fixed-shell-layout.md
 ```
 
-Expected: no changed file outside the three listed paths.
+Expected: no changed file outside the five listed paths.
 
-- [ ] **Step 4: Record the shared browser handoff**
+- [x] **Step 4: Run and record the hearing browser matrix**
 
-The future hearing Playwright spec must cover 1260/1259, 1221/1220, 1181/1180, 681/680, 390, 320, and 1024×600. It must assert canvas geometry, exclusive scroll rails, drawer containment/Escape behavior, and no document-level horizontal overflow.
+`frontend/tests/browser/hearing-court.layout.spec.js` covers 1260/1259, 1221/1220/1219, 1181/1180, 681/680, 390, 320, and 1024×600. It asserts canvas geometry, exclusive scroll rails, drawer containment, focus looping and Escape behavior, cross-breakpoint dialog-state cleanup, 44px ledger controls, long unbroken error containment, and no document-level horizontal overflow.
 
 - [ ] **Step 5: Commit**
 

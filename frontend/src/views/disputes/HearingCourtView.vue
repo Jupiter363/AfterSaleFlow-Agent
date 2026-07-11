@@ -3506,8 +3506,8 @@ onBeforeUnmount(() => {
 }
 .hearing-ledger header button {
   display: grid;
-  width: 36px;
-  height: 36px;
+  width: 44px;
+  height: 44px;
   flex: 0 0 auto;
   place-items: center;
   color: #53617a;
@@ -3589,6 +3589,10 @@ onBeforeUnmount(() => {
   left: 22px;
   z-index: 12;
   max-width: calc(100% - 44px);
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
   padding: 10px 14px;
   margin: 0;
   color: #a94552;
@@ -3610,7 +3614,7 @@ onBeforeUnmount(() => {
 }
 .settlement-dialog form header { display: flex; justify-content: space-between; gap: 20px; }
 .settlement-dialog form header h2 { margin: 6px 0 16px; color: #4a4651; }
-.settlement-dialog form header button { width: 36px; height: 36px; background: #f5ecd8; border: 0; border-radius: 50%; font-size: 21px; }
+.settlement-dialog form header button { width: 44px; height: 44px; background: #f5ecd8; border: 0; border-radius: 50%; font-size: 21px; }
 .settlement-dialog label { display: grid; gap: 7px; color: #695f61; font-size: 12px; }
 .settlement-dialog textarea { padding: 11px; color: #4c464d; background: #fff; border: 1px solid #e5d9bf; border-radius: 13px; resize: vertical; }
 .settlement-dialog p { color: #7d7170; font-size: 11px; }
@@ -3675,7 +3679,7 @@ onBeforeUnmount(() => {
     max-height: none;
     visibility: hidden;
     pointer-events: none;
-    transition: transform .2s ease, visibility .2s ease;
+    transition: transform .2s ease;
   }
   .party-evidence-rail--left {
     left: 0;

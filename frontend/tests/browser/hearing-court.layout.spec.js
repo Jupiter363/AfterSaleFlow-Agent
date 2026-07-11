@@ -47,6 +47,40 @@ async function expectNoDocumentHorizontalOverflow(page) {
   ).toBe(true);
 }
 
+async function expectCourtroomInsideWorkspace(page) {
+  const geometry = await page.evaluate(() => {
+    const workspace = document.querySelector(".room-shell__workspace");
+    const courtroom = document.querySelector("[data-hearing-courtroom-page]");
+    if (!workspace || !courtroom) return null;
+    const workspaceRect = workspace.getBoundingClientRect();
+    const courtroomRect = courtroom.getBoundingClientRect();
+    return {
+      workspace: {
+        left: workspaceRect.left,
+        right: workspaceRect.right,
+        width: workspaceRect.width,
+      },
+      courtroom: {
+        left: courtroomRect.left,
+        right: courtroomRect.right,
+        width: courtroomRect.width,
+        height: courtroomRect.height,
+      },
+    };
+  });
+  expect(geometry).not.toBeNull();
+  expect(geometry.courtroom.left).toBeGreaterThanOrEqual(
+    geometry.workspace.left - 1,
+  );
+  expect(geometry.courtroom.right).toBeLessThanOrEqual(
+    geometry.workspace.right + 1,
+  );
+  expect(geometry.courtroom.width).toBeLessThanOrEqual(
+    geometry.workspace.width + 1,
+  );
+  expect(geometry.courtroom.height).toBeGreaterThanOrEqual(720);
+  expect(geometry.courtroom.height).toBeLessThanOrEqual(820);
+}
 async function setHearingWorkspaceWidth(page, width) {
   await page.locator(".app-page").evaluate((element, nextWidth) => {
     element.style.setProperty("width", `${nextWidth}px`, "important");
@@ -119,6 +153,20 @@ async function expectOnlyDrawerOpen(page, side) {
   await expect(openDrawers).toHaveAttribute("data-evidence-drawer-open", side);
 }
 
+async function expectDrawerFocusLoop(page, side) {
+  const drawer = page.locator(`[data-evidence-drawer-open="${side}"]`);
+  const closeButton = drawer.locator(`[data-close-evidence-drawer="${side}"]`);
+  await expect(closeButton).toBeFocused();
+
+  await page.keyboard.press("Shift+Tab");
+  expect(
+    await drawer.evaluate((element) => element.contains(document.activeElement)),
+  ).toBe(true);
+  await expect(closeButton).not.toBeFocused();
+
+  await page.keyboard.press("Tab");
+  await expect(closeButton).toBeFocused();
+}
 test("loads the deterministic hearing court in Chromium", async ({ page }) => {
   const pageErrors = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
@@ -157,6 +205,47 @@ test("keeps three columns through 1220px and switches to drawers below it", asyn
   await expectNoDocumentHorizontalOverflow(page);
 });
 
+for (const viewportWidth of [1260, 1259, 1181, 1180]) {
+  test(`keeps the fixed courtroom canvas contained at ${viewportWidth}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: viewportWidth, height: 900 });
+    await openHearingCourt(page);
+
+    expect(await gridColumnCount(page.locator("[data-hearing-courtroom-page]")))
+      .toBe(1);
+    await expect(page.locator(".evidence-drawer-launchers"))
+      .toHaveCSS("display", "flex");
+    await expectCourtroomInsideWorkspace(page);
+    await expectNoDocumentHorizontalOverflow(page);
+  });
+}
+
+for (const viewportWidth of [681, 680]) {
+  test(`keeps all hearing stages and the input dock contained at ${viewportWidth}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: viewportWidth, height: 900 });
+    await openHearingCourt(page);
+    const progress = page.locator("[data-hearing-progress-track]");
+    const stageCopies = page.locator("[data-round-progress-item] > div");
+
+    await expect(page.locator("[data-round-progress-item]")).toHaveCount(3);
+    expect(await gridColumnCount(progress)).toBe(3);
+    await expect(stageCopies.first()).toHaveCSS(
+      "display",
+      viewportWidth === 680 ? "grid" : "flex",
+    );
+    await expect(page.locator("[data-hearing-stage-dock]"))
+      .toHaveCSS("height", "122px");
+    await expect(page.locator("[data-round-input-bar]"))
+      .toHaveCSS("height", "154px");
+    expect(await gridColumnCount(page.locator(".round-input-bar__composer")))
+      .toBe(2);
+    await expectCourtroomInsideWorkspace(page);
+    await expectNoDocumentHorizontalOverflow(page);
+  });
+}
 for (const viewport of [
   { width: 390, height: 844 },
   { width: 320, height: 568 },
@@ -172,6 +261,34 @@ for (const viewport of [
   });
 }
 
+test("wraps a 200-character unbroken hearing error without document overflow", async ({
+  page,
+}) => {
+  const errorText = "E".repeat(200);
+  await page.setViewportSize({ width: 320, height: 568 });
+  await openHearingCourt(page, { loadError: errorText });
+  const alert = page.locator(".hearing-error");
+  await expect(alert).toHaveText(errorText);
+  const containment = await alert.evaluate((element) => {
+    const canvas = element.closest(".courtroom-center");
+    const canvasRect = canvas.getBoundingClientRect();
+    const alertRect = element.getBoundingClientRect();
+    return {
+      alertLeft: alertRect.left,
+      alertRight: alertRect.right,
+      alertClientWidth: element.clientWidth,
+      alertScrollWidth: element.scrollWidth,
+      canvasLeft: canvasRect.left,
+      canvasRight: canvasRect.right,
+    };
+  });
+  expect(containment.alertLeft).toBeGreaterThanOrEqual(containment.canvasLeft - 1);
+  expect(containment.alertRight).toBeLessThanOrEqual(containment.canvasRight + 1);
+  expect(containment.alertScrollWidth).toBeLessThanOrEqual(
+    containment.alertClientWidth + 1,
+  );
+  await expectNoDocumentHorizontalOverflow(page);
+});
 test("contains closed drawers, keeps sides mutually exclusive, and closes with Escape", async ({
   page,
 }) => {
@@ -187,6 +304,7 @@ test("contains closed drawers, keeps sides mutually exclusive, and closes with E
 
   await leftTrigger.click();
   await expectOnlyDrawerOpen(page, "left");
+  await expectDrawerFocusLoop(page, "left");
   await expectNoDocumentHorizontalOverflow(page);
 
   await page.keyboard.press("Escape");
@@ -197,6 +315,7 @@ test("contains closed drawers, keeps sides mutually exclusive, and closes with E
 
   await rightTrigger.click();
   await expectOnlyDrawerOpen(page, "right");
+  await expectDrawerFocusLoop(page, "right");
   await expectNoDocumentHorizontalOverflow(page);
 
   await page.keyboard.press("Escape");
@@ -210,6 +329,44 @@ test("contains closed drawers, keeps sides mutually exclusive, and closes with E
   await expectNoDocumentHorizontalOverflow(page);
 });
 
+test("clears drawer dialog state without restoring hidden launcher focus when the canvas widens", async ({
+  page,
+}) => {
+  await openHearingCourt(page);
+  await setHearingWorkspaceWidth(page, 1219);
+  const leftTrigger = page.locator('[data-open-evidence-drawer="left"]');
+  const leftRail = page.locator('[data-rail-position="left"]');
+
+  await leftTrigger.click();
+  await expectOnlyDrawerOpen(page, "left");
+  await expect(leftRail).toHaveAttribute("role", "dialog");
+  await expect(leftRail).toHaveAttribute("aria-modal", "true");
+
+  await setHearingWorkspaceWidth(page, 1220);
+  await expect(page.locator("[data-evidence-drawer-open]")).toHaveCount(0);
+  await expect(leftRail).not.toHaveAttribute("role", "dialog");
+  await expect(leftRail).not.toHaveAttribute("aria-modal", "true");
+  await expect(leftTrigger).not.toBeFocused();
+  await expect(page.locator(".evidence-drawer-launchers"))
+    .toHaveCSS("display", "none");
+  await expectNoDocumentHorizontalOverflow(page);
+});
+
+test("keeps the hearing ledger close target at least 44px square", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await openHearingCourt(page);
+  await page.locator('[data-open-evidence-drawer="right"]').click();
+  await page.locator("[data-open-court-ledger]").click();
+  const closeButton = page.locator(".hearing-ledger header button");
+  const box = await closeButton.boundingBox();
+
+  expect(box).not.toBeNull();
+  expect(box.width).toBeGreaterThanOrEqual(44);
+  expect(box.height).toBeGreaterThanOrEqual(44);
+  await expectNoDocumentHorizontalOverflow(page);
+});
 test("holds the 122px status and 154px input slots while the message rail scrolls", async ({
   page,
 }) => {

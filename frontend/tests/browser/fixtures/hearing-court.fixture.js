@@ -160,6 +160,16 @@ export async function installHearingCourtFixture(page, options = {}) {
       request.method() === "GET" &&
       url.pathname === `/api/disputes/${CASE_ID}/hearing`
     ) {
+      if (options.loadError) {
+        return route.fulfill({
+          status: 502,
+          contentType: "application/json",
+          body: JSON.stringify({
+            success: false,
+            message: options.loadError,
+          }),
+        });
+      }
       return fulfillJson(route, hearing);
     }
     if (

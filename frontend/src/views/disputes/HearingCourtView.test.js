@@ -792,6 +792,31 @@ describe("HearingCourtView", () => {
     expect(componentSource).not.toContain("@media (max-width: 1180px)");
   });
 
+  it("keeps ledger and settlement dialog close controls at least 44px square", () => {
+    expect(componentSource).toMatch(
+      /\.hearing-ledger header button\s*{[^}]*width:\s*44px;[^}]*height:\s*44px;/,
+    );
+    expect(componentSource).toMatch(
+      /\.settlement-dialog form header button\s*{[^}]*width:\s*44px;\s*height:\s*44px;/,
+    );
+  });
+
+  it("contains a 200-character unbroken hearing error inside the fixed canvas", async () => {
+    const errorText = "E".repeat(200);
+    const { wrapper } = await mountView({
+      messageAction: vi.fn().mockRejectedValue(new Error(errorText)),
+    });
+
+    await wrapper.get('[data-send-message] textarea').setValue("trigger error");
+    await wrapper.get("[data-send-hearing-statement]").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.get('[role="alert"]').text()).toBe(errorText);
+    expect(componentSource).toMatch(
+      /\.hearing-error\s*{[^}]*min-width:\s*0;[^}]*white-space:\s*pre-wrap;[^}]*overflow-wrap:\s*anywhere;[^}]*word-break:\s*break-word;/,
+    );
+  });
+
   it("clips translated inactive evidence drawers at the narrow canvas boundary", () => {
     expect(componentSource).toContain(
       "transform: translateX(calc(-100% - 20px));",
