@@ -29,23 +29,39 @@ def test_intake_officer_prompt_declares_context_pack_workflow_contract() -> None
     )
 
     assert "Context Pack 读取契约" in system_prompt
-    assert "current_turn" in system_prompt
-    assert "intake_initial_form" in system_prompt
-    assert "latest_canvas_snapshot" in system_prompt
-    assert "short_term_memory" in system_prompt
-    assert "compressed_summary" in system_prompt
+    assert "current_user_message" in system_prompt
+    assert "initial_case_facts" in system_prompt
+    assert "previous_case_detail" in system_prompt
+    assert "recent_dialogue_messages" in system_prompt
+    assert "最近 3 个完整对话轮次" in system_prompt
     assert "接待室是单方参与房间" in system_prompt
-    assert "raw_statement" in system_prompt
-    assert "platform_statement" in system_prompt
-    assert "不要丢弃稳定信息" in system_prompt
+    assert "不得要求发起方上传" in system_prompt
+    assert "85 分为进入下一步阈值" in system_prompt
     assert "WAITING_FOR_REMARK" in system_prompt
     assert "HAS_REMARKS" in system_prompt
     assert "claim_resolution" in system_prompt
     assert "respondent_attitude" in system_prompt
     assert "dispute_core_state" in system_prompt
     assert "只能表达“发起方所转述的另一方态度”" in system_prompt
-    assert "外部正式回应状态会在进入模型前被移除" in system_prompt
     assert '"source": "发起方单方陈述（主观） / 尚未回应"' in system_prompt
+
+
+def test_intake_party_profiles_keep_current_message_priority_and_do_not_request_evidence() -> None:
+    repository = PromptRepository()
+
+    for profile_id in (
+        "DISPUTE_INTAKE_OFFICER:USER:v1",
+        "DISPUTE_INTAKE_OFFICER:MERCHANT:v1",
+    ):
+        system_prompt, _ = repository.render(
+            "intake_turn_case_detail",
+            {"case_id": "CASE_prompt_profile"},
+            {"type": "object"},
+            prompt_profile_id=profile_id,
+        )
+
+        assert "current_user_message` 是本轮最高优先级输入" in system_prompt
+        assert "不得要求截图、照片、视频、聊天记录" in system_prompt
 
 
 def test_evidence_clerk_prompt_declares_context_pack_and_party_isolation_contract() -> None:

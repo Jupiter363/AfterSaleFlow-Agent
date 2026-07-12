@@ -203,7 +203,7 @@ public class RoomMessageService {
                 dispute.getId(),
                 room.getRoomType(),
                 actor,
-                command,
+                saved,
                 traceId,
                 traceId);
         evidenceAgentTurnService.continueFromParticipantMessage(

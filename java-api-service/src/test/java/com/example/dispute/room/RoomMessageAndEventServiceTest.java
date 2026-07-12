@@ -459,7 +459,7 @@ class RoomMessageAndEventServiceTest {
                         eq(dispute.getId()),
                         eq(RoomType.INTAKE),
                         eq(new AuthenticatedActor("user-local", ActorRole.USER)),
-                        eq(command),
+                        any(RoomMessageEntity.class),
                         eq("TRACE_INTAKE"),
                         eq("TRACE_INTAKE"));
     }

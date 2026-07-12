@@ -211,19 +211,41 @@ class IntakeTurnMessage(StrictModel):
     text: LongText
 
 
+class IntakeDialogueMessage(StrictModel):
+    message_id: Identifier
+    sequence_no: Annotated[int, Field(ge=1)]
+    role: Literal["USER", "MERCHANT", "CUSTOMER_SERVICE", "SYSTEM", "AGENT"]
+    source: Literal[
+        "EXTERNAL_IMPORT", "FORM_SUBMISSION", "ROOM_MESSAGE", "AGENT_RESPONSE"
+    ]
+    text: LongText
+
+
+class IntakeInitialCaseFacts(StrictModel):
+    order_reference: Identifier | None = None
+    after_sales_reference: Identifier | None = None
+    logistics_reference: Identifier | None = None
+    initiator_role: Literal["USER", "MERCHANT", "CUSTOMER_SERVICE", "SYSTEM"] = (
+        "USER"
+    )
+    requested_outcome_hint: Identifier | None = None
+    claim_resolution_seed: IntakeClaimResolutionSeed | None = None
+    respondent_attitude_seed: IntakeRespondentAttitudeSeed | None = None
+
+
 class IntakeTurnRequest(StrictModel):
     case_id: Annotated[
         str, Field(pattern=r"^CASE_[A-Za-z0-9_]{1,59}$")
     ]
     room_type: Literal["INTAKE"]
-    turn_source: Literal["LOBBY_SEED", "USER_MESSAGE"]
-    lobby_seed: IntakeLobbySeed
-    current_user_message: IntakeTurnMessage | None = None
-    latest_scroll_snapshot: dict[str, object] | None = None
+    turn_source: Literal["EXTERNAL_IMPORT", "FORM_SUBMISSION", "ROOM_MESSAGE"]
+    initial_case_facts: IntakeInitialCaseFacts
+    current_user_message: IntakeDialogueMessage
+    recent_dialogue_messages: Annotated[
+        list[IntakeDialogueMessage], Field(max_length=6)
+    ] = Field(default_factory=list)
+    previous_case_detail: dict[str, object] | None = None
     initiator_statement_transcript: list[IntakeTurnMessage] = Field(
-        default_factory=list
-    )
-    recent_turns: Annotated[list[dict[str, object]], Field(max_length=20)] = Field(
         default_factory=list
     )
     agent_context: AgentInvocationContext
@@ -234,6 +256,24 @@ class IntakeTurnRequest(StrictModel):
             raise ValueError("case_id must match agent_context.case_id")
         if self.room_type != self.agent_context.room_type:
             raise ValueError("room_type must match agent_context.room_type")
+        if self.current_user_message.source != self.turn_source:
+            raise ValueError("current_user_message.source must match turn_source")
+        if any(
+            message.sequence_no >= self.current_user_message.sequence_no
+            for message in self.recent_dialogue_messages
+        ):
+            raise ValueError(
+                "recent_dialogue_messages must contain only messages before the current message"
+            )
+        if self.recent_dialogue_messages != sorted(
+            self.recent_dialogue_messages, key=lambda message: message.sequence_no
+        ):
+            raise ValueError("recent_dialogue_messages must be ordered by sequence_no")
+        if (
+            self.recent_dialogue_messages
+            and self.recent_dialogue_messages[0].role == "AGENT"
+        ):
+            raise ValueError("recent_dialogue_messages must start with a participant message")
         return self
 
 

@@ -2,6 +2,7 @@ package com.example.dispute.room.application;
 
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
+import com.example.dispute.casecore.domain.CaseSourceType;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.room.domain.MessageSenderType;
@@ -24,7 +25,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.time.Clock;
 import java.time.Instant;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -95,6 +95,19 @@ public class IntakeAgentTurnService {
         int turnNo = memoryRepository.findMaxTurnNoByAgentSessionId(session.agentSession().getId()) + 1;
         IntakeLobbySeed sanitizedLobbySeed = sanitizeLobbySeed(lobbySeed);
         String initialStatement = initialStatement(sanitizedLobbySeed);
+        String turnSource =
+                context.dispute().getSourceType() == CaseSourceType.EXTERNAL_IMPORT
+                        ? "EXTERNAL_IMPORT"
+                        : "FORM_SUBMISSION";
+        RoomMessageEntity initialRoomMessage =
+                appendInitialParticipantMessage(
+                        context.dispute(),
+                        context.room(),
+                        session.agentSession(),
+                        actor,
+                        initialStatement,
+                        turnSource,
+                        traceId);
         RoomTurnMemoryEntity initialStatementMemory =
                 RoomTurnMemoryEntity.participantTurn(
                         "MEMORY_" + compactUuid(),
@@ -113,12 +126,12 @@ public class IntakeAgentTurnService {
                 new IntakeAgentTurnCommand(
                         caseId,
                         RoomType.INTAKE,
-                        "LOBBY_SEED",
-                        sanitizedLobbySeed,
-                        null,
-                        List.of(toParticipantMessage(initialStatementMemory)),
+                        turnSource,
+                        IntakeInitialCaseFacts.from(sanitizedLobbySeed),
+                        dialogueMessage(initialRoomMessage, turnSource),
+                        recentDialogueMessages(context.room(), initialRoomMessage.getSequenceNo()),
                         previousScrollSnapshot,
-                        recentTurns(session.agentSession()),
+                        List.of(toParticipantMessage(initialStatementMemory)),
                         session.agentContext());
         IntakeAgentTurnResult result =
                 safeRun(command, previousScrollSnapshot, traceId, requestId);
@@ -130,11 +143,11 @@ public class IntakeAgentTurnService {
             String caseId,
             RoomType roomType,
             AuthenticatedActor actor,
-            RoomMessageCommand message,
+            RoomMessageEntity message,
             String traceId,
             String requestId) {
         if (roomType != RoomType.INTAKE
-                || message.messageType() != MessageType.PARTY_TEXT
+                || message.getMessageType() != MessageType.PARTY_TEXT
                 || !isParty(actor.role())) {
             return;
         }
@@ -149,7 +162,7 @@ public class IntakeAgentTurnService {
                         turnNo,
                         actor.actorId(),
                         actor.role().name(),
-                        message.text(),
+                        message.getMessageText(),
                         session.agentSession(),
                         session.accessSession(),
                         "{}"));
@@ -158,15 +171,12 @@ public class IntakeAgentTurnService {
                 new IntakeAgentTurnCommand(
                         caseId,
                         RoomType.INTAKE,
-                        "USER_MESSAGE",
-                        seedFromDispute(context.dispute(), actor),
-                        new IntakeParticipantMessage(
-                                "INTAKE_TURN_" + turnNo,
-                                actor.role().name(),
-                                message.text()),
-                        initiatorStatementTranscript(session.agentSession()),
+                        "ROOM_MESSAGE",
+                        IntakeInitialCaseFacts.from(seedFromDispute(context.dispute(), actor)),
+                        dialogueMessage(message, "ROOM_MESSAGE"),
+                        recentDialogueMessages(context.room(), message.getSequenceNo()),
                         previousScrollSnapshot,
-                        recentTurns(session.agentSession()),
+                        initiatorStatementTranscript(session.agentSession()),
                         session.agentContext());
         IntakeAgentTurnResult result =
                 safeRun(command, previousScrollSnapshot, traceId, requestId);
@@ -422,6 +432,52 @@ public class IntakeAgentTurnService {
                 AGENT_SENDER_ID);
     }
 
+    private RoomMessageEntity appendInitialParticipantMessage(
+            FulfillmentCaseEntity dispute,
+            CaseRoomEntity room,
+            AgentConversationSessionEntity agentSession,
+            AuthenticatedActor actor,
+            String statement,
+            String source,
+            String traceId) {
+        String idempotencyKey =
+                "intake-initial-statement:" + source + ":" + agentSession.getId();
+        var existing =
+                messageRepository.findByCaseIdAndIdempotencyKey(dispute.getId(), idempotencyKey);
+        if (existing.isPresent()) {
+            return existing.orElseThrow();
+        }
+        long sequence = messageRepository.findMaxSequenceByRoomId(room.getId()) + 1;
+        String audienceActorIdsJson = json(List.of(actor.actorId()));
+        RoomMessageEntity saved =
+                messageRepository.save(
+                        RoomMessageEntity.create(
+                                "MESSAGE_" + compactUuid(),
+                                dispute.getId(),
+                                room.getId(),
+                                sequence,
+                                MessageSenderType.PARTY,
+                                actor.role().name(),
+                                actor.actorId(),
+                                audienceJson(),
+                                audienceActorIdsJson,
+                                MessageType.PARTY_TEXT,
+                                statement,
+                                "[]",
+                                idempotencyKey,
+                                Instant.now(clock),
+                                traceId));
+        eventService.recordRoomMessage(
+                dispute.getId(),
+                room.getId(),
+                saved.getId(),
+                saved.getMessageText(),
+                saved.getAudienceJson(),
+                audienceActorIdsJson,
+                actor.actorId());
+        return saved;
+    }
+
     private JsonNode latestScrollSnapshot(String agentSessionId) {
         return memoryRepository
                 .findTopByAgentSessionIdAndAgentRoleIsNotNullOrderByTurnNoDesc(agentSessionId)
@@ -430,27 +486,51 @@ public class IntakeAgentTurnService {
                 .orElseGet(objectMapper::createObjectNode);
     }
 
-    private List<IntakeRecentTurn> recentTurns(AgentConversationSessionEntity agentSession) {
-        return memoryRepository
-                .findTop10ByAgentSessionIdOrderByTurnNoDesc(agentSession.getId())
-                .stream()
-                .filter(memory -> agentSession.getId().equals(memory.getAgentSessionId()))
-                .sorted(Comparator.comparingInt(RoomTurnMemoryEntity::getTurnNo))
-                .map(
-                        memory ->
-                                new IntakeRecentTurn(
-                                        memory.getTurnNo(),
-                                        memory.getActorId(),
-                                        memory.getAnswerRole(),
-                                        memory.getAnswerContent(),
-                                        memory.getAgentRole(),
-                                        memory.getAgentResponse(),
-                                        readJson(memory.getScrollSnapshotJson()),
-                                        textOrDefault(memory.getAgentSessionId(), agentSession.getId()),
-                                        textOrDefault(
-                                                memory.getConversationScope(),
-                                                agentSession.getConversationScope())))
+    private List<IntakeDialogueMessage> recentDialogueMessages(
+            CaseRoomEntity room, long currentSequence) {
+        List<RoomMessageEntity> candidates =
+                messageRepository.findAllByRoomIdOrderBySequenceNoAsc(room.getId()).stream()
+                        .filter(message -> message.getSequenceNo() < currentSequence)
+                        .filter(
+                                message ->
+                                        message.getMessageType() == MessageType.PARTY_TEXT
+                                                || message.getMessageType()
+                                                        == MessageType.AGENT_MESSAGE)
+                        .toList();
+        int start = Math.max(0, candidates.size() - 6);
+        while (start < candidates.size()
+                && candidates.get(start).getMessageType() == MessageType.AGENT_MESSAGE) {
+            start++;
+        }
+        return candidates.subList(start, candidates.size()).stream()
+                .map(this::dialogueMessage)
                 .toList();
+    }
+
+    private IntakeDialogueMessage dialogueMessage(RoomMessageEntity message) {
+        String source;
+        if (message.getMessageType() == MessageType.AGENT_MESSAGE) {
+            source = "AGENT_RESPONSE";
+        } else if (message.getIdempotencyKey().startsWith("intake-initial-statement:")) {
+            String[] parts = message.getIdempotencyKey().split(":", 3);
+            source = parts.length >= 2 ? parts[1] : "FORM_SUBMISSION";
+        } else {
+            source = "ROOM_MESSAGE";
+        }
+        return dialogueMessage(message, source);
+    }
+
+    private IntakeDialogueMessage dialogueMessage(RoomMessageEntity message, String source) {
+        String role =
+                message.getMessageType() == MessageType.AGENT_MESSAGE
+                        ? "AGENT"
+                        : message.getSenderRole();
+        return new IntakeDialogueMessage(
+                message.getId(),
+                message.getSequenceNo(),
+                role,
+                source,
+                message.getMessageText());
     }
 
     private List<IntakeParticipantMessage> initiatorStatementTranscript(
@@ -472,11 +552,14 @@ public class IntakeAgentTurnService {
     }
 
     private static String initialStatement(IntakeLobbySeed seed) {
+        if (!blank(seed.rawText())) {
+            return seed.rawText();
+        }
         if (seed.claimResolutionSeed() != null
                 && !blank(seed.claimResolutionSeed().originalStatement())) {
             return seed.claimResolutionSeed().originalStatement();
         }
-        return seed.rawText();
+        throw new IllegalArgumentException("initial intake statement is required");
     }
 
     private IntakeAgentTurnResult degraded(

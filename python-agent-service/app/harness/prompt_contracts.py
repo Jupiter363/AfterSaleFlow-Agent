@@ -34,23 +34,15 @@ _COMMON_DISPLAY_ONLY = (
 _CONTRACTS: dict[str, AgentContextContract] = {
     "intake_turn_case_detail": AgentContextContract(
         node_name="intake_turn_case_detail",
-        configuration_profile_key="DISPUTE_INTAKE_CONTEXT_PACK_V1",
+        configuration_profile_key="DISPUTE_INTAKE_CONTEXT_PACK_V2",
         sections=(
-            ContextSectionSpec("current_turn", 100, True, "java_filtered"),
+            ContextSectionSpec("current_user_message", 100, True, "room_message"),
+            ContextSectionSpec("previous_case_detail", 98, False, "dossier_snapshot"),
             ContextSectionSpec(
-                "initiator_statement_transcript",
-                98,
-                False,
-                "participant_raw_untrusted",
+                "recent_dialogue_messages", 96, False, "room_message_history"
             ),
-            ContextSectionSpec("intake_initial_form", 96, False, "java_filtered"),
-            ContextSectionSpec("case_identity", 95, False, "java_filtered"),
-            ContextSectionSpec("latest_canvas_snapshot", 90, False, "java_filtered"),
-            ContextSectionSpec("short_term_memory", 85, False, "session_scoped"),
-            ContextSectionSpec("compressed_summary", 80, False, "session_scoped"),
-            ContextSectionSpec("room_deadline", 75, False, "java_filtered"),
-            ContextSectionSpec("tool_results", 70, False, "tool_result"),
-            ContextSectionSpec("frontend_display_hints", 40, False, "ui_hint"),
+            ContextSectionSpec("initial_case_facts", 94, False, "java_filtered"),
+            ContextSectionSpec("case_identity", 92, True, "java_filtered"),
             *_COMMON_DISPLAY_ONLY,
         ),
     ),

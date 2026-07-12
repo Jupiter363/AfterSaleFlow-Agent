@@ -14,7 +14,6 @@ from app.agents.dispute_intake_officer.skills.dossier.dossier_skill import (
     SUBJECTIVE_RESPONDENT_SOURCE,
 )
 from app.harness.context_pack import build_context_pack
-from app.harness.memory import MemeoMemoryAssembler
 from app.harness.narrative_policy import rewrite_platform_narrative
 from app.schemas import IntakeTurnRequest, IntakeTurnResult
 
@@ -86,21 +85,21 @@ def build_intake_turn_graph(model_runner: Any | None = None):
 def _load_context(state: IntakeTurnGraphState) -> dict[str, Any]:
     request = state["request"]
     agent_context = request["agent_context"]
-    current = request.get("current_user_message") or {}
-    seed = request["lobby_seed"]
-    source_text = str(current.get("text") or seed.get("raw_text") or "")
+    current = request["current_user_message"]
+    source_text = str(current.get("text") or "")
     actor_role = str(
         agent_context.get("actor_role")
         or current.get("role")
-        or seed.get("initiator_role")
+        or (request.get("initial_case_facts") or {}).get("initiator_role")
         or "USER"
     )
-    memory_frame = MemeoMemoryAssembler().assemble(
-        request.get("recent_turns") or [],
-        expected_agent_session_id=str(agent_context.get("agent_session_id") or ""),
-        expected_conversation_scope=str(agent_context.get("conversation_scope") or ""),
-        strict_scope=True,
-    ).model_dump(mode="json")
+    recent_messages = request.get("recent_dialogue_messages") or []
+    memory_frame = {
+        "context_contract": "intake_turn_context.v2",
+        "dialogue_window": "3_ROUNDS_6_MESSAGES",
+        "recent_dialogue_count": len(recent_messages),
+        "current_message_sequence": current.get("sequence_no"),
+    }
     return {
         "source_text": source_text,
         "actor_role": actor_role,
@@ -119,44 +118,30 @@ def _reason_with_llm_node(model_runner: Any | None):
                 "executed_nodes": ["fallback_reasoning"],
             }
         try:
-            prompt_lobby_seed = _subjective_only_lobby_seed(
-                request.get("lobby_seed") or {}
+            prompt_initial_facts = _subjective_only_initial_case_facts(
+                request.get("initial_case_facts") or {}
             )
-            prompt_snapshot = _subjective_only_snapshot(
-                request.get("latest_scroll_snapshot") or {}
+            prompt_previous_detail = _subjective_only_snapshot(
+                request.get("previous_case_detail") or {}
             )
+            context_sources = {
+                "case_identity": _case_identity_context(request, state),
+                "recent_dialogue_messages": request.get("recent_dialogue_messages")
+                or [],
+                "current_user_message": request["current_user_message"],
+                "previous_case_detail": prompt_previous_detail,
+            }
+            if request.get("turn_source") in {"EXTERNAL_IMPORT", "FORM_SUBMISSION"}:
+                context_sources["initial_case_facts"] = prompt_initial_facts
             context_pack = build_context_pack(
                 "intake_turn_case_detail",
-                {
-                    "current_turn": _current_turn_context(request, state),
-                    "intake_initial_form": prompt_lobby_seed,
-                    "initiator_statement_transcript": request.get(
-                        "initiator_statement_transcript"
-                    )
-                    or [],
-                    "case_identity": _case_identity_context(request, state),
-                    "latest_canvas_snapshot": prompt_snapshot,
-                    "short_term_memory": str(
-                        state["memory_frame"].get("prompt_memory") or ""
-                    ),
-                    "compressed_summary": str(
-                        state["memory_frame"].get("compressed_summary") or ""
-                    ),
-                },
+                context_sources,
                 actor_role=state["actor_role"],
             )
             generation = model_runner.invoke_structured(
                 node_name="intake_turn_case_detail",
                 case_data={
-                    "case_id": request.get("case_id"),
-                    "room_type": request.get("room_type"),
-                    "turn_source": request.get("turn_source"),
-                    "actor_role": state["actor_role"],
-                    "agent_key": agent_context.get("agent_key"),
-                    "prompt_profile_id": agent_context.get("prompt_profile_id"),
-                    "lobby_seed": prompt_lobby_seed,
-                    "current_user_message": request.get("current_user_message"),
-                    "latest_scroll_snapshot": prompt_snapshot,
+                    "context_contract": "intake_turn_context.v2",
                 },
                 output_type=IntakeCaseDetailLlmOutput,
                 agent_context=agent_context,
@@ -186,7 +171,7 @@ def _reason_with_llm_node(model_runner: Any | None):
     return reason_with_llm
 
 
-def _subjective_only_lobby_seed(seed: dict[str, Any]) -> dict[str, Any]:
+def _subjective_only_initial_case_facts(seed: dict[str, Any]) -> dict[str, Any]:
     """Remove response-state seeds that were not derived from initiator text."""
 
     sanitized = copy.deepcopy(seed)
@@ -228,8 +213,12 @@ def _render_case_detail_dossier(state: IntakeTurnGraphState) -> dict[str, Any]:
         llm_missing_fields=output.missing_fields,
         llm_confidence=output.confidence,
     )
+    room_utterance = _enforce_intake_question_boundary(
+        output.room_utterance,
+        rendered.scroll_snapshot,
+    )
     return {
-        "room_utterance": output.room_utterance,
+        "room_utterance": room_utterance,
         "dossier_patch": rendered.dossier_patch,
         "scroll_snapshot": rendered.scroll_snapshot,
         "canvas_operations": rendered.canvas_operations,
@@ -240,6 +229,54 @@ def _render_case_detail_dossier(state: IntakeTurnGraphState) -> dict[str, Any]:
         "confidence": rendered.confidence,
         "executed_nodes": ["render_case_detail_dossier"],
     }
+
+
+def _enforce_intake_question_boundary(
+    utterance: str,
+    case_detail: dict[str, Any],
+) -> str:
+    evidence_markers = (
+        "截图",
+        "照片",
+        "视频",
+        "聊天记录",
+        "沟通记录",
+        "录音",
+        "凭证",
+        "证明材料",
+        "证据材料",
+        "上传",
+        "补交",
+        "提供证据",
+        "提供材料",
+        "提交材料",
+    )
+    if not any(marker in utterance for marker in evidence_markers):
+        return utterance
+
+    quality = case_detail.get("intake_quality")
+    ready = isinstance(quality, dict) and quality.get("ready_for_next_step") is True
+    if ready:
+        return (
+            "我已了解大致案情，当前信息已经可以提交。"
+            "请问还有没有需要备注给证据书记官或后续审理环节的案情内容？"
+        )
+
+    missing = case_detail.get("missing_information")
+    questions = missing.get("next_questions") if isinstance(missing, dict) else []
+    safe_questions = [
+        str(question)
+        for question in questions or []
+        if question and not any(marker in str(question) for marker in evidence_markers)
+    ]
+    if safe_questions:
+        return "我已记录本轮补充。为了继续梳理案情，请补充：" + " ".join(
+            safe_questions[:3]
+        )
+    return (
+        "我已记录本轮补充。为了继续梳理案情，请说明事情发生的时间、经过、"
+        "当前处理状态、你的诉求以及你所了解的对方态度。"
+    )
 
 
 def _validate_readiness(state: IntakeTurnGraphState) -> dict[str, Any]:
@@ -266,8 +303,10 @@ def _validate_readiness(state: IntakeTurnGraphState) -> dict[str, Any]:
                 "room_utterance": utterance + " " + " ".join(additions),
                 "executed_nodes": ["validate_readiness"],
             }
-        if "已了解" not in utterance:
-            additions.append("我已了解本案情况，可以进入下一步。")
+        if "已了解大致案情" not in utterance:
+            additions.append("我已了解大致案情。")
+        if "可以提交" not in utterance and "可提交" not in utterance:
+            additions.append("当前信息已经可以提交。")
         if "备注" not in utterance:
             additions.append(
                 "请问还有没有需要备注给证据书记官或后续审理环节的内容？"
@@ -289,14 +328,14 @@ def _fallback_output(state: IntakeTurnGraphState) -> IntakeCaseDetailLlmOutput:
         source_text,
         actor_role=state["actor_role"],
     )
-    seed = request.get("lobby_seed") or {}
+    seed = request.get("initial_case_facts") or {}
     requested_outcome = seed.get("requested_outcome_hint") or _requested_outcome_from_text(
         source_text
     )
     knowledge_query = _is_knowledge_query(source_text)
     utterance = (
         "我已先把你的补充安全记录下来，并整理为右侧案件详情。"
-        "为了继续推进，请补充仍缺少的订单、物流或商家沟通材料。"
+        "为了继续推进，请补充仍不清楚的事情经过、当前状态、处理诉求或对方态度。"
     )
     if knowledge_query:
         utterance += (
@@ -350,7 +389,7 @@ def _fallback_output(state: IntakeTurnGraphState) -> IntakeCaseDetailLlmOutput:
             },
             "intake_quality": {
                 "score": 45,
-                "threshold": 80,
+                "threshold": 85,
                 "ready_for_next_step": False,
                 "score_breakdown": {
                     "references": 5,
@@ -407,33 +446,11 @@ def _requested_outcome_from_text(text: str) -> str:
     return "UNKNOWN"
 
 
-def _current_turn_context(
-    request: dict[str, Any],
-    state: IntakeTurnGraphState,
-) -> dict[str, Any]:
-    current = request.get("current_user_message") or {}
-    seed = request.get("lobby_seed") or {}
-    return {
-        "turn_source": request.get("turn_source"),
-        "role": state["actor_role"],
-        "text": current.get("text") or seed.get("raw_text") or "",
-        "message_id": current.get("message_id"),
-        "is_lobby_seed": not bool(current),
-        "remark_status": (
-            (request.get("latest_scroll_snapshot") or {})
-            .get("handoff_notes", {})
-            .get("remark_status")
-            if isinstance(request.get("latest_scroll_snapshot") or {}, dict)
-            else ""
-        ),
-    }
-
-
 def _case_identity_context(
     request: dict[str, Any],
     state: IntakeTurnGraphState,
 ) -> dict[str, Any]:
-    seed = request.get("lobby_seed") or {}
+    seed = request.get("initial_case_facts") or {}
     return {
         "case_id": request.get("case_id"),
         "room_type": request.get("room_type"),

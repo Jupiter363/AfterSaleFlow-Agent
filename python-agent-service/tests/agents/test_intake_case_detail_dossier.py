@@ -5,6 +5,9 @@ from types import SimpleNamespace
 from app.agents.dispute_intake_officer.skills.dossier.dossier_skill import (
     _canonical_verification_focus,
 )
+from app.agents.dispute_intake_officer.workflow import (
+    _enforce_intake_question_boundary,
+)
 from app.schemas import IntakeTurnRequest
 
 
@@ -41,24 +44,36 @@ def _request(**overrides):
     payload = {
         "case_id": "CASE_intake_case_detail",
         "room_type": "INTAKE",
-        "turn_source": "USER_MESSAGE",
-        "lobby_seed": {
+        "turn_source": "ROOM_MESSAGE",
+        "initial_case_facts": {
             "order_reference": "ORDER_1001",
             "after_sales_reference": "AS_1001",
             "logistics_reference": "SF1001001001",
             "initiator_role": "USER",
-            "raw_text": "物流显示签收，但用户称没有收到商品，商家要求等待物流核查。",
             "requested_outcome_hint": "REFUND",
         },
         "current_user_message": {
             "message_id": "MESSAGE_1001",
+            "sequence_no": 3,
             "role": "USER",
+            "source": "ROOM_MESSAGE",
             "text": "我补充：商家没有给签收底单，我希望退款。订单和物流信息都在右侧。",
         },
-        "latest_scroll_snapshot": None,
-        "recent_turns": [],
+        "recent_dialogue_messages": [],
+        "previous_case_detail": None,
     }
     payload.update(overrides)
+    legacy_seed = payload.pop("lobby_seed", None)
+    if isinstance(legacy_seed, dict):
+        legacy_seed.pop("raw_text", None)
+        payload["initial_case_facts"] = legacy_seed
+    if "latest_scroll_snapshot" in payload:
+        payload["previous_case_detail"] = payload.pop("latest_scroll_snapshot")
+    payload.pop("recent_turns", None)
+    current = payload["current_user_message"]
+    current.setdefault("sequence_no", 3)
+    current.setdefault("source", payload["turn_source"])
+    payload.setdefault("recent_dialogue_messages", [])
     payload.setdefault("agent_context", _agent_context(str(payload["case_id"])))
     return IntakeTurnRequest.model_validate(payload)
 
@@ -94,6 +109,26 @@ def test_verification_focus_merges_names_gaps_questions_and_actions() -> None:
         "核验物流签收及投递记录，确认签收人身份、位置、时间与开箱检查间隔",
     ]
     assert all(not item.endswith(("?", "？")) for item in result)
+
+
+def test_intake_question_boundary_replaces_evidence_requests_with_case_questions() -> None:
+    utterance = "请上传开箱视频、聊天记录截图和物流签收凭证。"
+    case_detail = {
+        "intake_quality": {"score": 72, "ready_for_next_step": False},
+        "missing_information": {
+            "next_questions": [
+                "包裹实际到达时间是什么时候？",
+                "能否提供物流签收截图？",
+            ]
+        },
+    }
+
+    result = _enforce_intake_question_boundary(utterance, case_detail)
+
+    assert "包裹实际到达时间是什么时候" in result
+    assert "上传" not in result
+    assert "截图" not in result
+    assert "凭证" not in result
 
 
 class CaseDetailRunner:
@@ -219,7 +254,8 @@ def test_intake_turn_workflow_lives_under_agent_package_and_outputs_case_detail(
     assert result.scroll_snapshot["respondent_attitude"]["attitude"] == "NOT_RESPONDED"
     assert result.scroll_snapshot["dispute_core_state"]["conflict_type"] == "CLAIM_UNANSWERED"
     assert result.dossier_patch["case_detail"]["case_story"]["title"] == "物流显示签收但用户称未收到商品"
-    assert "已了解本案" in result.room_utterance
+    assert "已了解大致案情" in result.room_utterance
+    assert "已经可以提交" in result.room_utterance
 
 
 def test_intake_case_detail_readiness_is_gated_by_score_and_required_references() -> None:
@@ -304,7 +340,8 @@ def test_ready_intake_turn_asks_for_handoff_remark_before_next_room() -> None:
     runner = CaseDetailRunner(score=86)
     result = IntakeTurnWorkflow(model_runner=runner).run(_request())
 
-    assert "已了解本案情况" in result.room_utterance
+    assert "已了解大致案情" in result.room_utterance
+    assert "已经可以提交" in result.room_utterance
     assert "备注" in result.room_utterance
     assert "证据书记官" in result.room_utterance
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 
 
@@ -29,7 +30,7 @@ class AssembledPromptContext:
             "sections": [
                 {
                     "name": section.name,
-                    "content": section.content,
+                    "content": _structured_section_content(section.content),
                     "estimated_tokens": section.estimated_tokens(),
                     "priority": section.priority,
                     "required": section.required,
@@ -40,6 +41,15 @@ class AssembledPromptContext:
             "estimated_tokens": self.estimated_tokens,
             "omitted_section_names": list(self.omitted_section_names),
         }
+
+
+def _structured_section_content(content: str) -> object:
+    """Keep JSON context as JSON instead of embedding escaped JSON strings."""
+
+    try:
+        return json.loads(content)
+    except (TypeError, json.JSONDecodeError):
+        return content
 
 
 class ContextWindowManager:

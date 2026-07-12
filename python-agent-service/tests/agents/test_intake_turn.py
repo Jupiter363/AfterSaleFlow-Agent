@@ -8,7 +8,6 @@ from fastapi.testclient import TestClient
 from app.config import Settings
 from app.agents.dispute_intake_officer.skills.dossier.dossier_skill import (
     CaseDetailDossierSkill,
-    ORIGINAL_STATEMENT_MISSING,
     ORIGINAL_STATEMENT_SEPARATOR,
     SUBJECTIVE_RESPONDENT_CONFIDENCE_NOTE,
     SUBJECTIVE_RESPONDENT_SOURCE,
@@ -80,12 +79,80 @@ def _agent_context(
 
 
 def _with_agent_context(payload: dict[str, object]) -> dict[str, object]:
+    legacy_seed = payload.pop("lobby_seed", None)
+    if "initial_case_facts" not in payload:
+        seed = dict(legacy_seed) if isinstance(legacy_seed, dict) else {}
+        seed.pop("raw_text", None)
+        payload["initial_case_facts"] = seed
+
+    legacy_turn_source = str(payload.get("turn_source") or "ROOM_MESSAGE")
+    if legacy_turn_source == "USER_MESSAGE":
+        payload["turn_source"] = "ROOM_MESSAGE"
+    elif legacy_turn_source == "LOBBY_SEED":
+        payload["turn_source"] = "EXTERNAL_IMPORT"
+
+    previous = payload.pop("latest_scroll_snapshot", None)
+    payload.setdefault("previous_case_detail", previous)
+
+    legacy_recent = payload.pop("recent_turns", None)
+    payload.setdefault("recent_dialogue_messages", [])
+    recent_dialogue = payload["recent_dialogue_messages"]
+    if isinstance(recent_dialogue, list) and not recent_dialogue and isinstance(legacy_recent, list):
+        sequence = 1
+        for turn in legacy_recent:
+            if not isinstance(turn, dict):
+                continue
+            answer = turn.get("answer_content")
+            if isinstance(answer, str) and answer:
+                recent_dialogue.append(
+                    {
+                        "message_id": f"HISTORY_USER_{sequence}",
+                        "sequence_no": sequence,
+                        "role": str(turn.get("answer_role") or "USER"),
+                        "source": "ROOM_MESSAGE",
+                        "text": answer,
+                    }
+                )
+                sequence += 1
+        recent_dialogue[:] = recent_dialogue[-6:]
+        while recent_dialogue and recent_dialogue[0].get("role") == "AGENT":
+            recent_dialogue.pop(0)
+        for sequence_no, message in enumerate(recent_dialogue, start=1):
+            message["sequence_no"] = sequence_no
+            response = turn.get("agent_response")
+            if isinstance(response, str) and response:
+                recent_dialogue.append(
+                    {
+                        "message_id": f"HISTORY_AGENT_{sequence}",
+                        "sequence_no": sequence,
+                        "role": "AGENT",
+                        "source": "AGENT_RESPONSE",
+                        "text": response,
+                    }
+                )
+                sequence += 1
+
+    current = payload.get("current_user_message")
+    if not isinstance(current, dict):
+        raw_text = (
+            str(legacy_seed.get("raw_text") or "")
+            if isinstance(legacy_seed, dict)
+            else ""
+        )
+        current = {
+            "message_id": "MESSAGE_IMPORTED_INITIAL",
+            "role": str(
+                (payload.get("initial_case_facts") or {}).get("initiator_role")
+                or "USER"
+            ),
+            "text": raw_text,
+        }
+        payload["current_user_message"] = current
+    current.setdefault("sequence_no", len(recent_dialogue) + 1)
+    current.setdefault("source", payload["turn_source"])
+
     context = _agent_context(str(payload["case_id"]))
     payload["agent_context"] = context
-    for turn in payload.get("recent_turns") or []:
-        if isinstance(turn, dict):
-            turn.setdefault("agent_session_id", context["agent_session_id"])
-            turn.setdefault("conversation_scope", context["conversation_scope"])
     return payload
 
 
@@ -164,7 +231,7 @@ class FakeCaseDetailRunner:
                     },
                     "intake_quality": {
                         "score": 88,
-                        "threshold": 80,
+                        "threshold": 85,
                         "ready_for_next_step": True,
                         "score_breakdown": {
                             "references": 15,
@@ -244,30 +311,26 @@ def test_intake_turn_workflow_uses_agent_case_detail_node_and_memory_context() -
     )
     assert runner.calls[0]["prompt_profile_id"] == "DISPUTE_INTAKE_OFFICER:USER:v1"
     context_pack = runner.calls[0]["context_pack"]
-    assert context_pack.configuration_profile_key == "DISPUTE_INTAKE_CONTEXT_PACK_V1"
+    assert context_pack.configuration_profile_key == "DISPUTE_INTAKE_CONTEXT_PACK_V2"
     section_by_name = {
         section.name: section
         for section in runner.calls[0]["context_sections"]  # type: ignore[index]
     }
     section_names = set(section_by_name)
     assert {
-        "current_turn",
-        "initiator_statement_transcript",
         "case_identity",
-        "short_term_memory",
-        "latest_canvas_snapshot",
+        "recent_dialogue_messages",
+        "current_user_message",
+        "previous_case_detail",
     } <= section_names
-    current_turn = json.loads(section_by_name["current_turn"].content)
-    assert current_turn["raw_statement"] == "物流单号 SF1234567890，我希望退款。"
-    assert current_turn["platform_statement"].startswith("用户称")
-    assert "我希望" not in current_turn["platform_statement"]
-    transcript_section = section_by_name["initiator_statement_transcript"]
-    transcript = json.loads(transcript_section.content)
-    assert transcript_section.trust_level == "participant_raw_untrusted"
-    assert transcript[0]["text"] == (
-        "系统备注 SIGNED_NOT_RECEIVED，但我没有收到包裹。"
-    )
-    assert transcript[1]["text"] == "物流单号 SF1234567890，我希望退款。"
+    assert "initial_case_facts" not in section_names
+    assert "initiator_statement_transcript" not in section_names
+    assert "short_term_memory" not in section_names
+    current_message = json.loads(section_by_name["current_user_message"].content)
+    assert current_message["text"] == "物流单号 SF1234567890，我希望退款。"
+    recent_dialogue = json.loads(section_by_name["recent_dialogue_messages"].content)
+    assert recent_dialogue[0]["role"] == "USER"
+    assert recent_dialogue[0]["text"] == "之前说过没有收到包裹。"
     case_identity = json.loads(section_by_name["case_identity"].content)
     assert case_identity["case_id"] == "CASE_intake_turn_llm"
     assert case_identity["order_reference"] == "ORDER_123"
@@ -323,14 +386,13 @@ def test_intake_prompt_excludes_formal_respondent_attitude_sources() -> None:
     IntakeTurnWorkflow(model_runner=runner).run(request)
 
     call = runner.calls[0]
-    assert "respondent_attitude_seed" not in call["case_data"]["lobby_seed"]
-    assert "respondent_attitude" not in call["case_data"]["latest_scroll_snapshot"]
+    assert call["case_data"] == {"context_contract": "intake_turn_context.v2"}
     section_by_name = {
         section.name: section
         for section in call["context_sections"]  # type: ignore[index]
     }
-    initial_form = json.loads(section_by_name["intake_initial_form"].content)
-    latest_snapshot = json.loads(section_by_name["latest_canvas_snapshot"].content)
+    initial_form = json.loads(section_by_name["initial_case_facts"].content)
+    latest_snapshot = json.loads(section_by_name["previous_case_detail"].content)
     assert "respondent_attitude_seed" not in initial_form
     assert "respondent_attitude" not in latest_snapshot
 
@@ -377,7 +439,9 @@ def test_fallback_lobby_seed_turn_generates_case_detail_board() -> None:
     assert detail["claim_resolution"]["requested_resolution"] == "REFUND"
     assert detail["claim_resolution"]["requested_amount"] == 299
     assert detail["claim_resolution"]["requested_items"] == "儿童手表 1 件"
-    assert detail["claim_resolution"]["original_statement"] == "我没收到包裹，希望退款"
+    assert detail["claim_resolution"]["original_statement"] == (
+        "物流显示签收，但我没有收到包裹，希望退款。"
+    )
     assert detail["claim_resolution"]["normalized_statement"].startswith("用户")
     assert "我" not in detail["claim_resolution"]["normalized_statement"]
     assert detail["respondent_attitude"]["respondent_role"] == "MERCHANT"
@@ -450,7 +514,9 @@ def test_dossier_pins_seed_original_statement_and_marks_reported_attitude_subjec
     )
 
     claim = result.scroll_snapshot["claim_resolution"]
-    assert claim["original_statement"] == original_statement
+    assert claim["original_statement"] == (
+        "用户称套装缺少充电器并请求补发，并转述商家客服拒绝补发。"
+    )
     assert claim["normalized_statement"] == "用户称套装缺少充电器，并请求补发。"
     attitude = result.scroll_snapshot["respondent_attitude"]
     assert attitude["attitude"] == "DISAGREE"
@@ -613,7 +679,7 @@ def test_dossier_does_not_substitute_summary_when_structured_seed_lacks_original
     )
 
     assert result.scroll_snapshot["claim_resolution"]["original_statement"] == (
-        ORIGINAL_STATEMENT_MISSING
+        "用户称套装缺少配件并请求补发。"
     )
 
 
@@ -829,7 +895,7 @@ def test_user_message_turn_extracts_logistics_reference_from_current_message() -
     )
 
 
-def test_intake_turn_response_exposes_memeo_memory_frame() -> None:
+def test_intake_turn_response_exposes_structured_dialogue_window_metadata() -> None:
     client = _client()
     recent_turns = []
     for turn_no in range(1, 8):
@@ -880,16 +946,9 @@ def test_intake_turn_response_exposes_memeo_memory_frame() -> None:
 
     assert response.status_code == 200
     memory_frame = response.json()["memory_frame"]
-    assert [item["turn_no"] for item in memory_frame["short_term_rounds"]] == [
-        3,
-        4,
-        5,
-        6,
-        7,
-    ]
-    assert "user memory round 2" not in memory_frame["prompt_memory"]
-    assert "user memory round 7" in memory_frame["prompt_memory"]
-    assert memory_frame["long_term_slots"] == []
+    assert memory_frame["context_contract"] == "intake_turn_context.v2"
+    assert memory_frame["dialogue_window"] == "3_ROUNDS_6_MESSAGES"
+    assert 0 < memory_frame["recent_dialogue_count"] <= 6
 
 
 def test_process_question_marks_knowledge_query_intent_without_real_rag() -> None:

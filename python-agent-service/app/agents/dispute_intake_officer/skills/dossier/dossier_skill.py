@@ -83,7 +83,7 @@ class CaseDetailDossierSkill:
     """
 
     schema_version = "intake_case_detail.v1"
-    readiness_threshold = 80
+    readiness_threshold = 85
 
     def render(
         self,
@@ -108,7 +108,7 @@ class CaseDetailDossierSkill:
                 llm_confidence=llm_confidence,
             )
 
-        previous = request.latest_scroll_snapshot or {}
+        previous = request.previous_case_detail or {}
         previous_waiting_for_remark = (
             _handoff_remark_status(previous) == "WAITING_FOR_REMARK"
             if isinstance(previous, dict)
@@ -121,7 +121,7 @@ class CaseDetailDossierSkill:
         _enforce_original_statement(detail, request, previous)
         _enforce_respondent_attitude_source(
             detail,
-            request.lobby_seed,
+            request.initial_case_facts,
             previous,
             llm_case_detail,
         )
@@ -133,11 +133,20 @@ class CaseDetailDossierSkill:
             "logistics_reference": trusted_refs.get("logistics_reference") or "",
         }
 
-        llm_missing_from_detail = _list_values(
-            _ensure_dict(detail, "missing_information").get("blocking_gaps")
-        )
+        missing_info = _ensure_dict(detail, "missing_information")
+        for field_name in ("blocking_gaps", "nice_to_have_gaps", "next_questions"):
+            missing_info[field_name] = [
+                value
+                for value in _list_values(missing_info.get(field_name))
+                if not _is_evidence_material_request(value)
+            ]
+        llm_missing_from_detail = _list_values(missing_info.get("blocking_gaps"))
         missing = self._hard_missing_fields(trusted_refs)
-        missing.extend(field for field in llm_missing_fields if field not in missing)
+        missing.extend(
+            field
+            for field in llm_missing_fields
+            if field not in missing and not _is_evidence_material_request(field)
+        )
         missing.extend(field for field in llm_missing_from_detail if field not in missing)
         score = _clamp_score(
             detail.get("intake_quality", {}).get("score")
@@ -157,10 +166,9 @@ class CaseDetailDossierSkill:
                 str(quality.get("improvement_reason") or "")
             )
 
-        missing_info = _ensure_dict(detail, "missing_information")
         missing_info["blocking_gaps"] = _human_missing_fields(missing)
         if quality["ready_for_next_step"]:
-            missing_info.setdefault("next_questions", [])
+            missing_info["next_questions"] = []
             _ensure_handoff_notes(detail)
         elif not missing_info.get("next_questions"):
             missing_info["next_questions"] = [_question_for_missing(missing)]
@@ -228,26 +236,28 @@ class CaseDetailDossierSkill:
         )
 
     def _trusted_references(self, request: IntakeTurnRequest) -> dict[str, str]:
-        current_text = (request.current_user_message.text if request.current_user_message else "")
-        raw_text = request.lobby_seed.raw_text or ""
-        previous = request.latest_scroll_snapshot or {}
+        current_text = request.current_user_message.text
+        transcript_text = "\n".join(
+            message.text for message in request.initiator_statement_transcript
+        )
+        previous = request.previous_case_detail or {}
         previous_refs = previous.get("references") if isinstance(previous, dict) else {}
         if not isinstance(previous_refs, dict):
             previous_refs = {}
-        source_text = f"{raw_text}\n{current_text}"
+        source_text = transcript_text or current_text
         return {
             "order_reference": (
-                request.lobby_seed.order_reference
+                request.initial_case_facts.order_reference
                 or str(previous_refs.get("order_reference") or "")
                 or _first_match(ORDER_REFERENCE_RE, source_text)
             ),
             "after_sales_reference": (
-                request.lobby_seed.after_sales_reference
+                request.initial_case_facts.after_sales_reference
                 or str(previous_refs.get("after_sales_reference") or "")
                 or _first_match(AFTER_SALES_REFERENCE_RE, source_text)
             ),
             "logistics_reference": (
-                request.lobby_seed.logistics_reference
+                request.initial_case_facts.logistics_reference
                 or str(previous_refs.get("logistics_reference") or "")
                 or _first_match(LOGISTICS_REFERENCE_RE, source_text)
             ),
@@ -263,8 +273,7 @@ class CaseDetailDossierSkill:
         return missing
 
     def _default_case_detail(self, request: IntakeTurnRequest) -> dict[str, Any]:
-        current_text = request.current_user_message.text if request.current_user_message else ""
-        source_text = current_text or request.lobby_seed.raw_text
+        source_text = request.current_user_message.text
         return {
             "schema_version": self.schema_version,
             "case_story": {
@@ -284,8 +293,16 @@ class CaseDetailDossierSkill:
                 "logistics_reference": "",
             },
             "party_positions": {
-                "user_claim": source_text if request.lobby_seed.initiator_role == "USER" else "",
-                "merchant_claim": source_text if request.lobby_seed.initiator_role == "MERCHANT" else "",
+                "user_claim": (
+                    source_text
+                    if request.initial_case_facts.initiator_role == "USER"
+                    else ""
+                ),
+                "merchant_claim": (
+                    source_text
+                    if request.initial_case_facts.initiator_role == "MERCHANT"
+                    else ""
+                ),
                 "platform_observation": "",
             },
             "dispute_focus": {
@@ -294,16 +311,18 @@ class CaseDetailDossierSkill:
                 "facts_to_verify": [],
             },
             "requested_resolution": {
-                "requested_outcome": request.lobby_seed.requested_outcome_hint or "UNKNOWN",
+                "requested_outcome": request.initial_case_facts.requested_outcome_hint or "UNKNOWN",
                 "expected_resolution_text": "",
             },
             "claim_resolution": _default_claim_resolution(
-                request.lobby_seed,
+                request.initial_case_facts,
                 source_text,
             ),
-            "respondent_attitude": _default_respondent_attitude(request.lobby_seed),
+            "respondent_attitude": _default_respondent_attitude(
+                request.initial_case_facts
+            ),
             "dispute_core_state": _default_dispute_core_state(
-                request.lobby_seed,
+                request.initial_case_facts,
                 source_text,
             ),
             "risk_assessment": {
@@ -439,8 +458,8 @@ def _enforce_original_statement(
         previous_provenance = {}
 
     current = request.current_user_message
-    current_message_id = current.message_id if current is not None else ""
-    current_text = current.text if current is not None else ""
+    current_message_id = current.message_id
+    current_text = current.text
     prior_is_trusted = (
         previous_provenance.get("policy") == ORIGINAL_STATEMENT_POLICY
         and isinstance(previous_claim.get("original_statement"), str)
@@ -456,21 +475,8 @@ def _enforce_original_statement(
             previous_provenance.get("submission_count")
         ) + (1 if len(statements) > 1 else 0)
     else:
-        statements = [
-            _initial_original_statement(
-                request.lobby_seed,
-                request.lobby_seed.raw_text,
-            )
-        ]
-        recent_statements = _recent_participant_statements(request.recent_turns)
-        statements.extend(recent_statements)
-        if current_text and (not recent_statements or recent_statements[-1] != current_text):
-            statements.append(current_text)
-        submission_count = (
-            (0 if statements[0] == ORIGINAL_STATEMENT_MISSING else 1)
-            + len(statements)
-            - 1
-        )
+        statements = [current_text]
+        submission_count = 1
 
     claim["original_statement"] = ORIGINAL_STATEMENT_SEPARATOR.join(statements)
     claim["original_statement_provenance"] = {
@@ -478,7 +484,7 @@ def _enforce_original_statement(
         "last_message_id": current_message_id,
         "submission_count": submission_count,
         "separator": "BLANK_LINE",
-        "source": "LEGACY_COMPATIBILITY",
+        "source": "CURRENT_MESSAGE",
     }
 
 
@@ -490,17 +496,6 @@ def _initial_original_statement(lobby_seed: Any, source_text: str) -> str:
             return original_statement
         return ORIGINAL_STATEMENT_MISSING
     return source_text
-
-
-def _recent_participant_statements(recent_turns: list[dict[str, object]]) -> list[str]:
-    statements: list[str] = []
-    for turn in recent_turns:
-        if not isinstance(turn, dict):
-            continue
-        content = turn.get("answer_content")
-        if isinstance(content, str) and content.strip():
-            statements.append(content)
-    return statements
 
 
 def _non_negative_int(value: Any) -> int:
@@ -853,7 +848,7 @@ def _record_handoff_remark_if_needed(
     previous_waiting_for_remark: bool,
 ) -> None:
     current = request.current_user_message
-    if not previous_waiting_for_remark or current is None or not current.text.strip():
+    if not previous_waiting_for_remark or not current.text.strip():
         return
 
     notes = _ensure_handoff_notes(detail)
@@ -961,6 +956,31 @@ def _list_values(value: Any) -> list[str]:
     if isinstance(value, str) and value.strip():
         return [value.strip()]
     return []
+
+
+def _is_evidence_material_request(value: Any) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    return any(
+        marker in text
+        for marker in (
+            "截图",
+            "照片",
+            "视频",
+            "聊天记录",
+            "沟通记录",
+            "录音",
+            "凭证",
+            "证明材料",
+            "证据材料",
+            "上传",
+            "补交",
+            "提供证据",
+            "提供材料",
+            "提交材料",
+        )
+    )
 
 
 def _question_for_missing(missing: list[str]) -> str:

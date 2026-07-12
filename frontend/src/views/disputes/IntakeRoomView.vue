@@ -103,7 +103,7 @@ const caseDetailQuality = computed(() => {
   const quality = caseDetailDossier.value?.intake_quality || {};
   return {
     score: currentCaseDossier.value?.quality_score ?? quality.score ?? 0,
-    threshold: quality.threshold ?? 80,
+    threshold: quality.threshold ?? 85,
     ready: currentCaseDossier.value?.ready_for_next_step ?? Boolean(quality.ready_for_next_step),
     reason: humanizeDossierText(quality.improvement_reason || "", { fallback: "" }),
   };

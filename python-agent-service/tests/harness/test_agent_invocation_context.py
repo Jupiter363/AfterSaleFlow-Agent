@@ -50,14 +50,19 @@ def _intake_payload() -> dict[str, object]:
     return {
         "case_id": case_id,
         "room_type": "INTAKE",
-        "turn_source": "LOBBY_SEED",
-        "lobby_seed": {
+        "turn_source": "EXTERNAL_IMPORT",
+        "initial_case_facts": {
             "initiator_role": "USER",
-            "raw_text": "Package signed but not received.",
         },
-        "current_user_message": None,
-        "latest_scroll_snapshot": None,
-        "recent_turns": [],
+        "current_user_message": {
+            "message_id": "MESSAGE_IMPORTED_INITIAL",
+            "sequence_no": 1,
+            "role": "USER",
+            "source": "EXTERNAL_IMPORT",
+            "text": "Package signed but not received.",
+        },
+        "recent_dialogue_messages": [],
+        "previous_case_detail": None,
         "agent_context": _agent_context(case_id=case_id),
     }
 

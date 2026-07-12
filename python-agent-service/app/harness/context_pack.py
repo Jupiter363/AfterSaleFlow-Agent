@@ -81,6 +81,16 @@ def _normalize_section_value(
     *,
     actor_role: str | None,
 ) -> Any:
+    if name in {
+        "case_identity",
+        "initial_case_facts",
+        "recent_dialogue_messages",
+        "current_user_message",
+        "previous_case_detail",
+    }:
+        # The intake v2 contract is already a normalized structured payload.
+        # Preserve role/source enums, message text and dossier field values.
+        return value
     if name == "current_turn":
         return _normalize_current_turn(value, actor_role=actor_role)
     if name == "initiator_statement_transcript":
