@@ -23,6 +23,7 @@ def _settings() -> Settings:
         litellm_master_key="test-litellm-master-key",
         langfuse_public_key="pk-test-key",
         langfuse_secret_key="sk-test-secret",
+        java_service_secret="test-java-service-secret",
         python_agent_service_secret="test-agent-service-secret",
         langfuse_enabled=False,
     )

@@ -1,6 +1,6 @@
 ﻿# Hearing Court Ten-Point Closure Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> 本文件是庭审主线、证据核验、裁决审核和后续执行扩展的统一实施方案；后续产品决策继续追加在本文件，不再依赖外部开发技能或拆散到多个临时计划。
 
 **Goal:** 把庭审页从“可展示的 UI”补齐为可运行、可追溯、可审核的三轮 AI 小法庭产品闭环。
 
@@ -33,6 +33,20 @@
 5. **当前审核侧只有唯一系统审核员。** 只有 `actor_id=reviewer-local` 且 `role=PLATFORM_REVIEWER` 可以确认、修改或提交审核决定；其他账号即使声明 `PLATFORM_REVIEWER` 角色，也必须返回 403。决定权限要在查询 review task、draft 或其他案件审核资源之前校验，避免通过 404/响应差异泄漏任务是否存在。审核列表与审核包的查看权限继续沿用既有角色规则，本轮不扩展多审核员分配模型。
 6. **固定账号建立在可信本地演示认证边界上。** 当前 `X-User-Id` / `X-Role` 头仅用于本地调试和固定三账号角色切换，不构成面向公网的强身份认证。Docker 服务对外发布前，必须由可信认证网关或签名会话提供并覆盖身份，不能允许外部客户端自行声明这两个头；本轮不把完整登录、多用户、审核员分配引入庭审主线。
 7. **dev-local 调试边界。** 本地联调以 `scripts/dev-local.ps1` 启动 Java API `8080` 与 Vite `5173`；Docker 只承担依赖服务和最终部署形态，不作为日常前后端热调试入口。
+
+## 2026-07-12 多模态证据核验与人工复核边界
+
+1. **唯一模型链路。** 所有 Agent 统一通过 `Python Harness → LiteLLM → qwen3.7-plus` 调用模型。Java 不拼模型提示词、不直接调用供应商，只提供权限过滤后的正式 `evidence_context_envelope.v1` 数据包、原件受控读取接口、持久化和审计能力。
+2. **当前证据范围。** 证据书记官每轮只允许评估 `current_event.attachment_refs` 中、且已包含在当前角色 `visible_evidence` 的证据。正式 `evidence_assessments` 必须对本轮附件完整一一覆盖；缺失、重复、未知或空 evidence id 全部失败关闭。历史证据、对方私有证据、旧 `verification_suggestions` 或模型自行编造的 evidence id 均不得生成新核验版本。
+3. **多模态输入。** Python Harness 通过 Java 内部接口读取被授权原件，校验 evidence id、文件大小、总大小、图片数量、MIME、文件魔数和 SHA-256 后，以 OpenAI 兼容 `image_url` data URL 发送给 qwen3.7-plus。支持 PNG、JPEG、WebP；视频、GIF、超限文件和格式异常进入人工复核。
+4. **隐私门禁。** 未脱敏图片只有在当事人上传时逐证据明确勾选“允许多模态模型用于本案核验”，并把授权范围写入证据 metadata/audit 后才可外发；未授权材料只使用 OCR/元数据并转人工。生产和本地调试均不存在全局原图绕过开关。Java 模型原件接口除 SYSTEM 身份、`JAVA_SERVICE_SECRET`、案件归属与证据可见性校验外，还强制要求证据已脱敏或逐证据授权，SYSTEM 不能绕过。
+5. **四维评分正式落库。** 每份本轮证据独立保存：`authenticity_score`、`relevance_score`、`completeness_score`、`assessment_confidence`。其中真实性分表示来源链/文件完整/未见明显编辑异常的正向评分，不是对证据所陈述事实的真值判定；评估置信度是模型对本次分析的把握，不是案件胜负概率。
+6. **事实映射。** Harness 从接待卷宗的已知事实、争议事实和待核验事实生成稳定 `allowed_fact_targets` 白名单；字符串事实使用内容哈希形成稳定 ID。`fact_links` 只能引用该白名单，并明确 `SUPPORTS / OPPOSES / INCONCLUSIVE` 关系、理由和置信度。白名单外引用会被删除并强制转人工，不能创建新的矩阵事实行。证据矩阵冻结时使用最新真实模型评分和过滤后的关系。
+7. **模型权限边界。** 模型只能输出 `PLAUSIBLE / SUSPICIOUS / NEEDS_HUMAN_REVIEW`，不得直接输出 `VERIFIED / REJECTED`，不得判断责任、退款或执行动作。图片可提示疑似划痕、破损等视觉现象，但不能单独证明形成时间、原因和责任。
+8. **可信模态约束与审计。** 模型只能声明 Harness manifest 已真实提供的 `OCR_TEXT / IMAGE_PIXELS / FILE_METADATA`。原图未加载、哈希不符、隐私门禁阻断或读取失败时，Harness 必须清除模型自报的视觉发现和 `IMAGE_PIXELS`，压低真实性、完整性与评估置信度上限，并强制转人工。每份评估把经过白名单裁剪的 `asset_audit` 随核验版本持久化，记录加载状态、格式、大小、已检查模态和隐私授权依据，不记录原始图片或内部 secret。
+9. **人工审核卡片。** 证据目录根据最新版本化 `evidence_verification` 投影只读“待人工审核”卡片，展示四维评分、已检查模态、原因码、模型能力限制和审核指引。细微外观损伤、关键区域模糊/遮挡、OCR 与画面冲突、来源哈希缺失、高风险标志或低评估置信度必须进入该队列。
+10. **失败关闭。** 正式 Evidence Clerk 已配置模型时，模型/合同异常不得返回确定性核验兜底结果；请求应明确失败并允许重试，避免把模板结果写成真实核验。没有 attachment refs 时仍可进行普通证据室对话，但不会生成单证据评估版本。
+11. **运行与验证。** `scripts/verify-qwen-multimodal.py` 通过 LiteLLM 发送真实红蓝测试图、JSON mode 和 `qwen3.7-plus`，验证模型是否真正读取视觉像素。正式 E2E 至少覆盖：聊天截图（OCR+视觉）、无关图片（真实性与相关性分离）、细微划痕图片（强制人工复核）、未脱敏图片（默认不外发）。真实探针要求本地配置有效且已轮换的 `DASHSCOPE_API_KEY`。
 
 ---
 

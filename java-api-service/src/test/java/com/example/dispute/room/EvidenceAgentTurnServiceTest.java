@@ -9,22 +9,23 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import com.example.dispute.config.ActorRole;
-import com.example.dispute.config.AuthenticatedActor;
-import com.example.dispute.common.exception.ForbiddenException;
 import com.example.dispute.common.api.ErrorCode;
 import com.example.dispute.common.exception.AgentExecutionException;
+import com.example.dispute.common.exception.ForbiddenException;
+import com.example.dispute.config.ActorRole;
+import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.RiskLevel;
+import com.example.dispute.evidence.domain.EvidenceVerificationStatus;
 import com.example.dispute.evidence.infrastructure.persistence.entity.EvidenceVerificationEntity;
 import com.example.dispute.evidence.infrastructure.persistence.repository.EvidenceVerificationRepository;
 import com.example.dispute.infrastructure.persistence.entity.EvidenceItemEntity;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.repository.EvidenceItemRepository;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
-import com.example.dispute.room.application.CaseEventService;
 import com.example.dispute.room.application.AccessSessionResolver;
 import com.example.dispute.room.application.AgentSessionResolver;
+import com.example.dispute.room.application.CaseEventService;
 import com.example.dispute.room.application.EvidenceAgentTurnClient;
 import com.example.dispute.room.application.EvidenceAgentTurnCommand;
 import com.example.dispute.room.application.EvidenceAgentTurnResult;
@@ -34,8 +35,8 @@ import com.example.dispute.room.application.EvidenceContextEnvelopeV1;
 import com.example.dispute.room.application.IntakeRecentTurn;
 import com.example.dispute.room.application.RoomMessageCommand;
 import com.example.dispute.room.application.SessionPermissionService;
-import com.example.dispute.room.domain.PermissionLevel;
 import com.example.dispute.room.domain.MessageType;
+import com.example.dispute.room.domain.PermissionLevel;
 import com.example.dispute.room.domain.RoomType;
 import com.example.dispute.room.infrastructure.persistence.entity.AgentConversationSessionEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseAccessSessionEntity;
@@ -57,13 +58,17 @@ import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.BeforeEach;
-import org.springframework.test.util.ReflectionTestUtils;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.test.util.ReflectionTestUtils;
 
 @ExtendWith(MockitoExtension.class)
 class EvidenceAgentTurnServiceTest {
@@ -130,6 +135,322 @@ class EvidenceAgentTurnServiceTest {
                                         invocation.getArgument(2),
                                         invocation.getArgument(3),
                                         invocation.getArgument(4)));
+    }
+
+    @Test
+    void completeMultimodalAssessmentPersistsCurrentAttachmentAndHumanReviewWinsStatus()
+            throws Exception {
+        FulfillmentCaseEntity dispute = evidenceCase();
+        CaseRoomEntity room = evidenceRoom(dispute);
+        EvidenceItemEntity attached =
+                evidenceItem("EVIDENCE_ATTACHED", "USER", "user-local", "PARTIES");
+        EvidenceItemEntity historical =
+                evidenceItem("EVIDENCE_HISTORICAL", "USER", "user-local", "PARTIES");
+        when(caseRepository.findByIdForUpdate(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.EVIDENCE))
+                .thenReturn(Optional.of(room));
+        when(memoryRepository.findMaxTurnNoByAgentSessionId(any())).thenReturn(0);
+        when(memoryRepository.findTop50ByAgentSessionIdOrderByTurnNoDesc(any()))
+                .thenReturn(List.of());
+        when(evidenceItemRepository
+                        .findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(
+                                dispute.getId()))
+                .thenReturn(List.of(attached, historical));
+        when(client.run(any(), eq("TRACE_MULTIMODAL"), eq("REQ_MULTIMODAL")))
+                .thenReturn(
+                        new EvidenceAgentTurnResult(
+                                "The visible scratch needs human inspection.",
+                                objectMapper.readTree("{}"),
+                                objectMapper.readTree("[]"),
+                                List.of(attached.getId()),
+                                List.of(),
+                                List.of(),
+                                List.of(assessment(attached.getId(), true)),
+                                false,
+                                false,
+                                "NONE",
+                                0.81));
+        when(verificationRepository.findTopByEvidenceIdOrderByVerificationVersionDesc(
+                        attached.getId()))
+                .thenReturn(Optional.empty());
+        when(memoryRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(verificationRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(messageRepository.findByCaseIdAndIdempotencyKey(eq(dispute.getId()), any()))
+                .thenReturn(Optional.empty());
+        when(messageRepository.findMaxSequenceByRoomId(room.getId())).thenReturn(1L);
+        when(messageRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+
+        service.continueFromParticipantMessage(
+                dispute.getId(),
+                RoomType.EVIDENCE,
+                new AuthenticatedActor("user-local", ActorRole.USER),
+                new RoomMessageCommand(
+                        MessageType.PARTY_EVIDENCE_REFERENCE,
+                        "Please inspect the attached product photo.",
+                        List.of(attached.getId())),
+                "MESSAGE_MULTIMODAL",
+                CLOCK.instant(),
+                "TRACE_MULTIMODAL",
+                "REQ_MULTIMODAL");
+
+        ArgumentCaptor<EvidenceVerificationEntity> verification =
+                ArgumentCaptor.forClass(EvidenceVerificationEntity.class);
+        verify(verificationRepository).save(verification.capture());
+        EvidenceVerificationEntity persisted = verification.getValue();
+        assertThat(persisted.getEvidenceId()).isEqualTo(attached.getId());
+        assertThat(persisted.getVerificationStatus())
+                .isEqualTo(EvidenceVerificationStatus.NEEDS_HUMAN_REVIEW);
+        assertThat(persisted.isRequiresHumanReview()).isTrue();
+        JsonNode findings = objectMapper.readTree(persisted.getAgentFindingsJson());
+        assertThat(findings.path("analysis_method").asText()).isEqualTo("HYBRID");
+        assertThat(findings.path("fact_links").get(0).path("fact_id").asText())
+                .isEqualTo("FACT_GOODS_CONDITION");
+        assertThat(findings.path("authenticity_score").asDouble()).isEqualTo(0.73);
+        assertThat(findings.path("relevance_score").asDouble()).isEqualTo(0.91);
+        assertThat(findings.path("completeness_score").asDouble()).isEqualTo(0.68);
+        assertThat(findings.path("assessment_confidence").asDouble()).isEqualTo(0.84);
+        assertThat(findings.path("human_review").path("required").asBoolean()).isTrue();
+        assertThat(findings.path("asset_audit").path("visual_input_status").asText())
+                .isEqualTo("LOADED");
+        verify(verificationRepository, never())
+                .findTopByEvidenceIdOrderByVerificationVersionDesc(historical.getId());
+    }
+
+    private static EvidenceAgentTurnResult.EvidenceAssessment assessment(
+            String evidenceId, boolean humanReview) {
+        return new EvidenceAgentTurnResult.EvidenceAssessment(
+                evidenceId,
+                "HYBRID",
+                List.of("IMAGE", "OCR_TEXT"),
+                List.of(Map.of("fact_id", "FACT_GOODS_CONDITION", "relation", "SUPPORTS")),
+                0.73,
+                0.91,
+                0.68,
+                0.84,
+                List.of(Map.of("type", "SURFACE_MARK", "description", "Possible scratch")),
+                List.of("The image cannot establish when the mark formed."),
+                List.of(Map.of("code", "DAMAGE_CAUSALITY_UNCERTAIN", "severity", "HIGH")),
+                humanReview ? "SUSPICIOUS" : "PLAUSIBLE",
+                new EvidenceAgentTurnResult.HumanReview(
+                        humanReview,
+                        humanReview ? List.of("VISUAL_DAMAGE_CAUSALITY") : List.of(),
+                        humanReview ? List.of("Inspect the original image at full resolution.") : List.of()),
+                Map.of(
+                        "visual_input_status", "LOADED",
+                        "privacy_basis", "EXPLICIT_PARTY_AUTHORIZATION"),
+                "The image shows a possible surface mark.");
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("invalidAssessmentCoverage")
+    void attachmentAssessmentCoverageMismatchFailsClosed(
+            String scenario,
+            List<EvidenceAgentTurnResult.EvidenceAssessment> assessments) throws Exception {
+        FulfillmentCaseEntity dispute = evidenceCase();
+        CaseRoomEntity room = evidenceRoom(dispute);
+        EvidenceItemEntity first =
+                evidenceItem("EVIDENCE_COVERAGE_1", "USER", "user-local", "PARTIES");
+        EvidenceItemEntity second =
+                evidenceItem("EVIDENCE_COVERAGE_2", "USER", "user-local", "PARTIES");
+        when(caseRepository.findByIdForUpdate(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.EVIDENCE))
+                .thenReturn(Optional.of(room));
+        when(memoryRepository.findMaxTurnNoByAgentSessionId(any())).thenReturn(0);
+        when(memoryRepository.findTop50ByAgentSessionIdOrderByTurnNoDesc(any()))
+                .thenReturn(List.of());
+        when(evidenceItemRepository
+                        .findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(
+                                dispute.getId()))
+                .thenReturn(List.of(first, second));
+        when(client.run(any(), eq("TRACE_COVERAGE"), eq("REQ_COVERAGE")))
+                .thenReturn(
+                        new EvidenceAgentTurnResult(
+                                "Assessment response for " + scenario,
+                                objectMapper.readTree("{}"),
+                                objectMapper.readTree("[]"),
+                                List.of(first.getId(), second.getId()),
+                                List.of(),
+                                List.of(),
+                                assessments,
+                                false,
+                                false,
+                                "NONE",
+                                0.8));
+        when(memoryRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+
+        assertThatThrownBy(
+                        () ->
+                                service.continueFromParticipantMessage(
+                                        dispute.getId(),
+                                        RoomType.EVIDENCE,
+                                        new AuthenticatedActor("user-local", ActorRole.USER),
+                                        new RoomMessageCommand(
+                                                MessageType.PARTY_EVIDENCE_REFERENCE,
+                                                "Please inspect both attachments.",
+                                                List.of(first.getId(), second.getId())),
+                                        "MESSAGE_COVERAGE",
+                                        CLOCK.instant(),
+                                        "TRACE_COVERAGE",
+                                        "REQ_COVERAGE"))
+                .isInstanceOfSatisfying(
+                        AgentExecutionException.class,
+                        failure -> {
+                            assertThat(failure.errorCode())
+                                    .isEqualTo(ErrorCode.AGENT_OUTPUT_SCHEMA_INVALID);
+                            assertThat(failure.details())
+                                    .containsKeys(
+                                            "duplicate_evidence_ids",
+                                            "unknown_evidence_ids",
+                                            "missing_evidence_ids");
+                        });
+        verify(verificationRepository, never()).save(any());
+        verify(messageRepository, never()).save(any());
+    }
+
+    private static Stream<Arguments> invalidAssessmentCoverage() {
+        return Stream.of(
+                Arguments.of(
+                        "missing assessment",
+                        List.of(assessment("EVIDENCE_COVERAGE_1", false))),
+                Arguments.of(
+                        "unknown assessment",
+                        List.of(
+                                assessment("EVIDENCE_COVERAGE_1", false),
+                                assessment("EVIDENCE_UNKNOWN", false))),
+                Arguments.of(
+                        "duplicate assessment",
+                        List.of(
+                                assessment("EVIDENCE_COVERAGE_1", false),
+                                assessment("EVIDENCE_COVERAGE_1", false))));
+    }
+
+    @Test
+    void legacySuggestionWithoutCurrentAttachmentDoesNotCreateVerification() throws Exception {
+        FulfillmentCaseEntity dispute = evidenceCase();
+        CaseRoomEntity room = evidenceRoom(dispute);
+        EvidenceItemEntity historical =
+                evidenceItem("EVIDENCE_HISTORY_ONLY", "USER", "user-local", "PARTIES");
+        when(caseRepository.findByIdForUpdate(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.EVIDENCE))
+                .thenReturn(Optional.of(room));
+        when(memoryRepository.findMaxTurnNoByAgentSessionId(any())).thenReturn(0);
+        when(memoryRepository.findTop50ByAgentSessionIdOrderByTurnNoDesc(any()))
+                .thenReturn(List.of());
+        when(evidenceItemRepository
+                        .findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(
+                                dispute.getId()))
+                .thenReturn(List.of(historical));
+        when(client.run(any(), eq("TRACE_TEXT_ONLY"), eq("REQ_TEXT_ONLY")))
+                .thenReturn(
+                        new EvidenceAgentTurnResult(
+                                "Please explain the evidence source.",
+                                objectMapper.readTree("{}"),
+                                objectMapper.readTree("[]"),
+                                List.of(historical.getId()),
+                                List.of(
+                                        new EvidenceAgentTurnResult.EvidenceVerificationSuggestion(
+                                                historical.getId(),
+                                                "A previous item was mentioned.",
+                                                0.72)),
+                                List.of(),
+                                false,
+                                false,
+                                "NONE",
+                                0.72));
+        when(memoryRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(messageRepository.findByCaseIdAndIdempotencyKey(eq(dispute.getId()), any()))
+                .thenReturn(Optional.empty());
+        when(messageRepository.findMaxSequenceByRoomId(room.getId())).thenReturn(1L);
+        when(messageRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+
+        service.continueFromParticipantMessage(
+                dispute.getId(),
+                RoomType.EVIDENCE,
+                new AuthenticatedActor("user-local", ActorRole.USER),
+                new RoomMessageCommand(
+                        MessageType.PARTY_TEXT,
+                        "This message does not submit or reference a file.",
+                        List.of()),
+                "MESSAGE_TEXT_ONLY",
+                CLOCK.instant(),
+                "TRACE_TEXT_ONLY",
+                "REQ_TEXT_ONLY");
+
+        verify(verificationRepository, never()).save(any());
+        verify(verificationRepository, never())
+                .findTopByEvidenceIdOrderByVerificationVersionDesc(historical.getId());
+        ArgumentCaptor<RoomMessageEntity> displayedReply =
+                ArgumentCaptor.forClass(RoomMessageEntity.class);
+        verify(messageRepository).save(displayedReply.capture());
+        assertThat(displayedReply.getValue().getMessageText())
+                .isEqualTo("Please explain the evidence source.");
+    }
+
+    @Test
+    void attachmentWithOnlyLegacySuggestionFailsClosedWithoutVerificationPersistence()
+            throws Exception {
+        FulfillmentCaseEntity dispute = evidenceCase();
+        CaseRoomEntity room = evidenceRoom(dispute);
+        EvidenceItemEntity attached =
+                evidenceItem("EVIDENCE_LEGACY_ONLY", "USER", "user-local", "PARTIES");
+        when(caseRepository.findByIdForUpdate(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.EVIDENCE))
+                .thenReturn(Optional.of(room));
+        when(memoryRepository.findMaxTurnNoByAgentSessionId(any())).thenReturn(0);
+        when(memoryRepository.findTop50ByAgentSessionIdOrderByTurnNoDesc(any()))
+                .thenReturn(List.of());
+        when(evidenceItemRepository
+                        .findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(
+                                dispute.getId()))
+                .thenReturn(List.of(attached));
+        when(client.run(any(), eq("TRACE_LEGACY_ATTACHMENT"), eq("REQ_LEGACY_ATTACHMENT")))
+                .thenReturn(
+                        new EvidenceAgentTurnResult(
+                                "This legacy suggestion must not become a verification.",
+                                objectMapper.readTree("{}"),
+                                objectMapper.readTree("[]"),
+                                List.of(attached.getId()),
+                                List.of(
+                                        new EvidenceAgentTurnResult.EvidenceVerificationSuggestion(
+                                                attached.getId(),
+                                                "Legacy confidence suggestion",
+                                                0.93)),
+                                List.of(),
+                                false,
+                                false,
+                                "NONE",
+                                0.93));
+        when(memoryRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+
+        assertThatThrownBy(
+                        () ->
+                                service.continueFromParticipantMessage(
+                                        dispute.getId(),
+                                        RoomType.EVIDENCE,
+                                        new AuthenticatedActor("user-local", ActorRole.USER),
+                                        new RoomMessageCommand(
+                                                MessageType.PARTY_EVIDENCE_REFERENCE,
+                                                "Inspect this attachment.",
+                                                List.of(attached.getId())),
+                                        "MESSAGE_LEGACY_ATTACHMENT",
+                                        CLOCK.instant(),
+                                        "TRACE_LEGACY_ATTACHMENT",
+                                        "REQ_LEGACY_ATTACHMENT"))
+                .isInstanceOfSatisfying(
+                        AgentExecutionException.class,
+                        failure -> {
+                            assertThat(failure.errorCode())
+                                    .isEqualTo(ErrorCode.AGENT_OUTPUT_SCHEMA_INVALID);
+                            assertThat(failure.details().get("missing_evidence_ids"))
+                                    .isEqualTo(List.of(attached.getId()));
+                        });
+        verify(verificationRepository, never()).save(any());
+        verify(messageRepository, never()).save(any());
     }
 
     @Test
@@ -238,6 +559,7 @@ class EvidenceAgentTurnServiceTest {
                                                 "The user-private delivery material is relevant but still needs carrier corroboration.",
                                                 0.62)),
                                 List.of(),
+                                List.of(assessment("EVIDENCE_USER_PRIVATE", false)),
                                 false,
                                 false,
                                 "STUB",
@@ -319,8 +641,8 @@ class EvidenceAgentTurnServiceTest {
                 .isEqualTo("EVIDENCE_USER_PRIVATE");
         assertThat(verification.getValue().getVerificationVersion()).isEqualTo(1);
         assertThat(verification.getValue().getAgentFindingsJson())
-                .contains("carrier corroboration")
-                .contains("\"confidence_score\":0.62");
+                .contains("possible surface mark")
+                .contains("\"confidence_score\":0.84");
         assertThat(commandJson.path("context_envelope")
                         .path("current_event")
                         .path("message_type")
@@ -981,6 +1303,9 @@ class EvidenceAgentTurnServiceTest {
                                 objectMapper.createObjectNode(),
                                 objectMapper.createArrayNode(),
                                 List.of("EVIDENCE_UPLOAD_1"),
+                                List.of(),
+                                List.of(),
+                                List.of(assessment("EVIDENCE_UPLOAD_1", false)),
                                 false,
                                 false,
                                 "STUB",
@@ -1074,7 +1399,7 @@ class EvidenceAgentTurnServiceTest {
     }
 
     @Test
-    void failedEvidenceAgentCallFallsBackToChineseClerkMessage() {
+    void failedEvidenceAgentCallFailsClosedWithoutPersistingSyntheticVerification() {
         FulfillmentCaseEntity dispute = evidenceCase();
         CaseRoomEntity room = evidenceRoom(dispute);
         when(caseRepository.findByIdForUpdate(dispute.getId()))
@@ -1092,34 +1417,28 @@ class EvidenceAgentTurnServiceTest {
                 .thenReturn(List.of());
         when(client.run(any(), eq("TRACE_DEGRADED"), eq("REQ_DEGRADED")))
                 .thenThrow(new IllegalStateException("agent endpoint missing"));
-        when(memoryRepository.save(any()))
-                .thenAnswer(invocation -> invocation.getArgument(0));
-        when(messageRepository.findByCaseIdAndIdempotencyKey(eq(dispute.getId()), any()))
-                .thenReturn(Optional.empty());
-        when(messageRepository.findMaxSequenceByRoomId(room.getId())).thenReturn(0L);
-        when(messageRepository.save(any()))
-                .thenAnswer(invocation -> invocation.getArgument(0));
 
-        service.continueFromParticipantMessage(
-                dispute.getId(),
-                RoomType.EVIDENCE,
-                new AuthenticatedActor("user-local", ActorRole.USER),
-                new RoomMessageCommand(
-                        MessageType.PARTY_TEXT,
-                        "我会上传开箱照片原图。",
-                        List.of()),
-                "MESSAGE_DEGRADED",
-                CLOCK.instant(),
-                "TRACE_DEGRADED",
-                "REQ_DEGRADED");
-
-        ArgumentCaptor<RoomMessageEntity> agentMessage =
-                ArgumentCaptor.forClass(RoomMessageEntity.class);
-        verify(messageRepository).save(agentMessage.capture());
-        assertThat(agentMessage.getValue().getMessageText())
-                .contains("证据书记官")
-                .contains("已经安全保存")
-                .doesNotContain("temporarily unavailable");
+        assertThatThrownBy(
+                        () ->
+                                service.continueFromParticipantMessage(
+                                        dispute.getId(),
+                                        RoomType.EVIDENCE,
+                                        new AuthenticatedActor("user-local", ActorRole.USER),
+                                        new RoomMessageCommand(
+                                                MessageType.PARTY_TEXT,
+                                                "我会上传开箱照片原图。",
+                                                List.of()),
+                                        "MESSAGE_DEGRADED",
+                                        CLOCK.instant(),
+                                        "TRACE_DEGRADED",
+                                        "REQ_DEGRADED"))
+                .isInstanceOfSatisfying(
+                        AgentExecutionException.class,
+                        failure ->
+                                assertThat(failure.errorCode())
+                                        .isEqualTo(ErrorCode.AGENT_SERVICE_UNAVAILABLE));
+        verify(messageRepository, never()).save(any());
+        verify(verificationRepository, never()).save(any());
     }
 
     @Test

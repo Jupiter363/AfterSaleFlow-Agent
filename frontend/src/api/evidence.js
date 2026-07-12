@@ -10,12 +10,20 @@ export const evidenceApi = {
     apiRequest(`/disputes/${caseId}/evidence`, actor),
   completion: (actor, caseId) =>
     apiRequest(`/disputes/${caseId}/evidence/completion`, actor),
-  upload: (actor, caseId, { file, evidenceType, sourceType, visibility, occurredAt }) => {
+  upload: (actor, caseId, {
+    file,
+    evidenceType,
+    sourceType,
+    visibility,
+    occurredAt,
+    modelProcessingAuthorized = false,
+  }) => {
     const form = new FormData();
     form.append("file", file);
     form.append("evidence_type", evidenceType);
     form.append("source_type", sourceType);
     form.append("visibility", visibility);
+    form.append("model_processing_authorized", String(modelProcessingAuthorized));
     if (occurredAt) form.append("occurred_at", occurredAt);
     return apiRequest(`/disputes/${caseId}/evidence`, actor, {
       method: "POST",

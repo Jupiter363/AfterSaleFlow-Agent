@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import re
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -20,6 +22,7 @@ MAX_PROMPT_EVIDENCE_ITEMS = 20
 MAX_EVIDENCE_PREVIEW_CHARS = 3_000
 MAX_MODEL_TEXT_CHARS = 20_000
 MAX_CASE_SUMMARY_CHARS = 4_000
+_SAFE_FACT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 
 
 class EvidenceTurnWorkingSet(BaseModel):
@@ -34,6 +37,7 @@ class EvidenceTurnWorkingSet(BaseModel):
     actor_id: str
     current_event: dict[str, Any]
     case_intake_dossier: dict[str, Any]
+    allowed_fact_targets: tuple[dict[str, str], ...] = Field(default_factory=tuple)
     available_evidence: tuple[EvidenceTurnEvidenceItem, ...] = Field(default_factory=tuple)
 
 
@@ -65,6 +69,7 @@ class EvidenceContextAssembler:
         room_policy = envelope.room_policy
         turn_source = current_event.event_type
         canonical_dossier = _canonical_case_dossier(envelope)
+        allowed_fact_targets = _allowed_fact_targets(canonical_dossier)
         current_turn = _current_turn(envelope, turn_source=turn_source)
         visible_evidence = _actor_visible_evidence(envelope)
         recent_turns = [
@@ -89,6 +94,7 @@ class EvidenceContextAssembler:
             actor_id=actor.actor_id,
             current_event=current_turn,
             case_intake_dossier=canonical_dossier,
+            allowed_fact_targets=allowed_fact_targets,
             available_evidence=working_evidence,
         )
         context_sources = {
@@ -102,6 +108,7 @@ class EvidenceContextAssembler:
                 "context_captured_at": envelope.captured_at,
             },
             "canonical_case_dossier": canonical_dossier,
+            "allowed_fact_targets": list(allowed_fact_targets),
             "actor_private_memory": str(memory_frame.get("prompt_memory") or ""),
             "compressed_summary": str(
                 memory_frame.get("compressed_summary") or ""
@@ -187,6 +194,63 @@ def _canonical_case_dossier(
         "available": dossier_snapshot is not None,
     }
     return dossier
+
+
+def _allowed_fact_targets(dossier: dict[str, Any]) -> tuple[dict[str, str], ...]:
+    """Build stable fact IDs only from the trusted intake dossier."""
+
+    collections = (
+        _nested_value(dossier, "dispute_focus", "facts_to_verify"),
+        dossier.get("known_facts"),
+        dossier.get("disputed_facts"),
+        dossier.get("facts_in_dispute"),
+        _nested_value(dossier, "dispute_core_state", "facts_in_dispute"),
+    )
+    targets: list[dict[str, str]] = []
+    seen_ids: set[str] = set()
+    for collection in collections:
+        values = collection if isinstance(collection, list) else []
+        for value in values:
+            target = _fact_target(value)
+            if target is None or target["fact_id"] in seen_ids:
+                continue
+            seen_ids.add(target["fact_id"])
+            targets.append(target)
+            if len(targets) >= 100:
+                return tuple(targets)
+    return tuple(targets)
+
+
+def _nested_value(value: dict[str, Any], *path: str) -> Any:
+    current: Any = value
+    for key in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
+def _fact_target(value: Any) -> dict[str, str] | None:
+    explicit_id = ""
+    label = ""
+    if isinstance(value, str):
+        label = value.strip()
+    elif isinstance(value, dict):
+        candidate_id = str(value.get("fact_id") or value.get("id") or "").strip()
+        if _SAFE_FACT_ID.fullmatch(candidate_id):
+            explicit_id = candidate_id
+        for key in ("fact", "description", "event", "title", "name", "issue"):
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                label = candidate.strip()
+                break
+    if not label and not explicit_id:
+        return None
+    label = (label or explicit_id)[:500]
+    fact_id = explicit_id or (
+        "FACT_INTAKE_" + hashlib.sha256(label.encode("utf-8")).hexdigest()[:16].upper()
+    )
+    return {"fact_id": fact_id, "fact": label}
 
 
 def _current_turn(
@@ -297,6 +361,7 @@ def _working_evidence(item: Any) -> EvidenceTurnEvidenceItem:
         submitted_by_role=item.submitted_by_role,
         visibility=item.visibility,
         content_url=item.content_url,
+        content_type=item.content_type,
         parse_status=item.parse_status,
         original_filename=item.original_filename,
         parser_warning=parse_notice,

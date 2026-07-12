@@ -35,6 +35,22 @@ function buildEvidenceCatalog({
           index % 3 === 0 ? "NEEDS_HUMAN_REVIEW" : "VERIFIED",
         confidence_score: index % 4 === 0 ? 0.62 : 0.91,
         confidence_level: index % 4 === 0 ? "MEDIUM" : "HIGH",
+        authenticity_score: 0.78,
+        relevance_score: index % 3 === 0 ? 0.86 : 0.72,
+        completeness_score: index % 3 === 0 ? 0.54 : 0.81,
+        assessment_confidence: index % 3 === 0 ? 0.67 : 0.88,
+        requires_human_review: index % 3 === 0,
+        inspected_modalities: ["IMAGE_PIXELS", "OCR_TEXT", "FILE_METADATA"],
+        limitations:
+          index % 3 === 0
+            ? ["单张图片不能单独证明外观痕迹形成时间、原因或责任归属。"]
+            : [],
+        human_review_reason_codes:
+          index % 3 === 0 ? ["FINE_VISUAL_DAMAGE_REQUIRES_HUMAN"] : [],
+        human_review_instructions:
+          index % 3 === 0
+            ? ["请审核员打开原图，核对疑似划痕区域、拍摄时间和来源链。"]
+            : [],
         verification_feedback:
           index === 0
             ? LONG_UNBROKEN_TEXT
@@ -136,6 +152,24 @@ export async function installEvidenceRoomFixture(page, options = {}) {
       url.pathname === "/api/notifications/unread-count"
     ) {
       return fulfillJson(route, { unread_count: 0 });
+    }
+    if (request.method() === "GET" && url.pathname === "/api/disputes") {
+      return fulfillJson(route, {
+        items: [],
+        page: 0,
+        size: 20,
+        total_elements: 0,
+      });
+    }
+    if (
+      request.method() === "GET" &&
+      url.pathname === `/api/disputes/${CASE_ID}`
+    ) {
+      return fulfillJson(route, {
+        id: CASE_ID,
+        status: "EVIDENCE_COLLECTION",
+        initiator_role: options.initiatorRole || "USER",
+      });
     }
     if (
       request.method() === "GET" &&

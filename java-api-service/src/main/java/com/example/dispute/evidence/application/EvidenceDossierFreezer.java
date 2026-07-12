@@ -4,6 +4,7 @@ import com.example.dispute.domain.model.ParseStatus;
 import com.example.dispute.evidence.domain.EvidenceSubmissionStatus;
 import com.example.dispute.evidence.domain.EvidenceVerificationStatus;
 import com.example.dispute.evidence.infrastructure.persistence.entity.EvidenceDossierItemEntity;
+import com.example.dispute.evidence.infrastructure.persistence.entity.EvidenceVerificationEntity;
 import com.example.dispute.evidence.infrastructure.persistence.repository.EvidenceDossierItemRepository;
 import com.example.dispute.evidence.infrastructure.persistence.repository.EvidenceVerificationRepository;
 import com.example.dispute.infrastructure.persistence.entity.EvidenceDossierEntity;
@@ -11,6 +12,7 @@ import com.example.dispute.infrastructure.persistence.entity.EvidenceItemEntity;
 import com.example.dispute.infrastructure.persistence.repository.EvidenceDossierRepository;
 import com.example.dispute.infrastructure.persistence.repository.EvidenceItemRepository;
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.util.ArrayList;
@@ -87,17 +89,38 @@ public class EvidenceDossierFreezer {
 
         List<Map<String, Object>> timeline = new ArrayList<>();
         List<Map<String, Object>> evidenceItems = new ArrayList<>();
+        List<String> unmappedEvidence = new ArrayList<>();
         Map<String, MatrixAccumulator> matrixByFact = new LinkedHashMap<>();
         Map<String, PartySummaryAccumulator> partySummary = new LinkedHashMap<>();
         partySummary.put("USER", new PartySummaryAccumulator());
         partySummary.put("MERCHANT", new PartySummaryAccumulator());
         for (IncludedEvidence item : included) {
             EvidenceItemEntity evidence = item.evidence();
-            double authenticityScore = authenticityScore(item.status());
-            double relevanceScore = relevanceScore(evidence);
-            double completenessScore = completenessScore(evidence);
-            String factId = factId(evidence);
+            double authenticityScore =
+                    verificationScore(
+                            item,
+                            "authenticity_score",
+                            authenticityScore(item.status()));
+            double relevanceScore =
+                    verificationScore(item, "relevance_score", relevanceScore(evidence));
+            double completenessScore =
+                    verificationScore(
+                            item,
+                            "completeness_score",
+                            completenessScore(evidence));
+            double assessmentConfidence =
+                    verificationScore(item, "assessment_confidence", authenticityScore);
             String claimedFact = claimedFact(evidence);
+            List<FactLinkSnapshot> factLinks = factLinks(item);
+            boolean structuredFactLinks = hasStructuredFactLinks(item);
+            boolean requiresHumanReview =
+                    item.verification() != null && item.verification().isRequiresHumanReview();
+            double compositeScore =
+                    compositeEvidenceScore(
+                            authenticityScore,
+                            relevanceScore,
+                            completenessScore,
+                            assessmentConfidence);
             Map<String, Object> timelineEntry = new LinkedHashMap<>();
             timelineEntry.put("evidence_id", evidence.getId());
             timelineEntry.put("evidence_type", evidence.getEvidenceType());
@@ -118,21 +141,63 @@ public class EvidenceDossierFreezer {
             evidenceItem.put("evidence_type", evidence.getEvidenceType());
             evidenceItem.put("parsed_text", abbreviate(evidence.getParsedText(), 180));
             evidenceItem.put("claimed_fact", claimedFact);
-            evidenceItem.put("supports_fact_ids", List.of(factId));
+            evidenceItem.put(
+                    "supports_fact_ids",
+                    factLinks.stream()
+                            .filter(link -> "SUPPORTS".equals(link.relation()))
+                            .map(FactLinkSnapshot::factId)
+                            .toList());
+            evidenceItem.put(
+                    "opposes_fact_ids",
+                    factLinks.stream()
+                            .filter(link -> "OPPOSES".equals(link.relation()))
+                            .map(FactLinkSnapshot::factId)
+                            .toList());
             evidenceItem.put("authenticity_score", authenticityScore);
             evidenceItem.put("relevance_score", relevanceScore);
             evidenceItem.put("completeness_score", completenessScore);
+            evidenceItem.put("assessment_confidence", assessmentConfidence);
+            evidenceItem.put("requires_human_review", requiresHumanReview);
             evidenceItem.put("verification_status", statusName(item.status()));
             evidenceItem.put("risk_flags", riskFlags(item.status(), evidence));
             evidenceItems.add(evidenceItem);
 
-            matrixByFact.computeIfAbsent(factId, ignored -> new MatrixAccumulator(factId, claimedFact))
-                    .add(item, authenticityScore);
+            if (structuredFactLinks) {
+                if (factLinks.isEmpty()) {
+                    unmappedEvidence.add(evidence.getId());
+                }
+                for (FactLinkSnapshot link : factLinks) {
+                    double linkScore = compositeScore * link.confidence();
+                    matrixByFact
+                            .computeIfAbsent(
+                                    link.factId(),
+                                    ignored ->
+                                            new MatrixAccumulator(
+                                                    link.factId(),
+                                                    defaultText(link.reason(), link.factId())))
+                            .add(
+                                    item,
+                                    link.relation(),
+                                    linkScore,
+                                    requiresHumanReview);
+                }
+            } else {
+                String legacyFactId = factId(evidence);
+                matrixByFact
+                        .computeIfAbsent(
+                                legacyFactId,
+                                ignored -> new MatrixAccumulator(legacyFactId, claimedFact))
+                        .add(item, "SUPPORTS", compositeScore, requiresHumanReview);
+            }
             partySummary
                     .computeIfAbsent(
                             defaultText(evidence.getSubmittedByRole(), "UNKNOWN"),
                             ignored -> new PartySummaryAccumulator())
-                    .add(evidence, item.status(), authenticityScore);
+                    .add(
+                            evidence,
+                            item.status(),
+                            compositeScore,
+                            requiresHumanReview);
         }
 
         Map<String, Object> summary = new LinkedHashMap<>();
@@ -160,7 +225,7 @@ public class EvidenceDossierFreezer {
                 matrixByFact.values().stream().map(MatrixAccumulator::toMap).toList());
         matrixSummary.put(
                 "unmapped_evidence",
-                List.of());
+                unmappedEvidence);
         matrixSummary.put(
                 "handoff_notes",
                 summary.get("handoff_notes"));
@@ -190,6 +255,30 @@ public class EvidenceDossierFreezer {
             snapshot.put("parse_status", parseStatusName(evidence.getParseStatus()));
             snapshot.put("claimed_fact", claimedFact(evidence));
             snapshot.put("verification_status", statusName(item.status()));
+            snapshot.put(
+                    "authenticity_score",
+                    verificationScore(
+                            item,
+                            "authenticity_score",
+                            authenticityScore(item.status())));
+            snapshot.put(
+                    "relevance_score",
+                    verificationScore(
+                            item,
+                            "relevance_score",
+                            relevanceScore(evidence)));
+            snapshot.put(
+                    "completeness_score",
+                    verificationScore(
+                            item,
+                            "completeness_score",
+                            completenessScore(evidence)));
+            snapshot.put(
+                    "assessment_confidence",
+                    verificationScore(
+                            item,
+                            "assessment_confidence",
+                            authenticityScore(item.status())));
             snapshots.add(
                     EvidenceDossierItemEntity.snapshot(
                             "DOSSIER_ITEM_" + compactUuid(),
@@ -206,12 +295,91 @@ public class EvidenceDossierFreezer {
     }
 
     private IncludedEvidence withLatestStatus(EvidenceItemEntity evidence) {
-        EvidenceVerificationStatus status =
+        return new IncludedEvidence(
+                evidence,
                 verificationRepository
                         .findTopByEvidenceIdOrderByVerificationVersionDesc(evidence.getId())
-                        .map(verification -> verification.getVerificationStatus())
-                        .orElse(null);
-        return new IncludedEvidence(evidence, status);
+                        .orElse(null));
+    }
+
+    private double verificationScore(
+            IncludedEvidence item, String fieldName, double fallback) {
+        if (item.verification() == null) {
+            return fallback;
+        }
+        try {
+            var value =
+                    objectMapper
+                            .readTree(item.verification().getAgentFindingsJson())
+                            .path(fieldName);
+            if (!value.isNumber()) {
+                return fallback;
+            }
+            double score = value.asDouble();
+            if (!Double.isFinite(score)) {
+                return fallback;
+            }
+            return Math.max(0.0, Math.min(1.0, score > 1.0 ? score / 100.0 : score));
+        } catch (JsonProcessingException exception) {
+            return fallback;
+        }
+    }
+
+    private boolean hasStructuredFactLinks(IncludedEvidence item) {
+        return agentFindings(item).has("fact_links");
+    }
+
+    private List<FactLinkSnapshot> factLinks(IncludedEvidence item) {
+        JsonNode rawLinks = agentFindings(item).path("fact_links");
+        if (!rawLinks.isArray()) {
+            return List.of();
+        }
+        List<FactLinkSnapshot> links = new ArrayList<>();
+        for (JsonNode rawLink : rawLinks) {
+            String factId = rawLink.path("fact_id").asText("").trim();
+            String relation = rawLink.path("relation").asText("").trim();
+            if (factId.isBlank()
+                    || !("SUPPORTS".equals(relation)
+                            || "OPPOSES".equals(relation)
+                            || "INCONCLUSIVE".equals(relation))) {
+                continue;
+            }
+            double confidence = rawLink.path("confidence").asDouble(0.0);
+            if (!Double.isFinite(confidence)) {
+                confidence = 0.0;
+            }
+            links.add(
+                    new FactLinkSnapshot(
+                            factId,
+                            relation,
+                            abbreviate(rawLink.path("reason").asText(""), 180),
+                            Math.max(0.0, Math.min(1.0, confidence))));
+        }
+        return List.copyOf(links);
+    }
+
+    private JsonNode agentFindings(IncludedEvidence item) {
+        if (item.verification() == null
+                || item.verification().getAgentFindingsJson() == null
+                || item.verification().getAgentFindingsJson().isBlank()) {
+            return objectMapper.createObjectNode();
+        }
+        try {
+            return objectMapper.readTree(item.verification().getAgentFindingsJson());
+        } catch (JsonProcessingException exception) {
+            return objectMapper.createObjectNode();
+        }
+    }
+
+    private static double compositeEvidenceScore(
+            double authenticity,
+            double relevance,
+            double completeness,
+            double assessmentConfidence) {
+        return authenticity * 0.30
+                + relevance * 0.30
+                + completeness * 0.20
+                + assessmentConfidence * 0.20;
     }
 
     private String json(Object value) {
@@ -365,10 +533,13 @@ public class EvidenceDossierFreezer {
                         .mapToDouble(
                                 item ->
                                         ((Number) item.get("authenticity_score")).doubleValue()
-                                                * 0.45
+                                                * 0.30
                                                 + ((Number) item.get("relevance_score")).doubleValue()
-                                                        * 0.35
+                                                        * 0.30
                                                 + ((Number) item.get("completeness_score")).doubleValue()
+                                                        * 0.20
+                                                + ((Number) item.get("assessment_confidence"))
+                                                                .doubleValue()
                                                         * 0.20)
                         .average()
                         .orElse(0.0);
@@ -401,27 +572,53 @@ public class EvidenceDossierFreezer {
     }
 
     private record IncludedEvidence(
-            EvidenceItemEntity evidence, EvidenceVerificationStatus status) {}
+            EvidenceItemEntity evidence, EvidenceVerificationEntity verification) {
+
+        private EvidenceVerificationStatus status() {
+            return verification == null ? null : verification.getVerificationStatus();
+        }
+    }
+
+    private record FactLinkSnapshot(
+            String factId, String relation, String reason, double confidence) {}
 
     private static final class MatrixAccumulator {
         private final String factId;
         private final String fact;
         private final List<String> supportingEvidence = new ArrayList<>();
         private final List<String> opposingEvidence = new ArrayList<>();
-        private double strongestScore;
+        private final List<String> inconclusiveEvidence = new ArrayList<>();
+        private double strongestSupportScore;
+        private double strongestOppositionScore;
+        private boolean requiresHumanReview;
 
         private MatrixAccumulator(String factId, String fact) {
             this.factId = factId;
             this.fact = fact;
         }
 
-        private void add(IncludedEvidence item, double score) {
-            supportingEvidence.add(item.evidence().getId());
-            strongestScore = Math.max(strongestScore, score);
+        private void add(
+                IncludedEvidence item,
+                String relation,
+                double score,
+                boolean requiresHumanReview) {
+            if ("SUPPORTS".equals(relation)) {
+                supportingEvidence.add(item.evidence().getId());
+                strongestSupportScore = Math.max(strongestSupportScore, score);
+            } else if ("OPPOSES".equals(relation)) {
+                opposingEvidence.add(item.evidence().getId());
+                strongestOppositionScore = Math.max(strongestOppositionScore, score);
+            } else {
+                inconclusiveEvidence.add(item.evidence().getId());
+            }
+            this.requiresHumanReview |= requiresHumanReview;
         }
 
         private boolean strongEnough() {
-            return strongestScore >= 0.75;
+            return !requiresHumanReview
+                    && !supportingEvidence.isEmpty()
+                    && strongestSupportScore >= 0.75
+                    && strongestOppositionScore < 0.60;
         }
 
         private Map<String, Object> toMap() {
@@ -430,8 +627,16 @@ public class EvidenceDossierFreezer {
             row.put("fact", fact);
             row.put("supporting_evidence", supportingEvidence);
             row.put("opposing_evidence", opposingEvidence);
+            row.put("inconclusive_evidence", inconclusiveEvidence);
+            row.put("requires_human_review", requiresHumanReview);
+            double strongestScore = Math.max(strongestSupportScore, strongestOppositionScore);
             row.put("evidence_strength", evidenceStrength(strongestScore));
-            row.put("judge_attention", judgeAttention(strongestScore));
+            row.put(
+                    "judge_attention",
+                    judgeAttention(
+                            strongestSupportScore,
+                            strongestOppositionScore,
+                            requiresHumanReview));
             return row;
         }
 
@@ -445,11 +650,20 @@ public class EvidenceDossierFreezer {
             return "LOW";
         }
 
-        private static String judgeAttention(double score) {
-            if (score >= 0.85) {
+        private static String judgeAttention(
+                double supportScore,
+                double oppositionScore,
+                boolean requiresHumanReview) {
+            if (requiresHumanReview) {
+                return "该事实关联证据仍需人工复核，庭审不得直接将模型观察写成已验证事实。";
+            }
+            if (oppositionScore >= 0.60) {
+                return "该事实同时存在较强反向证据，庭审应重点核对双方证据来源、时间与完整上下文。";
+            }
+            if (supportScore >= 0.85) {
                 return "该事实已有较强证据支撑，庭审中仍需确认来源链路和双方解释。";
             }
-            if (score >= 0.60) {
+            if (supportScore >= 0.60) {
                 return "该事实已有一定证据支撑，但仍需核验证据形成时间、来源和完整性。";
             }
             return "该事实证明强度偏弱，庭审中应要求当事人补充说明或接受人工复核。";
@@ -465,14 +679,15 @@ public class EvidenceDossierFreezer {
         private void add(
                 EvidenceItemEntity evidence,
                 EvidenceVerificationStatus status,
-                double authenticityScore) {
+                double compositeScore,
+                boolean requiresHumanReview) {
             total++;
             String label =
                     defaultText(evidence.getOriginalFilename(), evidence.getId())
                             + "（"
                             + statusName(status)
                             + "）";
-            if (authenticityScore >= 0.75) {
+            if (!requiresHumanReview && compositeScore >= 0.75) {
                 strongPoints.add(label);
             } else {
                 weakPoints.add(label);

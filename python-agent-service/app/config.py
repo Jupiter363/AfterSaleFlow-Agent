@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     langfuse_secret_key: str = Field(min_length=8)
     langfuse_enabled: bool = True
     java_api_service_url: str = "http://java-api-service:8080"
+    java_service_secret: str = Field(min_length=16)
     python_agent_service_secret: str = Field(min_length=16)
     prompt_version: str = "hearing-v1"
     evaluation_prompt_version: str = "evaluation-v1"

@@ -7,6 +7,7 @@ import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.config.DisputeProperties;
 import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.RiskLevel;
+import com.example.dispute.hearing.application.HearingRoundService;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.notification.application.NotificationService;
@@ -17,10 +18,13 @@ import com.example.dispute.notification.infrastructure.persistence.repository.No
 import com.example.dispute.room.application.IntakeConfirmationCommand;
 import com.example.dispute.room.application.IntakeRoomService;
 import com.example.dispute.room.application.IntakeAgentTurnService;
+import com.example.dispute.room.application.AccessSessionResolver;
+import com.example.dispute.room.application.EvidenceAgentTurnService;
 import com.example.dispute.room.application.ParticipantService;
 import com.example.dispute.room.application.CaseEventService;
 import com.example.dispute.room.application.RoomMessageCommand;
 import com.example.dispute.room.application.RoomMessageService;
+import com.example.dispute.room.application.SessionPermissionService;
 import com.example.dispute.room.domain.MessageType;
 import com.example.dispute.room.domain.PhaseClockStatus;
 import com.example.dispute.room.domain.PhaseClockType;
@@ -104,6 +108,10 @@ class IntakeRoomServiceIntegrationTest {
     @Autowired private CaseTimelineEventRepository eventRepository;
     @MockitoBean private EvidenceWindowCoordinator evidenceWindowCoordinator;
     @MockitoBean private IntakeAgentTurnService intakeAgentTurnService;
+    @MockitoBean private AccessSessionResolver accessSessionResolver;
+    @MockitoBean private SessionPermissionService sessionPermissionService;
+    @MockitoBean private EvidenceAgentTurnService evidenceAgentTurnService;
+    @MockitoBean private HearingRoundService hearingRoundService;
 
     @Test
     void acceptedIntakePersistsParticipantsRoomsAndTheAuthoritativeDeadline() {

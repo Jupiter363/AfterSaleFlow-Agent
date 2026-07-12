@@ -236,9 +236,13 @@ if ($Stop) {
 Import-DotEnv -Path (Join-Path $projectRoot ".env")
 if (
     [string]::IsNullOrWhiteSpace($env:DASHSCOPE_API_KEY) -or
+    $env:DASHSCOPE_API_KEY -eq "EMPTY" -or
     $env:DASHSCOPE_API_KEY -eq "__PASTE_YOUR_DASHSCOPE_API_KEY_HERE__"
 ) {
-    throw "DASHSCOPE_API_KEY is not configured in .env."
+    Write-Warning (
+        "DASHSCOPE_API_KEY is not configured in .env. Java and frontend will start, " +
+        "but model-backed Agent requests will fail closed until the key is configured."
+    )
 }
 New-Item -ItemType Directory -Path $stateDir -Force | Out-Null
 
@@ -250,6 +254,10 @@ try {
     }
 
     $env:JAVA_API_SERVICE_URL = "http://host.docker.internal:8080"
+    docker compose build python-agent-service | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to build the current Python Agent source for local dev."
+    }
     docker compose up -d --no-build --force-recreate `
         python-agent-service ocr-parser-service | Out-Host
     if ($LASTEXITCODE -ne 0) {

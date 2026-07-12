@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import base64
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import httpx
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
@@ -18,6 +21,7 @@ def _settings() -> Settings:
         litellm_master_key="test-litellm-master-key",
         langfuse_public_key="pk-test-key",
         langfuse_secret_key="sk-test-secret",
+        java_service_secret="test-java-service-secret",
         python_agent_service_secret="test-agent-service-secret",
         langfuse_enabled=False,
     )
@@ -308,6 +312,38 @@ class FakeEvidenceRunner:
         )
 
 
+class CapturingMultimodalRunner:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def invoke_structured(self, **kwargs):
+        self.calls.append(kwargs)
+        output_type = kwargs["output_type"]
+        return SimpleNamespace(
+            value=output_type(
+                room_utterance="已结合原图、OCR 和文件元数据完成本轮证据核验。",
+                evidence_assessments=[
+                    {
+                        "evidence_id": "EVIDENCE_signature_photo",
+                        "analysis_method": "HYBRID",
+                        "inspected_modalities": [
+                            "OCR_TEXT",
+                            "IMAGE_PIXELS",
+                            "FILE_METADATA",
+                        ],
+                        "authenticity_score": 0.82,
+                        "relevance_score": 0.91,
+                        "completeness_score": 0.76,
+                        "assessment_confidence": 0.8,
+                        "recommendation": "PLAUSIBLE",
+                        "summary": "图片可读，内容与签收争议相关。",
+                    }
+                ],
+                confidence=0.8,
+            )
+        )
+
+
 class GenericOpeningRunner:
     def invoke_structured(
         self,
@@ -420,6 +456,47 @@ def test_evidence_turn_workflow_uses_harness_node_with_memory_dossier_and_eviden
     assert result.evidence_requests[0].target_evidence_id == "EVIDENCE_signature_photo"
     assert result.verification_suggestions[0].evidence_id == "EVIDENCE_signature_photo"
     assert 0 <= result.verification_suggestions[0].confidence_score <= 1
+
+
+def test_evidence_turn_workflow_places_asset_manifest_in_context_pack() -> None:
+    from app.agents.evidence_clerk.workflow import EvidenceTurnWorkflow
+    from app.harness.evidence_asset_loader import EvidenceAssetLoader
+    from app.schemas import EvidenceTurnRequest
+
+    image = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    )
+    payload = _java_evidence_turn_command_payload()
+    payload["context_envelope"]["current_event"]["attachment_refs"] = [
+        "EVIDENCE_signature_photo"
+    ]
+    evidence = payload["context_envelope"]["visible_evidence"][0]
+    evidence["content_type"] = "image/png"
+    evidence["file_size"] = len(image)
+    evidence["file_hash"] = hashlib.sha256(image).hexdigest()
+    evidence["desensitized"] = True
+    runner = CapturingMultimodalRunner()
+    workflow = EvidenceTurnWorkflow(
+        model_runner=runner,
+        asset_loader=EvidenceAssetLoader(
+            java_api_service_url="http://java-api-service:8080",
+            java_service_secret="test-java-service-secret",
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, content=image)
+            ),
+        ),
+    )
+
+    result = workflow.run(EvidenceTurnRequest.model_validate(payload))
+
+    call = runner.calls[0]
+    context_pack = call["context_pack"]
+    sections = {item.name: item.content for item in context_pack.prompt_sections()}
+    manifest = json.loads(sections["multimodal_evidence_manifest"])
+    assert manifest["loaded_image_count"] == 1
+    assert manifest["items"][0]["visual_input_status"] == "LOADED"
+    assert call["multimodal_parts"][1]["type"] == "image_url"
+    assert result.evidence_assessments[0].analysis_method == "HYBRID"
 
 
 def test_evidence_opening_turn_passes_source_to_llm_context() -> None:
@@ -590,7 +667,7 @@ def test_evidence_context_assembler_preserves_null_parsed_text_and_adds_notice()
     from app.harness.evidence_context_assembler import EvidenceContextAssembler
     from app.schemas import EvidenceTurnRequest
 
-    payload = _evidence_turn_payload()
+    payload = _java_evidence_turn_command_payload()
     evidence = payload["context_envelope"]["visible_evidence"][0]
     evidence["parsed_text"] = None
     evidence["parse_status"] = "PROCESSING"
@@ -883,3 +960,380 @@ def test_evidence_turn_prompt_treats_initiator_evidence_as_admission_gate() -> N
     assert "证据不足也不阻止进入小法庭" not in prompt
     assert "只做证据核验" in prompt
     assert "不判断责任" in prompt
+
+
+def test_evidence_asset_loader_fetches_authorized_image_and_builds_data_url() -> None:
+    from app.harness.evidence_asset_loader import EvidenceAssetLoader
+    from app.schemas import EvidenceTurnRequest
+
+    image = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    )
+    payload = _java_evidence_turn_command_payload()
+    evidence = payload["context_envelope"]["visible_evidence"][0]
+    evidence["content_type"] = "image/png"
+    evidence["file_size"] = len(image)
+    evidence["file_hash"] = hashlib.sha256(image).hexdigest()
+    evidence["desensitized"] = True
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith(
+            "/internal/evidence/CASE_evidence_turn_llm/"
+            "EVIDENCE_signature_photo/content"
+        )
+        assert request.headers["X-Service-Identity"] == "python-agent-service"
+        assert request.headers["X-Service-Secret"] == "test-java-service-secret"
+        return httpx.Response(200, content=image)
+
+    envelope = EvidenceTurnRequest.model_validate(payload).context_envelope
+    loaded = EvidenceAssetLoader(
+        java_api_service_url="http://java-api-service:8080",
+        java_service_secret="test-java-service-secret",
+        transport=httpx.MockTransport(handler),
+    ).load(envelope)
+
+    assert loaded.manifest["loaded_image_count"] == 1
+    assert loaded.manifest["items"][0]["visual_input_status"] == "LOADED"
+    assert loaded.content_parts[1]["type"] == "image_url"
+    assert loaded.content_parts[1]["image_url"]["url"].startswith(
+        "data:image/png;base64,"
+    )
+
+
+def test_evidence_asset_loader_blocks_hash_mismatch_from_model_input() -> None:
+    from app.harness.evidence_asset_loader import EvidenceAssetLoader
+    from app.schemas import EvidenceTurnRequest
+
+    payload = _java_evidence_turn_command_payload()
+    evidence = payload["context_envelope"]["visible_evidence"][0]
+    evidence["content_type"] = "image/png"
+    evidence["file_hash"] = "0" * 64
+    evidence["desensitized"] = True
+    image = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    )
+    envelope = EvidenceTurnRequest.model_validate(payload).context_envelope
+    loaded = EvidenceAssetLoader(
+        java_api_service_url="http://java-api-service:8080",
+        java_service_secret="test-java-service-secret",
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, content=image)
+        ),
+    ).load(envelope)
+
+    assert loaded.content_parts == ()
+    assert loaded.manifest["items"][0]["visual_input_status"] == "HASH_MISMATCH"
+
+
+def test_evidence_asset_loader_blocks_raw_image_until_privacy_gate_is_enabled() -> None:
+    from app.harness.evidence_asset_loader import EvidenceAssetLoader
+    from app.schemas import EvidenceTurnRequest
+
+    payload = _java_evidence_turn_command_payload()
+    evidence = payload["context_envelope"]["visible_evidence"][0]
+    evidence["content_type"] = "image/png"
+    evidence["desensitized"] = False
+    envelope = EvidenceTurnRequest.model_validate(payload).context_envelope
+    loaded = EvidenceAssetLoader(
+        java_api_service_url="http://java-api-service:8080",
+        java_service_secret="test-java-service-secret",
+        transport=httpx.MockTransport(
+            lambda request: pytest.fail("raw image must not be fetched")
+        ),
+    ).load(envelope)
+
+    assert loaded.content_parts == ()
+    assert loaded.manifest["items"][0]["visual_input_status"] == (
+        "PRIVACY_REVIEW_REQUIRED"
+    )
+
+
+def test_evidence_asset_loader_accepts_per_evidence_model_processing_authorization() -> None:
+    from app.harness.evidence_asset_loader import EvidenceAssetLoader
+    from app.schemas import EvidenceTurnRequest
+
+    image = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    )
+    payload = _java_evidence_turn_command_payload()
+    evidence = payload["context_envelope"]["visible_evidence"][0]
+    evidence["content_type"] = "image/png"
+    evidence["desensitized"] = False
+    evidence["file_hash"] = hashlib.sha256(image).hexdigest()
+    evidence["metadata"] = {"model_processing_authorized": True}
+    envelope = EvidenceTurnRequest.model_validate(payload).context_envelope
+    loaded = EvidenceAssetLoader(
+        java_api_service_url="http://java-api-service:8080",
+        java_service_secret="test-java-service-secret",
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, content=image)
+        ),
+    ).load(envelope)
+
+    assert loaded.manifest["loaded_image_count"] == 1
+    descriptor = loaded.manifest["items"][0]
+    assert descriptor["privacy_basis"] == "EXPLICIT_PARTY_AUTHORIZATION"
+    assert descriptor["visual_input_status"] == "LOADED"
+
+
+def test_evidence_asset_loader_blocks_declared_image_with_invalid_magic() -> None:
+    from app.harness.evidence_asset_loader import EvidenceAssetLoader
+    from app.schemas import EvidenceTurnRequest
+
+    payload = _java_evidence_turn_command_payload()
+    evidence = payload["context_envelope"]["visible_evidence"][0]
+    evidence["content_type"] = "image/png"
+    evidence["desensitized"] = True
+    evidence["file_hash"] = hashlib.sha256(b"not-an-image").hexdigest()
+    envelope = EvidenceTurnRequest.model_validate(payload).context_envelope
+    loaded = EvidenceAssetLoader(
+        java_api_service_url="http://java-api-service:8080",
+        java_service_secret="test-java-service-secret",
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, content=b"not-an-image")
+        ),
+    ).load(envelope)
+
+    assert loaded.content_parts == ()
+    assert loaded.manifest["items"][0]["visual_input_status"] == "MIME_MISMATCH"
+
+
+def test_evidence_asset_loader_marks_missing_hash_as_provenance_gap() -> None:
+    from app.harness.evidence_asset_loader import EvidenceAssetLoader
+    from app.schemas import EvidenceTurnRequest
+
+    image = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    )
+    payload = _java_evidence_turn_command_payload()
+    evidence = payload["context_envelope"]["visible_evidence"][0]
+    evidence["content_type"] = "image/png"
+    evidence["desensitized"] = True
+    evidence["file_hash"] = None
+    envelope = EvidenceTurnRequest.model_validate(payload).context_envelope
+    loaded = EvidenceAssetLoader(
+        java_api_service_url="http://java-api-service:8080",
+        java_service_secret="test-java-service-secret",
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, content=image)
+        ),
+    ).load(envelope)
+
+    assert loaded.manifest["loaded_image_count"] == 1
+    assert loaded.manifest["items"][0]["visual_input_status"] == (
+        "LOADED_WITHOUT_HASH"
+    )
+
+
+def test_assessment_policy_keeps_irrelevant_image_separate_from_authenticity() -> None:
+    from app.agents.evidence_clerk.assessment_policy import EvidenceAssessmentPolicy
+    from app.harness.evidence_context_assembler import EvidenceContextAssembler
+    from app.schemas import EvidenceItemAssessment, EvidenceTurnRequest
+
+    assembled = EvidenceContextAssembler().assemble(
+        EvidenceTurnRequest.model_validate(_java_evidence_turn_command_payload())
+    )
+    assessment = EvidenceItemAssessment(
+        evidence_id="EVIDENCE_signature_photo",
+        analysis_method="MULTIMODAL",
+        inspected_modalities=["OCR_TEXT", "IMAGE_PIXELS", "FILE_METADATA"],
+        fact_links=[],
+        authenticity_score=0.88,
+        relevance_score=0.08,
+        completeness_score=0.82,
+        assessment_confidence=0.86,
+        findings=[
+            {
+                "finding_type": "UNRELATED_SCENE",
+                "description": "画面内容与物流签收争议没有直接关系。",
+            }
+        ],
+        limitations=[],
+        risk_flags=[],
+        recommendation="PLAUSIBLE",
+        human_review={"required": False},
+        summary="图片本身可读，但与当前争议事实关联性很低。",
+    )
+
+    result = EvidenceAssessmentPolicy().apply(
+        [assessment],
+        assembled.working_set,
+        {
+            "items": [
+                {
+                    "evidence_id": "EVIDENCE_signature_photo",
+                    "visual_input_status": "LOADED",
+                    "inspected_modalities": [
+                        "OCR_TEXT",
+                        "IMAGE_PIXELS",
+                        "FILE_METADATA",
+                    ],
+                }
+            ]
+        },
+    )[0]
+
+    assert result.authenticity_score == 0.88
+    assert result.relevance_score == 0.08
+    assert result.human_review.required is False
+
+
+def test_assessment_policy_blocks_fact_ids_outside_intake_dossier_allowlist() -> None:
+    from app.agents.evidence_clerk.assessment_policy import EvidenceAssessmentPolicy
+    from app.harness.evidence_context_assembler import EvidenceContextAssembler
+    from app.schemas import EvidenceItemAssessment, EvidenceTurnRequest
+
+    payload = _java_evidence_turn_command_payload()
+    payload["context_envelope"]["intake_dossier_snapshot"]["payload"][
+        "dispute_focus"
+    ]["facts_to_verify"] = [
+        {"fact_id": "FACT_SIGNED", "fact": "物流记录是否足以证明本人收货"}
+    ]
+    assembled = EvidenceContextAssembler().assemble(
+        EvidenceTurnRequest.model_validate(payload)
+    )
+    assert assembled.working_set.allowed_fact_targets == (
+        {"fact_id": "FACT_SIGNED", "fact": "物流记录是否足以证明本人收货"},
+    )
+    assessment = EvidenceItemAssessment(
+        evidence_id="EVIDENCE_signature_photo",
+        analysis_method="HYBRID",
+        inspected_modalities=["OCR_TEXT", "IMAGE_PIXELS", "FILE_METADATA"],
+        fact_links=[
+            {
+                "fact_id": "FACT_SIGNED",
+                "relation": "SUPPORTS",
+                "reason": "图片包含签收记录。",
+                "confidence": 0.78,
+            },
+            {
+                "fact_id": "FACT_MODEL_INVENTED",
+                "relation": "SUPPORTS",
+                "reason": "模型自行创造的事实。",
+                "confidence": 0.99,
+            },
+        ],
+        authenticity_score=0.82,
+        relevance_score=0.88,
+        completeness_score=0.74,
+        assessment_confidence=0.8,
+        recommendation="PLAUSIBLE",
+        summary="签收图片与既有待证事实相关。",
+    )
+
+    result = EvidenceAssessmentPolicy().apply(
+        [assessment],
+        assembled.working_set,
+        {
+            "items": [
+                {
+                    "evidence_id": "EVIDENCE_signature_photo",
+                    "visual_input_status": "LOADED",
+                    "inspected_modalities": [
+                        "OCR_TEXT",
+                        "IMAGE_PIXELS",
+                        "FILE_METADATA",
+                    ],
+                }
+            ]
+        },
+    )[0]
+
+    assert [item.fact_id for item in result.fact_links] == ["FACT_SIGNED"]
+    assert result.recommendation == "NEEDS_HUMAN_REVIEW"
+    assert "UNKNOWN_FACT_REFERENCE" in result.human_review.reason_codes
+    assert any("事实白名单" in item for item in result.limitations)
+
+
+def test_assessment_policy_routes_visual_damage_to_human_review() -> None:
+    from app.agents.evidence_clerk.assessment_policy import EvidenceAssessmentPolicy
+    from app.harness.evidence_context_assembler import EvidenceContextAssembler
+    from app.schemas import EvidenceItemAssessment, EvidenceTurnRequest
+
+    payload = _java_evidence_turn_command_payload()
+    payload["context_envelope"]["intake_dossier_snapshot"]["payload"]["case_story"][
+        "one_sentence_summary"
+    ] = "用户称商品表面存在细微划痕，需要核验照片。"
+    assembled = EvidenceContextAssembler().assemble(
+        EvidenceTurnRequest.model_validate(payload)
+    )
+    assessment = EvidenceItemAssessment(
+        evidence_id="EVIDENCE_signature_photo",
+        analysis_method="MULTIMODAL",
+        inspected_modalities=["IMAGE_PIXELS"],
+        authenticity_score=0.84,
+        relevance_score=0.91,
+        completeness_score=0.79,
+        assessment_confidence=0.83,
+        recommendation="PLAUSIBLE",
+        summary="画面可见疑似细微划痕。",
+    )
+
+    result = EvidenceAssessmentPolicy().apply(
+        [assessment],
+        assembled.working_set,
+        {
+            "items": [
+                {
+                    "evidence_id": "EVIDENCE_signature_photo",
+                    "visual_input_status": "LOADED",
+                    "inspected_modalities": ["IMAGE_PIXELS", "FILE_METADATA"],
+                }
+            ]
+        },
+    )[0]
+
+    assert result.recommendation == "NEEDS_HUMAN_REVIEW"
+    assert result.human_review.required is True
+    assert "FINE_VISUAL_DAMAGE_REQUIRES_HUMAN" in result.human_review.reason_codes
+    assert any("形成时间" in item for item in result.limitations)
+
+
+def test_assessment_policy_rejects_model_claim_of_visual_inspection_when_not_loaded() -> None:
+    from app.agents.evidence_clerk.assessment_policy import EvidenceAssessmentPolicy
+    from app.harness.evidence_context_assembler import EvidenceContextAssembler
+    from app.schemas import EvidenceItemAssessment, EvidenceTurnRequest
+
+    assembled = EvidenceContextAssembler().assemble(
+        EvidenceTurnRequest.model_validate(_java_evidence_turn_command_payload())
+    )
+    assessment = EvidenceItemAssessment(
+        evidence_id="EVIDENCE_signature_photo",
+        analysis_method="MULTIMODAL",
+        inspected_modalities=["IMAGE_PIXELS"],
+        authenticity_score=0.99,
+        relevance_score=0.95,
+        completeness_score=0.96,
+        assessment_confidence=0.98,
+        findings=[
+            {
+                "finding_type": "CLAIMED_VISUAL_FINDING",
+                "description": "模型自称看到了签收图片。",
+            }
+        ],
+        recommendation="PLAUSIBLE",
+        summary="不可信的模型自报视觉结论。",
+    )
+
+    result = EvidenceAssessmentPolicy().apply(
+        [assessment],
+        assembled.working_set,
+        {
+            "items": [
+                {
+                    "evidence_id": "EVIDENCE_signature_photo",
+                    "visual_input_status": "FETCH_FAILED",
+                    "inspected_modalities": [],
+                }
+            ]
+        },
+    )[0]
+
+    assert result.analysis_method == "TEXT_ONLY"
+    assert "IMAGE_PIXELS" not in result.inspected_modalities
+    assert result.findings == []
+    assert result.authenticity_score <= 0.5
+    assert result.completeness_score <= 0.5
+    assert result.assessment_confidence <= 0.4
+    assert result.recommendation == "NEEDS_HUMAN_REVIEW"
+    assert result.asset_audit["visual_input_status"] == "FETCH_FAILED"

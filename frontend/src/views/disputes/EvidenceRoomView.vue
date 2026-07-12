@@ -47,6 +47,7 @@ const error = ref("");
 const evidenceGateError = ref("");
 const agentState = ref("LISTENING");
 const fileInput = ref(null);
+const modelProcessingAuthorized = ref(false);
 const messages = ref([...(props.initialMessages || [])]);
 const selectedEvidence = ref(null);
 const expandedEvidenceGroup = ref(null);
@@ -92,7 +93,7 @@ const items = computed(() => catalog.value?.items || []);
 const actorOwnedItems = computed(() =>
   items.value.filter(
     (item) =>
-      item.submitted_by_role === role.value,
+      evidenceField(item, "submitted_by_role", "submittedByRole", "") === role.value,
   ),
 );
 const pendingItems = computed(() =>
@@ -104,6 +105,14 @@ const submittedItems = computed(() =>
   actorOwnedItems.value.filter(
     (item) => evidenceSubmissionStatus(item) === "SUBMITTED",
   ),
+);
+const humanReviewScopeItems = computed(() =>
+  role.value === "PLATFORM_REVIEWER"
+    ? items.value.filter((item) => evidenceSubmissionStatus(item) === "SUBMITTED")
+    : submittedItems.value,
+);
+const humanReviewItems = computed(() =>
+  humanReviewScopeItems.value.filter((item) => evidenceRequiresHumanReview(item)),
 );
 const initiatorRole = computed(
   () => catalog.value?.initiator_role || catalog.value?.initiatorRole || "USER",
@@ -176,6 +185,26 @@ const confidenceLabels = {
   UNKNOWN: "待评分",
 };
 
+const humanReviewReasonLabels = {
+  VISUAL_DETAIL_UNCERTAIN: "图片或视频细节无法由模型可靠判定",
+  FINE_VISUAL_DAMAGE_REQUIRES_HUMAN: "细微外观损伤需要人工查看原图",
+  VISUAL_NOT_INSPECTED: "模型未完成原始画面检查",
+  SOURCE_HASH_MISSING: "原件缺少可核对的入库哈希",
+  LOW_AUTHENTICITY_SCORE: "真实性评分偏低",
+  LOW_COMPLETENESS_SCORE: "材料完整性评分偏低",
+  LOW_ASSESSMENT_CONFIDENCE: "模型对本次核验的把握不足",
+  HIGH_RISK_FLAG: "模型识别到高风险信号",
+  ASSESSMENT_MISSING: "模型未返回完整的结构化核验结果",
+  UNKNOWN_FACT_REFERENCE: "证据引用了接待卷宗之外的事实，需人工映射",
+  SOURCE_PROVENANCE_UNVERIFIED: "材料来源或流转链路尚未核实",
+  POSSIBLE_EDITING: "材料可能存在编辑或拼接痕迹",
+  LOW_IMAGE_QUALITY: "画面清晰度不足",
+  OCR_AMBIGUOUS: "文字识别结果存在歧义",
+  METADATA_MISSING: "缺少可用于交叉核验的元数据",
+  CROSS_SOURCE_CONFLICT: "与其他材料存在冲突",
+  CONTENT_NOT_RELEVANT: "材料与当前争议事实的关联性不足",
+};
+
 const fileIconCatalog = {
   pdf: { kind: "pdf", badge: "PDF", label: "PDF 文档材料" },
   word: { kind: "word", badge: "DOC", label: "Word 文档材料" },
@@ -215,19 +244,48 @@ function evidenceSubmissionStatusLabel(item) {
   return status || "待确认";
 }
 
+function evidenceVerificationStatus(item) {
+  return String(
+    evidenceField(item, "verification_status", "verificationStatus", "PENDING"),
+  ).toUpperCase();
+}
+
 function isDeletingEvidence(item) {
   return deletingEvidenceIds.value.has(evidenceId(item));
 }
 
-function evidenceConfidenceScore(item) {
-  const raw = evidenceField(item, "confidence_score", "confidenceScore", null);
+function percentageScore(raw) {
   if (raw === null || raw === undefined || raw === "") return null;
   const numeric = Number(raw);
   if (!Number.isFinite(numeric)) return null;
-  return numeric <= 1 ? Math.round(numeric * 100) : Math.round(numeric);
+  return Math.min(100, Math.max(0, numeric <= 1 ? Math.round(numeric * 100) : Math.round(numeric)));
+}
+
+function evidenceAssessmentConfidenceRaw(item) {
+  return evidenceField(
+    item,
+    "assessment_confidence",
+    "assessmentConfidence",
+    evidenceField(
+      item,
+      "confidence_score",
+      "confidenceScore",
+      evidenceField(item, "confidence", "confidence", null),
+    ),
+  );
+}
+
+function evidenceConfidenceScore(item) {
+  return percentageScore(evidenceAssessmentConfidenceRaw(item));
 }
 
 function evidenceConfidenceLevel(item) {
+  const score = evidenceConfidenceScore(item);
+  if (score !== null) {
+    if (score >= 80) return confidenceLabels.HIGH;
+    if (score >= 50) return confidenceLabels.MEDIUM;
+    return confidenceLabels.LOW;
+  }
   const value = String(
     evidenceField(item, "confidence_level", "confidenceLevel", "UNKNOWN"),
   ).toUpperCase();
@@ -235,21 +293,86 @@ function evidenceConfidenceLevel(item) {
 }
 
 function evidenceConfidenceTone(item) {
+  const score = evidenceConfidenceScore(item);
+  if (score !== null) {
+    if (score >= 80) return "high";
+    if (score >= 50) return "medium";
+    return "low";
+  }
   const value = String(
     evidenceField(item, "confidence_level", "confidenceLevel", "UNKNOWN"),
   ).toLowerCase();
   if (["high", "medium", "low"].includes(value)) return value;
-  const score = evidenceConfidenceScore(item);
-  if (score === null) return "unknown";
-  if (score >= 80) return "high";
-  if (score >= 50) return "medium";
-  return "low";
+  return "unknown";
 }
 
 function evidenceConfidenceCopy(item) {
   const score = evidenceConfidenceScore(item);
   const label = evidenceConfidenceLevel(item);
   return score === null ? label : `${score}% · ${label}`;
+}
+
+function evidenceMetricScore(item, snakeCaseKey, camelCaseKey) {
+  return percentageScore(evidenceField(item, snakeCaseKey, camelCaseKey, null));
+}
+
+function evidenceMetricCopy(item, snakeCaseKey, camelCaseKey) {
+  const score = evidenceMetricScore(item, snakeCaseKey, camelCaseKey);
+  return score === null ? "待评估" : `${score}%`;
+}
+
+function normalizedList(value) {
+  if (Array.isArray(value)) {
+    return value.map((entry) => String(entry || "").trim()).filter(Boolean);
+  }
+  if (value === null || value === undefined || value === "") return [];
+  return [String(value).trim()].filter(Boolean);
+}
+
+function evidenceListField(item, snakeCaseKey, camelCaseKey) {
+  return normalizedList(evidenceField(item, snakeCaseKey, camelCaseKey, []));
+}
+
+function evidenceInspectedModalities(item) {
+  return evidenceListField(item, "inspected_modalities", "inspectedModalities");
+}
+
+function evidenceLimitations(item) {
+  return evidenceListField(item, "limitations", "limitations");
+}
+
+function evidenceHumanReviewReasons(item) {
+  return evidenceListField(
+    item,
+    "human_review_reason_codes",
+    "humanReviewReasonCodes",
+  );
+}
+
+function evidenceHumanReviewInstructions(item) {
+  return evidenceListField(
+    item,
+    "human_review_instructions",
+    "humanReviewInstructions",
+  );
+}
+
+function humanReviewReasonLabel(reasonCode) {
+  const code = String(reasonCode || "").trim();
+  if (code.startsWith("VISUAL_INPUT_")) return "原始视觉内容未能安全加载";
+  if (code.startsWith("ASSESSMENT_MISSING_")) return "模型未返回完整的结构化核验结果";
+  return humanReviewReasonLabels[code] || code.replaceAll("_", " ");
+}
+
+function evidenceRequiresHumanReview(item) {
+  const explicit = evidenceField(
+    item,
+    "requires_human_review",
+    "requiresHumanReview",
+    false,
+  );
+  return explicit === true || String(explicit).toLowerCase() === "true" ||
+    evidenceVerificationStatus(item) === "NEEDS_HUMAN_REVIEW";
 }
 
 function evidenceOwnerLabel(item) {
@@ -743,9 +866,11 @@ async function uploadFiles(event) {
           : "OTHER",
         sourceType: evidenceSourceType.value,
         visibility: "PRIVATE",
+        modelProcessingAuthorized: modelProcessingAuthorized.value,
       });
     }
     await refreshWorkspace();
+    modelProcessingAuthorized.value = false;
     agentState.value = "LISTENING";
   } catch (failure) {
     error.value = failure.message;
@@ -982,6 +1107,10 @@ onBeforeUnmount(() => {
               @change="uploadFiles"
             />
           </label>
+          <label class="evidence-uploader__model-consent">
+            <input v-model="modelProcessingAuthorized" type="checkbox" />
+            <span>允许证据书记官将本次原图发送给多模态模型，仅用于本案核验</span>
+          </label>
         </section>
 
         <div class="evidence-board__list" data-evidence-list-scroll>
@@ -1118,16 +1247,16 @@ onBeforeUnmount(() => {
                 <em class="evidence-card__status">{{ evidenceOwnerLabel(item) }}</em>
                 <span
                   class="verification-pill"
-                  :data-verification="item.verification_status || 'PENDING'"
+                  :data-verification="evidenceVerificationStatus(item)"
                 >
-                  {{ statusLabels[item.verification_status] || item.verification_status || "待核验" }}
+                  {{ statusLabels[evidenceVerificationStatus(item)] || evidenceVerificationStatus(item) || "待核验" }}
                 </span>
                 <span
                   class="confidence-pill"
                   :data-confidence="evidenceConfidenceTone(item)"
                   data-evidence-confidence
                 >
-                  {{ evidenceConfidenceCopy(item) }}
+                  核验把握 {{ evidenceConfidenceCopy(item) }}
                 </span>
               </span>
               <span
@@ -1142,6 +1271,76 @@ onBeforeUnmount(() => {
               <button type="button" data-expand-submitted-evidence @click="openEvidenceGroup('submitted', $event)">
                 展开原件匣
               </button>
+            </div>
+          </section>
+
+          <section
+            v-if="humanReviewItems.length"
+            class="evidence-library evidence-library--human-review"
+            data-human-review-queue
+          >
+            <header>
+              <div>
+                <span class="evidence-kicker">HUMAN REVIEW</span>
+                <h3>待人工审核</h3>
+              </div>
+              <span class="human-review-seal">{{ humanReviewItems.length }} 项待核查</span>
+            </header>
+            <p class="human-review-intro">
+              模型已完成初筛，但以下判断仍需要审核员结合原件和业务记录确认。
+            </p>
+            <div class="human-review-list" data-human-review-list>
+              <article
+                v-for="item in humanReviewItems"
+                :key="`human-review-${evidenceId(item)}`"
+                class="human-review-card"
+                data-human-review-card
+              >
+                <header class="human-review-card__header">
+                  <div>
+                    <strong :title="evidenceOriginalFilename(item) || evidenceId(item)">
+                      {{ evidenceOriginalFilename(item) || evidenceId(item) }}
+                    </strong>
+                    <small>{{ evidenceTypeLabels[evidenceField(item, 'evidence_type', 'evidenceType', '')] || evidenceField(item, 'evidence_type', 'evidenceType', '其他材料') }}</small>
+                  </div>
+                  <span>待人工审核</span>
+                </header>
+                <div class="human-review-metrics" data-evidence-assessment-metrics>
+                  <span><small>真实性</small><strong>{{ evidenceMetricCopy(item, "authenticity_score", "authenticityScore") }}</strong></span>
+                  <span><small>关联性</small><strong>{{ evidenceMetricCopy(item, "relevance_score", "relevanceScore") }}</strong></span>
+                  <span><small>完整性</small><strong>{{ evidenceMetricCopy(item, "completeness_score", "completenessScore") }}</strong></span>
+                  <span><small>核验把握</small><strong>{{ evidenceConfidenceScore(item) === null ? "待评估" : `${evidenceConfidenceScore(item)}%` }}</strong></span>
+                </div>
+                <div class="human-review-card__body">
+                  <section v-if="evidenceInspectedModalities(item).length">
+                    <strong>模型已检查</strong>
+                    <p>{{ evidenceInspectedModalities(item).join("、") }}</p>
+                  </section>
+                  <section>
+                    <strong>触发原因</strong>
+                    <ul v-if="evidenceHumanReviewReasons(item).length">
+                      <li v-for="reason in evidenceHumanReviewReasons(item)" :key="reason">
+                        {{ humanReviewReasonLabel(reason) }}
+                      </li>
+                    </ul>
+                    <p v-else>模型将该材料标记为需要人工审核。</p>
+                  </section>
+                  <section>
+                    <strong>模型限制</strong>
+                    <ul v-if="evidenceLimitations(item).length">
+                      <li v-for="limitation in evidenceLimitations(item)" :key="limitation">{{ limitation }}</li>
+                    </ul>
+                    <p v-else>暂无具体限制说明，请以原始材料为准。</p>
+                  </section>
+                  <section>
+                    <strong>审核指引</strong>
+                    <ul v-if="evidenceHumanReviewInstructions(item).length">
+                      <li v-for="instruction in evidenceHumanReviewInstructions(item)" :key="instruction">{{ instruction }}</li>
+                    </ul>
+                    <p v-else>请结合原件、元数据和相关业务记录进行交叉核验。</p>
+                  </section>
+                </div>
+              </article>
             </div>
           </section>
 
@@ -1242,12 +1441,54 @@ onBeforeUnmount(() => {
         </header>
         <div class="evidence-modal__facts">
           <span>提交方：{{ evidenceOwnerLabel(selectedEvidence) }}</span>
-          <span>核验状态：{{ statusLabels[selectedEvidence.verification_status] || selectedEvidence.verification_status || "待核验" }}</span>
-          <span>置信度：{{ evidenceConfidenceCopy(selectedEvidence) }}</span>
+          <span>核验状态：{{ statusLabels[evidenceVerificationStatus(selectedEvidence)] || evidenceVerificationStatus(selectedEvidence) || "待核验" }}</span>
+          <span>核验把握：{{ evidenceConfidenceCopy(selectedEvidence) }}</span>
           <span v-if="evidenceOriginalFilename(selectedEvidence)">
             原始文件：{{ evidenceOriginalFilename(selectedEvidence) }}
           </span>
         </div>
+        <section class="evidence-modal__assessment" data-evidence-detail-assessment>
+          <strong>多维核验结果</strong>
+          <div class="human-review-metrics">
+            <span><small>真实性</small><strong>{{ evidenceMetricCopy(selectedEvidence, "authenticity_score", "authenticityScore") }}</strong></span>
+            <span><small>关联性</small><strong>{{ evidenceMetricCopy(selectedEvidence, "relevance_score", "relevanceScore") }}</strong></span>
+            <span><small>完整性</small><strong>{{ evidenceMetricCopy(selectedEvidence, "completeness_score", "completenessScore") }}</strong></span>
+            <span><small>核验把握</small><strong>{{ evidenceConfidenceScore(selectedEvidence) === null ? "待评估" : `${evidenceConfidenceScore(selectedEvidence)}%` }}</strong></span>
+          </div>
+          <p v-if="evidenceInspectedModalities(selectedEvidence).length">
+            已检查模态：{{ evidenceInspectedModalities(selectedEvidence).join("、") }}
+          </p>
+        </section>
+        <article
+          v-if="evidenceRequiresHumanReview(selectedEvidence)"
+          class="evidence-modal__human-review"
+          data-evidence-detail-human-review
+        >
+          <strong>待人工审核</strong>
+          <div class="evidence-modal__review-scroll">
+            <section>
+              <b>触发原因</b>
+              <ul v-if="evidenceHumanReviewReasons(selectedEvidence).length">
+                <li v-for="reason in evidenceHumanReviewReasons(selectedEvidence)" :key="reason">{{ humanReviewReasonLabel(reason) }}</li>
+              </ul>
+              <p v-else>模型将该材料标记为需要人工审核。</p>
+            </section>
+            <section>
+              <b>模型限制</b>
+              <ul v-if="evidenceLimitations(selectedEvidence).length">
+                <li v-for="limitation in evidenceLimitations(selectedEvidence)" :key="limitation">{{ limitation }}</li>
+              </ul>
+              <p v-else>暂无具体限制说明，请以原始材料为准。</p>
+            </section>
+            <section>
+              <b>审核指引</b>
+              <ul v-if="evidenceHumanReviewInstructions(selectedEvidence).length">
+                <li v-for="instruction in evidenceHumanReviewInstructions(selectedEvidence)" :key="instruction">{{ instruction }}</li>
+              </ul>
+              <p v-else>请结合原件、元数据和相关业务记录进行交叉核验。</p>
+            </section>
+          </div>
+        </article>
         <article v-if="evidenceFeedback(selectedEvidence)">
           <strong>书记官核验反馈</strong>
           <p>{{ evidenceFeedback(selectedEvidence) }}</p>
@@ -1569,6 +1810,27 @@ onBeforeUnmount(() => {
   opacity: 0;
 }
 
+.evidence-uploader__model-consent {
+  grid-column: 2 / -1;
+  display: flex;
+  min-width: 0;
+  gap: 7px;
+  align-items: flex-start;
+  color: #66758b;
+  font-size: 10px;
+  line-height: 1.35;
+  cursor: pointer;
+}
+
+.evidence-uploader__model-consent input {
+  flex: 0 0 auto;
+  margin: 1px 0 0;
+}
+
+.evidence-uploader__model-consent span {
+  overflow-wrap: anywhere;
+}
+
 .evidence-board__list {
   display: grid;
   align-content: start;
@@ -1599,6 +1861,11 @@ onBeforeUnmount(() => {
   border-color: #f1dfad;
 }
 
+.evidence-library--human-review {
+  background: linear-gradient(160deg, #fff2e9, #fffaf6 48%, #fff);
+  border-color: #f1d1bd;
+}
+
 .evidence-library--shared {
   background: linear-gradient(160deg, #eaf8ff, #fff);
 }
@@ -1623,6 +1890,137 @@ onBeforeUnmount(() => {
 
 .shared-seal {
   color: #2e7b72;
+}
+
+.human-review-seal {
+  height: max-content;
+  padding: 6px 9px;
+  color: #985a3f;
+  background: #fff8f2;
+  border: 1px solid #efd1bf;
+  border-radius: 999px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.human-review-intro {
+  margin: 0 0 9px;
+  color: #7d6b62;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.human-review-list {
+  display: grid;
+  min-width: 0;
+  gap: 10px;
+}
+
+.human-review-card {
+  min-width: 0;
+  padding: 12px;
+  background: #ffffffeb;
+  border: 1px solid #ecd8ca;
+  border-radius: 16px;
+  box-shadow: 0 10px 24px #7b503a0d;
+}
+
+.human-review-card .human-review-card__header {
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.human-review-card__header > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.human-review-card__header strong {
+  overflow: hidden;
+  color: #4c403a;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.human-review-card__header small {
+  color: #88756b;
+  font-size: 11px;
+}
+
+.human-review-card__header > span {
+  flex: 0 0 auto;
+  padding: 5px 7px;
+  color: #9b5b3e;
+  background: #fff0e5;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.human-review-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  min-width: 0;
+  gap: 6px;
+}
+
+.human-review-metrics > span {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+  padding: 7px 6px;
+  text-align: center;
+  background: #f8f4f1;
+  border-radius: 10px;
+}
+
+.human-review-metrics small {
+  overflow: hidden;
+  color: #8a786e;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.human-review-metrics strong {
+  color: #54433b;
+  font-size: 12px;
+}
+
+.human-review-card__body {
+  display: grid;
+  min-width: 0;
+  gap: 9px;
+  margin-top: 10px;
+}
+
+.human-review-card__body section {
+  min-width: 0;
+}
+
+.human-review-card__body section > strong {
+  color: #574841;
+  font-size: 11px;
+}
+
+.human-review-card__body ul,
+.human-review-card__body p,
+.evidence-modal__human-review ul {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  color: #75675f;
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.human-review-card__body p {
+  padding-left: 0;
 }
 
 .evidence-grid {
@@ -2205,6 +2603,57 @@ onBeforeUnmount(() => {
   word-break: break-word;
 }
 
+.evidence-modal__assessment {
+  display: grid;
+  min-width: 0;
+  gap: 9px;
+  padding: 12px;
+  background: #ffffffd9;
+  border: 1px solid #e2ebf6;
+  border-radius: 14px;
+}
+
+.evidence-modal__assessment > strong {
+  color: #33435c;
+}
+
+.evidence-modal__assessment > p {
+  font-size: 12px;
+}
+
+.evidence-modal__human-review {
+  border-color: #efd1bf !important;
+  background: #fff8f2 !important;
+}
+
+.evidence-modal__review-scroll {
+  display: grid;
+  max-height: 230px;
+  min-width: 0;
+  gap: 12px;
+  padding-right: 5px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.evidence-modal__review-scroll section {
+  min-width: 0;
+}
+
+.evidence-modal__review-scroll b {
+  color: #5a4941;
+  font-size: 12px;
+}
+
+.evidence-modal__human-review ul,
+.evidence-modal__human-review p {
+  margin-top: 5px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 .evidence-modal__panel article strong {
   display: block;
   margin-bottom: 6px;
@@ -2220,6 +2669,10 @@ onBeforeUnmount(() => {
     grid-template-columns: 1fr;
   }
 
+  .human-review-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .evidence-uploader {
     grid-template-columns: minmax(0, 1fr) auto;
     gap: 8px;
@@ -2233,6 +2686,10 @@ onBeforeUnmount(() => {
   .evidence-uploader__button,
   .evidence-footer button {
     text-align: center;
+  }
+
+  .evidence-uploader__model-consent {
+    grid-column: 1 / -1;
   }
 
   .evidence-footer {

@@ -289,6 +289,14 @@ public class EvidenceItemEntity extends AbstractEntity {
         return metadataJson;
     }
 
+    public void authorizeModelProcessing(String authorizationMetadataJson, String actorId) {
+        if (authorizationMetadataJson == null || authorizationMetadataJson.isBlank()) {
+            throw new IllegalArgumentException("authorization metadata must not be blank");
+        }
+        this.metadataJson = authorizationMetadataJson;
+        this.updatedBy = actorId;
+    }
+
     public void applyParseSuccess(
             String text, String extractionJson, String actorId) {
         if (text == null || text.isBlank()) {

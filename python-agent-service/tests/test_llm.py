@@ -1,6 +1,7 @@
 import json
 
 import httpx
+import pytest
 
 from app.llm import LiteLlmProxyClient
 from app.schemas import EvidenceGapOutput
@@ -53,6 +54,84 @@ def test_litellm_proxy_contract_and_structured_response_validation() -> None:
 
     assert result.value.requires_supplemental_evidence is False
     assert result.token_usage["total"] == 14
+
+
+def test_litellm_proxy_sends_inline_multimodal_evidence_parts() -> None:
+    data_url = (
+        "data:image/png;base64,"
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8A"
+        "AQUBAScY42YAAAAASUVORK5CYII="
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        user_content = body["messages"][1]["content"]
+        assert user_content[0] == {"type": "text", "text": "inspect evidence"}
+        assert user_content[1] == {
+            "type": "text",
+            "text": "Evidence EVIDENCE_image follows.",
+        }
+        assert user_content[2] == {
+            "type": "image_url",
+            "image_url": {"url": data_url, "detail": "high"},
+        }
+        return httpx.Response(
+            200,
+            json={
+                "model": "qwen3.7-plus",
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "requires_supplemental_evidence": False,
+                                    "gaps": [],
+                                }
+                            )
+                        }
+                    }
+                ],
+            },
+        )
+
+    client = LiteLlmProxyClient(
+        "http://litellm:4000",
+        "qwen3.7-plus",
+        "test-master-key",
+        transport=httpx.MockTransport(handler),
+    )
+    result = client.generate(
+        node_name="evidence_multimodal_probe",
+        system_prompt="system",
+        user_prompt="inspect evidence",
+        output_type=EvidenceGapOutput,
+        user_content_parts=[
+            {"type": "text", "text": "Evidence EVIDENCE_image follows."},
+            {
+                "type": "image_url",
+                "image_url": {"url": data_url, "detail": "high"},
+            },
+        ],
+    )
+
+    assert result.model == "qwen3.7-plus"
+
+
+@pytest.mark.parametrize(
+    "data_url",
+    [
+        "https://example.invalid/evidence.png",
+        "data:image/gif;base64,R0lGODlhAQABAIAAAAUEBA==",
+        "data:image/png,not-base64",
+        "data:image/png;base64,not_base64!",
+        "data:image/png;base64,/9j/",
+    ],
+)
+def test_litellm_proxy_rejects_untrusted_multimodal_parts(data_url: str) -> None:
+    with pytest.raises(ValueError):
+        LiteLlmProxyClient._validated_multimodal_parts(
+            [{"type": "image_url", "image_url": {"url": data_url}}]
+        )
 
 
 def test_litellm_proxy_repairs_empty_structured_content_with_plain_json_retry() -> None:

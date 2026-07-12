@@ -87,6 +87,8 @@ public class EvidenceController {
             @RequestParam(defaultValue = "PARTIES")
                     @Pattern(regexp = "PRIVATE|PARTIES|PLATFORM")
                     String visibility,
+            @RequestParam(name = "model_processing_authorized", defaultValue = "false")
+                    boolean modelProcessingAuthorized,
             @RequestParam(required = false)
                     @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME)
                     OffsetDateTime occurredAt,
@@ -99,6 +101,7 @@ public class EvidenceController {
                         evidenceType,
                         sourceType,
                         visibility,
+                        modelProcessingAuthorized,
                         occurredAt,
                         actor(authentication));
         return ResponseEntity.status(HttpStatus.CREATED)

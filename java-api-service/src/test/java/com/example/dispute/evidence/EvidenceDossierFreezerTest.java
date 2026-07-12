@@ -179,6 +179,134 @@ class EvidenceDossierFreezerTest {
                 .containsExactly("EVIDENCE_LEGACY_PARSE_STATUS");
     }
 
+    @Test
+    void frozenDossierUsesPersistedMultimodalScoresInsteadOfStatusDefaults()
+            throws Exception {
+        Clock clock =
+                Clock.fixed(Instant.parse("2026-07-03T01:00:00Z"), ZoneOffset.UTC);
+        ObjectMapper objectMapper = new ObjectMapper().findAndRegisterModules();
+        EvidenceDossierFreezer freezer =
+                new EvidenceDossierFreezer(
+                        dossierRepository,
+                        dossierItemRepository,
+                        evidenceRepository,
+                        verificationRepository,
+                        objectMapper,
+                        clock);
+        EvidenceItemEntity item = evidence("EVIDENCE_MULTIMODAL_SCORE");
+        EvidenceVerificationEntity verification =
+                EvidenceVerificationEntity.create(
+                        "VERIFY_MULTIMODAL_SCORE",
+                        "CASE_FREEZE",
+                        item.getId(),
+                        2,
+                        EvidenceVerificationStatus.PLAUSIBLE,
+                        "{}",
+                        """
+                        {
+                          "authenticity_score":0.37,
+                          "relevance_score":0.93,
+                          "completeness_score":0.64,
+                          "assessment_confidence":0.88
+                        }
+                        """,
+                        "{}",
+                        false,
+                        Instant.parse("2026-07-03T00:40:00Z"),
+                        "evidence-clerk",
+                        "TRACE_MULTIMODAL_SCORE");
+        when(dossierRepository.findByCaseIdAndDossierVersion("CASE_FREEZE", 4))
+                .thenReturn(Optional.empty());
+        when(evidenceRepository
+                        .findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(
+                                "CASE_FREEZE"))
+                .thenReturn(List.of(item));
+        when(verificationRepository.findTopByEvidenceIdOrderByVerificationVersionDesc(
+                        item.getId()))
+                .thenReturn(Optional.of(verification));
+        when(dossierRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        EvidenceDossierEntity frozen = freezer.freeze("CASE_FREEZE", 4, "system");
+
+        JsonNode evidenceItem = objectMapper.readTree(frozen.getSummaryJson())
+                .path("evidence_items")
+                .get(0);
+        assertThat(evidenceItem.path("authenticity_score").asDouble()).isEqualTo(0.37);
+        assertThat(evidenceItem.path("relevance_score").asDouble()).isEqualTo(0.93);
+        assertThat(evidenceItem.path("completeness_score").asDouble()).isEqualTo(0.64);
+        assertThat(evidenceItem.path("assessment_confidence").asDouble()).isEqualTo(0.88);
+        JsonNode matrix = objectMapper.readTree(frozen.getMatrixSummaryJson());
+        assertThat(matrix.path("fact_evidence_matrix").get(0).path("evidence_strength").asText())
+                .isEqualTo("MEDIUM");
+    }
+
+    @Test
+    void lowRelevanceModelFactLinkDoesNotBecomeVerifiedFact() throws Exception {
+        Clock clock =
+                Clock.fixed(Instant.parse("2026-07-03T01:00:00Z"), ZoneOffset.UTC);
+        ObjectMapper objectMapper = new ObjectMapper().findAndRegisterModules();
+        EvidenceDossierFreezer freezer =
+                new EvidenceDossierFreezer(
+                        dossierRepository,
+                        dossierItemRepository,
+                        evidenceRepository,
+                        verificationRepository,
+                        objectMapper,
+                        clock);
+        EvidenceItemEntity item = evidence("EVIDENCE_UNRELATED_IMAGE");
+        EvidenceVerificationEntity verification =
+                EvidenceVerificationEntity.create(
+                        "VERIFY_UNRELATED_IMAGE",
+                        "CASE_FREEZE",
+                        item.getId(),
+                        3,
+                        EvidenceVerificationStatus.PLAUSIBLE,
+                        "{}",
+                        """
+                        {
+                          "analysis_method":"MULTIMODAL",
+                          "authenticity_score":0.92,
+                          "relevance_score":0.05,
+                          "completeness_score":0.90,
+                          "assessment_confidence":0.88,
+                          "fact_links":[{
+                            "fact_id":"FACT_SIGNED_BY_USER",
+                            "relation":"SUPPORTS",
+                            "reason":"图片内容与签收事实缺少直接关联",
+                            "confidence":0.95
+                          }]
+                        }
+                        """,
+                        "{}",
+                        false,
+                        Instant.parse("2026-07-03T00:45:00Z"),
+                        "evidence-clerk",
+                        "TRACE_UNRELATED_IMAGE");
+        when(dossierRepository.findByCaseIdAndDossierVersion("CASE_FREEZE", 5))
+                .thenReturn(Optional.empty());
+        when(evidenceRepository
+                        .findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(
+                                "CASE_FREEZE"))
+                .thenReturn(List.of(item));
+        when(verificationRepository.findTopByEvidenceIdOrderByVerificationVersionDesc(
+                        item.getId()))
+                .thenReturn(Optional.of(verification));
+        when(dossierRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        EvidenceDossierEntity frozen = freezer.freeze("CASE_FREEZE", 5, "system");
+
+        JsonNode summary = objectMapper.readTree(frozen.getSummaryJson());
+        assertThat(summary.path("verified_facts")).isEmpty();
+        assertThat(summary.path("contested_facts")).hasSize(1);
+        JsonNode matrix = objectMapper.readTree(frozen.getMatrixSummaryJson())
+                .path("fact_evidence_matrix")
+                .get(0);
+        assertThat(matrix.path("fact_id").asText()).isEqualTo("FACT_SIGNED_BY_USER");
+        assertThat(matrix.path("evidence_strength").asText()).isNotEqualTo("HIGH");
+    }
+
     private static EvidenceItemEntity evidence(String id) {
         EvidenceItemEntity evidence =
                 EvidenceItemEntity.uploaded(

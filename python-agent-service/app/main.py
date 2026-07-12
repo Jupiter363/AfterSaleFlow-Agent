@@ -25,6 +25,7 @@ from app.business.api.final_agents import FinalAgentServices
 from app.business.simulated_imports import SimulatedExternalImportWorkflow
 from app.config import Settings, get_settings
 from app.harness.guardrails import GuardrailViolation
+from app.harness.evidence_asset_loader import EvidenceAssetLoader
 from app.harness.model_runner import HarnessModelRunner
 from app.harness.validation import CitationValidationError
 from app.llm import AgentServiceUnavailable, LiteLlmProxyClient
@@ -465,7 +466,11 @@ def _build_evidence_turn_workflow(settings: Settings) -> EvidenceTurnWorkflow:
         model_runner=HarnessModelRunner(
             llm=llm,
             prompts=PromptRepository(),
-        )
+        ),
+        asset_loader=EvidenceAssetLoader(
+            java_api_service_url=settings.java_api_service_url,
+            java_service_secret=settings.java_service_secret,
+        ),
     )
 
 

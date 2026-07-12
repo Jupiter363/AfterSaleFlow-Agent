@@ -8,12 +8,14 @@ from langgraph.graph import END, START, StateGraph
 from typing_extensions import NotRequired, TypedDict
 
 from app.agents.evidence_clerk.skills.authenticity import EvidenceAuthenticitySkill
+from app.agents.evidence_clerk.assessment_policy import EvidenceAssessmentPolicy
 from app.harness.context_pack import build_context_pack
 from app.harness.evidence_context_assembler import (
     AssembledEvidenceContext,
     EvidenceContextAssembler,
     EvidenceTurnWorkingSet,
 )
+from app.harness.evidence_asset_loader import EvidenceAssetLoader
 from app.harness.localization_policy import localize_internal_text
 from app.schemas import (
     EvidenceAuthenticityFlag,
@@ -37,14 +39,20 @@ class EvidenceTurnGraphState(TypedDict):
     evidence_requests: NotRequired[list[dict[str, Any]]]
     verification_suggestions: NotRequired[list[dict[str, Any]]]
     authenticity_flags: NotRequired[list[dict[str, Any]]]
+    evidence_assessments: NotRequired[list[dict[str, Any]]]
     confidence: NotRequired[float]
+    asset_manifest: NotRequired[dict[str, Any]]
 
 
 class EvidenceTurnWorkflow:
     """LangGraph workflow for the evidence clerk room conversation."""
 
-    def __init__(self, model_runner: Any | None = None) -> None:
-        self._graph = build_evidence_turn_graph(model_runner)
+    def __init__(
+        self,
+        model_runner: Any | None = None,
+        asset_loader: EvidenceAssetLoader | None = None,
+    ) -> None:
+        self._graph = build_evidence_turn_graph(model_runner, asset_loader)
 
     def run(self, request: EvidenceTurnRequest) -> EvidenceTurnResult:
         result = self._graph.invoke(
@@ -59,15 +67,22 @@ class EvidenceTurnWorkflow:
             evidence_requests=result["evidence_requests"],
             verification_suggestions=result["verification_suggestions"],
             authenticity_flags=result["authenticity_flags"],
+            evidence_assessments=result["evidence_assessments"],
             memory_frame=result["memory_frame"],
             confidence=float(result["confidence"]),
         )
 
 
-def build_evidence_turn_graph(model_runner: Any | None = None):
+def build_evidence_turn_graph(
+    model_runner: Any | None = None,
+    asset_loader: EvidenceAssetLoader | None = None,
+):
     builder = StateGraph(EvidenceTurnGraphState)
     builder.add_node("load_context", _load_context)
-    builder.add_node("reason_with_llm", _reason_with_llm_node(model_runner))
+    builder.add_node(
+        "reason_with_llm",
+        _reason_with_llm_node(model_runner, asset_loader),
+    )
     builder.add_node("apply_authenticity_guardrails", _apply_authenticity_guardrails)
     builder.add_edge(START, "load_context")
     builder.add_edge("load_context", "reason_with_llm")
@@ -86,7 +101,10 @@ def _load_context(state: EvidenceTurnGraphState) -> dict[str, Any]:
     }
 
 
-def _reason_with_llm_node(model_runner: Any | None):
+def _reason_with_llm_node(
+    model_runner: Any | None,
+    asset_loader: EvidenceAssetLoader | None,
+):
     def reason_with_llm(state: EvidenceTurnGraphState) -> dict[str, Any]:
         assembled = state["assembled_context"]
         working_set = assembled.working_set
@@ -94,41 +112,54 @@ def _reason_with_llm_node(model_runner: Any | None):
         if model_runner is None:
             return {
                 "llm_output": _fallback_output(working_set),
+                "asset_manifest": {"items": []},
                 "executed_nodes": ["fallback_reasoning"],
             }
         try:
+            loaded_assets = (
+                asset_loader.load(assembled.raw_envelope)
+                if asset_loader is not None
+                else None
+            )
+            asset_manifest = (
+                loaded_assets.manifest if loaded_assets is not None else {"items": []}
+            )
+            context_sources = dict(assembled.context_sources)
+            context_sources["multimodal_evidence_manifest"] = asset_manifest
             context_pack = build_context_pack(
                 "evidence_turn",
-                assembled.context_sources,
+                context_sources,
                 actor_role=working_set.actor_role,
             )
+            invocation = {
+                "node_name": "evidence_turn",
+                "case_data": assembled.case_data,
+                "output_type": EvidenceTurnLlmOutput,
+                "agent_context": agent_context.model_dump(mode="json"),
+                "prompt_profile_id": agent_context.prompt_profile_id,
+                "context_pack": context_pack,
+            }
+            if loaded_assets is not None and loaded_assets.content_parts:
+                invocation["multimodal_parts"] = list(loaded_assets.content_parts)
             generation = model_runner.invoke_structured(
-                node_name="evidence_turn",
-                case_data=assembled.case_data,
-                output_type=EvidenceTurnLlmOutput,
-                agent_context=agent_context.model_dump(mode="json"),
-                prompt_profile_id=agent_context.prompt_profile_id,
-                context_pack=context_pack,
+                **invocation,
             )
             return {
                 "llm_output": generation.value,
+                "asset_manifest": asset_manifest,
                 "executed_nodes": ["reason_with_llm"],
             }
         except Exception as failure:
-            LOGGER.warning(
-                "evidence clerk LLM turn degraded: case_id=%s actor_role=%s "
+            LOGGER.exception(
+                "evidence clerk LLM turn failed closed: case_id=%s actor_role=%s "
                 "agent_invocation_id=%s error_type=%s error=%s",
                 working_set.case_id,
                 working_set.actor_role,
                 agent_context.agent_invocation_id,
                 type(failure).__name__,
                 failure,
-                exc_info=True,
             )
-            return {
-                "llm_output": _fallback_output(working_set),
-                "executed_nodes": ["fallback_reasoning_after_llm_error"],
-            }
+            raise
 
     return reason_with_llm
 
@@ -159,6 +190,17 @@ def _apply_authenticity_guardrails(state: EvidenceTurnGraphState) -> dict[str, A
         output.authenticity_flags or baseline.authenticity_flags,
         ("flag_type", "description"),
     )
+    evidence_assessments = EvidenceAssessmentPolicy().apply(
+        output.evidence_assessments,
+        request,
+        state.get("asset_manifest", {"items": []}),
+    )
+    assessment_confidence = (
+        sum(item.assessment_confidence for item in evidence_assessments)
+        / len(evidence_assessments)
+        if evidence_assessments
+        else float(output.confidence or baseline.confidence)
+    )
     return {
         "room_utterance": _sanitize_non_final(
             _localize_internal_text(output.room_utterance)
@@ -172,7 +214,10 @@ def _apply_authenticity_guardrails(state: EvidenceTurnGraphState) -> dict[str, A
         "authenticity_flags": [
             item.model_dump(mode="json") for item in authenticity_flags[:20]
         ],
-        "confidence": min(1.0, max(0.0, float(output.confidence or baseline.confidence))),
+        "evidence_assessments": [
+            item.model_dump(mode="json") for item in evidence_assessments[:50]
+        ],
+        "confidence": min(1.0, max(0.0, assessment_confidence)),
         "executed_nodes": ["apply_authenticity_guardrails"],
     }
 

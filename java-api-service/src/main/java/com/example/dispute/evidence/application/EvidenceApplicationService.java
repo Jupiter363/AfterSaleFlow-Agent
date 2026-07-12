@@ -23,6 +23,7 @@ import java.security.NoSuchAlgorithmException;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.HexFormat;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -86,6 +87,27 @@ public class EvidenceApplicationService {
             String visibility,
             OffsetDateTime occurredAt,
             AuthenticatedActor actor) {
+        return upload(
+                caseId,
+                file,
+                evidenceType,
+                sourceType,
+                visibility,
+                false,
+                occurredAt,
+                actor);
+    }
+
+    @Transactional
+    public EvidenceView upload(
+            String caseId,
+            MultipartFile file,
+            String evidenceType,
+            String sourceType,
+            String visibility,
+            boolean modelProcessingAuthorized,
+            OffsetDateTime occurredAt,
+            AuthenticatedActor actor) {
         FulfillmentCaseEntity disputeCase = authorizedCase(caseId, actor);
         validateSourceType(sourceType, actor);
         validateFile(file);
@@ -97,7 +119,25 @@ public class EvidenceApplicationService {
                         .findFirstByCaseIdAndFileHashAndSourceTypeAndDeletedAtIsNullOrderByCreatedAtDesc(
                                 caseId, hash, sourceType);
         if (duplicate.isPresent()) {
-            return toView(duplicate.get());
+            EvidenceItemEntity existing = duplicate.get();
+            if (modelProcessingAuthorized
+                    && !Boolean.TRUE.equals(
+                            readJsonMap(existing.getMetadataJson())
+                                    .get("model_processing_authorized"))) {
+                existing.authorizeModelProcessing(
+                        modelProcessingAuthorization(existing.getMetadataJson(), actor),
+                        actor.actorId());
+                evidenceRepository.save(existing);
+                auditRecorder.record(
+                        actor,
+                        "EVIDENCE_MODEL_PROCESSING_AUTHORIZED",
+                        "EVIDENCE_ITEM",
+                        existing.getId(),
+                        caseId,
+                        Map.of("model_processing_authorized", false),
+                        Map.of("model_processing_authorized", true));
+            }
+            return toView(existing);
         }
 
         EvidenceDossierEntity dossier =
@@ -138,6 +178,11 @@ public class EvidenceApplicationService {
                         file.getSize(),
                         required(visibility, "visibility"),
                         occurredAt);
+        if (modelProcessingAuthorized) {
+            entity.authorizeModelProcessing(
+                    modelProcessingAuthorization(entity.getMetadataJson(), actor),
+                    actor.actorId());
+        }
         EvidenceView view = toView(evidenceRepository.save(entity));
         auditRecorder.record(
                 actor,
@@ -149,9 +194,20 @@ public class EvidenceApplicationService {
                 Map.of(
                         "file_hash", view.fileHash(),
                         "source_type", view.sourceType(),
-                        "visibility", view.visibility()));
+                        "visibility", view.visibility(),
+                        "model_processing_authorized", modelProcessingAuthorized));
         triggerNonBlockingIntegrations(view);
         return view;
+    }
+
+    private String modelProcessingAuthorization(
+            String existingMetadataJson, AuthenticatedActor actor) {
+        Map<String, Object> metadata =
+                new LinkedHashMap<>(readJsonMap(existingMetadataJson));
+        metadata.put("model_processing_authorized", true);
+        metadata.put("authorization_scope", "CURRENT_DISPUTE_EVIDENCE_REVIEW");
+        metadata.put("authorized_by", actor.actorId());
+        return writeJson(metadata);
     }
 
     @Transactional
@@ -457,21 +513,50 @@ public class EvidenceApplicationService {
             String caseId,
             String evidenceId,
             AuthenticatedActor actor) {
-        FulfillmentCaseEntity dispute = authorizedCase(caseId, actor);
-        EvidenceItemEntity item =
-                evidenceRepository
-                        .findById(evidenceId)
-                        .filter(evidence -> evidence.getCaseId().equals(dispute.getId()))
-                        .filter(evidence -> evidence.getDeletedAt() == null)
-                        .orElseThrow(
-                                () ->
-                                        new NotFoundException(
-                                                ErrorCode.EVIDENCE_NOT_FOUND,
-                                                "evidence not found",
-                                                Map.of("evidence_id", evidenceId)));
+        EvidenceItemEntity item = evidenceItem(caseId, evidenceId, actor);
         if (!canReadContent(item, actor)) {
             throw new ForbiddenException("actor cannot read evidence content");
         }
+        return loadContent(item);
+    }
+
+    @Transactional(readOnly = true)
+    public EvidenceContentView contentForModel(
+            String caseId,
+            String evidenceId,
+            AuthenticatedActor actor) {
+        EvidenceItemEntity item = evidenceItem(caseId, evidenceId, actor);
+        if (!canReadContent(item, actor)) {
+            throw new ForbiddenException("actor cannot read evidence content");
+        }
+        boolean modelProcessingAllowed =
+                item.isDesensitized()
+                        || Boolean.TRUE.equals(
+                                readJsonMap(item.getMetadataJson())
+                                        .get("model_processing_authorized"));
+        if (!modelProcessingAllowed) {
+            throw new ForbiddenException(
+                    "evidence is not authorized for model processing");
+        }
+        return loadContent(item);
+    }
+
+    private EvidenceItemEntity evidenceItem(
+            String caseId, String evidenceId, AuthenticatedActor actor) {
+        FulfillmentCaseEntity dispute = authorizedCase(caseId, actor);
+        return evidenceRepository
+                .findById(evidenceId)
+                .filter(evidence -> evidence.getCaseId().equals(dispute.getId()))
+                .filter(evidence -> evidence.getDeletedAt() == null)
+                .orElseThrow(
+                        () ->
+                                new NotFoundException(
+                                        ErrorCode.EVIDENCE_NOT_FOUND,
+                                        "evidence not found",
+                                        Map.of("evidence_id", evidenceId)));
+    }
+
+    private EvidenceContentView loadContent(EvidenceItemEntity item) {
         return new EvidenceContentView(
                 item.getOriginalFilename(),
                 item.getContentType(),

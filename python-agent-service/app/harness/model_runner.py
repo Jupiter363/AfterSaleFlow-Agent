@@ -51,6 +51,7 @@ class HarnessModelRunner:
         max_input_tokens: int | None = None,
         agent_context: Any | None = None,
         prompt_profile_id: str | None = None,
+        multimodal_parts: list[dict[str, Any]] | None = None,
     ) -> HarnessGeneration[T]:
         assembled_context = self._context_window.assemble(
             context_pack.prompt_sections() if context_pack is not None else context_sections or [],
@@ -91,12 +92,15 @@ class HarnessModelRunner:
                 user_prompt=user_prompt,
             )
         )
-        generation: StructuredGeneration = self._llm.generate(
-            node_name=node_name,
-            system_prompt=str(messages[0].content),
-            user_prompt=str(messages[1].content),
-            output_type=output_type,
-        )
+        generation_args = {
+            "node_name": node_name,
+            "system_prompt": str(messages[0].content),
+            "user_prompt": str(messages[1].content),
+            "output_type": output_type,
+        }
+        if multimodal_parts:
+            generation_args["user_content_parts"] = multimodal_parts
+        generation: StructuredGeneration = self._llm.generate(**generation_args)
         return HarnessGeneration(
             value=generation.value,  # type: ignore[arg-type]
             model=generation.model,

@@ -24,6 +24,7 @@ tmp/
 **/playwright-report/
 **/test-results/
 **/blob-report/
+**/debug.log
 
 .worktrees/
 

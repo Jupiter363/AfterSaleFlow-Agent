@@ -118,6 +118,29 @@ async function assertEvidenceGeometry(page, expectedColumns) {
   await assertNoDocumentHorizontalOverflow(page);
 }
 
+test("renders multimodal consent and human-review cards for visual evidence", async ({
+  page,
+}) => {
+  await openEvidenceRoom(page, { role: "USER", count: 6 });
+
+  await expect(page.locator(".evidence-uploader__model-consent")).toContainText(
+    "仅用于本案核验",
+  );
+  const queue = page.locator("[data-human-review-queue]");
+  await expect(queue).toBeVisible();
+  await expect(queue.locator("[data-human-review-card]")).toHaveCount(2);
+  await expect(queue).toContainText("真实性78%");
+  await expect(queue).toContainText("核验把握67%");
+  await expect(queue).toContainText("细微外观损伤需要人工查看原图");
+  await queue.scrollIntoViewIfNeeded();
+  await queue.locator("[data-human-review-card]").first().scrollIntoViewIfNeeded();
+
+  await page.screenshot({
+    path: "test-results/evidence-human-review.png",
+    fullPage: false,
+  });
+});
+
 test("switches columns at 1060/1059px of actual workspace width", async ({
   page,
 }) => {

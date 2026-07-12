@@ -55,4 +55,20 @@ describe("evidenceApi", () => {
       }),
     );
   });
+
+  it("sends explicit per-evidence multimodal processing authorization", async () => {
+    const file = new File(["image"], "proof.png", { type: "image/png" });
+
+    await evidenceApi.upload(actor, "CASE_1", {
+      file,
+      evidenceType: "IMAGE",
+      sourceType: "USER_UPLOAD",
+      visibility: "PRIVATE",
+      modelProcessingAuthorized: true,
+    });
+
+    const request = fetch.mock.calls[0][1];
+    expect(request.body).toBeInstanceOf(FormData);
+    expect(request.body.get("model_processing_authorized")).toBe("true");
+  });
 });

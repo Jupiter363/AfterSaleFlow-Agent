@@ -153,6 +153,69 @@ class EvidenceVerificationAndCatalogServiceTest {
     }
 
     @Test
+    void catalogProjectsMultimodalScoresAndHumanReviewCardFields() {
+        FulfillmentCaseEntity dispute = evidenceCase();
+        EvidenceItemEntity evidence =
+                evidence("EVIDENCE_MULTIMODAL", "USER", "user-local", "PARTIES");
+        EvidenceVerificationEntity verification =
+                EvidenceVerificationEntity.create(
+                        "VERIFY_MULTIMODAL",
+                        dispute.getId(),
+                        evidence.getId(),
+                        2,
+                        EvidenceVerificationStatus.NEEDS_HUMAN_REVIEW,
+                        "{}",
+                        """
+                        {
+                          "confidence_score":0.82,
+                          "authenticity_score":0.71,
+                          "relevance_score":0.93,
+                          "completeness_score":0.66,
+                          "assessment_confidence":0.82,
+                          "inspected_modalities":["IMAGE","OCR_TEXT"],
+                          "limitations":["Cannot establish capture time from pixels alone"],
+                          "human_review":{
+                            "required":true,
+                            "reason_codes":["SOURCE_PROVENANCE"],
+                            "instructions":["Inspect original export"]
+                          }
+                        }
+                        """,
+                        "{}",
+                        true,
+                        Instant.parse("2026-07-03T01:30:00Z"),
+                        "evidence-clerk",
+                        "TRACE_MULTIMODAL");
+        when(caseRepository.findById(dispute.getId())).thenReturn(Optional.of(dispute));
+        when(evidenceRepository
+                        .findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(
+                                dispute.getId()))
+                .thenReturn(List.of(evidence));
+        when(verificationRepository.findTopByEvidenceIdOrderByVerificationVersionDesc(
+                        evidence.getId()))
+                .thenReturn(Optional.of(verification));
+
+        var item =
+                catalogService
+                        .catalog(
+                                dispute.getId(),
+                                new AuthenticatedActor("user-local", ActorRole.USER))
+                        .items()
+                        .getFirst();
+
+        assertThat(item.authenticityScore()).isEqualTo(0.71);
+        assertThat(item.relevanceScore()).isEqualTo(0.93);
+        assertThat(item.completenessScore()).isEqualTo(0.66);
+        assertThat(item.assessmentConfidence()).isEqualTo(0.82);
+        assertThat(item.inspectedModalities()).containsExactly("IMAGE", "OCR_TEXT");
+        assertThat(item.limitations())
+                .containsExactly("Cannot establish capture time from pixels alone");
+        assertThat(item.requiresHumanReview()).isTrue();
+        assertThat(item.humanReviewReasonCodes()).containsExactly("SOURCE_PROVENANCE");
+        assertThat(item.humanReviewInstructions()).containsExactly("Inspect original export");
+    }
+
+    @Test
     void deterministicProvenanceCanVerifyButInvalidMimeIsRejectedAndRemainsAuditable() {
         FulfillmentCaseEntity dispute = evidenceCase();
         EvidenceItemEntity item =

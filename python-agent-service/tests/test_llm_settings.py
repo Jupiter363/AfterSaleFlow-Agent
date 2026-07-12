@@ -9,6 +9,7 @@ def test_settings_resolve_qwen_only_through_litellm() -> None:
         litellm_master_key="test-litellm-master-key",
         langfuse_public_key="pk-test-key",
         langfuse_secret_key="sk-test-secret",
+        java_service_secret="test-java-service-secret",
         python_agent_service_secret="test-agent-service-secret",
         langfuse_enabled=False,
     )
@@ -23,6 +24,7 @@ def test_default_evaluation_workflow_builder_returns_workflow() -> None:
         litellm_master_key="test-litellm-master-key",
         langfuse_public_key="pk-test-key",
         langfuse_secret_key="sk-test-secret",
+        java_service_secret="test-java-service-secret",
         python_agent_service_secret="test-agent-service-secret",
         langfuse_enabled=False,
     )

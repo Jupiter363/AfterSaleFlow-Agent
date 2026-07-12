@@ -461,6 +461,7 @@ class EvidenceTurnEvidenceItem(StrictModel):
     submitted_by_role: Literal["USER", "MERCHANT", "PLATFORM", "CUSTOMER_SERVICE"] | None = None
     visibility: Identifier | None = None
     content_url: ShortText | None = None
+    content_type: ShortText | None = None
     parse_status: Identifier | None = None
     original_filename: ShortText | None = None
     redacted: bool = False
@@ -493,6 +494,71 @@ class EvidenceAuthenticityFlag(StrictModel):
     severity: Literal["LOW", "MEDIUM", "HIGH"] = "LOW"
 
 
+class EvidenceFactLink(StrictModel):
+    fact_id: Identifier
+    relation: Literal["SUPPORTS", "OPPOSES", "INCONCLUSIVE"]
+    reason: ShortText
+    confidence: Confidence
+
+
+class EvidenceVisualFinding(StrictModel):
+    finding_type: Identifier
+    description: ShortText
+    visual_region: ShortText | None = None
+
+
+class EvidenceRiskFlag(StrictModel):
+    code: Identifier
+    severity: Literal["LOW", "MEDIUM", "HIGH"]
+    description: ShortText
+
+
+class EvidenceHumanReviewSignal(StrictModel):
+    required: bool = False
+    reason_codes: Annotated[list[Identifier], Field(max_length=20)] = Field(
+        default_factory=list
+    )
+    instructions: Annotated[list[ShortText], Field(max_length=20)] = Field(
+        default_factory=list
+    )
+
+
+class EvidenceItemAssessment(StrictModel):
+    """Auditable, per-evidence model assessment; never a truth guarantee."""
+
+    evidence_id: Identifier
+    analysis_method: Literal["TEXT_ONLY", "MULTIMODAL", "HYBRID"]
+    inspected_modalities: Annotated[list[Identifier], Field(max_length=10)] = Field(
+        default_factory=list
+    )
+    fact_links: Annotated[list[EvidenceFactLink], Field(max_length=50)] = Field(
+        default_factory=list
+    )
+    authenticity_score: Confidence
+    relevance_score: Confidence
+    completeness_score: Confidence
+    assessment_confidence: Confidence
+    findings: Annotated[list[EvidenceVisualFinding], Field(max_length=30)] = Field(
+        default_factory=list
+    )
+    limitations: Annotated[list[ShortText], Field(max_length=30)] = Field(
+        default_factory=list
+    )
+    risk_flags: Annotated[list[EvidenceRiskFlag], Field(max_length=30)] = Field(
+        default_factory=list
+    )
+    recommendation: Literal[
+        "PLAUSIBLE",
+        "SUSPICIOUS",
+        "NEEDS_HUMAN_REVIEW",
+    ]
+    human_review: EvidenceHumanReviewSignal = Field(
+        default_factory=EvidenceHumanReviewSignal
+    )
+    asset_audit: dict[str, object] = Field(default_factory=dict)
+    summary: LongText
+
+
 class EvidenceTurnLlmOutput(StrictModel):
     room_utterance: LongText
     evidence_requests: Annotated[
@@ -506,6 +572,10 @@ class EvidenceTurnLlmOutput(StrictModel):
     authenticity_flags: Annotated[
         list[EvidenceAuthenticityFlag],
         Field(max_length=100),
+    ] = Field(default_factory=list)
+    evidence_assessments: Annotated[
+        list[EvidenceItemAssessment],
+        Field(max_length=50),
     ] = Field(default_factory=list)
     confidence: Confidence
 

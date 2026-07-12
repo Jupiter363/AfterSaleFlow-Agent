@@ -13,6 +13,8 @@ import com.example.dispute.infrastructure.persistence.repository.FulfillmentCase
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -100,6 +102,7 @@ public class EvidenceCatalogService {
                         .map(this::readJson)
                         .orElseGet(objectMapper::createObjectNode);
         Double confidenceScore = confidenceScore(agentFindings);
+        JsonNode humanReview = agentFindings.path("human_review");
         return new RoleScopedEvidenceView.Item(
                 item.getId(),
                 item.getEvidenceType(),
@@ -116,7 +119,22 @@ public class EvidenceCatalogService {
                 item.getParsedText(),
                 item.getSubmissionStatus().name(),
                 item.getSubmittedAt(),
-                item.getSubmissionBatchId());
+                item.getSubmissionBatchId(),
+                score(agentFindings, "authenticity_score"),
+                score(agentFindings, "relevance_score"),
+                score(agentFindings, "completeness_score"),
+                score(agentFindings, "assessment_confidence"),
+                textList(agentFindings.path("inspected_modalities")),
+                textList(agentFindings.path("limitations")),
+                latestVerification
+                        .map(EvidenceVerificationEntity::isRequiresHumanReview)
+                        .orElse(false),
+                firstNonEmptyTextList(
+                        humanReview.path("reason_codes"),
+                        reasons.path("human_review_reason_codes")),
+                firstNonEmptyTextList(
+                        humanReview.path("instructions"),
+                        reasons.path("human_review_instructions")));
     }
 
     private JsonNode readJson(String json) {
@@ -143,6 +161,37 @@ public class EvidenceCatalogService {
             return Math.max(0.0, Math.min(1.0, score / 100.0));
         }
         return Math.max(0.0, Math.min(1.0, score));
+    }
+
+    private static Double score(JsonNode agentFindings, String fieldName) {
+        if (agentFindings == null || agentFindings.isMissingNode() || agentFindings.isNull()) {
+            return null;
+        }
+        JsonNode value = agentFindings.path(fieldName);
+        if (!value.isNumber()) {
+            return null;
+        }
+        double score = value.asDouble();
+        return Math.max(0.0, Math.min(1.0, score > 1.0 ? score / 100.0 : score));
+    }
+
+    private static List<String> firstNonEmptyTextList(JsonNode primary, JsonNode fallback) {
+        List<String> values = textList(primary);
+        return values.isEmpty() ? textList(fallback) : values;
+    }
+
+    private static List<String> textList(JsonNode node) {
+        if (node == null || !node.isArray()) {
+            return List.of();
+        }
+        List<String> values = new ArrayList<>();
+        node.forEach(
+                item -> {
+                    if (item.isTextual() && !item.asText().isBlank()) {
+                        values.add(item.asText());
+                    }
+                });
+        return List.copyOf(values);
     }
 
     private static String confidenceLevel(JsonNode agentFindings, Double confidenceScore) {

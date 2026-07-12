@@ -30,6 +30,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.time.Instant;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -48,8 +49,6 @@ public class EvidenceAgentTurnService {
     private static final String AGENT_SENDER_ROLE = "CUSTOMER_SERVICE";
     private static final String AGENT_SENDER_ID = "evidence-clerk";
     private static final String OPENING_IDEMPOTENCY_VERSION = "dossier-v3";
-    private static final String DEGRADED_REASON_AGENT_CALL_FAILED = "AGENT_CALL_FAILED";
-    private static final String DEGRADED_REASON_AGENT_OUTPUT_EMPTY = "AGENT_OUTPUT_EMPTY";
     private static final List<String> SUPERSEDED_GENERIC_OPENING_MARKERS =
             List.of(
                     "您好！我是您的证据书记官",
@@ -153,7 +152,14 @@ public class EvidenceAgentTurnService {
                                 sourceMessageCreatedAt),
                         session.agentContext());
         EvidenceAgentTurnResult result = safeRun(command, traceId, requestId);
-        persistAgentTurn(context, session, turnNo, actor.role(), result, traceId);
+        persistAgentTurn(
+                context,
+                session,
+                turnNo,
+                actor.role(),
+                message.attachmentRefs(),
+                result,
+                traceId);
     }
 
     @Transactional
@@ -277,33 +283,21 @@ public class EvidenceAgentTurnService {
                     || blank(result.roomUtterance())
                     || result.liabilityDetermined()
                     || result.remedyRecommended()) {
-                log.warn(
-                        "Evidence agent turn degraded because output was empty or unsafe: case_id={}, room_type={}, trace_id={}, request_id={}",
-                        command.contextEnvelope().caseSnapshot().caseId(),
-                        command.contextEnvelope().roomPolicy().roomType(),
-                        traceId,
-                        requestId);
-                return degraded(DEGRADED_REASON_AGENT_OUTPUT_EMPTY, traceId);
+                throw new AgentExecutionException(
+                        ErrorCode.AGENT_OUTPUT_SCHEMA_INVALID,
+                        "evidence agent returned empty or unsafe output",
+                        Map.of("trace_id", traceId, "request_id", requestId));
             }
             return result;
         } catch (AgentExecutionException failure) {
-            if (failure.errorCode() == ErrorCode.AGENT_OUTPUT_SCHEMA_INVALID) {
-                log.error(
-                        "Evidence agent contract mismatch: case_id={}, room_type={}, trace_id={}, request_id={}, failure_message={}, validation_errors={}",
-                        command.contextEnvelope().caseSnapshot().caseId(),
-                        command.contextEnvelope().roomPolicy().roomType(),
-                        traceId,
-                        requestId,
-                        failure.getMessage(),
-                        failure.details().getOrDefault("validation_errors", List.of()),
-                        failure);
-                throw failure;
-            }
             logAgentFailure(command, traceId, requestId, failure);
-            return degraded(DEGRADED_REASON_AGENT_CALL_FAILED, traceId);
+            throw failure;
         } catch (RuntimeException failure) {
             logAgentFailure(command, traceId, requestId, failure);
-            return degraded(DEGRADED_REASON_AGENT_CALL_FAILED, traceId);
+            throw new AgentExecutionException(
+                    ErrorCode.AGENT_SERVICE_UNAVAILABLE,
+                    "evidence agent request failed",
+                    Map.of("trace_id", traceId, "request_id", requestId));
         }
     }
 
@@ -313,7 +307,7 @@ public class EvidenceAgentTurnService {
             String requestId,
             RuntimeException failure) {
         log.warn(
-                "Evidence agent turn degraded after agent call failure: case_id={}, room_type={}, trace_id={}, request_id={}, failure_type={}, failure_message={}",
+                "Evidence agent turn failed closed after agent call failure: case_id={}, room_type={}, trace_id={}, request_id={}, failure_type={}, failure_message={}",
                 command.contextEnvelope().caseSnapshot().caseId(),
                 command.contextEnvelope().roomPolicy().roomType(),
                 traceId,
@@ -328,8 +322,16 @@ public class EvidenceAgentTurnService {
             SessionContext session,
             int turnNo,
             ActorRole audienceParty,
+            List<String> currentAttachmentRefs,
             EvidenceAgentTurnResult result,
             String traceId) {
+        Set<String> allowedAttachmentIds =
+                validateEvidenceAssessmentCoverage(
+                        context.dispute().getId(),
+                        session.accessSession(),
+                        currentAttachmentRefs,
+                        result.evidenceAssessments(),
+                        traceId);
         String runId = "EVIDENCE_RUN_" + compactUuid();
         memoryRepository.save(
                 RoomTurnMemoryEntity.agentTurn(
@@ -356,100 +358,174 @@ public class EvidenceAgentTurnService {
                 turnNo,
                 traceId,
                 turnIdempotencyKey(context.dispute(), session.agentSession(), audienceParty, turnNo));
-        persistEvidenceVerificationSuggestions(
+        persistEvidenceVerifications(
                 context.dispute().getId(),
-                session.accessSession(),
+                allowedAttachmentIds,
                 result,
                 runId,
                 traceId);
     }
 
-    private void persistEvidenceVerificationSuggestions(
+    private Set<String> validateEvidenceAssessmentCoverage(
             String caseId,
             CaseAccessSessionEntity accessSession,
+            List<String> currentAttachmentRefs,
+            List<EvidenceAgentTurnResult.EvidenceAssessment> assessments,
+            String traceId) {
+        Set<String> allowedAttachmentIds = new HashSet<>();
+        if (currentAttachmentRefs != null && !currentAttachmentRefs.isEmpty()) {
+            allowedAttachmentIds.addAll(visibleEvidenceIds(caseId, accessSession));
+            allowedAttachmentIds.retainAll(Set.copyOf(currentAttachmentRefs));
+        }
+
+        Set<String> assessmentIds = new HashSet<>();
+        Set<String> duplicateIds = new HashSet<>();
+        boolean hasBlankId = false;
+        for (EvidenceAgentTurnResult.EvidenceAssessment assessment : assessments) {
+            String evidenceId = assessment.evidenceId();
+            if (blank(evidenceId)) {
+                hasBlankId = true;
+                continue;
+            }
+            if (!assessmentIds.add(evidenceId)) {
+                duplicateIds.add(evidenceId);
+            }
+        }
+
+        Set<String> unknownIds = new HashSet<>(assessmentIds);
+        unknownIds.removeAll(allowedAttachmentIds);
+        Set<String> missingIds = new HashSet<>(allowedAttachmentIds);
+        missingIds.removeAll(assessmentIds);
+        if (hasBlankId
+                || !duplicateIds.isEmpty()
+                || !unknownIds.isEmpty()
+                || !missingIds.isEmpty()
+                || assessments.size() != allowedAttachmentIds.size()) {
+            throw new AgentExecutionException(
+                    ErrorCode.AGENT_OUTPUT_SCHEMA_INVALID,
+                    "evidence agent assessments must cover each current attachment exactly once",
+                    Map.of(
+                            "trace_id", traceId,
+                            "expected_evidence_ids", sorted(allowedAttachmentIds),
+                            "assessment_evidence_ids", sorted(assessmentIds),
+                            "duplicate_evidence_ids", sorted(duplicateIds),
+                            "unknown_evidence_ids", sorted(unknownIds),
+                            "missing_evidence_ids", sorted(missingIds),
+                            "blank_evidence_id", hasBlankId));
+        }
+        return Set.copyOf(allowedAttachmentIds);
+    }
+
+    private void persistEvidenceVerifications(
+            String caseId,
+            Set<String> allowedAttachmentIds,
             EvidenceAgentTurnResult result,
             String runId,
             String traceId) {
-        List<EvidenceAgentTurnResult.EvidenceVerificationSuggestion> suggestions =
-                normalizedVerificationSuggestions(result);
-        if (suggestions.isEmpty()) {
+        if (allowedAttachmentIds.isEmpty()) {
             return;
         }
-        Set<String> visibleEvidenceIds =
-                evidenceItemRepository
-                        .findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(
-                                caseId)
-                        .stream()
-                        .filter(item -> evidenceVisibleToSession(item, accessSession))
-                        .map(EvidenceItemEntity::getId)
-                        .collect(Collectors.toSet());
-        for (EvidenceAgentTurnResult.EvidenceVerificationSuggestion suggestion : suggestions) {
-            if (blank(suggestion.evidenceId()) || !visibleEvidenceIds.contains(suggestion.evidenceId())) {
-                continue;
-            }
-            int version =
-                    verificationRepository
-                            .findTopByEvidenceIdOrderByVerificationVersionDesc(
-                                    suggestion.evidenceId())
-                            .map(EvidenceVerificationEntity::getVerificationVersion)
-                            .orElse(0)
-                            + 1;
-            double score = clamp01(suggestion.confidenceScore());
+        persistEvidenceAssessments(
+                caseId,
+                result.evidenceAssessments(),
+                runId,
+                traceId);
+    }
+
+    private void persistEvidenceAssessments(
+            String caseId,
+            List<EvidenceAgentTurnResult.EvidenceAssessment> assessments,
+            String runId,
+            String traceId) {
+        for (EvidenceAgentTurnResult.EvidenceAssessment assessment : assessments) {
+            int version = nextVerificationVersion(assessment.evidenceId());
+            EvidenceAgentTurnResult.HumanReview humanReview = assessment.humanReview();
+            boolean requiresHumanReview =
+                    humanReview.required()
+                            || "NEEDS_HUMAN_REVIEW".equals(assessment.recommendation());
+            Map<String, Object> agentFindings = new java.util.LinkedHashMap<>();
+            agentFindings.put("agent_run_id", runId);
+            agentFindings.put("analysis_method", assessment.analysisMethod());
+            agentFindings.put("inspected_modalities", assessment.inspectedModalities());
+            agentFindings.put("fact_links", assessment.factLinks());
+            agentFindings.put("authenticity_score", assessment.authenticityScore());
+            agentFindings.put("relevance_score", assessment.relevanceScore());
+            agentFindings.put("completeness_score", assessment.completenessScore());
+            agentFindings.put("assessment_confidence", assessment.assessmentConfidence());
+            agentFindings.put("confidence_score", assessment.assessmentConfidence());
+            agentFindings.put(
+                    "confidence_level", confidenceLevel(assessment.assessmentConfidence()));
+            agentFindings.put("findings", assessment.findings());
+            agentFindings.put("limitations", assessment.limitations());
+            agentFindings.put("risk_flags", assessment.riskFlags());
+            agentFindings.put("asset_audit", assessment.assetAudit());
+            agentFindings.put("recommendation", assessment.recommendation());
+            agentFindings.put("verification_feedback", safeText(assessment.summary()));
+            agentFindings.put(
+                    "human_review",
+                    Map.of(
+                            "required", requiresHumanReview,
+                            "reason_codes", humanReview.reasonCodes(),
+                            "instructions", humanReview.instructions()));
+
+            Map<String, Object> reasons = new java.util.LinkedHashMap<>();
+            reasons.put("summary", safeText(assessment.summary()));
+            reasons.put("limitations", assessment.limitations());
+            reasons.put("risk_flags", assessment.riskFlags());
+            reasons.put("human_review_reason_codes", humanReview.reasonCodes());
+            reasons.put("human_review_instructions", humanReview.instructions());
+
             verificationRepository.save(
                     EvidenceVerificationEntity.create(
                             "VERIFY_" + compactUuid(),
                             caseId,
-                            suggestion.evidenceId(),
+                            assessment.evidenceId(),
                             version,
-                            verificationStatus(score),
+                            verificationStatus(assessment, requiresHumanReview),
                             json(
                                     Map.of(
                                             "checks",
                                             List.of(
-                                                    "agent_batch_submission",
-                                                    "source_time_authenticity_relevance"))),
-                            json(
-                                    Map.of(
-                                            "agent_run_id",
-                                            runId,
-                                            "confidence_score",
-                                            score,
-                                            "confidence_level",
-                                            confidenceLevel(score),
-                                            "verification_feedback",
-                                            safeText(suggestion.suggestion()),
-                                            "room_utterance",
-                                            safeText(result.roomUtterance()))),
-                            json(
-                                    Map.of(
-                                            "summary",
-                                            safeText(suggestion.suggestion()),
-                                            "authenticity_flags",
-                                            authenticityFlagsForEvidence(
-                                                    result, suggestion.evidenceId()))),
-                            score < 0.45,
+                                                    "authorized_current_event_attachment",
+                                                    "multimodal_evidence_assessment"),
+                                            "inspected_modalities",
+                                            assessment.inspectedModalities())),
+                            json(agentFindings),
+                            json(reasons),
+                            requiresHumanReview,
                             Instant.now(clock),
                             AGENT_SENDER_ID,
                             traceId));
         }
     }
 
-    private List<EvidenceAgentTurnResult.EvidenceVerificationSuggestion>
-            normalizedVerificationSuggestions(EvidenceAgentTurnResult result) {
-        if (!result.verificationSuggestions().isEmpty()) {
-            return result.verificationSuggestions();
+    private Set<String> visibleEvidenceIds(
+            String caseId, CaseAccessSessionEntity accessSession) {
+        return evidenceItemRepository
+                .findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(caseId)
+                .stream()
+                .filter(item -> evidenceVisibleToSession(item, accessSession))
+                .map(EvidenceItemEntity::getId)
+                .collect(Collectors.toCollection(java.util.HashSet::new));
+    }
+
+    private int nextVerificationVersion(String evidenceId) {
+        return verificationRepository
+                        .findTopByEvidenceIdOrderByVerificationVersionDesc(evidenceId)
+                        .map(EvidenceVerificationEntity::getVerificationVersion)
+                        .orElse(0)
+                + 1;
+    }
+
+    private static EvidenceVerificationStatus verificationStatus(
+            EvidenceAgentTurnResult.EvidenceAssessment assessment,
+            boolean requiresHumanReview) {
+        if (requiresHumanReview) {
+            return EvidenceVerificationStatus.NEEDS_HUMAN_REVIEW;
         }
-        if (result.referencedEvidenceIds().isEmpty()) {
-            return List.of();
-        }
-        return result.referencedEvidenceIds().stream()
-                .map(
-                        evidenceId ->
-                                new EvidenceAgentTurnResult.EvidenceVerificationSuggestion(
-                                        evidenceId,
-                                        result.roomUtterance(),
-                                        result.confidence()))
-                .toList();
+        return "SUSPICIOUS".equals(assessment.recommendation())
+                ? EvidenceVerificationStatus.SUSPICIOUS
+                : EvidenceVerificationStatus.PLAUSIBLE;
     }
 
     private boolean evidenceVisibleToSession(
@@ -462,16 +538,6 @@ public class EvidenceAgentTurnService {
                 && item.getSubmissionStatus() == EvidenceSubmissionStatus.SUBMITTED;
     }
 
-    private static EvidenceVerificationStatus verificationStatus(double score) {
-        if (score >= 0.75) {
-            return EvidenceVerificationStatus.PLAUSIBLE;
-        }
-        if (score >= 0.45) {
-            return EvidenceVerificationStatus.SUSPICIOUS;
-        }
-        return EvidenceVerificationStatus.NEEDS_HUMAN_REVIEW;
-    }
-
     private static String confidenceLevel(double score) {
         if (score >= 0.8) {
             return "HIGH";
@@ -482,28 +548,12 @@ public class EvidenceAgentTurnService {
         return "LOW";
     }
 
-    private static double clamp01(double value) {
-        if (Double.isNaN(value) || Double.isInfinite(value)) {
-            return 0.0;
-        }
-        return Math.max(0.0, Math.min(1.0, value));
-    }
-
     private static String safeText(String value) {
         return value == null ? "" : value;
     }
 
-    private List<Map<String, String>> authenticityFlagsForEvidence(
-            EvidenceAgentTurnResult result, String evidenceId) {
-        return result.authenticityFlags().stream()
-                .filter(flag -> blank(flag.evidenceId()) || evidenceId.equals(flag.evidenceId()))
-                .map(
-                        flag ->
-                                Map.of(
-                                        "flag_type", safeText(flag.flagType()),
-                                        "description", safeText(flag.description()),
-                                        "severity", safeText(flag.severity())))
-                .toList();
+    private static List<String> sorted(Set<String> values) {
+        return values.stream().sorted().toList();
     }
 
     private RoomMessageEntity appendAgentMessage(
@@ -650,27 +700,6 @@ public class EvidenceAgentTurnService {
                 + audienceParty.name()
                 + ":"
                 + turnNo;
-    }
-
-    private EvidenceAgentTurnResult degraded(String reason, String traceId) {
-        return new EvidenceAgentTurnResult(
-                "证据书记官暂时没有完成智能核验，但你的发言已经安全保存。你可以继续补充证据来源、形成时间、原始文件和关联说明。",
-                objectMapper.valueToTree(
-                        Map.of(
-                                "agent_degraded",
-                                true,
-                                "agent_degraded_reason",
-                                reason,
-                                "trace_id",
-                                traceId,
-                                "next_best_action",
-                                "CONTINUE_EVIDENCE_DIALOG")),
-                objectMapper.valueToTree(List.of()),
-                List.of(),
-                false,
-                false,
-                "STUB",
-                0.0);
     }
 
     private JsonNode defaultObject(JsonNode node) {

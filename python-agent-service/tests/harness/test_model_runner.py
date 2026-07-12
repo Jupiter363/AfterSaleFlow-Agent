@@ -16,13 +16,22 @@ class RecordingLlm:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
 
-    def generate(self, *, node_name, system_prompt, user_prompt, output_type):
+    def generate(
+        self,
+        *,
+        node_name,
+        system_prompt,
+        user_prompt,
+        output_type,
+        user_content_parts=None,
+    ):
         self.calls.append(
             {
                 "node_name": node_name,
                 "system_prompt": system_prompt,
                 "user_prompt": user_prompt,
                 "output_type": output_type,
+                "user_content_parts": user_content_parts,
             }
         )
         return StructuredGeneration(
@@ -109,6 +118,31 @@ def test_model_runner_passes_prompt_profile_and_trusted_agent_context() -> None:
     assert "EVIDENCE_CLERK:USER:v1" in str(call["system_prompt"])
     assert "MALICIOUS_CASE_DATA" not in str(call["system_prompt"])
     assert "MALICIOUS_CASE_DATA" in str(call["user_prompt"])
+
+
+def test_model_runner_forwards_multimodal_parts_only_to_llm_transport() -> None:
+    llm = RecordingLlm()
+    runner = HarnessModelRunner(llm=llm, prompts=PromptRepository())
+    parts = [
+        {"type": "text", "text": "Evidence EVIDENCE_image follows."},
+        {
+            "type": "image_url",
+            "image_url": {
+                "url": "data:image/png;base64,iVBORw0KGgo=",
+                "detail": "high",
+            },
+        },
+    ]
+
+    runner.invoke_structured(
+        node_name="evidence_turn",
+        case_data={"case_id": "CASE_multimodal"},
+        output_type=RunnerOutput,
+        multimodal_parts=parts,
+    )
+
+    assert llm.calls[0]["user_content_parts"] == parts
+    assert "data:image" not in str(llm.calls[0]["user_prompt"])
 
 
 def test_context_window_rejects_required_section_that_cannot_fit() -> None:

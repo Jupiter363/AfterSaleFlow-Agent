@@ -380,6 +380,134 @@ describe("EvidenceRoomView", () => {
     expect(wrapper.get("[data-complete-evidence]").element.disabled).toBe(false);
   });
 
+  it("renders multimodal assessment confidence and a read-only human review card", async () => {
+    const reviewCatalog = {
+      ...catalog,
+      items: [
+        {
+          ...catalog.items[0],
+          evidence_id: "EVIDENCE_VISUAL_REVIEW",
+          original_filename: "商品划痕细节照片.png",
+          verification_status: "NEEDS_HUMAN_REVIEW",
+          authenticity_score: 0.74,
+          relevance_score: 0.93,
+          completeness_score: 0.58,
+          assessment_confidence: 0.67,
+          confidence_score: 0.99,
+          inspected_modalities: ["IMAGE", "OCR"],
+          limitations: ["单张照片无法排除光线反射对划痕形态的影响。"],
+          requires_human_review: true,
+          human_review_reason_codes: ["VISUAL_DETAIL_UNCERTAIN"],
+          human_review_instructions: ["对照原图检查划痕边缘、反光和拍摄时间。"],
+        },
+      ],
+    };
+    const { wrapper } = await mountView({ initialCatalog: reviewCatalog });
+
+    const submittedCard = wrapper.get("[data-evidence-originals] [data-evidence-card]");
+    expect(submittedCard.get("[data-evidence-confidence]").text()).toContain("核验把握 67%");
+
+    const queue = wrapper.get("[data-human-review-queue]");
+    expect(queue.text()).toContain("待人工审核");
+    const reviewCard = queue.get("[data-human-review-card]");
+    expect(reviewCard.text()).toContain("商品划痕细节照片.png");
+    expect(reviewCard.text()).toContain("真实性74%");
+    expect(reviewCard.text()).toContain("关联性93%");
+    expect(reviewCard.text()).toContain("完整性58%");
+    expect(reviewCard.text()).toContain("核验把握67%");
+    expect(reviewCard.text()).toContain("图片或视频细节无法由模型可靠判定");
+    expect(reviewCard.text()).toContain("单张照片无法排除光线反射");
+    expect(reviewCard.text()).toContain("对照原图检查划痕边缘");
+    expect(reviewCard.find("button").exists()).toBe(false);
+
+    await submittedCard.trigger("click");
+    const detail = wrapper.get("[data-evidence-detail-modal]");
+    expect(detail.get("[data-evidence-detail-assessment]").text()).toContain("真实性74%");
+    expect(detail.get("[data-evidence-detail-assessment]").text()).toContain("已检查模态：IMAGE、OCR");
+    expect(detail.get("[data-evidence-detail-human-review]").text()).toContain("审核指引");
+  });
+
+  it("accepts camelCase assessment fields and requiresHumanReview independently of status", async () => {
+    const camelCaseCatalog = {
+      ...catalog,
+      items: [
+        {
+          evidenceId: "EVIDENCE_CAMEL_REVIEW",
+          evidenceType: "CHAT_SCREENSHOT",
+          submittedByRole: "USER",
+          contentUrl: "/objects/chat.png",
+          originalFilename: "聊天记录.png",
+          submissionStatus: "SUBMITTED",
+          verificationStatus: "PLAUSIBLE",
+          authenticityScore: 81,
+          relevanceScore: 88,
+          completenessScore: 72,
+          assessmentConfidence: 76,
+          inspectedModalities: ["IMAGE", "TEXT"],
+          limitations: "聊天参与方身份仍需核对。",
+          requiresHumanReview: true,
+          humanReviewReasonCodes: ["SOURCE_PROVENANCE_UNVERIFIED"],
+          humanReviewInstructions: ["核对账号主体和完整上下文。"],
+        },
+      ],
+    };
+    const { wrapper } = await mountView({ initialCatalog: camelCaseCatalog });
+
+    const reviewCard = wrapper.get("[data-human-review-card]");
+    expect(reviewCard.text()).toContain("聊天记录.png");
+    expect(reviewCard.text()).toContain("材料来源或流转链路尚未核实");
+    expect(reviewCard.text()).toContain("聊天参与方身份仍需核对");
+    expect(wrapper.get("[data-evidence-confidence]").text()).toContain("76%");
+  });
+
+  it("shows every party human-review item to the platform reviewer", async () => {
+    const reviewerCatalog = {
+      ...catalog,
+      items: [
+        {
+          ...catalog.items[0],
+          evidence_id: "EVIDENCE_USER_REVIEW",
+          original_filename: "用户聊天截图.png",
+          submission_status: "SUBMITTED",
+          submitted_by_role: "USER",
+          requires_human_review: true,
+        },
+        {
+          ...catalog.items[0],
+          evidence_id: "EVIDENCE_MERCHANT_REVIEW",
+          original_filename: "商家发货照片.png",
+          submission_status: "SUBMITTED",
+          submitted_by_role: "MERCHANT",
+          requires_human_review: true,
+        },
+      ],
+    };
+    const { wrapper } = await mountView({
+      initialCatalog: reviewerCatalog,
+      viewerRole: "PLATFORM_REVIEWER",
+    });
+
+    const queue = wrapper.get("[data-human-review-queue]");
+    expect(queue.findAll("[data-human-review-card]")).toHaveLength(2);
+    expect(queue.text()).toContain("用户聊天截图.png");
+    expect(queue.text()).toContain("商家发货照片.png");
+  });
+
+  it("keeps one board scroll rail and expands human-review cards inside it", () => {
+    expect(evidenceRoomSource).toMatch(
+      /\.human-review-list\s*\{[^}]*display:\s*grid/s,
+    );
+    expect(evidenceRoomSource).toMatch(
+      /\.human-review-card__body\s*\{[^}]*display:\s*grid/s,
+    );
+    expect(evidenceRoomSource).not.toMatch(
+      /\.human-review-card__body\s*\{[^}]*overflow-y:\s*(?:auto|scroll)/s,
+    );
+    expect(evidenceRoomSource).toMatch(
+      /\.evidence-modal__review-scroll\s*\{[^}]*max-height:\s*230px[^}]*overflow-y:\s*auto/s,
+    );
+  });
+
   it("shows a dismissible modal when the dispute initiator has no submitted evidence", async () => {
     const emptyInitiatorCatalog = {
       ...catalog,
@@ -1082,6 +1210,9 @@ describe("EvidenceRoomView", () => {
     });
     roomApi.messages.mockResolvedValueOnce([]);
     const { wrapper } = await mountView({ viewerRole: "MERCHANT" });
+    await wrapper
+      .get(".evidence-uploader__model-consent input")
+      .setValue(true);
     const input = wrapper.get('input[type="file"]');
     const file = new File(["# delivery notes"], "delivery-notes.md", {
       type: "text/markdown",
@@ -1099,6 +1230,10 @@ describe("EvidenceRoomView", () => {
     expect(["OTHER", "DOCUMENT"]).toContain(uploadCommand.evidenceType);
     expect(uploadCommand.sourceType).toBe("MERCHANT_UPLOAD");
     expect(uploadCommand.visibility).toBe("PRIVATE");
+    expect(uploadCommand.modelProcessingAuthorized).toBe(true);
+    expect(
+      wrapper.get(".evidence-uploader__model-consent input").element.checked,
+    ).toBe(false);
     expect(evidenceApi.catalog).toHaveBeenCalledWith(
       expect.objectContaining({ role: "MERCHANT" }),
       "CASE_EVIDENCE_1",
