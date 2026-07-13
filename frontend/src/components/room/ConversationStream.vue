@@ -15,8 +15,13 @@ import AgentStreamingMessage from "./AgentStreamingMessage.vue";
 import { displayRoomMessageText, roleLabel } from "../../utils/displayText";
 import {
   durableMessagesOutsideActiveStreams,
+  streamCardsForRun,
   visibleAgentStreams,
 } from "../../stores/agentStream";
+import {
+  agentSpeakerLine,
+  agentSpeakerLineForIdentity,
+} from "../../utils/agentSpeakerPresentation";
 
 const props = defineProps({
   messages: { type: Array, default: () => [] },
@@ -52,6 +57,16 @@ const displayedMessages = computed(() =>
 const pendingStreamingRuns = computed(() =>
   visibleAgentStreams(props.streamingRuns, displayedMessages.value),
 );
+const agentSurfaceTone = computed(() => {
+  const label = String(props.agentLabel || "").toLowerCase();
+  const roles = [
+    ...orderedMessages.value.map((message) => message.sender_role),
+    ...props.streamingRuns.map((run) => run.senderRole),
+  ].map((value) => String(value || "").toLowerCase());
+  if (label.includes("证据") || roles.includes("evidence_clerk")) return "evidence-clerk";
+  if (label.includes("陪审") || roles.includes("jury_panel")) return "jury-panel";
+  return "default";
+});
 const PARTY_ROLES = new Set(["USER", "MERCHANT"]);
 const AGENT_ROLES = new Set([
   "CUSTOMER_SERVICE",
@@ -99,7 +114,10 @@ function displaySenderLabel(message) {
     message.message_type === "AGENT_MESSAGE" &&
     AGENT_ROLES.has(message.sender_role)
   ) {
-    return props.agentLabel;
+    return agentSpeakerLineForIdentity(props.agentLabel);
+  }
+  if (AGENT_ROLES.has(message.sender_role) && message.sender_role !== "SYSTEM") {
+    return agentSpeakerLine(message.sender_role);
   }
   return roleLabel(message.sender_role);
 }
@@ -122,7 +140,11 @@ onMounted(() => {
 </script>
 
 <template>
-  <section class="conversation-stream" aria-label="房间对话">
+  <section
+    class="conversation-stream"
+    :class="`conversation-stream--${agentSurfaceTone}`"
+    aria-label="房间对话"
+  >
     <div
       ref="messagesRail"
       class="conversation-stream__messages"
@@ -145,12 +167,15 @@ onMounted(() => {
         </header>
         <p>{{ displayRoomMessageText(message.message_text) }}</p>
       </article>
-      <AgentStreamingMessage
-        v-for="run in pendingStreamingRuns"
-        :key="run.runId"
-        :run="run"
-        :label="run.agentLabel || agentLabel"
-      />
+      <template v-for="run in pendingStreamingRuns" :key="run.runId">
+        <AgentStreamingMessage
+          v-for="card in streamCardsForRun(run)"
+          :key="`${run.runId}:${card.key}`"
+          :run="run"
+          :card="card"
+          :label="run.agentLabel || agentLabel"
+        />
+      </template>
       <div
         v-if="!displayedMessages.length && !pendingStreamingRuns.length"
         class="conversation-stream__empty"
@@ -188,12 +213,31 @@ onMounted(() => {
   --conversation-message-font-size: 13px;
   --conversation-message-body-font-size: 12.5px;
   --conversation-message-meta-font-size: 10.5px;
+  --conversation-agent-message-color: #334159;
+  --conversation-agent-message-background: #fffaf1;
+  --conversation-agent-message-border: #e7decc;
+  --conversation-agent-message-title: #5e5143;
+  --conversation-agent-message-meta: #8a7c68;
   display: grid;
   grid-template-rows: minmax(0, 1fr) auto;
   gap: 14px;
   width: 100%;
   min-height: 0;
   overflow: hidden;
+}
+.conversation-stream--evidence-clerk {
+  --conversation-agent-message-color: #27475d;
+  --conversation-agent-message-background: #eef8fb;
+  --conversation-agent-message-border: #cee4ea;
+  --conversation-agent-message-title: #31596c;
+  --conversation-agent-message-meta: #668a99;
+}
+.conversation-stream--jury-panel {
+  --conversation-agent-message-color: #494263;
+  --conversation-agent-message-background: #f3efff;
+  --conversation-agent-message-border: #ddd2f1;
+  --conversation-agent-message-title: #5a4e78;
+  --conversation-agent-message-meta: #80749a;
 }
 .conversation-stream__messages {
   display: grid;
@@ -219,7 +263,11 @@ onMounted(() => {
 }
 .conversation-stream__message--agent {
   justify-self: start;
+  color: var(--conversation-agent-message-color);
+  background: var(--conversation-agent-message-background);
+  border-color: var(--conversation-agent-message-border);
   border-radius: 18px 18px 18px 6px;
+  box-shadow: none;
 }
 .conversation-stream__message--party {
   justify-self: end;
@@ -229,10 +277,12 @@ onMounted(() => {
 .conversation-stream__message--merchant { background: #effaef; }
 .conversation-stream__message--customer_service,
 .conversation-stream__message--dispute_intake_officer,
-.conversation-stream__message--intake_officer { background: #fffaf1; }
+.conversation-stream__message--intake_officer { background: var(--conversation-agent-message-background); }
 .conversation-stream__message--platform_reviewer { background: #f4efff; }
 .conversation-stream__message header { display: flex; justify-content: space-between; gap: 12px; }
 .conversation-stream__message small { color: #8a96aa; font-size: var(--conversation-message-meta-font-size); }
+.conversation-stream__message--agent header strong { color: var(--conversation-agent-message-title); }
+.conversation-stream__message--agent header small { color: var(--conversation-agent-message-meta); }
 .conversation-stream__message p {
   margin: 7px 0 0;
   font-size: var(--conversation-message-body-font-size);

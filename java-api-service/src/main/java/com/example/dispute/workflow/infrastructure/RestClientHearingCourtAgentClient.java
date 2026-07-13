@@ -80,6 +80,19 @@ public class RestClientHearingCourtAgentClient implements HearingCourtAgentClien
                     Map.of("endpoint", ENDPOINT));
         }
         JsonNode nextRound = response.path("next_round_no");
+        boolean finalDraftRequired = response.path("final_draft_required").asBoolean(false);
+        String finalProposedResolution =
+                response.path("final_proposed_resolution").asText(null);
+        JsonNode juryReviewReport = response.path("jury_review_report");
+        if (finalDraftRequired
+                && (finalProposedResolution == null
+                        || finalProposedResolution.isBlank()
+                        || !juryReviewReport.isObject())) {
+            throw new AgentExecutionException(
+                    ErrorCode.AGENT_OUTPUT_SCHEMA_INVALID,
+                    "final hearing turn is missing the proposed resolution or jury review",
+                    Map.of("endpoint", ENDPOINT));
+        }
         return new HearingCourtAgentResult(
                 response.path("speaker_role").asText(),
                 response.path("message_text").asText(),
@@ -89,8 +102,10 @@ public class RestClientHearingCourtAgentClient implements HearingCourtAgentClien
                 response.path("court_event_type").asText(),
                 response.path("round_no").asInt(),
                 nextRound.isMissingNode() || nextRound.isNull() ? null : nextRound.asInt(),
-                response.path("final_draft_required").asBoolean(false),
+                finalDraftRequired,
                 textArray(response.path("review_focus_signal")),
+                finalProposedResolution,
+                objectMap(juryReviewReport),
                 response.path("prompt_version").asText(),
                 response.path("model").asText());
     }
@@ -114,6 +129,16 @@ public class RestClientHearingCourtAgentClient implements HearingCourtAgentClien
                     }
                 });
         return List.copyOf(values);
+    }
+
+    private static Map<String, Object> objectMap(JsonNode node) {
+        if (node == null || !node.isObject()) {
+            return Map.of();
+        }
+        return OBJECT_MAPPER.convertValue(
+                node,
+                OBJECT_MAPPER.getTypeFactory().constructMapType(
+                        LinkedHashMap.class, String.class, Object.class));
     }
 
     // 所属模块：【Temporal 持久化编排 / 外部集成层】「RestClientHearingCourtAgentClient.requestBody(HearingCourtAgentCommand)」。

@@ -7,6 +7,7 @@
 package com.example.dispute.hearing.application;
 
 import java.util.List;
+import java.util.Map;
 
 // 所属模块：【共享小法庭 / 应用编排层】类型「HearingCourtAgentResult」。
 // 类型职责：定义庭审法庭Agent跨层传递时使用的不可变数据契约；本类型显式提供 「HearingCourtAgentResult」、「HearingCourtAgentResult」、「blankToDefault」。
@@ -24,6 +25,8 @@ public record HearingCourtAgentResult(
         Integer nextRoundNo,
         boolean finalDraftRequired,
         List<String> reviewFocusSignal,
+        String finalProposedResolution,
+        Map<String, Object> juryReviewReport,
         String promptVersion,
         String model) {
 
@@ -42,6 +45,9 @@ public record HearingCourtAgentResult(
                 questionsForMerchant == null ? List.of() : List.copyOf(questionsForMerchant);
         reviewFocusSignal =
                 reviewFocusSignal == null ? List.of() : List.copyOf(reviewFocusSignal);
+        finalProposedResolution = blankToNull(finalProposedResolution);
+        juryReviewReport =
+                juryReviewReport == null ? Map.of() : Map.copyOf(juryReviewReport);
         courtEventType =
                 blankToDefault(
                         courtEventType,
@@ -50,6 +56,36 @@ public record HearingCourtAgentResult(
                                 : "JUDGE_NEXT_QUESTIONS_READY");
         promptVersion = blankToDefault(promptVersion, "hearing-round-turn-unknown");
         model = blankToDefault(model, "unknown");
+    }
+
+    public HearingCourtAgentResult(
+            String speakerRole,
+            String messageText,
+            String roundSummary,
+            List<String> questionsForUser,
+            List<String> questionsForMerchant,
+            String courtEventType,
+            int roundNo,
+            Integer nextRoundNo,
+            boolean finalDraftRequired,
+            List<String> reviewFocusSignal,
+            String promptVersion,
+            String model) {
+        this(
+                speakerRole,
+                messageText,
+                roundSummary,
+                questionsForUser,
+                questionsForMerchant,
+                courtEventType,
+                roundNo,
+                nextRoundNo,
+                finalDraftRequired,
+                reviewFocusSignal,
+                null,
+                Map.of(),
+                promptVersion,
+                model);
     }
 
     // 所属模块：【共享小法庭 / 应用编排层】「HearingCourtAgentResult.HearingCourtAgentResult(String,String,String,List,List,String,int,Integer,boolean,String,String)」。
@@ -81,6 +117,8 @@ public record HearingCourtAgentResult(
                 nextRoundNo,
                 finalDraftRequired,
                 List.of(),
+                null,
+                Map.of(),
                 promptVersion,
                 model);
     }
@@ -93,5 +131,9 @@ public record HearingCourtAgentResult(
     // Java 语法：record 自动生成组件访问器、equals、hashCode 和 toString，适合传递不可变业务快照。
     private static String blankToDefault(String value, String fallback) {
         return value == null || value.isBlank() ? fallback : value;
+    }
+
+    private static String blankToNull(String value) {
+        return value == null || value.isBlank() ? null : value;
     }
 }

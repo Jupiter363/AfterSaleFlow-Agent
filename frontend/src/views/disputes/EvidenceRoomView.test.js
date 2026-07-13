@@ -178,10 +178,15 @@ function routerForEvidence() {
 
 // 业务位置：【前端证据室】mountView：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 async function mountView(overrides = {}, mountOptions = {}) {
+  const { historyMode: openAsHistory = false, ...viewOverrides } = overrides;
   const router = routerForEvidence();
-  await router.push("/disputes/CASE_EVIDENCE_1/evidence");
+  await router.push(
+    openAsHistory
+      ? "/disputes/CASE_EVIDENCE_1/evidence?view=history"
+      : "/disputes/CASE_EVIDENCE_1/evidence",
+  );
   await router.isReady();
-  const completeAction = overrides.completeAction || vi.fn();
+  const completeAction = viewOverrides.completeAction || vi.fn();
   const wrapper = mount(EvidenceRoomView, {
     props: {
       initialCatalog: catalog,
@@ -192,7 +197,7 @@ async function mountView(overrides = {}, mountOptions = {}) {
       initialMessages: initialEvidenceMessages,
       completeAction,
       modelHealthLoader: connectedModelHealth,
-      ...overrides,
+      ...viewOverrides,
     },
     global: { plugins: [router] },
     ...mountOptions,
@@ -239,6 +244,28 @@ describe("EvidenceRoomView", () => {
       sender_role: "USER",
       message_text: "posted",
     });
+  });
+
+  it("keeps historical evidence readable while locking every write control", async () => {
+    const eventStreamer = vi.fn();
+    const completeAction = vi.fn();
+    const { wrapper } = await mountView({
+      historyMode: true,
+      eventStreamer,
+      completeAction,
+    });
+
+    expect(wrapper.get("[data-room-history-banner]").text()).toContain("历史浏览模式");
+    expect(wrapper.find(".conversation-stream__composer").exists()).toBe(false);
+    expect(wrapper.get(".evidence-uploader input").attributes("disabled")).toBeDefined();
+    expect(wrapper.get("[data-complete-evidence]").attributes("disabled")).toBeDefined();
+    expect(wrapper.findAll("[data-delete-pending-evidence]").every(
+      (button) => button.attributes("disabled") !== undefined,
+    )).toBe(true);
+    expect(roomApi.ensureOpening).not.toHaveBeenCalled();
+    expect(evidenceApi.upload).not.toHaveBeenCalled();
+    expect(completeAction).not.toHaveBeenCalled();
+    expect(eventStreamer).not.toHaveBeenCalled();
   });
 
   // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。

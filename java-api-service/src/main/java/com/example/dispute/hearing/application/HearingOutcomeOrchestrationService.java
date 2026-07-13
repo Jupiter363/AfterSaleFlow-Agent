@@ -10,13 +10,22 @@ import com.example.dispute.common.api.ErrorCode;
 import com.example.dispute.common.exception.BusinessException;
 import com.example.dispute.domain.model.HearingStatus;
 import com.example.dispute.infrastructure.persistence.entity.HearingStateEntity;
+import com.example.dispute.infrastructure.persistence.entity.AdjudicationDraftEntity;
 import com.example.dispute.infrastructure.persistence.repository.AdjudicationDraftRepository;
 import com.example.dispute.infrastructure.persistence.repository.HearingStateRepository;
 import com.example.dispute.infrastructure.persistence.repository.RemedyPlanRepository;
 import com.example.dispute.infrastructure.persistence.repository.ReviewTaskRepository;
 import com.example.dispute.remedy.application.RemedyApplicationService;
 import com.example.dispute.review.application.ReviewApplicationService;
+import com.example.dispute.room.domain.MessageSenderType;
+import com.example.dispute.room.domain.MessageType;
+import com.example.dispute.room.domain.RoomType;
+import com.example.dispute.room.infrastructure.persistence.entity.RoomMessageEntity;
+import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
+import com.example.dispute.room.infrastructure.persistence.repository.RoomMessageRepository;
+import java.time.Instant;
 import java.util.Map;
+import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -33,6 +42,11 @@ import org.springframework.transaction.support.TransactionTemplate;
 @Service
 public class HearingOutcomeOrchestrationService {
 
+    private static final String ADJOURNMENT_MESSAGE =
+            "庭审草案已记录，本庭休庭。案件已进入人工审核流程，平台审核员将在一个工作日内完成处理。审核完成后，您可以查看最终结果。";
+    private static final String SHARED_COURT_AUDIENCE_JSON =
+            "[\"USER\",\"MERCHANT\",\"CUSTOMER_SERVICE\",\"PLATFORM_REVIEWER\",\"ADMIN\",\"SYSTEM\"]";
+
     private static final Logger log =
             LoggerFactory.getLogger(HearingOutcomeOrchestrationService.class);
 
@@ -40,6 +54,8 @@ public class HearingOutcomeOrchestrationService {
     private final AdjudicationDraftRepository draftRepository;
     private final RemedyPlanRepository remedyRepository;
     private final ReviewTaskRepository reviewTaskRepository;
+    private final CaseRoomRepository roomRepository;
+    private final RoomMessageRepository messageRepository;
     private final RemedyApplicationService remedyService;
     private final ReviewApplicationService reviewService;
     private final TransactionTemplate recoveryTransaction;
@@ -55,6 +71,8 @@ public class HearingOutcomeOrchestrationService {
             AdjudicationDraftRepository draftRepository,
             RemedyPlanRepository remedyRepository,
             ReviewTaskRepository reviewTaskRepository,
+            CaseRoomRepository roomRepository,
+            RoomMessageRepository messageRepository,
             RemedyApplicationService remedyService,
             ReviewApplicationService reviewService,
             PlatformTransactionManager transactionManager) {
@@ -62,6 +80,8 @@ public class HearingOutcomeOrchestrationService {
         this.draftRepository = draftRepository;
         this.remedyRepository = remedyRepository;
         this.reviewTaskRepository = reviewTaskRepository;
+        this.roomRepository = roomRepository;
+        this.messageRepository = messageRepository;
         this.remedyService = remedyService;
         this.reviewService = reviewService;
         this.recoveryTransaction = new TransactionTemplate(transactionManager);
@@ -145,19 +165,32 @@ public class HearingOutcomeOrchestrationService {
         if (hearing == null || hearing.getHearingStatus() != HearingStatus.COMPLETED) {
             return false;
         }
-        if (reviewTaskRepository
-                .findFirstByCaseIdOrderByCreatedAtDesc(hearing.getCaseId())
-                .isPresent()) {
-            return false;
-        }
-        if (draftRepository.findFirstByCaseIdOrderByDraftVersionDesc(caseId).isEmpty()) {
+        var draft = draftRepository.findFirstByCaseIdOrderByDraftVersionDesc(caseId);
+        if (draft.isEmpty()) {
             log.warn(
                     "Skipping completed hearing recovery for case {} because adjudication draft is missing",
                     caseId);
             return false;
         }
+        var plan = remedyRepository.findFirstByCaseIdOrderByPlanVersionDesc(caseId);
+        var task = reviewTaskRepository.findFirstByCaseIdOrderByCreatedAtDesc(caseId);
+        boolean terminalMessagesMissing =
+                plan.isPresent()
+                        && task.isPresent()
+                        && (messageRepository
+                                        .findByCaseIdAndIdempotencyKey(
+                                                caseId,
+                                                finalDraftIdempotencyKey(
+                                                        caseId, draft.get().getId()))
+                                        .isEmpty()
+                                || messageRepository
+                                        .findByCaseIdAndIdempotencyKey(
+                                                caseId,
+                                                adjournmentIdempotencyKey(
+                                                        caseId, task.get().getId()))
+                                        .isEmpty());
         HearingOutcomeOrchestrationResult result = orchestrate(hearing);
-        return result.createdRemedy() || result.createdReviewTask();
+        return result.createdRemedy() || result.createdReviewTask() || terminalMessagesMissing;
     }
 
     // 所属模块：【共享小法庭 / 应用编排层】「HearingOutcomeOrchestrationService.orchestrate(HearingStateEntity)」。
@@ -172,7 +205,8 @@ public class HearingOutcomeOrchestrationService {
             return new HearingOutcomeOrchestrationResult(
                     hearing.getCaseId(), null, null, false, false, "SKIPPED_NOT_COMPLETED");
         }
-        draftRepository
+        AdjudicationDraftEntity finalDraft =
+                draftRepository
                 .findFirstByCaseIdOrderByDraftVersionDesc(hearing.getCaseId())
                 .orElseThrow(
                         () ->
@@ -206,6 +240,24 @@ public class HearingOutcomeOrchestrationService {
                                         reviewService.createForWorkflow(
                                                 hearing.getCaseId(), remedyPlanId));
 
+        remedyRepository
+                .findById(remedyPlanId)
+                .filter(plan -> hearing.getCaseId().equals(plan.getCaseId()))
+                .orElseThrow(
+                        () ->
+                                new IllegalStateException(
+                                        "review gate requires a persisted remedy plan"));
+        reviewTaskRepository
+                .findById(reviewTaskId)
+                .filter(task -> hearing.getCaseId().equals(task.getCaseId()))
+                .filter(task -> remedyPlanId.equals(task.getPlanId()))
+                .orElseThrow(
+                        () ->
+                                new IllegalStateException(
+                                        "review gate requires a persisted review task"));
+        appendFinalDraftMessage(hearing, finalDraft);
+        appendAdjournmentMessage(hearing, reviewTaskId);
+
         return new HearingOutcomeOrchestrationResult(
                 hearing.getCaseId(),
                 remedyPlanId,
@@ -213,5 +265,120 @@ public class HearingOutcomeOrchestrationService {
                 createdRemedy,
                 createdReviewTask,
                 "REVIEW_GATE_READY");
+    }
+
+    private void appendFinalDraftMessage(
+            HearingStateEntity hearing,
+            AdjudicationDraftEntity draft) {
+        String idempotencyKey =
+                finalDraftIdempotencyKey(hearing.getCaseId(), draft.getId());
+        if (messageRepository
+                .findByCaseIdAndIdempotencyKey(hearing.getCaseId(), idempotencyKey)
+                .isPresent()) {
+            return;
+        }
+        var room =
+                roomRepository
+                        .findByCaseIdAndRoomTypeForUpdate(
+                                hearing.getCaseId(), RoomType.HEARING)
+                        .orElseThrow(
+                                () ->
+                                        new IllegalStateException(
+                                                "hearing room is required before final draft handoff"));
+        if (messageRepository
+                .findByCaseIdAndIdempotencyKey(hearing.getCaseId(), idempotencyKey)
+                .isPresent()) {
+            return;
+        }
+        String draftMessage =
+                "裁决草案 V2（非最终草案）\n"
+                        + "拟处理方向："
+                        + draft.getRecommendedDecision()
+                        + "\n"
+                        + "理由摘要："
+                        + draft.getDraftText()
+                        + "\n本草案已提交平台审核员确认，尚未生效。";
+        long sequence = messageRepository.findMaxSequenceByRoomId(room.getId()) + 1;
+        RoomMessageEntity message =
+                RoomMessageEntity.create(
+                        "MESSAGE_" + compactUuid(),
+                        hearing.getCaseId(),
+                        room.getId(),
+                        sequence,
+                        MessageSenderType.AGENT,
+                        "JUDGE",
+                        "presiding-judge",
+                        SHARED_COURT_AUDIENCE_JSON,
+                        "[]",
+                        MessageType.AGENT_MESSAGE,
+                        draftMessage,
+                        "[]",
+                        idempotencyKey,
+                        hearing.getRoundNo(),
+                        Instant.now(),
+                        "TRACE_HEARING_FINAL_DRAFT_" + hearing.getCaseId());
+        if (draft.getCreatedByAgentRunId() != null
+                && !draft.getCreatedByAgentRunId().isBlank()) {
+            message.attachAgentRun(draft.getCreatedByAgentRunId());
+        }
+        messageRepository.save(message);
+    }
+
+    private void appendAdjournmentMessage(
+            HearingStateEntity hearing,
+            String reviewTaskId) {
+        String idempotencyKey =
+                adjournmentIdempotencyKey(hearing.getCaseId(), reviewTaskId);
+        if (messageRepository
+                .findByCaseIdAndIdempotencyKey(hearing.getCaseId(), idempotencyKey)
+                .isPresent()) {
+            return;
+        }
+        var room =
+                roomRepository
+                        .findByCaseIdAndRoomTypeForUpdate(
+                                hearing.getCaseId(), RoomType.HEARING)
+                        .orElseThrow(
+                                () ->
+                                        new IllegalStateException(
+                                                "hearing room is required before adjournment"));
+        if (messageRepository
+                .findByCaseIdAndIdempotencyKey(hearing.getCaseId(), idempotencyKey)
+                .isPresent()) {
+            return;
+        }
+        long sequence = messageRepository.findMaxSequenceByRoomId(room.getId()) + 1;
+        messageRepository.save(
+                RoomMessageEntity.create(
+                        "MESSAGE_" + compactUuid(),
+                        hearing.getCaseId(),
+                        room.getId(),
+                        sequence,
+                        MessageSenderType.SYSTEM,
+                        "SYSTEM",
+                        "hearing-system",
+                        SHARED_COURT_AUDIENCE_JSON,
+                        "[]",
+                        MessageType.SYSTEM_EVENT,
+                        ADJOURNMENT_MESSAGE,
+                        "[]",
+                        idempotencyKey,
+                        hearing.getRoundNo(),
+                        Instant.now(),
+                        "TRACE_HEARING_ADJOURNMENT_" + hearing.getCaseId()));
+    }
+
+    private static String compactUuid() {
+        return UUID.randomUUID().toString().replace("-", "");
+    }
+
+    private static String adjournmentIdempotencyKey(
+            String caseId, String reviewTaskId) {
+        return "hearing-adjourned:" + caseId + ":" + reviewTaskId;
+    }
+
+    private static String finalDraftIdempotencyKey(
+            String caseId, String draftId) {
+        return "hearing-final-draft-v2:" + caseId + ":" + draftId;
     }
 }

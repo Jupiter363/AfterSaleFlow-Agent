@@ -7,11 +7,12 @@ import { createRoomState, resumeRoomEvents, streamRoomEvents } from "./room";
 vi.mock("../api/rooms", () => ({
   consumeCaseEvents: vi.fn(),
   roomApi: {
+    events: vi.fn(async () => []),
     messages: vi.fn(),
   },
 }));
 
-import { consumeCaseEvents } from "../api/rooms";
+import { consumeCaseEvents, roomApi } from "../api/rooms";
 
 // 业务位置：【前端状态仓库】describe：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 API 响应、SSE 增量和用户操作 正确进入 跨组件一致的案件/房间/证据状态。上游：API 响应、SSE 增量和用户操作。下游：跨组件一致的案件/房间/证据状态。边界：本地状态不能替代服务端事实。
 describe("room event recovery", () => {
@@ -167,5 +168,31 @@ describe("room event recovery", () => {
       "CASE_A:EVIDENCE:user-local:USER": 17,
       "CASE_A:EVIDENCE:merchant-local:MERCHANT": 3,
     });
+  });
+
+  it("starts a fresh room subscription after the replayed snapshot baseline", async () => {
+    const state = createRoomState();
+    const abortController = new AbortController();
+    roomApi.events.mockResolvedValueOnce([
+      { sequence_no: 7, event_type: "AGENT_RUN_STARTED" },
+      { sequence_no: 9, event_type: "ROOM_MESSAGE_CREATED" },
+    ]);
+    consumeCaseEvents.mockImplementationOnce(async ({ lastEventId }) => {
+      expect(lastEventId).toBe(9);
+      abortController.abort();
+      return 9;
+    });
+
+    await streamRoomEvents({
+      actor: { id: "user-local", role: "USER" },
+      caseId: "CASE_BASELINE",
+      roomType: "HEARING",
+      state,
+      signal: abortController.signal,
+      snapshotLoader: vi.fn(),
+      retryDelayMs: 0,
+    });
+
+    expect(state.lastEventIds["CASE_BASELINE:HEARING:user-local:USER"]).toBe(9);
   });
 });

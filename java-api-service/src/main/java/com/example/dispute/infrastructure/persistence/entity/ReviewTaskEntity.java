@@ -96,6 +96,19 @@ public class ReviewTaskEntity extends AbstractEntity {
             case ESCALATE_MANUAL->ReviewTaskStatus.ESCALATED;};
         if(taskStatus!=ReviewTaskStatus.WAITING_EVIDENCE)completedAt=OffsetDateTime.now(ZoneOffset.UTC);
     }
+    public void startReview(String reviewerId) {
+        if (taskStatus == ReviewTaskStatus.IN_REVIEW) {
+            assignedReviewerId = reviewerId;
+            updatedBy = reviewerId;
+            return;
+        }
+        if (taskStatus != ReviewTaskStatus.PENDING && taskStatus != ReviewTaskStatus.ASSIGNED) {
+            throw new IllegalStateException("review cannot start from status " + taskStatus);
+        }
+        assignedReviewerId = reviewerId;
+        taskStatus = ReviewTaskStatus.IN_REVIEW;
+        updatedBy = reviewerId;
+    }
     // 所属模块：【PostgreSQL 事实模型 / JPA 实体层】「ReviewTaskEntity.prePersist()」。
     // 具体功能：「ReviewTaskEntity.prePersist()」：在 JPA 首次 INSERT 前初始化 「createdAt」、「updatedAt」，保证即使调用方没有显式赋值，数据库中的审计字段也完整。
     // 上游调用：「ReviewTaskEntity.prePersist()」由使用「ReviewTaskEntity」的控制器、应用服务、Workflow Activity 或测试场景触发。

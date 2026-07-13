@@ -12,6 +12,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -24,6 +25,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.doAnswer;
 
 import com.example.dispute.common.transaction.PostCommitSideEffectExecutor;
+import com.example.dispute.agentstream.application.AgentRunFinalizationContext;
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.RiskLevel;
@@ -58,6 +60,7 @@ import com.example.dispute.tool.application.ToolDefinition;
 import com.example.dispute.tool.application.ToolRegistry;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.OffsetDateTime;
@@ -65,6 +68,8 @@ import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -1052,6 +1057,162 @@ class HearingCourtOrchestratorTest {
     // 上游调用：「HearingCourtOrchestratorTest.hearingCase()」由本测试类中的 「HearingCourtOrchestratorTest.afterRoundOpenedAppendsOpeningJudgeMessage」、「HearingCourtOrchestratorTest.invokesTheRemoteCourtAgentOutsideAnyActiveCourtTransaction」、「HearingCourtOrchestratorTest.afterRoundClosedAppendsOneIdempotentJudgeMessageAndLifecycleEvent」、「HearingCourtOrchestratorTest.afterRoundClosedComposesJudgeContextFromActiveEvidenceDossierVersion」 调用。
     // 下游影响：「HearingCourtOrchestratorTest.hearingCase()」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
     // 系统意义：「HearingCourtOrchestratorTest.hearingCase()」守住「共享小法庭」的可执行规格，尤其防止 「CASE_COURT」、「ORDER-COURT」、「AS-COURT」、「LOG-COURT」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
+    @Test
+    void streamingFinalizationUsesStableJudgeMessageKeyForAttemptScopedAgentRunKey()
+            throws Exception {
+        FulfillmentCaseEntity dispute = hearingCase();
+        CaseRoomEntity room =
+                CaseRoomEntity.open(
+                        "ROOM_HEARING_CASE_COURT",
+                        dispute.getId(),
+                        RoomType.HEARING,
+                        OffsetDateTime.parse("2026-07-07T01:00:00Z"),
+                        "system");
+        HearingRoundEntity round =
+                HearingRoundEntity.open(
+                        "HEARING_ROUND_3",
+                        dispute.getId(),
+                        null,
+                        3,
+                        2,
+                        Instant.parse("2026-07-07T01:05:00Z"),
+                        Instant.parse("2026-07-07T01:00:00Z"),
+                        "system");
+        round.complete(
+                "{\"trigger\":\"BOTH_PARTIES_SUBMITTED\"}",
+                null,
+                Instant.parse("2026-07-07T01:04:00Z"),
+                "hearing-controller");
+
+        String canonicalJudgeKey = "judge-round-turn:" + dispute.getId() + ":3";
+        String attemptScopedRunKey = canonicalJudgeKey + ":retry:2";
+        String juryKey = "jury-review-report:" + dispute.getId() + ":3";
+        String proposedResolution = "拟由用户退回商品，商家验收后退还订单价款。";
+        AtomicReference<RoomMessageEntity> savedJudge = new AtomicReference<>();
+        AtomicReference<RoomMessageEntity> savedJury = new AtomicReference<>();
+        AtomicReference<AgentA2AMessageView> savedA2A = new AtomicReference<>();
+
+        when(caseRepository.findById(dispute.getId())).thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.HEARING))
+                .thenReturn(Optional.of(room));
+        when(roundRepository.findByCaseIdAndRoundNo(dispute.getId(), 3))
+                .thenReturn(Optional.of(round));
+        when(messageRepository.findByCaseIdAndIdempotencyKey(eq(dispute.getId()), anyString()))
+                .thenAnswer(
+                        invocation -> {
+                            String key = invocation.getArgument(1);
+                            if (canonicalJudgeKey.equals(key)) {
+                                return Optional.ofNullable(savedJudge.get());
+                            }
+                            if (juryKey.equals(key)) {
+                                return Optional.ofNullable(savedJury.get());
+                            }
+                            return Optional.empty();
+                        });
+        when(messageRepository.findMaxSequenceByRoomId(room.getId())).thenReturn(0L, 1L);
+        when(messageRepository.save(any()))
+                .thenAnswer(
+                        invocation -> {
+                            RoomMessageEntity message = invocation.getArgument(0);
+                            if (canonicalJudgeKey.equals(message.getIdempotencyKey())) {
+                                savedJudge.set(message);
+                            } else if (juryKey.equals(message.getIdempotencyKey())) {
+                                savedJury.set(message);
+                            }
+                            return message;
+                        });
+        when(a2aMessageService.findFormalJuryReviewReport(dispute.getId(), 3))
+                .thenAnswer(ignored -> Optional.ofNullable(savedA2A.get()));
+        doAnswer(
+                        invocation -> {
+                            AgentA2ACommand command = invocation.getArgument(0);
+                            ObjectMapper mapper = new ObjectMapper();
+                            AgentA2AMessageView saved =
+                                    new AgentA2AMessageView(
+                                            "A2A_FINAL_REVIEW",
+                                            command.caseId(),
+                                            command.roundNo(),
+                                            command.fromAgent(),
+                                            command.toAgent(),
+                                            command.messageType(),
+                                            mapper.writeValueAsString(command.inputRefs()),
+                                            mapper.writeValueAsString(command.payload()),
+                                            command.visibility(),
+                                            command.agentRunId(),
+                                            CLOCK.instant());
+                            savedA2A.set(saved);
+                            return saved;
+                        })
+                .when(a2aMessageService)
+                .record(any());
+
+        List<Map<String, Object>> findings =
+                List.of(
+                        Map.of("dimension", "FACT_COMPLETENESS"),
+                        Map.of("dimension", "EVIDENCE_CONSISTENCY"),
+                        Map.of("dimension", "RULE_APPLICABILITY"),
+                        Map.of("dimension", "PROCEDURAL_FAIRNESS"),
+                        Map.of("dimension", "REMEDY_FEASIBILITY"),
+                        Map.of("dimension", "RISK_AND_OMISSIONS"));
+        Map<String, Object> juryReview =
+                Map.of(
+                        "reviewed_proposal", proposedResolution,
+                        "summary", "六项复核已完成。",
+                        "risk_level", "MEDIUM",
+                        "confidence_score", 88,
+                        "findings", findings,
+                        "approval_performed", false,
+                        "execution_triggered", false,
+                        "is_final_decision", false);
+        HearingCourtAgentResult result =
+                new HearingCourtAgentResult(
+                        "JUDGE",
+                        "法官拟处理方案：" + proposedResolution,
+                        "第三轮审理完成。",
+                        List.of(),
+                        List.of(),
+                        "FINAL_DRAFT_REQUIRED",
+                        3,
+                        null,
+                        true,
+                        List.of("复核退货退款的执行条件。"),
+                        proposedResolution,
+                        juryReview,
+                        "hearing-round-turn-test-v1",
+                        "qwen3.7-plus");
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode request =
+                mapper.readTree(
+                        """
+                        {
+                          "round_no": 3,
+                          "final_round": true,
+                          "round_status": "CLOSED",
+                          "party_submissions": [{"participant_role":"USER"}]
+                        }
+                        """);
+        AgentRunFinalizationContext finalization =
+                new AgentRunFinalizationContext(
+                        "AGENT_RUN_RETRY_2",
+                        dispute.getId(),
+                        room.getId(),
+                        "HEARING_ROUND",
+                        "TRACE_FINAL_RETRY_2",
+                        attemptScopedRunKey,
+                        request);
+
+        assertThatCode(() -> orchestrator.finalizeResult(finalization, mapper.valueToTree(result)))
+                .doesNotThrowAnyException();
+
+        assertThat(savedJudge.get()).isNotNull();
+        assertThat(savedJudge.get().getIdempotencyKey()).isEqualTo(canonicalJudgeKey);
+        assertThat(savedJudge.get().getAgentRunId()).isEqualTo("AGENT_RUN_RETRY_2");
+        assertThat(savedJury.get()).isNotNull();
+        assertThat(savedA2A.get()).isNotNull();
+        verify(messageRepository, never())
+                .findByCaseIdAndIdempotencyKey(dispute.getId(), attemptScopedRunKey);
+    }
+
     private static FulfillmentCaseEntity hearingCase() {
         return FulfillmentCaseEntity.imported(
                 "CASE_COURT",

@@ -8,6 +8,8 @@ export const reviewApi = {
     apiRequest(`/reviews?status=${status}`, actor),
   packet: (actor, taskId) =>
     apiRequest(`/reviews/${taskId}/packet`, actor),
+  start: (actor, taskId) =>
+    apiRequest(`/reviews/${taskId}/start`, actor, { method: "POST" }),
   queryCopilot: (actor, taskId, question) =>
     apiRequest(`/reviews/${taskId}/copilot/query`, actor, {
       method: "POST",

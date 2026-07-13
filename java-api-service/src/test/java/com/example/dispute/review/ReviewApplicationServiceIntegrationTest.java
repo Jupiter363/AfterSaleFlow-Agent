@@ -119,6 +119,86 @@ class ReviewApplicationServiceIntegrationTest {
                 "[{\"action_type\":\"REFUND\",\"idempotency_key\":\"REMEDY:CASE_review:1:0:REFUND\",\"preconditions\":[\"PLATFORM_REVIEW_APPROVED\"],\"risk_level\":\"HIGH\",\"requires_approval\":true,\"parameters\":{}}]",
                 "[\"PLATFORM_REVIEW_APPROVED\"]","[\"NOTIFY_USER_AFTER_EXECUTION\"]","temporal-worker"));
     }
+
+    @Test
+    void startingReviewMovesTheTaskAndFullHearingCaseFromDraftToReview() {
+        FulfillmentCaseEntity dispute =
+                FulfillmentCaseEntity.create(
+                        "CASE_review_start",
+                        "ORDER_review_start",
+                        null,
+                        "user-review-start",
+                        "merchant-review-start",
+                        "CREATE_review_start",
+                        "CONDITION_MISMATCH",
+                        "Review a completed hearing draft",
+                        "The parties can read the draft before the reviewer starts work.",
+                        RiskLevel.HIGH,
+                        "user-review-start");
+        dispute.completeIntake(
+                "CONDITION_MISMATCH",
+                CaseStatus.INTAKE_COMPLETED,
+                RiskLevel.HIGH,
+                "{}",
+                "user-review-start");
+        dispute.markDossierBuilt("user-review-start");
+        dispute.applyRoute(RouteType.FULL_HEARING, "user-review-start");
+        dispute.markRemedyPlanned("temporal-worker");
+        cases.saveAndFlush(dispute);
+        plans.saveAndFlush(
+                RemedyPlanEntity.pendingApproval(
+                        "REMEDY_review_start",
+                        dispute.getId(),
+                        null,
+                        1,
+                        RouteType.FULL_HEARING,
+                        RiskLevel.HIGH,
+                        "[{\"action_type\":\"REFUND\",\"idempotency_key\":\"REMEDY:CASE_review_start:1:0:REFUND\",\"preconditions\":[\"PLATFORM_REVIEW_APPROVED\"],\"risk_level\":\"HIGH\",\"requires_approval\":true,\"parameters\":{}}]",
+                        "[\"PLATFORM_REVIEW_APPROVED\"]",
+                        "[\"NOTIFY_USER_AFTER_EXECUTION\"]",
+                        "temporal-worker"));
+
+        String taskId =
+                service.createForWorkflow(
+                        "CASE_review_start", "REMEDY_review_start");
+
+        assertThat(tasks.findById(taskId))
+                .hasValueSatisfying(
+                        task ->
+                                assertThat(task.getTaskStatus())
+                                        .isEqualTo(ReviewTaskStatus.PENDING));
+        assertThat(cases.findById("CASE_review_start"))
+                .hasValueSatisfying(
+                        persistedCase -> {
+                            assertThat(persistedCase.getCaseStatus())
+                                    .isEqualTo(CaseStatus.WAITING_HUMAN_REVIEW);
+                            assertThat(persistedCase.getCurrentRoom()).isEqualTo("DRAFT");
+                        });
+
+        var started =
+                service.start(
+                        taskId,
+                        new AuthenticatedActor(
+                                "reviewer-local", ActorRole.PLATFORM_REVIEWER));
+        tasks.flush();
+        cases.flush();
+
+        assertThat(started.status()).isEqualTo("IN_REVIEW");
+        assertThat(started.assignedReviewerId()).isEqualTo("reviewer-local");
+        assertThat(tasks.findById(taskId))
+                .hasValueSatisfying(
+                        task ->
+                                assertThat(task.getTaskStatus())
+                                        .isEqualTo(ReviewTaskStatus.IN_REVIEW));
+        assertThat(cases.findById("CASE_review_start"))
+                .hasValueSatisfying(
+                        persistedCase -> {
+                            assertThat(persistedCase.getCaseStatus())
+                                    .isEqualTo(CaseStatus.WAITING_HUMAN_REVIEW);
+                            assertThat(persistedCase.getCurrentRoom()).isEqualTo("REVIEW");
+                        });
+    }
+
     // 所属模块：【平台人工终审 / 自动化测试层】「ReviewApplicationServiceIntegrationTest.createsPacketAndOnlyReviewerCanModifyApproveWithDiff()」。
     // 具体功能：「ReviewApplicationServiceIntegrationTest.createsPacketAndOnlyReviewerCanModifyApproveWithDiff()」：复现“创建并持久化（场景方法「createsPacketAndOnlyReviewerCanModifyApproveWithDiff」）”场景：驱动 「service.createForWorkflow」、「service.packet」、「service.list」、「service.decide」，再用 「assertThat」、「verify」、「assertThatThrownBy」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_review」、「REMEDY_review」、「reviewer-local」、「cs-1」。
     // 上游调用：「ReviewApplicationServiceIntegrationTest.createsPacketAndOnlyReviewerCanModifyApproveWithDiff()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。

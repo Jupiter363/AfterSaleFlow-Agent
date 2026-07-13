@@ -15,6 +15,11 @@ const props = defineProps({
   showCaseId: { type: Boolean, default: true },
   showConnection: { type: Boolean, default: true },
   showBoundary: { type: Boolean, default: true },
+  historyMode: { type: Boolean, default: false },
+  historyDescription: {
+    type: String,
+    default: "当前展示的是已封存的历史房间记录，所有业务操作均已锁定。",
+  },
   connectionState: {
     type: String,
     default: "connected",
@@ -62,6 +67,14 @@ const shortCaseId = computed(() =>
     <section class="room-shell__agent">
       <slot name="agent" />
     </section>
+
+    <aside v-if="historyMode" class="room-shell__history" data-room-history-banner>
+      <span aria-hidden="true">🔒</span>
+      <div>
+        <strong>历史浏览模式</strong>
+        <p>{{ historyDescription }}</p>
+      </div>
+    </aside>
 
     <section class="room-shell__workspace">
       <slot />
@@ -151,6 +164,22 @@ const shortCaseId = computed(() =>
 .room-shell__agent {
   min-width: 0;
 }
+.room-shell__history {
+  display: flex;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  color: #526178;
+  background: #f3f6fa;
+  border: 1px solid #dbe3ee;
+  border-radius: 8px;
+}
+.room-shell__history > span { flex: 0 0 auto; font-size: 16px; }
+.room-shell__history strong { color: #34445b; font-size: 13px; }
+.room-shell__history p { margin: 2px 0 0; font-size: 12px; line-height: 1.45; }
 .room-shell__workspace {
   container: room-workspace / inline-size;
   min-width: 0;

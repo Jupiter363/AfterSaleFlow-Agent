@@ -10,6 +10,7 @@ from typing import Annotated, Any
 from langgraph.graph import END, START, StateGraph
 from typing_extensions import NotRequired, TypedDict
 
+from app.agents.unified_jury_review import UnifiedJuryReviewAgent
 from app.harness.context_pack import build_context_pack
 from app.harness.execution_tools import (
     ExecutionToolDeclaration,
@@ -18,6 +19,7 @@ from app.harness.execution_tools import (
 from app.harness.localization_policy import localize_internal_text
 from app.llm import AgentOutputSchemaError, AgentServiceUnavailable
 from app.schemas import HearingRoundTurnRequest, HearingRoundTurnResult
+from app.streaming import current_stream_observer
 
 
 LOGGER = logging.getLogger(__name__)
@@ -33,18 +35,26 @@ class HearingRoundTurnGraphState(TypedDict):
 
 
 class HearingRoundTurnWorkflow:
-    """主持法官单轮庭审发言工作流。
+    """主持法官单轮庭审发言，并在最终轮触发一次统一评审。
 
     这个工作流服务于“第 N 轮庭审”：根据当前轮次、双方陈述、证据卷宗和陪审团 A2A 记录，
-    生成法官公开发言，再通过护栏强制保持“非最终裁决、需人工复核”的定位。
+    生成法官公开发言，再通过护栏强制保持“非最终裁决、需人工复核”的定位；
+    第三轮封存后由独立统一评审 Agent 覆盖六项指标，报告随同一运行结果交给 Java 持久化。
     """
 
     # 所属模块：庭审法官 Agent > 单轮 LangGraph > 工作流实例初始化。
     # 具体功能：`__init__` 将 HarnessModelRunner 绑定进 LLM 闭包，并编译固定的“模型生成→法庭护栏”两节点图。
     # 上下游：上游是服务启动依赖装配；下游是 `run` 重用编译图处理开庭、普通结轮或第三轮收敛请求。
     # 系统意义：模型永远不能绕开 apply_court_guardrails 直接成为法官公开结果，三轮程序和人工复核标志由代码控制。
-    def __init__(self, model_runner: Any | None = None) -> None:
+    def __init__(
+        self,
+        model_runner: Any | None = None,
+        jury_review_agent: UnifiedJuryReviewAgent | None = None,
+    ) -> None:
         self._graph = build_hearing_round_turn_graph(model_runner)
+        self._jury_review_agent = jury_review_agent or (
+            UnifiedJuryReviewAgent(model_runner) if model_runner is not None else None
+        )
 
     # 所属模块：庭审法官 Agent > 单轮 LangGraph > Java 调用门面。
     # 具体功能：`run` 把 HearingRoundTurnRequest 序列化为初始 state，invoke 编译图，并对最终 `state["result"]` 再做 HearingRoundTurnResult 运行时验收。
@@ -57,7 +67,16 @@ class HearingRoundTurnWorkflow:
                 "executed_nodes": [],
             }
         )
-        return HearingRoundTurnResult.model_validate(state["result"])
+        result = HearingRoundTurnResult.model_validate(state["result"])
+        final_round = request.final_round or request.round_no >= 3
+        if final_round and request.party_submissions:
+            if self._jury_review_agent is None:
+                raise AgentServiceUnavailable(
+                    "final hearing round requires the unified jury review agent"
+                )
+            report = self._jury_review_agent.review(request, result)
+            result = result.model_copy(update={"jury_review_report": report})
+        return result
 
 
 # 所属模块：庭审法官 Agent > 单轮 LangGraph > 拓扑构建与编译。
@@ -177,12 +196,22 @@ def _apply_court_guardrails(state: HearingRoundTurnGraphState) -> dict[str, Any]
         questions_for_merchant = _opening_questions_for_merchant(request)
         round_summary = "法官已打开本轮庭审，等待用户和商家分别提交本轮说明。"
         proposed_resolution_direction = None
+        final_proposed_resolution = None
     elif final_round:
+        final_proposed_resolution = _sanitize_final_proposed_resolution(
+            output.final_proposed_resolution
+        )
         expected_event = "FINAL_DRAFT_REQUIRED"
         message_text = _sanitize_judge_message(
             output.message_text,
             final_round=True,
         )
+        if final_proposed_resolution not in message_text:
+            message_text = _append_streamed_public_contract(
+                message_text,
+                label="非最终拟处理方案：",
+                value=final_proposed_resolution,
+            )
         next_round_no = None
         questions_for_user = []
         questions_for_merchant = []
@@ -201,15 +230,16 @@ def _apply_court_guardrails(state: HearingRoundTurnGraphState) -> dict[str, Any]
         round_summary = _sanitize_round_summary(output.round_summary)
         review_focus_signal = []
         proposed_resolution_direction = None
+        final_proposed_resolution = None
         if request.round_no == 2:
             proposed_resolution_direction = _sanitize_proposed_resolution_direction(
                 output.proposed_resolution_direction
             )
             if proposed_resolution_direction not in message_text:
-                message_text = (
-                    message_text.rstrip("。")
-                    + f"。本庭当前非最终拟处理方向为：{proposed_resolution_direction}。"
-                    + "请双方在第三轮仅说明认可或具体异议。"
+                message_text = _append_streamed_public_contract(
+                    message_text,
+                    label="非最终拟处理方向：",
+                    value=proposed_resolution_direction,
                 )
     if opening_turn:
         review_focus_signal = []
@@ -226,6 +256,7 @@ def _apply_court_guardrails(state: HearingRoundTurnGraphState) -> dict[str, Any]
             "final_draft_required": final_round and not opening_turn,
             "review_focus_signal": review_focus_signal,
             "proposed_resolution_direction": proposed_resolution_direction,
+            "final_proposed_resolution": final_proposed_resolution,
             "non_final": True,
             "requires_human_review": True,
         }
@@ -236,63 +267,23 @@ def _apply_court_guardrails(state: HearingRoundTurnGraphState) -> dict[str, Any]
     }
 
 
-# 所属模块：庭审法官 Agent > 单轮 LangGraph > 显式程序降级结果。
-# 具体功能：`_fallback_result` 不分析责任，只按开庭/最终/普通轮生成固定程序消息、事件和问题；最终轮仍封存材料并生成 review focus，而不生成实体裁判结论。
-# 上下游：上游是测试或显式降级策略传入 HearingRoundTurnRequest（主 LLM 节点当前失败关闭）；下游仍应经过 `_apply_court_guardrails` 或等价 Java 持久化规则。
-# 系统意义：模型故障时可维持庭审状态机，但不能用本地 fallback 冒充对案情、证据和规则的智能判断。
-def _fallback_result(request: HearingRoundTurnRequest) -> HearingRoundTurnResult:
-    """在模型不可用时生成可继续流转的法官结果。
+def _append_streamed_public_contract(
+    message_text: str,
+    *,
+    label: str,
+    value: str,
+) -> str:
+    """Append a model-produced contract field and expose the suffix as a delta."""
 
-    降级结果不会替代裁判：它只维持开庭、下一轮追问或“进入裁判草案”这三个
-    业务状态，确保 Java 侧能持久化回合并把案件交给人工复核，而不是中断整场庭审。
-    """
-
-    if _is_opening_turn(request):
-        return HearingRoundTurnResult(
-            message_text=_opening_message(request),
-            round_summary="法官已打开本轮庭审，等待用户和商家分别提交本轮说明。",
-            questions_for_user=_opening_questions_for_user(request),
-            questions_for_merchant=_opening_questions_for_merchant(request),
-            court_event_type="JUDGE_OPENING_READY",
-            round_no=request.round_no,
-            next_round_no=request.round_no,
-            final_draft_required=False,
-            prompt_version="hearing-round-opening-fallback-v1",
-            model="local-fallback",
+    suffix = f"\n\n{label}{value}"
+    observer = current_stream_observer()
+    if observer is not None:
+        observer.visible_delta(
+            "hearing_round_turn",
+            "message_text",
+            suffix,
         )
-    final_round = request.final_round or request.round_no >= 3
-    if final_round:
-        message = (
-            "第三轮陈述已封存。AI 法官将基于当前案情、证据和双方陈述形成非最终裁决草案，"
-            "并进入裁决草案与后续确认路径。"
-        )
-        return HearingRoundTurnResult(
-            message_text=message,
-            round_summary="模型暂不可用，系统已封存最终轮材料并进入裁决草案生成路径。",
-            court_event_type="FINAL_DRAFT_REQUIRED",
-            round_no=request.round_no,
-            next_round_no=None,
-            final_draft_required=True,
-            review_focus_signal=_derived_review_focus_signal(request),
-            prompt_version="hearing-round-turn-fallback-v1",
-            model="local-fallback",
-        )
-    return HearingRoundTurnResult(
-        message_text=(
-            f"第 {request.round_no} 轮陈述已封存。下一轮请双方继续围绕争议焦点、证据来源、"
-            "形成时间和与案情的关联性进行定向说明。"
-        ),
-        round_summary="模型暂不可用，系统已按结构化庭审流程封存本轮材料。",
-        questions_for_user=["请补充与本人主张直接相关的事实、时间线和证据来源说明。"],
-        questions_for_merchant=["请补充履约记录、物流交接记录和与用户主张差异相关的说明。"],
-        court_event_type="JUDGE_NEXT_QUESTIONS_READY",
-        round_no=request.round_no,
-        next_round_no=request.round_no + 1,
-        final_draft_required=False,
-        review_focus_signal=[],
-        prompt_version="hearing-round-turn-fallback-v1",
-        model="local-fallback",
-    )
+    return message_text.rstrip() + suffix
 
 
 # 所属模块：庭审法官 Agent > 最终轮交接 > 人工关注点选择。
@@ -587,11 +578,12 @@ def _sanitize_judge_message(text: str, *, final_round: bool) -> str:
             "hearing round model returned an empty public message",
         )
     if final_round and _looks_like_more_questions(localized):
-        localized = "第三轮陈述已封存。AI 法官将基于当前案情、证据和双方陈述形成非最终裁决草案，并进入裁决草案与后续确认路径。"
+        raise AgentOutputSchemaError(
+            "hearing_round_turn",
+            "final hearing round cannot ask the parties another question",
+        )
     if "最终裁决" in localized and "非最终裁决" not in localized:
         localized = localized.replace("最终裁决", "非最终裁决草案")
-    if final_round and "非最终裁决草案" not in localized:
-        localized = localized.rstrip("。") + "，并进入非最终裁决草案生成路径。"
     localized = (
         localized.replace("并提交平台审核员终审", "并进入裁决草案与后续确认路径")
         .replace("提交平台审核员终审", "进入裁决草案与后续确认路径")
@@ -600,8 +592,16 @@ def _sanitize_judge_message(text: str, *, final_round: bool) -> str:
         .replace("审核员终审", "后续确认")
         .replace("人类终审", "后续确认")
     )
-    if "后续确认" not in localized:
-        localized = localized.rstrip("。") + "。AI 法官意见为非最终建议，后续仍需按平台流程确认。"
+    if final_round and "非最终" not in localized:
+        raise AgentOutputSchemaError(
+            "hearing_round_turn",
+            "final-round public message must state that the proposal is non-final",
+        )
+    if final_round and "评审" not in localized:
+        raise AgentOutputSchemaError(
+            "hearing_round_turn",
+            "final-round public message must state that the proposal enters AI review",
+        )
     return localized
 
 
@@ -623,6 +623,31 @@ def _sanitize_proposed_resolution_direction(text: str | None) -> str:
             "round two must provide a concrete proposed resolution direction",
         )
     localized = localized.replace("最终裁决", "非最终拟处理方向")
+    return localized
+
+
+def _sanitize_final_proposed_resolution(text: str | None) -> str:
+    """验收第三轮法官提交给统一评审员的非最终拟处理方案 V1。"""
+
+    localized = localize_internal_text(str(text or "").strip()).rstrip("。")
+    if not localized or any(
+        marker in localized
+        for marker in ("将提出", "待确认", "后续再", "暂不提出", "无法判断")
+    ):
+        raise AgentOutputSchemaError(
+            "hearing_round_turn",
+            "final round must provide a concrete final proposed resolution V1",
+        )
+    if "非最终" not in localized:
+        raise AgentOutputSchemaError(
+            "hearing_round_turn",
+            "final proposed resolution V1 must explicitly be non-final",
+        )
+    if "最终裁决" in localized and "非最终裁决" not in localized:
+        raise AgentOutputSchemaError(
+            "hearing_round_turn",
+            "final proposed resolution V1 cannot present itself as a final decision",
+        )
     return localized
 
 

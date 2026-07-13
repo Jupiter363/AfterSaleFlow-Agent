@@ -28,6 +28,15 @@ describe("display text helpers", () => {
     expect(text).not.toContain("SIGNED_NOT_RECEIVED");
   });
 
+  it("preserves evidence ids until the room can map them to visible filenames", () => {
+    const text = displayRoomMessageText(
+      "法官引用 EVIDENCE_USER_REAL，并要求 MERCHANT 补充说明。",
+    );
+
+    expect(text).toContain("EVIDENCE_USER_REAL");
+    expect(text).toContain("商家");
+  });
+
   // 业务位置：【前端应用】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由、API 和本地状态 正确进入 售后纠纷处理界面。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
   it("maps adjudication recommendation enum codes to readable Chinese", () => {
     const text = humanizeDossierText("RESHIP_OR_REFUND_AFTER_SIGNATURE_REVIEW");
@@ -35,6 +44,20 @@ describe("display text helpers", () => {
     expect(text).toContain("补发");
     expect(text).toContain("退款");
     expect(text).not.toContain("RESHIP_OR_REFUND_AFTER_SIGNATURE_REVIEW");
+  });
+
+  it("localizes draft validation fallbacks for the read-only scroll", () => {
+    expect(humanizeDossierText("UNDETERMINED")).toBe("待终审确认");
+    expect(
+      humanizeDossierText(
+        "Structured agent output could not be validated. No automated finding was accepted.",
+      ),
+    ).toContain("需由终审人工复核");
+    expect(
+      humanizeDossierText(
+        "Review the failed final-convergence structured output manually.",
+      ),
+    ).toContain("请人工复核");
   });
 
   // 业务位置：【前端应用】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由、API 和本地状态 正确进入 售后纠纷处理界面。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。

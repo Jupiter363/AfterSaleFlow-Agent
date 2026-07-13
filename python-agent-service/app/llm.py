@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import logging
 import re
 import threading
 import time
@@ -21,6 +22,9 @@ from app.streaming import (
     VisibleFieldSpec,
     current_stream_observer,
 )
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 # 这个文件是“真正请求大模型”的底层适配层。
@@ -79,6 +83,7 @@ _NODE_GENERATION_BUDGETS: dict[str, ModelGenerationBudget] = {
     "risk_critic": ModelGenerationBudget(8_192),
     "remedy_critic": ModelGenerationBudget(8_192),
     "fairness_critic": ModelGenerationBudget(8_192),
+    "jury_review": ModelGenerationBudget(8_192),
     "review_copilot": ModelGenerationBudget(8_192),
 }
 
@@ -572,6 +577,19 @@ class LiteLlmProxyClient:
             # 前面投影出的只是“可见字段增量”，不能当成最终可信结果。
             value = output_type.model_validate_json(content)
         except (TypeError, ValidationError, ValueError) as exception:
+            validation_details: object = str(exception)
+            if isinstance(exception, ValidationError):
+                validation_details = exception.errors(
+                    include_input=False,
+                    include_url=False,
+                )
+            LOGGER.error(
+                "structured stream output validation failed: node=%s "
+                "response_chars=%s details=%s",
+                node_name,
+                len(content),
+                validation_details,
+            )
             raise AgentOutputSchemaError(
                 node_name,
                 f"{node_name} returned invalid streamed structured output",

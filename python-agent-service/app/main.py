@@ -54,6 +54,7 @@ from fastapi.responses import JSONResponse
 # ---- 代理 & 工作流 ----
 from app.agents.critics import build_default_critics
 from app.agents.deliberation_panel import DeliberationPanel
+from app.agents.unified_jury_review import UnifiedJuryReviewAgent
 from app.agents.dispute_intake_officer import DisputeIntakeOfficer
 from app.agents.evaluation_agent import EvaluationAgent
 from app.agents.evidence_clerk import EvidenceClerk
@@ -1092,11 +1093,13 @@ def _build_simulated_import_workflow(
 def _build_hearing_round_turn_workflow(settings: Settings) -> HearingRoundTurnWorkflow:
     """构建庭审轮转工作流。"""
     llm = _build_llm_client(settings)
+    model_runner = HarnessModelRunner(
+        llm=llm,
+        prompts=PromptRepository(),
+    )
     return HearingRoundTurnWorkflow(
-        model_runner=HarnessModelRunner(
-            llm=llm,
-            prompts=PromptRepository(),
-        )
+        model_runner=model_runner,
+        jury_review_agent=UnifiedJuryReviewAgent(model_runner),
     )
 
 

@@ -9,6 +9,7 @@ package com.example.dispute.database;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.example.dispute.domain.model.CaseStatus;
+import com.example.dispute.domain.model.ApprovalDecisionType;
 import com.example.dispute.domain.model.RiskLevel;
 import com.example.dispute.domain.model.RouteType;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
@@ -83,5 +84,69 @@ class FulfillmentCaseEntityTest {
                         "system");
 
         assertThat(dispute.getRouteType()).isEqualTo(RouteType.FULL_HEARING);
+    }
+
+    @Test
+    void openHearingRecoveryAttachesWorkflowBeforeRemedyPlanning() {
+        FulfillmentCaseEntity dispute =
+                FulfillmentCaseEntity.imported(
+                        "CASE_open_hearing_recovery",
+                        "ORDER_open_hearing_recovery",
+                        null,
+                        "LOG_open_hearing_recovery",
+                        "user-room",
+                        "merchant-room",
+                        "IMPORT_open_hearing_recovery",
+                        "DELIVERY_NOT_RECEIVED",
+                        "Delivery dispute",
+                        "A recovered final draft must enter the review gate.",
+                        RiskLevel.HIGH,
+                        CaseStatus.EVIDENCE_OPEN,
+                        "EVIDENCE",
+                        OffsetDateTime.now().plusHours(2),
+                        "external",
+                        "EXT_open_hearing_recovery",
+                        "system");
+
+        dispute.openHearing(OffsetDateTime.now().plusHours(3), "system");
+        dispute.attachHearingWorkflow("WORKFLOW_open_hearing_recovery", "system");
+        dispute.markRemedyPlanned("system");
+
+        assertThat(dispute.getCaseStatus()).isEqualTo(CaseStatus.REMEDY_PLANNED);
+        assertThat(dispute.getCurrentRoom()).isEqualTo("DRAFT");
+    }
+
+    @Test
+    void hearingDraftReviewAndOutcomeUseDistinctRooms() {
+        FulfillmentCaseEntity dispute =
+                FulfillmentCaseEntity.imported(
+                        "CASE_room_progression",
+                        "ORDER_room_progression",
+                        null,
+                        "LOG_room_progression",
+                        "user-room",
+                        "merchant-room",
+                        "IMPORT_room_progression",
+                        "DELIVERY_NOT_RECEIVED",
+                        "Delivery dispute",
+                        "A completed hearing needs a visible draft before review.",
+                        RiskLevel.HIGH,
+                        CaseStatus.HEARING,
+                        "HEARING",
+                        OffsetDateTime.now().plusHours(3),
+                        "external",
+                        "EXT_room_progression",
+                        "system");
+
+        dispute.markRemedyPlanned("system");
+        dispute.waitForHumanReview("system");
+        assertThat(dispute.getCurrentRoom()).isEqualTo("DRAFT");
+
+        dispute.enterHumanReview("reviewer-local");
+        assertThat(dispute.getCurrentRoom()).isEqualTo("REVIEW");
+
+        dispute.applyReviewOutcome(ApprovalDecisionType.APPROVE, "reviewer-local");
+        assertThat(dispute.getCurrentRoom()).isEqualTo("OUTCOME");
+        assertThat(dispute.getCaseStatus()).isEqualTo(CaseStatus.APPROVED_FOR_EXECUTION);
     }
 }

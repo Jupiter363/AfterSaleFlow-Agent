@@ -7,6 +7,7 @@ import {
   extractAgentRunDescriptor,
 } from "../api/agentStream";
 import { createStreamTextPacer } from "../utils/streamTextPacer";
+import { streamCardPresentation } from "../utils/agentSpeakerPresentation";
 
 const ACTIVE_STATUSES = new Set([
   "PENDING",
@@ -57,7 +58,52 @@ function isVisibleField(fieldPath) {
 }
 
 function isStructuredVisibleField(fieldPath) {
-  return String(fieldPath || "").startsWith("case_detail.");
+  const value = String(fieldPath || "");
+  return value.startsWith("case_detail.") || [
+    "final_proposed_resolution",
+    "reviewed_proposal",
+  ].includes(value);
+}
+
+function createStreamCard(presentation) {
+  return reactive({
+    key: presentation.key,
+    identity: presentation.identity,
+    name: presentation.name,
+    senderRole: presentation.senderRole,
+    fieldText: {},
+    fieldOrder: [],
+    content: "",
+  });
+}
+
+function ensureStreamCard(run, event = {}) {
+  const presentation = streamCardPresentation({
+    operation: run.operation,
+    nodeName: event.nodeName,
+    fieldPath: event.fieldPath,
+    senderRole: run.senderRole,
+    agentLabel: run.agentLabel,
+  });
+  if (!run.cards[presentation.key]) {
+    run.cards[presentation.key] = createStreamCard(presentation);
+    run.cardOrder.push(presentation.key);
+  }
+  return run.cards[presentation.key];
+}
+
+function rebuildCardContent(card) {
+  card.content = card.fieldOrder
+    .map((field) => card.fieldText[field] || "")
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+export function streamCardsForRun(run) {
+  if (!run) return [];
+  return (run.cardOrder || [])
+    .map((key) => run.cards?.[key])
+    .filter(Boolean);
 }
 
 // 业务位置：【前端状态仓库】rebuildVisibleContent：把 API 响应、SSE 增量和用户操作 组装为本块需要的 面向当事人的业务文本，供 跨组件一致的案件/房间/证据状态 使用。上游：API 响应、SSE 增量和用户操作。下游：跨组件一致的案件/房间/证据状态。边界：本地状态不能替代服务端事实。
@@ -157,7 +203,10 @@ export function durableMessagesOutsideActiveStreams(messages, runs = []) {
   const activeRunIds = new Set((runs || []).map((run) => run.runId).filter(Boolean));
   const activeReceivedTexts = new Set(
     (runs || [])
-      .map((run) => String(run.receivedContent || "").trim())
+      .flatMap((run) => [
+        String(run.receivedContent || "").trim(),
+        ...streamCardsForRun(run).map((card) => String(card.content || "").trim()),
+      ])
       .filter(Boolean),
   );
   return (messages || []).filter((message) => {
@@ -242,6 +291,10 @@ export async function consumeAgentRun({
     receivedContent: "",
     receivedFieldText: {},
     receivedFieldOrder: [],
+    cards: {},
+    cardOrder: [],
+    activeCardKey: "default",
+    pacedFieldMeta: {},
     seenEventSequences: markRaw(new Set()),
     lastEventId: -1,
     usage: null,
@@ -256,12 +309,24 @@ export async function consumeAgentRun({
     displayPacer: null,
     promise: null,
   });
+  ensureStreamCard(run, {});
   run.displayPacer = markRaw(createStreamTextPacer({
-    onReveal: (fieldPath, fragment) => {
-      if (!run.fieldOrder.includes(fieldPath)) {
-        run.fieldOrder.push(fieldPath);
+    onReveal: (pacedFieldKey, fragment) => {
+      const meta = run.pacedFieldMeta[pacedFieldKey] || {
+        fieldPath: pacedFieldKey,
+        cardKey: "default",
+      };
+      const fieldPath = meta.fieldPath;
+      if (!run.fieldOrder.includes(pacedFieldKey)) {
+        run.fieldOrder.push(pacedFieldKey);
       }
-      run.fieldText[fieldPath] = (run.fieldText[fieldPath] || "") + fragment;
+      run.fieldText[pacedFieldKey] = (run.fieldText[pacedFieldKey] || "") + fragment;
+      const card = run.cards[meta.cardKey] || run.cards.default;
+      if (!card.fieldOrder.includes(pacedFieldKey)) {
+        card.fieldOrder.push(pacedFieldKey);
+      }
+      card.fieldText[pacedFieldKey] = (card.fieldText[pacedFieldKey] || "") + fragment;
+      rebuildCardContent(card);
       rebuildVisibleContent(run);
     },
   }));
@@ -295,6 +360,10 @@ export async function consumeAgentRun({
               } else if (event.event === "visible_delta") {
                 if (!isVisibleField(event.fieldPath) || !event.delta) return;
                 run.status = "STREAMING";
+                const card = isStructuredVisibleField(event.fieldPath)
+                  ? null
+                  : ensureStreamCard(run, event);
+                if (card) run.activeCardKey = card.key;
                 if (!run.receivedFieldOrder.includes(event.fieldPath)) {
                   run.receivedFieldOrder.push(event.fieldPath);
                 }
@@ -309,7 +378,13 @@ export async function consumeAgentRun({
                     (run.fieldText[event.fieldPath] || "") + event.delta;
                   rebuildVisibleContent(run);
                 } else {
-                  run.displayPacer.enqueue(event.fieldPath, event.delta);
+                  const pacedFieldKey = `${event.nodeName || "node"}::${event.fieldPath}`;
+                  run.pacedFieldMeta[pacedFieldKey] = {
+                    fieldPath: event.fieldPath,
+                    cardKey: card.key,
+                    nodeName: event.nodeName || "",
+                  };
+                  run.displayPacer.enqueue(pacedFieldKey, event.delta);
                 }
               } else if (event.event === "usage") {
                 run.usage = event.usage;
@@ -320,6 +395,7 @@ export async function consumeAgentRun({
                   throw controller.signal.reason || new DOMException("Aborted", "AbortError");
                 }
                 run.status = "FINALIZING";
+                run.activeCardKey = "";
                 run.finalResult = event.result;
                 try {
                   await onFinal?.(event.result, run, event);

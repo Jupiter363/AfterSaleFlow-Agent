@@ -106,9 +106,15 @@ public class FulfillmentDisputeWorkflowImpl
                                     3));
             draftId = hearing.draftId();
             manualRequired = hearing.manualRequired();
-            if (command.deliberationRequired()) {
-                // 评议团只读取冻结的最终草案和卷宗；并行 critic 的反对意见只能提高人工关注，
-                // 不能直接批准或执行补救动作。
+            boolean replayLegacyCriticPanel =
+                    Workflow.getVersion(
+                                    "unified-jury-replaces-critic-panel",
+                                    Workflow.DEFAULT_VERSION,
+                                    1)
+                            == Workflow.DEFAULT_VERSION;
+            if (replayLegacyCriticPanel && command.deliberationRequired()) {
+                // 仅为既有 Temporal 历史保留可重放兼容。新案件已由第三轮统一 AI 评审员
+                // 在 V1 -> V2 之间完成六维复核，不再启动第二套五 Critic 子流程。
                 DeliberationPanelWorkflow panel =
                         Workflow.newChildWorkflowStub(
                                 DeliberationPanelWorkflow.class,

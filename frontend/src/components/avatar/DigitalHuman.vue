@@ -172,7 +172,7 @@ const personaMatchers = [
   { persona: "intake", keywords: ["接待官", "受理"] },
   { persona: "evidence", keywords: ["书记官", "证据"] },
   { persona: "judge", keywords: ["法官", "裁决"] },
-  { persona: "jury", keywords: ["评审团", "陪审团", "圆桌"] },
+  { persona: "jury", keywords: ["评审员", "评审团", "陪审团", "圆桌"] },
   { persona: "review", keywords: ["审核解释官", "审核辅助官", "审核"] },
   { persona: "guide", keywords: ["路线引导员", "引导"] },
 ];

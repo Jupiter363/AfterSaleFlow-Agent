@@ -32,6 +32,12 @@ export const routes = [
     meta: { title: "小法庭", section: "rooms" },
   },
   {
+    path: "/disputes/:caseId/draft",
+    name: "adjudication-draft-room",
+    component: () => import("../views/disputes/AdjudicationDraftView.vue"),
+    meta: { title: "裁决草案室", section: "rooms" },
+  },
+  {
     path: "/disputes/:caseId/outcome",
     name: "dispute-outcome",
     component: () => import("../views/disputes/OutcomeView.vue"),

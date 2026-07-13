@@ -37,6 +37,7 @@ import {
   clearAgentStreams,
   consumeAgentRun,
   durableMessagesOutsideActiveStreams,
+  streamCardsForRun,
   visibleAgentStreams,
 } from "../../stores/agentStream";
 import { displayRoomMessageText } from "../../utils/displayText";
@@ -105,8 +106,11 @@ const LONG_TRANSCRIPT_PREVIEW_LENGTH = 900;
 let evidenceDrawerResizeObserver = null;
 let evidenceDrawerWindowResizeHandler = null;
 let courtLedgerReturnFocus = null;
-const caseId = computed(() => route.params.caseId);
+const mountedCaseId = String(route.params.caseId || "");
+const caseId = computed(() => String(route.params.caseId || mountedCaseId));
+const historyMode = computed(() => route.query.view === "history");
 const shouldDiscoverActiveHearingRuns = computed(() =>
+  !historyMode.value &&
   props.initialMessages === null &&
   props.initialHearing === null &&
   props.initialEvidenceCatalog === null &&
@@ -127,7 +131,9 @@ const effectiveActor = computed(() => {
   };
 });
 const hearingStreamingRuns = computed(() =>
-  activeAgentStreams({
+  historyMode.value
+    ? []
+    : activeAgentStreams({
     caseId: caseId.value,
     roomType: "HEARING",
     actorId: effectiveActor.value.id,
@@ -144,10 +150,19 @@ const visibleHearingStreamingRuns = computed(() =>
   visibleAgentStreams(
     hearingStreamingRuns.value,
     hearingTranscriptMessages.value,
-  ).map((run) => ({
-    ...run,
-    content: sanitizeHearingCopy(run.content),
-  })),
+  ).map((run) => {
+    const cards = Object.fromEntries(
+      Object.entries(run.cards || {}).map(([key, card]) => [
+        key,
+        { ...card, content: sanitizeHearingCopy(card.content) },
+      ]),
+    );
+    return {
+      ...run,
+      cards,
+      content: sanitizeHearingCopy(run.content),
+    };
+  }),
 );
 const isReviewer = computed(() => role.value === "PLATFORM_REVIEWER");
 const rounds = computed(() => hearing.value?.rounds || []);
@@ -316,24 +331,33 @@ const draftReadyForResult = computed(
 );
 const completeHearingHint = computed(
   () =>
+    historyMode.value
+      ? "历史庭审已封存，当前页面仅供浏览。"
+      :
     serverNextStepHint.value ||
-    (serverCanCompleteHearing.value
-      ? "AI 法官已生成裁决草案，可进入结果页查看草案说明。"
+    (serverReviewGateReady.value
+      ? "庭审草案已记录，本庭休庭；平台审核员将在一个工作日内处理。"
+      : serverCanCompleteHearing.value
+      ? "裁决草案已生成，正在移交人工审核。"
       : "三轮陈述封存后，需要等待 AI 法官生成裁决草案。"),
 );
 const completeHearingButtonLabel = computed(() =>
-  serverCanCompleteHearing.value ? "查看裁决草案" : "等待裁决草案",
+  serverCanCompleteHearing.value ? "移交人工审核" : "等待裁决草案",
 );
 const reviewHandoffTitle = computed(() =>
   serverPhaseLabel.value ||
-  (draftReadyForResult.value || serverReviewGateReady.value
-    ? "裁决草案已生成"
+  (serverReviewGateReady.value
+    ? "本庭休庭，等待人工审核"
+    : draftReadyForResult.value
+    ? "裁决草案已生成，正在移交"
     : "三轮陈述已封存，等待裁决草案"),
 );
 const reviewHandoffBody = computed(() =>
   serverNextStepHint.value ||
-  (draftReadyForResult.value || serverReviewGateReady.value
-    ? "AI 法官已生成裁决草案，可进入结果页查看草案说明。"
+  (serverReviewGateReady.value
+    ? "庭审草案已记录，案件已进入人工审核。平台审核员将在一个工作日内完成处理，审核完成后可查看最终结果。"
+    : draftReadyForResult.value
+    ? "AI 法官已生成评审后的裁决草案，系统正在创建人工审核任务。"
     : "本案已经达到三轮陈述上限，双方内容已自动封存。AI 法官会基于庭审记录和证据架输出确定裁决方案草案。"),
 );
 const counterpartyLabel = computed(() =>
@@ -341,6 +365,7 @@ const counterpartyLabel = computed(() =>
 );
 const canSubmitRound = computed(
   () =>
+    !historyMode.value &&
     !loadingState.hearing &&
     !hearingStreamingRuns.value.length &&
     isCaseParty.value &&
@@ -350,6 +375,7 @@ const canSubmitRound = computed(
 );
 const canSubmitStatement = computed(
   () =>
+    !historyMode.value &&
     !loadingState.hearing &&
     !hearingStreamingRuns.value.length &&
     isCaseParty.value &&
@@ -366,6 +392,7 @@ const isActiveRoundTimeOpen = computed(() => {
 });
 const canSupplementEvidence = computed(
   () =>
+    !historyMode.value &&
     !loadingState.hearing &&
     !hearingStreamingRuns.value.length &&
     isCaseParty.value &&
@@ -396,6 +423,21 @@ const evidenceRailProfiles = {
     supplementLabel: "补充商家证据",
   },
 };
+const evidenceFileIconCatalog = {
+  pdf: { kind: "pdf", badge: "PDF", label: "PDF 文档材料" },
+  word: { kind: "word", badge: "DOC", label: "Word 文档材料" },
+  markdown: { kind: "markdown", badge: "MD", label: "Markdown 文档材料" },
+  text: { kind: "text", badge: "TXT", label: "文本材料" },
+  document: { kind: "document", badge: "DOC", label: "文档材料" },
+  image: { kind: "image", badge: "IMG", label: "图片材料" },
+  video: { kind: "video", badge: "VID", label: "视频材料" },
+  other: { kind: "other", badge: "FILE", label: "其他材料" },
+};
+const imageExtensions = new Set(["png", "jpg", "jpeg", "webp", "gif", "bmp", "svg"]);
+const videoExtensions = new Set(["mp4", "mov", "avi", "webm", "mkv", "m4v"]);
+const wordExtensions = new Set(["doc", "docx"]);
+const markdownExtensions = new Set(["md", "markdown"]);
+const textExtensions = new Set(["txt", "csv", "log"]);
 const leftEvidenceRail = computed(() =>
   role.value === "MERCHANT" ? evidenceRailProfiles.merchant : evidenceRailProfiles.user,
 );
@@ -405,6 +447,10 @@ const rightEvidenceRail = computed(() =>
     : evidenceRailProfiles.merchant,
 );
 const evidenceItems = computed(() => evidenceCatalog.value?.items || []);
+const evidenceClerkAgentState = computed(() => {
+  if (loadingState.evidence) return "THINKING";
+  return evidenceItems.value.length ? "HANDOFF" : "LISTENING";
+});
 const leftEvidenceItems = computed(() =>
   evidenceItemsForRole(leftEvidenceRail.value.role),
 );
@@ -583,6 +629,18 @@ const liveTranscriptItems = computed(() =>
     .filter(Boolean),
 );
 const courtTranscriptItems = computed(() => liveTranscriptItems.value);
+const juryAgentState = computed(() => {
+  if (courtTranscriptItems.value.some((item) => item.isFormalJuryReport)) {
+    return "HANDOFF";
+  }
+  if (
+    Number(activeRoundNo.value) >= props.roundLimit &&
+    ["THINKING", "SPEAKING"].includes(agentState.value)
+  ) {
+    return "THINKING";
+  }
+  return "LISTENING";
+});
 const courtLedgerItems = computed(() => {
   const roundItems = rounds.value.map((round) => ({
     id: round.round_id || `round-${round.round_no}`,
@@ -608,11 +666,16 @@ const courtLedgerItems = computed(() => {
 });
 
 const transcriptRoleProfiles = {
-  INTAKE_OFFICER: { type: "intake", speaker: "案情接待官", badge: "案情接待" },
-  EVIDENCE_CLERK: { type: "clerk", speaker: "证据书记官", badge: "证据归档" },
-  JUDGE: { type: "judge", speaker: "主审法官", badge: "法官宣读" },
-  JURY: { type: "jury", speaker: "AI 评审团", badge: "评审团观察" },
-  AI_JURY: { type: "jury", speaker: "AI 评审团", badge: "评审团观察" },
+  INTAKE_OFFICER: { type: "intake", speaker: "案情接待官 · 小衡 正常发言：", badge: "案情接待" },
+  CUSTOMER_SERVICE: { type: "intake", speaker: "案情接待官 · 小衡 正常发言：", badge: "案情接待" },
+  EVIDENCE_CLERK: { type: "clerk", speaker: "证据书记官 · 小册 正常发言：", badge: "证据归档" },
+  JUDGE: { type: "judge", speaker: "主审法官 · 小正 正常发言：", badge: "法官宣读" },
+  AI_JUDGE: { type: "judge", speaker: "主审法官 · 小正 正常发言：", badge: "法官宣读" },
+  PRESIDING_JUDGE: { type: "judge", speaker: "主审法官 · 小正 正常发言：", badge: "法官宣读" },
+  JURY: { type: "jury", speaker: "AI 评审员 · 小察 正常发言：", badge: "评审复核" },
+  AI_JURY: { type: "jury", speaker: "AI 评审员 · 小察 正常发言：", badge: "评审复核" },
+  JURY_PANEL: { type: "jury", speaker: "AI 评审员 · 小察 正常发言：", badge: "评审复核" },
+  SYSTEM: { type: "system", speaker: "系统通知", badge: "流程状态" },
   USER: { type: "user", speaker: "用户陈述", badge: "" },
   MERCHANT: { type: "merchant", speaker: "商家陈述", badge: "" },
 };
@@ -639,7 +702,7 @@ function transcriptBadgeForRole(senderRole) {
 
 // 业务位置：【前端庭审】transcriptBadgeForMessage：围绕 房间消息和对话记录 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function transcriptBadgeForMessage(message) {
-  if (messageType(message) === "JURY_REVIEW_REPORT") return "评审团复核报告";
+  if (messageType(message) === "JURY_REVIEW_REPORT") return "评审复核报告";
   return transcriptBadgeForRole(messageSenderRole(message));
 }
 
@@ -647,7 +710,7 @@ function transcriptBadgeForMessage(message) {
 function transcriptBadgeForItem(item) {
   if (item.badge) return item.badge;
   if (item.type === "judge") return "法官宣读";
-  if (item.type === "jury") return "评审团观察";
+  if (item.type === "jury") return "评审复核";
   return "";
 }
 
@@ -906,7 +969,7 @@ function transcriptTextForMessage(message) {
   if (messageType(message) === "JURY_REVIEW_REPORT") {
     return formatJuryReviewReport(messagePayload(message), rawMessageText(message));
   }
-  const text = sanitizeHearingCopy(displayRoomMessageText(rawMessageText(message)));
+  const text = displayRoomMessageText(sanitizeHearingCopy(rawMessageText(message)));
   if (
     messageSenderRole(message) === "EVIDENCE_CLERK" &&
     /^(证据书记官宣读证据卷宗|已完成证据装卷)/u.test(text)
@@ -992,12 +1055,16 @@ function formatJuryReviewReport(payload, fallbackText = "") {
   if (!payload) {
     return compactReportSection(
       stripTranscriptPreamble(
-        sanitizeHearingCopy(displayRoomMessageText(fallbackText)),
+        displayRoomMessageText(sanitizeHearingCopy(fallbackText)),
       ),
     );
   }
+  const publicMessage = compactReportSection(
+    displayRoomMessageText(sanitizeHearingCopy(payload.public_message || "")),
+  );
+  if (publicMessage) return publicMessage;
   const summary = compactReportSection(
-    sanitizeHearingCopy(displayRoomMessageText(payload.summary || "")),
+    displayRoomMessageText(sanitizeHearingCopy(payload.summary || "")),
   );
   const recommendations = Array.isArray(payload.recommendations)
     ? payload.recommendations
@@ -1006,12 +1073,12 @@ function formatJuryReviewReport(payload, fallbackText = "") {
       : [];
   const conciseRecommendations = uniqueReportItems(
     recommendations.map((item) =>
-      sanitizeHearingCopy(displayRoomMessageText(item)),
+      displayRoomMessageText(sanitizeHearingCopy(item)),
     ),
     [summary],
   ).slice(0, 3);
   const reviewNotes = uniqueReportItems(
-    [sanitizeHearingCopy(displayRoomMessageText(payload.review_notes || ""))],
+    [displayRoomMessageText(sanitizeHearingCopy(payload.review_notes || ""))],
     [summary, ...conciseRecommendations],
   )[0];
   const parts = [summary];
@@ -1019,7 +1086,7 @@ function formatJuryReviewReport(payload, fallbackText = "") {
     parts.push(`复核建议：${conciseRecommendations.join("；")}`);
   }
   if (reviewNotes) parts.push(`补充说明：${reviewNotes}`);
-  return parts.filter(Boolean).join(" ") || "评审团已完成复核，报告已交由法官参考。";
+  return parts.filter(Boolean).join(" ") || "AI 评审员已完成复核，报告已交由法官参考。";
 }
 
 // 业务位置：【前端庭审】stripTranscriptPreamble：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
@@ -1040,15 +1107,6 @@ function transcriptTime(value) {
     minute: "2-digit",
     hour12: false,
   });
-}
-
-// 业务位置：【前端庭审】evidenceTypeLabel：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
-function evidenceTypeLabel(type) {
-  return {
-    image: "图片",
-    video: "视频",
-    text: "文本",
-  }[type] || "文件";
 }
 
 // 业务位置：【前端庭审】evidenceItemsForRole：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
@@ -1187,8 +1245,7 @@ function fileExtension(value) {
   return fileName.slice(lastDotIndex + 1).toLowerCase();
 }
 
-// 业务位置：【前端庭审】evidenceCardType：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
-function evidenceCardType(item) {
+function evidenceFileIcon(item) {
   const extension = fileExtension(
     evidenceOriginalFilename(item) ||
       evidenceField(item, "content_url", "contentUrl", ""),
@@ -1196,18 +1253,27 @@ function evidenceCardType(item) {
   const evidenceType = String(
     evidenceField(item, "evidence_type", "evidenceType", ""),
   ).toUpperCase();
-  if (
-    ["mp4", "mov", "avi", "webm", "mkv", "m4v"].includes(extension) ||
-    evidenceType === "VIDEO"
-  ) {
-    return "video";
+  if (extension === "pdf") return evidenceFileIconCatalog.pdf;
+  if (wordExtensions.has(extension)) return evidenceFileIconCatalog.word;
+  if (markdownExtensions.has(extension)) return evidenceFileIconCatalog.markdown;
+  if (textExtensions.has(extension)) return evidenceFileIconCatalog.text;
+  if (imageExtensions.has(extension) || ["IMAGE", "CHAT_SCREENSHOT"].includes(evidenceType)) {
+    return evidenceFileIconCatalog.image;
   }
-  if (
-    ["png", "jpg", "jpeg", "webp", "gif", "bmp", "svg"].includes(extension) ||
-    ["IMAGE", "CHAT_SCREENSHOT"].includes(evidenceType)
-  ) {
-    return "image";
+  if (videoExtensions.has(extension) || evidenceType === "VIDEO") {
+    return evidenceFileIconCatalog.video;
   }
+  if (["DOCUMENT", "DELIVERY_RECORD", "LOGISTICS_PROOF"].includes(evidenceType)) {
+    return evidenceFileIconCatalog.document;
+  }
+  return evidenceFileIconCatalog.other;
+}
+
+// 业务位置：【前端庭审】evidenceCardType：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
+function evidenceCardType(item) {
+  const kind = evidenceFileIcon(item).kind;
+  if (kind === "video") return "video";
+  if (kind === "image") return "image";
   return "text";
 }
 
@@ -1291,8 +1357,10 @@ function summary(round) {
 // 业务位置：【前端庭审】ledgerRoundText：围绕 庭审轮次和法官发言 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function ledgerRoundText(round) {
   const value = summary(round);
-  return sanitizeHearingCopy(
-    displayRoomMessageText(value.judge || value.clerk || value.jury || "本轮记录已封存。"),
+  return displayRoomMessageText(
+    sanitizeHearingCopy(
+      value.judge || value.clerk || value.jury || "本轮记录已封存。",
+    ),
   );
 }
 
@@ -1304,7 +1372,7 @@ function ledgerItemForMessage(message) {
       id: message.id || `evidence-${message.sequence_no || ""}`,
       title: `第 ${messageRoundNo(message)} 轮补充证据`,
       status: "已入卷",
-      text: sanitizeHearingCopy(displayRoomMessageText(rawMessageText(message))),
+      text: displayRoomMessageText(sanitizeHearingCopy(rawMessageText(message))),
       statusCode: "EVIDENCE_SUPPLEMENT",
       roundNo: messageRoundNo(message),
       sequenceNo: message.sequence_no || message.sequenceNo || 0,
@@ -1321,7 +1389,7 @@ function ledgerItemForMessage(message) {
       id: message.id || `matrix-${message.sequence_no || ""}`,
       title: "证据矩阵更新",
       status: versionText,
-      text: sanitizeHearingCopy(displayRoomMessageText(reason)),
+      text: displayRoomMessageText(sanitizeHearingCopy(reason)),
       statusCode: "EVIDENCE_DOSSIER_REVISED",
       roundNo: messageRoundNo(message),
       sequenceNo: message.sequence_no || message.sequenceNo || 0,
@@ -1331,7 +1399,7 @@ function ledgerItemForMessage(message) {
   if (type === "JURY_REVIEW_REPORT") {
     return {
       id: message.id || `jury-${message.sequence_no || ""}`,
-      title: `第 ${messageRoundNo(message)} 轮评审团复核报告`,
+      title: `第 ${messageRoundNo(message)} 轮评审复核报告`,
       status: "已交法官",
       text: formatJuryReviewReport(messagePayload(message), rawMessageText(message)),
       statusCode: "JURY_REVIEW_REPORT",
@@ -1443,7 +1511,7 @@ function ledgerItemForCaseEvent(event) {
       id: `event-${sequenceNo}`,
       title: "评审团复核完成",
       status: "已交法官",
-      text: "评审团复核报告已通过 A2A 通信交给法官，用于修订或确认裁决草案。",
+      text: "评审复核报告已通过内部协作链路交给法官，用于修订或确认裁决草案。",
       statusCode: type,
       roundNo,
       sequenceNo,
@@ -1454,9 +1522,9 @@ function ledgerItemForCaseEvent(event) {
     return {
       id: `event-${sequenceNo}`,
       title: "裁决草案状态更新",
-      status: sanitizeHearingCopy(displayRoomMessageText(payload.phase_label || "草案已生成")),
-      text: sanitizeHearingCopy(
-        displayRoomMessageText(payload.next_step_hint || "裁决草案已生成，可进入结果页查看。"),
+      status: displayRoomMessageText(sanitizeHearingCopy(payload.phase_label || "草案已生成")),
+      text: displayRoomMessageText(
+        sanitizeHearingCopy(payload.next_step_hint || "裁决草案已生成，可进入结果页查看。"),
       ),
       statusCode: type,
       roundNo,
@@ -1515,6 +1583,7 @@ async function load() {
     if (shouldDiscoverActiveHearingRuns.value) {
       await resumeActiveHearingRuns();
     }
+    return true;
   } catch (failure) {
     loadingState.hearing = false;
     loadingState.evidence = false;
@@ -1522,6 +1591,7 @@ async function load() {
     loadingState.events = false;
     error.value = failure.message;
     agentState.value = "ERROR";
+    return false;
   }
 }
 
@@ -1558,6 +1628,7 @@ function upsertRoomMessage(message) {
 
 // 业务位置：【前端庭审】resumeActiveHearingRuns：执行 庭审轮次和法官发言 对应的业务动作，并将结果交给 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 async function resumeActiveHearingRuns() {
+  if (historyMode.value) return;
   const activeRuns = await loadActiveAgentRuns(
     effectiveActor.value,
     caseId.value,
@@ -1581,7 +1652,7 @@ function hearingAgentPresentation(descriptor) {
   }
   if (operation === "DELIBERATION") {
     return {
-      agentLabel: "陪审团",
+      agentLabel: "AI 评审员",
       senderRole: "JURY_PANEL",
     };
   }
@@ -1616,6 +1687,7 @@ async function consumeHearingAgentRun(result, options = {}) {
 
 // 业务位置：【前端庭审】postMessage：执行 房间消息和对话记录 对应的业务动作，并将结果交给 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 async function postMessage(command) {
+  if (historyMode.value) return null;
   error.value = "";
   agentState.value = "THINKING";
   try {
@@ -1654,6 +1726,7 @@ async function submitStatementInput() {
 
 // 业务位置：【前端庭审】proposeSettlement：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 async function proposeSettlement() {
+  if (historyMode.value) return;
   const text = proposalText.value.trim();
   if (!text) return;
   proposing.value = true;
@@ -1770,7 +1843,7 @@ async function supplementEvidence(event) {
 
 // 业务位置：【前端庭审】submitCurrentRound：执行 庭审轮次和法官发言 对应的业务动作，并将结果交给 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 async function submitCurrentRound() {
-  if (!isCaseParty.value) return;
+  if (historyMode.value || !canSubmitRound.value) return;
   submittingRound.value = true;
   error.value = "";
   agentState.value = "THINKING";
@@ -1829,6 +1902,7 @@ async function submitCurrentRound() {
 
 // 业务位置：【前端庭审】startEventStream：启动或关闭与 Agent 流事件 相关的后台任务或订阅，控制运行资源和生命周期。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function startEventStream() {
+  if (historyMode.value) return;
   const streamer = props.eventStreamer || streamRoomEvents;
   void streamer({
     actor: effectiveActor.value,
@@ -1838,6 +1912,7 @@ function startEventStream() {
     signal: eventAbortController.signal,
     snapshotLoader: refreshHearing,
     applyEvent: async (event) => {
+      if (historyMode.value) return;
       const eventType = roomEventType(event);
       if (eventType === "AGENT_RUN_STARTED") {
         const payload = caseEventPayload(event);
@@ -1881,6 +1956,7 @@ function roomEventType(event) {
 
 // 业务位置：【前端庭审】confirmSettlement：执行 当前阶段业务数据 对应的业务动作，并将结果交给 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 async function confirmSettlement(version) {
+  if (historyMode.value) return;
   confirmingVersion.value = version;
   error.value = "";
   agentState.value = "THINKING";
@@ -1911,7 +1987,7 @@ async function confirmSettlement(version) {
 
 // 业务位置：【前端庭审】completeHearing：执行 庭审轮次和法官发言 对应的业务动作，并将结果交给 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 async function completeHearing() {
-  if (!serverCanCompleteHearing.value) return;
+  if (historyMode.value || !serverCanCompleteHearing.value) return;
   error.value = "";
   agentState.value = "THINKING";
   try {
@@ -1923,7 +1999,8 @@ async function completeHearing() {
       status,
     };
     if (statusAllowsCompletion(status)) {
-      await router.push(`/disputes/${caseId.value}/outcome`);
+      agentState.value = "HANDOFF";
+      await refreshHearing();
       return;
     }
     agentState.value = "HANDOFF";
@@ -1952,15 +2029,36 @@ watch(hearingStreamingRuns, () => {
   void scrollTranscriptToLatest();
 }, { deep: true });
 
+watch(historyMode, (historical) => {
+  if (!historical) {
+    if (
+      props.eventStreamer ||
+      props.initialHearing === null ||
+      props.initialMessages === null
+    ) {
+      startEventStream();
+    }
+    return;
+  }
+  eventAbortController.abort();
+  eventAbortController = new AbortController();
+  clearAgentStreams({ caseId: caseId.value, roomType: "HEARING" });
+  settlementOpen.value = false;
+  submittingRound.value = false;
+  supplementing.value = false;
+  proposing.value = false;
+  confirmingVersion.value = null;
+});
+
 onMounted(async () => {
   window.addEventListener("keydown", handleCourtroomKeydown);
   startEvidenceDrawerBreakpointObserver();
   await load();
-  if (
+  if (!historyMode.value && (
     props.eventStreamer ||
     props.initialHearing === null ||
     props.initialMessages === null
-  ) {
+  )) {
     startEventStream();
   }
 });
@@ -1982,6 +2080,8 @@ onBeforeUnmount(() => {
     subtitle-description="法官将依次核对事实、证据和拟处理方向，庭审完成后进入裁决草案。"
     :case-id="caseId"
     :connection-state="connectionState"
+    :history-mode="historyMode"
+    history-description="庭审已经封存，陈述、补证和流程推进均已锁定；你仍可查看庭审记录与证据卷轴。"
   >
     <template #clock>
       <div data-hearing-countdown>
@@ -2001,11 +2101,11 @@ onBeforeUnmount(() => {
       >
         <DigitalHuman
           data-court-agent-card="jury-a"
-          state="THINKING"
+          :state="juryAgentState"
           name="小察"
-          role="AI 评审团"
+          role="AI 评审员"
           portrait-variant="jury-a"
-          message="关注事实完整性、证据冲突和风险信号。"
+          message="统一复核事实、证据、规则、程序公平、方案可行性与遗漏风险。"
         />
         <DigitalHuman
           data-court-agent-card="judge"
@@ -2015,12 +2115,11 @@ onBeforeUnmount(() => {
           message="主持三轮陈述，第三轮后生成非最终裁决草案。"
         />
         <DigitalHuman
-          data-court-agent-card="jury-b"
-          state="LISTENING"
-          name="小律"
-          role="AI 评审团"
-          portrait-variant="jury-b"
-          message="关注裁决草案是否符合规则与双方可接受度。"
+          data-court-agent-card="evidence-clerk"
+          :state="evidenceClerkAgentState"
+          name="小册"
+          role="证据书记官"
+          message="核验双方证据来源、完整性与证明力，并维护庭审证据卷宗。"
         />
       </section>
     </template>
@@ -2105,9 +2204,21 @@ onBeforeUnmount(() => {
             class="evidence-file-card"
             :class="`evidence-file-card--${evidenceCardTone(item)}`"
           >
-            <i class="evidence-file-card__icon" :data-type="evidenceCardType(item)">
-              {{ evidenceTypeLabel(evidenceCardType(item)) }}
-            </i>
+            <span
+              class="evidence-file-card__icon evidence-file-icon evidence-file-icon--submitted"
+              :data-file-kind="evidenceFileIcon(item).kind"
+              :aria-label="evidenceFileIcon(item).label"
+              data-hearing-evidence-icon
+            >
+              <span class="evidence-file-icon__body" aria-hidden="true">
+                <span class="evidence-file-icon__landscape"></span>
+                <span class="evidence-file-icon__play"></span>
+                <span class="evidence-file-icon__lines"></span>
+              </span>
+              <span class="evidence-file-icon__badge" data-file-badge>
+                {{ evidenceFileIcon(item).badge }}
+              </span>
+            </span>
             <div>
               <strong :title="evidenceFilename(item)">{{ evidenceFilename(item) }}</strong>
               <small>{{ evidenceTypeCopy(item) }} · {{ evidenceSubmissionStatusLabel(item) }}</small>
@@ -2230,7 +2341,7 @@ onBeforeUnmount(() => {
                 <strong>
                   <small v-if="transcriptBadgeForItem(item)">{{ transcriptBadgeForItem(item) }}</small>
                   {{ item.speaker }}
-                  <span v-if="item.type === 'jury'" class="court-message__jury-tags" aria-label="评审团辅助指标">
+                  <span v-if="item.type === 'jury'" class="court-message__jury-tags" aria-label="评审辅助指标">
                     <span>风险等级</span>
                     <em>{{ item.riskLevel }}</em>
                     <span>可信分</span>
@@ -2252,13 +2363,16 @@ onBeforeUnmount(() => {
               </button>
             </article>
 
-            <AgentStreamingMessage
-              v-for="run in visibleHearingStreamingRuns"
-              :key="run.runId"
-              :run="run"
-              :label="run.agentLabel"
-              appearance="court"
-            />
+            <template v-for="run in visibleHearingStreamingRuns" :key="run.runId">
+              <AgentStreamingMessage
+                v-for="card in streamCardsForRun(run)"
+                :key="`${run.runId}:${card.key}`"
+                :run="run"
+                :card="card"
+                :label="run.agentLabel"
+                appearance="court"
+              />
+            </template>
 
             <div
               v-if="loadingState.messages"
@@ -2299,14 +2413,25 @@ onBeforeUnmount(() => {
               </div>
             </header>
             <div
-              v-if="reviewHandoffVisible"
+              v-if="historyMode"
+              class="round-input-bar__final-status"
+              data-hearing-history-locked
+            >
+              <span>🔒</span>
+              <div>
+                <strong>历史庭审已锁定</strong>
+                <small>这里只保留当时的陈述、证据和法官记录，不能再次提交或补证。</small>
+              </div>
+            </div>
+            <div
+              v-else-if="reviewHandoffVisible"
               class="round-input-bar__final-status"
               data-round-input-final-status
             >
               <span>🔒</span>
               <div>
-                <strong>庭审已封存，等待裁决草案</strong>
-                <small>当前输入区已锁定，可在右侧查看裁决草案入口状态。</small>
+                <strong>{{ reviewHandoffTitle }}</strong>
+                <small>{{ reviewHandoffBody }}</small>
               </div>
             </div>
             <div
@@ -2402,9 +2527,21 @@ onBeforeUnmount(() => {
               class="evidence-file-card"
               :class="`evidence-file-card--${evidenceCardTone(item)}`"
             >
-              <i class="evidence-file-card__icon" :data-type="evidenceCardType(item)">
-                {{ evidenceTypeLabel(evidenceCardType(item)) }}
-              </i>
+              <span
+                class="evidence-file-card__icon evidence-file-icon evidence-file-icon--submitted"
+                :data-file-kind="evidenceFileIcon(item).kind"
+                :aria-label="evidenceFileIcon(item).label"
+                data-hearing-evidence-icon
+              >
+                <span class="evidence-file-icon__body" aria-hidden="true">
+                  <span class="evidence-file-icon__landscape"></span>
+                  <span class="evidence-file-icon__play"></span>
+                  <span class="evidence-file-icon__lines"></span>
+                </span>
+                <span class="evidence-file-icon__badge" data-file-badge>
+                  {{ evidenceFileIcon(item).badge }}
+                </span>
+              </span>
               <div>
                 <strong :title="evidenceFilename(item)">{{ evidenceFilename(item) }}</strong>
                 <small>{{ evidenceTypeCopy(item) }} · {{ evidenceSubmissionStatusLabel(item) }}</small>
@@ -2448,15 +2585,23 @@ onBeforeUnmount(() => {
             {{ completeHearingHint }}
           </small>
           <button
+            v-if="!serverReviewGateReady"
             type="button"
             class="evidence-complete-button"
             data-complete-hearing
-            :disabled="!serverCanCompleteHearing"
+            :disabled="historyMode || !serverCanCompleteHearing"
             :title="completeHearingHint"
             @click="completeHearing"
           >
             {{ completeHearingButtonLabel }}
           </button>
+          <div
+            v-else
+            class="evidence-complete-button evidence-complete-button--waiting"
+            data-hearing-awaiting-review
+          >
+            等待人工审核
+          </div>
         </div>
       </div>
     </main>
@@ -2539,8 +2684,9 @@ onBeforeUnmount(() => {
 .court-agent-strip :deep(.digital-human[data-court-agent-card="jury-a"]) {
   background: linear-gradient(145deg, #ffffff, #f5f0ff 58%, #f8fbff);
 }
-.court-agent-strip :deep(.digital-human[data-court-agent-card="jury-b"]) {
-  background: linear-gradient(145deg, #ffffff, #effff9 52%, #f8f2ff);
+.court-agent-strip :deep(.digital-human[data-court-agent-card="evidence-clerk"]) {
+  background: linear-gradient(145deg, #f7fffc, #eef8ff 58%, #f7f4ff);
+  border-color: #cfe7e1;
 }
 .court-agent-strip :deep(.digital-human__identity) {
   display: grid;
@@ -2648,7 +2794,7 @@ onBeforeUnmount(() => {
   position: relative;
   display: flex;
   justify-content: space-between;
-  gap: 12px;
+  gap: 8px;
   align-items: flex-start;
   min-width: 0;
   min-height: 0;
@@ -2672,6 +2818,12 @@ onBeforeUnmount(() => {
   margin: 5px 0 4px;
   color: #30415c;
 }
+.party-evidence-rail__header h2 {
+  font-size: 20px;
+  letter-spacing: 0;
+  line-height: 1.2;
+  white-space: nowrap;
+}
 .party-evidence-rail__header p {
   margin: 0;
   color: #8996a8;
@@ -2680,12 +2832,12 @@ onBeforeUnmount(() => {
 }
 .party-evidence-rail__header b {
   flex: 0 0 auto;
-  padding: 7px 13px;
+  padding: 7px 10px;
   color: #53619a;
   background: #edf7ff;
   border: 1px solid #cfe8f7;
   border-radius: 999px;
-  font-size: 11px;
+  font-size: 10px;
   white-space: nowrap;
 }
 .party-evidence-rail--merchant .party-evidence-rail__header b {
@@ -2768,30 +2920,142 @@ onBeforeUnmount(() => {
 .evidence-file-card--gold::before { background: #f6bf62; }
 .evidence-file-card--mint::before { background: #78d9bd; }
 .evidence-file-card__icon {
+  position: relative;
   display: grid;
   width: 42px;
-  height: 42px;
+  height: 44px;
   place-items: center;
-  color: transparent;
-  background: #eaf8ff;
-  border-radius: 14px;
-  font-style: normal;
+  overflow: visible;
+  background: linear-gradient(145deg, var(--file-tint, #f4f7fb), #fff);
+  border: 1px solid var(--file-border, #dbe5f1);
+  border-radius: 15px;
+  box-shadow: inset 0 1px 0 #ffffffd9, 0 8px 18px #5b749014;
 }
-.evidence-file-card__icon::before {
-  color: #17a8e6;
-  font-size: 13px;
+.evidence-file-icon[data-file-kind="pdf"] {
+  --file-accent: #e86d54;
+  --file-tint: #fff0ec;
+  --file-border: #ffd0c6;
+}
+.evidence-file-icon[data-file-kind="word"] {
+  --file-accent: #4d83df;
+  --file-tint: #edf5ff;
+  --file-border: #caddff;
+}
+.evidence-file-icon[data-file-kind="markdown"],
+.evidence-file-icon[data-file-kind="text"],
+.evidence-file-icon[data-file-kind="document"] {
+  --file-accent: #7766d8;
+  --file-tint: #f2efff;
+  --file-border: #ddd6ff;
+}
+.evidence-file-icon[data-file-kind="image"] {
+  --file-accent: #30a99b;
+  --file-tint: #eafbf6;
+  --file-border: #bfeee2;
+}
+.evidence-file-icon[data-file-kind="video"] {
+  --file-accent: #d56a9c;
+  --file-tint: #fff0f7;
+  --file-border: #ffd0e3;
+}
+.evidence-file-icon[data-file-kind="other"] {
+  --file-accent: #7890aa;
+  --file-tint: #f3f7fb;
+  --file-border: #dbe5ef;
+}
+.evidence-file-icon__body {
+  position: relative;
+  display: grid;
+  width: 25px;
+  height: 30px;
+  overflow: hidden;
+  place-items: center;
+  background: #fff;
+  border: 1px solid color-mix(in srgb, var(--file-accent, #7890aa) 28%, #ffffff);
+  border-radius: 7px 7px 8px 8px;
+}
+.evidence-file-icon__body::before {
+  position: absolute;
+  top: -1px;
+  right: -1px;
+  width: 9px;
+  height: 9px;
+  content: "";
+  background: linear-gradient(135deg, #ffffff 0 48%, var(--file-accent, #7890aa) 50% 100%);
+  border-left: 1px solid color-mix(in srgb, var(--file-accent, #7890aa) 24%, #ffffff);
+  border-bottom: 1px solid color-mix(in srgb, var(--file-accent, #7890aa) 24%, #ffffff);
+  border-radius: 0 0 0 4px;
+}
+.evidence-file-icon__lines {
+  display: grid;
+  width: 14px;
+  height: 12px;
+  gap: 3px;
+}
+.evidence-file-icon__lines::before,
+.evidence-file-icon__lines::after {
+  display: block;
+  height: 2px;
+  content: "";
+  background: color-mix(in srgb, var(--file-accent, #7890aa) 70%, #ffffff);
+  border-radius: 999px;
+}
+.evidence-file-icon__landscape,
+.evidence-file-icon__play {
+  display: none;
+}
+.evidence-file-icon[data-file-kind="image"] .evidence-file-icon__body,
+.evidence-file-icon[data-file-kind="video"] .evidence-file-icon__body {
+  width: 28px;
+  height: 24px;
+  border-radius: 8px;
+}
+.evidence-file-icon[data-file-kind="image"] .evidence-file-icon__body::before,
+.evidence-file-icon[data-file-kind="video"] .evidence-file-icon__body::before {
+  display: none;
+}
+.evidence-file-icon[data-file-kind="image"] .evidence-file-icon__lines,
+.evidence-file-icon[data-file-kind="video"] .evidence-file-icon__lines {
+  display: none;
+}
+.evidence-file-icon[data-file-kind="image"] .evidence-file-icon__landscape {
+  position: absolute;
+  inset: 5px;
+  display: block;
+  background:
+    radial-gradient(circle at 78% 25%, #ffd36f 0 3px, transparent 4px),
+    linear-gradient(135deg, transparent 48%, color-mix(in srgb, var(--file-accent) 78%, #ffffff) 49% 72%, transparent 73%),
+    linear-gradient(45deg, transparent 34%, color-mix(in srgb, var(--file-accent) 55%, #ffffff) 35% 62%, transparent 63%);
+  border-radius: 5px;
+}
+.evidence-file-icon[data-file-kind="video"] .evidence-file-icon__body {
+  background:
+    repeating-linear-gradient(90deg, #ffffff 0 5px, color-mix(in srgb, var(--file-accent) 12%, #ffffff) 5px 8px),
+    #fff;
+}
+.evidence-file-icon[data-file-kind="video"] .evidence-file-icon__play {
+  display: block;
+  width: 0;
+  height: 0;
+  margin-left: 2px;
+  border-top: 6px solid transparent;
+  border-bottom: 6px solid transparent;
+  border-left: 10px solid var(--file-accent, #d56a9c);
+}
+.evidence-file-icon__badge {
+  position: absolute;
+  right: -4px;
+  bottom: -4px;
+  padding: 2px 4px;
+  color: #fff;
+  background: var(--file-accent, #7890aa);
+  border: 1px solid #ffffffd9;
+  border-radius: 7px;
+  box-shadow: 0 4px 10px #33435c1a;
+  font-size: 8px;
   font-weight: 900;
-  content: attr(data-type);
-}
-.evidence-file-card__icon[data-type="text"] { background: #f5f2ff; }
-.evidence-file-card__icon[data-type="text"]::before { color: #7f70dd; content: "TXT"; }
-.evidence-file-card__icon[data-type="image"]::before { content: "IMG"; }
-.evidence-file-card__icon[data-type="video"] {
-  background: #fff4e5;
-}
-.evidence-file-card__icon[data-type="video"]::before {
-  color: #bd7b15;
-  content: "VID";
+  letter-spacing: 0;
+  line-height: 1;
 }
 .evidence-file-card strong {
   display: block;
@@ -2829,15 +3093,10 @@ onBeforeUnmount(() => {
   background: #f4fbff;
 }
 .party-evidence-rail--right .evidence-file-card {
-  grid-template-columns: 40px minmax(0, 1fr);
+  grid-template-columns: 46px minmax(0, 1fr);
   gap: 10px;
   min-height: 78px;
   padding: 8px 9px 8px 12px;
-}
-.party-evidence-rail--right .evidence-file-card__icon {
-  width: 38px;
-  height: 38px;
-  border-radius: 13px;
 }
 .party-evidence-rail--right .evidence-file-card small {
   margin-top: 3px;
@@ -2930,6 +3189,13 @@ onBeforeUnmount(() => {
   background: #eef4f8;
   box-shadow: none;
   cursor: not-allowed;
+}
+.evidence-complete-button--waiting {
+  color: #39755f;
+  background: #e9f7f1;
+  border-color: #c9e8db;
+  box-shadow: none;
+  cursor: default;
 }
 .hearing-side-actions__hint {
   position: absolute;
@@ -3474,6 +3740,17 @@ onBeforeUnmount(() => {
   cursor: pointer;
   font-size: 11px;
   font-weight: 900;
+}
+.court-message--system {
+  justify-self: center;
+  width: min(88%, 760px);
+  background: linear-gradient(135deg, #f5fbf8, #edf7f3);
+  border-color: #cce5da;
+  box-shadow: 0 10px 24px #4b8f7112;
+}
+.court-message--system header strong,
+.court-message--system p {
+  color: #386b57;
 }
 .court-message--judge {
   align-self: center;
@@ -4183,9 +4460,20 @@ onBeforeUnmount(() => {
     padding-top: 56px;
   }
 }
+@media (max-width: 1050px) {
+  .court-agent-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .court-agent-strip :deep(.digital-human[data-court-agent-card="evidence-clerk"]) {
+    grid-column: 1 / -1;
+  }
+}
 @media (max-width: 680px) {
   .court-agent-strip {
     grid-template-columns: 1fr;
+  }
+  .court-agent-strip :deep(.digital-human[data-court-agent-card="evidence-clerk"]) {
+    grid-column: auto;
   }
   .hearing-stage-dock {
     padding-right: 10px;

@@ -46,7 +46,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.time.DayOfWeek;
 import java.time.OffsetDateTime;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.HexFormat;
@@ -85,7 +87,8 @@ public class ReviewApplicationService {
     private final ObjectMapper objectMapper;
     private final TransactionTemplate transactions;
     private final ApprovalPolicyEngine policyEngine;
-    private final int reviewTimeoutHours;
+    private final int packetExpiryHours;
+    private final int reviewDueBusinessDays;
 
     // 所属模块：【平台人工终审 / 应用编排层】「ReviewApplicationService.ReviewApplicationService(FulfillmentCaseRepository,RemedyPlanRepository,AdjudicationDraftRepository,HearingStateRepository,EvidenceDossierRepository,ReviewPacketRepository,ReviewTaskRepository,ApprovalRecordRepository,DeliberationReportRepository,ApprovalPolicyDecisionRepository,CaseLifecycleNotificationService,AuditRecorder,PostReviewOrchestrationService,ObjectMapper,TransactionTemplate,BigDecimal,BigDecimal,int)」。
     // 具体功能：「ReviewApplicationService.ReviewApplicationService(FulfillmentCaseRepository,RemedyPlanRepository,AdjudicationDraftRepository,HearingStateRepository,EvidenceDossierRepository,ReviewPacketRepository,ReviewTaskRepository,ApprovalRecordRepository,DeliberationReportRepository,ApprovalPolicyDecisionRepository,CaseLifecycleNotificationService,AuditRecorder,PostReviewOrchestrationService,ObjectMapper,TransactionTemplate,BigDecimal,BigDecimal,int)」：通过构造器接收 「caseRepository」(FulfillmentCaseRepository)、「planRepository」(RemedyPlanRepository)、「draftRepository」(AdjudicationDraftRepository)、「hearingRepository」(HearingStateRepository)、「dossierRepository」(EvidenceDossierRepository)、「packetRepository」(ReviewPacketRepository)、「taskRepository」(ReviewTaskRepository)、「approvalRepository」(ApprovalRecordRepository)、「deliberationRepository」(DeliberationReportRepository)、「policyDecisionRepository」(ApprovalPolicyDecisionRepository)、「lifecycleNotifications」(CaseLifecycleNotificationService)、「auditRecorder」(AuditRecorder)、「postReviewOrchestration」(PostReviewOrchestrationService)、「objectMapper」(ObjectMapper)、「transactions」(TransactionTemplate)、「refundThreshold」(BigDecimal)、「reshipThreshold」(BigDecimal)、「reviewTimeoutHours」(int) 并保存为「ReviewApplicationService」的协作依赖；这里只完成依赖装配，不提前访问数据库或外部服务。
@@ -111,7 +114,8 @@ public class ReviewApplicationService {
             TransactionTemplate transactions,
             @Value("${app.approval.refund-threshold:500.00}") BigDecimal refundThreshold,
             @Value("${app.approval.reship-threshold:300.00}") BigDecimal reshipThreshold,
-            @Value("${app.approval.review-timeout-hours:168}") int reviewTimeoutHours) {
+            @Value("${app.approval.packet-expiry-hours:168}") int packetExpiryHours,
+            @Value("${app.approval.review-due-business-days:1}") int reviewDueBusinessDays) {
         this.caseRepository=caseRepository; this.planRepository=planRepository;
         this.draftRepository=draftRepository; this.hearingRepository=hearingRepository;
         this.dossierRepository=dossierRepository;
@@ -124,7 +128,8 @@ public class ReviewApplicationService {
         this.postReviewOrchestration=postReviewOrchestration; this.objectMapper=objectMapper;
         this.transactions=transactions;
         this.policyEngine=new ApprovalPolicyEngine(refundThreshold,reshipThreshold);
-        this.reviewTimeoutHours=reviewTimeoutHours;
+        this.packetExpiryHours=packetExpiryHours;
+        this.reviewDueBusinessDays=Math.max(1,reviewDueBusinessDays);
     }
 
     // 所属模块：【平台人工终审 / 应用编排层】「ReviewApplicationService.createForWorkflow(String,String)」。
@@ -203,7 +208,7 @@ public class ReviewApplicationService {
                         "presiding-judge-v1"),
                 actionHash,
                 frozenAt,
-                frozenAt.plusHours(reviewTimeoutHours),
+                frozenAt.plusHours(packetExpiryHours),
                 write(
                         draft == null || draft.getCreatedByAgentRunId() == null
                                 ? List.of()
@@ -227,7 +232,7 @@ public class ReviewApplicationService {
         ReviewTaskEntity task=taskRepository.save(ReviewTaskEntity.pendingAssigned(
                 "REVIEW_"+id(),caseId,planId,packet.getId(),policy.priority(),policy.requiredRole(),
                 PlatformReviewerAuthorization.SYSTEM_REVIEWER_ID,
-                OffsetDateTime.now(ZoneOffset.UTC).plusHours(reviewTimeoutHours),SYSTEM.actorId()));
+                nextBusinessDay(frozenAt,reviewDueBusinessDays),SYSTEM.actorId()));
         disputeCase.waitForHumanReview(SYSTEM.actorId()); caseRepository.save(disputeCase);
         auditRecorder.record(SYSTEM,"REVIEW_TASK_CREATED","REVIEW_TASK",task.getId(),caseId,Map.of(),
                 Map.of("priority",policy.priority(),"required_approvals",policy.requiredApprovals(),"risk_flags",policy.riskFlags()));
@@ -245,6 +250,33 @@ public class ReviewApplicationService {
     public List<ReviewTaskView> list(ReviewTaskStatus status,AuthenticatedActor actor){
         assertCanView(actor);
         return taskRepository.findAllByTaskStatusOrderByCreatedAtAsc(status).stream().map(this::view).toList();
+    }
+    @Transactional
+    public ReviewTaskView start(String taskId, AuthenticatedActor actor) {
+        PlatformReviewerAuthorization.requireDecisionAccess(actor);
+        ReviewTaskEntity task =
+                taskRepository
+                        .findByIdForUpdate(taskId)
+                        .orElseThrow(() -> notFound("review task", taskId));
+        FulfillmentCaseEntity disputeCase =
+                caseRepository
+                        .findByIdForUpdate(task.getCaseId())
+                        .orElseThrow(() -> notFound("case", task.getCaseId()));
+        String previousTaskStatus = task.getTaskStatus().name();
+        String previousRoom = Objects.toString(disputeCase.getCurrentRoom(), "");
+        task.startReview(actor.actorId());
+        disputeCase.enterHumanReview(actor.actorId());
+        taskRepository.save(task);
+        caseRepository.save(disputeCase);
+        auditRecorder.record(
+                actor,
+                "REVIEW_STARTED",
+                "REVIEW_TASK",
+                task.getId(),
+                task.getCaseId(),
+                Map.of("task_status", previousTaskStatus, "current_room", previousRoom),
+                Map.of("task_status", "IN_REVIEW", "current_room", "REVIEW"));
+        return view(task);
     }
 
     // 所属模块：【平台人工终审 / 应用编排层】「ReviewApplicationService.packet(String,AuthenticatedActor)」。
@@ -429,6 +461,23 @@ public class ReviewApplicationService {
     // 下游影响：「ReviewApplicationService.isOpen(ReviewTaskStatus)」只产生当前对象的返回值或字段变化，不访问额外基础设施；计算结果以「boolean」交给调用方。
     // 系统意义：「ReviewApplicationService.isOpen(ReviewTaskStatus)」负责主链路中的“Open”；最终决定权属于具备平台审核角色的人；过期、改版或哈希不一致的审批必须失效
     private static boolean isOpen(ReviewTaskStatus status){return status==ReviewTaskStatus.PENDING||status==ReviewTaskStatus.ASSIGNED||status==ReviewTaskStatus.IN_REVIEW;}
+
+    private static OffsetDateTime nextBusinessDay(
+            OffsetDateTime createdAt, int businessDays) {
+        OffsetDateTime dueAt =
+                createdAt
+                        .atZoneSameInstant(ZoneId.of("Asia/Shanghai"))
+                        .toOffsetDateTime();
+        int remaining = businessDays;
+        while (remaining > 0) {
+            dueAt = dueAt.plusDays(1);
+            DayOfWeek day = dueAt.getDayOfWeek();
+            if (day != DayOfWeek.SATURDAY && day != DayOfWeek.SUNDAY) {
+                remaining--;
+            }
+        }
+        return dueAt.withOffsetSameInstant(ZoneOffset.UTC);
+    }
     // 所属模块：【平台人工终审 / 应用编排层】「ReviewApplicationService.assertCanView(AuthenticatedActor)」。
     // 具体功能：「ReviewApplicationService.assertCanView(AuthenticatedActor)」：断言Can视图；实际协作者为 「actor.role」；不满足前置条件时抛出 「ForbiddenException」，最终返回「void」。
     // 上游调用：「ReviewApplicationService.assertCanView(AuthenticatedActor)」的上游调用点包括 「ReviewApplicationService.list」、「ReviewApplicationService.packet」。

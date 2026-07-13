@@ -98,6 +98,10 @@ class PromptComposer:
             "deliberation_panel",
             "fairness_critic.md",
         ),
+        "jury_review": PromptTemplateRef(
+            "deliberation_panel",
+            "jury_review.md",
+        ),
         "review_copilot": PromptTemplateRef(
             "review_copilot",
             "review_copilot.md",

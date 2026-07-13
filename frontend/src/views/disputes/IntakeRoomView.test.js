@@ -127,7 +127,11 @@ async function mountInteractiveView(options = {}) {
       { path: "/disputes/:caseId/evidence", component: { template: "<div />" } },
     ],
   });
-  await router.push("/disputes/CASE_INTAKE_1/intake");
+  await router.push(
+    options.historyMode
+      ? "/disputes/CASE_INTAKE_1/intake?view=history"
+      : "/disputes/CASE_INTAKE_1/intake",
+  );
   await router.isReady();
   const wrapper = mount(IntakeRoomView, {
     props: {
@@ -142,6 +146,7 @@ async function mountInteractiveView(options = {}) {
       turnMemoryLoader: options.turnMemoryLoader,
       confirmAction: options.confirmAction || vi.fn(),
       cancelAction: options.cancelAction,
+      eventStreamer: options.eventStreamer,
       modelHealthLoader: options.modelHealthLoader || connectedModelHealth,
     },
     global: { plugins: [router] },
@@ -161,6 +166,30 @@ describe("IntakeRoomView", () => {
 
   afterEach(() => {
     clearAgentStreams({}, { abort: true });
+  });
+
+  it("renders completed intake as history and blocks every write path", async () => {
+    const postMessageAction = vi.fn();
+    const confirmAction = vi.fn();
+    const cancelAction = vi.fn();
+    const eventStreamer = vi.fn();
+    const wrapper = await mountInteractiveView({
+      historyMode: true,
+      postMessageAction,
+      confirmAction,
+      cancelAction,
+      eventStreamer,
+    });
+
+    expect(wrapper.get("[data-room-history-banner]").text()).toContain("历史浏览模式");
+    expect(wrapper.find(".conversation-stream__composer").exists()).toBe(false);
+    expect(wrapper.get("[data-intake-history-actions]").text()).toContain("历史接待已锁定");
+    expect(wrapper.find("[data-confirm-admission]").exists()).toBe(false);
+    expect(wrapper.find("[data-resolve-without-dispute]").exists()).toBe(false);
+    expect(postMessageAction).not.toHaveBeenCalled();
+    expect(confirmAction).not.toHaveBeenCalled();
+    expect(cancelAction).not.toHaveBeenCalled();
+    expect(eventStreamer).not.toHaveBeenCalled();
   });
 
   // 业务位置：【前端接待室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。

@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from app.agents.presiding_judge.round_workflow import HearingRoundTurnWorkflow
 from app.harness.prompt_composer import PromptRepository
-from app.schemas import HearingRoundTurnRequest, HearingRoundTurnResult
+from app.schemas import (
+    HearingRoundTurnRequest,
+    HearingRoundTurnResult,
+    JuryReviewDimension,
+    JuryReviewFinding,
+    JuryReviewReport,
+)
 
 
 class FakeRoundModelRunner:
@@ -41,7 +47,27 @@ class FakeRoundModelRunner:
             }
         )
 
-        generated = self.generated or output_type(
+        if node_name == "jury_review":
+            generated = JuryReviewReport(
+                public_message="本次 V1 已完成六维复核，法官形成 V2 时应逐项回应签收核验风险。",
+                reviewed_proposal=case_data["reviewed_proposal"],
+                summary="统一评审员已完成六项非最终复核。",
+                risk_level="MEDIUM",
+                confidence_score=82,
+                findings=[
+                    JuryReviewFinding(
+                        dimension=dimension,
+                        severity="LOW",
+                        assessment=f"已复核{dimension.value}。",
+                        basis=["基于冻结庭审材料。"],
+                    )
+                    for dimension in JuryReviewDimension
+                ],
+                recommendations=["法官草案应逐项回应第三轮复核方向。"],
+                review_notes="评审意见只补充风险和遗漏，不构成最终裁决。",
+            )
+        else:
+            generated = self.generated or output_type(
             speaker_role="JUDGE",
             message_text="第一轮事实陈述已封存。第二轮请用户补充签收现场情况，请商家补充物流交接记录。",
             round_summary="双方第一轮围绕物流显示签收但用户称未收到包裹展开陈述。",
@@ -53,7 +79,7 @@ class FakeRoundModelRunner:
             final_draft_required=False,
             prompt_version="hearing-round-turn-v1",
             model="fake-round-model",
-        )
+            )
 
         class Generation:
             value = generated
@@ -292,17 +318,23 @@ def test_open_round_is_guarded_as_judge_opening_instead_of_sealed_turn() -> None
 # 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `request`。
 # 系统意义：固定“Agent 角色能力 > test_presiding_judge_round_turn”的可观察契约，防止后续重构改变业务结果。
 def test_final_round_is_guarded_to_final_draft_path() -> None:
+    proposal = (
+        "非最终拟处理方案 V1：在人工核验签收人身份和投递位置后，"
+        "若无法证明用户本人收货，建议支持退款；否则维持履约完成判断"
+    )
     runner = FakeRoundModelRunner(
         generated=HearingRoundTurnResult(
             speaker_role="JUDGE",
-            message_text="第三轮之后还需要双方继续补充更多材料。",
-            round_summary="模型误把第三轮当成中间轮。",
-            questions_for_user=["继续补充。"],
-            questions_for_merchant=["继续补充。"],
-            court_event_type="JUDGE_NEXT_QUESTIONS_READY",
+            message_text=(
+                f"第三轮陈述已封存。本庭提出{proposal}。"
+                "该非最终方案现在交由统一 AI 评审员复核。"
+            ),
+            round_summary="第三轮已封存，法官形成评审前拟处理方案 V1。",
+            court_event_type="FINAL_DRAFT_REQUIRED",
             round_no=3,
             next_round_no=None,
-            final_draft_required=False,
+            final_draft_required=True,
+            final_proposed_resolution=proposal,
             prompt_version="hearing-round-turn-v1",
             model="fake-round-model",
         )
@@ -318,10 +350,16 @@ def test_final_round_is_guarded_to_final_draft_path() -> None:
     assert result.final_draft_required is True
     assert result.questions_for_user == []
     assert result.questions_for_merchant == []
-    assert "非最终裁决草案" in result.message_text
-    assert "后续确认" in result.message_text
+    assert proposal in result.message_text
+    assert result.final_proposed_resolution == proposal
+    assert "评审" in result.message_text
     assert "平台审核员" not in result.message_text
     assert "终审" not in result.message_text
+    assert result.jury_review_report is not None
+    assert result.jury_review_report.reviewed_proposal == proposal
+    assert {item.dimension for item in result.jury_review_report.findings} == set(
+        JuryReviewDimension
+    )
 
 
 # 所属模块：Agent 角色能力 > test_presiding_judge_round_turn；函数角色：回归测试用例。
@@ -329,15 +367,20 @@ def test_final_round_is_guarded_to_final_draft_path() -> None:
 # 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `request`。
 # 系统意义：固定“Agent 角色能力 > test_presiding_judge_round_turn”的可观察契约，防止后续重构改变业务结果。
 def test_final_round_party_opinions_become_review_focus_signal() -> None:
+    proposal = "非最终拟处理方案 V1：建议在人工复核签收证据后决定是否支持退款"
     runner = FakeRoundModelRunner(
         generated=HearingRoundTurnResult(
             speaker_role="JUDGE",
-            message_text="第三轮陈述已封存，AI 法官将生成非最终裁决草案。",
+            message_text=(
+                f"第三轮陈述已封存。本庭提出{proposal}。"
+                "该非最终方案现在交由统一 AI 评审员复核。"
+            ),
             round_summary="第三轮双方围绕拟处理方向表达确认和异议。",
             court_event_type="FINAL_DRAFT_REQUIRED",
             round_no=3,
             next_round_no=None,
             final_draft_required=True,
+            final_proposed_resolution=proposal,
             prompt_version="hearing-round-turn-v1",
             model="fake-round-model",
         )
@@ -369,5 +412,5 @@ def test_final_round_party_opinions_become_review_focus_signal() -> None:
         "用户认可退款方向，但要求复核签收人身份是否已核验清楚。",
         "商家不同意退款，主张物流签收记录足以证明已履约。",
     ]
-    assert "非最终裁决草案" in result.message_text
+    assert proposal in result.message_text
     assert "直接采纳用户意见" not in result.message_text

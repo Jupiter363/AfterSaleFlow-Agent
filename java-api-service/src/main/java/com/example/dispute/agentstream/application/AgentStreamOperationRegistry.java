@@ -101,7 +101,9 @@ public class AgentStreamOperationRegistry {
                 "/internal/agents/hearing/round-turn/stream",
                 "PRESIDING_JUDGE",
                 "hearing_round_turn",
-                Set.of("message_text"));
+                Set.of(
+                        "message_text",
+                        "jury_review_report.public_message"));
         register(
                 values,
                 "HEARING_STAGE",

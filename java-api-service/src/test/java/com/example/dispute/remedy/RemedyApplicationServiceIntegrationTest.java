@@ -7,6 +7,7 @@
 package com.example.dispute.remedy;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.dispute.common.audit.AuditRecorder;
 import com.example.dispute.config.ActorRole;
@@ -30,6 +31,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import jakarta.persistence.EntityManager;
 import java.math.BigDecimal;
+import java.time.OffsetDateTime;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
@@ -199,6 +201,81 @@ class RemedyApplicationServiceIntegrationTest {
                         disputeCase ->
                                 assertThat(disputeCase.getCaseStatus())
                                         .isEqualTo(CaseStatus.REMEDY_PLANNED));
+    }
+
+    @Test
+    void openHearingRecoveryAttachesWorkflowBeforeRemedyPlanning() {
+        String caseId = "CASE_open_hearing_remedy_recovery";
+        String workflowId = "hearing-window-" + caseId;
+        FulfillmentCaseEntity disputeCase =
+                FulfillmentCaseEntity.imported(
+                        caseId,
+                        "ORDER_open_hearing_remedy_recovery",
+                        null,
+                        "LOG_open_hearing_remedy_recovery",
+                        "user-remedy",
+                        "merchant-remedy",
+                        "IMPORT_open_hearing_remedy_recovery",
+                        "PRODUCT_SAFETY_RISK",
+                        "Product safety dispute",
+                        "The completed hearing draft must enter human review.",
+                        RiskLevel.HIGH,
+                        CaseStatus.EVIDENCE_OPEN,
+                        "EVIDENCE",
+                        OffsetDateTime.now().plusHours(2),
+                        "external",
+                        "EXT_open_hearing_remedy_recovery",
+                        "system");
+        disputeCase.openHearing(OffsetDateTime.now().plusHours(3), "system");
+
+        assertThat(disputeCase.getCaseStatus()).isEqualTo(CaseStatus.HEARING_OPEN);
+        assertThat(disputeCase.getCurrentWorkflowId()).isNull();
+        assertThatThrownBy(() -> disputeCase.markRemedyPlanned("system"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("remedy cannot be planned from status HEARING_OPEN");
+        caseRepository.saveAndFlush(disputeCase);
+
+        HearingStateEntity hearing =
+                HearingStateEntity.start(
+                        "HEARING_open_hearing_remedy_recovery",
+                        caseId,
+                        workflowId,
+                        "temporal-worker");
+        hearing.complete(false, "temporal-worker");
+        hearingRepository.saveAndFlush(hearing);
+        draftRepository.saveAndFlush(
+                AdjudicationDraftEntity.create(
+                        "DRAFT_open_hearing_remedy_recovery",
+                        caseId,
+                        hearing.getId(),
+                        1,
+                        "[]",
+                        "[]",
+                        "[]",
+                        "[\"verify safety risk\"]",
+                        "MANUAL_REVIEW_REQUIRED",
+                        new BigDecimal("0.9000"),
+                        "Recovered non-final draft for reviewer confirmation.",
+                        "python-agent-service/test-model",
+                        "PENDING_HUMAN_REVIEW",
+                        "temporal-worker"));
+        entityManager.flush();
+        entityManager.clear();
+
+        String planId = service.generateForWorkflow(caseId, workflowId);
+
+        assertThat(planRepository.findById(planId))
+                .hasValueSatisfying(
+                        plan ->
+                                assertThat(plan.getAdjudicationDraftId())
+                                        .isEqualTo("DRAFT_open_hearing_remedy_recovery"));
+        assertThat(caseRepository.findById(caseId))
+                .hasValueSatisfying(
+                        saved -> {
+                            assertThat(saved.getCurrentWorkflowId()).isEqualTo(workflowId);
+                            assertThat(saved.getCaseStatus()).isEqualTo(CaseStatus.REMEDY_PLANNED);
+                            assertThat(saved.getCurrentRoom()).isEqualTo("DRAFT");
+                        });
     }
 
     // 所属模块：【确定性补救规划 / 自动化测试层】「RemedyApplicationServiceIntegrationTest.legacyRoomHearingWithoutRouteStillPlansFromCompletedDraft()」。

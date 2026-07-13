@@ -87,6 +87,7 @@ let modelHealthInFlight = null;
 const caseId = computed(
   () => catalog.value?.case_id || route.params.caseId,
 );
+const historyMode = computed(() => route.query.view === "history");
 const role = computed(() => props.viewerRole || actor.role);
 const demoActorIds = {
   USER: "user-local",
@@ -102,8 +103,11 @@ const effectiveActor = computed(() => {
   };
 });
 const isMerchant = computed(() => role.value === "MERCHANT");
-const shouldEnsureOpening = computed(() => ["USER", "MERCHANT"].includes(role.value));
+const shouldEnsureOpening = computed(() =>
+  !historyMode.value && ["USER", "MERCHANT"].includes(role.value),
+);
 const shouldDiscoverActiveEvidenceRuns = computed(() =>
+  !historyMode.value &&
   props.initialMessages === null &&
   props.initialCatalog === null &&
   props.initialCompletion === null &&
@@ -134,6 +138,7 @@ const evidenceStreamingRuns = computed(() =>
 );
 const modelConnected = computed(() => modelConnectionState.value === "connected");
 const modelConnectionLabel = computed(() => {
+  if (historyMode.value) return "历史记录已封存";
   if (evidenceStreamingRuns.value.length) return "数字人正在输出";
   if (modelConnectionState.value === "connected") return "数字人已连接";
   if (modelConnectionState.value === "checking") return "连接检测中";
@@ -143,6 +148,7 @@ const initialEvidencePlanReady = computed(() =>
   displayedMessages.value.some((message) => isCurrentEvidenceClerkMessage(message)),
 );
 const evidenceConversationEmptyText = computed(() => {
+  if (historyMode.value) return "该证据室没有可供浏览的历史对话。";
   if (!modelConnected.value) {
     return "数字人未连接，恢复连接后将生成首轮核验计划。";
   }
@@ -152,6 +158,7 @@ const evidenceConversationEmptyText = computed(() => {
   return "证据书记官的首轮核验计划正在同步到对话记录。";
 });
 const evidenceComposerDisabled = computed(() =>
+  historyMode.value ||
   !modelConnected.value ||
   (shouldEnsureOpening.value && !initialEvidencePlanReady.value) ||
   uploading.value ||
@@ -160,6 +167,7 @@ const evidenceComposerDisabled = computed(() =>
   evidenceStreamingRuns.value.length > 0,
 );
 const evidenceWorkStatus = computed(() => {
+  if (historyMode.value) return "HISTORY";
   if (evidenceStreamingRuns.value.length || agentState.value === "STREAMING") {
     return "STREAMING";
   }
@@ -180,6 +188,12 @@ const evidenceWorkStatus = computed(() => {
 });
 const evidenceWorkStatusCopy = computed(() => {
   const copies = {
+    HISTORY: {
+      eyebrow: "ARCHIVED EVIDENCE",
+      title: "历史证据记录已封存",
+      description: "可以浏览当时的对话、材料和核验结果，上传、提交和流程推进均已锁定。",
+      tone: "ready",
+    },
     MODEL_CONNECTING: {
       eyebrow: "MODEL STATUS",
       title: "正在检测数字人连接",
@@ -906,6 +920,7 @@ async function resumeActiveEvidenceRuns(
   actorSnapshot = { ...effectiveActor.value },
   caseSnapshot = caseId.value,
 ) {
+  if (historyMode.value) return;
   const activeRuns = await loadActiveAgentRuns(
     actorSnapshot,
     caseSnapshot,
@@ -1033,7 +1048,7 @@ async function checkModelConnection() {
 
 // 业务位置：【前端证据室】startModelHealthPolling：启动或关闭与 模型请求和结构化结果 相关的后台任务或订阅，控制运行资源和生命周期。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function startModelHealthPolling() {
-  if (modelHealthTimer) return;
+  if (historyMode.value || modelHealthTimer) return;
   void checkModelConnection();
   modelHealthTimer = window.setInterval(() => {
     void checkModelConnection();
@@ -1136,6 +1151,7 @@ async function refreshUntilAgentReply(afterSequenceNo) {
 
 // 业务位置：【前端证据室】postMessage：执行 房间消息和对话记录 对应的业务动作，并将结果交给 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 async function postMessage(command) {
+  if (historyMode.value) return;
   error.value = "";
   agentState.value = "THINKING";
   const pendingId = `LOCAL_PENDING_${Date.now()}`;
@@ -1182,6 +1198,7 @@ async function postMessage(command) {
 
 // 业务位置：【前端证据室】startEventStream：启动或关闭与 Agent 流事件 相关的后台任务或订阅，控制运行资源和生命周期。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function startEventStream() {
+  if (historyMode.value) return;
   if (eventStreamActive) {
     eventAbortController.abort();
     eventAbortController = new AbortController();
@@ -1214,6 +1231,10 @@ function startEventStream() {
 
 // 业务位置：【前端证据室】uploadFiles：读取 当前阶段业务数据，并依据当前案件、角色和会话权限裁剪成可用输入。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 async function uploadFiles(event) {
+  if (historyMode.value) {
+    if (event?.target) event.target.value = "";
+    return;
+  }
   const files = [...(event.target.files || [])];
   if (!files.length) return;
   uploading.value = true;
@@ -1244,7 +1265,7 @@ async function uploadFiles(event) {
 
 // 业务位置：【前端证据室】submitPendingBatch：执行 当前阶段业务数据 对应的业务动作，并将结果交给 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 async function submitPendingBatch() {
-  if (!pendingItems.value.length || submittingBatch.value) return;
+  if (historyMode.value || !pendingItems.value.length || submittingBatch.value) return;
   submittingBatch.value = true;
   error.value = "";
   agentState.value = "THINKING";
@@ -1284,6 +1305,7 @@ async function submitPendingBatch() {
 
 // 业务位置：【前端证据室】deletePendingEvidence：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 async function deletePendingEvidence(item) {
+  if (historyMode.value) return;
   const id = evidenceId(item);
   if (!id || deletingEvidenceIds.value.has(id)) return;
   deletingEvidenceIds.value = new Set([...deletingEvidenceIds.value, id]);
@@ -1303,6 +1325,7 @@ async function deletePendingEvidence(item) {
 
 // 业务位置：【前端证据室】completeEvidence：执行 当前可见证据和附件 对应的业务动作，并将结果交给 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 async function completeEvidence(event) {
+  if (historyMode.value) return;
   if (!canCompleteEvidenceLocally.value) {
     evidenceGateError.value = "发起争议方需先正式提交至少 1 份相关证据，当前证据栏为空，暂不能进入下一步。";
     agentState.value = "ERROR";
@@ -1365,17 +1388,18 @@ function dismissStreamError() {
 
 // 业务位置：【前端证据室】enterHearing：切换与 庭审轮次和法官发言 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function enterHearing() {
+  if (historyMode.value) return;
   return router.push(`/disputes/${caseId.value}/hearing`);
 }
 
 onMounted(async () => {
-  startModelHealthPolling();
+  if (!historyMode.value) startModelHealthPolling();
   await load();
-  if (
+  if (!historyMode.value && (
     props.eventStreamer ||
     props.initialCatalog === null ||
     props.initialCompletion === null
-  ) {
+  )) {
     startEventStream();
   }
 });
@@ -1395,7 +1419,7 @@ watch(role, async (nextRole, previousRole) => {
   evidenceGateError.value = "";
   resetModalController();
   messages.value = [];
-  if (eventStreamActive) {
+  if (!historyMode.value && eventStreamActive) {
     startEventStream();
   }
   try {
@@ -1409,6 +1433,28 @@ watch(role, async (nextRole, previousRole) => {
     error.value = failure.message;
     agentState.value = "ERROR";
   }
+});
+watch(historyMode, (historical) => {
+  if (!historical) {
+    startModelHealthPolling();
+    if (
+      props.eventStreamer ||
+      props.initialCatalog === null ||
+      props.initialCompletion === null
+    ) {
+      startEventStream();
+    }
+    return;
+  }
+  stopModelHealthPolling();
+  workspaceGeneration += 1;
+  uploading.value = false;
+  submittingBatch.value = false;
+  completing.value = false;
+  eventAbortController.abort();
+  eventAbortController = new AbortController();
+  eventStreamActive = false;
+  clearAgentStreams({ caseId: caseId.value, roomType: "EVIDENCE" });
 });
 onBeforeUnmount(() => {
   eventAbortController.abort();
@@ -1427,6 +1473,8 @@ onBeforeUnmount(() => {
     :case-id="caseId"
     :connection-state="connectionState"
     :show-boundary="false"
+    :history-mode="historyMode"
+    history-description="证据记录已经封存，对话、上传、删除、提交和流程推进均已锁定；你仍可查看材料及核验详情。"
   >
     <template #clock>
       <div data-evidence-countdown>
@@ -1473,8 +1521,10 @@ onBeforeUnmount(() => {
         <div class="evidence-room__conversation-frame">
           <ConversationStream
             :messages="displayedMessages"
-            :streaming-runs="evidenceStreamingRuns"
+            :streaming-runs="historyMode ? [] : evidenceStreamingRuns"
             :disabled="evidenceComposerDisabled"
+            :composer-visible="!historyMode"
+            disabled-reason="历史证据记录仅供浏览，不能再次提交说明。"
             :empty-text="evidenceConversationEmptyText"
             agent-label="证据书记官"
             placeholder="告诉书记官这份证据从哪里来、形成于何时、能证明什么…"
@@ -1505,13 +1555,17 @@ onBeforeUnmount(() => {
               <strong>上传图片、视频、Markdown 或文档</strong>
               <small>解析完成后先进入待提交区，确认后再交给书记官。</small>
             </div>
-            <label class="evidence-uploader__button">
+            <label
+              class="evidence-uploader__button"
+              :class="{ 'evidence-uploader__button--disabled': historyMode }"
+              :aria-disabled="historyMode"
+            >
               {{ uploading ? "核验中…" : "选择材料" }}
               <input
                 ref="fileInput"
                 type="file"
                 multiple
-                :disabled="uploading || evidenceStreamingRuns.length > 0"
+                :disabled="historyMode || uploading || evidenceStreamingRuns.length > 0"
                 @change="uploadFiles"
               />
             </label>
@@ -1541,7 +1595,7 @@ onBeforeUnmount(() => {
                   type="button"
                   class="evidence-card__remove"
                   data-delete-pending-evidence
-                  :disabled="isDeletingEvidence(item)"
+                  :disabled="historyMode || isDeletingEvidence(item)"
                   @click.stop="deletePendingEvidence(item)"
                 >×</button>
                 <span class="evidence-card__preview">
@@ -1575,7 +1629,7 @@ onBeforeUnmount(() => {
               <button
                 type="button"
                 data-submit-evidence-batch
-                :disabled="submittingBatch || evidenceStreamingRuns.length > 0"
+                :disabled="historyMode || submittingBatch || evidenceStreamingRuns.length > 0"
                 @click="submitPendingBatch"
               >
                 {{ submittingBatch ? "提交中…" : "提交本批给书记官" }}
@@ -1689,6 +1743,7 @@ onBeforeUnmount(() => {
             v-if="completion?.sealed"
             type="button"
             data-enter-hearing
+            :disabled="historyMode"
             @click="enterHearing"
           >
             进入小法庭
@@ -1705,7 +1760,7 @@ onBeforeUnmount(() => {
             v-else
             type="button"
             data-complete-evidence
-            :disabled="completing || evidenceStreamingRuns.length > 0"
+            :disabled="historyMode || completing || evidenceStreamingRuns.length > 0"
             @click="completeEvidence"
           >
             {{ completing ? "正在封入证据袋…" : "我方举证完成" }}
@@ -3125,6 +3180,10 @@ onBeforeUnmount(() => {
   display: block;
   margin-bottom: 6px;
   color: #33435c;
+}
+.evidence-uploader__button--disabled {
+  cursor: not-allowed;
+  opacity: .55;
 }
 
 .evidence-modal__panel--detail {

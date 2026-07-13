@@ -173,6 +173,13 @@ export function normalizeAgentStreamEvent(sseEvent, expectedRunId = "") {
     runId,
     event,
     sequence: Number.isFinite(sequence) ? sequence : 0,
+    nodeName: String(firstDefined(
+      payload.node_name,
+      payload.nodeName,
+      envelope.node_name,
+      envelope.nodeName,
+      "",
+    )),
     fieldPath: String(firstDefined(
       payload.field_path,
       payload.fieldPath,

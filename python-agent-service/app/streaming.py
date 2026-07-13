@@ -11,6 +11,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+import logging
 import re
 from threading import Event, Lock
 from typing import Any, Literal
@@ -19,6 +20,9 @@ from uuid import uuid4
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 STREAM_SCHEMA_VERSION = "agent_stream.v1"
@@ -152,6 +156,12 @@ VISIBLE_FIELD_REGISTRY: dict[str, dict[str, tuple[VisibleFieldSpec, ...]]] = {
     "hearing_round_turn": {
         "hearing_round_turn": (
             VisibleFieldSpec("message_text", "message_text"),
+        ),
+        "jury_review": (
+            VisibleFieldSpec(
+                "public_message",
+                "jury_review_report.public_message",
+            ),
         ),
     },
     "hearing_stage": {
@@ -572,6 +582,14 @@ def workflow_ndjson_response(
             pass
         except Exception as exception:  # HTTP 流已打开，只能编码成协议内 error 事件。
             if not disconnected.is_set():
+                LOGGER.error(
+                    "agent stream workflow failed: operation=%s run_id=%s "
+                    "error_type=%s error=%s",
+                    operation,
+                    run_id,
+                    type(exception).__name__,
+                    exception,
+                )
                 code, message, retryable, node_name = _public_stream_error(
                     exception,
                     visible_output_emitted=observer.visible_output_emitted,

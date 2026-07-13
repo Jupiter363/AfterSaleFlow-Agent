@@ -18,7 +18,7 @@ from app.harness.evidence_context_assembler import (
 )
 from app.harness.evidence_asset_loader import EvidenceAssetLoader
 from app.harness.localization_policy import localize_internal_text
-from app.llm import AgentOutputSchemaError, AgentServiceUnavailable
+from app.llm import AgentServiceUnavailable
 from app.schemas import (
     EvidenceTurnLlmOutput,
     EvidenceTurnRequest,
@@ -355,24 +355,30 @@ def _validated_matrix_patch(
         # 这里 patch 是 Pydantic 对象，所以可以用 patch.fact_id 访问字段；
         # 如果是普通 dict，则一般写 patch["fact_id"]。
         if patch.fact_id not in allowed_fact_ids:
-            raise AgentOutputSchemaError(
-                "evidence_turn",
-                "fact_matrix_patch referenced an unknown fact_id",
+            LOGGER.warning(
+                "dropping evidence matrix patch with unknown fact_id: fact_id=%s",
+                patch.fact_id,
             )
+            continue
         if patch.evidence_id not in current_evidence_ids:
-            raise AgentOutputSchemaError(
-                "evidence_turn",
-                "fact_matrix_patch referenced evidence outside the current turn",
+            LOGGER.warning(
+                "dropping evidence matrix patch outside current turn: evidence_id=%s",
+                patch.evidence_id,
             )
+            continue
         if patch.operation == "UPSERT_LINK" and (
             patch.evidence_id,
             patch.fact_id,
             patch.relation,
         ) not in assessment_links:
-            raise AgentOutputSchemaError(
-                "evidence_turn",
-                "fact_matrix_patch is inconsistent with evidence_assessments",
+            LOGGER.warning(
+                "dropping evidence matrix patch inconsistent with normalized assessment: "
+                "evidence_id=%s fact_id=%s relation=%s",
+                patch.evidence_id,
+                patch.fact_id,
+                patch.relation,
             )
+            continue
         # 同一操作/事实/证据重复项只保留第一次，避免模型重复输出放大 patch 或版本变化。
         key = (patch.operation, patch.fact_id, patch.evidence_id)
         if key in seen:
@@ -405,24 +411,43 @@ def _validated_human_review_tasks(
     seen: set[str] = set()
     for task in tasks:
         if task.evidence_id not in current_evidence_ids:
-            raise AgentOutputSchemaError(
-                "evidence_turn",
-                "human_review_tasks referenced evidence outside the current turn",
+            LOGGER.warning(
+                "dropping human review task outside current turn: evidence_id=%s",
+                task.evidence_id,
             )
+            continue
         if task.evidence_id not in review_required_ids:
-            raise AgentOutputSchemaError(
-                "evidence_turn",
-                "human_review_tasks is inconsistent with evidence_assessments",
+            LOGGER.warning(
+                "dropping human review task not required by normalized assessment: "
+                "evidence_id=%s",
+                task.evidence_id,
             )
+            continue
         if task.evidence_id in seen:
             continue
         seen.add(task.evidence_id)
         result.append(task.model_dump(mode="json"))
-    if seen != review_required_ids:
-        raise AgentOutputSchemaError(
-            "evidence_turn",
-            "every human-review assessment requires one structured review task",
+
+    assessment_by_id = {assessment.evidence_id: assessment for assessment in assessments}
+    for evidence_id in sorted(review_required_ids - seen):
+        assessment = assessment_by_id[evidence_id]
+        reason_codes = list(assessment.human_review.reason_codes) or [
+            "NORMALIZED_ASSESSMENT_REQUIRES_REVIEW"
+        ]
+        instructions = list(assessment.human_review.instructions) or [
+            "核对原始材料来源、完整上下文及形成时间，并记录人工复核结论。"
+        ]
+        high_risk = any(flag.severity == "HIGH" for flag in assessment.risk_flags)
+        result.append(
+            {
+                "evidence_id": evidence_id,
+                "reason_codes": reason_codes[:20],
+                "review_goal": "人工复核该证据的来源、完整性与真实性风险。",
+                "instructions": instructions[:20],
+                "priority": "HIGH" if high_risk else "MEDIUM",
+            }
         )
+        seen.add(evidence_id)
     return result[:50]
 
 
@@ -450,22 +475,21 @@ def _validated_internal_handoff(
         str(item.get("evidence_id") or "") for item in human_review_tasks
     }
     payload = handoff.model_dump(mode="json")
-    if any(
-        fact_id not in allowed_fact_ids
+    payload["uncovered_fact_ids"] = [
+        fact_id
         for fact_id in payload.get("uncovered_fact_ids", [])
-    ):
-        raise AgentOutputSchemaError(
-            "evidence_turn",
-            "internal_handoff referenced an unknown fact_id",
-        )
+        if fact_id in allowed_fact_ids
+    ][:100]
     handoff_review_ids = set(payload.get("human_review_evidence_ids", []))
     if handoff_review_ids != human_review_ids or not handoff_review_ids.issubset(
         assessed_evidence_ids
     ):
-        raise AgentOutputSchemaError(
-            "evidence_turn",
-            "internal_handoff human review references are inconsistent",
+        LOGGER.warning(
+            "normalizing internal handoff human review references: supplied=%s expected=%s",
+            sorted(handoff_review_ids),
+            sorted(human_review_ids),
         )
+    payload["human_review_evidence_ids"] = sorted(human_review_ids)
     return payload
 
 

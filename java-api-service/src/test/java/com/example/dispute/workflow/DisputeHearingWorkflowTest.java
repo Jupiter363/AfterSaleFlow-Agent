@@ -7,6 +7,7 @@
 package com.example.dispute.workflow;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.dispute.workflow.domain.EvidenceSubmissionSignal;
 import com.example.dispute.workflow.domain.HearingStageActivityResult;
@@ -16,6 +17,7 @@ import com.example.dispute.workflow.temporal.DisputeHearingActivities;
 import com.example.dispute.workflow.temporal.DisputeHearingWorkflow;
 import com.example.dispute.workflow.temporal.DisputeHearingWorkflowImpl;
 import io.temporal.client.WorkflowClient;
+import io.temporal.client.WorkflowFailedException;
 import io.temporal.client.WorkflowOptions;
 import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.worker.Worker;
@@ -148,19 +150,20 @@ class DisputeHearingWorkflowTest {
     void invalidStructuredStageInterruptsBeforeLaterCognition() {
         activities.invalidStage = "C4_EVIDENCE_CROSS_CHECK";
 
-        HearingWorkflowResult result =
-                workflow("WORKFLOW_hearing_invalid")
-                        .run(
-                                command(
-                                        "CASE_hearing_invalid",
-                                        "WORKFLOW_hearing_invalid",
-                                        Duration.ofHours(1),
-                                        1));
+        assertThatThrownBy(
+                        () ->
+                                workflow("WORKFLOW_hearing_invalid")
+                                        .run(
+                                                command(
+                                                        "CASE_hearing_invalid",
+                                                        "WORKFLOW_hearing_invalid",
+                                                        Duration.ofHours(1),
+                                                        1)))
+                .isInstanceOf(WorkflowFailedException.class);
 
-        assertThat(result.status()).isEqualTo("VALIDATION_INTERRUPTED");
-        assertThat(result.manualRequired()).isTrue();
         assertThat(activities.stages)
                 .doesNotContain("C5_RULE_APPLICATION", "C6_DRAFT_GENERATION");
+        assertThat(activities.completionCalls).isZero();
     }
 
     // 所属模块：【Temporal 持久化编排 / 自动化测试层】「DisputeHearingWorkflowTest.initializesHearingStateBeforeWaitingForStatementRounds()」。
@@ -427,6 +430,7 @@ class DisputeHearingWorkflowTest {
         private volatile boolean alwaysRequireEvidence;
         private volatile String invalidStage;
         private int c2Calls;
+        private int completionCalls;
 
         // 所属模块：【Temporal 持久化编排 / 自动化测试层】「DisputeHearingWorkflowTest.RecordingActivities.initialize(HearingWorkflowCommand)」。
         // 具体功能：「DisputeHearingWorkflowTest.RecordingActivities.initialize(HearingWorkflowCommand)」：作为「RecordingActivities」测试替身实现「initialize」：记录 「command.caseId」 的输入或调用次数，让被测编排能够观察到确定、可断言的协作者行为。
@@ -521,6 +525,8 @@ class DisputeHearingWorkflowTest {
                 boolean manualRequired,
                 boolean evidenceTimedOut,
                 long dossierVersion,
-                String stopReason) {}
+                String stopReason) {
+            completionCalls++;
+        }
     }
 }

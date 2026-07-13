@@ -79,7 +79,9 @@ let modelHealthTimer = null;
 let modelHealthInFlight = null;
 
 const caseId = computed(() => dispute.value?.id || route.params.caseId);
+const historyMode = computed(() => route.query.view === "history");
 const shouldDiscoverActiveIntakeRuns = computed(() =>
+  !historyMode.value &&
   props.initialMessages === null &&
   props.initialDispute === null &&
   !props.messagesLoader,
@@ -93,7 +95,10 @@ const intakeStreamingRuns = computed(() =>
   }),
 );
 const intakeCancellationDisabled = computed(() =>
-  submitting.value || admitted.value || intakeStreamingRuns.value.length > 0,
+  historyMode.value ||
+  submitting.value ||
+  admitted.value ||
+  intakeStreamingRuns.value.length > 0,
 );
 const caseNoteTitle = computed(() =>
   humanizeDossierText(dispute.value?.title || "履约争端", {
@@ -114,12 +119,14 @@ const partyCanChat = computed(
 );
 const modelConnected = computed(() => modelConnectionState.value === "connected");
 const modelConnectionLabel = computed(() => {
+  if (historyMode.value) return "历史记录已封存";
   if (intakeStreamingRuns.value.length) return "数字人正在输出";
   if (modelConnectionState.value === "connected") return "数字人已连接";
   if (modelConnectionState.value === "checking") return "连接检测中";
   return "数字人未连接";
 });
 const intakeConversationEmptyText = computed(() => {
+  if (historyMode.value) return "该接待室没有可供浏览的历史对话。";
   if (!modelConnected.value) {
     return "数字人未连接，恢复连接后将生成首轮案情追问。";
   }
@@ -129,6 +136,9 @@ const intakeConversationEmptyText = computed(() => {
   return "接待官的首轮追问正在同步到对话记录。";
 });
 const intakeComposerDisabledReason = computed(() => {
+  if (historyMode.value) {
+    return "历史接待记录仅供浏览，不能再次提交陈述。";
+  }
   if (!["USER", "MERCHANT"].includes(actor.role)) {
     return "当前是平台观察/审核身份。请切换为用户或商家身份，才能继续与争议接待官对话。";
   }
@@ -146,6 +156,7 @@ const intakeComposerDisabledReason = computed(() => {
   return "";
 });
 const intakeWorkStatus = computed(() => {
+  if (historyMode.value) return "HISTORY";
   if (
     intakeStreamingRuns.value.length ||
     String(agentState.value).toUpperCase() === "STREAMING"
@@ -163,6 +174,12 @@ const intakeWorkStatus = computed(() => {
 });
 const intakeWorkStatusCopy = computed(() => {
   const copies = {
+    HISTORY: {
+      eyebrow: "ARCHIVED INTAKE",
+      title: "历史接待记录已封存",
+      description: "可以浏览当时的对话与案情卷宗，陈述、受理和流程推进均已锁定。",
+      tone: "ready",
+    },
     MODEL_CONNECTING: {
       eyebrow: "MODEL STATUS",
       title: "正在检测数字人连接",
@@ -254,6 +271,7 @@ const caseDetailDossier = computed(() => {
 const isCaseDetailDossier = computed(() => Boolean(caseDetailDossier.value));
 const initialAgentReady = computed(() => Boolean(caseDetailDossier.value));
 const intakeDossierSubmissionDisabled = computed(() =>
+  historyMode.value ||
   submitting.value ||
   admitted.value ||
   intakeStreamingRuns.value.length > 0 ||
@@ -1010,6 +1028,7 @@ function applyStreamedCaseDetailEvent(event, snapshot = currentWorkspaceSnapshot
 
 // 业务位置：【前端接待室】resumeActiveIntakeRuns：执行 案件受理信息和接待结论 对应的业务动作，并将结果交给 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 async function resumeActiveIntakeRuns(snapshot = currentWorkspaceSnapshot()) {
+  if (historyMode.value) return;
   const activeRuns = await loadActiveAgentRuns(
     snapshot.actor,
     snapshot.caseId,
@@ -1079,7 +1098,7 @@ async function checkModelConnection() {
 
 // 业务位置：【前端接待室】startModelHealthPolling：启动或关闭与 模型请求和结构化结果 相关的后台任务或订阅，控制运行资源和生命周期。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 function startModelHealthPolling() {
-  if (modelHealthTimer) return;
+  if (historyMode.value || modelHealthTimer) return;
   void checkModelConnection();
   modelHealthTimer = window.setInterval(() => {
     void checkModelConnection();
@@ -1125,6 +1144,7 @@ function removeOptimisticMessage(id) {
 
 // 业务位置：【前端接待室】startEventStream：启动或关闭与 Agent 流事件 相关的后台任务或订阅，控制运行资源和生命周期。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 function startEventStream(snapshot = currentWorkspaceSnapshot()) {
+  if (historyMode.value) return;
   const streamer = props.eventStreamer || streamRoomEvents;
   void streamer({
     actor: snapshot.actor,
@@ -1144,6 +1164,7 @@ function startEventStream(snapshot = currentWorkspaceSnapshot()) {
 
 // 业务位置：【前端接待室】postMessage：执行 房间消息和对话记录 对应的业务动作，并将结果交给 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 async function postMessage(command) {
+  if (historyMode.value) return;
   const snapshot = currentWorkspaceSnapshot();
   if (!modelConnected.value) {
     await checkModelConnection();
@@ -1210,7 +1231,7 @@ async function postMessage(command) {
 
 // 业务位置：【前端接待室】resolveWithoutDispute：读取 当前阶段业务数据，并依据当前案件、角色和会话权限裁剪成可用输入。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 async function resolveWithoutDispute() {
-  if (intakeCancellationDisabled.value) return;
+  if (historyMode.value || intakeCancellationDisabled.value) return;
   const snapshot = currentWorkspaceSnapshot();
   submitting.value = true;
   error.value = "";
@@ -1247,7 +1268,7 @@ async function resolveWithoutDispute() {
 
 // 业务位置：【前端接待室】confirmAdmission：执行 案件受理信息和接待结论 对应的业务动作，并将结果交给 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 async function confirmAdmission() {
-  if (intakeDossierSubmissionDisabled.value) return;
+  if (historyMode.value || intakeDossierSubmissionDisabled.value) return;
   const snapshot = currentWorkspaceSnapshot();
   submitting.value = true;
   error.value = "";
@@ -1279,6 +1300,7 @@ async function confirmAdmission() {
 
 // 业务位置：【前端接待室】enterEvidenceRoom：切换与 当前可见证据和附件 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 async function enterEvidenceRoom() {
+  if (historyMode.value) return;
   await router.push(`/disputes/${caseId.value}/evidence`);
 }
 
@@ -1292,9 +1314,9 @@ function dismissError() {
 
 onMounted(async () => {
   const snapshot = currentWorkspaceSnapshot();
-  startModelHealthPolling();
+  if (!historyMode.value) startModelHealthPolling();
   await load(snapshot);
-  if (props.eventStreamer || props.initialMessages === null) {
+  if (!historyMode.value && (props.eventStreamer || props.initialMessages === null)) {
     startEventStream(snapshot);
   }
 });
@@ -1309,11 +1331,28 @@ watch(
         await resumeActiveIntakeRuns(snapshot);
       }
     }
-    if (props.eventStreamer || props.initialMessages === null) {
+    if (!historyMode.value && (props.eventStreamer || props.initialMessages === null)) {
       startEventStream(snapshot);
     }
   },
 );
+watch(historyMode, (historical) => {
+  if (!historical) {
+    startModelHealthPolling();
+    if (props.eventStreamer || props.initialMessages === null) {
+      startEventStream(currentWorkspaceSnapshot());
+    }
+    return;
+  }
+  stopModelHealthPolling();
+  workspaceGeneration.value += 1;
+  submitting.value = false;
+  eventAbortController.abort();
+  eventAbortController = new AbortController();
+  eventState.connected = false;
+  eventState.reconnecting = false;
+  clearAgentStreams({ caseId: caseId.value, roomType: "INTAKE" });
+});
 onBeforeUnmount(() => {
   stopModelHealthPolling();
   eventAbortController.abort();
@@ -1337,6 +1376,8 @@ onBeforeUnmount(() => {
     :show-case-id="false"
     :show-connection="false"
     :show-boundary="false"
+    :history-mode="historyMode"
+    history-description="接待记录已经封存，对话、受理、取消和流程推进均已锁定；你仍可浏览当时的案情卷宗。"
   >
     <template #agent>
       <DigitalHuman
@@ -1378,9 +1419,9 @@ onBeforeUnmount(() => {
         >
           <ConversationStream
             :messages="intakeRecipientView ? [] : messages"
-            :streaming-runs="intakeRecipientView ? [] : intakeStreamingRuns"
-            :disabled="submitting || intakeStreamingRuns.length > 0 || admitted || !partyCanChat || !initialAgentReady || !modelConnected"
-            :composer-visible="partyCanChat"
+            :streaming-runs="historyMode || intakeRecipientView ? [] : intakeStreamingRuns"
+            :disabled="historyMode || submitting || intakeStreamingRuns.length > 0 || admitted || !partyCanChat || !initialAgentReady || !modelConnected"
+            :composer-visible="!historyMode && partyCanChat"
             :disabled-reason="intakeComposerDisabledReason"
             :empty-text="intakeConversationEmptyText"
             placeholder="补充订单、物流、双方沟通或你的期望…"
@@ -1584,7 +1625,14 @@ onBeforeUnmount(() => {
 
         <div class="intake-dossier__confirm">
           <div
-            v-if="intakeRecipientView"
+            v-if="historyMode"
+            class="intake-dossier__readonly-actions"
+            data-intake-history-actions
+          >
+            历史接待已锁定，仅保留当时的案情与对话记录
+          </div>
+          <div
+            v-else-if="intakeRecipientView"
             class="intake-dossier__actions"
           >
             <button

@@ -153,6 +153,25 @@ public class ActiveCourtroomContextAssembler {
             throw new IllegalStateException(
                     "formal jury review report must be sent from JURY_PANEL to PRESIDING_JUDGE");
         }
+        String proposedResolution =
+                formalReport.path("input_refs")
+                        .path("final_proposed_resolution")
+                        .asText("");
+        String reviewedProposal =
+                formalReport.path("payload")
+                        .path("reviewed_proposal")
+                        .asText("");
+        String payloadProposal =
+                formalReport.path("payload")
+                        .path("final_proposed_resolution")
+                        .asText("");
+        if (proposedResolution.isBlank()
+                || !proposedResolution.equals(reviewedProposal)
+                || !proposedResolution.equals(payloadProposal)) {
+            throw new IllegalStateException(
+                    "final convergence requires one consistent proposed resolution V1");
+        }
+        context.put("final_proposed_resolution", proposedResolution);
         validatedSealedRounds(caseId, throughRoundNo);
         return context;
     }

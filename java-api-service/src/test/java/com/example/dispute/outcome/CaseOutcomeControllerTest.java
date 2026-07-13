@@ -101,6 +101,8 @@ class CaseOutcomeControllerTest {
                                         objectMapper.readTree("[\"核验签收人身份\"]"),
                                         objectMapper.readTree(
                                                 "{\"id\":\"PLAN_1\",\"actions\":[{\"action_type\":\"REFUND\",\"amount\":199}]}")),
+                                "REVIEW_1",
+                                "APPROVED",
                                 List.of()));
 
         mockMvc.perform(

@@ -87,6 +87,13 @@ public class ReviewController {
             @PathVariable @NotBlank String taskId,Authentication authentication,HttpServletRequest request){
         return success(service.packet(taskId,actor(authentication)),request);
     }
+    @PostMapping("/{taskId}/start")
+    public ApiResponse<ReviewTaskView> start(
+            @PathVariable @NotBlank String taskId,
+            Authentication authentication,
+            HttpServletRequest request) {
+        return success(service.start(taskId, actor(authentication)), request);
+    }
     // 所属模块：【平台人工终审 / HTTP 接口层】「ReviewController.decide(String,String,DecisionRequest,Authentication,HttpServletRequest)」。
     // 具体功能：「ReviewController.decide(String,String,DecisionRequest,Authentication,HttpServletRequest)」：处理「POST /api/reviews」请求，把路径、查询参数和认证主体转换为应用层调用，主要委托 「service.decide」、「body.decision」、「body.reason」、「body.approvedPlan」，并返回「ApiResponse<ReviewDecisionView>」。
     // 上游调用：「ReviewController.decide(String,String,DecisionRequest,Authentication,HttpServletRequest)」的上游是携带认证信息与 Trace/Request ID 的「POST /api/reviews」HTTP 请求。

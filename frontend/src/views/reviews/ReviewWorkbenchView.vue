@@ -4,7 +4,7 @@
 -->
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import { extractAgentRunDescriptor } from "../../api/agentStream";
 import { reviewApi } from "../../api/review";
@@ -40,8 +40,12 @@ const copilotSubmitting = ref(false);
 const copilotStreamError = ref("");
 const reviewId = computed(() => route.params.reviewId);
 const role = computed(() => props.viewerRole || actor.role);
+const historyMode = computed(() => route.query.view === "history");
 const canDecide = computed(
-  () => role.value === "PLATFORM_REVIEWER" && packet.value?.status === "FROZEN",
+  () =>
+    !historyMode.value &&
+    role.value === "PLATFORM_REVIEWER" &&
+    packet.value?.status === "FROZEN",
 );
 const effectiveServerNow = computed(
   () => props.serverNow || new Date().toISOString(),
@@ -52,6 +56,7 @@ const copilotContext = computed(() => ({
   actor,
 }));
 const copilotRuns = computed(() => {
+  if (historyMode.value) return [];
   const durableRunIds = new Set(
     copilotMessages.value.map((message) => message.agent_run_id).filter(Boolean),
   );
@@ -63,7 +68,10 @@ const copilotBusy = computed(
   () => copilotSubmitting.value || copilotRuns.value.length > 0,
 );
 const canUseCopilot = computed(
-  () => role.value === "PLATFORM_REVIEWER" && Boolean(packet.value),
+  () =>
+    !historyMode.value &&
+    role.value === "PLATFORM_REVIEWER" &&
+    Boolean(packet.value),
 );
 const digitalHumanState = computed(() =>
   copilotBusy.value ? "THINKING" : agentState.value,
@@ -288,7 +296,7 @@ async function consumeCopilotRun(rawDescriptor) {
 
 // 业务位置：【前端审核工作台】resumeCopilotRuns：执行 当前阶段业务数据 对应的业务动作，并将结果交给 审核员批准、修改、补证或人工交接。上游：冻结审核包、Agent 建议和履约动作。下游：审核员批准、修改、补证或人工交接。边界：决定必须显式由有权限审核员提交。
 async function resumeCopilotRuns() {
-  if (!packet.value || role.value !== "PLATFORM_REVIEWER") return;
+  if (historyMode.value || !packet.value || role.value !== "PLATFORM_REVIEWER") return;
   const activeRuns = await reviewApi.activeCopilotRuns(actor, reviewId.value);
   await Promise.all(activeRuns.map((run) => consumeCopilotRun(run)));
 }
@@ -312,6 +320,7 @@ async function submitCopilotQuestion() {
       reviewId.value,
       question,
     );
+    if (historyMode.value) return;
     await consumeCopilotRun(descriptor);
     agentState.value = "LISTENING";
   } catch (failure) {
@@ -325,6 +334,7 @@ async function submitCopilotQuestion() {
 
 // 业务位置：【前端审核工作台】requestDecision：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 冻结审核包、Agent 建议和履约动作 正确进入 审核员批准、修改、补证或人工交接。上游：冻结审核包、Agent 建议和履约动作。下游：审核员批准、修改、补证或人工交接。边界：决定必须显式由有权限审核员提交。
 function requestDecision(decision) {
+  if (historyMode.value || !canDecide.value) return;
   error.value = "";
   if (!reason.value.trim()) {
     error.value = "请先填写审核理由";
@@ -335,6 +345,7 @@ function requestDecision(decision) {
 
 // 业务位置：【前端审核工作台】submitDecision：执行 当前阶段业务数据 对应的业务动作，并将结果交给 审核员批准、修改、补证或人工交接。上游：冻结审核包、Agent 建议和履约动作。下游：审核员批准、修改、补证或人工交接。边界：决定必须显式由有权限审核员提交。
 async function submitDecision() {
+  if (historyMode.value || !canDecide.value || submitting.value) return;
   submitting.value = true;
   error.value = "";
   agentState.value = "THINKING";
@@ -360,6 +371,14 @@ async function submitDecision() {
   }
 }
 
+watch(historyMode, (historical) => {
+  if (!historical) return;
+  pendingDecision.value = "";
+  copilotQuestion.value = "";
+  copilotSubmitting.value = false;
+  clearAgentStreams(copilotContext.value);
+});
+
 onMounted(load);
 onBeforeUnmount(() => clearAgentStreams(copilotContext.value));
 </script>
@@ -384,6 +403,14 @@ onBeforeUnmount(() => clearAgentStreams(copilotContext.value));
         :server-now="effectiveServerNow"
       />
     </header>
+
+    <aside v-if="historyMode" class="review-workbench__history" data-review-history-banner>
+      <span aria-hidden="true">🔒</span>
+      <div>
+        <strong>历史浏览模式</strong>
+        <p>终审记录已经封存，解释官提问和所有终审决定按钮均已锁定。</p>
+      </div>
+    </aside>
 
     <DigitalHuman
       :state="digitalHumanState"
@@ -552,10 +579,12 @@ onBeforeUnmount(() => clearAgentStreams(copilotContext.value));
           </div>
         </section>
         <div v-else class="decision-readonly">
-          ReviewPacket 冻结前仅可只读旁观，系统不会展示任何批准按钮。
+          {{ historyMode
+            ? "这是已封存的历史终审记录，所有批准、修改和驳回操作均已锁定。"
+            : "ReviewPacket 冻结前仅可只读旁观，系统不会展示任何批准按钮。" }}
         </div>
 
-        <div v-if="pendingDecision" class="decision-confirm" role="dialog">
+        <div v-if="pendingDecision && !historyMode" class="decision-confirm" role="dialog">
           <strong>确认提交 {{ pendingDecision }}？</strong>
           <p>此操作会写入不可变审核记录，并驱动后续执行链路。</p>
           <div>
@@ -563,7 +592,7 @@ onBeforeUnmount(() => clearAgentStreams(copilotContext.value));
             <button
               type="button"
               data-decision-confirm
-              :disabled="submitting"
+              :disabled="historyMode || submitting"
               @click="submitDecision"
             >
               {{ submitting ? "正在落槌…" : "确认并落槌" }}
@@ -602,6 +631,10 @@ onBeforeUnmount(() => clearAgentStreams(copilotContext.value));
   word-break: break-word;
 }
 .review-workbench__header { display: flex; min-width: 0; justify-content: space-between; align-items: flex-end; gap: 24px; }
+.review-workbench__history { display: flex; align-items: center; gap: 10px; padding: 11px 14px; color: #526178; background: #f3f6fa; border: 1px solid #dbe3ee; border-radius: 8px; }
+.review-workbench__history > span { flex: 0 0 auto; font-size: 16px; }
+.review-workbench__history strong { color: #34445b; font-size: 13px; }
+.review-workbench__history p { margin: 2px 0 0; font-size: 12px; line-height: 1.45; }
 .review-workbench__header > div > span, .packet-index > span, .packet-canvas header span {
   color: #7486a4; font-size: 10px; font-weight: 900; letter-spacing: .17em;
 }

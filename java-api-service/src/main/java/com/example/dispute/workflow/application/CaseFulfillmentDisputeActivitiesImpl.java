@@ -420,16 +420,10 @@ public class CaseFulfillmentDisputeActivitiesImpl
                         "operation", "HEARING_ANALYSIS"),
                 "agent-run-started:" + accepted.runId(),
                 SYSTEM.actorId());
-        AgentRunEntity completed;
-        try {
-            completed = awaitAgentRun(accepted.runId());
-        } catch (AgentExecutionException failure) {
-            if (command.finalConvergence()
-                    && failure.errorCode() == ErrorCode.AGENT_OUTPUT_SCHEMA_INVALID) {
-                return persistFinalSchemaFailureFallback(command, request, accepted.runId());
-            }
-            throw failure;
-        }
+        // 最终收敛也必须以真实模型的完整结构化结果为准。Schema 失败时保留失败
+        // AgentRun 并向上抛错，让 Temporal 按正式重试策略处理；禁止生成 UNDETERMINED
+        // 占位草案，否则页面会把一次失败伪装成“草案已生成、已休庭”。
+        AgentRunEntity completed = awaitAgentRun(accepted.runId());
         HearingAgentResult result = parseHearingAgentResult(readJson(completed.getStreamResultJson()));
         boolean requiresAdditionalEvidence =
                 result.requiresAdditionalEvidence() && command.allowSupplementalRequest();
@@ -458,35 +452,6 @@ public class CaseFulfillmentDisputeActivitiesImpl
                 result.manualRequired(),
                 draftId,
                 requiresAdditionalEvidence ? "WAITING_EVIDENCE" : "RUNNING");
-    }
-
-    private HearingAnalysisActivityResult persistFinalSchemaFailureFallback(
-            HearingAnalysisActivityCommand command, JsonNode request, String failedRunId) {
-        ObjectNode raw = objectMapper.createObjectNode();
-        raw.put("case_id", command.caseId());
-        raw.put("workflow_id", command.workflowId());
-        raw.put("workflow_status", "MANUAL_REVIEW_REQUIRED");
-        raw.putArray("executed_nodes");
-        ObjectNode draft = raw.putObject("adjudication_draft").putObject("draft");
-        draft.put("draft_status", "PENDING_HUMAN_REVIEW");
-        draft.put("recommended_outcome", "UNDETERMINED");
-        draft.put(
-                "reasoning_summary",
-                "Structured agent output could not be validated. No automated finding was accepted.");
-        draft.putArray("issue_findings");
-        draft.put("confidence", 0);
-        draft.put("risk_level", "HIGH");
-        draft.putArray("review_focus")
-                .add("Review the failed final-convergence structured output manually.");
-        draft.put("requires_human_review", true);
-        draft.put("is_final_decision", false);
-        raw.putArray("manual_review_reasons").add("AGENT_OUTPUT_SCHEMA_INVALID");
-        raw.put("prompt_version", "deterministic-fallback-v1");
-        raw.put("model", "manual-review-fallback");
-
-        HearingAgentResult result = parseHearingAgentResult(raw);
-        String draftId = persistAnalysis(command, request, result, false, 0L, failedRunId);
-        return new HearingAnalysisActivityResult(false, true, draftId, "RUNNING");
     }
 
     // 所属模块：【Temporal 持久化编排 / 应用编排层】「CaseFulfillmentDisputeActivitiesImpl.awaitAgentRun(String)」。

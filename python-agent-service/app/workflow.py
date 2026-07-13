@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+from app.adjudication_contract import mandatory_c6_review_responses
 from app.graph import OUTPUT_TYPES, build_hearing_graph
 from app.llm import AgentOutputSchemaError, StructuredLlmClient
 from app.harness.prompt_composer import PromptRepository
 from app.schemas import (
-    AdjudicationDraft,
     AdjudicationDraftOutput,
     EvidenceCrossCheckOutput,
     EvidenceGapOutput,
@@ -170,27 +170,19 @@ class HearingWorkflow:
     ) -> HearingAnalysisResult:
         """运行完整 C1-C6 图。"""
 
+        _validate_final_convergence_review(request)
         request_data = request.model_dump(mode="json")
         with self._tracer.workflow(trace_context, request_data) as trace:
-            try:
-                state = self._graph.invoke(
-                    # 初始状态只放 request、trace_context、executed_nodes；
-                    # 每个图节点会逐步把 issue_framing/evidence_gap 等结果写回 state。
-                    {
-                        "request": request_data,
-                        "trace_context": trace_context,
-                        "executed_nodes": [],
-                    }
-                )
-                result = self._completed(request, state)
-            except AgentOutputSchemaError as exception:
-                hearing_context = request.hearing_context
-                if not (
-                    hearing_context.final_convergence
-                    or hearing_context.must_produce_final_plan
-                ):
-                    raise
-                result = self._manual_review(request, exception)
+            state = self._graph.invoke(
+                # 初始状态只放 request、trace_context、executed_nodes；
+                # 每个图节点会逐步把 issue_framing/evidence_gap 等结果写回 state。
+                {
+                    "request": request_data,
+                    "trace_context": trace_context,
+                    "executed_nodes": [],
+                }
+            )
+            result = self._completed(request, state)
             trace.complete(result.model_dump(mode="json"))
             return result
 
@@ -203,6 +195,10 @@ class HearingWorkflow:
     ) -> HearingAnalysisResult:
         """把 LangGraph 最终 state 转成正式响应模型。"""
 
+        adjudication_draft = AdjudicationDraftOutput.model_validate(
+            state["adjudication_draft"]
+        )
+        _validate_c6_draft_review_responses(request, adjudication_draft)
         return HearingAnalysisResult(
             case_id=request.case_id,
             workflow_id=request.workflow_id,
@@ -221,46 +217,10 @@ class HearingWorkflow:
             rule_application=RuleApplicationOutput.model_validate(
                 state["rule_application"]
             ),
-            adjudication_draft=AdjudicationDraftOutput.model_validate(
-                state["adjudication_draft"]
-            ),
+            adjudication_draft=adjudication_draft,
             prompt_version=self._prompt_version,
             model=self._model,
         )
-
-    # 所属模块：听证主链路 > C1-C6 门面 > 最终收敛 Schema 失败人工兜底构造器。
-    # 具体功能：`_manual_review` 可在 AgentOutputSchemaError 时构造零置信、HIGH 风险、UNDETERMINED 的非裁决占位草案，并记录出错 node_name 与固定人工原因码。
-    # 上下游：上游是最终收敛时完整图节点输出无法通过结构化校验的异常路径；下游是 MANUAL_REVIEW_REQUIRED 响应和人工工作台。
-    # 系统意义：最终轮必须确定性结束，但不得从损坏自由文本猜结论；普通非最终轮仍保持严格失败。
-    def _manual_review(
-        self, request: HearingAnalyzeRequest, exception: AgentOutputSchemaError
-    ) -> HearingAnalysisResult:
-        fallback = AdjudicationDraftOutput(
-            draft=AdjudicationDraft(
-                recommended_outcome="UNDETERMINED",
-                reasoning_summary=(
-                    "Structured agent output could not be validated. "
-                    "No automated finding was accepted."
-                ),
-                issue_findings=[],
-                confidence=0,
-                risk_level="HIGH",
-                review_focus=[
-                    f"Review invalid structured output from {exception.node_name}"
-                ],
-            )
-        )
-        return HearingAnalysisResult(
-            case_id=request.case_id,
-            workflow_id=request.workflow_id,
-            workflow_status="MANUAL_REVIEW_REQUIRED",
-            executed_nodes=[],
-            adjudication_draft=fallback,
-            manual_review_reasons=["AGENT_OUTPUT_SCHEMA_INVALID"],
-            prompt_version=self._prompt_version,
-            model=self._model,
-        )
-
 
 # 所属模块：听证主链路 > C6 审核包 > 证据缺口提取。
 # 具体功能：`_c6_evidence_gaps` 仅在 C6 从冻结 previous_stage_outputs.C2_EVIDENCE_GAP 读取 gaps[].reason；结构缺失/损坏时返回明确英文诊断而非假装没有缺口。
@@ -328,3 +288,101 @@ def _c6_reviewer_attention(request: HearingStageRequest) -> list[str]:
             f"{request.current_settlement_version}."
         )
     return attention
+
+
+def _validate_final_convergence_review(request: HearingAnalyzeRequest) -> None:
+    """在 C1-C6 终局图启动前验收 V1 与统一评审报告的绑定关系。"""
+
+    hearing_context = request.hearing_context
+    if not (
+        hearing_context.final_convergence
+        or hearing_context.must_produce_final_plan
+    ):
+        return
+    courtroom_context = hearing_context.courtroom_context
+    proposal_v1 = courtroom_context.get("final_proposed_resolution")
+    formal_report = courtroom_context.get("jury_review_report")
+    if not isinstance(proposal_v1, str) or not proposal_v1.strip():
+        raise AgentOutputSchemaError(
+            "adjudication_draft_node",
+            "final convergence requires final_proposed_resolution V1",
+        )
+    if not isinstance(formal_report, dict):
+        raise AgentOutputSchemaError(
+            "adjudication_draft_node",
+            "final convergence requires the formal jury review report",
+        )
+    payload = formal_report.get("payload")
+    if not isinstance(payload, dict):
+        raise AgentOutputSchemaError(
+            "adjudication_draft_node",
+            "formal jury review report payload is missing",
+        )
+    if payload.get("reviewed_proposal") != proposal_v1:
+        raise AgentOutputSchemaError(
+            "adjudication_draft_node",
+            "jury review report is not bound to final_proposed_resolution V1",
+        )
+    findings = payload.get("findings")
+    if not isinstance(findings, list) or len(findings) != 6:
+        raise AgentOutputSchemaError(
+            "adjudication_draft_node",
+            "jury review report must contain six findings",
+        )
+    required_dimensions = {
+        "FACT_COMPLETENESS",
+        "EVIDENCE_CONSISTENCY",
+        "RULE_APPLICABILITY",
+        "PROCEDURAL_FAIRNESS",
+        "REMEDY_FEASIBILITY",
+        "RISK_AND_OMISSIONS",
+    }
+    dimensions = {
+        finding.get("dimension")
+        for finding in findings
+        if isinstance(finding, dict)
+    }
+    if dimensions != required_dimensions:
+        raise AgentOutputSchemaError(
+            "adjudication_draft_node",
+            "jury review report does not cover every required dimension",
+        )
+
+
+def _validate_c6_draft_review_responses(
+    request: HearingAnalyzeRequest,
+    output: AdjudicationDraftOutput,
+) -> None:
+    """确保裁决草案 V2 逐项回应评审报告中的强制修订意见。"""
+
+    hearing_context = request.hearing_context
+    if not (
+        hearing_context.final_convergence
+        or hearing_context.must_produce_final_plan
+    ):
+        return
+    required_responses = dict(
+        mandatory_c6_review_responses(request.model_dump(mode="json"))
+    )
+    responses = output.draft.jury_review_responses
+    response_dimensions = [item.dimension for item in responses]
+    if len(response_dimensions) != len(set(response_dimensions)):
+        raise AgentOutputSchemaError(
+            "adjudication_draft_node",
+            "adjudication draft V2 contains duplicate jury review responses",
+        )
+    responses_by_dimension = {item.dimension: item for item in responses}
+    missing = set(required_responses) - set(responses_by_dimension)
+    if missing:
+        raise AgentOutputSchemaError(
+            "adjudication_draft_node",
+            "adjudication draft V2 omitted mandatory jury review responses: "
+            + ",".join(sorted(missing)),
+        )
+    for dimension, severity in required_responses.items():
+        if responses_by_dimension[dimension].severity != severity:
+            raise AgentOutputSchemaError(
+                "adjudication_draft_node",
+                "adjudication draft V2 changed the severity of jury finding "
+                + dimension,
+            )

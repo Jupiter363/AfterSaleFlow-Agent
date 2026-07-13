@@ -38,6 +38,8 @@ const intakeOpen = ref(false);
 const creating = ref(false);
 const importingExternal = ref(false);
 const deletingCase = ref(false);
+const openingStage = ref("");
+const stageNavigationError = ref("");
 const deleteCandidate = ref(null);
 const createError = ref("");
 const importError = ref("");
@@ -129,7 +131,7 @@ const journey = [
   { key: "INTAKE", room: "INTAKE", label: "案情接待", agent: "接待官整理事实" },
   { key: "EVIDENCE", room: "EVIDENCE", label: "证据核验", agent: "证据书记官复核" },
   { key: "HEARING", room: "HEARING", label: "三轮庭审", agent: "法官组织审理" },
-  { key: "DRAFT", room: "REVIEW", label: "裁决草案", agent: "法官生成草案" },
+  { key: "DRAFT", room: "DRAFT", label: "裁决草案", agent: "法官生成草案" },
   { key: "REVIEW", room: "REVIEW", label: "人工终审", agent: "审核员最终确认" },
   { key: "OUTCOME", room: "OUTCOME", label: "执行结果", agent: "执行专员处理" },
 ];
@@ -152,19 +154,40 @@ const pendingActionLabels = {
 };
 
 const currentRoomIndex = computed(() => {
-  if (selectedCase.value?.case_status === "CLOSED") return journey.length - 1;
+  const status = selectedCase.value?.case_status;
   const room = selectedCase.value?.current_room;
+  if (["APPROVED_FOR_EXECUTION", "EXECUTING", "CLOSED", "MANUAL_HANDOFF"].includes(status)) {
+    return journey.length - 1;
+  }
+  if (room === "REVIEW") return 4;
+  if (
+    room === "DRAFT" ||
+    [
+      "DRAFT_READY",
+      "DELIBERATION_RUNNING",
+      "REVIEW_PENDING",
+      "WAITING_HUMAN_REVIEW",
+      "REMEDY_PLANNED",
+    ].includes(status)
+  ) {
+    return 3;
+  }
   if (room === "INTAKE") return 0;
   if (room === "EVIDENCE") return 1;
   if (room === "HEARING") return 2;
-  if (room === "REVIEW") {
-    return selectedCase.value?.pending_action === "AWAIT_REVIEW" ? 4 : 3;
-  }
   if (room === "OUTCOME") return 5;
   return 0;
 });
 const currentStage = computed(() => journey[currentRoomIndex.value] || journey[0]);
 const journeyProgress = computed(() => `${currentRoomIndex.value + 1} / ${journey.length}`);
+const currentRoomActionLabel = computed(() => {
+  if (currentRoomIndex.value === 5) return "查看最终结果";
+  if (currentRoomIndex.value === 4) {
+    return actor.role === "PLATFORM_REVIEWER" ? "进入终审室" : "查看裁决草案";
+  }
+  if (currentRoomIndex.value === 3) return "进入裁决草案室";
+  return "进入当前房间";
+});
 
 // 业务位置：【前端案件页面】stageState：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
 function stageState(index) {
@@ -175,26 +198,84 @@ function stageState(index) {
 
 function stageStatus(index) {
   const state = stageState(index);
-  if (state === "completed") return "完成";
-  if (state === "current") return "现在";
+  if (state === "completed") return "历史 · 只读";
+  if (state === "current") return "当前房间";
   if (index === currentRoomIndex.value + 1) return "下一站";
   return "待解锁";
+}
+
+const stageRouteNames = {
+  INTAKE: "intake-room",
+  EVIDENCE: "evidence-room",
+  HEARING: "hearing-court",
+  DRAFT: "adjudication-draft-room",
+  OUTCOME: "dispute-outcome",
+};
+
+function stageEntryDisabled(stage, index) {
+  if (stageState(index) === "locked" || openingStage.value) return true;
+  return false;
+}
+
+async function enterStage(stage, index) {
+  const dispute = selectedCase.value;
+  if (!dispute || stageEntryDisabled(stage, index)) return;
+  const historical = index < currentRoomIndex.value;
+  stageNavigationError.value = "";
+  openingStage.value = stage.key;
+  try {
+    if (stage.room === "REVIEW") {
+      if (actor.role !== "PLATFORM_REVIEWER") {
+        await router.push({
+          path: `/disputes/${dispute.id}/draft`,
+          query: historical ? { view: "history" } : {},
+        });
+        return;
+      }
+      const result = await disputeApi.outcome(actor, dispute.id);
+      const reviewTaskId = result?.review_task_id || result?.reviewTaskId;
+      if (!reviewTaskId) {
+        stageNavigationError.value = "未找到该案件的终审记录。";
+        return;
+      }
+      await router.push({
+        path: `/reviews/${encodeURIComponent(reviewTaskId)}`,
+        query: historical ? { view: "history" } : {},
+      });
+      return;
+    }
+    const name = stageRouteNames[stage.room];
+    if (!name) return;
+    await router.push({
+      name,
+      params: { caseId: dispute.id },
+      query: historical ? { view: "history" } : {},
+    });
+  } catch (failure) {
+    stageNavigationError.value = failure?.message || "暂时无法打开该阶段记录。";
+  } finally {
+    openingStage.value = "";
+  }
 }
 
 // 业务位置：【前端案件页面】enterCurrentRoom：切换与 当前阶段业务数据 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
 function enterCurrentRoom() {
   const dispute = selectedCase.value;
   if (!dispute) return;
-  const routes = {
-    INTAKE: "intake",
-    EVIDENCE: "evidence",
-    HEARING: "hearing",
-    REVIEW: "outcome",
-  };
-  const room = dispute.case_status === "CLOSED"
-    ? "outcome"
-    : routes[dispute.current_room] || "outcome";
-  router.push(`/disputes/${dispute.id}/${room}`);
+  if (["APPROVED_FOR_EXECUTION", "EXECUTING", "CLOSED", "MANUAL_HANDOFF"].includes(dispute.case_status)) {
+    router.push(`/disputes/${dispute.id}/outcome`);
+    return;
+  }
+  if (dispute.current_room === "REVIEW" && actor.role === "PLATFORM_REVIEWER") {
+    router.push("/reviews");
+    return;
+  }
+  if (currentRoomIndex.value >= 3) {
+    router.push(`/disputes/${dispute.id}/draft`);
+    return;
+  }
+  const routes = { INTAKE: "intake", EVIDENCE: "evidence", HEARING: "hearing" };
+  router.push(`/disputes/${dispute.id}/${routes[dispute.current_room] || "intake"}`);
 }
 
 // 业务位置：【前端案件页面】sourceLabel：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
@@ -203,9 +284,17 @@ function sourceLabel(source) {
 }
 
 // 业务位置：【前端案件页面】roomLabel：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
-function roomLabel(room) {
-  if (room === "REVIEW") return "裁决与人工终审";
-  return journey.find((stage) => stage.room === room)?.label || room || "待分配房间";
+function roomLabel(dispute) {
+  if (!dispute) return "待分配房间";
+  const status = dispute.case_status;
+  if (["APPROVED_FOR_EXECUTION", "EXECUTING", "CLOSED", "MANUAL_HANDOFF"].includes(status)) {
+    return "执行结果";
+  }
+  if (dispute.current_room === "REVIEW") return "平台人工终审";
+  if (["DRAFT_READY", "REVIEW_PENDING", "WAITING_HUMAN_REVIEW", "REMEDY_PLANNED"].includes(status)) {
+    return "裁决草案";
+  }
+  return journey.find((stage) => stage.room === dispute.current_room)?.label || dispute.current_room || "待分配房间";
 }
 
 // 业务位置：【前端案件页面】riskLabel：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
@@ -214,7 +303,10 @@ function riskLabel(risk) {
 }
 
 // 业务位置：【前端案件页面】pendingActionLabel：围绕 履约执行动作和工具意图 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
-function pendingActionLabel(action) {
+function pendingActionLabel(action, dispute = selectedCase.value) {
+  if (action === "AWAIT_REVIEW") {
+    return dispute?.current_room === "REVIEW" ? "平台终审进行中" : "查看裁决草案";
+  }
   return pendingActionLabels[action] || action || "等待下一步";
 }
 
@@ -558,9 +650,9 @@ onBeforeUnmount(() => {
             <strong>{{ item.title }}</strong>
             <span class="dispute-ticket__room">
               <i aria-hidden="true" />
-              {{ roomLabel(item.current_room) }}
+              {{ roomLabel(item) }}
             </span>
-            <small>{{ pendingActionLabel(item.pending_action) }}</small>
+            <small>{{ pendingActionLabel(item.pending_action, item) }}</small>
           </button>
         </div>
       </aside>
@@ -611,7 +703,7 @@ onBeforeUnmount(() => {
             >
               <span aria-hidden="true">→</span>
               <span>
-                <strong>进入当前房间</strong>
+                <strong>{{ currentRoomActionLabel }}</strong>
                 <small>{{ currentStage.label }} · {{ pendingActionLabel(selectedCase?.pending_action) }}</small>
               </span>
             </button>
@@ -621,12 +713,25 @@ onBeforeUnmount(() => {
                 v-for="(stage, index) in journey"
                 :key="stage.key"
                 :data-stage-state="stageState(index)"
+                :data-stage-room="stage.room"
               >
                 <span class="adventure-path__orb">{{ index + 1 }}</span>
                 <strong>{{ stage.label }}</strong>
                 <small>{{ stageStatus(index) }}</small>
+                <button
+                  type="button"
+                  class="adventure-path__hit"
+                  :data-stage-entry="stage.room"
+                  :disabled="stageEntryDisabled(stage, index)"
+                  :aria-label="`${stage.label}：${stageStatus(index)}`"
+                  @click="enterStage(stage, index)"
+                />
               </li>
             </ol>
+
+            <p v-if="stageNavigationError" class="adventure-path__error" role="alert">
+              {{ stageNavigationError }}
+            </p>
 
             <div class="hearing-adventure__finish">
               <span aria-hidden="true">⚑</span>
@@ -1761,6 +1866,32 @@ onBeforeUnmount(() => {
   border-radius: 38px;
   box-shadow: 0 10px 24px rgba(18, 56, 46, .13);
   transition: transform .2s ease, opacity .2s ease;
+}
+.adventure-path__hit {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  padding: 0;
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-radius: 34px;
+}
+.adventure-path__hit:focus-visible { outline: 3px solid rgba(64, 140, 247, .42); outline-offset: 3px; }
+.adventure-path__hit:disabled { cursor: not-allowed; }
+.adventure-path li[data-stage-state="completed"]:has(.adventure-path__hit:not(:disabled)):hover {
+  transform: translateY(-4px);
+  box-shadow: 0 14px 28px rgba(18, 56, 46, .17);
+}
+.adventure-path__error {
+  position: absolute;
+  top: 116px;
+  left: 22px;
+  z-index: 5;
+  max-width: 280px;
+  margin: 0;
+  color: #a23e49;
+  font-size: 12px;
 }
 .adventure-path li:nth-child(1) { left: 76px; top: 294px; background: #ffd9cf; }
 .adventure-path li:nth-child(2) { left: 224px; top: 150px; background: #d6e8ff; }

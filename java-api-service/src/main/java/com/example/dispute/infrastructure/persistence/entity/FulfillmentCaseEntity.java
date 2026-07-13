@@ -625,6 +625,8 @@ public class FulfillmentCaseEntity extends AbstractEntity {
                     "remedy cannot be planned from status " + caseStatus);
         }
         this.caseStatus = CaseStatus.REMEDY_PLANNED;
+        this.currentRoom = routeType == RouteType.FULL_HEARING ? "DRAFT" : "REVIEW";
+        this.currentDeadlineAt = null;
         this.updatedBy = required(actorId, "actorId");
     }
 
@@ -640,6 +642,18 @@ public class FulfillmentCaseEntity extends AbstractEntity {
                     "review cannot start from status " + caseStatus);
         }
         caseStatus = CaseStatus.WAITING_HUMAN_REVIEW;
+        currentRoom = routeType == RouteType.FULL_HEARING ? "DRAFT" : "REVIEW";
+        currentDeadlineAt = null;
+        updatedBy = required(actorId, "actorId");
+    }
+
+    public void enterHumanReview(String actorId) {
+        if (caseStatus != CaseStatus.WAITING_HUMAN_REVIEW) {
+            throw new IllegalStateException(
+                    "review room cannot open from status " + caseStatus);
+        }
+        currentRoom = "REVIEW";
+        currentDeadlineAt = null;
         updatedBy = required(actorId, "actorId");
     }
 
@@ -662,6 +676,11 @@ public class FulfillmentCaseEntity extends AbstractEntity {
                     case REQUEST_MORE_EVIDENCE -> CaseStatus.WAITING_EVIDENCE;
                     case REJECT, ESCALATE_MANUAL -> CaseStatus.MANUAL_HANDOFF;
                 };
+        currentRoom =
+                decision == com.example.dispute.domain.model.ApprovalDecisionType.REQUEST_MORE_EVIDENCE
+                        ? "EVIDENCE"
+                        : "OUTCOME";
+        currentDeadlineAt = null;
         updatedBy = required(actorId, "actorId");
     }
 
@@ -680,6 +699,8 @@ public class FulfillmentCaseEntity extends AbstractEntity {
                     "execution cannot start from status " + caseStatus);
         }
         caseStatus = CaseStatus.EXECUTING;
+        currentRoom = "OUTCOME";
+        currentDeadlineAt = null;
         updatedBy = required(actorId, "actorId");
     }
 
@@ -697,6 +718,8 @@ public class FulfillmentCaseEntity extends AbstractEntity {
                     "case cannot close from status " + caseStatus);
         }
         caseStatus = CaseStatus.CLOSED;
+        currentRoom = "OUTCOME";
+        currentDeadlineAt = null;
         closedAt = OffsetDateTime.now(ZoneOffset.UTC);
         updatedBy = required(actorId, "actorId");
     }

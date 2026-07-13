@@ -28,24 +28,29 @@ const packet = {
 
 // 业务位置：【前端审核工作台】mountView：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 冻结审核包、Agent 建议和履约动作 正确进入 审核员批准、修改、补证或人工交接。上游：冻结审核包、Agent 建议和履约动作。下游：审核员批准、修改、补证或人工交接。边界：决定必须显式由有权限审核员提交。
 async function mountView(overrides = {}) {
+  const { historyMode: openAsHistory = false, ...viewOverrides } = overrides;
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [{ path: "/reviews/:reviewId", component: { template: "<div />" } }],
   });
-  await router.push("/reviews/REVIEW_1");
+  await router.push(
+    openAsHistory
+      ? "/reviews/REVIEW_1?view=history"
+      : "/reviews/REVIEW_1",
+  );
   await router.isReady();
-  const decideAction = overrides.decideAction || vi.fn();
+  const decideAction = viewOverrides.decideAction || vi.fn();
   const wrapper = mount(ReviewWorkbenchView, {
     props: {
       initialPacket: packet,
       viewerRole: "PLATFORM_REVIEWER",
       decideAction,
       serverNow: "2026-07-03T12:00:00+08:00",
-      ...overrides,
+      ...viewOverrides,
     },
     global: { plugins: [router] },
   });
-  return { wrapper, decideAction };
+  return { wrapper, router, decideAction };
 }
 
 // 业务位置：【前端审核工作台】describe：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 冻结审核包、Agent 建议和履约动作 正确进入 审核员批准、修改、补证或人工交接。上游：冻结审核包、Agent 建议和履约动作。下游：审核员批准、修改、补证或人工交接。边界：决定必须显式由有权限审核员提交。
@@ -55,6 +60,33 @@ describe("ReviewWorkbenchView", () => {
     actor.role = "USER";
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  it("locks copilot and decision controls when reopening historical review", async () => {
+    const decideAction = vi.fn();
+    const { wrapper } = await mountView({ historyMode: true, decideAction });
+
+    expect(wrapper.get("[data-review-history-banner]").text()).toContain("历史浏览模式");
+    expect(wrapper.find("[data-review-decisions]").exists()).toBe(false);
+    expect(wrapper.get("[data-review-copilot-input]").attributes("disabled")).toBeDefined();
+    expect(wrapper.get("[data-review-copilot-submit]").attributes("disabled")).toBeDefined();
+    expect(wrapper.text()).toContain("所有批准、修改和驳回操作均已锁定");
+    expect(decideAction).not.toHaveBeenCalled();
+  });
+
+  it("clears an open decision confirmation when the active view becomes historical", async () => {
+    const { wrapper, router, decideAction } = await mountView();
+    await wrapper.get("[data-review-reason]").setValue("已完成证据与规则复核");
+    await wrapper.get('[data-decision="APPROVE"]').trigger("click");
+    expect(wrapper.find("[data-decision-confirm]").exists()).toBe(true);
+
+    await router.push("/reviews/REVIEW_1?view=history");
+    await flushPromises();
+
+    expect(wrapper.get("[data-review-history-banner]").text()).toContain("历史浏览模式");
+    expect(wrapper.find("[data-decision-confirm]").exists()).toBe(false);
+    expect(wrapper.find("[data-review-decisions]").exists()).toBe(false);
+    expect(decideAction).not.toHaveBeenCalled();
   });
 
   // 业务位置：【前端审核工作台】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 冻结审核包、Agent 建议和履约动作 正确进入 审核员批准、修改、补证或人工交接。上游：冻结审核包、Agent 建议和履约动作。下游：审核员批准、修改、补证或人工交接。边界：决定必须显式由有权限审核员提交。

@@ -12,6 +12,7 @@ import com.example.dispute.workflow.domain.HearingWorkflowCommand;
 import com.example.dispute.workflow.domain.HearingWorkflowResult;
 import io.temporal.activity.ActivityOptions;
 import io.temporal.failure.ActivityFailure;
+import io.temporal.failure.ApplicationFailure;
 import io.temporal.common.RetryOptions;
 import io.temporal.workflow.Workflow;
 import java.time.Duration;
@@ -66,6 +67,12 @@ public class DisputeHearingWorkflowImpl
         String draftId = null;
         // initialize 是 Activity：它负责数据库事实；下面的 Workflow 变量只保存可重放控制状态。
         activities.initialize(command);
+        boolean failClosedOnStageFailure =
+                Workflow.getVersion(
+                                        "hearing-stage-failure-fail-closed",
+                                        Workflow.DEFAULT_VERSION,
+                                        1)
+                                == 1;
         String stopReason = awaitSharedHearing(command);
         if ("DEADLINE_EXPIRED".equals(stopReason)) {
             evidenceTimedOut = true;
@@ -110,7 +117,8 @@ public class DisputeHearingWorkflowImpl
                             command,
                             dossierVersion,
                             evidenceTimedOut,
-                            "VALIDATION_INTERRUPTED");
+                            "VALIDATION_INTERRUPTED",
+                            failClosedOnStageFailure);
                 }
                 HearingStageActivityResult c2 =
                         runStage(
@@ -126,7 +134,8 @@ public class DisputeHearingWorkflowImpl
                             command,
                             dossierVersion,
                             evidenceTimedOut,
-                            "VALIDATION_INTERRUPTED");
+                            "VALIDATION_INTERRUPTED",
+                            failClosedOnStageFailure);
                 }
                 if (!c2.requiresAdditionalEvidence()
                         || evidenceTimedOut
@@ -151,7 +160,8 @@ public class DisputeHearingWorkflowImpl
                             command,
                             dossierVersion,
                             evidenceTimedOut,
-                            "VALIDATION_INTERRUPTED");
+                            "VALIDATION_INTERRUPTED",
+                            failClosedOnStageFailure);
                 }
                 boolean received =
                         Workflow.await(
@@ -196,18 +206,23 @@ public class DisputeHearingWorkflowImpl
                             command,
                             dossierVersion,
                             evidenceTimedOut,
-                            "VALIDATION_INTERRUPTED");
+                            "VALIDATION_INTERRUPTED",
+                            failClosedOnStageFailure);
                 }
                 if ("C6_DRAFT_GENERATION".equals(stage)) {
                     draftId = result.draftId();
                 }
             }
         } catch (ActivityFailure failure) {
+            if (failClosedOnStageFailure) {
+                throw failure;
+            }
             return interrupt(
                     command,
                     dossierVersion,
                     evidenceTimedOut,
-                    "ACTIVITY_INTERRUPTED");
+                    "ACTIVITY_INTERRUPTED",
+                    false);
         }
         String status = manualRequired ? "MANUAL_REVIEW_REQUIRED" : "COMPLETED";
         activities.complete(
@@ -270,7 +285,13 @@ public class DisputeHearingWorkflowImpl
             HearingWorkflowCommand command,
             long dossierVersion,
             boolean evidenceTimedOut,
-            String status) {
+            String status,
+            boolean failClosed) {
+        if (failClosed) {
+            throw ApplicationFailure.newNonRetryableFailure(
+                    "hearing stage did not produce a validated draft",
+                    "HEARING_STAGE_VALIDATION_FAILED");
+        }
         activities.complete(
                 command.caseId(),
                 command.workflowId(),

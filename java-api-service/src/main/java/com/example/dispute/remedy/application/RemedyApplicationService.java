@@ -13,6 +13,7 @@ import com.example.dispute.common.exception.ForbiddenException;
 import com.example.dispute.common.exception.NotFoundException;
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
+import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.HearingStatus;
 import com.example.dispute.domain.model.RouteType;
 import com.example.dispute.infrastructure.persistence.entity.AdjudicationDraftEntity;
@@ -93,6 +94,11 @@ public class RemedyApplicationService {
                         .findByIdForUpdate(caseId)
                         .orElseThrow(() -> caseNotFound(caseId));
         RouteType sourceRoute = resolveSourceRoute(disputeCase, workflowId);
+        if (sourceRoute == RouteType.FULL_HEARING
+                && disputeCase.getCaseStatus() == CaseStatus.HEARING_OPEN) {
+            disputeCase.attachHearingWorkflow(workflowId, SYSTEM.actorId());
+            caseRepository.save(disputeCase);
+        }
         if (sourceRoute == RouteType.FULL_HEARING
                 && !workflowId.equals(disputeCase.getCurrentWorkflowId())) {
             throw new BusinessException(

@@ -157,7 +157,7 @@ describe("DigitalHuman", () => {
       props: {
         state: "THINKING",
         name: "小察",
-        role: "AI 评审团",
+        role: "AI 评审员",
         portraitVariant: "jury-a",
       },
     });

@@ -8,6 +8,10 @@ from typing import Annotated, Any
 from langgraph.graph import END, START, StateGraph
 from typing_extensions import NotRequired, TypedDict
 
+from app.adjudication_contract import (
+    c6_output_type_for_request,
+    trusted_c6_review_contract,
+)
 from app.llm import StructuredLlmClient
 from app.harness.prompt_composer import PromptRepository
 from app.schemas import (
@@ -90,7 +94,7 @@ def build_hearing_graph(
         # 闭包语法说明：node(...) 返回 execute 函数。
         # 每个 node_name 都会绑定不同的 output_type 和 state_key，
         # 这样可以用同一段 execute 逻辑创建多个 LangGraph 节点。
-        output_type = OUTPUT_TYPES[node_name]
+        default_output_type = OUTPUT_TYPES[node_name]
         state_key = STATE_KEYS[node_name]
 
         # 所属模块：听证主链路 > C1-C6 LangGraph > 单阶段节点执行器。
@@ -98,6 +102,11 @@ def build_hearing_graph(
         # 上下游：上游是 START/固定边/条件边传入的 HearingGraphState；下游返回 `{本阶段状态键: output, executed_nodes:[node_name]}`，由 LangGraph 合并后流向下一节点。
         # 系统意义：节点返回的是局部更新而非完整 state；executed_nodes 的 operator.add reducer 保留真实路径，Pydantic 结构化生成阻止自由文本直接污染后续阶段。
         def execute(state: HearingGraphState) -> dict[str, Any]:
+            output_type = (
+                c6_output_type_for_request(state["request"])
+                if node_name == "adjudication_draft_node"
+                else default_output_type
+            )
             # case_data 会进入不可信 user prompt。字典推导式只收集“已经写入 state”的阶段，
             # 因而跳过条件分支未执行的 party_liaison，而不会制造一个假空结果。
             case_data = {
@@ -108,8 +117,23 @@ def build_hearing_graph(
                     if key in state
                 },
             }
+            if node_name == "adjudication_draft_node":
+                # Repeat the compact manifest at the end of the user payload so
+                # it remains adjacent to the response contract even when the
+                # frozen courtroom dossier is large. The authoritative copy is
+                # still the system-level trusted_agent_context below.
+                case_data["c6_response_contract"] = trusted_c6_review_contract(
+                    state["request"]
+                )
             system_prompt, user_prompt = prompts.render(
-                node_name, case_data, output_type.model_json_schema()
+                node_name,
+                case_data,
+                output_type.model_json_schema(),
+                trusted_agent_context=(
+                    trusted_c6_review_contract(state["request"])
+                    if node_name == "adjudication_draft_node"
+                    else None
+                ),
             )
             # 这里是本节点唯一一次 LLM 调用；output_type 强制模型输出符合指定 Pydantic schema。
             generation = llm.generate(

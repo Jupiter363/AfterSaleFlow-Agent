@@ -1134,6 +1134,56 @@ class HearingRoundTurnRequest(StrictModel):
     ] = Field(default_factory=list)
 
 
+class JuryReviewDimension(StrEnum):
+    FACT_COMPLETENESS = "FACT_COMPLETENESS"
+    EVIDENCE_CONSISTENCY = "EVIDENCE_CONSISTENCY"
+    RULE_APPLICABILITY = "RULE_APPLICABILITY"
+    PROCEDURAL_FAIRNESS = "PROCEDURAL_FAIRNESS"
+    REMEDY_FEASIBILITY = "REMEDY_FEASIBILITY"
+    RISK_AND_OMISSIONS = "RISK_AND_OMISSIONS"
+
+
+class JuryReviewFinding(StrictModel):
+    dimension: JuryReviewDimension
+    severity: Literal["NONE", "LOW", "MEDIUM", "HIGH", "BLOCKER"]
+    assessment: ShortText
+    basis: Annotated[list[ShortText], Field(min_length=1, max_length=6)]
+    requires_revision: bool = False
+
+
+class JuryReviewReport(StrictModel):
+    public_message: LongText
+    reviewed_proposal: LongText
+    summary: ShortText
+    risk_level: Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"]
+    confidence_score: Annotated[int, Field(ge=0, le=100)]
+    review_focus_signal: Annotated[list[ShortText], Field(max_length=20)] = Field(
+        default_factory=list
+    )
+    findings: Annotated[list[JuryReviewFinding], Field(min_length=6, max_length=6)]
+    recommendations: Annotated[list[ShortText], Field(max_length=8)] = Field(
+        default_factory=list
+    )
+    review_notes: ShortText
+    visibility: Literal["REVIEWER_VISIBLE"] = "REVIEWER_VISIBLE"
+    prompt_version: Identifier = "unified-jury-review-v1"
+    model: Identifier = "unknown"
+    approval_performed: Literal[False] = False
+    execution_triggered: Literal[False] = False
+    is_final_decision: Literal[False] = False
+
+    @model_validator(mode="after")
+    def validate_review_contract(self) -> "JuryReviewReport":
+        dimensions = [finding.dimension for finding in self.findings]
+        if len(dimensions) != len(set(dimensions)):
+            raise ValueError("jury review findings must not repeat dimensions")
+        if set(dimensions) != set(JuryReviewDimension):
+            raise ValueError("jury review findings must cover all six dimensions")
+        if "非最终" not in self.reviewed_proposal:
+            raise ValueError("reviewed_proposal must identify itself as non-final")
+        return self
+
+
 class HearingRoundTurnResult(StrictModel):
     speaker_role: Literal["JUDGE"] = "JUDGE"
     message_text: LongText
@@ -1155,7 +1205,9 @@ class HearingRoundTurnResult(StrictModel):
     review_focus_signal: Annotated[list[ShortText], Field(max_length=20)] = Field(
         default_factory=list
     )
+    jury_review_report: JuryReviewReport | None = None
     proposed_resolution_direction: ShortText | None = None
+    final_proposed_resolution: LongText | None = None
     prompt_version: Identifier = "hearing-round-turn-v1"
     model: Identifier = "unknown"
     non_final: Literal[True] = True

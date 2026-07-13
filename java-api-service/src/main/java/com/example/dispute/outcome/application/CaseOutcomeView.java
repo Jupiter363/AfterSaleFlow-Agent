@@ -23,4 +23,6 @@ public record CaseOutcomeView(
         OffsetDateTime closedAt,
         FinalDecisionView finalDecision,
         AdjudicationDraftView adjudicationDraft,
+        String reviewTaskId,
+        String reviewTaskStatus,
         List<ActionRecordView> actions) {}

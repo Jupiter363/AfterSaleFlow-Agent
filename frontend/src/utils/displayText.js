@@ -66,6 +66,7 @@ const VALUE_LABELS = {
   PENDING_REVIEW: "待复核",
   PENDING_HUMAN_REVIEW: "待人工复核",
   PENDING_POLICY_REVIEW: "待规则复核",
+  UNDETERMINED: "待终审确认",
   WAITING_HUMAN_REVIEW: "等待人工复核",
   NEEDS_HUMAN_REVIEW: "待人工复核",
   REQUIRES_HUMAN_REVIEW: "需人工复核",
@@ -123,6 +124,10 @@ const ENGLISH_PHRASE_LABELS = {
   "No additional details or evidence provided.": "尚未补充更多细节或证据。",
   "Package not received.": "用户称未收到包裹。",
   "Package not received": "用户称未收到包裹",
+  "Structured agent output could not be validated. No automated finding was accepted.":
+    "结构化草案未通过校验，系统未采纳自动结论，需由终审人工复核。",
+  "Review the failed final-convergence structured output manually.":
+    "请人工复核未通过校验的终局结构化输出。",
 };
 
 const TOKEN_LABELS = {
@@ -185,7 +190,25 @@ export function displayRoomMessageText(value) {
   if (questionMarks >= 6 && questionMarks / raw.length > 0.35) {
     return "历史消息编码异常，原始内容已按不可变记录留存。";
   }
-  return replaceInternalTokens(summarizeEvidenceMatrixJson(raw));
+  return replaceInternalTokensPreservingEvidenceIds(
+    summarizeEvidenceMatrixJson(raw),
+  );
+}
+
+function replaceInternalTokensPreservingEvidenceIds(raw) {
+  const evidenceIds = [];
+  const protectedText = String(raw || "").replace(
+    /\bEVIDENCE_[A-Za-z0-9_-]+\b/g,
+    (evidenceId) => {
+      const index = evidenceIds.push(evidenceId) - 1;
+      return `@@ROOM_EVIDENCE_${index}@@`;
+    },
+  );
+  const localized = replaceInternalTokens(protectedText);
+  return localized.replace(
+    /@@ROOM_EVIDENCE_(\d+)@@/g,
+    (_placeholder, index) => evidenceIds[Number(index)] || "",
+  );
 }
 
 // 业务位置：【前端应用】summarizeEvidenceMatrixJson：围绕 事实-证据矩阵 计算本模块需要的派生信息，使其能够从 路由、API 和本地状态 正确进入 售后纠纷处理界面。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。

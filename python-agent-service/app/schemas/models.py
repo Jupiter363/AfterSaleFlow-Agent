@@ -150,6 +150,21 @@ class DraftIssueFinding(StrictModel):
     policy_basis: Annotated[list[Identifier], Field(max_length=30)]
 
 
+class JuryReviewResponse(StrictModel):
+    dimension: Literal[
+        "FACT_COMPLETENESS",
+        "EVIDENCE_CONSISTENCY",
+        "RULE_APPLICABILITY",
+        "PROCEDURAL_FAIRNESS",
+        "REMEDY_FEASIBILITY",
+        "RISK_AND_OMISSIONS",
+    ]
+    severity: Literal["NONE", "LOW", "MEDIUM", "HIGH", "BLOCKER"]
+    disposition: Literal["ACCEPTED", "PARTIALLY_ACCEPTED", "NOT_ACCEPTED"]
+    response: LongText
+    basis: Annotated[list[ShortText], Field(min_length=1, max_length=6)]
+
+
 class AdjudicationDraft(StrictModel):
     draft_status: Literal["PENDING_HUMAN_REVIEW"] = "PENDING_HUMAN_REVIEW"
     recommended_outcome: ShortText
@@ -158,6 +173,10 @@ class AdjudicationDraft(StrictModel):
     confidence: Confidence
     risk_level: RiskLevel
     review_focus: Annotated[list[ShortText], Field(min_length=1, max_length=30)]
+    jury_review_responses: Annotated[
+        list[JuryReviewResponse],
+        Field(max_length=6),
+    ] = Field(default_factory=list)
     requires_human_review: Literal[True] = True
     is_final_decision: Literal[False] = False
 

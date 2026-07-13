@@ -20,6 +20,31 @@ export function createRoomState() {
 
 export const roomStore = reactive(createRoomState());
 
+function eventSequenceNo(event) {
+  const value = Number(
+    event?.sequence_no ?? event?.sequenceNo ?? event?.id ?? 0,
+  );
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+async function initializeRoomEventCursor({
+  actor,
+  caseId,
+  state,
+  cursorKey,
+}) {
+  if (Object.prototype.hasOwnProperty.call(state.lastEventIds, cursorKey)) {
+    return;
+  }
+  const replayed = await roomApi.events(actor, caseId, 0);
+  const baseline = (Array.isArray(replayed) ? replayed : []).reduce(
+    (highest, event) => Math.max(highest, eventSequenceNo(event)),
+    0,
+  );
+  state.lastEventIds[cursorKey] = baseline;
+  state.lastEventId = baseline;
+}
+
 // 业务位置：【前端状态仓库】loadRoomMessages：读取 房间消息和对话记录，并依据当前案件、角色和会话权限裁剪成可用输入。上游：API 响应、SSE 增量和用户操作。下游：跨组件一致的案件/房间/证据状态。边界：本地状态不能替代服务端事实。
 export function loadRoomMessages(actor, caseId, roomType, state = roomStore) {
   state.roomType = roomType;
@@ -80,6 +105,7 @@ export async function streamRoomEvents({
     .join(":");
   while (!signal?.aborted) {
     try {
+      await initializeRoomEventCursor({ actor, caseId, state, cursorKey });
       await resumeRoomEvents({
         state,
         snapshotLoader:

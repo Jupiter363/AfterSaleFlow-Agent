@@ -5,9 +5,11 @@
 
 <script setup>
 import { computed } from "vue";
+import { agentSpeakerPresentation } from "../../utils/agentSpeakerPresentation";
 
 const props = defineProps({
   run: { type: Object, required: true },
+  card: { type: Object, default: null },
   label: { type: String, default: "" },
   appearance: {
     type: String,
@@ -16,10 +18,28 @@ const props = defineProps({
   },
 });
 
-const displayLabel = computed(() => props.label || props.run.agentLabel || "数字人");
+const fallbackPresentation = computed(() =>
+  agentSpeakerPresentation(
+    props.card?.senderRole || props.run.senderRole,
+    props.label || props.run.agentLabel || "数字人",
+  ),
+);
+const displayIdentity = computed(() =>
+  props.card?.identity || fallbackPresentation.value.identity,
+);
+const displayName = computed(() =>
+  props.card?.name || fallbackPresentation.value.name,
+);
+const displayContent = computed(() =>
+  props.card ? props.card.content || "" : props.run.content || "",
+);
+const cardIsActive = computed(() =>
+  !props.card || props.run.activeCardKey === props.card.key,
+);
 const statusLabel = computed(() => {
   if (props.run.status === "RECONNECTING") return "正在恢复连接";
   if (props.run.status === "FINALIZING") return "正在整理正式记录";
+  if (!cardIsActive.value && displayContent.value) return "本段生成完成";
   return "正在生成";
 });
 </script>
@@ -27,21 +47,25 @@ const statusLabel = computed(() => {
 <template>
   <article
     class="agent-streaming-message"
-    :class="`agent-streaming-message--${appearance}`"
+    :class="[
+      `agent-streaming-message--${appearance}`,
+      `agent-streaming-message--${String(card?.senderRole || run.senderRole || 'agent').toLowerCase()}`,
+    ]"
     :data-agent-run-id="run.runId"
+    :data-agent-stream-card="card?.key || 'default'"
     :data-agent-stream-status="run.status"
     data-agent-streaming-message
     aria-live="polite"
-    aria-busy="true"
+    :aria-busy="cardIsActive"
   >
     <header>
-      <strong>{{ displayLabel }}</strong>
+      <strong>{{ displayIdentity }} · {{ displayName }} 正常发言：</strong>
       <small>{{ statusLabel }}</small>
     </header>
     <p>
-      <span v-if="run.content">{{ run.content }}</span>
+      <span v-if="displayContent">{{ displayContent }}</span>
       <span v-else class="agent-streaming-message__waiting">正在组织回复</span>
-      <i class="agent-streaming-message__cursor" aria-hidden="true" />
+      <i v-if="cardIsActive" class="agent-streaming-message__cursor" aria-hidden="true" />
     </p>
   </article>
 </template>
@@ -50,10 +74,10 @@ const statusLabel = computed(() => {
 .agent-streaming-message {
   box-sizing: border-box;
   min-width: 0;
-  color: #334159;
-  background: #fffaf1;
-  border: 1px solid #e7decc;
-  box-shadow: 0 8px 26px #455d8610;
+  color: var(--conversation-agent-message-color, #334159);
+  background: var(--conversation-agent-message-background, #fffaf1);
+  border: 1px solid var(--conversation-agent-message-border, #e7decc);
+  box-shadow: none;
 }
 .agent-streaming-message--conversation {
   justify-self: start;
@@ -69,6 +93,20 @@ const statusLabel = computed(() => {
   border-radius: 18px 18px 18px 7px;
   background: linear-gradient(145deg, #fffdf7, #fff8e9);
 }
+.agent-streaming-message--jury_panel {
+  --conversation-agent-message-color: #494263;
+  --conversation-agent-message-background: #f3efff;
+  --conversation-agent-message-border: #ddd2f1;
+  --conversation-agent-message-title: #5a4e78;
+  --conversation-agent-message-meta: #80749a;
+}
+.agent-streaming-message--evidence_clerk {
+  --conversation-agent-message-color: #27475d;
+  --conversation-agent-message-background: #eef8fb;
+  --conversation-agent-message-border: #cee4ea;
+  --conversation-agent-message-title: #31596c;
+  --conversation-agent-message-meta: #668a99;
+}
 .agent-streaming-message header {
   display: flex;
   align-items: center;
@@ -76,11 +114,11 @@ const statusLabel = computed(() => {
   gap: 16px;
 }
 .agent-streaming-message header strong {
-  color: #5e5143;
+  color: var(--conversation-agent-message-title, #5e5143);
   font-size: 13px;
 }
 .agent-streaming-message header small {
-  color: #9a7c50;
+  color: var(--conversation-agent-message-meta, #8a7c68);
   font-size: 10.5px;
   font-weight: 700;
   letter-spacing: .02em;

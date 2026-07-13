@@ -51,9 +51,13 @@ class ReviewControllerTest {
     // 系统意义：「ReviewControllerTest.reviewerCanListAndSubmitAuditedDecision()」守住「平台人工终审」的可执行规格，尤其防止 「REVIEW_1」、「CASE_1」、「REMEDY_1」、「PACKET_1」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test void reviewerCanListAndSubmitAuditedDecision() throws Exception{
         when(service.list(any(),any())).thenReturn(List.of(new ReviewTaskView("REVIEW_1","CASE_1","REMEDY_1","PACKET_1","PENDING","URGENT","PLATFORM_REVIEWER",null,null,null)));
+        when(service.start(eq("REVIEW_1"),any())).thenReturn(new ReviewTaskView("REVIEW_1","CASE_1","REMEDY_1","PACKET_1","IN_REVIEW","URGENT","PLATFORM_REVIEWER","reviewer-local",null,null));
         when(service.decide(eq("REVIEW_1"),any(),any())).thenReturn(new ReviewDecisionView("APPROVAL_1","REVIEW_1","CASE_1","APPROVE","APPROVED","APPROVED_FOR_EXECUTION",true));
         mvc.perform(get("/api/reviews").header(HeaderAuthenticationFilter.USER_ID_HEADER,"reviewer-local").header(HeaderAuthenticationFilter.ROLE_HEADER,"PLATFORM_REVIEWER"))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.data[0].priority").value("URGENT"));
+        mvc.perform(post("/api/reviews/REVIEW_1/start").header(HeaderAuthenticationFilter.USER_ID_HEADER,"reviewer-local")
+                        .header(HeaderAuthenticationFilter.ROLE_HEADER,"PLATFORM_REVIEWER"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.data.status").value("IN_REVIEW"));
         mvc.perform(post("/api/reviews/REVIEW_1/decision").header(HeaderAuthenticationFilter.USER_ID_HEADER,"reviewer-local")
                         .header(HeaderAuthenticationFilter.ROLE_HEADER,"PLATFORM_REVIEWER").header("Idempotency-Key","decision-1")
                         .contentType(MediaType.APPLICATION_JSON).content("{\"decision\":\"APPROVE\",\"reason\":\"verified\"}"))

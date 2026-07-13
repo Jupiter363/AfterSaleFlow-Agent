@@ -37,6 +37,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -54,6 +55,15 @@ public class HearingCourtOrchestrator implements AgentRunFinalizer {
 
     public static final String JUDGE_SENDER_ROLE = "JUDGE";
     public static final String JUDGE_SENDER_ID = "presiding-judge";
+
+    private static final Set<String> REQUIRED_JURY_REVIEW_DIMENSIONS =
+            Set.of(
+                    "FACT_COMPLETENESS",
+                    "EVIDENCE_CONSISTENCY",
+                    "RULE_APPLICABILITY",
+                    "PROCEDURAL_FAIRNESS",
+                    "REMEDY_FEASIBILITY",
+                    "RISK_AND_OMISSIONS");
 
     private static final Logger log = LoggerFactory.getLogger(HearingCourtOrchestrator.class);
 
@@ -338,12 +348,19 @@ public class HearingCourtOrchestrator implements AgentRunFinalizer {
                         + finalization.caseId()
                         + ":"
                         + roundNo;
+        // A run retry has an attempt-scoped stream key, while the persisted court message has
+        // one stable domain identity per case and round. Never leak the retry key into the room
+        // message or the same finalization cannot bind its jury report to the judge proposal.
+        String judgeMessageKey =
+                opening
+                        ? judgeRoundOpeningKey(finalization.caseId(), roundNo)
+                        : judgeRoundTurnKey(finalization.caseId(), roundNo);
         TurnPreparation preparation =
                 TurnPreparation.generate(
                         finalization.caseId(),
                         roundNo,
                         finalRound,
-                        finalization.idempotencyKey(),
+                        judgeMessageKey,
                         lifecycleEventKey,
                         null);
         HearingCourtAgentResult result =
@@ -391,6 +408,20 @@ public class HearingCourtOrchestrator implements AgentRunFinalizer {
                         && "FINAL_DRAFT_REQUIRED".equals(result.courtEventType()))) {
             throw new IllegalStateException(
                     "hearing stream result does not match the final-round state");
+        }
+        if (finalRound) {
+            if (result.finalProposedResolution() == null
+                    || result.finalProposedResolution().isBlank()) {
+                throw new IllegalStateException(
+                        "final hearing turn requires a non-final proposed resolution");
+            }
+            if (result.juryReviewReport().isEmpty()) {
+                throw new IllegalStateException(
+                        "final hearing turn requires a model-generated jury review report");
+            }
+        } else if (result.finalProposedResolution() != null) {
+            throw new IllegalStateException(
+                    "non-final hearing turn cannot publish a final proposed resolution");
         }
         if (!finalRound
                 && !"JUDGE_NEXT_QUESTIONS_READY".equals(result.courtEventType())) {
@@ -450,12 +481,15 @@ public class HearingCourtOrchestrator implements AgentRunFinalizer {
                 submissionRepository.findAllByCaseIdAndRoundNoOrderBySubmittedAtAsc(
                         caseId, roundNo);
         if (existingJudgeMessage.isPresent()) {
+            HearingCourtAgentCommand recoveryCommand =
+                    command(dispute, round, submissions, finalRound);
             return TurnPreparation.repair(
                     caseId,
                     roundNo,
                     finalRound,
                     idempotencyKey,
                     lifecycleEventKey,
+                    recoveryCommand,
                     reviewFocusSignal(submissions));
         }
         HearingCourtAgentCommand command = command(dispute, round, submissions, finalRound);
@@ -513,6 +547,7 @@ public class HearingCourtOrchestrator implements AgentRunFinalizer {
         Optional<RoomMessageEntity> existingJudgeMessage =
                 messageRepository.findByCaseIdAndIdempotencyKey(
                         preparation.caseId(), preparation.idempotencyKey());
+        RoomMessageEntity persistedJudgeProposal = existingJudgeMessage.orElse(null);
         HearingCourtAgentResult effectiveResult = generated;
         if (existingJudgeMessage.isEmpty()) {
             if (effectiveResult == null) {
@@ -527,6 +562,7 @@ public class HearingCourtOrchestrator implements AgentRunFinalizer {
                             preparation.idempotencyKey(),
                             traceId,
                             runId);
+            persistedJudgeProposal = saved;
             eventService.recordRoomMessage(
                     dispute.getId(),
                     room.getId(),
@@ -561,8 +597,15 @@ public class HearingCourtOrchestrator implements AgentRunFinalizer {
                         ? preparation.recoveryReviewFocus()
                         : effectiveResult.reviewFocusSignal(),
                 effectiveResult == null
+                        ? null
+                        : effectiveResult.finalProposedResolution(),
+                effectiveResult == null
+                        ? Map.of()
+                        : effectiveResult.juryReviewReport(),
+                effectiveResult == null
                         ? "hearing-round-recovery-v1"
                         : effectiveResult.promptVersion(),
+                persistedJudgeProposal,
                 traceId);
     }
 
@@ -572,16 +615,24 @@ public class HearingCourtOrchestrator implements AgentRunFinalizer {
     // 下游影响：「HearingCourtOrchestrator.judgeLifecyclePayload(HearingCourtAgentResult)」向下依次触达 「result.roundNo」、「result.nextRoundNo」、「result.finalDraftRequired」、「result.roundSummary」；计算结果以「Map<String, Object>」交给调用方。
     // 系统意义：「HearingCourtOrchestrator.judgeLifecyclePayload(HearingCourtAgentResult)」负责主链路中的“法官生命周期载荷”；最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
     private Map<String, Object> judgeLifecyclePayload(HearingCourtAgentResult result) {
-        return Map.of(
-                "round_no", result.roundNo(),
-                "next_round_no", result.nextRoundNo() == null ? "" : result.nextRoundNo(),
-                "final_draft_required", result.finalDraftRequired(),
-                "round_summary", result.roundSummary(),
-                "questions_for_user", result.questionsForUser(),
-                "questions_for_merchant", result.questionsForMerchant(),
-                "review_focus_signal", result.reviewFocusSignal(),
-                "prompt_version", result.promptVersion(),
-                "model", result.model());
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("round_no", result.roundNo());
+        payload.put(
+                "next_round_no",
+                result.nextRoundNo() == null ? "" : result.nextRoundNo());
+        payload.put("final_draft_required", result.finalDraftRequired());
+        payload.put("round_summary", result.roundSummary());
+        payload.put("questions_for_user", result.questionsForUser());
+        payload.put("questions_for_merchant", result.questionsForMerchant());
+        payload.put("review_focus_signal", result.reviewFocusSignal());
+        if (result.finalProposedResolution() != null) {
+            payload.put(
+                    "final_proposed_resolution",
+                    result.finalProposedResolution());
+        }
+        payload.put("prompt_version", result.promptVersion());
+        payload.put("model", result.model());
+        return Map.copyOf(payload);
     }
 
     // 所属模块：【共享小法庭 / 应用编排层】「HearingCourtOrchestrator.command(FulfillmentCaseEntity,HearingRoundEntity,List,boolean)」。
@@ -846,7 +897,7 @@ public class HearingCourtOrchestrator implements AgentRunFinalizer {
     }
 
     // 所属模块：【共享小法庭 / 应用编排层】「HearingCourtOrchestrator.appendFormalJuryReportIfNeeded(FulfillmentCaseEntity,CaseRoomEntity,int,String,List,String,String)」。
-    // 具体功能：「HearingCourtOrchestrator.appendFormalJuryReportIfNeeded(FulfillmentCaseEntity,CaseRoomEntity,int,String,List,String,String)」：仅在终局或高风险分支写入正式评审团报告，优先复用 A2A 已有报告，缺失时以 reviewFocus 生成可审计兜底报告并写共享消息，最终返回「void」。
+    // 具体功能：最终轮写入正式评审报告；优先复用 A2A 已有报告，缺失时只接受统一评审 Agent 生成并通过六项指标校验的报告，不再由 Java 生成固定模板。
     // 上游调用：「HearingCourtOrchestrator.appendFormalJuryReportIfNeeded(FulfillmentCaseEntity,CaseRoomEntity,int,String,List,String,String)」的上游调用点包括 「HearingCourtOrchestrator.persistJudgeTurn」。
     // 下游影响：「HearingCourtOrchestrator.appendFormalJuryReportIfNeeded(FulfillmentCaseEntity,CaseRoomEntity,int,String,List,String,String)」向下依次触达 「messageRepository.findByCaseIdAndIdempotencyKey」、「a2aMessageService.findFormalJuryReviewReport」、「a2aMessageService.record」、「messageRepository.findMaxSequenceByRoomId」。
     // 系统意义：「HearingCourtOrchestrator.appendFormalJuryReportIfNeeded(FulfillmentCaseEntity,CaseRoomEntity,int,String,List,String,String)」负责主链路中的“FormalJuryReportIfNeeded”；最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
@@ -856,7 +907,10 @@ public class HearingCourtOrchestrator implements AgentRunFinalizer {
             int roundNo,
             String judgeEventType,
             List<String> reviewFocusSignal,
+            String finalProposedResolution,
+            Map<String, Object> juryReviewReport,
             String promptVersion,
+            RoomMessageEntity persistedJudgeProposal,
             String traceId) {
         if (roundNo < 3) {
             return;
@@ -867,48 +921,83 @@ public class HearingCourtOrchestrator implements AgentRunFinalizer {
                         .findByCaseIdAndIdempotencyKey(dispute.getId(), idempotencyKey);
         Optional<AgentA2AMessageView> a2aReport =
                 a2aMessageService.findFormalJuryReviewReport(dispute.getId(), roundNo);
-        if (roomReport.isPresent() && a2aReport.isPresent()) {
-            return;
+        if (persistedJudgeProposal == null) {
+            throw new IllegalStateException(
+                    "formal jury review requires the persisted judge proposal");
         }
-        Map<String, Object> generatedInputRefs =
-                Map.of(
-                        "round_no", roundNo,
-                        "judge_event_type", judgeEventType,
-                        "review_focus_signal", reviewFocusSignal,
-                        "prompt_version", promptVersion);
+
+        Map<String, Object> persistedInputRefs =
+                a2aReport
+                        .map(
+                                report ->
+                                        jsonObject(
+                                                report.inputRefsJson(),
+                                                "formal jury A2A input refs"))
+                        .orElseGet(LinkedHashMap::new);
+        Map<String, Object> persistedPayload =
+                a2aReport
+                        .map(
+                                report ->
+                                        jsonObject(
+                                                report.payloadJson(),
+                                                "formal jury A2A payload"))
+                        .orElseGet(
+                                () ->
+                                        roomReport
+                                                .map(
+                                                        message ->
+                                                                jsonObject(
+                                                                        message.getMessageText(),
+                                                                        "jury room report"))
+                                                .orElseGet(
+                                                        () ->
+                                                                juryReviewPayload(
+                                                                        juryReviewReport,
+                                                                        finalProposedResolution,
+                                                                        reviewFocusSignal)));
+
+        String reviewedProposal = requiredText(persistedPayload, "reviewed_proposal");
+        if (persistedInputRefs.isEmpty()) {
+            persistedInputRefs =
+                    juryReviewInputRefs(
+                            roundNo,
+                            judgeEventType,
+                            reviewFocusSignal,
+                            promptVersion,
+                            reviewedProposal);
+        }
+        validateFormalJuryArtifacts(
+                persistedInputRefs,
+                persistedPayload,
+                persistedJudgeProposal.getMessageText());
+
+        Map<String, Object> finalInputRefs = Map.copyOf(persistedInputRefs);
+        Map<String, Object> finalPayload = Map.copyOf(persistedPayload);
         AgentA2AMessageView survivingA2A =
                 a2aReport.orElseGet(
-                        () -> {
-                            Map<String, Object> payload =
-                                    roomReport
-                                            .map(
-                                                    message ->
-                                                            jsonObject(
-                                                                    message.getMessageText(),
-                                                                    "jury room report"))
-                                            .orElseGet(
-                                                    () ->
-                                                            juryReviewPayload(
-                                                                    reviewFocusSignal));
-                            return a2aMessageService.record(
-                    new AgentA2ACommand(
-                            dispute.getId(),
-                            roundNo,
-                            "JURY_PANEL",
-                            AgentA2AMessageService.PRESIDING_JUDGE,
-                            "JURY_REVIEW_REPORT",
-                                            generatedInputRefs,
-                            payload,
-                            "REVIEWER_VISIBLE",
-                                            null));
-                        });
+                        () ->
+                                a2aMessageService.record(
+                                        new AgentA2ACommand(
+                                                dispute.getId(),
+                                                roundNo,
+                                                "JURY_PANEL",
+                                                AgentA2AMessageService.PRESIDING_JUDGE,
+                                                "JURY_REVIEW_REPORT",
+                                                finalInputRefs,
+                                                finalPayload,
+                                                "REVIEWER_VISIBLE",
+                                                null)));
         if (roomReport.isPresent()) {
             return;
         }
-        Map<String, Object> persistedInputRefs =
+        persistedInputRefs =
                 jsonObject(survivingA2A.inputRefsJson(), "formal jury A2A input refs");
-        Map<String, Object> persistedPayload =
+        persistedPayload =
                 jsonObject(survivingA2A.payloadJson(), "formal jury A2A payload");
+        validateFormalJuryArtifacts(
+                persistedInputRefs,
+                persistedPayload,
+                persistedJudgeProposal.getMessageText());
         long sequence = messageRepository.findMaxSequenceByRoomId(room.getId()) + 1;
         RoomMessageEntity saved =
                 messageRepository.save(
@@ -967,40 +1056,165 @@ public class HearingCourtOrchestrator implements AgentRunFinalizer {
     // 下游影响：「HearingCourtOrchestrator.hasCompleteFormalJuryReport(String,int)」向下依次触达 「messageRepository.findByCaseIdAndIdempotencyKey」、「a2aMessageService.hasFormalJuryReviewReport」、「juryReviewReportKey」、「isPresent」；计算结果以「boolean」交给调用方。
     // 系统意义：「HearingCourtOrchestrator.hasCompleteFormalJuryReport(String,int)」负责主链路中的“协议完整性FormalJuryReport”；最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
     public boolean hasCompleteFormalJuryReport(String caseId, int roundNo) {
-        return messageRepository
-                        .findByCaseIdAndIdempotencyKey(
-                                caseId, juryReviewReportKey(caseId, roundNo))
-                        .isPresent()
-                && a2aMessageService.hasFormalJuryReviewReport(caseId, roundNo);
+        Optional<RoomMessageEntity> roomReport =
+                messageRepository.findByCaseIdAndIdempotencyKey(
+                        caseId, juryReviewReportKey(caseId, roundNo));
+        Optional<RoomMessageEntity> judgeMessage =
+                messageRepository.findByCaseIdAndIdempotencyKey(
+                        caseId, judgeRoundTurnKey(caseId, roundNo));
+        Optional<AgentA2AMessageView> a2aReport =
+                a2aMessageService.findFormalJuryReviewReport(caseId, roundNo);
+        if (roomReport.isEmpty() || judgeMessage.isEmpty() || a2aReport.isEmpty()) {
+            return false;
+        }
+        try {
+            Map<String, Object> inputRefs =
+                    jsonObject(a2aReport.get().inputRefsJson(), "formal jury A2A input refs");
+            Map<String, Object> payload =
+                    jsonObject(a2aReport.get().payloadJson(), "formal jury A2A payload");
+            Map<String, Object> roomPayload =
+                    jsonObject(roomReport.get().getMessageText(), "jury room report");
+            validateFormalJuryArtifacts(
+                    inputRefs, payload, judgeMessage.get().getMessageText());
+            return payload.equals(roomPayload);
+        } catch (RuntimeException invalidReport) {
+            return false;
+        }
     }
 
     // 所属模块：【共享小法庭 / 应用编排层】「HearingCourtOrchestrator.juryReviewPayload(List)」。
-    // 具体功能：「HearingCourtOrchestrator.juryReviewPayload(List)」：构建jury审核载荷；处理的关键状态/协议值包括 「第三轮未形成明确异议，仍需法官在草案中说明事实采信和证据依据。」、「summary」、「评审团已完成第三轮复核，报告已交由法官生成裁决草案时参考。」、「risk_level」，最终返回「Map<String, Object>」。
+    // 具体功能：校验统一评审 Agent 的六维报告，覆盖模型越权标志，并把法官归一化后的第三轮复核方向写入正式 A2A 载荷。
     // 上游调用：「HearingCourtOrchestrator.juryReviewPayload(List)」的上游调用点包括 「HearingCourtOrchestrator.appendFormalJuryReportIfNeeded」。
     // 下游影响：「HearingCourtOrchestrator.juryReviewPayload(List)」只产生当前对象的返回值或字段变化，不访问额外基础设施；计算结果以「Map<String, Object>」交给调用方。
     // 系统意义：「HearingCourtOrchestrator.juryReviewPayload(List)」负责主链路中的“jury审核载荷”；最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
-    private Map<String, Object> juryReviewPayload(List<String> reviewFocusSignal) {
-        List<String> focus =
-                reviewFocusSignal == null || reviewFocusSignal.isEmpty()
-                        ? List.of("第三轮未形成明确异议，仍需法官在草案中说明事实采信和证据依据。")
-                        : List.copyOf(reviewFocusSignal);
-        return Map.of(
-                "summary",
-                "评审团已完成第三轮复核，报告已交由法官生成裁决草案时参考。",
-                "risk_level",
-                focus.size() >= 3 ? "HIGH" : "MEDIUM",
-                "confidence_score",
-                75,
+    private Map<String, Object> juryReviewPayload(
+            Map<String, Object> juryReviewReport,
+            String finalProposedResolution,
+            List<String> reviewFocusSignal) {
+        if (finalProposedResolution == null || finalProposedResolution.isBlank()) {
+            throw new IllegalStateException(
+                    "final hearing convergence requires a proposed resolution");
+        }
+        if (juryReviewReport == null || juryReviewReport.isEmpty()) {
+            throw new IllegalStateException(
+                    "final hearing convergence requires a model-generated jury review report");
+        }
+        Object findings = juryReviewReport.get("findings");
+        if (!(findings instanceof List<?> findingList) || findingList.size() != 6) {
+            throw new IllegalStateException(
+                    "jury review report must contain all six evaluation dimensions");
+        }
+        if (!(juryReviewReport.get("summary") instanceof String summary)
+                || summary.isBlank()
+                || !(juryReviewReport.get("risk_level") instanceof String riskLevel)
+                || riskLevel.isBlank()
+                || !(juryReviewReport.get("confidence_score") instanceof Number)) {
+            throw new IllegalStateException("jury review report is missing required fields");
+        }
+        if (Boolean.TRUE.equals(juryReviewReport.get("approval_performed"))
+                || Boolean.TRUE.equals(juryReviewReport.get("execution_triggered"))
+                || Boolean.TRUE.equals(juryReviewReport.get("is_final_decision"))) {
+            throw new IllegalStateException(
+                    "jury review report attempted approval, execution, or final adjudication");
+        }
+        String reviewedProposal = requiredText(juryReviewReport, "reviewed_proposal");
+        if (!finalProposedResolution.equals(reviewedProposal)) {
+            throw new IllegalStateException(
+                    "jury review report does not review the judge's exact proposed resolution");
+        }
+        Map<String, Object> payload = new LinkedHashMap<>(juryReviewReport);
+        payload.put("final_proposed_resolution", finalProposedResolution);
+        payload.put(
                 "review_focus_signal",
-                focus,
-                "recommendations",
-                List.of(
-                        "请法官在裁决草案中逐项回应第三轮复核关注点。",
-                        "请避免直接采纳单方自然语言意见，应结合案情卷宗和证据矩阵复核。"),
-                "review_notes",
-                "评审团复核报告是风险和遗漏视野补充，不是二次裁决主体。",
-                "visibility",
-                "REVIEWER_VISIBLE");
+                reviewFocusSignal == null ? List.of() : List.copyOf(reviewFocusSignal));
+        payload.put("visibility", "REVIEWER_VISIBLE");
+        payload.put("approval_performed", false);
+        payload.put("execution_triggered", false);
+        payload.put("is_final_decision", false);
+        return Map.copyOf(payload);
+    }
+
+    private Map<String, Object> juryReviewInputRefs(
+            int roundNo,
+            String judgeEventType,
+            List<String> reviewFocusSignal,
+            String promptVersion,
+            String finalProposedResolution) {
+        Map<String, Object> inputRefs = new LinkedHashMap<>();
+        inputRefs.put("round_no", roundNo);
+        inputRefs.put("judge_event_type", judgeEventType);
+        inputRefs.put(
+                "review_focus_signal",
+                reviewFocusSignal == null ? List.of() : List.copyOf(reviewFocusSignal));
+        inputRefs.put("prompt_version", promptVersion);
+        inputRefs.put("final_proposed_resolution", finalProposedResolution);
+        return Map.copyOf(inputRefs);
+    }
+
+    private void validateFormalJuryArtifacts(
+            Map<String, Object> inputRefs,
+            Map<String, Object> payload,
+            String judgeMessageText) {
+        String proposedResolution =
+                requiredText(inputRefs, "final_proposed_resolution");
+        String reviewedProposal = requiredText(payload, "reviewed_proposal");
+        String payloadProposal = requiredText(payload, "final_proposed_resolution");
+        if (!proposedResolution.equals(reviewedProposal)
+                || !proposedResolution.equals(payloadProposal)) {
+            throw new IllegalStateException(
+                    "formal jury review proposal references are inconsistent");
+        }
+        if (judgeMessageText == null || !judgeMessageText.contains(proposedResolution)) {
+            throw new IllegalStateException(
+                    "persisted judge message does not contain the reviewed proposal");
+        }
+
+        Object findings = payload.get("findings");
+        if (!(findings instanceof List<?> findingList) || findingList.size() != 6) {
+            throw new IllegalStateException(
+                    "jury review report must contain all six evaluation dimensions");
+        }
+        Set<String> dimensions =
+                findingList.stream()
+                        .map(
+                                finding -> {
+                                    if (!(finding instanceof Map<?, ?> findingMap)) {
+                                        throw new IllegalStateException(
+                                                "jury review finding must be an object");
+                                    }
+                                    Object dimension = findingMap.get("dimension");
+                                    if (!(dimension instanceof String value) || value.isBlank()) {
+                                        throw new IllegalStateException(
+                                                "jury review finding is missing its dimension");
+                                    }
+                                    return value;
+                                })
+                        .collect(java.util.stream.Collectors.toUnmodifiableSet());
+        if (!dimensions.equals(REQUIRED_JURY_REVIEW_DIMENSIONS)) {
+            throw new IllegalStateException(
+                    "jury review report must cover the six required dimensions exactly once");
+        }
+        if (!(payload.get("summary") instanceof String summary)
+                || summary.isBlank()
+                || !(payload.get("risk_level") instanceof String riskLevel)
+                || riskLevel.isBlank()
+                || !(payload.get("confidence_score") instanceof Number)) {
+            throw new IllegalStateException("jury review report is missing required fields");
+        }
+        if (Boolean.TRUE.equals(payload.get("approval_performed"))
+                || Boolean.TRUE.equals(payload.get("execution_triggered"))
+                || Boolean.TRUE.equals(payload.get("is_final_decision"))) {
+            throw new IllegalStateException(
+                    "jury review report attempted approval, execution, or final adjudication");
+        }
+    }
+
+    private static String requiredText(Map<String, Object> source, String field) {
+        Object value = source.get(field);
+        if (!(value instanceof String text) || text.isBlank()) {
+            throw new IllegalStateException("jury review report is missing " + field);
+        }
+        return text;
     }
 
     // 所属模块：【共享小法庭 / 应用编排层】「HearingCourtOrchestrator.jsonObject(String,String)」。
@@ -1194,6 +1408,7 @@ public class HearingCourtOrchestrator implements AgentRunFinalizer {
                 boolean finalRound,
                 String idempotencyKey,
                 String lifecycleEventKey,
+                HearingCourtAgentCommand command,
                 List<String> recoveryReviewFocus) {
             return new TurnPreparation(
                     caseId,
@@ -1201,7 +1416,7 @@ public class HearingCourtOrchestrator implements AgentRunFinalizer {
                     finalRound,
                     idempotencyKey,
                     lifecycleEventKey,
-                    null,
+                    command,
                     List.copyOf(recoveryReviewFocus),
                     false);
         }

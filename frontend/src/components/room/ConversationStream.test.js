@@ -15,6 +15,16 @@ describe("ConversationStream", () => {
       status: "STREAMING",
       content: "正在逐步生成回复",
       agentLabel: "争议接待官",
+      senderRole: "CUSTOMER_SERVICE",
+      activeCardKey: "default",
+      cardOrder: ["default"],
+      cards: {
+        default: {
+          key: "default",
+          senderRole: "CUSTOMER_SERVICE",
+          content: "正在逐步生成回复",
+        },
+      },
     };
     const wrapper = mount(ConversationStream, {
       props: { messages: [], streamingRuns: [run] },
@@ -33,6 +43,7 @@ describe("ConversationStream", () => {
         message_text: "正式回复",
         agent_run_id: "AGENT_RUN_1",
       }],
+      streamingRuns: [],
     });
 
     expect(wrapper.find("[data-agent-streaming-message]").exists()).toBe(false);
@@ -251,13 +262,68 @@ describe("ConversationStream", () => {
     expect(source).toContain("--conversation-message-body-font-size: 12.5px;");
   });
 
+  it("uses one agent message surface before and after streaming completes", () => {
+    const wrapper = mount(ConversationStream, {
+      props: {
+        agentLabel: "证据书记官",
+        messages: [
+          {
+            id: "MESSAGE_DURABLE",
+            sequence_no: 1,
+            sender_role: "CUSTOMER_SERVICE",
+            message_type: "AGENT_MESSAGE",
+            message_text: "已经完成的核验意见。",
+          },
+        ],
+        streamingRuns: [
+          {
+            runId: "AGENT_RUN_ACTIVE",
+            status: "STREAMING",
+            senderRole: "EVIDENCE_CLERK",
+            content: "正在继续生成核验意见。",
+            activeCardKey: "default",
+            cardOrder: ["default"],
+            cards: {
+              default: {
+                key: "default",
+                senderRole: "EVIDENCE_CLERK",
+                content: "正在继续生成核验意见。",
+              },
+            },
+          },
+        ],
+      },
+    });
+
+    expect(wrapper.classes()).toContain("conversation-stream--evidence-clerk");
+    expect(wrapper.find(".conversation-stream__message--agent").exists()).toBe(true);
+    expect(wrapper.find("[data-agent-streaming-message]").exists()).toBe(true);
+
+    const conversationSource = readFileSync(
+      "src/components/room/ConversationStream.vue",
+      "utf8",
+    );
+    const streamingSource = readFileSync(
+      "src/components/room/AgentStreamingMessage.vue",
+      "utf8",
+    );
+    expect(conversationSource).toContain(
+      "background: var(--conversation-agent-message-background)",
+    );
+    expect(streamingSource).toContain(
+      "background: var(--conversation-agent-message-background, #fffaf1)",
+    );
+    expect(conversationSource).toContain("box-shadow: none");
+    expect(streamingSource).toContain("box-shadow: none");
+  });
+
   // 业务位置：【Java 房间协作】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、访问会话和参与方身份 正确进入 接待/证据回合记忆、Agent 上下文和事件。上游：房间消息、访问会话和参与方身份。下游：接待/证据回合记忆、Agent 上下文和事件。边界：会话和可见性必须按参与方隔离。
   it("automatically scrolls to the latest message when history changes", () => {
     const source = readFileSync("src/components/room/ConversationStream.vue", "utf8");
 
     expect(source).toContain("messagesRail");
     expect(source).toContain("scrollToLatestMessage");
-    expect(source).toContain("watch([orderedMessages, pendingStreamingRuns]");
+    expect(source).toContain("watch([displayedMessages, pendingStreamingRuns]");
     expect(source).toContain("rail.scrollTop = rail.scrollHeight;");
   });
 });

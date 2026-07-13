@@ -17,6 +17,7 @@ const router = useRouter();
 const tasks = ref(props.initialTasks || []);
 const loading = ref(false);
 const error = ref("");
+const activeReviewStatuses = ["PENDING", "IN_REVIEW"];
 const priorityLabels = {
   URGENT: "急件",
   HIGH: "高优先",
@@ -27,6 +28,7 @@ const priorityLabels = {
 const statusLabels = {
   PENDING: "待审核",
   ASSIGNED: "已分配",
+  IN_REVIEW: "审核中",
   IN_PROGRESS: "审核中",
   COMPLETED: "已完成",
   CANCELLED: "已取消",
@@ -36,8 +38,14 @@ const statusLabels = {
 async function load() {
   if (props.initialTasks !== null) return;
   loading.value = true;
+  error.value = "";
   try {
-    tasks.value = await reviewApi.list(actor);
+    const taskGroups = await Promise.all(
+      activeReviewStatuses.map((status) => reviewApi.list(actor, status)),
+    );
+    tasks.value = Array.from(
+      new Map(taskGroups.flat().map((task) => [task.id, task])).values(),
+    );
   } catch (failure) {
     error.value = failure.message;
   } finally {

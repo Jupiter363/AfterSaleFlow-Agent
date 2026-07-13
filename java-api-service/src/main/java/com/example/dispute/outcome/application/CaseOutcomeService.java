@@ -110,6 +110,8 @@ public class CaseOutcomeService {
                 remedyPlanRepository
                         .findFirstByCaseIdOrderByPlanVersionDesc(caseId)
                         .orElse(null);
+        var reviewTask =
+                reviewTaskRepository.findFirstByCaseIdOrderByCreatedAtDesc(caseId).orElse(null);
 
         return new CaseOutcomeView(
                 caseId,
@@ -118,6 +120,8 @@ public class CaseOutcomeService {
                 dispute.getClosedAt(),
                 finalDecision(dispute, approval, draft, flowConclusion),
                 adjudicationDraft(draft, remedyPlan),
+                reviewTask == null ? null : reviewTask.getId(),
+                reviewTask == null ? null : reviewTask.getTaskStatus().name(),
                 executorService.actions(caseId, actor));
     }
 

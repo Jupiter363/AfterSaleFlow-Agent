@@ -26,10 +26,15 @@ import com.example.dispute.hearing.application.HearingOutcomeOrchestrationServic
 import com.example.dispute.remedy.application.RemedyApplicationService;
 import com.example.dispute.review.application.PostReviewOrchestrationService;
 import com.example.dispute.review.application.ReviewApplicationService;
+import com.example.dispute.room.domain.RoomType;
+import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
+import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import jakarta.persistence.EntityManager;
 import java.math.BigDecimal;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
@@ -117,6 +122,7 @@ class HearingOutcomeOrchestrationServiceIntegrationTest {
     @Autowired AdjudicationDraftRepository drafts;
     @Autowired RemedyPlanRepository remedies;
     @Autowired ReviewTaskRepository reviews;
+    @Autowired CaseRoomRepository rooms;
     @Autowired JdbcTemplate jdbcTemplate;
     @Autowired EntityManager entityManager;
     @MockitoBean AuditRecorder auditRecorder;
@@ -216,6 +222,13 @@ class HearingOutcomeOrchestrationServiceIntegrationTest {
         disputeCase.applyRoute(RouteType.FULL_HEARING, "user-hearing-outcome");
         disputeCase.startHearing(workflowId, "temporal-worker");
         cases.saveAndFlush(disputeCase);
+        rooms.saveAndFlush(
+                CaseRoomEntity.open(
+                        "ROOM_HEARING_" + caseId,
+                        caseId,
+                        RoomType.HEARING,
+                        OffsetDateTime.now(ZoneOffset.UTC),
+                        "temporal-worker"));
         HearingStateEntity hearing =
                 HearingStateEntity.start(
                         hearingIdFor(caseId),
