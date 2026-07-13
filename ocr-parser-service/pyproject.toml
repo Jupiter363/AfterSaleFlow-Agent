@@ -1,3 +1,6 @@
+# 文件作用：OCR 解析服务代码文件，负责证据文件解析、外部调用、数据模型或接口处理。
+# 说明：本注释用于帮助读者先了解配置用途，再修改具体配置项。
+
 [build-system]
 requires = ["setuptools>=75"]
 build-backend = "setuptools.build_meta"

@@ -1,3 +1,6 @@
+// 文件作用：自动化测试文件，验证 OutcomeView.test 相关模块的行为、契约或页面布局。
+// 说明：本注释用于帮助读者先了解本文件职责，再继续阅读具体实现。
+
 import { flushPromises, mount } from "@vue/test-utils";
 import { createMemoryHistory, createRouter } from "vue-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -34,6 +37,7 @@ const outcome = {
   ],
 };
 
+// 业务位置：【前端处理结果】mountOutcome：围绕 阶段处理结果或草案 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
 async function mountOutcome(initialOutcome) {
   const router = createRouter({
     history: createMemoryHistory(),
@@ -70,6 +74,7 @@ const draftOutcome = {
   },
 };
 
+// 业务位置：【前端处理结果】describe：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
 describe("OutcomeView", () => {
   beforeEach(() => {
     actor.id = "user-local";
@@ -81,6 +86,7 @@ describe("OutcomeView", () => {
     vi.restoreAllMocks();
   });
 
+  // 业务位置：【前端处理结果】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
   it("explains the final ruling and exposes deterministic execution receipts", async () => {
     const wrapper = await mountOutcome(outcome);
 
@@ -92,6 +98,7 @@ describe("OutcomeView", () => {
     expect(wrapper.text()).toContain("审核员确认现有证据链完整");
   });
 
+  // 业务位置：【前端处理结果】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
   it("simulates execution assistant handoff for final decisions without real action receipts", async () => {
     vi.useFakeTimers();
     const wrapper = await mountOutcome({
@@ -119,6 +126,7 @@ describe("OutcomeView", () => {
     expect(wrapper.text()).toContain("方案执行成功");
   });
 
+  // 业务位置：【前端处理结果】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
   it("formats nested execution result payloads instead of dumping raw JSON", async () => {
     const wrapper = await mountOutcome({
       ...outcome,
@@ -152,6 +160,7 @@ describe("OutcomeView", () => {
     expect(receipt.text()).not.toContain("{");
   });
 
+  // 业务位置：【前端处理结果】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
   it("shows the AI draft explanation chain when the backend exposes it", async () => {
     const wrapper = await mountOutcome({
       ...outcome,
@@ -181,6 +190,7 @@ describe("OutcomeView", () => {
     expect(wrapper.get("[data-reviewer-attention]").text()).toContain("核验签收人身份");
   });
 
+  // 业务位置：【前端处理结果】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
   it("does not expose raw draft field names or internal enum values to parties", async () => {
     const wrapper = await mountOutcome({
       ...outcome,
@@ -233,6 +243,7 @@ describe("OutcomeView", () => {
     expect(pageText).not.toContain("EVIDENCE_INTERNAL_001");
   });
 
+  // 业务位置：【前端处理结果】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
   it("keeps the draft room compact and Chinese-first when detailed draft data is present", async () => {
     const wrapper = await mountOutcome({
       ...outcome,
@@ -266,6 +277,7 @@ describe("OutcomeView", () => {
     expect(pageText.match(/重复草案正文/g) || []).toHaveLength(1);
   });
 
+  // 业务位置：【前端处理结果】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
   it("does not repeat the long plain-language conclusion as the draft recommendation", async () => {
     const repeatedConclusion =
       "鉴于用户提交的售后请求及三轮庭审陈述均为乱码，无法识别具体争议内容和诉求，且用户提供的物流证明材料解析不完整，真实性待核验，商家亦未提交有效证据，现有物流记录显示已签收。建议维持订单完成状态，不支持发起赔付或退款程序。";
@@ -293,6 +305,7 @@ describe("OutcomeView", () => {
     expect(pageText).not.toContain("可信分可信分");
   });
 
+  // 业务位置：【前端处理结果】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
   it("presents waiting-review AI drafts as non-final outcomes without reviewer-facing wording", async () => {
     const wrapper = await mountOutcome({
       ...outcome,
@@ -342,6 +355,7 @@ describe("OutcomeView", () => {
     expect(pageText).not.toContain("INVALID_ARGUMENT");
   });
 
+  // 业务位置：【前端处理结果】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
   it("shows the explanation officer replay only in the draft room", async () => {
     const wrapper = await mountOutcome({
       ...outcome,
@@ -377,6 +391,7 @@ describe("OutcomeView", () => {
     expect(explainer.text()).not.toContain("平台终审");
   });
 
+  // 业务位置：【前端处理结果】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
   it("keeps outcome review controls hidden from parties", async () => {
     const wrapper = await mountOutcome(draftOutcome);
 
@@ -385,6 +400,7 @@ describe("OutcomeView", () => {
     expect(wrapper.text()).not.toContain("修改并确认");
   });
 
+  // 业务位置：【前端处理结果】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
   it("lets platform reviewers confirm the AI draft from the outcome room", async () => {
     actor.id = "reviewer-local";
     actor.role = "PLATFORM_REVIEWER";
@@ -415,6 +431,7 @@ describe("OutcomeView", () => {
     expect(wrapper.text()).toContain("审核员已确认草案");
   });
 
+  // 业务位置：【前端处理结果】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
   it("shows reviewer controls for waiting-review outcomes even without embedded draft details", async () => {
     actor.id = "reviewer-local";
     actor.role = "PLATFORM_REVIEWER";
@@ -428,6 +445,7 @@ describe("OutcomeView", () => {
     expect(wrapper.get("[data-review-confirm]").text()).toContain("确认草案");
   });
 
+  // 业务位置：【前端处理结果】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
   it("lets platform reviewers modify the high-level handling direction and execution plan", async () => {
     actor.id = "reviewer-local";
     actor.role = "PLATFORM_REVIEWER";
@@ -462,6 +480,7 @@ describe("OutcomeView", () => {
     );
   });
 
+  // 业务位置：【前端处理结果】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
   it("disables modifying until a high-level direction or execution plan is provided", async () => {
     actor.id = "reviewer-local";
     actor.role = "PLATFORM_REVIEWER";

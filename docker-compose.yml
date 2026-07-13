@@ -1,3 +1,6 @@
+# 文件作用：项目代码或配置文件，支撑售后争议系统的构建、运行、测试或部署。
+# 说明：本注释用于帮助读者先了解配置用途，再修改具体配置项。
+
 name: ${COMPOSE_PROJECT_NAME:-order-fulfillment-dispute-system}
 
 x-common: &common
@@ -311,6 +314,7 @@ services:
       APPROVAL_RESHIP_THRESHOLD: ${APPROVAL_RESHIP_THRESHOLD:-300.00}
       APPROVAL_REVIEW_TIMEOUT_HOURS: ${APPROVAL_REVIEW_TIMEOUT_HOURS:-168}
       PYTHON_AGENT_SERVICE_URL: http://python-agent-service:8000
+      APP_AGENT_TIMEOUT_MS: ${APP_AGENT_TIMEOUT_MS:-300000}
       OCR_SERVICE_URL: http://ocr-parser-service:8010
       JAVA_SERVICE_SECRET: ${JAVA_SERVICE_SECRET}
       PYTHON_AGENT_SERVICE_SECRET: ${PYTHON_AGENT_SERVICE_SECRET}

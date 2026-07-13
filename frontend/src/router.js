@@ -1,3 +1,6 @@
+// 文件作用：前端路由文件，定义页面访问路径、权限和导航规则。
+// 说明：本注释用于帮助读者先了解本文件职责，再继续阅读具体实现。
+
 import { createRouter, createWebHistory } from "vue-router";
 import CaseDetailView from "./views/CaseDetailView.vue";
 import CaseListView from "./views/CaseListView.vue";

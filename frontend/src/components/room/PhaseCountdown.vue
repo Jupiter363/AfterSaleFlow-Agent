@@ -1,3 +1,8 @@
+<!--
+  文件作用：前端组件文件，封装可复用 UI、状态展示或业务交互单元。
+  说明：本注释用于帮助读者先了解组件/页面职责，再阅读 template、script 和 style。
+-->
+
 <script setup>
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 

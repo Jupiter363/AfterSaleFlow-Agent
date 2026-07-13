@@ -1,3 +1,6 @@
+// 文件作用：自动化测试文件，验证 review-queue.layout.spec 相关模块的行为、契约或页面布局。
+// 说明：本注释用于帮助读者先了解本文件职责，再继续阅读具体实现。
+
 import { expect, test } from "@playwright/test";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
@@ -23,6 +26,7 @@ const viewports = [
   { width: 320, height: 568 },
 ];
 
+// 业务位置：【前端浏览器回归测试】fulfillJson：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 function fulfillJson(route, data) {
   return route.fulfill({
     status: 200,
@@ -31,6 +35,7 @@ function fulfillJson(route, data) {
   });
 }
 
+// 业务位置：【前端浏览器回归测试】installReviewQueueFixture：围绕 人工审核关注点和陪审团提示 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 async function installReviewQueueFixture(page, scenario = "normal") {
   await page.addInitScript((value) => {
     localStorage.setItem("dispute-actor", JSON.stringify(value));
@@ -86,6 +91,7 @@ async function installReviewQueueFixture(page, scenario = "normal") {
   });
 }
 
+// 业务位置：【前端浏览器回归测试】openReviewQueue：切换与 人工审核关注点和陪审团提示 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 async function openReviewQueue(page, { viewport, scenario = "normal" }) {
   await page.setViewportSize(viewport);
   await installReviewQueueFixture(page, scenario);
@@ -93,6 +99,7 @@ async function openReviewQueue(page, { viewport, scenario = "normal" }) {
   await expect(page.locator("[data-review-task]")).toHaveCount(2);
 }
 
+// 业务位置：【前端浏览器回归测试】assertNoPageHorizontalOverflow：核验 当前阶段业务数据 的权限、Schema 和阶段边界，阻止越权或不完整结果进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 async function assertNoPageHorizontalOverflow(page) {
   const report = await page.evaluate(() => {
     const viewportWidth = document.documentElement.clientWidth;
@@ -122,6 +129,7 @@ async function assertNoPageHorizontalOverflow(page) {
   ).toBe(true);
 }
 
+// 业务位置：【前端浏览器回归测试】captureLayoutScreenshot：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 async function captureLayoutScreenshot(page, { viewport, scenario }) {
   if (process.env.CAPTURE_LAYOUT_SCREENSHOTS !== "1") return;
   await mkdir(screenshotDirectory, { recursive: true });
@@ -136,6 +144,7 @@ async function captureLayoutScreenshot(page, { viewport, scenario }) {
 
 for (const viewport of viewports) {
   for (const scenario of ["normal", "long"]) {
+    // 业务位置：【前端浏览器回归测试】test：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
     test(`keeps review queue contained at ${viewport.width}px with ${scenario} data`, async ({
       page,
     }) => {

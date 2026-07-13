@@ -1,3 +1,6 @@
+// 文件作用：前端工程代码文件，支撑售后争议系统的页面、交互、样式或构建配置。
+// 说明：本注释用于帮助读者先了解本文件职责，再继续阅读具体实现。
+
 const ROLE_LABELS = {
   USER: "用户",
   CUSTOMER: "用户",
@@ -9,9 +12,12 @@ const ROLE_LABELS = {
   COURT_CLERK: "庭审书记官",
   JUDGE: "AI 法官",
   AI_JUDGE: "AI 法官",
+  PRESIDING_JUDGE: "AI 法官",
   JURY: "AI 评审团",
   AI_JURY: "AI 评审团",
+  JURY_PANEL: "AI 评审团",
   REVIEW_ASSISTANT: "审核解释官",
+  REVIEW_COPILOT: "审核解释官",
   PLATFORM_REVIEWER: "平台审核员",
   SYSTEM: "系统",
 };
@@ -45,6 +51,10 @@ const FIELD_LABELS = {
   unboxing_video: "开箱视频",
   opening_video: "开箱视频",
   delivery_record: "物流派送记录",
+  logistics_record: "物流记录",
+  logistics_records: "物流记录",
+  logisticsRecord: "物流记录",
+  logisticsRecords: "物流记录",
   proof_of_delivery: "签收凭证",
   after_sales_record: "售后记录",
   communication_record: "沟通记录",
@@ -53,6 +63,14 @@ const FIELD_LABELS = {
 const VALUE_LABELS = {
   UNKNOWN: "待确认",
   PENDING: "待确认",
+  PENDING_REVIEW: "待复核",
+  PENDING_HUMAN_REVIEW: "待人工复核",
+  PENDING_POLICY_REVIEW: "待规则复核",
+  WAITING_HUMAN_REVIEW: "等待人工复核",
+  NEEDS_HUMAN_REVIEW: "待人工复核",
+  REQUIRES_HUMAN_REVIEW: "需人工复核",
+  HUMAN_REVIEW: "人工复核",
+  POLICY_REVIEW: "规则复核",
   WAITING: "等待补充",
   NEED_MORE_INFO: "继续补充信息",
   ACCEPTED: "建议受理",
@@ -121,11 +139,13 @@ const CHINESE_RE = /[\u3400-\u9fff]/;
 const LATIN_RE = /[A-Za-z]{3,}/;
 const EVIDENCE_MATRIX_JSON_RE = /\{[^{}]*"evidence_id"[^{}]*\}/g;
 
+// 业务位置：【前端应用】roleLabel：围绕 当事人主张、角色和对方态度 计算本模块需要的派生信息，使其能够从 路由、API 和本地状态 正确进入 售后纠纷处理界面。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
 export function roleLabel(role) {
   if (!role) return "未知身份";
   return ROLE_LABELS[role] || humanizeDossierText(role, { fallback: "未知身份" });
 }
 
+// 业务位置：【前端应用】humanizeDossierText：围绕 案件卷宗 计算本模块需要的派生信息，使其能够从 路由、API 和本地状态 正确进入 售后纠纷处理界面。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
 export function humanizeDossierText(value, options = {}) {
   const fallback = options.fallback ?? "待补充";
   if (Array.isArray(value)) {
@@ -148,6 +168,7 @@ export function humanizeDossierText(value, options = {}) {
   return replaceInternalTokens(raw);
 }
 
+// 业务位置：【前端应用】humanizeDossierList：围绕 案件卷宗 计算本模块需要的派生信息，使其能够从 路由、API 和本地状态 正确进入 售后纠纷处理界面。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
 export function humanizeDossierList(values, fallback = "等待补充更多信息") {
   const list = Array.isArray(values) ? values : [values];
   const mapped = list
@@ -156,6 +177,7 @@ export function humanizeDossierList(values, fallback = "等待补充更多信息
   return mapped.length ? mapped : [fallback];
 }
 
+// 业务位置：【前端应用】displayRoomMessageText：读取 房间消息和对话记录，并依据当前案件、角色和会话权限裁剪成可用输入。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
 export function displayRoomMessageText(value) {
   if (!value) return "";
   const raw = String(value);
@@ -166,6 +188,7 @@ export function displayRoomMessageText(value) {
   return replaceInternalTokens(summarizeEvidenceMatrixJson(raw));
 }
 
+// 业务位置：【前端应用】summarizeEvidenceMatrixJson：围绕 事实-证据矩阵 计算本模块需要的派生信息，使其能够从 路由、API 和本地状态 正确进入 售后纠纷处理界面。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
 function summarizeEvidenceMatrixJson(raw) {
   return raw.replace(EVIDENCE_MATRIX_JSON_RE, (jsonText) => {
     try {
@@ -177,6 +200,7 @@ function summarizeEvidenceMatrixJson(raw) {
   });
 }
 
+// 业务位置：【前端应用】localizedEvidenceMatrixRow：将 事实-证据矩阵 转换为稳定的接口、提示词或页面表达，避免直接暴露内部实现字段。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
 function localizedEvidenceMatrixRow(row) {
   const relation = localizedRelationType(row?.relation_type);
   const verification = localizedVerificationStatus(row?.verification_status);
@@ -187,6 +211,7 @@ function localizedEvidenceMatrixRow(row) {
   return `${parts.join("，")}，庭审中需继续说明其对应的争议事实、形成时间和来源链路`;
 }
 
+// 业务位置：【前端应用】localizedRelationType：将 当前阶段业务数据 转换为稳定的接口、提示词或页面表达，避免直接暴露内部实现字段。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
 function localizedRelationType(value) {
   switch (String(value || "").toUpperCase()) {
     case "UNMAPPED":
@@ -209,6 +234,7 @@ function localizedRelationType(value) {
   }
 }
 
+// 业务位置：【前端应用】localizedVerificationStatus：将 当前阶段业务数据 转换为稳定的接口、提示词或页面表达，避免直接暴露内部实现字段。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
 function localizedVerificationStatus(value) {
   switch (String(value || "").toUpperCase()) {
     case "UNVERIFIED":
@@ -230,6 +256,7 @@ function localizedVerificationStatus(value) {
   }
 }
 
+// 业务位置：【前端应用】localizedEvidenceStrength：将 当前可见证据和附件 转换为稳定的接口、提示词或页面表达，避免直接暴露内部实现字段。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
 function localizedEvidenceStrength(value) {
   switch (String(value || "").toUpperCase()) {
     case "HIGH":
@@ -249,6 +276,7 @@ function localizedEvidenceStrength(value) {
   }
 }
 
+// 业务位置：【前端应用】humanizeTitle：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由、API 和本地状态 正确进入 售后纠纷处理界面。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
 function humanizeTitle(raw, fallback) {
   const localized = replaceInternalTokens(raw);
   if (CHINESE_RE.test(localized)) return localized;
@@ -262,6 +290,7 @@ function humanizeTitle(raw, fallback) {
   return localized;
 }
 
+// 业务位置：【前端应用】humanizeSummary：围绕 面向当事人的业务文本 计算本模块需要的派生信息，使其能够从 路由、API 和本地状态 正确进入 售后纠纷处理界面。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
 function humanizeSummary(raw, fallback) {
   const localized = replaceInternalTokens(raw);
   if (CHINESE_RE.test(localized)) return localized;
@@ -271,7 +300,7 @@ function humanizeSummary(raw, fallback) {
     return "用户反馈手表损坏，仍需补充故障细节、证据和双方处理意见。";
   }
   if (lower.includes("no additional details") || lower.includes("provided")) {
-    return "接待官正在整理争议事实，请继续补充订单、证据和处理诉求。";
+    return "接待官正在整理争议事实，请继续补充案件经过、当前状态和处理诉求。";
   }
   if (LATIN_RE.test(localized)) {
     return fallback || "接待官正在整理争议事实，请继续补充关键信息。";
@@ -279,8 +308,13 @@ function humanizeSummary(raw, fallback) {
   return localized;
 }
 
+// 业务位置：【前端应用】replaceInternalTokens：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由、API 和本地状态 正确进入 售后纠纷处理界面。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
 function replaceInternalTokens(raw) {
-  let output = raw;
+  const source = String(raw || "");
+  const exact = TOKEN_LABELS[source.trim()];
+  if (exact !== undefined) return exact;
+
+  let output = source;
   for (const [token, label] of TOKEN_REPLACEMENTS) {
     output = output.split(token).join(label);
   }

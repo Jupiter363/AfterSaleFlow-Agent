@@ -1,3 +1,5 @@
+# 文件作用：仅从 Java 内部证据接口加载本轮已授权附件，执行隐私、数量、大小、时限、MIME 与哈希校验后再构造多模态输入。
+
 from __future__ import annotations
 
 import base64
@@ -33,8 +35,12 @@ class LoadedEvidenceAssets:
 
 
 class EvidenceAssetLoader:
-    """Load only Java-authorized evidence attachments for multimodal inference."""
+    """只加载 Java 已按当前参与方可见性过滤并授权模型处理的证据附件。"""
 
+    # 所属模块：Agent Harness > 多模态证据 > 内部加载器信任根初始化。
+    # 具体功能：`__init__` 固定 Java 基地址、服务密钥、总超时和测试 transport，并立即校验 URL 只能指向批准的内部 host。
+    # 上下游：上游是服务安全配置；下游是 `load` 对固定案件/证据 content endpoint 的受控下载。
+    # 系统意义：content_url 或案件文本不能驱动任意网络请求，避免 SSRF、凭据泄露和从外部地址注入伪造图片。
     def __init__(
         self,
         *,
@@ -49,16 +55,26 @@ class EvidenceAssetLoader:
         self._timeout = timeout_seconds
         self._transport = transport
 
+    # 所属模块：Agent Harness > 多模态证据 > 本轮附件安全加载主链路。
+    # 具体功能：`load` 仅遍历 current_event.attachment_refs，逐项检查可见性、ID、隐私授权、格式、数量/单图/总大小/截止时间，再流式下载并核验 magic bytes 与 SHA-256。
+    # 上下游：上游是 Java 构造的 EvidenceContextEnvelopeV1（可见证据白名单+本轮引用）；下游是 LLM user content_parts 和逐证据 asset manifest。
+    # 系统意义：manifest 明确区分“模型看过像素”和“只看过 OCR/元数据”；任何未加载、哈希异常或越限材料都不能被模型假装已核验。
     def load(self, envelope: EvidenceContextEnvelopeV1) -> LoadedEvidenceAssets:
+        # dict.fromkeys 在保持原顺序的同时去重，避免同一证据重复下载、重复计费或绕过图片数量上限。
         requested_ids = list(dict.fromkeys(envelope.current_event.attachment_refs))
         visible_by_id = {item.evidence_id: item for item in envelope.visible_evidence}
         manifest_items: list[dict[str, Any]] = []
         content_parts: list[dict[str, Any]] = []
         loaded_images = 0
         loaded_bytes = 0
-        deadline = time.monotonic() + self._timeout
-
-        with httpx.Client(timeout=self._timeout, transport=self._transport) as client:
+        # 内部回环请求不读取系统代理，避免本机代理探测或证书初始化耗尽图片
+        # 下载预算。deadline 从客户端就绪后开始，仍然约束整批附件总下载时间。
+        with httpx.Client(
+            timeout=self._timeout,
+            transport=self._transport,
+            trust_env=False,
+        ) as client:
+            deadline = time.monotonic() + self._timeout
             for evidence_id in requested_ids:
                 if not SAFE_EVIDENCE_ID.fullmatch(evidence_id):
                     raise ValueError("unsafe evidence identifier")
@@ -72,6 +88,7 @@ class EvidenceAssetLoader:
                     "visual_input_status": "NOT_LOADED",
                     "inspected_modalities": ["OCR_TEXT"] if item.parsed_text else [],
                 }
+                # 原图只有“已脱敏”或“当事人明确授权模型处理”至少满足其一，才可能进入后续下载。
                 model_processing_authorized = _model_processing_authorized(item.metadata)
                 descriptor["model_processing_authorized"] = model_processing_authorized
                 if item.desensitized:
@@ -115,6 +132,7 @@ class EvidenceAssetLoader:
                     descriptor["limitation"] = "读取证据原件超过本轮时间预算。"
                     manifest_items.append(descriptor)
                     continue
+                # 即使 Java 声明了 file_size，也必须边下载边检查实际字节数；声明值不能作为唯一安全依据。
                 try:
                     with client.stream(
                         "GET",
@@ -155,6 +173,7 @@ class EvidenceAssetLoader:
                     descriptor["limitation"] = "未能通过内部受控接口读取证据原件。"
                     manifest_items.append(descriptor)
                     continue
+                # HTTP/数据库 content_type 可能伪造，因此再用文件头 magic bytes 判定真实图片类型。
                 detected_type = _detected_image_type(payload)
                 if detected_type != content_type:
                     descriptor["visual_input_status"] = "MIME_MISMATCH"
@@ -169,6 +188,7 @@ class EvidenceAssetLoader:
                     manifest_items.append(descriptor)
                     continue
 
+                # 只有全部边界通过后才做 base64；此前失败项只进入 manifest，不进入模型 content_parts。
                 data_url = (
                     f"data:{content_type};base64,"
                     f"{base64.b64encode(payload).decode('ascii')}"
@@ -225,6 +245,10 @@ class _TotalAssetLimitExceeded(RuntimeError):
     pass
 
 
+# 所属模块：Agent Harness > 多模态证据 > Java 基地址 SSRF 防护。
+# 具体功能：`_validate_internal_java_url` 只允许 http/https 与 SAFE_JAVA_HOSTS，并拒绝 URL 内嵌用户名、密码、query 或 fragment。
+# 上下游：上游是 EvidenceAssetLoader 构造时的服务配置；下游安全时才保存 base_url，失败则阻止服务使用该加载器。
+# 系统意义：证据下载必须回到内部 Java 权限接口；不能把服务密钥发送到调用方拼接的外部 URL 或含凭据的歧义地址。
 def _validate_internal_java_url(value: str) -> None:
     parsed = urlparse(value)
     if parsed.scheme not in {"http", "https"} or parsed.hostname not in SAFE_JAVA_HOSTS:
@@ -233,6 +257,10 @@ def _validate_internal_java_url(value: str) -> None:
         raise ValueError("JAVA_API_SERVICE_URL must not contain credentials or query data")
 
 
+# 所属模块：Agent Harness > 多模态证据 > 图片 magic bytes 识别。
+# 具体功能：`_detected_image_type` 根据 PNG/JPEG/WebP 文件头返回真实 MIME；不匹配任何允许格式时返回 None。
+# 上下游：上游是刚从 Java 内部接口读取且已限长的 bytes；下游与声明 content_type 比较，决定能否构造 image_url。
+# 系统意义：扩展名和 HTTP MIME 都是不可信元数据；检查文件头可阻止把脚本/其他二进制伪装成图片送给多模态供应商。
 def _detected_image_type(payload: bytes) -> str | None:
     if payload.startswith(b"\x89PNG\r\n\x1a\n"):
         return "image/png"
@@ -243,5 +271,9 @@ def _detected_image_type(payload: bytes) -> str | None:
     return None
 
 
+# 所属模块：Agent Harness > 多模态证据 > 显式模型处理授权读取。
+# 具体功能：`_model_processing_authorized` 仅当 metadata 中对应字段是布尔值 True 才授权；字符串 "true"、1 或缺失都不接受。
+# 上下游：上游是 Java 已持久化的证据隐私元数据；下游是 `load` 的原图隐私分支与 manifest privacy_basis。
+# 系统意义：采用严格真值比较可避免宽松类型转换把脏数据当成当事人同意，从而把未脱敏原图发送给外部模型。
 def _model_processing_authorized(metadata: dict[str, object]) -> bool:
     return metadata.get("model_processing_authorized") is True

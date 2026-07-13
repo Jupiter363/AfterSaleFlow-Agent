@@ -1,6 +1,13 @@
+/*
+ * 所属模块：房间协作与权限。
+ * 文件职责：验证接待Agent轮次，覆盖 「initialTurnUsesLobbySeedAndPersistsAgentScrollSnapshot」、「initialTurnParticipatesInTheCallerTransactionSoFreshCasesCanBeSeeded」、「initialTurnOmitsShortLobbySeedReferencesBeforeCallingAgent」、「participantTurnPersistsUserAnswerAndSendsPreviousScrollSnapshotToAgent」、「participantTurnSendsTheCompleteOrderedTranscriptBeyondTheRecentTurnWindow」、「participantTurnDoesNotRepeatInitialFormFacts」。
+ * 业务链路：JUnit 构造夹具并驱动真实服务或 Mock 协作者，断言返回值、持久化状态和调用边界；维护接待室、证据室和小法庭的参与人、不可变消息、会话权限、阶段时钟与 Agent 记忆。
+ * 关键边界：每次读取和写入都要绑定案件参与关系、角色、房间和受众范围
+ */
 package com.example.dispute.room;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.lenient;
@@ -54,6 +61,11 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
+// 所属模块：【房间协作与权限 / 自动化测试层】类型「IntakeAgentTurnServiceTest」。
+// 类型职责：集中验证接待Agent轮次的业务场景、权限边界和持久化/外部协作契约；本类型显式提供 「setUp」、「initialTurnUsesLobbySeedAndPersistsAgentScrollSnapshot」、「initialTurnParticipatesInTheCallerTransactionSoFreshCasesCanBeSeeded」、「initialTurnOmitsShortLobbySeedReferencesBeforeCallingAgent」、「participantTurnPersistsUserAnswerAndSendsPreviousScrollSnapshotToAgent」、「participantTurnSendsTheCompleteOrderedTranscriptBeyondTheRecentTurnWindow」。
+// 协作关系：由 JUnit 发现并执行其中带 @Test 的场景。
+// 边界意义：每次读取和写入都要绑定案件参与关系、角色、房间和受众范围
+// Java 语法：class 同时封装状态与方法；final 依赖通过构造器注入后不可重新指向。
 @ExtendWith(MockitoExtension.class)
 class IntakeAgentTurnServiceTest {
 
@@ -74,6 +86,11 @@ class IntakeAgentTurnServiceTest {
     private ObjectMapper objectMapper;
     private IntakeAgentTurnService service;
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「IntakeAgentTurnServiceTest.setUp()」。
+    // 具体功能：「IntakeAgentTurnServiceTest.setUp()」：在每个测试场景运行前创建「accessSessionResolver.resolve」、「agentSessionResolver.resolve」、「invocation.getArgument」、「lenient」，统一准备后续断言依赖的初始状态，避免各用例重复搭建且保持彼此隔离。
+    // 上游调用：「IntakeAgentTurnServiceTest.setUp()」由 JUnit 生命周期或本测试类的场景方法调用。
+    // 下游影响：「IntakeAgentTurnServiceTest.setUp()」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「IntakeAgentTurnServiceTest.setUp()」守住「房间协作与权限」的可执行规格；后续重构若破坏契约会在进入集成环境前失败。
     @BeforeEach
     void setUp() {
         objectMapper = new ObjectMapper().findAndRegisterModules();
@@ -110,6 +127,11 @@ class IntakeAgentTurnServiceTest {
                                         invocation.getArgument(4)));
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「IntakeAgentTurnServiceTest.initialTurnUsesLobbySeedAndPersistsAgentScrollSnapshot()」。
+    // 具体功能：「IntakeAgentTurnServiceTest.initialTurnUsesLobbySeedAndPersistsAgentScrollSnapshot()」：复现“核对完整业务行为（场景方法「initialTurnUsesLobbySeedAndPersistsAgentScrollSnapshot」）”场景：驱动 「caseRepository.findByIdForUpdate」、「roomRepository.findByCaseIdAndRoomType」、「memoryRepository.findMaxTurnNoByAgentSessionId」、「memoryRepository.findTopByAgentSessionIdAndAgentRoleIsNotNullOrderByTurnNoDesc」，再用 「verify」、「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「TRACE_1」、「REQ_1」、「我先确认一下：你是说订单显示已签收但没有收到，对吗？」、「current_outcome」。
+    // 上游调用：「IntakeAgentTurnServiceTest.initialTurnUsesLobbySeedAndPersistsAgentScrollSnapshot()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「IntakeAgentTurnServiceTest.initialTurnUsesLobbySeedAndPersistsAgentScrollSnapshot()」的下游是被测服务、仓储或外部客户端替身；「verify、assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「IntakeAgentTurnServiceTest.initialTurnUsesLobbySeedAndPersistsAgentScrollSnapshot()」守住「房间协作与权限」的可执行规格，尤其防止 「TRACE_1」、「REQ_1」、「我先确认一下：你是说订单显示已签收但没有收到，对吗？」、「current_outcome」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void initialTurnUsesLobbySeedAndPersistsAgentScrollSnapshot() {
         FulfillmentCaseEntity dispute = intakeCase();
@@ -168,20 +190,18 @@ class IntakeAgentTurnServiceTest {
         verify(client).run(command.capture(), eq("TRACE_1"), eq("REQ_1"));
         assertThat(command.getValue().caseId()).isEqualTo(dispute.getId());
         assertThat(command.getValue().turnSource()).isEqualTo("EXTERNAL_IMPORT");
-        assertThat(command.getValue().currentUserMessage().source())
+        assertThat(command.getValue().currentUserMessage()).isNull();
+        assertThat(command.getValue().initialCaseFacts().formSource())
                 .isEqualTo("EXTERNAL_IMPORT");
-        assertThat(command.getValue().currentUserMessage().text())
+        assertThat(command.getValue().initialCaseFacts().formDescription())
                 .isEqualTo("物流轨迹显示订单已签收，但发起方表示未收到包裹。");
+        assertThat(command.getValue().initialCaseFacts().claimResolutionSeed().requestedResolution())
+                .isEqualTo("REFUND");
+        assertThat(command.getValue().initialCaseFacts().claimResolutionSeed().originalStatement())
+                .isNull();
+        assertThat(command.getValue().initialCaseFacts().respondentAttitudeSeed()).isNull();
         assertThat(command.getValue().recentDialogueMessages()).isEmpty();
-        assertThat(command.getValue().initiatorStatementTranscript())
-                .singleElement()
-                .satisfies(
-                        statement -> {
-                            assertThat(statement.messageId()).isEqualTo("INTAKE_TURN_1");
-                            assertThat(statement.role()).isEqualTo("USER");
-                            assertThat(statement.text())
-                                    .isEqualTo("物流轨迹显示订单已签收，但发起方表示未收到包裹。");
-                        });
+        assertThat(command.getValue().initiatorStatementTranscript()).isEmpty();
         assertThat(command.getValue().previousCaseDetail().isObject()).isTrue();
         assertThat(command.getValue().agentContext().actorId()).isEqualTo("user-local");
         assertThat(command.getValue().agentContext().actorRole()).isEqualTo("USER");
@@ -193,16 +213,14 @@ class IntakeAgentTurnServiceTest {
 
         ArgumentCaptor<RoomTurnMemoryEntity> memory =
                 ArgumentCaptor.forClass(RoomTurnMemoryEntity.class);
-        verify(memoryRepository, org.mockito.Mockito.times(2)).save(memory.capture());
-        assertThat(memory.getAllValues().get(0).getAnswerRole()).isEqualTo("USER");
-        assertThat(memory.getAllValues().get(0).getAnswerContent())
-                .isEqualTo("物流轨迹显示订单已签收，但发起方表示未收到包裹。");
-        assertThat(memory.getAllValues().get(1).getAgentRole())
+        verify(memoryRepository).save(memory.capture());
+        assertThat(memory.getValue().getAnswerContent()).isNull();
+        assertThat(memory.getValue().getAgentRole())
                 .isEqualTo("DISPUTE_INTAKE_OFFICER");
-        assertThat(memory.getAllValues().get(1).getTurnNo()).isEqualTo(1);
-        assertThat(memory.getAllValues().get(1).getScrollSnapshotJson())
+        assertThat(memory.getValue().getTurnNo()).isEqualTo(1);
+        assertThat(memory.getValue().getScrollSnapshotJson())
                 .contains("ASK_FOR_CLARIFICATION");
-        assertThat(memory.getAllValues().get(1).getDossierPatchJson())
+        assertThat(memory.getValue().getDossierPatchJson())
                 .contains("\"memory_frame\"")
                 .contains("\"prompt_memory\":\"short memory\"");
 
@@ -219,15 +237,16 @@ class IntakeAgentTurnServiceTest {
 
         ArgumentCaptor<RoomMessageEntity> roomMessages =
                 ArgumentCaptor.forClass(RoomMessageEntity.class);
-        verify(messageRepository, org.mockito.Mockito.times(2)).save(roomMessages.capture());
-        assertThat(roomMessages.getAllValues().get(0).getMessageType())
-                .isEqualTo(MessageType.PARTY_TEXT);
-        assertThat(roomMessages.getAllValues().get(0).getMessageText())
-                .isEqualTo("物流轨迹显示订单已签收，但发起方表示未收到包裹。");
-        assertThat(roomMessages.getAllValues().get(1).getMessageType())
+        verify(messageRepository).save(roomMessages.capture());
+        assertThat(roomMessages.getValue().getMessageType())
                 .isEqualTo(MessageType.AGENT_MESSAGE);
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「IntakeAgentTurnServiceTest.initialTurnParticipatesInTheCallerTransactionSoFreshCasesCanBeSeeded()」。
+    // 具体功能：「IntakeAgentTurnServiceTest.initialTurnParticipatesInTheCallerTransactionSoFreshCasesCanBeSeeded()」：复现“核对完整业务行为（场景方法「initialTurnParticipatesInTheCallerTransactionSoFreshCasesCanBeSeeded」）”场景：驱动 「transactional.propagation」、「getAnnotation」、「IntakeAgentTurnService.class.getMethod」、「assertThat(transactional).isNotNull」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「startInitialTurn」。
+    // 上游调用：「IntakeAgentTurnServiceTest.initialTurnParticipatesInTheCallerTransactionSoFreshCasesCanBeSeeded()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「IntakeAgentTurnServiceTest.initialTurnParticipatesInTheCallerTransactionSoFreshCasesCanBeSeeded()」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「IntakeAgentTurnServiceTest.initialTurnParticipatesInTheCallerTransactionSoFreshCasesCanBeSeeded()」守住「房间协作与权限」的可执行规格，尤其防止 「startInitialTurn」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void initialTurnParticipatesInTheCallerTransactionSoFreshCasesCanBeSeeded()
             throws NoSuchMethodException {
@@ -246,9 +265,14 @@ class IntakeAgentTurnServiceTest {
         assertThat(transactional.propagation()).isEqualTo(Propagation.REQUIRED);
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「IntakeAgentTurnServiceTest.initialTurnOmitsShortLobbySeedReferencesBeforeCallingAgent()」。
+    // 具体功能：「IntakeAgentTurnServiceTest.initialTurnOmitsShortLobbySeedReferencesBeforeCallingAgent()」：复现“核对完整业务行为（场景方法「initialTurnOmitsShortLobbySeedReferencesBeforeCallingAgent」）”场景：驱动 「caseRepository.findByIdForUpdate」、「roomRepository.findByCaseIdAndRoomType」、「memoryRepository.findMaxTurnNoByAgentSessionId」、「memoryRepository.findTopByAgentSessionIdAndAgentRoleIsNotNullOrderByTurnNoDesc」，再用 「verify」、「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「TRACE_SHORT_INITIAL」、「REQ_SHORT_INITIAL」、「我会先补齐缺失的订单、售后和物流引用。」、「admission_recommendation」。
+    // 上游调用：「IntakeAgentTurnServiceTest.initialTurnOmitsShortLobbySeedReferencesBeforeCallingAgent()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「IntakeAgentTurnServiceTest.initialTurnOmitsShortLobbySeedReferencesBeforeCallingAgent()」的下游是被测服务、仓储或外部客户端替身；「verify、assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「IntakeAgentTurnServiceTest.initialTurnOmitsShortLobbySeedReferencesBeforeCallingAgent()」守住「房间协作与权限」的可执行规格，尤其防止 「TRACE_SHORT_INITIAL」、「REQ_SHORT_INITIAL」、「我会先补齐缺失的订单、售后和物流引用。」、「admission_recommendation」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void initialTurnOmitsShortLobbySeedReferencesBeforeCallingAgent() {
-        FulfillmentCaseEntity dispute = intakeCase();
+        FulfillmentCaseEntity dispute = manuallyCreatedIntakeCase();
         CaseRoomEntity room = intakeRoom(dispute);
         when(caseRepository.findByIdForUpdate(dispute.getId()))
                 .thenReturn(Optional.of(dispute));
@@ -293,17 +317,20 @@ class IntakeAgentTurnServiceTest {
         ArgumentCaptor<IntakeAgentTurnCommand> command =
                 ArgumentCaptor.forClass(IntakeAgentTurnCommand.class);
         verify(client).run(command.capture(), eq("TRACE_SHORT_INITIAL"), eq("REQ_SHORT_INITIAL"));
+        assertThat(command.getValue().turnSource()).isEqualTo("FORM_SUBMISSION");
+        assertThat(command.getValue().initialCaseFacts().formSource())
+                .isEqualTo("FORM_SUBMISSION");
         assertThat(command.getValue().initialCaseFacts().orderReference()).isNull();
         assertThat(command.getValue().initialCaseFacts().afterSalesReference()).isNull();
         assertThat(command.getValue().initialCaseFacts().logisticsReference()).isNull();
-        assertThat(command.getValue().initiatorStatementTranscript())
-                .singleElement()
-                .satisfies(
-                        statement ->
-                                assertThat(statement.text())
-                                        .isEqualTo("物流显示签收，但我没有收到包裹。"));
+        assertThat(command.getValue().initiatorStatementTranscript()).isEmpty();
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「IntakeAgentTurnServiceTest.participantTurnPersistsUserAnswerAndSendsPreviousScrollSnapshotToAgent()」。
+    // 具体功能：「IntakeAgentTurnServiceTest.participantTurnPersistsUserAnswerAndSendsPreviousScrollSnapshotToAgent()」：复现“核对完整业务行为（场景方法「participantTurnPersistsUserAnswerAndSendsPreviousScrollSnapshotToAgent」）”场景：驱动 「caseRepository.findByIdForUpdate」、「roomRepository.findByCaseIdAndRoomType」、「memoryRepository.findMaxTurnNoByAgentSessionId」、「memoryRepository.findTopByAgentSessionIdAndAgentRoleIsNotNullOrderByTurnNoDesc」，再用 「verify」、「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「MEMORY_PREVIOUS」、「dispute-intake-officer」、「DISPUTE_INTAKE_OFFICER」、「我先确认一下签收争议。」。
+    // 上游调用：「IntakeAgentTurnServiceTest.participantTurnPersistsUserAnswerAndSendsPreviousScrollSnapshotToAgent()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「IntakeAgentTurnServiceTest.participantTurnPersistsUserAnswerAndSendsPreviousScrollSnapshotToAgent()」的下游是被测服务、仓储或外部客户端替身；「verify、assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「IntakeAgentTurnServiceTest.participantTurnPersistsUserAnswerAndSendsPreviousScrollSnapshotToAgent()」守住「房间协作与权限」的可执行规格，尤其防止 「MEMORY_PREVIOUS」、「dispute-intake-officer」、「DISPUTE_INTAKE_OFFICER」、「我先确认一下签收争议。」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void participantTurnPersistsUserAnswerAndSendsPreviousScrollSnapshotToAgent() {
         FulfillmentCaseEntity dispute = intakeCase();
@@ -376,9 +403,12 @@ class IntakeAgentTurnServiceTest {
         assertThat(command.getValue().turnSource()).isEqualTo("ROOM_MESSAGE");
         assertThat(command.getValue().currentUserMessage().messageId()).isEqualTo("MESSAGE_CURRENT_2");
         assertThat(command.getValue().currentUserMessage().text()).contains("退款");
+        assertThat(command.getValue().initialCaseFacts()).isNull();
         assertThat(command.getValue().previousCaseDetail().path("current_outcome").asText())
                 .isEqualTo("ASK_FOR_CLARIFICATION");
-        assertThat(command.getValue().recentDialogueMessages()).hasSizeLessThanOrEqualTo(6);
+        assertThat(command.getValue().recentDialogueMessages()).hasSizeLessThanOrEqualTo(5);
+        assertThat(command.getValue().recentDialogueMessages().size() + 1)
+                .isLessThanOrEqualTo(6);
 
         ArgumentCaptor<RoomTurnMemoryEntity> memories =
                 ArgumentCaptor.forClass(RoomTurnMemoryEntity.class);
@@ -397,6 +427,11 @@ class IntakeAgentTurnServiceTest {
         assertThat(currentDossier.getValue().getSourceTurnNo()).isEqualTo(2);
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「IntakeAgentTurnServiceTest.participantTurnSendsTheCompleteOrderedTranscriptBeyondTheRecentTurnWindow()」。
+    // 具体功能：「IntakeAgentTurnServiceTest.participantTurnSendsTheCompleteOrderedTranscriptBeyondTheRecentTurnWindow()」：复现“核对完整业务行为（场景方法「participantTurnSendsTheCompleteOrderedTranscriptBeyondTheRecentTurnWindow」）”场景：驱动 「caseRepository.findByIdForUpdate」、「roomRepository.findByCaseIdAndRoomType」、「memoryRepository.findMaxTurnNoByAgentSessionId」、「memoryRepository.findTopByAgentSessionIdAndAgentRoleIsNotNullOrderByTurnNoDesc」，再用 「verify」、「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「user-local」、「DISPUTE_INTAKE_OFFICER」、「intake-user-v1」、「MEMEO_DEFAULT」。
+    // 上游调用：「IntakeAgentTurnServiceTest.participantTurnSendsTheCompleteOrderedTranscriptBeyondTheRecentTurnWindow()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「IntakeAgentTurnServiceTest.participantTurnSendsTheCompleteOrderedTranscriptBeyondTheRecentTurnWindow()」的下游是被测服务、仓储或外部客户端替身；「verify、assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「IntakeAgentTurnServiceTest.participantTurnSendsTheCompleteOrderedTranscriptBeyondTheRecentTurnWindow()」守住「房间协作与权限」的可执行规格，尤其防止 「user-local」、「DISPUTE_INTAKE_OFFICER」、「intake-user-v1」、「MEMEO_DEFAULT」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void participantTurnSendsTheCompleteOrderedTranscriptBeyondTheRecentTurnWindow() {
         FulfillmentCaseEntity dispute = intakeCase();
@@ -430,21 +465,23 @@ class IntakeAgentTurnServiceTest {
         }
         List<RoomMessageEntity> visibleHistory = new ArrayList<>();
         for (int round = 1; round <= 4; round++) {
-            long userSequence = round * 2L - 1L;
-            visibleHistory.add(
-                    participantMessage(
-                            dispute,
-                            room,
-                            userSequence,
-                            "MESSAGE_HISTORY_USER_" + round,
-                            "历史用户陈述 " + round));
+            long agentSequence = round * 2L - 1L;
             visibleHistory.add(
                     agentMessage(
                             dispute,
                             room,
-                            userSequence + 1,
+                            agentSequence,
                             "MESSAGE_HISTORY_AGENT_" + round,
                             "历史接待官回复 " + round));
+            if (round < 4) {
+                visibleHistory.add(
+                        participantMessage(
+                                dispute,
+                                room,
+                                agentSequence + 1,
+                                "MESSAGE_HISTORY_USER_" + round,
+                                "历史用户陈述 " + round));
+            }
         }
         when(caseRepository.findByIdForUpdate(dispute.getId()))
                 .thenReturn(Optional.of(dispute));
@@ -494,7 +531,7 @@ class IntakeAgentTurnServiceTest {
                 participantMessage(
                         dispute,
                         room,
-                        12,
+                        8,
                         "MESSAGE_CURRENT_12",
                         latestStatement),
                 "TRACE_TRANSCRIPT",
@@ -504,19 +541,23 @@ class IntakeAgentTurnServiceTest {
                 ArgumentCaptor.forClass(IntakeAgentTurnCommand.class);
         verify(client).run(command.capture(), eq("TRACE_TRANSCRIPT"), eq("REQ_TRANSCRIPT"));
         assertThat(command.getValue().recentDialogueMessages())
-                .hasSize(6)
+                .hasSize(5)
                 .first()
                 .satisfies(
                         message -> {
                             assertThat(message.sequenceNo()).isEqualTo(3);
-                            assertThat(message.role()).isEqualTo("USER");
+                            assertThat(message.role()).isEqualTo("AGENT");
                         });
         assertThat(command.getValue().recentDialogueMessages()).last()
                 .satisfies(
                         message -> {
-                            assertThat(message.sequenceNo()).isEqualTo(8);
+                            assertThat(message.sequenceNo()).isEqualTo(7);
                             assertThat(message.role()).isEqualTo("AGENT");
                         });
+        assertThat(command.getValue().recentDialogueMessages())
+                .extracting(message -> message.role())
+                .containsExactly("AGENT", "USER", "AGENT", "USER", "AGENT");
+        assertThat(command.getValue().recentDialogueMessages().size() + 1).isEqualTo(6);
         assertThat(command.getValue().initiatorStatementTranscript())
                 .hasSize(12)
                 .extracting(message -> message.text())
@@ -540,8 +581,13 @@ class IntakeAgentTurnServiceTest {
                 .allSatisfy(message -> assertThat(message.role()).isEqualTo("USER"));
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「IntakeAgentTurnServiceTest.participantTurnDoesNotRepeatInitialFormFacts()」。
+    // 具体功能：「IntakeAgentTurnServiceTest.participantTurnDoesNotRepeatInitialFormFacts()」：复现“核对完整业务行为（场景方法「participantTurnDoesNotRepeatInitialFormFacts」）”场景：驱动 「caseRepository.findByIdForUpdate」、「roomRepository.findByCaseIdAndRoomType」、「memoryRepository.findMaxTurnNoByAgentSessionId」、「memoryRepository.findTopByAgentSessionIdAndAgentRoleIsNotNullOrderByTurnNoDesc」，再用 「verify」、「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_INTAKE_SHORT_REFS」、「2」、「user-local」、「merchant-local」。
+    // 上游调用：「IntakeAgentTurnServiceTest.participantTurnDoesNotRepeatInitialFormFacts()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「IntakeAgentTurnServiceTest.participantTurnDoesNotRepeatInitialFormFacts()」的下游是被测服务、仓储或外部客户端替身；「verify、assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「IntakeAgentTurnServiceTest.participantTurnDoesNotRepeatInitialFormFacts()」守住「房间协作与权限」的可执行规格，尤其防止 「CASE_INTAKE_SHORT_REFS」、「2」、「user-local」、「merchant-local」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
-    void participantTurnOmitsShortExternalReferencesBeforeCallingAgent() {
+    void participantTurnDoesNotRepeatInitialFormFacts() {
         FulfillmentCaseEntity dispute =
                 FulfillmentCaseEntity.imported(
                         "CASE_INTAKE_SHORT_REFS",
@@ -605,13 +651,16 @@ class IntakeAgentTurnServiceTest {
         ArgumentCaptor<IntakeAgentTurnCommand> command =
                 ArgumentCaptor.forClass(IntakeAgentTurnCommand.class);
         verify(client).run(command.capture(), eq("TRACE_SHORT"), eq("REQ_SHORT"));
-        assertThat(command.getValue().initialCaseFacts().orderReference()).isNull();
-        assertThat(command.getValue().initialCaseFacts().afterSalesReference()).isNull();
-        assertThat(command.getValue().initialCaseFacts().logisticsReference()).isNull();
+        assertThat(command.getValue().initialCaseFacts()).isNull();
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「IntakeAgentTurnServiceTest.participantTurnFailsClosedWithoutPersistingSyntheticAgentMemory()」。
+    // 具体功能：「IntakeAgentTurnServiceTest.participantTurnFailsClosedWithoutPersistingSyntheticAgentMemory()」：复现“核对完整业务行为（场景方法「participantTurnFailsClosedWithoutPersistingSyntheticAgentMemory」）”场景：驱动 「caseRepository.findByIdForUpdate」、「roomRepository.findByCaseIdAndRoomType」、「memoryRepository.findMaxTurnNoByAgentSessionId」、「memoryRepository.findTopByAgentSessionIdAndAgentRoleIsNotNullOrderByTurnNoDesc」，再用 「assertThatThrownBy」、「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「MEMORY_PREVIOUS」、「dispute-intake-officer」、「DISPUTE_INTAKE_OFFICER」、「我先确认一下签收争议。」。
+    // 上游调用：「IntakeAgentTurnServiceTest.participantTurnFailsClosedWithoutPersistingSyntheticAgentMemory()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「IntakeAgentTurnServiceTest.participantTurnFailsClosedWithoutPersistingSyntheticAgentMemory()」的下游是被测服务、仓储或外部客户端替身；「assertThatThrownBy、verify」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「IntakeAgentTurnServiceTest.participantTurnFailsClosedWithoutPersistingSyntheticAgentMemory()」守住「房间协作与权限」的可执行规格，尤其防止 「MEMORY_PREVIOUS」、「dispute-intake-officer」、「DISPUTE_INTAKE_OFFICER」、「我先确认一下签收争议。」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
-    void participantTurnPersistsTraceableDegradedMemoryWhenAgentCallFails() {
+    void participantTurnFailsClosedWithoutPersistingSyntheticAgentMemory() {
         FulfillmentCaseEntity dispute = intakeCase();
         CaseRoomEntity room = intakeRoom(dispute);
         RoomTurnMemoryEntity previous =
@@ -638,46 +687,36 @@ class IntakeAgentTurnServiceTest {
                 .thenReturn(Optional.of(previous));
         when(client.run(any(), eq("TRACE_FAIL"), eq("REQ_FAIL")))
                 .thenThrow(new RuntimeException("python returned 422"));
-        when(memoryRepository.save(any()))
-                .thenAnswer(invocation -> invocation.getArgument(0));
-        when(intakeDossierRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.INTAKE))
-                .thenReturn(Optional.empty());
-        when(intakeDossierRepository.save(any()))
-                .thenAnswer(invocation -> invocation.getArgument(0));
-        when(messageRepository.findByCaseIdAndIdempotencyKey(
-                        eq(dispute.getId()), any()))
-                .thenReturn(Optional.empty());
-        when(messageRepository.findMaxSequenceByRoomId(room.getId())).thenReturn(1L);
-        when(messageRepository.save(any()))
-                .thenAnswer(invocation -> invocation.getArgument(0));
 
-        service.continueFromParticipantMessage(
-                dispute.getId(),
-                RoomType.INTAKE,
-                new AuthenticatedActor("user-local", ActorRole.USER),
-                participantMessage(
-                        dispute,
-                        room,
-                        2,
-                        "MESSAGE_FAIL",
-                        "我继续补充：商家回复让我找快递，但快递说只能让商家发起核查。"),
-                "TRACE_FAIL",
-                "REQ_FAIL");
+        assertThatThrownBy(
+                        () ->
+                                service.continueFromParticipantMessage(
+                                        dispute.getId(),
+                                        RoomType.INTAKE,
+                                        new AuthenticatedActor("user-local", ActorRole.USER),
+                                        participantMessage(
+                                                dispute,
+                                                room,
+                                                2,
+                                                "MESSAGE_FAIL",
+                                                "我继续补充：商家回复让我找快递，但快递说只能让商家发起核查。"),
+                                        "TRACE_FAIL",
+                                        "REQ_FAIL"))
+                .isInstanceOf(
+                        com.example.dispute.common.exception.AgentExecutionException.class)
+                .hasMessageContaining("intake agent model request failed");
 
-        ArgumentCaptor<RoomTurnMemoryEntity> memories =
-                ArgumentCaptor.forClass(RoomTurnMemoryEntity.class);
-        verify(memoryRepository, org.mockito.Mockito.times(2)).save(memories.capture());
-        RoomTurnMemoryEntity degradedMemory = memories.getAllValues().get(1);
-        assertThat(degradedMemory.getAgentResponse())
-                .contains("接待官暂时没有完成智能整理");
-        assertThat(degradedMemory.getDossierPatchJson())
-                .contains("\"agent_degraded\":true")
-                .contains("\"agent_degraded_reason\":\"AGENT_CALL_FAILED\"")
-                .contains("\"trace_id\":\"TRACE_FAIL\"");
-        assertThat(degradedMemory.getScrollSnapshotJson())
-                .contains("ASK_FOR_CLARIFICATION");
+        verify(memoryRepository, org.mockito.Mockito.times(1)).save(any());
+        verify(client).run(any(), eq("TRACE_FAIL"), eq("REQ_FAIL"));
+        verify(intakeDossierRepository, org.mockito.Mockito.never()).save(any());
+        verify(messageRepository, org.mockito.Mockito.never()).save(any());
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「IntakeAgentTurnServiceTest.result(String,Map)」。
+    // 具体功能：「IntakeAgentTurnServiceTest.result(String,Map)」：作为测试辅助方法为“核对完整业务行为（场景方法「result」）”组装或读取「IntakeAgentTurnResult」 输入夹具，供本测试类的场景方法复用。
+    // 上游调用：「IntakeAgentTurnServiceTest.result(String,Map)」由本测试类中的 「IntakeAgentTurnServiceTest.initialTurnUsesLobbySeedAndPersistsAgentScrollSnapshot」、「IntakeAgentTurnServiceTest.initialTurnOmitsShortLobbySeedReferencesBeforeCallingAgent」、「IntakeAgentTurnServiceTest.participantTurnPersistsUserAnswerAndSendsPreviousScrollSnapshotToAgent」、「IntakeAgentTurnServiceTest.participantTurnSendsTheCompleteOrderedTranscriptBeyondTheRecentTurnWindow」 调用。
+    // 下游影响：「IntakeAgentTurnServiceTest.result(String,Map)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「IntakeAgentTurnServiceTest.result(String,Map)」守住「房间协作与权限」的可执行规格，尤其防止 「schema_version」、「intake_case_detail.v1」、「case_story」、「title」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private IntakeAgentTurnResult result(String utterance, Map<String, Object> scrollSnapshot) {
         Map<String, Object> caseDetail =
                 Map.of(
@@ -703,6 +742,11 @@ class IntakeAgentTurnServiceTest {
                 0.86);
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「IntakeAgentTurnServiceTest.participantMessage(FulfillmentCaseEntity,CaseRoomEntity,long,String,String)」。
+    // 具体功能：「IntakeAgentTurnServiceTest.participantMessage(FulfillmentCaseEntity,CaseRoomEntity,long,String,String)」：作为测试辅助方法为“核对完整业务行为（场景方法「participantMessage」）”组装或读取「RoomMessageEntity.create」、「CLOCK.instant」、「dispute.getId」、「room.getId」，供本测试类的场景方法复用。
+    // 上游调用：「IntakeAgentTurnServiceTest.participantMessage(FulfillmentCaseEntity,CaseRoomEntity,long,String,String)」由本测试类中的 「IntakeAgentTurnServiceTest.participantTurnPersistsUserAnswerAndSendsPreviousScrollSnapshotToAgent」、「IntakeAgentTurnServiceTest.participantTurnSendsTheCompleteOrderedTranscriptBeyondTheRecentTurnWindow」、「IntakeAgentTurnServiceTest.participantTurnDoesNotRepeatInitialFormFacts」、「IntakeAgentTurnServiceTest.participantTurnFailsClosedWithoutPersistingSyntheticAgentMemory」 调用。
+    // 下游影响：「IntakeAgentTurnServiceTest.participantMessage(FulfillmentCaseEntity,CaseRoomEntity,long,String,String)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「IntakeAgentTurnServiceTest.participantMessage(FulfillmentCaseEntity,CaseRoomEntity,long,String,String)」守住「房间协作与权限」的可执行规格，尤其防止 「user-local」、「[\"user-local\"]」、「[]」、「test-intake-message:」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static RoomMessageEntity participantMessage(
             FulfillmentCaseEntity dispute,
             CaseRoomEntity room,
@@ -727,6 +771,11 @@ class IntakeAgentTurnServiceTest {
                 "TRACE_TEST");
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「IntakeAgentTurnServiceTest.agentMessage(FulfillmentCaseEntity,CaseRoomEntity,long,String,String)」。
+    // 具体功能：「IntakeAgentTurnServiceTest.agentMessage(FulfillmentCaseEntity,CaseRoomEntity,long,String,String)」：作为测试辅助方法为“核对完整业务行为（场景方法「agentMessage」）”组装或读取「RoomMessageEntity.create」、「CLOCK.instant」、「dispute.getId」、「room.getId」，供本测试类的场景方法复用。
+    // 上游调用：「IntakeAgentTurnServiceTest.agentMessage(FulfillmentCaseEntity,CaseRoomEntity,long,String,String)」由本测试类中的 「IntakeAgentTurnServiceTest.participantTurnSendsTheCompleteOrderedTranscriptBeyondTheRecentTurnWindow」 调用。
+    // 下游影响：「IntakeAgentTurnServiceTest.agentMessage(FulfillmentCaseEntity,CaseRoomEntity,long,String,String)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「IntakeAgentTurnServiceTest.agentMessage(FulfillmentCaseEntity,CaseRoomEntity,long,String,String)」守住「房间协作与权限」的可执行规格，尤其防止 「CUSTOMER_SERVICE」、「dispute-intake-officer」、「[\"user-local\"]」、「[]」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static RoomMessageEntity agentMessage(
             FulfillmentCaseEntity dispute,
             CaseRoomEntity room,
@@ -751,6 +800,11 @@ class IntakeAgentTurnServiceTest {
                 "TRACE_TEST");
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「IntakeAgentTurnServiceTest.accessSession(String,AuthenticatedActor)」。
+    // 具体功能：「IntakeAgentTurnServiceTest.accessSession(String,AuthenticatedActor)」：作为测试辅助方法为“核对完整业务行为（场景方法「accessSession」）”组装或读取「CaseAccessSessionEntity.create」、「actor.role」、「actor.actorId」，供本测试类的场景方法复用。
+    // 上游调用：「IntakeAgentTurnServiceTest.accessSession(String,AuthenticatedActor)」由本测试类中的 「IntakeAgentTurnServiceTest.setUp」、「IntakeAgentTurnServiceTest.participantTurnSendsTheCompleteOrderedTranscriptBeyondTheRecentTurnWindow」 调用。
+    // 下游影响：「IntakeAgentTurnServiceTest.accessSession(String,AuthenticatedActor)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「IntakeAgentTurnServiceTest.accessSession(String,AuthenticatedActor)」守住「房间协作与权限」的可执行规格，尤其防止 「ACCESS_」、「default」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static CaseAccessSessionEntity accessSession(String caseId, AuthenticatedActor actor) {
         PermissionLevel level =
                 actor.role() == ActorRole.MERCHANT
@@ -766,6 +820,11 @@ class IntakeAgentTurnServiceTest {
                 actor.actorId());
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「IntakeAgentTurnServiceTest.agentSession(CaseAccessSessionEntity,RoomType,String,String,String)」。
+    // 具体功能：「IntakeAgentTurnServiceTest.agentSession(CaseAccessSessionEntity,RoomType,String,String,String)」：作为测试辅助方法为“核对完整业务行为（场景方法「agentSession」）”组装或读取「AgentConversationSessionEntity.create」、「accessSession.getActorId」，供本测试类的场景方法复用。
+    // 上游调用：「IntakeAgentTurnServiceTest.agentSession(CaseAccessSessionEntity,RoomType,String,String,String)」由本测试类中的 「IntakeAgentTurnServiceTest.setUp」、「IntakeAgentTurnServiceTest.participantTurnSendsTheCompleteOrderedTranscriptBeyondTheRecentTurnWindow」 调用。
+    // 下游影响：「IntakeAgentTurnServiceTest.agentSession(CaseAccessSessionEntity,RoomType,String,String,String)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「IntakeAgentTurnServiceTest.agentSession(CaseAccessSessionEntity,RoomType,String,String,String)」守住「房间协作与权限」的可执行规格，尤其防止 「AGENT_SESSION_」、「_」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static AgentConversationSessionEntity agentSession(
             CaseAccessSessionEntity accessSession,
             RoomType roomType,
@@ -782,6 +841,11 @@ class IntakeAgentTurnServiceTest {
                 accessSession.getActorId());
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「IntakeAgentTurnServiceTest.intakeCase()」。
+    // 具体功能：「IntakeAgentTurnServiceTest.intakeCase()」：作为测试辅助方法为“核对完整业务行为（场景方法「intakeCase」）”组装或读取「FulfillmentCaseEntity.imported」，供本测试类的场景方法复用。
+    // 上游调用：「IntakeAgentTurnServiceTest.intakeCase()」由本测试类中的 「IntakeAgentTurnServiceTest.initialTurnUsesLobbySeedAndPersistsAgentScrollSnapshot」、「IntakeAgentTurnServiceTest.participantTurnPersistsUserAnswerAndSendsPreviousScrollSnapshotToAgent」、「IntakeAgentTurnServiceTest.participantTurnSendsTheCompleteOrderedTranscriptBeyondTheRecentTurnWindow」、「IntakeAgentTurnServiceTest.participantTurnFailsClosedWithoutPersistingSyntheticAgentMemory」 调用。
+    // 下游影响：「IntakeAgentTurnServiceTest.intakeCase()」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「IntakeAgentTurnServiceTest.intakeCase()」守住「房间协作与权限」的可执行规格，尤其防止 「CASE_INTAKE_AGENT」、「ORDER-1」、「AFTER-1」、「LOG-1」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static FulfillmentCaseEntity intakeCase() {
         FulfillmentCaseEntity dispute =
                 FulfillmentCaseEntity.imported(
@@ -805,6 +869,33 @@ class IntakeAgentTurnServiceTest {
         return dispute;
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「IntakeAgentTurnServiceTest.manuallyCreatedIntakeCase()」。
+    // 具体功能：「IntakeAgentTurnServiceTest.manuallyCreatedIntakeCase()」：作为测试辅助方法为“核对完整业务行为（场景方法「manuallyCreatedIntakeCase」）”组装或读取「FulfillmentCaseEntity.create」，供本测试类的场景方法复用。
+    // 上游调用：「IntakeAgentTurnServiceTest.manuallyCreatedIntakeCase()」由本测试类中的 「IntakeAgentTurnServiceTest.initialTurnOmitsShortLobbySeedReferencesBeforeCallingAgent」 调用。
+    // 下游影响：「IntakeAgentTurnServiceTest.manuallyCreatedIntakeCase()」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「IntakeAgentTurnServiceTest.manuallyCreatedIntakeCase()」守住「房间协作与权限」的可执行规格，尤其防止 「CASE_MANUAL_INTAKE_AGENT」、「ORDER-1」、「AFTER-1」、「LOG-1」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
+    private static FulfillmentCaseEntity manuallyCreatedIntakeCase() {
+        return FulfillmentCaseEntity.create(
+                "CASE_MANUAL_INTAKE_AGENT",
+                "ORDER-1",
+                "AFTER-1",
+                "LOG-1",
+                "user-local",
+                "merchant-local",
+                ActorRole.USER,
+                "idem-manual-intake-agent",
+                "SIGNED_NOT_RECEIVED",
+                "签收未收到",
+                "用户通过争议表单说明订单显示签收但未收到包裹。",
+                RiskLevel.HIGH,
+                "user-local");
+    }
+
+    // 所属模块：【房间协作与权限 / 自动化测试层】「IntakeAgentTurnServiceTest.intakeRoom(FulfillmentCaseEntity)」。
+    // 具体功能：「IntakeAgentTurnServiceTest.intakeRoom(FulfillmentCaseEntity)」：作为测试辅助方法为“核对完整业务行为（场景方法「intakeRoom」）”组装或读取「CaseRoomEntity.open」、「OffsetDateTime.parse」、「dispute.getId」，供本测试类的场景方法复用。
+    // 上游调用：「IntakeAgentTurnServiceTest.intakeRoom(FulfillmentCaseEntity)」由本测试类中的 「IntakeAgentTurnServiceTest.initialTurnUsesLobbySeedAndPersistsAgentScrollSnapshot」、「IntakeAgentTurnServiceTest.initialTurnOmitsShortLobbySeedReferencesBeforeCallingAgent」、「IntakeAgentTurnServiceTest.participantTurnPersistsUserAnswerAndSendsPreviousScrollSnapshotToAgent」、「IntakeAgentTurnServiceTest.participantTurnSendsTheCompleteOrderedTranscriptBeyondTheRecentTurnWindow」 调用。
+    // 下游影响：「IntakeAgentTurnServiceTest.intakeRoom(FulfillmentCaseEntity)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「IntakeAgentTurnServiceTest.intakeRoom(FulfillmentCaseEntity)」守住「房间协作与权限」的可执行规格，尤其防止 「ROOM_INTAKE_AGENT」、「2026-07-05T00:00:00Z」、「system」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static CaseRoomEntity intakeRoom(FulfillmentCaseEntity dispute) {
         return CaseRoomEntity.open(
                 "ROOM_INTAKE_AGENT",

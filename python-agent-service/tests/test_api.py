@@ -1,3 +1,5 @@
+# 文件作用：自动化测试文件，验证 test_api 相关模块的行为、契约或页面布局。
+
 from fastapi.testclient import TestClient
 
 from app.config import Settings
@@ -17,9 +19,17 @@ from app.main import create_app
 
 
 class FakeWorkflow:
+    # 所属模块：Python 支撑模块 > test_api；函数角色：对象依赖初始化。
+    # 具体功能：`__init__` 注入并保存处理本阶段状态需要的客户端、配置或策略依赖。
+    # 上下游：上游为 相邻模块输入；下游为 结构化调用结果。
+    # 系统意义：该函数在系统中的业务边界是：接口稳定、错误显式、不绕过权限审计。
     def __init__(self) -> None:
         self.context = None
 
+    # 所属模块：Python 支撑模块 > test_api；函数角色：类/闭包内部方法。
+    # 具体功能：`analyze` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`HearingAnalysisResult`、`AdjudicationDraftOutput`、`AdjudicationDraft`。
+    # 上下游：上游为 相邻模块输入；下游为 协作调用 `HearingAnalysisResult`、`AdjudicationDraftOutput`、`AdjudicationDraft`。
+    # 系统意义：该函数在系统中的业务边界是：接口稳定、错误显式、不绕过权限审计。
     def analyze(self, request, context):
         self.context = context
         return HearingAnalysisResult(
@@ -44,6 +54,10 @@ class FakeWorkflow:
 
 
 class FakeIntakeWorkflow:
+    # 所属模块：Python 支撑模块 > test_api；函数角色：类/闭包内部方法。
+    # 具体功能：`analyze` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`IntakeAnalysisOutput`。
+    # 上下游：上游为 相邻模块输入；下游为 协作调用 `IntakeAnalysisOutput`。
+    # 系统意义：该函数在系统中的业务边界是：接口稳定、错误显式、不绕过权限审计。
     def analyze(self, request, context):
         return IntakeAnalysisOutput(
             case_type="DISPUTE",
@@ -57,6 +71,10 @@ class FakeIntakeWorkflow:
 
 
 class FakeEvaluationWorkflow:
+    # 所属模块：Python 支撑模块 > test_api；函数角色：类/闭包内部方法。
+    # 具体功能：`analyze` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`EvaluationAnalysisResult`、`EvaluationMetricScores`、`EvaluationFinding`。
+    # 上下游：上游为 相邻模块输入；下游为 协作调用 `EvaluationAnalysisResult`、`EvaluationMetricScores`、`EvaluationFinding`。
+    # 系统意义：该函数在系统中的业务边界是：接口稳定、错误显式、不绕过权限审计。
     def analyze(self, request, context):
         return EvaluationAnalysisResult(
             case_id=request.case_id,
@@ -90,6 +108,10 @@ class FakeEvaluationWorkflow:
 
 
 class FakeHearingRoundTurnWorkflow:
+    # 所属模块：Python 支撑模块 > test_api；函数角色：类/闭包内部方法。
+    # 具体功能：`run` 驱动本阶段状态对应的业务步骤并返回阶段结果；关键协作调用：`HearingRoundTurnResult`。
+    # 上下游：上游为 相邻模块输入；下游为 协作调用 `HearingRoundTurnResult`。
+    # 系统意义：该函数在系统中的业务边界是：接口稳定、错误显式、不绕过权限审计。
     def run(self, request):
         return HearingRoundTurnResult(
             speaker_role="JUDGE",
@@ -107,6 +129,10 @@ class FakeHearingRoundTurnWorkflow:
 
 
 class FakeSimulatedImportWorkflow:
+    # 所属模块：Python 支撑模块 > test_api；函数角色：类/闭包内部方法。
+    # 具体功能：`generate` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`SimulatedExternalImportResult`、`SimulatedExternalDispute`。
+    # 上下游：上游为 相邻模块输入；下游为 协作调用 `SimulatedExternalImportResult`、`SimulatedExternalDispute`。
+    # 系统意义：该函数在系统中的业务边界是：接口稳定、错误显式、不绕过权限审计。
     def generate(self, request):
         return SimulatedExternalImportResult(
             items=[
@@ -128,6 +154,10 @@ class FakeSimulatedImportWorkflow:
         )
 
 
+# 所属模块：Python 支撑模块 > test_api；函数角色：模块公开业务函数。
+# 具体功能：`settings` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`Settings`。
+# 上下游：上游为 本文件的 `test_hearing_api_requires_secret_and_propagates_correlation_ids`、`test_hearing_api_accepts_courtroom_bootstrap_context_from_java`、`test_intake_api_matches_the_java_client_raw_response_contract`、`test_evaluation_api_only_accepts_authenticated_closed_case_snapshots`；下游为 协作调用 `Settings`。
+# 系统意义：该函数在系统中的业务边界是：接口稳定、错误显式、不绕过权限审计。
 def settings() -> Settings:
     return Settings(
         litellm_master_key="test-litellm-master-key",
@@ -139,6 +169,10 @@ def settings() -> Settings:
     )
 
 
+# 所属模块：Python 支撑模块 > test_api；函数角色：模块公开业务函数。
+# 具体功能：`request_payload` 读取并按案件、角色或会话范围筛选本阶段状态；返回/更新字段：`case_id`、`workflow_id`、`user_id`、`claims`。
+# 上下游：上游为 本文件的 `test_hearing_api_requires_secret_and_propagates_correlation_ids`、`test_hearing_api_accepts_courtroom_bootstrap_context_from_java`；下游为 返回/更新 `case_id`、`workflow_id`、`user_id`、`claims`。
+# 系统意义：该函数在系统中的业务边界是：接口稳定、错误显式、不绕过权限审计。
 def request_payload() -> dict:
     return {
         "case_id": "CASE_api",
@@ -156,6 +190,10 @@ def request_payload() -> dict:
     }
 
 
+# 所属模块：Python 支撑模块 > test_api；函数角色：回归测试用例。
+# 具体功能：`test_hearing_api_requires_secret_and_propagates_correlation_ids` 验证庭审材料在固定案例中的输出、边界和失败行为；关键协作调用：`FakeWorkflow`、`TestClient`、`client.post`。
+# 上下游：上游为 相邻模块输入；下游为 本文件的 `settings`、`request_payload`。
+# 系统意义：固定“Python 支撑模块 > test_api”的可观察契约，防止后续重构改变业务结果。
 def test_hearing_api_requires_secret_and_propagates_correlation_ids() -> None:
     workflow = FakeWorkflow()
     client = TestClient(create_app(settings(), workflow))
@@ -185,6 +223,10 @@ def test_hearing_api_requires_secret_and_propagates_correlation_ids() -> None:
     assert workflow.context.trace_id == "TRACE_api"
 
 
+# 所属模块：Python 支撑模块 > test_api；函数角色：回归测试用例。
+# 具体功能：`test_hearing_api_accepts_courtroom_bootstrap_context_from_java` 验证案件与会话上下文在固定案例中的输出、边界和失败行为；关键协作调用：`FakeWorkflow`、`TestClient`、`client.post`。
+# 上下游：上游为 相邻模块输入；下游为 本文件的 `request_payload`、`settings`。
+# 系统意义：固定“Python 支撑模块 > test_api”的可观察契约，防止后续重构改变业务结果。
 def test_hearing_api_accepts_courtroom_bootstrap_context_from_java() -> None:
     workflow = FakeWorkflow()
     client = TestClient(create_app(settings(), workflow))
@@ -243,6 +285,10 @@ def test_hearing_api_accepts_courtroom_bootstrap_context_from_java() -> None:
     assert response.json()["adjudication_draft"]["draft"]["is_final_decision"] is False
 
 
+# 所属模块：Python 支撑模块 > test_api；函数角色：回归测试用例。
+# 具体功能：`test_intake_api_matches_the_java_client_raw_response_contract` 验证接待信息在固定案例中的输出、边界和失败行为；关键协作调用：`TestClient`、`client.post`、`create_app`。
+# 上下游：上游为 相邻模块输入；下游为 本文件的 `settings`。
+# 系统意义：固定“Python 支撑模块 > test_api”的可观察契约，防止后续重构改变业务结果。
 def test_intake_api_matches_the_java_client_raw_response_contract() -> None:
     client = TestClient(
         create_app(settings(), FakeWorkflow(), FakeIntakeWorkflow())
@@ -276,6 +322,10 @@ def test_intake_api_matches_the_java_client_raw_response_contract() -> None:
     }
 
 
+# 所属模块：Python 支撑模块 > test_api；函数角色：回归测试用例。
+# 具体功能：`test_evaluation_api_only_accepts_authenticated_closed_case_snapshots` 验证冻结快照在固定案例中的输出、边界和失败行为；关键协作调用：`TestClient`、`client.post`、`create_app`。
+# 上下游：上游为 相邻模块输入；下游为 本文件的 `settings`。
+# 系统意义：固定“Python 支撑模块 > test_api”的可观察契约，防止后续重构改变业务结果。
 def test_evaluation_api_only_accepts_authenticated_closed_case_snapshots() -> None:
     client = TestClient(
         create_app(
@@ -315,6 +365,10 @@ def test_evaluation_api_only_accepts_authenticated_closed_case_snapshots() -> No
     assert response.json()["online_case_mutated"] is False
 
 
+# 所属模块：Python 支撑模块 > test_api；函数角色：回归测试用例。
+# 具体功能：`test_simulated_external_import_api_generates_import_dtos` 验证本阶段状态在固定案例中的输出、边界和失败行为；关键协作调用：`TestClient`、`client.post`、`create_app`。
+# 上下游：上游为 相邻模块输入；下游为 本文件的 `settings`。
+# 系统意义：固定“Python 支撑模块 > test_api”的可观察契约，防止后续重构改变业务结果。
 def test_simulated_external_import_api_generates_import_dtos() -> None:
     client = TestClient(
         create_app(
@@ -346,6 +400,10 @@ def test_simulated_external_import_api_generates_import_dtos() -> None:
     assert response.json()["items"][0]["merchant_id"] == "merchant-local"
 
 
+# 所属模块：Python 支撑模块 > test_api；函数角色：回归测试用例。
+# 具体功能：`test_hearing_round_turn_api_matches_java_court_adapter_contract` 验证庭审轮次在固定案例中的输出、边界和失败行为；关键协作调用：`TestClient`、`client.post`、`create_app`。
+# 上下游：上游为 相邻模块输入；下游为 本文件的 `settings`。
+# 系统意义：固定“Python 支撑模块 > test_api”的可观察契约，防止后续重构改变业务结果。
 def test_hearing_round_turn_api_matches_java_court_adapter_contract() -> None:
     client = TestClient(
         create_app(

@@ -1,3 +1,5 @@
+# 文件作用：项目运维脚本，用于本地开发、环境初始化、密钥生成或接口校验。
+
 from __future__ import annotations
 
 import base64
@@ -11,6 +13,10 @@ import zlib
 from pathlib import Path
 
 
+# 所属模块：开发运维脚本 > verify-qwen-multimodal；函数角色：模块私有业务函数。
+# 具体功能：`_load_env_file` 读取并按案件、角色或会话范围筛选本阶段状态；关键协作调用：`splitlines`、`env_file.exists`、`raw_line.strip`。
+# 上下游：上游为 本文件的 `main`；下游为 协作调用 `splitlines`、`env_file.exists`、`raw_line.strip`、`line.split`。
+# 系统意义：该函数在系统中的业务边界是：仅用于开发环境，不写生产数据。
 def _load_env_file() -> None:
     env_file = Path(__file__).resolve().parents[1] / ".env"
     if not env_file.exists():
@@ -23,6 +29,10 @@ def _load_env_file() -> None:
         os.environ.setdefault(name.strip(), value.strip())
 
 
+# 所属模块：开发运维脚本 > verify-qwen-multimodal；函数角色：模块私有业务函数。
+# 具体功能：`_png_chunk` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`struct.pack`、`zlib.crc32`。
+# 上下游：上游为 本文件的 `_red_blue_test_image`；下游为 协作调用 `struct.pack`、`zlib.crc32`。
+# 系统意义：该函数在系统中的业务边界是：仅用于开发环境，不写生产数据。
 def _png_chunk(kind: bytes, payload: bytes) -> bytes:
     return (
         struct.pack(">I", len(payload))
@@ -32,6 +42,10 @@ def _png_chunk(kind: bytes, payload: bytes) -> bytes:
     )
 
 
+# 所属模块：开发运维脚本 > verify-qwen-multimodal；函数角色：模块私有业务函数。
+# 具体功能：`_red_blue_test_image` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`join`、`rows.append`、`pixels.extend`。
+# 上下游：上游为 本文件的 `main`；下游为 本文件的 `_png_chunk`。
+# 系统意义：该函数在系统中的业务边界是：仅用于开发环境，不写生产数据。
 def _red_blue_test_image() -> bytes:
     width = 64
     height = 32
@@ -54,6 +68,10 @@ def _red_blue_test_image() -> bytes:
     )
 
 
+# 所属模块：开发运维脚本 > verify-qwen-multimodal；函数角色：模块公开业务函数。
+# 具体功能：`main` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`os.getenv`、`decode`、`urllib.request.Request`。
+# 上下游：上游为 本地环境变量、容器端口、服务配置；下游为 本文件的 `_load_env_file`、`_red_blue_test_image`。
+# 系统意义：该函数在系统中的业务边界是：仅用于开发环境，不写生产数据。
 def main() -> int:
     _load_env_file()
     dashscope_key = os.getenv("DASHSCOPE_API_KEY", "")
@@ -75,6 +93,7 @@ def main() -> int:
     request_body = {
         "model": "qwen3.7-plus",
         "temperature": 0,
+        "enable_thinking": False,
         "response_format": {"type": "json_object"},
         "messages": [
             {

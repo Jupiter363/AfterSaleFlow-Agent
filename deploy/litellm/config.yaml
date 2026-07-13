@@ -1,3 +1,6 @@
+# 文件作用：部署配置文件，描述数据库、中间件、代理、对象存储或运行时初始化逻辑。
+# 说明：本注释用于帮助读者先了解配置用途，再修改具体配置项。
+
 model_list:
   - model_name: qwen3.7-plus
     litellm_params:
@@ -5,7 +8,7 @@ model_list:
       api_key: os.environ/DASHSCOPE_API_KEY
       api_base: os.environ/DEFAULT_LLM_API_BASE
       extra_body:
-        enable_thinking: true
+        enable_thinking: false
 
 litellm_settings:
   drop_params: true

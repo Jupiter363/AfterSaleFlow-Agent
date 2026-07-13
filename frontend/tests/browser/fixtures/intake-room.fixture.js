@@ -1,13 +1,18 @@
+// 文件作用：自动化测试文件，验证 intake-room.fixture 相关模块的行为、契约或页面布局。
+// 说明：本注释用于帮助读者先了解本文件职责，再继续阅读具体实现。
+
 import { expect } from "@playwright/test";
 
 export const CASE_ID = "CASE_INTAKE_LAYOUT";
 
 const actor = { id: "user-local", role: "USER", label: "用户" };
 
+// 业务位置：【前端浏览器回归测试】repeatToLength：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 function repeatToLength(seed, length) {
   return seed.repeat(Math.ceil(length / seed.length)).slice(0, length);
 }
 
+// 业务位置：【前端浏览器回归测试】buildMessages：把 页面夹具和拦截 API 响应 组装为本块需要的 房间消息和对话记录，供 房间、审核和结果页面的交互断言 使用。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 function buildMessages({ count = 2, unbrokenLength = 0 } = {}) {
   const messages = [
     {
@@ -40,6 +45,7 @@ function buildMessages({ count = 2, unbrokenLength = 0 } = {}) {
   return messages;
 }
 
+// 业务位置：【前端浏览器回归测试】buildTurnMemory：把 页面夹具和拦截 API 响应 组装为本块需要的 案件会话和上下文快照，供 房间、审核和结果页面的交互断言 使用。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 function buildTurnMemory({
   summaryLength = 150,
   statementLength = 160,
@@ -122,6 +128,7 @@ function buildTurnMemory({
   };
 }
 
+// 业务位置：【前端浏览器回归测试】fulfillJson：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 function fulfillJson(route, data) {
   return route.fulfill({
     status: 200,
@@ -130,6 +137,7 @@ function fulfillJson(route, data) {
   });
 }
 
+// 业务位置：【前端浏览器回归测试】installIntakeRoomFixture：围绕 案件受理信息和接待结论 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 export async function installIntakeRoomFixture(page, options = {}) {
   const messages = buildMessages(options.messages);
   const turnMemory = buildTurnMemory(options.dossier);

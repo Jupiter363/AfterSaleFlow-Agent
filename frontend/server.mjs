@@ -1,3 +1,6 @@
+// 文件作用：前端工程代码文件，支撑售后争议系统的页面、交互、样式或构建配置。
+// 说明：本注释用于帮助读者先了解本文件职责，再继续阅读具体实现。
+
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { createServer } from "node:http";
@@ -16,6 +19,7 @@ const contentTypes = {
   ".woff2": "font/woff2",
 };
 
+// 业务位置：【前端应用】responseHeaders：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由、API 和本地状态 正确进入 售后纠纷处理界面。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
 function responseHeaders(path) {
   return {
     "Cache-Control": path.includes("/assets/")
@@ -30,6 +34,7 @@ function responseHeaders(path) {
   };
 }
 
+// 业务位置：【前端应用】serveFile：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由、API 和本地状态 正确进入 售后纠纷处理界面。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
 async function serveFile(requestPath, response) {
   const safePath = normalize(requestPath).replace(/^(\.\.[/\\])+/, "");
   const candidate = join(root, safePath);

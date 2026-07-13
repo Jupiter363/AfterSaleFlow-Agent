@@ -1,9 +1,45 @@
+// 文件作用：自动化测试文件，验证 ConversationStream.test 相关模块的行为、契约或页面布局。
+// 说明：本注释用于帮助读者先了解本文件职责，再继续阅读具体实现。
+
 import { mount } from "@vue/test-utils";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import ConversationStream from "./ConversationStream.vue";
 
+// 业务位置：【Java 房间协作】describe：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、访问会话和参与方身份 正确进入 接待/证据回合记忆、Agent 上下文和事件。上游：房间消息、访问会话和参与方身份。下游：接待/证据回合记忆、Agent 上下文和事件。边界：会话和可见性必须按参与方隔离。
 describe("ConversationStream", () => {
+  // 业务位置：【Java 房间协作】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、访问会话和参与方身份 正确进入 接待/证据回合记忆、Agent 上下文和事件。上游：房间消息、访问会话和参与方身份。下游：接待/证据回合记忆、Agent 上下文和事件。边界：会话和可见性必须按参与方隔离。
+  it("renders an incremental agent message and lets its durable run record replace it", async () => {
+    const run = {
+      runId: "AGENT_RUN_1",
+      status: "STREAMING",
+      content: "正在逐步生成回复",
+      agentLabel: "争议接待官",
+    };
+    const wrapper = mount(ConversationStream, {
+      props: { messages: [], streamingRuns: [run] },
+    });
+
+    expect(wrapper.get("[data-agent-streaming-message]").text()).toContain(
+      "正在逐步生成回复",
+    );
+
+    await wrapper.setProps({
+      messages: [{
+        id: "MESSAGE_FINAL",
+        sequence_no: 1,
+        sender_role: "CUSTOMER_SERVICE",
+        message_type: "AGENT_MESSAGE",
+        message_text: "正式回复",
+        agent_run_id: "AGENT_RUN_1",
+      }],
+    });
+
+    expect(wrapper.find("[data-agent-streaming-message]").exists()).toBe(false);
+    expect(wrapper.text()).toContain("正式回复");
+  });
+
+  // 业务位置：【Java 房间协作】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、访问会话和参与方身份 正确进入 接待/证据回合记忆、Agent 上下文和事件。上游：房间消息、访问会话和参与方身份。下游：接待/证据回合记忆、Agent 上下文和事件。边界：会话和可见性必须按参与方隔离。
   it("renders immutable messages in sequence and emits a new party statement", async () => {
     const wrapper = mount(ConversationStream, {
       props: {
@@ -30,6 +66,9 @@ describe("ConversationStream", () => {
       expect.stringContaining("我没有收到包裹"),
       expect.stringContaining("商品已按地址发出"),
     ]);
+    expect(
+      wrapper.findAll("[data-room-message] header small").map((node) => node.text()),
+    ).toEqual(["#1", "#2"]);
 
     await wrapper.get("textarea").setValue("请核对签收照片。");
     await wrapper.get("[data-send-message]").trigger("submit");
@@ -41,6 +80,7 @@ describe("ConversationStream", () => {
     });
   });
 
+  // 业务位置：【Java 房间协作】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、访问会话和参与方身份 正确进入 接待/证据回合记忆、Agent 上下文和事件。上游：房间消息、访问会话和参与方身份。下游：接待/证据回合记忆、Agent 上下文和事件。边界：会话和可见性必须按参与方隔离。
   it("keeps immutable corrupted history readable without showing question-mark noise", () => {
     const wrapper = mount(ConversationStream, {
       props: {
@@ -59,6 +99,7 @@ describe("ConversationStream", () => {
     expect(wrapper.text()).not.toContain("????????");
   });
 
+  // 业务位置：【Java 房间协作】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、访问会话和参与方身份 正确进入 接待/证据回合记忆、Agent 上下文和事件。上游：房间消息、访问会话和参与方身份。下游：接待/证据回合记忆、Agent 上下文和事件。边界：会话和可见性必须按参与方隔离。
   it("renders internal dispute enum codes as Chinese labels in immutable messages", () => {
     const wrapper = mount(ConversationStream, {
       props: {
@@ -78,6 +119,7 @@ describe("ConversationStream", () => {
     expect(wrapper.text()).not.toContain("SIGNED_NOT_RECEIVED");
   });
 
+  // 业务位置：【Java 房间协作】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、访问会话和参与方身份 正确进入 接待/证据回合记忆、Agent 上下文和事件。上游：房间消息、访问会话和参与方身份。下游：接待/证据回合记忆、Agent 上下文和事件。边界：会话和可见性必须按参与方隔离。
   it("renders sender roles as user-facing Chinese labels", () => {
     const wrapper = mount(ConversationStream, {
       props: {
@@ -104,6 +146,7 @@ describe("ConversationStream", () => {
     expect(wrapper.text()).not.toContain("MERCHANT");
   });
 
+  // 业务位置：【Java 房间协作】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、访问会话和参与方身份 正确进入 接待/证据回合记忆、Agent 上下文和事件。上游：房间消息、访问会话和参与方身份。下游：接待/证据回合记忆、Agent 上下文和事件。边界：会话和可见性必须按参与方隔离。
   it("can override generic agent messages with a room-specific digital human label", () => {
     const wrapper = mount(ConversationStream, {
       props: {
@@ -124,6 +167,7 @@ describe("ConversationStream", () => {
     expect(wrapper.text()).not.toContain("争议接待官");
   });
 
+  // 业务位置：【Java 房间协作】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、访问会话和参与方身份 正确进入 接待/证据回合记忆、Agent 上下文和事件。上游：房间消息、访问会话和参与方身份。下游：接待/证据回合记忆、Agent 上下文和事件。边界：会话和可见性必须按参与方隔离。
   it("places intake officer messages on the left and party messages on the right", () => {
     const wrapper = mount(ConversationStream, {
       props: {
@@ -152,6 +196,7 @@ describe("ConversationStream", () => {
     expect(merchantMessage.attributes("data-message-lane")).toBe("right");
   });
 
+  // 业务位置：【Java 房间协作】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、访问会话和参与方身份 正确进入 接待/证据回合记忆、Agent 上下文和事件。上游：房间消息、访问会话和参与方身份。下游：接待/证据回合记忆、Agent 上下文和事件。边界：会话和可见性必须按参与方隔离。
   it("keeps history inside a scrollable message rail", () => {
     const source = readFileSync("src/components/room/ConversationStream.vue", "utf8");
 
@@ -178,6 +223,7 @@ describe("ConversationStream", () => {
     );
   });
 
+  // 业务位置：【Java 房间协作】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、访问会话和参与方身份 正确进入 接待/证据回合记忆、Agent 上下文和事件。上游：房间消息、访问会话和参与方身份。下游：接待/证据回合记忆、Agent 上下文和事件。边界：会话和可见性必须按参与方隔离。
   it("keeps a complete unbroken long message in the document", () => {
     const longMessage = "A".repeat(1000);
     const wrapper = mount(ConversationStream, {
@@ -197,6 +243,7 @@ describe("ConversationStream", () => {
     expect(wrapper.get("[data-room-message] p").text()).toBe(longMessage);
   });
 
+  // 业务位置：【Java 房间协作】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、访问会话和参与方身份 正确进入 接待/证据回合记忆、Agent 上下文和事件。上游：房间消息、访问会话和参与方身份。下游：接待/证据回合记忆、Agent 上下文和事件。边界：会话和可见性必须按参与方隔离。
   it("uses a compact message typography scale for dense room conversations", () => {
     const source = readFileSync("src/components/room/ConversationStream.vue", "utf8");
 
@@ -204,12 +251,13 @@ describe("ConversationStream", () => {
     expect(source).toContain("--conversation-message-body-font-size: 12.5px;");
   });
 
+  // 业务位置：【Java 房间协作】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、访问会话和参与方身份 正确进入 接待/证据回合记忆、Agent 上下文和事件。上游：房间消息、访问会话和参与方身份。下游：接待/证据回合记忆、Agent 上下文和事件。边界：会话和可见性必须按参与方隔离。
   it("automatically scrolls to the latest message when history changes", () => {
     const source = readFileSync("src/components/room/ConversationStream.vue", "utf8");
 
     expect(source).toContain("messagesRail");
     expect(source).toContain("scrollToLatestMessage");
-    expect(source).toContain("watch(orderedMessages");
+    expect(source).toContain("watch([orderedMessages, pendingStreamingRuns]");
     expect(source).toContain("rail.scrollTop = rail.scrollHeight;");
   });
 });

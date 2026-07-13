@@ -1,3 +1,9 @@
+/*
+ * 所属模块：数据库迁移入口。
+ * 文件职责：验证演示案件案件清理MigrationIntegration，覆盖 「purgesTheSimulatedCaseGraphAndRetainsAnIndependentAuditSnapshot」、「acceptsTheLegacySimulatedSourceButRejectsAdminAndFormalCases」、「appendOnlyRecordsStillRejectOrdinaryDeletion」、「purgeFunctionExplicitlyCoversEveryCaseScopedTable」。
+ * 业务链路：JUnit 构造夹具并驱动真实服务或 Mock 协作者，断言返回值、持久化状态和调用边界；独立执行 Flyway 迁移并验证 PostgreSQL Schema 可用。
+ * 关键边界：迁移先于业务服务读写，失败时必须阻止使用不兼容的表结构
+ */
 package com.example.dispute.database;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -18,6 +24,11 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
+// 所属模块：【数据库迁移入口 / 自动化测试层】类型「DemoCasePurgeMigrationIntegrationTest」。
+// 类型职责：集中验证演示案件案件清理MigrationIntegration的业务场景、权限边界和持久化/外部协作契约；本类型显式提供 「migrate」、「purgesTheSimulatedCaseGraphAndRetainsAnIndependentAuditSnapshot」、「acceptsTheLegacySimulatedSourceButRejectsAdminAndFormalCases」、「appendOnlyRecordsStillRejectOrdinaryDeletion」、「purgeFunctionExplicitlyCoversEveryCaseScopedTable」、「insertSimulatedCaseGraph」。
+// 协作关系：由 JUnit 发现并执行其中带 @Test 的场景。
+// 边界意义：迁移先于业务服务读写，失败时必须阻止使用不兼容的表结构
+// Java 语法：class 同时封装状态与方法；final 依赖通过构造器注入后不可重新指向。
 @Testcontainers
 class DemoCasePurgeMigrationIntegrationTest {
 
@@ -38,6 +49,11 @@ class DemoCasePurgeMigrationIntegrationTest {
 
     private static String jdbcUrl;
 
+    // 所属模块：【数据库迁移入口 / 自动化测试层】「DemoCasePurgeMigrationIntegrationTest.migrate()」。
+    // 具体功能：「DemoCasePurgeMigrationIntegrationTest.migrate()」：在每个测试场景运行前创建「POSTGRESQL.getHost」、「POSTGRESQL.getMappedPort」、「Flyway.configure」、「migrate」，统一准备后续断言依赖的初始状态，避免各用例重复搭建且保持彼此隔离。
+    // 上游调用：「DemoCasePurgeMigrationIntegrationTest.migrate()」由 JUnit 生命周期或本测试类的场景方法调用。
+    // 下游影响：「DemoCasePurgeMigrationIntegrationTest.migrate()」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「DemoCasePurgeMigrationIntegrationTest.migrate()」守住「数据库迁移入口」的可执行规格，尤其防止 「:」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @BeforeAll
     static void migrate() {
         jdbcUrl =
@@ -54,6 +70,11 @@ class DemoCasePurgeMigrationIntegrationTest {
                 .migrate();
     }
 
+    // 所属模块：【数据库迁移入口 / 自动化测试层】「DemoCasePurgeMigrationIntegrationTest.purgesTheSimulatedCaseGraphAndRetainsAnIndependentAuditSnapshot()」。
+    // 具体功能：「DemoCasePurgeMigrationIntegrationTest.purgesTheSimulatedCaseGraphAndRetainsAnIndependentAuditSnapshot()」：复现“核对完整业务行为（场景方法「purgesTheSimulatedCaseGraphAndRetainsAnIndependentAuditSnapshot」）”场景：驱动 「DriverManager.getConnection」、「connection.prepareStatement」、「statement.setString」、「statement.executeQuery」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「TEMPLATE_SIMULATED_OMS」、「CASE_PURGE_DEMO」、「reviewer-local」、「PLATFORM_REVIEWER」。
+    // 上游调用：「DemoCasePurgeMigrationIntegrationTest.purgesTheSimulatedCaseGraphAndRetainsAnIndependentAuditSnapshot()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「DemoCasePurgeMigrationIntegrationTest.purgesTheSimulatedCaseGraphAndRetainsAnIndependentAuditSnapshot()」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「DemoCasePurgeMigrationIntegrationTest.purgesTheSimulatedCaseGraphAndRetainsAnIndependentAuditSnapshot()」守住「数据库迁移入口」的可执行规格，尤其防止 「TEMPLATE_SIMULATED_OMS」、「CASE_PURGE_DEMO」、「reviewer-local」、「PLATFORM_REVIEWER」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void purgesTheSimulatedCaseGraphAndRetainsAnIndependentAuditSnapshot()
             throws SQLException {
@@ -121,6 +142,11 @@ class DemoCasePurgeMigrationIntegrationTest {
         }
     }
 
+    // 所属模块：【数据库迁移入口 / 自动化测试层】「DemoCasePurgeMigrationIntegrationTest.acceptsTheLegacySimulatedSourceButRejectsAdminAndFormalCases()」。
+    // 具体功能：「DemoCasePurgeMigrationIntegrationTest.acceptsTheLegacySimulatedSourceButRejectsAdminAndFormalCases()」：复现“核对完整业务行为（场景方法「acceptsTheLegacySimulatedSourceButRejectsAdminAndFormalCases」）”场景：驱动 「DriverManager.getConnection」、「insertBareCase」、「callPurge」、「countById」，再用 「assertThat」、「assertThatThrownBy」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_PURGE_LEGACY」、「EXTERNAL_IMPORT」、「LLM_SIMULATED_OMS」、「PLATFORM_REVIEWER」。
+    // 上游调用：「DemoCasePurgeMigrationIntegrationTest.acceptsTheLegacySimulatedSourceButRejectsAdminAndFormalCases()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「DemoCasePurgeMigrationIntegrationTest.acceptsTheLegacySimulatedSourceButRejectsAdminAndFormalCases()」的下游是被测服务、仓储或外部客户端替身；「assertThat、assertThatThrownBy」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「DemoCasePurgeMigrationIntegrationTest.acceptsTheLegacySimulatedSourceButRejectsAdminAndFormalCases()」守住「数据库迁移入口」的可执行规格，尤其防止 「CASE_PURGE_LEGACY」、「EXTERNAL_IMPORT」、「LLM_SIMULATED_OMS」、「PLATFORM_REVIEWER」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void acceptsTheLegacySimulatedSourceButRejectsAdminAndFormalCases()
             throws SQLException {
@@ -170,6 +196,11 @@ class DemoCasePurgeMigrationIntegrationTest {
         }
     }
 
+    // 所属模块：【数据库迁移入口 / 自动化测试层】「DemoCasePurgeMigrationIntegrationTest.appendOnlyRecordsStillRejectOrdinaryDeletion()」。
+    // 具体功能：「DemoCasePurgeMigrationIntegrationTest.appendOnlyRecordsStillRejectOrdinaryDeletion()」：复现“核对完整业务行为（场景方法「appendOnlyRecordsStillRejectOrdinaryDeletion」）”场景：驱动 「DriverManager.getConnection」、「connection.createStatement」、「statement.executeUpdate」、「insertBareCase」，再用 「assertThatThrownBy」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_PURGE_APPEND」、「EXTERNAL_IMPORT」、「TEMPLATE_SIMULATED_OMS」。
+    // 上游调用：「DemoCasePurgeMigrationIntegrationTest.appendOnlyRecordsStillRejectOrdinaryDeletion()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「DemoCasePurgeMigrationIntegrationTest.appendOnlyRecordsStillRejectOrdinaryDeletion()」的下游是被测服务、仓储或外部客户端替身；「assertThatThrownBy」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「DemoCasePurgeMigrationIntegrationTest.appendOnlyRecordsStillRejectOrdinaryDeletion()」守住「数据库迁移入口」的可执行规格，尤其防止 「CASE_PURGE_APPEND」、「EXTERNAL_IMPORT」、「TEMPLATE_SIMULATED_OMS」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void appendOnlyRecordsStillRejectOrdinaryDeletion() throws SQLException {
         try (Connection connection =
@@ -217,6 +248,11 @@ class DemoCasePurgeMigrationIntegrationTest {
         }
     }
 
+    // 所属模块：【数据库迁移入口 / 自动化测试层】「DemoCasePurgeMigrationIntegrationTest.purgeFunctionExplicitlyCoversEveryCaseScopedTable()」。
+    // 具体功能：「DemoCasePurgeMigrationIntegrationTest.purgeFunctionExplicitlyCoversEveryCaseScopedTable()」：复现“核对完整业务行为（场景方法「purgeFunctionExplicitlyCoversEveryCaseScopedTable」）”场景：驱动 「DriverManager.getConnection」、「connection.createStatement」、「statement.executeQuery」、「result.next」，再用 「assertThat」 核对返回值、状态变化或协作者调用。
+    // 上游调用：「DemoCasePurgeMigrationIntegrationTest.purgeFunctionExplicitlyCoversEveryCaseScopedTable()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「DemoCasePurgeMigrationIntegrationTest.purgeFunctionExplicitlyCoversEveryCaseScopedTable()」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「DemoCasePurgeMigrationIntegrationTest.purgeFunctionExplicitlyCoversEveryCaseScopedTable()」守住「数据库迁移入口」的可执行规格；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void purgeFunctionExplicitlyCoversEveryCaseScopedTable() throws SQLException {
         try (Connection connection =
@@ -261,6 +297,11 @@ class DemoCasePurgeMigrationIntegrationTest {
         }
     }
 
+    // 所属模块：【数据库迁移入口 / 自动化测试层】「DemoCasePurgeMigrationIntegrationTest.insertSimulatedCaseGraph(Connection,String)」。
+    // 具体功能：「DemoCasePurgeMigrationIntegrationTest.insertSimulatedCaseGraph(Connection,String)」：作为测试辅助方法为“核对完整业务行为（场景方法「insertSimulatedCaseGraph」）”组装或读取「connection.createStatement」、「statement.executeUpdate」、「insertBareCase」，供本测试类的场景方法复用。
+    // 上游调用：「DemoCasePurgeMigrationIntegrationTest.insertSimulatedCaseGraph(Connection,String)」由本测试类中的 「DemoCasePurgeMigrationIntegrationTest.purgesTheSimulatedCaseGraphAndRetainsAnIndependentAuditSnapshot」 调用。
+    // 下游影响：「DemoCasePurgeMigrationIntegrationTest.insertSimulatedCaseGraph(Connection,String)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「DemoCasePurgeMigrationIntegrationTest.insertSimulatedCaseGraph(Connection,String)」守住「数据库迁移入口」的可执行规格，尤其防止 「CASE_PURGE_DEMO」、「EXTERNAL_IMPORT」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static void insertSimulatedCaseGraph(
             Connection connection, String sourceSystem) throws SQLException {
         insertBareCase(
@@ -401,6 +442,11 @@ class DemoCasePurgeMigrationIntegrationTest {
         }
     }
 
+    // 所属模块：【数据库迁移入口 / 自动化测试层】「DemoCasePurgeMigrationIntegrationTest.insertBareCase(Connection,String,String,String)」。
+    // 具体功能：「DemoCasePurgeMigrationIntegrationTest.insertBareCase(Connection,String,String,String)」：作为测试辅助方法为“核对完整业务行为（场景方法「insertBareCase」）”组装或读取「connection.prepareStatement」、「statement.setString」、「statement.executeUpdate」，供本测试类的场景方法复用。
+    // 上游调用：「DemoCasePurgeMigrationIntegrationTest.insertBareCase(Connection,String,String,String)」由本测试类中的 「DemoCasePurgeMigrationIntegrationTest.acceptsTheLegacySimulatedSourceButRejectsAdminAndFormalCases」、「DemoCasePurgeMigrationIntegrationTest.appendOnlyRecordsStillRejectOrdinaryDeletion」、「DemoCasePurgeMigrationIntegrationTest.insertSimulatedCaseGraph」 调用。
+    // 下游影响：「DemoCasePurgeMigrationIntegrationTest.insertBareCase(Connection,String,String,String)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「DemoCasePurgeMigrationIntegrationTest.insertBareCase(Connection,String,String,String)」守住「数据库迁移入口」的可执行规格，尤其防止 「idem-」、「CASE_PURGE_DEMO」、「external-」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static void insertBareCase(
             Connection connection,
             String caseId,
@@ -431,6 +477,11 @@ class DemoCasePurgeMigrationIntegrationTest {
         }
     }
 
+    // 所属模块：【数据库迁移入口 / 自动化测试层】「DemoCasePurgeMigrationIntegrationTest.callPurge(Connection,String,String)」。
+    // 具体功能：「DemoCasePurgeMigrationIntegrationTest.callPurge(Connection,String,String)」：作为测试辅助方法为“核对完整业务行为（场景方法「callPurge」）”组装或读取「connection.prepareStatement」、「statement.setString」、「statement.executeQuery」，供本测试类的场景方法复用。
+    // 上游调用：「DemoCasePurgeMigrationIntegrationTest.callPurge(Connection,String,String)」由本测试类中的 「DemoCasePurgeMigrationIntegrationTest.acceptsTheLegacySimulatedSourceButRejectsAdminAndFormalCases」 调用。
+    // 下游影响：「DemoCasePurgeMigrationIntegrationTest.callPurge(Connection,String,String)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「DemoCasePurgeMigrationIntegrationTest.callPurge(Connection,String,String)」守住「数据库迁移入口」的可执行规格，尤其防止 「reviewer-local」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static void callPurge(
             Connection connection, String caseId, String reviewerRole)
             throws SQLException {
@@ -444,6 +495,11 @@ class DemoCasePurgeMigrationIntegrationTest {
         }
     }
 
+    // 所属模块：【数据库迁移入口 / 自动化测试层】「DemoCasePurgeMigrationIntegrationTest.count(Connection,String,String)」。
+    // 具体功能：「DemoCasePurgeMigrationIntegrationTest.count(Connection,String,String)」：作为测试辅助方法为“核对完整业务行为（场景方法「count」）”组装或读取「connection.prepareStatement」、「statement.setString」、「statement.executeQuery」、「result.next」，供本测试类的场景方法复用。
+    // 上游调用：「DemoCasePurgeMigrationIntegrationTest.count(Connection,String,String)」由本测试类中的 「DemoCasePurgeMigrationIntegrationTest.purgesTheSimulatedCaseGraphAndRetainsAnIndependentAuditSnapshot」 调用。
+    // 下游影响：「DemoCasePurgeMigrationIntegrationTest.count(Connection,String,String)」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「DemoCasePurgeMigrationIntegrationTest.count(Connection,String,String)」守住「数据库迁移入口」的可执行规格；后续重构若破坏契约会在进入集成环境前失败。
     private static long count(Connection connection, String table, String caseId)
             throws SQLException {
         try (var statement =
@@ -457,6 +513,11 @@ class DemoCasePurgeMigrationIntegrationTest {
         }
     }
 
+    // 所属模块：【数据库迁移入口 / 自动化测试层】「DemoCasePurgeMigrationIntegrationTest.countById(Connection,String,String)」。
+    // 具体功能：「DemoCasePurgeMigrationIntegrationTest.countById(Connection,String,String)」：作为测试辅助方法为“核对完整业务行为（场景方法「countById」）”组装或读取「connection.prepareStatement」、「statement.setString」、「statement.executeQuery」、「result.next」，供本测试类的场景方法复用。
+    // 上游调用：「DemoCasePurgeMigrationIntegrationTest.countById(Connection,String,String)」由本测试类中的 「DemoCasePurgeMigrationIntegrationTest.purgesTheSimulatedCaseGraphAndRetainsAnIndependentAuditSnapshot」、「DemoCasePurgeMigrationIntegrationTest.acceptsTheLegacySimulatedSourceButRejectsAdminAndFormalCases」 调用。
+    // 下游影响：「DemoCasePurgeMigrationIntegrationTest.countById(Connection,String,String)」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「DemoCasePurgeMigrationIntegrationTest.countById(Connection,String,String)」守住「数据库迁移入口」的可执行规格；后续重构若破坏契约会在进入集成环境前失败。
     private static long countById(
             Connection connection, String table, String id) throws SQLException {
         try (var statement =

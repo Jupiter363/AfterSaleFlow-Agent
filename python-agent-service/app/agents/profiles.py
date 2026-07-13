@@ -1,3 +1,5 @@
+# 文件作用：Python Agent 服务代码文件，承载售后争议智能体的 API、配置、模型调用或业务流程。
+
 """Default-deny authority profiles for the final agent roster."""
 
 from __future__ import annotations
@@ -18,6 +20,10 @@ _FORBIDDEN_ACTIONS = frozenset(
 )
 
 
+# 所属模块：Agent 角色能力 > profiles；函数角色：模块私有业务函数。
+# 具体功能：`_budget` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`LoopBudget`。
+# 上下游：上游为 本文件的 `final_agent_profiles`；下游为 协作调用 `LoopBudget`。
+# 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
 def _budget(
     iterations: int,
     tools: int,
@@ -36,6 +42,10 @@ def _budget(
     )
 
 
+# 所属模块：Agent 角色能力 > profiles；函数角色：模块私有业务函数。
+# 具体功能：`_profile` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`AgentProfile`、`frozenset`。
+# 上下游：上游为 本文件的 `final_agent_profiles`；下游为 协作调用 `AgentProfile`、`frozenset`。
+# 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
 def _profile(
     agent_id: str,
     role: str,
@@ -63,6 +73,10 @@ def _profile(
     )
 
 
+# 所属模块：Agent 角色能力 > profiles；函数角色：模块公开业务函数。
+# 具体功能：`final_agent_profiles` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`critic_specs.items`、`key.replace`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_profile`、`_budget`。
+# 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
 def final_agent_profiles() -> dict[str, AgentProfile]:
     """Build fresh immutable profiles so runtime mutation cannot leak."""
 

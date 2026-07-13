@@ -1,3 +1,5 @@
+# 文件作用：自动化测试文件，验证 test_evidence_clerk_turn 相关模块的行为、契约或页面布局。
+
 from __future__ import annotations
 
 import json
@@ -16,6 +18,10 @@ from app.harness.prompt_composer import PromptRepository
 from app.main import create_app
 
 
+# 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：模块私有业务函数。
+# 具体功能：`_settings` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`Settings`。
+# 上下游：上游为 本文件的 `test_evidence_turn_api_requires_service_secret_and_fails_without_model`、`test_evidence_turn_api_rejects_legacy_and_mixed_transport_contracts`、`test_evidence_turn_endpoint_accepts_java_command_payload_without_degrading`；下游为 协作调用 `Settings`。
+# 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
 def _settings() -> Settings:
     return Settings(
         litellm_master_key="test-litellm-master-key",
@@ -27,10 +33,18 @@ def _settings() -> Settings:
     )
 
 
+# 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：模块私有业务函数。
+# 具体功能：`_headers` 围绕本阶段状态计算该函数独立负责的业务派生值；返回/更新字段：`X-Service-Secret`。
+# 上下游：上游为 本文件的 `test_evidence_turn_api_requires_service_secret_and_fails_without_model`、`test_evidence_turn_api_rejects_legacy_and_mixed_transport_contracts`、`test_evidence_turn_endpoint_accepts_java_command_payload_without_degrading`；下游为 返回/更新 `X-Service-Secret`。
+# 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
 def _headers() -> dict[str, str]:
     return {"X-Service-Secret": "test-agent-service-secret"}
 
 
+# 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：模块私有业务函数。
+# 具体功能：`_agent_context` 围绕案件与会话上下文计算该函数独立负责的业务派生值；返回/更新字段：`tenant_id`、`case_id`、`room_type`、`actor_id`。
+# 上下游：上游为 本文件的 `_evidence_turn_payload`；下游为 返回/更新 `tenant_id`、`case_id`、`room_type`、`actor_id`。
+# 系统意义：控制隐私、Token 和会话隔离：服从角色权限、上下文范围和非最终结论边界。
 def _agent_context(
     case_id: str,
     *,
@@ -64,6 +78,10 @@ def _agent_context(
     }
 
 
+# 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：模块私有业务函数。
+# 具体功能：`_evidence_turn_payload` 读取并按案件、角色或会话范围筛选当前可见证据；返回/更新字段：`context_envelope`、`agent_context`。
+# 上下游：上游为 本文件的 `_java_evidence_turn_command_payload`、`test_evidence_turn_workflow_uses_harness_node_with_memory_dossier_and_evidence_context`、`legacy_evidence_turn_fallback_asks_authenticity_and_relevance_questions_without_deciding`、`legacy_evidence_fallback_bounds_deterministic_output_above_one_hundred_items`；下游为 本文件的 `_agent_context`、`_visible_signature_evidence`。
+# 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
 def _evidence_turn_payload() -> dict[str, object]:
     case_id = "CASE_evidence_turn_llm"
     agent_context = _agent_context(case_id)
@@ -168,6 +186,10 @@ def _evidence_turn_payload() -> dict[str, object]:
     }
 
 
+# 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：模块私有业务函数。
+# 具体功能：`_visible_signature_evidence` 围绕当前可见证据计算该函数独立负责的业务派生值；返回/更新字段：`evidence_id`、`dossier_id`、`evidence_type`、`source_type`。
+# 上下游：上游为 本文件的 `_evidence_turn_payload`、`test_evidence_context_assembler_prioritizes_current_attachments_and_budgets`、`legacy_evidence_fallback_bounds_deterministic_output_above_one_hundred_items`；下游为 返回/更新 `evidence_id`、`dossier_id`、`evidence_type`、`source_type`。
+# 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
 def _visible_signature_evidence() -> dict[str, object]:
     return {
         "evidence_id": "EVIDENCE_signature_photo",
@@ -198,6 +220,10 @@ def _visible_signature_evidence() -> dict[str, object]:
     }
 
 
+# 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：模块私有业务函数。
+# 具体功能：`_java_evidence_turn_command_payload` 读取并按案件、角色或会话范围筛选当前可见证据；关键协作调用：`event.update`。
+# 上下游：上游为 本文件的 `_java_evidence_opening_command_payload`、`test_evidence_turn_workflow_places_asset_manifest_in_context_pack`、`test_evidence_context_assembler_preserves_null_parsed_text_and_adds_notice`、`test_evidence_context_assembler_prioritizes_current_attachments_and_budgets`；下游为 本文件的 `_evidence_turn_payload`。
+# 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
 def _java_evidence_turn_command_payload() -> dict[str, object]:
     payload = _evidence_turn_payload()
     event = payload["context_envelope"]["current_event"]
@@ -212,6 +238,10 @@ def _java_evidence_turn_command_payload() -> dict[str, object]:
     return payload
 
 
+# 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：模块私有业务函数。
+# 具体功能：`_java_evidence_opening_command_payload` 读取并按案件、角色或会话范围筛选当前可见证据。
+# 上下游：上游为 本文件的 `test_evidence_opening_turn_passes_source_to_llm_context`、`legacy_evidence_opening_fallback_asks_dossier_specific_evidence_questions`、`legacy_evidence_opening_fallback_states_initiator_evidence_gate_without_deciding`、`legacy_evidence_opening_fallback_localizes_internal_dispute_codes`；下游为 本文件的 `_java_evidence_turn_command_payload`。
+# 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
 def _java_evidence_opening_command_payload() -> dict[str, object]:
     payload = _java_evidence_turn_command_payload()
     envelope = payload["context_envelope"]
@@ -249,10 +279,33 @@ def _java_evidence_opening_command_payload() -> dict[str, object]:
     return payload
 
 
+# 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：模块私有业务函数。
+# 具体功能：`_empty_internal_handoff` 围绕本阶段状态计算该函数独立负责的业务派生值；返回/更新字段：`evidence_change_summary`、`matrix_change_summary`、`remaining_conflicts`、`uncovered_fact_ids`。
+# 上下游：上游为 本文件的 `FakeEvidenceRunner.invoke_structured`、`CapturingMultimodalRunner.invoke_structured`、`GenericOpeningRunner.invoke_structured`、`MaximalOpeningRunner.invoke_structured`；下游为 返回/更新 `evidence_change_summary`、`matrix_change_summary`、`remaining_conflicts`、`uncovered_fact_ids`。
+# 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
+def _empty_internal_handoff() -> dict[str, object]:
+    return {
+        "evidence_change_summary": "本轮没有新增证据评估。",
+        "matrix_change_summary": "证据矩阵保持不变。",
+        "remaining_conflicts": [],
+        "uncovered_fact_ids": [],
+        "human_review_evidence_ids": [],
+        "judge_attention_points": [],
+    }
+
+
 class FakeEvidenceRunner:
+    # 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：对象依赖初始化。
+    # 具体功能：`__init__` 注入并保存处理本阶段状态需要的客户端、配置或策略依赖。
+    # 上下游：上游为 受治理的案件上下文和角色提示词；下游为 符合 Schema 的角色分析结果。
+    # 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
 
+    # 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：类/闭包内部方法。
+    # 具体功能：`invoke_structured` 驱动本阶段状态对应的业务步骤并返回阶段结果；关键协作调用：`self.calls.append`、`SimpleNamespace`、`context_pack.prompt_sections`。
+    # 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_empty_internal_handoff`。
+    # 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
     def invoke_structured(
         self,
         *,
@@ -307,15 +360,24 @@ class FakeEvidenceRunner:
                         "severity": "MEDIUM",
                     }
                 ],
+                internal_handoff=_empty_internal_handoff(),
                 confidence=0.64,
             )
         )
 
 
 class CapturingMultimodalRunner:
+    # 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：对象依赖初始化。
+    # 具体功能：`__init__` 注入并保存处理本阶段状态需要的客户端、配置或策略依赖。
+    # 上下游：上游为 受治理的案件上下文和角色提示词；下游为 符合 Schema 的角色分析结果。
+    # 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
 
+    # 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：类/闭包内部方法。
+    # 具体功能：`invoke_structured` 驱动本阶段状态对应的业务步骤并返回阶段结果；关键协作调用：`self.calls.append`、`SimpleNamespace`、`output_type`。
+    # 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_empty_internal_handoff`。
+    # 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
     def invoke_structured(self, **kwargs):
         self.calls.append(kwargs)
         output_type = kwargs["output_type"]
@@ -335,16 +397,25 @@ class CapturingMultimodalRunner:
                         "relevance_score": 0.91,
                         "completeness_score": 0.76,
                         "assessment_confidence": 0.8,
+                        "source_basis": ["原始图片、OCR 文本和文件元数据。"],
+                        "supported_fact_ids": [],
+                        "unsupported_claims": ["不能仅凭该图片确认实际收件人身份。"],
+                        "formation_time_assessment": "图片中的时间信息仍需与平台记录核对。",
                         "recommendation": "PLAUSIBLE",
                         "summary": "图片可读，内容与签收争议相关。",
                     }
                 ],
+                internal_handoff=_empty_internal_handoff(),
                 confidence=0.8,
             )
         )
 
 
 class GenericOpeningRunner:
+    # 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：类/闭包内部方法。
+    # 具体功能：`invoke_structured` 驱动本阶段状态对应的业务步骤并返回阶段结果；关键协作调用：`SimpleNamespace`、`output_type`。
+    # 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_empty_internal_handoff`。
+    # 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
     def invoke_structured(
         self,
         *,
@@ -362,12 +433,17 @@ class GenericOpeningRunner:
                 evidence_requests=[],
                 verification_suggestions=[],
                 authenticity_flags=[],
+                internal_handoff=_empty_internal_handoff(),
                 confidence=0.31,
             )
         )
 
 
 class MaximalOpeningRunner:
+    # 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：类/闭包内部方法。
+    # 具体功能：`invoke_structured` 驱动本阶段状态对应的业务步骤并返回阶段结果；关键协作调用：`SimpleNamespace`、`output_type`。
+    # 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_empty_internal_handoff`。
+    # 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
     def invoke_structured(
         self,
         *,
@@ -401,11 +477,16 @@ class MaximalOpeningRunner:
                     }
                     for index in range(100)
                 ],
+                internal_handoff=_empty_internal_handoff(),
                 confidence=0.8,
             )
         )
 
 
+# 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：回归测试用例。
+# 具体功能：`test_evidence_turn_workflow_uses_harness_node_with_memory_dossier_and_evidence_context` 验证案件卷宗在固定案例中的输出、边界和失败行为；关键协作调用：`FakeEvidenceRunner`、`EvidenceTurnWorkflow`、`workflow.run`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_evidence_turn_payload`。
+# 系统意义：固定“Agent 角色能力 > test_evidence_clerk_turn”的可观察契约，防止后续重构改变业务结果。
 def test_evidence_turn_workflow_uses_harness_node_with_memory_dossier_and_evidence_context() -> None:
     from app.agents.evidence_clerk.workflow import EvidenceTurnWorkflow
     from app.schemas import EvidenceTurnRequest
@@ -418,20 +499,21 @@ def test_evidence_turn_workflow_uses_harness_node_with_memory_dossier_and_eviden
     assert runner.calls[0]["node_name"] == "evidence_turn"
     assert runner.calls[0]["output_type"].__name__ == "EvidenceTurnLlmOutput"
     context_pack = runner.calls[0]["context_pack"]
-    assert context_pack.configuration_profile_key == "EVIDENCE_CLERK_CONTEXT_PACK_V1"
+    assert context_pack.configuration_profile_key == "EVIDENCE_CLERK_CONTEXT_PACK_V2"
     section_by_name = {
         section.name: section.content
         for section in runner.calls[0]["context_sections"]  # type: ignore[index]
     }
     assert {
         "current_turn",
-        "actor_private_memory",
+        "private_conversation_window",
         "canonical_case_dossier",
-        "actor_visible_evidence",
+        "party_visible_evidence_catalog",
     } <= set(section_by_name)
+    private_window = json.loads(section_by_name["private_conversation_window"])
     assert (
         "user evidence memory asks about signature proof"
-        in section_by_name["actor_private_memory"]
+        in private_window["turns"][0]["answer_content"]
     )
     current_turn = json.loads(section_by_name["current_turn"])
     assert current_turn["raw_statement"] == (
@@ -441,11 +523,13 @@ def test_evidence_turn_workflow_uses_harness_node_with_memory_dossier_and_eviden
     assert "我上传" not in current_turn["platform_statement"]
     assert "物流显示签收但用户称未收到包裹" in section_by_name["canonical_case_dossier"]
     assert "SIGNED_NOT_RECEIVED" not in section_by_name["canonical_case_dossier"]
-    actor_visible_evidence = json.loads(section_by_name["actor_visible_evidence"])
+    actor_visible_evidence = json.loads(
+        section_by_name["party_visible_evidence_catalog"]
+    )
     assert actor_visible_evidence["items"][0]["evidence_id"] == (
         "EVIDENCE_signature_photo"
     )
-    assert actor_visible_evidence["items"][0]["source_type"] == "用户"
+    assert actor_visible_evidence["items"][0]["source_type"] == "USER"
     assert runner.calls[0]["agent_context"]["agent_session_id"] == (
         "SESSION_CASE_evidence_turn_llm_USER_evidence"
     )
@@ -458,6 +542,10 @@ def test_evidence_turn_workflow_uses_harness_node_with_memory_dossier_and_eviden
     assert 0 <= result.verification_suggestions[0].confidence_score <= 1
 
 
+# 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：回归测试用例。
+# 具体功能：`test_evidence_turn_workflow_places_asset_manifest_in_context_pack` 验证当前可见证据在固定案例中的输出、边界和失败行为；关键协作调用：`base64.b64decode`、`hexdigest`、`CapturingMultimodalRunner`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_java_evidence_turn_command_payload`。
+# 系统意义：固定“Agent 角色能力 > test_evidence_clerk_turn”的可观察契约，防止后续重构改变业务结果。
 def test_evidence_turn_workflow_places_asset_manifest_in_context_pack() -> None:
     from app.agents.evidence_clerk.workflow import EvidenceTurnWorkflow
     from app.harness.evidence_asset_loader import EvidenceAssetLoader
@@ -492,13 +580,17 @@ def test_evidence_turn_workflow_places_asset_manifest_in_context_pack() -> None:
     call = runner.calls[0]
     context_pack = call["context_pack"]
     sections = {item.name: item.content for item in context_pack.prompt_sections()}
-    manifest = json.loads(sections["multimodal_evidence_manifest"])
-    assert manifest["loaded_image_count"] == 1
-    assert manifest["items"][0]["visual_input_status"] == "LOADED"
+    observation = json.loads(sections["multimodal_observation"])
+    assert observation["manifest"]["loaded_image_count"] == 1
+    assert observation["manifest"]["items"][0]["visual_input_status"] == "LOADED"
     assert call["multimodal_parts"][1]["type"] == "image_url"
     assert result.evidence_assessments[0].analysis_method == "HYBRID"
 
 
+# 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：回归测试用例。
+# 具体功能：`test_evidence_opening_turn_passes_source_to_llm_context` 验证当前可见证据在固定案例中的输出、边界和失败行为；关键协作调用：`FakeEvidenceRunner`、`EvidenceTurnWorkflow`、`workflow.run`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_java_evidence_opening_command_payload`。
+# 系统意义：固定“Agent 角色能力 > test_evidence_clerk_turn”的可观察契约，防止后续重构改变业务结果。
 def test_evidence_opening_turn_passes_source_to_llm_context() -> None:
     from app.agents.evidence_clerk.workflow import EvidenceTurnWorkflow
     from app.schemas import EvidenceTurnRequest
@@ -512,7 +604,11 @@ def test_evidence_opening_turn_passes_source_to_llm_context() -> None:
     assert runner.calls[0]["case_data"]["event_id"] == "EVIDENCE_OPENING_1"
 
 
-def test_evidence_opening_fallback_asks_dossier_specific_evidence_questions() -> None:
+# 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：模块公开业务函数。
+# 具体功能：`legacy_evidence_opening_fallback_asks_dossier_specific_evidence_questions` 在模型或外部依赖不可用时生成保守的案件卷宗降级结果；关键协作调用：`EvidenceTurnWorkflow`、`workflow.run`、`join`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_java_evidence_opening_command_payload`。
+# 系统意义：保证依赖故障时案件进入可解释的重试或人工路径，而不是生成伪结论。
+def legacy_evidence_opening_fallback_asks_dossier_specific_evidence_questions() -> None:
     from app.agents.evidence_clerk.workflow import EvidenceTurnWorkflow
     from app.schemas import EvidenceTurnRequest
 
@@ -536,7 +632,11 @@ def test_evidence_opening_fallback_asks_dossier_specific_evidence_questions() ->
     assert result.remedy_recommended is False
 
 
-def test_evidence_opening_fallback_states_initiator_evidence_gate_without_deciding() -> None:
+# 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：模块公开业务函数。
+# 具体功能：`legacy_evidence_opening_fallback_states_initiator_evidence_gate_without_deciding` 在模型或外部依赖不可用时生成保守的当前可见证据降级结果；关键协作调用：`EvidenceTurnWorkflow`、`workflow.run`、`EvidenceTurnRequest.model_validate`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_java_evidence_opening_command_payload`。
+# 系统意义：保证依赖故障时案件进入可解释的重试或人工路径，而不是生成伪结论。
+def legacy_evidence_opening_fallback_states_initiator_evidence_gate_without_deciding() -> None:
     from app.agents.evidence_clerk.workflow import EvidenceTurnWorkflow
     from app.schemas import EvidenceTurnRequest
 
@@ -557,7 +657,11 @@ def test_evidence_opening_fallback_states_initiator_evidence_gate_without_decidi
     assert result.remedy_recommended is False
 
 
-def test_evidence_opening_fallback_localizes_internal_dispute_codes() -> None:
+# 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：模块公开业务函数。
+# 具体功能：`legacy_evidence_opening_fallback_localizes_internal_dispute_codes` 在模型或外部依赖不可用时生成保守的当前可见证据降级结果；关键协作调用：`EvidenceTurnWorkflow`、`workflow.run`、`join`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_java_evidence_opening_command_payload`。
+# 系统意义：保证依赖故障时案件进入可解释的重试或人工路径，而不是生成伪结论。
+def legacy_evidence_opening_fallback_localizes_internal_dispute_codes() -> None:
     from app.agents.evidence_clerk.workflow import EvidenceTurnWorkflow
     from app.schemas import EvidenceTurnRequest
 
@@ -584,7 +688,11 @@ def test_evidence_opening_fallback_localizes_internal_dispute_codes() -> None:
     assert "物流显示签收但用户称未收到包裹" in combined
 
 
-def test_evidence_opening_fallback_normalizes_summary_punctuation() -> None:
+# 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：模块公开业务函数。
+# 具体功能：`legacy_evidence_opening_fallback_normalizes_summary_punctuation` 在模型或外部依赖不可用时生成保守的当前可见证据降级结果；关键协作调用：`EvidenceTurnWorkflow`、`workflow.run`、`EvidenceTurnRequest.model_validate`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_java_evidence_opening_command_payload`。
+# 系统意义：保证依赖故障时案件进入可解释的重试或人工路径，而不是生成伪结论。
+def legacy_evidence_opening_fallback_normalizes_summary_punctuation() -> None:
     from app.agents.evidence_clerk.workflow import EvidenceTurnWorkflow
     from app.schemas import EvidenceTurnRequest
 
@@ -601,7 +709,11 @@ def test_evidence_opening_fallback_normalizes_summary_punctuation() -> None:
     assert "物流显示签收，但用户称没有收到包裹。" in result.room_utterance
 
 
-def test_evidence_opening_replaces_generic_llm_welcome_with_dossier_questions() -> None:
+# 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：模块公开业务函数。
+# 具体功能：`legacy_evidence_opening_replaces_generic_llm_welcome_with_dossier_questions` 围绕案件卷宗计算该函数独立负责的业务派生值；关键协作调用：`EvidenceTurnWorkflow`、`workflow.run`、`join`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_java_evidence_opening_command_payload`。
+# 系统意义：把不确定模型能力限制在确定性系统边界内：服从角色权限、上下文范围和非最终结论边界。
+def legacy_evidence_opening_replaces_generic_llm_welcome_with_dossier_questions() -> None:
     from app.agents.evidence_clerk.workflow import EvidenceTurnWorkflow
     from app.schemas import EvidenceTurnRequest
 
@@ -624,7 +736,11 @@ def test_evidence_opening_replaces_generic_llm_welcome_with_dossier_questions() 
     assert "签收后发现手表划痕" in combined
 
 
-def test_evidence_opening_coerce_bounds_merged_model_and_baseline_output() -> None:
+# 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：模块公开业务函数。
+# 具体功能：`legacy_evidence_opening_coerce_bounds_merged_model_and_baseline_output` 把当前可见证据写入或合并到可追溯的阶段状态；关键协作调用：`EvidenceTurnWorkflow`、`workflow.run`、`EvidenceTurnRequest.model_validate`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_java_evidence_opening_command_payload`。
+# 系统意义：把不确定模型能力限制在确定性系统边界内：服从角色权限、上下文范围和非最终结论边界。
+def legacy_evidence_opening_coerce_bounds_merged_model_and_baseline_output() -> None:
     from app.agents.evidence_clerk.workflow import EvidenceTurnWorkflow
     from app.schemas import EvidenceTurnRequest
 
@@ -638,7 +754,11 @@ def test_evidence_opening_coerce_bounds_merged_model_and_baseline_output() -> No
     assert len(result.authenticity_flags) <= 20
 
 
-def test_evidence_turn_fallback_asks_authenticity_and_relevance_questions_without_deciding() -> None:
+# 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：模块公开业务函数。
+# 具体功能：`legacy_evidence_turn_fallback_asks_authenticity_and_relevance_questions_without_deciding` 在模型或外部依赖不可用时生成保守的当前可见证据降级结果；关键协作调用：`EvidenceTurnWorkflow`、`workflow.run`、`join`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_evidence_turn_payload`。
+# 系统意义：保证依赖故障时案件进入可解释的重试或人工路径，而不是生成伪结论。
+def legacy_evidence_turn_fallback_asks_authenticity_and_relevance_questions_without_deciding() -> None:
     from app.agents.evidence_clerk.workflow import EvidenceTurnWorkflow
     from app.schemas import EvidenceTurnRequest
 
@@ -663,6 +783,10 @@ def test_evidence_turn_fallback_asks_authenticity_and_relevance_questions_withou
     assert result.remedy_recommended is False
 
 
+# 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：回归测试用例。
+# 具体功能：`test_evidence_context_assembler_preserves_null_parsed_text_and_adds_notice` 把上游材料组装为本阶段可消费的当前可见证据；关键协作调用：`assemble`、`EvidenceTurnRequest.model_validate`、`EvidenceContextAssembler`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_java_evidence_turn_command_payload`。
+# 系统意义：固定“Agent 角色能力 > test_evidence_clerk_turn”的可观察契约，防止后续重构改变业务结果。
 def test_evidence_context_assembler_preserves_null_parsed_text_and_adds_notice() -> None:
     from app.harness.evidence_context_assembler import EvidenceContextAssembler
     from app.schemas import EvidenceTurnRequest
@@ -676,7 +800,7 @@ def test_evidence_context_assembler_preserves_null_parsed_text_and_adds_notice()
         EvidenceTurnRequest.model_validate(payload)
     )
 
-    evidence_context = assembled.context_sources["actor_visible_evidence"]
+    evidence_context = assembled.context_sources["party_visible_evidence_catalog"]
     model_evidence = evidence_context["items"][0]
     assert "parsed_text" not in model_evidence
     assert model_evidence["content_preview"] == (
@@ -696,6 +820,10 @@ def test_evidence_context_assembler_preserves_null_parsed_text_and_adds_notice()
     )
 
 
+# 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：回归测试用例。
+# 具体功能：`test_evidence_context_assembler_prioritizes_current_attachments_and_budgets` 把上游材料组装为本阶段可消费的当前可见证据；关键协作调用：`assemble`、`items.append`、`EvidenceTurnRequest.model_validate`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_java_evidence_turn_command_payload`、`_visible_signature_evidence`。
+# 系统意义：固定“Agent 角色能力 > test_evidence_clerk_turn”的可观察契约，防止后续重构改变业务结果。
 def test_evidence_context_assembler_prioritizes_current_attachments_and_budgets() -> None:
     from app.harness.evidence_context_assembler import EvidenceContextAssembler
     from app.schemas import EvidenceTurnRequest
@@ -717,7 +845,7 @@ def test_evidence_context_assembler_prioritizes_current_attachments_and_budgets(
     assembled = EvidenceContextAssembler().assemble(
         EvidenceTurnRequest.model_validate(payload)
     )
-    evidence_context = assembled.context_sources["actor_visible_evidence"]
+    evidence_context = assembled.context_sources["party_visible_evidence_catalog"]
 
     assert evidence_context["source_count"] == 25
     assert evidence_context["included_count"] == 20
@@ -731,7 +859,11 @@ def test_evidence_context_assembler_prioritizes_current_attachments_and_budgets(
     assert len(assembled.raw_envelope.visible_evidence[0].parsed_text or "") > 20_000
 
 
-def test_evidence_fallback_bounds_deterministic_output_above_one_hundred_items() -> None:
+# 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：模块公开业务函数。
+# 具体功能：`legacy_evidence_fallback_bounds_deterministic_output_above_one_hundred_items` 在模型或外部依赖不可用时生成保守的当前可见证据降级结果；关键协作调用：`EvidenceTurnRequest.model_validate`、`assemble`、`draft`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_evidence_turn_payload`、`_visible_signature_evidence`。
+# 系统意义：保证依赖故障时案件进入可解释的重试或人工路径，而不是生成伪结论。
+def legacy_evidence_fallback_bounds_deterministic_output_above_one_hundred_items() -> None:
     from app.agents.evidence_clerk.skills.authenticity import EvidenceAuthenticitySkill
     from app.agents.evidence_clerk.workflow import EvidenceTurnWorkflow
     from app.harness.evidence_context_assembler import EvidenceContextAssembler
@@ -761,6 +893,10 @@ def test_evidence_fallback_bounds_deterministic_output_above_one_hundred_items()
     assert len(result.authenticity_flags) <= 20
 
 
+# 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：回归测试用例。
+# 具体功能：`test_evidence_context_assembler_uses_raw_case_when_intake_dossier_is_missing` 把上游材料组装为本阶段可消费的案件卷宗；关键协作调用：`assemble`、`EvidenceTurnRequest.model_validate`、`EvidenceContextAssembler`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_evidence_turn_payload`。
+# 系统意义：固定“Agent 角色能力 > test_evidence_clerk_turn”的可观察契约，防止后续重构改变业务结果。
 def test_evidence_context_assembler_uses_raw_case_when_intake_dossier_is_missing() -> None:
     from app.harness.evidence_context_assembler import EvidenceContextAssembler
     from app.schemas import EvidenceTurnRequest
@@ -785,6 +921,10 @@ def test_evidence_context_assembler_uses_raw_case_when_intake_dossier_is_missing
     ] is True
 
 
+# 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：回归测试用例。
+# 具体功能：`test_evidence_envelope_accepts_short_external_business_references` 验证当前可见证据在固定案例中的输出、边界和失败行为；关键协作调用：`snapshot.update`、`EvidenceTurnRequest.model_validate`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_evidence_turn_payload`。
+# 系统意义：固定“Agent 角色能力 > test_evidence_clerk_turn”的可观察契约，防止后续重构改变业务结果。
 def test_evidence_envelope_accepts_short_external_business_references() -> None:
     from app.schemas import EvidenceTurnRequest
 
@@ -806,6 +946,10 @@ def test_evidence_envelope_accepts_short_external_business_references() -> None:
     assert request.context_envelope.case_snapshot.source_system == "X"
 
 
+# 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：回归测试用例。
+# 具体功能：`test_evidence_envelope_rejects_cross_actor_or_unknown_attachment_evidence` 验证当前可见证据在固定案例中的输出、边界和失败行为；关键协作调用：`pytest.raises`、`EvidenceTurnRequest.model_validate`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_java_evidence_turn_command_payload`。
+# 系统意义：固定“Agent 角色能力 > test_evidence_clerk_turn”的可观察契约，防止后续重构改变业务结果。
 def test_evidence_envelope_rejects_cross_actor_or_unknown_attachment_evidence() -> None:
     from app.schemas import EvidenceTurnRequest
 
@@ -834,7 +978,11 @@ def test_evidence_envelope_rejects_cross_actor_or_unknown_attachment_evidence() 
     )
 
 
-def test_evidence_turn_api_requires_service_secret_and_returns_fallback_payload() -> None:
+# 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：回归测试用例。
+# 具体功能：`test_evidence_turn_api_requires_service_secret_and_fails_without_model` 验证当前可见证据在固定案例中的输出、边界和失败行为；关键协作调用：`TestClient`、`client.post`、`create_app`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_settings`、`_evidence_turn_payload`、`_headers`。
+# 系统意义：固定“Agent 角色能力 > test_evidence_clerk_turn”的可观察契约，防止后续重构改变业务结果。
+def test_evidence_turn_api_requires_service_secret_and_fails_without_model() -> None:
     from app.agents.evidence_clerk.workflow import EvidenceTurnWorkflow
 
     client = TestClient(
@@ -857,16 +1005,14 @@ def test_evidence_turn_api_requires_service_secret_and_returns_fallback_payload(
         json=_evidence_turn_payload(),
     )
 
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["non_final"] is True
-    assert payload["evidence_requests"]
-    assert payload["verification_suggestions"][0]["evidence_id"] == (
-        "EVIDENCE_signature_photo"
-    )
-    assert payload["memory_frame"]["short_term_rounds"][0]["turn_no"] == 1
+    assert response.status_code == 503
+    assert response.json()["code"] == "AGENT_SERVICE_UNAVAILABLE"
 
 
+# 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：回归测试用例。
+# 具体功能：`test_evidence_turn_api_rejects_legacy_and_mixed_transport_contracts` 验证当前可见证据在固定案例中的输出、边界和失败行为；关键协作调用：`TestClient`、`client.post`、`create_app`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_evidence_turn_payload`、`_settings`、`_headers`。
+# 系统意义：固定“Agent 角色能力 > test_evidence_clerk_turn”的可观察契约，防止后续重构改变业务结果。
 def test_evidence_turn_api_rejects_legacy_and_mixed_transport_contracts() -> None:
     from app.agents.evidence_clerk.workflow import EvidenceTurnWorkflow
 
@@ -903,20 +1049,24 @@ def test_evidence_turn_api_rejects_legacy_and_mixed_transport_contracts() -> Non
     assert mixed_response.status_code == 422
 
 
+# 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：回归测试用例。
+# 具体功能：`test_evidence_turn_endpoint_accepts_java_command_payload_without_degrading` 读取并按案件、角色或会话范围筛选当前可见证据；关键协作调用：`TestClient`、`client.post`、`response.json`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_settings`、`_headers`、`_evidence_turn_payload`。
+# 系统意义：固定“Agent 角色能力 > test_evidence_clerk_turn”的可观察契约，防止后续重构改变业务结果。
 def test_evidence_turn_endpoint_accepts_java_command_payload_without_degrading() -> None:
     from app.agents.evidence_clerk.workflow import EvidenceTurnWorkflow
 
     client = TestClient(
         create_app(
             _settings(),
-            evidence_turn_workflow=EvidenceTurnWorkflow(),
+            evidence_turn_workflow=EvidenceTurnWorkflow(model_runner=FakeEvidenceRunner()),
         )
     )
 
     response = client.post(
         "/internal/agents/evidence/turn",
         headers=_headers(),
-        json=_java_evidence_turn_command_payload(),
+        json=_evidence_turn_payload(),
     )
 
     assert response.status_code == 200
@@ -930,38 +1080,48 @@ def test_evidence_turn_endpoint_accepts_java_command_payload_without_degrading()
     )
     assert any("\u4e00" <= char <= "\u9fff" for char in utterance)
     assert "Evidence clerk is temporarily unavailable" not in utterance
-    assert payload["memory_frame"].get("agent_degraded") is not True
+    assert payload["memory_patch"].get("agent_degraded") is not True
     assert payload["liability_determined"] is False
     assert payload["remedy_recommended"] is False
     assert "责任在" not in utterance
     assert "应当退款" not in utterance
     assert "最终判定" not in utterance
     assert "来源" in combined_questions
-    assert "完整" in combined_suggestions
+    assert "裁剪" in combined_suggestions
     assert "关联" in utterance + combined_questions + combined_suggestions
 
 
+# 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：回归测试用例。
+# 具体功能：`test_prompt_repository_registers_evidence_turn_prompt` 验证当前可见证据在固定案例中的输出、边界和失败行为；关键协作调用：`template_path`、`Path`、`PromptRepository`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 协作调用 `template_path`、`Path`、`PromptRepository`。
+# 系统意义：固定“Agent 角色能力 > test_evidence_clerk_turn”的可观察契约，防止后续重构改变业务结果。
 def test_prompt_repository_registers_evidence_turn_prompt() -> None:
     assert PromptRepository().template_path("evidence_turn") == Path(
         "app/agents/prompts/evidence_clerk/evidence_turn.md"
     )
 
 
+# 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：回归测试用例。
+# 具体功能：`test_evidence_turn_prompt_treats_initiator_evidence_as_admission_gate` 验证当前可见证据在固定案例中的输出、边界和失败行为；关键协作调用：`read_text`、`Path`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 协作调用 `read_text`、`Path`。
+# 系统意义：固定“Agent 角色能力 > test_evidence_clerk_turn”的可观察契约，防止后续重构改变业务结果。
 def test_evidence_turn_prompt_treats_initiator_evidence_as_admission_gate() -> None:
     prompt = Path(
         "app/agents/prompts/evidence_clerk/evidence_turn.md"
     ).read_text(encoding="utf-8")
 
-    assert "发起争议方须至少正式提交 1 份相关证据后才能完成举证" in prompt
-    assert "另一方可补充材料，或等待举证时效结束" in prompt
+    assert "至少正式提交 1 份相关证据后才能完成举证" in prompt
     assert "受理门槛" in prompt
-    assert "不是证据强弱或责任评价" in prompt
-    assert "不得宣称无证据、证据不足仍可开庭或进入小法庭" in prompt
-    assert "证据不足也不阻止进入小法庭" not in prompt
-    assert "只做证据核验" in prompt
     assert "不判断责任" in prompt
+    assert "ROOM_OPENING" in prompt
+    assert "只用简体中文" in prompt
+    assert "禁止英文翻译、双语复述" in prompt
 
 
+# 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：回归测试用例。
+# 具体功能：`test_evidence_asset_loader_fetches_authorized_image_and_builds_data_url` 把上游材料组装为本阶段可消费的当前可见证据；关键协作调用：`base64.b64decode`、`hexdigest`、`load`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_java_evidence_turn_command_payload`。
+# 系统意义：固定“Agent 角色能力 > test_evidence_clerk_turn”的可观察契约，防止后续重构改变业务结果。
 def test_evidence_asset_loader_fetches_authorized_image_and_builds_data_url() -> None:
     from app.harness.evidence_asset_loader import EvidenceAssetLoader
     from app.schemas import EvidenceTurnRequest
@@ -976,6 +1136,10 @@ def test_evidence_asset_loader_fetches_authorized_image_and_builds_data_url() ->
     evidence["file_hash"] = hashlib.sha256(image).hexdigest()
     evidence["desensitized"] = True
 
+    # 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：类/闭包内部方法。
+    # 具体功能：`handler` 驱动本阶段状态对应的业务步骤并返回阶段结果；关键协作调用：`request.url.path.endswith`、`httpx.Response`。
+    # 上下游：上游为 受治理的案件上下文和角色提示词；下游为 协作调用 `request.url.path.endswith`、`httpx.Response`。
+    # 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path.endswith(
             "/internal/evidence/CASE_evidence_turn_llm/"
@@ -1000,6 +1164,10 @@ def test_evidence_asset_loader_fetches_authorized_image_and_builds_data_url() ->
     )
 
 
+# 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：回归测试用例。
+# 具体功能：`test_evidence_asset_loader_blocks_hash_mismatch_from_model_input` 读取并按案件、角色或会话范围筛选当前可见证据；关键协作调用：`base64.b64decode`、`load`、`EvidenceTurnRequest.model_validate`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_java_evidence_turn_command_payload`。
+# 系统意义：固定“Agent 角色能力 > test_evidence_clerk_turn”的可观察契约，防止后续重构改变业务结果。
 def test_evidence_asset_loader_blocks_hash_mismatch_from_model_input() -> None:
     from app.harness.evidence_asset_loader import EvidenceAssetLoader
     from app.schemas import EvidenceTurnRequest
@@ -1025,6 +1193,10 @@ def test_evidence_asset_loader_blocks_hash_mismatch_from_model_input() -> None:
     assert loaded.manifest["items"][0]["visual_input_status"] == "HASH_MISMATCH"
 
 
+# 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：回归测试用例。
+# 具体功能：`test_evidence_asset_loader_blocks_raw_image_until_privacy_gate_is_enabled` 读取并按案件、角色或会话范围筛选当前可见证据；关键协作调用：`load`、`EvidenceTurnRequest.model_validate`、`EvidenceAssetLoader`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_java_evidence_turn_command_payload`。
+# 系统意义：固定“Agent 角色能力 > test_evidence_clerk_turn”的可观察契约，防止后续重构改变业务结果。
 def test_evidence_asset_loader_blocks_raw_image_until_privacy_gate_is_enabled() -> None:
     from app.harness.evidence_asset_loader import EvidenceAssetLoader
     from app.schemas import EvidenceTurnRequest
@@ -1048,6 +1220,10 @@ def test_evidence_asset_loader_blocks_raw_image_until_privacy_gate_is_enabled() 
     )
 
 
+# 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：回归测试用例。
+# 具体功能：`test_evidence_asset_loader_accepts_per_evidence_model_processing_authorization` 读取并按案件、角色或会话范围筛选当前可见证据；关键协作调用：`base64.b64decode`、`hexdigest`、`load`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_java_evidence_turn_command_payload`。
+# 系统意义：固定“Agent 角色能力 > test_evidence_clerk_turn”的可观察契约，防止后续重构改变业务结果。
 def test_evidence_asset_loader_accepts_per_evidence_model_processing_authorization() -> None:
     from app.harness.evidence_asset_loader import EvidenceAssetLoader
     from app.schemas import EvidenceTurnRequest
@@ -1076,6 +1252,10 @@ def test_evidence_asset_loader_accepts_per_evidence_model_processing_authorizati
     assert descriptor["visual_input_status"] == "LOADED"
 
 
+# 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：回归测试用例。
+# 具体功能：`test_evidence_asset_loader_blocks_declared_image_with_invalid_magic` 读取并按案件、角色或会话范围筛选当前可见证据；关键协作调用：`hexdigest`、`load`、`EvidenceTurnRequest.model_validate`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_java_evidence_turn_command_payload`。
+# 系统意义：固定“Agent 角色能力 > test_evidence_clerk_turn”的可观察契约，防止后续重构改变业务结果。
 def test_evidence_asset_loader_blocks_declared_image_with_invalid_magic() -> None:
     from app.harness.evidence_asset_loader import EvidenceAssetLoader
     from app.schemas import EvidenceTurnRequest
@@ -1098,6 +1278,10 @@ def test_evidence_asset_loader_blocks_declared_image_with_invalid_magic() -> Non
     assert loaded.manifest["items"][0]["visual_input_status"] == "MIME_MISMATCH"
 
 
+# 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：回归测试用例。
+# 具体功能：`test_evidence_asset_loader_marks_missing_hash_as_provenance_gap` 读取并按案件、角色或会话范围筛选当前可见证据；关键协作调用：`base64.b64decode`、`load`、`EvidenceTurnRequest.model_validate`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_java_evidence_turn_command_payload`。
+# 系统意义：固定“Agent 角色能力 > test_evidence_clerk_turn”的可观察契约，防止后续重构改变业务结果。
 def test_evidence_asset_loader_marks_missing_hash_as_provenance_gap() -> None:
     from app.harness.evidence_asset_loader import EvidenceAssetLoader
     from app.schemas import EvidenceTurnRequest
@@ -1125,6 +1309,10 @@ def test_evidence_asset_loader_marks_missing_hash_as_provenance_gap() -> None:
     )
 
 
+# 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：回归测试用例。
+# 具体功能：`test_assessment_policy_keeps_irrelevant_image_separate_from_authenticity` 验证平台规则在固定案例中的输出、边界和失败行为；关键协作调用：`assemble`、`EvidenceItemAssessment`、`EvidenceTurnRequest.model_validate`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_java_evidence_turn_command_payload`。
+# 系统意义：固定“Agent 角色能力 > test_evidence_clerk_turn”的可观察契约，防止后续重构改变业务结果。
 def test_assessment_policy_keeps_irrelevant_image_separate_from_authenticity() -> None:
     from app.agents.evidence_clerk.assessment_policy import EvidenceAssessmentPolicy
     from app.harness.evidence_context_assembler import EvidenceContextAssembler
@@ -1142,6 +1330,10 @@ def test_assessment_policy_keeps_irrelevant_image_separate_from_authenticity() -
         relevance_score=0.08,
         completeness_score=0.82,
         assessment_confidence=0.86,
+        source_basis=["原始图片和文件元数据。"],
+        supported_fact_ids=[],
+        unsupported_claims=["该图片不能支持本案物流签收事实。"],
+        formation_time_assessment="图片形成时间尚待核验。",
         findings=[
             {
                 "finding_type": "UNRELATED_SCENE",
@@ -1178,6 +1370,10 @@ def test_assessment_policy_keeps_irrelevant_image_separate_from_authenticity() -
     assert result.human_review.required is False
 
 
+# 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：回归测试用例。
+# 具体功能：`test_assessment_policy_blocks_fact_ids_outside_intake_dossier_allowlist` 验证案件卷宗在固定案例中的输出、边界和失败行为；关键协作调用：`assemble`、`EvidenceItemAssessment`、`EvidenceTurnRequest.model_validate`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_java_evidence_turn_command_payload`。
+# 系统意义：固定“Agent 角色能力 > test_evidence_clerk_turn”的可观察契约，防止后续重构改变业务结果。
 def test_assessment_policy_blocks_fact_ids_outside_intake_dossier_allowlist() -> None:
     from app.agents.evidence_clerk.assessment_policy import EvidenceAssessmentPolicy
     from app.harness.evidence_context_assembler import EvidenceContextAssembler
@@ -1217,6 +1413,10 @@ def test_assessment_policy_blocks_fact_ids_outside_intake_dossier_allowlist() ->
         relevance_score=0.88,
         completeness_score=0.74,
         assessment_confidence=0.8,
+        source_basis=["原始图片、OCR 文本和文件元数据。"],
+        supported_fact_ids=["FACT_SIGNED", "FACT_MODEL_INVENTED"],
+        unsupported_claims=[],
+        formation_time_assessment="图片时间需要与物流平台记录交叉核对。",
         recommendation="PLAUSIBLE",
         summary="签收图片与既有待证事实相关。",
     )
@@ -1245,6 +1445,10 @@ def test_assessment_policy_blocks_fact_ids_outside_intake_dossier_allowlist() ->
     assert any("事实白名单" in item for item in result.limitations)
 
 
+# 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：回归测试用例。
+# 具体功能：`test_assessment_policy_routes_visual_damage_to_human_review` 验证人工复核信息在固定案例中的输出、边界和失败行为；关键协作调用：`assemble`、`EvidenceItemAssessment`、`EvidenceTurnRequest.model_validate`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_java_evidence_turn_command_payload`。
+# 系统意义：固定“Agent 角色能力 > test_evidence_clerk_turn”的可观察契约，防止后续重构改变业务结果。
 def test_assessment_policy_routes_visual_damage_to_human_review() -> None:
     from app.agents.evidence_clerk.assessment_policy import EvidenceAssessmentPolicy
     from app.harness.evidence_context_assembler import EvidenceContextAssembler
@@ -1265,6 +1469,10 @@ def test_assessment_policy_routes_visual_damage_to_human_review() -> None:
         relevance_score=0.91,
         completeness_score=0.79,
         assessment_confidence=0.83,
+        source_basis=["原始图片像素和文件元数据。"],
+        supported_fact_ids=[],
+        unsupported_claims=["图片不能单独证明划痕形成时间和责任。"],
+        formation_time_assessment="无法仅凭图片确认划痕形成时间。",
         recommendation="PLAUSIBLE",
         summary="画面可见疑似细微划痕。",
     )
@@ -1289,6 +1497,53 @@ def test_assessment_policy_routes_visual_damage_to_human_review() -> None:
     assert any("形成时间" in item for item in result.limitations)
 
 
+def test_assessment_policy_uses_asset_manifest_as_modality_authority() -> None:
+    from app.agents.evidence_clerk.assessment_policy import EvidenceAssessmentPolicy
+    from app.harness.evidence_context_assembler import EvidenceContextAssembler
+    from app.schemas import EvidenceItemAssessment, EvidenceTurnRequest
+
+    assembled = EvidenceContextAssembler().assemble(
+        EvidenceTurnRequest.model_validate(_java_evidence_turn_command_payload())
+    )
+    assessment = EvidenceItemAssessment(
+        evidence_id="EVIDENCE_signature_photo",
+        analysis_method="TEXT_ONLY",
+        inspected_modalities=[],
+        authenticity_score=0.8,
+        relevance_score=0.1,
+        completeness_score=0.8,
+        assessment_confidence=0.9,
+        source_basis=["图片像素和文件元数据。"],
+        supported_fact_ids=[],
+        unsupported_claims=["界面截图不能支持物流签收事实。"],
+        formation_time_assessment="图片形成时间尚待核验。",
+        recommendation="SUSPICIOUS",
+        summary="图片是与案件无关的界面截图。",
+    )
+
+    result = EvidenceAssessmentPolicy().apply(
+        [assessment],
+        assembled.working_set,
+        {
+            "items": [
+                {
+                    "evidence_id": "EVIDENCE_signature_photo",
+                    "visual_input_status": "LOADED",
+                    "inspected_modalities": ["IMAGE_PIXELS", "FILE_METADATA"],
+                }
+            ]
+        },
+    )[0]
+
+    assert result.analysis_method == "MULTIMODAL"
+    assert result.inspected_modalities == ["IMAGE_PIXELS", "FILE_METADATA"]
+    assert "VISUAL_NOT_INSPECTED" not in result.human_review.reason_codes
+
+
+# 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：回归测试用例。
+# 具体功能：`test_assessment_policy_rejects_model_claim_of_visual_inspection_when_not_loaded` 读取并按案件、角色或会话范围筛选模型状态；关键协作调用：`assemble`、`EvidenceItemAssessment`、`EvidenceTurnRequest.model_validate`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_java_evidence_turn_command_payload`。
+# 系统意义：固定“Agent 角色能力 > test_evidence_clerk_turn”的可观察契约，防止后续重构改变业务结果。
 def test_assessment_policy_rejects_model_claim_of_visual_inspection_when_not_loaded() -> None:
     from app.agents.evidence_clerk.assessment_policy import EvidenceAssessmentPolicy
     from app.harness.evidence_context_assembler import EvidenceContextAssembler
@@ -1305,6 +1560,10 @@ def test_assessment_policy_rejects_model_claim_of_visual_inspection_when_not_loa
         relevance_score=0.95,
         completeness_score=0.96,
         assessment_confidence=0.98,
+        source_basis=["模型声称读取图片，但资产加载记录不支持该说法。"],
+        supported_fact_ids=[],
+        unsupported_claims=["无法确认图片中的签收内容。"],
+        formation_time_assessment="未读取原图，无法核验形成时间。",
         findings=[
             {
                 "finding_type": "CLAIMED_VISUAL_FINDING",

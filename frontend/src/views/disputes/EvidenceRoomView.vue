@@ -1,3 +1,8 @@
+<!--
+  文件作用：前端页面视图文件，组织售后争议对应页面的数据加载、交互和展示。
+  说明：本注释用于帮助读者先了解组件/页面职责，再阅读 template、script 和 style。
+-->
+
 <script setup>
 import {
   computed,
@@ -10,9 +15,15 @@ import {
 } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { newIdempotencyKey } from "../../api/client";
+import {
+  extractAgentRunDescriptor,
+  loadActiveAgentRuns,
+  resultRoomMessage,
+} from "../../api/agentStream";
 import { evidenceApi } from "../../api/evidence";
 import { roomApi } from "../../api/rooms";
 import DigitalHuman from "../../components/avatar/DigitalHuman.vue";
+import AgentStreamErrorDialog from "../../components/room/AgentStreamErrorDialog.vue";
 import ConversationStream from "../../components/room/ConversationStream.vue";
 import PhaseCountdown from "../../components/room/PhaseCountdown.vue";
 import RoomShell from "../../components/room/RoomShell.vue";
@@ -21,6 +32,11 @@ import {
   createRoomState,
   streamRoomEvents,
 } from "../../stores/room";
+import {
+  activeAgentStreams,
+  clearAgentStreams,
+  consumeAgentRun,
+} from "../../stores/agentStream";
 
 const props = defineProps({
   initialCatalog: { type: Object, default: null },
@@ -32,6 +48,7 @@ const props = defineProps({
   completeAction: { type: Function, default: null },
   eventStreamer: { type: Function, default: null },
   messageAction: { type: Function, default: null },
+  modelHealthLoader: { type: Function, default: null },
   agentReplyPollAttempts: { type: Number, default: 5 },
   agentReplyPollDelayMs: { type: Number, default: 1500 },
 });
@@ -44,12 +61,13 @@ const uploading = ref(false);
 const submittingBatch = ref(false);
 const completing = ref(false);
 const error = ref("");
+const streamError = ref("");
 const evidenceGateError = ref("");
 const agentState = ref("LISTENING");
 const fileInput = ref(null);
-const modelProcessingAuthorized = ref(false);
 const messages = ref([...(props.initialMessages || [])]);
 const selectedEvidence = ref(null);
+const selectedEvidenceMode = ref("evidence");
 const expandedEvidenceGroup = ref(null);
 const evidenceGateModal = ref(null);
 const evidenceDetailModal = ref(null);
@@ -57,11 +75,14 @@ const evidenceGalleryModal = ref(null);
 const modalStack = ref([]);
 const deletingEvidenceIds = ref(new Set());
 const eventState = reactive(createRoomState());
+const modelConnectionState = ref("checking");
 const modalTriggers = new Map();
 let eventAbortController = new AbortController();
 let eventStreamActive = false;
 let workspaceGeneration = 0;
 let modalKeydownAttached = false;
+let modelHealthTimer = null;
+let modelHealthInFlight = null;
 
 const caseId = computed(
   () => catalog.value?.case_id || route.params.caseId,
@@ -82,12 +103,133 @@ const effectiveActor = computed(() => {
 });
 const isMerchant = computed(() => role.value === "MERCHANT");
 const shouldEnsureOpening = computed(() => ["USER", "MERCHANT"].includes(role.value));
+const shouldDiscoverActiveEvidenceRuns = computed(() =>
+  props.initialMessages === null &&
+  props.initialCatalog === null &&
+  props.initialCompletion === null &&
+  !props.eventStreamer,
+);
 const displayedMessages = computed(() => {
   const hasDossierSpecificOpening = messages.value.some((message) =>
     isDossierSpecificOpeningMessage(message),
   );
-  if (!hasDossierSpecificOpening) return messages.value;
-  return messages.value.filter((message) => !isSupersededOpeningMessage(message));
+  const visibleMessages = hasDossierSpecificOpening
+    ? messages.value.filter((message) => !isSupersededOpeningMessage(message))
+    : messages.value;
+  return visibleMessages.map((message) => ({
+    ...message,
+    message_text: displayEvidenceReferences(message?.message_text),
+  }));
+});
+const evidenceStreamingRuns = computed(() =>
+  activeAgentStreams({
+    caseId: caseId.value,
+    roomType: "EVIDENCE",
+    actorId: effectiveActor.value.id,
+    actorRole: effectiveActor.value.role,
+  }).map((run) => ({
+    ...run,
+    content: displayEvidenceReferences(run.content),
+  })),
+);
+const modelConnected = computed(() => modelConnectionState.value === "connected");
+const modelConnectionLabel = computed(() => {
+  if (evidenceStreamingRuns.value.length) return "数字人正在输出";
+  if (modelConnectionState.value === "connected") return "数字人已连接";
+  if (modelConnectionState.value === "checking") return "连接检测中";
+  return "数字人未连接";
+});
+const initialEvidencePlanReady = computed(() =>
+  displayedMessages.value.some((message) => isCurrentEvidenceClerkMessage(message)),
+);
+const evidenceConversationEmptyText = computed(() => {
+  if (!modelConnected.value) {
+    return "数字人未连接，恢复连接后将生成首轮核验计划。";
+  }
+  if (!initialEvidencePlanReady.value) {
+    return "证据书记官正在依据接待卷宗生成首轮核验计划，请稍候。";
+  }
+  return "证据书记官的首轮核验计划正在同步到对话记录。";
+});
+const evidenceComposerDisabled = computed(() =>
+  !modelConnected.value ||
+  (shouldEnsureOpening.value && !initialEvidencePlanReady.value) ||
+  uploading.value ||
+  submittingBatch.value ||
+  completing.value ||
+  evidenceStreamingRuns.value.length > 0,
+);
+const evidenceWorkStatus = computed(() => {
+  if (evidenceStreamingRuns.value.length || agentState.value === "STREAMING") {
+    return "STREAMING";
+  }
+  if (!modelConnected.value) {
+    return modelConnectionState.value === "checking"
+      ? "MODEL_CONNECTING"
+      : "MODEL_DISCONNECTED";
+  }
+  if (error.value) return "ERROR";
+  if (completion.value?.sealed) return "HANDOFF";
+  if (!initialEvidencePlanReady.value && shouldEnsureOpening.value) {
+    return "GENERATING_INITIAL";
+  }
+  if (uploading.value || submittingBatch.value || completing.value || agentState.value === "THINKING") {
+    return "ANALYSING";
+  }
+  return "READY";
+});
+const evidenceWorkStatusCopy = computed(() => {
+  const copies = {
+    MODEL_CONNECTING: {
+      eyebrow: "MODEL STATUS",
+      title: "正在检测数字人连接",
+      description: "正在确认多模态模型是否可用，连接成功后将生成首轮核验计划。",
+      tone: "working",
+    },
+    MODEL_DISCONNECTED: {
+      eyebrow: "MODEL OFFLINE",
+      title: "数字人未连接",
+      description: "模型服务暂不可用；恢复连接后才能生成核验计划或提交说明。",
+      tone: "error",
+    },
+    GENERATING_INITIAL: {
+      eyebrow: "EVIDENCE STATUS",
+      title: "证据书记官正在生成首轮核验计划",
+      description: "正在读取接待卷宗、争议焦点和待核验事实，确定本轮材料方向。",
+      tone: "working",
+    },
+    ANALYSING: {
+      eyebrow: "EVIDENCE STATUS",
+      title: "证据书记官正在分析本轮材料",
+      description: "正在核对来源、完整性、关联性和需要人工复核的风险信号。",
+      tone: "working",
+    },
+    STREAMING: {
+      eyebrow: "LIVE GENERATION",
+      title: "证据书记官正在流式输出",
+      description: "核验意见正在生成；完成校验并正式入库前，当前内容仅作实时展示。",
+      tone: "streaming",
+    },
+    READY: {
+      eyebrow: "READY",
+      title: "证据书记官已就绪",
+      description: "可说明材料来源、形成时间和可证明范围，或上传待提交证据。",
+      tone: "ready",
+    },
+    HANDOFF: {
+      eyebrow: "HANDOFF",
+      title: "证据室已封存",
+      description: "本轮证据核验已完成，卷宗和复核记录已交接至庭审阶段。",
+      tone: "handoff",
+    },
+    ERROR: {
+      eyebrow: "EVIDENCE ERROR",
+      title: "证据书记官生成失败",
+      description: "模型响应未完成，当前不会写入兜底内容；请在服务恢复后重试。",
+      tone: "error",
+    },
+  };
+  return copies[evidenceWorkStatus.value] || copies.READY;
 });
 const items = computed(() => catalog.value?.items || []);
 const actorOwnedItems = computed(() =>
@@ -149,6 +291,9 @@ const completionStatusMessage = computed(() => {
   return "提交完成只代表当前一方完成；系统会等待另一方或举证时效结束。";
 });
 const connectionState = computed(() => {
+  // An active evidence AgentRun proves the model stream is live even when the
+  // durable room-event channel has not connected yet.
+  if (evidenceStreamingRuns.value.length > 0) return "connected";
   if (eventState.connected) return "connected";
   if (eventState.reconnecting) return "reconnecting";
   return "offline";
@@ -222,20 +367,24 @@ const wordExtensions = new Set(["doc", "docx"]);
 const markdownExtensions = new Set(["md", "markdown"]);
 const textExtensions = new Set(["txt", "csv", "log"]);
 
+// 业务位置：【前端证据室】evidenceField：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function evidenceField(item, snakeCaseKey, camelCaseKey, fallback = "") {
   return item?.[snakeCaseKey] ?? item?.[camelCaseKey] ?? fallback;
 }
 
+// 业务位置：【前端证据室】evidenceId：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function evidenceId(item) {
   return evidenceField(item, "evidence_id", "evidenceId", "");
 }
 
+// 业务位置：【前端证据室】evidenceSubmissionStatus：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function evidenceSubmissionStatus(item) {
   return String(
     evidenceField(item, "submission_status", "submissionStatus", "SUBMITTED"),
   ).toUpperCase();
 }
 
+// 业务位置：【前端证据室】evidenceSubmissionStatusLabel：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function evidenceSubmissionStatusLabel(item) {
   const status = evidenceSubmissionStatus(item);
   if (status === "PENDING_SUBMISSION") return "待提交";
@@ -244,16 +393,19 @@ function evidenceSubmissionStatusLabel(item) {
   return status || "待确认";
 }
 
+// 业务位置：【前端证据室】evidenceVerificationStatus：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function evidenceVerificationStatus(item) {
   return String(
     evidenceField(item, "verification_status", "verificationStatus", "PENDING"),
   ).toUpperCase();
 }
 
+// 业务位置：【前端证据室】isDeletingEvidence：判断 当前可见证据和附件 是否满足当前流程分支的进入条件。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function isDeletingEvidence(item) {
   return deletingEvidenceIds.value.has(evidenceId(item));
 }
 
+// 业务位置：【前端证据室】percentageScore：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function percentageScore(raw) {
   if (raw === null || raw === undefined || raw === "") return null;
   const numeric = Number(raw);
@@ -261,6 +413,7 @@ function percentageScore(raw) {
   return Math.min(100, Math.max(0, numeric <= 1 ? Math.round(numeric * 100) : Math.round(numeric)));
 }
 
+// 业务位置：【前端证据室】evidenceAssessmentConfidenceRaw：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function evidenceAssessmentConfidenceRaw(item) {
   return evidenceField(
     item,
@@ -275,10 +428,12 @@ function evidenceAssessmentConfidenceRaw(item) {
   );
 }
 
+// 业务位置：【前端证据室】evidenceConfidenceScore：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function evidenceConfidenceScore(item) {
   return percentageScore(evidenceAssessmentConfidenceRaw(item));
 }
 
+// 业务位置：【前端证据室】evidenceConfidenceLevel：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function evidenceConfidenceLevel(item) {
   const score = evidenceConfidenceScore(item);
   if (score !== null) {
@@ -292,6 +447,7 @@ function evidenceConfidenceLevel(item) {
   return confidenceLabels[value] || confidenceLabels.UNKNOWN;
 }
 
+// 业务位置：【前端证据室】evidenceConfidenceTone：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function evidenceConfidenceTone(item) {
   const score = evidenceConfidenceScore(item);
   if (score !== null) {
@@ -306,21 +462,25 @@ function evidenceConfidenceTone(item) {
   return "unknown";
 }
 
+// 业务位置：【前端证据室】evidenceConfidenceCopy：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function evidenceConfidenceCopy(item) {
   const score = evidenceConfidenceScore(item);
   const label = evidenceConfidenceLevel(item);
   return score === null ? label : `${score}% · ${label}`;
 }
 
+// 业务位置：【前端证据室】evidenceMetricScore：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function evidenceMetricScore(item, snakeCaseKey, camelCaseKey) {
   return percentageScore(evidenceField(item, snakeCaseKey, camelCaseKey, null));
 }
 
+// 业务位置：【前端证据室】evidenceMetricCopy：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function evidenceMetricCopy(item, snakeCaseKey, camelCaseKey) {
   const score = evidenceMetricScore(item, snakeCaseKey, camelCaseKey);
   return score === null ? "待评估" : `${score}%`;
 }
 
+// 业务位置：【前端证据室】normalizedList：将 当前阶段业务数据 转换为稳定的接口、提示词或页面表达，避免直接暴露内部实现字段。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function normalizedList(value) {
   if (Array.isArray(value)) {
     return value.map((entry) => String(entry || "").trim()).filter(Boolean);
@@ -329,18 +489,17 @@ function normalizedList(value) {
   return [String(value).trim()].filter(Boolean);
 }
 
+// 业务位置：【前端证据室】evidenceListField：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function evidenceListField(item, snakeCaseKey, camelCaseKey) {
   return normalizedList(evidenceField(item, snakeCaseKey, camelCaseKey, []));
 }
 
-function evidenceInspectedModalities(item) {
-  return evidenceListField(item, "inspected_modalities", "inspectedModalities");
-}
-
+// 业务位置：【前端证据室】evidenceLimitations：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function evidenceLimitations(item) {
   return evidenceListField(item, "limitations", "limitations");
 }
 
+// 业务位置：【前端证据室】evidenceHumanReviewReasons：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function evidenceHumanReviewReasons(item) {
   return evidenceListField(
     item,
@@ -349,6 +508,7 @@ function evidenceHumanReviewReasons(item) {
   );
 }
 
+// 业务位置：【前端证据室】evidenceHumanReviewInstructions：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function evidenceHumanReviewInstructions(item) {
   return evidenceListField(
     item,
@@ -357,6 +517,7 @@ function evidenceHumanReviewInstructions(item) {
   );
 }
 
+// 业务位置：【前端证据室】humanReviewReasonLabel：围绕 人工审核关注点和陪审团提示 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function humanReviewReasonLabel(reasonCode) {
   const code = String(reasonCode || "").trim();
   if (code.startsWith("VISUAL_INPUT_")) return "原始视觉内容未能安全加载";
@@ -364,6 +525,7 @@ function humanReviewReasonLabel(reasonCode) {
   return humanReviewReasonLabels[code] || code.replaceAll("_", " ");
 }
 
+// 业务位置：【前端证据室】evidenceRequiresHumanReview：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function evidenceRequiresHumanReview(item) {
   const explicit = evidenceField(
     item,
@@ -375,6 +537,7 @@ function evidenceRequiresHumanReview(item) {
     evidenceVerificationStatus(item) === "NEEDS_HUMAN_REVIEW";
 }
 
+// 业务位置：【前端证据室】evidenceOwnerLabel：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function evidenceOwnerLabel(item) {
   const owner = evidenceField(item, "submitted_by_role", "submittedByRole", "");
   if (owner === "MERCHANT") return "商家提交";
@@ -383,22 +546,59 @@ function evidenceOwnerLabel(item) {
   return owner || "来源待确认";
 }
 
+// 业务位置：【前端证据室】evidenceFeedback：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function evidenceFeedback(item) {
   return evidenceField(item, "verification_feedback", "verificationFeedback", "");
 }
 
-function evidenceParsedText(item) {
-  return evidenceField(item, "parsed_text", "parsedText", "");
-}
-
+// 业务位置：【前端证据室】evidenceOriginalFilename：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function evidenceOriginalFilename(item) {
   return evidenceField(item, "original_filename", "originalFilename", "");
 }
 
+function compactEvidenceDisplayName(item) {
+  const originalName = evidenceOriginalFilename(item);
+  const fileName = String(originalName || "").split(/[\\/]/).pop() || "";
+  const extensionIndex = fileName.lastIndexOf(".");
+  const baseName = extensionIndex > 0 ? fileName.slice(0, extensionIndex) : fileName;
+  const characters = Array.from(baseName.trim());
+  if (!characters.length) return "该材料";
+  return characters.length > 5
+    ? `${characters.slice(0, 5).join("")}…`
+    : characters.join("");
+}
+
+function displayEvidenceReferences(value, fallbackItem = null) {
+  const replaced = String(value || "").replace(
+    /(?:证据\s*)?EVIDENCE_[A-Za-z0-9_-]+/g,
+    (internalId) => {
+      const normalizedId = internalId.match(/EVIDENCE_[A-Za-z0-9_-]+/)?.[0] || "";
+      const mappedItem = items.value.find(
+        (candidate) => evidenceId(candidate) === normalizedId,
+      ) || (fallbackItem && evidenceId(fallbackItem) === normalizedId
+        ? fallbackItem
+        : null);
+      return mappedItem
+        ? `证据：${compactEvidenceDisplayName(mappedItem)}`
+        : "该证据";
+    },
+  );
+  return replaced.replace(
+    /(证据：[^，。；\s（）()]{1,6})[（(]文件名[:：][^）)]+[）)]/g,
+    "$1",
+  );
+}
+
+function evidenceFeedbackDisplay(item) {
+  return displayEvidenceReferences(evidenceFeedback(item), item);
+}
+
+// 业务位置：【前端证据室】evidenceFileSourceName：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function evidenceFileSourceName(item) {
   return evidenceOriginalFilename(item) || evidenceField(item, "content_url", "contentUrl", "");
 }
 
+// 业务位置：【前端证据室】fileExtension：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function fileExtension(value) {
   const cleanValue = String(value || "").split(/[?#]/)[0];
   const fileName = cleanValue.split(/[\\/]/).pop() || "";
@@ -407,6 +607,7 @@ function fileExtension(value) {
   return fileName.slice(lastDotIndex + 1).toLowerCase();
 }
 
+// 业务位置：【前端证据室】evidenceFileIcon：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function evidenceFileIcon(item) {
   const extension = fileExtension(evidenceFileSourceName(item));
   const evidenceType = String(evidenceField(item, "evidence_type", "evidenceType", "")).toUpperCase();
@@ -424,12 +625,14 @@ function evidenceFileIcon(item) {
   return fileIconCatalog.other;
 }
 
+// 业务位置：【前端证据室】evidenceFileIconStatusClass：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function evidenceFileIconStatusClass(item) {
   return evidenceSubmissionStatus(item) === "PENDING_SUBMISSION"
     ? "evidence-file-icon--pending"
     : "evidence-file-icon--submitted";
 }
 
+// 业务位置：【前端证据室】modalRoot：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function modalRoot(modalName) {
   if (modalName === "gate") return evidenceGateModal.value;
   if (modalName === "detail") return evidenceDetailModal.value;
@@ -437,20 +640,24 @@ function modalRoot(modalName) {
   return null;
 }
 
+// 业务位置：【前端证据室】modalDepth：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function modalDepth(modalName) {
   const index = modalStack.value.indexOf(modalName);
   return 40 + Math.max(index, 0);
 }
 
+// 业务位置：【前端证据室】isTopModal：判断 当前阶段业务数据 是否满足当前流程分支的进入条件。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function isTopModal(modalName) {
   return modalStack.value.at(-1) === modalName;
 }
 
+// 业务位置：【前端证据室】isModalCovered：判断 当前阶段业务数据 是否满足当前流程分支的进入条件。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function isModalCovered(modalName) {
   const index = modalStack.value.indexOf(modalName);
   return index >= 0 && index < modalStack.value.length - 1;
 }
 
+// 业务位置：【前端证据室】modalTrigger：执行 当前阶段业务数据 对应的业务动作，并将结果交给 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function modalTrigger(event) {
   const eventTarget = event?.currentTarget;
   if (eventTarget instanceof HTMLElement) return eventTarget;
@@ -459,6 +666,7 @@ function modalTrigger(event) {
     : null;
 }
 
+// 业务位置：【前端证据室】modalFocusableElements：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function modalFocusableElements(modalName) {
   const root = modalRoot(modalName);
   if (!root) return [];
@@ -472,6 +680,7 @@ function modalFocusableElements(modalName) {
   );
 }
 
+// 业务位置：【前端证据室】focusModal：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function focusModal(modalName) {
   const root = modalRoot(modalName);
   if (!root || !isTopModal(modalName)) return;
@@ -480,18 +689,21 @@ function focusModal(modalName) {
   if (target instanceof HTMLElement) target.focus();
 }
 
+// 业务位置：【前端证据室】attachModalKeydown：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function attachModalKeydown() {
   if (modalKeydownAttached) return;
   document.addEventListener("keydown", handleModalKeydown);
   modalKeydownAttached = true;
 }
 
+// 业务位置：【前端证据室】detachModalKeydown：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function detachModalKeydown() {
   if (!modalKeydownAttached) return;
   document.removeEventListener("keydown", handleModalKeydown);
   modalKeydownAttached = false;
 }
 
+// 业务位置：【前端证据室】openModal：切换与 当前阶段业务数据 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function openModal(modalName, event) {
   const trigger = modalTrigger(event);
   if (trigger) modalTriggers.set(modalName, trigger);
@@ -503,6 +715,7 @@ function openModal(modalName, event) {
   void nextTick(() => focusModal(modalName));
 }
 
+// 业务位置：【前端证据室】closeModal：切换与 当前阶段业务数据 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function closeModal(modalName, options = {}) {
   const wasTopModal = isTopModal(modalName);
   const trigger = modalTriggers.get(modalName);
@@ -520,6 +733,7 @@ function closeModal(modalName, options = {}) {
   });
 }
 
+// 业务位置：【前端证据室】trapModalFocus：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function trapModalFocus(event, modalName) {
   const focusableElements = modalFocusableElements(modalName);
   if (!focusableElements.length) {
@@ -539,6 +753,7 @@ function trapModalFocus(event, modalName) {
   focusableElements[nextIndex].focus();
 }
 
+// 业务位置：【前端证据室】closeTopModal：切换与 当前阶段业务数据 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function closeTopModal() {
   const topModal = modalStack.value.at(-1);
   if (topModal === "detail") closeEvidenceDetail();
@@ -546,6 +761,7 @@ function closeTopModal() {
   if (topModal === "gate") dismissEvidenceGate();
 }
 
+// 业务位置：【前端证据室】handleModalKeydown：执行 当前阶段业务数据 对应的业务动作，并将结果交给 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function handleModalKeydown(event) {
   const topModal = modalStack.value.at(-1);
   if (!topModal) return;
@@ -557,27 +773,36 @@ function handleModalKeydown(event) {
   if (event.key === "Tab") trapModalFocus(event, topModal);
 }
 
+// 业务位置：【前端证据室】resetModalController：更新 当前阶段业务数据 的消息、缓存或持久记录，避免旧回合数据影响当前处理。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function resetModalController() {
   modalStack.value = [];
   modalTriggers.clear();
   detachModalKeydown();
 }
 
-function openEvidenceDetail(item, event) {
+// 业务位置：【前端证据室】openEvidenceDetail：切换与 当前可见证据和附件 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
+function openEvidenceDetail(item, event, mode = "evidence") {
   selectedEvidence.value = item;
+  selectedEvidenceMode.value = mode === "human-review"
+    ? "human-review"
+    : "evidence";
   openModal("detail", event);
 }
 
+// 业务位置：【前端证据室】closeEvidenceDetail：切换与 当前可见证据和附件 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function closeEvidenceDetail() {
   selectedEvidence.value = null;
+  selectedEvidenceMode.value = "evidence";
   closeModal("detail");
 }
 
+// 业务位置：【前端证据室】openEvidenceGroup：切换与 当前可见证据和附件 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function openEvidenceGroup(group, event) {
   expandedEvidenceGroup.value = group;
   openModal("gallery", event);
 }
 
+// 业务位置：【前端证据室】closeEvidenceGroup：切换与 当前可见证据和附件 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function closeEvidenceGroup() {
   expandedEvidenceGroup.value = null;
   closeModal("gallery");
@@ -593,6 +818,7 @@ const expandedEvidenceTitle = computed(() =>
   expandedEvidenceGroup.value === "pending" ? "本批待提交" : "我的原件匣",
 );
 
+// 业务位置：【前端证据室】load：读取 当前阶段业务数据，并依据当前案件、角色和会话权限裁剪成可用输入。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 async function load() {
   const generation = workspaceGeneration;
   const actorSnapshot = { ...effectiveActor.value };
@@ -617,6 +843,9 @@ async function load() {
       );
       if (nextMessages === null) return;
       messages.value = nextMessages;
+      if (shouldDiscoverActiveEvidenceRuns.value) {
+        await resumeActiveEvidenceRuns(actorSnapshot, caseSnapshot);
+      }
     }
   } catch (failure) {
     if (!isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) return;
@@ -625,6 +854,7 @@ async function load() {
   }
 }
 
+// 业务位置：【前端证据室】isCurrentWorkspace：判断 页面工作区和业务快照 是否满足当前流程分支的进入条件。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function isCurrentWorkspace(generation, actorSnapshot, caseSnapshot) {
   return (
     generation === workspaceGeneration &&
@@ -634,6 +864,7 @@ function isCurrentWorkspace(generation, actorSnapshot, caseSnapshot) {
   );
 }
 
+// 业务位置：【前端证据室】loadActorScopedMessages：读取 房间消息和对话记录，并依据当前案件、角色和会话权限裁剪成可用输入。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 async function loadActorScopedMessages(
   generation,
   actorSnapshot,
@@ -651,7 +882,11 @@ async function loadActorScopedMessages(
   if (!shouldRequestEvidenceOpening(options.ensureOpening, firstMessages)) {
     return firstMessages;
   }
-  await roomApi.ensureOpening(actorSnapshot, caseSnapshot, "EVIDENCE");
+  const opening = await roomApi.ensureOpening(actorSnapshot, caseSnapshot, "EVIDENCE");
+  await consumeEvidenceAgentRun(opening, {
+    actorSnapshot,
+    caseSnapshot,
+  });
   if (!isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) {
     return null;
   }
@@ -666,6 +901,51 @@ async function loadActorScopedMessages(
   return openedMessages;
 }
 
+// 业务位置：【前端证据室】resumeActiveEvidenceRuns：执行 当前可见证据和附件 对应的业务动作，并将结果交给 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
+async function resumeActiveEvidenceRuns(
+  actorSnapshot = { ...effectiveActor.value },
+  caseSnapshot = caseId.value,
+) {
+  const activeRuns = await loadActiveAgentRuns(
+    actorSnapshot,
+    caseSnapshot,
+    "EVIDENCE",
+  );
+  await Promise.all((activeRuns || []).map((descriptor) =>
+    consumeEvidenceAgentRun(descriptor, {
+      actorSnapshot,
+      caseSnapshot,
+      onFinal: () => refreshWorkspace(),
+    }),
+  ));
+}
+
+// 业务位置：【前端证据室】consumeEvidenceAgentRun：执行 当前可见证据和附件 对应的业务动作，并将结果交给 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
+async function consumeEvidenceAgentRun(result, options = {}) {
+  const descriptor = extractAgentRunDescriptor(result);
+  if (!descriptor) return false;
+  const actorSnapshot = options.actorSnapshot || { ...effectiveActor.value };
+  const caseSnapshot = options.caseSnapshot || caseId.value;
+  streamError.value = "";
+  agentState.value = "STREAMING";
+  await consumeAgentRun({
+    actor: actorSnapshot,
+    caseId: caseSnapshot,
+    roomType: "EVIDENCE",
+    descriptor,
+    agentLabel: "证据书记官",
+    senderRole: "EVIDENCE_CLERK",
+    signal: eventAbortController.signal,
+    onFinal: options.onFinal,
+    onError: (failure) => {
+      streamError.value = failure.message;
+    },
+  });
+  if (agentState.value === "STREAMING") agentState.value = "SPEAKING";
+  return true;
+}
+
+// 业务位置：【前端证据室】shouldRequestEvidenceOpening：判断 当前可见证据和附件 是否满足当前流程分支的进入条件。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function shouldRequestEvidenceOpening(ensureOpening, firstMessages) {
   if (!ensureOpening) return false;
   return (
@@ -674,6 +954,7 @@ function shouldRequestEvidenceOpening(ensureOpening, firstMessages) {
   );
 }
 
+// 业务位置：【前端证据室】containsOnlySupersededOpeningMessages：切换与 房间消息和对话记录 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function containsOnlySupersededOpeningMessages(firstMessages) {
   return (
     firstMessages.length > 0 &&
@@ -681,6 +962,7 @@ function containsOnlySupersededOpeningMessages(firstMessages) {
   );
 }
 
+// 业务位置：【前端证据室】isSupersededOpeningMessage：判断 房间消息和对话记录 是否满足当前流程分支的进入条件。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function isSupersededOpeningMessage(message) {
   const text = message?.message_text || "";
   return (
@@ -693,6 +975,7 @@ function isSupersededOpeningMessage(message) {
   );
 }
 
+// 业务位置：【前端证据室】isDossierSpecificOpeningMessage：判断 案件卷宗 是否满足当前流程分支的进入条件。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function isDossierSpecificOpeningMessage(message) {
   const text = message?.message_text || "";
   return (
@@ -703,6 +986,68 @@ function isDossierSpecificOpeningMessage(message) {
   );
 }
 
+// 业务位置：【前端证据室】isCurrentEvidenceClerkMessage：判断 当前可见证据和附件 是否满足当前流程分支的进入条件。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
+function isCurrentEvidenceClerkMessage(message) {
+  return (
+    message?.sender_role === "CUSTOMER_SERVICE" &&
+    message?.message_type === "AGENT_MESSAGE" &&
+    !isSupersededOpeningMessage(message)
+  );
+}
+
+// 业务位置：【前端证据室】fetchModelHealth：读取 模型请求和结构化结果，并依据当前案件、角色和会话权限裁剪成可用输入。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
+async function fetchModelHealth() {
+  if (props.modelHealthLoader) {
+    return props.modelHealthLoader();
+  }
+  const response = await fetch("/agent-api/health/model", {
+    headers: { Accept: "application/json" },
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(`model health check failed: HTTP ${response.status}`);
+  }
+  return response.json();
+}
+
+// 业务位置：【前端证据室】checkModelConnection：围绕 模型请求和结构化结果 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
+async function checkModelConnection() {
+  if (modelHealthInFlight) return modelHealthInFlight;
+  if (modelConnectionState.value !== "connected") {
+    modelConnectionState.value = "checking";
+  }
+  modelHealthInFlight = (async () => {
+    try {
+      const payload = await fetchModelHealth();
+      const status = String(payload?.model_status || payload?.status || "").toUpperCase();
+      modelConnectionState.value =
+        status === "CONNECTED" || status === "UP" ? "connected" : "disconnected";
+    } catch (_failure) {
+      modelConnectionState.value = "disconnected";
+    } finally {
+      modelHealthInFlight = null;
+    }
+  })();
+  return modelHealthInFlight;
+}
+
+// 业务位置：【前端证据室】startModelHealthPolling：启动或关闭与 模型请求和结构化结果 相关的后台任务或订阅，控制运行资源和生命周期。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
+function startModelHealthPolling() {
+  if (modelHealthTimer) return;
+  void checkModelConnection();
+  modelHealthTimer = window.setInterval(() => {
+    void checkModelConnection();
+  }, 30000);
+}
+
+// 业务位置：【前端证据室】stopModelHealthPolling：启动或关闭与 模型请求和结构化结果 相关的后台任务或订阅，控制运行资源和生命周期。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
+function stopModelHealthPolling() {
+  if (!modelHealthTimer) return;
+  window.clearInterval(modelHealthTimer);
+  modelHealthTimer = null;
+}
+
+// 业务位置：【前端证据室】loadCatalogOrEmpty：读取 当前阶段业务数据，并依据当前案件、角色和会话权限裁剪成可用输入。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 async function loadCatalogOrEmpty(actorSnapshot, caseSnapshot) {
   try {
     return await evidenceApi.catalog(actorSnapshot, caseSnapshot);
@@ -714,10 +1059,12 @@ async function loadCatalogOrEmpty(actorSnapshot, caseSnapshot) {
   }
 }
 
+// 业务位置：【前端证据室】isMissingEvidenceCatalog：判断 当前可见证据和附件 是否满足当前流程分支的进入条件。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function isMissingEvidenceCatalog(failure) {
   return ["EVIDENCE_NOT_FOUND", "RESOURCE_NOT_FOUND"].includes(failure?.code);
 }
 
+// 业务位置：【前端证据室】refreshWorkspace：重新加载 页面工作区和业务快照，确保页面和下一次 Agent 调用基于最新案件版本。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 async function refreshWorkspace(options = {}) {
   const generation = options.generation ?? workspaceGeneration;
   const actorSnapshot = { ...effectiveActor.value };
@@ -741,10 +1088,12 @@ async function refreshWorkspace(options = {}) {
   return true;
 }
 
+// 业务位置：【前端证据室】nextLocalSequence：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function nextLocalSequence() {
   return Math.max(0, ...messages.value.map((message) => message.sequence_no || 0)) + 1;
 }
 
+// 业务位置：【前端证据室】upsertMessage：将 房间消息和对话记录 持久化或合并到案件快照，使 核验提示、补证操作和庭审准备 读取到可追溯版本。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function upsertMessage(message) {
   const existingIndex = messages.value.findIndex((item) => item.id === message.id);
   if (existingIndex >= 0) {
@@ -754,10 +1103,12 @@ function upsertMessage(message) {
   messages.value.push(message);
 }
 
+// 业务位置：【前端证据室】removeMessage：更新 房间消息和对话记录 的消息、缓存或持久记录，避免旧回合数据影响当前处理。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function removeMessage(messageId) {
   messages.value = messages.value.filter((message) => message.id !== messageId);
 }
 
+// 业务位置：【前端证据室】hasAgentReplyAfter：判断 当前阶段业务数据 是否满足当前流程分支的进入条件。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function hasAgentReplyAfter(sequenceNo) {
   return messages.value.some(
     (message) =>
@@ -766,11 +1117,13 @@ function hasAgentReplyAfter(sequenceNo) {
   );
 }
 
+// 业务位置：【前端证据室】delay：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function delay(ms) {
   if (ms <= 0) return Promise.resolve();
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
+// 业务位置：【前端证据室】refreshUntilAgentReply：重新加载 当前阶段业务数据，确保页面和下一次 Agent 调用基于最新案件版本。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 async function refreshUntilAgentReply(afterSequenceNo) {
   await refreshWorkspace();
   if (hasAgentReplyAfter(afterSequenceNo)) return;
@@ -781,6 +1134,7 @@ async function refreshUntilAgentReply(afterSequenceNo) {
   }
 }
 
+// 业务位置：【前端证据室】postMessage：执行 房间消息和对话记录 对应的业务动作，并将结果交给 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 async function postMessage(command) {
   error.value = "";
   agentState.value = "THINKING";
@@ -797,7 +1151,7 @@ async function postMessage(command) {
   };
   messages.value.push(pendingMessage);
   try {
-    const saved = props.messageAction
+    const result = props.messageAction
       ? await props.messageAction(command)
       : await roomApi.postMessage(
           effectiveActor.value,
@@ -805,11 +1159,17 @@ async function postMessage(command) {
           "EVIDENCE",
           command,
         );
-    if (saved) {
+    const descriptor = extractAgentRunDescriptor(result);
+    const saved = descriptor ? resultRoomMessage(result) : result;
+    if (saved && typeof saved === "object") {
       removeMessage(pendingId);
       upsertMessage(saved);
     }
-    if (!props.messageAction) {
+    if (descriptor) {
+      await consumeEvidenceAgentRun(result, {
+        onFinal: () => refreshWorkspace(),
+      });
+    } else if (!props.messageAction) {
       await refreshUntilAgentReply(saved?.sequence_no || pendingMessage.sequence_no);
     }
     agentState.value = "SPEAKING";
@@ -820,6 +1180,7 @@ async function postMessage(command) {
   }
 }
 
+// 业务位置：【前端证据室】startEventStream：启动或关闭与 Agent 流事件 相关的后台任务或订阅，控制运行资源和生命周期。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function startEventStream() {
   if (eventStreamActive) {
     eventAbortController.abort();
@@ -851,6 +1212,7 @@ function startEventStream() {
   });
 }
 
+// 业务位置：【前端证据室】uploadFiles：读取 当前阶段业务数据，并依据当前案件、角色和会话权限裁剪成可用输入。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 async function uploadFiles(event) {
   const files = [...(event.target.files || [])];
   if (!files.length) return;
@@ -866,11 +1228,10 @@ async function uploadFiles(event) {
           : "OTHER",
         sourceType: evidenceSourceType.value,
         visibility: "PRIVATE",
-        modelProcessingAuthorized: modelProcessingAuthorized.value,
+        modelProcessingAuthorized: true,
       });
     }
     await refreshWorkspace();
-    modelProcessingAuthorized.value = false;
     agentState.value = "LISTENING";
   } catch (failure) {
     error.value = failure.message;
@@ -881,6 +1242,7 @@ async function uploadFiles(event) {
   }
 }
 
+// 业务位置：【前端证据室】submitPendingBatch：执行 当前阶段业务数据 对应的业务动作，并将结果交给 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 async function submitPendingBatch() {
   if (!pendingItems.value.length || submittingBatch.value) return;
   submittingBatch.value = true;
@@ -897,12 +1259,20 @@ async function submitPendingBatch() {
       },
       newIdempotencyKey("evidence-batch"),
     );
-    if (result?.room_message) {
-      upsertMessage(result.room_message);
+    const descriptor = extractAgentRunDescriptor(result);
+    const roomMessage = resultRoomMessage(result);
+    if (roomMessage && typeof roomMessage === "object") {
+      upsertMessage(roomMessage);
     }
-    await refreshUntilAgentReply(
-      result?.room_message?.sequence_no || nextLocalSequence() - 1,
-    );
+    if (descriptor) {
+      await consumeEvidenceAgentRun(result, {
+        onFinal: () => refreshWorkspace(),
+      });
+    } else {
+      await refreshUntilAgentReply(
+        roomMessage?.sequence_no || nextLocalSequence() - 1,
+      );
+    }
     agentState.value = "SPEAKING";
   } catch (failure) {
     error.value = failure.message;
@@ -912,6 +1282,7 @@ async function submitPendingBatch() {
   }
 }
 
+// 业务位置：【前端证据室】deletePendingEvidence：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 async function deletePendingEvidence(item) {
   const id = evidenceId(item);
   if (!id || deletingEvidenceIds.value.has(id)) return;
@@ -930,6 +1301,7 @@ async function deletePendingEvidence(item) {
   }
 }
 
+// 业务位置：【前端证据室】completeEvidence：执行 当前可见证据和附件 对应的业务动作，并将结果交给 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 async function completeEvidence(event) {
   if (!canCompleteEvidenceLocally.value) {
     evidenceGateError.value = "发起争议方需先正式提交至少 1 份相关证据，当前证据栏为空，暂不能进入下一步。";
@@ -954,6 +1326,7 @@ async function completeEvidence(event) {
   }
 }
 
+// 业务位置：【前端证据室】mergeCompletionResult：将 阶段处理结果或草案 持久化或合并到案件快照，使 核验提示、补证操作和庭审准备 读取到可追溯版本。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function mergeCompletionResult(previous, result) {
   const sealed = result.sealed ?? result.all_parties_completed ?? false;
   const completedRole = result.completed_role || result.completedRole;
@@ -975,17 +1348,28 @@ function mergeCompletionResult(previous, result) {
   return next;
 }
 
+// 业务位置：【前端证据室】dismissEvidenceGate：切换与 当前可见证据和附件 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function dismissEvidenceGate() {
   evidenceGateError.value = "";
   agentState.value = "LISTENING";
   closeModal("gate");
 }
 
+// 业务位置：【前端证据室】dismissStreamError：切换与 Agent 流事件 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
+function dismissStreamError() {
+  const previous = streamError.value;
+  streamError.value = "";
+  if (error.value === previous) error.value = "";
+  if (agentState.value === "ERROR") agentState.value = "LISTENING";
+}
+
+// 业务位置：【前端证据室】enterHearing：切换与 庭审轮次和法官发言 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function enterHearing() {
   return router.push(`/disputes/${caseId.value}/hearing`);
 }
 
 onMounted(async () => {
+  startModelHealthPolling();
   await load();
   if (
     props.eventStreamer ||
@@ -997,13 +1381,16 @@ onMounted(async () => {
 });
 watch(role, async (nextRole, previousRole) => {
   if (!previousRole || nextRole === previousRole) return;
+  clearAgentStreams({ caseId: caseId.value, roomType: "EVIDENCE" });
   workspaceGeneration += 1;
   const generation = workspaceGeneration;
   error.value = "";
+  streamError.value = "";
   agentState.value = "THINKING";
   catalog.value = null;
   completion.value = null;
   selectedEvidence.value = null;
+  selectedEvidenceMode.value = "evidence";
   expandedEvidenceGroup.value = null;
   evidenceGateError.value = "";
   resetModalController();
@@ -1013,6 +1400,9 @@ watch(role, async (nextRole, previousRole) => {
   }
   try {
     await refreshWorkspace({ generation, ensureOpening: props.initialMessages === null });
+    if (shouldDiscoverActiveEvidenceRuns.value) {
+      await resumeActiveEvidenceRuns();
+    }
     agentState.value = "LISTENING";
   } catch (failure) {
     if (generation !== workspaceGeneration) return;
@@ -1022,6 +1412,8 @@ watch(role, async (nextRole, previousRole) => {
 });
 onBeforeUnmount(() => {
   eventAbortController.abort();
+  clearAgentStreams({ caseId: caseId.value, roomType: "EVIDENCE" });
+  stopModelHealthPolling();
   resetModalController();
 });
 </script>
@@ -1030,8 +1422,11 @@ onBeforeUnmount(() => {
   <RoomShell
     eyebrow="EVIDENCE GARDEN"
     title="证据书记官室"
+    subtitle="证据核验"
+    subtitle-description="请围绕待核验事实提交材料，证据书记官会说明关联性、完整性和人工复核要求。"
     :case-id="caseId"
     :connection-state="connectionState"
+    :show-boundary="false"
   >
     <template #clock>
       <div data-evidence-countdown>
@@ -1058,17 +1453,29 @@ onBeforeUnmount(() => {
 
     <div class="evidence-room" data-evidence-room-layout>
       <section class="evidence-room__conversation" data-evidence-chat-panel>
-        <div class="evidence-room__case-note">
-          <span>书记官正在核对</span>
-          <h2>围绕接待室收敛的案情补充证据</h2>
-          <p>
-            发起争议方须至少正式提交 1 份相关证据；另一方可提交材料，或等待举证时效结束。
-          </p>
+        <div
+          class="evidence-room__case-note"
+          :data-status="evidenceWorkStatusCopy.tone"
+          data-evidence-work-status
+        >
+          <i class="evidence-room__status-orb" aria-hidden="true" />
+          <div class="evidence-room__status-copy">
+            <span>{{ evidenceWorkStatusCopy.eyebrow }}</span>
+            <h2>{{ evidenceWorkStatusCopy.title }}</h2>
+            <p>{{ evidenceWorkStatusCopy.description }}</p>
+          </div>
+          <div class="evidence-room__status-meta">
+            <small :data-model-state="evidenceStreamingRuns.length ? 'connected' : modelConnectionState">
+              {{ modelConnectionLabel }}
+            </small>
+          </div>
         </div>
         <div class="evidence-room__conversation-frame">
           <ConversationStream
             :messages="displayedMessages"
-            :disabled="uploading || submittingBatch || completing"
+            :streaming-runs="evidenceStreamingRuns"
+            :disabled="evidenceComposerDisabled"
+            :empty-text="evidenceConversationEmptyText"
             agent-label="证据书记官"
             placeholder="告诉书记官这份证据从哪里来、形成于何时、能证明什么…"
             @submit="postMessage"
@@ -1081,39 +1488,35 @@ onBeforeUnmount(() => {
           <div>
             <span class="evidence-kicker">EVIDENCE BOARD</span>
             <h2>已提交证据</h2>
-            <p>点击任意证据卡片查看解析文本、核验反馈和置信度。</p>
+            <p>点击任意证据卡片查看核验结果与人工复核信息。</p>
           </div>
           <span class="evidence-board__badge">
             {{ isMerchant ? "商家证据方" : "用户证据方" }}
           </span>
         </header>
 
-        <section class="evidence-uploader">
-          <div class="evidence-uploader__illustration" aria-hidden="true">
-            <span>📎</span><span>🖼️</span><span>🎞️</span>
-          </div>
-          <div>
-            <span class="evidence-kicker">MULTIMODAL DESK</span>
-            <strong>上传图片、视频、Markdown 或文档</strong>
-            <small>OCR/解析后会进入证据库，并由书记官给出核验建议。</small>
-          </div>
-          <label class="evidence-uploader__button">
-            {{ uploading ? "核验中…" : "选择材料" }}
-            <input
-              ref="fileInput"
-              type="file"
-              multiple
-              :disabled="uploading"
-              @change="uploadFiles"
-            />
-          </label>
-          <label class="evidence-uploader__model-consent">
-            <input v-model="modelProcessingAuthorized" type="checkbox" />
-            <span>允许证据书记官将本次原图发送给多模态模型，仅用于本案核验</span>
-          </label>
-        </section>
+        <div class="evidence-board__cards" data-evidence-list-scroll>
+          <section class="evidence-uploader">
+            <div class="evidence-uploader__illustration" aria-hidden="true">
+              <span>📎</span><span>🖼️</span><span>🎞️</span>
+            </div>
+            <div>
+              <span class="evidence-kicker">MULTIMODAL DESK</span>
+              <strong>上传图片、视频、Markdown 或文档</strong>
+              <small>解析完成后先进入待提交区，确认后再交给书记官。</small>
+            </div>
+            <label class="evidence-uploader__button">
+              {{ uploading ? "核验中…" : "选择材料" }}
+              <input
+                ref="fileInput"
+                type="file"
+                multiple
+                :disabled="uploading || evidenceStreamingRuns.length > 0"
+                @change="uploadFiles"
+              />
+            </label>
+          </section>
 
-        <div class="evidence-board__list" data-evidence-list-scroll>
           <section class="evidence-library evidence-library--pending" data-evidence-pending>
             <header>
               <div>
@@ -1122,74 +1525,57 @@ onBeforeUnmount(() => {
               </div>
               <span class="privacy-seal">{{ pendingItems.length }} 个待提交</span>
             </header>
-            <p v-if="!pendingItems.length" class="evidence-empty">选择材料后，会先进入这里；提交前可以删除。</p>
-            <article
-              v-for="item in pendingItems"
-              :key="evidenceId(item)"
-              class="evidence-card evidence-card--pending"
-              data-evidence-card
-              tabindex="0"
-              @click="openEvidenceDetail(item, $event)"
-              @keydown.enter.self.prevent="openEvidenceDetail(item, $event)"
-              @keydown.space.self.prevent="openEvidenceDetail(item, $event)"
-            >
-              <button
-                type="button"
-                class="evidence-card__remove"
-                data-delete-pending-evidence
-                :disabled="isDeletingEvidence(item)"
-                @click.stop="deletePendingEvidence(item)"
+            <div class="evidence-card-strip" data-evidence-horizontal-strip>
+              <p v-if="!pendingItems.length" class="evidence-empty">选择材料后会在这里生成预览。</p>
+              <article
+                v-for="item in pendingItems"
+                :key="evidenceId(item)"
+                class="evidence-card evidence-card--compact evidence-card--pending"
+                data-evidence-card
+                tabindex="0"
+                @click="openEvidenceDetail(item, $event)"
+                @keydown.enter.self.prevent="openEvidenceDetail(item, $event)"
+                @keydown.space.self.prevent="openEvidenceDetail(item, $event)"
               >
-                ×
-              </button>
-              <span
-                class="evidence-card__icon evidence-file-icon"
-                :class="evidenceFileIconStatusClass(item)"
-                :data-file-kind="evidenceFileIcon(item).kind"
-                :aria-label="evidenceFileIcon(item).label"
-              >
-                <span class="evidence-file-icon__body" aria-hidden="true">
-                  <span class="evidence-file-icon__landscape"></span>
-                  <span class="evidence-file-icon__play"></span>
-                  <span class="evidence-file-icon__lines"></span>
+                <button
+                  type="button"
+                  class="evidence-card__remove"
+                  data-delete-pending-evidence
+                  :disabled="isDeletingEvidence(item)"
+                  @click.stop="deletePendingEvidence(item)"
+                >×</button>
+                <span class="evidence-card__preview">
+                  <span
+                    class="evidence-card__icon evidence-file-icon"
+                    :class="evidenceFileIconStatusClass(item)"
+                    :data-file-kind="evidenceFileIcon(item).kind"
+                    :aria-label="evidenceFileIcon(item).label"
+                  >
+                    <span class="evidence-file-icon__body" aria-hidden="true">
+                      <span class="evidence-file-icon__landscape"></span>
+                      <span class="evidence-file-icon__play"></span>
+                      <span class="evidence-file-icon__lines"></span>
+                    </span>
+                    <span class="evidence-file-icon__badge" data-file-badge>{{ evidenceFileIcon(item).badge }}</span>
+                  </span>
                 </span>
-                <span class="evidence-file-icon__badge" data-file-badge>
-                  {{ evidenceFileIcon(item).badge }}
+                <span class="evidence-card__main">
+                  <strong>{{ evidenceTypeLabels[item.evidence_type] || item.evidence_type }}</strong>
+                  <small class="evidence-card__filename" data-evidence-filename :title="evidenceOriginalFilename(item) || evidenceId(item)">
+                    {{ evidenceOriginalFilename(item) || evidenceId(item) }}
+                  </small>
                 </span>
-              </span>
-              <span class="evidence-card__main">
-                <strong>{{ evidenceTypeLabels[item.evidence_type] || item.evidence_type }}</strong>
-                <small
-                  class="evidence-card__filename"
-                  data-evidence-filename
-                  :title="evidenceOriginalFilename(item) || evidenceId(item)"
-                >
-                  {{ evidenceOriginalFilename(item) || evidenceId(item) }}
-                </small>
-              </span>
-              <span class="evidence-card__meta" data-evidence-status-row>
-                <em class="evidence-card__status">
-                  {{ evidenceSubmissionStatusLabel(item) }}
-                </em>
-                <span class="verification-pill" data-verification="PENDING">待提交</span>
-                <span class="confidence-pill" data-confidence="unknown">书记官尚未核验</span>
-              </span>
-              <span
-                v-if="evidenceFeedback(item)"
-                class="evidence-card__description"
-                data-evidence-description
-              >
-                {{ evidenceFeedback(item) }}
-              </span>
-            </article>
+                <span class="evidence-card__labels" data-evidence-status-row>
+                  <em>{{ evidenceOwnerLabel(item) }}</em>
+                  <em>待提交</em>
+                </span>
+              </article>
+            </div>
             <div v-if="pendingItems.length" class="evidence-library__actions">
-              <button type="button" data-expand-pending-evidence @click="openEvidenceGroup('pending', $event)">
-                展开
-              </button>
               <button
                 type="button"
                 data-submit-evidence-batch
-                :disabled="submittingBatch"
+                :disabled="submittingBatch || evidenceStreamingRuns.length > 0"
                 @click="submitPendingBatch"
               >
                 {{ submittingBatch ? "提交中…" : "提交本批给书记官" }}
@@ -1201,81 +1587,50 @@ onBeforeUnmount(() => {
             <header>
               <div>
                 <span class="evidence-kicker">MY ORIGINALS</span>
-                <h3>我的原件匣</h3>
+                <h3>已提交证据</h3>
               </div>
-              <span class="privacy-seal">仅当前一方可见</span>
+              <span class="privacy-seal">{{ submittedItems.length }} 项</span>
             </header>
-            <p v-if="!submittedItems.length" class="evidence-empty">正式提交后，材料会锁定进入我的原件匣。</p>
-            <button
-              v-for="item in submittedItems"
-              :key="evidenceId(item)"
-              type="button"
-              class="evidence-card"
-              data-evidence-card
-              @click="openEvidenceDetail(item, $event)"
-            >
-              <span
-                class="evidence-card__icon evidence-file-icon"
-                :class="evidenceFileIconStatusClass(item)"
-                :data-file-kind="evidenceFileIcon(item).kind"
-                :aria-label="evidenceFileIcon(item).label"
+            <div class="evidence-card-strip" data-evidence-horizontal-strip>
+              <p v-if="!submittedItems.length" class="evidence-empty">暂无已提交证据。</p>
+              <button
+                v-for="item in submittedItems"
+                :key="evidenceId(item)"
+                type="button"
+                class="evidence-card evidence-card--compact evidence-card--submitted"
+                data-evidence-card
+                @click="openEvidenceDetail(item, $event)"
               >
-                <span class="evidence-file-icon__body" aria-hidden="true">
-                  <span class="evidence-file-icon__landscape"></span>
-                  <span class="evidence-file-icon__play"></span>
-                  <span class="evidence-file-icon__lines"></span>
+                <span class="evidence-card__preview">
+                  <span
+                    class="evidence-card__icon evidence-file-icon"
+                    :class="evidenceFileIconStatusClass(item)"
+                    :data-file-kind="evidenceFileIcon(item).kind"
+                    :aria-label="evidenceFileIcon(item).label"
+                  >
+                    <span class="evidence-file-icon__body" aria-hidden="true">
+                      <span class="evidence-file-icon__landscape"></span>
+                      <span class="evidence-file-icon__play"></span>
+                      <span class="evidence-file-icon__lines"></span>
+                    </span>
+                    <span class="evidence-file-icon__badge" data-file-badge>{{ evidenceFileIcon(item).badge }}</span>
+                  </span>
                 </span>
-                <span class="evidence-file-icon__badge" data-file-badge>
-                  {{ evidenceFileIcon(item).badge }}
+                <span class="evidence-card__main">
+                  <strong>{{ evidenceTypeLabels[item.evidence_type] || item.evidence_type }}</strong>
+                  <small class="evidence-card__filename" data-evidence-filename :title="evidenceOriginalFilename(item) || evidenceId(item)">
+                    {{ evidenceOriginalFilename(item) || evidenceId(item) }}
+                  </small>
                 </span>
-                <span class="evidence-file-icon__lock" aria-hidden="true"></span>
-              </span>
-              <span class="evidence-card__main">
-                <strong>{{ evidenceTypeLabels[item.evidence_type] || item.evidence_type }}</strong>
-                <small
-                  class="evidence-card__filename"
-                  data-evidence-filename
-                  :title="evidenceOriginalFilename(item) || evidenceId(item)"
-                >
-                  {{ evidenceOriginalFilename(item) || evidenceId(item) }}
-                </small>
-              </span>
-              <span class="evidence-card__meta" data-evidence-status-row>
-                <em class="evidence-card__status">
-                  {{ evidenceSubmissionStatusLabel(item) }}
-                </em>
-                <em class="evidence-card__status">{{ evidenceOwnerLabel(item) }}</em>
-                <span
-                  class="verification-pill"
-                  :data-verification="evidenceVerificationStatus(item)"
-                >
-                  {{ statusLabels[evidenceVerificationStatus(item)] || evidenceVerificationStatus(item) || "待核验" }}
+                <span class="evidence-card__labels" data-evidence-status-row>
+                  <em>{{ evidenceOwnerLabel(item) }}</em>
+                  <em>待人工复核</em>
                 </span>
-                <span
-                  class="confidence-pill"
-                  :data-confidence="evidenceConfidenceTone(item)"
-                  data-evidence-confidence
-                >
-                  核验把握 {{ evidenceConfidenceCopy(item) }}
-                </span>
-              </span>
-              <span
-                v-if="evidenceFeedback(item)"
-                class="evidence-card__description"
-                data-evidence-description
-              >
-                {{ evidenceFeedback(item) }}
-              </span>
-            </button>
-            <div v-if="submittedItems.length" class="evidence-library__actions evidence-library__actions--right">
-              <button type="button" data-expand-submitted-evidence @click="openEvidenceGroup('submitted', $event)">
-                展开原件匣
               </button>
             </div>
           </section>
 
           <section
-            v-if="humanReviewItems.length"
             class="evidence-library evidence-library--human-review"
             data-human-review-queue
           >
@@ -1286,64 +1641,43 @@ onBeforeUnmount(() => {
               </div>
               <span class="human-review-seal">{{ humanReviewItems.length }} 项待核查</span>
             </header>
-            <p class="human-review-intro">
-              模型已完成初筛，但以下判断仍需要审核员结合原件和业务记录确认。
-            </p>
-            <div class="human-review-list" data-human-review-list>
-              <article
+            <div class="human-review-list evidence-card-strip" data-human-review-list data-evidence-vertical-strip>
+              <p v-if="!humanReviewItems.length" class="evidence-empty">当前没有需要人工复核的证据。</p>
+              <button
                 v-for="item in humanReviewItems"
                 :key="`human-review-${evidenceId(item)}`"
-                class="human-review-card"
+                type="button"
+                class="human-review-card evidence-card evidence-card--compact"
                 data-human-review-card
+                data-evidence-card
+                @click="openEvidenceDetail(item, $event, 'human-review')"
               >
-                <header class="human-review-card__header">
-                  <div>
-                    <strong :title="evidenceOriginalFilename(item) || evidenceId(item)">
-                      {{ evidenceOriginalFilename(item) || evidenceId(item) }}
-                    </strong>
-                    <small>{{ evidenceTypeLabels[evidenceField(item, 'evidence_type', 'evidenceType', '')] || evidenceField(item, 'evidence_type', 'evidenceType', '其他材料') }}</small>
-                  </div>
-                  <span>待人工审核</span>
-                </header>
-                <div class="human-review-metrics" data-evidence-assessment-metrics>
-                  <span><small>真实性</small><strong>{{ evidenceMetricCopy(item, "authenticity_score", "authenticityScore") }}</strong></span>
-                  <span><small>关联性</small><strong>{{ evidenceMetricCopy(item, "relevance_score", "relevanceScore") }}</strong></span>
-                  <span><small>完整性</small><strong>{{ evidenceMetricCopy(item, "completeness_score", "completenessScore") }}</strong></span>
-                  <span><small>核验把握</small><strong>{{ evidenceConfidenceScore(item) === null ? "待评估" : `${evidenceConfidenceScore(item)}%` }}</strong></span>
-                </div>
-                <div class="human-review-card__body">
-                  <section v-if="evidenceInspectedModalities(item).length">
-                    <strong>模型已检查</strong>
-                    <p>{{ evidenceInspectedModalities(item).join("、") }}</p>
-                  </section>
-                  <section>
-                    <strong>触发原因</strong>
-                    <ul v-if="evidenceHumanReviewReasons(item).length">
-                      <li v-for="reason in evidenceHumanReviewReasons(item)" :key="reason">
-                        {{ humanReviewReasonLabel(reason) }}
-                      </li>
-                    </ul>
-                    <p v-else>模型将该材料标记为需要人工审核。</p>
-                  </section>
-                  <section>
-                    <strong>模型限制</strong>
-                    <ul v-if="evidenceLimitations(item).length">
-                      <li v-for="limitation in evidenceLimitations(item)" :key="limitation">{{ limitation }}</li>
-                    </ul>
-                    <p v-else>暂无具体限制说明，请以原始材料为准。</p>
-                  </section>
-                  <section>
-                    <strong>审核指引</strong>
-                    <ul v-if="evidenceHumanReviewInstructions(item).length">
-                      <li v-for="instruction in evidenceHumanReviewInstructions(item)" :key="instruction">{{ instruction }}</li>
-                    </ul>
-                    <p v-else>请结合原件、元数据和相关业务记录进行交叉核验。</p>
-                  </section>
-                </div>
-              </article>
+                <span class="evidence-card__preview">
+                  <span
+                    class="evidence-card__icon evidence-file-icon"
+                    :class="evidenceFileIconStatusClass(item)"
+                    :data-file-kind="evidenceFileIcon(item).kind"
+                    :aria-label="evidenceFileIcon(item).label"
+                  >
+                    <span class="evidence-file-icon__body" aria-hidden="true">
+                      <span class="evidence-file-icon__landscape"></span>
+                      <span class="evidence-file-icon__play"></span>
+                      <span class="evidence-file-icon__lines"></span>
+                    </span>
+                    <span class="evidence-file-icon__badge" data-file-badge>{{ evidenceFileIcon(item).badge }}</span>
+                  </span>
+                </span>
+                <span class="evidence-card__main">
+                  <strong :title="evidenceOriginalFilename(item) || evidenceId(item)">{{ evidenceOriginalFilename(item) || evidenceId(item) }}</strong>
+                  <small>点击查看人工审核要求</small>
+                </span>
+                <span class="evidence-card__labels">
+                  <em>{{ evidenceOwnerLabel(item) }}</em>
+                  <em>人工审核任务</em>
+                </span>
+              </button>
             </div>
           </section>
-
         </div>
 
         <footer class="evidence-footer">
@@ -1371,7 +1705,7 @@ onBeforeUnmount(() => {
             v-else
             type="button"
             data-complete-evidence
-            :disabled="completing"
+            :disabled="completing || evidenceStreamingRuns.length > 0"
             @click="completeEvidence"
           >
             {{ completing ? "正在封入证据袋…" : "我方举证完成" }}
@@ -1380,6 +1714,11 @@ onBeforeUnmount(() => {
         <p v-if="error" class="evidence-error" role="alert">{{ error }}</p>
       </section>
     </div>
+
+    <AgentStreamErrorDialog
+      :message="streamError"
+      @dismiss="dismissStreamError"
+    />
 
     <div
       v-if="evidenceGateError"
@@ -1420,51 +1759,73 @@ onBeforeUnmount(() => {
       :aria-modal="isTopModal('detail') ? 'true' : 'false'"
       :aria-hidden="isModalCovered('detail') ? 'true' : undefined"
       :inert="isModalCovered('detail') ? true : undefined"
-      aria-label="证据详情"
+      :aria-label="selectedEvidenceMode === 'human-review' ? '人工审核详情' : '证据详情'"
       @click.self="closeEvidenceDetail"
     >
-      <section class="evidence-modal__panel">
-        <header>
-          <div>
-            <span class="evidence-kicker">EVIDENCE DETAIL</span>
-            <h2>{{ evidenceId(selectedEvidence) }}</h2>
-            <p>{{ evidenceTypeLabels[selectedEvidence.evidence_type] || selectedEvidence.evidence_type }}</p>
+      <section
+        class="evidence-modal__panel evidence-modal__panel--detail"
+        :class="{ 'evidence-modal__panel--human-review': selectedEvidenceMode === 'human-review' }"
+        :data-detail-mode="selectedEvidenceMode"
+      >
+        <header class="evidence-modal__detail-header">
+          <div class="evidence-modal__identity">
+            <span
+              class="evidence-card__icon evidence-file-icon evidence-file-icon--large"
+              :class="evidenceFileIconStatusClass(selectedEvidence)"
+              :data-file-kind="evidenceFileIcon(selectedEvidence).kind"
+              :aria-label="evidenceFileIcon(selectedEvidence).label"
+            >
+              <span class="evidence-file-icon__body" aria-hidden="true">
+                <span class="evidence-file-icon__landscape"></span>
+                <span class="evidence-file-icon__play"></span>
+                <span class="evidence-file-icon__lines"></span>
+              </span>
+              <span class="evidence-file-icon__badge">{{ evidenceFileIcon(selectedEvidence).badge }}</span>
+            </span>
+            <div>
+              <span class="evidence-kicker">{{ selectedEvidenceMode === "human-review" ? "人工审核详情" : "证据详情" }}</span>
+              <h2>{{ evidenceOriginalFilename(selectedEvidence) || evidenceId(selectedEvidence) }}</h2>
+              <p>{{ evidenceTypeLabels[selectedEvidence.evidence_type] || selectedEvidence.evidence_type || "其他材料" }}</p>
+            </div>
           </div>
           <button
             type="button"
+            class="evidence-modal__close"
             data-close-evidence-modal
             data-modal-initial-focus
+            :aria-label="selectedEvidenceMode === 'human-review' ? '关闭人工审核详情' : '关闭证据详情'"
             @click="closeEvidenceDetail"
           >
-            关闭
+            ×
           </button>
         </header>
         <div class="evidence-modal__facts">
-          <span>提交方：{{ evidenceOwnerLabel(selectedEvidence) }}</span>
-          <span>核验状态：{{ statusLabels[evidenceVerificationStatus(selectedEvidence)] || evidenceVerificationStatus(selectedEvidence) || "待核验" }}</span>
-          <span>核验把握：{{ evidenceConfidenceCopy(selectedEvidence) }}</span>
-          <span v-if="evidenceOriginalFilename(selectedEvidence)">
-            原始文件：{{ evidenceOriginalFilename(selectedEvidence) }}
-          </span>
+          <span><small>提交方</small><strong>{{ evidenceOwnerLabel(selectedEvidence) }}</strong></span>
+          <span><small>核验状态</small><strong>{{ statusLabels[evidenceVerificationStatus(selectedEvidence)] || evidenceVerificationStatus(selectedEvidence) || "待核验" }}</strong></span>
+          <span><small>核验把握</small><strong>{{ evidenceConfidenceCopy(selectedEvidence) }}</strong></span>
+          <span><small>提交状态</small><strong>{{ evidenceSubmissionStatusLabel(selectedEvidence) }}</strong></span>
         </div>
         <section class="evidence-modal__assessment" data-evidence-detail-assessment>
-          <strong>多维核验结果</strong>
+          <div class="evidence-modal__section-title">
+            <strong>多维核验结果</strong>
+            <span>AI 初步核验</span>
+          </div>
           <div class="human-review-metrics">
             <span><small>真实性</small><strong>{{ evidenceMetricCopy(selectedEvidence, "authenticity_score", "authenticityScore") }}</strong></span>
             <span><small>关联性</small><strong>{{ evidenceMetricCopy(selectedEvidence, "relevance_score", "relevanceScore") }}</strong></span>
             <span><small>完整性</small><strong>{{ evidenceMetricCopy(selectedEvidence, "completeness_score", "completenessScore") }}</strong></span>
             <span><small>核验把握</small><strong>{{ evidenceConfidenceScore(selectedEvidence) === null ? "待评估" : `${evidenceConfidenceScore(selectedEvidence)}%` }}</strong></span>
           </div>
-          <p v-if="evidenceInspectedModalities(selectedEvidence).length">
-            已检查模态：{{ evidenceInspectedModalities(selectedEvidence).join("、") }}
-          </p>
         </section>
         <article
-          v-if="evidenceRequiresHumanReview(selectedEvidence)"
+          v-if="selectedEvidenceMode === 'human-review' && evidenceRequiresHumanReview(selectedEvidence)"
           class="evidence-modal__human-review"
           data-evidence-detail-human-review
         >
-          <strong>待人工审核</strong>
+          <div class="evidence-modal__section-title">
+            <strong>待人工审核</strong>
+            <span>平台复核</span>
+          </div>
           <div class="evidence-modal__review-scroll">
             <section>
               <b>触发原因</b>
@@ -1489,25 +1850,27 @@ onBeforeUnmount(() => {
             </section>
           </div>
         </article>
-        <article v-if="evidenceFeedback(selectedEvidence)">
-          <strong>书记官核验反馈</strong>
-          <p>{{ evidenceFeedback(selectedEvidence) }}</p>
+        <article v-if="evidenceFeedback(selectedEvidence)" class="evidence-modal__feedback">
+          <div class="evidence-modal__section-title">
+            <strong>书记官核验反馈</strong>
+            <span>核验说明</span>
+          </div>
+          <p>{{ evidenceFeedbackDisplay(selectedEvidence) }}</p>
         </article>
-        <article v-if="evidenceParsedText(selectedEvidence)">
-          <strong>解析文本 / OCR</strong>
-          <p>{{ evidenceParsedText(selectedEvidence) }}</p>
-        </article>
-        <a
-          v-if="selectedEvidence.content_url"
-          class="evidence-modal__link"
-          :href="selectedEvidence.content_url"
-          :download="evidenceOriginalFilename(selectedEvidence) || evidenceId(selectedEvidence)"
-          data-download-evidence
-          target="_blank"
-          rel="noreferrer"
-        >
-          下载原始材料
-        </a>
+        <footer class="evidence-modal__actions">
+          <span>{{ selectedEvidenceMode === "human-review" ? "该材料需要结合原件与业务记录完成人工确认。" : "AI 核验结果仅供审核参考，请结合原始材料判断。" }}</span>
+          <a
+            v-if="selectedEvidence.content_url"
+            class="evidence-modal__link"
+            :href="selectedEvidence.content_url"
+            :download="evidenceOriginalFilename(selectedEvidence) || evidenceId(selectedEvidence)"
+            data-download-evidence
+            target="_blank"
+            rel="noreferrer"
+          >
+            下载原始材料
+          </a>
+        </footer>
       </section>
     </div>
 
@@ -1621,10 +1984,21 @@ onBeforeUnmount(() => {
 }
 
 .evidence-room__case-note {
-  padding: 16px;
-  margin-bottom: 14px;
-  background: linear-gradient(135deg, #eef8ff, #fff5df);
-  border-radius: 20px;
+  box-sizing: border-box;
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  height: 92px;
+  padding: 15px 16px 18px;
+  margin: 0 0 14px;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 20% 15%, rgba(255, 255, 255, .95), transparent 34%),
+    linear-gradient(135deg, #f8fbff, #f4f7ff);
+  border: 1px solid #dce8f4;
+  border-radius: 18px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .92);
 }
 
 .evidence-room__case-note span,
@@ -1635,16 +2009,130 @@ onBeforeUnmount(() => {
   letter-spacing: .16em;
 }
 
+.evidence-room__status-orb {
+  position: relative;
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border-radius: 14px;
+  background: linear-gradient(135deg, #8ca2ff, #77dfb7);
+  box-shadow: 0 10px 24px rgba(96, 122, 180, .22);
+}
+
+.evidence-room__status-orb::before,
+.evidence-room__status-orb::after {
+  content: "";
+  position: absolute;
+  border-radius: 999px;
+}
+
+.evidence-room__status-orb::before {
+  width: 11px;
+  height: 11px;
+  background: #fff;
+}
+
+.evidence-room__status-orb::after {
+  inset: -5px;
+  border: 1px solid rgba(126, 151, 232, .38);
+  animation: evidence-status-pulse 1.55s ease-out infinite;
+}
+
+.evidence-room__status-copy {
+  min-width: 0;
+}
+
 .evidence-room__case-note h2 {
-  margin: 5px 0;
+  margin: 3px 0 2px;
   color: #34435c;
-  font-size: 21px;
+  font-size: 17px;
+  line-height: 1.22;
 }
 
 .evidence-room__case-note p {
+  display: -webkit-box;
   margin: 0;
+  overflow: hidden;
   color: #6f7d92;
-  line-height: 1.6;
+  font-size: 12px;
+  line-height: 1.42;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.evidence-room__status-meta {
+  display: grid;
+  min-width: 96px;
+  justify-items: end;
+  gap: 4px;
+}
+
+.evidence-room__status-meta small {
+  padding: 3px 8px;
+  color: #71809a;
+  background: rgba(255, 255, 255, .72);
+  border: 1px solid #dfe8f4;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.evidence-room__status-meta small[data-model-state="connected"] {
+  color: #2f8569;
+  background: rgba(229, 250, 240, .82);
+  border-color: rgba(106, 211, 169, .48);
+}
+
+.evidence-room__status-meta small[data-model-state="checking"] {
+  color: #6b6f9a;
+  background: rgba(241, 244, 255, .86);
+  border-color: rgba(163, 174, 240, .5);
+}
+
+.evidence-room__status-meta small[data-model-state="disconnected"] {
+  color: #b24b5d;
+  background: rgba(255, 238, 240, .9);
+  border-color: rgba(244, 143, 156, .55);
+}
+
+.evidence-room__case-note[data-status="working"] .evidence-room__status-orb {
+  background: linear-gradient(135deg, #a98cf5, #79b9ff);
+}
+
+.evidence-room__case-note[data-status="streaming"] .evidence-room__status-orb {
+  background: linear-gradient(135deg, #7f8df1, #62c4ee);
+}
+
+.evidence-room__case-note[data-status="ready"] .evidence-room__status-orb {
+  background: linear-gradient(135deg, #64d8a4, #70c7ff);
+}
+
+.evidence-room__case-note[data-status="handoff"] .evidence-room__status-orb {
+  background: linear-gradient(135deg, #74a7ff, #b7c4da);
+}
+
+.evidence-room__case-note[data-status="error"] .evidence-room__status-orb {
+  background: linear-gradient(135deg, #ff7f8d, #ffbd8a);
+}
+
+.evidence-room__case-note[data-status="ready"] .evidence-room__status-orb::after,
+.evidence-room__case-note[data-status="handoff"] .evidence-room__status-orb::after,
+.evidence-room__case-note[data-status="error"] .evidence-room__status-orb::after {
+  animation: none;
+  opacity: .35;
+}
+
+@keyframes evidence-status-pulse {
+  0% {
+    opacity: .85;
+    transform: scale(.86);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.28);
+  }
 }
 
 .evidence-room__conversation-frame {
@@ -1808,27 +2296,6 @@ onBeforeUnmount(() => {
   width: 1px;
   height: 1px;
   opacity: 0;
-}
-
-.evidence-uploader__model-consent {
-  grid-column: 2 / -1;
-  display: flex;
-  min-width: 0;
-  gap: 7px;
-  align-items: flex-start;
-  color: #66758b;
-  font-size: 10px;
-  line-height: 1.35;
-  cursor: pointer;
-}
-
-.evidence-uploader__model-consent input {
-  flex: 0 0 auto;
-  margin: 1px 0 0;
-}
-
-.evidence-uploader__model-consent span {
-  overflow-wrap: anywhere;
 }
 
 .evidence-board__list {
@@ -2660,13 +3127,345 @@ onBeforeUnmount(() => {
   color: #33435c;
 }
 
+.evidence-modal__panel--detail {
+  width: min(760px, 100%);
+  max-height: min(680px, calc(100vh - 48px));
+  gap: 10px;
+  padding: 18px;
+  background: #f7f9fc;
+  border-color: #dfe7f1;
+  border-radius: 24px;
+}
+
+.evidence-modal__detail-header {
+  align-items: center;
+  padding: 12px 14px;
+  background: linear-gradient(135deg, #ffffff 20%, #f0f6ff 100%);
+  border: 1px solid #e2eaf4;
+  border-radius: 18px;
+}
+
+.evidence-modal__panel--human-review .evidence-modal__detail-header {
+  background: linear-gradient(135deg, #fffdfb 15%, #fff2e7 100%);
+  border-color: #efd7c5;
+}
+
+.evidence-modal__panel--human-review .evidence-modal__identity .evidence-kicker {
+  color: #a76843;
+}
+
+.evidence-modal__panel--human-review .evidence-modal__section-title > span {
+  color: #9b5f3c;
+  background: #fff0e4;
+}
+
+.evidence-modal__panel--human-review .evidence-modal__section-title > strong {
+  color: #684633;
+}
+
+.evidence-modal__identity {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.evidence-modal__identity > div {
+  min-width: 0;
+}
+
+.evidence-modal__identity .evidence-file-icon--large {
+  flex: 0 0 auto;
+  margin: 0;
+}
+
+.evidence-modal__identity h2 {
+  margin: 3px 0 2px;
+  font-size: 19px;
+  line-height: 1.3;
+}
+
+.evidence-modal__identity p {
+  color: #8794a7;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.evidence-modal__panel .evidence-modal__close {
+  width: 36px;
+  min-width: 36px;
+  min-height: 36px;
+  padding: 0;
+  color: #75849a;
+  background: #edf3f9;
+  border-radius: 50%;
+  font-size: 22px;
+  font-weight: 500;
+  line-height: 1;
+}
+
+.evidence-modal__panel .evidence-modal__close:hover {
+  color: #40516a;
+  background: #e3ebf5;
+}
+
+.evidence-modal__panel--detail .evidence-modal__facts {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0;
+  padding: 5px;
+  background: #edf2f7;
+  border: 1px solid #e1e9f2;
+  border-radius: 15px;
+}
+
+.evidence-modal__panel--detail .evidence-modal__facts span {
+  display: grid;
+  gap: 5px;
+  padding: 8px 13px;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  white-space: normal;
+}
+
+.evidence-modal__panel--detail .evidence-modal__facts span + span {
+  border-left: 1px solid #d8e1eb;
+}
+
+.evidence-modal__panel--human-review .evidence-modal__facts {
+  background: #f7ede5;
+  border-color: #ead7c8;
+}
+
+.evidence-modal__panel--human-review .evidence-modal__facts span + span {
+  border-left-color: #e3cfc0;
+}
+
+.evidence-modal__facts small {
+  color: #8a98aa;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.evidence-modal__facts strong {
+  overflow: hidden;
+  color: #3e4f68;
+  font-size: 13px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.evidence-modal__panel--detail .evidence-modal__assessment {
+  padding: 14px;
+  background: #fff;
+  border-color: #e2ebf5;
+  border-radius: 15px;
+}
+
+.evidence-modal__panel--human-review .evidence-modal__assessment {
+  background: #fffaf6;
+  border-color: #efd9c9;
+}
+
+.evidence-modal__section-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.evidence-modal__section-title > strong {
+  margin: 0 !important;
+  color: #33445d;
+  font-size: 14px;
+}
+
+.evidence-modal__section-title > span {
+  padding: 4px 8px;
+  color: #6174c8;
+  background: #eef1ff;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.evidence-modal__panel--detail .human-review-metrics > span {
+  padding: 8px;
+  background: #f4f7fb;
+  border: 0;
+  border-radius: 10px;
+}
+
+.evidence-modal__panel--detail .human-review-metrics small {
+  color: #8996a8;
+}
+
+.evidence-modal__panel--detail .human-review-metrics strong {
+  margin: 0;
+  color: #43536b;
+  font-size: 13px;
+}
+
+.evidence-modal__panel--human-review .human-review-metrics > span {
+  background: #f9eee6;
+}
+
+.evidence-modal__panel--human-review .human-review-metrics small {
+  color: #9b7862;
+}
+
+.evidence-modal__panel--human-review .human-review-metrics strong {
+  color: #704b36;
+}
+
+.evidence-modal__panel--detail .evidence-modal__human-review {
+  display: grid;
+  gap: 9px;
+  padding: 14px;
+  border-color: #f0d9c8 !important;
+  background: linear-gradient(135deg, #fffaf5, #fffdfb) !important;
+  border-radius: 15px;
+}
+
+.evidence-modal__panel--detail .evidence-modal__review-scroll {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  max-height: none;
+  gap: 0;
+  padding: 0;
+  overflow: visible;
+  scrollbar-gutter: auto;
+}
+
+.evidence-modal__panel--detail .evidence-modal__review-scroll section {
+  padding: 2px 14px 0;
+}
+
+.evidence-modal__panel--detail .evidence-modal__review-scroll section:first-child {
+  padding-left: 0;
+}
+
+.evidence-modal__panel--detail .evidence-modal__review-scroll section:last-child {
+  padding-right: 0;
+}
+
+.evidence-modal__panel--detail .evidence-modal__review-scroll section + section {
+  border-left: 1px solid #ecdccc;
+}
+
+.evidence-modal__panel--detail .evidence-modal__human-review ul {
+  margin-bottom: 0;
+  padding-left: 16px;
+  color: #6f625b;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.evidence-modal__feedback {
+  position: relative;
+  display: grid;
+  gap: 9px;
+  padding: 14px 15px 14px 18px !important;
+  overflow: hidden;
+  background: linear-gradient(135deg, #fff, #f8fbff) !important;
+  border-color: #e2ebf5 !important;
+  border-radius: 15px !important;
+}
+
+.evidence-modal__feedback::before {
+  position: absolute;
+  inset: 12px auto 12px 0;
+  width: 3px;
+  content: "";
+  background: #8c9de3;
+  border-radius: 0 999px 999px 0;
+}
+
+.evidence-modal__feedback p {
+  color: #5f6f86;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.evidence-modal__panel--human-review .evidence-modal__feedback {
+  background: linear-gradient(135deg, #f8ede4, #f5e5d9) !important;
+  border-color: #e8cbb7 !important;
+}
+
+.evidence-modal__panel--human-review .evidence-modal__feedback::before {
+  background: #d28b5e;
+}
+
+.evidence-modal__panel--human-review .evidence-modal__feedback p {
+  color: #6d4d3a;
+}
+
+.evidence-modal__actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 2px 2px 0;
+}
+
+.evidence-modal__actions > span {
+  min-width: 0;
+  color: #8a97a8;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.evidence-modal__actions .evidence-modal__link {
+  flex: 0 0 auto;
+  min-height: 40px;
+  padding-inline: 16px;
+  color: #fff;
+  background: linear-gradient(135deg, #7886df, #6070cc);
+  border-radius: 12px;
+  box-shadow: 0 8px 18px #6676cf2b;
+}
+
+.evidence-modal__panel--human-review .evidence-modal__actions > span {
+  color: #987762;
+}
+
+.evidence-modal__panel--human-review .evidence-modal__actions .evidence-modal__link {
+  background: linear-gradient(135deg, #d99365, #bd7448);
+  box-shadow: 0 8px 18px #bd74482b;
+}
+
 @container room-workspace (max-width: 1059px) {
   .evidence-room { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 620px) {
-  .evidence-modal__facts {
+  .evidence-modal__panel--detail .evidence-modal__facts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .evidence-modal__panel--detail .evidence-modal__facts span:nth-child(3) {
+    border-left: 0;
+  }
+
+  .evidence-modal__panel--detail .evidence-modal__review-scroll {
     grid-template-columns: 1fr;
+  }
+
+  .evidence-modal__panel--detail .evidence-modal__review-scroll section {
+    padding: 8px 0;
+  }
+
+  .evidence-modal__panel--detail .evidence-modal__review-scroll section + section {
+    border-top: 1px solid #ecdccc;
+    border-left: 0;
+  }
+
+  .evidence-modal__actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .evidence-modal__actions .evidence-modal__link {
+    width: 100%;
   }
 
   .human-review-metrics {
@@ -2686,10 +3485,6 @@ onBeforeUnmount(() => {
   .evidence-uploader__button,
   .evidence-footer button {
     text-align: center;
-  }
-
-  .evidence-uploader__model-consent {
-    grid-column: 1 / -1;
   }
 
   .evidence-footer {
@@ -2720,9 +3515,9 @@ onBeforeUnmount(() => {
     grid-column: 1 / -1;
     grid-row: 1;
     min-width: 0;
-    margin: 0;
-    font-size: 26px;
-    line-height: 1.15;
+    margin: 7px 0 8px;
+    font-size: clamp(32px, 5vw, 56px);
+    line-height: 1.05;
     white-space: normal;
     overflow-wrap: anywhere;
     word-break: break-word;
@@ -2848,6 +3643,312 @@ onBeforeUnmount(() => {
     left: 18px;
     right: 18px;
     bottom: 90px;
+  }
+}
+
+/* Fixed evidence board: four stable cards with horizontal evidence rails. */
+.evidence-board {
+  grid-template-rows: 76px minmax(0, 1fr) 60px;
+}
+
+.evidence-board__cards {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  grid-template-columns: minmax(0, 1.12fr) minmax(190px, .88fr);
+  grid-template-rows: 86px minmax(0, 1.12fr) minmax(0, .88fr);
+  gap: 10px;
+  overflow: hidden;
+}
+
+.evidence-board__cards > .evidence-uploader {
+  grid-column: 1 / -1;
+  grid-row: 1;
+}
+
+.evidence-board__cards > .evidence-library--pending {
+  grid-column: 1;
+  grid-row: 2;
+}
+
+.evidence-board__cards > .evidence-library--pending .evidence-card-strip {
+  min-height: 125px;
+}
+
+.evidence-board__cards > .evidence-library--private {
+  grid-column: 1;
+  grid-row: 3;
+}
+
+.evidence-board__cards > .evidence-library--human-review {
+  grid-column: 2;
+  grid-row: 2 / span 2;
+}
+
+.evidence-board__cards .evidence-library {
+  display: grid;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  box-sizing: border-box;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  padding: 10px;
+  overflow: hidden;
+}
+
+.evidence-board__cards .evidence-library > header {
+  align-items: center;
+  margin-bottom: 7px;
+}
+
+.evidence-card-strip {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 2px 2px 7px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scrollbar-color: #b9c9dd transparent;
+  scrollbar-width: thin;
+  scroll-snap-type: x proximity;
+}
+
+.evidence-card-strip::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.evidence-card-strip::-webkit-scrollbar-thumb { background: #b9c9dd; border-radius: 999px; }
+.evidence-card-strip::-webkit-scrollbar-track { background: transparent; }
+
+.evidence-card.evidence-card--compact {
+  display: grid;
+  flex: 0 0 168px;
+  width: 168px;
+  height: 116px;
+  min-width: 168px;
+  box-sizing: border-box;
+  grid-template-columns: 56px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto;
+  grid-template-areas:
+    "preview main"
+    "labels labels";
+  align-items: center;
+  gap: 7px 9px;
+  margin: 0;
+  padding: 9px;
+  overflow: hidden;
+  scroll-snap-align: start;
+}
+
+.evidence-card.evidence-card--compact.evidence-card--pending { padding-right: 30px; }
+
+.evidence-card.evidence-card--compact.evidence-card--submitted {
+  background: linear-gradient(145deg, #ffffff, #f7fbff);
+  border-color: #dce8f3;
+  box-shadow: 0 8px 18px #456b9810;
+}
+
+.evidence-card--submitted .evidence-card__main > strong {
+  color: #385570;
+}
+
+.evidence-card--submitted .evidence-card__main > small {
+  color: #71889d;
+}
+
+.evidence-card--submitted .evidence-card__labels em {
+  color: #57738c;
+  background: #eaf2f8;
+}
+
+.evidence-card--submitted .evidence-card__labels em:last-child {
+  color: #426786;
+  background: #dcebf6;
+}
+
+.evidence-card.evidence-card--compact.evidence-card--submitted::before,
+.evidence-library--human-review .human-review-card::before {
+  position: absolute;
+  top: 15px;
+  bottom: 15px;
+  left: 0;
+  width: 3px;
+  content: "";
+  background: #80a9cf;
+  border-radius: 0 999px 999px 0;
+}
+
+.evidence-card__preview {
+  display: grid;
+  width: 56px;
+  height: 56px;
+  grid-area: preview;
+  place-items: center;
+  overflow: hidden;
+  background: transparent;
+  border: 0;
+}
+
+.evidence-card--compact .evidence-card__preview .evidence-card__icon {
+  display: grid;
+  width: 46px;
+  height: 48px;
+  grid-area: auto;
+  background: linear-gradient(145deg, var(--file-tint, #f4f7fb), #fff);
+  border: 1px solid var(--file-border, #dbe5f1);
+  border-radius: 15px;
+  box-shadow: inset 0 1px 0 #ffffffd9, 0 8px 18px #5b749014;
+}
+
+.evidence-card--compact .evidence-card__main {
+  align-self: center;
+  gap: 4px;
+}
+
+.evidence-card--compact .evidence-card__main > small:not(.evidence-card__filename) {
+  overflow: hidden;
+  color: #8a96a8;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.evidence-card__labels {
+  display: flex;
+  min-width: 0;
+  grid-area: labels;
+  gap: 5px;
+  overflow: hidden;
+}
+
+.evidence-card__labels em {
+  min-width: 0;
+  padding: 4px 6px;
+  overflow: hidden;
+  color: #5f7188;
+  background: #edf3f8;
+  border-radius: 999px;
+  font-size: 9px;
+  font-style: normal;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.evidence-card__labels em:last-child {
+  color: #8b5d35;
+  background: #fff0df;
+}
+
+.evidence-library--human-review .evidence-card-strip {
+  align-items: stretch;
+  flex-direction: column;
+  padding-right: 6px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  scroll-snap-type: y proximity;
+}
+
+.evidence-library--human-review .evidence-card.evidence-card--compact {
+  flex: 0 0 116px;
+  width: 100%;
+  min-width: 0;
+  background: linear-gradient(145deg, #fffdfb, #fff7f0);
+  border-color: #e9cdb9;
+  box-shadow: 0 8px 20px #8f5c3912;
+}
+
+.evidence-library--human-review .human-review-card::before {
+  width: 4px;
+  background: #d59061;
+}
+
+.evidence-library--human-review .human-review-card .evidence-card__main > strong {
+  color: #674632;
+}
+
+.evidence-library--human-review .human-review-card .evidence-card__main > small {
+  color: #9a7259;
+  font-weight: 700;
+}
+
+.evidence-library--human-review .human-review-card .evidence-card__labels em:last-child {
+  color: #9b5b38;
+  background: #ffe7d5;
+}
+
+.evidence-library--human-review .human-review-card .evidence-card__labels em:first-child {
+  color: #8a634b;
+  background: #f9ede4;
+}
+
+.evidence-card__preview:has(.evidence-file-icon[data-file-kind="image"]) {
+  background: linear-gradient(145deg, #e5faf4, #fff5cf);
+  border-radius: 14px;
+  box-shadow: inset 0 0 0 1px #c9eee3;
+}
+
+.evidence-card__preview:has(.evidence-file-icon[data-file-kind="video"]) {
+  background: linear-gradient(145deg, #fff0f7, #f2ebff);
+  border-radius: 14px;
+  box-shadow: inset 0 0 0 1px #f2d3e4;
+}
+
+.evidence-card__preview:has(.evidence-file-icon[data-file-kind="pdf"]) {
+  background: linear-gradient(145deg, #fff0eb, #fff8e3);
+  border-radius: 14px;
+  box-shadow: inset 0 0 0 1px #f5d2c7;
+}
+
+.evidence-card__preview:has(.evidence-file-icon[data-file-kind="word"]) {
+  background: linear-gradient(145deg, #eaf4ff, #eff4ff);
+  border-radius: 14px;
+  box-shadow: inset 0 0 0 1px #cfdfff;
+}
+
+.evidence-card__preview:has(.evidence-file-icon[data-file-kind="markdown"]),
+.evidence-card__preview:has(.evidence-file-icon[data-file-kind="text"]),
+.evidence-card__preview:has(.evidence-file-icon[data-file-kind="document"]) {
+  background: linear-gradient(145deg, #f0edff, #f8f1ff);
+  border-radius: 14px;
+  box-shadow: inset 0 0 0 1px #ddd7f6;
+}
+
+.evidence-card__preview:has(.evidence-file-icon[data-file-kind="other"]) {
+  background: linear-gradient(145deg, #eef4f8, #f2faf7);
+  border-radius: 14px;
+  box-shadow: inset 0 0 0 1px #d6e3e8;
+}
+
+.evidence-board__cards .evidence-empty {
+  flex: 0 0 100%;
+  margin: 4px 0 0;
+}
+
+.evidence-board__cards .evidence-library__actions {
+  justify-content: flex-end;
+  margin-top: 6px;
+}
+
+@media (max-width: 620px) {
+  .evidence-board__cards {
+    grid-template-columns: minmax(0, 1fr) 170px;
+  }
+
+  .evidence-card.evidence-card--compact {
+    grid-template-columns: 52px minmax(0, 1fr);
+    grid-template-areas:
+      "preview main"
+      "labels labels";
+  }
+
+  .evidence-card__preview {
+    width: 52px;
+    height: 52px;
   }
 }
 </style>

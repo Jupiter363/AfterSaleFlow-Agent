@@ -1,3 +1,5 @@
+# 文件作用：自动化测试文件，验证 test_memeo_memory 相关模块的行为、契约或页面布局。
+
 from __future__ import annotations
 
 import pytest
@@ -9,6 +11,10 @@ from app.harness.memory import (
 )
 
 
+# 所属模块：Agent Harness > test_memeo_memory；函数角色：模块私有业务函数。
+# 具体功能：`_participant` 围绕本阶段状态计算该函数独立负责的业务派生值；返回/更新字段：`turn_no`、`actor_id`、`answer_role`、`answer_content`。
+# 上下游：上游为 本文件的 `test_memeo_memory_uses_latest_five_rounds_as_short_term_memory`、`test_memeo_memory_compresses_latest_ten_round_window_to_200_tokens`、`test_memeo_long_term_memory_slot_is_reserved_but_not_prompted`、`test_memeo_memory_modes_are_configurable_for_future_agent_center`；下游为 返回/更新 `turn_no`、`actor_id`、`answer_role`、`answer_content`。
+# 系统意义：该函数在系统中的业务边界是：隔离参与方会话；不可信案件文本不能升级为系统指令。
 def _participant(turn_no: int, text: str) -> dict[str, object]:
     return {
         "turn_no": turn_no,
@@ -21,6 +27,10 @@ def _participant(turn_no: int, text: str) -> dict[str, object]:
     }
 
 
+# 所属模块：Agent Harness > test_memeo_memory；函数角色：模块私有业务函数。
+# 具体功能：`_agent` 围绕本阶段状态计算该函数独立负责的业务派生值；返回/更新字段：`turn_no`、`actor_id`、`answer_role`、`answer_content`。
+# 上下游：上游为 本文件的 `test_memeo_memory_uses_latest_five_rounds_as_short_term_memory`、`test_strict_memeo_memory_rejects_turn_from_different_agent_session`、`test_strict_memeo_memory_accepts_only_matching_session_turns`；下游为 返回/更新 `turn_no`、`actor_id`、`answer_role`、`answer_content`。
+# 系统意义：该函数在系统中的业务边界是：隔离参与方会话；不可信案件文本不能升级为系统指令。
 def _agent(turn_no: int, text: str) -> dict[str, object]:
     return {
         "turn_no": turn_no,
@@ -33,6 +43,10 @@ def _agent(turn_no: int, text: str) -> dict[str, object]:
     }
 
 
+# 所属模块：Agent Harness > test_memeo_memory；函数角色：模块私有业务函数。
+# 具体功能：`_scoped` 围绕本阶段状态计算该函数独立负责的业务派生值；返回/更新字段：`agent_session_id`、`conversation_scope`。
+# 上下游：上游为 本文件的 `test_strict_memeo_memory_rejects_turn_from_different_agent_session`、`test_strict_memeo_memory_rejects_conversation_scope_mismatch`、`test_strict_memeo_memory_accepts_only_matching_session_turns`；下游为 返回/更新 `agent_session_id`、`conversation_scope`。
+# 系统意义：该函数在系统中的业务边界是：隔离参与方会话；不可信案件文本不能升级为系统指令。
 def _scoped(turn: dict[str, object], session_id: str = "SESSION_A") -> dict[str, object]:
     return {
         **turn,
@@ -41,6 +55,10 @@ def _scoped(turn: dict[str, object], session_id: str = "SESSION_A") -> dict[str,
     }
 
 
+# 所属模块：Agent Harness > test_memeo_memory；函数角色：回归测试用例。
+# 具体功能：`test_memeo_memory_uses_latest_five_rounds_as_short_term_memory` 验证Agent 回合记忆在固定案例中的输出、边界和失败行为；关键协作调用：`assemble`、`turns.append`、`MemeoMemoryAssembler`。
+# 上下游：上游为 Java 可信快照、调用身份、上下文合同、角色模板；下游为 本文件的 `_participant`、`_agent`。
+# 系统意义：固定“Agent Harness > test_memeo_memory”的可观察契约，防止后续重构改变业务结果。
 def test_memeo_memory_uses_latest_five_rounds_as_short_term_memory() -> None:
     turns: list[dict[str, object]] = []
     for turn_no in range(1, 8):
@@ -61,6 +79,10 @@ def test_memeo_memory_uses_latest_five_rounds_as_short_term_memory() -> None:
     assert frame.prompt_memory_estimated_tokens <= 200
 
 
+# 所属模块：Agent Harness > test_memeo_memory；函数角色：回归测试用例。
+# 具体功能：`test_memeo_memory_compresses_latest_ten_round_window_to_200_tokens` 验证Agent 回合记忆在固定案例中的输出、边界和失败行为；关键协作调用：`assemble`、`MemeoMemoryAssembler`、`MemeoMemoryConfig`。
+# 上下游：上游为 Java 可信快照、调用身份、上下文合同、角色模板；下游为 本文件的 `_participant`。
+# 系统意义：固定“Agent Harness > test_memeo_memory”的可观察契约，防止后续重构改变业务结果。
 def test_memeo_memory_compresses_latest_ten_round_window_to_200_tokens() -> None:
     turns = [
         _participant(
@@ -85,6 +107,10 @@ def test_memeo_memory_compresses_latest_ten_round_window_to_200_tokens() -> None
     assert "Compressed summary" in frame.prompt_memory
 
 
+# 所属模块：Agent Harness > test_memeo_memory；函数角色：回归测试用例。
+# 具体功能：`test_memeo_long_term_memory_slot_is_reserved_but_not_prompted` 验证模型提示词在固定案例中的输出、边界和失败行为；关键协作调用：`assemble`、`MemeoMemoryAssembler`。
+# 上下游：上游为 Java 可信快照、调用身份、上下文合同、角色模板；下游为 本文件的 `_participant`。
+# 系统意义：固定“Agent Harness > test_memeo_memory”的可观察契约，防止后续重构改变业务结果。
 def test_memeo_long_term_memory_slot_is_reserved_but_not_prompted() -> None:
     frame = MemeoMemoryAssembler().assemble(
         [_participant(1, "historical material should be visible only")],
@@ -102,6 +128,10 @@ def test_memeo_long_term_memory_slot_is_reserved_but_not_prompted() -> None:
     assert "vector memory not enabled yet" not in frame.prompt_memory
 
 
+# 所属模块：Agent Harness > test_memeo_memory；函数角色：回归测试用例。
+# 具体功能：`test_memeo_memory_modes_are_configurable_for_future_agent_center` 验证Agent 回合记忆在固定案例中的输出、边界和失败行为；关键协作调用：`assemble`、`MemeoMemoryAssembler`、`MemeoMemoryConfig`。
+# 上下游：上游为 Java 可信快照、调用身份、上下文合同、角色模板；下游为 本文件的 `_participant`。
+# 系统意义：固定“Agent Harness > test_memeo_memory”的可观察契约，防止后续重构改变业务结果。
 def test_memeo_memory_modes_are_configurable_for_future_agent_center() -> None:
     turns = [_participant(turn_no, f"user round {turn_no}") for turn_no in range(1, 12)]
 
@@ -141,6 +171,10 @@ def test_memeo_memory_modes_are_configurable_for_future_agent_center() -> None:
     assert long_term_enabled.long_term_slots[0].prompt_included is False
 
 
+# 所属模块：Agent Harness > test_memeo_memory；函数角色：回归测试用例。
+# 具体功能：`test_strict_memeo_memory_rejects_turn_from_different_agent_session` 验证参与方会话在固定案例中的输出、边界和失败行为；关键协作调用：`pytest.raises`、`assemble`、`MemeoMemoryAssembler`。
+# 上下游：上游为 Java 可信快照、调用身份、上下文合同、角色模板；下游为 本文件的 `_scoped`、`_participant`、`_agent`。
+# 系统意义：固定“Agent Harness > test_memeo_memory”的可观察契约，防止后续重构改变业务结果。
 def test_strict_memeo_memory_rejects_turn_from_different_agent_session() -> None:
     turns = [
         _scoped(_participant(1, "current actor private memory"), "SESSION_A"),
@@ -157,6 +191,10 @@ def test_strict_memeo_memory_rejects_turn_from_different_agent_session() -> None
     assert "agent_session_id mismatch" in str(failure.value)
 
 
+# 所属模块：Agent Harness > test_memeo_memory；函数角色：回归测试用例。
+# 具体功能：`test_strict_memeo_memory_rejects_turn_without_agent_session_id` 验证参与方会话在固定案例中的输出、边界和失败行为；关键协作调用：`pytest.raises`、`assemble`、`MemeoMemoryAssembler`。
+# 上下游：上游为 Java 可信快照、调用身份、上下文合同、角色模板；下游为 本文件的 `_participant`。
+# 系统意义：固定“Agent Harness > test_memeo_memory”的可观察契约，防止后续重构改变业务结果。
 def test_strict_memeo_memory_rejects_turn_without_agent_session_id() -> None:
     with pytest.raises(MemoryScopeViolation) as failure:
         MemeoMemoryAssembler().assemble(
@@ -168,6 +206,10 @@ def test_strict_memeo_memory_rejects_turn_without_agent_session_id() -> None:
     assert "missing agent_session_id" in str(failure.value)
 
 
+# 所属模块：Agent Harness > test_memeo_memory；函数角色：回归测试用例。
+# 具体功能：`test_strict_memeo_memory_rejects_conversation_scope_mismatch` 验证Agent 回合记忆在固定案例中的输出、边界和失败行为；关键协作调用：`pytest.raises`、`assemble`、`MemeoMemoryAssembler`。
+# 上下游：上游为 Java 可信快照、调用身份、上下文合同、角色模板；下游为 本文件的 `_scoped`、`_participant`。
+# 系统意义：固定“Agent Harness > test_memeo_memory”的可观察契约，防止后续重构改变业务结果。
 def test_strict_memeo_memory_rejects_conversation_scope_mismatch() -> None:
     turns = [
         {
@@ -191,6 +233,10 @@ def test_strict_memeo_memory_rejects_conversation_scope_mismatch() -> None:
     assert "conversation_scope mismatch" in str(failure.value)
 
 
+# 所属模块：Agent Harness > test_memeo_memory；函数角色：回归测试用例。
+# 具体功能：`test_strict_memeo_memory_accepts_only_matching_session_turns` 验证参与方会话在固定案例中的输出、边界和失败行为；关键协作调用：`assemble`、`MemeoMemoryAssembler`。
+# 上下游：上游为 Java 可信快照、调用身份、上下文合同、角色模板；下游为 本文件的 `_scoped`、`_participant`、`_agent`。
+# 系统意义：固定“Agent Harness > test_memeo_memory”的可观察契约，防止后续重构改变业务结果。
 def test_strict_memeo_memory_accepts_only_matching_session_turns() -> None:
     frame = MemeoMemoryAssembler().assemble(
         [

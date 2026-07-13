@@ -1,3 +1,5 @@
+# 文件作用：Python Agent 服务代码文件，承载售后争议智能体的 API、配置、模型调用或业务流程。
+
 """Panel aggregation that preserves minority and unavailable-critic risks."""
 
 from __future__ import annotations
@@ -14,11 +16,19 @@ from app.schemas import (
 
 
 class DeliberationPanel:
+    # 所属模块：合议评审 Agent；函数角色：对象依赖初始化。
+    # 具体功能：`__init__` 注入并保存处理本阶段状态需要的客户端、配置或策略依赖；关键协作调用：`ValueError`。
+    # 上下游：上游为 法官草案、证据分析、规则适用；下游为 协作调用 `ValueError`。
+    # 系统意义：失败显式映射为 `ValueError`，避免错误状态被当成成功结果。
     def __init__(self, critics: list[CriticAgent]) -> None:
         if not critics:
             raise ValueError("deliberation panel requires at least one critic")
         self._critics = tuple(critics)
 
+    # 所属模块：合议评审 Agent；函数角色：类/闭包内部方法。
+    # 具体功能：`run` 驱动本阶段状态对应的业务步骤并返回阶段结果；关键协作调用：`frozen_input_fingerprint`、`DeliberationReport`、`critic.review`。
+    # 上下游：上游为 法官草案、证据分析、规则适用；下游为 协作调用 `frozen_input_fingerprint`、`DeliberationReport`、`critic.review`、`dict.fromkeys`。
+    # 系统意义：该函数在系统中的业务边界是：只提出风险和分歧，不修改正式裁判。
     def run(self, request: DeliberationRequest) -> DeliberationReport:
         fingerprint = frozen_input_fingerprint(request.frozen_input)
         reports = [

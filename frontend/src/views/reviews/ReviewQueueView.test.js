@@ -1,3 +1,6 @@
+// 文件作用：自动化测试文件，验证 ReviewQueueView.test 相关模块的行为、契约或页面布局。
+// 说明：本注释用于帮助读者先了解本文件职责，再继续阅读具体实现。
+
 import { flushPromises, mount } from "@vue/test-utils";
 import { createMemoryHistory, createRouter } from "vue-router";
 import { describe, expect, it } from "vitest";
@@ -22,7 +25,9 @@ const tasks = [
   },
 ];
 
+// 业务位置：【前端审核工作台】describe：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 冻结审核包、Agent 建议和履约动作 正确进入 审核员批准、修改、补证或人工交接。上游：冻结审核包、Agent 建议和履约动作。下游：审核员批准、修改、补证或人工交接。边界：决定必须显式由有权限审核员提交。
 describe("ReviewQueueView", () => {
+  // 业务位置：【前端审核工作台】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 冻结审核包、Agent 建议和履约动作 正确进入 审核员批准、修改、补证或人工交接。上游：冻结审核包、Agent 建议和履约动作。下游：审核员批准、修改、补证或人工交接。边界：决定必须显式由有权限审核员提交。
   it("turns frozen review tasks into a lightweight reviewer launchpad", async () => {
     const router = createRouter({
       history: createMemoryHistory(),

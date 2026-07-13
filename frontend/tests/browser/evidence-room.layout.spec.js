@@ -1,3 +1,6 @@
+// 文件作用：自动化测试文件，验证 evidence-room.layout.spec 相关模块的行为、契约或页面布局。
+// 说明：本注释用于帮助读者先了解本文件职责，再继续阅读具体实现。
+
 import { expect, test } from "@playwright/test";
 import {
   CASE_ID,
@@ -6,10 +9,12 @@ import {
   installEvidenceRoomFixture,
 } from "./fixtures/evidence-room.fixture.js";
 
+// 业务位置：【前端浏览器回归测试】gridTrackCount：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 function gridTrackCount(value) {
   return value.trim().split(/\s+/).filter(Boolean).length;
 }
 
+// 业务位置：【前端浏览器回归测试】assertInside：核验 当前阶段业务数据 的权限、Schema 和阶段边界，阻止越权或不完整结果进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 async function assertInside(inner, outer) {
   const [innerBox, outerBox] = await Promise.all([
     inner.boundingBox(),
@@ -27,6 +32,7 @@ async function assertInside(inner, outer) {
   );
 }
 
+// 业务位置：【前端浏览器回归测试】horizontalOverflowReport：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 async function horizontalOverflowReport(page) {
   return page.evaluate(() => {
     const viewportWidth = document.documentElement.clientWidth;
@@ -52,6 +58,7 @@ async function horizontalOverflowReport(page) {
   });
 }
 
+// 业务位置：【前端浏览器回归测试】assertNoDocumentHorizontalOverflow：核验 当前阶段业务数据 的权限、Schema 和阶段边界，阻止越权或不完整结果进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 async function assertNoDocumentHorizontalOverflow(page) {
   const report = await horizontalOverflowReport(page);
   expect(report.scrollWidth, JSON.stringify(report, null, 2)).toBeLessThanOrEqual(
@@ -59,18 +66,21 @@ async function assertNoDocumentHorizontalOverflow(page) {
   );
 }
 
+// 业务位置：【前端浏览器回归测试】assertTouchHeight：核验 当前阶段业务数据 的权限、Schema 和阶段边界，阻止越权或不完整结果进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 async function assertTouchHeight(locator) {
   const box = await locator.boundingBox();
   expect(box).not.toBeNull();
   expect(box.height).toBeGreaterThanOrEqual(44);
 }
 
+// 业务位置：【前端浏览器回归测试】openEvidenceRoom：切换与 当前可见证据和附件 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 async function openEvidenceRoom(page, options = {}) {
   await installEvidenceRoomFixture(page, options);
   await page.goto(`/disputes/${CASE_ID}/evidence`);
   await expect(page.locator("[data-evidence-board-panel]")).toBeVisible();
 }
 
+// 业务位置：【前端浏览器回归测试】assertEvidenceGeometry：核验 当前可见证据和附件 的权限、Schema 和阶段边界，阻止越权或不完整结果进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 async function assertEvidenceGeometry(page, expectedColumns) {
   const room = page.locator("[data-evidence-room-layout]");
   const chat = page.locator("[data-evidence-chat-panel]");
@@ -118,6 +128,7 @@ async function assertEvidenceGeometry(page, expectedColumns) {
   await assertNoDocumentHorizontalOverflow(page);
 }
 
+// 业务位置：【前端浏览器回归测试】test：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 test("renders multimodal consent and human-review cards for visual evidence", async ({
   page,
 }) => {
@@ -141,6 +152,7 @@ test("renders multimodal consent and human-review cards for visual evidence", as
   });
 });
 
+// 业务位置：【前端浏览器回归测试】test：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 test("switches columns at 1060/1059px of actual workspace width", async ({
   page,
 }) => {
@@ -173,6 +185,7 @@ for (const [index, viewport] of [
   { width: 320, height: 568 },
   { width: 1024, height: 600 },
 ].entries()) {
+  // 业务位置：【前端浏览器回归测试】test：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
   test(`keeps fixed evidence geometry and actions at ${viewport.width}x${viewport.height}`, async ({
     page,
   }) => {
@@ -199,6 +212,7 @@ for (const [index, viewport] of [
   });
 }
 for (const role of ["USER", "MERCHANT"]) {
+  // 业务位置：【前端浏览器回归测试】test：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
   test(`keeps 100 ${role} evidence cards in the sole right-board scroll rail`, async ({
     page,
   }) => {
@@ -236,6 +250,7 @@ for (const role of ["USER", "MERCHANT"]) {
   });
 }
 
+// 业务位置：【前端浏览器回归测试】test：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 test("keeps the compact uploader and footer horizontal at 620/619px", async ({
   page,
 }) => {
@@ -280,6 +295,7 @@ test("keeps the compact uploader and footer horizontal at 620/619px", async ({
   }
 });
 
+// 业务位置：【前端浏览器回归测试】test：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 test("keeps uploader and completion controls at least 44px tall without changing the 740px board", async ({
   page,
 }) => {
@@ -293,6 +309,7 @@ test("keeps uploader and completion controls at least 44px tall without changing
   await assertInside(page.locator(".evidence-footer"), board);
 });
 
+// 业务位置：【前端浏览器回归测试】test：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 test("keeps the hearing entrance at least 44px tall inside the sealed footer", async ({
   page,
 }) => {
@@ -311,6 +328,7 @@ test("keeps the hearing entrance at least 44px tall inside the sealed footer", a
   await assertInside(page.locator(".evidence-footer"), board);
 });
 
+// 业务位置：【前端浏览器回归测试】test：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 test("traps the evidence gate focus and restores the completion trigger on Escape", async ({
   page,
 }) => {
@@ -341,6 +359,7 @@ test("traps the evidence gate focus and restores the completion trigger on Escap
   await expect(completionTrigger).toBeFocused();
 });
 
+// 业务位置：【前端浏览器回归测试】test：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 test("keeps detail above gallery and unwinds focus one modal at a time", async ({
   page,
 }) => {
@@ -395,6 +414,7 @@ for (const scenario of [
   { width: 390, height: 844, role: "USER" },
   { width: 320, height: 568, role: "MERCHANT" },
 ]) {
+  // 业务位置：【前端浏览器回归测试】test：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
   test(`contains long evidence text and its detail modal at ${scenario.width}px for ${scenario.role}`, async ({
     page,
   }) => {

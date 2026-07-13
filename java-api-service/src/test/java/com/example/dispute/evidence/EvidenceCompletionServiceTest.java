@@ -1,3 +1,9 @@
+/*
+ * 所属模块：证据与版本化卷宗。
+ * 文件职责：验证证据完成确认，覆盖 「bothPartyCompletionsSealEvidenceEarlyAndOpenTheThreeHourHearing」、「repeatedCompletionByTheSameRoleUsesTheExistingPhaseConfirmation」、「initiatorCannotCompleteEvidenceWithoutSubmittedEvidence」、「deadlineWarningNotifiesBothPartiesWhileTheEvidenceWindowIsOpen」。
+ * 业务链路：JUnit 构造夹具并驱动真实服务或 Mock 协作者，断言返回值、持久化状态和调用边界；接收原始证据、触发 OCR、执行可信度核验、控制角色可见性并冻结版本化卷宗。
+ * 关键边界：原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
+ */
 package com.example.dispute.evidence;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -44,6 +50,11 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+// 所属模块：【证据与版本化卷宗 / 自动化测试层】类型「EvidenceCompletionServiceTest」。
+// 类型职责：集中验证证据完成确认的业务场景、权限边界和持久化/外部协作契约；本类型显式提供 「setUp」、「bothPartyCompletionsSealEvidenceEarlyAndOpenTheThreeHourHearing」、「repeatedCompletionByTheSameRoleUsesTheExistingPhaseConfirmation」、「initiatorCannotCompleteEvidenceWithoutSubmittedEvidence」、「deadlineWarningNotifiesBothPartiesWhileTheEvidenceWindowIsOpen」。
+// 协作关系：由 JUnit 发现并执行其中带 @Test 的场景。
+// 边界意义：原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
+// Java 语法：class 同时封装状态与方法；final 依赖通过构造器注入后不可重新指向。
 @ExtendWith(MockitoExtension.class)
 class EvidenceCompletionServiceTest {
 
@@ -65,6 +76,11 @@ class EvidenceCompletionServiceTest {
     private CaseRoomEntity evidenceRoom;
     private CasePhaseClockEntity evidenceClock;
 
+    // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceCompletionServiceTest.setUp()」。
+    // 具体功能：「EvidenceCompletionServiceTest.setUp()」：在每个测试场景运行前创建「caseRepository.findByIdForUpdate」、「Clock.fixed」、「Instant.parse」、「Duration.ofHours」，统一准备后续断言依赖的初始状态，避免各用例重复搭建且保持彼此隔离。
+    // 上游调用：「EvidenceCompletionServiceTest.setUp()」由 JUnit 生命周期或本测试类的场景方法调用。
+    // 下游影响：「EvidenceCompletionServiceTest.setUp()」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「EvidenceCompletionServiceTest.setUp()」守住「证据与版本化卷宗」的可执行规格，尤其防止 「2026-07-03T01:00:00Z」、「CASE_EVIDENCE_COMPLETE」、「ORDER-1」、「LOG-1」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @BeforeEach
     void setUp() {
         Clock clock =
@@ -136,6 +152,11 @@ class EvidenceCompletionServiceTest {
                 .thenReturn(1);
     }
 
+    // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceCompletionServiceTest.bothPartyCompletionsSealEvidenceEarlyAndOpenTheThreeHourHearing()」。
+    // 具体功能：「EvidenceCompletionServiceTest.bothPartyCompletionsSealEvidenceEarlyAndOpenTheThreeHourHearing()」：复现“核对完整业务行为（场景方法「bothPartyCompletionsSealEvidenceEarlyAndOpenTheThreeHourHearing」）”场景：驱动 「evidenceRepository.countByCaseIdAndSubmittedByRoleAndSubmissionStatusAndDeletedAtIsNull」、「roomRepository.findByCaseIdAndRoomType」、「clockRepository.findByCaseIdAndClockType」、「completionRepository.save」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「USER」、「user-complete-1」、「merchant-complete-1」、「COMPLETED」。
+    // 上游调用：「EvidenceCompletionServiceTest.bothPartyCompletionsSealEvidenceEarlyAndOpenTheThreeHourHearing()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「EvidenceCompletionServiceTest.bothPartyCompletionsSealEvidenceEarlyAndOpenTheThreeHourHearing()」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「EvidenceCompletionServiceTest.bothPartyCompletionsSealEvidenceEarlyAndOpenTheThreeHourHearing()」守住「证据与版本化卷宗」的可执行规格，尤其防止 「USER」、「user-complete-1」、「merchant-complete-1」、「COMPLETED」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void bothPartyCompletionsSealEvidenceEarlyAndOpenTheThreeHourHearing() {
         when(evidenceRepository.countByCaseIdAndSubmittedByRoleAndSubmissionStatusAndDeletedAtIsNull(
@@ -184,6 +205,11 @@ class EvidenceCompletionServiceTest {
                 .isEqualTo(OffsetDateTime.parse("2026-07-03T04:00:00Z"));
     }
 
+    // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceCompletionServiceTest.repeatedCompletionByTheSameRoleUsesTheExistingPhaseConfirmation()」。
+    // 具体功能：「EvidenceCompletionServiceTest.repeatedCompletionByTheSameRoleUsesTheExistingPhaseConfirmation()」：复现“核对完整业务行为（场景方法「repeatedCompletionByTheSameRoleUsesTheExistingPhaseConfirmation」）”场景：驱动 「evidenceRepository.countByCaseIdAndSubmittedByRoleAndSubmissionStatusAndDeletedAtIsNull」、「completionRepository.findByCaseIdAndIdempotencyKey」、「completionRepository.findByCaseIdAndDossierVersionAndParticipantRole」、「completionRepository.countByCaseIdAndDossierVersionAndCompletionStatus」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「USER」、「EVIDENCE_COMPLETE_EXISTING」、「user-local」、「user-complete-original」。
+    // 上游调用：「EvidenceCompletionServiceTest.repeatedCompletionByTheSameRoleUsesTheExistingPhaseConfirmation()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「EvidenceCompletionServiceTest.repeatedCompletionByTheSameRoleUsesTheExistingPhaseConfirmation()」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「EvidenceCompletionServiceTest.repeatedCompletionByTheSameRoleUsesTheExistingPhaseConfirmation()」守住「证据与版本化卷宗」的可执行规格，尤其防止 「USER」、「EVIDENCE_COMPLETE_EXISTING」、「user-local」、「user-complete-original」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void repeatedCompletionByTheSameRoleUsesTheExistingPhaseConfirmation() {
         when(evidenceRepository.countByCaseIdAndSubmittedByRoleAndSubmissionStatusAndDeletedAtIsNull(
@@ -218,6 +244,11 @@ class EvidenceCompletionServiceTest {
         assertThat(result.allPartiesCompleted()).isFalse();
     }
 
+    // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceCompletionServiceTest.initiatorCannotCompleteEvidenceWithoutSubmittedEvidence()」。
+    // 具体功能：「EvidenceCompletionServiceTest.initiatorCannotCompleteEvidenceWithoutSubmittedEvidence()」：复现“核对完整业务行为（场景方法「initiatorCannotCompleteEvidenceWithoutSubmittedEvidence」）”场景：驱动 「evidenceRepository.countByCaseIdAndSubmittedByRoleAndSubmissionStatusAndDeletedAtIsNull」、「service.complete」，再用 「assertThatThrownBy」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「USER」、「user-local」、「user-complete-without-evidence」。
+    // 上游调用：「EvidenceCompletionServiceTest.initiatorCannotCompleteEvidenceWithoutSubmittedEvidence()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「EvidenceCompletionServiceTest.initiatorCannotCompleteEvidenceWithoutSubmittedEvidence()」的下游是被测服务、仓储或外部客户端替身；「assertThatThrownBy」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「EvidenceCompletionServiceTest.initiatorCannotCompleteEvidenceWithoutSubmittedEvidence()」守住「证据与版本化卷宗」的可执行规格，尤其防止 「USER」、「user-local」、「user-complete-without-evidence」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void initiatorCannotCompleteEvidenceWithoutSubmittedEvidence() {
         when(evidenceRepository.countByCaseIdAndSubmittedByRoleAndSubmissionStatusAndDeletedAtIsNull(
@@ -234,6 +265,11 @@ class EvidenceCompletionServiceTest {
                 .hasMessageContaining("发起争议方需先正式提交至少 1 份相关证据");
     }
 
+    // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceCompletionServiceTest.deadlineWarningNotifiesBothPartiesWhileTheEvidenceWindowIsOpen()」。
+    // 具体功能：「EvidenceCompletionServiceTest.deadlineWarningNotifiesBothPartiesWhileTheEvidenceWindowIsOpen()」：复现“核对完整业务行为（场景方法「deadlineWarningNotifiesBothPartiesWhileTheEvidenceWindowIsOpen」）”场景：驱动 「service.warnDeadline」，再用 「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「2026-07-03T02:00:00Z」。
+    // 上游调用：「EvidenceCompletionServiceTest.deadlineWarningNotifiesBothPartiesWhileTheEvidenceWindowIsOpen()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「EvidenceCompletionServiceTest.deadlineWarningNotifiesBothPartiesWhileTheEvidenceWindowIsOpen()」的下游是被测服务、仓储或外部客户端替身；「verify」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「EvidenceCompletionServiceTest.deadlineWarningNotifiesBothPartiesWhileTheEvidenceWindowIsOpen()」守住「证据与版本化卷宗」的可执行规格，尤其防止 「2026-07-03T02:00:00Z」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void deadlineWarningNotifiesBothPartiesWhileTheEvidenceWindowIsOpen() {
         service.warnDeadline(dispute.getId());

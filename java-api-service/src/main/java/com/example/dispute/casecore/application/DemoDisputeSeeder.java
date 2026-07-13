@@ -1,3 +1,9 @@
+/*
+ * 所属模块：案件核心与导入。
+ * 文件职责：承载演示案件争议Seeder在当前业务模块中的规则与协作边界。
+ * 业务链路：核心入口/契约为 「run」；维护争议案件事实、来源、幂等导入和演示数据清理。
+ * 关键边界：Java/PostgreSQL 是案件状态事实源，导入重试不能创建重复案件
+ */
 package com.example.dispute.casecore.application;
 
 import com.example.dispute.config.ActorRole;
@@ -18,6 +24,11 @@ import org.springframework.stereotype.Component;
  * external adapter. Flyway remains schema-only and production stays empty unless explicitly
  * enabled.
  */
+// 所属模块：【案件核心与导入 / 应用编排层】类型「DemoDisputeSeeder」。
+// 类型职责：承载演示案件争议Seeder在当前业务模块中的规则与协作边界；本类型显式提供 「DemoDisputeSeeder」、「run」、「demoCommands」、「command」。
+// 协作关系：由同模块控制器、应用服务或框架生命周期创建和调用。
+// 边界意义：Java/PostgreSQL 是案件状态事实源，导入重试不能创建重复案件
+// Java 语法：class 同时封装状态与方法；final 依赖通过构造器注入后不可重新指向。
 @Component
 @ConditionalOnExpression(
         "${dispute.seed-demo-disputes:false} and ${spring.flyway.enabled:true}")
@@ -29,11 +40,23 @@ public class DemoDisputeSeeder implements ApplicationRunner {
     private final DisputeImportService importService;
     private final Clock clock;
 
+    // 所属模块：【案件核心与导入 / 应用编排层】「DemoDisputeSeeder.DemoDisputeSeeder(DisputeImportService,Clock)」。
+    // 具体功能：「DemoDisputeSeeder.DemoDisputeSeeder(DisputeImportService,Clock)」：通过构造器接收 「importService」(DisputeImportService)、「clock」(Clock) 并保存为「DemoDisputeSeeder」的协作依赖；这里只完成依赖装配，不提前访问数据库或外部服务。
+    // 上游调用：「DemoDisputeSeeder.DemoDisputeSeeder(DisputeImportService,Clock)」由 Spring 容器执行构造器注入，依赖在 Bean 创建阶段一次性提供。
+    // 下游影响：「DemoDisputeSeeder.DemoDisputeSeeder(DisputeImportService,Clock)」只产生当前对象的返回值或字段变化，不访问额外基础设施。
+    // 系统意义：「DemoDisputeSeeder.DemoDisputeSeeder(DisputeImportService,Clock)」负责主链路中的“演示案件争议Seeder”；Java/PostgreSQL 是案件状态事实源，导入重试不能创建重复案件
+    // Java 语法：构造器名称与类名相同且没有返回类型；参数通常由 Spring 按类型注入。
     public DemoDisputeSeeder(DisputeImportService importService, Clock clock) {
         this.importService = importService;
         this.clock = clock;
     }
 
+    // 所属模块：【案件核心与导入 / 应用编排层】「DemoDisputeSeeder.run(ApplicationArguments)」。
+    // 具体功能：「DemoDisputeSeeder.run(ApplicationArguments)」：运行演示案件争议Seeder；实际协作者为 「importService.importDispute」、「command.externalCaseReference」、「demoCommands」；处理的关键状态/协议值包括 「seed-」，最终返回「void」。
+    // 上游调用：「DemoDisputeSeeder.run(ApplicationArguments)」由使用「DemoDisputeSeeder」的控制器、应用服务、Workflow Activity 或测试场景触发。
+    // 下游影响：「DemoDisputeSeeder.run(ApplicationArguments)」向下依次触达 「importService.importDispute」、「command.externalCaseReference」、「demoCommands」。
+    // 系统意义：「DemoDisputeSeeder.run(ApplicationArguments)」负责主链路中的“演示案件争议Seeder”；Java/PostgreSQL 是案件状态事实源，导入重试不能创建重复案件
+    // Java 语法：stream/lambda 把集合处理写成管道；lambda 中引用的外部局部变量必须保持 effectively final。
     @Override
     public void run(ApplicationArguments args) {
         demoCommands().forEach(
@@ -44,6 +67,11 @@ public class DemoDisputeSeeder implements ApplicationRunner {
                                 "seed-" + command.externalCaseReference().toLowerCase()));
     }
 
+    // 所属模块：【案件核心与导入 / 应用编排层】「DemoDisputeSeeder.demoCommands()」。
+    // 具体功能：「DemoDisputeSeeder.demoCommands()」：构建演示案件Commands；实际协作者为 「Duration.ofHours」、「now.plus」、「command」；处理的关键状态/协议值包括 「DEMO-DISPUTE-001」、「ORDER-DEMO-001」、「user-local」、「merchant-local」，最终返回「List<ImportDisputeCommand>」。
+    // 上游调用：「DemoDisputeSeeder.demoCommands()」的上游调用点包括 「DemoDisputeSeeder.run」。
+    // 下游影响：「DemoDisputeSeeder.demoCommands()」向下依次触达 「Duration.ofHours」、「now.plus」、「command」；计算结果以「List<ImportDisputeCommand>」交给调用方。
+    // 系统意义：「DemoDisputeSeeder.demoCommands()」负责主链路中的“演示案件Commands”；Java/PostgreSQL 是案件状态事实源，导入重试不能创建重复案件
     private List<ImportDisputeCommand> demoCommands() {
         OffsetDateTime now = OffsetDateTime.now(clock);
         return List.of(
@@ -121,6 +149,11 @@ public class DemoDisputeSeeder implements ApplicationRunner {
                         null));
     }
 
+    // 所属模块：【案件核心与导入 / 应用编排层】「DemoDisputeSeeder.command(String,String,String,String,String,String,String,RiskLevel,CaseStatus,String,OffsetDateTime)」。
+    // 具体功能：「DemoDisputeSeeder.command(String,String,String,String,String,String,String,RiskLevel,CaseStatus,String,OffsetDateTime)」：构建命令；处理的关键状态/协议值包括 「DEMO」、「LOG-」、「USER」，最终返回「ImportDisputeCommand」。
+    // 上游调用：「DemoDisputeSeeder.command(String,String,String,String,String,String,String,RiskLevel,CaseStatus,String,OffsetDateTime)」的上游调用点包括 「DemoDisputeSeeder.demoCommands」。
+    // 下游影响：「DemoDisputeSeeder.command(String,String,String,String,String,String,String,RiskLevel,CaseStatus,String,OffsetDateTime)」只产生当前对象的返回值或字段变化，不访问额外基础设施；计算结果以「ImportDisputeCommand」交给调用方。
+    // 系统意义：「DemoDisputeSeeder.command(String,String,String,String,String,String,String,RiskLevel,CaseStatus,String,OffsetDateTime)」负责主链路中的“命令”；Java/PostgreSQL 是案件状态事实源，导入重试不能创建重复案件
     private static ImportDisputeCommand command(
             String externalReference,
             String orderReference,

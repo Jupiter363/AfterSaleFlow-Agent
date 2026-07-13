@@ -1011,3 +1011,44 @@ Boundary checks:
 - Type consistency: first-stage status fields use snake_case over HTTP and camelCase in Java records via existing Jackson config.
 - Admission consistency: manual `complete` and automatic `expire` both use the same backend guard; frontend local blocking is only UX optimization and does not replace backend enforcement.
 
+## 2026-07-13 全系统模型真流式输出收口
+
+本节继续作为十点方案的统一事实源，不另建分散的流式方案文件。
+
+### 固定传输链路
+
+```text
+qwen3.7-plus / LiteLLM stream=true
+  -> Python Harness 过滤并投影公开增量
+  -> agent_stream.v1 NDJSON
+  -> Java AgentRun 校验、持久化、权限隔离与 finalizer
+  -> 浏览器 SSE（支持 Last-Event-ID 重放）
+  -> 统一 AgentStreamingMessage 逐段展示
+```
+
+固定事件为 `start / visible_delta / usage / final / error`。公开增量采用白名单；
+`reasoning_content`、思维链、Prompt、工具参数、内部证据矩阵 patch、陪审 A2A 原始观察不得进入浏览器事件。
+
+### 统一复用范围
+
+- 接待室：初始追问和后续陈述共用 `INTAKE_TURN`。
+- 证据室及庭审补证：共用 `EVIDENCE_TURN`，保留参与方可见范围。
+- 三轮庭审：法官开场、轮次收束和终轮提示共用 `HEARING_ROUND`。
+- 裁决草案：状态机服务端启动 `HEARING_ANALYSIS`，结果页不得自行触发第二次模型调用。
+- 审核解释官：审核员基于冻结 ReviewPacket 发起 `REVIEW`，只公开 `answer`。
+- 内部评审团、离线 Evaluation 等非用户对话节点可以复用同一传输协议，但内部观察和评估正文不向当事人公开。
+
+### 正式结果与失败边界
+
+- `visible_delta` 只用于临时展示，不能写成案件事实或正式消息。
+- 完整模型 JSON 必须先通过 Python Pydantic、Java 业务合同和权限校验。
+- Java finalizer 在同一事务内写正式消息、卷宗、证据矩阵或裁决草案；提交后才发布 `final` SSE。
+- 前端收到 `final` 后先刷新 durable REST 数据，再移除临时流气泡，避免闪烁和半成品入卷。
+- 模型、网络或结构化校验失败统一发布 `error` 并弹窗；不得生成模板回复、假打字或确定性裁决兜底。
+- 同一案件、房间、参与者和 Agent 操作只允许一个进行中的 run；幂等重放返回原 run。
+- 页面刷新通过 active-run 查询和持久化事件游标恢复，断线后从 `Last-Event-ID` 继续。
+
+### 最终统一验证范围
+
+完成全部模块后一次性执行：Python 流式投影与真实 provider 合同、Java NDJSON/SSE/finalizer/权限、前端 Store 与各房间恢复、三服务构建、真实 Qwen 端到端和浏览器截图验证。开发任务之间不重复执行全量回归。
+

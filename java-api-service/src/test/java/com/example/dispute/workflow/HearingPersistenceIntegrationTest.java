@@ -1,6 +1,13 @@
+/*
+ * 所属模块：Temporal 持久化编排。
+ * 文件职责：验证庭审PersistenceIntegration，覆盖 「persistsStateAppendOnlyRecordsDraftAndPartySubmission」、「activityCallsAgentOutsideTransactionAndPersistsEveryNodeAndDraft」、「finalConvergenceRequestSuppressesSupplementalEvidenceAndRequiresPlan」、「hearingAgentFailureDoesNotPersistASyntheticManualReviewDraft」、「finalConvergenceAgentFailureDoesNotProduceADeterministicPlan」、「finalRoundRecoveryQuerySupportsInitialNullCursorOnPostgresql」。
+ * 业务链路：JUnit 构造夹具并驱动真实服务或 Mock 协作者，断言返回值、持久化状态和调用边界；串联举证窗口、共享庭审、按需评议、人工终审、确定性执行和结案恢复。
+ * 关键边界：Workflow 代码必须可重放且不直接做网络或数据库 I/O；副作用放入 Activity
+ */
 package com.example.dispute.workflow;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.verifyNoInteractions;
 
 import com.example.dispute.domain.model.CaseStatus;
@@ -76,6 +83,11 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
+// 所属模块：【Temporal 持久化编排 / 自动化测试层】类型「HearingPersistenceIntegrationTest」。
+// 类型职责：集中验证庭审PersistenceIntegration的业务场景、权限边界和持久化/外部协作契约；本类型显式提供 「databaseProperties」、「persistsStateAppendOnlyRecordsDraftAndPartySubmission」、「activityCallsAgentOutsideTransactionAndPersistsEveryNodeAndDraft」、「finalConvergenceRequestSuppressesSupplementalEvidenceAndRequiresPlan」、「hearingAgentFailureDoesNotPersistASyntheticManualReviewDraft」、「finalConvergenceAgentFailureDoesNotProduceADeterministicPlan」。
+// 协作关系：由 JUnit 发现并执行其中带 @Test 的场景。
+// 边界意义：Workflow 代码必须可重放且不直接做网络或数据库 I/O；副作用放入 Activity
+// Java 语法：class 同时封装状态与方法；final 依赖通过构造器注入后不可重新指向。
 @DataJpaTest(properties = "spring.jpa.hibernate.ddl-auto=validate")
 @Testcontainers
 class HearingPersistenceIntegrationTest {
@@ -90,6 +102,11 @@ class HearingPersistenceIntegrationTest {
                     .withEnv("POSTGRES_PASSWORD", "local_test_password")
                     .withExposedPorts(5432);
 
+    // 所属模块：【Temporal 持久化编排 / 自动化测试层】「HearingPersistenceIntegrationTest.databaseProperties(DynamicPropertyRegistry)」。
+    // 具体功能：「HearingPersistenceIntegrationTest.databaseProperties(DynamicPropertyRegistry)」：作为测试辅助方法为“核对完整业务行为（场景方法「databaseProperties」）”组装或读取「POSTGRESQL.getHost」、「POSTGRESQL.getMappedPort」，供本测试类的场景方法复用。
+    // 上游调用：「HearingPersistenceIntegrationTest.databaseProperties(DynamicPropertyRegistry)」由 JUnit 生命周期或本测试类的场景方法调用。
+    // 下游影响：「HearingPersistenceIntegrationTest.databaseProperties(DynamicPropertyRegistry)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「HearingPersistenceIntegrationTest.databaseProperties(DynamicPropertyRegistry)」守住「Temporal 持久化编排」的可执行规格，尤其防止 「spring.datasource.url」、「:」、「spring.datasource.username」、「dispute_test」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @DynamicPropertySource
     static void databaseProperties(DynamicPropertyRegistry registry) {
         registry.add(
@@ -120,6 +137,11 @@ class HearingPersistenceIntegrationTest {
     @Autowired private RoomMessageRepository roomMessageRepository;
     @Autowired private PlatformTransactionManager transactionManager;
 
+    // 所属模块：【Temporal 持久化编排 / 自动化测试层】「HearingPersistenceIntegrationTest.persistsStateAppendOnlyRecordsDraftAndPartySubmission()」。
+    // 具体功能：「HearingPersistenceIntegrationTest.persistsStateAppendOnlyRecordsDraftAndPartySubmission()」：复现“持久化业务事实（场景方法「persistsStateAppendOnlyRecordsDraftAndPartySubmission」）”场景：驱动 「caseRepository.saveAndFlush」、「stateRepository.saveAndFlush」、「recordRepository.saveAndFlush」、「draftRepository.saveAndFlush」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_hearingdb」、「ORDER_hearingdb」、「user-hearing」、「merchant-hearing」。
+    // 上游调用：「HearingPersistenceIntegrationTest.persistsStateAppendOnlyRecordsDraftAndPartySubmission()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「HearingPersistenceIntegrationTest.persistsStateAppendOnlyRecordsDraftAndPartySubmission()」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「HearingPersistenceIntegrationTest.persistsStateAppendOnlyRecordsDraftAndPartySubmission()」守住「Temporal 持久化编排」的可执行规格，尤其防止 「CASE_hearingdb」、「ORDER_hearingdb」、「user-hearing」、「merchant-hearing」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void persistsStateAppendOnlyRecordsDraftAndPartySubmission() {
         FulfillmentCaseEntity disputeCase =
@@ -225,6 +247,12 @@ class HearingPersistenceIntegrationTest {
                                         .isEqualTo("USER"));
     }
 
+    // 所属模块：【Temporal 持久化编排 / 自动化测试层】「HearingPersistenceIntegrationTest.activityCallsAgentOutsideTransactionAndPersistsEveryNodeAndDraft()」。
+    // 具体功能：「HearingPersistenceIntegrationTest.activityCallsAgentOutsideTransactionAndPersistsEveryNodeAndDraft()」：复现“核对完整业务行为（场景方法「activityCallsAgentOutsideTransactionAndPersistsEveryNodeAndDraft」）”场景：驱动 「caseRepository.saveAndFlush」、「agentRunRepository.findAllByCaseIdOrderByCreatedAtAsc」、「recordRepository.findAllByCaseIdOrderByCreatedAtAsc」、「stateRepository.findByCaseId」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_activitydb」、「idem-activity」、「claims」、「issue_framing_node」。
+    // 上游调用：「HearingPersistenceIntegrationTest.activityCallsAgentOutsideTransactionAndPersistsEveryNodeAndDraft()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「HearingPersistenceIntegrationTest.activityCallsAgentOutsideTransactionAndPersistsEveryNodeAndDraft()」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「HearingPersistenceIntegrationTest.activityCallsAgentOutsideTransactionAndPersistsEveryNodeAndDraft()」守住「Temporal 持久化编排」的可执行规格，尤其防止 「CASE_activitydb」、「idem-activity」、「claims」、「issue_framing_node」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
+    // Java 语法：@Transactional 由 Spring 代理拦截；只有通过代理调用时才会开启或加入事务。
     @Test
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
     void activityCallsAgentOutsideTransactionAndPersistsEveryNodeAndDraft()
@@ -339,6 +367,12 @@ class HearingPersistenceIntegrationTest {
                                         .isEqualTo(CaseStatus.HEARING));
     }
 
+    // 所属模块：【Temporal 持久化编排 / 自动化测试层】「HearingPersistenceIntegrationTest.finalConvergenceRequestSuppressesSupplementalEvidenceAndRequiresPlan()」。
+    // 具体功能：「HearingPersistenceIntegrationTest.finalConvergenceRequestSuppressesSupplementalEvidenceAndRequiresPlan()」：复现“核对完整业务行为（场景方法「finalConvergenceRequestSuppressesSupplementalEvidenceAndRequiresPlan」）”场景：驱动 「caseRepository.saveAndFlush」，再用 「assertThat」、「verifyNoInteractions」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_finalconvergence」、「idem-final-convergence」、「hearing_context」、「completed_statement_rounds」。
+    // 上游调用：「HearingPersistenceIntegrationTest.finalConvergenceRequestSuppressesSupplementalEvidenceAndRequiresPlan()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「HearingPersistenceIntegrationTest.finalConvergenceRequestSuppressesSupplementalEvidenceAndRequiresPlan()」的下游是被测服务、仓储或外部客户端替身；「assertThat、verifyNoInteractions」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「HearingPersistenceIntegrationTest.finalConvergenceRequestSuppressesSupplementalEvidenceAndRequiresPlan()」守住「Temporal 持久化编排」的可执行规格，尤其防止 「CASE_finalconvergence」、「idem-final-convergence」、「hearing_context」、「completed_statement_rounds」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
+    // Java 语法：@Transactional 由 Spring 代理拦截；只有通过代理调用时才会开启或加入事务。
     @Test
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
     void finalConvergenceRequestSuppressesSupplementalEvidenceAndRequiresPlan()
@@ -477,9 +511,15 @@ class HearingPersistenceIntegrationTest {
         verifyNoInteractions(lifecycleNotifications);
     }
 
+    // 所属模块：【Temporal 持久化编排 / 自动化测试层】「HearingPersistenceIntegrationTest.hearingAgentFailureDoesNotPersistASyntheticManualReviewDraft()」。
+    // 具体功能：「HearingPersistenceIntegrationTest.hearingAgentFailureDoesNotPersistASyntheticManualReviewDraft()」：复现“核对完整业务行为（场景方法「hearingAgentFailureDoesNotPersistASyntheticManualReviewDraft」）”场景：驱动 「caseRepository.saveAndFlush」、「draftRepository.findFirstByCaseIdOrderByDraftVersionDesc」、「recordRepository.findAllByCaseIdOrderByCreatedAtAsc」、「agentRunRepository.findAllByCaseIdOrderByCreatedAtAsc」，再用 「assertThatThrownBy」、「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_agentfallback」、「idem-agent-fallback」、「CASEWORKFLOW_CASE_agentfallback」。
+    // 上游调用：「HearingPersistenceIntegrationTest.hearingAgentFailureDoesNotPersistASyntheticManualReviewDraft()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「HearingPersistenceIntegrationTest.hearingAgentFailureDoesNotPersistASyntheticManualReviewDraft()」的下游是被测服务、仓储或外部客户端替身；「assertThatThrownBy、assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「HearingPersistenceIntegrationTest.hearingAgentFailureDoesNotPersistASyntheticManualReviewDraft()」守住「Temporal 持久化编排」的可执行规格，尤其防止 「CASE_agentfallback」、「idem-agent-fallback」、「CASEWORKFLOW_CASE_agentfallback」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
+    // Java 语法：@Transactional 由 Spring 代理拦截；只有通过代理调用时才会开启或加入事务。
     @Test
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
-    void hearingAgentFailureFallsBackToManualReviewDraft() {
+    void hearingAgentFailureDoesNotPersistASyntheticManualReviewDraft() {
         FulfillmentCaseEntity disputeCase =
                 routedCase("CASE_agentfallback", "idem-agent-fallback");
         caseRepository.saveAndFlush(disputeCase);
@@ -517,44 +557,35 @@ class HearingPersistenceIntegrationTest {
                         Duration.ofHours(72),
                         2));
 
-        var result =
-                activities.analyzeHearing(
-                        new HearingAnalysisActivityCommand(
-                                disputeCase.getId(), workflowId, 0, false, false));
+        assertThatThrownBy(
+                        () ->
+                                activities.analyzeHearing(
+                                        new HearingAnalysisActivityCommand(
+                                                disputeCase.getId(),
+                                                workflowId,
+                                                0,
+                                                false,
+                                                false)))
+                .isInstanceOf(RuntimeException.class)
+                .hasMessageContaining("agent model service unavailable");
 
-        assertThat(result.manualRequired()).isTrue();
-        assertThat(result.requiresAdditionalEvidence()).isFalse();
-        assertThat(result.hearingStatus()).isEqualTo("RUNNING");
-        assertThat(result.draftId()).startsWith("DRAFT_");
-        assertThat(
-                        draftRepository.findFirstByCaseIdOrderByDraftVersionDesc(
-                                disputeCase.getId()))
-                .hasValueSatisfying(
-                        draft -> {
-                            assertThat(draft.getDraftStatus())
-                                    .isEqualTo("PENDING_HUMAN_REVIEW");
-                            assertThat(draft.getRecommendedDecision())
-                                    .isEqualTo("MANUAL_REVIEW_REQUIRED");
-                            assertThat(draft.getDraftText())
-                                    .contains("模型服务暂不可用");
-                        });
-        assertThat(
-                        recordRepository.findAllByCaseIdOrderByCreatedAtAsc(
-                                disputeCase.getId()))
-                .extracting(HearingRecordEntity::getNodeName)
-                .containsExactly("adjudication_draft_node");
+        assertThat(draftRepository.findFirstByCaseIdOrderByDraftVersionDesc(disputeCase.getId()))
+                .isEmpty();
+        assertThat(recordRepository.findAllByCaseIdOrderByCreatedAtAsc(disputeCase.getId()))
+                .isEmpty();
         assertThat(agentRunRepository.findAllByCaseIdOrderByCreatedAtAsc(disputeCase.getId()))
-                .singleElement()
-                .satisfies(
-                        run -> {
-                            assertThat(run.getTraceId()).isEqualTo("TRACE_" + workflowId);
-                            assertThat(run.getOutputRef()).isEqualTo(result.draftId());
-                    });
+                .isEmpty();
     }
 
+    // 所属模块：【Temporal 持久化编排 / 自动化测试层】「HearingPersistenceIntegrationTest.finalConvergenceAgentFailureDoesNotProduceADeterministicPlan()」。
+    // 具体功能：「HearingPersistenceIntegrationTest.finalConvergenceAgentFailureDoesNotProduceADeterministicPlan()」：复现“核对完整业务行为（场景方法「finalConvergenceAgentFailureDoesNotProduceADeterministicPlan」）”场景：驱动 「caseRepository.saveAndFlush」、「draftRepository.findFirstByCaseIdOrderByDraftVersionDesc」，再用 「assertThatThrownBy」、「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_finalfallback」、「idem-final-fallback」、「CASEWORKFLOW_CASE_finalfallback」。
+    // 上游调用：「HearingPersistenceIntegrationTest.finalConvergenceAgentFailureDoesNotProduceADeterministicPlan()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「HearingPersistenceIntegrationTest.finalConvergenceAgentFailureDoesNotProduceADeterministicPlan()」的下游是被测服务、仓储或外部客户端替身；「assertThatThrownBy、assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「HearingPersistenceIntegrationTest.finalConvergenceAgentFailureDoesNotProduceADeterministicPlan()」守住「Temporal 持久化编排」的可执行规格，尤其防止 「CASE_finalfallback」、「idem-final-fallback」、「CASEWORKFLOW_CASE_finalfallback」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
+    // Java 语法：@Transactional 由 Spring 代理拦截；只有通过代理调用时才会开启或加入事务。
     @Test
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
-    void finalConvergenceAgentFailureStillProducesConcreteReviewablePlan() {
+    void finalConvergenceAgentFailureDoesNotProduceADeterministicPlan() {
         FulfillmentCaseEntity disputeCase =
                 routedCase("CASE_finalfallback", "idem-final-fallback");
         caseRepository.saveAndFlush(disputeCase);
@@ -593,37 +624,29 @@ class HearingPersistenceIntegrationTest {
                         2));
         seedFinalCourtroomContext(disputeCase.getId(), workflowId);
 
-        var result =
-                activities.analyzeHearing(
-                        new HearingAnalysisActivityCommand(
-                                disputeCase.getId(),
-                                workflowId,
-                                3,
-                                false,
-                                true,
-                                true,
-                                3));
+        assertThatThrownBy(
+                        () ->
+                                activities.analyzeHearing(
+                                        new HearingAnalysisActivityCommand(
+                                                disputeCase.getId(),
+                                                workflowId,
+                                                3,
+                                                false,
+                                                true,
+                                                true,
+                                                3)))
+                .isInstanceOf(RuntimeException.class)
+                .hasMessageContaining("agent model service unavailable");
 
-        assertThat(result.manualRequired()).isTrue();
-        assertThat(result.requiresAdditionalEvidence()).isFalse();
-        assertThat(result.draftId()).startsWith("DRAFT_");
-        assertThat(
-                        draftRepository.findFirstByCaseIdOrderByDraftVersionDesc(
-                                disputeCase.getId()))
-                .hasValueSatisfying(
-                        draft -> {
-                            assertThat(draft.getDraftStatus())
-                                    .isEqualTo("PENDING_HUMAN_REVIEW");
-                            assertThat(draft.getRecommendedDecision())
-                                    .contains("RESHIP");
-                            assertThat(draft.getRecommendedDecision())
-                                    .doesNotContain("MANUAL_REVIEW_REQUIRED");
-                            assertThat(draft.getDraftText())
-                                    .contains("最终轮次")
-                                    .contains("补发");
-                        });
+        assertThat(draftRepository.findFirstByCaseIdOrderByDraftVersionDesc(disputeCase.getId()))
+                .isEmpty();
     }
 
+    // 所属模块：【Temporal 持久化编排 / 自动化测试层】「HearingPersistenceIntegrationTest.finalRoundRecoveryQuerySupportsInitialNullCursorOnPostgresql()」。
+    // 具体功能：「HearingPersistenceIntegrationTest.finalRoundRecoveryQuerySupportsInitialNullCursorOnPostgresql()」：复现“核对完整业务行为（场景方法「finalRoundRecoveryQuerySupportsInitialNullCursorOnPostgresql」）”场景：驱动 「caseRepository.saveAndFlush」、「hearingRoundRepository.saveAndFlush」、「hearingRoundRepository.findFinalRoundsWithoutDraft」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_finalcursor」、「idem-final-cursor」、「HEARING_ROUND_finalcursor_3」、「2026-07-07T01:05:00Z」。
+    // 上游调用：「HearingPersistenceIntegrationTest.finalRoundRecoveryQuerySupportsInitialNullCursorOnPostgresql()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「HearingPersistenceIntegrationTest.finalRoundRecoveryQuerySupportsInitialNullCursorOnPostgresql()」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「HearingPersistenceIntegrationTest.finalRoundRecoveryQuerySupportsInitialNullCursorOnPostgresql()」守住「Temporal 持久化编排」的可执行规格，尤其防止 「CASE_finalcursor」、「idem-final-cursor」、「HEARING_ROUND_finalcursor_3」、「2026-07-07T01:05:00Z」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void finalRoundRecoveryQuerySupportsInitialNullCursorOnPostgresql() {
         FulfillmentCaseEntity disputeCase =
@@ -658,6 +681,12 @@ class HearingPersistenceIntegrationTest {
                 .contains("CASE_finalcursor");
     }
 
+    // 所属模块：【Temporal 持久化编排 / 自动化测试层】「HearingPersistenceIntegrationTest.juryRepairUsesTheNextLockedRoomSequenceWhenASequenceBlockerAlreadyExists()」。
+    // 具体功能：「HearingPersistenceIntegrationTest.juryRepairUsesTheNextLockedRoomSequenceWhenASequenceBlockerAlreadyExists()」：复现“核对完整业务行为（场景方法「juryRepairUsesTheNextLockedRoomSequenceWhenASequenceBlockerAlreadyExists」）”场景：驱动 「caseRepository.saveAndFlush」、「caseRoomRepository.saveAndFlush」、「hearingRoundRepository.saveAndFlush」、「roomMessageRepository.saveAndFlush」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_jurytxrollback」、「idem-jury-tx-rollback」、「ROOM_」、「2026-07-10T08:00:00Z」。
+    // 上游调用：「HearingPersistenceIntegrationTest.juryRepairUsesTheNextLockedRoomSequenceWhenASequenceBlockerAlreadyExists()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「HearingPersistenceIntegrationTest.juryRepairUsesTheNextLockedRoomSequenceWhenASequenceBlockerAlreadyExists()」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「HearingPersistenceIntegrationTest.juryRepairUsesTheNextLockedRoomSequenceWhenASequenceBlockerAlreadyExists()」守住「Temporal 持久化编排」的可执行规格，尤其防止 「CASE_jurytxrollback」、「idem-jury-tx-rollback」、「ROOM_」、「2026-07-10T08:00:00Z」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
+    // Java 语法：@Transactional 由 Spring 代理拦截；只有通过代理调用时才会开启或加入事务。
     @Test
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
     void juryRepairUsesTheNextLockedRoomSequenceWhenASequenceBlockerAlreadyExists()
@@ -775,6 +804,11 @@ class HearingPersistenceIntegrationTest {
         assertThat(roomMessageRepository.findById(sequenceBlocker.getId())).isPresent();
     }
 
+    // 所属模块：【Temporal 持久化编排 / 自动化测试层】「HearingPersistenceIntegrationTest.activeContextAssembler(ObjectMapper)」。
+    // 具体功能：「HearingPersistenceIntegrationTest.activeContextAssembler(ObjectMapper)」：作为测试辅助方法为“核对完整业务行为（场景方法「activeContextAssembler」）”组装或读取「ActiveCourtroomContextAssembler」、「AgentA2AMessageService」、「ToolRegistry」 输入夹具，供本测试类的场景方法复用。
+    // 上游调用：「HearingPersistenceIntegrationTest.activeContextAssembler(ObjectMapper)」由本测试类中的 「HearingPersistenceIntegrationTest.activityCallsAgentOutsideTransactionAndPersistsEveryNodeAndDraft」、「HearingPersistenceIntegrationTest.finalConvergenceRequestSuppressesSupplementalEvidenceAndRequiresPlan」、「HearingPersistenceIntegrationTest.hearingAgentFailureDoesNotPersistASyntheticManualReviewDraft」、「HearingPersistenceIntegrationTest.finalConvergenceAgentFailureDoesNotProduceADeterministicPlan」 调用。
+    // 下游影响：「HearingPersistenceIntegrationTest.activeContextAssembler(ObjectMapper)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「HearingPersistenceIntegrationTest.activeContextAssembler(ObjectMapper)」守住「Temporal 持久化编排」的可执行规格；后续重构若破坏契约会在进入集成环境前失败。
     private ActiveCourtroomContextAssembler activeContextAssembler(ObjectMapper mapper) {
         return new ActiveCourtroomContextAssembler(
                 recordRepository,
@@ -787,6 +821,12 @@ class HearingPersistenceIntegrationTest {
                 mapper);
     }
 
+    // 所属模块：【Temporal 持久化编排 / 自动化测试层】「HearingPersistenceIntegrationTest.seedFinalCourtroomContext(String,String)」。
+    // 具体功能：「HearingPersistenceIntegrationTest.seedFinalCourtroomContext(String,String)」：作为测试辅助方法为“核对完整业务行为（场景方法「seedFinalCourtroomContext」）”组装或读取「stateRepository.findByWorkflowId」、「recordRepository.saveAndFlush」、「evidenceDossierRepository.saveAndFlush」、「hearingRoundRepository.saveAndFlush」，供本测试类的场景方法复用。
+    // 上游调用：「HearingPersistenceIntegrationTest.seedFinalCourtroomContext(String,String)」由本测试类中的 「HearingPersistenceIntegrationTest.finalConvergenceRequestSuppressesSupplementalEvidenceAndRequiresPlan」、「HearingPersistenceIntegrationTest.finalConvergenceAgentFailureDoesNotProduceADeterministicPlan」 调用。
+    // 下游影响：「HearingPersistenceIntegrationTest.seedFinalCourtroomContext(String,String)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「HearingPersistenceIntegrationTest.seedFinalCourtroomContext(String,String)」守住「Temporal 持久化编排」的可执行规格，尤其防止 「HREC_BOOTSTRAP_」、「C0_COURT_BOOTSTRAP」、「BOOTSTRAP_DOSSIER_SNAPSHOT」、「{}」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
+    // Java 语法：Optional 表示结果可能不存在；orElseThrow 会把空值分支转换为明确异常。
     private void seedFinalCourtroomContext(String caseId, String workflowId) {
         HearingStateEntity state = stateRepository.findByWorkflowId(workflowId).orElseThrow();
         recordRepository.saveAndFlush(
@@ -902,6 +942,11 @@ class HearingPersistenceIntegrationTest {
                         "jury-panel"));
     }
 
+    // 所属模块：【Temporal 持久化编排 / 自动化测试层】「HearingPersistenceIntegrationTest.routedCase(String,String)」。
+    // 具体功能：「HearingPersistenceIntegrationTest.routedCase(String,String)」：作为测试辅助方法为“核对完整业务行为（场景方法「routedCase」）”组装或读取「FulfillmentCaseEntity.create」、「disputeCase.completeIntake」、「disputeCase.markDossierBuilt」、「disputeCase.applyRoute」，供本测试类的场景方法复用。
+    // 上游调用：「HearingPersistenceIntegrationTest.routedCase(String,String)」由本测试类中的 「HearingPersistenceIntegrationTest.activityCallsAgentOutsideTransactionAndPersistsEveryNodeAndDraft」、「HearingPersistenceIntegrationTest.finalConvergenceRequestSuppressesSupplementalEvidenceAndRequiresPlan」、「HearingPersistenceIntegrationTest.hearingAgentFailureDoesNotPersistASyntheticManualReviewDraft」、「HearingPersistenceIntegrationTest.finalConvergenceAgentFailureDoesNotProduceADeterministicPlan」 调用。
+    // 下游影响：「HearingPersistenceIntegrationTest.routedCase(String,String)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「HearingPersistenceIntegrationTest.routedCase(String,String)」守住「Temporal 持久化编排」的可执行规格，尤其防止 「ORDER_」、「user-hearing」、「merchant-hearing」、「NON_RECEIPT」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static FulfillmentCaseEntity routedCase(
             String caseId, String idempotencyKey) {
         FulfillmentCaseEntity disputeCase =

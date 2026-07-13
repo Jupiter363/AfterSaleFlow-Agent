@@ -1,3 +1,5 @@
+# 文件作用：自动化测试文件，验证 container_document_smoke 相关模块的行为、契约或页面布局。
+
 """Container smoke test for the real MarkItDown document dependencies."""
 
 from io import BytesIO
@@ -10,6 +12,10 @@ from openpyxl import Workbook
 from app.parsers import MarkItDownEngine
 
 
+# 所属模块：Python 支撑模块 > container_document_smoke；函数角色：模块公开业务函数。
+# 具体功能：`make_docx` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`BytesIO`、`output.getvalue`、`ZipFile`。
+# 上下游：上游为 本文件的 `main`；下游为 协作调用 `BytesIO`、`output.getvalue`、`ZipFile`、`archive.writestr`。
+# 系统意义：该函数在系统中的业务边界是：接口稳定、错误显式、不绕过权限审计。
 def make_docx(text: str) -> bytes:
     output = BytesIO()
     with ZipFile(output, "w", ZIP_DEFLATED) as archive:
@@ -39,6 +45,10 @@ def make_docx(text: str) -> bytes:
     return output.getvalue()
 
 
+# 所属模块：Python 支撑模块 > container_document_smoke；函数角色：模块公开业务函数。
+# 具体功能：`make_xlsx` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`BytesIO`、`Workbook`、`workbook.save`。
+# 上下游：上游为 本文件的 `main`；下游为 协作调用 `BytesIO`、`Workbook`、`workbook.save`、`output.getvalue`。
+# 系统意义：该函数在系统中的业务边界是：接口稳定、错误显式、不绕过权限审计。
 def make_xlsx(text: str) -> bytes:
     output = BytesIO()
     workbook = Workbook()
@@ -47,6 +57,10 @@ def make_xlsx(text: str) -> bytes:
     return output.getvalue()
 
 
+# 所属模块：Python 支撑模块 > container_document_smoke；函数角色：模块公开业务函数。
+# 具体功能：`make_pdf` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`encode`、`output.extend`、`offsets.append`。
+# 上下游：上游为 本文件的 `main`；下游为 协作调用 `encode`、`output.extend`、`offsets.append`。
+# 系统意义：该函数在系统中的业务边界是：接口稳定、错误显式、不绕过权限审计。
 def make_pdf(text: str) -> bytes:
     stream = f"BT /F1 18 Tf 72 720 Td ({text}) Tj ET".encode("ascii")
     objects = [
@@ -78,6 +92,10 @@ def make_pdf(text: str) -> bytes:
     return bytes(output)
 
 
+# 所属模块：Python 支撑模块 > container_document_smoke；函数角色：模块公开业务函数。
+# 具体功能：`main` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`MarkItDownEngine`、`TemporaryDirectory`、`fixtures.items`。
+# 上下游：上游为 相邻模块输入；下游为 本文件的 `make_docx`、`make_xlsx`、`make_pdf`。
+# 系统意义：该函数在系统中的业务边界是：接口稳定、错误显式、不绕过权限审计。
 def main() -> None:
     engine = MarkItDownEngine()
     fixtures = {

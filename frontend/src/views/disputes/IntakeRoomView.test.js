@@ -1,13 +1,21 @@
+// 文件作用：自动化测试文件，验证 IntakeRoomView.test 相关模块的行为、契约或页面布局。
+// 说明：本注释用于帮助读者先了解本文件职责，再继续阅读具体实现。
+
 import { flushPromises, mount } from "@vue/test-utils";
 import { readFileSync } from "node:fs";
 import {
   createMemoryHistory,
   createRouter,
 } from "vue-router";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { actor } from "../../state/actor";
+import {
+  agentStreamStore,
+  clearAgentStreams,
+} from "../../stores/agentStream";
 import IntakeRoomView from "./IntakeRoomView.vue";
 
+// 业务位置：【前端接待室】readUtf8Source：读取 当前阶段业务数据，并依据当前案件、角色和会话权限裁剪成可用输入。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 function readUtf8Source(path) {
   return readFileSync(path, "utf8").replace(/\r\n/g, "\n");
 }
@@ -37,6 +45,52 @@ const analysis = {
   admission_recommendation: "建议受理",
 };
 
+const readyTurnMemory = {
+  turn_no: 1,
+  case_intake_dossier: {
+    dossier_version: 1,
+    quality_score: 88,
+    ready_for_next_step: true,
+    admission_recommendation: "ACCEPTED",
+    dossier: {
+      schema_version: "intake_case_detail.v1",
+      case_story: {
+        one_sentence_summary: "用户称物流显示签收，但本人没有收到包裹。",
+      },
+      references: {
+        order_reference: "ORDER-1",
+        after_sales_reference: "AFTER-1",
+        logistics_reference: "LOG-1",
+      },
+      claim_resolution: {
+        initiator_role: "USER",
+        requested_resolution: "核实签收并退款",
+        original_statement: dispute.description,
+      },
+      respondent_attitude: {
+        respondent_role: "MERCHANT",
+        attitude: "NOT_RESPONDED",
+        position: "商家尚未回应",
+      },
+      dispute_core_state: {
+        core_conflict: "签收记录与用户未收货陈述存在冲突。",
+        next_verification_focus: ["核验签收人身份", "核验实际投递位置"],
+      },
+      intake_quality: {
+        score: 88,
+        threshold: 85,
+        ready_for_next_step: true,
+      },
+    },
+  },
+};
+
+const connectedModelHealth = vi.fn().mockResolvedValue({
+  status: "UP",
+  model_status: "CONNECTED",
+});
+
+// 业务位置：【前端接待室】mountView：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 async function mountView(confirmAction = vi.fn(), eventStreamer = null, cancelAction = vi.fn()) {
   const router = createRouter({
     history: createMemoryHistory(),
@@ -51,16 +105,20 @@ async function mountView(confirmAction = vi.fn(), eventStreamer = null, cancelAc
     props: {
       initialDispute: dispute,
       initialAnalysis: analysis,
+      initialTurnMemory: readyTurnMemory,
       initialMessages: [],
       confirmAction,
       cancelAction,
       eventStreamer,
+      modelHealthLoader: connectedModelHealth,
     },
     global: { plugins: [router] },
   });
+  await flushPromises();
   return { wrapper, router, confirmAction, cancelAction };
 }
 
+// 业务位置：【前端接待室】mountInteractiveView：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 async function mountInteractiveView(options = {}) {
   const router = createRouter({
     history: createMemoryHistory(),
@@ -71,37 +129,47 @@ async function mountInteractiveView(options = {}) {
   });
   await router.push("/disputes/CASE_INTAKE_1/intake");
   await router.isReady();
-  return mount(IntakeRoomView, {
+  const wrapper = mount(IntakeRoomView, {
     props: {
       initialDispute: dispute,
       initialAnalysis: options.initialAnalysis || analysis,
       initialMessages: Object.hasOwn(options, "initialMessages") ? options.initialMessages : [],
       initialTurnMemory: Object.hasOwn(options, "initialTurnMemory")
         ? options.initialTurnMemory
-        : null,
+        : readyTurnMemory,
       postMessageAction: options.postMessageAction,
       messagesLoader: options.messagesLoader,
       turnMemoryLoader: options.turnMemoryLoader,
       confirmAction: options.confirmAction || vi.fn(),
       cancelAction: options.cancelAction,
+      modelHealthLoader: options.modelHealthLoader || connectedModelHealth,
     },
     global: { plugins: [router] },
     attachTo: options.attachTo,
   });
+  await flushPromises();
+  return wrapper;
 }
 
+// 业务位置：【前端接待室】describe：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 describe("IntakeRoomView", () => {
   beforeEach(() => {
+    clearAgentStreams({}, { abort: true });
     actor.id = "user-local";
     actor.role = "USER";
   });
 
+  afterEach(() => {
+    clearAgentStreams({}, { abort: true });
+  });
+
+  // 业务位置：【前端接待室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
   it("turns intake analysis into correctable dossier stickers", async () => {
     const { wrapper } = await mountView();
 
     expect(wrapper.text()).toContain("争议接待官");
     expect(wrapper.get("[data-dispute-detail-card]").text()).toContain("争议详情");
-    expect(wrapper.text()).toContain("未收到包裹");
+    expect(wrapper.text()).toContain("没有收到");
     expect(wrapper.get("[data-dispute-detail-respondent]").text()).toContain("商家尚未回应");
     expect(wrapper.get("[data-verification-gaps]").text()).toContain("下一步核验重点");
     expect(wrapper.text()).toContain("高风险");
@@ -114,6 +182,7 @@ describe("IntakeRoomView", () => {
     expect(wrapper.find("[data-single-party-statement]").exists()).toBe(true);
   });
 
+  // 业务位置：【前端接待室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
   it("opens the evidence room only after the server confirms admission", async () => {
     const confirmAction = vi.fn().mockResolvedValue({
       admissible: true,
@@ -137,6 +206,7 @@ describe("IntakeRoomView", () => {
     );
   });
 
+  // 业务位置：【前端接待室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
   it("subscribes to the resumable case stream and aborts it on room exit", async () => {
     let signal;
     const eventStreamer = vi.fn(async (options) => {
@@ -157,6 +227,39 @@ describe("IntakeRoomView", () => {
     expect(signal.aborted).toBe(true);
   });
 
+  it("keeps the room header connected while an intake AgentRun is actively streaming", async () => {
+    agentStreamStore.runs.AGENT_RUN_INTAKE_LIVE = {
+      runId: "AGENT_RUN_INTAKE_LIVE",
+      caseId: "CASE_INTAKE_1",
+      roomType: "INTAKE",
+      actorId: "user-local",
+      actorRole: "USER",
+      status: "STREAMING",
+      content: "正在生成首轮追问",
+      startedAt: Date.now(),
+    };
+    const disconnectedModelHealth = vi.fn().mockResolvedValue({
+      status: "DOWN",
+      model_status: "DISCONNECTED",
+    });
+
+    const wrapper = await mountInteractiveView({
+      modelHealthLoader: disconnectedModelHealth,
+    });
+
+    expect(wrapper.get("[data-intake-work-status]").text()).toContain(
+      "LIVE GENERATION",
+    );
+    expect(wrapper.get('[data-connection="connected"]').text()).toContain(
+      "实时连接",
+    );
+    expect(wrapper.text()).not.toContain("暂时离线");
+    expect(wrapper.get('[data-model-state="connected"]').text()).toContain(
+      "正在输出",
+    );
+  });
+
+  // 业务位置：【前端接待室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
   it("refreshes room messages and the live dossier after every intake dialogue turn", async () => {
     const postMessageAction = vi.fn().mockResolvedValue({
       id: "MESSAGE_USER_1",
@@ -219,6 +322,7 @@ describe("IntakeRoomView", () => {
     expect(wrapper.text()).not.toContain("delivery conflict");
   });
 
+  // 业务位置：【前端接待室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
   it("shows the party statement immediately while the intake officer is thinking", async () => {
     let resolvePost;
     const postMessageAction = vi.fn(
@@ -269,6 +373,7 @@ describe("IntakeRoomView", () => {
     expect(wrapper.text()).toContain("我已记录你的退款诉求。");
   });
 
+  // 业务位置：【前端接待室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
   it("maps backend enum values and missing slot keys into Chinese dossier copy", async () => {
     const wrapper = await mountInteractiveView({
       initialTurnMemory: {
@@ -339,10 +444,11 @@ describe("IntakeRoomView", () => {
       "The user reports",
     );
     expect(wrapper.get("[data-origin-statement-text]").attributes("title")).toBe(
-      "The user reports that the watch is broken. No additional details or evidence provided.",
+      dispute.description,
     );
   });
 
+  // 业务位置：【前端接待室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
   it("renders the current case-detail dossier as the right-side board", async () => {
     const wrapper = await mountInteractiveView({
       initialAnalysis: {
@@ -388,6 +494,12 @@ describe("IntakeRoomView", () => {
             requested_resolution: {
               requested_outcome: "REFUND",
               expected_resolution_text: "用户希望退款。",
+            },
+            claim_resolution: {
+              initiator_role: "MERCHANT",
+              requested_resolution: "REFUND",
+              normalized_statement: "商家要求等待物流核查。",
+              original_statement: "商家要求等待物流核查。",
             },
             risk_assessment: {
               case_grade: "MEDIUM",
@@ -476,6 +588,7 @@ describe("IntakeRoomView", () => {
     expect(wrapper.text()).not.toContain("可继续对话纠正");
   });
 
+  // 业务位置：【前端接待室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
   it("renders the claim and respondent attitude state from the intake dossier", async () => {
     const wrapper = await mountInteractiveView({
       initialTurnMemory: {
@@ -563,6 +676,7 @@ describe("IntakeRoomView", () => {
     expect(wrapper.text()).not.toContain("NOT_RESPONDED");
   });
 
+  // 业务位置：【前端接待室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
   it("marks an extracted respondent attitude as the initiator's subjective account", async () => {
     const wrapper = await mountInteractiveView({
       initialTurnMemory: {
@@ -600,6 +714,7 @@ describe("IntakeRoomView", () => {
     );
   });
 
+  // 业务位置：【前端接待室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
   it("marks a legacy party-position fallback as a subjective account", async () => {
     const wrapper = await mountInteractiveView({
       initialTurnMemory: {
@@ -634,6 +749,7 @@ describe("IntakeRoomView", () => {
     );
   });
 
+  // 业务位置：【前端接待室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
   it("renders the original statement without trimming or replacing internal-looking tokens", async () => {
     const originalStatement = "  我原话里写了 REFUND 和 UNKNOWN。\n\n请保持原样。  ";
     const wrapper = await mountInteractiveView({
@@ -664,6 +780,7 @@ describe("IntakeRoomView", () => {
     );
   });
 
+  // 业务位置：【前端接待室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
   it("shows claim status and verification gaps for legacy case-detail dossiers without structured claim fields", async () => {
     const wrapper = await mountInteractiveView({
       initialAnalysis: {
@@ -730,6 +847,7 @@ describe("IntakeRoomView", () => {
     expect(gaps.findAll("[data-verification-gap-item]")).toHaveLength(2);
   });
 
+  // 业务位置：【前端接待室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
   it("uses the user position as the respondent response when the merchant initiated the dispute", async () => {
     const wrapper = await mountInteractiveView({
       initialAnalysis: {
@@ -765,6 +883,7 @@ describe("IntakeRoomView", () => {
     expect(respondent.text()).not.toContain("商家请求平台驳回退款");
   });
 
+  // 业务位置：【前端接待室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
   it("asks for the user response when a merchant-initiated dispute has no respondent position", async () => {
     const wrapper = await mountInteractiveView({
       initialAnalysis: {
@@ -799,6 +918,7 @@ describe("IntakeRoomView", () => {
     expect(wrapper.get("[data-verification-gaps]").text()).not.toContain("商家对诉求的明确回应");
   });
 
+  // 业务位置：【前端接待室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
   it("preserves external reference identifiers without translating enum-like tokens", async () => {
     const wrapper = await mountInteractiveView({
       initialAnalysis: {
@@ -806,6 +926,20 @@ describe("IntakeRoomView", () => {
         order_reference: "ORDER_MERCHANT_INITIATED",
         after_sales_reference: "AFTER_USER_HIGH",
         logistics_reference: "LOGISTICS_MEDIUM_USER",
+      },
+      initialTurnMemory: {
+        ...readyTurnMemory,
+        case_intake_dossier: {
+          ...readyTurnMemory.case_intake_dossier,
+          dossier: {
+            ...readyTurnMemory.case_intake_dossier.dossier,
+            references: {
+              order_reference: "ORDER_MERCHANT_INITIATED",
+              after_sales_reference: "AFTER_USER_HIGH",
+              logistics_reference: "LOGISTICS_MEDIUM_USER",
+            },
+          },
+        },
       },
     });
 
@@ -815,6 +949,7 @@ describe("IntakeRoomView", () => {
     expect(index.text()).toContain("LOGISTICS_MEDIUM_USER");
   });
 
+  // 业务位置：【前端接待室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
   it("keeps a claim status placeholder visible when the intake memory has no case-detail schema yet", async () => {
     const wrapper = await mountInteractiveView({
       initialAnalysis: {
@@ -841,13 +976,14 @@ describe("IntakeRoomView", () => {
 
     const disputeDetail = wrapper.get("[data-dispute-detail-card]");
     expect(disputeDetail.text()).toContain("争议详情");
-    expect(disputeDetail.get("[data-dispute-detail-claim]").text()).toContain("诉求待确认");
+    expect(disputeDetail.get("[data-dispute-detail-claim]").text()).toContain("等待接待官整理");
     expect(disputeDetail.get("[data-dispute-detail-claim]").text()).not.toContain("请求待确认诉求");
     expect(disputeDetail.get("[data-dispute-detail-claim]").text()).not.toContain("待确认诉求待确认");
-    expect(disputeDetail.get("[data-dispute-detail-respondent]").text()).toContain("商家尚未回应");
+    expect(disputeDetail.get("[data-dispute-detail-respondent]").text()).toContain("等待接待官整理");
     expect(disputeDetail.text()).not.toContain("UNKNOWN");
   });
 
+  // 业务位置：【前端接待室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
   it("does not duplicate unknown role and unknown resolution in the claim placeholder", async () => {
     const wrapper = await mountInteractiveView({
       initialAnalysis: {
@@ -873,15 +1009,16 @@ describe("IntakeRoomView", () => {
     });
 
     const disputeDetail = wrapper.get("[data-dispute-detail-card]");
-    expect(disputeDetail.get("[data-dispute-detail-claim]").text()).toContain("诉求待确认");
+    expect(disputeDetail.get("[data-dispute-detail-claim]").text()).toContain("等待接待官整理");
     expect(disputeDetail.get("[data-dispute-detail-claim]").text()).not.toContain("待确认诉求待确认");
-    expect(disputeDetail.get("[data-dispute-detail-respondent]").text()).toContain("对方尚未回应");
+    expect(disputeDetail.get("[data-dispute-detail-respondent]").text()).toContain("等待接待官整理");
     expect(disputeDetail.get("[data-dispute-detail-respondent]").text()).not.toContain("待确认尚未回应");
     expect(disputeDetail.text()).not.toContain("待确认尚未");
     expect(disputeDetail.text()).not.toContain("待确认的具体诉求");
     expect(disputeDetail.text()).not.toContain("待确认诉求与待确认回应");
   });
 
+  // 业务位置：【前端接待室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
   it("shows service errors in a modal notice instead of embedding them in the right dossier card", async () => {
     const wrapper = await mountInteractiveView({
       confirmAction: vi.fn().mockRejectedValue(new Error("服务返回了不可解析的响应（HTTP 502）")),
@@ -898,6 +1035,7 @@ describe("IntakeRoomView", () => {
     expect(wrapper.get("[data-case-detail-dossier]").text()).not.toContain("HTTP 502");
   });
 
+  // 业务位置：【前端接待室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
   it("keeps long dossier text bounded while preserving full content for inspection", async () => {
     const longTitle = "物流显示签收但用户称本人、家人、同住人和门岗均未收到商品且商家坚持以系统签收记录拒绝退款的复杂履约争议";
     const longSummary =
@@ -934,6 +1072,7 @@ describe("IntakeRoomView", () => {
               requested_resolution: "REFUND",
               requested_amount: 299,
               requested_items: "儿童手表 1 件，订单内还包含表带和保护膜，需要确认是否整体退款",
+              original_statement: longStatement,
               normalized_statement: "用户称未实际收到包裹，并请求退款。",
             },
             respondent_attitude: {
@@ -1001,6 +1140,7 @@ describe("IntakeRoomView", () => {
     expect(source).toContain("data-origin-statement-text");
   });
 
+  // 业务位置：【前端接待室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
   it("keeps four verification previews and opens complete dossier text accessibly", async () => {
     const longSummary = "摘".repeat(300);
     const longStatement = "原".repeat(500);
@@ -1201,6 +1341,7 @@ describe("IntakeRoomView", () => {
     }
   });
 
+  // 业务位置：【前端接待室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
   it("infers the single-party intake initiator from immutable party messages when the model slot is missing", async () => {
     actor.id = "user-local";
     actor.role = "USER";
@@ -1232,6 +1373,7 @@ describe("IntakeRoomView", () => {
     expect(wrapper.find("[data-enter-evidence-room]").exists()).toBe(true);
   });
 
+  // 业务位置：【前端接待室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
   it("lays out the submit and resolve actions as a two-column action bar", async () => {
     const { wrapper } = await mountView();
 
@@ -1242,6 +1384,7 @@ describe("IntakeRoomView", () => {
     expect(actions.classes()).toContain("intake-dossier__actions--two-column");
   });
 
+  // 业务位置：【前端接待室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
   it("keeps persisted handoff remarks out of the right-side judgment area without adding a second input box", async () => {
     const wrapper = await mountInteractiveView({
       initialTurnMemory: {
@@ -1309,6 +1452,7 @@ describe("IntakeRoomView", () => {
     expect(wrapper.find(".intake-dossier__confirm textarea").exists()).toBe(false);
   });
 
+  // 业务位置：【前端接待室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
   it("keeps agent memory internals out of the party intake room UI", async () => {
     const wrapper = await mountInteractiveView({
       initialTurnMemory: {
@@ -1346,6 +1490,7 @@ describe("IntakeRoomView", () => {
     expect(wrapper.text()).not.toContain("Mem0");
   });
 
+  // 业务位置：【前端接待室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
   it("persists intake cancellation instead of only changing local state", async () => {
     const confirmAction = vi.fn();
     const cancelAction = vi.fn().mockResolvedValue({
@@ -1373,6 +1518,7 @@ describe("IntakeRoomView", () => {
     );
   });
 
+  // 业务位置：【前端接待室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
   it("keeps reviewer identities from sending party dialogue to the intake agent", async () => {
     actor.id = "reviewer-local";
     actor.role = "PLATFORM_REVIEWER";
@@ -1386,6 +1532,7 @@ describe("IntakeRoomView", () => {
     expect(wrapper.find("[data-intake-actions-readonly]").exists()).toBe(true);
   });
 
+  // 业务位置：【前端接待室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
   it("keeps the non-initiating party out of the single-party intake composer", async () => {
     actor.id = "merchant-local";
     actor.role = "MERCHANT";
@@ -1402,6 +1549,7 @@ describe("IntakeRoomView", () => {
     expect(wrapper.find("[data-enter-evidence-room]").exists()).toBe(true);
   });
 
+  // 业务位置：【前端接待室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
   it("clears intake messages and latest memory immediately when actor changes in-place", async () => {
     const wrapper = await mountInteractiveView({
       initialMessages: [
@@ -1446,6 +1594,7 @@ describe("IntakeRoomView", () => {
     expect(wrapper.text()).not.toContain("USER-only dossier text");
   });
 
+  // 业务位置：【前端接待室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
   it("ignores stale intake refresh results from the previous actor", async () => {
     let resolveUserMemory;
     const messagesLoader = vi
@@ -1506,6 +1655,7 @@ describe("IntakeRoomView", () => {
     expect(wrapper.text()).not.toContain("USER stale right board");
   });
 
+  // 业务位置：【前端接待室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
   it("keeps the intake room outer cards at a fixed non-stretching height", () => {
     const source = readUtf8Source("src/views/disputes/IntakeRoomView.vue");
 
@@ -1523,6 +1673,9 @@ describe("IntakeRoomView", () => {
     );
     expect(source).toContain(
       "grid-template-columns: repeat(2, minmax(0, 1fr));",
+    );
+    expect(source).toMatch(
+      /\.intake-case-detail__todo-text\s*\{[\s\S]*?text-overflow: ellipsis;[\s\S]*?white-space: nowrap;/,
     );
     expect(source).toContain("-webkit-line-clamp: 2;");
     expect(source).toContain(

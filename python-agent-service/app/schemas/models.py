@@ -1,3 +1,5 @@
+# 文件作用：Python Agent 数据契约文件，使用 Pydantic 定义请求、响应和模型输出结构。
+
 """Core final-compatible Agent request and output models."""
 
 from __future__ import annotations

@@ -1,3 +1,6 @@
+// 文件作用：自动化测试文件，验证 global-width.fixture 相关模块的行为、契约或页面布局。
+// 说明：本注释用于帮助读者先了解本文件职责，再继续阅读具体实现。
+
 import { expect } from "@playwright/test";
 
 export const GLOBAL_CASE_IDS = {
@@ -15,6 +18,7 @@ const GLOBAL_ROOM_MESSAGE_ENDPOINTS = {
   [GLOBAL_CASE_IDS.hearing]: "HEARING",
 };
 
+// 业务位置：【前端浏览器回归测试】assertGlobalRoomMessageEndpoint：核验 房间消息和对话记录 的权限、Schema 和阶段边界，阻止越权或不完整结果进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 export function assertGlobalRoomMessageEndpoint(caseId, roomType) {
   const expectedRoomType = GLOBAL_ROOM_MESSAGE_ENDPOINTS[caseId];
   if (!expectedRoomType) {
@@ -42,6 +46,7 @@ const actors = {
 const futureDeadline = "2026-07-12T18:00:00+08:00";
 const serverNow = "2026-07-11T10:00:00+08:00";
 
+// 业务位置：【前端浏览器回归测试】fulfillJson：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 function fulfillJson(route, data) {
   return route.fulfill({
     status: 200,
@@ -50,6 +55,7 @@ function fulfillJson(route, data) {
   });
 }
 
+// 业务位置：【前端浏览器回归测试】dispute：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 function dispute(caseId, room, overrides = {}) {
   return {
     id: caseId,
@@ -70,6 +76,7 @@ function dispute(caseId, room, overrides = {}) {
   };
 }
 
+// 业务位置：【前端浏览器回归测试】intakeTurnMemory：围绕 案件会话和上下文快照 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 function intakeTurnMemory() {
   const gaps = [
     "核验签收人身份",
@@ -147,6 +154,7 @@ function intakeTurnMemory() {
   };
 }
 
+// 业务位置：【前端浏览器回归测试】evidenceCatalog：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 function evidenceCatalog(caseId) {
   return {
     case_id: caseId,
@@ -172,6 +180,7 @@ function evidenceCatalog(caseId) {
   };
 }
 
+// 业务位置：【前端浏览器回归测试】hearingSnapshot：围绕 庭审轮次和法官发言 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 function hearingSnapshot() {
   return {
     rounds: [
@@ -197,6 +206,7 @@ function hearingSnapshot() {
   };
 }
 
+// 业务位置：【前端浏览器回归测试】hearingMessages：围绕 庭审轮次和法官发言 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 function hearingMessages() {
   return [
     {
@@ -211,6 +221,7 @@ function hearingMessages() {
   ];
 }
 
+// 业务位置：【前端浏览器回归测试】outcomeSnapshot：围绕 阶段处理结果或草案 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 function outcomeSnapshot() {
   return {
     case_id: GLOBAL_CASE_IDS.outcome,
@@ -236,6 +247,7 @@ function outcomeSnapshot() {
   };
 }
 
+// 业务位置：【前端浏览器回归测试】reviewTasks：围绕 人工审核关注点和陪审团提示 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 function reviewTasks() {
   return [
     {
@@ -249,6 +261,7 @@ function reviewTasks() {
   ];
 }
 
+// 业务位置：【前端浏览器回归测试】reviewPacket：围绕 人工审核关注点和陪审团提示 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 function reviewPacket() {
   return {
     id: "PACKET_GLOBAL",
@@ -276,6 +289,7 @@ function reviewPacket() {
   };
 }
 
+// 业务位置：【前端浏览器回归测试】roomMessages：围绕 房间消息和对话记录 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 function roomMessages(roomType) {
   if (roomType === "INTAKE") {
     return [
@@ -302,10 +316,12 @@ function roomMessages(roomType) {
   return hearingMessages();
 }
 
+// 业务位置：【前端浏览器回归测试】isKnownCaseId：判断 当前阶段业务数据 是否满足当前流程分支的进入条件。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 function isKnownCaseId(caseId) {
   return Object.values(GLOBAL_CASE_IDS).includes(caseId);
 }
 
+// 业务位置：【前端浏览器回归测试】installGlobalWidthFixture：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 export async function installGlobalWidthFixture(page, options = {}) {
   const actor = actors[options.role || "USER"];
   if (!actor) {

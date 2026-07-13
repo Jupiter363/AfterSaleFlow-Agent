@@ -1,3 +1,9 @@
+/*
+ * 所属模块：结案与离线评估。
+ * 文件职责：验证案件结案Integration，覆盖 「closesExecutedCaseAndCreatesExactlyOneCompletedEvaluation」、「rejectsClosureUntilEveryApprovedActionSucceeded」、「evaluationCanOnlyBeReadByAdministratorOrSystem」、「agentFailureKeepsCaseClosedAndPersistsFailedEvaluationTrace」。
+ * 业务链路：JUnit 构造夹具并驱动真实服务或 Mock 协作者，断言返回值、持久化状态和调用边界；关闭已执行案件并调用评估 Agent 生成质量指标和离线报告。
+ * 关键边界：评估只能读取已关闭案件，不能反向修改在线裁决、规则或 Prompt
+ */
 package com.example.dispute.evaluation;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -57,6 +63,11 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
+// 所属模块：【结案与离线评估 / 自动化测试层】类型「CaseClosureServiceIntegrationTest」。
+// 类型职责：集中验证案件结案Integration的业务场景、权限边界和持久化/外部协作契约；本类型显式提供 「properties」、「configureAgent」、「closesExecutedCaseAndCreatesExactlyOneCompletedEvaluation」、「rejectsClosureUntilEveryApprovedActionSucceeded」、「evaluationCanOnlyBeReadByAdministratorOrSystem」、「agentFailureKeepsCaseClosedAndPersistsFailedEvaluationTrace」。
+// 协作关系：由 JUnit 发现并执行其中带 @Test 的场景。
+// 边界意义：评估只能读取已关闭案件，不能反向修改在线裁决、规则或 Prompt
+// Java 语法：class 同时封装状态与方法；final 依赖通过构造器注入后不可重新指向。
 @DataJpaTest(properties = "spring.jpa.hibernate.ddl-auto=validate")
 @Import({
     CaseClosureService.class,
@@ -79,6 +90,11 @@ class CaseClosureServiceIntegrationTest {
                     .withEnv("POSTGRES_PASSWORD", "local_test_password")
                     .withExposedPorts(5432);
 
+    // 所属模块：【结案与离线评估 / 自动化测试层】「CaseClosureServiceIntegrationTest.properties(DynamicPropertyRegistry)」。
+    // 具体功能：「CaseClosureServiceIntegrationTest.properties(DynamicPropertyRegistry)」：作为测试辅助方法为“核对完整业务行为（场景方法「properties」）”组装或读取「POSTGRESQL.getHost」、「POSTGRESQL.getMappedPort」，供本测试类的场景方法复用。
+    // 上游调用：「CaseClosureServiceIntegrationTest.properties(DynamicPropertyRegistry)」由 JUnit 生命周期或本测试类的场景方法调用。
+    // 下游影响：「CaseClosureServiceIntegrationTest.properties(DynamicPropertyRegistry)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「CaseClosureServiceIntegrationTest.properties(DynamicPropertyRegistry)」守住「结案与离线评估」的可执行规格，尤其防止 「spring.datasource.url」、「:」、「spring.datasource.username」、「dispute_test」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @DynamicPropertySource
     static void properties(DynamicPropertyRegistry registry) {
         registry.add(
@@ -93,8 +109,18 @@ class CaseClosureServiceIntegrationTest {
         registry.add("spring.datasource.password", () -> "local_test_password");
     }
 
+    // 所属模块：【结案与离线评估 / 自动化测试层】类型「JacksonConfig」。
+    // 类型职责：承载JacksonConfig在当前业务模块中的规则与协作边界；本类型显式提供 「objectMapper」。
+    // 协作关系：由 JUnit 发现并执行其中带 @Test 的场景。
+    // 边界意义：评估只能读取已关闭案件，不能反向修改在线裁决、规则或 Prompt
+    // Java 语法：class 同时封装状态与方法；final 依赖通过构造器注入后不可重新指向。
     @TestConfiguration
     static class JacksonConfig {
+        // 所属模块：【结案与离线评估 / 自动化测试层】「CaseClosureServiceIntegrationTest.JacksonConfig.objectMapper()」。
+        // 具体功能：「CaseClosureServiceIntegrationTest.JacksonConfig.objectMapper()」：作为测试辅助方法为“核对完整业务行为（场景方法「objectMapper」）”组装或读取「ObjectMapper」 输入夹具，供本测试类的场景方法复用。
+        // 上游调用：「CaseClosureServiceIntegrationTest.JacksonConfig.objectMapper()」由 JUnit 生命周期或本测试类的场景方法调用。
+        // 下游影响：「CaseClosureServiceIntegrationTest.JacksonConfig.objectMapper()」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+        // 系统意义：「CaseClosureServiceIntegrationTest.JacksonConfig.objectMapper()」守住「结案与离线评估」的可执行规格；后续重构若破坏契约会在进入集成环境前失败。
         @Bean
         ObjectMapper objectMapper() {
             return new ObjectMapper()
@@ -115,6 +141,11 @@ class CaseClosureServiceIntegrationTest {
     @MockitoBean AuditRecorder auditRecorder;
     @MockitoBean CaseLifecycleNotificationService lifecycleNotifications;
 
+    // 所属模块：【结案与离线评估 / 自动化测试层】「CaseClosureServiceIntegrationTest.configureAgent()」。
+    // 具体功能：「CaseClosureServiceIntegrationTest.configureAgent()」：在每个测试场景运行前创建「actions.deleteAllInBatch」、「evaluations.deleteAllInBatch」、「approvals.deleteAllInBatch」、「reviewTasks.deleteAllInBatch」，统一准备后续断言依赖的初始状态，避免各用例重复搭建且保持彼此隔离。
+    // 上游调用：「CaseClosureServiceIntegrationTest.configureAgent()」由 JUnit 生命周期或本测试类的场景方法调用。
+    // 下游影响：「CaseClosureServiceIntegrationTest.configureAgent()」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「CaseClosureServiceIntegrationTest.configureAgent()」守住「结案与离线评估」的可执行规格，尤其防止 「case_id」、「evaluation-model」、「evaluation-v1」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @BeforeEach
     void configureAgent() throws Exception {
         actions.deleteAllInBatch();
@@ -181,6 +212,11 @@ class CaseClosureServiceIntegrationTest {
                         });
     }
 
+    // 所属模块：【结案与离线评估 / 自动化测试层】「CaseClosureServiceIntegrationTest.closesExecutedCaseAndCreatesExactlyOneCompletedEvaluation()」。
+    // 具体功能：「CaseClosureServiceIntegrationTest.closesExecutedCaseAndCreatesExactlyOneCompletedEvaluation()」：复现“核对完整业务行为（场景方法「closesExecutedCaseAndCreatesExactlyOneCompletedEvaluation」）”场景：驱动 「service.close」、「service.metrics」，再用 「assertThat」、「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「success」、「CASE_success」、「CLOSE_success」、「TRACE_success」。
+    // 上游调用：「CaseClosureServiceIntegrationTest.closesExecutedCaseAndCreatesExactlyOneCompletedEvaluation()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「CaseClosureServiceIntegrationTest.closesExecutedCaseAndCreatesExactlyOneCompletedEvaluation()」的下游是被测服务、仓储或外部客户端替身；「assertThat、verify」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「CaseClosureServiceIntegrationTest.closesExecutedCaseAndCreatesExactlyOneCompletedEvaluation()」守住「结案与离线评估」的可执行规格，尤其防止 「success」、「CASE_success」、「CLOSE_success」、「TRACE_success」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void closesExecutedCaseAndCreatesExactlyOneCompletedEvaluation() {
         seed("success", true);
@@ -248,6 +284,11 @@ class CaseClosureServiceIntegrationTest {
                 .executionCompleted(any(FulfillmentCaseEntity.class));
     }
 
+    // 所属模块：【结案与离线评估 / 自动化测试层】「CaseClosureServiceIntegrationTest.rejectsClosureUntilEveryApprovedActionSucceeded()」。
+    // 具体功能：「CaseClosureServiceIntegrationTest.rejectsClosureUntilEveryApprovedActionSucceeded()」：复现“拒绝非法输入或越权操作（场景方法「rejectsClosureUntilEveryApprovedActionSucceeded」）”场景：驱动 「service.close」，再用 「assertThatThrownBy」、「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「failed_action」、「CASE_failed_action」、「CLOSE_failed_action」、「TRACE_failed_action」。
+    // 上游调用：「CaseClosureServiceIntegrationTest.rejectsClosureUntilEveryApprovedActionSucceeded()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「CaseClosureServiceIntegrationTest.rejectsClosureUntilEveryApprovedActionSucceeded()」的下游是被测服务、仓储或外部客户端替身；「assertThatThrownBy、assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「CaseClosureServiceIntegrationTest.rejectsClosureUntilEveryApprovedActionSucceeded()」守住「结案与离线评估」的可执行规格，尤其防止 「failed_action」、「CASE_failed_action」、「CLOSE_failed_action」、「TRACE_failed_action」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void rejectsClosureUntilEveryApprovedActionSucceeded() {
         seed("failed_action", false);
@@ -270,6 +311,11 @@ class CaseClosureServiceIntegrationTest {
         assertThat(evaluations.findAll()).isEmpty();
     }
 
+    // 所属模块：【结案与离线评估 / 自动化测试层】「CaseClosureServiceIntegrationTest.evaluationCanOnlyBeReadByAdministratorOrSystem()」。
+    // 具体功能：「CaseClosureServiceIntegrationTest.evaluationCanOnlyBeReadByAdministratorOrSystem()」：复现“核对完整业务行为（场景方法「evaluationCanOnlyBeReadByAdministratorOrSystem」）”场景：驱动 「service.close」、「service.evaluation」，再用 「assertThatThrownBy」、「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「visibility」、「CASE_visibility」、「CLOSE_visibility」、「TRACE_visibility」。
+    // 上游调用：「CaseClosureServiceIntegrationTest.evaluationCanOnlyBeReadByAdministratorOrSystem()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「CaseClosureServiceIntegrationTest.evaluationCanOnlyBeReadByAdministratorOrSystem()」的下游是被测服务、仓储或外部客户端替身；「assertThatThrownBy、assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「CaseClosureServiceIntegrationTest.evaluationCanOnlyBeReadByAdministratorOrSystem()」守住「结案与离线评估」的可执行规格，尤其防止 「visibility」、「CASE_visibility」、「CLOSE_visibility」、「TRACE_visibility」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void evaluationCanOnlyBeReadByAdministratorOrSystem() {
         seed("visibility", true);
@@ -294,6 +340,11 @@ class CaseClosureServiceIntegrationTest {
                 .isNotNull();
     }
 
+    // 所属模块：【结案与离线评估 / 自动化测试层】「CaseClosureServiceIntegrationTest.agentFailureKeepsCaseClosedAndPersistsFailedEvaluationTrace()」。
+    // 具体功能：「CaseClosureServiceIntegrationTest.agentFailureKeepsCaseClosedAndPersistsFailedEvaluationTrace()」：复现“核对完整业务行为（场景方法「agentFailureKeepsCaseClosedAndPersistsFailedEvaluationTrace」）”场景：驱动 「service.close」，再用 「assertThatThrownBy」、「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「agent_failure」、「CASE_agent_failure」、「CLOSE_agent_failure」、「TRACE_agent_failure」。
+    // 上游调用：「CaseClosureServiceIntegrationTest.agentFailureKeepsCaseClosedAndPersistsFailedEvaluationTrace()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「CaseClosureServiceIntegrationTest.agentFailureKeepsCaseClosedAndPersistsFailedEvaluationTrace()」的下游是被测服务、仓储或外部客户端替身；「assertThatThrownBy、assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「CaseClosureServiceIntegrationTest.agentFailureKeepsCaseClosedAndPersistsFailedEvaluationTrace()」守住「结案与离线评估」的可执行规格，尤其防止 「agent_failure」、「CASE_agent_failure」、「CLOSE_agent_failure」、「TRACE_agent_failure」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void agentFailureKeepsCaseClosedAndPersistsFailedEvaluationTrace() {
         seed("agent_failure", true);
@@ -330,6 +381,11 @@ class CaseClosureServiceIntegrationTest {
                         });
     }
 
+    // 所属模块：【结案与离线评估 / 自动化测试层】「CaseClosureServiceIntegrationTest.seed(String,boolean)」。
+    // 具体功能：「CaseClosureServiceIntegrationTest.seed(String,boolean)」：作为测试辅助方法为“核对完整业务行为（场景方法「seed」）”组装或读取「FulfillmentCaseEntity.create」、「RemedyPlanEntity.pendingApproval」、「ReviewPacketEntity.create」、「ReviewTaskEntity.pending」，供本测试类的场景方法复用。
+    // 上游调用：「CaseClosureServiceIntegrationTest.seed(String,boolean)」由本测试类中的 「CaseClosureServiceIntegrationTest.closesExecutedCaseAndCreatesExactlyOneCompletedEvaluation」、「CaseClosureServiceIntegrationTest.rejectsClosureUntilEveryApprovedActionSucceeded」、「CaseClosureServiceIntegrationTest.evaluationCanOnlyBeReadByAdministratorOrSystem」、「CaseClosureServiceIntegrationTest.agentFailureKeepsCaseClosedAndPersistsFailedEvaluationTrace」 调用。
+    // 下游影响：「CaseClosureServiceIntegrationTest.seed(String,boolean)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「CaseClosureServiceIntegrationTest.seed(String,boolean)」守住「结案与离线评估」的可执行规格，尤其防止 「CASE_」、「REMEDY_」、「PACKET_」、「REVIEW_」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private void seed(String suffix, boolean succeeded) {
         String caseId = "CASE_" + suffix;
         String planId = "REMEDY_" + suffix;

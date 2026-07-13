@@ -1,3 +1,6 @@
+// 文件作用：自动化测试文件，验证 DigitalHuman.test 相关模块的行为、契约或页面布局。
+// 说明：本注释用于帮助读者先了解本文件职责，再继续阅读具体实现。
+
 import { mount } from "@vue/test-utils";
 import { describe, expect, it } from "vitest";
 import DigitalHuman, {
@@ -24,6 +27,7 @@ const expectedHairStyles = {
   guide: "guide-cropped-bang",
 };
 
+// 业务位置：【前端业务组件】describe：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面传入的案件、消息、证据或审核数据 正确进入 可复用的房间交互和展示事件。上游：页面传入的案件、消息、证据或审核数据。下游：可复用的房间交互和展示事件。边界：组件不直接跨越业务权限调用。
 describe("DigitalHuman", () => {
   it.each(DIGITAL_HUMAN_STATES)("renders the shared %s state", (state) => {
     const wrapper = mount(DigitalHuman, {
@@ -38,12 +42,13 @@ describe("DigitalHuman", () => {
     expect(wrapper.attributes("data-state")).toBe(state);
     expect(wrapper.text()).toContain("小衡");
     expect(wrapper.text()).toContain("争议接待官");
-    expect(wrapper.text()).toContain("AI 建议非最终");
+    expect(wrapper.text()).toContain("AI 只提供非最终建议，最终裁决由平台审核员确认");
     expect(wrapper.find('[aria-live="polite"]').text()).toContain(
       "我正在整理双方主张。",
     );
   });
 
+  // 业务位置：【前端业务组件】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面传入的案件、消息、证据或审核数据 正确进入 可复用的房间交互和展示事件。上游：页面传入的案件、消息、证据或审核数据。下游：可复用的房间交互和展示事件。边界：组件不直接跨越业务权限调用。
   it("provides a static reduced-motion presentation", () => {
     const wrapper = mount(DigitalHuman, {
       props: {
@@ -58,6 +63,7 @@ describe("DigitalHuman", () => {
     expect(wrapper.find("[data-motion-orbit]").exists()).toBe(false);
   });
 
+  // 业务位置：【前端业务组件】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面传入的案件、消息、证据或审核数据 正确进入 可复用的房间交互和展示事件。上游：页面传入的案件、消息、证据或审核数据。下游：可复用的房间交互和展示事件。边界：组件不直接跨越业务权限调用。
   it("keeps the orbit aligned inside the avatar svg coordinate system", () => {
     const wrapper = mount(DigitalHuman, {
       props: {
@@ -77,6 +83,142 @@ describe("DigitalHuman", () => {
       .toBe(false);
   });
 
+  it("renders the production reception-officer portrait inside the shared state halo", () => {
+    const wrapper = mount(DigitalHuman, {
+      props: {
+        state: "LISTENING",
+        name: "小衡",
+        role: "争议接待官",
+      },
+    });
+
+    const portrait = wrapper.get("[data-intake-officer-portrait]");
+    expect(wrapper.attributes("data-persona")).toBe("intake");
+    expect(portrait.attributes("href")).toContain("intake-officer.webp");
+    expect(portrait.attributes()).toMatchObject({
+      x: "-15",
+      y: "-8",
+      width: "250",
+      height: "250",
+      preserveAspectRatio: "xMidYMid meet",
+    });
+    expect(wrapper.get("[data-motion-orbit]").exists()).toBe(true);
+  });
+
+  it("renders the production judge portrait inside the shared state halo", () => {
+    const wrapper = mount(DigitalHuman, {
+      props: {
+        state: "THINKING",
+        name: "小正",
+        role: "AI 法官",
+      },
+    });
+
+    const portrait = wrapper.get("[data-judge-portrait]");
+    expect(wrapper.attributes("data-persona")).toBe("judge");
+    expect(portrait.attributes("href")).toContain("judge.webp");
+    expect(portrait.attributes()).toMatchObject({
+      x: "-15",
+      y: "-8",
+      width: "250",
+      height: "250",
+      preserveAspectRatio: "xMidYMid meet",
+    });
+    expect(wrapper.find("[data-intake-officer-portrait]").exists()).toBe(false);
+    expect(wrapper.get("[data-motion-orbit]").exists()).toBe(true);
+  });
+
+  it("renders the production evidence-clerk portrait inside the shared state halo", () => {
+    const wrapper = mount(DigitalHuman, {
+      props: {
+        state: "LISTENING",
+        name: "小册",
+        role: "证据书记官",
+      },
+    });
+
+    const portrait = wrapper.get("[data-evidence-clerk-portrait]");
+    expect(wrapper.attributes("data-persona")).toBe("evidence");
+    expect(portrait.attributes("href")).toContain("evidence-clerk.webp");
+    expect(portrait.attributes()).toMatchObject({
+      x: "-15",
+      y: "-8",
+      width: "250",
+      height: "250",
+      preserveAspectRatio: "xMidYMid meet",
+    });
+    expect(wrapper.find("[data-intake-officer-portrait]").exists()).toBe(false);
+    expect(wrapper.find("[data-judge-portrait]").exists()).toBe(false);
+    expect(wrapper.get("[data-motion-orbit]").exists()).toBe(true);
+  });
+
+  it("applies independent production portraits to jury A and jury B", () => {
+    const juryA = mount(DigitalHuman, {
+      props: {
+        state: "THINKING",
+        name: "小察",
+        role: "AI 评审团",
+        portraitVariant: "jury-a",
+      },
+    });
+    const juryB = mount(DigitalHuman, {
+      props: {
+        state: "LISTENING",
+        name: "小律",
+        role: "AI 评审团",
+        portraitVariant: "jury-b",
+      },
+    });
+
+    const juryAPortrait = juryA.get("[data-jury-a-portrait]");
+    const juryBPortrait = juryB.get("[data-jury-b-portrait]");
+    expect(juryA.attributes("data-persona")).toBe("jury");
+    expect(juryA.attributes("data-portrait-variant")).toBe("jury-a");
+    expect(juryAPortrait.attributes("href")).toContain("jury-a.webp");
+    expect(juryAPortrait.attributes()).toMatchObject({
+      x: "-15",
+      y: "-8",
+      width: "250",
+      height: "250",
+      preserveAspectRatio: "xMidYMid meet",
+    });
+    expect(juryA.find("[data-jury-b-portrait]").exists()).toBe(false);
+    expect(juryB.attributes("data-persona")).toBe("jury");
+    expect(juryB.attributes("data-portrait-variant")).toBe("jury-b");
+    expect(juryBPortrait.attributes("href")).toContain("jury-b.webp");
+    expect(juryBPortrait.attributes()).toMatchObject({
+      x: "-15",
+      y: "-8",
+      width: "250",
+      height: "250",
+      preserveAspectRatio: "xMidYMid meet",
+    });
+    expect(juryB.find("[data-jury-a-portrait]").exists()).toBe(false);
+  });
+
+  it("renders the production route-guide portrait inside the shared state halo", () => {
+    const wrapper = mount(DigitalHuman, {
+      props: {
+        state: "HANDOFF",
+        name: "小途",
+        role: "路线引导员",
+      },
+    });
+
+    const portrait = wrapper.get("[data-route-guide-portrait]");
+    expect(wrapper.attributes("data-persona")).toBe("guide");
+    expect(portrait.attributes("href")).toContain("route-guide.webp");
+    expect(portrait.attributes()).toMatchObject({
+      x: "-15",
+      y: "-8",
+      width: "250",
+      height: "250",
+      preserveAspectRatio: "xMidYMid meet",
+    });
+    expect(wrapper.get("[data-motion-orbit]").exists()).toBe(true);
+  });
+
+  // 业务位置：【前端业务组件】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面传入的案件、消息、证据或审核数据 正确进入 可复用的房间交互和展示事件。上游：页面传入的案件、消息、证据或审核数据。下游：可复用的房间交互和展示事件。边界：组件不直接跨越业务权限调用。
   it("exposes a 30/40/30 portrait layout for costume-safe avatars", () => {
     expect(DIGITAL_HUMAN_LAYOUT).toEqual({
       headAccessory: 30,
@@ -193,11 +335,12 @@ describe("DigitalHuman", () => {
     },
   );
 
+  // 业务位置：【前端业务组件】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面传入的案件、消息、证据或审核数据 正确进入 可复用的房间交互和展示事件。上游：页面传入的案件、消息、证据或审核数据。下游：可复用的房间交互和展示事件。边界：组件不直接跨越业务权限调用。
   it("gives the judge a wig, left law code, and right gavel", () => {
     const wrapper = mount(DigitalHuman, {
       props: {
         state: "SPEAKING",
-        name: "衡衡",
+        name: "小正",
         role: "AI 法官",
       },
     });

@@ -1,9 +1,11 @@
+# 文件作用：Python Agent 数据契约文件，使用 Pydantic 定义请求、响应和模型输出结构。
+
 """Strict contracts for the six final AI Native agent roles."""
 
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import Field, model_validator
 
@@ -20,7 +22,16 @@ from app.schemas.models import (
 )
 
 
+# 这个文件定义“最终 Agent API”的严格输入/输出契约。
+# 对 Python 新手：
+# - class Xxx(StrictModel) 表示定义一个 Pydantic 数据模型；
+# - 字段后面的冒号是类型标注，例如 raw_text: LongText；
+# - Literal["USER", "MERCHANT"] 表示这个字段只能取这两个字符串之一；
+# - Annotated[list[Identifier], Field(max_length=30)] 表示 list 之外还附带 Pydantic 校验规则；
+# - default_factory=list 表示每次创建对象时生成一个新的空列表，避免多个实例共享同一个列表。
 class DisputeIntakeRequest(StrictModel):
+    """争议接待 Agent 的初始分析请求。"""
+
     submission_id: Identifier
     initiator_role: Literal["USER", "MERCHANT"]
     raw_text: LongText
@@ -34,12 +45,20 @@ class DisputeIntakeRequest(StrictModel):
 
 
 class IntakeClaim(StrictModel):
+    """从自然语言中抽取出的单条当事人主张。"""
+
     party: Literal["USER", "MERCHANT"]
     claim_text: LongText
     source_ref: Identifier
 
 
 class DisputeIntakeResult(StrictModel):
+    """接待 Agent 的结构化输出。
+
+    liability_determined 和 remedy_promised 被固定为 False，
+    表示接待阶段不能判断责任，也不能承诺赔付方案。
+    """
+
     admissible: bool
     initiator_role: Literal["USER", "MERCHANT"]
     order_reference: Identifier | None = None
@@ -72,34 +91,59 @@ class DisputeIntakeResult(StrictModel):
     liability_determined: Literal[False] = False
     remedy_promised: Literal[False] = False
 
+    # 所属模块：Python Agent 数据契约 > final_agents；函数角色：只读派生属性。
+    # 具体功能：`is_potential_dispute` 判断本阶段状态是否满足当前业务分支条件。
+    # 上下游：上游为 Java 请求、LangGraph 状态、LLM JSON；下游为 Pydantic 强校验领域对象。
+    # 系统意义：该函数在系统中的业务边界是：拒绝多余字段、资源越界、身份错配和非法枚举。
     @property
     def is_potential_dispute(self) -> bool:
         """Compatibility view for callers migrating to ``admissible``."""
 
         return self.admissible
 
+    # 所属模块：Python Agent 数据契约 > final_agents；函数角色：只读派生属性。
+    # 具体功能：`admissibility_recommendation` 围绕本阶段状态计算该函数独立负责的业务派生值。
+    # 上下游：上游为 Java 请求、LangGraph 状态、LLM JSON；下游为 Pydantic 强校验领域对象。
+    # 系统意义：该函数在系统中的业务边界是：拒绝多余字段、资源越界、身份错配和非法枚举。
     @property
     def admissibility_recommendation(self) -> str:
         return self.admission_recommendation
 
+    # 所属模块：Python Agent 数据契约 > final_agents；函数角色：只读派生属性。
+    # 具体功能：`initiator` 围绕本阶段状态计算该函数独立负责的业务派生值。
+    # 上下游：上游为 Java 请求、LangGraph 状态、LLM JSON；下游为 Pydantic 强校验领域对象。
+    # 系统意义：该函数在系统中的业务边界是：拒绝多余字段、资源越界、身份错配和非法枚举。
     @property
     def initiator(self) -> str:
         return self.initiator_role
 
+    # 所属模块：Python Agent 数据契约 > final_agents；函数角色：只读派生属性。
+    # 具体功能：`claims` 围绕当事人主张计算该函数独立负责的业务派生值。
+    # 上下游：上游为 Java 请求、LangGraph 状态、LLM JSON；下游为 Pydantic 强校验领域对象。
+    # 系统意义：该函数在系统中的业务边界是：拒绝多余字段、资源越界、身份错配和非法枚举。
     @property
     def claims(self) -> list[IntakeClaim]:
         return self.party_claims
 
+    # 所属模块：Python Agent 数据契约 > final_agents；函数角色：只读派生属性。
+    # 具体功能：`requested_remedy` 围绕本阶段状态计算该函数独立负责的业务派生值。
+    # 上下游：上游为 Java 请求、LangGraph 状态、LLM JSON；下游为 Pydantic 强校验领域对象。
+    # 系统意义：该函数在系统中的业务边界是：拒绝多余字段、资源越界、身份错配和非法枚举。
     @property
     def requested_remedy(self) -> str:
         return self.requested_outcome
 
+    # 所属模块：Python Agent 数据契约 > final_agents；函数角色：只读派生属性。
+    # 具体功能：`risk_signals` 围绕本阶段状态计算该函数独立负责的业务派生值。
+    # 上下游：上游为 Java 请求、LangGraph 状态、LLM JSON；下游为 Pydantic 强校验领域对象。
+    # 系统意义：该函数在系统中的业务边界是：拒绝多余字段、资源越界、身份错配和非法枚举。
     @property
     def risk_signals(self) -> list[Identifier]:
         return self.initial_risk_signals
 
 
 RiskLevelLiteral = Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"]
+# RawTransportText / RawReference 是复用型字段约束，避免每个请求重复写长度限制。
 RawTransportText = Annotated[
     str,
     Field(min_length=1, max_length=2_000_000),
@@ -111,6 +155,8 @@ RawReference = Annotated[
 
 
 class SimulatedExternalImportRequest(StrictModel):
+    """本地演示/测试用的模拟外部导入请求。"""
+
     count: Annotated[int, Field(ge=1, le=1)] = 1
     scenario: ShortText = "履约争议订单"
     risk_level_hint: RiskLevelLiteral | None = "MEDIUM"
@@ -119,8 +165,18 @@ class SimulatedExternalImportRequest(StrictModel):
     counterparty_actor_id: Identifier
     simulation_batch_id: Identifier | None = None
 
+    # 所属模块：Python Agent 数据契约 > final_agents；函数角色：类/闭包内部方法。
+    # 具体功能：`validate_fixed_demo_parties` Pydantic 模型级校验；关键协作调用：`model_validator`、`ValueError`。
+    # 上下游：上游为 Java 请求、LangGraph 状态、LLM JSON；下游为 协作调用 `model_validator`、`ValueError`。
+    # 系统意义：这是信任边界：拒绝多余字段、资源越界、身份错配和非法枚举。
     @model_validator(mode="after")
     def validate_fixed_demo_parties(self) -> "SimulatedExternalImportRequest":
+        """Pydantic 模型级校验。
+
+        @model_validator(mode="after") 表示字段基础校验完成后，再检查多个字段之间的关系。
+        这里强制本地演示账号固定成 user-local / merchant-local。
+        """
+
         expected_current = (
             "user-local"
             if self.initiator_role_hint == "USER"
@@ -222,6 +278,8 @@ class IntakeDialogueMessage(StrictModel):
 
 
 class IntakeInitialCaseFacts(StrictModel):
+    form_source: Literal["EXTERNAL_IMPORT", "FORM_SUBMISSION"] | None = None
+    form_description: LongText | None = None
     order_reference: Identifier | None = None
     after_sales_reference: Identifier | None = None
     logistics_reference: Identifier | None = None
@@ -233,33 +291,146 @@ class IntakeInitialCaseFacts(StrictModel):
     respondent_attitude_seed: IntakeRespondentAttitudeSeed | None = None
 
 
+# 所属模块：Python Agent 数据契约 > final_agents；函数角色：模块私有业务函数。
+# 具体功能：`_validate_intake_context_tree` 校验案件与会话上下文的 Schema、权限和阶段约束，拒绝越权或不一致数据；关键协作调用：`stack.pop`、`ValueError`、`seen_containers.add`。
+# 上下游：上游为 本文件的 `IntakeTurnRequest.enforce_context_resource_limits`；下游为 协作调用 `stack.pop`、`ValueError`、`seen_containers.add`、`current.items`。
+# 系统意义：这是信任边界：拒绝多余字段、资源越界、身份错配和非法枚举。
+def _validate_intake_context_tree(value: Any, *, field_name: str) -> None:
+    """Validate an untrusted JSON-like tree without recursively copying it."""
+
+    max_depth = 12
+    max_nodes = 5_000
+    max_text_characters = 200_000
+    stack: list[tuple[Any, int]] = [(value, 0)]
+    seen_containers: set[int] = set()
+    node_count = 0
+    text_characters = 0
+
+    while stack:
+        current, depth = stack.pop()
+        node_count += 1
+        if node_count > max_nodes:
+            raise ValueError(f"{field_name} exceeds {max_nodes} values")
+        if depth > max_depth:
+            raise ValueError(f"{field_name} exceeds nesting depth {max_depth}")
+        if isinstance(current, str):
+            text_characters += len(current)
+        elif isinstance(current, dict):
+            identity = id(current)
+            if identity in seen_containers:
+                raise ValueError(f"{field_name} must be an acyclic JSON tree")
+            seen_containers.add(identity)
+            for key, item in current.items():
+                text_characters += len(str(key))
+                stack.append((item, depth + 1))
+        elif isinstance(current, (list, tuple)):
+            identity = id(current)
+            if identity in seen_containers:
+                raise ValueError(f"{field_name} must be an acyclic JSON tree")
+            seen_containers.add(identity)
+            stack.extend((item, depth + 1) for item in current)
+        if text_characters > max_text_characters:
+            raise ValueError(
+                f"{field_name} exceeds {max_text_characters} text characters"
+            )
+
+
 class IntakeTurnRequest(StrictModel):
     case_id: Annotated[
         str, Field(pattern=r"^CASE_[A-Za-z0-9_]{1,59}$")
     ]
     room_type: Literal["INTAKE"]
     turn_source: Literal["EXTERNAL_IMPORT", "FORM_SUBMISSION", "ROOM_MESSAGE"]
-    initial_case_facts: IntakeInitialCaseFacts
-    current_user_message: IntakeDialogueMessage
+    initial_case_facts: IntakeInitialCaseFacts | None = None
+    current_user_message: IntakeDialogueMessage | None = None
     recent_dialogue_messages: Annotated[
-        list[IntakeDialogueMessage], Field(max_length=6)
+        list[IntakeDialogueMessage], Field(max_length=5)
     ] = Field(default_factory=list)
     previous_case_detail: dict[str, object] | None = None
-    initiator_statement_transcript: list[IntakeTurnMessage] = Field(
-        default_factory=list
-    )
+    initiator_statement_transcript: Annotated[
+        list[IntakeTurnMessage], Field(max_length=100)
+    ] = Field(default_factory=list)
     agent_context: AgentInvocationContext
 
+    # 所属模块：Python Agent 数据契约 > final_agents；函数角色：类/闭包内部方法。
+    # 具体功能：`enforce_context_resource_limits` 校验案件与会话上下文的 Schema、权限和阶段约束，拒绝越权或不一致数据；关键协作调用：`model_validator`、`raw.get`、`ValueError`。
+    # 上下游：上游为 Java 请求、LangGraph 状态、LLM JSON；下游为 本文件的 `_validate_intake_context_tree`。
+    # 系统意义：这是信任边界：拒绝多余字段、资源越界、身份错配和非法枚举。
+    @model_validator(mode="before")
+    @classmethod
+    def enforce_context_resource_limits(cls, raw: Any) -> Any:
+        """Reject oversized intake context before Pydantic copies it.
+
+        Intake requests are assembled from persisted room state. Keeping the
+        board and verbatim transcript bounded prevents a malformed snapshot or
+        an unbounded audit transcript from being copied into every model turn.
+        """
+
+        if not isinstance(raw, dict):
+            return raw
+        transcript = raw.get("initiator_statement_transcript")
+        if isinstance(transcript, list) and len(transcript) > 100:
+            raise ValueError("initiator_statement_transcript exceeds 100 messages")
+
+        text_characters = 0
+        for message in transcript if isinstance(transcript, list) else []:
+            if isinstance(message, dict):
+                text_characters += len(str(message.get("text") or ""))
+        for message in raw.get("recent_dialogue_messages") or []:
+            if isinstance(message, dict):
+                text_characters += len(str(message.get("text") or ""))
+        current = raw.get("current_user_message")
+        if isinstance(current, dict):
+            text_characters += len(str(current.get("text") or ""))
+        initial = raw.get("initial_case_facts")
+        if isinstance(initial, dict):
+            text_characters += len(str(initial.get("form_description") or ""))
+        if text_characters > 200_000:
+            raise ValueError("intake textual context exceeds 200000 characters")
+
+        previous = raw.get("previous_case_detail")
+        if previous is not None:
+            _validate_intake_context_tree(previous, field_name="previous_case_detail")
+        return raw
+
+    # 所属模块：Python Agent 数据契约 > final_agents；函数角色：类/闭包内部方法。
+    # 具体功能：`enforce_agent_context_scope` 校验案件与会话上下文的 Schema、权限和阶段约束，拒绝越权或不一致数据；关键协作调用：`model_validator`、`ValueError`。
+    # 上下游：上游为 Java 请求、LangGraph 状态、LLM JSON；下游为 协作调用 `model_validator`、`ValueError`。
+    # 系统意义：这是信任边界：拒绝多余字段、资源越界、身份错配和非法枚举。
     @model_validator(mode="after")
     def enforce_agent_context_scope(self) -> "IntakeTurnRequest":
         if self.case_id != self.agent_context.case_id:
             raise ValueError("case_id must match agent_context.case_id")
         if self.room_type != self.agent_context.room_type:
             raise ValueError("room_type must match agent_context.room_type")
-        if self.current_user_message.source != self.turn_source:
+        current = self.current_user_message
+        if self.turn_source in {"EXTERNAL_IMPORT", "FORM_SUBMISSION"}:
+            if self.initial_case_facts is None:
+                raise ValueError("form-opening turns require initial_case_facts")
+            if (
+                self.initial_case_facts.form_source is not None
+                and self.initial_case_facts.form_source != self.turn_source
+            ):
+                raise ValueError("initial_case_facts.form_source must match turn_source")
+            if current is not None:
+                raise ValueError(
+                    "form-opening turns cannot contain current_user_message"
+                )
+            if self.recent_dialogue_messages:
+                raise ValueError("form-opening turns cannot have dialogue history")
+            if self.previous_case_detail:
+                raise ValueError("form-opening turns cannot have previous_case_detail")
+            return self
+        if self.initial_case_facts is not None:
+            raise ValueError("ROOM_MESSAGE turns cannot contain initial_case_facts")
+        if current is None:
+            raise ValueError("ROOM_MESSAGE turns require current_user_message")
+        if current.role not in {"USER", "MERCHANT"}:
+            raise ValueError("current_user_message must be a party message")
+        if current.source != self.turn_source:
             raise ValueError("current_user_message.source must match turn_source")
         if any(
-            message.sequence_no >= self.current_user_message.sequence_no
+            message.sequence_no >= current.sequence_no
             for message in self.recent_dialogue_messages
         ):
             raise ValueError(
@@ -269,11 +440,15 @@ class IntakeTurnRequest(StrictModel):
             self.recent_dialogue_messages, key=lambda message: message.sequence_no
         ):
             raise ValueError("recent_dialogue_messages must be ordered by sequence_no")
-        if (
-            self.recent_dialogue_messages
-            and self.recent_dialogue_messages[0].role == "AGENT"
-        ):
-            raise ValueError("recent_dialogue_messages must start with a participant message")
+        if not self.recent_dialogue_messages:
+            raise ValueError("ROOM_MESSAGE turns require the preceding agent question")
+        if len(self.recent_dialogue_messages) % 2 != 1:
+            raise ValueError("recent dialogue must contain complete agent-first pairs")
+        for index, message in enumerate(self.recent_dialogue_messages):
+            if index % 2 == 0 and message.role != "AGENT":
+                raise ValueError("recent dialogue must start and alternate from AGENT")
+            if index % 2 == 1 and message.role not in {"USER", "MERCHANT"}:
+                raise ValueError("recent dialogue must alternate AGENT and party messages")
         return self
 
 
@@ -365,6 +540,10 @@ class EvidenceCurrentEventV1(StrictModel):
     turn_no: Annotated[int, Field(ge=1)]
     occurred_at: ShortText
 
+    # 所属模块：Python Agent 数据契约 > final_agents；函数角色：类/闭包内部方法。
+    # 具体功能：`validate_event_shape` 校验本阶段状态的 Schema、权限和阶段约束，拒绝越权或不一致数据；关键协作调用：`model_validator`、`ValueError`、`self.text.strip`。
+    # 上下游：上游为 Java 请求、LangGraph 状态、LLM JSON；下游为 协作调用 `model_validator`、`ValueError`、`self.text.strip`。
+    # 系统意义：这是信任边界：拒绝多余字段、资源越界、身份错配和非法枚举。
     @model_validator(mode="after")
     def validate_event_shape(self) -> "EvidenceCurrentEventV1":
         if self.event_type == "ROOM_OPENING":
@@ -460,6 +639,10 @@ class EvidenceContextEnvelopeV1(StrictModel):
     private_conversation: EvidencePrivateConversationV1
     room_policy: EvidenceRoomPolicyV1
 
+    # 所属模块：Python Agent 数据契约 > final_agents；函数角色：类/闭包内部方法。
+    # 具体功能：`validate_visible_evidence_scope` 校验当前可见证据的 Schema、权限和阶段约束，拒绝越权或不一致数据；关键协作调用：`model_validator`、`visible_ids.add`、`ValueError`。
+    # 上下游：上游为 Java 请求、LangGraph 状态、LLM JSON；下游为 协作调用 `model_validator`、`visible_ids.add`、`ValueError`。
+    # 系统意义：这是信任边界：拒绝多余字段、资源越界、身份错配和非法枚举。
     @model_validator(mode="after")
     def validate_visible_evidence_scope(self) -> "EvidenceContextEnvelopeV1":
         actor = self.actor_snapshot
@@ -522,7 +705,7 @@ class EvidenceVerificationSuggestion(StrictModel):
         Field(
             ge=0,
             le=1,
-            description="0.0-1.0 confidence score for this evidence-verification suggestion.",
+            description="该证据核验建议的置信度，取值范围为 0.0 至 1.0。",
         ),
     ]
 
@@ -564,7 +747,7 @@ class EvidenceHumanReviewSignal(StrictModel):
 
 
 class EvidenceItemAssessment(StrictModel):
-    """Auditable, per-evidence model assessment; never a truth guarantee."""
+    """针对单份证据的可审计模型评估，不构成真实性保证。"""
 
     evidence_id: Identifier
     analysis_method: Literal["TEXT_ONLY", "MULTIMODAL", "HYBRID"]
@@ -578,6 +761,14 @@ class EvidenceItemAssessment(StrictModel):
     relevance_score: Confidence
     completeness_score: Confidence
     assessment_confidence: Confidence
+    source_basis: Annotated[list[ShortText], Field(min_length=1, max_length=20)]
+    supported_fact_ids: Annotated[list[Identifier], Field(max_length=50)] = Field(
+        default_factory=list
+    )
+    unsupported_claims: Annotated[list[ShortText], Field(max_length=30)] = Field(
+        default_factory=list
+    )
+    formation_time_assessment: ShortText
     findings: Annotated[list[EvidenceVisualFinding], Field(max_length=30)] = Field(
         default_factory=list
     )
@@ -599,11 +790,45 @@ class EvidenceItemAssessment(StrictModel):
     summary: LongText
 
 
+class EvidenceFactMatrixPatch(StrictModel):
+    operation: Literal["UPSERT_LINK", "REMOVE_LINK"]
+    fact_id: Identifier
+    evidence_id: Identifier
+    relation: Literal["SUPPORTS", "OPPOSES", "INCONCLUSIVE"]
+    reason: ShortText
+    confidence: Confidence
+
+
+class EvidenceHumanReviewTask(StrictModel):
+    evidence_id: Identifier
+    reason_codes: Annotated[list[Identifier], Field(min_length=1, max_length=20)]
+    review_goal: ShortText
+    instructions: Annotated[list[ShortText], Field(min_length=1, max_length=20)]
+    priority: Literal["LOW", "MEDIUM", "HIGH"]
+
+
+class EvidenceInternalHandoff(StrictModel):
+    evidence_change_summary: ShortText
+    matrix_change_summary: ShortText
+    remaining_conflicts: Annotated[list[ShortText], Field(max_length=30)] = Field(
+        default_factory=list
+    )
+    uncovered_fact_ids: Annotated[list[Identifier], Field(max_length=100)] = Field(
+        default_factory=list
+    )
+    human_review_evidence_ids: Annotated[
+        list[Identifier], Field(max_length=50)
+    ] = Field(default_factory=list)
+    judge_attention_points: Annotated[list[ShortText], Field(max_length=30)] = Field(
+        default_factory=list
+    )
+
+
 class EvidenceTurnLlmOutput(StrictModel):
     room_utterance: LongText
     evidence_requests: Annotated[
         list[EvidenceTurnQuestion],
-        Field(max_length=30),
+        Field(max_length=3),
     ] = Field(default_factory=list)
     verification_suggestions: Annotated[
         list[EvidenceVerificationSuggestion],
@@ -617,6 +842,15 @@ class EvidenceTurnLlmOutput(StrictModel):
         list[EvidenceItemAssessment],
         Field(max_length=50),
     ] = Field(default_factory=list)
+    fact_matrix_patch: Annotated[
+        list[EvidenceFactMatrixPatch],
+        Field(max_length=100),
+    ] = Field(default_factory=list)
+    human_review_tasks: Annotated[
+        list[EvidenceHumanReviewTask],
+        Field(max_length=50),
+    ] = Field(default_factory=list)
+    internal_handoff: EvidenceInternalHandoff
     confidence: Confidence
 
 
@@ -624,11 +858,19 @@ class EvidenceTurnRequest(StrictModel):
     context_envelope: EvidenceContextEnvelopeV1
     agent_context: AgentInvocationContext
 
+    # 所属模块：Python Agent 数据契约 > final_agents；函数角色：类/闭包内部方法。
+    # 具体功能：`enforce_agent_context_scope` 校验案件与会话上下文的 Schema、权限和阶段约束，拒绝越权或不一致数据；关键协作调用：`model_validator`。
+    # 上下游：上游为 Java 请求、LangGraph 状态、LLM JSON；下游为 本文件的 `_validate_context_envelope_scope`。
+    # 系统意义：这是信任边界：拒绝多余字段、资源越界、身份错配和非法枚举。
     @model_validator(mode="after")
     def enforce_agent_context_scope(self) -> "EvidenceTurnRequest":
         self._validate_context_envelope_scope()
         return self
 
+    # 所属模块：Python Agent 数据契约 > final_agents；函数角色：类/闭包内部方法。
+    # 具体功能：`_validate_context_envelope_scope` 校验案件与会话上下文的 Schema、权限和阶段约束，拒绝越权或不一致数据；关键协作调用：`ValueError`。
+    # 上下游：上游为 本文件的 `EvidenceTurnRequest.enforce_agent_context_scope`；下游为 协作调用 `ValueError`。
+    # 系统意义：这是信任边界：拒绝多余字段、资源越界、身份错配和非法枚举。
     def _validate_context_envelope_scope(self) -> None:
         envelope = self.context_envelope
         case_snapshot = envelope.case_snapshot
@@ -764,7 +1006,18 @@ class EvidenceTurnRequest(StrictModel):
 
 
 class EvidenceTurnResult(EvidenceTurnLlmOutput):
-    memory_frame: dict[str, object] = Field(default_factory=dict)
+    # Python 内部仍以 memory_frame 表示本轮工作记忆；跨服务 JSON 使用
+    # Java AgentRun 正式合同名 memory_patch，避免流式 final 在别名反序列化前失败。
+    memory_frame: dict[str, object] = Field(
+        default_factory=dict,
+        serialization_alias="memory_patch",
+    )
+    canvas_operations: Annotated[
+        list[dict[str, object]], Field(max_length=100)
+    ] = Field(default_factory=list)
+    referenced_evidence_ids: Annotated[
+        list[Identifier], Field(max_length=50)
+    ] = Field(default_factory=list)
     non_final: Literal[True] = True
     liability_determined: Literal[False] = False
     remedy_recommended: Literal[False] = False
@@ -809,6 +1062,10 @@ class HearingStageRequest(StrictModel):
     )
     current_settlement_version: Annotated[int, Field(ge=1)] | None = None
 
+    # 所属模块：Python Agent 数据契约 > final_agents；函数角色：类/闭包内部方法。
+    # 具体功能：`require_forced_convergence_context` 围绕案件与会话上下文计算该函数独立负责的业务派生值；关键协作调用：`model_validator`、`ValueError`。
+    # 上下游：上游为 Java 请求、LangGraph 状态、LLM JSON；下游为 协作调用 `model_validator`、`ValueError`。
+    # 系统意义：控制隐私、Token 和会话隔离：拒绝多余字段、资源越界、身份错配和非法枚举。
     @model_validator(mode="after")
     def require_forced_convergence_context(self) -> "HearingStageRequest":
         if self.stage is not HearingStage.C6_DRAFT_GENERATION:
@@ -898,6 +1155,7 @@ class HearingRoundTurnResult(StrictModel):
     review_focus_signal: Annotated[list[ShortText], Field(max_length=20)] = Field(
         default_factory=list
     )
+    proposed_resolution_direction: ShortText | None = None
     prompt_version: Identifier = "hearing-round-turn-v1"
     model: Identifier = "unknown"
     non_final: Literal[True] = True

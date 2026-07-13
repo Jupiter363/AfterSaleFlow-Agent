@@ -1,6 +1,11 @@
+// 文件作用：自动化测试文件，验证 ReviewWorkbenchView.test 相关模块的行为、契约或页面布局。
+// 说明：本注释用于帮助读者先了解本文件职责，再继续阅读具体实现。
+
 import { flushPromises, mount } from "@vue/test-utils";
 import { createMemoryHistory, createRouter } from "vue-router";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { reviewApi } from "../../api/review";
+import { actor } from "../../state/actor";
 import ReviewWorkbenchView from "./ReviewWorkbenchView.vue";
 
 const packet = {
@@ -21,6 +26,7 @@ const packet = {
   status: "FROZEN",
 };
 
+// 业务位置：【前端审核工作台】mountView：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 冻结审核包、Agent 建议和履约动作 正确进入 审核员批准、修改、补证或人工交接。上游：冻结审核包、Agent 建议和履约动作。下游：审核员批准、修改、补证或人工交接。边界：决定必须显式由有权限审核员提交。
 async function mountView(overrides = {}) {
   const router = createRouter({
     history: createMemoryHistory(),
@@ -42,7 +48,16 @@ async function mountView(overrides = {}) {
   return { wrapper, decideAction };
 }
 
+// 业务位置：【前端审核工作台】describe：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 冻结审核包、Agent 建议和履约动作 正确进入 审核员批准、修改、补证或人工交接。上游：冻结审核包、Agent 建议和履约动作。下游：审核员批准、修改、补证或人工交接。边界：决定必须显式由有权限审核员提交。
 describe("ReviewWorkbenchView", () => {
+  afterEach(() => {
+    actor.id = "user-local";
+    actor.role = "USER";
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  // 业务位置：【前端审核工作台】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 冻结审核包、Agent 建议和履约动作 正确进入 审核员批准、修改、补证或人工交接。上游：冻结审核包、Agent 建议和履约动作。下游：审核员批准、修改、补证或人工交接。边界：决定必须显式由有权限审核员提交。
   it("shows the frozen packet, review copilot and human-only controls", async () => {
     const { wrapper } = await mountView();
 
@@ -61,6 +76,7 @@ describe("ReviewWorkbenchView", () => {
     expect(wrapper.find("[data-review-decisions]").exists()).toBe(true);
   });
 
+  // 业务位置：【前端审核工作台】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 冻结审核包、Agent 建议和履约动作 正确进入 审核员批准、修改、补证或人工交接。上游：冻结审核包、Agent 建议和履约动作。下游：审核员批准、修改、补证或人工交接。边界：决定必须显式由有权限审核员提交。
   it("renders backend snake_case remedy actions as concrete execution work", async () => {
     const { wrapper } = await mountView({
       initialPacket: {
@@ -90,6 +106,7 @@ describe("ReviewWorkbenchView", () => {
     expect(remedyCard.text()).not.toContain("未提供");
   });
 
+  // 业务位置：【前端审核工作台】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 冻结审核包、Agent 建议和履约动作 正确进入 审核员批准、修改、补证或人工交接。上游：冻结审核包、Agent 建议和履约动作。下游：审核员批准、修改、补证或人工交接。边界：决定必须显式由有权限审核员提交。
   it("renders backend snake_case adjudication draft fields instead of waiting copy", async () => {
     const { wrapper } = await mountView({
       initialPacket: {
@@ -108,6 +125,7 @@ describe("ReviewWorkbenchView", () => {
     expect(draftCard.text()).not.toContain("等待草案");
   });
 
+  // 业务位置：【前端审核工作台】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 冻结审核包、Agent 建议和履约动作 正确进入 审核员批准、修改、补证或人工交接。上游：冻结审核包、Agent 建议和履约动作。下游：审核员批准、修改、补证或人工交接。边界：决定必须显式由有权限审核员提交。
   it("requires a reason and explicit second confirmation before a final decision", async () => {
     const decideAction = vi.fn().mockResolvedValue({
       decision: "APPROVE",
@@ -131,6 +149,7 @@ describe("ReviewWorkbenchView", () => {
     expect(wrapper.text()).toContain("终审决定已提交");
   });
 
+  // 业务位置：【前端审核工作台】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 冻结审核包、Agent 建议和履约动作 正确进入 审核员批准、修改、补证或人工交接。上游：冻结审核包、Agent 建议和履约动作。下游：审核员批准、修改、补证或人工交接。边界：决定必须显式由有权限审核员提交。
   it("never exposes final decision controls before the packet is frozen", async () => {
     const { wrapper } = await mountView({
       initialPacket: { ...packet, status: "PREPARING" },
@@ -138,5 +157,46 @@ describe("ReviewWorkbenchView", () => {
 
     expect(wrapper.find("[data-review-decisions]").exists()).toBe(false);
     expect(wrapper.text()).toContain("ReviewPacket 冻结前仅可只读旁观");
+  });
+
+  // 业务位置：【前端审核工作台】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 冻结审核包、Agent 建议和履约动作 正确进入 审核员批准、修改、补证或人工交接。上游：冻结审核包、Agent 建议和履约动作。下游：审核员批准、修改、补证或人工交接。边界：决定必须显式由有权限审核员提交。
+  it("streams the reviewer copilot answer through the shared AgentRun component", async () => {
+    actor.id = "reviewer-local";
+    actor.role = "PLATFORM_REVIEWER";
+    vi.spyOn(reviewApi, "queryCopilot").mockResolvedValue({
+      run_id: "AGENT_RUN_REVIEW_1",
+      operation: "REVIEW",
+      stream_url: "/api/agent-runs/AGENT_RUN_REVIEW_1/events",
+    });
+    const encoder = new TextEncoder();
+    const eventStream = [
+      'id: 0\nevent: start\ndata: {"schemaVersion":"agent_stream.v1","runId":"AGENT_RUN_REVIEW_1","sequence":0,"type":"start"}\n\n',
+      'id: 1\nevent: visible_delta\ndata: {"schemaVersion":"agent_stream.v1","runId":"AGENT_RUN_REVIEW_1","sequence":1,"type":"visible_delta","field":"answer","delta":"重点复核"}\n\n',
+      'id: 2\nevent: visible_delta\ndata: {"schemaVersion":"agent_stream.v1","runId":"AGENT_RUN_REVIEW_1","sequence":2,"type":"visible_delta","field":"answer","delta":"签收人身份。"}\n\n',
+      'id: 3\nevent: final\ndata: {"schemaVersion":"agent_stream.v1","runId":"AGENT_RUN_REVIEW_1","sequence":3,"type":"final","response":{"answer":"重点复核签收人身份。"}}\n\n',
+    ].join("");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(encoder.encode(eventStream));
+          controller.close();
+        },
+      }),
+    }));
+    const { wrapper } = await mountView();
+
+    await wrapper.get("[data-review-copilot-input]").setValue("最需要复核什么？");
+    await wrapper.get(".review-copilot__composer").trigger("submit");
+    await flushPromises();
+
+    expect(reviewApi.queryCopilot).toHaveBeenCalledWith(
+      actor,
+      "REVIEW_1",
+      "最需要复核什么？",
+    );
+    expect(wrapper.text()).toContain("重点复核签收人身份。");
+    expect(wrapper.text()).not.toContain("reasoning_content");
   });
 });

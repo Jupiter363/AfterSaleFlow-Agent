@@ -1,3 +1,5 @@
+# 文件作用：自动化测试文件，验证 test_tools_skills 相关模块的行为、契约或页面布局。
+
 from typing import Any
 
 import pytest
@@ -19,10 +21,18 @@ class EvidenceReadInput(BaseModel):
     evidence_id: str = Field(pattern=r"^EV-[0-9]+$")
 
 
+# 所属模块：Agent Harness > test_tools_skills；函数角色：模块公开业务函数。
+# 具体功能：`profile` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`AgentProfile.model_validate`、`profile_payload`。
+# 上下游：上游为 本文件的 `test_gateway_enforces_profile_state_schema_redaction_and_audit`、`test_gateway_rejects_forbidden_unknown_wrong_state_and_invalid_input`、`test_skill_registry_cannot_expand_profile_authority`；下游为 协作调用 `AgentProfile.model_validate`、`profile_payload`。
+# 系统意义：该函数在系统中的业务边界是：隔离参与方会话；不可信案件文本不能升级为系统指令。
 def profile() -> AgentProfile:
     return AgentProfile.model_validate(profile_payload())
 
 
+# 所属模块：Agent Harness > test_tools_skills；函数角色：模块公开业务函数。
+# 具体功能：`request` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`ToolRequest`。
+# 上下游：上游为 本文件的 `test_gateway_enforces_profile_state_schema_redaction_and_audit`、`test_gateway_rejects_forbidden_unknown_wrong_state_and_invalid_input`；下游为 协作调用 `ToolRequest`。
+# 系统意义：该函数在系统中的业务边界是：隔离参与方会话；不可信案件文本不能升级为系统指令。
 def request(tool_name: str, arguments: dict[str, Any]) -> ToolRequest:
     return ToolRequest(
         tool_name=tool_name,
@@ -35,6 +45,10 @@ def request(tool_name: str, arguments: dict[str, Any]) -> ToolRequest:
     )
 
 
+# 所属模块：Agent Harness > test_tools_skills；函数角色：回归测试用例。
+# 具体功能：`test_gateway_enforces_profile_state_schema_redaction_and_audit` 校验本阶段状态的 Schema、权限和阶段约束，拒绝越权或不一致数据；关键协作调用：`ToolGateway`、`gateway.register`、`gateway.execute`。
+# 上下游：上游为 Java 可信快照、调用身份、上下文合同、角色模板；下游为 本文件的 `profile`、`request`。
+# 系统意义：固定“Agent Harness > test_tools_skills”的可观察契约，防止后续重构改变业务结果。
 def test_gateway_enforces_profile_state_schema_redaction_and_audit() -> None:
     audits: list[dict[str, Any]] = []
     gateway = ToolGateway(audit_sink=audits.append)
@@ -69,6 +83,10 @@ def test_gateway_enforces_profile_state_schema_redaction_and_audit() -> None:
     assert audits[0]["agent_run_id"] == "RUN-1"
 
 
+# 所属模块：Agent Harness > test_tools_skills；函数角色：回归测试用例。
+# 具体功能：`test_gateway_rejects_forbidden_unknown_wrong_state_and_invalid_input` 验证本阶段状态在固定案例中的输出、边界和失败行为；关键协作调用：`ToolGateway`、`gateway.register`、`wrong_state.model_copy`。
+# 上下游：上游为 Java 可信快照、调用身份、上下文合同、角色模板；下游为 本文件的 `request`、`profile`。
+# 系统意义：固定“Agent Harness > test_tools_skills”的可观察契约，防止后续重构改变业务结果。
 def test_gateway_rejects_forbidden_unknown_wrong_state_and_invalid_input() -> None:
     gateway = ToolGateway()
     gateway.register(
@@ -106,6 +124,10 @@ def test_gateway_rejects_forbidden_unknown_wrong_state_and_invalid_input() -> No
         )
 
 
+# 所属模块：Agent Harness > test_tools_skills；函数角色：回归测试用例。
+# 具体功能：`test_skill_registry_cannot_expand_profile_authority` 验证本阶段状态在固定案例中的输出、边界和失败行为；关键协作调用：`SkillRegistry`、`registry.register`、`registry.resolve`。
+# 上下游：上游为 Java 可信快照、调用身份、上下文合同、角色模板；下游为 本文件的 `profile`。
+# 系统意义：固定“Agent Harness > test_tools_skills”的可观察契约，防止后续重构改变业务结果。
 def test_skill_registry_cannot_expand_profile_authority() -> None:
     registry = SkillRegistry()
     registry.register(

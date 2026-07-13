@@ -1,4 +1,8 @@
+// 文件作用：前端 API 客户端文件，封装浏览器到后端服务的 HTTP/SSE 调用。
+// 说明：本注释用于帮助读者先了解本文件职责，再继续阅读具体实现。
+
 import { apiRequest, apiUrl, newIdempotencyKey } from "./client";
+import { consumeSse, parseSseBlock } from "./sse";
 
 export const roomApi = {
   messages: (actor, caseId, roomType) =>
@@ -35,33 +39,9 @@ export const roomApi = {
     }),
 };
 
-export function parseSseBlock(block) {
-  let id = null;
-  let event = "message";
-  const dataLines = [];
+export { parseSseBlock };
 
-  for (const rawLine of block.split(/\r?\n/)) {
-    if (!rawLine || rawLine.startsWith(":")) continue;
-    const separator = rawLine.indexOf(":");
-    const field = separator === -1 ? rawLine : rawLine.slice(0, separator);
-    const value =
-      separator === -1
-        ? ""
-        : rawLine.slice(separator + 1).replace(/^ /, "");
-    if (field === "id") id = Number(value);
-    if (field === "event") event = value;
-    if (field === "data") dataLines.push(value);
-  }
-
-  if (!dataLines.length) return null;
-  const rawData = dataLines.join("\n");
-  return {
-    id: Number.isFinite(id) ? id : null,
-    event,
-    data: JSON.parse(rawData),
-  };
-}
-
+// 业务位置：【前端 API/SSE 适配】consumeCaseEvents：围绕 Agent 流事件 计算本模块需要的派生信息，使其能够从 页面操作和访问令牌 正确进入 Java HTTP 请求或 Agent 流事件。上游：页面操作和访问令牌。下游：Java HTTP 请求或 Agent 流事件。边界：统一处理错误和取消，不能伪造服务端状态。
 export async function consumeCaseEvents({
   actor,
   caseId,
@@ -70,47 +50,12 @@ export async function consumeCaseEvents({
   fetchImpl = globalThis.fetch,
   signal,
 }) {
-  const response = await fetchImpl(
-    apiUrl(`/disputes/${caseId}/events?last_event_id=${lastEventId}`),
-    {
-      headers: {
-        Accept: "text/event-stream",
-        "Last-Event-ID": String(lastEventId),
-        "X-Role": actor.role,
-        "X-User-Id": actor.id,
-      },
-      signal,
-    },
-  );
-  if (!response.ok || !response.body) {
-    throw new Error(`事件流连接失败（HTTP ${response.status}）`);
-  }
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let cursor = lastEventId;
-
-  while (true) {
-    const { done, value } = await reader.read();
-    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
-    const blocks = buffer.split(/\r?\n\r?\n/);
-    buffer = blocks.pop() || "";
-    for (const block of blocks) {
-      const event = parseSseBlock(block);
-      if (!event) continue;
-      if (event.id != null) cursor = Math.max(cursor, event.id);
-      await onEvent?.(event);
-    }
-    if (done) break;
-  }
-
-  if (buffer.trim()) {
-    const event = parseSseBlock(buffer);
-    if (event) {
-      if (event.id != null) cursor = Math.max(cursor, event.id);
-      await onEvent?.(event);
-    }
-  }
-  return cursor;
+  return consumeSse({
+    actor,
+    lastEventId,
+    onEvent,
+    fetchImpl,
+    signal,
+    url: apiUrl(`/disputes/${caseId}/events?last_event_id=${lastEventId}`),
+  });
 }

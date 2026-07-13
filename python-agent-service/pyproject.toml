@@ -1,3 +1,6 @@
+# 文件作用：Python Agent 服务代码文件，承载售后争议智能体的 API、配置、模型调用或业务流程。
+# 说明：本注释用于帮助读者先了解配置用途，再修改具体配置项。
+
 [project]
 name = "python-agent-service"
 version = "0.1.0"

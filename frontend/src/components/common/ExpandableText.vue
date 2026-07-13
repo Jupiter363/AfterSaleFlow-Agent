@@ -1,3 +1,8 @@
+<!--
+  文件作用：前端组件文件，封装可复用 UI、状态展示或业务交互单元。
+  说明：本注释用于帮助读者先了解组件/页面职责，再阅读 template、script 和 style。
+-->
+
 <script setup>
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 
@@ -13,6 +18,7 @@ const content = ref(null);
 const overflowing = ref(false);
 let observer;
 
+// 业务位置：【前端业务组件】measure：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面传入的案件、消息、证据或审核数据 正确进入 可复用的房间交互和展示事件。上游：页面传入的案件、消息、证据或审核数据。下游：可复用的房间交互和展示事件。边界：组件不直接跨越业务权限调用。
 function measure() {
   const element = content.value;
   overflowing.value = Boolean(
@@ -20,6 +26,7 @@ function measure() {
   );
 }
 
+// 业务位置：【前端业务组件】open：切换与 当前阶段业务数据 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：页面传入的案件、消息、证据或审核数据。下游：可复用的房间交互和展示事件。边界：组件不直接跨越业务权限调用。
 function open() {
   emit("open", { label: props.label, text: props.text });
 }

@@ -1,3 +1,8 @@
+<!--
+  文件作用：前端页面视图文件，组织售后争议对应页面的数据加载、交互和展示。
+  说明：本注释用于帮助读者先了解组件/页面职责，再阅读 template、script 和 style。
+-->
+
 <script setup>
 import { onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
@@ -27,6 +32,7 @@ const statusLabels = {
   CANCELLED: "已取消",
 };
 
+// 业务位置：【前端审核工作台】load：读取 当前阶段业务数据，并依据当前案件、角色和会话权限裁剪成可用输入。上游：冻结审核包、Agent 建议和履约动作。下游：审核员批准、修改、补证或人工交接。边界：决定必须显式由有权限审核员提交。
 async function load() {
   if (props.initialTasks !== null) return;
   loading.value = true;
@@ -39,15 +45,18 @@ async function load() {
   }
 }
 
+// 业务位置：【前端审核工作台】openTask：切换与 当前阶段业务数据 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：冻结审核包、Agent 建议和履约动作。下游：审核员批准、修改、补证或人工交接。边界：决定必须显式由有权限审核员提交。
 function openTask(task) {
   return router.push(`/reviews/${task.id}`);
 }
 
+// 业务位置：【前端审核工作台】shortId：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 冻结审核包、Agent 建议和履约动作 正确进入 审核员批准、修改、补证或人工交接。上游：冻结审核包、Agent 建议和履约动作。下游：审核员批准、修改、补证或人工交接。边界：决定必须显式由有权限审核员提交。
 function shortId(value) {
   if (!value) return "未关联";
   return value.length > 16 ? `${value.slice(0, 9)}…` : value;
 }
 
+// 业务位置：【前端审核工作台】displayTime：将 当前阶段业务数据 转换为稳定的接口、提示词或页面表达，避免直接暴露内部实现字段。上游：冻结审核包、Agent 建议和履约动作。下游：审核员批准、修改、补证或人工交接。边界：决定必须显式由有权限审核员提交。
 function displayTime(value) {
   if (!value) return "等待分配";
   const date = new Date(value);
@@ -56,10 +65,12 @@ function displayTime(value) {
   return `${date.getMonth() + 1}月${date.getDate()}日 ${hour}:${minute}`;
 }
 
+// 业务位置：【前端审核工作台】priorityLabel：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 冻结审核包、Agent 建议和履约动作 正确进入 审核员批准、修改、补证或人工交接。上游：冻结审核包、Agent 建议和履约动作。下游：审核员批准、修改、补证或人工交接。边界：决定必须显式由有权限审核员提交。
 function priorityLabel(priority) {
   return priorityLabels[priority] || priority || "普通";
 }
 
+// 业务位置：【前端审核工作台】statusLabel：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 冻结审核包、Agent 建议和履约动作 正确进入 审核员批准、修改、补证或人工交接。上游：冻结审核包、Agent 建议和履约动作。下游：审核员批准、修改、补证或人工交接。边界：决定必须显式由有权限审核员提交。
 function statusLabel(status) {
   return statusLabels[status] || status || "待审核";
 }
@@ -73,7 +84,12 @@ onMounted(load);
       <div>
         <span>HUMAN FINAL GATE</span>
         <h1>平台终审队列</h1>
-        <p>AI 已经把长卷宗折成可核验的审核包，最后一槌仍由人来落下。</p>
+        <p class="review-queue-page__lead">
+          <span class="review-queue-page__context">
+            人工终审队列 <i aria-hidden="true">✦</i>
+          </span>
+          <span>AI 已经把长卷宗折成可核验的审核包，最后一槌仍由人来落下。</span>
+        </p>
       </div>
       <div class="review-queue-page__mascot" aria-hidden="true">
         <span>⚖️</span><i>仅审核员可进入</i>
@@ -127,10 +143,13 @@ onMounted(load);
   border: 1px solid #dce7f2; border-radius: 34px;
 }
 .review-queue-page__hero > div > span, .review-queue-board__title span {
-  color: #7487a6; font-size: 10px; font-weight: 900; letter-spacing: .17em;
+  color: #7185a8; font-size: 10px; font-weight: 800; letter-spacing: .18em;
 }
-.review-queue-page__hero h1 { margin: 7px 0; color: #30405b; font-size: clamp(30px, 5vw, 48px); }
+.review-queue-page__hero h1 { margin: 7px 0 8px; color: #263754; font-size: clamp(32px, 5vw, 56px); line-height: 1.05; }
 .review-queue-page__hero p { margin: 0; color: #697991; }
+.review-queue-page__lead { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; }
+.review-queue-page__context { display: inline-flex; gap: 6px; align-items: center; color: #586b85; font-size: 12px; font-weight: 900; line-height: 1; }
+.review-queue-page__context i { color: #ff9a76; font-size: 9px; font-style: normal; }
 .review-queue-page__mascot { display: grid; place-items: center; min-width: 150px; padding: 18px; background: #ffffffb8; border-radius: 26px; }
 .review-queue-page__mascot span { font-size: 52px; }
 .review-queue-page__mascot i { color: #77688d; font-size: 11px; font-style: normal; }

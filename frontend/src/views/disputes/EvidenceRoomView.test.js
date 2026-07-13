@@ -1,3 +1,6 @@
+// 文件作用：自动化测试文件，验证 EvidenceRoomView.test 相关模块的行为、契约或页面布局。
+// 说明：本注释用于帮助读者先了解本文件职责，再继续阅读具体实现。
+
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { flushPromises, mount } from "@vue/test-utils";
@@ -101,6 +104,7 @@ const catalog = {
   ],
 };
 
+// 业务位置：【前端证据室】stressCatalog：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function stressCatalog(role, count = 100, filenameFactory = null) {
   return {
     case_id: "CASE_EVIDENCE_1",
@@ -135,6 +139,22 @@ const initialCompletion = {
   next_room: null,
 };
 
+const initialEvidenceMessages = [
+  {
+    id: "EVIDENCE_OPENING",
+    sequence_no: 1,
+    sender_role: "CUSTOMER_SERVICE",
+    message_type: "AGENT_MESSAGE",
+    message_text: "请先补充与接待室案情匹配的证据来源、形成时间和原件。",
+  },
+];
+
+const connectedModelHealth = vi.fn().mockResolvedValue({
+  status: "UP",
+  model_status: "CONNECTED",
+});
+
+// 业务位置：【前端证据室】deferred：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function deferred() {
   let resolve;
   let reject;
@@ -145,6 +165,7 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
+// 业务位置：【前端证据室】routerForEvidence：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function routerForEvidence() {
   return createRouter({
     history: createMemoryHistory(),
@@ -155,6 +176,7 @@ function routerForEvidence() {
   });
 }
 
+// 业务位置：【前端证据室】mountView：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 async function mountView(overrides = {}, mountOptions = {}) {
   const router = routerForEvidence();
   await router.push("/disputes/CASE_EVIDENCE_1/evidence");
@@ -167,19 +189,26 @@ async function mountView(overrides = {}, mountOptions = {}) {
       deadlineAt: "2026-07-03T14:00:00+08:00",
       serverNow: "2026-07-03T12:00:00+08:00",
       viewerRole: "USER",
-      initialMessages: [],
+      initialMessages: initialEvidenceMessages,
       completeAction,
+      modelHealthLoader: connectedModelHealth,
       ...overrides,
     },
     global: { plugins: [router] },
     ...mountOptions,
   });
+  await flushPromises();
   return { wrapper, router, completeAction };
 }
 
+// 业务位置：【前端证据室】describe：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 describe("EvidenceRoomView", () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    connectedModelHealth.mockResolvedValue({
+      status: "UP",
+      model_status: "CONNECTED",
+    });
     evidenceApi.catalog.mockResolvedValue(catalog);
     evidenceApi.completion.mockResolvedValue(initialCompletion);
     evidenceApi.upload.mockResolvedValue({});
@@ -212,6 +241,7 @@ describe("EvidenceRoomView", () => {
     });
   });
 
+  // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
   it("renders an intake-like fixed two-panel evidence room", async () => {
     const { wrapper } = await mountView();
 
@@ -222,21 +252,20 @@ describe("EvidenceRoomView", () => {
     expect(
       wrapper.get("[data-evidence-board-panel]").find(".evidence-uploader").exists(),
     ).toBe(true);
-    expect(wrapper.get(".evidence-room__case-note").text()).toContain(
-      "发起争议方须至少正式提交 1 份相关证据；另一方可提交材料，或等待举证时效结束。",
-    );
+    expect(wrapper.get(".evidence-room__case-note").text()).toContain("证据书记官已就绪");
   });
 
-  it("encodes the fixed board budget, single list scroll rail, and approved breakpoints", () => {
+  // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
+  it("encodes a fixed four-card board with horizontal evidence rails", () => {
     expect(evidenceRoomSource).toContain("--evidence-panel-height: 740px");
     expect(evidenceRoomSource).toMatch(
-      /grid-template-rows:\s*76px 86px minmax\(0, 1fr\) 60px/,
+      /\.evidence-board\s*\{[^}]*grid-template-rows:\s*76px minmax\(0, 1fr\) 60px/s,
     );
     expect(evidenceRoomSource).toMatch(
-      /\.evidence-board__list\s*\{[^}]*overflow-y:\s*auto/s,
+      /\.evidence-board__cards\s*\{[^}]*overflow:\s*hidden/s,
     );
-    expect(evidenceRoomSource).not.toMatch(
-      /\.evidence-library\s*\{[^}]*overflow(?:-y)?:\s*(?:auto|scroll)/s,
+    expect(evidenceRoomSource).toMatch(
+      /\.evidence-card-strip\s*\{[^}]*overflow-x:\s*auto[^}]*overflow-y:\s*hidden/s,
     );
     expect(evidenceRoomSource).toMatch(
       /@container room-workspace \(max-width: 1059px\)/,
@@ -247,9 +276,6 @@ describe("EvidenceRoomView", () => {
     expect(evidenceRoomSource).not.toMatch(/@media \(max-width: 1059px\)/);
     expect(evidenceRoomSource).not.toMatch(/@media \(max-width: 1060px\)/);
     expect(evidenceRoomSource).toMatch(/@media \(max-width: 360px\)/);
-    expect(evidenceRoomSource).toMatch(
-      /grid-template-rows:\s*88px 96px minmax\(0, 1fr\) 72px/,
-    );
     expect(evidenceRoomSource).toMatch(/:deep\(\.room-shell__header\)/);
     expect(evidenceRoomSource).toMatch(
       /:deep\(\.room-shell__boundary\)[^{]*\{[^}]*overflow-wrap:\s*anywhere/s,
@@ -259,6 +285,7 @@ describe("EvidenceRoomView", () => {
     );
   });
 
+  // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
   it("keeps compact footer controls horizontal and overlays errors outside the board tracks", () => {
     const compactStyles = evidenceRoomSource.match(
       /@media \(max-width: 620px\)([\s\S]*?)@media \(max-width: 360px\)/,
@@ -282,6 +309,7 @@ describe("EvidenceRoomView", () => {
     );
   });
 
+  // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
   it("reserves a real 44px touch target for uploader, footer, and modal actions", () => {
     expect(evidenceRoomSource).toMatch(
       /\.evidence-uploader__button,\s*\.evidence-footer button\s*\{[^}]*min-height:\s*44px[^}]*display:\s*inline-flex/s,
@@ -292,7 +320,7 @@ describe("EvidenceRoomView", () => {
   });
 
   it.each(["USER", "MERCHANT"])(
-    "renders 100 %s evidence cards inside the single list rail without moving the footer",
+    "renders 100 %s evidence cards inside fixed horizontal rails without moving the footer",
     async (viewerRole) => {
       const { wrapper } = await mountView({
         viewerRole,
@@ -300,30 +328,32 @@ describe("EvidenceRoomView", () => {
       });
 
       const listRail = wrapper.get("[data-evidence-list-scroll]");
-      expect(listRail.findAll("[data-evidence-card]")).toHaveLength(100);
+      expect(
+        listRail.get("[data-evidence-originals]").findAll("[data-evidence-card]"),
+      ).toHaveLength(100);
+      expect(listRail.get("[data-human-review-queue]").findAll("[data-human-review-card]")).toHaveLength(34);
       expect(listRail.find(".evidence-footer").exists()).toBe(false);
       expect(wrapper.get("[data-evidence-board-panel] > .evidence-footer").exists()).toBe(true);
       expect(wrapper.findAll("[data-evidence-status-row]")).toHaveLength(100);
-      expect(wrapper.get("[data-evidence-status-row]").text()).toContain("已提交");
-      expect(wrapper.get("[data-evidence-status-row]").text()).toContain("88% · 高置信");
+      expect(wrapper.get("[data-evidence-status-row]").text()).toContain(
+        viewerRole === "MERCHANT" ? "商家提交" : "用户提交",
+      );
+      expect(wrapper.get("[data-evidence-status-row]").text()).toContain("待人工复核");
     },
   );
 
-  it("keeps a 200-character unbroken filename inspectable and long verification text on its own row", async () => {
+  // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
+  it("keeps a 200-character filename inspectable without rendering feedback inside the compact card", async () => {
     const filename = `${"证据原件无空格长文件名".repeat(20).slice(0, 200)}.pdf`;
     const longCatalog = stressCatalog("USER", 1, () => filename);
     const { wrapper } = await mountView({ initialCatalog: longCatalog });
 
     const card = wrapper.get("[data-evidence-card]");
     const filenameNode = card.get("[data-evidence-filename]");
-    const description = card.get("[data-evidence-description]");
 
     expect(filenameNode.attributes("title")).toBe(filename);
     expect(filenameNode.text()).toBe(filename);
-    expect(description.text()).toContain("来源完整性与时间线需要逐项核对");
-    expect(evidenceRoomSource).toMatch(
-      /\.evidence-card__description\s*\{[^}]*grid-column:\s*1\s*\/\s*-1[^}]*overflow-wrap:\s*anywhere/s,
-    );
+    expect(card.find("[data-evidence-description]").exists()).toBe(false);
     expect(evidenceRoomSource).toMatch(
       /\.evidence-card__filename\s*\{[^}]*text-overflow:\s*ellipsis[^}]*white-space:\s*nowrap/s,
     );
@@ -331,6 +361,9 @@ describe("EvidenceRoomView", () => {
     await card.trigger("click");
 
     expect(wrapper.get("[data-evidence-detail-modal]").text()).toContain(filename);
+    expect(wrapper.get("[data-evidence-detail-modal]").text()).toContain(
+      "来源完整性与时间线需要逐项核对",
+    );
     expect(evidenceRoomSource).toMatch(
       /\.evidence-modal__facts span\s*\{[^}]*min-width:\s*0[^}]*overflow-wrap:\s*anywhere[^}]*word-break:\s*break-word/s,
     );
@@ -345,6 +378,7 @@ describe("EvidenceRoomView", () => {
     );
   });
 
+  // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
   it("keeps the narrow room header, countdown, AI notice, and conversation chain wrap-safe", () => {
     expect(evidenceRoomSource).toMatch(
       /@media \(max-width: 360px\)[\s\S]*:deep\(\.room-shell__header\)[\s\S]*grid-template-columns:\s*minmax\(0, 1fr\) auto/,
@@ -356,10 +390,11 @@ describe("EvidenceRoomView", () => {
       /:deep\(\.conversation-stream__message\)[^{]*\{[^}]*min-width:\s*0[^}]*overflow-wrap:\s*anywhere/s,
     );
     expect(evidenceRoomSource).toMatch(
-      /\.evidence-card__meta\s*\{[^}]*flex-wrap:\s*wrap/s,
+      /\.evidence-card__labels\s*\{[^}]*overflow:\s*hidden/s,
     );
   });
 
+  // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
   it("shows confidence feedback and keeps completion available for low confidence evidence", async () => {
     const lowConfidenceCatalog = {
       ...catalog,
@@ -375,11 +410,15 @@ describe("EvidenceRoomView", () => {
     };
     const { wrapper } = await mountView({ initialCatalog: lowConfidenceCatalog });
 
-    expect(wrapper.get("[data-evidence-confidence]").text()).toContain("31%");
-    expect(wrapper.get("[data-evidence-confidence]").text()).toContain("低置信");
+    const compactCard = wrapper.get("[data-evidence-originals] [data-evidence-card]");
+    expect(compactCard.find("[data-evidence-confidence]").exists()).toBe(false);
+    await compactCard.trigger("click");
+    expect(wrapper.get("[data-evidence-detail-modal]").text()).toContain("31%");
+    expect(wrapper.get("[data-evidence-detail-modal]").text()).toContain("低置信");
     expect(wrapper.get("[data-complete-evidence]").element.disabled).toBe(false);
   });
 
+  // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
   it("renders multimodal assessment confidence and a read-only human review card", async () => {
     const reviewCatalog = {
       ...catalog,
@@ -405,28 +444,35 @@ describe("EvidenceRoomView", () => {
     const { wrapper } = await mountView({ initialCatalog: reviewCatalog });
 
     const submittedCard = wrapper.get("[data-evidence-originals] [data-evidence-card]");
-    expect(submittedCard.get("[data-evidence-confidence]").text()).toContain("核验把握 67%");
+    expect(submittedCard.text()).toContain("用户提交");
+    expect(submittedCard.text()).toContain("待人工复核");
+    expect(submittedCard.find("[data-evidence-confidence]").exists()).toBe(false);
 
     const queue = wrapper.get("[data-human-review-queue]");
     expect(queue.text()).toContain("待人工审核");
     const reviewCard = queue.get("[data-human-review-card]");
     expect(reviewCard.text()).toContain("商品划痕细节照片.png");
-    expect(reviewCard.text()).toContain("真实性74%");
-    expect(reviewCard.text()).toContain("关联性93%");
-    expect(reviewCard.text()).toContain("完整性58%");
-    expect(reviewCard.text()).toContain("核验把握67%");
-    expect(reviewCard.text()).toContain("图片或视频细节无法由模型可靠判定");
-    expect(reviewCard.text()).toContain("单张照片无法排除光线反射");
-    expect(reviewCard.text()).toContain("对照原图检查划痕边缘");
-    expect(reviewCard.find("button").exists()).toBe(false);
+    expect(reviewCard.text()).toContain("用户提交");
+    expect(reviewCard.text()).toContain("人工审核任务");
+    expect(reviewCard.text()).not.toContain("单张照片无法排除光线反射");
+    expect(reviewCard.element.tagName).toBe("BUTTON");
 
     await submittedCard.trigger("click");
-    const detail = wrapper.get("[data-evidence-detail-modal]");
+    let detail = wrapper.get("[data-evidence-detail-modal]");
+    expect(detail.attributes("data-detail-mode")).toBe("evidence");
     expect(detail.get("[data-evidence-detail-assessment]").text()).toContain("真实性74%");
-    expect(detail.get("[data-evidence-detail-assessment]").text()).toContain("已检查模态：IMAGE、OCR");
+    expect(detail.get("[data-evidence-detail-assessment]").text()).toContain("AI 初步核验");
+    expect(detail.text()).not.toContain("解析文本 / OCR");
+    expect(detail.find("[data-evidence-detail-human-review]").exists()).toBe(false);
+
+    await detail.get("[data-close-evidence-modal]").trigger("click");
+    await reviewCard.trigger("click");
+    detail = wrapper.get("[data-evidence-detail-modal]");
+    expect(detail.attributes("data-detail-mode")).toBe("human-review");
     expect(detail.get("[data-evidence-detail-human-review]").text()).toContain("审核指引");
   });
 
+  // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
   it("accepts camelCase assessment fields and requiresHumanReview independently of status", async () => {
     const camelCaseCatalog = {
       ...catalog,
@@ -455,11 +501,16 @@ describe("EvidenceRoomView", () => {
 
     const reviewCard = wrapper.get("[data-human-review-card]");
     expect(reviewCard.text()).toContain("聊天记录.png");
-    expect(reviewCard.text()).toContain("材料来源或流转链路尚未核实");
-    expect(reviewCard.text()).toContain("聊天参与方身份仍需核对");
-    expect(wrapper.get("[data-evidence-confidence]").text()).toContain("76%");
+    expect(reviewCard.text()).toContain("人工审核任务");
+    expect(reviewCard.text()).not.toContain("聊天参与方身份仍需核对");
+    await reviewCard.trigger("click");
+    const detail = wrapper.get("[data-evidence-detail-modal]");
+    expect(detail.text()).toContain("材料来源或流转链路尚未核实");
+    expect(detail.text()).toContain("聊天参与方身份仍需核对");
+    expect(detail.text()).toContain("76%");
   });
 
+  // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
   it("shows every party human-review item to the platform reviewer", async () => {
     const reviewerCatalog = {
       ...catalog,
@@ -493,21 +544,23 @@ describe("EvidenceRoomView", () => {
     expect(queue.text()).toContain("商家发货照片.png");
   });
 
-  it("keeps one board scroll rail and expands human-review cards inside it", () => {
+  // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
+  it("keeps the board fixed with horizontal evidence rails and a vertical human-review queue", () => {
     expect(evidenceRoomSource).toMatch(
-      /\.human-review-list\s*\{[^}]*display:\s*grid/s,
+      /\.evidence-board__cards\s*\{[^}]*overflow:\s*hidden/s,
     );
     expect(evidenceRoomSource).toMatch(
-      /\.human-review-card__body\s*\{[^}]*display:\s*grid/s,
+      /\.evidence-card-strip\s*\{[^}]*display:\s*flex[^}]*overflow-x:\s*auto[^}]*overflow-y:\s*hidden/s,
     );
-    expect(evidenceRoomSource).not.toMatch(
-      /\.human-review-card__body\s*\{[^}]*overflow-y:\s*(?:auto|scroll)/s,
+    expect(evidenceRoomSource).toMatch(
+      /\.evidence-library--human-review \.evidence-card-strip\s*\{[^}]*flex-direction:\s*column[^}]*overflow-x:\s*hidden[^}]*overflow-y:\s*auto/s,
     );
     expect(evidenceRoomSource).toMatch(
       /\.evidence-modal__review-scroll\s*\{[^}]*max-height:\s*230px[^}]*overflow-y:\s*auto/s,
     );
   });
 
+  // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
   it("shows a dismissible modal when the dispute initiator has no submitted evidence", async () => {
     const emptyInitiatorCatalog = {
       ...catalog,
@@ -542,6 +595,7 @@ describe("EvidenceRoomView", () => {
     expect(wrapper.find("[data-evidence-gate-modal]").exists()).toBe(false);
   });
 
+  // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
   it("moves focus into the evidence gate, traps Tab, closes on Escape, and restores the completion trigger", async () => {
     const emptyInitiatorCatalog = {
       ...catalog,
@@ -598,6 +652,7 @@ describe("EvidenceRoomView", () => {
     wrapper.unmount();
   });
 
+  // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
   it("allows a non-initiating party to complete without submitted evidence", async () => {
     const emptyMerchantCatalog = {
       ...catalog,
@@ -624,6 +679,7 @@ describe("EvidenceRoomView", () => {
     expect(wrapper.find("[data-evidence-gate-modal]").exists()).toBe(false);
   });
 
+  // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
   it("opens a submitted evidence detail modal from a card", async () => {
     const { wrapper } = await mountView();
 
@@ -632,7 +688,7 @@ describe("EvidenceRoomView", () => {
       .trigger("click");
 
     const modal = wrapper.get("[data-evidence-detail-modal]");
-    expect(modal.text()).toContain("EVIDENCE_USER_PRIVATE");
+    expect(modal.text()).not.toContain("EVIDENCE_USER_PRIVATE");
     expect(modal.text()).toContain("92%");
     expect(modal.text()).toContain("原始截图来源清晰");
     expect(modal.text()).toContain("user-original.png");
@@ -641,6 +697,7 @@ describe("EvidenceRoomView", () => {
     expect(wrapper.find("[data-evidence-detail-modal]").exists()).toBe(false);
   });
 
+  // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
   it("does not open evidence detail when keyboard activation comes from nested actions", async () => {
     const { wrapper } = await mountView({}, { attachTo: document.body });
 
@@ -648,52 +705,15 @@ describe("EvidenceRoomView", () => {
       key: "Enter",
     });
     expect(wrapper.find("[data-evidence-detail-modal]").exists()).toBe(false);
-
-    await wrapper.get("[data-expand-submitted-evidence]").trigger("click");
-    await flushPromises();
-    await wrapper.get("[data-gallery-download-evidence]").trigger("keydown", {
-      key: "Enter",
-    });
-
-    expect(wrapper.find("[data-evidence-detail-modal]").exists()).toBe(false);
     wrapper.unmount();
   });
 
-  it("keeps gallery and detail as a focus-restoring modal stack", async () => {
+  // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
+  it("opens compact evidence cards directly into a focus-restoring detail modal", async () => {
     const { wrapper } = await mountView({}, { attachTo: document.body });
-    const galleryTrigger = wrapper.get("[data-expand-submitted-evidence]").element;
-    galleryTrigger.focus();
-
-    await wrapper.get("[data-expand-submitted-evidence]").trigger("click");
-    await flushPromises();
-
-    const gallery = wrapper.get("[data-evidence-gallery-modal]");
-    const galleryClose = gallery.get("[data-close-evidence-gallery]").element;
-    expect(document.activeElement).toBe(galleryClose);
-
-    document.dispatchEvent(
-      new KeyboardEvent("keydown", {
-        key: "Tab",
-        shiftKey: true,
-        bubbles: true,
-        cancelable: true,
-      }),
-    );
-    expect(document.activeElement).toBe(
-      gallery.findAll("[data-evidence-gallery-card]").at(-1).element,
-    );
-
-    document.dispatchEvent(
-      new KeyboardEvent("keydown", {
-        key: "Tab",
-        bubbles: true,
-        cancelable: true,
-      }),
-    );
-    expect(document.activeElement).toBe(galleryClose);
-
-    const galleryCard = gallery.get("[data-evidence-gallery-card]");
-    await galleryCard.trigger("click");
+    const card = wrapper.get("[data-evidence-originals] [data-evidence-card]");
+    card.element.focus();
+    await card.trigger("click");
     await flushPromises();
 
     const detail = wrapper.get("[data-evidence-detail-modal]");
@@ -737,10 +757,6 @@ describe("EvidenceRoomView", () => {
       }),
     );
     expect(document.activeElement).toBe(detailClose);
-    expect(Number(detail.attributes("data-modal-depth"))).toBeGreaterThan(
-      Number(gallery.attributes("data-modal-depth")),
-    );
-    expect(gallery.attributes("aria-hidden")).toBe("true");
 
     document.dispatchEvent(
       new KeyboardEvent("keydown", {
@@ -752,29 +768,17 @@ describe("EvidenceRoomView", () => {
     await flushPromises();
 
     expect(wrapper.find("[data-evidence-detail-modal]").exists()).toBe(false);
-    expect(wrapper.find("[data-evidence-gallery-modal]").exists()).toBe(true);
-    expect(document.activeElement).toBe(galleryCard.element);
-
-    document.dispatchEvent(
-      new KeyboardEvent("keydown", {
-        key: "Escape",
-        bubbles: true,
-        cancelable: true,
-      }),
-    );
-    await flushPromises();
-
-    expect(wrapper.find("[data-evidence-gallery-modal]").exists()).toBe(false);
-    expect(document.activeElement).toBe(galleryTrigger);
+    expect(document.activeElement).toBe(card.element);
     wrapper.unmount();
   });
 
+  // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
   it("removes the modal keyboard listener when the view unmounts", async () => {
     const addSpy = vi.spyOn(document, "addEventListener");
     const removeSpy = vi.spyOn(document, "removeEventListener");
     const { wrapper } = await mountView({}, { attachTo: document.body });
 
-    await wrapper.get("[data-expand-submitted-evidence]").trigger("click");
+    await wrapper.get("[data-evidence-originals] [data-evidence-card]").trigger("click");
     await flushPromises();
 
     const keydownRegistration = addSpy.mock.calls.find(
@@ -792,6 +796,7 @@ describe("EvidenceRoomView", () => {
     removeSpy.mockRestore();
   });
 
+  // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
   it("uses reusable document image and video icons for evidence files", async () => {
     const iconCatalog = {
       ...catalog,
@@ -838,6 +843,7 @@ describe("EvidenceRoomView", () => {
     expect(wrapper.find('[data-file-kind="pdf"]').exists()).toBe(true);
     expect(wrapper.find('[data-file-kind="word"]').exists()).toBe(true);
     expect(wrapper.find('[data-file-kind="markdown"]').exists()).toBe(true);
+    expect(wrapper.find(".evidence-card__preview img").exists()).toBe(false);
     expect(wrapper.find('[data-file-kind="image"]').exists()).toBe(true);
     expect(wrapper.find('[data-file-kind="video"]').exists()).toBe(true);
     expect(
@@ -847,6 +853,7 @@ describe("EvidenceRoomView", () => {
     ).toEqual(expect.arrayContaining(["PDF", "DOC", "MD", "IMG", "VID"]));
   });
 
+  // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
   it("ensures the evidence clerk opens the first actor-scoped turn only for an empty thread", async () => {
     roomApi.messages.mockResolvedValueOnce([]);
     roomApi.messages.mockResolvedValueOnce([
@@ -875,6 +882,7 @@ describe("EvidenceRoomView", () => {
     expect(wrapper.text()).toContain("请根据接待室案情先补充质检视频");
   });
 
+  // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
   it("does not append a clerk opening when the actor already has an evidence conversation", async () => {
     roomApi.messages.mockResolvedValueOnce([
       {
@@ -893,6 +901,7 @@ describe("EvidenceRoomView", () => {
     expect(wrapper.text()).toContain("I already started this evidence conversation.");
   });
 
+  // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
   it("requests a dossier-specific opening upgrade for a stale generic clerk welcome", async () => {
     roomApi.messages.mockResolvedValueOnce([
       {
@@ -933,6 +942,7 @@ describe("EvidenceRoomView", () => {
     expect(wrapper.text()).toContain("商家质检视频");
   });
 
+  // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
   it("requests an opening upgrade when earlier fallback openings still have no case focus", async () => {
     roomApi.messages.mockResolvedValueOnce([
       {
@@ -991,6 +1001,7 @@ describe("EvidenceRoomView", () => {
     expect(wrapper.text()).toContain("物流签收记录");
   });
 
+  // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
   it("still opens the evidence clerk conversation when the evidence catalog is not created yet", async () => {
     const missingCatalog = new Error("catalog not found");
     missingCatalog.code = "EVIDENCE_NOT_FOUND";
@@ -1026,6 +1037,7 @@ describe("EvidenceRoomView", () => {
     expect(wrapper.find('[role="alert"]').exists()).toBe(false);
   });
 
+  // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
   it("separates pending evidence from submitted originals and removes the shared wall", async () => {
     const { wrapper } = await mountView();
 
@@ -1053,6 +1065,7 @@ describe("EvidenceRoomView", () => {
     expect(wrapper.get("[data-evidence-countdown]").text()).toContain("02:00:00");
   });
 
+  // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
   it("keeps platform-only evidence out of the party evidence room", async () => {
     const platformCatalog = {
       ...catalog,
@@ -1077,6 +1090,7 @@ describe("EvidenceRoomView", () => {
     );
   });
 
+  // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
   it("waits for the server completion result before exposing the hearing entrance", async () => {
     const completeAction = vi.fn().mockResolvedValue({
       all_parties_completed: true,
@@ -1101,6 +1115,7 @@ describe("EvidenceRoomView", () => {
     );
   });
 
+  // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
   it("shows a durable waiting state after the current party completes evidence", async () => {
     const completeAction = vi.fn().mockResolvedValue({
       completed_role: "USER",
@@ -1118,6 +1133,7 @@ describe("EvidenceRoomView", () => {
     expect(wrapper.get("[data-evidence-completed]").text()).toContain("等待商家");
   });
 
+  // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
   it("shows the merchant completion variant without exposing a user-only original", async () => {
     const { wrapper } = await mountView({ viewerRole: "MERCHANT" });
 
@@ -1127,6 +1143,7 @@ describe("EvidenceRoomView", () => {
     );
   });
 
+  // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
   it("exposes the hearing entrance when the resumed event stream announces it", async () => {
     const eventStreamer = vi.fn(async (options) => {
       options.state.connected = true;
@@ -1148,6 +1165,7 @@ describe("EvidenceRoomView", () => {
     expect(wrapper.get("[data-enter-hearing]").text()).toContain("进入小法庭");
   });
 
+  // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
   it("keeps the evidence conversation composer enabled while evidence is not uploading or completing", async () => {
     const { wrapper } = await mountView();
     const textarea = wrapper.get('[data-send-message] textarea');
@@ -1162,6 +1180,7 @@ describe("EvidenceRoomView", () => {
     expect(submitButton.element.disabled).toBe(false);
   });
 
+  // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
   it("records evidence explanations through the immutable clerk conversation", async () => {
     const messageAction = vi.fn().mockResolvedValue({
       id: "MESSAGE_EVIDENCE_1",
@@ -1185,6 +1204,7 @@ describe("EvidenceRoomView", () => {
     expect(wrapper.text()).toContain("这张照片由我在开箱时拍摄。");
   });
 
+  // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
   it("uploads into the pending batch card without interrupting the evidence clerk", async () => {
     const refreshedCatalog = {
       ...catalog,
@@ -1210,9 +1230,6 @@ describe("EvidenceRoomView", () => {
     });
     roomApi.messages.mockResolvedValueOnce([]);
     const { wrapper } = await mountView({ viewerRole: "MERCHANT" });
-    await wrapper
-      .get(".evidence-uploader__model-consent input")
-      .setValue(true);
     const input = wrapper.get('input[type="file"]');
     const file = new File(["# delivery notes"], "delivery-notes.md", {
       type: "text/markdown",
@@ -1231,9 +1248,7 @@ describe("EvidenceRoomView", () => {
     expect(uploadCommand.sourceType).toBe("MERCHANT_UPLOAD");
     expect(uploadCommand.visibility).toBe("PRIVATE");
     expect(uploadCommand.modelProcessingAuthorized).toBe(true);
-    expect(
-      wrapper.get(".evidence-uploader__model-consent input").element.checked,
-    ).toBe(false);
+    expect(wrapper.find(".evidence-uploader__model-consent").exists()).toBe(false);
     expect(evidenceApi.catalog).toHaveBeenCalledWith(
       expect.objectContaining({ role: "MERCHANT" }),
       "CASE_EVIDENCE_1",
@@ -1251,6 +1266,7 @@ describe("EvidenceRoomView", () => {
     expect(wrapper.text()).not.toContain("Markdown evidence has been indexed by the clerk.");
   });
 
+  // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
   it("submits pending evidence as a batch and then waits for the clerk feedback", async () => {
     const afterSubmitCatalog = {
       ...catalog,
@@ -1306,6 +1322,7 @@ describe("EvidenceRoomView", () => {
     expect(wrapper.text()).toContain("书记官已读取本批材料");
   });
 
+  // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
   it("deletes only pending evidence from the staging card", async () => {
     const afterDeleteCatalog = {
       ...catalog,
@@ -1332,6 +1349,7 @@ describe("EvidenceRoomView", () => {
     );
   });
 
+  // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
   it("refreshes evidence messages after sending an explanation and shows the clerk reply", async () => {
     const refreshedMessages = [
       {
@@ -1383,6 +1401,7 @@ describe("EvidenceRoomView", () => {
     expect(wrapper.text()).toContain("I have linked the photo to the packaging timeline.");
   });
 
+  // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
   it("shows the party statement immediately while the evidence clerk turn is running", async () => {
     let resolvePost;
     const savedMessage = {
@@ -1416,6 +1435,7 @@ describe("EvidenceRoomView", () => {
     expect(wrapper.text()).toContain("Please verify this markdown evidence.");
   });
 
+  // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
   it("continues refreshing after send until the evidence clerk reply appears", async () => {
     const savedMessage = {
       id: "USER_EXPLANATION_CONFIRMED",
@@ -1451,6 +1471,7 @@ describe("EvidenceRoomView", () => {
     expect(wrapper.text()).toContain("证据书记官：请补充原始文件哈希和形成时间。");
   });
 
+  // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
   it("reloads actor-scoped evidence data when the viewer role changes", async () => {
     const userThread = [
       {
@@ -1488,6 +1509,7 @@ describe("EvidenceRoomView", () => {
     expect(wrapper.text()).toContain("Merchant-only evidence explanation thread.");
   });
 
+  // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
   it("clears the previous party thread immediately when the viewer role changes", async () => {
     const stalledRefresh = deferred();
     roomApi.messages.mockReturnValueOnce(stalledRefresh.promise);
@@ -1513,6 +1535,7 @@ describe("EvidenceRoomView", () => {
     await flushPromises();
   });
 
+  // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
   it("ignores stale evidence refresh results from the previous actor", async () => {
     const merchantMessages = deferred();
     const userMessages = deferred();
@@ -1560,6 +1583,7 @@ describe("EvidenceRoomView", () => {
     expect(wrapper.text()).not.toContain("Stale merchant thread must not overwrite user view.");
   });
 
+  // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
   it("uploads user evidence with the backend actor-specific source type", async () => {
     const { wrapper } = await mountView({ viewerRole: "USER" });
     const input = wrapper.get('input[type="file"]');

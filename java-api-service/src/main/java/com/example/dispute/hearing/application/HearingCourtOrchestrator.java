@@ -1,5 +1,15 @@
+/*
+ * 所属模块：共享小法庭。
+ * 文件职责：承载庭审轮次开放、Agent 回合和终局交接在当前业务模块中的规则与协作边界。
+ * 业务链路：核心入口/契约为 「afterRoundOpenedAfterCommit」、「afterRoundClosedAfterCommit」、「afterRoundOpened」、「afterRoundClosed」、「supports」、「finalizeResult」；管理固定轮次陈述、庭审时钟、和解版本、Agent 协作消息以及非最终裁决草案。
+ * 关键边界：最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
+ */
 package com.example.dispute.hearing.application;
 
+import com.example.dispute.agentstream.application.AgentRunCoordinator;
+import com.example.dispute.agentstream.application.AgentRunFinalizationContext;
+import com.example.dispute.agentstream.application.AgentRunFinalizer;
+import com.example.dispute.agentstream.application.AgentRunStartCommand;
 import com.example.dispute.common.transaction.PostCommitSideEffectExecutor;
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.hearing.infrastructure.persistence.entity.HearingRoundEntity;
@@ -20,6 +30,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.LinkedHashMap;
@@ -29,11 +40,17 @@ import java.util.Optional;
 import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 
+// 所属模块：【共享小法庭 / 应用编排层】类型「HearingCourtOrchestrator」。
+// 类型职责：承载庭审轮次开放、Agent 回合和终局交接在当前业务模块中的规则与协作边界；本类型显式提供 「HearingCourtOrchestrator」、「HearingCourtOrchestrator」、「afterRoundOpenedAfterCommit」、「afterRoundClosedAfterCommit」、「afterRoundClosedAfterCommit」、「afterRoundOpened」。
+// 协作关系：主要由 「HearingFinalRoundRecoveryService.recoverFinalRoundsWithoutDraft」、「HearingRoundService.dispatchRoundClosedAfterCommit」、「HearingCourtOrchestratorTest.afterCommitRoundTurnFailuresDoNotPropagateToTheBusinessRequest」、「HearingCourtOrchestratorTest.afterRoundClosedAppendsOneIdempotentJudgeMessageAndLifecycleEvent」 使用。
+// 边界意义：最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
+// Java 语法：class 同时封装状态与方法；final 依赖通过构造器注入后不可重新指向。
 @Service
-public class HearingCourtOrchestrator {
+public class HearingCourtOrchestrator implements AgentRunFinalizer {
 
     public static final String JUDGE_SENDER_ROLE = "JUDGE";
     public static final String JUDGE_SENDER_ID = "presiding-judge";
@@ -53,7 +70,15 @@ public class HearingCourtOrchestrator {
     private final Clock clock;
     private final PostCommitSideEffectExecutor postCommit;
     private final TransactionTemplate courtTransaction;
+    private AgentRunCoordinator agentRunCoordinator;
+    private HearingWorkflowCoordinator workflowCoordinator;
 
+    // 所属模块：【共享小法庭 / 应用编排层】「HearingCourtOrchestrator.HearingCourtOrchestrator(FulfillmentCaseRepository,CaseRoomRepository,HearingRoundRepository,HearingRoundPartySubmissionRepository,RoomMessageRepository,CaseEventService,HearingCourtAgentClient,AgentA2AMessageService,ActiveCourtroomContextAssembler,ObjectMapper,Clock,PostCommitSideEffectExecutor,TransactionTemplate)」。
+    // 具体功能：「HearingCourtOrchestrator.HearingCourtOrchestrator(FulfillmentCaseRepository,CaseRoomRepository,HearingRoundRepository,HearingRoundPartySubmissionRepository,RoomMessageRepository,CaseEventService,HearingCourtAgentClient,AgentA2AMessageService,ActiveCourtroomContextAssembler,ObjectMapper,Clock,PostCommitSideEffectExecutor,TransactionTemplate)」：通过构造器接收 「caseRepository」(FulfillmentCaseRepository)、「roomRepository」(CaseRoomRepository)、「roundRepository」(HearingRoundRepository)、「submissionRepository」(HearingRoundPartySubmissionRepository)、「messageRepository」(RoomMessageRepository)、「eventService」(CaseEventService)、「agentClient」(HearingCourtAgentClient)、「a2aMessageService」(AgentA2AMessageService)、「courtroomContextAssembler」(ActiveCourtroomContextAssembler)、「objectMapper」(ObjectMapper)、「clock」(Clock)、「postCommit」(PostCommitSideEffectExecutor)、「courtTransaction」(TransactionTemplate) 并保存为「HearingCourtOrchestrator」的协作依赖；这里只完成依赖装配，不提前访问数据库或外部服务。
+    // 上游调用：「HearingCourtOrchestrator.HearingCourtOrchestrator(FulfillmentCaseRepository,CaseRoomRepository,HearingRoundRepository,HearingRoundPartySubmissionRepository,RoomMessageRepository,CaseEventService,HearingCourtAgentClient,AgentA2AMessageService,ActiveCourtroomContextAssembler,ObjectMapper,Clock,PostCommitSideEffectExecutor,TransactionTemplate)」的上游创建点包括 「HearingCourtOrchestratorTest.setUp」、「HearingCourtOrchestratorTest.invokesTheRemoteCourtAgentOutsideAnyActiveCourtTransaction」、「HearingPersistenceIntegrationTest.juryRepairUsesTheNextLockedRoomSequenceWhenASequenceBlockerAlreadyExists」。
+    // 下游影响：「HearingCourtOrchestrator.HearingCourtOrchestrator(FulfillmentCaseRepository,CaseRoomRepository,HearingRoundRepository,HearingRoundPartySubmissionRepository,RoomMessageRepository,CaseEventService,HearingCourtAgentClient,AgentA2AMessageService,ActiveCourtroomContextAssembler,ObjectMapper,Clock,PostCommitSideEffectExecutor,TransactionTemplate)」只产生当前对象的返回值或字段变化，不访问额外基础设施。
+    // 系统意义：「HearingCourtOrchestrator.HearingCourtOrchestrator(FulfillmentCaseRepository,CaseRoomRepository,HearingRoundRepository,HearingRoundPartySubmissionRepository,RoomMessageRepository,CaseEventService,HearingCourtAgentClient,AgentA2AMessageService,ActiveCourtroomContextAssembler,ObjectMapper,Clock,PostCommitSideEffectExecutor,TransactionTemplate)」负责主链路中的“庭审法庭编排器”；最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
+    // Java 语法：构造器名称与类名相同且没有返回类型；参数通常由 Spring 按类型注入。
     public HearingCourtOrchestrator(
             FulfillmentCaseRepository caseRepository,
             CaseRoomRepository roomRepository,
@@ -83,6 +108,52 @@ public class HearingCourtOrchestrator {
         this.courtTransaction = courtTransaction;
     }
 
+    // 所属模块：【共享小法庭 / 应用编排层】「HearingCourtOrchestrator.HearingCourtOrchestrator(FulfillmentCaseRepository,CaseRoomRepository,HearingRoundRepository,HearingRoundPartySubmissionRepository,RoomMessageRepository,CaseEventService,HearingCourtAgentClient,AgentA2AMessageService,ActiveCourtroomContextAssembler,ObjectMapper,Clock,PostCommitSideEffectExecutor,TransactionTemplate,AgentRunCoordinator,HearingWorkflowCoordinator)」。
+    // 具体功能：「HearingCourtOrchestrator.HearingCourtOrchestrator(FulfillmentCaseRepository,CaseRoomRepository,HearingRoundRepository,HearingRoundPartySubmissionRepository,RoomMessageRepository,CaseEventService,HearingCourtAgentClient,AgentA2AMessageService,ActiveCourtroomContextAssembler,ObjectMapper,Clock,PostCommitSideEffectExecutor,TransactionTemplate,AgentRunCoordinator,HearingWorkflowCoordinator)」：通过构造器接收 「caseRepository」(FulfillmentCaseRepository)、「roomRepository」(CaseRoomRepository)、「roundRepository」(HearingRoundRepository)、「submissionRepository」(HearingRoundPartySubmissionRepository)、「messageRepository」(RoomMessageRepository)、「eventService」(CaseEventService)、「agentClient」(HearingCourtAgentClient)、「a2aMessageService」(AgentA2AMessageService)、「courtroomContextAssembler」(ActiveCourtroomContextAssembler)、「objectMapper」(ObjectMapper)、「clock」(Clock)、「postCommit」(PostCommitSideEffectExecutor)、「courtTransaction」(TransactionTemplate)、「agentRunCoordinator」(AgentRunCoordinator)、「workflowCoordinator」(HearingWorkflowCoordinator) 并保存为「HearingCourtOrchestrator」的协作依赖；这里只完成依赖装配，不提前访问数据库或外部服务。
+    // 上游调用：「HearingCourtOrchestrator.HearingCourtOrchestrator(FulfillmentCaseRepository,CaseRoomRepository,HearingRoundRepository,HearingRoundPartySubmissionRepository,RoomMessageRepository,CaseEventService,HearingCourtAgentClient,AgentA2AMessageService,ActiveCourtroomContextAssembler,ObjectMapper,Clock,PostCommitSideEffectExecutor,TransactionTemplate,AgentRunCoordinator,HearingWorkflowCoordinator)」的上游创建点包括 「HearingCourtOrchestratorTest.setUp」、「HearingCourtOrchestratorTest.invokesTheRemoteCourtAgentOutsideAnyActiveCourtTransaction」、「HearingPersistenceIntegrationTest.juryRepairUsesTheNextLockedRoomSequenceWhenASequenceBlockerAlreadyExists」。
+    // 下游影响：「HearingCourtOrchestrator.HearingCourtOrchestrator(FulfillmentCaseRepository,CaseRoomRepository,HearingRoundRepository,HearingRoundPartySubmissionRepository,RoomMessageRepository,CaseEventService,HearingCourtAgentClient,AgentA2AMessageService,ActiveCourtroomContextAssembler,ObjectMapper,Clock,PostCommitSideEffectExecutor,TransactionTemplate,AgentRunCoordinator,HearingWorkflowCoordinator)」只产生当前对象的返回值或字段变化，不访问额外基础设施。
+    // 系统意义：「HearingCourtOrchestrator.HearingCourtOrchestrator(FulfillmentCaseRepository,CaseRoomRepository,HearingRoundRepository,HearingRoundPartySubmissionRepository,RoomMessageRepository,CaseEventService,HearingCourtAgentClient,AgentA2AMessageService,ActiveCourtroomContextAssembler,ObjectMapper,Clock,PostCommitSideEffectExecutor,TransactionTemplate,AgentRunCoordinator,HearingWorkflowCoordinator)」负责主链路中的“庭审法庭编排器”；最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
+    // Java 语法：构造器名称与类名相同且没有返回类型；参数通常由 Spring 按类型注入。
+    @Autowired
+    public HearingCourtOrchestrator(
+            FulfillmentCaseRepository caseRepository,
+            CaseRoomRepository roomRepository,
+            HearingRoundRepository roundRepository,
+            HearingRoundPartySubmissionRepository submissionRepository,
+            RoomMessageRepository messageRepository,
+            CaseEventService eventService,
+            HearingCourtAgentClient agentClient,
+            AgentA2AMessageService a2aMessageService,
+            ActiveCourtroomContextAssembler courtroomContextAssembler,
+            ObjectMapper objectMapper,
+            Clock clock,
+            PostCommitSideEffectExecutor postCommit,
+            TransactionTemplate courtTransaction,
+            AgentRunCoordinator agentRunCoordinator,
+            HearingWorkflowCoordinator workflowCoordinator) {
+        this(
+                caseRepository,
+                roomRepository,
+                roundRepository,
+                submissionRepository,
+                messageRepository,
+                eventService,
+                agentClient,
+                a2aMessageService,
+                courtroomContextAssembler,
+                objectMapper,
+                clock,
+                postCommit,
+                courtTransaction);
+        this.agentRunCoordinator = agentRunCoordinator;
+        this.workflowCoordinator = workflowCoordinator;
+    }
+
+    // 所属模块：【共享小法庭 / 应用编排层】「HearingCourtOrchestrator.afterRoundOpenedAfterCommit(String,int,String)」。
+    // 具体功能：「HearingCourtOrchestrator.afterRoundOpenedAfterCommit(String,int,String)」：在轮次实体与开庭事件提交成功后再生成法官开场，避免 Agent 读取不到刚开放的轮次；稳定键保证重试不重复发言，最终返回「void」。
+    // 上游调用：「HearingCourtOrchestrator.afterRoundOpenedAfterCommit(String,int,String)」由使用「HearingCourtOrchestrator」的控制器、应用服务、Workflow Activity 或测试场景触发。
+    // 下游影响：「HearingCourtOrchestrator.afterRoundOpenedAfterCommit(String,int,String)」向下依次触达 「postCommit.execute」、「afterRoundOpened」。
+    // 系统意义：「HearingCourtOrchestrator.afterRoundOpenedAfterCommit(String,int,String)」负责主链路中的“之后轮次Opened之后提交”；最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
     public void afterRoundOpenedAfterCommit(String caseId, int roundNo, String traceId) {
         postCommit.execute(
                 "hearing-court-round-opened",
@@ -90,11 +161,21 @@ public class HearingCourtOrchestrator {
                 () -> afterRoundOpened(caseId, roundNo, traceId));
     }
 
+    // 所属模块：【共享小法庭 / 应用编排层】「HearingCourtOrchestrator.afterRoundClosedAfterCommit(String,int,boolean,String)」。
+    // 具体功能：「HearingCourtOrchestrator.afterRoundClosedAfterCommit(String,int,boolean,String)」：在轮次封存事务提交后触发法官总结；已有完整法官回合时直接执行 completion，否则启动/恢复 HEARING_ROUND AgentRun，最终轮还要求正式评审团报告齐备，最终返回「void」。
+    // 上游调用：「HearingCourtOrchestrator.afterRoundClosedAfterCommit(String,int,boolean,String)」的上游调用点包括 「HearingCourtOrchestrator.afterRoundClosedAfterCommit」、「HearingRoundService.dispatchRoundClosedAfterCommit」、「HearingCourtOrchestratorTest.afterCommitRoundTurnFailuresDoNotPropagateToTheBusinessRequest」、「HearingCourtOrchestratorTest.afterRoundClosedComposesJudgeContextFromActiveEvidenceDossierVersion」。
+    // 下游影响：「HearingCourtOrchestrator.afterRoundClosedAfterCommit(String,int,boolean,String)」向下依次触达 「afterRoundClosedAfterCommit」。
+    // 系统意义：「HearingCourtOrchestrator.afterRoundClosedAfterCommit(String,int,boolean,String)」负责主链路中的“之后轮次Closed之后提交”；最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
     public void afterRoundClosedAfterCommit(
             String caseId, int roundNo, boolean finalRound, String traceId) {
         afterRoundClosedAfterCommit(caseId, roundNo, finalRound, traceId, () -> {});
     }
 
+    // 所属模块：【共享小法庭 / 应用编排层】「HearingCourtOrchestrator.afterRoundClosedAfterCommit(String,int,boolean,String,Runnable)」。
+    // 具体功能：「HearingCourtOrchestrator.afterRoundClosedAfterCommit(String,int,boolean,String,Runnable)」：在轮次封存事务提交后触发法官总结；已有完整法官回合时直接执行 completion，否则启动/恢复 HEARING_ROUND AgentRun，最终轮还要求正式评审团报告齐备，最终返回「void」。
+    // 上游调用：「HearingCourtOrchestrator.afterRoundClosedAfterCommit(String,int,boolean,String,Runnable)」的上游调用点包括 「HearingCourtOrchestrator.afterRoundClosedAfterCommit」、「HearingRoundService.dispatchRoundClosedAfterCommit」、「HearingCourtOrchestratorTest.afterCommitRoundTurnFailuresDoNotPropagateToTheBusinessRequest」、「HearingCourtOrchestratorTest.afterRoundClosedComposesJudgeContextFromActiveEvidenceDossierVersion」。
+    // 下游影响：「HearingCourtOrchestrator.afterRoundClosedAfterCommit(String,int,boolean,String,Runnable)」向下依次触达 「postCommit.execute」、「completion.run」、「afterRoundClosed」、「isJudgeTurnComplete」。
+    // 系统意义：「HearingCourtOrchestrator.afterRoundClosedAfterCommit(String,int,boolean,String,Runnable)」负责主链路中的“之后轮次Closed之后提交”；最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
     public void afterRoundClosedAfterCommit(
             String caseId,
             int roundNo,
@@ -106,10 +187,18 @@ public class HearingCourtOrchestrator {
                 Map.of("case_id", caseId, "round_no", roundNo, "final_round", finalRound),
                 () -> {
                     afterRoundClosed(caseId, roundNo, finalRound, traceId);
-                    completion.run();
+                    if (agentRunCoordinator == null
+                            || isJudgeTurnComplete(caseId, roundNo, finalRound)) {
+                        completion.run();
+                    }
                 });
     }
 
+    // 所属模块：【共享小法庭 / 应用编排层】「HearingCourtOrchestrator.afterRoundOpened(String,int,String)」。
+    // 具体功能：「HearingCourtOrchestrator.afterRoundOpened(String,int,String)」：执行之后轮次Opened；实际协作者为 「processJudgeTurn」、「judgeRoundOpeningKey」；处理的关键状态/协议值包括 「judge-round-opening-ready:」、「:」，最终返回「void」。
+    // 上游调用：「HearingCourtOrchestrator.afterRoundOpened(String,int,String)」的上游调用点包括 「HearingCourtOrchestrator.afterRoundOpenedAfterCommit」、「HearingCourtOrchestratorTest.afterRoundOpenedAppendsOpeningJudgeMessage」。
+    // 下游影响：「HearingCourtOrchestrator.afterRoundOpened(String,int,String)」向下依次触达 「processJudgeTurn」、「judgeRoundOpeningKey」。
+    // 系统意义：「HearingCourtOrchestrator.afterRoundOpened(String,int,String)」负责主链路中的“之后轮次Opened”；最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
     public void afterRoundOpened(String caseId, int roundNo, String traceId) {
         processJudgeTurn(
                 caseId,
@@ -120,6 +209,11 @@ public class HearingCourtOrchestrator {
                 traceId);
     }
 
+    // 所属模块：【共享小法庭 / 应用编排层】「HearingCourtOrchestrator.afterRoundClosed(String,int,boolean,String)」。
+    // 具体功能：「HearingCourtOrchestrator.afterRoundClosed(String,int,boolean,String)」：更新之后轮次Closed：先更新内部状态 「agentRunCoordinator」；实际协作者为 「processJudgeTurn」、「judgeRoundTurnKey」、「hasCompleteFormalJuryReport」；不满足前置条件时抛出 「IllegalStateException」；处理的关键状态/协议值包括 「judge-round-turn-ready:」、「:」，最终返回「void」。
+    // 上游调用：「HearingCourtOrchestrator.afterRoundClosed(String,int,boolean,String)」的上游调用点包括 「HearingCourtOrchestrator.afterRoundClosedAfterCommit」、「HearingFinalRoundRecoveryService.recoverFinalRoundsWithoutDraft」、「HearingCourtOrchestratorTest.afterRoundClosedAppendsOneIdempotentJudgeMessageAndLifecycleEvent」、「HearingCourtOrchestratorTest.finalRoundRetryReusesTheSurvivingA2APayloadWhenRepairingTheRoomCard」。
+    // 下游影响：「HearingCourtOrchestrator.afterRoundClosed(String,int,boolean,String)」向下依次触达 「processJudgeTurn」、「judgeRoundTurnKey」、「hasCompleteFormalJuryReport」。
+    // 系统意义：「HearingCourtOrchestrator.afterRoundClosed(String,int,boolean,String)」负责主链路中的“之后轮次Closed”；最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
     public void afterRoundClosed(
             String caseId, int roundNo, boolean finalRound, String traceId) {
         processJudgeTurn(
@@ -129,12 +223,19 @@ public class HearingCourtOrchestrator {
                 judgeRoundTurnKey(caseId, roundNo),
                 "judge-round-turn-ready:" + caseId + ":" + roundNo,
                 traceId);
-        if (finalRound && !hasCompleteFormalJuryReport(caseId, roundNo)) {
+        if (agentRunCoordinator == null
+                && finalRound
+                && !hasCompleteFormalJuryReport(caseId, roundNo)) {
             throw new IllegalStateException(
                     "final hearing convergence requires both formal jury A2A and room report");
         }
     }
 
+    // 所属模块：【共享小法庭 / 应用编排层】「HearingCourtOrchestrator.processJudgeTurn(String,int,boolean,String,String,String)」。
+    // 具体功能：「HearingCourtOrchestrator.processJudgeTurn(String,int,boolean,String,String,String)」：先在短事务中锁定案件、轮次和提交并判断 completed/repair/generate 三种准备结果；需要模型时在事务外调用 Agent，随后用第二个事务幂等保存，避免长事务占用数据库锁，最终返回「void」。
+    // 上游调用：「HearingCourtOrchestrator.processJudgeTurn(String,int,boolean,String,String,String)」的上游调用点包括 「HearingCourtOrchestrator.afterRoundOpened」、「HearingCourtOrchestrator.afterRoundClosed」。
+    // 下游影响：「HearingCourtOrchestrator.processJudgeTurn(String,int,boolean,String,String,String)」向下依次触达 「courtTransaction.execute」、「preparation.complete」、「preparation.command」、「courtTransaction.executeWithoutResult」。
+    // 系统意义：「HearingCourtOrchestrator.processJudgeTurn(String,int,boolean,String,String,String)」负责主链路中的“法官轮次”；最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
     private void processJudgeTurn(
             String caseId,
             int roundNo,
@@ -142,6 +243,8 @@ public class HearingCourtOrchestrator {
             String idempotencyKey,
             String lifecycleEventKey,
             String traceId) {
+        // 第一个短事务只负责锁行、检查幂等键并冻结 Agent 输入。
+        // 外部模型调用绝不能占着案件/轮次数据库锁等待网络响应。
         TurnPreparation preparation =
                 courtTransaction.execute(
                         ignored ->
@@ -154,6 +257,12 @@ public class HearingCourtOrchestrator {
         if (preparation == null || preparation.complete()) {
             return;
         }
+        if (agentRunCoordinator != null && preparation.command() != null) {
+            // 新链路把模型调用交给可恢复 AgentRun；当前方法返回后由 Finalizer 完成第二个事务。
+            startStreamingJudgeTurn(preparation, traceId);
+            return;
+        }
+        // 兼容同步链路同样在事务外生成，再开启独立短事务持久化结果。
         HearingCourtAgentResult generated =
                 preparation.command() == null
                         ? null
@@ -162,6 +271,156 @@ public class HearingCourtOrchestrator {
                 ignored -> persistJudgeTurn(preparation, generated, traceId));
     }
 
+    // 所属模块：【共享小法庭 / 应用编排层】「HearingCourtOrchestrator.startStreamingJudgeTurn(TurnPreparation,String)」。
+    // 具体功能：「HearingCourtOrchestrator.startStreamingJudgeTurn(TurnPreparation,String)」：把冻结的 TurnPreparation 命令和共享法庭受众封装为 HEARING_ROUND AgentRun，以 case+round+阶段作为幂等键启动；不存在法庭房间时拒绝运行，最终返回「void」。
+    // 上游调用：「HearingCourtOrchestrator.startStreamingJudgeTurn(TurnPreparation,String)」的上游调用点包括 「HearingCourtOrchestrator.processJudgeTurn」。
+    // 下游影响：「HearingCourtOrchestrator.startStreamingJudgeTurn(TurnPreparation,String)」向下依次触达 「agentRunCoordinator.start」、「roomRepository.findByCaseIdAndRoomType」、「preparation.command」、「preparation.caseId」。
+    // 系统意义：「HearingCourtOrchestrator.startStreamingJudgeTurn(TurnPreparation,String)」负责主链路中的“Streaming法官轮次”；最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
+    // Java 语法：Optional 表示结果可能不存在；orElseThrow 会把空值分支转换为明确异常。
+    private void startStreamingJudgeTurn(TurnPreparation preparation, String traceId) {
+        HearingCourtAgentCommand command = preparation.command();
+        // 请求、受众和幂等键会随 AgentRun 一起持久化；Worker 重启后无需重新读取可变庭审上下文。
+        agentRunCoordinator.start(
+                new AgentRunStartCommand(
+                        preparation.caseId(),
+                        roomRepository
+                                .findByCaseIdAndRoomType(
+                                        preparation.caseId(), RoomType.HEARING)
+                                .orElseThrow(
+                                        () -> new IllegalArgumentException(
+                                                "hearing room not found"))
+                                .getId(),
+                        "HEARING_ROUND",
+                        judgeRequest(command),
+                        List.of(
+                                ActorRole.USER.name(),
+                                ActorRole.MERCHANT.name(),
+                                ActorRole.CUSTOMER_SERVICE.name(),
+                                ActorRole.PLATFORM_REVIEWER.name(),
+                                ActorRole.ADMIN.name(),
+                                ActorRole.SYSTEM.name()),
+                        List.of(),
+                        preparation.idempotencyKey(),
+                        traceId,
+                        "REQ_HEARING_ROUND_" + preparation.caseId() + "_" + preparation.roundNo(),
+                        JUDGE_SENDER_ID));
+    }
+
+    // 所属模块：【共享小法庭 / 应用编排层】「HearingCourtOrchestrator.supports(String)」。
+    // 具体功能：「HearingCourtOrchestrator.supports(String)」：判断是否支持；处理的关键状态/协议值包括 「HEARING_ROUND」，最终返回「boolean」。
+    // 上游调用：「HearingCourtOrchestrator.supports(String)」由使用「HearingCourtOrchestrator」的控制器、应用服务、Workflow Activity 或测试场景触发。
+    // 下游影响：「HearingCourtOrchestrator.supports(String)」只产生当前对象的返回值或字段变化，不访问额外基础设施；计算结果以「boolean」交给调用方。
+    // 系统意义：「HearingCourtOrchestrator.supports(String)」负责主链路中的“”；最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
+    @Override
+    public boolean supports(String operation) {
+        return "HEARING_ROUND".equals(operation);
+    }
+
+    // 所属模块：【共享小法庭 / 应用编排层】「HearingCourtOrchestrator.finalizeResult(AgentRunFinalizationContext,JsonNode)」。
+    // 具体功能：「HearingCourtOrchestrator.finalizeResult(AgentRunFinalizationContext,JsonNode)」：作为 HEARING_ROUND Finalizer 重建持久化 TurnPreparation，校验模型轮次、事件类型和终局标志，原子保存法官消息/A2A 记录后才向 Hearing Workflow 发送 roundCompleted，最终返回「void」。
+    // 上游调用：「HearingCourtOrchestrator.finalizeResult(AgentRunFinalizationContext,JsonNode)」由使用「HearingCourtOrchestrator」的控制器、应用服务、Workflow Activity 或测试场景触发。
+    // 下游影响：「HearingCourtOrchestrator.finalizeResult(AgentRunFinalizationContext,JsonNode)」向下依次触达 「workflowCoordinator.roundCompletedAfterCommit」、「TurnPreparation.generate」、「finalization.request」、「finalization.caseId」。
+    // 系统意义：「HearingCourtOrchestrator.finalizeResult(AgentRunFinalizationContext,JsonNode)」负责主链路中的“finalize结果”；最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
+    @Override
+    public void finalizeResult(AgentRunFinalizationContext finalization, JsonNode rawResult) {
+        JsonNode request = finalization.request();
+        int roundNo = request.path("round_no").asInt(0);
+        if (roundNo < 1) {
+            throw new IllegalStateException("hearing stream is missing round_no");
+        }
+        boolean finalRound = request.path("final_round").asBoolean(false);
+        boolean opening =
+                "OPEN".equals(request.path("round_status").asText())
+                        && request.path("party_submissions").isArray()
+                        && request.path("party_submissions").isEmpty();
+        String lifecycleEventKey =
+                (opening ? "judge-round-opening-ready:" : "judge-round-turn-ready:")
+                        + finalization.caseId()
+                        + ":"
+                        + roundNo;
+        TurnPreparation preparation =
+                TurnPreparation.generate(
+                        finalization.caseId(),
+                        roundNo,
+                        finalRound,
+                        finalization.idempotencyKey(),
+                        lifecycleEventKey,
+                        null);
+        HearingCourtAgentResult result =
+                objectMapper.convertValue(rawResult, HearingCourtAgentResult.class);
+        validateStreamingJudgeResult(result, roundNo, finalRound, opening);
+        persistJudgeTurn(
+                preparation, result, finalization.traceId(), finalization.runId());
+        if (finalRound && !hasCompleteFormalJuryReport(finalization.caseId(), roundNo)) {
+            throw new IllegalStateException(
+                    "final hearing convergence requires a formal jury report");
+        }
+        if (!opening && workflowCoordinator != null) {
+            workflowCoordinator.roundCompletedAfterCommit(
+                    finalization.caseId(), roundNo, false);
+        }
+    }
+
+    // 所属模块：【共享小法庭 / 应用编排层】「HearingCourtOrchestrator.validateStreamingJudgeResult(HearingCourtAgentResult,int,boolean,boolean)」。
+    // 具体功能：「HearingCourtOrchestrator.validateStreamingJudgeResult(HearingCourtAgentResult,int,boolean,boolean)」：要求模型 roundNo 与请求一致、speakerRole 为 PRESIDING_JUDGE，并约束 opening/普通回合/最终回合允许的 courtEventType 和 finalDraftRequired，最终返回「void」。
+    // 上游调用：「HearingCourtOrchestrator.validateStreamingJudgeResult(HearingCourtAgentResult,int,boolean,boolean)」的上游调用点包括 「HearingCourtOrchestrator.finalizeResult」。
+    // 下游影响：「HearingCourtOrchestrator.validateStreamingJudgeResult(HearingCourtAgentResult,int,boolean,boolean)」向下依次触达 「result.roundNo」、「result.speakerRole」、「result.finalDraftRequired」、「result.courtEventType」。
+    // 系统意义：「HearingCourtOrchestrator.validateStreamingJudgeResult(HearingCourtAgentResult,int,boolean,boolean)」在“Streaming法官结果”进入下游前阻断非法状态；最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
+    private void validateStreamingJudgeResult(
+            HearingCourtAgentResult result,
+            int expectedRoundNo,
+            boolean finalRound,
+            boolean opening) {
+        if (result.roundNo() != expectedRoundNo) {
+            throw new IllegalStateException(
+                    "hearing stream result does not match the requested round");
+        }
+        if (!JUDGE_SENDER_ROLE.equals(result.speakerRole())) {
+            throw new IllegalStateException("hearing stream result has an invalid speaker");
+        }
+        if (opening) {
+            if (result.finalDraftRequired()
+                    || !"JUDGE_OPENING_READY".equals(result.courtEventType())) {
+                throw new IllegalStateException(
+                        "hearing opening stream attempted to advance the court state");
+            }
+            return;
+        }
+        if (finalRound
+                != (result.finalDraftRequired()
+                        && "FINAL_DRAFT_REQUIRED".equals(result.courtEventType()))) {
+            throw new IllegalStateException(
+                    "hearing stream result does not match the final-round state");
+        }
+        if (!finalRound
+                && !"JUDGE_NEXT_QUESTIONS_READY".equals(result.courtEventType())) {
+            throw new IllegalStateException(
+                    "non-final hearing stream attempted an invalid state transition");
+        }
+    }
+
+    // 所属模块：【共享小法庭 / 应用编排层】「HearingCourtOrchestrator.isJudgeTurnComplete(String,int,boolean)」。
+    // 具体功能：「HearingCourtOrchestrator.isJudgeTurnComplete(String,int,boolean)」：判断是否法官轮次协议完整性；实际协作者为 「messageRepository.findByCaseIdAndIdempotencyKey」、「judgeRoundTurnKey」、「hasCompleteFormalJuryReport」、「isPresent」，最终返回「boolean」。
+    // 上游调用：「HearingCourtOrchestrator.isJudgeTurnComplete(String,int,boolean)」的上游调用点包括 「HearingCourtOrchestrator.afterRoundClosedAfterCommit」。
+    // 下游影响：「HearingCourtOrchestrator.isJudgeTurnComplete(String,int,boolean)」向下依次触达 「messageRepository.findByCaseIdAndIdempotencyKey」、「judgeRoundTurnKey」、「hasCompleteFormalJuryReport」、「isPresent」；计算结果以「boolean」交给调用方。
+    // 系统意义：「HearingCourtOrchestrator.isJudgeTurnComplete(String,int,boolean)」负责主链路中的“法官轮次协议完整性”；最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
+    private boolean isJudgeTurnComplete(
+            String caseId, int roundNo, boolean finalRound) {
+        boolean judgeMessageReady =
+                messageRepository
+                        .findByCaseIdAndIdempotencyKey(
+                                caseId, judgeRoundTurnKey(caseId, roundNo))
+                        .isPresent();
+        return judgeMessageReady
+                && (!finalRound || hasCompleteFormalJuryReport(caseId, roundNo));
+    }
+
+    // 所属模块：【共享小法庭 / 应用编排层】「HearingCourtOrchestrator.prepareJudgeTurn(String,int,boolean,String,String)」。
+    // 具体功能：「HearingCourtOrchestrator.prepareJudgeTurn(String,int,boolean,String,String)」：在案件和轮次行锁内检查幂等消息、收集本轮双方提交、组装版本化 CourtroomContext；若结果已存在返回 completed，历史状态缺口返回 repair，否则返回可调用模型的 generate 命令，最终返回「TurnPreparation」。
+    // 上游调用：「HearingCourtOrchestrator.prepareJudgeTurn(String,int,boolean,String,String)」的上游调用点包括 「HearingCourtOrchestrator.processJudgeTurn」。
+    // 下游影响：「HearingCourtOrchestrator.prepareJudgeTurn(String,int,boolean,String,String)」向下依次触达 「messageRepository.findByCaseIdAndIdempotencyKey」、「caseRepository.findByIdForUpdate」、「roundRepository.findByCaseIdAndRoundNo」、「submissionRepository.findAllByCaseIdAndRoundNoOrderBySubmittedAtAsc」；计算结果以「TurnPreparation」交给调用方。
+    // 系统意义：「HearingCourtOrchestrator.prepareJudgeTurn(String,int,boolean,String,String)」负责主链路中的“法官轮次”；最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
+    // Java 语法：Optional 表示结果可能不存在；orElseThrow 会把空值分支转换为明确异常。
     private TurnPreparation prepareJudgeTurn(
             String caseId,
             int roundNo,
@@ -209,10 +468,34 @@ public class HearingCourtOrchestrator {
                 command);
     }
 
+    // 所属模块：【共享小法庭 / 应用编排层】「HearingCourtOrchestrator.persistJudgeTurn(TurnPreparation,HearingCourtAgentResult,String)」。
+    // 具体功能：「HearingCourtOrchestrator.persistJudgeTurn(TurnPreparation,HearingCourtAgentResult,String)」：重新锁定案件、法庭房间和轮次并复查幂等键，保存法官消息、生命周期事件和必要的正式评审团报告；最终草案需求以数据库当前状态为准，防止迟到 Agent 覆盖已恢复结果，最终返回「void」。
+    // 上游调用：「HearingCourtOrchestrator.persistJudgeTurn(TurnPreparation,HearingCourtAgentResult,String)」的上游调用点包括 「HearingCourtOrchestrator.processJudgeTurn」、「HearingCourtOrchestrator.finalizeResult」、「HearingCourtOrchestrator.persistJudgeTurn」。
+    // 下游影响：「HearingCourtOrchestrator.persistJudgeTurn(TurnPreparation,HearingCourtAgentResult,String)」向下依次触达 「persistJudgeTurn」、「compactUuid」。
+    // 系统意义：「HearingCourtOrchestrator.persistJudgeTurn(TurnPreparation,HearingCourtAgentResult,String)」负责主链路中的“法官轮次”；最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
     private void persistJudgeTurn(
             TurnPreparation preparation,
             HearingCourtAgentResult generated,
             String traceId) {
+        persistJudgeTurn(
+                preparation,
+                generated,
+                traceId,
+                "HEARING_RUN_" + compactUuid());
+    }
+
+    // 所属模块：【共享小法庭 / 应用编排层】「HearingCourtOrchestrator.persistJudgeTurn(TurnPreparation,HearingCourtAgentResult,String,String)」。
+    // 具体功能：「HearingCourtOrchestrator.persistJudgeTurn(TurnPreparation,HearingCourtAgentResult,String,String)」：重新锁定案件、法庭房间和轮次并复查幂等键，保存法官消息、生命周期事件和必要的正式评审团报告；最终草案需求以数据库当前状态为准，防止迟到 Agent 覆盖已恢复结果，最终返回「void」。
+    // 上游调用：「HearingCourtOrchestrator.persistJudgeTurn(TurnPreparation,HearingCourtAgentResult,String,String)」的上游调用点包括 「HearingCourtOrchestrator.processJudgeTurn」、「HearingCourtOrchestrator.finalizeResult」、「HearingCourtOrchestrator.persistJudgeTurn」。
+    // 下游影响：「HearingCourtOrchestrator.persistJudgeTurn(TurnPreparation,HearingCourtAgentResult,String,String)」向下依次触达 「caseRepository.findByIdForUpdate」、「roomRepository.findByCaseIdAndRoomTypeForUpdate」、「roundRepository.findByCaseIdAndRoundNoForUpdate」、「messageRepository.findByCaseIdAndIdempotencyKey」。
+    // 系统意义：「HearingCourtOrchestrator.persistJudgeTurn(TurnPreparation,HearingCourtAgentResult,String,String)」负责主链路中的“法官轮次”；最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
+    // Java 语法：Optional 表示结果可能不存在；orElseThrow 会把空值分支转换为明确异常。
+    private void persistJudgeTurn(
+            TurnPreparation preparation,
+            HearingCourtAgentResult generated,
+            String traceId,
+            String runId) {
+        // 第二个事务必须重新加锁并复查消息幂等键，因为模型运行期间可能已有恢复任务写入结果。
         FulfillmentCaseEntity dispute =
                 caseRepository
                         .findByIdForUpdate(preparation.caseId())
@@ -242,7 +525,8 @@ public class HearingCourtOrchestrator {
                             preparation.roundNo(),
                             effectiveResult,
                             preparation.idempotencyKey(),
-                            traceId);
+                            traceId,
+                            runId);
             eventService.recordRoomMessage(
                     dispute.getId(),
                     room.getId(),
@@ -282,6 +566,11 @@ public class HearingCourtOrchestrator {
                 traceId);
     }
 
+    // 所属模块：【共享小法庭 / 应用编排层】「HearingCourtOrchestrator.judgeLifecyclePayload(HearingCourtAgentResult)」。
+    // 具体功能：「HearingCourtOrchestrator.judgeLifecyclePayload(HearingCourtAgentResult)」：构建法官生命周期载荷；实际协作者为 「result.roundNo」、「result.nextRoundNo」、「result.finalDraftRequired」、「result.roundSummary」；处理的关键状态/协议值包括 「round_no」、「next_round_no」、「final_draft_required」、「round_summary」，最终返回「Map<String, Object>」。
+    // 上游调用：「HearingCourtOrchestrator.judgeLifecyclePayload(HearingCourtAgentResult)」的上游调用点包括 「HearingCourtOrchestrator.persistJudgeTurn」。
+    // 下游影响：「HearingCourtOrchestrator.judgeLifecyclePayload(HearingCourtAgentResult)」向下依次触达 「result.roundNo」、「result.nextRoundNo」、「result.finalDraftRequired」、「result.roundSummary」；计算结果以「Map<String, Object>」交给调用方。
+    // 系统意义：「HearingCourtOrchestrator.judgeLifecyclePayload(HearingCourtAgentResult)」负责主链路中的“法官生命周期载荷”；最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
     private Map<String, Object> judgeLifecyclePayload(HearingCourtAgentResult result) {
         return Map.of(
                 "round_no", result.roundNo(),
@@ -295,6 +584,12 @@ public class HearingCourtOrchestrator {
                 "model", result.model());
     }
 
+    // 所属模块：【共享小法庭 / 应用编排层】「HearingCourtOrchestrator.command(FulfillmentCaseEntity,HearingRoundEntity,List,boolean)」。
+    // 具体功能：「HearingCourtOrchestrator.command(FulfillmentCaseEntity,HearingRoundEntity,List,boolean)」：构建命令；实际协作者为 「dispute.getId」、「dispute.getCurrentWorkflowId」、「dispute.getOrderId」、「dispute.getAfterSaleId」；处理的关键状态/协议值包括 「hearing-window-」、「MEDIUM」、「{}」，最终返回「HearingCourtAgentCommand」。
+    // 上游调用：「HearingCourtOrchestrator.command(FulfillmentCaseEntity,HearingRoundEntity,List,boolean)」的上游调用点包括 「HearingCourtOrchestrator.prepareJudgeTurn」。
+    // 下游影响：「HearingCourtOrchestrator.command(FulfillmentCaseEntity,HearingRoundEntity,List,boolean)」向下依次触达 「dispute.getId」、「dispute.getCurrentWorkflowId」、「dispute.getOrderId」、「dispute.getAfterSaleId」；计算结果以「HearingCourtAgentCommand」交给调用方。
+    // 系统意义：「HearingCourtOrchestrator.command(FulfillmentCaseEntity,HearingRoundEntity,List,boolean)」负责主链路中的“命令”；最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
+    // Java 语法：stream/lambda 把集合处理写成管道；lambda 中引用的外部局部变量必须保持 effectively final。
     private HearingCourtAgentCommand command(
             FulfillmentCaseEntity dispute,
             HearingRoundEntity round,
@@ -328,10 +623,46 @@ public class HearingCourtOrchestrator {
                         .toList());
     }
 
+    // 所属模块：【共享小法庭 / 应用编排层】「HearingCourtOrchestrator.courtroomContextJson(String,int)」。
+    // 具体功能：「HearingCourtOrchestrator.courtroomContextJson(String,int)」：构建法庭上下文上下文JSON；实际协作者为 「courtroomContextAssembler.assemble」、「json」，最终返回「String」。
+    // 上游调用：「HearingCourtOrchestrator.courtroomContextJson(String,int)」的上游调用点包括 「HearingCourtOrchestrator.command」。
+    // 下游影响：「HearingCourtOrchestrator.courtroomContextJson(String,int)」向下依次触达 「courtroomContextAssembler.assemble」、「json」；计算结果以「String」交给调用方。
+    // 系统意义：「HearingCourtOrchestrator.courtroomContextJson(String,int)」负责主链路中的“法庭上下文上下文JSON”；最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
     private String courtroomContextJson(String caseId, int roundNo) {
         return json(courtroomContextAssembler.assemble(caseId, roundNo));
     }
 
+    // 所属模块：【共享小法庭 / 应用编排层】「HearingCourtOrchestrator.judgeRequest(HearingCourtAgentCommand)」。
+    // 具体功能：「HearingCourtOrchestrator.judgeRequest(HearingCourtAgentCommand)」：解析法官请求：先把 JSON 文本解析为可逐字段校验的 JsonNode；实际协作者为 「objectMapper.valueToTree」、「objectMapper.readTree」、「command.courtroomContextJson」、「courtroomContext.isObject」；不满足前置条件时抛出 「IllegalStateException」；处理的关键状态/协议值包括 「courtroom_context_json」、「{}」、「courtroom_context」，最终返回「ObjectNode」。
+    // 上游调用：「HearingCourtOrchestrator.judgeRequest(HearingCourtAgentCommand)」的上游调用点包括 「HearingCourtOrchestrator.startStreamingJudgeTurn」。
+    // 下游影响：「HearingCourtOrchestrator.judgeRequest(HearingCourtAgentCommand)」向下依次触达 「objectMapper.valueToTree」、「objectMapper.readTree」、「command.courtroomContextJson」、「courtroomContext.isObject」；计算结果以「ObjectNode」交给调用方。
+    // 系统意义：「HearingCourtOrchestrator.judgeRequest(HearingCourtAgentCommand)」负责主链路中的“法官请求”；最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
+    private ObjectNode judgeRequest(HearingCourtAgentCommand command) {
+        ObjectNode request = objectMapper.valueToTree(command);
+        request.remove("courtroom_context_json");
+        try {
+            JsonNode courtroomContext =
+                    objectMapper.readTree(
+                            command.courtroomContextJson() == null
+                                            || command.courtroomContextJson().isBlank()
+                                    ? "{}"
+                                    : command.courtroomContextJson());
+            request.set(
+                    "courtroom_context",
+                    courtroomContext != null && courtroomContext.isObject()
+                            ? courtroomContext
+                            : objectMapper.createObjectNode());
+        } catch (JsonProcessingException invalidContext) {
+            throw new IllegalStateException("invalid courtroom context", invalidContext);
+        }
+        return request;
+    }
+
+    // 所属模块：【共享小法庭 / 应用编排层】「HearingCourtOrchestrator.safeGenerate(HearingCourtAgentCommand,String)」。
+    // 具体功能：「HearingCourtOrchestrator.safeGenerate(HearingCourtAgentCommand,String)」：调用庭审 Agent 生成本轮法官发言；模型不可用时记录 case/round/Trace 并使用确定性 fallback，保证庭审时钟不会无限等待，最终返回「HearingCourtAgentResult」。
+    // 上游调用：「HearingCourtOrchestrator.safeGenerate(HearingCourtAgentCommand,String)」的上游调用点包括 「HearingCourtOrchestrator.processJudgeTurn」。
+    // 下游影响：「HearingCourtOrchestrator.safeGenerate(HearingCourtAgentCommand,String)」向下依次触达 「agentClient.generateRoundTurn」、「command.caseId」、「command.roundNo」、「log.warn」；计算结果以「HearingCourtAgentResult」交给调用方。
+    // 系统意义：「HearingCourtOrchestrator.safeGenerate(HearingCourtAgentCommand,String)」负责主链路中的“Generate”；最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
     private HearingCourtAgentResult safeGenerate(HearingCourtAgentCommand command, String traceId) {
         try {
             return agentClient.generateRoundTurn(
@@ -349,6 +680,11 @@ public class HearingCourtOrchestrator {
         }
     }
 
+    // 所属模块：【共享小法庭 / 应用编排层】「HearingCourtOrchestrator.fallback(HearingCourtAgentCommand)」。
+    // 具体功能：「HearingCourtOrchestrator.fallback(HearingCourtAgentCommand)」：根据是否开场、是否最终轮和双方提交生成确定性法官话术；最终轮明确要求生成可审核草案，非最终轮只提出下一轮问题，最终返回「HearingCourtAgentResult」。
+    // 上游调用：「HearingCourtOrchestrator.fallback(HearingCourtAgentCommand)」的上游调用点包括 「HearingCourtOrchestrator.safeGenerate」。
+    // 下游影响：「HearingCourtOrchestrator.fallback(HearingCourtAgentCommand)」向下依次触达 「command.partySubmissions」、「command.roundStatus」、「command.stopReason」、「command.finalRound」；计算结果以「HearingCourtAgentResult」交给调用方。
+    // 系统意义：「HearingCourtOrchestrator.fallback(HearingCourtAgentCommand)」负责主链路中的“兜底结果”；最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
     private HearingCourtAgentResult fallback(HearingCourtAgentCommand command) {
         boolean opening =
                 command.partySubmissions().isEmpty()
@@ -399,6 +735,12 @@ public class HearingCourtOrchestrator {
                 "local-fallback");
     }
 
+    // 所属模块：【共享小法庭 / 应用编排层】「HearingCourtOrchestrator.reviewFocusSignal(HearingCourtAgentCommand)」。
+    // 具体功能：「HearingCourtOrchestrator.reviewFocusSignal(HearingCourtAgentCommand)」：构建审核关注点信号；实际协作者为 「command.finalRound」、「command.partySubmissions」、「limit」，最终返回「List<String>」。
+    // 上游调用：「HearingCourtOrchestrator.reviewFocusSignal(HearingCourtAgentCommand)」的上游调用点包括 「HearingCourtOrchestrator.prepareJudgeTurn」、「HearingCourtOrchestrator.fallback」。
+    // 下游影响：「HearingCourtOrchestrator.reviewFocusSignal(HearingCourtAgentCommand)」向下依次触达 「command.finalRound」、「command.partySubmissions」、「limit」；计算结果以「List<String>」交给调用方。
+    // 系统意义：「HearingCourtOrchestrator.reviewFocusSignal(HearingCourtAgentCommand)」负责主链路中的“审核关注点信号”；最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
+    // Java 语法：stream/lambda 把集合处理写成管道；lambda 中引用的外部局部变量必须保持 effectively final。
     private List<String> reviewFocusSignal(HearingCourtAgentCommand command) {
         if (!command.finalRound()) {
             return List.of();
@@ -410,6 +752,12 @@ public class HearingCourtOrchestrator {
                 .toList();
     }
 
+    // 所属模块：【共享小法庭 / 应用编排层】「HearingCourtOrchestrator.reviewFocusSignal(List)」。
+    // 具体功能：「HearingCourtOrchestrator.reviewFocusSignal(List)」：构建审核关注点信号；实际协作者为 「submission.getParticipantRole」、「submission.getSubmissionSource」、「submission.getSubmissionJson」、「defaultText」；处理的关键状态/协议值包括 「{}」，最终返回「List<String>」。
+    // 上游调用：「HearingCourtOrchestrator.reviewFocusSignal(List)」的上游调用点包括 「HearingCourtOrchestrator.prepareJudgeTurn」、「HearingCourtOrchestrator.fallback」。
+    // 下游影响：「HearingCourtOrchestrator.reviewFocusSignal(List)」向下依次触达 「submission.getParticipantRole」、「submission.getSubmissionSource」、「submission.getSubmissionJson」、「defaultText」；计算结果以「List<String>」交给调用方。
+    // 系统意义：「HearingCourtOrchestrator.reviewFocusSignal(List)」负责主链路中的“审核关注点信号”；最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
+    // Java 语法：stream/lambda 把集合处理写成管道；lambda 中引用的外部局部变量必须保持 effectively final。
     private List<String> reviewFocusSignal(
             List<HearingRoundPartySubmissionEntity> submissions) {
         return submissions.stream()
@@ -426,6 +774,11 @@ public class HearingCourtOrchestrator {
                 .toList();
     }
 
+    // 所属模块：【共享小法庭 / 应用编排层】「HearingCourtOrchestrator.reviewFocusSignal(PartySubmission)」。
+    // 具体功能：「HearingCourtOrchestrator.reviewFocusSignal(PartySubmission)」：构建审核关注点信号；实际协作者为 「submission.submissionJson」、「submission.participantRole」、「statementFromSubmissionJson」、「thirdPersonReviewFocus」；处理的关键状态/协议值包括 「USER」、「认可」、「退款」、「签收人身份」，最终返回「String」。
+    // 上游调用：「HearingCourtOrchestrator.reviewFocusSignal(PartySubmission)」的上游调用点包括 「HearingCourtOrchestrator.prepareJudgeTurn」、「HearingCourtOrchestrator.fallback」。
+    // 下游影响：「HearingCourtOrchestrator.reviewFocusSignal(PartySubmission)」向下依次触达 「submission.submissionJson」、「submission.participantRole」、「statementFromSubmissionJson」、「thirdPersonReviewFocus」；计算结果以「String」交给调用方。
+    // 系统意义：「HearingCourtOrchestrator.reviewFocusSignal(PartySubmission)」负责主链路中的“审核关注点信号”；最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
     private String reviewFocusSignal(HearingCourtAgentCommand.PartySubmission submission) {
         String statement = statementFromSubmissionJson(submission.submissionJson());
         if (statement.isBlank()) {
@@ -449,6 +802,11 @@ public class HearingCourtOrchestrator {
         return thirdPersonReviewFocus("当事人", statement);
     }
 
+    // 所属模块：【共享小法庭 / 应用编排层】「HearingCourtOrchestrator.statementFromSubmissionJson(String)」。
+    // 具体功能：「HearingCourtOrchestrator.statementFromSubmissionJson(String)」：解析statementFrom提交JSON：先把 JSON 文本解析为可逐字段校验的 JsonNode；实际协作者为 「objectMapper.readTree」、「node.isObject」、「defaultText」、「node.path(field).asText」；处理的关键状态/协议值包括 「{}」、「statement」、「content」、「message」，最终返回「String」。
+    // 上游调用：「HearingCourtOrchestrator.statementFromSubmissionJson(String)」的上游调用点包括 「HearingCourtOrchestrator.reviewFocusSignal」。
+    // 下游影响：「HearingCourtOrchestrator.statementFromSubmissionJson(String)」向下依次触达 「objectMapper.readTree」、「node.isObject」、「defaultText」、「node.path(field).asText」；计算结果以「String」交给调用方。
+    // 系统意义：「HearingCourtOrchestrator.statementFromSubmissionJson(String)」负责主链路中的“statementFrom提交JSON”；最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
     private String statementFromSubmissionJson(String submissionJson) {
         try {
             JsonNode node = objectMapper.readTree(defaultText(submissionJson, "{}"));
@@ -466,6 +824,11 @@ public class HearingCourtOrchestrator {
         return "";
     }
 
+    // 所属模块：【共享小法庭 / 应用编排层】「HearingCourtOrchestrator.thirdPersonReviewFocus(String,String)」。
+    // 具体功能：「HearingCourtOrchestrator.thirdPersonReviewFocus(String,String)」：构建thirdPerson审核关注点；实际协作者为 「statement.replace」、「replaceAll」、「replace」、「statement.replace("我方",roleLabel).replace」；处理的关键状态/协议值包括 「我方」、「我们」、「我」、「[。；;\\s]+$」，最终返回「String」。
+    // 上游调用：「HearingCourtOrchestrator.thirdPersonReviewFocus(String,String)」的上游调用点包括 「HearingCourtOrchestrator.reviewFocusSignal」。
+    // 下游影响：「HearingCourtOrchestrator.thirdPersonReviewFocus(String,String)」向下依次触达 「statement.replace」、「replaceAll」、「replace」、「statement.replace("我方",roleLabel).replace」；计算结果以「String」交给调用方。
+    // 系统意义：「HearingCourtOrchestrator.thirdPersonReviewFocus(String,String)」负责主链路中的“thirdPerson审核关注点”；最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
     private String thirdPersonReviewFocus(String roleLabel, String statement) {
         String normalized =
                 statement
@@ -482,6 +845,11 @@ public class HearingCourtOrchestrator {
         return normalized + "。";
     }
 
+    // 所属模块：【共享小法庭 / 应用编排层】「HearingCourtOrchestrator.appendFormalJuryReportIfNeeded(FulfillmentCaseEntity,CaseRoomEntity,int,String,List,String,String)」。
+    // 具体功能：「HearingCourtOrchestrator.appendFormalJuryReportIfNeeded(FulfillmentCaseEntity,CaseRoomEntity,int,String,List,String,String)」：仅在终局或高风险分支写入正式评审团报告，优先复用 A2A 已有报告，缺失时以 reviewFocus 生成可审计兜底报告并写共享消息，最终返回「void」。
+    // 上游调用：「HearingCourtOrchestrator.appendFormalJuryReportIfNeeded(FulfillmentCaseEntity,CaseRoomEntity,int,String,List,String,String)」的上游调用点包括 「HearingCourtOrchestrator.persistJudgeTurn」。
+    // 下游影响：「HearingCourtOrchestrator.appendFormalJuryReportIfNeeded(FulfillmentCaseEntity,CaseRoomEntity,int,String,List,String,String)」向下依次触达 「messageRepository.findByCaseIdAndIdempotencyKey」、「a2aMessageService.findFormalJuryReviewReport」、「a2aMessageService.record」、「messageRepository.findMaxSequenceByRoomId」。
+    // 系统意义：「HearingCourtOrchestrator.appendFormalJuryReportIfNeeded(FulfillmentCaseEntity,CaseRoomEntity,int,String,List,String,String)」负责主链路中的“FormalJuryReportIfNeeded”；最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
     private void appendFormalJuryReportIfNeeded(
             FulfillmentCaseEntity dispute,
             CaseRoomEntity room,
@@ -593,6 +961,11 @@ public class HearingCourtOrchestrator {
                 "jury-panel");
     }
 
+    // 所属模块：【共享小法庭 / 应用编排层】「HearingCourtOrchestrator.hasCompleteFormalJuryReport(String,int)」。
+    // 具体功能：「HearingCourtOrchestrator.hasCompleteFormalJuryReport(String,int)」：判断是否存在协议完整性FormalJuryReport；实际协作者为 「messageRepository.findByCaseIdAndIdempotencyKey」、「a2aMessageService.hasFormalJuryReviewReport」、「juryReviewReportKey」、「isPresent」，最终返回「boolean」。
+    // 上游调用：「HearingCourtOrchestrator.hasCompleteFormalJuryReport(String,int)」的上游调用点包括 「HearingCourtOrchestrator.afterRoundClosed」、「HearingCourtOrchestrator.finalizeResult」、「HearingCourtOrchestrator.isJudgeTurnComplete」、「HearingCourtOrchestrator.prepareJudgeTurn」。
+    // 下游影响：「HearingCourtOrchestrator.hasCompleteFormalJuryReport(String,int)」向下依次触达 「messageRepository.findByCaseIdAndIdempotencyKey」、「a2aMessageService.hasFormalJuryReviewReport」、「juryReviewReportKey」、「isPresent」；计算结果以「boolean」交给调用方。
+    // 系统意义：「HearingCourtOrchestrator.hasCompleteFormalJuryReport(String,int)」负责主链路中的“协议完整性FormalJuryReport”；最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
     public boolean hasCompleteFormalJuryReport(String caseId, int roundNo) {
         return messageRepository
                         .findByCaseIdAndIdempotencyKey(
@@ -601,6 +974,11 @@ public class HearingCourtOrchestrator {
                 && a2aMessageService.hasFormalJuryReviewReport(caseId, roundNo);
     }
 
+    // 所属模块：【共享小法庭 / 应用编排层】「HearingCourtOrchestrator.juryReviewPayload(List)」。
+    // 具体功能：「HearingCourtOrchestrator.juryReviewPayload(List)」：构建jury审核载荷；处理的关键状态/协议值包括 「第三轮未形成明确异议，仍需法官在草案中说明事实采信和证据依据。」、「summary」、「评审团已完成第三轮复核，报告已交由法官生成裁决草案时参考。」、「risk_level」，最终返回「Map<String, Object>」。
+    // 上游调用：「HearingCourtOrchestrator.juryReviewPayload(List)」的上游调用点包括 「HearingCourtOrchestrator.appendFormalJuryReportIfNeeded」。
+    // 下游影响：「HearingCourtOrchestrator.juryReviewPayload(List)」只产生当前对象的返回值或字段变化，不访问额外基础设施；计算结果以「Map<String, Object>」交给调用方。
+    // 系统意义：「HearingCourtOrchestrator.juryReviewPayload(List)」负责主链路中的“jury审核载荷”；最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
     private Map<String, Object> juryReviewPayload(List<String> reviewFocusSignal) {
         List<String> focus =
                 reviewFocusSignal == null || reviewFocusSignal.isEmpty()
@@ -625,6 +1003,11 @@ public class HearingCourtOrchestrator {
                 "REVIEWER_VISIBLE");
     }
 
+    // 所属模块：【共享小法庭 / 应用编排层】「HearingCourtOrchestrator.jsonObject(String,String)」。
+    // 具体功能：「HearingCourtOrchestrator.jsonObject(String,String)」：解析JSON对象：先把 JSON 文本解析为可逐字段校验的 JsonNode；实际协作者为 「objectMapper.readTree」、「node.isObject」、「objectMapper.convertValue」、「defaultText」；不满足前置条件时抛出 「IllegalStateException」；处理的关键状态/协议值包括 「{}」，最终返回「Map<String, Object>」。
+    // 上游调用：「HearingCourtOrchestrator.jsonObject(String,String)」的上游调用点包括 「HearingCourtOrchestrator.appendFormalJuryReportIfNeeded」。
+    // 下游影响：「HearingCourtOrchestrator.jsonObject(String,String)」向下依次触达 「objectMapper.readTree」、「node.isObject」、「objectMapper.convertValue」、「defaultText」；计算结果以「Map<String, Object>」交给调用方。
+    // 系统意义：「HearingCourtOrchestrator.jsonObject(String,String)」统一“JSON对象”的跨层表示，避免不同入口产生不兼容字段；最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
     private Map<String, Object> jsonObject(String value, String label) {
         try {
             JsonNode node = objectMapper.readTree(defaultText(value, "{}"));
@@ -638,15 +1021,21 @@ public class HearingCourtOrchestrator {
         }
     }
 
+    // 所属模块：【共享小法庭 / 应用编排层】「HearingCourtOrchestrator.appendJudgeMessage(FulfillmentCaseEntity,CaseRoomEntity,int,HearingCourtAgentResult,String,String,String)」。
+    // 具体功能：「HearingCourtOrchestrator.appendJudgeMessage(FulfillmentCaseEntity,CaseRoomEntity,int,HearingCourtAgentResult,String,String,String)」：追加法官消息：先把新状态写入 PostgreSQL 事实表；实际协作者为 「messageRepository.findMaxSequenceByRoomId」、「messageRepository.save」、「RoomMessageEntity.create」、「room.getId」；处理的关键状态/协议值包括 「MESSAGE_」、「[]」，最终返回「RoomMessageEntity」。
+    // 上游调用：「HearingCourtOrchestrator.appendJudgeMessage(FulfillmentCaseEntity,CaseRoomEntity,int,HearingCourtAgentResult,String,String,String)」的上游调用点包括 「HearingCourtOrchestrator.persistJudgeTurn」。
+    // 下游影响：「HearingCourtOrchestrator.appendJudgeMessage(FulfillmentCaseEntity,CaseRoomEntity,int,HearingCourtAgentResult,String,String,String)」向下依次触达 「messageRepository.findMaxSequenceByRoomId」、「messageRepository.save」、「RoomMessageEntity.create」、「room.getId」；计算结果以「RoomMessageEntity」交给调用方。
+    // 系统意义：「HearingCourtOrchestrator.appendJudgeMessage(FulfillmentCaseEntity,CaseRoomEntity,int,HearingCourtAgentResult,String,String,String)」负责主链路中的“法官消息”；最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
     private RoomMessageEntity appendJudgeMessage(
             FulfillmentCaseEntity dispute,
             CaseRoomEntity room,
             int roundNo,
             HearingCourtAgentResult result,
             String idempotencyKey,
-            String traceId) {
+            String traceId,
+            String runId) {
         long sequence = messageRepository.findMaxSequenceByRoomId(room.getId()) + 1;
-        return messageRepository.save(
+        RoomMessageEntity message =
                 RoomMessageEntity.create(
                         "MESSAGE_" + compactUuid(),
                         dispute.getId(),
@@ -663,9 +1052,16 @@ public class HearingCourtOrchestrator {
                         idempotencyKey,
                         roundNo,
                         Instant.now(clock),
-                        traceId));
+                        traceId);
+        message.attachAgentRun(runId);
+        return messageRepository.save(message);
     }
 
+    // 所属模块：【共享小法庭 / 应用编排层】「HearingCourtOrchestrator.sharedCourtAudienceJson()」。
+    // 具体功能：「HearingCourtOrchestrator.sharedCourtAudienceJson()」：计算 SHA-shared法庭受众 JSONJSON；实际协作者为 「json」，最终返回「String」。
+    // 上游调用：「HearingCourtOrchestrator.sharedCourtAudienceJson()」的上游调用点包括 「HearingCourtOrchestrator.appendFormalJuryReportIfNeeded」、「HearingCourtOrchestrator.appendJudgeMessage」。
+    // 下游影响：「HearingCourtOrchestrator.sharedCourtAudienceJson()」向下依次触达 「json」；计算结果以「String」交给调用方。
+    // 系统意义：「HearingCourtOrchestrator.sharedCourtAudienceJson()」负责主链路中的“shared法庭受众 JSONJSON”；最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
     private String sharedCourtAudienceJson() {
         return json(
                 List.of(
@@ -677,6 +1073,11 @@ public class HearingCourtOrchestrator {
                         ActorRole.SYSTEM.name()));
     }
 
+    // 所属模块：【共享小法庭 / 应用编排层】「HearingCourtOrchestrator.json(Object)」。
+    // 具体功能：「HearingCourtOrchestrator.json(Object)」：序列化JSON：先把结构化对象序列化为稳定 JSON；实际协作者为 「objectMapper.writeValueAsString」；不满足前置条件时抛出 「IllegalStateException」，最终返回「String」。
+    // 上游调用：「HearingCourtOrchestrator.json(Object)」的上游调用点包括 「HearingCourtOrchestrator.courtroomContextJson」、「HearingCourtOrchestrator.sharedCourtAudienceJson」。
+    // 下游影响：「HearingCourtOrchestrator.json(Object)」向下依次触达 「objectMapper.writeValueAsString」；计算结果以「String」交给调用方。
+    // 系统意义：「HearingCourtOrchestrator.json(Object)」统一“JSON”的跨层表示，避免不同入口产生不兼容字段；最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
     private String json(Object value) {
         try {
             return objectMapper.writeValueAsString(value);
@@ -685,6 +1086,11 @@ public class HearingCourtOrchestrator {
         }
     }
 
+    // 所属模块：【共享小法庭 / 应用编排层】「HearingCourtOrchestrator.participantId(FulfillmentCaseEntity,ActorRole)」。
+    // 具体功能：「HearingCourtOrchestrator.participantId(FulfillmentCaseEntity,ActorRole)」：构建参与人标识；实际协作者为 「dispute.getUserId」、「dispute.getMerchantId」，最终返回「String」。
+    // 上游调用：「HearingCourtOrchestrator.participantId(FulfillmentCaseEntity,ActorRole)」的上游调用点包括 「HearingCourtOrchestrator.command」。
+    // 下游影响：「HearingCourtOrchestrator.participantId(FulfillmentCaseEntity,ActorRole)」向下依次触达 「dispute.getUserId」、「dispute.getMerchantId」；计算结果以「String」交给调用方。
+    // 系统意义：「HearingCourtOrchestrator.participantId(FulfillmentCaseEntity,ActorRole)」负责主链路中的“参与人标识”；最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
     private static String participantId(FulfillmentCaseEntity dispute, ActorRole role) {
         return switch (role) {
             case USER -> dispute.getUserId();
@@ -693,26 +1099,56 @@ public class HearingCourtOrchestrator {
         };
     }
 
+    // 所属模块：【共享小法庭 / 应用编排层】「HearingCourtOrchestrator.defaultText(String,String)」。
+    // 具体功能：「HearingCourtOrchestrator.defaultText(String,String)」：构建默认文本，最终返回「String」。
+    // 上游调用：「HearingCourtOrchestrator.defaultText(String,String)」的上游调用点包括 「HearingCourtOrchestrator.command」、「HearingCourtOrchestrator.reviewFocusSignal」、「HearingCourtOrchestrator.statementFromSubmissionJson」、「HearingCourtOrchestrator.jsonObject」。
+    // 下游影响：「HearingCourtOrchestrator.defaultText(String,String)」只产生当前对象的返回值或字段变化，不访问额外基础设施；计算结果以「String」交给调用方。
+    // 系统意义：「HearingCourtOrchestrator.defaultText(String,String)」负责主链路中的“默认文本”；最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
     private static String defaultText(String value, String fallback) {
         return value == null || value.isBlank() ? fallback : value;
     }
 
+    // 所属模块：【共享小法庭 / 应用编排层】「HearingCourtOrchestrator.judgeRoundOpeningKey(String,int)」。
+    // 具体功能：「HearingCourtOrchestrator.judgeRoundOpeningKey(String,int)」：构建法官轮次开场消息键；处理的关键状态/协议值包括 「judge-round-opening:」、「:」，最终返回「String」。
+    // 上游调用：「HearingCourtOrchestrator.judgeRoundOpeningKey(String,int)」的上游调用点包括 「HearingCourtOrchestrator.afterRoundOpened」。
+    // 下游影响：「HearingCourtOrchestrator.judgeRoundOpeningKey(String,int)」只产生当前对象的返回值或字段变化，不访问额外基础设施；计算结果以「String」交给调用方。
+    // 系统意义：「HearingCourtOrchestrator.judgeRoundOpeningKey(String,int)」负责主链路中的“法官轮次开场消息键”；最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
     private static String judgeRoundOpeningKey(String caseId, int roundNo) {
         return "judge-round-opening:" + caseId + ":" + roundNo;
     }
 
+    // 所属模块：【共享小法庭 / 应用编排层】「HearingCourtOrchestrator.judgeRoundTurnKey(String,int)」。
+    // 具体功能：「HearingCourtOrchestrator.judgeRoundTurnKey(String,int)」：构建法官轮次轮次键；处理的关键状态/协议值包括 「judge-round-turn:」、「:」，最终返回「String」。
+    // 上游调用：「HearingCourtOrchestrator.judgeRoundTurnKey(String,int)」的上游调用点包括 「HearingCourtOrchestrator.afterRoundClosed」、「HearingCourtOrchestrator.isJudgeTurnComplete」。
+    // 下游影响：「HearingCourtOrchestrator.judgeRoundTurnKey(String,int)」只产生当前对象的返回值或字段变化，不访问额外基础设施；计算结果以「String」交给调用方。
+    // 系统意义：「HearingCourtOrchestrator.judgeRoundTurnKey(String,int)」负责主链路中的“法官轮次轮次键”；最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
     private static String judgeRoundTurnKey(String caseId, int roundNo) {
         return "judge-round-turn:" + caseId + ":" + roundNo;
     }
 
+    // 所属模块：【共享小法庭 / 应用编排层】「HearingCourtOrchestrator.juryReviewReportKey(String,int)」。
+    // 具体功能：「HearingCourtOrchestrator.juryReviewReportKey(String,int)」：构建jury审核Report键；处理的关键状态/协议值包括 「jury-review-report:」、「:」，最终返回「String」。
+    // 上游调用：「HearingCourtOrchestrator.juryReviewReportKey(String,int)」的上游调用点包括 「HearingCourtOrchestrator.appendFormalJuryReportIfNeeded」、「HearingCourtOrchestrator.hasCompleteFormalJuryReport」。
+    // 下游影响：「HearingCourtOrchestrator.juryReviewReportKey(String,int)」只产生当前对象的返回值或字段变化，不访问额外基础设施；计算结果以「String」交给调用方。
+    // 系统意义：「HearingCourtOrchestrator.juryReviewReportKey(String,int)」负责主链路中的“jury审核Report键”；最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
     private static String juryReviewReportKey(String caseId, int roundNo) {
         return "jury-review-report:" + caseId + ":" + roundNo;
     }
 
+    // 所属模块：【共享小法庭 / 应用编排层】「HearingCourtOrchestrator.compactUuid()」。
+    // 具体功能：「HearingCourtOrchestrator.compactUuid()」：压缩表示UUID；实际协作者为 「UUID.randomUUID」、「UUID.randomUUID().toString().replace」；处理的关键状态/协议值包括 「-」，最终返回「String」。
+    // 上游调用：「HearingCourtOrchestrator.compactUuid()」的上游调用点包括 「HearingCourtOrchestrator.persistJudgeTurn」、「HearingCourtOrchestrator.appendFormalJuryReportIfNeeded」、「HearingCourtOrchestrator.appendJudgeMessage」。
+    // 下游影响：「HearingCourtOrchestrator.compactUuid()」向下依次触达 「UUID.randomUUID」、「UUID.randomUUID().toString().replace」；计算结果以「String」交给调用方。
+    // 系统意义：「HearingCourtOrchestrator.compactUuid()」负责主链路中的“UUID”；最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
     private static String compactUuid() {
         return UUID.randomUUID().toString().replace("-", "");
     }
 
+    // 所属模块：【共享小法庭 / 应用编排层】类型「TurnPreparation」。
+    // 类型职责：定义轮次Preparation跨层传递时使用的不可变数据契约；本类型显式提供 「completed」、「repair」、「generate」。
+    // 协作关系：主要由 「HearingCourtOrchestrator.finalizeResult」、「HearingCourtOrchestrator.prepareJudgeTurn」 使用。
+    // 边界意义：最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
+    // Java 语法：record 用于不可变数据载体，编译器会生成组件访问器和值语义方法。
     private record TurnPreparation(
             String caseId,
             int roundNo,
@@ -723,6 +1159,12 @@ public class HearingCourtOrchestrator {
             List<String> recoveryReviewFocus,
             boolean complete) {
 
+        // 所属模块：【共享小法庭 / 应用编排层】「HearingCourtOrchestrator.TurnPreparation.completed(String,int,boolean,String,String)」。
+        // 具体功能：「HearingCourtOrchestrator.TurnPreparation.completed(String,int,boolean,String,String)」：完成完成，最终返回「TurnPreparation」。
+        // 上游调用：「HearingCourtOrchestrator.TurnPreparation.completed(String,int,boolean,String,String)」的上游调用点包括 「HearingCourtOrchestrator.prepareJudgeTurn」。
+        // 下游影响：「HearingCourtOrchestrator.TurnPreparation.completed(String,int,boolean,String,String)」只产生当前对象的返回值或字段变化，不访问额外基础设施；计算结果以「TurnPreparation」交给调用方。
+        // 系统意义：「HearingCourtOrchestrator.TurnPreparation.completed(String,int,boolean,String,String)」负责主链路中的“完成”；最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
+        // Java 语法：record 自动生成组件访问器、equals、hashCode 和 toString，适合传递不可变业务快照。
         private static TurnPreparation completed(
                 String caseId,
                 int roundNo,
@@ -740,6 +1182,12 @@ public class HearingCourtOrchestrator {
                     true);
         }
 
+        // 所属模块：【共享小法庭 / 应用编排层】「HearingCourtOrchestrator.TurnPreparation.repair(String,int,boolean,String,String,List)」。
+        // 具体功能：「HearingCourtOrchestrator.TurnPreparation.repair(String,int,boolean,String,String,List)」：构建恢复修复，最终返回「TurnPreparation」。
+        // 上游调用：「HearingCourtOrchestrator.TurnPreparation.repair(String,int,boolean,String,String,List)」的上游调用点包括 「HearingCourtOrchestrator.prepareJudgeTurn」。
+        // 下游影响：「HearingCourtOrchestrator.TurnPreparation.repair(String,int,boolean,String,String,List)」只产生当前对象的返回值或字段变化，不访问额外基础设施；计算结果以「TurnPreparation」交给调用方。
+        // 系统意义：「HearingCourtOrchestrator.TurnPreparation.repair(String,int,boolean,String,String,List)」负责主链路中的“恢复修复”；最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
+        // Java 语法：record 自动生成组件访问器、equals、hashCode 和 toString，适合传递不可变业务快照。
         private static TurnPreparation repair(
                 String caseId,
                 int roundNo,
@@ -758,6 +1206,12 @@ public class HearingCourtOrchestrator {
                     false);
         }
 
+        // 所属模块：【共享小法庭 / 应用编排层】「HearingCourtOrchestrator.TurnPreparation.generate(String,int,boolean,String,String,HearingCourtAgentCommand)」。
+        // 具体功能：「HearingCourtOrchestrator.TurnPreparation.generate(String,int,boolean,String,String,HearingCourtAgentCommand)」：生成轮次Preparation，最终返回「TurnPreparation」。
+        // 上游调用：「HearingCourtOrchestrator.TurnPreparation.generate(String,int,boolean,String,String,HearingCourtAgentCommand)」的上游调用点包括 「HearingCourtOrchestrator.finalizeResult」、「HearingCourtOrchestrator.prepareJudgeTurn」。
+        // 下游影响：「HearingCourtOrchestrator.TurnPreparation.generate(String,int,boolean,String,String,HearingCourtAgentCommand)」只产生当前对象的返回值或字段变化，不访问额外基础设施；计算结果以「TurnPreparation」交给调用方。
+        // 系统意义：「HearingCourtOrchestrator.TurnPreparation.generate(String,int,boolean,String,String,HearingCourtAgentCommand)」负责主链路中的“轮次Preparation”；最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
+        // Java 语法：record 自动生成组件访问器、equals、hashCode 和 toString，适合传递不可变业务快照。
         private static TurnPreparation generate(
                 String caseId,
                 int roundNo,

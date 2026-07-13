@@ -242,7 +242,7 @@ Workflow History。
 ```text
 唯一默认模型 qwen3.7-plus；
 应用服务只调用 LiteLLM；
-Qwen 思考模式由 LiteLLM 统一设置 enable_thinking=true；
+Qwen 思考模式由 LiteLLM 统一设置 enable_thinking=false；
 模型供应商密钥不进入前端、Prompt、日志或数据库；
 Java 不直接调用 LiteLLM 或 Qwen 3.7 Plus。
 ```

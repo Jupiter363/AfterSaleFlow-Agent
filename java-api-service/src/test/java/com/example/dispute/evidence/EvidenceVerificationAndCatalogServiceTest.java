@@ -1,3 +1,9 @@
+/*
+ * 所属模块：证据与版本化卷宗。
+ * 文件职责：验证证据核验并且，覆盖 「partyCatalogIsLimitedToOwnEvidenceButReviewerCanSeeAllOriginals」、「catalogIncludesLatestVerificationConfidenceFeedback」、「catalogProjectsMultimodalScoresAndHumanReviewCardFields」、「deterministicProvenanceCanVerifyButInvalidMimeIsRejectedAndRemainsAuditable」。
+ * 业务链路：JUnit 构造夹具并驱动真实服务或 Mock 协作者，断言返回值、持久化状态和调用边界；接收原始证据、触发 OCR、执行可信度核验、控制角色可见性并冻结版本化卷宗。
+ * 关键边界：原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
+ */
 package com.example.dispute.evidence;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -31,6 +37,11 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+// 所属模块：【证据与版本化卷宗 / 自动化测试层】类型「EvidenceVerificationAndCatalogServiceTest」。
+// 类型职责：集中验证证据核验并且的业务场景、权限边界和持久化/外部协作契约；本类型显式提供 「setUp」、「partyCatalogIsLimitedToOwnEvidenceButReviewerCanSeeAllOriginals」、「catalogIncludesLatestVerificationConfidenceFeedback」、「catalogProjectsMultimodalScoresAndHumanReviewCardFields」、「deterministicProvenanceCanVerifyButInvalidMimeIsRejectedAndRemainsAuditable」、「evidence」。
+// 协作关系：由 JUnit 发现并执行其中带 @Test 的场景。
+// 边界意义：原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
+// Java 语法：class 同时封装状态与方法；final 依赖通过构造器注入后不可重新指向。
 @ExtendWith(MockitoExtension.class)
 class EvidenceVerificationAndCatalogServiceTest {
 
@@ -41,6 +52,11 @@ class EvidenceVerificationAndCatalogServiceTest {
     private EvidenceVerificationService verificationService;
     private EvidenceCatalogService catalogService;
 
+    // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceVerificationAndCatalogServiceTest.setUp()」。
+    // 具体功能：「EvidenceVerificationAndCatalogServiceTest.setUp()」：在每个测试场景运行前创建「Clock.fixed」、「Instant.parse」，统一准备后续断言依赖的初始状态，避免各用例重复搭建且保持彼此隔离。
+    // 上游调用：「EvidenceVerificationAndCatalogServiceTest.setUp()」由 JUnit 生命周期或本测试类的场景方法调用。
+    // 下游影响：「EvidenceVerificationAndCatalogServiceTest.setUp()」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「EvidenceVerificationAndCatalogServiceTest.setUp()」守住「证据与版本化卷宗」的可执行规格，尤其防止 「2026-07-03T00:00:00Z」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @BeforeEach
     void setUp() {
         Clock clock =
@@ -62,6 +78,11 @@ class EvidenceVerificationAndCatalogServiceTest {
                         verificationRepository);
     }
 
+    // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceVerificationAndCatalogServiceTest.partyCatalogIsLimitedToOwnEvidenceButReviewerCanSeeAllOriginals()」。
+    // 具体功能：「EvidenceVerificationAndCatalogServiceTest.partyCatalogIsLimitedToOwnEvidenceButReviewerCanSeeAllOriginals()」：复现“核对完整业务行为（场景方法「partyCatalogIsLimitedToOwnEvidenceButReviewerCanSeeAllOriginals」）”场景：驱动 「caseRepository.findById」、「evidenceRepository.findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc」、「verificationRepository.findTopByEvidenceIdOrderByVerificationVersionDesc」、「catalogService.catalog」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「EVIDENCE_MERCHANT」、「MERCHANT」、「merchant-local」、「PRIVATE」。
+    // 上游调用：「EvidenceVerificationAndCatalogServiceTest.partyCatalogIsLimitedToOwnEvidenceButReviewerCanSeeAllOriginals()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「EvidenceVerificationAndCatalogServiceTest.partyCatalogIsLimitedToOwnEvidenceButReviewerCanSeeAllOriginals()」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「EvidenceVerificationAndCatalogServiceTest.partyCatalogIsLimitedToOwnEvidenceButReviewerCanSeeAllOriginals()」守住「证据与版本化卷宗」的可执行规格，尤其防止 「EVIDENCE_MERCHANT」、「MERCHANT」、「merchant-local」、「PRIVATE」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void partyCatalogIsLimitedToOwnEvidenceButReviewerCanSeeAllOriginals() {
         FulfillmentCaseEntity dispute = evidenceCase();
@@ -107,6 +128,11 @@ class EvidenceVerificationAndCatalogServiceTest {
                 });
     }
 
+    // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceVerificationAndCatalogServiceTest.catalogIncludesLatestVerificationConfidenceFeedback()」。
+    // 具体功能：「EvidenceVerificationAndCatalogServiceTest.catalogIncludesLatestVerificationConfidenceFeedback()」：复现“核对完整业务行为（场景方法「catalogIncludesLatestVerificationConfidenceFeedback」）”场景：驱动 「caseRepository.findById」、「evidenceRepository.findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc」、「verificationRepository.findTopByEvidenceIdOrderByVerificationVersionDesc」、「catalogService.catalog」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「EVIDENCE_CONFIDENCE」、「USER」、「user-local」、「PARTIES」。
+    // 上游调用：「EvidenceVerificationAndCatalogServiceTest.catalogIncludesLatestVerificationConfidenceFeedback()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「EvidenceVerificationAndCatalogServiceTest.catalogIncludesLatestVerificationConfidenceFeedback()」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「EvidenceVerificationAndCatalogServiceTest.catalogIncludesLatestVerificationConfidenceFeedback()」守住「证据与版本化卷宗」的可执行规格，尤其防止 「EVIDENCE_CONFIDENCE」、「USER」、「user-local」、「PARTIES」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void catalogIncludesLatestVerificationConfidenceFeedback() {
         FulfillmentCaseEntity dispute = evidenceCase();
@@ -152,6 +178,11 @@ class EvidenceVerificationAndCatalogServiceTest {
                 });
     }
 
+    // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceVerificationAndCatalogServiceTest.catalogProjectsMultimodalScoresAndHumanReviewCardFields()」。
+    // 具体功能：「EvidenceVerificationAndCatalogServiceTest.catalogProjectsMultimodalScoresAndHumanReviewCardFields()」：复现“核对完整业务行为（场景方法「catalogProjectsMultimodalScoresAndHumanReviewCardFields」）”场景：驱动 「caseRepository.findById」、「evidenceRepository.findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc」、「verificationRepository.findTopByEvidenceIdOrderByVerificationVersionDesc」、「catalogService.catalog」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「EVIDENCE_MULTIMODAL」、「USER」、「user-local」、「PARTIES」。
+    // 上游调用：「EvidenceVerificationAndCatalogServiceTest.catalogProjectsMultimodalScoresAndHumanReviewCardFields()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「EvidenceVerificationAndCatalogServiceTest.catalogProjectsMultimodalScoresAndHumanReviewCardFields()」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「EvidenceVerificationAndCatalogServiceTest.catalogProjectsMultimodalScoresAndHumanReviewCardFields()」守住「证据与版本化卷宗」的可执行规格，尤其防止 「EVIDENCE_MULTIMODAL」、「USER」、「user-local」、「PARTIES」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void catalogProjectsMultimodalScoresAndHumanReviewCardFields() {
         FulfillmentCaseEntity dispute = evidenceCase();
@@ -215,6 +246,11 @@ class EvidenceVerificationAndCatalogServiceTest {
         assertThat(item.humanReviewInstructions()).containsExactly("Inspect original export");
     }
 
+    // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceVerificationAndCatalogServiceTest.deterministicProvenanceCanVerifyButInvalidMimeIsRejectedAndRemainsAuditable()」。
+    // 具体功能：「EvidenceVerificationAndCatalogServiceTest.deterministicProvenanceCanVerifyButInvalidMimeIsRejectedAndRemainsAuditable()」：复现“核对完整业务行为（场景方法「deterministicProvenanceCanVerifyButInvalidMimeIsRejectedAndRemainsAuditable」）”场景：驱动 「caseRepository.findByIdForUpdate」、「evidenceRepository.findById」、「verificationRepository.findTopByEvidenceIdOrderByVerificationVersionDesc」、「verificationRepository.save」，再用 「verify」、「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「EVIDENCE_USER」、「USER」、「user-local」、「PARTIES」。
+    // 上游调用：「EvidenceVerificationAndCatalogServiceTest.deterministicProvenanceCanVerifyButInvalidMimeIsRejectedAndRemainsAuditable()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「EvidenceVerificationAndCatalogServiceTest.deterministicProvenanceCanVerifyButInvalidMimeIsRejectedAndRemainsAuditable()」的下游是被测服务、仓储或外部客户端替身；「verify、assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「EvidenceVerificationAndCatalogServiceTest.deterministicProvenanceCanVerifyButInvalidMimeIsRejectedAndRemainsAuditable()」守住「证据与版本化卷宗」的可执行规格，尤其防止 「EVIDENCE_USER」、「USER」、「user-local」、「PARTIES」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void deterministicProvenanceCanVerifyButInvalidMimeIsRejectedAndRemainsAuditable() {
         FulfillmentCaseEntity dispute = evidenceCase();
@@ -252,6 +288,11 @@ class EvidenceVerificationAndCatalogServiceTest {
         assertThat(rejected.auditable()).isTrue();
     }
 
+    // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceVerificationAndCatalogServiceTest.evidence(String,String,String,String)」。
+    // 具体功能：「EvidenceVerificationAndCatalogServiceTest.evidence(String,String,String,String)」：作为测试辅助方法为“核对完整业务行为（场景方法「evidence」）”组装或读取「EvidenceItemEntity.uploaded」、「OffsetDateTime.parse」，供本测试类的场景方法复用。
+    // 上游调用：「EvidenceVerificationAndCatalogServiceTest.evidence(String,String,String,String)」由本测试类中的 「EvidenceVerificationAndCatalogServiceTest.partyCatalogIsLimitedToOwnEvidenceButReviewerCanSeeAllOriginals」、「EvidenceVerificationAndCatalogServiceTest.catalogIncludesLatestVerificationConfidenceFeedback」、「EvidenceVerificationAndCatalogServiceTest.catalogProjectsMultimodalScoresAndHumanReviewCardFields」、「EvidenceVerificationAndCatalogServiceTest.deterministicProvenanceCanVerifyButInvalidMimeIsRejectedAndRemainsAuditable」 调用。
+    // 下游影响：「EvidenceVerificationAndCatalogServiceTest.evidence(String,String,String,String)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「EvidenceVerificationAndCatalogServiceTest.evidence(String,String,String,String)」守住「证据与版本化卷宗」的可执行规格，尤其防止 「CASE_EVIDENCE_ROOM」、「DOSSIER_1」、「PHOTO」、「_UPLOAD」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static EvidenceItemEntity evidence(
             String id, String role, String actorId, String visibility) {
         return EvidenceItemEntity.uploaded(
@@ -272,6 +313,11 @@ class EvidenceVerificationAndCatalogServiceTest {
                 OffsetDateTime.parse("2026-07-02T00:00:00Z"));
     }
 
+    // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceVerificationAndCatalogServiceTest.evidenceCase()」。
+    // 具体功能：「EvidenceVerificationAndCatalogServiceTest.evidenceCase()」：作为测试辅助方法为“核对完整业务行为（场景方法「evidenceCase」）”组装或读取「FulfillmentCaseEntity.imported」、「OffsetDateTime.parse」，供本测试类的场景方法复用。
+    // 上游调用：「EvidenceVerificationAndCatalogServiceTest.evidenceCase()」由本测试类中的 「EvidenceVerificationAndCatalogServiceTest.partyCatalogIsLimitedToOwnEvidenceButReviewerCanSeeAllOriginals」、「EvidenceVerificationAndCatalogServiceTest.catalogIncludesLatestVerificationConfidenceFeedback」、「EvidenceVerificationAndCatalogServiceTest.catalogProjectsMultimodalScoresAndHumanReviewCardFields」、「EvidenceVerificationAndCatalogServiceTest.deterministicProvenanceCanVerifyButInvalidMimeIsRejectedAndRemainsAuditable」 调用。
+    // 下游影响：「EvidenceVerificationAndCatalogServiceTest.evidenceCase()」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「EvidenceVerificationAndCatalogServiceTest.evidenceCase()」守住「证据与版本化卷宗」的可执行规格，尤其防止 「CASE_EVIDENCE_ROOM」、「ORDER-EVIDENCE」、「LOG-EVIDENCE」、「user-local」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static FulfillmentCaseEntity evidenceCase() {
         return FulfillmentCaseEntity.imported(
                 "CASE_EVIDENCE_ROOM",

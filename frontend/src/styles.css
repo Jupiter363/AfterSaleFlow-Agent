@@ -1,3 +1,8 @@
+/*
+ * 文件作用：前端样式文件，定义页面布局、视觉风格和响应式展示规则。
+ * 说明：本注释用于帮助读者先了解样式职责，再阅读具体选择器。
+ */
+
 :root {
   font-family: Inter, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
   color: #31405a;
@@ -85,38 +90,83 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .brand__copy { display: grid; gap: 2px; }
 .brand__copy strong { color: #30415c; font-size: 16px; }
 .brand__copy small { color: #8492a7; font-size: 9px; letter-spacing: .07em; text-transform: uppercase; }
-.app-center {
-  display: grid;
-  gap: 3px;
-  justify-items: center;
-  min-width: 0;
-}
-.app-nav { display: flex; justify-content: center; gap: 7px; }
+.app-nav { display: flex; justify-content: flex-end; gap: 7px; }
 .app-nav a {
   padding: 10px 14px;
-  color: #68778e;
-  border-radius: 13px;
-  font-size: 13px;
-  font-weight: 700;
-}
-.app-nav a.router-link-active {
   color: #53619a;
   background: linear-gradient(135deg, #edf6ff, #f2edff);
-  box-shadow: inset 0 0 0 1px #dce6f3;
+  border: 1px solid #dce6f3;
+  border-radius: 13px;
+  box-shadow: 0 6px 16px #536c8b12;
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
 }
-.app-tools { display: flex; align-items: center; gap: 9px; }
-.actor-switcher { display: grid; grid-template-columns: 120px 118px; gap: 6px; }
-.actor-switcher label { display: grid; gap: 2px; }
-.actor-switcher label > span { color: #8a96a8; font-size: 8px; font-weight: 800; letter-spacing: .08em; }
+.app-nav a.router-link-active {
+  color: #46558f;
+  background: linear-gradient(135deg, #e7f3ff, #eee8ff);
+  border-color: #cfdcf0;
+  box-shadow: 0 7px 18px #536c8b18, inset 0 0 0 1px #ffffffb8;
+}
+.app-tools {
+  display: flex;
+  grid-column: 3;
+  align-items: center;
+  justify-self: end;
+  gap: 9px;
+}
+.actor-switcher {
+  display: grid;
+  grid-template-columns: 132px 126px;
+  gap: 8px;
+  align-items: end;
+}
+.actor-switcher label {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+.actor-switcher label > span {
+  padding-left: 2px;
+  color: #7c899d;
+  font-size: 9px;
+  font-weight: 750;
+  letter-spacing: 0;
+  line-height: 1;
+}
 .actor-switcher input, .actor-switcher select {
   width: 100%;
-  height: 31px;
-  padding: 5px 8px;
-  color: #55647b;
-  background: #f6f9fc;
-  border: 1px solid #e0e7f0;
-  border-radius: 9px;
-  font-size: 11px;
+  height: 34px;
+  padding: 6px 10px;
+  color: #46566f;
+  background-color: #fff;
+  border: 1px solid #dbe4ef;
+  border-radius: 10px;
+  box-shadow: inset 0 1px 2px #536c8b0a;
+  font-size: 12px;
+  font-weight: 600;
+  transition: border-color .16s ease, box-shadow .16s ease, background-color .16s ease;
+}
+.actor-switcher input {
+  color: #607087;
+  background-color: #f4f7fb;
+}
+.actor-switcher select {
+  padding-right: 28px;
+  cursor: pointer;
+}
+.actor-switcher label:hover input,
+.actor-switcher label:hover select {
+  border-color: #c9d7e8;
+}
+.actor-switcher label:focus-within > span {
+  color: #5669a1;
+}
+.actor-switcher input:focus,
+.actor-switcher select:focus {
+  border-color: #9eb7dc;
+  box-shadow: 0 0 0 3px #dce9fa99;
+  outline: 0;
 }
 .app-page {
   width: min(1440px, calc(100% - 52px));
@@ -127,7 +177,6 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 @media (max-width: 1040px) {
   .app-header { grid-template-columns: auto 1fr auto; }
   .app-nav { display: none; }
-  .app-center { justify-items: start; }
   .app-tools { justify-self: end; }
 }
 @media (max-width: 760px) {
@@ -137,7 +186,6 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
     width: calc(100% - 20px);
     margin-top: 0;
   }
-  .app-center { grid-column: 1 / -1; grid-row: 2; }
   .actor-switcher { display: none; }
   .brand__copy small { display: none; }
   .app-page { width: calc(100% - 24px); }

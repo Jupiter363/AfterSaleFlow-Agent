@@ -1,3 +1,8 @@
+<!--
+  文件作用：前端组件文件，封装可复用 UI、状态展示或业务交互单元。
+  说明：本注释用于帮助读者先了解组件/页面职责，再阅读 template、script 和 style。
+-->
+
 <script setup>
 import {
   computed,
@@ -6,16 +11,26 @@ import {
   ref,
   watch,
 } from "vue";
+import AgentStreamingMessage from "./AgentStreamingMessage.vue";
 import { displayRoomMessageText, roleLabel } from "../../utils/displayText";
+import {
+  durableMessagesOutsideActiveStreams,
+  visibleAgentStreams,
+} from "../../stores/agentStream";
 
 const props = defineProps({
   messages: { type: Array, default: () => [] },
+  streamingRuns: { type: Array, default: () => [] },
   disabled: { type: Boolean, default: false },
   agentLabel: { type: String, default: "" },
   composerVisible: { type: Boolean, default: true },
   disabledReason: {
     type: String,
     default: "切换为用户或商家身份后，可以继续与数字人对话。",
+  },
+  emptyText: {
+    type: String,
+    default: "对话还没有开始。数字人会先听你完整说明。",
   },
   placeholder: { type: String, default: "把你的情况告诉数字人…" },
 });
@@ -28,14 +43,30 @@ const orderedMessages = computed(() =>
     (left, right) => (left.sequence_no ?? 0) - (right.sequence_no ?? 0),
   ),
 );
+const displayedMessages = computed(() =>
+  durableMessagesOutsideActiveStreams(
+    orderedMessages.value,
+    props.streamingRuns,
+  ),
+);
+const pendingStreamingRuns = computed(() =>
+  visibleAgentStreams(props.streamingRuns, displayedMessages.value),
+);
 const PARTY_ROLES = new Set(["USER", "MERCHANT"]);
 const AGENT_ROLES = new Set([
   "CUSTOMER_SERVICE",
   "DISPUTE_INTAKE_OFFICER",
   "INTAKE_OFFICER",
+  "EVIDENCE_CLERK",
+  "JUDGE",
+  "AI_JUDGE",
+  "PRESIDING_JUDGE",
+  "JURY_PANEL",
+  "REVIEW_COPILOT",
   "SYSTEM",
 ]);
 
+// 业务位置：【Java 房间协作】submit：执行 当前阶段业务数据 对应的业务动作，并将结果交给 接待/证据回合记忆、Agent 上下文和事件。上游：房间消息、访问会话和参与方身份。下游：接待/证据回合记忆、Agent 上下文和事件。边界：会话和可见性必须按参与方隔离。
 function submit() {
   const value = text.value.trim();
   if (!value || props.disabled) return;
@@ -47,18 +78,21 @@ function submit() {
   text.value = "";
 }
 
+// 业务位置：【Java 房间协作】messageLane：围绕 房间消息和对话记录 计算本模块需要的派生信息，使其能够从 房间消息、访问会话和参与方身份 正确进入 接待/证据回合记忆、Agent 上下文和事件。上游：房间消息、访问会话和参与方身份。下游：接待/证据回合记忆、Agent 上下文和事件。边界：会话和可见性必须按参与方隔离。
 function messageLane(role) {
   if (PARTY_ROLES.has(role)) return "right";
   if (AGENT_ROLES.has(role)) return "left";
   return "left";
 }
 
+// 业务位置：【Java 房间协作】messageLaneClass：围绕 房间消息和对话记录 计算本模块需要的派生信息，使其能够从 房间消息、访问会话和参与方身份 正确进入 接待/证据回合记忆、Agent 上下文和事件。上游：房间消息、访问会话和参与方身份。下游：接待/证据回合记忆、Agent 上下文和事件。边界：会话和可见性必须按参与方隔离。
 function messageLaneClass(role) {
   return messageLane(role) === "right"
     ? "conversation-stream__message--party"
     : "conversation-stream__message--agent";
 }
 
+// 业务位置：【Java 房间协作】displaySenderLabel：将 当前阶段业务数据 转换为稳定的接口、提示词或页面表达，避免直接暴露内部实现字段。上游：房间消息、访问会话和参与方身份。下游：接待/证据回合记忆、Agent 上下文和事件。边界：会话和可见性必须按参与方隔离。
 function displaySenderLabel(message) {
   if (
     props.agentLabel &&
@@ -70,6 +104,7 @@ function displaySenderLabel(message) {
   return roleLabel(message.sender_role);
 }
 
+// 业务位置：【Java 房间协作】scrollToLatestMessage：围绕 房间消息和对话记录 计算本模块需要的派生信息，使其能够从 房间消息、访问会话和参与方身份 正确进入 接待/证据回合记忆、Agent 上下文和事件。上游：房间消息、访问会话和参与方身份。下游：接待/证据回合记忆、Agent 上下文和事件。边界：会话和可见性必须按参与方隔离。
 async function scrollToLatestMessage() {
   await nextTick();
   const rail = messagesRail.value;
@@ -77,7 +112,7 @@ async function scrollToLatestMessage() {
   rail.scrollTop = rail.scrollHeight;
 }
 
-watch(orderedMessages, () => {
+watch([displayedMessages, pendingStreamingRuns], () => {
   void scrollToLatestMessage();
 }, { deep: true });
 
@@ -94,7 +129,7 @@ onMounted(() => {
       aria-live="polite"
     >
       <article
-        v-for="message in orderedMessages"
+        v-for="(message, visibleIndex) in displayedMessages"
         :key="message.id"
         class="conversation-stream__message"
         :class="[
@@ -106,12 +141,21 @@ onMounted(() => {
       >
         <header>
           <strong>{{ displaySenderLabel(message) }}</strong>
-          <small>#{{ message.sequence_no }}</small>
+          <small>#{{ visibleIndex + 1 }}</small>
         </header>
         <p>{{ displayRoomMessageText(message.message_text) }}</p>
       </article>
-      <div v-if="!orderedMessages.length" class="conversation-stream__empty">
-        对话还没有开始。数字人会先听你完整说明。
+      <AgentStreamingMessage
+        v-for="run in pendingStreamingRuns"
+        :key="run.runId"
+        :run="run"
+        :label="run.agentLabel || agentLabel"
+      />
+      <div
+        v-if="!displayedMessages.length && !pendingStreamingRuns.length"
+        class="conversation-stream__empty"
+      >
+        {{ emptyText }}
       </div>
     </div>
 

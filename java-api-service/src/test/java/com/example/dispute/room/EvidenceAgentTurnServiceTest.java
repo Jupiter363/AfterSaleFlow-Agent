@@ -1,3 +1,9 @@
+/*
+ * 所属模块：房间协作与权限。
+ * 文件职责：验证证据Agent轮次，覆盖 「completeMultimodalAssessmentPersistsCurrentAttachmentAndHumanReviewWinsStatus」、「attachmentAssessmentCoverageMismatchFailsClosed」、「legacySuggestionWithoutCurrentAttachmentDoesNotCreateVerification」、「attachmentWithOnlyLegacySuggestionFailsClosedWithoutVerificationPersistence」、「partyTextPersistsEvidenceMemorySendsPartyScopedContextAndAppendsIsolatedClerkReply」、「ensureOpeningCreatesOneActorScopedClerkMessageAndReusesIt」。
+ * 业务链路：JUnit 构造夹具并驱动真实服务或 Mock 协作者，断言返回值、持久化状态和调用边界；维护接待室、证据室和小法庭的参与人、不可变消息、会话权限、阶段时钟与 Agent 记忆。
+ * 关键边界：每次读取和写入都要绑定案件参与关系、角色、房间和受众范围
+ */
 package com.example.dispute.room;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -44,6 +50,7 @@ import com.example.dispute.room.infrastructure.persistence.entity.CaseIntakeDoss
 import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.RoomMessageEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.RoomTurnMemoryEntity;
+import com.example.dispute.evidence.application.EvidenceDossierFreezer;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseIntakeDossierRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.RoomMessageRepository;
@@ -70,6 +77,11 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.test.util.ReflectionTestUtils;
 
+// 所属模块：【房间协作与权限 / 自动化测试层】类型「EvidenceAgentTurnServiceTest」。
+// 类型职责：集中验证证据Agent轮次的业务场景、权限边界和持久化/外部协作契约；本类型显式提供 「setUp」、「completeMultimodalAssessmentPersistsCurrentAttachmentAndHumanReviewWinsStatus」、「assessment」、「attachmentAssessmentCoverageMismatchFailsClosed」、「invalidAssessmentCoverage」、「legacySuggestionWithoutCurrentAttachmentDoesNotCreateVerification」。
+// 协作关系：由 JUnit 发现并执行其中带 @Test 的场景。
+// 边界意义：每次读取和写入都要绑定案件参与关系、角色、房间和受众范围
+// Java 语法：class 同时封装状态与方法；final 依赖通过构造器注入后不可重新指向。
 @ExtendWith(MockitoExtension.class)
 class EvidenceAgentTurnServiceTest {
 
@@ -82,6 +94,7 @@ class EvidenceAgentTurnServiceTest {
     @Mock private CaseIntakeDossierRepository intakeDossierRepository;
     @Mock private EvidenceItemRepository evidenceItemRepository;
     @Mock private EvidenceVerificationRepository verificationRepository;
+    @Mock private EvidenceDossierFreezer dossierFreezer;
     @Mock private RoomMessageRepository messageRepository;
     @Mock private CaseEventService eventService;
     @Mock private AccessSessionResolver accessSessionResolver;
@@ -92,6 +105,11 @@ class EvidenceAgentTurnServiceTest {
     private ObjectMapper objectMapper;
     private EvidenceAgentTurnService service;
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「EvidenceAgentTurnServiceTest.setUp()」。
+    // 具体功能：「EvidenceAgentTurnServiceTest.setUp()」：在每个测试场景运行前创建「accessSessionResolver.resolve」、「agentSessionResolver.resolve」、「invocation.getArgument」、「lenient」，统一准备后续断言依赖的初始状态，避免各用例重复搭建且保持彼此隔离。
+    // 上游调用：「EvidenceAgentTurnServiceTest.setUp()」由 JUnit 生命周期或本测试类的场景方法调用。
+    // 下游影响：「EvidenceAgentTurnServiceTest.setUp()」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「EvidenceAgentTurnServiceTest.setUp()」守住「房间协作与权限」的可执行规格；后续重构若破坏契约会在进入集成环境前失败。
     @BeforeEach
     void setUp() {
         objectMapper = new ObjectMapper().findAndRegisterModules();
@@ -109,6 +127,7 @@ class EvidenceAgentTurnServiceTest {
                         memoryRepository,
                         evidenceItemRepository,
                         verificationRepository,
+                        dossierFreezer,
                         messageRepository,
                         eventService,
                         accessSessionResolver,
@@ -137,6 +156,11 @@ class EvidenceAgentTurnServiceTest {
                                         invocation.getArgument(4)));
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「EvidenceAgentTurnServiceTest.completeMultimodalAssessmentPersistsCurrentAttachmentAndHumanReviewWinsStatus()」。
+    // 具体功能：「EvidenceAgentTurnServiceTest.completeMultimodalAssessmentPersistsCurrentAttachmentAndHumanReviewWinsStatus()」：复现“核对完整业务行为（场景方法「completeMultimodalAssessmentPersistsCurrentAttachmentAndHumanReviewWinsStatus」）”场景：驱动 「caseRepository.findByIdForUpdate」、「roomRepository.findByCaseIdAndRoomType」、「memoryRepository.findMaxTurnNoByAgentSessionId」、「memoryRepository.findTop50ByAgentSessionIdOrderByTurnNoDesc」，再用 「verify」、「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「EVIDENCE_ATTACHED」、「USER」、「user-local」、「PARTIES」。
+    // 上游调用：「EvidenceAgentTurnServiceTest.completeMultimodalAssessmentPersistsCurrentAttachmentAndHumanReviewWinsStatus()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「EvidenceAgentTurnServiceTest.completeMultimodalAssessmentPersistsCurrentAttachmentAndHumanReviewWinsStatus()」的下游是被测服务、仓储或外部客户端替身；「verify、assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「EvidenceAgentTurnServiceTest.completeMultimodalAssessmentPersistsCurrentAttachmentAndHumanReviewWinsStatus()」守住「房间协作与权限」的可执行规格，尤其防止 「EVIDENCE_ATTACHED」、「USER」、「user-local」、「PARTIES」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void completeMultimodalAssessmentPersistsCurrentAttachmentAndHumanReviewWinsStatus()
             throws Exception {
@@ -218,6 +242,11 @@ class EvidenceAgentTurnServiceTest {
                 .findTopByEvidenceIdOrderByVerificationVersionDesc(historical.getId());
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「EvidenceAgentTurnServiceTest.assessment(String,boolean)」。
+    // 具体功能：「EvidenceAgentTurnServiceTest.assessment(String,boolean)」：作为测试辅助方法为“核对完整业务行为（场景方法「assessment」）”组装或读取「EvidenceAssessment」、「HumanReview」 输入夹具，供本测试类的场景方法复用。
+    // 上游调用：「EvidenceAgentTurnServiceTest.assessment(String,boolean)」由本测试类中的 「EvidenceAgentTurnServiceTest.completeMultimodalAssessmentPersistsCurrentAttachmentAndHumanReviewWinsStatus」、「EvidenceAgentTurnServiceTest.invalidAssessmentCoverage」、「EvidenceAgentTurnServiceTest.partyTextPersistsEvidenceMemorySendsPartyScopedContextAndAppendsIsolatedClerkReply」、「EvidenceAgentTurnServiceTest.partyEvidenceReferenceUsesAttachmentRefsWhenTextIsBlank」 调用。
+    // 下游影响：「EvidenceAgentTurnServiceTest.assessment(String,boolean)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「EvidenceAgentTurnServiceTest.assessment(String,boolean)」守住「房间协作与权限」的可执行规格，尤其防止 「HYBRID」、「IMAGE」、「OCR_TEXT」、「fact_id」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static EvidenceAgentTurnResult.EvidenceAssessment assessment(
             String evidenceId, boolean humanReview) {
         return new EvidenceAgentTurnResult.EvidenceAssessment(
@@ -243,6 +272,11 @@ class EvidenceAgentTurnServiceTest {
                 "The image shows a possible surface mark.");
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「EvidenceAgentTurnServiceTest.attachmentAssessmentCoverageMismatchFailsClosed(String,List)」。
+    // 具体功能：「EvidenceAgentTurnServiceTest.attachmentAssessmentCoverageMismatchFailsClosed(String,List)」：复现“核对完整业务行为（场景方法「attachmentAssessmentCoverageMismatchFailsClosed」）”场景：驱动 「caseRepository.findByIdForUpdate」、「roomRepository.findByCaseIdAndRoomType」、「memoryRepository.findMaxTurnNoByAgentSessionId」、「memoryRepository.findTop50ByAgentSessionIdOrderByTurnNoDesc」，再用 「assertThatThrownBy」、「assertThat」、「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「EVIDENCE_COVERAGE_1」、「USER」、「user-local」、「PARTIES」。
+    // 上游调用：「EvidenceAgentTurnServiceTest.attachmentAssessmentCoverageMismatchFailsClosed(String,List)」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「EvidenceAgentTurnServiceTest.attachmentAssessmentCoverageMismatchFailsClosed(String,List)」的下游是被测服务、仓储或外部客户端替身；「assertThatThrownBy、assertThat、verify」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「EvidenceAgentTurnServiceTest.attachmentAssessmentCoverageMismatchFailsClosed(String,List)」守住「房间协作与权限」的可执行规格，尤其防止 「EVIDENCE_COVERAGE_1」、「USER」、「user-local」、「PARTIES」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @ParameterizedTest(name = "{0}")
     @MethodSource("invalidAssessmentCoverage")
     void attachmentAssessmentCoverageMismatchFailsClosed(
@@ -310,6 +344,11 @@ class EvidenceAgentTurnServiceTest {
         verify(messageRepository, never()).save(any());
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「EvidenceAgentTurnServiceTest.invalidAssessmentCoverage()」。
+    // 具体功能：「EvidenceAgentTurnServiceTest.invalidAssessmentCoverage()」：作为测试辅助方法为“核对完整业务行为（场景方法「invalidAssessmentCoverage」）”组装或读取「assessment」，供本测试类的场景方法复用。
+    // 上游调用：「EvidenceAgentTurnServiceTest.invalidAssessmentCoverage()」由 JUnit 生命周期或本测试类的场景方法调用。
+    // 下游影响：「EvidenceAgentTurnServiceTest.invalidAssessmentCoverage()」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「EvidenceAgentTurnServiceTest.invalidAssessmentCoverage()」守住「房间协作与权限」的可执行规格，尤其防止 「EVIDENCE_COVERAGE_1」、「EVIDENCE_UNKNOWN」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static Stream<Arguments> invalidAssessmentCoverage() {
         return Stream.of(
                 Arguments.of(
@@ -327,6 +366,11 @@ class EvidenceAgentTurnServiceTest {
                                 assessment("EVIDENCE_COVERAGE_1", false))));
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「EvidenceAgentTurnServiceTest.legacySuggestionWithoutCurrentAttachmentDoesNotCreateVerification()」。
+    // 具体功能：「EvidenceAgentTurnServiceTest.legacySuggestionWithoutCurrentAttachmentDoesNotCreateVerification()」：复现“核对完整业务行为（场景方法「legacySuggestionWithoutCurrentAttachmentDoesNotCreateVerification」）”场景：驱动 「caseRepository.findByIdForUpdate」、「roomRepository.findByCaseIdAndRoomType」、「memoryRepository.findMaxTurnNoByAgentSessionId」、「memoryRepository.findTop50ByAgentSessionIdOrderByTurnNoDesc」，再用 「verify」、「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「EVIDENCE_HISTORY_ONLY」、「USER」、「user-local」、「PARTIES」。
+    // 上游调用：「EvidenceAgentTurnServiceTest.legacySuggestionWithoutCurrentAttachmentDoesNotCreateVerification()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「EvidenceAgentTurnServiceTest.legacySuggestionWithoutCurrentAttachmentDoesNotCreateVerification()」的下游是被测服务、仓储或外部客户端替身；「verify、assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「EvidenceAgentTurnServiceTest.legacySuggestionWithoutCurrentAttachmentDoesNotCreateVerification()」守住「房间协作与权限」的可执行规格，尤其防止 「EVIDENCE_HISTORY_ONLY」、「USER」、「user-local」、「PARTIES」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void legacySuggestionWithoutCurrentAttachmentDoesNotCreateVerification() throws Exception {
         FulfillmentCaseEntity dispute = evidenceCase();
@@ -390,6 +434,11 @@ class EvidenceAgentTurnServiceTest {
                 .isEqualTo("Please explain the evidence source.");
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「EvidenceAgentTurnServiceTest.attachmentWithOnlyLegacySuggestionFailsClosedWithoutVerificationPersistence()」。
+    // 具体功能：「EvidenceAgentTurnServiceTest.attachmentWithOnlyLegacySuggestionFailsClosedWithoutVerificationPersistence()」：复现“核对完整业务行为（场景方法「attachmentWithOnlyLegacySuggestionFailsClosedWithoutVerificationPersistence」）”场景：驱动 「caseRepository.findByIdForUpdate」、「roomRepository.findByCaseIdAndRoomType」、「memoryRepository.findMaxTurnNoByAgentSessionId」、「memoryRepository.findTop50ByAgentSessionIdOrderByTurnNoDesc」，再用 「assertThatThrownBy」、「assertThat」、「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「EVIDENCE_LEGACY_ONLY」、「USER」、「user-local」、「PARTIES」。
+    // 上游调用：「EvidenceAgentTurnServiceTest.attachmentWithOnlyLegacySuggestionFailsClosedWithoutVerificationPersistence()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「EvidenceAgentTurnServiceTest.attachmentWithOnlyLegacySuggestionFailsClosedWithoutVerificationPersistence()」的下游是被测服务、仓储或外部客户端替身；「assertThatThrownBy、assertThat、verify」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「EvidenceAgentTurnServiceTest.attachmentWithOnlyLegacySuggestionFailsClosedWithoutVerificationPersistence()」守住「房间协作与权限」的可执行规格，尤其防止 「EVIDENCE_LEGACY_ONLY」、「USER」、「user-local」、「PARTIES」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void attachmentWithOnlyLegacySuggestionFailsClosedWithoutVerificationPersistence()
             throws Exception {
@@ -453,6 +502,11 @@ class EvidenceAgentTurnServiceTest {
         verify(messageRepository, never()).save(any());
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「EvidenceAgentTurnServiceTest.partyTextPersistsEvidenceMemorySendsPartyScopedContextAndAppendsIsolatedClerkReply()」。
+    // 具体功能：「EvidenceAgentTurnServiceTest.partyTextPersistsEvidenceMemorySendsPartyScopedContextAndAppendsIsolatedClerkReply()」：复现“核对完整业务行为（场景方法「partyTextPersistsEvidenceMemorySendsPartyScopedContextAndAppendsIsolatedClerkReply」）”场景：驱动 「caseRepository.findByIdForUpdate」、「roomRepository.findByCaseIdAndRoomType」、「memoryRepository.findMaxTurnNoByAgentSessionId」、「intakeDossierRepository.findByCaseIdAndRoomType」，再用 「verify」、「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「user-local」、「EVIDENCE_CLERK」、「EVIDENCE_CLERK:USER:v1」、「MEMEO_DEFAULT」。
+    // 上游调用：「EvidenceAgentTurnServiceTest.partyTextPersistsEvidenceMemorySendsPartyScopedContextAndAppendsIsolatedClerkReply()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「EvidenceAgentTurnServiceTest.partyTextPersistsEvidenceMemorySendsPartyScopedContextAndAppendsIsolatedClerkReply()」的下游是被测服务、仓储或外部客户端替身；「verify、assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「EvidenceAgentTurnServiceTest.partyTextPersistsEvidenceMemorySendsPartyScopedContextAndAppendsIsolatedClerkReply()」守住「房间协作与权限」的可执行规格，尤其防止 「user-local」、「EVIDENCE_CLERK」、「EVIDENCE_CLERK:USER:v1」、「MEMEO_DEFAULT」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void partyTextPersistsEvidenceMemorySendsPartyScopedContextAndAppendsIsolatedClerkReply()
             throws Exception {
@@ -710,6 +764,11 @@ class EvidenceAgentTurnServiceTest {
                         eq("evidence-clerk"));
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「EvidenceAgentTurnServiceTest.ensureOpeningCreatesOneActorScopedClerkMessageAndReusesIt()」。
+    // 具体功能：「EvidenceAgentTurnServiceTest.ensureOpeningCreatesOneActorScopedClerkMessageAndReusesIt()」：复现“核对完整业务行为（场景方法「ensureOpeningCreatesOneActorScopedClerkMessageAndReusesIt」）”场景：驱动 「caseRepository.findByIdForUpdate」、「roomRepository.findByCaseIdAndRoomType」、「messageRepository.findByCaseIdAndIdempotencyKey」、「messageRepository.findAllByRoomIdOrderBySequenceNoAsc」，再用 「verify」、「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「MESSAGE_EXISTING_OPENING」、「CUSTOMER_SERVICE」、「evidence-clerk」、「[\"user-local\"]」。
+    // 上游调用：「EvidenceAgentTurnServiceTest.ensureOpeningCreatesOneActorScopedClerkMessageAndReusesIt()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「EvidenceAgentTurnServiceTest.ensureOpeningCreatesOneActorScopedClerkMessageAndReusesIt()」的下游是被测服务、仓储或外部客户端替身；「verify、assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「EvidenceAgentTurnServiceTest.ensureOpeningCreatesOneActorScopedClerkMessageAndReusesIt()」守住「房间协作与权限」的可执行规格，尤其防止 「MESSAGE_EXISTING_OPENING」、「CUSTOMER_SERVICE」、「evidence-clerk」、「[\"user-local\"]」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void ensureOpeningCreatesOneActorScopedClerkMessageAndReusesIt()
             throws Exception {
@@ -837,6 +896,11 @@ class EvidenceAgentTurnServiceTest {
         assertThat(reused.id()).isEqualTo("MESSAGE_EXISTING_OPENING");
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「EvidenceAgentTurnServiceTest.ensureOpeningReusesExistingActorScopedConversationInsteadOfAppendingLateOpening()」。
+    // 具体功能：「EvidenceAgentTurnServiceTest.ensureOpeningReusesExistingActorScopedConversationInsteadOfAppendingLateOpening()」：复现“核对完整业务行为（场景方法「ensureOpeningReusesExistingActorScopedConversationInsteadOfAppendingLateOpening」）”场景：驱动 「caseRepository.findByIdForUpdate」、「roomRepository.findByCaseIdAndRoomType」、「messageRepository.findByCaseIdAndIdempotencyKey」、「messageRepository.findAllByRoomIdOrderBySequenceNoAsc」，再用 「assertThat」、「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「MESSAGE_EXISTING_USER_THREAD」、「USER」、「user-local」、「[\"user-local\"]」。
+    // 上游调用：「EvidenceAgentTurnServiceTest.ensureOpeningReusesExistingActorScopedConversationInsteadOfAppendingLateOpening()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「EvidenceAgentTurnServiceTest.ensureOpeningReusesExistingActorScopedConversationInsteadOfAppendingLateOpening()」的下游是被测服务、仓储或外部客户端替身；「assertThat、verify」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「EvidenceAgentTurnServiceTest.ensureOpeningReusesExistingActorScopedConversationInsteadOfAppendingLateOpening()」守住「房间协作与权限」的可执行规格，尤其防止 「MESSAGE_EXISTING_USER_THREAD」、「USER」、「user-local」、「[\"user-local\"]」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void ensureOpeningReusesExistingActorScopedConversationInsteadOfAppendingLateOpening()
             throws Exception {
@@ -904,6 +968,11 @@ class EvidenceAgentTurnServiceTest {
         verify(messageRepository, never()).save(any(RoomMessageEntity.class));
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「EvidenceAgentTurnServiceTest.ensureOpeningSupersedesOnlyGenericWelcomeOpeningWithDossierSpecificOpening()」。
+    // 具体功能：「EvidenceAgentTurnServiceTest.ensureOpeningSupersedesOnlyGenericWelcomeOpeningWithDossierSpecificOpening()」：复现“核对完整业务行为（场景方法「ensureOpeningSupersedesOnlyGenericWelcomeOpeningWithDossierSpecificOpening」）”场景：驱动 「caseRepository.findByIdForUpdate」、「roomRepository.findByCaseIdAndRoomType」、「messageRepository.findByCaseIdAndIdempotencyKey」、「messageRepository.findAllByRoomIdOrderBySequenceNoAsc」，再用 「assertThat」、「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「MESSAGE_STALE_GENERIC_OPENING」、「CUSTOMER_SERVICE」、「evidence-clerk」、「[\"user-local\"]」。
+    // 上游调用：「EvidenceAgentTurnServiceTest.ensureOpeningSupersedesOnlyGenericWelcomeOpeningWithDossierSpecificOpening()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「EvidenceAgentTurnServiceTest.ensureOpeningSupersedesOnlyGenericWelcomeOpeningWithDossierSpecificOpening()」的下游是被测服务、仓储或外部客户端替身；「assertThat、verify」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「EvidenceAgentTurnServiceTest.ensureOpeningSupersedesOnlyGenericWelcomeOpeningWithDossierSpecificOpening()」守住「房间协作与权限」的可执行规格，尤其防止 「MESSAGE_STALE_GENERIC_OPENING」、「CUSTOMER_SERVICE」、「evidence-clerk」、「[\"user-local\"]」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void ensureOpeningSupersedesOnlyGenericWelcomeOpeningWithDossierSpecificOpening()
             throws Exception {
@@ -991,6 +1060,11 @@ class EvidenceAgentTurnServiceTest {
         assertThat(savedMessage.getValue().getIdempotencyKey()).contains("dossier-v3");
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「EvidenceAgentTurnServiceTest.ensureOpeningKeepsIntakeSnapshotNullWhenIntakeDossierIsMissing()」。
+    // 具体功能：「EvidenceAgentTurnServiceTest.ensureOpeningKeepsIntakeSnapshotNullWhenIntakeDossierIsMissing()」：复现“核对完整业务行为（场景方法「ensureOpeningKeepsIntakeSnapshotNullWhenIntakeDossierIsMissing」）”场景：驱动 「caseRepository.findByIdForUpdate」、「roomRepository.findByCaseIdAndRoomType」、「messageRepository.findByCaseIdAndIdempotencyKey」、「messageRepository.findAllByRoomIdOrderBySequenceNoAsc」，再用 「verify」、「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「TRACE_FALLBACK_DOSSIER」、「REQ_FALLBACK_DOSSIER」、「请围绕签收未收到争议补充物流签收记录、门牌照片和投递轨迹。」、「LLM」。
+    // 上游调用：「EvidenceAgentTurnServiceTest.ensureOpeningKeepsIntakeSnapshotNullWhenIntakeDossierIsMissing()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「EvidenceAgentTurnServiceTest.ensureOpeningKeepsIntakeSnapshotNullWhenIntakeDossierIsMissing()」的下游是被测服务、仓储或外部客户端替身；「verify、assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「EvidenceAgentTurnServiceTest.ensureOpeningKeepsIntakeSnapshotNullWhenIntakeDossierIsMissing()」守住「房间协作与权限」的可执行规格，尤其防止 「TRACE_FALLBACK_DOSSIER」、「REQ_FALLBACK_DOSSIER」、「请围绕签收未收到争议补充物流签收记录、门牌照片和投递轨迹。」、「LLM」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void ensureOpeningKeepsIntakeSnapshotNullWhenIntakeDossierIsMissing()
             throws Exception {
@@ -1049,6 +1123,11 @@ class EvidenceAgentTurnServiceTest {
         assertThat(envelope.caseSnapshot().orderId()).isEqualTo("ORDER-EVIDENCE");
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「EvidenceAgentTurnServiceTest.ensureOpeningSupersedesOpeningOnlyThreadWithPendingFocusFallback()」。
+    // 具体功能：「EvidenceAgentTurnServiceTest.ensureOpeningSupersedesOpeningOnlyThreadWithPendingFocusFallback()」：复现“核对完整业务行为（场景方法「ensureOpeningSupersedesOpeningOnlyThreadWithPendingFocusFallback」）”场景：驱动 「caseRepository.findByIdForUpdate」、「roomRepository.findByCaseIdAndRoomType」、「messageRepository.findByCaseIdAndIdempotencyKey」、「messageRepository.findAllByRoomIdOrderBySequenceNoAsc」，再用 「assertThat」、「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「MESSAGE_STALE_GENERIC_OPENING」、「CUSTOMER_SERVICE」、「evidence-clerk」、「[\"user-local\"]」。
+    // 上游调用：「EvidenceAgentTurnServiceTest.ensureOpeningSupersedesOpeningOnlyThreadWithPendingFocusFallback()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「EvidenceAgentTurnServiceTest.ensureOpeningSupersedesOpeningOnlyThreadWithPendingFocusFallback()」的下游是被测服务、仓储或外部客户端替身；「assertThat、verify」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「EvidenceAgentTurnServiceTest.ensureOpeningSupersedesOpeningOnlyThreadWithPendingFocusFallback()」守住「房间协作与权限」的可执行规格，尤其防止 「MESSAGE_STALE_GENERIC_OPENING」、「CUSTOMER_SERVICE」、「evidence-clerk」、「[\"user-local\"]」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void ensureOpeningSupersedesOpeningOnlyThreadWithPendingFocusFallback()
             throws Exception {
@@ -1136,6 +1215,11 @@ class EvidenceAgentTurnServiceTest {
         verify(client).run(any(), eq("TRACE_STALE_STACK"), eq("REQ_STALE_STACK"));
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「EvidenceAgentTurnServiceTest.evidenceAgentRecentTurnsAreScopedToTheSpeakingParty()」。
+    // 具体功能：「EvidenceAgentTurnServiceTest.evidenceAgentRecentTurnsAreScopedToTheSpeakingParty()」：复现“核对完整业务行为（场景方法「evidenceAgentRecentTurnsAreScopedToTheSpeakingParty」）”场景：驱动 「caseRepository.findByIdForUpdate」、「roomRepository.findByCaseIdAndRoomType」、「memoryRepository.findMaxTurnNoByAgentSessionId」、「intakeDossierRepository.findByCaseIdAndRoomType」，再用 「verify」、「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「user-local」、「EVIDENCE_CLERK」、「EVIDENCE_CLERK:USER:v1」、「MEMEO_DEFAULT」。
+    // 上游调用：「EvidenceAgentTurnServiceTest.evidenceAgentRecentTurnsAreScopedToTheSpeakingParty()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「EvidenceAgentTurnServiceTest.evidenceAgentRecentTurnsAreScopedToTheSpeakingParty()」的下游是被测服务、仓储或外部客户端替身；「verify、assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「EvidenceAgentTurnServiceTest.evidenceAgentRecentTurnsAreScopedToTheSpeakingParty()」守住「房间协作与权限」的可执行规格，尤其防止 「user-local」、「EVIDENCE_CLERK」、「EVIDENCE_CLERK:USER:v1」、「MEMEO_DEFAULT」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void evidenceAgentRecentTurnsAreScopedToTheSpeakingParty() throws Exception {
         FulfillmentCaseEntity dispute = evidenceCase();
@@ -1273,6 +1357,11 @@ class EvidenceAgentTurnServiceTest {
                 .contains("用户侧书记官回复：请补充门口监控原视频。");
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「EvidenceAgentTurnServiceTest.partyEvidenceReferenceUsesAttachmentRefsWhenTextIsBlank()」。
+    // 具体功能：「EvidenceAgentTurnServiceTest.partyEvidenceReferenceUsesAttachmentRefsWhenTextIsBlank()」：复现“核对完整业务行为（场景方法「partyEvidenceReferenceUsesAttachmentRefsWhenTextIsBlank」）”场景：驱动 「caseRepository.findByIdForUpdate」、「roomRepository.findByCaseIdAndRoomType」、「memoryRepository.findMaxTurnNoByAgentSessionId」、「intakeDossierRepository.findByCaseIdAndRoomType」，再用 「verify」、「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「EVIDENCE_UPLOAD_1」、「MERCHANT」、「merchant-local」、「PRIVATE」。
+    // 上游调用：「EvidenceAgentTurnServiceTest.partyEvidenceReferenceUsesAttachmentRefsWhenTextIsBlank()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「EvidenceAgentTurnServiceTest.partyEvidenceReferenceUsesAttachmentRefsWhenTextIsBlank()」的下游是被测服务、仓储或外部客户端替身；「verify、assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「EvidenceAgentTurnServiceTest.partyEvidenceReferenceUsesAttachmentRefsWhenTextIsBlank()」守住「房间协作与权限」的可执行规格，尤其防止 「EVIDENCE_UPLOAD_1」、「MERCHANT」、「merchant-local」、「PRIVATE」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void partyEvidenceReferenceUsesAttachmentRefsWhenTextIsBlank() {
         FulfillmentCaseEntity dispute = evidenceCase();
@@ -1353,6 +1442,11 @@ class EvidenceAgentTurnServiceTest {
                 .doesNotContain("USER");
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「EvidenceAgentTurnServiceTest.rejectsEvidenceReferenceThatIsNotVisibleToTheCurrentActor()」。
+    // 具体功能：「EvidenceAgentTurnServiceTest.rejectsEvidenceReferenceThatIsNotVisibleToTheCurrentActor()」：复现“拒绝非法输入或越权操作（场景方法「rejectsEvidenceReferenceThatIsNotVisibleToTheCurrentActor」）”场景：驱动 「caseRepository.findByIdForUpdate」、「roomRepository.findByCaseIdAndRoomType」、「memoryRepository.findMaxTurnNoByAgentSessionId」、「intakeDossierRepository.findByCaseIdAndRoomType」，再用 「assertThatThrownBy」、「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「EVIDENCE_MERCHANT_PRIVATE」、「MERCHANT」、「merchant-local」、「PRIVATE」。
+    // 上游调用：「EvidenceAgentTurnServiceTest.rejectsEvidenceReferenceThatIsNotVisibleToTheCurrentActor()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「EvidenceAgentTurnServiceTest.rejectsEvidenceReferenceThatIsNotVisibleToTheCurrentActor()」的下游是被测服务、仓储或外部客户端替身；「assertThatThrownBy、verify」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「EvidenceAgentTurnServiceTest.rejectsEvidenceReferenceThatIsNotVisibleToTheCurrentActor()」守住「房间协作与权限」的可执行规格，尤其防止 「EVIDENCE_MERCHANT_PRIVATE」、「MERCHANT」、「merchant-local」、「PRIVATE」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void rejectsEvidenceReferenceThatIsNotVisibleToTheCurrentActor() {
         FulfillmentCaseEntity dispute = evidenceCase();
@@ -1398,6 +1492,11 @@ class EvidenceAgentTurnServiceTest {
         verify(client, never()).run(any(), any(), any());
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「EvidenceAgentTurnServiceTest.failedEvidenceAgentCallFailsClosedWithoutPersistingSyntheticVerification()」。
+    // 具体功能：「EvidenceAgentTurnServiceTest.failedEvidenceAgentCallFailsClosedWithoutPersistingSyntheticVerification()」：复现“核对完整业务行为（场景方法「failedEvidenceAgentCallFailsClosedWithoutPersistingSyntheticVerification」）”场景：驱动 「caseRepository.findByIdForUpdate」、「roomRepository.findByCaseIdAndRoomType」、「memoryRepository.findMaxTurnNoByAgentSessionId」、「intakeDossierRepository.findByCaseIdAndRoomType」，再用 「assertThatThrownBy」、「assertThat」、「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「TRACE_DEGRADED」、「REQ_DEGRADED」、「user-local」、「我会上传开箱照片原图。」。
+    // 上游调用：「EvidenceAgentTurnServiceTest.failedEvidenceAgentCallFailsClosedWithoutPersistingSyntheticVerification()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「EvidenceAgentTurnServiceTest.failedEvidenceAgentCallFailsClosedWithoutPersistingSyntheticVerification()」的下游是被测服务、仓储或外部客户端替身；「assertThatThrownBy、assertThat、verify」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「EvidenceAgentTurnServiceTest.failedEvidenceAgentCallFailsClosedWithoutPersistingSyntheticVerification()」守住「房间协作与权限」的可执行规格，尤其防止 「TRACE_DEGRADED」、「REQ_DEGRADED」、「user-local」、「我会上传开箱照片原图。」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void failedEvidenceAgentCallFailsClosedWithoutPersistingSyntheticVerification() {
         FulfillmentCaseEntity dispute = evidenceCase();
@@ -1441,6 +1540,11 @@ class EvidenceAgentTurnServiceTest {
         verify(verificationRepository, never()).save(any());
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「EvidenceAgentTurnServiceTest.agentContractMismatchIsNotSilentlyDegraded()」。
+    // 具体功能：「EvidenceAgentTurnServiceTest.agentContractMismatchIsNotSilentlyDegraded()」：复现“核对完整业务行为（场景方法「agentContractMismatchIsNotSilentlyDegraded」）”场景：驱动 「caseRepository.findByIdForUpdate」、「roomRepository.findByCaseIdAndRoomType」、「memoryRepository.findMaxTurnNoByAgentSessionId」、「intakeDossierRepository.findByCaseIdAndRoomType」，再用 「assertThatThrownBy」、「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「http_status」、「TRACE_CONTRACT」、「REQ_CONTRACT」、「user-local」。
+    // 上游调用：「EvidenceAgentTurnServiceTest.agentContractMismatchIsNotSilentlyDegraded()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「EvidenceAgentTurnServiceTest.agentContractMismatchIsNotSilentlyDegraded()」的下游是被测服务、仓储或外部客户端替身；「assertThatThrownBy、verify」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「EvidenceAgentTurnServiceTest.agentContractMismatchIsNotSilentlyDegraded()」守住「房间协作与权限」的可执行规格，尤其防止 「http_status」、「TRACE_CONTRACT」、「REQ_CONTRACT」、「user-local」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void agentContractMismatchIsNotSilentlyDegraded() {
         FulfillmentCaseEntity dispute = evidenceCase();
@@ -1486,6 +1590,11 @@ class EvidenceAgentTurnServiceTest {
         verify(messageRepository, never()).save(any());
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「EvidenceAgentTurnServiceTest.accessSession(String,AuthenticatedActor)」。
+    // 具体功能：「EvidenceAgentTurnServiceTest.accessSession(String,AuthenticatedActor)」：作为测试辅助方法为“核对完整业务行为（场景方法「accessSession」）”组装或读取「CaseAccessSessionEntity.create」、「actor.role」、「actor.actorId」，供本测试类的场景方法复用。
+    // 上游调用：「EvidenceAgentTurnServiceTest.accessSession(String,AuthenticatedActor)」由本测试类中的 「EvidenceAgentTurnServiceTest.setUp」、「EvidenceAgentTurnServiceTest.partyTextPersistsEvidenceMemorySendsPartyScopedContextAndAppendsIsolatedClerkReply」、「EvidenceAgentTurnServiceTest.evidenceAgentRecentTurnsAreScopedToTheSpeakingParty」 调用。
+    // 下游影响：「EvidenceAgentTurnServiceTest.accessSession(String,AuthenticatedActor)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「EvidenceAgentTurnServiceTest.accessSession(String,AuthenticatedActor)」守住「房间协作与权限」的可执行规格，尤其防止 「ACCESS_」、「default」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static CaseAccessSessionEntity accessSession(String caseId, AuthenticatedActor actor) {
         PermissionLevel level =
                 actor.role() == ActorRole.MERCHANT
@@ -1501,6 +1610,11 @@ class EvidenceAgentTurnServiceTest {
                 actor.actorId());
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「EvidenceAgentTurnServiceTest.agentSession(CaseAccessSessionEntity,RoomType,String,String,String)」。
+    // 具体功能：「EvidenceAgentTurnServiceTest.agentSession(CaseAccessSessionEntity,RoomType,String,String,String)」：作为测试辅助方法为“核对完整业务行为（场景方法「agentSession」）”组装或读取「AgentConversationSessionEntity.create」、「accessSession.getActorId」，供本测试类的场景方法复用。
+    // 上游调用：「EvidenceAgentTurnServiceTest.agentSession(CaseAccessSessionEntity,RoomType,String,String,String)」由本测试类中的 「EvidenceAgentTurnServiceTest.setUp」、「EvidenceAgentTurnServiceTest.partyTextPersistsEvidenceMemorySendsPartyScopedContextAndAppendsIsolatedClerkReply」、「EvidenceAgentTurnServiceTest.evidenceAgentRecentTurnsAreScopedToTheSpeakingParty」 调用。
+    // 下游影响：「EvidenceAgentTurnServiceTest.agentSession(CaseAccessSessionEntity,RoomType,String,String,String)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「EvidenceAgentTurnServiceTest.agentSession(CaseAccessSessionEntity,RoomType,String,String,String)」守住「房间协作与权限」的可执行规格，尤其防止 「AGENT_SESSION_」、「_」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static AgentConversationSessionEntity agentSession(
             CaseAccessSessionEntity accessSession,
             RoomType roomType,
@@ -1517,6 +1631,11 @@ class EvidenceAgentTurnServiceTest {
                 accessSession.getActorId());
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「EvidenceAgentTurnServiceTest.attachSessionScope(RoomTurnMemoryEntity,AgentConversationSessionEntity)」。
+    // 具体功能：「EvidenceAgentTurnServiceTest.attachSessionScope(RoomTurnMemoryEntity,AgentConversationSessionEntity)」：作为测试辅助方法为“核对完整业务行为（场景方法「attachSessionScope」）”组装或读取「ReflectionTestUtils.setField」、「agentSession.getId」、「agentSession.getConversationScope」，供本测试类的场景方法复用。
+    // 上游调用：「EvidenceAgentTurnServiceTest.attachSessionScope(RoomTurnMemoryEntity,AgentConversationSessionEntity)」由本测试类中的 「EvidenceAgentTurnServiceTest.evidenceAgentRecentTurnsAreScopedToTheSpeakingParty」 调用。
+    // 下游影响：「EvidenceAgentTurnServiceTest.attachSessionScope(RoomTurnMemoryEntity,AgentConversationSessionEntity)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「EvidenceAgentTurnServiceTest.attachSessionScope(RoomTurnMemoryEntity,AgentConversationSessionEntity)」守住「房间协作与权限」的可执行规格，尤其防止 「agentSessionId」、「conversationScope」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static void attachSessionScope(
             RoomTurnMemoryEntity memory,
             AgentConversationSessionEntity agentSession) {
@@ -1525,6 +1644,11 @@ class EvidenceAgentTurnServiceTest {
                 memory, "conversationScope", agentSession.getConversationScope());
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「EvidenceAgentTurnServiceTest.evidenceItem(String,String,String,String)」。
+    // 具体功能：「EvidenceAgentTurnServiceTest.evidenceItem(String,String,String,String)」：作为测试辅助方法为“核对完整业务行为（场景方法「evidenceItem」）”组装或读取「EvidenceItemEntity.uploaded」、「OffsetDateTime.parse」、「item.markSubmitted」，供本测试类的场景方法复用。
+    // 上游调用：「EvidenceAgentTurnServiceTest.evidenceItem(String,String,String,String)」由本测试类中的 「EvidenceAgentTurnServiceTest.completeMultimodalAssessmentPersistsCurrentAttachmentAndHumanReviewWinsStatus」、「EvidenceAgentTurnServiceTest.attachmentAssessmentCoverageMismatchFailsClosed」、「EvidenceAgentTurnServiceTest.legacySuggestionWithoutCurrentAttachmentDoesNotCreateVerification」、「EvidenceAgentTurnServiceTest.attachmentWithOnlyLegacySuggestionFailsClosedWithoutVerificationPersistence」 调用。
+    // 下游影响：「EvidenceAgentTurnServiceTest.evidenceItem(String,String,String,String)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「EvidenceAgentTurnServiceTest.evidenceItem(String,String,String,String)」守住「房间协作与权限」的可执行规格，尤其防止 「CASE_EVIDENCE_AGENT」、「DOSSIER_1」、「PHOTO」、「UPLOAD」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static EvidenceItemEntity evidenceItem(
             String id, String submittedByRole, String submittedById, String visibility) {
         EvidenceItemEntity item =
@@ -1551,6 +1675,11 @@ class EvidenceAgentTurnServiceTest {
         return item;
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「EvidenceAgentTurnServiceTest.evidenceCase()」。
+    // 具体功能：「EvidenceAgentTurnServiceTest.evidenceCase()」：作为测试辅助方法为“核对完整业务行为（场景方法「evidenceCase」）”组装或读取「FulfillmentCaseEntity.imported」、「OffsetDateTime.parse」，供本测试类的场景方法复用。
+    // 上游调用：「EvidenceAgentTurnServiceTest.evidenceCase()」由本测试类中的 「EvidenceAgentTurnServiceTest.completeMultimodalAssessmentPersistsCurrentAttachmentAndHumanReviewWinsStatus」、「EvidenceAgentTurnServiceTest.attachmentAssessmentCoverageMismatchFailsClosed」、「EvidenceAgentTurnServiceTest.legacySuggestionWithoutCurrentAttachmentDoesNotCreateVerification」、「EvidenceAgentTurnServiceTest.attachmentWithOnlyLegacySuggestionFailsClosedWithoutVerificationPersistence」 调用。
+    // 下游影响：「EvidenceAgentTurnServiceTest.evidenceCase()」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「EvidenceAgentTurnServiceTest.evidenceCase()」守住「房间协作与权限」的可执行规格，尤其防止 「CASE_EVIDENCE_AGENT」、「ORDER-EVIDENCE」、「AFTER-EVIDENCE」、「LOG-EVIDENCE」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static FulfillmentCaseEntity evidenceCase() {
         return FulfillmentCaseEntity.imported(
                 "CASE_EVIDENCE_AGENT",
@@ -1572,6 +1701,11 @@ class EvidenceAgentTurnServiceTest {
                 "system");
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「EvidenceAgentTurnServiceTest.evidenceRoom(FulfillmentCaseEntity)」。
+    // 具体功能：「EvidenceAgentTurnServiceTest.evidenceRoom(FulfillmentCaseEntity)」：作为测试辅助方法为“核对完整业务行为（场景方法「evidenceRoom」）”组装或读取「CaseRoomEntity.open」、「OffsetDateTime.parse」、「dispute.getId」，供本测试类的场景方法复用。
+    // 上游调用：「EvidenceAgentTurnServiceTest.evidenceRoom(FulfillmentCaseEntity)」由本测试类中的 「EvidenceAgentTurnServiceTest.completeMultimodalAssessmentPersistsCurrentAttachmentAndHumanReviewWinsStatus」、「EvidenceAgentTurnServiceTest.attachmentAssessmentCoverageMismatchFailsClosed」、「EvidenceAgentTurnServiceTest.legacySuggestionWithoutCurrentAttachmentDoesNotCreateVerification」、「EvidenceAgentTurnServiceTest.attachmentWithOnlyLegacySuggestionFailsClosedWithoutVerificationPersistence」 调用。
+    // 下游影响：「EvidenceAgentTurnServiceTest.evidenceRoom(FulfillmentCaseEntity)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「EvidenceAgentTurnServiceTest.evidenceRoom(FulfillmentCaseEntity)」守住「房间协作与权限」的可执行规格，尤其防止 「ROOM_EVIDENCE_AGENT」、「2026-07-06T00:00:00Z」、「system」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static CaseRoomEntity evidenceRoom(FulfillmentCaseEntity dispute) {
         return CaseRoomEntity.open(
                 "ROOM_EVIDENCE_AGENT",

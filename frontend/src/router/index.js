@@ -1,3 +1,6 @@
+// 文件作用：前端路由文件，定义页面访问路径、权限和导航规则。
+// 说明：本注释用于帮助读者先了解本文件职责，再继续阅读具体实现。
+
 import { createRouter, createWebHistory } from "vue-router";
 import { actor } from "../state/actor";
 import { routeAccessDecision } from "./access";
@@ -67,6 +70,7 @@ export const routes = [
   { path: "/:pathMatch(.*)*", redirect: "/disputes" },
 ];
 
+// 业务位置：【案件路由】createAppRouter：把 案件状态、准入结论和风险信息 组装为本块需要的 当前阶段业务数据，供 下一处理房间或工作流路径 使用。上游：案件状态、准入结论和风险信息。下游：下一处理房间或工作流路径。边界：路由只决定流程，不作责任认定。
 export function createAppRouter(history = createWebHistory()) {
   const router = createRouter({ history, routes });
   router.beforeEach((to) => routeAccessDecision(to, actor));

@@ -1,5 +1,5 @@
-Return only valid JSON matching the required output schema.
+# JSON 输出规则
 
-Do not wrap JSON in Markdown fences. Do not include explanatory prose outside
-the JSON object. If a field is unknown, use the schema-approved unknown/null
-value instead of inventing facts.
+只返回与规定输出结构完全匹配的有效 JSON。
+
+不得使用 Markdown 代码围栏包裹 JSON，不得在 JSON 对象外添加解释文字。字段未知时，应使用结构约束允许的未知值或 `null`，不得编造事实。

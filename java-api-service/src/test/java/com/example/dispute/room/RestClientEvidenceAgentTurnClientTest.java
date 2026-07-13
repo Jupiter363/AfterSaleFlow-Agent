@@ -1,3 +1,9 @@
+/*
+ * 所属模块：房间协作与权限。
+ * 文件职责：验证Rest证据Agent轮次，覆盖 「sendsOnlyTheVersionedEnvelopeAndInvocationContext」、「preservesVerificationSuggestionsForTextOnlyConversationResponses」、「mapsHttp422ToAnExplicitAgentContractFailure」。
+ * 业务链路：JUnit 构造夹具并驱动真实服务或 Mock 协作者，断言返回值、持久化状态和调用边界；维护接待室、证据室和小法庭的参与人、不可变消息、会话权限、阶段时钟与 Agent 记忆。
+ * 关键边界：每次读取和写入都要绑定案件参与关系、角色、房间和受众范围
+ */
 package com.example.dispute.room;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -27,8 +33,18 @@ import org.springframework.http.MediaType;
 import org.springframework.test.web.client.MockRestServiceServer;
 import org.springframework.web.client.RestClient;
 
+// 所属模块：【房间协作与权限 / 自动化测试层】类型「RestClientEvidenceAgentTurnClientTest」。
+// 类型职责：集中验证Rest证据Agent轮次的业务场景、权限边界和持久化/外部协作契约；本类型显式提供 「sendsOnlyTheVersionedEnvelopeAndInvocationContext」、「preservesVerificationSuggestionsForTextOnlyConversationResponses」、「mapsHttp422ToAnExplicitAgentContractFailure」、「command」。
+// 协作关系：由 JUnit 发现并执行其中带 @Test 的场景。
+// 边界意义：每次读取和写入都要绑定案件参与关系、角色、房间和受众范围
+// Java 语法：class 同时封装状态与方法；final 依赖通过构造器注入后不可重新指向。
 class RestClientEvidenceAgentTurnClientTest {
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「RestClientEvidenceAgentTurnClientTest.sendsOnlyTheVersionedEnvelopeAndInvocationContext()」。
+    // 具体功能：「RestClientEvidenceAgentTurnClientTest.sendsOnlyTheVersionedEnvelopeAndInvocationContext()」：复现“核对完整业务行为（场景方法「sendsOnlyTheVersionedEnvelopeAndInvocationContext」）”场景：驱动 「client.run」，再用 「assertThat」、「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「X-Trace-Id」、「TRACE_ENVELOPE」、「X-Request-Id」、「REQ_ENVELOPE」。
+    // 上游调用：「RestClientEvidenceAgentTurnClientTest.sendsOnlyTheVersionedEnvelopeAndInvocationContext()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「RestClientEvidenceAgentTurnClientTest.sendsOnlyTheVersionedEnvelopeAndInvocationContext()」的下游是被测服务、仓储或外部客户端替身；「assertThat、verify」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「RestClientEvidenceAgentTurnClientTest.sendsOnlyTheVersionedEnvelopeAndInvocationContext()」守住「房间协作与权限」的可执行规格，尤其防止 「X-Trace-Id」、「TRACE_ENVELOPE」、「X-Request-Id」、「REQ_ENVELOPE」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void sendsOnlyTheVersionedEnvelopeAndInvocationContext() {
         RestClient.Builder builder = RestClient.builder().baseUrl("http://agent.test");
@@ -107,6 +123,11 @@ class RestClientEvidenceAgentTurnClientTest {
         server.verify();
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「RestClientEvidenceAgentTurnClientTest.preservesVerificationSuggestionsForTextOnlyConversationResponses()」。
+    // 具体功能：「RestClientEvidenceAgentTurnClientTest.preservesVerificationSuggestionsForTextOnlyConversationResponses()」：复现“核对完整业务行为（场景方法「preservesVerificationSuggestionsForTextOnlyConversationResponses」）”场景：驱动 「client.run」，再用 「assertThat」、「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「TRACE_TEXT_ONLY」、「REQ_TEXT_ONLY」、「EVIDENCE_HISTORY」。
+    // 上游调用：「RestClientEvidenceAgentTurnClientTest.preservesVerificationSuggestionsForTextOnlyConversationResponses()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「RestClientEvidenceAgentTurnClientTest.preservesVerificationSuggestionsForTextOnlyConversationResponses()」的下游是被测服务、仓储或外部客户端替身；「assertThat、verify」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「RestClientEvidenceAgentTurnClientTest.preservesVerificationSuggestionsForTextOnlyConversationResponses()」守住「房间协作与权限」的可执行规格，尤其防止 「TRACE_TEXT_ONLY」、「REQ_TEXT_ONLY」、「EVIDENCE_HISTORY」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void preservesVerificationSuggestionsForTextOnlyConversationResponses() {
         RestClient.Builder builder = RestClient.builder().baseUrl("http://agent.test");
@@ -150,6 +171,11 @@ class RestClientEvidenceAgentTurnClientTest {
         server.verify();
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「RestClientEvidenceAgentTurnClientTest.mapsHttp422ToAnExplicitAgentContractFailure()」。
+    // 具体功能：「RestClientEvidenceAgentTurnClientTest.mapsHttp422ToAnExplicitAgentContractFailure()」：复现“核对完整业务行为（场景方法「mapsHttp422ToAnExplicitAgentContractFailure」）”场景：驱动 「client.run」，再用 「assertThatThrownBy」、「assertThat」、「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「TRACE_422」、「REQ_422」、「case_snapshot」、「source_type」。
+    // 上游调用：「RestClientEvidenceAgentTurnClientTest.mapsHttp422ToAnExplicitAgentContractFailure()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「RestClientEvidenceAgentTurnClientTest.mapsHttp422ToAnExplicitAgentContractFailure()」的下游是被测服务、仓储或外部客户端替身；「assertThatThrownBy、assertThat、verify」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「RestClientEvidenceAgentTurnClientTest.mapsHttp422ToAnExplicitAgentContractFailure()」守住「房间协作与权限」的可执行规格，尤其防止 「TRACE_422」、「REQ_422」、「case_snapshot」、「source_type」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void mapsHttp422ToAnExplicitAgentContractFailure() {
         RestClient.Builder builder = RestClient.builder().baseUrl("http://agent.test");
@@ -176,6 +202,11 @@ class RestClientEvidenceAgentTurnClientTest {
         server.verify();
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「RestClientEvidenceAgentTurnClientTest.command()」。
+    // 具体功能：「RestClientEvidenceAgentTurnClientTest.command()」：作为测试辅助方法为“核对完整业务行为（场景方法「command」）”组装或读取「EvidenceContextEnvelopeV1」、「CaseSnapshot」、「ActorSnapshot」 输入夹具，供本测试类的场景方法复用。
+    // 上游调用：「RestClientEvidenceAgentTurnClientTest.command()」由本测试类中的 「RestClientEvidenceAgentTurnClientTest.sendsOnlyTheVersionedEnvelopeAndInvocationContext」、「RestClientEvidenceAgentTurnClientTest.preservesVerificationSuggestionsForTextOnlyConversationResponses」、「RestClientEvidenceAgentTurnClientTest.mapsHttp422ToAnExplicitAgentContractFailure」 调用。
+    // 下游影响：「RestClientEvidenceAgentTurnClientTest.command()」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「RestClientEvidenceAgentTurnClientTest.command()」守住「房间协作与权限」的可执行规格，尤其防止 「2026-07-11T00:00:00Z」、「CASE_1」、「EVIDENCE_OPEN」、「DISPUTE」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static EvidenceAgentTurnCommand command() {
         Instant now = Instant.parse("2026-07-11T00:00:00Z");
         EvidenceContextEnvelopeV1 envelope =

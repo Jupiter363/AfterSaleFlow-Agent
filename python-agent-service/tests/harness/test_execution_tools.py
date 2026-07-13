@@ -1,3 +1,5 @@
+# 文件作用：自动化测试文件，验证 test_execution_tools 相关模块的行为、契约或页面布局。
+
 from __future__ import annotations
 
 import json
@@ -12,7 +14,15 @@ from app.harness.execution_tools import (
 )
 
 
+# 所属模块：Agent Harness > test_execution_tools；函数角色：回归测试用例。
+# 具体功能：`test_java_execution_tool_catalog_client_reads_internal_tool_declarations` 读取并按案件、角色或会话范围筛选履约执行动作；关键协作调用：`JavaExecutionToolCatalogClient`、`client.fetch`、`httpx.Response`。
+# 上下游：上游为 Java 可信快照、调用身份、上下文合同、角色模板；下游为 协作调用 `JavaExecutionToolCatalogClient`、`client.fetch`、`httpx.Response`、`httpx.MockTransport`。
+# 系统意义：固定“Agent Harness > test_execution_tools”的可观察契约，防止后续重构改变业务结果。
 def test_java_execution_tool_catalog_client_reads_internal_tool_declarations() -> None:
+    # 所属模块：Agent Harness > test_execution_tools；函数角色：类/闭包内部方法。
+    # 具体功能：`handler` 驱动本阶段状态对应的业务步骤并返回阶段结果；关键协作调用：`httpx.Response`。
+    # 上下游：上游为 Java 可信快照、调用身份、上下文合同、角色模板；下游为 协作调用 `httpx.Response`。
+    # 系统意义：该函数在系统中的业务边界是：隔离参与方会话；不可信案件文本不能升级为系统指令。
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "GET"
         assert request.url.path == "/internal/tools/execution"
@@ -50,6 +60,10 @@ def test_java_execution_tool_catalog_client_reads_internal_tool_declarations() -
     assert declarations[0].requires_approved_plan is True
 
 
+# 所属模块：Agent Harness > test_execution_tools；函数角色：回归测试用例。
+# 具体功能：`test_execution_tool_intention_section_is_prompt_safe_and_non_executable` 验证模型提示词在固定案例中的输出、边界和失败行为；关键协作调用：`JavaExecutionToolCatalogClient`、`build_execution_tool_intention_section`、`json.loads`。
+# 上下游：上游为 Java 可信快照、调用身份、上下文合同、角色模板；下游为 协作调用 `JavaExecutionToolCatalogClient`、`build_execution_tool_intention_section`、`json.loads`、`client.fetch`。
+# 系统意义：固定“Agent Harness > test_execution_tools”的可观察契约，防止后续重构改变业务结果。
 def test_execution_tool_intention_section_is_prompt_safe_and_non_executable() -> None:
     client = JavaExecutionToolCatalogClient(
         base_url="http://unused",
@@ -88,6 +102,10 @@ def test_execution_tool_intention_section_is_prompt_safe_and_non_executable() ->
     assert "operation" not in content["tools"][0]
 
 
+# 所属模块：Agent Harness > test_execution_tools；函数角色：回归测试用例。
+# 具体功能：`test_execution_tool_event_observation_section_is_read_only` 读取并按案件、角色或会话范围筛选履约执行动作；关键协作调用：`build_execution_tool_event_observation_section`、`json.loads`、`ExecutionToolEventObservation`。
+# 上下游：上游为 Java 可信快照、调用身份、上下文合同、角色模板；下游为 协作调用 `build_execution_tool_event_observation_section`、`json.loads`、`ExecutionToolEventObservation`。
+# 系统意义：固定“Agent Harness > test_execution_tools”的可观察契约，防止后续重构改变业务结果。
 def test_execution_tool_event_observation_section_is_read_only() -> None:
     section = build_execution_tool_event_observation_section(
         [

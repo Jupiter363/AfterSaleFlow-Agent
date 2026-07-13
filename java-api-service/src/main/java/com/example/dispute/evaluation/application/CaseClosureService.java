@@ -1,3 +1,9 @@
+/*
+ * 所属模块：结案与离线评估。
+ * 文件职责：编排执行完成后的案件关闭与离线评估规则、权限校验与事实读写。
+ * 业务链路：核心入口/契约为 「close」、「evaluation」、「metrics」；关闭已执行案件并调用评估 Agent 生成质量指标和离线报告。
+ * 关键边界：评估只能读取已关闭案件，不能反向修改在线裁决、规则或 Prompt
+ */
 package com.example.dispute.evaluation.application;
 
 import com.example.dispute.common.api.ErrorCode;
@@ -36,6 +42,11 @@ import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 
+// 所属模块：【结案与离线评估 / 应用编排层】类型「CaseClosureService」。
+// 类型职责：编排执行完成后的案件关闭与离线评估规则、权限校验与事实读写；本类型显式提供 「CaseClosureService」、「close」、「evaluation」、「metrics」、「prepareClosure」、「latestApproval」。
+// 协作关系：主要由 「CaseFulfillmentDisputeActivitiesImpl.closeCaseAndEvaluate」、「ClosureController.close」、「ClosureController.evaluation」、「ClosureController.metrics」 使用。
+// 边界意义：评估只能读取已关闭案件，不能反向修改在线裁决、规则或 Prompt
+// Java 语法：class 同时封装状态与方法；final 依赖通过构造器注入后不可重新指向。
 @Service
 public class CaseClosureService {
 
@@ -56,6 +67,12 @@ public class CaseClosureService {
     private final ObjectMapper objectMapper;
     private final TransactionTemplate transactions;
 
+    // 所属模块：【结案与离线评估 / 应用编排层】「CaseClosureService.CaseClosureService(FulfillmentCaseRepository,ApprovalRecordRepository,ActionRecordRepository,EvaluationTraceRepository,AdjudicationDraftRepository,EvidenceItemRepository,EvaluationAgentClient,AuditRecorder,CaseLifecycleNotificationService,ObjectMapper,TransactionTemplate)」。
+    // 具体功能：「CaseClosureService.CaseClosureService(FulfillmentCaseRepository,ApprovalRecordRepository,ActionRecordRepository,EvaluationTraceRepository,AdjudicationDraftRepository,EvidenceItemRepository,EvaluationAgentClient,AuditRecorder,CaseLifecycleNotificationService,ObjectMapper,TransactionTemplate)」：通过构造器接收 「caseRepository」(FulfillmentCaseRepository)、「approvalRepository」(ApprovalRecordRepository)、「actionRepository」(ActionRecordRepository)、「evaluationRepository」(EvaluationTraceRepository)、「draftRepository」(AdjudicationDraftRepository)、「evidenceRepository」(EvidenceItemRepository)、「evaluationAgent」(EvaluationAgentClient)、「auditRecorder」(AuditRecorder)、「lifecycleNotifications」(CaseLifecycleNotificationService)、「objectMapper」(ObjectMapper)、「transactions」(TransactionTemplate) 并保存为「CaseClosureService」的协作依赖；这里只完成依赖装配，不提前访问数据库或外部服务。
+    // 上游调用：「CaseClosureService.CaseClosureService(FulfillmentCaseRepository,ApprovalRecordRepository,ActionRecordRepository,EvaluationTraceRepository,AdjudicationDraftRepository,EvidenceItemRepository,EvaluationAgentClient,AuditRecorder,CaseLifecycleNotificationService,ObjectMapper,TransactionTemplate)」由应用层、序列化框架或测试夹具创建。
+    // 下游影响：「CaseClosureService.CaseClosureService(FulfillmentCaseRepository,ApprovalRecordRepository,ActionRecordRepository,EvaluationTraceRepository,AdjudicationDraftRepository,EvidenceItemRepository,EvaluationAgentClient,AuditRecorder,CaseLifecycleNotificationService,ObjectMapper,TransactionTemplate)」只产生当前对象的返回值或字段变化，不访问额外基础设施。
+    // 系统意义：「CaseClosureService.CaseClosureService(FulfillmentCaseRepository,ApprovalRecordRepository,ActionRecordRepository,EvaluationTraceRepository,AdjudicationDraftRepository,EvidenceItemRepository,EvaluationAgentClient,AuditRecorder,CaseLifecycleNotificationService,ObjectMapper,TransactionTemplate)」负责主链路中的“案件结案服务”；评估只能读取已关闭案件，不能反向修改在线裁决、规则或 Prompt
+    // Java 语法：构造器名称与类名相同且没有返回类型；参数通常由 Spring 按类型注入。
     public CaseClosureService(
             FulfillmentCaseRepository caseRepository,
             ApprovalRecordRepository approvalRepository,
@@ -81,6 +98,12 @@ public class CaseClosureService {
         this.transactions = transactions;
     }
 
+    // 所属模块：【结案与离线评估 / 应用编排层】「CaseClosureService.close(String,String,AuthenticatedActor,String,String)」。
+    // 具体功能：「CaseClosureService.close(String,String,AuthenticatedActor,String,String)」：关闭结案：先在显式事务模板中原子写入业务事实，再在事务模板中读取并更新同一版本的案件状态，再由 Spring 事务代理统一提交数据库变化；实际协作者为 「transactions.execute」、「pending.invokeEvaluation」、「evaluationAgent.analyze」、「pending.snapshot」；处理的关键状态/协议值包括 「idempotencyKey」，最终返回「ClosureView」。
+    // 上游调用：「CaseClosureService.close(String,String,AuthenticatedActor,String,String)」的上游调用点包括 「ClosureController.close」、「CaseFulfillmentDisputeActivitiesImpl.closeCaseAndEvaluate」、「CaseClosureServiceIntegrationTest.closesExecutedCaseAndCreatesExactlyOneCompletedEvaluation」、「CaseClosureServiceIntegrationTest.rejectsClosureUntilEveryApprovedActionSucceeded」。
+    // 下游影响：「CaseClosureService.close(String,String,AuthenticatedActor,String,String)」向下依次触达 「transactions.execute」、「pending.invokeEvaluation」、「evaluationAgent.analyze」、「pending.snapshot」；这些数据库变化在方法正常返回后由 Spring 统一提交，异常会触发回滚。
+    // 系统意义：「CaseClosureService.close(String,String,AuthenticatedActor,String,String)」定义原子提交边界；评估只能读取已关闭案件，不能反向修改在线裁决、规则或 Prompt
+    // Java 语法：@Transactional 由 Spring 代理拦截；只有通过代理调用时才会开启或加入事务。
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
     public ClosureView close(
             String caseId,
@@ -118,6 +141,12 @@ public class CaseClosureService {
                 ignored -> closureView(caseId));
     }
 
+    // 所属模块：【结案与离线评估 / 应用编排层】「CaseClosureService.evaluation(String,AuthenticatedActor)」。
+    // 具体功能：「CaseClosureService.evaluation(String,AuthenticatedActor)」：构建评估：先由 Spring 事务代理统一提交数据库变化，再按主键读取现有事实并显式处理不存在分支，再把 Optional 空值转换为明确业务异常；实际协作者为 「caseRepository.findById」、「evaluationRepository.findFirstByCaseIdOrderByEvaluationVersionDesc」、「disputeCase.getCaseStatus」、「assertCanReadEvaluation」；处理的关键状态/协议值包括 「case_status」、「case_id」，最终返回「EvaluationReportView」。
+    // 上游调用：「CaseClosureService.evaluation(String,AuthenticatedActor)」的上游调用点包括 「ClosureController.evaluation」、「CaseClosureServiceIntegrationTest.evaluationCanOnlyBeReadByAdministratorOrSystem」、「ClosureControllerTest.administratorCanCloseAndQueryEvaluationAndMetrics」。
+    // 下游影响：「CaseClosureService.evaluation(String,AuthenticatedActor)」向下依次触达 「caseRepository.findById」、「evaluationRepository.findFirstByCaseIdOrderByEvaluationVersionDesc」、「disputeCase.getCaseStatus」、「assertCanReadEvaluation」；这些数据库变化在方法正常返回后由 Spring 统一提交，异常会触发回滚。
+    // 系统意义：「CaseClosureService.evaluation(String,AuthenticatedActor)」定义原子提交边界；评估只能读取已关闭案件，不能反向修改在线裁决、规则或 Prompt
+    // Java 语法：@Transactional 由 Spring 代理拦截；只有通过代理调用时才会开启或加入事务。
     @Transactional(readOnly = true)
     public EvaluationReportView evaluation(
             String caseId, AuthenticatedActor actor) {
@@ -142,6 +171,12 @@ public class CaseClosureService {
                                         Map.of("case_id", caseId)));
     }
 
+    // 所属模块：【结案与离线评估 / 应用编排层】「CaseClosureService.metrics(AuthenticatedActor)」。
+    // 具体功能：「CaseClosureService.metrics(AuthenticatedActor)」：构建评估指标：先由 Spring 事务代理统一提交数据库变化；实际协作者为 「evaluationRepository.findAllByOrderByCreatedAtDesc」、「trace.getEvaluationStatus」、「assertCanReadEvaluation」、「average」；处理的关键状态/协议值包括 「COMPLETED」、「draft_approval_rate」、「reviewer_modification_rate」，最终返回「EvaluationMetricsView」。
+    // 上游调用：「CaseClosureService.metrics(AuthenticatedActor)」的上游调用点包括 「ClosureController.metrics」、「CaseClosureServiceIntegrationTest.closesExecutedCaseAndCreatesExactlyOneCompletedEvaluation」、「ClosureControllerTest.administratorCanCloseAndQueryEvaluationAndMetrics」。
+    // 下游影响：「CaseClosureService.metrics(AuthenticatedActor)」向下依次触达 「evaluationRepository.findAllByOrderByCreatedAtDesc」、「trace.getEvaluationStatus」、「assertCanReadEvaluation」、「average」；这些数据库变化在方法正常返回后由 Spring 统一提交，异常会触发回滚。
+    // 系统意义：「CaseClosureService.metrics(AuthenticatedActor)」定义原子提交边界；评估只能读取已关闭案件，不能反向修改在线裁决、规则或 Prompt
+    // Java 语法：@Transactional 由 Spring 代理拦截；只有通过代理调用时才会开启或加入事务。
     @Transactional(readOnly = true)
     public EvaluationMetricsView metrics(AuthenticatedActor actor) {
         assertCanReadEvaluation(actor);
@@ -163,6 +198,12 @@ public class CaseClosureService {
                 average(completed, "reviewer_modification_rate"));
     }
 
+    // 所属模块：【结案与离线评估 / 应用编排层】「CaseClosureService.prepareClosure(String,String,AuthenticatedActor)」。
+    // 具体功能：「CaseClosureService.prepareClosure(String,String,AuthenticatedActor)」：准备结案：先把新状态写入 PostgreSQL 事实表，再把 Optional 空值转换为明确业务异常；实际协作者为 「caseRepository.findByIdForUpdate」、「evaluationRepository.findFirstByCaseIdOrderByEvaluationVersionDesc」、「actionRepository.findAllByCaseIdOrderByCreatedAtAsc」、「evaluationRepository.save」；处理的关键状态/协议值包括 「case_id」、「COMPLETED」、「PENDING」、「case_status」，最终返回「PendingClosure」。
+    // 上游调用：「CaseClosureService.prepareClosure(String,String,AuthenticatedActor)」的上游调用点包括 「CaseClosureService.close」。
+    // 下游影响：「CaseClosureService.prepareClosure(String,String,AuthenticatedActor)」向下依次触达 「caseRepository.findByIdForUpdate」、「evaluationRepository.findFirstByCaseIdOrderByEvaluationVersionDesc」、「actionRepository.findAllByCaseIdOrderByCreatedAtAsc」、「evaluationRepository.save」；计算结果以「PendingClosure」交给调用方。
+    // 系统意义：「CaseClosureService.prepareClosure(String,String,AuthenticatedActor)」负责主链路中的“结案”；评估只能读取已关闭案件，不能反向修改在线裁决、规则或 Prompt
+    // Java 语法：Optional 表示结果可能不存在；orElseThrow 会把空值分支转换为明确异常。
     private PendingClosure prepareClosure(
             String caseId,
             String idempotencyKey,
@@ -248,6 +289,12 @@ public class CaseClosureService {
         return new PendingClosure(caseId, trace.getId(), snapshot, true);
     }
 
+    // 所属模块：【结案与离线评估 / 应用编排层】「CaseClosureService.latestApproval(String)」。
+    // 具体功能：「CaseClosureService.latestApproval(String)」：构建最新版本审批：先把 Optional 空值转换为明确业务异常；实际协作者为 「findFirstByCaseIdAndDecisionTypeInOrderByCreatedAtDesc」、「closureDenied」；处理的关键状态/协议值包括 「case_id」，最终返回「ApprovalRecordEntity」。
+    // 上游调用：「CaseClosureService.latestApproval(String)」的上游调用点包括 「CaseClosureService.prepareClosure」。
+    // 下游影响：「CaseClosureService.latestApproval(String)」向下依次触达 「findFirstByCaseIdAndDecisionTypeInOrderByCreatedAtDesc」、「closureDenied」；计算结果以「ApprovalRecordEntity」交给调用方。
+    // 系统意义：「CaseClosureService.latestApproval(String)」负责主链路中的“最新版本审批”；评估只能读取已关闭案件，不能反向修改在线裁决、规则或 Prompt
+    // Java 语法：Optional 表示结果可能不存在；orElseThrow 会把空值分支转换为明确异常。
     private ApprovalRecordEntity latestApproval(String caseId) {
         return approvalRepository
                 .findFirstByCaseIdAndDecisionTypeInOrderByCreatedAtDesc(
@@ -259,6 +306,12 @@ public class CaseClosureService {
                                         Map.of("case_id", caseId)));
     }
 
+    // 所属模块：【结案与离线评估 / 应用编排层】「CaseClosureService.validateCompletedExecution(ApprovalRecordEntity,List)」。
+    // 具体功能：「CaseClosureService.validateCompletedExecution(ApprovalRecordEntity,List)」：校验完成执行；实际协作者为 「approval.getId」、「action.getExecutionStatus」、「action.getApprovalRecordId」、「approval.getPlanId」；处理的关键状态/协议值包括 「approval_record_id」、「expected_actions」、「actual_actions」，最终返回「void」。
+    // 上游调用：「CaseClosureService.validateCompletedExecution(ApprovalRecordEntity,List)」的上游调用点包括 「CaseClosureService.prepareClosure」。
+    // 下游影响：「CaseClosureService.validateCompletedExecution(ApprovalRecordEntity,List)」向下依次触达 「approval.getId」、「action.getExecutionStatus」、「action.getApprovalRecordId」、「approval.getPlanId」。
+    // 系统意义：「CaseClosureService.validateCompletedExecution(ApprovalRecordEntity,List)」在“完成执行”进入下游前阻断非法状态；评估只能读取已关闭案件，不能反向修改在线裁决、规则或 Prompt
+    // Java 语法：stream/lambda 把集合处理写成管道；lambda 中引用的外部局部变量必须保持 effectively final。
     private void validateCompletedExecution(
             ApprovalRecordEntity approval,
             List<ActionRecordEntity> actions) {
@@ -307,6 +360,12 @@ public class CaseClosureService {
         }
     }
 
+    // 所属模块：【结案与离线评估 / 应用编排层】「CaseClosureService.expectedActionTypes(JsonNode)」。
+    // 具体功能：「CaseClosureService.expectedActionTypes(JsonNode)」：构建expected动作Types；实际协作者为 「actionNodes.isArray」、「notificationNodes.isArray」、「expected.merge」、「node.asText」；处理的关键状态/协议值包括 「actions」、「notifications」、「action_type」，最终返回「Map<String, Integer>」。
+    // 上游调用：「CaseClosureService.expectedActionTypes(JsonNode)」的上游调用点包括 「CaseClosureService.validateCompletedExecution」。
+    // 下游影响：「CaseClosureService.expectedActionTypes(JsonNode)」向下依次触达 「actionNodes.isArray」、「notificationNodes.isArray」、「expected.merge」、「node.asText」；计算结果以「Map<String, Integer>」交给调用方。
+    // 系统意义：「CaseClosureService.expectedActionTypes(JsonNode)」负责主链路中的“expected动作Types”；评估只能读取已关闭案件，不能反向修改在线裁决、规则或 Prompt
+    // Java 语法：stream/lambda 把集合处理写成管道；lambda 中引用的外部局部变量必须保持 effectively final。
     private Map<String, Integer> expectedActionTypes(JsonNode approvedPlan) {
         Map<String, Integer> expected = new LinkedHashMap<>();
         JsonNode actionNodes = approvedPlan.path("actions");
@@ -326,6 +385,12 @@ public class CaseClosureService {
         return expected;
     }
 
+    // 所属模块：【结案与离线评估 / 应用编排层】「CaseClosureService.buildSnapshot(FulfillmentCaseEntity,ApprovalRecordEntity,List)」。
+    // 具体功能：「CaseClosureService.buildSnapshot(FulfillmentCaseEntity,ApprovalRecordEntity,List)」：组装快照；实际协作者为 「draftRepository.findFirstByCaseIdOrderByDraftVersionDesc」、「findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc」、「draftPolicy.isArray」、「objectMapper.createObjectNode」；处理的关键状态/协议值包括 「case_id」、「case_status」、「route_type」、「UNROUTED」，最终返回「JsonNode」。
+    // 上游调用：「CaseClosureService.buildSnapshot(FulfillmentCaseEntity,ApprovalRecordEntity,List)」的上游调用点包括 「CaseClosureService.prepareClosure」。
+    // 下游影响：「CaseClosureService.buildSnapshot(FulfillmentCaseEntity,ApprovalRecordEntity,List)」向下依次触达 「draftRepository.findFirstByCaseIdOrderByDraftVersionDesc」、「findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc」、「draftPolicy.isArray」、「objectMapper.createObjectNode」；计算结果以「JsonNode」交给调用方。
+    // 系统意义：「CaseClosureService.buildSnapshot(FulfillmentCaseEntity,ApprovalRecordEntity,List)」负责主链路中的“快照”；评估只能读取已关闭案件，不能反向修改在线裁决、规则或 Prompt
+    // Java 语法：stream/lambda 把集合处理写成管道；lambda 中引用的外部局部变量必须保持 effectively final。
     private JsonNode buildSnapshot(
             FulfillmentCaseEntity disputeCase,
             ApprovalRecordEntity approval,
@@ -403,6 +468,11 @@ public class CaseClosureService {
         return snapshot;
     }
 
+    // 所属模块：【结案与离线评估 / 应用编排层】「CaseClosureService.draftSnapshot(AdjudicationDraftEntity)」。
+    // 具体功能：「CaseClosureService.draftSnapshot(AdjudicationDraftEntity)」：构建草案快照；实际协作者为 「objectMapper.createObjectNode」、「draft.getId」、「draft.getDraftVersion」、「draft.getDraftStatus」；处理的关键状态/协议值包括 「draft_id」、「draft_version」、「draft_status」、「recommended_decision」，最终返回「ObjectNode」。
+    // 上游调用：「CaseClosureService.draftSnapshot(AdjudicationDraftEntity)」只由「CaseClosureService」内部流程使用，负责封装“草案快照”这一步校验、映射或状态转换。
+    // 下游影响：「CaseClosureService.draftSnapshot(AdjudicationDraftEntity)」向下依次触达 「objectMapper.createObjectNode」、「draft.getId」、「draft.getDraftVersion」、「draft.getDraftStatus」；计算结果以「ObjectNode」交给调用方。
+    // 系统意义：「CaseClosureService.draftSnapshot(AdjudicationDraftEntity)」负责主链路中的“草案快照”；评估只能读取已关闭案件，不能反向修改在线裁决、规则或 Prompt
     private ObjectNode draftSnapshot(AdjudicationDraftEntity draft) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("draft_id", draft.getId());
@@ -421,6 +491,12 @@ public class CaseClosureService {
         return node;
     }
 
+    // 所属模块：【结案与离线评估 / 应用编排层】「CaseClosureService.completeEvaluation(PendingClosure,EvaluationAgentResult,AuthenticatedActor)」。
+    // 具体功能：「CaseClosureService.completeEvaluation(PendingClosure,EvaluationAgentResult,AuthenticatedActor)」：完成评估：先把新状态写入 PostgreSQL 事实表，再把 Optional 空值转换为明确业务异常；实际协作者为 「evaluationRepository.findByIdForUpdate」、「evaluationRepository.save」、「result.report」、「pending.caseId」；不满足前置条件时抛出 「IllegalStateException」；处理的关键状态/协议值包括 「case_id」、「COMPLETED」、「evaluation_status」、「metric_scores」，最终返回「void」。
+    // 上游调用：「CaseClosureService.completeEvaluation(PendingClosure,EvaluationAgentResult,AuthenticatedActor)」的上游调用点包括 「CaseClosureService.close」。
+    // 下游影响：「CaseClosureService.completeEvaluation(PendingClosure,EvaluationAgentResult,AuthenticatedActor)」向下依次触达 「evaluationRepository.findByIdForUpdate」、「evaluationRepository.save」、「result.report」、「pending.caseId」。
+    // 系统意义：「CaseClosureService.completeEvaluation(PendingClosure,EvaluationAgentResult,AuthenticatedActor)」负责主链路中的“评估”；评估只能读取已关闭案件，不能反向修改在线裁决、规则或 Prompt
+    // Java 语法：Optional 表示结果可能不存在；orElseThrow 会把空值分支转换为明确异常。
     private void completeEvaluation(
             PendingClosure pending,
             EvaluationAgentResult result,
@@ -468,6 +544,12 @@ public class CaseClosureService {
                         "evaluator_model", result.evaluatorModel()));
     }
 
+    // 所属模块：【结案与离线评估 / 应用编排层】「CaseClosureService.failEvaluation(PendingClosure,RuntimeException,AuthenticatedActor)」。
+    // 具体功能：「CaseClosureService.failEvaluation(PendingClosure,RuntimeException,AuthenticatedActor)」：标记失败评估：先把新状态写入 PostgreSQL 事实表，再把 Optional 空值转换为明确业务异常；实际协作者为 「evaluationRepository.findByIdForUpdate」、「evaluationRepository.save」、「pending.evaluationTraceId」、「trace.fail」；处理的关键状态/协议值包括 「status」、「FAILED」、「error_type」、「EVALUATION_FAILED」，最终返回「void」。
+    // 上游调用：「CaseClosureService.failEvaluation(PendingClosure,RuntimeException,AuthenticatedActor)」的上游调用点包括 「CaseClosureService.close」。
+    // 下游影响：「CaseClosureService.failEvaluation(PendingClosure,RuntimeException,AuthenticatedActor)」向下依次触达 「evaluationRepository.findByIdForUpdate」、「evaluationRepository.save」、「pending.evaluationTraceId」、「trace.fail」。
+    // 系统意义：「CaseClosureService.failEvaluation(PendingClosure,RuntimeException,AuthenticatedActor)」负责主链路中的“评估”；评估只能读取已关闭案件，不能反向修改在线裁决、规则或 Prompt
+    // Java 语法：Optional 表示结果可能不存在；orElseThrow 会把空值分支转换为明确异常。
     private void failEvaluation(
             PendingClosure pending,
             RuntimeException exception,
@@ -498,6 +580,12 @@ public class CaseClosureService {
                 Map.of("evaluation_status", "FAILED"));
     }
 
+    // 所属模块：【结案与离线评估 / 应用编排层】「CaseClosureService.closureView(String)」。
+    // 具体功能：「CaseClosureService.closureView(String)」：构建结案视图：先按主键读取现有事实并显式处理不存在分支，再把 Optional 空值转换为明确业务异常；实际协作者为 「caseRepository.findById」、「evaluationRepository.findFirstByCaseIdOrderByEvaluationVersionDesc」、「disputeCase.getCaseStatus」、「disputeCase.getClosedAt」，最终返回「ClosureView」。
+    // 上游调用：「CaseClosureService.closureView(String)」的上游调用点包括 「CaseClosureService.close」。
+    // 下游影响：「CaseClosureService.closureView(String)」向下依次触达 「caseRepository.findById」、「evaluationRepository.findFirstByCaseIdOrderByEvaluationVersionDesc」、「disputeCase.getCaseStatus」、「disputeCase.getClosedAt」；计算结果以「ClosureView」交给调用方。
+    // 系统意义：「CaseClosureService.closureView(String)」负责主链路中的“结案视图”；评估只能读取已关闭案件，不能反向修改在线裁决、规则或 Prompt
+    // Java 语法：Optional 表示结果可能不存在；orElseThrow 会把空值分支转换为明确异常。
     private ClosureView closureView(String caseId) {
         FulfillmentCaseEntity disputeCase =
                 caseRepository
@@ -519,6 +607,11 @@ public class CaseClosureService {
                 trace.getEvaluationStatus());
     }
 
+    // 所属模块：【结案与离线评估 / 应用编排层】「CaseClosureService.reportView(EvaluationTraceEntity)」。
+    // 具体功能：「CaseClosureService.reportView(EvaluationTraceEntity)」：构建report视图；实际协作者为 「trace.getId」、「trace.getCaseId」、「trace.getEvaluationVersion」、「trace.getEvaluationStatus」，最终返回「EvaluationReportView」。
+    // 上游调用：「CaseClosureService.reportView(EvaluationTraceEntity)」只由「CaseClosureService」内部流程使用，负责封装“report视图”这一步校验、映射或状态转换。
+    // 下游影响：「CaseClosureService.reportView(EvaluationTraceEntity)」向下依次触达 「trace.getId」、「trace.getCaseId」、「trace.getEvaluationVersion」、「trace.getEvaluationStatus」；计算结果以「EvaluationReportView」交给调用方。
+    // 系统意义：「CaseClosureService.reportView(EvaluationTraceEntity)」负责主链路中的“report视图”；评估只能读取已关闭案件，不能反向修改在线裁决、规则或 Prompt
     private EvaluationReportView reportView(EvaluationTraceEntity trace) {
         return new EvaluationReportView(
                 trace.getId(),
@@ -536,6 +629,12 @@ public class CaseClosureService {
                 trace.getCreatedAt());
     }
 
+    // 所属模块：【结案与离线评估 / 应用编排层】「CaseClosureService.average(List,String)」。
+    // 具体功能：「CaseClosureService.average(List,String)」：从每条已完成评估的 metric_scores JSON 读取指定指标，忽略缺失值并计算平均分；没有有效样本时返回 0，最终返回「double」。
+    // 上游调用：「CaseClosureService.average(List,String)」的上游调用点包括 「CaseClosureService.metrics」。
+    // 下游影响：「CaseClosureService.average(List,String)」向下依次触达 「trace.getMetricScoresJson」、「read」、「average」、「traces.stream().mapToDouble」；计算结果以「double」交给调用方。
+    // 系统意义：「CaseClosureService.average(List,String)」负责主链路中的“average”；评估只能读取已关闭案件，不能反向修改在线裁决、规则或 Prompt
+    // Java 语法：stream/lambda 把集合处理写成管道；lambda 中引用的外部局部变量必须保持 effectively final。
     private double average(
             List<EvaluationTraceEntity> traces, String metric) {
         return traces.stream()
@@ -548,6 +647,11 @@ public class CaseClosureService {
                 .orElse(0);
     }
 
+    // 所属模块：【结案与离线评估 / 应用编排层】「CaseClosureService.read(String)」。
+    // 具体功能：「CaseClosureService.read(String)」：读取JSON节点：先把 JSON 文本解析为可逐字段校验的 JsonNode；实际协作者为 「objectMapper.readTree」；不满足前置条件时抛出 「IllegalStateException」，最终返回「JsonNode」。
+    // 上游调用：「CaseClosureService.read(String)」的上游调用点包括 「CaseClosureService.prepareClosure」、「CaseClosureService.validateCompletedExecution」、「CaseClosureService.buildSnapshot」、「CaseClosureService.draftSnapshot」。
+    // 下游影响：「CaseClosureService.read(String)」向下依次触达 「objectMapper.readTree」；计算结果以「JsonNode」交给调用方。
+    // 系统意义：「CaseClosureService.read(String)」统一“JSON节点”的跨层表示，避免不同入口产生不兼容字段；评估只能读取已关闭案件，不能反向修改在线裁决、规则或 Prompt
     private JsonNode read(String json) {
         try {
             return objectMapper.readTree(json);
@@ -557,6 +661,11 @@ public class CaseClosureService {
         }
     }
 
+    // 所属模块：【结案与离线评估 / 应用编排层】「CaseClosureService.write(Object)」。
+    // 具体功能：「CaseClosureService.write(Object)」：写入字符串：先把结构化对象序列化为稳定 JSON；实际协作者为 「objectMapper.writeValueAsString」；不满足前置条件时抛出 「IllegalStateException」，最终返回「String」。
+    // 上游调用：「CaseClosureService.write(Object)」的上游调用点包括 「CaseClosureService.failEvaluation」。
+    // 下游影响：「CaseClosureService.write(Object)」向下依次触达 「objectMapper.writeValueAsString」；计算结果以「String」交给调用方。
+    // 系统意义：「CaseClosureService.write(Object)」负责主链路中的“字符串”；评估只能读取已关闭案件，不能反向修改在线裁决、规则或 Prompt
     private String write(Object value) {
         try {
             return objectMapper.writeValueAsString(value);
@@ -566,6 +675,11 @@ public class CaseClosureService {
         }
     }
 
+    // 所属模块：【结案与离线评估 / 应用编排层】「CaseClosureService.requiredJsonText(JsonNode,String)」。
+    // 具体功能：「CaseClosureService.requiredJsonText(JsonNode,String)」：校验JSON文本；实际协作者为 「closureDenied」、「node.path(field).asText」；处理的关键状态/协议值包括 「field」，最终返回「String」。
+    // 上游调用：「CaseClosureService.requiredJsonText(JsonNode,String)」的上游调用点包括 「CaseClosureService.expectedActionTypes」。
+    // 下游影响：「CaseClosureService.requiredJsonText(JsonNode,String)」向下依次触达 「closureDenied」、「node.path(field).asText」；计算结果以「String」交给调用方。
+    // 系统意义：「CaseClosureService.requiredJsonText(JsonNode,String)」在“JSON文本”进入下游前阻断非法状态；评估只能读取已关闭案件，不能反向修改在线裁决、规则或 Prompt
     private static String requiredJsonText(JsonNode node, String field) {
         String value = node.path(field).asText();
         if (value.isBlank()) {
@@ -576,12 +690,22 @@ public class CaseClosureService {
         return value;
     }
 
+    // 所属模块：【结案与离线评估 / 应用编排层】「CaseClosureService.requireText(String,String)」。
+    // 具体功能：「CaseClosureService.requireText(String,String)」：强制校验文本；不满足前置条件时抛出 「IllegalArgumentException」，最终返回「void」。
+    // 上游调用：「CaseClosureService.requireText(String,String)」的上游调用点包括 「CaseClosureService.close」。
+    // 下游影响：「CaseClosureService.requireText(String,String)」只产生当前对象的返回值或字段变化，不访问额外基础设施。
+    // 系统意义：「CaseClosureService.requireText(String,String)」在“文本”进入下游前阻断非法状态；评估只能读取已关闭案件，不能反向修改在线裁决、规则或 Prompt
     private static void requireText(String value, String field) {
         if (value == null || value.isBlank()) {
             throw new IllegalArgumentException(field + " must not be blank");
         }
     }
 
+    // 所属模块：【结案与离线评估 / 应用编排层】「CaseClosureService.assertCanClose(AuthenticatedActor)」。
+    // 具体功能：「CaseClosureService.assertCanClose(AuthenticatedActor)」：断言CanClose；实际协作者为 「actor.role」；不满足前置条件时抛出 「ForbiddenException」，最终返回「void」。
+    // 上游调用：「CaseClosureService.assertCanClose(AuthenticatedActor)」的上游调用点包括 「CaseClosureService.close」。
+    // 下游影响：「CaseClosureService.assertCanClose(AuthenticatedActor)」向下依次触达 「actor.role」。
+    // 系统意义：「CaseClosureService.assertCanClose(AuthenticatedActor)」在“CanClose”进入下游前阻断非法状态；评估只能读取已关闭案件，不能反向修改在线裁决、规则或 Prompt
     private static void assertCanClose(AuthenticatedActor actor) {
         if (actor.role() != ActorRole.ADMIN
                 && actor.role() != ActorRole.SYSTEM) {
@@ -590,6 +714,11 @@ public class CaseClosureService {
         }
     }
 
+    // 所属模块：【结案与离线评估 / 应用编排层】「CaseClosureService.assertCanReadEvaluation(AuthenticatedActor)」。
+    // 具体功能：「CaseClosureService.assertCanReadEvaluation(AuthenticatedActor)」：断言CanRead评估；实际协作者为 「actor.role」；不满足前置条件时抛出 「ForbiddenException」，最终返回「void」。
+    // 上游调用：「CaseClosureService.assertCanReadEvaluation(AuthenticatedActor)」的上游调用点包括 「CaseClosureService.evaluation」、「CaseClosureService.metrics」。
+    // 下游影响：「CaseClosureService.assertCanReadEvaluation(AuthenticatedActor)」向下依次触达 「actor.role」。
+    // 系统意义：「CaseClosureService.assertCanReadEvaluation(AuthenticatedActor)」在“CanRead评估”进入下游前阻断非法状态；评估只能读取已关闭案件，不能反向修改在线裁决、规则或 Prompt
     private static void assertCanReadEvaluation(AuthenticatedActor actor) {
         if (actor.role() != ActorRole.ADMIN
                 && actor.role() != ActorRole.SYSTEM) {
@@ -598,11 +727,21 @@ public class CaseClosureService {
         }
     }
 
+    // 所属模块：【结案与离线评估 / 应用编排层】「CaseClosureService.closureDenied(String,Map)」。
+    // 具体功能：「CaseClosureService.closureDenied(String,Map)」：构建结案拒绝结果，最终返回「CaseClosureException」。
+    // 上游调用：「CaseClosureService.closureDenied(String,Map)」的上游调用点包括 「CaseClosureService.evaluation」、「CaseClosureService.prepareClosure」、「CaseClosureService.latestApproval」、「CaseClosureService.validateCompletedExecution」。
+    // 下游影响：「CaseClosureService.closureDenied(String,Map)」只产生当前对象的返回值或字段变化，不访问额外基础设施；计算结果以「CaseClosureException」交给调用方。
+    // 系统意义：「CaseClosureService.closureDenied(String,Map)」负责主链路中的“结案拒绝结果”；评估只能读取已关闭案件，不能反向修改在线裁决、规则或 Prompt
     private static CaseClosureException closureDenied(
             String message, Map<String, Object> details) {
         return new CaseClosureException(message, details);
     }
 
+    // 所属模块：【结案与离线评估 / 应用编排层】「CaseClosureService.caseNotFound(String)」。
+    // 具体功能：「CaseClosureService.caseNotFound(String)」：构建案件不Found；处理的关键状态/协议值包括 「case_id」，最终返回「NotFoundException」。
+    // 上游调用：「CaseClosureService.caseNotFound(String)」的上游调用点包括 「CaseClosureService.evaluation」、「CaseClosureService.prepareClosure」、「CaseClosureService.closureView」。
+    // 下游影响：「CaseClosureService.caseNotFound(String)」只产生当前对象的返回值或字段变化，不访问额外基础设施；计算结果以「NotFoundException」交给调用方。
+    // 系统意义：「CaseClosureService.caseNotFound(String)」负责主链路中的“案件不Found”；评估只能读取已关闭案件，不能反向修改在线裁决、规则或 Prompt
     private static NotFoundException caseNotFound(String caseId) {
         return new NotFoundException(
                 ErrorCode.CASE_NOT_FOUND,
@@ -610,10 +749,20 @@ public class CaseClosureService {
                 Map.of("case_id", caseId));
     }
 
+    // 所属模块：【结案与离线评估 / 应用编排层】「CaseClosureService.compactUuid()」。
+    // 具体功能：「CaseClosureService.compactUuid()」：压缩表示UUID；实际协作者为 「UUID.randomUUID」、「UUID.randomUUID().toString().replace」；处理的关键状态/协议值包括 「-」，最终返回「String」。
+    // 上游调用：「CaseClosureService.compactUuid()」的上游调用点包括 「CaseClosureService.prepareClosure」。
+    // 下游影响：「CaseClosureService.compactUuid()」向下依次触达 「UUID.randomUUID」、「UUID.randomUUID().toString().replace」；计算结果以「String」交给调用方。
+    // 系统意义：「CaseClosureService.compactUuid()」负责主链路中的“UUID”；评估只能读取已关闭案件，不能反向修改在线裁决、规则或 Prompt
     private static String compactUuid() {
         return UUID.randomUUID().toString().replace("-", "");
     }
 
+    // 所属模块：【结案与离线评估 / 应用编排层】类型「PendingClosure」。
+    // 类型职责：定义待处理结案跨层传递时使用的不可变数据契约；本类型显式提供 框架生成的默认访问器。
+    // 协作关系：由同模块控制器、应用服务或框架生命周期创建和调用。
+    // 边界意义：评估只能读取已关闭案件，不能反向修改在线裁决、规则或 Prompt
+    // Java 语法：record 用于不可变数据载体，编译器会生成组件访问器和值语义方法。
     private record PendingClosure(
             String caseId,
             String evaluationTraceId,

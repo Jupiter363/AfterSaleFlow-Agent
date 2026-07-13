@@ -1,3 +1,9 @@
+/*
+ * 所属模块：数据库迁移入口。
+ * 文件职责：验证MigrationIntegration，覆盖 「migrationsApplyOnceAndCreateTheCompletePostgresqlSchema」。
+ * 业务链路：JUnit 构造夹具并驱动真实服务或 Mock 协作者，断言返回值、持久化状态和调用边界；独立执行 Flyway 迁移并验证 PostgreSQL Schema 可用。
+ * 关键边界：迁移先于业务服务读写，失败时必须阻止使用不兼容的表结构
+ */
 package com.example.dispute.database;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -18,6 +24,11 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
+// 所属模块：【数据库迁移入口 / 自动化测试层】类型「MigrationIntegrationTest」。
+// 类型职责：集中验证MigrationIntegration的业务场景、权限边界和持久化/外部协作契约；本类型显式提供 「migrationsApplyOnceAndCreateTheCompletePostgresqlSchema」、「loadTables」、「columnType」、「numericDefinition」、「loadIndexes」、「countRows」。
+// 协作关系：由 JUnit 发现并执行其中带 @Test 的场景。
+// 边界意义：迁移先于业务服务读写，失败时必须阻止使用不兼容的表结构
+// Java 语法：class 同时封装状态与方法；final 依赖通过构造器注入后不可重新指向。
 @Testcontainers
 class MigrationIntegrationTest {
 
@@ -36,6 +47,11 @@ class MigrationIntegrationTest {
                     .withExposedPorts(5432)
                     .waitingFor(Wait.forListeningPort());
 
+    // 所属模块：【数据库迁移入口 / 自动化测试层】「MigrationIntegrationTest.migrationsApplyOnceAndCreateTheCompletePostgresqlSchema()」。
+    // 具体功能：「MigrationIntegrationTest.migrationsApplyOnceAndCreateTheCompletePostgresqlSchema()」：复现“核对完整业务行为（场景方法「migrationsApplyOnceAndCreateTheCompletePostgresqlSchema」）”场景：驱动 「POSTGRESQL.getHost」、「POSTGRESQL.getMappedPort」、「Flyway.configure」、「DriverManager.getConnection」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「:」、「fulfillment_dispute_case」、「evidence_dossier」、「evidence_dossier_item」。
+    // 上游调用：「MigrationIntegrationTest.migrationsApplyOnceAndCreateTheCompletePostgresqlSchema()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「MigrationIntegrationTest.migrationsApplyOnceAndCreateTheCompletePostgresqlSchema()」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「MigrationIntegrationTest.migrationsApplyOnceAndCreateTheCompletePostgresqlSchema()」守住「数据库迁移入口」的可执行规格，尤其防止 「:」、「fulfillment_dispute_case」、「evidence_dossier」、「evidence_dossier_item」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void migrationsApplyOnceAndCreateTheCompletePostgresqlSchema() throws SQLException {
         String jdbcUrl =
@@ -182,6 +198,11 @@ class MigrationIntegrationTest {
         }
     }
 
+    // 所属模块：【数据库迁移入口 / 自动化测试层】「MigrationIntegrationTest.loadTables(Connection)」。
+    // 具体功能：「MigrationIntegrationTest.loadTables(Connection)」：作为测试辅助方法为“核对完整业务行为（场景方法「loadTables」）”组装或读取「HashSet」 输入夹具，供本测试类的场景方法复用。
+    // 上游调用：「MigrationIntegrationTest.loadTables(Connection)」由本测试类中的 「MigrationIntegrationTest.migrationsApplyOnceAndCreateTheCompletePostgresqlSchema」 调用。
+    // 下游影响：「MigrationIntegrationTest.loadTables(Connection)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「MigrationIntegrationTest.loadTables(Connection)」守住「数据库迁移入口」的可执行规格；后续重构若破坏契约会在进入集成环境前失败。
     private static Set<String> loadTables(Connection connection) throws SQLException {
         Set<String> tables = new HashSet<>();
         try (Statement statement = connection.createStatement();
@@ -201,6 +222,11 @@ class MigrationIntegrationTest {
         return tables;
     }
 
+    // 所属模块：【数据库迁移入口 / 自动化测试层】「MigrationIntegrationTest.columnType(Connection,String,String)」。
+    // 具体功能：「MigrationIntegrationTest.columnType(Connection,String,String)」：作为测试辅助方法为“核对完整业务行为（场景方法「columnType」）”组装或读取「connection.prepareStatement」、「statement.setString」、「statement.executeQuery」、「result.next」，供本测试类的场景方法复用。
+    // 上游调用：「MigrationIntegrationTest.columnType(Connection,String,String)」由本测试类中的 「MigrationIntegrationTest.migrationsApplyOnceAndCreateTheCompletePostgresqlSchema」 调用。
+    // 下游影响：「MigrationIntegrationTest.columnType(Connection,String,String)」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「MigrationIntegrationTest.columnType(Connection,String,String)」守住「数据库迁移入口」的可执行规格；后续重构若破坏契约会在进入集成环境前失败。
     private static String columnType(Connection connection, String table, String column)
             throws SQLException {
         try (var statement =
@@ -221,6 +247,11 @@ class MigrationIntegrationTest {
         }
     }
 
+    // 所属模块：【数据库迁移入口 / 自动化测试层】「MigrationIntegrationTest.numericDefinition(Connection,String,String)」。
+    // 具体功能：「MigrationIntegrationTest.numericDefinition(Connection,String,String)」：作为测试辅助方法为“核对完整业务行为（场景方法「numericDefinition」）”组装或读取「connection.prepareStatement」、「statement.setString」、「statement.executeQuery」、「result.next」，供本测试类的场景方法复用。
+    // 上游调用：「MigrationIntegrationTest.numericDefinition(Connection,String,String)」由本测试类中的 「MigrationIntegrationTest.migrationsApplyOnceAndCreateTheCompletePostgresqlSchema」 调用。
+    // 下游影响：「MigrationIntegrationTest.numericDefinition(Connection,String,String)」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「MigrationIntegrationTest.numericDefinition(Connection,String,String)」守住「数据库迁移入口」的可执行规格，尤其防止 「:」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static String numericDefinition(
             Connection connection, String table, String column) throws SQLException {
         try (var statement =
@@ -241,6 +272,11 @@ class MigrationIntegrationTest {
         }
     }
 
+    // 所属模块：【数据库迁移入口 / 自动化测试层】「MigrationIntegrationTest.loadIndexes(Connection)」。
+    // 具体功能：「MigrationIntegrationTest.loadIndexes(Connection)」：作为测试辅助方法为“核对完整业务行为（场景方法「loadIndexes」）”组装或读取「HashSet」 输入夹具，供本测试类的场景方法复用。
+    // 上游调用：「MigrationIntegrationTest.loadIndexes(Connection)」由本测试类中的 「MigrationIntegrationTest.migrationsApplyOnceAndCreateTheCompletePostgresqlSchema」 调用。
+    // 下游影响：「MigrationIntegrationTest.loadIndexes(Connection)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「MigrationIntegrationTest.loadIndexes(Connection)」守住「数据库迁移入口」的可执行规格；后续重构若破坏契约会在进入集成环境前失败。
     private static Set<String> loadIndexes(Connection connection) throws SQLException {
         Set<String> indexes = new HashSet<>();
         try (Statement statement = connection.createStatement();
@@ -254,6 +290,11 @@ class MigrationIntegrationTest {
         return indexes;
     }
 
+    // 所属模块：【数据库迁移入口 / 自动化测试层】「MigrationIntegrationTest.countRows(Connection,String,String)」。
+    // 具体功能：「MigrationIntegrationTest.countRows(Connection,String,String)」：作为测试辅助方法为“核对完整业务行为（场景方法「countRows」）”组装或读取「connection.createStatement」、「statement.executeQuery」、「result.next」、「result.getLong」，供本测试类的场景方法复用。
+    // 上游调用：「MigrationIntegrationTest.countRows(Connection,String,String)」由本测试类中的 「MigrationIntegrationTest.migrationsApplyOnceAndCreateTheCompletePostgresqlSchema」 调用。
+    // 下游影响：「MigrationIntegrationTest.countRows(Connection,String,String)」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「MigrationIntegrationTest.countRows(Connection,String,String)」守住「数据库迁移入口」的可执行规格；后续重构若破坏契约会在进入集成环境前失败。
     private static long countRows(
             Connection connection, String table, String condition)
             throws SQLException {
@@ -266,6 +307,11 @@ class MigrationIntegrationTest {
         }
     }
 
+    // 所属模块：【数据库迁移入口 / 自动化测试层】「MigrationIntegrationTest.loadTriggers(Connection)」。
+    // 具体功能：「MigrationIntegrationTest.loadTriggers(Connection)」：作为测试辅助方法为“核对完整业务行为（场景方法「loadTriggers」）”组装或读取「HashSet」 输入夹具，供本测试类的场景方法复用。
+    // 上游调用：「MigrationIntegrationTest.loadTriggers(Connection)」由本测试类中的 「MigrationIntegrationTest.migrationsApplyOnceAndCreateTheCompletePostgresqlSchema」 调用。
+    // 下游影响：「MigrationIntegrationTest.loadTriggers(Connection)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「MigrationIntegrationTest.loadTriggers(Connection)」守住「数据库迁移入口」的可执行规格；后续重构若破坏契约会在进入集成环境前失败。
     private static Set<String> loadTriggers(Connection connection) throws SQLException {
         Set<String> triggers = new HashSet<>();
         try (Statement statement = connection.createStatement();
@@ -283,6 +329,11 @@ class MigrationIntegrationTest {
         return triggers;
     }
 
+    // 所属模块：【数据库迁移入口 / 自动化测试层】「MigrationIntegrationTest.assertAppendOnlyTablesRejectMutation(Connection)」。
+    // 具体功能：「MigrationIntegrationTest.assertAppendOnlyTablesRejectMutation(Connection)」：作为测试辅助方法为“核对完整业务行为（场景方法「assertAppendOnlyTablesRejectMutation」）”组装或读取「connection.createStatement」、「statement.executeUpdate」、「assertThatSqlFails」，供本测试类的场景方法复用。
+    // 上游调用：「MigrationIntegrationTest.assertAppendOnlyTablesRejectMutation(Connection)」由本测试类中的 「MigrationIntegrationTest.migrationsApplyOnceAndCreateTheCompletePostgresqlSchema」 调用。
+    // 下游影响：「MigrationIntegrationTest.assertAppendOnlyTablesRejectMutation(Connection)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「MigrationIntegrationTest.assertAppendOnlyTablesRejectMutation(Connection)」守住「数据库迁移入口」的可执行规格；后续重构若破坏契约会在进入集成环境前失败。
     private static void assertAppendOnlyTablesRejectMutation(Connection connection)
             throws SQLException {
         try (Statement statement = connection.createStatement()) {
@@ -340,6 +391,11 @@ class MigrationIntegrationTest {
                 "case_timeline_event is append-only");
     }
 
+    // 所属模块：【数据库迁移入口 / 自动化测试层】「MigrationIntegrationTest.assertHearingRoundFiveIsSupported(Connection)」。
+    // 具体功能：「MigrationIntegrationTest.assertHearingRoundFiveIsSupported(Connection)」：作为测试辅助方法为“核对完整业务行为（场景方法「assertHearingRoundFiveIsSupported」）”组装或读取「connection.createStatement」、「statement.executeUpdate」，供本测试类的场景方法复用。
+    // 上游调用：「MigrationIntegrationTest.assertHearingRoundFiveIsSupported(Connection)」由本测试类中的 「MigrationIntegrationTest.migrationsApplyOnceAndCreateTheCompletePostgresqlSchema」 调用。
+    // 下游影响：「MigrationIntegrationTest.assertHearingRoundFiveIsSupported(Connection)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「MigrationIntegrationTest.assertHearingRoundFiveIsSupported(Connection)」守住「数据库迁移入口」的可执行规格；后续重构若破坏契约会在进入集成环境前失败。
     private static void assertHearingRoundFiveIsSupported(Connection connection)
             throws SQLException {
         try (Statement statement = connection.createStatement()) {
@@ -384,6 +440,11 @@ class MigrationIntegrationTest {
         }
     }
 
+    // 所属模块：【数据库迁移入口 / 自动化测试层】「MigrationIntegrationTest.assertFormalJuryReportUniqueness(Connection)」。
+    // 具体功能：「MigrationIntegrationTest.assertFormalJuryReportUniqueness(Connection)」：作为测试辅助方法为“核对完整业务行为（场景方法「assertFormalJuryReportUniqueness」）”组装或读取「connection.createStatement」、「statement.executeUpdate」、「assertThatSqlFails」，供本测试类的场景方法复用。
+    // 上游调用：「MigrationIntegrationTest.assertFormalJuryReportUniqueness(Connection)」由本测试类中的 「MigrationIntegrationTest.migrationsApplyOnceAndCreateTheCompletePostgresqlSchema」 调用。
+    // 下游影响：「MigrationIntegrationTest.assertFormalJuryReportUniqueness(Connection)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「MigrationIntegrationTest.assertFormalJuryReportUniqueness(Connection)」守住「数据库迁移入口」的可执行规格，尤其防止 「uq_agent_a2a_jury_review_report」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static void assertFormalJuryReportUniqueness(Connection connection)
             throws SQLException {
         try (Statement statement = connection.createStatement()) {
@@ -448,6 +509,11 @@ class MigrationIntegrationTest {
         }
     }
 
+    // 所属模块：【数据库迁移入口 / 自动化测试层】「MigrationIntegrationTest.assertThatSqlFails(Connection,String,String)」。
+    // 具体功能：「MigrationIntegrationTest.assertThatSqlFails(Connection,String,String)」：作为测试辅助方法为“核对完整业务行为（场景方法「assertThatSqlFails」）”组装或读取「connection.createStatement」、「statement.executeUpdate」、「hasMessageContaining」、「isInstanceOf」，供本测试类的场景方法复用。
+    // 上游调用：「MigrationIntegrationTest.assertThatSqlFails(Connection,String,String)」由本测试类中的 「MigrationIntegrationTest.assertAppendOnlyTablesRejectMutation」、「MigrationIntegrationTest.assertFormalJuryReportUniqueness」 调用。
+    // 下游影响：「MigrationIntegrationTest.assertThatSqlFails(Connection,String,String)」的下游是被测服务、仓储或外部客户端替身；「assertThatThrownBy」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「MigrationIntegrationTest.assertThatSqlFails(Connection,String,String)」守住「数据库迁移入口」的可执行规格；后续重构若破坏契约会在进入集成环境前失败。
     private static void assertThatSqlFails(
             Connection connection, String sql, String expectedMessage) {
         org.assertj.core.api.Assertions.assertThatThrownBy(

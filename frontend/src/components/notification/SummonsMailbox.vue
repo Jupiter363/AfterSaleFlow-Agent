@@ -1,3 +1,8 @@
+<!--
+  文件作用：前端组件文件，封装可复用 UI、状态展示或业务交互单元。
+  说明：本注释用于帮助读者先了解组件/页面职责，再阅读 template、script 和 style。
+-->
+
 <script setup>
 import { computed, ref } from "vue";
 
@@ -20,15 +25,18 @@ const unreadCount = computed(
   () => props.notifications.filter((item) => !item.read).length,
 );
 
+// 业务位置：【案件通知】select：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 生命周期事件和目标角色 正确进入 站内通知视图和已读/关闭状态。上游：生命周期事件和目标角色。下游：站内通知视图和已读/关闭状态。边界：通知受角色和案件可见性限制。
 function select(item) {
   if (!item.read) emit("mark-read", item.id);
   emit("open-notification", item);
 }
 
+// 业务位置：【案件通知】isDeleting：判断 当前阶段业务数据 是否满足当前流程分支的进入条件。上游：生命周期事件和目标角色。下游：站内通知视图和已读/关闭状态。边界：通知受角色和案件可见性限制。
 function isDeleting(notificationId) {
   return props.deletingNotificationIds.includes(notificationId);
 }
 
+// 业务位置：【案件通知】displayTime：将 当前阶段业务数据 转换为稳定的接口、提示词或页面表达，避免直接暴露内部实现字段。上游：生命周期事件和目标角色。下游：站内通知视图和已读/关闭状态。边界：通知受角色和案件可见性限制。
 function displayTime(value) {
   if (!value) return "";
   return new Intl.DateTimeFormat("zh-CN", {
@@ -39,6 +47,7 @@ function displayTime(value) {
   }).format(new Date(value));
 }
 
+// 业务位置：【案件通知】shortId：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 生命周期事件和目标角色 正确进入 站内通知视图和已读/关闭状态。上游：生命周期事件和目标角色。下游：站内通知视图和已读/关闭状态。边界：通知受角色和案件可见性限制。
 function shortId(value) {
   if (!value) return "未关联案件";
   return value.length > 16 ? `${value.slice(0, 9)}…` : value;

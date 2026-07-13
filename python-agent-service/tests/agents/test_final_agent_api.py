@@ -1,3 +1,5 @@
+# 文件作用：自动化测试文件，验证 test_final_agent_api 相关模块的行为、契约或页面布局。
+
 from __future__ import annotations
 
 from fastapi.testclient import TestClient
@@ -25,6 +27,10 @@ from app.schemas import (
 
 
 class _LegacyWorkflow:
+    # 所属模块：Agent 角色能力 > test_final_agent_api；函数角色：类/闭包内部方法。
+    # 具体功能：`analyze` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`HearingAnalysisResult`、`AdjudicationDraftOutput`、`AdjudicationDraft`。
+    # 上下游：上游为 受治理的案件上下文和角色提示词；下游为 协作调用 `HearingAnalysisResult`、`AdjudicationDraftOutput`、`AdjudicationDraft`。
+    # 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
     def analyze(self, request, _context):
         return HearingAnalysisResult(
             case_id=request.case_id,
@@ -47,6 +53,10 @@ class _LegacyWorkflow:
 
 
 class _LegacyIntake:
+    # 所属模块：Agent 角色能力 > test_final_agent_api；函数角色：类/闭包内部方法。
+    # 具体功能：`analyze` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`IntakeAnalysisOutput`。
+    # 上下游：上游为 受治理的案件上下文和角色提示词；下游为 协作调用 `IntakeAnalysisOutput`。
+    # 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
     def analyze(self, request, _context):
         return IntakeAnalysisOutput(
             case_type="DISPUTE",
@@ -60,6 +70,10 @@ class _LegacyIntake:
 
 
 class _LegacyEvaluation:
+    # 所属模块：Agent 角色能力 > test_final_agent_api；函数角色：类/闭包内部方法。
+    # 具体功能：`analyze` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`EvaluationAnalysisResult`、`EvaluationMetricScores`。
+    # 上下游：上游为 受治理的案件上下文和角色提示词；下游为 协作调用 `EvaluationAnalysisResult`、`EvaluationMetricScores`。
+    # 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
     def analyze(self, request, _context):
         return EvaluationAnalysisResult(
             case_id=request.case_id,
@@ -84,6 +98,10 @@ class _LegacyEvaluation:
 
 
 class _IntakeAgent:
+    # 所属模块：Agent 角色能力 > test_final_agent_api；函数角色：类/闭包内部方法。
+    # 具体功能：`analyze` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`DisputeIntakeResult`。
+    # 上下游：上游为 受治理的案件上下文和角色提示词；下游为 协作调用 `DisputeIntakeResult`。
+    # 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
     def analyze(self, request, context, *, case_state):
         return DisputeIntakeResult(
             admissible=True,
@@ -108,6 +126,10 @@ class _IntakeAgent:
 
 
 class _EvidenceAgent:
+    # 所属模块：Agent 角色能力 > test_final_agent_api；函数角色：类/闭包内部方法。
+    # 具体功能：`build` 把上游材料组装为本阶段可消费的本阶段状态；关键协作调用：`EvidenceDossierResult`。
+    # 上下游：上游为 受治理的案件上下文和角色提示词；下游为 协作调用 `EvidenceDossierResult`。
+    # 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
     def build(self, request):
         return EvidenceDossierResult(
             case_id=request.case_id,
@@ -116,6 +138,10 @@ class _EvidenceAgent:
 
 
 class _JudgeAgent:
+    # 所属模块：Agent 角色能力 > test_final_agent_api；函数角色：类/闭包内部方法。
+    # 具体功能：`run_stage` 驱动本阶段状态对应的业务步骤并返回阶段结果；关键协作调用：`HearingStageResult`。
+    # 上下游：上游为 受治理的案件上下文和角色提示词；下游为 协作调用 `HearingStageResult`。
+    # 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
     def run_stage(self, request, context, *, case_state):
         return HearingStageResult(
             case_id=request.case_id,
@@ -130,6 +156,10 @@ class _JudgeAgent:
 
 
 class _PanelAgent:
+    # 所属模块：Agent 角色能力 > test_final_agent_api；函数角色：类/闭包内部方法。
+    # 具体功能：`run` 驱动本阶段状态对应的业务步骤并返回阶段结果；关键协作调用：`DeliberationReport`、`CriticReport`。
+    # 上下游：上游为 受治理的案件上下文和角色提示词；下游为 协作调用 `DeliberationReport`、`CriticReport`。
+    # 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
     def run(self, request):
         fingerprint = "a" * 64
         return DeliberationReport(
@@ -151,6 +181,10 @@ class _PanelAgent:
 
 
 class _CopilotAgent:
+    # 所属模块：Agent 角色能力 > test_final_agent_api；函数角色：类/闭包内部方法。
+    # 具体功能：`query` 读取并按案件、角色或会话范围筛选本阶段状态；关键协作调用：`ReviewCopilotAnswer`。
+    # 上下游：上游为 受治理的案件上下文和角色提示词；下游为 协作调用 `ReviewCopilotAnswer`。
+    # 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
     def query(self, request):
         return ReviewCopilotAnswer(
             answer="The current packet shows an unresolved evidence gap.",
@@ -166,10 +200,18 @@ class _CopilotAgent:
 
 
 class _EvaluationAgent:
+    # 所属模块：Agent 角色能力 > test_final_agent_api；函数角色：类/闭包内部方法。
+    # 具体功能：`analyze` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`analyze`、`_LegacyEvaluation`。
+    # 上下游：上游为 受治理的案件上下文和角色提示词；下游为 协作调用 `analyze`、`_LegacyEvaluation`。
+    # 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
     def analyze(self, request, context, *, offline):
         return _LegacyEvaluation().analyze(request, context)
 
 
+# 所属模块：Agent 角色能力 > test_final_agent_api；函数角色：模块私有业务函数。
+# 具体功能：`_settings` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`Settings`。
+# 上下游：上游为 本文件的 `_client`；下游为 协作调用 `Settings`。
+# 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
 def _settings() -> Settings:
     return Settings(
         litellm_master_key="test-litellm-master-key",
@@ -181,6 +223,10 @@ def _settings() -> Settings:
     )
 
 
+# 所属模块：Agent 角色能力 > test_final_agent_api；函数角色：模块私有业务函数。
+# 具体功能：`_client` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`_LegacyWorkflow`、`_LegacyIntake`、`_LegacyEvaluation`。
+# 上下游：上游为 本文件的 `test_all_final_internal_agent_routes_are_authenticated`、`test_final_internal_agent_routes_return_strict_non_final_outputs`；下游为 本文件的 `_settings`。
+# 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
 def _client() -> TestClient:
     legacy_hearing = _LegacyWorkflow()
     legacy_intake = _LegacyIntake()
@@ -204,10 +250,18 @@ def _client() -> TestClient:
     )
 
 
+# 所属模块：Agent 角色能力 > test_final_agent_api；函数角色：模块私有业务函数。
+# 具体功能：`_headers` 围绕本阶段状态计算该函数独立负责的业务派生值；返回/更新字段：`X-Service-Secret`。
+# 上下游：上游为 本文件的 `test_final_internal_agent_routes_return_strict_non_final_outputs`；下游为 返回/更新 `X-Service-Secret`。
+# 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
 def _headers() -> dict[str, str]:
     return {"X-Service-Secret": "test-agent-service-secret"}
 
 
+# 所属模块：Agent 角色能力 > test_final_agent_api；函数角色：回归测试用例。
+# 具体功能：`test_all_final_internal_agent_routes_are_authenticated` 验证本阶段状态在固定案例中的输出、边界和失败行为；关键协作调用：`client.post`、`route.path.startswith`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_client`。
+# 系统意义：固定“Agent 角色能力 > test_final_agent_api”的可观察契约，防止后续重构改变业务结果。
 def test_all_final_internal_agent_routes_are_authenticated() -> None:
     client = _client()
     paths = {
@@ -241,6 +295,10 @@ def test_all_final_internal_agent_routes_are_authenticated() -> None:
     assert unauthorized.status_code == 401
 
 
+# 所属模块：Agent 角色能力 > test_final_agent_api；函数角色：回归测试用例。
+# 具体功能：`test_final_internal_agent_routes_return_strict_non_final_outputs` 验证结构化输出在固定案例中的输出、边界和失败行为；关键协作调用：`client.post`、`intake.json`、`evidence.json`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_client`、`_headers`。
+# 系统意义：固定“Agent 角色能力 > test_final_agent_api”的可观察契约，防止后续重构改变业务结果。
 def test_final_internal_agent_routes_return_strict_non_final_outputs() -> None:
     client = _client()
     intake = client.post(

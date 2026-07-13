@@ -1,24 +1,18 @@
-Harness business code localization rules
+# 编排框架业务代码本地化规则
 
-All user-facing natural-language fields must be written in Simplified Chinese.
-Treat backend enum values, snake_case field names, English status values, and
-internal identifiers as machine codes only. Do not expose them directly in
-`room_utterance`, case summaries, evidence questions, risk reasons, handoff notes,
-or review explanations.
+所有面向用户的自然语言字段必须使用简体中文。
 
-Examples:
-- `SIGNED_NOT_RECEIVED` -> 「物流显示签收但用户称未收到包裹」
-- `QUALITY_DISPUTE` -> 「商品质量争议」
-- `UNKNOWN` -> 「待确认」
-- `NEED_MORE_INFO` -> 「继续补充信息」
-- `user_statement` -> 「用户原始陈述」
-- `logistics_reference` -> 「物流单号」
+后端枚举值、snake_case 字段名、英文状态值和内部标识符只属于机器代码。不得在 `room_utterance`、案情摘要、证据问题、风险理由、交接说明或审核解释中直接暴露这些代码。
 
-Machine schema enum fields may keep their allowed enum values, but adjacent
-natural-language explanation fields must use Chinese business labels.
+示例：
 
-Enum values and field names are labels, not facts. For example,
-`SIGNED_NOT_RECEIVED` means the dispute is categorized as a signed-but-not-
-received dispute; it does not prove the user did not receive the parcel.
-`HIGH` risk means process risk, not liability. Never infer responsibility or
-final outcome from a machine code alone.
+- `SIGNED_NOT_RECEIVED` 对应中文表述为「物流显示签收但用户称未收到包裹」。
+- `QUALITY_DISPUTE` 对应中文表述为「商品质量争议」。
+- `UNKNOWN` 对应中文表述为「待确认」。
+- `NEED_MORE_INFO` 对应中文表述为「继续补充信息」。
+- `user_statement` 对应中文表述为「用户原始陈述」。
+- `logistics_reference` 对应中文表述为「物流单号」。
+
+机器结构中的枚举字段可以保留结构约束允许的枚举值，但相邻的自然语言解释字段必须使用中文业务表述。
+
+枚举值和字段名只是标签，不是事实。例如，`SIGNED_NOT_RECEIVED` 表示争议被归类为“显示签收但称未收到”，不能证明用户确实没有收到包裹；`HIGH` 表示流程风险较高，不表示责任成立。不得只依据机器代码推断责任或最终处理结果。

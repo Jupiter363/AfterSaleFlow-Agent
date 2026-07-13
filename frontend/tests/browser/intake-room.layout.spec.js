@@ -1,9 +1,13 @@
+// 文件作用：自动化测试文件，验证 intake-room.layout.spec 相关模块的行为、契约或页面布局。
+// 说明：本注释用于帮助读者先了解本文件职责，再继续阅读具体实现。
+
 import { expect, test } from "@playwright/test";
 import {
   CASE_ID,
   installIntakeRoomFixture,
 } from "./fixtures/intake-room.fixture.js";
 
+// 业务位置：【前端浏览器回归测试】pageHasHorizontalOverflow：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 async function pageHasHorizontalOverflow(page) {
   return page.evaluate(
     () =>
@@ -12,6 +16,7 @@ async function pageHasHorizontalOverflow(page) {
   );
 }
 
+// 业务位置：【前端浏览器回归测试】horizontalOverflowReport：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 async function horizontalOverflowReport(page) {
   return page.evaluate(() => {
     const viewportWidth = document.documentElement.clientWidth;
@@ -68,6 +73,7 @@ async function horizontalOverflowReport(page) {
   });
 }
 
+// 业务位置：【前端浏览器回归测试】assertInside：核验 当前阶段业务数据 的权限、Schema 和阶段边界，阻止越权或不完整结果进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 async function assertInside(inner, outer) {
   const [innerBox, outerBox] = await Promise.all([
     inner.boundingBox(),
@@ -85,6 +91,7 @@ async function assertInside(inner, outer) {
   );
 }
 
+// 业务位置：【前端浏览器回归测试】test：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 test("keeps 740px shells and switches by the 1060px workspace contract", async ({
   page,
 }) => {
@@ -129,6 +136,7 @@ for (const viewport of [
   { width: 620, height: 843 },
   { width: 1024, height: 600 },
 ]) {
+  // 业务位置：【前端浏览器回归测试】test：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
   test(`keeps the intake contract at ${viewport.width}x${viewport.height}`, async ({
     page,
   }) => {
@@ -186,6 +194,7 @@ for (const viewport of [
   { width: 390, height: 844 },
   { width: 320, height: 568 },
 ]) {
+  // 业务位置：【前端浏览器回归测试】test：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
   test(`preserves dossier slots at ${viewport.width}px`, async ({ page }) => {
     await page.setViewportSize(viewport);
     await installIntakeRoomFixture(page, {
@@ -235,6 +244,7 @@ for (const viewport of [
   { width: 390, height: 844 },
   { width: 320, height: 568 },
 ]) {
+  // 业务位置：【前端浏览器回归测试】test：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
   test(`keeps the message rail as the only scrolling region under pressure at ${viewport.width}px`, async ({
     page,
   }) => {
@@ -276,6 +286,7 @@ for (const viewport of [
       const action = element.querySelector(":scope > div");
       const text = action?.querySelector("span");
       const button = action?.querySelector("button");
+      // 业务位置：【前端浏览器回归测试】box：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
       const box = (node) => ({
         clientHeight: node?.clientHeight ?? null,
         scrollHeight: node?.scrollHeight ?? null,
@@ -321,6 +332,7 @@ for (const viewport of [
   });
 }
 
+// 业务位置：【前端浏览器回归测试】test：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 test("confines native modal keyboard traversal and restores the trigger", async ({
   page,
 }) => {
@@ -384,6 +396,7 @@ test("confines native modal keyboard traversal and restores the trigger", async 
   await expect(trigger).toBeFocused();
 });
 
+// 业务位置：【前端浏览器回归测试】test：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 test("wraps a 200-character unbroken error detail inside the intake dialog", async ({
   page,
 }) => {

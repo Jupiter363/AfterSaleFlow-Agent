@@ -1,3 +1,5 @@
+# 文件作用：编排证据室单轮 LangGraph：装配当前参与方可信证据视图、执行一次结构化多模态判断，再用确定性护栏验收矩阵与人工任务。
+
 from __future__ import annotations
 
 import logging
@@ -7,7 +9,6 @@ from typing import Annotated, Any
 from langgraph.graph import END, START, StateGraph
 from typing_extensions import NotRequired, TypedDict
 
-from app.agents.evidence_clerk.skills.authenticity import EvidenceAuthenticitySkill
 from app.agents.evidence_clerk.assessment_policy import EvidenceAssessmentPolicy
 from app.harness.context_pack import build_context_pack
 from app.harness.evidence_context_assembler import (
@@ -17,9 +18,8 @@ from app.harness.evidence_context_assembler import (
 )
 from app.harness.evidence_asset_loader import EvidenceAssetLoader
 from app.harness.localization_policy import localize_internal_text
+from app.llm import AgentOutputSchemaError, AgentServiceUnavailable
 from app.schemas import (
-    EvidenceAuthenticityFlag,
-    EvidenceTurnQuestion,
     EvidenceTurnLlmOutput,
     EvidenceTurnRequest,
     EvidenceTurnResult,
@@ -30,6 +30,14 @@ LOGGER = logging.getLogger(__name__)
 
 
 class EvidenceTurnGraphState(TypedDict):
+    """证据书记官单轮处理图的状态。
+
+    证据室比接待室更强调权限和可见性：
+    Java 先把“当前参与方可见”的证据封装成 envelope，
+    Python 再把 envelope 组装成模型可读上下文，最后用 guardrails 校验模型输出。
+    executed_nodes 使用 operator.add reducer 累加轨迹；NotRequired 字段由对应节点逐步写入。
+    """
+
     request: dict[str, Any]
     executed_nodes: Annotated[list[str], operator.add]
     memory_frame: dict[str, Any]
@@ -40,13 +48,20 @@ class EvidenceTurnGraphState(TypedDict):
     verification_suggestions: NotRequired[list[dict[str, Any]]]
     authenticity_flags: NotRequired[list[dict[str, Any]]]
     evidence_assessments: NotRequired[list[dict[str, Any]]]
+    fact_matrix_patch: NotRequired[list[dict[str, Any]]]
+    human_review_tasks: NotRequired[list[dict[str, Any]]]
+    internal_handoff: NotRequired[dict[str, Any]]
     confidence: NotRequired[float]
     asset_manifest: NotRequired[dict[str, Any]]
 
 
 class EvidenceTurnWorkflow:
-    """LangGraph workflow for the evidence clerk room conversation."""
+    """证据书记官 LangGraph 工作流入口。"""
 
+    # 所属模块：证据室 Agent > 单轮 LangGraph > 工作流实例初始化。
+    # 具体功能：`__init__` 将 HarnessModelRunner 与可选 EvidenceAssetLoader 绑定到 LLM 节点，并编译固定的“上下文→模型→护栏”三节点图。
+    # 上下游：上游是服务启动时的文本模型与内部证据加载器依赖；下游是 `run` 重用编译图处理每个证据房间事件。
+    # 系统意义：多模态加载和模型调用都被确定性前后节点包围，LLM 无法跳过 Java 可见性信封或直接提交证据判断。
     def __init__(
         self,
         model_runner: Any | None = None,
@@ -54,7 +69,12 @@ class EvidenceTurnWorkflow:
     ) -> None:
         self._graph = build_evidence_turn_graph(model_runner, asset_loader)
 
+    # 所属模块：证据室 Agent > 单轮 LangGraph > Java 调用门面与矩阵落地投影。
+    # 具体功能：`run` 以序列化请求初始化图，执行完后把已校验 fact_matrix_patch 合并旧矩阵，将矩阵/人工任务/内部交接写入 memory_frame 与 canvas_operations，再构造 EvidenceTurnResult。
+    # 上下游：上游是 Java 按当前 actor 过滤的 EvidenceTurnRequest；下游是房间话术、证据请求/评估、增量矩阵、人工复核任务及 Java 画布持久化操作。
+    # 系统意义：只有护栏节点产出的 patch 能改变矩阵；原始 LLM 输出不会直接进入返回面，且 referenced_evidence_ids 固定为本轮附件。
     def run(self, request: EvidenceTurnRequest) -> EvidenceTurnResult:
+        # 图执行结束后，result 是一个普通 dict；再组装成 EvidenceTurnResult 返回给 Java。
         result = self._graph.invoke(
             {
                 "request": request.model_dump(mode="json"),
@@ -62,21 +82,53 @@ class EvidenceTurnWorkflow:
                 "memory_frame": {},
             }
         )
+        matrix_snapshot = _merge_fact_matrix(
+            result["assembled_context"].working_set.evidence_matrix_snapshot,
+            result["fact_matrix_patch"],
+        )
+        memory_frame = {
+            # **dict 是 Python 字典展开语法：把 result["memory_frame"] 的键值拷贝进新 dict。
+            **result["memory_frame"],
+            "evidence_matrix_snapshot": matrix_snapshot,
+            "fact_matrix_patch": result["fact_matrix_patch"],
+            "human_review_tasks": result["human_review_tasks"],
+            "internal_handoff": result["internal_handoff"],
+        }
         return EvidenceTurnResult(
             room_utterance=result["room_utterance"],
             evidence_requests=result["evidence_requests"],
             verification_suggestions=result["verification_suggestions"],
             authenticity_flags=result["authenticity_flags"],
             evidence_assessments=result["evidence_assessments"],
-            memory_frame=result["memory_frame"],
+            fact_matrix_patch=result["fact_matrix_patch"],
+            human_review_tasks=result["human_review_tasks"],
+            internal_handoff=result["internal_handoff"],
+            memory_frame=memory_frame,
+            canvas_operations=[
+                {
+                    "operation": "REPLACE_EVIDENCE_MATRIX_SNAPSHOT",
+                    "value": matrix_snapshot,
+                },
+                {
+                    "operation": "SET_EVIDENCE_HUMAN_REVIEW_TASKS",
+                    "value": result["human_review_tasks"],
+                },
+            ],
+            referenced_evidence_ids=list(request.context_envelope.current_event.attachment_refs),
             confidence=float(result["confidence"]),
         )
 
 
+# 所属模块：证据室 Agent > 单轮 LangGraph > 拓扑构建与编译。
+# 具体功能：`build_evidence_turn_graph` 注册 load_context、闭包 LLM 节点、apply_authenticity_guardrails，并用固定边连接 START 到 END 后 compile。
+# 上下游：上游是 EvidenceTurnWorkflow 初始化；下游是 invoke 时由每个节点返回局部 state 更新并按 reducer 合并。
+# 系统意义：模型节点永远位于可信装配之后、确定性验收之前；证据相关工作流没有由模型决定的任意条件跳转。
 def build_evidence_turn_graph(
     model_runner: Any | None = None,
     asset_loader: EvidenceAssetLoader | None = None,
 ):
+    """组装证据室图：上下文装配 -> LLM 判断 -> 真实性/一致性护栏。"""
+
     builder = StateGraph(EvidenceTurnGraphState)
     builder.add_node("load_context", _load_context)
     builder.add_node(
@@ -91,7 +143,13 @@ def build_evidence_turn_graph(
     return builder.compile()
 
 
+# 所属模块：证据室 Agent > 单轮 LangGraph > load_context 信任边界节点。
+# 具体功能：`_load_context` 重新用 EvidenceTurnRequest 校验初始 dict，再由 EvidenceContextAssembler 从同一 envelope 构造模型 context_sources、严格会话 memory_frame 和护栏 working_set。
+# 上下游：上游是 run 提供的 request 初始状态；下游把 AssembledEvidenceContext 与 memory_frame 写入 state，供 LLM 和护栏节点分别读取。
+# 系统意义：模型视图与护栏白名单同源，但职责分离；如果 Java envelope 或会话范围不合法，图在任何模型调用前失败。
 def _load_context(state: EvidenceTurnGraphState) -> dict[str, Any]:
+    """把可信 EvidenceTurnRequest 转成模型上下文和 deterministic working set。"""
+
     request = EvidenceTurnRequest.model_validate(state["request"])
     assembled_context = EvidenceContextAssembler().assemble(request)
     return {
@@ -101,21 +159,32 @@ def _load_context(state: EvidenceTurnGraphState) -> dict[str, Any]:
     }
 
 
+# 所属模块：证据室 Agent > 单轮 LangGraph > 多模态 LLM 节点工厂。
+# 具体功能：`_reason_with_llm_node` 用闭包固定 model_runner/asset_loader，返回只接收 EvidenceTurnGraphState 的 `reason_with_llm`，避免不可序列化依赖进入图状态。
+# 上下游：上游是 build_evidence_turn_graph 注册节点；下游是 LangGraph 在 load_context 后调用内部执行器。
+# 系统意义：测试可注入受控模型/HTTP transport，案件请求却不能替换加载器或借 state 提供任意网络客户端。
 def _reason_with_llm_node(
     model_runner: Any | None,
     asset_loader: EvidenceAssetLoader | None,
 ):
+    """创建证据室 LLM 节点。
+
+    这个节点可能携带多模态附件：asset_loader 会把允许进入模型的图片转成 content_parts，
+    但模型仍必须输出 EvidenceTurnLlmOutput 这种结构化 JSON。
+    """
+
+    # 所属模块：证据室 Agent > 单轮 LangGraph > reason_with_llm 节点执行器。
+    # 具体功能：`reason_with_llm` 从 assembled context 读取可信 working_set，可选加载本轮授权图片，将“实际加载状态”写入 multimodal_observation，按 evidence_turn 合同裁剪后执行一次 EvidenceTurnLlmOutput 结构化调用。
+    # 上下游：上游是 load_context 产生的 AssembledEvidenceContext；下游仅写 llm_output 与 asset_manifest，交给真实性/引用护栏验收。
+    # 系统意义：manifest 阻止模型声称看过未加载图片；多模态 parts 只能来自内部 AssetLoader，任何异常记录案件/actor/invocation 后失败关闭。
     def reason_with_llm(state: EvidenceTurnGraphState) -> dict[str, Any]:
         assembled = state["assembled_context"]
         working_set = assembled.working_set
         agent_context = assembled.agent_context
         if model_runner is None:
-            return {
-                "llm_output": _fallback_output(working_set),
-                "asset_manifest": {"items": []},
-                "executed_nodes": ["fallback_reasoning"],
-            }
+            raise AgentServiceUnavailable("evidence clerk model runner is unavailable")
         try:
+            # asset_loader 未配置时仍可基于 OCR/元数据做文本核验，但 manifest 明确没有任何像素输入。
             loaded_assets = (
                 asset_loader.load(assembled.raw_envelope)
                 if asset_loader is not None
@@ -125,12 +194,25 @@ def _reason_with_llm_node(
                 loaded_assets.manifest if loaded_assets is not None else {"items": []}
             )
             context_sources = dict(assembled.context_sources)
-            context_sources["multimodal_evidence_manifest"] = asset_manifest
+            # multimodal_observation 告诉模型：哪些附件实际被加载、哪些只是元数据。
+            # 这样模型不能假装看过未加载的证据图片。
+            context_sources["multimodal_observation"] = {
+                "source": "HARNESS_ASSET_LOADER",
+                "requested_attachment_ids": list(
+                    working_set.current_event.get("attachment_refs", [])
+                ),
+                "manifest": asset_manifest,
+                "trust_note": (
+                    "只有 visual_input_status 为 LOADED 或 "
+                    "LOADED_WITHOUT_HASH 的证据实际进入多模态模型。"
+                ),
+            }
             context_pack = build_context_pack(
                 "evidence_turn",
                 context_sources,
                 actor_role=working_set.actor_role,
             )
+            # invocation 字典统一文本和多模态路径；只有存在已授权 content_parts 才追加 multimodal_parts。
             invocation = {
                 "node_name": "evidence_turn",
                 "case_data": assembled.case_data,
@@ -140,6 +222,7 @@ def _reason_with_llm_node(
                 "context_pack": context_pack,
             }
             if loaded_assets is not None and loaded_assets.content_parts:
+                # 只有 asset_loader 判定可用的内容才进入多模态输入。
                 invocation["multimodal_parts"] = list(loaded_assets.content_parts)
             generation = model_runner.invoke_structured(
                 **invocation,
@@ -164,30 +247,32 @@ def _reason_with_llm_node(
     return reason_with_llm
 
 
+# 所属模块：证据室 Agent > 单轮 LangGraph > 输出确定性验收节点。
+# 具体功能：`_apply_authenticity_guardrails` 本地化仅展示字段，经 EvidenceAssessmentPolicy 复核每项评估，再交叉校验矩阵 patch、人工任务、内部 handoff，最后限长并计算评估平均置信度。
+# 上下游：上游是模型 EvidenceTurnLlmOutput、可信 working_set 与 asset_manifest；下游写入 END 所需的全部公开/内部结果字段。
+# 系统意义：Schema 合法仍不代表业务引用合法；该节点要求模型各输出分区相互一致，并强制“证据核验非定责”的公开话术边界。
 def _apply_authenticity_guardrails(state: EvidenceTurnGraphState) -> dict[str, Any]:
+    """对模型输出做确定性护栏。
+
+    证据室不能直接相信模型：
+    - 文本需要本地化清理；
+    - 证据评估要经过 EvidenceAssessmentPolicy；
+    - fact_matrix_patch 只能引用本轮允许的 fact_id 和 evidence_id；
+    - human_review_tasks 必须和 assessment 中的人工复核标记一致。
+    """
+
     output = state["llm_output"]
     request = state["assembled_context"].working_set
-    opening_baseline = (
-        _opening_fallback_output(request)
-        if request.turn_source == "ROOM_OPENING"
-        else None
-    )
-    if opening_baseline is not None:
-        output = _coerce_room_opening_output(output, opening_baseline, request)
-    baseline = opening_baseline or EvidenceAuthenticitySkill().draft(request)
     evidence_requests = _localize_model_text_fields(
-        output.evidence_requests or baseline.evidence_requests,
+        output.evidence_requests,
         ("question", "reason"),
     )
-    verification_suggestions = (
-        output.verification_suggestions or baseline.verification_suggestions
-    )
     verification_suggestions = _localize_model_text_fields(
-        verification_suggestions,
+        output.verification_suggestions,
         ("suggestion",),
     )
     authenticity_flags = _localize_model_text_fields(
-        output.authenticity_flags or baseline.authenticity_flags,
+        output.authenticity_flags,
         ("flag_type", "description"),
     )
     evidence_assessments = EvidenceAssessmentPolicy().apply(
@@ -195,11 +280,28 @@ def _apply_authenticity_guardrails(state: EvidenceTurnGraphState) -> dict[str, A
         request,
         state.get("asset_manifest", {"items": []}),
     )
+    fact_matrix_patch = _validated_matrix_patch(
+        output.fact_matrix_patch,
+        request,
+        evidence_assessments,
+    )
+    human_review_tasks = _validated_human_review_tasks(
+        output.human_review_tasks,
+        request,
+        evidence_assessments,
+    )
+    internal_handoff = _validated_internal_handoff(
+        output.internal_handoff,
+        request,
+        evidence_assessments,
+        human_review_tasks,
+    )
+    # 有逐证据评估时采用其平均值；没有评估才回退模型总置信度，最终再夹在 0..1 范围。
     assessment_confidence = (
         sum(item.assessment_confidence for item in evidence_assessments)
         / len(evidence_assessments)
         if evidence_assessments
-        else float(output.confidence or baseline.confidence)
+        else float(output.confidence)
     )
     return {
         "room_utterance": _sanitize_non_final(
@@ -217,187 +319,220 @@ def _apply_authenticity_guardrails(state: EvidenceTurnGraphState) -> dict[str, A
         "evidence_assessments": [
             item.model_dump(mode="json") for item in evidence_assessments[:50]
         ],
+        "fact_matrix_patch": fact_matrix_patch,
+        "human_review_tasks": human_review_tasks,
+        "internal_handoff": internal_handoff,
         "confidence": min(1.0, max(0.0, assessment_confidence)),
         "executed_nodes": ["apply_authenticity_guardrails"],
     }
 
 
-def _coerce_room_opening_output(
-    output: EvidenceTurnLlmOutput,
-    baseline: EvidenceTurnLlmOutput,
+# 所属模块：证据室 Agent > 输出护栏 > 事实-证据矩阵 patch 验收。
+# 具体功能：`_validated_matrix_patch` 要求 fact_id 在接待卷宗白名单、evidence_id 属于本轮附件；UPSERT_LINK 还必须与已验收 assessment 的 `(证据,事实,关系)` 三元组一致，最后稳定去重并限 100 条。
+# 上下游：上游是模型 patches、working_set 和 EvidenceAssessmentPolicy 结果；下游是 `_merge_fact_matrix` 可实际应用的 JSON patch 列表。
+# 系统意义：可见历史证据也不能在非当前回合被模型偷偷改链接；模型必须先对证据作出一致评估，不能单独注入矩阵关系。
+def _validated_matrix_patch(
+    patches: list[Any],
     request: EvidenceTurnWorkingSet,
-) -> EvidenceTurnLlmOutput:
-    """Make the first evidence-room turn dossier-driven even if the LLM is generic."""
+    assessments: list[Any],
+) -> list[dict[str, Any]]:
+    """校验证据-事实矩阵补丁，防止模型引用越权事实或非本轮证据。"""
 
-    if _contains_opening_dossier_anchor(output.room_utterance, request):
-        room_utterance = output.room_utterance
-    else:
-        room_utterance = baseline.room_utterance
-    return EvidenceTurnLlmOutput(
-        room_utterance=room_utterance,
-        evidence_requests=_dedupe_questions(
-            [*baseline.evidence_requests, *output.evidence_requests]
-        )[:30],
-        verification_suggestions=output.verification_suggestions,
-        authenticity_flags=_dedupe_flags(
-            [*baseline.authenticity_flags, *output.authenticity_flags]
-        )[:100],
-        confidence=max(float(output.confidence), float(baseline.confidence)),
-    )
-
-
-def _contains_opening_dossier_anchor(
-    text: str,
-    request: EvidenceTurnWorkingSet,
-) -> bool:
-    normalized = text.casefold()
-    return any(anchor.casefold() in normalized for anchor in _opening_dossier_anchors(request))
-
-
-def _opening_dossier_anchors(request: EvidenceTurnWorkingSet) -> list[str]:
-    dossier = request.case_intake_dossier or {}
-    dispute_focus = _dict_value(dossier.get("dispute_focus"))
-    case_story = _dict_value(dossier.get("case_story"))
-    anchors: list[str] = []
-    core_issue = str(dispute_focus.get("core_issue") or "").strip()
-    if core_issue:
-        anchors.append(core_issue)
-    core_issue_label = _localized_core_issue(dispute_focus)
-    if core_issue_label:
-        anchors.append(core_issue_label)
-    anchors.extend(_string_list(dispute_focus.get("facts_to_verify")))
-    summary = str(case_story.get("one_sentence_summary") or "").strip()
-    if summary:
-        anchors.append(summary[:32])
-    return [anchor for anchor in anchors if len(anchor) >= 4]
-
-
-def _dedupe_questions(
-    questions: list[EvidenceTurnQuestion],
-) -> list[EvidenceTurnQuestion]:
-    result: list[EvidenceTurnQuestion] = []
-    seen: set[str] = set()
-    for question in questions:
-        key = question.question.strip().casefold()
-        if key and key not in seen:
-            result.append(question)
-            seen.add(key)
-    return result
-
-
-def _dedupe_flags(
-    flags: list[EvidenceAuthenticityFlag],
-) -> list[EvidenceAuthenticityFlag]:
-    result: list[EvidenceAuthenticityFlag] = []
-    seen: set[tuple[str | None, str, str]] = set()
-    for flag in flags:
-        key = (flag.evidence_id, flag.flag_type, flag.description)
-        if key not in seen:
-            result.append(flag)
-            seen.add(key)
-    return result
-
-
-def _fallback_output(request: EvidenceTurnWorkingSet) -> EvidenceTurnLlmOutput:
-    if request.turn_source == "ROOM_OPENING":
-        return _opening_fallback_output(request)
-    draft = EvidenceAuthenticitySkill().draft(request)
-    return EvidenceTurnLlmOutput(
-        room_utterance=(
-            "我会只围绕这批材料的来源、形成时间、完整性、可读性和与本案争议事实的关联性来核验；"
-            "现在不会判断责任，也不会给出退款、赔付或最终处理方案。"
-        ),
-        evidence_requests=draft.evidence_requests,
-        verification_suggestions=draft.verification_suggestions,
-        authenticity_flags=draft.authenticity_flags,
-        confidence=draft.confidence,
-    )
-
-
-def _opening_fallback_output(request: EvidenceTurnWorkingSet) -> EvidenceTurnLlmOutput:
-    dossier = request.case_intake_dossier or {}
-    dispute_focus = _dict_value(dossier.get("dispute_focus"))
-    case_story = _dict_value(dossier.get("case_story"))
-    core_issue = _localized_core_issue(dispute_focus)
-    facts = [
-        _localize_internal_text(fact)
-        for fact in _string_list(dispute_focus.get("facts_to_verify"))
-    ]
-    if not facts:
-        facts = [
-            "原始证据文件",
-            "证据形成时间",
-            "证据来源路径",
-            "与接待室案情的关联事实",
-        ]
-    summary = _normalize_sentence(
-        _localize_internal_text(str(case_story.get("one_sentence_summary") or ""))
-    )
-    facts_text = "、".join(facts)
-    story_text = f"。接待室案情摘要：{summary}" if summary else "。"
-    room_utterance = (
-        f"我先根据接待室收敛的案情开始举证核对。本案当前争议焦点是 {core_issue}，"
-        f"首轮请围绕这些材料补充证据：{facts_text}{story_text}"
-        "你可以上传文件，也可以先说明证据来源、形成时间、保存方式和能证明的事实；"
-        "发起争议方须至少正式提交 1 份相关证据后才能完成举证；"
-        "另一方可补充材料，或等待举证时效结束。"
-    )
-    evidence_requests = [
-        EvidenceTurnQuestion(
-            question_id=f"QUESTION_OPENING_FACT_{index}",
-            target_evidence_id=None,
-            question=(
-                f"请补充或说明「{fact}」对应的原始材料、形成时间、来源路径，"
-                f"以及它如何关联争议焦点 {core_issue}。"
-            ),
-            reason=f"接待室案情把「{fact}」列为首轮需要核验的事实材料。",
-        )
-        for index, fact in enumerate(facts, start=1)
-    ]
-    return EvidenceTurnLlmOutput(
-        room_utterance=room_utterance,
-        evidence_requests=evidence_requests[:10],
-        verification_suggestions=[],
-        authenticity_flags=[
-            EvidenceAuthenticityFlag(
-                evidence_id=None,
-                flag_type="OPENING_EVIDENCE_GAPS",
-                description=f"首轮举证需要围绕 {core_issue} 补齐：{facts_text}。",
-                severity="MEDIUM",
+    allowed_fact_ids = {
+        str(item.get("fact_id") or "") for item in request.allowed_fact_targets
+    }
+    current_evidence_ids = {
+        str(item) for item in request.current_event.get("attachment_refs", [])
+    }
+    assessment_links = {
+        (assessment.evidence_id, link.fact_id, link.relation)
+        for assessment in assessments
+        for link in assessment.fact_links
+    }
+    result: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for patch in patches:
+        # 这里 patch 是 Pydantic 对象，所以可以用 patch.fact_id 访问字段；
+        # 如果是普通 dict，则一般写 patch["fact_id"]。
+        if patch.fact_id not in allowed_fact_ids:
+            raise AgentOutputSchemaError(
+                "evidence_turn",
+                "fact_matrix_patch referenced an unknown fact_id",
             )
-        ],
-        confidence=0.42,
-    )
+        if patch.evidence_id not in current_evidence_ids:
+            raise AgentOutputSchemaError(
+                "evidence_turn",
+                "fact_matrix_patch referenced evidence outside the current turn",
+            )
+        if patch.operation == "UPSERT_LINK" and (
+            patch.evidence_id,
+            patch.fact_id,
+            patch.relation,
+        ) not in assessment_links:
+            raise AgentOutputSchemaError(
+                "evidence_turn",
+                "fact_matrix_patch is inconsistent with evidence_assessments",
+            )
+        # 同一操作/事实/证据重复项只保留第一次，避免模型重复输出放大 patch 或版本变化。
+        key = (patch.operation, patch.fact_id, patch.evidence_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(patch.model_dump(mode="json"))
+    return result[:100]
 
 
-def _dict_value(value: Any) -> dict[str, Any]:
-    return value if isinstance(value, dict) else {}
+# 所属模块：证据室 Agent > 输出护栏 > 人工证据复核任务验收。
+# 具体功能：`_validated_human_review_tasks` 要求每个任务引用本轮附件且对应 assessment.human_review.required=True；按 evidence_id 去重后还要与全部 required IDs 完全相等。
+# 上下游：上游是模型任务列表、working_set 和已验收 assessments；下游是 EvidenceTurnResult.human_review_tasks 与内部 handoff 校验。
+# 系统意义：不能凭空创建无评估依据的人工任务，也不能漏掉护栏认为必须复核的证据；一证据一结构化任务便于 Java 幂等持久化。
+def _validated_human_review_tasks(
+    tasks: list[Any],
+    request: EvidenceTurnWorkingSet,
+    assessments: list[Any],
+) -> list[dict[str, Any]]:
+    """校验人工复核任务必须和证据评估结论一一对应。"""
+
+    current_evidence_ids = {
+        str(item) for item in request.current_event.get("attachment_refs", [])
+    }
+    review_required_ids = {
+        assessment.evidence_id
+        for assessment in assessments
+        if assessment.human_review.required
+    }
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for task in tasks:
+        if task.evidence_id not in current_evidence_ids:
+            raise AgentOutputSchemaError(
+                "evidence_turn",
+                "human_review_tasks referenced evidence outside the current turn",
+            )
+        if task.evidence_id not in review_required_ids:
+            raise AgentOutputSchemaError(
+                "evidence_turn",
+                "human_review_tasks is inconsistent with evidence_assessments",
+            )
+        if task.evidence_id in seen:
+            continue
+        seen.add(task.evidence_id)
+        result.append(task.model_dump(mode="json"))
+    if seen != review_required_ids:
+        raise AgentOutputSchemaError(
+            "evidence_turn",
+            "every human-review assessment requires one structured review task",
+        )
+    return result[:50]
 
 
-def _string_list(value: Any) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    result: list[str] = []
-    for item in value:
-        text = str(item).strip()
-        if text:
-            result.append(text)
-    return result
+# 所属模块：证据室 Agent > 输出护栏 > 后续庭审内部交接验收。
+# 具体功能：`_validated_internal_handoff` 将 Pydantic handoff 转 JSON，检查 uncovered_fact_ids 全在卷宗白名单，并要求 human_review_evidence_ids 与已生成任务完全一致且属于已评估证据。
+# 上下游：上游是模型 handoff、working_set、assessments 和已验收人工任务；下游是 memory_frame/internal_handoff 供庭审或审核环节消费。
+# 系统意义：内部摘要虽然不展示给当事人，也不能携带模型发明事实或不可见证据；跨阶段传递的引用必须和本轮确定性结果闭合。
+def _validated_internal_handoff(
+    handoff: Any,
+    request: EvidenceTurnWorkingSet,
+    assessments: list[Any],
+    human_review_tasks: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """校验证据室交给后续庭审/审核环节的内部摘要。
+
+    摘要中的未覆盖事实、待人工核验的证据必须都来自本次可信 working set，避免
+    模型凭空扩大案件范围或把对当前参与方不可见的材料传入下一环节。
+    """
+
+    allowed_fact_ids = {
+        str(item.get("fact_id") or "") for item in request.allowed_fact_targets
+    }
+    assessed_evidence_ids = {assessment.evidence_id for assessment in assessments}
+    human_review_ids = {
+        str(item.get("evidence_id") or "") for item in human_review_tasks
+    }
+    payload = handoff.model_dump(mode="json")
+    if any(
+        fact_id not in allowed_fact_ids
+        for fact_id in payload.get("uncovered_fact_ids", [])
+    ):
+        raise AgentOutputSchemaError(
+            "evidence_turn",
+            "internal_handoff referenced an unknown fact_id",
+        )
+    handoff_review_ids = set(payload.get("human_review_evidence_ids", []))
+    if handoff_review_ids != human_review_ids or not handoff_review_ids.issubset(
+        assessed_evidence_ids
+    ):
+        raise AgentOutputSchemaError(
+            "evidence_turn",
+            "internal_handoff human review references are inconsistent",
+        )
+    return payload
 
 
-def _localized_core_issue(dispute_focus: dict[str, Any]) -> str:
-    for key in ("core_issue_label", "core_issue_text", "core_issue"):
-        value = str(dispute_focus.get(key) or "").strip()
-        if value:
-            return _localize_internal_text(value)
-    return "争议焦点待确认"
+# 所属模块：证据室 Agent > 矩阵持久化投影 > patch 合并器。
+# 具体功能：`_merge_fact_matrix` 兼容旧矩阵包装，用 `(fact_id,evidence_id)` 建稳定索引；REMOVE 删除，UPSERT 覆盖关系，只有存在 patch 时版本加一并标记 updated。
+# 上下游：上游是 working_set 中旧 snapshot 与已通过 `_validated_matrix_patch` 的列表；下游是 memory_frame 和 REPLACE_EVIDENCE_MATRIX_SNAPSHOT 画布操作。
+# 系统意义：同一事实-证据对最多一条当前关系，重放空 patch 不增版本；函数只合并已验收 patch，不再接触原始模型对象。
+def _merge_fact_matrix(
+    snapshot: dict[str, Any],
+    patches: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """把模型给出的矩阵 patch 合并到旧快照，生成新的事实-证据链接视图。"""
+
+    # 使用 (fact_id, evidence_id) 作为稳定键：同一证据对同一事实只能保留一条最新链接。
+
+    raw_matrix = snapshot.get("matrix", []) if isinstance(snapshot, dict) else []
+    if isinstance(raw_matrix, dict):
+        raw_links = raw_matrix.get("links") or raw_matrix.get("items") or raw_matrix.get("rows")
+        links = list(raw_links) if isinstance(raw_links, list) else []
+    else:
+        links = list(raw_matrix) if isinstance(raw_matrix, list) else []
+    by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    for item in links:
+        if not isinstance(item, dict):
+            continue
+        fact_id = str(item.get("fact_id") or "")
+        evidence_id = str(item.get("evidence_id") or "")
+        if fact_id and evidence_id:
+            by_key[(fact_id, evidence_id)] = dict(item)
+    for patch in patches:
+        key = (str(patch["fact_id"]), str(patch["evidence_id"]))
+        if patch["operation"] == "REMOVE_LINK":
+            by_key.pop(key, None)
+            continue
+        by_key[key] = {
+            "fact_id": patch["fact_id"],
+            "evidence_id": patch["evidence_id"],
+            "relation": patch["relation"],
+            "reason": patch["reason"],
+            "confidence": patch["confidence"],
+        }
+    base_version = int(snapshot.get("version", 0) or 0) if isinstance(snapshot, dict) else 0
+    return {
+        "schema_version": "fact_evidence_matrix.v1",
+        "version": base_version + (1 if patches else 0),
+        "links": list(by_key.values()),
+        "updated": bool(patches),
+    }
 
 
+# 所属模块：证据室 Agent > 展示规范化 > 单文本本地化适配。
+# 具体功能：`_localize_internal_text` 把证据工作流调用统一转发到 Harness 共享码表，供本文件保持稳定私有接口。
+# 上下游：上游是公开话术和 `_localize_model_text_fields`；下游是 localization_policy，不处理 evidence_id/fact_id。
+# 系统意义：接待、证据、庭审共享同一内部代码中文表达，避免各模块出现不同翻译；只作用展示文本，不改变机器合同。
 def _localize_internal_text(text: str) -> str:
+    """把模型可能输出的内部枚举/英文术语改成面向业务人员的展示文字。"""
+
     return localize_internal_text(text)
 
 
+# 所属模块：证据室 Agent > 展示规范化 > Pydantic 字段白名单本地化。
+# 具体功能：`_localize_model_text_fields` 只读取调用方列出的展示字段，用 model_copy(update=...) 生成新对象；未列字段和机器 ID 保持原值。
+# 上下游：上游是 evidence_requests/verification_suggestions/authenticity_flags；下游是输出护栏序列化后的公开列表。
+# 系统意义：本地化不能用递归全对象替换，否则可能改变 evidence_id、fact_id 并使后续白名单校验失效。
 def _localize_model_text_fields(items: list[Any], fields: tuple[str, ...]) -> list[Any]:
+    """只本地化允许展示的字段，不触碰 evidence_id、fact_id 等需要保持稳定的机器标识。"""
+
     localized: list[Any] = []
     for item in items:
         updates: dict[str, str] = {}
@@ -409,12 +544,17 @@ def _localize_model_text_fields(items: list[Any], fields: tuple[str, ...]) -> li
     return localized
 
 
-def _normalize_sentence(text: str) -> str:
-    stripped = text.strip()
-    return stripped.rstrip("。.!！?？") + "。" if stripped else ""
-
-
+# 所属模块：证据室 Agent > 展示护栏 > 非最终职责强制。
+# 具体功能：`_sanitize_non_final` 将最终判定、责任归属、应退款/赔付等越权短语替换为“证据层面仍需核验”，并确保尾句明确本轮不定责、不出最终方案。
+# 上下游：上游是本地化后的模型 room_utterance；下游是当事人在证据房间看到的最终话术。
+# 系统意义：即使结构化字段都合法，公开自然语言也不能让用户误以为证据书记官已经作出平台裁决或承诺履约动作。
 def _sanitize_non_final(text: str) -> str:
+    """清除证据室越权的责任或赔付结论。
+
+    证据书记官只能说明核验进展、缺口和真实性风险；责任判断与最终方案只能由后续
+    庭审草案和人工审核处理。
+    """
+
     forbidden = ("最终判定", "最终裁决", "责任在", "应当退款", "应当赔付")
     sanitized = text
     for phrase in forbidden:

@@ -1,3 +1,9 @@
+/*
+ * 所属模块：Temporal 持久化编排。
+ * 文件职责：在 Temporal Activity 边界执行最终五段 Workflow 到现有领域服务的 Activity 适配所需的数据库、Agent 或工具副作用。
+ * 业务链路：核心入口/契约为 「markTransferred」、「planRemedy」、「createReviewPacket」、「closeCaseAndEvaluate」、「initialize」、「runStage」；串联举证窗口、共享庭审、按需评议、人工终审、确定性执行和结案恢复。
+ * 关键边界：Workflow 代码必须可重放且不直接做网络或数据库 I/O；副作用放入 Activity
+ */
 package com.example.dispute.workflow.application;
 
 import com.example.dispute.domain.model.RouteType;
@@ -57,6 +63,11 @@ import org.springframework.stereotype.Component;
  * already-running histories. New orchestration never invokes those services
  * directly from workflow code.
  */
+// 所属模块：【Temporal 持久化编排 / 应用编排层】类型「FinalWorkflowActivitiesAdapter」。
+// 类型职责：在 Temporal Activity 边界执行最终五段 Workflow 到现有领域服务的 Activity 适配所需的数据库、Agent 或工具副作用；本类型显式提供 「FinalWorkflowActivitiesAdapter」、「markTransferred」、「planRemedy」、「createReviewPacket」、「closeCaseAndEvaluate」、「initialize」。
+// 协作关系：主要由 「FinalWorkflowActivitiesAdapterTest.completedSharedHearingCreatesReviewTaskForHumanGate」、「FinalWorkflowActivitiesAdapterTest.finalConvergenceInvokesLegacyAnalysisOnlyAtC6DraftGeneration」 使用。
+// 边界意义：Workflow 代码必须可重放且不直接做网络或数据库 I/O；副作用放入 Activity
+// Java 语法：class 同时封装状态与方法；final 依赖通过构造器注入后不可重新指向。
 @Component
 public class FinalWorkflowActivitiesAdapter
         implements FulfillmentDisputeActivities,
@@ -81,6 +92,12 @@ public class FinalWorkflowActivitiesAdapter
     private final ConcurrentMap<String, HearingAnalysisActivityResult>
             hearingRounds = new ConcurrentHashMap<>();
 
+    // 所属模块：【Temporal 持久化编排 / 应用编排层】「FinalWorkflowActivitiesAdapter.FinalWorkflowActivitiesAdapter(CaseFulfillmentDisputeActivitiesImpl,ApprovalRecordRepository,ReviewPacketRepository,ReviewTaskRepository,DeliberationReportRepository,AdjudicationDraftRepository,HearingStateRepository,SettlementProposalRepository,ObjectMapper,HearingRoundService,HearingOutcomeOrchestrationService,CasePhaseClockRepository,Clock)」。
+    // 具体功能：「FinalWorkflowActivitiesAdapter.FinalWorkflowActivitiesAdapter(CaseFulfillmentDisputeActivitiesImpl,ApprovalRecordRepository,ReviewPacketRepository,ReviewTaskRepository,DeliberationReportRepository,AdjudicationDraftRepository,HearingStateRepository,SettlementProposalRepository,ObjectMapper,HearingRoundService,HearingOutcomeOrchestrationService,CasePhaseClockRepository,Clock)」：通过构造器接收 「legacy」(CaseFulfillmentDisputeActivitiesImpl)、「approvalRepository」(ApprovalRecordRepository)、「packetRepository」(ReviewPacketRepository)、「taskRepository」(ReviewTaskRepository)、「deliberationRepository」(DeliberationReportRepository)、「draftRepository」(AdjudicationDraftRepository)、「hearingStateRepository」(HearingStateRepository)、「settlementProposalRepository」(SettlementProposalRepository)、「objectMapper」(ObjectMapper)、「hearingRoundService」(HearingRoundService)、「hearingOutcomeOrchestration」(HearingOutcomeOrchestrationService)、「phaseClockRepository」(CasePhaseClockRepository)、「clock」(Clock) 并保存为「FinalWorkflowActivitiesAdapter」的协作依赖；这里只完成依赖装配，不提前访问数据库或外部服务。
+    // 上游调用：「FinalWorkflowActivitiesAdapter.FinalWorkflowActivitiesAdapter(CaseFulfillmentDisputeActivitiesImpl,ApprovalRecordRepository,ReviewPacketRepository,ReviewTaskRepository,DeliberationReportRepository,AdjudicationDraftRepository,HearingStateRepository,SettlementProposalRepository,ObjectMapper,HearingRoundService,HearingOutcomeOrchestrationService,CasePhaseClockRepository,Clock)」由 Spring 容器执行构造器注入，依赖在 Bean 创建阶段一次性提供；测试中也由 「FinalWorkflowActivitiesAdapterTest.finalConvergenceInvokesLegacyAnalysisOnlyAtC6DraftGeneration」、「FinalWorkflowActivitiesAdapterTest.completedSharedHearingCreatesReviewTaskForHumanGate」 显式创建。
+    // 下游影响：「FinalWorkflowActivitiesAdapter.FinalWorkflowActivitiesAdapter(CaseFulfillmentDisputeActivitiesImpl,ApprovalRecordRepository,ReviewPacketRepository,ReviewTaskRepository,DeliberationReportRepository,AdjudicationDraftRepository,HearingStateRepository,SettlementProposalRepository,ObjectMapper,HearingRoundService,HearingOutcomeOrchestrationService,CasePhaseClockRepository,Clock)」只产生当前对象的返回值或字段变化，不访问额外基础设施。
+    // 系统意义：「FinalWorkflowActivitiesAdapter.FinalWorkflowActivitiesAdapter(CaseFulfillmentDisputeActivitiesImpl,ApprovalRecordRepository,ReviewPacketRepository,ReviewTaskRepository,DeliberationReportRepository,AdjudicationDraftRepository,HearingStateRepository,SettlementProposalRepository,ObjectMapper,HearingRoundService,HearingOutcomeOrchestrationService,CasePhaseClockRepository,Clock)」把不可重放 I/O 隔离在 Activity 中，允许 Temporal 按策略重试，同时要求下游写入具备幂等性。
+    // Java 语法：构造器名称与类名相同且没有返回类型；参数通常由 Spring 按类型注入。
     public FinalWorkflowActivitiesAdapter(
             CaseFulfillmentDisputeActivitiesImpl legacy,
             ApprovalRecordRepository approvalRepository,
@@ -110,11 +127,21 @@ public class FinalWorkflowActivitiesAdapter
         this.clock = clock;
     }
 
+    // 所属模块：【Temporal 持久化编排 / 应用编排层】「FinalWorkflowActivitiesAdapter.markTransferred(String,String)」。
+    // 具体功能：「FinalWorkflowActivitiesAdapter.markTransferred(String,String)」：标记Transferred，最终返回「void」。
+    // 上游调用：「FinalWorkflowActivitiesAdapter.markTransferred(String,String)」由使用「FinalWorkflowActivitiesAdapter」的控制器、应用服务、Workflow Activity 或测试场景触发。
+    // 下游影响：「FinalWorkflowActivitiesAdapter.markTransferred(String,String)」只产生当前对象的返回值或字段变化，不访问额外基础设施。
+    // 系统意义：「FinalWorkflowActivitiesAdapter.markTransferred(String,String)」把不可重放 I/O 隔离在 Activity 中，允许 Temporal 按策略重试，同时要求下游写入具备幂等性。
     @Override
     public void markTransferred(String caseId, String workflowId) {
         // Routing already persists TRANSFERRED before workflow start.
     }
 
+    // 所属模块：【Temporal 持久化编排 / 应用编排层】「FinalWorkflowActivitiesAdapter.planRemedy(String,String,String,String)」。
+    // 具体功能：「FinalWorkflowActivitiesAdapter.planRemedy(String,String,String,String)」：规划补救；实际协作者为 「legacy.planRemedy」，最终返回「String」。
+    // 上游调用：「FinalWorkflowActivitiesAdapter.planRemedy(String,String,String,String)」由使用「FinalWorkflowActivitiesAdapter」的控制器、应用服务、Workflow Activity 或测试场景触发。
+    // 下游影响：「FinalWorkflowActivitiesAdapter.planRemedy(String,String,String,String)」向下依次触达 「legacy.planRemedy」；计算结果以「String」交给调用方。
+    // 系统意义：「FinalWorkflowActivitiesAdapter.planRemedy(String,String,String,String)」把不可重放 I/O 隔离在 Activity 中，允许 Temporal 按策略重试，同时要求下游写入具备幂等性。
     @Override
     public String planRemedy(
             String caseId,
@@ -124,6 +151,12 @@ public class FinalWorkflowActivitiesAdapter
         return legacy.planRemedy(caseId, workflowId);
     }
 
+    // 所属模块：【Temporal 持久化编排 / 应用编排层】「FinalWorkflowActivitiesAdapter.createReviewPacket(String,String,String,String)」。
+    // 具体功能：「FinalWorkflowActivitiesAdapter.createReviewPacket(String,String,String,String)」：创建审核审核包：先按主键读取现有事实并显式处理不存在分支，再把 Optional 空值转换为明确业务异常；实际协作者为 「taskRepository.findById」、「packetRepository.findById」、「legacy.createReviewTask」、「task.getPacketId」，最终返回「ReviewGateSnapshot」。
+    // 上游调用：「FinalWorkflowActivitiesAdapter.createReviewPacket(String,String,String,String)」由使用「FinalWorkflowActivitiesAdapter」的控制器、应用服务、Workflow Activity 或测试场景触发。
+    // 下游影响：「FinalWorkflowActivitiesAdapter.createReviewPacket(String,String,String,String)」向下依次触达 「taskRepository.findById」、「packetRepository.findById」、「legacy.createReviewTask」、「task.getPacketId」；计算结果以「ReviewGateSnapshot」交给调用方。
+    // 系统意义：「FinalWorkflowActivitiesAdapter.createReviewPacket(String,String,String,String)」把不可重放 I/O 隔离在 Activity 中，允许 Temporal 按策略重试，同时要求下游写入具备幂等性。
+    // Java 语法：Optional 表示结果可能不存在；orElseThrow 会把空值分支转换为明确异常。
     @Override
     public ReviewGateSnapshot createReviewPacket(
             String caseId,
@@ -148,11 +181,21 @@ public class FinalWorkflowActivitiesAdapter
                 task.getRequiredRole());
     }
 
+    // 所属模块：【Temporal 持久化编排 / 应用编排层】「FinalWorkflowActivitiesAdapter.closeCaseAndEvaluate(String)」。
+    // 具体功能：「FinalWorkflowActivitiesAdapter.closeCaseAndEvaluate(String)」：关闭案件并且Evaluate；实际协作者为 「legacy.closeCaseAndEvaluate」，最终返回「void」。
+    // 上游调用：「FinalWorkflowActivitiesAdapter.closeCaseAndEvaluate(String)」由使用「FinalWorkflowActivitiesAdapter」的控制器、应用服务、Workflow Activity 或测试场景触发。
+    // 下游影响：「FinalWorkflowActivitiesAdapter.closeCaseAndEvaluate(String)」向下依次触达 「legacy.closeCaseAndEvaluate」。
+    // 系统意义：「FinalWorkflowActivitiesAdapter.closeCaseAndEvaluate(String)」把不可重放 I/O 隔离在 Activity 中，允许 Temporal 按策略重试，同时要求下游写入具备幂等性。
     @Override
     public void closeCaseAndEvaluate(String caseId) {
         legacy.closeCaseAndEvaluate(caseId);
     }
 
+    // 所属模块：【Temporal 持久化编排 / 应用编排层】「FinalWorkflowActivitiesAdapter.initialize(HearingWorkflowCommand)」。
+    // 具体功能：「FinalWorkflowActivitiesAdapter.initialize(HearingWorkflowCommand)」：初始化最终五段 Workflow 到现有领域服务的 Activity 适配；实际协作者为 「legacy.initializeHearing」、「command.caseId」、「command.workflowId」、「command.evidenceWaitTimeout」，最终返回「void」。
+    // 上游调用：「FinalWorkflowActivitiesAdapter.initialize(HearingWorkflowCommand)」由使用「FinalWorkflowActivitiesAdapter」的控制器、应用服务、Workflow Activity 或测试场景触发。
+    // 下游影响：「FinalWorkflowActivitiesAdapter.initialize(HearingWorkflowCommand)」向下依次触达 「legacy.initializeHearing」、「command.caseId」、「command.workflowId」、「command.evidenceWaitTimeout」。
+    // 系统意义：「FinalWorkflowActivitiesAdapter.initialize(HearingWorkflowCommand)」把不可重放 I/O 隔离在 Activity 中，允许 Temporal 按策略重试，同时要求下游写入具备幂等性。
     @Override
     public void initialize(HearingWorkflowCommand command) {
         legacy.initializeHearing(
@@ -164,6 +207,11 @@ public class FinalWorkflowActivitiesAdapter
                         command.maxEvidenceRounds()));
     }
 
+    // 所属模块：【Temporal 持久化编排 / 应用编排层】「FinalWorkflowActivitiesAdapter.runStage(String,String,String,int,long,boolean,boolean,int)」。
+    // 具体功能：「FinalWorkflowActivitiesAdapter.runStage(String,String,String,int,long,boolean,boolean,int)」：运行Stage；实际协作者为 「hearingRounds.computeIfAbsent」、「legacy.analyzeHearing」、「analysis.requiresAdditionalEvidence」、「analysis.manualRequired」；处理的关键状态/协议值包括 「C6_DRAFT_GENERATION」、「FINAL_CONVERGENCE_DEFERRED_TO_C6_」、「:」、「C2_EVIDENCE_GAP」，最终返回「HearingStageActivityResult」。
+    // 上游调用：「FinalWorkflowActivitiesAdapter.runStage(String,String,String,int,long,boolean,boolean,int)」由使用「FinalWorkflowActivitiesAdapter」的控制器、应用服务、Workflow Activity 或测试场景触发。
+    // 下游影响：「FinalWorkflowActivitiesAdapter.runStage(String,String,String,int,long,boolean,boolean,int)」向下依次触达 「hearingRounds.computeIfAbsent」、「legacy.analyzeHearing」、「analysis.requiresAdditionalEvidence」、「analysis.manualRequired」；计算结果以「HearingStageActivityResult」交给调用方。
+    // 系统意义：「FinalWorkflowActivitiesAdapter.runStage(String,String,String,int,long,boolean,boolean,int)」把不可重放 I/O 隔离在 Activity 中，允许 Temporal 按策略重试，同时要求下游写入具备幂等性。
     @Override
     public HearingStageActivityResult runStage(
             String caseId,
@@ -209,6 +257,11 @@ public class FinalWorkflowActivitiesAdapter
                 "LEGACY_MIGRATION_" + round + "_" + stage);
     }
 
+    // 所属模块：【Temporal 持久化编排 / 应用编排层】「FinalWorkflowActivitiesAdapter.recordEvidence(EvidenceSubmissionSignal)」。
+    // 具体功能：「FinalWorkflowActivitiesAdapter.recordEvidence(EvidenceSubmissionSignal)」：记录证据；实际协作者为 「legacy.recordPartyEvidence」、「signal.partyRole」、「signal.submissionId」、「signal.evidenceRefs」，最终返回「long」。
+    // 上游调用：「FinalWorkflowActivitiesAdapter.recordEvidence(EvidenceSubmissionSignal)」由使用「FinalWorkflowActivitiesAdapter」的控制器、应用服务、Workflow Activity 或测试场景触发。
+    // 下游影响：「FinalWorkflowActivitiesAdapter.recordEvidence(EvidenceSubmissionSignal)」向下依次触达 「legacy.recordPartyEvidence」、「signal.partyRole」、「signal.submissionId」、「signal.evidenceRefs」；计算结果以「long」交给调用方。
+    // 系统意义：「FinalWorkflowActivitiesAdapter.recordEvidence(EvidenceSubmissionSignal)」把不可重放 I/O 隔离在 Activity 中，允许 Temporal 按策略重试，同时要求下游写入具备幂等性。
     @Override
     public long recordEvidence(EvidenceSubmissionSignal signal) {
         legacy.recordPartyEvidence(
@@ -219,6 +272,11 @@ public class FinalWorkflowActivitiesAdapter
         return 0;
     }
 
+    // 所属模块：【Temporal 持久化编排 / 应用编排层】「FinalWorkflowActivitiesAdapter.persistStageTrace(String,String,String,int,long,String)」。
+    // 具体功能：「FinalWorkflowActivitiesAdapter.persistStageTrace(String,String,String,int,long,String)」：持久化Stage链路标识，最终返回「void」。
+    // 上游调用：「FinalWorkflowActivitiesAdapter.persistStageTrace(String,String,String,int,long,String)」由使用「FinalWorkflowActivitiesAdapter」的控制器、应用服务、Workflow Activity 或测试场景触发。
+    // 下游影响：「FinalWorkflowActivitiesAdapter.persistStageTrace(String,String,String,int,long,String)」只产生当前对象的返回值或字段变化，不访问额外基础设施。
+    // 系统意义：「FinalWorkflowActivitiesAdapter.persistStageTrace(String,String,String,int,long,String)」把不可重放 I/O 隔离在 Activity 中，允许 Temporal 按策略重试，同时要求下游写入具备幂等性。
     @Override
     public void persistStageTrace(
             String caseId,
@@ -230,6 +288,11 @@ public class FinalWorkflowActivitiesAdapter
         // Legacy analysis persistence already records every C1-C6 node.
     }
 
+    // 所属模块：【Temporal 持久化编排 / 应用编排层】「FinalWorkflowActivitiesAdapter.complete(String,String,String,boolean,boolean,long,String)」。
+    // 具体功能：「FinalWorkflowActivitiesAdapter.complete(String,String,String,boolean,boolean,long,String)」：完成最终五段 Workflow 到现有领域服务的 Activity 适配：先把新状态写入 PostgreSQL 事实表；实际协作者为 「hearingRoundService.expire」、「phaseClockRepository.findByCaseIdAndClockType」、「phaseClockRepository.save」、「Math.toIntExact」；处理的关键状态/协议值包括 「DEADLINE_EXPIRED」、「temporal-worker」、「SETTLEMENT_CONFIRMED」、「:」，最终返回「void」。
+    // 上游调用：「FinalWorkflowActivitiesAdapter.complete(String,String,String,boolean,boolean,long,String)」由使用「FinalWorkflowActivitiesAdapter」的控制器、应用服务、Workflow Activity 或测试场景触发。
+    // 下游影响：「FinalWorkflowActivitiesAdapter.complete(String,String,String,boolean,boolean,long,String)」向下依次触达 「hearingRoundService.expire」、「phaseClockRepository.findByCaseIdAndClockType」、「phaseClockRepository.save」、「Math.toIntExact」。
+    // 系统意义：「FinalWorkflowActivitiesAdapter.complete(String,String,String,boolean,boolean,long,String)」把不可重放 I/O 隔离在 Activity 中，允许 Temporal 按策略重试，同时要求下游写入具备幂等性。
     @Override
     public void complete(
             String caseId,
@@ -273,6 +336,12 @@ public class FinalWorkflowActivitiesAdapter
         hearingRounds.keySet().removeIf(key -> key.startsWith(workflowId + ":"));
     }
 
+    // 所属模块：【Temporal 持久化编排 / 应用编排层】「FinalWorkflowActivitiesAdapter.ensureSettlementDraft(String)」。
+    // 具体功能：「FinalWorkflowActivitiesAdapter.ensureSettlementDraft(String)」：确保和解草案：先把新状态写入 PostgreSQL 事实表，再把 Optional 空值转换为明确业务异常；实际协作者为 「draftRepository.findFirstByCaseIdOrderByDraftVersionDesc」、「settlementProposalRepository.findTopByCaseIdOrderByProposalVersionDesc」、「hearingStateRepository.findByCaseId」、「draftRepository.save」；处理的关键状态/协议值包括 「SETTLEMENT_CONFIRMED」、「DRAFT_」、「-」、「双方已确认一致方案」，最终返回「void」。
+    // 上游调用：「FinalWorkflowActivitiesAdapter.ensureSettlementDraft(String)」的上游调用点包括 「FinalWorkflowActivitiesAdapter.complete」。
+    // 下游影响：「FinalWorkflowActivitiesAdapter.ensureSettlementDraft(String)」向下依次触达 「draftRepository.findFirstByCaseIdOrderByDraftVersionDesc」、「settlementProposalRepository.findTopByCaseIdOrderByProposalVersionDesc」、「hearingStateRepository.findByCaseId」、「draftRepository.save」。
+    // 系统意义：「FinalWorkflowActivitiesAdapter.ensureSettlementDraft(String)」把不可重放 I/O 隔离在 Activity 中，允许 Temporal 按策略重试，同时要求下游写入具备幂等性。
+    // Java 语法：Optional 表示结果可能不存在；orElseThrow 会把空值分支转换为明确异常。
     private void ensureSettlementDraft(String caseId) {
         var latestDraft = draftRepository.findFirstByCaseIdOrderByDraftVersionDesc(caseId);
         if (latestDraft
@@ -321,6 +390,11 @@ public class FinalWorkflowActivitiesAdapter
                         "temporal-worker"));
     }
 
+    // 所属模块：【Temporal 持久化编排 / 应用编排层】「FinalWorkflowActivitiesAdapter.freeze(DeliberationPanelCommand)」。
+    // 具体功能：「FinalWorkflowActivitiesAdapter.freeze(DeliberationPanelCommand)」：冻结冻结评议快照；实际协作者为 「UUID.nameUUIDFromBytes」、「command.caseId」、「command.draftId」、「command.dossierVersion」；处理的关键状态/协议值包括 「:」、「-」、「MIGRATION_RULESET」，最终返回「FrozenDeliberationSnapshot」。
+    // 上游调用：「FinalWorkflowActivitiesAdapter.freeze(DeliberationPanelCommand)」由使用「FinalWorkflowActivitiesAdapter」的控制器、应用服务、Workflow Activity 或测试场景触发。
+    // 下游影响：「FinalWorkflowActivitiesAdapter.freeze(DeliberationPanelCommand)」向下依次触达 「UUID.nameUUIDFromBytes」、「command.caseId」、「command.draftId」、「command.dossierVersion」；计算结果以「FrozenDeliberationSnapshot」交给调用方。
+    // 系统意义：「FinalWorkflowActivitiesAdapter.freeze(DeliberationPanelCommand)」把不可重放 I/O 隔离在 Activity 中，允许 Temporal 按策略重试，同时要求下游写入具备幂等性。
     @Override
     public FrozenDeliberationSnapshot freeze(
             DeliberationPanelCommand command) {
@@ -344,6 +418,11 @@ public class FinalWorkflowActivitiesAdapter
                 fingerprint);
     }
 
+    // 所属模块：【Temporal 持久化编排 / 应用编排层】「FinalWorkflowActivitiesAdapter.runCritic(FrozenDeliberationSnapshot,String)」。
+    // 具体功能：「FinalWorkflowActivitiesAdapter.runCritic(FrozenDeliberationSnapshot,String)」：运行评审角色；实际协作者为 「snapshot.fingerprint」；处理的关键状态/协议值包括 「FAILED」、「BLOCKER」、「CRITIC_ADAPTER_MIGRATION_PENDING」，最终返回「CriticActivityResult」。
+    // 上游调用：「FinalWorkflowActivitiesAdapter.runCritic(FrozenDeliberationSnapshot,String)」由使用「FinalWorkflowActivitiesAdapter」的控制器、应用服务、Workflow Activity 或测试场景触发。
+    // 下游影响：「FinalWorkflowActivitiesAdapter.runCritic(FrozenDeliberationSnapshot,String)」向下依次触达 「snapshot.fingerprint」；计算结果以「CriticActivityResult」交给调用方。
+    // 系统意义：「FinalWorkflowActivitiesAdapter.runCritic(FrozenDeliberationSnapshot,String)」把不可重放 I/O 隔离在 Activity 中，允许 Temporal 按策略重试，同时要求下游写入具备幂等性。
     @Override
     public CriticActivityResult runCritic(
             FrozenDeliberationSnapshot snapshot,
@@ -357,6 +436,12 @@ public class FinalWorkflowActivitiesAdapter
                 snapshot.fingerprint());
     }
 
+    // 所属模块：【Temporal 持久化编排 / 应用编排层】「FinalWorkflowActivitiesAdapter.persistReport(DeliberationPanelCommand,FrozenDeliberationSnapshot,List,String)」。
+    // 具体功能：「FinalWorkflowActivitiesAdapter.persistReport(DeliberationPanelCommand,FrozenDeliberationSnapshot,List,String)」：持久化Report：先把新状态写入 PostgreSQL 事实表；实际协作者为 「deliberationRepository.existsById」、「deliberationRepository.findFirstByCaseIdOrderByReportVersionDesc」、「deliberationRepository.save」、「UUID.nameUUIDFromBytes」；处理的关键状态/协议值包括 「DELIBERATION_」、「:」、「-」、「HIGH」，最终返回「String」。
+    // 上游调用：「FinalWorkflowActivitiesAdapter.persistReport(DeliberationPanelCommand,FrozenDeliberationSnapshot,List,String)」由使用「FinalWorkflowActivitiesAdapter」的控制器、应用服务、Workflow Activity 或测试场景触发。
+    // 下游影响：「FinalWorkflowActivitiesAdapter.persistReport(DeliberationPanelCommand,FrozenDeliberationSnapshot,List,String)」向下依次触达 「deliberationRepository.existsById」、「deliberationRepository.findFirstByCaseIdOrderByReportVersionDesc」、「deliberationRepository.save」、「UUID.nameUUIDFromBytes」；计算结果以「String」交给调用方。
+    // 系统意义：「FinalWorkflowActivitiesAdapter.persistReport(DeliberationPanelCommand,FrozenDeliberationSnapshot,List,String)」把不可重放 I/O 隔离在 Activity 中，允许 Temporal 按策略重试，同时要求下游写入具备幂等性。
+    // Java 语法：stream/lambda 把集合处理写成管道；lambda 中引用的外部局部变量必须保持 effectively final。
     @Override
     public String persistReport(
             DeliberationPanelCommand command,
@@ -417,6 +502,11 @@ public class FinalWorkflowActivitiesAdapter
         return id;
     }
 
+    // 所属模块：【Temporal 持久化编排 / 应用编排层】「FinalWorkflowActivitiesAdapter.recordInvalidDecision(HumanReviewCommand,HumanReviewSignal,String)」。
+    // 具体功能：「FinalWorkflowActivitiesAdapter.recordInvalidDecision(HumanReviewCommand,HumanReviewSignal,String)」：记录非法决定，最终返回「void」。
+    // 上游调用：「FinalWorkflowActivitiesAdapter.recordInvalidDecision(HumanReviewCommand,HumanReviewSignal,String)」由使用「FinalWorkflowActivitiesAdapter」的控制器、应用服务、Workflow Activity 或测试场景触发。
+    // 下游影响：「FinalWorkflowActivitiesAdapter.recordInvalidDecision(HumanReviewCommand,HumanReviewSignal,String)」只产生当前对象的返回值或字段变化，不访问额外基础设施。
+    // 系统意义：「FinalWorkflowActivitiesAdapter.recordInvalidDecision(HumanReviewCommand,HumanReviewSignal,String)」把不可重放 I/O 隔离在 Activity 中，允许 Temporal 按策略重试，同时要求下游写入具备幂等性。
     @Override
     public void recordInvalidDecision(
             HumanReviewCommand command,
@@ -425,6 +515,11 @@ public class FinalWorkflowActivitiesAdapter
         // The reviewer API records its own rejected decision attempt.
     }
 
+    // 所属模块：【Temporal 持久化编排 / 应用编排层】「FinalWorkflowActivitiesAdapter.persistDecision(HumanReviewCommand,HumanReviewSignal,String)」。
+    // 具体功能：「FinalWorkflowActivitiesAdapter.persistDecision(HumanReviewCommand,HumanReviewSignal,String)」：持久化决定；实际协作者为 「signal.humanReviewRecordId」、「command.reviewPacketId」；处理的关键状态/协议值包括 「REVIEW_」，最终返回「String」。
+    // 上游调用：「FinalWorkflowActivitiesAdapter.persistDecision(HumanReviewCommand,HumanReviewSignal,String)」由使用「FinalWorkflowActivitiesAdapter」的控制器、应用服务、Workflow Activity 或测试场景触发。
+    // 下游影响：「FinalWorkflowActivitiesAdapter.persistDecision(HumanReviewCommand,HumanReviewSignal,String)」向下依次触达 「signal.humanReviewRecordId」、「command.reviewPacketId」；计算结果以「String」交给调用方。
+    // 系统意义：「FinalWorkflowActivitiesAdapter.persistDecision(HumanReviewCommand,HumanReviewSignal,String)」把不可重放 I/O 隔离在 Activity 中，允许 Temporal 按策略重试，同时要求下游写入具备幂等性。
     @Override
     public String persistDecision(
             HumanReviewCommand command,
@@ -436,6 +531,11 @@ public class FinalWorkflowActivitiesAdapter
                 : signal.humanReviewRecordId();
     }
 
+    // 所属模块：【Temporal 持久化编排 / 应用编排层】「FinalWorkflowActivitiesAdapter.validateApproval(ExecutionCommand)」。
+    // 具体功能：「FinalWorkflowActivitiesAdapter.validateApproval(ExecutionCommand)」：校验审批：先按主键读取现有事实并显式处理不存在分支；实际协作者为 「approvalRepository.findById」、「command.approved」、「command.reviewId」、「record.getActionSnapshotHash」；处理的关键状态/协议值包括 「APPROVAL_REQUIRED」、「HUMAN_REVIEW_RECORD_NOT_FOUND」、「ACTION_HASH_MISMATCH」、「STALE_REVIEW_PACKET」，最终返回「ApprovalValidationResult」。
+    // 上游调用：「FinalWorkflowActivitiesAdapter.validateApproval(ExecutionCommand)」由使用「FinalWorkflowActivitiesAdapter」的控制器、应用服务、Workflow Activity 或测试场景触发。
+    // 下游影响：「FinalWorkflowActivitiesAdapter.validateApproval(ExecutionCommand)」向下依次触达 「approvalRepository.findById」、「command.approved」、「command.reviewId」、「record.getActionSnapshotHash」；计算结果以「ApprovalValidationResult」交给调用方。
+    // 系统意义：「FinalWorkflowActivitiesAdapter.validateApproval(ExecutionCommand)」把不可重放 I/O 隔离在 Activity 中，允许 Temporal 按策略重试，同时要求下游写入具备幂等性。
     @Override
     public ApprovalValidationResult validateApproval(
             ExecutionCommand command) {
@@ -459,6 +559,11 @@ public class FinalWorkflowActivitiesAdapter
         return new ApprovalValidationResult(true, null);
     }
 
+    // 所属模块：【Temporal 持久化编排 / 应用编排层】「FinalWorkflowActivitiesAdapter.executeAction(String,ExecutionAction)」。
+    // 具体功能：「FinalWorkflowActivitiesAdapter.executeAction(String,ExecutionAction)」：执行动作；实际协作者为 「legacy.executeApprovedPlan」、「action.actionId」；处理的关键状态/协议值包括 「SUCCEEDED」，最终返回「ExecutionActionActivityResult」。
+    // 上游调用：「FinalWorkflowActivitiesAdapter.executeAction(String,ExecutionAction)」由使用「FinalWorkflowActivitiesAdapter」的控制器、应用服务、Workflow Activity 或测试场景触发。
+    // 下游影响：「FinalWorkflowActivitiesAdapter.executeAction(String,ExecutionAction)」向下依次触达 「legacy.executeApprovedPlan」、「action.actionId」；计算结果以「ExecutionActionActivityResult」交给调用方。
+    // 系统意义：「FinalWorkflowActivitiesAdapter.executeAction(String,ExecutionAction)」把不可重放 I/O 隔离在 Activity 中，允许 Temporal 按策略重试，同时要求下游写入具备幂等性。
     @Override
     public ExecutionActionActivityResult executeAction(
             String caseId,
@@ -468,6 +573,11 @@ public class FinalWorkflowActivitiesAdapter
                 action.actionId(), "SUCCEEDED", null);
     }
 
+    // 所属模块：【Temporal 持久化编排 / 应用编排层】「FinalWorkflowActivitiesAdapter.lookupAction(String,ExecutionAction)」。
+    // 具体功能：「FinalWorkflowActivitiesAdapter.lookupAction(String,ExecutionAction)」：构建lookup动作；实际协作者为 「action.actionId」；处理的关键状态/协议值包括 「UNKNOWN」，最终返回「ExecutionActionActivityResult」。
+    // 上游调用：「FinalWorkflowActivitiesAdapter.lookupAction(String,ExecutionAction)」由使用「FinalWorkflowActivitiesAdapter」的控制器、应用服务、Workflow Activity 或测试场景触发。
+    // 下游影响：「FinalWorkflowActivitiesAdapter.lookupAction(String,ExecutionAction)」向下依次触达 「action.actionId」；计算结果以「ExecutionActionActivityResult」交给调用方。
+    // 系统意义：「FinalWorkflowActivitiesAdapter.lookupAction(String,ExecutionAction)」把不可重放 I/O 隔离在 Activity 中，允许 Temporal 按策略重试，同时要求下游写入具备幂等性。
     @Override
     public ExecutionActionActivityResult lookupAction(
             String caseId,
@@ -476,6 +586,11 @@ public class FinalWorkflowActivitiesAdapter
                 action.actionId(), "UNKNOWN", null);
     }
 
+    // 所属模块：【Temporal 持久化编排 / 应用编排层】「FinalWorkflowActivitiesAdapter.write(Object)」。
+    // 具体功能：「FinalWorkflowActivitiesAdapter.write(Object)」：写入字符串：先把结构化对象序列化为稳定 JSON；实际协作者为 「objectMapper.writeValueAsString」；不满足前置条件时抛出 「IllegalStateException」，最终返回「String」。
+    // 上游调用：「FinalWorkflowActivitiesAdapter.write(Object)」的上游调用点包括 「FinalWorkflowActivitiesAdapter.ensureSettlementDraft」、「FinalWorkflowActivitiesAdapter.persistReport」。
+    // 下游影响：「FinalWorkflowActivitiesAdapter.write(Object)」向下依次触达 「objectMapper.writeValueAsString」；计算结果以「String」交给调用方。
+    // 系统意义：「FinalWorkflowActivitiesAdapter.write(Object)」把不可重放 I/O 隔离在 Activity 中，允许 Temporal 按策略重试，同时要求下游写入具备幂等性。
     private String write(Object value) {
         try {
             return objectMapper.writeValueAsString(value);
@@ -485,6 +600,11 @@ public class FinalWorkflowActivitiesAdapter
         }
     }
 
+    // 所属模块：【Temporal 持久化编排 / 应用编排层】「FinalWorkflowActivitiesAdapter.recommendationFromSettlement(String)」。
+    // 具体功能：「FinalWorkflowActivitiesAdapter.recommendationFromSettlement(String)」：构建recommendationFrom和解；处理的关键状态/协议值包括 「REFUND」、「退款」、「退费」、「返款」，最终返回「String」。
+    // 上游调用：「FinalWorkflowActivitiesAdapter.recommendationFromSettlement(String)」的上游调用点包括 「FinalWorkflowActivitiesAdapter.ensureSettlementDraft」。
+    // 下游影响：「FinalWorkflowActivitiesAdapter.recommendationFromSettlement(String)」只产生当前对象的返回值或字段变化，不访问额外基础设施；计算结果以「String」交给调用方。
+    // 系统意义：「FinalWorkflowActivitiesAdapter.recommendationFromSettlement(String)」把不可重放 I/O 隔离在 Activity 中，允许 Temporal 按策略重试，同时要求下游写入具备幂等性。
     private static String recommendationFromSettlement(String proposalText) {
         String upper = proposalText.toUpperCase(java.util.Locale.ROOT);
         if (upper.contains("REFUND")
@@ -511,6 +631,11 @@ public class FinalWorkflowActivitiesAdapter
         return "SETTLEMENT_CONFIRMED";
     }
 
+    // 所属模块：【Temporal 持久化编排 / 应用编排层】「FinalWorkflowActivitiesAdapter.shouldOpenHumanReviewGate(String)」。
+    // 具体功能：「FinalWorkflowActivitiesAdapter.shouldOpenHumanReviewGate(String)」：计算是否需要Open人工审核门禁；处理的关键状态/协议值包括 「ACTIVITY_INTERRUPTED」、「VALIDATION_INTERRUPTED」，最终返回「boolean」。
+    // 上游调用：「FinalWorkflowActivitiesAdapter.shouldOpenHumanReviewGate(String)」的上游调用点包括 「FinalWorkflowActivitiesAdapter.complete」。
+    // 下游影响：「FinalWorkflowActivitiesAdapter.shouldOpenHumanReviewGate(String)」只产生当前对象的返回值或字段变化，不访问额外基础设施；计算结果以「boolean」交给调用方。
+    // 系统意义：「FinalWorkflowActivitiesAdapter.shouldOpenHumanReviewGate(String)」把不可重放 I/O 隔离在 Activity 中，允许 Temporal 按策略重试，同时要求下游写入具备幂等性。
     private static boolean shouldOpenHumanReviewGate(String status) {
         return !"ACTIVITY_INTERRUPTED".equals(status)
                 && !"VALIDATION_INTERRUPTED".equals(status);

@@ -1,3 +1,9 @@
+/*
+ * 所属模块：共享小法庭。
+ * 文件职责：验证庭审CollaborationIntegration，覆盖 「onlyBothConfirmationsOnTheCurrentSettlementVersionConverge」、「theThirdCompletedRoundForcesConvergenceWithoutExtendingTheWindow」、「factsSufficientHintDoesNotCloseTheHearingBeforeTheThirdStatementRound」、「openingHearingCreatesInitialRoundWithoutAskingJudgeBeforeBootstrap」、「hearingStatusViewTracksOpenWaitingAndFinalDraftReadiness」、「completeHearingDoesNotGenerateADraftWhileTemporalIsDrafting」。
+ * 业务链路：JUnit 构造夹具并驱动真实服务或 Mock 协作者，断言返回值、持久化状态和调用边界；管理固定轮次陈述、庭审时钟、和解版本、Agent 协作消息以及非最终裁决草案。
+ * 关键边界：最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
+ */
 package com.example.dispute.hearing;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -100,6 +106,11 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
+// 所属模块：【共享小法庭 / 自动化测试层】类型「HearingCollaborationIntegrationTest」。
+// 类型职责：集中验证庭审CollaborationIntegration的业务场景、权限边界和持久化/外部协作契约；本类型显式提供 「databaseProperties」、「setUp」、「onlyBothConfirmationsOnTheCurrentSettlementVersionConverge」、「theThirdCompletedRoundForcesConvergenceWithoutExtendingTheWindow」、「factsSufficientHintDoesNotCloseTheHearingBeforeTheThirdStatementRound」、「openingHearingCreatesInitialRoundWithoutAskingJudgeBeforeBootstrap」。
+// 协作关系：由 JUnit 发现并执行其中带 @Test 的场景。
+// 边界意义：最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
+// Java 语法：class 同时封装状态与方法；final 依赖通过构造器注入后不可重新指向。
 @DataJpaTest(properties = "spring.jpa.hibernate.ddl-auto=validate")
 @EnableConfigurationProperties(DisputeProperties.class)
 @Import({
@@ -128,6 +139,11 @@ class HearingCollaborationIntegrationTest {
                     .withEnv("POSTGRES_PASSWORD", "local_test_password")
                     .withExposedPorts(5432);
 
+    // 所属模块：【共享小法庭 / 自动化测试层】「HearingCollaborationIntegrationTest.databaseProperties(DynamicPropertyRegistry)」。
+    // 具体功能：「HearingCollaborationIntegrationTest.databaseProperties(DynamicPropertyRegistry)」：作为测试辅助方法为“核对完整业务行为（场景方法「databaseProperties」）”组装或读取「POSTGRESQL.getHost」、「POSTGRESQL.getMappedPort」，供本测试类的场景方法复用。
+    // 上游调用：「HearingCollaborationIntegrationTest.databaseProperties(DynamicPropertyRegistry)」由 JUnit 生命周期或本测试类的场景方法调用。
+    // 下游影响：「HearingCollaborationIntegrationTest.databaseProperties(DynamicPropertyRegistry)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「HearingCollaborationIntegrationTest.databaseProperties(DynamicPropertyRegistry)」守住「共享小法庭」的可执行规格，尤其防止 「spring.datasource.url」、「:」、「spring.datasource.username」、「dispute_test」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @DynamicPropertySource
     static void databaseProperties(DynamicPropertyRegistry registry) {
         registry.add(
@@ -172,6 +188,11 @@ class HearingCollaborationIntegrationTest {
     private AuthenticatedActor merchant;
     private AuthenticatedActor system;
 
+    // 所属模块：【共享小法庭 / 自动化测试层】「HearingCollaborationIntegrationTest.setUp()」。
+    // 具体功能：「HearingCollaborationIntegrationTest.setUp()」：在每个测试场景运行前创建「Instant.parse」，统一准备后续断言依赖的初始状态，避免各用例重复搭建且保持彼此隔离。
+    // 上游调用：「HearingCollaborationIntegrationTest.setUp()」由 JUnit 生命周期或本测试类的场景方法调用。
+    // 下游影响：「HearingCollaborationIntegrationTest.setUp()」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「HearingCollaborationIntegrationTest.setUp()」守住「共享小法庭」的可执行规格，尤其防止 「user-local」、「merchant-local」、「hearing-controller」、「2026-07-03T01:00:00Z」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @BeforeEach
     void setUp() {
         user = new AuthenticatedActor("user-local", ActorRole.USER);
@@ -180,6 +201,12 @@ class HearingCollaborationIntegrationTest {
         mutableClock.set(Instant.parse("2026-07-03T01:00:00Z"));
     }
 
+    // 所属模块：【共享小法庭 / 自动化测试层】「HearingCollaborationIntegrationTest.onlyBothConfirmationsOnTheCurrentSettlementVersionConverge()」。
+    // 具体功能：「HearingCollaborationIntegrationTest.onlyBothConfirmationsOnTheCurrentSettlementVersionConverge()」：复现“核对完整业务行为（场景方法「onlyBothConfirmationsOnTheCurrentSettlementVersionConverge」）”场景：驱动 「settlementService.propose」、「settlementService.confirm」、「proposalRepository.findAllByCaseIdOrderByProposalVersionDesc」、「confirmationRepository.count」，再用 「assertThat」、「assertThatThrownBy」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_SETTLEMENT」、「{\"refund\":50}」、「TRACE_v1」、「confirm-v1-user」。
+    // 上游调用：「HearingCollaborationIntegrationTest.onlyBothConfirmationsOnTheCurrentSettlementVersionConverge()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「HearingCollaborationIntegrationTest.onlyBothConfirmationsOnTheCurrentSettlementVersionConverge()」的下游是被测服务、仓储或外部客户端替身；「assertThat、assertThatThrownBy」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「HearingCollaborationIntegrationTest.onlyBothConfirmationsOnTheCurrentSettlementVersionConverge()」守住「共享小法庭」的可执行规格，尤其防止 「CASE_SETTLEMENT」、「{\"refund\":50}」、「TRACE_v1」、「confirm-v1-user」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
+    // Java 语法：Optional 表示结果可能不存在；orElseThrow 会把空值分支转换为明确异常。
     @Test
     void onlyBothConfirmationsOnTheCurrentSettlementVersionConverge() {
         seedHearing("CASE_SETTLEMENT");
@@ -263,6 +290,11 @@ class HearingCollaborationIntegrationTest {
                 .isEqualTo("SETTLEMENT_CONFIRMED");
     }
 
+    // 所属模块：【共享小法庭 / 自动化测试层】「HearingCollaborationIntegrationTest.theThirdCompletedRoundForcesConvergenceWithoutExtendingTheWindow()」。
+    // 具体功能：「HearingCollaborationIntegrationTest.theThirdCompletedRoundForcesConvergenceWithoutExtendingTheWindow()」：复现“核对完整业务行为（场景方法「theThirdCompletedRoundForcesConvergenceWithoutExtendingTheWindow」）”场景：驱动 「roundService.completeNext」、「roundRepository.findAllByCaseIdOrderByRoundNoAsc」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_THREE_ROUNDS」、「{\"round\":1}」、「{\"round\":2}」、「{\"round\":3}」。
+    // 上游调用：「HearingCollaborationIntegrationTest.theThirdCompletedRoundForcesConvergenceWithoutExtendingTheWindow()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「HearingCollaborationIntegrationTest.theThirdCompletedRoundForcesConvergenceWithoutExtendingTheWindow()」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「HearingCollaborationIntegrationTest.theThirdCompletedRoundForcesConvergenceWithoutExtendingTheWindow()」守住「共享小法庭」的可执行规格，尤其防止 「CASE_THREE_ROUNDS」、「{\"round\":1}」、「{\"round\":2}」、「{\"round\":3}」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void theThirdCompletedRoundForcesConvergenceWithoutExtendingTheWindow() {
         seedHearing("CASE_THREE_ROUNDS");
@@ -291,6 +323,11 @@ class HearingCollaborationIntegrationTest {
                 .hasSize(3);
     }
 
+    // 所属模块：【共享小法庭 / 自动化测试层】「HearingCollaborationIntegrationTest.factsSufficientHintDoesNotCloseTheHearingBeforeTheThirdStatementRound()」。
+    // 具体功能：「HearingCollaborationIntegrationTest.factsSufficientHintDoesNotCloseTheHearingBeforeTheThirdStatementRound()」：复现“核对完整业务行为（场景方法「factsSufficientHintDoesNotCloseTheHearingBeforeTheThirdStatementRound」）”场景：驱动 「roundService.completeNext」，再用 「assertThat」、「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_FACTS_HINT」、「{\"round\":1}」。
+    // 上游调用：「HearingCollaborationIntegrationTest.factsSufficientHintDoesNotCloseTheHearingBeforeTheThirdStatementRound()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「HearingCollaborationIntegrationTest.factsSufficientHintDoesNotCloseTheHearingBeforeTheThirdStatementRound()」的下游是被测服务、仓储或外部客户端替身；「assertThat、verify」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「HearingCollaborationIntegrationTest.factsSufficientHintDoesNotCloseTheHearingBeforeTheThirdStatementRound()」守住「共享小法庭」的可执行规格，尤其防止 「CASE_FACTS_HINT」、「{\"round\":1}」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void factsSufficientHintDoesNotCloseTheHearingBeforeTheThirdStatementRound() {
         seedHearing("CASE_FACTS_HINT");
@@ -308,6 +345,12 @@ class HearingCollaborationIntegrationTest {
                 .roundCompletedAfterCommit("CASE_FACTS_HINT", 1, false);
     }
 
+    // 所属模块：【共享小法庭 / 自动化测试层】「HearingCollaborationIntegrationTest.openingHearingCreatesInitialRoundWithoutAskingJudgeBeforeBootstrap()」。
+    // 具体功能：「HearingCollaborationIntegrationTest.openingHearingCreatesInitialRoundWithoutAskingJudgeBeforeBootstrap()」：复现“核对完整业务行为（场景方法「openingHearingCreatesInitialRoundWithoutAskingJudgeBeforeBootstrap」）”场景：驱动 「roundService.ensureInitialRoundOpen」、「roundRepository.findAllByCaseIdOrderByRoundNoAsc」、「eventRepository.findByCaseIdAndEventKey」，再用 「assertThat」、「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_OPENING」、「hearing-controller」、「TRACE_HEARING_ROUND_1」、「hearing-round-opened:1」。
+    // 上游调用：「HearingCollaborationIntegrationTest.openingHearingCreatesInitialRoundWithoutAskingJudgeBeforeBootstrap()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「HearingCollaborationIntegrationTest.openingHearingCreatesInitialRoundWithoutAskingJudgeBeforeBootstrap()」的下游是被测服务、仓储或外部客户端替身；「assertThat、verify」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「HearingCollaborationIntegrationTest.openingHearingCreatesInitialRoundWithoutAskingJudgeBeforeBootstrap()」守住「共享小法庭」的可执行规格，尤其防止 「CASE_OPENING」、「hearing-controller」、「TRACE_HEARING_ROUND_1」、「hearing-round-opened:1」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
+    // Java 语法：Optional 表示结果可能不存在；orElseThrow 会把空值分支转换为明确异常。
     @Test
     void openingHearingCreatesInitialRoundWithoutAskingJudgeBeforeBootstrap() {
         seedHearing("CASE_OPENING");
@@ -342,6 +385,11 @@ class HearingCollaborationIntegrationTest {
                 .isEqualTo("HEARING_ROUND_OPENED");
     }
 
+    // 所属模块：【共享小法庭 / 自动化测试层】「HearingCollaborationIntegrationTest.hearingStatusViewTracksOpenWaitingAndFinalDraftReadiness()」。
+    // 具体功能：「HearingCollaborationIntegrationTest.hearingStatusViewTracksOpenWaitingAndFinalDraftReadiness()」：复现“核对完整业务行为（场景方法「hearingStatusViewTracksOpenWaitingAndFinalDraftReadiness」）”场景：驱动 「roundService.ensureInitialRoundOpen」、「roundService.status」、「roundService.recordPartyMessageSubmission」、「roundService.submitParty」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_STATUS_VIEW」、「hearing-controller」、「ROUND_OPEN」、「本轮陈述中」。
+    // 上游调用：「HearingCollaborationIntegrationTest.hearingStatusViewTracksOpenWaitingAndFinalDraftReadiness()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「HearingCollaborationIntegrationTest.hearingStatusViewTracksOpenWaitingAndFinalDraftReadiness()」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「HearingCollaborationIntegrationTest.hearingStatusViewTracksOpenWaitingAndFinalDraftReadiness()」守住「共享小法庭」的可执行规格，尤其防止 「CASE_STATUS_VIEW」、「hearing-controller」、「ROUND_OPEN」、「本轮陈述中」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void hearingStatusViewTracksOpenWaitingAndFinalDraftReadiness() {
         seedHearing("CASE_STATUS_VIEW");
@@ -496,6 +544,11 @@ class HearingCollaborationIntegrationTest {
         assertThat(reviewGateReady.nextStepHint()).doesNotContain("平台审核入口");
     }
 
+    // 所属模块：【共享小法庭 / 自动化测试层】「HearingCollaborationIntegrationTest.completeHearingDoesNotGenerateADraftWhileTemporalIsDrafting()」。
+    // 具体功能：「HearingCollaborationIntegrationTest.completeHearingDoesNotGenerateADraftWhileTemporalIsDrafting()」：复现“核对完整业务行为（场景方法「completeHearingDoesNotGenerateADraftWhileTemporalIsDrafting」）”场景：驱动 「hearingStateRepository.saveAndFlush」、「roundService.completeNext」、「roundService.completeHearing」、「draftRepository.findFirstByCaseIdOrderByDraftVersionDesc」，再用 「assertThat」、「verifyNoInteractions」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_TEMPORAL_FINAL_DRAFT_OWNER」、「HEARING_CASE_TEMPORAL_FINAL_DRAFT_OWNER」、「hearing-bootstrap」、「{\"round\":1}」。
+    // 上游调用：「HearingCollaborationIntegrationTest.completeHearingDoesNotGenerateADraftWhileTemporalIsDrafting()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「HearingCollaborationIntegrationTest.completeHearingDoesNotGenerateADraftWhileTemporalIsDrafting()」的下游是被测服务、仓储或外部客户端替身；「assertThat、verifyNoInteractions」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「HearingCollaborationIntegrationTest.completeHearingDoesNotGenerateADraftWhileTemporalIsDrafting()」守住「共享小法庭」的可执行规格，尤其防止 「CASE_TEMPORAL_FINAL_DRAFT_OWNER」、「HEARING_CASE_TEMPORAL_FINAL_DRAFT_OWNER」、「hearing-bootstrap」、「{\"round\":1}」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void completeHearingDoesNotGenerateADraftWhileTemporalIsDrafting() {
         seedHearing("CASE_TEMPORAL_FINAL_DRAFT_OWNER");
@@ -530,6 +583,12 @@ class HearingCollaborationIntegrationTest {
         verifyNoInteractions(hearingAgentClient);
     }
 
+    // 所属模块：【共享小法庭 / 自动化测试层】「HearingCollaborationIntegrationTest.completeHearingOrchestratesAnExistingTemporalDraftOnlyOnce()」。
+    // 具体功能：「HearingCollaborationIntegrationTest.completeHearingOrchestratesAnExistingTemporalDraftOnlyOnce()」：复现“核对完整业务行为（场景方法「completeHearingOrchestratesAnExistingTemporalDraftOnlyOnce」）”场景：驱动 「hearingStateRepository.saveAndFlush」、「roundService.completeNext」、「roundService.status」、「roundService.completeHearing」，再用 「assertThat」、「verifyNoInteractions」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_FINAL_DRAFT_COMPLETION」、「HEARING_CASE_FINAL_DRAFT_COMPLETION」、「hearing-bootstrap」、「{\"round\":1}」。
+    // 上游调用：「HearingCollaborationIntegrationTest.completeHearingOrchestratesAnExistingTemporalDraftOnlyOnce()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「HearingCollaborationIntegrationTest.completeHearingOrchestratesAnExistingTemporalDraftOnlyOnce()」的下游是被测服务、仓储或外部客户端替身；「assertThat、verifyNoInteractions」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「HearingCollaborationIntegrationTest.completeHearingOrchestratesAnExistingTemporalDraftOnlyOnce()」守住「共享小法庭」的可执行规格，尤其防止 「CASE_FINAL_DRAFT_COMPLETION」、「HEARING_CASE_FINAL_DRAFT_COMPLETION」、「hearing-bootstrap」、「{\"round\":1}」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
+    // Java 语法：Optional 表示结果可能不存在；orElseThrow 会把空值分支转换为明确异常。
     @Test
     void completeHearingOrchestratesAnExistingTemporalDraftOnlyOnce() {
         seedHearing("CASE_FINAL_DRAFT_COMPLETION");
@@ -605,6 +664,11 @@ class HearingCollaborationIntegrationTest {
         verifyNoInteractions(hearingAgentClient);
     }
 
+    // 所属模块：【共享小法庭 / 自动化测试层】「HearingCollaborationIntegrationTest.completeHearingSynchronouslyCreatesReviewGateForImmediateReviewConfirmation()」。
+    // 具体功能：「HearingCollaborationIntegrationTest.completeHearingSynchronouslyCreatesReviewGateForImmediateReviewConfirmation()」：复现“核对完整业务行为（场景方法「completeHearingSynchronouslyCreatesReviewGateForImmediateReviewConfirmation」）”场景：驱动 「hearingStateRepository.saveAndFlush」、「roundService.completeNext」、「roundService.completeHearing」、「reviewTaskRepository.findFirstByCaseIdOrderByCreatedAtDesc」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_FINAL_REVIEW_GATE_SYNC」、「HEARING_CASE_FINAL_REVIEW_GATE_SYNC」、「hearing-bootstrap」、「{\"round\":1}」。
+    // 上游调用：「HearingCollaborationIntegrationTest.completeHearingSynchronouslyCreatesReviewGateForImmediateReviewConfirmation()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「HearingCollaborationIntegrationTest.completeHearingSynchronouslyCreatesReviewGateForImmediateReviewConfirmation()」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「HearingCollaborationIntegrationTest.completeHearingSynchronouslyCreatesReviewGateForImmediateReviewConfirmation()」守住「共享小法庭」的可执行规格，尤其防止 「CASE_FINAL_REVIEW_GATE_SYNC」、「HEARING_CASE_FINAL_REVIEW_GATE_SYNC」、「hearing-bootstrap」、「{\"round\":1}」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void completeHearingSynchronouslyCreatesReviewGateForImmediateReviewConfirmation() {
         seedHearing("CASE_FINAL_REVIEW_GATE_SYNC");
@@ -651,6 +715,11 @@ class HearingCollaborationIntegrationTest {
                                         .isEqualTo(CaseStatus.WAITING_HUMAN_REVIEW));
     }
 
+    // 所属模块：【共享小法庭 / 自动化测试层】「HearingCollaborationIntegrationTest.completeHearingRecoversDraftReadyCaseWithoutWaitingForScheduler()」。
+    // 具体功能：「HearingCollaborationIntegrationTest.completeHearingRecoversDraftReadyCaseWithoutWaitingForScheduler()」：复现“核对完整业务行为（场景方法「completeHearingRecoversDraftReadyCaseWithoutWaitingForScheduler」）”场景：驱动 「hearingStateRepository.saveAndFlush」、「roundService.completeNext」、「draftRepository.saveAndFlush」、「roundService.status」，再用 「assertThat」、「verifyNoInteractions」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_FINAL_REVIEW_GATE_DRAFT_READY」、「HEARING_CASE_FINAL_REVIEW_GATE_DRAFT_READY」、「hearing-bootstrap」、「{\"round\":1}」。
+    // 上游调用：「HearingCollaborationIntegrationTest.completeHearingRecoversDraftReadyCaseWithoutWaitingForScheduler()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「HearingCollaborationIntegrationTest.completeHearingRecoversDraftReadyCaseWithoutWaitingForScheduler()」的下游是被测服务、仓储或外部客户端替身；「assertThat、verifyNoInteractions」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「HearingCollaborationIntegrationTest.completeHearingRecoversDraftReadyCaseWithoutWaitingForScheduler()」守住「共享小法庭」的可执行规格，尤其防止 「CASE_FINAL_REVIEW_GATE_DRAFT_READY」、「HEARING_CASE_FINAL_REVIEW_GATE_DRAFT_READY」、「hearing-bootstrap」、「{\"round\":1}」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void completeHearingRecoversDraftReadyCaseWithoutWaitingForScheduler() {
         seedHearing("CASE_FINAL_REVIEW_GATE_DRAFT_READY");
@@ -717,6 +786,11 @@ class HearingCollaborationIntegrationTest {
         verifyNoInteractions(hearingAgentClient);
     }
 
+    // 所属模块：【共享小法庭 / 自动化测试层】「HearingCollaborationIntegrationTest.seededTemporalFinalDraftCanBeAdoptedAfterFormalJuryA2AReport()」。
+    // 具体功能：「HearingCollaborationIntegrationTest.seededTemporalFinalDraftCanBeAdoptedAfterFormalJuryA2AReport()」：复现“核对完整业务行为（场景方法「seededTemporalFinalDraftCanBeAdoptedAfterFormalJuryA2AReport」）”场景：驱动 「hearingStateRepository.saveAndFlush」、「roundService.completeNext」、「a2aMessageService.record」、「roundService.completeHearing」，再用 「assertThat」、「verifyNoInteractions」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_FINAL_DRAFT_JURY_REPORT」、「HEARING_CASE_FINAL_DRAFT_JURY_REPORT」、「hearing-bootstrap」、「{\"round\":1}」。
+    // 上游调用：「HearingCollaborationIntegrationTest.seededTemporalFinalDraftCanBeAdoptedAfterFormalJuryA2AReport()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「HearingCollaborationIntegrationTest.seededTemporalFinalDraftCanBeAdoptedAfterFormalJuryA2AReport()」的下游是被测服务、仓储或外部客户端替身；「assertThat、verifyNoInteractions」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「HearingCollaborationIntegrationTest.seededTemporalFinalDraftCanBeAdoptedAfterFormalJuryA2AReport()」守住「共享小法庭」的可执行规格，尤其防止 「CASE_FINAL_DRAFT_JURY_REPORT」、「HEARING_CASE_FINAL_DRAFT_JURY_REPORT」、「hearing-bootstrap」、「{\"round\":1}」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void seededTemporalFinalDraftCanBeAdoptedAfterFormalJuryA2AReport() {
         seedHearing("CASE_FINAL_DRAFT_JURY_REPORT");
@@ -777,6 +851,12 @@ class HearingCollaborationIntegrationTest {
         verifyNoInteractions(hearingAgentClient);
     }
 
+    // 所属模块：【共享小法庭 / 自动化测试层】「HearingCollaborationIntegrationTest.finalRoundRequiresAFinalDraftVersionInsteadOfReusingEarlierAnalysisDrafts()」。
+    // 具体功能：「HearingCollaborationIntegrationTest.finalRoundRequiresAFinalDraftVersionInsteadOfReusingEarlierAnalysisDrafts()」：复现“核对完整业务行为（场景方法「finalRoundRequiresAFinalDraftVersionInsteadOfReusingEarlierAnalysisDrafts」）”场景：驱动 「hearingStateRepository.saveAndFlush」、「draftRepository.saveAndFlush」、「roundService.completeNext」、「roundService.status」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_FINAL_DRAFT_VERSION」、「HEARING_CASE_FINAL_DRAFT_VERSION」、「hearing-bootstrap」、「DRAFT_CASE_FINAL_DRAFT_VERSION_ROUND_1」。
+    // 上游调用：「HearingCollaborationIntegrationTest.finalRoundRequiresAFinalDraftVersionInsteadOfReusingEarlierAnalysisDrafts()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「HearingCollaborationIntegrationTest.finalRoundRequiresAFinalDraftVersionInsteadOfReusingEarlierAnalysisDrafts()」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「HearingCollaborationIntegrationTest.finalRoundRequiresAFinalDraftVersionInsteadOfReusingEarlierAnalysisDrafts()」守住「共享小法庭」的可执行规格，尤其防止 「CASE_FINAL_DRAFT_VERSION」、「HEARING_CASE_FINAL_DRAFT_VERSION」、「hearing-bootstrap」、「DRAFT_CASE_FINAL_DRAFT_VERSION_ROUND_1」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
+    // Java 语法：Optional 表示结果可能不存在；orElseThrow 会把空值分支转换为明确异常。
     @Test
     void finalRoundRequiresAFinalDraftVersionInsteadOfReusingEarlierAnalysisDrafts() {
         seedHearing("CASE_FINAL_DRAFT_VERSION");
@@ -837,6 +917,11 @@ class HearingCollaborationIntegrationTest {
                 .isEqualTo(4);
     }
 
+    // 所属模块：【共享小法庭 / 自动化测试层】「HearingCollaborationIntegrationTest.workflowSignalWaitsUntilCourtOrchestrationCompletes()」。
+    // 具体功能：「HearingCollaborationIntegrationTest.workflowSignalWaitsUntilCourtOrchestrationCompletes()」：复现“核对完整业务行为（场景方法「workflowSignalWaitsUntilCourtOrchestrationCompletes」）”场景：驱动 「roundService.completeNext」，再用 「verify」、「verifyNoInteractions」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_COURT_SIGNAL_ORDER」、「{\"round\":1}」。
+    // 上游调用：「HearingCollaborationIntegrationTest.workflowSignalWaitsUntilCourtOrchestrationCompletes()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「HearingCollaborationIntegrationTest.workflowSignalWaitsUntilCourtOrchestrationCompletes()」的下游是被测服务、仓储或外部客户端替身；「verify、verifyNoInteractions」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「HearingCollaborationIntegrationTest.workflowSignalWaitsUntilCourtOrchestrationCompletes()」守住「共享小法庭」的可执行规格，尤其防止 「CASE_COURT_SIGNAL_ORDER」、「{\"round\":1}」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void workflowSignalWaitsUntilCourtOrchestrationCompletes() {
         seedHearing("CASE_COURT_SIGNAL_ORDER");
@@ -863,6 +948,12 @@ class HearingCollaborationIntegrationTest {
                 .roundCompletedAfterCommit("CASE_COURT_SIGNAL_ORDER", 1, false);
     }
 
+    // 所属模块：【共享小法庭 / 自动化测试层】「HearingCollaborationIntegrationTest.partyRoundSubmissionsWaitForBothSidesBeforeTriggeringJudge()」。
+    // 具体功能：「HearingCollaborationIntegrationTest.partyRoundSubmissionsWaitForBothSidesBeforeTriggeringJudge()」：复现“核对完整业务行为（场景方法「partyRoundSubmissionsWaitForBothSidesBeforeTriggeringJudge」）”场景：驱动 「roundService.submitParty」、「roundRepository.findByCaseIdAndRoundNo」，再用 「assertThat」、「verifyNoInteractions」、「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_PARTY_ROUND」、「BOTH_PARTIES_SUBMITTED」、「双方本轮陈述已提交并封存」、「鍙」。
+    // 上游调用：「HearingCollaborationIntegrationTest.partyRoundSubmissionsWaitForBothSidesBeforeTriggeringJudge()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「HearingCollaborationIntegrationTest.partyRoundSubmissionsWaitForBothSidesBeforeTriggeringJudge()」的下游是被测服务、仓储或外部客户端替身；「assertThat、verifyNoInteractions、verify」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「HearingCollaborationIntegrationTest.partyRoundSubmissionsWaitForBothSidesBeforeTriggeringJudge()」守住「共享小法庭」的可执行规格，尤其防止 「CASE_PARTY_ROUND」、「BOTH_PARTIES_SUBMITTED」、「双方本轮陈述已提交并封存」、「鍙」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
+    // Java 语法：Optional 表示结果可能不存在；orElseThrow 会把空值分支转换为明确异常。
     @Test
     void partyRoundSubmissionsWaitForBothSidesBeforeTriggeringJudge() {
         seedHearing("CASE_PARTY_ROUND");
@@ -912,6 +1003,11 @@ class HearingCollaborationIntegrationTest {
                 .roundCompletedAfterCommit("CASE_PARTY_ROUND", 1, false);
     }
 
+    // 所属模块：【共享小法庭 / 自动化测试层】「HearingCollaborationIntegrationTest.bothPartySubmissionsOpenTheNextRoundUntilTheFinalRound()」。
+    // 具体功能：「HearingCollaborationIntegrationTest.bothPartySubmissionsOpenTheNextRoundUntilTheFinalRound()」：复现“核对完整业务行为（场景方法「bothPartySubmissionsOpenTheNextRoundUntilTheFinalRound」）”场景：驱动 「roundService.submitParty」、「roundRepository.findAllByCaseIdOrderByRoundNoAsc」，再用 「assertThat」、「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_PARTY_ROUND_CONTINUES」、「roundNo」、「roundStatus」。
+    // 上游调用：「HearingCollaborationIntegrationTest.bothPartySubmissionsOpenTheNextRoundUntilTheFinalRound()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「HearingCollaborationIntegrationTest.bothPartySubmissionsOpenTheNextRoundUntilTheFinalRound()」的下游是被测服务、仓储或外部客户端替身；「assertThat、verify」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「HearingCollaborationIntegrationTest.bothPartySubmissionsOpenTheNextRoundUntilTheFinalRound()」守住「共享小法庭」的可执行规格，尤其防止 「CASE_PARTY_ROUND_CONTINUES」、「roundNo」、「roundStatus」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void bothPartySubmissionsOpenTheNextRoundUntilTheFinalRound() {
         seedHearing("CASE_PARTY_ROUND_CONTINUES");
@@ -947,6 +1043,11 @@ class HearingCollaborationIntegrationTest {
                 .roundCompletedAfterCommit("CASE_PARTY_ROUND_CONTINUES", 1, false);
     }
 
+    // 所属模块：【共享小法庭 / 自动化测试层】「HearingCollaborationIntegrationTest.dueRoundAutoSubmitsMissingPartyAndTriggersJudgeOnce()」。
+    // 具体功能：「HearingCollaborationIntegrationTest.dueRoundAutoSubmitsMissingPartyAndTriggersJudgeOnce()」：复现“核对完整业务行为（场景方法「dueRoundAutoSubmitsMissingPartyAndTriggersJudgeOnce」）”场景：驱动 「roundService.submitParty」、「roundService.expireDueRounds」、「roundService.list」、「submissionRepository.findAllByCaseIdAndRoundNoOrderBySubmittedAtAsc」，再用 「assertThat」、「verifyNoInteractions」、「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_ROUND_TIMEOUT」、「2026-07-03T01:05:01Z」、「ROUND_DEADLINE_EXPIRED」、「AUTO_TIMEOUT」。
+    // 上游调用：「HearingCollaborationIntegrationTest.dueRoundAutoSubmitsMissingPartyAndTriggersJudgeOnce()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「HearingCollaborationIntegrationTest.dueRoundAutoSubmitsMissingPartyAndTriggersJudgeOnce()」的下游是被测服务、仓储或外部客户端替身；「assertThat、verifyNoInteractions、verify」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「HearingCollaborationIntegrationTest.dueRoundAutoSubmitsMissingPartyAndTriggersJudgeOnce()」守住「共享小法庭」的可执行规格，尤其防止 「CASE_ROUND_TIMEOUT」、「2026-07-03T01:05:01Z」、「ROUND_DEADLINE_EXPIRED」、「AUTO_TIMEOUT」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void dueRoundAutoSubmitsMissingPartyAndTriggersJudgeOnce() {
         seedHearing("CASE_ROUND_TIMEOUT");
@@ -988,6 +1089,12 @@ class HearingCollaborationIntegrationTest {
                 .roundCompletedAfterCommit("CASE_ROUND_TIMEOUT", 1, false);
     }
 
+    // 所属模块：【共享小法庭 / 自动化测试层】「HearingCollaborationIntegrationTest.roomMessageStatementsFromBothPartiesCloseRoundAndOpenNextRound()」。
+    // 具体功能：「HearingCollaborationIntegrationTest.roomMessageStatementsFromBothPartiesCloseRoundAndOpenNextRound()」：复现“核对完整业务行为（场景方法「roomMessageStatementsFromBothPartiesCloseRoundAndOpenNextRound」）”场景：驱动 「roundService.ensureInitialRoundOpen」、「roundService.recordPartyMessageSubmission」、「roundRepository.findByCaseIdAndRoundNo」、「submissionRepository.findAllByCaseIdAndRoundNoOrderBySubmittedAtAsc」，再用 「assertThat」、「verifyNoInteractions」、「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_ROOM_STATEMENT」、「hearing-controller」、「MESSAGE_USER_HEARING_TEXT」、「用户补充：请核验签收人身份和投递照片。」。
+    // 上游调用：「HearingCollaborationIntegrationTest.roomMessageStatementsFromBothPartiesCloseRoundAndOpenNextRound()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「HearingCollaborationIntegrationTest.roomMessageStatementsFromBothPartiesCloseRoundAndOpenNextRound()」的下游是被测服务、仓储或外部客户端替身；「assertThat、verifyNoInteractions、verify」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「HearingCollaborationIntegrationTest.roomMessageStatementsFromBothPartiesCloseRoundAndOpenNextRound()」守住「共享小法庭」的可执行规格，尤其防止 「CASE_ROOM_STATEMENT」、「hearing-controller」、「MESSAGE_USER_HEARING_TEXT」、「用户补充：请核验签收人身份和投递照片。」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
+    // Java 语法：Optional 表示结果可能不存在；orElseThrow 会把空值分支转换为明确异常。
     @Test
     void roomMessageStatementsFromBothPartiesCloseRoundAndOpenNextRound() {
         seedHearing("CASE_ROOM_STATEMENT");
@@ -1049,6 +1156,12 @@ class HearingCollaborationIntegrationTest {
                 .roundCompletedAfterCommit("CASE_ROOM_STATEMENT", 1, false);
     }
 
+    // 所属模块：【共享小法庭 / 自动化测试层】「HearingCollaborationIntegrationTest.secondRoundEvidenceExplanationRevisesActiveEvidenceDossierVersion()」。
+    // 具体功能：「HearingCollaborationIntegrationTest.secondRoundEvidenceExplanationRevisesActiveEvidenceDossierVersion()」：复现“核对完整业务行为（场景方法「secondRoundEvidenceExplanationRevisesActiveEvidenceDossierVersion」）”场景：驱动 「evidenceDossierRepository.saveAndFlush」、「roundService.ensureInitialRoundOpen」、「roundService.submitParty」、「evidenceDossierRepository.findTopByCaseIdOrderByDossierVersionDesc」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_EVIDENCE_REVISION」、「EVIDENCE_DOSSIER_REVISION_V1」、「evidence-clerk」、「{\"evidence_count\":1}」。
+    // 上游调用：「HearingCollaborationIntegrationTest.secondRoundEvidenceExplanationRevisesActiveEvidenceDossierVersion()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「HearingCollaborationIntegrationTest.secondRoundEvidenceExplanationRevisesActiveEvidenceDossierVersion()」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「HearingCollaborationIntegrationTest.secondRoundEvidenceExplanationRevisesActiveEvidenceDossierVersion()」守住「共享小法庭」的可执行规格，尤其防止 「CASE_EVIDENCE_REVISION」、「EVIDENCE_DOSSIER_REVISION_V1」、「evidence-clerk」、「{\"evidence_count\":1}」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
+    // Java 语法：Optional 表示结果可能不存在；orElseThrow 会把空值分支转换为明确异常。
     @Test
     void secondRoundEvidenceExplanationRevisesActiveEvidenceDossierVersion() {
         seedHearing("CASE_EVIDENCE_REVISION");
@@ -1130,6 +1243,12 @@ class HearingCollaborationIntegrationTest {
                         });
     }
 
+    // 所属模块：【共享小法庭 / 自动化测试层】「HearingCollaborationIntegrationTest.expireDueRoundsSkipsCasesThatAlreadyLeftTheHearingPhase()」。
+    // 具体功能：「HearingCollaborationIntegrationTest.expireDueRoundsSkipsCasesThatAlreadyLeftTheHearingPhase()」：复现“核对完整业务行为（场景方法「expireDueRoundsSkipsCasesThatAlreadyLeftTheHearingPhase」）”场景：驱动 「caseRepository.saveAndFlush」、「roundRepository.saveAndFlush」、「roundService.expireDueRounds」、「roundRepository.findById」，再用 「assertThat」、「verifyNoInteractions」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_POST_HEARING_DUE」、「ORDER-CASE_POST_HEARING_DUE」、「LOG-CASE_POST_HEARING_DUE」、「user-local」。
+    // 上游调用：「HearingCollaborationIntegrationTest.expireDueRoundsSkipsCasesThatAlreadyLeftTheHearingPhase()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「HearingCollaborationIntegrationTest.expireDueRoundsSkipsCasesThatAlreadyLeftTheHearingPhase()」的下游是被测服务、仓储或外部客户端替身；「assertThat、verifyNoInteractions」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「HearingCollaborationIntegrationTest.expireDueRoundsSkipsCasesThatAlreadyLeftTheHearingPhase()」守住「共享小法庭」的可执行规格，尤其防止 「CASE_POST_HEARING_DUE」、「ORDER-CASE_POST_HEARING_DUE」、「LOG-CASE_POST_HEARING_DUE」、「user-local」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
+    // Java 语法：Optional 表示结果可能不存在；orElseThrow 会把空值分支转换为明确异常。
     @Test
     void expireDueRoundsSkipsCasesThatAlreadyLeftTheHearingPhase() {
         caseRepository.saveAndFlush(
@@ -1174,6 +1293,11 @@ class HearingCollaborationIntegrationTest {
         verifyNoInteractions(hearingWorkflowCoordinator);
     }
 
+    // 所属模块：【共享小法庭 / 自动化测试层】「HearingCollaborationIntegrationTest.seedHearing(String)」。
+    // 具体功能：「HearingCollaborationIntegrationTest.seedHearing(String)」：作为测试辅助方法为“核对完整业务行为（场景方法「seedHearing」）”组装或读取「caseRepository.saveAndFlush」、「roomRepository.saveAndFlush」、「FulfillmentCaseEntity.imported」、「OffsetDateTime.parse」，供本测试类的场景方法复用。
+    // 上游调用：「HearingCollaborationIntegrationTest.seedHearing(String)」由本测试类中的 「HearingCollaborationIntegrationTest.onlyBothConfirmationsOnTheCurrentSettlementVersionConverge」、「HearingCollaborationIntegrationTest.theThirdCompletedRoundForcesConvergenceWithoutExtendingTheWindow」、「HearingCollaborationIntegrationTest.factsSufficientHintDoesNotCloseTheHearingBeforeTheThirdStatementRound」、「HearingCollaborationIntegrationTest.openingHearingCreatesInitialRoundWithoutAskingJudgeBeforeBootstrap」 调用。
+    // 下游影响：「HearingCollaborationIntegrationTest.seedHearing(String)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「HearingCollaborationIntegrationTest.seedHearing(String)」守住「共享小法庭」的可执行规格，尤其防止 「ORDER-」、「LOG-」、「user-local」、「merchant-local」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private void seedHearing(String caseId) {
         caseRepository.saveAndFlush(
                 FulfillmentCaseEntity.imported(
@@ -1203,12 +1327,24 @@ class HearingCollaborationIntegrationTest {
                         "system"));
     }
 
+    // 所属模块：【共享小法庭 / 自动化测试层】「HearingCollaborationIntegrationTest.attachHearingWorkflow(String)」。
+    // 具体功能：「HearingCollaborationIntegrationTest.attachHearingWorkflow(String)」：作为测试辅助方法为“核对完整业务行为（场景方法「attachHearingWorkflow」）”组装或读取「caseRepository.findById」、「caseRepository.saveAndFlush」、「dispute.attachHearingWorkflow」，供本测试类的场景方法复用。
+    // 上游调用：「HearingCollaborationIntegrationTest.attachHearingWorkflow(String)」由本测试类中的 「HearingCollaborationIntegrationTest.completeHearingDoesNotGenerateADraftWhileTemporalIsDrafting」、「HearingCollaborationIntegrationTest.completeHearingOrchestratesAnExistingTemporalDraftOnlyOnce」、「HearingCollaborationIntegrationTest.completeHearingSynchronouslyCreatesReviewGateForImmediateReviewConfirmation」、「HearingCollaborationIntegrationTest.completeHearingRecoversDraftReadyCaseWithoutWaitingForScheduler」 调用。
+    // 下游影响：「HearingCollaborationIntegrationTest.attachHearingWorkflow(String)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「HearingCollaborationIntegrationTest.attachHearingWorkflow(String)」守住「共享小法庭」的可执行规格，尤其防止 「hearing-window-」、「hearing-bootstrap」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
+    // Java 语法：Optional 表示结果可能不存在；orElseThrow 会把空值分支转换为明确异常。
     private void attachHearingWorkflow(String caseId) {
         FulfillmentCaseEntity dispute = caseRepository.findById(caseId).orElseThrow();
         dispute.attachHearingWorkflow("hearing-window-" + caseId, "hearing-bootstrap");
         caseRepository.saveAndFlush(dispute);
     }
 
+    // 所属模块：【共享小法庭 / 自动化测试层】「HearingCollaborationIntegrationTest.seedTemporalFinalDraft(String)」。
+    // 具体功能：「HearingCollaborationIntegrationTest.seedTemporalFinalDraft(String)」：作为测试辅助方法为“核对完整业务行为（场景方法「seedTemporalFinalDraft」）”组装或读取「IllegalStateException」、「BigDecimal」 输入夹具，供本测试类的场景方法复用。
+    // 上游调用：「HearingCollaborationIntegrationTest.seedTemporalFinalDraft(String)」由本测试类中的 「HearingCollaborationIntegrationTest.completeHearingOrchestratesAnExistingTemporalDraftOnlyOnce」、「HearingCollaborationIntegrationTest.completeHearingSynchronouslyCreatesReviewGateForImmediateReviewConfirmation」、「HearingCollaborationIntegrationTest.seededTemporalFinalDraftCanBeAdoptedAfterFormalJuryA2AReport」、「HearingCollaborationIntegrationTest.finalRoundRequiresAFinalDraftVersionInsteadOfReusingEarlierAnalysisDrafts」 调用。
+    // 下游影响：「HearingCollaborationIntegrationTest.seedTemporalFinalDraft(String)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「HearingCollaborationIntegrationTest.seedTemporalFinalDraft(String)」守住「共享小法庭」的可执行规格，尤其防止 「DRAFT_TEMPORAL_C6_」、「[\"三轮庭审已经完整封存\"]」、「[\"证据矩阵已由证据书记官复核\"]」、「[\"平台规则将在人工审核阶段最终确认\"]」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
+    // Java 语法：Optional 表示结果可能不存在；orElseThrow 会把空值分支转换为明确异常。
     private String seedTemporalFinalDraft(String caseId) {
         HearingStateEntity hearingState =
                 hearingStateRepository
@@ -1237,6 +1373,11 @@ class HearingCollaborationIntegrationTest {
         return draftId;
     }
 
+    // 所属模块：【共享小法庭 / 自动化测试层】「HearingCollaborationIntegrationTest.completeCourtOrchestration(String,int,boolean)」。
+    // 具体功能：「HearingCollaborationIntegrationTest.completeCourtOrchestration(String,int,boolean)」：作为测试辅助方法为“核对完整业务行为（场景方法「completeCourtOrchestration」）”组装或读取「ArgumentCaptor.forClass」、「completion.capture」、「completion.getValue」、「verify(hearingCourtOrchestrator).afterRoundClosedAfterCommit」，供本测试类的场景方法复用。
+    // 上游调用：「HearingCollaborationIntegrationTest.completeCourtOrchestration(String,int,boolean)」由本测试类中的 「HearingCollaborationIntegrationTest.factsSufficientHintDoesNotCloseTheHearingBeforeTheThirdStatementRound」、「HearingCollaborationIntegrationTest.partyRoundSubmissionsWaitForBothSidesBeforeTriggeringJudge」、「HearingCollaborationIntegrationTest.bothPartySubmissionsOpenTheNextRoundUntilTheFinalRound」、「HearingCollaborationIntegrationTest.dueRoundAutoSubmitsMissingPartyAndTriggersJudgeOnce」 调用。
+    // 下游影响：「HearingCollaborationIntegrationTest.completeCourtOrchestration(String,int,boolean)」的下游是被测服务、仓储或外部客户端替身；「verify、verifyNoInteractions」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「HearingCollaborationIntegrationTest.completeCourtOrchestration(String,int,boolean)」守住「共享小法庭」的可执行规格，尤其防止 「TRACE_HEARING_ROUND_」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private void completeCourtOrchestration(String caseId, int roundNo, boolean finalRound) {
         ArgumentCaptor<Runnable> completion = ArgumentCaptor.forClass(Runnable.class);
         verify(hearingCourtOrchestrator)
@@ -1250,8 +1391,18 @@ class HearingCollaborationIntegrationTest {
         completion.getValue().run();
     }
 
+    // 所属模块：【共享小法庭 / 自动化测试层】类型「FixedClockConfiguration」。
+    // 类型职责：在 Spring 启动期装配Fixed时钟所需 Bean 和基础设施参数；本类型显式提供 「mutableClock」、「objectMapper」、「transactionTemplate」。
+    // 协作关系：由 JUnit 发现并执行其中带 @Test 的场景。
+    // 边界意义：最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
+    // Java 语法：class 同时封装状态与方法；final 依赖通过构造器注入后不可重新指向。
     @TestConfiguration(proxyBeanMethods = false)
     static class FixedClockConfiguration {
+        // 所属模块：【共享小法庭 / 自动化测试层】「HearingCollaborationIntegrationTest.FixedClockConfiguration.mutableClock()」。
+        // 具体功能：「HearingCollaborationIntegrationTest.FixedClockConfiguration.mutableClock()」：作为测试辅助方法为“核对完整业务行为（场景方法「mutableClock」）”组装或读取「MutableClock」 输入夹具，供本测试类的场景方法复用。
+        // 上游调用：「HearingCollaborationIntegrationTest.FixedClockConfiguration.mutableClock()」由 JUnit 生命周期或本测试类的场景方法调用。
+        // 下游影响：「HearingCollaborationIntegrationTest.FixedClockConfiguration.mutableClock()」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+        // 系统意义：「HearingCollaborationIntegrationTest.FixedClockConfiguration.mutableClock()」守住「共享小法庭」的可执行规格，尤其防止 「2026-07-03T01:00:00Z」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
         @Bean
         @Primary
         MutableClock mutableClock() {
@@ -1259,40 +1410,84 @@ class HearingCollaborationIntegrationTest {
                     Instant.parse("2026-07-03T01:00:00Z"), ZoneOffset.UTC);
         }
 
+        // 所属模块：【共享小法庭 / 自动化测试层】「HearingCollaborationIntegrationTest.FixedClockConfiguration.objectMapper()」。
+        // 具体功能：「HearingCollaborationIntegrationTest.FixedClockConfiguration.objectMapper()」：作为测试辅助方法为“核对完整业务行为（场景方法「objectMapper」）”组装或读取「ObjectMapper」 输入夹具，供本测试类的场景方法复用。
+        // 上游调用：「HearingCollaborationIntegrationTest.FixedClockConfiguration.objectMapper()」由 JUnit 生命周期或本测试类的场景方法调用。
+        // 下游影响：「HearingCollaborationIntegrationTest.FixedClockConfiguration.objectMapper()」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+        // 系统意义：「HearingCollaborationIntegrationTest.FixedClockConfiguration.objectMapper()」守住「共享小法庭」的可执行规格；后续重构若破坏契约会在进入集成环境前失败。
         @Bean
         ObjectMapper objectMapper() {
             return new ObjectMapper().findAndRegisterModules();
         }
 
+        // 所属模块：【共享小法庭 / 自动化测试层】「HearingCollaborationIntegrationTest.FixedClockConfiguration.transactionTemplate(PlatformTransactionManager)」。
+        // 具体功能：「HearingCollaborationIntegrationTest.FixedClockConfiguration.transactionTemplate(PlatformTransactionManager)」：作为测试辅助方法为“核对完整业务行为（场景方法「transactionTemplate」）”组装或读取「TransactionTemplate」 输入夹具，供本测试类的场景方法复用。
+        // 上游调用：「HearingCollaborationIntegrationTest.FixedClockConfiguration.transactionTemplate(PlatformTransactionManager)」由 JUnit 生命周期或本测试类的场景方法调用。
+        // 下游影响：「HearingCollaborationIntegrationTest.FixedClockConfiguration.transactionTemplate(PlatformTransactionManager)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+        // 系统意义：「HearingCollaborationIntegrationTest.FixedClockConfiguration.transactionTemplate(PlatformTransactionManager)」守住「共享小法庭」的可执行规格；后续重构若破坏契约会在进入集成环境前失败。
         @Bean
         TransactionTemplate transactionTemplate(PlatformTransactionManager transactionManager) {
             return new TransactionTemplate(transactionManager);
         }
     }
 
+    // 所属模块：【共享小法庭 / 自动化测试层】类型「MutableClock」。
+    // 类型职责：承载Mutable时钟在当前业务模块中的规则与协作边界；本类型显式提供 「MutableClock」、「set」、「getZone」、「withZone」、「instant」。
+    // 协作关系：主要由 「FixedClockConfiguration.mutableClock」、「HearingCollaborationIntegrationTest.dueRoundAutoSubmitsMissingPartyAndTriggersJudgeOnce」、「HearingCollaborationIntegrationTest.setUp」 使用。
+    // 边界意义：最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
+    // Java 语法：class 同时封装状态与方法；final 依赖通过构造器注入后不可重新指向。
     static final class MutableClock extends Clock {
         private final AtomicReference<Instant> instant;
         private final ZoneId zone;
 
+        // 所属模块：【共享小法庭 / 自动化测试层】「HearingCollaborationIntegrationTest.MutableClock.MutableClock(Instant,ZoneId)」。
+        // 具体功能：「HearingCollaborationIntegrationTest.MutableClock.MutableClock(Instant,ZoneId)」：作为测试辅助方法为“核对完整业务行为（场景方法「MutableClock」）”组装或读取「AtomicReference」 输入夹具，供本测试类的场景方法复用。
+        // 上游调用：「HearingCollaborationIntegrationTest.MutableClock.MutableClock(Instant,ZoneId)」由本测试类中的 「FixedClockConfiguration.mutableClock」、「MutableClock.withZone」 调用。
+        // 下游影响：「HearingCollaborationIntegrationTest.MutableClock.MutableClock(Instant,ZoneId)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+        // 系统意义：「HearingCollaborationIntegrationTest.MutableClock.MutableClock(Instant,ZoneId)」守住「共享小法庭」的可执行规格；后续重构若破坏契约会在进入集成环境前失败。
+        // Java 语法：构造器名称与类名相同且没有返回类型；参数通常由 Spring 按类型注入。
         MutableClock(Instant initial, ZoneId zone) {
             this.instant = new AtomicReference<>(initial);
             this.zone = zone;
         }
 
+        // 所属模块：【共享小法庭 / 自动化测试层】「HearingCollaborationIntegrationTest.MutableClock.set(Instant)」。
+        // 具体功能：「HearingCollaborationIntegrationTest.MutableClock.set(Instant)」：作为测试辅助方法为“核对完整业务行为（场景方法「set」）”组装或读取测试夹具数据，供本测试类的场景方法复用。
+        // 上游调用：「HearingCollaborationIntegrationTest.MutableClock.set(Instant)」由本测试类中的 「HearingCollaborationIntegrationTest.setUp」、「HearingCollaborationIntegrationTest.dueRoundAutoSubmitsMissingPartyAndTriggersJudgeOnce」 调用。
+        // 下游影响：「HearingCollaborationIntegrationTest.MutableClock.set(Instant)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+        // 系统意义：「HearingCollaborationIntegrationTest.MutableClock.set(Instant)」守住「共享小法庭」的可执行规格；后续重构若破坏契约会在进入集成环境前失败。
         void set(Instant next) {
             instant.set(next);
         }
 
+        // 所属模块：【共享小法庭 / 自动化测试层】「HearingCollaborationIntegrationTest.MutableClock.getZone()」。
+        // 具体功能：「HearingCollaborationIntegrationTest.MutableClock.getZone()」：作为「MutableClock」测试替身实现「getZone」：返回预设值 「zone」，让被测编排能够观察到确定、可断言的协作者行为。
+        // 上游调用：「HearingCollaborationIntegrationTest.MutableClock.getZone()」由 JUnit 生命周期或本测试类的场景方法调用。
+        // 下游影响：「HearingCollaborationIntegrationTest.MutableClock.getZone()」下游仅修改测试内存状态或返回桩值：返回预设值 「zone」；场景结束后由外层测试读取这些记录完成断言。
+        // 系统意义：「HearingCollaborationIntegrationTest.MutableClock.getZone()」守住「共享小法庭」的可执行规格；后续重构若破坏契约会在进入集成环境前失败。
+        // Java 语法：@Override 要求签名与接口/父类一致，编译器会在方法名或参数写错时直接报错。
         @Override
         public ZoneId getZone() {
             return zone;
         }
 
+        // 所属模块：【共享小法庭 / 自动化测试层】「HearingCollaborationIntegrationTest.MutableClock.withZone(ZoneId)」。
+        // 具体功能：「HearingCollaborationIntegrationTest.MutableClock.withZone(ZoneId)」：作为「MutableClock」测试替身实现「withZone」：返回预设值 「newMutableClock(instant.get(),zone)」，让被测编排能够观察到确定、可断言的协作者行为。
+        // 上游调用：「HearingCollaborationIntegrationTest.MutableClock.withZone(ZoneId)」由 JUnit 生命周期或本测试类的场景方法调用。
+        // 下游影响：「HearingCollaborationIntegrationTest.MutableClock.withZone(ZoneId)」下游仅修改测试内存状态或返回桩值：返回预设值 「newMutableClock(instant.get(),zone)」；场景结束后由外层测试读取这些记录完成断言。
+        // 系统意义：「HearingCollaborationIntegrationTest.MutableClock.withZone(ZoneId)」守住「共享小法庭」的可执行规格；后续重构若破坏契约会在进入集成环境前失败。
+        // Java 语法：@Override 要求签名与接口/父类一致，编译器会在方法名或参数写错时直接报错。
         @Override
         public Clock withZone(ZoneId zone) {
             return new MutableClock(instant.get(), zone);
         }
 
+        // 所属模块：【共享小法庭 / 自动化测试层】「HearingCollaborationIntegrationTest.MutableClock.instant()」。
+        // 具体功能：「HearingCollaborationIntegrationTest.MutableClock.instant()」：作为「MutableClock」测试替身实现「instant」：返回预设值 「instant.get()」，让被测编排能够观察到确定、可断言的协作者行为。
+        // 上游调用：「HearingCollaborationIntegrationTest.MutableClock.instant()」由 JUnit 生命周期或本测试类的场景方法调用。
+        // 下游影响：「HearingCollaborationIntegrationTest.MutableClock.instant()」下游仅修改测试内存状态或返回桩值：返回预设值 「instant.get()」；场景结束后由外层测试读取这些记录完成断言。
+        // 系统意义：「HearingCollaborationIntegrationTest.MutableClock.instant()」守住「共享小法庭」的可执行规格；后续重构若破坏契约会在进入集成环境前失败。
+        // Java 语法：@Override 要求签名与接口/父类一致，编译器会在方法名或参数写错时直接报错。
         @Override
         public Instant instant() {
             return instant.get();

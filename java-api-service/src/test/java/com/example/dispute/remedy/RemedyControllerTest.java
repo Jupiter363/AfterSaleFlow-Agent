@@ -1,3 +1,9 @@
+/*
+ * 所属模块：确定性补救规划。
+ * 文件职责：验证补救，覆盖 「returnsApprovalGatedPlanDto」。
+ * 业务链路：JUnit 构造夹具并驱动真实服务或 Mock 协作者，断言返回值、持久化状态和调用边界；把已认定事实和非最终建议转换为退款、补发等结构化候选动作。
+ * 关键边界：规划器只能决定动作形状和依赖，不能重新裁定事实或直接执行
+ */
 package com.example.dispute.remedy;
 
 import static org.mockito.ArgumentMatchers.any;
@@ -32,6 +38,11 @@ import org.springframework.context.annotation.Import;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
+// 所属模块：【确定性补救规划 / 自动化测试层】类型「RemedyControllerTest」。
+// 类型职责：集中验证补救的业务场景、权限边界和持久化/外部协作契约；本类型显式提供 「returnsApprovalGatedPlanDto」。
+// 协作关系：由 JUnit 发现并执行其中带 @Test 的场景。
+// 边界意义：规划器只能决定动作形状和依赖，不能重新裁定事实或直接执行
+// Java 语法：class 同时封装状态与方法；final 依赖通过构造器注入后不可重新指向。
 @WebMvcTest(RemedyController.class)
 @Import({
     CommonConfiguration.class,
@@ -48,6 +59,11 @@ class RemedyControllerTest {
     @Autowired private MockMvc mockMvc;
     @MockitoBean private RemedyApplicationService service;
 
+    // 所属模块：【确定性补救规划 / 自动化测试层】「RemedyControllerTest.returnsApprovalGatedPlanDto()」。
+    // 具体功能：「RemedyControllerTest.returnsApprovalGatedPlanDto()」：复现“返回正确投影（场景方法「returnsApprovalGatedPlanDto」）”场景：驱动 「OffsetDateTime.parse」、「mockMvc.perform」、「when」、「eq」，再用 测试框架断言 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_remedy」、「REMEDY_1」、「PENDING_APPROVAL」、「0.00」。
+    // 上游调用：「RemedyControllerTest.returnsApprovalGatedPlanDto()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「RemedyControllerTest.returnsApprovalGatedPlanDto()」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「RemedyControllerTest.returnsApprovalGatedPlanDto()」守住「确定性补救规划」的可执行规格，尤其防止 「CASE_remedy」、「REMEDY_1」、「PENDING_APPROVAL」、「0.00」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void returnsApprovalGatedPlanDto() throws Exception {
         when(service.get(eq("CASE_remedy"), any()))

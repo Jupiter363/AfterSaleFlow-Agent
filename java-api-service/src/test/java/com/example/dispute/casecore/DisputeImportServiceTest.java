@@ -1,3 +1,9 @@
+/*
+ * 所属模块：案件核心与导入。
+ * 文件职责：验证争议导入，覆盖 「importsAnExternalDisputeWithOverviewState」、「startsInitialIntakeTurnOnlyAfterTheImportTransactionCommits」、「intakePersistenceFailureAfterCommitDoesNotRollBackTheImportedCase」、「importedDisputePassesClaimResolutionSeedIntoTheIntakeLobby」、「importedEvidenceStateHasAnEnterableRoomAndAuthoritativeClock」、「returnsTheExistingCaseForTheSameExternalReference」。
+ * 业务链路：JUnit 构造夹具并驱动真实服务或 Mock 协作者，断言返回值、持久化状态和调用边界；维护争议案件事实、来源、幂等导入和演示数据清理。
+ * 关键边界：Java/PostgreSQL 是案件状态事实源，导入重试不能创建重复案件
+ */
 package com.example.dispute.casecore;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -63,6 +69,11 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
+// 所属模块：【案件核心与导入 / 自动化测试层】类型「DisputeImportServiceTest」。
+// 类型职责：集中验证争议导入的业务场景、权限边界和持久化/外部协作契约；本类型显式提供 「setUp」、「importsAnExternalDisputeWithOverviewState」、「startsInitialIntakeTurnOnlyAfterTheImportTransactionCommits」、「intakePersistenceFailureAfterCommitDoesNotRollBackTheImportedCase」、「importedDisputePassesClaimResolutionSeedIntoTheIntakeLobby」、「importedEvidenceStateHasAnEnterableRoomAndAuthoritativeClock」。
+// 协作关系：由 JUnit 发现并执行其中带 @Test 的场景。
+// 边界意义：Java/PostgreSQL 是案件状态事实源，导入重试不能创建重复案件
+// Java 语法：class 同时封装状态与方法；final 依赖通过构造器注入后不可重新指向。
 @ExtendWith(MockitoExtension.class)
 class DisputeImportServiceTest {
 
@@ -76,6 +87,11 @@ class DisputeImportServiceTest {
     private DisputeImportService service;
     private ExternalCaseImportTransactionService transactionService;
 
+    // 所属模块：【案件核心与导入 / 自动化测试层】「DisputeImportServiceTest.setUp()」。
+    // 具体功能：「DisputeImportServiceTest.setUp()」：在每个测试场景运行前创建「Duration.ofHours」、「Duration.ofMinutes」、「Duration.ofSeconds」、「Clock.fixed」，统一准备后续断言依赖的初始状态，避免各用例重复搭建且保持彼此隔离。
+    // 上游调用：「DisputeImportServiceTest.setUp()」由 JUnit 生命周期或本测试类的场景方法调用。
+    // 下游影响：「DisputeImportServiceTest.setUp()」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「DisputeImportServiceTest.setUp()」守住「案件核心与导入」的可执行规格，尤其防止 「2026-07-03T00:00:00Z」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @BeforeEach
     void setUp() {
         transactionService =
@@ -102,6 +118,11 @@ class DisputeImportServiceTest {
                 new DisputeImportService(transactionService, new SingleInstanceImportGate());
     }
 
+    // 所属模块：【案件核心与导入 / 自动化测试层】「DisputeImportServiceTest.importsAnExternalDisputeWithOverviewState()」。
+    // 具体功能：「DisputeImportServiceTest.importsAnExternalDisputeWithOverviewState()」：复现“核对完整业务行为（场景方法「importsAnExternalDisputeWithOverviewState」）”场景：驱动 「repository.findBySourceSystemAndExternalCaseRef」、「repository.save」、「service.importDispute」，再用 「assertThat」、「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「OMS」、「EXT-1001」、「external-adapter」、「import-ext-1001」。
+    // 上游调用：「DisputeImportServiceTest.importsAnExternalDisputeWithOverviewState()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「DisputeImportServiceTest.importsAnExternalDisputeWithOverviewState()」的下游是被测服务、仓储或外部客户端替身；「assertThat、verify」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「DisputeImportServiceTest.importsAnExternalDisputeWithOverviewState()」守住「案件核心与导入」的可执行规格，尤其防止 「OMS」、「EXT-1001」、「external-adapter」、「import-ext-1001」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void importsAnExternalDisputeWithOverviewState() {
         when(repository.findBySourceSystemAndExternalCaseRef("OMS", "EXT-1001"))
@@ -160,6 +181,11 @@ class DisputeImportServiceTest {
         assertThat(seed.getValue().rawText()).isEqualTo("用户表示未收到已签收包裹");
     }
 
+    // 所属模块：【案件核心与导入 / 自动化测试层】「DisputeImportServiceTest.startsInitialIntakeTurnOnlyAfterTheImportTransactionCommits()」。
+    // 具体功能：「DisputeImportServiceTest.startsInitialIntakeTurnOnlyAfterTheImportTransactionCommits()」：复现“启动下一阶段（场景方法「startsInitialIntakeTurnOnlyAfterTheImportTransactionCommits」）”场景：驱动 「repository.findBySourceSystemAndExternalCaseRef」、「repository.save」、「service.importDispute」，再用 「verify」、「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「OMS」、「EXT-1003」、「external-adapter」、「import-ext-1003」。
+    // 上游调用：「DisputeImportServiceTest.startsInitialIntakeTurnOnlyAfterTheImportTransactionCommits()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「DisputeImportServiceTest.startsInitialIntakeTurnOnlyAfterTheImportTransactionCommits()」的下游是被测服务、仓储或外部客户端替身；「verify、assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「DisputeImportServiceTest.startsInitialIntakeTurnOnlyAfterTheImportTransactionCommits()」守住「案件核心与导入」的可执行规格，尤其防止 「OMS」、「EXT-1003」、「external-adapter」、「import-ext-1003」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void startsInitialIntakeTurnOnlyAfterTheImportTransactionCommits() {
         when(repository.findBySourceSystemAndExternalCaseRef("OMS", "EXT-1003"))
@@ -203,6 +229,11 @@ class DisputeImportServiceTest {
         }
     }
 
+    // 所属模块：【案件核心与导入 / 自动化测试层】「DisputeImportServiceTest.intakePersistenceFailureAfterCommitDoesNotRollBackTheImportedCase()」。
+    // 具体功能：「DisputeImportServiceTest.intakePersistenceFailureAfterCommitDoesNotRollBackTheImportedCase()」：复现“核对完整业务行为（场景方法「intakePersistenceFailureAfterCommitDoesNotRollBackTheImportedCase」）”场景：驱动 「repository.findBySourceSystemAndExternalCaseRef」、「repository.save」、「service.importDispute」，再用 「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「OMS」、「EXT-POST-COMMIT-FAILURE」、「external-adapter」、「import-ext-post-commit-failure」。
+    // 上游调用：「DisputeImportServiceTest.intakePersistenceFailureAfterCommitDoesNotRollBackTheImportedCase()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「DisputeImportServiceTest.intakePersistenceFailureAfterCommitDoesNotRollBackTheImportedCase()」的下游是被测服务、仓储或外部客户端替身；「verify」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「DisputeImportServiceTest.intakePersistenceFailureAfterCommitDoesNotRollBackTheImportedCase()」守住「案件核心与导入」的可执行规格，尤其防止 「OMS」、「EXT-POST-COMMIT-FAILURE」、「external-adapter」、「import-ext-post-commit-failure」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void intakePersistenceFailureAfterCommitDoesNotRollBackTheImportedCase() {
         when(repository.findBySourceSystemAndExternalCaseRef("OMS", "EXT-POST-COMMIT-FAILURE"))
@@ -243,6 +274,11 @@ class DisputeImportServiceTest {
         }
     }
 
+    // 所属模块：【案件核心与导入 / 自动化测试层】「DisputeImportServiceTest.importedDisputePassesClaimResolutionSeedIntoTheIntakeLobby()」。
+    // 具体功能：「DisputeImportServiceTest.importedDisputePassesClaimResolutionSeedIntoTheIntakeLobby()」：复现“核对完整业务行为（场景方法「importedDisputePassesClaimResolutionSeedIntoTheIntakeLobby」）”场景：驱动 「repository.findBySourceSystemAndExternalCaseRef」、「repository.save」、「service.importDispute」，再用 「verify」、「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「OMS」、「EXT-CLAIM」、「external-adapter」、「import-ext-claim」。
+    // 上游调用：「DisputeImportServiceTest.importedDisputePassesClaimResolutionSeedIntoTheIntakeLobby()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「DisputeImportServiceTest.importedDisputePassesClaimResolutionSeedIntoTheIntakeLobby()」的下游是被测服务、仓储或外部客户端替身；「verify、assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「DisputeImportServiceTest.importedDisputePassesClaimResolutionSeedIntoTheIntakeLobby()」守住「案件核心与导入」的可执行规格，尤其防止 「OMS」、「EXT-CLAIM」、「external-adapter」、「import-ext-claim」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void importedDisputePassesClaimResolutionSeedIntoTheIntakeLobby() {
         when(repository.findBySourceSystemAndExternalCaseRef("OMS", "EXT-CLAIM"))
@@ -273,6 +309,11 @@ class DisputeImportServiceTest {
                 .isEqualTo("NOT_RESPONDED");
     }
 
+    // 所属模块：【案件核心与导入 / 自动化测试层】「DisputeImportServiceTest.importedEvidenceStateHasAnEnterableRoomAndAuthoritativeClock()」。
+    // 具体功能：「DisputeImportServiceTest.importedEvidenceStateHasAnEnterableRoomAndAuthoritativeClock()」：复现“核对完整业务行为（场景方法「importedEvidenceStateHasAnEnterableRoomAndAuthoritativeClock」）”场景：驱动 「repository.findBySourceSystemAndExternalCaseRef」、「repository.save」、「roomRepository.save」、「clockRepository.save」，再用 「verify」、「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「OMS」、「EXT-2001」、「EVIDENCE」、「2026-07-03T02:00:00Z」。
+    // 上游调用：「DisputeImportServiceTest.importedEvidenceStateHasAnEnterableRoomAndAuthoritativeClock()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「DisputeImportServiceTest.importedEvidenceStateHasAnEnterableRoomAndAuthoritativeClock()」的下游是被测服务、仓储或外部客户端替身；「verify、assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「DisputeImportServiceTest.importedEvidenceStateHasAnEnterableRoomAndAuthoritativeClock()」守住「案件核心与导入」的可执行规格，尤其防止 「OMS」、「EXT-2001」、「EVIDENCE」、「2026-07-03T02:00:00Z」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void importedEvidenceStateHasAnEnterableRoomAndAuthoritativeClock() {
         when(repository.findBySourceSystemAndExternalCaseRef("OMS", "EXT-2001"))
@@ -305,6 +346,11 @@ class DisputeImportServiceTest {
                 .isEqualTo(OffsetDateTime.parse("2026-07-03T02:00:00Z"));
     }
 
+    // 所属模块：【案件核心与导入 / 自动化测试层】「DisputeImportServiceTest.returnsTheExistingCaseForTheSameExternalReference()」。
+    // 具体功能：「DisputeImportServiceTest.returnsTheExistingCaseForTheSameExternalReference()」：复现“返回正确投影（场景方法「returnsTheExistingCaseForTheSameExternalReference」）”场景：驱动 「repository.findBySourceSystemAndExternalCaseRef」、「service.importDispute」，再用 「assertThat」、「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_EXISTING」、「ORDER-1001」、「AFTER-1001」、「LOG-1001」。
+    // 上游调用：「DisputeImportServiceTest.returnsTheExistingCaseForTheSameExternalReference()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「DisputeImportServiceTest.returnsTheExistingCaseForTheSameExternalReference()」的下游是被测服务、仓储或外部客户端替身；「assertThat、verify」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「DisputeImportServiceTest.returnsTheExistingCaseForTheSameExternalReference()」守住「案件核心与导入」的可执行规格，尤其防止 「CASE_EXISTING」、「ORDER-1001」、「AFTER-1001」、「LOG-1001」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void returnsTheExistingCaseForTheSameExternalReference() {
         FulfillmentCaseEntity existing =
@@ -346,6 +392,11 @@ class DisputeImportServiceTest {
                         any(String.class));
     }
 
+    // 所属模块：【案件核心与导入 / 自动化测试层】「DisputeImportServiceTest.replayRepairsThePersistedRoomInsteadOfTrustingConflictingPayloadState()」。
+    // 具体功能：「DisputeImportServiceTest.replayRepairsThePersistedRoomInsteadOfTrustingConflictingPayloadState()」：复现“核对完整业务行为（场景方法「replayRepairsThePersistedRoomInsteadOfTrustingConflictingPayloadState」）”场景：驱动 「repository.findBySourceSystemAndExternalCaseRef」、「roomRepository.save」、「service.importDispute」，再用 「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_EXISTING_STATE」、「ORDER-1001」、「AFTER-1001」、「LOG-1001」。
+    // 上游调用：「DisputeImportServiceTest.replayRepairsThePersistedRoomInsteadOfTrustingConflictingPayloadState()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「DisputeImportServiceTest.replayRepairsThePersistedRoomInsteadOfTrustingConflictingPayloadState()」的下游是被测服务、仓储或外部客户端替身；「verify」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「DisputeImportServiceTest.replayRepairsThePersistedRoomInsteadOfTrustingConflictingPayloadState()」守住「案件核心与导入」的可执行规格，尤其防止 「CASE_EXISTING_STATE」、「ORDER-1001」、「AFTER-1001」、「LOG-1001」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void replayRepairsThePersistedRoomInsteadOfTrustingConflictingPayloadState() {
         FulfillmentCaseEntity existing =
@@ -402,6 +453,11 @@ class DisputeImportServiceTest {
         verify(clockRepository, never()).save(any());
     }
 
+    // 所属模块：【案件核心与导入 / 自动化测试层】「DisputeImportServiceTest.rejectsReusingAnImportRequestKeyForAnotherExternalCase()」。
+    // 具体功能：「DisputeImportServiceTest.rejectsReusingAnImportRequestKeyForAnotherExternalCase()」：复现“拒绝非法输入或越权操作（场景方法「rejectsReusingAnImportRequestKeyForAnotherExternalCase」）”场景：驱动 「repository.findByCreationIdempotencyKey」、「service.importDispute」，再用 「assertThatThrownBy」、「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_FIRST_IMPORT」、「ORDER-1001」、「AFTER-1001」、「LOG-1001」。
+    // 上游调用：「DisputeImportServiceTest.rejectsReusingAnImportRequestKeyForAnotherExternalCase()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「DisputeImportServiceTest.rejectsReusingAnImportRequestKeyForAnotherExternalCase()」的下游是被测服务、仓储或外部客户端替身；「assertThatThrownBy、verify」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「DisputeImportServiceTest.rejectsReusingAnImportRequestKeyForAnotherExternalCase()」守住「案件核心与导入」的可执行规格，尤其防止 「CASE_FIRST_IMPORT」、「ORDER-1001」、「AFTER-1001」、「LOG-1001」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void rejectsReusingAnImportRequestKeyForAnotherExternalCase() {
         FulfillmentCaseEntity firstImport =
@@ -438,6 +494,11 @@ class DisputeImportServiceTest {
         verify(repository, never()).save(any());
     }
 
+    // 所属模块：【案件核心与导入 / 自动化测试层】「DisputeImportServiceTest.rejectsPartyActorsAtTheInternalImportBoundary()」。
+    // 具体功能：「DisputeImportServiceTest.rejectsPartyActorsAtTheInternalImportBoundary()」：复现“拒绝非法输入或越权操作（场景方法「rejectsPartyActorsAtTheInternalImportBoundary」）”场景：驱动 「service.importDispute」，再用 「assertThatThrownBy」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「EXT-1002」、「user-local」、「import-ext-1002」。
+    // 上游调用：「DisputeImportServiceTest.rejectsPartyActorsAtTheInternalImportBoundary()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「DisputeImportServiceTest.rejectsPartyActorsAtTheInternalImportBoundary()」的下游是被测服务、仓储或外部客户端替身；「assertThatThrownBy」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「DisputeImportServiceTest.rejectsPartyActorsAtTheInternalImportBoundary()」守住「案件核心与导入」的可执行规格，尤其防止 「EXT-1002」、「user-local」、「import-ext-1002」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void rejectsPartyActorsAtTheInternalImportBoundary() {
         assertThatThrownBy(
@@ -449,6 +510,11 @@ class DisputeImportServiceTest {
                 .isInstanceOf(SecurityException.class);
     }
 
+    // 所属模块：【案件核心与导入 / 自动化测试层】「DisputeImportServiceTest.simulatedBatchDoesNotOwnATransactionThatAccumulatesItemLocks()」。
+    // 具体功能：「DisputeImportServiceTest.simulatedBatchDoesNotOwnATransactionThatAccumulatesItemLocks()」：复现“核对完整业务行为（场景方法「simulatedBatchDoesNotOwnATransactionThatAccumulatesItemLocks」）”场景：驱动 「method.getAnnotation」、「DisputeImportService.class.getMethod」、「isNull」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「simulateExternalImport」。
+    // 上游调用：「DisputeImportServiceTest.simulatedBatchDoesNotOwnATransactionThatAccumulatesItemLocks()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「DisputeImportServiceTest.simulatedBatchDoesNotOwnATransactionThatAccumulatesItemLocks()」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「DisputeImportServiceTest.simulatedBatchDoesNotOwnATransactionThatAccumulatesItemLocks()」守住「案件核心与导入」的可执行规格，尤其防止 「simulateExternalImport」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void simulatedBatchDoesNotOwnATransactionThatAccumulatesItemLocks()
             throws NoSuchMethodException {
@@ -464,6 +530,11 @@ class DisputeImportServiceTest {
         assertThat(method.getAnnotation(Transactional.class)).isNull();
     }
 
+    // 所属模块：【案件核心与导入 / 自动化测试层】「DisputeImportServiceTest.simulatedImportDelegatesToTheTransactionalTemplateBoundary()」。
+    // 具体功能：「DisputeImportServiceTest.simulatedImportDelegatesToTheTransactionalTemplateBoundary()」：复现“核对完整业务行为（场景方法「simulatedImportDelegatesToTheTransactionalTemplateBoundary」）”场景：驱动 「transactionalImporter.simulateExternalImport」、「facade.simulateExternalImport」、「mock」、「when」，再用 「verify」、「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「user-local」、「merchant-local」、「external-adapter」、「simulate-batch」。
+    // 上游调用：「DisputeImportServiceTest.simulatedImportDelegatesToTheTransactionalTemplateBoundary()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「DisputeImportServiceTest.simulatedImportDelegatesToTheTransactionalTemplateBoundary()」的下游是被测服务、仓储或外部客户端替身；「verify、assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「DisputeImportServiceTest.simulatedImportDelegatesToTheTransactionalTemplateBoundary()」守住「案件核心与导入」的可执行规格，尤其防止 「user-local」、「merchant-local」、「external-adapter」、「simulate-batch」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void simulatedImportDelegatesToTheTransactionalTemplateBoundary()
             throws NoSuchMethodException {
@@ -515,6 +586,11 @@ class DisputeImportServiceTest {
                 .isNotNull();
     }
 
+    // 所属模块：【案件核心与导入 / 自动化测试层】「DisputeImportServiceTest.simulatedImportReusesTheOriginalRequestKeyForTransactionalReplay()」。
+    // 具体功能：「DisputeImportServiceTest.simulatedImportReusesTheOriginalRequestKeyForTransactionalReplay()」：复现“核对完整业务行为（场景方法「simulatedImportReusesTheOriginalRequestKeyForTransactionalReplay」）”场景：驱动 「ArgumentCaptor.forClass」、「transactionalImporter.simulateExternalImport」、「facade.simulateExternalImport」、「creationKeys.capture」，再用 「verify」、「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「user-local」、「merchant-local」、「external-adapter」、「simulate-retry」。
+    // 上游调用：「DisputeImportServiceTest.simulatedImportReusesTheOriginalRequestKeyForTransactionalReplay()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「DisputeImportServiceTest.simulatedImportReusesTheOriginalRequestKeyForTransactionalReplay()」的下游是被测服务、仓储或外部客户端替身；「verify、assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「DisputeImportServiceTest.simulatedImportReusesTheOriginalRequestKeyForTransactionalReplay()」守住「案件核心与导入」的可执行规格，尤其防止 「user-local」、「merchant-local」、「external-adapter」、「simulate-retry」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void simulatedImportReusesTheOriginalRequestKeyForTransactionalReplay() {
         ExternalCaseImportTransactionService transactionalImporter =
@@ -569,6 +645,11 @@ class DisputeImportServiceTest {
                 .containsExactly("simulate-retry", "simulate-retry");
     }
 
+    // 所属模块：【案件核心与导入 / 自动化测试层】「DisputeImportServiceTest.directImportsOfDifferentBusinessKeysCannotEnterTheTransactionBoundaryTogether()」。
+    // 具体功能：「DisputeImportServiceTest.directImportsOfDifferentBusinessKeysCannotEnterTheTransactionBoundaryTogether()」：复现“核对完整业务行为（场景方法「directImportsOfDifferentBusinessKeysCannotEnterTheTransactionBoundaryTogether」）”场景：驱动 「executor.submit」、「executor.shutdownNow」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「EXT-GATE-001」、「external-adapter」、「gate-first」、「EXT-GATE-002」。
+    // 上游调用：「DisputeImportServiceTest.directImportsOfDifferentBusinessKeysCannotEnterTheTransactionBoundaryTogether()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「DisputeImportServiceTest.directImportsOfDifferentBusinessKeysCannotEnterTheTransactionBoundaryTogether()」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「DisputeImportServiceTest.directImportsOfDifferentBusinessKeysCannotEnterTheTransactionBoundaryTogether()」守住「案件核心与导入」的可执行规格，尤其防止 「EXT-GATE-001」、「external-adapter」、「gate-first」、「EXT-GATE-002」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void directImportsOfDifferentBusinessKeysCannotEnterTheTransactionBoundaryTogether()
             throws Exception {
@@ -633,6 +714,11 @@ class DisputeImportServiceTest {
         }
     }
 
+    // 所属模块：【案件核心与导入 / 自动化测试层】「DisputeImportServiceTest.serializedImportReleasesTheGateAfterFailure()」。
+    // 具体功能：「DisputeImportServiceTest.serializedImportReleasesTheGateAfterFailure()」：复现“核对完整业务行为（场景方法「serializedImportReleasesTheGateAfterFailure」）”场景：驱动 「transactionalImporter.importDispute」、「facade.importDispute」、「mock」、「when」，再用 「assertThatThrownBy」、「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「EXT-GATE-FAIL」、「external-adapter」、「gate-failure」、「EXT-GATE-RECOVER」。
+    // 上游调用：「DisputeImportServiceTest.serializedImportReleasesTheGateAfterFailure()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「DisputeImportServiceTest.serializedImportReleasesTheGateAfterFailure()」的下游是被测服务、仓储或外部客户端替身；「assertThatThrownBy、assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「DisputeImportServiceTest.serializedImportReleasesTheGateAfterFailure()」守住「案件核心与导入」的可执行规格，尤其防止 「EXT-GATE-FAIL」、「external-adapter」、「gate-failure」、「EXT-GATE-RECOVER」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void serializedImportReleasesTheGateAfterFailure() {
         ExternalCaseImportTransactionService transactionalImporter =
@@ -668,6 +754,11 @@ class DisputeImportServiceTest {
                 .isSameAs(imported);
     }
 
+    // 所属模块：【案件核心与导入 / 自动化测试层】「DisputeImportServiceTest.simulationCommandRejectsCountsAboveOne()」。
+    // 具体功能：「DisputeImportServiceTest.simulationCommandRejectsCountsAboveOne()」：复现“核对完整业务行为（场景方法「simulationCommandRejectsCountsAboveOne」）”场景：驱动 「hasMessageContaining」、「isInstanceOf」，再用 「assertThatThrownBy」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「user-local」、「merchant-local」。
+    // 上游调用：「DisputeImportServiceTest.simulationCommandRejectsCountsAboveOne()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「DisputeImportServiceTest.simulationCommandRejectsCountsAboveOne()」的下游是被测服务、仓储或外部客户端替身；「assertThatThrownBy」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「DisputeImportServiceTest.simulationCommandRejectsCountsAboveOne()」守住「案件核心与导入」的可执行规格，尤其防止 「user-local」、「merchant-local」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void simulationCommandRejectsCountsAboveOne() {
         assertThatThrownBy(
@@ -683,6 +774,11 @@ class DisputeImportServiceTest {
                 .hasMessageContaining("count must be 1");
     }
 
+    // 所属模块：【案件核心与导入 / 自动化测试层】「DisputeImportServiceTest.importCommandRejectsNonDemoPartyIds()」。
+    // 具体功能：「DisputeImportServiceTest.importCommandRejectsNonDemoPartyIds()」：复现“核对完整业务行为（场景方法「importCommandRejectsNonDemoPartyIds」）”场景：驱动 「hasMessageContaining」、「isInstanceOf」，再用 「assertThatThrownBy」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「OMS」、「EXT-WRONG-PARTY」、「ORDER-WRONG-PARTY」、「user-1」。
+    // 上游调用：「DisputeImportServiceTest.importCommandRejectsNonDemoPartyIds()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「DisputeImportServiceTest.importCommandRejectsNonDemoPartyIds()」的下游是被测服务、仓储或外部客户端替身；「assertThatThrownBy」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「DisputeImportServiceTest.importCommandRejectsNonDemoPartyIds()」守住「案件核心与导入」的可执行规格，尤其防止 「OMS」、「EXT-WRONG-PARTY」、「ORDER-WRONG-PARTY」、「user-1」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void importCommandRejectsNonDemoPartyIds() {
         assertThatThrownBy(
@@ -707,6 +803,11 @@ class DisputeImportServiceTest {
                 .hasMessageContaining("userId must be user-local");
     }
 
+    // 所属模块：【案件核心与导入 / 自动化测试层】「DisputeImportServiceTest.importCommandRejectsNonDemoMerchantIds()」。
+    // 具体功能：「DisputeImportServiceTest.importCommandRejectsNonDemoMerchantIds()」：复现“核对完整业务行为（场景方法「importCommandRejectsNonDemoMerchantIds」）”场景：驱动 「hasMessageContaining」、「isInstanceOf」，再用 「assertThatThrownBy」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「OMS」、「EXT-WRONG-MERCHANT」、「ORDER-WRONG-MERCHANT」、「user-local」。
+    // 上游调用：「DisputeImportServiceTest.importCommandRejectsNonDemoMerchantIds()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「DisputeImportServiceTest.importCommandRejectsNonDemoMerchantIds()」的下游是被测服务、仓储或外部客户端替身；「assertThatThrownBy」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「DisputeImportServiceTest.importCommandRejectsNonDemoMerchantIds()」守住「案件核心与导入」的可执行规格，尤其防止 「OMS」、「EXT-WRONG-MERCHANT」、「ORDER-WRONG-MERCHANT」、「user-local」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void importCommandRejectsNonDemoMerchantIds() {
         assertThatThrownBy(
@@ -731,6 +832,11 @@ class DisputeImportServiceTest {
                 .hasMessageContaining("merchantId must be merchant-local");
     }
 
+    // 所属模块：【案件核心与导入 / 自动化测试层】「DisputeImportServiceTest.simulationCommandRequiresFixedPartiesInInitiatorOrder()」。
+    // 具体功能：「DisputeImportServiceTest.simulationCommandRequiresFixedPartiesInInitiatorOrder()」：复现“核对完整业务行为（场景方法「simulationCommandRequiresFixedPartiesInInitiatorOrder」）”场景：驱动 「hasMessageContaining」、「isInstanceOf」，再用 「assertThatThrownBy」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「merchant-local」、「user-local」。
+    // 上游调用：「DisputeImportServiceTest.simulationCommandRequiresFixedPartiesInInitiatorOrder()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「DisputeImportServiceTest.simulationCommandRequiresFixedPartiesInInitiatorOrder()」的下游是被测服务、仓储或外部客户端替身；「assertThatThrownBy」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「DisputeImportServiceTest.simulationCommandRequiresFixedPartiesInInitiatorOrder()」守住「案件核心与导入」的可执行规格，尤其防止 「merchant-local」、「user-local」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void simulationCommandRequiresFixedPartiesInInitiatorOrder() {
         assertThatThrownBy(
@@ -746,6 +852,11 @@ class DisputeImportServiceTest {
                 .hasMessageContaining("currentActorId must be user-local");
     }
 
+    // 所属模块：【案件核心与导入 / 自动化测试层】「DisputeImportServiceTest.command(String)」。
+    // 具体功能：「DisputeImportServiceTest.command(String)」：作为测试辅助方法为“核对完整业务行为（场景方法「command」）”组装或读取「command」，供本测试类的场景方法复用。
+    // 上游调用：「DisputeImportServiceTest.command(String)」由本测试类中的 「DisputeImportServiceTest.importsAnExternalDisputeWithOverviewState」、「DisputeImportServiceTest.startsInitialIntakeTurnOnlyAfterTheImportTransactionCommits」、「DisputeImportServiceTest.intakePersistenceFailureAfterCommitDoesNotRollBackTheImportedCase」、「DisputeImportServiceTest.importedEvidenceStateHasAnEnterableRoomAndAuthoritativeClock」 调用。
+    // 下游影响：「DisputeImportServiceTest.command(String)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「DisputeImportServiceTest.command(String)」守住「案件核心与导入」的可执行规格，尤其防止 「INTAKE」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static ImportDisputeCommand command(String externalReference) {
         return command(
                 externalReference,
@@ -754,6 +865,11 @@ class DisputeImportServiceTest {
                 null);
     }
 
+    // 所属模块：【案件核心与导入 / 自动化测试层】「DisputeImportServiceTest.command(String,CaseStatus,String,OffsetDateTime)」。
+    // 具体功能：「DisputeImportServiceTest.command(String,CaseStatus,String,OffsetDateTime)」：作为测试辅助方法为“核对完整业务行为（场景方法「command」）”组装或读取「ImportDisputeCommand」 输入夹具，供本测试类的场景方法复用。
+    // 上游调用：「DisputeImportServiceTest.command(String,CaseStatus,String,OffsetDateTime)」由本测试类中的 「DisputeImportServiceTest.importsAnExternalDisputeWithOverviewState」、「DisputeImportServiceTest.startsInitialIntakeTurnOnlyAfterTheImportTransactionCommits」、「DisputeImportServiceTest.intakePersistenceFailureAfterCommitDoesNotRollBackTheImportedCase」、「DisputeImportServiceTest.importedEvidenceStateHasAnEnterableRoomAndAuthoritativeClock」 调用。
+    // 下游影响：「DisputeImportServiceTest.command(String,CaseStatus,String,OffsetDateTime)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「DisputeImportServiceTest.command(String,CaseStatus,String,OffsetDateTime)」守住「案件核心与导入」的可执行规格，尤其防止 「OMS」、「ORDER-1001」、「AFTER-1001」、「LOG-1001」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static ImportDisputeCommand command(
             String externalReference,
             CaseStatus status,
@@ -777,6 +893,11 @@ class DisputeImportServiceTest {
                 deadline);
     }
 
+    // 所属模块：【案件核心与导入 / 自动化测试层】「DisputeImportServiceTest.commandWithClaimSeed(String)」。
+    // 具体功能：「DisputeImportServiceTest.commandWithClaimSeed(String)」：作为测试辅助方法为“核对完整业务行为（场景方法「commandWithClaimSeed」）”组装或读取「ImportDisputeCommand」、「ClaimResolutionSeed」、「RespondentAttitudeSeed」 输入夹具，供本测试类的场景方法复用。
+    // 上游调用：「DisputeImportServiceTest.commandWithClaimSeed(String)」由本测试类中的 「DisputeImportServiceTest.importedDisputePassesClaimResolutionSeedIntoTheIntakeLobby」 调用。
+    // 下游影响：「DisputeImportServiceTest.commandWithClaimSeed(String)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「DisputeImportServiceTest.commandWithClaimSeed(String)」守住「案件核心与导入」的可执行规格，尤其防止 「OMS」、「ORDER-1001」、「AFTER-1001」、「LOG-1001」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static ImportDisputeCommand commandWithClaimSeed(String externalReference) {
         return new ImportDisputeCommand(
                 "OMS",

@@ -1,3 +1,5 @@
+# 文件作用：自动化测试文件，验证 test_main_flows 相关模块的行为、契约或页面布局。
+
 import json
 import os
 import urllib.error
@@ -12,6 +14,10 @@ ROOT = Path(__file__).resolve().parents[2]
 BASE_URL = os.getenv("ACCEPTANCE_BASE_URL", "http://127.0.0.1:8080")
 
 
+# 所属模块：跨服务契约测试 > test_main_flows；函数角色：模块公开业务函数。
+# 具体功能：`request` 围绕被测业务场景计算该函数独立负责的业务派生值；关键协作调用：`urllib.request.Request`、`encode`、`urllib.request.urlopen`。
+# 上下游：上游为 本文件的 `test_seeded_disputes_are_listed_and_enterable_through_nginx`、`test_live_room_flow_reaches_confirmed_settlement_idempotently`；下游为 协作调用 `urllib.request.Request`、`encode`、`urllib.request.urlopen`、`decode`。
+# 系统意义：该函数在系统中的业务边界是：只锁定公共契约，不锁死内部实现。
 def request(method: str, path: str, *, payload: dict | None = None, headers: dict | None = None):
     data = None if payload is None else json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
@@ -34,6 +40,10 @@ def request(method: str, path: str, *, payload: dict | None = None, headers: dic
         return error.code, json.loads(body) if body else {}
 
 
+# 所属模块：跨服务契约测试 > test_main_flows；函数角色：模块公开业务函数。
+# 具体功能：`require_gateway` 围绕被测业务场景计算该函数独立负责的业务派生值；关键协作调用：`urllib.request.urlopen`、`pytest.skip`、`OSError`。
+# 上下游：上游为 本文件的 `test_seeded_disputes_are_listed_and_enterable_through_nginx`、`test_live_room_flow_reaches_confirmed_settlement_idempotently`；下游为 协作调用 `urllib.request.urlopen`、`pytest.skip`、`OSError`。
+# 系统意义：失败显式映射为 `OSError`，避免错误状态被当成成功结果。
 def require_gateway() -> None:
     try:
         with urllib.request.urlopen(BASE_URL + "/healthz", timeout=3) as response:
@@ -43,6 +53,10 @@ def require_gateway() -> None:
         pytest.skip(f"local acceptance gateway is not running: {exc}")
 
 
+# 所属模块：跨服务契约测试 > test_main_flows；函数角色：回归测试用例。
+# 具体功能：`test_seeded_disputes_are_listed_and_enterable_through_nginx` 验证被测业务场景在固定案例中的输出、边界和失败行为。
+# 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 本文件的 `require_gateway`、`request`。
+# 系统意义：固定“跨服务契约测试 > test_main_flows”的可观察契约，防止后续重构改变业务结果。
 def test_seeded_disputes_are_listed_and_enterable_through_nginx() -> None:
     require_gateway()
     status, response = request("GET", "/api/disputes?page=0&size=20")
@@ -58,6 +72,10 @@ def test_seeded_disputes_are_listed_and_enterable_through_nginx() -> None:
         assert response["data"]["id"] == case_id
 
 
+# 所属模块：跨服务契约测试 > test_main_flows；函数角色：回归测试用例。
+# 具体功能：`test_repository_e2e_flow_coverage_is_not_only_happy_path` 验证被测业务场景在固定案例中的输出、边界和失败行为；关键协作调用：`join`、`read_text`。
+# 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 协作调用 `join`、`read_text`。
+# 系统意义：固定“跨服务契约测试 > test_main_flows”的可观察契约，防止后续重构改变业务结果。
 def test_repository_e2e_flow_coverage_is_not_only_happy_path() -> None:
     java_tests = "\n".join(
         [
@@ -81,6 +99,10 @@ def test_repository_e2e_flow_coverage_is_not_only_happy_path() -> None:
         assert required in java_tests
 
 
+# 所属模块：跨服务契约测试 > test_main_flows；函数角色：回归测试用例。
+# 具体功能：`test_live_room_flow_reaches_confirmed_settlement_idempotently` 验证被测业务场景在固定案例中的输出、边界和失败行为；关键协作调用：`uuid.uuid4`、`json.dumps`。
+# 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 本文件的 `require_gateway`、`request`。
+# 系统意义：固定“跨服务契约测试 > test_main_flows”的可观察契约，防止后续重构改变业务结果。
 def test_live_room_flow_reaches_confirmed_settlement_idempotently() -> None:
     require_gateway()
     suffix = uuid.uuid4().hex[:16]

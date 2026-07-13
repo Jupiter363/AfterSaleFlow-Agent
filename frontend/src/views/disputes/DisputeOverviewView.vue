@@ -1,14 +1,27 @@
+<!--
+  文件作用：前端页面视图文件，组织售后争议对应页面的数据加载、交互和展示。
+  说明：本注释用于帮助读者先了解组件/页面职责，再阅读 template、script 和 style。
+-->
+
 <script setup>
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
+import { extractAgentRunDescriptor } from "../../api/agentStream";
 import { disputeApi } from "../../api/disputes";
 import DigitalHuman from "../../components/avatar/DigitalHuman.vue";
+import AgentStreamErrorDialog from "../../components/room/AgentStreamErrorDialog.vue";
+import AgentStreamingMessage from "../../components/room/AgentStreamingMessage.vue";
 import PhaseCountdown from "../../components/room/PhaseCountdown.vue";
 import { actor } from "../../state/actor";
 import {
   disputeStore,
   loadDisputes,
 } from "../../stores/dispute";
+import {
+  activeAgentStreams,
+  clearAgentStreams,
+  consumeAgentRun,
+} from "../../stores/agentStream";
 
 const props = defineProps({
   initialCases: { type: Array, default: () => [] },
@@ -28,6 +41,7 @@ const deletingCase = ref(false);
 const deleteCandidate = ref(null);
 const createError = ref("");
 const importError = ref("");
+const importStreamError = ref("");
 const deleteError = ref("");
 const intakeForm = ref({
   orderReference: "",
@@ -38,7 +52,6 @@ const intakeForm = ref({
   requestedResolution: "VERIFY_OR_EXPLAIN_ONLY",
   requestedAmount: "",
   requestedItems: "",
-  requestReason: "",
   description: "",
 });
 
@@ -57,6 +70,7 @@ const cases = computed(() =>
   localCases.value.length ? localCases.value : disputeStore.list.data,
 );
 
+// 业务位置：【前端案件页面】reconcileCases：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
 function reconcileCases(nextCases) {
   const refreshed = Array.isArray(nextCases) ? [...nextCases] : [];
   localCases.value = refreshed;
@@ -84,11 +98,20 @@ const canInitiateDispute = computed(() =>
 const canImportExternal = computed(() =>
   ["USER", "MERCHANT"].includes(actor.role),
 );
+const externalImportStreams = computed(() =>
+  activeAgentStreams({
+    caseId: "EXTERNAL_IMPORT",
+    roomType: "OVERVIEW",
+    actorId: actor.id,
+    actorRole: actor.role,
+  }),
+);
 const simulatedSourceSystems = new Set([
   "TEMPLATE_SIMULATED_OMS",
   "LLM_SIMULATED_OMS",
 ]);
 
+// 业务位置：【前端案件页面】isDeletableSimulatedCase：判断 当前阶段业务数据 是否满足当前流程分支的进入条件。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
 function isDeletableSimulatedCase(dispute) {
   return Boolean(
     dispute &&
@@ -103,11 +126,12 @@ const canDeleteSelectedCase = computed(() =>
 );
 
 const journey = [
-  { room: "INTAKE", label: "争议接待室", icon: "☁" },
-  { room: "EVIDENCE", label: "证据书记官室", icon: "⌕" },
-  { room: "HEARING", label: "共享小法庭", icon: "⚖" },
-  { room: "REVIEW", label: "平台终审", icon: "◇" },
-  { room: "OUTCOME", label: "结果与执行", icon: "✓" },
+  { key: "INTAKE", room: "INTAKE", label: "案情接待", agent: "接待官整理事实" },
+  { key: "EVIDENCE", room: "EVIDENCE", label: "证据核验", agent: "证据书记官复核" },
+  { key: "HEARING", room: "HEARING", label: "三轮庭审", agent: "法官组织审理" },
+  { key: "DRAFT", room: "REVIEW", label: "裁决草案", agent: "法官生成草案" },
+  { key: "REVIEW", room: "REVIEW", label: "人工终审", agent: "审核员最终确认" },
+  { key: "OUTCOME", room: "OUTCOME", label: "执行结果", agent: "执行专员处理" },
 ];
 const riskLabels = {
   CRITICAL: "极高风险",
@@ -129,20 +153,35 @@ const pendingActionLabels = {
 
 const currentRoomIndex = computed(() => {
   if (selectedCase.value?.case_status === "CLOSED") return journey.length - 1;
-  return Math.max(
-    0,
-    journey.findIndex(
-      (stage) => stage.room === selectedCase.value?.current_room,
-    ),
-  );
+  const room = selectedCase.value?.current_room;
+  if (room === "INTAKE") return 0;
+  if (room === "EVIDENCE") return 1;
+  if (room === "HEARING") return 2;
+  if (room === "REVIEW") {
+    return selectedCase.value?.pending_action === "AWAIT_REVIEW" ? 4 : 3;
+  }
+  if (room === "OUTCOME") return 5;
+  return 0;
 });
+const currentStage = computed(() => journey[currentRoomIndex.value] || journey[0]);
+const journeyProgress = computed(() => `${currentRoomIndex.value + 1} / ${journey.length}`);
 
+// 业务位置：【前端案件页面】stageState：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
 function stageState(index) {
   if (index < currentRoomIndex.value) return "completed";
   if (index === currentRoomIndex.value) return "current";
   return "locked";
 }
 
+function stageStatus(index) {
+  const state = stageState(index);
+  if (state === "completed") return "完成";
+  if (state === "current") return "现在";
+  if (index === currentRoomIndex.value + 1) return "下一站";
+  return "待解锁";
+}
+
+// 业务位置：【前端案件页面】enterCurrentRoom：切换与 当前阶段业务数据 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
 function enterCurrentRoom() {
   const dispute = selectedCase.value;
   if (!dispute) return;
@@ -158,44 +197,46 @@ function enterCurrentRoom() {
   router.push(`/disputes/${dispute.id}/${room}`);
 }
 
+// 业务位置：【前端案件页面】sourceLabel：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
 function sourceLabel(source) {
   return source === "EXTERNAL_IMPORT" ? "外部导入" : "接待官创建";
 }
 
-function shortId(value) {
-  if (!value) return "未关联";
-  return value.length > 16 ? `${value.slice(0, 9)}…` : value;
-}
-
+// 业务位置：【前端案件页面】roomLabel：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
 function roomLabel(room) {
+  if (room === "REVIEW") return "裁决与人工终审";
   return journey.find((stage) => stage.room === room)?.label || room || "待分配房间";
 }
 
+// 业务位置：【前端案件页面】riskLabel：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
 function riskLabel(risk) {
   return riskLabels[risk] || risk || "未评估";
 }
 
+// 业务位置：【前端案件页面】pendingActionLabel：围绕 履约执行动作和工具意图 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
 function pendingActionLabel(action) {
   return pendingActionLabels[action] || action || "等待下一步";
 }
 
+// 业务位置：【前端案件页面】openIntake：切换与 案件受理信息和接待结论 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
 function openIntake() {
   if (!canInitiateDispute.value) return;
-  intakeForm.value.userId = actor.role === "USER" ? actor.id : "";
-  intakeForm.value.merchantId =
-    actor.role === "MERCHANT" ? actor.id : "";
+  intakeForm.value.userId = actor.role === "MERCHANT" ? "user-local" : actor.id;
+  intakeForm.value.merchantId = actor.role === "MERCHANT" ? actor.id : "merchant-local";
   intakeForm.value.requestedResolution = "VERIFY_OR_EXPLAIN_ONLY";
   intakeForm.value.requestedAmount = "";
   intakeForm.value.requestedItems = "";
-  intakeForm.value.requestReason = "";
+  intakeForm.value.description = "";
   createError.value = "";
   intakeOpen.value = true;
 }
 
+// 业务位置：【前端案件页面】simulatedCounterpartyId：围绕 当事人主张、角色和对方态度 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
 function simulatedCounterpartyId(role) {
   return role === "MERCHANT" ? "user-local" : "merchant-local";
 }
 
+// 业务位置：【前端案件页面】normalizeImportedCase：将 当前阶段业务数据 转换为稳定的接口、提示词或页面表达，避免直接暴露内部实现字段。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
 function normalizeImportedCase(item) {
   const id = item.id || item.case_id;
   return {
@@ -226,6 +267,7 @@ function normalizeImportedCase(item) {
   };
 }
 
+// 业务位置：【前端案件页面】simulateExternalImport：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
 async function simulateExternalImport() {
   if (!canImportExternal.value || importingExternal.value) return;
   const initiatorRole = actor.role === "MERCHANT" ? "MERCHANT" : "USER";
@@ -241,23 +283,27 @@ async function simulateExternalImport() {
   };
   importingExternal.value = true;
   importError.value = "";
+  importStreamError.value = "";
   try {
     const result = props.simulateExternalImportAction
       ? await props.simulateExternalImportAction(command)
       : await disputeApi.simulateExternalImport(actor, command);
-    const imported = (result.items || []).map(normalizeImportedCase);
-    if (imported.length) {
-      const existing = localCases.value.length ? localCases.value : disputeStore.list.data;
-      const importedIds = new Set(imported.map((item) => item.id));
-      localCases.value = [
-        ...imported,
-        ...existing.filter((item) => !importedIds.has(item.id)),
-      ];
-      selectedId.value = imported[0].id;
+    const descriptor = extractAgentRunDescriptor(result);
+    if (descriptor) {
+      await consumeAgentRun({
+        actor: { id: actor.id, role: actor.role },
+        caseId: "EXTERNAL_IMPORT",
+        roomType: "OVERVIEW",
+        descriptor,
+        agentLabel: "外部案件导入助手",
+        senderRole: "SYSTEM",
+        onFinal: applyExternalImportResult,
+        onError: (failure) => {
+          importStreamError.value = failure.message;
+        },
+      });
     } else {
-      await loadDisputes(actor);
-      localCases.value = [...disputeStore.list.data];
-      selectedId.value = localCases.value[0]?.id || null;
+      await applyExternalImportResult(result);
     }
   } catch (failure) {
     importError.value = failure.message;
@@ -266,18 +312,46 @@ async function simulateExternalImport() {
   }
 }
 
+// 业务位置：【前端案件页面】applyExternalImportResult：围绕 阶段处理结果或草案 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
+async function applyExternalImportResult(result) {
+  const imported = (result?.items || []).map(normalizeImportedCase);
+  if (imported.length) {
+    const existing = localCases.value.length ? localCases.value : disputeStore.list.data;
+    const importedIds = new Set(imported.map((item) => item.id));
+    localCases.value = [
+      ...imported,
+      ...existing.filter((item) => !importedIds.has(item.id)),
+    ];
+    selectedId.value = imported[0].id;
+  } else {
+    await loadDisputes(actor);
+    localCases.value = [...disputeStore.list.data];
+    selectedId.value = localCases.value[0]?.id || null;
+  }
+}
+
+// 业务位置：【前端案件页面】dismissImportStreamError：切换与 Agent 流事件 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
+function dismissImportStreamError() {
+  const previous = importStreamError.value;
+  importStreamError.value = "";
+  if (importError.value === previous) importError.value = "";
+}
+
+// 业务位置：【前端案件页面】openDeleteCaseConfirmation：切换与 当前阶段业务数据 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
 function openDeleteCaseConfirmation() {
   if (!canDeleteSelectedCase.value) return;
   deleteCandidate.value = selectedCase.value;
   deleteError.value = "";
 }
 
+// 业务位置：【前端案件页面】closeDeleteCaseConfirmation：切换与 当前阶段业务数据 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
 function closeDeleteCaseConfirmation() {
   if (deletingCase.value) return;
   deleteCandidate.value = null;
   deleteError.value = "";
 }
 
+// 业务位置：【前端案件页面】confirmDeleteCase：执行 当前阶段业务数据 对应的业务动作，并将结果交给 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
 async function confirmDeleteCase() {
   if (deletingCase.value) return;
   const candidate = deleteCandidate.value;
@@ -324,6 +398,7 @@ async function confirmDeleteCase() {
   }
 }
 
+// 业务位置：【前端案件页面】createDispute：把 路由参数、API 数据和状态仓库 组装为本块需要的 当前阶段业务数据，供 用户可操作的案件视图 使用。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
 async function createDispute() {
   if (!canInitiateDispute.value) return;
   creating.value = true;
@@ -342,8 +417,7 @@ async function createDispute() {
       requested_resolution: intakeForm.value.requestedResolution,
       requested_amount: Number.isFinite(requestedAmount) ? requestedAmount : null,
       requested_items: intakeForm.value.requestedItems || null,
-      request_reason: intakeForm.value.requestReason || intakeForm.value.description,
-      original_statement: intakeForm.value.description,
+      request_reason: intakeForm.value.description,
     },
     attachment_ids: [],
     channel: "WEB",
@@ -365,6 +439,9 @@ onMounted(async () => {
   await loadDisputes(actor);
   selectedId.value ||= disputeStore.list.data[0]?.id || null;
 });
+onBeforeUnmount(() => {
+  clearAgentStreams({ caseId: "EXTERNAL_IMPORT", roomType: "OVERVIEW" });
+});
 </script>
 
 <template>
@@ -380,7 +457,57 @@ onMounted(async () => {
           这里只有已经进入争端流程的订单。选中案件，右侧路线会告诉你下一步。
         </p>
       </div>
-      <div class="overview-page__actions">
+      <div v-if="canDeleteSelectedCase" class="overview-page__actions">
+        <button
+          class="overview-page__delete"
+          type="button"
+          data-delete-simulated-case
+          @click="openDeleteCaseConfirmation"
+        >
+          <span aria-hidden="true">×</span>
+          删除模拟案例
+        </button>
+      </div>
+    </header>
+    <div
+      v-if="externalImportStreams.length"
+      class="overview-page__import-stream"
+      data-external-import-stream
+    >
+      <AgentStreamingMessage
+        v-for="run in externalImportStreams"
+        :key="run.runId"
+        :run="run"
+        :label="run.agentLabel"
+      />
+    </div>
+    <p v-if="importError" class="overview-page__error" role="alert">{{ importError }}</p>
+
+    <AgentStreamErrorDialog
+      :message="importStreamError"
+      title="外部案件生成失败"
+      @dismiss="dismissImportStreamError"
+    />
+
+    <section
+      v-if="selectedCase"
+      class="overview-guide-card"
+      data-overview-guide
+    >
+      <DigitalHuman
+        state="HANDOFF"
+        name="小途"
+        role="路线引导员"
+        :message="`当前位于${currentStage.label}。${pendingActionLabel(selectedCase?.pending_action)}`"
+      />
+    </section>
+
+    <div class="overview-layout" :class="{ 'overview-layout--empty': !cases.length }">
+      <div
+        v-if="canImportExternal || canInitiateDispute"
+        class="overview-case-actions"
+        aria-label="争议订单操作"
+      >
         <button
           v-if="canImportExternal"
           class="overview-page__import"
@@ -393,16 +520,6 @@ onMounted(async () => {
           {{ importingExternal ? "外部系统导入中" : "导入外部争议" }}
         </button>
         <button
-          v-if="canDeleteSelectedCase"
-          class="overview-page__delete"
-          type="button"
-          data-delete-simulated-case
-          @click="openDeleteCaseConfirmation"
-        >
-          <span aria-hidden="true">×</span>
-          删除模拟案例
-        </button>
-        <button
           v-if="canInitiateDispute"
           class="overview-page__start"
           type="button"
@@ -413,11 +530,8 @@ onMounted(async () => {
           发起争议审理
         </button>
       </div>
-    </header>
-    <p v-if="importError" class="overview-page__error" role="alert">{{ importError }}</p>
 
-    <div v-if="cases.length" class="overview-layout">
-      <aside class="dispute-rail" aria-label="争议订单">
+      <aside v-if="cases.length" class="dispute-rail" aria-label="争议订单">
         <div class="dispute-rail__heading">
           <div>
             <span>MY DISPUTES</span>
@@ -442,11 +556,6 @@ onMounted(async () => {
               <small :data-risk="item.risk_level">{{ riskLabel(item.risk_level) }}</small>
             </span>
             <strong>{{ item.title }}</strong>
-            <span class="dispute-ticket__id">
-              <span :title="item.order_id" :aria-label="item.order_id">{{ shortId(item.order_id) }}</span>
-              ·
-              <span data-short-case-id :title="item.id" :aria-label="item.id">{{ shortId(item.id) }}</span>
-            </span>
             <span class="dispute-ticket__room">
               <i aria-hidden="true" />
               {{ roomLabel(item.current_room) }}
@@ -456,104 +565,82 @@ onMounted(async () => {
         </div>
       </aside>
 
-      <main class="hearing-adventure" data-hearing-adventure>
-        <div class="hearing-adventure__sky" aria-hidden="true">
-          <span>✦</span><span>☁</span><span>✦</span>
-        </div>
-        <header class="hearing-adventure__header">
-          <div>
-            <span>CASE JOURNEY</span>
-            <h2 :title="selectedCase?.title" :aria-label="selectedCase?.title">{{ selectedCase?.title }}</h2>
-            <p>{{ pendingActionLabel(selectedCase?.pending_action) }}</p>
-          </div>
-          <PhaseCountdown
-            v-if="selectedCase?.deadline_at"
-            :deadline-at="selectedCase.deadline_at"
-            :server-now="serverNow"
-            label="当前房间剩余"
-          />
-        </header>
-
-        <div
-          class="hearing-adventure__next"
-          data-overview-guide
-          :aria-label="pendingActionLabel(selectedCase?.pending_action)"
-        >
-          <DigitalHuman
-            state="HANDOFF"
-            name="小衡"
-            role="路线引导员"
-            :message="pendingActionLabel(selectedCase?.pending_action) || '请选择一个争议案件。'"
-          />
-          <button type="button" data-enter-current-room @click="enterCurrentRoom">
-            进入当前房间
-            <span aria-hidden="true">→</span>
-          </button>
-        </div>
-
-        <ol class="adventure-path" data-adventure-path>
-          <li
-            v-for="(stage, index) in journey"
-            :key="stage.room"
-            :data-stage-state="stageState(index)"
-          >
-            <span class="adventure-path__connector" aria-hidden="true" />
-            <span class="adventure-path__node" aria-hidden="true">{{ stage.icon }}</span>
-            <div>
-              <small>STAGE {{ index + 1 }}</small>
-              <strong>{{ stage.label }}</strong>
-              <span v-if="stageState(index) === 'completed'">已经完成并留痕</span>
-              <span v-else-if="stageState(index) === 'current'">你现在在这里</span>
-              <span v-else>完成前序阶段后开放</span>
-            </div>
-          </li>
-        </ol>
-
-        <section
-          class="hearing-adventure__case-board"
+      <main v-if="cases.length" class="hearing-adventure" data-hearing-adventure>
+        <header
+          class="hearing-adventure__header"
           data-case-journey-dashboard
           aria-label="当前案件态势"
         >
-          <article>
-            <span>CASE FILE</span>
-            <strong
-              data-case-file-value
-              :title="selectedCase?.id"
-              :aria-label="selectedCase?.id"
-            >{{ selectedCase?.id }}</strong>
-            <small>案件编号</small>
-          </article>
-          <article>
-            <span>ORDER</span>
-            <strong
-              data-order-value
-              :title="selectedCase?.order_id || '未关联订单'"
-              :aria-label="selectedCase?.order_id || '未关联订单'"
-            >{{ selectedCase?.order_id || "未关联订单" }}</strong>
-            <small>{{ sourceLabel(selectedCase?.source_type) }}</small>
-          </article>
-          <article>
-            <span>ROOM CODE</span>
-            <strong>{{ selectedCase?.current_room }}</strong>
-            <small>{{ roomLabel(selectedCase?.current_room) }}</small>
-          </article>
-          <article>
-            <span>NEXT ACTION</span>
-            <strong
-              data-next-action-value
-              :title="pendingActionLabel(selectedCase?.pending_action)"
-              :aria-label="pendingActionLabel(selectedCase?.pending_action)"
-            >{{ pendingActionLabel(selectedCase?.pending_action) }}</strong>
-            <small>{{ riskLabel(selectedCase?.risk_level) }}</small>
-          </article>
+          <div class="hearing-adventure__identity">
+            <span aria-hidden="true">⌁</span>
+            <div>
+              <small>CASE JOURNEY</small>
+              <h2 :title="selectedCase?.title">{{ selectedCase?.title }}</h2>
+            </div>
+          </div>
+          <div class="hearing-adventure__header-status">
+            <strong>本案进度 {{ journeyProgress }}</strong>
+            <PhaseCountdown
+              v-if="selectedCase?.deadline_at"
+              :deadline-at="selectedCase.deadline_at"
+              :server-now="serverNow"
+              label="当前房间剩余"
+            />
+          </div>
+        </header>
+
+        <section class="hearing-adventure__viewport">
+          <div class="hearing-adventure__map">
+            <span class="hearing-adventure__terrain hearing-adventure__terrain--mint" aria-hidden="true" />
+            <span class="hearing-adventure__terrain hearing-adventure__terrain--yellow" aria-hidden="true" />
+            <span class="hearing-adventure__terrain hearing-adventure__terrain--blue" aria-hidden="true" />
+            <svg
+              class="adventure-path__route"
+              viewBox="0 0 1000 330"
+              preserveAspectRatio="none"
+              aria-hidden="true"
+            >
+              <path d="M 95 240 C 170 235, 165 100, 270 105 S 365 245, 445 220 S 520 180, 600 185 S 690 45, 755 90 S 865 225, 925 190" />
+            </svg>
+
+            <button
+              type="button"
+              class="map-room-entry"
+              data-enter-current-room
+              @click="enterCurrentRoom"
+            >
+              <span aria-hidden="true">→</span>
+              <span>
+                <strong>进入当前房间</strong>
+                <small>{{ currentStage.label }} · {{ pendingActionLabel(selectedCase?.pending_action) }}</small>
+              </span>
+            </button>
+
+            <ol class="adventure-path" data-adventure-path>
+              <li
+                v-for="(stage, index) in journey"
+                :key="stage.key"
+                :data-stage-state="stageState(index)"
+              >
+                <span class="adventure-path__orb">{{ index + 1 }}</span>
+                <strong>{{ stage.label }}</strong>
+                <small>{{ stageStatus(index) }}</small>
+              </li>
+            </ol>
+
+            <div class="hearing-adventure__finish">
+              <span aria-hidden="true">⚑</span>
+              <strong>终点由人类确认</strong>
+            </div>
+          </div>
         </section>
       </main>
-    </div>
 
-    <div v-else class="overview-empty">
-      <span aria-hidden="true">🎟</span>
-      <h2>还没有争议订单</h2>
-      <p>外部导入或接待官创建的争议会出现在这里，普通订单不会进入本页。</p>
+      <div v-else class="overview-empty">
+        <span aria-hidden="true">🎟</span>
+        <h2>还没有争议订单</h2>
+        <p>外部导入或接待官创建的争议会出现在这里，普通订单不会进入本页。</p>
+      </div>
     </div>
 
     <div v-if="intakeOpen" class="intake-launcher" role="dialog" aria-modal="true">
@@ -562,7 +649,7 @@ onMounted(async () => {
           <div>
             <span>NEW DISPUTE TICKET</span>
             <h2>请争议接待官开一张新案卡</h2>
-            <p>先提供最少引用与一段自然语言陈述，进入接待室后再由数字人继续追问。</p>
+            <p>先填写订单引用、初始诉求与一段自然语言陈述，进入接待室后由接待官继续追问。</p>
           </div>
           <button type="button" aria-label="关闭发起争议窗口" @click="intakeOpen = false">×</button>
         </header>
@@ -621,16 +708,6 @@ onMounted(async () => {
                 placeholder="可选，例如 儿童手表 1 件"
               />
             </label>
-            <label class="intake-launcher__claim-reason">
-              诉求原因说明
-              <textarea
-                v-model="intakeForm.requestReason"
-                data-claim-request-reason
-                rows="3"
-                required
-                placeholder="例如：物流显示签收但本人未收到，希望平台核验后退款"
-              />
-            </label>
           </section>
           <label class="intake-launcher__story">
             发生了什么
@@ -639,7 +716,7 @@ onMounted(async () => {
               data-intake-description
               rows="4"
               required
-              placeholder="像和业务员说话一样，描述履约争议与期望结果"
+              placeholder="描述争议经过、对方态度和你的期望处理结果；这段会作为原始陈述展示，不会被改写。"
             />
           </label>
         </div>
@@ -708,6 +785,15 @@ onMounted(async () => {
   align-items: flex-end;
 }
 .overview-page__intro > div { min-width: 0; }
+.overview-page__import-stream {
+  display: grid;
+  width: min(760px, 100%);
+  margin: -10px 0 14px;
+}
+.overview-page__import-stream :deep(.agent-streaming-message) {
+  width: 100%;
+  max-width: 100%;
+}
 .overview-page__actions {
   display: flex;
   flex: 0 0 auto;
@@ -930,18 +1016,6 @@ onMounted(async () => {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.dispute-ticket__id {
-  display: flex;
-  gap: 4px;
-  min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
-}
-.dispute-ticket__id span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
 .dispute-ticket__room { display: flex; align-items: center; gap: 7px; font-weight: 800; }
 .dispute-ticket__room i { width: 8px; height: 8px; background: #61c997; border-radius: 50%; }
 .hearing-adventure {
@@ -1030,16 +1104,6 @@ onMounted(async () => {
   color: #2d3e5c;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-.hearing-adventure__case-board strong[data-next-action-value] {
-  display: -webkit-box;
-  max-height: 2.9em;
-  overflow-wrap: anywhere;
-  text-overflow: clip;
-  white-space: normal;
-  line-height: 1.45;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
 }
 .hearing-adventure__case-board small {
   min-width: 0;
@@ -1194,30 +1258,28 @@ onMounted(async () => {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 11px;
-  padding: 14px;
-  border: 1px solid rgba(114, 139, 184, .28);
-  border-radius: 22px;
-  background: linear-gradient(135deg, rgba(244, 249, 255, .96), rgba(255, 249, 235, .9));
-}
-.intake-launcher__claim-copy,
-.intake-launcher__claim-reason {
-  grid-column: 1 / -1;
+  padding: 4px 0 0;
 }
 .intake-launcher__claim-copy {
+  grid-column: 1 / -1;
   display: flex;
   justify-content: space-between;
-  gap: 16px;
+  gap: 12px;
   align-items: center;
+  min-height: 22px;
+  padding-top: 2px;
 }
 .intake-launcher__claim-copy span {
-  color: #31527d;
+  color: #607089;
+  font-size: 12px;
   font-weight: 900;
-  letter-spacing: .08em;
+  letter-spacing: .02em;
 }
 .intake-launcher__claim-copy p {
   margin: 0;
   color: #7b879a;
-  font-size: 12px;
+  font-size: 11px;
+  line-height: 1.5;
 }
 .intake-launcher__story { grid-column: 1 / -1; }
 .intake-launcher__card footer { display: flex; justify-content: space-between; gap: 18px; align-items: center; margin-top: 15px; }
@@ -1338,7 +1400,6 @@ onMounted(async () => {
     font-size: 14px;
     -webkit-line-clamp: 1;
   }
-  .dispute-ticket__id,
   .dispute-ticket__room,
   .dispute-ticket > small { font-size: 11px; }
   .hearing-adventure {
@@ -1455,5 +1516,399 @@ onMounted(async () => {
   .dispute-ticket { min-width: 196px; }
   .hearing-adventure { padding: 12px; }
   .hearing-adventure__header h2 { font-size: 20px; }
+}
+
+/* Light Cognitive Field overview refactor */
+.overview-page {
+  --overview-rail-width: clamp(280px, 23vw, 330px);
+  gap: 20px;
+  padding: 0;
+  background: transparent;
+  border-radius: 0;
+}
+.overview-case-actions {
+  display: grid;
+  width: 100%;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  grid-column: 1;
+  grid-row: 1;
+}
+.overview-case-actions > button {
+  width: 100%;
+  min-width: 0;
+  justify-content: center;
+  padding-inline: 12px;
+  white-space: nowrap;
+}
+.overview-guide-card {
+  display: block;
+  padding: 14px;
+  min-width: 0;
+  background: rgba(255, 255, 255, .9);
+  border: 1px solid rgba(222, 235, 232, .94);
+  border-radius: 32px;
+  box-shadow: 0 16px 36px rgba(18, 56, 46, .1);
+}
+.overview-guide-card :deep(.digital-human) {
+  min-width: 0;
+  border: 0;
+  box-shadow: none;
+}
+.overview-layout {
+  display: grid;
+  grid-template-columns: var(--overview-rail-width) minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+  column-gap: 20px;
+  row-gap: 12px;
+  height: 690px;
+  min-width: 0;
+  min-height: 0;
+  overflow: visible;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+.dispute-rail {
+  grid-column: 1;
+  grid-row: 2;
+  min-width: 0;
+  min-height: 0;
+  padding: 20px;
+  overflow: hidden;
+  background: linear-gradient(180deg, rgba(255, 255, 255, .94), rgba(240, 250, 247, .94));
+  border: 1px solid rgba(220, 234, 230, .95);
+  border-radius: 30px;
+  box-shadow: 0 16px 38px rgba(18, 56, 46, .1);
+}
+.dispute-ticket {
+  background: rgba(255, 255, 255, .82);
+  border-color: rgba(218, 232, 227, .9);
+}
+.dispute-ticket--active {
+  border-color: #40c791;
+  box-shadow: 0 13px 28px rgba(18, 56, 46, .13);
+}
+.hearing-adventure {
+  position: relative;
+  display: grid;
+  grid-template-rows: 74px minmax(0, 1fr);
+  gap: 14px;
+  min-width: 0;
+  min-height: 0;
+  padding: 16px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, .93);
+  border: 1px solid rgba(224, 235, 232, .96);
+  border-radius: 38px;
+  box-shadow: 0 18px 44px rgba(18, 56, 46, .11);
+  grid-column: 2;
+  grid-row: 1 / span 2;
+}
+.overview-layout--empty .overview-empty {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+}
+.hearing-adventure__header {
+  position: relative;
+  z-index: 3;
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, .94);
+  border-radius: 23px;
+  box-shadow: 0 10px 24px rgba(18, 56, 46, .09);
+}
+.hearing-adventure__identity {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 11px;
+}
+.hearing-adventure__identity > span {
+  display: grid;
+  flex: 0 0 auto;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  color: #fff;
+  background: #40c791;
+  border-radius: 15px;
+  font-size: 24px;
+  font-weight: 900;
+  letter-spacing: 0;
+}
+.hearing-adventure__identity > div { min-width: 0; }
+.hearing-adventure__identity small {
+  color: #526e6b;
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: .14em;
+}
+.hearing-adventure__identity h2 {
+  margin: 1px 0 2px;
+  overflow: hidden;
+  color: #142e2e;
+  font-size: 17px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hearing-adventure__header-status {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 10px;
+}
+.hearing-adventure__header-status > strong {
+  padding: 9px 14px;
+  color: #142e2e;
+  background: #fff2ba;
+  border-radius: 999px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.hearing-adventure__viewport {
+  min-width: 0;
+  min-height: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border-radius: 28px;
+  scrollbar-width: thin;
+}
+.hearing-adventure__map {
+  position: relative;
+  min-width: 1000px;
+  height: 570px;
+  overflow: hidden;
+  background: rgba(252, 254, 253, .9);
+  border-radius: 28px;
+}
+.hearing-adventure__terrain {
+  position: absolute;
+  z-index: 0;
+  display: block;
+  border-radius: 50%;
+  pointer-events: none;
+}
+.hearing-adventure__terrain--mint {
+  left: -95px;
+  bottom: -115px;
+  width: 500px;
+  height: 350px;
+  background: #d1f7e5;
+}
+.hearing-adventure__terrain--yellow {
+  top: -175px;
+  right: -90px;
+  width: 510px;
+  height: 390px;
+  background: #fff2ba;
+}
+.hearing-adventure__terrain--blue {
+  right: 120px;
+  bottom: -165px;
+  width: 440px;
+  height: 300px;
+  background: #d6e8ff;
+}
+.adventure-path__route {
+  position: absolute;
+  inset: 80px 0 auto;
+  z-index: 2;
+  width: 100%;
+  height: 330px;
+  overflow: visible;
+}
+.adventure-path__route path {
+  fill: none;
+  stroke: #40c791;
+  stroke-width: 7;
+  stroke-linecap: round;
+  stroke-dasharray: 5 18;
+}
+.adventure-path {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: block;
+  width: auto;
+  min-width: 0;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  overflow: visible;
+  list-style: none;
+}
+.adventure-path li {
+  position: absolute;
+  display: grid;
+  box-sizing: border-box;
+  width: 116px;
+  height: 126px;
+  grid-template-rows: 52px auto auto;
+  justify-items: center;
+  align-content: start;
+  gap: 3px;
+  padding: 10px 8px;
+  color: #142e2e;
+  background: #fff;
+  border: 4px solid #fff;
+  border-radius: 38px;
+  box-shadow: 0 10px 24px rgba(18, 56, 46, .13);
+  transition: transform .2s ease, opacity .2s ease;
+}
+.adventure-path li:nth-child(1) { left: 76px; top: 294px; background: #ffd9cf; }
+.adventure-path li:nth-child(2) { left: 224px; top: 150px; background: #d6e8ff; }
+.adventure-path li:nth-child(3) { left: 382px; top: 252px; background: #d1f7e5; }
+.adventure-path li:nth-child(4) { left: 548px; top: 224px; background: #e8deff; }
+.adventure-path li:nth-child(5) { left: 708px; top: 100px; background: #fff2ba; }
+.adventure-path li:nth-child(6) { left: 866px; top: 206px; background: #fff; }
+.adventure-path li[data-stage-state="locked"] {
+  color: #9da8b6;
+  background: #f4f7fa;
+  border-color: #fff;
+  box-shadow: 0 8px 20px rgba(78, 99, 128, .075);
+  filter: saturate(.72);
+}
+.adventure-path li[data-stage-state="locked"] > * { opacity: .78; }
+.adventure-path li:nth-child(1)[data-stage-state="locked"] { background: #fff0eb; border-color: #fff8f5; }
+.adventure-path li:nth-child(2)[data-stage-state="locked"] { background: #edf5ff; border-color: #f8fbff; }
+.adventure-path li:nth-child(3)[data-stage-state="locked"] { background: #ebfaf3; border-color: #f7fdf9; }
+.adventure-path li:nth-child(4)[data-stage-state="locked"] { background: #f3efff; border-color: #fbf9ff; }
+.adventure-path li:nth-child(5)[data-stage-state="locked"] { background: #fff8da; border-color: #fffdf3; }
+.adventure-path li:nth-child(6)[data-stage-state="locked"] { background: #edf5f3; border-color: #f8fcfb; }
+.adventure-path li[data-stage-state="current"] {
+  z-index: 3;
+  outline: 3px solid rgba(64, 199, 145, .28);
+  transform: translateY(-7px) scale(1.06);
+}
+.adventure-path__orb {
+  display: grid;
+  width: 48px;
+  height: 48px;
+  place-items: center;
+  color: #fff;
+  background: #ff6b59;
+  border-radius: 50%;
+  font-size: 14px;
+  font-weight: 900;
+}
+.adventure-path li:nth-child(2) .adventure-path__orb { background: #408cf7; }
+.adventure-path li:nth-child(3) .adventure-path__orb { background: #40c791; }
+.adventure-path li:nth-child(4) .adventure-path__orb { background: #9168e7; }
+.adventure-path li:nth-child(5) .adventure-path__orb { color: #142e2e; background: #ffd447; }
+.adventure-path li:nth-child(6) .adventure-path__orb { background: #142e2e; }
+.adventure-path li > strong { color: #142e2e; font-size: 15px; }
+.adventure-path li > small { color: #526e6b; font-size: 10px; }
+.adventure-path li[data-stage-state="locked"] .adventure-path__orb {
+  color: #748296;
+  background: #e1e8ef;
+}
+.adventure-path li:nth-child(1)[data-stage-state="locked"] .adventure-path__orb { color: #9e584d; background: #ffd8cf; }
+.adventure-path li:nth-child(2)[data-stage-state="locked"] .adventure-path__orb { color: #4f78a6; background: #d6e8ff; }
+.adventure-path li:nth-child(3)[data-stage-state="locked"] .adventure-path__orb { color: #3e8668; background: #d1f1e1; }
+.adventure-path li:nth-child(4)[data-stage-state="locked"] .adventure-path__orb { color: #7257a9; background: #e2d8f8; }
+.adventure-path li:nth-child(5)[data-stage-state="locked"] .adventure-path__orb { color: #8a7629; background: #f7e9a8; }
+.adventure-path li:nth-child(6)[data-stage-state="locked"] .adventure-path__orb { color: #527069; background: #dce9e6; }
+.adventure-path li[data-stage-state="locked"] > strong { color: #667487; }
+.adventure-path li[data-stage-state="locked"] > small { color: #8995a5; }
+.map-room-entry {
+  position: absolute;
+  top: 25px;
+  left: 22px;
+  z-index: 4;
+  display: flex;
+  width: 224px;
+  min-height: 88px;
+  box-sizing: border-box;
+  align-items: center;
+  gap: 13px;
+  padding: 13px 16px;
+  color: #142e2e;
+  text-align: left;
+  background: #ffd9cf;
+  border: 0;
+  border-radius: 30px;
+  box-shadow: 0 10px 24px rgba(18, 56, 46, .11);
+  cursor: pointer;
+}
+.map-room-entry:hover { transform: translateY(-2px); }
+.map-room-entry:focus-visible { outline: 3px solid rgba(64, 140, 247, .32); outline-offset: 3px; }
+.map-room-entry > span:first-child {
+  display: grid;
+  flex: 0 0 auto;
+  width: 52px;
+  height: 52px;
+  place-items: center;
+  color: #142e2e;
+  background: rgba(255, 255, 255, .68);
+  border-radius: 50%;
+  font-size: 25px;
+  font-weight: 900;
+}
+.map-room-entry > span:last-child {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+}
+.map-room-entry strong { font-size: 14px; }
+.map-room-entry small {
+  overflow: hidden;
+  color: #526e6b;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hearing-adventure__finish {
+  position: absolute;
+  right: 24px;
+  bottom: 34px;
+  z-index: 3;
+  display: grid;
+  justify-items: center;
+  gap: 4px;
+  color: #142e2e;
+}
+.hearing-adventure__finish span { color: #ffd447; font-size: 52px; -webkit-text-stroke: 2px #142e2e; }
+.hearing-adventure__finish strong { font-size: 12px; }
+@media (max-width: 1020px) {
+  .overview-layout {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 180px 690px;
+    height: auto;
+  }
+  .overview-case-actions { grid-column: 1; grid-row: 1; width: min(100%, 330px); }
+  .dispute-rail {
+    grid-column: 1;
+    grid-row: 2;
+    grid-template-columns: 150px minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+    border: 1px solid rgba(220, 234, 230, .95);
+  }
+  .hearing-adventure { min-height: 690px; grid-column: 1; grid-row: 3; }
+  .overview-layout--empty .overview-empty { grid-column: 1; grid-row: 2 / span 2; }
+}
+@media (max-width: 760px) {
+  .overview-layout { grid-template-rows: auto 166px 660px; }
+  .hearing-adventure {
+    min-height: 660px;
+    padding: 12px;
+    border-radius: 30px;
+  }
+  .hearing-adventure__header { align-items: stretch; flex-direction: column; height: auto; }
+  .hearing-adventure__header-status { justify-content: space-between; }
+  .hearing-adventure__map { height: 545px; }
+}
+@media (max-width: 420px) {
+  .overview-guide-card { padding: 8px; border-radius: 24px; }
+  .overview-layout { grid-template-rows: auto 156px 650px; }
+  .dispute-rail { grid-template-columns: 92px minmax(0, 1fr); padding: 10px; border-radius: 22px; }
+  .hearing-adventure { min-height: 650px; }
+  .hearing-adventure__identity h2 { max-width: 220px; }
 }
 </style>

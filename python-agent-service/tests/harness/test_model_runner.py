@@ -1,3 +1,5 @@
+# 文件作用：自动化测试文件，验证 test_model_runner 相关模块的行为、契约或页面布局。
+
 from __future__ import annotations
 
 from pydantic import BaseModel
@@ -13,9 +15,17 @@ class RunnerOutput(BaseModel):
 
 
 class RecordingLlm:
+    # 所属模块：Agent Harness > test_model_runner；函数角色：对象依赖初始化。
+    # 具体功能：`__init__` 注入并保存处理本阶段状态需要的客户端、配置或策略依赖。
+    # 上下游：上游为 Java 可信快照、调用身份、上下文合同、角色模板；下游为 受 Token、权限、Schema、审计约束的模型输入或结果。
+    # 系统意义：该函数在系统中的业务边界是：隔离参与方会话；不可信案件文本不能升级为系统指令。
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
 
+    # 所属模块：Agent Harness > test_model_runner；函数角色：类/闭包内部方法。
+    # 具体功能：`generate` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`self.calls.append`、`StructuredGeneration`、`output_type`。
+    # 上下游：上游为 Java 可信快照、调用身份、上下文合同、角色模板；下游为 协作调用 `self.calls.append`、`StructuredGeneration`、`output_type`。
+    # 系统意义：该函数在系统中的业务边界是：隔离参与方会话；不可信案件文本不能升级为系统指令。
     def generate(
         self,
         *,
@@ -42,6 +52,10 @@ class RecordingLlm:
         )
 
 
+# 所属模块：Agent Harness > test_model_runner；函数角色：回归测试用例。
+# 具体功能：`test_model_runner_composes_prompt_with_managed_context_window` 把上游材料组装为本阶段可消费的模型提示词；关键协作调用：`RecordingLlm`、`HarnessModelRunner`、`runner.invoke_structured`。
+# 上下游：上游为 Java 可信快照、调用身份、上下文合同、角色模板；下游为 协作调用 `RecordingLlm`、`HarnessModelRunner`、`runner.invoke_structured`、`PromptRepository`。
+# 系统意义：固定“Agent Harness > test_model_runner”的可观察契约，防止后续重构改变业务结果。
 def test_model_runner_composes_prompt_with_managed_context_window() -> None:
     llm = RecordingLlm()
     runner = HarnessModelRunner(
@@ -83,6 +97,10 @@ def test_model_runner_composes_prompt_with_managed_context_window() -> None:
     assert "很早之前的历史。" not in str(call["user_prompt"])
 
 
+# 所属模块：Agent Harness > test_model_runner；函数角色：回归测试用例。
+# 具体功能：`test_model_runner_passes_prompt_profile_and_trusted_agent_context` 验证模型提示词在固定案例中的输出、边界和失败行为；关键协作调用：`RecordingLlm`、`HarnessModelRunner`、`runner.invoke_structured`。
+# 上下游：上游为 Java 可信快照、调用身份、上下文合同、角色模板；下游为 协作调用 `RecordingLlm`、`HarnessModelRunner`、`runner.invoke_structured`、`PromptRepository`。
+# 系统意义：固定“Agent Harness > test_model_runner”的可观察契约，防止后续重构改变业务结果。
 def test_model_runner_passes_prompt_profile_and_trusted_agent_context() -> None:
     llm = RecordingLlm()
     runner = HarnessModelRunner(
@@ -120,6 +138,10 @@ def test_model_runner_passes_prompt_profile_and_trusted_agent_context() -> None:
     assert "MALICIOUS_CASE_DATA" in str(call["user_prompt"])
 
 
+# 所属模块：Agent Harness > test_model_runner；函数角色：回归测试用例。
+# 具体功能：`test_model_runner_forwards_multimodal_parts_only_to_llm_transport` 验证结构化模型调用在固定案例中的输出、边界和失败行为；关键协作调用：`RecordingLlm`、`HarnessModelRunner`、`runner.invoke_structured`。
+# 上下游：上游为 Java 可信快照、调用身份、上下文合同、角色模板；下游为 协作调用 `RecordingLlm`、`HarnessModelRunner`、`runner.invoke_structured`、`PromptRepository`。
+# 系统意义：固定“Agent Harness > test_model_runner”的可观察契约，防止后续重构改变业务结果。
 def test_model_runner_forwards_multimodal_parts_only_to_llm_transport() -> None:
     llm = RecordingLlm()
     runner = HarnessModelRunner(llm=llm, prompts=PromptRepository())
@@ -145,6 +167,10 @@ def test_model_runner_forwards_multimodal_parts_only_to_llm_transport() -> None:
     assert "data:image" not in str(llm.calls[0]["user_prompt"])
 
 
+# 所属模块：Agent Harness > test_model_runner；函数角色：回归测试用例。
+# 具体功能：`test_context_window_rejects_required_section_that_cannot_fit` 验证案件与会话上下文在固定案例中的输出、边界和失败行为；关键协作调用：`ContextWindowManager`、`manager.assemble`、`AssertionError`。
+# 上下游：上游为 Java 可信快照、调用身份、上下文合同、角色模板；下游为 协作调用 `ContextWindowManager`、`manager.assemble`、`AssertionError`、`PromptSection`。
+# 系统意义：固定“Agent Harness > test_model_runner”的可观察契约，防止后续重构改变业务结果。
 def test_context_window_rejects_required_section_that_cannot_fit() -> None:
     manager = ContextWindowManager(default_max_input_tokens=10)
 

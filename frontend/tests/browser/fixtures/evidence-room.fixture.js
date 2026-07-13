@@ -1,3 +1,6 @@
+// 文件作用：自动化测试文件，验证 evidence-room.fixture 相关模块的行为、契约或页面布局。
+// 说明：本注释用于帮助读者先了解本文件职责，再继续阅读具体实现。
+
 import { expect } from "@playwright/test";
 
 export const CASE_ID = "CASE_EVIDENCE_LAYOUT";
@@ -9,10 +12,12 @@ const actors = {
   MERCHANT: { id: "merchant-local", role: "MERCHANT", label: "商家" },
 };
 
+// 业务位置：【前端浏览器回归测试】repeatToLength：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 function repeatToLength(seed, length) {
   return seed.repeat(Math.ceil(length / seed.length)).slice(0, length);
 }
 
+// 业务位置：【前端浏览器回归测试】buildEvidenceCatalog：把 页面夹具和拦截 API 响应 组装为本块需要的 当前可见证据和附件，供 房间、审核和结果页面的交互断言 使用。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 function buildEvidenceCatalog({
   role,
   count = 100,
@@ -77,6 +82,7 @@ function buildEvidenceCatalog({
   };
 }
 
+// 业务位置：【前端浏览器回归测试】buildCompletion：把 页面夹具和拦截 API 响应 组装为本块需要的 当前阶段业务数据，供 房间、审核和结果页面的交互断言 使用。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 function buildCompletion(options = {}) {
   const sealed = Boolean(options.sealed);
   return {
@@ -89,6 +95,7 @@ function buildCompletion(options = {}) {
   };
 }
 
+// 业务位置：【前端浏览器回归测试】buildMessages：把 页面夹具和拦截 API 响应 组装为本块需要的 房间消息和对话记录，供 房间、审核和结果页面的交互断言 使用。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 function buildMessages(role) {
   return [
     {
@@ -109,6 +116,7 @@ function buildMessages(role) {
   ];
 }
 
+// 业务位置：【前端浏览器回归测试】fulfillJson：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 function fulfillJson(route, data) {
   return route.fulfill({
     status: 200,
@@ -117,6 +125,7 @@ function fulfillJson(route, data) {
   });
 }
 
+// 业务位置：【前端浏览器回归测试】installEvidenceRoomFixture：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 export async function installEvidenceRoomFixture(page, options = {}) {
   const role = options.role || "USER";
   const actor = actors[role];

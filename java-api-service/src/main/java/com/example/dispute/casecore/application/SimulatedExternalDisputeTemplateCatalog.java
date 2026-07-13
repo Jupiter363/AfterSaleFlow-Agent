@@ -1,3 +1,9 @@
+/*
+ * 所属模块：案件核心与导入。
+ * 文件职责：维护模拟外部争议模板白名单并按稳定键解析实现。
+ * 业务链路：核心入口/契约为 「all」、「size」、「get」；维护争议案件事实、来源、幂等导入和演示数据清理。
+ * 关键边界：Java/PostgreSQL 是案件状态事实源，导入重试不能创建重复案件
+ */
 package com.example.dispute.casecore.application;
 
 import static com.example.dispute.domain.model.RiskLevel.HIGH;
@@ -9,6 +15,11 @@ import java.util.List;
 import org.springframework.stereotype.Component;
 
 /** Deterministic UTF-8 demo cases used by the local external-order importer. */
+// 所属模块：【案件核心与导入 / 应用编排层】类型「SimulatedExternalDisputeTemplateCatalog」。
+// 类型职责：维护模拟外部争议模板白名单并按稳定键解析实现；本类型显式提供 「all」、「size」、「get」、「template」。
+// 协作关系：主要由 「ExternalCaseImportTransactionService.simulateExternalImport」、「SimulatedExternalDisputeTemplateCatalogTest.containsExactlyTwentyOrderedUniqueAndCompleteUtf8Templates」、「SimulatedExternalImportTemplateCycleTest.importsTemplatesOneThroughTwentyThenCyclesBackToOne」、「SimulatedExternalImportTemplateCycleTest.mapsMerchantInitiatedTemplateClaimAsFormFactsWithoutInventedStatementsOrAttitude」 使用。
+// 边界意义：Java/PostgreSQL 是案件状态事实源，导入重试不能创建重复案件
+// Java 语法：class 同时封装状态与方法；final 依赖通过构造器注入后不可重新指向。
 @Component
 public class SimulatedExternalDisputeTemplateCatalog {
 
@@ -37,14 +48,29 @@ public class SimulatedExternalDisputeTemplateCatalog {
                     template(19, "订单取消后仍然发货", "发起方在订单出库前提交取消并收到受理提示，随后系统仍发货并产生退回运费争议。", "我在出库前提交取消并收到受理提示，订单后来还是发货了，请关闭订单并免除退回运费。商家说我提交取消时仓库已经完成出库。", "CANCELLATION_FAILURE", MEDIUM, "CANCEL_ORDER", "35.00", "家居收纳箱 2 个", "取消申请已被受理，要求关闭订单并免除退回运费。", "DISAGREE", "对方认为取消申请提交时仓库已经完成出库。"),
                     template(20, "商品参数宣传与检测结果不符", "页面宣称达到指定性能参数，第三方检测和实际使用结果均明显低于宣传值，双方对检测方法存在争议。", "我购买的净化器实测性能明显低于页面宣传参数，希望退货退款，并核验宣传参数依据。商家不认可现有检测条件，认为结果不能代表标准工况。", "SPECIFICATION_MISMATCH", HIGH, "RETURN_REFUND", "1899.00", "空气净化器 1 台", "核心性能未达到宣传标准，要求退货退款并核验参数依据。", "DISAGREE", "对方不认可现有检测条件，认为结果不能代表标准工况。"));
 
+    // 所属模块：【案件核心与导入 / 应用编排层】「SimulatedExternalDisputeTemplateCatalog.all()」。
+    // 具体功能：「SimulatedExternalDisputeTemplateCatalog.all()」：列出列表，最终返回「List<SimulatedExternalDisputeTemplate>」。
+    // 上游调用：「SimulatedExternalDisputeTemplateCatalog.all()」的上游调用点包括 「SimulatedExternalDisputeTemplateCatalogTest.containsExactlyTwentyOrderedUniqueAndCompleteUtf8Templates」、「SimulatedExternalImportTemplateCycleTest.importsTemplatesOneThroughTwentyThenCyclesBackToOne」。
+    // 下游影响：「SimulatedExternalDisputeTemplateCatalog.all()」只产生当前对象的返回值或字段变化，不访问额外基础设施；计算结果以「List<SimulatedExternalDisputeTemplate>」交给调用方。
+    // 系统意义：「SimulatedExternalDisputeTemplateCatalog.all()」负责主链路中的“列表”；Java/PostgreSQL 是案件状态事实源，导入重试不能创建重复案件
     public List<SimulatedExternalDisputeTemplate> all() {
         return TEMPLATES;
     }
 
+    // 所属模块：【案件核心与导入 / 应用编排层】「SimulatedExternalDisputeTemplateCatalog.size()」。
+    // 具体功能：「SimulatedExternalDisputeTemplateCatalog.size()」：返回启动期加载的模拟争议模板总数，供轮询游标取模和测试验证模板循环边界，最终返回「int」。
+    // 上游调用：「SimulatedExternalDisputeTemplateCatalog.size()」的上游调用点包括 「ExternalCaseImportTransactionService.simulateExternalImport」。
+    // 下游影响：「SimulatedExternalDisputeTemplateCatalog.size()」只产生当前对象的返回值或字段变化，不访问额外基础设施；计算结果以「int」交给调用方。
+    // 系统意义：「SimulatedExternalDisputeTemplateCatalog.size()」负责主链路中的“size”；Java/PostgreSQL 是案件状态事实源，导入重试不能创建重复案件
     public int size() {
         return TEMPLATES.size();
     }
 
+    // 所属模块：【案件核心与导入 / 应用编排层】「SimulatedExternalDisputeTemplateCatalog.get(int)」。
+    // 具体功能：「SimulatedExternalDisputeTemplateCatalog.get(int)」：读取「SimulatedExternalDisputeTemplateCatalog」中的「」状态，向 JPA、应用服务或序列化层返回「SimulatedExternalDisputeTemplate」。
+    // 上游调用：「SimulatedExternalDisputeTemplateCatalog.get(int)」的上游调用点包括 「ExternalCaseImportTransactionService.simulateExternalImport」、「SimulatedExternalImportTemplateCycleTest.importsTemplatesOneThroughTwentyThenCyclesBackToOne」、「SimulatedExternalImportTemplateCycleTest.mapsUserInitiatedTemplateClaimAsFormFactsWithoutInventedStatementsOrAttitude」、「SimulatedExternalImportTemplateCycleTest.mapsMerchantInitiatedTemplateClaimAsFormFactsWithoutInventedStatementsOrAttitude」。
+    // 下游影响：「SimulatedExternalDisputeTemplateCatalog.get(int)」只产生当前对象的返回值或字段变化，不访问额外基础设施；计算结果以「SimulatedExternalDisputeTemplate」交给调用方。
+    // 系统意义：「SimulatedExternalDisputeTemplateCatalog.get(int)」负责主链路中的“模拟外部争议模板”；Java/PostgreSQL 是案件状态事实源，导入重试不能创建重复案件
     public SimulatedExternalDisputeTemplate get(int templateNo) {
         if (templateNo < 1 || templateNo > TEMPLATES.size()) {
             throw new IllegalArgumentException("templateNo must be between 1 and " + TEMPLATES.size());
@@ -52,6 +78,11 @@ public class SimulatedExternalDisputeTemplateCatalog {
         return TEMPLATES.get(templateNo - 1);
     }
 
+    // 所属模块：【案件核心与导入 / 应用编排层】「SimulatedExternalDisputeTemplateCatalog.template(int,String,String,String,String,RiskLevel,String,String,String,String,String,String)」。
+    // 具体功能：「SimulatedExternalDisputeTemplateCatalog.template(int,String,String,String,String,RiskLevel,String,String,String,String,String,String)」：构建模板，最终返回「SimulatedExternalDisputeTemplate」。
+    // 上游调用：「SimulatedExternalDisputeTemplateCatalog.template(int,String,String,String,String,RiskLevel,String,String,String,String,String,String)」只由「SimulatedExternalDisputeTemplateCatalog」内部流程使用，负责封装“模板”这一步校验、映射或状态转换。
+    // 下游影响：「SimulatedExternalDisputeTemplateCatalog.template(int,String,String,String,String,RiskLevel,String,String,String,String,String,String)」只产生当前对象的返回值或字段变化，不访问额外基础设施；计算结果以「SimulatedExternalDisputeTemplate」交给调用方。
+    // 系统意义：「SimulatedExternalDisputeTemplateCatalog.template(int,String,String,String,String,RiskLevel,String,String,String,String,String,String)」负责主链路中的“模板”；Java/PostgreSQL 是案件状态事实源，导入重试不能创建重复案件
     private static SimulatedExternalDisputeTemplate template(
             int number,
             String title,

@@ -1,3 +1,8 @@
+<!--
+  文件作用：前端页面视图文件，组织售后争议对应页面的数据加载、交互和展示。
+  说明：本注释用于帮助读者先了解组件/页面职责，再阅读 template、script 和 style。
+-->
+
 <script setup>
 const agents = [
   {

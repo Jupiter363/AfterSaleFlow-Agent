@@ -1,3 +1,5 @@
+# 文件作用：自动化测试文件，验证 test_agent_invocation_context 相关模块的行为、契约或页面布局。
+
 from __future__ import annotations
 
 import pytest
@@ -6,6 +8,10 @@ from pydantic import ValidationError
 from app.schemas import EvidenceTurnRequest, IntakeTurnRequest
 
 
+# 所属模块：Agent Harness > test_agent_invocation_context；函数角色：模块私有业务函数。
+# 具体功能：`_agent_context` 围绕案件与会话上下文计算该函数独立负责的业务派生值；返回/更新字段：`tenant_id`、`case_id`、`room_type`、`actor_id`。
+# 上下游：上游为 本文件的 `_intake_payload`、`_evidence_payload`；下游为 返回/更新 `tenant_id`、`case_id`、`room_type`、`actor_id`。
+# 系统意义：控制隐私、Token 和会话隔离：隔离参与方会话；不可信案件文本不能升级为系统指令。
 def _agent_context(
     *,
     case_id: str = "CASE_context_contract",
@@ -45,6 +51,10 @@ def _agent_context(
     }
 
 
+# 所属模块：Agent Harness > test_agent_invocation_context；函数角色：模块私有业务函数。
+# 具体功能：`_intake_payload` 读取并按案件、角色或会话范围筛选接待信息；返回/更新字段：`case_id`、`room_type`、`turn_source`、`initial_case_facts`。
+# 上下游：上游为 本文件的 `test_intake_turn_request_requires_agent_context`、`test_request_rejects_case_id_and_room_type_mismatch`、`test_agent_context_rejects_blank_agent_session_id`；下游为 本文件的 `_agent_context`。
+# 系统意义：该函数在系统中的业务边界是：隔离参与方会话；不可信案件文本不能升级为系统指令。
 def _intake_payload() -> dict[str, object]:
     case_id = "CASE_context_contract"
     return {
@@ -67,6 +77,10 @@ def _intake_payload() -> dict[str, object]:
     }
 
 
+# 所属模块：Agent Harness > test_agent_invocation_context；函数角色：模块私有业务函数。
+# 具体功能：`_evidence_payload` 读取并按案件、角色或会话范围筛选当前可见证据；返回/更新字段：`context_envelope`、`agent_context`。
+# 上下游：上游为 本文件的 `test_evidence_turn_request_requires_agent_context`、`test_evidence_turn_request_rejects_actor_id_mismatch`、`test_evidence_turn_request_rejects_actor_role_mismatch`、`test_request_rejects_case_id_and_room_type_mismatch`；下游为 本文件的 `_agent_context`。
+# 系统意义：该函数在系统中的业务边界是：隔离参与方会话；不可信案件文本不能升级为系统指令。
 def _evidence_payload() -> dict[str, object]:
     case_id = "CASE_context_evidence"
     agent_context = _agent_context(
@@ -145,6 +159,10 @@ def _evidence_payload() -> dict[str, object]:
     }
 
 
+# 所属模块：Agent Harness > test_agent_invocation_context；函数角色：回归测试用例。
+# 具体功能：`test_intake_turn_request_requires_agent_context` 验证案件与会话上下文在固定案例中的输出、边界和失败行为；关键协作调用：`payload.pop`、`pytest.raises`、`IntakeTurnRequest.model_validate`。
+# 上下游：上游为 Java 可信快照、调用身份、上下文合同、角色模板；下游为 本文件的 `_intake_payload`。
+# 系统意义：固定“Agent Harness > test_agent_invocation_context”的可观察契约，防止后续重构改变业务结果。
 def test_intake_turn_request_requires_agent_context() -> None:
     payload = _intake_payload()
     payload.pop("agent_context")
@@ -155,6 +173,10 @@ def test_intake_turn_request_requires_agent_context() -> None:
     assert "agent_context" in str(failure.value)
 
 
+# 所属模块：Agent Harness > test_agent_invocation_context；函数角色：回归测试用例。
+# 具体功能：`test_evidence_turn_request_requires_agent_context` 验证当前可见证据在固定案例中的输出、边界和失败行为；关键协作调用：`payload.pop`、`pytest.raises`、`EvidenceTurnRequest.model_validate`。
+# 上下游：上游为 Java 可信快照、调用身份、上下文合同、角色模板；下游为 本文件的 `_evidence_payload`。
+# 系统意义：固定“Agent Harness > test_agent_invocation_context”的可观察契约，防止后续重构改变业务结果。
 def test_evidence_turn_request_requires_agent_context() -> None:
     payload = _evidence_payload()
     payload.pop("agent_context")
@@ -165,6 +187,10 @@ def test_evidence_turn_request_requires_agent_context() -> None:
     assert "agent_context" in str(failure.value)
 
 
+# 所属模块：Agent Harness > test_agent_invocation_context；函数角色：回归测试用例。
+# 具体功能：`test_evidence_turn_request_rejects_actor_id_mismatch` 验证当前可见证据在固定案例中的输出、边界和失败行为；关键协作调用：`pytest.raises`、`EvidenceTurnRequest.model_validate`。
+# 上下游：上游为 Java 可信快照、调用身份、上下文合同、角色模板；下游为 本文件的 `_evidence_payload`。
+# 系统意义：固定“Agent Harness > test_agent_invocation_context”的可观察契约，防止后续重构改变业务结果。
 def test_evidence_turn_request_rejects_actor_id_mismatch() -> None:
     payload = _evidence_payload()
     payload["context_envelope"]["actor_snapshot"]["actor_id"] = "USER_other"
@@ -175,6 +201,10 @@ def test_evidence_turn_request_rejects_actor_id_mismatch() -> None:
     assert "actor_id must match agent_context.actor_id" in str(failure.value)
 
 
+# 所属模块：Agent Harness > test_agent_invocation_context；函数角色：回归测试用例。
+# 具体功能：`test_evidence_turn_request_rejects_actor_role_mismatch` 验证当前可见证据在固定案例中的输出、边界和失败行为；关键协作调用：`pytest.raises`、`EvidenceTurnRequest.model_validate`。
+# 上下游：上游为 Java 可信快照、调用身份、上下文合同、角色模板；下游为 本文件的 `_evidence_payload`。
+# 系统意义：固定“Agent Harness > test_agent_invocation_context”的可观察契约，防止后续重构改变业务结果。
 def test_evidence_turn_request_rejects_actor_role_mismatch() -> None:
     payload = _evidence_payload()
     payload["context_envelope"]["actor_snapshot"]["actor_role"] = "MERCHANT"
@@ -185,6 +215,10 @@ def test_evidence_turn_request_rejects_actor_role_mismatch() -> None:
     assert "actor_role must match agent_context.actor_role" in str(failure.value)
 
 
+# 所属模块：Agent Harness > test_agent_invocation_context；函数角色：回归测试用例。
+# 具体功能：`test_request_rejects_case_id_and_room_type_mismatch` 验证本阶段状态在固定案例中的输出、边界和失败行为；关键协作调用：`pytest.raises`、`IntakeTurnRequest.model_validate`、`EvidenceTurnRequest.model_validate`。
+# 上下游：上游为 Java 可信快照、调用身份、上下文合同、角色模板；下游为 本文件的 `_intake_payload`、`_evidence_payload`。
+# 系统意义：固定“Agent Harness > test_agent_invocation_context”的可观察契约，防止后续重构改变业务结果。
 def test_request_rejects_case_id_and_room_type_mismatch() -> None:
     payload = _intake_payload()
     payload["agent_context"] = {
@@ -210,6 +244,10 @@ def test_request_rejects_case_id_and_room_type_mismatch() -> None:
     )
 
 
+# 所属模块：Agent Harness > test_agent_invocation_context；函数角色：回归测试用例。
+# 具体功能：`test_evidence_turn_request_rejects_legacy_and_mixed_payloads` 读取并按案件、角色或会话范围筛选当前可见证据；关键协作调用：`pytest.raises`、`EvidenceTurnRequest.model_validate`。
+# 上下游：上游为 Java 可信快照、调用身份、上下文合同、角色模板；下游为 本文件的 `_evidence_payload`。
+# 系统意义：固定“Agent Harness > test_agent_invocation_context”的可观察契约，防止后续重构改变业务结果。
 def test_evidence_turn_request_rejects_legacy_and_mixed_payloads() -> None:
     legacy_payload = {
         "case_id": "CASE_context_evidence",
@@ -244,6 +282,10 @@ def test_evidence_turn_request_rejects_legacy_and_mixed_payloads() -> None:
     assert "Extra inputs are not permitted" in str(mixed_failure.value)
 
 
+# 所属模块：Agent Harness > test_agent_invocation_context；函数角色：回归测试用例。
+# 具体功能：`test_evidence_turn_request_rejects_wrong_envelope_version_and_opening_text` 验证当前可见证据在固定案例中的输出、边界和失败行为；关键协作调用：`update`、`pytest.raises`、`EvidenceTurnRequest.model_validate`。
+# 上下游：上游为 Java 可信快照、调用身份、上下文合同、角色模板；下游为 本文件的 `_evidence_payload`。
+# 系统意义：固定“Agent Harness > test_agent_invocation_context”的可观察契约，防止后续重构改变业务结果。
 def test_evidence_turn_request_rejects_wrong_envelope_version_and_opening_text() -> None:
     wrong_version = _evidence_payload()
     wrong_version["context_envelope"]["schema_version"] = "evidence_context_envelope.v2"
@@ -268,6 +310,10 @@ def test_evidence_turn_request_rejects_wrong_envelope_version_and_opening_text()
     assert "ROOM_OPENING text must be null" in str(opening_failure.value)
 
 
+# 所属模块：Agent Harness > test_agent_invocation_context；函数角色：回归测试用例。
+# 具体功能：`test_agent_context_rejects_blank_agent_session_id` 验证案件与会话上下文在固定案例中的输出、边界和失败行为；关键协作调用：`pytest.raises`、`IntakeTurnRequest.model_validate`。
+# 上下游：上游为 Java 可信快照、调用身份、上下文合同、角色模板；下游为 本文件的 `_intake_payload`。
+# 系统意义：固定“Agent Harness > test_agent_invocation_context”的可观察契约，防止后续重构改变业务结果。
 def test_agent_context_rejects_blank_agent_session_id() -> None:
     payload = _intake_payload()
     payload["agent_context"] = {

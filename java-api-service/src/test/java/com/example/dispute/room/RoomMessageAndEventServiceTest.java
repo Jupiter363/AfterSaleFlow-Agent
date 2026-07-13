@@ -1,3 +1,9 @@
+/*
+ * 所属模块：房间协作与权限。
+ * 文件职责：验证房间消息并且事件，覆盖 「persistedMessagesAndEventsAreMappedAsImmutableAppendOnlyRecords」、「roomMessageViewCarriesTheHearingRoundForCourtTimelineGrouping」、「hearingPartyTextIsBoundToTheCurrentRoundAndRegisteredAsRoundStatement」、「hearingEvidenceReferenceIsBoundToTheCurrentRoundWithoutCountingAsRoundStatement」、「writesAnImmutableIdempotentMessageAndMonotonicCaseEventTogether」、「rejectsReusingAnIdempotencyKeyForDifferentImmutableMessageContent」。
+ * 业务链路：JUnit 构造夹具并驱动真实服务或 Mock 协作者，断言返回值、持久化状态和调用边界；维护接待室、证据室和小法庭的参与人、不可变消息、会话权限、阶段时钟与 Agent 记忆。
+ * 关键边界：每次读取和写入都要绑定案件参与关系、角色、房间和受众范围
+ */
 package com.example.dispute.room;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -62,6 +68,11 @@ import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseBodyEmitter.DataWithMediaType;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+// 所属模块：【房间协作与权限 / 自动化测试层】类型「RoomMessageAndEventServiceTest」。
+// 类型职责：集中验证房间消息并且事件的业务场景、权限边界和持久化/外部协作契约；本类型显式提供 「setUp」、「persistedMessagesAndEventsAreMappedAsImmutableAppendOnlyRecords」、「roomMessageViewCarriesTheHearingRoundForCourtTimelineGrouping」、「hearingPartyTextIsBoundToTheCurrentRoundAndRegisteredAsRoundStatement」、「hearingEvidenceReferenceIsBoundToTheCurrentRoundWithoutCountingAsRoundStatement」、「writesAnImmutableIdempotentMessageAndMonotonicCaseEventTogether」。
+// 协作关系：由 JUnit 发现并执行其中带 @Test 的场景。
+// 边界意义：每次读取和写入都要绑定案件参与关系、角色、房间和受众范围
+// Java 语法：class 同时封装状态与方法；final 依赖通过构造器注入后不可重新指向。
 @ExtendWith(MockitoExtension.class)
 class RoomMessageAndEventServiceTest {
 
@@ -82,6 +93,11 @@ class RoomMessageAndEventServiceTest {
     private RoomMessageService messageService;
     private final SessionPermissionService permissionService = new SessionPermissionService();
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「RoomMessageAndEventServiceTest.setUp()」。
+    // 具体功能：「RoomMessageAndEventServiceTest.setUp()」：在每个测试场景运行前创建「accessSessionResolver.resolve」、「invocation.getArgument」、「lenient」、「any」，统一准备后续断言依赖的初始状态，避免各用例重复搭建且保持彼此隔离。
+    // 上游调用：「RoomMessageAndEventServiceTest.setUp()」由 JUnit 生命周期或本测试类的场景方法调用。
+    // 下游影响：「RoomMessageAndEventServiceTest.setUp()」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「RoomMessageAndEventServiceTest.setUp()」守住「房间协作与权限」的可执行规格；后续重构若破坏契约会在进入集成环境前失败。
     @BeforeEach
     void setUp() {
         eventService =
@@ -116,12 +132,22 @@ class RoomMessageAndEventServiceTest {
                         });
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「RoomMessageAndEventServiceTest.persistedMessagesAndEventsAreMappedAsImmutableAppendOnlyRecords()」。
+    // 具体功能：「RoomMessageAndEventServiceTest.persistedMessagesAndEventsAreMappedAsImmutableAppendOnlyRecords()」：复现“核对完整业务行为（场景方法「persistedMessagesAndEventsAreMappedAsImmutableAppendOnlyRecords」）”场景：驱动 「isTrue」、「RoomMessageEntity.class.isAnnotationPresent」、「CaseTimelineEventEntity.class.isAnnotationPresent」，再用 「assertThat」 核对返回值、状态变化或协作者调用。
+    // 上游调用：「RoomMessageAndEventServiceTest.persistedMessagesAndEventsAreMappedAsImmutableAppendOnlyRecords()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「RoomMessageAndEventServiceTest.persistedMessagesAndEventsAreMappedAsImmutableAppendOnlyRecords()」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「RoomMessageAndEventServiceTest.persistedMessagesAndEventsAreMappedAsImmutableAppendOnlyRecords()」守住「房间协作与权限」的可执行规格；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void persistedMessagesAndEventsAreMappedAsImmutableAppendOnlyRecords() {
         assertThat(RoomMessageEntity.class.isAnnotationPresent(Immutable.class)).isTrue();
         assertThat(CaseTimelineEventEntity.class.isAnnotationPresent(Immutable.class)).isTrue();
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「RoomMessageAndEventServiceTest.roomMessageViewCarriesTheHearingRoundForCourtTimelineGrouping()」。
+    // 具体功能：「RoomMessageAndEventServiceTest.roomMessageViewCarriesTheHearingRoundForCourtTimelineGrouping()」：复现“核对完整业务行为（场景方法「roomMessageViewCarriesTheHearingRoundForCourtTimelineGrouping」）”场景：驱动 「caseRepository.findById」、「roomRepository.findByCaseIdAndRoomType」、「messageRepository.findAllByRoomIdOrderBySequenceNoAsc」、「messageService.list」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「MESSAGE_JUDGE_ROUND_1」、「CASE_ROOM_TEST」、「ROOM_HEARING」、「JUDGE」。
+    // 上游调用：「RoomMessageAndEventServiceTest.roomMessageViewCarriesTheHearingRoundForCourtTimelineGrouping()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「RoomMessageAndEventServiceTest.roomMessageViewCarriesTheHearingRoundForCourtTimelineGrouping()」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「RoomMessageAndEventServiceTest.roomMessageViewCarriesTheHearingRoundForCourtTimelineGrouping()」守住「房间协作与权限」的可执行规格，尤其防止 「MESSAGE_JUDGE_ROUND_1」、「CASE_ROOM_TEST」、「ROOM_HEARING」、「JUDGE」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void roomMessageViewCarriesTheHearingRoundForCourtTimelineGrouping() {
         RoomMessageEntity judgeMessage =
@@ -168,6 +194,11 @@ class RoomMessageAndEventServiceTest {
         assertThat(messages.getFirst().hearingRound()).isEqualTo(1);
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「RoomMessageAndEventServiceTest.hearingPartyTextIsBoundToTheCurrentRoundAndRegisteredAsRoundStatement()」。
+    // 具体功能：「RoomMessageAndEventServiceTest.hearingPartyTextIsBoundToTheCurrentRoundAndRegisteredAsRoundStatement()」：复现“核对完整业务行为（场景方法「hearingPartyTextIsBoundToTheCurrentRoundAndRegisteredAsRoundStatement」）”场景：驱动 「caseRepository.findByIdForUpdate」、「roomRepository.findByCaseIdAndRoomType」、「participantRepository.existsByCaseIdAndActorIdAndParticipantRole」、「messageRepository.findByCaseIdAndIdempotencyKey」，再用 「assertThat」、「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「ROOM_HEARING」、「2026-07-03T00:00:00Z」、「system」、「user-local」。
+    // 上游调用：「RoomMessageAndEventServiceTest.hearingPartyTextIsBoundToTheCurrentRoundAndRegisteredAsRoundStatement()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「RoomMessageAndEventServiceTest.hearingPartyTextIsBoundToTheCurrentRoundAndRegisteredAsRoundStatement()」的下游是被测服务、仓储或外部客户端替身；「assertThat、verify」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「RoomMessageAndEventServiceTest.hearingPartyTextIsBoundToTheCurrentRoundAndRegisteredAsRoundStatement()」守住「房间协作与权限」的可执行规格，尤其防止 「ROOM_HEARING」、「2026-07-03T00:00:00Z」、「system」、「user-local」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void hearingPartyTextIsBoundToTheCurrentRoundAndRegisteredAsRoundStatement() {
         FulfillmentCaseEntity dispute = evidenceCase();
@@ -224,6 +255,11 @@ class RoomMessageAndEventServiceTest {
                         eq(user));
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「RoomMessageAndEventServiceTest.hearingEvidenceReferenceIsBoundToTheCurrentRoundWithoutCountingAsRoundStatement()」。
+    // 具体功能：「RoomMessageAndEventServiceTest.hearingEvidenceReferenceIsBoundToTheCurrentRoundWithoutCountingAsRoundStatement()」：复现“核对完整业务行为（场景方法「hearingEvidenceReferenceIsBoundToTheCurrentRoundWithoutCountingAsRoundStatement」）”场景：驱动 「caseRepository.findByIdForUpdate」、「roomRepository.findByCaseIdAndRoomType」、「participantRepository.existsByCaseIdAndActorIdAndParticipantRole」、「messageRepository.findByCaseIdAndIdempotencyKey」，再用 「assertThat」、「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「ROOM_HEARING」、「2026-07-03T00:00:00Z」、「system」、「user-local」。
+    // 上游调用：「RoomMessageAndEventServiceTest.hearingEvidenceReferenceIsBoundToTheCurrentRoundWithoutCountingAsRoundStatement()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「RoomMessageAndEventServiceTest.hearingEvidenceReferenceIsBoundToTheCurrentRoundWithoutCountingAsRoundStatement()」的下游是被测服务、仓储或外部客户端替身；「assertThat、verify」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「RoomMessageAndEventServiceTest.hearingEvidenceReferenceIsBoundToTheCurrentRoundWithoutCountingAsRoundStatement()」守住「房间协作与权限」的可执行规格，尤其防止 「ROOM_HEARING」、「2026-07-03T00:00:00Z」、「system」、「user-local」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void hearingEvidenceReferenceIsBoundToTheCurrentRoundWithoutCountingAsRoundStatement() {
         FulfillmentCaseEntity dispute = evidenceCase();
@@ -272,6 +308,11 @@ class RoomMessageAndEventServiceTest {
                 .recordPartyMessageSubmission(any(), anyInt(), any(), any(), any());
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「RoomMessageAndEventServiceTest.writesAnImmutableIdempotentMessageAndMonotonicCaseEventTogether()」。
+    // 具体功能：「RoomMessageAndEventServiceTest.writesAnImmutableIdempotentMessageAndMonotonicCaseEventTogether()」：复现“核对完整业务行为（场景方法「writesAnImmutableIdempotentMessageAndMonotonicCaseEventTogether」）”场景：驱动 「caseRepository.findByIdForUpdate」、「roomRepository.findByCaseIdAndRoomType」、「participantRepository.existsByCaseIdAndActorIdAndParticipantRole」、「messageRepository.findByCaseIdAndIdempotencyKey」，再用 「assertThat」、「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「ROOM_EVIDENCE」、「2026-07-03T00:00:00Z」、「system」、「user-local」。
+    // 上游调用：「RoomMessageAndEventServiceTest.writesAnImmutableIdempotentMessageAndMonotonicCaseEventTogether()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「RoomMessageAndEventServiceTest.writesAnImmutableIdempotentMessageAndMonotonicCaseEventTogether()」的下游是被测服务、仓储或外部客户端替身；「assertThat、verify」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「RoomMessageAndEventServiceTest.writesAnImmutableIdempotentMessageAndMonotonicCaseEventTogether()」守住「房间协作与权限」的可执行规格，尤其防止 「ROOM_EVIDENCE」、「2026-07-03T00:00:00Z」、「system」、「user-local」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void writesAnImmutableIdempotentMessageAndMonotonicCaseEventTogether() {
         FulfillmentCaseEntity dispute = evidenceCase();
@@ -345,6 +386,11 @@ class RoomMessageAndEventServiceTest {
         verify(eventRepository, org.mockito.Mockito.times(1)).save(any());
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「RoomMessageAndEventServiceTest.rejectsReusingAnIdempotencyKeyForDifferentImmutableMessageContent()」。
+    // 具体功能：「RoomMessageAndEventServiceTest.rejectsReusingAnIdempotencyKeyForDifferentImmutableMessageContent()」：复现“拒绝非法输入或越权操作（场景方法「rejectsReusingAnIdempotencyKeyForDifferentImmutableMessageContent」）”场景：驱动 「caseRepository.findByIdForUpdate」、「roomRepository.findByCaseIdAndRoomType」、「messageRepository.findByCaseIdAndIdempotencyKey」、「messageService.post」，再用 「assertThatThrownBy」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「ROOM_EVIDENCE」、「2026-07-03T00:00:00Z」、「system」、「MESSAGE_EXISTING」。
+    // 上游调用：「RoomMessageAndEventServiceTest.rejectsReusingAnIdempotencyKeyForDifferentImmutableMessageContent()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「RoomMessageAndEventServiceTest.rejectsReusingAnIdempotencyKeyForDifferentImmutableMessageContent()」的下游是被测服务、仓储或外部客户端替身；「assertThatThrownBy」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「RoomMessageAndEventServiceTest.rejectsReusingAnIdempotencyKeyForDifferentImmutableMessageContent()」守住「房间协作与权限」的可执行规格，尤其防止 「ROOM_EVIDENCE」、「2026-07-03T00:00:00Z」、「system」、「MESSAGE_EXISTING」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void rejectsReusingAnIdempotencyKeyForDifferentImmutableMessageContent() {
         FulfillmentCaseEntity dispute = evidenceCase();
@@ -390,6 +436,11 @@ class RoomMessageAndEventServiceTest {
                 .hasMessageContaining("different room message");
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「RoomMessageAndEventServiceTest.platformReviewerCannotPostAPartyStatement()」。
+    // 具体功能：「RoomMessageAndEventServiceTest.platformReviewerCannotPostAPartyStatement()」：复现“核对完整业务行为（场景方法「platformReviewerCannotPostAPartyStatement」）”场景：驱动 「caseRepository.findByIdForUpdate」、「messageService.post」，再用 「assertThatThrownBy」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「reviewer-local」、「reviewer-party-message」、「TRACE_REVIEWER」。
+    // 上游调用：「RoomMessageAndEventServiceTest.platformReviewerCannotPostAPartyStatement()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「RoomMessageAndEventServiceTest.platformReviewerCannotPostAPartyStatement()」的下游是被测服务、仓储或外部客户端替身；「assertThatThrownBy」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「RoomMessageAndEventServiceTest.platformReviewerCannotPostAPartyStatement()」守住「房间协作与权限」的可执行规格，尤其防止 「reviewer-local」、「reviewer-party-message」、「TRACE_REVIEWER」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void platformReviewerCannotPostAPartyStatement() {
         FulfillmentCaseEntity dispute = evidenceCase();
@@ -414,6 +465,11 @@ class RoomMessageAndEventServiceTest {
                         com.example.dispute.common.exception.ForbiddenException.class);
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「RoomMessageAndEventServiceTest.intakePartyTextTriggersTheIntakeAgentTurnAfterTheMessageIsPersisted()」。
+    // 具体功能：「RoomMessageAndEventServiceTest.intakePartyTextTriggersTheIntakeAgentTurnAfterTheMessageIsPersisted()」：复现“核对完整业务行为（场景方法「intakePartyTextTriggersTheIntakeAgentTurnAfterTheMessageIsPersisted」）”场景：驱动 「caseRepository.findByIdForUpdate」、「roomRepository.findByCaseIdAndRoomType」、「participantRepository.existsByCaseIdAndActorIdAndParticipantRole」、「messageRepository.findByCaseIdAndIdempotencyKey」，再用 「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「ROOM_INTAKE」、「2026-07-03T00:00:00Z」、「system」、「user-local」。
+    // 上游调用：「RoomMessageAndEventServiceTest.intakePartyTextTriggersTheIntakeAgentTurnAfterTheMessageIsPersisted()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「RoomMessageAndEventServiceTest.intakePartyTextTriggersTheIntakeAgentTurnAfterTheMessageIsPersisted()」的下游是被测服务、仓储或外部客户端替身；「verify」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「RoomMessageAndEventServiceTest.intakePartyTextTriggersTheIntakeAgentTurnAfterTheMessageIsPersisted()」守住「房间协作与权限」的可执行规格，尤其防止 「ROOM_INTAKE」、「2026-07-03T00:00:00Z」、「system」、「user-local」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void intakePartyTextTriggersTheIntakeAgentTurnAfterTheMessageIsPersisted() {
         FulfillmentCaseEntity dispute = intakeCase();
@@ -464,6 +520,11 @@ class RoomMessageAndEventServiceTest {
                         eq("TRACE_INTAKE"));
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「RoomMessageAndEventServiceTest.evidencePartyEvidenceReferenceTriggersTheEvidenceAgentTurnAfterTheMessageIsPersisted()」。
+    // 具体功能：「RoomMessageAndEventServiceTest.evidencePartyEvidenceReferenceTriggersTheEvidenceAgentTurnAfterTheMessageIsPersisted()」：复现“核对完整业务行为（场景方法「evidencePartyEvidenceReferenceTriggersTheEvidenceAgentTurnAfterTheMessageIsPersisted」）”场景：驱动 「caseRepository.findByIdForUpdate」、「roomRepository.findByCaseIdAndRoomType」、「participantRepository.existsByCaseIdAndActorIdAndParticipantRole」、「messageRepository.findByCaseIdAndIdempotencyKey」，再用 「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「ROOM_EVIDENCE」、「2026-07-03T00:00:00Z」、「system」、「merchant-local」。
+    // 上游调用：「RoomMessageAndEventServiceTest.evidencePartyEvidenceReferenceTriggersTheEvidenceAgentTurnAfterTheMessageIsPersisted()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「RoomMessageAndEventServiceTest.evidencePartyEvidenceReferenceTriggersTheEvidenceAgentTurnAfterTheMessageIsPersisted()」的下游是被测服务、仓储或外部客户端替身；「verify」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「RoomMessageAndEventServiceTest.evidencePartyEvidenceReferenceTriggersTheEvidenceAgentTurnAfterTheMessageIsPersisted()」守住「房间协作与权限」的可执行规格，尤其防止 「ROOM_EVIDENCE」、「2026-07-03T00:00:00Z」、「system」、「merchant-local」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void evidencePartyEvidenceReferenceTriggersTheEvidenceAgentTurnAfterTheMessageIsPersisted() {
         FulfillmentCaseEntity dispute = evidenceCase();
@@ -516,6 +577,11 @@ class RoomMessageAndEventServiceTest {
                         eq("TRACE_EVIDENCE_REFERENCE"));
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「RoomMessageAndEventServiceTest.evidencePartyTextAndReferenceMessagesAreVisibleOnlyToSamePartyAndTrustedRoles()」。
+    // 具体功能：「RoomMessageAndEventServiceTest.evidencePartyTextAndReferenceMessagesAreVisibleOnlyToSamePartyAndTrustedRoles()」：复现“核对完整业务行为（场景方法「evidencePartyTextAndReferenceMessagesAreVisibleOnlyToSamePartyAndTrustedRoles」）”场景：驱动 「caseRepository.findByIdForUpdate」、「roomRepository.findByCaseIdAndRoomType」、「participantRepository.existsByCaseIdAndActorIdAndParticipantRole」、「messageRepository.findByCaseIdAndIdempotencyKey」，再用 「verify」、「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「ROOM_EVIDENCE」、「2026-07-03T00:00:00Z」、「system」、「user-local」。
+    // 上游调用：「RoomMessageAndEventServiceTest.evidencePartyTextAndReferenceMessagesAreVisibleOnlyToSamePartyAndTrustedRoles()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「RoomMessageAndEventServiceTest.evidencePartyTextAndReferenceMessagesAreVisibleOnlyToSamePartyAndTrustedRoles()」的下游是被测服务、仓储或外部客户端替身；「verify、assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「RoomMessageAndEventServiceTest.evidencePartyTextAndReferenceMessagesAreVisibleOnlyToSamePartyAndTrustedRoles()」守住「房间协作与权限」的可执行规格，尤其防止 「ROOM_EVIDENCE」、「2026-07-03T00:00:00Z」、「system」、「user-local」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void evidencePartyTextAndReferenceMessagesAreVisibleOnlyToSamePartyAndTrustedRoles()
             throws Exception {
@@ -608,6 +674,11 @@ class RoomMessageAndEventServiceTest {
         assertThat(merchantAudience).doesNotContain("USER");
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「RoomMessageAndEventServiceTest.intakeRoomRejectsTheNonInitiatingPartyBeforeEvidenceRoomOpens()」。
+    // 具体功能：「RoomMessageAndEventServiceTest.intakeRoomRejectsTheNonInitiatingPartyBeforeEvidenceRoomOpens()」：复现“核对完整业务行为（场景方法「intakeRoomRejectsTheNonInitiatingPartyBeforeEvidenceRoomOpens」）”场景：驱动 「caseRepository.findByIdForUpdate」、「messageService.post」，再用 「assertThatThrownBy」、「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「merchant-local」、「intake-merchant-rejected」、「TRACE_REJECT_NON_INITIATOR」。
+    // 上游调用：「RoomMessageAndEventServiceTest.intakeRoomRejectsTheNonInitiatingPartyBeforeEvidenceRoomOpens()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「RoomMessageAndEventServiceTest.intakeRoomRejectsTheNonInitiatingPartyBeforeEvidenceRoomOpens()」的下游是被测服务、仓储或外部客户端替身；「assertThatThrownBy、verify」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「RoomMessageAndEventServiceTest.intakeRoomRejectsTheNonInitiatingPartyBeforeEvidenceRoomOpens()」守住「房间协作与权限」的可执行规格，尤其防止 「merchant-local」、「intake-merchant-rejected」、「TRACE_REJECT_NON_INITIATOR」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void intakeRoomRejectsTheNonInitiatingPartyBeforeEvidenceRoomOpens() {
         FulfillmentCaseEntity dispute = intakeCase();
@@ -636,6 +707,11 @@ class RoomMessageAndEventServiceTest {
         verify(messageRepository, org.mockito.Mockito.never()).save(any());
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「RoomMessageAndEventServiceTest.evidenceRoomStillAcceptsBothDisputePartiesAfterAdmission()」。
+    // 具体功能：「RoomMessageAndEventServiceTest.evidenceRoomStillAcceptsBothDisputePartiesAfterAdmission()」：复现“核对完整业务行为（场景方法「evidenceRoomStillAcceptsBothDisputePartiesAfterAdmission」）”场景：驱动 「caseRepository.findByIdForUpdate」、「roomRepository.findByCaseIdAndRoomType」、「participantRepository.existsByCaseIdAndActorIdAndParticipantRole」、「messageRepository.findByCaseIdAndIdempotencyKey」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「ROOM_EVIDENCE」、「2026-07-03T00:00:00Z」、「system」、「merchant-local」。
+    // 上游调用：「RoomMessageAndEventServiceTest.evidenceRoomStillAcceptsBothDisputePartiesAfterAdmission()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「RoomMessageAndEventServiceTest.evidenceRoomStillAcceptsBothDisputePartiesAfterAdmission()」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「RoomMessageAndEventServiceTest.evidenceRoomStillAcceptsBothDisputePartiesAfterAdmission()」守住「房间协作与权限」的可执行规格，尤其防止 「ROOM_EVIDENCE」、「2026-07-03T00:00:00Z」、「system」、「merchant-local」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void evidenceRoomStillAcceptsBothDisputePartiesAfterAdmission() {
         FulfillmentCaseEntity dispute = evidenceCase();
@@ -680,6 +756,11 @@ class RoomMessageAndEventServiceTest {
         assertThat(message.messageText()).contains("inspection explanation");
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「RoomMessageAndEventServiceTest.evidenceRoomPartyMessagesAreScopedToTheSpeakingPartyAndTrustedPlatformRoles()」。
+    // 具体功能：「RoomMessageAndEventServiceTest.evidenceRoomPartyMessagesAreScopedToTheSpeakingPartyAndTrustedPlatformRoles()」：复现“核对完整业务行为（场景方法「evidenceRoomPartyMessagesAreScopedToTheSpeakingPartyAndTrustedPlatformRoles」）”场景：驱动 「caseRepository.findByIdForUpdate」、「roomRepository.findByCaseIdAndRoomType」、「participantRepository.existsByCaseIdAndActorIdAndParticipantRole」、「messageRepository.findByCaseIdAndIdempotencyKey」，再用 「verify」、「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「ROOM_EVIDENCE」、「2026-07-03T00:00:00Z」、「system」、「merchant-local」。
+    // 上游调用：「RoomMessageAndEventServiceTest.evidenceRoomPartyMessagesAreScopedToTheSpeakingPartyAndTrustedPlatformRoles()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「RoomMessageAndEventServiceTest.evidenceRoomPartyMessagesAreScopedToTheSpeakingPartyAndTrustedPlatformRoles()」的下游是被测服务、仓储或外部客户端替身；「verify、assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「RoomMessageAndEventServiceTest.evidenceRoomPartyMessagesAreScopedToTheSpeakingPartyAndTrustedPlatformRoles()」守住「房间协作与权限」的可执行规格，尤其防止 「ROOM_EVIDENCE」、「2026-07-03T00:00:00Z」、「system」、「merchant-local」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void evidenceRoomPartyMessagesAreScopedToTheSpeakingPartyAndTrustedPlatformRoles() {
         FulfillmentCaseEntity dispute = evidenceCase();
@@ -738,6 +819,11 @@ class RoomMessageAndEventServiceTest {
                 .doesNotContain("USER");
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「RoomMessageAndEventServiceTest.replayStartsAfterTheCursorAndFiltersMerchantPrivateEventsFromUser()」。
+    // 具体功能：「RoomMessageAndEventServiceTest.replayStartsAfterTheCursorAndFiltersMerchantPrivateEventsFromUser()」：复现“核对完整业务行为（场景方法「replayStartsAfterTheCursorAndFiltersMerchantPrivateEventsFromUser」）”场景：驱动 「caseRepository.findById」、「eventRepository.findAllByCaseIdAndSequenceNoGreaterThanOrderBySequenceNoAsc」、「eventService.replay」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「[\"USER\",\"MERCHANT\"]」、「shared」、「[\"MERCHANT\"]」、「merchant-private」。
+    // 上游调用：「RoomMessageAndEventServiceTest.replayStartsAfterTheCursorAndFiltersMerchantPrivateEventsFromUser()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「RoomMessageAndEventServiceTest.replayStartsAfterTheCursorAndFiltersMerchantPrivateEventsFromUser()」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「RoomMessageAndEventServiceTest.replayStartsAfterTheCursorAndFiltersMerchantPrivateEventsFromUser()」守住「房间协作与权限」的可执行规格，尤其防止 「[\"USER\",\"MERCHANT\"]」、「shared」、「[\"MERCHANT\"]」、「merchant-private」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void replayStartsAfterTheCursorAndFiltersMerchantPrivateEventsFromUser() {
         FulfillmentCaseEntity dispute = evidenceCase();
@@ -763,6 +849,11 @@ class RoomMessageAndEventServiceTest {
         assertThat(replay.getFirst().payloadJson()).contains("shared");
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「RoomMessageAndEventServiceTest.roomHistoryFiltersPrivateMessagesByExactActorWithinTheSameRole()」。
+    // 具体功能：「RoomMessageAndEventServiceTest.roomHistoryFiltersPrivateMessagesByExactActorWithinTheSameRole()」：复现“核对完整业务行为（场景方法「roomHistoryFiltersPrivateMessagesByExactActorWithinTheSameRole」）”场景：驱动 「caseRepository.findById」、「roomRepository.findByCaseIdAndRoomType」、「participantRepository.existsByCaseIdAndActorIdAndParticipantRole」、「messageRepository.findAllByRoomIdOrderBySequenceNoAsc」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「ROOM_EVIDENCE」、「2026-07-03T00:00:00Z」、「system」、「user-local」。
+    // 上游调用：「RoomMessageAndEventServiceTest.roomHistoryFiltersPrivateMessagesByExactActorWithinTheSameRole()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「RoomMessageAndEventServiceTest.roomHistoryFiltersPrivateMessagesByExactActorWithinTheSameRole()」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「RoomMessageAndEventServiceTest.roomHistoryFiltersPrivateMessagesByExactActorWithinTheSameRole()」守住「房间协作与权限」的可执行规格，尤其防止 「ROOM_EVIDENCE」、「2026-07-03T00:00:00Z」、「system」、「user-local」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void roomHistoryFiltersPrivateMessagesByExactActorWithinTheSameRole() {
         FulfillmentCaseEntity dispute = evidenceCase();
@@ -816,6 +907,11 @@ class RoomMessageAndEventServiceTest {
                 .containsExactly("current user's private evidence chat");
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「RoomMessageAndEventServiceTest.replayFiltersPrivateEventsByExactActorWithinTheSameRole()」。
+    // 具体功能：「RoomMessageAndEventServiceTest.replayFiltersPrivateEventsByExactActorWithinTheSameRole()」：复现“核对完整业务行为（场景方法「replayFiltersPrivateEventsByExactActorWithinTheSameRole」）”场景：驱动 「caseRepository.findById」、「participantRepository.existsByCaseIdAndActorIdAndParticipantRole」、「eventRepository.findAllByCaseIdAndSequenceNoGreaterThanOrderBySequenceNoAsc」、「eventService.replay」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「user-local」、「[\"USER\",\"PLATFORM_REVIEWER\"]」、「[\"user-other\"]」、「same-role-other-private」。
+    // 上游调用：「RoomMessageAndEventServiceTest.replayFiltersPrivateEventsByExactActorWithinTheSameRole()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「RoomMessageAndEventServiceTest.replayFiltersPrivateEventsByExactActorWithinTheSameRole()」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「RoomMessageAndEventServiceTest.replayFiltersPrivateEventsByExactActorWithinTheSameRole()」守住「房间协作与权限」的可执行规格，尤其防止 「user-local」、「[\"USER\",\"PLATFORM_REVIEWER\"]」、「[\"user-other\"]」、「same-role-other-private」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void replayFiltersPrivateEventsByExactActorWithinTheSameRole() {
         FulfillmentCaseEntity dispute = evidenceCase();
@@ -852,6 +948,11 @@ class RoomMessageAndEventServiceTest {
         assertThat(replay.getFirst().payloadJson()).contains("current-user-private");
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「RoomMessageAndEventServiceTest.subscriptionCatchesUpFromDurableStorageBeforeDeliveringANewerLiveEvent()」。
+    // 具体功能：「RoomMessageAndEventServiceTest.subscriptionCatchesUpFromDurableStorageBeforeDeliveringANewerLiveEvent()」：复现“核对完整业务行为（场景方法「subscriptionCatchesUpFromDurableStorageBeforeDeliveringANewerLiveEvent」）”场景：驱动 「caseRepository.findById」、「caseRepository.findByIdForUpdate」、「eventRepository.findByCaseIdAndEventKey」、「eventRepository.findMaxSequenceByCaseId」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「[\"USER\",\"MERCHANT\"]」、「historical」、「live」、「event-6」。
+    // 上游调用：「RoomMessageAndEventServiceTest.subscriptionCatchesUpFromDurableStorageBeforeDeliveringANewerLiveEvent()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「RoomMessageAndEventServiceTest.subscriptionCatchesUpFromDurableStorageBeforeDeliveringANewerLiveEvent()」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「RoomMessageAndEventServiceTest.subscriptionCatchesUpFromDurableStorageBeforeDeliveringANewerLiveEvent()」守住「房间协作与权限」的可执行规格，尤其防止 「[\"USER\",\"MERCHANT\"]」、「historical」、「live」、「event-6」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void subscriptionCatchesUpFromDurableStorageBeforeDeliveringANewerLiveEvent() {
         FulfillmentCaseEntity dispute = evidenceCase();
@@ -907,6 +1008,11 @@ class RoomMessageAndEventServiceTest {
                 .containsExactly(5L, 6L);
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「RoomMessageAndEventServiceTest.heartbeatRemovesDisconnectedSseSubscriptionWhenSendThrowsRuntimeException()」。
+    // 具体功能：「RoomMessageAndEventServiceTest.heartbeatRemovesDisconnectedSseSubscriptionWhenSendThrowsRuntimeException()」：复现“核对完整业务行为（场景方法「heartbeatRemovesDisconnectedSseSubscriptionWhenSendThrowsRuntimeException」）”场景：驱动 「eventRepository.findAllByCaseIdAndSequenceNoGreaterThanOrderBySequenceNoAsc」、「eventService.heartbeat」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「user-local」、「rawtypes」、「unchecked」、「subscriptions」。
+    // 上游调用：「RoomMessageAndEventServiceTest.heartbeatRemovesDisconnectedSseSubscriptionWhenSendThrowsRuntimeException()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「RoomMessageAndEventServiceTest.heartbeatRemovesDisconnectedSseSubscriptionWhenSendThrowsRuntimeException()」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「RoomMessageAndEventServiceTest.heartbeatRemovesDisconnectedSseSubscriptionWhenSendThrowsRuntimeException()」守住「房间协作与权限」的可执行规格，尤其防止 「user-local」、「rawtypes」、「unchecked」、「subscriptions」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void heartbeatRemovesDisconnectedSseSubscriptionWhenSendThrowsRuntimeException()
             throws ReflectiveOperationException {
@@ -936,6 +1042,11 @@ class RoomMessageAndEventServiceTest {
         assertThat(subscriptions).doesNotContainKey(dispute.getId());
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「RoomMessageAndEventServiceTest.roomHistoryFiltersReviewerOnlyMessagesForAParty()」。
+    // 具体功能：「RoomMessageAndEventServiceTest.roomHistoryFiltersReviewerOnlyMessagesForAParty()」：复现“核对完整业务行为（场景方法「roomHistoryFiltersReviewerOnlyMessagesForAParty」）”场景：驱动 「caseRepository.findById」、「roomRepository.findByCaseIdAndRoomType」、「messageRepository.findAllByRoomIdOrderBySequenceNoAsc」、「messageService.list」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「ROOM_EVIDENCE」、「2026-07-03T00:00:00Z」、「system」、「MESSAGE_SHARED」。
+    // 上游调用：「RoomMessageAndEventServiceTest.roomHistoryFiltersReviewerOnlyMessagesForAParty()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「RoomMessageAndEventServiceTest.roomHistoryFiltersReviewerOnlyMessagesForAParty()」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「RoomMessageAndEventServiceTest.roomHistoryFiltersReviewerOnlyMessagesForAParty()」守住「房间协作与权限」的可执行规格，尤其防止 「ROOM_EVIDENCE」、「2026-07-03T00:00:00Z」、「system」、「MESSAGE_SHARED」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void roomHistoryFiltersReviewerOnlyMessagesForAParty() {
         FulfillmentCaseEntity dispute = evidenceCase();
@@ -992,6 +1103,11 @@ class RoomMessageAndEventServiceTest {
                 .containsExactly("shared", "reviewer only");
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「RoomMessageAndEventServiceTest.intakeHistoryIsHiddenFromTheNonInitiatingParty()」。
+    // 具体功能：「RoomMessageAndEventServiceTest.intakeHistoryIsHiddenFromTheNonInitiatingParty()」：复现“核对完整业务行为（场景方法「intakeHistoryIsHiddenFromTheNonInitiatingParty」）”场景：驱动 「caseRepository.findById」、「roomRepository.findByCaseIdAndRoomType」、「messageService.list」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「ROOM_INTAKE」、「2026-07-03T00:00:00Z」、「system」、「merchant-local」。
+    // 上游调用：「RoomMessageAndEventServiceTest.intakeHistoryIsHiddenFromTheNonInitiatingParty()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「RoomMessageAndEventServiceTest.intakeHistoryIsHiddenFromTheNonInitiatingParty()」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「RoomMessageAndEventServiceTest.intakeHistoryIsHiddenFromTheNonInitiatingParty()」守住「房间协作与权限」的可执行规格，尤其防止 「ROOM_INTAKE」、「2026-07-03T00:00:00Z」、「system」、「merchant-local」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void intakeHistoryIsHiddenFromTheNonInitiatingParty() {
         FulfillmentCaseEntity dispute = intakeCase();
@@ -1017,11 +1133,21 @@ class RoomMessageAndEventServiceTest {
         assertThat(history).isEmpty();
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「RoomMessageAndEventServiceTest.event(long,String,String)」。
+    // 具体功能：「RoomMessageAndEventServiceTest.event(long,String,String)」：作为测试辅助方法为“核对完整业务行为（场景方法「event」）”组装或读取「event」，供本测试类的场景方法复用。
+    // 上游调用：「RoomMessageAndEventServiceTest.event(long,String,String)」由本测试类中的 「RoomMessageAndEventServiceTest.replayStartsAfterTheCursorAndFiltersMerchantPrivateEventsFromUser」、「RoomMessageAndEventServiceTest.replayFiltersPrivateEventsByExactActorWithinTheSameRole」、「RoomMessageAndEventServiceTest.subscriptionCatchesUpFromDurableStorageBeforeDeliveringANewerLiveEvent」、「RoomMessageAndEventServiceTest.event」 调用。
+    // 下游影响：「RoomMessageAndEventServiceTest.event(long,String,String)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「RoomMessageAndEventServiceTest.event(long,String,String)」守住「房间协作与权限」的可执行规格，尤其防止 「[]」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static CaseTimelineEventEntity event(
             long sequenceNo, String audienceJson, String payload) {
         return event(sequenceNo, audienceJson, "[]", payload);
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「RoomMessageAndEventServiceTest.event(long,String,String,String)」。
+    // 具体功能：「RoomMessageAndEventServiceTest.event(long,String,String,String)」：作为测试辅助方法为“核对完整业务行为（场景方法「event」）”组装或读取「CaseTimelineEventEntity.create」、「Instant.parse」，供本测试类的场景方法复用。
+    // 上游调用：「RoomMessageAndEventServiceTest.event(long,String,String,String)」由本测试类中的 「RoomMessageAndEventServiceTest.replayStartsAfterTheCursorAndFiltersMerchantPrivateEventsFromUser」、「RoomMessageAndEventServiceTest.replayFiltersPrivateEventsByExactActorWithinTheSameRole」、「RoomMessageAndEventServiceTest.subscriptionCatchesUpFromDurableStorageBeforeDeliveringANewerLiveEvent」、「RoomMessageAndEventServiceTest.event」 调用。
+    // 下游影响：「RoomMessageAndEventServiceTest.event(long,String,String,String)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「RoomMessageAndEventServiceTest.event(long,String,String,String)」守住「房间协作与权限」的可执行规格，尤其防止 「EVENT_」、「CASE_ROOM_TEST」、「ROOM_MESSAGE_CREATED」、「2026-07-03T00:00:00Z」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static CaseTimelineEventEntity event(
             long sequenceNo, String audienceJson, String audienceActorIdsJson, String payload) {
         return CaseTimelineEventEntity.create(
@@ -1039,6 +1165,11 @@ class RoomMessageAndEventServiceTest {
                 "system");
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「RoomMessageAndEventServiceTest.roomMessage(String,String,long,ActorRole,MessageType,String,String)」。
+    // 具体功能：「RoomMessageAndEventServiceTest.roomMessage(String,String,long,ActorRole,MessageType,String,String)」：作为测试辅助方法为“核对完整业务行为（场景方法「roomMessage」）”组装或读取「roomMessage」，供本测试类的场景方法复用。
+    // 上游调用：「RoomMessageAndEventServiceTest.roomMessage(String,String,long,ActorRole,MessageType,String,String)」由本测试类中的 「RoomMessageAndEventServiceTest.rejectsReusingAnIdempotencyKeyForDifferentImmutableMessageContent」、「RoomMessageAndEventServiceTest.roomHistoryFiltersPrivateMessagesByExactActorWithinTheSameRole」、「RoomMessageAndEventServiceTest.roomHistoryFiltersReviewerOnlyMessagesForAParty」、「RoomMessageAndEventServiceTest.roomMessage」 调用。
+    // 下游影响：「RoomMessageAndEventServiceTest.roomMessage(String,String,long,ActorRole,MessageType,String,String)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「RoomMessageAndEventServiceTest.roomMessage(String,String,long,ActorRole,MessageType,String,String)」守住「房间协作与权限」的可执行规格，尤其防止 「user-local」、「reviewer-local」、「[]」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static RoomMessageEntity roomMessage(
             String id,
             String roomId,
@@ -1059,6 +1190,11 @@ class RoomMessageAndEventServiceTest {
                 "[]");
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「RoomMessageAndEventServiceTest.roomMessage(String,String,long,ActorRole,String,MessageType,String,String,String)」。
+    // 具体功能：「RoomMessageAndEventServiceTest.roomMessage(String,String,long,ActorRole,String,MessageType,String,String,String)」：作为测试辅助方法为“核对完整业务行为（场景方法「roomMessage」）”组装或读取「RoomMessageEntity.create」、「Instant.parse」，供本测试类的场景方法复用。
+    // 上游调用：「RoomMessageAndEventServiceTest.roomMessage(String,String,long,ActorRole,String,MessageType,String,String,String)」由本测试类中的 「RoomMessageAndEventServiceTest.rejectsReusingAnIdempotencyKeyForDifferentImmutableMessageContent」、「RoomMessageAndEventServiceTest.roomHistoryFiltersPrivateMessagesByExactActorWithinTheSameRole」、「RoomMessageAndEventServiceTest.roomHistoryFiltersReviewerOnlyMessagesForAParty」、「RoomMessageAndEventServiceTest.roomMessage」 调用。
+    // 下游影响：「RoomMessageAndEventServiceTest.roomMessage(String,String,long,ActorRole,String,MessageType,String,String,String)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「RoomMessageAndEventServiceTest.roomMessage(String,String,long,ActorRole,String,MessageType,String,String,String)」守住「房间协作与权限」的可执行规格，尤其防止 「CASE_ROOM_TEST」、「[]」、「idem-」、「2026-07-03T00:00:00Z」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static RoomMessageEntity roomMessage(
             String id,
             String roomId,
@@ -1089,6 +1225,11 @@ class RoomMessageAndEventServiceTest {
                 "TRACE_" + id);
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「RoomMessageAndEventServiceTest.accessSession(String,AuthenticatedActor)」。
+    // 具体功能：「RoomMessageAndEventServiceTest.accessSession(String,AuthenticatedActor)」：作为测试辅助方法为“核对完整业务行为（场景方法「accessSession」）”组装或读取「CaseAccessSessionEntity.create」、「actor.role」、「actor.actorId」、「permissionLevel」，供本测试类的场景方法复用。
+    // 上游调用：「RoomMessageAndEventServiceTest.accessSession(String,AuthenticatedActor)」由本测试类中的 「RoomMessageAndEventServiceTest.setUp」、「RoomMessageAndEventServiceTest.heartbeatRemovesDisconnectedSseSubscriptionWhenSendThrowsRuntimeException」 调用。
+    // 下游影响：「RoomMessageAndEventServiceTest.accessSession(String,AuthenticatedActor)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「RoomMessageAndEventServiceTest.accessSession(String,AuthenticatedActor)」守住「房间协作与权限」的可执行规格，尤其防止 「ACCESS_」、「_」、「default」、「test」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static CaseAccessSessionEntity accessSession(String caseId, AuthenticatedActor actor) {
         return CaseAccessSessionEntity.create(
                 "ACCESS_" + caseId + "_" + actor.role().name() + "_" + actor.actorId(),
@@ -1100,6 +1241,11 @@ class RoomMessageAndEventServiceTest {
                 "test");
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「RoomMessageAndEventServiceTest.subscription(CaseAccessSessionEntity,SseEmitter,long)」。
+    // 具体功能：「RoomMessageAndEventServiceTest.subscription(CaseAccessSessionEntity,SseEmitter,long)」：作为测试辅助方法为“核对完整业务行为（场景方法「subscription」）”组装或读取「IllegalStateException」、「AtomicLong」 输入夹具，供本测试类的场景方法复用。
+    // 上游调用：「RoomMessageAndEventServiceTest.subscription(CaseAccessSessionEntity,SseEmitter,long)」由本测试类中的 「RoomMessageAndEventServiceTest.heartbeatRemovesDisconnectedSseSubscriptionWhenSendThrowsRuntimeException」 调用。
+    // 下游影响：「RoomMessageAndEventServiceTest.subscription(CaseAccessSessionEntity,SseEmitter,long)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「RoomMessageAndEventServiceTest.subscription(CaseAccessSessionEntity,SseEmitter,long)」守住「房间协作与权限」的可执行规格，尤其防止 「Subscription」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static Object subscription(
             CaseAccessSessionEntity accessSession, SseEmitter emitter, long lastSequence)
             throws ReflectiveOperationException {
@@ -1120,20 +1266,42 @@ class RoomMessageAndEventServiceTest {
         return constructor.newInstance(accessSession, emitter, new AtomicLong(lastSequence));
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】类型「ThrowingSseEmitter」。
+    // 类型职责：承载ThrowingSseEmitter在当前业务模块中的规则与协作边界；本类型显式提供 「ThrowingSseEmitter」、「send」。
+    // 协作关系：主要由 「RoomMessageAndEventServiceTest.heartbeatRemovesDisconnectedSseSubscriptionWhenSendThrowsRuntimeException」 使用。
+    // 边界意义：每次读取和写入都要绑定案件参与关系、角色、房间和受众范围
+    // Java 语法：class 同时封装状态与方法；final 依赖通过构造器注入后不可重新指向。
     private static final class ThrowingSseEmitter extends SseEmitter {
         private final RuntimeException failure;
 
+        // 所属模块：【房间协作与权限 / 自动化测试层】「RoomMessageAndEventServiceTest.ThrowingSseEmitter.ThrowingSseEmitter(RuntimeException)」。
+        // 具体功能：「RoomMessageAndEventServiceTest.ThrowingSseEmitter.ThrowingSseEmitter(RuntimeException)」：作为测试辅助方法为“核对完整业务行为（场景方法「ThrowingSseEmitter」）”组装或读取测试夹具数据，供本测试类的场景方法复用。
+        // 上游调用：「RoomMessageAndEventServiceTest.ThrowingSseEmitter.ThrowingSseEmitter(RuntimeException)」由本测试类中的 「RoomMessageAndEventServiceTest.heartbeatRemovesDisconnectedSseSubscriptionWhenSendThrowsRuntimeException」 调用。
+        // 下游影响：「RoomMessageAndEventServiceTest.ThrowingSseEmitter.ThrowingSseEmitter(RuntimeException)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+        // 系统意义：「RoomMessageAndEventServiceTest.ThrowingSseEmitter.ThrowingSseEmitter(RuntimeException)」守住「房间协作与权限」的可执行规格；后续重构若破坏契约会在进入集成环境前失败。
+        // Java 语法：构造器名称与类名相同且没有返回类型；参数通常由 Spring 按类型注入。
         private ThrowingSseEmitter(RuntimeException failure) {
             super(60_000L);
             this.failure = failure;
         }
 
+        // 所属模块：【房间协作与权限 / 自动化测试层】「RoomMessageAndEventServiceTest.ThrowingSseEmitter.send(SseEventBuilder)」。
+        // 具体功能：「RoomMessageAndEventServiceTest.ThrowingSseEmitter.send(SseEventBuilder)」：作为「ThrowingSseEmitter」测试替身实现「send」：按当前场景返回固定结果且不访问真实基础设施，让被测编排能够观察到确定、可断言的协作者行为。
+        // 上游调用：「RoomMessageAndEventServiceTest.ThrowingSseEmitter.send(SseEventBuilder)」由 JUnit 生命周期或本测试类的场景方法调用。
+        // 下游影响：「RoomMessageAndEventServiceTest.ThrowingSseEmitter.send(SseEventBuilder)」下游仅修改测试内存状态或返回桩值：不触发真实 I/O；场景结束后由外层测试读取这些记录完成断言。
+        // 系统意义：「RoomMessageAndEventServiceTest.ThrowingSseEmitter.send(SseEventBuilder)」守住「房间协作与权限」的可执行规格；后续重构若破坏契约会在进入集成环境前失败。
+        // Java 语法：@Override 要求签名与接口/父类一致，编译器会在方法名或参数写错时直接报错。
         @Override
         public void send(SseEventBuilder builder) throws java.io.IOException {
             throw failure;
         }
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「RoomMessageAndEventServiceTest.permissionLevel(ActorRole)」。
+    // 具体功能：「RoomMessageAndEventServiceTest.permissionLevel(ActorRole)」：作为测试辅助方法为“核对完整业务行为（场景方法「permissionLevel」）”组装或读取测试夹具数据，供本测试类的场景方法复用。
+    // 上游调用：「RoomMessageAndEventServiceTest.permissionLevel(ActorRole)」由本测试类中的 「RoomMessageAndEventServiceTest.accessSession」 调用。
+    // 下游影响：「RoomMessageAndEventServiceTest.permissionLevel(ActorRole)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「RoomMessageAndEventServiceTest.permissionLevel(ActorRole)」守住「房间协作与权限」的可执行规格；后续重构若破坏契约会在进入集成环境前失败。
     private static PermissionLevel permissionLevel(ActorRole role) {
         return switch (role) {
             case USER -> PermissionLevel.PARTY_USER;
@@ -1145,6 +1313,11 @@ class RoomMessageAndEventServiceTest {
         };
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「RoomMessageAndEventServiceTest.evidenceCase()」。
+    // 具体功能：「RoomMessageAndEventServiceTest.evidenceCase()」：作为测试辅助方法为“核对完整业务行为（场景方法「evidenceCase」）”组装或读取「FulfillmentCaseEntity.imported」、「OffsetDateTime.parse」，供本测试类的场景方法复用。
+    // 上游调用：「RoomMessageAndEventServiceTest.evidenceCase()」由本测试类中的 「RoomMessageAndEventServiceTest.roomMessageViewCarriesTheHearingRoundForCourtTimelineGrouping」、「RoomMessageAndEventServiceTest.hearingPartyTextIsBoundToTheCurrentRoundAndRegisteredAsRoundStatement」、「RoomMessageAndEventServiceTest.hearingEvidenceReferenceIsBoundToTheCurrentRoundWithoutCountingAsRoundStatement」、「RoomMessageAndEventServiceTest.writesAnImmutableIdempotentMessageAndMonotonicCaseEventTogether」 调用。
+    // 下游影响：「RoomMessageAndEventServiceTest.evidenceCase()」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「RoomMessageAndEventServiceTest.evidenceCase()」守住「房间协作与权限」的可执行规格，尤其防止 「CASE_ROOM_TEST」、「ORDER-ROOM」、「LOG-ROOM」、「user-local」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static FulfillmentCaseEntity evidenceCase() {
         return FulfillmentCaseEntity.imported(
                 "CASE_ROOM_TEST",
@@ -1166,6 +1339,11 @@ class RoomMessageAndEventServiceTest {
                 "external-adapter");
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「RoomMessageAndEventServiceTest.intakeCase()」。
+    // 具体功能：「RoomMessageAndEventServiceTest.intakeCase()」：作为测试辅助方法为“核对完整业务行为（场景方法「intakeCase」）”组装或读取「FulfillmentCaseEntity.imported」，供本测试类的场景方法复用。
+    // 上游调用：「RoomMessageAndEventServiceTest.intakeCase()」由本测试类中的 「RoomMessageAndEventServiceTest.intakePartyTextTriggersTheIntakeAgentTurnAfterTheMessageIsPersisted」、「RoomMessageAndEventServiceTest.intakeRoomRejectsTheNonInitiatingPartyBeforeEvidenceRoomOpens」、「RoomMessageAndEventServiceTest.intakeHistoryIsHiddenFromTheNonInitiatingParty」 调用。
+    // 下游影响：「RoomMessageAndEventServiceTest.intakeCase()」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「RoomMessageAndEventServiceTest.intakeCase()」守住「房间协作与权限」的可执行规格，尤其防止 「CASE_INTAKE_ROOM_TEST」、「ORDER-ROOM」、「LOG-ROOM」、「user-local」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static FulfillmentCaseEntity intakeCase() {
         return FulfillmentCaseEntity.imported(
                 "CASE_INTAKE_ROOM_TEST",

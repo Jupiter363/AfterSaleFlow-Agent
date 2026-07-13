@@ -1,3 +1,6 @@
+// 文件作用：自动化测试文件，验证 global-width-smoke.spec 相关模块的行为、契约或页面布局。
+// 说明：本注释用于帮助读者先了解本文件职责，再继续阅读具体实现。
+
 import { expect, test } from "@playwright/test";
 import {
   GLOBAL_CASE_IDS,
@@ -61,6 +64,7 @@ const compactViewports = [
   { width: 320, height: 568 },
 ];
 
+// 业务位置：【前端浏览器回归测试】horizontalOverflowReport：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 async function horizontalOverflowReport(page) {
   return page.evaluate(() => {
     const root = document.documentElement;
@@ -103,6 +107,7 @@ async function horizontalOverflowReport(page) {
 
 for (const viewport of compactViewports) {
   for (const route of routes) {
+    // 业务位置：【前端浏览器回归测试】test：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
     test(`${route.name} has no document overflow at ${viewport.width}px`, async ({
       page,
     }) => {

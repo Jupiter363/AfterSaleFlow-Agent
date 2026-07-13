@@ -1,3 +1,6 @@
+# 文件作用：容器镜像构建文件，定义服务运行环境、依赖安装和启动入口。
+# 说明：本注释用于帮助读者先了解文件用途，再修改具体配置。
+
 FROM public.ecr.aws/docker/library/node:22-alpine AS build
 WORKDIR /app
 ENV COREPACK_HOME=/opt/corepack

@@ -1,7 +1,12 @@
+// 文件作用：自动化测试文件，验证 verificationFocus.test 相关模块的行为、契约或页面布局。
+// 说明：本注释用于帮助读者先了解本文件职责，再继续阅读具体实现。
+
 import { describe, expect, it } from "vitest";
 import { normalizeVerificationFocus } from "./verificationFocus";
 
+// 业务位置：【前端应用】describe：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由、API 和本地状态 正确进入 售后纠纷处理界面。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
 describe("normalizeVerificationFocus", () => {
+  // 业务位置：【前端应用】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由、API 和本地状态 正确进入 售后纠纷处理界面。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
   it("merges material names, gaps, questions and actions into canonical action phrases", () => {
     const result = normalizeVerificationFocus([
       "开箱视频/照片",
@@ -33,10 +38,21 @@ describe("normalizeVerificationFocus", () => {
     expect(result.every((item) => !/[？?]$/u.test(item))).toBe(true);
   });
 
+  // 业务位置：【前端应用】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由、API 和本地状态 正确进入 售后纠纷处理界面。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
   it("keeps unrelated focus items distinct while enforcing action phrasing", () => {
     expect(normalizeVerificationFocus(["责任主体", "核验事项 1", "责任主体"])).toEqual([
       "核验责任主体",
       "核验事项 1",
     ]);
+  });
+
+  it("removes workflow status copy from business verification focus", () => {
+    expect(
+      normalizeVerificationFocus([
+        "等待接待官完成案件详情整理",
+        "信息完整度已达到提交阈值",
+        "核验商品异常照片或开箱视频，确认商品状态及形成时间",
+      ]),
+    ).toEqual(["核验商品异常照片或开箱视频，确认商品状态及形成时间"]);
   });
 });

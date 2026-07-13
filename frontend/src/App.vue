@@ -1,3 +1,8 @@
+<!--
+  文件作用：前端工程代码文件，支撑售后争议系统的页面、交互、样式或构建配置。
+  说明：本注释用于帮助读者先了解组件/页面职责，再阅读 template、script 和 style。
+-->
+
 <script setup>
 import {
   computed,
@@ -36,10 +41,12 @@ let caseSyncTimer;
 let caseSyncRunning = false;
 const CASE_SYNC_INTERVAL_MS = 3_000;
 
+// 业务位置：【前端应用】refreshNotifications：重新加载 当前阶段业务数据，确保页面和下一次 Agent 调用基于最新案件版本。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
 async function refreshNotifications() {
   await loadNotifications(actor);
 }
 
+// 业务位置：【前端应用】refreshCaseState：重新加载 当前阶段业务数据，确保页面和下一次 Agent 调用基于最新案件版本。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
 async function refreshCaseState() {
   if (caseSyncRunning) return;
   caseSyncRunning = true;
@@ -65,18 +72,22 @@ async function refreshCaseState() {
   }
 }
 
+// 业务位置：【前端应用】openNotification：切换与 当前阶段业务数据 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
 async function openNotification(notification) {
   if (notification.deep_link) await router.push(notification.deep_link);
 }
 
+// 业务位置：【前端应用】markRead：读取 当前阶段业务数据，并依据当前案件、角色和会话权限裁剪成可用输入。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
 async function markRead(notificationId) {
   await markNotificationRead(actor, notificationId);
 }
 
+// 业务位置：【前端应用】markAllRead：读取 当前阶段业务数据，并依据当前案件、角色和会话权限裁剪成可用输入。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
 async function markAllRead() {
   await markAllNotificationsRead(actor);
 }
 
+// 业务位置：【前端应用】deleteNotice：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由、API 和本地状态 正确进入 售后纠纷处理界面。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
 async function deleteNotice(notificationId) {
   if (deletingNotificationIds.value.includes(notificationId)) return;
   deletingNotificationIds.value = [
@@ -94,6 +105,7 @@ async function deleteNotice(notificationId) {
   }
 }
 
+// 业务位置：【前端应用】switchIdentity：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由、API 和本地状态 正确进入 售后纠纷处理界面。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
 async function switchIdentity(role) {
   switchDemoActor(role);
   if (route.path !== "/disputes") {
@@ -134,15 +146,12 @@ onBeforeUnmount(() => {
         </span>
       </router-link>
 
-      <div class="app-center">
-        <nav class="app-nav" aria-label="主导航">
-          <router-link to="/disputes">争议订单</router-link>
+      <div class="app-tools">
+        <nav class="app-nav app-nav--tools" aria-label="主导航">
+          <router-link to="/disputes">总览</router-link>
           <router-link v-if="showReview" to="/reviews">平台终审</router-link>
           <router-link v-if="showReview" to="/agents">数字人管理中心</router-link>
         </nav>
-      </div>
-
-      <div class="app-tools">
         <div class="actor-switcher" aria-label="体验身份">
           <label>
             <span>身份 ID</span>

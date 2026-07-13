@@ -1,3 +1,6 @@
+// 文件作用：前端工程代码文件，支撑售后争议系统的页面、交互、样式或构建配置。
+// 说明：本注释用于帮助读者先了解本文件职责，再继续阅读具体实现。
+
 import { defineConfig } from "vite";
 import vue from "@vitejs/plugin-vue";
 

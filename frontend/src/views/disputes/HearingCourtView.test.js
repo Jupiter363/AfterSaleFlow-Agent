@@ -1,3 +1,6 @@
+// 文件作用：自动化测试文件，验证 HearingCourtView.test 相关模块的行为、契约或页面布局。
+// 说明：本注释用于帮助读者先了解本文件职责，再继续阅读具体实现。
+
 import { readFileSync } from "node:fs";
 import { flushPromises, mount } from "@vue/test-utils";
 import { createMemoryHistory, createRouter } from "vue-router";
@@ -126,6 +129,7 @@ const courtMessages = [
   },
 ];
 
+// 业务位置：【前端庭审】mountView：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 async function mountView(overrides = {}) {
   const { attachTo, ...propOverrides } = overrides;
   if (!vi.isMockFunction(roomApi.events)) {
@@ -161,6 +165,7 @@ async function mountView(overrides = {}) {
   return { wrapper, router, confirmSettlementAction };
 }
 
+// 业务位置：【前端庭审】makeTranscriptMessage：围绕 房间消息和对话记录 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function makeTranscriptMessage(index, text, senderRole = "USER") {
   return {
     id: `MESSAGE_STRESS_${index}`,
@@ -179,6 +184,7 @@ function makeTranscriptMessage(index, text, senderRole = "USER") {
   };
 }
 
+// 业务位置：【前端庭审】makeEvidence：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function makeEvidence(index, submittedByRole) {
   return {
     evidence_id: `EVIDENCE_${submittedByRole}_${index}`,
@@ -194,7 +200,9 @@ function makeEvidence(index, submittedByRole) {
   };
 }
 
+// 业务位置：【前端庭审】describe：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 describe("HearingCourtView", () => {
+  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
   it("shows loading placeholders instead of false empty states while the hearing snapshot is still loading", async () => {
     vi.spyOn(hearingApi, "hearing").mockReturnValue(new Promise(() => {}));
     vi.spyOn(evidenceApi, "catalog").mockReturnValue(new Promise(() => {}));
@@ -216,6 +224,7 @@ describe("HearingCourtView", () => {
     expect(wrapper.find("[data-send-hearing-statement]").exists()).toBe(false);
   });
 
+  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
   it("renders a collaborative little court with agents, rounds and a three-hour clock", async () => {
     const { wrapper } = await mountView();
 
@@ -282,6 +291,7 @@ describe("HearingCourtView", () => {
     expect(wrapper.text()).not.toContain("审核解释官");
   });
 
+  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
   it("uses the AI-native courtroom layout with party evidence rails and no party role cards", async () => {
     const { wrapper } = await mountView();
 
@@ -289,10 +299,16 @@ describe("HearingCourtView", () => {
     expect(wrapper.get("[data-court-agent-strip]").text()).not.toContain("COURT AGENTS");
     expect(wrapper.get("[data-court-agent-strip]").text()).not.toContain("法官与 AI 评审团");
     expect(wrapper.get(".courtroom-center").classes()).toContain("courtroom-center--compact-stage");
-    expect(wrapper.findAll("[data-court-agent-card]")).toHaveLength(3);
-    expect(wrapper.get('[data-court-agent-card="judge"]').text()).toContain("衡衡");
-    expect(wrapper.get('[data-court-agent-card="jury-a"]').text()).toContain("评审 A");
-    expect(wrapper.get('[data-court-agent-card="jury-b"]').text()).toContain("评审 B");
+    const agentCards = wrapper.findAll("[data-court-agent-card]");
+    expect(agentCards).toHaveLength(3);
+    expect(agentCards.map((card) => card.attributes("data-court-agent-card"))).toEqual([
+      "jury-a",
+      "judge",
+      "jury-b",
+    ]);
+    expect(wrapper.get('[data-court-agent-card="jury-a"]').text()).toContain("小察");
+    expect(wrapper.get('[data-court-agent-card="judge"]').text()).toContain("小正");
+    expect(wrapper.get('[data-court-agent-card="jury-b"]').text()).toContain("小律");
     expect(wrapper.get("[data-hearing-stage-dock]").text()).toContain("第 2 轮");
     expect(wrapper.get('[data-party-evidence-rail="user"]').text()).toContain(
       "用户证据原件匣",
@@ -387,6 +403,28 @@ describe("HearingCourtView", () => {
     ).toBe(true);
   });
 
+  it("maps internal evidence ids and normalizes mixed sentence punctuation in judge copy", async () => {
+    const { wrapper } = await mountView({
+      initialMessages: [
+        {
+          id: "MESSAGE_JUDGE_EVIDENCE_REFERENCE",
+          sequence_no: 1,
+          sender_role: "JUDGE",
+          message_type: "AGENT_MESSAGE",
+          message_text:
+            "新增一份无效证据 EVIDENCE_USER_REAL，已拦截并标记为无效证据。；证据矩阵无新增有效关联。；商家未提供有效举证材料。；需关注后续补充情况。",
+        },
+      ],
+    });
+
+    const judgeCopy = wrapper.get('[data-court-message="judge"]').text();
+    expect(judgeCopy).toContain("证据：用户门口监…");
+    expect(judgeCopy).not.toContain("EVIDENCE_USER_REAL");
+    expect(judgeCopy).not.toContain("。；");
+    expect(judgeCopy).toContain("无效证据；证据矩阵无新增有效关联；");
+  });
+
+  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
   it("renders bootstrap room messages with courtroom role labels instead of backend sender roles", async () => {
     const { wrapper } = await mountView({
       initialMessages: [
@@ -479,6 +517,7 @@ describe("HearingCourtView", () => {
     );
   });
 
+  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
   it("shows an empty transcript state instead of fabricated courtroom messages when no backend messages exist", async () => {
     const { wrapper } = await mountView({ initialMessages: [] });
 
@@ -489,12 +528,14 @@ describe("HearingCourtView", () => {
     expect(transcript.find("[data-court-message]").exists()).toBe(false);
   });
 
+  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
   it("keeps the audit aide out of the hearing page even for a platform reviewer", async () => {
     const { wrapper } = await mountView({ viewerRole: "PLATFORM_REVIEWER" });
 
     expect(wrapper.text()).not.toContain("审核解释官");
   });
 
+  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
   it("lets courtroom authority cards grow vertically with long transcript text", () => {
     expect(componentSource).toContain(".court-message--authority-card");
     expect(componentSource).toContain("height: auto");
@@ -513,6 +554,7 @@ describe("HearingCourtView", () => {
     expect(componentSource).not.toContain("contain: layout paint");
   });
 
+  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
   it("uses explicit fixed rows and returns the input dock space to reviewers", async () => {
     const { wrapper: partyWrapper } = await mountView({ viewerRole: "USER" });
     const { wrapper: reviewerWrapper } = await mountView({
@@ -542,6 +584,7 @@ describe("HearingCourtView", () => {
     expect(componentSource).toContain("max-height: 820px;");
   });
 
+  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
   it("keeps all three hearing stages horizontal at the narrow breakpoint", async () => {
     const { wrapper } = await mountView();
 
@@ -557,6 +600,7 @@ describe("HearingCourtView", () => {
     );
   });
 
+  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
   it("switches to abnormal-report mode at exactly 1500 Unicode characters", async () => {
     const text1499 = "陈".repeat(1499);
     const text1500 = "陈".repeat(1500);
@@ -593,6 +637,7 @@ describe("HearingCourtView", () => {
     expect(thresholdCard.get("p").text()).toBe(text1500);
   });
 
+  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
   it("keeps fifty naturally-sized messages inside the one transcript scroll rail", async () => {
     const roles = ["USER", "MERCHANT", "JUDGE", "JURY"];
     const initialMessages = Array.from({ length: 50 }, (_, index) =>
@@ -617,6 +662,7 @@ describe("HearingCourtView", () => {
     expect(componentSource).toContain("overscroll-behavior: contain;");
   });
 
+  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
   it("keeps one hundred evidence records in the two dedicated evidence scroll rails", async () => {
     const items = [
       ...Array.from({ length: 50 }, (_, index) => makeEvidence(index + 1, "USER")),
@@ -640,6 +686,7 @@ describe("HearingCourtView", () => {
     );
   });
 
+  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
   it("opens only one accessible evidence drawer and restores launcher focus on Escape", async () => {
     const host = document.createElement("div");
     document.body.appendChild(host);
@@ -675,6 +722,7 @@ describe("HearingCourtView", () => {
     }
   });
 
+  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
   it("moves focus into the court ledger, traps Tab, and restores the opener for explicit closes", async () => {
     const host = document.createElement("div");
     document.body.appendChild(host);
@@ -716,6 +764,7 @@ describe("HearingCourtView", () => {
     }
   });
 
+  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
   it("closes the stacked court ledger before the evidence drawer on consecutive Escape presses", async () => {
     const host = document.createElement("div");
     document.body.appendChild(host);
@@ -748,6 +797,7 @@ describe("HearingCourtView", () => {
     }
   });
 
+  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
   it("removes the shared courtroom keydown listener when the view unmounts", async () => {
     const addListener = vi.spyOn(window, "addEventListener");
     const removeListener = vi.spyOn(window, "removeEventListener");
@@ -761,6 +811,7 @@ describe("HearingCourtView", () => {
     expect(removeListener).toHaveBeenCalledWith("keydown", keydownHandler);
   });
 
+  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
   it("clears an open evidence drawer without restoring focus when the courtroom grows past the drawer breakpoint", async () => {
     let resizeCallback;
     const observe = vi.fn();
@@ -822,6 +873,7 @@ describe("HearingCourtView", () => {
     }
   });
 
+  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
   it("uses a cleaned-up window resize fallback when ResizeObserver is unavailable", async () => {
     vi.stubGlobal("ResizeObserver", undefined);
     const addEventListener = vi.spyOn(window, "addEventListener");
@@ -865,6 +917,7 @@ describe("HearingCourtView", () => {
     }
   });
 
+  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
   it("declares the 1220px evidence-drawer breakpoint and fixed rail rows", () => {
     expect(componentSource).toContain(
       "container: hearing-court / inline-size;",
@@ -878,6 +931,7 @@ describe("HearingCourtView", () => {
     expect(componentSource).not.toContain("@media (max-width: 1180px)");
   });
 
+  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
   it("keeps ledger and settlement dialog close controls at least 44px square", () => {
     expect(componentSource).toMatch(
       /\.hearing-ledger header button\s*{[^}]*width:\s*44px;[^}]*height:\s*44px;/,
@@ -887,6 +941,7 @@ describe("HearingCourtView", () => {
     );
   });
 
+  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
   it("contains a 200-character unbroken hearing error inside the fixed canvas", async () => {
     const errorText = "E".repeat(200);
     const { wrapper } = await mountView({
@@ -903,6 +958,7 @@ describe("HearingCourtView", () => {
     );
   });
 
+  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
   it("clips translated inactive evidence drawers at the narrow canvas boundary", () => {
     expect(componentSource).toContain(
       "transform: translateX(calc(-100% - 20px));",
@@ -915,6 +971,7 @@ describe("HearingCourtView", () => {
     );
   });
 
+  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
   it("keeps user, merchant, and reviewer role shells semantically stable", async () => {
     for (const viewerRole of ["USER", "MERCHANT", "PLATFORM_REVIEWER"]) {
       const { wrapper } = await mountView({ viewerRole });
@@ -928,6 +985,7 @@ describe("HearingCourtView", () => {
     }
   });
 
+  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
   it("puts the current party evidence rail on the left and keeps the counterparty read-only on the right", async () => {
     const { wrapper } = await mountView({ viewerRole: "MERCHANT" });
 
@@ -942,6 +1000,7 @@ describe("HearingCourtView", () => {
     expect(rightRail.text()).not.toContain("补充用户证据");
   });
 
+  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
   it("renders party evidence rails from the backend evidence catalog instead of mock files", async () => {
     const { wrapper } = await mountView({ viewerRole: "MERCHANT" });
 
@@ -958,6 +1017,7 @@ describe("HearingCourtView", () => {
     expect(wrapper.text()).not.toContain("出库扫描记录.md");
   });
 
+  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
   it("shows an empty evidence rail state when the backend catalog has no visible evidence", async () => {
     const { wrapper } = await mountView({
       initialEvidenceCatalog: { case_id: "CASE_HEARING_1", items: [] },
@@ -968,6 +1028,7 @@ describe("HearingCourtView", () => {
     expect(wrapper.text()).not.toContain("物流签收底单.pdf");
   });
 
+  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
   it("keeps hearing-level actions below the right evidence card instead of inside it", async () => {
     const { wrapper } = await mountView();
 
@@ -984,6 +1045,7 @@ describe("HearingCourtView", () => {
     );
   });
 
+  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
   it("keeps settlement proposal and confirmation out of the normal hearing mainline", async () => {
     const confirmSettlementAction = vi.fn();
     const proposeSettlementAction = vi.fn();
@@ -1004,6 +1066,7 @@ describe("HearingCourtView", () => {
     expect(proposeSettlementAction).not.toHaveBeenCalled();
   });
 
+  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
   it("lets the current party submit a statement without closing the active hearing round", async () => {
     const messageAction = vi.fn().mockResolvedValue({
       id: "MESSAGE_ROUND_TEXT_1",
@@ -1042,6 +1105,7 @@ describe("HearingCourtView", () => {
     expect(wrapper.get("[data-send-hearing-statement]").text()).toBe("提交陈述");
   });
 
+  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
   it("keeps the statement button available after that party has already spoken in an open round", async () => {
     const { wrapper } = await mountView({
       viewerRole: "MERCHANT",
@@ -1066,6 +1130,7 @@ describe("HearingCourtView", () => {
     expect(wrapper.text()).toContain("已提交本轮，等待用户");
   });
 
+  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
   it("shows a judge-waiting status after both parties have spoken without sealing the round", async () => {
     const { wrapper } = await mountView({
       viewerRole: "MERCHANT",
@@ -1116,6 +1181,7 @@ describe("HearingCourtView", () => {
     expect(wrapper.get("[data-send-hearing-statement]").text()).toBe("提交陈述");
   });
 
+  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
   it("shows a sealed-round message after both parties have submitted", async () => {
     const { wrapper } = await mountView({
       viewerRole: "MERCHANT",
@@ -1144,6 +1210,7 @@ describe("HearingCourtView", () => {
     expect(wrapper.text()).not.toContain("等待用户");
   });
 
+  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
   it("hands the parties off to platform review after the final hearing round is sealed", async () => {
     const { wrapper } = await mountView({
       viewerRole: "USER",
@@ -1201,6 +1268,7 @@ describe("HearingCourtView", () => {
     );
   });
 
+  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
   it("uses the backend draft-ready status as the final sealed hearing headline", async () => {
     const { wrapper } = await mountView({
       viewerRole: "USER",
@@ -1251,12 +1319,14 @@ describe("HearingCourtView", () => {
     );
   });
 
+  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
   it("does not expose party round submission to platform reviewers", async () => {
     const { wrapper } = await mountView({ viewerRole: "PLATFORM_REVIEWER" });
 
     expect(wrapper.find("[data-submit-hearing-round]").exists()).toBe(false);
   });
 
+  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
   it("opens the outcome only after a durable case-closed event", async () => {
     const eventStreamer = vi.fn(async (options) => {
       options.state.connected = true;
@@ -1277,6 +1347,7 @@ describe("HearingCourtView", () => {
     );
   });
 
+  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
   it("refreshes the hearing snapshot when the backend emits a phase-changed event", async () => {
     const refreshedHearing = {
       ...hearing,
@@ -1325,6 +1396,7 @@ describe("HearingCourtView", () => {
     expect(wrapper.get("[data-complete-hearing]").text()).toBe("查看裁决草案");
   });
 
+  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
   it("lets parties leave the hearing through the right evidence rail completion button", async () => {
     const completeHearingAction = vi.fn().mockResolvedValue({
       hearing_phase: "DRAFT_READY",
@@ -1361,6 +1433,7 @@ describe("HearingCourtView", () => {
     );
   });
 
+  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
   it("does not let the completion button bypass the judge while the draft is still being prepared", async () => {
     const completeHearingAction = vi.fn();
     const { wrapper, router } = await mountView({
@@ -1394,6 +1467,7 @@ describe("HearingCourtView", () => {
     );
   });
 
+  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
   it("uploads and submits merchant supplementary evidence with the backend actor-specific source type", async () => {
     const supplementAction = vi.fn().mockResolvedValue({
       evidence_id: "EVIDENCE_SUPPLEMENT_1",
@@ -1439,6 +1513,7 @@ describe("HearingCourtView", () => {
         file,
         sourceType: "MERCHANT_UPLOAD",
         visibility: "PARTIES",
+        modelProcessingAuthorized: true,
       }),
     );
     expect(submitEvidenceBatchAction).toHaveBeenCalledWith(
@@ -1453,6 +1528,7 @@ describe("HearingCourtView", () => {
     );
   });
 
+  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
   it("shows formal jury review reports as cards without exposing raw A2A internals", async () => {
     const { wrapper } = await mountView({
       initialMessages: [
@@ -1502,6 +1578,7 @@ describe("HearingCourtView", () => {
     expect(wrapper.text()).not.toContain("evidence_dossier_version");
   });
 
+  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
   it("adds evidence supplements, matrix revisions and jury reports to the hearing ledger", async () => {
     const { wrapper } = await mountView({
       initialMessages: [
@@ -1557,6 +1634,7 @@ describe("HearingCourtView", () => {
     expect(ledger).not.toContain("JURY_REVIEW_REPORT");
   });
 
+  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
   it("adds final draft, reviewer handoff and execution assistant events to the hearing ledger", async () => {
     const { wrapper } = await mountView({
       initialEvents: [
@@ -1599,6 +1677,7 @@ describe("HearingCourtView", () => {
     expect(ledger).not.toContain("EXECUTION_ASSISTANT_HANDOFF");
   });
 
+  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
   it("shows a friendly empty ledger when no hearing rounds have started", async () => {
     const { wrapper } = await mountView({
       initialHearing: { rounds: [], settlements: [] },

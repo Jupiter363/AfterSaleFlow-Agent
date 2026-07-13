@@ -1,3 +1,8 @@
+<!--
+  文件作用：前端页面视图文件，组织售后争议对应页面的数据加载、交互和展示。
+  说明：本注释用于帮助读者先了解组件/页面职责，再阅读 template、script 和 style。
+-->
+
 <script setup>
 import {
   computed,
@@ -10,6 +15,10 @@ import {
 } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { disputeApi } from "../../api/disputes";
+import {
+  extractAgentRunDescriptor,
+  loadActiveAgentRuns,
+} from "../../api/agentStream";
 import { roomApi } from "../../api/rooms";
 import DigitalHuman from "../../components/avatar/DigitalHuman.vue";
 import ExpandableText from "../../components/common/ExpandableText.vue";
@@ -20,6 +29,11 @@ import {
   createRoomState,
   streamRoomEvents,
 } from "../../stores/room";
+import {
+  activeAgentStreams,
+  clearAgentStreams,
+  consumeAgentRun,
+} from "../../stores/agentStream";
 import {
   humanizeDossierList,
   humanizeDossierText,
@@ -38,6 +52,7 @@ const props = defineProps({
   confirmAction: { type: Function, default: null },
   cancelAction: { type: Function, default: null },
   eventStreamer: { type: Function, default: null },
+  modelHealthLoader: { type: Function, default: null },
 });
 
 const route = useRoute();
@@ -45,6 +60,8 @@ const router = useRouter();
 const dispute = ref(props.initialDispute);
 const analysis = ref(props.initialAnalysis);
 const turnMemory = ref(props.initialTurnMemory);
+const streamedCaseDetailSections = ref({});
+const pendingOriginalStatement = ref("");
 const messages = ref([...(props.initialMessages || [])]);
 const agentState = ref("LISTENING");
 const submitting = ref(false);
@@ -55,10 +72,29 @@ const dossierFulltext = ref(null);
 const dossierFulltextDialog = ref(null);
 let dossierFulltextReturnFocus = null;
 const eventState = reactive(createRoomState());
+const modelConnectionState = ref("checking");
 const workspaceGeneration = ref(0);
 let eventAbortController = new AbortController();
+let modelHealthTimer = null;
+let modelHealthInFlight = null;
 
 const caseId = computed(() => dispute.value?.id || route.params.caseId);
+const shouldDiscoverActiveIntakeRuns = computed(() =>
+  props.initialMessages === null &&
+  props.initialDispute === null &&
+  !props.messagesLoader,
+);
+const intakeStreamingRuns = computed(() =>
+  activeAgentStreams({
+    caseId: caseId.value,
+    roomType: "INTAKE",
+    actorId: actor.id,
+    actorRole: actor.role,
+  }),
+);
+const intakeCancellationDisabled = computed(() =>
+  submitting.value || admitted.value || intakeStreamingRuns.value.length > 0,
+);
 const caseNoteTitle = computed(() =>
   humanizeDossierText(dispute.value?.title || "履约争端", {
     kind: "title",
@@ -68,7 +104,7 @@ const caseNoteTitle = computed(() =>
 const caseNoteDescription = computed(() =>
   humanizeDossierText(dispute.value?.description || "", {
     kind: "summary",
-    fallback: "接待官正在整理争议事实，请继续补充订单、证据和处理诉求。",
+    fallback: "接待官正在整理争议事实，请继续补充案件经过、当前状态和处理诉求。",
   }),
 );
 const partyCanChat = computed(
@@ -76,6 +112,22 @@ const partyCanChat = computed(
     ["USER", "MERCHANT"].includes(actor.role) &&
     actor.role === normalizedPartyRole(initiatorRoleValue.value),
 );
+const modelConnected = computed(() => modelConnectionState.value === "connected");
+const modelConnectionLabel = computed(() => {
+  if (intakeStreamingRuns.value.length) return "数字人正在输出";
+  if (modelConnectionState.value === "connected") return "数字人已连接";
+  if (modelConnectionState.value === "checking") return "连接检测中";
+  return "数字人未连接";
+});
+const intakeConversationEmptyText = computed(() => {
+  if (!modelConnected.value) {
+    return "数字人未连接，恢复连接后将生成首轮案情追问。";
+  }
+  if (!initialAgentReady.value) {
+    return "接待官正在依据案件表单生成首轮案情追问，请稍候。";
+  }
+  return "接待官的首轮追问正在同步到对话记录。";
+});
 const intakeComposerDisabledReason = computed(() => {
   if (!["USER", "MERCHANT"].includes(actor.role)) {
     return "当前是平台观察/审核身份。请切换为用户或商家身份，才能继续与争议接待官对话。";
@@ -83,22 +135,131 @@ const intakeComposerDisabledReason = computed(() => {
   if (!partyCanChat.value) {
     return "接待室仅由发起方补充；另一方请在证据室完成举证和回应。";
   }
+  if (!modelConnected.value) {
+    return modelConnectionState.value === "checking"
+      ? "正在检测数字人模型连接，连接成功后才能发布陈述。"
+      : "数字人未连接，模型服务恢复后才能继续提交陈述。";
+  }
+  if (!initialAgentReady.value) {
+    return "接待官正在生成首轮案情追问和展板，请等待初始回复完成后再发布陈述。";
+  }
   return "";
 });
+const intakeWorkStatus = computed(() => {
+  if (
+    intakeStreamingRuns.value.length ||
+    String(agentState.value).toUpperCase() === "STREAMING"
+  ) return "STREAMING_RESPONSE";
+  if (!modelConnected.value) {
+    return modelConnectionState.value === "checking"
+      ? "MODEL_CONNECTING"
+      : "MODEL_DISCONNECTED";
+  }
+  if (error.value) return "ERROR";
+  if (admitted.value) return "HANDOFF";
+  if (!initialAgentReady.value) return "GENERATING_INITIAL";
+  if (submitting.value || agentState.value === "THINKING") return "GENERATING_RESPONSE";
+  return "READY_FOR_SUPPLEMENT";
+});
+const intakeWorkStatusCopy = computed(() => {
+  const copies = {
+    MODEL_CONNECTING: {
+      eyebrow: "MODEL STATUS",
+      title: "正在检测数字人连接",
+      description: "正在确认接待官模型是否可用，连接成功后开放陈述输入。",
+      tone: "working",
+    },
+    MODEL_DISCONNECTED: {
+      eyebrow: "MODEL OFFLINE",
+      title: "数字人未连接",
+      description: "模型服务暂不可用，恢复连接后才能继续提交陈述。",
+      tone: "error",
+    },
+    GENERATING_INITIAL: {
+      eyebrow: "INTAKE STATUS",
+      title: "接待官正在整理案情",
+      description: "正在读取表单、订单引用与初始诉求，生成首轮追问和右侧展板。",
+      tone: "working",
+    },
+    GENERATING_RESPONSE: {
+      eyebrow: "INTAKE STATUS",
+      title: "接待官正在生成回复",
+      description: "正在吸收本轮陈述，并同步更新案情卷宗。",
+      tone: "working",
+    },
+    STREAMING_RESPONSE: {
+      eyebrow: "LIVE GENERATION",
+      title: "接待官正在流式输出",
+      description: "回复与案情展板正在同步生成，请等待输出完成后再继续补充。",
+      tone: "streaming",
+    },
+    READY_FOR_SUPPLEMENT: {
+      eyebrow: "READY",
+      title: "接待官已就绪",
+      description: "请根据追问补充案情事实；证据材料后续在证据室提交。",
+      tone: "ready",
+    },
+    HANDOFF: {
+      eyebrow: "HANDOFF",
+      title: "接待室已封存",
+      description: "案情卷宗已上报，下一步进入证据室。",
+      tone: "handoff",
+    },
+    ERROR: {
+      eyebrow: "INTAKE ERROR",
+      title: "接待官生成失败",
+      description: "模型服务暂不可用，请稍后重试；当前不会写入兜底卷宗。",
+      tone: "error",
+    },
+  };
+  return copies[intakeWorkStatus.value] || copies.READY_FOR_SUPPLEMENT;
+});
 const connectionState = computed(() => {
+  // A live AgentRun is stronger connectivity evidence than a stale/failed
+  // durable-room stream probe. Keep the room header consistent with the
+  // visible LIVE GENERATION state while tokens are arriving.
+  if (intakeStreamingRuns.value.length > 0) return "connected";
   if (eventState.connected) return "connected";
   if (eventState.reconnecting) return "reconnecting";
   return "offline";
 });
 const scrollSnapshot = computed(() => turnMemory.value?.scroll_snapshot || null);
 const currentCaseDossier = computed(() => turnMemory.value?.case_intake_dossier || null);
+function mergeStreamedCaseDetail(base, sections) {
+  const streamedEntries = Object.entries(sections || {});
+  if (!streamedEntries.length) return base;
+  const merged = {
+    ...(base || {}),
+    schema_version: base?.schema_version || "intake_case_detail.v1",
+  };
+  streamedEntries.forEach(([section, value]) => {
+    const previous = merged[section];
+    merged[section] =
+      previous && value && typeof previous === "object" && typeof value === "object" &&
+      !Array.isArray(previous) && !Array.isArray(value)
+        ? { ...previous, ...value }
+        : value;
+  });
+  return merged;
+}
 const caseDetailDossier = computed(() => {
   const current = currentCaseDossier.value?.dossier;
-  if (current?.schema_version === "intake_case_detail.v1") return current;
-  if (scrollSnapshot.value?.schema_version === "intake_case_detail.v1") return scrollSnapshot.value;
-  return null;
+  const persisted = current?.schema_version === "intake_case_detail.v1"
+    ? current
+    : scrollSnapshot.value?.schema_version === "intake_case_detail.v1"
+      ? scrollSnapshot.value
+      : null;
+  return mergeStreamedCaseDetail(persisted, streamedCaseDetailSections.value);
 });
 const isCaseDetailDossier = computed(() => Boolean(caseDetailDossier.value));
+const initialAgentReady = computed(() => Boolean(caseDetailDossier.value));
+const intakeDossierSubmissionDisabled = computed(() =>
+  submitting.value ||
+  admitted.value ||
+  intakeStreamingRuns.value.length > 0 ||
+  !initialAgentReady.value ||
+  !modelConnected.value,
+);
 const caseDetailQuality = computed(() => {
   const quality = caseDetailDossier.value?.intake_quality || {};
   return {
@@ -147,13 +308,14 @@ const caseCover = computed(() => {
       kind: "title",
       fallback: "争议事件待梳理",
     }),
-    summary: humanizeDossierText(detail?.case_story?.one_sentence_summary || caseNoteDescription.value, {
+    summary: humanizeDossierText(detail?.case_story?.one_sentence_summary || "", {
       kind: "summary",
-      fallback: "接待官正在整理争议事实，请继续补充订单、证据和处理诉求。",
+      fallback: "",
     }),
     coreIssue: humanizeDossierText(detail?.dispute_focus?.core_issue || "UNKNOWN"),
   };
 });
+// 业务位置：【前端接待室】displayReferenceValue：将 案件和订单引用标识 转换为稳定的接口、提示词或页面表达，避免直接暴露内部实现字段。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 function displayReferenceValue(...values) {
   const value = values.find((item) => hasReferenceValue(item));
   if (!value) return "待补充";
@@ -223,6 +385,7 @@ const respondentAttitudeLabels = {
   NEED_MORE_INFO: "要求补充信息",
   PLATFORM_UNKNOWN: "平台暂未识别",
 };
+// 业务位置：【前端接待室】compactText：将 面向当事人的业务文本 转换为稳定的接口、提示词或页面表达，避免直接暴露内部实现字段。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 function compactText(...values) {
   return values
     .flat()
@@ -230,6 +393,7 @@ function compactText(...values) {
     .filter(Boolean)
     .join(" ");
 }
+// 业务位置：【前端接待室】legacyDossierSignalText：围绕 案件卷宗 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 function legacyDossierSignalText(detail) {
   const detailSignal = compactText(
     detail?.case_story?.title,
@@ -248,6 +412,7 @@ function legacyDossierSignalText(detail) {
     dispute.value?.description,
   );
 }
+// 业务位置：【前端接待室】inferResolutionCode：根据已有 当前阶段业务数据 推导本阶段的业务判断，供后续 Agent 或人工审核使用。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 function inferResolutionCode(detail, claim = {}) {
   const explicit =
     claim.requested_resolution ||
@@ -269,6 +434,7 @@ function inferResolutionCode(detail, claim = {}) {
   if (/核验|核实|解释|说明/.test(signal)) return "VERIFY_OR_EXPLAIN_ONLY";
   return "UNKNOWN";
 }
+// 业务位置：【前端接待室】meaningfulResponseText：围绕 面向当事人的业务文本 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 function meaningfulResponseText(value) {
   const text = humanizeDossierText(value || "", { fallback: "" }).trim();
   if (!text) return "";
@@ -280,6 +446,7 @@ function meaningfulResponseText(value) {
   }
   return text;
 }
+// 业务位置：【前端接待室】resolveRespondentRole：读取 当事人主张、角色和对方态度，并依据当前案件、角色和会话权限裁剪成可用输入。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 function resolveRespondentRole(detail, attitude = {}) {
   const explicitRole = normalizePartyRoleValue(
     attitude.respondent_role || attitude.respondentRole,
@@ -296,6 +463,7 @@ function resolveRespondentRole(detail, attitude = {}) {
   );
   return oppositePartyRole(initiatorRole);
 }
+// 业务位置：【前端接待室】partyPositionForRole：围绕 当事人主张、角色和对方态度 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 function partyPositionForRole(detail, role) {
   if (role === "USER") {
     return detail?.party_positions?.user_claim || analysis.value?.party_claims?.user;
@@ -305,6 +473,7 @@ function partyPositionForRole(detail, role) {
   }
   return "";
 }
+// 业务位置：【前端接待室】inferRespondentAttitude：根据已有 当事人主张、角色和对方态度 推导本阶段的业务判断，供后续 Agent 或人工审核使用。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 function inferRespondentAttitude(
   detail,
   attitude = {},
@@ -351,17 +520,21 @@ function inferRespondentAttitude(
     showSummary: true,
   };
 }
+// 业务位置：【前端接待室】isSignedNotReceivedContext：判断 案件会话和上下文快照 是否满足当前流程分支的进入条件。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 function isSignedNotReceivedContext(detail) {
   return /物流|签收|未收到|没收到|包裹|快递/u.test(legacyDossierSignalText(detail));
 }
+// 业务位置：【前端接待室】hasReferenceValue：判断 案件和订单引用标识 是否满足当前流程分支的进入条件。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 function hasReferenceValue(value) {
   const text = String(value || "").trim();
   return Boolean(text && !/^(待补充|待确认|UNKNOWN|PENDING)$/i.test(text));
 }
+// 业务位置：【前端接待室】fallbackFactsInDispute：在模型或外部服务不可用时，为 当前阶段业务数据 生成保守降级结果，使案件转入可继续追问或人工处理的路径。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 function fallbackFactsInDispute(detail) {
   if (!isSignedNotReceivedContext(detail)) return [];
   return ["用户是否实际收到商品", "签收记录是否足以证明本人收货"];
 }
+// 业务位置：【前端接待室】fallbackVerificationGaps：在模型或外部服务不可用时，为 当前阶段业务数据 生成保守降级结果，使案件转入可继续追问或人工处理的路径。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 function fallbackVerificationGaps(
   detail,
   hasRespondentResponse = true,
@@ -387,22 +560,28 @@ function fallbackVerificationGaps(
   }
   return gaps;
 }
+// 业务位置：【前端接待室】hasKnownPartyLabel：判断 当事人主张、角色和对方态度 是否满足当前流程分支的进入条件。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 function hasKnownPartyLabel(label) {
   return Boolean(label && !["待确认", "未知身份"].includes(label));
 }
+// 业务位置：【前端接待室】claimActionTextFor：围绕 当事人主张、角色和对方态度 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 function claimActionTextFor(initiator, resolution) {
   if (resolution === "待确认诉求") return hasKnownPartyLabel(initiator) ? `${initiator}诉求待确认` : "诉求待确认";
   return hasKnownPartyLabel(initiator) ? `${initiator}请求${resolution}` : `请求${resolution}`;
 }
+// 业务位置：【前端接待室】attitudeActionTextFor：围绕 当事人主张、角色和对方态度 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 function attitudeActionTextFor(respondent, attitudeLabel) {
   return hasKnownPartyLabel(respondent) ? `${respondent}${attitudeLabel}` : `对方${attitudeLabel}`;
 }
+// 业务位置：【前端接待室】partySubject：围绕 当事人主张、角色和对方态度 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 function partySubject(label, fallback) {
   return hasKnownPartyLabel(label) ? label : fallback;
 }
+// 业务位置：【前端接待室】respondentNoResponseText：围绕 面向当事人的业务文本 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 function respondentNoResponseText(respondent) {
   return `${partySubject(respondent, "对方")}尚未回应`;
 }
+// 业务位置：【前端接待室】markSubjectiveAttitude：围绕 当事人主张、角色和对方态度 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 function markSubjectiveAttitude(summary, source) {
   const text = String(summary || "").trim();
   const sourceText = String(source || "").trim();
@@ -485,10 +664,9 @@ const claimStatus = computed(() => {
 });
 const visibleClaimStatus = computed(() => {
   if (claimStatus.value) return claimStatus.value;
-  const detail = caseDetailDossier.value || {};
   const initiator = roleLabel(initiatorRoleValue.value || "UNKNOWN");
   const respondent = roleLabel(oppositePartyRole(initiatorRoleValue.value));
-  const resolution = claimResolutionLabels[inferResolutionCode(detail, {})] || "待确认诉求";
+  const resolution = "待接待官整理";
   return {
     initiator,
     respondent,
@@ -498,31 +676,16 @@ const visibleClaimStatus = computed(() => {
     amountDisplay: "",
     attitudeLabel: respondentAttitudeLabels.NOT_RESPONDED,
     attitudeActionText: attitudeActionTextFor(respondent, respondentAttitudeLabels.NOT_RESPONDED),
-    claimSummary:
-      resolution === "待确认诉求"
-        ? "诉求待确认"
-        : `${initiator}请求${resolution}。`,
-    claimMeta: `${initiator}主张${resolution}`,
-    attitudeSummary: respondentNoResponseText(respondent),
+    claimSummary: "等待接待官整理",
+    claimMeta: "等待接待官整理",
+    attitudeSummary: "等待接待官整理",
     showAttitudeSummary: false,
     attitudeMeta: `${respondent}：${respondentAttitudeLabels.NOT_RESPONDED}`,
-    coreConflict: `${partySubject(initiator, "发起方")}诉求与${partySubject(respondent, "对方")}回应的核心冲突仍待补齐。`,
+    coreConflict: "",
     factsInDispute: [],
-    nextFocus: [`${partySubject(respondent, "对方")}对诉求的明确回应`],
+    nextFocus: [],
   };
 });
-function qualityReasonToGaps(reason) {
-  const normalized = String(reason || "")
-    .replace(/^仍缺少可信的/, "")
-    .replace(/^仍缺少/, "")
-    .replace(/[。.]$/u, "")
-    .trim();
-  if (!normalized) return [];
-  return normalized
-    .split(/[、,，/]/u)
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
 const allVerificationGaps = computed(() => {
   const detail = caseDetailDossier.value || {};
   const missing = detail.missing_information || {};
@@ -542,7 +705,6 @@ const allVerificationGaps = computed(() => {
     ...(Array.isArray(detail.dispute_focus?.facts_to_verify)
       ? detail.dispute_focus.facts_to_verify
       : []),
-    ...qualityReasonToGaps(caseDetailQuality.value.reason),
     ...(claimStatus.value?.nextFocus || []),
     ...fallbackVerificationGaps(
       detail,
@@ -557,6 +719,7 @@ const hiddenVerificationGapCount = computed(() =>
   Math.max(0, allVerificationGaps.value.length - verificationGaps.value.length),
 );
 const scrollCards = computed(() => scrollSnapshot.value?.cards || []);
+// 业务位置：【前端接待室】scrollCardValue：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 function scrollCardValue(key, fallback = "") {
   return scrollCards.value.find((card) => card.key === key)?.value || fallback;
 }
@@ -590,6 +753,7 @@ const intakeRecipientView = computed(
 );
 const canManageIntake = computed(() => partyCanChat.value);
 
+// 业务位置：【前端接待室】currentWorkspaceSnapshot：围绕 页面工作区和业务快照 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 function currentWorkspaceSnapshot() {
   return {
     generation: workspaceGeneration.value,
@@ -601,6 +765,7 @@ function currentWorkspaceSnapshot() {
   };
 }
 
+// 业务位置：【前端接待室】isCurrentWorkspace：判断 页面工作区和业务快照 是否满足当前流程分支的进入条件。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 function isCurrentWorkspace(snapshot) {
   return (
     snapshot &&
@@ -611,10 +776,14 @@ function isCurrentWorkspace(snapshot) {
   );
 }
 
+// 业务位置：【前端接待室】resetWorkspaceForActorChange：更新 页面工作区和业务快照 的消息、缓存或持久记录，避免旧回合数据影响当前处理。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 function resetWorkspaceForActorChange() {
+  clearAgentStreams({ caseId: caseId.value, roomType: "INTAKE" });
   workspaceGeneration.value += 1;
   messages.value = [];
   turnMemory.value = null;
+  streamedCaseDetailSections.value = {};
+  pendingOriginalStatement.value = "";
   error.value = "";
   agentState.value = "LISTENING";
   submitting.value = false;
@@ -625,6 +794,7 @@ function resetWorkspaceForActorChange() {
   eventState.streamError = null;
 }
 
+// 业务位置：【前端接待室】normalizePartyRoleValue：将 当事人主张、角色和对方态度 转换为稳定的接口、提示词或页面表达，避免直接暴露内部实现字段。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 function normalizePartyRoleValue(role) {
   const value = String(role || "").trim().toUpperCase();
   if (
@@ -652,6 +822,7 @@ function normalizePartyRoleValue(role) {
   return "UNKNOWN";
 }
 
+// 业务位置：【前端接待室】oppositePartyRole：围绕 当事人主张、角色和对方态度 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 function oppositePartyRole(role) {
   const normalizedRole = normalizePartyRoleValue(role);
   if (normalizedRole === "USER") return "MERCHANT";
@@ -659,6 +830,7 @@ function oppositePartyRole(role) {
   return "UNKNOWN";
 }
 
+// 业务位置：【前端接待室】normalizedPartyRole：将 当事人主张、角色和对方态度 转换为稳定的接口、提示词或页面表达，避免直接暴露内部实现字段。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 function normalizedPartyRole(role) {
   return normalizePartyRoleValue(role);
 }
@@ -668,24 +840,32 @@ const subjectiveStatement = computed(() => {
   const claim = detail?.claim_resolution || {};
   const sourceRole = normalizedPartyRole(initiatorRoleValue.value);
   const sourceRoleName = roleLabel(sourceRole);
-  const fallbackPartyStatement =
-    sourceRole === "MERCHANT"
-      ? detail?.party_positions?.merchant_claim || analysis.value?.party_claims?.merchant
-      : detail?.party_positions?.user_claim || analysis.value?.party_claims?.user || dispute.value?.description;
   const originalStatement =
     claim.original_statement ||
     claim.originalStatement ||
-    fallbackPartyStatement;
+    dispute.value?.description;
+  const persistedStatement =
+    typeof originalStatement === "string" ? originalStatement.trim() : "";
+  const pendingStatement = pendingOriginalStatement.value.trim();
+  const compactPersistedStatement = persistedStatement.replace(
+    /\r?\n[\t ]*\r?\n+/g,
+    "\n",
+  );
+  const visibleStatement =
+    pendingStatement && !compactPersistedStatement.includes(pendingStatement)
+      ? [compactPersistedStatement, pendingStatement].filter(Boolean).join("\n")
+      : compactPersistedStatement;
   return {
     titleSuffix: `${sourceRoleName}原话`,
     label: "原始陈述",
     value:
-      typeof originalStatement === "string" && originalStatement.trim()
-        ? originalStatement
+      visibleStatement
+        ? visibleStatement
         : "等待继续补充发起方陈述",
   };
 });
 
+// 业务位置：【前端接待室】openDossierFulltext：切换与 案件卷宗 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 async function openDossierFulltext(payload) {
   dossierFulltextReturnFocus = document.activeElement;
   dossierFulltext.value = payload;
@@ -697,6 +877,7 @@ async function openDossierFulltext(payload) {
   dialog?.focus();
 }
 
+// 业务位置：【前端接待室】openVerificationGaps：切换与 当前阶段业务数据 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 async function openVerificationGaps() {
   dossierFulltextReturnFocus = document.activeElement;
   dossierFulltext.value = {
@@ -711,6 +892,7 @@ async function openVerificationGaps() {
   dialog?.focus();
 }
 
+// 业务位置：【前端接待室】closeDossierFulltext：切换与 案件卷宗 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 async function closeDossierFulltext() {
   const dialog = dossierFulltextDialog.value;
   const returnFocus = dossierFulltextReturnFocus;
@@ -725,6 +907,7 @@ async function closeDossierFulltext() {
   }
 }
 
+// 业务位置：【前端接待室】load：读取 当前阶段业务数据，并依据当前案件、角色和会话权限裁剪成可用输入。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 async function load(snapshot = currentWorkspaceSnapshot()) {
   try {
     if (!dispute.value) {
@@ -738,6 +921,9 @@ async function load(snapshot = currentWorkspaceSnapshot()) {
     if (props.initialTurnMemory === null && props.initialMessages === null) {
       await refreshTurnMemory(snapshot);
     }
+    if (shouldDiscoverActiveIntakeRuns.value) {
+      await resumeActiveIntakeRuns(snapshot);
+    }
   } catch (failure) {
     if (!isCurrentWorkspace(snapshot)) return;
     error.value = failure.message;
@@ -745,6 +931,7 @@ async function load(snapshot = currentWorkspaceSnapshot()) {
   }
 }
 
+// 业务位置：【前端接待室】refreshMessages：重新加载 房间消息和对话记录，确保页面和下一次 Agent 调用基于最新案件版本。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 async function refreshMessages(snapshot = currentWorkspaceSnapshot()) {
   const loadedMessages = await loadMessages(snapshot);
   if (isCurrentWorkspace(snapshot)) {
@@ -752,6 +939,7 @@ async function refreshMessages(snapshot = currentWorkspaceSnapshot()) {
   }
 }
 
+// 业务位置：【前端接待室】loadMessages：读取 房间消息和对话记录，并依据当前案件、角色和会话权限裁剪成可用输入。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 async function loadMessages(snapshot = currentWorkspaceSnapshot()) {
   const loader =
     props.messagesLoader ||
@@ -759,6 +947,7 @@ async function loadMessages(snapshot = currentWorkspaceSnapshot()) {
   return loader(snapshot);
 }
 
+// 业务位置：【前端接待室】refreshTurnMemory：重新加载 案件会话和上下文快照，确保页面和下一次 Agent 调用基于最新案件版本。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 async function refreshTurnMemory(snapshot = currentWorkspaceSnapshot()) {
   const loader =
     props.turnMemoryLoader ||
@@ -769,16 +958,150 @@ async function refreshTurnMemory(snapshot = currentWorkspaceSnapshot()) {
   }
 }
 
+// 业务位置：【前端接待室】refreshRoomSnapshot：重新加载 页面工作区和业务快照，确保页面和下一次 Agent 调用基于最新案件版本。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 async function refreshRoomSnapshot(snapshot = currentWorkspaceSnapshot()) {
   await Promise.all([refreshMessages(snapshot), refreshTurnMemory(snapshot)]);
 }
 
+function resetStreamedCaseDetail() {
+  streamedCaseDetailSections.value = {};
+}
+
+function applyStreamedCaseDetailEvent(event, snapshot = currentWorkspaceSnapshot()) {
+  if (!isCurrentWorkspace(snapshot) || event?.event !== "visible_delta") return;
+  const prefix = "case_detail.";
+  const fieldPath = String(event.fieldPath || "");
+  if (!fieldPath.startsWith(prefix) || !event.delta) return;
+  const [section, ...propertyPath] = fieldPath.slice(prefix.length).split(".");
+  if (!section) return;
+  try {
+    if (propertyPath.length) {
+      const previousSection = streamedCaseDetailSections.value[section];
+      const nextSection =
+        previousSection && typeof previousSection === "object" && !Array.isArray(previousSection)
+          ? { ...previousSection }
+          : {};
+      let target = nextSection;
+      propertyPath.forEach((property, index) => {
+        if (index === propertyPath.length - 1) {
+          target[property] = String(target[property] || "") + event.delta;
+          return;
+        }
+        const child = target[property];
+        target[property] =
+          child && typeof child === "object" && !Array.isArray(child) ? { ...child } : {};
+        target = target[property];
+      });
+      streamedCaseDetailSections.value = {
+        ...streamedCaseDetailSections.value,
+        [section]: nextSection,
+      };
+      return;
+    }
+    const value = JSON.parse(event.delta);
+    streamedCaseDetailSections.value = {
+      ...streamedCaseDetailSections.value,
+      [section]: value,
+    };
+  } catch (_failure) {
+    // 结构化分区只接受完整 JSON；最终事件仍会刷新正式持久化卷宗。
+  }
+}
+
+// 业务位置：【前端接待室】resumeActiveIntakeRuns：执行 案件受理信息和接待结论 对应的业务动作，并将结果交给 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
+async function resumeActiveIntakeRuns(snapshot = currentWorkspaceSnapshot()) {
+  const activeRuns = await loadActiveAgentRuns(
+    snapshot.actor,
+    snapshot.caseId,
+    "INTAKE",
+  );
+  if (!isCurrentWorkspace(snapshot) || !activeRuns?.length) return;
+  resetStreamedCaseDetail();
+  agentState.value = "STREAMING";
+  await Promise.all(activeRuns.map((descriptor) => consumeAgentRun({
+    actor: snapshot.actor,
+    caseId: snapshot.caseId,
+    roomType: "INTAKE",
+    descriptor,
+    agentLabel: "争议接待官",
+    senderRole: "INTAKE_OFFICER",
+    signal: eventAbortController.signal,
+    onEvent: (event) => applyStreamedCaseDetailEvent(event, snapshot),
+    onError: () => {
+      if (isCurrentWorkspace(snapshot)) resetStreamedCaseDetail();
+    },
+    onFinal: async () => {
+      if (isCurrentWorkspace(snapshot)) {
+        await refreshRoomSnapshot(snapshot);
+        resetStreamedCaseDetail();
+        pendingOriginalStatement.value = "";
+      }
+    },
+  })));
+  if (isCurrentWorkspace(snapshot)) agentState.value = "SPEAKING";
+}
+
+// 业务位置：【前端接待室】fetchModelHealth：读取 模型请求和结构化结果，并依据当前案件、角色和会话权限裁剪成可用输入。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
+async function fetchModelHealth() {
+  if (props.modelHealthLoader) {
+    return props.modelHealthLoader();
+  }
+  const response = await fetch("/agent-api/health/model", {
+    headers: { Accept: "application/json" },
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(`model health check failed: HTTP ${response.status}`);
+  }
+  return response.json();
+}
+
+// 业务位置：【前端接待室】checkModelConnection：围绕 模型请求和结构化结果 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
+async function checkModelConnection() {
+  if (modelHealthInFlight) return modelHealthInFlight;
+  if (modelConnectionState.value !== "connected") {
+    modelConnectionState.value = "checking";
+  }
+  modelHealthInFlight = (async () => {
+    try {
+      const payload = await fetchModelHealth();
+      const status = String(payload?.model_status || payload?.status || "").toUpperCase();
+      modelConnectionState.value =
+        status === "CONNECTED" || status === "UP" ? "connected" : "disconnected";
+    } catch (_failure) {
+      modelConnectionState.value = "disconnected";
+    } finally {
+      modelHealthInFlight = null;
+    }
+  })();
+  return modelHealthInFlight;
+}
+
+// 业务位置：【前端接待室】startModelHealthPolling：启动或关闭与 模型请求和结构化结果 相关的后台任务或订阅，控制运行资源和生命周期。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
+function startModelHealthPolling() {
+  if (modelHealthTimer) return;
+  void checkModelConnection();
+  modelHealthTimer = window.setInterval(() => {
+    void checkModelConnection();
+  }, 30000);
+}
+
+// 业务位置：【前端接待室】stopModelHealthPolling：启动或关闭与 模型请求和结构化结果 相关的后台任务或订阅，控制运行资源和生命周期。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
+function stopModelHealthPolling() {
+  if (!modelHealthTimer) return;
+  window.clearInterval(modelHealthTimer);
+  modelHealthTimer = null;
+}
+
+// 业务位置：【前端接待室】nextLocalSequenceNo：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 function nextLocalSequenceNo() {
   return Math.max(0, ...messages.value.map((message) => message.sequence_no || 0)) + 1;
 }
 
+// 业务位置：【前端接待室】appendOptimisticPartyMessage：更新 当事人主张、角色和对方态度 的消息、缓存或持久记录，避免旧回合数据影响当前处理。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 function appendOptimisticPartyMessage(command, snapshot = currentWorkspaceSnapshot()) {
   if (!command?.text?.trim()) return "";
+  pendingOriginalStatement.value = command.text.trim();
   const id = `PENDING_${Date.now()}_${Math.random().toString(16).slice(2)}`;
   messages.value = [
     ...messages.value,
@@ -793,11 +1116,14 @@ function appendOptimisticPartyMessage(command, snapshot = currentWorkspaceSnapsh
   return id;
 }
 
+// 业务位置：【前端接待室】removeOptimisticMessage：更新 房间消息和对话记录 的消息、缓存或持久记录，避免旧回合数据影响当前处理。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 function removeOptimisticMessage(id) {
   if (!id) return;
   messages.value = messages.value.filter((message) => message.id !== id);
+  pendingOriginalStatement.value = "";
 }
 
+// 业务位置：【前端接待室】startEventStream：启动或关闭与 Agent 流事件 相关的后台任务或订阅，控制运行资源和生命周期。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 function startEventStream(snapshot = currentWorkspaceSnapshot()) {
   const streamer = props.eventStreamer || streamRoomEvents;
   void streamer({
@@ -816,8 +1142,17 @@ function startEventStream(snapshot = currentWorkspaceSnapshot()) {
   });
 }
 
+// 业务位置：【前端接待室】postMessage：执行 房间消息和对话记录 对应的业务动作，并将结果交给 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 async function postMessage(command) {
   const snapshot = currentWorkspaceSnapshot();
+  if (!modelConnected.value) {
+    await checkModelConnection();
+    if (!modelConnected.value) {
+      error.value = "数字人未连接，模型服务恢复后才能继续提交陈述。";
+      agentState.value = "ERROR";
+      return;
+    }
+  }
   agentState.value = "THINKING";
   submitting.value = true;
   error.value = "";
@@ -826,16 +1161,46 @@ async function postMessage(command) {
     const submit =
       props.postMessageAction ||
       ((payload) => roomApi.postMessage(snapshot.actor, snapshot.caseId, "INTAKE", payload));
-    await submit(command);
-    await refreshRoomSnapshot(snapshot);
+    const result = await submit(command);
+    const descriptor = extractAgentRunDescriptor(result);
+    if (descriptor) {
+      resetStreamedCaseDetail();
+      agentState.value = "STREAMING";
+      await consumeAgentRun({
+        actor: snapshot.actor,
+        caseId: snapshot.caseId,
+        roomType: "INTAKE",
+        descriptor,
+        agentLabel: "争议接待官",
+        senderRole: "INTAKE_OFFICER",
+        signal: eventAbortController.signal,
+        onEvent: (event) => applyStreamedCaseDetailEvent(event, snapshot),
+        onError: () => {
+          if (isCurrentWorkspace(snapshot)) resetStreamedCaseDetail();
+        },
+        onFinal: async () => {
+          if (isCurrentWorkspace(snapshot)) {
+            await refreshRoomSnapshot(snapshot);
+            resetStreamedCaseDetail();
+            pendingOriginalStatement.value = "";
+          }
+        },
+      });
+    } else {
+      await refreshRoomSnapshot(snapshot);
+      resetStreamedCaseDetail();
+      pendingOriginalStatement.value = "";
+    }
     if (isCurrentWorkspace(snapshot)) {
       agentState.value = "SPEAKING";
     }
   } catch (failure) {
     if (!isCurrentWorkspace(snapshot)) return;
     removeOptimisticMessage(optimisticId);
+    resetStreamedCaseDetail();
     error.value = failure.message;
     agentState.value = "ERROR";
+    void checkModelConnection();
   } finally {
     if (isCurrentWorkspace(snapshot)) {
       submitting.value = false;
@@ -843,7 +1208,9 @@ async function postMessage(command) {
   }
 }
 
+// 业务位置：【前端接待室】resolveWithoutDispute：读取 当前阶段业务数据，并依据当前案件、角色和会话权限裁剪成可用输入。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 async function resolveWithoutDispute() {
+  if (intakeCancellationDisabled.value) return;
   const snapshot = currentWorkspaceSnapshot();
   submitting.value = true;
   error.value = "";
@@ -878,7 +1245,9 @@ async function resolveWithoutDispute() {
   }
 }
 
+// 业务位置：【前端接待室】confirmAdmission：执行 案件受理信息和接待结论 对应的业务动作，并将结果交给 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 async function confirmAdmission() {
+  if (intakeDossierSubmissionDisabled.value) return;
   const snapshot = currentWorkspaceSnapshot();
   submitting.value = true;
   error.value = "";
@@ -908,10 +1277,12 @@ async function confirmAdmission() {
   }
 }
 
+// 业务位置：【前端接待室】enterEvidenceRoom：切换与 当前可见证据和附件 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 async function enterEvidenceRoom() {
   await router.push(`/disputes/${caseId.value}/evidence`);
 }
 
+// 业务位置：【前端接待室】dismissError：切换与 当前阶段业务数据 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 function dismissError() {
   error.value = "";
   if (agentState.value === "ERROR") {
@@ -921,6 +1292,7 @@ function dismissError() {
 
 onMounted(async () => {
   const snapshot = currentWorkspaceSnapshot();
+  startModelHealthPolling();
   await load(snapshot);
   if (props.eventStreamer || props.initialMessages === null) {
     startEventStream(snapshot);
@@ -933,6 +1305,9 @@ watch(
     const snapshot = currentWorkspaceSnapshot();
     if (props.initialMessages === null) {
       await refreshRoomSnapshot(snapshot);
+      if (shouldDiscoverActiveIntakeRuns.value) {
+        await resumeActiveIntakeRuns(snapshot);
+      }
     }
     if (props.eventStreamer || props.initialMessages === null) {
       startEventStream(snapshot);
@@ -940,7 +1315,9 @@ watch(
   },
 );
 onBeforeUnmount(() => {
+  stopModelHealthPolling();
   eventAbortController.abort();
+  clearAgentStreams({ caseId: caseId.value, roomType: "INTAKE" });
   const dialog = dossierFulltextDialog.value;
   if (typeof dialog?.close === "function" && dialog.open) {
     dialog.close();
@@ -953,8 +1330,13 @@ onBeforeUnmount(() => {
   <RoomShell
     eyebrow="INTAKE LOUNGE"
     title="争议接待室"
+    subtitle="案情接待"
+    subtitle-description="请完整说明争议经过、当前状态和处理诉求，接待官会同步整理案情展板。"
     :case-id="caseId"
     :connection-state="connectionState"
+    :show-case-id="false"
+    :show-connection="false"
+    :show-boundary="false"
   >
     <template #agent>
       <DigitalHuman
@@ -973,10 +1355,22 @@ onBeforeUnmount(() => {
       <section
         class="intake-room__conversation"
       >
-        <div class="intake-room__case-note">
-          <span>你正在说明</span>
-          <h2>{{ caseNoteTitle }}</h2>
-          <p>{{ caseNoteDescription }}</p>
+        <div
+          class="intake-room__case-note"
+          :data-status="intakeWorkStatusCopy.tone"
+          data-intake-work-status
+        >
+          <i class="intake-room__status-orb" aria-hidden="true" />
+          <div class="intake-room__status-copy">
+            <span>{{ intakeWorkStatusCopy.eyebrow }}</span>
+            <h2>{{ intakeWorkStatusCopy.title }}</h2>
+            <p>{{ intakeWorkStatusCopy.description }}</p>
+          </div>
+          <div class="intake-room__status-meta">
+            <small :data-model-state="intakeStreamingRuns.length ? 'connected' : modelConnectionState">
+              {{ modelConnectionLabel }}
+            </small>
+          </div>
         </div>
         <div
           class="intake-room__conversation-lock-frame"
@@ -984,9 +1378,11 @@ onBeforeUnmount(() => {
         >
           <ConversationStream
             :messages="intakeRecipientView ? [] : messages"
-            :disabled="submitting || admitted || !partyCanChat"
+            :streaming-runs="intakeRecipientView ? [] : intakeStreamingRuns"
+            :disabled="submitting || intakeStreamingRuns.length > 0 || admitted || !partyCanChat || !initialAgentReady || !modelConnected"
             :composer-visible="partyCanChat"
             :disabled-reason="intakeComposerDisabledReason"
+            :empty-text="intakeConversationEmptyText"
             placeholder="补充订单、物流、双方沟通或你的期望…"
             @submit="postMessage"
           />
@@ -1211,7 +1607,7 @@ onBeforeUnmount(() => {
             <button
               type="button"
               data-confirm-admission
-              :disabled="submitting || admitted"
+              :disabled="intakeDossierSubmissionDisabled"
               @click="confirmAdmission"
             >
               <span v-if="admitted">已上报</span>
@@ -1222,7 +1618,7 @@ onBeforeUnmount(() => {
               type="button"
               class="intake-dossier__secondary"
               data-resolve-without-dispute
-              :disabled="submitting || admitted"
+              :disabled="intakeCancellationDisabled"
               @click="resolveWithoutDispute"
             >
               问题已解决，取消争议
@@ -1311,7 +1707,7 @@ onBeforeUnmount(() => {
 }
 .intake-room__conversation {
   display: grid;
-  grid-template-rows: 120px minmax(0, 1fr);
+  grid-template-rows: 92px minmax(0, 1fr);
   min-height: 0;
   padding: 18px;
 }
@@ -1328,12 +1724,20 @@ onBeforeUnmount(() => {
 }
 .intake-room__case-note {
   box-sizing: border-box;
-  height: 120px;
-  padding: 16px;
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  height: 92px;
+  padding: 15px 16px 18px;
   margin: 0;
   overflow: hidden;
-  background: linear-gradient(135deg, #e8f6ff, #f4efff);
-  border-radius: 20px;
+  background:
+    radial-gradient(circle at 20% 15%, rgba(255, 255, 255, .95), transparent 34%),
+    linear-gradient(135deg, #f8fbff, #f4f7ff);
+  border: 1px solid #dce8f4;
+  border-radius: 18px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .92);
 }
 .intake-room__case-note span,
 .intake-dossier header span {
@@ -1342,16 +1746,112 @@ onBeforeUnmount(() => {
   font-weight: 800;
   letter-spacing: .16em;
 }
-.intake-room__case-note h2 { margin: 5px 0; color: #34435c; }
+.intake-room__status-orb {
+  position: relative;
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border-radius: 14px;
+  background: linear-gradient(135deg, #8ca2ff, #77dfb7);
+  box-shadow: 0 10px 24px rgba(96, 122, 180, .22);
+}
+.intake-room__status-orb::before,
+.intake-room__status-orb::after {
+  content: "";
+  position: absolute;
+  border-radius: 999px;
+}
+.intake-room__status-orb::before {
+  width: 11px;
+  height: 11px;
+  background: #fff;
+}
+.intake-room__status-orb::after {
+  inset: -5px;
+  border: 1px solid rgba(126, 151, 232, .38);
+  animation: intake-status-pulse 1.55s ease-out infinite;
+}
+.intake-room__status-copy {
+  min-width: 0;
+}
+.intake-room__case-note h2 {
+  margin: 3px 0 2px;
+  color: #34435c;
+  font-size: 17px;
+  line-height: 1.22;
+}
 .intake-room__case-note p {
   display: -webkit-box;
   margin: 0;
   overflow: hidden;
   color: #6f7d92;
-  line-height: 1.5;
+  font-size: 12px;
+  line-height: 1.42;
   overflow-wrap: anywhere;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
+}
+.intake-room__status-meta {
+  display: grid;
+  min-width: 96px;
+  justify-items: end;
+  gap: 4px;
+}
+.intake-room__status-meta small {
+  padding: 3px 8px;
+  color: #71809a;
+  background: rgba(255, 255, 255, .72);
+  border: 1px solid #dfe8f4;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 800;
+}
+.intake-room__status-meta small[data-model-state="connected"] {
+  color: #2f8569;
+  background: rgba(229, 250, 240, .82);
+  border-color: rgba(106, 211, 169, .48);
+}
+.intake-room__status-meta small[data-model-state="checking"] {
+  color: #6b6f9a;
+  background: rgba(241, 244, 255, .86);
+  border-color: rgba(163, 174, 240, .5);
+}
+.intake-room__status-meta small[data-model-state="disconnected"] {
+  color: #b24b5d;
+  background: rgba(255, 238, 240, .9);
+  border-color: rgba(244, 143, 156, .55);
+}
+.intake-room__case-note[data-status="working"] .intake-room__status-orb {
+  background: linear-gradient(135deg, #a98cf5, #79b9ff);
+}
+.intake-room__case-note[data-status="streaming"] .intake-room__status-orb {
+  background: linear-gradient(135deg, #ff9c80, #a98cf5);
+}
+.intake-room__case-note[data-status="ready"] .intake-room__status-orb {
+  background: linear-gradient(135deg, #64d8a4, #70c7ff);
+}
+.intake-room__case-note[data-status="handoff"] .intake-room__status-orb {
+  background: linear-gradient(135deg, #74a7ff, #b7c4da);
+}
+.intake-room__case-note[data-status="error"] .intake-room__status-orb {
+  background: linear-gradient(135deg, #ff7f8d, #ffbd8a);
+}
+.intake-room__case-note[data-status="ready"] .intake-room__status-orb::after,
+.intake-room__case-note[data-status="handoff"] .intake-room__status-orb::after,
+.intake-room__case-note[data-status="error"] .intake-room__status-orb::after {
+  animation: none;
+  opacity: .35;
+}
+@keyframes intake-status-pulse {
+  0% {
+    opacity: .85;
+    transform: scale(.86);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.28);
+  }
 }
 .intake-room__conversation-lock-frame {
   position: relative;
@@ -1539,6 +2039,7 @@ onBeforeUnmount(() => {
 }
 .intake-case-detail__single-statement :deep(.expandable-text) {
   height: 100%;
+  align-content: start;
 }
 .intake-case-detail__single-statement :deep(.expandable-text__content) {
   color: #34425a;
@@ -1551,7 +2052,7 @@ onBeforeUnmount(() => {
   box-sizing: border-box;
   display: grid;
   height: 412px;
-  grid-template-rows: 18px 110px 112px 108px;
+  grid-template-rows: 18px 110px 126px 94px;
   gap: 6px;
   min-height: 0;
   padding: 12px 14px;
@@ -1630,22 +2131,22 @@ onBeforeUnmount(() => {
 }
 .intake-case-detail__meta-rows {
   display: grid;
-  height: 112px;
-  grid-template-rows: 70px 42px;
+  height: 126px;
+  grid-template-rows: 84px 42px;
   gap: 0;
   min-height: 0;
   border-top: 1px dashed #dce8f3;
 }
 .intake-case-detail__fields {
   display: grid;
-  height: 70px;
+  height: 84px;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   min-width: 0;
 }
 .intake-case-detail__field {
   display: grid;
   box-sizing: border-box;
-  height: 70px;
+  height: 84px;
   grid-template-rows: auto minmax(0, 1fr);
   gap: 4px;
   min-height: 0;
@@ -1664,8 +2165,8 @@ onBeforeUnmount(() => {
 }
 .intake-case-detail__field strong {
   color: #2d4d70;
-  -webkit-line-clamp: 2;
-  max-height: 3em;
+  -webkit-line-clamp: 3;
+  max-height: 4.5em;
 }
 .intake-case-detail__field em,
 .intake-case-detail__field small {
@@ -1805,15 +2306,13 @@ onBeforeUnmount(() => {
   min-width: 0;
 }
 .intake-case-detail__todo-text {
-  display: -webkit-box;
+  display: block;
   min-width: 0;
   overflow: hidden;
   font-size: 11px;
   line-height: 1.3;
-  overflow-wrap: anywhere;
-  word-break: break-word;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .intake-case-detail__todo-list li::before {
   counter-increment: intake-gaps;
@@ -1833,11 +2332,11 @@ onBeforeUnmount(() => {
   position: relative;
   box-sizing: border-box;
   display: grid;
-  height: 108px;
-  min-height: 108px;
-  grid-template-rows: 18px minmax(0, 1fr);
-  gap: 6px;
-  padding: 4px 0 0;
+  height: 94px;
+  min-height: 94px;
+  grid-template-rows: 16px minmax(0, 1fr);
+  gap: 2px;
+  padding: 2px 0 0;
   overflow: hidden;
   background: transparent;
   border: 0;
@@ -1845,20 +2344,16 @@ onBeforeUnmount(() => {
   border-radius: 0;
 }
 @supports (-webkit-line-clamp: 1) {
-  .intake-case-detail__field strong,
-  .intake-case-detail__todo-text {
+  .intake-case-detail__field strong {
     display: -webkit-box;
     overflow: hidden;
     -webkit-box-orient: vertical;
   }
 
   .intake-case-detail__field strong {
-    -webkit-line-clamp: 2;
+    -webkit-line-clamp: 3;
   }
 
-  .intake-case-detail__todo-text {
-    -webkit-line-clamp: 2;
-  }
 }
 .intake-dossier__confirm {
   position: relative;

@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# 文件作用：自动化测试文件，验证 smoke-test 相关模块的行为、契约或页面布局。
+# 说明：本注释用于帮助读者先了解脚本用途，再执行或修改脚本。
+
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -12,6 +15,7 @@ SMOKE_USER_ID="${SMOKE_USER_ID:-user-local}"
 RESPONSE_FILE="$(mktemp)"
 trap 'rm -f "${RESPONSE_FILE}"' EXIT
 
+# 业务位置：【开发与运维脚本】assert_http_200：核验 当前阶段业务数据 的权限、Schema 和阶段边界，阻止越权或不完整结果进入 可重复的初始化、启动或校验动作。上游：本地环境变量和容器服务。下游：可重复的初始化、启动或校验动作。边界：脚本不得写入真实生产数据。
 assert_http_200() {
   local name="$1"
   local url="$2"

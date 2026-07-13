@@ -1,3 +1,6 @@
+// 文件作用：自动化测试文件，验证 hearing-court.fixture 相关模块的行为、契约或页面布局。
+// 说明：本注释用于帮助读者先了解本文件职责，再继续阅读具体实现。
+
 import { expect } from "@playwright/test";
 
 export const CASE_ID = "CASE_HEARING_LAYOUT";
@@ -13,10 +16,12 @@ const actors = {
   },
 };
 
+// 业务位置：【前端浏览器回归测试】repeatToLength：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 function repeatToLength(seed, length) {
   return seed.repeat(Math.ceil(length / seed.length)).slice(0, length);
 }
 
+// 业务位置：【前端浏览器回归测试】buildHearing：把 页面夹具和拦截 API 响应 组装为本块需要的 庭审轮次和法官发言，供 房间、审核和结果页面的交互断言 使用。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 function buildHearing() {
   return {
     rounds: [
@@ -52,6 +57,7 @@ function buildHearing() {
   };
 }
 
+// 业务位置：【前端浏览器回归测试】buildMessages：把 页面夹具和拦截 API 响应 组装为本块需要的 房间消息和对话记录，供 房间、审核和结果页面的交互断言 使用。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 function buildMessages({ count = 4, longMessageLength = 0 } = {}) {
   const roles = ["JUDGE", "USER", "MERCHANT", "JURY"];
   const messages = Array.from({ length: count }, (_, index) => {
@@ -94,6 +100,7 @@ function buildMessages({ count = 4, longMessageLength = 0 } = {}) {
   return messages;
 }
 
+// 业务位置：【前端浏览器回归测试】buildEvidenceCatalog：把 页面夹具和拦截 API 响应 组装为本块需要的 当前可见证据和附件，供 房间、审核和结果页面的交互断言 使用。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 function buildEvidenceCatalog({ count = 4 } = {}) {
   return {
     case_id: CASE_ID,
@@ -120,6 +127,7 @@ function buildEvidenceCatalog({ count = 4 } = {}) {
   };
 }
 
+// 业务位置：【前端浏览器回归测试】fulfillJson：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 function fulfillJson(route, data) {
   return route.fulfill({
     status: 200,
@@ -128,6 +136,7 @@ function fulfillJson(route, data) {
   });
 }
 
+// 业务位置：【前端浏览器回归测试】installHearingCourtFixture：围绕 庭审轮次和法官发言 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 export async function installHearingCourtFixture(page, options = {}) {
   const actor = actors[options.role || "USER"];
   if (!actor) throw new Error(`Unsupported hearing fixture role: ${options.role}`);

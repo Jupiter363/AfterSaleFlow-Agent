@@ -1,3 +1,6 @@
+// 文件作用：自动化测试文件，验证 room.test 相关模块的行为、契约或页面布局。
+// 说明：本注释用于帮助读者先了解本文件职责，再继续阅读具体实现。
+
 import { describe, expect, it, vi } from "vitest";
 import { createRoomState, resumeRoomEvents, streamRoomEvents } from "./room";
 
@@ -10,7 +13,9 @@ vi.mock("../api/rooms", () => ({
 
 import { consumeCaseEvents } from "../api/rooms";
 
+// 业务位置：【前端状态仓库】describe：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 API 响应、SSE 增量和用户操作 正确进入 跨组件一致的案件/房间/证据状态。上游：API 响应、SSE 增量和用户操作。下游：跨组件一致的案件/房间/证据状态。边界：本地状态不能替代服务端事实。
 describe("room event recovery", () => {
+  // 业务位置：【前端状态仓库】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 API 响应、SSE 增量和用户操作 正确进入 跨组件一致的案件/房间/证据状态。上游：API 响应、SSE 增量和用户操作。下游：跨组件一致的案件/房间/证据状态。边界：本地状态不能替代服务端事实。
   it("reloads the authoritative snapshot before applying replayed events", async () => {
     const order = [];
     const state = createRoomState();
@@ -43,6 +48,7 @@ describe("room event recovery", () => {
     expect(state.connected).toBe(true);
   });
 
+  // 业务位置：【前端状态仓库】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 API 响应、SSE 增量和用户操作 正确进入 跨组件一致的案件/房间/证据状态。上游：API 响应、SSE 增量和用户操作。下游：跨组件一致的案件/房间/证据状态。边界：本地状态不能替代服务端事实。
   it("persists each durable cursor even when the stream disconnects mid-flight", async () => {
     const state = createRoomState();
     state.lastEventId = 11;
@@ -61,11 +67,13 @@ describe("room event recovery", () => {
     expect(state.lastEventId).toBe(12);
   });
 
+  // 业务位置：【前端状态仓库】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 API 响应、SSE 增量和用户操作 正确进入 跨组件一致的案件/房间/证据状态。上游：API 响应、SSE 增量和用户操作。下游：跨组件一致的案件/房间/证据状态。边界：本地状态不能替代服务端事实。
   it("isolates durable cursors by case when the user switches disputes", async () => {
     const state = createRoomState();
     const consumedCursors = [];
     const snapshotLoader = vi.fn();
 
+    // 业务位置：【前端状态仓库】consume：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 API 响应、SSE 增量和用户操作 正确进入 跨组件一致的案件/房间/证据状态。上游：API 响应、SSE 增量和用户操作。下游：跨组件一致的案件/房间/证据状态。边界：本地状态不能替代服务端事实。
     const consume = (nextCursor) => async ({ lastEventId }) => {
       consumedCursors.push(lastEventId);
       return nextCursor;
@@ -94,6 +102,7 @@ describe("room event recovery", () => {
     expect(state.lastEventIds).toEqual({ CASE_A: 13, CASE_B: 2 });
   });
 
+  // 业务位置：【前端状态仓库】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 API 响应、SSE 增量和用户操作 正确进入 跨组件一致的案件/房间/证据状态。上游：API 响应、SSE 增量和用户操作。下游：跨组件一致的案件/房间/证据状态。边界：本地状态不能替代服务端事实。
   it("isolates durable cursors by case, room and actor for room streams", async () => {
     const state = createRoomState();
     const consumedCursors = [];
@@ -117,6 +126,7 @@ describe("room event recovery", () => {
         return 17;
       });
     const snapshotLoader = vi.fn();
+    // 业务位置：【前端状态仓库】runOnce：执行 当前阶段业务数据 对应的业务动作，并将结果交给 跨组件一致的案件/房间/证据状态。上游：API 响应、SSE 增量和用户操作。下游：跨组件一致的案件/房间/证据状态。边界：本地状态不能替代服务端事实。
     const runOnce = (abortController) => async () => {
       abortController.abort();
     };

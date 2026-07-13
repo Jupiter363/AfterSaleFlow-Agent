@@ -1,3 +1,6 @@
+// 文件作用：前端工程代码文件，支撑售后争议系统的页面、交互、样式或构建配置。
+// 说明：本注释用于帮助读者先了解本文件职责，再继续阅读具体实现。
+
 const COMPONENT_TYPES = new Set([
   "status",
   "metric",
@@ -16,6 +19,7 @@ const NAVIGATION_TARGETS = new Set([
 const FORBIDDEN_TEXT =
   /<\s*\/?\s*(script|iframe|object|embed|style|html)|javascript:|https?:\/\/|\/api\/|\/internal\/|approve|execute/i;
 
+// 业务位置：【前端应用】object：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由、API 和本地状态 正确进入 售后纠纷处理界面。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
 function object(value, label) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new TypeError(`${label} must be an object`);
@@ -23,6 +27,7 @@ function object(value, label) {
   return value;
 }
 
+// 业务位置：【前端应用】text：围绕 面向当事人的业务文本 计算本模块需要的派生信息，使其能够从 路由、API 和本地状态 正确进入 售后纠纷处理界面。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
 function text(value, label, { required = true } = {}) {
   if (value == null && !required) return "";
   if (typeof value !== "string" || (required && !value.trim())) {
@@ -34,6 +39,7 @@ function text(value, label, { required = true } = {}) {
   return value.trim();
 }
 
+// 业务位置：【前端应用】citation：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由、API 和本地状态 正确进入 售后纠纷处理界面。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
 function citation(value) {
   const item = object(value, "citation");
   return {
@@ -42,6 +48,7 @@ function citation(value) {
   };
 }
 
+// 业务位置：【前端应用】block：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由、API 和本地状态 正确进入 售后纠纷处理界面。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
 function block(value) {
   const item = object(value, "block");
   if (!COMPONENT_TYPES.has(item.type)) {
@@ -75,6 +82,7 @@ function block(value) {
   return Object.freeze(parsed);
 }
 
+// 业务位置：【前端应用】parseGenerativeUi：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由、API 和本地状态 正确进入 售后纠纷处理界面。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
 export function parseGenerativeUi(value) {
   const payload = object(value, "Generative UI payload");
   if (payload.version !== 1 || !Array.isArray(payload.blocks)) {

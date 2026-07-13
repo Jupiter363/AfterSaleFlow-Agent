@@ -1,3 +1,5 @@
+# 文件作用：自动化测试文件，验证 test_graph 相关模块的行为、契约或页面布局。
+
 from contextlib import contextmanager
 
 import pytest
@@ -92,6 +94,10 @@ OUTPUTS = {
 
 
 class StubLlm:
+    # 所属模块：Python 支撑模块 > test_graph；函数角色：类/闭包内部方法。
+    # 具体功能：`generate` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`StructuredGeneration`、`output_type.model_validate`。
+    # 上下游：上游为 本文件的 `test_c3_is_skipped_when_no_supplemental_evidence_is_required`、`test_invalid_node_schema_enters_manual_review_without_a_final_decision`；下游为 协作调用 `StructuredGeneration`、`output_type.model_validate`。
+    # 系统意义：该函数在系统中的业务边界是：接口稳定、错误显式、不绕过权限审计。
     def generate(self, *, node_name, system_prompt, user_prompt, output_type):
         return StructuredGeneration(
             value=output_type.model_validate(OUTPUTS[node_name]),
@@ -102,18 +108,34 @@ class StubLlm:
 
 
 class RecordingTrace:
+    # 所属模块：Python 支撑模块 > test_graph；函数角色：对象依赖初始化。
+    # 具体功能：`__init__` 注入并保存处理本阶段状态需要的客户端、配置或策略依赖。
+    # 上下游：上游为 相邻模块输入；下游为 结构化调用结果。
+    # 系统意义：该函数在系统中的业务边界是：接口稳定、错误显式、不绕过权限审计。
     def __init__(self) -> None:
         self.nodes: list[str] = []
         self.prompts: list[str] = []
         self.completed = None
 
+    # 所属模块：Python 支撑模块 > test_graph；函数角色：上下文管理器。
+    # 具体功能：`workflow` 按协议增量产生或消费本阶段状态，维持顺序、限额和取消语义。
+    # 上下游：上游为 相邻模块输入；下游为 结构化调用结果。
+    # 系统意义：提供实时反馈，同时阻止未校验完整结果或内部推理经流通道泄露。
     @contextmanager
     def workflow(self, context, payload):
         yield self
 
+    # 所属模块：Python 支撑模块 > test_graph；函数角色：类/闭包内部方法。
+    # 具体功能：`complete` 驱动本阶段状态对应的业务步骤并返回阶段结果。
+    # 上下游：上游为 相邻模块输入；下游为 结构化调用结果。
+    # 系统意义：该函数在系统中的业务边界是：接口稳定、错误显式、不绕过权限审计。
     def complete(self, output):
         self.completed = output
 
+    # 所属模块：Python 支撑模块 > test_graph；函数角色：类/闭包内部方法。
+    # 具体功能：`generation` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`self.nodes.append`、`self.prompts.append`。
+    # 上下游：上游为 相邻模块输入；下游为 协作调用 `self.nodes.append`、`self.prompts.append`。
+    # 系统意义：该函数在系统中的业务边界是：接口稳定、错误显式、不绕过权限审计。
     def generation(
         self,
         context,
@@ -128,6 +150,10 @@ class RecordingTrace:
         self.prompts.append(prompt)
 
 
+# 所属模块：Python 支撑模块 > test_graph；函数角色：回归测试用例。
+# 具体功能：`test_c1_to_c6_graph_executes_structured_nodes_and_records_trace` 验证本阶段状态在固定案例中的输出、边界和失败行为；关键协作调用：`RecordingTrace`、`HearingWorkflow`、`HearingAnalyzeRequest`。
+# 上下游：上游为 相邻模块输入；下游为 协作调用 `RecordingTrace`、`HearingWorkflow`、`HearingAnalyzeRequest`、`AgentTraceContext`。
+# 系统意义：固定“Python 支撑模块 > test_graph”的可观察契约，防止后续重构改变业务结果。
 def test_c1_to_c6_graph_executes_structured_nodes_and_records_trace() -> None:
     tracer = RecordingTrace()
     workflow = HearingWorkflow(
@@ -187,8 +213,16 @@ def test_c1_to_c6_graph_executes_structured_nodes_and_records_trace() -> None:
     assert tracer.completed["adjudication_draft"]["draft"]["is_final_decision"] is False
 
 
+# 所属模块：Python 支撑模块 > test_graph；函数角色：回归测试用例。
+# 具体功能：`test_c3_is_skipped_when_no_supplemental_evidence_is_required` 验证当前可见证据在固定案例中的输出、边界和失败行为；关键协作调用：`RecordingTrace`、`HearingWorkflow`、`HearingAnalyzeRequest`。
+# 上下游：上游为 相邻模块输入；下游为 本文件的 `generate`。
+# 系统意义：固定“Python 支撑模块 > test_graph”的可观察契约，防止后续重构改变业务结果。
 def test_c3_is_skipped_when_no_supplemental_evidence_is_required() -> None:
     class NoGapLlm(StubLlm):
+        # 所属模块：Python 支撑模块 > test_graph；函数角色：类/闭包内部方法。
+        # 具体功能：`generate` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`generate`、`StructuredGeneration`、`output_type.model_validate`。
+        # 上下游：上游为 本文件的 `test_c3_is_skipped_when_no_supplemental_evidence_is_required`、`test_invalid_node_schema_enters_manual_review_without_a_final_decision`；下游为 协作调用 `generate`、`StructuredGeneration`、`output_type.model_validate`。
+        # 系统意义：该函数在系统中的业务边界是：接口稳定、错误显式、不绕过权限审计。
         def generate(self, *, node_name, system_prompt, user_prompt, output_type):
             if node_name == "evidence_gap_request_node":
                 return StructuredGeneration(
@@ -241,6 +275,10 @@ def test_c3_is_skipped_when_no_supplemental_evidence_is_required() -> None:
     assert result.party_liaison is None
 
 
+# 所属模块：Python 支撑模块 > test_graph；函数角色：回归测试用例。
+# 具体功能：`test_final_convergence_skips_supplemental_request_even_when_gap_is_detected` 验证本阶段状态在固定案例中的输出、边界和失败行为；关键协作调用：`RecordingTrace`、`HearingWorkflow`、`HearingAnalyzeRequest`。
+# 上下游：上游为 相邻模块输入；下游为 协作调用 `RecordingTrace`、`HearingWorkflow`、`HearingAnalyzeRequest`、`AgentTraceContext`。
+# 系统意义：固定“Python 支撑模块 > test_graph”的可观察契约，防止后续重构改变业务结果。
 def test_final_convergence_skips_supplemental_request_even_when_gap_is_detected() -> None:
     tracer = RecordingTrace()
     workflow = HearingWorkflow(
@@ -287,8 +325,16 @@ def test_final_convergence_skips_supplemental_request_even_when_gap_is_detected(
     assert result.party_liaison is None
 
 
+# 所属模块：Python 支撑模块 > test_graph；函数角色：回归测试用例。
+# 具体功能：`test_invalid_node_schema_enters_manual_review_without_a_final_decision` 验证人工复核信息在固定案例中的输出、边界和失败行为；关键协作调用：`RecordingTrace`、`HearingWorkflow`、`HearingAnalyzeRequest`。
+# 上下游：上游为 相邻模块输入；下游为 本文件的 `generate`。
+# 系统意义：固定“Python 支撑模块 > test_graph”的可观察契约，防止后续重构改变业务结果。
 def test_invalid_node_schema_enters_manual_review_without_a_final_decision() -> None:
     class InvalidLlm(StubLlm):
+        # 所属模块：Python 支撑模块 > test_graph；函数角色：类/闭包内部方法。
+        # 具体功能：`generate` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`generate`、`AgentOutputSchemaError`。
+        # 上下游：上游为 本文件的 `test_c3_is_skipped_when_no_supplemental_evidence_is_required`、`test_invalid_node_schema_enters_manual_review_without_a_final_decision`；下游为 协作调用 `generate`、`AgentOutputSchemaError`。
+        # 系统意义：失败显式映射为 `AgentOutputSchemaError`，避免错误状态被当成成功结果。
         def generate(self, *, node_name, system_prompt, user_prompt, output_type):
             if node_name == "evidence_cross_check_node":
                 raise AgentOutputSchemaError(node_name, "invalid output")
@@ -313,6 +359,13 @@ def test_invalid_node_schema_enters_manual_review_without_a_final_decision() -> 
                 "statement": "The evidence needs human review.",
             }
         ],
+        hearing_context={
+            "completed_statement_rounds": 3,
+            "max_statement_rounds": 3,
+            "final_convergence": True,
+            "must_produce_final_plan": True,
+            "allow_supplemental_request": False,
+        },
     )
     context = AgentTraceContext(
         trace_id="TRACE_invalid",
@@ -332,6 +385,43 @@ def test_invalid_node_schema_enters_manual_review_without_a_final_decision() -> 
     assert result.adjudication_draft.draft.requires_human_review is True
 
 
+def test_invalid_node_schema_outside_final_convergence_still_fails() -> None:
+    class InvalidLlm(StubLlm):
+        def generate(self, *, node_name, system_prompt, user_prompt, output_type):
+            raise AgentOutputSchemaError(node_name, "invalid output")
+
+    workflow = HearingWorkflow(
+        InvalidLlm(), PromptRepository(), RecordingTrace(), "test-model", "hearing-v1"
+    )
+    request = HearingAnalyzeRequest(
+        case_id="CASE_invalid_interim",
+        workflow_id="WORKFLOW_invalid_interim",
+        claims=[
+            {
+                "claim_id": "CLAIM_invalid_interim",
+                "party_type": "USER",
+                "statement": "The evidence needs another hearing round.",
+            }
+        ],
+    )
+    context = AgentTraceContext(
+        trace_id="TRACE_invalid_interim",
+        request_id="REQ_invalid_interim",
+        case_id=request.case_id,
+        workflow_id=request.workflow_id,
+        user_id=None,
+        role="SYSTEM",
+        prompt_version="hearing-v1",
+    )
+
+    with pytest.raises(AgentOutputSchemaError):
+        workflow.analyze(request, context)
+
+
+# 所属模块：Python 支撑模块 > test_graph；函数角色：回归测试用例。
+# 具体功能：`test_presiding_judge_stage_runner_executes_exactly_one_node` 验证法官结果在固定案例中的输出、边界和失败行为；关键协作调用：`pytest.mark.parametrize`、`RecordingTrace`、`HearingWorkflow`。
+# 上下游：上游为 相邻模块输入；下游为 协作调用 `pytest.mark.parametrize`、`RecordingTrace`、`HearingWorkflow`、`HearingStageRequest`。
+# 系统意义：固定“Python 支撑模块 > test_graph”的可观察契约，防止后续重构改变业务结果。
 @pytest.mark.parametrize(
     ("stage", "expected_node"),
     [

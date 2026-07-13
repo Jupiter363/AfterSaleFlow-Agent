@@ -1,3 +1,9 @@
+/*
+ * 所属模块：案件核心与导入。
+ * 文件职责：验证演示案件争议Seeder，覆盖 「seedsSixDeterministicDisputesThroughTheImportServiceWhenEnabled」、「doesNotRegisterTheSeederWhenDisabled」。
+ * 业务链路：JUnit 构造夹具并驱动真实服务或 Mock 协作者，断言返回值、持久化状态和调用边界；维护争议案件事实、来源、幂等导入和演示数据清理。
+ * 关键边界：Java/PostgreSQL 是案件状态事实源，导入重试不能创建重复案件
+ */
 package com.example.dispute.casecore;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -24,10 +30,20 @@ import org.springframework.context.annotation.ComponentScan;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.FilterType;
 
+// 所属模块：【案件核心与导入 / 自动化测试层】类型「DemoDisputeSeederTest」。
+// 类型职责：集中验证演示案件争议Seeder的业务场景、权限边界和持久化/外部协作契约；本类型显式提供 「seedsSixDeterministicDisputesThroughTheImportServiceWhenEnabled」、「doesNotRegisterTheSeederWhenDisabled」。
+// 协作关系：由 JUnit 发现并执行其中带 @Test 的场景。
+// 边界意义：Java/PostgreSQL 是案件状态事实源，导入重试不能创建重复案件
+// Java 语法：class 同时封装状态与方法；final 依赖通过构造器注入后不可重新指向。
 class DemoDisputeSeederTest {
 
     private final DisputeImportService importService = mock(DisputeImportService.class);
 
+    // 所属模块：【案件核心与导入 / 自动化测试层】「DemoDisputeSeederTest.seedsSixDeterministicDisputesThroughTheImportServiceWhenEnabled()」。
+    // 具体功能：「DemoDisputeSeederTest.seedsSixDeterministicDisputesThroughTheImportServiceWhenEnabled()」：复现“核对完整业务行为（场景方法「seedsSixDeterministicDisputesThroughTheImportServiceWhenEnabled」）”场景：驱动 「importService.importDispute」，再用 「assertThat」、「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_DEMO」、「ORDER-DEMO-1」、「AS-DEMO-1」、「SF-DEMO-1」。
+    // 上游调用：「DemoDisputeSeederTest.seedsSixDeterministicDisputesThroughTheImportServiceWhenEnabled()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「DemoDisputeSeederTest.seedsSixDeterministicDisputesThroughTheImportServiceWhenEnabled()」的下游是被测服务、仓储或外部客户端替身；「assertThat、verify」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「DemoDisputeSeederTest.seedsSixDeterministicDisputesThroughTheImportServiceWhenEnabled()」守住「案件核心与导入」的可执行规格，尤其防止 「CASE_DEMO」、「ORDER-DEMO-1」、「AS-DEMO-1」、「SF-DEMO-1」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void seedsSixDeterministicDisputesThroughTheImportServiceWhenEnabled() {
         when(importService.importDispute(any(), any(), anyString()))
@@ -93,6 +109,11 @@ class DemoDisputeSeederTest {
                         CaseStatus.CLOSED);
     }
 
+    // 所属模块：【案件核心与导入 / 自动化测试层】「DemoDisputeSeederTest.doesNotRegisterTheSeederWhenDisabled()」。
+    // 具体功能：「DemoDisputeSeederTest.doesNotRegisterTheSeederWhenDisabled()」：复现“核对完整业务行为（场景方法「doesNotRegisterTheSeederWhenDisabled」）”场景：驱动 「run」、「withPropertyValues」、「withBean」、「newApplicationContextRunner().withUserConfiguration」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「dispute.seed-demo-disputes=false」。
+    // 上游调用：「DemoDisputeSeederTest.doesNotRegisterTheSeederWhenDisabled()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「DemoDisputeSeederTest.doesNotRegisterTheSeederWhenDisabled()」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「DemoDisputeSeederTest.doesNotRegisterTheSeederWhenDisabled()」守住「案件核心与导入」的可执行规格，尤其防止 「dispute.seed-demo-disputes=false」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void doesNotRegisterTheSeederWhenDisabled() {
         new ApplicationContextRunner()
@@ -103,6 +124,11 @@ class DemoDisputeSeederTest {
                 .run(context -> assertThat(context).doesNotHaveBean(ApplicationRunner.class));
     }
 
+    // 所属模块：【案件核心与导入 / 自动化测试层】类型「DemoSeederScan」。
+    // 类型职责：承载演示案件SeederScan在当前业务模块中的规则与协作边界；本类型显式提供 框架生成的默认访问器。
+    // 协作关系：由 JUnit 发现并执行其中带 @Test 的场景。
+    // 边界意义：Java/PostgreSQL 是案件状态事实源，导入重试不能创建重复案件
+    // Java 语法：class 同时封装状态与方法；final 依赖通过构造器注入后不可重新指向。
     @Configuration(proxyBeanMethods = false)
     @ComponentScan(
             basePackages = "com.example.dispute.casecore.application",

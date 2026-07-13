@@ -1,3 +1,6 @@
+﻿# 文件作用：项目运维脚本，用于本地开发、环境初始化、密钥生成或接口校验。
+# 说明：本注释用于帮助读者先了解脚本用途，再执行或修改脚本。
+
 [CmdletBinding()]
 param(
     [string]$EnvFile,
@@ -23,20 +26,24 @@ if (-not (Test-Path -LiteralPath $EnvFile -PathType Leaf)) {
     Copy-Item -LiteralPath $ExampleFile -Destination $EnvFile
 }
 
+# 业务位置：【开发与运维脚本】New-SecureHex：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 本地环境变量和容器服务 正确进入 可重复的初始化、启动或校验动作。上游：本地环境变量和容器服务。下游：可重复的初始化、启动或校验动作。边界：脚本不得写入真实生产数据。
 function New-SecureHex {
     param([ValidateRange(1, 128)][int]$ByteCount)
 
     $bytes = New-Object byte[] $ByteCount
     $generator = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    # 业务位置：【开发与运维脚本】try：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 本地环境变量和容器服务 正确进入 可重复的初始化、启动或校验动作。上游：本地环境变量和容器服务。下游：可重复的初始化、启动或校验动作。边界：脚本不得写入真实生产数据。
     try {
         $generator.GetBytes($bytes)
     }
+    # 业务位置：【开发与运维脚本】finally：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 本地环境变量和容器服务 正确进入 可重复的初始化、启动或校验动作。上游：本地环境变量和容器服务。下游：可重复的初始化、启动或校验动作。边界：脚本不得写入真实生产数据。
     finally {
         $generator.Dispose()
     }
     return ([System.BitConverter]::ToString($bytes)).Replace("-", "").ToLowerInvariant()
 }
 
+# 业务位置：【开发与运维脚本】Set-GeneratedValue：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 本地环境变量和容器服务 正确进入 可重复的初始化、启动或校验动作。上游：本地环境变量和容器服务。下游：可重复的初始化、启动或校验动作。边界：脚本不得写入真实生产数据。
 function Set-GeneratedValue {
     param(
         [Parameter(Mandatory = $true)][string]$Key,
@@ -48,6 +55,7 @@ function Set-GeneratedValue {
         if ($_ -ceq $placeholder) {
             "$Key=$Value"
         }
+        # 业务位置：【开发与运维脚本】else：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 本地环境变量和容器服务 正确进入 可重复的初始化、启动或校验动作。上游：本地环境变量和容器服务。下游：可重复的初始化、启动或校验动作。边界：脚本不得写入真实生产数据。
         else {
             $_
         }

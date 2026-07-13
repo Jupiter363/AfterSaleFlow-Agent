@@ -1,3 +1,9 @@
+/*
+ * 所属模块：证据与版本化卷宗。
+ * 文件职责：验证证据提交，覆盖 「submitsPendingEvidenceAsOneBatchAndPostsEvidenceReferenceToClerk」、「submitsHearingSupplementEvidenceToTheHearingRoom」、「deletesOnlyPendingEvidenceOwnedByCurrentActor」、「refusesToDeleteSubmittedEvidence」。
+ * 业务链路：JUnit 构造夹具并驱动真实服务或 Mock 协作者，断言返回值、持久化状态和调用边界；接收原始证据、触发 OCR、执行可信度核验、控制角色可见性并冻结版本化卷宗。
+ * 关键边界：原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
+ */
 package com.example.dispute.evidence;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -39,6 +45,11 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+// 所属模块：【证据与版本化卷宗 / 自动化测试层】类型「EvidenceSubmissionServiceTest」。
+// 类型职责：集中验证证据提交的业务场景、权限边界和持久化/外部协作契约；本类型显式提供 「setUp」、「submitsPendingEvidenceAsOneBatchAndPostsEvidenceReferenceToClerk」、「submitsHearingSupplementEvidenceToTheHearingRoom」、「deletesOnlyPendingEvidenceOwnedByCurrentActor」、「refusesToDeleteSubmittedEvidence」、「evidence」。
+// 协作关系：由 JUnit 发现并执行其中带 @Test 的场景。
+// 边界意义：原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
+// Java 语法：class 同时封装状态与方法；final 依赖通过构造器注入后不可重新指向。
 @ExtendWith(MockitoExtension.class)
 class EvidenceSubmissionServiceTest {
 
@@ -50,6 +61,11 @@ class EvidenceSubmissionServiceTest {
 
     private EvidenceSubmissionService service;
 
+    // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceSubmissionServiceTest.setUp()」。
+    // 具体功能：「EvidenceSubmissionServiceTest.setUp()」：在每个测试场景运行前创建「Clock.fixed」、「Instant.parse」，统一准备后续断言依赖的初始状态，避免各用例重复搭建且保持彼此隔离。
+    // 上游调用：「EvidenceSubmissionServiceTest.setUp()」由 JUnit 生命周期或本测试类的场景方法调用。
+    // 下游影响：「EvidenceSubmissionServiceTest.setUp()」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「EvidenceSubmissionServiceTest.setUp()」守住「证据与版本化卷宗」的可执行规格，尤其防止 「2026-07-06T08:00:00Z」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @BeforeEach
     void setUp() {
         service =
@@ -65,6 +81,11 @@ class EvidenceSubmissionServiceTest {
                                 ZoneOffset.UTC));
     }
 
+    // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceSubmissionServiceTest.submitsPendingEvidenceAsOneBatchAndPostsEvidenceReferenceToClerk()」。
+    // 具体功能：「EvidenceSubmissionServiceTest.submitsPendingEvidenceAsOneBatchAndPostsEvidenceReferenceToClerk()」：复现“核对完整业务行为（场景方法「submitsPendingEvidenceAsOneBatchAndPostsEvidenceReferenceToClerk」）”场景：驱动 「caseRepository.findByIdForUpdate」、「batchRepository.findByCaseIdAndIdempotencyKey」、「evidenceRepository.findAllById」、「batchRepository.save」，再用 「assertThat」、「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「EVIDENCE_ONE」、「EVIDENCE_TWO」、「submit-1」、「TRACE_1」。
+    // 上游调用：「EvidenceSubmissionServiceTest.submitsPendingEvidenceAsOneBatchAndPostsEvidenceReferenceToClerk()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「EvidenceSubmissionServiceTest.submitsPendingEvidenceAsOneBatchAndPostsEvidenceReferenceToClerk()」的下游是被测服务、仓储或外部客户端替身；「assertThat、verify」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「EvidenceSubmissionServiceTest.submitsPendingEvidenceAsOneBatchAndPostsEvidenceReferenceToClerk()」守住「证据与版本化卷宗」的可执行规格，尤其防止 「EVIDENCE_ONE」、「EVIDENCE_TWO」、「submit-1」、「TRACE_1」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void submitsPendingEvidenceAsOneBatchAndPostsEvidenceReferenceToClerk() {
         FulfillmentCaseEntity dispute = evidenceCase();
@@ -88,6 +109,7 @@ class EvidenceSubmissionServiceTest {
                                 MessageType.PARTY_EVIDENCE_REFERENCE,
                                 "submitted",
                                 List.of("EVIDENCE_ONE", "EVIDENCE_TWO"),
+                                null,
                                 null,
                                 Instant.parse("2026-07-06T08:00:00Z")));
 
@@ -126,6 +148,11 @@ class EvidenceSubmissionServiceTest {
                 .containsExactly("EVIDENCE_ONE", "EVIDENCE_TWO");
     }
 
+    // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceSubmissionServiceTest.submitsHearingSupplementEvidenceToTheHearingRoom()」。
+    // 具体功能：「EvidenceSubmissionServiceTest.submitsHearingSupplementEvidenceToTheHearingRoom()」：复现“核对完整业务行为（场景方法「submitsHearingSupplementEvidenceToTheHearingRoom」）”场景：驱动 「caseRepository.findByIdForUpdate」、「batchRepository.findByCaseIdAndIdempotencyKey」、「evidenceRepository.findAllById」、「batchRepository.save」，再用 「assertThat」、「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「EVIDENCE_HEARING_SUPPLEMENT」、「submit-hearing-1」、「TRACE_HEARING」、「MESSAGE_HEARING_BATCH」。
+    // 上游调用：「EvidenceSubmissionServiceTest.submitsHearingSupplementEvidenceToTheHearingRoom()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「EvidenceSubmissionServiceTest.submitsHearingSupplementEvidenceToTheHearingRoom()」的下游是被测服务、仓储或外部客户端替身；「assertThat、verify」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「EvidenceSubmissionServiceTest.submitsHearingSupplementEvidenceToTheHearingRoom()」守住「证据与版本化卷宗」的可执行规格，尤其防止 「EVIDENCE_HEARING_SUPPLEMENT」、「submit-hearing-1」、「TRACE_HEARING」、「MESSAGE_HEARING_BATCH」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void submitsHearingSupplementEvidenceToTheHearingRoom() {
         FulfillmentCaseEntity dispute = hearingCase();
@@ -154,6 +181,7 @@ class EvidenceSubmissionServiceTest {
                                 MessageType.PARTY_EVIDENCE_REFERENCE,
                                 "submitted",
                                 List.of("EVIDENCE_HEARING_SUPPLEMENT"),
+                                null,
                                 1,
                                 Instant.parse("2026-07-06T08:00:00Z")));
 
@@ -186,6 +214,11 @@ class EvidenceSubmissionServiceTest {
                 .containsExactly("EVIDENCE_HEARING_SUPPLEMENT");
     }
 
+    // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceSubmissionServiceTest.deletesOnlyPendingEvidenceOwnedByCurrentActor()」。
+    // 具体功能：「EvidenceSubmissionServiceTest.deletesOnlyPendingEvidenceOwnedByCurrentActor()」：复现“核对完整业务行为（场景方法「deletesOnlyPendingEvidenceOwnedByCurrentActor」）”场景：驱动 「caseRepository.findByIdForUpdate」、「evidenceRepository.findById」、「service.deletePending」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「EVIDENCE_PENDING」、「user-local」。
+    // 上游调用：「EvidenceSubmissionServiceTest.deletesOnlyPendingEvidenceOwnedByCurrentActor()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「EvidenceSubmissionServiceTest.deletesOnlyPendingEvidenceOwnedByCurrentActor()」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「EvidenceSubmissionServiceTest.deletesOnlyPendingEvidenceOwnedByCurrentActor()」守住「证据与版本化卷宗」的可执行规格，尤其防止 「EVIDENCE_PENDING」、「user-local」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void deletesOnlyPendingEvidenceOwnedByCurrentActor() {
         FulfillmentCaseEntity dispute = evidenceCase();
@@ -201,6 +234,11 @@ class EvidenceSubmissionServiceTest {
         assertThat(pending.getDeletedAt()).isNotNull();
     }
 
+    // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceSubmissionServiceTest.refusesToDeleteSubmittedEvidence()」。
+    // 具体功能：「EvidenceSubmissionServiceTest.refusesToDeleteSubmittedEvidence()」：复现“核对完整业务行为（场景方法「refusesToDeleteSubmittedEvidence」）”场景：驱动 「caseRepository.findByIdForUpdate」、「evidenceRepository.findById」、「service.deletePending」，再用 「assertThatThrownBy」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「EVIDENCE_SUBMITTED」、「BATCH_1」、「2026-07-06T08:00:00Z」、「user-local」。
+    // 上游调用：「EvidenceSubmissionServiceTest.refusesToDeleteSubmittedEvidence()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「EvidenceSubmissionServiceTest.refusesToDeleteSubmittedEvidence()」的下游是被测服务、仓储或外部客户端替身；「assertThatThrownBy」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「EvidenceSubmissionServiceTest.refusesToDeleteSubmittedEvidence()」守住「证据与版本化卷宗」的可执行规格，尤其防止 「EVIDENCE_SUBMITTED」、「BATCH_1」、「2026-07-06T08:00:00Z」、「user-local」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void refusesToDeleteSubmittedEvidence() {
         FulfillmentCaseEntity dispute = evidenceCase();
@@ -222,6 +260,11 @@ class EvidenceSubmissionServiceTest {
                 .hasMessageContaining("submitted evidence cannot be deleted");
     }
 
+    // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceSubmissionServiceTest.evidence(String)」。
+    // 具体功能：「EvidenceSubmissionServiceTest.evidence(String)」：作为测试辅助方法为“核对完整业务行为（场景方法「evidence」）”组装或读取「EvidenceItemEntity.uploaded」、「OffsetDateTime.parse」，供本测试类的场景方法复用。
+    // 上游调用：「EvidenceSubmissionServiceTest.evidence(String)」由本测试类中的 「EvidenceSubmissionServiceTest.submitsPendingEvidenceAsOneBatchAndPostsEvidenceReferenceToClerk」、「EvidenceSubmissionServiceTest.submitsHearingSupplementEvidenceToTheHearingRoom」、「EvidenceSubmissionServiceTest.deletesOnlyPendingEvidenceOwnedByCurrentActor」、「EvidenceSubmissionServiceTest.refusesToDeleteSubmittedEvidence」 调用。
+    // 下游影响：「EvidenceSubmissionServiceTest.evidence(String)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「EvidenceSubmissionServiceTest.evidence(String)」守住「证据与版本化卷宗」的可执行规格，尤其防止 「CASE_EVIDENCE_ROOM」、「DOSSIER_1」、「DOCUMENT」、「USER_UPLOAD」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static EvidenceItemEntity evidence(String id) {
         return EvidenceItemEntity.uploaded(
                 id,
@@ -241,6 +284,11 @@ class EvidenceSubmissionServiceTest {
                 OffsetDateTime.parse("2026-07-06T07:30:00Z"));
     }
 
+    // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceSubmissionServiceTest.evidenceCase()」。
+    // 具体功能：「EvidenceSubmissionServiceTest.evidenceCase()」：作为测试辅助方法为“核对完整业务行为（场景方法「evidenceCase」）”组装或读取「FulfillmentCaseEntity.imported」、「OffsetDateTime.parse」，供本测试类的场景方法复用。
+    // 上游调用：「EvidenceSubmissionServiceTest.evidenceCase()」由本测试类中的 「EvidenceSubmissionServiceTest.submitsPendingEvidenceAsOneBatchAndPostsEvidenceReferenceToClerk」、「EvidenceSubmissionServiceTest.deletesOnlyPendingEvidenceOwnedByCurrentActor」、「EvidenceSubmissionServiceTest.refusesToDeleteSubmittedEvidence」 调用。
+    // 下游影响：「EvidenceSubmissionServiceTest.evidenceCase()」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「EvidenceSubmissionServiceTest.evidenceCase()」守住「证据与版本化卷宗」的可执行规格，尤其防止 「CASE_EVIDENCE_ROOM」、「ORDER-EVIDENCE」、「LOG-EVIDENCE」、「user-local」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static FulfillmentCaseEntity evidenceCase() {
         return FulfillmentCaseEntity.imported(
                 "CASE_EVIDENCE_ROOM",
@@ -262,6 +310,11 @@ class EvidenceSubmissionServiceTest {
                 "external-adapter");
     }
 
+    // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceSubmissionServiceTest.hearingCase()」。
+    // 具体功能：「EvidenceSubmissionServiceTest.hearingCase()」：作为测试辅助方法为“核对完整业务行为（场景方法「hearingCase」）”组装或读取「FulfillmentCaseEntity.imported」、「OffsetDateTime.parse」，供本测试类的场景方法复用。
+    // 上游调用：「EvidenceSubmissionServiceTest.hearingCase()」由本测试类中的 「EvidenceSubmissionServiceTest.submitsHearingSupplementEvidenceToTheHearingRoom」 调用。
+    // 下游影响：「EvidenceSubmissionServiceTest.hearingCase()」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「EvidenceSubmissionServiceTest.hearingCase()」守住「证据与版本化卷宗」的可执行规格，尤其防止 「CASE_EVIDENCE_ROOM」、「ORDER-EVIDENCE」、「LOG-EVIDENCE」、「user-local」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static FulfillmentCaseEntity hearingCase() {
         return FulfillmentCaseEntity.imported(
                 "CASE_EVIDENCE_ROOM",

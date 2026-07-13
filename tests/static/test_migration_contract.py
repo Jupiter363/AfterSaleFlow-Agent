@@ -1,3 +1,5 @@
+# 文件作用：自动化测试文件，验证 test_migration_contract 相关模块的行为、契约或页面布局。
+
 from __future__ import annotations
 
 import re
@@ -73,6 +75,10 @@ REQUIRED_TABLES = {
 }
 
 
+# 所属模块：跨服务契约测试 > test_migration_contract；函数角色：模块公开业务函数。
+# 具体功能：`migration_text` 围绕展示文本计算该函数独立负责的业务派生值；关键协作调用：`lower`、`join`、`read_text`。
+# 上下游：上游为 本文件的 `test_all_required_tables_are_created_once`、`test_business_tables_have_ids_timestamps_and_audit_actors`、`test_json_money_time_and_soft_delete_types_follow_contract`、`test_critical_uniqueness_foreign_keys_and_indexes_exist`；下游为 协作调用 `lower`、`join`、`read_text`。
+# 系统意义：该函数在系统中的业务边界是：只锁定公共契约，不锁死内部实现。
 def migration_text() -> str:
     return "\n".join(
         (MIGRATION_DIR / name).read_text(encoding="utf-8")
@@ -80,6 +86,10 @@ def migration_text() -> str:
     ).lower()
 
 
+# 所属模块：跨服务契约测试 > test_migration_contract；函数角色：模块公开业务函数。
+# 具体功能：`table_body` 围绕被测业务场景计算该函数独立负责的业务派生值；关键协作调用：`re.search`、`match.group`。
+# 上下游：上游为 本文件的 `test_business_tables_have_ids_timestamps_and_audit_actors`、`test_json_money_time_and_soft_delete_types_follow_contract`、`test_immutable_audit_and_execution_records_have_no_delete_cascade`；下游为 协作调用 `re.search`、`match.group`。
+# 系统意义：该函数在系统中的业务边界是：只锁定公共契约，不锁死内部实现。
 def table_body(sql: str, table: str) -> str:
     match = re.search(
         rf"create\s+table\s+{table}\s*\((.*?)\);",
@@ -90,12 +100,20 @@ def table_body(sql: str, table: str) -> str:
     return match.group(1)
 
 
+# 所属模块：跨服务契约测试 > test_migration_contract；函数角色：回归测试用例。
+# 具体功能：`test_ordered_flyway_migrations_exist` 验证被测业务场景在固定案例中的输出、边界和失败行为；关键协作调用：`MIGRATION_DIR.glob`。
+# 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 协作调用 `MIGRATION_DIR.glob`。
+# 系统意义：固定“跨服务契约测试 > test_migration_contract”的可观察契约，防止后续重构改变业务结果。
 def test_ordered_flyway_migrations_exist() -> None:
     actual = sorted(path.name for path in MIGRATION_DIR.glob("V*.sql"))
 
     assert actual == EXPECTED_MIGRATIONS
 
 
+# 所属模块：跨服务契约测试 > test_migration_contract；函数角色：回归测试用例。
+# 具体功能：`test_all_required_tables_are_created_once` 把上游材料组装为本阶段可消费的被测业务场景；关键协作调用：`re.findall`。
+# 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 本文件的 `migration_text`。
+# 系统意义：固定“跨服务契约测试 > test_migration_contract”的可观察契约，防止后续重构改变业务结果。
 def test_all_required_tables_are_created_once() -> None:
     sql = migration_text()
     created = re.findall(r"create\s+table\s+([a-z_]+)\s*\(", sql)
@@ -104,6 +122,10 @@ def test_all_required_tables_are_created_once() -> None:
     assert len(created) == len(REQUIRED_TABLES)
 
 
+# 所属模块：跨服务契约测试 > test_migration_contract；函数角色：回归测试用例。
+# 具体功能：`test_business_tables_have_ids_timestamps_and_audit_actors` 验证被测业务场景在固定案例中的输出、边界和失败行为；关键协作调用：`re.search`。
+# 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 本文件的 `migration_text`、`table_body`。
+# 系统意义：固定“跨服务契约测试 > test_migration_contract”的可观察契约，防止后续重构改变业务结果。
 def test_business_tables_have_ids_timestamps_and_audit_actors() -> None:
     sql = migration_text()
     append_only = {
@@ -146,6 +168,10 @@ def test_business_tables_have_ids_timestamps_and_audit_actors() -> None:
                 assert "updated_by varchar(128)" in body, table
 
 
+# 所属模块：跨服务契约测试 > test_migration_contract；函数角色：回归测试用例。
+# 具体功能：`test_json_money_time_and_soft_delete_types_follow_contract` 验证被测业务场景在固定案例中的输出、边界和失败行为；关键协作调用：`sql.count`。
+# 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 本文件的 `migration_text`、`table_body`。
+# 系统意义：固定“跨服务契约测试 > test_migration_contract”的可观察契约，防止后续重构改变业务结果。
 def test_json_money_time_and_soft_delete_types_follow_contract() -> None:
     sql = migration_text()
 
@@ -164,6 +190,10 @@ def test_json_money_time_and_soft_delete_types_follow_contract() -> None:
         assert "deleted_at timestamptz" in table_body(sql, table), table
 
 
+# 所属模块：跨服务契约测试 > test_migration_contract；函数角色：回归测试用例。
+# 具体功能：`test_critical_uniqueness_foreign_keys_and_indexes_exist` 验证合议质疑结果在固定案例中的输出、边界和失败行为。
+# 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 本文件的 `migration_text`。
+# 系统意义：固定“跨服务契约测试 > test_migration_contract”的可观察契约，防止后续重构改变业务结果。
 def test_critical_uniqueness_foreign_keys_and_indexes_exist() -> None:
     sql = migration_text()
 
@@ -185,6 +215,10 @@ def test_critical_uniqueness_foreign_keys_and_indexes_exist() -> None:
         assert fragment in sql
 
 
+# 所属模块：跨服务契约测试 > test_migration_contract；函数角色：回归测试用例。
+# 具体功能：`test_immutable_audit_and_execution_records_have_no_delete_cascade` 验证履约执行动作在固定案例中的输出、边界和失败行为。
+# 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 本文件的 `migration_text`、`table_body`。
+# 系统意义：固定“跨服务契约测试 > test_migration_contract”的可观察契约，防止后续重构改变业务结果。
 def test_immutable_audit_and_execution_records_have_no_delete_cascade() -> None:
     sql = migration_text()
 
@@ -193,6 +227,10 @@ def test_immutable_audit_and_execution_records_have_no_delete_cascade() -> None:
         assert "on delete cascade" not in body, table
 
 
+# 所属模块：跨服务契约测试 > test_migration_contract；函数角色：回归测试用例。
+# 具体功能：`test_frozen_review_and_execution_provenance_are_migrated` 验证人工复核信息在固定案例中的输出、边界和失败行为。
+# 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 本文件的 `migration_text`。
+# 系统意义：固定“跨服务契约测试 > test_migration_contract”的可观察契约，防止后续重构改变业务结果。
 def test_frozen_review_and_execution_provenance_are_migrated() -> None:
     sql = migration_text()
 

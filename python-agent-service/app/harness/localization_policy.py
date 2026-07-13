@@ -1,3 +1,5 @@
+# 文件作用：把内部枚举与字段代码转换为中文业务表达，同时保护 ID、引用号和当事人原话不被字符串替换破坏。
+
 from __future__ import annotations
 
 from typing import Any
@@ -124,6 +126,10 @@ _PRESERVED_SEQUENCE_KEYS = {
 }
 
 
+# 所属模块：Agent Harness > 业务本地化 > 单段展示文本替换。
+# 具体功能：`localize_internal_text` 按代码长度降序替换业务枚举/字段名，优先处理长代码，避免短 token 先替换破坏长 token。
+# 上下游：上游是模型输出展示字段或 `localize_context_tree` 中允许转换的字符串；下游是中文 Prompt、房间话术和审核界面文本。
+# 系统意义：仅负责可读性，不承担授权或事实判断；调用方必须确保机器 ID 和原始陈述不进入此函数。
 def localize_internal_text(text: str) -> str:
     output = str(text or "")
     for code, label in _TOKEN_REPLACEMENTS:
@@ -131,7 +137,12 @@ def localize_internal_text(text: str) -> str:
     return output
 
 
+# 所属模块：Agent Harness > 业务本地化 > 嵌套上下文递归转换。
+# 具体功能：`localize_context_tree` 递归复制 dict/list，对普通字符串本地化；通过 current_key 把 ID、引用、证据关系和原话字段原样保留。
+# 上下游：上游是 ContextPack 对卷宗、画布、模型结果等结构化树的规范化；下游是 `_should_preserve_value` 和单文本替换器。
+# 系统意义：返回新树而不原地修改冻结快照；字段感知的保护规则避免 `USER` 等字符串替换污染 case_id、evidence_ref 或用户原话。
 def localize_context_tree(value: Any, *, current_key: str | None = None) -> Any:
+    # `isinstance` 按运行时类型选择递归分支；dict 的 key 不翻译，只处理 value。
     if isinstance(value, dict):
         localized: dict[str, Any] = {}
         for key, item in value.items():
@@ -149,6 +160,10 @@ def localize_context_tree(value: Any, *, current_key: str | None = None) -> Any:
     return value
 
 
+# 所属模块：Agent Harness > 业务本地化 > 机器值/原文保护判定。
+# 具体功能：`_should_preserve_value` 对显式字段白名单及 `_id`、`_ids`、`_reference` 后缀返回 True，指示递归转换器跳过字符串替换。
+# 上下游：上游是 `localize_context_tree` 的每个字符串叶子；下游决定原值直返还是进入 `localize_internal_text`。
+# 系统意义：稳定引用是跨 Java、Python、数据库和前端关联同一事实/证据的合同，不能为了中文展示而改变。
 def _should_preserve_value(current_key: str | None) -> bool:
     if not current_key:
         return False

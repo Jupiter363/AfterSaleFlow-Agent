@@ -1,3 +1,5 @@
+# 文件作用：自动化测试文件，验证 test_presiding_judge_round_turn 相关模块的行为、契约或页面布局。
+
 from __future__ import annotations
 
 from app.agents.presiding_judge.round_workflow import HearingRoundTurnWorkflow
@@ -6,10 +8,18 @@ from app.schemas import HearingRoundTurnRequest, HearingRoundTurnResult
 
 
 class FakeRoundModelRunner:
+    # 所属模块：Agent 角色能力 > test_presiding_judge_round_turn；函数角色：对象依赖初始化。
+    # 具体功能：`__init__` 注入并保存处理本阶段状态需要的客户端、配置或策略依赖。
+    # 上下游：上游为 受治理的案件上下文和角色提示词；下游为 符合 Schema 的角色分析结果。
+    # 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
     def __init__(self, *, generated: HearingRoundTurnResult | None = None) -> None:
         self.calls: list[dict[str, object]] = []
         self.generated = generated
 
+    # 所属模块：Agent 角色能力 > test_presiding_judge_round_turn；函数角色：类/闭包内部方法。
+    # 具体功能：`invoke_structured` 驱动本阶段状态对应的业务步骤并返回阶段结果；关键协作调用：`self.calls.append`、`Generation`、`output_type`。
+    # 上下游：上游为 受治理的案件上下文和角色提示词；下游为 协作调用 `self.calls.append`、`Generation`、`output_type`。
+    # 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
     def invoke_structured(
         self,
         *,
@@ -52,6 +62,10 @@ class FakeRoundModelRunner:
         return Generation()
 
 
+# 所属模块：Agent 角色能力 > test_presiding_judge_round_turn；函数角色：模块公开业务函数。
+# 具体功能：`request` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`base.update`、`HearingRoundTurnRequest`。
+# 上下游：上游为 本文件的 `test_round_turn_workflow_uses_context_pack_and_returns_judge_message`、`test_round_turn_context_can_include_execution_tool_intentions_without_backend_names`、`test_open_round_is_guarded_as_judge_opening_instead_of_sealed_turn`、`test_final_round_is_guarded_to_final_draft_path`；下游为 协作调用 `base.update`、`HearingRoundTurnRequest`。
+# 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
 def request(**overrides) -> HearingRoundTurnRequest:
     base = {
         "case_id": "CASE_COURT",
@@ -116,6 +130,10 @@ def request(**overrides) -> HearingRoundTurnRequest:
     return HearingRoundTurnRequest(**base)
 
 
+# 所属模块：Agent 角色能力 > test_presiding_judge_round_turn；函数角色：回归测试用例。
+# 具体功能：`test_hearing_round_turn_prompt_is_registered_with_harness_fragments` 验证模型提示词在固定案例中的输出、边界和失败行为；关键协作调用：`render`、`HearingRoundTurnResult.model_json_schema`、`system_prompt.lower`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 协作调用 `render`、`HearingRoundTurnResult.model_json_schema`、`system_prompt.lower`、`PromptRepository`。
+# 系统意义：固定“Agent 角色能力 > test_presiding_judge_round_turn”的可观察契约，防止后续重构改变业务结果。
 def test_hearing_round_turn_prompt_is_registered_with_harness_fragments() -> None:
     system_prompt, user_prompt = PromptRepository().render(
         "hearing_round_turn",
@@ -138,6 +156,10 @@ def test_hearing_round_turn_prompt_is_registered_with_harness_fragments() -> Non
     assert "<untrusted_case_data>" in user_prompt
 
 
+# 所属模块：Agent 角色能力 > test_presiding_judge_round_turn；函数角色：回归测试用例。
+# 具体功能：`test_round_turn_workflow_uses_context_pack_and_returns_judge_message` 验证案件与会话上下文在固定案例中的输出、边界和失败行为；关键协作调用：`FakeRoundModelRunner`、`run`、`next`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `request`。
+# 系统意义：固定“Agent 角色能力 > test_presiding_judge_round_turn”的可观察契约，防止后续重构改变业务结果。
 def test_round_turn_workflow_uses_context_pack_and_returns_judge_message() -> None:
     runner = FakeRoundModelRunner()
 
@@ -173,6 +195,10 @@ def test_round_turn_workflow_uses_context_pack_and_returns_judge_message() -> No
     assert "不是和解协议" in round_policy.content
 
 
+# 所属模块：Agent 角色能力 > test_presiding_judge_round_turn；函数角色：回归测试用例。
+# 具体功能：`test_round_turn_context_can_include_execution_tool_intentions_without_backend_names` 验证案件与会话上下文在固定案例中的输出、边界和失败行为；关键协作调用：`FakeRoundModelRunner`、`run`、`next`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `request`。
+# 系统意义：固定“Agent 角色能力 > test_presiding_judge_round_turn”的可观察契约，防止后续重构改变业务结果。
 def test_round_turn_context_can_include_execution_tool_intentions_without_backend_names() -> None:
     runner = FakeRoundModelRunner()
 
@@ -211,6 +237,10 @@ def test_round_turn_context_can_include_execution_tool_intentions_without_backen
     assert "operation" not in execution_tools.content
 
 
+# 所属模块：Agent 角色能力 > test_presiding_judge_round_turn；函数角色：回归测试用例。
+# 具体功能：`test_open_round_is_guarded_as_judge_opening_instead_of_sealed_turn` 校验庭审轮次的 Schema、权限和阶段约束，拒绝越权或不一致数据；关键协作调用：`FakeRoundModelRunner`、`run`、`next`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `request`。
+# 系统意义：固定“Agent 角色能力 > test_presiding_judge_round_turn”的可观察契约，防止后续重构改变业务结果。
 def test_open_round_is_guarded_as_judge_opening_instead_of_sealed_turn() -> None:
     runner = FakeRoundModelRunner(
         generated=HearingRoundTurnResult(
@@ -257,6 +287,10 @@ def test_open_round_is_guarded_as_judge_opening_instead_of_sealed_turn() -> None
     assert "ROUND_OPENED" in current_turn.content
 
 
+# 所属模块：Agent 角色能力 > test_presiding_judge_round_turn；函数角色：回归测试用例。
+# 具体功能：`test_final_round_is_guarded_to_final_draft_path` 校验庭审轮次的 Schema、权限和阶段约束，拒绝越权或不一致数据；关键协作调用：`FakeRoundModelRunner`、`run`、`HearingRoundTurnResult`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `request`。
+# 系统意义：固定“Agent 角色能力 > test_presiding_judge_round_turn”的可观察契约，防止后续重构改变业务结果。
 def test_final_round_is_guarded_to_final_draft_path() -> None:
     runner = FakeRoundModelRunner(
         generated=HearingRoundTurnResult(
@@ -290,6 +324,10 @@ def test_final_round_is_guarded_to_final_draft_path() -> None:
     assert "终审" not in result.message_text
 
 
+# 所属模块：Agent 角色能力 > test_presiding_judge_round_turn；函数角色：回归测试用例。
+# 具体功能：`test_final_round_party_opinions_become_review_focus_signal` 验证庭审轮次在固定案例中的输出、边界和失败行为；关键协作调用：`FakeRoundModelRunner`、`run`、`HearingRoundTurnResult`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `request`。
+# 系统意义：固定“Agent 角色能力 > test_presiding_judge_round_turn”的可观察契约，防止后续重构改变业务结果。
 def test_final_round_party_opinions_become_review_focus_signal() -> None:
     runner = FakeRoundModelRunner(
         generated=HearingRoundTurnResult(

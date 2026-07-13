@@ -567,7 +567,7 @@ model_list:
       api_key: os.environ/DASHSCOPE_API_KEY
       api_base: os.environ/DEFAULT_LLM_API_BASE
       extra_body:
-        enable_thinking: true
+        enable_thinking: false
 
 litellm_settings:
   drop_params: true

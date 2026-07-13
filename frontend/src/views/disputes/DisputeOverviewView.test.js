@@ -1,3 +1,6 @@
+// 文件作用：自动化测试文件，验证 DisputeOverviewView.test 相关模块的行为、契约或页面布局。
+// 说明：本注释用于帮助读者先了解本文件职责，再继续阅读具体实现。
+
 import { flushPromises, mount } from "@vue/test-utils";
 import {
   createMemoryHistory,
@@ -61,6 +64,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+// 业务位置：【前端案件页面】mountOverview：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
 async function mountOverview(
   createAction = null,
   simulateExternalImportAction = null,
@@ -92,7 +96,9 @@ async function mountOverview(
   return { wrapper, router };
 }
 
+// 业务位置：【前端案件页面】describe：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
 describe("DisputeOverviewView", () => {
+  // 业务位置：【前端案件页面】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
   it("reconciles a reviewer deletion from the server into another actor's open overview", async () => {
     actor.id = "merchant-local";
     actor.role = "MERCHANT";
@@ -118,56 +124,42 @@ describe("DisputeOverviewView", () => {
     expect(wrapper.find("[data-case-id]").exists()).toBe(false);
   });
 
+  // 业务位置：【前端案件页面】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
   it("switches the selected dispute without navigating", async () => {
     const { wrapper, router } = await mountOverview();
 
     await wrapper.get('[data-case-id="CASE_EXT_001"]').trigger("click");
 
-    expect(wrapper.get("[data-hearing-adventure]").text()).toContain(
-      "证据书记官室",
-    );
+    expect(wrapper.get("[data-hearing-adventure]").text()).toContain("证据核验");
     expect(router.currentRoute.value.path).toBe("/disputes");
   });
 
+  // 业务位置：【前端案件页面】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
   it("translates raw risk, room and pending-action enums into readable labels", async () => {
     const { wrapper } = await mountOverview();
 
     const firstTicket = wrapper.get('[data-case-id="CASE_EXT_001"]');
     expect(firstTicket.text()).toContain("高风险");
-    expect(firstTicket.text()).toContain("证据书记官室");
+    expect(firstTicket.text()).toContain("证据核验");
     expect(firstTicket.text()).toContain("提交证据");
     expect(firstTicket.text()).not.toContain("SUBMIT_EVIDENCE");
   });
 
-  it("keeps long identifiers compact while preserving the full value as a title", async () => {
+  // 业务位置：【前端案件页面】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
+  it("does not expose case or order identifiers in overview cards", async () => {
     const { wrapper } = await mountOverview();
 
     const longTicket = wrapper.get(
       `[data-case-id="${longCaseId}"]`,
     );
-    expect(longTicket.get("[data-short-case-id]").text()).toContain("…");
-    expect(longTicket.get("[data-short-case-id]").attributes("title")).toBe(
-      longCaseId,
-    );
-  });
-
-  it("exposes the full case and order values from the compact 2x2 case index", async () => {
-    const { wrapper } = await mountOverview();
-
+    expect(longTicket.text()).not.toContain(longCaseId);
+    expect(longTicket.text()).not.toContain(longOrderId);
     await wrapper.get(`[data-case-id="${longCaseId}"]`).trigger("click");
-
-    const caseValue = wrapper.get("[data-case-file-value]");
-    const orderValue = wrapper.get("[data-order-value]");
-    expect(caseValue.attributes()).toMatchObject({
-      title: longCaseId,
-      "aria-label": longCaseId,
-    });
-    expect(orderValue.attributes()).toMatchObject({
-      title: longOrderId,
-      "aria-label": longOrderId,
-    });
+    expect(wrapper.get("[data-hearing-adventure]").text()).not.toContain(longCaseId);
+    expect(wrapper.get("[data-hearing-adventure]").text()).not.toContain(longOrderId);
   });
 
+  // 业务位置：【前端案件页面】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
   it("enters the selected dispute's current room", async () => {
     const { wrapper, router } = await mountOverview();
 
@@ -179,6 +171,7 @@ describe("DisputeOverviewView", () => {
     );
   });
 
+  // 业务位置：【前端案件页面】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
   it("keeps the order rail scrollable while the selected case owns the main journey space", async () => {
     const { wrapper } = await mountOverview();
 
@@ -186,58 +179,60 @@ describe("DisputeOverviewView", () => {
     expect(scrollRail.findAll(".dispute-ticket")).toHaveLength(cases.length);
 
     const dashboard = wrapper.get("[data-case-journey-dashboard]");
-    expect(dashboard.text()).toContain("CASE_EXT_001");
-    expect(dashboard.text()).toContain("ORDER-001");
-    expect(dashboard.text()).toContain("EVIDENCE");
+    expect(dashboard.text()).not.toContain("CASE_EXT_001");
+    expect(dashboard.text()).not.toContain("ORDER-001");
+    expect(wrapper.get("[data-adventure-path]").text()).toContain("证据核验");
   });
 
-  it("shows the guide card first, then the journey path, then the case dashboard", async () => {
+  // 业务位置：【前端案件页面】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
+  it("keeps the guide card below the title and outside the split rail-and-map layout", async () => {
     const { wrapper } = await mountOverview();
     const main = wrapper.get("[data-hearing-adventure]");
-    const guide = main.get("[data-overview-guide]");
+    const guide = wrapper.get("[data-overview-guide]");
     const path = main.get("[data-adventure-path]");
     const dashboard = main.get("[data-case-journey-dashboard]");
 
-    expect(main.element.compareDocumentPosition(guide.element)).toBe(
-      Node.DOCUMENT_POSITION_CONTAINED_BY | Node.DOCUMENT_POSITION_FOLLOWING,
-    );
-    expect(guide.element.compareDocumentPosition(path.element)).toBe(
+    expect(main.find("[data-overview-guide]").exists()).toBe(false);
+    expect(guide.find("[data-enter-current-room]").exists()).toBe(false);
+    expect(main.get("[data-enter-current-room]").text()).toContain("进入当前房间");
+    expect(guide.element.compareDocumentPosition(main.element)).toBe(
       Node.DOCUMENT_POSITION_FOLLOWING,
     );
-    expect(path.element.compareDocumentPosition(dashboard.element)).toBe(
+    expect(dashboard.element.compareDocumentPosition(path.element)).toBe(
       Node.DOCUMENT_POSITION_FOLLOWING,
     );
+    expect(path.findAll("li")).toHaveLength(6);
+    expect(path.text()).toContain("案情接待");
+    expect(path.text()).toContain("证据核验");
+    expect(path.text()).toContain("三轮庭审");
+    expect(path.text()).toContain("裁决草案");
+    expect(path.text()).toContain("人工终审");
+    expect(path.text()).toContain("执行结果");
   });
 
-  it("declares the fixed overview frame, horizontal track and 2x2 case-index contracts", () => {
+  // 业务位置：【前端案件页面】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
+  it("declares independent rail and cognitive-field map layout contracts", () => {
     const source = fs.readFileSync(
       path.resolve(__dirname, "DisputeOverviewView.vue"),
       "utf8",
     );
 
-    expect(source).toContain("--overview-journey-gap");
-    expect(source).toContain("gap: var(--overview-journey-gap)");
-    expect(source).toContain(
-      "height: clamp(720px, calc(100dvh - 170px), 780px)",
-    );
-    expect(source).toContain("height: 810px");
-    expect(source).toContain("height: 880px");
-    expect(source).toContain("height: 940px");
+    expect(source).toContain("/* Light Cognitive Field overview refactor */");
     expect(source).toMatch(
-      /\.hearing-adventure__case-board\s*\{[^}]*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/,
+      /\.overview-layout\s*\{[^}]*grid-template-columns: var\(--overview-rail-width\) minmax\(0, 1fr\)[^}]*background: transparent[^}]*border: 0/,
     );
     expect(source).toMatch(
-      /\.adventure-path\s*\{[^}]*overflow-x: auto/,
+      /\.dispute-rail\s*\{[^}]*border-radius: 30px[^}]*box-shadow:/,
     );
-    expect(source).toContain(".hearing-adventure__sky { position: absolute");
-    expect(source).not.toContain(
-      ".adventure-path { grid-template-columns: 1fr",
+    expect(source).toMatch(
+      /\.hearing-adventure\s*\{[^}]*background: rgba\(255, 255, 255, \.93\)[^}]*border-radius: 38px[^}]*box-shadow:/,
     );
-    expect(source).not.toContain(
-      ".hearing-adventure__case-board { grid-template-columns: 1fr; }",
+    expect(source).toMatch(
+      /\.adventure-path__route path\s*\{[^}]*stroke: #40c791[^}]*stroke-dasharray: 5 18/,
     );
   });
 
+  // 业务位置：【前端案件页面】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
   it("places the overview context directly before the intro copy", async () => {
     const { wrapper } = await mountOverview();
 
@@ -252,6 +247,7 @@ describe("DisputeOverviewView", () => {
     );
   });
 
+  // 业务位置：【前端案件页面】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
   it("creates a minimal dispute ticket before entering the intake room", async () => {
     actor.id = "user-1";
     actor.role = "USER";
@@ -280,6 +276,7 @@ describe("DisputeOverviewView", () => {
     );
   });
 
+  // 业务位置：【前端案件页面】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
   it("submits the initiator claim resolution as a claim seed, not an execution action", async () => {
     actor.id = "user-1";
     actor.role = "USER";
@@ -296,9 +293,6 @@ describe("DisputeOverviewView", () => {
     await wrapper.get("[data-claim-requested-amount]").setValue("299");
     await wrapper.get("[data-claim-requested-items]").setValue("儿童手表 1 件");
     await wrapper
-      .get("[data-claim-request-reason]")
-      .setValue("物流显示签收但用户本人没有收到包裹，希望退款。");
-    await wrapper
       .get("[data-intake-description]")
       .setValue("我没收到包裹，希望退款");
     await wrapper.get(".intake-launcher__card").trigger("submit");
@@ -311,13 +305,16 @@ describe("DisputeOverviewView", () => {
           requested_resolution: "REFUND",
           requested_amount: 299,
           requested_items: "儿童手表 1 件",
-          request_reason: "物流显示签收但用户本人没有收到包裹，希望退款。",
-          original_statement: "我没收到包裹，希望退款",
+          request_reason: "我没收到包裹，希望退款",
         },
       }),
     );
+    expect(
+      createAction.mock.calls[0][0].claim_resolution_seed,
+    ).not.toHaveProperty("original_statement");
   });
 
+  // 业务位置：【前端案件页面】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
   it("keeps dispute initiation available to merchants", async () => {
     actor.id = "merchant-1";
     actor.role = "MERCHANT";
@@ -331,6 +328,7 @@ describe("DisputeOverviewView", () => {
     expect(wrapper.get("[data-intake-merchant]").element.value).toBe("merchant-1");
   });
 
+  // 业务位置：【前端案件页面】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
   it("does not expose dispute initiation to platform reviewers", async () => {
     actor.id = "reviewer-local";
     actor.role = "PLATFORM_REVIEWER";
@@ -353,6 +351,7 @@ describe("DisputeOverviewView", () => {
     expect(wrapper.find("[data-simulate-external-import]").exists()).toBe(true);
   });
 
+  // 业务位置：【前端案件页面】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
   it("shows deletion only for a reviewer selecting an approved simulated source", async () => {
     actor.id = "reviewer-local";
     actor.role = "PLATFORM_REVIEWER";
@@ -369,6 +368,7 @@ describe("DisputeOverviewView", () => {
     expect(wrapper.find("[data-delete-simulated-case]").exists()).toBe(false);
   });
 
+  // 业务位置：【前端案件页面】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
   it("cancels simulated-case deletion without calling the API", async () => {
     actor.id = "reviewer-local";
     actor.role = "PLATFORM_REVIEWER";
@@ -385,6 +385,7 @@ describe("DisputeOverviewView", () => {
     expect(wrapper.find("[data-delete-case-modal]").exists()).toBe(false);
   });
 
+  // 业务位置：【前端案件页面】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
   it("deletes a simulated case once, updates the list and selects the next case", async () => {
     actor.id = "reviewer-local";
     actor.role = "PLATFORM_REVIEWER";
@@ -415,6 +416,7 @@ describe("DisputeOverviewView", () => {
     expect(wrapper.find("[data-delete-case-modal]").exists()).toBe(false);
   });
 
+  // 业务位置：【前端案件页面】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
   it("keeps confirmation open and restores actions when deletion fails", async () => {
     actor.id = "reviewer-local";
     actor.role = "PLATFORM_REVIEWER";
@@ -431,6 +433,7 @@ describe("DisputeOverviewView", () => {
     expect(wrapper.find('[data-case-id="CASE_EXT_001"]').exists()).toBe(true);
   });
 
+  // 业务位置：【前端案件页面】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
   it("does not open intake when a stale party action is triggered after switching to reviewer", async () => {
     actor.id = "user-local";
     actor.role = "USER";
@@ -445,6 +448,7 @@ describe("DisputeOverviewView", () => {
     expect(wrapper.find(".intake-launcher").exists()).toBe(false);
   });
 
+  // 业务位置：【前端案件页面】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
   it("does not create a dispute when the actor becomes a reviewer after opening intake", async () => {
     actor.id = "user-local";
     actor.role = "USER";
@@ -461,6 +465,7 @@ describe("DisputeOverviewView", () => {
     expect(router.currentRoute.value.path).toBe("/disputes");
   });
 
+  // 业务位置：【前端案件页面】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
   it("simulates external imported disputes from the current demo identity", async () => {
     actor.id = "merchant-local";
     actor.role = "MERCHANT";
@@ -505,6 +510,7 @@ describe("DisputeOverviewView", () => {
     );
   });
 
+  // 业务位置：【前端案件页面】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
   it("ignores duplicate import triggers while an import is pending", async () => {
     actor.id = "user-local";
     actor.role = "USER";
@@ -537,6 +543,7 @@ describe("DisputeOverviewView", () => {
     expect(requestCountWhilePending).toBe(1);
   });
 
+  // 业务位置：【前端案件页面】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
   it("re-enables the import button after the API request times out", async () => {
     vi.useFakeTimers();
     actor.id = "user-local";
@@ -564,6 +571,7 @@ describe("DisputeOverviewView", () => {
     expect(importButton.text()).toContain("导入外部争议");
   });
 
+  // 业务位置：【前端案件页面】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
   it("does not expose simulation wording when an imported item lacks optional display fields", async () => {
     actor.id = "user-local";
     actor.role = "USER";

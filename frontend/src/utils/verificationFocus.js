@@ -1,3 +1,6 @@
+// 文件作用：前端工程代码文件，支撑售后争议系统的页面、交互、样式或构建配置。
+// 说明：本注释用于帮助读者先了解本文件职责，再继续阅读具体实现。
+
 const CANONICAL_FOCUS_RULES = [
   {
     key: "product-page",
@@ -36,6 +39,10 @@ const CANONICAL_FOCUS_RULES = [
   },
 ];
 
+const PROCESS_FOCUS_PATTERN =
+  /信息完整度|完整度已达到|提交阈值|可以提交|等待接待官|接待官.{0,12}整理|完成案件详情|进入下一步|后续流程|流程推进|ready_for_next_step|WAITING_FOR_REMARK|NOT_READY/iu;
+
+// 业务位置：【前端应用】cleanFocusText：围绕 面向当事人的业务文本 计算本模块需要的派生信息，使其能够从 路由、API 和本地状态 正确进入 售后纠纷处理界面。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
 function cleanFocusText(value) {
   return String(value || "")
     .replace(/^[\s·•\-—]+/u, "")
@@ -48,6 +55,7 @@ function cleanFocusText(value) {
     .trim();
 }
 
+// 业务位置：【前端应用】genericActionFocus：围绕 履约执行动作和工具意图 计算本模块需要的派生信息，使其能够从 路由、API 和本地状态 正确进入 售后纠纷处理界面。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
 function genericActionFocus(value) {
   let text = cleanFocusText(value);
   if (!text) return "";
@@ -60,12 +68,13 @@ function genericActionFocus(value) {
   return `核验${text}`;
 }
 
+// 业务位置：【前端应用】normalizeVerificationFocus：将 当前阶段业务数据 转换为稳定的接口、提示词或页面表达，避免直接暴露内部实现字段。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
 export function normalizeVerificationFocus(values) {
   const result = [];
   const seen = new Set();
   const sources = (Array.isArray(values) ? values : [])
     .map(cleanFocusText)
-    .filter(Boolean);
+    .filter((value) => value && !PROCESS_FOCUS_PATTERN.test(value));
   const hasProductConditionContext = sources.some((source) =>
     /开箱|拆箱|磨损|划痕|破损|损坏|外观|瑕疵/u.test(source),
   );

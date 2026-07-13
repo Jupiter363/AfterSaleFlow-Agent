@@ -1,3 +1,9 @@
+/*
+ * 所属模块：平台人工终审。
+ * 文件职责：验证事务后审核OrchestrationIntegration，覆盖 「approvedReviewHandsOffToExecutionAssistantWithoutExecutingActions」、「requestMoreEvidenceDoesNotExecuteActions」、「manualHandoffDoesNotExecuteActions」。
+ * 业务链路：JUnit 构造夹具并驱动真实服务或 Mock 协作者，断言返回值、持久化状态和调用边界；冻结 ReviewPacket、执行审批策略并记录审核员对具体版本和动作哈希的最终决定。
+ * 关键边界：最终决定权属于具备平台审核角色的人；过期、改版或哈希不一致的审批必须失效
+ */
 package com.example.dispute.review;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -52,6 +58,11 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
+// 所属模块：【平台人工终审 / 自动化测试层】类型「PostReviewOrchestrationServiceIntegrationTest」。
+// 类型职责：集中验证事务后审核OrchestrationIntegration的业务场景、权限边界和持久化/外部协作契约；本类型显式提供 「properties」、「resetDataAndMocks」、「approvedReviewHandsOffToExecutionAssistantWithoutExecutingActions」、「requestMoreEvidenceDoesNotExecuteActions」、「manualHandoffDoesNotExecuteActions」、「seed」。
+// 协作关系：由 JUnit 发现并执行其中带 @Test 的场景。
+// 边界意义：最终决定权属于具备平台审核角色的人；过期、改版或哈希不一致的审批必须失效
+// Java 语法：class 同时封装状态与方法；final 依赖通过构造器注入后不可重新指向。
 @DataJpaTest(properties = "spring.jpa.hibernate.ddl-auto=validate")
 @Import({
     PostReviewOrchestrationService.class,
@@ -74,6 +85,11 @@ class PostReviewOrchestrationServiceIntegrationTest {
                     .withEnv("POSTGRES_PASSWORD", "local_test_password")
                     .withExposedPorts(5432);
 
+    // 所属模块：【平台人工终审 / 自动化测试层】「PostReviewOrchestrationServiceIntegrationTest.properties(DynamicPropertyRegistry)」。
+    // 具体功能：「PostReviewOrchestrationServiceIntegrationTest.properties(DynamicPropertyRegistry)」：作为测试辅助方法为“核对完整业务行为（场景方法「properties」）”组装或读取「POSTGRESQL.getHost」、「POSTGRESQL.getMappedPort」，供本测试类的场景方法复用。
+    // 上游调用：「PostReviewOrchestrationServiceIntegrationTest.properties(DynamicPropertyRegistry)」由 JUnit 生命周期或本测试类的场景方法调用。
+    // 下游影响：「PostReviewOrchestrationServiceIntegrationTest.properties(DynamicPropertyRegistry)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「PostReviewOrchestrationServiceIntegrationTest.properties(DynamicPropertyRegistry)」守住「平台人工终审」的可执行规格，尤其防止 「spring.datasource.url」、「:」、「spring.datasource.username」、「dispute_test」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @DynamicPropertySource
     static void properties(DynamicPropertyRegistry registry) {
         registry.add(
@@ -88,8 +104,18 @@ class PostReviewOrchestrationServiceIntegrationTest {
         registry.add("spring.datasource.password", () -> "local_test_password");
     }
 
+    // 所属模块：【平台人工终审 / 自动化测试层】类型「JacksonConfig」。
+    // 类型职责：承载JacksonConfig在当前业务模块中的规则与协作边界；本类型显式提供 「objectMapper」。
+    // 协作关系：由 JUnit 发现并执行其中带 @Test 的场景。
+    // 边界意义：最终决定权属于具备平台审核角色的人；过期、改版或哈希不一致的审批必须失效
+    // Java 语法：class 同时封装状态与方法；final 依赖通过构造器注入后不可重新指向。
     @TestConfiguration
     static class JacksonConfig {
+        // 所属模块：【平台人工终审 / 自动化测试层】「PostReviewOrchestrationServiceIntegrationTest.JacksonConfig.objectMapper()」。
+        // 具体功能：「PostReviewOrchestrationServiceIntegrationTest.JacksonConfig.objectMapper()」：作为测试辅助方法为“核对完整业务行为（场景方法「objectMapper」）”组装或读取「ObjectMapper」 输入夹具，供本测试类的场景方法复用。
+        // 上游调用：「PostReviewOrchestrationServiceIntegrationTest.JacksonConfig.objectMapper()」由 JUnit 生命周期或本测试类的场景方法调用。
+        // 下游影响：「PostReviewOrchestrationServiceIntegrationTest.JacksonConfig.objectMapper()」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+        // 系统意义：「PostReviewOrchestrationServiceIntegrationTest.JacksonConfig.objectMapper()」守住「平台人工终审」的可执行规格；后续重构若破坏契约会在进入集成环境前失败。
         @Bean
         ObjectMapper objectMapper() {
             return new ObjectMapper()
@@ -110,6 +136,11 @@ class PostReviewOrchestrationServiceIntegrationTest {
     @MockitoBean AuditRecorder auditRecorder;
     @MockitoBean CaseEventService caseEventService;
 
+    // 所属模块：【平台人工终审 / 自动化测试层】「PostReviewOrchestrationServiceIntegrationTest.resetDataAndMocks()」。
+    // 具体功能：「PostReviewOrchestrationServiceIntegrationTest.resetDataAndMocks()」：在每个测试场景运行前创建「actions.deleteAllInBatch」、「evaluations.deleteAllInBatch」、「approvals.deleteAllInBatch」、「reviewTasks.deleteAllInBatch」，统一准备后续断言依赖的初始状态，避免各用例重复搭建且保持彼此隔离。
+    // 上游调用：「PostReviewOrchestrationServiceIntegrationTest.resetDataAndMocks()」由 JUnit 生命周期或本测试类的场景方法调用。
+    // 下游影响：「PostReviewOrchestrationServiceIntegrationTest.resetDataAndMocks()」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「PostReviewOrchestrationServiceIntegrationTest.resetDataAndMocks()」守住「平台人工终审」的可执行规格；后续重构若破坏契约会在进入集成环境前失败。
     @BeforeEach
     void resetDataAndMocks() {
         actions.deleteAllInBatch();
@@ -121,6 +152,11 @@ class PostReviewOrchestrationServiceIntegrationTest {
         cases.deleteAllInBatch();
     }
 
+    // 所属模块：【平台人工终审 / 自动化测试层】「PostReviewOrchestrationServiceIntegrationTest.approvedReviewHandsOffToExecutionAssistantWithoutExecutingActions()」。
+    // 具体功能：「PostReviewOrchestrationServiceIntegrationTest.approvedReviewHandsOffToExecutionAssistantWithoutExecutingActions()」：复现“核对完整业务行为（场景方法「approvedReviewHandsOffToExecutionAssistantWithoutExecutingActions」）”场景：驱动 「service.orchestrate」，再用 「assertThat」、「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「approved」、「APPROVAL_approved」、「post-review-approved」、「EXECUTION_ASSISTANT_HANDOFF」。
+    // 上游调用：「PostReviewOrchestrationServiceIntegrationTest.approvedReviewHandsOffToExecutionAssistantWithoutExecutingActions()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「PostReviewOrchestrationServiceIntegrationTest.approvedReviewHandsOffToExecutionAssistantWithoutExecutingActions()」的下游是被测服务、仓储或外部客户端替身；「assertThat、verify」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「PostReviewOrchestrationServiceIntegrationTest.approvedReviewHandsOffToExecutionAssistantWithoutExecutingActions()」守住「平台人工终审」的可执行规格，尤其防止 「approved」、「APPROVAL_approved」、「post-review-approved」、「EXECUTION_ASSISTANT_HANDOFF」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void approvedReviewHandsOffToExecutionAssistantWithoutExecutingActions() {
         seed("approved", ApprovalDecisionType.APPROVE);
@@ -160,6 +196,11 @@ class PostReviewOrchestrationServiceIntegrationTest {
                         eq(REVIEWER.actorId()));
     }
 
+    // 所属模块：【平台人工终审 / 自动化测试层】「PostReviewOrchestrationServiceIntegrationTest.requestMoreEvidenceDoesNotExecuteActions()」。
+    // 具体功能：「PostReviewOrchestrationServiceIntegrationTest.requestMoreEvidenceDoesNotExecuteActions()」：复现“核对完整业务行为（场景方法「requestMoreEvidenceDoesNotExecuteActions」）”场景：驱动 「service.orchestrate」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「supplement」、「APPROVAL_supplement」、「post-review-supplement」、「WAITING_EVIDENCE」。
+    // 上游调用：「PostReviewOrchestrationServiceIntegrationTest.requestMoreEvidenceDoesNotExecuteActions()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「PostReviewOrchestrationServiceIntegrationTest.requestMoreEvidenceDoesNotExecuteActions()」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「PostReviewOrchestrationServiceIntegrationTest.requestMoreEvidenceDoesNotExecuteActions()」守住「平台人工终审」的可执行规格，尤其防止 「supplement」、「APPROVAL_supplement」、「post-review-supplement」、「WAITING_EVIDENCE」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void requestMoreEvidenceDoesNotExecuteActions() {
         seed("supplement", ApprovalDecisionType.REQUEST_MORE_EVIDENCE);
@@ -181,6 +222,11 @@ class PostReviewOrchestrationServiceIntegrationTest {
                                         .isEqualTo(CaseStatus.WAITING_EVIDENCE));
     }
 
+    // 所属模块：【平台人工终审 / 自动化测试层】「PostReviewOrchestrationServiceIntegrationTest.manualHandoffDoesNotExecuteActions()」。
+    // 具体功能：「PostReviewOrchestrationServiceIntegrationTest.manualHandoffDoesNotExecuteActions()」：复现“核对完整业务行为（场景方法「manualHandoffDoesNotExecuteActions」）”场景：驱动 「service.orchestrate」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「manual」、「APPROVAL_manual」、「post-review-manual」、「MANUAL_HANDOFF」。
+    // 上游调用：「PostReviewOrchestrationServiceIntegrationTest.manualHandoffDoesNotExecuteActions()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「PostReviewOrchestrationServiceIntegrationTest.manualHandoffDoesNotExecuteActions()」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「PostReviewOrchestrationServiceIntegrationTest.manualHandoffDoesNotExecuteActions()」守住「平台人工终审」的可执行规格，尤其防止 「manual」、「APPROVAL_manual」、「post-review-manual」、「MANUAL_HANDOFF」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void manualHandoffDoesNotExecuteActions() {
         seed("manual", ApprovalDecisionType.ESCALATE_MANUAL);
@@ -202,6 +248,11 @@ class PostReviewOrchestrationServiceIntegrationTest {
                                         .isEqualTo(CaseStatus.MANUAL_HANDOFF));
     }
 
+    // 所属模块：【平台人工终审 / 自动化测试层】「PostReviewOrchestrationServiceIntegrationTest.seed(String,ApprovalDecisionType)」。
+    // 具体功能：「PostReviewOrchestrationServiceIntegrationTest.seed(String,ApprovalDecisionType)」：作为测试辅助方法为“核对完整业务行为（场景方法「seed」）”组装或读取「ReviewPacketVersions」 输入夹具，供本测试类的场景方法复用。
+    // 上游调用：「PostReviewOrchestrationServiceIntegrationTest.seed(String,ApprovalDecisionType)」由本测试类中的 「PostReviewOrchestrationServiceIntegrationTest.approvedReviewHandsOffToExecutionAssistantWithoutExecutingActions」、「PostReviewOrchestrationServiceIntegrationTest.requestMoreEvidenceDoesNotExecuteActions」、「PostReviewOrchestrationServiceIntegrationTest.manualHandoffDoesNotExecuteActions」 调用。
+    // 下游影响：「PostReviewOrchestrationServiceIntegrationTest.seed(String,ApprovalDecisionType)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「PostReviewOrchestrationServiceIntegrationTest.seed(String,ApprovalDecisionType)」守住「平台人工终审」的可执行规格，尤其防止 「CASE_」、「REMEDY_」、「PACKET_」、「REVIEW_」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private void seed(String suffix, ApprovalDecisionType decision) {
         String caseId = "CASE_" + suffix;
         String planId = "REMEDY_" + suffix;
@@ -327,6 +378,11 @@ class PostReviewOrchestrationServiceIntegrationTest {
                         frozenAt.plusDays(1)));
     }
 
+    // 所属模块：【平台人工终审 / 自动化测试层】「PostReviewOrchestrationServiceIntegrationTest.read(String)」。
+    // 具体功能：「PostReviewOrchestrationServiceIntegrationTest.read(String)」：作为测试辅助方法为“核对完整业务行为（场景方法「read」）”组装或读取「IllegalStateException」 输入夹具，供本测试类的场景方法复用。
+    // 上游调用：「PostReviewOrchestrationServiceIntegrationTest.read(String)」由本测试类中的 「PostReviewOrchestrationServiceIntegrationTest.seed」 调用。
+    // 下游影响：「PostReviewOrchestrationServiceIntegrationTest.read(String)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「PostReviewOrchestrationServiceIntegrationTest.read(String)」守住「平台人工终审」的可执行规格；后续重构若破坏契约会在进入集成环境前失败。
     private JsonNode read(String value) {
         try {
             return objectMapper.readTree(value);

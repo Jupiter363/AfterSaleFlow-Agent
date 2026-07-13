@@ -1,4 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!--
+  文件作用：Java API 服务代码文件，承载售后争议后端业务、持久化或集成逻辑。
+  说明：本注释用于帮助读者先了解 XML 配置用途，再阅读具体节点。
+-->
+
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">

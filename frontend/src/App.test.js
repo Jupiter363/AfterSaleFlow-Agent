@@ -1,3 +1,6 @@
+// 文件作用：自动化测试文件，验证 App.test 相关模块的行为、契约或页面布局。
+// 说明：本注释用于帮助读者先了解本文件职责，再继续阅读具体实现。
+
 import { flushPromises, mount } from "@vue/test-utils";
 import {
   createMemoryHistory,
@@ -45,6 +48,7 @@ afterEach(() => {
   disputeStore.current.status = "idle";
 });
 
+// 业务位置：【前端应用】mountApp：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由、API 和本地状态 正确进入 售后纠纷处理界面。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
 async function mountApp() {
   const router = createRouter({
     history: createMemoryHistory(),
@@ -77,7 +81,9 @@ async function mountApp() {
   });
 }
 
+// 业务位置：【前端应用】describe：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由、API 和本地状态 正确进入 售后纠纷处理界面。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
 describe("App shell", () => {
+  // 业务位置：【前端应用】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由、API 和本地状态 正确进入 售后纠纷处理界面。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
   it("only exposes reviewer navigation entries to the platform reviewer", async () => {
     actor.id = "user-local";
     actor.role = "USER";
@@ -86,6 +92,7 @@ describe("App shell", () => {
     const partyHrefs = partyWrapper
       .findAll(".app-nav a")
       .map((link) => link.attributes("href"));
+    expect(partyWrapper.get(".app-nav").text()).toBe("总览");
     expect(partyHrefs).toContain("/disputes");
     expect(partyHrefs).not.toContain("/reviews");
     expect(partyHrefs).not.toContain("/agents");
@@ -101,8 +108,18 @@ describe("App shell", () => {
     expect(reviewerHrefs).toContain("/disputes");
     expect(reviewerHrefs).toContain("/reviews");
     expect(reviewerHrefs).toContain("/agents");
+    expect(reviewerWrapper.get(".app-nav").text()).toContain("总览");
+    expect(reviewerWrapper.get(".app-nav").text()).toContain("平台终审");
+    expect(reviewerWrapper.get(".app-nav").text()).toContain("数字人管理中心");
+    expect(
+      reviewerWrapper.get(".app-tools").element.firstElementChild,
+    ).toBe(reviewerWrapper.get(".app-nav").element);
+    expect(
+      reviewerWrapper.get(".app-nav").element.nextElementSibling,
+    ).toBe(reviewerWrapper.get(".actor-switcher").element);
   });
 
+  // 业务位置：【前端应用】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由、API 和本地状态 正确进入 售后纠纷处理界面。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
   it("keeps global context copy out of the fixed top navigation and separate rows", async () => {
     const wrapper = await mountApp();
 
@@ -112,6 +129,7 @@ describe("App shell", () => {
     expect(wrapper.text()).not.toContain("AI 建议非最终");
   });
 
+  // 业务位置：【前端应用】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由、API 和本地状态 正确进入 售后纠纷处理界面。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
   it("uses fixed demo actor ids and returns to the dispute overview when switching identity", async () => {
     actor.id = "user-local";
     actor.role = "USER";
@@ -133,6 +151,7 @@ describe("App shell", () => {
     expect(router.currentRoute.value.path).toBe("/disputes");
   });
 
+  // 业务位置：【前端应用】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由、API 和本地状态 正确进入 售后纠纷处理界面。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
   it("redirects every actor away from a case removed by the reviewer", async () => {
     vi.useFakeTimers();
     actor.id = "user-local";

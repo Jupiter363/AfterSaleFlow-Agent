@@ -1,3 +1,5 @@
+# 文件作用：Python Agent 服务代码文件，承载售后争议智能体的 API、配置、模型调用或业务流程。
+
 """Evidence Clerk: versioned organization without liability reasoning."""
 
 from __future__ import annotations
@@ -24,9 +26,17 @@ class EvidenceClerk:
     deliberately keeps original references and never fills gaps by inference.
     """
 
+    # 所属模块：证据室 Agent > 证据数据契约；函数角色：对象依赖初始化。
+    # 具体功能：`__init__` 注入并保存处理本阶段状态需要的客户端、配置或策略依赖；关键协作调用：`final_agent_profiles`。
+    # 上下游：上游为 Java 按参与方权限筛选的证据、事实目标、私有会话；下游为 协作调用 `final_agent_profiles`。
+    # 系统意义：该函数在系统中的业务边界是：只核验证据，不定责；模型不得引用本轮不可见材料。
     def __init__(self) -> None:
         self.profile = final_agent_profiles()["evidence_clerk"]
 
+    # 所属模块：证据室 Agent > 证据数据契约；函数角色：类/闭包内部方法。
+    # 具体功能：`build` 把上游材料组装为本阶段可消费的本阶段状态；关键协作调用：`EvidenceDossierResult`、`EvidenceCatalogEntry`、`ClaimIssueEvidenceLink`。
+    # 上下游：上游为 Java 按参与方权限筛选的证据、事实目标、私有会话；下游为 本文件的 `_duplicate_groups`、`_potential_conflicts`、`_verification_assessment`。
+    # 系统意义：该函数在系统中的业务边界是：只核验证据，不定责；模型不得引用本轮不可见材料。
     def build(self, request: EvidenceBuildRequest) -> EvidenceDossierResult:
         catalog = [
             EvidenceCatalogEntry(
@@ -114,6 +124,10 @@ class EvidenceClerk:
         )
 
 
+# 所属模块：证据室 Agent > 证据数据契约；函数角色：模块私有业务函数。
+# 具体功能：`_duplicate_groups` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`defaultdict`、`join`、`hexdigest`。
+# 上下游：上游为 本文件的 `EvidenceClerk.build`；下游为 协作调用 `defaultdict`、`join`、`hexdigest`、`append`。
+# 系统意义：该函数在系统中的业务边界是：只核验证据，不定责；模型不得引用本轮不可见材料。
 def _duplicate_groups(
     request: EvidenceBuildRequest,
 ) -> list[list[str]]:
@@ -129,6 +143,10 @@ def _duplicate_groups(
     ]
 
 
+# 所属模块：证据室 Agent > 证据数据契约；函数角色：模块私有业务函数。
+# 具体功能：`_potential_conflicts` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`defaultdict`、`join`、`add`。
+# 上下游：上游为 本文件的 `EvidenceClerk.build`；下游为 协作调用 `defaultdict`、`join`、`add`、`split`。
+# 系统意义：该函数在系统中的业务边界是：只核验证据，不定责；模型不得引用本轮不可见材料。
 def _potential_conflicts(
     request: EvidenceBuildRequest,
 ) -> list[str]:
@@ -145,6 +163,10 @@ def _potential_conflicts(
     ]
 
 
+# 所属模块：证据室 Agent > 证据数据契约；函数角色：模块私有业务函数。
+# 具体功能：`_verification_assessment` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`EvidenceVerificationAssessment`。
+# 上下游：上游为 本文件的 `EvidenceClerk.build`；下游为 协作调用 `EvidenceVerificationAssessment`。
+# 系统意义：该函数在系统中的业务边界是：只核验证据，不定责；模型不得引用本轮不可见材料。
 def _verification_assessment(
     item: DossierEvidenceItem,
     conflicting_types: set[str],

@@ -1,3 +1,9 @@
+/*
+ * 所属模块：房间协作与权限。
+ * 文件职责：验证接待房间，覆盖 「acceptedIntakeInvitesBothPartiesAndOpensATwoHourEvidenceWindow」、「platformReviewerCanAcceptImportedIntakeAndSummonBothParties」、「acceptedImportedIntakeClosesTheExistingRoomInsteadOfInsertingADuplicate」、「acceptedSlotCompletionIntakeCanBeConfirmedAfterTheAgentDossierIsReady」、「notAdmissibleEndsAfterIntakeWithoutInvitingMerchantOrOpeningEvidence」、「resolvedIntakeCancellationClosesTheRoomWithoutOpeningEvidence」。
+ * 业务链路：JUnit 构造夹具并驱动真实服务或 Mock 协作者，断言返回值、持久化状态和调用边界；维护接待室、证据室和小法庭的参与人、不可变消息、会话权限、阶段时钟与 Agent 记忆。
+ * 关键边界：每次读取和写入都要绑定案件参与关系、角色、房间和受众范围
+ */
 package com.example.dispute.room;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -48,6 +54,11 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+// 所属模块：【房间协作与权限 / 自动化测试层】类型「IntakeRoomServiceTest」。
+// 类型职责：集中验证接待房间的业务场景、权限边界和持久化/外部协作契约；本类型显式提供 「setUp」、「acceptedIntakeInvitesBothPartiesAndOpensATwoHourEvidenceWindow」、「platformReviewerCanAcceptImportedIntakeAndSummonBothParties」、「acceptedImportedIntakeClosesTheExistingRoomInsteadOfInsertingADuplicate」、「acceptedSlotCompletionIntakeCanBeConfirmedAfterTheAgentDossierIsReady」、「notAdmissibleEndsAfterIntakeWithoutInvitingMerchantOrOpeningEvidence」。
+// 协作关系：由 JUnit 发现并执行其中带 @Test 的场景。
+// 边界意义：每次读取和写入都要绑定案件参与关系、角色、房间和受众范围
+// Java 语法：class 同时封装状态与方法；final 依赖通过构造器注入后不可重新指向。
 @ExtendWith(MockitoExtension.class)
 class IntakeRoomServiceTest {
 
@@ -66,6 +77,11 @@ class IntakeRoomServiceTest {
 
     private IntakeRoomService service;
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「IntakeRoomServiceTest.setUp()」。
+    // 具体功能：「IntakeRoomServiceTest.setUp()」：在每个测试场景运行前创建「caseRepository.save」、「roomRepository.save」、「participantRepository.saveAll」、「Duration.ofHours」，统一准备后续断言依赖的初始状态，避免各用例重复搭建且保持彼此隔离。
+    // 上游调用：「IntakeRoomServiceTest.setUp()」由 JUnit 生命周期或本测试类的场景方法调用。
+    // 下游影响：「IntakeRoomServiceTest.setUp()」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「IntakeRoomServiceTest.setUp()」守住「房间协作与权限」的可执行规格；后续重构若破坏契约会在进入集成环境前失败。
     @BeforeEach
     void setUp() {
         ParticipantService participants = new ParticipantService(participantRepository);
@@ -94,6 +110,11 @@ class IntakeRoomServiceTest {
                 .thenAnswer(invocation -> invocation.getArgument(0));
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「IntakeRoomServiceTest.acceptedIntakeInvitesBothPartiesAndOpensATwoHourEvidenceWindow()」。
+    // 具体功能：「IntakeRoomServiceTest.acceptedIntakeInvitesBothPartiesAndOpensATwoHourEvidenceWindow()」：复现“核对完整业务行为（场景方法「acceptedIntakeInvitesBothPartiesAndOpensATwoHourEvidenceWindow」）”场景：驱动 「caseRepository.findByIdForUpdate」、「phaseClockRepository.save」、「service.confirm」，再用 「assertThat」、「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_ACCEPTED」、「user-local」、「SIGNED_NOT_RECEIVED」、「确认信息无误，同意发起争议审理」。
+    // 上游调用：「IntakeRoomServiceTest.acceptedIntakeInvitesBothPartiesAndOpensATwoHourEvidenceWindow()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「IntakeRoomServiceTest.acceptedIntakeInvitesBothPartiesAndOpensATwoHourEvidenceWindow()」的下游是被测服务、仓储或外部客户端替身；「assertThat、verify」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「IntakeRoomServiceTest.acceptedIntakeInvitesBothPartiesAndOpensATwoHourEvidenceWindow()」守住「房间协作与权限」的可执行规格，尤其防止 「CASE_ACCEPTED」、「user-local」、「SIGNED_NOT_RECEIVED」、「确认信息无误，同意发起争议审理」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void acceptedIntakeInvitesBothPartiesAndOpensATwoHourEvidenceWindow() {
         FulfillmentCaseEntity dispute = pendingCase("CASE_ACCEPTED");
@@ -169,6 +190,11 @@ class IntakeRoomServiceTest {
                         org.mockito.ArgumentMatchers.eq("user-local"));
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「IntakeRoomServiceTest.platformReviewerCanAcceptImportedIntakeAndSummonBothParties()」。
+    // 具体功能：「IntakeRoomServiceTest.platformReviewerCanAcceptImportedIntakeAndSummonBothParties()」：复现“核对完整业务行为（场景方法「platformReviewerCanAcceptImportedIntakeAndSummonBothParties」）”场景：驱动 「caseRepository.findByIdForUpdate」、「phaseClockRepository.save」、「service.confirm」，再用 「assertThat」、「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_PLATFORM_ACCEPTED」、「reviewer-local」、「SIGNED_NOT_RECEIVED」、「unchecked」。
+    // 上游调用：「IntakeRoomServiceTest.platformReviewerCanAcceptImportedIntakeAndSummonBothParties()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「IntakeRoomServiceTest.platformReviewerCanAcceptImportedIntakeAndSummonBothParties()」的下游是被测服务、仓储或外部客户端替身；「assertThat、verify」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「IntakeRoomServiceTest.platformReviewerCanAcceptImportedIntakeAndSummonBothParties()」守住「房间协作与权限」的可执行规格，尤其防止 「CASE_PLATFORM_ACCEPTED」、「reviewer-local」、「SIGNED_NOT_RECEIVED」、「unchecked」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void platformReviewerCanAcceptImportedIntakeAndSummonBothParties() {
         FulfillmentCaseEntity dispute = pendingCase("CASE_PLATFORM_ACCEPTED");
@@ -209,6 +235,11 @@ class IntakeRoomServiceTest {
                 .containsExactlyInAnyOrder(ActorRole.USER, ActorRole.MERCHANT);
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「IntakeRoomServiceTest.acceptedImportedIntakeClosesTheExistingRoomInsteadOfInsertingADuplicate()」。
+    // 具体功能：「IntakeRoomServiceTest.acceptedImportedIntakeClosesTheExistingRoomInsteadOfInsertingADuplicate()」：复现“核对完整业务行为（场景方法「acceptedImportedIntakeClosesTheExistingRoomInsteadOfInsertingADuplicate」）”场景：驱动 「caseRepository.findByIdForUpdate」、「roomRepository.findByCaseIdAndRoomType」、「phaseClockRepository.save」、「service.confirm」，再用 「verify」、「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_IMPORTED」、「ROOM_IMPORTED_INTAKE」、「2026-07-02T20:00:00Z」、「external-adapter」。
+    // 上游调用：「IntakeRoomServiceTest.acceptedImportedIntakeClosesTheExistingRoomInsteadOfInsertingADuplicate()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「IntakeRoomServiceTest.acceptedImportedIntakeClosesTheExistingRoomInsteadOfInsertingADuplicate()」的下游是被测服务、仓储或外部客户端替身；「verify、assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「IntakeRoomServiceTest.acceptedImportedIntakeClosesTheExistingRoomInsteadOfInsertingADuplicate()」守住「房间协作与权限」的可执行规格，尤其防止 「CASE_IMPORTED」、「ROOM_IMPORTED_INTAKE」、「2026-07-02T20:00:00Z」、「external-adapter」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void acceptedImportedIntakeClosesTheExistingRoomInsteadOfInsertingADuplicate() {
         FulfillmentCaseEntity dispute = pendingCase("CASE_IMPORTED");
@@ -245,6 +276,11 @@ class IntakeRoomServiceTest {
                 .isEqualTo(RoomStatus.CLOSED);
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「IntakeRoomServiceTest.acceptedSlotCompletionIntakeCanBeConfirmedAfterTheAgentDossierIsReady()」。
+    // 具体功能：「IntakeRoomServiceTest.acceptedSlotCompletionIntakeCanBeConfirmedAfterTheAgentDossierIsReady()」：复现“核对完整业务行为（场景方法「acceptedSlotCompletionIntakeCanBeConfirmedAfterTheAgentDossierIsReady」）”场景：驱动 「caseRepository.findByIdForUpdate」、「phaseClockRepository.save」、「service.confirm」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_SLOT_COMPLETION_ACCEPTED」、「ORDER-CASE_SLOT_COMPLETION_ACCEPTED」、「LOG-CASE_SLOT_COMPLETION_ACCEPTED」、「user-local」。
+    // 上游调用：「IntakeRoomServiceTest.acceptedSlotCompletionIntakeCanBeConfirmedAfterTheAgentDossierIsReady()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「IntakeRoomServiceTest.acceptedSlotCompletionIntakeCanBeConfirmedAfterTheAgentDossierIsReady()」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「IntakeRoomServiceTest.acceptedSlotCompletionIntakeCanBeConfirmedAfterTheAgentDossierIsReady()」守住「房间协作与权限」的可执行规格，尤其防止 「CASE_SLOT_COMPLETION_ACCEPTED」、「ORDER-CASE_SLOT_COMPLETION_ACCEPTED」、「LOG-CASE_SLOT_COMPLETION_ACCEPTED」、「user-local」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void acceptedSlotCompletionIntakeCanBeConfirmedAfterTheAgentDossierIsReady() {
         FulfillmentCaseEntity dispute =
@@ -286,6 +322,11 @@ class IntakeRoomServiceTest {
         assertThat(dispute.getCaseStatus()).isEqualTo(CaseStatus.EVIDENCE_OPEN);
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「IntakeRoomServiceTest.notAdmissibleEndsAfterIntakeWithoutInvitingMerchantOrOpeningEvidence()」。
+    // 具体功能：「IntakeRoomServiceTest.notAdmissibleEndsAfterIntakeWithoutInvitingMerchantOrOpeningEvidence()」：复现“核对完整业务行为（场景方法「notAdmissibleEndsAfterIntakeWithoutInvitingMerchantOrOpeningEvidence」）”场景：驱动 「caseRepository.findByIdForUpdate」、「service.confirm」，再用 「assertThat」、「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_REJECTED」、「user-local」、「NOT_A_FULFILLMENT_DISPUTE」、「确认本次请求不构成履约争端」。
+    // 上游调用：「IntakeRoomServiceTest.notAdmissibleEndsAfterIntakeWithoutInvitingMerchantOrOpeningEvidence()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「IntakeRoomServiceTest.notAdmissibleEndsAfterIntakeWithoutInvitingMerchantOrOpeningEvidence()」的下游是被测服务、仓储或外部客户端替身；「assertThat、verify」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「IntakeRoomServiceTest.notAdmissibleEndsAfterIntakeWithoutInvitingMerchantOrOpeningEvidence()」守住「房间协作与权限」的可执行规格，尤其防止 「CASE_REJECTED」、「user-local」、「NOT_A_FULFILLMENT_DISPUTE」、「确认本次请求不构成履约争端」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void notAdmissibleEndsAfterIntakeWithoutInvitingMerchantOrOpeningEvidence() {
         FulfillmentCaseEntity dispute = pendingCase("CASE_REJECTED");
@@ -323,6 +364,11 @@ class IntakeRoomServiceTest {
                 .containsExactly(RoomType.INTAKE);
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「IntakeRoomServiceTest.resolvedIntakeCancellationClosesTheRoomWithoutOpeningEvidence()」。
+    // 具体功能：「IntakeRoomServiceTest.resolvedIntakeCancellationClosesTheRoomWithoutOpeningEvidence()」：复现“核对完整业务行为（场景方法「resolvedIntakeCancellationClosesTheRoomWithoutOpeningEvidence」）”场景：驱动 「caseRepository.findByIdForUpdate」、「roomRepository.findByCaseIdAndRoomType」、「service.cancel」，再用 「assertThat」、「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_CANCELLED」、「ROOM_CANCELLED_INTAKE」、「2026-07-02T20:00:00Z」、「external-adapter」。
+    // 上游调用：「IntakeRoomServiceTest.resolvedIntakeCancellationClosesTheRoomWithoutOpeningEvidence()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「IntakeRoomServiceTest.resolvedIntakeCancellationClosesTheRoomWithoutOpeningEvidence()」的下游是被测服务、仓储或外部客户端替身；「assertThat、verify」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「IntakeRoomServiceTest.resolvedIntakeCancellationClosesTheRoomWithoutOpeningEvidence()」守住「房间协作与权限」的可执行规格，尤其防止 「CASE_CANCELLED」、「ROOM_CANCELLED_INTAKE」、「2026-07-02T20:00:00Z」、「external-adapter」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void resolvedIntakeCancellationClosesTheRoomWithoutOpeningEvidence() {
         FulfillmentCaseEntity dispute = pendingCase("CASE_CANCELLED");
@@ -366,6 +412,11 @@ class IntakeRoomServiceTest {
                         org.mockito.ArgumentMatchers.eq("user-local"));
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「IntakeRoomServiceTest.acceptedIntakeSnapshotsTheLatestAgentDossierIntoTheCase()」。
+    // 具体功能：「IntakeRoomServiceTest.acceptedIntakeSnapshotsTheLatestAgentDossierIntoTheCase()」：复现“核对完整业务行为（场景方法「acceptedIntakeSnapshotsTheLatestAgentDossierIntoTheCase」）”场景：驱动 「caseRepository.findByIdForUpdate」、「intakeDossierRepository.findByCaseIdAndRoomType」、「phaseClockRepository.save」、「service.confirm」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_DOSSIER_ACCEPTED」、「INTAKE_DOSSIER_CASE_DOSSIER_ACCEPTED」、「ACCEPTED」、「dispute-intake-officer」。
+    // 上游调用：「IntakeRoomServiceTest.acceptedIntakeSnapshotsTheLatestAgentDossierIntoTheCase()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「IntakeRoomServiceTest.acceptedIntakeSnapshotsTheLatestAgentDossierIntoTheCase()」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「IntakeRoomServiceTest.acceptedIntakeSnapshotsTheLatestAgentDossierIntoTheCase()」守住「房间协作与权限」的可执行规格，尤其防止 「CASE_DOSSIER_ACCEPTED」、「INTAKE_DOSSIER_CASE_DOSSIER_ACCEPTED」、「ACCEPTED」、「dispute-intake-officer」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void acceptedIntakeSnapshotsTheLatestAgentDossierIntoTheCase() {
         FulfillmentCaseEntity dispute = pendingCase("CASE_DOSSIER_ACCEPTED");
@@ -403,6 +454,11 @@ class IntakeRoomServiceTest {
         assertThat(dispute.getCaseStatus()).isEqualTo(CaseStatus.EVIDENCE_OPEN);
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「IntakeRoomServiceTest.acceptedIntakeAllowsEmptyConfirmationNoteAndKeepsHandoffRemarkFromDossier()」。
+    // 具体功能：「IntakeRoomServiceTest.acceptedIntakeAllowsEmptyConfirmationNoteAndKeepsHandoffRemarkFromDossier()」：复现“核对完整业务行为（场景方法「acceptedIntakeAllowsEmptyConfirmationNoteAndKeepsHandoffRemarkFromDossier」）”场景：驱动 「caseRepository.findByIdForUpdate」、「intakeDossierRepository.findByCaseIdAndRoomType」、「phaseClockRepository.save」、「service.confirm」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_DOSSIER_REMARK」、「INTAKE_DOSSIER_CASE_DOSSIER_REMARK」、「ACCEPTED」、「dispute-intake-officer」。
+    // 上游调用：「IntakeRoomServiceTest.acceptedIntakeAllowsEmptyConfirmationNoteAndKeepsHandoffRemarkFromDossier()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「IntakeRoomServiceTest.acceptedIntakeAllowsEmptyConfirmationNoteAndKeepsHandoffRemarkFromDossier()」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「IntakeRoomServiceTest.acceptedIntakeAllowsEmptyConfirmationNoteAndKeepsHandoffRemarkFromDossier()」守住「房间协作与权限」的可执行规格，尤其防止 「CASE_DOSSIER_REMARK」、「INTAKE_DOSSIER_CASE_DOSSIER_REMARK」、「ACCEPTED」、「dispute-intake-officer」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void acceptedIntakeAllowsEmptyConfirmationNoteAndKeepsHandoffRemarkFromDossier() {
         FulfillmentCaseEntity dispute = pendingCase("CASE_DOSSIER_REMARK");
@@ -458,6 +514,11 @@ class IntakeRoomServiceTest {
         assertThat(dispute.getCaseStatus()).isEqualTo(CaseStatus.EVIDENCE_OPEN);
     }
 
+    // 所属模块：【房间协作与权限 / 自动化测试层】「IntakeRoomServiceTest.pendingCase(String)」。
+    // 具体功能：「IntakeRoomServiceTest.pendingCase(String)」：作为测试辅助方法为“核对完整业务行为（场景方法「pendingCase」）”组装或读取「FulfillmentCaseEntity.imported」，供本测试类的场景方法复用。
+    // 上游调用：「IntakeRoomServiceTest.pendingCase(String)」由本测试类中的 「IntakeRoomServiceTest.acceptedIntakeInvitesBothPartiesAndOpensATwoHourEvidenceWindow」、「IntakeRoomServiceTest.platformReviewerCanAcceptImportedIntakeAndSummonBothParties」、「IntakeRoomServiceTest.acceptedImportedIntakeClosesTheExistingRoomInsteadOfInsertingADuplicate」、「IntakeRoomServiceTest.notAdmissibleEndsAfterIntakeWithoutInvitingMerchantOrOpeningEvidence」 调用。
+    // 下游影响：「IntakeRoomServiceTest.pendingCase(String)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「IntakeRoomServiceTest.pendingCase(String)」守住「房间协作与权限」的可执行规格，尤其防止 「ORDER-」、「LOG-」、「user-local」、「merchant-local」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static FulfillmentCaseEntity pendingCase(String id) {
         return FulfillmentCaseEntity.imported(
                 id,

@@ -1,3 +1,9 @@
+/*
+ * 所属模块：房间协作与权限。
+ * 文件职责：编排接待室受理确认和下一阶段开放规则、权限校验与事实读写。
+ * 业务链路：核心入口/契约为 「confirm」、「cancel」；维护接待室、证据室和小法庭的参与人、不可变消息、会话权限、阶段时钟与 Agent 记忆。
+ * 关键边界：每次读取和写入都要绑定案件参与关系、角色、房间和受众范围
+ */
 package com.example.dispute.room.application;
 
 import com.example.dispute.common.api.ErrorCode;
@@ -27,6 +33,11 @@ import com.example.dispute.workflow.application.EvidenceWindowCoordinator;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+// 所属模块：【房间协作与权限 / 应用编排层】类型「IntakeRoomService」。
+// 类型职责：编排接待室受理确认和下一阶段开放规则、权限校验与事实读写；本类型显式提供 「IntakeRoomService」、「confirm」、「acceptedIntakeResultJson」、「cancel」、「sendCounterpartySummons」、「sendSummonsTo」。
+// 协作关系：主要由 「IntakeRoomController.cancel」、「IntakeRoomController.confirm」、「DisputeControllerTest.cancelsTheIntakeWhenTheIssueIsResolvedBeforeAdmission」、「DisputeControllerTest.confirmsTheIntakeDecisionThroughTheRoomBasedApi」 使用。
+// 边界意义：每次读取和写入都要绑定案件参与关系、角色、房间和受众范围
+// Java 语法：class 同时封装状态与方法；final 依赖通过构造器注入后不可重新指向。
 @Service
 public class IntakeRoomService {
 
@@ -42,6 +53,12 @@ public class IntakeRoomService {
     private final DisputeProperties disputeProperties;
     private final Clock clock;
 
+    // 所属模块：【房间协作与权限 / 应用编排层】「IntakeRoomService.IntakeRoomService(FulfillmentCaseRepository,CaseRoomRepository,CasePhaseClockRepository,CaseIntakeDossierRepository,ParticipantService,NotificationService,CaseLifecycleNotificationService,EvidenceWindowCoordinator,CaseEventService,DisputeProperties,Clock)」。
+    // 具体功能：「IntakeRoomService.IntakeRoomService(FulfillmentCaseRepository,CaseRoomRepository,CasePhaseClockRepository,CaseIntakeDossierRepository,ParticipantService,NotificationService,CaseLifecycleNotificationService,EvidenceWindowCoordinator,CaseEventService,DisputeProperties,Clock)」：通过构造器接收 「caseRepository」(FulfillmentCaseRepository)、「roomRepository」(CaseRoomRepository)、「phaseClockRepository」(CasePhaseClockRepository)、「intakeDossierRepository」(CaseIntakeDossierRepository)、「participantService」(ParticipantService)、「notificationService」(NotificationService)、「lifecycleNotifications」(CaseLifecycleNotificationService)、「evidenceWindowCoordinator」(EvidenceWindowCoordinator)、「caseEventService」(CaseEventService)、「disputeProperties」(DisputeProperties)、「clock」(Clock) 并保存为「IntakeRoomService」的协作依赖；这里只完成依赖装配，不提前访问数据库或外部服务。
+    // 上游调用：「IntakeRoomService.IntakeRoomService(FulfillmentCaseRepository,CaseRoomRepository,CasePhaseClockRepository,CaseIntakeDossierRepository,ParticipantService,NotificationService,CaseLifecycleNotificationService,EvidenceWindowCoordinator,CaseEventService,DisputeProperties,Clock)」的上游创建点包括 「IntakeRoomServiceTest.setUp」。
+    // 下游影响：「IntakeRoomService.IntakeRoomService(FulfillmentCaseRepository,CaseRoomRepository,CasePhaseClockRepository,CaseIntakeDossierRepository,ParticipantService,NotificationService,CaseLifecycleNotificationService,EvidenceWindowCoordinator,CaseEventService,DisputeProperties,Clock)」只产生当前对象的返回值或字段变化，不访问额外基础设施。
+    // 系统意义：「IntakeRoomService.IntakeRoomService(FulfillmentCaseRepository,CaseRoomRepository,CasePhaseClockRepository,CaseIntakeDossierRepository,ParticipantService,NotificationService,CaseLifecycleNotificationService,EvidenceWindowCoordinator,CaseEventService,DisputeProperties,Clock)」负责主链路中的“接待房间服务”；每次读取和写入都要绑定案件参与关系、角色、房间和受众范围
+    // Java 语法：构造器名称与类名相同且没有返回类型；参数通常由 Spring 按类型注入。
     public IntakeRoomService(
             FulfillmentCaseRepository caseRepository,
             CaseRoomRepository roomRepository,
@@ -67,6 +84,12 @@ public class IntakeRoomService {
         this.clock = clock;
     }
 
+    // 所属模块：【房间协作与权限 / 应用编排层】「IntakeRoomService.confirm(String,AuthenticatedActor,IntakeConfirmationCommand)」。
+    // 具体功能：「IntakeRoomService.confirm(String,AuthenticatedActor,IntakeConfirmationCommand)」：确认接待Confirmation：先由 Spring 事务代理统一提交数据库变化，再把新状态写入 PostgreSQL 事实表，再把 Optional 空值转换为明确业务异常；实际协作者为 「caseRepository.findByIdForUpdate」、「roomRepository.findByCaseIdAndRoomType」、「roomRepository.save」、「participantService.addInitiator」；处理的关键状态/协议值包括 「case_id」、「INTAKE_REJECTED」、「case_status」、「intake-confirmed:」，最终返回「IntakeConfirmationView」。
+    // 上游调用：「IntakeRoomService.confirm(String,AuthenticatedActor,IntakeConfirmationCommand)」的上游调用点包括 「IntakeRoomController.confirm」、「DisputeControllerTest.confirmsTheIntakeDecisionThroughTheRoomBasedApi」、「IntakeRoomControllerTest.confirmsAdmissionWithoutLegacyConfirmationNoteInput」、「IntakeRoomServiceIntegrationTest.acceptedIntakePersistsParticipantsRoomsAndTheAuthoritativeDeadline」。
+    // 下游影响：「IntakeRoomService.confirm(String,AuthenticatedActor,IntakeConfirmationCommand)」向下依次触达 「caseRepository.findByIdForUpdate」、「roomRepository.findByCaseIdAndRoomType」、「roomRepository.save」、「participantService.addInitiator」；这些数据库变化在方法正常返回后由 Spring 统一提交，异常会触发回滚。
+    // 系统意义：「IntakeRoomService.confirm(String,AuthenticatedActor,IntakeConfirmationCommand)」定义原子提交边界；每次读取和写入都要绑定案件参与关系、角色、房间和受众范围
+    // Java 语法：@Transactional 由 Spring 代理拦截；只有通过代理调用时才会开启或加入事务。
     @Transactional
     public IntakeConfirmationView confirm(
             String caseId,
@@ -161,6 +184,11 @@ public class IntakeRoomService {
                 deadline);
     }
 
+    // 所属模块：【房间协作与权限 / 应用编排层】「IntakeRoomService.acceptedIntakeResultJson(FulfillmentCaseEntity)」。
+    // 具体功能：「IntakeRoomService.acceptedIntakeResultJson(FulfillmentCaseEntity)」：构建接待结果JSON；实际协作者为 「intakeDossierRepository.findByCaseIdAndRoomType」、「dispute.getId」、「dossier.getDossierJson」、「dispute.getIntakeResultJson」，最终返回「String」。
+    // 上游调用：「IntakeRoomService.acceptedIntakeResultJson(FulfillmentCaseEntity)」的上游调用点包括 「IntakeRoomService.confirm」。
+    // 下游影响：「IntakeRoomService.acceptedIntakeResultJson(FulfillmentCaseEntity)」向下依次触达 「intakeDossierRepository.findByCaseIdAndRoomType」、「dispute.getId」、「dossier.getDossierJson」、「dispute.getIntakeResultJson」；计算结果以「String」交给调用方。
+    // 系统意义：「IntakeRoomService.acceptedIntakeResultJson(FulfillmentCaseEntity)」负责主链路中的“接待结果JSON”；每次读取和写入都要绑定案件参与关系、角色、房间和受众范围
     private String acceptedIntakeResultJson(FulfillmentCaseEntity dispute) {
         return intakeDossierRepository
                 .findByCaseIdAndRoomType(dispute.getId(), RoomType.INTAKE)
@@ -169,6 +197,12 @@ public class IntakeRoomService {
                 .orElse(dispute.getIntakeResultJson());
     }
 
+    // 所属模块：【房间协作与权限 / 应用编排层】「IntakeRoomService.cancel(String,AuthenticatedActor,String)」。
+    // 具体功能：「IntakeRoomService.cancel(String,AuthenticatedActor,String)」：判断能否cancel：先由 Spring 事务代理统一提交数据库变化，再把新状态写入 PostgreSQL 事实表，再把 Optional 空值转换为明确业务异常；实际协作者为 「caseRepository.findByIdForUpdate」、「roomRepository.findByCaseIdAndRoomType」、「roomRepository.save」、「caseRepository.save」；处理的关键状态/协议值包括 「case_id」、「INTAKE_CANCELLED」、「case_status」、「reason」，最终返回「IntakeConfirmationView」。
+    // 上游调用：「IntakeRoomService.cancel(String,AuthenticatedActor,String)」的上游调用点包括 「IntakeRoomController.cancel」、「DisputeControllerTest.cancelsTheIntakeWhenTheIssueIsResolvedBeforeAdmission」、「IntakeRoomServiceTest.resolvedIntakeCancellationClosesTheRoomWithoutOpeningEvidence」。
+    // 下游影响：「IntakeRoomService.cancel(String,AuthenticatedActor,String)」向下依次触达 「caseRepository.findByIdForUpdate」、「roomRepository.findByCaseIdAndRoomType」、「roomRepository.save」、「caseRepository.save」；这些数据库变化在方法正常返回后由 Spring 统一提交，异常会触发回滚。
+    // 系统意义：「IntakeRoomService.cancel(String,AuthenticatedActor,String)」定义原子提交边界；每次读取和写入都要绑定案件参与关系、角色、房间和受众范围
+    // Java 语法：@Transactional 由 Spring 代理拦截；只有通过代理调用时才会开启或加入事务。
     @Transactional
     public IntakeConfirmationView cancel(
             String caseId,
@@ -213,6 +247,11 @@ public class IntakeRoomService {
         return new IntakeConfirmationView(caseId, dispute.getCaseStatus(), null, null);
     }
 
+    // 所属模块：【房间协作与权限 / 应用编排层】「IntakeRoomService.sendCounterpartySummons(FulfillmentCaseEntity,AuthenticatedActor,OffsetDateTime)」。
+    // 具体功能：「IntakeRoomService.sendCounterpartySummons(FulfillmentCaseEntity,AuthenticatedActor,OffsetDateTime)」：发送CounterpartySummons；实际协作者为 「initiator.role」、「dispute.getMerchantId」、「dispute.getUserId」、「sendSummonsTo」，最终返回「void」。
+    // 上游调用：「IntakeRoomService.sendCounterpartySummons(FulfillmentCaseEntity,AuthenticatedActor,OffsetDateTime)」的上游调用点包括 「IntakeRoomService.confirm」。
+    // 下游影响：「IntakeRoomService.sendCounterpartySummons(FulfillmentCaseEntity,AuthenticatedActor,OffsetDateTime)」向下依次触达 「initiator.role」、「dispute.getMerchantId」、「dispute.getUserId」、「sendSummonsTo」。
+    // 系统意义：「IntakeRoomService.sendCounterpartySummons(FulfillmentCaseEntity,AuthenticatedActor,OffsetDateTime)」负责主链路中的“CounterpartySummons”；每次读取和写入都要绑定案件参与关系、角色、房间和受众范围
     private void sendCounterpartySummons(
             FulfillmentCaseEntity dispute,
             AuthenticatedActor initiator,
@@ -229,6 +268,11 @@ public class IntakeRoomService {
         sendSummonsTo(dispute, dispute.getMerchantId(), ActorRole.MERCHANT, deadline);
     }
 
+    // 所属模块：【房间协作与权限 / 应用编排层】「IntakeRoomService.sendSummonsTo(FulfillmentCaseEntity,String,ActorRole,OffsetDateTime)」。
+    // 具体功能：「IntakeRoomService.sendSummonsTo(FulfillmentCaseEntity,String,ActorRole,OffsetDateTime)」：发送Summons；实际协作者为 「notificationService.send」、「dispute.getId」；处理的关键状态/协议值包括 「:intake-accepted」、「争议审理传票」、「订单争议已受理，请在两小时内进入证据书记官室。」、「{\"deadline_at\":\」，最终返回「void」。
+    // 上游调用：「IntakeRoomService.sendSummonsTo(FulfillmentCaseEntity,String,ActorRole,OffsetDateTime)」的上游调用点包括 「IntakeRoomService.sendCounterpartySummons」。
+    // 下游影响：「IntakeRoomService.sendSummonsTo(FulfillmentCaseEntity,String,ActorRole,OffsetDateTime)」向下依次触达 「notificationService.send」、「dispute.getId」。
+    // 系统意义：「IntakeRoomService.sendSummonsTo(FulfillmentCaseEntity,String,ActorRole,OffsetDateTime)」负责主链路中的“Summons”；每次读取和写入都要绑定案件参与关系、角色、房间和受众范围
     private void sendSummonsTo(
             FulfillmentCaseEntity dispute,
             String recipientId,
@@ -247,10 +291,20 @@ public class IntakeRoomService {
                         "{\"deadline_at\":\"" + deadline + "\"}"));
     }
 
+    // 所属模块：【房间协作与权限 / 应用编排层】「IntakeRoomService.roomId()」。
+    // 具体功能：「IntakeRoomService.roomId()」：构建房间标识；实际协作者为 「UUID.randomUUID」、「UUID.randomUUID().toString().replace」；处理的关键状态/协议值包括 「ROOM_」、「-」，最终返回「String」。
+    // 上游调用：「IntakeRoomService.roomId()」的上游调用点包括 「IntakeRoomService.confirm」、「IntakeRoomService.cancel」。
+    // 下游影响：「IntakeRoomService.roomId()」向下依次触达 「UUID.randomUUID」、「UUID.randomUUID().toString().replace」；计算结果以「String」交给调用方。
+    // 系统意义：「IntakeRoomService.roomId()」负责主链路中的“房间标识”；每次读取和写入都要绑定案件参与关系、角色、房间和受众范围
     private static String roomId() {
         return "ROOM_" + UUID.randomUUID().toString().replace("-", "");
     }
 
+    // 所属模块：【房间协作与权限 / 应用编排层】「IntakeRoomService.clockId()」。
+    // 具体功能：「IntakeRoomService.clockId()」：构建时钟标识；实际协作者为 「UUID.randomUUID」、「UUID.randomUUID().toString().replace」；处理的关键状态/协议值包括 「CLOCK_」、「-」，最终返回「String」。
+    // 上游调用：「IntakeRoomService.clockId()」的上游调用点包括 「IntakeRoomService.confirm」。
+    // 下游影响：「IntakeRoomService.clockId()」向下依次触达 「UUID.randomUUID」、「UUID.randomUUID().toString().replace」；计算结果以「String」交给调用方。
+    // 系统意义：「IntakeRoomService.clockId()」负责主链路中的“时钟标识”；每次读取和写入都要绑定案件参与关系、角色、房间和受众范围
     private static String clockId() {
         return "CLOCK_" + UUID.randomUUID().toString().replace("-", "");
     }

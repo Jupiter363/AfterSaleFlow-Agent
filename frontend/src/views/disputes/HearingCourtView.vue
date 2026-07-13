@@ -1,3 +1,8 @@
+<!--
+  文件作用：前端页面视图文件，组织售后争议对应页面的数据加载、交互和展示。
+  说明：本注释用于帮助读者先了解组件/页面职责，再阅读 template、script 和 style。
+-->
+
 <script setup>
 import {
   computed,
@@ -9,10 +14,17 @@ import {
   watch,
 } from "vue";
 import { useRoute, useRouter } from "vue-router";
+import {
+  extractAgentRunDescriptor,
+  loadActiveAgentRuns,
+  resultRoomMessage,
+} from "../../api/agentStream";
 import { hearingApi } from "../../api/hearing";
 import { evidenceApi } from "../../api/evidence";
 import { roomApi } from "../../api/rooms";
 import DigitalHuman from "../../components/avatar/DigitalHuman.vue";
+import AgentStreamErrorDialog from "../../components/room/AgentStreamErrorDialog.vue";
+import AgentStreamingMessage from "../../components/room/AgentStreamingMessage.vue";
 import PhaseCountdown from "../../components/room/PhaseCountdown.vue";
 import RoomShell from "../../components/room/RoomShell.vue";
 import { actor } from "../../state/actor";
@@ -20,6 +32,13 @@ import {
   createRoomState,
   streamRoomEvents,
 } from "../../stores/room";
+import {
+  activeAgentStreams,
+  clearAgentStreams,
+  consumeAgentRun,
+  durableMessagesOutsideActiveStreams,
+  visibleAgentStreams,
+} from "../../stores/agentStream";
 import { displayRoomMessageText } from "../../utils/displayText";
 
 const props = defineProps({
@@ -48,6 +67,7 @@ const evidenceCatalog = ref(props.initialEvidenceCatalog);
 const agentState = ref("LISTENING");
 const reviewGateOpen = ref(false);
 const error = ref("");
+const streamError = ref("");
 const confirmingVersion = ref(null);
 const messages = ref([...(props.initialMessages || [])]);
 const caseEvents = ref([...(props.initialEvents || [])]);
@@ -62,6 +82,7 @@ const ledgerOpen = ref(false);
 const evidenceDrawerSide = ref(null);
 const expandedTranscriptIds = ref([]);
 const hearingCourtroomPage = ref(null);
+const courtTranscriptRail = ref(null);
 const leftEvidenceDrawer = ref(null);
 const rightEvidenceDrawer = ref(null);
 const leftEvidenceDrawerTrigger = ref(null);
@@ -85,6 +106,12 @@ let evidenceDrawerResizeObserver = null;
 let evidenceDrawerWindowResizeHandler = null;
 let courtLedgerReturnFocus = null;
 const caseId = computed(() => route.params.caseId);
+const shouldDiscoverActiveHearingRuns = computed(() =>
+  props.initialMessages === null &&
+  props.initialHearing === null &&
+  props.initialEvidenceCatalog === null &&
+  !props.eventStreamer,
+);
 const role = computed(() => props.viewerRole || actor.role);
 const demoActorIds = {
   USER: "user-local",
@@ -99,6 +126,29 @@ const effectiveActor = computed(() => {
     role: role.value,
   };
 });
+const hearingStreamingRuns = computed(() =>
+  activeAgentStreams({
+    caseId: caseId.value,
+    roomType: "HEARING",
+    actorId: effectiveActor.value.id,
+    actorRole: effectiveActor.value.role,
+  }),
+);
+const hearingTranscriptMessages = computed(() =>
+  durableMessagesOutsideActiveStreams(
+    messages.value,
+    hearingStreamingRuns.value,
+  ),
+);
+const visibleHearingStreamingRuns = computed(() =>
+  visibleAgentStreams(
+    hearingStreamingRuns.value,
+    hearingTranscriptMessages.value,
+  ).map((run) => ({
+    ...run,
+    content: sanitizeHearingCopy(run.content),
+  })),
+);
 const isReviewer = computed(() => role.value === "PLATFORM_REVIEWER");
 const rounds = computed(() => hearing.value?.rounds || []);
 const settlements = computed(() => hearing.value?.settlements || []);
@@ -147,6 +197,7 @@ const stageClockTimer = setInterval(() => {
   stageClockLocalNow.value = Date.now();
 }, 1000);
 const connectionState = computed(() => {
+  if (hearingStreamingRuns.value.length > 0) return "connected";
   if (eventState.connected) return "connected";
   if (eventState.reconnecting) return "reconnecting";
   return "offline";
@@ -193,6 +244,7 @@ const activeRoundClosed = computed(() =>
 const activeRoundNo = computed(
   () => activeRound.value?.round_no || activeRound.value?.roundNo || 0,
 );
+// 业务位置：【前端庭审】messageRoundNo：围绕 庭审轮次和法官发言 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function messageRoundNo(message) {
   const raw =
     message?.hearing_round ??
@@ -204,14 +256,17 @@ function messageRoundNo(message) {
   return Number.isFinite(numeric) ? numeric : 0;
 }
 
+// 业务位置：【前端庭审】messageSenderRole：围绕 当事人主张、角色和对方态度 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function messageSenderRole(message) {
   return message?.sender_role || message?.senderRole || "";
 }
 
+// 业务位置：【前端庭审】messageType：读取 房间消息和对话记录，并依据当前案件、角色和会话权限裁剪成可用输入。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function messageType(message) {
   return String(message?.message_type || message?.messageType || "").toUpperCase();
 }
 
+// 业务位置：【前端庭审】partyHasSpokenInActiveRound：围绕 庭审轮次和法官发言 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function partyHasSpokenInActiveRound(partyRole) {
   const roundNo = Number(activeRoundNo.value);
   if (!roundNo || !partyRole) return false;
@@ -287,18 +342,36 @@ const counterpartyLabel = computed(() =>
 const canSubmitRound = computed(
   () =>
     !loadingState.hearing &&
+    !hearingStreamingRuns.value.length &&
     isCaseParty.value &&
     !currentActorSubmitted.value &&
-    !activeRoundClosed.value,
+    !activeRoundClosed.value &&
+    isActiveRoundTimeOpen.value,
 );
 const canSubmitStatement = computed(
   () =>
     !loadingState.hearing &&
+    !hearingStreamingRuns.value.length &&
     isCaseParty.value &&
-    !activeRoundClosed.value,
+    !activeRoundClosed.value &&
+    isActiveRoundTimeOpen.value,
 );
 const activeRoundDeadline = computed(
   () => activeRound.value?.round_deadline_at || activeRound.value?.roundDeadlineAt || "",
+);
+const isActiveRoundTimeOpen = computed(() => {
+  if (!activeRoundDeadline.value) return true;
+  const deadline = Date.parse(activeRoundDeadline.value);
+  return !Number.isFinite(deadline) || deadline > estimatedServerNowMs.value;
+});
+const canSupplementEvidence = computed(
+  () =>
+    !loadingState.hearing &&
+    !hearingStreamingRuns.value.length &&
+    isCaseParty.value &&
+    !currentActorSubmitted.value &&
+    !activeRoundClosed.value &&
+    isActiveRoundTimeOpen.value,
 );
 const roundStepLabels = ["事实陈述", "证据解释", "方案确认"];
 const evidenceRailProfiles = {
@@ -391,6 +464,7 @@ const stageDockBadge = computed(() => {
   if (currentActorSubmitted.value) return "等待对方";
   return "进行中";
 });
+// 业务位置：【前端庭审】formatStageClock：将 当前阶段业务数据 转换为稳定的接口、提示词或页面表达，避免直接暴露内部实现字段。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function formatStageClock(deadlineAt) {
   const deadlineMs = Date.parse(deadlineAt || "");
   if (!Number.isFinite(deadlineMs)) return "05:00";
@@ -486,7 +560,7 @@ const judgeReviewStatus = computed(() => {
   return { label: "法官/评审", value: "法官提问中", tone: "active" };
 });
 const liveTranscriptItems = computed(() =>
-  messages.value
+  hearingTranscriptMessages.value
     .filter((message) => !isSystemAuditOnlyMessage(message))
     .map((message, index) => {
       const rawText = message.message_text || message.text || message.content || "";
@@ -543,27 +617,33 @@ const transcriptRoleProfiles = {
   MERCHANT: { type: "merchant", speaker: "商家陈述", badge: "" },
 };
 
+// 业务位置：【前端庭审】transcriptProfileForRole：围绕 当事人主张、角色和对方态度 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function transcriptProfileForRole(senderRole) {
   return transcriptRoleProfiles[senderRole] || transcriptRoleProfiles.JUDGE;
 }
 
+// 业务位置：【前端庭审】transcriptTypeForRole：围绕 当事人主张、角色和对方态度 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function transcriptTypeForRole(senderRole) {
   return transcriptProfileForRole(senderRole).type;
 }
 
+// 业务位置：【前端庭审】transcriptSpeakerForRole：围绕 当事人主张、角色和对方态度 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function transcriptSpeakerForRole(senderRole) {
   return transcriptProfileForRole(senderRole).speaker;
 }
 
+// 业务位置：【前端庭审】transcriptBadgeForRole：围绕 当事人主张、角色和对方态度 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function transcriptBadgeForRole(senderRole) {
   return transcriptProfileForRole(senderRole).badge;
 }
 
+// 业务位置：【前端庭审】transcriptBadgeForMessage：围绕 房间消息和对话记录 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function transcriptBadgeForMessage(message) {
   if (messageType(message) === "JURY_REVIEW_REPORT") return "评审团复核报告";
   return transcriptBadgeForRole(messageSenderRole(message));
 }
 
+// 业务位置：【前端庭审】transcriptBadgeForItem：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function transcriptBadgeForItem(item) {
   if (item.badge) return item.badge;
   if (item.type === "judge") return "法官宣读";
@@ -571,18 +651,22 @@ function transcriptBadgeForItem(item) {
   return "";
 }
 
+// 业务位置：【前端庭审】transcriptCharacters：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function transcriptCharacters(text) {
   return Array.from(String(text || ""));
 }
 
+// 业务位置：【前端庭审】isLongTranscript：判断 当前阶段业务数据 是否满足当前流程分支的进入条件。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function isLongTranscript(item) {
   return transcriptCharacters(item?.text).length >= LONG_TRANSCRIPT_THRESHOLD;
 }
 
+// 业务位置：【前端庭审】isTranscriptExpanded：判断 当前阶段业务数据 是否满足当前流程分支的进入条件。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function isTranscriptExpanded(item) {
   return expandedTranscriptIds.value.includes(item?.id);
 }
 
+// 业务位置：【前端庭审】visibleTranscriptText：围绕 面向当事人的业务文本 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function visibleTranscriptText(item) {
   if (!isLongTranscript(item) || isTranscriptExpanded(item)) return item?.text || "";
   return `${transcriptCharacters(item?.text)
@@ -590,6 +674,7 @@ function visibleTranscriptText(item) {
     .join("")}…`;
 }
 
+// 业务位置：【前端庭审】toggleTranscript：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function toggleTranscript(item) {
   if (!item?.id || !isLongTranscript(item)) return;
   expandedTranscriptIds.value = isTranscriptExpanded(item)
@@ -597,22 +682,26 @@ function toggleTranscript(item) {
     : [...expandedTranscriptIds.value, item.id];
 }
 
+// 业务位置：【前端庭审】evidenceDrawerElement：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function evidenceDrawerElement(side) {
   return side === "left" ? leftEvidenceDrawer.value : rightEvidenceDrawer.value;
 }
 
+// 业务位置：【前端庭审】evidenceDrawerCloseButton：切换与 当前可见证据和附件 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function evidenceDrawerCloseButton(side) {
   return side === "left"
     ? leftEvidenceDrawerClose.value
     : rightEvidenceDrawerClose.value;
 }
 
+// 业务位置：【前端庭审】evidenceDrawerTrigger：执行 当前可见证据和附件 对应的业务动作，并将结果交给 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function evidenceDrawerTrigger(side) {
   return side === "left"
     ? leftEvidenceDrawerTrigger.value
     : rightEvidenceDrawerTrigger.value;
 }
 
+// 业务位置：【前端庭审】openEvidenceDrawer：切换与 当前可见证据和附件 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 async function openEvidenceDrawer(side) {
   if (!["left", "right"].includes(side)) return;
   evidenceDrawerSide.value = side;
@@ -620,6 +709,7 @@ async function openEvidenceDrawer(side) {
   evidenceDrawerCloseButton(side)?.focus();
 }
 
+// 业务位置：【前端庭审】closeEvidenceDrawer：切换与 当前可见证据和附件 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 async function closeEvidenceDrawer({ restoreFocus = true } = {}) {
   const closingSide = evidenceDrawerSide.value;
   if (!closingSide) return;
@@ -628,6 +718,7 @@ async function closeEvidenceDrawer({ restoreFocus = true } = {}) {
   if (restoreFocus) evidenceDrawerTrigger(closingSide)?.focus();
 }
 
+// 业务位置：【前端庭审】evidenceDrawerContainer：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function evidenceDrawerContainer() {
   return (
     hearingCourtroomPage.value?.closest?.(".room-shell__workspace") ||
@@ -635,6 +726,7 @@ function evidenceDrawerContainer() {
   );
 }
 
+// 业务位置：【前端庭审】evidenceDrawerContainerWidth：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function evidenceDrawerContainerWidth(entry) {
   const contentBoxSize = entry?.contentBoxSize;
   if (Array.isArray(contentBoxSize)) {
@@ -646,11 +738,13 @@ function evidenceDrawerContainerWidth(entry) {
   return Number(entry?.contentRect?.width) || 0;
 }
 
+// 业务位置：【前端庭审】clearEvidenceDrawerForWideLayout：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function clearEvidenceDrawerForWideLayout(width) {
   if (width < EVIDENCE_DRAWER_BREAKPOINT || !evidenceDrawerSide.value) return;
   void closeEvidenceDrawer({ restoreFocus: false });
 }
 
+// 业务位置：【前端庭审】startEvidenceDrawerBreakpointObserver：启动或关闭与 当前可见证据和附件 相关的后台任务或订阅，控制运行资源和生命周期。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function startEvidenceDrawerBreakpointObserver() {
   const container = evidenceDrawerContainer();
   if (!container) return;
@@ -669,6 +763,7 @@ function startEvidenceDrawerBreakpointObserver() {
   evidenceDrawerWindowResizeHandler();
 }
 
+// 业务位置：【前端庭审】stopEvidenceDrawerBreakpointObserver：启动或关闭与 当前可见证据和附件 相关的后台任务或订阅，控制运行资源和生命周期。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function stopEvidenceDrawerBreakpointObserver() {
   evidenceDrawerResizeObserver?.disconnect();
   evidenceDrawerResizeObserver = null;
@@ -678,6 +773,7 @@ function stopEvidenceDrawerBreakpointObserver() {
   }
 }
 
+// 业务位置：【前端庭审】trapEvidenceDrawerFocus：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function trapEvidenceDrawerFocus(event) {
   if (event.key !== "Tab" || !evidenceDrawerSide.value) return;
   const drawer = evidenceDrawerElement(evidenceDrawerSide.value);
@@ -697,6 +793,7 @@ function trapEvidenceDrawerFocus(event) {
   }
 }
 
+// 业务位置：【前端庭审】openCourtLedger：切换与 庭审轮次和法官发言 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 async function openCourtLedger(event) {
   courtLedgerReturnFocus =
     event?.currentTarget || courtLedgerTrigger.value || document.activeElement;
@@ -705,6 +802,7 @@ async function openCourtLedger(event) {
   courtLedgerCloseButton.value?.focus();
 }
 
+// 业务位置：【前端庭审】closeCourtLedger：切换与 庭审轮次和法官发言 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 async function closeCourtLedger({ restoreFocus = true } = {}) {
   if (!ledgerOpen.value) return;
   const returnFocus = courtLedgerReturnFocus;
@@ -714,6 +812,7 @@ async function closeCourtLedger({ restoreFocus = true } = {}) {
   if (restoreFocus && returnFocus?.isConnected) returnFocus.focus();
 }
 
+// 业务位置：【前端庭审】trapCourtLedgerFocus：围绕 庭审轮次和法官发言 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function trapCourtLedgerFocus(event) {
   if (event.key !== "Tab" || !ledgerOpen.value) return;
   const drawer = courtLedgerDrawer.value;
@@ -736,6 +835,7 @@ function trapCourtLedgerFocus(event) {
   }
 }
 
+// 业务位置：【前端庭审】handleCourtroomKeydown：执行 庭审轮次和法官发言 对应的业务动作，并将结果交给 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function handleCourtroomKeydown(event) {
   if (event.key !== "Escape") return;
   if (ledgerOpen.value) {
@@ -749,10 +849,12 @@ function handleCourtroomKeydown(event) {
   }
 }
 
+// 业务位置：【前端庭审】rawMessageText：读取 房间消息和对话记录，并依据当前案件、角色和会话权限裁剪成可用输入。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function rawMessageText(message) {
   return message?.message_text || message?.messageText || message?.text || message?.content || "";
 }
 
+// 业务位置：【前端庭审】messagePayload：读取 房间消息和对话记录，并依据当前案件、角色和会话权限裁剪成可用输入。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function messagePayload(message) {
   const rawText = rawMessageText(message);
   if (!rawText || typeof rawText !== "string") return null;
@@ -765,6 +867,7 @@ function messagePayload(message) {
   }
 }
 
+// 业务位置：【前端庭审】messageVisibility：围绕 房间消息和对话记录 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function messageVisibility(message) {
   return String(
     message?.visibility ||
@@ -775,10 +878,12 @@ function messageVisibility(message) {
   ).toUpperCase();
 }
 
+// 业务位置：【前端庭审】isSystemAuditOnlyMessage：判断 房间消息和对话记录 是否满足当前流程分支的进入条件。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function isSystemAuditOnlyMessage(message) {
   return messageVisibility(message) === "SYSTEM_AUDIT_ONLY";
 }
 
+// 业务位置：【前端庭审】juryRiskLabel：围绕 人工审核关注点和陪审团提示 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function juryRiskLabel(value) {
   const normalized = String(value || "").toUpperCase();
   return {
@@ -788,6 +893,7 @@ function juryRiskLabel(value) {
   }[normalized] || "中风险";
 }
 
+// 业务位置：【前端庭审】juryConfidenceLabel：围绕 人工审核关注点和陪审团提示 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function juryConfidenceLabel(value) {
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return "75/100";
@@ -795,37 +901,128 @@ function juryConfidenceLabel(value) {
   return `${Math.round(score)}/100`;
 }
 
+// 业务位置：【前端庭审】transcriptTextForMessage：围绕 房间消息和对话记录 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function transcriptTextForMessage(message) {
   if (messageType(message) === "JURY_REVIEW_REPORT") {
     return formatJuryReviewReport(messagePayload(message), rawMessageText(message));
   }
-  return stripTranscriptPreamble(
-    sanitizeHearingCopy(displayRoomMessageText(rawMessageText(message))),
+  const text = sanitizeHearingCopy(displayRoomMessageText(rawMessageText(message)));
+  if (
+    messageSenderRole(message) === "EVIDENCE_CLERK" &&
+    /^(证据书记官宣读证据卷宗|已完成证据装卷)/u.test(text)
+  ) {
+    return compactEvidenceBootstrapReport(text);
+  }
+  return stripTranscriptPreamble(text);
+}
+
+// 庭审卡片只展示稳定、去重的证据摘要；完整矩阵与 A2A 报告仍由后端结构化卷宗提供。
+function compactEvidenceBootstrapReport(value) {
+  const text = stripTranscriptPreamble(cleanPublicReportText(value));
+  const evidenceCount = text.match(/(?:共\s*)?(\d+)\s*份/u)?.[1];
+  const confidence = text.match(/(?:总体置信度(?:为)?|当前证据总体置信度为)\s*(\d{1,3})\s*\/\s*100/u)?.[1];
+  const finding = firstReportSection(text, ["核验结论", "核心证明矩阵显示"]);
+  const gap = firstReportSection(text, ["待补强", "证据交接备注"]);
+  const parts = [
+    evidenceCount ? `已完成证据装卷，共 ${evidenceCount} 份` : "已完成证据装卷",
+    confidence ? `总体置信度 ${Math.min(Number(confidence), 100)}/100` : "",
+    finding ? `核验结论：${finding}` : "",
+  ];
+  if (gap && !reportTextOverlaps(finding, gap)) parts.push(`待补强：${gap}`);
+  return `${parts.filter(Boolean).join("。")}。`;
+}
+
+function firstReportSection(text, labels) {
+  for (const label of labels) {
+    const pattern = new RegExp(
+      `${label}[：:]\\s*([\\s\\S]*?)(?=。(?:核验结论|核心证明矩阵显示|待补强|证据交接备注)[：:]|$)`,
+      "u",
+    );
+    const match = String(text || "").match(pattern);
+    if (match?.[1]) return compactReportSection(match[1]);
+  }
+  return "";
+}
+
+function cleanPublicReportText(value) {
+  return String(value || "")
+    .replace(/(^|[\s；;。,:：])[sS](?=[\u3400-\u9fff])/gu, "$1")
+    .replace(/\bUSER\b/giu, "用户")
+    .replace(/\bMERCHANT\b/giu, "商家")
+    .replace(/\s+/gu, " ")
+    .trim();
+}
+
+function compactReportSection(value) {
+  const normalized = cleanPublicReportText(value)
+    .replace(/^[\-—•·*\d.、\s]+/u, "")
+    .replace(/[。；;，,\s]+$/u, "")
+    .trim();
+  const characters = Array.from(normalized);
+  return characters.length > 84 ? `${characters.slice(0, 84).join("")}…` : normalized;
+}
+
+function reportTextOverlaps(left, right) {
+  const normalize = (value) =>
+    compactReportSection(value).replace(/[\s，。；：、,.!！?？…]/gu, "");
+  const normalizedLeft = normalize(left);
+  const normalizedRight = normalize(right);
+  return Boolean(
+    normalizedLeft &&
+      normalizedRight &&
+      (normalizedLeft.includes(normalizedRight) ||
+        normalizedRight.includes(normalizedLeft)),
   );
 }
 
+function uniqueReportItems(values, existing = []) {
+  const accepted = [...existing].filter(Boolean);
+  const unique = [];
+  for (const value of values) {
+    const item = compactReportSection(value);
+    if (!item || accepted.some((current) => reportTextOverlaps(current, item))) continue;
+    accepted.push(item);
+    unique.push(item);
+  }
+  return unique;
+}
+
+// 业务位置：【前端庭审】formatJuryReviewReport：将 人工审核关注点和陪审团提示 转换为稳定的接口、提示词或页面表达，避免直接暴露内部实现字段。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function formatJuryReviewReport(payload, fallbackText = "") {
   if (!payload) {
-    return stripTranscriptPreamble(
-      sanitizeHearingCopy(displayRoomMessageText(fallbackText)),
+    return compactReportSection(
+      stripTranscriptPreamble(
+        sanitizeHearingCopy(displayRoomMessageText(fallbackText)),
+      ),
     );
   }
-  const parts = [];
-  if (payload.summary) parts.push(sanitizeHearingCopy(displayRoomMessageText(payload.summary)));
+  const summary = compactReportSection(
+    sanitizeHearingCopy(displayRoomMessageText(payload.summary || "")),
+  );
   const recommendations = Array.isArray(payload.recommendations)
     ? payload.recommendations
     : payload.recommendation
       ? [payload.recommendation]
       : [];
-  if (recommendations.length) {
-    parts.push(`建议：${recommendations.map((item) => sanitizeHearingCopy(displayRoomMessageText(item))).join("；")}`);
+  const conciseRecommendations = uniqueReportItems(
+    recommendations.map((item) =>
+      sanitizeHearingCopy(displayRoomMessageText(item)),
+    ),
+    [summary],
+  ).slice(0, 3);
+  const reviewNotes = uniqueReportItems(
+    [sanitizeHearingCopy(displayRoomMessageText(payload.review_notes || ""))],
+    [summary, ...conciseRecommendations],
+  )[0];
+  const parts = [summary];
+  if (conciseRecommendations.length) {
+    parts.push(`复核建议：${conciseRecommendations.join("；")}`);
   }
-  if (payload.review_notes) {
-    parts.push(sanitizeHearingCopy(displayRoomMessageText(payload.review_notes)));
-  }
+  if (reviewNotes) parts.push(`补充说明：${reviewNotes}`);
   return parts.filter(Boolean).join(" ") || "评审团已完成复核，报告已交由法官参考。";
 }
 
+// 业务位置：【前端庭审】stripTranscriptPreamble：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function stripTranscriptPreamble(text) {
   return String(text || "").replace(
     /^(案情接待官宣读案情卷宗|证据书记官宣读证据卷宗)[：:]\s*/u,
@@ -833,6 +1030,7 @@ function stripTranscriptPreamble(text) {
   );
 }
 
+// 业务位置：【前端庭审】transcriptTime：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function transcriptTime(value) {
   if (!value) return "刚刚";
   const date = new Date(value);
@@ -844,6 +1042,7 @@ function transcriptTime(value) {
   });
 }
 
+// 业务位置：【前端庭审】evidenceTypeLabel：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function evidenceTypeLabel(type) {
   return {
     image: "图片",
@@ -852,6 +1051,7 @@ function evidenceTypeLabel(type) {
   }[type] || "文件";
 }
 
+// 业务位置：【前端庭审】evidenceItemsForRole：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function evidenceItemsForRole(partyRole) {
   return evidenceItems.value.filter(
     (item) =>
@@ -860,16 +1060,56 @@ function evidenceItemsForRole(partyRole) {
   );
 }
 
+// 业务位置：【前端庭审】evidenceField：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function evidenceField(item, snakeCaseKey, camelCaseKey, fallback = "") {
   return item?.[snakeCaseKey] ?? item?.[camelCaseKey] ?? fallback;
 }
 
+// 业务位置：【前端庭审】statusField：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function statusField(snakeCaseKey, camelCaseKey, fallback = "") {
   return hearingStatus.value?.[snakeCaseKey] ?? hearingStatus.value?.[camelCaseKey] ?? fallback;
 }
 
-function sanitizeHearingCopy(value) {
+// 业务位置：【前端庭审】sanitizeHearingCopy：核验 庭审轮次和法官发言 的权限、Schema 和阶段边界，阻止越权或不完整结果进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
+function compactHearingEvidenceName(item) {
+  const originalName = evidenceOriginalFilename(item);
+  const fileName = String(originalName || "").split(/[\\/]/).pop() || "";
+  const extensionIndex = fileName.lastIndexOf(".");
+  const baseName = extensionIndex > 0 ? fileName.slice(0, extensionIndex) : fileName;
+  const characters = Array.from(baseName.trim());
+  if (!characters.length) return "该材料";
+  return characters.length > 5
+    ? `${characters.slice(0, 5).join("")}…`
+    : characters.join("");
+}
+
+function displayHearingEvidenceReferences(value) {
+  return String(value || "").replace(
+    /(?:证据\s*)?EVIDENCE_[A-Za-z0-9_-]+/g,
+    (reference) => {
+      const internalId = reference.match(/EVIDENCE_[A-Za-z0-9_-]+/)?.[0] || "";
+      const matchedEvidence = evidenceItems.value.find(
+        (item) => evidenceId(item) === internalId,
+      );
+      return matchedEvidence
+        ? `证据：${compactHearingEvidenceName(matchedEvidence)}`
+        : "该证据";
+    },
+  );
+}
+
+function normalizeHearingPunctuation(value) {
   return String(value || "")
+    .replace(/[。．]\s*[；;]+/g, "；")
+    .replace(/[；;]+\s*[。．]/g, "。")
+    .replace(/[；;]{2,}/g, "；")
+    .replace(/([，。！？；])\1+/g, "$1")
+    .replace(/\s+([，。！？；])/g, "$1")
+    .trim();
+}
+
+function sanitizeHearingCopy(value) {
+  const sanitized = String(value || "")
     .replace(
       "裁决草案已经进入平台审核入口，可查看结果页并等待审核员确认。",
       "裁决草案已生成，可进入结果页查看草案说明。",
@@ -888,16 +1128,22 @@ function sanitizeHearingCopy(value) {
     .replaceAll("平台终审", "后续确认")
     .replaceAll("审核员终审", "后续确认")
     .replaceAll("人类终审", "后续确认");
+  return normalizeHearingPunctuation(
+    displayHearingEvidenceReferences(sanitized),
+  );
 }
 
+// 业务位置：【前端庭审】statusAllowsCompletion：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function statusAllowsCompletion(status) {
   return Boolean(status?.can_complete_hearing ?? status?.canCompleteHearing);
 }
 
+// 业务位置：【前端庭审】evidenceSubmittedByRole：执行 当前可见证据和附件 对应的业务动作，并将结果交给 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function evidenceSubmittedByRole(item) {
   return evidenceField(item, "submitted_by_role", "submittedByRole", "");
 }
 
+// 业务位置：【前端庭审】evidenceId：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function evidenceId(item) {
   return (
     evidenceField(item, "evidence_id", "evidenceId", "") ||
@@ -905,20 +1151,24 @@ function evidenceId(item) {
   );
 }
 
+// 业务位置：【前端庭审】evidenceOriginalFilename：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function evidenceOriginalFilename(item) {
   return evidenceField(item, "original_filename", "originalFilename", "");
 }
 
+// 业务位置：【前端庭审】evidenceFilename：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function evidenceFilename(item) {
   return evidenceOriginalFilename(item) || evidenceId(item) || "未命名证据";
 }
 
+// 业务位置：【前端庭审】evidenceSubmissionStatus：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function evidenceSubmissionStatus(item) {
   return String(
     evidenceField(item, "submission_status", "submissionStatus", "SUBMITTED"),
   ).toUpperCase();
 }
 
+// 业务位置：【前端庭审】evidenceSubmissionStatusLabel：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function evidenceSubmissionStatusLabel(item) {
   const status = evidenceSubmissionStatus(item);
   if (status === "PENDING_SUBMISSION") return "待提交";
@@ -928,6 +1178,7 @@ function evidenceSubmissionStatusLabel(item) {
   return status || "待确认";
 }
 
+// 业务位置：【前端庭审】fileExtension：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function fileExtension(value) {
   const cleanValue = String(value || "").split(/[?#]/)[0];
   const fileName = cleanValue.split(/[\\/]/).pop() || "";
@@ -936,6 +1187,7 @@ function fileExtension(value) {
   return fileName.slice(lastDotIndex + 1).toLowerCase();
 }
 
+// 业务位置：【前端庭审】evidenceCardType：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function evidenceCardType(item) {
   const extension = fileExtension(
     evidenceOriginalFilename(item) ||
@@ -959,6 +1211,7 @@ function evidenceCardType(item) {
   return "text";
 }
 
+// 业务位置：【前端庭审】evidenceCardTone：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function evidenceCardTone(item) {
   const extension = fileExtension(evidenceOriginalFilename(item));
   const type = evidenceCardType(item);
@@ -968,6 +1221,7 @@ function evidenceCardTone(item) {
   return "purple";
 }
 
+// 业务位置：【前端庭审】evidenceTypeCopy：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function evidenceTypeCopy(item) {
   const type = evidenceCardType(item);
   if (type === "image") return "图片材料";
@@ -975,6 +1229,7 @@ function evidenceTypeCopy(item) {
   return "文本材料";
 }
 
+// 业务位置：【前端庭审】evidenceVerificationLabel：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function evidenceVerificationLabel(item) {
   const status = String(
     evidenceField(item, "verification_status", "verificationStatus", "PENDING"),
@@ -991,6 +1246,7 @@ function evidenceVerificationLabel(item) {
   }[status] || "待核验";
 }
 
+// 业务位置：【前端庭审】evidenceConfidence：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function evidenceConfidence(item) {
   const raw = evidenceField(item, "confidence_score", "confidenceScore", null);
   if (raw === null || raw === undefined || raw === "") return "待评分";
@@ -1000,10 +1256,12 @@ function evidenceConfidence(item) {
   return `${percentage}%`;
 }
 
+// 业务位置：【前端庭审】isMissingEvidenceCatalog：判断 当前可见证据和附件 是否满足当前流程分支的进入条件。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function isMissingEvidenceCatalog(failure) {
   return ["EVIDENCE_NOT_FOUND", "RESOURCE_NOT_FOUND"].includes(failure?.code);
 }
 
+// 业务位置：【前端庭审】loadEvidenceCatalog：读取 当前可见证据和附件，并依据当前案件、角色和会话权限裁剪成可用输入。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 async function loadEvidenceCatalog(actorSnapshot = effectiveActor.value) {
   try {
     evidenceCatalog.value = await evidenceApi.catalog(actorSnapshot, caseId.value);
@@ -1016,10 +1274,12 @@ async function loadEvidenceCatalog(actorSnapshot = effectiveActor.value) {
   }
 }
 
+// 业务位置：【前端庭审】uploadedEvidenceId：读取 当前可见证据和附件，并依据当前案件、角色和会话权限裁剪成可用输入。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function uploadedEvidenceId(uploaded) {
   return uploaded?.evidence_id || uploaded?.evidenceId || uploaded?.id || "";
 }
 
+// 业务位置：【前端庭审】summary：围绕 面向当事人的业务文本 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function summary(round) {
   try {
     return JSON.parse(round?.summary_json || "{}");
@@ -1028,6 +1288,7 @@ function summary(round) {
   }
 }
 
+// 业务位置：【前端庭审】ledgerRoundText：围绕 庭审轮次和法官发言 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function ledgerRoundText(round) {
   const value = summary(round);
   return sanitizeHearingCopy(
@@ -1035,6 +1296,7 @@ function ledgerRoundText(round) {
   );
 }
 
+// 业务位置：【前端庭审】ledgerItemForMessage：围绕 房间消息和对话记录 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function ledgerItemForMessage(message) {
   const type = messageType(message);
   if (type === "PARTY_EVIDENCE_REFERENCE") {
@@ -1081,21 +1343,27 @@ function ledgerItemForMessage(message) {
   return null;
 }
 
+// 业务位置：【前端庭审】caseEventType：围绕 Agent 流事件 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function caseEventType(event) {
   return event?.event_type || event?.eventType || event?.event || "";
 }
 
+// 业务位置：【前端庭审】caseEventSequence：围绕 Agent 流事件 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function caseEventSequence(event) {
   return event?.sequence_no || event?.sequenceNo || event?.id || 0;
 }
 
+// 业务位置：【前端庭审】caseEventPayload：读取 Agent 流事件，并依据当前案件、角色和会话权限裁剪成可用输入。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function caseEventPayload(event) {
+  const envelope = event?.data && typeof event.data === "object"
+    ? event.data
+    : event;
   const raw =
-    event?.payload_json ||
-    event?.payloadJson ||
-    event?.event_json ||
-    event?.eventJson ||
-    event?.payload ||
+    envelope?.payload_json ||
+    envelope?.payloadJson ||
+    envelope?.event_json ||
+    envelope?.eventJson ||
+    envelope?.payload ||
     {};
   if (typeof raw === "string") {
     try {
@@ -1107,6 +1375,7 @@ function caseEventPayload(event) {
   return raw && typeof raw === "object" ? raw : {};
 }
 
+// 业务位置：【前端庭审】participantRoleLabel：围绕 当事人主张、角色和对方态度 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function participantRoleLabel(roleValue) {
   return {
     USER: "用户",
@@ -1116,6 +1385,7 @@ function participantRoleLabel(roleValue) {
   }[String(roleValue || "").toUpperCase()] || "当事人";
 }
 
+// 业务位置：【前端庭审】stopReasonLabel：启动或关闭与 当前阶段业务数据 相关的后台任务或订阅，控制运行资源和生命周期。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function stopReasonLabel(reasonValue) {
   const value = String(reasonValue || "").toUpperCase();
   if (value === "BOTH_PARTIES_SUBMITTED") return "双方已提交";
@@ -1125,6 +1395,7 @@ function stopReasonLabel(reasonValue) {
   return "已封存";
 }
 
+// 业务位置：【前端庭审】ledgerItemForCaseEvent：围绕 Agent 流事件 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function ledgerItemForCaseEvent(event) {
   const type = caseEventType(event);
   const payload = caseEventPayload(event);
@@ -1208,10 +1479,12 @@ function ledgerItemForCaseEvent(event) {
   return null;
 }
 
+// 业务位置：【前端庭审】roundStatusLabel：围绕 庭审轮次和法官发言 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function roundStatusLabel(status) {
   return roundStatusLabels[status] || status || "待开始";
 }
 
+// 业务位置：【前端庭审】load：读取 当前阶段业务数据，并依据当前案件、角色和会话权限裁剪成可用输入。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 async function load() {
   try {
     const actorSnapshot = effectiveActor.value;
@@ -1239,6 +1512,9 @@ async function load() {
       caseEvents.value = await roomApi.events(actorSnapshot, caseId.value, 0);
       loadingState.events = false;
     }
+    if (shouldDiscoverActiveHearingRuns.value) {
+      await resumeActiveHearingRuns();
+    }
   } catch (failure) {
     loadingState.hearing = false;
     loadingState.evidence = false;
@@ -1249,6 +1525,7 @@ async function load() {
   }
 }
 
+// 业务位置：【前端庭审】refreshHearing：重新加载 庭审轮次和法官发言，确保页面和下一次 Agent 调用基于最新案件版本。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 async function refreshHearing() {
   const actorSnapshot = effectiveActor.value;
   const [nextHearing, nextMessages, nextEvidenceCatalog, nextEvents] = await Promise.all([
@@ -1268,11 +1545,81 @@ async function refreshHearing() {
   caseEvents.value = nextEvents;
 }
 
+// 业务位置：【前端庭审】upsertRoomMessage：将 房间消息和对话记录 持久化或合并到案件快照，使 下一轮提交或裁判草案审核入口 读取到可追溯版本。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
+function upsertRoomMessage(message) {
+  if (!message || typeof message !== "object") return;
+  const index = messages.value.findIndex((item) => item.id === message.id);
+  if (index >= 0) {
+    messages.value.splice(index, 1, message);
+    return;
+  }
+  messages.value.push(message);
+}
+
+// 业务位置：【前端庭审】resumeActiveHearingRuns：执行 庭审轮次和法官发言 对应的业务动作，并将结果交给 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
+async function resumeActiveHearingRuns() {
+  const activeRuns = await loadActiveAgentRuns(
+    effectiveActor.value,
+    caseId.value,
+    "HEARING",
+  );
+  await Promise.all((activeRuns || []).map((descriptor) =>
+    consumeHearingAgentRun(descriptor, hearingAgentPresentation(descriptor)),
+  ));
+}
+
+// 业务位置：【前端庭审】hearingAgentPresentation：围绕 庭审轮次和法官发言 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
+function hearingAgentPresentation(descriptor) {
+  const operation = String(
+    descriptor?.operation || extractAgentRunDescriptor(descriptor)?.operation || "",
+  ).toUpperCase();
+  if (operation.startsWith("EVIDENCE_")) {
+    return {
+      agentLabel: "证据书记官",
+      senderRole: "EVIDENCE_CLERK",
+    };
+  }
+  if (operation === "DELIBERATION") {
+    return {
+      agentLabel: "陪审团",
+      senderRole: "JURY_PANEL",
+    };
+  }
+  return {
+    agentLabel: "AI 法官",
+    senderRole: "JUDGE",
+  };
+}
+
+// 业务位置：【前端庭审】consumeHearingAgentRun：执行 庭审轮次和法官发言 对应的业务动作，并将结果交给 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
+async function consumeHearingAgentRun(result, options = {}) {
+  const descriptor = extractAgentRunDescriptor(result);
+  if (!descriptor) return false;
+  streamError.value = "";
+  agentState.value = "STREAMING";
+  await consumeAgentRun({
+    actor: { ...effectiveActor.value },
+    caseId: caseId.value,
+    roomType: "HEARING",
+    descriptor,
+    agentLabel: options.agentLabel || "AI 法官",
+    senderRole: options.senderRole || "JUDGE",
+    signal: eventAbortController.signal,
+    onFinal: options.onFinal || (() => refreshHearing()),
+    onError: (failure) => {
+      streamError.value = failure.message;
+    },
+  });
+  if (agentState.value === "STREAMING") agentState.value = "SPEAKING";
+  return true;
+}
+
+// 业务位置：【前端庭审】postMessage：执行 房间消息和对话记录 对应的业务动作，并将结果交给 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 async function postMessage(command) {
   error.value = "";
   agentState.value = "THINKING";
   try {
-    const saved = props.messageAction
+    const result = props.messageAction
       ? await props.messageAction(command)
       : await roomApi.postMessage(
           effectiveActor.value,
@@ -1280,9 +1627,12 @@ async function postMessage(command) {
           "HEARING",
           command,
         );
-    messages.value.push(saved);
+    const descriptor = extractAgentRunDescriptor(result);
+    const saved = descriptor ? resultRoomMessage(result) : result;
+    upsertRoomMessage(saved);
+    if (descriptor) await consumeHearingAgentRun(result);
     agentState.value = "SPEAKING";
-    return saved;
+    return saved || result;
   } catch (failure) {
     error.value = failure.message;
     agentState.value = "ERROR";
@@ -1290,6 +1640,7 @@ async function postMessage(command) {
   }
 }
 
+// 业务位置：【前端庭审】submitStatementInput：执行 当前阶段业务数据 对应的业务动作，并将结果交给 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 async function submitStatementInput() {
   const text = statementText.value.trim();
   if (!text || statementInputDisabled.value) return;
@@ -1301,6 +1652,7 @@ async function submitStatementInput() {
   if (saved) statementText.value = "";
 }
 
+// 业务位置：【前端庭审】proposeSettlement：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 async function proposeSettlement() {
   const text = proposalText.value.trim();
   if (!text) return;
@@ -1343,9 +1695,16 @@ async function proposeSettlement() {
   }
 }
 
+// 业务位置：【前端庭审】supplementEvidence：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 async function supplementEvidence(event) {
   const file = event.target.files?.[0];
   if (!file) return;
+  if (!canSupplementEvidence.value) {
+    error.value = "本轮庭审已封存、已超时或你的陈述已提交，暂不能补充证据。";
+    agentState.value = "ERROR";
+    event.target.value = "";
+    return;
+  }
   supplementing.value = true;
   error.value = "";
   try {
@@ -1356,6 +1715,7 @@ async function supplementEvidence(event) {
         : "OTHER",
       sourceType: evidenceSourceType.value,
       visibility: "PARTIES",
+      modelProcessingAuthorized: true,
     };
     const uploaded = props.supplementAction
       ? await props.supplementAction(command)
@@ -1373,12 +1733,18 @@ async function supplementEvidence(event) {
             caseId.value,
             batchCommand,
           );
-      const roomMessage =
-        submittedBatch?.room_message || submittedBatch?.roomMessage || null;
-      if (roomMessage) {
-        messages.value.push(roomMessage);
+      const descriptor = extractAgentRunDescriptor(submittedBatch);
+      const roomMessage = resultRoomMessage(submittedBatch);
+      if (roomMessage && typeof roomMessage === "object") {
+        upsertRoomMessage(roomMessage);
         agentState.value = "SPEAKING";
-      } else {
+      }
+      if (descriptor) {
+        await consumeHearingAgentRun(submittedBatch, {
+          agentLabel: "证据书记官",
+          senderRole: "EVIDENCE_CLERK",
+        });
+      } else if (!roomMessage) {
         await postMessage({
           message_type: "PARTY_EVIDENCE_REFERENCE",
           text: `已补充证据：${file.name}`,
@@ -1392,7 +1758,7 @@ async function supplementEvidence(event) {
         attachment_refs: [],
       });
     }
-    await loadEvidenceCatalog(effectiveActor.value);
+    await refreshHearing();
   } catch (failure) {
     error.value = failure.message;
     agentState.value = "ERROR";
@@ -1402,6 +1768,7 @@ async function supplementEvidence(event) {
   }
 }
 
+// 业务位置：【前端庭审】submitCurrentRound：执行 庭审轮次和法官发言 对应的业务动作，并将结果交给 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 async function submitCurrentRound() {
   if (!isCaseParty.value) return;
   submittingRound.value = true;
@@ -1419,9 +1786,19 @@ async function submitCurrentRound() {
     }),
   };
   try {
-    const saved = props.submitRoundAction
+    const result = props.submitRoundAction
       ? await props.submitRoundAction(command)
       : await hearingApi.submitRound(effectiveActor.value, caseId.value, command);
+    const descriptor = extractAgentRunDescriptor(result);
+    if (descriptor) {
+      await consumeHearingAgentRun(result, {
+        agentLabel: "AI 法官",
+        senderRole: "JUDGE",
+      });
+      agentState.value = "SPEAKING";
+      return;
+    }
+    const saved = result;
     if (!props.submitRoundAction) {
       await refreshHearing();
       agentState.value = saved.status === "COMPLETED" ? "THINKING" : "SPEAKING";
@@ -1450,6 +1827,7 @@ async function submitCurrentRound() {
   }
 }
 
+// 业务位置：【前端庭审】startEventStream：启动或关闭与 Agent 流事件 相关的后台任务或订阅，控制运行资源和生命周期。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function startEventStream() {
   const streamer = props.eventStreamer || streamRoomEvents;
   void streamer({
@@ -1461,6 +1839,22 @@ function startEventStream() {
     snapshotLoader: refreshHearing,
     applyEvent: async (event) => {
       const eventType = roomEventType(event);
+      if (eventType === "AGENT_RUN_STARTED") {
+        const payload = caseEventPayload(event);
+        const operation = String(payload.operation || "").toUpperCase();
+        if ([
+          "HEARING_ANALYSIS",
+          "HEARING_STAGE",
+          "HEARING_ROUND",
+          "EVIDENCE_TURN",
+          "DELIBERATION",
+        ].includes(operation)) {
+          void consumeHearingAgentRun(
+            payload,
+            hearingAgentPresentation(payload),
+          ).catch(() => {});
+        }
+      }
       if (reviewGateEvents.has(eventType)) {
         reviewGateOpen.value = true;
         agentState.value = "HANDOFF";
@@ -1473,6 +1867,7 @@ function startEventStream() {
   });
 }
 
+// 业务位置：【前端庭审】roomEventType：围绕 Agent 流事件 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 function roomEventType(event) {
   return (
     event?.event ||
@@ -1484,6 +1879,7 @@ function roomEventType(event) {
   );
 }
 
+// 业务位置：【前端庭审】confirmSettlement：执行 当前阶段业务数据 对应的业务动作，并将结果交给 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 async function confirmSettlement(version) {
   confirmingVersion.value = version;
   error.value = "";
@@ -1513,6 +1909,7 @@ async function confirmSettlement(version) {
   }
 }
 
+// 业务位置：【前端庭审】completeHearing：执行 庭审轮次和法官发言 对应的业务动作，并将结果交给 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 async function completeHearing() {
   if (!serverCanCompleteHearing.value) return;
   error.value = "";
@@ -1536,6 +1933,25 @@ async function completeHearing() {
   }
 }
 
+// 业务位置：【前端庭审】scrollTranscriptToLatest：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
+async function scrollTranscriptToLatest() {
+  await nextTick();
+  const rail = courtTranscriptRail.value;
+  if (rail) rail.scrollTop = rail.scrollHeight;
+}
+
+// 业务位置：【前端庭审】dismissStreamError：切换与 Agent 流事件 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
+function dismissStreamError() {
+  const previous = streamError.value;
+  streamError.value = "";
+  if (error.value === previous) error.value = "";
+  if (agentState.value === "ERROR") agentState.value = "LISTENING";
+}
+
+watch(hearingStreamingRuns, () => {
+  void scrollTranscriptToLatest();
+}, { deep: true });
+
 onMounted(async () => {
   window.addEventListener("keydown", handleCourtroomKeydown);
   startEvidenceDrawerBreakpointObserver();
@@ -1553,6 +1969,7 @@ onBeforeUnmount(() => {
   courtLedgerReturnFocus = null;
   stopEvidenceDrawerBreakpointObserver();
   eventAbortController.abort();
+  clearAgentStreams({ caseId: caseId.value, roomType: "HEARING" });
   clearInterval(stageClockTimer);
 });
 </script>
@@ -1561,6 +1978,8 @@ onBeforeUnmount(() => {
   <RoomShell
     eyebrow="AI NATIVE COURTROOM"
     title="AI 小法庭 · 履约争端庭审"
+    subtitle="三轮庭审"
+    subtitle-description="法官将依次核对事实、证据和拟处理方向，庭审完成后进入裁决草案。"
     :case-id="caseId"
     :connection-state="connectionState"
   >
@@ -1581,24 +2000,26 @@ onBeforeUnmount(() => {
         aria-label="庭审数字人席位"
       >
         <DigitalHuman
+          data-court-agent-card="jury-a"
+          state="THINKING"
+          name="小察"
+          role="AI 评审团"
+          portrait-variant="jury-a"
+          message="关注事实完整性、证据冲突和风险信号。"
+        />
+        <DigitalHuman
           data-court-agent-card="judge"
           :state="agentState"
-          name="衡衡"
+          name="小正"
           role="AI 法官"
           message="主持三轮陈述，第三轮后生成非最终裁决草案。"
         />
         <DigitalHuman
-          data-court-agent-card="jury-a"
-          state="THINKING"
-          name="评审 A"
-          role="AI 评审团"
-          message="关注事实完整性、证据冲突和风险信号。"
-        />
-        <DigitalHuman
           data-court-agent-card="jury-b"
           state="LISTENING"
-          name="评审 B"
+          name="小律"
           role="AI 评审团"
+          portrait-variant="jury-b"
           message="关注裁决草案是否符合规则与双方可接受度。"
         />
       </section>
@@ -1716,7 +2137,7 @@ onBeforeUnmount(() => {
 
         <footer class="party-evidence-rail__footer">
           <label
-            v-if="isCaseParty && leftEvidenceRail.role === role"
+            v-if="canSupplementEvidence && leftEvidenceRail.role === role"
             class="evidence-supplement-button"
             :class="{ 'evidence-supplement-button--merchant': leftEvidenceRail.key === 'merchant' }"
             :data-supplement-evidence="leftEvidenceRail.key"
@@ -1725,10 +2146,6 @@ onBeforeUnmount(() => {
             <input type="file" :disabled="supplementing" @change="supplementEvidence" />
           </label>
 
-          <button class="evidence-expand-button" type="button">
-            展开证据预览
-            <span aria-hidden="true">↗</span>
-          </button>
         </footer>
       </aside>
 
@@ -1785,6 +2202,7 @@ onBeforeUnmount(() => {
 
         <section class="court-transcript" data-court-transcript>
           <div
+            ref="courtTranscriptRail"
             class="court-transcript__messages"
             data-transcript-scroll-rail="true"
           >
@@ -1834,6 +2252,14 @@ onBeforeUnmount(() => {
               </button>
             </article>
 
+            <AgentStreamingMessage
+              v-for="run in visibleHearingStreamingRuns"
+              :key="run.runId"
+              :run="run"
+              :label="run.agentLabel"
+              appearance="court"
+            />
+
             <div
               v-if="loadingState.messages"
               class="court-transcript__empty court-transcript__empty--loading"
@@ -1843,7 +2269,7 @@ onBeforeUnmount(() => {
               <small>正在读取开庭消息和双方陈述，请稍候。</small>
             </div>
             <div
-              v-else-if="!courtTranscriptItems.length"
+              v-else-if="!courtTranscriptItems.length && !visibleHearingStreamingRuns.length"
               class="court-transcript__empty"
               data-court-transcript-empty
             >
@@ -2035,6 +2461,12 @@ onBeforeUnmount(() => {
       </div>
     </main>
 
+    <AgentStreamErrorDialog
+      :message="streamError"
+      title="庭审数字人生成失败"
+      @dismiss="dismissStreamError"
+    />
+
     <div
       v-if="ledgerOpen"
       ref="courtLedgerDrawer"
@@ -2095,13 +2527,9 @@ onBeforeUnmount(() => {
   min-width: 0;
 }
 .court-agent-strip :deep(.digital-human) {
-  grid-template-columns: 96px minmax(0, 1fr);
-  gap: 12px;
-  align-items: center;
   min-width: 0;
-  min-height: 132px;
-  padding: 14px;
-  border-radius: 24px;
+  height: var(--digital-human-card-height);
+  min-height: var(--digital-human-card-height);
   box-shadow: 0 16px 38px #536c8b12;
 }
 .court-agent-strip :deep(.digital-human[data-court-agent-card="judge"]) {
@@ -2114,22 +2542,10 @@ onBeforeUnmount(() => {
 .court-agent-strip :deep(.digital-human[data-court-agent-card="jury-b"]) {
   background: linear-gradient(145deg, #ffffff, #effff9 52%, #f8f2ff);
 }
-.court-agent-strip :deep(.digital-human__portrait) {
-  min-height: 96px;
-}
-.court-agent-strip :deep(.digital-human__portrait svg) {
-  width: 96px;
-  height: 96px;
-}
-.court-agent-strip :deep(.digital-human__state-dot) {
-  right: 3px;
-  bottom: 10px;
-  width: 14px;
-  height: 14px;
-  border-width: 3px;
-}
 .court-agent-strip :deep(.digital-human__identity) {
-  align-items: center;
+  display: grid;
+  gap: 5px;
+  align-items: start;
 }
 .court-agent-strip :deep(.digital-human__identity strong) {
   font-size: 16px;
@@ -2139,6 +2555,7 @@ onBeforeUnmount(() => {
   font-size: 11px;
 }
 .court-agent-strip :deep(.digital-human__identity small) {
+  justify-self: start;
   padding: 4px 7px;
   font-size: 10px;
   white-space: nowrap;
@@ -2161,15 +2578,7 @@ onBeforeUnmount(() => {
   min-height: auto;
 }
 :deep(.room-shell__header) {
-  align-items: center;
-}
-:deep(.room-shell__header h1) {
-  margin: 3px 0 0;
-  font-size: clamp(24px, 2.4vw, 30px);
-  line-height: 1.16;
-}
-:deep(.room-shell__header p) {
-  display: none;
+  align-items: flex-end;
 }
 :deep(.room-shell__boundary) {
   display: none;
@@ -2293,7 +2702,8 @@ onBeforeUnmount(() => {
   align-content: start;
   gap: 12px;
   min-height: 0;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
   padding: 2px 3px 10px 0;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
@@ -2443,7 +2853,6 @@ onBeforeUnmount(() => {
   min-height: 0;
 }
 .evidence-supplement-button,
-.evidence-expand-button,
 .evidence-ledger-button,
 .evidence-complete-button {
   position: relative;
@@ -2459,8 +2868,7 @@ onBeforeUnmount(() => {
   font-weight: 900;
   cursor: pointer;
 }
-.party-evidence-rail__footer .evidence-supplement-button,
-.party-evidence-rail__footer .evidence-expand-button {
+.party-evidence-rail__footer .evidence-supplement-button {
   width: 100%;
   min-width: 0;
   height: 48px;

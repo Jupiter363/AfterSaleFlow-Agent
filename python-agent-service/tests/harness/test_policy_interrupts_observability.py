@@ -1,3 +1,5 @@
+# 文件作用：自动化测试文件，验证 test_policy_interrupts_observability 相关模块的行为、契约或页面布局。
+
 from datetime import UTC, datetime
 
 from app.harness.hooks import HookEvent, LifecycleHooks
@@ -10,6 +12,10 @@ from app.harness.observability import AgentRunEvent, InMemoryRunObserver
 from app.harness.policy import InstructionBundle, InstructionLayer
 
 
+# 所属模块：Agent Harness > test_policy_interrupts_observability；函数角色：回归测试用例。
+# 具体功能：`test_instruction_bundle_preserves_trusted_priority_and_marks_case_data` 验证本阶段状态在固定案例中的输出、边界和失败行为；关键协作调用：`InstructionBundle`、`bundle.layers`、`bundle.render`。
+# 上下游：上游为 Java 可信快照、调用身份、上下文合同、角色模板；下游为 协作调用 `InstructionBundle`、`bundle.layers`、`bundle.render`。
+# 系统意义：固定“Agent Harness > test_policy_interrupts_observability”的可观察契约，防止后续重构改变业务结果。
 def test_instruction_bundle_preserves_trusted_priority_and_marks_case_data() -> None:
     bundle = InstructionBundle(
         platform_policy="Never make a final decision.",
@@ -34,6 +40,10 @@ def test_instruction_bundle_preserves_trusted_priority_and_marks_case_data() -> 
     assert "<UNTRUSTED_CASE_DATA>" in bundle.render()
 
 
+# 所属模块：Agent Harness > test_policy_interrupts_observability；函数角色：回归测试用例。
+# 具体功能：`test_interrupt_policy_covers_high_risk_low_confidence_and_failures` 验证平台规则在固定案例中的输出、边界和失败行为；关键协作调用：`HumanInterruptPolicy`、`policy.evaluate`、`RiskAssessment`。
+# 上下游：上游为 Java 可信快照、调用身份、上下文合同、角色模板；下游为 协作调用 `HumanInterruptPolicy`、`policy.evaluate`、`RiskAssessment`。
+# 系统意义：固定“Agent Harness > test_policy_interrupts_observability”的可观察契约，防止后续重构改变业务结果。
 def test_interrupt_policy_covers_high_risk_low_confidence_and_failures() -> None:
     policy = HumanInterruptPolicy(confidence_threshold=0.65)
 
@@ -58,6 +68,10 @@ def test_interrupt_policy_covers_high_risk_low_confidence_and_failures() -> None
     assert interrupt.requires_human is True
 
 
+# 所属模块：Agent Harness > test_policy_interrupts_observability；函数角色：回归测试用例。
+# 具体功能：`test_hooks_and_observer_record_ordered_redacted_events` 验证本阶段状态在固定案例中的输出、边界和失败行为；关键协作调用：`LifecycleHooks`、`hooks.register`、`hooks.emit`。
+# 上下游：上游为 Java 可信快照、调用身份、上下文合同、角色模板；下游为 协作调用 `LifecycleHooks`、`hooks.register`、`hooks.emit`、`InMemoryRunObserver`。
+# 系统意义：固定“Agent Harness > test_policy_interrupts_observability”的可观察契约，防止后续重构改变业务结果。
 def test_hooks_and_observer_record_ordered_redacted_events() -> None:
     calls: list[str] = []
     hooks = LifecycleHooks()

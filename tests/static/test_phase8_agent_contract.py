@@ -1,3 +1,5 @@
+# 文件作用：自动化测试文件，验证 test_phase8_agent_contract 相关模块的行为、契约或页面布局。
+
 from pathlib import Path
 
 
@@ -6,6 +8,10 @@ SERVICE = ROOT / "python-agent-service"
 APP = SERVICE / "app"
 
 
+# 所属模块：跨服务契约测试 > test_phase8_agent_contract；函数角色：回归测试用例。
+# 具体功能：`test_python_agent_dependencies_and_container_are_formal` 验证被测业务场景在固定案例中的输出、边界和失败行为；关键协作调用：`read_text`。
+# 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 协作调用 `read_text`。
+# 系统意义：固定“跨服务契约测试 > test_phase8_agent_contract”的可观察契约，防止后续重构改变业务结果。
 def test_python_agent_dependencies_and_container_are_formal() -> None:
     requirements = (SERVICE / "requirements.txt").read_text(encoding="utf-8")
     assert "langgraph==1.2.6" in requirements
@@ -18,6 +24,10 @@ def test_python_agent_dependencies_and_container_are_formal() -> None:
     assert "app.main:create_app" in dockerfile
 
 
+# 所属模块：跨服务契约测试 > test_phase8_agent_contract；函数角色：回归测试用例。
+# 具体功能：`test_all_c1_to_c6_nodes_and_conditional_gap_path_exist` 验证被测业务场景在固定案例中的输出、边界和失败行为；关键协作调用：`read_text`、`is_file`。
+# 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 协作调用 `read_text`、`is_file`。
+# 系统意义：固定“跨服务契约测试 > test_phase8_agent_contract”的可观察契约，防止后续重构改变业务结果。
 def test_all_c1_to_c6_nodes_and_conditional_gap_path_exist() -> None:
     graph = (APP / "graph.py").read_text(encoding="utf-8")
     for node in (
@@ -34,6 +44,10 @@ def test_all_c1_to_c6_nodes_and_conditional_gap_path_exist() -> None:
     assert "requires_supplemental_evidence" in graph
 
 
+# 所属模块：跨服务契约测试 > test_phase8_agent_contract；函数角色：回归测试用例。
+# 具体功能：`test_agent_output_is_non_final_and_forced_to_human_review` 验证人工复核信息在固定案例中的输出、边界和失败行为；关键协作调用：`read_text`。
+# 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 协作调用 `read_text`。
+# 系统意义：固定“跨服务契约测试 > test_phase8_agent_contract”的可观察契约，防止后续重构改变业务结果。
 def test_agent_output_is_non_final_and_forced_to_human_review() -> None:
     schemas = (APP / "schemas" / "models.py").read_text(encoding="utf-8")
     assert 'requires_human_review: Literal[True] = True' in schemas
@@ -45,6 +59,10 @@ def test_agent_output_is_non_final_and_forced_to_human_review() -> None:
     assert "AGENT_OUTPUT_SCHEMA_INVALID" in workflow
 
 
+# 所属模块：跨服务契约测试 > test_phase8_agent_contract；函数角色：回归测试用例。
+# 具体功能：`test_agent_has_no_execution_tool_and_masks_trace_inputs` 验证履约执行动作在固定案例中的输出、边界和失败行为；关键协作调用：`join`、`read_text`、`path.read_text`。
+# 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 协作调用 `join`、`read_text`、`path.read_text`、`APP.glob`。
+# 系统意义：固定“跨服务契约测试 > test_phase8_agent_contract”的可观察契约，防止后续重构改变业务结果。
 def test_agent_has_no_execution_tool_and_masks_trace_inputs() -> None:
     production_python = "\n".join(
         path.read_text(encoding="utf-8")
@@ -57,6 +75,10 @@ def test_agent_has_no_execution_tool_and_masks_trace_inputs() -> None:
     assert "sha256" in (APP / "tracing.py").read_text(encoding="utf-8")
 
 
+# 所属模块：跨服务契约测试 > test_phase8_agent_contract；函数角色：回归测试用例。
+# 具体功能：`test_agent_api_and_langfuse_headless_keys_are_wired` 验证被测业务场景在固定案例中的输出、边界和失败行为；关键协作调用：`read_text`。
+# 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 协作调用 `read_text`。
+# 系统意义：固定“跨服务契约测试 > test_phase8_agent_contract”的可观察契约，防止后续重构改变业务结果。
 def test_agent_api_and_langfuse_headless_keys_are_wired() -> None:
     main = (APP / "main.py").read_text(encoding="utf-8")
     assert "/internal/agents/intake/analyze" in main

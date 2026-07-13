@@ -1,8 +1,24 @@
+<!--
+  文件作用：前端页面视图文件，组织售后争议对应页面的数据加载、交互和展示。
+  说明：本注释用于帮助读者先了解组件/页面职责，再阅读 template、script 和 style。
+-->
+
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
+import {
+  extractAgentRunDescriptor,
+  loadActiveAgentRuns,
+} from "../../api/agentStream";
 import { disputeApi } from "../../api/disputes";
+import AgentStreamErrorDialog from "../../components/room/AgentStreamErrorDialog.vue";
+import AgentStreamingMessage from "../../components/room/AgentStreamingMessage.vue";
 import { actor } from "../../state/actor";
+import {
+  activeAgentStreams,
+  clearAgentStreams,
+  consumeAgentRun,
+} from "../../stores/agentStream";
 import { humanizeDossierText } from "../../utils/displayText";
 
 const props = defineProps({
@@ -13,6 +29,7 @@ const route = useRoute();
 const router = useRouter();
 const outcome = ref(props.initialOutcome);
 const error = ref("");
+const streamError = ref("");
 const reviewReason = ref("审核员确认 AI 裁决草案。");
 const reviewPlanDraft = ref({
   id: "",
@@ -25,16 +42,25 @@ const reviewStatus = ref("");
 const executionAssistantState = ref("idle");
 let executionAssistantTimer = null;
 let executionAssistantCaseId = "";
+const outcomeStreamAbortController = new AbortController();
+const DRAFT_STREAM_OPERATIONS = new Set(["HEARING_ANALYSIS", "HEARING_STAGE"]);
 const caseId = computed(
   () => outcome.value?.case_id || route.params.caseId,
 );
+const outcomeDraftStreamingRuns = computed(() =>
+  activeAgentStreams({
+    caseId: caseId.value,
+    roomType: "HEARING",
+    actorId: actor.id,
+    actorRole: actor.role,
+  }).filter((run) => DRAFT_STREAM_OPERATIONS.has(run.operation)),
+);
 const actions = computed(() => outcome.value?.actions || []);
+const persistedDecision = computed(
+  () => outcome.value?.final_decision || outcome.value?.finalDecision || null,
+);
 const rawDecision = computed(
-  () =>
-    outcome.value?.final_decision || {
-      conclusion: "处理结果待生成",
-      explanation: "当前结果说明以后续确认记录为准。",
-    },
+  () => persistedDecision.value || {},
 );
 const adjudicationDraft = computed(
   () => outcome.value?.adjudication_draft || outcome.value?.adjudicationDraft || null,
@@ -59,6 +85,23 @@ const isDraftOutcome = computed(
         caseStatus.value === "HEARING_COMPLETED",
     ),
 );
+const hasPersistedDecision = computed(() => {
+  const source = persistedDecision.value || {};
+  const conclusion = String(source.conclusion || "").trim();
+  const explanation = String(source.explanation || "").trim();
+  if (!conclusion && !explanation) return false;
+  const pendingConclusion =
+    !conclusion ||
+    /^(?:处理结果|裁决草案|裁决结论|结论)?\s*(?:待生成|尚未生成|生成中)$/.test(conclusion);
+  const placeholderExplanation =
+    !explanation ||
+    /以后续确认记录为准|当前(?:没有|暂无)可展示|尚未生成|正在生成|待生成/.test(explanation);
+  return !(pendingConclusion && placeholderExplanation);
+});
+const hasRenderableOutcome = computed(() =>
+  isFinalOutcome.value || Boolean(adjudicationDraft.value) || hasPersistedDecision.value,
+);
+const draftGenerationActive = computed(() => outcomeDraftStreamingRuns.value.length > 0);
 const canReviewOutcomeDraft = computed(
   () => actor.role === "PLATFORM_REVIEWER" && isDraftOutcome.value,
 );
@@ -77,24 +120,49 @@ const canModifyReviewPlan = computed(
 );
 const decision = computed(() => {
   const source = rawDecision.value || {};
-  if (!isDraftOutcome.value) return source;
   return {
     ...source,
-    conclusion: localizeOutcomeCopy(source.conclusion || "AI 裁决草案已生成"),
+    conclusion: localizeOutcomeCopy(
+      source.conclusion || (isDraftOutcome.value ? "AI 裁决草案已生成" : ""),
+    ),
     explanation: localizeOutcomeCopy(
-      source.explanation || "此处展示的是 AI 生成的非最终裁决草案。",
+      source.explanation ||
+        (isDraftOutcome.value ? "此处展示的是 AI 生成的非最终裁决草案。" : ""),
     ),
     review_reason: localizeOutcomeCopy(source.review_reason || source.reviewReason || ""),
   };
 });
-const heroSealText = computed(() => (isFinalOutcome.value ? "最终" : "草案"));
+const heroSealText = computed(() => {
+  if (isFinalOutcome.value) return "最终";
+  if (!hasRenderableOutcome.value) return draftGenerationActive.value ? "生成" : "等待";
+  return "草案";
+});
 const heroKicker = computed(() =>
-  isFinalOutcome.value ? "最终结果已确认" : "裁决草案已生成",
+  isFinalOutcome.value
+    ? "最终结果已确认"
+    : !hasRenderableOutcome.value
+      ? draftGenerationActive.value ? "实时生成" : "等待裁决草案"
+      : "裁决草案已生成",
 );
-const heroTitle = computed(() => (isFinalOutcome.value ? "最终裁决" : "AI 裁决草案"));
-const heroStatusTitle = computed(() => (isFinalOutcome.value ? "裁决已生效" : "等待后续确认"));
+const heroTitle = computed(() => {
+  if (isFinalOutcome.value) return "最终裁决";
+  if (!hasRenderableOutcome.value) {
+    return draftGenerationActive.value ? "法官正在生成裁决草案" : "裁决草案尚未生成";
+  }
+  return "AI 裁决草案";
+});
+const heroStatusTitle = computed(() => {
+  if (isFinalOutcome.value) return "裁决已生效";
+  if (!hasRenderableOutcome.value) return draftGenerationActive.value ? "正在生成" : "等待法官处理";
+  return "等待后续确认";
+});
 const heroStatusDetail = computed(() => {
   if (isFinalOutcome.value) return outcome.value?.closed_at || "执行结果持续同步中";
+  if (!hasRenderableOutcome.value) {
+    return draftGenerationActive.value
+      ? "模型输出完成并校验入库后展示正式草案"
+      : "庭审记录封存后由 AI 法官生成";
+  }
   return "非最终结果，确认后形成最终处理结果";
 });
 const verdictBoundaryText = computed(() => {
@@ -191,18 +259,24 @@ const resultLabels = {
   reference_id: "引用号",
   simulated: "模拟执行",
   tool_name: "工具",
+  logistics_record: "物流记录",
+  logistics_records: "物流记录",
+  logisticsRecord: "物流记录",
+  logisticsRecords: "物流记录",
   "response.action_type": "动作类型",
   "response.idempotency_key": "幂等键",
   "response.status": "回执状态",
   status: "状态",
 };
 
+// 业务位置：【前端处理结果】resultValue：围绕 阶段处理结果或草案 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
 function resultValue(value) {
   if (value === null || value === undefined || value === "") return "未提供";
   if (typeof value === "boolean") return value ? "是" : "否";
   return String(value);
 }
 
+// 业务位置：【前端处理结果】flattenResult：围绕 阶段处理结果或草案 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
 function flattenResult(value, prefix = "") {
   if (value === null || value === undefined || value === "") return [];
   if (Array.isArray(value)) {
@@ -223,10 +297,12 @@ function flattenResult(value, prefix = "") {
   ];
 }
 
+// 业务位置：【前端处理结果】executionResultRows：围绕 履约执行动作和工具意图 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
 function executionResultRows(action) {
   return flattenResult(action.result);
 }
 
+// 业务位置：【前端处理结果】sanitizeOutcomeCopy：核验 阶段处理结果或草案 的权限、Schema 和阶段边界，阻止越权或不完整结果进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
 function sanitizeOutcomeCopy(value) {
   if (value === null || value === undefined || value === "") return "";
   const raw = String(value);
@@ -259,11 +335,13 @@ function sanitizeOutcomeCopy(value) {
     .replaceAll("审核员终审", "后续确认");
 }
 
+// 业务位置：【前端处理结果】localizeOutcomeCopy：将 阶段处理结果或草案 转换为稳定的接口、提示词或页面表达，避免直接暴露内部实现字段。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
 function localizeOutcomeCopy(value) {
   if (value === null || value === undefined || value === "") return "";
   return sanitizeOutcomeCopy(humanizeDossierText(value, { fallback: "" }));
 }
 
+// 业务位置：【前端处理结果】isSameDraftCopy：判断 阶段处理结果或草案 是否满足当前流程分支的进入条件。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
 function isSameDraftCopy(left, right) {
   const normalizedLeft = String(left || "").replace(/\s+/g, "");
   const normalizedRight = String(right || "").replace(/\s+/g, "");
@@ -287,6 +365,13 @@ const INTERNAL_DRAFT_KEYS = new Set([
 
 const DRAFT_VALUE_LABELS = {
   NEEDS_HUMAN_REVIEW: "待人工复核",
+  REQUIRES_HUMAN_REVIEW: "需人工复核",
+  PENDING_HUMAN_REVIEW: "待人工复核",
+  PENDING_POLICY_REVIEW: "待规则复核",
+  PENDING_REVIEW: "待复核",
+  WAITING_HUMAN_REVIEW: "等待人工复核",
+  HUMAN_REVIEW: "人工复核",
+  POLICY_REVIEW: "规则复核",
   PARTIALLY_VERIFIED: "部分核验",
   VERIFIED: "已核验",
   UNVERIFIED: "待核验",
@@ -299,6 +384,7 @@ const DRAFT_VALUE_LABELS = {
   false: "否",
 };
 
+// 业务位置：【前端处理结果】draftValue：围绕 阶段处理结果或草案 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
 function draftValue(value) {
   if (value === null || value === undefined || value === "") return "未提供";
   if (Array.isArray(value)) {
@@ -322,6 +408,7 @@ function draftValue(value) {
   return localizeOutcomeCopy(value);
 }
 
+// 业务位置：【前端处理结果】shouldShowDraftField：判断 阶段处理结果或草案 是否满足当前流程分支的进入条件。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
 function shouldShowDraftField(key, value) {
   if (INTERNAL_DRAFT_KEYS.has(key)) return false;
   if (value === null || value === undefined || value === "") return false;
@@ -329,10 +416,12 @@ function shouldShowDraftField(key, value) {
   return Boolean(draftValue(value));
 }
 
+// 业务位置：【前端处理结果】isInternalDraftIdentifier：判断 阶段处理结果或草案 是否满足当前流程分支的进入条件。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
 function isInternalDraftIdentifier(value) {
   return /^(ISSUE|FACT|EVIDENCE|EVD|DRAFT|A2A|CASE)_[A-Za-z0-9_-]+$/.test(value);
 }
 
+// 业务位置：【前端处理结果】draftFieldLabel：围绕 阶段处理结果或草案 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
 function draftFieldLabel(key) {
   return (
     {
@@ -343,6 +432,10 @@ function draftFieldLabel(key) {
       rule: "规则",
       application: "适用说明",
       source: "来源",
+      logistics_record: "物流记录",
+      logistics_records: "物流记录",
+      logisticsRecord: "物流记录",
+      logisticsRecords: "物流记录",
       confidence: "可信度",
       risk_flag: "风险提示",
       policy_basis: "规则依据",
@@ -365,11 +458,13 @@ function draftFieldLabel(key) {
   );
 }
 
+// 业务位置：【前端处理结果】draftList：围绕 阶段处理结果或草案 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
 function draftList(value) {
   if (!value) return [];
   return Array.isArray(value) ? value : [value];
 }
 
+// 业务位置：【前端处理结果】draftConfidenceScore：围绕 阶段处理结果或草案 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
 function draftConfidenceScore(value) {
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return "待评分";
@@ -412,6 +507,7 @@ const explanationOfficerNotes = computed(() => {
   };
 });
 
+// 业务位置：【前端处理结果】defaultApprovedPlan：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
 function defaultApprovedPlan() {
   const draft = adjudicationDraft.value || {};
   const plan =
@@ -433,6 +529,7 @@ function defaultApprovedPlan() {
   };
 }
 
+// 业务位置：【前端处理结果】normalizeApprovedPlan：将 当前阶段业务数据 转换为稳定的接口、提示词或页面表达，避免直接暴露内部实现字段。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
 function normalizeApprovedPlan(plan) {
   const source = plan && typeof plan === "object" ? plan : {};
   const firstAction = Array.isArray(source.actions) ? source.actions[0] : null;
@@ -457,6 +554,7 @@ function normalizeApprovedPlan(plan) {
   };
 }
 
+// 业务位置：【前端处理结果】syncReviewPlanDraft：围绕 人工审核关注点和陪审团提示 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
 function syncReviewPlanDraft(force = false) {
   if (
     !force &&
@@ -469,12 +567,20 @@ function syncReviewPlanDraft(force = false) {
   reviewPlanDraft.value = normalizeApprovedPlan(defaultApprovedPlan());
 }
 
+// 业务位置：【前端处理结果】refreshOutcomeAfterReview：重新加载 人工审核关注点和陪审团提示，确保页面和下一次 Agent 调用基于最新案件版本。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
 async function refreshOutcomeAfterReview(message) {
-  outcome.value = await disputeApi.outcome(actor, caseId.value);
+  await refreshOutcome();
   reviewStatus.value = message;
   syncReviewPlanDraft(true);
 }
 
+// 业务位置：【前端处理结果】refreshOutcome：重新加载 阶段处理结果或草案，确保页面和下一次 Agent 调用基于最新案件版本。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
+async function refreshOutcome() {
+  outcome.value = await disputeApi.outcome(actor, caseId.value);
+  return outcome.value;
+}
+
+// 业务位置：【前端处理结果】confirmOutcomeDraft：执行 阶段处理结果或草案 对应的业务动作，并将结果交给 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
 async function confirmOutcomeDraft() {
   if (reviewBusy.value) return;
   error.value = "";
@@ -494,6 +600,7 @@ async function confirmOutcomeDraft() {
   }
 }
 
+// 业务位置：【前端处理结果】modifyOutcomeDraftFromStructuredPlan：围绕 阶段处理结果或草案 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
 async function modifyOutcomeDraftFromStructuredPlan() {
   if (reviewBusy.value) return;
   error.value = "";
@@ -515,6 +622,7 @@ async function modifyOutcomeDraftFromStructuredPlan() {
   }
 }
 
+// 业务位置：【前端处理结果】buildApprovedPlan：把 审核决定和执行/结案状态 组装为本块需要的 当前阶段业务数据，供 当事人可见的处理结论和后续动作 使用。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
 function buildApprovedPlan() {
   return {
     id: reviewPlanDraft.value.id,
@@ -524,6 +632,7 @@ function buildApprovedPlan() {
   };
 }
 
+// 业务位置：【前端处理结果】clearExecutionAssistantTimer：围绕 履约执行动作和工具意图 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
 function clearExecutionAssistantTimer() {
   if (executionAssistantTimer) {
     clearTimeout(executionAssistantTimer);
@@ -531,6 +640,7 @@ function clearExecutionAssistantTimer() {
   }
 }
 
+// 业务位置：【前端处理结果】scheduleExecutionAssistantSuccess：围绕 履约执行动作和工具意图 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
 function scheduleExecutionAssistantSuccess() {
   clearExecutionAssistantTimer();
   executionAssistantTimer = setTimeout(() => {
@@ -539,6 +649,7 @@ function scheduleExecutionAssistantSuccess() {
   }, 3000);
 }
 
+// 业务位置：【前端处理结果】syncExecutionAssistantState：围绕 履约执行动作和工具意图 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
 function syncExecutionAssistantState() {
   if (!shouldShowExecutionAssistant.value) {
     clearExecutionAssistantTimer();
@@ -571,18 +682,84 @@ watch(
   { immediate: true },
 );
 
+// 业务位置：【前端处理结果】isDraftStreamDescriptor：判断 Agent 流事件 是否满足当前流程分支的进入条件。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
+function isDraftStreamDescriptor(value) {
+  const descriptor = extractAgentRunDescriptor(value);
+  return Boolean(descriptor && DRAFT_STREAM_OPERATIONS.has(descriptor.operation));
+}
+
+// 业务位置：【前端处理结果】consumeOutcomeDraftRun：执行 阶段处理结果或草案 对应的业务动作，并将结果交给 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
+async function consumeOutcomeDraftRun(value) {
+  const descriptor = extractAgentRunDescriptor(value);
+  if (!descriptor || !DRAFT_STREAM_OPERATIONS.has(descriptor.operation)) return false;
+  streamError.value = "";
+  await consumeAgentRun({
+    actor: { id: actor.id, role: actor.role },
+    caseId: caseId.value,
+    roomType: "HEARING",
+    descriptor,
+    agentLabel: "AI 法官",
+    senderRole: "JUDGE",
+    signal: outcomeStreamAbortController.signal,
+    onFinal: async () => {
+      await refreshOutcome();
+      syncReviewPlanDraft(true);
+    },
+    onError: (failure) => {
+      streamError.value = failure.message;
+    },
+  });
+  return true;
+}
+
+// 业务位置：【前端处理结果】resumeOutcomeDraftRuns：执行 阶段处理结果或草案 对应的业务动作，并将结果交给 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
+async function resumeOutcomeDraftRuns() {
+  if (props.initialOutcome !== null) return false;
+  const activeRuns = await loadActiveAgentRuns(actor, caseId.value, "HEARING");
+  const draftRuns = (activeRuns || []).filter(isDraftStreamDescriptor);
+  if (!draftRuns.length) return false;
+  error.value = "";
+  await Promise.all(draftRuns.map(consumeOutcomeDraftRun));
+  return true;
+}
+
+// 业务位置：【前端处理结果】dismissStreamError：切换与 Agent 流事件 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
+function dismissStreamError() {
+  const previous = streamError.value;
+  streamError.value = "";
+  if (error.value === previous) error.value = "";
+}
+
+// 业务位置：【前端处理结果】load：读取 当前阶段业务数据，并依据当前案件、角色和会话权限裁剪成可用输入。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
 async function load() {
+  let outcomeFailure = null;
   try {
     if (outcome.value === null) {
-      outcome.value = await disputeApi.outcome(actor, caseId.value);
+      await refreshOutcome();
     }
   } catch (failure) {
+    outcomeFailure = failure;
+  }
+  try {
+    const resumed = await resumeOutcomeDraftRuns();
+    if (!resumed && outcomeFailure) error.value = outcomeFailure.message;
+  } catch (failure) {
+    if (!streamError.value) streamError.value = failure.message;
     error.value = failure.message;
   }
 }
 
 onMounted(load);
-onBeforeUnmount(clearExecutionAssistantTimer);
+onBeforeUnmount(() => {
+  clearExecutionAssistantTimer();
+  outcomeStreamAbortController.abort();
+  clearAgentStreams({
+    caseId: caseId.value,
+    roomType: "HEARING",
+    actorId: actor.id,
+    actorRole: actor.role,
+  });
+});
 </script>
 
 <template>
@@ -595,7 +772,12 @@ onBeforeUnmount(clearExecutionAssistantTimer);
       <div>
         <span class="outcome-kicker">{{ heroKicker }}</span>
         <h1>{{ heroTitle }}</h1>
-        <p>{{ outcome?.title }} · {{ caseId }}</p>
+        <p class="outcome-hero__lead">
+          <span class="outcome-hero__context">
+            裁决草案与最终结果 <i aria-hidden="true">✦</i>
+          </span>
+          <span>当事人查看裁决说明，平台审核员确认或修改后形成最终结果。</span>
+        </p>
       </div>
       <div class="outcome-hero__status">
         <strong>{{ heroStatusTitle }}</strong>
@@ -603,7 +785,42 @@ onBeforeUnmount(clearExecutionAssistantTimer);
       </div>
     </section>
 
-    <section class="verdict-card">
+    <section
+      v-if="!hasRenderableOutcome"
+      class="outcome-generation"
+      data-outcome-draft-generation
+      :data-streaming="draftGenerationActive"
+    >
+      <header>
+        <div>
+          <span class="outcome-kicker">AI 法官</span>
+          <h2>
+            {{ draftGenerationActive ? "法官正在生成裁决草案" : "等待法官生成裁决草案" }}
+          </h2>
+          <p>
+            {{ draftGenerationActive
+              ? "正在依据庭审记录、证据矩阵和复核意见生成草案；校验入库前不会展示为正式结论。"
+              : "庭审记录已封存时，法官会在后台生成草案；当前没有可展示的正式结论。" }}
+          </p>
+        </div>
+        <strong>{{ draftGenerationActive ? "实时输出中" : "尚未开始" }}</strong>
+      </header>
+      <div v-if="draftGenerationActive" class="outcome-generation__streams">
+        <AgentStreamingMessage
+          v-for="run in outcomeDraftStreamingRuns"
+          :key="run.runId"
+          :run="run"
+          label="AI 法官"
+          appearance="court"
+        />
+      </div>
+      <div v-else class="outcome-generation__waiting">
+        <span aria-hidden="true">⚖️</span>
+        <p>当前没有正在生成的草案任务，请稍后刷新或返回庭审页查看案件状态。</p>
+      </div>
+    </section>
+
+    <section v-if="hasRenderableOutcome" class="verdict-card">
       <span class="outcome-kicker">白话结论</span>
       <h2>{{ decision.conclusion }}</h2>
       <p>{{ decision.explanation }}</p>
@@ -826,7 +1043,7 @@ onBeforeUnmount(clearExecutionAssistantTimer);
       </p>
     </section>
 
-    <section class="execution-board">
+    <section v-if="hasRenderableOutcome" class="execution-board">
       <header>
         <div>
           <span class="outcome-kicker">{{ executionBoardKicker }}</span>
@@ -897,6 +1114,11 @@ onBeforeUnmount(clearExecutionAssistantTimer);
       </div>
       <button type="button" @click="router.push('/disputes')">返回争议订单中心</button>
     </footer>
+    <AgentStreamErrorDialog
+      :message="streamError"
+      title="裁决草案生成失败"
+      @dismiss="dismissStreamError"
+    />
     <p v-if="error" class="outcome-error" role="alert">{{ error }}</p>
   </main>
 </template>
@@ -933,11 +1155,83 @@ onBeforeUnmount(clearExecutionAssistantTimer);
 .outcome-hero__seal { display: grid; place-items: center; width: 78px; height: 78px; background: #fff; border-radius: 50%; box-shadow: inset 0 0 0 6px #eef8f1; }
 .outcome-hero__seal span { font-size: 34px; }
 .outcome-hero__seal i { color: #5d8a76; font-size: 9px; font-style: normal; font-weight: 900; letter-spacing: .15em; }
-.outcome-kicker { color: #7186a5; font-size: 11px; font-weight: 900; letter-spacing: .08em; }
-.outcome-hero h1 { margin: 5px 0; color: #2f4058; font-size: clamp(28px, 4vw, 44px); }
+.outcome-kicker { color: #7185a8; font-size: 10px; font-weight: 800; letter-spacing: .18em; }
+.outcome-hero h1 { margin: 7px 0 8px; color: #263754; font-size: clamp(32px, 5vw, 56px); line-height: 1.05; }
 .outcome-hero p { margin: 0; overflow-wrap: anywhere; color: #728097; }
+.outcome-hero__lead { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; }
+.outcome-hero__context { display: inline-flex; gap: 6px; align-items: center; color: #586b85; font-size: 12px; font-weight: 900; line-height: 1; }
+.outcome-hero__context i { color: #ff9a76; font-size: 9px; font-style: normal; }
 .outcome-hero__status { display: grid; gap: 5px; padding: 13px; color: #267251; background: #fff; border-radius: 16px; }
 .outcome-hero__status small { color: #7f8c9d; }
+.outcome-generation {
+  display: grid;
+  gap: 16px;
+  min-height: 250px;
+  padding: 22px;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 88% 14%, rgba(153, 127, 227, .13), transparent 30%),
+    linear-gradient(145deg, #fffdf8, #f7f9ff);
+  border: 1px solid #e4deee;
+  border-radius: 24px;
+  box-shadow: 0 16px 42px rgba(73, 86, 128, .09);
+}
+.outcome-generation > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+}
+.outcome-generation > header h2 {
+  margin: 5px 0 6px;
+  color: #35445d;
+  font-size: 22px;
+}
+.outcome-generation > header p {
+  max-width: 760px;
+  margin: 0;
+  color: #758197;
+  font-size: 13px;
+  line-height: 1.65;
+}
+.outcome-generation > header strong {
+  flex: 0 0 auto;
+  padding: 7px 11px;
+  color: #7662b2;
+  background: #f2eeff;
+  border: 1px solid #e0d8fa;
+  border-radius: 999px;
+  font-size: 11px;
+}
+.outcome-generation[data-streaming="true"] > header strong {
+  color: #a35c34;
+  background: #fff3e8;
+  border-color: #f3d5bd;
+}
+.outcome-generation__streams {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+  min-height: 120px;
+}
+.outcome-generation__streams :deep(.agent-streaming-message--court) {
+  width: 100%;
+  max-width: none;
+}
+.outcome-generation__waiting {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  min-height: 110px;
+  padding: 18px;
+  color: #78849a;
+  background: rgba(255, 255, 255, .72);
+  border: 1px dashed #d9dfea;
+  border-radius: 18px;
+}
+.outcome-generation__waiting span { font-size: 28px; }
+.outcome-generation__waiting p { margin: 0; line-height: 1.65; }
 .verdict-card { min-width: 0; padding: 20px; background: #ffffffde; border: 1px solid #e1e8f1; border-radius: 24px; text-align: left; }
 .verdict-card h2 {
   max-height: 8.7em;
@@ -1404,7 +1698,7 @@ onBeforeUnmount(clearExecutionAssistantTimer);
     box-shadow: inset 0 0 0 4px #eef8f1;
   }
   .outcome-hero__seal span { font-size: 25px; }
-  .outcome-hero h1 { font-size: 24px; }
+  .outcome-hero h1 { font-size: 32px; line-height: 1.05; }
   .outcome-hero p { font-size: 13px; }
   .outcome-hero__status { grid-column: 1 / -1; }
   .outcome-hero__status { padding: 10px 12px; border-radius: 14px; }

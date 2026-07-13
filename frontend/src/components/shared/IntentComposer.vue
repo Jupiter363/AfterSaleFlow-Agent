@@ -1,3 +1,8 @@
+<!--
+  文件作用：前端组件文件，封装可复用 UI、状态展示或业务交互单元。
+  说明：本注释用于帮助读者先了解组件/页面职责，再阅读 template、script 和 style。
+-->
+
 <script setup>
 import { ref } from "vue";
 
@@ -9,6 +14,7 @@ const props = defineProps({
 const emit = defineEmits(["submit"]);
 const intent = ref("");
 
+// 业务位置：【前端业务组件】submit：执行 当前阶段业务数据 对应的业务动作，并将结果交给 可复用的房间交互和展示事件。上游：页面传入的案件、消息、证据或审核数据。下游：可复用的房间交互和展示事件。边界：组件不直接跨越业务权限调用。
 function submit() {
   const value = intent.value.trim();
   if (!value || props.busy) return;

@@ -1,9 +1,18 @@
+# 文件作用：自动化测试文件，验证 test_intake_case_detail_dossier 相关模块的行为、契约或页面布局。
+
 from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
+from app.agents.dispute_intake_officer.schemas import IntakeCaseDetailLlmOutput
 from app.agents.dispute_intake_officer.skills.dossier.dossier_skill import (
+    CaseDetailDossierSkill,
+    ORIGINAL_STATEMENT_SEPARATOR,
+    SUBJECTIVE_RESPONDENT_SOURCE,
     _canonical_verification_focus,
+    _reported_attitude_position,
 )
 from app.agents.dispute_intake_officer.workflow import (
     _enforce_intake_question_boundary,
@@ -11,6 +20,10 @@ from app.agents.dispute_intake_officer.workflow import (
 from app.schemas import IntakeTurnRequest
 
 
+# 所属模块：Agent 角色能力 > test_intake_case_detail_dossier；函数角色：模块私有业务函数。
+# 具体功能：`_agent_context` 围绕案件与会话上下文计算该函数独立负责的业务派生值；返回/更新字段：`tenant_id`、`case_id`、`room_type`、`actor_id`。
+# 上下游：上游为 本文件的 `_request`、`test_current_message_is_not_duplicated_in_summary_or_original_statement`；下游为 返回/更新 `tenant_id`、`case_id`、`room_type`、`actor_id`。
+# 系统意义：控制隐私、Token 和会话隔离：服从角色权限、上下文范围和非最终结论边界。
 def _agent_context(case_id: str) -> dict[str, object]:
     prompt_profile_id = "DISPUTE_INTAKE_OFFICER:USER:v1"
     access_session_id = f"ACCESS_{case_id}_USER"
@@ -40,44 +53,77 @@ def _agent_context(case_id: str) -> dict[str, object]:
     }
 
 
+# 所属模块：Agent 角色能力 > test_intake_case_detail_dossier；函数角色：模块私有业务函数。
+# 具体功能：`_request` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`payload.update`、`payload.pop`、`current.setdefault`。
+# 上下游：上游为 本文件的 `test_intake_turn_workflow_lives_under_agent_package_and_outputs_case_detail`、`test_intake_case_detail_readiness_is_gated_by_score_and_required_references`、`test_intake_case_detail_translates_llm_missing_field_codes_before_persisting`、`test_ready_intake_turn_asks_for_handoff_remark_before_next_room`；下游为 本文件的 `_agent_context`。
+# 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
 def _request(**overrides):
     payload = {
         "case_id": "CASE_intake_case_detail",
         "room_type": "INTAKE",
         "turn_source": "ROOM_MESSAGE",
-        "initial_case_facts": {
-            "order_reference": "ORDER_1001",
-            "after_sales_reference": "AS_1001",
-            "logistics_reference": "SF1001001001",
-            "initiator_role": "USER",
-            "requested_outcome_hint": "REFUND",
-        },
+        "initial_case_facts": None,
         "current_user_message": {
             "message_id": "MESSAGE_1001",
-            "sequence_no": 3,
+            "sequence_no": 2,
             "role": "USER",
             "source": "ROOM_MESSAGE",
             "text": "我补充：商家没有给签收底单，我希望退款。订单和物流信息都在右侧。",
         },
-        "recent_dialogue_messages": [],
-        "previous_case_detail": None,
+        "recent_dialogue_messages": [
+            {
+                "message_id": "MESSAGE_OPENING",
+                "sequence_no": 1,
+                "role": "AGENT",
+                "source": "AGENT_RESPONSE",
+                "text": "请补充本案仍不清楚的事实。",
+            }
+        ],
+        "previous_case_detail": {
+            "schema_version": "intake_case_detail.v1",
+            "references": {
+                "order_reference": "ORDER_1001",
+                "after_sales_reference": "AS_1001",
+                "logistics_reference": "SF1001001001",
+            },
+            "claim_resolution": {
+                "initiator_role": "USER",
+                "requested_resolution": "REFUND",
+            },
+        },
     }
     payload.update(overrides)
     legacy_seed = payload.pop("lobby_seed", None)
     if isinstance(legacy_seed, dict):
         legacy_seed.pop("raw_text", None)
-        payload["initial_case_facts"] = legacy_seed
+        previous = dict(payload.get("previous_case_detail") or {})
+        previous["schema_version"] = "intake_case_detail.v1"
+        previous["references"] = {
+            "order_reference": legacy_seed.get("order_reference") or "",
+            "after_sales_reference": legacy_seed.get("after_sales_reference") or "",
+            "logistics_reference": legacy_seed.get("logistics_reference") or "",
+        }
+        previous["claim_resolution"] = {
+            "initiator_role": legacy_seed.get("initiator_role") or "USER",
+            "requested_resolution": legacy_seed.get("requested_outcome_hint")
+            or "REFUND",
+        }
+        payload["previous_case_detail"] = previous
     if "latest_scroll_snapshot" in payload:
         payload["previous_case_detail"] = payload.pop("latest_scroll_snapshot")
     payload.pop("recent_turns", None)
     current = payload["current_user_message"]
-    current.setdefault("sequence_no", 3)
+    current.setdefault("sequence_no", 2)
     current.setdefault("source", payload["turn_source"])
     payload.setdefault("recent_dialogue_messages", [])
     payload.setdefault("agent_context", _agent_context(str(payload["case_id"])))
     return IntakeTurnRequest.model_validate(payload)
 
 
+# 所属模块：Agent 角色能力 > test_intake_case_detail_dossier；函数角色：回归测试用例。
+# 具体功能：`test_verification_focus_merges_names_gaps_questions_and_actions` 把本阶段状态写入或合并到可追溯的阶段状态；关键协作调用：`_canonical_verification_focus`、`item.endswith`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 协作调用 `_canonical_verification_focus`、`item.endswith`。
+# 系统意义：固定“Agent 角色能力 > test_intake_case_detail_dossier”的可观察契约，防止后续重构改变业务结果。
 def test_verification_focus_merges_names_gaps_questions_and_actions() -> None:
     result = _canonical_verification_focus(
         [
@@ -111,6 +157,321 @@ def test_verification_focus_merges_names_gaps_questions_and_actions() -> None:
     assert all(not item.endswith(("?", "？")) for item in result)
 
 
+# 所属模块：Agent 角色能力 > test_intake_case_detail_dossier；函数角色：回归测试用例。
+# 具体功能：`test_promotion_case_focus_collapses_questions_into_three_audit_actions` 验证本阶段状态在固定案例中的输出、边界和失败行为；关键协作调用：`_canonical_verification_focus`、`item.endswith`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 协作调用 `_canonical_verification_focus`、`item.endswith`。
+# 系统意义：固定“Agent 角色能力 > test_intake_case_detail_dossier”的可观察契约，防止后续重构改变业务结果。
+def test_promotion_case_focus_collapses_questions_into_three_audit_actions() -> None:
+    result = _canonical_verification_focus(
+        [
+            "直播间宣传内容及主播承诺的具体规则",
+            "活动规则及名额状态",
+            "用户联系客服的具体时间及客服回复原文",
+            "商家对用户补偿诉求的正式态度",
+            "您是通过哪个直播间下单的？主播当时具体怎么承诺返现？",
+            "7月12日订单完成后，您是什么时候联系客服的？",
+        ]
+    )
+
+    assert result == [
+        "核验直播宣传承诺、适用条件与活动规则",
+        "核验用户与商家的完整沟通记录",
+        "核实商家对诉求的明确回应",
+    ]
+    assert all(not item.endswith(("?", "？")) for item in result)
+
+
+# 所属模块：Agent 角色能力 > test_intake_case_detail_dossier；函数角色：回归测试用例。
+# 具体功能：`test_subscription_focus_collapses_to_four_business_audit_actions` 验证本阶段状态在固定案例中的输出、边界和失败行为；关键协作调用：`_canonical_verification_focus`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 协作调用 `_canonical_verification_focus`。
+# 系统意义：固定“Agent 角色能力 > test_intake_case_detail_dossier”的可观察契约，防止后续重构改变业务结果。
+def test_subscription_focus_collapses_to_four_business_audit_actions() -> None:
+    result = _canonical_verification_focus(
+        [
+            "用户发现自动续费扣款的具体时间和金额",
+            "是否收到续费提醒及短信、邮件或App推送渠道",
+            "扣款后是否使用新周期服务",
+            "用户是否已经联系商家客服，商家如何回应",
+            "您是在什么时间发现这笔扣款的？",
+        ],
+        respondent_role="MERCHANT",
+    )
+
+    assert result == [
+        "核验自动续费扣款时间、金额与服务周期",
+        "核验续费提醒的发送时间、渠道与显著性",
+        "核验新周期服务是否实际使用",
+        "核验用户与商家的完整沟通记录",
+    ]
+
+
+# 所属模块：Agent 角色能力 > test_intake_case_detail_dossier；函数角色：回归测试用例。
+# 具体功能：`test_current_message_is_not_duplicated_in_summary_or_original_statement` 验证房间消息在固定案例中的输出、边界和失败行为；关键协作调用：`IntakeTurnRequest.model_validate`、`render`、`count`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_agent_context`。
+# 系统意义：固定“Agent 角色能力 > test_intake_case_detail_dossier”的可观察契约，防止后续重构改变业务结果。
+def test_current_message_is_not_duplicated_in_summary_or_original_statement() -> None:
+    current_text = (
+        "我在7月10日晚上8点通过品牌官方直播间下单，主播明确说订单完成后返现120元，"
+        "没有说明名额限制。7月12日订单完成后我立即联系客服，客服回复活动名额已满，"
+        "拒绝返现。除此之外没有其他沟通，商家目前明确不同意补偿。"
+    )
+    request = IntakeTurnRequest.model_validate(
+        {
+            "case_id": "CASE_intake_no_duplicate",
+            "room_type": "INTAKE",
+            "turn_source": "ROOM_MESSAGE",
+            "initial_case_facts": None,
+            "current_user_message": {
+                "message_id": "MESSAGE_current",
+                "sequence_no": 2,
+                "role": "USER",
+                "source": "ROOM_MESSAGE",
+                "text": current_text,
+            },
+            "recent_dialogue_messages": [
+                {
+                    "message_id": "MESSAGE_opening",
+                    "sequence_no": 1,
+                    "role": "AGENT",
+                    "source": "AGENT_RESPONSE",
+                    "text": "请补充下单时间、客服回复和商家态度。",
+                }
+            ],
+            "previous_case_detail": {
+                "schema_version": "intake_case_detail.v1",
+                "case_story": {
+                    "one_sentence_summary": "用户称直播间承诺返现120元，但客服表示名额已满。"
+                },
+                "claim_resolution": {
+                    "initiator_role": "USER",
+                    "requested_resolution": "COMPENSATION",
+                },
+            },
+            "initiator_statement_transcript": [
+                {
+                    "message_id": "INTAKE_TURN_2",
+                    "role": "USER",
+                    "text": current_text,
+                }
+            ],
+            "agent_context": _agent_context("CASE_intake_no_duplicate"),
+        }
+    )
+    rendered = CaseDetailDossierSkill().render(
+        request=request,
+        room_utterance="已记录本轮补充。",
+        llm_case_detail={
+            "schema_version": "intake_case_detail.v1",
+            "case_story": {
+                "one_sentence_summary": (
+                    "用户称7月10日晚上8点通过品牌官方直播间下单购买咖啡机，"
+                    "主播承诺订单完成后返现120元且未说明名额限制，7月12日订单完成后"
+                    "联系客服被告知活动名额已满，商家明确不同意补偿。"
+                )
+            },
+            "claim_resolution": {
+                "initiator_role": "USER",
+                "requested_resolution": "COMPENSATION",
+                "normalized_statement": "用户请求商家补偿120元。",
+            },
+            "missing_information": {
+                "blocking_gaps": [],
+                "nice_to_have_gaps": [],
+                "next_questions": [],
+            },
+            "intake_quality": {"score": 75},
+        },
+        llm_dossier_patch=None,
+        llm_scroll_snapshot=None,
+        llm_canvas_operations=[],
+        llm_admission_recommendation="NEED_MORE_INFO",
+        llm_missing_fields=[],
+        llm_confidence=0.75,
+    )
+
+    detail = rendered.scroll_snapshot
+    assert detail["claim_resolution"]["original_statement"] == current_text
+    assert detail["case_story"]["one_sentence_summary"].count("7月10日晚上8点") == 1
+    assert detail["case_story"]["one_sentence_summary"].count("商家明确不同意补偿") == 1
+
+
+def test_real_intake_replay_keeps_summary_attitude_statement_and_focus_clean() -> None:
+    form_text = (
+        "我购买轻薄笔记本电脑后正常使用十天，电脑开始频繁自动关机。"
+        "按商家指导完成远程排障和恢复出厂设置后仍未解决。"
+        "商家表示超过七天不支持换货，只同意由我付费维修。"
+        "我希望换货；如无法换货，则要求免费维修。"
+    )
+    opening = IntakeTurnRequest.model_validate(
+        {
+            "case_id": "CASE_intake_e2e_quality",
+            "room_type": "INTAKE",
+            "turn_source": "FORM_SUBMISSION",
+            "initial_case_facts": {
+                "form_source": "FORM_SUBMISSION",
+                "form_description": form_text,
+                "order_reference": "ORDER-E2E-001",
+                "after_sales_reference": "AFTERSALE-E2E-001",
+                "logistics_reference": "LOGISTICS-E2E-001",
+                "initiator_role": "USER",
+                "requested_outcome_hint": "REPLACE_OR_REPAIR",
+            },
+            "current_user_message": None,
+            "recent_dialogue_messages": [],
+            "previous_case_detail": None,
+            "initiator_statement_transcript": [],
+            "agent_context": _agent_context("CASE_intake_e2e_quality"),
+        }
+    )
+    first = CaseDetailDossierSkill().render(
+        request=opening,
+        room_utterance="请补充商家的检测结论和您的处理诉求。",
+        llm_case_detail={
+            "case_story": {
+                "one_sentence_summary": (
+                    "用户称笔记本电脑使用十天后频繁自动关机，远程排障和恢复出厂设置"
+                    "仍未解决，商家拒绝换货且仅同意付费维修，用户要求换货或免费维修。"
+                )
+            },
+            "respondent_attitude": {
+                "respondent_role": "MERCHANT",
+                "attitude": "DISAGREE",
+                # Reproduce the bad model output: it copied the entire form.
+                "position": form_text,
+                "confidence": 0.8,
+            },
+            "dispute_core_state": {
+                "next_verification_focus": [
+                    "等待接待官完成案件详情整理",
+                    "核实商品故障原因及是否属于质量问题",
+                    "核实商品故障原因与质量问题",
+                    "信息完整度已达到提交阈值",
+                    "确认商家对换货与维修的处理意见",
+                ]
+            },
+            "intake_quality": {"score": 70},
+        },
+        llm_dossier_patch=None,
+        llm_scroll_snapshot=None,
+        llm_canvas_operations=[],
+        llm_admission_recommendation="NEED_MORE_INFO",
+        llm_missing_fields=[],
+        llm_confidence=0.8,
+    )
+
+    first_detail = first.scroll_snapshot
+    assert first_detail["claim_resolution"]["original_statement"] == form_text
+    assert first_detail["respondent_attitude"]["source"] == SUBJECTIVE_RESPONDENT_SOURCE
+    assert first_detail["respondent_attitude"]["position"] == (
+        "商家表示超过七天不支持换货，只同意由我付费维修。"
+    )
+    assert all(
+        "完整度" not in item and "等待接待官" not in item
+        for item in first_detail["dispute_core_state"]["next_verification_focus"]
+    )
+    assert len(first_detail["dispute_core_state"]["next_verification_focus"]) <= 4
+
+    supplement = (
+        "商家没有给出书面检测结论，只说系统超过七天不能换货。"
+        "我优先要求换货；若确实无法换货，可以接受商家免费维修，"
+        "但不能让我承担维修费。"
+    )
+    cumulative_summary = (
+        "用户称购买笔记本电脑并正常使用约十天后频繁自动关机，按商家指导远程排障"
+        "及恢复出厂设置仍未解决；商家未出具书面检测结论并口头表示超过七天不能换货，"
+        "用户优先要求换货，无法换货时接受免费维修但不承担维修费。"
+    )
+    second_request = IntakeTurnRequest.model_validate(
+        {
+            "case_id": "CASE_intake_e2e_quality",
+            "room_type": "INTAKE",
+            "turn_source": "ROOM_MESSAGE",
+            "initial_case_facts": None,
+            "current_user_message": {
+                "message_id": "MESSAGE_supplement",
+                "sequence_no": 2,
+                "role": "USER",
+                "source": "ROOM_MESSAGE",
+                "text": supplement,
+            },
+            "recent_dialogue_messages": [
+                {
+                    "message_id": "MESSAGE_opening",
+                    "sequence_no": 1,
+                    "role": "AGENT",
+                    "source": "AGENT_RESPONSE",
+                    "text": "请补充商家的检测结论和您的处理诉求。",
+                }
+            ],
+            "previous_case_detail": first_detail,
+            "initiator_statement_transcript": [
+                {
+                    "message_id": "INTAKE_TURN_2",
+                    "role": "USER",
+                    "text": supplement,
+                }
+            ],
+            "agent_context": _agent_context("CASE_intake_e2e_quality"),
+        }
+    )
+    second = CaseDetailDossierSkill().render(
+        request=second_request,
+        room_utterance="当前案情已可以提交。",
+        llm_case_detail={
+            "case_story": {"one_sentence_summary": cumulative_summary},
+            "respondent_attitude": {
+                "respondent_role": "MERCHANT",
+                "attitude": "DISAGREE",
+                "position": "商家口头表示系统超过七天不能换货，未出具书面检测结论。",
+                "confidence": 0.8,
+            },
+            "dispute_core_state": {
+                "next_verification_focus": [
+                    "核验商家是否已出具书面检测结论或故障原因说明",
+                    "确认商家对免费维修及维修费用承担的最终处理方案",
+                    "核实商家对诉求的明确回应",
+                    "核验信息完整度已达到提交阈值",
+                ]
+            },
+            "intake_quality": {"score": 88},
+        },
+        llm_dossier_patch=None,
+        llm_scroll_snapshot=None,
+        llm_canvas_operations=[],
+        llm_admission_recommendation="ACCEPTED",
+        llm_missing_fields=[],
+        llm_confidence=0.8,
+    )
+
+    second_detail = second.scroll_snapshot
+    assert second_detail["case_story"]["one_sentence_summary"] == cumulative_summary
+    assert second_detail["case_story"]["one_sentence_summary"].count("没有给出") == 0
+    assert second_detail["claim_resolution"]["original_statement"] == (
+        form_text + ORIGINAL_STATEMENT_SEPARATOR + supplement
+    )
+    assert second_detail["respondent_attitude"]["position"] == (
+        "商家没有给出书面检测结论，只说系统超过七天不能换货。"
+    )
+    second_focus = second_detail["dispute_core_state"]["next_verification_focus"]
+    assert len(second_focus) <= 4
+    assert not any("完整度" in item for item in second_focus)
+    assert sum("商家" in item and "诉求" in item for item in second_focus) <= 1
+
+
+def test_intake_model_output_requires_a_complete_case_summary_each_turn() -> None:
+    with pytest.raises(ValueError, match="one_sentence_summary is required"):
+        IntakeCaseDetailLlmOutput.model_validate(
+            {
+                "room_utterance": "已记录。",
+                "case_detail": {"respondent_attitude": {"attitude": "DISAGREE"}},
+            }
+        )
+
+
+# 所属模块：Agent 角色能力 > test_intake_case_detail_dossier；函数角色：回归测试用例。
+# 具体功能：`test_intake_question_boundary_replaces_evidence_requests_with_case_questions` 验证当前可见证据在固定案例中的输出、边界和失败行为；关键协作调用：`_enforce_intake_question_boundary`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 协作调用 `_enforce_intake_question_boundary`。
+# 系统意义：固定“Agent 角色能力 > test_intake_case_detail_dossier”的可观察契约，防止后续重构改变业务结果。
 def test_intake_question_boundary_replaces_evidence_requests_with_case_questions() -> None:
     utterance = "请上传开箱视频、聊天记录截图和物流签收凭证。"
     case_detail = {
@@ -131,11 +492,49 @@ def test_intake_question_boundary_replaces_evidence_requests_with_case_questions
     assert "凭证" not in result
 
 
+def test_attitude_position_skips_counterparty_used_as_contact_object() -> None:
+    statement = (
+        "我立即联系商家要求换货，商家回复照片不能证明是收货时损坏，"
+        "只愿意补偿50元，不同意换货。"
+    )
+
+    assert _reported_attitude_position(statement, "USER") == (
+        "商家回复照片不能证明是收货时损坏，只愿意补偿50元，不同意换货。"
+    )
+
+
+def test_intake_question_boundary_removes_question_answered_by_claim_seed() -> None:
+    utterance = (
+        "为了继续梳理案情，请补充：您目前的具体诉求是换货、退货退款，"
+        "还是其他处理方式？ 您是否已在平台发起售后单，目前进度如何？"
+    )
+    case_detail = {
+        "intake_quality": {"score": 70, "ready_for_next_step": False},
+        "claim_resolution": {"requested_resolution": "REPLACE_OR_REPAIR"},
+        "missing_information": {
+            "next_questions": ["您是否已在平台发起售后单，目前进度如何？"]
+        },
+    }
+
+    result = _enforce_intake_question_boundary(utterance, case_detail)
+
+    assert "具体诉求" not in result
+    assert "售后单" in result
+
+
 class CaseDetailRunner:
+    # 所属模块：Agent 角色能力 > test_intake_case_detail_dossier；函数角色：对象依赖初始化。
+    # 具体功能：`__init__` 注入并保存处理本阶段状态需要的客户端、配置或策略依赖。
+    # 上下游：上游为 受治理的案件上下文和角色提示词；下游为 符合 Schema 的角色分析结果。
+    # 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
     def __init__(self, score: int = 86) -> None:
         self.score = score
         self.calls: list[dict[str, object]] = []
 
+    # 所属模块：Agent 角色能力 > test_intake_case_detail_dossier；函数角色：类/闭包内部方法。
+    # 具体功能：`invoke_structured` 驱动本阶段状态对应的业务步骤并返回阶段结果；关键协作调用：`self.calls.append`、`SimpleNamespace`、`output_type`。
+    # 上下游：上游为 本文件的 `test_intake_case_detail_translates_llm_missing_field_codes_before_persisting`；下游为 协作调用 `self.calls.append`、`SimpleNamespace`、`output_type`、`context_pack.prompt_sections`。
+    # 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
     def invoke_structured(
         self,
         *,
@@ -238,6 +637,10 @@ class CaseDetailRunner:
         )
 
 
+# 所属模块：Agent 角色能力 > test_intake_case_detail_dossier；函数角色：回归测试用例。
+# 具体功能：`test_intake_turn_workflow_lives_under_agent_package_and_outputs_case_detail` 验证接待信息在固定案例中的输出、边界和失败行为；关键协作调用：`CaseDetailRunner`、`run`、`IntakeTurnWorkflow`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_request`。
+# 系统意义：固定“Agent 角色能力 > test_intake_case_detail_dossier”的可观察契约，防止后续重构改变业务结果。
 def test_intake_turn_workflow_lives_under_agent_package_and_outputs_case_detail() -> None:
     from app.agents.dispute_intake_officer.workflow import IntakeTurnWorkflow
 
@@ -258,6 +661,10 @@ def test_intake_turn_workflow_lives_under_agent_package_and_outputs_case_detail(
     assert "已经可以提交" in result.room_utterance
 
 
+# 所属模块：Agent 角色能力 > test_intake_case_detail_dossier；函数角色：回归测试用例。
+# 具体功能：`test_intake_case_detail_readiness_is_gated_by_score_and_required_references` 读取并按案件、角色或会话范围筛选接待信息；关键协作调用：`CaseDetailRunner`、`run`、`IntakeTurnWorkflow`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_request`。
+# 系统意义：固定“Agent 角色能力 > test_intake_case_detail_dossier”的可观察契约，防止后续重构改变业务结果。
 def test_intake_case_detail_readiness_is_gated_by_score_and_required_references() -> None:
     from app.agents.dispute_intake_officer.workflow import IntakeTurnWorkflow
 
@@ -285,10 +692,18 @@ def test_intake_case_detail_readiness_is_gated_by_score_and_required_references(
     assert "订单号" in result.scroll_snapshot["missing_information"]["next_questions"][0]
 
 
+# 所属模块：Agent 角色能力 > test_intake_case_detail_dossier；函数角色：回归测试用例。
+# 具体功能：`test_intake_case_detail_translates_llm_missing_field_codes_before_persisting` 把结构化模型调用写入或合并到可追溯的阶段状态；关键协作调用：`run`、`IntakeTurnWorkflow`、`RunnerWithFieldCodes`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_request`、`invoke_structured`。
+# 系统意义：固定“Agent 角色能力 > test_intake_case_detail_dossier”的可观察契约，防止后续重构改变业务结果。
 def test_intake_case_detail_translates_llm_missing_field_codes_before_persisting() -> None:
     from app.agents.dispute_intake_officer.workflow import IntakeTurnWorkflow
 
     class RunnerWithFieldCodes(CaseDetailRunner):
+        # 所属模块：Agent 角色能力 > test_intake_case_detail_dossier；函数角色：类/闭包内部方法。
+        # 具体功能：`invoke_structured` 驱动本阶段状态对应的业务步骤并返回阶段结果；关键协作调用：`invoke_structured`。
+        # 上下游：上游为 本文件的 `test_intake_case_detail_translates_llm_missing_field_codes_before_persisting`；下游为 协作调用 `invoke_structured`。
+        # 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
         def invoke_structured(
             self,
             *,
@@ -334,6 +749,10 @@ def test_intake_case_detail_translates_llm_missing_field_codes_before_persisting
     assert blocking_gaps == ["买家证据材料", "商家发货前照片"]
 
 
+# 所属模块：Agent 角色能力 > test_intake_case_detail_dossier；函数角色：回归测试用例。
+# 具体功能：`test_ready_intake_turn_asks_for_handoff_remark_before_next_room` 读取并按案件、角色或会话范围筛选接待信息；关键协作调用：`CaseDetailRunner`、`run`、`IntakeTurnWorkflow`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_request`。
+# 系统意义：固定“Agent 角色能力 > test_intake_case_detail_dossier”的可观察契约，防止后续重构改变业务结果。
 def test_ready_intake_turn_asks_for_handoff_remark_before_next_room() -> None:
     from app.agents.dispute_intake_officer.workflow import IntakeTurnWorkflow
 
@@ -346,6 +765,10 @@ def test_ready_intake_turn_asks_for_handoff_remark_before_next_room() -> None:
     assert "证据书记官" in result.room_utterance
 
 
+# 所属模块：Agent 角色能力 > test_intake_case_detail_dossier；函数角色：回归测试用例。
+# 具体功能：`test_handoff_remark_is_persisted_when_officer_is_waiting_for_remark` 把本阶段状态写入或合并到可追溯的阶段状态；关键协作调用：`CaseDetailRunner`、`run`、`IntakeTurnWorkflow`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_request`。
+# 系统意义：固定“Agent 角色能力 > test_intake_case_detail_dossier”的可观察契约，防止后续重构改变业务结果。
 def test_handoff_remark_is_persisted_when_officer_is_waiting_for_remark() -> None:
     from app.agents.dispute_intake_officer.workflow import IntakeTurnWorkflow
 
@@ -387,6 +810,10 @@ def test_handoff_remark_is_persisted_when_officer_is_waiting_for_remark() -> Non
     assert "已收到备注" in result.room_utterance
 
 
+# 所属模块：Agent 角色能力 > test_intake_case_detail_dossier；函数角色：回归测试用例。
+# 具体功能：`test_ready_board_does_not_treat_regular_followup_as_remark_before_officer_asks` 读取并按案件、角色或会话范围筛选本阶段状态；关键协作调用：`CaseDetailRunner`、`run`、`IntakeTurnWorkflow`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_request`。
+# 系统意义：固定“Agent 角色能力 > test_intake_case_detail_dossier”的可观察契约，防止后续重构改变业务结果。
 def test_ready_board_does_not_treat_regular_followup_as_remark_before_officer_asks() -> None:
     from app.agents.dispute_intake_officer.workflow import IntakeTurnWorkflow
 

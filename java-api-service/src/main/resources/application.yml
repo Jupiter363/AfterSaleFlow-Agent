@@ -1,3 +1,6 @@
+# 文件作用：Java API 服务代码文件，承载售后争议后端业务、持久化或集成逻辑。
+# 说明：本注释用于帮助读者先了解配置用途，再修改具体配置项。
+
 spring:
   application:
     name: java-api-service

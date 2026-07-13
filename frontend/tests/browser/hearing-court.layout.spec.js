@@ -1,3 +1,6 @@
+// 文件作用：自动化测试文件，验证 hearing-court.layout.spec 相关模块的行为、契约或页面布局。
+// 说明：本注释用于帮助读者先了解本文件职责，再继续阅读具体实现。
+
 import { expect, test } from "@playwright/test";
 import {
   CASE_ID,
@@ -5,6 +8,7 @@ import {
   installHearingCourtFixture,
 } from "./fixtures/hearing-court.fixture.js";
 
+// 业务位置：【前端浏览器回归测试】openHearingCourt：切换与 庭审轮次和法官发言 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 async function openHearingCourt(page, options = {}) {
   await installHearingCourtFixture(page, options);
   await page.goto(`/disputes/${CASE_ID}/hearing`);
@@ -12,6 +16,7 @@ async function openHearingCourt(page, options = {}) {
     .toBeVisible();
 }
 
+// 业务位置：【前端浏览器回归测试】horizontalOverflowReport：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 async function horizontalOverflowReport(page) {
   return page.evaluate(() => {
     const root = document.documentElement;
@@ -39,6 +44,7 @@ async function horizontalOverflowReport(page) {
   });
 }
 
+// 业务位置：【前端浏览器回归测试】expectNoDocumentHorizontalOverflow：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 async function expectNoDocumentHorizontalOverflow(page) {
   const report = await horizontalOverflowReport(page);
   expect(
@@ -47,6 +53,7 @@ async function expectNoDocumentHorizontalOverflow(page) {
   ).toBe(true);
 }
 
+// 业务位置：【前端浏览器回归测试】expectCourtroomInsideWorkspace：围绕 庭审轮次和法官发言 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 async function expectCourtroomInsideWorkspace(page) {
   const geometry = await page.evaluate(() => {
     const workspace = document.querySelector(".room-shell__workspace");
@@ -81,6 +88,7 @@ async function expectCourtroomInsideWorkspace(page) {
   expect(geometry.courtroom.height).toBeGreaterThanOrEqual(720);
   expect(geometry.courtroom.height).toBeLessThanOrEqual(820);
 }
+// 业务位置：【前端浏览器回归测试】setHearingWorkspaceWidth：围绕 庭审轮次和法官发言 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 async function setHearingWorkspaceWidth(page, width) {
   await page.locator(".app-page").evaluate((element, nextWidth) => {
     element.style.setProperty("width", `${nextWidth}px`, "important");
@@ -93,6 +101,7 @@ async function setHearingWorkspaceWidth(page, width) {
   return workspace;
 }
 
+// 业务位置：【前端浏览器回归测试】gridColumnCount：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 async function gridColumnCount(locator) {
   return locator.evaluate((element) =>
     getComputedStyle(element)
@@ -102,6 +111,7 @@ async function gridColumnCount(locator) {
   );
 }
 
+// 业务位置：【前端浏览器回归测试】assertHorizontalContainment：核验 当前阶段业务数据 的权限、Schema 和阶段边界，阻止越权或不完整结果进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 async function assertHorizontalContainment(
   page,
   outerSelector,
@@ -147,12 +157,14 @@ async function assertHorizontalContainment(
   ).toBe(true);
 }
 
+// 业务位置：【前端浏览器回归测试】expectOnlyDrawerOpen：切换与 当前阶段业务数据 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 async function expectOnlyDrawerOpen(page, side) {
   const openDrawers = page.locator("[data-evidence-drawer-open]");
   await expect(openDrawers).toHaveCount(1);
   await expect(openDrawers).toHaveAttribute("data-evidence-drawer-open", side);
 }
 
+// 业务位置：【前端浏览器回归测试】expectDrawerFocusLoop：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 async function expectDrawerFocusLoop(page, side) {
   const drawer = page.locator(`[data-evidence-drawer-open="${side}"]`);
   const closeButton = drawer.locator(`[data-close-evidence-drawer="${side}"]`);
@@ -167,6 +179,7 @@ async function expectDrawerFocusLoop(page, side) {
   await page.keyboard.press("Tab");
   await expect(closeButton).toBeFocused();
 }
+// 业务位置：【前端浏览器回归测试】test：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 test("loads the deterministic hearing court in Chromium", async ({ page }) => {
   const pageErrors = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
@@ -181,6 +194,7 @@ test("loads the deterministic hearing court in Chromium", async ({ page }) => {
   expect(pageErrors).toEqual([]);
 });
 
+// 业务位置：【前端浏览器回归测试】test：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 test("keeps three columns through 1220px and switches to drawers below it", async ({
   page,
 }) => {
@@ -206,6 +220,7 @@ test("keeps three columns through 1220px and switches to drawers below it", asyn
 });
 
 for (const viewportWidth of [1260, 1259, 1181, 1180]) {
+  // 业务位置：【前端浏览器回归测试】test：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
   test(`keeps the fixed courtroom canvas contained at ${viewportWidth}px`, async ({
     page,
   }) => {
@@ -222,6 +237,7 @@ for (const viewportWidth of [1260, 1259, 1181, 1180]) {
 }
 
 for (const viewportWidth of [681, 680]) {
+  // 业务位置：【前端浏览器回归测试】test：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
   test(`keeps all hearing stages and the input dock contained at ${viewportWidth}px`, async ({
     page,
   }) => {
@@ -251,6 +267,7 @@ for (const viewport of [
   { width: 320, height: 568 },
   { width: 1024, height: 600 },
 ]) {
+  // 业务位置：【前端浏览器回归测试】test：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
   test(`does not overflow the document at ${viewport.width}x${viewport.height}`, async ({
     page,
   }) => {
@@ -261,6 +278,7 @@ for (const viewport of [
   });
 }
 
+// 业务位置：【前端浏览器回归测试】test：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 test("wraps a 200-character unbroken hearing error without document overflow", async ({
   page,
 }) => {
@@ -289,6 +307,7 @@ test("wraps a 200-character unbroken hearing error without document overflow", a
   );
   await expectNoDocumentHorizontalOverflow(page);
 });
+// 业务位置：【前端浏览器回归测试】test：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 test("contains closed drawers, keeps sides mutually exclusive, and closes with Escape", async ({
   page,
 }) => {
@@ -329,6 +348,7 @@ test("contains closed drawers, keeps sides mutually exclusive, and closes with E
   await expectNoDocumentHorizontalOverflow(page);
 });
 
+// 业务位置：【前端浏览器回归测试】test：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 test("clears drawer dialog state without restoring hidden launcher focus when the canvas widens", async ({
   page,
 }) => {
@@ -352,6 +372,7 @@ test("clears drawer dialog state without restoring hidden launcher focus when th
   await expectNoDocumentHorizontalOverflow(page);
 });
 
+// 业务位置：【前端浏览器回归测试】test：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 test("keeps court ledger focus modal and restores its opener after button and backdrop closes", async ({
   page,
 }) => {
@@ -384,6 +405,7 @@ test("keeps court ledger focus modal and restores its opener after button and ba
   await expectOnlyDrawerOpen(page, "right");
 });
 
+// 业务位置：【前端浏览器回归测试】test：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 test("closes a stacked court ledger before its underlying evidence drawer", async ({
   page,
 }) => {
@@ -405,6 +427,7 @@ test("closes a stacked court ledger before its underlying evidence drawer", asyn
   await expect(evidenceTrigger).toBeFocused();
 });
 
+// 业务位置：【前端浏览器回归测试】test：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 test("keeps the hearing ledger close target at least 44px square", async ({
   page,
 }) => {
@@ -420,6 +443,7 @@ test("keeps the hearing ledger close target at least 44px square", async ({
   expect(box.height).toBeGreaterThanOrEqual(44);
   await expectNoDocumentHorizontalOverflow(page);
 });
+// 业务位置：【前端浏览器回归测试】test：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 test("holds the 122px status and 154px input slots while the message rail scrolls", async ({
   page,
 }) => {
@@ -444,6 +468,7 @@ test("holds the 122px status and 154px input slots while the message rail scroll
   await expectNoDocumentHorizontalOverflow(page);
 });
 
+// 业务位置：【前端浏览器回归测试】test：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 test("returns the input-dock space to the reviewer transcript", async ({
   browser,
   baseURL,
@@ -490,6 +515,7 @@ test("returns the input-dock space to the reviewer transcript", async ({
   }
 });
 
+// 业务位置：【前端浏览器回归测试】test：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 test("contains 50 messages, a 2000-character statement, and 100 evidence cards", async ({
   page,
 }) => {

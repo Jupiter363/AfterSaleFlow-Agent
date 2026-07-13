@@ -1,3 +1,5 @@
+# 文件作用：自动化测试文件，验证 test_final_migration_contract 相关模块的行为、契约或页面布局。
+
 from pathlib import Path
 
 
@@ -13,10 +15,18 @@ MIGRATIONS = (
 )
 
 
+# 所属模块：跨服务契约测试 > test_final_migration_contract；函数角色：模块公开业务函数。
+# 具体功能：`migration` 围绕被测业务场景计算该函数独立负责的业务派生值；关键协作调用：`lower`、`read_text`。
+# 上下游：上游为 本文件的 `test_final_core_renames_the_business_fact_tables`、`test_final_governance_tables_cover_agents_panel_and_versions`、`test_room_collaboration_migrations_cover_the_final_product`、`test_room_messages_and_replay_events_are_database_append_only`；下游为 协作调用 `lower`、`read_text`。
+# 系统意义：该函数在系统中的业务边界是：只锁定公共契约，不锁死内部实现。
 def migration(name: str) -> str:
     return (MIGRATIONS / name).read_text(encoding="utf-8").lower()
 
 
+# 所属模块：跨服务契约测试 > test_final_migration_contract；函数角色：回归测试用例。
+# 具体功能：`test_final_forward_migrations_exist` 验证被测业务场景在固定案例中的输出、边界和失败行为；关键协作调用：`is_file`。
+# 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 协作调用 `is_file`。
+# 系统意义：固定“跨服务契约测试 > test_final_migration_contract”的可观察契约，防止后续重构改变业务结果。
 def test_final_forward_migrations_exist() -> None:
     assert (MIGRATIONS / "V007__final_dispute_core.sql").is_file()
     assert (
@@ -33,6 +43,10 @@ def test_final_forward_migrations_exist() -> None:
     assert (MIGRATIONS / "V013__append_only_room_stream.sql").is_file()
 
 
+# 所属模块：跨服务契约测试 > test_final_migration_contract；函数角色：回归测试用例。
+# 具体功能：`test_final_core_renames_the_business_fact_tables` 验证被测业务场景在固定案例中的输出、边界和失败行为。
+# 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 本文件的 `migration`。
+# 系统意义：固定“跨服务契约测试 > test_final_migration_contract”的可观察契约，防止后续重构改变业务结果。
 def test_final_core_renames_the_business_fact_tables() -> None:
     sql = migration("V007__final_dispute_core.sql")
 
@@ -50,6 +64,10 @@ def test_final_core_renames_the_business_fact_tables() -> None:
         assert fragment in sql
 
 
+# 所属模块：跨服务契约测试 > test_final_migration_contract；函数角色：回归测试用例。
+# 具体功能：`test_final_governance_tables_cover_agents_panel_and_versions` 验证被测业务场景在固定案例中的输出、边界和失败行为。
+# 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 本文件的 `migration`。
+# 系统意义：固定“跨服务契约测试 > test_final_migration_contract”的可观察契约，防止后续重构改变业务结果。
 def test_final_governance_tables_cover_agents_panel_and_versions() -> None:
     sql = migration("V008__final_agent_hearing_governance.sql")
 
@@ -77,6 +95,10 @@ def test_final_governance_tables_cover_agents_panel_and_versions() -> None:
     assert "profile_version varchar(64)" in sql
 
 
+# 所属模块：跨服务契约测试 > test_final_migration_contract；函数角色：回归测试用例。
+# 具体功能：`test_room_collaboration_migrations_cover_the_final_product` 验证被测业务场景在固定案例中的输出、边界和失败行为。
+# 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 本文件的 `migration`。
+# 系统意义：固定“跨服务契约测试 > test_final_migration_contract”的可观察契约，防止后续重构改变业务结果。
 def test_room_collaboration_migrations_cover_the_final_product() -> None:
     rooms = migration("V010__case_rooms_and_participants.sql")
     evidence_hearing = migration(
@@ -111,6 +133,10 @@ def test_room_collaboration_migrations_cover_the_final_product() -> None:
     assert "business_event_key" in events
 
 
+# 所属模块：跨服务契约测试 > test_final_migration_contract；函数角色：回归测试用例。
+# 具体功能：`test_room_messages_and_replay_events_are_database_append_only` 验证房间消息在固定案例中的输出、边界和失败行为。
+# 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 本文件的 `migration`。
+# 系统意义：固定“跨服务契约测试 > test_final_migration_contract”的可观察契约，防止后续重构改变业务结果。
 def test_room_messages_and_replay_events_are_database_append_only() -> None:
     append_only = migration("V013__append_only_room_stream.sql")
 

@@ -1,8 +1,14 @@
+<!--
+  文件作用：前端组件文件，封装可复用 UI、状态展示或业务交互单元。
+  说明：本注释用于帮助读者先了解组件/页面职责，再阅读 template、script 和 style。
+-->
+
 <script>
 export const DIGITAL_HUMAN_STATES = [
   "IDLE",
   "LISTENING",
   "THINKING",
+  "STREAMING",
   "SPEAKING",
   "COMPLETED",
   "HANDOFF",
@@ -131,6 +137,12 @@ export const DIGITAL_HUMAN_EXPRESSIONS = {
 
 <script setup>
 import { computed } from "vue";
+import evidenceClerkPortrait from "../../assets/digital-humans/evidence-clerk.webp";
+import intakeOfficerPortrait from "../../assets/digital-humans/intake-officer.webp";
+import judgePortrait from "../../assets/digital-humans/judge.webp";
+import juryAPortrait from "../../assets/digital-humans/jury-a.webp";
+import juryBPortrait from "../../assets/digital-humans/jury-b.webp";
+import routeGuidePortrait from "../../assets/digital-humans/route-guide.webp";
 
 const props = defineProps({
   state: {
@@ -141,6 +153,7 @@ const props = defineProps({
   name: { type: String, required: true },
   role: { type: String, required: true },
   message: { type: String, default: "我在这里，随时可以开始。" },
+  portraitVariant: { type: String, default: "" },
   reducedMotion: { type: Boolean, default: false },
 });
 
@@ -148,6 +161,7 @@ const stateLabels = {
   IDLE: "等候中",
   LISTENING: "认真倾听",
   THINKING: "整理线索",
+  STREAMING: "正在生成",
   SPEAKING: "正在说明",
   COMPLETED: "本阶段完成",
   HANDOFF: "准备交接",
@@ -190,6 +204,7 @@ const hairShape = computed(() =>
     :data-persona="persona"
     :data-expression="profile.expression"
     :data-silhouette="profile.silhouette"
+    :data-portrait-variant="portraitVariant || null"
   >
     <div class="digital-human__portrait" aria-hidden="true">
       <svg viewBox="0 0 220 220" role="presentation">
@@ -485,6 +500,73 @@ const hairShape = computed(() =>
             <path class="digital-human__prop-line" d="M165 174h16" />
           </template>
         </g>
+
+        <image
+          v-if="persona === 'intake'"
+          class="digital-human__raster-portrait"
+          :href="intakeOfficerPortrait"
+          x="-15"
+          y="-8"
+          width="250"
+          height="250"
+          preserveAspectRatio="xMidYMid meet"
+          data-intake-officer-portrait
+        />
+        <image
+          v-else-if="persona === 'evidence'"
+          class="digital-human__raster-portrait digital-human__raster-portrait--evidence"
+          :href="evidenceClerkPortrait"
+          x="-15"
+          y="-8"
+          width="250"
+          height="250"
+          preserveAspectRatio="xMidYMid meet"
+          data-evidence-clerk-portrait
+        />
+        <image
+          v-else-if="persona === 'judge'"
+          class="digital-human__raster-portrait digital-human__raster-portrait--judge"
+          :href="judgePortrait"
+          x="-15"
+          y="-8"
+          width="250"
+          height="250"
+          preserveAspectRatio="xMidYMid meet"
+          data-judge-portrait
+        />
+        <image
+          v-else-if="persona === 'jury' && portraitVariant === 'jury-a'"
+          class="digital-human__raster-portrait digital-human__raster-portrait--jury-a"
+          :href="juryAPortrait"
+          x="-15"
+          y="-8"
+          width="250"
+          height="250"
+          preserveAspectRatio="xMidYMid meet"
+          data-jury-a-portrait
+        />
+        <image
+          v-else-if="persona === 'jury' && portraitVariant === 'jury-b'"
+          class="digital-human__raster-portrait digital-human__raster-portrait--jury-b"
+          :href="juryBPortrait"
+          x="-15"
+          y="-8"
+          width="250"
+          height="250"
+          preserveAspectRatio="xMidYMid meet"
+          data-jury-b-portrait
+        />
+        <image
+          v-else-if="persona === 'guide'"
+          class="digital-human__raster-portrait digital-human__raster-portrait--guide"
+          :href="routeGuidePortrait"
+          x="-15"
+          y="-8"
+          width="250"
+          height="250"
+          preserveAspectRatio="xMidYMid meet"
+          data-route-guide-portrait
+        />
       </svg>
       <span class="digital-human__state-dot" />
     </div>
@@ -498,13 +580,14 @@ const hairShape = computed(() =>
         <small>{{ stateLabel }}</small>
       </div>
       <p aria-live="polite">{{ message }}</p>
-      <span class="digital-human__boundary">AI 建议非最终 · 人类审核员最终落槌</span>
+      <span class="digital-human__boundary">AI 只提供非最终建议，最终裁决由平台审核员确认</span>
     </div>
   </article>
 </template>
 
 <style scoped>
 .digital-human {
+  --digital-human-card-height: 190px;
   --human-accent: #64b9ff;
   --costume-main: #64b9ff;
   --costume-trim: #fff7de;
@@ -513,9 +596,12 @@ const hairShape = computed(() =>
   --costume-panel: #77c5ff;
   --costume-panel-soft: #e8f6ff;
   display: grid;
+  box-sizing: border-box;
   grid-template-columns: 148px minmax(0, 1fr);
   gap: 18px;
   align-items: center;
+  height: var(--digital-human-card-height);
+  min-height: var(--digital-human-card-height);
   padding: 18px;
   color: #20304a;
   background: linear-gradient(135deg, #ffffffd9, #f4f0ffde);
@@ -575,6 +661,7 @@ const hairShape = computed(() =>
 
 .digital-human[data-state="LISTENING"] { --human-accent: #6ed5aa; }
 .digital-human[data-state="THINKING"] { --human-accent: #a98cf5; }
+.digital-human[data-state="STREAMING"] { --human-accent: #8f83f2; }
 .digital-human[data-state="SPEAKING"] { --human-accent: #ff9c80; }
 .digital-human[data-state="COMPLETED"] { --human-accent: #52c790; }
 .digital-human[data-state="HANDOFF"] { --human-accent: #f5b84d; }
@@ -605,6 +692,36 @@ const hairShape = computed(() =>
 
 .digital-human__halo {
   fill: color-mix(in srgb, var(--human-accent), white 65%);
+}
+.digital-human--intake .digital-human__body-layer,
+.digital-human--intake .digital-human__head-layer,
+.digital-human--intake .digital-human__hand-prop,
+.digital-human--evidence .digital-human__body-layer,
+.digital-human--evidence .digital-human__head-layer,
+.digital-human--evidence .digital-human__hand-prop,
+.digital-human--judge .digital-human__body-layer,
+.digital-human--judge .digital-human__head-layer,
+.digital-human--judge .digital-human__hand-prop,
+.digital-human--jury[data-portrait-variant="jury-a"] .digital-human__body-layer,
+.digital-human--jury[data-portrait-variant="jury-a"] .digital-human__head-layer,
+.digital-human--jury[data-portrait-variant="jury-a"] .digital-human__hand-prop,
+.digital-human--jury[data-portrait-variant="jury-b"] .digital-human__body-layer,
+.digital-human--jury[data-portrait-variant="jury-b"] .digital-human__head-layer,
+.digital-human--jury[data-portrait-variant="jury-b"] .digital-human__hand-prop,
+.digital-human--guide .digital-human__body-layer,
+.digital-human--guide .digital-human__head-layer,
+.digital-human--guide .digital-human__hand-prop {
+  display: none;
+}
+.digital-human__raster-portrait {
+  pointer-events: none;
+}
+.digital-human__raster-portrait--evidence,
+.digital-human__raster-portrait--guide,
+.digital-human__raster-portrait--judge,
+.digital-human__raster-portrait--jury-a,
+.digital-human__raster-portrait--jury-b {
+  filter: drop-shadow(0 4px 5px rgba(65, 58, 91, .16));
 }
 .digital-human__hair {
   fill: #3d4162;
@@ -842,7 +959,12 @@ const hairShape = computed(() =>
 }
 
 @media (max-width: 560px) {
-  .digital-human { grid-template-columns: 96px minmax(0, 1fr); padding: 14px; }
+  .digital-human {
+    grid-template-columns: 96px minmax(0, 1fr);
+    height: auto;
+    min-height: var(--digital-human-card-height);
+    padding: 14px;
+  }
   .digital-human__portrait { min-height: 96px; }
   .digital-human__portrait svg { width: 96px; height: 96px; }
 }

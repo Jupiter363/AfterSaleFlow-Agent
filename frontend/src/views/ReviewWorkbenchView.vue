@@ -1,3 +1,8 @@
+<!--
+  文件作用：前端页面视图文件，组织售后争议对应页面的数据加载、交互和展示。
+  说明：本注释用于帮助读者先了解组件/页面职责，再阅读 template、script 和 style。
+-->
+
 <script setup>
 import { computed, onMounted, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
@@ -16,6 +21,7 @@ const canDecide = computed(() =>
   ["PLATFORM_REVIEWER", "ADMIN"].includes(actor.role),
 );
 
+// 业务位置：【前端案件页面】loadTasks：读取 当前阶段业务数据，并依据当前案件、角色和会话权限裁剪成可用输入。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
 async function loadTasks() {
   loading.value = true;
   try {
@@ -27,6 +33,7 @@ async function loadTasks() {
   }
 }
 
+// 业务位置：【前端案件页面】selectTask：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
 async function selectTask(task) {
   try {
     selectedTask.value = task;
@@ -37,6 +44,7 @@ async function selectTask(task) {
   }
 }
 
+// 业务位置：【前端案件页面】decide：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
 async function decide(decision) {
   if (!canDecide.value) {
     ElMessage.error("当前角色无权提交审核决定");

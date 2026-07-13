@@ -1,3 +1,9 @@
+/*
+ * 所属模块：证据与版本化卷宗。
+ * 文件职责：验证证据卷宗冻结器，覆盖 「rejectedEvidenceRemainsInTheAuditStoreButIsExcludedFromTheFrozenVersion」、「frozenDossierContainsEvidenceItemsPartySummaryAndFactEvidenceMatrix」、「freezeToleratesLegacyEvidenceWithoutParseStatus」、「frozenDossierUsesPersistedMultimodalScoresInsteadOfStatusDefaults」、「lowRelevanceModelFactLinkDoesNotBecomeVerifiedFact」。
+ * 业务链路：JUnit 构造夹具并驱动真实服务或 Mock 协作者，断言返回值、持久化状态和调用边界；接收原始证据、触发 OCR、执行可信度核验、控制角色可见性并冻结版本化卷宗。
+ * 关键边界：原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
+ */
 package com.example.dispute.evidence;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -30,6 +36,11 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.test.util.ReflectionTestUtils;
 
+// 所属模块：【证据与版本化卷宗 / 自动化测试层】类型「EvidenceDossierFreezerTest」。
+// 类型职责：集中验证证据卷宗冻结器的业务场景、权限边界和持久化/外部协作契约；本类型显式提供 「rejectedEvidenceRemainsInTheAuditStoreButIsExcludedFromTheFrozenVersion」、「frozenDossierContainsEvidenceItemsPartySummaryAndFactEvidenceMatrix」、「freezeToleratesLegacyEvidenceWithoutParseStatus」、「frozenDossierUsesPersistedMultimodalScoresInsteadOfStatusDefaults」、「lowRelevanceModelFactLinkDoesNotBecomeVerifiedFact」、「evidence」。
+// 协作关系：由 JUnit 发现并执行其中带 @Test 的场景。
+// 边界意义：原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
+// Java 语法：class 同时封装状态与方法；final 依赖通过构造器注入后不可重新指向。
 @ExtendWith(MockitoExtension.class)
 class EvidenceDossierFreezerTest {
 
@@ -38,6 +49,11 @@ class EvidenceDossierFreezerTest {
     @Mock private EvidenceItemRepository evidenceRepository;
     @Mock private EvidenceVerificationRepository verificationRepository;
 
+    // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceDossierFreezerTest.rejectedEvidenceRemainsInTheAuditStoreButIsExcludedFromTheFrozenVersion()」。
+    // 具体功能：「EvidenceDossierFreezerTest.rejectedEvidenceRemainsInTheAuditStoreButIsExcludedFromTheFrozenVersion()」：复现“核对完整业务行为（场景方法「rejectedEvidenceRemainsInTheAuditStoreButIsExcludedFromTheFrozenVersion」）”场景：驱动 「dossierRepository.findByCaseIdAndDossierVersion」、「evidenceRepository.findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc」、「verificationRepository.findTopByEvidenceIdOrderByVerificationVersionDesc」、「dossierRepository.save」，再用 「assertThat」、「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「2026-07-03T01:00:00Z」、「EVIDENCE_ACCEPTED」、「EVIDENCE_REJECTED」、「CASE_FREEZE」。
+    // 上游调用：「EvidenceDossierFreezerTest.rejectedEvidenceRemainsInTheAuditStoreButIsExcludedFromTheFrozenVersion()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「EvidenceDossierFreezerTest.rejectedEvidenceRemainsInTheAuditStoreButIsExcludedFromTheFrozenVersion()」的下游是被测服务、仓储或外部客户端替身；「assertThat、verify」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「EvidenceDossierFreezerTest.rejectedEvidenceRemainsInTheAuditStoreButIsExcludedFromTheFrozenVersion()」守住「证据与版本化卷宗」的可执行规格，尤其防止 「2026-07-03T01:00:00Z」、「EVIDENCE_ACCEPTED」、「EVIDENCE_REJECTED」、「CASE_FREEZE」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void rejectedEvidenceRemainsInTheAuditStoreButIsExcludedFromTheFrozenVersion() {
         Clock clock =
@@ -85,6 +101,11 @@ class EvidenceDossierFreezerTest {
                         "CASE_FREEZE");
     }
 
+    // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceDossierFreezerTest.frozenDossierContainsEvidenceItemsPartySummaryAndFactEvidenceMatrix()」。
+    // 具体功能：「EvidenceDossierFreezerTest.frozenDossierContainsEvidenceItemsPartySummaryAndFactEvidenceMatrix()」：复现“核对完整业务行为（场景方法「frozenDossierContainsEvidenceItemsPartySummaryAndFactEvidenceMatrix」）”场景：驱动 「dossierRepository.findByCaseIdAndDossierVersion」、「evidenceRepository.findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc」、「verificationRepository.findTopByEvidenceIdOrderByVerificationVersionDesc」、「dossierRepository.save」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「2026-07-03T01:00:00Z」、「EVIDENCE_USER_LOGISTICS」、「{\"ocr\":\"物流详情\"}」、「parser」。
+    // 上游调用：「EvidenceDossierFreezerTest.frozenDossierContainsEvidenceItemsPartySummaryAndFactEvidenceMatrix()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「EvidenceDossierFreezerTest.frozenDossierContainsEvidenceItemsPartySummaryAndFactEvidenceMatrix()」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「EvidenceDossierFreezerTest.frozenDossierContainsEvidenceItemsPartySummaryAndFactEvidenceMatrix()」守住「证据与版本化卷宗」的可执行规格，尤其防止 「2026-07-03T01:00:00Z」、「EVIDENCE_USER_LOGISTICS」、「{\"ocr\":\"物流详情\"}」、「parser」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void frozenDossierContainsEvidenceItemsPartySummaryAndFactEvidenceMatrix()
             throws Exception {
@@ -140,6 +161,11 @@ class EvidenceDossierFreezerTest {
         assertThat(matrix.toString()).doesNotContain("UNMAPPED");
     }
 
+    // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceDossierFreezerTest.freezeToleratesLegacyEvidenceWithoutParseStatus()」。
+    // 具体功能：「EvidenceDossierFreezerTest.freezeToleratesLegacyEvidenceWithoutParseStatus()」：复现“核对完整业务行为（场景方法「freezeToleratesLegacyEvidenceWithoutParseStatus」）”场景：驱动 「dossierRepository.findByCaseIdAndDossierVersion」、「evidenceRepository.findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc」、「verificationRepository.findTopByEvidenceIdOrderByVerificationVersionDesc」、「dossierRepository.save」，再用 「assertThat」、「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「2026-07-03T01:00:00Z」、「EVIDENCE_LEGACY_PARSE_STATUS」、「parseStatus」、「CASE_FREEZE」。
+    // 上游调用：「EvidenceDossierFreezerTest.freezeToleratesLegacyEvidenceWithoutParseStatus()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「EvidenceDossierFreezerTest.freezeToleratesLegacyEvidenceWithoutParseStatus()」的下游是被测服务、仓储或外部客户端替身；「assertThat、verify」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「EvidenceDossierFreezerTest.freezeToleratesLegacyEvidenceWithoutParseStatus()」守住「证据与版本化卷宗」的可执行规格，尤其防止 「2026-07-03T01:00:00Z」、「EVIDENCE_LEGACY_PARSE_STATUS」、「parseStatus」、「CASE_FREEZE」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void freezeToleratesLegacyEvidenceWithoutParseStatus() {
         Clock clock =
@@ -179,6 +205,11 @@ class EvidenceDossierFreezerTest {
                 .containsExactly("EVIDENCE_LEGACY_PARSE_STATUS");
     }
 
+    // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceDossierFreezerTest.frozenDossierUsesPersistedMultimodalScoresInsteadOfStatusDefaults()」。
+    // 具体功能：「EvidenceDossierFreezerTest.frozenDossierUsesPersistedMultimodalScoresInsteadOfStatusDefaults()」：复现“核对完整业务行为（场景方法「frozenDossierUsesPersistedMultimodalScoresInsteadOfStatusDefaults」）”场景：驱动 「dossierRepository.findByCaseIdAndDossierVersion」、「evidenceRepository.findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc」、「verificationRepository.findTopByEvidenceIdOrderByVerificationVersionDesc」、「dossierRepository.save」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「2026-07-03T01:00:00Z」、「EVIDENCE_MULTIMODAL_SCORE」、「VERIFY_MULTIMODAL_SCORE」、「CASE_FREEZE」。
+    // 上游调用：「EvidenceDossierFreezerTest.frozenDossierUsesPersistedMultimodalScoresInsteadOfStatusDefaults()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「EvidenceDossierFreezerTest.frozenDossierUsesPersistedMultimodalScoresInsteadOfStatusDefaults()」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「EvidenceDossierFreezerTest.frozenDossierUsesPersistedMultimodalScoresInsteadOfStatusDefaults()」守住「证据与版本化卷宗」的可执行规格，尤其防止 「2026-07-03T01:00:00Z」、「EVIDENCE_MULTIMODAL_SCORE」、「VERIFY_MULTIMODAL_SCORE」、「CASE_FREEZE」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void frozenDossierUsesPersistedMultimodalScoresInsteadOfStatusDefaults()
             throws Exception {
@@ -241,6 +272,11 @@ class EvidenceDossierFreezerTest {
                 .isEqualTo("MEDIUM");
     }
 
+    // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceDossierFreezerTest.lowRelevanceModelFactLinkDoesNotBecomeVerifiedFact()」。
+    // 具体功能：「EvidenceDossierFreezerTest.lowRelevanceModelFactLinkDoesNotBecomeVerifiedFact()」：复现“核对完整业务行为（场景方法「lowRelevanceModelFactLinkDoesNotBecomeVerifiedFact」）”场景：驱动 「dossierRepository.findByCaseIdAndDossierVersion」、「evidenceRepository.findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc」、「verificationRepository.findTopByEvidenceIdOrderByVerificationVersionDesc」、「dossierRepository.save」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「2026-07-03T01:00:00Z」、「EVIDENCE_UNRELATED_IMAGE」、「VERIFY_UNRELATED_IMAGE」、「CASE_FREEZE」。
+    // 上游调用：「EvidenceDossierFreezerTest.lowRelevanceModelFactLinkDoesNotBecomeVerifiedFact()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「EvidenceDossierFreezerTest.lowRelevanceModelFactLinkDoesNotBecomeVerifiedFact()」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「EvidenceDossierFreezerTest.lowRelevanceModelFactLinkDoesNotBecomeVerifiedFact()」守住「证据与版本化卷宗」的可执行规格，尤其防止 「2026-07-03T01:00:00Z」、「EVIDENCE_UNRELATED_IMAGE」、「VERIFY_UNRELATED_IMAGE」、「CASE_FREEZE」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void lowRelevanceModelFactLinkDoesNotBecomeVerifiedFact() throws Exception {
         Clock clock =
@@ -307,6 +343,11 @@ class EvidenceDossierFreezerTest {
         assertThat(matrix.path("evidence_strength").asText()).isNotEqualTo("HIGH");
     }
 
+    // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceDossierFreezerTest.evidence(String)」。
+    // 具体功能：「EvidenceDossierFreezerTest.evidence(String)」：作为测试辅助方法为“核对完整业务行为（场景方法「evidence」）”组装或读取「EvidenceItemEntity.uploaded」、「OffsetDateTime.parse」、「evidence.markSubmitted」，供本测试类的场景方法复用。
+    // 上游调用：「EvidenceDossierFreezerTest.evidence(String)」由本测试类中的 「EvidenceDossierFreezerTest.rejectedEvidenceRemainsInTheAuditStoreButIsExcludedFromTheFrozenVersion」、「EvidenceDossierFreezerTest.frozenDossierContainsEvidenceItemsPartySummaryAndFactEvidenceMatrix」、「EvidenceDossierFreezerTest.freezeToleratesLegacyEvidenceWithoutParseStatus」、「EvidenceDossierFreezerTest.frozenDossierUsesPersistedMultimodalScoresInsteadOfStatusDefaults」 调用。
+    // 下游影响：「EvidenceDossierFreezerTest.evidence(String)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「EvidenceDossierFreezerTest.evidence(String)」守住「证据与版本化卷宗」的可执行规格，尤其防止 「CASE_FREEZE」、「DOSSIER_COLLECTING」、「LOGISTICS_PROOF」、「USER_UPLOAD」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static EvidenceItemEntity evidence(String id) {
         EvidenceItemEntity evidence =
                 EvidenceItemEntity.uploaded(
@@ -332,6 +373,11 @@ class EvidenceDossierFreezerTest {
         return evidence;
     }
 
+    // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceDossierFreezerTest.verification(EvidenceItemEntity,EvidenceVerificationStatus)」。
+    // 具体功能：「EvidenceDossierFreezerTest.verification(EvidenceItemEntity,EvidenceVerificationStatus)」：作为测试辅助方法为“核对完整业务行为（场景方法「verification」）”组装或读取「EvidenceVerificationEntity.create」、「Instant.parse」、「item.getId」，供本测试类的场景方法复用。
+    // 上游调用：「EvidenceDossierFreezerTest.verification(EvidenceItemEntity,EvidenceVerificationStatus)」由本测试类中的 「EvidenceDossierFreezerTest.rejectedEvidenceRemainsInTheAuditStoreButIsExcludedFromTheFrozenVersion」、「EvidenceDossierFreezerTest.frozenDossierContainsEvidenceItemsPartySummaryAndFactEvidenceMatrix」 调用。
+    // 下游影响：「EvidenceDossierFreezerTest.verification(EvidenceItemEntity,EvidenceVerificationStatus)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「EvidenceDossierFreezerTest.verification(EvidenceItemEntity,EvidenceVerificationStatus)」守住「证据与版本化卷宗」的可执行规格，尤其防止 「VERIFY_」、「CASE_FREEZE」、「{}」、「[]」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static EvidenceVerificationEntity verification(
             EvidenceItemEntity item, EvidenceVerificationStatus status) {
         return EvidenceVerificationEntity.create(

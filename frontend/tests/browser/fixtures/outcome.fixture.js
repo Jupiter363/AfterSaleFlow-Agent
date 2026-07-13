@@ -1,3 +1,6 @@
+// 文件作用：自动化测试文件，验证 outcome.fixture 相关模块的行为、契约或页面布局。
+// 说明：本注释用于帮助读者先了解本文件职责，再继续阅读具体实现。
+
 import { expect } from "@playwright/test";
 
 export const OUTCOME_CASE_ID = "CASE_OUTCOME_LAYOUT";
@@ -21,6 +24,7 @@ const longParagraph =
     10,
   );
 
+// 业务位置：【前端浏览器回归测试】fulfillJson：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 function fulfillJson(route, data) {
   return route.fulfill({
     status: 200,
@@ -29,6 +33,7 @@ function fulfillJson(route, data) {
   });
 }
 
+// 业务位置：【前端浏览器回归测试】draftBlock：围绕 阶段处理结果或草案 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 function draftBlock(scenario) {
   const pressure = scenario === "long";
   return {
@@ -78,6 +83,7 @@ function draftBlock(scenario) {
   };
 }
 
+// 业务位置：【前端浏览器回归测试】outcomeSnapshot：围绕 阶段处理结果或草案 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 function outcomeSnapshot({ scenario = "final" } = {}) {
   const pressure = scenario === "long";
   const isDraft = scenario === "draft" || scenario === "reviewer" || pressure;
@@ -124,6 +130,7 @@ function outcomeSnapshot({ scenario = "final" } = {}) {
   };
 }
 
+// 业务位置：【前端浏览器回归测试】installOutcomeFixture：围绕 阶段处理结果或草案 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 export async function installOutcomeFixture(page, options = {}) {
   const actor = actors[options.role || "USER"];
   if (!actor) throw new Error(`Unsupported outcome role: ${options.role}`);

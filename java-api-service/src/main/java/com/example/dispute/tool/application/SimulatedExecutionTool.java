@@ -1,3 +1,9 @@
+/*
+ * 所属模块：执行工具目录。
+ * 文件职责：承载模拟执行工具在当前业务模块中的规则与协作边界。
+ * 业务链路：核心入口/契约为 「definitions」、「supports」、「execute」；注册可调用工具、暴露内部只读目录并提供本地模拟执行适配器。
+ * 关键边界：工具必须白名单注册且参数受 Schema 约束，不能执行任意模型文本
+ */
 package com.example.dispute.tool.application;
 
 import com.example.dispute.common.api.ErrorCode;
@@ -14,6 +20,11 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 import org.springframework.stereotype.Component;
 
+// 所属模块：【执行工具目录 / 应用编排层】类型「SimulatedExecutionTool」。
+// 类型职责：承载模拟执行工具在当前业务模块中的规则与协作边界；本类型显式提供 「definitions」、「supports」、「execute」、「digest」、「definition」。
+// 协作关系：主要由 「SimulatedExecutionToolTest.mapsEveryApprovedExecutionFamilyToADeterministicSimulation」、「SimulatedExecutionToolTest.recordsDeterministicToolFailuresInsteadOfPretendingSuccess」 使用。
+// 边界意义：工具必须白名单注册且参数受 Schema 约束，不能执行任意模型文本
+// Java 语法：class 同时封装状态与方法；final 依赖通过构造器注入后不可重新指向。
 @Component
 public class SimulatedExecutionTool implements ToolAdapter {
 
@@ -103,16 +114,31 @@ public class SimulatedExecutionTool implements ToolAdapter {
                             Collectors.toUnmodifiableMap(
                                     ToolDefinition::actionType, Function.identity()));
 
+    // 所属模块：【执行工具目录 / 应用编排层】「SimulatedExecutionTool.definitions()」。
+    // 具体功能：「SimulatedExecutionTool.definitions()」：构建定义列表，最终返回「List<ToolDefinition>」。
+    // 上游调用：「SimulatedExecutionTool.definitions()」由使用「SimulatedExecutionTool」的控制器、应用服务、Workflow Activity 或测试场景触发。
+    // 下游影响：「SimulatedExecutionTool.definitions()」只产生当前对象的返回值或字段变化，不访问额外基础设施；计算结果以「List<ToolDefinition>」交给调用方。
+    // 系统意义：「SimulatedExecutionTool.definitions()」负责主链路中的“定义列表”；工具必须白名单注册且参数受 Schema 约束，不能执行任意模型文本
     @Override
     public List<ToolDefinition> definitions() {
         return DEFINITIONS;
     }
 
+    // 所属模块：【执行工具目录 / 应用编排层】「SimulatedExecutionTool.supports(String)」。
+    // 具体功能：「SimulatedExecutionTool.supports(String)」：判断是否支持；实际协作者为 「OPERATIONS.containsKey」，最终返回「boolean」。
+    // 上游调用：「SimulatedExecutionTool.supports(String)」由使用「SimulatedExecutionTool」的控制器、应用服务、Workflow Activity 或测试场景触发。
+    // 下游影响：「SimulatedExecutionTool.supports(String)」向下依次触达 「OPERATIONS.containsKey」；计算结果以「boolean」交给调用方。
+    // 系统意义：「SimulatedExecutionTool.supports(String)」负责主链路中的“”；工具必须白名单注册且参数受 Schema 约束，不能执行任意模型文本
     @Override
     public boolean supports(String actionType) {
         return OPERATIONS.containsKey(actionType);
     }
 
+    // 所属模块：【执行工具目录 / 应用编排层】「SimulatedExecutionTool.execute(ExecutableAction)」。
+    // 具体功能：「SimulatedExecutionTool.execute(ExecutableAction)」：执行工具执行；实际协作者为 「action.actionType」、「action.parameters」、「action.idempotencyKey」、「operation.toolName」；不满足前置条件时抛出 「ToolExecutionException」；处理的关键状态/协议值包括 「action_type」、「simulate_failure」、「SIM_」、「status」，最终返回「ToolExecutionResult」。
+    // 上游调用：「SimulatedExecutionTool.execute(ExecutableAction)」的上游调用点包括 「SimulatedExecutionToolTest.mapsEveryApprovedExecutionFamilyToADeterministicSimulation」、「SimulatedExecutionToolTest.recordsDeterministicToolFailuresInsteadOfPretendingSuccess」。
+    // 下游影响：「SimulatedExecutionTool.execute(ExecutableAction)」向下依次触达 「action.actionType」、「action.parameters」、「action.idempotencyKey」、「operation.toolName」；计算结果以「ToolExecutionResult」交给调用方。
+    // 系统意义：「SimulatedExecutionTool.execute(ExecutableAction)」负责主链路中的“工具执行”；工具必须白名单注册且参数受 Schema 约束，不能执行任意模型文本
     @Override
     public ToolExecutionResult execute(ExecutableAction action) {
         ToolDefinition operation = OPERATIONS.get(action.actionType());
@@ -140,6 +166,11 @@ public class SimulatedExecutionTool implements ToolAdapter {
                         "idempotency_key", action.idempotencyKey()));
     }
 
+    // 所属模块：【执行工具目录 / 应用编排层】「SimulatedExecutionTool.digest(String)」。
+    // 具体功能：「SimulatedExecutionTool.digest(String)」：对模拟工具输入计算 SHA-256 十六进制摘要，生成可重复核对且不回显完整敏感参数的外部结果引用，最终返回「String」。
+    // 上游调用：「SimulatedExecutionTool.digest(String)」的上游调用点包括 「SimulatedExecutionTool.execute」。
+    // 下游影响：「SimulatedExecutionTool.digest(String)」向下依次触达 「MessageDigest.getInstance」、「HexFormat.of().formatHex」、「MessageDigest.getInstance("SHA-256").digest」；计算结果以「String」交给调用方。
+    // 系统意义：「SimulatedExecutionTool.digest(String)」负责主链路中的“digest”；工具必须白名单注册且参数受 Schema 约束，不能执行任意模型文本
     private static String digest(String value) {
         try {
             return HexFormat.of()
@@ -151,6 +182,11 @@ public class SimulatedExecutionTool implements ToolAdapter {
         }
     }
 
+    // 所属模块：【执行工具目录 / 应用编排层】「SimulatedExecutionTool.definition(String,String,String,String,String,RiskLevel)」。
+    // 具体功能：「SimulatedExecutionTool.definition(String,String,String,String,String,RiskLevel)」：构建定义，最终返回「ToolDefinition」。
+    // 上游调用：「SimulatedExecutionTool.definition(String,String,String,String,String,RiskLevel)」只由「SimulatedExecutionTool」内部流程使用，负责封装“定义”这一步校验、映射或状态转换。
+    // 下游影响：「SimulatedExecutionTool.definition(String,String,String,String,String,RiskLevel)」只产生当前对象的返回值或字段变化，不访问额外基础设施；计算结果以「ToolDefinition」交给调用方。
+    // 系统意义：「SimulatedExecutionTool.definition(String,String,String,String,String,RiskLevel)」负责主链路中的“定义”；工具必须白名单注册且参数受 Schema 约束，不能执行任意模型文本
     private static ToolDefinition definition(
             String actionType,
             String toolName,

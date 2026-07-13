@@ -1,7 +1,11 @@
+// 文件作用：前端状态管理文件，维护页面共享状态、缓存和业务动作。
+// 说明：本注释用于帮助读者先了解本文件职责，再继续阅读具体实现。
+
 import { reactive } from "vue";
 import { consumeCaseEvents, roomApi } from "../api/rooms";
 import { createResourceState, loadResource } from "./resource";
 
+// 业务位置：【前端状态仓库】createRoomState：把 API 响应、SSE 增量和用户操作 组装为本块需要的 当前阶段业务数据，供 跨组件一致的案件/房间/证据状态 使用。上游：API 响应、SSE 增量和用户操作。下游：跨组件一致的案件/房间/证据状态。边界：本地状态不能替代服务端事实。
 export function createRoomState() {
   return {
     messages: createResourceState([]),
@@ -16,6 +20,7 @@ export function createRoomState() {
 
 export const roomStore = reactive(createRoomState());
 
+// 业务位置：【前端状态仓库】loadRoomMessages：读取 房间消息和对话记录，并依据当前案件、角色和会话权限裁剪成可用输入。上游：API 响应、SSE 增量和用户操作。下游：跨组件一致的案件/房间/证据状态。边界：本地状态不能替代服务端事实。
 export function loadRoomMessages(actor, caseId, roomType, state = roomStore) {
   state.roomType = roomType;
   return loadResource(
@@ -25,6 +30,7 @@ export function loadRoomMessages(actor, caseId, roomType, state = roomStore) {
   );
 }
 
+// 业务位置：【前端状态仓库】resumeRoomEvents：围绕 Agent 流事件 计算本模块需要的派生信息，使其能够从 API 响应、SSE 增量和用户操作 正确进入 跨组件一致的案件/房间/证据状态。上游：API 响应、SSE 增量和用户操作。下游：跨组件一致的案件/房间/证据状态。边界：本地状态不能替代服务端事实。
 export async function resumeRoomEvents({
   state = roomStore,
   snapshotLoader,
@@ -58,6 +64,7 @@ export async function resumeRoomEvents({
   return state.lastEventId;
 }
 
+// 业务位置：【前端状态仓库】streamRoomEvents：围绕 Agent 流事件 计算本模块需要的派生信息，使其能够从 API 响应、SSE 增量和用户操作 正确进入 跨组件一致的案件/房间/证据状态。上游：API 响应、SSE 增量和用户操作。下游：跨组件一致的案件/房间/证据状态。边界：本地状态不能替代服务端事实。
 export async function streamRoomEvents({
   actor,
   caseId,

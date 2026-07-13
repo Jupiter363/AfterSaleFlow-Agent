@@ -1,3 +1,5 @@
+# 文件作用：自动化测试文件，验证 test_final_agents 相关模块的行为、契约或页面布局。
+
 from __future__ import annotations
 
 import pytest
@@ -36,6 +38,10 @@ from app.schemas import (
 )
 
 
+# 所属模块：Agent 角色能力 > test_final_agents；函数角色：回归测试用例。
+# 具体功能：`test_room_agent_contracts_expose_final_intake_and_forced_c6_fields` 验证接待信息在固定案例中的输出、边界和失败行为；关键协作调用：`HearingStageRequest`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 协作调用 `HearingStageRequest`。
+# 系统意义：固定“Agent 角色能力 > test_final_agents”的可观察契约，防止后续重构改变业务结果。
 def test_room_agent_contracts_expose_final_intake_and_forced_c6_fields() -> None:
     from app.schemas import DisputeIntakeResult
 
@@ -77,6 +83,10 @@ def test_room_agent_contracts_expose_final_intake_and_forced_c6_fields() -> None
     assert forced.latest_frozen_dossier_version == forced.dossier_version
 
 
+# 所属模块：Agent 角色能力 > test_final_agents；函数角色：回归测试用例。
+# 具体功能：`test_final_profiles_are_default_deny_and_cannot_approve_or_execute` 验证本阶段状态在固定案例中的输出、边界和失败行为；关键协作调用：`final_agent_profiles`、`profiles.values`、`profile.authorizes_tool`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 协作调用 `final_agent_profiles`、`profiles.values`、`profile.authorizes_tool`。
+# 系统意义：固定“Agent 角色能力 > test_final_agents”的可观察契约，防止后续重构改变业务结果。
 def test_final_profiles_are_default_deny_and_cannot_approve_or_execute() -> None:
     profiles = final_agent_profiles()
 
@@ -98,8 +108,16 @@ def test_final_profiles_are_default_deny_and_cannot_approve_or_execute() -> None
         assert not profile.authorizes_tool("case.close")
 
 
+# 所属模块：Agent 角色能力 > test_final_agents；函数角色：回归测试用例。
+# 具体功能：`test_dispute_intake_officer_reuses_intake_analysis_without_deciding` 验证接待信息在固定案例中的输出、边界和失败行为；关键协作调用：`DisputeIntakeOfficer`、`IntakeWorkflow`、`DisputeIntakeRequest`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `analyze`。
+# 系统意义：固定“Agent 角色能力 > test_final_agents”的可观察契约，防止后续重构改变业务结果。
 def test_dispute_intake_officer_reuses_intake_analysis_without_deciding() -> None:
     class IntakeWorkflow:
+        # 所属模块：Agent 角色能力 > test_final_agents；函数角色：类/闭包内部方法。
+        # 具体功能：`analyze` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`IntakeAnalysisOutput`。
+        # 上下游：上游为 本文件的 `test_dispute_intake_officer_reuses_intake_analysis_without_deciding`、`test_presiding_judge_only_runs_in_hearing_states_and_stays_non_final`、`test_evaluation_agent_is_closed_case_offline_only`；下游为 协作调用 `IntakeAnalysisOutput`。
+        # 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
         def analyze(self, request, _context):
             from app.schemas import IntakeAnalysisOutput
 
@@ -137,6 +155,10 @@ def test_dispute_intake_officer_reuses_intake_analysis_without_deciding() -> Non
     assert result.liability_determined is False
 
     class NonDisputeWorkflow:
+        # 所属模块：Agent 角色能力 > test_final_agents；函数角色：类/闭包内部方法。
+        # 具体功能：`analyze` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`IntakeAnalysisOutput`。
+        # 上下游：上游为 本文件的 `test_dispute_intake_officer_reuses_intake_analysis_without_deciding`、`test_presiding_judge_only_runs_in_hearing_states_and_stays_non_final`、`test_evaluation_agent_is_closed_case_offline_only`；下游为 协作调用 `IntakeAnalysisOutput`。
+        # 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
         def analyze(self, request, _context):
             from app.schemas import IntakeAnalysisOutput
 
@@ -177,6 +199,10 @@ def test_dispute_intake_officer_reuses_intake_analysis_without_deciding() -> Non
         )
 
 
+# 所属模块：Agent 角色能力 > test_final_agents；函数角色：回归测试用例。
+# 具体功能：`test_evidence_clerk_versions_and_preserves_evidence_without_deciding` 验证当前可见证据在固定案例中的输出、边界和失败行为；关键协作调用：`EvidenceClerk`、`EvidenceBuildRequest`、`clerk.build`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 协作调用 `EvidenceClerk`、`EvidenceBuildRequest`、`clerk.build`、`DossierEvidenceItem`。
+# 系统意义：固定“Agent 角色能力 > test_final_agents”的可观察契约，防止后续重构改变业务结果。
 def test_evidence_clerk_versions_and_preserves_evidence_without_deciding() -> None:
     clerk = EvidenceClerk()
     request = EvidenceBuildRequest(
@@ -281,6 +307,10 @@ def test_evidence_clerk_versions_and_preserves_evidence_without_deciding() -> No
     assert result.visibility_warnings
 
 
+# 所属模块：Agent 角色能力 > test_final_agents；函数角色：模块私有业务函数。
+# 具体功能：`_frozen_input` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`FrozenDeliberationInput`。
+# 上下游：上游为 本文件的 `test_all_critics_receive_the_same_frozen_input_and_blocker_is_preserved`、`test_panel_contract_rejects_unfrozen_room_messages_or_newer_evidence`、`test_failed_or_timed_out_critic_requires_human_review`、`test_critic_rejects_output_for_another_frozen_snapshot`；下游为 协作调用 `FrozenDeliberationInput`。
+# 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
 def _frozen_input() -> FrozenDeliberationInput:
     return FrozenDeliberationInput(
         case_id="CASE_panel",
@@ -297,9 +327,17 @@ def _frozen_input() -> FrozenDeliberationInput:
     )
 
 
+# 所属模块：Agent 角色能力 > test_final_agents；函数角色：回归测试用例。
+# 具体功能：`test_all_critics_receive_the_same_frozen_input_and_blocker_is_preserved` 验证合议质疑结果在固定案例中的输出、边界和失败行为；关键协作调用：`build_default_critics`、`run`、`fingerprints.append`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_frozen_input`。
+# 系统意义：固定“Agent 角色能力 > test_final_agents”的可观察契约，防止后续重构改变业务结果。
 def test_all_critics_receive_the_same_frozen_input_and_blocker_is_preserved() -> None:
     fingerprints: list[str] = []
 
+    # 所属模块：Agent 角色能力 > test_final_agents；函数角色：类/闭包内部方法。
+    # 具体功能：`evaluator` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`fingerprints.append`、`CriticDraft`。
+    # 上下游：上游为 受治理的案件上下文和角色提示词；下游为 协作调用 `fingerprints.append`、`CriticDraft`。
+    # 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
     def evaluator(
         critic_type: CriticType,
         frozen_input: FrozenDeliberationInput,
@@ -348,6 +386,10 @@ def test_all_critics_receive_the_same_frozen_input_and_blocker_is_preserved() ->
     assert report.execution_triggered is False
 
 
+# 所属模块：Agent 角色能力 > test_final_agents；函数角色：回归测试用例。
+# 具体功能：`test_panel_contract_rejects_unfrozen_room_messages_or_newer_evidence` 验证当前可见证据在固定案例中的输出、边界和失败行为；关键协作调用：`model_dump`、`pytest.raises`、`FrozenDeliberationInput.model_validate`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_frozen_input`。
+# 系统意义：固定“Agent 角色能力 > test_final_agents”的可观察契约，防止后续重构改变业务结果。
 def test_panel_contract_rejects_unfrozen_room_messages_or_newer_evidence() -> None:
     payload = _frozen_input().model_dump(mode="json")
     payload["room_messages"] = [{"sequence": 18, "content": "new assertion"}]
@@ -357,9 +399,17 @@ def test_panel_contract_rejects_unfrozen_room_messages_or_newer_evidence() -> No
         FrozenDeliberationInput.model_validate(payload)
 
 
+# 所属模块：Agent 角色能力 > test_final_agents；函数角色：回归测试用例。
+# 具体功能：`test_failed_or_timed_out_critic_requires_human_review` 验证人工复核信息在固定案例中的输出、边界和失败行为；关键协作调用：`run`、`next`、`CriticDraft`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_frozen_input`。
+# 系统意义：固定“Agent 角色能力 > test_final_agents”的可观察契约，防止后续重构改变业务结果。
 def test_failed_or_timed_out_critic_requires_human_review() -> None:
     frozen_input = _frozen_input()
 
+    # 所属模块：Agent 角色能力 > test_final_agents；函数角色：类/闭包内部方法。
+    # 具体功能：`evaluator` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`CriticDraft`、`TimeoutError`。
+    # 上下游：上游为 受治理的案件上下文和角色提示词；下游为 协作调用 `CriticDraft`、`TimeoutError`。
+    # 系统意义：失败显式映射为 `TimeoutError`，避免错误状态被当成成功结果。
     def evaluator(
         critic_type: CriticType,
         _frozen_input: FrozenDeliberationInput,
@@ -384,7 +434,15 @@ def test_failed_or_timed_out_critic_requires_human_review() -> None:
     assert "RULE_CRITIC_UNAVAILABLE" in report.major_risks
 
 
+# 所属模块：Agent 角色能力 > test_final_agents；函数角色：回归测试用例。
+# 具体功能：`test_critic_rejects_output_for_another_frozen_snapshot` 验证合议质疑结果在固定案例中的输出、边界和失败行为；关键协作调用：`CriticAgent`、`critic.review`、`CriticDraft`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_frozen_input`。
+# 系统意义：固定“Agent 角色能力 > test_final_agents”的可观察契约，防止后续重构改变业务结果。
 def test_critic_rejects_output_for_another_frozen_snapshot() -> None:
+    # 所属模块：Agent 角色能力 > test_final_agents；函数角色：类/闭包内部方法。
+    # 具体功能：`wrong_snapshot` 围绕冻结快照计算该函数独立负责的业务派生值；关键协作调用：`CriticDraft`。
+    # 上下游：上游为 受治理的案件上下文和角色提示词；下游为 协作调用 `CriticDraft`。
+    # 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
     def wrong_snapshot(
         _critic_type: CriticType,
         _frozen_input: FrozenDeliberationInput,
@@ -402,6 +460,10 @@ def test_critic_rejects_output_for_another_frozen_snapshot() -> None:
     assert report.blocking_issues == ["FROZEN_INPUT_MISMATCH"]
 
 
+# 所属模块：Agent 角色能力 > test_final_agents；函数角色：回归测试用例。
+# 具体功能：`test_review_copilot_validates_frozen_refs_and_cannot_issue_a_decision` 校验人工复核信息的 Schema、权限和阶段约束，拒绝越权或不一致数据；关键协作调用：`ReviewCopilotAnswer`、`ReviewCopilot`、`ReviewCopilotRequest`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 协作调用 `ReviewCopilotAnswer`、`ReviewCopilot`、`ReviewCopilotRequest`、`copilot.query`。
+# 系统意义：固定“Agent 角色能力 > test_final_agents”的可观察契约，防止后续重构改变业务结果。
 def test_review_copilot_validates_frozen_refs_and_cannot_issue_a_decision() -> None:
     safe_answer = ReviewCopilotAnswer(
         answer="The draft relies on the carrier scan, while receipt remains disputed.",
@@ -466,6 +528,10 @@ def test_review_copilot_validates_frozen_refs_and_cannot_issue_a_decision() -> N
 
 
 class _FakeHearingWorkflow:
+    # 所属模块：Agent 角色能力 > test_final_agents；函数角色：类/闭包内部方法。
+    # 具体功能：`analyze` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`HearingAnalysisResult`、`AdjudicationDraftOutput`、`AdjudicationDraft`。
+    # 上下游：上游为 本文件的 `test_dispute_intake_officer_reuses_intake_analysis_without_deciding`、`test_presiding_judge_only_runs_in_hearing_states_and_stays_non_final`、`test_evaluation_agent_is_closed_case_offline_only`；下游为 协作调用 `HearingAnalysisResult`、`AdjudicationDraftOutput`、`AdjudicationDraft`。
+    # 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
     def analyze(self, request, _context):
         return HearingAnalysisResult(
             case_id=request.case_id,
@@ -487,6 +553,10 @@ class _FakeHearingWorkflow:
         )
 
 
+# 所属模块：Agent 角色能力 > test_final_agents；函数角色：回归测试用例。
+# 具体功能：`test_presiding_judge_only_runs_in_hearing_states_and_stays_non_final` 验证庭审材料在固定案例中的输出、边界和失败行为；关键协作调用：`PresidingJudge`、`_FakeHearingWorkflow`、`pytest.raises`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `analyze`。
+# 系统意义：固定“Agent 角色能力 > test_final_agents”的可观察契约，防止后续重构改变业务结果。
 def test_presiding_judge_only_runs_in_hearing_states_and_stays_non_final() -> None:
     judge = PresidingJudge(_FakeHearingWorkflow())
     request = type(
@@ -503,8 +573,16 @@ def test_presiding_judge_only_runs_in_hearing_states_and_stays_non_final() -> No
     assert result.adjudication_draft.draft.requires_human_review is True
 
 
+# 所属模块：Agent 角色能力 > test_final_agents；函数角色：回归测试用例。
+# 具体功能：`test_presiding_judge_runs_one_explicit_c1_c6_stage` 验证法官结果在固定案例中的输出、边界和失败行为；关键协作调用：`PresidingJudge`、`HearingStageRequest`、`StageWorkflow`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `run_stage`。
+# 系统意义：固定“Agent 角色能力 > test_final_agents”的可观察契约，防止后续重构改变业务结果。
 def test_presiding_judge_runs_one_explicit_c1_c6_stage() -> None:
     class StageWorkflow(_FakeHearingWorkflow):
+        # 所属模块：Agent 角色能力 > test_final_agents；函数角色：类/闭包内部方法。
+        # 具体功能：`run_stage` 驱动本阶段状态对应的业务步骤并返回阶段结果；关键协作调用：`HearingStageResult`。
+        # 上下游：上游为 本文件的 `test_presiding_judge_runs_one_explicit_c1_c6_stage`；下游为 协作调用 `HearingStageResult`。
+        # 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
         def run_stage(self, request, _context):
             return HearingStageResult(
                 case_id=request.case_id,
@@ -544,6 +622,10 @@ def test_presiding_judge_runs_one_explicit_c1_c6_stage() -> None:
 
 
 class _FakeEvaluationWorkflow:
+    # 所属模块：Agent 角色能力 > test_final_agents；函数角色：类/闭包内部方法。
+    # 具体功能：`analyze` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`EvaluationAnalysisResult`、`EvaluationMetricScores`、`EvaluationFinding`。
+    # 上下游：上游为 本文件的 `test_dispute_intake_officer_reuses_intake_analysis_without_deciding`、`test_presiding_judge_only_runs_in_hearing_states_and_stays_non_final`、`test_evaluation_agent_is_closed_case_offline_only`；下游为 协作调用 `EvaluationAnalysisResult`、`EvaluationMetricScores`、`EvaluationFinding`。
+    # 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
     def analyze(self, request, _context):
         return EvaluationAnalysisResult(
             case_id=request.case_id,
@@ -574,6 +656,10 @@ class _FakeEvaluationWorkflow:
         )
 
 
+# 所属模块：Agent 角色能力 > test_final_agents；函数角色：回归测试用例。
+# 具体功能：`test_evaluation_agent_is_closed_case_offline_only` 验证本阶段状态在固定案例中的输出、边界和失败行为；关键协作调用：`EvaluationAgent`、`_FakeEvaluationWorkflow`、`pytest.raises`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `analyze`。
+# 系统意义：固定“Agent 角色能力 > test_final_agents”的可观察契约，防止后续重构改变业务结果。
 def test_evaluation_agent_is_closed_case_offline_only() -> None:
     agent = EvaluationAgent(_FakeEvaluationWorkflow())
     closed_request = type(

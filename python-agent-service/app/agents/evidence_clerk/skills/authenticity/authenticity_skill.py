@@ -1,3 +1,5 @@
+# 文件作用：Python Agent 服务代码文件，承载售后争议智能体的 API、配置、模型调用或业务流程。
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -27,6 +29,10 @@ class EvidenceAuthenticitySkill:
     integrity, and relevance. It never decides liability or remedy.
     """
 
+    # 所属模块：证据室 Agent > 真实性初筛技能；函数角色：类/闭包内部方法。
+    # 具体功能：`draft` 围绕非最终草案计算该函数独立负责的业务派生值；关键协作调用：`EvidenceAuthenticityDraft`、`questions.append`、`join`。
+    # 上下游：上游为 Java 按参与方权限筛选的证据、事实目标、私有会话；下游为 本文件的 `_weak_points`、`_question_for`、`_confidence`、`_flags_for`。
+    # 系统意义：该函数在系统中的业务边界是：只核验证据，不定责；模型不得引用本轮不可见材料。
     def draft(self, request: EvidenceTurnWorkingSet) -> EvidenceAuthenticityDraft:
         questions: list[EvidenceTurnQuestion] = []
         suggestions: list[EvidenceVerificationSuggestion] = []
@@ -97,6 +103,10 @@ class EvidenceAuthenticitySkill:
         )
 
 
+# 所属模块：证据室 Agent > 真实性初筛技能；函数角色：模块私有业务函数。
+# 具体功能：`_weak_points` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`evidence_text.casefold`、`points.add`。
+# 上下游：上游为 本文件的 `EvidenceAuthenticitySkill.draft`；下游为 协作调用 `evidence_text.casefold`、`points.add`。
+# 系统意义：该函数在系统中的业务边界是：只核验证据，不定责；模型不得引用本轮不可见材料。
 def _weak_points(parser_warning: str | None, evidence_text: str) -> set[str]:
     normalized = evidence_text.casefold()
     points: set[str] = set()
@@ -111,6 +121,10 @@ def _weak_points(parser_warning: str | None, evidence_text: str) -> set[str]:
     return points
 
 
+# 所属模块：证据室 Agent > 真实性初筛技能；函数角色：模块私有业务函数。
+# 具体功能：`_question_for` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`join`、`EvidenceTurnQuestion`、`requested_points.add`。
+# 上下游：上游为 本文件的 `EvidenceAuthenticitySkill.draft`；下游为 协作调用 `join`、`EvidenceTurnQuestion`、`requested_points.add`。
+# 系统意义：该函数在系统中的业务边界是：只核验证据，不定责；模型不得引用本轮不可见材料。
 def _question_for(
     evidence_id: str,
     weak_points: set[str],
@@ -142,6 +156,10 @@ def _question_for(
     )
 
 
+# 所属模块：证据室 Agent > 真实性初筛技能；函数角色：模块私有业务函数。
+# 具体功能：`_flags_for` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`EvidenceAuthenticityFlag`。
+# 上下游：上游为 本文件的 `EvidenceAuthenticitySkill.draft`；下游为 协作调用 `EvidenceAuthenticityFlag`。
+# 系统意义：该函数在系统中的业务边界是：只核验证据，不定责；模型不得引用本轮不可见材料。
 def _flags_for(
     evidence_id: str,
     weak_points: Iterable[str],
@@ -164,6 +182,10 @@ def _flags_for(
     ]
 
 
+# 所属模块：证据室 Agent > 真实性初筛技能；函数角色：模块私有业务函数。
+# 具体功能：`_confidence` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`evidence_text.strip`、`round`。
+# 上下游：上游为 本文件的 `EvidenceAuthenticitySkill.draft`；下游为 协作调用 `evidence_text.strip`、`round`。
+# 系统意义：该函数在系统中的业务边界是：只核验证据，不定责；模型不得引用本轮不可见材料。
 def _confidence(parser_warning: str | None, evidence_text: str) -> float:
     score = 0.72
     if parser_warning:

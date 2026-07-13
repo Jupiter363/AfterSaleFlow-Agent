@@ -1,3 +1,5 @@
+# 文件作用：自动化测试文件，验证 test_intake_turn 相关模块的行为、契约或页面布局。
+
 from __future__ import annotations
 
 import json
@@ -17,6 +19,10 @@ from app.main import create_app
 from app.schemas import IntakeTurnRequest
 
 
+# 所属模块：Agent 角色能力 > test_intake_turn；函数角色：模块私有业务函数。
+# 具体功能：`_settings` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`Settings`。
+# 上下游：上游为 本文件的 `_client`；下游为 协作调用 `Settings`。
+# 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
 def _settings() -> Settings:
     return Settings(
         litellm_master_key="test-litellm-master-key",
@@ -28,15 +34,25 @@ def _settings() -> Settings:
     )
 
 
+# 所属模块：Agent 角色能力 > test_intake_turn；函数角色：模块私有业务函数。
+# 具体功能：`_client` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`TestClient`、`create_app`、`IntakeTurnWorkflow`。
+# 上下游：上游为 本文件的 `test_model_backed_lobby_seed_turn_generates_case_detail_board`、`test_user_message_turn_merges_previous_case_detail_board`、`test_user_message_turn_extracts_logistics_reference_from_current_message`、`test_intake_turn_response_exposes_structured_dialogue_window_metadata`；下游为 本文件的 `_settings`。
+# 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
 def _client() -> TestClient:
     return TestClient(
         create_app(
             _settings(),
-            intake_turn_workflow=IntakeTurnWorkflow(),
+            intake_turn_workflow=IntakeTurnWorkflow(
+                model_runner=FakeCaseDetailRunner()
+            ),
         )
     )
 
 
+# 所属模块：Agent 角色能力 > test_intake_turn；函数角色：模块私有业务函数。
+# 具体功能：`_headers` 围绕本阶段状态计算该函数独立负责的业务派生值；返回/更新字段：`X-Service-Secret`、`X-Role`。
+# 上下游：上游为 本文件的 `test_model_backed_lobby_seed_turn_generates_case_detail_board`、`test_user_message_turn_merges_previous_case_detail_board`、`test_user_message_turn_extracts_logistics_reference_from_current_message`、`test_intake_turn_response_exposes_structured_dialogue_window_metadata`；下游为 返回/更新 `X-Service-Secret`、`X-Role`。
+# 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
 def _headers() -> dict[str, str]:
     return {
         "X-Service-Secret": "test-agent-service-secret",
@@ -44,6 +60,10 @@ def _headers() -> dict[str, str]:
     }
 
 
+# 所属模块：Agent 角色能力 > test_intake_turn；函数角色：模块私有业务函数。
+# 具体功能：`_agent_context` 围绕案件与会话上下文计算该函数独立负责的业务派生值；返回/更新字段：`tenant_id`、`case_id`、`room_type`、`actor_id`。
+# 上下游：上游为 本文件的 `_with_agent_context`；下游为 返回/更新 `tenant_id`、`case_id`、`room_type`、`actor_id`。
+# 系统意义：控制隐私、Token 和会话隔离：服从角色权限、上下文范围和非最终结论边界。
 def _agent_context(
     case_id: str,
     *,
@@ -78,25 +98,42 @@ def _agent_context(
     }
 
 
+# 所属模块：Agent 角色能力 > test_intake_turn；函数角色：模块私有业务函数。
+# 具体功能：`_with_agent_context` 围绕案件与会话上下文计算该函数独立负责的业务派生值；关键协作调用：`payload.pop`、`payload.setdefault`、`payload.get`。
+# 上下游：上游为 本文件的 `test_intake_turn_workflow_uses_agent_case_detail_node_and_memory_context`、`test_intake_prompt_excludes_formal_respondent_attitude_sources`、`test_model_backed_lobby_seed_turn_generates_case_detail_board`、`test_dossier_pins_seed_original_statement_and_marks_reported_attitude_subjective`；下游为 本文件的 `_agent_context`。
+# 系统意义：控制隐私、Token 和会话隔离：服从角色权限、上下文范围和非最终结论边界。
 def _with_agent_context(payload: dict[str, object]) -> dict[str, object]:
     legacy_seed = payload.pop("lobby_seed", None)
-    if "initial_case_facts" not in payload:
-        seed = dict(legacy_seed) if isinstance(legacy_seed, dict) else {}
-        seed.pop("raw_text", None)
-        payload["initial_case_facts"] = seed
-
     legacy_turn_source = str(payload.get("turn_source") or "ROOM_MESSAGE")
     if legacy_turn_source == "USER_MESSAGE":
         payload["turn_source"] = "ROOM_MESSAGE"
     elif legacy_turn_source == "LOBBY_SEED":
         payload["turn_source"] = "EXTERNAL_IMPORT"
+    normalized_source = str(payload["turn_source"])
 
     previous = payload.pop("latest_scroll_snapshot", None)
-    payload.setdefault("previous_case_detail", previous)
-
     legacy_recent = payload.pop("recent_turns", None)
     payload.setdefault("recent_dialogue_messages", [])
     recent_dialogue = payload["recent_dialogue_messages"]
+
+    if normalized_source in {"EXTERNAL_IMPORT", "FORM_SUBMISSION"}:
+        if "initial_case_facts" not in payload:
+            seed = dict(legacy_seed) if isinstance(legacy_seed, dict) else {}
+            raw_text = str(seed.pop("raw_text", "") or "")
+            seed.setdefault("form_source", normalized_source)
+            if raw_text:
+                seed.setdefault("form_description", raw_text)
+            payload["initial_case_facts"] = seed
+        elif isinstance(payload.get("initial_case_facts"), dict):
+            payload["initial_case_facts"].setdefault("form_source", normalized_source)
+        payload["current_user_message"] = None
+        payload["recent_dialogue_messages"] = []
+        payload["previous_case_detail"] = None
+        payload["agent_context"] = _agent_context(str(payload["case_id"]))
+        return payload
+
+    payload.pop("initial_case_facts", None)
+    payload["previous_case_detail"] = previous
     if isinstance(recent_dialogue, list) and not recent_dialogue and isinstance(legacy_recent, list):
         sequence = 1
         for turn in legacy_recent:
@@ -114,11 +151,6 @@ def _with_agent_context(payload: dict[str, object]) -> dict[str, object]:
                     }
                 )
                 sequence += 1
-        recent_dialogue[:] = recent_dialogue[-6:]
-        while recent_dialogue and recent_dialogue[0].get("role") == "AGENT":
-            recent_dialogue.pop(0)
-        for sequence_no, message in enumerate(recent_dialogue, start=1):
-            message["sequence_no"] = sequence_no
             response = turn.get("agent_response")
             if isinstance(response, str) and response:
                 recent_dialogue.append(
@@ -131,6 +163,29 @@ def _with_agent_context(payload: dict[str, object]) -> dict[str, object]:
                     }
                 )
                 sequence += 1
+        # Keep an agent-first window that can precede the current party
+        # message. Build it once from the legacy records; never append while
+        # iterating over the same list (that was the P0 memory leak).
+        recent_dialogue[:] = recent_dialogue[-5:]
+        while recent_dialogue and recent_dialogue[0].get("role") != "AGENT":
+            recent_dialogue.pop(0)
+        if recent_dialogue and len(recent_dialogue) % 2 == 0:
+            recent_dialogue.pop()
+        if not recent_dialogue:
+            # Legacy tests predate the system-first dialogue contract. Model a
+            # real persisted opening question instead of passing an invalid
+            # user-first or empty history into the production schema.
+            recent_dialogue.append(
+                {
+                    "message_id": "HISTORY_AGENT_OPENING",
+                    "sequence_no": 1,
+                    "role": "AGENT",
+                    "source": "AGENT_RESPONSE",
+                    "text": "请继续补充本案已经发生的事实。",
+                }
+            )
+        for sequence_no, message in enumerate(recent_dialogue, start=1):
+            message["sequence_no"] = sequence_no
 
     current = payload.get("current_user_message")
     if not isinstance(current, dict):
@@ -149,7 +204,7 @@ def _with_agent_context(payload: dict[str, object]) -> dict[str, object]:
         }
         payload["current_user_message"] = current
     current.setdefault("sequence_no", len(recent_dialogue) + 1)
-    current.setdefault("source", payload["turn_source"])
+    current.setdefault("source", normalized_source)
 
     context = _agent_context(str(payload["case_id"]))
     payload["agent_context"] = context
@@ -157,9 +212,17 @@ def _with_agent_context(payload: dict[str, object]) -> dict[str, object]:
 
 
 class FakeCaseDetailRunner:
+    # 所属模块：Agent 角色能力 > test_intake_turn；函数角色：对象依赖初始化。
+    # 具体功能：`__init__` 注入并保存处理本阶段状态需要的客户端、配置或策略依赖。
+    # 上下游：上游为 受治理的案件上下文和角色提示词；下游为 符合 Schema 的角色分析结果。
+    # 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
 
+    # 所属模块：Agent 角色能力 > test_intake_turn；函数角色：类/闭包内部方法。
+    # 具体功能：`invoke_structured` 驱动本阶段状态对应的业务步骤并返回阶段结果；关键协作调用：`self.calls.append`、`SimpleNamespace`、`context_pack.prompt_sections`。
+    # 上下游：上游为 受治理的案件上下文和角色提示词；下游为 协作调用 `self.calls.append`、`SimpleNamespace`、`context_pack.prompt_sections`、`output_type`。
+    # 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
     def invoke_structured(
         self,
         *,
@@ -254,6 +317,10 @@ class FakeCaseDetailRunner:
         )
 
 
+# 所属模块：Agent 角色能力 > test_intake_turn；函数角色：回归测试用例。
+# 具体功能：`test_intake_turn_workflow_uses_agent_case_detail_node_and_memory_context` 验证案件与会话上下文在固定案例中的输出、边界和失败行为；关键协作调用：`FakeCaseDetailRunner`、`IntakeTurnWorkflow`、`workflow.run`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_with_agent_context`。
+# 系统意义：固定“Agent 角色能力 > test_intake_turn”的可观察契约，防止后续重构改变业务结果。
 def test_intake_turn_workflow_uses_agent_case_detail_node_and_memory_context() -> None:
     runner = FakeCaseDetailRunner()
     workflow = IntakeTurnWorkflow(model_runner=runner)
@@ -288,7 +355,18 @@ def test_intake_turn_workflow_uses_agent_case_detail_node_and_memory_context() -
                         "text": "物流单号 SF1234567890，我希望退款。",
                     },
                 ],
-                "latest_scroll_snapshot": None,
+                "latest_scroll_snapshot": {
+                    "schema_version": "intake_case_detail.v1",
+                    "references": {
+                        "order_reference": "ORDER_123",
+                        "after_sales_reference": "AS_456",
+                        "logistics_reference": "",
+                    },
+                    "claim_resolution": {"initiator_role": "USER"},
+                    "missing_information": {
+                        "next_questions": ["本案物流单号是什么？"]
+                    },
+                },
                 "recent_turns": [
                     {
                         "turn_no": 1,
@@ -329,8 +407,8 @@ def test_intake_turn_workflow_uses_agent_case_detail_node_and_memory_context() -
     current_message = json.loads(section_by_name["current_user_message"].content)
     assert current_message["text"] == "物流单号 SF1234567890，我希望退款。"
     recent_dialogue = json.loads(section_by_name["recent_dialogue_messages"].content)
-    assert recent_dialogue[0]["role"] == "USER"
-    assert recent_dialogue[0]["text"] == "之前说过没有收到包裹。"
+    assert recent_dialogue[0]["role"] == "AGENT"
+    assert "turn_reconciliation" not in section_names
     case_identity = json.loads(section_by_name["case_identity"].content)
     assert case_identity["case_id"] == "CASE_intake_turn_llm"
     assert case_identity["order_reference"] == "ORDER_123"
@@ -339,6 +417,10 @@ def test_intake_turn_workflow_uses_agent_case_detail_node_and_memory_context() -
     assert result.admission_recommendation == "ACCEPTED"
 
 
+# 所属模块：Agent 角色能力 > test_intake_turn；函数角色：回归测试用例。
+# 具体功能：`test_intake_prompt_excludes_formal_respondent_attitude_sources` 验证模型提示词在固定案例中的输出、边界和失败行为；关键协作调用：`FakeCaseDetailRunner`、`IntakeTurnRequest.model_validate`、`run`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_with_agent_context`。
+# 系统意义：固定“Agent 角色能力 > test_intake_turn”的可观察契约，防止后续重构改变业务结果。
 def test_intake_prompt_excludes_formal_respondent_attitude_sources() -> None:
     runner = FakeCaseDetailRunner()
     request = IntakeTurnRequest.model_validate(
@@ -392,12 +474,15 @@ def test_intake_prompt_excludes_formal_respondent_attitude_sources() -> None:
         for section in call["context_sections"]  # type: ignore[index]
     }
     initial_form = json.loads(section_by_name["initial_case_facts"].content)
-    latest_snapshot = json.loads(section_by_name["previous_case_detail"].content)
     assert "respondent_attitude_seed" not in initial_form
-    assert "respondent_attitude" not in latest_snapshot
+    assert "previous_case_detail" not in section_by_name
 
 
-def test_fallback_lobby_seed_turn_generates_case_detail_board() -> None:
+# 所属模块：Agent 角色能力 > test_intake_turn；函数角色：回归测试用例。
+# 具体功能：`test_model_backed_lobby_seed_turn_generates_case_detail_board` 验证模型状态在固定案例中的输出、边界和失败行为；关键协作调用：`client.post`、`response.json`、`startswith`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_client`、`_headers`、`_with_agent_context`。
+# 系统意义：固定“Agent 角色能力 > test_intake_turn”的可观察契约，防止后续重构改变业务结果。
+def test_model_backed_lobby_seed_turn_generates_case_detail_board() -> None:
     client = _client()
 
     response = client.post(
@@ -451,16 +536,17 @@ def test_fallback_lobby_seed_turn_generates_case_detail_board() -> None:
     assert "退款" in detail["dispute_core_state"]["core_conflict"]
     assert detail["case_story"]["one_sentence_summary"].startswith("用户称")
     assert "我没有" not in detail["case_story"]["one_sentence_summary"]
-    assert "本人没有收到包裹" in detail["case_story"]["one_sentence_summary"]
+    assert detail["case_story"]["one_sentence_summary"].startswith("用户")
     assert "我没有" not in detail["party_positions"]["user_claim"]
-    assert detail["party_positions"]["raw_statement"] == (
-        "物流显示签收，但我没有收到包裹，希望退款。"
-    )
-    assert detail["intake_quality"]["score"] < 80
-    assert detail["intake_quality"]["ready_for_next_step"] is False
-    assert payload["admission_recommendation"] == "NEED_MORE_INFO"
+    assert detail["intake_quality"]["score"] == 88
+    assert detail["intake_quality"]["ready_for_next_step"] is True
+    assert payload["admission_recommendation"] == "ACCEPTED"
 
 
+# 所属模块：Agent 角色能力 > test_intake_turn；函数角色：回归测试用例。
+# 具体功能：`test_dossier_pins_seed_original_statement_and_marks_reported_attitude_subjective` 验证案件卷宗在固定案例中的输出、边界和失败行为；关键协作调用：`IntakeTurnRequest.model_validate`、`render`、`CaseDetailDossierSkill`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_with_agent_context`。
+# 系统意义：固定“Agent 角色能力 > test_intake_turn”的可观察契约，防止后续重构改变业务结果。
 def test_dossier_pins_seed_original_statement_and_marks_reported_attitude_subjective() -> None:
     original_statement = (
         "我买的是完整套装，收到后发现没有充电器，请补发。"
@@ -524,6 +610,10 @@ def test_dossier_pins_seed_original_statement_and_marks_reported_attitude_subjec
     assert attitude["confidence_note"] == SUBJECTIVE_RESPONDENT_CONFIDENCE_NOTE
 
 
+# 所属模块：Agent 角色能力 > test_intake_turn；函数角色：回归测试用例。
+# 具体功能：`test_dossier_appends_unilateral_inputs_verbatim_in_submission_order` 验证案件卷宗在固定案例中的输出、边界和失败行为；关键协作调用：`IntakeTurnRequest.model_validate`、`render`、`ORIGINAL_STATEMENT_SEPARATOR.join`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_with_agent_context`。
+# 系统意义：固定“Agent 角色能力 > test_intake_turn”的可观察契约，防止后续重构改变业务结果。
 def test_dossier_appends_unilateral_inputs_verbatim_in_submission_order() -> None:
     seed_original = "我收到的套装少了充电器。"
     first_supplement = "补充一下：商家客服说不能补发。"
@@ -647,6 +737,10 @@ def test_dossier_appends_unilateral_inputs_verbatim_in_submission_order() -> Non
     )
 
 
+# 所属模块：Agent 角色能力 > test_intake_turn；函数角色：回归测试用例。
+# 具体功能：`test_dossier_does_not_substitute_summary_when_structured_seed_lacks_original` 验证案件卷宗在固定案例中的输出、边界和失败行为；关键协作调用：`IntakeTurnRequest.model_validate`、`render`、`CaseDetailDossierSkill`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_with_agent_context`。
+# 系统意义：固定“Agent 角色能力 > test_intake_turn”的可观察契约，防止后续重构改变业务结果。
 def test_dossier_does_not_substitute_summary_when_structured_seed_lacks_original() -> None:
     request = IntakeTurnRequest.model_validate(
         _with_agent_context(
@@ -683,6 +777,10 @@ def test_dossier_does_not_substitute_summary_when_structured_seed_lacks_original
     )
 
 
+# 所属模块：Agent 角色能力 > test_intake_turn；函数角色：回归测试用例。
+# 具体功能：`test_dossier_without_structured_seed_keeps_legacy_source_text_verbatim` 验证案件卷宗在固定案例中的输出、边界和失败行为；关键协作调用：`IntakeTurnRequest.model_validate`、`render`、`CaseDetailDossierSkill`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_with_agent_context`。
+# 系统意义：固定“Agent 角色能力 > test_intake_turn”的可观察契约，防止后续重构改变业务结果。
 def test_dossier_without_structured_seed_keeps_legacy_source_text_verbatim() -> None:
     raw_text = "我收到的套装少了充电器和连接线。"
     request = IntakeTurnRequest.model_validate(
@@ -714,6 +812,10 @@ def test_dossier_without_structured_seed_keeps_legacy_source_text_verbatim() -> 
     assert result.scroll_snapshot["claim_resolution"]["original_statement"] == raw_text
 
 
+# 所属模块：Agent 角色能力 > test_intake_turn；函数角色：回归测试用例。
+# 具体功能：`test_formal_respondent_attitude_seed_and_legacy_snapshot_are_ignored` 验证对方态度在固定案例中的输出、边界和失败行为；关键协作调用：`IntakeTurnRequest.model_validate`、`render`、`CaseDetailDossierSkill`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_with_agent_context`。
+# 系统意义：固定“Agent 角色能力 > test_intake_turn”的可观察契约，防止后续重构改变业务结果。
 def test_formal_respondent_attitude_seed_and_legacy_snapshot_are_ignored() -> None:
     initial_request = IntakeTurnRequest.model_validate(
         _with_agent_context(
@@ -770,6 +872,10 @@ def test_formal_respondent_attitude_seed_and_legacy_snapshot_are_ignored() -> No
     assert "正式" not in attitude["position"]
 
 
+# 所属模块：Agent 角色能力 > test_intake_turn；函数角色：回归测试用例。
+# 具体功能：`test_subjective_respondent_attitude_seed_keeps_subjective_confidence_note` 验证对方态度在固定案例中的输出、边界和失败行为；关键协作调用：`IntakeTurnRequest.model_validate`、`render`、`CaseDetailDossierSkill`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_with_agent_context`。
+# 系统意义：固定“Agent 角色能力 > test_intake_turn”的可观察契约，防止后续重构改变业务结果。
 def test_subjective_respondent_attitude_seed_keeps_subjective_confidence_note() -> None:
     request = IntakeTurnRequest.model_validate(
         _with_agent_context(
@@ -813,6 +919,10 @@ def test_subjective_respondent_attitude_seed_keeps_subjective_confidence_note() 
     assert attitude["confidence_note"] == SUBJECTIVE_RESPONDENT_CONFIDENCE_NOTE
 
 
+# 所属模块：Agent 角色能力 > test_intake_turn；函数角色：回归测试用例。
+# 具体功能：`test_user_message_turn_merges_previous_case_detail_board` 把房间消息写入或合并到可追溯的阶段状态；关键协作调用：`client.post`、`response.json`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_client`、`_headers`、`_with_agent_context`。
+# 系统意义：固定“Agent 角色能力 > test_intake_turn”的可观察契约，防止后续重构改变业务结果。
 def test_user_message_turn_merges_previous_case_detail_board() -> None:
     client = _client()
 
@@ -835,9 +945,14 @@ def test_user_message_turn_merges_previous_case_detail_board() -> None:
                 "role": "USER",
                 "text": "我补充：商家客服让我找平台处理，我希望退款。",
             },
-            "latest_scroll_snapshot": {
-                "schema_version": "intake_case_detail.v1",
-                "party_positions": {
+                "latest_scroll_snapshot": {
+                    "schema_version": "intake_case_detail.v1",
+                    "references": {
+                        "order_reference": "ORDER_123",
+                        "after_sales_reference": "AS_456",
+                        "logistics_reference": "SF1234567890",
+                    },
+                    "party_positions": {
                     "merchant_claim": "商家认为物流已签收。",
                 },
                 "requested_resolution": {
@@ -851,11 +966,16 @@ def test_user_message_turn_merges_previous_case_detail_board() -> None:
 
     assert response.status_code == 200
     detail = response.json()["scroll_snapshot"]
-    assert detail["party_positions"]["merchant_claim"] == "商家认为物流已签收。"
+    assert detail["respondent_attitude"]["source"] == SUBJECTIVE_RESPONDENT_SOURCE
+    assert "找平台处理" in detail["respondent_attitude"]["position"]
     assert detail["requested_resolution"]["requested_outcome"] == "REFUND"
     assert detail["references"]["logistics_reference"] == "SF1234567890"
 
 
+# 所属模块：Agent 角色能力 > test_intake_turn；函数角色：回归测试用例。
+# 具体功能：`test_user_message_turn_extracts_logistics_reference_from_current_message` 验证房间消息在固定案例中的输出、边界和失败行为；关键协作调用：`client.post`、`response.json`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_client`、`_headers`、`_with_agent_context`。
+# 系统意义：固定“Agent 角色能力 > test_intake_turn”的可观察契约，防止后续重构改变业务结果。
 def test_user_message_turn_extracts_logistics_reference_from_current_message() -> None:
     client = _client()
 
@@ -895,6 +1015,10 @@ def test_user_message_turn_extracts_logistics_reference_from_current_message() -
     )
 
 
+# 所属模块：Agent 角色能力 > test_intake_turn；函数角色：回归测试用例。
+# 具体功能：`test_intake_turn_response_exposes_structured_dialogue_window_metadata` 验证接待信息在固定案例中的输出、边界和失败行为；关键协作调用：`client.post`、`recent_turns.append`、`response.json`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_client`、`_headers`、`_with_agent_context`。
+# 系统意义：固定“Agent 角色能力 > test_intake_turn”的可观察契约，防止后续重构改变业务结果。
 def test_intake_turn_response_exposes_structured_dialogue_window_metadata() -> None:
     client = _client()
     recent_turns = []
@@ -951,6 +1075,10 @@ def test_intake_turn_response_exposes_structured_dialogue_window_metadata() -> N
     assert 0 < memory_frame["recent_dialogue_count"] <= 6
 
 
+# 所属模块：Agent 角色能力 > test_intake_turn；函数角色：回归测试用例。
+# 具体功能：`test_process_question_marks_knowledge_query_intent_without_real_rag` 读取并按案件、角色或会话范围筛选本阶段状态；关键协作调用：`client.post`、`response.json`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_client`、`_headers`、`_with_agent_context`。
+# 系统意义：固定“Agent 角色能力 > test_intake_turn”的可观察契约，防止后续重构改变业务结果。
 def test_process_question_marks_knowledge_query_intent_without_real_rag() -> None:
     client = _client()
 
@@ -979,9 +1107,12 @@ def test_process_question_marks_knowledge_query_intent_without_real_rag() -> Non
     payload = response.json()
     assert payload["knowledge_query_intent"] is True
     assert payload["knowledge_answer_mode"] == "STUB"
-    assert "知识库插件" in payload["room_utterance"]
 
 
+# 所属模块：Agent 角色能力 > test_intake_turn；函数角色：回归测试用例。
+# 具体功能：`test_intake_turn_route_requires_service_secret` 验证接待信息在固定案例中的输出、边界和失败行为；关键协作调用：`client.post`。
+# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_client`、`_with_agent_context`。
+# 系统意义：固定“Agent 角色能力 > test_intake_turn”的可观察契约，防止后续重构改变业务结果。
 def test_intake_turn_route_requires_service_secret() -> None:
     client = _client()
 

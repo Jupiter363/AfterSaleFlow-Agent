@@ -1,3 +1,5 @@
+# 文件作用：自动化测试文件，验证 test_repository_contract 相关模块的行为、契约或页面布局。
+
 from __future__ import annotations
 
 import re
@@ -131,6 +133,10 @@ GENERATED_SECRET_KEYS = {
 }
 
 
+# 所属模块：跨服务契约测试 > test_repository_contract；函数角色：模块公开业务函数。
+# 具体功能：`parse_env_example` 围绕被测业务场景计算该函数独立负责的业务派生值；关键协作调用：`splitlines`、`raw_line.strip`、`line.split`。
+# 上下游：上游为 本文件的 `test_env_example_is_complete_and_contains_only_placeholders`；下游为 协作调用 `splitlines`、`raw_line.strip`、`line.split`、`read_text`。
+# 系统意义：该函数在系统中的业务边界是：只锁定公共契约，不锁死内部实现。
 def parse_env_example() -> dict[str, str]:
     values: dict[str, str] = {}
     for raw_line in (ROOT / ".env.example").read_text(encoding="utf-8").splitlines():
@@ -142,6 +148,10 @@ def parse_env_example() -> dict[str, str]:
     return values
 
 
+# 所属模块：跨服务契约测试 > test_repository_contract；函数角色：回归测试用例。
+# 具体功能：`test_repository_contains_required_root_files_and_directories` 验证被测业务场景在固定案例中的输出、边界和失败行为；关键协作调用：`is_file`、`is_dir`。
+# 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 协作调用 `is_file`、`is_dir`。
+# 系统意义：固定“跨服务契约测试 > test_repository_contract”的可观察契约，防止后续重构改变业务结果。
 def test_repository_contains_required_root_files_and_directories() -> None:
     missing_files = sorted(name for name in REQUIRED_ROOT_FILES if not (ROOT / name).is_file())
     missing_directories = sorted(
@@ -152,6 +162,10 @@ def test_repository_contains_required_root_files_and_directories() -> None:
     assert not missing_directories, f"missing directories: {missing_directories}"
 
 
+# 所属模块：跨服务契约测试 > test_repository_contract；函数角色：回归测试用例。
+# 具体功能：`test_env_example_is_complete_and_contains_only_placeholders` 验证被测业务场景在固定案例中的输出、边界和失败行为；关键协作调用：`values.keys`。
+# 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 本文件的 `parse_env_example`。
+# 系统意义：固定“跨服务契约测试 > test_repository_contract”的可观察契约，防止后续重构改变业务结果。
 def test_env_example_is_complete_and_contains_only_placeholders() -> None:
     values = parse_env_example()
 
@@ -160,11 +174,15 @@ def test_env_example_is_complete_and_contains_only_placeholders() -> None:
     assert values["DEFAULT_LLM_PROVIDER"] == "litellm"
     assert values["DEFAULT_LLM_MODEL"] == "qwen3.7-plus"
     assert values["LITELLM_DEFAULT_MODEL"] == "qwen3.7-plus"
-    assert values["LLM_ENABLE_THINKING"] == "true"
+    assert values["LLM_ENABLE_THINKING"] == "false"
     for key in GENERATED_SECRET_KEYS:
         assert values[key] == "__GENERATED_BY_CODEX__", key
 
 
+# 所属模块：跨服务契约测试 > test_repository_contract；函数角色：回归测试用例。
+# 具体功能：`test_compose_declares_every_required_service_with_healthchecks` 把上游材料组装为本阶段可消费的被测业务场景；关键协作调用：`yaml.safe_load`、`read_text`、`services.keys`。
+# 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 协作调用 `yaml.safe_load`、`read_text`、`services.keys`。
+# 系统意义：固定“跨服务契约测试 > test_repository_contract”的可观察契约，防止后续重构改变业务结果。
 def test_compose_declares_every_required_service_with_healthchecks() -> None:
     compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
     services = compose["services"]
@@ -173,6 +191,10 @@ def test_compose_declares_every_required_service_with_healthchecks() -> None:
     assert all("healthcheck" in services[name] for name in REQUIRED_SERVICES)
 
 
+# 所属模块：跨服务契约测试 > test_repository_contract；函数角色：回归测试用例。
+# 具体功能：`test_qwen_credentials_stop_at_litellm_gateway` 验证结构化模型调用在固定案例中的输出、边界和失败行为；关键协作调用：`yaml.safe_load`、`read_text`。
+# 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 协作调用 `yaml.safe_load`、`read_text`。
+# 系统意义：固定“跨服务契约测试 > test_repository_contract”的可观察契约，防止后续重构改变业务结果。
 def test_qwen_credentials_stop_at_litellm_gateway() -> None:
     compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
     services = compose["services"]
@@ -188,9 +210,13 @@ def test_qwen_credentials_stop_at_litellm_gateway() -> None:
     model = litellm_config["model_list"][0]
     assert model["model_name"] == "qwen3.7-plus"
     assert model["litellm_params"]["model"] == "openai/qwen3.7-plus"
-    assert model["litellm_params"]["extra_body"] == {"enable_thinking": True}
+    assert model["litellm_params"]["extra_body"] == {"enable_thinking": False}
 
 
+# 所属模块：跨服务契约测试 > test_repository_contract；函数角色：回归测试用例。
+# 具体功能：`test_compose_has_persistent_volumes_and_expected_host_ports` 把上游材料组装为本阶段可消费的被测业务场景；关键协作调用：`yaml.safe_load`、`read_text`、`volumes.keys`。
+# 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 协作调用 `yaml.safe_load`、`read_text`、`volumes.keys`。
+# 系统意义：固定“跨服务契约测试 > test_repository_contract”的可观察契约，防止后续重构改变业务结果。
 def test_compose_has_persistent_volumes_and_expected_host_ports() -> None:
     compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
     services = compose["services"]
@@ -212,6 +238,10 @@ def test_compose_has_persistent_volumes_and_expected_host_ports() -> None:
     assert "127.0.0.1:${NGINX_PORT:-18080}:80" in services["nginx"]["ports"]
 
 
+# 所属模块：跨服务契约测试 > test_repository_contract；函数角色：回归测试用例。
+# 具体功能：`test_required_scripts_exist_and_fail_fast` 验证被测业务场景在固定案例中的输出、边界和失败行为；关键协作调用：`read_text`、`text.startswith`、`re.search`。
+# 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 协作调用 `read_text`、`text.startswith`、`re.search`、`is_file`。
+# 系统意义：固定“跨服务契约测试 > test_repository_contract”的可观察契约，防止后续重构改变业务结果。
 def test_required_scripts_exist_and_fail_fast() -> None:
     scripts_dir = ROOT / "scripts"
     missing = sorted(name for name in REQUIRED_SCRIPTS if not (scripts_dir / name).is_file())
@@ -223,6 +253,10 @@ def test_required_scripts_exist_and_fail_fast() -> None:
         assert re.search(r"^set -euo pipefail$", text, re.MULTILINE), name
 
 
+# 所属模块：跨服务契约测试 > test_repository_contract；函数角色：回归测试用例。
+# 具体功能：`test_gitignore_excludes_secrets_and_generated_outputs` 验证结构化输出在固定案例中的输出、边界和失败行为；关键协作调用：`read_text`。
+# 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 协作调用 `read_text`。
+# 系统意义：固定“跨服务契约测试 > test_repository_contract”的可观察契约，防止后续重构改变业务结果。
 def test_gitignore_excludes_secrets_and_generated_outputs() -> None:
     text = (ROOT / ".gitignore").read_text(encoding="utf-8")
 
@@ -241,6 +275,10 @@ def test_gitignore_excludes_secrets_and_generated_outputs() -> None:
         assert pattern in text
 
 
+# 所属模块：跨服务契约测试 > test_repository_contract；函数角色：回归测试用例。
+# 具体功能：`test_gitattributes_preserves_container_and_shell_line_endings` 验证被测业务场景在固定案例中的输出、边界和失败行为；关键协作调用：`read_text`。
+# 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 协作调用 `read_text`。
+# 系统意义：固定“跨服务契约测试 > test_repository_contract”的可观察契约，防止后续重构改变业务结果。
 def test_gitattributes_preserves_container_and_shell_line_endings() -> None:
     text = (ROOT / ".gitattributes").read_text(encoding="utf-8")
 
@@ -254,6 +292,10 @@ def test_gitattributes_preserves_container_and_shell_line_endings() -> None:
         assert rule in text
 
 
+# 所属模块：跨服务契约测试 > test_repository_contract；函数角色：回归测试用例。
+# 具体功能：`test_java_public_controllers_use_only_final_unversioned_api_roots` 验证被测业务场景在固定案例中的输出、边界和失败行为；关键协作调用：`join`、`path.read_text`、`source_root.rglob`。
+# 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 协作调用 `join`、`path.read_text`、`source_root.rglob`。
+# 系统意义：固定“跨服务契约测试 > test_repository_contract”的可观察契约，防止后续重构改变业务结果。
 def test_java_public_controllers_use_only_final_unversioned_api_roots() -> None:
     source_root = ROOT / "java-api-service" / "src" / "main" / "java"
     controller_sources = "\n".join(
@@ -267,6 +309,10 @@ def test_java_public_controllers_use_only_final_unversioned_api_roots() -> None:
     assert '"/api/reviews' in controller_sources
 
 
+# 所属模块：跨服务契约测试 > test_repository_contract；函数角色：回归测试用例。
+# 具体功能：`test_nginx_supports_replayable_sse_without_exposing_internal_routes` 验证被测业务场景在固定案例中的输出、边界和失败行为；关键协作调用：`read_text`。
+# 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 协作调用 `read_text`。
+# 系统意义：固定“跨服务契约测试 > test_repository_contract”的可观察契约，防止后续重构改变业务结果。
 def test_nginx_supports_replayable_sse_without_exposing_internal_routes() -> None:
     nginx = (ROOT / "deploy" / "nginx" / "default.conf").read_text(
         encoding="utf-8"
@@ -280,6 +326,10 @@ def test_nginx_supports_replayable_sse_without_exposing_internal_routes() -> Non
     assert "return 404;" in nginx
 
 
+# 所属模块：跨服务契约测试 > test_repository_contract；函数角色：回归测试用例。
+# 具体功能：`test_room_timing_configuration_is_declared_with_final_defaults` 验证运行配置在固定案例中的输出、边界和失败行为；关键协作调用：`read_text`。
+# 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 协作调用 `read_text`。
+# 系统意义：固定“跨服务契约测试 > test_repository_contract”的可观察契约，防止后续重构改变业务结果。
 def test_room_timing_configuration_is_declared_with_final_defaults() -> None:
     application = (
         ROOT / "java-api-service" / "src" / "main" / "resources" / "application.yml"
@@ -292,6 +342,10 @@ def test_room_timing_configuration_is_declared_with_final_defaults() -> None:
     assert "seed-demo-disputes: ${SEED_DEMO_DISPUTES:false}" in application
 
 
+# 所属模块：跨服务契约测试 > test_repository_contract；函数角色：回归测试用例。
+# 具体功能：`test_windows_secret_generator_preserves_user_key_and_hides_secrets` 验证被测业务场景在固定案例中的输出、边界和失败行为；关键协作调用：`example.write_text`、`subprocess.run`、`destination.read_text`。
+# 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 协作调用 `example.write_text`、`subprocess.run`、`destination.read_text`、`shutil.which`。
+# 系统意义：固定“跨服务契约测试 > test_repository_contract”的可观察契约，防止后续重构改变业务结果。
 def test_windows_secret_generator_preserves_user_key_and_hides_secrets(
     tmp_path: Path,
 ) -> None:
@@ -332,6 +386,10 @@ def test_windows_secret_generator_preserves_user_key_and_hides_secrets(
     assert all(values[key] not in result.stdout for key in GENERATED_SECRET_KEYS)
 
 
+# 所属模块：跨服务契约测试 > test_repository_contract；函数角色：回归测试用例。
+# 具体功能：`test_windows_secret_generator_defaults_to_project_root` 验证被测业务场景在固定案例中的输出、边界和失败行为；关键协作调用：`scripts.mkdir`、`write_text`、`subprocess.run`。
+# 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 协作调用 `scripts.mkdir`、`write_text`、`subprocess.run`、`is_file`。
+# 系统意义：固定“跨服务契约测试 > test_repository_contract”的可观察契约，防止后续重构改变业务结果。
 def test_windows_secret_generator_defaults_to_project_root(tmp_path: Path) -> None:
     if shutil.which("powershell.exe") is None:
         pytest.skip("Windows PowerShell is not available")
@@ -366,6 +424,10 @@ def test_windows_secret_generator_defaults_to_project_root(tmp_path: Path) -> No
     assert (project / ".env").is_file()
 
 
+# 所属模块：跨服务契约测试 > test_repository_contract；函数角色：回归测试用例。
+# 具体功能：`test_java_service_uses_java_21_multistage_nonroot_image` 验证被测业务场景在固定案例中的输出、边界和失败行为；关键协作调用：`read_text`、`dockerfile.count`。
+# 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 协作调用 `read_text`、`dockerfile.count`。
+# 系统意义：固定“跨服务契约测试 > test_repository_contract”的可观察契约，防止后续重构改变业务结果。
 def test_java_service_uses_java_21_multistage_nonroot_image() -> None:
     dockerfile = (ROOT / "java-api-service" / "Dockerfile").read_text(encoding="utf-8")
 

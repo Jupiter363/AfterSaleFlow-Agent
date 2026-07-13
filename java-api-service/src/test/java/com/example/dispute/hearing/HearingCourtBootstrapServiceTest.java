@@ -1,3 +1,9 @@
+/*
+ * 所属模块：共享小法庭。
+ * 文件职责：验证庭审法庭开庭装卷，覆盖 「bootstrapsTheHearingByFreezingPriorDossiersAndAppendingOpeningMessages」、「repeatedBootstrapDoesNotDuplicateSnapshotOrOpeningMessages」、「bootstrapCreatesAnEmptyEvidenceBaselineWhenNoEvidenceDossierExists」、「alreadyBootstrappedPostHearingCasesRemainReadableWithoutOpeningANewCourtSession」、「evidenceReadingLocalizesUnmappedMatrixRowsInsteadOfLeakingBackendFields」。
+ * 业务链路：JUnit 构造夹具并驱动真实服务或 Mock 协作者，断言返回值、持久化状态和调用边界；管理固定轮次陈述、庭审时钟、和解版本、Agent 协作消息以及非最终裁决草案。
+ * 关键边界：最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
+ */
 package com.example.dispute.hearing;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -45,6 +51,11 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+// 所属模块：【共享小法庭 / 自动化测试层】类型「HearingCourtBootstrapServiceTest」。
+// 类型职责：集中验证庭审法庭开庭装卷的业务场景、权限边界和持久化/外部协作契约；本类型显式提供 「setUp」、「bootstrapsTheHearingByFreezingPriorDossiersAndAppendingOpeningMessages」、「repeatedBootstrapDoesNotDuplicateSnapshotOrOpeningMessages」、「bootstrapCreatesAnEmptyEvidenceBaselineWhenNoEvidenceDossierExists」、「alreadyBootstrappedPostHearingCasesRemainReadableWithoutOpeningANewCourtSession」、「evidenceReadingLocalizesUnmappedMatrixRowsInsteadOfLeakingBackendFields」。
+// 协作关系：由 JUnit 发现并执行其中带 @Test 的场景。
+// 边界意义：最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
+// Java 语法：class 同时封装状态与方法；final 依赖通过构造器注入后不可重新指向。
 @ExtendWith(MockitoExtension.class)
 class HearingCourtBootstrapServiceTest {
 
@@ -65,6 +76,11 @@ class HearingCourtBootstrapServiceTest {
     private HearingCourtBootstrapService service;
     private ObjectMapper objectMapper;
 
+    // 所属模块：【共享小法庭 / 自动化测试层】「HearingCourtBootstrapServiceTest.setUp()」。
+    // 具体功能：「HearingCourtBootstrapServiceTest.setUp()」：在每个测试场景运行前创建「newObjectMapper().findAndRegisterModules」，统一准备后续断言依赖的初始状态，避免各用例重复搭建且保持彼此隔离。
+    // 上游调用：「HearingCourtBootstrapServiceTest.setUp()」由 JUnit 生命周期或本测试类的场景方法调用。
+    // 下游影响：「HearingCourtBootstrapServiceTest.setUp()」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「HearingCourtBootstrapServiceTest.setUp()」守住「共享小法庭」的可执行规格；后续重构若破坏契约会在进入集成环境前失败。
     @BeforeEach
     void setUp() {
         objectMapper = new ObjectMapper().findAndRegisterModules();
@@ -83,6 +99,11 @@ class HearingCourtBootstrapServiceTest {
                         CLOCK);
     }
 
+    // 所属模块：【共享小法庭 / 自动化测试层】「HearingCourtBootstrapServiceTest.bootstrapsTheHearingByFreezingPriorDossiersAndAppendingOpeningMessages()」。
+    // 具体功能：「HearingCourtBootstrapServiceTest.bootstrapsTheHearingByFreezingPriorDossiersAndAppendingOpeningMessages()」：复现“核对完整业务行为（场景方法「bootstrapsTheHearingByFreezingPriorDossiersAndAppendingOpeningMessages」）”场景：驱动 「caseRepository.findByIdForUpdate」、「roomRepository.findByCaseIdAndRoomType」、「hearingStateRepository.findByCaseId」、「intakeDossierRepository.findByCaseIdAndRoomType」，再用 「verify」、「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「HEARING_STATE_BOOTSTRAP」、「hearing-bootstrap-」、「hearing-bootstrap」、「INTAKE_DOSSIER_1」。
+    // 上游调用：「HearingCourtBootstrapServiceTest.bootstrapsTheHearingByFreezingPriorDossiersAndAppendingOpeningMessages()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「HearingCourtBootstrapServiceTest.bootstrapsTheHearingByFreezingPriorDossiersAndAppendingOpeningMessages()」的下游是被测服务、仓储或外部客户端替身；「verify、assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「HearingCourtBootstrapServiceTest.bootstrapsTheHearingByFreezingPriorDossiersAndAppendingOpeningMessages()」守住「共享小法庭」的可执行规格，尤其防止 「HEARING_STATE_BOOTSTRAP」、「hearing-bootstrap-」、「hearing-bootstrap」、「INTAKE_DOSSIER_1」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void bootstrapsTheHearingByFreezingPriorDossiersAndAppendingOpeningMessages()
             throws Exception {
@@ -227,6 +248,11 @@ class HearingCourtBootstrapServiceTest {
                 .ensureInitialRoundOpen(CASE_ID, 3, "hearing-bootstrap");
     }
 
+    // 所属模块：【共享小法庭 / 自动化测试层】「HearingCourtBootstrapServiceTest.repeatedBootstrapDoesNotDuplicateSnapshotOrOpeningMessages()」。
+    // 具体功能：「HearingCourtBootstrapServiceTest.repeatedBootstrapDoesNotDuplicateSnapshotOrOpeningMessages()」：复现“核对完整业务行为（场景方法「repeatedBootstrapDoesNotDuplicateSnapshotOrOpeningMessages」）”场景：驱动 「caseRepository.findByIdForUpdate」、「roomRepository.findByCaseIdAndRoomType」、「hearingStateRepository.findByCaseId」、「intakeDossierRepository.findByCaseIdAndRoomType」，再用 「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「HEARING_STATE_BOOTSTRAP」、「hearing-bootstrap-」、「hearing-bootstrap」、「C0_COURT_BOOTSTRAP」。
+    // 上游调用：「HearingCourtBootstrapServiceTest.repeatedBootstrapDoesNotDuplicateSnapshotOrOpeningMessages()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「HearingCourtBootstrapServiceTest.repeatedBootstrapDoesNotDuplicateSnapshotOrOpeningMessages()」的下游是被测服务、仓储或外部客户端替身；「verify」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「HearingCourtBootstrapServiceTest.repeatedBootstrapDoesNotDuplicateSnapshotOrOpeningMessages()」守住「共享小法庭」的可执行规格，尤其防止 「HEARING_STATE_BOOTSTRAP」、「hearing-bootstrap-」、「hearing-bootstrap」、「C0_COURT_BOOTSTRAP」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void repeatedBootstrapDoesNotDuplicateSnapshotOrOpeningMessages() {
         FulfillmentCaseEntity dispute = hearingCase();
@@ -266,6 +292,11 @@ class HearingCourtBootstrapServiceTest {
                 .ensureInitialRoundOpen(CASE_ID, 1, "hearing-bootstrap");
     }
 
+    // 所属模块：【共享小法庭 / 自动化测试层】「HearingCourtBootstrapServiceTest.bootstrapCreatesAnEmptyEvidenceBaselineWhenNoEvidenceDossierExists()」。
+    // 具体功能：「HearingCourtBootstrapServiceTest.bootstrapCreatesAnEmptyEvidenceBaselineWhenNoEvidenceDossierExists()」：复现“核对完整业务行为（场景方法「bootstrapCreatesAnEmptyEvidenceBaselineWhenNoEvidenceDossierExists」）”场景：驱动 「caseRepository.findByIdForUpdate」、「roomRepository.findByCaseIdAndRoomType」、「hearingStateRepository.findByCaseId」、「intakeDossierRepository.findByCaseIdAndRoomType」，再用 「verify」、「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「HEARING_STATE_BOOTSTRAP」、「hearing-bootstrap-」、「hearing-bootstrap」、「C0_COURT_BOOTSTRAP」。
+    // 上游调用：「HearingCourtBootstrapServiceTest.bootstrapCreatesAnEmptyEvidenceBaselineWhenNoEvidenceDossierExists()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「HearingCourtBootstrapServiceTest.bootstrapCreatesAnEmptyEvidenceBaselineWhenNoEvidenceDossierExists()」的下游是被测服务、仓储或外部客户端替身；「verify、assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「HearingCourtBootstrapServiceTest.bootstrapCreatesAnEmptyEvidenceBaselineWhenNoEvidenceDossierExists()」守住「共享小法庭」的可执行规格，尤其防止 「HEARING_STATE_BOOTSTRAP」、「hearing-bootstrap-」、「hearing-bootstrap」、「C0_COURT_BOOTSTRAP」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void bootstrapCreatesAnEmptyEvidenceBaselineWhenNoEvidenceDossierExists() {
         FulfillmentCaseEntity dispute = hearingCase();
@@ -318,6 +349,11 @@ class HearingCourtBootstrapServiceTest {
                 .ensureInitialRoundOpen(CASE_ID, 1, "hearing-bootstrap");
     }
 
+    // 所属模块：【共享小法庭 / 自动化测试层】「HearingCourtBootstrapServiceTest.alreadyBootstrappedPostHearingCasesRemainReadableWithoutOpeningANewCourtSession()」。
+    // 具体功能：「HearingCourtBootstrapServiceTest.alreadyBootstrappedPostHearingCasesRemainReadableWithoutOpeningANewCourtSession()」：复现“核对完整业务行为（场景方法「alreadyBootstrappedPostHearingCasesRemainReadableWithoutOpeningANewCourtSession」）”场景：驱动 「caseRepository.findByIdForUpdate」、「hearingStateRepository.findByCaseId」、「service.bootstrap」，再用 「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「HEARING_STATE_BOOTSTRAP」、「hearing-bootstrap-」、「hearing-bootstrap」、「merchant-local」。
+    // 上游调用：「HearingCourtBootstrapServiceTest.alreadyBootstrappedPostHearingCasesRemainReadableWithoutOpeningANewCourtSession()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「HearingCourtBootstrapServiceTest.alreadyBootstrappedPostHearingCasesRemainReadableWithoutOpeningANewCourtSession()」的下游是被测服务、仓储或外部客户端替身；「verify」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「HearingCourtBootstrapServiceTest.alreadyBootstrappedPostHearingCasesRemainReadableWithoutOpeningANewCourtSession()」守住「共享小法庭」的可执行规格，尤其防止 「HEARING_STATE_BOOTSTRAP」、「hearing-bootstrap-」、「hearing-bootstrap」、「merchant-local」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void alreadyBootstrappedPostHearingCasesRemainReadableWithoutOpeningANewCourtSession() {
         FulfillmentCaseEntity dispute = postHearingReviewCase();
@@ -344,6 +380,12 @@ class HearingCourtBootstrapServiceTest {
         verify(hearingRoundService, never()).ensureInitialRoundOpen(any(), any(int.class), any());
     }
 
+    // 所属模块：【共享小法庭 / 自动化测试层】「HearingCourtBootstrapServiceTest.evidenceReadingLocalizesUnmappedMatrixRowsInsteadOfLeakingBackendFields()」。
+    // 具体功能：「HearingCourtBootstrapServiceTest.evidenceReadingLocalizesUnmappedMatrixRowsInsteadOfLeakingBackendFields()」：复现“核对完整业务行为（场景方法「evidenceReadingLocalizesUnmappedMatrixRowsInsteadOfLeakingBackendFields」）”场景：驱动 「caseRepository.findByIdForUpdate」、「roomRepository.findByCaseIdAndRoomType」、「hearingStateRepository.findByCaseId」、「intakeDossierRepository.findByCaseIdAndRoomType」，再用 「verify」、「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「HEARING_STATE_BOOTSTRAP」、「hearing-bootstrap-」、「hearing-bootstrap」、「EVIDENCE_DOSSIER_1」。
+    // 上游调用：「HearingCourtBootstrapServiceTest.evidenceReadingLocalizesUnmappedMatrixRowsInsteadOfLeakingBackendFields()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「HearingCourtBootstrapServiceTest.evidenceReadingLocalizesUnmappedMatrixRowsInsteadOfLeakingBackendFields()」的下游是被测服务、仓储或外部客户端替身；「verify、assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「HearingCourtBootstrapServiceTest.evidenceReadingLocalizesUnmappedMatrixRowsInsteadOfLeakingBackendFields()」守住「共享小法庭」的可执行规格，尤其防止 「HEARING_STATE_BOOTSTRAP」、「hearing-bootstrap-」、「hearing-bootstrap」、「EVIDENCE_DOSSIER_1」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
+    // Java 语法：stream/lambda 把集合处理写成管道；lambda 中引用的外部局部变量必须保持 effectively final。
     @Test
     void evidenceReadingLocalizesUnmappedMatrixRowsInsteadOfLeakingBackendFields() {
         FulfillmentCaseEntity dispute = hearingCase();
@@ -414,6 +456,11 @@ class HearingCourtBootstrapServiceTest {
                 .doesNotContain("UNVERIFIED");
     }
 
+    // 所属模块：【共享小法庭 / 自动化测试层】「HearingCourtBootstrapServiceTest.hearingCase()」。
+    // 具体功能：「HearingCourtBootstrapServiceTest.hearingCase()」：作为测试辅助方法为“核对完整业务行为（场景方法「hearingCase」）”组装或读取「FulfillmentCaseEntity.imported」、「OffsetDateTime.parse」，供本测试类的场景方法复用。
+    // 上游调用：「HearingCourtBootstrapServiceTest.hearingCase()」由本测试类中的 「HearingCourtBootstrapServiceTest.bootstrapsTheHearingByFreezingPriorDossiersAndAppendingOpeningMessages」、「HearingCourtBootstrapServiceTest.repeatedBootstrapDoesNotDuplicateSnapshotOrOpeningMessages」、「HearingCourtBootstrapServiceTest.bootstrapCreatesAnEmptyEvidenceBaselineWhenNoEvidenceDossierExists」、「HearingCourtBootstrapServiceTest.evidenceReadingLocalizesUnmappedMatrixRowsInsteadOfLeakingBackendFields」 调用。
+    // 下游影响：「HearingCourtBootstrapServiceTest.hearingCase()」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「HearingCourtBootstrapServiceTest.hearingCase()」守住「共享小法庭」的可执行规格，尤其防止 「ORDER-BOOTSTRAP」、「AS-BOOTSTRAP」、「LOG-BOOTSTRAP」、「user-local」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static FulfillmentCaseEntity hearingCase() {
         return FulfillmentCaseEntity.imported(
                 CASE_ID,
@@ -435,6 +482,11 @@ class HearingCourtBootstrapServiceTest {
                 "external-adapter");
     }
 
+    // 所属模块：【共享小法庭 / 自动化测试层】「HearingCourtBootstrapServiceTest.postHearingReviewCase()」。
+    // 具体功能：「HearingCourtBootstrapServiceTest.postHearingReviewCase()」：作为测试辅助方法为“核对完整业务行为（场景方法「postHearingReviewCase」）”组装或读取「FulfillmentCaseEntity.imported」、「OffsetDateTime.parse」，供本测试类的场景方法复用。
+    // 上游调用：「HearingCourtBootstrapServiceTest.postHearingReviewCase()」由本测试类中的 「HearingCourtBootstrapServiceTest.alreadyBootstrappedPostHearingCasesRemainReadableWithoutOpeningANewCourtSession」 调用。
+    // 下游影响：「HearingCourtBootstrapServiceTest.postHearingReviewCase()」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「HearingCourtBootstrapServiceTest.postHearingReviewCase()」守住「共享小法庭」的可执行规格，尤其防止 「ORDER-BOOTSTRAP」、「AS-BOOTSTRAP」、「LOG-BOOTSTRAP」、「user-local」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static FulfillmentCaseEntity postHearingReviewCase() {
         return FulfillmentCaseEntity.imported(
                 CASE_ID,
@@ -456,6 +508,11 @@ class HearingCourtBootstrapServiceTest {
                 "external-adapter");
     }
 
+    // 所属模块：【共享小法庭 / 自动化测试层】「HearingCourtBootstrapServiceTest.hearingRoom()」。
+    // 具体功能：「HearingCourtBootstrapServiceTest.hearingRoom()」：作为测试辅助方法为“核对完整业务行为（场景方法「hearingRoom」）”组装或读取「CaseRoomEntity.open」、「OffsetDateTime.parse」，供本测试类的场景方法复用。
+    // 上游调用：「HearingCourtBootstrapServiceTest.hearingRoom()」由本测试类中的 「HearingCourtBootstrapServiceTest.bootstrapsTheHearingByFreezingPriorDossiersAndAppendingOpeningMessages」、「HearingCourtBootstrapServiceTest.repeatedBootstrapDoesNotDuplicateSnapshotOrOpeningMessages」、「HearingCourtBootstrapServiceTest.bootstrapCreatesAnEmptyEvidenceBaselineWhenNoEvidenceDossierExists」、「HearingCourtBootstrapServiceTest.evidenceReadingLocalizesUnmappedMatrixRowsInsteadOfLeakingBackendFields」 调用。
+    // 下游影响：「HearingCourtBootstrapServiceTest.hearingRoom()」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「HearingCourtBootstrapServiceTest.hearingRoom()」守住「共享小法庭」的可执行规格，尤其防止 「ROOM_HEARING_BOOTSTRAP」、「2026-07-08T01:00:00Z」、「system」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static CaseRoomEntity hearingRoom() {
         return CaseRoomEntity.open(
                 "ROOM_HEARING_BOOTSTRAP",
@@ -465,6 +522,11 @@ class HearingCourtBootstrapServiceTest {
                 "system");
     }
 
+    // 所属模块：【共享小法庭 / 自动化测试层】「HearingCourtBootstrapServiceTest.existingMessage(CaseRoomEntity,String)」。
+    // 具体功能：「HearingCourtBootstrapServiceTest.existingMessage(CaseRoomEntity,String)」：作为测试辅助方法为“核对完整业务行为（场景方法「existingMessage」）”组装或读取「RoomMessageEntity.create」、「CLOCK.instant」、「room.getId」，供本测试类的场景方法复用。
+    // 上游调用：「HearingCourtBootstrapServiceTest.existingMessage(CaseRoomEntity,String)」由本测试类中的 「HearingCourtBootstrapServiceTest.repeatedBootstrapDoesNotDuplicateSnapshotOrOpeningMessages」 调用。
+    // 下游影响：「HearingCourtBootstrapServiceTest.existingMessage(CaseRoomEntity,String)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「HearingCourtBootstrapServiceTest.existingMessage(CaseRoomEntity,String)」守住「共享小法庭」的可执行规格，尤其防止 「MESSAGE_EXISTING_」、「[]」、「existing」、「existing-key」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static RoomMessageEntity existingMessage(CaseRoomEntity room, String senderRole) {
         return RoomMessageEntity.create(
                 "MESSAGE_EXISTING_" + senderRole,

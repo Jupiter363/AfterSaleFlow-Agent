@@ -1,7 +1,12 @@
+// 文件作用：自动化测试文件，验证 displayText.test 相关模块的行为、契约或页面布局。
+// 说明：本注释用于帮助读者先了解本文件职责，再继续阅读具体实现。
+
 import { describe, expect, it } from "vitest";
 import { displayRoomMessageText, humanizeDossierText } from "./displayText";
 
+// 业务位置：【前端应用】describe：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由、API 和本地状态 正确进入 售后纠纷处理界面。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
 describe("display text helpers", () => {
+  // 业务位置：【前端应用】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由、API 和本地状态 正确进入 售后纠纷处理界面。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
   it("maps intake dossier internal evidence field codes to readable Chinese", () => {
     const text = humanizeDossierText(
       "仍缺少可信的buyer_evidence、merchant_outbound_photos",
@@ -13,6 +18,7 @@ describe("display text helpers", () => {
     expect(text).not.toContain("merchant_outbound_photos");
   });
 
+  // 业务位置：【前端应用】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由、API 和本地状态 正确进入 售后纠纷处理界面。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
   it("maps internal dispute enum codes inside immutable room messages", () => {
     const text = displayRoomMessageText(
       "本案当前争议焦点是 SIGNED_NOT_RECEIVED，请补充物流签收记录。",
@@ -22,6 +28,7 @@ describe("display text helpers", () => {
     expect(text).not.toContain("SIGNED_NOT_RECEIVED");
   });
 
+  // 业务位置：【前端应用】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由、API 和本地状态 正确进入 售后纠纷处理界面。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
   it("maps adjudication recommendation enum codes to readable Chinese", () => {
     const text = humanizeDossierText("RESHIP_OR_REFUND_AFTER_SIGNATURE_REVIEW");
 
@@ -30,6 +37,7 @@ describe("display text helpers", () => {
     expect(text).not.toContain("RESHIP_OR_REFUND_AFTER_SIGNATURE_REVIEW");
   });
 
+  // 业务位置：【前端应用】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由、API 和本地状态 正确进入 售后纠纷处理界面。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
   it("summarizes raw evidence matrix json in immutable room messages", () => {
     const text = displayRoomMessageText(
       '证据书记官宣读证据卷宗：核心证明矩阵显示：{"evidence_id":"EVIDENCE_001","relation_type":"UNMAPPED","verification_status":"UNVERIFIED"}。',

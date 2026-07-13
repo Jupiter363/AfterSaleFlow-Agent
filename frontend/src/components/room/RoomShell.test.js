@@ -1,9 +1,14 @@
+// 文件作用：自动化测试文件，验证 RoomShell.test 相关模块的行为、契约或页面布局。
+// 说明：本注释用于帮助读者先了解本文件职责，再继续阅读具体实现。
+
 import { mount } from "@vue/test-utils";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import RoomShell from "./RoomShell.vue";
 
+// 业务位置：【Java 房间协作】describe：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、访问会话和参与方身份 正确进入 接待/证据回合记忆、Agent 上下文和事件。上游：房间消息、访问会话和参与方身份。下游：接待/证据回合记忆、Agent 上下文和事件。边界：会话和可见性必须按参与方隔离。
 describe("RoomShell", () => {
+  // 业务位置：【Java 房间协作】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、访问会话和参与方身份 正确进入 接待/证据回合记忆、Agent 上下文和事件。上游：房间消息、访问会话和参与方身份。下游：接待/证据回合记忆、Agent 上下文和事件。边界：会话和可见性必须按参与方隔离。
   it("keeps room context, server status and human-final boundary visible", () => {
     const wrapper = mount(RoomShell, {
       props: {
@@ -26,6 +31,7 @@ describe("RoomShell", () => {
     expect(wrapper.text()).toContain("证据书架");
   });
 
+  // 业务位置：【Java 房间协作】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、访问会话和参与方身份 正确进入 接待/证据回合记忆、Agent 上下文和事件。上游：房间消息、访问会话和参与方身份。下游：接待/证据回合记忆、Agent 上下文和事件。边界：会话和可见性必须按参与方隔离。
   it("shortens long case identifiers in the header while preserving the full title", () => {
     const wrapper = mount(RoomShell, {
       props: {
@@ -40,6 +46,7 @@ describe("RoomShell", () => {
     );
   });
 
+  // 业务位置：【Java 房间协作】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、访问会话和参与方身份 正确进入 接待/证据回合记忆、Agent 上下文和事件。上游：房间消息、访问会话和参与方身份。下游：接待/证据回合记忆、Agent 上下文和事件。边界：会话和可见性必须按参与方隔离。
   it("exposes the workspace as an inline-size container for room layouts", () => {
     const source = readFileSync("src/components/room/RoomShell.vue", "utf8");
 

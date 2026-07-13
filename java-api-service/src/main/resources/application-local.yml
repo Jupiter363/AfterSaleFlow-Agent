@@ -1,3 +1,6 @@
+# 文件作用：Java API 服务代码文件，承载售后争议后端业务、持久化或集成逻辑。
+# 说明：本注释用于帮助读者先了解配置用途，再修改具体配置项。
+
 spring:
   datasource:
     url: jdbc:postgresql://${POSTGRES_HOST:postgresql}:${POSTGRES_PORT:5432}/${JAVA_DB_NAME:dispute_system}
@@ -23,7 +26,7 @@ app:
   agent:
     base-url: ${PYTHON_AGENT_SERVICE_URL:http://127.0.0.1:18000}
     service-secret: ${PYTHON_AGENT_SERVICE_SECRET}
-    timeout-ms: 120000
+    timeout-ms: ${APP_AGENT_TIMEOUT_MS:300000}
   ocr:
     base-url: ${OCR_SERVICE_URL:http://127.0.0.1:18010}
     service-secret: ${OCR_SERVICE_SECRET}

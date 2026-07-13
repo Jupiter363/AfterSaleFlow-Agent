@@ -1,3 +1,9 @@
+/*
+ * 所属模块：共享小法庭。
+ * 文件职责：验证庭审法庭，覆盖 「afterCommitRoundTurnFailuresDoNotPropagateToTheBusinessRequest」、「afterRoundOpenedAppendsOpeningJudgeMessage」、「invokesTheRemoteCourtAgentOutsideAnyActiveCourtTransaction」、「afterRoundClosedAppendsOneIdempotentJudgeMessageAndLifecycleEvent」、「afterRoundClosedComposesJudgeContextFromActiveEvidenceDossierVersion」、「finalRoundRetryRepairsMissingFormalJuryReportBeforeCompletion」。
+ * 业务链路：JUnit 构造夹具并驱动真实服务或 Mock 协作者，断言返回值、持久化状态和调用边界；管理固定轮次陈述、庭审时钟、和解版本、Agent 协作消息以及非最终裁决草案。
+ * 关键边界：最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
+ */
 package com.example.dispute.hearing;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -75,6 +81,11 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 import org.springframework.transaction.support.TransactionCallback;
 import org.springframework.transaction.support.TransactionTemplate;
 
+// 所属模块：【共享小法庭 / 自动化测试层】类型「HearingCourtOrchestratorTest」。
+// 类型职责：集中验证庭审法庭的业务场景、权限边界和持久化/外部协作契约；本类型显式提供 「setUp」、「afterCommitRoundTurnFailuresDoNotPropagateToTheBusinessRequest」、「afterRoundOpenedAppendsOpeningJudgeMessage」、「invokesTheRemoteCourtAgentOutsideAnyActiveCourtTransaction」、「afterRoundClosedAppendsOneIdempotentJudgeMessageAndLifecycleEvent」、「afterRoundClosedComposesJudgeContextFromActiveEvidenceDossierVersion」。
+// 协作关系：由 JUnit 发现并执行其中带 @Test 的场景。
+// 边界意义：最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
+// Java 语法：class 同时封装状态与方法；final 依赖通过构造器注入后不可重新指向。
 @ExtendWith(MockitoExtension.class)
 class HearingCourtOrchestratorTest {
 
@@ -97,6 +108,11 @@ class HearingCourtOrchestratorTest {
     private HearingCourtOrchestrator orchestrator;
     private ActiveCourtroomContextAssembler courtroomContextAssembler;
 
+    // 所属模块：【共享小法庭 / 自动化测试层】「HearingCourtOrchestratorTest.setUp()」。
+    // 具体功能：「HearingCourtOrchestratorTest.setUp()」：在每个测试场景运行前创建「caseRepository.findByIdForUpdate」、「caseRepository.findById」、「roomRepository.findByCaseIdAndRoomTypeForUpdate」、「roomRepository.findByCaseIdAndRoomType」，统一准备后续断言依赖的初始状态，避免各用例重复搭建且保持彼此隔离。
+    // 上游调用：「HearingCourtOrchestratorTest.setUp()」由 JUnit 生命周期或本测试类的场景方法调用。
+    // 下游影响：「HearingCourtOrchestratorTest.setUp()」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「HearingCourtOrchestratorTest.setUp()」守住「共享小法庭」的可执行规格，尤其防止 「A2A_TEST_FORMAL」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @BeforeEach
     void setUp() {
         lenient()
@@ -180,6 +196,11 @@ class HearingCourtOrchestratorTest {
                         courtTransaction);
     }
 
+    // 所属模块：【共享小法庭 / 自动化测试层】「HearingCourtOrchestratorTest.afterCommitRoundTurnFailuresDoNotPropagateToTheBusinessRequest()」。
+    // 具体功能：「HearingCourtOrchestratorTest.afterCommitRoundTurnFailuresDoNotPropagateToTheBusinessRequest()」：复现“核对完整业务行为（场景方法「afterCommitRoundTurnFailuresDoNotPropagateToTheBusinessRequest」）”场景：驱动 「orchestrator.afterRoundClosedAfterCommit」、「assertThatCode」、「doesNotThrowAnyException」，再用 测试框架断言 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_COURT」、「TRACE_COURT_ROUND_1」。
+    // 上游调用：「HearingCourtOrchestratorTest.afterCommitRoundTurnFailuresDoNotPropagateToTheBusinessRequest()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「HearingCourtOrchestratorTest.afterCommitRoundTurnFailuresDoNotPropagateToTheBusinessRequest()」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「HearingCourtOrchestratorTest.afterCommitRoundTurnFailuresDoNotPropagateToTheBusinessRequest()」守住「共享小法庭」的可执行规格，尤其防止 「CASE_COURT」、「TRACE_COURT_ROUND_1」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void afterCommitRoundTurnFailuresDoNotPropagateToTheBusinessRequest() {
         assertThatCode(
@@ -189,6 +210,11 @@ class HearingCourtOrchestratorTest {
                 .doesNotThrowAnyException();
     }
 
+    // 所属模块：【共享小法庭 / 自动化测试层】「HearingCourtOrchestratorTest.afterRoundOpenedAppendsOpeningJudgeMessage()」。
+    // 具体功能：「HearingCourtOrchestratorTest.afterRoundOpenedAppendsOpeningJudgeMessage()」：复现“核对完整业务行为（场景方法「afterRoundOpenedAppendsOpeningJudgeMessage」）”场景：驱动 「caseRepository.findById」、「roomRepository.findByCaseIdAndRoomType」、「roundRepository.findByCaseIdAndRoundNo」、「submissionRepository.findAllByCaseIdAndRoundNoOrderBySubmittedAtAsc」，再用 「verify」、「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「ROOM_HEARING_CASE_COURT」、「2026-07-07T01:00:00Z」、「system」、「HEARING_ROUND_1」。
+    // 上游调用：「HearingCourtOrchestratorTest.afterRoundOpenedAppendsOpeningJudgeMessage()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「HearingCourtOrchestratorTest.afterRoundOpenedAppendsOpeningJudgeMessage()」的下游是被测服务、仓储或外部客户端替身；「verify、assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「HearingCourtOrchestratorTest.afterRoundOpenedAppendsOpeningJudgeMessage()」守住「共享小法庭」的可执行规格，尤其防止 「ROOM_HEARING_CASE_COURT」、「2026-07-07T01:00:00Z」、「system」、「HEARING_ROUND_1」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void afterRoundOpenedAppendsOpeningJudgeMessage() {
         FulfillmentCaseEntity dispute = hearingCase();
@@ -273,6 +299,11 @@ class HearingCourtOrchestratorTest {
                         eq("presiding-judge"));
     }
 
+    // 所属模块：【共享小法庭 / 自动化测试层】「HearingCourtOrchestratorTest.invokesTheRemoteCourtAgentOutsideAnyActiveCourtTransaction()」。
+    // 具体功能：「HearingCourtOrchestratorTest.invokesTheRemoteCourtAgentOutsideAnyActiveCourtTransaction()」：复现“核对完整业务行为（场景方法「invokesTheRemoteCourtAgentOutsideAnyActiveCourtTransaction」）”场景：驱动 「caseRepository.findById」、「roomRepository.findByCaseIdAndRoomType」、「roundRepository.findByCaseIdAndRoundNo」、「submissionRepository.findAllByCaseIdAndRoundNoOrderBySubmittedAtAsc」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「ROOM_HEARING_CASE_COURT」、「2026-07-07T01:00:00Z」、「system」、「HEARING_ROUND_1」。
+    // 上游调用：「HearingCourtOrchestratorTest.invokesTheRemoteCourtAgentOutsideAnyActiveCourtTransaction()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「HearingCourtOrchestratorTest.invokesTheRemoteCourtAgentOutsideAnyActiveCourtTransaction()」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「HearingCourtOrchestratorTest.invokesTheRemoteCourtAgentOutsideAnyActiveCourtTransaction()」守住「共享小法庭」的可执行规格，尤其防止 「ROOM_HEARING_CASE_COURT」、「2026-07-07T01:00:00Z」、「system」、「HEARING_ROUND_1」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void invokesTheRemoteCourtAgentOutsideAnyActiveCourtTransaction() {
         FulfillmentCaseEntity dispute = hearingCase();
@@ -342,6 +373,11 @@ class HearingCourtOrchestratorTest {
                 dispute.getId(), 1, "TRACE_COURT_OPENING_1");
     }
 
+    // 所属模块：【共享小法庭 / 自动化测试层】「HearingCourtOrchestratorTest.afterRoundClosedAppendsOneIdempotentJudgeMessageAndLifecycleEvent()」。
+    // 具体功能：「HearingCourtOrchestratorTest.afterRoundClosedAppendsOneIdempotentJudgeMessageAndLifecycleEvent()」：复现“核对完整业务行为（场景方法「afterRoundClosedAppendsOneIdempotentJudgeMessageAndLifecycleEvent」）”场景：驱动 「caseRepository.findById」、「roomRepository.findByCaseIdAndRoomType」、「roundRepository.findByCaseIdAndRoundNo」、「submissionRepository.findAllByCaseIdAndRoundNoOrderBySubmittedAtAsc」，再用 「verify」、「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「ROOM_HEARING_CASE_COURT」、「2026-07-07T01:00:00Z」、「system」、「HEARING_ROUND_1」。
+    // 上游调用：「HearingCourtOrchestratorTest.afterRoundClosedAppendsOneIdempotentJudgeMessageAndLifecycleEvent()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「HearingCourtOrchestratorTest.afterRoundClosedAppendsOneIdempotentJudgeMessageAndLifecycleEvent()」的下游是被测服务、仓储或外部客户端替身；「verify、assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「HearingCourtOrchestratorTest.afterRoundClosedAppendsOneIdempotentJudgeMessageAndLifecycleEvent()」守住「共享小法庭」的可执行规格，尤其防止 「ROOM_HEARING_CASE_COURT」、「2026-07-07T01:00:00Z」、「system」、「HEARING_ROUND_1」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void afterRoundClosedAppendsOneIdempotentJudgeMessageAndLifecycleEvent() {
         FulfillmentCaseEntity dispute = hearingCase();
@@ -491,6 +527,11 @@ class HearingCourtOrchestratorTest {
         assertThat(savedMessage.getValue().getAudienceActorIdsJson()).isEqualTo("[]");
     }
 
+    // 所属模块：【共享小法庭 / 自动化测试层】「HearingCourtOrchestratorTest.afterRoundClosedComposesJudgeContextFromActiveEvidenceDossierVersion()」。
+    // 具体功能：「HearingCourtOrchestratorTest.afterRoundClosedComposesJudgeContextFromActiveEvidenceDossierVersion()」：复现“核对完整业务行为（场景方法「afterRoundClosedComposesJudgeContextFromActiveEvidenceDossierVersion」）”场景：驱动 「caseRepository.findById」、「roomRepository.findByCaseIdAndRoomType」、「roundRepository.findByCaseIdAndRoundNo」、「submissionRepository.findAllByCaseIdAndRoundNoOrderBySubmittedAtAsc」，再用 「verify」、「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「ROOM_HEARING_CASE_COURT」、「2026-07-07T01:00:00Z」、「system」、「HEARING_ROUND_3」。
+    // 上游调用：「HearingCourtOrchestratorTest.afterRoundClosedComposesJudgeContextFromActiveEvidenceDossierVersion()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「HearingCourtOrchestratorTest.afterRoundClosedComposesJudgeContextFromActiveEvidenceDossierVersion()」的下游是被测服务、仓储或外部客户端替身；「verify、assertThat」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「HearingCourtOrchestratorTest.afterRoundClosedComposesJudgeContextFromActiveEvidenceDossierVersion()」守住「共享小法庭」的可执行规格，尤其防止 「ROOM_HEARING_CASE_COURT」、「2026-07-07T01:00:00Z」、「system」、「HEARING_ROUND_3」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void afterRoundClosedComposesJudgeContextFromActiveEvidenceDossierVersion() {
         FulfillmentCaseEntity dispute = hearingCase();
@@ -640,6 +681,11 @@ class HearingCourtOrchestratorTest {
         completionOrder.verify(completion).run();
     }
 
+    // 所属模块：【共享小法庭 / 自动化测试层】「HearingCourtOrchestratorTest.finalRoundRetryRepairsMissingFormalJuryReportBeforeCompletion()」。
+    // 具体功能：「HearingCourtOrchestratorTest.finalRoundRetryRepairsMissingFormalJuryReportBeforeCompletion()」：复现“核对完整业务行为（场景方法「finalRoundRetryRepairsMissingFormalJuryReportBeforeCompletion」）”场景：驱动 「messageRepository.findByCaseIdAndIdempotencyKey」、「a2aMessageService.hasFormalJuryReviewReport」、「caseRepository.findById」、「roomRepository.findByCaseIdAndRoomType」，再用 「verify」、「assertThat」、「verifyNoInteractions」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「ROOM_HEARING_CASE_COURT」、「2026-07-07T01:00:00Z」、「system」、「HEARING_ROUND_3」。
+    // 上游调用：「HearingCourtOrchestratorTest.finalRoundRetryRepairsMissingFormalJuryReportBeforeCompletion()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「HearingCourtOrchestratorTest.finalRoundRetryRepairsMissingFormalJuryReportBeforeCompletion()」的下游是被测服务、仓储或外部客户端替身；「verify、assertThat、verifyNoInteractions」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「HearingCourtOrchestratorTest.finalRoundRetryRepairsMissingFormalJuryReportBeforeCompletion()」守住「共享小法庭」的可执行规格，尤其防止 「ROOM_HEARING_CASE_COURT」、「2026-07-07T01:00:00Z」、「system」、「HEARING_ROUND_3」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void finalRoundRetryRepairsMissingFormalJuryReportBeforeCompletion() {
         FulfillmentCaseEntity dispute = hearingCase();
@@ -721,6 +767,11 @@ class HearingCourtOrchestratorTest {
         verifyNoInteractions(agentClient);
     }
 
+    // 所属模块：【共享小法庭 / 自动化测试层】「HearingCourtOrchestratorTest.finalRoundRetryRepairsMissingA2AWhenTheJuryRoomMessageAlreadyExists()」。
+    // 具体功能：「HearingCourtOrchestratorTest.finalRoundRetryRepairsMissingA2AWhenTheJuryRoomMessageAlreadyExists()」：复现“核对完整业务行为（场景方法「finalRoundRetryRepairsMissingA2AWhenTheJuryRoomMessageAlreadyExists」）”场景：驱动 「messageRepository.findByCaseIdAndIdempotencyKey」、「a2aMessageService.hasFormalJuryReviewReport」、「caseRepository.findById」、「roomRepository.findByCaseIdAndRoomType」，再用 「verify」、「assertThat」、「verifyNoInteractions」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「ROOM_HEARING_CASE_COURT」、「2026-07-07T01:00:00Z」、「system」、「HEARING_ROUND_3」。
+    // 上游调用：「HearingCourtOrchestratorTest.finalRoundRetryRepairsMissingA2AWhenTheJuryRoomMessageAlreadyExists()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「HearingCourtOrchestratorTest.finalRoundRetryRepairsMissingA2AWhenTheJuryRoomMessageAlreadyExists()」的下游是被测服务、仓储或外部客户端替身；「verify、assertThat、verifyNoInteractions」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「HearingCourtOrchestratorTest.finalRoundRetryRepairsMissingA2AWhenTheJuryRoomMessageAlreadyExists()」守住「共享小法庭」的可执行规格，尤其防止 「ROOM_HEARING_CASE_COURT」、「2026-07-07T01:00:00Z」、「system」、「HEARING_ROUND_3」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void finalRoundRetryRepairsMissingA2AWhenTheJuryRoomMessageAlreadyExists()
             throws Exception {
@@ -816,6 +867,11 @@ class HearingCourtOrchestratorTest {
         verifyNoInteractions(agentClient);
     }
 
+    // 所属模块：【共享小法庭 / 自动化测试层】「HearingCourtOrchestratorTest.finalRoundRetryReusesTheSurvivingA2APayloadWhenRepairingTheRoomCard()」。
+    // 具体功能：「HearingCourtOrchestratorTest.finalRoundRetryReusesTheSurvivingA2APayloadWhenRepairingTheRoomCard()」：复现“核对完整业务行为（场景方法「finalRoundRetryReusesTheSurvivingA2APayloadWhenRepairingTheRoomCard」）”场景：驱动 「messageRepository.findByCaseIdAndIdempotencyKey」、「a2aMessageService.hasFormalJuryReviewReport」、「a2aMessageService.findFormalJuryReviewReport」、「caseRepository.findById」，再用 「verify」、「assertThat」、「verifyNoInteractions」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「ROOM_HEARING_CASE_COURT」、「2026-07-07T01:00:00Z」、「system」、「HEARING_ROUND_3」。
+    // 上游调用：「HearingCourtOrchestratorTest.finalRoundRetryReusesTheSurvivingA2APayloadWhenRepairingTheRoomCard()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「HearingCourtOrchestratorTest.finalRoundRetryReusesTheSurvivingA2APayloadWhenRepairingTheRoomCard()」的下游是被测服务、仓储或外部客户端替身；「verify、assertThat、verifyNoInteractions」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「HearingCourtOrchestratorTest.finalRoundRetryReusesTheSurvivingA2APayloadWhenRepairingTheRoomCard()」守住「共享小法庭」的可执行规格，尤其防止 「ROOM_HEARING_CASE_COURT」、「2026-07-07T01:00:00Z」、「system」、「HEARING_ROUND_3」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void finalRoundRetryReusesTheSurvivingA2APayloadWhenRepairingTheRoomCard()
             throws Exception {
@@ -908,6 +964,11 @@ class HearingCourtOrchestratorTest {
         verifyNoInteractions(agentClient);
     }
 
+    // 所属模块：【共享小法庭 / 自动化测试层】「HearingCourtOrchestratorTest.finalConvergenceContextRequiresFormalJuryReport()」。
+    // 具体功能：「HearingCourtOrchestratorTest.finalConvergenceContextRequiresFormalJuryReport()」：复现“核对完整业务行为（场景方法「finalConvergenceContextRequiresFormalJuryReport」）”场景：驱动 「hearingRecordRepository.findTopByCaseIdAndNodeNameAndRoundNoAndRecordTypeOrderByCreatedAtDesc」、「evidenceDossierRepository.findTopByCaseIdOrderByDossierVersionDesc」、「a2aMessageService.findForJudge」，再用 「assertThatThrownBy」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「C0_COURT_BOOTSTRAP」、「BOOTSTRAP_DOSSIER_SNAPSHOT」。
+    // 上游调用：「HearingCourtOrchestratorTest.finalConvergenceContextRequiresFormalJuryReport()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「HearingCourtOrchestratorTest.finalConvergenceContextRequiresFormalJuryReport()」的下游是被测服务、仓储或外部客户端替身；「assertThatThrownBy」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「HearingCourtOrchestratorTest.finalConvergenceContextRequiresFormalJuryReport()」守住「共享小法庭」的可执行规格，尤其防止 「C0_COURT_BOOTSTRAP」、「BOOTSTRAP_DOSSIER_SNAPSHOT」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void finalConvergenceContextRequiresFormalJuryReport() {
         FulfillmentCaseEntity dispute = hearingCase();
@@ -930,6 +991,11 @@ class HearingCourtOrchestratorTest {
                 .hasMessageContaining("formal jury review report");
     }
 
+    // 所属模块：【共享小法庭 / 自动化测试层】「HearingCourtOrchestratorTest.afterRoundClosedRequiresFrozenCourtroomContext()」。
+    // 具体功能：「HearingCourtOrchestratorTest.afterRoundClosedRequiresFrozenCourtroomContext()」：复现“核对完整业务行为（场景方法「afterRoundClosedRequiresFrozenCourtroomContext」）”场景：驱动 「caseRepository.findById」、「roundRepository.findByCaseIdAndRoundNo」、「submissionRepository.findAllByCaseIdAndRoundNoOrderBySubmittedAtAsc」、「hearingRecordRepository.findTopByCaseIdAndNodeNameAndRoundNoAndRecordTypeOrderByCreatedAtDesc」，再用 「assertThatThrownBy」、「verifyNoInteractions」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「ROOM_HEARING_CASE_COURT」、「2026-07-07T01:00:00Z」、「system」、「HEARING_ROUND_1」。
+    // 上游调用：「HearingCourtOrchestratorTest.afterRoundClosedRequiresFrozenCourtroomContext()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
+    // 下游影响：「HearingCourtOrchestratorTest.afterRoundClosedRequiresFrozenCourtroomContext()」的下游是被测服务、仓储或外部客户端替身；「assertThatThrownBy、verifyNoInteractions」把结果与预期状态、异常或调用次数锁定。
+    // 系统意义：「HearingCourtOrchestratorTest.afterRoundClosedRequiresFrozenCourtroomContext()」守住「共享小法庭」的可执行规格，尤其防止 「ROOM_HEARING_CASE_COURT」、「2026-07-07T01:00:00Z」、「system」、「HEARING_ROUND_1」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void afterRoundClosedRequiresFrozenCourtroomContext() {
         FulfillmentCaseEntity dispute = hearingCase();
@@ -981,6 +1047,11 @@ class HearingCourtOrchestratorTest {
         verifyNoInteractions(agentClient);
     }
 
+    // 所属模块：【共享小法庭 / 自动化测试层】「HearingCourtOrchestratorTest.hearingCase()」。
+    // 具体功能：「HearingCourtOrchestratorTest.hearingCase()」：作为测试辅助方法为“核对完整业务行为（场景方法「hearingCase」）”组装或读取「FulfillmentCaseEntity.imported」、「OffsetDateTime.parse」，供本测试类的场景方法复用。
+    // 上游调用：「HearingCourtOrchestratorTest.hearingCase()」由本测试类中的 「HearingCourtOrchestratorTest.afterRoundOpenedAppendsOpeningJudgeMessage」、「HearingCourtOrchestratorTest.invokesTheRemoteCourtAgentOutsideAnyActiveCourtTransaction」、「HearingCourtOrchestratorTest.afterRoundClosedAppendsOneIdempotentJudgeMessageAndLifecycleEvent」、「HearingCourtOrchestratorTest.afterRoundClosedComposesJudgeContextFromActiveEvidenceDossierVersion」 调用。
+    // 下游影响：「HearingCourtOrchestratorTest.hearingCase()」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「HearingCourtOrchestratorTest.hearingCase()」守住「共享小法庭」的可执行规格，尤其防止 「CASE_COURT」、「ORDER-COURT」、「AS-COURT」、「LOG-COURT」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static FulfillmentCaseEntity hearingCase() {
         return FulfillmentCaseEntity.imported(
                 "CASE_COURT",
@@ -1002,6 +1073,11 @@ class HearingCourtOrchestratorTest {
                 "external-adapter");
     }
 
+    // 所属模块：【共享小法庭 / 自动化测试层】「HearingCourtOrchestratorTest.bootstrapSnapshot(String)」。
+    // 具体功能：「HearingCourtOrchestratorTest.bootstrapSnapshot(String)」：作为测试辅助方法为“核对完整业务行为（场景方法「bootstrapSnapshot」）”组装或读取「HearingRecordEntity.record」，供本测试类的场景方法复用。
+    // 上游调用：「HearingCourtOrchestratorTest.bootstrapSnapshot(String)」由本测试类中的 「HearingCourtOrchestratorTest.afterRoundOpenedAppendsOpeningJudgeMessage」、「HearingCourtOrchestratorTest.invokesTheRemoteCourtAgentOutsideAnyActiveCourtTransaction」、「HearingCourtOrchestratorTest.afterRoundClosedAppendsOneIdempotentJudgeMessageAndLifecycleEvent」、「HearingCourtOrchestratorTest.afterRoundClosedComposesJudgeContextFromActiveEvidenceDossierVersion」 调用。
+    // 下游影响：「HearingCourtOrchestratorTest.bootstrapSnapshot(String)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「HearingCourtOrchestratorTest.bootstrapSnapshot(String)」守住「共享小法庭」的可执行规格，尤其防止 「HREC_BOOTSTRAP」、「HEARING_STATE_BOOTSTRAP」、「hearing-window-」、「C0_COURT_BOOTSTRAP」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static HearingRecordEntity bootstrapSnapshot(String caseId) {
         return HearingRecordEntity.record(
                 "HREC_BOOTSTRAP",
@@ -1044,6 +1120,11 @@ class HearingCourtOrchestratorTest {
                 "hearing-bootstrap");
     }
 
+    // 所属模块：【共享小法庭 / 自动化测试层】「HearingCourtOrchestratorTest.activeEvidenceDossierV2(String)」。
+    // 具体功能：「HearingCourtOrchestratorTest.activeEvidenceDossierV2(String)」：作为测试辅助方法为“核对完整业务行为（场景方法「activeEvidenceDossierV2」）”组装或读取「EvidenceDossierEntity.frozen」，供本测试类的场景方法复用。
+    // 上游调用：「HearingCourtOrchestratorTest.activeEvidenceDossierV2(String)」由本测试类中的 「HearingCourtOrchestratorTest.afterRoundClosedComposesJudgeContextFromActiveEvidenceDossierVersion」、「HearingCourtOrchestratorTest.finalConvergenceContextRequiresFormalJuryReport」 调用。
+    // 下游影响：「HearingCourtOrchestratorTest.activeEvidenceDossierV2(String)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「HearingCourtOrchestratorTest.activeEvidenceDossierV2(String)」守住「共享小法庭」的可执行规格，尤其防止 「EVIDENCE_DOSSIER_ACTIVE_V2」、「evidence-clerk」、「[]」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static EvidenceDossierEntity activeEvidenceDossierV2(String caseId) {
         return EvidenceDossierEntity.frozen(
                 "EVIDENCE_DOSSIER_ACTIVE_V2",
@@ -1074,6 +1155,11 @@ class HearingCourtOrchestratorTest {
                 """);
     }
 
+    // 所属模块：【共享小法庭 / 自动化测试层】「HearingCourtOrchestratorTest.openingResult()」。
+    // 具体功能：「HearingCourtOrchestratorTest.openingResult()」：作为测试辅助方法为“核对完整业务行为（场景方法「openingResult」）”组装或读取「HearingCourtAgentResult」 输入夹具，供本测试类的场景方法复用。
+    // 上游调用：「HearingCourtOrchestratorTest.openingResult()」由本测试类中的 「HearingCourtOrchestratorTest.invokesTheRemoteCourtAgentOutsideAnyActiveCourtTransaction」 调用。
+    // 下游影响：「HearingCourtOrchestratorTest.openingResult()」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
+    // 系统意义：「HearingCourtOrchestratorTest.openingResult()」守住「共享小法庭」的可执行规格，尤其防止 「JUDGE」、「小法庭现在开庭。」、「法官已打开第一轮事实陈述。」、「请用户说明争议事实。」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static HearingCourtAgentResult openingResult() {
         return new HearingCourtAgentResult(
                 "JUDGE",
@@ -1089,20 +1175,49 @@ class HearingCourtOrchestratorTest {
                 "test-model");
     }
 
+    // 所属模块：【共享小法庭 / 自动化测试层】类型「TrackingTransactionManager」。
+    // 类型职责：承载TrackingTransactionManager在当前业务模块中的规则与协作边界；本类型显式提供 「doGetTransaction」、「doBegin」、「doCommit」、「doRollback」。
+    // 协作关系：由 JUnit 发现并执行其中带 @Test 的场景。
+    // 边界意义：最多三轮且受三小时时钟约束；AI 输出必须进入平台终审而非直接生效
+    // Java 语法：class 同时封装状态与方法；final 依赖通过构造器注入后不可重新指向。
     private static final class TrackingTransactionManager
             extends AbstractPlatformTransactionManager {
 
+        // 所属模块：【共享小法庭 / 自动化测试层】「HearingCourtOrchestratorTest.TrackingTransactionManager.doGetTransaction()」。
+        // 具体功能：「HearingCourtOrchestratorTest.TrackingTransactionManager.doGetTransaction()」：作为「TrackingTransactionManager」测试替身实现「doGetTransaction」：返回预设值 「newObject()」，让被测编排能够观察到确定、可断言的协作者行为。
+        // 上游调用：「HearingCourtOrchestratorTest.TrackingTransactionManager.doGetTransaction()」由 JUnit 生命周期或本测试类的场景方法调用。
+        // 下游影响：「HearingCourtOrchestratorTest.TrackingTransactionManager.doGetTransaction()」下游仅修改测试内存状态或返回桩值：返回预设值 「newObject()」；场景结束后由外层测试读取这些记录完成断言。
+        // 系统意义：「HearingCourtOrchestratorTest.TrackingTransactionManager.doGetTransaction()」守住「共享小法庭」的可执行规格；后续重构若破坏契约会在进入集成环境前失败。
+        // Java 语法：@Override 要求签名与接口/父类一致，编译器会在方法名或参数写错时直接报错。
         @Override
         protected Object doGetTransaction() {
             return new Object();
         }
 
+        // 所属模块：【共享小法庭 / 自动化测试层】「HearingCourtOrchestratorTest.TrackingTransactionManager.doBegin(Object,TransactionDefinition)」。
+        // 具体功能：「HearingCourtOrchestratorTest.TrackingTransactionManager.doBegin(Object,TransactionDefinition)」：作为「TrackingTransactionManager」测试替身实现「doBegin」：按当前场景返回固定结果且不访问真实基础设施，让被测编排能够观察到确定、可断言的协作者行为。
+        // 上游调用：「HearingCourtOrchestratorTest.TrackingTransactionManager.doBegin(Object,TransactionDefinition)」由 JUnit 生命周期或本测试类的场景方法调用。
+        // 下游影响：「HearingCourtOrchestratorTest.TrackingTransactionManager.doBegin(Object,TransactionDefinition)」下游仅修改测试内存状态或返回桩值：不触发真实 I/O；场景结束后由外层测试读取这些记录完成断言。
+        // 系统意义：「HearingCourtOrchestratorTest.TrackingTransactionManager.doBegin(Object,TransactionDefinition)」守住「共享小法庭」的可执行规格；后续重构若破坏契约会在进入集成环境前失败。
+        // Java 语法：@Override 要求签名与接口/父类一致，编译器会在方法名或参数写错时直接报错。
         @Override
         protected void doBegin(Object transaction, TransactionDefinition definition) {}
 
+        // 所属模块：【共享小法庭 / 自动化测试层】「HearingCourtOrchestratorTest.TrackingTransactionManager.doCommit(DefaultTransactionStatus)」。
+        // 具体功能：「HearingCourtOrchestratorTest.TrackingTransactionManager.doCommit(DefaultTransactionStatus)」：作为「TrackingTransactionManager」测试替身实现「doCommit」：按当前场景返回固定结果且不访问真实基础设施，让被测编排能够观察到确定、可断言的协作者行为。
+        // 上游调用：「HearingCourtOrchestratorTest.TrackingTransactionManager.doCommit(DefaultTransactionStatus)」由 JUnit 生命周期或本测试类的场景方法调用。
+        // 下游影响：「HearingCourtOrchestratorTest.TrackingTransactionManager.doCommit(DefaultTransactionStatus)」下游仅修改测试内存状态或返回桩值：不触发真实 I/O；场景结束后由外层测试读取这些记录完成断言。
+        // 系统意义：「HearingCourtOrchestratorTest.TrackingTransactionManager.doCommit(DefaultTransactionStatus)」守住「共享小法庭」的可执行规格；后续重构若破坏契约会在进入集成环境前失败。
+        // Java 语法：@Override 要求签名与接口/父类一致，编译器会在方法名或参数写错时直接报错。
         @Override
         protected void doCommit(DefaultTransactionStatus status) {}
 
+        // 所属模块：【共享小法庭 / 自动化测试层】「HearingCourtOrchestratorTest.TrackingTransactionManager.doRollback(DefaultTransactionStatus)」。
+        // 具体功能：「HearingCourtOrchestratorTest.TrackingTransactionManager.doRollback(DefaultTransactionStatus)」：作为「TrackingTransactionManager」测试替身实现「doRollback」：按当前场景返回固定结果且不访问真实基础设施，让被测编排能够观察到确定、可断言的协作者行为。
+        // 上游调用：「HearingCourtOrchestratorTest.TrackingTransactionManager.doRollback(DefaultTransactionStatus)」由 JUnit 生命周期或本测试类的场景方法调用。
+        // 下游影响：「HearingCourtOrchestratorTest.TrackingTransactionManager.doRollback(DefaultTransactionStatus)」下游仅修改测试内存状态或返回桩值：不触发真实 I/O；场景结束后由外层测试读取这些记录完成断言。
+        // 系统意义：「HearingCourtOrchestratorTest.TrackingTransactionManager.doRollback(DefaultTransactionStatus)」守住「共享小法庭」的可执行规格；后续重构若破坏契约会在进入集成环境前失败。
+        // Java 语法：@Override 要求签名与接口/父类一致，编译器会在方法名或参数写错时直接报错。
         @Override
         protected void doRollback(DefaultTransactionStatus status) {}
     }

@@ -1,3 +1,6 @@
+// 文件作用：自动化测试文件，验证 playwright.infrastructure.test 相关模块的行为、契约或页面布局。
+// 说明：本注释用于帮助读者先了解本文件职责，再继续阅读具体实现。
+
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -17,7 +20,9 @@ afterEach(() => {
   vi.resetModules();
 });
 
+// 业务位置：【前端应用】describe：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由、API 和本地状态 正确进入 售后纠纷处理界面。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
 describe("Playwright worktree isolation", () => {
+  // 业务位置：【前端应用】test：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由、API 和本地状态 正确进入 售后纠纷处理界面。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
   test("derives the browser server and base URL from PLAYWRIGHT_PORT", async () => {
     process.env.PLAYWRIGHT_PORT = "43173";
     vi.resetModules();
@@ -41,12 +46,14 @@ describe("Playwright worktree isolation", () => {
     },
   );
 
+  // 业务位置：【前端应用】test：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由、API 和本地状态 正确进入 售后纠纷处理界面。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
   test("starts this worktree's Vite server instead of reusing another one", async () => {
     const { default: config } = await import("./playwright.config.js");
 
     expect(config.webServer.reuseExistingServer).toBe(false);
   });
 
+  // 业务位置：【前端应用】test：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由、API 和本地状态 正确进入 售后纠纷处理界面。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
   test("layout specs inherit the configured base URL instead of pinning a port", async () => {
     const source = await readFile(
       path.join(
@@ -60,6 +67,7 @@ describe("Playwright worktree isolation", () => {
   });
 });
 
+// 业务位置：【前端应用】describe：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由、API 和本地状态 正确进入 售后纠纷处理界面。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
 describe("global width fixture room routing", () => {
   test.each([
     [GLOBAL_CASE_IDS.intake, "INTAKE"],
@@ -69,6 +77,7 @@ describe("global width fixture room routing", () => {
     expect(assertGlobalRoomMessageEndpoint(caseId, roomType)).toBe(roomType);
   });
 
+  // 业务位置：【前端应用】test：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由、API 和本地状态 正确进入 售后纠纷处理界面。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
   test("rejects a known case ID routed to another room's messages", () => {
     expect(() =>
       assertGlobalRoomMessageEndpoint(GLOBAL_CASE_IDS.intake, "EVIDENCE"),
@@ -85,6 +94,7 @@ describe("global width fixture room routing", () => {
   );
 });
 
+// 业务位置：【前端应用】test：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由、API 和本地状态 正确进入 售后纠纷处理界面。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
 test("global width smoke keeps strict page health checks without expected failures", async () => {
   const source = await readFile(
     path.join(process.cwd(), "tests/browser/global-width-smoke.spec.js"),

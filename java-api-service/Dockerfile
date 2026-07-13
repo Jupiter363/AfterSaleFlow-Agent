@@ -1,3 +1,6 @@
+# 文件作用：容器镜像构建文件，定义服务运行环境、依赖安装和启动入口。
+# 说明：本注释用于帮助读者先了解文件用途，再修改具体配置。
+
 FROM mcr.microsoft.com/openjdk/jdk:21-ubuntu@sha256:f89b256658018e9a591f64b396a1dd82978af20b9a52605c0185a77c95a10eb0 AS build
 WORKDIR /workspace
 
