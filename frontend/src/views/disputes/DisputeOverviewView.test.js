@@ -169,6 +169,11 @@ describe("DisputeOverviewView", () => {
 
   // 业务位置：【前端案件页面】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
   it("enters the selected dispute's current room", async () => {
+    vi.spyOn(disputeApi, "intakeStatus").mockResolvedValue({
+      current_actor_completed: true,
+      can_use_intake: false,
+      can_enter_evidence: true,
+    });
     const { wrapper, router } = await mountOverview();
 
     await wrapper.get("[data-enter-current-room]").trigger("click");
@@ -176,6 +181,78 @@ describe("DisputeOverviewView", () => {
 
     expect(router.currentRoute.value.path).toBe(
       "/disputes/CASE_EXT_001/evidence",
+    );
+  });
+
+  it("routes an unfinished respondent to private intake while the initiator uses evidence", async () => {
+    actor.id = "merchant-local";
+    actor.role = "MERCHANT";
+    const intakeStatus = vi.spyOn(disputeApi, "intakeStatus").mockResolvedValue({
+      initiator_status: "COMPLETED",
+      respondent_status: "OPEN",
+      current_actor_completed: false,
+      can_use_intake: true,
+      can_enter_evidence: false,
+    });
+    const { wrapper, router } = await mountOverview();
+
+    await wrapper.get("[data-enter-current-room]").trigger("click");
+    await flushPromises();
+
+    expect(intakeStatus).toHaveBeenCalledWith(actor, "CASE_EXT_001");
+    expect(router.currentRoute.value.path).toBe(
+      "/disputes/CASE_EXT_001/intake",
+    );
+  });
+
+  it("lights intake and locks evidence for the respondent role projection", async () => {
+    actor.id = "merchant-local";
+    actor.role = "MERCHANT";
+    const respondentCases = [{
+      ...cases[0],
+      current_room: "INTAKE",
+      pending_action: "COMPLETE_INTAKE",
+      initiator_role: "USER",
+    }];
+    const { wrapper, router } = await mountOverview(
+      null,
+      null,
+      null,
+      respondentCases,
+    );
+    const stages = wrapper.findAll("[data-stage-state]");
+
+    expect(stages[0].attributes("data-stage-state")).toBe("current");
+    expect(stages[1].attributes("data-stage-state")).toBe("locked");
+    expect(wrapper.get('[data-stage-entry="EVIDENCE"]').attributes("disabled"))
+      .toBeDefined();
+
+    await wrapper.get("[data-enter-current-room]").trigger("click");
+    await flushPromises();
+
+    expect(router.currentRoute.value.path).toBe(
+      "/disputes/CASE_EXT_001/intake",
+    );
+  });
+
+  it("applies the respondent intake gate when the current evidence stage is clicked", async () => {
+    actor.id = "merchant-local";
+    actor.role = "MERCHANT";
+    const intakeStatus = vi.spyOn(disputeApi, "intakeStatus").mockResolvedValue({
+      initiator_status: "COMPLETED",
+      respondent_status: "OPEN",
+      current_actor_completed: false,
+      can_use_intake: true,
+      can_enter_evidence: false,
+    });
+    const { wrapper, router } = await mountOverview();
+
+    await wrapper.get('[data-stage-entry="EVIDENCE"]').trigger("click");
+    await flushPromises();
+
+    expect(intakeStatus).toHaveBeenCalledWith(actor, "CASE_EXT_001");
+    expect(router.currentRoute.value.path).toBe(
+      "/disputes/CASE_EXT_001/intake",
     );
   });
 
@@ -212,13 +289,13 @@ describe("DisputeOverviewView", () => {
     expect(path.findAll("li")).toHaveLength(6);
     expect(path.text()).toContain("案情接待");
     expect(path.text()).toContain("证据核验");
-    expect(path.text()).toContain("三轮庭审");
+    expect(path.text()).toContain("智能庭审");
     expect(path.text()).toContain("裁决草案");
     expect(path.text()).toContain("人工终审");
     expect(path.text()).toContain("执行结果");
   });
 
-  it("lights the draft stop for every role before a reviewer enters terminal review", async () => {
+  it("keeps the draft stop available to a reviewer before terminal review starts", async () => {
     actor.id = "reviewer-local";
     actor.role = "PLATFORM_REVIEWER";
     const draftCase = [{
@@ -239,7 +316,33 @@ describe("DisputeOverviewView", () => {
     expect(router.currentRoute.value.fullPath).toBe("/disputes/CASE_DRAFT_STAGE/draft");
   });
 
-  it("lights terminal review globally only after the reviewer starts it", async () => {
+  it.each([
+    ["USER", "user-local"],
+    ["MERCHANT", "merchant-local"],
+  ])("shows %s a disabled waiting action while human review is pending", async (role, actorId) => {
+    actor.id = actorId;
+    actor.role = role;
+    const waitingCase = [{
+      ...cases[1],
+      id: `CASE_${role}_WAITING_REVIEW`,
+      case_status: "WAITING_HUMAN_REVIEW",
+      current_room: "DRAFT",
+      pending_action: "AWAIT_REVIEW",
+    }];
+    const { wrapper, router } = await mountOverview(null, null, null, waitingCase);
+    const currentRoomButton = wrapper.get("[data-enter-current-room]");
+
+    expect(currentRoomButton.attributes("disabled")).toBeDefined();
+    expect(currentRoomButton.attributes("data-waiting-human-review")).toBe("true");
+    expect(currentRoomButton.text()).toContain("等待人工终审");
+    expect(wrapper.get("[data-overview-guide]").text()).toContain("等待人工终审");
+    expect(wrapper.get('[data-stage-entry="REVIEW"]').attributes("disabled")).toBeDefined();
+    await currentRoomButton.trigger("click");
+    await flushPromises();
+    expect(router.currentRoute.value.fullPath).toBe("/disputes");
+  });
+
+  it("keeps terminal review locked for a party after the reviewer starts it", async () => {
     actor.id = "user-local";
     actor.role = "USER";
     const reviewCase = [{
@@ -251,14 +354,22 @@ describe("DisputeOverviewView", () => {
     }];
     const { wrapper, router } = await mountOverview(null, null, null, reviewCase);
     const stages = wrapper.findAll("[data-stage-state]");
+    const currentRoomButton = wrapper.get("[data-enter-current-room]");
+    const reviewStage = wrapper.get('[data-stage-entry="REVIEW"]');
 
     expect(stages[3].attributes("data-stage-state")).toBe("completed");
-    expect(stages[4].attributes("data-stage-state")).toBe("current");
-    expect(wrapper.get("[data-enter-current-room]").text()).toContain("人工终审");
-    expect(wrapper.get("[data-enter-current-room]").text()).toContain("查看裁决草案");
-    await wrapper.get("[data-enter-current-room]").trigger("click");
+    expect(stages[4].attributes("data-stage-state")).toBe("locked");
+    expect(stages[4].text()).toContain("权限锁定");
+    expect(currentRoomButton.attributes("disabled")).toBeDefined();
+    expect(currentRoomButton.text()).toContain("等待人工终审");
+    expect(reviewStage.attributes("disabled")).toBeUndefined();
+    expect(reviewStage.attributes("data-permission-locked")).toBe("true");
+    await reviewStage.trigger("click");
     await flushPromises();
-    expect(router.currentRoute.value.fullPath).toBe("/disputes/CASE_REVIEW_STAGE/draft");
+    expect(wrapper.get("[data-review-permission-dialog]").text()).toContain(
+      "抱歉您没有权限",
+    );
+    expect(router.currentRoute.value.fullPath).toBe("/disputes");
   });
 
   it("lets the platform reviewer re-enter the lit terminal-review stage", async () => {
@@ -291,8 +402,18 @@ describe("DisputeOverviewView", () => {
     }];
     const { wrapper, router } = await mountOverview(null, null, null, approvedCase);
     const stages = wrapper.findAll("[data-stage-state]");
+    const reviewStage = wrapper.get('[data-stage-entry="REVIEW"]');
 
+    expect(stages[4].attributes("data-stage-state")).toBe("locked");
+    expect(stages[4].text()).toContain("权限锁定");
     expect(stages[5].attributes("data-stage-state")).toBe("current");
+    expect(reviewStage.attributes("disabled")).toBeUndefined();
+    await reviewStage.trigger("click");
+    expect(wrapper.get("[data-review-permission-dialog]").text()).toContain(
+      "抱歉您没有权限",
+    );
+    expect(router.currentRoute.value.fullPath).toBe("/disputes");
+    await wrapper.get("[data-close-review-permission]").trigger("click");
     expect(wrapper.get("[data-enter-current-room]").text()).toContain("查看最终结果");
     await wrapper.get("[data-enter-current-room]").trigger("click");
     await flushPromises();
@@ -321,6 +442,11 @@ describe("DisputeOverviewView", () => {
   it("opens the current stage without carrying the history lock", async () => {
     actor.id = "user-local";
     actor.role = "USER";
+    vi.spyOn(disputeApi, "intakeStatus").mockResolvedValue({
+      current_actor_completed: true,
+      can_use_intake: false,
+      can_enter_evidence: true,
+    });
     const { wrapper, router } = await mountOverview();
 
     await wrapper.get('[data-stage-entry="EVIDENCE"]').trigger("click");
@@ -353,7 +479,7 @@ describe("DisputeOverviewView", () => {
     );
   });
 
-  it("keeps a completed review stage historically browseable without exposing the reviewer workbench", async () => {
+  it("keeps a completed review stage locked for merchants after results open", async () => {
     actor.id = "merchant-local";
     actor.role = "MERCHANT";
     const approvedCase = [{
@@ -365,13 +491,18 @@ describe("DisputeOverviewView", () => {
     const { wrapper, router } = await mountOverview(null, null, null, approvedCase);
     const reviewStage = wrapper.get('[data-stage-entry="REVIEW"]');
 
+    expect(wrapper.findAll("[data-stage-state]")[4].attributes("data-stage-state")).toBe(
+      "locked",
+    );
     expect(reviewStage.attributes("disabled")).toBeUndefined();
+    expect(reviewStage.attributes("data-permission-locked")).toBe("true");
     await reviewStage.trigger("click");
     await flushPromises();
 
-    expect(router.currentRoute.value.fullPath).toBe(
-      "/disputes/CASE_PUBLIC_REVIEW_HISTORY/draft?view=history",
+    expect(wrapper.get("[data-review-permission-dialog]").text()).toContain(
+      "抱歉您没有权限",
     );
+    expect(router.currentRoute.value.fullPath).toBe("/disputes");
   });
 
   // 业务位置：【前端案件页面】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
@@ -516,16 +647,17 @@ describe("DisputeOverviewView", () => {
   });
 
   // 业务位置：【前端案件页面】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
-  it("shows deletion only for a reviewer selecting an approved simulated source", async () => {
+  it("shows deletion for reviewer-created and approved simulated sources", async () => {
     actor.id = "reviewer-local";
     actor.role = "PLATFORM_REVIEWER";
     const { wrapper } = await mountOverview();
 
     expect(wrapper.find("[data-delete-simulated-case]").exists()).toBe(true);
+    expect(wrapper.get("[data-delete-case]").text()).toContain("删除案件");
 
     await wrapper.get(`[data-case-id="${longCaseId}"]`).trigger("click");
 
-    expect(wrapper.find("[data-delete-simulated-case]").exists()).toBe(false);
+    expect(wrapper.find("[data-delete-simulated-case]").exists()).toBe(true);
 
     await wrapper.get(`[data-case-id="${formalExternalCaseId}"]`).trigger("click");
 

@@ -97,33 +97,53 @@ public class AgentStreamOperationRegistry {
                 Set.of());
         register(
                 values,
-                "HEARING_ROUND",
-                "/internal/agents/hearing/round-turn/stream",
-                "PRESIDING_JUDGE",
-                "hearing_round_turn",
-                Set.of(
-                        "message_text",
-                        "jury_review_report.public_message"));
+                "HEARING_INTAKE_QUESTIONS",
+                "/internal/agents/hearing-flow/intake/questions/stream",
+                "INTAKE_OFFICER",
+                "hearing_intake_questions",
+                Set.of("public_message"));
         register(
                 values,
-                "HEARING_STAGE",
-                "/internal/agents/hearing/run-stage/stream",
-                "PRESIDING_JUDGE",
-                "hearing_stage",
-                Set.of(
-                        "output.neutral_summary",
-                        "output.draft.recommended_outcome",
-                        "output.draft.reasoning_summary"));
+                "HEARING_INTAKE_SYNTHESIS",
+                "/internal/agents/hearing-flow/intake/synthesis/stream",
+                "INTAKE_OFFICER",
+                "hearing_intake_synthesis",
+                Set.of("public_message"));
         register(
                 values,
-                "HEARING_ANALYSIS",
-                "/internal/agents/legacy/hearing/analyze/stream",
+                "HEARING_EVIDENCE_REQUESTS",
+                "/internal/agents/hearing-flow/evidence/requests/stream",
+                "EVIDENCE_CLERK",
+                "hearing_evidence_requests",
+                Set.of("public_message"));
+        register(
+                values,
+                "HEARING_EVIDENCE_SYNTHESIS",
+                "/internal/agents/hearing-flow/evidence/synthesis/stream",
+                "EVIDENCE_CLERK",
+                "hearing_evidence_synthesis",
+                Set.of("public_message"));
+        register(
+                values,
+                "HEARING_JUDGE_V1",
+                "/internal/agents/hearing-flow/judge/v1/stream",
                 "PRESIDING_JUDGE",
-                "hearing_analysis",
-                Set.of(
-                        "issue_framing.neutral_summary",
-                        "adjudication_draft.draft.recommended_outcome",
-                        "adjudication_draft.draft.reasoning_summary"));
+                "hearing_judge_v1",
+                Set.of("public_message"));
+        register(
+                values,
+                "HEARING_JURY_REVIEW",
+                "/internal/agents/hearing-flow/jury/review/stream",
+                "JURY_PANEL",
+                "hearing_jury_review",
+                Set.of("public_message"));
+        register(
+                values,
+                "HEARING_JUDGE_V2",
+                "/internal/agents/hearing-flow/judge/v2/stream",
+                "PRESIDING_JUDGE",
+                "hearing_judge_v2",
+                Set.of("public_message"));
         register(
                 values,
                 "DELIBERATION",

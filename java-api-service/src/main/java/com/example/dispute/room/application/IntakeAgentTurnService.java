@@ -168,7 +168,8 @@ public class IntakeAgentTurnService implements AgentRunFinalizer {
         int turnNo = memoryRepository.findMaxTurnNoByAgentSessionId(session.agentSession().getId()) + 1;
         IntakeLobbySeed sanitizedLobbySeed = sanitizeLobbySeed(lobbySeed);
         String turnSource = initialFormSource(context.dispute());
-        JsonNode previousScrollSnapshot = latestScrollSnapshot(session.agentSession().getId());
+        JsonNode previousScrollSnapshot =
+                latestScrollSnapshot(caseId, session.agentSession().getId(), false);
         IntakeAgentTurnCommand command =
                 new IntakeAgentTurnCommand(
                         caseId,
@@ -188,6 +189,80 @@ public class IntakeAgentTurnService implements AgentRunFinalizer {
         IntakeAgentTurnResult result = safeRun(command, previousScrollSnapshot, traceId, requestId);
         persistAgentTurn(context, session, turnNo, result, traceId);
         return null;
+    }
+
+    /**
+     * Creates the respondent's private intake opening from the frozen initiator matrix.
+     * The opening is procedural and does not create a respondent fact source or mutate the dossier.
+     */
+    @Transactional
+    public RoomMessageView ensureRespondentOpening(
+            String caseId,
+            RoomType roomType,
+            AuthenticatedActor actor,
+            String traceId,
+            String requestId) {
+        if (roomType != RoomType.INTAKE || !isParty(actor.role())) {
+            throw new IllegalArgumentException("respondent intake opening requires a party actor");
+        }
+
+        TurnContext context = prepare(caseId, RoomType.INTAKE);
+        if (actor.role() == context.dispute().getInitiatorRole()) {
+            throw new IllegalArgumentException("initiator intake opening is created with the case");
+        }
+        SessionContext session = resolveSession(caseId, actor, RoomType.INTAKE);
+        String idempotencyKey =
+                "agent-intake-respondent-opening:" + session.agentSession().getId();
+        var existing =
+                messageRepository.findByCaseIdAndIdempotencyKey(caseId, idempotencyKey);
+        if (existing.isPresent()) {
+            return roomMessageView(existing.orElseThrow());
+        }
+        var visibleConversation =
+                messageRepository.findAllByRoomIdOrderBySequenceNoAsc(context.room().getId())
+                        .stream()
+                        .filter(message -> visibleToActor(message, actor.actorId()))
+                        .filter(
+                                message ->
+                                        message.getMessageType() == MessageType.AGENT_MESSAGE
+                                                || message.getMessageType()
+                                                        == MessageType.PARTY_TEXT)
+                        .toList();
+        if (!visibleConversation.isEmpty()) {
+            return roomMessageView(visibleConversation.getFirst());
+        }
+
+        JsonNode frozenDossier = readJson(context.dispute().getIntakeResultJson());
+        String utterance = respondentOpeningUtterance(frozenDossier, actor.role());
+        String audienceActorIdsJson = json(List.of(actor.actorId()));
+        long sequence = messageRepository.findMaxSequenceByRoomId(context.room().getId()) + 1;
+        RoomMessageEntity saved =
+                messageRepository.save(
+                        RoomMessageEntity.create(
+                                "MESSAGE_" + compactUuid(),
+                                caseId,
+                                context.room().getId(),
+                                sequence,
+                                MessageSenderType.AGENT,
+                                AGENT_SENDER_ROLE,
+                                AGENT_SENDER_ID,
+                                audienceJson(),
+                                audienceActorIdsJson,
+                                MessageType.AGENT_MESSAGE,
+                                utterance,
+                                "[]",
+                                idempotencyKey,
+                                Instant.now(clock),
+                                traceId));
+        eventService.recordRoomMessage(
+                caseId,
+                context.room().getId(),
+                saved.getId(),
+                saved.getMessageText(),
+                saved.getAudienceJson(),
+                audienceActorIdsJson,
+                AGENT_SENDER_ID);
+        return roomMessageView(saved);
     }
 
     // 所属模块：【房间协作与权限 / 应用编排层】「IntakeAgentTurnService.continueFromParticipantMessage(String,RoomType,AuthenticatedActor,RoomMessageEntity,String,String)」。
@@ -225,7 +300,11 @@ public class IntakeAgentTurnService implements AgentRunFinalizer {
                         session.agentSession(),
                         session.accessSession(),
                         "{}"));
-        JsonNode previousScrollSnapshot = latestScrollSnapshot(session.agentSession().getId());
+        JsonNode previousScrollSnapshot =
+                latestScrollSnapshot(
+                        caseId,
+                        session.agentSession().getId(),
+                        actor.role() != context.dispute().getInitiatorRole());
         IntakeAgentTurnCommand command =
                 new IntakeAgentTurnCommand(
                         caseId,
@@ -233,7 +312,8 @@ public class IntakeAgentTurnService implements AgentRunFinalizer {
                         "ROOM_MESSAGE",
                         null,
                         dialogueMessage(message, "ROOM_MESSAGE"),
-                        recentDialogueMessages(context.room(), message.getSequenceNo()),
+                        recentDialogueMessages(
+                                context.room(), message.getSequenceNo(), actor.actorId()),
                         previousScrollSnapshot,
                         initiatorStatementTranscript(session.agentSession()),
                         session.agentContext());
@@ -348,7 +428,7 @@ public class IntakeAgentTurnService implements AgentRunFinalizer {
                         accessSession,
                         agentSession,
                         roomType,
-                        "INTAKE_INITIATOR_PRIVATE"));
+                        "INTAKE_PARTY_PRIVATE"));
     }
 
     // 所属模块：【房间协作与权限 / 应用编排层】「IntakeAgentTurnService.prepare(String,RoomType)」。
@@ -653,12 +733,37 @@ public class IntakeAgentTurnService implements AgentRunFinalizer {
     // 上游调用：「IntakeAgentTurnService.latestScrollSnapshot(String)」的上游调用点包括 「IntakeAgentTurnService.startInitialTurn」、「IntakeAgentTurnService.continueFromParticipantMessage」。
     // 下游影响：「IntakeAgentTurnService.latestScrollSnapshot(String)」向下依次触达 「findTopByAgentSessionIdAndAgentRoleIsNotNullOrderByTurnNoDesc」；计算结果以「JsonNode」交给调用方。
     // 系统意义：「IntakeAgentTurnService.latestScrollSnapshot(String)」负责主链路中的“最新版本Scroll快照”；每次读取和写入都要绑定案件参与关系、角色、房间和受众范围
-    private JsonNode latestScrollSnapshot(String agentSessionId) {
+    private JsonNode latestScrollSnapshot(
+            String caseId, String agentSessionId, boolean resetPartyProgress) {
         return memoryRepository
                 .findTopByAgentSessionIdAndAgentRoleIsNotNullOrderByTurnNoDesc(agentSessionId)
                 .map(RoomTurnMemoryEntity::getScrollSnapshotJson)
                 .map(this::readJson)
-                .orElseGet(objectMapper::createObjectNode);
+                .orElseGet(
+                        () ->
+                                intakeDossierRepository
+                                        .findByCaseIdAndRoomType(caseId, RoomType.INTAKE)
+                                        .map(CaseIntakeDossierEntity::getDossierJson)
+                                        .map(this::readJson)
+                                        .map(
+                                                dossier ->
+                                                        resetPartyProgress
+                                                                ? respondentBaseline(dossier)
+                                                                : dossier)
+                                        .orElseGet(objectMapper::createObjectNode));
+    }
+
+    /** Keeps initiator facts as context while respondent completeness starts independently. */
+    private JsonNode respondentBaseline(JsonNode frozenInitiatorDossier) {
+        ObjectNode baseline = defaultObject(frozenInitiatorDossier).deepCopy();
+        ObjectNode quality = objectMapper.createObjectNode();
+        quality.put("score", 0);
+        quality.put("ready_for_next_step", false);
+        quality.put(
+                "improvement_reason",
+                "被发起方陈述尚未开始；完善度按被发起方自己的陈述独立统计。");
+        baseline.set("intake_quality", quality);
+        return baseline;
     }
 
     // 所属模块：【房间协作与权限 / 应用编排层】「IntakeAgentTurnService.recentDialogueMessages(CaseRoomEntity,long)」。
@@ -668,10 +773,11 @@ public class IntakeAgentTurnService implements AgentRunFinalizer {
     // 系统意义：「IntakeAgentTurnService.recentDialogueMessages(CaseRoomEntity,long)」负责主链路中的“最近对话Messages”；每次读取和写入都要绑定案件参与关系、角色、房间和受众范围
     // Java 语法：stream/lambda 把集合处理写成管道；lambda 中引用的外部局部变量必须保持 effectively final。
     private List<IntakeDialogueMessage> recentDialogueMessages(
-            CaseRoomEntity room, long currentSequence) {
+            CaseRoomEntity room, long currentSequence, String actorId) {
         List<RoomMessageEntity> candidates =
                 messageRepository.findAllByRoomIdOrderBySequenceNoAsc(room.getId()).stream()
                         .filter(message -> message.getSequenceNo() < currentSequence)
+                        .filter(message -> visibleToActor(message, actorId))
                         .filter(
                                 message ->
                                         message.getMessageType() == MessageType.PARTY_TEXT
@@ -686,6 +792,19 @@ public class IntakeAgentTurnService implements AgentRunFinalizer {
         return candidates.subList(start, candidates.size()).stream()
                 .map(this::dialogueMessage)
                 .toList();
+    }
+
+    private boolean visibleToActor(RoomMessageEntity message, String actorId) {
+        JsonNode audience = readJson(message.getAudienceActorIdsJson());
+        if (!audience.isArray() || audience.isEmpty()) {
+            return true;
+        }
+        for (JsonNode candidate : audience) {
+            if (actorId.equals(candidate.asText())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // 所属模块：【房间协作与权限 / 应用编排层】「IntakeAgentTurnService.dialogueMessage(RoomMessageEntity)」。
@@ -747,6 +866,113 @@ public class IntakeAgentTurnService implements AgentRunFinalizer {
                 "INTAKE_TURN_" + memory.getTurnNo(),
                 memory.getAnswerRole(),
                 memory.getAnswerContent());
+    }
+
+    private static String respondentOpeningUtterance(
+            JsonNode dossier, ActorRole respondentRole) {
+        JsonNode matrix = dossier.path("case_fact_matrix");
+        String matrixKind = matrix.path("matrix_kind").asText();
+        String matrixRespondentRole =
+                matrix.path("party_map").path("respondent_role").asText();
+        if (!"case_fact_matrix.v2".equals(matrix.path("schema_version").asText())
+                || !"INITIATOR_FROZEN".equals(matrixKind)
+                || !respondentRole.name().equals(matrixRespondentRole)) {
+            throw new IllegalStateException(
+                    "respondent intake requires a matching frozen initiator matrix");
+        }
+
+        JsonNode initiatorClaim = matrix.path("claims").path("initiator_claim");
+        String claimSummary =
+                firstOpeningText(
+                        initiatorClaim.path("position_summary").asText(null),
+                        initiatorClaim.path("reason_summary").asText(null),
+                        matrix.path("case_overview").path("neutral_summary").asText(null));
+        String factTarget = firstUnaddressedFactTarget(matrix.path("fact_rows"), respondentRole);
+
+        String claimQuestion =
+                claimSummary == null
+                        ? "1. 您对发起方诉求是接受、部分接受还是不接受？如不接受，请说明当前处理意见。"
+                        : "1. 对发起方提出的“"
+                                + claimSummary
+                                + "”，您是接受、部分接受还是不接受？如不接受，请说明当前处理意见。";
+        String factQuestion =
+                factTarget == null
+                        ? "2. 请说明您所了解的事件经过、当前处理状态，以及需要修正或补充的事实。"
+                        : "2. 对“"
+                                + factTarget
+                                + "”这一事实，您是确认、否认、部分认可，还是暂不清楚？如需修正，请直接说明。";
+        return "您好，我是争议接待官小衡。\n\n"
+                + "我已收到这起争议。以下内容目前只代表发起方陈述，尚未经过证据核验；"
+                + "接待室只梳理双方陈述，暂不需要上传证据。\n\n请先说明：\n"
+                + claimQuestion
+                + "\n"
+                + factQuestion;
+    }
+
+    private static String firstUnaddressedFactTarget(
+            JsonNode factRows, ActorRole respondentRole) {
+        if (!factRows.isArray()) {
+            return null;
+        }
+        for (String materiality : List.of("CORE", "SUPPORTING", "CONTEXT")) {
+            for (JsonNode row : factRows) {
+                if (!materiality.equals(row.path("materiality").asText())) {
+                    continue;
+                }
+                String stance =
+                        row.path("positions")
+                                .path(respondentRole.name())
+                                .path("stance")
+                                .asText();
+                if (!"NOT_ADDRESSED".equals(stance) && !"UNKNOWN".equals(stance)) {
+                    continue;
+                }
+                String target = openingText(row.path("fact_target").asText(null));
+                if (target != null) {
+                    return target;
+                }
+            }
+        }
+        return null;
+    }
+
+    private static String firstOpeningText(String... candidates) {
+        for (String candidate : candidates) {
+            String normalized = openingText(candidate);
+            if (normalized != null) {
+                return normalized;
+            }
+        }
+        return null;
+    }
+
+    private static String openingText(String value) {
+        if (value == null) {
+            return null;
+        }
+        String normalized = value.replaceAll("\\s+", " ").trim();
+        if (normalized.isEmpty()) {
+            return null;
+        }
+        return normalized.length() <= 160
+                ? normalized
+                : normalized.substring(0, 157) + "...";
+    }
+
+    private static RoomMessageView roomMessageView(RoomMessageEntity entity) {
+        return new RoomMessageView(
+                entity.getId(),
+                entity.getCaseId(),
+                entity.getRoomId(),
+                entity.getSequenceNo(),
+                entity.getSenderRole(),
+                entity.getSenderId(),
+                entity.getMessageType(),
+                entity.getMessageSource(),
+                entity.getMessageText(),
+                List.of(),
+                entity.getAgentRunId(),
+                entity.getCreatedAt());
     }
 
     // 所属模块：【房间协作与权限 / 应用编排层】「IntakeAgentTurnService.initialFormSource(FulfillmentCaseEntity)」。

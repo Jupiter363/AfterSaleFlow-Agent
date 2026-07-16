@@ -24,33 +24,30 @@ function repeatToLength(seed, length) {
 // 业务位置：【前端浏览器回归测试】buildHearing：把 页面夹具和拦截 API 响应 组装为本块需要的 庭审轮次和法官发言，供 房间、审核和结果页面的交互断言 使用。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 function buildHearing() {
   return {
-    rounds: [
-      {
-        round_id: "ROUND_1",
-        round_no: 1,
-        status: "COMPLETED",
-        dossier_version: 1,
-        stop_reason: "BOTH_PARTIES_SUBMITTED",
-        summary_json: JSON.stringify({
-          judge: "The first hearing round is sealed.",
-        }),
-      },
-      {
-        round_id: "ROUND_2",
-        round_no: 2,
-        status: "OPEN",
-        dossier_version: 2,
-        round_deadline_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
-        submitted_roles: [],
-        current_actor_submitted: false,
-        summary_json: JSON.stringify({
-          judge: "Explain how the delivery record matches the evidence.",
-        }),
-      },
-    ],
+    flow_schema_version: "hearing_flow.v2",
+    question_set: {
+      schema_version: "hearing_question_set.v1",
+      question_set_id: "HEARING_QUESTION_SET_LAYOUT",
+      questions: [
+        {
+          question_id: "HEARING_QUESTION_LAYOUT_1",
+          fact_ids: ["FACT_DELIVERY_LAYOUT"],
+          target_roles: ["USER", "MERCHANT"],
+          question_text: "请说明签收记录与实际交付情况之间的对应关系。",
+        },
+      ],
+    },
+    evidence_request_set: null,
     settlements: [],
     status: {
-      hearing_phase: "ROUNDS_ACTIVE",
+      flow_schema_version: "hearing_flow.v2",
+      flow_stage: "PARTY_ANSWERS_OPEN",
+      stage_sequence: 5,
+      stage_deadline_at: new Date(Date.now() + 20 * 60 * 1000).toISOString(),
+      party_statuses: {
+        USER: { submission_status: "PENDING" },
+        MERCHANT: { submission_status: "PENDING" },
+      },
       can_complete_hearing: false,
       review_gate_ready: false,
     },
@@ -59,7 +56,7 @@ function buildHearing() {
 
 // 业务位置：【前端浏览器回归测试】buildMessages：把 页面夹具和拦截 API 响应 组装为本块需要的 房间消息和对话记录，供 房间、审核和结果页面的交互断言 使用。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 function buildMessages({ count = 4, longMessageLength = 0 } = {}) {
-  const roles = ["JUDGE", "USER", "MERCHANT", "JURY"];
+  const roles = ["INTAKE_OFFICER", "USER", "MERCHANT", "EVIDENCE_CLERK"];
   const messages = Array.from({ length: count }, (_, index) => {
     const sequence = index + 1;
     const senderRole =
@@ -70,30 +67,26 @@ function buildMessages({ count = 4, longMessageLength = 0 } = {}) {
       longMessageLength && sequence === count
         ? "L".repeat(longMessageLength)
         : repeatToLength(`Hearing statement ${sequence}. `, 128);
-    const isJury = senderRole === "JURY";
+    const isParty = ["USER", "MERCHANT"].includes(senderRole);
     return {
       id: `MESSAGE_${sequence}`,
       sequence_no: sequence,
       sender_role: senderRole,
-      message_type: isJury ? "JURY_REVIEW_REPORT" : "PARTY_TEXT",
-      hearing_round: 2,
-      message_text: isJury
-        ? JSON.stringify({
-            risk_level: "MEDIUM",
-            confidence_score: 0.78,
-            summary: longText,
-          })
-        : longText,
+      message_type: isParty ? "PARTY_TEXT" : "AGENT_MESSAGE",
+      message_source: isParty ? "PARTY_ACTION" : "ROLE_TEMPLATE",
+      stage_code: "PARTY_ANSWERS_OPEN",
+      message_text: longText,
       created_at: `2026-07-11T10:${String(sequence % 60).padStart(2, "0")}:00+08:00`,
     };
   });
   messages.push({
     id: "MESSAGE_A2A_INTERNAL",
     sequence_no: count + 1,
-    sender_role: "JURY",
+    sender_role: "SYSTEM",
     message_type: "A2A_AGENT_MESSAGE",
     visibility: "SYSTEM_AUDIT_ONLY",
-    hearing_round: 2,
+    message_source: "SYSTEM_STAGE_EVENT",
+    stage_code: "PARTY_ANSWERS_OPEN",
     message_text: INTERNAL_A2A_TEXT,
     created_at: "2026-07-11T11:00:00+08:00",
   });
@@ -165,6 +158,9 @@ export async function installHearingCourtFixture(page, options = {}) {
     ) {
       return fulfillJson(route, { unread_count: 0 });
     }
+    if (request.method() === "GET" && url.pathname === "/api/disputes") {
+      return fulfillJson(route, { items: [] });
+    }
     if (
       request.method() === "GET" &&
       url.pathname === `/api/disputes/${CASE_ID}/hearing`
@@ -192,6 +188,12 @@ export async function installHearingCourtFixture(page, options = {}) {
       url.pathname === `/api/disputes/${CASE_ID}/rooms/HEARING/messages`
     ) {
       return fulfillJson(route, messages);
+    }
+    if (
+      request.method() === "GET" &&
+      url.pathname === `/api/disputes/${CASE_ID}/rooms/HEARING/agent-runs/active`
+    ) {
+      return fulfillJson(route, []);
     }
     if (
       request.method() === "GET" &&

@@ -23,7 +23,49 @@ const error = ref("");
 const enteringReview = ref(false);
 let reviewEntryGeneration = 0;
 
+const DECISION_LABELS = {
+  MANUAL_REVIEW_REQUIRED: "转人工复核",
+  APPROVE_REFUND: "建议退款",
+  FULL_REFUND: "建议全额退款",
+  PARTIAL_REFUND: "建议部分退款",
+  REPLACEMENT: "建议换新或补发",
+  REJECT_CLAIM: "建议驳回诉求",
+};
+const ACTION_LABELS = {
+  CREATE_MANUAL_REVIEW_TICKET: "创建人工复核工单",
+  REFUND: "发起退款",
+  PARTIAL_REFUND: "发起部分退款",
+  CANCEL_ORDER: "取消订单",
+  RESHIP: "重新发货",
+  REPLACE: "换新处理",
+  SEND_NOTIFICATION: "发送处理通知",
+};
+const RISK_LABELS = { LOW: "低风险", MEDIUM: "中风险", HIGH: "高风险" };
+const PRECONDITION_LABELS = {
+  CASE_NOT_CLOSED: "案件尚未关闭",
+  PLAN_VERSION_CURRENT: "方案仍为当前版本",
+  PLATFORM_REVIEW_APPROVED: "已通过平台终审",
+  TARGET_RESOURCE_AVAILABLE: "目标资源可用",
+};
+const NOTIFICATION_LABELS = {
+  NOTIFY_USER_AFTER_EXECUTION: "执行后通知用户",
+  NOTIFY_MERCHANT_AFTER_EXECUTION: "执行后通知商家",
+  AUDIT_EXECUTION_RESULT: "记录执行审计结果",
+};
+const RULE_LABELS = {
+  DELIVERY_PROOF: "签收争议举证规则",
+  UNSHIPPED_CANCEL: "未发货订单取消规则",
+  MERCHANT_APPROVED_REFUND: "商家同意退款规则",
+};
+const PARAMETER_LABELS = {
+  source_recommendation: "来源建议",
+  sourceRecommendation: "来源建议",
+  source_is_final_decision: "是否最终决定",
+  sourceIsFinalDecision: "是否最终决定",
+};
+
 const caseId = computed(() => String(outcome.value?.case_id || mountedCaseId));
+const caseTitle = computed(() => readable(outcome.value?.title) || "履约争端");
 const role = computed(() => props.viewerRole || actor.role);
 const historyMode = computed(() => route.query.view === "history");
 const draft = computed(
@@ -43,9 +85,15 @@ const canEnterReview = computed(
     ["PENDING", "ASSIGNED", "IN_REVIEW"].includes(reviewTaskStatus.value),
 );
 const draftVersion = computed(() => draft.value?.draft_version || draft.value?.draftVersion || 1);
-const draftStatusLabel = computed(() =>
-  reviewTaskStatus.value === "IN_REVIEW" ? "终审进行中" : "待进入平台终审",
-);
+const draftId = computed(() => identifier(draft.value?.id));
+const draftStatus = computed(() => draft.value?.draft_status || draft.value?.draftStatus || "");
+const draftStatusLabel = computed(() => {
+  if (reviewTaskStatus.value === "IN_REVIEW") return "终审进行中";
+  if (reviewTaskStatus.value === "APPROVED") return "平台终审已完成";
+  if (reviewTaskStatus.value === "REJECTED") return "平台终审已退回";
+  if (draftStatus.value === "PENDING_HUMAN_REVIEW") return "待进入平台终审";
+  return "非最终草案";
+});
 const judgeState = computed(() => {
   if (loading.value) return "THINKING";
   if (!draft.value) return "LISTENING";
@@ -59,8 +107,12 @@ const judgeMessage = computed(() => {
   }
   return "庭审草案已经封存。本页只展示草案，不在这里作出终审决定。";
 });
-const recommendation = computed(() =>
-  readable(draft.value?.recommended_decision || draft.value?.recommendedDecision || "待终审确认"),
+const recommendationSource = computed(
+  () => draft.value?.recommended_decision || draft.value?.recommendedDecision || "待终审确认",
+);
+const recommendation = computed(() => decisionLabel(recommendationSource.value));
+const recommendationCode = computed(() =>
+  isCodeToken(recommendationSource.value) ? identifier(recommendationSource.value) : "",
 );
 const draftText = computed(() =>
   readable(draft.value?.draft_text || draft.value?.draftText || "暂无草案正文。"),
@@ -78,15 +130,25 @@ const issueFindings = computed(() =>
         finding: readable(item),
         evidenceBasis: [],
         policyBasis: [],
+        evidenceGap: "",
+        confidence: "",
       };
     }
+    const factId = identifier(item.fact_id || item.factId || item.issue_id || item.issueId);
+    const explicitPolicyBasis = identifiers(
+      item.policy_basis || item.policyBasis || item.rule_code,
+    );
     return {
-      id: identifier(item.issue_id || item.issueId) || `争议项 ${String(index + 1).padStart(2, "0")}`,
+      id: factId || `争议项 ${String(index + 1).padStart(2, "0")}`,
       finding: readable(
         item.suggested_finding || item.suggestedFinding || item.finding || item.neutral_analysis,
       ),
-      evidenceBasis: identifiers(item.evidence_basis || item.evidenceBasis || item.supported_by),
-      policyBasis: identifiers(item.policy_basis || item.policyBasis || item.rule_code),
+      evidenceBasis: identifiers(
+        item.evidence_ids || item.evidenceIds || item.evidence_basis || item.evidenceBasis || item.supported_by,
+      ),
+      policyBasis: explicitPolicyBasis.length ? explicitPolicyBasis : policyRefsForFact(factId),
+      evidenceGap: readable(item.evidence_gap || item.evidenceGap),
+      confidence: score(item.confidence),
     };
   }),
 );
@@ -101,18 +163,29 @@ const evidenceAssessments = computed(() =>
           contradictedBy: [],
           missingEvidence: null,
           confidence: "",
+          factIds: [],
+          weight: "",
+          limitations: [],
         };
       }
+      const assessmentType = item.assessment_type || item.assessmentType;
       return {
-        id: identifier(item.issue_id || item.issueId) || `核验 ${String(index + 1).padStart(2, "0")}`,
-        analysis: readable(item.neutral_analysis || item.neutralAnalysis || item.assessment || item.finding),
+        id:
+          identifier(item.evidence_id || item.evidenceId || item.issue_id || item.issueId) ||
+          `${assessmentType === "EVIDENCE_GAP" ? "证据缺口" : "核验"} ${String(index + 1).padStart(2, "0")}`,
+        analysis: readable(item.assessment || item.neutral_analysis || item.neutralAnalysis || item.finding),
         supportedBy: identifiers(item.supported_by || item.supportedBy),
         contradictedBy: identifiers(item.contradicted_by || item.contradictedBy),
         missingEvidence:
-          typeof (item.missing_evidence ?? item.missingEvidence) === "boolean"
-            ? item.missing_evidence ?? item.missingEvidence
-            : null,
+          assessmentType === "EVIDENCE_GAP"
+            ? true
+            : typeof (item.missing_evidence ?? item.missingEvidence) === "boolean"
+              ? item.missing_evidence ?? item.missingEvidence
+              : null,
         confidence: score(item.confidence),
+        factIds: identifiers(item.fact_ids || item.factIds),
+        weight: evidenceWeight(item.weight),
+        limitations: list(item.limitations),
       };
     },
   ),
@@ -126,23 +199,60 @@ const policyApplications = computed(() =>
         rationale: readable(item),
         applicable: null,
         limitations: [],
+        factIds: [],
       };
     }
     const code = identifier(item.rule_code || item.ruleCode || item.rule);
     const version = readable(item.rule_version || item.ruleVersion);
+    const name = readable(item.rule_name || item.ruleName || item.title);
     return {
       issueId: identifier(item.issue_id || item.issueId) || `规则 ${String(index + 1).padStart(2, "0")}`,
-      rule: [code, version ? `V${version}` : ""].filter(Boolean).join(" · "),
+      ruleCode: code,
+      rule: [RULE_LABELS[code] || name || code, version ? `V${version}` : ""]
+        .filter(Boolean)
+        .join(" · "),
       rationale: readable(item.rationale || item.application || item.description),
       applicable: typeof item.applicable === "boolean" ? item.applicable : null,
       limitations: list(item.limitations),
+      factIds: identifiers(item.fact_ids || item.factIds),
     };
   }),
 );
 const reviewFocus = computed(() =>
   list(draft.value?.reviewer_attention || draft.value?.reviewerAttention),
 );
-
+const approvedPlan = computed(
+  () => draft.value?.approved_plan || draft.value?.approvedPlan || null,
+);
+const planView = computed(() => {
+  if (!isRecord(approvedPlan.value)) return null;
+  return {
+    id: identifier(approvedPlan.value.id),
+    version:
+      approvedPlan.value.version ||
+      approvedPlan.value.plan_version ||
+      approvedPlan.value.planVersion ||
+      1,
+    actions: rawList(approvedPlan.value.actions).map(mapPlanAction),
+    preconditions: codeItems(approvedPlan.value.preconditions, PRECONDITION_LABELS),
+    notifications: codeItems(
+      approvedPlan.value.notifications ||
+        approvedPlan.value.notification_plan ||
+        approvedPlan.value.notificationPlan,
+      NOTIFICATION_LABELS,
+    ),
+  };
+});
+const contentItemCount = computed(() => {
+  const plan = planView.value;
+  return (
+    issueFindings.value.length +
+    evidenceAssessments.value.length +
+    policyApplications.value.length +
+    reviewFocus.value.length +
+    (plan?.actions.length || 0)
+  );
+});
 function rawList(value) {
   if (value == null) return [];
   return Array.isArray(value) ? value : [value];
@@ -169,6 +279,89 @@ function score(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) return "";
   return `${Math.round((number <= 1 ? number * 100 : number))}/100`;
+}
+
+function evidenceWeight(value) {
+  return (
+    { NONE: "未形成", LOW: "低", MEDIUM: "中", HIGH: "高" }[
+      String(value || "").toUpperCase()
+    ] || readable(value)
+  );
+}
+
+function isCodeToken(value) {
+  return typeof value === "string" && /^[A-Z][A-Z0-9_]+$/.test(value.trim());
+}
+
+function decisionLabel(value) {
+  const code = identifier(value);
+  return DECISION_LABELS[code] || readable(value) || "待终审确认";
+}
+
+function codeItems(value, labels) {
+  return rawList(value)
+    .map((item) => {
+      const code = identifier(item);
+      if (!code) return null;
+      return { code, label: labels[code] || readable(code) };
+    })
+    .filter(Boolean);
+}
+
+function mapPlanAction(item, index) {
+  if (!isRecord(item)) {
+    return {
+      code: "",
+      label: readable(item) || `处理动作 ${String(index + 1).padStart(2, "0")}`,
+      risk: "",
+      requiresApproval: null,
+      preconditions: [],
+      parameters: [],
+    };
+  }
+  const code = identifier(item.action_type || item.actionType || item.type);
+  const parameters = isRecord(item.parameters) ? item.parameters : {};
+  return {
+    code,
+    label: ACTION_LABELS[code] || readable(code) || `处理动作 ${String(index + 1).padStart(2, "0")}`,
+    risk: RISK_LABELS[identifier(item.risk_level || item.riskLevel)] || readable(item.risk_level || item.riskLevel),
+    requiresApproval:
+      typeof (item.requires_approval ?? item.requiresApproval) === "boolean"
+        ? item.requires_approval ?? item.requiresApproval
+        : null,
+    preconditions: codeItems(item.preconditions, PRECONDITION_LABELS),
+    parameters: Object.entries(parameters).map(([key, value]) => ({
+      key,
+      label: PARAMETER_LABELS[key] || key,
+      value:
+        key === "source_recommendation" || key === "sourceRecommendation"
+          ? decisionLabel(value)
+          : key === "source_is_final_decision" || key === "sourceIsFinalDecision"
+            ? value
+              ? "是"
+              : "否，仍需平台终审"
+            : readable(value),
+    })),
+  };
+}
+
+function policyRefsForFact(factId) {
+  if (!factId) return [];
+  return rawList(draft.value?.policy_application || draft.value?.policyApplication)
+    .filter(
+      (item) =>
+        isRecord(item) &&
+        item.applicable !== false &&
+        identifiers(item.fact_ids || item.factIds).includes(factId),
+    )
+    .map((item) => {
+      const code = identifier(item.rule_code || item.ruleCode || item.rule);
+      const version = readable(item.rule_version || item.ruleVersion);
+      return [RULE_LABELS[code] || code, version ? `V${version}` : ""]
+        .filter(Boolean)
+        .join(" · ");
+    })
+    .filter(Boolean);
 }
 
 function readable(value) {
@@ -277,11 +470,15 @@ onMounted(load);
               <div class="draft-scroll__title">
                 <span>庭审最终输出 · 第 {{ draftVersion }} 版</span>
                 <h2>履约争端裁决草案</h2>
-                <p>AI 法官依据已封存庭审记录形成</p>
+                <p>{{ caseTitle }}</p>
+                <small v-if="draftId">草案编号 {{ draftId }}</small>
               </div>
 
               <section class="draft-scroll__summary" data-draft-summary>
-                <div class="draft-scroll__recommendation">
+                <div
+                  class="draft-scroll__recommendation"
+                  :title="recommendationCode || undefined"
+                >
                   <span>法官建议结论</span>
                   <h3>{{ recommendation }}</h3>
                 </div>
@@ -292,11 +489,15 @@ onMounted(load);
                   </div>
                   <div>
                     <dt>文书状态</dt>
-                    <dd>非最终裁决</dd>
+                    <dd>{{ draftStatusLabel }}</dd>
                   </div>
                   <div>
                     <dt>草案版本</dt>
                     <dd>第 {{ draftVersion }} 版</dd>
+                  </div>
+                  <div>
+                    <dt>内容规模</dt>
+                    <dd>{{ contentItemCount }} 项</dd>
                   </div>
                 </dl>
               </section>
@@ -318,7 +519,7 @@ onMounted(load);
               <section class="draft-scroll__focus" data-draft-section="attention">
                 <header class="draft-scroll__module-heading">
                   <span>人工终审复核</span>
-                  <h3>重点关注事项</h3>
+                  <h3>重点关注事项 <small>{{ reviewFocus.length }} 项</small></h3>
                 </header>
                 <div class="draft-scroll__module-content">
                   <p v-if="!reviewFocus.length">暂无额外终审关注点。</p>
@@ -340,6 +541,7 @@ onMounted(load);
                     <small>ISSUE FINDINGS</small>
                     <h3>争议项认定与依据映射</h3>
                   </div>
+                  <em>{{ issueFindings.length }} 项</em>
                 </header>
                 <div class="draft-scroll__module-content">
                   <p v-if="!issueFindings.length" class="draft-scroll__empty">暂无结构化争议项认定。</p>
@@ -348,6 +550,7 @@ onMounted(load);
                       <header>
                         <span>{{ String(index + 1).padStart(2, "0") }}</span>
                         <strong>{{ item.id }}</strong>
+                        <small v-if="item.confidence">可信分 {{ item.confidence }}</small>
                       </header>
                       <div class="draft-scroll__finding">
                         <small>建议认定</small>
@@ -362,6 +565,10 @@ onMounted(load);
                           <small>规则依据</small>
                           <p>{{ item.policyBasis.length ? item.policyBasis.join("、") : "暂无明确规则编号" }}</p>
                         </div>
+                        <div v-if="item.evidenceGap">
+                          <small>证据缺口</small>
+                          <p>{{ item.evidenceGap }}</p>
+                        </div>
                       </div>
                     </li>
                   </ol>
@@ -375,6 +582,7 @@ onMounted(load);
                     <small>EVIDENCE CROSS-CHECK</small>
                     <h3>证据交叉核验</h3>
                   </div>
+                  <em>{{ evidenceAssessments.length }} 项</em>
                 </header>
                 <div class="draft-scroll__module-content">
                   <p v-if="!evidenceAssessments.length" class="draft-scroll__empty">暂无结构化证据核验意见。</p>
@@ -398,6 +606,18 @@ onMounted(load);
                           <dt>证据缺口</dt>
                           <dd>{{ item.missingEvidence ? "仍有缺失" : "未发现" }}</dd>
                         </div>
+                        <div v-if="item.factIds.length">
+                          <dt>关联事实</dt>
+                          <dd>{{ item.factIds.join("、") }}</dd>
+                        </div>
+                        <div v-if="item.weight">
+                          <dt>证明权重</dt>
+                          <dd>{{ item.weight }}</dd>
+                        </div>
+                        <div v-if="item.limitations.length">
+                          <dt>采信限制</dt>
+                          <dd>{{ item.limitations.join("、") }}</dd>
+                        </div>
                       </dl>
                     </li>
                   </ol>
@@ -411,6 +631,7 @@ onMounted(load);
                     <small>RULE APPLICATION</small>
                     <h3>规则适用论证</h3>
                   </div>
+                  <em>{{ policyApplications.length }} 项</em>
                 </header>
                 <div class="draft-scroll__module-content">
                   <p v-if="!policyApplications.length" class="draft-scroll__empty">暂无结构化规则适用说明。</p>
@@ -420,10 +641,20 @@ onMounted(load);
                         <strong>{{ item.issueId }}</strong>
                         <span v-if="item.applicable !== null">{{ item.applicable ? "规则适用" : "暂不适用" }}</span>
                       </header>
-                      <b v-if="item.rule" class="draft-scroll__rule">{{ item.rule }}</b>
+                      <b
+                        v-if="item.rule"
+                        class="draft-scroll__rule"
+                        :title="item.ruleCode || undefined"
+                      >
+                        {{ item.rule }}
+                      </b>
                       <p>{{ item.rationale || "暂无适用理由。" }}</p>
-                      <dl v-if="item.limitations.length">
-                        <div>
+                      <dl v-if="item.factIds.length || item.limitations.length">
+                        <div v-if="item.factIds.length">
+                          <dt>关联事实</dt>
+                          <dd>{{ item.factIds.join("、") }}</dd>
+                        </div>
+                        <div v-if="item.limitations.length">
                           <dt>适用限制</dt>
                           <dd>{{ item.limitations.join("、") }}</dd>
                         </div>
@@ -432,6 +663,94 @@ onMounted(load);
                   </ol>
                 </div>
               </section>
+
+            <section
+              v-if="planView"
+              class="draft-scroll__plan"
+              data-draft-section="plan"
+            >
+              <header class="draft-scroll__section-heading">
+                <span>肆</span>
+                <div>
+                  <small>PROPOSED REMEDY</small>
+                  <h3>拟定执行方案</h3>
+                </div>
+                <em>{{ planView.actions.length }} 项动作</em>
+              </header>
+
+              <div class="draft-scroll__plan-grid">
+                <div class="draft-scroll__plan-actions">
+                  <div class="draft-scroll__plan-meta">
+                    <span>方案第 {{ planView.version }} 版</span>
+                    <code v-if="planView.id">{{ planView.id }}</code>
+                  </div>
+                  <p v-if="!planView.actions.length" class="draft-scroll__empty">暂无拟定执行动作。</p>
+                  <ol v-else>
+                    <li
+                      v-for="(action, index) in planView.actions"
+                      :key="`${action.code || 'action'}-${index}`"
+                      :title="action.code || undefined"
+                    >
+                      <header>
+                        <span>{{ String(index + 1).padStart(2, "0") }}</span>
+                        <div>
+                          <strong>{{ action.label }}</strong>
+                        </div>
+                        <b v-if="action.risk">{{ action.risk }}</b>
+                      </header>
+                      <dl v-if="action.parameters.length || action.requiresApproval !== null">
+                        <div v-for="parameter in action.parameters" :key="parameter.key">
+                          <dt>{{ parameter.label }}</dt>
+                          <dd>{{ parameter.value }}</dd>
+                        </div>
+                        <div v-if="action.requiresApproval !== null">
+                          <dt>审批要求</dt>
+                          <dd>{{ action.requiresApproval ? "平台终审通过后执行" : "无需额外审批" }}</dd>
+                        </div>
+                      </dl>
+                      <ul v-if="action.preconditions.length" aria-label="动作执行前置条件">
+                        <li
+                          v-for="condition in action.preconditions"
+                          :key="condition.code"
+                          :title="condition.code"
+                        >
+                          {{ condition.label }}
+                        </li>
+                      </ul>
+                    </li>
+                  </ol>
+                </div>
+
+                <div class="draft-scroll__plan-support">
+                  <section>
+                    <h4>方案前置条件</h4>
+                    <p v-if="!planView.preconditions.length">暂无额外前置条件。</p>
+                    <ul v-else>
+                      <li
+                        v-for="condition in planView.preconditions"
+                        :key="condition.code"
+                        :title="condition.code"
+                      >
+                        {{ condition.label }}
+                      </li>
+                    </ul>
+                  </section>
+                  <section>
+                    <h4>执行后通知</h4>
+                    <p v-if="!planView.notifications.length">暂无通知安排。</p>
+                    <ul v-else>
+                      <li
+                        v-for="notification in planView.notifications"
+                        :key="notification.code"
+                        :title="notification.code"
+                      >
+                        {{ notification.label }}
+                      </li>
+                    </ul>
+                  </section>
+                </div>
+              </div>
+            </section>
             </div>
 
             <footer class="draft-scroll__notice" data-draft-boundary>
@@ -504,17 +823,18 @@ onMounted(load);
   --draft-panel-height: 740px;
   display: grid;
   box-sizing: border-box;
-  grid-template-rows: minmax(0, 1fr) auto auto;
+  grid-template-rows: var(--draft-panel-height) auto auto;
   gap: 10px;
-  height: var(--draft-panel-height);
+  height: auto;
   width: 100%;
   min-width: 0;
   min-height: 0;
-  overflow: hidden;
+  overflow: visible;
   color: #24394a;
 }
 .draft-room__document {
   display: grid;
+  height: var(--draft-panel-height);
   min-width: 0;
   min-height: 0;
   overflow: visible;
@@ -573,15 +893,14 @@ onMounted(load);
 .draft-scroll-frame__rod--bottom { transform: translateY(-3px); }
 .draft-scroll {
   --draft-masthead-height: 104px;
-  --draft-overview-height: 136px;
   --draft-notice-height: 42px;
   position: relative;
   display: grid;
   box-sizing: border-box;
   grid-template-rows:
     var(--draft-masthead-height)
-    var(--draft-overview-height)
-    minmax(220px, 1fr)
+    minmax(0, 1fr)
+    minmax(0, 1fr)
     var(--draft-notice-height);
   min-width: 0;
   min-height: 0;
@@ -597,24 +916,26 @@ onMounted(load);
 .draft-scroll::after { content: ""; position: absolute; top: 0; bottom: 0; width: 5px; background: #f0e2c4; }
 .draft-scroll::before { left: 8px; }
 .draft-scroll::after { right: 8px; }
-.draft-scroll__masthead { display: grid; box-sizing: border-box; grid-template-columns: minmax(250px, .8fr) minmax(480px, 1.8fr) 62px; align-items: center; min-height: 0; gap: 32px; padding-bottom: 14px; border-bottom: 2px solid #24394a; }
+.draft-scroll__masthead { display: grid; box-sizing: border-box; grid-template-columns: minmax(250px, .8fr) minmax(480px, 1.8fr) 62px; align-items: center; min-height: 104px; gap: 32px; padding-bottom: 14px; border-bottom: 2px solid #24394a; }
 .draft-scroll__title { min-width: 0; }
 .draft-scroll__title h2 { margin: 6px 0 3px; color: #182d38; font-size: 27px; line-height: 1.2; letter-spacing: 0; }
 .draft-scroll__title p { margin: 0; color: #6b6e67; font-size: 13px; }
+.draft-scroll__title > small { display: block; margin-top: 5px; color: #8d7b63; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 9px; overflow-wrap: anywhere; }
 .draft-scroll__seal { display: grid; width: 62px; height: 62px; place-content: center; border: 3px double #b9434d; border-radius: 50%; color: #b9434d; font-size: 13px; line-height: 1.25; text-align: center; transform: rotate(-7deg); }
-.draft-scroll__summary { display: grid; grid-template-columns: minmax(220px, 1fr) auto; align-items: end; min-width: 0; gap: 26px; padding-left: 32px; border-left: 1px solid #d8ccb2; }
+.draft-scroll__summary { display: grid; grid-template-columns: minmax(220px, 1fr) auto; align-items: start; min-width: 0; gap: 26px; padding-left: 32px; border-left: 1px solid #d8ccb2; }
 .draft-scroll__recommendation { min-width: 0; }
-.draft-scroll__recommendation h3 { margin: 7px 0 0; color: #8f303a; font-size: 21px; line-height: 1.35; letter-spacing: 0; overflow-wrap: anywhere; }
-.draft-scroll__summary dl { display: grid; grid-template-columns: repeat(3, auto); margin: 0; gap: 18px; }
+.draft-scroll__recommendation h3 { margin: 4px 0 0; color: #8f303a; font-size: 34px; line-height: 1.1; letter-spacing: 0; overflow-wrap: anywhere; }
+.draft-scroll__summary dl { display: grid; grid-template-columns: repeat(2, minmax(82px, auto)); margin: 0; gap: 10px 18px; }
 .draft-scroll__summary dl div { display: grid; gap: 3px; }
 .draft-scroll__summary dt { color: #797970; font-size: 11px; }
 .draft-scroll__summary dd { margin: 0; font-size: 13px; font-weight: 900; white-space: nowrap; }
-.draft-scroll__overview { display: grid; grid-template-columns: minmax(0, 2fr) minmax(300px, 1fr); min-height: 0; border-bottom: 1px solid #d8ccb2; }
+.draft-scroll__overview { display: grid; grid-template-columns: minmax(0, 2fr) minmax(300px, 1fr); min-height: 0; overflow: hidden; border-bottom: 1px solid #d8ccb2; }
 .draft-scroll__body, .draft-scroll__focus { display: grid; grid-template-rows: auto minmax(0, 1fr); min-width: 0; min-height: 0; padding: 14px 0; }
 .draft-scroll__body { padding-right: 34px; }
 .draft-scroll__focus { padding-left: 34px; border-left: 1px solid #d8ccb2; }
 .draft-scroll__module-heading > span { color: #237a72; font-size: 10px; font-weight: 900; }
 .draft-scroll__module-heading h3 { margin: 5px 0 0; font-size: 17px; letter-spacing: 0; }
+.draft-scroll__module-heading h3 small { margin-left: 6px; color: #8d7b63; font-size: 10px; font-weight: 700; }
 .draft-scroll__module-content { min-width: 0; min-height: 0; padding-right: 5px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; scrollbar-width: thin; }
 .draft-scroll__body .draft-scroll__module-content p, .draft-scroll__focus .draft-scroll__module-content > p { margin: 9px 0 0; color: #33464e; font-size: 14px; line-height: 1.65; white-space: pre-wrap; }
 .draft-scroll__focus ol { display: grid; margin: 9px 0 0; padding: 0; gap: 8px; list-style: none; }
@@ -624,8 +945,9 @@ onMounted(load);
 .draft-scroll__section-heading > span { display: grid; width: 30px; height: 30px; flex: 0 0 30px; place-content: center; border: 1px solid #237a72; border-radius: 50%; color: #237a72; font-size: 12px; font-weight: 900; }
 .draft-scroll__section-heading small { color: #8d7b63; font-size: 9px; font-weight: 900; }
 .draft-scroll__section-heading h3 { margin: 2px 0 0; font-size: 17px; letter-spacing: 0; }
-.draft-scroll__analysis-board { display: grid; grid-template-columns: minmax(360px, 1.25fr) minmax(280px, 1fr) minmax(280px, 1fr); min-height: 0; border-bottom: 1px solid #d8ccb2; }
-.draft-scroll__analysis-board > section { display: grid; grid-template-rows: auto minmax(0, 1fr); min-width: 0; min-height: 0; padding: 16px 26px; }
+.draft-scroll__section-heading em { margin-left: auto; color: #8d7b63; font-size: 10px; font-style: normal; font-weight: 800; white-space: nowrap; }
+.draft-scroll__analysis-board { display: grid; grid-template-columns: repeat(4, minmax(240px, 1fr)); min-height: 0; overflow-x: auto; overflow-y: hidden; overscroll-behavior: contain; scrollbar-width: thin; border-bottom: 1px solid #d8ccb2; }
+.draft-scroll__analysis-board > section { display: grid; grid-template-rows: auto minmax(0, 1fr); min-width: 0; min-height: 0; padding: 16px 20px; }
 .draft-scroll__analysis-board > section:first-child { padding-left: 0; }
 .draft-scroll__analysis-board > section:last-child { padding-right: 0; }
 .draft-scroll__analysis-board > section + section { border-left: 1px solid #d8ccb2; }
@@ -653,6 +975,25 @@ onMounted(load);
 .draft-scroll__analysis-list dd { margin: 0; overflow-wrap: anywhere; }
 .draft-scroll__rule { display: block; margin-top: 7px; color: #8f303a; font-size: 12px; }
 .draft-scroll__empty { margin: 10px 0 0; color: #72756f; font-size: 13px; }
+.draft-scroll__plan { min-width: 0; min-height: 0; }
+.draft-scroll__plan-grid { display: grid; grid-template-columns: 1fr; align-content: start; min-width: 0; min-height: 0; gap: 16px; margin-top: 10px; padding-right: 5px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; scrollbar-width: thin; }
+.draft-scroll__plan-meta { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; padding-bottom: 9px; border-bottom: 1px solid #e3d9c4; color: #8d7b63; font-size: 11px; }
+.draft-scroll__plan-meta code { font-size: 9px; overflow-wrap: anywhere; }
+.draft-scroll__plan-actions > ol { display: grid; margin: 0; padding: 0; list-style: none; }
+.draft-scroll__plan-actions > ol > li { padding: 14px 0; border-bottom: 1px solid #e3d9c4; }
+.draft-scroll__plan-actions > ol > li > header { display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; align-items: start; gap: 10px; }
+.draft-scroll__plan-actions > ol > li > header > span { color: #b9434d; font-size: 10px; font-weight: 900; }
+.draft-scroll__plan-actions header strong { display: block; font-size: 13px; }
+.draft-scroll__plan-actions header b { padding: 3px 6px; border: 1px solid #b8cdc9; border-radius: 3px; color: #237a72; font-size: 10px; white-space: nowrap; }
+.draft-scroll__plan-actions dl { display: grid; grid-template-columns: 1fr; margin: 12px 0 0 38px; gap: 7px; }
+.draft-scroll__plan-actions dl div { display: grid; grid-template-columns: 76px minmax(0, 1fr); gap: 8px; font-size: 11px; line-height: 1.5; }
+.draft-scroll__plan-actions dt { color: #8d7b63; font-weight: 800; }
+.draft-scroll__plan-actions dd { margin: 0; overflow-wrap: anywhere; }
+.draft-scroll__plan-actions > ol > li > ul { display: grid; margin: 10px 0 0 38px; padding: 0; gap: 5px; color: #53646a; font-size: 11px; list-style-position: inside; }
+.draft-scroll__plan-support { display: grid; align-content: start; gap: 16px; padding-top: 16px; border-top: 1px solid #d8ccb2; }
+.draft-scroll__plan-support h4 { margin: 0; font-size: 13px; }
+.draft-scroll__plan-support p { margin: 8px 0 0; color: #72756f; font-size: 12px; }
+.draft-scroll__plan-support ul { display: grid; margin: 8px 0 0; padding-left: 18px; gap: 6px; color: #40535a; font-size: 12px; line-height: 1.5; }
 .draft-scroll__notice { display: flex; box-sizing: border-box; align-items: center; align-self: end; justify-content: center; width: 100%; height: var(--draft-notice-height); gap: 10px; border-top: 1px solid #d8ccb2; text-align: center; }
 .draft-scroll__notice strong { color: #b9434d; }
 .draft-scroll__notice p { margin: 0; max-width: 760px; color: #6f645b; font-size: 12px; line-height: 1.6; }
@@ -663,21 +1004,10 @@ onMounted(load);
 .draft-room__review:disabled { cursor: progress; opacity: .65; }
 .draft-room__error { width: 100%; margin: 0; color: #a32f3b; font-size: 12px; text-align: right; overflow-wrap: anywhere; }
 @container room-workspace (max-width: 1120px) {
-  .draft-scroll { display: block; overflow-y: auto; scrollbar-gutter: stable; }
+  .draft-scroll { --draft-masthead-height: 140px; padding-inline: 30px; }
   .draft-scroll__masthead { grid-template-columns: minmax(230px, .8fr) minmax(0, 1.7fr) 58px; gap: 22px; }
   .draft-scroll__summary { grid-template-columns: 1fr; align-items: start; gap: 12px; padding-left: 22px; }
   .draft-scroll__summary dl { justify-content: start; }
-  .draft-scroll__overview { min-height: var(--draft-overview-height); }
-  .draft-scroll__analysis-board { grid-template-columns: 1fr 1fr; min-height: 400px; }
-  .draft-scroll__analysis-board > section:first-child { grid-column: 1 / -1; padding-right: 0; }
-  .draft-scroll__analysis-board > section:nth-child(2) { padding-left: 0; border-left: 0; border-top: 1px solid #d8ccb2; }
-  .draft-scroll__analysis-board > section:nth-child(3) { border-top: 1px solid #d8ccb2; }
-  .draft-scroll__issue-list > li { grid-template-columns: 150px minmax(0, 1fr) minmax(280px, 1fr); padding: 0; }
-  .draft-scroll__issue-list > li > header, .draft-scroll__finding, .draft-scroll__basis { padding: 13px 15px; }
-  .draft-scroll__issue-list > li > header { display: grid; align-content: start; gap: 5px; padding-left: 0; }
-  .draft-scroll__finding { margin-top: 0; border-left: 1px solid #e3d9c4; border-right: 1px solid #e3d9c4; }
-  .draft-scroll__basis { margin-top: 0; padding-top: 13px; border-top: 0; }
-  .draft-scroll__notice { margin-top: 0; }
 }
 @media (max-width: 700px) {
   :deep(.room-shell__header) { align-items: stretch; }
@@ -685,24 +1015,29 @@ onMounted(load);
   .draft-scroll-frame { width: 100%; }
   .draft-scroll-frame__rod { grid-template-columns: 22px minmax(0, 1fr) 22px; }
   .draft-scroll-frame__rod i { width: 22px; }
-  .draft-scroll { margin-inline: 7px; padding: 24px 22px 0; }
+  .draft-scroll { --draft-masthead-height: 230px; margin-inline: 7px; padding: 24px 22px 0; }
   .draft-scroll__title h2 { font-size: 25px; }
   .draft-scroll__masthead { grid-template-columns: minmax(0, 1fr) 54px; align-items: center; }
   .draft-scroll__summary { grid-column: 1 / -1; grid-row: 2; padding: 14px 0 0; border-top: 1px solid #d8ccb2; border-left: 0; }
   .draft-scroll__seal { grid-column: 2; grid-row: 1; width: 54px; height: 54px; font-size: 12px; }
-  .draft-scroll__overview, .draft-scroll__analysis-board { grid-template-columns: 1fr; }
+  .draft-scroll__overview { grid-template-columns: repeat(2, minmax(280px, 86vw)); overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; }
+  .draft-scroll__analysis-board { grid-template-columns: repeat(4, minmax(280px, 86vw)); }
   .draft-scroll__summary { align-items: start; gap: 14px; }
   .draft-scroll__summary dl { grid-template-columns: 1fr; gap: 7px; }
   .draft-scroll__summary dl div { grid-template-columns: 72px minmax(0, 1fr); }
-  .draft-scroll__body { padding-right: 0; }
-  .draft-scroll__focus { padding-left: 0; border-top: 1px solid #d8ccb2; border-left: 0; }
-  .draft-scroll__analysis-board { min-height: 0; }
-  .draft-scroll__analysis-board > section, .draft-scroll__analysis-board > section:first-child, .draft-scroll__analysis-board > section:last-child { grid-column: auto; min-height: 180px; padding: 18px 0; }
-  .draft-scroll__analysis-board > section + section { border-top: 1px solid #d8ccb2; border-left: 0; }
+  .draft-scroll__body { padding-right: 18px; }
+  .draft-scroll__focus { padding-left: 18px; border-left: 1px solid #d8ccb2; }
+  .draft-scroll__analysis-board > section { min-height: 0; padding: 16px 18px; }
   .draft-scroll__issue-list > li { grid-template-columns: 1fr; }
   .draft-scroll__issue-list > li > header, .draft-scroll__finding, .draft-scroll__basis { padding: 12px 0; }
   .draft-scroll__finding { border-top: 1px solid #e3d9c4; border-right: 0; border-bottom: 1px solid #e3d9c4; border-left: 0; }
   .draft-scroll__basis { grid-template-columns: 1fr; gap: 10px; }
+  .draft-scroll__plan-grid, .draft-scroll__plan-support { grid-template-columns: 1fr; }
+  .draft-scroll__plan-support { gap: 16px; }
+  .draft-scroll__plan-actions > ol > li > header { grid-template-columns: 24px minmax(0, 1fr); }
+  .draft-scroll__plan-actions header b { grid-column: 2; justify-self: start; }
+  .draft-scroll__plan-actions dl { grid-template-columns: 1fr; margin-left: 34px; }
+  .draft-scroll__plan-actions > ol > li > ul { margin-left: 34px; }
   .draft-scroll__notice { display: grid; gap: 5px; }
   .draft-room__actions { display: grid; }
   .draft-room__actions button { width: 100%; }

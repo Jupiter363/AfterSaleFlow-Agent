@@ -14,11 +14,16 @@ import com.example.dispute.infrastructure.persistence.entity.AgentRunEntity;
 import com.example.dispute.infrastructure.persistence.repository.AgentRunRepository;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.OffsetDateTime;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
@@ -36,7 +41,7 @@ import org.springframework.transaction.annotation.Transactional;
 @Service
 public class AgentRunCoordinator {
 
-    private static final int MAX_INFRASTRUCTURE_ATTEMPTS = 3;
+    private static final int MAX_AUTOMATIC_ATTEMPTS = 3;
     private static final String RETRY_SUFFIX = ":attempt-";
 
     private final AgentRunRepository runRepository;
@@ -85,17 +90,13 @@ public class AgentRunCoordinator {
         AgentStreamOperationRegistry.OperationDefinition operation =
                 operationRegistry.require(command.operation());
         String requestJson = json(command.request());
-        String requestHash = sha256(requestJson);
+        String requestHash = canonicalRequestHash(command.request());
         var existing =
                 runRepository.findByCaseIdAndStreamIdempotencyKey(
                         command.caseId(), command.idempotencyKey());
         if (existing.isPresent()) {
             AgentRunEntity run = existing.orElseThrow();
-            if (!operation.operation().equals(run.getStreamOperation())
-                    || !requestHash.equals(run.getStreamRequestHash())) {
-                throw new IdempotencyConflictException(
-                        "Idempotency-Key was already used for a different agent run");
-            }
+            assertSameFingerprint(run, operation.operation(), requestHash);
             return accepted(run);
         }
         var inFlight =
@@ -173,13 +174,13 @@ public class AgentRunCoordinator {
     }
 
     /**
-     * Creates a new audited attempt for a failed infrastructure run.
+     * Creates a new audited attempt for an automatically recoverable failed run.
      *
      * <p>The original terminal run is never rewritten. Ordinary operations require an explicitly
-     * retryable transport failure with no visible output. Final hearing analysis may also replace a
-     * partial provisional draft after a timeout because no adjudication draft was committed.
-     * Repeated callers reuse the newest attempt, so Temporal Activity retries and the hearing
-     * recovery scheduler cannot fan out duplicate model calls.
+     * retryable transport failure with no visible output. Final hearing convergence may also retry
+     * a schema-invalid model response because no adjudication draft was committed. Repeated callers
+     * reuse the newest attempt, so Temporal Activity retries and the hearing recovery scheduler
+     * cannot fan out duplicate model calls.
      */
     @Transactional
     public AgentRunAcceptedView retryInfrastructureFailure(AgentRunStartCommand command) {
@@ -190,7 +191,7 @@ public class AgentRunCoordinator {
         AgentStreamOperationRegistry.OperationDefinition operation =
                 operationRegistry.require(command.operation());
         String requestJson = json(command.request());
-        String requestHash = sha256(requestJson);
+        String requestHash = canonicalRequestHash(command.request());
         List<AgentRunEntity> attempts =
                 runRepository
                         .findAllByCaseIdAndStreamIdempotencyKeyStartingWithOrderByCreatedAtAsc(
@@ -203,11 +204,11 @@ public class AgentRunCoordinator {
         }
         AgentRunEntity latest = attempts.get(attempts.size() - 1);
         assertSameFingerprint(latest, operation.operation(), requestHash);
-        if (!"FAILED".equals(latest.getRunStatus()) || !recoverableInfrastructureFailure(latest)) {
+        if (!"FAILED".equals(latest.getRunStatus()) || !recoverableAutomaticFailure(latest)) {
             return accepted(latest);
         }
         int nextAttempt = attemptNumber(latest.getStreamIdempotencyKey(), command.idempotencyKey()) + 1;
-        if (nextAttempt > MAX_INFRASTRUCTURE_ATTEMPTS) {
+        if (nextAttempt > MAX_AUTOMATIC_ATTEMPTS) {
             return accepted(latest);
         }
         String retryKey = command.idempotencyKey() + RETRY_SUFFIX + nextAttempt;
@@ -255,54 +256,29 @@ public class AgentRunCoordinator {
             return false;
         }
         return attemptNumber(latest.getStreamIdempotencyKey(), baseIdempotencyKey)
-                < MAX_INFRASTRUCTURE_ATTEMPTS;
+                < MAX_AUTOMATIC_ATTEMPTS;
     }
 
-    @Transactional(readOnly = true)
-    public boolean hasRestartableFinalConvergenceFailure(
-            String caseId, String baseIdempotencyKey) {
-        List<AgentRunEntity> attempts =
-                runRepository
-                        .findAllByCaseIdAndStreamIdempotencyKeyStartingWithOrderByCreatedAtAsc(
-                                caseId, baseIdempotencyKey)
-                        .stream()
-                        .filter(run -> isAttemptOf(run, baseIdempotencyKey))
-                        .toList();
-        if (attempts.isEmpty()) {
+    private boolean recoverableAutomaticFailure(AgentRunEntity run) {
+        if (recoverableInfrastructureFailure(run)) {
             return true;
         }
-        AgentRunEntity latest = attempts.get(attempts.size() - 1);
-        if (!"FAILED".equals(latest.getRunStatus())) {
+        if (!"AGENT_OUTPUT_SCHEMA_INVALID".equals(run.getErrorCode())) {
             return false;
         }
-        boolean finalHearingAnalysis =
-                "HEARING_ANALYSIS".equals(latest.getStreamOperation())
-                        && latest.getStreamIdempotencyKey() != null
-                        && latest.getStreamIdempotencyKey().contains(":final");
-        if (!finalHearingAnalysis) {
-            return false;
-        }
-        if ("AGENT_OUTPUT_SCHEMA_INVALID".equals(latest.getErrorCode())) {
-            return true;
-        }
-        return recoverableInfrastructureFailure(latest)
-                && attemptNumber(latest.getStreamIdempotencyKey(), baseIdempotencyKey)
-                        < MAX_INFRASTRUCTURE_ATTEMPTS;
+        return switch (run.getStreamOperation()) {
+            case "HEARING_JUDGE_V1", "HEARING_JURY_REVIEW", "HEARING_JUDGE_V2" -> true;
+            default -> false;
+        };
     }
 
     private boolean recoverableInfrastructureFailure(AgentRunEntity run) {
         boolean infrastructureFailure =
                 "AGENT_STREAM_TIMEOUT".equals(run.getErrorCode())
-                        || "AGENT_STREAM_TRANSPORT_FAILED".equals(run.getErrorCode());
+                        || "AGENT_STREAM_TRANSPORT_FAILED".equals(run.getErrorCode())
+                        || "AGENT_SERVICE_UNAVAILABLE".equals(run.getErrorCode());
         if (!infrastructureFailure) {
             return false;
-        }
-        boolean finalHearingAnalysis =
-                "HEARING_ANALYSIS".equals(run.getStreamOperation())
-                        && run.getStreamIdempotencyKey() != null
-                        && run.getStreamIdempotencyKey().contains(":final");
-        if (finalHearingAnalysis) {
-            return true;
         }
         return Boolean.TRUE.equals(run.getErrorRetryable())
                 && !eventService.hasVisibleOutput(run.getId());
@@ -330,10 +306,29 @@ public class AgentRunCoordinator {
         return Integer.parseInt(key.substring((baseKey + RETRY_SUFFIX).length()));
     }
 
-    private static void assertSameFingerprint(
+    private void assertSameFingerprint(
             AgentRunEntity run, String operation, String requestHash) {
-        if (!operation.equals(run.getStreamOperation())
-                || !requestHash.equals(run.getStreamRequestHash())) {
+        assertSameOperation(run, operation);
+        if (!sameRequestFingerprint(run, requestHash)) {
+            throw new IdempotencyConflictException(
+                    "Idempotency-Key was already used for a different agent run");
+        }
+    }
+
+    private boolean sameRequestFingerprint(AgentRunEntity run, String requestHash) {
+        if (requestHash.equals(run.getStreamRequestHash())) {
+            return true;
+        }
+        try {
+            return requestHash.equals(
+                    canonicalRequestHash(objectMapper.readTree(run.getStreamRequestJson())));
+        } catch (JsonProcessingException failure) {
+            return false;
+        }
+    }
+
+    private static void assertSameOperation(AgentRunEntity run, String operation) {
+        if (!operation.equals(run.getStreamOperation())) {
             throw new IdempotencyConflictException(
                     "Idempotency-Key was already used for a different agent run");
         }
@@ -395,6 +390,27 @@ public class AgentRunCoordinator {
         } catch (JsonProcessingException exception) {
             throw new IllegalArgumentException("agent run request is not serializable", exception);
         }
+    }
+
+    private String canonicalRequestHash(JsonNode request) {
+        return sha256(json(canonicalize(request)));
+    }
+
+    private JsonNode canonicalize(JsonNode value) {
+        if (value.isObject()) {
+            ObjectNode canonical = objectMapper.createObjectNode();
+            var names = new ArrayList<String>();
+            value.fieldNames().forEachRemaining(names::add);
+            Collections.sort(names);
+            names.forEach(name -> canonical.set(name, canonicalize(value.get(name))));
+            return canonical;
+        }
+        if (value.isArray()) {
+            ArrayNode canonical = objectMapper.createArrayNode();
+            value.forEach(item -> canonical.add(canonicalize(item)));
+            return canonical;
+        }
+        return value.deepCopy();
     }
 
     // 所属模块：【Agent 流式运行 / 应用编排层】「AgentRunCoordinator.sha256(String)」。

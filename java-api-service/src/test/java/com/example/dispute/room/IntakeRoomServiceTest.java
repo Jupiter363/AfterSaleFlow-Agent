@@ -7,6 +7,7 @@
 package com.example.dispute.room;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
@@ -16,6 +17,7 @@ import static org.mockito.Mockito.when;
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.config.DisputeProperties;
+import com.example.dispute.common.exception.ForbiddenException;
 import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.RiskLevel;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
@@ -26,6 +28,7 @@ import com.example.dispute.notification.application.NotificationService;
 import com.example.dispute.notification.domain.NotificationType;
 import com.example.dispute.room.application.IntakeConfirmationCommand;
 import com.example.dispute.room.application.IntakeRoomService;
+import com.example.dispute.room.application.IntakeProgressService;
 import com.example.dispute.room.application.ParticipantService;
 import com.example.dispute.room.application.CaseEventService;
 import com.example.dispute.room.domain.PhaseClockType;
@@ -74,6 +77,7 @@ class IntakeRoomServiceTest {
     @Mock private CaseLifecycleNotificationService lifecycleNotifications;
     @Mock private EvidenceWindowCoordinator evidenceWindowCoordinator;
     @Mock private CaseEventService caseEventService;
+    @Mock private IntakeProgressService intakeProgressService;
 
     private IntakeRoomService service;
 
@@ -91,6 +95,7 @@ class IntakeRoomServiceTest {
                         roomRepository,
                         phaseClockRepository,
                         intakeDossierRepository,
+                        intakeProgressService,
                         participants,
                         notificationService,
                         lifecycleNotifications,
@@ -99,13 +104,14 @@ class IntakeRoomServiceTest {
                         new DisputeProperties(
                                 Duration.ofHours(2),
                                 Duration.ofHours(3),
-                                Duration.ofMinutes(5),
-                                3,
+                                Duration.ofMinutes(20),
                                 Duration.ofSeconds(15),
                                 true),
                         CLOCK);
-        when(caseRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
-        when(roomRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        lenient().when(caseRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        lenient().when(roomRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
         lenient().when(participantRepository.saveAll(any()))
                 .thenAnswer(invocation -> invocation.getArgument(0));
     }
@@ -116,12 +122,10 @@ class IntakeRoomServiceTest {
     // 下游影响：「IntakeRoomServiceTest.acceptedIntakeInvitesBothPartiesAndOpensATwoHourEvidenceWindow()」的下游是被测服务、仓储或外部客户端替身；「assertThat、verify」把结果与预期状态、异常或调用次数锁定。
     // 系统意义：「IntakeRoomServiceTest.acceptedIntakeInvitesBothPartiesAndOpensATwoHourEvidenceWindow()」守住「房间协作与权限」的可执行规格，尤其防止 「CASE_ACCEPTED」、「user-local」、「SIGNED_NOT_RECEIVED」、「确认信息无误，同意发起争议审理」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
-    void acceptedIntakeInvitesBothPartiesAndOpensATwoHourEvidenceWindow() {
+    void acceptedInitiatorIntakeInvitesRespondentWithoutOpeningEvidence() {
         FulfillmentCaseEntity dispute = pendingCase("CASE_ACCEPTED");
         when(caseRepository.findByIdForUpdate("CASE_ACCEPTED"))
                 .thenReturn(Optional.of(dispute));
-        when(phaseClockRepository.save(any()))
-                .thenAnswer(invocation -> invocation.getArgument(0));
 
         var result =
                 service.confirm(
@@ -133,10 +137,9 @@ class IntakeRoomServiceTest {
                                 RiskLevel.HIGH,
                                 "确认信息无误，同意发起争议审理"));
 
-        assertThat(result.caseStatus()).isEqualTo(CaseStatus.EVIDENCE_OPEN);
-        assertThat(result.currentRoom()).isEqualTo(RoomType.EVIDENCE);
-        assertThat(result.deadlineAt())
-                .isEqualTo(OffsetDateTime.parse("2026-07-03T02:00:00Z"));
+        assertThat(result.caseStatus()).isEqualTo(CaseStatus.INTAKE_COMPLETED);
+        assertThat(result.currentRoom()).isEqualTo(RoomType.INTAKE);
+        assertThat(result.deadlineAt()).isNull();
 
         @SuppressWarnings("unchecked")
         ArgumentCaptor<Iterable<CaseParticipantEntity>> participants =
@@ -147,26 +150,14 @@ class IntakeRoomServiceTest {
                 .containsExactlyInAnyOrder(ActorRole.USER, ActorRole.MERCHANT);
 
         ArgumentCaptor<CaseRoomEntity> rooms = ArgumentCaptor.forClass(CaseRoomEntity.class);
-        verify(roomRepository, org.mockito.Mockito.times(2)).save(rooms.capture());
+        verify(roomRepository).save(rooms.capture());
         assertThat(rooms.getAllValues())
                 .anySatisfy(
                         room -> {
                             assertThat(room.getRoomType()).isEqualTo(RoomType.INTAKE);
-                            assertThat(room.getRoomStatus()).isEqualTo(RoomStatus.CLOSED);
-                        })
-                .anySatisfy(
-                        room -> {
-                            assertThat(room.getRoomType()).isEqualTo(RoomType.EVIDENCE);
                             assertThat(room.getRoomStatus()).isEqualTo(RoomStatus.OPEN);
                         });
-
-        ArgumentCaptor<CasePhaseClockEntity> phaseClock =
-                ArgumentCaptor.forClass(CasePhaseClockEntity.class);
-        verify(phaseClockRepository).save(phaseClock.capture());
-        assertThat(phaseClock.getValue().getClockType())
-                .isEqualTo(PhaseClockType.EVIDENCE_SUBMISSION);
-        assertThat(phaseClock.getValue().getDeadlineAt())
-                .isEqualTo(OffsetDateTime.parse("2026-07-03T02:00:00Z"));
+        verify(phaseClockRepository, never()).save(any());
         ArgumentCaptor<NotificationCommand> summons =
                 ArgumentCaptor.forClass(NotificationCommand.class);
         verify(notificationService).send(summons.capture());
@@ -174,16 +165,13 @@ class IntakeRoomServiceTest {
         assertThat(summons.getValue().notificationType())
                 .isEqualTo(NotificationType.DISPUTE_SUMMONS);
         assertThat(summons.getValue().deepLink())
-                .isEqualTo("/disputes/CASE_ACCEPTED/evidence");
-        verify(lifecycleNotifications)
-                .evidenceRoomOpened(
-                        dispute,
-                        OffsetDateTime.parse("2026-07-03T02:00:00Z"));
+                .isEqualTo("/disputes/CASE_ACCEPTED/intake");
+        verify(lifecycleNotifications, never()).evidenceRoomOpened(any(), any());
         verify(caseEventService)
                 .recordLifecycleEvent(
                         org.mockito.ArgumentMatchers.eq("CASE_ACCEPTED"),
                         any(),
-                        org.mockito.ArgumentMatchers.eq("EVIDENCE_OPENED"),
+                        org.mockito.ArgumentMatchers.eq("INITIATOR_INTAKE_COMPLETED"),
                         any(),
                         org.mockito.ArgumentMatchers.eq(
                                 "intake-confirmed:CASE_ACCEPTED"),
@@ -200,8 +188,6 @@ class IntakeRoomServiceTest {
         FulfillmentCaseEntity dispute = pendingCase("CASE_PLATFORM_ACCEPTED");
         when(caseRepository.findByIdForUpdate("CASE_PLATFORM_ACCEPTED"))
                 .thenReturn(Optional.of(dispute));
-        when(phaseClockRepository.save(any()))
-                .thenAnswer(invocation -> invocation.getArgument(0));
 
         var result =
                 service.confirm(
@@ -213,8 +199,8 @@ class IntakeRoomServiceTest {
                                 RiskLevel.HIGH,
                                 "confirmed by intake officer"));
 
-        assertThat(result.caseStatus()).isEqualTo(CaseStatus.EVIDENCE_OPEN);
-        assertThat(result.currentRoom()).isEqualTo(RoomType.EVIDENCE);
+        assertThat(result.caseStatus()).isEqualTo(CaseStatus.INTAKE_COMPLETED);
+        assertThat(result.currentRoom()).isEqualTo(RoomType.INTAKE);
 
         @SuppressWarnings("unchecked")
         ArgumentCaptor<Iterable<CaseParticipantEntity>> participants =
@@ -255,8 +241,6 @@ class IntakeRoomServiceTest {
         when(roomRepository.findByCaseIdAndRoomType(
                         "CASE_IMPORTED", RoomType.INTAKE))
                 .thenReturn(Optional.of(existing));
-        when(phaseClockRepository.save(any()))
-                .thenAnswer(invocation -> invocation.getArgument(0));
 
         service.confirm(
                 "CASE_IMPORTED",
@@ -267,13 +251,8 @@ class IntakeRoomServiceTest {
                         RiskLevel.HIGH,
                         "确认受理"));
 
-        ArgumentCaptor<CaseRoomEntity> rooms =
-                ArgumentCaptor.forClass(CaseRoomEntity.class);
-        verify(roomRepository, org.mockito.Mockito.times(2)).save(rooms.capture());
-        assertThat(rooms.getAllValues().get(0).getId())
-                .isEqualTo("ROOM_IMPORTED_INTAKE");
-        assertThat(rooms.getAllValues().get(0).getRoomStatus())
-                .isEqualTo(RoomStatus.CLOSED);
+        verify(roomRepository, never()).save(any());
+        assertThat(existing.getRoomStatus()).isEqualTo(RoomStatus.OPEN);
     }
 
     // 所属模块：【房间协作与权限 / 自动化测试层】「IntakeRoomServiceTest.acceptedSlotCompletionIntakeCanBeConfirmedAfterTheAgentDossierIsReady()」。
@@ -304,8 +283,6 @@ class IntakeRoomServiceTest {
                         "external-adapter");
         when(caseRepository.findByIdForUpdate("CASE_SLOT_COMPLETION_ACCEPTED"))
                 .thenReturn(Optional.of(dispute));
-        when(phaseClockRepository.save(any()))
-                .thenAnswer(invocation -> invocation.getArgument(0));
 
         var result =
                 service.confirm(
@@ -317,9 +294,9 @@ class IntakeRoomServiceTest {
                                 RiskLevel.MEDIUM,
                                 "AI 接待官已整理完整，确认发起争议审理"));
 
-        assertThat(result.caseStatus()).isEqualTo(CaseStatus.EVIDENCE_OPEN);
-        assertThat(result.currentRoom()).isEqualTo(RoomType.EVIDENCE);
-        assertThat(dispute.getCaseStatus()).isEqualTo(CaseStatus.EVIDENCE_OPEN);
+        assertThat(result.caseStatus()).isEqualTo(CaseStatus.INTAKE_COMPLETED);
+        assertThat(result.currentRoom()).isEqualTo(RoomType.INTAKE);
+        assertThat(dispute.getCaseStatus()).isEqualTo(CaseStatus.INTAKE_COMPLETED);
     }
 
     // 所属模块：【房间协作与权限 / 自动化测试层】「IntakeRoomServiceTest.notAdmissibleEndsAfterIntakeWithoutInvitingMerchantOrOpeningEvidence()」。
@@ -358,10 +335,12 @@ class IntakeRoomServiceTest {
         verify(notificationService, never()).send(any());
 
         ArgumentCaptor<CaseRoomEntity> rooms = ArgumentCaptor.forClass(CaseRoomEntity.class);
-        verify(roomRepository).save(rooms.capture());
+        verify(roomRepository, org.mockito.Mockito.times(2)).save(rooms.capture());
         assertThat(rooms.getAllValues())
                 .extracting(CaseRoomEntity::getRoomType)
-                .containsExactly(RoomType.INTAKE);
+                .containsOnly(RoomType.INTAKE);
+        assertThat(rooms.getAllValues().getLast().getRoomStatus())
+                .isEqualTo(RoomStatus.CLOSED);
     }
 
     // 所属模块：【房间协作与权限 / 自动化测试层】「IntakeRoomServiceTest.resolvedIntakeCancellationClosesTheRoomWithoutOpeningEvidence()」。
@@ -412,6 +391,29 @@ class IntakeRoomServiceTest {
                         org.mockito.ArgumentMatchers.eq("user-local"));
     }
 
+    @Test
+    void respondentCannotCancelTheInitiatorsPendingDispute() {
+        FulfillmentCaseEntity dispute = pendingCase("CASE_RESPONDENT_CANCEL");
+        when(caseRepository.findByIdForUpdate("CASE_RESPONDENT_CANCEL"))
+                .thenReturn(Optional.of(dispute));
+
+        assertThatThrownBy(
+                        () ->
+                                service.cancel(
+                                        "CASE_RESPONDENT_CANCEL",
+                                        new AuthenticatedActor(
+                                                "merchant-local", ActorRole.MERCHANT),
+                                        "merchant tries to remove the dispute"))
+                .isInstanceOf(ForbiddenException.class)
+                .hasMessageContaining("only the intake initiator can cancel");
+
+        assertThat(dispute.getCaseStatus()).isEqualTo(CaseStatus.INTAKE_PENDING);
+        verify(caseRepository, never()).save(any());
+        verify(roomRepository, never()).save(any());
+        verify(caseEventService, never())
+                .recordLifecycleEvent(any(), any(), any(), any(), any(), any());
+    }
+
     // 所属模块：【房间协作与权限 / 自动化测试层】「IntakeRoomServiceTest.acceptedIntakeSnapshotsTheLatestAgentDossierIntoTheCase()」。
     // 具体功能：「IntakeRoomServiceTest.acceptedIntakeSnapshotsTheLatestAgentDossierIntoTheCase()」：复现“核对完整业务行为（场景方法「acceptedIntakeSnapshotsTheLatestAgentDossierIntoTheCase」）”场景：驱动 「caseRepository.findByIdForUpdate」、「intakeDossierRepository.findByCaseIdAndRoomType」、「phaseClockRepository.save」、「service.confirm」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_DOSSIER_ACCEPTED」、「INTAKE_DOSSIER_CASE_DOSSIER_ACCEPTED」、「ACCEPTED」、「dispute-intake-officer」。
     // 上游调用：「IntakeRoomServiceTest.acceptedIntakeSnapshotsTheLatestAgentDossierIntoTheCase()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
@@ -438,12 +440,10 @@ class IntakeRoomServiceTest {
                                         "ACCEPTED",
                                         3,
                                         "dispute-intake-officer")));
-        when(phaseClockRepository.save(any()))
-                .thenAnswer(invocation -> invocation.getArgument(0));
 
         service.confirm(
                 "CASE_DOSSIER_ACCEPTED",
-                new AuthenticatedActor("merchant-local", ActorRole.MERCHANT),
+                new AuthenticatedActor("user-local", ActorRole.USER),
                 new IntakeConfirmationCommand(
                         true,
                         "PRODUCT_QUALITY",
@@ -451,7 +451,7 @@ class IntakeRoomServiceTest {
                         "确认发起并上报"));
 
         assertThat(dispute.getIntakeResultJson()).isEqualTo(dossierJson);
-        assertThat(dispute.getCaseStatus()).isEqualTo(CaseStatus.EVIDENCE_OPEN);
+        assertThat(dispute.getCaseStatus()).isEqualTo(CaseStatus.INTAKE_COMPLETED);
     }
 
     // 所属模块：【房间协作与权限 / 自动化测试层】「IntakeRoomServiceTest.acceptedIntakeAllowsEmptyConfirmationNoteAndKeepsHandoffRemarkFromDossier()」。
@@ -497,8 +497,6 @@ class IntakeRoomServiceTest {
                                         "ACCEPTED",
                                         4,
                                         "dispute-intake-officer")));
-        when(phaseClockRepository.save(any()))
-                .thenAnswer(invocation -> invocation.getArgument(0));
 
         service.confirm(
                 "CASE_DOSSIER_REMARK",
@@ -511,7 +509,7 @@ class IntakeRoomServiceTest {
 
         assertThat(dispute.getIntakeResultJson()).isEqualTo(dossierJson);
         assertThat(dispute.getIntakeResultJson()).contains("请证据书记官重点核查快递柜取件记录。");
-        assertThat(dispute.getCaseStatus()).isEqualTo(CaseStatus.EVIDENCE_OPEN);
+        assertThat(dispute.getCaseStatus()).isEqualTo(CaseStatus.INTAKE_COMPLETED);
     }
 
     // 所属模块：【房间协作与权限 / 自动化测试层】「IntakeRoomServiceTest.pendingCase(String)」。

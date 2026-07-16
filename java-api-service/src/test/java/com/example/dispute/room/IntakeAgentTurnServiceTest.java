@@ -11,6 +11,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -209,7 +210,7 @@ class IntakeAgentTurnServiceTest {
                 .isEqualTo("DISPUTE_INTAKE_OFFICER");
         assertThat(command.getValue().agentContext().agentSessionId()).isNotBlank();
         assertThat(command.getValue().agentContext().scopeType())
-                .isEqualTo("INTAKE_INITIATOR_PRIVATE");
+                .isEqualTo("INTAKE_PARTY_PRIVATE");
 
         ArgumentCaptor<RoomTurnMemoryEntity> memory =
                 ArgumentCaptor.forClass(RoomTurnMemoryEntity.class);
@@ -240,6 +241,91 @@ class IntakeAgentTurnServiceTest {
         verify(messageRepository).save(roomMessages.capture());
         assertThat(roomMessages.getValue().getMessageType())
                 .isEqualTo(MessageType.AGENT_MESSAGE);
+    }
+
+    @Test
+    void respondentOpeningUsesOnlyTheFrozenMatrixAndDoesNotMutateTheDossier() {
+        FulfillmentCaseEntity dispute = intakeCase();
+        CaseRoomEntity room = intakeRoom(dispute);
+        String frozenDossier =
+                """
+                {
+                  "schema_version": "intake_case_detail.v1",
+                  "claim_resolution": {
+                    "original_statement": "INITIATOR_PRIVATE_SECRET"
+                  },
+                  "case_fact_matrix": {
+                    "schema_version": "case_fact_matrix.v2",
+                    "matrix_kind": "INITIATOR_FROZEN",
+                    "party_map": {
+                      "initiator_role": "USER",
+                      "respondent_role": "MERCHANT"
+                    },
+                    "case_overview": {
+                      "neutral_summary": "用户主张页面承诺包含基础安装。"
+                    },
+                    "claims": {
+                      "initiator_claim": {
+                        "position_summary": "用户要求退还150元安装费。",
+                        "reason_summary": "页面承诺包含基础安装。",
+                        "source_refs": ["MESSAGE_PRIVATE_SECRET"]
+                      }
+                    },
+                    "fact_rows": [
+                      {
+                        "fact_id": "FACT_INSTALL_SCOPE",
+                        "materiality": "CORE",
+                        "fact_target": "商品页面是否标注包含基础安装",
+                        "positions": {
+                          "USER": {"stance": "CONFIRM"},
+                          "MERCHANT": {"stance": "NOT_ADDRESSED"}
+                        }
+                      }
+                    ]
+                  }
+                }
+                """;
+        dispute.admitToEvidence(
+                "SIGNED_NOT_RECEIVED",
+                RiskLevel.HIGH,
+                frozenDossier,
+                OffsetDateTime.parse("2026-07-06T00:00:00Z"),
+                "user-local");
+        when(caseRepository.findByIdForUpdate(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.INTAKE))
+                .thenReturn(Optional.of(room));
+        when(messageRepository.findByCaseIdAndIdempotencyKey(
+                        eq(dispute.getId()), any()))
+                .thenReturn(Optional.empty());
+        when(messageRepository.findMaxSequenceByRoomId(room.getId())).thenReturn(3L);
+        when(messageRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        var opening =
+                service.ensureRespondentOpening(
+                        dispute.getId(),
+                        RoomType.INTAKE,
+                        new AuthenticatedActor("merchant-local", ActorRole.MERCHANT),
+                        "TRACE_RESPONDENT_OPENING",
+                        "REQ_RESPONDENT_OPENING");
+
+        assertThat(opening.sequenceNo()).isEqualTo(4L);
+        assertThat(opening.messageText())
+                .contains("只代表发起方陈述，尚未经过证据核验")
+                .contains("用户要求退还150元安装费")
+                .contains("商品页面是否标注包含基础安装")
+                .doesNotContain("INITIATOR_PRIVATE_SECRET")
+                .doesNotContain("MESSAGE_PRIVATE_SECRET");
+        ArgumentCaptor<RoomMessageEntity> savedMessage =
+                ArgumentCaptor.forClass(RoomMessageEntity.class);
+        verify(messageRepository).save(savedMessage.capture());
+        assertThat(savedMessage.getValue().getAudienceActorIdsJson())
+                .isEqualTo("[\"merchant-local\"]");
+        assertThat(savedMessage.getValue().getIdempotencyKey())
+                .startsWith("agent-intake-respondent-opening:");
+        verify(intakeDossierRepository, never()).save(any());
+        verify(client, never()).run(any(), any(), any());
     }
 
     // 所属模块：【房间协作与权限 / 自动化测试层】「IntakeAgentTurnServiceTest.initialTurnParticipatesInTheCallerTransactionSoFreshCasesCanBeSeeded()」。

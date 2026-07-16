@@ -10,7 +10,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
@@ -24,10 +23,10 @@ import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.RiskLevel;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
-import com.example.dispute.hearing.application.HearingRoundService;
 import com.example.dispute.room.application.CaseEventService;
 import com.example.dispute.room.application.EvidenceAgentTurnService;
 import com.example.dispute.room.application.IntakeAgentTurnService;
+import com.example.dispute.room.application.IntakeProgressService;
 import com.example.dispute.room.application.AccessSessionResolver;
 import com.example.dispute.room.application.CaseEventView;
 import com.example.dispute.room.application.RoomMessageCommand;
@@ -86,8 +85,8 @@ class RoomMessageAndEventServiceTest {
     @Mock private CaseTimelineEventRepository eventRepository;
     @Mock private IntakeAgentTurnService intakeAgentTurnService;
     @Mock private EvidenceAgentTurnService evidenceAgentTurnService;
-    @Mock private HearingRoundService hearingRoundService;
     @Mock private AccessSessionResolver accessSessionResolver;
+    @Mock private IntakeProgressService intakeProgressService;
 
     private CaseEventService eventService;
     private RoomMessageService messageService;
@@ -118,9 +117,9 @@ class RoomMessageAndEventServiceTest {
                         eventService,
                         intakeAgentTurnService,
                         evidenceAgentTurnService,
-                        hearingRoundService,
                         accessSessionResolver,
                         permissionService,
+                        intakeProgressService,
                         CLOCK);
         lenient()
                 .when(accessSessionResolver.resolve(any(), any()))
@@ -141,6 +140,54 @@ class RoomMessageAndEventServiceTest {
     void persistedMessagesAndEventsAreMappedAsImmutableAppendOnlyRecords() {
         assertThat(RoomMessageEntity.class.isAnnotationPresent(Immutable.class)).isTrue();
         assertThat(CaseTimelineEventEntity.class.isAnnotationPresent(Immutable.class)).isTrue();
+    }
+
+    @Test
+    void intakeOpeningIsGatedByRespondentProgressAndDelegatedToTheIntakeOfficer() {
+        FulfillmentCaseEntity dispute = intakeCase();
+        AuthenticatedActor respondent =
+                new AuthenticatedActor("merchant-local", ActorRole.MERCHANT);
+        RoomMessageView expected =
+                new RoomMessageView(
+                        "MESSAGE_RESPONDENT_OPENING",
+                        dispute.getId(),
+                        "ROOM_INTAKE",
+                        1,
+                        "CUSTOMER_SERVICE",
+                        "dispute-intake-officer",
+                        MessageType.AGENT_MESSAGE,
+                        "请先回应发起方诉求。",
+                        List.of(),
+                        null,
+                        CLOCK.instant());
+        when(caseRepository.findById(dispute.getId())).thenReturn(Optional.of(dispute));
+        when(intakeAgentTurnService.ensureRespondentOpening(
+                        dispute.getId(),
+                        RoomType.INTAKE,
+                        respondent,
+                        "TRACE_OPENING",
+                        "REQ_OPENING"))
+                .thenReturn(expected);
+
+        Object opening =
+                messageService.ensureOpening(
+                        dispute.getId(),
+                        RoomType.INTAKE,
+                        respondent,
+                        "TRACE_OPENING",
+                        "REQ_OPENING");
+
+        assertThat(opening).isSameAs(expected);
+        verify(intakeProgressService).assertIntakePost(dispute, respondent);
+        verify(intakeAgentTurnService)
+                .ensureRespondentOpening(
+                        dispute.getId(),
+                        RoomType.INTAKE,
+                        respondent,
+                        "TRACE_OPENING",
+                        "REQ_OPENING");
+        verify(evidenceAgentTurnService, never())
+                .ensureOpeningOrStart(any(), any(), any(), any(), any());
     }
 
     // 所属模块：【房间协作与权限 / 自动化测试层】「RoomMessageAndEventServiceTest.roomMessageViewCarriesTheHearingRoundForCourtTimelineGrouping()」。
@@ -164,8 +211,7 @@ class RoomMessageAndEventServiceTest {
                         MessageType.AGENT_MESSAGE,
                         "第一轮陈述已封存，法官将提出下一轮定向问题。",
                         "[]",
-                        "judge-round-turn:CASE_ROOM_TEST:1",
-                        1,
+                        "hearing-flow-v2-judge-message",
                         Instant.parse("2026-07-03T00:00:00Z"),
                         "TRACE_JUDGE_ROUND_1");
         when(caseRepository.findById(evidenceCase().getId()))
@@ -191,7 +237,6 @@ class RoomMessageAndEventServiceTest {
 
         assertThat(messages).hasSize(1);
         assertThat(messages.getFirst().senderRole()).isEqualTo("JUDGE");
-        assertThat(messages.getFirst().hearingRound()).isEqualTo(1);
     }
 
     // 所属模块：【房间协作与权限 / 自动化测试层】「RoomMessageAndEventServiceTest.hearingPartyTextIsBoundToTheCurrentRoundAndRegisteredAsRoundStatement()」。
@@ -200,59 +245,30 @@ class RoomMessageAndEventServiceTest {
     // 下游影响：「RoomMessageAndEventServiceTest.hearingPartyTextIsBoundToTheCurrentRoundAndRegisteredAsRoundStatement()」的下游是被测服务、仓储或外部客户端替身；「assertThat、verify」把结果与预期状态、异常或调用次数锁定。
     // 系统意义：「RoomMessageAndEventServiceTest.hearingPartyTextIsBoundToTheCurrentRoundAndRegisteredAsRoundStatement()」守住「房间协作与权限」的可执行规格，尤其防止 「ROOM_HEARING」、「2026-07-03T00:00:00Z」、「system」、「user-local」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
-    void hearingPartyTextIsBoundToTheCurrentRoundAndRegisteredAsRoundStatement() {
+    void hearingPartyTextIsRejectedOutsideStructuredEndpoints() {
         FulfillmentCaseEntity dispute = evidenceCase();
-        CaseRoomEntity room =
-                CaseRoomEntity.open(
-                        "ROOM_HEARING",
-                        dispute.getId(),
-                        RoomType.HEARING,
-                        OffsetDateTime.parse("2026-07-03T00:00:00Z"),
-                        "system");
         AuthenticatedActor user = new AuthenticatedActor("user-local", ActorRole.USER);
         when(caseRepository.findByIdForUpdate(dispute.getId()))
                 .thenReturn(Optional.of(dispute));
-        when(roomRepository.findByCaseIdAndRoomType(
-                        dispute.getId(), RoomType.HEARING))
-                .thenReturn(Optional.of(room));
         when(participantRepository.existsByCaseIdAndActorIdAndParticipantRole(
                         dispute.getId(), "user-local", ActorRole.USER))
                 .thenReturn(true);
-        when(messageRepository.findByCaseIdAndIdempotencyKey(
-                        dispute.getId(), "hearing-msg-1"))
-                .thenReturn(Optional.empty());
-        when(messageRepository.findMaxSequenceByRoomId(room.getId())).thenReturn(4L);
-        when(eventRepository.findMaxSequenceByCaseId(dispute.getId())).thenReturn(8L);
-        when(messageRepository.save(any()))
-                .thenAnswer(invocation -> invocation.getArgument(0));
-        when(eventRepository.save(any()))
-                .thenAnswer(invocation -> invocation.getArgument(0));
-        when(hearingRoundService.currentOpenRoundNoForPartyMessage(dispute.getId(), user))
-                .thenReturn(2);
-
         RoomMessageCommand command =
                 new RoomMessageCommand(
                         MessageType.PARTY_TEXT,
                         "用户补充：请核验签收位置和投递照片。",
                         List.of());
 
-        RoomMessageView message =
-                messageService.post(
-                        dispute.getId(),
-                        RoomType.HEARING,
-                        command,
-                        user,
-                        "hearing-msg-1",
-                        "TRACE_HEARING_MSG");
-
-        assertThat(message.hearingRound()).isEqualTo(2);
-        verify(hearingRoundService)
-                .recordPartyMessageSubmission(
-                        eq(dispute.getId()),
-                        eq(2),
-                        eq(message.id()),
-                        eq("用户补充：请核验签收位置和投递照片。"),
-                        eq(user));
+        assertThatThrownBy(
+                        () ->
+                                messageService.post(
+                                        dispute.getId(),
+                                        RoomType.HEARING,
+                                        command,
+                                        user,
+                                        "hearing-msg-1",
+                                        "TRACE_HEARING_MSG"))
+                .isInstanceOf(com.example.dispute.common.exception.ForbiddenException.class);
     }
 
     // 所属模块：【房间协作与权限 / 自动化测试层】「RoomMessageAndEventServiceTest.hearingEvidenceReferenceIsBoundToTheCurrentRoundWithoutCountingAsRoundStatement()」。
@@ -288,9 +304,6 @@ class RoomMessageAndEventServiceTest {
                 .thenAnswer(invocation -> invocation.getArgument(0));
         when(eventRepository.save(any()))
                 .thenAnswer(invocation -> invocation.getArgument(0));
-        when(hearingRoundService.currentOpenRoundNoForPartyMessage(dispute.getId(), user))
-                .thenReturn(2);
-
         RoomMessageView message =
                 messageService.post(
                         dispute.getId(),
@@ -303,9 +316,7 @@ class RoomMessageAndEventServiceTest {
                         "hearing-evidence-ref-1",
                         "TRACE_HEARING_EVIDENCE_REF");
 
-        assertThat(message.hearingRound()).isEqualTo(2);
-        verify(hearingRoundService, never())
-                .recordPartyMessageSubmission(any(), anyInt(), any(), any(), any());
+        assertThat(message.messageType()).isEqualTo(MessageType.PARTY_EVIDENCE_REFERENCE);
     }
 
     // 所属模块：【房间协作与权限 / 自动化测试层】「RoomMessageAndEventServiceTest.writesAnImmutableIdempotentMessageAndMonotonicCaseEventTogether()」。
@@ -680,10 +691,17 @@ class RoomMessageAndEventServiceTest {
     // 下游影响：「RoomMessageAndEventServiceTest.intakeRoomRejectsTheNonInitiatingPartyBeforeEvidenceRoomOpens()」的下游是被测服务、仓储或外部客户端替身；「assertThatThrownBy、verify」把结果与预期状态、异常或调用次数锁定。
     // 系统意义：「RoomMessageAndEventServiceTest.intakeRoomRejectsTheNonInitiatingPartyBeforeEvidenceRoomOpens()」守住「房间协作与权限」的可执行规格，尤其防止 「merchant-local」、「intake-merchant-rejected」、「TRACE_REJECT_NON_INITIATOR」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
-    void intakeRoomRejectsTheNonInitiatingPartyBeforeEvidenceRoomOpens() {
+    void intakeRoomUsesThePartyProgressGate() {
         FulfillmentCaseEntity dispute = intakeCase();
+        AuthenticatedActor respondent =
+                new AuthenticatedActor("merchant-local", ActorRole.MERCHANT);
         when(caseRepository.findByIdForUpdate(dispute.getId()))
                 .thenReturn(Optional.of(dispute));
+        org.mockito.Mockito.doThrow(
+                        new com.example.dispute.common.exception.ForbiddenException(
+                                "respondent intake is not open"))
+                .when(intakeProgressService)
+                .assertIntakePost(dispute, respondent);
 
         assertThatThrownBy(
                         () ->
@@ -694,13 +712,12 @@ class RoomMessageAndEventServiceTest {
                                                 MessageType.PARTY_TEXT,
                                                 "I am the other side and should respond in the evidence room.",
                                                 List.of()),
-                                        new AuthenticatedActor(
-                                                "merchant-local", ActorRole.MERCHANT),
+                                        respondent,
                                         "intake-merchant-rejected",
                                         "TRACE_REJECT_NON_INITIATOR"))
                 .isInstanceOf(
                         com.example.dispute.common.exception.ForbiddenException.class)
-                .hasMessageContaining("only the intake initiator");
+                .hasMessageContaining("respondent intake is not open");
 
         verify(roomRepository, org.mockito.Mockito.never())
                 .findByCaseIdAndRoomType(dispute.getId(), RoomType.INTAKE);

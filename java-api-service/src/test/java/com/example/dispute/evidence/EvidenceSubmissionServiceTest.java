@@ -110,7 +110,6 @@ class EvidenceSubmissionServiceTest {
                                 "submitted",
                                 List.of("EVIDENCE_ONE", "EVIDENCE_TWO"),
                                 null,
-                                null,
                                 Instant.parse("2026-07-06T08:00:00Z")));
 
         var result =
@@ -156,12 +155,13 @@ class EvidenceSubmissionServiceTest {
     @Test
     void submitsHearingSupplementEvidenceToTheHearingRoom() {
         FulfillmentCaseEntity dispute = hearingCase();
-        EvidenceItemEntity item = evidence("EVIDENCE_HEARING_SUPPLEMENT");
+        EvidenceItemEntity first = evidence("EVIDENCE_HEARING_SUPPLEMENT_1");
+        EvidenceItemEntity second = evidence("EVIDENCE_HEARING_SUPPLEMENT_2");
+        List<String> batchIds = List.of(first.getId(), second.getId());
         when(caseRepository.findByIdForUpdate(dispute.getId())).thenReturn(Optional.of(dispute));
         when(batchRepository.findByCaseIdAndIdempotencyKey(dispute.getId(), "submit-hearing-1"))
                 .thenReturn(Optional.empty());
-        when(evidenceRepository.findAllById(List.of("EVIDENCE_HEARING_SUPPLEMENT")))
-                .thenReturn(List.of(item));
+        when(evidenceRepository.findAllById(batchIds)).thenReturn(List.of(first, second));
         when(batchRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
         when(roomMessageService.post(
                         eq(dispute.getId()),
@@ -180,23 +180,24 @@ class EvidenceSubmissionServiceTest {
                                 "user-local",
                                 MessageType.PARTY_EVIDENCE_REFERENCE,
                                 "submitted",
-                                List.of("EVIDENCE_HEARING_SUPPLEMENT"),
+                                batchIds,
                                 null,
-                                1,
                                 Instant.parse("2026-07-06T08:00:00Z")));
 
         var result =
                 service.submit(
                         dispute.getId(),
                         new EvidenceSubmissionCommand(
-                                List.of("EVIDENCE_HEARING_SUPPLEMENT"),
+                                batchIds,
                                 "庭审补充证据"),
                         new AuthenticatedActor("user-local", ActorRole.USER),
                         "submit-hearing-1",
                         "TRACE_HEARING");
 
         assertThat(result.roomMessage().roomId()).isEqualTo("ROOM_HEARING");
-        assertThat(item.getSubmissionStatus().name()).isEqualTo("SUBMITTED");
+        assertThat(result.evidenceIds()).containsExactlyElementsOf(batchIds);
+        assertThat(first.getSubmissionStatus().name()).isEqualTo("SUBMITTED");
+        assertThat(second.getSubmissionStatus().name()).isEqualTo("SUBMITTED");
 
         ArgumentCaptor<RoomMessageCommand> commandCaptor =
                 ArgumentCaptor.forClass(RoomMessageCommand.class);
@@ -211,7 +212,7 @@ class EvidenceSubmissionServiceTest {
         assertThat(commandCaptor.getValue().messageType())
                 .isEqualTo(MessageType.PARTY_EVIDENCE_REFERENCE);
         assertThat(commandCaptor.getValue().attachmentRefs())
-                .containsExactly("EVIDENCE_HEARING_SUPPLEMENT");
+                .containsExactlyElementsOf(batchIds);
     }
 
     // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceSubmissionServiceTest.deletesOnlyPendingEvidenceOwnedByCurrentActor()」。

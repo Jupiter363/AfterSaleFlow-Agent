@@ -7,6 +7,7 @@
 package com.example.dispute.evidence.application;
 
 import java.time.OffsetDateTime;
+import java.util.List;
 
 // 所属模块：【证据与版本化卷宗 / 应用编排层】类型「EvidenceView」。
 // 类型职责：定义证据跨层传递时使用的不可变数据契约；本类型显式提供 「EvidenceView」。
@@ -31,7 +32,19 @@ public record EvidenceView(
         OffsetDateTime createdAt,
         String submissionStatus,
         OffsetDateTime submittedAt,
-        String submissionBatchId) {
+        String submissionBatchId,
+        String claimedFact,
+        boolean truthAttested,
+        List<String> attestationScope,
+        String partyCapacity,
+        String attestationVersion,
+        String forgeryConsequenceCode,
+        String enforcementGate) {
+
+    public EvidenceView {
+        attestationScope =
+                attestationScope == null ? List.of() : List.copyOf(attestationScope);
+    }
 
     // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceView.EvidenceView(String,String,String,String,String,String,String,String,String,long,String,String,boolean,OffsetDateTime,OffsetDateTime)」。
     // 具体功能：「EvidenceView.EvidenceView(String,String,String,String,String,String,String,String,String,long,String,String,boolean,OffsetDateTime,OffsetDateTime)」：使用 「id」(String)、「caseId」(String)、「evidenceType」(String)、「sourceType」(String)、「fileBucket」(String)、「fileObjectKey」(String)、「fileHash」(String)、「originalFilename」(String)、「contentType」(String)、「fileSize」(long)、「parseStatus」(String)、「visibility」(String)、「desensitized」(boolean)、「occurredAt」(OffsetDateTime)、「createdAt」(OffsetDateTime) 初始化「EvidenceView」的不可变状态或协作参数，使后续方法不必依赖半初始化对象。
@@ -72,6 +85,13 @@ public record EvidenceView(
                 occurredAt,
                 createdAt,
                 "SUBMITTED",
+                null,
+                null,
+                null,
+                false,
+                List.of(),
+                null,
+                null,
                 null,
                 null);
     }

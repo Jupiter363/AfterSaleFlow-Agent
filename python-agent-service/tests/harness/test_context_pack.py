@@ -16,6 +16,14 @@ class ContextPackRunnerOutput(BaseModel):
     answer: str
 
 
+FACT_TARGETS = [
+    {
+        "fact_id": "FACT_DELIVERY_STATUS",
+        "fact_target": "物流是否已实际送达",
+    }
+]
+
+
 class RecordingContextPackLlm:
     # 所属模块：Agent Harness > test_context_pack；函数角色：对象依赖初始化。
     # 具体功能：`__init__` 注入并保存处理本阶段状态需要的客户端、配置或策略依赖。
@@ -61,6 +69,7 @@ def test_prompt_contract_declares_standard_sections_and_configuration_center_slo
     assert specs["current_turn"].required is True
     assert specs["canonical_case_dossier"].priority == 96
     assert specs["fact_targets"].priority == 95
+    assert specs["fact_targets"].required is True
     assert specs["fact_targets"].trust_level == "intake_dossier_allowlist"
     assert specs["private_conversation_window"].trust_level == (
         "current_actor_session_only"
@@ -122,6 +131,7 @@ def test_localization_policy_does_not_translate_identifiers_or_references() -> N
                 "case_id": "CASE_USER_1",
                 "order_reference": "ORD-USER-20260706",
             },
+            "fact_targets": FACT_TARGETS,
             "party_visible_evidence_catalog": [
                 {
                     "evidence_id": "EVIDENCE_USER_SIGNATURE_1",
@@ -175,6 +185,7 @@ def test_context_pack_builds_localized_sections_and_keeps_raw_statement_for_trac
                 "turn_source": "PARTY_MESSAGE",
             },
             "case_identity": {"case_id": "CASE_CONTEXT_1"},
+            "fact_targets": FACT_TARGETS,
             "canonical_case_dossier": {
                 "case_story": {
                     "one_sentence_summary": "我没有收到包裹，希望退款。",
@@ -223,6 +234,7 @@ def test_context_pack_preserves_raw_statement_even_when_it_contains_internal_cod
                 "text": raw_text,
             },
             "case_identity": {"case_id": "CASE_CONTEXT_2"},
+            "fact_targets": FACT_TARGETS,
         },
     )
 
@@ -249,6 +261,7 @@ def test_model_runner_accepts_context_pack_and_excludes_display_only_sections() 
             {
                 "current_turn": {"role": "USER", "text": "我上传了签收截图。"},
                 "case_identity": {"case_id": "CASE_CONTEXT_3"},
+                "fact_targets": FACT_TARGETS,
                 "canonical_case_dossier": {
                 "dispute_focus": {"core_issue": "SIGNED_NOT_RECEIVED"},
             },

@@ -8,10 +8,16 @@ package com.example.dispute.database;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.example.dispute.caseintake.application.CaseVisibilitySpecification;
+import com.example.dispute.config.ActorRole;
+import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.RiskLevel;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
+import com.example.dispute.room.infrastructure.persistence.entity.CaseIntakePartyCompletionEntity;
+import com.example.dispute.room.infrastructure.persistence.repository.CaseIntakePartyCompletionRepository;
+import java.time.Instant;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
@@ -61,6 +67,7 @@ class FulfillmentCaseRepositoryIntegrationTest {
     }
 
     @Autowired private FulfillmentCaseRepository repository;
+    @Autowired private CaseIntakePartyCompletionRepository intakeCompletionRepository;
 
     // 所属模块：【数据库迁移入口 / 自动化测试层】「FulfillmentCaseRepositoryIntegrationTest.savesAndFindsACaseByIdempotencyKey()」。
     // 具体功能：「FulfillmentCaseRepositoryIntegrationTest.savesAndFindsACaseByIdempotencyKey()」：复现“核对完整业务行为（场景方法「savesAndFindsACaseByIdempotencyKey」）”场景：驱动 「repository.saveAndFlush」、「repository.findByCreationIdempotencyKey」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「case-repository-1」、「order-1」、「user-1」、「merchant-1」。
@@ -91,5 +98,130 @@ class FulfillmentCaseRepositoryIntegrationTest {
                             assertThat(saved.getId()).isEqualTo("case-repository-1");
                             assertThat(saved.getCaseStatus()).isEqualTo(CaseStatus.INTAKE_PENDING);
                         });
+    }
+
+    @Test
+    void unlocksAUserInitiatedCaseForTheMerchantOnlyAfterExactInitiatorCompletion() {
+        FulfillmentCaseEntity dispute =
+                intakeCompletedCase(
+                        "case-user-initiated-visibility",
+                        "user-visibility",
+                        "merchant-visibility",
+                        ActorRole.USER);
+        repository.saveAndFlush(dispute);
+
+        assertThat(visibleCaseIds(new AuthenticatedActor("user-visibility", ActorRole.USER)))
+                .containsExactly(dispute.getId());
+        assertThat(visibleCaseIds(
+                        new AuthenticatedActor("merchant-visibility", ActorRole.MERCHANT)))
+                .isEmpty();
+        assertThat(visibleCaseIds(
+                        new AuthenticatedActor("user-visibility", ActorRole.MERCHANT)))
+                .isEmpty();
+
+        intakeCompletionRepository.saveAndFlush(
+                CaseIntakePartyCompletionEntity.terminal(
+                        "completion-user-visibility",
+                        dispute.getId(),
+                        ActorRole.USER,
+                        "user-visibility",
+                        "COMPLETED",
+                        Instant.parse("2026-07-16T01:00:00Z"),
+                        "user-visibility"));
+
+        assertThat(visibleCaseIds(
+                        new AuthenticatedActor("merchant-visibility", ActorRole.MERCHANT)))
+                .containsExactly(dispute.getId());
+    }
+
+    @Test
+    void unlocksAMerchantInitiatedCaseForTheUserOnlyAfterExactInitiatorCompletion() {
+        FulfillmentCaseEntity dispute =
+                intakeCompletedCase(
+                        "case-merchant-initiated-visibility",
+                        "user-counterparty",
+                        "merchant-initiator",
+                        ActorRole.MERCHANT);
+        repository.saveAndFlush(dispute);
+
+        assertThat(visibleCaseIds(
+                        new AuthenticatedActor("merchant-initiator", ActorRole.MERCHANT)))
+                .containsExactly(dispute.getId());
+        assertThat(visibleCaseIds(
+                        new AuthenticatedActor("user-counterparty", ActorRole.USER)))
+                .isEmpty();
+
+        intakeCompletionRepository.saveAndFlush(
+                CaseIntakePartyCompletionEntity.terminal(
+                        "completion-merchant-visibility",
+                        dispute.getId(),
+                        ActorRole.MERCHANT,
+                        "merchant-initiator",
+                        "COMPLETED",
+                        Instant.parse("2026-07-16T01:00:00Z"),
+                        "merchant-initiator"));
+
+        assertThat(visibleCaseIds(
+                        new AuthenticatedActor("user-counterparty", ActorRole.USER)))
+                .containsExactly(dispute.getId());
+    }
+
+    @Test
+    void doesNotUnlockTheRespondentForACompletionWithTheWrongParticipantId() {
+        FulfillmentCaseEntity dispute =
+                intakeCompletedCase(
+                        "case-wrong-completion-identity",
+                        "user-correct",
+                        "merchant-locked",
+                        ActorRole.USER);
+        repository.saveAndFlush(dispute);
+        intakeCompletionRepository.saveAndFlush(
+                CaseIntakePartyCompletionEntity.terminal(
+                        "completion-wrong-identity",
+                        dispute.getId(),
+                        ActorRole.USER,
+                        "different-user",
+                        "COMPLETED",
+                        Instant.parse("2026-07-16T01:00:00Z"),
+                        "different-user"));
+
+        assertThat(visibleCaseIds(
+                        new AuthenticatedActor("merchant-locked", ActorRole.MERCHANT)))
+                .isEmpty();
+    }
+
+    private java.util.List<String> visibleCaseIds(AuthenticatedActor actor) {
+        return repository.findAll(CaseVisibilitySpecification.visibleTo(actor)).stream()
+                .map(FulfillmentCaseEntity::getId)
+                .toList();
+    }
+
+    private static FulfillmentCaseEntity intakeCompletedCase(
+            String caseId,
+            String userId,
+            String merchantId,
+            ActorRole initiatorRole) {
+        FulfillmentCaseEntity dispute =
+                FulfillmentCaseEntity.create(
+                        caseId,
+                        "order-" + caseId,
+                        null,
+                        null,
+                        userId,
+                        merchantId,
+                        initiatorRole,
+                        "idempotency-" + caseId,
+                        "DISPUTE",
+                        "接待顺序测试",
+                        "验证发起方完成后才向被发起方展示。",
+                        RiskLevel.MEDIUM,
+                        initiatorRole == ActorRole.USER ? userId : merchantId);
+        dispute.completeIntake(
+                "FULFILLMENT_CONFLICT",
+                CaseStatus.INTAKE_COMPLETED,
+                RiskLevel.MEDIUM,
+                "{}",
+                initiatorRole == ActorRole.USER ? userId : merchantId);
+        return dispute;
     }
 }

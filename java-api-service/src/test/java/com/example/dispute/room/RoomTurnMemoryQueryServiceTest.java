@@ -22,6 +22,7 @@ import com.example.dispute.infrastructure.persistence.repository.FulfillmentCase
 import com.example.dispute.room.application.AccessSessionResolver;
 import com.example.dispute.room.application.AgentSessionResolver;
 import com.example.dispute.room.application.RoomTurnMemoryQueryService;
+import com.example.dispute.room.application.IntakeProgressService;
 import com.example.dispute.room.application.SessionPermissionService;
 import com.example.dispute.room.domain.PermissionLevel;
 import com.example.dispute.room.domain.RoomType;
@@ -57,6 +58,7 @@ class RoomTurnMemoryQueryServiceTest {
     @Mock private AccessSessionResolver accessSessionResolver;
     @Mock private AgentSessionResolver agentSessionResolver;
     @Mock private SessionPermissionService permissionService;
+    @Mock private IntakeProgressService intakeProgressService;
 
     private RoomTurnMemoryQueryService service;
 
@@ -76,6 +78,7 @@ class RoomTurnMemoryQueryServiceTest {
                         accessSessionResolver,
                         agentSessionResolver,
                         permissionService,
+                        intakeProgressService,
                         new ObjectMapper().findAndRegisterModules());
         lenient()
                 .when(accessSessionResolver.resolve(any(), any()))
@@ -147,6 +150,58 @@ class RoomTurnMemoryQueryServiceTest {
         assertThat(result.orElseThrow().caseIntakeDossier().qualityScore()).isEqualTo(88);
         assertThat(result.orElseThrow().caseIntakeDossier().readyForNextStep()).isTrue();
         assertThat(result.orElseThrow().canvasOperations()).hasSize(1);
+    }
+
+    @Test
+    void respondentWithoutPrivateMemoryReceivesOnlyTheStructuredIntakeDossier() {
+        FulfillmentCaseEntity dispute = intakeCase();
+        String dossierJson =
+                """
+                {
+                  "schema_version":"intake_case_detail.v1",
+                  "case_fact_matrix":{
+                    "schema_version":"case_fact_matrix.v2",
+                    "matrix_kind":"INITIATOR_FROZEN"
+                  }
+                }
+                """;
+        CaseIntakeDossierEntity dossier =
+                CaseIntakeDossierEntity.create(
+                        "INTAKE_DOSSIER_RESPONDENT",
+                        dispute.getId(),
+                        RoomType.INTAKE,
+                        dossierJson,
+                        88,
+                        true,
+                        "ACCEPTED",
+                        3,
+                        "dispute-intake-officer");
+        when(caseRepository.findById(dispute.getId())).thenReturn(Optional.of(dispute));
+        when(memoryRepository
+                        .findTopByAgentSessionIdAndAgentRoleIsNotNullOrderByTurnNoDesc(any()))
+                .thenReturn(Optional.empty());
+        when(intakeDossierRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.INTAKE))
+                .thenReturn(Optional.of(dossier));
+
+        var result =
+                service.latestAgentMemory(
+                        dispute.getId(),
+                        RoomType.INTAKE,
+                        new AuthenticatedActor("merchant-local", ActorRole.MERCHANT));
+
+        assertThat(result).isPresent();
+        assertThat(result.orElseThrow().agentResponse()).isEmpty();
+        assertThat(result.orElseThrow().memoryFrame().isEmpty()).isTrue();
+        assertThat(result.orElseThrow().scrollSnapshot().path("schema_version").asText())
+                .isEqualTo("intake_case_detail.v1");
+        assertThat(
+                        result.orElseThrow()
+                                .caseIntakeDossier()
+                                .dossier()
+                                .path("case_fact_matrix")
+                                .path("matrix_kind")
+                                .asText())
+                .isEqualTo("INITIATOR_FROZEN");
     }
 
     // 所属模块：【房间协作与权限 / 自动化测试层】「RoomTurnMemoryQueryServiceTest.latestAgentMemoryRejectsActorsOutsideTheDispute()」。

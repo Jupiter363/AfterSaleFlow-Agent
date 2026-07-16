@@ -155,10 +155,10 @@ class EvidenceDossierFreezerTest {
         assertThat(summary.path("overall_confidence_score").asInt()).isGreaterThan(0);
 
         JsonNode matrix = objectMapper.readTree(frozen.getMatrixSummaryJson());
-        assertThat(matrix.path("fact_evidence_matrix")).hasSize(1);
-        assertThat(matrix.path("fact_evidence_matrix").get(0).path("supporting_evidence"))
-                .hasSize(1);
-        assertThat(matrix.toString()).doesNotContain("UNMAPPED");
+        assertThat(matrix.path("fact_evidence_matrix")).isEmpty();
+        assertThat(matrix.path("unmapped_evidence").toString())
+                .contains("EVIDENCE_USER_LOGISTICS");
+        assertThat(matrix.toString()).doesNotContain("UNMAPPED_CLAIM_TARGET");
     }
 
     // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceDossierFreezerTest.freezeToleratesLegacyEvidenceWithoutParseStatus()」。
@@ -238,7 +238,13 @@ class EvidenceDossierFreezerTest {
                           "authenticity_score":0.37,
                           "relevance_score":0.93,
                           "completeness_score":0.64,
-                          "assessment_confidence":0.88
+                          "assessment_confidence":0.88,
+                          "fact_links":[{
+                            "fact_id":"FACT_GOODS_CONDITION",
+                            "relation":"INCONCLUSIVE",
+                            "reason":"真实性偏低，保留正式事实坐标等待人工复核",
+                            "confidence":0.88
+                          }]
                         }
                         """,
                         "{}",
@@ -269,7 +275,7 @@ class EvidenceDossierFreezerTest {
         assertThat(evidenceItem.path("assessment_confidence").asDouble()).isEqualTo(0.88);
         JsonNode matrix = objectMapper.readTree(frozen.getMatrixSummaryJson());
         assertThat(matrix.path("fact_evidence_matrix").get(0).path("evidence_strength").asText())
-                .isEqualTo("MEDIUM");
+                .isEqualTo("LOW");
     }
 
     // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceDossierFreezerTest.lowRelevanceModelFactLinkDoesNotBecomeVerifiedFact()」。
@@ -369,6 +375,17 @@ class EvidenceDossierFreezerTest {
         evidence.markSubmitted(
                 "BATCH_" + id,
                 OffsetDateTime.parse("2026-07-03T00:10:00Z"),
+                "user-local");
+        evidence.recordSubmissionDeclaration(
+                """
+                {"claimed_fact":"物流截图用于证明包裹签收状态","truth_attested":true,
+                "attestation_version":"EVIDENCE_TRUTH_ATTESTATION_V1",
+                "attestation_scope":["AUTHENTICITY","CLAIMED_FACT_RELEVANCE"],
+                "attestation_role":"USER","attested_by":"user-local",
+                "attested_at":"2026-07-03T00:05:00Z","party_capacity":"INITIATOR",
+                "forgery_consequence_code":"REJECT_INITIATOR_CLAIMS_AND_REPUTATION_PENALTY",
+                "enforcement_gate":"HUMAN_CONFIRMED_FORGERY_REQUIRED"}
+                """,
                 "user-local");
         return evidence;
     }

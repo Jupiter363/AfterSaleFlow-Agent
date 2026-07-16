@@ -386,8 +386,7 @@ class SimulatedExternalImportTemplateCycleTest {
                 new DisputeProperties(
                         Duration.ofHours(2),
                         Duration.ofHours(3),
-                        Duration.ofMinutes(5),
-                        3,
+                        Duration.ofMinutes(20),
                         Duration.ofSeconds(15),
                         true),
                 Clock.fixed(

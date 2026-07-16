@@ -48,4 +48,18 @@ describe("PhaseCountdown", () => {
     expect(wrapper.emitted("expired")).toBeUndefined();
     expect(wrapper.attributes("data-awaiting-server")).toBe("true");
   });
+
+  it("does not invent a local deadline while the server deadline is unavailable", () => {
+    const wrapper = mount(PhaseCountdown, {
+      props: {
+        deadlineAt: "",
+        serverNow: "2026-07-03T10:00:00Z",
+        label: "举证窗口",
+      },
+    });
+
+    expect(wrapper.text()).toContain("00:00:00");
+    expect(wrapper.text()).toContain("等待服务端确认下一阶段");
+    expect(wrapper.attributes("data-awaiting-server")).toBe("true");
+  });
 });

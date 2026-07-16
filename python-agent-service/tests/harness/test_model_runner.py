@@ -90,8 +90,8 @@ def test_model_runner_composes_prompt_with_managed_context_window() -> None:
     assert len(llm.calls) == 1
     call = llm.calls[0]
     assert call["node_name"] == "intake_analyze"
-    assert "Common AI Native harness safety boundary" in str(call["system_prompt"])
-    assert "neutral Dispute Intake Officer" in str(call["system_prompt"])
+    assert "人工智能原生编排框架通用安全边界" in str(call["system_prompt"])
+    assert "中立争议接待官" in str(call["system_prompt"])
     assert "harness_context" in str(call["user_prompt"])
     assert "最近一轮：用户坚持未收到包裹。" in str(call["user_prompt"])
     assert "很早之前的历史。" not in str(call["user_prompt"])

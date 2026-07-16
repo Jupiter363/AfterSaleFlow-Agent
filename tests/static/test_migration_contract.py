@@ -11,7 +11,7 @@ MIGRATION_DIR = (
     ROOT / "java-api-service" / "src" / "main" / "resources" / "db" / "migration"
 )
 
-EXPECTED_MIGRATIONS = [
+BASELINE_MIGRATIONS = [
     "V001__init_case_tables.sql",
     "V002__init_evidence_tables.sql",
     "V003__init_hearing_tables.sql",
@@ -82,7 +82,7 @@ REQUIRED_TABLES = {
 def migration_text() -> str:
     return "\n".join(
         (MIGRATION_DIR / name).read_text(encoding="utf-8")
-        for name in EXPECTED_MIGRATIONS
+        for name in BASELINE_MIGRATIONS
     ).lower()
 
 
@@ -106,8 +106,10 @@ def table_body(sql: str, table: str) -> str:
 # 系统意义：固定“跨服务契约测试 > test_migration_contract”的可观察契约，防止后续重构改变业务结果。
 def test_ordered_flyway_migrations_exist() -> None:
     actual = sorted(path.name for path in MIGRATION_DIR.glob("V*.sql"))
+    versions = [int(re.match(r"V(\d+)__", name).group(1)) for name in actual]
 
-    assert actual == EXPECTED_MIGRATIONS
+    assert actual[: len(BASELINE_MIGRATIONS)] == BASELINE_MIGRATIONS
+    assert versions == list(range(1, len(actual) + 1))
 
 
 # 所属模块：跨服务契约测试 > test_migration_contract；函数角色：回归测试用例。

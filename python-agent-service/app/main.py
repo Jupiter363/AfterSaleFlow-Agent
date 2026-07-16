@@ -54,14 +54,12 @@ from fastapi.responses import JSONResponse
 # ---- 代理 & 工作流 ----
 from app.agents.critics import build_default_critics
 from app.agents.deliberation_panel import DeliberationPanel
-from app.agents.unified_jury_review import UnifiedJuryReviewAgent
 from app.agents.dispute_intake_officer import DisputeIntakeOfficer
 from app.agents.evaluation_agent import EvaluationAgent
 from app.agents.evidence_clerk import EvidenceClerk
 from app.agents.evidence_clerk.workflow import EvidenceTurnWorkflow
+from app.agents.hearing_flow import HearingFlowWorkflows
 from app.agents.model_roles import ModelCriticEvaluator, ModelReviewAnswerer
-from app.agents.presiding_judge import PresidingJudge
-from app.agents.presiding_judge.round_workflow import HearingRoundTurnWorkflow
 from app.agents.review_copilot import ReviewCopilot
 from app.business.api.final_agents import FinalAgentServices
 from app.business.simulated_imports import SimulatedExternalImportWorkflow
@@ -83,12 +81,20 @@ from app.harness.prompt_composer import PromptRepository
 
 # ---- 请求 / 响应 Schema ----
 from app.schemas import (
-    HearingAnalysisResult,
-    HearingAnalyzeRequest,
-    HearingStageRequest,
-    HearingStageResult,
-    HearingRoundTurnRequest,
-    HearingRoundTurnResult,
+    HearingIntakeQuestionsRequest,
+    HearingIntakeQuestionsResult,
+    HearingIntakeSynthesisRequest,
+    HearingIntakeSynthesisResult,
+    HearingEvidenceRequestsRequest,
+    HearingEvidenceRequestsResult,
+    HearingEvidenceSynthesisRequest,
+    HearingEvidenceSynthesisResult,
+    HearingJudgeV1Request,
+    HearingJudgeV1Result,
+    HearingJuryReviewRequest,
+    HearingJuryReviewResult,
+    HearingJudgeV2Request,
+    HearingJudgeV2Result,
     DeliberationReport,
     DeliberationRequest,
     DisputeIntakeRequest,
@@ -120,7 +126,6 @@ from app.tracing import (
     LangfuseAgentTracer,
     NoOpAgentTracer,
 )
-from app.workflow import HearingWorkflow
 
 
 # ==================== 常量定义 ====================
@@ -136,18 +141,17 @@ SAFE_CORRELATION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 
 # 所属模块：Python Agent 服务边界 > main；函数角色：模块公开业务函数。
 # 具体功能：`create_app` 应用工厂：创建并配置 FastAPI 实例；关键协作调用：`FastAPI`、`app.middleware`、`app.exception_handler`；返回/更新字段：`status`、`service`、`model_status`。
-# 上下游：上游为 Java 内部鉴权 HTTP 请求、关联 ID；下游为 本文件的 `_build_llm_client`、`_build_workflow`、`_build_intake_workflow`、`_build_intake_turn_workflow`。
+# 上下游：上游为 Java 内部鉴权 HTTP 请求、关联 ID；下游为本文件的工作流构建函数。
 # 系统意义：该函数在系统中的业务边界是：鉴权、追踪、异常映射必须完整；不泄露内部推理。
 def create_app(
     settings: Settings | None = None,
-    workflow: HearingWorkflow | None = None,
     intake_workflow: IntakeWorkflow | None = None,
     intake_turn_workflow: IntakeTurnWorkflow | None = None,
     evidence_turn_workflow: EvidenceTurnWorkflow | None = None,
     evaluation_workflow: EvaluationWorkflow | None = None,
     final_agent_services: FinalAgentServices | None = None,
     simulated_import_workflow: SimulatedExternalImportWorkflow | None = None,
-    hearing_round_turn_workflow: HearingRoundTurnWorkflow | None = None,
+    hearing_flow_workflows: HearingFlowWorkflows | None = None,
 ) -> FastAPI:
     """应用工厂：创建并配置 FastAPI 实例。
 
@@ -160,8 +164,6 @@ def create_app(
     ----------
     settings : Settings | None
         应用配置（LLM 连接信息、服务密钥等），默认从环境变量加载。
-    workflow : HearingWorkflow | None
-        庭审工作流实例，负责 C1-C6 完整庭审流程。
     intake_workflow : IntakeWorkflow | None
         争议受理工作流，负责案件初始分析。
     intake_turn_workflow : IntakeTurnWorkflow | None
@@ -174,9 +176,8 @@ def create_app(
         组合的代理服务集合，封装所有业务代理。
     simulated_import_workflow : SimulatedExternalImportWorkflow | None
         模拟导入工作流，生成测试数据。
-    hearing_round_turn_workflow : HearingRoundTurnWorkflow | None
-        庭审轮转工作流，处理庭审多轮交互。
-
+    hearing_flow_workflows : HearingFlowWorkflows | None
+        `hearing_flow.v2` 七个独立庭审操作的集合。
     Returns
     -------
     FastAPI
@@ -197,7 +198,6 @@ def create_app(
     resolved = settings or get_settings()
 
     # 构建各工作流实例：如果未传入则自动构建默认实现
-    hearing_workflow = workflow or _build_workflow(resolved)
     resolved_intake_workflow = intake_workflow or _build_intake_workflow(resolved)
     resolved_intake_turn_workflow = intake_turn_workflow or _build_intake_turn_workflow(
         resolved
@@ -211,8 +211,8 @@ def create_app(
     resolved_simulated_import_workflow = (
         simulated_import_workflow or _build_simulated_import_workflow(resolved)
     )
-    resolved_hearing_round_turn_workflow = (
-        hearing_round_turn_workflow or _build_hearing_round_turn_workflow(resolved)
+    resolved_hearing_flow_workflows = (
+        hearing_flow_workflows or _build_hearing_flow_workflows(resolved)
     )
 
     # 构建 LLM 健康检查客户端
@@ -221,7 +221,6 @@ def create_app(
     # 构建最终代理服务集合：组合所有业务代理
     final_services = final_agent_services or _build_final_agent_services(
         resolved,
-        hearing_workflow,
         resolved_intake_workflow,
         resolved_evaluation_workflow,
     )
@@ -464,6 +463,97 @@ def create_app(
         _authorize(x_service_secret, resolved.python_agent_service_secret)
         return await run_in_threadpool(resolved_evidence_turn_workflow.run, payload)
 
+    @app.post(
+        "/internal/agents/hearing-flow/intake/questions",
+        response_model=HearingIntakeQuestionsResult,
+    )
+    async def hearing_intake_questions(
+        payload: HearingIntakeQuestionsRequest,
+        x_service_secret: str = Header(alias=SERVICE_SECRET_HEADER),
+    ) -> HearingIntakeQuestionsResult:
+        _authorize(x_service_secret, resolved.python_agent_service_secret)
+        return await run_in_threadpool(
+            resolved_hearing_flow_workflows.intake_questions, payload
+        )
+
+    @app.post(
+        "/internal/agents/hearing-flow/intake/synthesis",
+        response_model=HearingIntakeSynthesisResult,
+    )
+    async def hearing_intake_synthesis(
+        payload: HearingIntakeSynthesisRequest,
+        x_service_secret: str = Header(alias=SERVICE_SECRET_HEADER),
+    ) -> HearingIntakeSynthesisResult:
+        _authorize(x_service_secret, resolved.python_agent_service_secret)
+        return await run_in_threadpool(
+            resolved_hearing_flow_workflows.intake_synthesis, payload
+        )
+
+    @app.post(
+        "/internal/agents/hearing-flow/evidence/requests",
+        response_model=HearingEvidenceRequestsResult,
+    )
+    async def hearing_evidence_requests(
+        payload: HearingEvidenceRequestsRequest,
+        x_service_secret: str = Header(alias=SERVICE_SECRET_HEADER),
+    ) -> HearingEvidenceRequestsResult:
+        _authorize(x_service_secret, resolved.python_agent_service_secret)
+        return await run_in_threadpool(
+            resolved_hearing_flow_workflows.evidence_requests, payload
+        )
+
+    @app.post(
+        "/internal/agents/hearing-flow/evidence/synthesis",
+        response_model=HearingEvidenceSynthesisResult,
+    )
+    async def hearing_evidence_synthesis(
+        payload: HearingEvidenceSynthesisRequest,
+        x_service_secret: str = Header(alias=SERVICE_SECRET_HEADER),
+    ) -> HearingEvidenceSynthesisResult:
+        _authorize(x_service_secret, resolved.python_agent_service_secret)
+        return await run_in_threadpool(
+            resolved_hearing_flow_workflows.evidence_synthesis, payload
+        )
+
+    @app.post(
+        "/internal/agents/hearing-flow/judge/v1",
+        response_model=HearingJudgeV1Result,
+    )
+    async def hearing_judge_v1(
+        payload: HearingJudgeV1Request,
+        x_service_secret: str = Header(alias=SERVICE_SECRET_HEADER),
+    ) -> HearingJudgeV1Result:
+        _authorize(x_service_secret, resolved.python_agent_service_secret)
+        return await run_in_threadpool(
+            resolved_hearing_flow_workflows.judge_v1, payload
+        )
+
+    @app.post(
+        "/internal/agents/hearing-flow/jury/review",
+        response_model=HearingJuryReviewResult,
+    )
+    async def hearing_jury_review(
+        payload: HearingJuryReviewRequest,
+        x_service_secret: str = Header(alias=SERVICE_SECRET_HEADER),
+    ) -> HearingJuryReviewResult:
+        _authorize(x_service_secret, resolved.python_agent_service_secret)
+        return await run_in_threadpool(
+            resolved_hearing_flow_workflows.jury_review, payload
+        )
+
+    @app.post(
+        "/internal/agents/hearing-flow/judge/v2",
+        response_model=HearingJudgeV2Result,
+    )
+    async def hearing_judge_v2(
+        payload: HearingJudgeV2Request,
+        x_service_secret: str = Header(alias=SERVICE_SECRET_HEADER),
+    ) -> HearingJudgeV2Result:
+        _authorize(x_service_secret, resolved.python_agent_service_secret)
+        return await run_in_threadpool(
+            resolved_hearing_flow_workflows.judge_v2, payload
+        )
+
     # ==================== 同步路由 —— 外部导入模拟 ====================
 
     # 所属模块：Python Agent 服务边界 > main；函数角色：类/闭包内部方法。
@@ -502,62 +592,6 @@ def create_app(
         """证据卷宗构建。"""
         _authorize(x_service_secret, resolved.python_agent_service_secret)
         return await run_in_threadpool(final_services.evidence.build, payload)
-
-    # ==================== 同步路由 —— 庭审 (Hearing) ====================
-
-    # 所属模块：Python Agent 服务边界 > main；函数角色：类/闭包内部方法。
-    # 具体功能：`final_hearing` 运行庭审阶段（C1-C6）；关键协作调用：`app.post`、`Header`、`run_in_threadpool`。
-    # 上下游：上游为 Java 内部鉴权 HTTP 请求、关联 ID；下游为 本文件的 `_authorize`、`_trace_context`。
-    # 系统意义：该函数在系统中的业务边界是：鉴权、追踪、异常映射必须完整；不泄露内部推理。
-    @app.post(
-        "/internal/agents/hearing/run-stage",
-        response_model=HearingStageResult,
-    )
-    async def final_hearing(
-        payload: HearingStageRequest,
-        request: Request,
-        x_service_secret: str = Header(alias=SERVICE_SECRET_HEADER),
-        x_role: str = Header(default="SYSTEM", alias="X-Role"),
-        x_case_state: str = Header(
-            default="FULL_HEARING",
-            alias="X-Case-State",
-        ),
-    ) -> HearingStageResult:
-        """运行庭审阶段（C1-C6）。"""
-        _authorize(x_service_secret, resolved.python_agent_service_secret)
-        context = _trace_context(
-            request,
-            case_id=payload.case_id,
-            workflow_id=payload.workflow_id,
-            user_id=payload.user_id,
-            role=x_role,
-            prompt_version=resolved.prompt_version,
-        )
-        return await run_in_threadpool(
-            final_services.hearing.run_stage,
-            payload,
-            context,
-            case_state=x_case_state,
-        )
-
-    # 所属模块：Python Agent 服务边界 > main；函数角色：类/闭包内部方法。
-    # 具体功能：`hearing_round_turn` 庭审多轮交互处理；关键协作调用：`app.post`、`Header`、`run_in_threadpool`。
-    # 上下游：上游为 Java 内部鉴权 HTTP 请求、关联 ID；下游为 本文件的 `_authorize`。
-    # 系统意义：该函数在系统中的业务边界是：鉴权、追踪、异常映射必须完整；不泄露内部推理。
-    @app.post(
-        "/internal/agents/hearing/round-turn",
-        response_model=HearingRoundTurnResult,
-    )
-    async def hearing_round_turn(
-        payload: HearingRoundTurnRequest,
-        x_service_secret: str = Header(alias=SERVICE_SECRET_HEADER),
-    ) -> HearingRoundTurnResult:
-        """庭审多轮交互处理。"""
-        _authorize(x_service_secret, resolved.python_agent_service_secret)
-        return await run_in_threadpool(
-            resolved_hearing_round_turn_workflow.run,
-            payload,
-        )
 
     # ==================== 同步路由 —— 合议 (Deliberation) ====================
 
@@ -633,33 +667,6 @@ def create_app(
 
     # ==================== 同步路由 —— 遗留接口 (Legacy) ====================
     # 保留旧版本的同步接口，用于向后兼容，在 Java 迁移窗口期内仍可使用。
-
-    # 所属模块：Python Agent 服务边界 > main；函数角色：类/闭包内部方法。
-    # 具体功能：`analyze_hearing` [遗留] 庭审全量分析 —— 一次性执行 C1-C6 所有阶段；关键协作调用：`app.post`、`Header`、`AgentTraceContext`。
-    # 上下游：上游为 Java 内部鉴权 HTTP 请求、关联 ID；下游为 本文件的 `_authorize`。
-    # 系统意义：该函数在系统中的业务边界是：鉴权、追踪、异常映射必须完整；不泄露内部推理。
-    @app.post(
-        "/internal/agents/legacy/hearing/analyze",
-        response_model=HearingAnalysisResult,
-    )
-    async def analyze_hearing(
-        payload: HearingAnalyzeRequest,
-        request: Request,
-        x_service_secret: str = Header(alias=SERVICE_SECRET_HEADER),
-        x_role: str = Header(default="SYSTEM", alias="X-Role"),
-    ) -> HearingAnalysisResult:
-        """[遗留] 庭审全量分析 —— 一次性执行 C1-C6 所有阶段。"""
-        _authorize(x_service_secret, resolved.python_agent_service_secret)
-        context = AgentTraceContext(
-            trace_id=request.state.trace_id,
-            request_id=request.state.request_id,
-            case_id=payload.case_id,
-            workflow_id=payload.workflow_id,
-            user_id=payload.user_id,
-            role=x_role,
-            prompt_version=resolved.prompt_version,
-        )
-        return await run_in_threadpool(hearing_workflow.analyze, payload, context)
 
     # 所属模块：Python Agent 服务边界 > main；函数角色：类/闭包内部方法。
     # 具体功能：`analyze_intake` [遗留] 争议受理全量分析；关键协作调用：`app.post`、`Header`、`AgentTraceContext`。
@@ -764,6 +771,97 @@ def create_app(
             invoke=lambda: resolved_evidence_turn_workflow.run(payload),
         )
 
+    @app.post("/internal/agents/hearing-flow/intake/questions/stream")
+    async def hearing_intake_questions_stream(
+        payload: HearingIntakeQuestionsRequest,
+        x_service_secret: str = Header(alias=SERVICE_SECRET_HEADER),
+        x_agent_run_id: str | None = Header(default=None, alias=AGENT_RUN_HEADER),
+    ):
+        _authorize(x_service_secret, resolved.python_agent_service_secret)
+        return workflow_ndjson_response(
+            operation="hearing_intake_questions",
+            run_id=resolve_agent_run_id(x_agent_run_id),
+            invoke=lambda: resolved_hearing_flow_workflows.intake_questions(payload),
+        )
+
+    @app.post("/internal/agents/hearing-flow/intake/synthesis/stream")
+    async def hearing_intake_synthesis_stream(
+        payload: HearingIntakeSynthesisRequest,
+        x_service_secret: str = Header(alias=SERVICE_SECRET_HEADER),
+        x_agent_run_id: str | None = Header(default=None, alias=AGENT_RUN_HEADER),
+    ):
+        _authorize(x_service_secret, resolved.python_agent_service_secret)
+        return workflow_ndjson_response(
+            operation="hearing_intake_synthesis",
+            run_id=resolve_agent_run_id(x_agent_run_id),
+            invoke=lambda: resolved_hearing_flow_workflows.intake_synthesis(payload),
+        )
+
+    @app.post("/internal/agents/hearing-flow/evidence/requests/stream")
+    async def hearing_evidence_requests_stream(
+        payload: HearingEvidenceRequestsRequest,
+        x_service_secret: str = Header(alias=SERVICE_SECRET_HEADER),
+        x_agent_run_id: str | None = Header(default=None, alias=AGENT_RUN_HEADER),
+    ):
+        _authorize(x_service_secret, resolved.python_agent_service_secret)
+        return workflow_ndjson_response(
+            operation="hearing_evidence_requests",
+            run_id=resolve_agent_run_id(x_agent_run_id),
+            invoke=lambda: resolved_hearing_flow_workflows.evidence_requests(payload),
+        )
+
+    @app.post("/internal/agents/hearing-flow/evidence/synthesis/stream")
+    async def hearing_evidence_synthesis_stream(
+        payload: HearingEvidenceSynthesisRequest,
+        x_service_secret: str = Header(alias=SERVICE_SECRET_HEADER),
+        x_agent_run_id: str | None = Header(default=None, alias=AGENT_RUN_HEADER),
+    ):
+        _authorize(x_service_secret, resolved.python_agent_service_secret)
+        return workflow_ndjson_response(
+            operation="hearing_evidence_synthesis",
+            run_id=resolve_agent_run_id(x_agent_run_id),
+            invoke=lambda: resolved_hearing_flow_workflows.evidence_synthesis(payload),
+        )
+
+    @app.post("/internal/agents/hearing-flow/judge/v1/stream")
+    async def hearing_judge_v1_stream(
+        payload: HearingJudgeV1Request,
+        x_service_secret: str = Header(alias=SERVICE_SECRET_HEADER),
+        x_agent_run_id: str | None = Header(default=None, alias=AGENT_RUN_HEADER),
+    ):
+        _authorize(x_service_secret, resolved.python_agent_service_secret)
+        return workflow_ndjson_response(
+            operation="hearing_judge_v1",
+            run_id=resolve_agent_run_id(x_agent_run_id),
+            invoke=lambda: resolved_hearing_flow_workflows.judge_v1(payload),
+        )
+
+    @app.post("/internal/agents/hearing-flow/jury/review/stream")
+    async def hearing_jury_review_stream(
+        payload: HearingJuryReviewRequest,
+        x_service_secret: str = Header(alias=SERVICE_SECRET_HEADER),
+        x_agent_run_id: str | None = Header(default=None, alias=AGENT_RUN_HEADER),
+    ):
+        _authorize(x_service_secret, resolved.python_agent_service_secret)
+        return workflow_ndjson_response(
+            operation="hearing_jury_review",
+            run_id=resolve_agent_run_id(x_agent_run_id),
+            invoke=lambda: resolved_hearing_flow_workflows.jury_review(payload),
+        )
+
+    @app.post("/internal/agents/hearing-flow/judge/v2/stream")
+    async def hearing_judge_v2_stream(
+        payload: HearingJudgeV2Request,
+        x_service_secret: str = Header(alias=SERVICE_SECRET_HEADER),
+        x_agent_run_id: str | None = Header(default=None, alias=AGENT_RUN_HEADER),
+    ):
+        _authorize(x_service_secret, resolved.python_agent_service_secret)
+        return workflow_ndjson_response(
+            operation="hearing_judge_v2",
+            run_id=resolve_agent_run_id(x_agent_run_id),
+            invoke=lambda: resolved_hearing_flow_workflows.judge_v2(payload),
+        )
+
     # 所属模块：Python Agent 服务边界 > main；函数角色：类/闭包内部方法。
     # 具体功能：`simulate_external_import_stream` [流式] 模拟外部数据导入；关键协作调用：`app.post`、`Header`、`workflow_ndjson_response`。
     # 上下游：上游为 Java 内部鉴权 HTTP 请求、关联 ID；下游为 本文件的 `_authorize`。
@@ -798,60 +896,6 @@ def create_app(
             operation="evidence_build",
             run_id=resolve_agent_run_id(x_agent_run_id),
             invoke=lambda: final_services.evidence.build(payload),
-        )
-
-    # 所属模块：Python Agent 服务边界 > main；函数角色：类/闭包内部方法。
-    # 具体功能：`final_hearing_stream` [流式] 运行庭审阶段；关键协作调用：`app.post`、`Header`、`workflow_ndjson_response`。
-    # 上下游：上游为 Java 内部鉴权 HTTP 请求、关联 ID；下游为 本文件的 `_authorize`、`_trace_context`。
-    # 系统意义：提供实时反馈，同时阻止未校验完整结果或内部推理经流通道泄露。
-    @app.post("/internal/agents/hearing/run-stage/stream")
-    async def final_hearing_stream(
-        payload: HearingStageRequest,
-        request: Request,
-        x_service_secret: str = Header(alias=SERVICE_SECRET_HEADER),
-        x_role: str = Header(default="SYSTEM", alias="X-Role"),
-        x_case_state: str = Header(
-            default="FULL_HEARING",
-            alias="X-Case-State",
-        ),
-        x_agent_run_id: str | None = Header(default=None, alias=AGENT_RUN_HEADER),
-    ):
-        """[流式] 运行庭审阶段。"""
-        _authorize(x_service_secret, resolved.python_agent_service_secret)
-        context = _trace_context(
-            request,
-            case_id=payload.case_id,
-            workflow_id=payload.workflow_id,
-            user_id=payload.user_id,
-            role=x_role,
-            prompt_version=resolved.prompt_version,
-        )
-        return workflow_ndjson_response(
-            operation="hearing_stage",
-            run_id=resolve_agent_run_id(x_agent_run_id),
-            invoke=lambda: final_services.hearing.run_stage(
-                payload,
-                context,
-                case_state=x_case_state,
-            ),
-        )
-
-    # 所属模块：Python Agent 服务边界 > main；函数角色：类/闭包内部方法。
-    # 具体功能：`hearing_round_turn_stream` [流式] 庭审多轮交互；关键协作调用：`app.post`、`Header`、`workflow_ndjson_response`。
-    # 上下游：上游为 Java 内部鉴权 HTTP 请求、关联 ID；下游为 本文件的 `_authorize`。
-    # 系统意义：提供实时反馈，同时阻止未校验完整结果或内部推理经流通道泄露。
-    @app.post("/internal/agents/hearing/round-turn/stream")
-    async def hearing_round_turn_stream(
-        payload: HearingRoundTurnRequest,
-        x_service_secret: str = Header(alias=SERVICE_SECRET_HEADER),
-        x_agent_run_id: str | None = Header(default=None, alias=AGENT_RUN_HEADER),
-    ):
-        """[流式] 庭审多轮交互。"""
-        _authorize(x_service_secret, resolved.python_agent_service_secret)
-        return workflow_ndjson_response(
-            operation="hearing_round_turn",
-            run_id=resolve_agent_run_id(x_agent_run_id),
-            invoke=lambda: resolved_hearing_round_turn_workflow.run(payload),
         )
 
     # 所属模块：Python Agent 服务边界 > main；函数角色：类/闭包内部方法。
@@ -923,35 +967,6 @@ def create_app(
         )
 
     # 所属模块：Python Agent 服务边界 > main；函数角色：类/闭包内部方法。
-    # 具体功能：`analyze_hearing_stream` [流式][遗留] 庭审全量分析；关键协作调用：`app.post`、`Header`、`AgentTraceContext`。
-    # 上下游：上游为 Java 内部鉴权 HTTP 请求、关联 ID；下游为 本文件的 `_authorize`。
-    # 系统意义：提供实时反馈，同时阻止未校验完整结果或内部推理经流通道泄露。
-    @app.post("/internal/agents/legacy/hearing/analyze/stream")
-    async def analyze_hearing_stream(
-        payload: HearingAnalyzeRequest,
-        request: Request,
-        x_service_secret: str = Header(alias=SERVICE_SECRET_HEADER),
-        x_role: str = Header(default="SYSTEM", alias="X-Role"),
-        x_agent_run_id: str | None = Header(default=None, alias=AGENT_RUN_HEADER),
-    ):
-        """[流式][遗留] 庭审全量分析。"""
-        _authorize(x_service_secret, resolved.python_agent_service_secret)
-        context = AgentTraceContext(
-            trace_id=request.state.trace_id,
-            request_id=request.state.request_id,
-            case_id=payload.case_id,
-            workflow_id=payload.workflow_id,
-            user_id=payload.user_id,
-            role=x_role,
-            prompt_version=resolved.prompt_version,
-        )
-        return workflow_ndjson_response(
-            operation="hearing_analysis",
-            run_id=resolve_agent_run_id(x_agent_run_id),
-            invoke=lambda: hearing_workflow.analyze(payload, context),
-        )
-
-    # 所属模块：Python Agent 服务边界 > main；函数角色：类/闭包内部方法。
     # 具体功能：`analyze_intake_stream` [流式][遗留] 争议受理全量分析；关键协作调用：`app.post`、`Header`、`AgentTraceContext`。
     # 上下游：上游为 Java 内部鉴权 HTTP 请求、关联 ID；下游为 本文件的 `_authorize`。
     # 系统意义：提供实时反馈，同时阻止未校验完整结果或内部推理经流通道泄露。
@@ -985,23 +1000,6 @@ def create_app(
 
 # ==================== 工作流构建函数 ====================
 # 每个函数负责构建一个独立的工作流实例，统一通过 Settings 获取配置。
-
-
-# 所属模块：Python Agent 服务边界 > main；函数角色：模块私有业务函数。
-# 具体功能：`_build_workflow` 构建庭审工作流（C1-C6 完整流程）；关键协作调用：`HearingWorkflow`、`PromptRepository`。
-# 上下游：上游为 本文件的 `create_app`；下游为 本文件的 `_build_llm_client`、`_build_tracer`。
-# 系统意义：定义可恢复、可追踪的阶段顺序，使案件重试仍沿相同业务路径推进。
-def _build_workflow(settings: Settings) -> HearingWorkflow:
-    """构建庭审工作流（C1-C6 完整流程）。"""
-    llm = _build_llm_client(settings)
-    tracer = _build_tracer(settings)
-    return HearingWorkflow(
-        llm,
-        PromptRepository(),
-        tracer,
-        settings.resolved_llm_model,
-        settings.prompt_version,
-    )
 
 
 # 所属模块：Python Agent 服务边界 > main；函数角色：模块私有业务函数。
@@ -1087,40 +1085,35 @@ def _build_simulated_import_workflow(
 
 
 # 所属模块：Python Agent 服务边界 > main；函数角色：模块私有业务函数。
-# 具体功能：`_build_hearing_round_turn_workflow` 构建庭审轮转工作流；关键协作调用：`HearingRoundTurnWorkflow`、`HarnessModelRunner`、`PromptRepository`。
+# 具体功能：`_build_hearing_flow_workflows` 构建 hearing_flow.v2 的七个独立模型操作；关键协作调用：`HearingFlowWorkflows`、`HarnessModelRunner`、`PromptRepository`。
 # 上下游：上游为 Java 内部鉴权 HTTP 请求、关联 ID；下游为 本文件的 `_build_llm_client`。
 # 系统意义：定义可恢复、可追踪的阶段顺序，使案件重试仍沿相同业务路径推进。
-def _build_hearing_round_turn_workflow(settings: Settings) -> HearingRoundTurnWorkflow:
-    """构建庭审轮转工作流。"""
+def _build_hearing_flow_workflows(settings: Settings) -> HearingFlowWorkflows:
+    """Build the seven independent ``hearing_flow.v2`` model operations."""
     llm = _build_llm_client(settings)
     model_runner = HarnessModelRunner(
         llm=llm,
         prompts=PromptRepository(),
     )
-    return HearingRoundTurnWorkflow(
-        model_runner=model_runner,
-        jury_review_agent=UnifiedJuryReviewAgent(model_runner),
-    )
+    return HearingFlowWorkflows(model_runner)
 
 
 # 所属模块：Python Agent 服务边界 > main；函数角色：模块私有业务函数。
-# 具体功能：`_build_final_agent_services` 构建最终代理服务集合：组合所有业务代理（受理、证据、庭审、合议、评审、评估）；关键协作调用：`PromptRepository`、`ModelCriticEvaluator`、`FinalAgentServices`。
+# 具体功能：`_build_final_agent_services` 构建通用代理服务集合：组合受理、证据、合议、评审和评估代理；关键协作调用：`PromptRepository`、`ModelCriticEvaluator`、`FinalAgentServices`。
 # 上下游：上游为 Java 内部鉴权 HTTP 请求、关联 ID；下游为 本文件的 `_build_llm_client`。
 # 系统意义：该函数在系统中的业务边界是：鉴权、追踪、异常映射必须完整；不泄露内部推理。
 def _build_final_agent_services(
     settings: Settings,
-    hearing_workflow: HearingWorkflow,
     intake_workflow: IntakeWorkflow,
     evaluation_workflow: EvaluationWorkflow,
 ) -> FinalAgentServices:
-    """构建最终代理服务集合：组合所有业务代理（受理、证据、庭审、合议、评审、评估）。"""
+    """构建通用代理服务集合；庭审 V2 由独立操作直接注册。"""
     llm = _build_llm_client(settings)
     prompts = PromptRepository()
     critic_evaluator = ModelCriticEvaluator(llm, prompts)
     return FinalAgentServices(
         intake=DisputeIntakeOfficer(intake_workflow),
         evidence=EvidenceClerk(),
-        hearing=PresidingJudge(hearing_workflow),
         deliberation=DeliberationPanel(
             build_default_critics(critic_evaluator)
         ),
@@ -1134,7 +1127,7 @@ def _build_final_agent_services(
 
 # 所属模块：Python Agent 服务边界 > main；函数角色：模块私有业务函数。
 # 具体功能：`_build_llm_client` 构建 LiteLLM 代理客户端（连接 LLM 代理层）；关键协作调用：`LiteLlmProxyClient`。
-# 上下游：上游为 本文件的 `create_app`、`_build_workflow`、`_build_intake_workflow`、`_build_intake_turn_workflow`；下游为 协作调用 `LiteLlmProxyClient`。
+# 上下游：上游为本文件的工作流构建函数；下游为 `LiteLlmProxyClient`。
 # 系统意义：把不确定模型能力限制在确定性系统边界内：鉴权、追踪、异常映射必须完整；不泄露内部推理。
 def _build_llm_client(settings: Settings) -> LiteLlmProxyClient:
     """构建 LiteLLM 代理客户端（连接 LLM 代理层）。"""
@@ -1148,7 +1141,7 @@ def _build_llm_client(settings: Settings) -> LiteLlmProxyClient:
 
 # 所属模块：Python Agent 服务边界 > main；函数角色：模块私有业务函数。
 # 具体功能：`_build_tracer` 构建追踪器：启用 Langfuse 时返回真实追踪器，否则返回空实现；关键协作调用：`LangfuseAgentTracer`、`NoOpAgentTracer`。
-# 上下游：上游为 本文件的 `_build_workflow`、`_build_intake_workflow`、`_build_evaluation_workflow`；下游为 协作调用 `LangfuseAgentTracer`、`NoOpAgentTracer`。
+# 上下游：上游为需要追踪的受理与评估工作流；下游为 `LangfuseAgentTracer` 或 `NoOpAgentTracer`。
 # 系统意义：该函数在系统中的业务边界是：鉴权、追踪、异常映射必须完整；不泄露内部推理。
 def _build_tracer(settings: Settings):
     """构建追踪器：启用 Langfuse 时返回真实追踪器，否则返回空实现。"""
@@ -1166,7 +1159,7 @@ def _build_tracer(settings: Settings):
 
 # 所属模块：Python Agent 服务边界 > main；函数角色：模块私有业务函数。
 # 具体功能：`_trace_context` 从请求状态中提取追踪上下文（trace_id / request_id 来自中间件）；关键协作调用：`AgentTraceContext`。
-# 上下游：上游为 本文件的 `create_app.final_intake`、`create_app.final_hearing`、`create_app.final_evaluation`、`create_app.final_intake_stream`；下游为 协作调用 `AgentTraceContext`。
+# 上下游：上游为本文件的受理、评估同步与流式路由；下游为 `AgentTraceContext`。
 # 系统意义：控制隐私、Token 和会话隔离：鉴权、追踪、异常映射必须完整；不泄露内部推理。
 def _trace_context(
     request: Request,

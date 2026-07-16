@@ -22,6 +22,8 @@ import com.example.dispute.notification.application.CaseLifecycleNotificationSer
 import com.example.dispute.notification.application.NotificationService;
 import com.example.dispute.notification.domain.NotificationType;
 import com.example.dispute.room.application.CaseEventService;
+import com.example.dispute.room.application.IntakeProgressService;
+import com.example.dispute.room.application.IntakeMatrixLifecycleService;
 import com.example.dispute.room.domain.PhaseClockType;
 import com.example.dispute.room.domain.RoomStatus;
 import com.example.dispute.room.domain.RoomType;
@@ -35,8 +37,7 @@ import java.util.Optional;
 import java.util.Map;
 import java.util.UUID;
 import com.example.dispute.workflow.application.EvidenceWindowCoordinator;
-import com.example.dispute.hearing.application.HearingRoundService;
-import com.example.dispute.hearing.application.HearingWorkflowCoordinator;
+import com.example.dispute.hearing.application.HearingFlowRuntimeService;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -55,11 +56,12 @@ public class EvidenceCompletionService {
     private final CasePhaseClockRepository clockRepository;
     private final EvidenceDossierFreezer dossierFreezer;
     private final EvidenceWindowCoordinator evidenceWindowCoordinator;
+    private final IntakeProgressService intakeProgressService;
+    private final IntakeMatrixLifecycleService intakeMatrixLifecycleService;
     private final CaseEventService caseEventService;
     private final NotificationService notificationService;
     private final CaseLifecycleNotificationService lifecycleNotifications;
-    private final HearingRoundService hearingRoundService;
-    private final HearingWorkflowCoordinator hearingWorkflowCoordinator;
+    private final HearingFlowRuntimeService hearingFlowRuntimeService;
     private final DisputeProperties disputeProperties;
     private final Clock clock;
 
@@ -77,11 +79,12 @@ public class EvidenceCompletionService {
             CasePhaseClockRepository clockRepository,
             EvidenceDossierFreezer dossierFreezer,
             EvidenceWindowCoordinator evidenceWindowCoordinator,
+            IntakeProgressService intakeProgressService,
+            IntakeMatrixLifecycleService intakeMatrixLifecycleService,
             CaseEventService caseEventService,
             NotificationService notificationService,
             CaseLifecycleNotificationService lifecycleNotifications,
-            HearingRoundService hearingRoundService,
-            HearingWorkflowCoordinator hearingWorkflowCoordinator,
+            HearingFlowRuntimeService hearingFlowRuntimeService,
             DisputeProperties disputeProperties,
             Clock clock) {
         this.caseRepository = caseRepository;
@@ -91,11 +94,12 @@ public class EvidenceCompletionService {
         this.clockRepository = clockRepository;
         this.dossierFreezer = dossierFreezer;
         this.evidenceWindowCoordinator = evidenceWindowCoordinator;
+        this.intakeProgressService = intakeProgressService;
+        this.intakeMatrixLifecycleService = intakeMatrixLifecycleService;
         this.caseEventService = caseEventService;
         this.notificationService = notificationService;
         this.lifecycleNotifications = lifecycleNotifications;
-        this.hearingRoundService = hearingRoundService;
-        this.hearingWorkflowCoordinator = hearingWorkflowCoordinator;
+        this.hearingFlowRuntimeService = hearingFlowRuntimeService;
         this.disputeProperties = disputeProperties;
         this.clock = clock;
     }
@@ -135,17 +139,20 @@ public class EvidenceCompletionService {
                         .findByIdForUpdate(caseId)
                         .orElseThrow(() -> new IllegalArgumentException("case not found"));
         assertParty(dispute, actor);
-        assertInitiatorHasSubmittedEvidence(dispute);
+        intakeProgressService.assertEvidenceAccess(dispute, actor);
+        if (actor.actorId().equals(initiatorParticipantId(dispute))) {
+            assertInitiatorHasSubmittedEvidence(dispute);
+        }
         int dossierVersion =
                 isEvidenceOpen(dispute)
                         ? completionVersion(caseId)
                         : dossierFreezer.latestVersion(caseId);
         Optional<EvidencePartyCompletionEntity> existing =
                 completionRepository.findByCaseIdAndIdempotencyKey(caseId, idempotencyKey);
-        Optional<EvidencePartyCompletionEntity> roleCompletion =
-                completionRepository.findByCaseIdAndDossierVersionAndParticipantRole(
-                        caseId, dossierVersion, actor.role());
-        if (existing.isEmpty() && roleCompletion.isEmpty()) {
+        Optional<EvidencePartyCompletionEntity> participantCompletion =
+                completionRepository.findByCaseIdAndDossierVersionAndParticipantId(
+                        caseId, dossierVersion, actor.actorId());
+        if (existing.isEmpty() && participantCompletion.isEmpty()) {
             completionRepository.save(
                     EvidencePartyCompletionEntity.completed(
                             "EVIDENCE_COMPLETE_" + compactUuid(),
@@ -158,14 +165,19 @@ public class EvidenceCompletionService {
         }
         evidenceWindowCoordinator.signalPartyCompletedAfterCommit(
                 caseId, actor.role().name());
-        long completed =
-                completionRepository.countByCaseIdAndDossierVersionAndCompletionStatus(
+        var completions =
+                completionRepository.findAllByCaseIdAndDossierVersionAndCompletionStatus(
                         caseId, dossierVersion, "COMPLETED");
-        if (completed < 2) {
+        boolean userCompleted =
+                hasCompletionForParticipant(completions, dispute.getUserId());
+        boolean merchantCompleted =
+                hasCompletionForParticipant(completions, dispute.getMerchantId());
+        if (!userCompleted || !merchantCompleted) {
             return new EvidenceCompletionView(
                     caseId, dossierVersion, actor.role(), false, "EVIDENCE",
                     dispute.getCurrentDeadlineAt());
         }
+        assertInitiatorHasSubmittedEvidence(dispute);
         OffsetDateTime now = OffsetDateTime.now(clock);
         dossierFreezer.freeze(caseId, dossierVersion, actor.actorId());
         boolean transitioning = isEvidenceOpen(dispute);
@@ -174,9 +186,7 @@ public class EvidenceCompletionService {
         if (transitioning) {
             announceHearingOpened(
                     dispute, hearingRoom, dossierVersion, "BOTH_PARTIES_COMPLETED");
-            hearingRoundService.ensureInitialRoundOpen(
-                    caseId, dossierVersion, actor.actorId());
-            hearingWorkflowCoordinator.startAfterCommit(caseId, dossierVersion);
+            hearingFlowRuntimeService.startAfterEvidenceSealed(caseId);
         }
         return new EvidenceCompletionView(
                 caseId,
@@ -201,6 +211,7 @@ public class EvidenceCompletionService {
                         .findById(caseId)
                         .orElseThrow(() -> new IllegalArgumentException("case not found"));
         assertCanAccess(dispute, actor);
+        intakeProgressService.assertEvidenceAccess(dispute, actor);
         int dossierVersion =
                 isEvidenceOpen(dispute)
                         ? completionVersion(caseId)
@@ -210,11 +221,9 @@ public class EvidenceCompletionService {
                         .findAllByCaseIdAndDossierVersionAndCompletionStatus(
                                 caseId, dossierVersion, "COMPLETED");
         boolean userCompleted =
-                completions.stream()
-                        .anyMatch(item -> item.getParticipantRole() == ActorRole.USER);
+                hasCompletionForParticipant(completions, dispute.getUserId());
         boolean merchantCompleted =
-                completions.stream()
-                        .anyMatch(item -> item.getParticipantRole() == ActorRole.MERCHANT);
+                hasCompletionForParticipant(completions, dispute.getMerchantId());
         boolean sealed = dispute.getCaseStatus() != CaseStatus.EVIDENCE_OPEN;
         return new EvidenceCompletionStatusView(
                 caseId,
@@ -241,6 +250,9 @@ public class EvidenceCompletionService {
         int dossierVersion = completionVersion(caseId);
         if (dispute.getCaseStatus() == CaseStatus.EVIDENCE_OPEN
                 || dispute.getCaseStatus() == CaseStatus.EVIDENCE_SEALED) {
+            intakeProgressService.markRespondentTimedOut(
+                    dispute, OffsetDateTime.now(clock));
+            intakeMatrixLifecycleService.freezeRespondentTimeout(dispute);
             assertInitiatorHasSubmittedEvidence(dispute);
             dossierFreezer.freeze(caseId, dossierVersion, "evidence-deadline");
             CaseRoomEntity hearingRoom =
@@ -251,9 +263,7 @@ public class EvidenceCompletionService {
                             false);
             announceHearingOpened(
                     dispute, hearingRoom, dossierVersion, "DEADLINE_EXPIRED");
-            hearingRoundService.ensureInitialRoundOpen(
-                    caseId, dossierVersion, "evidence-deadline");
-            hearingWorkflowCoordinator.startAfterCommit(caseId, dossierVersion);
+            hearingFlowRuntimeService.startAfterEvidenceSealed(caseId);
         }
         return status(caseId, new AuthenticatedActor("evidence-deadline", ActorRole.SYSTEM));
     }
@@ -359,11 +369,12 @@ public class EvidenceCompletionService {
     // 系统意义：「EvidenceCompletionService.assertInitiatorHasSubmittedEvidence(FulfillmentCaseEntity)」在“发起方HasSubmitted证据”进入下游前阻断非法状态；原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
     private void assertInitiatorHasSubmittedEvidence(FulfillmentCaseEntity dispute) {
         ActorRole initiatorRole = dispute.getInitiatorRole();
+        String initiatorId = initiatorParticipantId(dispute);
         long submitted =
                 evidenceRepository
-                        .countByCaseIdAndSubmittedByRoleAndSubmissionStatusAndDeletedAtIsNull(
+                        .countByCaseIdAndSubmittedByIdAndSubmissionStatusAndDeletedAtIsNull(
                                 dispute.getId(),
-                                initiatorRole.name(),
+                                initiatorId,
                                 EvidenceSubmissionStatus.SUBMITTED);
         if (submitted > 0) {
             return;
@@ -373,7 +384,21 @@ public class EvidenceCompletionService {
                 Map.of(
                         "case_id", dispute.getId(),
                         "initiator_role", initiatorRole.name(),
+                        "initiator_id", initiatorId,
                         "required_submission_status", EvidenceSubmissionStatus.SUBMITTED.name()));
+    }
+
+    private static String initiatorParticipantId(FulfillmentCaseEntity dispute) {
+        return dispute.getInitiatorRole() == ActorRole.MERCHANT
+                ? dispute.getMerchantId()
+                : dispute.getUserId();
+    }
+
+    private static boolean hasCompletionForParticipant(
+            java.util.List<EvidencePartyCompletionEntity> completions,
+            String participantId) {
+        return completions.stream()
+                .anyMatch(item -> participantId.equals(item.getParticipantId()));
     }
 
     // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceCompletionService.assertCanAccess(FulfillmentCaseEntity,AuthenticatedActor)」。

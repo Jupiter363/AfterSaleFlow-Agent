@@ -1,5 +1,7 @@
 # 文件作用：自动化测试文件，验证 test_simulated_imports 相关模块的行为、契约或页面布局。
 
+from types import SimpleNamespace
+
 import pytest
 from pydantic import ValidationError
 
@@ -7,12 +9,19 @@ from app.business.simulated_imports import SimulatedExternalImportWorkflow
 from app.schemas import SimulatedExternalImportRequest
 
 
+class DeterministicImportRunner:
+    def invoke_structured(self, **kwargs):
+        request = SimulatedExternalImportRequest.model_validate(kwargs["case_data"])
+        value = SimulatedExternalImportWorkflow()._deterministic_result(request)
+        return SimpleNamespace(value=value)
+
+
 # 所属模块：Python 支撑模块 > test_simulated_imports；函数角色：回归测试用例。
 # 具体功能：`test_simulated_import_batch_id_changes_external_references` 验证业务引用号在固定案例中的输出、边界和失败行为；关键协作调用：`SimulatedExternalImportWorkflow`、`workflow.generate`、`first_refs.isdisjoint`。
 # 上下游：上游为 相邻模块输入；下游为 协作调用 `SimulatedExternalImportWorkflow`、`workflow.generate`、`first_refs.isdisjoint`、`SimulatedExternalImportRequest`。
 # 系统意义：固定“Python 支撑模块 > test_simulated_imports”的可观察契约，防止后续重构改变业务结果。
 def test_simulated_import_batch_id_changes_external_references() -> None:
-    workflow = SimulatedExternalImportWorkflow()
+    workflow = SimulatedExternalImportWorkflow(model_runner=DeterministicImportRunner())
 
     first = workflow.generate(
         SimulatedExternalImportRequest(
@@ -50,7 +59,7 @@ def test_simulated_import_batch_id_changes_external_references() -> None:
 # 上下游：上游为 相邻模块输入；下游为 协作调用 `SimulatedExternalImportWorkflow`、`workflow.generate`、`SimulatedExternalImportRequest`。
 # 系统意义：固定“Python 支撑模块 > test_simulated_imports”的可观察契约，防止后续重构改变业务结果。
 def test_simulated_import_generates_real_dispute_copy_without_visible_simulation_labels() -> None:
-    workflow = SimulatedExternalImportWorkflow()
+    workflow = SimulatedExternalImportWorkflow(model_runner=DeterministicImportRunner())
 
     result = workflow.generate(
         SimulatedExternalImportRequest(

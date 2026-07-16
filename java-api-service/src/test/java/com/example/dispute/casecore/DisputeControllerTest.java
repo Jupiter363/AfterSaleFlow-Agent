@@ -37,6 +37,7 @@ import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.RiskLevel;
 import com.example.dispute.room.api.IntakeRoomController;
 import com.example.dispute.room.application.IntakeConfirmationView;
+import com.example.dispute.room.application.IntakeProgressService;
 import com.example.dispute.room.application.IntakeRoomService;
 import com.example.dispute.room.domain.RoomType;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -78,6 +79,7 @@ class DisputeControllerTest {
     @MockitoBean private CaseApplicationService service;
     @MockitoBean private DisputeImportService importService;
     @MockitoBean private IntakeRoomService intakeRoomService;
+    @MockitoBean private IntakeProgressService intakeProgressService;
 
     // 所属模块：【案件核心与导入 / 自动化测试层】「DisputeControllerTest.createsDisputeThroughTheUnversionedFinalApi()」。
     // 具体功能：「DisputeControllerTest.createsDisputeThroughTheUnversionedFinalApi()」：复现“创建并持久化（场景方法「createsDisputeThroughTheUnversionedFinalApi」）”场景：驱动 「service.create」，再用 测试框架断言 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「idem-dispute-1」、「user-1」、「USER」、「Idempotency-Key」。
@@ -113,6 +115,11 @@ class DisputeControllerTest {
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.success").value(true))
                 .andExpect(jsonPath("$.data.id").value("CASE_test"))
+                .andExpect(jsonPath("$.data.initiator_id").value("user-1"))
+                .andExpect(jsonPath("$.data.initiator_role").value("USER"))
+                .andExpect(jsonPath("$.data.respondent_id").value("merchant-1"))
+                .andExpect(jsonPath("$.data.respondent_role").value("MERCHANT"))
+                .andExpect(jsonPath("$.data.party_position").value("INITIATOR"))
                 .andExpect(jsonPath("$.request_id").isNotEmpty())
                 .andExpect(jsonPath("$.trace_id").isNotEmpty());
     }
@@ -536,6 +543,10 @@ class DisputeControllerTest {
                 OffsetDateTime.parse("2026-07-02T00:00:00Z"),
                 OffsetDateTime.parse("2026-07-02T00:00:00Z"),
                 null,
-                com.example.dispute.config.ActorRole.USER);
+                com.example.dispute.config.ActorRole.USER,
+                "user-1",
+                com.example.dispute.config.ActorRole.MERCHANT,
+                "merchant-1",
+                com.example.dispute.casecore.domain.CasePartyPosition.INITIATOR);
     }
 }

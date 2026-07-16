@@ -8,6 +8,7 @@ package com.example.dispute.evidence;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -24,6 +25,7 @@ import com.example.dispute.config.JsonAuthenticationEntryPoint;
 import com.example.dispute.config.SecurityConfiguration;
 import com.example.dispute.config.SecurityFailureWriter;
 import com.example.dispute.evidence.api.EvidenceController;
+import com.example.dispute.room.application.IntakeProgressService;
 import com.example.dispute.evidence.application.EvidenceApplicationService;
 import com.example.dispute.evidence.application.EvidenceCatalogService;
 import com.example.dispute.evidence.application.EvidenceCompletionService;
@@ -61,6 +63,7 @@ import org.springframework.test.web.servlet.MockMvc;
 class EvidenceRoomControllerTest {
 
     @Autowired private MockMvc mockMvc;
+    @MockitoBean private IntakeProgressService intakeProgressService;
     @MockitoBean private EvidenceApplicationService applicationService;
     @MockitoBean private EvidenceCatalogService catalogService;
     @MockitoBean private EvidenceVerificationService verificationService;
@@ -105,6 +108,9 @@ class EvidenceRoomControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.items[0].evidence_id").value("EVIDENCE_1"))
                 .andExpect(jsonPath("$.data.items[0].redacted").value(true));
+
+        verify(intakeProgressService)
+                .assertEvidenceReadAccess(eq("CASE_evidence"), any());
     }
 
     // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceRoomControllerTest.completesEvidenceWithoutAcceptingAClientDossierVersion()」。
@@ -133,6 +139,8 @@ class EvidenceRoomControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.dossier_version").value(2))
                 .andExpect(jsonPath("$.data.all_parties_completed").value(false));
+
+        verify(intakeProgressService).assertEvidenceAccess(eq("CASE_evidence"), any());
     }
 
     // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceRoomControllerTest.returnsTheSharedCompletionProjection()」。

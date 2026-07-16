@@ -7,6 +7,7 @@
 package com.example.dispute.caseintake.application;
 
 import com.example.dispute.casecore.domain.CaseSourceType;
+import com.example.dispute.casecore.domain.CasePartyPosition;
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.RiskLevel;
@@ -45,4 +46,8 @@ public record CaseView(
         OffsetDateTime createdAt,
         OffsetDateTime updatedAt,
         OffsetDateTime closedAt,
-        ActorRole initiatorRole) {}
+        ActorRole initiatorRole,
+        String initiatorId,
+        ActorRole respondentRole,
+        String respondentId,
+        CasePartyPosition partyPosition) {}

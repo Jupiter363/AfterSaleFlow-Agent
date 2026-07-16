@@ -328,15 +328,15 @@ def _apply_authenticity_guardrails(state: EvidenceTurnGraphState) -> dict[str, A
 
 
 # 所属模块：证据室 Agent > 输出护栏 > 事实-证据矩阵 patch 验收。
-# 具体功能：`_validated_matrix_patch` 要求 fact_id 在接待卷宗白名单、evidence_id 属于本轮附件；UPSERT_LINK 还必须与已验收 assessment 的 `(证据,事实,关系)` 三元组一致，最后稳定去重并限 100 条。
+# 具体功能：`_validated_matrix_patch` 从已验收 assessment.fact_links 确定性生成 UPSERT_LINK；模型不再同时维护两份关联。显式 REMOVE_LINK 仅能引用本轮证据和白名单事实。
 # 上下游：上游是模型 patches、working_set 和 EvidenceAssessmentPolicy 结果；下游是 `_merge_fact_matrix` 可实际应用的 JSON patch 列表。
-# 系统意义：可见历史证据也不能在非当前回合被模型偷偷改链接；模型必须先对证据作出一致评估，不能单独注入矩阵关系。
+# 系统意义：事实关联只有 assessment.fact_links 一个语义真源；矩阵 patch 是确定性持久化指令，避免同一模型在两个字段给出不一致结果。
 def _validated_matrix_patch(
     patches: list[Any],
     request: EvidenceTurnWorkingSet,
     assessments: list[Any],
 ) -> list[dict[str, Any]]:
-    """校验证据-事实矩阵补丁，防止模型引用越权事实或非本轮证据。"""
+    """Derive UPSERTs from accepted links and validate optional removals."""
 
     allowed_fact_ids = {
         str(item.get("fact_id") or "") for item in request.allowed_fact_targets
@@ -344,16 +344,54 @@ def _validated_matrix_patch(
     current_evidence_ids = {
         str(item) for item in request.current_event.get("attachment_refs", [])
     }
-    assessment_links = {
-        (assessment.evidence_id, link.fact_id, link.relation)
-        for assessment in assessments
-        for link in assessment.fact_links
-    }
     result: list[dict[str, Any]] = []
-    seen: set[tuple[str, str, str]] = set()
+    upsert_pairs: set[tuple[str, str]] = set()
+
+    # 先为每份有效评估保留至少一个事实坐标，再补充其余关联。
+    # 当单轮附件较多时，这个顺序保证 100 条 patch 上限不会
+    # 先被某一份证据的大量次要关联占满。
+    link_groups = [
+        (assessment.evidence_id, list(assessment.fact_links))
+        for assessment in assessments
+        if assessment.evidence_id in current_evidence_ids and assessment.fact_links
+    ]
+
+    def append_upsert(evidence_id: str, link: Any) -> None:
+        if len(result) >= 100 or link.fact_id not in allowed_fact_ids:
+            return
+        key = (link.fact_id, evidence_id)
+        if key in upsert_pairs:
+            return
+        upsert_pairs.add(key)
+        result.append(
+            {
+                "operation": "UPSERT_LINK",
+                "fact_id": link.fact_id,
+                "evidence_id": evidence_id,
+                "relation": link.relation,
+                "reason": link.reason,
+                "confidence": float(link.confidence),
+            }
+        )
+
+    for evidence_id, links in link_groups:
+        append_upsert(evidence_id, links[0])
+    for evidence_id, links in link_groups:
+        for link in links[1:]:
+            append_upsert(evidence_id, link)
+
+    # UPSERT_LINK 由上方的已验收 fact_links 生成。仅保留模型显式
+    # 要求删除的旧关联，且不能删除本轮刚验收的同一坐标。
+    seen_removals: set[tuple[str, str]] = set()
     for patch in patches:
-        # 这里 patch 是 Pydantic 对象，所以可以用 patch.fact_id 访问字段；
-        # 如果是普通 dict，则一般写 patch["fact_id"]。
+        if patch.operation != "REMOVE_LINK":
+            LOGGER.info(
+                "ignoring model-authored UPSERT_LINK; normalized assessment is authoritative: "
+                "evidence_id=%s fact_id=%s",
+                patch.evidence_id,
+                patch.fact_id,
+            )
+            continue
         if patch.fact_id not in allowed_fact_ids:
             LOGGER.warning(
                 "dropping evidence matrix patch with unknown fact_id: fact_id=%s",
@@ -366,26 +404,20 @@ def _validated_matrix_patch(
                 patch.evidence_id,
             )
             continue
-        if patch.operation == "UPSERT_LINK" and (
-            patch.evidence_id,
-            patch.fact_id,
-            patch.relation,
-        ) not in assessment_links:
+        pair = (patch.fact_id, patch.evidence_id)
+        if pair in upsert_pairs:
             LOGGER.warning(
-                "dropping evidence matrix patch inconsistent with normalized assessment: "
-                "evidence_id=%s fact_id=%s relation=%s",
+                "dropping REMOVE_LINK that conflicts with a normalized assessment link: "
+                "evidence_id=%s fact_id=%s",
                 patch.evidence_id,
                 patch.fact_id,
-                patch.relation,
             )
             continue
-        # 同一操作/事实/证据重复项只保留第一次，避免模型重复输出放大 patch 或版本变化。
-        key = (patch.operation, patch.fact_id, patch.evidence_id)
-        if key in seen:
+        if pair in seen_removals or len(result) >= 100:
             continue
-        seen.add(key)
+        seen_removals.add(pair)
         result.append(patch.model_dump(mode="json"))
-    return result[:100]
+    return result
 
 
 # 所属模块：证据室 Agent > 输出护栏 > 人工证据复核任务验收。
@@ -519,6 +551,7 @@ def _merge_fact_matrix(
         evidence_id = str(item.get("evidence_id") or "")
         if fact_id and evidence_id:
             by_key[(fact_id, evidence_id)] = dict(item)
+    before_by_key = {key: dict(value) for key, value in by_key.items()}
     for patch in patches:
         key = (str(patch["fact_id"]), str(patch["evidence_id"]))
         if patch["operation"] == "REMOVE_LINK":
@@ -532,11 +565,12 @@ def _merge_fact_matrix(
             "confidence": patch["confidence"],
         }
     base_version = int(snapshot.get("version", 0) or 0) if isinstance(snapshot, dict) else 0
+    changed = by_key != before_by_key
     return {
         "schema_version": "fact_evidence_matrix.v1",
-        "version": base_version + (1 if patches else 0),
+        "version": base_version + (1 if changed else 0),
         "links": list(by_key.values()),
-        "updated": bool(patches),
+        "updated": changed,
     }
 
 

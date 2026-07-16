@@ -10,7 +10,9 @@ import com.example.dispute.common.api.ApiResponse;
 import com.example.dispute.common.trace.TraceIdFilter;
 import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.room.application.IntakeConfirmationView;
+import com.example.dispute.room.application.IntakeProgressService;
 import com.example.dispute.room.application.IntakeRoomService;
+import com.example.dispute.room.application.IntakeStatusView;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Pattern;
@@ -18,6 +20,7 @@ import java.time.Clock;
 import java.time.Instant;
 import org.springframework.security.core.Authentication;
 import org.springframework.validation.annotation.Validated;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -35,6 +38,7 @@ import org.springframework.web.bind.annotation.RestController;
 public class IntakeRoomController {
 
     private final IntakeRoomService service;
+    private final IntakeProgressService progressService;
     private final Clock clock;
 
     // 所属模块：【房间协作与权限 / HTTP 接口层】「IntakeRoomController.IntakeRoomController(IntakeRoomService,Clock)」。
@@ -43,9 +47,30 @@ public class IntakeRoomController {
     // 下游影响：「IntakeRoomController.IntakeRoomController(IntakeRoomService,Clock)」只产生当前对象的返回值或字段变化，不访问额外基础设施。
     // 系统意义：「IntakeRoomController.IntakeRoomController(IntakeRoomService,Clock)」是外部请求进入业务事实源的边界，必须先完成身份/参数校验，再由应用服务决定事务和权限。
     // Java 语法：构造器名称与类名相同且没有返回类型；参数通常由 Spring 按类型注入。
-    public IntakeRoomController(IntakeRoomService service, Clock clock) {
+    public IntakeRoomController(
+            IntakeRoomService service,
+            IntakeProgressService progressService,
+            Clock clock) {
         this.service = service;
+        this.progressService = progressService;
         this.clock = clock;
+    }
+
+    @GetMapping("/status")
+    public ApiResponse<IntakeStatusView> status(
+            @PathVariable
+                    @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}")
+                    String caseId,
+            Authentication authentication,
+            HttpServletRequest servletRequest) {
+        String traceId = correlationId(servletRequest, TraceIdFilter.TRACE_ATTRIBUTE);
+        String requestId = correlationId(servletRequest, TraceIdFilter.REQUEST_ATTRIBUTE);
+        return ApiResponse.success(
+                progressService.status(
+                        caseId, (AuthenticatedActor) authentication.getPrincipal()),
+                requestId,
+                traceId,
+                Instant.now(clock));
     }
 
     // 所属模块：【房间协作与权限 / HTTP 接口层】「IntakeRoomController.confirm(String,IntakeConfirmationRequest,Authentication,HttpServletRequest)」。

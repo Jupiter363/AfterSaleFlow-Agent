@@ -10,8 +10,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -26,6 +28,7 @@ import com.example.dispute.evidence.domain.EvidenceVerificationStatus;
 import com.example.dispute.evidence.infrastructure.persistence.entity.EvidenceVerificationEntity;
 import com.example.dispute.evidence.infrastructure.persistence.repository.EvidenceVerificationRepository;
 import com.example.dispute.infrastructure.persistence.entity.EvidenceItemEntity;
+import com.example.dispute.infrastructure.persistence.entity.EvidenceDossierEntity;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.repository.EvidenceItemRepository;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
@@ -73,6 +76,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -154,6 +158,13 @@ class EvidenceAgentTurnServiceTest {
                                         invocation.getArgument(2),
                                         invocation.getArgument(3),
                                         invocation.getArgument(4)));
+        lenient()
+                .when(intakeDossierRepository.findByCaseIdAndRoomType(any(), eq(RoomType.INTAKE)))
+                .thenAnswer(
+                        invocation ->
+                                Optional.of(
+                                        intakeDossierWithFormalFacts(
+                                                invocation.getArgument(0))));
     }
 
     // 所属模块：【房间协作与权限 / 自动化测试层】「EvidenceAgentTurnServiceTest.completeMultimodalAssessmentPersistsCurrentAttachmentAndHumanReviewWinsStatus()」。
@@ -242,6 +253,103 @@ class EvidenceAgentTurnServiceTest {
                 .findTopByEvidenceIdOrderByVerificationVersionDesc(historical.getId());
     }
 
+    @Test
+    void hearingSupplementBatchUsesHearingContractAndFreezesOneMergedDossier()
+            throws Exception {
+        FulfillmentCaseEntity dispute = hearingCase();
+        CaseRoomEntity room = hearingRoom(dispute);
+        EvidenceItemEntity first =
+                evidenceItem("EVIDENCE_HEARING_BATCH_1", "USER", "user-local", "PARTIES");
+        EvidenceItemEntity second =
+                evidenceItem("EVIDENCE_HEARING_BATCH_2", "USER", "user-local", "PARTIES");
+        List<String> batchIds = List.of(first.getId(), second.getId());
+
+        when(caseRepository.findByIdForUpdate(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.HEARING))
+                .thenReturn(Optional.of(room));
+        when(memoryRepository.findMaxTurnNoByAgentSessionId(any())).thenReturn(0);
+        when(memoryRepository.findTop50ByAgentSessionIdOrderByTurnNoDesc(any()))
+                .thenReturn(List.of());
+        when(evidenceItemRepository
+                        .findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(
+                                dispute.getId()))
+                .thenReturn(List.of(first, second));
+        when(client.run(any(), eq("TRACE_HEARING_BATCH"), eq("REQ_HEARING_BATCH")))
+                .thenReturn(
+                        new EvidenceAgentTurnResult(
+                                "Both supplemental items were reviewed as one batch.",
+                                objectMapper.readTree("{}"),
+                                objectMapper.readTree("[]"),
+                                batchIds,
+                                List.of(),
+                                List.of(),
+                                List.of(
+                                        assessment(first.getId(), false),
+                                        assessment(second.getId(), false)),
+                                false,
+                                false,
+                                "NONE",
+                                0.86));
+        when(verificationRepository.findTopByEvidenceIdOrderByVerificationVersionDesc(any()))
+                .thenReturn(Optional.empty());
+        when(memoryRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(verificationRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(messageRepository.findByCaseIdAndIdempotencyKey(eq(dispute.getId()), any()))
+                .thenReturn(Optional.empty());
+        when(messageRepository.findMaxSequenceByRoomId(room.getId())).thenReturn(3L);
+        when(messageRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(dossierFreezer.targetVersion(dispute.getId())).thenReturn(2);
+        when(dossierFreezer.freeze(dispute.getId(), 2, "evidence-clerk"))
+                .thenReturn(
+                        EvidenceDossierEntity.frozen(
+                                "DOSSIER_HEARING_BATCH_V2",
+                                dispute.getId(),
+                                2,
+                                "evidence-clerk",
+                                "{}",
+                                "[]",
+                                "{\"fact_evidence_matrix\":[]}"));
+
+        service.continueFromParticipantMessage(
+                dispute.getId(),
+                RoomType.HEARING,
+                new AuthenticatedActor("user-local", ActorRole.USER),
+                new RoomMessageCommand(
+                        MessageType.PARTY_EVIDENCE_REFERENCE,
+                        "Two supplemental evidence items.",
+                        batchIds),
+                "MESSAGE_HEARING_BATCH",
+                CLOCK.instant(),
+                "TRACE_HEARING_BATCH",
+                "REQ_HEARING_BATCH");
+
+        ArgumentCaptor<EvidenceAgentTurnCommand> command =
+                ArgumentCaptor.forClass(EvidenceAgentTurnCommand.class);
+        verify(client, times(1))
+                .run(
+                        command.capture(),
+                        eq("TRACE_HEARING_BATCH"),
+                        eq("REQ_HEARING_BATCH"));
+        assertThat(command.getValue().agentContext().roomType()).isEqualTo(RoomType.HEARING);
+        assertThat(command.getValue().contextEnvelope().roomPolicy().roomType())
+                .isEqualTo(RoomType.HEARING);
+        assertThat(command.getValue().contextEnvelope().currentEvent().attachmentRefs())
+                .containsExactlyElementsOf(batchIds);
+
+        ArgumentCaptor<EvidenceVerificationEntity> verifications =
+                ArgumentCaptor.forClass(EvidenceVerificationEntity.class);
+        verify(verificationRepository, times(2)).save(verifications.capture());
+        assertThat(verifications.getAllValues())
+                .extracting(EvidenceVerificationEntity::getEvidenceId)
+                .containsExactlyInAnyOrderElementsOf(batchIds);
+        InOrder mergeOrder = inOrder(verificationRepository, dossierFreezer);
+        mergeOrder.verify(verificationRepository, times(2)).save(any());
+        mergeOrder.verify(dossierFreezer, times(1))
+                .freeze(dispute.getId(), 2, "evidence-clerk");
+    }
+
     // 所属模块：【房间协作与权限 / 自动化测试层】「EvidenceAgentTurnServiceTest.assessment(String,boolean)」。
     // 具体功能：「EvidenceAgentTurnServiceTest.assessment(String,boolean)」：作为测试辅助方法为“核对完整业务行为（场景方法「assessment」）”组装或读取「EvidenceAssessment」、「HumanReview」 输入夹具，供本测试类的场景方法复用。
     // 上游调用：「EvidenceAgentTurnServiceTest.assessment(String,boolean)」由本测试类中的 「EvidenceAgentTurnServiceTest.completeMultimodalAssessmentPersistsCurrentAttachmentAndHumanReviewWinsStatus」、「EvidenceAgentTurnServiceTest.invalidAssessmentCoverage」、「EvidenceAgentTurnServiceTest.partyTextPersistsEvidenceMemorySendsPartyScopedContextAndAppendsIsolatedClerkReply」、「EvidenceAgentTurnServiceTest.partyEvidenceReferenceUsesAttachmentRefsWhenTextIsBlank」 调用。
@@ -258,6 +366,10 @@ class EvidenceAgentTurnServiceTest {
                 0.91,
                 0.68,
                 0.84,
+                List.of("用户提交的原始文件与入库元数据。"),
+                List.of("FACT_GOODS_CONDITION"),
+                List.of(),
+                "形成时间尚待平台元数据进一步核验。",
                 List.of(Map.of("type", "SURFACE_MARK", "description", "Possible scratch")),
                 List.of("The image cannot establish when the mark formed."),
                 List.of(Map.of("code", "DAMAGE_CAUSALITY_UNCERTAIN", "severity", "HIGH")),
@@ -270,6 +382,30 @@ class EvidenceAgentTurnServiceTest {
                         "visual_input_status", "LOADED",
                         "privacy_basis", "EXPLICIT_PARTY_AUTHORIZATION"),
                 "The image shows a possible surface mark.");
+    }
+
+    private static CaseIntakeDossierEntity intakeDossierWithFormalFacts(String caseId) {
+        return CaseIntakeDossierEntity.create(
+                "INTAKE_DOSSIER_FORMAL_FACTS",
+                caseId,
+                RoomType.INTAKE,
+                """
+                {
+                  "schema_version":"intake_case_detail.v1",
+                  "unilateral_case_matrix":{
+                    "schema_version":"unilateral_case_matrix.v1",
+                    "fact_rows":[
+                      {"fact_id":"FACT_GOODS_CONDITION"},
+                      {"fact_id":"FACT_DELIVERY"}
+                    ]
+                  }
+                }
+                """,
+                90,
+                true,
+                "ACCEPTED",
+                1,
+                "dispute-intake-officer");
     }
 
     // 所属模块：【房间协作与权限 / 自动化测试层】「EvidenceAgentTurnServiceTest.attachmentAssessmentCoverageMismatchFailsClosed(String,List)」。
@@ -563,18 +699,7 @@ class EvidenceAgentTurnServiceTest {
         when(memoryRepository.findMaxTurnNoByAgentSessionId(any()))
                 .thenReturn(2);
         when(intakeDossierRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.INTAKE))
-                .thenReturn(
-                        Optional.of(
-                                CaseIntakeDossierEntity.create(
-                                        "INTAKE_DOSSIER_EVIDENCE_AGENT",
-                                        dispute.getId(),
-                                        RoomType.INTAKE,
-                                        "{\"schema_version\":\"intake_case_detail.v1\",\"case_story\":{\"title\":\"Signed not received\"}}",
-                                        90,
-                                        true,
-                                        "ACCEPTED",
-                                        1,
-                                        "dispute-intake-officer")));
+                .thenReturn(Optional.of(intakeDossierWithFormalFacts(dispute.getId())));
         when(evidenceItemRepository.findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(
                         dispute.getId()))
                 .thenReturn(
@@ -894,6 +1019,113 @@ class EvidenceAgentTurnServiceTest {
                 .contains("user-local");
         assertThat(created.messageText()).contains("划痕照片原图");
         assertThat(reused.id()).isEqualTo("MESSAGE_EXISTING_OPENING");
+    }
+
+    @Test
+    void merchantEvidenceContextKeepsOnlySharedBilateralIntakeProjection()
+            throws Exception {
+        FulfillmentCaseEntity dispute = evidenceCase();
+        CaseRoomEntity room = evidenceRoom(dispute);
+        CaseIntakeDossierEntity bilateralDossier =
+                CaseIntakeDossierEntity.create(
+                        "INTAKE_DOSSIER_BILATERAL",
+                        dispute.getId(),
+                        RoomType.INTAKE,
+                        """
+                        {
+                          "schema_version":"intake_case_detail.v1",
+                          "claim_resolution":{"original_statement":"PRIVATE_INITIATOR_TRANSCRIPT"},
+                          "handoff_notes":{"latest_remark":"PRIVATE_INITIATOR_REMARK"},
+                          "party_positions":{"raw_statement":"PRIVATE_PARTY_TEXT"},
+                          "case_fact_matrix":{
+                            "schema_version":"case_fact_matrix.v2",
+                            "matrix_kind":"BILATERAL_FROZEN",
+                            "matrix_version":4,
+                            "case_overview":{
+                              "neutral_summary":"Shared neutral air-fryer dispute summary.",
+                              "core_conflict":"Whether first use exposed a product safety defect."
+                            },
+                            "fact_rows":[
+                              {"fact_id":"FACT_PRODUCT_STATE","fact_target":"First-use product state"}
+                            ]
+                          }
+                        }
+                        """,
+                        90,
+                        true,
+                        "ACCEPTED",
+                        4,
+                        "dispute-intake-officer");
+        when(caseRepository.findByIdForUpdate(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.EVIDENCE))
+                .thenReturn(Optional.of(room));
+        when(intakeDossierRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.INTAKE))
+                .thenReturn(Optional.of(bilateralDossier));
+        when(messageRepository.findByCaseIdAndIdempotencyKey(eq(dispute.getId()), any()))
+                .thenReturn(Optional.empty());
+        when(messageRepository.findAllByRoomIdOrderBySequenceNoAsc(room.getId()))
+                .thenReturn(List.of());
+        when(memoryRepository.findMaxTurnNoByAgentSessionId(any())).thenReturn(0);
+        when(memoryRepository.findTop50ByAgentSessionIdOrderByTurnNoDesc(any()))
+                .thenReturn(List.of());
+        when(evidenceItemRepository
+                        .findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(
+                                dispute.getId()))
+                .thenReturn(List.of());
+        when(client.run(any(), eq("TRACE_MERCHANT_OPENING"), eq("REQ_MERCHANT_OPENING")))
+                .thenReturn(
+                        new EvidenceAgentTurnResult(
+                                "Please provide the merchant-side quality records.",
+                                objectMapper.createObjectNode(),
+                                objectMapper.createArrayNode(),
+                                List.of(),
+                                false,
+                                false,
+                                "STUB",
+                                0.8));
+        when(memoryRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(messageRepository.findMaxSequenceByRoomId(room.getId())).thenReturn(0L);
+        when(messageRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+
+        service.ensureOpening(
+                dispute.getId(),
+                RoomType.EVIDENCE,
+                new AuthenticatedActor("merchant-local", ActorRole.MERCHANT),
+                "TRACE_MERCHANT_OPENING",
+                "REQ_MERCHANT_OPENING");
+
+        ArgumentCaptor<EvidenceAgentTurnCommand> command =
+                ArgumentCaptor.forClass(EvidenceAgentTurnCommand.class);
+        verify(client)
+                .run(
+                        command.capture(),
+                        eq("TRACE_MERCHANT_OPENING"),
+                        eq("REQ_MERCHANT_OPENING"));
+        EvidenceContextEnvelopeV1 envelope = command.getValue().contextEnvelope();
+        JsonNode payload = envelope.intakeDossierSnapshot().payload();
+        assertThat(envelope.actorSnapshot().actorRole()).isEqualTo("MERCHANT");
+        assertThat(envelope.caseSnapshot().description())
+                .isEqualTo("Shared neutral air-fryer dispute summary.");
+        assertThat(payload.path("case_fact_matrix").path("matrix_kind").asText())
+                .isEqualTo("BILATERAL_FROZEN");
+        assertThat(payload.path("case_fact_matrix").path("matrix_version").asInt())
+                .isEqualTo(4);
+        assertThat(payload.path("case_story").path("one_sentence_summary").asText())
+                .isEqualTo("Shared neutral air-fryer dispute summary.");
+        assertThat(payload.has("claim_resolution")).isFalse();
+        assertThat(payload.has("handoff_notes")).isFalse();
+        assertThat(payload.has("party_positions")).isFalse();
+        assertThat(objectMapper.writeValueAsString(command.getValue()))
+                .doesNotContain(
+                        "PRIVATE_INITIATOR_TRANSCRIPT",
+                        "PRIVATE_INITIATOR_REMARK",
+                        "PRIVATE_PARTY_TEXT");
+        ArgumentCaptor<RoomTurnMemoryEntity> memory =
+                ArgumentCaptor.forClass(RoomTurnMemoryEntity.class);
+        verify(memoryRepository).save(memory.capture());
+        assertThat(memory.getValue().getScrollSnapshotJson())
+                .isEqualTo(memory.getValue().getDossierPatchJson());
     }
 
     // 所属模块：【房间协作与权限 / 自动化测试层】「EvidenceAgentTurnServiceTest.ensureOpeningReusesExistingActorScopedConversationInsteadOfAppendingLateOpening()」。
@@ -1373,7 +1605,7 @@ class EvidenceAgentTurnServiceTest {
         when(memoryRepository.findMaxTurnNoByAgentSessionId(any()))
                 .thenReturn(0);
         when(intakeDossierRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.INTAKE))
-                .thenReturn(Optional.empty());
+                .thenReturn(Optional.of(intakeDossierWithFormalFacts(dispute.getId())));
         when(evidenceItemRepository.findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(
                         dispute.getId()))
                 .thenReturn(
@@ -1701,6 +1933,27 @@ class EvidenceAgentTurnServiceTest {
                 "system");
     }
 
+    private static FulfillmentCaseEntity hearingCase() {
+        return FulfillmentCaseEntity.imported(
+                "CASE_EVIDENCE_AGENT",
+                "ORDER-EVIDENCE",
+                "AFTER-EVIDENCE",
+                "LOG-EVIDENCE",
+                "user-local",
+                "merchant-local",
+                "idem-hearing-evidence-agent",
+                "SIGNED_NOT_RECEIVED",
+                "Signed but not received",
+                "The parties are supplementing evidence in hearing round two.",
+                RiskLevel.HIGH,
+                CaseStatus.HEARING_OPEN,
+                "HEARING",
+                OffsetDateTime.parse("2026-07-06T02:00:00Z"),
+                "OMS",
+                "EXT-HEARING-EVIDENCE",
+                "system");
+    }
+
     // 所属模块：【房间协作与权限 / 自动化测试层】「EvidenceAgentTurnServiceTest.evidenceRoom(FulfillmentCaseEntity)」。
     // 具体功能：「EvidenceAgentTurnServiceTest.evidenceRoom(FulfillmentCaseEntity)」：作为测试辅助方法为“核对完整业务行为（场景方法「evidenceRoom」）”组装或读取「CaseRoomEntity.open」、「OffsetDateTime.parse」、「dispute.getId」，供本测试类的场景方法复用。
     // 上游调用：「EvidenceAgentTurnServiceTest.evidenceRoom(FulfillmentCaseEntity)」由本测试类中的 「EvidenceAgentTurnServiceTest.completeMultimodalAssessmentPersistsCurrentAttachmentAndHumanReviewWinsStatus」、「EvidenceAgentTurnServiceTest.attachmentAssessmentCoverageMismatchFailsClosed」、「EvidenceAgentTurnServiceTest.legacySuggestionWithoutCurrentAttachmentDoesNotCreateVerification」、「EvidenceAgentTurnServiceTest.attachmentWithOnlyLegacySuggestionFailsClosedWithoutVerificationPersistence」 调用。
@@ -1711,6 +1964,15 @@ class EvidenceAgentTurnServiceTest {
                 "ROOM_EVIDENCE_AGENT",
                 dispute.getId(),
                 RoomType.EVIDENCE,
+                OffsetDateTime.parse("2026-07-06T00:00:00Z"),
+                "system");
+    }
+
+    private static CaseRoomEntity hearingRoom(FulfillmentCaseEntity dispute) {
+        return CaseRoomEntity.open(
+                "ROOM_HEARING_EVIDENCE_AGENT",
+                dispute.getId(),
+                RoomType.HEARING,
                 OffsetDateTime.parse("2026-07-06T00:00:00Z"),
                 "system");
     }

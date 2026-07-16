@@ -10,14 +10,11 @@ from app.agents.deliberation_panel import DeliberationPanel
 from app.agents.dispute_intake_officer import DisputeIntakeOfficer
 from app.agents.evaluation_agent import EvaluationAgent
 from app.agents.evidence_clerk import EvidenceClerk
-from app.agents.presiding_judge import PresidingJudge
 from app.agents.profiles import final_agent_profiles
 from app.agents.review_copilot import ReviewCopilot
 from app.harness.guardrails import GuardrailViolation
 from app.harness.validation import CitationValidationError
 from app.schemas import (
-    AdjudicationDraft,
-    AdjudicationDraftOutput,
     CriticDraft,
     CriticSeverity,
     CriticType,
@@ -29,9 +26,6 @@ from app.schemas import (
     EvaluationMetricScores,
     EvidenceBuildRequest,
     FrozenDeliberationInput,
-    HearingAnalysisResult,
-    HearingStageRequest,
-    HearingStageResult,
     ReviewCopilotAnswer,
     ReviewCopilotRequest,
     ReviewStatement,
@@ -39,10 +33,10 @@ from app.schemas import (
 
 
 # 所属模块：Agent 角色能力 > test_final_agents；函数角色：回归测试用例。
-# 具体功能：`test_room_agent_contracts_expose_final_intake_and_forced_c6_fields` 验证接待信息在固定案例中的输出、边界和失败行为；关键协作调用：`HearingStageRequest`。
-# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 协作调用 `HearingStageRequest`。
+# 具体功能：`test_room_agent_contract_exposes_final_intake_fields` 验证接待结果的稳定公共字段。
+# 上下游：上游为受治理的案件上下文和角色提示词；下游为接待 API。
 # 系统意义：固定“Agent 角色能力 > test_final_agents”的可观察契约，防止后续重构改变业务结果。
-def test_room_agent_contracts_expose_final_intake_and_forced_c6_fields() -> None:
+def test_room_agent_contract_exposes_final_intake_fields() -> None:
     from app.schemas import DisputeIntakeResult
 
     assert set(DisputeIntakeResult.model_fields) >= {
@@ -57,31 +51,6 @@ def test_room_agent_contracts_expose_final_intake_and_forced_c6_fields() -> None
         "admission_recommendation",
         "room_utterance",
     }
-
-    forced = HearingStageRequest(
-        case_id="CASE_forced",
-        workflow_id="WORKFLOW_forced",
-        stage="C6_DRAFT_GENERATION",
-        dossier_version=3,
-        latest_frozen_dossier_version=3,
-        round_no=3,
-        stop_reason="DEADLINE_EXPIRED",
-        deadline_expired=True,
-        round_limit_reached=False,
-        party_absence_flags={"USER": False, "MERCHANT": True},
-        current_settlement_version=2,
-        claims=[
-            {
-                "claim_id": "CLAIM_forced",
-                "party_type": "USER",
-                "statement": "Parcel not received.",
-            }
-        ],
-    )
-
-    assert forced.deadline_expired is True
-    assert forced.latest_frozen_dossier_version == forced.dossier_version
-
 
 # 所属模块：Agent 角色能力 > test_final_agents；函数角色：回归测试用例。
 # 具体功能：`test_final_profiles_are_default_deny_and_cannot_approve_or_execute` 验证本阶段状态在固定案例中的输出、边界和失败行为；关键协作调用：`final_agent_profiles`、`profiles.values`、`profile.authorizes_tool`。
@@ -525,100 +494,6 @@ def test_review_copilot_validates_frozen_refs_and_cannot_issue_a_decision() -> N
     )
     with pytest.raises(GuardrailViolation):
         ReviewCopilot(lambda _request: unsafe).query(request)
-
-
-class _FakeHearingWorkflow:
-    # 所属模块：Agent 角色能力 > test_final_agents；函数角色：类/闭包内部方法。
-    # 具体功能：`analyze` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`HearingAnalysisResult`、`AdjudicationDraftOutput`、`AdjudicationDraft`。
-    # 上下游：上游为 本文件的 `test_dispute_intake_officer_reuses_intake_analysis_without_deciding`、`test_presiding_judge_only_runs_in_hearing_states_and_stays_non_final`、`test_evaluation_agent_is_closed_case_offline_only`；下游为 协作调用 `HearingAnalysisResult`、`AdjudicationDraftOutput`、`AdjudicationDraft`。
-    # 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
-    def analyze(self, request, _context):
-        return HearingAnalysisResult(
-            case_id=request.case_id,
-            workflow_id=request.workflow_id,
-            workflow_status="COMPLETED",
-            executed_nodes=["issue_framing_node", "adjudication_draft_node"],
-            adjudication_draft=AdjudicationDraftOutput(
-                draft=AdjudicationDraft(
-                    recommended_outcome="REQUEST_MORE_EVIDENCE",
-                    reasoning_summary="Receipt remains unresolved.",
-                    issue_findings=[],
-                    confidence=0.7,
-                    risk_level="HIGH",
-                    review_focus=["Check handover evidence."],
-                )
-            ),
-            prompt_version="hearing-v1",
-            model="test-model",
-        )
-
-
-# 所属模块：Agent 角色能力 > test_final_agents；函数角色：回归测试用例。
-# 具体功能：`test_presiding_judge_only_runs_in_hearing_states_and_stays_non_final` 验证庭审材料在固定案例中的输出、边界和失败行为；关键协作调用：`PresidingJudge`、`_FakeHearingWorkflow`、`pytest.raises`。
-# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `analyze`。
-# 系统意义：固定“Agent 角色能力 > test_final_agents”的可观察契约，防止后续重构改变业务结果。
-def test_presiding_judge_only_runs_in_hearing_states_and_stays_non_final() -> None:
-    judge = PresidingJudge(_FakeHearingWorkflow())
-    request = type(
-        "Request",
-        (),
-        {"case_id": "CASE_judge", "workflow_id": "WORKFLOW_judge"},
-    )()
-
-    with pytest.raises(PermissionError):
-        judge.analyze(request, object(), case_state="SIMPLE_HEARING")
-
-    result = judge.analyze(request, object(), case_state="FULL_HEARING")
-    assert result.adjudication_draft.draft.is_final_decision is False
-    assert result.adjudication_draft.draft.requires_human_review is True
-
-
-# 所属模块：Agent 角色能力 > test_final_agents；函数角色：回归测试用例。
-# 具体功能：`test_presiding_judge_runs_one_explicit_c1_c6_stage` 验证法官结果在固定案例中的输出、边界和失败行为；关键协作调用：`PresidingJudge`、`HearingStageRequest`、`StageWorkflow`。
-# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `run_stage`。
-# 系统意义：固定“Agent 角色能力 > test_final_agents”的可观察契约，防止后续重构改变业务结果。
-def test_presiding_judge_runs_one_explicit_c1_c6_stage() -> None:
-    class StageWorkflow(_FakeHearingWorkflow):
-        # 所属模块：Agent 角色能力 > test_final_agents；函数角色：类/闭包内部方法。
-        # 具体功能：`run_stage` 驱动本阶段状态对应的业务步骤并返回阶段结果；关键协作调用：`HearingStageResult`。
-        # 上下游：上游为 本文件的 `test_presiding_judge_runs_one_explicit_c1_c6_stage`；下游为 协作调用 `HearingStageResult`。
-        # 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
-        def run_stage(self, request, _context):
-            return HearingStageResult(
-                case_id=request.case_id,
-                workflow_id=request.workflow_id,
-                stage=request.stage,
-                dossier_version=request.dossier_version,
-                output={"neutral_summary": "Receipt is disputed.", "issues": []},
-                output_schema="IssueFramingOutput",
-                prompt_version="hearing-v1",
-                model="test-model",
-            )
-
-    judge = PresidingJudge(StageWorkflow())
-    request = HearingStageRequest(
-        case_id="CASE_stage",
-        workflow_id="WORKFLOW_stage",
-        stage="C1_ISSUE_FRAMING",
-        dossier_version=1,
-        claims=[
-            {
-                "claim_id": "CLAIM_stage",
-                "party_type": "USER",
-                "statement": "Parcel not received.",
-            }
-        ],
-    )
-
-    result = judge.run_stage(
-        request,
-        object(),
-        case_state="FULL_HEARING",
-    )
-
-    assert result.stage == "C1_ISSUE_FRAMING"
-    assert result.non_final is True
-    assert result.requires_human_review is True
 
 
 class _FakeEvaluationWorkflow:

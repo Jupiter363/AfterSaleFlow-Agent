@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import logging
 import operator
+import re
 from typing import Annotated, Any
 
 from langgraph.graph import END, START, StateGraph
@@ -14,12 +15,13 @@ from app.agents.dispute_intake_officer.schemas import IntakeCaseDetailLlmOutput
 from app.agents.dispute_intake_officer.skills.dossier.dossier_skill import (
     CaseDetailDossierSkill,
     SUBJECTIVE_RESPONDENT_SOURCE,
+    _is_evidence_material_request,
     _question_targets_resolved_intake_field,
 )
 from app.harness.context_pack import build_context_pack
-from app.harness.narrative_policy import rewrite_platform_narrative
 from app.llm import AgentOutputSchemaError, AgentServiceUnavailable
 from app.schemas import IntakeTurnRequest, IntakeTurnResult
+from app.streaming import current_stream_observer
 
 
 LOGGER = logging.getLogger(__name__)
@@ -79,7 +81,7 @@ class IntakeTurnWorkflow:
             "memory_frame": {},
         }
         result = self._graph.invoke(initial_state)
-        return IntakeTurnResult(
+        response = IntakeTurnResult(
             room_utterance=result["room_utterance"],
             dossier_patch=result["dossier_patch"],
             scroll_snapshot=result["scroll_snapshot"],
@@ -91,6 +93,17 @@ class IntakeTurnWorkflow:
             knowledge_answer_mode=result.get("knowledge_answer_mode", "NONE"),  # type: ignore[arg-type]
             confidence=float(result["confidence"]),
         )
+        observer = current_stream_observer()
+        if observer is not None and observer.operation == "intake_turn":
+            # 模型原始 room_utterance 可能被案情边界/readiness 节点改写。
+            # 只在所有确定性护栏完成后发布最终文本，保证 visible_delta 拼接值
+            # 与随后持久化的 final.room_utterance 完全一致。
+            observer.visible_delta(
+                "intake_turn_case_detail",
+                "room_utterance",
+                response.room_utterance,
+            )
+        return response
 
 
 # 所属模块：接待室 Agent > 单轮 LangGraph > 拓扑构建与编译。
@@ -176,7 +189,8 @@ def _reason_with_llm_node(model_runner: Any | None):
                 request.get("initial_case_facts") or {}
             )
             prompt_previous_detail = _subjective_only_snapshot(
-                request.get("previous_case_detail") or {}
+                request.get("previous_case_detail") or {},
+                actor_role=state["actor_role"],
             )
             # 先建立最小必需身份/最近消息；可选段只在请求确实携带时加入，避免用空对象覆盖合同语义。
             context_sources = {
@@ -249,17 +263,123 @@ def _subjective_only_initial_case_facts(seed: dict[str, Any]) -> dict[str, Any]:
 
 
 # 所属模块：接待室 Agent > 单轮 LangGraph > 旧卷宗态度隔离。
-# 具体功能：`_subjective_only_snapshot` 深拷贝 previous_case_detail，只保留带 SUBJECTIVE_RESPONDENT_SOURCE 的 respondent_attitude，移除旧流程正式响应状态。
+# 具体功能：`_subjective_only_snapshot` 对发起方保留主观来源展板，对被发起方只投影冻结 case_fact_matrix.v2 的结构化允许字段。
 # 上下游：上游是 reason_with_llm 的上一版卷宗；下游是 previous_case_detail ContextSection。
-# 系统意义：后续接待回合不能因历史字段污染而向发起方泄露/确认另一方正式答辩，也不能据此提前判断责任。
-def _subjective_only_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+# 系统意义：双方私聊原文和参与方私有展板都不能跨角色进入模型上下文；跨方只允许冻结事实矩阵的中性结构化投影。
+def _subjective_only_snapshot(
+    snapshot: dict[str, Any],
+    *,
+    actor_role: str,
+) -> dict[str, Any]:
     """Do not let legacy formal response state contaminate private-room reasoning."""
 
     sanitized = copy.deepcopy(snapshot)
+    matrix = sanitized.get("case_fact_matrix")
+    if _is_respondent_matrix_view(matrix, actor_role=actor_role):
+        projected_matrix = _respondent_matrix_prompt_projection(matrix)
+        return {"case_fact_matrix": projected_matrix} if projected_matrix else {}
     attitude = sanitized.get("respondent_attitude")
     if not _has_subjective_source(attitude):
         sanitized.pop("respondent_attitude", None)
     return _compact_case_detail_snapshot(sanitized)
+
+
+def _is_respondent_matrix_view(value: Any, *, actor_role: str) -> bool:
+    if not isinstance(value, dict) or value.get("schema_version") != "case_fact_matrix.v2":
+        return False
+    party_map = value.get("party_map")
+    if not isinstance(party_map, dict):
+        return False
+    return str(party_map.get("respondent_role") or "").upper() == str(
+        actor_role or ""
+    ).upper()
+
+
+def _respondent_matrix_prompt_projection(value: Any) -> dict[str, Any]:
+    """Expose only the frozen matrix semantics to the respondent's private prompt."""
+
+    if not isinstance(value, dict) or value.get("schema_version") != "case_fact_matrix.v2":
+        return {}
+
+    claims = value.get("claims")
+    projected_claims: dict[str, Any] = {}
+    if isinstance(claims, dict):
+        initiator_claim = claims.get("initiator_claim")
+        if isinstance(initiator_claim, dict):
+            projected_claims["initiator_claim"] = _non_empty_mapping(
+                {
+                    "initiator_role": initiator_claim.get("initiator_role"),
+                    "requested_resolution": initiator_claim.get("requested_resolution"),
+                    "requested_amount": initiator_claim.get("requested_amount"),
+                    "requested_items": initiator_claim.get("requested_items"),
+                    "reason_summary": initiator_claim.get("reason_summary"),
+                    "position_summary": initiator_claim.get("position_summary"),
+                }
+            )
+        for key in ("respondent_reported_by_initiator", "respondent_direct"):
+            position = claims.get(key)
+            if not isinstance(position, dict):
+                continue
+            projected_claims[key] = _non_empty_mapping(
+                {
+                    "respondent_role": position.get("respondent_role"),
+                    "attitude": position.get("attitude"),
+                    "position_summary": position.get("position_summary"),
+                    "alternative_proposal": position.get("alternative_proposal"),
+                    "source_type": position.get("source_type"),
+                }
+            )
+        if claims.get("claim_conflict"):
+            projected_claims["claim_conflict"] = claims.get("claim_conflict")
+
+    projected_rows: list[dict[str, Any]] = []
+    fact_rows = value.get("fact_rows")
+    for row in fact_rows[:100] if isinstance(fact_rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        positions = row.get("positions")
+        projected_positions: dict[str, Any] = {}
+        if isinstance(positions, dict):
+            for role in ("USER", "MERCHANT"):
+                position = positions.get(role)
+                if not isinstance(position, dict):
+                    continue
+                projected_positions[role] = _non_empty_mapping(
+                    {
+                        "stance": position.get("stance"),
+                        "position_summary": position.get("position_summary"),
+                        "asserted_value": position.get("asserted_value"),
+                    }
+                )
+        projected_rows.append(
+            _non_empty_mapping(
+                {
+                    "fact_id": row.get("fact_id"),
+                    "category": row.get("category"),
+                    "fact_target": row.get("fact_target"),
+                    "materiality": row.get("materiality"),
+                    "positions": projected_positions,
+                    "party_alignment": row.get("party_alignment"),
+                    "requires_resolution": row.get("requires_resolution"),
+                    "truth_status": row.get("truth_status"),
+                }
+            )
+        )
+
+    return _non_empty_mapping(
+        {
+            "schema_version": value.get("schema_version"),
+            "matrix_id": value.get("matrix_id"),
+            "matrix_version": value.get("matrix_version"),
+            "matrix_kind": value.get("matrix_kind"),
+            "content_hash": value.get("content_hash"),
+            "party_map": value.get("party_map"),
+            "case_overview": value.get("case_overview"),
+            "claims": projected_claims,
+            "fact_rows": projected_rows,
+            "fact_indexes": value.get("fact_indexes"),
+        }
+    )
 
 
 # 所属模块：接待室 Agent > Prompt 压缩 > 最近对话窗口投影。
@@ -411,6 +531,25 @@ def _compact_case_detail_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 "latest_remark": handoff.get("latest_remark"),
             }
         )
+
+    case_matrix = snapshot.get("case_fact_matrix")
+    if isinstance(case_matrix, dict):
+        fact_rows = case_matrix.get("fact_rows")
+        compact["case_fact_matrix"] = _non_empty_mapping(
+            {
+                "schema_version": case_matrix.get("schema_version"),
+                "matrix_id": case_matrix.get("matrix_id"),
+                "matrix_version": case_matrix.get("matrix_version"),
+                "matrix_kind": case_matrix.get("matrix_kind"),
+                "content_hash": case_matrix.get("content_hash"),
+                "party_map": case_matrix.get("party_map"),
+                "case_overview": case_matrix.get("case_overview"),
+                "claims": case_matrix.get("claims"),
+                "fact_rows": fact_rows[:100]
+                if isinstance(fact_rows, list)
+                else [],
+            }
+        )
     # 最外层再次删除空分区；False 和 0 不在右侧元组中，因此合法布尔/评分不会被误删。
     return {key: value for key, value in compact.items() if value not in ({}, [], "", None)}
 
@@ -472,6 +611,7 @@ def _fact_verification_items(value: Any) -> list[str]:
         "进入下一步",
         "后续流程",
         "ready_for_next_step",
+        "READY_PENDING_REMARK_INVITE",
         "WAITING_FOR_REMARK",
         "NOT_READY",
     )
@@ -520,11 +660,16 @@ def _render_case_detail_dossier(state: IntakeTurnGraphState) -> dict[str, Any]:
         llm_admission_recommendation=output.admission_recommendation,
         llm_missing_fields=output.missing_fields,
         llm_confidence=output.confidence,
+        llm_case_matrix_delta=(
+            output.case_matrix_delta or output.unilateral_case_matrix
+        ),
     )
     room_utterance = _enforce_intake_question_boundary(
         output.room_utterance,
         rendered.scroll_snapshot,
+        actor_role=request.agent_context.actor_role,
     )
+    room_utterance = _limit_follow_up_questions(room_utterance, limit=2)
     return {
         "room_utterance": room_utterance,
         "dossier_patch": rendered.dossier_patch,
@@ -547,17 +692,20 @@ def _render_case_detail_dossier(state: IntakeTurnGraphState) -> dict[str, Any]:
 
 
 # 所属模块：接待室 Agent > 单轮 LangGraph > 房间职责话术护栏。
-# 具体功能：`_enforce_intake_question_boundary` 在卷宗已就绪时只询问交接备注；未就绪时检测并移除“上传截图/视频/凭证”等证据室问题，优先改用 Skill 生成的安全案情问题。
+# 具体功能：`_enforce_intake_question_boundary` 在卷宗首次就绪时保留当前问题，下一轮才询问交接备注；未就绪时检测并移除“上传截图/视频/凭证”等证据室问题，优先改用 Skill 生成的安全案情问题。
 # 上下游：上游是模型 room_utterance 与确定性 scroll_snapshot；下游是用户在接待室实际看到的回复。
 # 系统意义：材料必须在证据室按可见性和附件协议提交；接待 Agent 不能诱导用户在私聊文本中绕开正式证据链路，也不能继续阻塞已可提交案件。
 def _enforce_intake_question_boundary(
     utterance: str,
     case_detail: dict[str, Any],
+    *,
+    actor_role: str | None = None,
 ) -> str:
     """限制接待室话术只收集案情，不抢占证据室职责。
 
-    当卷宗已满足提交条件时，接待官只询问是否还有交接备注；未满足时也不会把“上传
-    证据”作为接待室追问，避免用户在错误房间提交材料而绕过证据可见性流程。
+    卷宗本轮首次满足提交条件时保留已流式输出的问题；用户回答后，下一轮才询问
+    是否还有交接备注。未满足时也不会把“上传证据”作为接待室追问，避免用户在
+    错误房间提交材料而绕过证据可见性流程。
     """
 
     quality = case_detail.get("intake_quality")
@@ -569,37 +717,21 @@ def _enforce_intake_question_boundary(
             if isinstance(handoff_notes, dict)
             else ""
         )
+        if remark_status == "READY_PENDING_REMARK_INVITE":
+            return utterance
         if remark_status in {"HAS_REMARKS", "NO_EXTRA_REMARKS"}:
             return "已收到备注，当前案情信息已经可以提交。"
         return (
-            "我已了解大致案情，当前信息已经可以提交。"
+            "已记录本轮补充，当前信息已经可以提交。"
             "请问还有没有需要备注给证据书记官或后续审理环节的案情内容？"
         )
 
-    evidence_markers = (
-        "截图",
-        "照片",
-        "视频",
-        "聊天记录",
-        "沟通记录",
-        "录音",
-        "凭证",
-        "证明材料",
-        "证据材料",
-        "上传",
-        "补交",
-        "提供证据",
-        "提供材料",
-        "提交材料",
-    )
     repeats_resolved_field = _question_targets_resolved_intake_field(
         utterance,
         case_detail,
+        actor_role=actor_role,
     )
-    if (
-        not repeats_resolved_field
-        and not any(marker in utterance for marker in evidence_markers)
-    ):
+    if not repeats_resolved_field and not _is_evidence_material_request(utterance):
         return utterance
 
     missing = case_detail.get("missing_information")
@@ -607,12 +739,16 @@ def _enforce_intake_question_boundary(
     safe_questions = [
         str(question)
         for question in questions or []
-        if question and not any(marker in str(question) for marker in evidence_markers)
-        and not _question_targets_resolved_intake_field(question, case_detail)
+        if question and not _is_evidence_material_request(question)
+        and not _question_targets_resolved_intake_field(
+            question,
+            case_detail,
+            actor_role=actor_role,
+        )
     ]
     if safe_questions:
         return "我已记录本轮补充。为了继续梳理案情，请补充：" + " ".join(
-            safe_questions[:3]
+            safe_questions[:2]
         )
     return (
         "我已记录本轮补充。为了继续梳理案情，请说明事情发生的时间、经过、"
@@ -620,8 +756,38 @@ def _enforce_intake_question_boundary(
     )
 
 
+def _limit_follow_up_questions(utterance: str, *, limit: int) -> str:
+    """Keep at most ``limit`` question sentences in a user-visible reply."""
+
+    if limit < 1:
+        return ""
+    text = str(utterance or "")
+    numbered = list(re.finditer(r"(?<!\d)([1-9]\d*)[.、．)]", text))
+    if len(numbered) > limit and [
+        int(match.group(1)) for match in numbered[: limit + 1]
+    ] == list(range(1, limit + 2)):
+        text = text[: numbered[limit].start()].rstrip()
+    question_count = 0
+    kept: list[str] = []
+    for segment in re.split(r"(?<=[？?])", text):
+        if not segment:
+            continue
+        segment_questions = segment.count("？") + segment.count("?")
+        if segment_questions:
+            if question_count >= limit:
+                continue
+            if question_count + segment_questions > limit:
+                allowed = limit - question_count
+                boundary_matches = list(re.finditer(r"[？?]", segment))
+                segment = segment[: boundary_matches[allowed - 1].end()]
+                segment_questions = allowed
+            question_count += segment_questions
+        kept.append(segment)
+    return "".join(kept).strip()
+
+
 # 所属模块：接待室 Agent > 单轮 LangGraph > 最终就绪一致性节点。
-# 具体功能：`_validate_readiness` 仅信任当前 CaseDetailDossierSkill.schema_version 的 intake_quality；ready 时补齐“已收到备注/可以提交/可补交接备注”等必要话术，旧版快照走兼容轨迹不改文案。
+# 具体功能：`_validate_readiness` 仅信任当前 CaseDetailDossierSkill.schema_version 的 intake_quality；首次 ready 时保留流式话术，下一轮再补齐“已记录/可以提交/可补交接备注”等必要话术，旧版快照走兼容轨迹不改文案。
 # 上下游：上游是卷宗渲染后的 scroll_snapshot 与 room_utterance；下游是 END 前最后一次局部更新和最终 IntakeTurnResult。
 # 系统意义：结构化 ready 标志与用户可见提示必须一致，避免后台允许提交但 Agent 仍无限追问，或话术声称可提交而权威评分未达阈值。
 def _validate_readiness(state: IntakeTurnGraphState) -> dict[str, Any]:
@@ -645,6 +811,8 @@ def _validate_readiness(state: IntakeTurnGraphState) -> dict[str, Any]:
             if isinstance(handoff_notes, dict)
             else ""
         )
+        if remark_status == "READY_PENDING_REMARK_INVITE":
+            return {"executed_nodes": ["validate_readiness_pending_remark_invite"]}
         if remark_status in {"HAS_REMARKS", "NO_EXTRA_REMARKS"}:
             if "收到备注" not in utterance and "已收到" not in utterance:
                 additions.append("已收到备注，我会把这部分一起交接给证据书记官。")
@@ -654,8 +822,8 @@ def _validate_readiness(state: IntakeTurnGraphState) -> dict[str, Any]:
                 "room_utterance": utterance + " " + " ".join(additions),
                 "executed_nodes": ["validate_readiness"],
             }
-        if "已了解大致案情" not in utterance:
-            additions.append("我已了解大致案情。")
+        if "已记录" not in utterance:
+            additions.append("已记录本轮补充。")
         if "可以提交" not in utterance and "可提交" not in utterance:
             additions.append("当前信息已经可以提交。")
         if "备注" not in utterance:
@@ -670,109 +838,6 @@ def _validate_readiness(state: IntakeTurnGraphState) -> dict[str, Any]:
             "executed_nodes": ["validate_readiness"],
         }
     return {"executed_nodes": ["validate_readiness"]}
-
-
-# 所属模块：接待室 Agent > 单轮 LangGraph > 显式降级结果构造器。
-# 具体功能：`_fallback_output` 仅记录原话/平台转述、最小引用和待补字段，用关键词保守识别诉求，固定低分/低置信/NEED_MORE_INFO，不生成对方态度或事实认定。
-# 上下游：上游是测试或显式降级策略传入的已加载 state（主 reason 节点当前对服务错误失败关闭）；下游仍需经过 CaseDetailDossierSkill 和 readiness 护栏才可返回。
-# 系统意义：依赖故障时也不能编造一个“完整卷宗”；低质量标记确保案件留在补充/人工路径而不是自动流转。
-def _fallback_output(state: IntakeTurnGraphState) -> IntakeCaseDetailLlmOutput:
-    """在 LLM 不可用时生成保守的接待结果。
-
-    该结果只记录当事人的原始表述和待补信息，不伪造对方态度、事实认定或受理结论，
-    让后续回合或人工处理能够安全补全案件。
-    """
-
-    request = state["request"]
-    source_text = state["source_text"]
-    platform_text = rewrite_platform_narrative(
-        source_text,
-        actor_role=state["actor_role"],
-    )
-    seed = request.get("initial_case_facts") or {}
-    requested_outcome = seed.get("requested_outcome_hint") or _requested_outcome_from_text(
-        source_text
-    )
-    knowledge_query = _is_knowledge_query(source_text)
-    if request.get("current_user_message") is None:
-        utterance = (
-            "我已根据发起表单建立案件详情。"
-            "为了继续梳理，请先补充表单中仍不清楚的事情经过、当前状态、处理诉求或对方态度。"
-        )
-    else:
-        utterance = (
-            "我已先把你的补充安全记录下来，并整理为右侧案件详情。"
-            "为了继续推进，请补充仍不清楚的事情经过、当前状态、处理诉求或对方态度。"
-        )
-    if knowledge_query:
-        utterance += (
-            " 关于平台规则和处理时效，我先按通用流程解释；"
-            "真实知识库插件后续接入后会给出更精确的规则引用。"
-        )
-    return IntakeCaseDetailLlmOutput(
-        room_utterance=utterance,
-        case_detail={
-            "schema_version": CaseDetailDossierSkill.schema_version,
-            "case_story": {
-                "title": "待完善履约争议",
-                "one_sentence_summary": platform_text,
-            },
-            "references": {
-                "order_reference": seed.get("order_reference") or "",
-                "after_sales_reference": seed.get("after_sales_reference") or "",
-                "logistics_reference": seed.get("logistics_reference") or "",
-            },
-            "party_positions": {
-                "user_claim": platform_text if state["actor_role"] != "MERCHANT" else "",
-                "merchant_claim": platform_text if state["actor_role"] == "MERCHANT" else "",
-                "raw_statement": (
-                    source_text if request.get("current_user_message") is not None else ""
-                ),
-                "platform_observation": "",
-            },
-            "dispute_focus": {
-                "core_issue": "UNKNOWN",
-                "key_conflicts": [],
-                "facts_to_verify": [],
-            },
-            "requested_resolution": {
-                "requested_outcome": requested_outcome,
-                "expected_resolution_text": "",
-            },
-            "risk_assessment": {
-                "case_grade": "LOW",
-                "risk_signals": [],
-                "reasoning": "",
-            },
-            "missing_information": {
-                "blocking_gaps": [],
-                "nice_to_have_gaps": [],
-                "next_questions": [],
-            },
-            "intake_quality": {
-                "score": 45,
-                "threshold": 85,
-                "ready_for_next_step": False,
-                "score_breakdown": {
-                    "references": 5,
-                    "event_story": 10,
-                    "party_positions": 10,
-                    "requested_resolution": 5,
-                    "risk_and_conflicts": 5,
-                    "next_action_clarity": 10,
-                },
-                "improvement_reason": "模型暂时降级，等待继续补充并重新整理。",
-            },
-            "admission": {
-                "recommendation": "NEED_MORE_INFO",
-                "reasoning": "信息仍需补充。",
-                "confidence": 0.45,
-            },
-        },
-        knowledge_query_intent=knowledge_query,
-        knowledge_answer_mode="STUB" if knowledge_query else "NONE",
-        confidence=0.45,
-    )
 
 
 # 所属模块：接待室 Agent > 单轮 LangGraph > 规则问句保守识别。
@@ -801,23 +866,6 @@ def _is_knowledge_query(text: str) -> bool:
             "how long",
         )
     )
-
-
-# 所属模块：接待室 Agent > 单轮 LangGraph > 降级诉求枚举识别。
-# 具体功能：`_requested_outcome_from_text` 仅为 fallback 按退款、补发/换货、退货的固定顺序匹配中英文关键词；无法确定返回 UNKNOWN。
-# 上下游：上游是当事人原始 source_text；下游是低置信降级卷宗 requested_outcome，不触发任何履约工具。
-# 系统意义：这是记录“当事人想要什么”而非判定“平台应当做什么”；UNKNOWN 比错误猜测更适合后续追问。
-def _requested_outcome_from_text(text: str) -> str:
-    """从当事人自然语言中粗略识别退款、补发、退货等诉求；无法确认时保持 UNKNOWN。"""
-
-    normalized = (text or "").casefold()
-    if any(term in normalized for term in ("退款", "退钱", "refund")):
-        return "REFUND"
-    if any(term in normalized for term in ("补发", "重发", "换货", "replacement", "reship")):
-        return "REPLACEMENT"
-    if any(term in normalized for term in ("退货", "return")):
-        return "RETURN"
-    return "UNKNOWN"
 
 
 # 所属模块：接待室 Agent > 单轮 LangGraph > 最小案件身份上下文。

@@ -48,7 +48,7 @@ class DemoCasePurgeServiceTest {
     void rejectsEveryRoleExceptPlatformReviewer(AuthenticatedActor actor) {
         assertThatThrownBy(() -> service.purge("CASE_demo", actor))
                 .isInstanceOf(ForbiddenException.class)
-                .hasMessage("only the platform reviewer can delete simulated cases");
+                .hasMessage("only the platform reviewer can delete cases");
 
         verifyNoInteractions(caseRepository, purgeStore);
     }
@@ -82,22 +82,21 @@ class DemoCasePurgeServiceTest {
     // 下游影响：「DemoCasePurgeServiceTest.rejectsARegularIntakeCase()」的下游是被测服务、仓储或外部客户端替身；「assertThatThrownBy、verifyNoInteractions」把结果与预期状态、异常或调用次数锁定。
     // 系统意义：「DemoCasePurgeServiceTest.rejectsARegularIntakeCase()」守住「案件核心与导入」的可执行规格，尤其防止 「CASE_regular」、「reviewer-local」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
-    void rejectsARegularIntakeCase() {
+    void purgesAnIntakeCreatedCase() {
         FulfillmentCaseEntity disputeCase = simulatedCase(CaseSourceType.INTAKE_CREATED, null);
         when(caseRepository.findByIdForUpdate("CASE_regular"))
                 .thenReturn(Optional.of(disputeCase));
 
-        assertThatThrownBy(
-                        () ->
-                                service.purge(
-                                        "CASE_regular",
-                                        new AuthenticatedActor(
-                                                "reviewer-local",
-                                                ActorRole.PLATFORM_REVIEWER)))
-                .isInstanceOf(ForbiddenException.class)
-                .hasMessage("only simulated imported cases can be deleted");
+        service.purge(
+                "CASE_regular",
+                new AuthenticatedActor(
+                        "reviewer-local", ActorRole.PLATFORM_REVIEWER));
 
-        verifyNoInteractions(purgeStore);
+        verify(purgeStore)
+                .purge(
+                        "CASE_regular",
+                        "reviewer-local",
+                        ActorRole.PLATFORM_REVIEWER.name());
     }
 
     // 所属模块：【案件核心与导入 / 应用编排层】「DemoCasePurgeServiceTest.rejectsARealExternalImport()」。
@@ -119,7 +118,7 @@ class DemoCasePurgeServiceTest {
                                                 "reviewer-local",
                                                 ActorRole.PLATFORM_REVIEWER)))
                 .isInstanceOf(ForbiddenException.class)
-                .hasMessage("only simulated imported cases can be deleted");
+                .hasMessage("only intake-created or simulated imported cases can be deleted");
 
         verifyNoInteractions(purgeStore);
     }

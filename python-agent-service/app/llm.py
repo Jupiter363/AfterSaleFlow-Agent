@@ -71,21 +71,31 @@ _NODE_GENERATION_BUDGETS: dict[str, ModelGenerationBudget] = {
     "intake_turn_case_detail": ModelGenerationBudget(6_144),
     "evidence_turn": ModelGenerationBudget(8_192),
     "evaluation_analyze": ModelGenerationBudget(8_192),
-    "hearing_round_turn": ModelGenerationBudget(8_192),
-    "issue_framing_node": ModelGenerationBudget(8_192),
-    "evidence_gap_request_node": ModelGenerationBudget(8_192),
-    "party_liaison_node": ModelGenerationBudget(8_192),
-    "evidence_cross_check_node": ModelGenerationBudget(8_192),
-    "rule_application_node": ModelGenerationBudget(8_192),
-    "adjudication_draft_node": ModelGenerationBudget(12_288),
+    "hearing_intake_questions": ModelGenerationBudget(4_096),
+    "hearing_intake_synthesis": ModelGenerationBudget(6_144),
+    "hearing_evidence_requests": ModelGenerationBudget(4_096),
+    "hearing_evidence_file_assessment": ModelGenerationBudget(4_096),
+    "hearing_evidence_synthesis": ModelGenerationBudget(12_288),
+    "hearing_judge_v1": ModelGenerationBudget(8_192),
+    "hearing_jury_review": ModelGenerationBudget(8_192),
+    "hearing_judge_v2": ModelGenerationBudget(12_288),
     "evidence_critic": ModelGenerationBudget(8_192),
     "rule_critic": ModelGenerationBudget(8_192),
     "risk_critic": ModelGenerationBudget(8_192),
     "remedy_critic": ModelGenerationBudget(8_192),
     "fairness_critic": ModelGenerationBudget(8_192),
-    "jury_review": ModelGenerationBudget(8_192),
     "review_copilot": ModelGenerationBudget(8_192),
 }
+
+# Atomic outputs must become visible only after full schema validation.
+# Buffering keeps the validated non-streaming repair path available without
+# exposing a partial evidence assessment or final judgment from a truncated
+# provider response.
+_BUFFERED_STRUCTURED_NODES = frozenset({"evidence_turn", "hearing_judge_v2"})
+# Evidence output still has deterministic reference/authenticity guardrails after
+# Pydantic validation. Its user-visible text therefore travels only in the
+# workflow's final response, after those guardrails have succeeded.
+_WORKFLOW_FINAL_VISIBLE_NODES = frozenset({"evidence_turn"})
 
 
 # 所属模块：LLM 网关 > 节点资源治理 > 生成预算查询。
@@ -325,7 +335,7 @@ class LiteLlmProxyClient:
 
         # ContextVar 让同一同步调用栈感知外层流请求；没有绑定时保持传统非流式行为。
         observer = current_stream_observer()
-        if observer is not None:
+        if observer is not None and node_name not in _BUFFERED_STRUCTURED_NODES:
             completed: StructuredGeneration | None = None
             for update in self.generate_stream(
                 node_name=node_name,
@@ -417,7 +427,7 @@ class LiteLlmProxyClient:
             ) from exception
         latency_ms = int((time.perf_counter() - started) * 1000)
         usage = payload.get("usage") or {}
-        return StructuredGeneration(
+        generation = StructuredGeneration(
             value=value,
             model=str(payload.get("model") or self._model),
             latency_ms=latency_ms,
@@ -427,6 +437,21 @@ class LiteLlmProxyClient:
                 "total": int(usage.get("total_tokens") or 0),
             },
         )
+        if observer is not None:
+            observer.raise_if_cancelled()
+            if node_name not in _WORKFLOW_FINAL_VISIBLE_NODES:
+                projector = IncrementalVisibleJsonProjector(
+                    observer.visible_fields_for(node_name)
+                )
+                for field, delta in projector.feed(value.model_dump_json()):
+                    observer.visible_delta(node_name, field, delta)
+            observer.usage(
+                node_name=node_name,
+                model=generation.model,
+                latency_ms=generation.latency_ms,
+                token_usage=generation.token_usage,
+            )
+        return generation
 
     # 所属模块：LLM 网关 > LiteLLM 适配器 > 单请求 SSE 结构化流。
     # 具体功能：`generate_stream` 发起一次 provider strict JSON Schema 流请求，逐行限长解析 SSE，仅累计 delta.content；同时经 IncrementalVisibleJsonProjector 投影白名单字段，完整收齐后再用 output_type 校验并产出唯一 completed。
@@ -460,6 +485,8 @@ class LiteLlmProxyClient:
         model = self._model
         usage: dict[str, Any] = {}
         stream_observer = current_stream_observer()
+        done_received = False
+        finish_reason: str | None = None
 
         try:
             with httpx.Client(
@@ -507,6 +534,7 @@ class LiteLlmProxyClient:
                         if line.startswith(b"data:"):
                             line = line[5:].strip()
                         if line == b"[DONE]":
+                            done_received = True
                             break
                         try:
                             payload = json.loads(line)
@@ -531,6 +559,14 @@ class LiteLlmProxyClient:
                         choice = choices[0]
                         if not isinstance(choice, dict):
                             continue
+                        choice_finish_reason = choice.get("finish_reason")
+                        if choice_finish_reason is not None:
+                            if not isinstance(choice_finish_reason, str):
+                                raise AgentServiceUnavailable(
+                                    "LiteLLM proxy returned an invalid stream "
+                                    "finish_reason"
+                                )
+                            finish_reason = choice_finish_reason
                         delta_payload = choice.get("delta")
                         if not isinstance(delta_payload, dict):
                             continue
@@ -572,6 +608,47 @@ class LiteLlmProxyClient:
             raise AgentServiceUnavailable("LLM streaming request failed") from exception
 
         content = content_buffer.getvalue()
+        if not done_received:
+            LOGGER.warning(
+                "structured stream terminated before done: node=%s "
+                "finish_reason=%r response_chars=%s",
+                node_name,
+                finish_reason,
+                len(content),
+            )
+            raise AgentServiceUnavailable(
+                "LiteLLM proxy stream ended before [DONE]"
+            )
+        if finish_reason is None:
+            LOGGER.warning(
+                "structured stream completed without finish reason: node=%s "
+                "response_chars=%s",
+                node_name,
+                len(content),
+            )
+            raise AgentServiceUnavailable(
+                "LiteLLM proxy stream ended without finish_reason"
+            )
+        if finish_reason == "length":
+            raise AgentServiceUnavailable(
+                "LiteLLM proxy stream reached the output token limit"
+            )
+        if finish_reason == "content_filter":
+            raise AgentServiceUnavailable(
+                "LiteLLM proxy stream was stopped by the content filter"
+            )
+        if finish_reason != "stop":
+            LOGGER.warning(
+                "structured stream stopped by provider: node=%s "
+                "finish_reason=%r response_chars=%s",
+                node_name,
+                finish_reason,
+                len(content),
+            )
+            raise AgentServiceUnavailable(
+                "LiteLLM proxy stream stopped with provider finish_reason "
+                f"{finish_reason!r}"
+            )
         try:
             # 流式阶段也必须等完整 JSON 收齐后再做 Pydantic 校验；
             # 前面投影出的只是“可见字段增量”，不能当成最终可信结果。

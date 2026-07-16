@@ -4,4 +4,7 @@
 
 # Preserve the public import surface while schemas are split by final role.
 from app.schemas.final_agents import *  # noqa: F403
+from app.schemas.intake_case_matrix import *  # noqa: F403
+from app.schemas.case_fact_matrix import *  # noqa: F403
+from app.schemas.hearing_flow import *  # noqa: F403
 from app.schemas.models import *  # noqa: F403

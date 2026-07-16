@@ -47,6 +47,6 @@ springdoc:
 dispute:
   evidence-window: ${EVIDENCE_WINDOW:PT2H}
   hearing-window: ${HEARING_WINDOW:PT3H}
-  max-hearing-rounds: ${MAX_HEARING_ROUNDS:3}
+  hearing-party-stage-window: ${HEARING_PARTY_STAGE_WINDOW:PT20M}
   sse-heartbeat: ${SSE_HEARTBEAT:PT15S}
   seed-demo-disputes: ${SEED_DEMO_DISPUTES:false}

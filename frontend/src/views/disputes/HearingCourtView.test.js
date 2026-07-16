@@ -5,15 +5,22 @@ import { readFileSync } from "node:fs";
 import { flushPromises, mount } from "@vue/test-utils";
 import { createMemoryHistory, createRouter } from "vue-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { disputeApi } from "../../api/disputes";
 import { evidenceApi } from "../../api/evidence";
 import { hearingApi } from "../../api/hearing";
 import { roomApi } from "../../api/rooms";
+import {
+  agentStreamStore,
+  clearAgentStreams,
+} from "../../stores/agentStream";
 import HearingCourtView from "./HearingCourtView.vue";
 
 const componentSource = readFileSync("src/views/disputes/HearingCourtView.vue", "utf8");
 
 afterEach(() => {
+  clearAgentStreams({}, { abort: true });
   vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 const evidenceCatalog = {
@@ -55,33 +62,31 @@ const evidenceCatalog = {
 };
 
 const hearing = {
-  rounds: [
-    {
-      round_id: "ROUND_1",
-      round_no: 1,
-      status: "COMPLETED",
-      dossier_version: 1,
-      stop_reason: "EVIDENCE_SUPPLEMENT_REQUIRED",
-      summary_json: JSON.stringify({
-        clerk: "双方已经提交第一版证据目录。",
-        judge: "物流签收凭证仍需交叉核验。",
-      }),
-    },
-    {
-      round_id: "ROUND_2",
-      round_no: 2,
-      status: "OPEN",
-      dossier_version: 2,
-      round_deadline_at: "2026-07-03T12:05:00+08:00",
-      submitted_roles: [],
-      current_actor_submitted: false,
-      summary_json: JSON.stringify({
-        clerk: "补充证据已入卷。",
-        judge: "正在形成裁决草案。",
-        jury: "建议核对签收人身份。",
-      }),
-    },
-  ],
+  status: {
+    flow_schema_version: "hearing_flow.v2",
+    stage_code: "PARTY_ANSWERS_OPEN",
+    stage_sequence: 1,
+    stage_deadline_at: "2026-07-03T12:20:00+08:00",
+    party_statuses: { USER: "PENDING", MERCHANT: "PENDING" },
+  },
+  question_set: {
+    schema_version: "hearing_intake_questions.v1",
+    question_set_id: "HEARING_QUESTION_SET_1",
+    questions: [
+      {
+        question_id: "HEARING_QUESTION_USER_1",
+        target_party: "USER",
+        fact_ids: ["FACT_INTAKE_001"],
+        question_text: "请说明发现未收到商品的具体时间，以及当时核对了哪些位置。",
+      },
+      {
+        question_id: "HEARING_QUESTION_MERCHANT_1",
+        target_party: "MERCHANT",
+        fact_ids: ["FACT_INTAKE_001"],
+        question_text: "请说明发货、物流交接及签收凭证的形成过程。",
+      },
+    ],
+  },
   settlements: [
     {
       settlement_id: "SETTLEMENT_1",
@@ -93,6 +98,39 @@ const hearing = {
     },
   ],
 };
+
+function evidenceStageHearing(partyStatuses = { USER: "PENDING", MERCHANT: "PENDING" }) {
+  return {
+    ...hearing,
+    status: {
+      flow_schema_version: "hearing_flow.v2",
+      stage_code: "PARTY_EVIDENCE_OPEN",
+      stage_sequence: 2,
+      stage_deadline_at: "2026-07-03T12:20:00+08:00",
+      party_statuses: partyStatuses,
+    },
+    evidence_request_set: {
+      schema_version: "hearing_evidence_requests.v1",
+      request_set_id: "HEARING_EVIDENCE_REQUEST_SET_1",
+      requests: [
+        {
+          request_id: "HEARING_EVIDENCE_REQUEST_USER_1",
+          target_party: "USER",
+          fact_ids: ["FACT_INTAKE_001"],
+          evidence_ids: [],
+          request_text: "请提交能够说明实际收货位置的材料。",
+        },
+        {
+          request_id: "HEARING_EVIDENCE_REQUEST_MERCHANT_1",
+          target_party: "MERCHANT",
+          fact_ids: ["FACT_INTAKE_001"],
+          evidence_ids: [],
+          request_text: "请提交物流交接及签收凭证。",
+        },
+      ],
+    },
+  };
+}
 
 const courtMessages = [
   {
@@ -159,7 +197,6 @@ async function mountView(overrides = {}) {
       viewerRole: "USER",
       deadlineAt: "2026-07-03T15:00:00+08:00",
       serverNow: "2026-07-03T12:00:00+08:00",
-      roundLimit: 3,
       confirmSettlementAction,
       initialEvents: [],
       initialMessages: courtMessages,
@@ -208,6 +245,20 @@ function makeEvidence(index, submittedByRole) {
 
 // 业务位置：【前端庭审】describe：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
 describe("HearingCourtView", () => {
+  it("uses each courtroom digital human's clothing color on their transcript cards", () => {
+    expect(componentSource).toMatch(/court-message--intake[\s\S]*?--court-clothing-color: #95c9b6/);
+    expect(componentSource).toMatch(/court-message--clerk[\s\S]*?--court-clothing-color: #77a9e7/);
+    expect(componentSource).toMatch(/court-message--judge[\s\S]*?--court-clothing-color: #302e55/);
+    expect(componentSource).toMatch(/court-message--jury[\s\S]*?--court-clothing-color: #d6c2f7/);
+    expect(componentSource).toMatch(
+      /court-agent-strip :deep\(\.digital-human__identity small\)[\s\S]*?display: none;/,
+    );
+    expect(componentSource).toMatch(
+      /court-message--judge[\s\S]*?--court-clothing-color: #302e55[\s\S]*?48%, white/,
+    );
+    expect(componentSource).not.toContain(".court-message--judge-bench-card::before");
+  });
+
   it("shows a sealed historical courtroom and blocks all mutation controls", async () => {
     const eventStreamer = vi.fn();
     const postMessageAction = vi.fn();
@@ -222,7 +273,7 @@ describe("HearingCourtView", () => {
 
     expect(wrapper.get("[data-room-history-banner]").text()).toContain("历史浏览模式");
     expect(wrapper.get("[data-hearing-history-locked]").text()).toContain("历史庭审已锁定");
-    expect(wrapper.find("[data-round-input-composer]").exists()).toBe(false);
+    expect(wrapper.find("[data-stage-input-composer]").exists()).toBe(false);
     expect(wrapper.find("[data-supplement-evidence]").exists()).toBe(false);
     const completeButton = wrapper.find("[data-complete-hearing]");
     if (completeButton.exists()) {
@@ -251,12 +302,12 @@ describe("HearingCourtView", () => {
     expect(wrapper.findAll("[data-evidence-empty]")).toHaveLength(0);
     expect(wrapper.text()).not.toContain("等待开庭消息");
     expect(wrapper.text()).not.toContain("暂无已提交证据");
-    expect(wrapper.get('textarea[aria-label="本轮陈述"]').attributes("disabled")).toBeDefined();
-    expect(wrapper.find("[data-send-hearing-statement]").exists()).toBe(false);
+    expect(wrapper.find("[data-answer-bundle-form]").exists()).toBe(false);
+    expect(wrapper.get("[data-stage-input-locked]").text()).toContain("资料装载");
   });
 
   // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
-  it("renders a collaborative little court with agents, rounds and a three-hour clock", async () => {
+  it("renders the explicit hearing flow with agents and a shared party deadline", async () => {
     const { wrapper } = await mountView();
 
     expect(wrapper.text()).toContain("小法庭");
@@ -265,7 +316,7 @@ describe("HearingCourtView", () => {
     expect(wrapper.text()).toContain("AI 评审员");
     const statusDock = wrapper.get("[data-hearing-stage-dock]");
     expect(statusDock.text()).toContain("当前庭审状态");
-    expect(statusDock.text()).toContain("第 2 轮");
+    expect(statusDock.text()).toContain("双方回答");
     expect(statusDock.text()).not.toContain("HEARING STAGE DOCK");
     expect(statusDock.classes()).toContain("hearing-stage-dock--fixed-dashboard");
     expect(statusDock.classes()).toContain("hearing-stage-dock--short");
@@ -279,47 +330,84 @@ describe("HearingCourtView", () => {
     expect(wrapper.get("[data-hearing-stage-clock]").classes()).toContain(
       "hearing-stage-dock__clock--centered",
     );
-    expect(wrapper.get("[data-hearing-stage-clock]").text()).toContain("当前轮次还剩");
-    expect(wrapper.get("[data-hearing-stage-clock]").text()).toContain("05:00");
+    expect(wrapper.get("[data-hearing-stage-clock]").text()).toContain("共享提交时间");
+    expect(wrapper.get("[data-hearing-stage-clock]").text()).toContain("20:00");
     expect(wrapper.get("[data-hearing-stage-clock]").text()).not.toContain("04:18");
     expect(wrapper.find("[data-hearing-progress-track]").exists()).toBe(true);
     expect(wrapper.find("[data-hearing-status-strip]").exists()).toBe(false);
-    const progressItems = wrapper.findAll("[data-round-progress-item]");
-    expect(progressItems).toHaveLength(3);
-    expect(progressItems[0].attributes("data-round-progress-state")).toBe("complete");
-    expect(progressItems[1].attributes("data-round-progress-state")).toBe("active");
-    expect(progressItems[2].attributes("data-round-progress-state")).toBe("pending");
-    expect(progressItems[0].attributes("data-round-connector-state")).toBe("complete");
-    expect(progressItems[1].attributes("data-round-connector-state")).toBe("pending");
-    expect(progressItems[0].find("[data-round-active-spinner]").exists()).toBe(false);
-    expect(progressItems[1].find("[data-round-active-spinner]").exists()).toBe(true);
-    expect(progressItems[2].find("[data-round-active-spinner]").exists()).toBe(false);
-    expect(progressItems[0].find(".round-progress-board__number").exists()).toBe(false);
-    expect(progressItems[1].find(".round-progress-board__number").exists()).toBe(false);
-    expect(progressItems[2].find(".round-progress-board__number").exists()).toBe(false);
+    const progressItems = wrapper.findAll("[data-stage-progress-item]");
+    expect(progressItems).toHaveLength(6);
+    expect(progressItems[0].attributes("data-stage-progress-state")).toBe("complete");
+    expect(progressItems[1].attributes("data-stage-progress-state")).toBe("active");
+    expect(progressItems[2].attributes("data-stage-progress-state")).toBe("pending");
+    expect(progressItems[0].attributes("data-stage-connector-state")).toBe("complete");
+    expect(progressItems[1].attributes("data-stage-connector-state")).toBe("pending");
+    expect(progressItems[0].find("[data-stage-active-spinner]").exists()).toBe(false);
+    expect(progressItems[1].find("[data-stage-active-spinner]").exists()).toBe(true);
+    expect(progressItems[2].find("[data-stage-active-spinner]").exists()).toBe(false);
+    expect(progressItems[0].find(".stage-progress-board__number").exists()).toBe(false);
+    expect(progressItems[1].find(".stage-progress-board__number").exists()).toBe(false);
+    expect(progressItems[2].find(".stage-progress-board__number").exists()).toBe(false);
     expect(progressItems[0].get("b").text()).toBe("");
     expect(progressItems[1].get("b").text()).toBe("");
     expect(progressItems[2].get("b").text()).toBe("");
-    expect(progressItems[0].get(".round-progress-board__label").text()).toBe("事实陈述");
-    expect(progressItems[1].get(".round-progress-board__label").text()).toBe("证据解释");
-    expect(progressItems[2].get(".round-progress-board__label").text()).toBe("方案确认");
-    expect(progressItems[0].get(".round-progress-board__status").text()).toBe("已封存");
-    expect(progressItems[1].get(".round-progress-board__status").text()).toBe("进行中");
-    expect(progressItems[2].get(".round-progress-board__status").text()).toBe("未开始");
+    expect(progressItems[0].get(".stage-progress-board__label").text()).toBe("案情交接");
+    expect(progressItems[1].get(".stage-progress-board__label").text()).toBe("案情澄清");
+    expect(progressItems[2].get(".stage-progress-board__label").text()).toBe("证据核验");
+    expect(progressItems[0].get(".stage-progress-board__status").text()).toBe("已完成");
+    expect(progressItems[1].get(".stage-progress-board__status").text()).toBe("进行中");
+    expect(progressItems[2].get(".stage-progress-board__status").text()).toBe("未开始");
     expect(statusDock.find('[data-hearing-status-chip="USER"]').exists()).toBe(false);
     expect(statusDock.find('[data-hearing-status-chip="MERCHANT"]').exists()).toBe(false);
     expect(statusDock.text()).not.toContain("时间/封存");
     expect(statusDock.text()).not.toContain("法官/评审");
-    expect(wrapper.get("[data-round-input-party-statuses]").text()).toContain("用户提交");
-    expect(wrapper.get("[data-round-input-party-statuses]").text()).toContain("商家提交");
-    expect(wrapper.get("[data-hearing-countdown]").text()).toContain("庭审时效");
-    await wrapper.get("[data-open-court-ledger]").trigger("click");
-    expect(wrapper.get("[data-court-ledger-drawer]").text()).toContain(
-      "物流签收凭证仍需交叉核验",
-    );
-    expect(wrapper.get("[data-court-ledger-drawer]").text()).toContain("已完成");
-    expect(wrapper.get("[data-court-ledger-drawer]").text()).not.toContain("COMPLETED");
+    expect(wrapper.get("[data-stage-input-party-statuses]").text()).toContain("用户提交");
+    expect(wrapper.get("[data-stage-input-party-statuses]").text()).toContain("商家提交");
+    expect(wrapper.get("[data-hearing-countdown]").text()).toContain("庭审总时效");
     expect(wrapper.text()).not.toContain("审核解释官");
+  });
+
+  it("does not invent a party deadline when the server omitted it", async () => {
+    const status = { ...hearing.status };
+    delete status.stage_deadline_at;
+
+    const { wrapper } = await mountView({
+      initialHearing: {
+        ...hearing,
+        status,
+      },
+    });
+
+    expect(wrapper.get("[data-hearing-stage-clock]").text()).toContain("当前阶段");
+    expect(wrapper.get("[data-hearing-stage-clock]").text()).toContain("双方回答");
+    expect(wrapper.get("[data-hearing-stage-clock]").text()).not.toContain("20:00");
+  });
+
+  it("keeps the total hearing countdown anchored to the case deadline after refresh", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-03T04:00:00Z"));
+    vi.spyOn(disputeApi, "get").mockResolvedValue({
+      deadline_at: "2026-07-03T15:00:00+08:00",
+    });
+
+    const first = await mountView({
+      deadlineAt: "",
+      serverNow: "2026-07-03T12:00:00+08:00",
+    });
+    await flushPromises();
+    expect(first.wrapper.get("[data-hearing-countdown]").text()).toContain("03:00:00");
+    first.wrapper.unmount();
+
+    vi.setSystemTime(new Date("2026-07-03T04:30:00Z"));
+    const refreshed = await mountView({
+      deadlineAt: "",
+      serverNow: "2026-07-03T12:30:00+08:00",
+    });
+    await flushPromises();
+
+    expect(disputeApi.get).toHaveBeenCalledTimes(2);
+    expect(refreshed.wrapper.get("[data-hearing-countdown]").text()).toContain("02:30:00");
+    refreshed.wrapper.unmount();
   });
 
   // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
@@ -331,19 +419,21 @@ describe("HearingCourtView", () => {
     expect(wrapper.get("[data-court-agent-strip]").text()).not.toContain("法官与 AI 评审团");
     expect(wrapper.get(".courtroom-center").classes()).toContain("courtroom-center--compact-stage");
     const agentCards = wrapper.findAll("[data-court-agent-card]");
-    expect(agentCards).toHaveLength(3);
+    expect(agentCards).toHaveLength(4);
     expect(agentCards.map((card) => card.attributes("data-court-agent-card"))).toEqual([
       "jury-a",
       "judge",
+      "intake-officer",
       "evidence-clerk",
     ]);
     expect(wrapper.get('[data-court-agent-card="jury-a"]').text()).toContain("小察");
     expect(wrapper.get('[data-court-agent-card="jury-a"]').text()).toContain("方案可行性");
     expect(wrapper.get('[data-court-agent-card="judge"]').text()).toContain("小正");
+    expect(wrapper.get('[data-court-agent-card="intake-officer"]').text()).toContain("小迎");
     expect(wrapper.get('[data-court-agent-card="evidence-clerk"]').text()).toContain("小册");
     expect(wrapper.get('[data-court-agent-card="evidence-clerk"]').text()).toContain("证据书记官");
     expect(wrapper.find('[data-court-agent-card="jury-b"]').exists()).toBe(false);
-    expect(wrapper.get("[data-hearing-stage-dock]").text()).toContain("第 2 轮");
+    expect(wrapper.get("[data-hearing-stage-dock]").text()).toContain("双方回答");
     expect(wrapper.get('[data-party-evidence-rail="user"]').text()).toContain(
       "用户证据原件匣",
     );
@@ -374,55 +464,57 @@ describe("HearingCourtView", () => {
     expect(wrapper.get('[data-court-message="merchant"]').classes()).toContain("court-message--party-statement-card");
     expect(wrapper.get('[data-court-message="merchant"]').classes()).toContain("court-message--soft-party-card");
     expect(wrapper.get('[data-court-message="merchant"]').classes()).toContain("court-message--flexible-height-card");
-    expect(wrapper.get("[data-round-input-bar]").text()).toContain(
-      "本轮陈述输入台",
+    expect(wrapper.get("[data-stage-input-bar]").text()).toContain(
+      "当前阶段提交台",
     );
-    expect(wrapper.get("[data-round-input-bar]").text()).not.toContain(
+    expect(wrapper.get("[data-stage-input-bar]").text()).not.toContain(
       "提出一致方案",
     );
-    expect(wrapper.get("[data-round-input-bar]").text()).not.toContain(
+    expect(wrapper.get("[data-stage-input-bar]").text()).not.toContain(
       "和解意向",
     );
-    expect(wrapper.get("[data-round-input-bar]").text()).not.toContain(
+    expect(wrapper.get("[data-stage-input-bar]").text()).not.toContain(
       "确认或说明异议",
     );
-    const inputHeader = wrapper.get("[data-round-input-header]");
-    const inputComposer = wrapper.get("[data-round-input-composer]");
-    expect(inputHeader.text()).toContain("本轮陈述输入台");
+    const inputHeader = wrapper.get("[data-stage-input-header]");
+    const inputComposer = wrapper.get("[data-answer-bundle-form]");
+    expect(inputHeader.text()).toContain("当前阶段提交台");
     expect(inputHeader.text()).toContain("用户提交");
     expect(inputHeader.text()).toContain("商家提交");
     expect(inputHeader.text()).not.toContain("确认或说明异议");
-    expect(wrapper.find("[data-round-input-description]").exists()).toBe(false);
-    expect(wrapper.get("[data-round-input-bar]").text()).not.toContain(
+    expect(wrapper.find("[data-stage-input-description]").exists()).toBe(false);
+    expect(wrapper.get("[data-stage-input-bar]").text()).not.toContain(
       "当前陈述、证据解释或对法官拟处理方向的确认或说明异议会被封装为本轮立场",
     );
     expect(inputHeader.element.compareDocumentPosition(inputComposer.element)).toBe(
       Node.DOCUMENT_POSITION_FOLLOWING,
     );
     expect(wrapper.find("[data-open-settlement]").exists()).toBe(false);
-    expect(wrapper.get("[data-round-input-bar]").classes()).toContain(
-      "round-input-bar--fixed-dock",
+    expect(wrapper.get("[data-stage-input-bar]").classes()).toContain(
+      "stage-input-bar--fixed-dock",
     );
-    expect(wrapper.get("[data-round-input-bar]").text()).toContain(
-      "提交陈述",
+    expect(wrapper.get("[data-stage-input-bar]").text()).toContain(
+      "提交本方陈述",
     );
-    expect(wrapper.get("[data-round-input-bar]").text()).not.toContain(
+    expect(wrapper.get("[data-stage-input-bar]").text()).not.toContain(
+      "一次提交全部回答",
+    );
+    expect(wrapper.get("[data-stage-input-bar]").text()).not.toContain(
       "发送陈述",
     );
-    expect(wrapper.get("[data-round-input-bar]").text()).not.toContain(
+    expect(wrapper.get("[data-stage-input-bar]").text()).not.toContain(
       "发送本轮陈述",
     );
-    expect(wrapper.get("[data-round-input-bar]").text()).not.toContain(
+    expect(wrapper.get("[data-stage-input-bar]").text()).not.toContain(
       "提交本轮陈述",
     );
-    expect(wrapper.get("[data-round-input-bar]").text()).not.toContain(
+    expect(wrapper.get("[data-stage-input-bar]").text()).not.toContain(
       "本轮提交时效",
     );
-    expect(wrapper.get("[data-round-input-bar]").text()).not.toContain(
+    expect(wrapper.get("[data-stage-input-bar]").text()).not.toContain(
       "等待服务端确认下一阶段",
     );
-    expect(wrapper.find("[data-send-hearing-statement]").exists()).toBe(true);
-    expect(wrapper.find("[data-submit-hearing-round]").exists()).toBe(false);
+    expect(wrapper.find("[data-submit-answer-bundle]").exists()).toBe(true);
     expect(wrapper.get('[data-party-evidence-rail="user"]').text()).not.toContain(
       "用户代表",
     );
@@ -435,6 +527,78 @@ describe("HearingCourtView", () => {
     expect(
       wrapper.get('[data-rail-position="right"]').find("[data-complete-hearing]").exists(),
     ).toBe(true);
+  });
+
+  it("streams the draft and jury report inside their final courtroom cards", async () => {
+    agentStreamStore.runs.AGENT_RUN_DRAFT_LIVE = {
+      runId: "AGENT_RUN_DRAFT_LIVE",
+      caseId: "CASE_HEARING_1",
+      roomType: "HEARING",
+      operation: "HEARING_JUDGE_V1",
+      actorId: "user-local",
+      actorRole: "USER",
+      agentLabel: "AI 法官",
+      senderRole: "JUDGE",
+      status: "STREAMING",
+      content: "正在归纳三轮庭审并生成裁决草案",
+      receivedContent: "正在归纳三轮庭审并生成裁决草案",
+      activeCardKey: "adjudication-draft",
+      cardOrder: ["adjudication-draft"],
+      cards: {
+        "adjudication-draft": {
+          key: "adjudication-draft",
+          identity: "主审法官",
+          name: "小正",
+          senderRole: "PRESIDING_JUDGE",
+          content: "正在归纳三轮庭审并生成裁决草案",
+        },
+      },
+      startedAt: 1,
+    };
+    agentStreamStore.runs.AGENT_RUN_JURY_LIVE = {
+      runId: "AGENT_RUN_JURY_LIVE",
+      caseId: "CASE_HEARING_1",
+      roomType: "HEARING",
+      operation: "HEARING_JURY_REVIEW",
+      actorId: "user-local",
+      actorRole: "USER",
+      agentLabel: "AI 评审员",
+      senderRole: "JURY_PANEL",
+      status: "STREAMING",
+      content: "正在复核草案中的事实、证据与遗漏风险",
+      receivedContent: "正在复核草案中的事实、证据与遗漏风险",
+      activeCardKey: "jury-review",
+      cardOrder: ["jury-review"],
+      cards: {
+        "jury-review": {
+          key: "jury-review",
+          identity: "AI 评审员",
+          name: "小察",
+          senderRole: "JURY_PANEL",
+          content: "正在复核草案中的事实、证据与遗漏风险",
+        },
+      },
+      startedAt: 2,
+    };
+
+    const { wrapper } = await mountView();
+    const liveCards = wrapper.findAll('[data-agent-streaming-message="true"]');
+    expect(liveCards).toHaveLength(2);
+    expect(wrapper.find(".agent-streaming-message").exists()).toBe(false);
+
+    const draftCard = wrapper.get('[data-agent-stream-card="adjudication-draft"]');
+    expect(draftCard.attributes("data-court-message")).toBe("judge");
+    expect(draftCard.classes()).toContain("court-message--judge-bench-card");
+    expect(draftCard.text()).toContain("裁决草案 V1");
+    expect(draftCard.text()).toContain("正在归纳三轮庭审并生成裁决草案");
+    expect(draftCard.text()).toContain("实时生成中");
+
+    const juryCard = wrapper.get('[data-agent-stream-card="jury-review"]');
+    expect(juryCard.attributes("data-court-message")).toBe("jury");
+    expect(juryCard.classes()).toContain("court-message--jury-review-card");
+    expect(juryCard.text()).toContain("评审复核报告");
+    expect(juryCard.text()).toContain("正在复核草案中的事实、证据与遗漏风险");
+    expect(juryCard.text()).toContain("实时生成中");
   });
 
   it("maps internal evidence ids and normalizes mixed sentence punctuation in judge copy", async () => {
@@ -456,6 +620,80 @@ describe("HearingCourtView", () => {
     expect(judgeCopy).not.toContain("EVIDENCE_USER_REAL");
     expect(judgeCopy).not.toContain("。；");
     expect(judgeCopy).toContain("无效证据；证据矩阵无新增有效关联；");
+  });
+
+  it("extracts persisted matrix JSON into readable courtroom summaries", async () => {
+    const caseMatrix = {
+      schema_version: "case_fact_matrix.v2",
+      matrix_id: "CASE_MATRIX_INTERNAL",
+      case_overview: {
+        neutral_summary: "用户称未收到商品，商家称已送达约定地点。",
+        core_conflict: "商品是否完成实际交付。",
+      },
+      claims: {
+        initiator_claim: {
+          initiator_role: "USER",
+          position_summary: "用户要求退款。",
+        },
+        respondent_direct: {
+          respondent_role: "MERCHANT",
+          position_summary: "商家认为订单已履行。",
+        },
+      },
+      fact_rows: [
+        {
+          fact_id: "FACT_DELIVERY_INTERNAL",
+          fact_target: "商品是否实际交付",
+          positions: {
+            USER: { stance: "DENY" },
+            MERCHANT: { stance: "CONFIRM" },
+          },
+          requires_resolution: true,
+        },
+      ],
+    };
+    const evidenceMatrix = {
+      schema_version: "fact_evidence_matrix.v2",
+      matrix_id: "EVIDENCE_MATRIX_INTERNAL",
+      fact_coverage: [
+        {
+          fact_id: "FACT_DELIVERY_INTERNAL",
+          coverage_status: "PARTIALLY_COVERED_BY_FROZEN_DOSSIER",
+          evidence_ids: ["EVIDENCE_INTERNAL"],
+        },
+      ],
+    };
+    const { wrapper } = await mountView({
+      initialMessages: [
+        {
+          id: "MESSAGE_CASE_MATRIX",
+          sequence_no: 1,
+          sender_role: "INTAKE_OFFICER",
+          message_type: "AGENT_MESSAGE",
+          message_text: `现宣读庭前双方案情矩阵：\n${JSON.stringify(caseMatrix)}`,
+        },
+        {
+          id: "MESSAGE_EVIDENCE_MATRIX",
+          sequence_no: 2,
+          sender_role: "EVIDENCE_CLERK",
+          message_type: "AGENT_MESSAGE",
+          message_text: `现宣读庭前证据覆盖矩阵：\n${JSON.stringify(evidenceMatrix)}`,
+        },
+      ],
+    });
+
+    const transcript = wrapper.get("[data-court-transcript]").text();
+    expect(transcript).toContain("庭前双方案情汇总");
+    expect(transcript).toContain("用户要求退款");
+    expect(transcript).toContain("商品是否实际交付（用户：否认；商家：确认，待庭审核实）");
+    expect(transcript).toContain("庭前证据覆盖汇总");
+    expect(transcript).toContain("部分覆盖 1 项");
+    expect(wrapper.get('[data-court-message-id="MESSAGE_EVIDENCE_MATRIX"]').text())
+      .toContain("商品是否实际交付：部分证据覆盖");
+    expect(transcript).not.toContain("schema_version");
+    expect(transcript).not.toContain("CASE_MATRIX_INTERNAL");
+    expect(transcript).not.toContain("FACT_DELIVERY_INTERNAL");
+    expect(transcript).not.toContain("EVIDENCE_INTERNAL");
   });
 
   // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
@@ -575,10 +813,14 @@ describe("HearingCourtView", () => {
     expect(componentSource).toContain("height: auto");
     expect(componentSource).toContain("max-height: none");
     expect(componentSource).toContain("flex: 0 0 auto");
-    expect(componentSource).toContain("--court-message-min-height: 143px");
-    expect(componentSource).toContain("--court-message-min-height: 149px");
-    expect(componentSource).toContain("--court-message-min-height: 123px");
-    expect(componentSource).toContain("--court-message-min-height: 101px");
+    expect(componentSource).toContain("--court-message-min-height: 95px");
+    expect(componentSource).toContain("--court-message-min-height: 99px");
+    expect(componentSource).toContain("--court-message-min-height: 82px");
+    expect(componentSource).toContain("--court-message-min-height: 67px");
+    expect(componentSource).toContain("--court-party-card-width: 347px");
+    expect(componentSource).toContain(
+      "width: min(var(--court-party-card-width), calc(100% - 24px))",
+    );
     expect(componentSource).toContain("padding-bottom: 18px");
     expect(componentSource).toContain("width: min(58%, 600px)");
     expect(componentSource).toContain("margin: 0 0 4px");
@@ -604,7 +846,7 @@ describe("HearingCourtView", () => {
     expect(reviewerWrapper.get(".courtroom-center").classes()).toContain(
       "courtroom-center--without-input",
     );
-    expect(reviewerWrapper.find("[data-round-input-bar]").exists()).toBe(false);
+    expect(reviewerWrapper.find("[data-stage-input-bar]").exists()).toBe(false);
     expect(componentSource).toContain(
       "height: clamp(720px, calc(100dvh - 150px), 820px);",
     );
@@ -619,18 +861,18 @@ describe("HearingCourtView", () => {
   });
 
   // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
-  it("keeps all three hearing stages horizontal at the narrow breakpoint", async () => {
+  it("keeps all six hearing flow groups horizontally scrollable at the narrow breakpoint", async () => {
     const { wrapper } = await mountView();
 
-    expect(wrapper.findAll("[data-round-progress-item]")).toHaveLength(3);
+    expect(wrapper.findAll("[data-stage-progress-item]")).toHaveLength(6);
     expect(componentSource).toContain(
-      "grid-template-columns: repeat(3, minmax(0, 1fr));",
+      "grid-template-columns: repeat(6, minmax(82px, 1fr));",
     );
     expect(componentSource).not.toMatch(
-      /\.round-progress-board\s*{[^}]*grid-template-columns:\s*1fr/,
+      /\.stage-progress-board\s*{[^}]*grid-template-columns:\s*1fr/,
     );
     expect(componentSource).toMatch(
-      /@media \(max-width: 680px\)[\s\S]*?\.round-progress-board__item div\s*{\s*display:\s*grid;/,
+      /@media \(max-width: 680px\)[\s\S]*?\.stage-progress-board__item div\s*{\s*display:\s*grid;/,
     );
   });
 
@@ -979,11 +1221,11 @@ describe("HearingCourtView", () => {
   it("contains a 200-character unbroken hearing error inside the fixed canvas", async () => {
     const errorText = "E".repeat(200);
     const { wrapper } = await mountView({
-      messageAction: vi.fn().mockRejectedValue(new Error(errorText)),
+      submitAnswersAction: vi.fn().mockRejectedValue(new Error(errorText)),
     });
 
-    await wrapper.get('[data-send-message] textarea').setValue("trigger error");
-    await wrapper.get("[data-send-hearing-statement]").trigger("click");
+    await wrapper.get('[data-answer-bundle-form] textarea').setValue("trigger error");
+    await wrapper.get("[data-submit-answer-bundle]").trigger("click");
     await flushPromises();
 
     expect(wrapper.get('[role="alert"]').text()).toBe(errorText);
@@ -1012,7 +1254,7 @@ describe("HearingCourtView", () => {
       expect(
         wrapper.get("[data-hearing-courtroom-page]").attributes("data-viewer-role"),
       ).toBe(viewerRole);
-      expect(wrapper.find("[data-round-input-bar]").exists()).toBe(
+      expect(wrapper.find("[data-stage-input-bar]").exists()).toBe(
         viewerRole !== "PLATFORM_REVIEWER",
       );
       wrapper.unmount();
@@ -1021,7 +1263,27 @@ describe("HearingCourtView", () => {
 
   // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
   it("puts the current party evidence rail on the left and keeps the counterparty read-only on the right", async () => {
-    const { wrapper } = await mountView({ viewerRole: "MERCHANT" });
+    const { wrapper } = await mountView({
+      viewerRole: "MERCHANT",
+      initialHearing: {
+        ...hearing,
+        status: {
+          ...hearing.status,
+          stage_code: "PARTY_EVIDENCE_OPEN",
+        },
+        evidence_request_set: {
+          request_set_id: "REQUEST_SET_1",
+          requests: [
+            {
+              request_id: "REQUEST_MERCHANT_1",
+              target_party: "MERCHANT",
+              fact_ids: ["FACT_INTAKE_001"],
+              request_text: "请提交签收底单。",
+            },
+          ],
+        },
+      },
+    });
 
     const leftRail = wrapper.get('[data-rail-position="left"]');
     const rightRail = wrapper.get('[data-rail-position="right"]');
@@ -1109,239 +1371,492 @@ describe("HearingCourtView", () => {
   });
 
   // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
-  it("lets the current party submit a statement without closing the active hearing round", async () => {
-    const messageAction = vi.fn().mockResolvedValue({
-      id: "MESSAGE_ROUND_TEXT_1",
-      sequence_no: 1,
-      sender_role: "USER",
-      message_type: "PARTY_TEXT",
-      message_text: "用户补充本轮陈述内容。",
+  it("submits one natural-language party statement and then locks the party input", async () => {
+    const submitAnswersAction = vi.fn().mockResolvedValue({
+      participant_role: "USER",
+      submission_status: "SUBMITTED",
     });
-    const submitRoundAction = vi.fn();
     const { wrapper } = await mountView({
-      messageAction,
-      submitRoundAction,
-    });
-
-    await wrapper
-      .get('[data-send-message] textarea')
-      .setValue("用户补充本轮陈述内容。");
-    await wrapper.get("[data-send-hearing-statement]").trigger("click");
-    await flushPromises();
-
-    expect(messageAction).toHaveBeenCalledWith(
-      expect.objectContaining({
-        message_type: "PARTY_TEXT",
-        text: "用户补充本轮陈述内容。",
-      }),
-    );
-    expect(submitRoundAction).not.toHaveBeenCalled();
-    expect(wrapper.get('[data-send-message] textarea').element.value).toBe("");
-    expect(wrapper.get("[data-court-transcript]").text()).toContain(
-      "用户补充本轮陈述内容。",
-    );
-    expect(wrapper.get('[data-round-input-party-status="USER"]').text()).toContain(
-      "已提交",
-    );
-    expect(wrapper.get("[data-send-hearing-statement]").exists()).toBe(true);
-    expect(wrapper.get("[data-send-hearing-statement]").text()).toBe("提交陈述");
-  });
-
-  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
-  it("keeps the statement button available after that party has already spoken in an open round", async () => {
-    const { wrapper } = await mountView({
-      viewerRole: "MERCHANT",
+      submitAnswersAction,
       initialHearing: {
         ...hearing,
-        rounds: [
-          hearing.rounds[0],
-          {
-            ...hearing.rounds[1],
-            status: "WAITING",
-            submitted_roles: ["MERCHANT"],
-            current_actor_submitted: true,
-          },
-        ],
+        issue_set: {
+          schema_version: "hearing_issue_set.v1",
+          issue_set_id: "HEARING_ISSUE_SET_1",
+          issues: [
+            {
+              issue_id: "HEARING_ISSUE_1",
+              issue_statement: "商品是否实际投递至约定位置",
+              fact_ids: ["FACT_INTAKE_001"],
+              party_prompts: [
+                {
+                  target_participant_id: "user-local",
+                  role_snapshot: "USER",
+                  prompt_text: "请说明你核对过的收货位置和记录。",
+                },
+                {
+                  target_participant_id: "merchant-local",
+                  role_snapshot: "MERCHANT",
+                  prompt_text: "请说明物流交接和签收凭证。",
+                },
+              ],
+            },
+          ],
+        },
       },
     });
 
-    expect(wrapper.find("[data-submit-hearing-round]").exists()).toBe(false);
-    expect(wrapper.get("[data-send-hearing-statement]").exists()).toBe(true);
-    expect(wrapper.get("[data-send-hearing-statement]").text()).toBe("提交陈述");
-    expect(wrapper.get('[data-send-message] textarea').attributes("disabled")).toBeUndefined();
-    expect(wrapper.text()).toContain("已提交本轮，等待用户");
+    expect(wrapper.get("[data-hearing-issue]").text()).toContain(
+      "商品是否实际投递至约定位置",
+    );
+    expect(wrapper.get("[data-hearing-party-prompt]").text()).toContain(
+      "请说明你核对过的收货位置和记录。",
+    );
+    expect(wrapper.text()).not.toContain("请说明物流交接和签收凭证。");
+
+    await wrapper
+      .get('[data-party-statement-form] textarea')
+      .setValue("我在签收通知到达后立即核对了门口、前台和监控记录。");
+    await wrapper.get("[data-submit-party-statement]").trigger("click");
+    await flushPromises();
+
+    expect(submitAnswersAction).toHaveBeenCalledWith({
+      schema_version: "hearing_party_statement.v1",
+      issue_set_id: "HEARING_ISSUE_SET_1",
+      statement_text: "我在签收通知到达后立即核对了门口、前台和监控记录。",
+      source_message_ids: [],
+    });
+    expect(wrapper.get("[data-stage-input-submitted]").text()).toContain(
+      "本阶段材料已提交",
+    );
+    expect(wrapper.find("[data-party-statement-form]").exists()).toBe(false);
   });
 
-  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
-  it("shows a judge-waiting status after both parties have spoken without sealing the round", async () => {
+  it("renders system notices as centered time-and-text rows before digital-human cards", async () => {
     const { wrapper } = await mountView({
-      viewerRole: "MERCHANT",
-      initialHearing: {
-        rounds: [
-          {
-            round_id: "ROUND_1",
-            round_no: 1,
-            status: "OPEN",
-            dossier_version: 1,
-            submitted_roles: ["USER", "MERCHANT"],
-            current_actor_submitted: true,
-          },
-        ],
-        settlements: [],
-      },
       initialMessages: [
         {
-          id: "MESSAGE_USER_ROUND_1",
+          id: "MESSAGE_SYSTEM_OPENING",
           sequence_no: 1,
-          sender_role: "USER",
-          message_type: "PARTY_TEXT",
-          message_text: "用户已完成事实陈述。",
-          hearing_round: 1,
+          sender_role: "SYSTEM",
+          message_type: "SYSTEM_NOTICE",
+          message_text: "双方已进入庭审，数字人将依次宣读庭前卷宗。",
+          created_at: "2026-07-03T12:00:00+08:00",
         },
         {
-          id: "MESSAGE_MERCHANT_ROUND_1",
+          id: "MESSAGE_JUDGE_AFTER_SYSTEM",
           sequence_no: 2,
-          sender_role: "MERCHANT",
-          message_type: "PARTY_TEXT",
-          message_text: "商家已完成事实陈述。",
-          hearing_round: 1,
+          sender_role: "JUDGE",
+          message_type: "AGENT_MESSAGE",
+          message_text: "现在开始审理本案。",
+          created_at: "2026-07-03T12:01:00+08:00",
         },
       ],
     });
 
-    const statusDock = wrapper.get("[data-hearing-stage-dock]");
-
-    expect(statusDock.text()).toContain("双方已陈述，等待法官收束");
-    expect(statusDock.text()).not.toContain("等待用户");
-    expect(statusDock.text()).not.toContain("等待商家");
-    expect(wrapper.get('[data-round-input-party-status="USER"]').text()).toContain(
-      "已提交",
+    const rail = wrapper.get("[data-transcript-scroll-rail]");
+    const notice = wrapper.get("[data-court-system-notice]");
+    const judgeCard = wrapper.get('[data-court-message="judge"]');
+    expect(notice.text()).toContain("12:00");
+    expect(notice.text()).toContain("双方已进入庭审");
+    expect(notice.classes()).not.toContain("court-message");
+    expect(wrapper.find('[data-court-message="system"]').exists()).toBe(false);
+    expect(Array.from(rail.element.children).indexOf(notice.element)).toBeLessThan(
+      Array.from(rail.element.children).indexOf(judgeCard.element),
     );
-    expect(wrapper.get('[data-round-input-party-status="MERCHANT"]').text()).toContain(
-      "已提交",
-    );
-    expect(wrapper.get("[data-send-hearing-statement]").text()).toBe("提交陈述");
+    expect(judgeCard.text()).toContain("主审法官");
   });
 
-  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
-  it("shows a sealed-round message after both parties have submitted", async () => {
+  it("prefers participant identity statuses over conflicting legacy role statuses", async () => {
     const { wrapper } = await mountView({
-      viewerRole: "MERCHANT",
       initialHearing: {
         ...hearing,
-        rounds: [
-          hearing.rounds[0],
+        status: {
+          ...hearing.status,
+          participant_statuses: [
+            {
+              participant_id: "user-local",
+              participant_role: "USER",
+              status: "PENDING",
+            },
+            {
+              participant_id: "merchant-local",
+              participant_role: "MERCHANT",
+              status: "SUBMITTED",
+            },
+          ],
+          party_statuses: { USER: "SUBMITTED", MERCHANT: "PENDING" },
+        },
+      },
+    });
+
+    expect(wrapper.find("[data-party-statement-form]").exists()).toBe(true);
+    expect(
+      wrapper.get('[data-stage-input-party-status="USER"]').classes(),
+    ).toContain("stage-input-party-status--pending");
+    expect(
+      wrapper.get('[data-stage-input-party-status="MERCHANT"]').classes(),
+    ).toContain("stage-input-party-status--submitted");
+  });
+
+  it("updates the optimistic submission state by participant identity", async () => {
+    const merchantStatement = {
+      id: "MESSAGE_MERCHANT_IDENTITY_PRIVATE",
+      sequence_no: 10,
+      sender_role: "MERCHANT",
+      sender_id: "merchant-local",
+      message_type: "PARTY_TEXT",
+      message_source: "PARTY_ACTION",
+      message_text: "MERCHANT_PRIVATE_STATEMENT_BODY",
+      created_at: "2026-07-03T12:10:00+08:00",
+    };
+    const { wrapper } = await mountView({
+      submitAnswersAction: vi.fn().mockResolvedValue({
+        participant_id: "user-local",
+        participant_role: "USER",
+        submission_status: "SUBMITTED",
+      }),
+      initialHearing: {
+        ...hearing,
+        status: {
+          ...hearing.status,
+          participant_statuses: [
+            {
+              participant_id: "user-local",
+              participant_role: "USER",
+              status: "PENDING",
+            },
+            {
+              participant_id: "merchant-local",
+              participant_role: "MERCHANT",
+              status: "SUBMITTED",
+            },
+          ],
+          party_statuses: { USER: "PENDING", MERCHANT: "PENDING" },
+        },
+      },
+      initialMessages: [...courtMessages, merchantStatement],
+    });
+
+    expect(
+      wrapper.find('[data-court-message-id="MESSAGE_MERCHANT_IDENTITY_PRIVATE"]').exists(),
+    ).toBe(false);
+    await wrapper
+      .get('[data-party-statement-form] textarea')
+      .setValue("My complete statement for every shared dispute issue.");
+    await wrapper.get("[data-submit-party-statement]").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.get("[data-hearing-stage-dock]").text()).toContain(
+      "双方已提交",
+    );
+    expect(
+      wrapper.find('[data-court-message-id="MESSAGE_MERCHANT_IDENTITY_PRIVATE"]').exists(),
+    ).toBe(true);
+  });
+
+  it("uses the formal statement endpoint when no submit action is injected", async () => {
+    const submitStatement = vi.spyOn(hearingApi, "submitStatement").mockResolvedValue({
+      participant_id: "user-local",
+      participant_role: "USER",
+      submission_status: "SUBMITTED",
+    });
+    const submitAnswers = vi.spyOn(hearingApi, "submitAnswers");
+    vi.spyOn(hearingApi, "hearing").mockResolvedValue({
+      ...hearing,
+      status: {
+        ...hearing.status,
+        participant_statuses: [
           {
-            ...hearing.rounds[1],
-            status: "COMPLETED",
-            submitted_roles: ["USER", "MERCHANT"],
-            current_actor_submitted: true,
-            summary_json: JSON.stringify({
-              trigger: "BOTH_PARTIES_SUBMITTED",
-              judge: "双方本轮提交完成，等待 AI 法官生成本轮判断。",
-            }),
+            participant_id: "user-local",
+            participant_role: "USER",
+            status: "SUBMITTED",
+          },
+          {
+            participant_id: "merchant-local",
+            participant_role: "MERCHANT",
+            status: "PENDING",
           },
         ],
       },
     });
+    vi.spyOn(roomApi, "messages").mockResolvedValue(courtMessages);
+    vi.spyOn(roomApi, "events").mockResolvedValue([]);
+    vi.spyOn(evidenceApi, "catalog").mockResolvedValue(evidenceCatalog);
+    const { wrapper } = await mountView();
 
-    expect(wrapper.find("[data-submit-hearing-round]").exists()).toBe(false);
-    expect(wrapper.get("[data-hearing-stage-dock]").text()).toContain("本轮已封存");
-    expect(wrapper.get('[data-round-input-party-status="USER"]').text()).toContain("已封存");
-    expect(wrapper.get('[data-round-input-party-status="MERCHANT"]').text()).toContain("已封存");
-    expect(wrapper.text()).not.toContain("等待用户");
+    await wrapper
+      .get('[data-party-statement-form] textarea')
+      .setValue("A complete natural-language statement.");
+    await wrapper.get("[data-submit-party-statement]").trigger("click");
+    await flushPromises();
+
+    expect(submitStatement).toHaveBeenCalledWith(
+      { id: "user-local", role: "USER", label: expect.any(String) },
+      "CASE_HEARING_1",
+      {
+        schema_version: "hearing_party_statement.v1",
+        issue_set_id: "HEARING_QUESTION_SET_1",
+        statement_text: "A complete natural-language statement.",
+        source_message_ids: [],
+      },
+    );
+    expect(submitAnswers).not.toHaveBeenCalled();
+  });
+
+  it("uses the role-keyed party prompt emitted by the hearing agent", async () => {
+    const { wrapper } = await mountView({
+      initialHearing: {
+        ...hearing,
+        question_set: {
+          schema_version: "hearing_intake_questions.v1",
+          question_set_id: "HEARING_ISSUE_SET_ROLE_PROMPTS",
+          questions: [
+            {
+              question_id: "HEARING_ISSUE_DELIVERY",
+              issue_id: "HEARING_ISSUE_DELIVERY",
+              issue_statement: "商品是否实际投递至约定位置",
+              target_roles: ["USER", "MERCHANT"],
+              fact_ids: ["FACT_INTAKE_001"],
+              question_text: "商品是否实际投递至约定位置",
+              party_prompts: {
+                USER: "请说明你核对过的收货位置和记录。",
+                MERCHANT: "请说明物流交接和签收凭证。",
+              },
+            },
+          ],
+        },
+      },
+    });
+
+    expect(wrapper.get("[data-hearing-issue]").text()).toContain(
+      "商品是否实际投递至约定位置",
+    );
+    expect(wrapper.get("[data-hearing-party-prompt]").text()).toContain(
+      "请说明你核对过的收货位置和记录。",
+    );
+    expect(wrapper.text()).not.toContain("请说明物流交接和签收凭证。");
+  });
+
+  it("allows a statement when the shared issue set has no prompt for the current party", async () => {
+    const submitAnswersAction = vi.fn().mockResolvedValue({
+      participant_role: "USER",
+      submission_status: "SUBMITTED",
+    });
+    const { wrapper } = await mountView({
+      submitAnswersAction,
+      initialHearing: {
+        ...hearing,
+        question_set: {
+          schema_version: "hearing_intake_questions.v1",
+          question_set_id: "HEARING_QUESTION_SET_MERCHANT_ONLY",
+          questions: [
+            {
+              question_id: "HEARING_QUESTION_MERCHANT_ONLY",
+              target_party: "MERCHANT",
+              question_text: "请商家说明物流交接过程。",
+            },
+          ],
+        },
+      },
+    });
+
+    expect(wrapper.get("[data-hearing-party-prompt-empty]").text()).toContain(
+      "当前没有本方定向提示",
+    );
+    await wrapper
+      .get('[data-party-statement-form] textarea')
+      .setValue("我方仍希望说明未实际收到商品，并请求核对投递位置。");
+    await wrapper.get("[data-submit-party-statement]").trigger("click");
+    await flushPromises();
+
+    expect(submitAnswersAction).toHaveBeenCalledWith({
+      schema_version: "hearing_party_statement.v1",
+      issue_set_id: "HEARING_QUESTION_SET_MERCHANT_ONLY",
+      statement_text: "我方仍希望说明未实际收到商品，并请求核对投递位置。",
+      source_message_ids: [],
+    });
+  });
+
+  it("withholds the counterparty raw statement until both parties are terminal", async () => {
+    const merchantStatement = {
+      id: "MESSAGE_MERCHANT_PRIVATE_STATEMENT",
+      sequence_no: 9,
+      sender_role: "MERCHANT",
+      sender_id: "merchant-local",
+      message_type: "PARTY_TEXT",
+      message_source: "PARTY_ACTION",
+      message_text: "商家尚未公开的完整责任陈述。",
+      created_at: "2026-07-03T12:09:00+08:00",
+    };
+    const pending = await mountView({
+      initialHearing: {
+        ...hearing,
+        status: {
+          ...hearing.status,
+          party_statuses: { USER: "PENDING", MERCHANT: "SUBMITTED" },
+        },
+      },
+      initialMessages: [...courtMessages, merchantStatement],
+    });
+
+    expect(pending.wrapper.text()).not.toContain("商家尚未公开的完整责任陈述。");
+    expect(
+      pending.wrapper.find('[data-court-message-id="MESSAGE_MERCHANT_PRIVATE_STATEMENT"]').exists(),
+    ).toBe(false);
+
+    const terminal = await mountView({
+      initialHearing: {
+        ...hearing,
+        status: {
+          ...hearing.status,
+          party_statuses: { USER: "SUBMITTED", MERCHANT: "SUBMITTED" },
+        },
+      },
+      initialMessages: [...courtMessages, merchantStatement],
+    });
+
+    expect(terminal.wrapper.text()).toContain("商家尚未公开的完整责任陈述。");
   });
 
   // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
-  it("hands the parties off to platform review after the final hearing round is sealed", async () => {
+  it("does not allow a party to resubmit after its stage terminal state", async () => {
+    const { wrapper } = await mountView({
+      viewerRole: "MERCHANT",
+      initialHearing: {
+        ...hearing,
+        status: {
+          ...hearing.status,
+          party_statuses: { USER: "PENDING", MERCHANT: "SUBMITTED" },
+        },
+      },
+    });
+
+    expect(wrapper.find("[data-submit-answer-bundle]").exists()).toBe(false);
+    expect(wrapper.get("[data-stage-input-submitted]").text()).toContain("等待对方提交");
+    expect(wrapper.text()).toContain("已提交，等待用户");
+  });
+
+  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
+  it("waits for system synthesis after both party statements reach terminal state", async () => {
+    const { wrapper } = await mountView({
+      viewerRole: "MERCHANT",
+      initialHearing: {
+        ...hearing,
+        status: {
+          ...hearing.status,
+          party_statuses: { USER: "SUBMITTED", MERCHANT: "SUBMITTED" },
+        },
+      },
+    });
+
+    const statusDock = wrapper.get("[data-hearing-stage-dock]");
+
+    expect(statusDock.text()).toContain("双方已提交，等待系统统一整理");
+    expect(statusDock.text()).not.toContain("等待用户");
+    expect(statusDock.text()).not.toContain("等待商家");
+    expect(wrapper.get('[data-stage-input-party-status="USER"]').text()).toContain(
+      "已提交",
+    );
+    expect(wrapper.get('[data-stage-input-party-status="MERCHANT"]').text()).toContain(
+      "已提交",
+    );
+    expect(wrapper.find("[data-submit-answer-bundle]").exists()).toBe(false);
+  });
+
+  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
+  it("shows intake synthesis without invoking or naming the judge", async () => {
+    const { wrapper } = await mountView({
+      viewerRole: "MERCHANT",
+      initialHearing: {
+        ...hearing,
+        status: {
+          ...hearing.status,
+          stage_code: "INTAKE_SYNTHESIZING",
+          party_statuses: { USER: "SUBMITTED", MERCHANT: "SUBMITTED" },
+        },
+      },
+    });
+
+    expect(wrapper.get("[data-hearing-stage-dock]").text()).toContain("整理案情");
+    expect(wrapper.get("[data-stage-input-locked]").text()).toContain("全量案情矩阵");
+    expect(wrapper.find("[data-answer-bundle-form]").exists()).toBe(false);
+    expect(wrapper.get("[data-hearing-stage-dock]").text()).not.toContain("法官");
+  });
+
+  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
+  it("hands the parties to human review only after the persisted V2 is ready", async () => {
     const { wrapper } = await mountView({
       viewerRole: "USER",
       initialHearing: {
         ...hearing,
-        rounds: [
-          hearing.rounds[0],
-          {
-            ...hearing.rounds[1],
-            status: "COMPLETED",
-            submitted_roles: ["USER", "MERCHANT"],
-            current_actor_submitted: true,
-          },
-          {
-            round_id: "ROUND_3",
-            round_no: 3,
-            status: "FORCED_CLOSED",
-            dossier_version: 3,
-            stop_reason: "MAX_ROUNDS",
-            submitted_roles: ["USER", "MERCHANT"],
-            current_actor_submitted: true,
-            summary_json: JSON.stringify({
-              trigger: "MAX_ROUNDS_REACHED",
-              judge: "第三轮陈述已封存，正在生成最终裁决草案。",
-            }),
-          },
-        ],
+        status: {
+          flow_schema_version: "hearing_flow.v2",
+          flow_stage: "HUMAN_REVIEW_OPEN",
+          latest_draft_id: "DRAFT_V2_1",
+          review_gate_ready: true,
+          party_statuses: { USER: "SUBMITTED", MERCHANT: "SUBMITTED" },
+        },
       },
     });
 
     expect(wrapper.find("[data-review-handoff]").exists()).toBe(false);
     const statusDock = wrapper.get("[data-hearing-stage-dock]");
-    expect(statusDock.text()).toContain("等待裁决草案");
+    expect(statusDock.text()).toContain("本庭休庭，等待人工审核");
     expect(statusDock.text()).not.toContain("平台终审");
     expect(statusDock.text()).not.toContain("进入平台终审，等待审核员确认最终结果");
-    expect(statusDock.get("[data-hearing-stage-clock]").text()).toContain("当前轮次还剩");
-    expect(statusDock.get("[data-hearing-stage-clock]").text()).toContain("00:00");
+    expect(statusDock.get("[data-hearing-stage-clock]").text()).toContain("当前阶段");
+    expect(statusDock.get("[data-hearing-stage-clock]").text()).not.toContain("00:00");
     expect(wrapper.find("[data-hearing-progress-track]").classes()).toContain(
-      "round-progress-board--timeline",
+      "stage-progress-board--timeline",
     );
     expect(statusDock.find("[data-hearing-status-strip]").exists()).toBe(false);
-    expect(wrapper.get("[data-round-input-party-statuses]").text()).toContain("用户提交");
-    expect(wrapper.get("[data-round-input-party-statuses]").text()).toContain("商家提交");
-    expect(wrapper.find("[data-submit-hearing-round]").exists()).toBe(false);
-    expect(wrapper.find("[data-round-input-bar]").exists()).toBe(true);
-    expect(wrapper.get("[data-round-input-bar]").text()).toContain(
-      "庭审已封存，等待裁决草案",
-    );
-    expect(wrapper.get("[data-round-input-bar]").text()).not.toContain("ROUND INPUT DOCK");
-    expect(wrapper.get("[data-round-input-bar]").text()).not.toContain("等待平台终审");
-    expect(wrapper.find('[data-send-message] textarea').exists()).toBe(false);
-    expect(wrapper.find("[data-send-hearing-statement]").exists()).toBe(false);
-    expect(wrapper.get("[data-round-input-final-status]").text()).toContain(
-      "庭审已封存，等待裁决草案",
+    expect(wrapper.find("[data-submit-answer-bundle]").exists()).toBe(false);
+    expect(wrapper.find("[data-stage-input-bar]").exists()).toBe(true);
+    expect(wrapper.get("[data-stage-input-final-status]").text()).toContain(
+      "本庭休庭，等待人工审核",
     );
   });
 
+  it("offers a status refresh while the human-review handoff projection is incomplete", async () => {
+    const { wrapper } = await mountView({
+      viewerRole: "USER",
+      initialHearing: {
+        ...hearing,
+        status: {
+          flow_schema_version: "hearing_flow.v2",
+          flow_stage: "HUMAN_REVIEW_OPEN",
+          latest_draft_id: "DRAFT_V2_HANDOFF",
+          review_gate_ready: false,
+        },
+      },
+    });
+
+    expect(wrapper.get("[data-hearing-stage-dock]").text()).toContain(
+      "裁决草案已生成，正在移交",
+    );
+    expect(wrapper.get("[data-hearing-stage-dock]").text()).not.toContain(
+      "本庭休庭，等待人工审核",
+    );
+    expect(wrapper.get("[data-complete-hearing]").text()).toBe("刷新草案状态");
+    expect(wrapper.get("[data-complete-hearing]").element.disabled).toBe(false);
+  });
+
   // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
-  it("uses the backend draft-ready status as the final sealed hearing headline", async () => {
+  it("keeps a ready draft behind an explicit courtroom entry click", async () => {
     const { wrapper, router } = await mountView({
       viewerRole: "USER",
       initialHearing: {
         ...hearing,
         status: {
-          hearing_phase: "DRAFT_READY",
+          flow_schema_version: "hearing_flow.v2",
+          flow_stage: "HUMAN_REVIEW_OPEN",
           phase_label: "裁决草案已生成",
-          next_step_hint: "AI 法官已生成裁决草案，可进入结果页查看草案说明。",
+          next_step_hint: "AI 法官已生成裁决草案，可进入裁决草案室查阅。",
           can_complete_hearing: true,
           latest_draft_id: "DRAFT_READY_1",
-          final_round_sealed: true,
+          review_gate_ready: true,
         },
-        rounds: [
-          hearing.rounds[0],
-          {
-            ...hearing.rounds[1],
-            status: "COMPLETED",
-            submitted_roles: ["USER", "MERCHANT"],
-            current_actor_submitted: true,
-          },
-          {
-            round_id: "ROUND_3",
-            round_no: 3,
-            status: "FORCED_CLOSED",
-            dossier_version: 3,
-            stop_reason: "MAX_ROUNDS",
-            submitted_roles: ["USER", "MERCHANT"],
-            current_actor_submitted: true,
-          },
-        ],
       },
     });
 
@@ -1350,48 +1865,67 @@ describe("HearingCourtView", () => {
     expect(statusDock.text()).toContain("裁决草案已生成");
     expect(statusDock.text()).not.toContain("等待裁决草案");
     expect(wrapper.get("[data-complete-hearing-hint]").text()).toContain(
-      "可进入结果页查看草案说明",
+      "可进入裁决草案室查阅",
     );
     expect(wrapper.get("[data-complete-hearing-hint]").text()).not.toContain(
       "平台审核入口",
     );
     expect(wrapper.find('[data-send-message] textarea').exists()).toBe(false);
-    expect(wrapper.get("[data-round-input-final-status]").text()).toContain(
-      "庭审已封存，等待裁决草案",
+    expect(wrapper.get("[data-stage-input-final-status]").text()).toContain(
+      "裁决草案已生成",
     );
     await flushPromises();
-    expect(router.currentRoute.value.fullPath).toBe(
-      "/disputes/CASE_HEARING_1/draft",
-    );
+    expect(wrapper.get("[data-complete-hearing]").text()).toBe("查看裁决草案");
+    expect(router.currentRoute.value.fullPath).toBe("/disputes/CASE_HEARING_1/hearing");
+  });
+
+  it("presents hearing intake streams as intake-officer actions", () => {
+    expect(componentSource).toContain('operation.startsWith("HEARING_INTAKE_")');
+    expect(componentSource).toContain('agentLabel: "案情接待官"');
+    expect(componentSource).toContain('senderRole: "INTAKE_OFFICER"');
+    expect(componentSource).toContain('"HEARING_INTAKE_QUESTIONS",');
+    expect(componentSource).toContain('"HEARING_INTAKE_SYNTHESIS",');
   });
 
   it("hands a platform reviewer to the same read-only draft room", async () => {
-    const { router } = await mountView({
+    const readyStatus = {
+      flow_schema_version: "hearing_flow.v2",
+      flow_stage: "HUMAN_REVIEW_OPEN",
+      can_complete_hearing: true,
+      review_gate_ready: true,
+      latest_draft_id: "DRAFT_READY_2",
+      review_task_id: "REVIEW_READY_2",
+    };
+    const completeHearingAction = vi.fn().mockResolvedValue({
+      ...hearing,
+      status: readyStatus,
+      decision_chain: {
+        ADJUDICATION_DRAFT: { id: "DRAFT_READY_2" },
+      },
+    });
+    const { wrapper, router } = await mountView({
       viewerRole: "PLATFORM_REVIEWER",
+      completeHearingAction,
       initialHearing: {
         ...hearing,
-        status: {
-          hearing_phase: "REVIEW_GATE_READY",
-          can_complete_hearing: true,
-          review_gate_ready: true,
-          latest_draft_id: "DRAFT_READY_2",
-          review_task_id: "REVIEW_READY_2",
-          final_round_sealed: true,
-        },
+        status: readyStatus,
       },
     });
 
+    expect(router.currentRoute.value.fullPath).toBe("/disputes/CASE_HEARING_1/hearing");
+    await wrapper.get("[data-complete-hearing]").trigger("click");
     await flushPromises();
+    expect(completeHearingAction).not.toHaveBeenCalled();
     expect(router.currentRoute.value.fullPath).toBe(
       "/disputes/CASE_HEARING_1/draft",
     );
   });
 
   // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
-  it("does not expose party round submission to platform reviewers", async () => {
+  it("does not expose party stage submission to platform reviewers", async () => {
     const { wrapper } = await mountView({ viewerRole: "PLATFORM_REVIEWER" });
 
-    expect(wrapper.find("[data-submit-hearing-round]").exists()).toBe(false);
+    expect(wrapper.find("[data-submit-answer-bundle]").exists()).toBe(false);
   });
 
   // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
@@ -1416,27 +1950,28 @@ describe("HearingCourtView", () => {
   });
 
   // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
-  it("refreshes the hearing snapshot when the backend emits a phase-changed event", async () => {
+  it("refreshes the hearing snapshot when the backend emits a flow-stage event", async () => {
     const refreshedHearing = {
       ...hearing,
       status: {
-        hearing_phase: "DRAFT_READY",
+        flow_schema_version: "hearing_flow.v2",
+        flow_stage: "HUMAN_REVIEW_OPEN",
         phase_label: "裁决草案已生成",
-        next_step_hint: "裁决草案已生成，可进入结果页查看草案说明。",
+        next_step_hint: "裁决草案已生成，可进入裁决草案室查阅。",
         can_complete_hearing: true,
         latest_draft_id: "DRAFT_READY_EVENT",
-        final_round_sealed: true,
+        review_gate_ready: true,
       },
     };
     const eventStreamer = vi.fn(async (options) => {
       options.state.connected = true;
       await options.applyEvent({
         id: 18,
-        event: "HEARING_PHASE_CHANGED",
+        event: "HEARING_FLOW_STAGE_CHANGED",
         data: {
-          event_type: "HEARING_PHASE_CHANGED",
+          event_type: "HEARING_FLOW_STAGE_CHANGED",
           payload_json: JSON.stringify({
-            hearing_phase: "DRAFT_READY",
+            flow_stage: "HUMAN_REVIEW_OPEN",
             latest_draft_id: "DRAFT_READY_EVENT",
           }),
         },
@@ -1464,57 +1999,118 @@ describe("HearingCourtView", () => {
     expect(wrapper.get("[data-complete-hearing]").text()).toBe("查看裁决草案");
   });
 
-  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
-  it("lets parties leave the hearing through the right evidence rail completion button", async () => {
-    const completeHearingAction = vi.fn().mockResolvedValue({
-      hearing_phase: "DRAFT_READY",
-      phase_label: "裁决草案已生成",
-      next_step_hint: "AI 法官已生成裁决草案，可进入结果页查看草案说明。",
-      can_complete_hearing: true,
-      latest_draft_id: "DRAFT_READY_1",
-      final_round_sealed: true,
-    });
-    const { wrapper, router } = await mountView({
-      completeHearingAction,
-      initialHearing: {
-        ...hearing,
-        status: {
-          hearing_phase: "DRAFT_READY",
-          phase_label: "裁决草案已生成",
-          next_step_hint: "AI 法官已生成裁决草案，可进入结果页查看草案说明。",
-          can_complete_hearing: true,
-          latest_draft_id: "DRAFT_READY_1",
-          final_round_sealed: true,
-        },
+  it("rechecks a delayed final projection after the review task event", async () => {
+    vi.useFakeTimers();
+    const staleHearing = {
+      ...hearing,
+      status: {
+        flow_schema_version: "hearing_flow.v2",
+        flow_stage: "JUDGE_V2_GENERATING",
+        stage_sequence: 13,
+        stage_status: "RUNNING",
+        review_gate_ready: false,
       },
+    };
+    const readyHearing = {
+      ...hearing,
+      status: {
+        flow_schema_version: "hearing_flow.v2",
+        flow_stage: "CLOSED",
+        stage_sequence: 15,
+        stage_status: "COMPLETED",
+        flow_status: "CLOSED",
+        latest_draft_id: "JUDGE_V2_DELAYED",
+        review_gate_ready: true,
+      },
+    };
+    const eventStreamer = vi.fn(async (options) => {
+      options.state.connected = true;
+      await options.applyEvent({
+        id: 19,
+        event: "REVIEW_TASK_CREATED",
+        data: {
+          event_type: "REVIEW_TASK_CREATED",
+          payload_json: JSON.stringify({ review_task_id: "REVIEW_DELAYED" }),
+        },
+      });
     });
+    const completeHearingAction = vi.fn();
+    vi.spyOn(hearingApi, "hearing")
+      .mockResolvedValueOnce(staleHearing)
+      .mockResolvedValueOnce(staleHearing)
+      .mockResolvedValueOnce(readyHearing);
+    vi.spyOn(roomApi, "messages").mockResolvedValue(courtMessages);
+    vi.spyOn(evidenceApi, "catalog").mockResolvedValue(evidenceCatalog);
 
-    const button = wrapper.get("[data-complete-hearing]");
-    expect(button.text()).toBe("查看裁决草案");
-
-    await button.trigger("click");
+    const { wrapper, router } = await mountView({
+      initialHearing: staleHearing,
+      eventStreamer,
+      completeHearingAction,
+    });
     await flushPromises();
 
-    expect(completeHearingAction).toHaveBeenCalled();
-    expect(router.currentRoute.value.path).toBe(
-      "/disputes/CASE_HEARING_1/draft",
+    expect(wrapper.get("[data-complete-hearing]").text()).toBe(
+      "正在确认草案状态",
     );
+    await vi.advanceTimersByTimeAsync(300);
+    await flushPromises();
+    expect(hearingApi.hearing).toHaveBeenCalledTimes(2);
+
+    await vi.advanceTimersByTimeAsync(900);
+    await flushPromises();
+    expect(hearingApi.hearing).toHaveBeenCalledTimes(3);
+    expect(wrapper.get("[data-complete-hearing]").text()).toBe("查看裁决草案");
+    expect(wrapper.get("[data-complete-hearing]").element.disabled).toBe(false);
+
+    await wrapper.get("[data-complete-hearing]").trigger("click");
+    await flushPromises();
+    expect(completeHearingAction).not.toHaveBeenCalled();
+    expect(router.currentRoute.value.path).toBe("/disputes/CASE_HEARING_1/draft");
   });
 
   // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
-  it("does not let the completion button bypass the judge while the draft is still being prepared", async () => {
+  it("does not poll or open the draft while V2 is still being generated", async () => {
     const completeHearingAction = vi.fn();
     const { wrapper, router } = await mountView({
       completeHearingAction,
       initialHearing: {
         ...hearing,
         status: {
-          hearing_phase: "JUDGE_DRAFTING",
-          phase_label: "等待裁决草案",
-          next_step_hint: "三轮陈述已封存，等待 AI 法官生成裁决草案。",
+          flow_schema_version: "hearing_flow.v2",
+          flow_stage: "JUDGE_V2_GENERATING",
+          phase_label: "法官正在生成 V2 草案",
+          next_step_hint: "评审报告已绑定，正在生成唯一 V2。",
           can_complete_hearing: false,
-          final_round_sealed: true,
         },
+      },
+    });
+
+    const button = wrapper.get("[data-complete-hearing]");
+    expect(button.element.disabled).toBe(true);
+    expect(button.text()).toBe("等待裁决草案");
+
+    await button.trigger("click");
+    await flushPromises();
+
+    expect(completeHearingAction).not.toHaveBeenCalled();
+    expect(router.currentRoute.value.path).toBe("/disputes/CASE_HEARING_1/hearing");
+  });
+
+  // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
+  it("shows stage progress instead of a fake round countdown while V1 is generated", async () => {
+    const draftingStatus = {
+      flow_schema_version: "hearing_flow.v2",
+      flow_stage: "JUDGE_V1_GENERATING",
+      phase_label: "法官正在生成 V1 草案",
+      next_step_hint: "法官仅基于已冻结庭审卷宗生成 V1。",
+      can_complete_hearing: false,
+    };
+    const completeHearingAction = vi.fn();
+    const { wrapper, router } = await mountView({
+      completeHearingAction,
+      initialHearing: {
+        ...hearing,
+        status: draftingStatus,
       },
     });
 
@@ -1523,13 +2119,16 @@ describe("HearingCourtView", () => {
     expect(button.element.disabled).toBe(true);
     expect(button.text()).toBe("等待裁决草案");
     expect(wrapper.get("[data-complete-hearing-hint]").text()).toContain(
-      "等待 AI 法官生成裁决草案",
+      "法官仅基于已冻结庭审卷宗生成 V1",
     );
+    expect(wrapper.get("[data-hearing-stage-clock]").text()).toContain("法官草案 V1");
+    expect(wrapper.get("[data-hearing-stage-clock]").text()).not.toContain("00:00");
 
     await button.trigger("click");
     await flushPromises();
 
     expect(completeHearingAction).not.toHaveBeenCalled();
+    expect(wrapper.find("[data-draft-generation-notice]").exists()).toBe(false);
     expect(router.currentRoute.value.path).toBe(
       "/disputes/CASE_HEARING_1/hearing",
     );
@@ -1549,7 +2148,7 @@ describe("HearingCourtView", () => {
         message_type: "PARTY_EVIDENCE_REFERENCE",
         message_text: "商家提交了 1 份证据材料。",
         attachment_refs: ["EVIDENCE_SUPPLEMENT_1"],
-        hearing_round: 2,
+        stage_code: "PARTY_EVIDENCE_OPEN",
       },
     });
     const messageAction = vi.fn().mockResolvedValue({
@@ -1560,6 +2159,7 @@ describe("HearingCourtView", () => {
     });
     const { wrapper } = await mountView({
       viewerRole: "MERCHANT",
+      initialHearing: evidenceStageHearing(),
       supplementAction,
       submitEvidenceBatchAction,
       messageAction,
@@ -1576,16 +2176,31 @@ describe("HearingCourtView", () => {
     await input.trigger("change");
     await flushPromises();
 
+    expect(supplementAction).not.toHaveBeenCalled();
+    const declaration = wrapper.get("[data-supplement-declaration-modal]");
+    expect(declaration.text()).toContain("商家 · 被争议方");
+    await declaration
+      .get("[data-supplement-claimed-fact]")
+      .setValue("证明商家在约定时间内完成了包裹交付。 ");
+    await declaration.get("[data-supplement-truth-attested]").setValue(true);
+    await declaration.get("[data-supplement-declaration-form]").trigger("submit");
+    await flushPromises();
+
     expect(supplementAction).toHaveBeenCalledWith(
       expect.objectContaining({
         file,
         sourceType: "MERCHANT_UPLOAD",
         visibility: "PARTIES",
         modelProcessingAuthorized: true,
+        claimedFact: "证明商家在约定时间内完成了包裹交付。",
+        truthAttested: true,
       }),
     );
     expect(submitEvidenceBatchAction).toHaveBeenCalledWith(
       expect.objectContaining({
+        schema_version: "hearing_evidence_batch.v1",
+        request_set_id: "HEARING_EVIDENCE_REQUEST_SET_1",
+        request_ids: ["HEARING_EVIDENCE_REQUEST_MERCHANT_1"],
         evidence_ids: ["EVIDENCE_SUPPLEMENT_1"],
         batch_note: "庭审补充证据：签收底单.pdf",
       }),
@@ -1594,6 +2209,82 @@ describe("HearingCourtView", () => {
     expect(wrapper.get("[data-court-transcript]").text()).toContain(
       "商家提交了 1 份证据材料。",
     );
+  });
+
+  it("uploads every supplementary evidence file in parallel and submits one shared batch", async () => {
+    let resolveFirstUpload;
+    const firstUpload = new Promise((resolve) => {
+      resolveFirstUpload = resolve;
+    });
+    const supplementAction = vi.fn(({ file }) => {
+      if (file.name === "订单截图.png") return firstUpload;
+      return Promise.resolve({
+        evidence_id: "EVIDENCE_SUPPLEMENT_LOGISTICS",
+        original_filename: file.name,
+      });
+    });
+    const submitEvidenceBatchAction = vi.fn().mockResolvedValue({
+      room_message: {
+        id: "MESSAGE_SUPPLEMENT_BATCH_PARALLEL",
+        sequence_no: 4,
+        sender_role: "USER",
+        message_type: "PARTY_EVIDENCE_REFERENCE",
+        message_text: "用户提交了 2 份证据材料。",
+        attachment_refs: [
+          "EVIDENCE_SUPPLEMENT_ORDER",
+          "EVIDENCE_SUPPLEMENT_LOGISTICS",
+        ],
+        stage_code: "PARTY_EVIDENCE_OPEN",
+      },
+    });
+    const { wrapper } = await mountView({
+      viewerRole: "USER",
+      initialHearing: evidenceStageHearing(),
+      supplementAction,
+      submitEvidenceBatchAction,
+    });
+    const input = wrapper.get('input[type="file"]');
+    const files = [
+      new File(["order"], "订单截图.png", { type: "image/png" }),
+      new File(["logistics"], "物流记录.pdf", { type: "application/pdf" }),
+    ];
+    Object.defineProperty(input.element, "files", {
+      value: files,
+      configurable: true,
+    });
+
+    expect(input.attributes("multiple")).toBeDefined();
+    await input.trigger("change");
+    const declaration = wrapper.get("[data-supplement-declaration-modal]");
+    expect(declaration.text()).toContain("订单截图.png");
+    expect(declaration.text()).toContain("物流记录.pdf");
+    await declaration
+      .get("[data-supplement-claimed-fact]")
+      .setValue("共同证明下单规格与物流交接过程。");
+    await declaration.get("[data-supplement-truth-attested]").setValue(true);
+    await declaration.get("[data-supplement-declaration-form]").trigger("submit");
+    await Promise.resolve();
+
+    expect(supplementAction).toHaveBeenCalledTimes(2);
+    expect(submitEvidenceBatchAction).not.toHaveBeenCalled();
+
+    resolveFirstUpload({
+      evidence_id: "EVIDENCE_SUPPLEMENT_ORDER",
+      original_filename: files[0].name,
+    });
+    await flushPromises();
+
+    expect(submitEvidenceBatchAction).toHaveBeenCalledOnce();
+    expect(submitEvidenceBatchAction).toHaveBeenCalledWith({
+      schema_version: "hearing_evidence_batch.v1",
+      request_set_id: "HEARING_EVIDENCE_REQUEST_SET_1",
+      request_ids: ["HEARING_EVIDENCE_REQUEST_USER_1"],
+      evidence_ids: [
+        "EVIDENCE_SUPPLEMENT_ORDER",
+        "EVIDENCE_SUPPLEMENT_LOGISTICS",
+      ],
+      batch_note: "庭审补充证据（2份）：订单截图.png、物流记录.pdf",
+    });
   });
 
   // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
@@ -1618,7 +2309,7 @@ describe("HearingCourtView", () => {
           sequence_no: 6,
           sender_role: "JURY",
           message_type: "JURY_REVIEW_REPORT",
-          hearing_round: 3,
+          stage_code: "JURY_REVIEWING",
           message_text: JSON.stringify({
             a2a_message_id: "A2A_INTERNAL_REPORT_1",
             message_type: "JURY_REVIEW_REPORT",
@@ -1647,7 +2338,7 @@ describe("HearingCourtView", () => {
   });
 
   // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
-  it("adds evidence supplements, matrix revisions and jury reports to the hearing ledger", async () => {
+  it("adds evidence supplements, matrix revisions and jury reports without round labels", async () => {
     const { wrapper } = await mountView({
       initialMessages: [
         ...courtMessages,
@@ -1658,19 +2349,19 @@ describe("HearingCourtView", () => {
           message_type: "PARTY_EVIDENCE_REFERENCE",
           message_text: "商家提交了 1 份补充证据材料。",
           attachment_refs: ["EVIDENCE_SUPPLEMENT_1"],
-          hearing_round: 2,
+          stage_code: "PARTY_EVIDENCE_OPEN",
         },
         {
           id: "MESSAGE_DOSSIER_REVISION_1",
           sequence_no: 6,
           sender_role: "EVIDENCE_CLERK",
           message_type: "EVIDENCE_DOSSIER_REVISED",
-          hearing_round: 2,
+          stage_code: "EVIDENCE_SYNTHESIZING",
           message_text: JSON.stringify({
             active_version: 2,
             supersedes_version: 1,
-            updated_after_round: 2,
-            revision_reason: "第二轮补证后更新证据矩阵",
+            source_stage: "EVIDENCE_SYNTHESIZING",
+            revision_reason: "庭审补证完成后更新共享证据矩阵",
           }),
         },
         {
@@ -1678,7 +2369,7 @@ describe("HearingCourtView", () => {
           sequence_no: 7,
           sender_role: "JURY",
           message_type: "JURY_REVIEW_REPORT",
-          hearing_round: 3,
+          stage_code: "JURY_REVIEWING",
           message_text: JSON.stringify({
             risk_level: "MEDIUM",
             confidence_score: 75,
@@ -1691,37 +2382,48 @@ describe("HearingCourtView", () => {
     await wrapper.get("[data-open-court-ledger]").trigger("click");
     const ledger = wrapper.get("[data-court-ledger-drawer]").text();
 
-    expect(ledger).toContain("第 2 轮补充证据");
+    expect(ledger).toContain("当事方补充证据");
     expect(ledger).toContain("商家提交了 1 份补充证据材料");
     expect(ledger).toContain("证据矩阵更新");
     expect(ledger).toContain("v1 → v2");
-    expect(ledger).toContain("第二轮补证后更新证据矩阵");
-    expect(ledger).toContain("第 3 轮评审复核报告");
+    expect(ledger).toContain("庭审补证完成后更新共享证据矩阵");
+    expect(ledger).toContain("评审复核报告");
     expect(ledger).toContain("评审团建议法官在草案中说明证据缺口");
     expect(ledger).not.toContain("active_version");
     expect(ledger).not.toContain("JURY_REVIEW_REPORT");
   });
 
   // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
-  it("adds final draft, reviewer handoff and execution assistant events to the hearing ledger", async () => {
+  it("adds dossier, V1, jury, V2 and reviewer handoff events to the hearing ledger", async () => {
     const { wrapper } = await mountView({
       initialEvents: [
         {
           sequence_no: 21,
-          event_type: "FINAL_DRAFT_REQUIRED",
-          payload_json: JSON.stringify({ round_no: 3 }),
+          event_type: "TRIAL_DOSSIER_FROZEN",
+          payload_json: JSON.stringify({ trial_dossier_id: "TRIAL_DOSSIER_1" }),
         },
         {
           sequence_no: 22,
-          event_type: "HEARING_PHASE_CHANGED",
-          payload_json: JSON.stringify({
-            current_round_no: 3,
-            phase_label: "裁决草案已生成",
-            next_step_hint: "可以进入结果页查看裁决草案，并等待后续确认。",
-          }),
+          event_type: "JUDGE_V1_READY",
+          payload_json: JSON.stringify({ proposal_id: "JUDGE_V1_1" }),
         },
         {
           sequence_no: 23,
+          event_type: "JURY_REVIEW_READY",
+          payload_json: JSON.stringify({ review_id: "JURY_REVIEW_1" }),
+        },
+        {
+          sequence_no: 24,
+          event_type: "JUDGE_V2_READY",
+          payload_json: JSON.stringify({ judge_v2_id: "JUDGE_V2_1" }),
+        },
+        {
+          sequence_no: 25,
+          event_type: "REVIEW_TASK_CREATED",
+          payload_json: JSON.stringify({ review_task_id: "REVIEW_1" }),
+        },
+        {
+          sequence_no: 26,
           event_type: "EXECUTION_ASSISTANT_HANDOFF",
           payload_json: JSON.stringify({
             status: "EXECUTION_ASSISTANT_HANDOFF",
@@ -1735,10 +2437,11 @@ describe("HearingCourtView", () => {
     await wrapper.get("[data-open-court-ledger]").trigger("click");
     const ledger = wrapper.get("[data-court-ledger-drawer]").text();
 
-    expect(ledger).toContain("法官进入裁决草案生成");
-    expect(ledger).toContain("草案生成中");
-    expect(ledger).toContain("裁决草案状态更新");
-    expect(ledger).toContain("裁决草案已生成");
+    expect(ledger).toContain("庭审卷宗冻结");
+    expect(ledger).toContain("法官 V1 草案");
+    expect(ledger).toContain("评审复核报告");
+    expect(ledger).toContain("法官 V2 草案");
+    expect(ledger).toContain("人工审核任务");
     expect(ledger).toContain("执行专员助手");
     expect(ledger).toContain("裁决已确认，方案已移交给执行专员助手处理");
     expect(ledger).not.toContain("approval_record_id");
@@ -1746,17 +2449,24 @@ describe("HearingCourtView", () => {
   });
 
   // 业务位置：【前端庭审】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 庭审轮次、双方陈述、法官 Agent 流 正确进入 下一轮提交或裁判草案审核入口。上游：庭审轮次、双方陈述、法官 Agent 流。下游：下一轮提交或裁判草案审核入口。边界：页面不得把 AI 建议显示为最终裁判。
-  it("shows a friendly empty ledger when no hearing rounds have started", async () => {
+  it("shows a friendly empty ledger before flow events are persisted", async () => {
     const { wrapper } = await mountView({
-      initialHearing: { rounds: [], settlements: [] },
+      initialHearing: {
+        status: {
+          flow_schema_version: "hearing_flow.v2",
+          flow_stage: "COURT_PREPARING",
+        },
+        settlements: [],
+      },
+      initialMessages: [],
     });
 
     await wrapper.get("[data-open-court-ledger]").trigger("click");
 
-    expect(wrapper.get("[data-round-ledger-empty]").text()).toContain(
-      "第一轮庭审记录生成后",
+    expect(wrapper.get("[data-hearing-ledger-empty]").text()).toContain(
+      "庭审阶段事件生成后",
     );
-    expect(wrapper.get("[data-round-ledger-empty]").text()).not.toContain(
+    expect(wrapper.get("[data-hearing-ledger-empty]").text()).not.toContain(
       "提出一致方案",
     );
   });

@@ -1,6 +1,6 @@
 # 文件作用：Python Agent 服务代码文件，承载售后争议智能体的 API、配置、模型调用或业务流程。
 
-"""Composition root for the six final internal Agent APIs."""
+"""Composition root for the non-hearing internal Agent APIs."""
 
 from __future__ import annotations
 
@@ -24,14 +24,6 @@ class EvidenceAgent(Protocol):
     def build(self, *args: Any, **kwargs: Any) -> Any: ...
 
 
-class HearingAgent(Protocol):
-    # 所属模块：Python Agent 服务边界 > final_agents；函数角色：类/闭包内部方法。
-    # 具体功能：`run_stage` 驱动本阶段状态对应的业务步骤并返回阶段结果。
-    # 上下游：上游为 Java 内部鉴权 HTTP 请求、关联 ID；下游为 同步/流式 Agent 响应、标准错误。
-    # 系统意义：该函数在系统中的业务边界是：鉴权、追踪、异常映射必须完整；不泄露内部推理。
-    def run_stage(self, *args: Any, **kwargs: Any) -> Any: ...
-
-
 class DeliberationAgent(Protocol):
     # 所属模块：Python Agent 服务边界 > final_agents；函数角色：类/闭包内部方法。
     # 具体功能：`run` 驱动本阶段状态对应的业务步骤并返回阶段结果。
@@ -52,7 +44,6 @@ class ReviewCopilotAgent(Protocol):
 class FinalAgentServices:
     intake: AnalyzeAgent
     evidence: EvidenceAgent
-    hearing: HearingAgent
     deliberation: DeliberationAgent
     review_copilot: ReviewCopilotAgent
     evaluation: AnalyzeAgent

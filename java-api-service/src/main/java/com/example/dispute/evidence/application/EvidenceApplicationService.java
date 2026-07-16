@@ -51,6 +51,8 @@ public class EvidenceApplicationService {
     private static final Logger LOGGER =
             LoggerFactory.getLogger(EvidenceApplicationService.class);
     private static final long MAX_FILE_SIZE = 25L * 1024 * 1024;
+    private static final String ATTESTATION_VERSION = "EVIDENCE_TRUTH_ATTESTATION_V1";
+    private static final String HUMAN_FORGERY_GATE = "HUMAN_CONFIRMED_FORGERY_REQUIRED";
     private static final Set<String> ALLOWED_CONTENT_TYPES =
             Set.of(
                     "image/png",
@@ -108,6 +110,8 @@ public class EvidenceApplicationService {
             String evidenceType,
             String sourceType,
             String visibility,
+            String claimedFact,
+            boolean truthAttested,
             OffsetDateTime occurredAt,
             AuthenticatedActor actor) {
         return upload(
@@ -117,6 +121,8 @@ public class EvidenceApplicationService {
                 sourceType,
                 visibility,
                 false,
+                claimedFact,
+                truthAttested,
                 occurredAt,
                 actor);
     }
@@ -135,10 +141,14 @@ public class EvidenceApplicationService {
             String sourceType,
             String visibility,
             boolean modelProcessingAuthorized,
+            String claimedFact,
+            boolean truthAttested,
             OffsetDateTime occurredAt,
             AuthenticatedActor actor) {
         FulfillmentCaseEntity disputeCase = authorizedCase(caseId, actor);
         validateSourceType(sourceType, actor);
+        String normalizedClaimedFact = validateSubmissionDeclaration(claimedFact, truthAttested, actor);
+        SubmissionAttestation attestation = submissionAttestation(disputeCase, actor);
         validateFile(file);
         byte[] content = bytes(file);
         validateSignature(file.getContentType(), content);
@@ -149,6 +159,10 @@ public class EvidenceApplicationService {
                                 caseId, hash, sourceType);
         if (duplicate.isPresent()) {
             EvidenceItemEntity existing = duplicate.get();
+            existing.recordSubmissionDeclaration(
+                    submissionDeclarationMetadata(
+                            existing.getMetadataJson(), normalizedClaimedFact, attestation, actor),
+                    actor.actorId());
             if (modelProcessingAuthorized
                     && !Boolean.TRUE.equals(
                             readJsonMap(existing.getMetadataJson())
@@ -166,7 +180,19 @@ public class EvidenceApplicationService {
                         Map.of("model_processing_authorized", false),
                         Map.of("model_processing_authorized", true));
             }
-            return toView(existing);
+            EvidenceView view = toView(evidenceRepository.save(existing));
+            auditRecorder.record(
+                    actor,
+                    "EVIDENCE_SUBMISSION_DECLARATION_RECORDED",
+                    "EVIDENCE_ITEM",
+                    existing.getId(),
+                    caseId,
+                    Map.of(),
+                    Map.of(
+                            "claimed_fact", normalizedClaimedFact,
+                            "truth_attested", true,
+                            "party_capacity", attestation.partyCapacity()));
+            return view;
         }
 
         EvidenceDossierEntity dossier =
@@ -207,6 +233,10 @@ public class EvidenceApplicationService {
                         file.getSize(),
                         required(visibility, "visibility"),
                         occurredAt);
+        entity.recordSubmissionDeclaration(
+                submissionDeclarationMetadata(
+                        entity.getMetadataJson(), normalizedClaimedFact, attestation, actor),
+                actor.actorId());
         if (modelProcessingAuthorized) {
             entity.authorizeModelProcessing(
                     modelProcessingAuthorization(entity.getMetadataJson(), actor),
@@ -234,6 +264,54 @@ public class EvidenceApplicationService {
     // 上游调用：「EvidenceApplicationService.modelProcessingAuthorization(String,AuthenticatedActor)」的上游调用点包括 「EvidenceApplicationService.upload」。
     // 下游影响：「EvidenceApplicationService.modelProcessingAuthorization(String,AuthenticatedActor)」向下依次触达 「actor.actorId」、「readJsonMap」、「writeJson」；计算结果以「String」交给调用方。
     // 系统意义：「EvidenceApplicationService.modelProcessingAuthorization(String,AuthenticatedActor)」负责主链路中的“modelProcessing授权”；原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
+    private static String validateSubmissionDeclaration(
+            String claimedFact, boolean truthAttested, AuthenticatedActor actor) {
+        if (!truthAttested) {
+            throw new IllegalArgumentException("truthAttested must be true");
+        }
+        if (actor.role() != ActorRole.USER && actor.role() != ActorRole.MERCHANT) {
+            throw new ForbiddenException("only a dispute party can attest submitted evidence");
+        }
+        String normalized = claimedFact == null ? "" : claimedFact.trim();
+        if (normalized.length() < 5 || normalized.length() > 1000) {
+            throw new IllegalArgumentException(
+                    "claimedFact length must be between 5 and 1000 characters");
+        }
+        return normalized;
+    }
+
+    private static SubmissionAttestation submissionAttestation(
+            FulfillmentCaseEntity disputeCase, AuthenticatedActor actor) {
+        boolean initiator = disputeCase.getInitiatorRole() == actor.role();
+        return new SubmissionAttestation(
+                initiator ? "INITIATOR" : "RESPONDENT",
+                initiator
+                        ? "REJECT_INITIATOR_CLAIMS_AND_REPUTATION_PENALTY"
+                        : "ACCEPT_REASONABLE_COUNTERPARTY_CLAIMS_AND_REPUTATION_PENALTY");
+    }
+
+    private String submissionDeclarationMetadata(
+            String existingMetadataJson,
+            String claimedFact,
+            SubmissionAttestation attestation,
+            AuthenticatedActor actor) {
+        Map<String, Object> metadata =
+                new LinkedHashMap<>(readJsonMap(existingMetadataJson));
+        metadata.put("claimed_fact", claimedFact);
+        metadata.put("truth_attested", true);
+        metadata.put("attestation_version", ATTESTATION_VERSION);
+        metadata.put(
+                "attestation_scope",
+                List.of("AUTHENTICITY", "CLAIMED_FACT_RELEVANCE"));
+        metadata.put("attestation_role", actor.role().name());
+        metadata.put("attested_by", actor.actorId());
+        metadata.put("attested_at", OffsetDateTime.now(ZoneOffset.UTC).toString());
+        metadata.put("party_capacity", attestation.partyCapacity());
+        metadata.put("forgery_consequence_code", attestation.forgeryConsequenceCode());
+        metadata.put("enforcement_gate", HUMAN_FORGERY_GATE);
+        return writeJson(metadata);
+    }
+
     private String modelProcessingAuthorization(
             String existingMetadataJson, AuthenticatedActor actor) {
         Map<String, Object> metadata =
@@ -584,6 +662,7 @@ public class EvidenceApplicationService {
     // 下游影响：「EvidenceApplicationService.toView(EvidenceItemEntity)」向下依次触达 「entity.getId」、「entity.getCaseId」、「entity.getEvidenceType」、「entity.getSourceType」；计算结果以「EvidenceView」交给调用方。
     // 系统意义：「EvidenceApplicationService.toView(EvidenceItemEntity)」统一“视图”的跨层表示，避免不同入口产生不兼容字段；原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
     private EvidenceView toView(EvidenceItemEntity entity) {
+        Map<String, Object> metadata = readJsonMap(entity.getMetadataJson());
         return new EvidenceView(
                 entity.getId(),
                 entity.getCaseId(),
@@ -602,7 +681,28 @@ public class EvidenceApplicationService {
                 entity.getCreatedAt(),
                 entity.getSubmissionStatus().name(),
                 entity.getSubmittedAt(),
-                entity.getSubmissionBatchId());
+                entity.getSubmissionBatchId(),
+                metadataText(metadata, "claimed_fact"),
+                Boolean.TRUE.equals(metadata.get("truth_attested")),
+                metadataTextList(metadata, "attestation_scope"),
+                metadataText(metadata, "party_capacity"),
+                metadataText(metadata, "attestation_version"),
+                metadataText(metadata, "forgery_consequence_code"),
+                metadataText(metadata, "enforcement_gate"));
+    }
+
+    private static String metadataText(Map<String, Object> metadata, String key) {
+        Object value = metadata.get(key);
+        return value == null ? null : value.toString();
+    }
+
+    private static List<String> metadataTextList(
+            Map<String, Object> metadata, String key) {
+        Object value = metadata.get(key);
+        if (!(value instanceof List<?> values)) {
+            return List.of();
+        }
+        return values.stream().filter(java.util.Objects::nonNull).map(Object::toString).toList();
     }
 
     // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceApplicationService.content(String,String,AuthenticatedActor)」。
@@ -785,4 +885,7 @@ public class EvidenceApplicationService {
         }
         return value;
     }
+
+    private record SubmissionAttestation(
+            String partyCapacity, String forgeryConsequenceCode) {}
 }

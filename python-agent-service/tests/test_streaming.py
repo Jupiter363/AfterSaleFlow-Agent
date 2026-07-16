@@ -26,6 +26,7 @@ from app.streaming import (
     STREAM_EVENT_QUEUE_MAXSIZE,
     STREAM_MAX_MODEL_DOCUMENT_CHARS,
     STREAM_MAX_VISIBLE_OUTPUT_CHARS,
+    StreamUsageEvent,
     VisibleFieldSpec,
     current_stream_observer,
     workflow_ndjson_response,
@@ -130,7 +131,8 @@ def test_real_provider_stream_projects_answer_and_ignores_reasoning_channel() ->
                     {
                         "delta": {
                             "content": '好","internal_note":"内部说明"}'
-                        }
+                        },
+                        "finish_reason": "stop",
                     }
                 ],
             },
@@ -213,7 +215,10 @@ def test_invalid_streamed_schema_fails_closed_without_second_model_call() -> Non
             text=_sse(
                 {
                     "choices": [
-                        {"delta": {"content": '{"room_utterance":12}'}}
+                        {
+                            "delta": {"content": '{"room_utterance":12}'},
+                            "finish_reason": "stop",
+                        }
                     ]
                 },
                 "[DONE]",
@@ -304,6 +309,35 @@ def test_observer_splits_large_deltas_and_rejects_unbounded_visible_output() -> 
             "room_utterance",
             "y" * (STREAM_MAX_VISIBLE_OUTPUT_CHARS - len(large_delta) + 1),
         )
+
+
+def test_observer_reorders_events_constructed_by_parallel_model_threads() -> None:
+    published = []
+    observer = AgentStreamObserver(
+        operation="hearing_evidence_synthesis",
+        run_id="AGENT_RUN_parallel_usage",
+        publish=published.append,
+    )
+    first = StreamUsageEvent(
+        **observer._base_fields(),
+        node_name="hearing_evidence_file_assessment",
+        model="test-model",
+        latency_ms=10,
+        token_usage={"total_tokens": 10},
+    )
+    second = StreamUsageEvent(
+        **observer._base_fields(),
+        node_name="hearing_evidence_file_assessment",
+        model="test-model",
+        latency_ms=20,
+        token_usage={"total_tokens": 20},
+    )
+
+    observer._emit(second)
+    assert published == []
+
+    observer._emit(first)
+    assert [event.sequence for event in published] == [0, 1]
 
 
 # 所属模块：Python 支撑模块 > test_streaming；函数角色：回归测试用例。

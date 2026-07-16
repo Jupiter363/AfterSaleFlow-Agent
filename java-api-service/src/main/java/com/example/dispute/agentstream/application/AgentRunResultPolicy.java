@@ -61,14 +61,6 @@ public class AgentRunResultPolicy {
                             "evidence result contains a prohibited decision");
                 }
             }
-            case "HEARING_ROUND" -> {
-                requireText(result, "message_text");
-                requireText(result, "speaker_role");
-                if (result.path("round_no").asInt(0) < 1) {
-                    throw new AgentStreamProtocolException(
-                            "hearing result has invalid round_no");
-                }
-            }
             case "REVIEW" -> requireText(result, "answer");
             default -> {
                 // Python owns the complete Pydantic schema.  Java still requires an object and

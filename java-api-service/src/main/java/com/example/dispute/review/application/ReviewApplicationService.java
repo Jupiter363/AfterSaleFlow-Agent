@@ -17,6 +17,9 @@ import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.config.PlatformReviewerAuthorization;
 import com.example.dispute.domain.model.ApprovalDecisionType;
 import com.example.dispute.domain.model.ReviewTaskStatus;
+import com.example.dispute.hearing.domain.HearingArtifactType;
+import com.example.dispute.hearing.infrastructure.persistence.entity.HearingFlowArtifactEntity;
+import com.example.dispute.hearing.infrastructure.persistence.repository.HearingFlowArtifactRepository;
 import com.example.dispute.infrastructure.persistence.entity.AdjudicationDraftEntity;
 import com.example.dispute.infrastructure.persistence.entity.ApprovalPolicyDecisionEntity;
 import com.example.dispute.infrastructure.persistence.entity.ApprovalRecordEntity;
@@ -27,7 +30,6 @@ import com.example.dispute.infrastructure.persistence.entity.ReviewTaskEntity;
 import com.example.dispute.infrastructure.persistence.repository.AdjudicationDraftRepository;
 import com.example.dispute.infrastructure.persistence.repository.ApprovalPolicyDecisionRepository;
 import com.example.dispute.infrastructure.persistence.repository.ApprovalRecordRepository;
-import com.example.dispute.infrastructure.persistence.repository.DeliberationReportRepository;
 import com.example.dispute.infrastructure.persistence.repository.EvidenceDossierRepository;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.infrastructure.persistence.repository.HearingStateRepository;
@@ -74,12 +76,12 @@ public class ReviewApplicationService {
     private final FulfillmentCaseRepository caseRepository;
     private final RemedyPlanRepository planRepository;
     private final AdjudicationDraftRepository draftRepository;
+    private final HearingFlowArtifactRepository hearingArtifactRepository;
     private final HearingStateRepository hearingRepository;
     private final EvidenceDossierRepository dossierRepository;
     private final ReviewPacketRepository packetRepository;
     private final ReviewTaskRepository taskRepository;
     private final ApprovalRecordRepository approvalRepository;
-    private final DeliberationReportRepository deliberationRepository;
     private final ApprovalPolicyDecisionRepository policyDecisionRepository;
     private final CaseLifecycleNotificationService lifecycleNotifications;
     private final AuditRecorder auditRecorder;
@@ -100,12 +102,12 @@ public class ReviewApplicationService {
             FulfillmentCaseRepository caseRepository,
             RemedyPlanRepository planRepository,
             AdjudicationDraftRepository draftRepository,
+            HearingFlowArtifactRepository hearingArtifactRepository,
             HearingStateRepository hearingRepository,
             EvidenceDossierRepository dossierRepository,
             ReviewPacketRepository packetRepository,
             ReviewTaskRepository taskRepository,
             ApprovalRecordRepository approvalRepository,
-            DeliberationReportRepository deliberationRepository,
             ApprovalPolicyDecisionRepository policyDecisionRepository,
             CaseLifecycleNotificationService lifecycleNotifications,
             AuditRecorder auditRecorder,
@@ -117,11 +119,12 @@ public class ReviewApplicationService {
             @Value("${app.approval.packet-expiry-hours:168}") int packetExpiryHours,
             @Value("${app.approval.review-due-business-days:1}") int reviewDueBusinessDays) {
         this.caseRepository=caseRepository; this.planRepository=planRepository;
-        this.draftRepository=draftRepository; this.hearingRepository=hearingRepository;
+        this.draftRepository=draftRepository;
+        this.hearingArtifactRepository=hearingArtifactRepository;
+        this.hearingRepository=hearingRepository;
         this.dossierRepository=dossierRepository;
         this.packetRepository=packetRepository; this.taskRepository=taskRepository;
         this.approvalRepository=approvalRepository;
-        this.deliberationRepository=deliberationRepository;
         this.policyDecisionRepository=policyDecisionRepository;
         this.lifecycleNotifications=lifecycleNotifications;
         this.auditRecorder=auditRecorder;
@@ -140,9 +143,9 @@ public class ReviewApplicationService {
     // Java 语法：@Transactional 由 Spring 代理拦截；只有通过代理调用时才会开启或加入事务。
     @Transactional
     public String createForWorkflow(String caseId,String planId){
-        var existing=taskRepository.findFirstByCaseIdOrderByCreatedAtDesc(caseId);
-        if(existing.isPresent() && isOpen(existing.get().getTaskStatus())) return existing.get().getId();
         FulfillmentCaseEntity disputeCase=caseRepository.findByIdForUpdate(caseId).orElseThrow(()->notFound("case",caseId));
+        var existing=taskRepository.findFirstByCaseIdAndPlanIdOrderByCreatedAtDesc(caseId, planId);
+        if(existing.isPresent() && isOpen(existing.get().getTaskStatus())) return existing.get().getId();
         RemedyPlanEntity plan=planRepository.findById(planId).orElseThrow(()->notFound("remedy plan",planId));
         if(!caseId.equals(plan.getCaseId())) throw new BusinessException(ErrorCode.CASE_STATUS_INVALID,"plan does not belong to case",Map.of());
         List<String> actionTypes=actionTypes(plan.getActionsJson());
@@ -162,6 +165,37 @@ public class ReviewApplicationService {
         int version=packetRepository.findFirstByCaseIdAndPlanIdOrderByPacketVersionDesc(caseId,planId)
                 .map(packet->packet.getPacketVersion()+1).orElse(1);
         AdjudicationDraftEntity draft=draftRepository.findFirstByCaseIdOrderByDraftVersionDesc(caseId).orElse(null);
+        HearingFlowArtifactEntity v2Draft =
+                hearingArtifactRepository
+                        .findByCaseIdAndArtifactType(
+                                caseId, HearingArtifactType.ADJUDICATION_DRAFT)
+                        .orElse(null);
+        if (v2Draft != null
+                && (draft == null
+                        || !v2Draft.getId().equals(draft.getId())
+                        || !v2Draft.getAgentRunId().equals(draft.getCreatedByAgentRunId())
+                        || !v2Draft.getId().equals(plan.getAdjudicationDraftId()))) {
+            throw new IllegalStateException(
+                    "review packet is not bound to the frozen V2 adjudication draft");
+        }
+        List<String> agentRunRefs;
+        if (v2Draft == null) {
+            agentRunRefs =
+                    draft == null || draft.getCreatedByAgentRunId() == null
+                            ? List.of()
+                            : List.of(draft.getCreatedByAgentRunId());
+        } else {
+            HearingFlowArtifactEntity proposal =
+                    requireV2Artifact(caseId, HearingArtifactType.JUDGE_PROPOSAL);
+            HearingFlowArtifactEntity report =
+                    requireV2Artifact(caseId, HearingArtifactType.JURY_REVIEW_REPORT);
+            validateV2DecisionChain(caseId, proposal, report, v2Draft);
+            agentRunRefs =
+                    List.of(
+                            proposal.getAgentRunId(),
+                            report.getAgentRunId(),
+                            v2Draft.getAgentRunId());
+        }
         int dossierVersion =
                 dossierRepository
                         .findByCaseId(caseId)
@@ -172,11 +206,7 @@ public class ReviewApplicationService {
                         .findByCaseId(caseId)
                         .map(item -> Math.max(1, item.getRoundNo() + 1))
                         .orElse(1);
-        int deliberationVersion =
-                deliberationRepository
-                        .findFirstByCaseIdOrderByReportVersionDesc(caseId)
-                        .map(item -> item.getReportVersion())
-                        .orElse(0);
+        int deliberationVersion = 0;
         OffsetDateTime frozenAt = OffsetDateTime.now(ZoneOffset.UTC);
         JsonNode frozenRemedy =
                 read(
@@ -200,33 +230,32 @@ public class ReviewApplicationService {
                         dossierVersion,
                         issueVersion,
                         draft == null ? 1 : draft.getDraftVersion(),
-                        deliberationVersion,
+                        v2Draft == null ? deliberationVersion : 1,
                         plan.getPlanVersion(),
                         "ruleset-current",
-                        "hearing-v1",
+                        v2Draft == null ? "hearing-v1" : "hearing-flow.v2",
                         "dispute-default-v1",
-                        "presiding-judge-v1"),
+                        v2Draft == null ? "presiding-judge-v1" : "hearing-judge-v2"),
                 actionHash,
                 frozenAt,
                 frozenAt.plusHours(packetExpiryHours),
-                write(
-                        draft == null || draft.getCreatedByAgentRunId() == null
-                                ? List.of()
-                                : List.of(draft.getCreatedByAgentRunId())),
+                write(agentRunRefs),
                 write(Map.of("title",disputeCase.getTitle(),"description",disputeCase.getDescription(),
                         "route_type",disputeCase.getRouteType().name(),"risk_level",disputeCase.getRiskLevel().name())),
                 disputeCase.getIntakeResultJson(),
                 draft==null?"[]":draft.getFactFindingsJson(),
                 draft==null?"[]":draft.getEvidenceAssessmentJson(),
-                draft==null?"{}":write(Map.of(
-                        "id",draft.getId(),
-                        "recommended_decision",draft.getRecommendedDecision(),
-                        "confidence",draft.getConfidence(),
-                        "draft_text",draft.getDraftText(),
-                        "fact_findings",read(draft.getFactFindingsJson()),
-                        "evidence_assessment",read(draft.getEvidenceAssessmentJson()),
-                        "policy_application",read(draft.getPolicyApplicationJson()),
-                        "reviewer_attention",read(draft.getReviewerAttentionJson()))),
+                v2Draft != null
+                        ? v2Draft.getPayloadJson()
+                        : draft==null?"{}":write(Map.of(
+                                "id",draft.getId(),
+                                "recommended_decision",draft.getRecommendedDecision(),
+                                "confidence",draft.getConfidence(),
+                                "draft_text",draft.getDraftText(),
+                                "fact_findings",read(draft.getFactFindingsJson()),
+                                "evidence_assessment",read(draft.getEvidenceAssessmentJson()),
+                                "policy_application",read(draft.getPolicyApplicationJson()),
+                                "reviewer_attention",read(draft.getReviewerAttentionJson()))),
                 frozenRemedy.toString(),
                 write(policy.riskFlags()),SYSTEM.actorId()));
         ReviewTaskEntity task=taskRepository.save(ReviewTaskEntity.pendingAssigned(
@@ -443,6 +472,44 @@ public class ReviewApplicationService {
     // 系统意义：「ReviewApplicationService.actionTypes(String)」负责主链路中的“动作Types”；最终决定权属于具备平台审核角色的人；过期、改版或哈希不一致的审批必须失效
     // Java 语法：stream/lambda 把集合处理写成管道；lambda 中引用的外部局部变量必须保持 effectively final。
     private List<String> actionTypes(String json){List<String> values=new ArrayList<>();read(json).forEach(node->values.add(node.path("action_type").asText()));return values;}
+
+    private HearingFlowArtifactEntity requireV2Artifact(
+            String caseId, HearingArtifactType artifactType) {
+        return hearingArtifactRepository
+                .findByCaseIdAndArtifactType(caseId, artifactType)
+                .orElseThrow(
+                        () ->
+                                new IllegalStateException(
+                                        "incomplete hearing_flow.v2 decision chain"));
+    }
+
+    private static void validateV2DecisionChain(
+            String caseId,
+            HearingFlowArtifactEntity proposal,
+            HearingFlowArtifactEntity report,
+            HearingFlowArtifactEntity draft) {
+        boolean sameDossier =
+                caseId.equals(proposal.getCaseId())
+                        && caseId.equals(report.getCaseId())
+                        && caseId.equals(draft.getCaseId())
+                        && proposal.getFlowInstanceId().equals(report.getFlowInstanceId())
+                        && proposal.getFlowInstanceId().equals(draft.getFlowInstanceId())
+                        && proposal.getTrialDossierId().equals(report.getTrialDossierId())
+                        && proposal.getTrialDossierId().equals(draft.getTrialDossierId())
+                        && proposal.getTrialDossierHash().equals(report.getTrialDossierHash())
+                        && proposal.getTrialDossierHash().equals(draft.getTrialDossierHash());
+        boolean parentChain =
+                proposal.getId().equals(report.getProposalId())
+                        && proposal.getContentHash().equals(report.getProposalContentHash())
+                        && proposal.getId().equals(draft.getProposalId())
+                        && proposal.getContentHash().equals(draft.getProposalContentHash())
+                        && report.getId().equals(draft.getReportId())
+                        && report.getContentHash().equals(draft.getReportContentHash());
+        if (!sameDossier || !parentChain) {
+            throw new IllegalStateException(
+                    "review packet decision artifact chain is invalid");
+        }
+    }
     // 所属模块：【平台人工终审 / 应用编排层】「ReviewApplicationService.read(String)」。
     // 具体功能：「ReviewApplicationService.read(String)」：读取JSON节点：先把 JSON 文本解析为可逐字段校验的 JsonNode；实际协作者为 「objectMapper.readTree」；不满足前置条件时抛出 「IllegalStateException」，最终返回「JsonNode」。
     // 上游调用：「ReviewApplicationService.read(String)」的上游调用点包括 「ReviewApplicationService.createForWorkflow」、「ReviewApplicationService.packet」、「ReviewApplicationService.persistDecision」、「ReviewApplicationService.assertSameIdempotentRequest」。

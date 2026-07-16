@@ -9,6 +9,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import EvidenceRoomView from "./EvidenceRoomView.vue";
 import { evidenceApi } from "../../api/evidence";
 import { roomApi } from "../../api/rooms";
+import { getAgentStreamRun } from "../../stores/agentStream";
 
 const evidenceRoomSource = readFileSync(
   resolve(process.cwd(), "src/views/disputes/EvidenceRoomView.vue"),
@@ -29,6 +30,7 @@ vi.mock("../../api/evidence", () => ({
 vi.mock("../../api/rooms", () => ({
   roomApi: {
     ensureOpening: vi.fn(),
+    latestTurnMemory: vi.fn(),
     messages: vi.fn(),
     postMessage: vi.fn(),
   },
@@ -36,11 +38,14 @@ vi.mock("../../api/rooms", () => ({
 
 const catalog = {
   case_id: "CASE_EVIDENCE_1",
+  initiator_role: "USER",
+  initiator_id: "user-local",
   items: [
     {
       evidence_id: "EVIDENCE_USER_PRIVATE",
       evidence_type: "CHAT_SCREENSHOT",
       submitted_by_role: "USER",
+      submitted_by_id: "user-local",
       visibility: "PRIVATE",
       content_url: "/objects/user-original.png",
       redacted: false,
@@ -58,6 +63,7 @@ const catalog = {
       evidence_id: "EVIDENCE_USER_PENDING",
       evidence_type: "LOGISTICS_PROOF",
       submitted_by_role: "USER",
+      submitted_by_id: "user-local",
       visibility: "PRIVATE",
       content_url: "/objects/logistics-pending.png",
       redacted: false,
@@ -69,6 +75,7 @@ const catalog = {
       evidence_id: "EVIDENCE_MERCHANT_SUBMITTED",
       evidence_type: "DELIVERY_RECORD",
       submitted_by_role: "MERCHANT",
+      submitted_by_id: "merchant-local",
       visibility: "PRIVATE",
       content_url: "/objects/merchant-delivery.pdf",
       redacted: false,
@@ -81,6 +88,7 @@ const catalog = {
       evidence_id: "EVIDENCE_REJECTED",
       evidence_type: "OTHER",
       submitted_by_role: "USER",
+      submitted_by_id: "user-local",
       visibility: "PRIVATE",
       content_url: null,
       redacted: false,
@@ -93,6 +101,7 @@ const catalog = {
       evidence_id: "EVIDENCE_REVIEW",
       evidence_type: "VIDEO",
       submitted_by_role: "USER",
+      submitted_by_id: "user-local",
       visibility: "PRIVATE",
       content_url: null,
       redacted: false,
@@ -109,10 +118,12 @@ function stressCatalog(role, count = 100, filenameFactory = null) {
   return {
     case_id: "CASE_EVIDENCE_1",
     initiator_role: role,
+    initiator_id: role === "MERCHANT" ? "merchant-local" : "user-local",
     items: Array.from({ length: count }, (_, index) => ({
       evidence_id: `EVIDENCE_${role}_${String(index + 1).padStart(3, "0")}`,
       evidence_type: index % 2 === 0 ? "DELIVERY_RECORD" : "CHAT_SCREENSHOT",
       submitted_by_role: role,
+      submitted_by_id: role === "MERCHANT" ? "merchant-local" : "user-local",
       visibility: "PRIVATE",
       content_url: null,
       redacted: false,
@@ -148,6 +159,27 @@ const initialEvidenceMessages = [
     message_text: "请先补充与接待室案情匹配的证据来源、形成时间和原件。",
   },
 ];
+
+const evidenceTurnMemory = {
+  case_intake_dossier: {
+    dossier: {
+      schema_version: "intake_case_detail.v1",
+      case_fact_matrix: {
+        schema_version: "case_fact_matrix.v2",
+        fact_rows: [
+          {
+            fact_id: "FACT_INTAKE_32C8D9067B3377209DBD",
+            fact_target: "冷链运输状态及商品收货时状况",
+          },
+          {
+            fact_id: "FACT_INTAKE_8609A837FBFD8A7896B2",
+            fact_target: "用户是否已经食用涉案商品",
+          },
+        ],
+      },
+    },
+  },
+};
 
 const connectedModelHealth = vi.fn().mockResolvedValue({
   status: "UP",
@@ -230,6 +262,7 @@ describe("EvidenceRoomView", () => {
       },
     });
     evidenceApi.deletePending.mockResolvedValue({});
+    roomApi.latestTurnMemory.mockResolvedValue(evidenceTurnMemory);
     roomApi.ensureOpening.mockResolvedValue({
       id: "EVIDENCE_OPENING",
       sequence_no: 1,
@@ -257,7 +290,8 @@ describe("EvidenceRoomView", () => {
 
     expect(wrapper.get("[data-room-history-banner]").text()).toContain("历史浏览模式");
     expect(wrapper.find(".conversation-stream__composer").exists()).toBe(false);
-    expect(wrapper.get(".evidence-uploader input").attributes("disabled")).toBeDefined();
+    expect(wrapper.get("[data-open-evidence-upload]").attributes("disabled")).toBeDefined();
+    expect(wrapper.find("[data-evidence-upload-modal]").exists()).toBe(false);
     expect(wrapper.get("[data-complete-evidence]").attributes("disabled")).toBeDefined();
     expect(wrapper.findAll("[data-delete-pending-evidence]").every(
       (button) => button.attributes("disabled") !== undefined,
@@ -283,6 +317,46 @@ describe("EvidenceRoomView", () => {
   });
 
   // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
+  it("uses the evidence completion deadline returned by the server", async () => {
+    const { wrapper } = await mountView({
+      initialCompletion: {
+        ...initialCompletion,
+        next_deadline_at: "2026-07-03T15:00:00+08:00",
+      },
+      deadlineAt: "2026-07-03T14:00:00+08:00",
+      serverNow: "2026-07-03T12:00:00+08:00",
+    });
+
+    expect(wrapper.get(".phase-countdown").text()).toContain("03:00:00");
+    expect(wrapper.get(".phase-countdown").attributes("data-awaiting-server")).toBe(
+      "false",
+    );
+  });
+
+  it("maps second-round fact and coverage fields in durable clerk messages", async () => {
+    const { wrapper } = await mountView({
+      initialMessages: [
+        ...initialEvidenceMessages,
+        {
+          id: "EVIDENCE_SECOND_ROUND",
+          sequence_no: 2,
+          sender_role: "EVIDENCE_CLERK",
+          message_type: "AGENT_MESSAGE",
+          message_text:
+            "所有关键事实行（FACT_INTAKE_32C8D9067B3377209DBD、FACT_INTAKE_8609A837FBFD8A7896B2）的证据覆盖状态均为“未被庭前冻结证据卷宗覆盖”，且 REQUIRES_HUMAN_REVIEW。",
+        },
+      ],
+    });
+
+    expect(wrapper.text()).toContain("冷链运输状态及商品收货时状况");
+    expect(wrapper.text()).toContain("用户是否已经食用涉案商品");
+    expect(wrapper.text()).toContain("尚无庭前证据支持");
+    expect(wrapper.text()).toContain("需要人工复核");
+    expect(wrapper.text()).not.toContain("FACT_INTAKE_");
+    expect(wrapper.text()).not.toContain("REQUIRES_HUMAN_REVIEW");
+    expect(wrapper.text()).not.toContain("未被庭前冻结证据卷宗覆盖");
+  });
+
   it("encodes a fixed four-card board with horizontal evidence rails", () => {
     expect(evidenceRoomSource).toContain("--evidence-panel-height: 740px");
     expect(evidenceRoomSource).toMatch(
@@ -508,6 +582,7 @@ describe("EvidenceRoomView", () => {
           evidenceId: "EVIDENCE_CAMEL_REVIEW",
           evidenceType: "CHAT_SCREENSHOT",
           submittedByRole: "USER",
+          submittedById: "user-local",
           contentUrl: "/objects/chat.png",
           originalFilename: "聊天记录.png",
           submissionStatus: "SUBMITTED",
@@ -535,6 +610,59 @@ describe("EvidenceRoomView", () => {
     expect(detail.text()).toContain("材料来源或流转链路尚未核实");
     expect(detail.text()).toContain("聊天参与方身份仍需核对");
     expect(detail.text()).toContain("76%");
+  });
+
+  it("distinguishes suspected forgery from low relevance in the human review queue", async () => {
+    const reasonCatalog = {
+      ...catalog,
+      items: [
+        {
+          ...catalog.items[0],
+          evidence_id: "EVIDENCE_LOW_AUTHENTICITY",
+          original_filename: "真实性偏低.png",
+          authenticity_score: 0.42,
+          relevance_score: 0.91,
+          requires_human_review: true,
+          human_review_reason_codes: ["SUSPECTED_FORGERY_LOW_AUTHENTICITY"],
+        },
+        {
+          ...catalog.items[0],
+          evidence_id: "EVIDENCE_LOW_RELEVANCE",
+          original_filename: "关联度偏低.png",
+          authenticity_score: 0.88,
+          relevance_score: 0.34,
+          requires_human_review: true,
+          human_review_reason_codes: ["LOW_RELEVANCE_SCORE"],
+        },
+        {
+          ...catalog.items[0],
+          evidence_id: "EVIDENCE_LOW_BOTH",
+          original_filename: "双项偏低.png",
+          authenticity_score: 0.31,
+          relevance_score: 0.28,
+          requires_human_review: true,
+          human_review_reason_codes: [
+            "LOW_AUTHENTICITY_SUSPECTED_FORGERY",
+            "LOW_RELEVANCE_SCORE",
+          ],
+        },
+      ],
+    };
+    const { wrapper } = await mountView({ initialCatalog: reasonCatalog });
+
+    const cards = wrapper.findAll("[data-human-review-card]");
+    expect(cards).toHaveLength(3);
+    expect(cards[0].text()).toContain("疑似造假");
+    expect(cards[1].text()).toContain("关联度低");
+    expect(cards[1].text()).not.toContain("疑似造假");
+    expect(cards[2].text()).toContain("疑似造假");
+    expect(cards[2].text()).toContain("关联度低");
+    expect(cards[2].findAll("[data-human-review-risk-label]")).toHaveLength(2);
+
+    await cards[0].trigger("click");
+    expect(wrapper.get("[data-evidence-detail-human-review]").text()).toContain(
+      "疑似造假：真实性评分低于 50%",
+    );
   });
 
   // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
@@ -615,6 +743,8 @@ describe("EvidenceRoomView", () => {
     expect(modal.text()).toContain(
       "发起争议方需先正式提交至少 1 份相关证据，当前证据栏为空，暂不能进入下一步。",
     );
+    expect(wrapper.get(".digital-human").attributes("data-state")).toBe("LISTENING");
+    expect(wrapper.text()).not.toContain("证据书记官生成失败");
     expect(wrapper.find('.evidence-board [role="alert"]').exists()).toBe(false);
 
     await modal.get("[data-dismiss-evidence-gate]").trigger("click");
@@ -909,8 +1039,36 @@ describe("EvidenceRoomView", () => {
     expect(wrapper.text()).toContain("请根据接待室案情先补充质检视频");
   });
 
+  it("opens an independent first evidence turn for the merchant actor", async () => {
+    roomApi.messages
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          id: "MERCHANT_EVIDENCE_OPENING",
+          sequence_no: 1,
+          sender_role: "CUSTOMER_SERVICE",
+          message_type: "AGENT_MESSAGE",
+          message_text: "请商家围绕发货质检记录和告知时间补充证据。",
+        },
+      ]);
+
+    const { wrapper } = await mountView({
+      viewerRole: "MERCHANT",
+      initialMessages: null,
+    });
+    await flushPromises();
+
+    expect(roomApi.ensureOpening).toHaveBeenCalledTimes(1);
+    expect(roomApi.ensureOpening).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "merchant-local", role: "MERCHANT" }),
+      "CASE_EVIDENCE_1",
+      "EVIDENCE",
+    );
+    expect(wrapper.text()).toContain("请商家围绕发货质检记录");
+  });
+
   // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
-  it("does not append a clerk opening when the actor already has an evidence conversation", async () => {
+  it("does not append another opening when the private thread already has a current clerk turn", async () => {
     roomApi.messages.mockResolvedValueOnce([
       {
         id: "USER_EXISTING_EVIDENCE_TURN",
@@ -919,6 +1077,13 @@ describe("EvidenceRoomView", () => {
         message_type: "PARTY_TEXT",
         message_text: "I already started this evidence conversation.",
       },
+      {
+        id: "CLERK_EXISTING_EVIDENCE_TURN",
+        sequence_no: 5,
+        sender_role: "CUSTOMER_SERVICE",
+        message_type: "AGENT_MESSAGE",
+        message_text: "Please provide the original photo and its capture time.",
+      },
     ]);
 
     const { wrapper } = await mountView({ initialMessages: null });
@@ -926,6 +1091,35 @@ describe("EvidenceRoomView", () => {
 
     expect(roomApi.ensureOpening).not.toHaveBeenCalled();
     expect(wrapper.text()).toContain("I already started this evidence conversation.");
+  });
+
+  it("repairs a party-only private thread by requesting the missing clerk opening", async () => {
+    const partyMessage = {
+      id: "USER_PARTY_ONLY_TURN",
+      sequence_no: 1,
+      sender_role: "USER",
+      message_type: "PARTY_TEXT",
+      message_text: "This explanation was saved before the opening completed.",
+    };
+    roomApi.messages
+      .mockResolvedValueOnce([partyMessage])
+      .mockResolvedValueOnce([
+        partyMessage,
+        {
+          id: "RECOVERED_CLERK_OPENING",
+          sequence_no: 2,
+          sender_role: "CUSTOMER_SERVICE",
+          message_type: "AGENT_MESSAGE",
+          message_text: "I have restored the evidence checklist for this private thread.",
+        },
+      ]);
+
+    const { wrapper } = await mountView({ initialMessages: null });
+    await flushPromises();
+
+    expect(roomApi.ensureOpening).toHaveBeenCalledTimes(1);
+    expect(wrapper.text()).toContain("restored the evidence checklist");
+    expect(wrapper.get('[data-send-message] textarea').element.disabled).toBe(false);
   });
 
   // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
@@ -1064,6 +1258,99 @@ describe("EvidenceRoomView", () => {
     expect(wrapper.find('[role="alert"]').exists()).toBe(false);
   });
 
+  it("refreshes a delayed merchant-initiated catalog before allowing the user to complete", async () => {
+    const missingCatalog = new Error("catalog not found");
+    missingCatalog.code = "EVIDENCE_NOT_FOUND";
+    const catalogReady = deferred();
+    evidenceApi.catalog
+      .mockRejectedValueOnce(missingCatalog)
+      .mockReturnValueOnce(catalogReady.promise);
+    roomApi.messages
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          id: "EVIDENCE_OPENING_BEFORE_CATALOG",
+          sequence_no: 1,
+          sender_role: "CUSTOMER_SERVICE",
+          message_type: "AGENT_MESSAGE",
+          message_text: "Please provide evidence source, timestamp and original file.",
+        },
+      ]);
+    const completeAction = vi.fn().mockResolvedValue({
+      completed_role: "USER",
+      all_parties_completed: false,
+      next_room: "EVIDENCE",
+    });
+
+    const { wrapper } = await mountView({
+      initialCatalog: null,
+      initialMessages: null,
+      viewerRole: "USER",
+      completeAction,
+      eventStreamer: vi.fn(async () => {}),
+    });
+
+    expect(wrapper.text()).toContain("正在同步证据目录");
+    expect(wrapper.get("[data-complete-evidence]").attributes("disabled")).toBeDefined();
+    expect(wrapper.get('[data-send-message] textarea').element.disabled).toBe(true);
+
+    catalogReady.resolve({
+      case_id: "CASE_EVIDENCE_1",
+      initiator_role: "MERCHANT",
+      initiator_id: "merchant-local",
+      items: [],
+    });
+    await flushPromises();
+    await flushPromises();
+
+    expect(evidenceApi.catalog).toHaveBeenCalledTimes(2);
+    expect(wrapper.get("[data-complete-evidence]").attributes("disabled")).toBeUndefined();
+    expect(wrapper.get('[data-send-message] textarea').element.disabled).toBe(false);
+    await wrapper.get("[data-complete-evidence]").trigger("click");
+    await flushPromises();
+
+    expect(completeAction).toHaveBeenCalledOnce();
+    expect(wrapper.find("[data-evidence-gate-modal]").exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("证据书记官生成失败");
+  });
+
+  it("retries the catalog after a role switch instead of restoring a roleless snapshot", async () => {
+    const missingCatalog = new Error("catalog not found");
+    missingCatalog.code = "EVIDENCE_NOT_FOUND";
+    evidenceApi.catalog
+      .mockRejectedValueOnce(missingCatalog)
+      .mockResolvedValueOnce({
+        case_id: "CASE_EVIDENCE_1",
+        initiator_role: "MERCHANT",
+        initiator_id: "merchant-local",
+        items: [],
+      });
+    const completeAction = vi.fn();
+    const { wrapper } = await mountView({
+      initialCatalog: {
+        case_id: "CASE_EVIDENCE_1",
+        initiator_role: "USER",
+        initiator_id: "user-local",
+        items: [],
+      },
+      completeAction,
+    });
+
+    await wrapper.setProps({ viewerRole: "MERCHANT" });
+    await flushPromises();
+    await flushPromises();
+
+    expect(evidenceApi.catalog).toHaveBeenCalledTimes(2);
+    expect(wrapper.get("[data-complete-evidence]").attributes("disabled")).toBeUndefined();
+    await wrapper.get("[data-complete-evidence]").trigger("click");
+    await flushPromises();
+
+    expect(completeAction).not.toHaveBeenCalled();
+    expect(wrapper.get("[data-evidence-gate-modal]").text()).toContain(
+      "发起争议方需先正式提交至少 1 份相关证据",
+    );
+  });
+
   // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
   it("separates pending evidence from submitted originals and removes the shared wall", async () => {
     const { wrapper } = await mountView();
@@ -1082,13 +1369,12 @@ describe("EvidenceRoomView", () => {
     expect(wrapper.text()).not.toContain(
       "EVIDENCE_MERCHANT_SUBMITTED",
     );
-    for (const status of [
-      "VERIFIED",
-      "REJECTED",
-      "NEEDS_HUMAN_REVIEW",
-    ]) {
-      expect(wrapper.find(`[data-verification="${status}"]`).exists()).toBe(true);
-    }
+    const submittedStatus = wrapper.get(
+      "[data-evidence-originals] [data-evidence-status-row]",
+    );
+    expect(submittedStatus.text()).toContain("用户提交");
+    expect(submittedStatus.text()).toContain("待人工复核");
+    expect(wrapper.find("[data-verification]").exists()).toBe(false);
     expect(wrapper.get("[data-evidence-countdown]").text()).toContain("02:00:00");
   });
 
@@ -1241,6 +1527,7 @@ describe("EvidenceRoomView", () => {
           evidence_id: "EVIDENCE_MARKDOWN_UPLOAD",
           evidence_type: "OTHER",
           submitted_by_role: "MERCHANT",
+          submitted_by_id: "merchant-local",
           visibility: "PRIVATE",
           content_url: "/objects/merchant-notes.md",
           redacted: false,
@@ -1257,7 +1544,8 @@ describe("EvidenceRoomView", () => {
     });
     roomApi.messages.mockResolvedValueOnce([]);
     const { wrapper } = await mountView({ viewerRole: "MERCHANT" });
-    const input = wrapper.get('input[type="file"]');
+    await wrapper.get("[data-open-evidence-upload]").trigger("click");
+    const input = wrapper.get("[data-evidence-upload-file]");
     const file = new File(["# delivery notes"], "delivery-notes.md", {
       type: "text/markdown",
     });
@@ -1269,12 +1557,28 @@ describe("EvidenceRoomView", () => {
     await input.trigger("change");
     await flushPromises();
 
+    expect(input.attributes("multiple")).toBeUndefined();
+    expect(evidenceApi.upload).not.toHaveBeenCalled();
+    const declaration = wrapper.get("[data-evidence-upload-modal]");
+    expect(declaration.text()).toContain("商家 · 被争议方");
+    expect(declaration.text()).toContain("人工复核确认证据造假后");
+    expect(declaration.text()).toContain("支持并进入执行对方的全部合理诉求");
+    expect(declaration.text()).toContain("真实性与相关性承诺");
+    await declaration
+      .get("[data-evidence-claimed-fact]")
+      .setValue("证明商家已在发货前向用户说明商品状态。");
+    await declaration.get("[data-evidence-truth-attested]").setValue(true);
+    await declaration.get("[data-evidence-upload-form]").trigger("submit");
+    await flushPromises();
+
     const uploadCommand = evidenceApi.upload.mock.calls[0][2];
     expect(uploadCommand.file).toBe(file);
     expect(["OTHER", "DOCUMENT"]).toContain(uploadCommand.evidenceType);
     expect(uploadCommand.sourceType).toBe("MERCHANT_UPLOAD");
     expect(uploadCommand.visibility).toBe("PRIVATE");
     expect(uploadCommand.modelProcessingAuthorized).toBe(true);
+    expect(uploadCommand.claimedFact).toBe("证明商家已在发货前向用户说明商品状态。");
+    expect(uploadCommand.truthAttested).toBe(true);
     expect(wrapper.find(".evidence-uploader__model-consent").exists()).toBe(false);
     expect(evidenceApi.catalog).toHaveBeenCalledWith(
       expect.objectContaining({ role: "MERCHANT" }),
@@ -1304,6 +1608,8 @@ describe("EvidenceRoomView", () => {
               submission_status: "SUBMITTED",
               submitted_at: "2026-07-03T01:00:00Z",
               submission_batch_id: "EVIDENCE_BATCH_1",
+              verification_status: "PLAUSIBLE",
+              verification_feedback: "已映射到待核验事实，仍需补充形成时间。",
             }
           : item,
       ),
@@ -1346,7 +1652,137 @@ describe("EvidenceRoomView", () => {
     expect(wrapper.get("[data-evidence-originals]").text()).toContain(
       "logistics-pending.png",
     );
+    const mappedEvidence = wrapper
+      .findAll("[data-evidence-card]")
+      .find((card) => card.text().includes("logistics-pending.png"));
+    await mappedEvidence.trigger("click");
+    expect(wrapper.get("[data-evidence-detail-modal]").text()).toContain("基本可信");
+    expect(wrapper.get("[data-evidence-detail-modal]").text()).toContain("已映射到待核验事实");
     expect(wrapper.text()).toContain("书记官已读取本批材料");
+  });
+
+  it("finishes the merchant clerk stream before refreshing the evidence board", async () => {
+    const runId = "AGENT_RUN_MERCHANT_EVIDENCE";
+    const streamedReply =
+      "FACT_INTAKE_32C8D9067B3377209DBD 的覆盖状态为 NOT_COVERED_BY_FROZEN_DOSSIER。";
+    let roomSnapshotLoader;
+    let streamController;
+    const merchantPending = {
+      ...catalog.items[1],
+      evidence_id: "EVIDENCE_MERCHANT_PENDING",
+      submitted_by_role: "MERCHANT",
+      submitted_by_id: "merchant-local",
+      original_filename: "merchant-pending.pdf",
+    };
+    const merchantCatalog = {
+      ...catalog,
+      items: [merchantPending],
+    };
+    const refreshedCatalog = {
+      ...merchantCatalog,
+      items: [{
+        ...merchantPending,
+        submission_status: "SUBMITTED",
+        verification_status: "PLAUSIBLE",
+      }],
+    };
+    const batchMessage = {
+      id: "MERCHANT_BATCH_MESSAGE",
+      sequence_no: 2,
+      sender_role: "MERCHANT",
+      message_type: "PARTY_EVIDENCE_REFERENCE",
+      message_text: "Merchant submitted one evidence item.",
+      attachment_refs: [merchantPending.evidence_id],
+    };
+    evidenceApi.submitBatch.mockResolvedValue({
+      room_message: batchMessage,
+      agent_run: {
+        run_id: runId,
+        stream_url: `/api/agent-runs/${runId}/events`,
+      },
+    });
+    roomApi.messages.mockResolvedValue([
+      batchMessage,
+      {
+        id: "MERCHANT_CLERK_REPLY",
+        sequence_no: 3,
+        sender_role: "EVIDENCE_CLERK",
+        message_type: "AGENT_MESSAGE",
+        message_text: streamedReply,
+        agent_run_id: runId,
+      },
+    ]);
+    evidenceApi.catalog.mockImplementation(() => {
+      const run = getAgentStreamRun(runId);
+      expect(run?.content).toBe(streamedReply);
+      expect(run?.status).toBe("COMPLETED");
+      return Promise.resolve(refreshedCatalog);
+    });
+    const eventStreamer = vi.fn(({ snapshotLoader }) => {
+      roomSnapshotLoader = snapshotLoader;
+    });
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(new ReadableStream({
+        start(controller) {
+          streamController = controller;
+        },
+      }), { status: 200, headers: { "Content-Type": "text/event-stream" } }),
+    );
+    const { wrapper } = await mountView({
+      viewerRole: "MERCHANT",
+      initialCatalog: merchantCatalog,
+      eventStreamer,
+    });
+
+    try {
+      await wrapper.get("[data-submit-evidence-batch]").trigger("click");
+      streamController.enqueue(new TextEncoder().encode([
+        `id: 0\nevent: start\ndata: {"schemaVersion":"agent_stream.v1","runId":"${runId}","sequence":0,"type":"start"}\n\n`,
+        `id: 1\nevent: visible_delta\ndata: {"schemaVersion":"agent_stream.v1","runId":"${runId}","sequence":1,"type":"visible_delta","field":"room_utterance","delta":"${streamedReply}"}\n\n`,
+      ].join("")));
+      await vi.waitFor(() => {
+        expect(getAgentStreamRun(runId)?.status).toBe("STREAMING");
+      });
+
+      await roomSnapshotLoader();
+      expect(evidenceApi.catalog).not.toHaveBeenCalled();
+
+      streamController.enqueue(new TextEncoder().encode(
+        `id: 2\nevent: final\ndata: {"schemaVersion":"agent_stream.v1","runId":"${runId}","sequence":2,"type":"final","response":{"room_utterance":"${streamedReply}"}}\n\n`,
+      ));
+      await vi.waitFor(
+        () => expect(evidenceApi.catalog).toHaveBeenCalledTimes(1),
+        { timeout: 3000 },
+      );
+      await flushPromises();
+
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(getAgentStreamRun(runId)?.status).toBe("COMPLETED");
+      expect(wrapper.get("[data-evidence-board-panel]").attributes("data-board-streaming"))
+        .toBe("true");
+      expect(wrapper.get(".evidence-board__badge").text()).toContain("展板同步 0/1");
+      expect(wrapper.get("[data-evidence-pending]").text())
+        .toContain("merchant-pending.pdf");
+      expect(wrapper.get("[data-evidence-originals]").text())
+        .not.toContain("merchant-pending.pdf");
+
+      await vi.waitFor(() => {
+        expect(wrapper.find(".evidence-card--stream-updating").exists()).toBe(true);
+      });
+      await vi.waitFor(() => {
+        expect(wrapper.get("[data-evidence-originals]").text())
+          .toContain("merchant-pending.pdf");
+        expect(wrapper.get("[data-evidence-board-panel]").attributes("data-board-streaming"))
+          .toBe("false");
+      });
+      expect(wrapper.text()).toContain("冷链运输状态及商品收货时状况");
+      expect(wrapper.text()).toContain("尚无庭前证据支持");
+      expect(wrapper.text()).not.toContain("FACT_INTAKE_");
+      expect(wrapper.text()).not.toContain("NOT_COVERED_BY_FROZEN_DOSSIER");
+    } finally {
+      wrapper.unmount();
+      fetchSpy.mockRestore();
+    }
   });
 
   // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
@@ -1611,9 +2047,88 @@ describe("EvidenceRoomView", () => {
   });
 
   // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
-  it("uploads user evidence with the backend actor-specific source type", async () => {
+  it("does not write a late user message response into the merchant private thread", async () => {
+    const lateUserResponse = deferred();
+    roomApi.messages.mockResolvedValueOnce([
+      {
+        id: "MERCHANT_CURRENT_CLERK_TURN",
+        sequence_no: 1,
+        sender_role: "CUSTOMER_SERVICE",
+        message_type: "AGENT_MESSAGE",
+        message_text: "Merchant-private evidence checklist.",
+      },
+    ]);
+    const { wrapper } = await mountView({
+      viewerRole: "USER",
+      messageAction: vi.fn(() => lateUserResponse.promise),
+    });
+
+    await wrapper
+      .get('[data-send-message] textarea')
+      .setValue("User-private explanation still in flight.");
+    await wrapper.get("[data-send-message]").trigger("submit");
+    await wrapper.setProps({ viewerRole: "MERCHANT" });
+    await flushPromises();
+
+    lateUserResponse.resolve({
+      id: "LATE_USER_PRIVATE_MESSAGE",
+      sequence_no: 8,
+      sender_role: "USER",
+      message_type: "PARTY_TEXT",
+      message_text: "Late user response must stay out of the merchant thread.",
+    });
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("Merchant-private evidence checklist.");
+    expect(wrapper.text()).not.toContain("Late user response must stay out");
+  });
+
+  it("does not write a late user batch result into the merchant private thread", async () => {
+    const lateBatchResponse = deferred();
+    evidenceApi.submitBatch.mockReturnValueOnce(lateBatchResponse.promise);
+    roomApi.messages.mockResolvedValueOnce([
+      {
+        id: "MERCHANT_CURRENT_CLERK_TURN",
+        sequence_no: 1,
+        sender_role: "CUSTOMER_SERVICE",
+        message_type: "AGENT_MESSAGE",
+        message_text: "Merchant-private batch checklist.",
+      },
+    ]);
     const { wrapper } = await mountView({ viewerRole: "USER" });
-    const input = wrapper.get('input[type="file"]');
+
+    await wrapper.get("[data-submit-evidence-batch]").trigger("click");
+    await wrapper.setProps({ viewerRole: "MERCHANT" });
+    await flushPromises();
+
+    lateBatchResponse.resolve({
+      batch_id: "LATE_USER_BATCH",
+      evidence_ids: ["EVIDENCE_USER_PENDING"],
+      room_message: {
+        id: "LATE_USER_BATCH_MESSAGE",
+        sequence_no: 9,
+        sender_role: "USER",
+        message_type: "PARTY_EVIDENCE_REFERENCE",
+        message_text: "Late user batch must stay out of the merchant thread.",
+      },
+    });
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("Merchant-private batch checklist.");
+    expect(wrapper.text()).not.toContain("Late user batch must stay out");
+    expect(wrapper.get('[data-send-message] textarea').element.disabled).toBe(false);
+  });
+
+  it("uploads user evidence with the backend actor-specific source type", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const { wrapper } = await mountView(
+      { viewerRole: "USER" },
+      { attachTo: host },
+    );
+    await wrapper.get("[data-open-evidence-upload]").trigger("click");
+    expect(wrapper.get("[data-evidence-upload-modal]").text()).toContain("尚未选择文件");
+    const input = wrapper.get("[data-evidence-upload-file]");
     const file = new File(["demo"], "开箱照片.png", { type: "image/png" });
     Object.defineProperty(input.element, "files", {
       value: [file],
@@ -1621,6 +2136,27 @@ describe("EvidenceRoomView", () => {
     });
 
     await input.trigger("change");
+    await flushPromises();
+
+    expect(evidenceApi.upload).not.toHaveBeenCalled();
+    const declaration = wrapper.get("[data-evidence-upload-modal]");
+    expect(declaration.get("[data-evidence-upload-guidance]").text()).toContain(
+      "文件已选择",
+    );
+    expect(document.activeElement).toBe(
+      declaration.get("[data-evidence-claimed-fact]").element,
+    );
+    expect(declaration.get("[data-confirm-evidence-upload]").attributes("disabled"))
+      .toBeUndefined();
+    expect(declaration.text()).toContain("用户 · 争议发起方");
+    expect(declaration.text()).toContain("驳回用户的全部诉求");
+    expect(declaration.text()).toContain("真实性评分低于 50% 时标记“疑似造假”");
+    expect(declaration.text()).toContain("关联性评分低于 50% 时标记“关联度低”并进入人工审核");
+    await declaration
+      .get("[data-evidence-claimed-fact]")
+      .setValue("证明商品开箱时已存在划痕。");
+    await declaration.get("[data-evidence-truth-attested]").setValue(true);
+    await declaration.get("[data-evidence-upload-form]").trigger("submit");
     await flushPromises();
 
     expect(evidenceApi.upload).toHaveBeenCalledWith(
@@ -1631,7 +2167,85 @@ describe("EvidenceRoomView", () => {
         evidenceType: "OTHER",
         sourceType: "USER_UPLOAD",
         visibility: "PRIVATE",
+        claimedFact: "证明商品开箱时已存在划痕。",
+        truthAttested: true,
       }),
     );
+    wrapper.unmount();
+    host.remove();
+  });
+
+  it("rejects a claimed fact shorter than the backend minimum before upload", async () => {
+    const { wrapper } = await mountView({ viewerRole: "USER" });
+    await wrapper.get("[data-open-evidence-upload]").trigger("click");
+    const input = wrapper.get("[data-evidence-upload-file]");
+    const file = new File(["demo"], "质检说明.png", { type: "image/png" });
+    Object.defineProperty(input.element, "files", {
+      value: [file],
+      configurable: true,
+    });
+
+    await input.trigger("change");
+    const declaration = wrapper.get("[data-evidence-upload-modal]");
+    const claimedFact = declaration.get("[data-evidence-claimed-fact]");
+    await claimedFact.setValue("质检");
+    await declaration.get("[data-evidence-truth-attested]").setValue(true);
+
+    expect(claimedFact.attributes("minlength")).toBe("5");
+    expect(declaration.get("[data-confirm-evidence-upload]").attributes("disabled"))
+      .toBeUndefined();
+
+    await declaration.get("[data-evidence-upload-form]").trigger("submit");
+    await flushPromises();
+
+    expect(evidenceApi.upload).not.toHaveBeenCalled();
+    expect(declaration.get("[role=alert]").text()).toContain(
+      "证明内容至少填写 5 个字符",
+    );
+  });
+
+  it("clears the selected file when the upload declaration is cancelled", async () => {
+    const { wrapper } = await mountView({ viewerRole: "USER" });
+    await wrapper.get("[data-open-evidence-upload]").trigger("click");
+    const input = wrapper.get("[data-evidence-upload-file]");
+    const file = new File(["demo"], "同名证据.png", { type: "image/png" });
+    Object.defineProperty(input.element, "files", {
+      value: [file],
+      configurable: true,
+    });
+
+    await input.trigger("change");
+    expect(wrapper.find("[data-evidence-upload-modal]").exists()).toBe(true);
+
+    await wrapper.get("[data-cancel-evidence-upload]").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.find("[data-evidence-upload-modal]").exists()).toBe(false);
+    expect(input.element.value).toBe("");
+    expect(evidenceApi.upload).not.toHaveBeenCalled();
+  });
+
+  it("derives the declaration consequence from initiatorRole instead of a fixed user role", async () => {
+    const { wrapper } = await mountView({
+      viewerRole: "MERCHANT",
+      initialCatalog: {
+        ...catalog,
+        initiator_role: "MERCHANT",
+        initiator_id: "merchant-local",
+      },
+    });
+    await wrapper.get("[data-open-evidence-upload]").trigger("click");
+    const input = wrapper.get("[data-evidence-upload-file]");
+    Object.defineProperty(input.element, "files", {
+      value: [new File(["demo"], "商家举证.pdf", { type: "application/pdf" })],
+      configurable: true,
+    });
+
+    await input.trigger("change");
+
+    const declaration = wrapper.get("[data-evidence-upload-modal]");
+    expect(declaration.text()).toContain("商家 · 争议发起方");
+    expect(declaration.text()).toContain("驳回商家的全部诉求");
+    expect(declaration.text()).not.toContain("支持并进入执行对方的全部合理诉求");
   });
 });

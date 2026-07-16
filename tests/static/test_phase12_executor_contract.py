@@ -72,29 +72,13 @@ def test_executor_records_idempotent_success_failure_and_retry_boundaries() -> N
 # 具体功能：`test_tool_call_is_outside_database_transaction_and_workflow_driven` 验证工具意图在固定案例中的输出、边界和失败行为；关键协作调用：`split`、`service.split`。
 # 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 本文件的 `read`。
 # 系统意义：固定“跨服务契约测试 > test_phase12_executor_contract”的可观察契约，防止后续重构改变业务结果。
-def test_tool_call_is_outside_database_transaction_and_workflow_driven() -> None:
+def test_tool_call_is_outside_database_transaction() -> None:
     service = read(JAVA / "executor" / "application" / "ToolExecutorService.java")
-    workflow = read(
-        JAVA
-        / "workflow"
-        / "temporal"
-        / "CaseFulfillmentDisputeWorkflowImpl.java"
-    )
-    activities = read(
-        JAVA
-        / "workflow"
-        / "application"
-        / "CaseFulfillmentDisputeActivitiesImpl.java"
-    )
     assert "@Transactional" not in service.split(
         "public ExecutionBatchView executeApprovedActions", 1
     )[0].split("public class ToolExecutorService", 1)[1]
-    assert "ToolExecutionResult result = tool.execute(action)" in service
+    assert "ToolExecutionResult result = toolRegistry.execute(action)" in service
     assert "transactions.executeWithoutResult" in service
-    assert "activities.executeApprovedPlan(input.caseId())" in workflow
-    assert "activities.closeCaseAndEvaluate(input.caseId())" in workflow
-    assert "EVALUATION_COMPLETE" in workflow
-    assert '"WORKFLOW_EXECUTE:" + caseId' in activities
 
 
 # 所属模块：跨服务契约测试 > test_phase12_executor_contract；函数角色：回归测试用例。

@@ -48,8 +48,9 @@ def test_intake_officer_prompt_declares_context_pack_workflow_contract() -> None
     assert "turn_reconciliation" not in system_prompt
     assert "turn_audit" not in system_prompt
     assert "forbidden_repeat_topics" not in system_prompt
-    assert "合计最多 6 条" in system_prompt
-    assert "发起方私有接待室" in system_prompt
+    assert "最多追问 2 个" in system_prompt
+    assert "当前方是被发起方时" in system_prompt
+    assert "不得引用或猜测发起方私聊原文" in system_prompt
     assert "不得索要截图、照片、视频" in system_prompt
     assert "只进行一次模型调用" in system_prompt
     assert "只输出本轮发生变化的分支" in system_prompt

@@ -93,11 +93,11 @@ class CaseOutcomeControllerTest {
                                         "AI 法官形成非最终裁决草案。",
                                         "READY",
                                         objectMapper.readTree(
-                                                "[{\"fact\":\"物流记录显示已签收\"}]"),
+                                                "[{\"fact_id\":\"FACT_DELIVERY\",\"finding\":\"物流记录显示已签收\",\"evidence_ids\":[\"EVIDENCE_WAYBILL\"],\"confidence\":0.88}]"),
                                         objectMapper.readTree(
-                                                "[{\"assessment\":\"商家证据不足以证明用户本人签收\"}]"),
+                                                "[{\"assessment_type\":\"EVIDENCE\",\"evidence_id\":\"EVIDENCE_WAYBILL\",\"fact_ids\":[\"FACT_DELIVERY\"],\"assessment\":\"商家证据不足以证明用户本人签收\",\"weight\":\"MEDIUM\",\"confidence\":0.68,\"limitations\":[\"缺少签收主体信息\"]}]"),
                                         objectMapper.readTree(
-                                                "[{\"rule\":\"签收争议举证责任\"}]"),
+                                                "[{\"rule_code\":\"DELIVERY_PROOF\",\"rule_version\":1,\"rule_name\":\"签收争议举证责任\",\"fact_ids\":[\"FACT_DELIVERY\"],\"applicable\":true,\"rationale\":\"履约方应提供可核验交付记录\"}]"),
                                         objectMapper.readTree("[\"核验签收人身份\"]"),
                                         objectMapper.readTree(
                                                 "{\"id\":\"PLAN_1\",\"actions\":[{\"action_type\":\"REFUND\",\"amount\":199}]}")),
@@ -118,13 +118,25 @@ class CaseOutcomeControllerTest {
                                 .value(true))
                 .andExpect(jsonPath("$.data.adjudication_draft.id").value("DRAFT_1"))
                 .andExpect(
-                        jsonPath("$.data.adjudication_draft.fact_findings[0].fact")
+                        jsonPath("$.data.adjudication_draft.fact_findings[0].fact_id")
+                                .value("FACT_DELIVERY"))
+                .andExpect(
+                        jsonPath("$.data.adjudication_draft.fact_findings[0].finding")
                                 .value("物流记录显示已签收"))
+                .andExpect(
+                        jsonPath("$.data.adjudication_draft.evidence_assessment[0].assessment_type")
+                                .value("EVIDENCE"))
+                .andExpect(
+                        jsonPath("$.data.adjudication_draft.evidence_assessment[0].evidence_id")
+                                .value("EVIDENCE_WAYBILL"))
                 .andExpect(
                         jsonPath("$.data.adjudication_draft.evidence_assessment[0].assessment")
                                 .value("商家证据不足以证明用户本人签收"))
                 .andExpect(
-                        jsonPath("$.data.adjudication_draft.policy_application[0].rule")
+                        jsonPath("$.data.adjudication_draft.policy_application[0].rule_code")
+                                .value("DELIVERY_PROOF"))
+                .andExpect(
+                        jsonPath("$.data.adjudication_draft.policy_application[0].rule_name")
                                 .value("签收争议举证责任"))
                 .andExpect(
                         jsonPath("$.data.adjudication_draft.reviewer_attention[0]")

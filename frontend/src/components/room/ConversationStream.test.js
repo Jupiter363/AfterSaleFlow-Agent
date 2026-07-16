@@ -176,6 +176,32 @@ describe("ConversationStream", () => {
 
     expect(wrapper.text()).toContain("证据书记官");
     expect(wrapper.text()).not.toContain("争议接待官");
+    expect(wrapper.text()).not.toContain("·");
+    expect(
+      wrapper.get("[data-agent-speaker-label]").attributes("data-agent-speaker-tone"),
+    ).toBe("evidence");
+  });
+
+  it("keeps system-backed agent output in the digital-human label treatment", () => {
+    const wrapper = mount(ConversationStream, {
+      props: {
+        agentLabel: "外部案件导入助手",
+        messages: [
+          {
+            id: "MESSAGE_IMPORT_ASSISTANT",
+            sequence_no: 1,
+            sender_role: "SYSTEM",
+            message_type: "AGENT_MESSAGE",
+            message_text: "外部案件已导入。",
+          },
+        ],
+      },
+    });
+
+    const label = wrapper.get("[data-agent-speaker-label]");
+    expect(label.attributes("data-agent-speaker-tone")).toBe("guide");
+    expect(label.text()).toContain("外部案件导入助手");
+    expect(label.text()).not.toContain("·");
   });
 
   // 业务位置：【Java 房间协作】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、访问会话和参与方身份 正确进入 接待/证据回合记忆、Agent 上下文和事件。上游：房间消息、访问会话和参与方身份。下游：接待/证据回合记忆、Agent 上下文和事件。边界：会话和可见性必须按参与方隔离。

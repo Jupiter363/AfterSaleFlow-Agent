@@ -1,22 +1,36 @@
-// 文件作用：自动化测试文件，验证 OutcomeView.test 相关模块的行为、契约或页面布局。
-// 说明：本注释用于帮助读者先了解本文件职责，再继续阅读具体实现。
-
 import { flushPromises, mount } from "@vue/test-utils";
 import { createMemoryHistory, createRouter } from "vue-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { disputeApi } from "../../api/disputes";
 import { actor } from "../../state/actor";
 import OutcomeView from "./OutcomeView.vue";
 
-const outcome = {
+const actionOnlyPlan = {
+  actions: [
+    {
+      action_type: "REFUND",
+      description: "向用户原支付渠道退还订单实付金额 299 元，并关闭本次争议。",
+      amount: 299,
+      currency: "CNY",
+    },
+  ],
+};
+
+const approvedOutcome = {
   case_id: "CASE_OUTCOME_1",
   title: "签收未收到争议",
   case_status: "CLOSED",
   closed_at: "2026-07-03T13:20:00+08:00",
+  adjudication_draft: {
+    id: "DRAFT_V2_7",
+    draft_version: 7,
+    recommended_decision: "建议支持用户退款请求",
+    draft_text: "庭审认为现有证据不足以证明包裹由用户本人或授权人签收。",
+  },
   final_decision: {
     conclusion: "支持用户退款请求",
-    explanation: "现有证据不足以证明包裹由用户本人或授权人签收。",
-    review_reason: "审核员确认现有证据链完整。",
+    explanation: "最终处理方案已经审核生效。",
+    review_reason: "管理员确认现有证据链完整，裁决适用规则准确。",
+    approved_plan: actionOnlyPlan,
     source: "HUMAN_REVIEW",
     human_confirmed: true,
   },
@@ -37,7 +51,23 @@ const outcome = {
   ],
 };
 
-// 业务位置：【前端处理结果】mountOutcome：围绕 阶段处理结果或草案 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
+const unapprovedOutcome = {
+  ...approvedOutcome,
+  case_status: "WAITING_HUMAN_REVIEW",
+  closed_at: null,
+  final_decision: {
+    conclusion: "这是一条尚未审批的内部草案结论",
+    explanation: "这是一条尚未审批的内部草案说明",
+    review_reason: "这是一条尚未审批的内部审核意见",
+    approved_plan: {
+      handling_direction: "REFUND",
+      execution_plan: "这是一条尚未审批的内部执行方案",
+    },
+    human_confirmed: false,
+  },
+  actions: [],
+};
+
 async function mountOutcome(initialOutcome) {
   const router = createRouter({
     history: createMemoryHistory(),
@@ -45,36 +75,13 @@ async function mountOutcome(initialOutcome) {
   });
   await router.push("/disputes/CASE_OUTCOME_1/outcome");
   await router.isReady();
+
   return mount(OutcomeView, {
     props: { initialOutcome },
     global: { plugins: [router] },
   });
 }
 
-const draftOutcome = {
-  ...outcome,
-  case_status: "WAITING_HUMAN_REVIEW",
-  closed_at: null,
-  final_decision: {
-    conclusion: "等待确认裁决草案",
-    explanation: "AI 法官已形成非最终裁决草案。",
-    human_confirmed: false,
-  },
-  actions: [],
-  adjudication_draft: {
-    id: "DRAFT_REVIEW_READY",
-    recommended_decision: "建议退款",
-    confidence: 0.82,
-    draft_text: "AI 法官已基于三轮庭审形成非最终裁决草案。",
-    reviewer_attention: ["请审核员确认签收凭证是否足以证明用户本人签收。"],
-    approved_plan: {
-      id: "PLAN_1",
-      actions: [{ action_type: "REFUND", amount: 199 }],
-    },
-  },
-};
-
-// 业务位置：【前端处理结果】describe：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
 describe("OutcomeView", () => {
   beforeEach(() => {
     actor.id = "user-local";
@@ -86,59 +93,111 @@ describe("OutcomeView", () => {
     vi.restoreAllMocks();
   });
 
-  // 业务位置：【前端处理结果】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
-  it("explains the final ruling and exposes deterministic execution receipts", async () => {
-    const wrapper = await mountOutcome(outcome);
+  it("uses the shared room header for the read-only execution result page", async () => {
+    const wrapper = await mountOutcome(approvedOutcome);
 
-    expect(wrapper.text()).toContain("最终裁决");
-    expect(wrapper.text()).toContain("支持用户退款请求");
-    expect(wrapper.text()).toContain("REFUND-20260703-1");
-    expect(wrapper.findAll("[data-execution-receipt]")).toHaveLength(2);
-    expect(wrapper.text()).toContain("裁决已生效");
-    expect(wrapper.text()).toContain("审核员确认现有证据链完整");
+    expect(wrapper.get(".room-shell__header h1").text()).toBe("执行结果");
   });
 
-  // 业务位置：【前端处理结果】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
-  it("simulates execution assistant handoff for final decisions without real action receipts", async () => {
+  it("shows the V2 hearing adjudication and its actual draft version", async () => {
+    const wrapper = await mountOutcome(approvedOutcome);
+    const hearing = wrapper.get("[data-outcome-hearing]");
+
+    expect(hearing.text()).toContain("庭审法官 V2");
+    expect(hearing.text()).toMatch(/v7|V7|版本\s*7/);
+    expect(hearing.text()).toContain("建议支持用户退款请求");
+    expect(hearing.text()).toContain(
+      "庭审认为现有证据不足以证明包裹由用户本人或授权人签收。",
+    );
+  });
+
+  it("shows the administrator review opinion without exposing review operations", async () => {
+    actor.id = "reviewer-local";
+    actor.role = "PLATFORM_REVIEWER";
+    const wrapper = await mountOutcome(approvedOutcome);
+    const review = wrapper.get("[data-outcome-review]");
+
+    expect(review.text()).toContain("管理员审核意见");
+    expect(review.text()).toContain(
+      "管理员确认现有证据链完整，裁决适用规则准确。",
+    );
+    expect(wrapper.find("[data-outcome-review-panel]").exists()).toBe(false);
+    expect(wrapper.find("[data-review-confirm]").exists()).toBe(false);
+    expect(wrapper.find("[data-review-modify]").exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("审核员操作");
+  });
+
+  it("derives the approved plan type and description from an action-only plan", async () => {
+    const wrapper = await mountOutcome(approvedOutcome);
+    const plan = wrapper.get("[data-outcome-plan]");
+
+    expect(plan.text()).toContain("最终执行方案");
+    expect(plan.text()).toMatch(/退款|REFUND/);
+    expect(plan.text()).toContain(
+      "向用户原支付渠道退还订单实付金额 299 元，并关闭本次争议。",
+    );
+  });
+
+  it("supports the handling direction and natural-language execution plan contract", async () => {
+    const wrapper = await mountOutcome({
+      ...approvedOutcome,
+      final_decision: {
+        ...approvedOutcome.final_decision,
+        approved_plan: {
+          handling_direction: "RETURN_AND_REFUND",
+          execution_plan: "用户寄回商品后，原支付渠道退还 299 元，并向双方发送结案通知。",
+        },
+      },
+    });
+    const plan = wrapper.get("[data-outcome-plan]");
+
+    expect(plan.text()).toMatch(/退货退款|RETURN_AND_REFUND/);
+    expect(plan.text()).toContain(
+      "用户寄回商品后，原支付渠道退还 299 元，并向双方发送结案通知。",
+    );
+  });
+
+  it("animates a frontend mock execution when no real action receipt exists", async () => {
     vi.useFakeTimers();
     const wrapper = await mountOutcome({
-      ...outcome,
+      ...approvedOutcome,
       case_status: "APPROVED_FOR_EXECUTION",
       closed_at: null,
-      final_decision: {
-        conclusion: "审核员已确认草案",
-        explanation: "最终裁决已确认，后续执行由执行专员助手处理。",
-        review_reason: "审核员确认裁决草案。",
-        source: "HUMAN_REVIEW",
-        human_confirmed: true,
-      },
       actions: [],
     });
 
-    expect(wrapper.text()).toContain("裁决已确认");
-    expect(wrapper.text()).toContain("方案已移交给执行专员助手处理");
-    expect(wrapper.text()).toContain("执行专员助手处理中");
-    expect(wrapper.text()).not.toContain("方案执行成功");
+    const execution = wrapper.get("[data-outcome-execution]");
+    expect(execution.find("[data-mock-execution]").exists()).toBe(true);
+    expect(execution.text()).toContain("方案下发");
+    expect(execution.text()).not.toContain("模拟执行完成");
 
-    vi.advanceTimersByTime(3000);
+    await vi.advanceTimersByTimeAsync(4_999);
+    await flushPromises();
+    expect(execution.get(".mock-execution__summary strong").text()).toBe("方案下发");
+
+    await vi.advanceTimersByTimeAsync(1);
+    await flushPromises();
+    expect(execution.get(".mock-execution__summary strong").text()).toBe("执行准备");
+
+    await vi.advanceTimersByTimeAsync(15_000);
     await flushPromises();
 
-    expect(wrapper.text()).toContain("方案执行成功");
+    expect(execution.text()).toContain("模拟执行完成");
+    expect(wrapper.find("[data-execution-receipt]").exists()).toBe(false);
   });
 
-  // 业务位置：【前端处理结果】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
-  it("formats nested execution result payloads instead of dumping raw JSON", async () => {
+  it("keeps structured real execution receipts when actions are available", async () => {
     const wrapper = await mountOutcome({
-      ...outcome,
+      ...approvedOutcome,
       actions: [
         {
           action_record_id: "ACTION_RESHIP",
           action_type: "RESHIP",
           execution_status: "SUCCEEDED",
-          external_result_ref: "SIM_RESHIP_1",
+          external_result_ref: "RESHIP-20260703-1",
           result: {
             operation: "reship",
-            simulated: true,
+            simulated: false,
             tool_name: "warehouse_tool",
             response: {
               status: "SUCCEEDED",
@@ -150,9 +209,10 @@ describe("OutcomeView", () => {
       ],
     });
 
-    const receipt = wrapper.get("[data-execution-receipt]");
-    expect(receipt.text()).toContain("RESHIP");
-    expect(receipt.text()).toContain("reship");
+    const execution = wrapper.get("[data-outcome-execution]");
+    const receipt = execution.get("[data-execution-receipt]");
+    expect(execution.find("[data-mock-execution]").exists()).toBe(false);
+    expect(receipt.text()).toContain("RESHIP-20260703-1");
     expect(receipt.text()).toContain("warehouse_tool");
     expect(receipt.text()).toContain("REMEDY:CASE:1:0:RESHIP");
     expect(receipt.find("pre").exists()).toBe(false);
@@ -160,343 +220,30 @@ describe("OutcomeView", () => {
     expect(receipt.text()).not.toContain("{");
   });
 
-  // 业务位置：【前端处理结果】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
-  it("shows the AI draft explanation chain when the backend exposes it", async () => {
+  it("does not treat a rejected human review as an approved final result", async () => {
     const wrapper = await mountOutcome({
-      ...outcome,
-      adjudication_draft: {
-        id: "DRAFT_1",
-        draft_version: 2,
-        recommended_decision: "支持用户退款请求",
-        confidence: 0.92,
-        draft_text: "AI 法官基于三轮陈述和证据证明矩阵形成非最终裁决草案。",
-        fact_findings: [{ fact: "物流记录显示已签收", conclusion: "已被物流记录支持" }],
-        evidence_assessment: [{ assessment: "商家证据不足以证明用户本人签收" }],
-        policy_application: [{ rule: "签收争议举证责任", application: "需核验签收人身份" }],
-        reviewer_attention: ["核验签收人身份"],
-      },
-    });
-
-    const draftCard = wrapper.get("[data-adjudication-draft]");
-    expect(draftCard.text()).toContain("AI 裁决草案（非最终）");
-    expect(draftCard.text()).toContain("支持用户退款请求");
-    expect(draftCard.text()).toContain("92/100");
-    expect(draftCard.text()).not.toContain("可信分可信分");
-    expect(wrapper.get("[data-fact-findings]").text()).toContain("物流记录显示已签收");
-    expect(wrapper.get("[data-evidence-assessment]").text()).toContain(
-      "商家证据不足以证明用户本人签收",
-    );
-    expect(wrapper.get("[data-policy-application]").text()).toContain("签收争议举证责任");
-    expect(wrapper.get("[data-reviewer-attention]").text()).toContain("核验签收人身份");
-  });
-
-  // 业务位置：【前端处理结果】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
-  it("does not expose raw draft field names or internal enum values to parties", async () => {
-    const wrapper = await mountOutcome({
-      ...outcome,
-      case_status: "WAITING_HUMAN_REVIEW",
-      closed_at: null,
-      final_decision: {
-        conclusion: "等待确认裁决草案",
-        explanation: "AI 法官已生成非最终草案。",
-        human_confirmed: false,
-      },
+      ...approvedOutcome,
+      review_task_status: "REJECTED",
       actions: [],
-      adjudication_draft: {
-        id: "DRAFT_INTERNAL_FIELDS",
-        recommended_decision: "RESHIP_OR_REFUND_AFTER_SIGNATURE_REVIEW",
-        confidence: 0.73,
-        draft_text: "AI 法官基于庭审材料生成非最终草案。",
-        fact_findings: [
-          {
-            issue_id: "ISSUE_001",
-            policy_basis: ["SIGNED_NOT_RECEIVED", "举证责任"],
-            evidence_basis: ["EVIDENCE_INTERNAL_001"],
-            suggested_finding:
-              "用户称物流显示签收但本人未收到包裹，验证状态为NEEDS_HUMAN_REVIEW，证据ID EVIDENCE_INTERNAL_001。",
-            verification_status: "NEEDS_HUMAN_REVIEW",
-          },
-        ],
-        evidence_assessment: [
-          {
-            supported_by: ["EVIDENCE_INTERNAL_001"],
-            contradicted_by: [],
-            missing_evidence: true,
-            neutral_analysis: "仍需核验签收人身份。",
-          },
-        ],
-        reviewer_attention: ["NEEDS_HUMAN_REVIEW"],
-      },
     });
 
-    const pageText = wrapper.text();
-    expect(pageText).not.toContain("issue_id");
-    expect(pageText).not.toContain("policy_basis");
-    expect(pageText).not.toContain("evidence_basis");
-    expect(pageText).not.toContain("suggested_finding");
-    expect(pageText).not.toContain("supported_by");
-    expect(pageText).not.toContain("contradicted_by");
-    expect(pageText).not.toContain("missing_evidence");
-    expect(pageText).not.toContain("neutral_analysis");
-    expect(pageText).not.toContain("NEEDS_HUMAN_REVIEW");
-    expect(pageText).not.toContain("SIGNED_NOT_RECEIVED");
-    expect(pageText).not.toContain("EVIDENCE_INTERNAL_001");
+    expect(wrapper.get("[data-outcome-waiting]").text()).toContain("等待最终结果");
+    expect(wrapper.find("[data-outcome-hearing]").exists()).toBe(false);
+    expect(wrapper.find("[data-outcome-plan]").exists()).toBe(false);
+    expect(wrapper.find("[data-mock-execution]").exists()).toBe(false);
   });
 
-  // 业务位置：【前端处理结果】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
-  it("keeps the draft room compact and Chinese-first when detailed draft data is present", async () => {
-    const wrapper = await mountOutcome({
-      ...outcome,
-      case_status: "WAITING_HUMAN_REVIEW",
-      closed_at: null,
-      final_decision: {
-        conclusion: "建议先核验签收记录",
-        explanation: "白话结论只呈现一次核心判断。",
-        human_confirmed: false,
-      },
-      actions: [],
-      adjudication_draft: {
-        id: "DRAFT_COMPACT",
-        recommended_decision: "RESHIP_OR_REFUND_AFTER_SIGNATURE_REVIEW",
-        confidence: 0.7,
-        draft_text: "重复草案正文：这段长文本不应该在草案页被多个卡片重复展示。",
-        fact_findings: [{ fact: "物流显示签收但用户称未收到包裹。" }],
-        evidence_assessment: [{ neutral_analysis: "仍需核验签收凭证。" }],
-        reviewer_attention: ["核验签收人身份"],
-      },
-    });
+  it("keeps every result section behind the approved-result boundary", async () => {
+    const wrapper = await mountOutcome(unapprovedOutcome);
 
-    const pageText = wrapper.text();
-    expect(pageText).toContain("白话结论");
-    expect(pageText).toContain("草案依据");
-    expect(pageText).toContain("解释员复盘");
-    expect(pageText).not.toContain("PLAIN-LANGUAGE RULING");
-    expect(pageText).not.toContain("AI JUDGE DRAFT");
-    expect(pageText).not.toContain("EXPLANATION OFFICER");
-    expect(pageText).not.toContain("FOLLOW-UP TRACE");
-    expect(pageText.match(/重复草案正文/g) || []).toHaveLength(1);
-  });
-
-  // 业务位置：【前端处理结果】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
-  it("does not repeat the long plain-language conclusion as the draft recommendation", async () => {
-    const repeatedConclusion =
-      "鉴于用户提交的售后请求及三轮庭审陈述均为乱码，无法识别具体争议内容和诉求，且用户提供的物流证明材料解析不完整，真实性待核验，商家亦未提交有效证据，现有物流记录显示已签收。建议维持订单完成状态，不支持发起赔付或退款程序。";
-    const wrapper = await mountOutcome({
-      ...outcome,
-      case_status: "WAITING_HUMAN_REVIEW",
-      closed_at: null,
-      final_decision: {
-        conclusion: repeatedConclusion,
-        explanation: "本案仍以后续确认为准。",
-        human_confirmed: false,
-      },
-      actions: [],
-      adjudication_draft: {
-        id: "DRAFT_REPEATED_RECOMMENDATION",
-        recommended_decision: repeatedConclusion,
-        confidence: 0.35,
-        draft_text: "AI 法官已形成非最终草案。",
-      },
-    });
-
-    const pageText = wrapper.text();
-    expect(pageText.match(new RegExp(repeatedConclusion, "g")) || []).toHaveLength(1);
-    expect(pageText).toContain("同上方白话结论一致");
-    expect(pageText).not.toContain("可信分可信分");
-  });
-
-  // 业务位置：【前端处理结果】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
-  it("presents waiting-review AI drafts as non-final outcomes without reviewer-facing wording", async () => {
-    const wrapper = await mountOutcome({
-      ...outcome,
-      case_status: "WAITING_HUMAN_REVIEW",
-      closed_at: null,
-      final_decision: {
-        conclusion: "RESHIP_OR_REFUND_AFTER_SIGNATURE_REVIEW",
-        explanation: "最终结果仍需平台审核确认。",
-        review_reason: "平台审核员需要核验签收凭证。",
-        human_confirmed: false,
-      },
-      actions: [],
-      adjudication_draft: {
-        id: "DRAFT_WAITING",
-        recommended_decision: "RESHIP_OR_REFUND_AFTER_SIGNATURE_REVIEW",
-        confidence: 0.75,
-        draft_text: "AI 法官已形成非最终裁决草案，等待平台审核员确认后生效。",
-        fact_findings: ["物流显示签收，但用户称本人未收到包裹。"],
-        evidence_assessment: ["商家证据仍需平台审核确认。"],
-        policy_application: ["签收争议应结合签收凭证和物流记录判断。"],
-        reviewer_attention: [
-          "平台审核员应重点核验签收人身份。",
-          '复核模型兜底生成原因：422 Unprocessable Entity: {"success":false,"code":"INVALID_ARGUMENT"}',
-        ],
-      },
-    });
-
-    const pageText = wrapper.text();
-    expect(pageText).toContain("AI 裁决草案");
-    expect(pageText).toContain("等待后续确认");
-    expect(pageText).toContain("AI 生成的非最终裁决草案");
-    expect(pageText).toContain("后续确认关注");
-    expect(pageText).toContain("建议补发或退款");
-    expect(pageText).toContain("确认与执行轨迹");
-    expect(pageText).toContain("尚未产生执行动作");
-    expect(pageText).toContain("复核模型曾触发兜底生成");
-    expect(wrapper.get(".outcome-hero h1").text()).toBe("AI 裁决草案");
-    expect(pageText).not.toContain("THE VERDICT HAS LANDED");
-    expect(pageText).not.toContain("裁决已生效");
-    expect(pageText).not.toContain("裁决落地轨迹");
-    expect(pageText).not.toContain("执行回执正在路上");
-    expect(pageText).not.toContain("平台审核员确认后的最终裁决");
-    expect(pageText).not.toContain("平台审核员");
-    expect(pageText).not.toContain("平台审核确认");
-    expect(pageText).not.toContain("RESHIP_OR_REFUND_AFTER_SIGNATURE_REVIEW");
-    expect(pageText).not.toContain("422 Unprocessable Entity");
-    expect(pageText).not.toContain("INVALID_ARGUMENT");
-  });
-
-  // 业务位置：【前端处理结果】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
-  it("shows the explanation officer replay only in the draft room", async () => {
-    const wrapper = await mountOutcome({
-      ...outcome,
-      case_status: "WAITING_HUMAN_REVIEW",
-      closed_at: null,
-      final_decision: {
-        conclusion: "等待确认裁决草案",
-        explanation: "AI 法官已生成非最终草案。",
-        human_confirmed: false,
-      },
-      actions: [],
-      adjudication_draft: {
-        id: "DRAFT_WITH_EXPLAINER",
-        recommended_decision: "支持用户退款请求",
-        confidence: 0.81,
-        draft_text: "AI 法官基于三轮庭审形成非最终草案。",
-        explanation_officer_notes: {
-          replay_summary:
-            "解释员复盘：第一轮确认签收争点，第二轮核验补证，第三轮整理双方对拟处理方向的异议。",
-          final_plan_explanation:
-            "草案倾向退款，是因为商家仍未证明用户本人或授权人签收。",
-          reviewer_focus: ["确认签收底单是否能证明本人签收"],
-        },
-      },
-    });
-
-    const explainer = wrapper.get("[data-explanation-officer]");
-    expect(explainer.text()).toContain("解释员复盘");
-    expect(explainer.text()).toContain("第一轮确认签收争点");
-    expect(explainer.text()).toContain("草案倾向退款");
-    expect(explainer.text()).toContain("确认签收底单是否能证明本人签收");
-    expect(explainer.text()).not.toContain("explanation_officer_notes");
-    expect(explainer.text()).not.toContain("平台终审");
-  });
-
-  // 业务位置：【前端处理结果】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
-  it("keeps outcome review controls hidden from parties", async () => {
-    const wrapper = await mountOutcome(draftOutcome);
-
-    expect(wrapper.find("[data-outcome-review-panel]").exists()).toBe(false);
-    expect(wrapper.text()).not.toContain("审核员确认草案");
-    expect(wrapper.text()).not.toContain("修改并确认");
-  });
-
-  // 业务位置：【前端处理结果】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
-  it("lets platform reviewers confirm the AI draft from the outcome room", async () => {
-    actor.id = "reviewer-local";
-    actor.role = "PLATFORM_REVIEWER";
-    const confirm = vi
-      .spyOn(disputeApi, "confirmOutcomeDraft")
-      .mockResolvedValue({ decision: "APPROVE", execution_allowed: true });
-    vi.spyOn(disputeApi, "outcome").mockResolvedValue({
-      ...draftOutcome,
-      final_decision: {
-        conclusion: "审核员已确认草案",
-        explanation: "最终处理方案等待执行同步。",
-        human_confirmed: true,
-      },
-      case_status: "CLOSED",
-      closed_at: "2026-07-09T15:40:00+08:00",
-    });
-    const wrapper = await mountOutcome(draftOutcome);
-
-    expect(wrapper.get("[data-outcome-review-panel]").text()).toContain("审核员确认草案");
-    await wrapper.get("[data-review-confirm]").trigger("click");
-    await flushPromises();
-
-    expect(confirm).toHaveBeenCalledWith(
-      expect.objectContaining({ role: "PLATFORM_REVIEWER" }),
-      "CASE_OUTCOME_1",
-      expect.stringContaining("审核员确认"),
-    );
-    expect(wrapper.text()).toContain("审核员已确认草案");
-  });
-
-  // 业务位置：【前端处理结果】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
-  it("shows reviewer controls for waiting-review outcomes even without embedded draft details", async () => {
-    actor.id = "reviewer-local";
-    actor.role = "PLATFORM_REVIEWER";
-
-    const wrapper = await mountOutcome({
-      ...draftOutcome,
-      adjudication_draft: null,
-    });
-
-    expect(wrapper.get("[data-outcome-review-panel]").text()).toContain("审核员确认草案");
-    expect(wrapper.get("[data-review-confirm]").text()).toContain("确认草案");
-  });
-
-  // 业务位置：【前端处理结果】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
-  it("lets platform reviewers modify the high-level handling direction and execution plan", async () => {
-    actor.id = "reviewer-local";
-    actor.role = "PLATFORM_REVIEWER";
-    const modify = vi
-      .spyOn(disputeApi, "modifyOutcomeDraft")
-      .mockResolvedValue({ decision: "MODIFY_AND_APPROVE", execution_allowed: true });
-    vi.spyOn(disputeApi, "outcome").mockResolvedValue(draftOutcome);
-    const wrapper = await mountOutcome(draftOutcome);
-
-    expect(wrapper.find("[data-review-approved-plan]").exists()).toBe(false);
-    expect(wrapper.get("[data-review-plan-editor]").text()).toContain("主处理方向");
-    expect(wrapper.get("[data-review-plan-editor]").text()).toContain("执行方案说明");
-    expect(wrapper.text()).not.toContain("新增执行动作");
-    expect(wrapper.text()).not.toContain("动作类型");
-    await wrapper.get("[data-review-handling-direction]").setValue("RESHIP");
-    await wrapper
-      .get("[data-review-execution-plan]")
-      .setValue("审核员建议补发一件同款商品，并向双方同步方案进度。");
-    await wrapper.get("[data-review-modify]").trigger("click");
-    await flushPromises();
-
-    expect(modify).toHaveBeenCalledWith(
-      expect.objectContaining({ role: "PLATFORM_REVIEWER" }),
-      "CASE_OUTCOME_1",
-      expect.stringContaining("审核员"),
-      {
-        id: "PLAN_1",
-        handling_direction: "RESHIP",
-        execution_plan: "审核员建议补发一件同款商品，并向双方同步方案进度。",
-        actions: [],
-      },
-    );
-  });
-
-  // 业务位置：【前端处理结果】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
-  it("disables modifying until a high-level direction or execution plan is provided", async () => {
-    actor.id = "reviewer-local";
-    actor.role = "PLATFORM_REVIEWER";
-    const wrapper = await mountOutcome({
-      ...draftOutcome,
-      adjudication_draft: {
-        ...draftOutcome.adjudication_draft,
-        approved_plan: { id: "PLAN_EMPTY", actions: [] },
-      },
-    });
-
-    expect(wrapper.find("[data-review-approved-plan-raw]").exists()).toBe(false);
-    expect(wrapper.text()).not.toContain("暂无执行动作");
-    expect(wrapper.get("[data-review-modify]").attributes("disabled")).toBeDefined();
-    await wrapper.get("[data-review-handling-direction]").setValue("COMPENSATION");
-
-    expect(wrapper.get("[data-review-modify]").attributes("disabled")).toBeUndefined();
+    expect(wrapper.get("[data-outcome-waiting]").text()).toContain("等待最终结果");
+    expect(wrapper.find("[data-outcome-hearing]").exists()).toBe(false);
+    expect(wrapper.find("[data-outcome-review]").exists()).toBe(false);
+    expect(wrapper.find("[data-outcome-plan]").exists()).toBe(false);
+    expect(wrapper.find("[data-outcome-execution]").exists()).toBe(false);
+    expect(wrapper.find("[data-mock-execution]").exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("这是一条尚未审批的内部草案结论");
+    expect(wrapper.text()).not.toContain("这是一条尚未审批的内部审核意见");
+    expect(wrapper.text()).not.toContain("这是一条尚未审批的内部执行方案");
   });
 });

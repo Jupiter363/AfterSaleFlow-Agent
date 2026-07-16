@@ -117,6 +117,35 @@ async function gridTrackCount(locator, property) {
   }, property);
 }
 
+test("keeps terminal review locked for parties before and after results open", async ({
+  page,
+}) => {
+  await openOverview(page, { width: 1024, height: 900 });
+
+  const currentRoomButton = page.locator("[data-enter-current-room]");
+  const reviewStage = page.locator('[data-stage-room="REVIEW"]');
+  const reviewEntry = reviewStage.locator('[data-stage-entry="REVIEW"]');
+
+  await expect(currentRoomButton).toBeDisabled();
+  await expect(currentRoomButton).toContainText("等待人工终审");
+  await expect(reviewStage).toHaveAttribute("data-stage-state", "locked");
+  await expect(reviewEntry).toHaveAttribute("data-permission-locked", "true");
+  await reviewEntry.click();
+  await expect(page.locator("[data-review-permission-dialog]")).toContainText(
+    "抱歉您没有权限",
+  );
+  await page.locator("[data-close-review-permission]").click();
+
+  await page.locator('[data-case-id="CASE_OVERVIEW_CLOSED"]').click();
+  await expect(currentRoomButton).toBeEnabled();
+  await expect(currentRoomButton).toContainText("查看最终结果");
+  await expect(reviewStage).toHaveAttribute("data-stage-state", "locked");
+  await reviewEntry.click();
+  await expect(page.locator("[data-review-permission-dialog]")).toContainText(
+    "抱歉您没有权限",
+  );
+});
+
 for (const viewport of viewportMatrix) {
   // 业务位置：【前端浏览器回归测试】test：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
   test(`keeps the fixed overview frame contract at ${viewport.width}x${viewport.height}`, async ({

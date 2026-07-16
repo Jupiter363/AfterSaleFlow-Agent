@@ -211,6 +211,6 @@ def test_repeated_dossier_turns_do_not_nest_prior_snapshots() -> None:
             len(json.dumps(previous, ensure_ascii=False, separators=(",", ":")))
         )
 
-    # The first render fills the deterministic default fields. Subsequent
-    # renders must remain byte-size stable instead of nesting the prior board.
-    assert max(serialized_sizes[1:]) == min(serialized_sizes[1:])
+    # Matrix version fields legitimately gain digits, but prior snapshots must
+    # not accumulate in the next render.
+    assert max(serialized_sizes[1:]) - min(serialized_sizes[1:]) <= 8

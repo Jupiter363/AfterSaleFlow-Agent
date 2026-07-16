@@ -22,6 +22,7 @@ const reviewer = {
 const longToken = "AGENT_CONFIG_LONG_UNBROKEN_TOKEN_".repeat(34);
 
 const viewports = [
+  { width: 1440, height: 1100 },
   { width: 390, height: 844 },
   { width: 320, height: 568 },
 ];
@@ -57,6 +58,13 @@ async function installAgentConsoleFixture(page) {
         body: JSON.stringify({ success: true, data: { unread_count: 0 } }),
       });
     }
+    if (request.method() === "GET" && url.pathname === "/api/disputes") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ success: true, data: { items: [] } }),
+      });
+    }
 
     throw new Error(
       `Unhandled agent-console browser-test API request: ${request.method()} ${url.pathname}${url.search}`,
@@ -76,22 +84,33 @@ async function openAgentConsole(page, viewport) {
 async function injectLongAgentCopy(page) {
   await page.evaluate((token) => {
     for (const selector of [
-      ".agent-console__intro p",
-      ".agent-console__intro > strong",
-      ".agent-ticket small",
-      ".agent-ticket i",
-      ".agent-panel__header p",
-      ".agent-config-tabs small",
-      ".jury-strategy__node",
-      ".jury-strategy p",
-      ".prompt-card dd",
-      ".prompt-card p",
-      ".skill-badges span",
-      ".court-preview b",
-      ".court-mapping p",
+      ".agent-console__description",
+      ".fleet-status small",
+      ".agent-list-item__copy small",
+      ".agent-list-item__copy em",
+      ".governance-note span",
+      ".agent-detail__summary",
+      ".agent-detail-header__tags span",
+      ".agent-info-list dd",
+      ".panel-toolbar p",
+      ".metric-cell dt",
+      ".metric-cell small",
+      ".overview-section__header p",
+      ".run-row span",
+      ".prompt-selector dd",
+      ".prompt-editor textarea",
+      ".safety-panel li",
+      ".switch-row p",
+      ".authority-block code",
+      ".authority-block li",
+      ".version-row__main p",
     ]) {
       for (const element of document.querySelectorAll(selector)) {
-        element.textContent = `${element.textContent} ${token}`;
+        if (element instanceof HTMLTextAreaElement) {
+          element.value = `${element.value} ${token}`;
+        } else {
+          element.textContent = `${element.textContent} ${token}`;
+        }
       }
     }
   }, longToken);
@@ -147,6 +166,8 @@ for (const viewport of viewports) {
   }) => {
     await openAgentConsole(page, viewport);
 
+    await expect(page.locator("[data-info-panel]")).toBeVisible();
+    await expect(page.locator(".agent-workbench > .agent-detail-header")).toHaveCount(0);
     await assertNoPageHorizontalOverflow(page);
     await captureLayoutScreenshot(page, { viewport, scenario: "normal" });
   });
@@ -161,4 +182,88 @@ for (const viewport of viewports) {
     await assertNoPageHorizontalOverflow(page);
     await captureLayoutScreenshot(page, { viewport, scenario: "long" });
   });
+
+  test(`keeps every agent management view contained at ${viewport.width}px`, async ({
+    page,
+  }) => {
+    await openAgentConsole(page, viewport);
+
+    for (const scenario of ["overview", "prompt", "strategy", "debug", "versions", "info"]) {
+      await page.locator(`[data-agent-tab="${scenario}"]`).click();
+      await expect(page.locator(`[data-${scenario}-panel]`)).toBeVisible();
+      await assertNoPageHorizontalOverflow(page);
+      await captureLayoutScreenshot(page, { viewport, scenario });
+    }
+
+    await page.locator("[data-change-avatar]").click();
+    await expect(page.locator(".avatar-dialog")).toBeVisible();
+    await assertNoPageHorizontalOverflow(page);
+    await captureLayoutScreenshot(page, { viewport, scenario: "avatar-picker" });
+    await page.locator(".avatar-dialog .dialog-close").click();
+  });
 }
+
+test("keeps the desktop workbench lower edge stable between management views", async ({
+  page,
+}) => {
+  await openAgentConsole(page, { width: 1440, height: 1100 });
+
+  const manager = page.locator(".agent-manager");
+  const initialBox = await manager.boundingBox();
+  expect(initialBox).not.toBeNull();
+  const expectedCardCounts = {
+    info: 4,
+    overview: 4,
+    prompt: 4,
+    strategy: 6,
+    debug: 2,
+    versions: 2,
+  };
+
+  for (const scenario of ["info", "overview", "prompt", "strategy", "debug", "versions"]) {
+    await page.locator(`[data-agent-tab="${scenario}"]`).click();
+    const panel = page.locator(`[data-${scenario}-panel]`);
+    await expect(panel).toBeVisible();
+
+    const currentBox = await manager.boundingBox();
+    expect(currentBox).not.toBeNull();
+    expect(Math.abs(currentBox.height - initialBox.height)).toBeLessThanOrEqual(1);
+
+    const layout = await panel.evaluate((element) => {
+      const panelRect = element.getBoundingClientRect();
+      const cards = [...element.querySelectorAll("[data-fixed-card]")].map((card) => {
+        const rect = card.getBoundingClientRect();
+        return {
+          height: rect.height,
+          top: rect.top,
+          bottom: rect.bottom,
+        };
+      });
+      const modeRow = element.querySelector(".switch-row--mode");
+      const modeControl = modeRow?.querySelector(".thinking-mode-control");
+      const followingRow = modeRow?.nextElementSibling;
+      const modeControlBottom = modeControl?.getBoundingClientRect().bottom ?? 0;
+      const followingRowTop = followingRow?.getBoundingClientRect().top ?? Infinity;
+      return {
+        clientHeight: element.clientHeight,
+        scrollHeight: element.scrollHeight,
+        overflowY: getComputedStyle(element).overflowY,
+        panelTop: panelRect.top,
+        panelBottom: panelRect.bottom,
+        modeControlOverlapsNextRow: modeControlBottom > followingRowTop + 1,
+        cards,
+      };
+    });
+
+    expect(layout.overflowY).toBe("hidden");
+    expect(layout.clientHeight).toBeGreaterThan(740);
+    expect(layout.scrollHeight).toBeLessThanOrEqual(layout.clientHeight + 1);
+    expect(layout.cards).toHaveLength(expectedCardCounts[scenario]);
+    expect(layout.modeControlOverlapsNextRow).toBe(false);
+    for (const card of layout.cards) {
+      expect(card.height).toBeGreaterThan(60);
+      expect(card.top).toBeGreaterThanOrEqual(layout.panelTop - 1);
+      expect(card.bottom).toBeLessThanOrEqual(layout.panelBottom + 1);
+    }
+  }
+});

@@ -14,6 +14,7 @@ import com.example.dispute.infrastructure.persistence.repository.FulfillmentCase
 import com.example.dispute.room.domain.RoomType;
 import com.example.dispute.room.infrastructure.persistence.entity.AgentConversationSessionEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseAccessSessionEntity;
+import com.example.dispute.room.infrastructure.persistence.entity.CaseIntakeDossierEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.RoomTurnMemoryEntity;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseParticipantRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseIntakeDossierRepository;
@@ -44,6 +45,7 @@ public class RoomTurnMemoryQueryService {
     private final AccessSessionResolver accessSessionResolver;
     private final AgentSessionResolver agentSessionResolver;
     private final SessionPermissionService permissionService;
+    private final IntakeProgressService intakeProgressService;
     private final ObjectMapper objectMapper;
 
     // 所属模块：【房间协作与权限 / 应用编排层】「RoomTurnMemoryQueryService.RoomTurnMemoryQueryService(FulfillmentCaseRepository,CaseParticipantRepository,RoomTurnMemoryRepository,CaseIntakeDossierRepository,AccessSessionResolver,AgentSessionResolver,SessionPermissionService,ObjectMapper)」。
@@ -60,6 +62,7 @@ public class RoomTurnMemoryQueryService {
             AccessSessionResolver accessSessionResolver,
             AgentSessionResolver agentSessionResolver,
             SessionPermissionService permissionService,
+            IntakeProgressService intakeProgressService,
             ObjectMapper objectMapper) {
         this.caseRepository = caseRepository;
         this.participantRepository = participantRepository;
@@ -68,6 +71,7 @@ public class RoomTurnMemoryQueryService {
         this.accessSessionResolver = accessSessionResolver;
         this.agentSessionResolver = agentSessionResolver;
         this.permissionService = permissionService;
+        this.intakeProgressService = intakeProgressService;
         this.objectMapper = objectMapper;
     }
 
@@ -86,6 +90,9 @@ public class RoomTurnMemoryQueryService {
                         .orElseThrow(() -> new IllegalArgumentException("case not found"));
         CaseAccessSessionEntity accessSession = accessSessionResolver.resolve(caseId, actor);
         permissionService.requireRoomRead(accessSession, roomType);
+        if (roomType == RoomType.INTAKE) {
+            intakeProgressService.assertIntakeRead(dispute, actor);
+        }
         if (isParty(actor.role()) && supportsPrivateAgentSession(roomType)) {
             AgentConversationSessionEntity agentSession =
                     agentSessionResolver.resolve(
@@ -94,15 +101,37 @@ public class RoomTurnMemoryQueryService {
                             agentKey(roomType),
                             promptProfileId(roomType, actor.role()),
                             "MEMEO_DEFAULT");
-            return memoryRepository
+            Optional<RoomTurnMemoryView> privateMemory = memoryRepository
                     .findTopByAgentSessionIdAndAgentRoleIsNotNullOrderByTurnNoDesc(
                             agentSession.getId())
                     .map(this::view);
+            if (privateMemory.isPresent() || roomType != RoomType.INTAKE) {
+                return privateMemory;
+            }
+            return intakeDossierRepository
+                    .findByCaseIdAndRoomType(caseId, RoomType.INTAKE)
+                    .map(this::dossierOnlyView);
         }
         return memoryRepository
                 .findTopByCaseIdAndRoomTypeAndAgentRoleIsNotNullOrderByTurnNoDesc(
                         caseId, roomType)
                 .map(this::view);
+    }
+
+    private RoomTurnMemoryView dossierOnlyView(CaseIntakeDossierEntity dossier) {
+        JsonNode snapshot = readJson(dossier.getDossierJson(), false);
+        return new RoomTurnMemoryView(
+                dossier.getCaseId(),
+                RoomType.INTAKE,
+                dossier.getSourceTurnNo(),
+                IntakeAgentTurnService.AGENT_ROLE,
+                "",
+                objectMapper.createObjectNode(),
+                snapshot,
+                objectMapper.createArrayNode(),
+                objectMapper.createObjectNode(),
+                intakeDossierView(dossier),
+                dossier.getUpdatedAt());
     }
 
     // 所属模块：【房间协作与权限 / 应用编排层】「RoomTurnMemoryQueryService.isParty(ActorRole)」。

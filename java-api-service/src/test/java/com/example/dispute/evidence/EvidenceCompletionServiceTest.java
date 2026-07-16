@@ -9,6 +9,8 @@ package com.example.dispute.evidence;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.example.dispute.config.ActorRole;
@@ -26,6 +28,8 @@ import com.example.dispute.infrastructure.persistence.repository.FulfillmentCase
 import com.example.dispute.notification.application.NotificationService;
 import com.example.dispute.notification.application.CaseLifecycleNotificationService;
 import com.example.dispute.room.application.CaseEventService;
+import com.example.dispute.room.application.IntakeMatrixLifecycleService;
+import com.example.dispute.room.application.IntakeProgressService;
 import com.example.dispute.room.domain.PhaseClockStatus;
 import com.example.dispute.room.domain.PhaseClockType;
 import com.example.dispute.room.domain.RoomStatus;
@@ -36,13 +40,13 @@ import com.example.dispute.room.infrastructure.persistence.repository.CasePhaseC
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import com.example.dispute.infrastructure.persistence.repository.EvidenceItemRepository;
 import com.example.dispute.workflow.application.EvidenceWindowCoordinator;
-import com.example.dispute.hearing.application.HearingRoundService;
-import com.example.dispute.hearing.application.HearingWorkflowCoordinator;
+import com.example.dispute.hearing.application.HearingFlowRuntimeService;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.List;
 import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -65,11 +69,12 @@ class EvidenceCompletionServiceTest {
     @Mock private CasePhaseClockRepository clockRepository;
     @Mock private EvidenceDossierFreezer dossierFreezer;
     @Mock private EvidenceWindowCoordinator evidenceWindowCoordinator;
+    @Mock private IntakeProgressService intakeProgressService;
+    @Mock private IntakeMatrixLifecycleService intakeMatrixLifecycleService;
     @Mock private CaseEventService caseEventService;
     @Mock private NotificationService notificationService;
     @Mock private CaseLifecycleNotificationService lifecycleNotifications;
-    @Mock private HearingRoundService hearingRoundService;
-    @Mock private HearingWorkflowCoordinator hearingWorkflowCoordinator;
+    @Mock private HearingFlowRuntimeService hearingFlowRuntimeService;
 
     private EvidenceCompletionService service;
     private FulfillmentCaseEntity dispute;
@@ -96,16 +101,16 @@ class EvidenceCompletionServiceTest {
                         clockRepository,
                         dossierFreezer,
                         evidenceWindowCoordinator,
+                        intakeProgressService,
+                        intakeMatrixLifecycleService,
                         caseEventService,
                         notificationService,
                         lifecycleNotifications,
-                        hearingRoundService,
-                        hearingWorkflowCoordinator,
+                        hearingFlowRuntimeService,
                         new DisputeProperties(
                                 Duration.ofHours(2),
                                 Duration.ofHours(3),
-                                Duration.ofMinutes(5),
-                                3,
+                                Duration.ofMinutes(20),
                                 Duration.ofSeconds(15),
                                 true),
                         clock);
@@ -159,8 +164,8 @@ class EvidenceCompletionServiceTest {
     // 系统意义：「EvidenceCompletionServiceTest.bothPartyCompletionsSealEvidenceEarlyAndOpenTheThreeHourHearing()」守住「证据与版本化卷宗」的可执行规格，尤其防止 「USER」、「user-complete-1」、「merchant-complete-1」、「COMPLETED」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void bothPartyCompletionsSealEvidenceEarlyAndOpenTheThreeHourHearing() {
-        when(evidenceRepository.countByCaseIdAndSubmittedByRoleAndSubmissionStatusAndDeletedAtIsNull(
-                        dispute.getId(), "USER", com.example.dispute.evidence.domain.EvidenceSubmissionStatus.SUBMITTED))
+        when(evidenceRepository.countByCaseIdAndSubmittedByIdAndSubmissionStatusAndDeletedAtIsNull(
+                        dispute.getId(), "user-local", com.example.dispute.evidence.domain.EvidenceSubmissionStatus.SUBMITTED))
                 .thenReturn(1L);
         when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.EVIDENCE))
                 .thenReturn(Optional.of(evidenceRoom));
@@ -181,9 +186,29 @@ class EvidenceCompletionServiceTest {
         when(completionRepository.findByCaseIdAndIdempotencyKey(
                         dispute.getId(), "merchant-complete-1"))
                 .thenReturn(Optional.empty());
-        when(completionRepository.countByCaseIdAndDossierVersionAndCompletionStatus(
+        EvidencePartyCompletionEntity userCompletion =
+                EvidencePartyCompletionEntity.completed(
+                        "EVIDENCE_COMPLETE_USER",
+                        dispute.getId(),
+                        1,
+                        ActorRole.USER,
+                        "user-local",
+                        "user-complete-1",
+                        Instant.parse("2026-07-03T00:30:00Z"));
+        EvidencePartyCompletionEntity merchantCompletion =
+                EvidencePartyCompletionEntity.completed(
+                        "EVIDENCE_COMPLETE_MERCHANT",
+                        dispute.getId(),
+                        1,
+                        ActorRole.MERCHANT,
+                        "merchant-local",
+                        "merchant-complete-1",
+                        Instant.parse("2026-07-03T00:40:00Z"));
+        when(completionRepository.findAllByCaseIdAndDossierVersionAndCompletionStatus(
                         dispute.getId(), 1, "COMPLETED"))
-                .thenReturn(1L, 2L);
+                .thenReturn(
+                        List.of(userCompletion),
+                        List.of(userCompletion, merchantCompletion));
 
         service.complete(
                 dispute.getId(),
@@ -203,6 +228,7 @@ class EvidenceCompletionServiceTest {
         assertThat(dispute.getCurrentRoom()).isEqualTo("HEARING");
         assertThat(dispute.getCurrentDeadlineAt())
                 .isEqualTo(OffsetDateTime.parse("2026-07-03T04:00:00Z"));
+        verify(hearingFlowRuntimeService).startAfterEvidenceSealed(dispute.getId());
     }
 
     // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceCompletionServiceTest.repeatedCompletionByTheSameRoleUsesTheExistingPhaseConfirmation()」。
@@ -211,28 +237,28 @@ class EvidenceCompletionServiceTest {
     // 下游影响：「EvidenceCompletionServiceTest.repeatedCompletionByTheSameRoleUsesTheExistingPhaseConfirmation()」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
     // 系统意义：「EvidenceCompletionServiceTest.repeatedCompletionByTheSameRoleUsesTheExistingPhaseConfirmation()」守住「证据与版本化卷宗」的可执行规格，尤其防止 「USER」、「EVIDENCE_COMPLETE_EXISTING」、「user-local」、「user-complete-original」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
-    void repeatedCompletionByTheSameRoleUsesTheExistingPhaseConfirmation() {
-        when(evidenceRepository.countByCaseIdAndSubmittedByRoleAndSubmissionStatusAndDeletedAtIsNull(
-                        dispute.getId(), "USER", com.example.dispute.evidence.domain.EvidenceSubmissionStatus.SUBMITTED))
+    void repeatedCompletionByTheSameParticipantIdUsesTheExistingPhaseConfirmation() {
+        when(evidenceRepository.countByCaseIdAndSubmittedByIdAndSubmissionStatusAndDeletedAtIsNull(
+                        dispute.getId(), "user-local", com.example.dispute.evidence.domain.EvidenceSubmissionStatus.SUBMITTED))
                 .thenReturn(1L);
         EvidencePartyCompletionEntity existing =
                 EvidencePartyCompletionEntity.completed(
                         "EVIDENCE_COMPLETE_EXISTING",
                         dispute.getId(),
                         1,
-                        ActorRole.USER,
+                        ActorRole.MERCHANT,
                         "user-local",
                         "user-complete-original",
                         Instant.parse("2026-07-03T00:30:00Z"));
         when(completionRepository.findByCaseIdAndIdempotencyKey(
                         dispute.getId(), "user-complete-retry"))
                 .thenReturn(Optional.empty());
-        when(completionRepository.findByCaseIdAndDossierVersionAndParticipantRole(
-                        dispute.getId(), 1, ActorRole.USER))
+        when(completionRepository.findByCaseIdAndDossierVersionAndParticipantId(
+                        dispute.getId(), 1, "user-local"))
                 .thenReturn(Optional.of(existing));
-        when(completionRepository.countByCaseIdAndDossierVersionAndCompletionStatus(
+        when(completionRepository.findAllByCaseIdAndDossierVersionAndCompletionStatus(
                         dispute.getId(), 1, "COMPLETED"))
-                .thenReturn(1L);
+                .thenReturn(List.of(existing));
 
         var result =
                 service.complete(
@@ -242,6 +268,44 @@ class EvidenceCompletionServiceTest {
 
         assertThat(result.dossierVersion()).isEqualTo(1);
         assertThat(result.allPartiesCompleted()).isFalse();
+        verify(completionRepository, never()).save(any());
+    }
+
+    @Test
+    void respondentCanCompleteIndependentlyBeforeInitiatorSubmitsEvidence() {
+        when(completionRepository.findByCaseIdAndIdempotencyKey(
+                        dispute.getId(), "merchant-complete-without-evidence"))
+                .thenReturn(Optional.empty());
+        when(completionRepository.findByCaseIdAndDossierVersionAndParticipantId(
+                        dispute.getId(), 1, "merchant-local"))
+                .thenReturn(Optional.empty());
+        when(completionRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        EvidencePartyCompletionEntity merchantCompletion =
+                EvidencePartyCompletionEntity.completed(
+                        "EVIDENCE_COMPLETE_MERCHANT",
+                        dispute.getId(),
+                        1,
+                        ActorRole.MERCHANT,
+                        "merchant-local",
+                        "merchant-complete-without-evidence",
+                        Instant.parse("2026-07-03T00:40:00Z"));
+        when(completionRepository.findAllByCaseIdAndDossierVersionAndCompletionStatus(
+                        dispute.getId(), 1, "COMPLETED"))
+                .thenReturn(List.of(merchantCompletion));
+
+        var result =
+                service.complete(
+                        dispute.getId(),
+                        new AuthenticatedActor("merchant-local", ActorRole.MERCHANT),
+                        "merchant-complete-without-evidence");
+
+        assertThat(result.completedRole()).isEqualTo(ActorRole.MERCHANT);
+        assertThat(result.allPartiesCompleted()).isFalse();
+        assertThat(result.nextRoom()).isEqualTo("EVIDENCE");
+        assertThat(dispute.getCaseStatus()).isEqualTo(CaseStatus.EVIDENCE_OPEN);
+        verify(evidenceWindowCoordinator)
+                .signalPartyCompletedAfterCommit(dispute.getId(), "MERCHANT");
     }
 
     // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceCompletionServiceTest.initiatorCannotCompleteEvidenceWithoutSubmittedEvidence()」。
@@ -251,8 +315,8 @@ class EvidenceCompletionServiceTest {
     // 系统意义：「EvidenceCompletionServiceTest.initiatorCannotCompleteEvidenceWithoutSubmittedEvidence()」守住「证据与版本化卷宗」的可执行规格，尤其防止 「USER」、「user-local」、「user-complete-without-evidence」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void initiatorCannotCompleteEvidenceWithoutSubmittedEvidence() {
-        when(evidenceRepository.countByCaseIdAndSubmittedByRoleAndSubmissionStatusAndDeletedAtIsNull(
-                        dispute.getId(), "USER", com.example.dispute.evidence.domain.EvidenceSubmissionStatus.SUBMITTED))
+        when(evidenceRepository.countByCaseIdAndSubmittedByIdAndSubmissionStatusAndDeletedAtIsNull(
+                        dispute.getId(), "user-local", com.example.dispute.evidence.domain.EvidenceSubmissionStatus.SUBMITTED))
                 .thenReturn(0L);
 
         assertThatThrownBy(

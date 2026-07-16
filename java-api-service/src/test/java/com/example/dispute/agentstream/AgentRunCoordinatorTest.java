@@ -122,6 +122,29 @@ class AgentRunCoordinatorTest {
         verify(worker, times(1)).execute(saved.get().getId());
     }
 
+    @Test
+    void semanticallyEqualRequestWithReorderedObjectFieldsReusesOriginalRun() {
+        AtomicReference<AgentRunEntity> saved = prepareNewRun();
+        ObjectNode original = objectMapper.createObjectNode();
+        original.put("z", "last");
+        original.set(
+                "nested",
+                objectMapper.createObjectNode().put("second", 2).put("first", 1));
+        ObjectNode restoredFromJsonb = objectMapper.createObjectNode();
+        restoredFromJsonb.set(
+                "nested",
+                objectMapper.createObjectNode().put("first", 1).put("second", 2));
+        restoredFromJsonb.put("z", "last");
+
+        var first = coordinator.start(command(original, "IDEMPOTENCY_REORDERED"));
+        var second =
+                coordinator.start(command(restoredFromJsonb, "IDEMPOTENCY_REORDERED"));
+
+        assertThat(second.runId()).isEqualTo(first.runId());
+        verify(runRepository, times(1)).save(any(AgentRunEntity.class));
+        verify(worker, times(1)).execute(saved.get().getId());
+    }
+
     // 所属模块：【Agent 流式运行 / 自动化测试层】「AgentRunCoordinatorTest.sameIdempotencyKeyWithDifferentRequestIsRejected()」。
     // 具体功能：「AgentRunCoordinatorTest.sameIdempotencyKeyWithDifferentRequestIsRejected()」：复现“核对完整业务行为（场景方法「sameIdempotencyKeyWithDifferentRequestIsRejected」）”场景：驱动 「coordinator.start」，再用 「assertThatThrownBy」、「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「original」、「IDEMPOTENCY_3」、「changed」。
     // 上游调用：「AgentRunCoordinatorTest.sameIdempotencyKeyWithDifferentRequestIsRejected()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
@@ -208,6 +231,65 @@ class AgentRunCoordinatorTest {
     }
 
     @Test
+    void unavailableJuryServiceWithoutVisibleOutputCreatesANewAuditedAttempt() {
+        AtomicReference<AgentRunEntity> saved = prepareNewRun();
+        AgentRunStartCommand command =
+                command(
+                        "HEARING_JURY_REVIEW",
+                        request("retry unavailable jury service"),
+                        "IDEMPOTENCY_JURY_UNAVAILABLE");
+        coordinator.start(command);
+        AgentRunEntity original = saved.get();
+        original.markRunning();
+        original.markFailed(
+                "AGENT_SERVICE_UNAVAILABLE", "LiteLLM proxy returned a stream error", true, 45000L);
+        when(runRepository
+                        .findAllByCaseIdAndStreamIdempotencyKeyStartingWithOrderByCreatedAtAsc(
+                                CASE_ID, "IDEMPOTENCY_JURY_UNAVAILABLE"))
+                .thenReturn(List.of(original));
+        when(eventService.hasVisibleOutput(original.getId())).thenReturn(false);
+
+        var retry = coordinator.retryInfrastructureFailure(command);
+
+        assertThat(original.getRunStatus()).isEqualTo("FAILED");
+        assertThat(saved.get()).isNotSameAs(original);
+        assertThat(saved.get().getRunStatus()).isEqualTo("PENDING");
+        assertThat(saved.get().getStreamIdempotencyKey())
+                .isEqualTo("IDEMPOTENCY_JURY_UNAVAILABLE:attempt-2");
+        assertThat(retry.runId()).isEqualTo(saved.get().getId());
+    }
+
+    @Test
+    void finalHearingSchemaFailureCreatesANewAuditedAttempt() {
+        AtomicReference<AgentRunEntity> saved = prepareNewRun();
+        AgentRunStartCommand command =
+                command(
+                        "HEARING_JURY_REVIEW",
+                        request("retry invalid jury output"),
+                        "IDEMPOTENCY_JURY_RETRY");
+        coordinator.start(command);
+        AgentRunEntity original = saved.get();
+        original.markRunning();
+        original.markFailed(
+                "AGENT_OUTPUT_SCHEMA_INVALID",
+                "jury findings must cover each dimension once",
+                false,
+                500L);
+        when(runRepository
+                        .findAllByCaseIdAndStreamIdempotencyKeyStartingWithOrderByCreatedAtAsc(
+                                CASE_ID, "IDEMPOTENCY_JURY_RETRY"))
+                .thenReturn(List.of(original));
+
+        var retry = coordinator.retryInfrastructureFailure(command);
+
+        assertThat(saved.get()).isNotSameAs(original);
+        assertThat(saved.get().getRunStatus()).isEqualTo("PENDING");
+        assertThat(saved.get().getStreamIdempotencyKey())
+                .isEqualTo("IDEMPOTENCY_JURY_RETRY:attempt-2");
+        assertThat(retry.runId()).isEqualTo(saved.get().getId());
+    }
+
+    @Test
     void failureWithVisibleOutputIsNeverRetried() {
         AtomicReference<AgentRunEntity> saved = prepareNewRun();
         AgentRunStartCommand command = command(request("visible"), "IDEMPOTENCY_VISIBLE");
@@ -225,40 +307,6 @@ class AgentRunCoordinatorTest {
 
         assertThat(unchanged.runId()).isEqualTo(original.getId());
         verify(runRepository, times(1)).save(any(AgentRunEntity.class));
-    }
-
-    @Test
-    void finalHearingSchemaFailureCanRestartForDeterministicFallback() {
-        String baseKey = "hearing-analysis:" + CASE_ID + ":3:final";
-        AgentRunEntity failed =
-                AgentRunEntity.streamingPending(
-                        "AGENT_RUN_SCHEMA_FAILED",
-                        CASE_ID,
-                        ROOM_ID,
-                        "HEARING_ANALYSIS",
-                        "/internal/agents/legacy/hearing/analyze/stream",
-                        "PRESIDING_JUDGE",
-                        "{}",
-                        "request-hash",
-                        "[\"USER\"]",
-                        "[]",
-                        baseKey,
-                        "TRACE_1",
-                        "REQUEST_1",
-                        ACTOR_ID);
-        failed.markRunning();
-        failed.markFailed(
-                "AGENT_OUTPUT_SCHEMA_INVALID",
-                "agent returned invalid structured output",
-                false,
-                1000L);
-        when(runRepository
-                        .findAllByCaseIdAndStreamIdempotencyKeyStartingWithOrderByCreatedAtAsc(
-                                CASE_ID, baseKey))
-                .thenReturn(List.of(failed));
-
-        assertThat(coordinator.hasRestartableFinalConvergenceFailure(CASE_ID, baseKey))
-                .isTrue();
     }
 
     // 所属模块：【Agent 流式运行 / 自动化测试层】「AgentRunCoordinatorTest.prepareNewRun()」。
@@ -291,10 +339,15 @@ class AgentRunCoordinatorTest {
     // 下游影响：「AgentRunCoordinatorTest.command(ObjectNode,String)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
     // 系统意义：「AgentRunCoordinatorTest.command(ObjectNode,String)」守住「Agent 流式运行」的可执行规格，尤其防止 「INTAKE_TURN」、「USER」、「TRACE_1」、「REQUEST_1」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private AgentRunStartCommand command(ObjectNode request, String idempotencyKey) {
+        return command("INTAKE_TURN", request, idempotencyKey);
+    }
+
+    private AgentRunStartCommand command(
+            String operation, ObjectNode request, String idempotencyKey) {
         return new AgentRunStartCommand(
                 CASE_ID,
                 ROOM_ID,
-                "INTAKE_TURN",
+                operation,
                 request,
                 List.of("USER"),
                 List.of(ACTOR_ID),

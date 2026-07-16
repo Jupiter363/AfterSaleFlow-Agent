@@ -16,7 +16,6 @@ from app.schemas.models import (
     Identifier,
     LongText,
     PartyClaim,
-    PolicyCandidate,
     ShortText,
     StrictModel,
 )
@@ -403,6 +402,14 @@ class IntakeTurnRequest(StrictModel):
             raise ValueError("case_id must match agent_context.case_id")
         if self.room_type != self.agent_context.room_type:
             raise ValueError("room_type must match agent_context.room_type")
+        actor_role = str(self.agent_context.actor_role or "").upper()
+        if actor_role not in {"USER", "MERCHANT"}:
+            raise ValueError("agent_context.actor_role must be an intake party")
+        if self.agent_context.scope_type not in {
+            "INTAKE_INITIATOR_PRIVATE",
+            "INTAKE_PARTY_PRIVATE",
+        }:
+            raise ValueError("agent_context.scope_type must be intake party private")
         current = self.current_user_message
         if self.turn_source in {"EXTERNAL_IMPORT", "FORM_SUBMISSION"}:
             if self.initial_case_facts is None:
@@ -427,6 +434,10 @@ class IntakeTurnRequest(StrictModel):
             raise ValueError("ROOM_MESSAGE turns require current_user_message")
         if current.role not in {"USER", "MERCHANT"}:
             raise ValueError("current_user_message must be a party message")
+        if current.role != actor_role:
+            raise ValueError(
+                "current_user_message.role must match agent_context.actor_role"
+            )
         if current.source != self.turn_source:
             raise ValueError("current_user_message.source must match turn_source")
         if any(
@@ -440,15 +451,15 @@ class IntakeTurnRequest(StrictModel):
             self.recent_dialogue_messages, key=lambda message: message.sequence_no
         ):
             raise ValueError("recent_dialogue_messages must be ordered by sequence_no")
-        if not self.recent_dialogue_messages:
-            raise ValueError("ROOM_MESSAGE turns require the preceding agent question")
-        if len(self.recent_dialogue_messages) % 2 != 1:
-            raise ValueError("recent dialogue must contain complete agent-first pairs")
-        for index, message in enumerate(self.recent_dialogue_messages):
-            if index % 2 == 0 and message.role != "AGENT":
-                raise ValueError("recent dialogue must start and alternate from AGENT")
-            if index % 2 == 1 and message.role not in {"USER", "MERCHANT"}:
-                raise ValueError("recent dialogue must alternate AGENT and party messages")
+        for message in self.recent_dialogue_messages:
+            if message.role == "AGENT":
+                continue
+            if message.role not in {"USER", "MERCHANT"}:
+                raise ValueError("recent dialogue may contain only AGENT and party messages")
+            if message.role != actor_role:
+                raise ValueError(
+                    "recent party message role must match agent_context.actor_role"
+                )
         return self
 
 
@@ -619,7 +630,7 @@ class EvidencePrivateConversationV1(StrictModel):
 
 class EvidenceRoomPolicyV1(StrictModel):
     room_id: Identifier
-    room_type: Literal["EVIDENCE"]
+    room_type: Literal["EVIDENCE", "HEARING"]
     room_status: Identifier
     current_deadline_at: ShortText | None
     initiator_role: Literal["USER", "MERCHANT"]
@@ -688,6 +699,23 @@ class EvidenceTurnEvidenceItem(StrictModel):
     parse_status: Identifier | None = None
     original_filename: ShortText | None = None
     redacted: bool = False
+    claimed_fact: LongText | None = None
+    truth_attested: bool | None = None
+    attestation_version: ShortText | None = None
+    attestation_scope: Annotated[list[Identifier], Field(max_length=10)] = Field(
+        default_factory=list
+    )
+    attestation_role: Literal[
+        "USER",
+        "MERCHANT",
+        "PLATFORM",
+        "CUSTOMER_SERVICE",
+    ] | None = None
+    attested_by: ShortText | None = None
+    attested_at: ShortText | None = None
+    party_capacity: Literal["INITIATOR", "RESPONDENT"] | None = None
+    forgery_consequence_code: ShortText | None = None
+    enforcement_gate: ShortText | None = None
 
 
 class EvidenceTurnQuestion(StrictModel):
@@ -755,7 +783,11 @@ class EvidenceItemAssessment(StrictModel):
         default_factory=list
     )
     fact_links: Annotated[list[EvidenceFactLink], Field(max_length=50)] = Field(
-        default_factory=list
+        default_factory=list,
+        description=(
+            "事实坐标关联；relevance_score >= 0.50 时至少一项。真实性或完整性"
+            "不足时保留 fact_id 并使用 INCONCLUSIVE；低相关时允许为空。"
+        ),
     )
     authenticity_score: Confidence
     relevance_score: Confidence
@@ -845,7 +877,13 @@ class EvidenceTurnLlmOutput(StrictModel):
     fact_matrix_patch: Annotated[
         list[EvidenceFactMatrixPatch],
         Field(max_length=100),
-    ] = Field(default_factory=list)
+    ] = Field(
+        default_factory=list,
+        description=(
+            "通常为空。UPSERT_LINK 由系统从已验收 fact_links 确定性生成；"
+            "模型仅在撤销本轮附件的既有错误关联时输出 REMOVE_LINK。"
+        ),
+    )
     human_review_tasks: Annotated[
         list[EvidenceHumanReviewTask],
         Field(max_length=50),
@@ -992,6 +1030,11 @@ class EvidenceTurnRequest(StrictModel):
                 "context_envelope.private_conversation.conversation_scope must match "
                 "actor_snapshot.conversation_scope"
             )
+        turn_numbers = [turn.turn_no for turn in conversation.recent_turns]
+        if turn_numbers != sorted(turn_numbers):
+            raise ValueError(
+                "context_envelope.private_conversation.recent_turns must be ordered"
+            )
         for turn in conversation.recent_turns:
             if turn.agent_session_id != conversation.agent_session_id:
                 raise ValueError(
@@ -1002,6 +1045,29 @@ class EvidenceTurnRequest(StrictModel):
                 raise ValueError(
                     "context_envelope.private_conversation.recent_turns "
                     "conversation_scope must match private_conversation.conversation_scope"
+                )
+            has_party_answer = (
+                turn.answer_content is not None or turn.answer_role is not None
+            )
+            if has_party_answer and turn.actor_id != actor_snapshot.actor_id:
+                raise ValueError(
+                    "context_envelope.private_conversation.recent_turns actor_id "
+                    "must match actor_snapshot.actor_id"
+                )
+            if has_party_answer and turn.answer_role != actor_snapshot.actor_role:
+                raise ValueError(
+                    "context_envelope.private_conversation.recent_turns answer_role "
+                    "must match actor_snapshot.actor_role"
+                )
+            if turn.agent_role is not None and turn.agent_role != "EVIDENCE_CLERK":
+                raise ValueError(
+                    "context_envelope.private_conversation.recent_turns agent_role "
+                    "must be EVIDENCE_CLERK"
+                )
+            if turn.agent_response is not None and turn.agent_role != "EVIDENCE_CLERK":
+                raise ValueError(
+                    "context_envelope.private_conversation.recent_turns agent response "
+                    "requires EVIDENCE_CLERK role"
                 )
 
 
@@ -1021,197 +1087,6 @@ class EvidenceTurnResult(EvidenceTurnLlmOutput):
     non_final: Literal[True] = True
     liability_determined: Literal[False] = False
     remedy_recommended: Literal[False] = False
-
-
-class HearingStage(StrEnum):
-    C1_ISSUE_FRAMING = "C1_ISSUE_FRAMING"
-    C2_EVIDENCE_GAP = "C2_EVIDENCE_GAP"
-    C3_EVIDENCE_REQUEST = "C3_EVIDENCE_REQUEST"
-    C4_EVIDENCE_CROSS_CHECK = "C4_EVIDENCE_CROSS_CHECK"
-    C5_RULE_APPLICATION = "C5_RULE_APPLICATION"
-    C6_DRAFT_GENERATION = "C6_DRAFT_GENERATION"
-
-
-class HearingStageRequest(StrictModel):
-    case_id: Identifier
-    workflow_id: Identifier
-    user_id: Identifier | None = None
-    stage: HearingStage
-    dossier_version: Annotated[int, Field(ge=1)]
-    claims: Annotated[list[PartyClaim], Field(min_length=1, max_length=50)]
-    evidence: Annotated[list[EvidenceItem], Field(max_length=100)] = Field(
-        default_factory=list
-    )
-    policy_candidates: Annotated[list[PolicyCandidate], Field(max_length=30)] = Field(
-        default_factory=list
-    )
-    previous_stage_outputs: dict[str, object] = Field(default_factory=dict)
-    evidence_timeout: bool = False
-    round_no: Annotated[int, Field(ge=1, le=3)] = 1
-    stop_reason: Literal[
-        "FACTS_SUFFICIENT",
-        "SETTLEMENT_CONFIRMED",
-        "MAX_ROUNDS",
-        "DEADLINE_EXPIRED",
-    ] | None = None
-    deadline_expired: bool = False
-    round_limit_reached: bool = False
-    latest_frozen_dossier_version: Annotated[int, Field(ge=1)] | None = None
-    party_absence_flags: dict[Literal["USER", "MERCHANT"], bool] = Field(
-        default_factory=dict
-    )
-    current_settlement_version: Annotated[int, Field(ge=1)] | None = None
-
-    # 所属模块：Python Agent 数据契约 > final_agents；函数角色：类/闭包内部方法。
-    # 具体功能：`require_forced_convergence_context` 围绕案件与会话上下文计算该函数独立负责的业务派生值；关键协作调用：`model_validator`、`ValueError`。
-    # 上下游：上游为 Java 请求、LangGraph 状态、LLM JSON；下游为 协作调用 `model_validator`、`ValueError`。
-    # 系统意义：控制隐私、Token 和会话隔离：拒绝多余字段、资源越界、身份错配和非法枚举。
-    @model_validator(mode="after")
-    def require_forced_convergence_context(self) -> "HearingStageRequest":
-        if self.stage is not HearingStage.C6_DRAFT_GENERATION:
-            return self
-        if self.stop_reason is None or self.latest_frozen_dossier_version is None:
-            raise ValueError(
-                "C6 requires stop_reason and latest_frozen_dossier_version"
-            )
-        if set(self.party_absence_flags) != {"USER", "MERCHANT"}:
-            raise ValueError("C6 requires USER and MERCHANT absence flags")
-        if self.latest_frozen_dossier_version != self.dossier_version:
-            raise ValueError("C6 must use the latest frozen dossier version")
-        if self.stop_reason == "DEADLINE_EXPIRED" and not self.deadline_expired:
-            raise ValueError("deadline stop requires deadline_expired=true")
-        if self.stop_reason == "MAX_ROUNDS" and not self.round_limit_reached:
-            raise ValueError("round-limit stop requires round_limit_reached=true")
-        return self
-
-
-class HearingStageResult(StrictModel):
-    case_id: Identifier
-    workflow_id: Identifier
-    stage: HearingStage
-    dossier_version: Annotated[int, Field(ge=1)]
-    output: dict[str, object]
-    output_schema: Identifier
-    prompt_version: Identifier
-    model: Identifier
-    evidence_gaps: list[ShortText] = Field(default_factory=list)
-    uncertainties: list[ShortText] = Field(default_factory=list)
-    reviewer_attention: list[ShortText] = Field(default_factory=list)
-    recommended_draft: dict[str, object] | None = None
-    non_final: Literal[True] = True
-    requires_human_review: Literal[True] = True
-
-
-class HearingRoundPartySubmission(StrictModel):
-    participant_role: Literal["USER", "MERCHANT"]
-    participant_id: Identifier
-    submission_source: Identifier
-    submission_json: LongText
-
-
-class HearingRoundTurnRequest(StrictModel):
-    case_id: Annotated[
-        str, Field(pattern=r"^CASE_[A-Za-z0-9_]{1,59}$")
-    ]
-    workflow_id: Identifier
-    order_id: Identifier | None = None
-    after_sale_id: Identifier | None = None
-    logistics_id: Identifier | None = None
-    dispute_type: Identifier | None = None
-    title: ShortText
-    case_description: LongText
-    risk_level: RiskLevelLiteral = "MEDIUM"
-    round_no: Annotated[int, Field(ge=1, le=3)]
-    dossier_version: Annotated[int, Field(ge=1)]
-    final_round: bool = False
-    round_status: Identifier
-    stop_reason: Identifier | None = None
-    round_summary_json: LongText = "{}"
-    courtroom_context: dict[str, object] = Field(default_factory=dict)
-    party_submissions: Annotated[
-        list[HearingRoundPartySubmission],
-        Field(max_length=10),
-    ] = Field(default_factory=list)
-
-
-class JuryReviewDimension(StrEnum):
-    FACT_COMPLETENESS = "FACT_COMPLETENESS"
-    EVIDENCE_CONSISTENCY = "EVIDENCE_CONSISTENCY"
-    RULE_APPLICABILITY = "RULE_APPLICABILITY"
-    PROCEDURAL_FAIRNESS = "PROCEDURAL_FAIRNESS"
-    REMEDY_FEASIBILITY = "REMEDY_FEASIBILITY"
-    RISK_AND_OMISSIONS = "RISK_AND_OMISSIONS"
-
-
-class JuryReviewFinding(StrictModel):
-    dimension: JuryReviewDimension
-    severity: Literal["NONE", "LOW", "MEDIUM", "HIGH", "BLOCKER"]
-    assessment: ShortText
-    basis: Annotated[list[ShortText], Field(min_length=1, max_length=6)]
-    requires_revision: bool = False
-
-
-class JuryReviewReport(StrictModel):
-    public_message: LongText
-    reviewed_proposal: LongText
-    summary: ShortText
-    risk_level: Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"]
-    confidence_score: Annotated[int, Field(ge=0, le=100)]
-    review_focus_signal: Annotated[list[ShortText], Field(max_length=20)] = Field(
-        default_factory=list
-    )
-    findings: Annotated[list[JuryReviewFinding], Field(min_length=6, max_length=6)]
-    recommendations: Annotated[list[ShortText], Field(max_length=8)] = Field(
-        default_factory=list
-    )
-    review_notes: ShortText
-    visibility: Literal["REVIEWER_VISIBLE"] = "REVIEWER_VISIBLE"
-    prompt_version: Identifier = "unified-jury-review-v1"
-    model: Identifier = "unknown"
-    approval_performed: Literal[False] = False
-    execution_triggered: Literal[False] = False
-    is_final_decision: Literal[False] = False
-
-    @model_validator(mode="after")
-    def validate_review_contract(self) -> "JuryReviewReport":
-        dimensions = [finding.dimension for finding in self.findings]
-        if len(dimensions) != len(set(dimensions)):
-            raise ValueError("jury review findings must not repeat dimensions")
-        if set(dimensions) != set(JuryReviewDimension):
-            raise ValueError("jury review findings must cover all six dimensions")
-        if "非最终" not in self.reviewed_proposal:
-            raise ValueError("reviewed_proposal must identify itself as non-final")
-        return self
-
-
-class HearingRoundTurnResult(StrictModel):
-    speaker_role: Literal["JUDGE"] = "JUDGE"
-    message_text: LongText
-    round_summary: LongText
-    questions_for_user: Annotated[list[ShortText], Field(max_length=10)] = Field(
-        default_factory=list
-    )
-    questions_for_merchant: Annotated[list[ShortText], Field(max_length=10)] = Field(
-        default_factory=list
-    )
-    court_event_type: Literal[
-        "JUDGE_OPENING_READY",
-        "JUDGE_NEXT_QUESTIONS_READY",
-        "FINAL_DRAFT_REQUIRED",
-    ]
-    round_no: Annotated[int, Field(ge=1, le=3)]
-    next_round_no: Annotated[int, Field(ge=1, le=3)] | None = None
-    final_draft_required: bool = False
-    review_focus_signal: Annotated[list[ShortText], Field(max_length=20)] = Field(
-        default_factory=list
-    )
-    jury_review_report: JuryReviewReport | None = None
-    proposed_resolution_direction: ShortText | None = None
-    final_proposed_resolution: LongText | None = None
-    prompt_version: Identifier = "hearing-round-turn-v1"
-    model: Identifier = "unknown"
-    non_final: Literal[True] = True
-    requires_human_review: Literal[True] = True
 
 
 class EvidenceBuildRequest(StrictModel):

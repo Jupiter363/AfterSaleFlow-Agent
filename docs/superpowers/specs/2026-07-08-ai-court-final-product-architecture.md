@@ -1752,3 +1752,320 @@ System prompt 四层：
 5. 最后补齐平台审核员终审和完整审计解释链。
 
 推荐先做 Phase 1，因为状态机是法庭产品的脊梁。没有稳定状态机，法官智能、证据矩阵和评审团都会变成不可靠的漂浮组件。
+
+---
+
+## 14. 2026-07-14 第一轮双方案情事实矩阵正式方案
+
+本节是第一轮案情归并的唯一方案源，不再创建分散方案文件。它覆盖本文件中“接待事实地图”和“法官第一轮直接读取双方原始陈述”的旧描述。
+
+### 14.1 目标与职责边界
+
+第一轮庭审的唯一目标，是把接待阶段形成的发起方单方案情，结合用户、商家第一轮直接陈述，升级为可供法官审理的双方案情事实矩阵。
+
+固定链路：
+
+```mermaid
+flowchart LR
+    A["接待官冻结 unilateral_case_matrix.v1"] --> B["证据书记官按 fact_id 建立证据矩阵"]
+    B --> C["庭审第一轮双方分别陈述"]
+    C --> D["接待官单次调用归并 bilateral_case_matrix.v1"]
+    D --> E["写入庭审卷宗"]
+    E --> F["法官仅读取双方案情投影与书记官加工结果"]
+```
+
+接待官在这一步只做事实拆分、立场归一、差异对齐和中性表述，不做以下判断：
+
+- 不判断证据真假或证据是否足以证明事实；
+- 不判断任何一方陈述更可信；
+- 不判断责任、规则适用或裁决方案；
+- 不读取原始附件、OCR、图片分析和未加工证据；
+- 不把双方一致陈述标记为“已证实事实”。
+
+每个案件在第一轮封存后调用接待官模型一次。模型失败或结构校验失败时阻断流程，不生成模板矩阵，也不开放第二轮。
+
+### 14.2 上游必须先形成正式单方事实矩阵
+
+`unilateral_case_matrix.v1` 必须由 Python 接待官在接待完成时正式生成并冻结。Java 不再从 `description`、摘要或默认文案中做事实语义拆解。
+
+单方矩阵至少包含：
+
+- `party_map`：发起方、被发起方角色；
+- `case_overview`：单方案情摘要，不作为已认定事实；
+- `claim_resolution`：发起方诉求；
+- `reported_respondent_attitude`：仅保留发起方明确转述的对方态度，并标记“发起方主观描述”；
+- `fact_rows`：接待官从发起方陈述拆出的原子事实条目；
+- `source_binding`：接待卷宗版本、来源轮次、内容哈希；
+- `matrix_version`、`content_hash`。
+
+每个 `fact_row` 从接待室起就获得稳定 `fact_id`。证据书记官后续只能关联这些 `fact_id`；首轮双方案情归并必须保留旧编号，新出现事实才生成新编号。这样案情矩阵、证据矩阵和法官事实审理可以共享同一事实坐标系。
+
+### 14.3 双方案情归并输入合同
+
+输入只包含三组业务内容和一组调用元数据：
+
+1. 冻结的 `unilateral_case_matrix.v1`；
+2. 用户第一轮封存陈述；
+3. 商家第一轮封存陈述；
+4. 案件、房间、版本、哈希和提交来源绑定。
+
+双方提交结构必须保留：
+
+| 字段 | 用途 |
+|---|---|
+| `submission_id` | 建立可审计来源引用 |
+| `actor_role` | 严格隔离用户与商家立场 |
+| `statement` | 第一轮原始陈述 |
+| `submission_source` | 区分真实房间陈述与 `AUTO_TIMEOUT` |
+| `message_id` | 回溯前端共享消息 |
+| `submitted_at` | 记录封存时点，不用于推断事实真伪 |
+
+`AUTO_TIMEOUT` 只能表示“该方本轮未陈述”，不得作为该方直接立场或事实来源。
+
+### 14.4 双方案情矩阵输出合同
+
+正式输出固定为 `bilateral_case_matrix.v1`，结构分为六区：
+
+```text
+bilateral_case_matrix.v1
+├─ identity_and_source       身份、版本、哈希、两份首轮提交绑定
+├─ case_overview             双方语境下的中性摘要与核心冲突
+├─ claim_positions           发起方诉求、接待期主观转述、对方首轮直接回应
+├─ fact_rows                 以事实为行的双方立场矩阵
+├─ fact_indexes              一致、部分一致、争议、单方、未回应等索引
+└─ quality_and_audit         质量、自检和越权保护，仅审计使用
+```
+
+诉求不是事实，必须与 `fact_rows` 分开保存。接待期“发起方描述的对方态度”和首轮“对方本人直接回应”也必须并列保存，不得相互覆盖。
+
+`claim_positions` 包含：
+
+- `initiator_claim`：诉求类型、金额、商品范围、理由、当前立场及真实来源引用；
+- `respondent_reported_at_intake`：发起方在接待室对对方态度的主观转述，可为空；
+- `respondent_direct_round_1`：被发起方第一轮直接回应；
+- `claim_conflict`：双方在处理诉求上的实际分歧。
+
+### 14.5 事实条目正式结构
+
+每一行只表达一个可被确认、否认或核验的原子命题：
+
+| 字段 | 规则 |
+|---|---|
+| `fact_id` | 接待阶段事实保留原编号；首轮新增事实使用确定性新编号 |
+| `category` | 订单、支付、履约、物流、商品状态、沟通、售后、时间或其他 |
+| `fact_target` | 中性、单一、可核验的事实命题，不写责任结论 |
+| `materiality` | `CORE / SUPPORTING / CONTEXT` |
+| `origin` | 来自接待卷宗或第一轮陈述，并附来源引用 |
+| `positions.USER` | 用户对该命题的立场、具体值和来源 |
+| `positions.MERCHANT` | 商家对该命题的立场、具体值和来源 |
+| `party_alignment` | 双方陈述的一致状态，不代表事实真伪 |
+| `truth_status` | 本阶段固定为 `NOT_EVALUATED` |
+| `requires_resolution` | 是否仍需后续程序收束；仅由 `party_alignment != AGREED` 确定，不表示证据真伪或事实成立 |
+
+`fact_indexes` 使用 `requires_resolution_fact_ids` 汇总尚未收束的事实编号。双方案情矩阵不再使用 `consensus`、`verification` 或 `verification_target_fact_ids`；证据判断只属于证据书记官卷宗。
+
+单方立场枚举：
+
+- `CONFIRM`：明确确认命题；
+- `DENY`：明确否认命题；
+- `PARTIAL`：只确认部分内容或给出不同具体值；
+- `UNKNOWN`：当事人明确表示不知道或无法确认，必须保留本轮提交引用；
+- `NOT_ADDRESSED`：当事人本轮完全未涉及该事实，来源引用必须为空。
+
+双方对齐状态由代码确定性计算：
+
+- `AGREED`：双方确认同一个原子命题，且规范化后的关键值一致；
+- `PARTIALLY_AGREED`：双方仅对部分范围或部分值一致；
+- `CONTESTED`：双方确认/否认冲突，或双方虽然都确认但日期、金额、数量等关键值不同；
+- `ONE_SIDED`：只有一方形成实质立场；
+- `UNRESOLVED`：双方均未形成可用立场或明确无法确认。
+
+不得只比较 `stance`。例如用户确认“7 月 12 日支付”，商家确认“7 月 13 日支付”，应判定为 `CONTESTED`，不能因为双方都是 `CONFIRM` 而判为一致。
+
+### 14.6 模型与确定性代码分工
+
+模型只负责：
+
+- 将长陈述拆成原子事实候选；
+- 把双方表达对齐到已有 `fact_id`；
+- 归一双方立场、关键值和诉求回应；
+- 生成中性摘要、核心冲突和差异说明；
+- 标记情绪、寒暄、程序性表达等非事实内容。
+
+Python 确定性后处理负责：
+
+- 校验全部来源引用只能来自本次冻结输入；
+- 保留旧事实编号并为新事实生成稳定编号；
+- 比较规范化关键值，计算 `party_alignment`；
+- 生成 `fact_indexes`、矩阵 ID、版本和内容哈希；
+- 固定 `truth_status=NOT_EVALUATED`；
+- 拒绝证据真假、责任和裁决越权输出；
+- 结构不完整、来源不明或模型越权时整次失败。
+
+Java 只负责：
+
+- 读取被冻结的单方矩阵和两份首轮提交；
+- 进行身份、权限、轮次、幂等和版本校验；
+- 调用 Python 接待官；
+- 重算并核对来源绑定与内容哈希；
+- 原子持久化 `BILATERAL_CASE_MATRIX_SNAPSHOT`；
+- 控制“矩阵完成 → 法官第一轮收敛 → 第二轮开放”的状态顺序。
+
+### 14.7 法官上下文的唯一投影
+
+矩阵成功后写入：
+
+```text
+courtroom_context.case_detail_dossier.bilateral_case_matrix
+```
+
+法官 Prompt 只投影以下四区：
+
+- `case_overview`
+- `claim_positions`
+- `fact_rows`
+- `fact_indexes`
+
+以下内容保留在持久化审计记录中，但不进入法官 Prompt：
+
+- `source_binding`
+- `matrix_quality`
+- `audit`
+- 原始双方第一轮陈述全文
+- 旧的单方接待卷宗全文
+- 展示用途的开庭消息
+
+法官不得同时收到“双方案情矩阵 + 旧单方卷宗 + 双方原始陈述”，否则同一信息会重复竞争注意力。证据部分另由证据书记官提供事实—证据矩阵、已核验结论、冲突、缺口和人工复核状态；法官不直接读取原始附件、OCR 或图片解析。
+
+### 14.8 状态机与失败语义
+
+正式顺序固定为：
+
+```text
+ROUND_1_OPEN
+→ ROUND_1_SEALED
+→ BILATERAL_MATRIX_GENERATING
+→ BILATERAL_MATRIX_READY
+→ JUDGE_ROUND_1_CONVERGING
+→ JUDGE_ROUND_1_READY
+→ ROUND_2_OPEN
+```
+
+任一模型调用、Schema、来源绑定、哈希或持久化失败，状态停留在可重试节点，不开放第二轮。重试使用由 `case_id + 单方矩阵哈希 + 两个 submission_id` 派生的幂等键；同一组冻结输入不得生成多个不同正式版本。
+
+### 14.9 首版验收标准
+
+- 接待完成后存在真正由接待官生成的 `unilateral_case_matrix.v1`，而非 Java 临时拆文本；
+- 证据矩阵和双方案情矩阵复用同一组接待事实编号；
+- 双方第一轮陈述封存后只调用一次接待官；
+- 超时占位不会被当成对方直接回应；
+- `UNKNOWN` 与 `NOT_ADDRESSED` 来源语义正确；
+- 相同 stance 但关键值不同的事实被判为争议；
+- 发起方诉求、主观转述的对方态度、对方直接回应三者不混淆；
+- 法官实际读取双方案情矩阵，不再读取旧单方卷宗和首轮原文；
+- 双方一致只表示 `party_alignment=AGREED`，始终保持 `truth_status=NOT_EVALUATED`；
+- 第一轮法官收敛完成前，第二轮不可提交。
+
+---
+
+## 15. 2026-07-15 双方顺序接待与统一案情矩阵（替代第 14 节）
+
+本节整体替代第 14 节的运行方案。第 14 节保留为历史决策记录，但以下旧链路不再执行：
+
+- 接待室输出 `unilateral_case_matrix.v1`；
+- 庭审第一轮结束后再次调用接待官生成 `bilateral_case_matrix.v1`；
+- 法官第一轮收敛完成后才允许进入第二轮。
+
+新的唯一正式结构是 `case_fact_matrix.v2`。它从发起方接待开始建立，在被发起方接待中原位演进，随后由证据书记官和法官复用同一组 `fact_id`。
+
+### 15.1 顺序接待与并行举证
+
+```mermaid
+flowchart LR
+    A["发起方私有接待"] --> B["发起方确认案情"]
+    B --> C["冻结 INITIATOR_FROZEN"]
+    B --> D["创建唯一 EVIDENCE_SUBMISSION 截止时间"]
+    C --> E["开放被发起方私有接待"]
+    D --> F["发起方进入证据室"]
+    E --> G["被发起方修正并补齐同一矩阵"]
+    G --> H["冻结 BILATERAL_FROZEN"]
+    H --> I["被发起方进入证据室并继承剩余时间"]
+    F --> J["双方举证完成或统一截止时间到达"]
+    I --> J
+    J --> K["冻结证据卷宗"]
+    K --> L["双方同步进入庭审"]
+    L --> M["法官基于已冻结庭审卷宗断案"]
+```
+
+发起方确认接待时立即发生两件独立但同事务提交的状态变化：
+
+1. 发起方获得证据室访问权；
+2. 被发起方的私有接待会话开放。
+
+被发起方不能读取发起方私聊原文，只能继承接待官输出的结构化案情卷宗。被发起方完成接待后才能进入证据室。
+
+### 15.2 唯一证据时钟
+
+证据截止时间是案件级事实，不是参与方各自的倒计时：
+
+- 只在发起方确认接待时创建一次 `EVIDENCE_SUBMISSION` 时钟；
+- `fulfillment_dispute_case.current_deadline_at` 与时钟记录保存同一绝对时间；
+- 被发起方完成接待时只能读取并复用该时间，禁止重新计算 `now + evidenceWindow`；
+- 前端没有收到服务端截止时间时显示等待状态，禁止自行假设两小时；
+- 双方证据完成可提前封卷；任一方尚未完成时，统一截止时间触发封卷；
+- 被发起方在截止前未完成接待时，矩阵转为 `RESPONDENT_TIMEOUT_FROZEN`，不把缺席解释为承认或否认。
+
+因此，被发起方可用时间等于“案件剩余举证时间”，不是从其进入证据室起重新获得完整时长。
+
+### 15.3 `case_fact_matrix.v2` 生命周期
+
+同一矩阵使用以下 `matrix_kind` 表达生命周期：
+
+| `matrix_kind` | 含义 |
+|---|---|
+| `INITIATOR_FROZEN` | 发起方接待已确认；对齐状态尚未计算 |
+| `BILATERAL_FROZEN` | 被发起方已直接回应；双方立场已确定性对齐 |
+| `RESPONDENT_TIMEOUT_FROZEN` | 被发起方未在统一截止前完成接待；其立场保持未回应 |
+
+每次演进必须满足：
+
+- 已有事实保持原 `fact_id`、`category` 和 `fact_target`；
+- 新事实获得确定性 `fact_id`；
+- `parent_ref` 指向上一版矩阵；
+- `matrix_version` 单调递增；
+- `content_hash` 由规范化完整内容重算；
+- `truth_status` 在接待阶段始终为 `NOT_EVALUATED`；
+- `party_alignment` 和 `requires_resolution` 由代码计算，不由模型直接决定。
+
+### 15.4 字段职责边界
+
+`case_fact_matrix.v2` 只登记双方说了什么以及双方陈述是否一致。证据真假、证明力、证据覆盖范围和法官认定不写回该矩阵。
+
+```text
+case_fact_matrix.v2
+├─ identity/version/hash
+├─ party_map
+├─ source_refs
+├─ case_overview
+├─ claims
+├─ fact_rows
+├─ fact_relationships
+├─ generation_ref
+└─ fact_indexes
+```
+
+证据书记官以 `fact_rows[].fact_id` 建立事实—证据映射。庭审卷宗装配层再把案情矩阵、冻结证据卷宗和证据覆盖状态组合为法官上下文；`NOT_COVERED_BY_FROZEN_DOSSIER` 等覆盖状态不进入接待官矩阵。
+
+### 15.5 法官参与边界
+
+本方案中的“第一阶段/第二阶段/第三阶段”分别指接待、举证、裁决，不再使用庭审第一轮来生成双方案情矩阵：
+
+- 接待阶段只由双方与接待官协作；
+- 举证阶段只由双方与证据书记官协作；
+- 法官的最早运行点是证据卷宗完成冻结并开放庭审之后。
+
+法官不参与接待交接，不参与证据倒计时，也不负责补造双方案情矩阵。法官读取的是已经稳定的 `BILATERAL_FROZEN` 或 `RESPONDENT_TIMEOUT_FROZEN` 案情矩阵及其对应冻结证据卷宗。
+
+### 15.6 兼容策略
+
+历史 `unilateral_case_matrix.v1` 和 `bilateral_case_matrix.v1` 只允许作为旧案件的只读兼容输入，并在读取时升级或投影。系统不再暴露生成旧双边矩阵的 Agent 路由、流式操作或庭审后置编排器，新案件不得写入旧格式。

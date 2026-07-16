@@ -64,8 +64,11 @@ describe("local service port contract", () => {
     const pythonHealthUrl =
       'http://127.0.0.1:$($env:PYTHON_AGENT_PORT)/health';
     expect(devLocal).toContain(pythonHealthUrl);
-    expect(devLocal).toContain("docker compose build python-agent-service");
-    expect(devLocal.match(/\$LASTEXITCODE -ne 0/g).length).toBeGreaterThanOrEqual(3);
+    expect(devLocal).toContain('"-m", "uvicorn", "app.main:create_app"');
+    expect(devLocal).toContain(
+      "[System.IO.File]::WriteAllText($pythonAgentPidFile, $pythonAgentProcess.Id.ToString())",
+    );
+    expect(devLocal.match(/\$LASTEXITCODE -ne 0/g).length).toBeGreaterThanOrEqual(2);
     expect(devLocal.indexOf(pythonHealthUrl)).toBeLessThan(
       devLocal.indexOf('Write-Output "Local development services are ready."'),
     );

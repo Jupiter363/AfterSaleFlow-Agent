@@ -19,6 +19,7 @@ import com.example.dispute.caseintake.application.AgentServiceClient;
 import com.example.dispute.caseintake.application.CaseApplicationService;
 import com.example.dispute.caseintake.application.CaseView;
 import com.example.dispute.caseintake.application.CreateCaseCommand;
+import com.example.dispute.casecore.domain.CasePartyPosition;
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AppProperties;
 import com.example.dispute.config.AuthenticatedActor;
@@ -31,13 +32,16 @@ import com.example.dispute.infrastructure.persistence.repository.AuditLogReposit
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.room.application.ParticipantService;
 import com.example.dispute.room.application.IntakeAgentTurnService;
+import com.example.dispute.room.application.IntakeProgressService;
 import com.example.dispute.room.application.IntakeLobbySeed;
+import com.example.dispute.room.application.IntakeStatusView;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Instant;
+import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
@@ -62,6 +66,7 @@ class CaseApplicationServiceTest {
     @Mock private CaseRoomRepository roomRepository;
     @Mock private ParticipantService participantService;
     @Mock private IntakeAgentTurnService intakeAgentTurnService;
+    @Mock private IntakeProgressService intakeProgressService;
 
     private CaseApplicationService service;
 
@@ -95,6 +100,7 @@ class CaseApplicationServiceTest {
                         roomRepository,
                         participantService,
                         intakeAgentTurnService,
+                        intakeProgressService,
                         properties,
                         Clock.fixed(Instant.parse("2026-06-28T00:00:00Z"), ZoneOffset.UTC),
                         new ObjectMapper().findAndRegisterModules());
@@ -123,6 +129,10 @@ class CaseApplicationServiceTest {
 
         assertThat(result.caseStatus()).isEqualTo(CaseStatus.INTAKE_COMPLETED);
         assertThat(result.initiatorRole()).isEqualTo(ActorRole.USER);
+        assertThat(result.initiatorId()).isEqualTo("user-1");
+        assertThat(result.respondentRole()).isEqualTo(ActorRole.MERCHANT);
+        assertThat(result.respondentId()).isEqualTo("merchant-1");
+        assertThat(result.partyPosition()).isEqualTo(CasePartyPosition.INITIATOR);
         assertThat(result.potentialDispute()).isTrue();
         assertThat(result.riskLevel()).isEqualTo(RiskLevel.MEDIUM);
         assertThat(result.agentDegraded()).isFalse();
@@ -286,6 +296,10 @@ class CaseApplicationServiceTest {
                         "REQ_merchant");
 
         assertThat(result.initiatorRole()).isEqualTo(ActorRole.MERCHANT);
+        assertThat(result.initiatorId()).isEqualTo("merchant-1");
+        assertThat(result.respondentRole()).isEqualTo(ActorRole.USER);
+        assertThat(result.respondentId()).isEqualTo("user-1");
+        assertThat(result.partyPosition()).isEqualTo(CasePartyPosition.INITIATOR);
         ArgumentCaptor<IntakeLobbySeed> lobbySeed =
                 ArgumentCaptor.forClass(IntakeLobbySeed.class);
         verify(intakeAgentTurnService)
@@ -323,14 +337,117 @@ class CaseApplicationServiceTest {
         when(caseRepository.findById("CASE_MERCHANT_INITIATED"))
                 .thenReturn(Optional.of(merchantInitiated));
 
-        CaseView result =
-                service.get(
-                        "CASE_MERCHANT_INITIATED",
-                        new AuthenticatedActor("user-local", ActorRole.USER));
+        AuthenticatedActor respondent =
+                new AuthenticatedActor("user-local", ActorRole.USER);
+        assertThatThrownBy(
+                        () -> service.get("CASE_MERCHANT_INITIATED", respondent))
+                .isInstanceOf(ForbiddenException.class)
+                .hasMessageContaining("before intake opens");
+        when(intakeProgressService.isCompleted(
+                        merchantInitiated, ActorRole.MERCHANT))
+                .thenReturn(true);
+
+        CaseView result = service.get("CASE_MERCHANT_INITIATED", respondent);
 
         assertThat(result.userId()).isEqualTo("user-local");
         assertThat(result.merchantId()).isEqualTo("merchant-local");
         assertThat(result.initiatorRole()).isEqualTo(ActorRole.MERCHANT);
+        assertThat(result.initiatorId()).isEqualTo("merchant-local");
+        assertThat(result.respondentRole()).isEqualTo(ActorRole.USER);
+        assertThat(result.respondentId()).isEqualTo("user-local");
+        assertThat(result.partyPosition()).isEqualTo(CasePartyPosition.RESPONDENT);
+    }
+
+    @Test
+    void rejectsAClaimedRoleThatDoesNotMatchTheActorIdPartyAssignment() {
+        FulfillmentCaseEntity dispute =
+                FulfillmentCaseEntity.create(
+                        "CASE_ROLE_MISMATCH",
+                        "ORDER_ROLE_MISMATCH",
+                        null,
+                        null,
+                        "user-local",
+                        "merchant-local",
+                        ActorRole.MERCHANT,
+                        "role-mismatch-idempotency",
+                        "DISPUTE",
+                        "身份不匹配",
+                        "actor id 命中商家，但请求声明为用户。",
+                        RiskLevel.MEDIUM,
+                        "merchant-local");
+        when(caseRepository.findById(dispute.getId())).thenReturn(Optional.of(dispute));
+
+        assertThatThrownBy(
+                        () ->
+                                service.get(
+                                        dispute.getId(),
+                                        new AuthenticatedActor(
+                                                "merchant-local", ActorRole.USER)))
+                .isInstanceOf(ForbiddenException.class)
+                .hasMessageContaining("id and role");
+    }
+
+    @Test
+    void projectsEvidenceOpenIntoDifferentCurrentRoomsForEachParty() {
+        FulfillmentCaseEntity dispute =
+                FulfillmentCaseEntity.create(
+                        "CASE_ROLE_SCOPED_ROOM",
+                        "ORDER_ROLE_SCOPED_ROOM",
+                        null,
+                        null,
+                        "user-local",
+                        "merchant-local",
+                        ActorRole.USER,
+                        "role-scoped-room-idempotency",
+                        "DISPUTE",
+                        "角色级房间投影",
+                        "发起方已完成接待，被发起方尚未完成。",
+                        RiskLevel.MEDIUM,
+                        "user-local");
+        OffsetDateTime deadline = OffsetDateTime.parse("2026-07-03T02:00:00Z");
+        dispute.admitToEvidence(
+                "PRODUCT_QUALITY",
+                RiskLevel.MEDIUM,
+                "{\"potentialDispute\":true,\"missingSlots\":[],\"agentDegraded\":false,\"analyzedAt\":\"2026-07-03T00:00:00Z\"}",
+                deadline,
+                "user-local");
+        AuthenticatedActor initiator =
+                new AuthenticatedActor("user-local", ActorRole.USER);
+        AuthenticatedActor respondent =
+                new AuthenticatedActor("merchant-local", ActorRole.MERCHANT);
+        when(caseRepository.findById(dispute.getId())).thenReturn(Optional.of(dispute));
+        when(intakeProgressService.status(dispute, initiator))
+                .thenReturn(
+                        new IntakeStatusView(
+                                dispute.getId(),
+                                ActorRole.USER,
+                                ActorRole.MERCHANT,
+                                "COMPLETED",
+                                "OPEN",
+                                true,
+                                false,
+                                true,
+                                deadline));
+        when(intakeProgressService.status(dispute, respondent))
+                .thenReturn(
+                        new IntakeStatusView(
+                                dispute.getId(),
+                                ActorRole.USER,
+                                ActorRole.MERCHANT,
+                                "COMPLETED",
+                                "OPEN",
+                                false,
+                                true,
+                                false,
+                                deadline));
+
+        CaseView initiatorView = service.get(dispute.getId(), initiator);
+        CaseView respondentView = service.get(dispute.getId(), respondent);
+
+        assertThat(initiatorView.currentRoom()).isEqualTo("EVIDENCE");
+        assertThat(initiatorView.pendingAction()).isEqualTo("SUBMIT_EVIDENCE");
+        assertThat(respondentView.currentRoom()).isEqualTo("INTAKE");
+        assertThat(respondentView.pendingAction()).isEqualTo("COMPLETE_INTAKE");
     }
 
     // 所属模块：【案件受理兼容链路 / 自动化测试层】「CaseApplicationServiceTest.privilegedCreatorIsMappedToSystemForTheIntakeTurnContract()」。

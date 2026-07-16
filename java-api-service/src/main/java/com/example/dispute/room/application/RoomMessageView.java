@@ -6,6 +6,7 @@
  */
 package com.example.dispute.room.application;
 
+import com.example.dispute.room.domain.MessageSource;
 import com.example.dispute.room.domain.MessageType;
 import java.time.Instant;
 import java.util.List;
@@ -23,8 +24,36 @@ public record RoomMessageView(
         String senderRole,
         String senderId,
         MessageType messageType,
+        MessageSource messageSource,
         String messageText,
         List<String> attachmentRefs,
         String agentRunId,
-        Integer hearingRound,
-        Instant createdAt) {}
+        Instant createdAt) {
+
+    public RoomMessageView(
+            String id,
+            String caseId,
+            String roomId,
+            long sequenceNo,
+            String senderRole,
+            String senderId,
+            MessageType messageType,
+            String messageText,
+            List<String> attachmentRefs,
+            String agentRunId,
+            Instant createdAt) {
+        this(
+                id,
+                caseId,
+                roomId,
+                sequenceNo,
+                senderRole,
+                senderId,
+                messageType,
+                null,
+                messageText,
+                attachmentRefs,
+                agentRunId,
+                createdAt);
+    }
+}

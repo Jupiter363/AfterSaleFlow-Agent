@@ -142,7 +142,7 @@ def test_evaluation_prompt_is_offline_read_only_and_cannot_mutate_rules() -> Non
         EvaluationAgentOutput.model_json_schema(),
     )
 
-    assert "closed case" in system_prompt
-    assert "offline" in system_prompt
-    assert "Never modify" in system_prompt
-    assert "online case" in system_prompt
+    assert "已经结案的案件" in system_prompt
+    assert "离线质量评估智能体" in system_prompt
+    assert "绝不能修改" in system_prompt
+    assert "在线案件" in system_prompt

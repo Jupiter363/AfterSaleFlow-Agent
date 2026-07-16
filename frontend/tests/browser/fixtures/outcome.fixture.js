@@ -1,30 +1,28 @@
-// 文件作用：自动化测试文件，验证 outcome.fixture 相关模块的行为、契约或页面布局。
-// 说明：本注释用于帮助读者先了解本文件职责，再继续阅读具体实现。
+// 执行结果页浏览器测试夹具：覆盖已审批最终结果、未审批等待态和长文本回执。
 
 import { expect } from "@playwright/test";
 
 export const OUTCOME_CASE_ID = "CASE_OUTCOME_LAYOUT";
 
 const actors = {
-  USER: { id: "user-local", role: "USER", label: "鐢ㄦ埛" },
+  USER: { id: "user-local", role: "USER", label: "消费者" },
   PLATFORM_REVIEWER: {
     id: "reviewer-local",
     role: "PLATFORM_REVIEWER",
-    label: "骞冲彴瀹℃牳鍛?",
+    label: "平台审核员",
   },
 };
 
 const longUnbroken =
-  "LONGTOKEN_".repeat(36) +
+  "LONG_RECEIPT_TOKEN_".repeat(36) +
   "https://example.invalid/" +
   "receipt/".repeat(26);
 
 const longParagraph =
-  "鐢ㄦ埛绉扮墿娴佺姸鎬佹樉绀虹鏀讹紝浣嗘湰浜哄強瀹朵汉鍧囪〃绀烘湭鏀跺埌鍟嗗搧銆傚晢瀹朵富寮犵墿娴佸凡瀹屾垚灞ョ害锛岀洰鍓嶉渶瑕佸洿缁曠鏀朵汉韬唤銆佹姇閫掍綅缃€佺墿娴佺収鐗囦笌鍙屾柟闄堣堪杩涜澶嶆牳銆?".repeat(
-    10,
+  "审核员已结合订单记录、双方陈述、物流轨迹和售后规则确认最终处理方案。".repeat(
+    44,
   );
 
-// 业务位置：【前端浏览器回归测试】fulfillJson：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 function fulfillJson(route, data) {
   return route.fulfill({
     status: 200,
@@ -33,104 +31,148 @@ function fulfillJson(route, data) {
   });
 }
 
-// 业务位置：【前端浏览器回归测试】draftBlock：围绕 阶段处理结果或草案 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
-function draftBlock(scenario) {
-  const pressure = scenario === "long";
-  return {
-    id: "DRAFT_OUTCOME_LAYOUT",
-    draft_version: 3,
-    recommended_decision: pressure
-      ? `${longParagraph}${longUnbroken}`
-      : "寤鸿鍚庣画纭绛炬敹鍑瘉鍚庡啀瀹氭柟鍚?",
-    confidence: 0.78,
-    draft_text: pressure
-      ? `${longParagraph}${longParagraph}${longUnbroken}`
-      : "AI 娉曞畼宸插熀浜庡涵瀹℃潗鏂欑敓鎴愰潪鏈€缁堣鍐宠崏妗堛€?",
-    fact_findings: [
-      {
-        fact: pressure ? `${longParagraph}${longUnbroken}` : "鐗╂祦鏄剧ず宸茬鏀?",
-        conclusion: "闇€缁撳悎绛炬敹浜鸿韩浠藉啀鍒ゆ柇",
-      },
-    ],
-    evidence_assessment: [
-      pressure
-        ? `${longParagraph}${longUnbroken}`
-        : "鍟嗗璇佹嵁鑳借瘉鏄庣墿娴佽褰曞瓨鍦紝浣嗕笉瓒充互鐩存帴璇佹槑鐢ㄦ埛鏈汉鏀惰揣銆?",
-    ],
-    policy_application: [
-      "绛炬敹浜夎搴旂粨鍚堣瘉鎹湡瀹炴€с€佸叧鑱旀€у拰瀹屾暣鎬ц繘琛屽垽鏂€?",
-    ],
-    reviewer_attention: [
-      pressure ? `${longParagraph}${longUnbroken}` : "鏍搁獙绛炬敹浜鸿韩浠藉拰绛炬敹鍦扮偣銆?",
-    ],
-    explanation_officer_notes: {
-      replay_summary: pressure
-        ? `${longParagraph}${longParagraph}${longUnbroken}`
-        : "瑙ｉ噴鍛樺鐩樹笁杞涵瀹★紝纭浜夎涓昏鍥寸粫绛炬敹浜嬪疄銆?",
-      final_plan_explanation: pressure
-        ? `${longParagraph}${longUnbroken}`
-        : "鑽夋闇€鍦ㄧ‘璁ゅ墠閲嶇偣澶嶆牳绛炬敹閾捐矾銆?",
-      reviewer_focus: [
-        pressure ? `${longParagraph}${longUnbroken}` : "鏍搁獙绛炬敹搴曞崟",
-      ],
-    },
-    approved_plan: {
-      id: pressure ? `PLAN_${longUnbroken}` : "PLAN_LAYOUT",
-      handling_direction: "REFUND",
-      execution_plan: pressure ? `${longParagraph}${longUnbroken}` : "寰呭鏍稿憳纭",
-      actions: [],
-    },
-  };
-}
+function approvedOutcome({ long = false, mock = false } = {}) {
+  const conclusion = long
+    ? `${longParagraph}${longUnbroken}`
+    : "审核通过：为用户退还订单实付金额，并同步关闭本次争议。";
+  const explanation = long
+    ? `${longParagraph}${longParagraph}${longUnbroken}`
+    : "审核员已核对订单、物流和双方举证，确认本方案为已经生效的最终处理结果。";
+  const reviewReason = long
+    ? `${longParagraph}${longUnbroken}`
+    : "证据链完整，退款范围和执行动作符合当前售后规则。";
 
-// 业务位置：【前端浏览器回归测试】outcomeSnapshot：围绕 阶段处理结果或草案 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
-function outcomeSnapshot({ scenario = "final" } = {}) {
-  const pressure = scenario === "long";
-  const isDraft = scenario === "draft" || scenario === "reviewer" || pressure;
   return {
     case_id: OUTCOME_CASE_ID,
-    title: pressure
-      ? `${longParagraph}${longUnbroken}`
-      : "绛炬敹鏈敹鍒颁簤璁?",
-    case_status: isDraft ? "WAITING_HUMAN_REVIEW" : "CLOSED",
-    closed_at: isDraft ? null : "2026-07-11T11:30:00+08:00",
-    final_decision: {
-      conclusion: pressure
+    title: "售后争议执行结果",
+    case_status: "CLOSED",
+    closed_at: "2026-07-11T11:30:00+08:00",
+    adjudication_draft: {
+      id: "DRAFT_OUTCOME_V2",
+      draft_version: 7,
+      recommended_decision: long
         ? `${longParagraph}${longUnbroken}`
-        : isDraft
-          ? "AI 瑁佸喅鑽夋宸茬敓鎴?"
-          : "鏀寔鐢ㄦ埛閫€娆捐姹?",
-      explanation: pressure
+        : "建议支持用户退款请求",
+      draft_text: long
         ? `${longParagraph}${longParagraph}${longUnbroken}`
-        : "鐜版湁鏉愭枡闇€缁х画鏍搁獙绛炬敹浜鸿韩浠戒笌绛炬敹鍦扮偣銆?",
-      review_reason: pressure ? `${longParagraph}${longUnbroken}` : "瀹℃牳鍛樼‘璁ゆ潗鏂欏凡鍏ュ嵎銆?",
-      human_confirmed: !isDraft,
-      source: isDraft ? "AI_JUDGE" : "HUMAN_REVIEW",
+        : "庭审法官 V2 认为商家现有材料不足以证明订单已经按约履行。",
+      confidence: 0.86,
     },
-    actions: isDraft
+    review_task_status: "APPROVED",
+    final_decision: {
+      conclusion,
+      explanation,
+      review_reason: reviewReason,
+      approved_plan: long
+        ? {
+            handling_direction: "RETURN_AND_REFUND",
+            execution_plan: `${longParagraph}${longUnbroken}`,
+            version: 3,
+            actions: [
+              {
+                action_type: "RETURN_AND_REFUND",
+                description: `${longParagraph}${longUnbroken}`,
+              },
+            ],
+          }
+        : {
+            version: 2,
+            actions: [
+              {
+                action_type: "REFUND",
+                description: "向用户原支付渠道退还订单实付金额 299 元，并同步结案。",
+              },
+            ],
+          },
+      human_confirmed: true,
+      source: "HUMAN_REVIEW",
+    },
+    actions: mock
       ? []
-      : [
+      : long
+      ? [
           {
-            action_record_id: "ACTION_OUTCOME_LAYOUT",
+            action_record_id: "ACTION_OUTCOME_LONG",
             action_type: "REFUND",
             execution_status: "SUCCEEDED",
-            result: pressure
-              ? {
-                  operation: longUnbroken,
-                  response: {
-                    idempotency_key: longUnbroken,
-                    status: "SUCCEEDED",
-                  },
-                }
-              : { amount: 299, currency: "CNY" },
-            external_result_ref: pressure ? longUnbroken : "REFUND-LAYOUT-1",
+            result: {
+              operation: longUnbroken,
+              response: {
+                idempotency_key: longUnbroken,
+                status: "SUCCEEDED",
+              },
+            },
+            external_result_ref: longUnbroken,
+          },
+        ]
+      : [
+          {
+            action_record_id: "ACTION_OUTCOME_REFUND",
+            action_type: "REFUND",
+            execution_status: "SUCCEEDED",
+            result: {
+              amount: 299,
+              currency: "CNY",
+              response: {
+                idempotency_key: "REFUND-LAYOUT-1",
+                status: "SUCCEEDED",
+              },
+            },
+            external_result_ref: "REFUND-LAYOUT-1",
+          },
+          {
+            action_record_id: "ACTION_OUTCOME_NOTIFY",
+            action_type: "NOTIFY_USER",
+            execution_status: "RUNNING",
+            result: {
+              delivered: false,
+              reference_id: "NOTICE-LAYOUT-1",
+            },
+            external_result_ref: "NOTICE-LAYOUT-1",
           },
         ],
-    adjudication_draft: isDraft ? draftBlock(pressure ? "long" : "draft") : null,
   };
 }
 
-// 业务位置：【前端浏览器回归测试】installOutcomeFixture：围绕 阶段处理结果或草案 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
+function pendingOutcome() {
+  return {
+    case_id: OUTCOME_CASE_ID,
+    title: "等待审核的售后争议",
+    case_status: "WAITING_HUMAN_REVIEW",
+    closed_at: null,
+    review_task_status: "IN_REVIEW",
+    final_decision: {
+      conclusion: "INTERNAL_DRAFT_DO_NOT_RENDER",
+      explanation: "INTERNAL_EXPLANATION_DO_NOT_RENDER",
+      review_reason: "INTERNAL_REVIEW_DO_NOT_RENDER",
+      approved_plan: {
+        handling_direction: "INTERNAL_PLAN_DO_NOT_RENDER",
+        execution_plan: "INTERNAL_PLAN_DO_NOT_RENDER",
+      },
+      human_confirmed: false,
+      source: "AI_JUDGE",
+    },
+    actions: [],
+    adjudication_draft: {
+      id: "DRAFT_OUTCOME_LAYOUT",
+      draft_version: 3,
+      recommended_decision: "INTERNAL_DRAFT_DO_NOT_RENDER",
+      draft_text: "INTERNAL_DRAFT_DO_NOT_RENDER",
+      explanation_officer_notes: {
+        replay_summary: "INTERNAL_EXPLANATION_DO_NOT_RENDER",
+      },
+    },
+  };
+}
+
+function outcomeSnapshot({ scenario = "final" } = {}) {
+  if (scenario === "pending") return pendingOutcome();
+  return approvedOutcome({
+    long: scenario === "long",
+    mock: scenario === "mock",
+  });
+}
+
 export async function installOutcomeFixture(page, options = {}) {
   const actor = actors[options.role || "USER"];
   if (!actor) throw new Error(`Unsupported outcome role: ${options.role}`);
@@ -156,6 +198,26 @@ export async function installOutcomeFixture(page, options = {}) {
       url.pathname === "/api/notifications/unread-count"
     ) {
       return fulfillJson(route, { unread_count: 0 });
+    }
+    if (request.method() === "GET" && url.pathname === "/api/disputes") {
+      return fulfillJson(route, { items: [] });
+    }
+    if (
+      request.method() === "GET" &&
+      url.pathname === `/api/disputes/${OUTCOME_CASE_ID}`
+    ) {
+      return fulfillJson(route, {
+        case_id: OUTCOME_CASE_ID,
+        title: "售后争议执行结果",
+        case_status: "APPROVED_FOR_EXECUTION",
+      });
+    }
+    if (
+      request.method() === "GET" &&
+      url.pathname ===
+        `/api/disputes/${OUTCOME_CASE_ID}/rooms/HEARING/agent-runs/active`
+    ) {
+      return fulfillJson(route, []);
     }
     if (
       request.method() === "GET" &&

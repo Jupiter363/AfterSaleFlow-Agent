@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import math
+import re
 from typing import Any
 
 from app.harness.evidence_context_assembler import EvidenceTurnWorkingSet
 from app.schemas import (
+    EvidenceFactLink,
     EvidenceHumanReviewSignal,
     EvidenceItemAssessment,
     EvidenceRiskFlag,
@@ -22,7 +25,6 @@ VISUAL_DAMAGE_TERMS = (
     "污渍",
     "损坏",
 )
-
 
 class EvidenceAssessmentPolicy:
     """Enforce model capability boundaries and fail visual gaps to review."""
@@ -94,6 +96,7 @@ class EvidenceAssessmentPolicy:
         )
         visual_loaded = visual_status in {"LOADED", "LOADED_WITHOUT_HASH"}
         authenticity_score = assessment.authenticity_score
+        relevance_score = assessment.relevance_score
         completeness_score = assessment.completeness_score
         assessment_confidence = assessment.assessment_confidence
         findings = list(assessment.findings)
@@ -102,21 +105,45 @@ class EvidenceAssessmentPolicy:
             for item in working_set.allowed_fact_targets
             if str(item.get("fact_id") or "")
         }
-        fact_links = [
+        candidate_fact_links = [
             link for link in assessment.fact_links if link.fact_id in allowed_fact_ids
         ]
-        supported_fact_ids = [
-            fact_id
-            for fact_id in assessment.supported_fact_ids
-            if fact_id in allowed_fact_ids
-        ]
+        supplied_supported_fact_ids = list(assessment.supported_fact_ids)
         if (
-            len(fact_links) != len(assessment.fact_links)
-            or len(supported_fact_ids) != len(assessment.supported_fact_ids)
+            len(candidate_fact_links) != len(assessment.fact_links)
+            or any(
+                fact_id not in allowed_fact_ids
+                for fact_id in supplied_supported_fact_ids
+            )
         ):
             reasons.append("UNKNOWN_FACT_REFERENCE")
             instructions.append("请核对该证据应关联到接待卷宗中的哪一项既有待证事实。")
             limitations.append("模型返回了接待卷宗事实白名单之外的事实引用，已阻止写入证据矩阵。")
+
+        if relevance_score >= 0.5 and not candidate_fact_links:
+            recovered_link = _recover_fact_coordinate(
+                evidence,
+                working_set.allowed_fact_targets,
+                relevance_score=relevance_score,
+                assessment_confidence=assessment_confidence,
+            )
+            if recovered_link is not None:
+                candidate_fact_links = [recovered_link]
+                reasons.append("FACT_LINK_RECOVERED_FROM_SHARED_TEXT")
+                instructions.append(
+                    "请人工确认系统依据材料正文与双方案情矩阵文本重合恢复的事实坐标。"
+                )
+                limitations.append(
+                    "模型遗漏正式 fact_id；系统仅按共享文本最高匹配恢复为 INCONCLUSIVE 关系，"
+                    "不代表该事实已获支持。"
+                )
+            else:
+                relevance_score = min(relevance_score, 0.49)
+                reasons.append("FACT_LINK_UNRESOLVED")
+                instructions.append("请人工把该材料映射到双方案情矩阵中的既有事实坐标。")
+                limitations.append(
+                    "模型未提供事实坐标，且材料文本不足以确定性恢复；本轮不写入事实证据矩阵。"
+                )
 
         if is_visual and not visual_loaded:
             reasons.append(f"VISUAL_INPUT_{visual_status}")
@@ -141,13 +168,55 @@ class EvidenceAssessmentPolicy:
             instructions.append("请核对疑似划痕、磨损或破损区域；不得仅凭图片判断形成时间和责任。")
             limitations.append("图片可提示疑似外观缺陷，但不能单独证明缺陷形成时间、原因或责任归属。")
         if authenticity_score < 0.5:
-            reasons.append("LOW_AUTHENTICITY_SCORE")
+            reasons.append("LOW_AUTHENTICITY_SUSPECTED_FORGERY")
+            instructions.append(
+                "请人工复核证据原件、来源链和完整上下文；疑似造假标签不是最终造假认定。"
+            )
+            if not any(flag.code == "SUSPECTED_FORGERY" for flag in risk_flags):
+                risk_flags.append(
+                    EvidenceRiskFlag(
+                        code="SUSPECTED_FORGERY",
+                        severity="HIGH",
+                        description="疑似造假",
+                    )
+                )
+        if relevance_score < 0.5:
+            reasons.append("LOW_RELEVANCE_SCORE")
+            instructions.append(
+                "请人工核对材料内容与提交方填写的证明目标是否存在直接、可解释的关联。"
+            )
+            if not any(flag.code == "LOW_RELEVANCE" for flag in risk_flags):
+                risk_flags.append(
+                    EvidenceRiskFlag(
+                        code="LOW_RELEVANCE",
+                        severity="MEDIUM",
+                        description="关联度低",
+                    )
+                )
         if completeness_score < 0.5:
             reasons.append("LOW_COMPLETENESS_SCORE")
         if assessment_confidence < 0.65:
             reasons.append("LOW_ASSESSMENT_CONFIDENCE")
         if any(flag.severity == "HIGH" for flag in assessment.risk_flags):
             reasons.append("HIGH_RISK_FLAG")
+
+        # 事实坐标与证据强弱是两件事。相关性达到业务阈值后，模型必须先说明
+        # 材料对应哪一个既有 fact_id；真实性或完整性不足只会把关系降级为
+        # INCONCLUSIVE，不能把事实坐标一并清空。低相关材料则不写入矩阵。
+        fact_links = _finalize_fact_links(
+            evidence_id=assessment.evidence_id,
+            candidate_links=candidate_fact_links,
+            submitted_fact_ids=[link.fact_id for link in assessment.fact_links],
+            supplied_supported_fact_ids=supplied_supported_fact_ids,
+            allowed_fact_ids=sorted(allowed_fact_ids),
+            relevance_score=relevance_score,
+            authenticity_score=authenticity_score,
+            completeness_score=completeness_score,
+            assessment_confidence=assessment_confidence,
+        )
+        supported_fact_ids = [
+            link.fact_id for link in fact_links if link.relation == "SUPPORTS"
+        ]
 
         required = assessment.human_review.required or bool(reasons)
         recommendation = (
@@ -170,6 +239,7 @@ class EvidenceAssessmentPolicy:
                 "fact_links": [item.model_dump(mode="json") for item in fact_links[:50]],
                 "supported_fact_ids": supported_fact_ids[:50],
                 "authenticity_score": authenticity_score,
+                "relevance_score": relevance_score,
                 "completeness_score": completeness_score,
                 "assessment_confidence": assessment_confidence,
                 "findings": [item.model_dump(mode="json") for item in findings[:30]],
@@ -184,6 +254,133 @@ class EvidenceAssessmentPolicy:
                 ).model_dump(mode="json"),
             }
         )
+
+
+def _finalize_fact_links(
+    *,
+    evidence_id: str,
+    candidate_links: list[EvidenceFactLink],
+    submitted_fact_ids: list[str],
+    supplied_supported_fact_ids: list[str],
+    allowed_fact_ids: list[str],
+    relevance_score: float,
+    authenticity_score: float,
+    completeness_score: float,
+    assessment_confidence: float,
+) -> list[EvidenceFactLink]:
+    """Normalize accepted fact coordinates independently from evidence strength."""
+
+    if relevance_score < 0.5:
+        return []
+    if not candidate_links:
+        raise ValueError(
+            "evidence assessment with relevance_score >= 0.5 must reference at "
+            f"least one allowed fact_id: evidence_id={evidence_id}; "
+            f"submitted_fact_ids={submitted_fact_ids}; "
+            f"supported_fact_ids={supplied_supported_fact_ids}; "
+            f"allowed_fact_ids={allowed_fact_ids}"
+        )
+
+    strength_insufficient = authenticity_score <= 0.5 or completeness_score <= 0.5
+    result: list[EvidenceFactLink] = []
+    seen_fact_ids: set[str] = set()
+    for link in candidate_links:
+        if link.fact_id in seen_fact_ids:
+            continue
+        seen_fact_ids.add(link.fact_id)
+        relation = "INCONCLUSIVE" if strength_insufficient else link.relation
+        reason = link.reason
+        if strength_insufficient and link.relation != "INCONCLUSIVE":
+            reason = (
+                "材料与该事实存在关联，但真实性或完整性不足，"
+                "当前仅登记为待核验关系。"
+            )
+        result.append(
+            EvidenceFactLink(
+                fact_id=link.fact_id,
+                relation=relation,
+                reason=reason,
+                confidence=min(
+                    float(link.confidence),
+                    float(relevance_score),
+                    float(assessment_confidence),
+                ),
+            )
+        )
+    return result[:50]
+
+
+def _recover_fact_coordinate(
+    evidence: Any,
+    allowed_fact_targets: tuple[dict[str, str], ...],
+    *,
+    relevance_score: float,
+    assessment_confidence: float,
+) -> EvidenceFactLink | None:
+    """Recover one conservative coordinate when the model omits every fact_id.
+
+    This does not infer support or opposition. It only selects the strongest shared-text
+    coordinate and records an INCONCLUSIVE link that is forced to human review upstream.
+    """
+
+    evidence_text = " ".join(
+        value
+        for value in (
+            str(getattr(evidence, "claimed_fact", "") or ""),
+            str(getattr(evidence, "content", "") or ""),
+            str(getattr(evidence, "original_filename", "") or ""),
+        )
+        if value
+    )
+    evidence_grams = _text_bigrams(evidence_text)
+    if not evidence_grams:
+        return None
+
+    candidates: list[tuple[float, str]] = []
+    for target in allowed_fact_targets:
+        fact_id = str(target.get("fact_id") or "")
+        target_text = " ".join(
+            value
+            for value in (
+                str(target.get("fact") or ""),
+                str(target.get("category") or ""),
+                str(target.get("match_text") or ""),
+            )
+            if value
+        )
+        target_grams = _text_bigrams(target_text)
+        if not fact_id or not target_grams:
+            continue
+        overlap = len(evidence_grams & target_grams)
+        score = overlap / math.sqrt(len(target_grams) * len(evidence_grams))
+        candidates.append((score, fact_id))
+
+    if not candidates:
+        return None
+    best_score, best_fact_id = max(candidates, key=lambda item: (item[0], item[1]))
+    if best_score < 0.08:
+        return None
+    return EvidenceFactLink(
+        fact_id=best_fact_id,
+        relation="INCONCLUSIVE",
+        reason=(
+            "材料正文与该待证事实的共享文本重合度最高；因模型遗漏正式事实坐标，"
+            "当前仅登记为待人工确认的事实关联。"
+        ),
+        confidence=min(
+            0.6,
+            float(relevance_score),
+            float(assessment_confidence),
+            max(0.5, best_score),
+        ),
+    )
+
+
+def _text_bigrams(value: str) -> set[str]:
+    normalized = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", value.casefold())
+    if len(normalized) < 2:
+        return set()
+    return {normalized[index : index + 2] for index in range(len(normalized) - 1)}
 
 
 # 所属模块：证据室 Agent > 确定性评估策略；函数角色：模块私有业务函数。

@@ -72,7 +72,12 @@ public class EvidenceCatalogService {
                         .filter(item -> canSeeCatalogItem(dispute, item, actor))
                         .map(item -> project(caseId, dispute, item, actor))
                         .toList();
-        return new RoleScopedEvidenceView(caseId, dispute.getInitiatorRole().name(), items);
+        String initiatorId =
+                dispute.getInitiatorRole() == ActorRole.MERCHANT
+                        ? dispute.getMerchantId()
+                        : dispute.getUserId();
+        return new RoleScopedEvidenceView(
+                caseId, dispute.getInitiatorRole().name(), initiatorId, items);
     }
 
     // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceCatalogService.canSeeCatalogItem(FulfillmentCaseEntity,EvidenceItemEntity,AuthenticatedActor)」。
@@ -134,12 +139,14 @@ public class EvidenceCatalogService {
                         .map(EvidenceVerificationEntity::getReasonsJson)
                         .map(this::readJson)
                         .orElseGet(objectMapper::createObjectNode);
+        JsonNode submissionMetadata = readJson(item.getMetadataJson());
         Double confidenceScore = confidenceScore(agentFindings);
         JsonNode humanReview = agentFindings.path("human_review");
         return new RoleScopedEvidenceView.Item(
                 item.getId(),
                 item.getEvidenceType(),
                 item.getSubmittedByRole(),
+                item.getSubmittedById(),
                 item.getVisibility(),
                 contentUrl,
                 !visible,
@@ -164,10 +171,19 @@ public class EvidenceCatalogService {
                         .orElse(false),
                 firstNonEmptyTextList(
                         humanReview.path("reason_codes"),
-                        reasons.path("human_review_reason_codes")),
+                        reasons.isArray()
+                                ? reasons
+                                : reasons.path("human_review_reason_codes")),
                 firstNonEmptyTextList(
                         humanReview.path("instructions"),
-                        reasons.path("human_review_instructions")));
+                        reasons.path("human_review_instructions")),
+                textOrNull(submissionMetadata.path("claimed_fact")),
+                submissionMetadata.path("truth_attested").asBoolean(false),
+                textList(submissionMetadata.path("attestation_scope")),
+                textOrNull(submissionMetadata.path("party_capacity")),
+                textOrNull(submissionMetadata.path("attestation_version")),
+                textOrNull(submissionMetadata.path("forgery_consequence_code")),
+                textOrNull(submissionMetadata.path("enforcement_gate")));
     }
 
     // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceCatalogService.readJson(String)」。
@@ -251,6 +267,14 @@ public class EvidenceCatalogService {
                     }
                 });
         return List.copyOf(values);
+    }
+
+    private static String textOrNull(JsonNode node) {
+        if (node == null || node.isMissingNode() || node.isNull()) {
+            return null;
+        }
+        String value = node.asText("").trim();
+        return value.isBlank() ? null : value;
     }
 
     // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceCatalogService.confidenceLevel(JsonNode,Double)」。

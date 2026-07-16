@@ -89,33 +89,22 @@ def test_agent_evaluation_runs_outside_database_transactions() -> None:
 def test_evaluation_agent_is_closed_case_only_and_read_only() -> None:
     schemas = read(PYTHON / "schemas" / "models.py")
     workflow = read(PYTHON / "evaluation.py")
-    prompt = read(PYTHON / "prompts" / "evaluation_analyze.md")
+    prompt = read(
+        PYTHON
+        / "agents"
+        / "prompts"
+        / "evaluation_agent"
+        / "evaluation_analyze.md"
+    )
     main = read(PYTHON / "main.py")
     assert 'case_status: Literal["CLOSED"]' in schemas
     assert "automatic_changes_applied: Literal[False]" in schemas
     assert "online_case_mutated: Literal[False]" in schemas
     assert "draft_approval_rate=1.0" in workflow
     assert "reviewer_modification_rate=" in workflow
-    assert "Never modify" in prompt
-    assert "online case" in prompt
+    assert "绝不能参与在线案件" in prompt
+    assert "不得更改在线案件" in prompt
     assert '"/internal/agents/evaluation/analyze"' in main
-
-
-# 所属模块：跨服务契约测试 > test_phase13_closure_evaluation_contract；函数角色：回归测试用例。
-# 具体功能：`test_workflow_orders_execution_before_closure_and_evaluation` 验证履约执行动作在固定案例中的输出、边界和失败行为；关键协作调用：`workflow.index`。
-# 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 本文件的 `read`。
-# 系统意义：固定“跨服务契约测试 > test_phase13_closure_evaluation_contract”的可观察契约，防止后续重构改变业务结果。
-def test_workflow_orders_execution_before_closure_and_evaluation() -> None:
-    workflow = read(
-        JAVA
-        / "workflow"
-        / "temporal"
-        / "CaseFulfillmentDisputeWorkflowImpl.java"
-    )
-    execution = workflow.index("activities.executeApprovedPlan")
-    closure = workflow.index("activities.closeCaseAndEvaluate")
-    assert execution < closure
-    assert "EVALUATION_COMPLETE" in workflow
 
 
 # 所属模块：跨服务契约测试 > test_phase13_closure_evaluation_contract；函数角色：回归测试用例。

@@ -25,6 +25,7 @@ import com.example.dispute.room.infrastructure.persistence.repository.RoomTurnMe
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.Comparator;
@@ -92,6 +93,7 @@ public class EvidenceContextEnvelopeFactory {
                         .orElse(null);
         JsonNode intakeDossierJson =
                 intakeDossier == null ? null : readJson(intakeDossier.getDossierJson());
+        JsonNode sharedIntakeDossierJson = sharedIntakeDossierProjection(intakeDossierJson);
         RecentTurnsWindow recentTurns = recentTurns(agentSession);
         List<EvidenceContextEnvelopeV1.VisibleEvidence> visibleEvidence =
                 visibleEvidence(dispute.getId(), actor);
@@ -100,8 +102,8 @@ public class EvidenceContextEnvelopeFactory {
         return new EvidenceContextEnvelopeV1(
                 EvidenceContextEnvelopeV1.SCHEMA_VERSION,
                 clock.instant().toString(),
-                caseSnapshot(dispute),
-                intakeDossierSnapshot(intakeDossier, intakeDossierJson),
+                caseSnapshot(dispute, sharedIntakeDossierJson),
+                intakeDossierSnapshot(intakeDossier, sharedIntakeDossierJson),
                 actorSnapshot(dispute, actor, accessSession, agentSession),
                 new EvidenceContextEnvelopeV1.CurrentEvent(
                         eventId,
@@ -135,7 +137,8 @@ public class EvidenceContextEnvelopeFactory {
     // 下游影响：「EvidenceContextEnvelopeFactory.caseSnapshot(FulfillmentCaseEntity)」向下依次触达 「dispute.getId」、「dispute.getVersion」、「dispute.getCaseStatus」、「dispute.getCaseType」；计算结果以「EvidenceContextEnvelopeV1.CaseSnapshot」交给调用方。
     // 系统意义：「EvidenceContextEnvelopeFactory.caseSnapshot(FulfillmentCaseEntity)」负责主链路中的“案件快照”；每次读取和写入都要绑定案件参与关系、角色、房间和受众范围
     private EvidenceContextEnvelopeV1.CaseSnapshot caseSnapshot(
-            FulfillmentCaseEntity dispute) {
+            FulfillmentCaseEntity dispute, JsonNode sharedIntakeDossier) {
+        String sharedDescription = sharedCaseDescription(dispute, sharedIntakeDossier);
         return new EvidenceContextEnvelopeV1.CaseSnapshot(
                 dispute.getId(),
                 dispute.getVersion(),
@@ -144,7 +147,7 @@ public class EvidenceContextEnvelopeFactory {
                 dispute.getDisputeType(),
                 dispute.getInitiatorRole().name(),
                 dispute.getTitle(),
-                dispute.getDescription(),
+                sharedDescription,
                 dispute.getRiskLevel().name(),
                 dispute.getRouteType() == null ? null : dispute.getRouteType().name(),
                 dispute.getOrderId(),
@@ -155,6 +158,77 @@ public class EvidenceContextEnvelopeFactory {
                 dispute.getExternalCaseRef(),
                 dispute.getCurrentRoom(),
                 isoTimestamp(dispute.getCurrentDeadlineAt()));
+    }
+
+    /**
+     * Evidence turns consume the bilateral handoff, not either party's private intake transcript.
+     * Keep the formal fact coordinate system and neutral summary while dropping raw statements,
+     * handoff remarks and role-private intake fields before the AgentRun request is persisted.
+     */
+    private JsonNode sharedIntakeDossierProjection(JsonNode payload) {
+        if (payload == null || !payload.isObject()) {
+            return payload;
+        }
+        JsonNode bilateralMatrix = payload.path("case_fact_matrix");
+        if (!"case_fact_matrix.v2".equals(
+                bilateralMatrix.path("schema_version").asText())) {
+            return legacySharedIntakeProjection(payload);
+        }
+
+        ObjectNode projected = objectMapper.createObjectNode();
+        projected.put(
+                "schema_version",
+                payload.path("schema_version").asText("intake_case_detail.v1"));
+        copyObjectField(payload, projected, "references");
+        projected.set("case_fact_matrix", bilateralMatrix.deepCopy());
+
+        JsonNode overview = bilateralMatrix.path("case_overview");
+        ObjectNode story = projected.putObject("case_story");
+        story.put("title", "待核验争议");
+        story.put(
+                "one_sentence_summary",
+                overview.path("neutral_summary").asText(""));
+        ObjectNode coreState = projected.putObject("dispute_core_state");
+        coreState.put("core_conflict", overview.path("core_conflict").asText(""));
+        return projected;
+    }
+
+    private JsonNode legacySharedIntakeProjection(JsonNode payload) {
+        ObjectNode projected = objectMapper.createObjectNode();
+        if (payload.has("schema_version")) {
+            projected.set("schema_version", payload.get("schema_version").deepCopy());
+        }
+        for (String field :
+                List.of(
+                        "references",
+                        "case_story",
+                        "dispute_focus",
+                        "dispute_core_state",
+                        "unilateral_case_matrix")) {
+            copyObjectField(payload, projected, field);
+        }
+        return projected;
+    }
+
+    private static void copyObjectField(
+            JsonNode source, ObjectNode target, String field) {
+        JsonNode value = source.get(field);
+        if (value != null && value.isObject()) {
+            target.set(field, value.deepCopy());
+        }
+    }
+
+    private static String sharedCaseDescription(
+            FulfillmentCaseEntity dispute, JsonNode sharedIntakeDossier) {
+        String neutralSummary =
+                sharedIntakeDossier == null
+                        ? ""
+                        : sharedIntakeDossier
+                                .path("case_story")
+                                .path("one_sentence_summary")
+                                .asText("")
+                                .trim();
+        return neutralSummary.isBlank() ? dispute.getDescription() : neutralSummary;
     }
 
     // 所属模块：【房间协作与权限 / 应用编排层】「EvidenceContextEnvelopeFactory.intakeDossierSnapshot(CaseIntakeDossierEntity,JsonNode)」。

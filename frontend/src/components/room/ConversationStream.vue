@@ -12,16 +12,13 @@ import {
   watch,
 } from "vue";
 import AgentStreamingMessage from "./AgentStreamingMessage.vue";
+import AgentSpeakerLabel from "./AgentSpeakerLabel.vue";
 import { displayRoomMessageText, roleLabel } from "../../utils/displayText";
 import {
   durableMessagesOutsideActiveStreams,
   streamCardsForRun,
   visibleAgentStreams,
 } from "../../stores/agentStream";
-import {
-  agentSpeakerLine,
-  agentSpeakerLineForIdentity,
-} from "../../utils/agentSpeakerPresentation";
 
 const props = defineProps({
   messages: { type: Array, default: () => [] },
@@ -38,6 +35,11 @@ const props = defineProps({
     default: "对话还没有开始。数字人会先听你完整说明。",
   },
   placeholder: { type: String, default: "把你的情况告诉数字人…" },
+  submitLabel: { type: String, default: "发送陈述" },
+  composerHint: {
+    type: String,
+    default: "消息提交后成为不可变房间记录",
+  },
 });
 
 const emit = defineEmits(["submit"]);
@@ -67,7 +69,7 @@ const agentSurfaceTone = computed(() => {
   if (label.includes("陪审") || roles.includes("jury_panel")) return "jury-panel";
   return "default";
 });
-const PARTY_ROLES = new Set(["USER", "MERCHANT"]);
+const PARTY_ROLES = new Set(["USER", "MERCHANT", "PLATFORM_REVIEWER"]);
 const AGENT_ROLES = new Set([
   "CUSTOMER_SERVICE",
   "DISPUTE_INTAKE_OFFICER",
@@ -76,6 +78,8 @@ const AGENT_ROLES = new Set([
   "JUDGE",
   "AI_JUDGE",
   "PRESIDING_JUDGE",
+  "JURY",
+  "AI_JURY",
   "JURY_PANEL",
   "REVIEW_COPILOT",
   "SYSTEM",
@@ -108,17 +112,21 @@ function messageLaneClass(role) {
 }
 
 // 业务位置：【Java 房间协作】displaySenderLabel：将 当前阶段业务数据 转换为稳定的接口、提示词或页面表达，避免直接暴露内部实现字段。上游：房间消息、访问会话和参与方身份。下游：接待/证据回合记忆、Agent 上下文和事件。边界：会话和可见性必须按参与方隔离。
+function isAgentSpeakerMessage(message) {
+  return (
+    message.message_type === "AGENT_MESSAGE" ||
+    (AGENT_ROLES.has(message.sender_role) && message.sender_role !== "SYSTEM")
+  );
+}
+
+function agentIdentityForMessage(message) {
+  if (props.agentLabel && message.message_type === "AGENT_MESSAGE") {
+    return props.agentLabel;
+  }
+  return "";
+}
+
 function displaySenderLabel(message) {
-  if (
-    props.agentLabel &&
-    message.message_type === "AGENT_MESSAGE" &&
-    AGENT_ROLES.has(message.sender_role)
-  ) {
-    return agentSpeakerLineForIdentity(props.agentLabel);
-  }
-  if (AGENT_ROLES.has(message.sender_role) && message.sender_role !== "SYSTEM") {
-    return agentSpeakerLine(message.sender_role);
-  }
   return roleLabel(message.sender_role);
 }
 
@@ -162,7 +170,14 @@ onMounted(() => {
         data-room-message
       >
         <header>
-          <strong>{{ displaySenderLabel(message) }}</strong>
+          <strong>
+            <AgentSpeakerLabel
+              v-if="isAgentSpeakerMessage(message)"
+              :role="message.sender_role"
+              :identity="agentIdentityForMessage(message)"
+            />
+            <template v-else>{{ displaySenderLabel(message) }}</template>
+          </strong>
           <small>#{{ visibleIndex + 1 }}</small>
         </header>
         <p>{{ displayRoomMessageText(message.message_text) }}</p>
@@ -198,8 +213,10 @@ onMounted(() => {
         aria-label="房间消息"
       />
       <div>
-        <span>消息提交后成为不可变房间记录</span>
-        <button type="submit" :disabled="disabled || !text.trim()">发送陈述</button>
+        <span>{{ composerHint }}</span>
+        <button type="submit" :disabled="disabled || !text.trim()">
+          {{ submitLabel }}
+        </button>
       </div>
     </form>
     <p v-else class="conversation-stream__readonly" data-room-readonly>

@@ -12,12 +12,20 @@ from app.agents.dispute_intake_officer.skills.dossier.dossier_skill import (
     ORIGINAL_STATEMENT_SEPARATOR,
     SUBJECTIVE_RESPONDENT_SOURCE,
     _canonical_verification_focus,
+    _enforce_case_story_summary,
+    _enforce_claim_resolution,
     _reported_attitude_position,
 )
 from app.agents.dispute_intake_officer.workflow import (
     _enforce_intake_question_boundary,
 )
 from app.schemas import IntakeTurnRequest
+from app.streaming import (
+    AgentStreamObserver,
+    IncrementalVisibleJsonProjector,
+    bind_stream_observer,
+    current_stream_observer,
+)
 
 
 # 所属模块：Agent 角色能力 > test_intake_case_detail_dossier；函数角色：模块私有业务函数。
@@ -459,13 +467,87 @@ def test_real_intake_replay_keeps_summary_attitude_statement_and_focus_clean() -
 
 
 def test_intake_model_output_requires_a_complete_case_summary_each_turn() -> None:
-    with pytest.raises(ValueError, match="one_sentence_summary is required"):
+    with pytest.raises(ValueError, match="one_sentence_summary"):
         IntakeCaseDetailLlmOutput.model_validate(
             {
                 "room_utterance": "已记录。",
-                "case_detail": {"respondent_attitude": {"attitude": "DISAGREE"}},
+                "case_detail": {
+                    "case_story": {"title": "履约争议"},
+                    "respondent_attitude": {"attitude": "DISAGREE"},
+                },
+                "unilateral_case_matrix": {
+                    "fact_rows": [
+                        {
+                            "fact_key": "NEW_CASE_EVENT",
+                            "category": "OTHER",
+                            "fact_target": "发起方提交履约争议",
+                            "materiality": "CORE",
+                            "position_summary": "发起方提交履约争议。",
+                            "asserted_value": "发起方提交履约争议",
+                            "source_scope": "CURRENT_SOURCE",
+                        }
+                    ],
+                    "summary_source_fact_keys": ["NEW_CASE_EVENT"],
+                },
             }
         )
+
+
+def test_intake_model_output_schema_requires_the_nested_case_summary() -> None:
+    schema = IntakeCaseDetailLlmOutput.model_json_schema()
+    detail_schema = schema["$defs"]["IntakeCaseDetailPatch"]
+    story_schema = schema["$defs"]["IntakeCaseStoryPatch"]
+
+    assert "case_detail" in schema["required"]
+    assert detail_schema["required"] == ["case_story"]
+    assert detail_schema["properties"]["case_story"] == {
+        "$ref": "#/$defs/IntakeCaseStoryPatch"
+    }
+    assert story_schema["required"] == ["one_sentence_summary"]
+    assert story_schema["properties"]["one_sentence_summary"]["minLength"] == 1
+
+
+def test_intake_case_detail_patch_stays_a_dict_and_keeps_dynamic_branches() -> None:
+    parsed = IntakeCaseDetailLlmOutput.model_validate(
+        {
+            "room_utterance": "已记录。",
+            "case_detail": {
+                "case_story": {
+                    "one_sentence_summary": "用户提交履约争议。",
+                    "event_timeline": [
+                        {"event": "用户提交争议", "source": "USER_MESSAGE"}
+                    ],
+                },
+                "missing_information": {
+                    "blocking_gaps": ["商家回应"],
+                    "next_questions": ["商家如何回应您的诉求？"],
+                },
+            },
+            "unilateral_case_matrix": {
+                "fact_rows": [
+                    {
+                        "fact_key": "NEW_CASE_EVENT",
+                        "category": "OTHER",
+                        "fact_target": "发起方提交履约争议",
+                        "materiality": "CORE",
+                        "position_summary": "发起方提交履约争议。",
+                        "asserted_value": "发起方提交履约争议",
+                        "source_scope": "CURRENT_SOURCE",
+                    }
+                ],
+                "summary_source_fact_keys": ["NEW_CASE_EVENT"],
+            },
+        }
+    )
+
+    assert isinstance(parsed.case_detail, dict)
+    assert parsed.case_detail["case_story"]["event_timeline"] == [
+        {"event": "用户提交争议", "source": "USER_MESSAGE"}
+    ]
+    assert parsed.case_detail["missing_information"]["blocking_gaps"] == [
+        "商家回应"
+    ]
+    assert "references" not in parsed.case_detail
 
 
 # 所属模块：Agent 角色能力 > test_intake_case_detail_dossier；函数角色：回归测试用例。
@@ -479,6 +561,8 @@ def test_intake_question_boundary_replaces_evidence_requests_with_case_questions
         "missing_information": {
             "next_questions": [
                 "包裹实际到达时间是什么时候？",
+                "包裹由谁签收？",
+                "您在什么时间联系了商家？",
                 "能否提供物流签收截图？",
             ]
         },
@@ -490,6 +574,136 @@ def test_intake_question_boundary_replaces_evidence_requests_with_case_questions
     assert "上传" not in result
     assert "截图" not in result
     assert "凭证" not in result
+    assert result.count("？") == 2
+    assert "什么时间联系了商家" not in result
+
+
+def test_respondent_message_keeps_initiator_claim_but_isolates_original_statement() -> None:
+    case_id = "CASE_respondent_claim_guard"
+    context = _agent_context(case_id)
+    context.update(
+        {
+            "actor_id": "MERCHANT_local_1",
+            "actor_role": "MERCHANT",
+            "permission_level": "PARTY_MERCHANT",
+            "scope_type": "INTAKE_PARTY_PRIVATE",
+            "allowed_actor_ids": ["MERCHANT_local_1"],
+            "allowed_actor_roles": ["MERCHANT"],
+        }
+    )
+    previous_claim = {
+        "initiator_role": "USER",
+        "requested_resolution": "REFUND",
+        "requested_amount": 200,
+        "requested_items": "安装服务",
+        "request_reason": "用户称服务没有完成。",
+        "normalized_statement": "用户请求退还200元服务费。",
+        "original_statement": "这是发起方逐字原始陈述。",
+        "original_statement_provenance": {
+            "policy": "INITIATOR_INPUTS_V1",
+            "last_message_id": "MESSAGE_USER_LAST",
+            "submission_count": 1,
+            "separator": "BLANK_LINE",
+            "source": "INITIATOR_STATEMENT_TRANSCRIPT",
+        },
+    }
+    previous = {
+        "schema_version": "intake_case_detail.v1",
+        "claim_resolution": previous_claim,
+        "case_fact_matrix": {
+            "schema_version": "case_fact_matrix.v2",
+            "party_map": {
+                "initiator_role": "USER",
+                "respondent_role": "MERCHANT",
+            },
+        },
+    }
+    request = IntakeTurnRequest.model_validate(
+        {
+            "case_id": case_id,
+            "room_type": "INTAKE",
+            "turn_source": "ROOM_MESSAGE",
+            "current_user_message": {
+                "message_id": "MESSAGE_MERCHANT_REPLY",
+                "sequence_no": 1,
+                "role": "MERCHANT",
+                "source": "ROOM_MESSAGE",
+                "text": "我方不同意退款，只愿意免费维修。",
+            },
+            "recent_dialogue_messages": [],
+            "previous_case_detail": previous,
+            "initiator_statement_transcript": [
+                {
+                    "message_id": "MESSAGE_MERCHANT_REPLY",
+                    "role": "MERCHANT",
+                    "text": "我方不同意退款，只愿意免费维修。",
+                }
+            ],
+            "agent_context": context,
+        }
+    )
+    detail = {
+        "claim_resolution": {
+            "initiator_role": "MERCHANT",
+            "requested_resolution": "REPLACE_OR_REPAIR",
+            "request_reason": "我方只愿意维修。",
+            "normalized_statement": "商家请求改为维修。",
+            "original_statement": "错误覆盖",
+        }
+    }
+
+    _enforce_claim_resolution(detail, request, previous)
+
+    assert detail["claim_resolution"] == {
+        key: value
+        for key, value in previous_claim.items()
+        if key not in {"original_statement", "original_statement_provenance"}
+    }
+    assert detail["requested_resolution"]["requested_outcome"] == "REFUND"
+
+
+def test_user_respondent_summary_uses_the_matrix_initiator_role() -> None:
+    case_id = "CASE_user_respondent_summary"
+    context = _agent_context(case_id)
+    context["scope_type"] = "INTAKE_PARTY_PRIVATE"
+    previous = {
+        "case_story": {"one_sentence_summary": "商家称服务已经完成。"},
+        "case_fact_matrix": {
+            "schema_version": "case_fact_matrix.v2",
+            "party_map": {
+                "initiator_role": "MERCHANT",
+                "respondent_role": "USER",
+            },
+        },
+    }
+    request = IntakeTurnRequest.model_validate(
+        {
+            "case_id": case_id,
+            "room_type": "INTAKE",
+            "turn_source": "ROOM_MESSAGE",
+            "current_user_message": {
+                "message_id": "MESSAGE_USER_RESPONSE",
+                "sequence_no": 1,
+                "role": "USER",
+                "source": "ROOM_MESSAGE",
+                "text": "我不同意，约定服务并没有完成。",
+            },
+            "recent_dialogue_messages": [],
+            "previous_case_detail": previous,
+            "agent_context": context,
+        }
+    )
+    summary = "商家主张服务已经完成，用户直接回应约定服务并未完成。"
+    detail = {"case_story": {"one_sentence_summary": summary}}
+
+    _enforce_case_story_summary(
+        detail,
+        request,
+        previous,
+        {"case_story": {"one_sentence_summary": summary}},
+    )
+
+    assert detail["case_story"]["one_sentence_summary"] == summary
 
 
 def test_attitude_position_skips_counterparty_used_as_contact_object() -> None:
@@ -522,13 +736,76 @@ def test_intake_question_boundary_removes_question_answered_by_claim_seed() -> N
     assert "售后单" in result
 
 
+def test_respondent_resolution_question_is_not_replaced_by_initiator_claim() -> None:
+    utterance = (
+        "已记录您关于商品未拆封、未激活的说明。为了明确争议焦点，请补充："
+        "1. 您提到的“白色大容量型号”具体是指哪一款配置（例如内存大小）？"
+        "2. 针对商家提出的换货方案，您目前的最终诉求是什么？"
+    )
+    case_detail = {
+        "intake_quality": {"score": 75, "ready_for_next_step": False},
+        "claim_resolution": {
+            "initiator_role": "MERCHANT",
+            "requested_resolution": "REPLACE_OR_REPAIR",
+        },
+        "missing_information": {
+            "next_questions": ["用户是否已拆封或激活手机"]
+        },
+    }
+
+    result = _enforce_intake_question_boundary(
+        utterance,
+        case_detail,
+        actor_role="USER",
+    )
+
+    assert result == utterance
+    assert "用户是否已拆封或激活手机" not in result
+
+
+def test_visible_follow_up_questions_replace_stale_structured_questions() -> None:
+    utterance = (
+        "已记录本轮补充。为了继续梳理，请补充："
+        "1. 手机的具体内存容量是多少？"
+        "2. 您是什么时间联系商家的？"
+    )
+    rendered = CaseDetailDossierSkill().render(
+        request=_request(),
+        room_utterance=utterance,
+        llm_case_detail={
+            "case_story": {
+                "one_sentence_summary": "用户称商品状态存在争议，并补充商品尚未拆封激活。"
+            },
+            "missing_information": {
+                "next_questions": ["用户是否已拆封或激活手机"]
+            },
+            "intake_quality": {"score": 75},
+        },
+        llm_dossier_patch=None,
+        llm_scroll_snapshot=None,
+        llm_canvas_operations=[],
+        llm_admission_recommendation="NEED_MORE_INFO",
+        llm_missing_fields=[],
+        llm_confidence=0.75,
+    )
+
+    assert rendered.scroll_snapshot["missing_information"]["next_questions"] == [
+        "手机的具体内存容量是多少？",
+        "您是什么时间联系商家的？",
+    ]
+
+
 class CaseDetailRunner:
     # 所属模块：Agent 角色能力 > test_intake_case_detail_dossier；函数角色：对象依赖初始化。
     # 具体功能：`__init__` 注入并保存处理本阶段状态需要的客户端、配置或策略依赖。
     # 上下游：上游为 受治理的案件上下文和角色提示词；下游为 符合 Schema 的角色分析结果。
     # 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
-    def __init__(self, score: int = 86) -> None:
+    def __init__(self, score: int = 86, *, room_utterance: str | None = None) -> None:
         self.score = score
+        self.room_utterance = room_utterance or (
+            "我已经了解本案的基本情况：物流显示签收但你主张未收到，"
+            "商家暂未提供签收底单。右侧案件详情已整理到可进入下一步。"
+        )
         self.calls: list[dict[str, object]] = []
 
     # 所属模块：Agent 角色能力 > test_intake_case_detail_dossier；函数角色：类/闭包内部方法。
@@ -562,10 +839,21 @@ class CaseDetailRunner:
         )
         return SimpleNamespace(
             value=output_type(
-                room_utterance=(
-                    "我已经了解本案的基本情况：物流显示签收但你主张未收到，"
-                    "商家暂未提供签收底单。右侧案件详情已整理到可进入下一步。"
-                ),
+                room_utterance=self.room_utterance,
+                unilateral_case_matrix={
+                    "fact_rows": [
+                        {
+                            "fact_key": "NEW_SIGNED_NOT_RECEIVED",
+                            "category": "LOGISTICS",
+                            "fact_target": "物流显示签收但发起方称未收到商品",
+                            "materiality": "CORE",
+                            "position_summary": "用户称物流显示签收但本人未收到商品。",
+                            "asserted_value": "物流显示签收但用户未收到",
+                            "source_scope": "CURRENT_SOURCE",
+                        }
+                    ],
+                    "summary_source_fact_keys": ["NEW_SIGNED_NOT_RECEIVED"],
+                },
                 case_detail={
                     "schema_version": "intake_case_detail.v1",
                     "case_story": {
@@ -657,8 +945,11 @@ def test_intake_turn_workflow_lives_under_agent_package_and_outputs_case_detail(
     assert result.scroll_snapshot["respondent_attitude"]["attitude"] == "NOT_RESPONDED"
     assert result.scroll_snapshot["dispute_core_state"]["conflict_type"] == "CLAIM_UNANSWERED"
     assert result.dossier_patch["case_detail"]["case_story"]["title"] == "物流显示签收但用户称未收到商品"
-    assert "已了解大致案情" in result.room_utterance
-    assert "已经可以提交" in result.room_utterance
+    assert "我已经了解本案的基本情况" in result.room_utterance
+    assert (
+        result.scroll_snapshot["handoff_notes"]["remark_status"]
+        == "READY_PENDING_REMARK_INVITE"
+    )
 
 
 # 所属模块：Agent 角色能力 > test_intake_case_detail_dossier；函数角色：回归测试用例。
@@ -753,16 +1044,18 @@ def test_intake_case_detail_translates_llm_missing_field_codes_before_persisting
 # 具体功能：`test_ready_intake_turn_asks_for_handoff_remark_before_next_room` 读取并按案件、角色或会话范围筛选接待信息；关键协作调用：`CaseDetailRunner`、`run`、`IntakeTurnWorkflow`。
 # 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_request`。
 # 系统意义：固定“Agent 角色能力 > test_intake_case_detail_dossier”的可观察契约，防止后续重构改变业务结果。
-def test_ready_intake_turn_asks_for_handoff_remark_before_next_room() -> None:
+def test_newly_ready_intake_turn_keeps_streamed_final_question() -> None:
     from app.agents.dispute_intake_officer.workflow import IntakeTurnWorkflow
 
-    runner = CaseDetailRunner(score=86)
+    final_question = "已记录。商家当时对退款诉求给出的具体答复是什么？"
+    runner = CaseDetailRunner(score=86, room_utterance=final_question)
     result = IntakeTurnWorkflow(model_runner=runner).run(_request())
 
-    assert "已了解大致案情" in result.room_utterance
-    assert "已经可以提交" in result.room_utterance
-    assert "备注" in result.room_utterance
-    assert "证据书记官" in result.room_utterance
+    assert result.room_utterance == final_question
+    assert (
+        result.scroll_snapshot["handoff_notes"]["remark_status"]
+        == "READY_PENDING_REMARK_INVITE"
+    )
 
 
 # 所属模块：Agent 角色能力 > test_intake_case_detail_dossier；函数角色：回归测试用例。
@@ -814,7 +1107,7 @@ def test_handoff_remark_is_persisted_when_officer_is_waiting_for_remark() -> Non
 # 具体功能：`test_ready_board_does_not_treat_regular_followup_as_remark_before_officer_asks` 读取并按案件、角色或会话范围筛选本阶段状态；关键协作调用：`CaseDetailRunner`、`run`、`IntakeTurnWorkflow`。
 # 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_request`。
 # 系统意义：固定“Agent 角色能力 > test_intake_case_detail_dossier”的可观察契约，防止后续重构改变业务结果。
-def test_ready_board_does_not_treat_regular_followup_as_remark_before_officer_asks() -> None:
+def test_pending_ready_board_records_final_answer_then_invites_remark() -> None:
     from app.agents.dispute_intake_officer.workflow import IntakeTurnWorkflow
 
     runner = CaseDetailRunner(score=88)
@@ -837,7 +1130,7 @@ def test_ready_board_does_not_treat_regular_followup_as_remark_before_officer_as
                 "ready_for_next_step": True,
             },
             "handoff_notes": {
-                "remark_status": "NOT_READY",
+                "remark_status": "READY_PENDING_REMARK_INVITE",
                 "latest_remark": "",
                 "remarks": [],
             },
@@ -850,4 +1143,81 @@ def test_ready_board_does_not_treat_regular_followup_as_remark_before_officer_as
     assert notes["remark_status"] == "WAITING_FOR_REMARK"
     assert notes["latest_remark"] == ""
     assert notes["remarks"] == []
+    assert "已记录本轮补充" in result.room_utterance
     assert "还有没有需要备注" in result.room_utterance
+
+
+def test_pending_ready_stream_matches_normalized_final_utterance() -> None:
+    from app.agents.dispute_intake_officer.workflow import IntakeTurnWorkflow
+
+    raw_question = (
+        "已记录您补充的情况。请问商家是否还提及其他拒绝退款的依据？"
+        "另外，您希望平台重点核实哪方面的情况？"
+    )
+
+    class RegistryStreamingRunner(CaseDetailRunner):
+        def invoke_structured(self, **kwargs):
+            generation = super().invoke_structured(**kwargs)
+            observer = current_stream_observer()
+            if observer is not None:
+                projector = IncrementalVisibleJsonProjector(
+                    observer.visible_fields_for(kwargs["node_name"])
+                )
+                for field, delta in projector.feed(
+                    generation.value.model_dump_json()
+                ):
+                    observer.visible_delta(kwargs["node_name"], field, delta)
+            return generation
+
+    request = _request(
+        current_user_message={
+            "message_id": "MESSAGE_FINAL_ANSWER",
+            "role": "USER",
+            "text": "商家只说商品已经吃完，所以拒绝退款。",
+        },
+        latest_scroll_snapshot={
+            "schema_version": "intake_case_detail.v1",
+            "references": {
+                "order_reference": "ORDER_1001",
+                "after_sales_reference": "AS_1001",
+                "logistics_reference": "SF1001001001",
+            },
+            "intake_quality": {
+                "score": 86,
+                "threshold": 80,
+                "ready_for_next_step": True,
+            },
+            "handoff_notes": {
+                "remark_status": "READY_PENDING_REMARK_INVITE",
+                "latest_remark": "",
+                "remarks": [],
+            },
+        },
+    )
+    published = []
+    observer = AgentStreamObserver(
+        operation="intake_turn",
+        run_id="AGENT_RUN_INTAKE_FINAL_VISIBLE",
+        publish=published.append,
+    )
+
+    with bind_stream_observer(observer):
+        result = IntakeTurnWorkflow(
+            model_runner=RegistryStreamingRunner(
+                score=88,
+                room_utterance=raw_question,
+            )
+        ).run(request)
+
+    streamed_utterance = "".join(
+        event.delta
+        for event in published
+        if event.type == "visible_delta" and event.field == "room_utterance"
+    )
+
+    assert result.scroll_snapshot["handoff_notes"]["remark_status"] == (
+        "WAITING_FOR_REMARK"
+    )
+    assert raw_question not in streamed_utterance
+    assert streamed_utterance == result.room_utterance
+    assert "还有没有需要备注" in streamed_utterance

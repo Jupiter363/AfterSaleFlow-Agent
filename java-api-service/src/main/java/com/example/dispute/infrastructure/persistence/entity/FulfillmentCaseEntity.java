@@ -7,6 +7,7 @@
 package com.example.dispute.infrastructure.persistence.entity;
 
 import com.example.dispute.casecore.domain.CaseSourceType;
+import com.example.dispute.casecore.domain.CasePartyAssignment;
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.RiskLevel;
@@ -52,6 +53,16 @@ public class FulfillmentCaseEntity extends AbstractEntity {
     @Enumerated(EnumType.STRING)
     @Column(name = "initiator_role", length = 32, nullable = false)
     private ActorRole initiatorRole;
+
+    @Column(name = "initiator_id", length = 128, nullable = false)
+    private String initiatorId;
+
+    @Column(name = "respondent_id", length = 128, nullable = false)
+    private String respondentId;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "respondent_role", length = 32, nullable = false)
+    private ActorRole respondentRole;
 
     @Column(name = "creation_idempotency_key", length = 128, nullable = false, unique = true)
     private String creationIdempotencyKey;
@@ -196,6 +207,12 @@ public class FulfillmentCaseEntity extends AbstractEntity {
         this.merchantId = required(merchantId, "merchantId");
         this.initiatorRole =
                 Objects.requireNonNull(initiatorRole, "initiatorRole must not be null");
+        CasePartyAssignment partyAssignment =
+                CasePartyAssignment.fromParticipants(
+                        this.userId, this.merchantId, this.initiatorRole);
+        this.initiatorId = partyAssignment.initiatorId();
+        this.respondentId = partyAssignment.respondentId();
+        this.respondentRole = partyAssignment.respondentRole();
         this.creationIdempotencyKey =
                 required(creationIdempotencyKey, "creationIdempotencyKey");
         this.caseType = required(caseType, "caseType");
@@ -449,6 +466,16 @@ public class FulfillmentCaseEntity extends AbstractEntity {
         this.currentRoom = "EVIDENCE";
         this.currentDeadlineAt =
                 Objects.requireNonNull(deadlineAt, "deadlineAt must not be null");
+        this.updatedBy = required(actorId, "actorId");
+    }
+
+    /** Refreshes the intake projection after the respondent finishes without restarting evidence. */
+    public void refreshIntakeResult(String intakeResultJson, String actorId) {
+        if (caseStatus != CaseStatus.EVIDENCE_OPEN) {
+            throw new IllegalStateException(
+                    "intake result cannot be refreshed from case status " + caseStatus);
+        }
+        this.intakeResultJson = required(intakeResultJson, "intakeResultJson");
         this.updatedBy = required(actorId, "actorId");
     }
 
@@ -888,6 +915,23 @@ public class FulfillmentCaseEntity extends AbstractEntity {
     // 系统意义：「FulfillmentCaseEntity.getInitiatorRole()」直接影响 PostgreSQL 事实投影；实体记录是 API 查询投影和审计依据，写入必须服从上层事务与状态机
     public ActorRole getInitiatorRole() {
         return initiatorRole;
+    }
+
+    public String getInitiatorId() {
+        return initiatorId;
+    }
+
+    public String getRespondentId() {
+        return respondentId;
+    }
+
+    public ActorRole getRespondentRole() {
+        return respondentRole;
+    }
+
+    public CasePartyAssignment partyAssignment() {
+        return new CasePartyAssignment(
+                initiatorId, initiatorRole, respondentId, respondentRole);
     }
 
     // 所属模块：【PostgreSQL 事实模型 / JPA 实体层】「FulfillmentCaseEntity.getCaseType()」。

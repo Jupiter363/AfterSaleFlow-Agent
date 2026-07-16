@@ -119,7 +119,9 @@ class VisibleFieldSpec:
 VISIBLE_FIELD_REGISTRY: dict[str, dict[str, tuple[VisibleFieldSpec, ...]]] = {
     "intake_turn": {
         "intake_turn_case_detail": (
-            VisibleFieldSpec("room_utterance", "room_utterance"),
+            # 接待话术会在卷宗渲染和 readiness 护栏中被确定性改写，不能直接公开
+            # 模型原稿。IntakeTurnWorkflow.run 会在全部护栏通过后发布最终话术；
+            # 其余卷宗分区仍可在模型生成期间实时更新。
             VisibleFieldSpec("title", "case_detail.case_story.title"),
             VisibleFieldSpec("one_sentence_summary", "case_detail.case_story.one_sentence_summary"),
             VisibleFieldSpec("order_reference", "case_detail.references.order_reference"),
@@ -153,39 +155,39 @@ VISIBLE_FIELD_REGISTRY: dict[str, dict[str, tuple[VisibleFieldSpec, ...]]] = {
             VisibleFieldSpec("room_utterance", "room_utterance"),
         ),
     },
-    "hearing_round_turn": {
-        "hearing_round_turn": (
-            VisibleFieldSpec("message_text", "message_text"),
-        ),
-        "jury_review": (
-            VisibleFieldSpec(
-                "public_message",
-                "jury_review_report.public_message",
-            ),
+    "hearing_intake_questions": {
+        "hearing_intake_questions": (
+            VisibleFieldSpec("public_message", "public_message"),
         ),
     },
-    "hearing_stage": {
-        "issue_framing_node": (
-            VisibleFieldSpec("neutral_summary", "output.neutral_summary"),
-        ),
-        "adjudication_draft_node": (
-            VisibleFieldSpec("recommended_outcome", "output.draft.recommended_outcome"),
-            VisibleFieldSpec("reasoning_summary", "output.draft.reasoning_summary"),
+    "hearing_intake_synthesis": {
+        "hearing_intake_synthesis": (
+            VisibleFieldSpec("public_message", "public_message"),
         ),
     },
-    "hearing_analysis": {
-        "issue_framing_node": (
-            VisibleFieldSpec("neutral_summary", "issue_framing.neutral_summary"),
+    "hearing_evidence_requests": {
+        "hearing_evidence_requests": (
+            VisibleFieldSpec("public_message", "public_message"),
         ),
-        "adjudication_draft_node": (
-            VisibleFieldSpec(
-                "recommended_outcome",
-                "adjudication_draft.draft.recommended_outcome",
-            ),
-            VisibleFieldSpec(
-                "reasoning_summary",
-                "adjudication_draft.draft.reasoning_summary",
-            ),
+    },
+    "hearing_evidence_synthesis": {
+        "hearing_evidence_synthesis": (
+            VisibleFieldSpec("public_message", "public_message"),
+        ),
+    },
+    "hearing_judge_v1": {
+        "hearing_judge_v1": (
+            VisibleFieldSpec("public_message", "public_message"),
+        ),
+    },
+    "hearing_jury_review": {
+        "hearing_jury_review": (
+            VisibleFieldSpec("public_message", "public_message"),
+        ),
+    },
+    "hearing_judge_v2": {
+        "hearing_judge_v2": (
+            VisibleFieldSpec("public_message", "public_message"),
         ),
     },
     "review_copilot": {
@@ -297,6 +299,9 @@ class AgentStreamObserver:
         self._publish = publish
         self._sequence = 0
         self._sequence_lock = Lock()
+        self._publish_lock = Lock()
+        self._next_publish_sequence = 0
+        self._pending_events: dict[int, AgentStreamEvent] = {}
         self._state_lock = Lock()
         self._visible_output_emitted = False
         self._visible_output_chars = 0
@@ -447,12 +452,18 @@ class AgentStreamObserver:
         return fields
 
     # 所属模块：Agent 流式协议 > 事件观察器 > 单一发布出口。
-    # 具体功能：`_emit` 在调用跨线程 publish 回调前统一执行取消检查；事件类型和 Schema 已由 Pydantic 模型构造保证。
+    # 具体功能：`_emit` 在调用跨线程 publish 回调前统一执行取消检查，并按 sequence 暂存并发线程抢先到达的事件，只有连续前缀才能依次发布。
     # 上下游：上游是观察器所有事件方法；下游是 workflow_ndjson_response.publish/schedule 的有界队列。
     # 系统意义：取消后不再把事件塞入无人消费的队列，所有事件共享同一背压与断连语义。
     def _emit(self, event: AgentStreamEvent) -> None:
         self.raise_if_cancelled()
-        self._publish(event)
+        with self._publish_lock:
+            self.raise_if_cancelled()
+            self._pending_events[event.sequence] = event
+            while self._next_publish_sequence in self._pending_events:
+                pending = self._pending_events.pop(self._next_publish_sequence)
+                self._publish(pending)
+                self._next_publish_sequence += 1
 
 
 _ACTIVE_STREAM_OBSERVER: ContextVar[AgentStreamObserver | None] = ContextVar(

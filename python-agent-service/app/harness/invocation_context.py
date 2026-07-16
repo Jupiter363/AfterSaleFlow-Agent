@@ -29,6 +29,7 @@ RoomType = Literal["INTAKE", "EVIDENCE", "HEARING", "REVIEW"]
 
 ScopeType = Literal[
     "INTAKE_INITIATOR_PRIVATE",
+    "INTAKE_PARTY_PRIVATE",
     "EVIDENCE_PARTY_PRIVATE",
     "ROOM_SHARED",
     "SYSTEM",

@@ -1,0 +1,163 @@
+package com.example.dispute.hearing.api;
+
+import com.example.dispute.common.api.ApiResponse;
+import com.example.dispute.common.trace.TraceIdFilter;
+import com.example.dispute.config.AuthenticatedActor;
+import com.example.dispute.hearing.application.HearingFlowRuntimeService;
+import com.example.dispute.hearing.application.HearingFlowView;
+import com.example.dispute.hearing.application.HearingPartyActionView;
+import com.example.dispute.hearing.application.SettlementService;
+import com.example.dispute.hearing.application.SettlementView;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.Pattern;
+import java.time.Clock;
+import java.time.Instant;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import org.springframework.security.core.Authentication;
+import org.springframework.validation.annotation.Validated;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+/** Party HTTP surface for hearing_flow.v2. */
+@Validated
+@RestController
+@RequestMapping("/api/disputes/{caseId}/hearing")
+public class HearingFlowController {
+
+    private final HearingFlowRuntimeService runtimeService;
+    private final SettlementService settlementService;
+    private final Clock clock;
+
+    public HearingFlowController(
+            HearingFlowRuntimeService runtimeService,
+            SettlementService settlementService,
+            Clock clock) {
+        this.runtimeService = runtimeService;
+        this.settlementService = settlementService;
+        this.clock = clock;
+    }
+
+    @GetMapping
+    public ApiResponse<Map<String, Object>> hearing(
+            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
+            Authentication authentication,
+            HttpServletRequest request) {
+        AuthenticatedActor actor = actor(authentication);
+        HearingFlowView flow = runtimeService.get(caseId, actor);
+        return success(projection(flow, settlementService.list(caseId, actor)), request);
+    }
+
+    @PostMapping("/answers")
+    public ApiResponse<HearingPartyActionView> answers(
+            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
+            @Valid @RequestBody HearingAnswerBundleRequest body,
+            Authentication authentication,
+            HttpServletRequest request) {
+        return success(runtimeService.submitAnswers(caseId, body, actor(authentication)), request);
+    }
+
+    @PostMapping("/statements")
+    public ApiResponse<HearingPartyActionView> statements(
+            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
+            @Valid @RequestBody HearingPartyStatementRequest body,
+            Authentication authentication,
+            HttpServletRequest request) {
+        return success(runtimeService.submitStatement(caseId, body, actor(authentication)), request);
+    }
+
+    @PostMapping("/evidence-batches")
+    public ApiResponse<HearingPartyActionView> evidenceBatches(
+            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
+            @Valid @RequestBody HearingEvidenceBatchRequest body,
+            Authentication authentication,
+            HttpServletRequest request) {
+        return success(
+                runtimeService.submitEvidenceBatch(caseId, body, actor(authentication)), request);
+    }
+
+    @PostMapping("/complete")
+    public ApiResponse<Map<String, Object>> complete(
+            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
+            Authentication authentication,
+            HttpServletRequest request) {
+        AuthenticatedActor actor = actor(authentication);
+        HearingFlowView flow = runtimeService.completeGate(caseId, actor);
+        return success(projection(flow, settlementService.list(caseId, actor)), request);
+    }
+
+    @GetMapping("/settlements")
+    public ApiResponse<List<SettlementView>> settlements(
+            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
+            Authentication authentication,
+            HttpServletRequest request) {
+        return success(settlementService.list(caseId, actor(authentication)), request);
+    }
+
+    @PostMapping("/settlements")
+    public ApiResponse<SettlementView> proposeSettlement(
+            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
+            @Valid @RequestBody SettlementProposalRequest body,
+            Authentication authentication,
+            HttpServletRequest request) {
+        return success(
+                settlementService.propose(
+                        caseId,
+                        body.toCommand(),
+                        actor(authentication),
+                        correlationId(request, TraceIdFilter.TRACE_ATTRIBUTE)),
+                request);
+    }
+
+    @PostMapping("/settlements/{version}/confirm")
+    public ApiResponse<SettlementView> confirmSettlement(
+            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
+            @PathVariable int version,
+            @RequestHeader("Idempotency-Key") String idempotencyKey,
+            Authentication authentication,
+            HttpServletRequest request) {
+        return success(
+                settlementService.confirm(
+                        caseId, version, actor(authentication), idempotencyKey),
+                request);
+    }
+
+    private static Map<String, Object> projection(HearingFlowView flow, Object settlements) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("status", flow.status());
+        result.put("question_set", flow.questionSet());
+        result.put("issue_set", flow.questionSet());
+        result.put("evidence_request_set", flow.evidenceRequestSet());
+        result.put("trial_dossier", flow.trialDossier());
+        result.put("decision_chain", flow.decisionChain());
+        result.put("settlements", settlements);
+        return result;
+    }
+
+    private <T> ApiResponse<T> success(T data, HttpServletRequest request) {
+        return ApiResponse.success(
+                data,
+                correlationId(request, TraceIdFilter.REQUEST_ATTRIBUTE),
+                correlationId(request, TraceIdFilter.TRACE_ATTRIBUTE),
+                Instant.now(clock));
+    }
+
+    private static AuthenticatedActor actor(Authentication authentication) {
+        return (AuthenticatedActor) authentication.getPrincipal();
+    }
+
+    private static String correlationId(HttpServletRequest request, String attribute) {
+        Object value = request.getAttribute(attribute);
+        if (value instanceof String identifier && !identifier.isBlank()) {
+            return identifier;
+        }
+        throw new IllegalStateException("correlation id filter did not run");
+    }
+}

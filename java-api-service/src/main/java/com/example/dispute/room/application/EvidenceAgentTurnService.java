@@ -43,7 +43,9 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -233,7 +235,7 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
                                 message.attachmentRefs(),
                                 turnNo,
                                 sourceMessageCreatedAt),
-                        session.agentContext());
+                        invocationContext(session, roomType));
         if (agentRunCoordinator != null) {
             return startStreamingRun(
                     context,
@@ -254,6 +256,7 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
                 actor.role(),
                 message.attachmentRefs(),
                 result,
+                allowedFactIds(command.contextEnvelope()),
                 traceId);
         return null;
     }
@@ -362,6 +365,7 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
                 envelope.currentEvent().attachmentRefs(),
                 result,
                 finalization.runId(),
+                allowedFactIds(envelope),
                 finalization.traceId());
     }
 
@@ -511,6 +515,7 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
             String runId,
             String traceId,
             String idempotencyKey) {
+        String memorySnapshotJson = json(defaultObject(result.memoryPatch()));
         memoryRepository.save(
                 RoomTurnMemoryEntity.agentTurn(
                         "MEMORY_" + compactUuid(),
@@ -520,8 +525,8 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
                         AGENT_SENDER_ID,
                         AGENT_ROLE,
                         result.roomUtterance(),
-                        json(defaultObject(result.memoryPatch())),
-                        "{}",
+                        memorySnapshotJson,
+                        memorySnapshotJson,
                         json(defaultArray(result.canvasOperations())),
                         runId,
                         session.agentSession(),
@@ -564,6 +569,16 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
                         agentSession,
                         roomType,
                         "EVIDENCE_PARTY_PRIVATE"));
+    }
+
+    private static AgentInvocationContext invocationContext(
+            SessionContext session, RoomType processingRoom) {
+        // Keep the party's evidence-session memory while binding the request to its physical room.
+        return AgentInvocationContext.partyPrivate(
+                session.accessSession(),
+                session.agentSession(),
+                processingRoom,
+                "EVIDENCE_PARTY_PRIVATE");
     }
 
     // 所属模块：【房间协作与权限 / 应用编排层】「EvidenceAgentTurnService.prepare(String,RoomType)」。
@@ -651,6 +666,7 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
             ActorRole audienceParty,
             List<String> currentAttachmentRefs,
             EvidenceAgentTurnResult result,
+            Set<String> allowedFactIds,
             String traceId) {
         persistAgentTurn(
                 context,
@@ -660,6 +676,7 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
                 currentAttachmentRefs,
                 result,
                 "EVIDENCE_RUN_" + compactUuid(),
+                allowedFactIds,
                 traceId);
     }
 
@@ -676,6 +693,7 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
             List<String> currentAttachmentRefs,
             EvidenceAgentTurnResult result,
             String runId,
+            Set<String> allowedFactIds,
             String traceId) {
         Set<String> allowedAttachmentIds =
                 validateEvidenceAssessmentCoverage(
@@ -684,6 +702,13 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
                         currentAttachmentRefs,
                         result.evidenceAssessments(),
                         traceId);
+        if (!allowedAttachmentIds.isEmpty() && allowedFactIds.isEmpty()) {
+            throw new IllegalStateException(
+                    "evidence result requires frozen case_fact_matrix.v2");
+        }
+        validateEvidenceFactReferences(
+                result, allowedFactIds, allowedAttachmentIds, traceId);
+        String memorySnapshotJson = json(defaultObject(result.memoryPatch()));
         memoryRepository.save(
                 RoomTurnMemoryEntity.agentTurn(
                         "MEMORY_" + compactUuid(),
@@ -693,8 +718,8 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
                         AGENT_SENDER_ID,
                         AGENT_ROLE,
                         result.roomUtterance(),
-                        json(defaultObject(result.memoryPatch())),
-                        "{}",
+                        memorySnapshotJson,
+                        memorySnapshotJson,
                         json(defaultArray(result.canvasOperations())),
                         runId,
                         session.agentSession(),
@@ -813,6 +838,156 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
         return Set.copyOf(allowedAttachmentIds);
     }
 
+    /**
+     * Reads the only fact namespace that the evidence clerk may reference. The namespace is bound
+     * to the persisted request envelope so a late AgentRun cannot silently switch to a newer or
+     * unrelated dossier while finalizing.
+     */
+    private Set<String> allowedFactIds(EvidenceContextEnvelopeV1 envelope) {
+        EvidenceContextEnvelopeV1.IntakeDossierSnapshot snapshot =
+                envelope.intakeDossierSnapshot();
+        JsonNode payload =
+                snapshot == null || snapshot.payload() == null
+                        ? objectMapper.createObjectNode()
+                        : snapshot.payload();
+        JsonNode matrix = payload.path("case_fact_matrix");
+        if (!"case_fact_matrix.v2".equals(matrix.path("schema_version").asText())) {
+            matrix = payload.path("unilateral_case_matrix");
+        }
+        JsonNode rows = matrix.path("fact_rows");
+        boolean supported =
+                "case_fact_matrix.v2".equals(matrix.path("schema_version").asText())
+                        || "unilateral_case_matrix.v1"
+                                .equals(matrix.path("schema_version").asText());
+        if (!matrix.isObject()
+                || !supported
+                || !rows.isArray()
+                || rows.isEmpty()) {
+            return Set.of();
+        }
+        Set<String> factIds = new LinkedHashSet<>();
+        for (JsonNode row : rows) {
+            String factId = row.path("fact_id").asText("").trim();
+            if (factId.isBlank() || !factIds.add(factId)) {
+                throw new IllegalStateException(
+                        "frozen case fact matrix contains invalid fact ids");
+            }
+        }
+        return Set.copyOf(factIds);
+    }
+
+    /**
+     * Revalidates Python's semantic evidence mapping at the Java persistence boundary. Model output
+     * is never authoritative merely because it passed JSON deserialization.
+     */
+    private void validateEvidenceFactReferences(
+            EvidenceAgentTurnResult result,
+            Set<String> allowedFactIds,
+            Set<String> allowedAttachmentIds,
+            String traceId) {
+        Map<String, Set<String>> linkedFactsByEvidence = new java.util.LinkedHashMap<>();
+        for (EvidenceAgentTurnResult.EvidenceAssessment assessment :
+                result.evidenceAssessments()) {
+            Set<String> linkedFacts = new LinkedHashSet<>();
+            Set<String> supportedFacts = new LinkedHashSet<>();
+            for (Map<String, Object> link : assessment.factLinks()) {
+                String factId = mapText(link, "fact_id");
+                String relation = mapText(link, "relation");
+                if (!allowedFactIds.contains(factId)
+                        || !Set.of("SUPPORTS", "OPPOSES", "INCONCLUSIVE")
+                                .contains(relation)
+                        || !linkedFacts.add(factId)) {
+                    throw invalidFactReference(
+                            "evidence assessment contains an invalid or duplicate fact link",
+                            traceId,
+                            assessment.evidenceId(),
+                            factId);
+                }
+                if ("SUPPORTS".equals(relation)) {
+                    supportedFacts.add(factId);
+                }
+            }
+            if (assessment.relevanceScore() >= 0.50 && linkedFacts.isEmpty()) {
+                throw invalidFactReference(
+                        "relevant evidence must reference at least one formal fact",
+                        traceId,
+                        assessment.evidenceId(),
+                        "");
+            }
+            Set<String> suppliedSupportedFacts =
+                    assessment.supportedFactIds().stream()
+                            .filter(value -> value != null && !value.isBlank())
+                            .collect(Collectors.toCollection(LinkedHashSet::new));
+            if (!supportedFacts.equals(suppliedSupportedFacts)
+                    || !allowedFactIds.containsAll(suppliedSupportedFacts)) {
+                throw invalidFactReference(
+                        "supported_fact_ids must equal SUPPORTS fact_links",
+                        traceId,
+                        assessment.evidenceId(),
+                        String.join(",", suppliedSupportedFacts));
+            }
+            linkedFactsByEvidence.put(assessment.evidenceId(), Set.copyOf(linkedFacts));
+        }
+
+        for (Map<String, Object> patch : result.factMatrixPatch()) {
+            String factId = mapText(patch, "fact_id");
+            String evidenceId = mapText(patch, "evidence_id");
+            String operation = mapText(patch, "operation");
+            if (!allowedFactIds.contains(factId)
+                    || !allowedAttachmentIds.contains(evidenceId)
+                    || !Set.of("UPSERT_LINK", "REMOVE_LINK").contains(operation)) {
+                throw invalidFactReference(
+                        "fact_matrix_patch references data outside the current formal scope",
+                        traceId,
+                        evidenceId,
+                        factId);
+            }
+            if ("UPSERT_LINK".equals(operation)
+                    && !linkedFactsByEvidence
+                            .getOrDefault(evidenceId, Set.of())
+                            .contains(factId)) {
+                throw invalidFactReference(
+                        "UPSERT_LINK must be derived from an accepted assessment fact link",
+                        traceId,
+                        evidenceId,
+                        factId);
+            }
+        }
+
+        Object uncovered = result.internalHandoff().get("uncovered_fact_ids");
+        if (uncovered instanceof List<?> values) {
+            for (Object value : values) {
+                String factId = value == null ? "" : value.toString().trim();
+                if (!allowedFactIds.contains(factId)) {
+                    throw invalidFactReference(
+                            "internal_handoff references an unknown fact",
+                            traceId,
+                            "",
+                            factId);
+                }
+            }
+        }
+    }
+
+    private AgentExecutionException invalidFactReference(
+            String message, String traceId, String evidenceId, String factId) {
+        return new AgentExecutionException(
+                ErrorCode.AGENT_OUTPUT_SCHEMA_INVALID,
+                message,
+                Map.of(
+                        "trace_id", safeText(traceId),
+                        "evidence_id", safeText(evidenceId),
+                        "fact_id", safeText(factId)));
+    }
+
+    private static String mapText(Map<String, Object> value, String field) {
+        if (value == null) {
+            return "";
+        }
+        Object raw = value.get(field);
+        return raw == null ? "" : raw.toString().trim();
+    }
+
     // 所属模块：【房间协作与权限 / 应用编排层】「EvidenceAgentTurnService.persistEvidenceVerifications(String,Set,EvidenceAgentTurnResult,String,String)」。
     // 具体功能：「EvidenceAgentTurnService.persistEvidenceVerifications(String,Set,EvidenceAgentTurnResult,String,String)」：持久化证据Verifications；实际协作者为 「persistEvidenceAssessments」，最终返回「void」。
     // 上游调用：「EvidenceAgentTurnService.persistEvidenceVerifications(String,Set,EvidenceAgentTurnResult,String,String)」的上游调用点包括 「EvidenceAgentTurnService.persistAgentTurn」。
@@ -847,9 +1022,58 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
         for (EvidenceAgentTurnResult.EvidenceAssessment assessment : result.evidenceAssessments()) {
             int version = nextVerificationVersion(assessment.evidenceId());
             EvidenceAgentTurnResult.HumanReview humanReview = assessment.humanReview();
+            EvidenceAssessmentReviewPolicy.Decision reviewDecision =
+                    EvidenceAssessmentReviewPolicy.evaluate(
+                            assessment.authenticityScore(),
+                            assessment.relevanceScore(),
+                            assessment.riskFlags());
+            boolean suspectedForgery = reviewDecision.suspectedForgery();
+            boolean lowRelevance = reviewDecision.lowRelevance();
             boolean requiresHumanReview =
                     humanReview.required()
-                            || "NEEDS_HUMAN_REVIEW".equals(assessment.recommendation());
+                            || "NEEDS_HUMAN_REVIEW".equals(assessment.recommendation())
+                            || reviewDecision.requiresHumanReview();
+            List<Map<String, Object>> riskFlags =
+                    new ArrayList<>(assessment.riskFlags());
+            boolean hasSuspectedForgeryFlag =
+                    riskFlags.stream()
+                            .anyMatch(
+                                    flag ->
+                                            "SUSPECTED_FORGERY"
+                                                    .equals(flag.get("code")));
+            if (suspectedForgery && !hasSuspectedForgeryFlag) {
+                riskFlags.add(
+                        Map.of(
+                                "code", "SUSPECTED_FORGERY",
+                                "severity", "HIGH",
+                                "message", "真实性评分低于疑似造假人工复核阈值"));
+            }
+            if (lowRelevance
+                    && riskFlags.stream()
+                            .noneMatch(flag -> "LOW_RELEVANCE".equals(flag.get("code")))) {
+                riskFlags.add(
+                        Map.of(
+                                "code", "LOW_RELEVANCE",
+                                "severity", "MEDIUM",
+                                "message", "证据与提交方声明证明目标的相关性评分较低"));
+            }
+            List<String> humanReviewReasonCodes =
+                    new ArrayList<>(humanReview.reasonCodes());
+            if (suspectedForgery
+                    && !humanReviewReasonCodes.contains(
+                            "LOW_AUTHENTICITY_SUSPECTED_FORGERY")) {
+                humanReviewReasonCodes.add("LOW_AUTHENTICITY_SUSPECTED_FORGERY");
+            }
+            if (lowRelevance
+                    && !humanReviewReasonCodes.contains("LOW_RELEVANCE_SCORE")) {
+                humanReviewReasonCodes.add("LOW_RELEVANCE_SCORE");
+            }
+            List<String> humanReviewInstructions =
+                    new ArrayList<>(humanReview.instructions());
+            if ((suspectedForgery || lowRelevance) && humanReviewInstructions.isEmpty()) {
+                humanReviewInstructions.add(
+                        "复核原始文件、形成链路、完整上下文及其与提交方声明证明目标的关联性；低分只触发人工复核，不得直接认定造假或触发处罚。");
+            }
             Map<String, Object> agentFindings = new java.util.LinkedHashMap<>();
             agentFindings.put("agent_run_id", runId);
             agentFindings.put("analysis_method", assessment.analysisMethod());
@@ -859,6 +1083,14 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
             agentFindings.put("relevance_score", assessment.relevanceScore());
             agentFindings.put("completeness_score", assessment.completenessScore());
             agentFindings.put("assessment_confidence", assessment.assessmentConfidence());
+            agentFindings.put(
+                    "low_authenticity_threshold",
+                    EvidenceAssessmentReviewPolicy.LOW_AUTHENTICITY_THRESHOLD);
+            agentFindings.put(
+                    "low_relevance_threshold",
+                    EvidenceAssessmentReviewPolicy.LOW_RELEVANCE_THRESHOLD);
+            agentFindings.put("suspected_forgery", suspectedForgery);
+            agentFindings.put("low_relevance", lowRelevance);
             agentFindings.put("source_basis", assessment.sourceBasis());
             agentFindings.put("supported_fact_ids", assessment.supportedFactIds());
             agentFindings.put("unsupported_claims", assessment.unsupportedClaims());
@@ -869,7 +1101,7 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
                     "confidence_level", confidenceLevel(assessment.assessmentConfidence()));
             agentFindings.put("findings", assessment.findings());
             agentFindings.put("limitations", assessment.limitations());
-            agentFindings.put("risk_flags", assessment.riskFlags());
+            agentFindings.put("risk_flags", List.copyOf(riskFlags));
             agentFindings.put("asset_audit", assessment.assetAudit());
             agentFindings.put("recommendation", assessment.recommendation());
             agentFindings.put("verification_feedback", safeText(assessment.summary()));
@@ -880,15 +1112,15 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
                     "human_review",
                     Map.of(
                             "required", requiresHumanReview,
-                            "reason_codes", humanReview.reasonCodes(),
-                            "instructions", humanReview.instructions()));
+                            "reason_codes", List.copyOf(humanReviewReasonCodes),
+                            "instructions", List.copyOf(humanReviewInstructions)));
 
             Map<String, Object> reasons = new java.util.LinkedHashMap<>();
             reasons.put("summary", safeText(assessment.summary()));
             reasons.put("limitations", assessment.limitations());
-            reasons.put("risk_flags", assessment.riskFlags());
-            reasons.put("human_review_reason_codes", humanReview.reasonCodes());
-            reasons.put("human_review_instructions", humanReview.instructions());
+            reasons.put("risk_flags", List.copyOf(riskFlags));
+            reasons.put("human_review_reason_codes", List.copyOf(humanReviewReasonCodes));
+            reasons.put("human_review_instructions", List.copyOf(humanReviewInstructions));
 
             verificationRepository.save(
                     EvidenceVerificationEntity.create(
@@ -896,7 +1128,8 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
                             caseId,
                             assessment.evidenceId(),
                             version,
-                            verificationStatus(assessment, requiresHumanReview),
+                            verificationStatus(
+                                    assessment, suspectedForgery, requiresHumanReview),
                             json(
                                     Map.of(
                                             "checks",
@@ -950,7 +1183,11 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
     // 系统意义：「EvidenceAgentTurnService.verificationStatus(EvidenceAssessment,boolean)」负责主链路中的“核验状态”；每次读取和写入都要绑定案件参与关系、角色、房间和受众范围
     private static EvidenceVerificationStatus verificationStatus(
             EvidenceAgentTurnResult.EvidenceAssessment assessment,
+            boolean suspectedForgery,
             boolean requiresHumanReview) {
+        if (suspectedForgery) {
+            return EvidenceVerificationStatus.SUSPICIOUS;
+        }
         if (requiresHumanReview) {
             return EvidenceVerificationStatus.NEEDS_HUMAN_REVIEW;
         }
@@ -1160,10 +1397,10 @@ public class EvidenceAgentTurnService implements AgentRunFinalizer {
                     entity.getSenderRole(),
                     entity.getSenderId(),
                     entity.getMessageType(),
+                    entity.getMessageSource(),
                     entity.getMessageText(),
                     attachments,
                     entity.getAgentRunId(),
-                    entity.getHearingRound(),
                     entity.getCreatedAt());
         } catch (JsonProcessingException exception) {
             throw new IllegalStateException("invalid evidence opening message attachments", exception);

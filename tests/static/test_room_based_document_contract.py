@@ -31,7 +31,7 @@ def test_room_based_final_contract() -> None:
         "传票信箱",
         "PT2H",
         "PT3H",
-        "MAX_HEARING_ROUNDS=3",
+        "HEARING_PARTY_STAGE_WINDOW=PT20M",
         "settlement_proposal",
         "Last-Event-ID",
     ):

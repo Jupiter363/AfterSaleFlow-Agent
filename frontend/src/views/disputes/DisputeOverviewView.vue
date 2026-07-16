@@ -40,6 +40,7 @@ const importingExternal = ref(false);
 const deletingCase = ref(false);
 const openingStage = ref("");
 const stageNavigationError = ref("");
+const reviewPermissionOpen = ref(false);
 const deleteCandidate = ref(null);
 const createError = ref("");
 const importError = ref("");
@@ -88,17 +89,39 @@ watch(
     reconcileCases(disputeStore.list.data);
   },
 );
+watch(selectedId, () => {
+  stageNavigationError.value = "";
+  reviewPermissionOpen.value = false;
+});
 const selectedCase = computed(
   () =>
     cases.value.find((item) => item.id === selectedId.value) ||
     cases.value[0] ||
     null,
 );
+const casePartyRoles = new Set(["USER", "MERCHANT"]);
+const humanReviewStatuses = new Set(["REVIEW_PENDING", "WAITING_HUMAN_REVIEW"]);
+const outcomeStatuses = new Set([
+  "APPROVED_FOR_EXECUTION",
+  "EXECUTING",
+  "CLOSED",
+  "MANUAL_HANDOFF",
+]);
+const isCaseParty = computed(() => casePartyRoles.has(actor.role));
+
+function isAwaitingHumanReview(dispute) {
+  if (!dispute || outcomeStatuses.has(dispute.case_status)) return false;
+  return (
+    humanReviewStatuses.has(dispute.case_status) ||
+    dispute.current_room === "REVIEW"
+  );
+}
+
 const canInitiateDispute = computed(() =>
-  ["USER", "MERCHANT"].includes(actor.role),
+  isCaseParty.value,
 );
 const canImportExternal = computed(() =>
-  ["USER", "MERCHANT"].includes(actor.role),
+  isCaseParty.value,
 );
 const externalImportStreams = computed(() =>
   activeAgentStreams({
@@ -113,24 +136,25 @@ const simulatedSourceSystems = new Set([
   "LLM_SIMULATED_OMS",
 ]);
 
-// 业务位置：【前端案件页面】isDeletableSimulatedCase：判断 当前阶段业务数据 是否满足当前流程分支的进入条件。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
-function isDeletableSimulatedCase(dispute) {
-  return Boolean(
-    dispute &&
-      dispute.source_type === "EXTERNAL_IMPORT" &&
-      simulatedSourceSystems.has(dispute.source_system),
+// 业务位置：【前端案件页面】isReviewerDeletableCase：判断 当前阶段业务数据 是否满足当前流程分支的进入条件。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
+function isReviewerDeletableCase(dispute) {
+  if (!dispute) return false;
+  if (dispute.source_type === "INTAKE_CREATED") return true;
+  return (
+    dispute.source_type === "EXTERNAL_IMPORT" &&
+    simulatedSourceSystems.has(dispute.source_system)
   );
 }
 
 const canDeleteSelectedCase = computed(() =>
   actor.role === "PLATFORM_REVIEWER" &&
-  isDeletableSimulatedCase(selectedCase.value),
+  isReviewerDeletableCase(selectedCase.value),
 );
 
 const journey = [
   { key: "INTAKE", room: "INTAKE", label: "案情接待", agent: "接待官整理事实" },
   { key: "EVIDENCE", room: "EVIDENCE", label: "证据核验", agent: "证据书记官复核" },
-  { key: "HEARING", room: "HEARING", label: "三轮庭审", agent: "法官组织审理" },
+  { key: "HEARING", room: "HEARING", label: "智能庭审", agent: "多角色分阶段审理" },
   { key: "DRAFT", room: "DRAFT", label: "裁决草案", agent: "法官生成草案" },
   { key: "REVIEW", room: "REVIEW", label: "人工终审", agent: "审核员最终确认" },
   { key: "OUTCOME", room: "OUTCOME", label: "执行结果", agent: "执行专员处理" },
@@ -156,7 +180,7 @@ const pendingActionLabels = {
 const currentRoomIndex = computed(() => {
   const status = selectedCase.value?.case_status;
   const room = selectedCase.value?.current_room;
-  if (["APPROVED_FOR_EXECUTION", "EXECUTING", "CLOSED", "MANUAL_HANDOFF"].includes(status)) {
+  if (outcomeStatuses.has(status)) {
     return journey.length - 1;
   }
   if (room === "REVIEW") return 4;
@@ -180,7 +204,14 @@ const currentRoomIndex = computed(() => {
 });
 const currentStage = computed(() => journey[currentRoomIndex.value] || journey[0]);
 const journeyProgress = computed(() => `${currentRoomIndex.value + 1} / ${journey.length}`);
+const partyAwaitingHumanReview = computed(() =>
+  isCaseParty.value && isAwaitingHumanReview(selectedCase.value),
+);
+const currentRoomActionDisabled = computed(() =>
+  partyAwaitingHumanReview.value || Boolean(openingStage.value),
+);
 const currentRoomActionLabel = computed(() => {
+  if (partyAwaitingHumanReview.value) return "等待人工终审";
   if (currentRoomIndex.value === 5) return "查看最终结果";
   if (currentRoomIndex.value === 4) {
     return actor.role === "PLATFORM_REVIEWER" ? "进入终审室" : "查看裁决草案";
@@ -191,12 +222,20 @@ const currentRoomActionLabel = computed(() => {
 
 // 业务位置：【前端案件页面】stageState：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
 function stageState(index) {
+  if (isCaseParty.value && journey[index]?.room === "REVIEW") return "locked";
   if (index < currentRoomIndex.value) return "completed";
   if (index === currentRoomIndex.value) return "current";
   return "locked";
 }
 
 function stageStatus(index) {
+  if (
+    isCaseParty.value &&
+    journey[index]?.room === "REVIEW" &&
+    currentRoomIndex.value >= index
+  ) {
+    return "权限锁定";
+  }
   const state = stageState(index);
   if (state === "completed") return "历史 · 只读";
   if (state === "current") return "当前房间";
@@ -212,14 +251,56 @@ const stageRouteNames = {
   OUTCOME: "dispute-outcome",
 };
 
+function isPartyRestrictedReviewStage(stage, index) {
+  return (
+    isCaseParty.value &&
+    stage?.room === "REVIEW" &&
+    currentRoomIndex.value >= index
+  );
+}
+
 function stageEntryDisabled(stage, index) {
+  if (isPartyRestrictedReviewStage(stage, index)) return Boolean(openingStage.value);
   if (stageState(index) === "locked" || openingStage.value) return true;
   return false;
 }
 
+function showReviewPermission() {
+  stageNavigationError.value = "";
+  reviewPermissionOpen.value = true;
+}
+
+function closeReviewPermission() {
+  reviewPermissionOpen.value = false;
+}
+
+async function redirectToRequiredIntake(dispute, targetRoom) {
+  if (
+    String(targetRoom || "").toUpperCase() !== "EVIDENCE" ||
+    !isCaseParty.value
+  ) {
+    return false;
+  }
+  const intakeStatus = await disputeApi.intakeStatus(actor, dispute.id);
+  const currentActorCompleted = Boolean(
+    intakeStatus?.current_actor_completed ?? intakeStatus?.currentActorCompleted,
+  );
+  const canEnterEvidence = Boolean(
+    intakeStatus?.can_enter_evidence ?? intakeStatus?.canEnterEvidence,
+  );
+  if (currentActorCompleted && canEnterEvidence) return false;
+  await router.push(`/disputes/${dispute.id}/intake`);
+  return true;
+}
+
 async function enterStage(stage, index) {
   const dispute = selectedCase.value;
-  if (!dispute || stageEntryDisabled(stage, index)) return;
+  if (!dispute) return;
+  if (isPartyRestrictedReviewStage(stage, index)) {
+    showReviewPermission();
+    return;
+  }
+  if (stageEntryDisabled(stage, index)) return;
   const historical = index < currentRoomIndex.value;
   stageNavigationError.value = "";
   openingStage.value = stage.key;
@@ -244,6 +325,7 @@ async function enterStage(stage, index) {
       });
       return;
     }
+    if (await redirectToRequiredIntake(dispute, stage.room)) return;
     const name = stageRouteNames[stage.room];
     if (!name) return;
     await router.push({
@@ -259,10 +341,11 @@ async function enterStage(stage, index) {
 }
 
 // 业务位置：【前端案件页面】enterCurrentRoom：切换与 当前阶段业务数据 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
-function enterCurrentRoom() {
+async function enterCurrentRoom() {
   const dispute = selectedCase.value;
   if (!dispute) return;
-  if (["APPROVED_FOR_EXECUTION", "EXECUTING", "CLOSED", "MANUAL_HANDOFF"].includes(dispute.case_status)) {
+  if (partyAwaitingHumanReview.value) return;
+  if (outcomeStatuses.has(dispute.case_status)) {
     router.push(`/disputes/${dispute.id}/outcome`);
     return;
   }
@@ -274,8 +357,23 @@ function enterCurrentRoom() {
     router.push(`/disputes/${dispute.id}/draft`);
     return;
   }
+  if (
+    dispute.current_room === "EVIDENCE" &&
+    isCaseParty.value
+  ) {
+    stageNavigationError.value = "";
+    openingStage.value = "CURRENT";
+    try {
+      if (await redirectToRequiredIntake(dispute, dispute.current_room)) return;
+    } catch (failure) {
+      stageNavigationError.value = failure?.message || "暂时无法确认当前接待进度。";
+      return;
+    } finally {
+      openingStage.value = "";
+    }
+  }
   const routes = { INTAKE: "intake", EVIDENCE: "evidence", HEARING: "hearing" };
-  router.push(`/disputes/${dispute.id}/${routes[dispute.current_room] || "intake"}`);
+  await router.push(`/disputes/${dispute.id}/${routes[dispute.current_room] || "intake"}`);
 }
 
 // 业务位置：【前端案件页面】sourceLabel：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
@@ -287,9 +385,10 @@ function sourceLabel(source) {
 function roomLabel(dispute) {
   if (!dispute) return "待分配房间";
   const status = dispute.case_status;
-  if (["APPROVED_FOR_EXECUTION", "EXECUTING", "CLOSED", "MANUAL_HANDOFF"].includes(status)) {
+  if (outcomeStatuses.has(status)) {
     return "执行结果";
   }
+  if (isCaseParty.value && isAwaitingHumanReview(dispute)) return "等待人工终审";
   if (dispute.current_room === "REVIEW") return "平台人工终审";
   if (["DRAFT_READY", "REVIEW_PENDING", "WAITING_HUMAN_REVIEW", "REMEDY_PLANNED"].includes(status)) {
     return "裁决草案";
@@ -305,6 +404,7 @@ function riskLabel(risk) {
 // 业务位置：【前端案件页面】pendingActionLabel：围绕 履约执行动作和工具意图 计算本模块需要的派生信息，使其能够从 路由参数、API 数据和状态仓库 正确进入 用户可操作的案件视图。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
 function pendingActionLabel(action, dispute = selectedCase.value) {
   if (action === "AWAIT_REVIEW") {
+    if (isCaseParty.value && isAwaitingHumanReview(dispute)) return "等待人工终审";
     return dispute?.current_room === "REVIEW" ? "平台终审进行中" : "查看裁决草案";
   }
   return pendingActionLabels[action] || action || "等待下一步";
@@ -449,7 +549,7 @@ async function confirmDeleteCase() {
   const candidate = deleteCandidate.value;
   if (
     actor.role !== "PLATFORM_REVIEWER" ||
-    !isDeletableSimulatedCase(candidate)
+    !isReviewerDeletableCase(candidate)
   ) {
     deleteError.value = "当前角色无权删除该案例";
     return;
@@ -553,11 +653,12 @@ onBeforeUnmount(() => {
         <button
           class="overview-page__delete"
           type="button"
+          data-delete-case
           data-delete-simulated-case
           @click="openDeleteCaseConfirmation"
         >
           <span aria-hidden="true">×</span>
-          删除模拟案例
+          删除案件
         </button>
       </div>
     </header>
@@ -699,6 +800,8 @@ onBeforeUnmount(() => {
               type="button"
               class="map-room-entry"
               data-enter-current-room
+              :data-waiting-human-review="partyAwaitingHumanReview ? 'true' : undefined"
+              :disabled="currentRoomActionDisabled"
               @click="enterCurrentRoom"
             >
               <span aria-hidden="true">→</span>
@@ -723,6 +826,7 @@ onBeforeUnmount(() => {
                   class="adventure-path__hit"
                   :data-stage-entry="stage.room"
                   :disabled="stageEntryDisabled(stage, index)"
+                  :data-permission-locked="isPartyRestrictedReviewStage(stage, index) ? 'true' : undefined"
                   :aria-label="`${stage.label}：${stageStatus(index)}`"
                   @click="enterStage(stage, index)"
                 />
@@ -746,6 +850,47 @@ onBeforeUnmount(() => {
         <h2>还没有争议订单</h2>
         <p>外部导入或接待官创建的争议会出现在这里，普通订单不会进入本页。</p>
       </div>
+    </div>
+
+    <div
+      v-if="reviewPermissionOpen"
+      class="review-permission-dialog"
+      data-review-permission-dialog
+      role="presentation"
+      @click.self="closeReviewPermission"
+    >
+      <section
+        class="review-permission-dialog__card"
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="review-permission-title"
+        aria-describedby="review-permission-description"
+        @keydown.esc.stop="closeReviewPermission"
+      >
+        <button
+          type="button"
+          class="review-permission-dialog__close"
+          aria-label="关闭无权限提示"
+          title="关闭"
+          @click="closeReviewPermission"
+        >
+          ×
+        </button>
+        <span>ACCESS RESTRICTED</span>
+        <h2 id="review-permission-title">抱歉您没有权限</h2>
+        <p id="review-permission-description">
+          人工终审室仅向平台审核员开放，请等待终审完成后查看执行结果。
+        </p>
+        <button
+          type="button"
+          class="review-permission-dialog__acknowledge"
+          data-close-review-permission
+          autofocus
+          @click="closeReviewPermission"
+        >
+          我知道了
+        </button>
+      </section>
     </div>
 
     <div v-if="intakeOpen" class="intake-launcher" role="dialog" aria-modal="true">
@@ -845,8 +990,8 @@ onBeforeUnmount(() => {
       @click.self="closeDeleteCaseConfirmation"
     >
       <section class="delete-case-modal__card">
-        <span class="delete-case-modal__eyebrow">SIMULATED CASE CLEANUP</span>
-        <h2 id="delete-case-title">确认删除这个模拟案例？</h2>
+        <span class="delete-case-modal__eyebrow">REVIEWER CASE CLEANUP</span>
+        <h2 id="delete-case-title">确认删除这个案件？</h2>
         <p>
           将永久删除“{{ deleteCandidate.title }}”（{{ deleteCandidate.id }}）及其案例数据，
           <strong>删除后不可恢复</strong>。
@@ -1319,6 +1464,81 @@ onBeforeUnmount(() => {
 .overview-empty > span { font-size: 48px; }
 .overview-empty h2 { margin: 12px 0 4px; }
 .overview-empty p { max-width: 520px; color: #758298; }
+.review-permission-dialog {
+  position: fixed;
+  inset: 0;
+  z-index: 75;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(34, 46, 62, .56);
+  backdrop-filter: blur(6px);
+}
+.review-permission-dialog__card {
+  position: relative;
+  box-sizing: border-box;
+  display: grid;
+  width: min(420px, 100%);
+  justify-items: center;
+  padding: 30px 28px 24px;
+  color: #2f4055;
+  text-align: center;
+  background: #fff;
+  border: 1px solid #d9e3ed;
+  border-radius: 8px;
+  box-shadow: 0 24px 70px rgba(25, 39, 56, .24);
+}
+.review-permission-dialog__card > span {
+  color: #9b6570;
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0;
+}
+.review-permission-dialog__card h2 {
+  margin: 8px 0 0;
+  color: #2b3c53;
+  font-size: 22px;
+  letter-spacing: 0;
+}
+.review-permission-dialog__card p {
+  margin: 10px 0 0;
+  color: #6d7b8d;
+  font-size: 13px;
+  line-height: 1.7;
+}
+.review-permission-dialog__close {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  display: grid;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  place-items: center;
+  color: #68778a;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  font-size: 24px;
+}
+.review-permission-dialog__acknowledge {
+  min-width: 118px;
+  min-height: 44px;
+  margin-top: 22px;
+  padding: 0 20px;
+  color: #fff;
+  background: #52677f;
+  border: 1px solid #52677f;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 800;
+}
+.review-permission-dialog__close:focus-visible,
+.review-permission-dialog__acknowledge:focus-visible {
+  outline: 3px solid rgba(77, 112, 151, .3);
+  outline-offset: 2px;
+}
 .intake-launcher {
   position: fixed;
   inset: 0;
@@ -1879,6 +2099,7 @@ onBeforeUnmount(() => {
 }
 .adventure-path__hit:focus-visible { outline: 3px solid rgba(64, 140, 247, .42); outline-offset: 3px; }
 .adventure-path__hit:disabled { cursor: not-allowed; }
+.adventure-path__hit[data-permission-locked="true"] { cursor: not-allowed; }
 .adventure-path li[data-stage-state="completed"]:has(.adventure-path__hit:not(:disabled)):hover {
   transform: translateY(-4px);
   box-shadow: 0 14px 28px rgba(18, 56, 46, .17);
@@ -1970,6 +2191,17 @@ onBeforeUnmount(() => {
 }
 .map-room-entry:hover { transform: translateY(-2px); }
 .map-room-entry:focus-visible { outline: 3px solid rgba(64, 140, 247, .32); outline-offset: 3px; }
+.map-room-entry:disabled {
+  color: #667487;
+  background: #edf2f6;
+  box-shadow: 0 8px 18px rgba(70, 89, 112, .08);
+  cursor: not-allowed;
+}
+.map-room-entry:disabled:hover { transform: none; }
+.map-room-entry:disabled > span:first-child {
+  color: #748296;
+  background: #fff;
+}
 .map-room-entry > span:first-child {
   display: grid;
   flex: 0 0 auto;

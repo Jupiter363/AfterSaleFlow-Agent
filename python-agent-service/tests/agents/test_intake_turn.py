@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.config import Settings
@@ -15,6 +16,10 @@ from app.agents.dispute_intake_officer.skills.dossier.dossier_skill import (
     SUBJECTIVE_RESPONDENT_SOURCE,
 )
 from app.intake_turn import IntakeTurnWorkflow
+from app.agents.dispute_intake_officer.workflow import (
+    _limit_follow_up_questions,
+    _subjective_only_snapshot,
+)
 from app.main import create_app
 from app.schemas import IntakeTurnRequest
 
@@ -211,6 +216,163 @@ def _with_agent_context(payload: dict[str, object]) -> dict[str, object]:
     return payload
 
 
+def test_respondent_prompt_snapshot_contains_only_the_frozen_matrix_projection() -> None:
+    private_secret = "INITIATOR_PRIVATE_STATEMENT_MUST_NOT_LEAK"
+    snapshot = {
+        "case_story": {"one_sentence_summary": private_secret},
+        "party_positions": {"user_claim": private_secret},
+        "claim_resolution": {"original_statement": private_secret},
+        "handoff_notes": {"latest_remark": private_secret},
+        "case_fact_matrix": {
+            "schema_version": "case_fact_matrix.v2",
+            "matrix_id": "CASE_MATRIX_SAFE",
+            "matrix_version": 1,
+            "matrix_kind": "INITIATOR_FROZEN",
+            "content_hash": "a" * 64,
+            "party_map": {
+                "initiator_role": "USER",
+                "respondent_role": "MERCHANT",
+            },
+            "source_refs": [private_secret],
+            "case_overview": {
+                "neutral_summary": "用户主张服务未按约完成。",
+                "core_conflict": "服务是否按约完成。",
+                "summary_source_fact_ids": ["FACT_INTAKE_SERVICE"],
+            },
+            "claims": {
+                "initiator_claim": {
+                    "initiator_role": "USER",
+                    "requested_resolution": "REFUND",
+                    "reason_summary": "用户主张服务未完成。",
+                    "position_summary": "用户请求退款。",
+                    "source_refs": [private_secret],
+                }
+            },
+            "fact_rows": [
+                {
+                    "fact_id": "FACT_INTAKE_SERVICE",
+                    "category": "FULFILLMENT",
+                    "fact_target": "商家是否完成约定服务",
+                    "materiality": "CORE",
+                    "origin": {"source_refs": [private_secret]},
+                    "positions": {
+                        "USER": {
+                            "stance": "DENY",
+                            "position_summary": "用户称服务未完成。",
+                            "asserted_value": "未完成",
+                            "source_refs": [private_secret],
+                        },
+                        "MERCHANT": {
+                            "stance": "NOT_ADDRESSED",
+                            "position_summary": "该方尚未直接陈述。",
+                            "source_refs": [],
+                        },
+                    },
+                    "party_alignment": {"status": "NOT_COMPUTED"},
+                    "requires_resolution": None,
+                    "truth_status": "NOT_EVALUATED",
+                }
+            ],
+        },
+    }
+
+    projected = _subjective_only_snapshot(snapshot, actor_role="MERCHANT")
+    serialized = json.dumps(projected, ensure_ascii=False)
+
+    assert set(projected) == {"case_fact_matrix"}
+    assert private_secret not in serialized
+    assert "original_statement" not in serialized
+    assert "source_refs" not in serialized
+    assert "商家是否完成约定服务" in serialized
+
+
+def test_intake_request_rejects_cross_party_messages_and_non_private_scope() -> None:
+    case_id = "CASE_intake_respondent_scope"
+    context = _agent_context(
+        case_id,
+        actor_id="MERCHANT_local_1",
+        actor_role="MERCHANT",
+        agent_session_id="SESSION_merchant_private",
+    )
+    context["scope_type"] = "INTAKE_PARTY_PRIVATE"
+    base = {
+        "case_id": case_id,
+        "room_type": "INTAKE",
+        "turn_source": "ROOM_MESSAGE",
+        "current_user_message": {
+            "message_id": "MESSAGE_MERCHANT_CURRENT",
+            "sequence_no": 4,
+            "role": "MERCHANT",
+            "source": "ROOM_MESSAGE",
+            "text": "我方认为服务已经完成。",
+        },
+        "recent_dialogue_messages": [
+            {
+                "message_id": "MESSAGE_AGENT_1",
+                "sequence_no": 1,
+                "role": "AGENT",
+                "source": "AGENT_RESPONSE",
+                "text": "请说明服务履行情况。",
+            },
+            {
+                "message_id": "MESSAGE_MERCHANT_OLD",
+                "sequence_no": 2,
+                "role": "MERCHANT",
+                "source": "ROOM_MESSAGE",
+                "text": "我方先核对一下。",
+            },
+            {
+                "message_id": "MESSAGE_AGENT_2",
+                "sequence_no": 3,
+                "role": "AGENT",
+                "source": "AGENT_RESPONSE",
+                "text": "请继续说明。",
+            },
+        ],
+        "agent_context": context,
+    }
+    assert IntakeTurnRequest.model_validate(base).current_user_message is not None
+
+    failed_retry = json.loads(json.dumps(base))
+    failed_retry["recent_dialogue_messages"] = failed_retry[
+        "recent_dialogue_messages"
+    ][:2]
+    retried = IntakeTurnRequest.model_validate(failed_retry)
+    assert [message.role for message in retried.recent_dialogue_messages] == [
+        "AGENT",
+        "MERCHANT",
+    ]
+
+    wrong_current = json.loads(json.dumps(base))
+    wrong_current["current_user_message"]["role"] = "USER"
+    with pytest.raises(ValueError, match="current_user_message.role"):
+        IntakeTurnRequest.model_validate(wrong_current)
+
+    wrong_history = json.loads(json.dumps(base))
+    wrong_history["recent_dialogue_messages"][1]["role"] = "USER"
+    with pytest.raises(ValueError, match="recent party message role"):
+        IntakeTurnRequest.model_validate(wrong_history)
+
+    wrong_scope = json.loads(json.dumps(base))
+    wrong_scope["agent_context"]["scope_type"] = "ROOM_SHARED"
+    with pytest.raises(ValueError, match="scope_type"):
+        IntakeTurnRequest.model_validate(wrong_scope)
+
+
+def test_intake_reply_is_limited_to_two_question_sentences() -> None:
+    reply = "已记录。第一个问题？第二个问题？第三个问题？后续会继续整理。"
+
+    limited = _limit_follow_up_questions(reply, limit=2)
+
+    assert limited.count("？") == 2
+    assert "第三个问题" not in limited
+    assert "后续会继续整理" in limited
+    assert _limit_follow_up_questions(
+        "请说明：1. 履约时间；2. 当前处理状态；3. 其他情况。",
+        limit=2,
+    ) == "请说明：1. 履约时间；2. 当前处理状态；"
+
+
 class FakeCaseDetailRunner:
     # 所属模块：Agent 角色能力 > test_intake_turn；函数角色：对象依赖初始化。
     # 具体功能：`__init__` 注入并保存处理本阶段状态需要的客户端、配置或策略依赖。
@@ -250,6 +412,20 @@ class FakeCaseDetailRunner:
         return SimpleNamespace(
             value=output_type(
                 room_utterance="我已了解本案情况，右侧案件详情已达到可进入下一步的标准。",
+                unilateral_case_matrix={
+                    "fact_rows": [
+                        {
+                            "fact_key": "NEW_SIGNED_NOT_RECEIVED",
+                            "category": "LOGISTICS",
+                            "fact_target": "物流显示签收但发起方称未收到商品",
+                            "materiality": "CORE",
+                            "position_summary": "用户称物流显示签收但本人未收到商品。",
+                            "asserted_value": "物流显示签收但用户未收到",
+                            "source_scope": "CURRENT_SOURCE",
+                        }
+                    ],
+                    "summary_source_fact_keys": ["NEW_SIGNED_NOT_RECEIVED"],
+                },
                 case_detail={
                     "schema_version": "intake_case_detail.v1",
                     "case_story": {

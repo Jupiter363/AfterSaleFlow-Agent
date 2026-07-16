@@ -148,7 +148,7 @@ class DemoCasePurgeMigrationIntegrationTest {
     // 下游影响：「DemoCasePurgeMigrationIntegrationTest.acceptsTheLegacySimulatedSourceButRejectsAdminAndFormalCases()」的下游是被测服务、仓储或外部客户端替身；「assertThat、assertThatThrownBy」把结果与预期状态、异常或调用次数锁定。
     // 系统意义：「DemoCasePurgeMigrationIntegrationTest.acceptsTheLegacySimulatedSourceButRejectsAdminAndFormalCases()」守住「数据库迁移入口」的可执行规格，尤其防止 「CASE_PURGE_LEGACY」、「EXTERNAL_IMPORT」、「LLM_SIMULATED_OMS」、「PLATFORM_REVIEWER」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
-    void acceptsTheLegacySimulatedSourceButRejectsAdminAndFormalCases()
+    void acceptsLegacySimulatedAndIntakeCreatedCasesButRejectsOtherActorsAndSources()
             throws SQLException {
         try (Connection connection =
                 DriverManager.getConnection(jdbcUrl, USERNAME, PASSWORD)) {
@@ -174,24 +174,78 @@ class DemoCasePurgeMigrationIntegrationTest {
                                             "ADMIN"))
                     .isInstanceOf(SQLException.class)
                     .hasMessageContaining(
-                            "only the platform reviewer can delete simulated cases");
+                            "only the platform reviewer can delete cases");
             assertThat(countById(connection, "fulfillment_dispute_case", "CASE_PURGE_ADMIN"))
                     .isOne();
 
             insertBareCase(
                     connection,
-                    "CASE_PURGE_FORMAL",
+                    "CASE_PURGE_INTAKE",
                     "INTAKE_CREATED",
                     null);
+            try (Statement statement = connection.createStatement()) {
+                statement.executeUpdate(
+                        """
+                        insert into case_room (
+                            id, case_id, room_type, room_status, opened_at,
+                            created_by, updated_by
+                        ) values (
+                            'ROOM_PURGE_INTAKE', 'CASE_PURGE_INTAKE', 'INTAKE',
+                            'OPEN', now(), 'test', 'test'
+                        )
+                        """);
+                statement.executeUpdate(
+                        """
+                        insert into room_message (
+                            id, case_id, room_id, sequence_no, sender_type,
+                            sender_role, sender_id, message_type, message_text,
+                            idempotency_key, created_by
+                        ) values (
+                            'MESSAGE_PURGE_INTAKE', 'CASE_PURGE_INTAKE',
+                            'ROOM_PURGE_INTAKE', 1, 'PARTY', 'USER', 'user-local',
+                            'PARTY_TEXT', 'intake message', 'purge-intake-message',
+                            'user-local'
+                        )
+                        """);
+            }
+            callPurge(connection, "CASE_PURGE_INTAKE", "PLATFORM_REVIEWER");
+            assertThat(countById(connection, "fulfillment_dispute_case", "CASE_PURGE_INTAKE"))
+                    .isZero();
+            try (var statement =
+                            connection.prepareStatement(
+                                    """
+                                    select source_type, source_system
+                                    from demo_case_purge_audit
+                                    where case_id = ?
+                                    order by purged_at desc
+                                    limit 1
+                                    """)) {
+                statement.setString(1, "CASE_PURGE_INTAKE");
+                try (var result = statement.executeQuery()) {
+                    assertThat(result.next()).isTrue();
+                    assertThat(result.getString("source_type")).isEqualTo("INTAKE_CREATED");
+                    assertThat(result.getString("source_system")).isNull();
+                }
+            }
+
+            insertBareCase(
+                    connection,
+                    "CASE_PURGE_FORMAL_EXTERNAL",
+                    "EXTERNAL_IMPORT",
+                    "PRODUCTION_OMS");
             assertThatThrownBy(
                             () ->
                                     callPurge(
                                             connection,
-                                            "CASE_PURGE_FORMAL",
+                                            "CASE_PURGE_FORMAL_EXTERNAL",
                                             "PLATFORM_REVIEWER"))
                     .isInstanceOf(SQLException.class)
-                    .hasMessageContaining("only simulated imported cases can be deleted");
-            assertThat(countById(connection, "fulfillment_dispute_case", "CASE_PURGE_FORMAL"))
+                    .hasMessageContaining(
+                            "only intake-created or simulated imported cases can be deleted");
+            assertThat(countById(
+                            connection,
+                            "fulfillment_dispute_case",
+                            "CASE_PURGE_FORMAL_EXTERNAL"))
                     .isOne();
         }
     }

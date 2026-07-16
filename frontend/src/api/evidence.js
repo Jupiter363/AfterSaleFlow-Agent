@@ -19,6 +19,8 @@ export const evidenceApi = {
     sourceType,
     visibility,
     occurredAt,
+    claimedFact,
+    truthAttested = false,
     modelProcessingAuthorized = false,
   }) => {
     const form = new FormData();
@@ -27,10 +29,13 @@ export const evidenceApi = {
     form.append("source_type", sourceType);
     form.append("visibility", visibility);
     form.append("model_processing_authorized", String(modelProcessingAuthorized));
+    form.append("claimed_fact", claimedFact);
+    form.append("truth_attested", String(truthAttested));
     if (occurredAt) form.append("occurred_at", occurredAt);
     return apiRequest(`/disputes/${caseId}/evidence`, actor, {
       method: "POST",
       body: form,
+      timeoutMs: 60_000,
     });
   },
   verify: (actor, caseId, evidenceId, command) =>

@@ -27,11 +27,9 @@ import com.example.dispute.infrastructure.persistence.entity.EvidenceItemEntity;
 import com.example.dispute.infrastructure.persistence.entity.EvidenceRequestEntity;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.entity.FlowConclusionEntity;
-import com.example.dispute.infrastructure.persistence.entity.HearingRecordEntity;
 import com.example.dispute.infrastructure.persistence.entity.HearingStateEntity;
 import com.example.dispute.infrastructure.persistence.entity.IssueEntity;
 import com.example.dispute.infrastructure.persistence.entity.PartyClaimEntity;
-import com.example.dispute.infrastructure.persistence.entity.PartySubmissionEntity;
 import com.example.dispute.infrastructure.persistence.entity.PolicyRuleEntity;
 import com.example.dispute.infrastructure.persistence.entity.RemedyPlanEntity;
 import com.example.dispute.infrastructure.persistence.entity.ReviewPacketEntity;
@@ -48,11 +46,9 @@ import com.example.dispute.infrastructure.persistence.repository.EvidenceItemRep
 import com.example.dispute.infrastructure.persistence.repository.EvidenceRequestRepository;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.infrastructure.persistence.repository.FlowConclusionRepository;
-import com.example.dispute.infrastructure.persistence.repository.HearingRecordRepository;
 import com.example.dispute.infrastructure.persistence.repository.HearingStateRepository;
 import com.example.dispute.infrastructure.persistence.repository.IssueRepository;
 import com.example.dispute.infrastructure.persistence.repository.PartyClaimRepository;
-import com.example.dispute.infrastructure.persistence.repository.PartySubmissionRepository;
 import com.example.dispute.infrastructure.persistence.repository.PolicyRuleRepository;
 import com.example.dispute.infrastructure.persistence.repository.RemedyPlanRepository;
 import com.example.dispute.infrastructure.persistence.repository.ReviewPacketRepository;
@@ -92,13 +88,7 @@ class PersistenceModelContractTest {
                                 ClaimIssueEvidenceMatrixEntity.class,
                                 "claim_issue_evidence_link"),
                         Map.entry(EvidenceRequestEntity.class, "evidence_request"),
-                        Map.entry(
-                                PartySubmissionEntity.class,
-                                "dispute_submission"),
                         Map.entry(HearingStateEntity.class, "hearing_state"),
-                        Map.entry(
-                                HearingRecordEntity.class,
-                                "hearing_stage_record"),
                         Map.entry(AdjudicationDraftEntity.class, "adjudication_draft"),
                         Map.entry(RemedyPlanEntity.class, "remedy_plan"),
                         Map.entry(ReviewPacketEntity.class, "review_packet"),
@@ -130,9 +120,7 @@ class PersistenceModelContractTest {
                             IssueRepository.class,
                             ClaimIssueEvidenceMatrixRepository.class,
                             EvidenceRequestRepository.class,
-                            PartySubmissionRepository.class,
                             HearingStateRepository.class,
-                            HearingRecordRepository.class,
                             AdjudicationDraftRepository.class,
                             RemedyPlanRepository.class,
                             ReviewPacketRepository.class,

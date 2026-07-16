@@ -48,12 +48,12 @@ def test_real_langfuse_sdk_exports_workflow_and_generation_observations() -> Non
             workflow_id="WORKFLOW_langfuse",
             user_id="USER_langfuse",
             role="SYSTEM",
-            prompt_version="hearing-v1",
+            prompt_version="hearing-flow-v2",
         )
         with tracer.workflow(context, {"case_id": context.case_id}) as trace:
             tracer.generation(
                 context,
-                "issue_framing_node",
+                "hearing_judge_v1",
                 "test-model",
                 "[REDACTED_INPUT sha256=test length=1]",
                 {"issues": []},

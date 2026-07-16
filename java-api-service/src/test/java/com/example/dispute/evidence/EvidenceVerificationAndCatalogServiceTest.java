@@ -8,6 +8,7 @@ package com.example.dispute.evidence;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.when;
 
 import com.example.dispute.config.ActorRole;
@@ -24,6 +25,9 @@ import com.example.dispute.infrastructure.persistence.entity.EvidenceItemEntity;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.repository.EvidenceItemRepository;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
+import com.example.dispute.room.domain.RoomType;
+import com.example.dispute.room.infrastructure.persistence.entity.CaseIntakeDossierEntity;
+import com.example.dispute.room.infrastructure.persistence.repository.CaseIntakeDossierRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.time.Instant;
@@ -48,6 +52,7 @@ class EvidenceVerificationAndCatalogServiceTest {
     @Mock private FulfillmentCaseRepository caseRepository;
     @Mock private EvidenceItemRepository evidenceRepository;
     @Mock private EvidenceVerificationRepository verificationRepository;
+    @Mock private CaseIntakeDossierRepository intakeDossierRepository;
 
     private EvidenceVerificationService verificationService;
     private EvidenceCatalogService catalogService;
@@ -69,8 +74,32 @@ class EvidenceVerificationAndCatalogServiceTest {
                         caseRepository,
                         evidenceRepository,
                         verificationRepository,
+                        intakeDossierRepository,
                         objectMapper,
                         clock);
+        lenient()
+                .when(intakeDossierRepository.findByCaseIdAndRoomType(any(), any()))
+                .thenAnswer(
+                        invocation ->
+                                Optional.of(
+                                        CaseIntakeDossierEntity.create(
+                                                "INTAKE_DOSSIER_VERIFY",
+                                                invocation.getArgument(0),
+                                                RoomType.INTAKE,
+                                                """
+                                                {
+                                                  "schema_version":"intake_case_detail.v1",
+                                                  "unilateral_case_matrix":{
+                                                    "schema_version":"unilateral_case_matrix.v1",
+                                                    "fact_rows":[{"fact_id":"FACT_DELIVERY"}]
+                                                  }
+                                                }
+                                                """,
+                                                90,
+                                                true,
+                                                "ACCEPTED",
+                                                1,
+                                                "dispute-intake-officer")));
         catalogService =
                 new EvidenceCatalogService(
                         caseRepository,

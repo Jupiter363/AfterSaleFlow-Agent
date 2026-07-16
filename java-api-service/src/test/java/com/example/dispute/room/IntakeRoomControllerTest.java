@@ -29,6 +29,7 @@ import com.example.dispute.room.api.IntakeRoomController;
 import com.example.dispute.room.application.IntakeConfirmationCommand;
 import com.example.dispute.room.application.IntakeConfirmationView;
 import com.example.dispute.room.application.IntakeRoomService;
+import com.example.dispute.room.application.IntakeProgressService;
 import com.example.dispute.room.domain.RoomType;
 import java.time.OffsetDateTime;
 import org.junit.jupiter.api.Test;
@@ -60,6 +61,7 @@ class IntakeRoomControllerTest {
 
     @Autowired private MockMvc mockMvc;
     @MockitoBean private IntakeRoomService service;
+    @MockitoBean private IntakeProgressService progressService;
 
     // 所属模块：【房间协作与权限 / 自动化测试层】「IntakeRoomControllerTest.confirmsAdmissionWithoutLegacyConfirmationNoteInput()」。
     // 具体功能：「IntakeRoomControllerTest.confirmsAdmissionWithoutLegacyConfirmationNoteInput()」：复现“核对完整业务行为（场景方法「confirmsAdmissionWithoutLegacyConfirmationNoteInput」）”场景：驱动 「service.confirm」，再用 「verify」、「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_test」、「2026-07-06T02:00:00Z」、「merchant-local」、「MERCHANT」。

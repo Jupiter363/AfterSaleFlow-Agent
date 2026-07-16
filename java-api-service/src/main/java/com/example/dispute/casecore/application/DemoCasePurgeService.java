@@ -58,7 +58,7 @@ public class DemoCasePurgeService {
     public DemoCasePurgeView purge(String caseId, AuthenticatedActor actor) {
         if (actor.role() != ActorRole.PLATFORM_REVIEWER) {
             throw new ForbiddenException(
-                    "only the platform reviewer can delete simulated cases");
+                    "only the platform reviewer can delete cases");
         }
 
         FulfillmentCaseEntity disputeCase =
@@ -71,14 +71,20 @@ public class DemoCasePurgeService {
                                                 "case was not found",
                                                 Map.of("case_id", caseId)));
 
-        if (disputeCase.getSourceType() != CaseSourceType.EXTERNAL_IMPORT
-                || !PURGEABLE_SOURCE_SYSTEMS.contains(
-                        disputeCase.getSourceSystem())) {
+        if (!isPurgeable(disputeCase)) {
             throw new ForbiddenException(
-                    "only simulated imported cases can be deleted");
+                    "only intake-created or simulated imported cases can be deleted");
         }
 
         purgeStore.purge(caseId, actor.actorId(), actor.role().name());
         return new DemoCasePurgeView(caseId, true);
+    }
+
+    private static boolean isPurgeable(FulfillmentCaseEntity disputeCase) {
+        if (disputeCase.getSourceType() == CaseSourceType.INTAKE_CREATED) {
+            return true;
+        }
+        return disputeCase.getSourceType() == CaseSourceType.EXTERNAL_IMPORT
+                && PURGEABLE_SOURCE_SYSTEMS.contains(disputeCase.getSourceSystem());
     }
 }

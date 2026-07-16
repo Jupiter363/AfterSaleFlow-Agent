@@ -110,7 +110,7 @@ public class HearingStateEntity extends AbstractEntity {
         state.caseId = caseId;
         state.workflowId = workflowId;
         state.hearingStatus = HearingStatus.RUNNING;
-        state.currentNode = "C0_HEARING_CONTROLLER";
+        state.currentNode = "COURT_PREPARING";
         state.graphStateJson = "{}";
         state.pendingRequestsJson = "[]";
         state.manualFlagsJson = "[]";
@@ -169,7 +169,7 @@ public class HearingStateEntity extends AbstractEntity {
     public void complete(boolean manualRequired, String actorId) {
         this.manualRequired |= manualRequired;
         this.hearingStatus = HearingStatus.COMPLETED;
-        this.currentNode = "C6_ADJUDICATION_DRAFT";
+        this.currentNode = "JUDGE_V2_GENERATED";
         this.waitingUntil = null;
         this.completedAt = OffsetDateTime.now(ZoneOffset.UTC);
         this.updatedBy = actorId;

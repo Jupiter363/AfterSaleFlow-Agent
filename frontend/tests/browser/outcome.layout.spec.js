@@ -1,5 +1,4 @@
-// 文件作用：自动化测试文件，验证 outcome.layout.spec 相关模块的行为、契约或页面布局。
-// 说明：本注释用于帮助读者先了解本文件职责，再继续阅读具体实现。
+// 执行结果页布局回归：审批后按四段展示庭审、审核、方案与执行情况。
 
 import { expect, test } from "@playwright/test";
 import { mkdir } from "node:fs/promises";
@@ -17,20 +16,37 @@ const screenshotDirectory = fileURLToPath(
   ),
 );
 
+const desktopViewport = { width: 1440, height: 1100 };
 const compactViewports = [
   { width: 390, height: 844 },
   { width: 320, height: 568 },
 ];
+const allViewports = [desktopViewport, ...compactViewports];
+const outcomeRoles = ["USER", "PLATFORM_REVIEWER"];
+const internalUiSelectors = [
+  "[data-adjudication-draft]",
+  "[data-explanation-officer]",
+  "[data-outcome-review-panel]",
+  "[data-review-plan-editor]",
+];
 
-// 业务位置：【前端浏览器回归测试】openOutcome：切换与 阶段处理结果或草案 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
-async function openOutcome(page, { viewport, scenario = "final", role = "USER" }) {
+async function openOutcome(
+  page,
+  { viewport, scenario = "final", role = "USER" },
+) {
   await page.setViewportSize(viewport);
   await installOutcomeFixture(page, { scenario, role });
   await page.goto(`/disputes/${OUTCOME_CASE_ID}/outcome`);
+
   await expect(page.locator(".outcome-page")).toBeVisible();
+  const header = page.locator(".room-shell__header");
+  await expect(header).toBeVisible();
+  await expect(header.locator("h1")).toHaveText("执行结果");
+  await expect(header.locator(".room-shell__context")).toContainText(
+    "最终结果归档",
+  );
 }
 
-// 业务位置：【前端浏览器回归测试】captureLayoutScreenshot：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 async function captureLayoutScreenshot(
   page,
   { viewport, scenario, role, track = "fullpage" },
@@ -50,7 +66,6 @@ async function captureLayoutScreenshot(
   });
 }
 
-// 业务位置：【前端浏览器回归测试】horizontalOverflowReport：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 async function horizontalOverflowReport(page) {
   return page.evaluate(() => {
     const viewportWidth = document.documentElement.clientWidth;
@@ -76,6 +91,7 @@ async function horizontalOverflowReport(page) {
           (left < -1 || right > viewportWidth + 1),
       )
       .slice(0, 20);
+
     return {
       viewportWidth,
       scrollWidth: document.documentElement.scrollWidth,
@@ -85,17 +101,76 @@ async function horizontalOverflowReport(page) {
   });
 }
 
-// 业务位置：【前端浏览器回归测试】assertNoPageHorizontalOverflow：核验 当前阶段业务数据 的权限、Schema 和阶段边界，阻止越权或不完整结果进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 async function assertNoPageHorizontalOverflow(page) {
   const report = await horizontalOverflowReport(page);
   expect(
     report.scrollWidth <= report.viewportWidth + 1,
     JSON.stringify(report, null, 2),
   ).toBe(true);
+  expect(
+    report.bodyScrollWidth <= report.viewportWidth + 1,
+    JSON.stringify(report, null, 2),
+  ).toBe(true);
 }
 
-// 业务位置：【前端浏览器回归测试】assertScrollableWhenLong：核验 当前阶段业务数据 的权限、Schema 和阶段边界，阻止越权或不完整结果进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
-async function assertScrollableWhenLong(locator) {
+async function assertNoInternalOrReviewerUi(page) {
+  await expect(page.locator(internalUiSelectors.join(","))).toHaveCount(0);
+  await expect(page.locator("textarea")).toHaveCount(0);
+  await expect(
+    page.getByRole("button", {
+      name: /确认裁决|确认结果|修改方案|退回重审|提交审核/,
+    }),
+  ).toHaveCount(0);
+  await expect(page.locator("body")).not.toContainText(
+    "INTERNAL_DRAFT_DO_NOT_RENDER",
+  );
+  await expect(page.locator("body")).not.toContainText(
+    "INTERNAL_EXPLANATION_DO_NOT_RENDER",
+  );
+  await expect(page.locator("body")).not.toContainText(
+    "INTERNAL_REVIEW_DO_NOT_RENDER",
+  );
+  await expect(page.locator("body")).not.toContainText(
+    "INTERNAL_PLAN_DO_NOT_RENDER",
+  );
+}
+
+async function assertFinalOutcome(page, { expectReceipt = true } = {}) {
+  await expect(page.locator("[data-outcome-waiting]")).toHaveCount(0);
+  await expect(page.locator("[data-outcome-summary-layout]")).toBeVisible();
+  await expect(page.locator("[data-outcome-hearing]")).toBeVisible();
+  await expect(page.locator("[data-outcome-review]")).toBeVisible();
+  await expect(page.locator("[data-outcome-plan]")).toBeVisible();
+  await expect(page.locator("[data-outcome-execution]")).toBeVisible();
+  if (expectReceipt) {
+    await expect(page.locator("[data-execution-receipt]")).not.toHaveCount(0);
+  }
+  await assertNoInternalOrReviewerUi(page);
+}
+
+async function assertPendingOutcome(page) {
+  await expect(page.locator("[data-outcome-waiting]")).toBeVisible();
+  await expect(page.locator("[data-outcome-summary-layout]")).toHaveCount(0);
+  await expect(page.locator("[data-outcome-hearing]")).toHaveCount(0);
+  await expect(page.locator("[data-outcome-review]")).toHaveCount(0);
+  await expect(page.locator("[data-outcome-plan]")).toHaveCount(0);
+  await expect(page.locator("[data-outcome-execution]")).toHaveCount(0);
+  await expect(page.locator("[data-mock-execution]")).toHaveCount(0);
+  await expect(page.locator("[data-execution-receipt]")).toHaveCount(0);
+  await assertNoInternalOrReviewerUi(page);
+}
+
+async function assertDesktopSummaryColumns(page) {
+  const hearing = await page.locator("[data-outcome-hearing]").boundingBox();
+  const review = await page.locator("[data-outcome-review]").boundingBox();
+  expect(hearing).not.toBeNull();
+  expect(review).not.toBeNull();
+  expect(Math.abs(hearing.y - review.y)).toBeLessThanOrEqual(2);
+  expect(Math.abs(hearing.height - review.height)).toBeLessThanOrEqual(2);
+  expect(hearing.x + hearing.width).toBeLessThan(review.x);
+}
+
+async function assertLocallyScrollable(locator) {
   const metrics = await locator.evaluate((element) => {
     const style = getComputedStyle(element);
     return {
@@ -104,78 +179,126 @@ async function assertScrollableWhenLong(locator) {
       scrollHeight: element.scrollHeight,
     };
   });
-  expect(["auto", "scroll"].includes(metrics.overflowY)).toBe(true);
-  expect(metrics.scrollHeight).toBeGreaterThanOrEqual(metrics.clientHeight);
-  return metrics.scrollHeight > metrics.clientHeight;
+
+  expect(["auto", "scroll"]).toContain(metrics.overflowY);
+  expect(metrics.scrollHeight).toBeGreaterThan(metrics.clientHeight);
 }
 
-// 业务位置：【前端浏览器回归测试】assertLongTextGroupContained：核验 面向当事人的业务文本 的权限、Schema 和阶段边界，阻止越权或不完整结果进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
-async function assertLongTextGroupContained(locator) {
-  const states = [];
-  for (const card of await locator.all()) {
-    states.push(await assertScrollableWhenLong(card));
-  }
-  expect(
-    states.some(Boolean),
-    "At least one card in the long-text group should use local scrolling.",
-  ).toBe(true);
-}
-
-for (const viewport of compactViewports) {
-  for (const scenario of ["final", "draft"]) {
-    // 业务位置：【前端浏览器回归测试】test：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
-    test(`contains ${scenario} outcome at ${viewport.width}px`, async ({
-      page,
-    }) => {
-      await openOutcome(page, { viewport, scenario });
-
-      await expect(page.locator(".verdict-card")).toBeVisible();
-      if (scenario === "draft") {
-        await expect(page.locator("[data-adjudication-draft]")).toBeVisible();
-        await expect(page.locator("[data-explanation-officer]")).toBeVisible();
-      }
-
-      await assertNoPageHorizontalOverflow(page);
-      await captureLayoutScreenshot(page, { viewport, scenario, role: "USER" });
+for (const role of outcomeRoles) {
+  test(`desktop final result is read-only for ${role}`, async ({ page }) => {
+    await openOutcome(page, {
+      viewport: desktopViewport,
+      scenario: "final",
+      role,
     });
-  }
 
-  // 业务位置：【前端浏览器回归测试】test：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
-  test(`contains reviewer operation panel at ${viewport.width}px`, async ({
+    await assertFinalOutcome(page);
+    await expect(page.locator("[data-outcome-hearing]")).toContainText(
+      "庭审法官 V2",
+    );
+    await expect(page.locator("[data-outcome-hearing]")).toContainText("v7");
+    await expect(page.locator("[data-outcome-review]")).toContainText(
+      "管理员审核意见",
+    );
+    await expect(page.locator("[data-outcome-plan]")).toContainText(
+      "最终执行方案",
+    );
+    await expect(page.locator("[data-outcome-plan]")).toContainText(
+      "向用户原支付渠道退还订单实付金额 299 元",
+    );
+    await expect(page.locator("[data-execution-receipt]")).toHaveCount(2);
+    await assertDesktopSummaryColumns(page);
+    await assertNoPageHorizontalOverflow(page);
+    await captureLayoutScreenshot(page, {
+      viewport: desktopViewport,
+      scenario: "final",
+      role,
+    });
+  });
+
+  test(`desktop pending result only shows waiting state for ${role}`, async ({
     page,
   }) => {
     await openOutcome(page, {
-      viewport,
-      scenario: "reviewer",
-      role: "PLATFORM_REVIEWER",
+      viewport: desktopViewport,
+      scenario: "pending",
+      role,
     });
 
-    const panel = page.locator("[data-outcome-review-panel]");
-    await expect(panel).toBeVisible();
-    await expect(panel.locator("[data-review-plan-editor]")).toBeVisible();
+    await assertPendingOutcome(page);
     await assertNoPageHorizontalOverflow(page);
     await captureLayoutScreenshot(page, {
-      viewport,
-      scenario: "reviewer",
-      role: "PLATFORM_REVIEWER",
+      viewport: desktopViewport,
+      scenario: "pending",
+      role,
     });
   });
 }
 
+test("frontend mock execution advances without a real receipt", async ({
+  page,
+}) => {
+  await openOutcome(page, {
+    viewport: desktopViewport,
+    scenario: "mock",
+  });
+
+  await assertFinalOutcome(page, { expectReceipt: false });
+  await expect(page.locator("[data-execution-receipt]")).toHaveCount(0);
+  const mock = page.locator("[data-mock-execution]");
+  await expect(mock).toBeVisible();
+  await expect(mock.locator(".mock-execution__summary strong")).toHaveText(
+    "执行准备",
+    { timeout: 7_000 },
+  );
+  await assertNoPageHorizontalOverflow(page);
+});
+
 for (const viewport of compactViewports) {
-  // 业务位置：【前端浏览器回归测试】test：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
-  test(`keeps long outcome text inside fixed cards at ${viewport.width}px`, async ({
+  for (const scenario of ["final", "pending"]) {
+    test(`${scenario} result fits ${viewport.width}px mobile viewport`, async ({
+      page,
+    }) => {
+      await openOutcome(page, { viewport, scenario });
+
+      if (scenario === "final") await assertFinalOutcome(page);
+      else await assertPendingOutcome(page);
+      await assertNoPageHorizontalOverflow(page);
+      await captureLayoutScreenshot(page, {
+        viewport,
+        scenario,
+        role: "USER",
+      });
+    });
+  }
+}
+
+for (const viewport of allViewports) {
+  test(`long approved result stays contained at ${viewport.width}px`, async ({
     page,
   }) => {
     await openOutcome(page, { viewport, scenario: "long" });
 
-    await assertNoPageHorizontalOverflow(page);
-    await assertScrollableWhenLong(page.locator(".verdict-card h2"));
-    await assertScrollableWhenLong(page.locator(".verdict-card > p").first());
-    await assertLongTextGroupContained(page.locator(".draft-explain-grid article"));
-    await assertLongTextGroupContained(
-      page.locator(".explanation-officer-card__body article"),
+    await assertFinalOutcome(page);
+    await assertLocallyScrollable(
+      page.locator("[data-outcome-hearing] .outcome-scroll-copy"),
     );
+    await assertLocallyScrollable(
+      page.locator("[data-outcome-review] .outcome-scroll-copy"),
+    );
+    await assertLocallyScrollable(
+      page.locator("[data-outcome-plan] .outcome-scroll-copy"),
+    );
+
+    const receipts = page.locator("[data-execution-receipt]");
+    await expect(receipts).toHaveCount(1);
+    const receipt = receipts.first();
+    await expect(receipt.locator(".execution-result")).toBeVisible();
+    await expect(receipt).toContainText("幂等键");
+    await expect(receipt).toContainText("回执状态");
+    await expect(receipt).not.toContainText("{");
+
+    await assertNoPageHorizontalOverflow(page);
     await captureLayoutScreenshot(page, {
       viewport,
       scenario: "long",

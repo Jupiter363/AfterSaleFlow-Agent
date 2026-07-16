@@ -52,6 +52,8 @@ def test_frontend_uses_only_nginx_proxy_paths_and_no_service_secrets() -> None:
         path.read_text(encoding="utf-8")
         for path in FRONTEND.rglob("*")
         if path.is_file()
+        and path.suffix.lower()
+        in {".css", ".html", ".js", ".json", ".md", ".svg", ".ts", ".vue"}
     )
     assert 'VITE_API_BASE_URL || "/api"' in client
     assert "VITE_API_BASE_URL=/api" in environment
@@ -115,12 +117,19 @@ def test_backend_supports_role_scoped_case_index_and_staff_audit_query() -> None
         / "application"
         / "CaseApplicationService.java"
     )
+    visibility = read(
+        JAVA
+        / "caseintake"
+        / "application"
+        / "CaseVisibilitySpecification.java"
+    )
     audit = read(JAVA / "audit" / "application" / "AuditQueryService.java")
     dossier = read(
         JAVA / "evidence" / "application" / "BuildDossierResult.java"
     )
-    assert 'root.get("userId")' in cases
-    assert 'root.get("merchantId")' in cases
+    assert "CaseVisibilitySpecification.visibleTo(actor)" in cases
+    assert 'root.get("initiatorId")' in visibility
+    assert 'root.get("respondentId")' in visibility
     assert "PageRequest.of" in cases
     assert "PLATFORM_REVIEWER" in audit
     assert "actor cannot view case audit logs" in audit

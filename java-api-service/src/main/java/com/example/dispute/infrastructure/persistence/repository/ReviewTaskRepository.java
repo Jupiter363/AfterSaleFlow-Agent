@@ -36,6 +36,8 @@ public interface ReviewTaskRepository extends JpaRepository<ReviewTaskEntity, St
     // 系统意义：「ReviewTaskRepository.findFirstByCaseIdOrderByCreatedAtDesc(String)」直接影响 PostgreSQL 事实投影；实体记录是 API 查询投影和审计依据，写入必须服从上层事务与状态机
     // Java 语法：接口方法以分号结束，只声明契约；运行时执行实现类中的同签名方法。
     Optional<ReviewTaskEntity> findFirstByCaseIdOrderByCreatedAtDesc(String caseId);
+    Optional<ReviewTaskEntity> findFirstByCaseIdAndPlanIdOrderByCreatedAtDesc(
+            String caseId, String planId);
     // 所属模块：【PostgreSQL 事实模型 / 仓储接口层】「ReviewTaskRepository.findByIdForUpdate(String)」。
     // 具体功能：「ReviewTaskRepository.findByIdForUpdate(String)」：声明按标识面向更新访问审核任务的 Spring Data 查询，由框架根据方法签名生成 SQL，并以「Optional<ReviewTaskEntity>」返回。
     // 上游调用：「ReviewTaskRepository.findByIdForUpdate(String)」的上游调用点包括 「ReviewApplicationService.persistDecision」。

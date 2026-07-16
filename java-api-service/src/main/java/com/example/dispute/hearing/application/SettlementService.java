@@ -48,7 +48,6 @@ public class SettlementService {
     private final SettlementConfirmationRepository confirmationRepository;
     private final CaseEventService eventService;
     private final NotificationService notificationService;
-    private final HearingWorkflowCoordinator hearingWorkflowCoordinator;
     private final Clock clock;
 
     // 所属模块：【共享小法庭 / 应用编排层】「SettlementService.SettlementService(FulfillmentCaseRepository,CaseRoomRepository,SettlementProposalRepository,SettlementConfirmationRepository,CaseEventService,NotificationService,HearingWorkflowCoordinator,Clock)」。
@@ -64,7 +63,6 @@ public class SettlementService {
             SettlementConfirmationRepository confirmationRepository,
             CaseEventService eventService,
             NotificationService notificationService,
-            HearingWorkflowCoordinator hearingWorkflowCoordinator,
             Clock clock) {
         this.caseRepository = caseRepository;
         this.roomRepository = roomRepository;
@@ -72,7 +70,6 @@ public class SettlementService {
         this.confirmationRepository = confirmationRepository;
         this.eventService = eventService;
         this.notificationService = notificationService;
-        this.hearingWorkflowCoordinator = hearingWorkflowCoordinator;
         this.clock = clock;
     }
 
@@ -198,8 +195,6 @@ public class SettlementService {
                     Map.of("settlement_id", current.getId(), "version", version),
                     "settlement-confirmed:" + version,
                     "system");
-            hearingWorkflowCoordinator.settlementConfirmedAfterCommit(
-                    caseId, version);
         }
         return view(current);
     }

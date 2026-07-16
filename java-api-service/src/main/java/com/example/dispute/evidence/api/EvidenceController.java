@@ -24,9 +24,13 @@ import com.example.dispute.evidence.application.EvidenceVerificationView;
 import com.example.dispute.evidence.application.EvidenceView;
 import com.example.dispute.evidence.application.FrozenEvidenceDossierView;
 import com.example.dispute.evidence.application.RoleScopedEvidenceView;
+import com.example.dispute.room.application.IntakeProgressService;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.AssertTrue;
+import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Pattern;
+import jakarta.validation.constraints.Size;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.OffsetDateTime;
@@ -66,6 +70,7 @@ public class EvidenceController {
     private final EvidenceCompletionService completionService;
     private final EvidenceDossierQueryService dossierQueryService;
     private final EvidenceSubmissionService submissionService;
+    private final IntakeProgressService intakeProgressService;
     private final Clock clock;
 
     // 所属模块：【证据与版本化卷宗 / HTTP 接口层】「EvidenceController.EvidenceController(EvidenceApplicationService,EvidenceCatalogService,EvidenceVerificationService,EvidenceCompletionService,EvidenceDossierQueryService,EvidenceSubmissionService,Clock)」。
@@ -81,6 +86,7 @@ public class EvidenceController {
             EvidenceCompletionService completionService,
             EvidenceDossierQueryService dossierQueryService,
             EvidenceSubmissionService submissionService,
+            IntakeProgressService intakeProgressService,
             Clock clock) {
         this.service = service;
         this.catalogService = catalogService;
@@ -88,6 +94,7 @@ public class EvidenceController {
         this.completionService = completionService;
         this.dossierQueryService = dossierQueryService;
         this.submissionService = submissionService;
+        this.intakeProgressService = intakeProgressService;
         this.clock = clock;
     }
 
@@ -111,7 +118,11 @@ public class EvidenceController {
                     String visibility,
             @RequestParam(name = "model_processing_authorized", defaultValue = "false")
                     boolean modelProcessingAuthorized,
-            @RequestParam(required = false)
+            @RequestParam("claimed_fact") @NotBlank @Size(min = 5, max = 1000)
+                    String claimedFact,
+            @RequestParam("truth_attested") @AssertTrue
+                    boolean truthAttested,
+            @RequestParam(name = "occurred_at", required = false)
                     @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME)
                     OffsetDateTime occurredAt,
             Authentication authentication,
@@ -124,8 +135,10 @@ public class EvidenceController {
                         sourceType,
                         visibility,
                         modelProcessingAuthorized,
+                        claimedFact,
+                        truthAttested,
                         occurredAt,
-                        actor(authentication));
+                        evidenceActor(caseId, authentication));
         return ResponseEntity.status(HttpStatus.CREATED)
                 .body(success(result, request));
     }
@@ -141,7 +154,7 @@ public class EvidenceController {
             Authentication authentication,
             HttpServletRequest request) {
         return success(
-                catalogService.catalog(caseId, actor(authentication)), request);
+                catalogService.catalog(caseId, evidenceReadActor(caseId, authentication)), request);
     }
 
     // 所属模块：【证据与版本化卷宗 / HTTP 接口层】「EvidenceController.submitBatch(String,EvidenceSubmissionRequest,String,Authentication,HttpServletRequest)」。
@@ -160,7 +173,7 @@ public class EvidenceController {
                 submissionService.submit(
                         caseId,
                         command.toCommand(),
-                        actor(authentication),
+                        evidenceActor(caseId, authentication),
                         idempotencyKey,
                         correlationId(request, TraceIdFilter.TRACE_ATTRIBUTE)),
                 request);
@@ -179,7 +192,8 @@ public class EvidenceController {
                     String evidenceId,
             Authentication authentication,
             HttpServletRequest request) {
-        submissionService.deletePending(caseId, evidenceId, actor(authentication));
+        submissionService.deletePending(
+                caseId, evidenceId, evidenceActor(caseId, authentication));
         return success(null, request);
     }
 
@@ -196,7 +210,7 @@ public class EvidenceController {
                     String evidenceId,
             Authentication authentication) {
         EvidenceContentView content =
-                service.content(caseId, evidenceId, actor(authentication));
+                service.content(caseId, evidenceId, evidenceReadActor(caseId, authentication));
         String filename =
                 content.filename() == null || content.filename().isBlank()
                         ? evidenceId
@@ -236,7 +250,7 @@ public class EvidenceController {
                         caseId,
                         evidenceId,
                         command,
-                        actor(authentication),
+                        evidenceActor(caseId, authentication),
                         correlationId(request, TraceIdFilter.TRACE_ATTRIBUTE)),
                 request);
     }
@@ -254,7 +268,7 @@ public class EvidenceController {
             HttpServletRequest request) {
         return success(
                 completionService.complete(
-                        caseId, actor(authentication), idempotencyKey),
+                        caseId, evidenceActor(caseId, authentication), idempotencyKey),
                 request);
     }
 
@@ -269,7 +283,8 @@ public class EvidenceController {
             Authentication authentication,
             HttpServletRequest request) {
         return success(
-                completionService.status(caseId, actor(authentication)), request);
+                completionService.status(
+                        caseId, evidenceReadActor(caseId, authentication)), request);
     }
 
     // 所属模块：【证据与版本化卷宗 / HTTP 接口层】「EvidenceController.frozenDossier(String,int,Authentication,HttpServletRequest)」。
@@ -284,7 +299,8 @@ public class EvidenceController {
             Authentication authentication,
             HttpServletRequest request) {
         return success(
-                dossierQueryService.get(caseId, version, actor(authentication)),
+                dossierQueryService.get(
+                        caseId, version, evidenceReadActor(caseId, authentication)),
                 request);
     }
 
@@ -299,7 +315,8 @@ public class EvidenceController {
             Authentication authentication,
             HttpServletRequest request) {
         return success(
-                dossierQueryService.latest(caseId, actor(authentication)), request);
+                dossierQueryService.latest(
+                        caseId, evidenceReadActor(caseId, authentication)), request);
     }
 
     // 所属模块：【证据与版本化卷宗 / HTTP 接口层】「EvidenceController.success(T,HttpServletRequest)」。
@@ -322,6 +339,20 @@ public class EvidenceController {
     // 系统意义：「EvidenceController.actor(Authentication)」是外部请求进入业务事实源的边界，必须先完成身份/参数校验，再由应用服务决定事务和权限。
     private static AuthenticatedActor actor(Authentication authentication) {
         return (AuthenticatedActor) authentication.getPrincipal();
+    }
+
+    private AuthenticatedActor evidenceActor(
+            String caseId, Authentication authentication) {
+        AuthenticatedActor actor = actor(authentication);
+        intakeProgressService.assertEvidenceAccess(caseId, actor);
+        return actor;
+    }
+
+    private AuthenticatedActor evidenceReadActor(
+            String caseId, Authentication authentication) {
+        AuthenticatedActor actor = actor(authentication);
+        intakeProgressService.assertEvidenceReadAccess(caseId, actor);
+        return actor;
     }
 
     // 所属模块：【证据与版本化卷宗 / HTTP 接口层】「EvidenceController.correlationId(HttpServletRequest,String)」。

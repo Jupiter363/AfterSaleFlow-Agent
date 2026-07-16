@@ -13,6 +13,7 @@ import {
   agentStreamStore,
   clearAgentStreams,
 } from "../../stores/agentStream";
+import { disputeStore } from "../../stores/dispute";
 import IntakeRoomView from "./IntakeRoomView.vue";
 
 // 业务位置：【前端接待室】readUtf8Source：读取 当前阶段业务数据，并依据当前案件、角色和会话权限裁剪成可用输入。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
@@ -95,6 +96,7 @@ async function mountView(confirmAction = vi.fn(), eventStreamer = null, cancelAc
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [
+      { path: "/disputes", component: { template: "<div />" } },
       { path: "/disputes/:caseId/intake", component: { template: "<div />" } },
       { path: "/disputes/:caseId/evidence", component: { template: "<div />" } },
     ],
@@ -123,6 +125,7 @@ async function mountInteractiveView(options = {}) {
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [
+      { path: "/disputes", component: { template: "<div />" } },
       { path: "/disputes/:caseId/intake", component: { template: "<div />" } },
       { path: "/disputes/:caseId/evidence", component: { template: "<div />" } },
     ],
@@ -135,19 +138,24 @@ async function mountInteractiveView(options = {}) {
   await router.isReady();
   const wrapper = mount(IntakeRoomView, {
     props: {
-      initialDispute: dispute,
+      initialDispute: options.initialDispute || dispute,
       initialAnalysis: options.initialAnalysis || analysis,
       initialMessages: Object.hasOwn(options, "initialMessages") ? options.initialMessages : [],
       initialTurnMemory: Object.hasOwn(options, "initialTurnMemory")
         ? options.initialTurnMemory
         : readyTurnMemory,
+      initialIntakeStatus: options.initialIntakeStatus,
       postMessageAction: options.postMessageAction,
+      openingAction: options.openingAction,
       messagesLoader: options.messagesLoader,
       turnMemoryLoader: options.turnMemoryLoader,
+      intakeStatusLoader: options.intakeStatusLoader,
       confirmAction: options.confirmAction || vi.fn(),
       cancelAction: options.cancelAction,
       eventStreamer: options.eventStreamer,
       modelHealthLoader: options.modelHealthLoader || connectedModelHealth,
+      evidenceReadyPollAttempts: options.evidenceReadyPollAttempts,
+      evidenceReadyPollDelayMs: options.evidenceReadyPollDelayMs,
     },
     global: { plugins: [router] },
     attachTo: options.attachTo,
@@ -162,10 +170,337 @@ describe("IntakeRoomView", () => {
     clearAgentStreams({}, { abort: true });
     actor.id = "user-local";
     actor.role = "USER";
+    disputeStore.list.data = [];
+    disputeStore.current.data = null;
   });
 
   afterEach(() => {
     clearAgentStreams({}, { abort: true });
+  });
+
+  it("keeps the respondent in a locked intake state before the initiator completes", async () => {
+    actor.id = "merchant-local";
+    actor.role = "MERCHANT";
+    const wrapper = await mountInteractiveView({
+      initialIntakeStatus: {
+        initiator_status: "OPEN",
+        respondent_status: "LOCKED",
+        current_actor_completed: false,
+        can_use_intake: false,
+        can_enter_evidence: false,
+      },
+    });
+
+    expect(wrapper.get("[data-intake-locked-chat]").text()).toContain("接待会话尚未开放");
+    expect(wrapper.get("[data-intake-waiting-for-initiator]").text()).toContain("等待发起方");
+    expect(wrapper.find("[data-enter-evidence-room]").exists()).toBe(false);
+    expect(wrapper.find("textarea").exists()).toBe(false);
+  });
+
+  it("opens a private respondent intake and enters evidence only after respondent confirmation", async () => {
+    actor.id = "merchant-local";
+    actor.role = "MERCHANT";
+    const confirmAction = vi.fn().mockResolvedValue({
+      case_status: "EVIDENCE_OPEN",
+      current_room: "EVIDENCE",
+      deadline_at: "2026-07-15T02:00:00Z",
+    });
+    const bilateralMemory = structuredClone(readyTurnMemory);
+    bilateralMemory.case_intake_dossier.dossier.case_fact_matrix = {
+      schema_version: "case_fact_matrix.v2",
+      matrix_kind: "BILATERAL_FROZEN",
+    };
+    const intakeStatusLoader = vi.fn().mockResolvedValue({
+      initiator_status: "COMPLETED",
+      respondent_status: "COMPLETED",
+      current_actor_completed: true,
+      can_use_intake: false,
+      can_enter_evidence: true,
+    });
+    const wrapper = await mountInteractiveView({
+      initialTurnMemory: bilateralMemory,
+      initialIntakeStatus: {
+        initiator_status: "COMPLETED",
+        respondent_status: "OPEN",
+        current_actor_completed: false,
+        can_use_intake: true,
+        can_enter_evidence: false,
+        evidence_deadline_at: "2026-07-15T02:00:00Z",
+      },
+      confirmAction,
+      intakeStatusLoader,
+    });
+
+    expect(wrapper.find("[data-intake-locked-chat]").exists()).toBe(false);
+    expect(wrapper.get("[data-confirm-admission]").text()).toContain("确认陈述并进入证据室");
+    expect(wrapper.find("[data-resolve-without-dispute]").exists()).toBe(false);
+
+    await wrapper.get("[data-confirm-admission]").trigger("click");
+    await flushPromises();
+
+    expect(confirmAction).toHaveBeenCalledWith(expect.objectContaining({ admissible: true }));
+    expect(intakeStatusLoader).toHaveBeenCalledTimes(1);
+    expect(wrapper.vm.$router.currentRoute.value.path)
+      .toBe("/disputes/CASE_INTAKE_1/evidence");
+  });
+
+  it("rechecks bilateral completion before routing to evidence", async () => {
+    actor.id = "merchant-local";
+    actor.role = "MERCHANT";
+    const bilateralMemory = structuredClone(readyTurnMemory);
+    bilateralMemory.case_intake_dossier.dossier.case_fact_matrix = {
+      schema_version: "case_fact_matrix.v2",
+      matrix_kind: "BILATERAL_FROZEN",
+    };
+    let releaseEvidenceReady;
+    const evidenceReady = new Promise((resolve) => {
+      releaseEvidenceReady = resolve;
+    });
+    const intakeStatusLoader = vi.fn()
+      .mockResolvedValueOnce({
+        initiator_status: "COMPLETED",
+        respondent_status: "OPEN",
+        current_actor_completed: true,
+        can_use_intake: false,
+        can_enter_evidence: false,
+      })
+      .mockReturnValueOnce(evidenceReady);
+    const wrapper = await mountInteractiveView({
+      initialTurnMemory: bilateralMemory,
+      initialIntakeStatus: {
+        initiator_status: "COMPLETED",
+        respondent_status: "OPEN",
+        current_actor_completed: false,
+        can_use_intake: true,
+        can_enter_evidence: false,
+      },
+      confirmAction: vi.fn().mockResolvedValue({
+        case_status: "EVIDENCE_OPEN",
+        current_room: "EVIDENCE",
+        deadline_at: "2026-07-15T02:00:00Z",
+      }),
+      intakeStatusLoader,
+      evidenceReadyPollAttempts: 2,
+      evidenceReadyPollDelayMs: 0,
+    });
+
+    await wrapper.get("[data-confirm-admission]").trigger("click");
+    await flushPromises();
+
+    expect(intakeStatusLoader).toHaveBeenCalledTimes(2);
+    expect(wrapper.vm.$router.currentRoute.value.path)
+      .toBe("/disputes/CASE_INTAKE_1/intake");
+    expect(wrapper.get("[data-waiting-for-evidence-ready]").text())
+      .toContain("双方完成状态正在核验");
+
+    releaseEvidenceReady({
+      initiator_status: "COMPLETED",
+      respondent_status: "COMPLETED",
+      current_actor_completed: true,
+      can_use_intake: false,
+      can_enter_evidence: true,
+    });
+    await flushPromises();
+
+    expect(wrapper.vm.$router.currentRoute.value.path)
+      .toBe("/disputes/CASE_INTAKE_1/evidence");
+  });
+
+  it("uses the server actor-id party position instead of inferring the side from role alone", async () => {
+    actor.id = "user-local";
+    actor.role = "USER";
+    const wrapper = await mountInteractiveView({
+      initialDispute: {
+        ...dispute,
+        initiator_id: "merchant-local",
+        initiator_role: "MERCHANT",
+        respondent_id: "user-local",
+        respondent_role: "USER",
+        party_position: "RESPONDENT",
+      },
+      initialIntakeStatus: {
+        initiator_role: "MERCHANT",
+        respondent_role: "USER",
+        initiator_status: "COMPLETED",
+        respondent_status: "OPEN",
+        current_actor_completed: false,
+        can_use_intake: true,
+        can_enter_evidence: false,
+      },
+    });
+
+    expect(wrapper.get("[data-confirm-admission]").text()).toContain(
+      "确认陈述并进入证据室",
+    );
+    expect(wrapper.find("[data-resolve-without-dispute]").exists()).toBe(false);
+  });
+
+  it("keeps the initiator in intake after submitting its statement", async () => {
+    const confirmAction = vi.fn().mockResolvedValue({
+      case_status: "INTAKE_COMPLETED",
+      current_room: "INTAKE",
+      deadline_at: null,
+    });
+    const wrapper = await mountInteractiveView({
+      initialIntakeStatus: {
+        initiator_role: "USER",
+        respondent_role: "MERCHANT",
+        initiator_status: "OPEN",
+        respondent_status: "LOCKED",
+        current_actor_completed: false,
+        can_use_intake: true,
+        can_enter_evidence: false,
+      },
+      confirmAction,
+      eventStreamer: vi.fn(async () => {}),
+    });
+
+    await wrapper.get("[data-confirm-admission]").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.find("[data-enter-evidence-room]").exists()).toBe(false);
+    expect(wrapper.get("[data-waiting-for-respondent-intake]").text()).toContain(
+      "等待对方独立完善陈述",
+    );
+  });
+
+  it("isolates the respondent original statement from the initiator dossier", async () => {
+    actor.id = "user-local";
+    actor.role = "USER";
+    const respondentMemory = structuredClone(readyTurnMemory);
+    respondentMemory.case_intake_dossier.dossier.claim_resolution = {
+      initiator_role: "MERCHANT",
+      requested_resolution: "REPLACE_OR_REPAIR",
+      original_statement: "商家发起方的原始陈述不得展示给用户。",
+    };
+    const merchantAnalysis = {
+      ...analysis,
+      initiator_role: "MERCHANT",
+    };
+
+    const emptyWrapper = await mountInteractiveView({
+      initialAnalysis: merchantAnalysis,
+      initialTurnMemory: respondentMemory,
+      initialMessages: [],
+    });
+
+    expect(
+      emptyWrapper.get("[data-origin-statement-text]").attributes("title"),
+    ).toBe("暂无原始陈述");
+    emptyWrapper.unmount();
+
+    const repliedWrapper = await mountInteractiveView({
+      initialAnalysis: merchantAnalysis,
+      initialTurnMemory: respondentMemory,
+      initialMessages: [
+        {
+          id: "MESSAGE_RESPONDENT_1",
+          sequence_no: 3,
+          sender_type: "PARTY",
+          sender_role: "USER",
+          message_text: "没有拆封，也没有激活手机。",
+        },
+      ],
+    });
+
+    expect(
+      repliedWrapper.get("[data-origin-statement-text]").attributes("title"),
+    ).toBe("没有拆封，也没有激活手机。");
+    expect(
+      repliedWrapper.get("[data-origin-statement-text]").attributes("title"),
+    ).not.toContain("商家发起方");
+  });
+
+  it("creates one matrix-guided opening when an eligible respondent thread is empty", async () => {
+    actor.id = "merchant-local";
+    actor.role = "MERCHANT";
+    const openingAction = vi.fn().mockResolvedValue({
+      id: "MESSAGE_RESPONDENT_OPENING",
+      sequence_no: 1,
+    });
+    const messagesLoader = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          id: "MESSAGE_RESPONDENT_OPENING",
+          sequence_no: 1,
+          sender_role: "CUSTOMER_SERVICE",
+          message_text: "以下为发起方尚未核验的陈述，请先回应诉求和核心事实。",
+        },
+      ]);
+
+    const wrapper = await mountInteractiveView({
+      initialMessages: null,
+      initialIntakeStatus: {
+        initiator_role: "USER",
+        respondent_role: "MERCHANT",
+        initiator_status: "COMPLETED",
+        respondent_status: "OPEN",
+        current_actor_completed: false,
+        can_use_intake: true,
+        can_enter_evidence: false,
+      },
+      messagesLoader,
+      openingAction,
+      eventStreamer: vi.fn(async () => {}),
+    });
+
+    expect(openingAction).toHaveBeenCalledTimes(1);
+    expect(openingAction).toHaveBeenCalledWith(
+      { id: "merchant-local", role: "MERCHANT" },
+      "CASE_INTAKE_1",
+      "INTAKE",
+    );
+    expect(messagesLoader).toHaveBeenCalledTimes(2);
+    expect(wrapper.text()).toContain("请先回应诉求和核心事实");
+  });
+
+  it("starts respondent completeness independently from the initiator dossier", async () => {
+    actor.id = "merchant-local";
+    actor.role = "MERCHANT";
+    const initiatorMemory = structuredClone(readyTurnMemory);
+    initiatorMemory.case_intake_dossier.dossier.case_fact_matrix = {
+      schema_version: "case_fact_matrix.v2",
+      matrix_kind: "INITIATOR_FROZEN",
+    };
+    const wrapper = await mountInteractiveView({
+      initialTurnMemory: initiatorMemory,
+      initialIntakeStatus: {
+        initiator_role: "USER",
+        respondent_role: "MERCHANT",
+        initiator_status: "COMPLETED",
+        respondent_status: "OPEN",
+        current_actor_completed: false,
+        can_use_intake: true,
+        can_enter_evidence: false,
+      },
+      eventStreamer: vi.fn(async () => {}),
+    });
+
+    expect(wrapper.get("[data-dossier-status-rail]").text()).toContain("完善度 0%");
+    expect(wrapper.get("[data-dossier-status-rail]").text()).not.toContain("完善度 88%");
+  });
+
+  it("does not create a respondent opening for the initiating party", async () => {
+    const openingAction = vi.fn();
+    await mountInteractiveView({
+      initialMessages: null,
+      initialIntakeStatus: {
+        initiator_role: "USER",
+        respondent_role: "MERCHANT",
+        initiator_status: "OPEN",
+        respondent_status: "LOCKED",
+        current_actor_completed: false,
+        can_use_intake: true,
+        can_enter_evidence: false,
+      },
+      messagesLoader: vi.fn().mockResolvedValue([]),
+      openingAction,
+      eventStreamer: vi.fn(async () => {}),
+    });
+
+    expect(openingAction).not.toHaveBeenCalled();
   });
 
   it("renders completed intake as history and blocks every write path", async () => {
@@ -199,7 +534,8 @@ describe("IntakeRoomView", () => {
     expect(wrapper.text()).toContain("争议接待官");
     expect(wrapper.get("[data-dispute-detail-card]").text()).toContain("争议详情");
     expect(wrapper.text()).toContain("没有收到");
-    expect(wrapper.get("[data-dispute-detail-respondent]").text()).toContain("商家尚未回应");
+    expect(wrapper.get("[data-dispute-detail-respondent]").text()).toContain("对方（商家）回应");
+    expect(wrapper.get("[data-dispute-detail-respondent]").text()).toContain("暂无回应");
     expect(wrapper.get("[data-verification-gaps]").text()).toContain("下一步核验重点");
     expect(wrapper.text()).toContain("高风险");
     expect(wrapper.text()).not.toContain("签收人与收件人不一致");
@@ -217,7 +553,24 @@ describe("IntakeRoomView", () => {
       admissible: true,
       current_room: "EVIDENCE",
     });
-    const { wrapper, router } = await mountView(confirmAction);
+    const wrapper = await mountInteractiveView({
+      confirmAction,
+      initialIntakeStatus: {
+        initiator_status: "OPEN",
+        respondent_status: "LOCKED",
+        current_actor_completed: false,
+        can_use_intake: true,
+        can_enter_evidence: false,
+      },
+      intakeStatusLoader: vi.fn().mockResolvedValue({
+        initiator_status: "COMPLETED",
+        respondent_status: "COMPLETED",
+        current_actor_completed: true,
+        can_use_intake: false,
+        can_enter_evidence: true,
+      }),
+    });
+    const router = wrapper.vm.$router;
 
     await wrapper.get("[data-confirm-admission]").trigger("click");
     await flushPromises();
@@ -279,9 +632,9 @@ describe("IntakeRoomView", () => {
     expect(wrapper.get("[data-intake-work-status]").text()).toContain(
       "LIVE GENERATION",
     );
-    expect(wrapper.get('[data-connection="connected"]').text()).toContain(
-      "实时连接",
-    );
+    expect(
+      wrapper.get('[data-connection="connected"]').attributes("data-connection"),
+    ).toBe("connected");
     expect(wrapper.text()).not.toContain("暂时离线");
     expect(wrapper.get('[data-model-state="connected"]').text()).toContain(
       "正在输出",
@@ -389,6 +742,8 @@ describe("IntakeRoomView", () => {
 
     expect(wrapper.text()).toContain("我希望退款。");
     expect(messagesLoader).not.toHaveBeenCalled();
+    expect(wrapper.get("[data-confirm-admission]").text()).toContain("正在整理…");
+    expect(wrapper.get("[data-confirm-admission]").text()).not.toContain("正在盖章");
 
     resolvePost({
       id: "MESSAGE_USER_1",
@@ -461,8 +816,8 @@ describe("IntakeRoomView", () => {
     expect(wrapper.text()).toContain("用户反馈手表损坏");
     expect(wrapper.text()).toContain("故障细节");
     expect(wrapper.text()).toContain("用户原始陈述");
-    expect(wrapper.text()).toContain("商家期望处理方案");
-    expect(wrapper.text()).toContain("核对订单信息与涉案商品");
+    expect(wrapper.text()).toContain("商家对诉求的明确回应");
+    expect(wrapper.text()).not.toContain("核对订单信息与涉案商品");
     expect(wrapper.text()).toContain("继续完善案件信息");
     expect(wrapper.text()).toContain("待确认");
     expect(wrapper.text()).not.toContain("Expected outcome");
@@ -696,7 +1051,9 @@ describe("IntakeRoomView", () => {
     expect(disputeDetail.get("[data-dispute-detail-claim]").text()).toContain("用户称未实际收到包裹，并请求退款");
     expect(disputeDetail.get("[data-dispute-detail-claim]").text()).toContain("¥299");
     expect(disputeDetail.get("[data-dispute-detail-claim]").text()).toContain("儿童手表 1 件");
-    expect(disputeDetail.get("[data-dispute-detail-respondent]").text()).toContain("商家尚未回应");
+    expect(disputeDetail.get("[data-dispute-detail-claim]").text()).toContain("我方（用户）诉求");
+    expect(disputeDetail.get("[data-dispute-detail-respondent]").text()).toContain("对方（商家）回应");
+    expect(disputeDetail.get("[data-dispute-detail-respondent]").text()).toContain("暂无回应");
     expect(disputeDetail.get("[data-dispute-detail-respondent]").text()).not.toContain("商家尚未在接待室表达态度");
     expect(disputeDetail.find("[data-dispute-detail-focus]").exists()).toBe(false);
     expect(wrapper.get("[data-verification-gaps]").text()).toContain("签收人身份");
@@ -706,7 +1063,7 @@ describe("IntakeRoomView", () => {
   });
 
   // 业务位置：【前端接待室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
-  it("marks an extracted respondent attitude as the initiator's subjective account", async () => {
+  it("keeps a reported counterparty attitude out of the initiator response card", async () => {
     const wrapper = await mountInteractiveView({
       initialTurnMemory: {
         turn_no: 2,
@@ -738,13 +1095,15 @@ describe("IntakeRoomView", () => {
       },
     });
 
-    expect(wrapper.get("[data-dispute-detail-respondent]").text()).toContain(
-      "商家不支持补发（主观）",
-    );
+    const response = wrapper.get("[data-dispute-detail-respondent]");
+    expect(response.text()).toContain("对方（商家）回应");
+    expect(response.text()).toContain("暂无回应");
+    expect(response.text()).not.toContain("商家不支持补发");
+    expect(response.text()).not.toContain("主观");
   });
 
   // 业务位置：【前端接待室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
-  it("marks a legacy party-position fallback as a subjective account", async () => {
+  it("keeps a legacy counterparty position out of the initiator response card", async () => {
     const wrapper = await mountInteractiveView({
       initialTurnMemory: {
         turn_no: 2,
@@ -773,9 +1132,11 @@ describe("IntakeRoomView", () => {
       },
     });
 
-    expect(wrapper.get("[data-dispute-detail-respondent]").text()).toContain(
-      "商家不支持补发（主观）",
-    );
+    const response = wrapper.get("[data-dispute-detail-respondent]");
+    expect(response.text()).toContain("对方（商家）回应");
+    expect(response.text()).toContain("暂无回应");
+    expect(response.text()).not.toContain("商家不支持补发");
+    expect(response.text()).not.toContain("主观");
   });
 
   // 业务位置：【前端接待室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
@@ -864,7 +1225,8 @@ describe("IntakeRoomView", () => {
     const disputeDetail = wrapper.get("[data-dispute-detail-card]");
     expect(disputeDetail.text()).toContain("争议详情");
     expect(disputeDetail.get("[data-dispute-detail-claim]").text()).toContain("用户请求退款");
-    expect(disputeDetail.get("[data-dispute-detail-respondent]").text()).toContain("商家尚未回应");
+    expect(disputeDetail.get("[data-dispute-detail-respondent]").text()).toContain("对方（商家）回应");
+    expect(disputeDetail.get("[data-dispute-detail-respondent]").text()).toContain("暂无回应");
     expect(disputeDetail.find("[data-dispute-detail-focus]").exists()).toBe(false);
     expect(disputeDetail.text()).not.toContain("REFUND");
     expect(disputeDetail.text()).not.toContain("UNKNOWN");
@@ -908,8 +1270,11 @@ describe("IntakeRoomView", () => {
     });
 
     const respondent = wrapper.get("[data-dispute-detail-respondent]");
+    expect(wrapper.get("[data-dispute-detail-claim]").text()).toContain("对方（商家）诉求");
+    expect(respondent.text()).toContain("我方（用户）回应");
     expect(respondent.text()).toContain("用户不同意驳回，仍要求退款");
     expect(respondent.text()).not.toContain("商家请求平台驳回退款");
+    expect(respondent.text()).not.toContain("主观");
   });
 
   // 业务位置：【前端接待室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
@@ -942,7 +1307,8 @@ describe("IntakeRoomView", () => {
       },
     });
 
-    expect(wrapper.get("[data-dispute-detail-respondent]").text()).toContain("用户尚未回应");
+    expect(wrapper.get("[data-dispute-detail-respondent]").text()).toContain("我方（用户）回应");
+    expect(wrapper.get("[data-dispute-detail-respondent]").text()).toContain("暂无回应");
     expect(wrapper.get("[data-verification-gaps]").text()).toContain("用户对诉求的明确回应");
     expect(wrapper.get("[data-verification-gaps]").text()).not.toContain("商家对诉求的明确回应");
   });
@@ -1008,7 +1374,7 @@ describe("IntakeRoomView", () => {
     expect(disputeDetail.get("[data-dispute-detail-claim]").text()).toContain("等待接待官整理");
     expect(disputeDetail.get("[data-dispute-detail-claim]").text()).not.toContain("请求待确认诉求");
     expect(disputeDetail.get("[data-dispute-detail-claim]").text()).not.toContain("待确认诉求待确认");
-    expect(disputeDetail.get("[data-dispute-detail-respondent]").text()).toContain("等待接待官整理");
+    expect(disputeDetail.get("[data-dispute-detail-respondent]").text()).toContain("暂无回应");
     expect(disputeDetail.text()).not.toContain("UNKNOWN");
   });
 
@@ -1040,7 +1406,7 @@ describe("IntakeRoomView", () => {
     const disputeDetail = wrapper.get("[data-dispute-detail-card]");
     expect(disputeDetail.get("[data-dispute-detail-claim]").text()).toContain("等待接待官整理");
     expect(disputeDetail.get("[data-dispute-detail-claim]").text()).not.toContain("待确认诉求待确认");
-    expect(disputeDetail.get("[data-dispute-detail-respondent]").text()).toContain("等待接待官整理");
+    expect(disputeDetail.get("[data-dispute-detail-respondent]").text()).toContain("暂无回应");
     expect(disputeDetail.get("[data-dispute-detail-respondent]").text()).not.toContain("待确认尚未回应");
     expect(disputeDetail.text()).not.toContain("待确认尚未");
     expect(disputeDetail.text()).not.toContain("待确认的具体诉求");
@@ -1371,7 +1737,7 @@ describe("IntakeRoomView", () => {
   });
 
   // 业务位置：【前端接待室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
-  it("infers the single-party intake initiator from immutable party messages when the model slot is missing", async () => {
+  it("infers the initiator from immutable party messages and keeps the respondent locked", async () => {
     actor.id = "user-local";
     actor.role = "USER";
     const { initiator_role: _initiatorRole, ...analysisWithoutInitiator } = analysis;
@@ -1399,7 +1765,8 @@ describe("IntakeRoomView", () => {
     expect(wrapper.find("[data-intake-locked-chat]").exists()).toBe(true);
     expect(wrapper.find("[data-confirm-admission]").exists()).toBe(false);
     expect(wrapper.find("[data-resolve-without-dispute]").exists()).toBe(false);
-    expect(wrapper.find("[data-enter-evidence-room]").exists()).toBe(true);
+    expect(wrapper.find("[data-enter-evidence-room]").exists()).toBe(false);
+    expect(wrapper.find("[data-intake-waiting-for-initiator]").exists()).toBe(true);
   });
 
   // 业务位置：【前端接待室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
@@ -1528,6 +1895,11 @@ describe("IntakeRoomView", () => {
       current_room: null,
     });
     const { wrapper, router } = await mountView(confirmAction, null, cancelAction);
+    disputeStore.list.data = [
+      { id: "CASE_INTAKE_1" },
+      { id: "CASE_REMAINS" },
+    ];
+    disputeStore.current.data = { id: "CASE_INTAKE_1" };
 
     await wrapper.get("[data-resolve-without-dispute]").trigger("click");
     await flushPromises();
@@ -1538,13 +1910,9 @@ describe("IntakeRoomView", () => {
       }),
     );
     expect(confirmAction).not.toHaveBeenCalled();
-    expect(router.currentRoute.value.path).toBe(
-      "/disputes/CASE_INTAKE_1/intake",
-    );
-    expect(wrapper.find("[data-resolve-without-dispute]").exists()).toBe(false);
-    expect(wrapper.get("[data-intake-result]").text()).toContain(
-      "争议已取消，接待室已归档",
-    );
+    expect(router.currentRoute.value.path).toBe("/disputes");
+    expect(disputeStore.list.data).toEqual([{ id: "CASE_REMAINS" }]);
+    expect(disputeStore.current.data).toBeNull();
   });
 
   // 业务位置：【前端接待室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
@@ -1562,7 +1930,7 @@ describe("IntakeRoomView", () => {
   });
 
   // 业务位置：【前端接待室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
-  it("keeps the non-initiating party out of the single-party intake composer", async () => {
+  it("keeps the respondent locked until the initiator completes intake", async () => {
     actor.id = "merchant-local";
     actor.role = "MERCHANT";
 
@@ -1572,10 +1940,10 @@ describe("IntakeRoomView", () => {
 
     expect(wrapper.find(".conversation-stream__composer").exists()).toBe(false);
     expect(wrapper.find("[data-intake-locked-chat]").exists()).toBe(true);
-    expect(wrapper.text()).toContain("只有发起方可以查看哦");
+    expect(wrapper.get("[data-intake-locked-chat]").text()).toContain("接待会话尚未开放");
     expect(wrapper.find("[data-confirm-admission]").exists()).toBe(false);
     expect(wrapper.find("[data-resolve-without-dispute]").exists()).toBe(false);
-    expect(wrapper.find("[data-enter-evidence-room]").exists()).toBe(true);
+    expect(wrapper.find("[data-enter-evidence-room]").exists()).toBe(false);
   });
 
   // 业务位置：【前端接待室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。

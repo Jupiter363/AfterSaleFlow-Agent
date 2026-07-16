@@ -215,6 +215,27 @@ def test_evidence_turn_request_rejects_actor_role_mismatch() -> None:
     assert "actor_role must match agent_context.actor_role" in str(failure.value)
 
 
+def test_evidence_turn_request_accepts_hearing_evidence_supplement_scope() -> None:
+    payload = _evidence_payload()
+    envelope = payload["context_envelope"]
+    context = payload["agent_context"]
+    old_scope = context["conversation_scope"]
+    hearing_scope = old_scope.replace(":EVIDENCE:", ":HEARING:")
+
+    envelope["case_snapshot"]["current_room"] = "HEARING"
+    envelope["room_policy"]["room_type"] = "HEARING"
+    envelope["room_policy"]["room_id"] = "ROOM_context_hearing"
+    envelope["actor_snapshot"]["conversation_scope"] = hearing_scope
+    envelope["private_conversation"]["conversation_scope"] = hearing_scope
+    context["room_type"] = "HEARING"
+    context["conversation_scope"] = hearing_scope
+
+    request = EvidenceTurnRequest.model_validate(payload)
+
+    assert request.context_envelope.room_policy.room_type == "HEARING"
+    assert request.agent_context.room_type == "HEARING"
+
+
 # 所属模块：Agent Harness > test_agent_invocation_context；函数角色：回归测试用例。
 # 具体功能：`test_request_rejects_case_id_and_room_type_mismatch` 验证本阶段状态在固定案例中的输出、边界和失败行为；关键协作调用：`pytest.raises`、`IntakeTurnRequest.model_validate`、`EvidenceTurnRequest.model_validate`。
 # 上下游：上游为 Java 可信快照、调用身份、上下文合同、角色模板；下游为 本文件的 `_intake_payload`、`_evidence_payload`。

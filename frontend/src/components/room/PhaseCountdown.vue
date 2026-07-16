@@ -29,7 +29,11 @@ watch(
 const remainingMs = computed(() => {
   const estimatedServerNow =
     anchorServer.value + (localNow.value - anchorLocal.value);
-  return Math.max(0, Date.parse(props.deadlineAt) - estimatedServerNow);
+  const deadline = Date.parse(props.deadlineAt);
+  if (!Number.isFinite(deadline) || !Number.isFinite(estimatedServerNow)) {
+    return 0;
+  }
+  return Math.max(0, deadline - estimatedServerNow);
 });
 
 const formatted = computed(() => {

@@ -1119,7 +1119,7 @@ API 路径：正式版不使用 /v2、/v3；
 # Room-based dispute workflow
 EVIDENCE_WINDOW=PT2H
 HEARING_WINDOW=PT3H
-MAX_HEARING_ROUNDS=3
+HEARING_PARTY_STAGE_WINDOW=PT20M
 SSE_HEARTBEAT=PT15S
 SSE_EMITTER_TIMEOUT=PT4H
 SEED_DEMO_DISPUTES=true
@@ -1144,7 +1144,7 @@ SSE 心跳：PT15S。
 dispute:
   evidence-window: ${EVIDENCE_WINDOW:PT2H}
   hearing-window: ${HEARING_WINDOW:PT3H}
-  max-hearing-rounds: ${MAX_HEARING_ROUNDS:3}
+  hearing-party-stage-window: ${HEARING_PARTY_STAGE_WINDOW:PT20M}
   sse-heartbeat: ${SSE_HEARTBEAT:PT15S}
   sse-emitter-timeout: ${SSE_EMITTER_TIMEOUT:PT4H}
   seed-demo-disputes: ${SEED_DEMO_DISPUTES:true}
@@ -1157,7 +1157,7 @@ dispute:
 
 ```text
 Duration 必须为正；
-MAX_HEARING_ROUNDS 必须在 1..5；
+HEARING_PARTY_STAGE_WINDOW 必须为正；
 SSE_EMITTER_TIMEOUT 必须大于 HEARING_WINDOW；
 Outbox batch size 必须在 1..1000。
 ```
@@ -1197,7 +1197,7 @@ CLOSED
 
 - [ ] `EVIDENCE_WINDOW=PT2H`。
 - [ ] `HEARING_WINDOW=PT3H`。
-- [ ] `MAX_HEARING_ROUNDS=3`。
+- [ ] `HEARING_PARTY_STAGE_WINDOW=PT20M`。
 - [ ] SSE 心跳与长连接超时合法。
 - [ ] 前端无法通过本地配置改变服务端截止时间。
 - [ ] 演示种子在生产关闭。

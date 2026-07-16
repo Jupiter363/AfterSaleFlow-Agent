@@ -14,12 +14,18 @@ import com.example.dispute.evidence.infrastructure.persistence.repository.Eviden
 import com.example.dispute.infrastructure.persistence.entity.EvidenceItemEntity;
 import com.example.dispute.infrastructure.persistence.repository.EvidenceItemRepository;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
+import com.example.dispute.room.domain.RoomType;
+import com.example.dispute.room.infrastructure.persistence.repository.CaseIntakeDossierRepository;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -35,6 +41,7 @@ public class EvidenceVerificationService {
     private final FulfillmentCaseRepository caseRepository;
     private final EvidenceItemRepository evidenceRepository;
     private final EvidenceVerificationRepository verificationRepository;
+    private final CaseIntakeDossierRepository intakeDossierRepository;
     private final ObjectMapper objectMapper;
     private final Clock clock;
 
@@ -48,11 +55,13 @@ public class EvidenceVerificationService {
             FulfillmentCaseRepository caseRepository,
             EvidenceItemRepository evidenceRepository,
             EvidenceVerificationRepository verificationRepository,
+            CaseIntakeDossierRepository intakeDossierRepository,
             ObjectMapper objectMapper,
             Clock clock) {
         this.caseRepository = caseRepository;
         this.evidenceRepository = evidenceRepository;
         this.verificationRepository = verificationRepository;
+        this.intakeDossierRepository = intakeDossierRepository;
         this.objectMapper = objectMapper;
         this.clock = clock;
     }
@@ -81,11 +90,13 @@ public class EvidenceVerificationService {
                 evidenceRepository.findById(evidenceId)
                         .filter(item -> item.getCaseId().equals(caseId))
                         .orElseThrow(() -> new IllegalArgumentException("evidence not found"));
-        int version =
+        var previous =
                 verificationRepository
-                                .findTopByEvidenceIdOrderByVerificationVersionDesc(evidence.getId())
-                                .map(item -> item.getVerificationVersion() + 1)
-                                .orElse(1);
+                        .findTopByEvidenceIdOrderByVerificationVersionDesc(evidence.getId());
+        int version = previous.map(item -> item.getVerificationVersion() + 1).orElse(1);
+        String agentFindingsJson =
+                mergedAndValidatedAgentFindings(
+                        caseId, command.agentFindingsJson(), previous.orElse(null));
         EvidenceVerificationStatus status = status(command);
         var reasons = reasons(command);
         EvidenceVerificationEntity saved =
@@ -97,13 +108,121 @@ public class EvidenceVerificationService {
                                 version,
                                 status,
                                 checksJson(command),
-                                command.agentFindingsJson(),
+                                agentFindingsJson,
                                 json(reasons),
-                                status == EvidenceVerificationStatus.NEEDS_HUMAN_REVIEW,
+                        status == EvidenceVerificationStatus.NEEDS_HUMAN_REVIEW
+                                || status == EvidenceVerificationStatus.SUSPICIOUS,
                                 clock.instant(),
                                 actor.actorId(),
                                 traceId));
         return view(saved);
+    }
+
+    private String mergedAndValidatedAgentFindings(
+            String caseId,
+            String requestedJson,
+            EvidenceVerificationEntity previous) {
+        ObjectNode merged = objectMapper.createObjectNode();
+        if (previous != null) {
+            JsonNode previousNode = parseObject(previous.getAgentFindingsJson());
+            previousNode.fields().forEachRemaining(entry -> merged.set(entry.getKey(), entry.getValue()));
+        }
+        JsonNode requested = parseObject(requestedJson);
+        requested.fields().forEachRemaining(entry -> merged.set(entry.getKey(), entry.getValue()));
+        validateFormalFactReferences(caseId, merged);
+        return json(merged);
+    }
+
+    private JsonNode parseObject(String value) {
+        try {
+            JsonNode node = objectMapper.readTree(value);
+            if (!node.isObject()) {
+                throw new IllegalArgumentException("agentFindingsJson must be a JSON object");
+            }
+            return node;
+        } catch (JsonProcessingException exception) {
+            throw new IllegalArgumentException("agentFindingsJson must be valid JSON", exception);
+        }
+    }
+
+    private void validateFormalFactReferences(String caseId, JsonNode findings) {
+        Set<String> allowedFactIds = officialFactIds(caseId);
+        Set<String> linkedFactIds = new LinkedHashSet<>();
+        JsonNode factLinks = findings.path("fact_links");
+        if (factLinks.isArray()) {
+            for (JsonNode link : factLinks) {
+                String factId = link.path("fact_id").asText("").trim();
+                if (!allowedFactIds.contains(factId)) {
+                    throw new IllegalArgumentException(
+                            "verification references unknown formal fact_id: " + factId);
+                }
+                linkedFactIds.add(factId);
+            }
+        }
+        validateFactIdArray(findings.path("supported_fact_ids"), allowedFactIds);
+        JsonNode patches = findings.path("fact_matrix_patch");
+        if (patches.isArray()) {
+            for (JsonNode patch : patches) {
+                String factId = patch.path("fact_id").asText("").trim();
+                if (!allowedFactIds.contains(factId)) {
+                    throw new IllegalArgumentException(
+                            "verification patch references unknown formal fact_id: " + factId);
+                }
+            }
+        }
+        if (findings.has("relevance_score")
+                && findings.path("relevance_score").asDouble(0.0) >= 0.50
+                && linkedFactIds.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "relevant evidence verification must retain a formal fact link");
+        }
+    }
+
+    private void validateFactIdArray(JsonNode values, Set<String> allowedFactIds) {
+        if (!values.isArray()) {
+            return;
+        }
+        for (JsonNode value : values) {
+            String factId = value.asText("").trim();
+            if (!allowedFactIds.contains(factId)) {
+                throw new IllegalArgumentException(
+                        "verification references unknown formal fact_id: " + factId);
+            }
+        }
+    }
+
+    private Set<String> officialFactIds(String caseId) {
+        JsonNode dossier =
+                intakeDossierRepository
+                        .findByCaseIdAndRoomType(caseId, RoomType.INTAKE)
+                        .map(item -> parseObject(item.getDossierJson()))
+                        .orElseThrow(
+                                () ->
+                                        new IllegalStateException(
+                                                "intake dossier is required for evidence verification"));
+        JsonNode matrix = dossier.path("case_fact_matrix");
+        if (!"case_fact_matrix.v2".equals(matrix.path("schema_version").asText())) {
+            matrix = dossier.path("unilateral_case_matrix");
+        }
+        JsonNode rows = matrix.path("fact_rows");
+        boolean supported =
+                "case_fact_matrix.v2".equals(matrix.path("schema_version").asText())
+                        || "unilateral_case_matrix.v1"
+                                .equals(matrix.path("schema_version").asText());
+        if (!supported
+                || !rows.isArray()
+                || rows.isEmpty()) {
+            throw new IllegalStateException(
+                    "frozen case_fact_matrix.v2 is required for evidence verification");
+        }
+        Set<String> factIds = new LinkedHashSet<>();
+        for (JsonNode row : rows) {
+            String factId = row.path("fact_id").asText("").trim();
+            if (factId.isBlank() || !factIds.add(factId)) {
+                throw new IllegalStateException("intake matrix contains invalid fact ids");
+            }
+        }
+        return Set.copyOf(factIds);
     }
 
     // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceVerificationService.status(EvidenceVerificationCommand)」。
@@ -140,6 +259,12 @@ public class EvidenceVerificationService {
         if (!command.sourceTrusted()) reasons.add("SOURCE_NOT_PROVEN");
         if (command.duplicate()) reasons.add("DUPLICATE_EVIDENCE");
         if (command.agentFlagsConflict()) reasons.add("AGENT_CONSISTENCY_CONFLICT");
+        if ((!command.hashValid() || command.duplicate())
+                && command.signatureValid()
+                && command.mimeValid()
+                && command.sizeAllowed()) {
+            reasons.add("SUSPECTED_FORGERY");
+        }
         return reasons;
     }
 

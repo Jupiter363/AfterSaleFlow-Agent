@@ -51,6 +51,7 @@ const props = defineProps({
   modelHealthLoader: { type: Function, default: null },
   agentReplyPollAttempts: { type: Number, default: 5 },
   agentReplyPollDelayMs: { type: Number, default: 1500 },
+  boardStreamStepDelayMs: { type: Number, default: 120 },
 });
 
 const route = useRoute();
@@ -60,12 +61,26 @@ const completion = ref(props.initialCompletion);
 const uploading = ref(false);
 const submittingBatch = ref(false);
 const completing = ref(false);
+const boardStreaming = ref(false);
+const boardStreamProgress = reactive({ current: 0, total: 0 });
+const boardStreamingEvidenceIds = ref(new Set());
 const error = ref("");
 const streamError = ref("");
 const evidenceGateError = ref("");
 const agentState = ref("LISTENING");
 const fileInput = ref(null);
+const evidenceUploadModal = ref(null);
+const uploadDeclarationOpen = ref(false);
+const pendingUploadFile = ref(null);
+const uploadDeclarationError = ref("");
+const uploadDeclarationForm = reactive({
+  claimedFact: "",
+  truthAttested: false,
+});
+const claimedFactMinLength = 5;
+const claimedFactMaxLength = 1000;
 const messages = ref([...(props.initialMessages || [])]);
+const intakeFactRows = ref([]);
 const selectedEvidence = ref(null);
 const selectedEvidenceMode = ref("evidence");
 const expandedEvidenceGroup = ref(null);
@@ -80,6 +95,8 @@ const modalTriggers = new Map();
 let eventAbortController = new AbortController();
 let eventStreamActive = false;
 let workspaceGeneration = 0;
+let evidenceAgentRunsInFlight = 0;
+let boardStreamToken = 0;
 let modalKeydownAttached = false;
 let modelHealthTimer = null;
 let modelHealthInFlight = null;
@@ -125,21 +142,59 @@ const displayedMessages = computed(() => {
     message_text: displayEvidenceReferences(message?.message_text),
   }));
 });
+const factReferenceLabels = computed(() => {
+  const labels = new Map();
+  intakeFactRows.value.forEach((row, index) => {
+    const factId = String(row?.fact_id || row?.factId || "").trim();
+    if (!factId) return;
+    const factTarget = String(
+      row?.fact_target || row?.factTarget || row?.fact || row?.statement || "",
+    ).trim();
+    labels.set(factId, factTarget || `争议事实 ${index + 1}`);
+  });
+
+  let fallbackIndex = intakeFactRows.value.length;
+  messages.value.forEach((message) => {
+    const factIds = String(message?.message_text || "").match(
+      /\bFACT_[A-Za-z0-9_-]+\b/g,
+    ) || [];
+    factIds.forEach((factId) => {
+      if (labels.has(factId)) return;
+      fallbackIndex += 1;
+      labels.set(factId, `争议事实 ${fallbackIndex}`);
+    });
+  });
+  return labels;
+});
 const evidenceStreamingRuns = computed(() =>
   activeAgentStreams({
     caseId: caseId.value,
     roomType: "EVIDENCE",
     actorId: effectiveActor.value.id,
     actorRole: effectiveActor.value.role,
-  }).map((run) => ({
-    ...run,
-    content: displayEvidenceReferences(run.content),
-  })),
+  }).map((run) => {
+    const cards = Object.fromEntries(
+      Object.entries(run.cards || {}).map(([key, card]) => [
+        key,
+        {
+          ...card,
+          content: displayEvidenceReferences(card?.content),
+        },
+      ]),
+    );
+    return {
+      ...run,
+      cards,
+      content: displayEvidenceReferences(run.content),
+      receivedContent: displayEvidenceReferences(run.receivedContent),
+    };
+  }),
 );
 const modelConnected = computed(() => modelConnectionState.value === "connected");
 const modelConnectionLabel = computed(() => {
   if (historyMode.value) return "历史记录已封存";
   if (evidenceStreamingRuns.value.length) return "数字人正在输出";
+  if (boardStreaming.value) return "证据展板正在同步";
   if (modelConnectionState.value === "connected") return "数字人已连接";
   if (modelConnectionState.value === "checking") return "连接检测中";
   return "数字人未连接";
@@ -160,10 +215,12 @@ const evidenceConversationEmptyText = computed(() => {
 const evidenceComposerDisabled = computed(() =>
   historyMode.value ||
   !modelConnected.value ||
+  !evidenceCatalogReady.value ||
   (shouldEnsureOpening.value && !initialEvidencePlanReady.value) ||
   uploading.value ||
   submittingBatch.value ||
   completing.value ||
+  boardStreaming.value ||
   evidenceStreamingRuns.value.length > 0,
 );
 const evidenceWorkStatus = computed(() => {
@@ -171,12 +228,14 @@ const evidenceWorkStatus = computed(() => {
   if (evidenceStreamingRuns.value.length || agentState.value === "STREAMING") {
     return "STREAMING";
   }
+  if (boardStreaming.value) return "BOARD_STREAMING";
   if (!modelConnected.value) {
     return modelConnectionState.value === "checking"
       ? "MODEL_CONNECTING"
       : "MODEL_DISCONNECTED";
   }
   if (error.value) return "ERROR";
+  if (!evidenceCatalogReady.value) return "CATALOG_LOADING";
   if (completion.value?.sealed) return "HANDOFF";
   if (!initialEvidencePlanReady.value && shouldEnsureOpening.value) {
     return "GENERATING_INITIAL";
@@ -206,6 +265,12 @@ const evidenceWorkStatusCopy = computed(() => {
       description: "模型服务暂不可用；恢复连接后才能生成核验计划或提交说明。",
       tone: "error",
     },
+    CATALOG_LOADING: {
+      eyebrow: "EVIDENCE STATUS",
+      title: "正在同步证据目录",
+      description: "正在确认争议发起方和当前证据状态，完成后开放举证操作。",
+      tone: "working",
+    },
     GENERATING_INITIAL: {
       eyebrow: "EVIDENCE STATUS",
       title: "证据书记官正在生成首轮核验计划",
@@ -222,6 +287,12 @@ const evidenceWorkStatusCopy = computed(() => {
       eyebrow: "LIVE GENERATION",
       title: "证据书记官正在流式输出",
       description: "核验意见正在生成；完成校验并正式入库前，当前内容仅作实时展示。",
+      tone: "streaming",
+    },
+    BOARD_STREAMING: {
+      eyebrow: "BOARD SYNC",
+      title: "证据展板正在逐项更新",
+      description: "书记官回复已完成，正在把已校验并入库的证据状态、核验结果和人工复核要求同步到展板。",
       tone: "streaming",
     },
     READY: {
@@ -249,7 +320,8 @@ const items = computed(() => catalog.value?.items || []);
 const actorOwnedItems = computed(() =>
   items.value.filter(
     (item) =>
-      evidenceField(item, "submitted_by_role", "submittedByRole", "") === role.value,
+      evidenceField(item, "submitted_by_id", "submittedById", "") ===
+      effectiveActor.value.id,
   ),
 );
 const pendingItems = computed(() =>
@@ -270,18 +342,72 @@ const humanReviewScopeItems = computed(() =>
 const humanReviewItems = computed(() =>
   humanReviewScopeItems.value.filter((item) => evidenceRequiresHumanReview(item)),
 );
-const initiatorRole = computed(
-  () => catalog.value?.initiator_role || catalog.value?.initiatorRole || "USER",
+const initiatorId = computed(
+  () => catalog.value?.initiator_id || catalog.value?.initiatorId || "",
 );
-const currentActorIsInitiator = computed(() => role.value === initiatorRole.value);
+const evidenceCatalogReady = computed(() => Boolean(initiatorId.value));
+const currentActorIsInitiator = computed(
+  () => evidenceCatalogReady.value && effectiveActor.value.id === initiatorId.value,
+);
+const currentPartyLabel = computed(() => {
+  if (role.value === "MERCHANT") return "商家";
+  if (role.value === "USER") return "用户";
+  return "当前提交方";
+});
+const uploadPartyCapacityLabel = computed(() =>
+  !evidenceCatalogReady.value
+    ? "身份同步中"
+    : currentActorIsInitiator.value
+      ? "争议发起方"
+      : "被争议方",
+);
+const uploadForgeryConsequence = computed(() =>
+  currentActorIsInitiator.value
+    ? `经平台人工复核确认证据造假后，将驳回${currentPartyLabel.value}的全部诉求、终止争议受理并扣减信誉分。`
+    : `经平台人工复核确认证据造假后，将支持并进入执行对方的全部合理诉求，并扣减${currentPartyLabel.value}的信誉分。`,
+);
+const pendingUploadFileSize = computed(() => {
+  const bytes = Number(pendingUploadFile.value?.size || 0);
+  if (!bytes) return "大小未知";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+});
+const evidenceUploadReady = computed(() =>
+  Boolean(
+    pendingUploadFile.value &&
+    uploadDeclarationForm.claimedFact.trim().length >= claimedFactMinLength &&
+    uploadDeclarationForm.claimedFact.trim().length <= claimedFactMaxLength &&
+    uploadDeclarationForm.truthAttested,
+  ),
+);
+const evidenceUploadGuidance = computed(() => {
+  if (!pendingUploadFile.value) return "先选择一份文件，再填写该材料能够证明的具体事实。";
+  const claimedFactLength = uploadDeclarationForm.claimedFact.trim().length;
+  if (!claimedFactLength) return "文件已选择。下一步请填写这份材料能够证明的具体事实。";
+  if (claimedFactLength < claimedFactMinLength) {
+    return `证明内容还需填写至少 ${claimedFactMinLength - claimedFactLength} 个字符。`;
+  }
+  if (!uploadDeclarationForm.truthAttested) {
+    return "证明内容已填写。请继续勾选证据真实性与相关性承诺。";
+  }
+  return "声明已完整，可以确认上传。";
+});
 const canCompleteEvidenceLocally = computed(
-  () => !currentActorIsInitiator.value || submittedItems.value.length > 0,
+  () =>
+    evidenceCatalogReady.value &&
+    (!currentActorIsInitiator.value || submittedItems.value.length > 0),
 );
 const effectiveDeadline = computed(
   () =>
-    props.deadlineAt ||
+    completion.value?.next_deadline_at ||
+    completion.value?.nextDeadlineAt ||
+    completion.value?.evidence_deadline_at ||
+    completion.value?.evidenceDeadlineAt ||
     completion.value?.deadline_at ||
-    new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(),
+    completion.value?.deadlineAt ||
+    props.deadlineAt ||
+    "",
 );
 const effectiveServerNow = computed(
   () => props.serverNow || new Date().toISOString(),
@@ -362,6 +488,11 @@ const humanReviewReasonLabels = {
   METADATA_MISSING: "缺少可用于交叉核验的元数据",
   CROSS_SOURCE_CONFLICT: "与其他材料存在冲突",
   CONTENT_NOT_RELEVANT: "材料与当前争议事实的关联性不足",
+  SUSPECTED_FORGERY_LOW_AUTHENTICITY: "疑似造假：真实性评分低于 50%",
+  LOW_AUTHENTICITY_SUSPECTED_FORGERY: "疑似造假：真实性评分低于 50%",
+  SUSPECTED_FORGERY: "疑似造假：真实性评分低于 50%，等待人工确认",
+  LOW_RELEVANCE_SCORE: "关联度低：材料与所填证明内容的关联性评分低于 50%",
+  LOW_RELEVANCE: "关联度低：材料与所填证明内容的关联性评分低于 50%",
 };
 
 const fileIconCatalog = {
@@ -570,6 +701,22 @@ function evidenceOriginalFilename(item) {
   return evidenceField(item, "original_filename", "originalFilename", "");
 }
 
+function evidenceHumanReviewTags(item) {
+  const reasons = new Set(evidenceHumanReviewReasons(item));
+  const tags = [];
+  if (
+    reasons.has("SUSPECTED_FORGERY_LOW_AUTHENTICITY") ||
+    reasons.has("LOW_AUTHENTICITY_SUSPECTED_FORGERY") ||
+    reasons.has("SUSPECTED_FORGERY")
+  ) {
+    tags.push("疑似造假");
+  }
+  if (reasons.has("LOW_RELEVANCE_SCORE") || reasons.has("LOW_RELEVANCE")) {
+    tags.push("关联度低");
+  }
+  return tags.length ? tags : ["人工审核任务"];
+}
+
 function compactEvidenceDisplayName(item) {
   const originalName = evidenceOriginalFilename(item);
   const fileName = String(originalName || "").split(/[\\/]/).pop() || "";
@@ -583,7 +730,7 @@ function compactEvidenceDisplayName(item) {
 }
 
 function displayEvidenceReferences(value, fallbackItem = null) {
-  const replaced = String(value || "").replace(
+  let replaced = String(value || "").replace(
     /(?:证据\s*)?EVIDENCE_[A-Za-z0-9_-]+/g,
     (internalId) => {
       const normalizedId = internalId.match(/EVIDENCE_[A-Za-z0-9_-]+/)?.[0] || "";
@@ -597,6 +744,19 @@ function displayEvidenceReferences(value, fallbackItem = null) {
         : "该证据";
     },
   );
+  replaced = replaced.replace(
+    /\bFACT(?:_[A-Za-z0-9_-]*)?\b/g,
+    (factId) => factReferenceLabels.value.get(factId) || "相关争议事实",
+  );
+  replaced = replaced
+    .replaceAll("PARTIALLY_COVERED_BY_FROZEN_DOSSIER", "庭前证据支持不完整")
+    .replaceAll("NOT_COVERED_BY_FROZEN_DOSSIER", "尚无庭前证据支持")
+    .replaceAll("COVERED_BY_SUBMITTED_EVIDENCE", "已有已提交证据支持")
+    .replaceAll("COVERED_BY_FROZEN_DOSSIER", "已有庭前证据支持")
+    .replaceAll("REQUIRES_HUMAN_REVIEW", "需要人工复核")
+    .replaceAll("未被庭前冻结证据卷宗覆盖", "尚无庭前证据支持")
+    .replaceAll("被庭前冻结证据卷宗部分覆盖", "庭前证据支持不完整")
+    .replaceAll("已被庭前冻结证据卷宗覆盖", "已有庭前证据支持");
   return replaced.replace(
     /(证据：[^，。；\s（）()]{1,6})[（(]文件名[:：][^）)]+[）)]/g,
     "$1",
@@ -648,6 +808,7 @@ function evidenceFileIconStatusClass(item) {
 
 // 业务位置：【前端证据室】modalRoot：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function modalRoot(modalName) {
+  if (modalName === "upload") return evidenceUploadModal.value;
   if (modalName === "gate") return evidenceGateModal.value;
   if (modalName === "detail") return evidenceDetailModal.value;
   if (modalName === "gallery") return evidenceGalleryModal.value;
@@ -770,6 +931,7 @@ function trapModalFocus(event, modalName) {
 // 业务位置：【前端证据室】closeTopModal：切换与 当前阶段业务数据 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function closeTopModal() {
   const topModal = modalStack.value.at(-1);
+  if (topModal === "upload") cancelEvidenceUpload();
   if (topModal === "detail") closeEvidenceDetail();
   if (topModal === "gallery") closeEvidenceGroup();
   if (topModal === "gate") dismissEvidenceGate();
@@ -832,6 +994,39 @@ const expandedEvidenceTitle = computed(() =>
   expandedEvidenceGroup.value === "pending" ? "本批待提交" : "我的原件匣",
 );
 
+function intakeFactRowsFromTurnMemory(turnMemory) {
+  const intakeDossier =
+    turnMemory?.case_intake_dossier?.dossier ||
+    turnMemory?.caseIntakeDossier?.dossier ||
+    null;
+  const dossier = intakeDossier || turnMemory?.scroll_snapshot || turnMemory?.scrollSnapshot;
+  const matrix =
+    dossier?.case_fact_matrix ||
+    dossier?.caseFactMatrix ||
+    dossier?.unilateral_case_matrix ||
+    dossier?.unilateralCaseMatrix ||
+    dossier;
+  const rows = matrix?.fact_rows || matrix?.factRows;
+  return Array.isArray(rows) ? rows : [];
+}
+
+async function loadIntakeFactRows(actorSnapshot, caseSnapshot) {
+  for (const roomType of ["INTAKE", "EVIDENCE"]) {
+    try {
+      const turnMemory = await roomApi.latestTurnMemory(
+        actorSnapshot,
+        caseSnapshot,
+        roomType,
+      );
+      const rows = intakeFactRowsFromTurnMemory(turnMemory);
+      if (rows.length) return rows;
+    } catch (_failure) {
+      // Fact labels are display enrichment; generic labels remain safe if unavailable.
+    }
+  }
+  return [];
+}
+
 // 业务位置：【前端证据室】load：读取 当前阶段业务数据，并依据当前案件、角色和会话权限裁剪成可用输入。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 async function load() {
   const generation = workspaceGeneration;
@@ -848,6 +1043,11 @@ async function load() {
       if (!isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) return;
       completion.value = nextCompletion;
     }
+    if (!intakeFactRows.value.length) {
+      const nextFactRows = await loadIntakeFactRows(actorSnapshot, caseSnapshot);
+      if (!isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) return;
+      intakeFactRows.value = nextFactRows;
+    }
     if (props.initialMessages === null) {
       const nextMessages = await loadActorScopedMessages(
         generation,
@@ -858,8 +1058,13 @@ async function load() {
       if (nextMessages === null) return;
       messages.value = nextMessages;
       if (shouldDiscoverActiveEvidenceRuns.value) {
-        await resumeActiveEvidenceRuns(actorSnapshot, caseSnapshot);
+        await resumeActiveEvidenceRuns(actorSnapshot, caseSnapshot, generation);
       }
+    }
+    if (!evidenceCatalogReady.value) {
+      const nextCatalog = await loadCatalogOrEmpty(actorSnapshot, caseSnapshot);
+      if (!isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) return;
+      catalog.value = nextCatalog;
     }
   } catch (failure) {
     if (!isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) return;
@@ -900,6 +1105,9 @@ async function loadActorScopedMessages(
   await consumeEvidenceAgentRun(opening, {
     actorSnapshot,
     caseSnapshot,
+    onFinal: () => isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)
+      ? refreshWorkspace({ generation, streamBoard: true })
+      : undefined,
   });
   if (!isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) {
     return null;
@@ -919,6 +1127,7 @@ async function loadActorScopedMessages(
 async function resumeActiveEvidenceRuns(
   actorSnapshot = { ...effectiveActor.value },
   caseSnapshot = caseId.value,
+  generation = workspaceGeneration,
 ) {
   if (historyMode.value) return;
   const activeRuns = await loadActiveAgentRuns(
@@ -930,7 +1139,9 @@ async function resumeActiveEvidenceRuns(
     consumeEvidenceAgentRun(descriptor, {
       actorSnapshot,
       caseSnapshot,
-      onFinal: () => refreshWorkspace(),
+      onFinal: () => isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)
+        ? refreshWorkspace({ generation, streamBoard: true })
+        : undefined,
     }),
   ));
 }
@@ -943,38 +1154,33 @@ async function consumeEvidenceAgentRun(result, options = {}) {
   const caseSnapshot = options.caseSnapshot || caseId.value;
   streamError.value = "";
   agentState.value = "STREAMING";
-  await consumeAgentRun({
-    actor: actorSnapshot,
-    caseId: caseSnapshot,
-    roomType: "EVIDENCE",
-    descriptor,
-    agentLabel: "证据书记官",
-    senderRole: "EVIDENCE_CLERK",
-    signal: eventAbortController.signal,
-    onFinal: options.onFinal,
-    onError: (failure) => {
-      streamError.value = failure.message;
-    },
-  });
-  if (agentState.value === "STREAMING") agentState.value = "SPEAKING";
-  return true;
+  evidenceAgentRunsInFlight += 1;
+  try {
+    const finalResult = await consumeAgentRun({
+      actor: actorSnapshot,
+      caseId: caseSnapshot,
+      roomType: "EVIDENCE",
+      descriptor,
+      agentLabel: "证据书记官",
+      senderRole: "EVIDENCE_CLERK",
+      signal: eventAbortController.signal,
+      onError: (failure) => {
+        streamError.value = failure.message;
+      },
+    });
+    if (agentState.value === "STREAMING") agentState.value = "SPEAKING";
+    await nextTick();
+    await options.onFinal?.(finalResult);
+    return true;
+  } finally {
+    evidenceAgentRunsInFlight = Math.max(0, evidenceAgentRunsInFlight - 1);
+  }
 }
 
 // 业务位置：【前端证据室】shouldRequestEvidenceOpening：判断 当前可见证据和附件 是否满足当前流程分支的进入条件。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function shouldRequestEvidenceOpening(ensureOpening, firstMessages) {
   if (!ensureOpening) return false;
-  return (
-    firstMessages.length === 0 ||
-    containsOnlySupersededOpeningMessages(firstMessages)
-  );
-}
-
-// 业务位置：【前端证据室】containsOnlySupersededOpeningMessages：切换与 房间消息和对话记录 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
-function containsOnlySupersededOpeningMessages(firstMessages) {
-  return (
-    firstMessages.length > 0 &&
-    firstMessages.every((message) => isSupersededOpeningMessage(message))
-  );
+  return !firstMessages.some((message) => isCurrentEvidenceClerkMessage(message));
 }
 
 // 业务位置：【前端证据室】isSupersededOpeningMessage：判断 房间消息和对话记录 是否满足当前流程分支的进入条件。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
@@ -1068,7 +1274,7 @@ async function loadCatalogOrEmpty(actorSnapshot, caseSnapshot) {
     return await evidenceApi.catalog(actorSnapshot, caseSnapshot);
   } catch (failure) {
     if (isMissingEvidenceCatalog(failure)) {
-      return { case_id: caseSnapshot, items: [] };
+      return null;
     }
     throw failure;
   }
@@ -1084,22 +1290,43 @@ async function refreshWorkspace(options = {}) {
   const generation = options.generation ?? workspaceGeneration;
   const actorSnapshot = { ...effectiveActor.value };
   const caseSnapshot = caseId.value;
-  const [nextCatalog, nextCompletion, nextMessages] = await Promise.all([
-    loadCatalogOrEmpty(actorSnapshot, caseSnapshot),
-    evidenceApi.completion(actorSnapshot, caseSnapshot),
-    loadActorScopedMessages(generation, actorSnapshot, caseSnapshot, {
-      ensureOpening: options.ensureOpening && shouldEnsureOpening.value,
-    }),
-  ]);
+  const nextMessages = await loadActorScopedMessages(
+    generation,
+    actorSnapshot,
+    caseSnapshot,
+    { ensureOpening: options.ensureOpening && shouldEnsureOpening.value },
+  );
   if (!isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) {
     return false;
   }
   if (nextMessages === null) {
     return false;
   }
-  catalog.value = nextCatalog;
+  let [nextCatalog, nextCompletion] = await Promise.all([
+    loadCatalogOrEmpty(actorSnapshot, caseSnapshot),
+    evidenceApi.completion(actorSnapshot, caseSnapshot),
+  ]);
+  if (!isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) {
+    return false;
+  }
+  if (nextCatalog === null) {
+    nextCatalog = await loadCatalogOrEmpty(actorSnapshot, caseSnapshot);
+    if (!isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) {
+      return false;
+    }
+  }
   completion.value = nextCompletion;
   messages.value = nextMessages;
+  if (options.streamBoard) {
+    await streamCatalogToBoard(nextCatalog, {
+      generation,
+      actorSnapshot,
+      caseSnapshot,
+    });
+  } else {
+    cancelBoardStream();
+    catalog.value = nextCatalog;
+  }
   return true;
 }
 
@@ -1138,13 +1365,121 @@ function delay(ms) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
+function cancelBoardStream() {
+  boardStreamToken += 1;
+  boardStreaming.value = false;
+  boardStreamProgress.current = 0;
+  boardStreamProgress.total = 0;
+  boardStreamingEvidenceIds.value = new Set();
+}
+
+function evidenceItemsDiffer(left, right) {
+  return JSON.stringify(left || null) !== JSON.stringify(right || null);
+}
+
+function boardCatalogOperations(previousCatalog, nextCatalog) {
+  const previousItems = Array.isArray(previousCatalog?.items)
+    ? previousCatalog.items
+    : [];
+  const nextItems = Array.isArray(nextCatalog?.items) ? nextCatalog.items : [];
+  const previousById = new Map(
+    previousItems.map((item) => [evidenceId(item), item]),
+  );
+  const nextIds = new Set(nextItems.map((item) => evidenceId(item)));
+  const operations = nextItems
+    .filter((item) => evidenceItemsDiffer(previousById.get(evidenceId(item)), item))
+    .map((item) => ({ type: "upsert", id: evidenceId(item), item }));
+  previousItems.forEach((item) => {
+    const id = evidenceId(item);
+    if (!nextIds.has(id)) operations.push({ type: "remove", id });
+  });
+  return operations;
+}
+
+function orderedBoardItems(stagedItems, nextCatalog) {
+  const nextItems = Array.isArray(nextCatalog?.items) ? nextCatalog.items : [];
+  const order = new Map(nextItems.map((item, index) => [evidenceId(item), index]));
+  return [...stagedItems].sort((left, right) => {
+    const leftOrder = order.get(evidenceId(left)) ?? Number.MAX_SAFE_INTEGER;
+    const rightOrder = order.get(evidenceId(right)) ?? Number.MAX_SAFE_INTEGER;
+    return leftOrder - rightOrder;
+  });
+}
+
+async function streamCatalogToBoard(nextCatalog, context) {
+  const previousCatalog = catalog.value;
+  const operations = boardCatalogOperations(previousCatalog, nextCatalog);
+  if (!operations.length || props.boardStreamStepDelayMs < 0) {
+    cancelBoardStream();
+    catalog.value = nextCatalog;
+    return true;
+  }
+
+  const token = ++boardStreamToken;
+  const maxSteps = 8;
+  const chunkSize = Math.max(1, Math.ceil(operations.length / maxSteps));
+  const stagedById = new Map(
+    (previousCatalog?.items || []).map((item) => [evidenceId(item), item]),
+  );
+  boardStreaming.value = true;
+  boardStreamProgress.current = 0;
+  boardStreamProgress.total = operations.length;
+  boardStreamingEvidenceIds.value = new Set();
+  catalog.value = {
+    ...nextCatalog,
+    items: orderedBoardItems(stagedById.values(), nextCatalog),
+  };
+
+  await nextTick();
+  await delay(props.boardStreamStepDelayMs);
+  for (let index = 0; index < operations.length; index += chunkSize) {
+    if (
+      token !== boardStreamToken ||
+      !isCurrentWorkspace(context.generation, context.actorSnapshot, context.caseSnapshot)
+    ) return false;
+    const chunk = operations.slice(index, index + chunkSize);
+    chunk.forEach((operation) => {
+      if (operation.type === "remove") stagedById.delete(operation.id);
+      else stagedById.set(operation.id, operation.item);
+    });
+    boardStreamingEvidenceIds.value = new Set(chunk.map((operation) => operation.id));
+    boardStreamProgress.current = Math.min(
+      operations.length,
+      boardStreamProgress.current + chunk.length,
+    );
+    catalog.value = {
+      ...nextCatalog,
+      items: orderedBoardItems(stagedById.values(), nextCatalog),
+    };
+    await nextTick();
+    await delay(props.boardStreamStepDelayMs);
+  }
+
+  if (token !== boardStreamToken) return false;
+  catalog.value = nextCatalog;
+  boardStreaming.value = false;
+  boardStreamingEvidenceIds.value = new Set();
+  return true;
+}
+
+function isBoardEvidenceUpdating(item) {
+  return boardStreamingEvidenceIds.value.has(evidenceId(item));
+}
+
 // 业务位置：【前端证据室】refreshUntilAgentReply：重新加载 当前阶段业务数据，确保页面和下一次 Agent 调用基于最新案件版本。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
-async function refreshUntilAgentReply(afterSequenceNo) {
-  await refreshWorkspace();
+async function refreshUntilAgentReply(afterSequenceNo, context = {}) {
+  const generation = context.generation ?? workspaceGeneration;
+  const actorSnapshot = context.actorSnapshot || { ...effectiveActor.value };
+  const caseSnapshot = context.caseSnapshot || caseId.value;
+  if (!isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) return;
+  await refreshWorkspace({ generation });
+  if (!isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) return;
   if (hasAgentReplyAfter(afterSequenceNo)) return;
   for (let attempt = 0; attempt < props.agentReplyPollAttempts; attempt += 1) {
     await delay(props.agentReplyPollDelayMs);
-    await refreshWorkspace();
+    if (!isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) return;
+    await refreshWorkspace({ generation });
+    if (!isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) return;
     if (hasAgentReplyAfter(afterSequenceNo)) return;
   }
 }
@@ -1152,14 +1487,17 @@ async function refreshUntilAgentReply(afterSequenceNo) {
 // 业务位置：【前端证据室】postMessage：执行 房间消息和对话记录 对应的业务动作，并将结果交给 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 async function postMessage(command) {
   if (historyMode.value) return;
+  const generation = workspaceGeneration;
+  const actorSnapshot = { ...effectiveActor.value };
+  const caseSnapshot = caseId.value;
   error.value = "";
   agentState.value = "THINKING";
   const pendingId = `LOCAL_PENDING_${Date.now()}`;
   const pendingMessage = {
     id: pendingId,
-    case_id: caseId.value,
+    case_id: caseSnapshot,
     sequence_no: nextLocalSequence(),
-    sender_role: role.value,
+    sender_role: actorSnapshot.role,
     message_type: command.message_type,
     message_text: command.text,
     attachment_refs: command.attachment_refs || [],
@@ -1170,11 +1508,12 @@ async function postMessage(command) {
     const result = props.messageAction
       ? await props.messageAction(command)
       : await roomApi.postMessage(
-          effectiveActor.value,
-          caseId.value,
+          actorSnapshot,
+          caseSnapshot,
           "EVIDENCE",
           command,
         );
+    if (!isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) return;
     const descriptor = extractAgentRunDescriptor(result);
     const saved = descriptor ? resultRoomMessage(result) : result;
     if (saved && typeof saved === "object") {
@@ -1183,13 +1522,23 @@ async function postMessage(command) {
     }
     if (descriptor) {
       await consumeEvidenceAgentRun(result, {
-        onFinal: () => refreshWorkspace(),
+        actorSnapshot,
+        caseSnapshot,
+        onFinal: () => isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)
+          ? refreshWorkspace({ generation, streamBoard: true })
+          : undefined,
       });
     } else if (!props.messageAction) {
-      await refreshUntilAgentReply(saved?.sequence_no || pendingMessage.sequence_no);
+      await refreshUntilAgentReply(
+        saved?.sequence_no || pendingMessage.sequence_no,
+        { generation, actorSnapshot, caseSnapshot },
+      );
     }
-    agentState.value = "SPEAKING";
+    if (isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) {
+      agentState.value = "SPEAKING";
+    }
   } catch (failure) {
+    if (!isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) return;
     removeMessage(pendingId);
     error.value = failure.message;
     agentState.value = "ERROR";
@@ -1197,6 +1546,22 @@ async function postMessage(command) {
 }
 
 // 业务位置：【前端证据室】startEventStream：启动或关闭与 Agent 流事件 相关的后台任务或订阅，控制运行资源和生命周期。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
+function shouldDeferEventWorkspaceRefresh() {
+  return (
+    evidenceAgentRunsInFlight > 0 ||
+    boardStreaming.value ||
+    uploading.value ||
+    submittingBatch.value ||
+    completing.value ||
+    ["THINKING", "STREAMING"].includes(agentState.value)
+  );
+}
+
+function refreshWorkspaceFromRoomEvent(generation) {
+  if (shouldDeferEventWorkspaceRefresh()) return Promise.resolve(false);
+  return refreshWorkspace({ generation });
+}
+
 function startEventStream() {
   if (historyMode.value) return;
   if (eventStreamActive) {
@@ -1214,7 +1579,7 @@ function startEventStream() {
     roomType: "EVIDENCE",
     state: eventState,
     signal: eventAbortController.signal,
-    snapshotLoader: () => refreshWorkspace({ generation }),
+    snapshotLoader: () => refreshWorkspaceFromRoomEvent(generation),
     applyEvent: async (event) => {
       if (!isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) return;
       if (event.event === "HEARING_OPENED") {
@@ -1229,57 +1594,130 @@ function startEventStream() {
   });
 }
 
-// 业务位置：【前端证据室】uploadFiles：读取 当前阶段业务数据，并依据当前案件、角色和会话权限裁剪成可用输入。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
-async function uploadFiles(event) {
+function clearEvidenceFileInput() {
+  if (fileInput.value) fileInput.value.value = "";
+}
+
+function resetEvidenceUploadDraft() {
+  pendingUploadFile.value = null;
+  uploadDeclarationForm.claimedFact = "";
+  uploadDeclarationForm.truthAttested = false;
+  uploadDeclarationError.value = "";
+  clearEvidenceFileInput();
+}
+
+function cancelEvidenceUpload() {
+  if (uploading.value) return;
+  resetEvidenceUploadDraft();
+  uploadDeclarationOpen.value = false;
+  closeModal("upload");
+}
+
+function openEvidenceUploadDialog(event) {
+  if (
+    historyMode.value ||
+    !evidenceCatalogReady.value ||
+    uploading.value ||
+    boardStreaming.value ||
+    evidenceStreamingRuns.value.length > 0
+  ) return;
+  resetEvidenceUploadDraft();
+  uploadDeclarationOpen.value = true;
+  openModal("upload", event);
+}
+
+// 业务位置：【前端证据室】uploadFiles：在声明表单内选择单份材料，确认前不向后端上传。
+function uploadFiles(event) {
   if (historyMode.value) {
     if (event?.target) event.target.value = "";
     return;
   }
-  const files = [...(event.target.files || [])];
-  if (!files.length) return;
+  const file = event?.target?.files?.[0];
+  if (!file) return;
+  pendingUploadFile.value = file;
+  uploadDeclarationForm.claimedFact = "";
+  uploadDeclarationForm.truthAttested = false;
+  uploadDeclarationError.value = "";
+  void nextTick(() => {
+    const target = evidenceUploadModal.value?.querySelector("[data-evidence-claimed-fact]");
+    if (!(target instanceof HTMLElement)) return;
+    target.focus();
+    target.scrollIntoView?.({ block: "center" });
+  });
+}
+
+// 业务位置：【前端证据室】confirmEvidenceUpload：真实性与相关性声明确认后，才将单份证据及其主张的证明目标提交后端。
+async function confirmEvidenceUpload() {
+  if (historyMode.value || uploading.value || !pendingUploadFile.value) return;
+  const claimedFact = uploadDeclarationForm.claimedFact.trim();
+  if (!claimedFact) {
+    uploadDeclarationError.value = "请填写这份证据能够证明的具体内容。";
+    return;
+  }
+  if (claimedFact.length < claimedFactMinLength) {
+    uploadDeclarationError.value = `证明内容至少填写 ${claimedFactMinLength} 个字符。`;
+    return;
+  }
+  if (claimedFact.length > claimedFactMaxLength) {
+    uploadDeclarationError.value = `证明内容不能超过 ${claimedFactMaxLength} 个字符。`;
+    return;
+  }
+  if (!uploadDeclarationForm.truthAttested) {
+    uploadDeclarationError.value = "请阅读并勾选证据真实性与相关性承诺。";
+    return;
+  }
+  const file = pendingUploadFile.value;
   uploading.value = true;
   error.value = "";
+  uploadDeclarationError.value = "";
   agentState.value = "THINKING";
   try {
-    for (const file of files) {
-      await evidenceApi.upload(effectiveActor.value, caseId.value, {
-        file,
-        evidenceType: file.type.startsWith("video/")
-          ? "VIDEO"
-          : "OTHER",
-        sourceType: evidenceSourceType.value,
-        visibility: "PRIVATE",
-        modelProcessingAuthorized: true,
-      });
-    }
+    await evidenceApi.upload(effectiveActor.value, caseId.value, {
+      file,
+      evidenceType: file.type.startsWith("video/")
+        ? "VIDEO"
+        : "OTHER",
+      sourceType: evidenceSourceType.value,
+      visibility: "PRIVATE",
+      modelProcessingAuthorized: true,
+      claimedFact,
+      truthAttested: true,
+    });
     await refreshWorkspace();
     agentState.value = "LISTENING";
+    resetEvidenceUploadDraft();
+    uploadDeclarationOpen.value = false;
+    closeModal("upload");
   } catch (failure) {
     error.value = failure.message;
+    uploadDeclarationError.value = failure.message;
     agentState.value = "ERROR";
   } finally {
     uploading.value = false;
-    if (fileInput.value) fileInput.value.value = "";
   }
 }
 
 // 业务位置：【前端证据室】submitPendingBatch：执行 当前阶段业务数据 对应的业务动作，并将结果交给 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 async function submitPendingBatch() {
   if (historyMode.value || !pendingItems.value.length || submittingBatch.value) return;
+  const generation = workspaceGeneration;
+  const actorSnapshot = { ...effectiveActor.value };
+  const caseSnapshot = caseId.value;
   submittingBatch.value = true;
   error.value = "";
   agentState.value = "THINKING";
   const evidenceIds = pendingItems.value.map((item) => evidenceId(item));
   try {
     const result = await evidenceApi.submitBatch(
-      effectiveActor.value,
-      caseId.value,
+      actorSnapshot,
+      caseSnapshot,
       {
         evidence_ids: evidenceIds,
         batch_note: "",
       },
       newIdempotencyKey("evidence-batch"),
     );
+    if (!isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) return;
     const descriptor = extractAgentRunDescriptor(result);
     const roomMessage = resultRoomMessage(result);
     if (roomMessage && typeof roomMessage === "object") {
@@ -1287,19 +1725,29 @@ async function submitPendingBatch() {
     }
     if (descriptor) {
       await consumeEvidenceAgentRun(result, {
-        onFinal: () => refreshWorkspace(),
+        actorSnapshot,
+        caseSnapshot,
+        onFinal: () => isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)
+          ? refreshWorkspace({ generation, streamBoard: true })
+          : undefined,
       });
     } else {
       await refreshUntilAgentReply(
         roomMessage?.sequence_no || nextLocalSequence() - 1,
+        { generation, actorSnapshot, caseSnapshot },
       );
     }
-    agentState.value = "SPEAKING";
+    if (isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) {
+      agentState.value = "SPEAKING";
+    }
   } catch (failure) {
+    if (!isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) return;
     error.value = failure.message;
     agentState.value = "ERROR";
   } finally {
-    submittingBatch.value = false;
+    if (isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) {
+      submittingBatch.value = false;
+    }
   }
 }
 
@@ -1326,9 +1774,13 @@ async function deletePendingEvidence(item) {
 // 业务位置：【前端证据室】completeEvidence：执行 当前可见证据和附件 对应的业务动作，并将结果交给 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 async function completeEvidence(event) {
   if (historyMode.value) return;
+  if (!evidenceCatalogReady.value) {
+    evidenceGateError.value = "证据目录仍在同步，请稍后重试。";
+    openModal("gate", event);
+    return;
+  }
   if (!canCompleteEvidenceLocally.value) {
     evidenceGateError.value = "发起争议方需先正式提交至少 1 份相关证据，当前证据栏为空，暂不能进入下一步。";
-    agentState.value = "ERROR";
     openModal("gate", event);
     return;
   }
@@ -1374,7 +1826,6 @@ function mergeCompletionResult(previous, result) {
 // 业务位置：【前端证据室】dismissEvidenceGate：切换与 当前可见证据和附件 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function dismissEvidenceGate() {
   evidenceGateError.value = "";
-  agentState.value = "LISTENING";
   closeModal("gate");
 }
 
@@ -1406,17 +1857,21 @@ onMounted(async () => {
 watch(role, async (nextRole, previousRole) => {
   if (!previousRole || nextRole === previousRole) return;
   clearAgentStreams({ caseId: caseId.value, roomType: "EVIDENCE" });
+  cancelBoardStream();
   workspaceGeneration += 1;
   const generation = workspaceGeneration;
   error.value = "";
   streamError.value = "";
   agentState.value = "THINKING";
+  submittingBatch.value = false;
   catalog.value = null;
   completion.value = null;
   selectedEvidence.value = null;
   selectedEvidenceMode.value = "evidence";
   expandedEvidenceGroup.value = null;
   evidenceGateError.value = "";
+  resetEvidenceUploadDraft();
+  uploadDeclarationOpen.value = false;
   resetModalController();
   messages.value = [];
   if (!historyMode.value && eventStreamActive) {
@@ -1447,8 +1902,12 @@ watch(historyMode, (historical) => {
     return;
   }
   stopModelHealthPolling();
+  cancelBoardStream();
   workspaceGeneration += 1;
   uploading.value = false;
+  resetEvidenceUploadDraft();
+  uploadDeclarationOpen.value = false;
+  resetModalController();
   submittingBatch.value = false;
   completing.value = false;
   eventAbortController.abort();
@@ -1457,6 +1916,8 @@ watch(historyMode, (historical) => {
   clearAgentStreams({ caseId: caseId.value, roomType: "EVIDENCE" });
 });
 onBeforeUnmount(() => {
+  uploadDeclarationOpen.value = false;
+  cancelBoardStream();
   eventAbortController.abort();
   clearAgentStreams({ caseId: caseId.value, roomType: "EVIDENCE" });
   stopModelHealthPolling();
@@ -1533,15 +1994,26 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
-      <section class="evidence-board" data-evidence-board-panel>
+      <section
+        class="evidence-board"
+        data-evidence-board-panel
+        :data-board-streaming="boardStreaming ? 'true' : 'false'"
+        :aria-busy="boardStreaming ? 'true' : 'false'"
+      >
         <header class="evidence-board__header">
           <div>
             <span class="evidence-kicker">EVIDENCE BOARD</span>
             <h2>已提交证据</h2>
             <p>点击任意证据卡片查看核验结果与人工复核信息。</p>
           </div>
-          <span class="evidence-board__badge">
-            {{ isMerchant ? "商家证据方" : "用户证据方" }}
+          <span
+            class="evidence-board__badge"
+            :data-streaming="boardStreaming ? 'true' : 'false'"
+            aria-live="polite"
+          >
+            {{ boardStreaming
+              ? `展板同步 ${boardStreamProgress.current}/${boardStreamProgress.total}`
+              : isMerchant ? "商家证据方" : "用户证据方" }}
           </span>
         </header>
 
@@ -1555,20 +2027,17 @@ onBeforeUnmount(() => {
               <strong>上传图片、视频、Markdown 或文档</strong>
               <small>解析完成后先进入待提交区，确认后再交给书记官。</small>
             </div>
-            <label
+            <button
+              type="button"
               class="evidence-uploader__button"
-              :class="{ 'evidence-uploader__button--disabled': historyMode }"
-              :aria-disabled="historyMode"
+              :class="{ 'evidence-uploader__button--disabled': historyMode || !evidenceCatalogReady }"
+              :aria-disabled="historyMode || !evidenceCatalogReady"
+              data-open-evidence-upload
+              :disabled="historyMode || !evidenceCatalogReady || uploading || boardStreaming || evidenceStreamingRuns.length > 0"
+              @click="openEvidenceUploadDialog"
             >
               {{ uploading ? "核验中…" : "选择材料" }}
-              <input
-                ref="fileInput"
-                type="file"
-                multiple
-                :disabled="historyMode || uploading || evidenceStreamingRuns.length > 0"
-                @change="uploadFiles"
-              />
-            </label>
+            </button>
           </section>
 
           <section class="evidence-library evidence-library--pending" data-evidence-pending>
@@ -1585,6 +2054,7 @@ onBeforeUnmount(() => {
                 v-for="item in pendingItems"
                 :key="evidenceId(item)"
                 class="evidence-card evidence-card--compact evidence-card--pending"
+                :class="{ 'evidence-card--stream-updating': isBoardEvidenceUpdating(item) }"
                 data-evidence-card
                 tabindex="0"
                 @click="openEvidenceDetail(item, $event)"
@@ -1595,7 +2065,7 @@ onBeforeUnmount(() => {
                   type="button"
                   class="evidence-card__remove"
                   data-delete-pending-evidence
-                  :disabled="historyMode || isDeletingEvidence(item)"
+                  :disabled="historyMode || boardStreaming || isDeletingEvidence(item)"
                   @click.stop="deletePendingEvidence(item)"
                 >×</button>
                 <span class="evidence-card__preview">
@@ -1629,7 +2099,7 @@ onBeforeUnmount(() => {
               <button
                 type="button"
                 data-submit-evidence-batch
-                :disabled="historyMode || submittingBatch || evidenceStreamingRuns.length > 0"
+                :disabled="historyMode || submittingBatch || boardStreaming || evidenceStreamingRuns.length > 0"
                 @click="submitPendingBatch"
               >
                 {{ submittingBatch ? "提交中…" : "提交本批给书记官" }}
@@ -1652,6 +2122,7 @@ onBeforeUnmount(() => {
                 :key="evidenceId(item)"
                 type="button"
                 class="evidence-card evidence-card--compact evidence-card--submitted"
+                :class="{ 'evidence-card--stream-updating': isBoardEvidenceUpdating(item) }"
                 data-evidence-card
                 @click="openEvidenceDetail(item, $event)"
               >
@@ -1702,6 +2173,7 @@ onBeforeUnmount(() => {
                 :key="`human-review-${evidenceId(item)}`"
                 type="button"
                 class="human-review-card evidence-card evidence-card--compact"
+                :class="{ 'evidence-card--stream-updating': isBoardEvidenceUpdating(item) }"
                 data-human-review-card
                 data-evidence-card
                 @click="openEvidenceDetail(item, $event, 'human-review')"
@@ -1727,7 +2199,11 @@ onBeforeUnmount(() => {
                 </span>
                 <span class="evidence-card__labels">
                   <em>{{ evidenceOwnerLabel(item) }}</em>
-                  <em>人工审核任务</em>
+                  <em
+                    v-for="tag in evidenceHumanReviewTags(item)"
+                    :key="`${evidenceId(item)}-${tag}`"
+                    data-human-review-risk-label
+                  >{{ tag }}</em>
                 </span>
               </button>
             </div>
@@ -1760,7 +2236,7 @@ onBeforeUnmount(() => {
             v-else
             type="button"
             data-complete-evidence
-            :disabled="historyMode || completing || evidenceStreamingRuns.length > 0"
+            :disabled="historyMode || !evidenceCatalogReady || completing || boardStreaming || evidenceStreamingRuns.length > 0"
             @click="completeEvidence"
           >
             {{ completing ? "正在封入证据袋…" : "我方举证完成" }}
@@ -1774,6 +2250,139 @@ onBeforeUnmount(() => {
       :message="streamError"
       @dismiss="dismissStreamError"
     />
+
+    <div
+      v-if="uploadDeclarationOpen"
+      ref="evidenceUploadModal"
+      class="evidence-modal"
+      data-evidence-upload-modal
+      :data-modal-depth="modalDepth('upload')"
+      :style="{ zIndex: modalDepth('upload') }"
+      role="dialog"
+      :aria-modal="isTopModal('upload') ? 'true' : 'false'"
+      :aria-hidden="isModalCovered('upload') ? 'true' : undefined"
+      :inert="isModalCovered('upload') ? true : undefined"
+      aria-labelledby="evidence-upload-title"
+      @click.self="cancelEvidenceUpload"
+    >
+      <form
+        class="evidence-modal__panel evidence-modal__panel--upload"
+        data-evidence-upload-form
+        novalidate
+        @submit.prevent="confirmEvidenceUpload"
+      >
+        <header class="evidence-upload__header">
+          <div>
+            <span class="evidence-kicker">SUBMISSION DECLARATION</span>
+            <h2 id="evidence-upload-title">提交证据前请确认</h2>
+            <p>书记官会围绕你填写的证明目标核验材料，不会将你的陈述直接视为已证实事实。</p>
+          </div>
+          <span class="evidence-upload__capacity">{{ currentPartyLabel }} · {{ uploadPartyCapacityLabel }}</span>
+        </header>
+
+        <section
+          class="evidence-upload__file"
+          :class="{ 'evidence-upload__file--empty': !pendingUploadFile }"
+          aria-label="待上传文件"
+        >
+          <span class="evidence-file-icon" data-file-kind="document" aria-hidden="true">
+            <span class="evidence-file-icon__body">
+              <span class="evidence-file-icon__lines"></span>
+            </span>
+            <span class="evidence-file-icon__badge">FILE</span>
+          </span>
+          <div v-if="pendingUploadFile">
+            <strong :title="pendingUploadFile.name">{{ pendingUploadFile.name }}</strong>
+            <small>{{ pendingUploadFile.type || "未知文件类型" }} · {{ pendingUploadFileSize }}</small>
+          </div>
+          <div v-else>
+            <strong>尚未选择文件</strong>
+            <small>支持图片、视频、Markdown、PDF 和文档；一次提交一份。</small>
+          </div>
+          <label class="evidence-upload__file-picker">
+            {{ pendingUploadFile ? "重新选择" : "选择文件" }}
+            <input
+              ref="fileInput"
+              data-evidence-upload-file
+              type="file"
+              :disabled="uploading"
+              @change="uploadFiles"
+            />
+          </label>
+        </section>
+
+        <p
+          class="evidence-upload__guidance"
+          data-evidence-upload-guidance
+          :data-ready="evidenceUploadReady ? 'true' : 'false'"
+          aria-live="polite"
+        >
+          {{ evidenceUploadGuidance }}
+        </p>
+
+        <label class="evidence-upload__field">
+          <span>此证据证明内容 <em>必填</em></span>
+          <textarea
+            v-model="uploadDeclarationForm.claimedFact"
+            data-evidence-claimed-fact
+            data-modal-initial-focus
+            :minlength="claimedFactMinLength"
+            :maxlength="claimedFactMaxLength"
+            rows="4"
+            required
+            placeholder="请具体说明这份材料要证明的事实，例如：证明商家于 7 月 12 日要求我额外支付 150 元安装费。"
+            @input="uploadDeclarationError = ''"
+          />
+          <small>{{ uploadDeclarationForm.claimedFact.length }}/{{ claimedFactMaxLength }} · 至少 {{ claimedFactMinLength }} 个字符，该内容仍需书记官核验。</small>
+        </label>
+
+        <section class="evidence-upload__consequence" data-evidence-forgery-consequence>
+          <span>真实性责任告知</span>
+          <strong>{{ uploadForgeryConsequence }}</strong>
+          <p>真实性评分低于 50% 时标记“疑似造假”并进入人工审核；关联性评分低于 50% 时标记“关联度低”并进入人工审核，但不认定造假。两类标记均不会自动触发处罚。</p>
+        </section>
+
+        <label class="evidence-upload__attestation">
+          <input
+            v-model="uploadDeclarationForm.truthAttested"
+            data-evidence-truth-attested
+            type="checkbox"
+            @change="uploadDeclarationError = ''"
+          />
+          <span>证据真实性与相关性承诺：本人承诺所提交证据真实、完整，且与本人填写的证明内容相关，未伪造、篡改或故意提交无关材料，并已阅读和知悉上述处理规则。</span>
+        </label>
+
+        <p v-if="uploadDeclarationError" class="evidence-upload__error" role="alert">
+          {{ uploadDeclarationError }}
+        </p>
+
+        <footer class="evidence-upload__actions">
+          <button
+            type="button"
+            class="evidence-upload__cancel"
+            data-cancel-evidence-upload
+            :disabled="uploading"
+            @click="cancelEvidenceUpload"
+          >
+            取消
+          </button>
+          <button
+            type="submit"
+            class="evidence-upload__confirm"
+            data-confirm-evidence-upload
+            :disabled="uploading || !pendingUploadFile"
+          >
+            {{ uploading
+              ? "正在上传…"
+              : evidenceUploadReady
+                ? "确认声明并上传"
+                : pendingUploadFile
+                  ? "检查声明并继续"
+                  : "请先选择文件" }}
+          </button>
+        </footer>
+      </form>
+    </div>
 
     <div
       v-if="evidenceGateError"
@@ -1808,6 +2417,7 @@ onBeforeUnmount(() => {
       ref="evidenceDetailModal"
       class="evidence-modal"
       data-evidence-detail-modal
+      :data-detail-mode="selectedEvidenceMode"
       :data-modal-depth="modalDepth('detail')"
       :style="{ zIndex: modalDepth('detail') }"
       role="dialog"
@@ -2346,13 +2956,6 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 
-.evidence-uploader__button input {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  opacity: 0;
-}
-
 .evidence-board__list {
   display: grid;
   align-content: start;
@@ -2709,6 +3312,13 @@ onBeforeUnmount(() => {
   border-radius: 999px;
 }
 
+.evidence-board__badge[data-streaming="true"] {
+  color: #315f73;
+  background: #e8f6f8;
+  border-color: #b9dde2;
+  font-variant-numeric: tabular-nums;
+}
+
 .evidence-file-icon__landscape,
 .evidence-file-icon__play {
   display: none;
@@ -3011,6 +3621,239 @@ onBeforeUnmount(() => {
   gap: 12px;
 }
 
+.evidence-modal__panel--upload {
+  width: min(650px, 100%);
+  gap: 16px;
+  padding: 24px;
+  overflow-x: hidden;
+  background:
+    radial-gradient(circle at 92% 4%, rgba(218, 228, 255, .72), transparent 28%),
+    linear-gradient(145deg, #fff, #f7f9fd);
+}
+
+.evidence-upload__header {
+  align-items: flex-start;
+}
+
+.evidence-upload__header p {
+  max-width: 480px;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.evidence-upload__capacity {
+  flex: 0 0 auto;
+  padding: 6px 10px;
+  color: #6272bd;
+  background: #edf1ff;
+  border: 1px solid #dde4ff;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.evidence-upload__file {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 13px;
+  align-items: center;
+  min-width: 0;
+  padding: 13px 15px;
+  background: #f2f6fb;
+  border: 1px solid #e1e9f3;
+  border-radius: 16px;
+}
+
+.evidence-upload__file > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.evidence-upload__file strong,
+.evidence-upload__file small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.evidence-upload__file strong {
+  color: #384961;
+  font-size: 14px;
+}
+
+.evidence-upload__file small {
+  color: #8492a5;
+  font-size: 11px;
+}
+
+.evidence-upload__file-picker {
+  display: inline-flex;
+  min-height: 36px;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 11px;
+  color: #596eb8;
+  background: #fff;
+  border: 1px solid #dbe3f4;
+  border-radius: 10px;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.evidence-upload__file-picker input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.evidence-upload__field {
+  display: grid;
+  min-width: 0;
+  gap: 7px;
+}
+
+.evidence-upload__guidance {
+  margin: -4px 0 0;
+  padding: 9px 11px;
+  color: #52658b !important;
+  background: #eef4ff;
+  border: 1px solid #dce7fb;
+  border-radius: 10px;
+  font-size: 12px !important;
+  font-weight: 750;
+  line-height: 1.5 !important;
+}
+
+.evidence-upload__guidance[data-ready="true"] {
+  color: #2e7469 !important;
+  background: #edf9f5;
+  border-color: #cde9df;
+}
+
+.evidence-upload__field > span {
+  color: #394a63;
+  font-size: 14px;
+  font-weight: 900;
+}
+
+.evidence-upload__field em {
+  margin-left: 5px;
+  color: #bd6670;
+  font-size: 10px;
+  font-style: normal;
+}
+
+.evidence-upload__field textarea {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 108px;
+  padding: 12px 14px;
+  resize: vertical;
+  color: #34465f;
+  background: #fff;
+  border: 1px solid #d8e2ee;
+  border-radius: 14px;
+  outline: 0;
+  font: inherit;
+  line-height: 1.6;
+}
+
+.evidence-upload__field textarea:focus {
+  border-color: #8e9de2;
+  box-shadow: 0 0 0 3px rgba(126, 142, 219, .13);
+}
+
+.evidence-upload__field > small {
+  color: #8795a8;
+  font-size: 11px;
+}
+
+.evidence-upload__consequence {
+  display: grid;
+  gap: 6px;
+  padding: 13px 15px;
+  background: linear-gradient(135deg, #fff9f3, #fff4ea);
+  border: 1px solid #f0dac8;
+  border-radius: 15px;
+}
+
+.evidence-upload__consequence > span {
+  color: #a16c47;
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: .12em;
+}
+
+.evidence-upload__consequence strong {
+  color: #6d4b39;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.evidence-upload__consequence p {
+  color: #92725e;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.evidence-upload__attestation {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: flex-start;
+  color: #526279;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.55;
+  cursor: pointer;
+}
+
+.evidence-upload__attestation input {
+  width: 17px;
+  height: 17px;
+  margin: 1px 0 0;
+  accent-color: #6878cf;
+}
+
+.evidence-upload__error {
+  padding: 9px 11px;
+  color: #a84552 !important;
+  background: #fff1f3;
+  border: 1px solid #ffd5db;
+  border-radius: 11px;
+  font-size: 12px;
+}
+
+.evidence-upload__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.evidence-modal__panel .evidence-upload__cancel {
+  color: #66758b;
+  background: #edf2f7;
+}
+
+.evidence-modal__panel .evidence-upload__confirm {
+  padding-inline: 18px;
+  color: #fff;
+  background: linear-gradient(135deg, #7d8be0, #6171ca);
+  box-shadow: 0 8px 18px rgba(97, 113, 202, .24);
+}
+
+.evidence-modal__panel .evidence-upload__actions button:disabled {
+  cursor: not-allowed;
+  opacity: .52;
+  box-shadow: none;
+}
+
 .evidence-modal__panel--notice > button {
   justify-self: end;
 }
@@ -3181,7 +4024,8 @@ onBeforeUnmount(() => {
   margin-bottom: 6px;
   color: #33435c;
 }
-.evidence-uploader__button--disabled {
+.evidence-uploader__button--disabled,
+.evidence-uploader__button:disabled {
   cursor: not-allowed;
   opacity: .55;
 }
@@ -3497,6 +4341,30 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 620px) {
+  .evidence-modal__panel--upload {
+    padding: 18px;
+  }
+
+  .evidence-upload__header {
+    display: grid;
+  }
+
+  .evidence-upload__capacity {
+    justify-self: start;
+  }
+
+  .evidence-upload__file {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .evidence-upload__file-picker {
+    grid-column: 1 / -1;
+  }
+
+  .evidence-upload__actions > button {
+    flex: 1 1 0;
+  }
+
   .evidence-modal__panel--detail .evidence-modal__facts {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -3800,6 +4668,33 @@ onBeforeUnmount(() => {
   padding: 9px;
   overflow: hidden;
   scroll-snap-align: start;
+}
+
+.evidence-card.evidence-card--stream-updating {
+  border-color: #6fb4c1;
+  animation: evidence-board-card-stream 560ms ease-out both;
+  box-shadow: 0 0 0 3px rgba(94, 167, 180, .16), 0 10px 22px rgba(55, 111, 127, .16);
+}
+
+@keyframes evidence-board-card-stream {
+  0% {
+    opacity: .45;
+    transform: translateY(5px);
+  }
+  55% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .evidence-card.evidence-card--stream-updating {
+    animation: none;
+  }
 }
 
 .evidence-card.evidence-card--compact.evidence-card--pending { padding-right: 30px; }

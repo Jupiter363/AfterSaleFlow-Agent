@@ -26,40 +26,22 @@ class AgentRunResultPolicyTest {
     private final AgentRunResultPolicy policy =
             new AgentRunResultPolicy(objectMapper, new AgentStreamOperationRegistry());
 
-    // 所属模块：【Agent 流式运行 / 自动化测试层】「AgentRunResultPolicyTest.hearingProjectionOnlyContainsExplicitlyPublicDraftText()」。
-    // 具体功能：「AgentRunResultPolicyTest.hearingProjectionOnlyContainsExplicitlyPublicDraftText()」：复现“核对完整业务行为（场景方法「hearingProjectionOnlyContainsExplicitlyPublicDraftText」）”场景：驱动 「policy.publicProjection」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「HEARING_ANALYSIS」、「issue_framing」、「neutral_summary」、「中立摘要」。
-    // 上游调用：「AgentRunResultPolicyTest.hearingProjectionOnlyContainsExplicitlyPublicDraftText()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
-    // 下游影响：「AgentRunResultPolicyTest.hearingProjectionOnlyContainsExplicitlyPublicDraftText()」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
-    // 系统意义：「AgentRunResultPolicyTest.hearingProjectionOnlyContainsExplicitlyPublicDraftText()」守住「Agent 流式运行」的可执行规格，尤其防止 「HEARING_ANALYSIS」、「issue_framing」、「neutral_summary」、「中立摘要」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
-    void hearingProjectionOnlyContainsExplicitlyPublicDraftText() throws Exception {
+    void hearingJudgeProjectionOnlyContainsThePublicMessage() throws Exception {
         var result =
                 objectMapper.readTree(
                         """
                         {
-                          "issue_framing":{"neutral_summary":"中立摘要","private_note":"不可见"},
-                          "adjudication_draft":{"draft":{
-                            "recommended_outcome":"建议退款",
-                            "reasoning_summary":"依据已核验材料形成非最终草案",
-                            "internal_matrix_patch":{"fact":"不可见"}
-                          }},
-                          "reasoning_content":"不可见"
+                          "public_message":"庭审问题已经形成。",
+                          "internal_reasoning":"不可见",
+                          "decision_draft":{"outcome":"不可见"}
                         }
                         """);
 
-        var projection = policy.publicProjection("HEARING_ANALYSIS", result);
+        var projection = policy.publicProjection("HEARING_JUDGE_V1", result);
 
-        assertThat(projection.path("issue_framing").path("neutral_summary").asText())
-                .isEqualTo("中立摘要");
-        assertThat(
-                        projection
-                                .path("adjudication_draft")
-                                .path("draft")
-                                .path("recommended_outcome")
-                                .asText())
-                .isEqualTo("建议退款");
         assertThat(projection.toString())
-                .doesNotContain("private_note", "internal_matrix_patch", "reasoning_content", "不可见");
+                .isEqualTo("{\"public_message\":\"庭审问题已经形成。\"}");
     }
 
     // 所属模块：【Agent 流式运行 / 自动化测试层】「AgentRunResultPolicyTest.evidenceTurnCannotSmuggleAResponsibilityOrRemedyDecision()」。

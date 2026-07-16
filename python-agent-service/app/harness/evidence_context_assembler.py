@@ -4,8 +4,10 @@
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 import hashlib
+import json
 import re
 from typing import Any
 
@@ -14,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.harness.invocation_context import AgentInvocationContext
 from app.harness.memory import MemeoMemoryAssembler
 from app.schemas import (
+    CaseFactMatrixV2,
     EvidenceContextEnvelopeV1,
     EvidenceTurnEvidenceItem,
     EvidenceTurnRequest,
@@ -105,7 +108,11 @@ class EvidenceContextAssembler:
             strict_scope=True,
         ).model_dump(mode="json")
         latest_canvas_snapshot = _latest_canvas_snapshot(envelope)
-        evidence_matrix_snapshot = _evidence_matrix_snapshot(latest_canvas_snapshot)
+        evidence_matrix_snapshot = _validated_evidence_matrix_snapshot(
+            _evidence_matrix_snapshot(latest_canvas_snapshot),
+            allowed_fact_targets=allowed_fact_targets,
+            visible_evidence_ids={item.evidence_id for item in envelope.visible_evidence},
+        )
         claim_and_response_state = _claim_and_response_state(canonical_dossier)
         fact_targets = _fact_targets(allowed_fact_targets, canonical_dossier)
         evidence_gap_plan = _evidence_gap_plan(
@@ -172,6 +179,15 @@ class EvidenceContextAssembler:
             "actor_role": actor.actor_role,
             "agent_key": request.agent_context.agent_key,
             "prompt_profile_id": actor.prompt_profile_id,
+            "fact_link_contract": {
+                "allowed_fact_ids": [
+                    item["fact_id"] for item in allowed_fact_targets
+                ],
+                "rule": (
+                    "relevance_score >= 0.50 时必须从 allowed_fact_ids 原样复制"
+                    "至少一个 fact_id 到 fact_links；不得翻译、缩写或新建 ID"
+                ),
+            },
         }
         return AssembledEvidenceContext(
             working_set=working_set,
@@ -194,8 +210,8 @@ def _canonical_case_dossier(
 
     snapshot = envelope.case_snapshot
     dossier_snapshot = envelope.intake_dossier_snapshot
-    # dict(...) 复制第一层，避免下面 setdefault/赋值修改 Java 请求对象中的原始 payload。
-    dossier = dict(dossier_snapshot.payload) if dossier_snapshot is not None else {}
+    raw_dossier = dict(dossier_snapshot.payload) if dossier_snapshot is not None else {}
+    dossier = _shared_intake_dossier_projection(raw_dossier, envelope=envelope)
     case_story = dossier.get("case_story")
     if isinstance(case_story, dict):
         case_story = dict(case_story)
@@ -250,32 +266,142 @@ def _canonical_case_dossier(
     return dossier
 
 
+def _shared_intake_dossier_projection(
+    dossier: dict[str, Any],
+    *,
+    envelope: EvidenceContextEnvelopeV1,
+) -> dict[str, Any]:
+    """Project the intake handoff without carrying either party's private text."""
+
+    candidate = dossier.get("case_fact_matrix")
+    if isinstance(candidate, dict) and candidate.get("schema_version") == "case_fact_matrix.v2":
+        matrix = _validated_case_fact_matrix(
+            candidate,
+            expected_case_id=envelope.case_snapshot.case_id,
+            expected_initiator_role=envelope.case_snapshot.initiator_role,
+        )
+        overview = matrix.get("case_overview")
+        overview = overview if isinstance(overview, dict) else {}
+        references = dossier.get("references")
+        references = references if isinstance(references, dict) else {}
+        return {
+            "schema_version": dossier.get("schema_version") or "intake_case_detail.v1",
+            "references": {
+                key: references.get(key)
+                for key in (
+                    "order_reference",
+                    "after_sales_reference",
+                    "logistics_reference",
+                )
+                if references.get(key)
+            },
+            "case_story": {
+                "title": "待核验争议",
+                "one_sentence_summary": str(overview.get("neutral_summary") or "")[:MAX_CASE_SUMMARY_CHARS],
+            },
+            "dispute_core_state": {
+                "core_conflict": overview.get("core_conflict"),
+            },
+            "case_fact_matrix": matrix,
+        }
+
+    legacy = dossier.get("unilateral_case_matrix")
+    projected: dict[str, Any] = {
+        key: copy.deepcopy(dossier[key])
+        for key in (
+            "schema_version",
+            "references",
+            "case_story",
+            "dispute_focus",
+            "dispute_core_state",
+        )
+        if key in dossier
+    }
+    if isinstance(legacy, dict):
+        projected["unilateral_case_matrix"] = copy.deepcopy(legacy)
+    return projected
+
+
+def _validated_case_fact_matrix(
+    value: dict[str, Any],
+    *,
+    expected_case_id: str | None = None,
+    expected_initiator_role: str | None = None,
+) -> dict[str, Any]:
+    matrix = CaseFactMatrixV2.model_validate(value)
+    if expected_case_id is not None and matrix.case_id != expected_case_id:
+        raise ValueError("case_fact_matrix.v2 case_id must match evidence case")
+    if (
+        expected_initiator_role is not None
+        and matrix.party_map.initiator_role != expected_initiator_role
+    ):
+        raise ValueError("case_fact_matrix.v2 party_map must match evidence case")
+    material = matrix.model_dump(mode="json")
+    content_hash = str(material.pop("content_hash"))
+    expected_hash = hashlib.sha256(
+        json.dumps(
+            material,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    if content_hash != expected_hash:
+        raise ValueError("case_fact_matrix.v2 content hash is invalid")
+    return matrix.model_dump(mode="json")
+
+
 # 所属模块：Agent Harness > 证据上下文边界 > 可关联事实白名单生成。
-# 具体功能：`_allowed_fact_targets` 只扫描可信接待卷宗约定的 facts_to_verify/known/disputed 集合，将多种形态转成稳定 fact_id，按首次出现去重并硬限制 100 项。
+# 具体功能：`_allowed_fact_targets` 优先读取 case_fact_matrix.v2，旧 unilateral_case_matrix.v1 仅作为历史卷宗兼容输入；两者都沿用稳定 fact_id，并硬限制 100 项。
 # 上下游：上游是 `_canonical_case_dossier`；下游是模型 fact_targets、EvidenceTurnWorkingSet 和 fact_matrix_patch 校验。
 # 系统意义：LLM 只能把证据关联到接待阶段已有事实，不能通过输出临时发明事实 ID 扩大案件范围或污染事实-证据矩阵。
 def _allowed_fact_targets(dossier: dict[str, Any]) -> tuple[dict[str, str], ...]:
-    """Build stable fact IDs only from the trusted intake dossier."""
+    """Expose only the intake officer's formal fact coordinate system."""
 
-    collections = (
-        _nested_value(dossier, "dispute_focus", "facts_to_verify"),
-        dossier.get("known_facts"),
-        dossier.get("disputed_facts"),
-        dossier.get("facts_in_dispute"),
-        _nested_value(dossier, "dispute_core_state", "facts_in_dispute"),
-    )
+    matrix = _formal_case_matrix(dossier)
+    rows = matrix.get("fact_rows")
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("case_fact_matrix.v2 fact_rows must not be empty")
     targets: list[dict[str, str]] = []
     seen_ids: set[str] = set()
-    for collection in collections:
-        values = collection if isinstance(collection, list) else []
-        for value in values:
-            target = _fact_target(value)
-            if target is None or target["fact_id"] in seen_ids:
-                continue
-            seen_ids.add(target["fact_id"])
-            targets.append(target)
-            if len(targets) >= 100:
-                return tuple(targets)
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError("case fact row must be an object")
+        fact_id = str(row.get("fact_id") or "").strip()
+        fact = str(row.get("fact_target") or "").strip()
+        materiality = str(row.get("materiality") or "").strip()
+        truth_status = str(row.get("truth_status") or "").strip()
+        if not _SAFE_FACT_ID.fullmatch(fact_id) or not fact:
+            raise ValueError("case fact row has an invalid fact_id or fact_target")
+        if materiality not in {"CORE", "SUPPORTING", "CONTEXT"}:
+            raise ValueError("case fact row has an invalid materiality")
+        if truth_status != "NOT_EVALUATED":
+            raise ValueError("intake facts must remain NOT_EVALUATED before evidence review")
+        if fact_id in seen_ids:
+            raise ValueError("case_fact_matrix.v2 contains duplicate fact_id")
+        seen_ids.add(fact_id)
+        positions = row.get("positions")
+        position_texts: list[str] = []
+        if isinstance(positions, dict):
+            for position in positions.values():
+                if not isinstance(position, dict):
+                    continue
+                for key in ("position_summary", "asserted_value"):
+                    value = position.get(key)
+                    if isinstance(value, str) and value.strip():
+                        position_texts.append(value.strip())
+        targets.append(
+            {
+                "fact_id": fact_id,
+                "fact": fact[:500],
+                "category": str(row.get("category") or "")[:100],
+                "match_text": " ".join([fact, *position_texts])[:2_000],
+                "materiality": materiality,
+                "truth_status": truth_status,
+            }
+        )
+        if len(targets) >= 100:
+            return tuple(targets)
     return tuple(targets)
 
 
@@ -290,38 +416,6 @@ def _nested_value(value: dict[str, Any], *path: str) -> Any:
             return None
         current = current.get(key)
     return current
-
-
-# 所属模块：Agent Harness > 证据上下文边界 > 单个事实引用规范化。
-# 具体功能：`_fact_target` 接受字符串或旧版 dict；安全的显式 fact_id 原样沿用，否则对最多 500 字事实标签做 SHA-256，生成可重复的 FACT_INTAKE_* ID。
-# 上下游：上游是 `_allowed_fact_targets` 遍历的可信卷宗条目；下游是事实状态、矩阵链接和人工审核引用。
-# 系统意义：同一事实跨回合获得同一 ID，便于幂等 patch；非法显式 ID 不被信任，只有标签哈希可成为新机器键。
-def _fact_target(value: Any) -> dict[str, str] | None:
-    """把各种形态的事实描述转成稳定 fact_id。
-
-    如果上游已经给了安全 ID，就沿用；否则用事实文本的 sha256 生成确定性 ID。
-    """
-
-    explicit_id = ""
-    label = ""
-    if isinstance(value, str):
-        label = value.strip()
-    elif isinstance(value, dict):
-        candidate_id = str(value.get("fact_id") or value.get("id") or "").strip()
-        if _SAFE_FACT_ID.fullmatch(candidate_id):
-            explicit_id = candidate_id
-        for key in ("fact", "description", "event", "title", "name", "issue"):
-            candidate = value.get(key)
-            if isinstance(candidate, str) and candidate.strip():
-                label = candidate.strip()
-                break
-    if not label and not explicit_id:
-        return None
-    label = (label or explicit_id)[:500]
-    fact_id = explicit_id or (
-        "FACT_INTAKE_" + hashlib.sha256(label.encode("utf-8")).hexdigest()[:16].upper()
-    )
-    return {"fact_id": fact_id, "fact": label}
 
 
 # 所属模块：Agent Harness > 证据上下文边界 > 当前证据事件投影。
@@ -373,60 +467,73 @@ def _task_mode(
 
 
 # 所属模块：Agent Harness > 证据上下文边界 > 双方主张状态投影。
-# 具体功能：`_claim_and_response_state` 仅复制卷宗中的诉求、被申请方态度和争议核心，并附来源与“对方态度可能只是发起方转述”的信任提示。
+# 具体功能：`_claim_and_response_state` 只投影正式单方矩阵中的诉求、发起方主观转述态度和争议核心。
 # 上下游：上游是冻结接待卷宗；下游是 evidence_turn 的 claim_and_response_state Prompt 段。
 # 系统意义：证据书记官需要理解核验目标，但不能把接待室单方描述当成对方正式承认或平台事实认定。
 def _claim_and_response_state(dossier: dict[str, Any]) -> dict[str, Any]:
+    matrix = _formal_case_matrix(dossier)
+    if matrix.get("schema_version") == "case_fact_matrix.v2":
+        claims = _dict_value(matrix.get("claims"))
+        overview = _dict_value(matrix.get("case_overview"))
+        return {
+            "claim_resolution": _dict_value(claims.get("initiator_claim")),
+            "respondent_reported_by_initiator": _dict_value(
+                claims.get("respondent_reported_by_initiator")
+            ),
+            "respondent_direct": _dict_value(claims.get("respondent_direct")),
+            "dispute_core_state": {
+                "core_conflict": overview.get("core_conflict")
+            },
+            "source": "CASE_FACT_MATRIX_V2",
+            "matrix_kind": matrix.get("matrix_kind"),
+            "matrix_version": matrix.get("matrix_version"),
+            "matrix_hash": matrix.get("content_hash"),
+            "trust_note": (
+                "双方立场仅表示接待陈述；party_alignment 不是事实真伪或证据充分性结论。"
+            ),
+        }
     return {
-        "claim_resolution": _dict_value(dossier.get("claim_resolution")),
-        "respondent_attitude": _dict_value(dossier.get("respondent_attitude")),
-        "dispute_core_state": _dict_value(dossier.get("dispute_core_state")),
-        "source": "INTAKE_DOSSIER",
+        "claim_resolution": _dict_value(matrix.get("claim_resolution")),
+        "respondent_attitude": _dict_value(
+            matrix.get("reported_respondent_attitude")
+        ),
+        "dispute_core_state": _dict_value(matrix.get("dispute_core_state")),
+        "source": "UNILATERAL_CASE_MATRIX_V1",
+        "matrix_version": matrix.get("matrix_version"),
+        "matrix_hash": matrix.get("content_hash"),
         "trust_note": (
-            "诉求来自发起方陈述；对方态度可能是发起方主观描述，"
-            "除非卷宗明确标注平台或对方直接来源。"
+            "诉求和事实均来自发起方接待陈述；respondent_attitude 仅在"
+            "reported_respondent_attitude 有值时表示发起方主观转述，不代表对方承认。"
         ),
     }
 
 
 # 所属模块：Agent Harness > 证据上下文边界 > 事实核验状态标注。
-# 具体功能：`_fact_targets` 对白名单事实按卷宗标签集合标为 KNOWN、DISPUTED 或 TO_VERIFY，并保留 fact_id 与 INTAKE_DOSSIER 来源。
+# 具体功能：`_fact_targets` 将单方矩阵的原子事实统一标为待核验，并保留 materiality、truth_status 与正式 fact_id。
 # 上下游：上游是 `_allowed_fact_targets` 与 canonical dossier；下游是模型核验优先级和 `_evidence_gap_plan`。
 # 系统意义：状态只是接待卷宗的现状映射，不是证据室重新认定；DISPUTED 事实可获得更高缺口优先级但仍需证据支持。
 def _fact_targets(
     allowed_fact_targets: tuple[dict[str, str], ...],
     dossier: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    known_labels = {
-        str(item).strip()
-        for item in dossier.get("known_facts", [])
-        if str(item).strip()
-    }
-    disputed_labels = {
-        str(item).strip()
-        for collection in (
-            dossier.get("disputed_facts", []),
-            dossier.get("facts_in_dispute", []),
-            _nested_value(dossier, "dispute_core_state", "facts_in_dispute") or [],
-        )
-        if isinstance(collection, list)
-        for item in collection
-        if str(item).strip()
-    }
     return [
         {
             **target,
-            "status": (
-                "KNOWN"
-                if target["fact"] in known_labels
-                else "DISPUTED"
-                if target["fact"] in disputed_labels
-                else "TO_VERIFY"
-            ),
-            "source": "INTAKE_DOSSIER",
+            "status": "TO_VERIFY",
+            "source": "CASE_FACT_MATRIX_V2",
         }
         for target in allowed_fact_targets
     ]
+
+
+def _formal_case_matrix(dossier: dict[str, Any]) -> dict[str, Any]:
+    matrix = dossier.get("case_fact_matrix")
+    if isinstance(matrix, dict) and matrix.get("schema_version") == "case_fact_matrix.v2":
+        return _validated_case_fact_matrix(matrix)
+    legacy = dossier.get("unilateral_case_matrix")
+    if isinstance(legacy, dict) and legacy.get("schema_version") == "unilateral_case_matrix.v1":
+        return legacy
+    raise ValueError("evidence context requires frozen case_fact_matrix.v2")
 
 
 # 所属模块：Agent Harness > 证据上下文边界 > 最近画布快照选择。
@@ -453,11 +560,96 @@ def _evidence_matrix_snapshot(canvas_snapshot: dict[str, Any]) -> dict[str, Any]
         "matrix",
     ):
         value = canvas_snapshot.get(key)
-        if isinstance(value, dict):
-            return {"version": value.get("version", 0), "matrix": value}
-        if isinstance(value, list):
-            return {"version": canvas_snapshot.get("version", 0), "matrix": value}
+        if isinstance(value, (dict, list)):
+            return {
+                "version": _evidence_matrix_version(
+                    value,
+                    fallback=canvas_snapshot.get("version", 0),
+                ),
+                "matrix": _evidence_matrix_links(value),
+                "available": True,
+            }
     return {"version": 0, "matrix": [], "available": False}
+
+
+def _evidence_matrix_version(value: Any, *, fallback: Any) -> int:
+    candidate = fallback
+    current = value
+    for _ in range(5):
+        if not isinstance(current, dict):
+            break
+        if "version" in current:
+            candidate = current.get("version")
+        nested = current.get("matrix")
+        if not isinstance(nested, dict):
+            break
+        current = nested
+    try:
+        version = int(candidate or 0)
+    except (TypeError, ValueError) as failure:
+        raise ValueError("evidence matrix version must be an integer") from failure
+    if version < 0:
+        raise ValueError("evidence matrix version must be non-negative")
+    return version
+
+
+def _evidence_matrix_links(value: Any) -> list[dict[str, Any]]:
+    current = value
+    for _ in range(5):
+        if isinstance(current, list):
+            return [dict(item) for item in current if isinstance(item, dict)]
+        if not isinstance(current, dict):
+            return []
+        for key in ("links", "items", "rows"):
+            candidate = current.get(key)
+            if isinstance(candidate, list):
+                return [dict(item) for item in candidate if isinstance(item, dict)]
+        current = current.get("matrix")
+    return []
+
+
+def _validated_evidence_matrix_snapshot(
+    snapshot: dict[str, Any],
+    *,
+    allowed_fact_targets: tuple[dict[str, str], ...],
+    visible_evidence_ids: set[str],
+) -> dict[str, Any]:
+    allowed_fact_ids = {
+        str(item.get("fact_id") or "") for item in allowed_fact_targets
+    }
+    by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    for item in _evidence_matrix_links(snapshot.get("matrix")):
+        fact_id = str(item.get("fact_id") or "").strip()
+        evidence_id = str(item.get("evidence_id") or "").strip()
+        relation = str(item.get("relation") or "").strip()
+        reason = str(item.get("reason") or "").strip()
+        try:
+            confidence = float(item.get("confidence"))
+        except (TypeError, ValueError):
+            continue
+        if (
+            fact_id not in allowed_fact_ids
+            or evidence_id not in visible_evidence_ids
+            or relation not in {"SUPPORTS", "OPPOSES", "INCONCLUSIVE"}
+            or not reason
+            or not 0 <= confidence <= 1
+        ):
+            continue
+        by_key[(fact_id, evidence_id)] = {
+            "fact_id": fact_id,
+            "evidence_id": evidence_id,
+            "relation": relation,
+            "reason": reason,
+            "confidence": confidence,
+        }
+    return {
+        "version": _evidence_matrix_version(
+            snapshot,
+            fallback=snapshot.get("version", 0),
+        ),
+        "matrix": list(by_key.values()),
+        "available": bool(snapshot.get("available", False)),
+    }
 
 
 # 所属模块：Agent Harness > 证据上下文边界 > 本轮证据缺口计划。
@@ -481,7 +673,7 @@ def _evidence_gap_plan(
         {
             "fact_id": target["fact_id"],
             "fact": target["fact"],
-            "priority": "HIGH" if target["status"] == "DISPUTED" else "MEDIUM",
+            "priority": "HIGH" if target.get("materiality") == "CORE" else "MEDIUM",
             "status": "UNCOVERED",
         }
         for target in fact_targets
@@ -576,6 +768,7 @@ def _visible_evidence(item: Any) -> dict[str, Any]:
         parse_status=item.parse_status,
     )
     content_preview = raw_preview[:MAX_EVIDENCE_PREVIEW_CHARS]
+    submission_declaration = _submission_declaration(item.metadata)
     return {
         "evidence_id": item.evidence_id,
         "evidence_type": item.evidence_type,
@@ -595,6 +788,7 @@ def _visible_evidence(item: Any) -> dict[str, Any]:
         "occurred_at": item.occurred_at,
         "submitted_at": item.submitted_at,
         "submission_status": item.submission_status,
+        **submission_declaration,
     }
 
 
@@ -649,6 +843,7 @@ def _working_evidence(item: Any) -> EvidenceTurnEvidenceItem:
         item.parsed_text,
         parse_status=item.parse_status,
     )
+    declaration = _submission_declaration(item.metadata)
     return EvidenceTurnEvidenceItem(
         evidence_id=item.evidence_id,
         evidence_type=item.evidence_type,
@@ -664,6 +859,78 @@ def _working_evidence(item: Any) -> EvidenceTurnEvidenceItem:
         original_filename=item.original_filename,
         parser_warning=parse_notice,
         redacted=item.desensitized,
+        **declaration,
+    )
+
+
+def _submission_declaration(metadata: Any) -> dict[str, Any]:
+    """只投影平台保存的举证声明字段，不把任意 metadata 注入模型上下文。"""
+
+    source = metadata if isinstance(metadata, dict) else {}
+
+    def value(*keys: str) -> Any:
+        for key in keys:
+            if key in source:
+                return source[key]
+        return None
+
+    claimed_fact = value("claimed_fact", "claimedFact")
+    claimed_fact = (
+        claimed_fact.strip()[:MAX_MODEL_TEXT_CHARS]
+        if isinstance(claimed_fact, str) and claimed_fact.strip()
+        else None
+    )
+    truth_attested_value = value("truth_attested", "truthAttested")
+    truth_attested = (
+        truth_attested_value if isinstance(truth_attested_value, bool) else None
+    )
+    return {
+        "claimed_fact": claimed_fact,
+        "truth_attested": truth_attested,
+        "attestation_version": _optional_text(
+            value("attestation_version", "attestationVersion")
+        ),
+        "attestation_scope": _attestation_scope(
+            value("attestation_scope", "attestationScope")
+        ),
+        "attestation_role": _allowed_text(
+            value("attestation_role", "attestationRole"),
+            {"USER", "MERCHANT", "PLATFORM", "CUSTOMER_SERVICE"},
+        ),
+        "attested_by": _optional_text(value("attested_by", "attestedBy")),
+        "attested_at": _optional_text(value("attested_at", "attestedAt")),
+        "party_capacity": _allowed_text(
+            value("party_capacity", "partyCapacity"),
+            {"INITIATOR", "RESPONDENT"},
+        ),
+        "forgery_consequence_code": _optional_text(
+            value("forgery_consequence_code", "forgeryConsequenceCode")
+        ),
+        "enforcement_gate": _optional_text(
+            value("enforcement_gate", "enforcementGate")
+        ),
+    }
+
+
+def _optional_text(value: Any) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value.strip()[:500]
+
+
+def _allowed_text(value: Any, allowed: set[str]) -> str | None:
+    candidate = _optional_text(value)
+    return candidate if candidate in allowed else None
+
+
+def _attestation_scope(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    allowed = {"AUTHENTICITY", "CLAIMED_FACT_RELEVANCE"}
+    return list(
+        dict.fromkeys(
+            item for raw in value if (item := _optional_text(raw)) in allowed
+        )
     )
 
 

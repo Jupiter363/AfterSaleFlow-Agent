@@ -70,7 +70,7 @@ class MigrationIntegrationTest {
         MigrateResult first = flyway.migrate();
         MigrateResult second = flyway.migrate();
 
-        assertThat(first.migrationsExecuted).isEqualTo(29);
+        assertThat(first.migrationsExecuted).isEqualTo(37);
         assertThat(second.migrationsExecuted).isZero();
 
         try (Connection connection =
@@ -100,6 +100,7 @@ class MigrationIntegrationTest {
                             "human_review_record",
                             "action_record",
                             "agent_run",
+                            "agent_run_stream_event",
                             "agent_tool_call",
                             "agent_guardrail_event",
                             "agent_memory_entry",
@@ -124,13 +125,19 @@ class MigrationIntegrationTest {
                             "notification_outbox",
                             "room_turn_memory",
                             "case_intake_dossier",
+                            "case_intake_party_completion",
                             "case_access_session",
                             "agent_conversation_session",
                             "agent_session_dossier",
                             "evidence_submission_batch",
                             "agent_a2a_message",
                             "simulated_import_template_cursor",
-                            "demo_case_purge_audit");
+                            "demo_case_purge_audit",
+                            "hearing_flow_instance",
+                            "hearing_flow_stage",
+                            "hearing_flow_action",
+                            "hearing_trial_dossier",
+                            "hearing_flow_artifact");
             assertThat(
                             countRows(
                                     connection,
@@ -161,6 +168,10 @@ class MigrationIntegrationTest {
                     .isEqualTo("character varying");
             assertThat(columnType(connection, "notification", "dismissed_at"))
                     .isEqualTo("timestamp with time zone");
+            assertThat(columnType(connection, "room_message", "message_source"))
+                    .isEqualTo("character varying");
+            assertThat(columnType(connection, "hearing_flow_action", "participant_id"))
+                    .isEqualTo("character varying");
             assertThat(numericDefinition(connection, "remedy_plan", "total_amount"))
                     .isEqualTo("18:2");
             assertThat(loadIndexes(connection))
@@ -181,7 +192,11 @@ class MigrationIntegrationTest {
                             "uq_settlement_confirmation_role",
                             "uq_notification_business_recipient",
                             "idx_notification_recipient_visible",
-                            "uq_agent_a2a_jury_review_report");
+                            "uq_agent_a2a_jury_review_report",
+                            "uq_evidence_completion_participant",
+                            "uq_hearing_flow_action_generated",
+                            "uq_hearing_flow_action_party",
+                            "uq_hearing_flow_artifact_case_type");
             assertThat(
                             countRows(
                                     connection,
@@ -192,7 +207,10 @@ class MigrationIntegrationTest {
             assertThat(loadTriggers(connection))
                     .contains(
                             "trg_room_message_append_only",
-                            "trg_case_timeline_event_append_only");
+                            "trg_case_timeline_event_append_only",
+                            "trg_hearing_flow_action_append_only",
+                            "trg_hearing_trial_dossier_append_only",
+                            "trg_hearing_flow_artifact_append_only");
             assertFormalJuryReportUniqueness(connection);
             assertAppendOnlyTablesRejectMutation(connection);
         }
@@ -363,10 +381,11 @@ class MigrationIntegrationTest {
                     """
                     insert into room_message (
                         id, case_id, room_id, sequence_no, sender_type, sender_role,
-                        sender_id, message_type, message_text, idempotency_key, created_by
+                        sender_id, message_source, message_type, message_text,
+                        idempotency_key, created_by
                     ) values (
                         'MESSAGE_APPEND_ONLY', 'CASE_APPEND_ONLY', 'ROOM_APPEND_ONLY', 1,
-                        'PARTY', 'USER', 'user-local', 'PARTY_TEXT', 'original',
+                        'PARTY', 'USER', 'user-local', 'PARTY_ACTION', 'PARTY_TEXT', 'original',
                         'append-only-message', 'user-local'
                     )
                     """);

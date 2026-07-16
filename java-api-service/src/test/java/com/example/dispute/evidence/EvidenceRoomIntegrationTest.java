@@ -44,8 +44,6 @@ import com.example.dispute.room.infrastructure.persistence.repository.CasePhaseC
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseTimelineEventRepository;
 import com.example.dispute.workflow.application.EvidenceWindowCoordinator;
-import com.example.dispute.hearing.application.HearingRoundService;
-import com.example.dispute.hearing.application.HearingWorkflowCoordinator;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.time.Instant;
@@ -126,8 +124,6 @@ class EvidenceRoomIntegrationTest {
     @Autowired private NotificationRepository notificationRepository;
     @Autowired private CaseTimelineEventRepository eventRepository;
     @MockitoBean private EvidenceWindowCoordinator evidenceWindowCoordinator;
-    @MockitoBean private HearingRoundService hearingRoundService;
-    @MockitoBean private HearingWorkflowCoordinator hearingWorkflowCoordinator;
     @MockitoBean private AccessSessionResolver accessSessionResolver;
     @MockitoBean private SessionPermissionService sessionPermissionService;
 

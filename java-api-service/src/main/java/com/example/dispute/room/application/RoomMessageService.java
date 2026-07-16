@@ -11,7 +11,6 @@ import com.example.dispute.common.exception.IdempotencyConflictException;
 import com.example.dispute.common.exception.ForbiddenException;
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
-import com.example.dispute.hearing.application.HearingRoundService;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.room.domain.MessageSenderType;
@@ -50,9 +49,9 @@ public class RoomMessageService {
     private final CaseEventService eventService;
     private final IntakeAgentTurnService intakeAgentTurnService;
     private final EvidenceAgentTurnService evidenceAgentTurnService;
-    private final HearingRoundService hearingRoundService;
     private final AccessSessionResolver accessSessionResolver;
     private final SessionPermissionService permissionService;
+    private final IntakeProgressService intakeProgressService;
     private final Clock clock;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -70,9 +69,9 @@ public class RoomMessageService {
             CaseEventService eventService,
             IntakeAgentTurnService intakeAgentTurnService,
             EvidenceAgentTurnService evidenceAgentTurnService,
-            HearingRoundService hearingRoundService,
             AccessSessionResolver accessSessionResolver,
             SessionPermissionService permissionService,
+            IntakeProgressService intakeProgressService,
             Clock clock) {
         this.caseRepository = caseRepository;
         this.roomRepository = roomRepository;
@@ -81,9 +80,9 @@ public class RoomMessageService {
         this.eventService = eventService;
         this.intakeAgentTurnService = intakeAgentTurnService;
         this.evidenceAgentTurnService = evidenceAgentTurnService;
-        this.hearingRoundService = hearingRoundService;
         this.accessSessionResolver = accessSessionResolver;
         this.permissionService = permissionService;
+        this.intakeProgressService = intakeProgressService;
         this.clock = clock;
     }
 
@@ -149,15 +148,15 @@ public class RoomMessageService {
         permissionService.requireRoomRead(accessSession, roomType);
         permissionService.require(accessSession, PermissionScope.ROOM_MESSAGE_READ);
         assertCanRead(dispute, actor);
+        if (roomType == RoomType.INTAKE) {
+            intakeProgressService.assertIntakeRead(dispute, actor);
+        } else if (roomType == RoomType.EVIDENCE) {
+            intakeProgressService.assertEvidenceAccess(dispute, actor);
+        }
         CaseRoomEntity room =
                 roomRepository
                         .findByCaseIdAndRoomType(caseId, roomType)
                         .orElseThrow(() -> new IllegalArgumentException("room not found"));
-        if (roomType == RoomType.INTAKE
-                && isParty(actor.role())
-                && !isIntakeInitiator(dispute, actor)) {
-            return List.of();
-        }
         return messageRepository.findAllByRoomIdOrderBySequenceNoAsc(room.getId())
                 .stream()
                 .filter(message -> visibleTo(message, accessSession))
@@ -178,7 +177,19 @@ public class RoomMessageService {
             AuthenticatedActor actor,
             String traceId,
             String requestId) {
+        if (roomType == RoomType.INTAKE) {
+            FulfillmentCaseEntity dispute =
+                    caseRepository.findById(caseId)
+                            .orElseThrow(() -> new IllegalArgumentException("case not found"));
+            intakeProgressService.assertIntakePost(dispute, actor);
+            return intakeAgentTurnService.ensureRespondentOpening(
+                    caseId, roomType, actor, traceId, requestId);
+        }
         if (roomType == RoomType.EVIDENCE) {
+            FulfillmentCaseEntity dispute =
+                    caseRepository.findById(caseId)
+                            .orElseThrow(() -> new IllegalArgumentException("case not found"));
+            intakeProgressService.assertEvidenceAccess(dispute, actor);
             return evidenceAgentTurnService.ensureOpeningOrStart(
                     caseId, roomType, actor, traceId, requestId);
         }
@@ -203,7 +214,6 @@ public class RoomMessageService {
         String audienceJson = audience(room.getRoomType(), actor.role(), command.messageType());
         String audienceActorIdsJson =
                 audienceActorIds(room.getRoomType(), actor, command.messageType());
-        Integer hearingRound = hearingRoundForPartyMessage(dispute, room, command, actor);
         long sequence = messageRepository.findMaxSequenceByRoomId(room.getId()) + 1;
         RoomMessageEntity message =
                 RoomMessageEntity.create(
@@ -220,17 +230,8 @@ public class RoomMessageService {
                         command.text(),
                         json(command.attachmentRefs()),
                         idempotencyKey,
-                        hearingRound,
                         clock.instant(),
                         traceId);
-        if (hearingRound != null && command.messageType() == MessageType.PARTY_TEXT) {
-            hearingRoundService.recordPartyMessageSubmission(
-                    dispute.getId(),
-                    hearingRound,
-                    message.getId(),
-                    message.getMessageText(),
-                    actor);
-        }
         AgentRunAcceptedView accepted = intakeAgentTurnService.continueFromParticipantMessage(
                 dispute.getId(),
                 room.getRoomType(),
@@ -272,19 +273,6 @@ public class RoomMessageService {
     // 上游调用：「RoomMessageService.hearingRoundForPartyMessage(FulfillmentCaseEntity,CaseRoomEntity,RoomMessageCommand,AuthenticatedActor)」的上游调用点包括 「RoomMessageService.create」。
     // 下游影响：「RoomMessageService.hearingRoundForPartyMessage(FulfillmentCaseEntity,CaseRoomEntity,RoomMessageCommand,AuthenticatedActor)」向下依次触达 「hearingRoundService.currentOpenRoundNoForPartyMessage」、「room.getRoomType」、「command.messageType」、「actor.role」；计算结果以「Integer」交给调用方。
     // 系统意义：「RoomMessageService.hearingRoundForPartyMessage(FulfillmentCaseEntity,CaseRoomEntity,RoomMessageCommand,AuthenticatedActor)」负责主链路中的“庭审轮次面向当事方消息”；每次读取和写入都要绑定案件参与关系、角色、房间和受众范围
-    private Integer hearingRoundForPartyMessage(
-            FulfillmentCaseEntity dispute,
-            CaseRoomEntity room,
-            RoomMessageCommand command,
-            AuthenticatedActor actor) {
-        if (room.getRoomType() != RoomType.HEARING
-                || !isHearingPartyRoundMessage(command.messageType())
-                || !isParty(actor.role())) {
-            return null;
-        }
-        return hearingRoundService.currentOpenRoundNoForPartyMessage(dispute.getId(), actor);
-    }
-
     // 所属模块：【房间协作与权限 / 应用编排层】「RoomMessageService.assertSameImmutableRequest(RoomMessageEntity,CaseRoomEntity,RoomMessageCommand,AuthenticatedActor)」。
     // 具体功能：「RoomMessageService.assertSameImmutableRequest(RoomMessageEntity,CaseRoomEntity,RoomMessageCommand,AuthenticatedActor)」：断言相同Immutable请求；实际协作者为 「existing.getRoomId」、「requestedRoom.getId」、「existing.getSenderRole」、「actor.role」；不满足前置条件时抛出 「IdempotencyConflictException」，最终返回「void」。
     // 上游调用：「RoomMessageService.assertSameImmutableRequest(RoomMessageEntity,CaseRoomEntity,RoomMessageCommand,AuthenticatedActor)」的上游调用点包括 「RoomMessageService.post」。
@@ -320,11 +308,16 @@ public class RoomMessageService {
             AuthenticatedActor actor,
             MessageType messageType) {
         assertCanRead(dispute, actor);
-        if (roomType == RoomType.INTAKE
+        if (roomType == RoomType.INTAKE) {
+            intakeProgressService.assertIntakePost(dispute, actor);
+        } else if (roomType == RoomType.EVIDENCE) {
+            intakeProgressService.assertEvidenceAccess(dispute, actor);
+        }
+        if (roomType == RoomType.HEARING
                 && isParty(actor.role())
-                && !isIntakeInitiator(dispute, actor)) {
+                && messageType != MessageType.PARTY_EVIDENCE_REFERENCE) {
             throw new ForbiddenException(
-                    "only the intake initiator can post in the intake room");
+                    "hearing_flow.v2 accepts party answers only through structured endpoints");
         }
         boolean allowed =
                 switch (actor.role()) {
@@ -383,10 +376,10 @@ public class RoomMessageService {
                     entity.getSenderRole(),
                     entity.getSenderId(),
                     entity.getMessageType(),
+                    entity.getMessageSource(),
                     entity.getMessageText(),
                     attachments,
                     entity.getAgentRunId(),
-                    entity.getHearingRound(),
                     entity.getCreatedAt());
         } catch (JsonProcessingException exception) {
             throw new IllegalStateException("invalid message attachments", exception);

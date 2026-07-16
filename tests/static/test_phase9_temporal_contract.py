@@ -24,19 +24,21 @@ def test_temporal_workflow_owns_wait_signal_timeout_and_retry() -> None:
         JAVA
         / "workflow"
         / "temporal"
-        / "CaseFulfillmentDisputeWorkflowImpl.java"
+        / "EvidenceWindowWorkflowImpl.java"
     )
     contract = text(
         JAVA
         / "workflow"
         / "temporal"
-        / "CaseFulfillmentDisputeWorkflow.java"
+        / "EvidenceWindowWorkflow.java"
     )
     assert "Workflow.await(" in workflow
-    assert "RetryOptions.newBuilder()" in workflow
-    assert "submitPartyEvidence" in contract
-    assert "submitReviewerSignal" in contract
-    assert "activities.planRemedy" in workflow
+    assert "partyCompleted" in contract
+    assert "activities.warn" in workflow
+    assert "activities.expire" in workflow
+    worker = text(JAVA / "workflow" / "config" / "TemporalWorkerConfiguration.java")
+    assert "EvidenceWindowWorkflowImpl.class" in worker
+    assert "DisputeHearingWorkflowImpl.class" not in worker
 
 
 # 所属模块：跨服务契约测试 > test_phase9_temporal_contract；函数角色：回归测试用例。
@@ -45,26 +47,21 @@ def test_temporal_workflow_owns_wait_signal_timeout_and_retry() -> None:
 # 系统意义：固定“跨服务契约测试 > test_phase9_temporal_contract”的可观察契约，防止后续重构改变业务结果。
 def test_hearing_controller_is_async_and_python_does_not_own_global_state() -> None:
     controller = text(
-        JAVA / "hearing" / "api" / "HearingCollaborationController.java"
+        JAVA / "hearing" / "api" / "HearingFlowController.java"
     )
-    application = text(
+    runtime = text(
         JAVA
-        / "workflow"
+        / "hearing"
         / "application"
-        / "WorkflowApplicationService.java"
+        / "HearingFlowRuntimeService.java"
     )
-    activity = text(
-        JAVA
-        / "workflow"
-        / "application"
-        / "CaseFulfillmentDisputeActivitiesImpl.java"
-    )
-    assert "WorkflowClient.start(" in application
-    assert ".getResult(" not in application
+    assert '@PostMapping("/answers")' in controller
+    assert '@PostMapping("/evidence-batches")' in controller
     assert ".getResult(" not in controller
-    assert "transactions.execute(" in activity
-    assert "agentClient.analyze(" in activity
-    assert "@Transactional" not in activity
+    assert "HearingFlowInstanceRepository" in runtime
+    assert "AgentRunCoordinator" in runtime
+    assert "trialDossierRepository" in runtime
+    assert "static" not in runtime.split("class HearingFlowRuntimeService", 1)[1].split("{", 1)[0]
 
 
 # 所属模块：跨服务契约测试 > test_phase9_temporal_contract；函数角色：回归测试用例。
@@ -73,13 +70,14 @@ def test_hearing_controller_is_async_and_python_does_not_own_global_state() -> N
 # 系统意义：固定“跨服务契约测试 > test_phase9_temporal_contract”的可观察契约，防止后续重构改变业务结果。
 def test_hearing_state_records_drafts_and_submissions_are_real_entities() -> None:
     for name, table in {
-        "HearingStateEntity.java": "hearing_state",
-        "HearingRecordEntity.java": "hearing_stage_record",
-        "AdjudicationDraftEntity.java": "adjudication_draft",
-        "PartySubmissionEntity.java": "dispute_submission",
+        "HearingFlowInstanceEntity.java": "hearing_flow_instance",
+        "HearingFlowStageEntity.java": "hearing_flow_stage",
+        "HearingFlowActionEntity.java": "hearing_flow_action",
+        "HearingTrialDossierEntity.java": "hearing_trial_dossier",
+        "HearingFlowArtifactEntity.java": "hearing_flow_artifact",
     }.items():
         entity = text(
-            JAVA / "infrastructure" / "persistence" / "entity" / name
+            JAVA / "hearing" / "infrastructure" / "persistence" / "entity" / name
         )
         assert f'@Table(name = "{table}")' in entity
         assert "@Column" in entity
@@ -89,7 +87,7 @@ def test_hearing_state_records_drafts_and_submissions_are_real_entities() -> Non
 # 具体功能：`test_worker_is_explicitly_enabled_only_in_compose` 把上游材料组装为本阶段可消费的被测业务场景。
 # 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 本文件的 `text`。
 # 系统意义：固定“跨服务契约测试 > test_phase9_temporal_contract”的可观察契约，防止后续重构改变业务结果。
-def test_worker_is_explicitly_enabled_only_in_compose() -> None:
+def test_worker_enablement_is_explicitly_configurable() -> None:
     config = text(
         JAVA
         / "workflow"
@@ -108,7 +106,7 @@ def test_worker_is_explicitly_enabled_only_in_compose() -> None:
     assert "@ConditionalOnProperty(" in config
     assert 'havingValue = "true"' in config
     assert 'APP_TEMPORAL_WORKER_ENABLED: "true"' in compose
-    assert "APP_TEMPORAL_WORKER_ENABLED:false" in local
+    assert "${APP_TEMPORAL_WORKER_ENABLED:" in local
 
 
 # 所属模块：跨服务契约测试 > test_phase9_temporal_contract；函数角色：回归测试用例。
@@ -117,21 +115,36 @@ def test_worker_is_explicitly_enabled_only_in_compose() -> None:
 # 系统意义：固定“跨服务契约测试 > test_phase9_temporal_contract”的可观察契约，防止后续重构改变业务结果。
 def test_phase9_public_api_and_service_auth_headers_exist() -> None:
     controller = text(
-        JAVA / "hearing" / "api" / "HearingCollaborationController.java"
+        JAVA / "hearing" / "api" / "HearingFlowController.java"
     )
-    client = text(
+    operations = text(
         JAVA
-        / "workflow"
-        / "infrastructure"
-        / "RestClientHearingAgentClient.java"
+        / "agentstream"
+        / "application"
+        / "AgentStreamOperationRegistry.java"
     )
     for route in (
-        "/rounds",
-        "/rounds/complete",
+        "/answers",
+        "/evidence-batches",
+        "/complete",
         "/settlements",
         "/settlements/{version}/confirm",
     ):
         assert route in controller
-    assert "/internal/agents/legacy/hearing/analyze" in client
+    for route in (
+        "/internal/agents/hearing-flow/intake/questions/stream",
+        "/internal/agents/hearing-flow/intake/synthesis/stream",
+        "/internal/agents/hearing-flow/evidence/requests/stream",
+        "/internal/agents/hearing-flow/evidence/synthesis/stream",
+        "/internal/agents/hearing-flow/judge/v1/stream",
+        "/internal/agents/hearing-flow/jury/review/stream",
+        "/internal/agents/hearing-flow/judge/v2/stream",
+    ):
+        assert route in operations
+    assert "HEARING_ROUND" not in operations
+    assert "HEARING_ANALYSIS" not in operations
+    client = text(
+        JAVA / "agentstream" / "infrastructure" / "AgentNdjsonStreamClient.java"
+    )
     assert '"X-Role", "SYSTEM"' in client
     assert "TraceIdFilter.TRACE_HEADER" in client

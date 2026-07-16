@@ -142,6 +142,7 @@ import intakeOfficerPortrait from "../../assets/digital-humans/intake-officer.we
 import judgePortrait from "../../assets/digital-humans/judge.webp";
 import juryAPortrait from "../../assets/digital-humans/jury-a.webp";
 import juryBPortrait from "../../assets/digital-humans/jury-b.webp";
+import reviewExplainerPortrait from "../../assets/digital-humans/review-explainer.webp";
 import routeGuidePortrait from "../../assets/digital-humans/route-guide.webp";
 
 const props = defineProps({
@@ -557,6 +558,17 @@ const hairShape = computed(() =>
           data-jury-b-portrait
         />
         <image
+          v-else-if="persona === 'review'"
+          class="digital-human__raster-portrait digital-human__raster-portrait--review"
+          :href="reviewExplainerPortrait"
+          x="-15"
+          y="-8"
+          width="250"
+          height="250"
+          preserveAspectRatio="xMidYMid meet"
+          data-review-explainer-portrait
+        />
+        <image
           v-else-if="persona === 'guide'"
           class="digital-human__raster-portrait digital-human__raster-portrait--guide"
           :href="routeGuidePortrait"
@@ -573,9 +585,9 @@ const hairShape = computed(() =>
 
     <div class="digital-human__copy">
       <div class="digital-human__identity">
-        <div>
+        <div class="digital-human__title-row">
           <strong>{{ name }}</strong>
-          <span>{{ role }}</span>
+          <span class="digital-human__role" data-digital-human-role>{{ role }}</span>
         </div>
         <small>{{ stateLabel }}</small>
       </div>
@@ -595,6 +607,9 @@ const hairShape = computed(() =>
   --costume-foundation: #d7ecff;
   --costume-panel: #77c5ff;
   --costume-panel-soft: #e8f6ff;
+  --persona-role-color: #334159;
+  --persona-role-background: #eef2f6;
+  --persona-role-border: #d6dee8;
   display: grid;
   box-sizing: border-box;
   grid-template-columns: 148px minmax(0, 1fr);
@@ -617,6 +632,9 @@ const hairShape = computed(() =>
   --costume-foundation: #bdeedd;
   --costume-panel: #68d0b5;
   --costume-panel-soft: #e3fbf3;
+  --persona-role-color: #68243f;
+  --persona-role-background: #95c9b6;
+  --persona-role-border: #74b29c;
 }
 .digital-human--evidence {
   --costume-main: #5ba7ff;
@@ -625,6 +643,9 @@ const hairShape = computed(() =>
   --costume-foundation: #c8e5ff;
   --costume-panel: #6db2ff;
   --costume-panel-soft: #edf7ff;
+  --persona-role-color: #5c2442;
+  --persona-role-background: #77a9e7;
+  --persona-role-border: #5f91cf;
 }
 .digital-human--judge {
   --costume-main: #51577f;
@@ -633,6 +654,9 @@ const hairShape = computed(() =>
   --costume-foundation: #616895;
   --costume-panel: #555d91;
   --costume-panel-soft: #fff1c8;
+  --persona-role-color: #fff0b8;
+  --persona-role-background: #302e55;
+  --persona-role-border: #77719c;
 }
 .digital-human--jury {
   --costume-main: #a98cf5;
@@ -641,6 +665,9 @@ const hairShape = computed(() =>
   --costume-foundation: #d9caff;
   --costume-panel: #a98cf5;
   --costume-panel-soft: #f4edff;
+  --persona-role-color: #594700;
+  --persona-role-background: #d6c2f7;
+  --persona-role-border: #a48cdb;
 }
 .digital-human--review {
   --costume-main: #3ea5b2;
@@ -649,6 +676,9 @@ const hairShape = computed(() =>
   --costume-foundation: #bde9ec;
   --costume-panel: #56b7c2;
   --costume-panel-soft: #e9fffb;
+  --persona-role-color: #eafff4;
+  --persona-role-background: #ce4040;
+  --persona-role-border: #a72f35;
 }
 .digital-human--guide {
   --costume-main: #f5b84d;
@@ -657,6 +687,9 @@ const hairShape = computed(() =>
   --costume-foundation: #ffe3a2;
   --costume-panel: #f5bd58;
   --costume-panel-soft: #fff5dc;
+  --persona-role-color: #2e315f;
+  --persona-role-background: #f5b84d;
+  --persona-role-border: #d79a2e;
 }
 
 .digital-human[data-state="LISTENING"] { --human-accent: #6ed5aa; }
@@ -708,6 +741,9 @@ const hairShape = computed(() =>
 .digital-human--jury[data-portrait-variant="jury-b"] .digital-human__body-layer,
 .digital-human--jury[data-portrait-variant="jury-b"] .digital-human__head-layer,
 .digital-human--jury[data-portrait-variant="jury-b"] .digital-human__hand-prop,
+.digital-human--review .digital-human__body-layer,
+.digital-human--review .digital-human__head-layer,
+.digital-human--review .digital-human__hand-prop,
 .digital-human--guide .digital-human__body-layer,
 .digital-human--guide .digital-human__head-layer,
 .digital-human--guide .digital-human__hand-prop {
@@ -720,7 +756,8 @@ const hairShape = computed(() =>
 .digital-human__raster-portrait--guide,
 .digital-human__raster-portrait--judge,
 .digital-human__raster-portrait--jury-a,
-.digital-human__raster-portrait--jury-b {
+.digital-human__raster-portrait--jury-b,
+.digital-human__raster-portrait--review {
   filter: drop-shadow(0 4px 5px rgba(65, 58, 91, .16));
 }
 .digital-human__hair {
@@ -928,10 +965,34 @@ const hairShape = computed(() =>
   gap: 12px;
   align-items: flex-start;
 }
+.digital-human__title-row {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
 .digital-human__identity strong,
 .digital-human__identity span { display: block; }
 .digital-human__identity strong { font-size: 20px; }
 .digital-human__identity span { margin-top: 3px; color: #667089; font-size: 13px; }
+.digital-human__identity .digital-human__role {
+  display: inline-flex;
+  box-sizing: border-box;
+  width: fit-content;
+  min-height: 24px;
+  align-items: center;
+  margin-top: 0;
+  padding: 3px 8px;
+  color: var(--persona-role-color);
+  background: var(--persona-role-background);
+  border: 1px solid var(--persona-role-border);
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.25;
+  letter-spacing: 0;
+}
 .digital-human__identity small {
   padding: 6px 10px;
   color: #374158;

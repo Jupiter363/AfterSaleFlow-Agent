@@ -447,6 +447,22 @@ public class EvidenceItemEntity extends AbstractEntity {
         return metadataJson;
     }
 
+    /**
+     * Replaces metadata with the application-layer merged evidence declaration document.
+     * Existing metadata must be carried forward by the caller.
+     */
+    public void recordSubmissionDeclaration(
+            String declarationMetadataJson, String actorId) {
+        if (declarationMetadataJson == null || declarationMetadataJson.isBlank()) {
+            throw new IllegalArgumentException("submission declaration metadata must not be blank");
+        }
+        if (actorId == null || actorId.isBlank()) {
+            throw new IllegalArgumentException("submission declaration actor must not be blank");
+        }
+        this.metadataJson = declarationMetadataJson;
+        this.updatedBy = actorId;
+    }
+
     // 所属模块：【PostgreSQL 事实模型 / JPA 实体层】「EvidenceItemEntity.authorizeModelProcessing(String,String)」。
     // 具体功能：「EvidenceItemEntity.authorizeModelProcessing(String,String)」：授权ModelProcessing：先更新内部状态 「metadataJson」、「updatedBy」；不满足前置条件时抛出 「IllegalArgumentException」，最终返回「void」。
     // 上游调用：「EvidenceItemEntity.authorizeModelProcessing(String,String)」由使用「EvidenceItemEntity」的控制器、应用服务、Workflow Activity 或测试场景触发。

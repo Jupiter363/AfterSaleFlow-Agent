@@ -9,6 +9,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.schemas import IntakeTurnRequest
+from app.schemas.intake_case_matrix import UnilateralCaseMatrixDraftV1
+from app.schemas.case_fact_matrix import CaseFactMatrixDeltaV2
+from app.agents.dispute_intake_officer.case_fact_matrix import (
+    finalize_case_fact_matrix,
+)
 
 
 ORDER_REFERENCE_RE = re.compile(r"\b(?:ORDER|ORD|订单)[-_]?[A-Za-z0-9]{3,40}\b", re.IGNORECASE)
@@ -25,6 +30,7 @@ ORIGINAL_STATEMENT_SEPARATOR = "\n\n"
 ORIGINAL_STATEMENT_MISSING = "外部系统未提供发起方原话"
 ORIGINAL_STATEMENT_POLICY = "INITIATOR_INPUTS_V1"
 SUBJECTIVE_RESPONDENT_SOURCE = "发起方单方陈述（主观）"
+DIRECT_RESPONDENT_SOURCE = "被发起方接待室直接陈述"
 SUBJECTIVE_RESPONDENT_CONFIDENCE_NOTE = (
     "仅表示从发起方单方陈述中提取态度的明确度，不代表事实真实性。"
 )
@@ -54,6 +60,8 @@ CASE_DETAIL_TOP_LEVEL_FIELDS = frozenset(
         "intake_quality",
         "admission",
         "handoff_notes",
+        "case_fact_matrix",
+        "unilateral_case_matrix",
     }
 )
 CASE_DETAIL_MAX_DEPTH = 12
@@ -126,7 +134,14 @@ class CaseDetailDossierSkill:
         llm_admission_recommendation: str,
         llm_missing_fields: list[str],
         llm_confidence: float,
+        llm_case_matrix_delta: (
+            CaseFactMatrixDeltaV2 | UnilateralCaseMatrixDraftV1 | None
+        ) = None,
+        llm_unilateral_case_matrix: UnilateralCaseMatrixDraftV1 | None = None,
     ) -> DossierRenderResult:
+        if llm_case_matrix_delta is not None and llm_unilateral_case_matrix is not None:
+            raise ValueError("provide only llm_case_matrix_delta")
+        effective_matrix_delta = llm_case_matrix_delta or llm_unilateral_case_matrix
         if llm_case_detail is None and llm_scroll_snapshot:
             return self._legacy_passthrough(
                 llm_dossier_patch=llm_dossier_patch,
@@ -139,11 +154,10 @@ class CaseDetailDossierSkill:
 
         previous = _case_detail_fields_only(request.previous_case_detail or {})
         bounded_llm_case_detail = _case_detail_fields_only(llm_case_detail or {})
-        previous_waiting_for_remark = (
-            _handoff_remark_status(previous) == "WAITING_FOR_REMARK"
-            if isinstance(previous, dict)
-            else False
+        previous_remark_status = (
+            _handoff_remark_status(previous) if isinstance(previous, dict) else ""
         )
+        previous_waiting_for_remark = previous_remark_status == "WAITING_FOR_REMARK"
         detail = self._default_case_detail(request)
         detail = _deep_merge(detail, previous if _is_case_detail(previous) else {})
         detail = _deep_merge(detail, bounded_llm_case_detail)
@@ -172,13 +186,30 @@ class CaseDetailDossierSkill:
         }
 
         missing_info = _ensure_dict(detail, "missing_information")
+        actor_role = str(request.agent_context.actor_role or "").upper()
         for field_name in ("blocking_gaps", "nice_to_have_gaps", "next_questions"):
-            missing_info[field_name] = [
+            values = [
                 value
                 for value in _list_values(missing_info.get(field_name))
                 if not _is_evidence_material_request(value)
-                and not _question_targets_resolved_intake_field(value, detail)
+                and not _question_targets_resolved_intake_field(
+                    value,
+                    detail,
+                    actor_role=actor_role,
+                )
             ]
+            missing_info[field_name] = values[:2] if field_name == "next_questions" else values
+        utterance_questions = _follow_up_questions_from_utterance(room_utterance)
+        if utterance_questions and not _is_evidence_material_request(room_utterance):
+            missing_info["next_questions"] = [
+                question
+                for question in utterance_questions
+                if not _question_targets_resolved_intake_field(
+                    question,
+                    detail,
+                    actor_role=actor_role,
+                )
+            ][:2]
         llm_missing_from_detail = _list_values(missing_info.get("blocking_gaps"))
         missing = self._hard_missing_fields(trusted_refs)
         missing.extend(
@@ -213,9 +244,21 @@ class CaseDetailDossierSkill:
         missing_info["blocking_gaps"] = _human_missing_fields(missing)
         if quality["ready_for_next_step"]:
             missing_info["next_questions"] = []
-            _ensure_handoff_notes(detail)
-        elif not missing_info.get("next_questions"):
-            missing_info["next_questions"] = [_question_for_missing(missing)]
+            if previous_remark_status == "READY_PENDING_REMARK_INVITE":
+                next_remark_status = "WAITING_FOR_REMARK"
+            elif previous_remark_status in {
+                "WAITING_FOR_REMARK",
+                "HAS_REMARKS",
+                "NO_EXTRA_REMARKS",
+            }:
+                next_remark_status = previous_remark_status
+            else:
+                next_remark_status = "READY_PENDING_REMARK_INVITE"
+            _ensure_handoff_notes(detail, remark_status=next_remark_status)
+        else:
+            _ensure_handoff_notes(detail, remark_status="NOT_READY")
+            if not missing_info.get("next_questions"):
+                missing_info["next_questions"] = [_question_for_missing(missing)]
         _normalize_next_verification_focus(detail)
         _record_handoff_remark_if_needed(
             detail,
@@ -233,6 +276,13 @@ class CaseDetailDossierSkill:
         admission["confidence"] = _clamp_confidence(
             admission.get("confidence", llm_confidence)
         )
+
+        detail["case_fact_matrix"] = finalize_case_fact_matrix(
+            request=request,
+            case_detail=detail,
+            delta=effective_matrix_delta,
+        ).model_dump(mode="json")
+        detail.pop("unilateral_case_matrix", None)
 
         operations = [
             {
@@ -574,9 +624,20 @@ def _enforce_case_story_summary(
     current = request.current_user_message
     initial = request.initial_case_facts
     form_description = str(getattr(initial, "form_description", None) or "").strip()
+    previous_matrix = previous.get("case_fact_matrix") if isinstance(previous, dict) else None
+    previous_party_map = (
+        previous_matrix.get("party_map")
+        if isinstance(previous_matrix, dict)
+        else {}
+    )
     initiator_role = _party_role_or_default(
         getattr(initial, "initiator_role", None)
+        or previous_party_map.get("initiator_role")
         or (current.role if current is not None else None)
+    )
+    actor_role = str(request.agent_context.actor_role or "").upper()
+    current_is_direct_respondent = (
+        current is not None and actor_role == _opposite_party(initiator_role)
     )
     source_texts = [form_description] if form_description else []
     source_texts.extend(
@@ -585,7 +646,7 @@ def _enforce_case_story_summary(
     if current is not None and not _transcript_contains_current(request):
         source_texts.append(current.text)
 
-    grounded_respondent = any(
+    grounded_respondent = current_is_direct_respondent or any(
         _has_explicit_respondent_report(text, initiator_role)
         for text in source_texts
     )
@@ -853,7 +914,23 @@ def _enforce_claim_resolution(
         previous_claim = {}
     current = request.current_user_message
     current_text = current.text if current is not None else ""
-    current_is_claim = _is_explicit_claim_text(current_text)
+    previous_matrix = previous.get("case_fact_matrix") if isinstance(previous, dict) else None
+    previous_party_map = (
+        previous_matrix.get("party_map")
+        if isinstance(previous_matrix, dict)
+        else {}
+    )
+    initiator_role = _party_role_or_default(
+        str(
+            previous_party_map.get("initiator_role")
+            or previous_claim.get("initiator_role")
+            or getattr(initial, "initiator_role", None)
+            or (current.role if current is not None else "")
+        )
+    )
+    actor_role = str(request.agent_context.actor_role or "").upper()
+    current_is_initiator = current is None or actor_role == initiator_role
+    current_is_claim = current_is_initiator and _is_explicit_claim_text(current_text)
 
     semantic_fields = (
         "initiator_role",
@@ -865,6 +942,12 @@ def _enforce_claim_resolution(
     if current is None:
         for field_name in semantic_fields:
             claim[field_name] = copy.deepcopy(defaults.get(field_name))
+    elif not current_is_initiator:
+        for field_name in (*semantic_fields, "normalized_statement"):
+            if field_name in previous_claim:
+                claim[field_name] = copy.deepcopy(previous_claim[field_name])
+            else:
+                claim[field_name] = copy.deepcopy(defaults.get(field_name))
     elif not current_is_claim:
         for field_name in semantic_fields:
             if field_name in previous_claim:
@@ -906,6 +989,11 @@ def _enforce_claim_resolution(
     requested = _ensure_dict(detail, "requested_resolution")
     requested["requested_outcome"] = requested_resolution
     requested["expected_resolution_text"] = claim["normalized_statement"]
+
+    if current is not None and not current_is_initiator:
+        claim.pop("original_statement", None)
+        claim.pop("original_statement_provenance", None)
+        return
 
     (
         original_statement,
@@ -1062,10 +1150,41 @@ def _enforce_respondent_attitude_source(
 
     initial = request.initial_case_facts
     current = request.current_user_message
+    previous_matrix = (
+        previous.get("case_fact_matrix") if isinstance(previous, dict) else None
+    )
+    previous_party_map = (
+        previous_matrix.get("party_map")
+        if isinstance(previous_matrix, dict)
+        else {}
+    )
     initiator_role = _party_role_or_default(
         getattr(initial, "initiator_role", None)
+        or previous_party_map.get("initiator_role")
         or (current.role if current is not None else None)
     )
+    actor_role = str(request.agent_context.actor_role or "").upper()
+    if current is not None and actor_role == _opposite_party(initiator_role):
+        llm_attitude = _nested_attitude(llm_case_detail)
+        candidate = _reported_attitude(llm_attitude)
+        if candidate is None:
+            candidate = {
+                "attitude": "NEED_MORE_INFO",
+                "position": current.text,
+                "confidence": 0.5,
+            }
+        detail["respondent_attitude"] = {
+            "respondent_role": actor_role,
+            "attitude": candidate["attitude"],
+            "position": candidate["position"],
+            "source": DIRECT_RESPONDENT_SOURCE,
+            "confidence": _clamp_confidence(candidate.get("confidence", 0.5)),
+            "grounding": {
+                "source": "RESPONDENT_PARTICIPANT_MESSAGE",
+                "message_id": current.message_id,
+            },
+        }
+        return
     form_description = str(getattr(initial, "form_description", None) or "")
     current_reports_attitude = current is not None and _has_explicit_respondent_report(
         current.text,
@@ -1312,9 +1431,43 @@ def _reported_attitude_position(text: str, initiator_role: str) -> str:
     return "；".join(extracted)[:500].rstrip("。；; ") + "。"
 
 
+def _follow_up_questions_from_utterance(value: Any) -> list[str]:
+    """Extract the model's user-visible follow-up questions in display order."""
+
+    text = str(value or "").strip()
+    if not text:
+        return []
+
+    questions: list[str] = []
+    numbered = list(re.finditer(r"(?<!\d)([1-9]\d*)[.、．)]\s*", text))
+    if numbered:
+        for index, marker in enumerate(numbered):
+            end = numbered[index + 1].start() if index + 1 < len(numbered) else len(text)
+            candidate = text[marker.end() : end].strip()
+            question_end = re.search(r"[？?]", candidate)
+            if question_end is not None:
+                candidate = candidate[: question_end.end()].strip()
+            if candidate:
+                questions.append(candidate)
+    else:
+        questions.extend(
+            match.group(0).strip()
+            for match in re.finditer(r"[^。！？?\r\n]+[？?]", text)
+            if match.group(0).strip()
+        )
+
+    unique: list[str] = []
+    for question in questions:
+        if question not in unique:
+            unique.append(question)
+    return unique[:2]
+
+
 def _question_targets_resolved_intake_field(
     value: Any,
     case_detail: dict[str, Any],
+    *,
+    actor_role: str | None = None,
 ) -> bool:
     """Drop follow-up questions whose answer already exists in the trusted dossier.
 
@@ -1327,14 +1480,26 @@ def _question_targets_resolved_intake_field(
         return False
     claim = case_detail.get("claim_resolution")
     claim = claim if isinstance(claim, dict) else {}
+    claim_role = str(claim.get("initiator_role") or "").upper()
+    normalized_actor_role = str(actor_role or "").upper()
+    claim_belongs_to_actor = (
+        not normalized_actor_role
+        or not claim_role
+        or normalized_actor_role == claim_role
+    )
     requested_resolution = str(claim.get("requested_resolution") or "").upper()
-    if requested_resolution and requested_resolution != "UNKNOWN" and re.search(
+    if (
+        claim_belongs_to_actor
+        and requested_resolution
+        and requested_resolution != "UNKNOWN"
+        and re.search(
         r"具体诉求|诉求是|希望.{0,12}(怎么处理|如何处理)|"
         r"换货.{0,12}退货退款|处理方式",
         question,
+        )
     ):
         return True
-    if claim.get("requested_amount") is not None and re.search(
+    if claim_belongs_to_actor and claim.get("requested_amount") is not None and re.search(
         r"诉求金额|要求.{0,8}金额|补偿.{0,8}金额|退款.{0,8}金额",
         question,
     ):
@@ -1662,7 +1827,7 @@ _VERIFICATION_FOCUS_RULES: tuple[tuple[str, re.Pattern[str], str], ...] = (
 _PROCESS_VERIFICATION_FOCUS_RE = re.compile(
     r"信息完整度|完整度已达到|提交阈值|可以提交|等待接待官|接待官.{0,12}整理|"
     r"完成案件详情|案件详情整理|进入下一步|后续流程|流程推进|"
-    r"ready_for_next_step|WAITING_FOR_REMARK|NOT_READY",
+    r"ready_for_next_step|READY_PENDING_REMARK_INVITE|WAITING_FOR_REMARK|NOT_READY",
     re.IGNORECASE,
 )
 
@@ -1881,9 +2046,15 @@ def _handoff_remark_status(value: dict[str, Any]) -> str:
 # 具体功能：`_ensure_handoff_notes` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`notes.setdefault`、`notes.get`。
 # 上下游：上游为 本文件的 `_record_handoff_remark_if_needed`；下游为 本文件的 `_ensure_dict`。
 # 系统意义：该函数在系统中的业务边界是：只建档追问，不收正式证据、不定责、不承诺赔付。
-def _ensure_handoff_notes(detail: dict[str, Any]) -> dict[str, Any]:
+def _ensure_handoff_notes(
+    detail: dict[str, Any],
+    *,
+    remark_status: str | None = None,
+) -> dict[str, Any]:
     notes = _ensure_dict(detail, "handoff_notes")
-    if not notes.get("remark_status") or notes.get("remark_status") == "NOT_READY":
+    if remark_status is not None:
+        notes["remark_status"] = remark_status
+    elif not notes.get("remark_status") or notes.get("remark_status") == "NOT_READY":
         notes["remark_status"] = "WAITING_FOR_REMARK"
     notes.setdefault("latest_remark", "")
     remarks = notes.get("remarks")
@@ -2062,7 +2233,7 @@ def _is_evidence_material_request(value: Any) -> bool:
     text = str(value or "").strip()
     if not text:
         return False
-    return any(
+    if any(
         marker in text
         for marker in (
             "截图",
@@ -2080,6 +2251,21 @@ def _is_evidence_material_request(value: Any) -> bool:
             "提供材料",
             "提交材料",
         )
+    ):
+        return True
+    evidence_actions = ("提供", "提交", "出示", "发送", "发来", "附上")
+    evidence_objects = (
+        "检测报告",
+        "检验报告",
+        "发票",
+        "交易流水",
+        "支付流水",
+        "快递底单",
+        "签收单",
+        "文件",
+    )
+    return any(action in text for action in evidence_actions) and any(
+        evidence_object in text for evidence_object in evidence_objects
     )
 
 

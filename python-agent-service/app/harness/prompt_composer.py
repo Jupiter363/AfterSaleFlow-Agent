@@ -50,33 +50,37 @@ class PromptComposer:
             "evaluation_agent",
             "evaluation_analyze.md",
         ),
-        "issue_framing_node": PromptTemplateRef(
-            "presiding_judge",
-            "issue_framing_node.md",
+        "hearing_intake_questions": PromptTemplateRef(
+            "dispute_intake_officer",
+            "hearing_intake_questions.md",
         ),
-        "evidence_gap_request_node": PromptTemplateRef(
-            "presiding_judge",
-            "evidence_gap_request_node.md",
+        "hearing_intake_synthesis": PromptTemplateRef(
+            "dispute_intake_officer",
+            "hearing_intake_synthesis.md",
         ),
-        "party_liaison_node": PromptTemplateRef(
-            "presiding_judge",
-            "party_liaison_node.md",
+        "hearing_evidence_requests": PromptTemplateRef(
+            "evidence_clerk",
+            "hearing_evidence_requests.md",
         ),
-        "evidence_cross_check_node": PromptTemplateRef(
-            "presiding_judge",
-            "evidence_cross_check_node.md",
+        "hearing_evidence_file_assessment": PromptTemplateRef(
+            "evidence_clerk",
+            "hearing_evidence_file_assessment.md",
         ),
-        "rule_application_node": PromptTemplateRef(
-            "presiding_judge",
-            "rule_application_node.md",
+        "hearing_evidence_synthesis": PromptTemplateRef(
+            "evidence_clerk",
+            "hearing_evidence_synthesis.md",
         ),
-        "adjudication_draft_node": PromptTemplateRef(
+        "hearing_judge_v1": PromptTemplateRef(
             "presiding_judge",
-            "adjudication_draft_node.md",
+            "hearing_judge_v1.md",
         ),
-        "hearing_round_turn": PromptTemplateRef(
+        "hearing_jury_review": PromptTemplateRef(
+            "deliberation_panel",
+            "hearing_jury_review.md",
+        ),
+        "hearing_judge_v2": PromptTemplateRef(
             "presiding_judge",
-            "hearing_round_turn.md",
+            "hearing_judge_v2.md",
         ),
         "evidence_critic": PromptTemplateRef(
             "deliberation_panel",
@@ -97,10 +101,6 @@ class PromptComposer:
         "fairness_critic": PromptTemplateRef(
             "deliberation_panel",
             "fairness_critic.md",
-        ),
-        "jury_review": PromptTemplateRef(
-            "deliberation_panel",
-            "jury_review.md",
         ),
         "review_copilot": PromptTemplateRef(
             "review_copilot",
@@ -142,7 +142,7 @@ class PromptComposer:
 
     # 所属模块：Agent Harness > Prompt 仓库 > 双消息渲染总入口。
     # 具体功能：`render` 分别调用 system 与 user 渲染器，返回 `(system_prompt, user_prompt)`，不把两种信任级别拼成同一段文本。
-    # 上下游：上游是 HarnessModelRunner 或 C1-C6 节点携带的 node_name、受控 case_data 和 Pydantic Schema；下游是 LangChain message 格式化或 LLM HTTP 请求。
+    # 上下游：上游是 HarnessModelRunner 携带的 node_name、受控 case_data 和 Pydantic Schema；下游是 LangChain message 格式化或 LLM HTTP 请求。
     # 系统意义：可信规则与不可信案件材料保持消息级隔离，减少案件内容覆盖系统职责、工具边界和输出协议的机会。
     def render(
         self,

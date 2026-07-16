@@ -9,6 +9,8 @@ package com.example.dispute.caseintake.application;
 import com.example.dispute.common.api.ErrorCode;
 import com.example.dispute.common.exception.ForbiddenException;
 import com.example.dispute.common.exception.NotFoundException;
+import com.example.dispute.casecore.domain.CasePartyAssignment;
+import com.example.dispute.casecore.domain.CasePartyPosition;
 import com.example.dispute.casecore.domain.CaseSourceType;
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AppProperties;
@@ -21,7 +23,9 @@ import com.example.dispute.infrastructure.persistence.repository.AuditLogReposit
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.room.application.ParticipantService;
 import com.example.dispute.room.application.IntakeAgentTurnService;
+import com.example.dispute.room.application.IntakeProgressService;
 import com.example.dispute.room.application.IntakeLobbySeed;
+import com.example.dispute.room.application.IntakeStatusView;
 import com.example.dispute.room.domain.RoomType;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
@@ -52,6 +56,7 @@ public class CaseApplicationService {
     private final CaseRoomRepository roomRepository;
     private final ParticipantService participantService;
     private final IntakeAgentTurnService intakeAgentTurnService;
+    private final IntakeProgressService intakeProgressService;
     private final AppProperties properties;
     private final Clock clock;
     private final ObjectMapper objectMapper;
@@ -68,6 +73,7 @@ public class CaseApplicationService {
             CaseRoomRepository roomRepository,
             ParticipantService participantService,
             IntakeAgentTurnService intakeAgentTurnService,
+            IntakeProgressService intakeProgressService,
             AppProperties properties,
             Clock clock,
             ObjectMapper objectMapper) {
@@ -76,6 +82,7 @@ public class CaseApplicationService {
         this.roomRepository = roomRepository;
         this.participantService = participantService;
         this.intakeAgentTurnService = intakeAgentTurnService;
+        this.intakeProgressService = intakeProgressService;
         this.properties = properties;
         this.clock = clock;
         this.objectMapper = objectMapper;
@@ -102,7 +109,8 @@ public class CaseApplicationService {
                             assertCanRead(entity, actor);
                             return toView(
                                     entity,
-                                    readSnapshot(entity.getIntakeResultJson()));
+                                    readSnapshot(entity.getIntakeResultJson()),
+                                    actor);
                         })
                 .orElseGet(
                         () ->
@@ -132,7 +140,7 @@ public class CaseApplicationService {
                                                 "case not found",
                                                 Map.of("case_id", caseId)));
         assertCanRead(entity, actor);
-        return toView(entity, readSnapshot(entity.getIntakeResultJson()));
+        return toView(entity, readSnapshot(entity.getIntakeResultJson()), actor);
     }
 
     // 所属模块：【案件受理兼容链路 / 应用编排层】「CaseApplicationService.list(CaseStatus,String,int,int,AuthenticatedActor)」。
@@ -152,6 +160,9 @@ public class CaseApplicationService {
                 (root, query, criteria) ->
                         criteria.and(
                                 criteria.isNull(root.get("deletedAt")),
+                                criteria.notEqual(
+                                        root.get("caseStatus"),
+                                        CaseStatus.CANCELLED),
                                 criteria.or(
                                         criteria.equal(
                                                 root.get("caseType"),
@@ -180,23 +191,7 @@ public class CaseApplicationService {
                                             root.get("disputeType"),
                                             disputeType));
         }
-        specification =
-                switch (actor.role()) {
-                    case USER ->
-                            specification.and(
-                                    (root, query, criteria) ->
-                                            criteria.equal(
-                                                    root.get("userId"),
-                                                    actor.actorId()));
-                    case MERCHANT ->
-                            specification.and(
-                                    (root, query, criteria) ->
-                                            criteria.equal(
-                                                    root.get("merchantId"),
-                                                    actor.actorId()));
-                    case CUSTOMER_SERVICE, PLATFORM_REVIEWER, ADMIN, SYSTEM ->
-                            specification;
-                };
+        specification = specification.and(CaseVisibilitySpecification.visibleTo(actor));
         Page<FulfillmentCaseEntity> result =
                 caseRepository.findAll(
                         specification,
@@ -211,7 +206,8 @@ public class CaseApplicationService {
                                         toView(
                                                 entity,
                                                 readSnapshot(
-                                                        entity.getIntakeResultJson())))
+                                                        entity.getIntakeResultJson()),
+                                                actor))
                         .toList(),
                 result.getNumber(),
                 result.getSize(),
@@ -309,7 +305,7 @@ public class CaseApplicationService {
                             actor.role().name(),
                             writeJson(Map.of("case_status", status.name()))));
         }
-        return toView(saved, snapshot);
+        return toView(saved, snapshot, actor);
     }
 
     // 所属模块：【案件受理兼容链路 / 应用编排层】「CaseApplicationService.initialIntakeShell(CreateCaseCommand)」。
@@ -374,14 +370,12 @@ public class CaseApplicationService {
     // 下游影响：「CaseApplicationService.assertCanRead(FulfillmentCaseEntity,AuthenticatedActor)」向下依次触达 「actor.role」、「actor.actorId」、「entity.getUserId」、「entity.getMerchantId」。
     // 系统意义：「CaseApplicationService.assertCanRead(FulfillmentCaseEntity,AuthenticatedActor)」在“CanRead”进入下游前阻断非法状态；接待分析只是非最终建议，不能越权决定赔付或执行动作
     private void assertCanRead(FulfillmentCaseEntity entity, AuthenticatedActor actor) {
-        boolean allowed =
-                switch (actor.role()) {
-                    case USER -> actor.actorId().equals(entity.getUserId());
-                    case MERCHANT -> actor.actorId().equals(entity.getMerchantId());
-                    case CUSTOMER_SERVICE, PLATFORM_REVIEWER, ADMIN, SYSTEM -> true;
-                };
-        if (!allowed) {
-            throw new ForbiddenException("actor cannot access this case");
+        CasePartyPosition position = partyPosition(entity.partyAssignment(), actor);
+        if (position == CasePartyPosition.RESPONDENT
+                && CaseVisibilitySpecification.respondentNeedsInitiatorCompletion(
+                        entity.getCaseStatus())
+                && !intakeProgressService.isCompleted(entity, entity.getInitiatorRole())) {
+            throw new ForbiddenException("respondent cannot access this case before intake opens");
         }
     }
 
@@ -392,19 +386,33 @@ public class CaseApplicationService {
     // 系统意义：「CaseApplicationService.assertCanCreate(CreateCaseCommand,AuthenticatedActor)」在“CanCreate”进入下游前阻断非法状态；接待分析只是非最终建议，不能越权决定赔付或执行动作
     private static void assertCanCreate(
             CreateCaseCommand command, AuthenticatedActor actor) {
-        boolean allowed =
-                switch (actor.role()) {
-                    case USER -> actor.actorId().equals(command.userId());
-                    case MERCHANT -> actor.actorId().equals(command.merchantId());
-                    case CUSTOMER_SERVICE, PLATFORM_REVIEWER, ADMIN, SYSTEM -> true;
-                };
-        if (!allowed) {
-            throw new ForbiddenException("actor cannot create a case for this party");
+        CasePartyAssignment assignment =
+                CasePartyAssignment.fromParticipants(
+                        command.userId(), command.merchantId(), command.initiatorRole());
+        if (!isParty(actor.role())) {
+            return;
         }
-        if ((actor.role() == ActorRole.USER || actor.role() == ActorRole.MERCHANT)
-                && command.initiatorRole() != actor.role()) {
+        CasePartyPosition position = partyPosition(assignment, actor);
+        if (position != CasePartyPosition.INITIATOR) {
             throw new ForbiddenException("party actor must be the intake initiator");
         }
+    }
+
+    private static CasePartyPosition partyPosition(
+            CasePartyAssignment assignment, AuthenticatedActor actor) {
+        if (!isParty(actor.role())) {
+            return CasePartyPosition.OBSERVER;
+        }
+        return assignment
+                .resolve(actor.actorId(), actor.role())
+                .orElseThrow(
+                        () ->
+                                new ForbiddenException(
+                                        "actor id and role do not match a case party"));
+    }
+
+    private static boolean isParty(ActorRole role) {
+        return role == ActorRole.USER || role == ActorRole.MERCHANT;
     }
 
     // 所属模块：【案件受理兼容链路 / 应用编排层】「CaseApplicationService.toView(FulfillmentCaseEntity,IntakeSnapshot)」。
@@ -412,7 +420,12 @@ public class CaseApplicationService {
     // 上游调用：「CaseApplicationService.toView(FulfillmentCaseEntity,IntakeSnapshot)」的上游调用点包括 「CaseApplicationService.create」、「CaseApplicationService.get」、「CaseApplicationService.list」、「CaseApplicationService.createNew」。
     // 下游影响：「CaseApplicationService.toView(FulfillmentCaseEntity,IntakeSnapshot)」向下依次触达 「entity.getId」、「entity.getOrderId」、「entity.getAfterSaleId」、「entity.getLogisticsId」；计算结果以「CaseView」交给调用方。
     // 系统意义：「CaseApplicationService.toView(FulfillmentCaseEntity,IntakeSnapshot)」统一“视图”的跨层表示，避免不同入口产生不兼容字段；接待分析只是非最终建议，不能越权决定赔付或执行动作
-    private CaseView toView(FulfillmentCaseEntity entity, IntakeSnapshot snapshot) {
+    private CaseView toView(
+            FulfillmentCaseEntity entity,
+            IntakeSnapshot snapshot,
+            AuthenticatedActor actor) {
+        CasePartyPosition partyPosition = partyPosition(entity.partyAssignment(), actor);
+        var intakeStatus = roleScopedIntakeStatus(entity, actor);
         return new CaseView(
                 entity.getId(),
                 entity.getOrderId(),
@@ -433,13 +446,17 @@ public class CaseApplicationService {
                 entity.getSourceType(),
                 entity.getSourceSystem(),
                 entity.getExternalCaseRef(),
-                entity.getCurrentRoom(),
+                currentRoom(entity, intakeStatus),
                 entity.getCurrentDeadlineAt(),
-                pendingAction(entity.getCaseStatus()),
+                pendingAction(entity, intakeStatus),
                 entity.getCreatedAt(),
                 entity.getUpdatedAt(),
                 entity.getClosedAt(),
-                entity.getInitiatorRole());
+                entity.getInitiatorRole(),
+                entity.getInitiatorId(),
+                entity.getRespondentRole(),
+                entity.getRespondentId(),
+                partyPosition);
     }
 
     // 所属模块：【案件受理兼容链路 / 应用编排层】「CaseApplicationService.publicCaseType(String)」。
@@ -477,6 +494,35 @@ public class CaseApplicationService {
             case CLOSED, CANCELLED, MANUAL_HANDOFF, NOT_ADMISSIBLE -> "VIEW_OUTCOME";
             default -> "CONTINUE_CASE";
         };
+    }
+
+    private String pendingAction(
+            FulfillmentCaseEntity entity, IntakeStatusView intakeStatus) {
+        if (entity.getCaseStatus() == CaseStatus.EVIDENCE_OPEN
+                && intakeStatus != null
+                && !intakeStatus.currentActorCompleted()) {
+            return "COMPLETE_INTAKE";
+        }
+        return pendingAction(entity.getCaseStatus());
+    }
+
+    private IntakeStatusView roleScopedIntakeStatus(
+            FulfillmentCaseEntity entity, AuthenticatedActor actor) {
+        if (entity.getCaseStatus() != CaseStatus.EVIDENCE_OPEN
+                || (actor.role() != ActorRole.USER && actor.role() != ActorRole.MERCHANT)) {
+            return null;
+        }
+        return intakeProgressService.status(entity, actor);
+    }
+
+    private static String currentRoom(
+            FulfillmentCaseEntity entity, IntakeStatusView intakeStatus) {
+        if (intakeStatus != null
+                && intakeStatus.canUseIntake()
+                && !intakeStatus.currentActorCompleted()) {
+            return RoomType.INTAKE.name();
+        }
+        return entity.getCurrentRoom();
     }
 
     // 所属模块：【案件受理兼容链路 / 应用编排层】「CaseApplicationService.readSnapshot(String)」。

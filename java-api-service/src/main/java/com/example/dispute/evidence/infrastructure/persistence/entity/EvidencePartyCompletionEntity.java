@@ -87,6 +87,7 @@ public class EvidencePartyCompletionEntity extends AbstractEntity {
     // 下游影响：「EvidencePartyCompletionEntity.getParticipantRole()」只产生当前对象的返回值或字段变化，不访问额外基础设施；计算结果以「ActorRole」交给调用方。
     // 系统意义：「EvidencePartyCompletionEntity.getParticipantRole()」直接影响 PostgreSQL 事实投影；原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
     public ActorRole getParticipantRole() { return participantRole; }
+    public String getParticipantId() { return participantId; }
     // 所属模块：【证据与版本化卷宗 / JPA 实体层】「EvidencePartyCompletionEntity.getDossierVersion()」。
     // 具体功能：「EvidencePartyCompletionEntity.getDossierVersion()」：读取「EvidencePartyCompletionEntity」中的「dossierVersion」状态，向 JPA、应用服务或序列化层返回「int」。
     // 上游调用：「EvidencePartyCompletionEntity.getDossierVersion()」由使用「EvidencePartyCompletionEntity」的控制器、应用服务、Workflow Activity 或测试场景触发。

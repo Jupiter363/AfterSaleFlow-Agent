@@ -40,7 +40,7 @@ const CANONICAL_FOCUS_RULES = [
 ];
 
 const PROCESS_FOCUS_PATTERN =
-  /信息完整度|完整度已达到|提交阈值|可以提交|等待接待官|接待官.{0,12}整理|完成案件详情|进入下一步|后续流程|流程推进|ready_for_next_step|WAITING_FOR_REMARK|NOT_READY/iu;
+  /信息完整度|完整度已达到|提交阈值|可以提交|等待接待官|接待官.{0,12}整理|完成案件详情|进入下一步|后续流程|流程推进|ready_for_next_step|READY_PENDING_REMARK_INVITE|WAITING_FOR_REMARK|NOT_READY/iu;
 
 // 业务位置：【前端应用】cleanFocusText：围绕 面向当事人的业务文本 计算本模块需要的派生信息，使其能够从 路由、API 和本地状态 正确进入 售后纠纷处理界面。上游：路由、API 和本地状态。下游：售后纠纷处理界面。边界：前端不拥有裁判和执行权限。
 function cleanFocusText(value) {

@@ -8,6 +8,7 @@ package com.example.dispute.room.infrastructure.persistence.entity;
 
 import com.example.dispute.infrastructure.persistence.entity.AbstractEntity;
 import com.example.dispute.room.domain.MessageSenderType;
+import com.example.dispute.room.domain.MessageSource;
 import com.example.dispute.room.domain.MessageType;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
@@ -61,6 +62,10 @@ public class RoomMessageEntity extends AbstractEntity {
     @Column(name = "message_type", length = 64, nullable = false)
     private MessageType messageType;
 
+    @Enumerated(EnumType.STRING)
+    @Column(name = "message_source", length = 32, nullable = false)
+    private MessageSource messageSource;
+
     @Column(name = "message_text", columnDefinition = "text")
     private String messageText;
 
@@ -70,9 +75,6 @@ public class RoomMessageEntity extends AbstractEntity {
 
     @Column(name = "agent_run_id", length = 64)
     private String agentRunId;
-
-    @Column(name = "hearing_round")
-    private Integer hearingRound;
 
     @Column(name = "idempotency_key", length = 128, nullable = false)
     private String idempotencyKey;
@@ -138,7 +140,6 @@ public class RoomMessageEntity extends AbstractEntity {
                 messageText,
                 attachmentRefsJson,
                 idempotencyKey,
-                null,
                 createdAt,
                 traceId);
     }
@@ -148,48 +149,6 @@ public class RoomMessageEntity extends AbstractEntity {
     // 上游调用：「RoomMessageEntity.create(String,String,String,long,MessageSenderType,String,String,String,String,MessageType,String,String,String,Integer,Instant,String)」的上游调用点包括 「HearingCourtBootstrapService.appendAgentMessageIfAbsent」、「HearingCourtOrchestrator.appendFormalJuryReportIfNeeded」、「HearingCourtOrchestrator.appendJudgeMessage」、「EvidenceAgentTurnService.appendAgentMessage」。
     // 下游影响：「RoomMessageEntity.create(String,String,String,long,MessageSenderType,String,String,String,String,MessageType,String,String,String,Integer,Instant,String)」向下依次触达 「Objects.requireNonNull」、「required」；计算结果以「RoomMessageEntity」交给调用方。
     // 系统意义：「RoomMessageEntity.create(String,String,String,long,MessageSenderType,String,String,String,String,MessageType,String,String,String,Integer,Instant,String)」直接影响 PostgreSQL 事实投影；每次读取和写入都要绑定案件参与关系、角色、房间和受众范围
-    public static RoomMessageEntity create(
-            String id,
-            String caseId,
-            String roomId,
-            long sequenceNo,
-            MessageSenderType senderType,
-            String senderRole,
-            String senderId,
-            String audienceJson,
-            String audienceActorIdsJson,
-            MessageType messageType,
-            String messageText,
-            String attachmentRefsJson,
-            String idempotencyKey,
-            Integer hearingRound,
-            Instant createdAt,
-            String traceId) {
-        RoomMessageEntity entity = new RoomMessageEntity(required(id, "id"));
-        entity.caseId = required(caseId, "caseId");
-        entity.roomId = required(roomId, "roomId");
-        entity.sequenceNo = sequenceNo;
-        entity.senderType = Objects.requireNonNull(senderType);
-        entity.senderRole = required(senderRole, "senderRole");
-        entity.senderId = required(senderId, "senderId");
-        entity.audienceJson = required(audienceJson, "audienceJson");
-        entity.audienceActorIdsJson = required(audienceActorIdsJson, "audienceActorIdsJson");
-        entity.messageType = Objects.requireNonNull(messageType);
-        entity.messageText = messageText;
-        entity.attachmentRefsJson = required(attachmentRefsJson, "attachmentRefsJson");
-        entity.idempotencyKey = required(idempotencyKey, "idempotencyKey");
-        entity.hearingRound = hearingRound;
-        entity.createdAt = Objects.requireNonNull(createdAt);
-        entity.traceId = traceId;
-        entity.createdBy = senderId;
-        return entity;
-    }
-
-    // 所属模块：【房间协作与权限 / JPA 实体层】「RoomMessageEntity.create(String,String,String,long,MessageSenderType,String,String,String,String,MessageType,String,String,String,Instant,String)」。
-    // 具体功能：「RoomMessageEntity.create(String,String,String,long,MessageSenderType,String,String,String,String,MessageType,String,String,String,Instant,String)」：提供「create」的便捷重载：接收 「id」(String)、「caseId」(String)、「roomId」(String)、「sequenceNo」(long)、「senderType」(MessageSenderType)、「senderRole」(String)、「senderId」(String)、「audienceJson」(String)、「audienceActorIdsJson」(String)、「messageType」(MessageType)、「messageText」(String)、「attachmentRefsJson」(String)、「idempotencyKey」(String)、「createdAt」(Instant)、「traceId」(String)，补齐默认选项后委托参数更完整的同名方法，保证两条入口共享同一套校验、事务和持久化逻辑。
-    // 上游调用：「RoomMessageEntity.create(String,String,String,long,MessageSenderType,String,String,String,String,MessageType,String,String,String,Instant,String)」的上游调用点包括 「HearingCourtBootstrapService.appendAgentMessageIfAbsent」、「HearingCourtOrchestrator.appendFormalJuryReportIfNeeded」、「HearingCourtOrchestrator.appendJudgeMessage」、「EvidenceAgentTurnService.appendAgentMessage」。
-    // 下游影响：「RoomMessageEntity.create(String,String,String,long,MessageSenderType,String,String,String,String,MessageType,String,String,String,Instant,String)」向下依次触达 「create」；计算结果以「RoomMessageEntity」交给调用方。
-    // 系统意义：「RoomMessageEntity.create(String,String,String,long,MessageSenderType,String,String,String,String,MessageType,String,String,String,Instant,String)」直接影响 PostgreSQL 事实投影；每次读取和写入都要绑定案件参与关系、角色、房间和受众范围
     public static RoomMessageEntity create(
             String id,
             String caseId,
@@ -216,13 +175,50 @@ public class RoomMessageEntity extends AbstractEntity {
                 senderId,
                 audienceJson,
                 audienceActorIdsJson,
+                defaultSource(senderType),
                 messageType,
                 messageText,
                 attachmentRefsJson,
                 idempotencyKey,
-                null,
                 createdAt,
                 traceId);
+    }
+
+    public static RoomMessageEntity create(
+            String id,
+            String caseId,
+            String roomId,
+            long sequenceNo,
+            MessageSenderType senderType,
+            String senderRole,
+            String senderId,
+            String audienceJson,
+            String audienceActorIdsJson,
+            MessageSource messageSource,
+            MessageType messageType,
+            String messageText,
+            String attachmentRefsJson,
+            String idempotencyKey,
+            Instant createdAt,
+            String traceId) {
+        RoomMessageEntity entity = new RoomMessageEntity(required(id, "id"));
+        entity.caseId = required(caseId, "caseId");
+        entity.roomId = required(roomId, "roomId");
+        entity.sequenceNo = sequenceNo;
+        entity.senderType = Objects.requireNonNull(senderType);
+        entity.senderRole = required(senderRole, "senderRole");
+        entity.senderId = required(senderId, "senderId");
+        entity.audienceJson = required(audienceJson, "audienceJson");
+        entity.audienceActorIdsJson = required(audienceActorIdsJson, "audienceActorIdsJson");
+        entity.messageSource = Objects.requireNonNull(messageSource);
+        entity.messageType = Objects.requireNonNull(messageType);
+        entity.messageText = messageText;
+        entity.attachmentRefsJson = required(attachmentRefsJson, "attachmentRefsJson");
+        entity.idempotencyKey = required(idempotencyKey, "idempotencyKey");
+        entity.createdAt = Objects.requireNonNull(createdAt);
+        entity.traceId = traceId;
+        entity.createdBy = senderId;
+        return entity;
     }
 
     // 所属模块：【房间协作与权限 / JPA 实体层】「RoomMessageEntity.getCaseId()」。
@@ -273,6 +269,7 @@ public class RoomMessageEntity extends AbstractEntity {
     // 下游影响：「RoomMessageEntity.getMessageType()」只产生当前对象的返回值或字段变化，不访问额外基础设施；计算结果以「MessageType」交给调用方。
     // 系统意义：「RoomMessageEntity.getMessageType()」直接影响 PostgreSQL 事实投影；每次读取和写入都要绑定案件参与关系、角色、房间和受众范围
     public MessageType getMessageType() { return messageType; }
+    public MessageSource getMessageSource() { return messageSource; }
     // 所属模块：【房间协作与权限 / JPA 实体层】「RoomMessageEntity.getMessageText()」。
     // 具体功能：「RoomMessageEntity.getMessageText()」：读取「RoomMessageEntity」中的「messageText」状态，向 JPA、应用服务或序列化层返回「String」。
     // 上游调用：「RoomMessageEntity.getMessageText()」的上游调用点包括 「EvidenceAgentTurnService.isSupersededOpeningMessage」、「EvidenceAgentTurnService.view」、「IntakeAgentTurnService.continueFromParticipantMessage」、「IntakeAgentTurnService.dialogueMessage」。
@@ -291,12 +288,6 @@ public class RoomMessageEntity extends AbstractEntity {
     // 下游影响：「RoomMessageEntity.getAgentRunId()」只产生当前对象的返回值或字段变化，不访问额外基础设施；计算结果以「String」交给调用方。
     // 系统意义：「RoomMessageEntity.getAgentRunId()」直接影响 PostgreSQL 事实投影；每次读取和写入都要绑定案件参与关系、角色、房间和受众范围
     public String getAgentRunId() { return agentRunId; }
-    // 所属模块：【房间协作与权限 / JPA 实体层】「RoomMessageEntity.getHearingRound()」。
-    // 具体功能：「RoomMessageEntity.getHearingRound()」：读取「RoomMessageEntity」中的「hearingRound」状态，向 JPA、应用服务或序列化层返回「Integer」。
-    // 上游调用：「RoomMessageEntity.getHearingRound()」的上游调用点包括 「EvidenceAgentTurnService.view」、「RoomMessageService.view」。
-    // 下游影响：「RoomMessageEntity.getHearingRound()」只产生当前对象的返回值或字段变化，不访问额外基础设施；计算结果以「Integer」交给调用方。
-    // 系统意义：「RoomMessageEntity.getHearingRound()」直接影响 PostgreSQL 事实投影；每次读取和写入都要绑定案件参与关系、角色、房间和受众范围
-    public Integer getHearingRound() { return hearingRound; }
     // 所属模块：【房间协作与权限 / JPA 实体层】「RoomMessageEntity.getIdempotencyKey()」。
     // 具体功能：「RoomMessageEntity.getIdempotencyKey()」：读取「RoomMessageEntity」中的「idempotencyKey」状态，向 JPA、应用服务或序列化层返回「String」。
     // 上游调用：「RoomMessageEntity.getIdempotencyKey()」由使用「RoomMessageEntity」的控制器、应用服务、Workflow Activity 或测试场景触发。
@@ -333,5 +324,13 @@ public class RoomMessageEntity extends AbstractEntity {
     private static String required(String value, String field) {
         if (value == null || value.isBlank()) throw new IllegalArgumentException(field + " must not be blank");
         return value;
+    }
+
+    private static MessageSource defaultSource(MessageSenderType senderType) {
+        return switch (Objects.requireNonNull(senderType)) {
+            case PARTY -> MessageSource.PARTY_ACTION;
+            case AGENT -> MessageSource.AGENT_LLM;
+            case SYSTEM, REVIEWER -> MessageSource.SYSTEM_STAGE_EVENT;
+        };
     }
 }

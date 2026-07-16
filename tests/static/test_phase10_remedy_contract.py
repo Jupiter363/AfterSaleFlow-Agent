@@ -66,25 +66,7 @@ def test_remedy_plan_persists_risk_idempotency_preconditions_and_notifications()
 # 具体功能：`test_workflow_enters_remedy_before_approval_and_api_is_read_only` 读取并按案件、角色或会话范围筛选被测业务场景；关键协作调用：`workflow.index`。
 # 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 本文件的 `read`。
 # 系统意义：固定“跨服务契约测试 > test_phase10_remedy_contract”的可观察契约，防止后续重构改变业务结果。
-def test_workflow_enters_remedy_before_approval_and_api_is_read_only() -> None:
-    workflow = read(
-        JAVA
-        / "workflow"
-        / "temporal"
-        / "CaseFulfillmentDisputeWorkflowImpl.java"
-    )
-    activity = read(
-        JAVA
-        / "workflow"
-        / "temporal"
-        / "CaseFulfillmentDisputeActivities.java"
-    )
+def test_remedy_api_is_read_only() -> None:
     controller = read(JAVA / "remedy" / "api" / "RemedyController.java")
-    assert "planRemedy" in activity
-    assert "createReviewTask" in activity
-    assert "activities.planRemedy" in workflow
-    assert workflow.index("activities.planRemedy") < workflow.index(
-        "activities.createReviewTask"
-    )
     assert "@GetMapping" in controller
     assert "@PostMapping" not in controller

@@ -131,6 +131,10 @@ def _normalize_section_value(
         "fact_targets",
         "multimodal_observation",
         "internal_audit_context",
+        "frozen_courtroom_dossier",
+        "hearing_memory",
+        "reviewed_proposal",
+        "review_focus_signal",
     }:
         # 这些段已在上游按权限和结构整理完成；保留枚举、机器 ID、证据原文及会话内消息，
         # 否则本地化替换可能让 fact_id/evidence_id 失去可验证性。

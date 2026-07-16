@@ -10,15 +10,18 @@ export const hearingApi = {
     apiRequest(`/disputes/${caseId}/hearing/complete`, actor, {
       method: "POST",
     }),
-  rounds: (actor, caseId) =>
-    apiRequest(`/disputes/${caseId}/hearing/rounds`, actor),
-  completeRound: (actor, caseId, command) =>
-    apiRequest(`/disputes/${caseId}/hearing/rounds/complete`, actor, {
+  submitAnswers: (actor, caseId, command) =>
+    apiRequest(`/disputes/${caseId}/hearing/answers`, actor, {
       method: "POST",
       body: JSON.stringify(command),
     }),
-  submitRound: (actor, caseId, command) =>
-    apiRequest(`/disputes/${caseId}/hearing/rounds/current/submissions`, actor, {
+  submitStatement: (actor, caseId, command) =>
+    apiRequest(`/disputes/${caseId}/hearing/statements`, actor, {
+      method: "POST",
+      body: JSON.stringify(command),
+    }),
+  submitEvidenceBatch: (actor, caseId, command) =>
+    apiRequest(`/disputes/${caseId}/hearing/evidence-batches`, actor, {
       method: "POST",
       body: JSON.stringify(command),
     }),

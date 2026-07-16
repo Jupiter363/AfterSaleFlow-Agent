@@ -5,6 +5,7 @@
 
 <script setup>
 import { computed } from "vue";
+import AgentSpeakerLabel from "./AgentSpeakerLabel.vue";
 import { agentSpeakerPresentation } from "../../utils/agentSpeakerPresentation";
 
 const props = defineProps({
@@ -59,7 +60,13 @@ const statusLabel = computed(() => {
     :aria-busy="cardIsActive"
   >
     <header>
-      <strong>{{ displayIdentity }} · {{ displayName }} 正常发言：</strong>
+      <strong>
+        <AgentSpeakerLabel
+          :role="card?.senderRole || run.senderRole"
+          :identity="displayIdentity"
+          :name="displayName"
+        />
+      </strong>
       <small>{{ statusLabel }}</small>
     </header>
     <p>

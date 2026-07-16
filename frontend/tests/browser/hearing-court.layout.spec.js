@@ -244,19 +244,19 @@ for (const viewportWidth of [681, 680]) {
     await page.setViewportSize({ width: viewportWidth, height: 900 });
     await openHearingCourt(page);
     const progress = page.locator("[data-hearing-progress-track]");
-    const stageCopies = page.locator("[data-round-progress-item] > div");
+    const stageCopies = page.locator("[data-stage-progress-item] > div");
 
-    await expect(page.locator("[data-round-progress-item]")).toHaveCount(3);
-    expect(await gridColumnCount(progress)).toBe(3);
+    await expect(page.locator("[data-stage-progress-item]")).toHaveCount(6);
+    expect(await gridColumnCount(progress)).toBe(6);
     await expect(stageCopies.first()).toHaveCSS(
       "display",
       viewportWidth === 680 ? "grid" : "flex",
     );
     await expect(page.locator("[data-hearing-stage-dock]"))
       .toHaveCSS("height", "122px");
-    await expect(page.locator("[data-round-input-bar]"))
+    await expect(page.locator("[data-stage-input-bar]"))
       .toHaveCSS("height", "154px");
-    expect(await gridColumnCount(page.locator(".round-input-bar__composer")))
+    expect(await gridColumnCount(page.locator(".stage-input-bar__composer")))
       .toBe(2);
     await expectCourtroomInsideWorkspace(page);
     await expectNoDocumentHorizontalOverflow(page);
@@ -450,7 +450,7 @@ test("holds the 122px status and 154px input slots while the message rail scroll
   await page.setViewportSize({ width: 390, height: 844 });
   await openHearingCourt(page, { messages: { count: 20 } });
   const status = page.locator("[data-hearing-stage-dock]");
-  const input = page.locator("[data-round-input-bar]");
+  const input = page.locator("[data-stage-input-bar]");
   const rail = page.locator(".court-transcript__messages");
 
   await expect(status).toHaveCSS("height", "122px");
@@ -498,9 +498,9 @@ test("returns the input-dock space to the reviewer transcript", async ({
       .locator(".court-transcript")
       .evaluate((element) => element.clientHeight);
 
-    await expect(userPage.locator("[data-round-input-bar]"))
+    await expect(userPage.locator("[data-stage-input-bar]"))
       .toHaveCount(1);
-    await expect(reviewerPage.locator("[data-round-input-bar]"))
+    await expect(reviewerPage.locator("[data-stage-input-bar]"))
       .toHaveCount(0);
     await expect(reviewerPage.locator("[data-hearing-stage-dock]"))
       .toHaveCSS("height", "122px");

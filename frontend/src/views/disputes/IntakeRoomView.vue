@@ -34,6 +34,7 @@ import {
   clearAgentStreams,
   consumeAgentRun,
 } from "../../stores/agentStream";
+import { disputeStore } from "../../stores/dispute";
 import {
   humanizeDossierList,
   humanizeDossierText,
@@ -45,14 +46,19 @@ const props = defineProps({
   initialDispute: { type: Object, default: null },
   initialAnalysis: { type: Object, default: null },
   initialTurnMemory: { type: Object, default: null },
+  initialIntakeStatus: { type: Object, default: null },
   initialMessages: { type: Array, default: null },
   messagesLoader: { type: Function, default: null },
   turnMemoryLoader: { type: Function, default: null },
+  intakeStatusLoader: { type: Function, default: null },
   postMessageAction: { type: Function, default: null },
+  openingAction: { type: Function, default: null },
   confirmAction: { type: Function, default: null },
   cancelAction: { type: Function, default: null },
   eventStreamer: { type: Function, default: null },
   modelHealthLoader: { type: Function, default: null },
+  evidenceReadyPollAttempts: { type: Number, default: 4 },
+  evidenceReadyPollDelayMs: { type: Number, default: 200 },
 });
 
 const route = useRoute();
@@ -60,6 +66,7 @@ const router = useRouter();
 const dispute = ref(props.initialDispute);
 const analysis = ref(props.initialAnalysis);
 const turnMemory = ref(props.initialTurnMemory);
+const intakeStatus = ref(props.initialIntakeStatus);
 const streamedCaseDetailSections = ref({});
 const pendingOriginalStatement = ref("");
 const messages = ref([...(props.initialMessages || [])]);
@@ -80,6 +87,56 @@ let modelHealthInFlight = null;
 
 const caseId = computed(() => dispute.value?.id || route.params.caseId);
 const historyMode = computed(() => route.query.view === "history");
+const actorPartyPosition = computed(() => {
+  const explicit = String(
+    dispute.value?.party_position || dispute.value?.partyPosition || "",
+  ).toUpperCase();
+  if (["INITIATOR", "RESPONDENT", "OBSERVER"].includes(explicit)) {
+    return explicit;
+  }
+
+  const actorId = String(actor.id || "");
+  const actorRole = normalizePartyRoleValue(actor.role);
+  const initiatorId = String(
+    dispute.value?.initiator_id || dispute.value?.initiatorId || "",
+  );
+  const respondentId = String(
+    dispute.value?.respondent_id || dispute.value?.respondentId || "",
+  );
+  const firstPartyTurn = (messages.value || []).find((message) =>
+    ["USER", "MERCHANT"].includes(
+      normalizePartyRoleValue(message.sender_role || message.senderRole),
+    ),
+  );
+  const initiatorRole = normalizePartyRoleValue(
+    intakeStatus.value?.initiator_role ||
+      intakeStatus.value?.initiatorRole ||
+      dispute.value?.initiator_role ||
+      dispute.value?.initiatorRole ||
+      analysis.value?.initiator_role ||
+      analysis.value?.initiatorRole ||
+      firstPartyTurn?.sender_role ||
+      firstPartyTurn?.senderRole,
+  );
+  const respondentRole = normalizePartyRoleValue(
+    intakeStatus.value?.respondent_role ||
+      intakeStatus.value?.respondentRole ||
+      dispute.value?.respondent_role ||
+      dispute.value?.respondentRole ||
+      oppositePartyRole(initiatorRole),
+  );
+  if (actorId && actorId === initiatorId && actorRole === initiatorRole) {
+    return "INITIATOR";
+  }
+  if (actorId && actorId === respondentId && actorRole === respondentRole) {
+    return "RESPONDENT";
+  }
+  if (!initiatorId && !respondentId) {
+    if (actorRole === initiatorRole) return "INITIATOR";
+    if (actorRole === oppositePartyRole(initiatorRole)) return "RESPONDENT";
+  }
+  return "OBSERVER";
+});
 const shouldDiscoverActiveIntakeRuns = computed(() =>
   !historyMode.value &&
   props.initialMessages === null &&
@@ -112,11 +169,18 @@ const caseNoteDescription = computed(() =>
     fallback: "接待官正在整理争议事实，请继续补充案件经过、当前状态和处理诉求。",
   }),
 );
-const partyCanChat = computed(
-  () =>
-    ["USER", "MERCHANT"].includes(actor.role) &&
-    actor.role === normalizedPartyRole(initiatorRoleValue.value),
-);
+const partyCanChat = computed(() => {
+  const serverValue = intakeStatus.value?.can_use_intake ?? intakeStatus.value?.canUseIntake;
+  if (typeof serverValue === "boolean") return serverValue;
+  return actorPartyPosition.value === "INITIATOR";
+});
+const currentActorIntakeCompleted = computed(() => Boolean(
+  intakeStatus.value?.current_actor_completed ??
+  intakeStatus.value?.currentActorCompleted,
+));
+const canEnterEvidence = computed(() => Boolean(
+  intakeStatus.value?.can_enter_evidence ?? intakeStatus.value?.canEnterEvidence,
+));
 const modelConnected = computed(() => modelConnectionState.value === "connected");
 const modelConnectionLabel = computed(() => {
   if (historyMode.value) return "历史记录已封存";
@@ -133,6 +197,9 @@ const intakeConversationEmptyText = computed(() => {
   if (!initialAgentReady.value) {
     return "接待官正在依据案件表单生成首轮案情追问，请稍候。";
   }
+  if (!currentActorIsInitiator.value && partyCanChat.value) {
+    return "请说明你对右侧案情、发起方诉求和争议事实的回应。";
+  }
   return "接待官的首轮追问正在同步到对话记录。";
 });
 const intakeComposerDisabledReason = computed(() => {
@@ -143,7 +210,7 @@ const intakeComposerDisabledReason = computed(() => {
     return "当前是平台观察/审核身份。请切换为用户或商家身份，才能继续与争议接待官对话。";
   }
   if (!partyCanChat.value) {
-    return "接待室仅由发起方补充；另一方请在证据室完成举证和回应。";
+    return "对方完成接待后，你的私有接待会话会自动开放。";
   }
   if (!modelConnected.value) {
     return modelConnectionState.value === "checking"
@@ -270,16 +337,35 @@ const caseDetailDossier = computed(() => {
 });
 const isCaseDetailDossier = computed(() => Boolean(caseDetailDossier.value));
 const initialAgentReady = computed(() => Boolean(caseDetailDossier.value));
+const currentMatrixKind = computed(() => String(
+  caseDetailDossier.value?.case_fact_matrix?.matrix_kind || "",
+).toUpperCase());
+const currentActorMatrixReady = computed(() =>
+  currentActorIsInitiator.value || currentMatrixKind.value === "BILATERAL_FROZEN",
+);
 const intakeDossierSubmissionDisabled = computed(() =>
   historyMode.value ||
   submitting.value ||
   admitted.value ||
   intakeStreamingRuns.value.length > 0 ||
   !initialAgentReady.value ||
-  !modelConnected.value,
+  !modelConnected.value ||
+  !currentActorMatrixReady.value,
 );
 const caseDetailQuality = computed(() => {
   const quality = caseDetailDossier.value?.intake_quality || {};
+  const respondentStartsIndependently =
+    !currentActorIsInitiator.value &&
+    partyCanChat.value &&
+    currentMatrixKind.value === "INITIATOR_FROZEN";
+  if (respondentStartsIndependently) {
+    return {
+      score: 0,
+      threshold: quality.threshold ?? 85,
+      ready: false,
+      reason: "被发起方完善度从本方陈述开始独立统计",
+    };
+  }
   return {
     score: currentCaseDossier.value?.quality_score ?? quality.score ?? 0,
     threshold: quality.threshold ?? 85,
@@ -599,15 +685,6 @@ function partySubject(label, fallback) {
 function respondentNoResponseText(respondent) {
   return `${partySubject(respondent, "对方")}尚未回应`;
 }
-// 业务位置：【前端接待室】markSubjectiveAttitude：围绕 当事人主张、角色和对方态度 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
-function markSubjectiveAttitude(summary, source) {
-  const text = String(summary || "").trim();
-  const sourceText = String(source || "").trim();
-  if (!text || !/主观|单方陈述|发起方陈述/u.test(sourceText) || /（主观）$/u.test(text)) {
-    return text;
-  }
-  return `${text.replace(/[。.]$/u, "")}（主观）`;
-}
 const claimStatus = computed(() => {
   const detail = caseDetailDossier.value;
   if (!detail) {
@@ -622,6 +699,18 @@ const claimStatus = computed(() => {
   const respondentRole = resolveRespondentRole(detail, attitude);
   const initiator = roleLabel(initiatorRole);
   const respondent = roleLabel(respondentRole);
+  const viewerIsInitiator = actorPartyPosition.value === "INITIATOR";
+  const viewerIsRespondent = actorPartyPosition.value === "RESPONDENT";
+  const claimLabel = viewerIsInitiator
+    ? `我方（${initiator}）诉求`
+    : viewerIsRespondent
+      ? `对方（${initiator}）诉求`
+      : `发起方（${initiator}）诉求`;
+  const responseLabel = viewerIsInitiator
+    ? `对方（${respondent}）回应`
+    : viewerIsRespondent
+      ? `我方（${respondent}）回应`
+      : `被发起方（${respondent}）回应`;
   const resolutionCode = inferResolutionCode(detail, claim);
   const resolution = claimResolutionLabels[resolutionCode] || "待确认诉求";
   const amount =
@@ -645,17 +734,20 @@ const claimStatus = computed(() => {
     respondentRole,
   );
   const fallbackFacts = fallbackFactsInDispute(detail);
-  const attitudeSummary = markSubjectiveAttitude(
-    inferredAttitude.hasResponse || inferredAttitude.showSummary
-      ? inferredAttitude.summary
-      : respondentNoResponseText(respondent),
-    inferredAttitude.hasResponse
-      ? "发起方单方陈述（主观）"
-      : attitude.source,
+  const responseHasSubjectiveSource = /主观|单方陈述|发起方陈述/u.test(
+    String(attitude.source || ""),
   );
+  const mayShowResponse =
+    !viewerIsInitiator && !(viewerIsRespondent && responseHasSubjectiveSource);
+  const attitudeSummary =
+    mayShowResponse && (inferredAttitude.hasResponse || inferredAttitude.showSummary)
+      ? inferredAttitude.summary
+      : "暂无回应";
   return {
     initiator,
     respondent,
+    claimLabel,
+    responseLabel,
     resolution,
     resolutionActionText: claimActionTextFor(initiator, resolution),
     requestedItems,
@@ -683,11 +775,25 @@ const claimStatus = computed(() => {
 const visibleClaimStatus = computed(() => {
   if (claimStatus.value) return claimStatus.value;
   const initiator = roleLabel(initiatorRoleValue.value || "UNKNOWN");
-  const respondent = roleLabel(oppositePartyRole(initiatorRoleValue.value));
+  const initiatorRole = normalizePartyRoleValue(initiatorRoleValue.value);
+  const respondentRole = oppositePartyRole(initiatorRole);
+  const respondent = roleLabel(respondentRole);
+  const viewerIsInitiator = actorPartyPosition.value === "INITIATOR";
+  const viewerIsRespondent = actorPartyPosition.value === "RESPONDENT";
   const resolution = "待接待官整理";
   return {
     initiator,
     respondent,
+    claimLabel: viewerIsInitiator
+      ? `我方（${initiator}）诉求`
+      : viewerIsRespondent
+        ? `对方（${initiator}）诉求`
+        : `发起方（${initiator}）诉求`,
+    responseLabel: viewerIsInitiator
+      ? `对方（${respondent}）回应`
+      : viewerIsRespondent
+        ? `我方（${respondent}）回应`
+        : `被发起方（${respondent}）回应`,
     resolution,
     resolutionActionText: claimActionTextFor(initiator, resolution),
     requestedItems: "",
@@ -696,7 +802,7 @@ const visibleClaimStatus = computed(() => {
     attitudeActionText: attitudeActionTextFor(respondent, respondentAttitudeLabels.NOT_RESPONDED),
     claimSummary: "等待接待官整理",
     claimMeta: "等待接待官整理",
-    attitudeSummary: "等待接待官整理",
+    attitudeSummary: "暂无回应",
     showAttitudeSummary: false,
     attitudeMeta: `${respondent}：${respondentAttitudeLabels.NOT_RESPONDED}`,
     coreConflict: "",
@@ -743,6 +849,8 @@ function scrollCardValue(key, fallback = "") {
 }
 const initiatorRoleValue = computed(() => {
   const explicitRole = normalizePartyRoleValue(
+    intakeStatus.value?.initiator_role ||
+    intakeStatus.value?.initiatorRole ||
     analysis.value?.initiator_role ||
     dispute.value?.initiator_role ||
     dispute.value?.initiatorRole,
@@ -766,10 +874,17 @@ const initiatorRoleCopy = computed(() =>
 );
 const intakeRecipientView = computed(
   () =>
-    ["USER", "MERCHANT"].includes(actor.role) &&
-    actor.role !== normalizedPartyRole(initiatorRoleValue.value),
+    actorPartyPosition.value === "RESPONDENT" &&
+    !partyCanChat.value &&
+    !currentActorIntakeCompleted.value,
 );
 const canManageIntake = computed(() => partyCanChat.value);
+const currentActorIsInitiator = computed(
+  () => actorPartyPosition.value === "INITIATOR",
+);
+const confirmButtonCopy = computed(() =>
+  currentActorIsInitiator.value ? "确认发起并上报" : "确认陈述并进入证据室",
+);
 
 // 业务位置：【前端接待室】currentWorkspaceSnapshot：围绕 页面工作区和业务快照 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 function currentWorkspaceSnapshot() {
@@ -800,8 +915,11 @@ function resetWorkspaceForActorChange() {
   workspaceGeneration.value += 1;
   messages.value = [];
   turnMemory.value = null;
+  intakeStatus.value = null;
   streamedCaseDetailSections.value = {};
   pendingOriginalStatement.value = "";
+  admitted.value = false;
+  resolved.value = false;
   error.value = "";
   agentState.value = "LISTENING";
   submitting.value = false;
@@ -856,30 +974,36 @@ function normalizedPartyRole(role) {
 const subjectiveStatement = computed(() => {
   const detail = caseDetailDossier.value;
   const claim = detail?.claim_resolution || {};
-  const sourceRole = normalizedPartyRole(initiatorRoleValue.value);
+  const sourceRole = normalizedPartyRole(actor.role);
   const sourceRoleName = roleLabel(sourceRole);
-  const originalStatement =
-    claim.original_statement ||
-    claim.originalStatement ||
-    dispute.value?.description;
+  const initiatorStatement = currentActorIsInitiator.value
+    ? claim.original_statement ||
+      claim.originalStatement ||
+      dispute.value?.description
+    : "";
+  const actorStatements = (messages.value || [])
+    .filter(
+      (message) =>
+        normalizedPartyRole(message.sender_role || message.senderRole) === sourceRole,
+    )
+    .map((message) => String(message.message_text || message.messageText || ""))
+    .filter((statement) => statement.trim());
   const persistedStatement =
-    typeof originalStatement === "string" ? originalStatement.trim() : "";
+    typeof initiatorStatement === "string" ? initiatorStatement : "";
   const pendingStatement = pendingOriginalStatement.value.trim();
-  const compactPersistedStatement = persistedStatement.replace(
-    /\r?\n[\t ]*\r?\n+/g,
-    "\n",
-  );
-  const visibleStatement =
-    pendingStatement && !compactPersistedStatement.includes(pendingStatement)
-      ? [compactPersistedStatement, pendingStatement].filter(Boolean).join("\n")
-      : compactPersistedStatement;
+  let visibleStatement = persistedStatement;
+  for (const statement of actorStatements) {
+    if (!visibleStatement.includes(statement)) {
+      visibleStatement = [visibleStatement, statement].filter(Boolean).join("\n");
+    }
+  }
+  if (pendingStatement && !visibleStatement.includes(pendingStatement)) {
+    visibleStatement = [visibleStatement, pendingStatement].filter(Boolean).join("\n");
+  }
   return {
     titleSuffix: `${sourceRoleName}原话`,
     label: "原始陈述",
-    value:
-      visibleStatement
-        ? visibleStatement
-        : "等待继续补充发起方陈述",
+    value: visibleStatement.trim() ? visibleStatement : "暂无原始陈述",
   };
 });
 
@@ -933,13 +1057,28 @@ async function load(snapshot = currentWorkspaceSnapshot()) {
       if (!isCurrentWorkspace(snapshot)) return;
       dispute.value = loadedDispute;
     }
-    if (props.initialMessages === null) {
-      await refreshMessages(snapshot);
+    if (
+      intakeStatus.value === null &&
+      (props.intakeStatusLoader || props.initialDispute === null)
+    ) {
+      await refreshIntakeStatus(snapshot);
     }
-    if (props.initialTurnMemory === null && props.initialMessages === null) {
+    admitted.value = currentActorIntakeCompleted.value;
+    const privateIntakeReadable = !intakeRecipientView.value;
+    if (props.initialMessages === null && privateIntakeReadable) {
+      const firstMessages = await refreshMessages(snapshot);
+      if (shouldRequestRespondentOpening(firstMessages)) {
+        await ensureRespondentOpening(snapshot);
+      }
+    }
+    if (
+      props.initialTurnMemory === null &&
+      props.initialMessages === null &&
+      privateIntakeReadable
+    ) {
       await refreshTurnMemory(snapshot);
     }
-    if (shouldDiscoverActiveIntakeRuns.value) {
+    if (shouldDiscoverActiveIntakeRuns.value && privateIntakeReadable) {
       await resumeActiveIntakeRuns(snapshot);
     }
   } catch (failure) {
@@ -954,6 +1093,37 @@ async function refreshMessages(snapshot = currentWorkspaceSnapshot()) {
   const loadedMessages = await loadMessages(snapshot);
   if (isCurrentWorkspace(snapshot)) {
     messages.value = loadedMessages;
+  }
+  return loadedMessages;
+}
+
+function shouldRequestRespondentOpening(firstMessages) {
+  const respondentStatus = String(
+    intakeStatus.value?.respondent_status ||
+    intakeStatus.value?.respondentStatus ||
+    "",
+  ).toUpperCase();
+  return (
+    props.initialMessages === null &&
+    !historyMode.value &&
+    Array.isArray(firstMessages) &&
+    firstMessages.length === 0 &&
+    ["USER", "MERCHANT"].includes(actor.role) &&
+    !currentActorIsInitiator.value &&
+    partyCanChat.value &&
+    respondentStatus === "OPEN" &&
+    !currentActorIntakeCompleted.value
+  );
+}
+
+async function ensureRespondentOpening(snapshot = currentWorkspaceSnapshot()) {
+  const ensure =
+    props.openingAction ||
+    ((openingActor, openingCaseId, roomType) =>
+      roomApi.ensureOpening(openingActor, openingCaseId, roomType));
+  await ensure(snapshot.actor, snapshot.caseId, "INTAKE");
+  if (isCurrentWorkspace(snapshot)) {
+    await refreshMessages(snapshot);
   }
 }
 
@@ -979,6 +1149,47 @@ async function refreshTurnMemory(snapshot = currentWorkspaceSnapshot()) {
 // 业务位置：【前端接待室】refreshRoomSnapshot：重新加载 页面工作区和业务快照，确保页面和下一次 Agent 调用基于最新案件版本。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 async function refreshRoomSnapshot(snapshot = currentWorkspaceSnapshot()) {
   await Promise.all([refreshMessages(snapshot), refreshTurnMemory(snapshot)]);
+}
+
+async function refreshIntakeStatus(snapshot = currentWorkspaceSnapshot()) {
+  const loader =
+    props.intakeStatusLoader ||
+    (() => disputeApi.intakeStatus(snapshot.actor, snapshot.caseId));
+  const loaded = await loader(snapshot);
+  if (isCurrentWorkspace(snapshot)) {
+    intakeStatus.value = loaded;
+  }
+  return loaded;
+}
+
+function intakeStatusAllowsEvidence(status) {
+  return Boolean(status?.can_enter_evidence ?? status?.canEnterEvidence);
+}
+
+function waitForEvidenceStatus(delayMs) {
+  if (delayMs <= 0) return Promise.resolve();
+  return new Promise((resolve) => window.setTimeout(resolve, delayMs));
+}
+
+async function verifyEvidenceReady(snapshot = currentWorkspaceSnapshot()) {
+  const attempts = Math.max(1, props.evidenceReadyPollAttempts);
+  let lastFailure = null;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (!isCurrentWorkspace(snapshot)) return false;
+    try {
+      const status = await refreshIntakeStatus(snapshot);
+      if (!isCurrentWorkspace(snapshot)) return false;
+      if (intakeStatusAllowsEvidence(status)) return true;
+      lastFailure = null;
+    } catch (failure) {
+      lastFailure = failure;
+    }
+    if (attempt < attempts - 1) {
+      await waitForEvidenceStatus(props.evidenceReadyPollDelayMs);
+    }
+  }
+  if (lastFailure) throw lastFailure;
+  return false;
 }
 
 function resetStreamedCaseDetail() {
@@ -1156,7 +1367,17 @@ function startEventStream(snapshot = currentWorkspaceSnapshot()) {
     applyEvent: async (event) => {
       if (!isCurrentWorkspace(snapshot)) return;
       if (event.event === "EVIDENCE_OPENED") {
-        await router.push(`/disputes/${snapshot.caseId}/evidence`);
+        if (props.initialIntakeStatus === null && props.initialDispute === null) {
+          await refreshIntakeStatus(snapshot);
+        }
+        if (canEnterEvidence.value) {
+          await router.push(`/disputes/${snapshot.caseId}/evidence`);
+        } else if (partyCanChat.value) {
+          await Promise.all([
+            refreshMessages(snapshot),
+            refreshTurnMemory(snapshot),
+          ]);
+        }
       }
     },
   });
@@ -1255,6 +1476,14 @@ async function resolveWithoutDispute() {
     resolved.value = true;
     admitted.value = true;
     agentState.value = "HANDOFF";
+    disputeStore.list.data = disputeStore.list.data.filter(
+      (item) => item.id !== snapshot.caseId,
+    );
+    if (disputeStore.current.data?.id === snapshot.caseId) {
+      disputeStore.current.data = null;
+      disputeStore.current.status = "empty";
+    }
+    await router.replace("/disputes");
   } catch (failure) {
     if (!isCurrentWorkspace(snapshot)) return;
     error.value = failure.message;
@@ -1282,11 +1511,27 @@ async function confirmAdmission() {
     const confirm =
       props.confirmAction ||
       ((payload) => disputeApi.confirmIntake(snapshot.actor, snapshot.caseId, payload));
-    await confirm(command);
+    const result = await confirm(command);
     if (!isCurrentWorkspace(snapshot)) return;
-    admitted.value = true;
-    agentState.value = "HANDOFF";
-    await router.push(`/disputes/${snapshot.caseId}/evidence`);
+    if (result) {
+      const currentRoom = String(result.current_room || result.currentRoom || "").toUpperCase();
+      const evidenceOpened = currentRoom === "EVIDENCE";
+      intakeStatus.value = {
+        ...(intakeStatus.value || {}),
+        current_actor_completed: true,
+        can_use_intake: false,
+        can_enter_evidence: false,
+        evidence_deadline_at: result.deadline_at || result.deadlineAt,
+      };
+      admitted.value = true;
+      agentState.value = "HANDOFF";
+      if (evidenceOpened) {
+        const evidenceReady = await verifyEvidenceReady(snapshot);
+        if (evidenceReady && isCurrentWorkspace(snapshot)) {
+          await router.push(`/disputes/${snapshot.caseId}/evidence`);
+        }
+      }
+    }
   } catch (failure) {
     if (!isCurrentWorkspace(snapshot)) return;
     error.value = failure.message;
@@ -1325,12 +1570,7 @@ watch(
   async () => {
     resetWorkspaceForActorChange();
     const snapshot = currentWorkspaceSnapshot();
-    if (props.initialMessages === null) {
-      await refreshRoomSnapshot(snapshot);
-      if (shouldDiscoverActiveIntakeRuns.value) {
-        await resumeActiveIntakeRuns(snapshot);
-      }
-    }
+    await load(snapshot);
     if (!historyMode.value && (props.eventStreamer || props.initialMessages === null)) {
       startEventStream(snapshot);
     }
@@ -1431,11 +1671,11 @@ onBeforeUnmount(() => {
             v-if="intakeRecipientView"
             class="intake-room__locked-chat"
             data-intake-locked-chat
-            aria-label="只有发起方可以查看哦"
+            aria-label="接待会话尚未开放"
           >
             <span aria-hidden="true">🔒</span>
-            <strong>只有发起方可以查看哦</strong>
-            <p>接待室保存的是发起方与接待官的单方事实梳理。你可以查看右侧案件概况，并进入证据室完成正式举证与回应。</p>
+            <strong>你的接待会话尚未开放</strong>
+            <p>发起方完成案情接待后，这里会开放你的私有会话。双方私聊原文互不可见，右侧仅交接结构化案情。</p>
           </div>
         </div>
       </section>
@@ -1513,7 +1753,7 @@ onBeforeUnmount(() => {
                   class="intake-case-detail__field"
                   data-dispute-detail-claim
                 >
-                  <span>发起方诉求</span>
+                  <span>{{ visibleClaimStatus.claimLabel }}</span>
                   <strong
                     :title="[
                       visibleClaimStatus.claimSummary,
@@ -1530,7 +1770,7 @@ onBeforeUnmount(() => {
                   class="intake-case-detail__field"
                   data-dispute-detail-respondent
                 >
-                  <span>对方回应</span>
+                  <span>{{ visibleClaimStatus.responseLabel }}</span>
                   <strong :title="visibleClaimStatus.attitudeSummary">
                     {{ visibleClaimStatus.attitudeSummary }}
                   </strong>
@@ -1633,16 +1873,32 @@ onBeforeUnmount(() => {
           </div>
           <div
             v-else-if="intakeRecipientView"
+            class="intake-dossier__readonly-actions"
+            data-intake-waiting-for-initiator
+          >
+            等待发起方完成接待
+          </div>
+          <div
+            v-else-if="admitted && canEnterEvidence"
             class="intake-dossier__actions"
           >
-            <button
-              type="button"
-              data-enter-evidence-room
-              :disabled="submitting"
-              @click="enterEvidenceRoom"
-            >
+            <button type="button" data-enter-evidence-room @click="enterEvidenceRoom">
               进入证据室
             </button>
+          </div>
+          <div
+            v-else-if="admitted && currentActorIsInitiator"
+            class="intake-dossier__readonly-actions"
+            data-waiting-for-respondent-intake
+          >
+            本方陈述已完成，等待对方独立完善陈述；双方完成后将统一开放证据室
+          </div>
+          <div
+            v-else-if="admitted"
+            class="intake-dossier__readonly-actions"
+            data-waiting-for-evidence-ready
+          >
+            双方完成状态正在核验，证据室确认开放后将自动进入
           </div>
           <div
             v-else-if="resolved"
@@ -1659,10 +1915,11 @@ onBeforeUnmount(() => {
               @click="confirmAdmission"
             >
               <span v-if="admitted">已上报</span>
-              <span v-else-if="submitting">正在盖章…</span>
-              <span v-else>确认发起并上报</span>
+              <span v-else-if="submitting">正在整理…</span>
+              <span v-else>{{ confirmButtonCopy }}</span>
             </button>
             <button
+              v-if="currentActorIsInitiator"
               type="button"
               class="intake-dossier__secondary"
               data-resolve-without-dispute

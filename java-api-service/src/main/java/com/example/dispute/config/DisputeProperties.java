@@ -19,8 +19,7 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
 public record DisputeProperties(
         @DefaultValue("PT2H") Duration evidenceWindow,
         @DefaultValue("PT3H") Duration hearingWindow,
-        @DefaultValue("PT5M") Duration hearingRoundWindow,
-        @DefaultValue("3") int maxHearingRounds,
+        @DefaultValue("PT20M") Duration hearingPartyStageWindow,
         @DefaultValue("PT15S") Duration sseHeartbeat,
         @DefaultValue("true") boolean seedDemoDisputes) {
 
@@ -33,12 +32,8 @@ public record DisputeProperties(
     public DisputeProperties {
         requirePositive(evidenceWindow, "evidence-window");
         requirePositive(hearingWindow, "hearing-window");
-        requirePositive(hearingRoundWindow, "hearing-round-window");
+        requirePositive(hearingPartyStageWindow, "hearing-party-stage-window");
         requirePositive(sseHeartbeat, "sse-heartbeat");
-        if (maxHearingRounds < 1 || maxHearingRounds > 5) {
-            throw new IllegalArgumentException(
-                    "max-hearing-rounds must be between 1 and 5");
-        }
     }
 
     // 所属模块：【身份鉴权与运行配置 / 核心业务层】「DisputeProperties.requirePositive(Duration,String)」。

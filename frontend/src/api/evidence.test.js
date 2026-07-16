@@ -72,10 +72,15 @@ describe("evidenceApi", () => {
       sourceType: "USER_UPLOAD",
       visibility: "PRIVATE",
       modelProcessingAuthorized: true,
+      claimedFact: "证明商品开箱时已经存在明显划痕。",
+      truthAttested: true,
     });
 
     const request = fetch.mock.calls[0][1];
     expect(request.body).toBeInstanceOf(FormData);
     expect(request.body.get("model_processing_authorized")).toBe("true");
+    expect(request.body.get("claimed_fact")).toBe("证明商品开箱时已经存在明显划痕。");
+    expect(request.body.get("truth_attested")).toBe("true");
+    expect(request.signal).toBeInstanceOf(AbortSignal);
   });
 });

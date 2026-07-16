@@ -51,6 +51,7 @@ describe("normalizeVerificationFocus", () => {
       normalizeVerificationFocus([
         "等待接待官完成案件详情整理",
         "信息完整度已达到提交阈值",
+        "READY_PENDING_REMARK_INVITE",
         "核验商品异常照片或开箱视频，确认商品状态及形成时间",
       ]),
     ).toEqual(["核验商品异常照片或开箱视频，确认商品状态及形成时间"]);

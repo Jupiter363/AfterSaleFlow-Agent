@@ -11,11 +11,9 @@ import {
   loadActiveAgentRuns,
 } from "../../api/agentStream";
 import { disputeApi } from "../../api/disputes";
-import AgentStreamErrorDialog from "../../components/room/AgentStreamErrorDialog.vue";
-import AgentStreamingMessage from "../../components/room/AgentStreamingMessage.vue";
+import RoomShell from "../../components/room/RoomShell.vue";
 import { actor } from "../../state/actor";
 import {
-  activeAgentStreams,
   clearAgentStreams,
   consumeAgentRun,
 } from "../../stores/agentStream";
@@ -28,32 +26,21 @@ const props = defineProps({
 const route = useRoute();
 const router = useRouter();
 const outcome = ref(props.initialOutcome);
+const loading = ref(props.initialOutcome === null);
 const error = ref("");
-const streamError = ref("");
-const reviewReason = ref("审核员确认 AI 裁决草案。");
-const reviewPlanDraft = ref({
-  id: "",
-  handling_direction: "",
-  execution_plan: "",
-  actions: [],
-});
-const reviewBusy = ref(false);
-const reviewStatus = ref("");
-const executionAssistantState = ref("idle");
-let executionAssistantTimer = null;
-let executionAssistantCaseId = "";
+const mockExecutionStage = ref(0);
+let mockExecutionTimer = null;
 const outcomeStreamAbortController = new AbortController();
-const DRAFT_STREAM_OPERATIONS = new Set(["HEARING_ANALYSIS", "HEARING_STAGE"]);
+const DRAFT_STREAM_OPERATIONS = new Set(["HEARING_JUDGE_V2"]);
+const MOCK_EXECUTION_STEPS = [
+  { label: "方案下发", detail: "读取管理员批准方案" },
+  { label: "执行准备", detail: "校验动作与前置条件" },
+  { label: "业务处理", detail: "模拟调用履约执行工具" },
+  { label: "结果同步", detail: "生成模拟执行回执" },
+];
+const MOCK_EXECUTION_STEP_INTERVAL_MS = 5_000;
 const caseId = computed(
   () => outcome.value?.case_id || route.params.caseId,
-);
-const outcomeDraftStreamingRuns = computed(() =>
-  activeAgentStreams({
-    caseId: caseId.value,
-    roomType: "HEARING",
-    actorId: actor.id,
-    actorRole: actor.role,
-  }).filter((run) => DRAFT_STREAM_OPERATIONS.has(run.operation)),
 );
 const actions = computed(() => outcome.value?.actions || []);
 const persistedDecision = computed(
@@ -62,184 +49,236 @@ const persistedDecision = computed(
 const rawDecision = computed(
   () => persistedDecision.value || {},
 );
-const adjudicationDraft = computed(
-  () => outcome.value?.adjudication_draft || outcome.value?.adjudicationDraft || null,
+const adjudicationDraft = computed(() => {
+  const source =
+    outcome.value?.adjudication_draft || outcome.value?.adjudicationDraft || {};
+  return source.draft && typeof source.draft === "object"
+    ? { ...source, ...source.draft }
+    : source;
+});
+const reviewTaskStatus = computed(() =>
+  String(outcome.value?.review_task_status || outcome.value?.reviewTaskStatus || "")
+    .trim()
+    .toUpperCase(),
 );
-const caseStatus = computed(() => outcome.value?.case_status || outcome.value?.caseStatus || "");
+const approvedPlan = computed(() => {
+  const decisionPlan =
+    rawDecision.value?.approved_plan || rawDecision.value?.approvedPlan;
+  if (decisionPlan && typeof decisionPlan === "object") return decisionPlan;
+  const legacyPlan =
+    adjudicationDraft.value?.approved_plan || adjudicationDraft.value?.approvedPlan;
+  return legacyPlan && typeof legacyPlan === "object" ? legacyPlan : {};
+});
+const finalPlanLabels = {
+  REFUND: "退款",
+  RETURN_AND_REFUND: "退货退款",
+  RETURN_REFUND: "退货退款",
+  RESHIP: "补发",
+  RESEND: "补发",
+  REPLACE: "换货",
+  EXCHANGE: "换货",
+  REPAIR: "维修",
+  COMPENSATE: "补偿",
+  COMPENSATION: "补偿",
+  REJECT: "不支持售后",
+  MANUAL_REVIEW: "转人工复核",
+  MANUAL_REVIEW_REQUIRED: "转人工复核",
+};
 const isFinalOutcome = computed(() => {
   const decision = rawDecision.value || {};
-  return Boolean(
-    decision.human_confirmed ||
-      decision.humanConfirmed ||
-      caseStatus.value === "CLOSED" ||
-      outcome.value?.closed_at ||
-      outcome.value?.closedAt,
+  const humanConfirmed = Boolean(
+    decision.human_confirmed || decision.humanConfirmed,
+  );
+  return (
+    humanConfirmed &&
+    (!reviewTaskStatus.value || reviewTaskStatus.value === "APPROVED")
   );
 });
-const isDraftOutcome = computed(
-  () =>
-    !isFinalOutcome.value &&
-    Boolean(
-      adjudicationDraft.value ||
-        caseStatus.value === "WAITING_HUMAN_REVIEW" ||
-        caseStatus.value === "HEARING_COMPLETED",
-    ),
-);
-const hasPersistedDecision = computed(() => {
-  const source = persistedDecision.value || {};
-  const conclusion = String(source.conclusion || "").trim();
-  const explanation = String(source.explanation || "").trim();
-  if (!conclusion && !explanation) return false;
-  const pendingConclusion =
-    !conclusion ||
-    /^(?:处理结果|裁决草案|裁决结论|结论)?\s*(?:待生成|尚未生成|生成中)$/.test(conclusion);
-  const placeholderExplanation =
-    !explanation ||
-    /以后续确认记录为准|当前(?:没有|暂无)可展示|尚未生成|正在生成|待生成/.test(explanation);
-  return !(pendingConclusion && placeholderExplanation);
-});
-const hasRenderableOutcome = computed(() =>
-  isFinalOutcome.value || Boolean(adjudicationDraft.value) || hasPersistedDecision.value,
-);
-const draftGenerationActive = computed(() => outcomeDraftStreamingRuns.value.length > 0);
-const canReviewOutcomeDraft = computed(
-  () => actor.role === "PLATFORM_REVIEWER" && isDraftOutcome.value,
-);
-const shouldShowExecutionAssistant = computed(
-  () =>
-    isFinalOutcome.value &&
-    actions.value.length === 0 &&
-    Boolean(rawDecision.value?.human_confirmed || rawDecision.value?.humanConfirmed),
-);
-const canModifyReviewPlan = computed(
-  () =>
-    Boolean(
-      String(reviewPlanDraft.value.handling_direction || "").trim() ||
-        String(reviewPlanDraft.value.execution_plan || "").trim(),
-    ),
-);
-const decision = computed(() => {
-  const source = rawDecision.value || {};
+const hearingDecision = computed(() => {
+  const source = adjudicationDraft.value || {};
   return {
-    ...source,
-    conclusion: localizeOutcomeCopy(
-      source.conclusion || (isDraftOutcome.value ? "AI 裁决草案已生成" : ""),
+    version: source.draft_version || source.draftVersion || "-",
+    type: formatFinalConclusion(
+      source.recommended_decision ||
+        source.recommendedDecision ||
+        rawDecision.value?.conclusion ||
+        "待同步",
     ),
-    explanation: localizeOutcomeCopy(
-      source.explanation ||
-        (isDraftOutcome.value ? "此处展示的是 AI 生成的非最终裁决草案。" : ""),
+    text: localizeOutcomeCopy(
+      source.draft_text ||
+        source.draftText ||
+        rawDecision.value?.explanation ||
+        "庭审 V2 裁决说明待同步。",
     ),
-    review_reason: localizeOutcomeCopy(source.review_reason || source.reviewReason || ""),
+    confidence: formatConfidence(source.confidence),
   };
 });
-const heroSealText = computed(() => {
-  if (isFinalOutcome.value) return "最终";
-  if (!hasRenderableOutcome.value) return draftGenerationActive.value ? "生成" : "等待";
-  return "草案";
-});
-const heroKicker = computed(() =>
-  isFinalOutcome.value
-    ? "最终结果已确认"
-    : !hasRenderableOutcome.value
-      ? draftGenerationActive.value ? "实时生成" : "等待裁决草案"
-      : "裁决草案已生成",
-);
-const heroTitle = computed(() => {
-  if (isFinalOutcome.value) return "最终裁决";
-  if (!hasRenderableOutcome.value) {
-    return draftGenerationActive.value ? "法官正在生成裁决草案" : "裁决草案尚未生成";
-  }
-  return "AI 裁决草案";
-});
-const heroStatusTitle = computed(() => {
-  if (isFinalOutcome.value) return "裁决已生效";
-  if (!hasRenderableOutcome.value) return draftGenerationActive.value ? "正在生成" : "等待法官处理";
-  return "等待后续确认";
-});
-const heroStatusDetail = computed(() => {
-  if (isFinalOutcome.value) return outcome.value?.closed_at || "执行结果持续同步中";
-  if (!hasRenderableOutcome.value) {
-    return draftGenerationActive.value
-      ? "模型输出完成并校验入库后展示正式草案"
-      : "庭审记录封存后由 AI 法官生成";
-  }
-  return "非最终结果，确认后形成最终处理结果";
-});
-const verdictBoundaryText = computed(() => {
-  if (isFinalOutcome.value && decision.value.human_confirmed) {
-    return "此处展示的是平台审核员确认后的最终裁决，不是 AI 草案。";
-  }
-  if (isFinalOutcome.value) {
-    return "此处展示的是已生效的系统结案结果。";
-  }
-  return "此处展示的是 AI 生成的非最终裁决草案，后续确认后才会形成最终结果。";
-});
-const draftStructureIntro = computed(() =>
-  isDraftOutcome.value
-    ? "以下为 AI 法官草案的结构化依据，最终以后续确认为准。"
-    : "以下为本次处理结果的结构化依据。",
-);
-const draftCardSummary = computed(() => {
-  const draftText = localizeOutcomeCopy(
-    adjudicationDraft.value?.draft_text ||
-      adjudicationDraft.value?.draftText ||
-      "",
-  );
-  if (!draftText) return draftStructureIntro.value;
-  const explanation = localizeOutcomeCopy(decision.value?.explanation || "");
-  if (isSameDraftCopy(draftText, explanation)) return draftStructureIntro.value;
-  return draftText;
-});
-const draftRecommendedDecision = computed(() =>
+const reviewOpinion = computed(() =>
   localizeOutcomeCopy(
-    adjudicationDraft.value?.recommended_decision ||
-      adjudicationDraft.value?.recommendedDecision ||
-      "待生成",
+    rawDecision.value?.review_reason ||
+      rawDecision.value?.reviewReason ||
+      rawDecision.value?.admin_review_opinion ||
+      rawDecision.value?.adminReviewOpinion ||
+      rawDecision.value?.decision_reason ||
+      rawDecision.value?.decisionReason ||
+      "管理员已确认庭审裁决与最终执行方案，无补充审核意见。",
   ),
 );
-const draftRecommendedDecisionDisplay = computed(() => {
-  const recommendation = draftRecommendedDecision.value;
-  if (
-    recommendation.length > 48 &&
-    isSameDraftCopy(recommendation, decision.value?.conclusion)
-  ) {
-    return "同上方白话结论一致";
-  }
-  return recommendation;
+const reviewStatusLabel = computed(() => {
+  const labels = {
+    APPROVED: "审核通过",
+    REJECTED: "未通过",
+    WAITING_HUMAN_REVIEW: "等待审核",
+    IN_REVIEW: "审核中",
+  };
+  return labels[reviewTaskStatus.value] || "管理员已确认";
 });
-const reviewerAttentionHeading = computed(() =>
-  isDraftOutcome.value ? "后续确认关注" : "审核关注",
-);
-const executionBoardKicker = computed(() =>
-  isFinalOutcome.value ? "执行回执" : "后续轨迹",
-);
-const executionBoardTitle = computed(() =>
-  isFinalOutcome.value ? "裁决落地轨迹" : "确认与执行轨迹",
-);
-const executionBoardCountText = computed(() => {
-  if (shouldShowExecutionAssistant.value) {
-    return executionAssistantState.value === "succeeded"
-      ? "模拟执行完成"
-      : "执行专员助手";
-  }
-  return isFinalOutcome.value
-    ? `${actions.value.length} 项执行动作`
-    : `${actions.value.length} 项后续动作`;
+const approvedPlanActions = computed(() => {
+  const source = approvedPlan.value?.actions || approvedPlan.value?.action || [];
+  return Array.isArray(source) ? source.filter(Boolean) : [];
 });
-const executionBoardEmptyText = computed(() =>
-  isFinalOutcome.value
-    ? "执行回执正在路上，请稍后刷新。"
-    : "尚未产生执行动作，等待后续确认后同步处理结果。",
+const approvedPlanType = computed(() => {
+  const source = approvedPlan.value || {};
+  const explicit =
+    source.plan_type ||
+    source.planType ||
+    source.solution_type ||
+    source.solutionType ||
+    source.handling_direction ||
+    source.handlingDirection ||
+    source.type;
+  if (explicit) return planTypeLabel(explicit);
+  const labels = Array.from(
+    new Set(
+      approvedPlanActions.value
+        .map((action) => actionTypeLabel(action))
+        .filter(Boolean),
+    ),
+  );
+  if (labels.length > 1) return "组合执行方案";
+  return labels[0] || hearingDecision.value.type || "已批准执行方案";
+});
+const approvedPlanDescription = computed(() => {
+  const source = approvedPlan.value || {};
+  const explicit =
+    source.description ||
+    source.natural_language_description ||
+    source.naturalLanguageDescription ||
+    source.execution_plan ||
+    source.executionPlan ||
+    source.summary ||
+    source.note;
+  if (explicit) return localizeOutcomeCopy(explicit);
+  const descriptions = approvedPlanActions.value
+    .map(describePlanAction)
+    .filter(Boolean);
+  return descriptions.length
+    ? `${descriptions.join("；")}。`
+    : "管理员已确认该执行方案，具体动作将在执行阶段同步。";
+});
+const approvedPlanVersion = computed(
+  () => approvedPlan.value?.version || approvedPlan.value?.plan_version || "-",
 );
-const footerNoticeText = computed(() =>
-  isFinalOutcome.value
-    ? "裁决、执行成功或异常都会同步进入双方平台信箱。"
-    : "草案、后续确认结果或执行异常都会同步进入双方平台信箱。",
+const approvedPlanActionLabels = computed(() =>
+  Array.from(
+    new Set(approvedPlanActions.value.map((action) => actionTypeLabel(action))),
+  ),
 );
+const approvedPlanSource = computed(() =>
+  rawDecision.value?.approved_plan || rawDecision.value?.approvedPlan
+    ? "管理员批准快照"
+    : "已批准历史方案",
+);
+const heroKicker = computed(() =>
+  loading.value
+    ? "正在加载"
+    : isFinalOutcome.value
+      ? "四段结果已归档"
+      : "等待最终结果",
+);
+const heroStatusTitle = computed(() => {
+  if (loading.value) return "正在获取最终结果";
+  return isFinalOutcome.value ? "管理员审核已完成" : "等待审核通过";
+});
+const heroStatusDetail = computed(() => {
+  if (loading.value) return "正在同步裁决、审核与执行信息";
+  if (isFinalOutcome.value) return "庭审裁决、审核意见与执行方案已生效";
+  return "审核通过后展示完整四段结果";
+});
+
+function actionExecutionStatus(action) {
+  return action.execution_status || action.executionStatus || action.status || "";
+}
+
+const executionSummary = computed(() => {
+  const statuses = actions.value.map(actionExecutionStatus);
+  if (!statuses.length) {
+    return {
+      label: "等待执行回执",
+      detail: "方案已生效，正在等待执行系统返回真实处理进度",
+      state: "active",
+    };
+  }
+  if (statuses.every((status) => status === "SUCCEEDED")) {
+    return { label: "执行完成", detail: "全部执行动作均已成功", state: "complete" };
+  }
+  if (statuses.includes("FAILED")) {
+    return { label: "执行异常", detail: "部分执行动作失败，请关注回执详情", state: "attention" };
+  }
+  if (statuses.includes("MANUAL_REQUIRED")) {
+    return { label: "等待人工处理", detail: "执行系统已记录人工接管状态", state: "attention" };
+  }
+  if (statuses.includes("RUNNING")) {
+    return { label: "执行中", detail: "执行动作正在处理中", state: "active" };
+  }
+  if (statuses.includes("COMPENSATING")) {
+    return { label: "补偿处理中", detail: "执行异常正在进行补偿处理", state: "active" };
+  }
+  if (statuses.includes("PENDING")) {
+    return { label: "等待执行", detail: "执行动作已创建，等待系统处理", state: "active" };
+  }
+  if (statuses.every((status) => ["SUCCEEDED", "COMPENSATED"].includes(status))) {
+    return { label: "执行已结束", detail: "全部动作已完成，异常动作已补偿处理", state: "complete" };
+  }
+  return { label: "回执同步中", detail: "正在同步最新执行状态", state: "active" };
+});
+
+const shouldUseMockExecution = computed(
+  () => isFinalOutcome.value && actions.value.length === 0,
+);
+const mockExecutionStatus = computed(() => {
+  if (mockExecutionStage.value >= MOCK_EXECUTION_STEPS.length) {
+    return {
+      label: "模拟执行完成",
+      detail: "四个演示步骤均已完成",
+      state: "complete",
+    };
+  }
+  const current = MOCK_EXECUTION_STEPS[mockExecutionStage.value];
+  return { label: current.label, detail: current.detail, state: "active" };
+});
+const mockExecutionProgress = computed(() =>
+  Math.min(
+    100,
+    Math.round(
+      ((mockExecutionStage.value + 1) / MOCK_EXECUTION_STEPS.length) * 100,
+    ),
+  ),
+);
+const footerNoticeText =
+  "庭审裁决、管理员审核、最终方案与执行情况会共同归档到案件结果。";
 
 const actionLabels = {
   REFUND: "退款",
+  RETURN_AND_REFUND: "退货退款",
+  RESHIP: "重新发货",
+  REPLACE: "更换商品",
   COMPENSATE: "补偿",
+  CANCEL_ORDER: "取消订单",
+  REJECT_AFTER_SALE: "关闭售后申请",
+  CLOSE_AFTER_SALE: "关闭售后申请",
+  CREATE_MANUAL_REVIEW_TICKET: "创建人工复核工单",
+  CREATE_FULFILLMENT_REMINDER: "创建履约提醒",
   NOTIFY_MERCHANT: "通知商家",
   NOTIFY_USER: "通知用户",
   CLOSE_CASE: "关闭案件",
@@ -250,6 +289,8 @@ const statusLabels = {
   RUNNING: "执行中",
   FAILED: "执行失败",
   MANUAL_REQUIRED: "等待人工处理",
+  COMPENSATING: "补偿处理中",
+  COMPENSATED: "已补偿处理",
 };
 const resultLabels = {
   amount: "金额",
@@ -268,6 +309,67 @@ const resultLabels = {
   "response.status": "回执状态",
   status: "状态",
 };
+
+function formatConfidence(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return "未提供";
+  const percent = numeric <= 1 ? numeric * 100 : numeric;
+  return `${Math.round(percent)}%`;
+}
+
+function actionTypeCode(action) {
+  return String(
+    action?.action_type || action?.actionType || action?.type || "",
+  )
+    .trim()
+    .toUpperCase();
+}
+
+function actionTypeLabel(action) {
+  const code = actionTypeCode(action);
+  return actionLabels[code] || finalPlanLabels[code] || humanizeDossierText(code, {
+    fallback: code,
+  });
+}
+
+function planTypeLabel(value) {
+  const code = String(value || "").trim().toUpperCase();
+  return finalPlanLabels[code] || actionLabels[code] || localizeOutcomeCopy(value);
+}
+
+function describePlanAction(action) {
+  const parameters = action?.parameters || {};
+  const explicit =
+    action?.description ||
+    action?.note ||
+    parameters.description ||
+    parameters.plan_description ||
+    parameters.planDescription ||
+    parameters.reason;
+  if (explicit) return localizeOutcomeCopy(explicit);
+
+  const descriptions = {
+    REFUND: "按管理员批准方案向用户原支付渠道发起退款",
+    RETURN_AND_REFUND: "安排用户退回商品，并在验收后完成退款",
+    RESHIP: "为用户重新发货并同步新的履约信息",
+    RESEND: "为用户重新发货并同步新的履约信息",
+    REPLACE: "为用户更换符合订单约定的商品",
+    EXCHANGE: "为用户更换符合订单约定的商品",
+    REPAIR: "安排商品维修并同步处理进度",
+    COMPENSATE: "按管理员批准标准向用户发放补偿",
+    CANCEL_ORDER: "取消争议订单并同步订单状态",
+    REJECT_AFTER_SALE: "关闭本次售后申请并归档处理依据",
+    CLOSE_AFTER_SALE: "关闭本次售后申请并归档处理依据",
+    CREATE_MANUAL_REVIEW_TICKET:
+      "创建人工复核工单，继续核验关键事实并由平台完成后续处理",
+    CREATE_FULFILLMENT_REMINDER: "创建履约提醒并通知责任方继续处理",
+    NOTIFY_USER: "向用户发送最终方案与执行结果通知",
+    NOTIFY_MERCHANT: "向商家发送最终方案与执行要求通知",
+    CLOSE_CASE: "在执行完成后关闭案件并归档结果",
+  };
+  const code = actionTypeCode(action);
+  return descriptions[code] || `执行“${actionTypeLabel(action)}”动作`;
+}
 
 // 业务位置：【前端处理结果】resultValue：围绕 阶段处理结果或草案 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
 function resultValue(value) {
@@ -299,7 +401,19 @@ function flattenResult(value, prefix = "") {
 
 // 业务位置：【前端处理结果】executionResultRows：围绕 履约执行动作和工具意图 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
 function executionResultRows(action) {
-  return flattenResult(action.result);
+  return flattenResult(
+    action.result || action.execution_result || action.executionResult,
+  );
+}
+
+function actionExternalReference(action) {
+  return (
+    action.external_result_ref ||
+    action.externalResultRef ||
+    action.reference_id ||
+    action.referenceId ||
+    ""
+  );
 }
 
 // 业务位置：【前端处理结果】sanitizeOutcomeCopy：核验 阶段处理结果或草案 的权限、Schema 和阶段边界，阻止越权或不完整结果进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
@@ -319,20 +433,7 @@ function sanitizeOutcomeCopy(value) {
     .replace(/\bVERIFIED\b/g, "已核验")
     .replace(/\bUNVERIFIED\b/g, "待核验")
     .replace(/\bSIGNED_NOT_RECEIVED\b/g, "物流显示签收但用户称未收到包裹")
-    .replace(/\b(ISSUE|FACT|EVIDENCE|EVD|DRAFT|A2A)_[A-Za-z0-9_-]+\b/g, "相关材料")
-    .replaceAll("裁决草案已经进入平台审核入口", "裁决草案已生成")
-    .replaceAll("进入平台终审，等待审核员确认最终结果", "查看裁决草案并等待后续确认")
-    .replaceAll("最终由平台审核员确认", "后续进入确认流程")
-    .replaceAll("最终结果仍需平台审核确认", "最终结果以后续确认为准")
-    .replaceAll("最终结果仍需平台审核员确认", "最终结果以后续确认为准")
-    .replaceAll("等待平台审核员确认", "等待后续确认")
-    .replaceAll("希望平台审核员给出", "希望后续确认环节给出")
-    .replaceAll("平台审核员确认", "后续确认")
-    .replaceAll("审核员确认", "后续确认")
-    .replaceAll("平台审核确认", "后续确认")
-    .replaceAll("平台审核员", "后续确认环节")
-    .replaceAll("平台终审", "后续确认")
-    .replaceAll("审核员终审", "后续确认");
+    .replace(/\b(ISSUE|FACT|EVIDENCE|EVD|DRAFT|A2A)_[A-Za-z0-9_-]+\b/g, "相关材料");
 }
 
 // 业务位置：【前端处理结果】localizeOutcomeCopy：将 阶段处理结果或草案 转换为稳定的接口、提示词或页面表达，避免直接暴露内部实现字段。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
@@ -341,346 +442,43 @@ function localizeOutcomeCopy(value) {
   return sanitizeOutcomeCopy(humanizeDossierText(value, { fallback: "" }));
 }
 
-// 业务位置：【前端处理结果】isSameDraftCopy：判断 阶段处理结果或草案 是否满足当前流程分支的进入条件。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
-function isSameDraftCopy(left, right) {
-  const normalizedLeft = String(left || "").replace(/\s+/g, "");
-  const normalizedRight = String(right || "").replace(/\s+/g, "");
-  if (!normalizedLeft || !normalizedRight) return false;
-  return (
-    normalizedLeft === normalizedRight ||
-    normalizedLeft.includes(normalizedRight) ||
-    normalizedRight.includes(normalizedLeft)
-  );
+function formatFinalConclusion(value) {
+  const normalized = String(value || "").trim().toUpperCase();
+  return finalPlanLabels[normalized] || localizeOutcomeCopy(value);
 }
 
-const INTERNAL_DRAFT_KEYS = new Set([
-  "id",
-  "issue_id",
-  "issueId",
-  "fact_id",
-  "factId",
-  "evidence_id",
-  "evidenceId",
-]);
-
-const DRAFT_VALUE_LABELS = {
-  NEEDS_HUMAN_REVIEW: "待人工复核",
-  REQUIRES_HUMAN_REVIEW: "需人工复核",
-  PENDING_HUMAN_REVIEW: "待人工复核",
-  PENDING_POLICY_REVIEW: "待规则复核",
-  PENDING_REVIEW: "待复核",
-  WAITING_HUMAN_REVIEW: "等待人工复核",
-  HUMAN_REVIEW: "人工复核",
-  POLICY_REVIEW: "规则复核",
-  PARTIALLY_VERIFIED: "部分核验",
-  VERIFIED: "已核验",
-  UNVERIFIED: "待核验",
-  SUPPORTED: "已有材料支持",
-  UNSUPPORTED: "缺少有效支持",
-  HIGH: "高",
-  MEDIUM: "中",
-  LOW: "低",
-  true: "是",
-  false: "否",
-};
-
-// 业务位置：【前端处理结果】draftValue：围绕 阶段处理结果或草案 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
-function draftValue(value) {
-  if (value === null || value === undefined || value === "") return "未提供";
-  if (Array.isArray(value)) {
-    const items = value.map(draftValue).filter(Boolean);
-    return items.length ? items.join("、") : "";
-  }
-  if (typeof value === "object") {
-    return Object.entries(value)
-      .filter(([key, item]) => shouldShowDraftField(key, item))
-      .map(([key, item]) => {
-        const formatted = draftValue(item);
-        return formatted ? `${draftFieldLabel(key)}：${formatted}` : "";
-      })
-      .filter(Boolean)
-      .join("；");
-  }
-  if (typeof value === "boolean") return value ? "是" : "否";
-  const raw = String(value);
-  if (isInternalDraftIdentifier(raw)) return "";
-  if (DRAFT_VALUE_LABELS[raw] !== undefined) return DRAFT_VALUE_LABELS[raw];
-  return localizeOutcomeCopy(value);
+function mockStepState(index) {
+  if (mockExecutionStage.value >= MOCK_EXECUTION_STEPS.length) return "complete";
+  if (index < mockExecutionStage.value) return "complete";
+  if (index === mockExecutionStage.value) return "active";
+  return "pending";
 }
 
-// 业务位置：【前端处理结果】shouldShowDraftField：判断 阶段处理结果或草案 是否满足当前流程分支的进入条件。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
-function shouldShowDraftField(key, value) {
-  if (INTERNAL_DRAFT_KEYS.has(key)) return false;
-  if (value === null || value === undefined || value === "") return false;
-  if (Array.isArray(value)) return value.some((item) => draftValue(item));
-  return Boolean(draftValue(value));
+function clearMockExecutionTimer() {
+  if (!mockExecutionTimer) return;
+  clearInterval(mockExecutionTimer);
+  mockExecutionTimer = null;
 }
 
-// 业务位置：【前端处理结果】isInternalDraftIdentifier：判断 阶段处理结果或草案 是否满足当前流程分支的进入条件。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
-function isInternalDraftIdentifier(value) {
-  return /^(ISSUE|FACT|EVIDENCE|EVD|DRAFT|A2A|CASE)_[A-Za-z0-9_-]+$/.test(value);
+function syncMockExecution(active) {
+  clearMockExecutionTimer();
+  mockExecutionStage.value = 0;
+  if (!active) return;
+  mockExecutionTimer = setInterval(() => {
+    mockExecutionStage.value += 1;
+    if (mockExecutionStage.value >= MOCK_EXECUTION_STEPS.length) {
+      clearMockExecutionTimer();
+    }
+  }, MOCK_EXECUTION_STEP_INTERVAL_MS);
 }
 
-// 业务位置：【前端处理结果】draftFieldLabel：围绕 阶段处理结果或草案 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
-function draftFieldLabel(key) {
-  return (
-    {
-      fact: "事实",
-      conclusion: "结论",
-      support_level: "支持程度",
-      assessment: "采信意见",
-      rule: "规则",
-      application: "适用说明",
-      source: "来源",
-      logistics_record: "物流记录",
-      logistics_records: "物流记录",
-      logisticsRecord: "物流记录",
-      logisticsRecords: "物流记录",
-      confidence: "可信度",
-      risk_flag: "风险提示",
-      policy_basis: "规则依据",
-      policyBasis: "规则依据",
-      evidence_basis: "证据依据",
-      evidenceBasis: "证据依据",
-      suggested_finding: "认定意见",
-      suggestedFinding: "认定意见",
-      verification_status: "核验状态",
-      verificationStatus: "核验状态",
-      supported_by: "支持材料",
-      supportedBy: "支持材料",
-      contradicted_by: "反向材料",
-      contradictedBy: "反向材料",
-      missing_evidence: "仍需补证",
-      missingEvidence: "仍需补证",
-      neutral_analysis: "中立分析",
-      neutralAnalysis: "中立分析",
-    }[key] || key
-  );
-}
-
-// 业务位置：【前端处理结果】draftList：围绕 阶段处理结果或草案 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
-function draftList(value) {
-  if (!value) return [];
-  return Array.isArray(value) ? value : [value];
-}
-
-// 业务位置：【前端处理结果】draftConfidenceScore：围绕 阶段处理结果或草案 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
-function draftConfidenceScore(value) {
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric)) return "待评分";
-  const score = numeric <= 1 ? numeric * 100 : numeric;
-  return `${Math.round(score)}/100`;
-}
-
-const explanationOfficerNotes = computed(() => {
-  if (!isDraftOutcome.value || !adjudicationDraft.value) return null;
-  const source =
-    adjudicationDraft.value.explanation_officer_notes ||
-    adjudicationDraft.value.explanationOfficerNotes ||
-    adjudicationDraft.value.hearing_replay ||
-    adjudicationDraft.value.hearingReplay ||
-    {};
-  const replaySummary =
-    source.replay_summary ||
-    source.replaySummary ||
-    adjudicationDraft.value.hearing_replay_summary ||
-    adjudicationDraft.value.hearingReplaySummary ||
-    "解释员将基于三轮庭审、补证记录、证据矩阵和评审团复核报告复盘草案依据。";
-  const finalPlanExplanation =
-    source.final_plan_explanation ||
-    source.finalPlanExplanation ||
-    source.plan_explanation ||
-    source.planExplanation ||
-    "解释员将围绕事实采信、证据缺口、双方异议和后续确认关注点解释草案依据。";
-  const focus =
-    source.reviewer_focus ||
-    source.reviewerFocus ||
-    source.confirmation_focus ||
-    source.confirmationFocus ||
-    adjudicationDraft.value.reviewer_attention ||
-    adjudicationDraft.value.reviewerAttention ||
-    [];
-  return {
-    replaySummary: localizeOutcomeCopy(replaySummary),
-    finalPlanExplanation: localizeOutcomeCopy(finalPlanExplanation),
-    focus: draftList(focus).map((item) => draftValue(item)),
-  };
-});
-
-// 业务位置：【前端处理结果】defaultApprovedPlan：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
-function defaultApprovedPlan() {
-  const draft = adjudicationDraft.value || {};
-  const plan =
-    draft.approved_plan ||
-    draft.approvedPlan ||
-    draft.remedy_plan ||
-    draft.remedyPlan ||
-    outcome.value?.approved_plan ||
-    outcome.value?.approvedPlan ||
-    outcome.value?.remedy_plan ||
-    outcome.value?.remedyPlan;
-  if (plan) return plan;
-  return {
-    id: draft.plan_id || draft.planId || "",
-    handling_direction:
-      draft.recommended_decision || draft.recommendedDecision || "",
-    execution_plan: "",
-    actions: [],
-  };
-}
-
-// 业务位置：【前端处理结果】normalizeApprovedPlan：将 当前阶段业务数据 转换为稳定的接口、提示词或页面表达，避免直接暴露内部实现字段。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
-function normalizeApprovedPlan(plan) {
-  const source = plan && typeof plan === "object" ? plan : {};
-  const firstAction = Array.isArray(source.actions) ? source.actions[0] : null;
-  return {
-    id: source.id || source.plan_id || source.planId || "",
-    handling_direction:
-      source.handling_direction ||
-      source.handlingDirection ||
-      source.main_direction ||
-      source.mainDirection ||
-      firstAction?.action_type ||
-      firstAction?.actionType ||
-      "",
-    execution_plan:
-      source.execution_plan ||
-      source.executionPlan ||
-      source.plan_summary ||
-      source.planSummary ||
-      source.description ||
-      "",
-    actions: [],
-  };
-}
-
-// 业务位置：【前端处理结果】syncReviewPlanDraft：围绕 人工审核关注点和陪审团提示 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
-function syncReviewPlanDraft(force = false) {
-  if (
-    !force &&
-    (reviewPlanDraft.value.id ||
-      reviewPlanDraft.value.handling_direction ||
-      reviewPlanDraft.value.execution_plan)
-  ) {
-    return;
-  }
-  reviewPlanDraft.value = normalizeApprovedPlan(defaultApprovedPlan());
-}
-
-// 业务位置：【前端处理结果】refreshOutcomeAfterReview：重新加载 人工审核关注点和陪审团提示，确保页面和下一次 Agent 调用基于最新案件版本。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
-async function refreshOutcomeAfterReview(message) {
-  await refreshOutcome();
-  reviewStatus.value = message;
-  syncReviewPlanDraft(true);
-}
+watch(shouldUseMockExecution, syncMockExecution, { immediate: true });
 
 // 业务位置：【前端处理结果】refreshOutcome：重新加载 阶段处理结果或草案，确保页面和下一次 Agent 调用基于最新案件版本。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
 async function refreshOutcome() {
   outcome.value = await disputeApi.outcome(actor, caseId.value);
   return outcome.value;
 }
-
-// 业务位置：【前端处理结果】confirmOutcomeDraft：执行 阶段处理结果或草案 对应的业务动作，并将结果交给 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
-async function confirmOutcomeDraft() {
-  if (reviewBusy.value) return;
-  error.value = "";
-  reviewStatus.value = "";
-  reviewBusy.value = true;
-  try {
-    await disputeApi.confirmOutcomeDraft(
-      actor,
-      caseId.value,
-      reviewReason.value || "审核员确认 AI 裁决草案。",
-    );
-    await refreshOutcomeAfterReview("已确认草案，最终处理状态已刷新。");
-  } catch (failure) {
-    error.value = failure.message;
-  } finally {
-    reviewBusy.value = false;
-  }
-}
-
-// 业务位置：【前端处理结果】modifyOutcomeDraftFromStructuredPlan：围绕 阶段处理结果或草案 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
-async function modifyOutcomeDraftFromStructuredPlan() {
-  if (reviewBusy.value) return;
-  error.value = "";
-  reviewStatus.value = "";
-  const approvedPlan = buildApprovedPlan();
-  reviewBusy.value = true;
-  try {
-    await disputeApi.modifyOutcomeDraft(
-      actor,
-      caseId.value,
-      reviewReason.value || "审核员修改并确认 AI 裁决草案。",
-      approvedPlan,
-    );
-    await refreshOutcomeAfterReview("已按修改方案确认草案，最终处理状态已刷新。");
-  } catch (failure) {
-    error.value = failure.message;
-  } finally {
-    reviewBusy.value = false;
-  }
-}
-
-// 业务位置：【前端处理结果】buildApprovedPlan：把 审核决定和执行/结案状态 组装为本块需要的 当前阶段业务数据，供 当事人可见的处理结论和后续动作 使用。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
-function buildApprovedPlan() {
-  return {
-    id: reviewPlanDraft.value.id,
-    handling_direction: reviewPlanDraft.value.handling_direction,
-    execution_plan: reviewPlanDraft.value.execution_plan,
-    actions: [],
-  };
-}
-
-// 业务位置：【前端处理结果】clearExecutionAssistantTimer：围绕 履约执行动作和工具意图 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
-function clearExecutionAssistantTimer() {
-  if (executionAssistantTimer) {
-    clearTimeout(executionAssistantTimer);
-    executionAssistantTimer = null;
-  }
-}
-
-// 业务位置：【前端处理结果】scheduleExecutionAssistantSuccess：围绕 履约执行动作和工具意图 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
-function scheduleExecutionAssistantSuccess() {
-  clearExecutionAssistantTimer();
-  executionAssistantTimer = setTimeout(() => {
-    executionAssistantState.value = "succeeded";
-    executionAssistantTimer = null;
-  }, 3000);
-}
-
-// 业务位置：【前端处理结果】syncExecutionAssistantState：围绕 履约执行动作和工具意图 计算本模块需要的派生信息，使其能够从 审核决定和执行/结案状态 正确进入 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
-function syncExecutionAssistantState() {
-  if (!shouldShowExecutionAssistant.value) {
-    clearExecutionAssistantTimer();
-    executionAssistantState.value = "idle";
-    executionAssistantCaseId = "";
-    return;
-  }
-  if (
-    executionAssistantCaseId === caseId.value &&
-    executionAssistantState.value !== "idle"
-  ) {
-    return;
-  }
-  executionAssistantCaseId = caseId.value;
-  executionAssistantState.value = "processing";
-  scheduleExecutionAssistantSuccess();
-}
-
-watch(
-  adjudicationDraft,
-  () => {
-    syncReviewPlanDraft();
-  },
-  { immediate: true },
-);
-
-watch(
-  [shouldShowExecutionAssistant, caseId],
-  syncExecutionAssistantState,
-  { immediate: true },
-);
 
 // 业务位置：【前端处理结果】isDraftStreamDescriptor：判断 Agent 流事件 是否满足当前流程分支的进入条件。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
 function isDraftStreamDescriptor(value) {
@@ -692,7 +490,6 @@ function isDraftStreamDescriptor(value) {
 async function consumeOutcomeDraftRun(value) {
   const descriptor = extractAgentRunDescriptor(value);
   if (!descriptor || !DRAFT_STREAM_OPERATIONS.has(descriptor.operation)) return false;
-  streamError.value = "";
   await consumeAgentRun({
     actor: { id: actor.id, role: actor.role },
     caseId: caseId.value,
@@ -703,10 +500,9 @@ async function consumeOutcomeDraftRun(value) {
     signal: outcomeStreamAbortController.signal,
     onFinal: async () => {
       await refreshOutcome();
-      syncReviewPlanDraft(true);
     },
-    onError: (failure) => {
-      streamError.value = failure.message;
+    onError: () => {
+      error.value = "最终结果暂时无法更新，请稍后刷新。";
     },
   });
   return true;
@@ -723,13 +519,6 @@ async function resumeOutcomeDraftRuns() {
   return true;
 }
 
-// 业务位置：【前端处理结果】dismissStreamError：切换与 Agent 流事件 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
-function dismissStreamError() {
-  const previous = streamError.value;
-  streamError.value = "";
-  if (error.value === previous) error.value = "";
-}
-
 // 业务位置：【前端处理结果】load：读取 当前阶段业务数据，并依据当前案件、角色和会话权限裁剪成可用输入。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
 async function load() {
   let outcomeFailure = null;
@@ -742,16 +531,17 @@ async function load() {
   }
   try {
     const resumed = await resumeOutcomeDraftRuns();
-    if (!resumed && outcomeFailure) error.value = outcomeFailure.message;
-  } catch (failure) {
-    if (!streamError.value) streamError.value = failure.message;
-    error.value = failure.message;
+    if (!resumed && outcomeFailure) error.value = "最终结果加载失败，请稍后重试。";
+  } catch {
+    error.value = "最终结果暂时无法更新，请稍后刷新。";
+  } finally {
+    loading.value = false;
   }
 }
 
 onMounted(load);
 onBeforeUnmount(() => {
-  clearExecutionAssistantTimer();
+  clearMockExecutionTimer();
   outcomeStreamAbortController.abort();
   clearAgentStreams({
     caseId: caseId.value,
@@ -763,364 +553,224 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <main class="outcome-page">
-    <section class="outcome-hero">
-      <div class="outcome-hero__seal" aria-hidden="true">
-        <span>⚖️</span>
-        <i>{{ heroSealText }}</i>
-      </div>
-      <div>
-        <span class="outcome-kicker">{{ heroKicker }}</span>
-        <h1>{{ heroTitle }}</h1>
-        <p class="outcome-hero__lead">
-          <span class="outcome-hero__context">
-            裁决草案与最终结果 <i aria-hidden="true">✦</i>
-          </span>
-          <span>当事人查看裁决说明，平台审核员确认或修改后形成最终结果。</span>
-        </p>
-      </div>
-      <div class="outcome-hero__status">
+  <RoomShell
+    class="outcome-shell"
+    eyebrow="CASE OUTCOME"
+    title="执行结果"
+    subtitle="最终结果归档"
+    subtitle-description="依次呈现庭审裁决、管理员审核意见、最终执行方案与执行情况。"
+    :case-id="caseId"
+    :show-case-id="false"
+    :show-connection="false"
+    :show-boundary="false"
+  >
+    <template #clock>
+      <div class="outcome-shell-status" :data-final="isFinalOutcome">
+        <span>{{ heroKicker }}</span>
         <strong>{{ heroStatusTitle }}</strong>
         <small>{{ heroStatusDetail }}</small>
       </div>
-    </section>
+    </template>
 
-    <section
-      v-if="!hasRenderableOutcome"
-      class="outcome-generation"
-      data-outcome-draft-generation
-      :data-streaming="draftGenerationActive"
-    >
-      <header>
-        <div>
-          <span class="outcome-kicker">AI 法官</span>
-          <h2>
-            {{ draftGenerationActive ? "法官正在生成裁决草案" : "等待法官生成裁决草案" }}
-          </h2>
-          <p>
-            {{ draftGenerationActive
-              ? "正在依据庭审记录、证据矩阵和复核意见生成草案；校验入库前不会展示为正式结论。"
-              : "庭审记录已封存时，法官会在后台生成草案；当前没有可展示的正式结论。" }}
-          </p>
-        </div>
-        <strong>{{ draftGenerationActive ? "实时输出中" : "尚未开始" }}</strong>
-      </header>
-      <div v-if="draftGenerationActive" class="outcome-generation__streams">
-        <AgentStreamingMessage
-          v-for="run in outcomeDraftStreamingRuns"
-          :key="run.runId"
-          :run="run"
-          label="AI 法官"
-          appearance="court"
-        />
-      </div>
-      <div v-else class="outcome-generation__waiting">
-        <span aria-hidden="true">⚖️</span>
-        <p>当前没有正在生成的草案任务，请稍后刷新或返回庭审页查看案件状态。</p>
-      </div>
-    </section>
-
-    <section v-if="hasRenderableOutcome" class="verdict-card">
-      <span class="outcome-kicker">白话结论</span>
-      <h2>{{ decision.conclusion }}</h2>
-      <p>{{ decision.explanation }}</p>
-      <p v-if="decision.review_reason" class="verdict-card__review">
-        审核说明：{{ decision.review_reason }}
-      </p>
-      <div class="verdict-card__boundary">
-        {{
-          verdictBoundaryText
-        }}
-      </div>
-    </section>
-
-    <section
-      v-if="adjudicationDraft"
-      class="adjudication-draft-card"
-      data-adjudication-draft
-    >
-      <header>
-        <div>
-          <span class="outcome-kicker">草案依据</span>
-          <h2>AI 裁决草案（非最终）</h2>
-          <p>
-            {{ draftCardSummary }}
-          </p>
-        </div>
-        <dl>
+    <main class="outcome-page">
+      <section v-if="!isFinalOutcome" class="outcome-generation" data-outcome-waiting>
+        <header>
           <div>
-            <dt>建议方向</dt>
-            <dd>{{ draftRecommendedDecisionDisplay }}</dd>
-          </div>
-          <div>
-            <dt>可信分</dt>
-            <dd>{{ draftConfidenceScore(adjudicationDraft.confidence) }}</dd>
-          </div>
-        </dl>
-      </header>
-
-      <div class="draft-explain-grid">
-        <article data-fact-findings>
-          <span>事实认定</span>
-          <p v-if="!draftList(adjudicationDraft.fact_findings || adjudicationDraft.factFindings).length">
-            暂无结构化事实认定。
-          </p>
-          <ul v-else>
-            <li
-              v-for="(item, index) in draftList(adjudicationDraft.fact_findings || adjudicationDraft.factFindings)"
-              :key="`fact-${index}`"
-            >
-              {{ draftValue(item) }}
-            </li>
-          </ul>
-        </article>
-        <article data-evidence-assessment>
-          <span>证据采信</span>
-          <p v-if="!draftList(adjudicationDraft.evidence_assessment || adjudicationDraft.evidenceAssessment).length">
-            暂无结构化证据采信意见。
-          </p>
-          <ul v-else>
-            <li
-              v-for="(item, index) in draftList(adjudicationDraft.evidence_assessment || adjudicationDraft.evidenceAssessment)"
-              :key="`evidence-${index}`"
-            >
-              {{ draftValue(item) }}
-            </li>
-          </ul>
-        </article>
-        <article data-policy-application>
-          <span>规则适用</span>
-          <p v-if="!draftList(adjudicationDraft.policy_application || adjudicationDraft.policyApplication).length">
-            暂无结构化规则适用说明。
-          </p>
-          <ul v-else>
-            <li
-              v-for="(item, index) in draftList(adjudicationDraft.policy_application || adjudicationDraft.policyApplication)"
-              :key="`policy-${index}`"
-            >
-              {{ draftValue(item) }}
-            </li>
-          </ul>
-        </article>
-        <article data-reviewer-attention>
-          <span>{{ reviewerAttentionHeading }}</span>
-          <p v-if="!draftList(adjudicationDraft.reviewer_attention || adjudicationDraft.reviewerAttention).length">
-            暂无额外{{ reviewerAttentionHeading }}点。
-          </p>
-          <ul v-else>
-            <li
-              v-for="(item, index) in draftList(adjudicationDraft.reviewer_attention || adjudicationDraft.reviewerAttention)"
-              :key="`attention-${index}`"
-            >
-              {{ draftValue(item) }}
-            </li>
-          </ul>
-        </article>
-      </div>
-    </section>
-
-    <section
-      v-if="explanationOfficerNotes"
-      class="explanation-officer-card"
-      data-explanation-officer
-    >
-      <header>
-        <div>
-          <span class="outcome-kicker">草案说明</span>
-          <h2>解释员复盘</h2>
-        </div>
-        <strong>草案确认辅助</strong>
-      </header>
-      <div class="explanation-officer-card__body">
-        <article>
-          <span>庭审复盘</span>
-          <p>{{ explanationOfficerNotes.replaySummary }}</p>
-        </article>
-        <article>
-          <span>方案解释</span>
-          <p>{{ explanationOfficerNotes.finalPlanExplanation }}</p>
-        </article>
-        <article>
-          <span>后续确认关注</span>
-          <ul v-if="explanationOfficerNotes.focus.length">
-            <li
-              v-for="(item, index) in explanationOfficerNotes.focus"
-              :key="`explainer-focus-${index}`"
-            >
-              {{ item }}
-            </li>
-          </ul>
-          <p v-else>暂无额外关注点。</p>
-        </article>
-      </div>
-    </section>
-
-    <section
-      v-if="canReviewOutcomeDraft"
-      class="outcome-review-panel"
-      data-outcome-review-panel
-    >
-      <header>
-        <div>
-          <span class="outcome-kicker">审核员操作</span>
-          <h2>审核员确认草案</h2>
-          <p>确认或修改后，系统会复用平台审核流生成最终确认记录。</p>
-        </div>
-        <strong>仅审核员可见</strong>
-      </header>
-      <label>
-        <span>确认说明</span>
-        <textarea
-          v-model="reviewReason"
-          data-review-reason
-          rows="3"
-          maxlength="2000"
-          placeholder="请填写确认或修改理由"
-        />
-      </label>
-      <div class="review-plan-editor" data-review-plan-editor>
-        <label>
-          <span>方案编号</span>
-          <input
-            v-model="reviewPlanDraft.id"
-            data-review-plan-id
-            placeholder="PLAN_1"
-          />
-        </label>
-        <label>
-          <span>主处理方向</span>
-          <select
-            v-model="reviewPlanDraft.handling_direction"
-            data-review-handling-direction
-          >
-            <option value="">请选择处理方向</option>
-            <option value="REFUND">退款</option>
-            <option value="RETURN_REFUND">退货退款</option>
-            <option value="RESHIP">补发</option>
-            <option value="REPLACE_OR_REPAIR">换货 / 维修</option>
-            <option value="COMPENSATION">赔付</option>
-            <option value="CANCEL_ORDER">取消订单</option>
-            <option value="REJECT_AFTER_SALE">驳回售后</option>
-            <option value="VERIFY_OR_EXPLAIN_ONLY">仅核验 / 解释</option>
-            <option value="MANUAL_REVIEW">转人工重点复核</option>
-            <option value="OTHER">其他</option>
-          </select>
-        </label>
-        <label>
-          <span>执行方案说明</span>
-          <textarea
-            v-model="reviewPlanDraft.execution_plan"
-            data-review-execution-plan
-            rows="4"
-            maxlength="3000"
-            placeholder="说明本次裁决如何落地，例如金额、商品、时效、前置条件、风险和注意事项。"
-          />
-        </label>
-        <p class="review-plan-editor__empty">
-          当前只确认主处理方向和方案说明；具体工具拆分后续由执行专员助手处理。
-        </p>
-      </div>
-      <div class="outcome-review-panel__actions">
-        <button
-          type="button"
-          data-review-confirm
-          :disabled="reviewBusy"
-          @click="confirmOutcomeDraft"
-        >
-          {{ reviewBusy ? "处理中..." : "确认草案" }}
-        </button>
-        <button
-          type="button"
-          data-review-modify
-          :disabled="reviewBusy || !canModifyReviewPlan"
-          @click="modifyOutcomeDraftFromStructuredPlan"
-        >
-          修改并确认
-        </button>
-      </div>
-      <p v-if="reviewStatus" class="outcome-review-panel__status">
-        {{ reviewStatus }}
-      </p>
-    </section>
-
-    <section v-if="hasRenderableOutcome" class="execution-board">
-      <header>
-        <div>
-          <span class="outcome-kicker">{{ executionBoardKicker }}</span>
-          <h2>{{ executionBoardTitle }}</h2>
-        </div>
-        <span>{{ executionBoardCountText }}</span>
-      </header>
-
-      <div v-if="actions.length" class="execution-board__grid">
-        <article
-          v-for="(action, index) in actions"
-          :key="action.action_record_id"
-          data-execution-receipt
-        >
-          <div class="execution-receipt__step">{{ index + 1 }}</div>
-          <div>
-            <span>{{ actionLabels[action.action_type] || action.action_type }}</span>
-            <h3>{{ statusLabels[action.execution_status] || action.execution_status }}</h3>
-            <p v-if="action.external_result_ref">
-              外部回执：{{ action.external_result_ref }}
+            <span class="outcome-kicker">最终结果</span>
+            <h2>{{ loading ? "正在获取最终结果" : "等待最终结果" }}</h2>
+            <p>
+              {{
+                loading
+                  ? "正在同步最新审批结果与执行状态。"
+                  : "管理员审核通过后，本页将展示完整的四段结果链路。"
+              }}
             </p>
-            <dl v-if="executionResultRows(action).length" class="execution-result">
-              <div
-                v-for="row in executionResultRows(action)"
-                :key="`${action.action_record_id}-${row.label}`"
-              >
-                <dt>{{ row.label }}</dt>
-                <dd>{{ row.value }}</dd>
-              </div>
-            </dl>
           </div>
-          <i :data-status="action.execution_status">
-            {{ action.execution_status === "SUCCEEDED" ? "✓" : "…" }}
-          </i>
-        </article>
-      </div>
-      <div
-        v-else-if="shouldShowExecutionAssistant"
-        class="execution-assistant"
-        data-execution-assistant
-      >
-        <div
-          class="execution-assistant__indicator"
-          :data-state="executionAssistantState"
-          aria-hidden="true"
-        >
-          <span />
+          <strong>{{ loading ? "同步中" : "尚未生效" }}</strong>
+        </header>
+        <div class="outcome-generation__waiting">
+          <i aria-hidden="true"></i>
+          <div>
+            <strong>{{ loading ? "结果加载中" : "等待审核通过" }}</strong>
+            <p>审批前不会展示庭审裁决、审核意见、执行方案或执行动画。</p>
+          </div>
         </div>
-        <div>
-          <span>裁决已确认</span>
-          <h3>方案已移交给执行专员助手处理</h3>
-          <p>
-            {{
-              executionAssistantState === "succeeded"
-                ? "方案执行成功"
-                : "执行专员助手处理中"
-            }}
-          </p>
-        </div>
-      </div>
-      <div v-else class="execution-board__empty">{{ executionBoardEmptyText }}</div>
-    </section>
+      </section>
 
-    <footer class="outcome-footer">
+      <div
+        v-if="isFinalOutcome"
+        class="outcome-four-stage"
+        data-outcome-summary-layout
+      >
+        <div class="outcome-primary-grid">
+          <section
+            class="outcome-stage outcome-stage--hearing"
+            data-outcome-hearing
+          >
+            <header class="outcome-stage__heading">
+              <span class="outcome-stage__index">01</span>
+              <div>
+                <span class="outcome-kicker">庭审结果</span>
+                <h2>庭审法官 V2</h2>
+              </div>
+              <strong>裁决稿 v{{ hearingDecision.version }}</strong>
+            </header>
+            <div class="outcome-stage__content">
+              <div class="outcome-result-type">
+                <span>裁决方向</span>
+                <strong>{{ hearingDecision.type }}</strong>
+              </div>
+              <p class="outcome-scroll-copy">{{ hearingDecision.text }}</p>
+            </div>
+            <footer class="outcome-stage__meta">
+              <span>裁决置信度</span>
+              <strong>{{ hearingDecision.confidence }}</strong>
+            </footer>
+          </section>
+
+          <section
+            class="outcome-stage outcome-stage--review"
+            data-outcome-review
+          >
+            <header class="outcome-stage__heading">
+              <span class="outcome-stage__index">02</span>
+              <div>
+                <span class="outcome-kicker">人工终审</span>
+                <h2>管理员审核意见</h2>
+              </div>
+              <strong>{{ reviewStatusLabel }}</strong>
+            </header>
+            <div class="outcome-review-opinion">
+              <span>审核意见</span>
+              <p class="outcome-scroll-copy">{{ reviewOpinion }}</p>
+            </div>
+            <footer class="outcome-stage__meta">
+              <span>结果属性</span>
+              <strong>只读归档</strong>
+            </footer>
+          </section>
+        </div>
+
+        <section
+          class="outcome-stage outcome-stage--plan"
+          data-outcome-plan
+        >
+          <header class="outcome-stage__heading">
+            <span class="outcome-stage__index">03</span>
+            <div>
+              <span class="outcome-kicker">管理员收束</span>
+              <h2>最终执行方案</h2>
+            </div>
+            <strong>{{ approvedPlanSource }} · v{{ approvedPlanVersion }}</strong>
+          </header>
+          <div class="approved-plan-layout">
+            <div class="approved-plan-type">
+              <span>方案类型</span>
+              <h3>{{ approvedPlanType }}</h3>
+              <div v-if="approvedPlanActionLabels.length" class="approved-plan-tags">
+                <span v-for="label in approvedPlanActionLabels" :key="label">
+                  {{ label }}
+                </span>
+              </div>
+            </div>
+            <div class="approved-plan-description">
+              <span>方案说明</span>
+              <p class="outcome-scroll-copy">{{ approvedPlanDescription }}</p>
+            </div>
+          </div>
+        </section>
+
+        <section
+          class="outcome-stage outcome-stage--execution"
+          data-outcome-execution
+          data-execution-board
+        >
+          <header class="outcome-stage__heading">
+            <span class="outcome-stage__index">04</span>
+            <div>
+              <span class="outcome-kicker">执行情况</span>
+              <h2>{{ actions.length ? executionSummary.label : mockExecutionStatus.label }}</h2>
+            </div>
+            <strong :data-state="actions.length ? executionSummary.state : mockExecutionStatus.state">
+              {{ actions.length ? `${actions.length} 项真实回执` : "前端 Mock 演示" }}
+            </strong>
+          </header>
+
+          <div v-if="actions.length" class="execution-board__grid execution-board__grid--stage">
+            <article
+              v-for="(action, index) in actions"
+              :key="action.action_record_id || action.actionRecordId || index"
+              data-execution-receipt
+            >
+              <div class="execution-receipt__step">{{ index + 1 }}</div>
+              <div>
+                <span>{{ actionTypeLabel(action) }}</span>
+                <h3>{{ statusLabels[actionExecutionStatus(action)] || actionExecutionStatus(action) }}</h3>
+                <p v-if="actionExternalReference(action)">
+                  外部回执：{{ actionExternalReference(action) }}
+                </p>
+                <dl v-if="executionResultRows(action).length" class="execution-result">
+                  <div
+                    v-for="row in executionResultRows(action)"
+                    :key="`${action.action_record_id || action.actionRecordId || index}-${row.label}`"
+                  >
+                    <dt>{{ row.label }}</dt>
+                    <dd>{{ row.value }}</dd>
+                  </div>
+                </dl>
+                <p v-if="action.error_message || action.errorMessage" class="execution-receipt__error">
+                  异常说明：{{ action.error_message || action.errorMessage }}
+                </p>
+              </div>
+              <i :data-status="actionExecutionStatus(action)">
+                {{ actionExecutionStatus(action) === "SUCCEEDED" ? "✓" : "·" }}
+              </i>
+            </article>
+          </div>
+
+          <div v-else class="mock-execution" data-mock-execution>
+            <div class="mock-execution__summary">
+              <div class="mock-execution__signal" :data-state="mockExecutionStatus.state" aria-hidden="true">
+                <i></i>
+              </div>
+              <div>
+                <span>当前模拟状态</span>
+                <strong>{{ mockExecutionStatus.label }}</strong>
+                <small>{{ mockExecutionStatus.detail }}</small>
+              </div>
+              <b>{{ mockExecutionProgress }}%</b>
+            </div>
+            <div class="mock-execution__bar" aria-hidden="true">
+              <i :style="{ width: `${mockExecutionProgress}%` }"></i>
+            </div>
+            <ol class="mock-execution__steps" aria-label="前端模拟执行进度">
+              <li
+                v-for="(step, index) in MOCK_EXECUTION_STEPS"
+                :key="step.label"
+                :data-state="mockStepState(index)"
+              >
+                <i aria-hidden="true"></i>
+                <strong>{{ step.label }}</strong>
+                <span>{{ step.detail }}</span>
+              </li>
+            </ol>
+            <p class="mock-execution__notice">
+              此处为前端 Mock 动画，仅用于展示执行流程，不代表真实资金或履约结果。
+            </p>
+          </div>
+        </section>
+      </div>
+
+      <footer class="outcome-footer">
       <div>
         <span aria-hidden="true">📬</span>
         <p>{{ footerNoticeText }}</p>
       </div>
       <button type="button" @click="router.push('/disputes')">返回争议订单中心</button>
     </footer>
-    <AgentStreamErrorDialog
-      :message="streamError"
-      title="裁决草案生成失败"
-      @dismiss="dismissStreamError"
-    />
-    <p v-if="error" class="outcome-error" role="alert">{{ error }}</p>
-  </main>
+      <p v-if="error" class="outcome-error" role="alert">{{ error }}</p>
+    </main>
+  </RoomShell>
 </template>
 
 <style scoped>
@@ -1758,5 +1408,1310 @@ onBeforeUnmount(() => {
   .execution-board article { gap: 8px; padding: 12px; }
   .execution-receipt__step { width: 30px; height: 30px; }
   .execution-board article > i { width: 24px; height: 24px; }
+}
+
+/* Final-result workspace aligned with the preceding RoomShell pages. */
+.outcome-shell :deep(.room-shell__agent:empty) {
+  display: none;
+}
+
+.outcome-shell-status {
+  display: grid;
+  width: min(300px, 100%);
+  gap: 3px;
+  padding: 12px 15px;
+  background: #fff;
+  border: 1px solid #dce6f1;
+  border-radius: 14px;
+  box-shadow: 0 9px 24px #536e9012;
+}
+
+.outcome-shell-status span {
+  color: #7185a8;
+  font-size: 9px;
+  font-weight: 900;
+}
+
+.outcome-shell-status strong {
+  color: #536683;
+  font-size: 13px;
+}
+
+.outcome-shell-status small {
+  color: #7d899a;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.outcome-shell-status[data-final="true"] {
+  background: linear-gradient(145deg, #f4fff9, #fff);
+  border-color: #cfe7d8;
+}
+
+.outcome-shell-status[data-final="true"] strong {
+  color: #2f7557;
+}
+
+.outcome-page {
+  max-width: 1280px;
+  gap: 22px;
+  padding-bottom: 24px;
+}
+
+.outcome-summary-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.55fr) minmax(320px, .65fr);
+  grid-auto-rows: 420px;
+  gap: 18px;
+  align-items: stretch;
+}
+
+.verdict-card,
+.outcome-status-card {
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #ffffffdf;
+  border: 1px solid #dfe8f2;
+  border-radius: 20px;
+  box-shadow: 0 14px 34px #536e900d;
+}
+
+.verdict-card {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  padding: 22px;
+  text-align: left;
+}
+
+.outcome-section-heading,
+.outcome-status-card > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.outcome-section-heading h2,
+.outcome-status-card h2 {
+  margin: 5px 0 0;
+  color: #34435c;
+  font-size: 18px;
+  line-height: 1.3;
+}
+
+.outcome-section-heading > strong,
+.outcome-status-card > header > strong {
+  flex: 0 0 auto;
+  padding: 6px 9px;
+  color: #2f7557;
+  background: #edf8f1;
+  border: 1px solid #cfe7d8;
+  border-radius: 9px;
+  font-size: 10px;
+}
+
+.verdict-card__body {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  align-content: stretch;
+  gap: 12px;
+  min-height: 0;
+  padding: 20px 0;
+  margin-top: 16px;
+  border-top: 1px solid #e4ebf2;
+}
+
+.verdict-card__body h3 {
+  min-height: 0;
+  max-height: 4.2em;
+  margin: 0;
+  padding-right: 5px;
+  overflow-y: auto;
+  color: #263754;
+  font-size: 26px;
+  line-height: 1.42;
+  scrollbar-color: #c8d8e8 transparent;
+  scrollbar-width: thin;
+}
+
+.verdict-card__body > p {
+  min-height: 0;
+  margin: 0;
+  padding-right: 5px;
+  overflow-y: auto;
+  color: #64738a;
+  font-size: 13px;
+  line-height: 1.72;
+  scrollbar-color: #c8d8e8 transparent;
+  scrollbar-width: thin;
+}
+
+.verdict-card__review {
+  padding-top: 11px;
+  color: #526b86 !important;
+  border-top: 1px dashed #dce5ef;
+  font-size: 12px !important;
+}
+
+.verdict-card__boundary {
+  width: 100%;
+  padding: 10px 12px;
+  margin: 0;
+  color: #665b7e;
+  background: #f3f0fb;
+  border-radius: 10px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.outcome-status-card {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  align-content: start;
+  gap: 18px;
+  padding: 20px;
+}
+
+.outcome-status-card dl {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  border-top: 1px solid #e4ebf2;
+}
+
+.outcome-status-card dl > div {
+  display: grid;
+  grid-template-columns: 86px minmax(0, 1fr);
+  gap: 10px;
+  min-height: 46px;
+  align-items: center;
+  border-bottom: 1px solid #e4ebf2;
+}
+
+.outcome-status-card dt {
+  color: #7b889b;
+  font-size: 10px;
+}
+
+.outcome-status-card dd {
+  margin: 0;
+  color: #405069;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.outcome-status-card > header > strong[data-state="active"] {
+  color: #93651c;
+  background: #fff4d7;
+  border-color: #ead8ac;
+}
+
+.outcome-status-card > header > strong[data-state="attention"] {
+  color: #9a4c57;
+  background: #ffeced;
+  border-color: #efcfd3;
+}
+
+.outcome-progress {
+  display: grid;
+  gap: 0;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.outcome-progress li {
+  position: relative;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 10px;
+  min-height: 51px;
+}
+
+.outcome-progress li:not(:last-child)::after {
+  position: absolute;
+  top: 18px;
+  bottom: 0;
+  left: 7px;
+  width: 2px;
+  content: "";
+  background: #dfe7ef;
+}
+
+.outcome-progress i {
+  position: relative;
+  z-index: 1;
+  width: 16px;
+  height: 16px;
+  margin-top: 1px;
+  background: #e7ecf2;
+  border: 4px solid #f7f9fc;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px #d8e1eb;
+}
+
+.outcome-progress li[data-state="complete"] i {
+  background: #52c790;
+  box-shadow: 0 0 0 1px #9cd7ba;
+}
+
+.outcome-progress li[data-state="active"] i {
+  background: #f5b84d;
+  box-shadow: 0 0 0 1px #e5c778;
+}
+
+.outcome-progress li[data-state="attention"] i {
+  background: #d96d78;
+  box-shadow: 0 0 0 1px #e7aab0;
+}
+
+.outcome-progress li > div {
+  display: grid;
+  align-content: start;
+  gap: 2px;
+}
+
+.outcome-progress strong {
+  color: #45556d;
+  font-size: 11px;
+}
+
+.outcome-progress span {
+  color: #8390a2;
+  font-size: 10px;
+}
+
+.outcome-generation {
+  min-height: 360px;
+  align-content: center;
+  padding: 30px;
+  background: #ffffffdf;
+  border: 1px solid #dfe8f2;
+  border-radius: 20px;
+  box-shadow: 0 14px 34px #536e900d;
+}
+
+.outcome-generation > header strong {
+  color: #93651c;
+  background: #fff4d7;
+  border-color: #ead8ac;
+}
+
+.outcome-generation__waiting {
+  grid-template-columns: 42px minmax(0, 1fr);
+  min-height: 112px;
+  background: #f8fbff;
+  border-style: solid;
+}
+
+.outcome-generation__waiting > i {
+  width: 32px;
+  height: 32px;
+  background: #fff;
+  border: 8px solid #dce8f4;
+  border-top-color: #7e93e5;
+  border-radius: 50%;
+  animation: execution-spin 1.1s linear infinite;
+}
+
+.outcome-generation__waiting > div {
+  display: grid;
+  gap: 4px;
+}
+
+.outcome-generation__waiting strong {
+  color: #45556d;
+  font-size: 13px;
+}
+
+.outcome-generation__waiting p {
+  color: #7b889b;
+  font-size: 12px;
+}
+
+.execution-board {
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+}
+
+.execution-board > header {
+  align-items: flex-end;
+  padding: 0 2px 13px;
+  border-bottom: 1px solid #dfe8f2;
+}
+
+.execution-board h2 {
+  margin: 5px 0 0;
+  font-size: 19px;
+}
+
+.execution-board__grid {
+  grid-auto-rows: 240px;
+  gap: 14px;
+  margin-top: 16px;
+}
+
+.execution-board article {
+  height: 100%;
+  min-height: 0;
+  padding: 17px;
+  overflow: hidden;
+  align-items: start;
+  background: #ffffffdf;
+  border-color: #dfe8f2;
+  border-radius: 18px;
+  box-shadow: 0 12px 28px #536e900d;
+}
+
+.execution-board article > div:not(.execution-receipt__step) {
+  min-height: 0;
+  max-height: 100%;
+  padding-right: 5px;
+  overflow-y: auto;
+  scrollbar-color: #c8d8e8 transparent;
+  scrollbar-width: thin;
+}
+
+.execution-receipt__error {
+  padding: 9px 10px;
+  color: #954753 !important;
+  background: #fff0f1;
+  border: 1px solid #f0d2d5;
+  border-radius: 8px;
+  line-height: 1.55;
+}
+
+.execution-result div {
+  background: #f4f8fc;
+}
+
+.execution-assistant,
+.execution-board__empty {
+  display: grid;
+  min-height: 154px;
+  place-items: center;
+  margin-top: 16px;
+  background: #ffffffdf;
+  border: 1px solid #dfe8f2;
+  border-radius: 18px;
+  box-shadow: 0 12px 28px #536e900d;
+}
+
+.outcome-footer {
+  padding: 15px 18px;
+  background: #fff8e8;
+  border-color: #eadcb9;
+  border-radius: 16px;
+}
+
+.outcome-footer > div > span {
+  display: none;
+}
+
+.outcome-footer button {
+  min-height: 42px;
+  padding: 9px 15px;
+  background: linear-gradient(135deg, #55b8df, #8585ef);
+  border-radius: 12px;
+}
+
+@media (max-width: 900px) {
+  .outcome-summary-layout {
+    grid-template-columns: 1fr;
+    grid-auto-rows: auto;
+  }
+
+  .verdict-card {
+    height: 390px;
+  }
+
+  .outcome-status-card {
+    height: 360px;
+    grid-template-columns: minmax(240px, .8fr) minmax(0, 1.2fr);
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .outcome-status-card > header {
+    grid-column: 1 / -1;
+  }
+
+  .outcome-status-card dl,
+  .outcome-progress {
+    align-self: start;
+  }
+}
+
+@media (max-width: 720px) {
+  .outcome-shell-status {
+    width: 100%;
+  }
+
+  .outcome-page {
+    gap: 18px;
+  }
+
+  .outcome-status-card {
+    height: 390px;
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto minmax(0, 1fr);
+  }
+
+  .outcome-status-card > header {
+    grid-column: auto;
+  }
+
+  .verdict-card,
+  .outcome-status-card,
+  .outcome-generation {
+    padding: 17px;
+    border-radius: 18px;
+  }
+
+  .verdict-card__body h3 {
+    font-size: 21px;
+  }
+
+  .execution-board__grid {
+    grid-template-columns: 1fr;
+    grid-auto-rows: 230px;
+  }
+}
+
+@media (max-width: 520px) {
+  .outcome-section-heading,
+  .outcome-status-card > header {
+    display: grid;
+  }
+
+  .outcome-section-heading > strong,
+  .outcome-status-card > header > strong {
+    justify-self: start;
+  }
+
+  .verdict-card {
+    height: 410px;
+  }
+
+  .outcome-status-card {
+    height: 410px;
+  }
+
+  .outcome-generation {
+    min-height: 300px;
+  }
+
+  .outcome-generation > header {
+    display: grid;
+  }
+
+  .outcome-generation > header strong {
+    justify-self: start;
+  }
+
+  .outcome-footer {
+    gap: 12px;
+  }
+
+  .outcome-footer button {
+    width: 100%;
+  }
+}
+
+/* Four-part approved outcome archive. */
+.outcome-four-stage {
+  display: grid;
+  min-width: 0;
+  gap: 18px;
+}
+
+.outcome-primary-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(310px, .65fr);
+  gap: 18px;
+}
+
+.outcome-stage {
+  position: relative;
+  display: grid;
+  min-width: 0;
+  overflow: hidden;
+  background: rgba(255, 255, 255, .93);
+  border: 1px solid #dfe7f0;
+  border-radius: 18px;
+  box-shadow: 0 14px 34px rgba(72, 91, 119, .07);
+}
+
+.outcome-stage--hearing,
+.outcome-stage--review {
+  height: 338px;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  padding: 20px;
+}
+
+.outcome-stage--plan {
+  height: 220px;
+  grid-template-rows: auto minmax(0, 1fr);
+  padding: 20px;
+}
+
+.outcome-stage--execution {
+  height: 340px;
+  grid-template-rows: auto minmax(0, 1fr);
+  padding: 20px;
+}
+
+.outcome-stage--hearing {
+  border-top: 3px solid #579f96;
+}
+
+.outcome-stage--review {
+  border-top: 3px solid #c49a55;
+}
+
+.outcome-stage--plan {
+  border-top: 3px solid #6685ba;
+}
+
+.outcome-stage--execution {
+  border-top: 3px solid #5b9d74;
+}
+
+.outcome-stage__heading {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 11px;
+  min-height: 58px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid #e5ebf2;
+}
+
+.outcome-stage__index {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  color: #52657f;
+  background: #f1f5fa;
+  border: 1px solid #dce5ef;
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.outcome-stage--hearing .outcome-stage__index {
+  color: #32766f;
+  background: #eaf7f4;
+  border-color: #cce7e1;
+}
+
+.outcome-stage--review .outcome-stage__index {
+  color: #8a6324;
+  background: #fff6e5;
+  border-color: #ecdcb9;
+}
+
+.outcome-stage--plan .outcome-stage__index {
+  color: #4e6695;
+  background: #eef2fb;
+  border-color: #d6dff0;
+}
+
+.outcome-stage--execution .outcome-stage__index {
+  color: #397354;
+  background: #edf8f1;
+  border-color: #d2e8da;
+}
+
+.outcome-stage__heading h2 {
+  margin: 5px 0 0;
+  color: #2f3f58;
+  font-size: 18px;
+  line-height: 1.3;
+}
+
+.outcome-stage__heading > strong {
+  max-width: 180px;
+  padding: 6px 9px;
+  color: #52677f;
+  background: #f3f6fa;
+  border: 1px solid #dfe6ef;
+  border-radius: 8px;
+  font-size: 10px;
+  line-height: 1.35;
+  text-align: center;
+}
+
+.outcome-stage__heading > strong[data-state="active"] {
+  color: #8b6220;
+  background: #fff5de;
+  border-color: #ead7aa;
+}
+
+.outcome-stage__heading > strong[data-state="complete"] {
+  color: #347153;
+  background: #edf8f1;
+  border-color: #cfe5d7;
+}
+
+.outcome-stage__heading > strong[data-state="attention"] {
+  color: #954753;
+  background: #fff0f1;
+  border-color: #efcfd3;
+}
+
+.outcome-stage__content {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 13px;
+  min-height: 0;
+  padding: 16px 0 12px;
+}
+
+.outcome-result-type {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 10px 12px;
+  background: #f1f8f7;
+  border: 1px solid #dbece8;
+  border-radius: 8px;
+}
+
+.outcome-result-type span,
+.outcome-review-opinion > span,
+.approved-plan-type > span,
+.approved-plan-description > span {
+  color: #7b889a;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.outcome-result-type strong {
+  color: #326f69;
+  font-size: 14px;
+  text-align: right;
+}
+
+.outcome-scroll-copy {
+  min-height: 0;
+  margin: 0;
+  padding-right: 6px;
+  overflow-y: auto;
+  color: #5f6e84;
+  font-size: 12px;
+  line-height: 1.72;
+  white-space: pre-wrap;
+  scrollbar-color: #c8d7e6 transparent;
+  scrollbar-width: thin;
+}
+
+.outcome-stage__meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 31px;
+  padding-top: 10px;
+  border-top: 1px solid #e7edf3;
+}
+
+.outcome-stage__meta span {
+  color: #8995a6;
+  font-size: 10px;
+}
+
+.outcome-stage__meta strong {
+  color: #4e6079;
+  font-size: 11px;
+}
+
+.outcome-review-opinion {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 10px;
+  min-height: 0;
+  padding: 17px 0 12px;
+}
+
+.outcome-review-opinion .outcome-scroll-copy {
+  padding: 13px 14px;
+  color: #5d566d;
+  background: #faf7f1;
+  border-left: 3px solid #d1ad6c;
+  border-radius: 0 8px 8px 0;
+}
+
+.approved-plan-layout {
+  display: grid;
+  grid-template-columns: minmax(250px, .72fr) minmax(0, 1.28fr);
+  gap: 18px;
+  min-height: 0;
+  padding-top: 14px;
+}
+
+.approved-plan-type,
+.approved-plan-description {
+  display: grid;
+  min-height: 0;
+  align-content: start;
+}
+
+.approved-plan-type {
+  gap: 7px;
+  padding: 12px 14px;
+  background: #f2f5fb;
+  border: 1px solid #dfe5f1;
+  border-radius: 8px;
+}
+
+.approved-plan-type h3 {
+  margin: 0;
+  color: #364f80;
+  font-size: 19px;
+  line-height: 1.35;
+}
+
+.approved-plan-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-height: 46px;
+  overflow-y: auto;
+}
+
+.approved-plan-tags span {
+  padding: 4px 7px;
+  color: #597099;
+  background: #fff;
+  border: 1px solid #d8e0ee;
+  border-radius: 7px;
+  font-size: 9px;
+  font-weight: 800;
+}
+
+.approved-plan-description {
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 8px;
+  padding: 10px 0;
+}
+
+.approved-plan-description .outcome-scroll-copy {
+  color: #52637b;
+  font-size: 13px;
+}
+
+.mock-execution {
+  display: grid;
+  grid-template-rows: auto 7px minmax(0, 1fr) auto;
+  gap: 11px;
+  min-height: 0;
+  padding-top: 14px;
+}
+
+.mock-execution__summary {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 11px;
+}
+
+.mock-execution__signal {
+  position: relative;
+  display: grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  background: #edf8f1;
+  border: 1px solid #cfe5d7;
+  border-radius: 50%;
+}
+
+.mock-execution__signal i {
+  width: 10px;
+  height: 10px;
+  background: #5da87a;
+  border-radius: 50%;
+}
+
+.mock-execution__signal[data-state="active"]::after {
+  position: absolute;
+  inset: 5px;
+  content: "";
+  border: 2px solid rgba(83, 154, 111, .35);
+  border-top-color: #4f956c;
+  border-radius: 50%;
+  animation: execution-spin 1s linear infinite;
+}
+
+.mock-execution__summary > div:nth-child(2) {
+  display: grid;
+  gap: 2px;
+}
+
+.mock-execution__summary span,
+.mock-execution__summary small {
+  color: #8490a1;
+  font-size: 9px;
+}
+
+.mock-execution__summary strong {
+  color: #3f5b4b;
+  font-size: 13px;
+}
+
+.mock-execution__summary b {
+  color: #4d765e;
+  font-size: 18px;
+}
+
+.mock-execution__bar {
+  overflow: hidden;
+  background: #e8edf2;
+  border-radius: 7px;
+}
+
+.mock-execution__bar i {
+  display: block;
+  height: 100%;
+  background: #65a982;
+  border-radius: inherit;
+  transition: width .45s ease;
+}
+
+.mock-execution__steps {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  min-height: 0;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.mock-execution__steps li {
+  position: relative;
+  display: grid;
+  grid-template-rows: 18px auto minmax(0, 1fr);
+  gap: 4px;
+  min-height: 0;
+  padding: 10px;
+  background: #f7f9fb;
+  border: 1px solid #e3e9ef;
+  border-radius: 8px;
+}
+
+.mock-execution__steps li > i {
+  width: 12px;
+  height: 12px;
+  background: #d6dee7;
+  border: 3px solid #fff;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px #cad4df;
+}
+
+.mock-execution__steps li[data-state="complete"] {
+  background: #f0f8f3;
+  border-color: #d4e8da;
+}
+
+.mock-execution__steps li[data-state="complete"] > i {
+  background: #61a77e;
+  box-shadow: 0 0 0 1px #a9d1b7;
+}
+
+.mock-execution__steps li[data-state="active"] {
+  background: #fff8e8;
+  border-color: #eadbb8;
+}
+
+.mock-execution__steps li[data-state="active"] > i {
+  background: #e3ac45;
+  box-shadow: 0 0 0 1px #e2c57f;
+  animation: execution-pulse 1.2s ease-in-out infinite;
+}
+
+.mock-execution__steps strong {
+  color: #4d5d72;
+  font-size: 10px;
+}
+
+.mock-execution__steps span {
+  color: #8793a3;
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.mock-execution__notice {
+  margin: 0;
+  color: #8a7460;
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.execution-board__grid--stage {
+  min-height: 0;
+  padding: 14px 5px 0 0;
+  margin: 0;
+  overflow-y: auto;
+  grid-auto-rows: 210px;
+  scrollbar-color: #c8d7e6 transparent;
+  scrollbar-width: thin;
+}
+
+.execution-board__grid--stage article {
+  height: 210px;
+}
+
+@media (max-width: 900px) {
+  .outcome-primary-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .outcome-stage--hearing {
+    height: 340px;
+  }
+
+  .outcome-stage--review {
+    height: 300px;
+  }
+}
+
+@media (max-width: 720px) {
+  .outcome-four-stage,
+  .outcome-primary-grid {
+    gap: 14px;
+  }
+
+  .outcome-stage--hearing,
+  .outcome-stage--review,
+  .outcome-stage--plan,
+  .outcome-stage--execution {
+    padding: 16px;
+    border-radius: 14px;
+  }
+
+  .outcome-stage--plan {
+    height: 330px;
+  }
+
+  .outcome-stage--execution {
+    height: 460px;
+  }
+
+  .approved-plan-layout {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
+    gap: 10px;
+  }
+
+  .approved-plan-tags {
+    max-height: 28px;
+  }
+
+  .mock-execution__steps {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .execution-board__grid--stage {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 420px) {
+  .outcome-stage__heading {
+    grid-template-columns: 36px minmax(0, 1fr);
+  }
+
+  .outcome-stage__heading > strong {
+    grid-column: 2;
+    justify-self: start;
+    max-width: 100%;
+  }
+
+  .outcome-stage--hearing {
+    height: 380px;
+  }
+
+  .outcome-stage--review {
+    height: 330px;
+  }
+
+  .outcome-stage--plan {
+    height: 360px;
+  }
+
+  .outcome-stage--execution {
+    height: 500px;
+  }
+
+  .mock-execution__summary {
+    grid-template-columns: 32px minmax(0, 1fr) auto;
+  }
+
+  .mock-execution__signal {
+    width: 30px;
+    height: 30px;
+  }
+}
+
+/* Align the result archive with the existing pastel room surfaces. */
+.outcome-stage {
+  padding: 18px;
+  background: rgba(255, 255, 255, .75);
+  border: 1px solid #dfe8f4;
+  border-radius: 28px;
+  box-shadow: 0 20px 55px rgba(85, 109, 149, .07);
+}
+
+.outcome-stage--hearing,
+.outcome-stage--review {
+  height: 410px;
+}
+
+.outcome-stage--plan {
+  height: 270px;
+}
+
+.outcome-stage--execution {
+  height: 400px;
+}
+
+.outcome-stage--hearing,
+.outcome-stage--review,
+.outcome-stage--plan,
+.outcome-stage--execution {
+  border-top-width: 1px;
+  border-top-color: #dfe8f4;
+}
+
+.outcome-stage__heading {
+  height: 92px;
+  min-height: 92px;
+  align-items: center;
+  padding: 15px 16px 18px;
+  background:
+    radial-gradient(circle at 20% 15%, rgba(255, 255, 255, .95), transparent 34%),
+    linear-gradient(135deg, #f8fbff, #f6f3ff);
+  border: 1px solid #dce8f4;
+  border-radius: 18px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .92);
+}
+
+.outcome-stage--review .outcome-stage__heading {
+  background:
+    radial-gradient(circle at 20% 15%, rgba(255, 255, 255, .95), transparent 34%),
+    linear-gradient(135deg, #fffaf0, #f7faff);
+}
+
+.outcome-stage--plan .outcome-stage__heading,
+.outcome-stage--execution .outcome-stage__heading {
+  background:
+    radial-gradient(circle at 20% 15%, rgba(255, 255, 255, .95), transparent 34%),
+    linear-gradient(135deg, #f4f7ff, #f2fbf7);
+}
+
+.outcome-stage--hearing .outcome-stage__index,
+.outcome-stage--review .outcome-stage__index,
+.outcome-stage--plan .outcome-stage__index,
+.outcome-stage--execution .outcome-stage__index {
+  width: 34px;
+  height: 34px;
+  color: #fff;
+  background: linear-gradient(135deg, #8ca2ff, #77dfb7);
+  border: 0;
+  border-radius: 14px;
+  box-shadow: 0 10px 24px rgba(96, 122, 180, .22);
+}
+
+.outcome-stage__heading > strong {
+  color: #60718b;
+  background: rgba(255, 255, 255, .82);
+  border-color: #dfe7f2;
+  border-radius: 999px;
+}
+
+.outcome-stage__heading > strong[data-state="active"] {
+  color: #526bc1;
+  background: #eef3ff;
+  border-color: #dbe4fb;
+}
+
+.outcome-stage__heading > strong[data-state="complete"] {
+  color: #347153;
+  background: #eaf8f1;
+  border-color: #d0e8da;
+}
+
+.outcome-stage__content {
+  padding: 16px 2px 12px;
+}
+
+.outcome-result-type {
+  background: linear-gradient(135deg, #f8fbff, #f2fbf7);
+  border-color: #dce9ed;
+  border-radius: 14px;
+}
+
+.outcome-review-opinion {
+  padding: 16px 2px 12px;
+}
+
+.outcome-review-opinion .outcome-scroll-copy {
+  padding: 14px;
+  background: #fffaf0;
+  border: 1px solid #efdfbb;
+  border-left-width: 1px;
+  border-radius: 16px;
+}
+
+.approved-plan-layout {
+  padding-top: 14px;
+}
+
+.approved-plan-type,
+.approved-plan-description {
+  padding: 14px;
+  background: linear-gradient(135deg, #fff, #f9fbff);
+  border: 1px solid #dfe8f4;
+  border-radius: 18px;
+  box-shadow: 0 8px 22px rgba(88, 119, 155, .04);
+}
+
+.approved-plan-type {
+  align-content: start;
+}
+
+.approved-plan-description {
+  gap: 8px;
+}
+
+.approved-plan-tags span {
+  color: #536bc0;
+  background: #eef3ff;
+  border-color: #dbe4fb;
+  border-radius: 999px;
+}
+
+.mock-execution {
+  margin-top: 14px;
+  padding: 15px;
+  background: linear-gradient(135deg, #f4f7ff, #f2fbf7);
+  border: 1px solid #dfe8f4;
+  border-radius: 18px;
+}
+
+.mock-execution__signal {
+  background: linear-gradient(135deg, #eef3ff, #eaf8f1);
+  border-color: #d7e3ec;
+}
+
+.mock-execution__bar {
+  background: #e8eef7;
+}
+
+.mock-execution__bar i {
+  background: linear-gradient(90deg, #7e93e5, #69c2a4);
+}
+
+.mock-execution__steps li {
+  background: rgba(255, 255, 255, .82);
+  border-color: #dfe8f4;
+  border-radius: 14px;
+  box-shadow: inset 0 1px 0 #fff;
+}
+
+.mock-execution__steps li[data-state="complete"] {
+  background: rgba(229, 250, 240, .82);
+  border-color: #d2eadc;
+}
+
+.mock-execution__steps li[data-state="active"] {
+  background: #f1f5ff;
+  border-color: #dbe4fb;
+}
+
+.execution-board__grid--stage {
+  margin-top: 14px;
+  padding: 0 5px 0 0;
+}
+
+.execution-board__grid--stage article {
+  background: linear-gradient(135deg, #fff, #f9fbff);
+  border-color: #dfe8f4;
+  border-radius: 18px;
+  box-shadow: 0 8px 22px rgba(88, 119, 155, .04);
+}
+
+@media (max-width: 900px) {
+  .outcome-stage--hearing {
+    height: 420px;
+  }
+
+  .outcome-stage--review {
+    height: 360px;
+  }
+}
+
+@media (max-width: 720px) {
+  .outcome-stage--hearing,
+  .outcome-stage--review,
+  .outcome-stage--plan,
+  .outcome-stage--execution {
+    padding: 14px;
+    border-radius: 24px;
+  }
+
+  .outcome-stage--plan {
+    height: 400px;
+  }
+
+  .outcome-stage--execution {
+    height: 540px;
+  }
+
+  .outcome-stage__heading {
+    height: auto;
+    min-height: 88px;
+    padding: 13px 14px;
+  }
+}
+
+@media (max-width: 420px) {
+  .outcome-stage--hearing {
+    height: 460px;
+  }
+
+  .outcome-stage--review {
+    height: 390px;
+  }
+
+  .outcome-stage--plan {
+    height: 440px;
+  }
+
+  .outcome-stage--execution {
+    height: 590px;
+  }
+}
+
+@keyframes execution-pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.35); opacity: .65; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mock-execution__signal[data-state="active"]::after,
+  .mock-execution__steps li[data-state="active"] > i {
+    animation: none;
+  }
+
+  .mock-execution__bar i {
+    transition: none;
+  }
 }
 </style>

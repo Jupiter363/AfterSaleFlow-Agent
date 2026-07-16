@@ -186,6 +186,15 @@ public class EvidenceDossierFreezer {
             evidenceItem.put("evidence_type", evidence.getEvidenceType());
             evidenceItem.put("parsed_text", abbreviate(evidence.getParsedText(), 180));
             evidenceItem.put("claimed_fact", claimedFact);
+            evidenceItem.put("submission_attestation", submissionAttestation(evidence));
+            evidenceItem.put(
+                    "party_capacity", evidenceMetadata(evidence).path("party_capacity").asText(null));
+            evidenceItem.put(
+                    "forgery_consequence_code",
+                    evidenceMetadata(evidence).path("forgery_consequence_code").asText(null));
+            evidenceItem.put(
+                    "enforcement_gate",
+                    evidenceMetadata(evidence).path("enforcement_gate").asText(null));
             evidenceItem.put(
                     "supports_fact_ids",
                     factLinks.stream()
@@ -204,12 +213,12 @@ public class EvidenceDossierFreezer {
             evidenceItem.put("assessment_confidence", assessmentConfidence);
             evidenceItem.put("requires_human_review", requiresHumanReview);
             evidenceItem.put("verification_status", statusName(item.status()));
-            evidenceItem.put("risk_flags", riskFlags(item.status(), evidence));
+            evidenceItem.put("risk_flags", riskFlags(item, evidence));
             evidenceItems.add(evidenceItem);
 
             if (structuredFactLinks) {
-                // Agent 已给结构化 fact_links 时严格使用该映射；空 links 被记为 unmapped，
-                // 不擅自把材料归到某个事实。旧数据缺少结构化字段时才走确定性兼容映射。
+                // Agent 已给结构化 fact_links 时严格使用该映射；低相关材料允许空 links，
+                // 只进入 unmapped_evidence 与人工复核区，绝不制造伪 fact_id 污染正式矩阵。
                 if (factLinks.isEmpty()) {
                     unmappedEvidence.add(evidence.getId());
                 }
@@ -229,12 +238,9 @@ public class EvidenceDossierFreezer {
                                     requiresHumanReview);
                 }
             } else {
-                String legacyFactId = factId(evidence);
-                matrixByFact
-                        .computeIfAbsent(
-                                legacyFactId,
-                                ignored -> new MatrixAccumulator(legacyFactId, claimedFact))
-                        .add(item, "SUPPORTS", compositeScore, requiresHumanReview);
+                // 正式版不再为缺少结构化映射的历史结果合成事实行。该材料仍保留在
+                // evidence_items/unmapped_evidence 中，供人工复核，但不能进入事实矩阵。
+                unmappedEvidence.add(evidence.getId());
             }
             partySummary
                     .computeIfAbsent(
@@ -303,6 +309,15 @@ public class EvidenceDossierFreezer {
             snapshot.put("original_filename", evidence.getOriginalFilename());
             snapshot.put("parse_status", parseStatusName(evidence.getParseStatus()));
             snapshot.put("claimed_fact", claimedFact(evidence));
+            snapshot.put("submission_attestation", submissionAttestation(evidence));
+            snapshot.put(
+                    "party_capacity", evidenceMetadata(evidence).path("party_capacity").asText(null));
+            snapshot.put(
+                    "forgery_consequence_code",
+                    evidenceMetadata(evidence).path("forgery_consequence_code").asText(null));
+            snapshot.put(
+                    "enforcement_gate",
+                    evidenceMetadata(evidence).path("enforcement_gate").asText(null));
             snapshot.put("verification_status", statusName(item.status()));
             snapshot.put(
                     "authenticity_score",
@@ -498,6 +513,46 @@ public class EvidenceDossierFreezer {
                 }
             }
         }
+        for (IncludedEvidence item : included) {
+            if (item.verification() == null || !item.verification().isRequiresHumanReview()) {
+                continue;
+            }
+            String evidenceId = item.evidence().getId();
+            boolean alreadyPresent =
+                    tasks.stream()
+                            .anyMatch(
+                                    task ->
+                                            evidenceId.equals(
+                                                    task.path("evidence_id").asText(null)));
+            if (alreadyPresent) {
+                continue;
+            }
+            boolean suspectedForgery =
+                    agentFindings(item)
+                                    .path("suspected_forgery")
+                                    .asBoolean(false)
+                            || verificationHasReason(item, "SUSPECTED_FORGERY");
+            var task = objectMapper.createObjectNode();
+            task.put("evidence_id", evidenceId);
+            task.put(
+                    "task_type",
+                    suspectedForgery
+                            ? "SUSPECTED_FORGERY_REVIEW"
+                            : "EVIDENCE_MANUAL_REVIEW");
+            task.put("risk_label", suspectedForgery ? "疑似造假" : "待人工复核");
+            task.put("claimed_fact", claimedFact(item.evidence()));
+            task.put(
+                    "instruction",
+                    suspectedForgery
+                            ? "核对原始文件、形成链路、完整上下文及其与声明证明目标的关联性。模型低分不得直接认定造假或触发处罚。"
+                            : "按证据书记官记录的限制条件完成人工复核。");
+            task.put(
+                    "enforcement_gate",
+                    suspectedForgery
+                            ? "HUMAN_CONFIRMED_FORGERY_REQUIRED"
+                            : "HUMAN_REVIEW_REQUIRED");
+            tasks.add(task);
+        }
         return List.copyOf(tasks);
     }
 
@@ -625,43 +680,47 @@ public class EvidenceDossierFreezer {
         return Math.min(0.95, score);
     }
 
-    // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceDossierFreezer.factId(EvidenceItemEntity)」。
-    // 具体功能：「EvidenceDossierFreezer.factId(EvidenceItemEntity)」：构建事实标识；实际协作者为 「evidence.getEvidenceType」、「evidence.getOriginalFilename」、「evidence.getParsedText」、「defaultText」；处理的关键状态/协议值包括 「logistics」、「signed」、「delivery」、「物流」，最终返回「String」。
-    // 上游调用：「EvidenceDossierFreezer.factId(EvidenceItemEntity)」的上游调用点包括 「EvidenceDossierFreezer.createFrozen」、「EvidenceDossierFreezer.claimedFact」。
-    // 下游影响：「EvidenceDossierFreezer.factId(EvidenceItemEntity)」向下依次触达 「evidence.getEvidenceType」、「evidence.getOriginalFilename」、「evidence.getParsedText」、「defaultText」；计算结果以「String」交给调用方。
-    // 系统意义：「EvidenceDossierFreezer.factId(EvidenceItemEntity)」负责主链路中的“事实标识”；原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
-    private static String factId(EvidenceItemEntity evidence) {
-        String haystack =
-                (defaultText(evidence.getEvidenceType(), "")
-                                + " "
-                                + defaultText(evidence.getOriginalFilename(), "")
-                                + " "
-                                + defaultText(evidence.getParsedText(), ""))
-                        .toLowerCase();
-        if (containsAny(haystack, "logistics", "signed", "delivery", "物流", "签收", "快递")) {
-            return "FACT_LOGISTICS_SIGNING";
-        }
-        if (containsAny(haystack, "quality", "inspection", "scratch", "质检", "划痕", "瑕疵")) {
-            return "FACT_GOODS_CONDITION";
-        }
-        return "FACT_GENERAL_DISPUTE";
+    // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceDossierFreezer.claimedFact(EvidenceItemEntity)」。
+    // 具体功能：「EvidenceDossierFreezer.claimedFact(EvidenceItemEntity)」：只读取提交方在上传声明中填写的证明目标；缺失时明确标记未声明，不再按文件类型或 OCR 文本推断事实。
+    // 上游调用：「EvidenceDossierFreezer.claimedFact(EvidenceItemEntity)」的上游调用点包括 「EvidenceDossierFreezer.createFrozen」。
+    // 下游影响：「EvidenceDossierFreezer.claimedFact(EvidenceItemEntity)」读取 evidence metadata；计算结果以「String」交给调用方。
+    // 系统意义：「EvidenceDossierFreezer.claimedFact(EvidenceItemEntity)」负责主链路中的“claimed事实”；原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
+    private String claimedFact(EvidenceItemEntity evidence) {
+        String claimedFact = evidenceMetadata(evidence).path("claimed_fact").asText("").trim();
+        return claimedFact.isBlank() ? "提交方未声明该证据的证明目标" : claimedFact;
     }
 
-    // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceDossierFreezer.claimedFact(EvidenceItemEntity)」。
-    // 具体功能：「EvidenceDossierFreezer.claimedFact(EvidenceItemEntity)」：领取claimed事实；实际协作者为 「evidence.getParsedText」、「abbreviate」、「factId」；处理的关键状态/协议值包括 「FACT_LOGISTICS_SIGNING」、「该证据用于说明物流、签收或投递链路相关事实」、「FACT_GOODS_CONDITION」、「该证据用于说明商品状态、质检或瑕疵相关事实」，最终返回「String」。
-    // 上游调用：「EvidenceDossierFreezer.claimedFact(EvidenceItemEntity)」的上游调用点包括 「EvidenceDossierFreezer.createFrozen」。
-    // 下游影响：「EvidenceDossierFreezer.claimedFact(EvidenceItemEntity)」向下依次触达 「evidence.getParsedText」、「abbreviate」、「factId」；计算结果以「String」交给调用方。
-    // 系统意义：「EvidenceDossierFreezer.claimedFact(EvidenceItemEntity)」负责主链路中的“claimed事实”；原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
-    private static String claimedFact(EvidenceItemEntity evidence) {
-        String parsed = abbreviate(evidence.getParsedText(), 120);
-        if (!parsed.isBlank()) {
-            return parsed;
+    private JsonNode evidenceMetadata(EvidenceItemEntity evidence) {
+        if (evidence.getMetadataJson() == null || evidence.getMetadataJson().isBlank()) {
+            return objectMapper.createObjectNode();
         }
-        return switch (factId(evidence)) {
-            case "FACT_LOGISTICS_SIGNING" -> "该证据用于说明物流、签收或投递链路相关事实";
-            case "FACT_GOODS_CONDITION" -> "该证据用于说明商品状态、质检或瑕疵相关事实";
-            default -> "该证据用于说明当事人提交的争议事实";
-        };
+        try {
+            return objectMapper.readTree(evidence.getMetadataJson());
+        } catch (JsonProcessingException exception) {
+            return objectMapper.createObjectNode();
+        }
+    }
+
+    private Map<String, Object> submissionAttestation(EvidenceItemEntity evidence) {
+        JsonNode metadata = evidenceMetadata(evidence);
+        List<String> scope = new ArrayList<>();
+        if (metadata.path("attestation_scope").isArray()) {
+            metadata.path("attestation_scope")
+                    .forEach(value -> {
+                        if (value.isTextual() && !value.asText().isBlank()) {
+                            scope.add(value.asText());
+                        }
+                    });
+        }
+        Map<String, Object> attestation = new LinkedHashMap<>();
+        attestation.put("truth_attested", metadata.path("truth_attested").asBoolean(false));
+        attestation.put(
+                "attestation_version", metadata.path("attestation_version").asText(null));
+        attestation.put("attestation_scope", List.copyOf(scope));
+        attestation.put("attestation_role", metadata.path("attestation_role").asText(null));
+        attestation.put("attested_by", metadata.path("attested_by").asText(null));
+        attestation.put("attested_at", metadata.path("attested_at").asText(null));
+        return attestation;
     }
 
     // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceDossierFreezer.riskFlags(EvidenceVerificationStatus,EvidenceItemEntity)」。
@@ -669,19 +728,70 @@ public class EvidenceDossierFreezer {
     // 上游调用：「EvidenceDossierFreezer.riskFlags(EvidenceVerificationStatus,EvidenceItemEntity)」的上游调用点包括 「EvidenceDossierFreezer.createFrozen」。
     // 下游影响：「EvidenceDossierFreezer.riskFlags(EvidenceVerificationStatus,EvidenceItemEntity)」向下依次触达 「evidence.getParseStatus」；计算结果以「List<String>」交给调用方。
     // 系统意义：「EvidenceDossierFreezer.riskFlags(EvidenceVerificationStatus,EvidenceItemEntity)」负责主链路中的“风险标记”；原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
-    private static List<String> riskFlags(
-            EvidenceVerificationStatus status, EvidenceItemEntity evidence) {
+    private List<String> riskFlags(
+            IncludedEvidence item, EvidenceItemEntity evidence) {
+        EvidenceVerificationStatus status = item.status();
         List<String> flags = new ArrayList<>();
         if (status == null || status == EvidenceVerificationStatus.NEEDS_HUMAN_REVIEW) {
-            flags.add("仍需人工复核真实性");
+            flags.add("仍需人工复核");
         }
-        if (status == EvidenceVerificationStatus.SUSPICIOUS) {
+        JsonNode agentRiskFlags = agentFindings(item).path("risk_flags");
+        if (agentRiskFlags.isArray()) {
+            for (JsonNode flag : agentRiskFlags) {
+                String code = flag.isTextual() ? flag.asText() : flag.path("code").asText("");
+                if (!code.isBlank() && !flags.contains(code)) {
+                    flags.add(code);
+                }
+            }
+        }
+        if ((agentFindings(item).path("suspected_forgery").asBoolean(false)
+                        || verificationHasReason(item, "SUSPECTED_FORGERY"))
+                && !flags.contains("SUSPECTED_FORGERY")) {
+            flags.add("SUSPECTED_FORGERY");
             flags.add("证据真实性存在疑点");
         }
         if (evidence.getParseStatus() != ParseStatus.SUCCEEDED) {
             flags.add("材料解析不完整");
         }
         return flags;
+    }
+
+    private boolean verificationHasReason(IncludedEvidence item, String reasonCode) {
+        if (item.verification() == null
+                || item.verification().getReasonsJson() == null
+                || item.verification().getReasonsJson().isBlank()) {
+            return false;
+        }
+        try {
+            JsonNode reasons = objectMapper.readTree(item.verification().getReasonsJson());
+            if (reasons.isArray()) {
+                for (JsonNode reason : reasons) {
+                    if (reasonCode.equals(reason.asText())) {
+                        return true;
+                    }
+                }
+            }
+            JsonNode riskFlags = reasons.path("risk_flags");
+            if (riskFlags.isArray()) {
+                for (JsonNode flag : riskFlags) {
+                    if (reasonCode.equals(flag.asText())
+                            || reasonCode.equals(flag.path("code").asText())) {
+                        return true;
+                    }
+                }
+            }
+            JsonNode reviewCodes = reasons.path("human_review_reason_codes");
+            if (reviewCodes.isArray()) {
+                for (JsonNode code : reviewCodes) {
+                    if (reasonCode.equals(code.asText())) {
+                        return true;
+                    }
+                }
+            }
+        } catch (JsonProcessingException ignored) {
+            return false;
+        }
+        return false;
     }
 
     // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceDossierFreezer.partyEvidenceSummary(Map)」。

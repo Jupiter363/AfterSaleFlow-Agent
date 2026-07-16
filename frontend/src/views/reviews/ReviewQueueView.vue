@@ -90,7 +90,7 @@ onMounted(load);
   <main class="review-queue-page">
     <header class="review-queue-page__hero">
       <div>
-        <span>HUMAN FINAL GATE</span>
+        <span>平台人工终审</span>
         <h1>平台终审队列</h1>
         <p class="review-queue-page__lead">
           <span class="review-queue-page__context">

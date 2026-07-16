@@ -8,8 +8,6 @@ from app.api.final_agents import FinalAgentServices
 from app.config import Settings
 from app.main import create_app
 from app.schemas import (
-    AdjudicationDraft,
-    AdjudicationDraftOutput,
     CriticReport,
     CriticSeverity,
     CriticStatus,
@@ -19,37 +17,9 @@ from app.schemas import (
     EvaluationAnalysisResult,
     EvaluationMetricScores,
     EvidenceDossierResult,
-    HearingAnalysisResult,
-    HearingStageResult,
     IntakeAnalysisOutput,
     ReviewCopilotAnswer,
 )
-
-
-class _LegacyWorkflow:
-    # 所属模块：Agent 角色能力 > test_final_agent_api；函数角色：类/闭包内部方法。
-    # 具体功能：`analyze` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`HearingAnalysisResult`、`AdjudicationDraftOutput`、`AdjudicationDraft`。
-    # 上下游：上游为 受治理的案件上下文和角色提示词；下游为 协作调用 `HearingAnalysisResult`、`AdjudicationDraftOutput`、`AdjudicationDraft`。
-    # 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
-    def analyze(self, request, _context):
-        return HearingAnalysisResult(
-            case_id=request.case_id,
-            workflow_id=request.workflow_id,
-            workflow_status="COMPLETED",
-            executed_nodes=["adjudication_draft_node"],
-            adjudication_draft=AdjudicationDraftOutput(
-                draft=AdjudicationDraft(
-                    recommended_outcome="REQUEST_MORE_EVIDENCE",
-                    reasoning_summary="More evidence is needed.",
-                    issue_findings=[],
-                    confidence=0.7,
-                    risk_level="HIGH",
-                    review_focus=["Check handover proof."],
-                )
-            ),
-            prompt_version="hearing-v1",
-            model="test-model",
-        )
 
 
 class _LegacyIntake:
@@ -137,24 +107,6 @@ class _EvidenceAgent:
         )
 
 
-class _JudgeAgent:
-    # 所属模块：Agent 角色能力 > test_final_agent_api；函数角色：类/闭包内部方法。
-    # 具体功能：`run_stage` 驱动本阶段状态对应的业务步骤并返回阶段结果；关键协作调用：`HearingStageResult`。
-    # 上下游：上游为 受治理的案件上下文和角色提示词；下游为 协作调用 `HearingStageResult`。
-    # 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
-    def run_stage(self, request, context, *, case_state):
-        return HearingStageResult(
-            case_id=request.case_id,
-            workflow_id=request.workflow_id,
-            stage=request.stage,
-            dossier_version=request.dossier_version,
-            output={"neutral_summary": "Receipt is disputed.", "issues": []},
-            output_schema="IssueFramingOutput",
-            prompt_version="hearing-v1",
-            model="test-model",
-        )
-
-
 class _PanelAgent:
     # 所属模块：Agent 角色能力 > test_final_agent_api；函数角色：类/闭包内部方法。
     # 具体功能：`run` 驱动本阶段状态对应的业务步骤并返回阶段结果；关键协作调用：`DeliberationReport`、`CriticReport`。
@@ -224,17 +176,15 @@ def _settings() -> Settings:
 
 
 # 所属模块：Agent 角色能力 > test_final_agent_api；函数角色：模块私有业务函数。
-# 具体功能：`_client` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`_LegacyWorkflow`、`_LegacyIntake`、`_LegacyEvaluation`。
+# 具体功能：`_client` 注入非庭审通用 Agent 服务和测试工作流。
 # 上下游：上游为 本文件的 `test_all_final_internal_agent_routes_are_authenticated`、`test_final_internal_agent_routes_return_strict_non_final_outputs`；下游为 本文件的 `_settings`。
 # 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
 def _client() -> TestClient:
-    legacy_hearing = _LegacyWorkflow()
     legacy_intake = _LegacyIntake()
     legacy_evaluation = _LegacyEvaluation()
     services = FinalAgentServices(
         intake=_IntakeAgent(),
         evidence=_EvidenceAgent(),
-        hearing=_JudgeAgent(),
         deliberation=_PanelAgent(),
         review_copilot=_CopilotAgent(),
         evaluation=_EvaluationAgent(),
@@ -242,9 +192,8 @@ def _client() -> TestClient:
     return TestClient(
         create_app(
             _settings(),
-            legacy_hearing,
-            legacy_intake,
-            legacy_evaluation,
+            intake_workflow=legacy_intake,
+            evaluation_workflow=legacy_evaluation,
             final_agent_services=services,
         )
     )
@@ -270,18 +219,29 @@ def test_all_final_internal_agent_routes_are_authenticated() -> None:
         if route.path.startswith("/internal/agents/")
         and "/legacy/" not in route.path
     }
-    assert paths == {
+    assert {
         "/internal/agents/intake/analyze",
         "/internal/agents/intake/turn",
         "/internal/agents/evidence/build",
         "/internal/agents/evidence/turn",
-            "/internal/agents/hearing/run-stage",
-            "/internal/agents/hearing/round-turn",
-            "/internal/agents/deliberation/run",
+        "/internal/agents/deliberation/run",
         "/internal/agents/review-copilot/query",
         "/internal/agents/evaluation/analyze",
         "/internal/agents/external-import/simulate",
-    }
+    } <= paths
+    assert "/internal/agents/hearing/run-stage" not in paths
+    assert "/internal/agents/hearing/round-turn" not in paths
+    for path in (
+        "/internal/agents/hearing-flow/intake/questions",
+        "/internal/agents/hearing-flow/intake/synthesis",
+        "/internal/agents/hearing-flow/evidence/requests",
+        "/internal/agents/hearing-flow/evidence/synthesis",
+        "/internal/agents/hearing-flow/judge/v1",
+        "/internal/agents/hearing-flow/jury/review",
+        "/internal/agents/hearing-flow/judge/v2",
+    ):
+        assert path in paths
+        assert path + "/stream" in paths
 
     unauthorized = client.post(
         "/internal/agents/evidence/build",
@@ -318,23 +278,6 @@ def test_final_internal_agent_routes_return_strict_non_final_outputs() -> None:
             "case_id": "CASE_api",
             "case_version": 1,
             "submission_version": 1,
-        },
-        headers=_headers(),
-    )
-    hearing = client.post(
-        "/internal/agents/hearing/run-stage",
-        json={
-            "case_id": "CASE_api",
-            "workflow_id": "WORKFLOW_api",
-            "stage": "C1_ISSUE_FRAMING",
-            "dossier_version": 1,
-            "claims": [
-                {
-                    "claim_id": "CLAIM_api",
-                    "party_type": "USER",
-                    "statement": "Parcel not received.",
-                }
-            ],
         },
         headers=_headers(),
     )
@@ -386,11 +329,10 @@ def test_final_internal_agent_routes_return_strict_non_final_outputs() -> None:
 
     assert all(
         response.status_code == 200
-        for response in [intake, evidence, hearing, panel, copilot, evaluation]
+        for response in [intake, evidence, panel, copilot, evaluation]
     )
     assert intake.json()["admission_recommendation"] == "ACCEPTED"
     assert evidence.json()["liability_determined"] is False
-    assert hearing.json()["non_final"] is True
     assert panel.json()["approval_performed"] is False
     assert copilot.json()["execution_triggered"] is False
     assert evaluation.json()["online_case_mutated"] is False

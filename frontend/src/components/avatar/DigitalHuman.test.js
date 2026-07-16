@@ -2,6 +2,7 @@
 // 说明：本注释用于帮助读者先了解本文件职责，再继续阅读具体实现。
 
 import { mount } from "@vue/test-utils";
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import DigitalHuman, {
   DIGITAL_HUMAN_LAYOUT,
@@ -152,6 +153,29 @@ describe("DigitalHuman", () => {
     expect(wrapper.get("[data-motion-orbit]").exists()).toBe(true);
   });
 
+  it("renders the production review-explainer portrait inside the shared state halo", () => {
+    const wrapper = mount(DigitalHuman, {
+      props: {
+        state: "THINKING",
+        name: "小译",
+        role: "审核解释官",
+      },
+    });
+
+    const portrait = wrapper.get("[data-review-explainer-portrait]");
+    expect(wrapper.attributes("data-persona")).toBe("review");
+    expect(portrait.attributes("href")).toContain("review-explainer.webp");
+    expect(portrait.attributes()).toMatchObject({
+      x: "-15",
+      y: "-8",
+      width: "250",
+      height: "250",
+      preserveAspectRatio: "xMidYMid meet",
+    });
+    expect(wrapper.find("[data-route-guide-portrait]").exists()).toBe(false);
+    expect(wrapper.get("[data-motion-orbit]").exists()).toBe(true);
+  });
+
   it("applies independent production portraits to jury A and jury B", () => {
     const juryA = mount(DigitalHuman, {
       props: {
@@ -251,6 +275,9 @@ describe("DigitalHuman", () => {
       expect(wrapper.attributes("data-persona")).toBe(persona);
       expect(wrapper.attributes("data-expression")).toBe(expression);
       expect(wrapper.classes()).toContain(`digital-human--${persona}`);
+      const titleRow = wrapper.get(".digital-human__title-row");
+      expect(titleRow.get("strong").text()).toBe("小衡");
+      expect(titleRow.get("[data-digital-human-role]").text()).toBe(role);
       expect(wrapper.get("[data-face-expression]").attributes("data-face-expression"))
         .toBe(expression);
 
@@ -334,6 +361,17 @@ describe("DigitalHuman", () => {
       expect(wrapper.find("[data-face-cover='true']").exists()).toBe(false);
     },
   );
+
+  it("matches every identity label to the current portrait clothing color", () => {
+    const source = readFileSync("src/components/avatar/DigitalHuman.vue", "utf8");
+
+    expect(source).toMatch(/digital-human--intake[\s\S]*?--persona-role-color: #68243f[\s\S]*?--persona-role-background: #95c9b6/);
+    expect(source).toMatch(/digital-human--evidence[\s\S]*?--persona-role-color: #5c2442[\s\S]*?--persona-role-background: #77a9e7/);
+    expect(source).toMatch(/digital-human--judge[\s\S]*?--persona-role-color: #fff0b8[\s\S]*?--persona-role-background: #302e55/);
+    expect(source).toMatch(/digital-human--jury[\s\S]*?--persona-role-color: #594700[\s\S]*?--persona-role-background: #d6c2f7/);
+    expect(source).toMatch(/digital-human--review[\s\S]*?--persona-role-color: #eafff4[\s\S]*?--persona-role-background: #ce4040/);
+    expect(source).toMatch(/digital-human--guide[\s\S]*?--persona-role-color: #2e315f[\s\S]*?--persona-role-background: #f5b84d/);
+  });
 
   // 业务位置：【前端业务组件】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面传入的案件、消息、证据或审核数据 正确进入 可复用的房间交互和展示事件。上游：页面传入的案件、消息、证据或审核数据。下游：可复用的房间交互和展示事件。边界：组件不直接跨越业务权限调用。
   it("gives the judge a wig, left law code, and right gavel", () => {

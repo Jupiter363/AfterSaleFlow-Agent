@@ -48,7 +48,15 @@ def test_final_java_bounded_contexts_are_explicit() -> None:
 # 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 协作调用 `is_dir`。
 # 系统意义：固定“跨服务契约测试 > test_final_repository_structure”的可观察契约，防止后续重构改变业务结果。
 def test_agent_service_has_governed_runtime_structure() -> None:
-    expected = {"api", "agents", "harness", "prompts", "schemas", "skills"}
+    expected = {
+        "api",
+        "agents",
+        "agents/prompts",
+        "harness",
+        "harness/prompts",
+        "schemas",
+        "skills",
+    }
 
     missing = sorted(name for name in expected if not (PYTHON / name).is_dir())
 

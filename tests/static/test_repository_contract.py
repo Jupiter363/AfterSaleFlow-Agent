@@ -109,7 +109,7 @@ REQUIRED_ENV_KEYS = {
     "ENABLE_SENSITIVE_LOG_MASKING",
     "EVIDENCE_WINDOW",
     "HEARING_WINDOW",
-    "MAX_HEARING_ROUNDS",
+    "HEARING_PARTY_STAGE_WINDOW",
     "SSE_HEARTBEAT",
     "SEED_DEMO_DISPUTES",
 }
@@ -337,7 +337,7 @@ def test_room_timing_configuration_is_declared_with_final_defaults() -> None:
 
     assert "evidence-window: ${EVIDENCE_WINDOW:PT2H}" in application
     assert "hearing-window: ${HEARING_WINDOW:PT3H}" in application
-    assert "max-hearing-rounds: ${MAX_HEARING_ROUNDS:3}" in application
+    assert "hearing-party-stage-window: ${HEARING_PARTY_STAGE_WINDOW:PT20M}" in application
     assert "sse-heartbeat: ${SSE_HEARTBEAT:PT15S}" in application
     assert "seed-demo-disputes: ${SEED_DEMO_DISPUTES:false}" in application
 

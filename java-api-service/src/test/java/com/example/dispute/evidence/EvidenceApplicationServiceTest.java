@@ -120,6 +120,8 @@ class EvidenceApplicationServiceTest {
                         "USER_UPLOAD",
                         "PARTIES",
                         true,
+                        "物流截图用于证明包裹签收状态",
+                        true,
                         null,
                         actor());
 
@@ -128,12 +130,21 @@ class EvidenceApplicationServiceTest {
         assertThat(result.parseStatus()).isEqualTo("PENDING");
         assertThat(result.submissionStatus()).isEqualTo("PENDING_SUBMISSION");
         assertThat(result.desensitized()).isFalse();
+        assertThat(result.claimedFact()).isEqualTo("物流截图用于证明包裹签收状态");
+        assertThat(result.truthAttested()).isTrue();
+        assertThat(result.attestationScope())
+                .containsExactly("AUTHENTICITY", "CLAIMED_FACT_RELEVANCE");
+        assertThat(result.partyCapacity()).isEqualTo("INITIATOR");
+        assertThat(result.attestationVersion()).isEqualTo("EVIDENCE_TRUTH_ATTESTATION_V1");
+        assertThat(result.enforcementGate()).isEqualTo("HUMAN_CONFIRMED_FORGERY_REQUIRED");
         ArgumentCaptor<EvidenceItemEntity> storedEvidence =
                 ArgumentCaptor.forClass(EvidenceItemEntity.class);
         verify(evidenceRepository).save(storedEvidence.capture());
         assertThat(storedEvidence.getValue().getMetadataJson())
                 .contains("\"model_processing_authorized\":true")
-                .contains("CURRENT_DISPUTE_EVIDENCE_REVIEW");
+                .contains("CURRENT_DISPUTE_EVIDENCE_REVIEW")
+                .contains("\"attestation_scope\":[\"AUTHENTICITY\",\"CLAIMED_FACT_RELEVANCE\"]")
+                .contains("\"forgery_consequence_code\":\"REJECT_INITIATOR_CLAIMS_AND_REPUTATION_PENALTY\"");
         verify(storage).storeOriginal(any(), any(), any(), any(), any());
         verify(searchIndexer).indexMetadata(any());
     }
@@ -164,6 +175,8 @@ class EvidenceApplicationServiceTest {
                 "USER_UPLOAD",
                 "PARTIES",
                 true,
+                "物流截图用于证明包裹签收状态",
+                true,
                 null,
                 actor());
 
@@ -171,8 +184,69 @@ class EvidenceApplicationServiceTest {
                 .contains("\"ocr_language\":\"zh-CN\"")
                 .contains("\"capture_source\":\"mobile\"")
                 .contains("\"model_processing_authorized\":true")
-                .contains("CURRENT_DISPUTE_EVIDENCE_REVIEW");
+                .contains("CURRENT_DISPUTE_EVIDENCE_REVIEW")
+                .contains("\"claimed_fact\":\"物流截图用于证明包裹签收状态\"")
+                .contains("\"truth_attested\":true");
         verify(storage, never()).storeOriginal(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void rejectsUploadWithoutTruthAndClaimRelevanceAttestation() {
+        when(caseRepository.findById("CASE_evidence"))
+                .thenReturn(Optional.of(caseEntity()));
+
+        assertThatThrownBy(
+                        () ->
+                                service.upload(
+                                        "CASE_evidence",
+                                        pngFile(),
+                                        "LOGISTICS_PROOF",
+                                        "USER_UPLOAD",
+                                        "PARTIES",
+                                        "物流截图用于证明包裹签收状态",
+                                        false,
+                                        null,
+                                        actor()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("truthAttested");
+
+        verify(storage, never()).storeOriginal(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void recordsRespondentCapacityAndCounterpartyConsequenceWithoutExecutingIt() {
+        when(caseRepository.findById("CASE_evidence"))
+                .thenReturn(Optional.of(caseEntity(ActorRole.MERCHANT)));
+        when(evidenceRepository
+                        .findFirstByCaseIdAndFileHashAndSourceTypeAndDeletedAtIsNullOrderByCreatedAtDesc(
+                                any(), any(), any()))
+                .thenReturn(Optional.empty());
+        when(evidenceRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(storage.storeOriginal(any(), any(), any(), any(), any()))
+                .thenReturn(
+                        new EvidenceStorage.StoredObject(
+                                "evidence-original",
+                                "CASE_evidence/EVIDENCE_test/proof.png"));
+
+        EvidenceView result =
+                service.upload(
+                        "CASE_evidence",
+                        pngFile(),
+                        "LOGISTICS_PROOF",
+                        "USER_UPLOAD",
+                        "PARTIES",
+                        "物流截图用于证明包裹签收状态",
+                        true,
+                        null,
+                        actor());
+
+        assertThat(result.partyCapacity()).isEqualTo("RESPONDENT");
+        assertThat(result.forgeryConsequenceCode())
+                .isEqualTo(
+                        "ACCEPT_REASONABLE_COUNTERPARTY_CLAIMS_AND_REPUTATION_PENALTY");
+        assertThat(result.enforcementGate())
+                .isEqualTo("HUMAN_CONFIRMED_FORGERY_REQUIRED");
     }
 
     // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceApplicationServiceTest.systemCannotReadRawEvidenceForModelWithoutPerEvidenceAuthorization()」。
@@ -290,6 +364,8 @@ class EvidenceApplicationServiceTest {
                         "CHAT_SCREENSHOT",
                         "USER_UPLOAD",
                         "PARTIES",
+                        "聊天记录用于证明双方沟通内容",
+                        true,
                         null,
                         actor());
 
@@ -355,6 +431,8 @@ class EvidenceApplicationServiceTest {
                         "DOCUMENT",
                         "USER_UPLOAD",
                         "PRIVATE",
+                        "该文件用于证明本案相关争议事实",
+                        true,
                         null,
                         actor());
 
@@ -385,9 +463,11 @@ class EvidenceApplicationServiceTest {
                                         "CASE_evidence",
                                         file,
                                         "OTHER",
-                                        "USER_UPLOAD",
-                                        "PRIVATE",
-                                        null,
+                                "USER_UPLOAD",
+                                "PRIVATE",
+                                "该文件用于证明本案相关争议事实",
+                                true,
+                                null,
                                         actor()))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("content type");
@@ -415,9 +495,11 @@ class EvidenceApplicationServiceTest {
                                         "CASE_evidence",
                                         file,
                                         "OTHER",
-                                        "USER_UPLOAD",
-                                        "PRIVATE",
-                                        null,
+                                "USER_UPLOAD",
+                                "PRIVATE",
+                                "该文件用于证明本案相关争议事实",
+                                true,
+                                null,
                                         actor()))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("signature");
@@ -447,9 +529,11 @@ class EvidenceApplicationServiceTest {
                                         "CASE_evidence",
                                         file,
                                         "OTHER",
-                                        "PLATFORM_UPLOAD",
-                                        "PARTIES",
-                                        null,
+                                "PLATFORM_UPLOAD",
+                                "PARTIES",
+                                "该文件用于证明本案相关争议事实",
+                                true,
+                                null,
                                         actor()))
                 .isInstanceOf(ForbiddenException.class)
                 .hasMessageContaining("source");
@@ -519,13 +603,19 @@ class EvidenceApplicationServiceTest {
     // 下游影响：「EvidenceApplicationServiceTest.caseEntity()」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
     // 系统意义：「EvidenceApplicationServiceTest.caseEntity()」守住「证据与版本化卷宗」的可执行规格，尤其防止 「CASE_evidence」、「order-evidence」、「user-evidence」、「merchant-evidence」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static FulfillmentCaseEntity caseEntity() {
+        return caseEntity(ActorRole.USER);
+    }
+
+    private static FulfillmentCaseEntity caseEntity(ActorRole initiatorRole) {
         FulfillmentCaseEntity entity =
                 FulfillmentCaseEntity.create(
                         "CASE_evidence",
                         "order-evidence",
                         null,
+                        null,
                         "user-evidence",
                         "merchant-evidence",
+                        initiatorRole,
                         "idem-evidence",
                         "DISPUTE",
                         "LOGISTICS_DISPUTE",

@@ -7,7 +7,6 @@
 package com.example.dispute.evidence.infrastructure.persistence.repository;
 
 import com.example.dispute.evidence.infrastructure.persistence.entity.EvidencePartyCompletionEntity;
-import com.example.dispute.config.ActorRole;
 import java.util.List;
 import java.util.Optional;
 import org.springframework.data.jpa.repository.JpaRepository;
@@ -34,8 +33,8 @@ public interface EvidencePartyCompletionRepository
     // 系统意义：「EvidencePartyCompletionRepository.findByCaseIdAndDossierVersionAndParticipantRole(String,int,ActorRole)」直接影响 PostgreSQL 事实投影；原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
     // Java 语法：接口方法以分号结束，只声明契约；运行时执行实现类中的同签名方法。
     Optional<EvidencePartyCompletionEntity>
-            findByCaseIdAndDossierVersionAndParticipantRole(
-                    String caseId, int dossierVersion, ActorRole participantRole);
+            findByCaseIdAndDossierVersionAndParticipantId(
+                    String caseId, int dossierVersion, String participantId);
     // 所属模块：【证据与版本化卷宗 / 仓储接口层】「EvidencePartyCompletionRepository.findAllByCaseIdAndDossierVersionAndCompletionStatus(String,int,String)」。
     // 具体功能：「EvidencePartyCompletionRepository.findAllByCaseIdAndDossierVersionAndCompletionStatus(String,int,String)」：声明按案件标识、卷宗版本、完成确认状态访问证据当事方完成确认的 Spring Data 查询，由框架根据方法签名生成 SQL，并以「List<EvidencePartyCompletionEntity>」返回。
     // 上游调用：「EvidencePartyCompletionRepository.findAllByCaseIdAndDossierVersionAndCompletionStatus(String,int,String)」的上游调用点包括 「EvidenceCompletionService.status」、「EvidenceRoomIntegrationTest.bothPartiesFreezeExactlyOneVersionAndRejectedEvidenceIsExcluded」。
@@ -59,6 +58,4 @@ public interface EvidencePartyCompletionRepository
     // 下游影响：「EvidencePartyCompletionRepository.countByCaseIdAndDossierVersionAndCompletionStatus(String,int,String)」的下游由 接口实现 接管，并把返回值交还当前模块调用方。
     // 系统意义：「EvidencePartyCompletionRepository.countByCaseIdAndDossierVersionAndCompletionStatus(String,int,String)」直接影响 PostgreSQL 事实投影；原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
     // Java 语法：接口方法以分号结束，只声明契约；运行时执行实现类中的同签名方法。
-    long countByCaseIdAndDossierVersionAndCompletionStatus(
-            String caseId, int dossierVersion, String completionStatus);
 }

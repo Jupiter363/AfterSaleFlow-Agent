@@ -46,6 +46,8 @@ export const disputeApi = {
       method: "POST",
       body: JSON.stringify(command),
     }),
+  intakeStatus: (actor, caseId) =>
+    apiRequest(`/disputes/${caseId}/intake/status`, actor),
   cancelIntake: (actor, caseId, reason = "") =>
     apiRequest(`/disputes/${caseId}/intake/cancel`, actor, {
       method: "POST",

@@ -5,7 +5,6 @@ from app.business.api.final_agents import (
     DeliberationAgent,
     EvidenceAgent,
     FinalAgentServices,
-    HearingAgent,
     ReviewCopilotAgent,
 )
 
@@ -14,6 +13,5 @@ __all__ = [
     "DeliberationAgent",
     "EvidenceAgent",
     "FinalAgentServices",
-    "HearingAgent",
     "ReviewCopilotAgent",
 ]

@@ -20,7 +20,12 @@ const IDENTITY_NAMES = {
   "AI 法官": "小正",
   "AI 评审员": "小察",
   "审核解释官": "小译",
+  "外部案件导入助手": "助手",
 };
+
+const NAME_IDENTITIES = Object.fromEntries(
+  Object.entries(IDENTITY_NAMES).map(([identity, name]) => [name, identity]),
+);
 
 function normalizedRole(role) {
   return String(role || "").trim().toUpperCase();
@@ -33,14 +38,50 @@ export function agentSpeakerPresentation(role, fallbackIdentity = "数字人") {
   };
 }
 
+export function agentSpeakerPresentationForIdentity(identity) {
+  const normalizedIdentity = String(identity || "数字人").trim() || "数字人";
+  const parts = normalizedIdentity
+    .split(/\s*[·•]\s*/u)
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  if (parts.length === 2 && NAME_IDENTITIES[parts[0]]) {
+    return { identity: parts[1], name: parts[0] };
+  }
+
+  return {
+    identity: normalizedIdentity,
+    name: IDENTITY_NAMES[normalizedIdentity] || "助手",
+  };
+}
+
+export function agentSpeakerTone(role, identity = "") {
+  const normalizedIdentity = String(identity).toUpperCase();
+  if (/接待|受理/u.test(normalizedIdentity)) return "intake";
+  if (/书记官|证据/u.test(normalizedIdentity)) return "evidence";
+  if (/法官|裁决/u.test(normalizedIdentity)) return "judge";
+  if (/评审员|评审团|陪审/u.test(normalizedIdentity)) return "jury";
+  if (/审核解释|审核辅助/u.test(normalizedIdentity)) return "review";
+  if (/导入|引导/u.test(normalizedIdentity)) return "guide";
+
+  const normalized = normalizedRole(role);
+  if (/INTAKE|CUSTOMER_SERVICE/u.test(normalized)) return "intake";
+  if (/EVIDENCE/u.test(normalized)) return "evidence";
+  if (/JUDGE/u.test(normalized)) return "judge";
+  if (/JURY/u.test(normalized)) return "jury";
+  if (/REVIEW/u.test(normalized)) return "review";
+  if (/GUIDE/u.test(normalized)) return "guide";
+  return "default";
+}
+
 export function agentSpeakerLine(role, fallbackIdentity = "数字人") {
   const presentation = agentSpeakerPresentation(role, fallbackIdentity);
-  return `${presentation.identity} · ${presentation.name} 正常发言：`;
+  return `${presentation.identity} ${presentation.name} 正常发言：`;
 }
 
 export function agentSpeakerLineForIdentity(identity) {
-  const normalizedIdentity = String(identity || "数字人");
-  return `${normalizedIdentity} · ${IDENTITY_NAMES[normalizedIdentity] || "助手"} 正常发言：`;
+  const presentation = agentSpeakerPresentationForIdentity(identity);
+  return `${presentation.identity} ${presentation.name} 正常发言：`;
 }
 
 export function streamCardPresentation({
@@ -52,9 +93,11 @@ export function streamCardPresentation({
 } = {}) {
   const operationCode = String(operation || "").toUpperCase();
   const node = String(nodeName || "").toLowerCase();
-  const field = String(fieldPath || "");
 
-  if (field.endsWith("public_message") || node.includes("unified_jury")) {
+  if (
+    operationCode === "HEARING_JURY_REVIEW" ||
+    node === "hearing_jury_review"
+  ) {
     return {
       key: "jury-review",
       senderRole: "JURY_PANEL",
@@ -62,7 +105,10 @@ export function streamCardPresentation({
     };
   }
 
-  if (node === "adjudication_draft_node") {
+  if (
+    operationCode === "HEARING_JUDGE_V1" ||
+    node === "hearing_judge_v1"
+  ) {
     return {
       key: "adjudication-draft",
       senderRole: "PRESIDING_JUDGE",
@@ -70,11 +116,36 @@ export function streamCardPresentation({
     };
   }
 
-  if (node === "issue_framing_node") {
+  if (
+    operationCode === "HEARING_JUDGE_V2" ||
+    node === "hearing_judge_v2"
+  ) {
     return {
-      key: "default",
+      key: "adjudication-draft-v2",
       senderRole: "PRESIDING_JUDGE",
       ...agentSpeakerPresentation("PRESIDING_JUDGE"),
+    };
+  }
+
+  if (
+    operationCode.startsWith("HEARING_INTAKE_") ||
+    node.startsWith("hearing_intake_")
+  ) {
+    return {
+      key: "default",
+      senderRole: "INTAKE_OFFICER",
+      ...agentSpeakerPresentation("INTAKE_OFFICER"),
+    };
+  }
+
+  if (
+    operationCode.startsWith("HEARING_EVIDENCE_") ||
+    node.startsWith("hearing_evidence_")
+  ) {
+    return {
+      key: "default",
+      senderRole: "EVIDENCE_CLERK",
+      ...agentSpeakerPresentation("EVIDENCE_CLERK"),
     };
   }
 

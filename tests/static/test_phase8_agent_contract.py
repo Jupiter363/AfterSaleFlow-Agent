@@ -28,20 +28,23 @@ def test_python_agent_dependencies_and_container_are_formal() -> None:
 # 具体功能：`test_all_c1_to_c6_nodes_and_conditional_gap_path_exist` 验证被测业务场景在固定案例中的输出、边界和失败行为；关键协作调用：`read_text`、`is_file`。
 # 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 协作调用 `read_text`、`is_file`。
 # 系统意义：固定“跨服务契约测试 > test_phase8_agent_contract”的可观察契约，防止后续重构改变业务结果。
-def test_all_c1_to_c6_nodes_and_conditional_gap_path_exist() -> None:
-    graph = (APP / "graph.py").read_text(encoding="utf-8")
-    for node in (
-        "issue_framing_node",
-        "evidence_gap_request_node",
-        "party_liaison_node",
-        "evidence_cross_check_node",
-        "rule_application_node",
-        "adjudication_draft_node",
-    ):
-        assert node in graph
-        assert (APP / "prompts" / f"{node}.md").is_file()
-    assert "add_conditional_edges" in graph
-    assert "requires_supplemental_evidence" in graph
+def test_all_hearing_flow_v2_operations_and_prompts_exist() -> None:
+    workflow = (APP / "agents" / "hearing_flow.py").read_text(encoding="utf-8")
+    prompt_root = APP / "agents" / "prompts"
+    operations = {
+        "intake_questions": prompt_root / "dispute_intake_officer" / "hearing_intake_questions.md",
+        "intake_synthesis": prompt_root / "dispute_intake_officer" / "hearing_intake_synthesis.md",
+        "evidence_requests": prompt_root / "evidence_clerk" / "hearing_evidence_requests.md",
+        "evidence_synthesis": prompt_root / "evidence_clerk" / "hearing_evidence_synthesis.md",
+        "judge_v1": prompt_root / "presiding_judge" / "hearing_judge_v1.md",
+        "jury_review": prompt_root / "deliberation_panel" / "hearing_jury_review.md",
+        "judge_v2": prompt_root / "presiding_judge" / "hearing_judge_v2.md",
+    }
+    for operation, prompt in operations.items():
+        assert f"def {operation}(" in workflow
+        assert prompt.is_file()
+    assert "ThreadPoolExecutor" in workflow
+    assert "hearing_flow.v2" in workflow
 
 
 # 所属模块：跨服务契约测试 > test_phase8_agent_contract；函数角色：回归测试用例。
@@ -49,14 +52,14 @@ def test_all_c1_to_c6_nodes_and_conditional_gap_path_exist() -> None:
 # 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 协作调用 `read_text`。
 # 系统意义：固定“跨服务契约测试 > test_phase8_agent_contract”的可观察契约，防止后续重构改变业务结果。
 def test_agent_output_is_non_final_and_forced_to_human_review() -> None:
-    schemas = (APP / "schemas" / "models.py").read_text(encoding="utf-8")
+    schemas = (APP / "schemas" / "hearing_flow.py").read_text(encoding="utf-8")
     assert 'requires_human_review: Literal[True] = True' in schemas
     assert 'is_final_decision: Literal[False] = False' in schemas
     assert 'draft_status: Literal["PENDING_HUMAN_REVIEW"]' in schemas
 
-    workflow = (APP / "workflow.py").read_text(encoding="utf-8")
-    assert "MANUAL_REVIEW_REQUIRED" in workflow
-    assert "AGENT_OUTPUT_SCHEMA_INVALID" in workflow
+    workflow = (APP / "agents" / "hearing_flow.py").read_text(encoding="utf-8")
+    assert '"is_final_decision": False' in workflow
+    assert '"hearing_judge_v2"' in workflow
 
 
 # 所属模块：跨服务契约测试 > test_phase8_agent_contract；函数角色：回归测试用例。
@@ -82,7 +85,19 @@ def test_agent_has_no_execution_tool_and_masks_trace_inputs() -> None:
 def test_agent_api_and_langfuse_headless_keys_are_wired() -> None:
     main = (APP / "main.py").read_text(encoding="utf-8")
     assert "/internal/agents/intake/analyze" in main
-    assert "/internal/agents/hearing/run-stage" in main
+    for route in (
+        "/internal/agents/hearing-flow/intake/questions/stream",
+        "/internal/agents/hearing-flow/intake/synthesis/stream",
+        "/internal/agents/hearing-flow/evidence/requests/stream",
+        "/internal/agents/hearing-flow/evidence/synthesis/stream",
+        "/internal/agents/hearing-flow/judge/v1/stream",
+        "/internal/agents/hearing-flow/jury/review/stream",
+        "/internal/agents/hearing-flow/judge/v2/stream",
+    ):
+        assert route in main
+    assert "/internal/agents/hearing/run-stage" not in main
+    assert "/internal/agents/hearing/round-turn" not in main
+    assert "/internal/agents/legacy/hearing/analyze" not in main
     assert "X-Service-Secret" in main
 
     compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")

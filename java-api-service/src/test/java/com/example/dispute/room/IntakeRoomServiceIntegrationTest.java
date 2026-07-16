@@ -13,7 +13,6 @@ import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.config.DisputeProperties;
 import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.RiskLevel;
-import com.example.dispute.hearing.application.HearingRoundService;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.notification.application.NotificationService;
@@ -127,7 +126,6 @@ class IntakeRoomServiceIntegrationTest {
     @MockitoBean private AccessSessionResolver accessSessionResolver;
     @MockitoBean private SessionPermissionService sessionPermissionService;
     @MockitoBean private EvidenceAgentTurnService evidenceAgentTurnService;
-    @MockitoBean private HearingRoundService hearingRoundService;
 
     // 所属模块：【房间协作与权限 / 自动化测试层】「IntakeRoomServiceIntegrationTest.acceptedIntakePersistsParticipantsRoomsAndTheAuthoritativeDeadline()」。
     // 具体功能：「IntakeRoomServiceIntegrationTest.acceptedIntakePersistsParticipantsRoomsAndTheAuthoritativeDeadline()」：复现“核对完整业务行为（场景方法「acceptedIntakePersistsParticipantsRoomsAndTheAuthoritativeDeadline」）”场景：驱动 「caseRepository.saveAndFlush」、「service.confirm」、「caseRepository.flush」、「caseRepository.findById」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_INTEGRATION」、「ORDER-INTEGRATION」、「LOG-INTEGRATION」、「user-local」。

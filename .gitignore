@@ -8,6 +8,7 @@ tmp/
 .local-dev/
 .codex-run/
 .codex/figma-previews/
+.codex/config.toml
 .idea/
 .vscode/
 .DS_Store

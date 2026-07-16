@@ -82,6 +82,12 @@ class EvidenceCatalogServiceTest {
         assertThat(catalog.items().getFirst().redacted()).isFalse();
         assertThat(catalog.items().getFirst().contentUrl())
                 .contains("/api/disputes/CASE_CATALOG_TEST/evidence/EVIDENCE_SHARED/content");
+        assertThat(catalog.items().getFirst().claimedFact())
+                .isEqualTo("物流截图用于证明包裹签收状态");
+        assertThat(catalog.items().getFirst().truthAttested()).isTrue();
+        assertThat(catalog.items().getFirst().attestationScope())
+                .containsExactly("AUTHENTICITY", "CLAIMED_FACT_RELEVANCE");
+        assertThat(catalog.items().getFirst().partyCapacity()).isEqualTo("INITIATOR");
     }
 
     // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceCatalogServiceTest.evidenceRoomCatalogKeepsCounterpartyEvidenceHiddenBeforeHearing()」。
@@ -150,7 +156,7 @@ class EvidenceCatalogServiceTest {
     // 下游影响：「EvidenceCatalogServiceTest.evidence(String)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
     // 系统意义：「EvidenceCatalogServiceTest.evidence(String)」守住「证据与版本化卷宗」的可执行规格，尤其防止 「EVIDENCE_SHARED」、「CASE_CATALOG_TEST」、「DOSSIER_1」、「LOGISTICS_PROOF」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static EvidenceItemEntity evidence(String visibility) {
-        return EvidenceItemEntity.uploaded(
+        EvidenceItemEntity evidence = EvidenceItemEntity.uploaded(
                 "EVIDENCE_SHARED",
                 "CASE_CATALOG_TEST",
                 "DOSSIER_1",
@@ -166,6 +172,17 @@ class EvidenceCatalogServiceTest {
                 128,
                 visibility,
                 OffsetDateTime.parse("2026-07-08T00:00:00Z"));
+        evidence.recordSubmissionDeclaration(
+                """
+                {"claimed_fact":"物流截图用于证明包裹签收状态","truth_attested":true,
+                "attestation_version":"EVIDENCE_TRUTH_ATTESTATION_V1",
+                "attestation_scope":["AUTHENTICITY","CLAIMED_FACT_RELEVANCE"],
+                "party_capacity":"INITIATOR",
+                "forgery_consequence_code":"REJECT_INITIATOR_CLAIMS_AND_REPUTATION_PENALTY",
+                "enforcement_gate":"HUMAN_CONFIRMED_FORGERY_REQUIRED"}
+                """,
+                "user-local");
+        return evidence;
     }
 
     // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceCatalogServiceTest.dispute(CaseStatus,String)」。

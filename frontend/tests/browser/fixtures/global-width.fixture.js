@@ -183,23 +183,30 @@ function evidenceCatalog(caseId) {
 // 业务位置：【前端浏览器回归测试】hearingSnapshot：围绕 庭审轮次和法官发言 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 function hearingSnapshot() {
   return {
-    rounds: [
-      {
-        round_id: "ROUND_GLOBAL_1",
-        round_no: 1,
-        status: "OPEN",
-        dossier_version: 1,
-        round_deadline_at: futureDeadline,
-        submitted_roles: [],
-        current_actor_submitted: false,
-        summary_json: JSON.stringify({
-          judge: "请双方围绕签收记录说明事实。",
-        }),
-      },
-    ],
+    flow_schema_version: "hearing_flow.v2",
+    question_set: {
+      schema_version: "hearing_question_set.v1",
+      question_set_id: "HEARING_QUESTION_SET_GLOBAL",
+      questions: [
+        {
+          question_id: "HEARING_QUESTION_GLOBAL_1",
+          fact_ids: ["FACT_DELIVERY_GLOBAL"],
+          target_roles: ["USER", "MERCHANT"],
+          question_text: "请双方围绕签收记录说明事实。",
+        },
+      ],
+    },
+    evidence_request_set: null,
     settlements: [],
     status: {
-      hearing_phase: "ROUNDS_ACTIVE",
+      flow_schema_version: "hearing_flow.v2",
+      flow_stage: "PARTY_ANSWERS_OPEN",
+      stage_sequence: 5,
+      stage_deadline_at: futureDeadline,
+      party_statuses: {
+        USER: { submission_status: "PENDING" },
+        MERCHANT: { submission_status: "PENDING" },
+      },
       can_complete_hearing: false,
       review_gate_ready: false,
     },
@@ -214,7 +221,6 @@ function hearingMessages() {
       sequence_no: 1,
       sender_role: "JUDGE",
       message_type: "AGENT_MESSAGE",
-      hearing_round: 1,
       message_text: "小法庭已开启，请围绕签收争点陈述。",
       created_at: serverNow,
     },

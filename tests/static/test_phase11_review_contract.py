@@ -19,26 +19,28 @@ def read(path: Path) -> str:
 def test_review_api_and_real_human_gate_exist() -> None:
     controller = read(JAVA / "review" / "api" / "ReviewController.java")
     service = read(JAVA / "review" / "application" / "ReviewApplicationService.java")
-    workflow = read(JAVA / "workflow" / "temporal" / "CaseFulfillmentDisputeWorkflowImpl.java")
     for path in ('"/{taskId}/packet"', '"/{taskId}/decision"'):
         assert path in controller
     assert "autoApprove" in read(JAVA / "review" / "domain" / "ApprovalPolicyDecision.java")
     assert "false" in read(JAVA / "review" / "domain" / "ApprovalPolicyEngine.java")
-    assert "WAITING_HUMAN_REVIEW" in workflow
-    assert "CUSTOMER_SERVICE" in service and "assertCanDecide" in service
+    assert "PlatformReviewerAuthorization.requireDecisionAccess(actor)" in service
+    assert "postReviewOrchestration.orchestrate(" in service
     assert "originalPlanJson" in read(JAVA / "infrastructure" / "persistence" / "entity" / "ApprovalRecordEntity.java")
 
 # 所属模块：跨服务契约测试 > test_phase11_review_contract；函数角色：回归测试用例。
 # 具体功能：`test_all_review_actions_and_temporal_evidence_return_are_supported` 验证当前可见证据在固定案例中的输出、边界和失败行为。
 # 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 本文件的 `read`。
 # 系统意义：固定“跨服务契约测试 > test_phase11_review_contract”的可观察契约，防止后续重构改变业务结果。
-def test_all_review_actions_and_temporal_evidence_return_are_supported() -> None:
+def test_all_review_actions_and_evidence_return_are_supported() -> None:
     decision = read(JAVA / "domain" / "model" / "ApprovalDecisionType.java")
-    workflow = read(JAVA / "workflow" / "temporal" / "CaseFulfillmentDisputeWorkflowImpl.java")
+    service = read(JAVA / "review" / "application" / "ReviewApplicationService.java")
+    orchestration = read(
+        JAVA / "review" / "application" / "PostReviewOrchestrationService.java"
+    )
     for action in ("APPROVE", "MODIFY_AND_APPROVE", "REJECT", "REQUEST_MORE_EVIDENCE", "ESCALATE_MANUAL"):
         assert action in decision
-    assert "REQUEST_MORE_EVIDENCE" in workflow
-    assert "Workflow.await(" in workflow
+    assert "case REQUEST_MORE_EVIDENCE" in service
+    assert '"WAITING_EVIDENCE"' in orchestration
 
 # 所属模块：跨服务契约测试 > test_phase11_review_contract；函数角色：回归测试用例。
 # 具体功能：`test_reviewer_frontend_is_backend_driven_and_role_gated` 验证人工复核信息在固定案例中的输出、边界和失败行为。

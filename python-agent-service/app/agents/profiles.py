@@ -116,11 +116,10 @@ def final_agent_profiles() -> dict[str, AgentProfile]:
             states={"FULL_HEARING", "DRAFT_REVISION"},
             scopes={"frozen_dossier", "party_claims", "rules", "hearing"},
             skills={
-                "issue_framing",
-                "evidence_gap",
-                "evidence_cross_check",
-                "rule_application",
-                "draft_generation",
+                "trial_dossier_review",
+                "judge_v1_drafting",
+                "jury_revision_response",
+                "judge_v2_drafting",
             },
             tools={
                 "evidence_dossier.read",
@@ -129,7 +128,7 @@ def final_agent_profiles() -> dict[str, AgentProfile]:
                 "rule_version.read",
             },
             budget=_budget(8, 15, 4, 120),
-            output_schema="HearingAnalysisResult",
+            output_schema="HearingJudgeV2Result",
         ),
         "review_copilot": _profile(
             "review-copilot",

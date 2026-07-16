@@ -36,8 +36,7 @@ class DisputePropertiesTest {
                 .withPropertyValues(
                         "dispute.evidence-window=PT2H",
                         "dispute.hearing-window=PT3H",
-                        "dispute.hearing-round-window=PT5M",
-                        "dispute.max-hearing-rounds=3",
+                        "dispute.hearing-party-stage-window=PT20M",
                         "dispute.sse-heartbeat=PT15S",
                         "dispute.seed-demo-disputes=true")
                 .run(
@@ -49,9 +48,8 @@ class DisputePropertiesTest {
                                     .isEqualTo(Duration.ofHours(2));
                             assertThat(properties.hearingWindow())
                                     .isEqualTo(Duration.ofHours(3));
-                            assertThat(properties.hearingRoundWindow())
-                                    .isEqualTo(Duration.ofMinutes(5));
-                            assertThat(properties.maxHearingRounds()).isEqualTo(3);
+                            assertThat(properties.hearingPartyStageWindow())
+                                    .isEqualTo(Duration.ofMinutes(20));
                             assertThat(properties.sseHeartbeat())
                                     .isEqualTo(Duration.ofSeconds(15));
                             assertThat(properties.seedDemoDisputes()).isTrue();
@@ -69,8 +67,7 @@ class DisputePropertiesTest {
                 .withPropertyValues(
                         "dispute.evidence-window=PT0S",
                         "dispute.hearing-window=PT3H",
-                        "dispute.hearing-round-window=PT5M",
-                        "dispute.max-hearing-rounds=6",
+                        "dispute.hearing-party-stage-window=PT20M",
                         "dispute.sse-heartbeat=PT15S")
                 .run(context -> assertThat(context).hasFailed());
     }

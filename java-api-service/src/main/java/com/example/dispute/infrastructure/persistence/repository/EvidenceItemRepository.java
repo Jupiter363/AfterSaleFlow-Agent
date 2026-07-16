@@ -37,12 +37,6 @@ public interface EvidenceItemRepository extends JpaRepository<EvidenceItemEntity
     List<EvidenceItemEntity>
             findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(String caseId);
 
-    // 所属模块：【PostgreSQL 事实模型 / 仓储接口层】「EvidenceItemRepository.countByCaseIdAndSubmittedByRoleAndSubmissionStatusAndDeletedAtIsNull(String,String,EvidenceSubmissionStatus)」。
-    // 具体功能：「EvidenceItemRepository.countByCaseIdAndSubmittedByRoleAndSubmissionStatusAndDeletedAtIsNull(String,String,EvidenceSubmissionStatus)」：声明按案件标识、Submitted按角色、提交状态、DeletedAtIs空值访问证据Item的 Spring Data 查询，由框架根据方法签名生成 SQL，并以「long」返回。
-    // 上游调用：「EvidenceItemRepository.countByCaseIdAndSubmittedByRoleAndSubmissionStatusAndDeletedAtIsNull(String,String,EvidenceSubmissionStatus)」的上游调用点包括 「EvidenceCompletionService.assertInitiatorHasSubmittedEvidence」、「EvidenceCompletionServiceTest.bothPartyCompletionsSealEvidenceEarlyAndOpenTheThreeHourHearing」、「EvidenceCompletionServiceTest.repeatedCompletionByTheSameRoleUsesTheExistingPhaseConfirmation」、「EvidenceCompletionServiceTest.initiatorCannotCompleteEvidenceWithoutSubmittedEvidence」。
-    // 下游影响：「EvidenceItemRepository.countByCaseIdAndSubmittedByRoleAndSubmissionStatusAndDeletedAtIsNull(String,String,EvidenceSubmissionStatus)」的下游由 接口实现 接管，并把返回值交还当前模块调用方。
-    // 系统意义：「EvidenceItemRepository.countByCaseIdAndSubmittedByRoleAndSubmissionStatusAndDeletedAtIsNull(String,String,EvidenceSubmissionStatus)」直接影响 PostgreSQL 事实投影；实体记录是 API 查询投影和审计依据，写入必须服从上层事务与状态机
-    // Java 语法：接口方法以分号结束，只声明契约；运行时执行实现类中的同签名方法。
-    long countByCaseIdAndSubmittedByRoleAndSubmissionStatusAndDeletedAtIsNull(
-            String caseId, String submittedByRole, EvidenceSubmissionStatus submissionStatus);
+    long countByCaseIdAndSubmittedByIdAndSubmissionStatusAndDeletedAtIsNull(
+            String caseId, String submittedById, EvidenceSubmissionStatus submissionStatus);
 }

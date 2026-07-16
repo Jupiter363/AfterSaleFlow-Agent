@@ -169,6 +169,9 @@ class EvidenceApiIntegrationTest {
         multipart.add("evidence_type", "LOGISTICS_PROOF");
         multipart.add("source_type", "USER_UPLOAD");
         multipart.add("visibility", "PARTIES");
+        multipart.add("claimed_fact", "物流截图用于证明包裹签收状态");
+        multipart.add("truth_attested", "true");
+        multipart.add("occurred_at", "2026-07-14T10:05:00+08:00");
         HttpHeaders headers = actorHeaders(MediaType.MULTIPART_FORM_DATA);
 
         ResponseEntity<Map> uploaded =
@@ -183,7 +186,8 @@ class EvidenceApiIntegrationTest {
         assertThat(evidence)
                 .containsEntry("content_type", "image/png")
                 .containsEntry("parse_status", "PENDING")
-                .containsEntry("desensitized", false);
+                .containsEntry("desensitized", false)
+                .containsEntry("occurred_at", "2026-07-14T02:05:00Z");
         assertThat(evidenceRepository.count()).isEqualTo(1);
 
         ResponseEntity<Map> callback =
