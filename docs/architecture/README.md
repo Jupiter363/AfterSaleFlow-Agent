@@ -1,24 +1,28 @@
-# 架构说明
+# 架构与文档入口
 
-权威需求来自 `Project Plan` 中的主控开发文档、统一配置说明和最终验收清单。
+## 当前权威文档
 
-系统保持以下不可绕过的链路：
+- [当前房间功能基线](../acceptance/current-room-function-baseline.md)：重构前六站旅程、
+  权限、Agent 行为、状态推进、持久化事实和 99 个稳定回归编号。
+- [Temporal-first Agent Platform Architecture](./temporal-first-agent-platform.md)：面向
+  1,000 个并发活跃房间的目标架构与分阶段迁移方案。
+- [Temporal-first 生产验证清单](../acceptance/temporal-first-agent-platform-verification-checklist.md)：
+  P0/P1/P2 发布门禁、容量、故障注入、安全和灾备证据要求。
+- [Hearing Flow V2 合同](../contracts/hearing-flow-v2.md)：当前固定 15 阶段庭审及其对象、
+  接口和不可变约束。
 
-```text
-Case Intake
-  -> Evidence Dossier
-  -> Router
-  -> A/B/C 业务路径
-  -> D Remedy Planner
-  -> Approval Policy
-  -> Platform Human Review
-  -> Tool Executor
-  -> Case Closure
-  -> Offline Evaluation
-```
+当前实现事实与目标架构必须分开阅读：现状以功能基线和代码为准，迁移终态以
+Temporal-first 架构为准。任何重构既要通过目标架构门禁，也不能破坏现状回归编号。
 
-- Java + Temporal 控制全局状态、等待、Signal、审批和执行。
-- Python + LangGraph 只分析证据并生成非最终草案。
-- Agent 不直接执行退款、补发、关闭售后等动作。
-- Tool Executor 只执行审核后快照中的动作。
-- Evaluation Agent 只分析 closed case，不改变在线 Case、规则或 Prompt。
+## 工程与运行文档
+
+- [API 约定](../api/README.md)
+- [数据库说明](../database/README.md)
+- [部署说明](../deployment/README.md)
+- [发布说明](../release/README.md)
+
+## 历史归档
+
+旧三轮庭审、C1-C6、早期验收和一次性模型实测资料已移出 `docs`，统一保存在
+[2026-07-17 前置架构历史文档](../../archive/legacy-docs/2026-07-17-pre-temporal/README.md)。
+归档资料不再作为实现或发布依据。

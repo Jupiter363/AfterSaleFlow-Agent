@@ -1,17 +1,19 @@
 # AI Native 履约争端审理系统
 
-这是一个面向用户与商家履约争端的 AI Native 审理协作系统。Agent Runtime Harness
-约束 Agent 的身份、上下文、记忆、Skill、工具、循环、输出与 Guardrail；Java 与
-Temporal 维护业务事实和可靠流程；Platform Human Review 承担最终责任；
-Tool Executor 只执行经过审批、参数冻结且具备幂等保护的确定性动作。
+这是一个面向用户与商家履约争端的 AI Native 审理协作系统。Java 与 PostgreSQL
+维护权限、消息、证据、裁决、审核、执行和审计领域账本；Temporal 当前负责持久化
+举证窗口，并按目标架构逐步接管房间时间、等待和失败恢复；Python Agent Runtime
+Harness 约束 Agent 的身份、上下文、记忆、Skill、模型执行、输出和 Guardrail。
 
 ## 核心边界
 
 - 非争端请求只转交外部系统，并在本系统终止。
-- 简易审理和完整审理最终都进入 Remedy Planner、审批、人审和确定性执行。
+- 当前用户旅程为接待、证据、`hearing_flow.v2`、裁决草案、人工终审和执行结果。
+- 接待和证据使用受治理的单轮 LangGraph；跨回合业务事实仍由 Java 持久化。
+- 庭审当前由 Java 持有固定 15 阶段流程，Python 提供七个独立模型操作。
 - Agent 不直接退款、补发、驳回或关闭售后。
-- AI 主审官 C1-C6 只生成非最终裁决草案，Remedy Planner 只规划动作。
-- 高风险案件按需启动 AI Deliberation Panel，评议报告不能批准案件。
+- 裁决链固定为 Judge V1、Jury Review、Judge V2；V2 仍是非最终草案。
+- 平台人工终审承担最终责任，Tool Executor 只执行已批准、哈希绑定且幂等的动作快照。
 - 未审批动作不能执行；执行快照、失败和重试均可追溯。
 - Evaluation Agent 只离线分析 closed case。
 - 当前版本不实现申诉/复审，不引入 Kubernetes、Kafka、MCP 或向量数据库。
@@ -20,9 +22,9 @@ Tool Executor 只执行经过审批、参数冻结且具备幂等保护的确定
 
 | 服务 | 职责 | 本地端口 |
 |---|---|---:|
-| `frontend` | Case、补证、证据、审核、执行与审计页面 | 5173 |
-| `java-api-service` | 业务事实源、REST API、Temporal Worker、审批和执行 | 8080 |
-| `python-agent-service` | Intake、C1-C6、Evaluation Agent | 18000 |
+| `frontend` | 六站争议旅程、房间交互、审核与结果投影 | 5173 |
+| `java-api-service` | 领域账本、REST/SSE、当前庭审流程、Temporal Worker、审批和执行 | 8080 |
+| `python-agent-service` | 接待/证据 LangGraph、庭审模型操作、审核 Copilot 和离线评估 | 18000 |
 | `ocr-parser-service` | 图片、PDF、Word、Excel 解析 | 18010 |
 | `postgresql` | 业务、审计、Temporal、Langfuse、LiteLLM 数据 | 15432 |
 | `redis` | 短期状态、缓存和执行锁 | 16379 |
@@ -82,4 +84,6 @@ docker compose up -d --build
 - [部署文档](docs/deployment/README.md)
 - [API 文档](docs/api/README.md)
 - [架构说明](docs/architecture/README.md)
+- [当前房间功能基线](docs/acceptance/current-room-function-baseline.md)
+- [Temporal-first 生产验证清单](docs/acceptance/temporal-first-agent-platform-verification-checklist.md)
 - [数据说明](docs/database/README.md)
