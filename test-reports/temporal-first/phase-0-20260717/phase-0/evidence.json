@@ -1,0 +1,126 @@
+{
+  "schema_version": "temporal-first-phase-evidence.v1",
+  "release_id": "phase-0-20260717",
+  "phase": 0,
+  "gate": "MIG-000",
+  "status": "PASS",
+  "evaluated_head": "7f84dfa13ca530435f5cf8f758f3994ce69f3ef3",
+  "source_commits": [
+    "04c7d384",
+    "022342cc",
+    "19651d12",
+    "7f84dfa13ca530435f5cf8f758f3994ce69f3ef3"
+  ],
+  "evaluated_at": "2026-07-17T14:08:33+08:00",
+  "approval": {
+    "status": "ACCEPTED",
+    "approved_by": "project_owner",
+    "approval_ref": "Codex task plan approval on 2026-07-17"
+  },
+  "gate_criteria": [
+    {
+      "criterion": "Six authority, delivery, AgentRun, Graph, release, topology, security, tool and DR ADRs are accepted",
+      "status": "PASS",
+      "evidence": "docs/architecture/adr/0001-process-domain-cognitive-authority.md through 0006-production-topology-security-and-dr.md"
+    },
+    {
+      "criterion": "SLO and retry taxonomy are versioned and accepted",
+      "status": "PASS",
+      "evidence": "docs/architecture/temporal-first-slo.md; docs/contracts/retry-taxonomy.md"
+    },
+    {
+      "criterion": "Every formal state category has one target writer and rollback never revives a competing writer in the same epoch",
+      "status": "PASS",
+      "evidence": "ADR 0001 writer matrix; ADR 0002 fencing; ADR 0005 rollback"
+    },
+    {
+      "criterion": "Seven fail-closed JSON Schemas, compatibility limits, positive/negative fixtures and RFC 8785 vectors are shared",
+      "status": "PASS",
+      "evidence": "contracts/agent-platform/v1; java-contracts.xml; python-contracts.xml"
+    },
+    {
+      "criterion": "Java records/codec and Python Pydantic/codec accept and reject the same shared fixtures",
+      "status": "PASS",
+      "evidence": "java-contracts.xml; python-contracts.xml"
+    },
+    {
+      "criterion": "All 279 architecture Check IDs, 99 current behavior IDs and 12 GAP IDs are unique and mapped",
+      "status": "PASS",
+      "evidence": "traceability.xml"
+    }
+  ],
+  "test_runs": [
+    {
+      "name": "Java shared contract codec",
+      "command": "java-api-service/mvnw.cmd -Dtest=AgentPlatformContractV1Test test",
+      "tests": 20,
+      "failures": 0,
+      "errors": 0,
+      "report": "java-contracts.xml",
+      "report_sha256": "89c7be2a4ef26fc147e0996556ddcb8948539dc036a4388847808c2f7ba64aec"
+    },
+    {
+      "name": "Python shared contract codec in isolated venv",
+      "command": "python -m pytest tests/contracts/test_agent_platform_v1.py -q",
+      "tests": 20,
+      "failures": 0,
+      "errors": 0,
+      "dependency_check": "pip check: No broken requirements found",
+      "report": "python-contracts.xml",
+      "report_sha256": "a4fdb00be7ce01bcbb4913d78cc01f3bea270b2b1f0c255bc98b3bf1f72a117c"
+    },
+    {
+      "name": "Phase 0 traceability and schema fixtures",
+      "command": "python -m pytest tests/static/test_temporal_refactor_traceability.py tests/static/test_agent_platform_schema_contracts.py -q",
+      "tests": 7,
+      "failures": 0,
+      "errors": 0,
+      "report": "traceability.xml",
+      "report_sha256": "1d17220ecc22f03eae6e99c5c5a9c85e1dab21fae94007a16d3befc834830715"
+    },
+    {
+      "name": "Python contract static style",
+      "command": "ruff check --select I app/contracts tests/contracts/test_agent_platform_v1.py && ruff check app/contracts tests/contracts/test_agent_platform_v1.py && ruff format --check app/contracts tests/contracts/test_agent_platform_v1.py",
+      "status": "PASS"
+    }
+  ],
+  "contract_decisions": {
+    "evidence_room_batch": "1-100 approved; Hearing supplemental batch remains 0-50",
+    "tenant_authority": "Java-issued non-PII tenant surrogate",
+    "temporal_production": "Temporal Cloud default with multi-AZ and acknowledged-event RPO 0 requirement",
+    "invocation_security": "mTLS plus ES256 envelope, 60-second maximum lifetime and durable nonce check",
+    "tool_retry": "No automatic retry without external idempotency key, status query and compensation or manual recovery",
+    "data_retention": "Classified lifecycle policy with at least 24-hour hot stream retention"
+  },
+  "deferred_runtime_enforcement": [
+    {
+      "rule": "A command deadline must still be valid at durable acceptance and invocation",
+      "phase": "P1/P3",
+      "owner": "Java/Python gateway",
+      "reason": "Audit and replay decoding must remain able to read an expired historical command"
+    },
+    {
+      "rule": "The same command ID with a different canonical hash is a conflict",
+      "phase": "P1/P3",
+      "owner": "Java command ledger/Python graph command ledger",
+      "reason": "Conflict detection requires durable prior state, not a stateless schema codec"
+    },
+    {
+      "rule": "Tenant, actor, room epoch, thread and capability bindings match current authority",
+      "phase": "P1/P3",
+      "owner": "Java authorization/signed Python invocation gateway",
+      "reason": "Binding validation requires authenticated authority and nonce state"
+    }
+  ],
+  "check_status": {
+    "MIG-000": "PASS",
+    "ARCH-CONTRACT-REL-RUNTIME-CHECKS": "TODO",
+    "MIG-001..008": "TODO",
+    "GATE-001..010": "TODO"
+  },
+  "non_claims": [
+    "No Workflow, database migration, business writer, scheduler, frontend or production deployment changed in Phase 0",
+    "No full regression, Docker, E2E, load, chaos, security or DR gate was run",
+    "Phase 0 contract success does not mark ARCH-001..011 or later migration gates as implemented"
+  ]
+}
