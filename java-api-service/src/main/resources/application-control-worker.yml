@@ -1,0 +1,15 @@
+spring:
+  main:
+    lazy-initialization: true
+    web-application-type: none
+
+app:
+  temporal:
+    worker:
+      enabled: true
+      role: CONTROL
+      deployment-name: after-sale-control
+
+dispute:
+  scheduling:
+    enabled: false

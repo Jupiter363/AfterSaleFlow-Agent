@@ -5,6 +5,7 @@ import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
 import com.example.dispute.workflow.infrastructure.persistence.entity.CaseRoomEpochEntity;
 import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.EpochLifecycleStatus;
 import jakarta.persistence.LockModeType;
+import java.time.OffsetDateTime;
 import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
@@ -28,6 +29,24 @@ public interface CaseRoomEpochRepository extends JpaRepository<CaseRoomEpochEnti
             "select epoch from CaseRoomEpochEntity epoch where epoch.temporalWorkflowId = :temporalWorkflowId")
     Optional<CaseRoomEpochEntity> findByTemporalWorkflowIdForUpdate(
             @Param("temporalWorkflowId") String temporalWorkflowId);
+
+    @Query(
+            """
+            select epoch
+              from CaseRoomEpochEntity epoch
+             where epoch.tenantSurrogate = :tenantSurrogate
+               and epoch.caseId = :caseId
+               and epoch.roomType = :roomType
+               and epoch.activatedAt <= :occurredAt
+               and (epoch.terminalAt is null or epoch.terminalAt >= :occurredAt)
+             order by epoch.roomEpoch desc
+            """)
+    List<CaseRoomEpochEntity> findEpochAt(
+            @Param("tenantSurrogate") String tenantSurrogate,
+            @Param("caseId") String caseId,
+            @Param("roomType") RoomType roomType,
+            @Param("occurredAt") OffsetDateTime occurredAt,
+            Pageable pageable);
 
     List<CaseRoomEpochEntity>
             findByLifecycleStatusAndWriterModeInAndTemporalWorkflowIdIsNotNullOrderByUpdatedAtAsc(

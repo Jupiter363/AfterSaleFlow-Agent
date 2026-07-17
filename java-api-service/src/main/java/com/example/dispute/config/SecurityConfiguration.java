@@ -7,6 +7,8 @@
 package com.example.dispute.config;
 
 import jakarta.servlet.DispatcherType;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication.Type;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
@@ -21,6 +23,7 @@ import org.springframework.security.web.authentication.AnonymousAuthenticationFi
 // 边界意义：调用方身份只能来自可信请求头映射，不能由业务请求体自行声明
 // Java 语法：class 同时封装状态与方法；final 依赖通过构造器注入后不可重新指向。
 @Configuration
+@ConditionalOnWebApplication(type = Type.SERVLET)
 public class SecurityConfiguration {
 
     // 所属模块：【身份鉴权与运行配置 / 核心业务层】「SecurityConfiguration.securityFilterChain(HttpSecurity,HeaderAuthenticationFilter,JsonAuthenticationEntryPoint,JsonAccessDeniedHandler)」。

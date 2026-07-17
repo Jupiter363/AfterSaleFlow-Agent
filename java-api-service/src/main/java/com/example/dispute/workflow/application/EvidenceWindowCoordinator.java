@@ -58,7 +58,8 @@ public class EvidenceWindowCoordinator {
                                     EvidenceWindowWorkflow.class,
                                     WorkflowOptions.newBuilder()
                                             .setWorkflowId(workflowId(caseId))
-                                            .setTaskQueue(properties.temporal().taskQueue())
+                                            .setTaskQueue(
+                                                    properties.temporal().legacyTaskQueue())
                                             .build());
                     WorkflowClient.start(
                             workflow::run, new EvidenceWindowCommand(caseId, window));

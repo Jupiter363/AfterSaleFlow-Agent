@@ -36,6 +36,9 @@ public interface CaseTimelineEventRepository extends JpaRepository<CaseTimelineE
     // Java 语法：接口方法以分号结束，只声明契约；运行时执行实现类中的同签名方法。
     List<CaseTimelineEventEntity> findAllByCaseIdOrderBySequenceNoAsc(String caseId);
 
+    List<CaseTimelineEventEntity> findByCaseIdAndSequenceNoBetweenOrderBySequenceNoAsc(
+            String caseId, long fromSequenceInclusive, long toSequenceInclusive);
+
     // 所属模块：【房间协作与权限 / 仓储接口层】「CaseTimelineEventRepository.findMaxSequenceByCaseId(String)」。
     // 具体功能：「CaseTimelineEventRepository.findMaxSequenceByCaseId(String)」：声明按较高风险等级序号按案件标识访问案件时间线事件的 Spring Data 查询，由框架根据方法签名生成 SQL，并以「long」返回。
     // 上游调用：「CaseTimelineEventRepository.findMaxSequenceByCaseId(String)」的上游调用点包括 「CaseEventService.recordRoomMessage」、「CaseEventService.recordLifecycleEvent」、「RoomMessageAndEventServiceTest.hearingPartyTextIsBoundToTheCurrentRoundAndRegisteredAsRoundStatement」、「RoomMessageAndEventServiceTest.hearingEvidenceReferenceIsBoundToTheCurrentRoundWithoutCountingAsRoundStatement」。

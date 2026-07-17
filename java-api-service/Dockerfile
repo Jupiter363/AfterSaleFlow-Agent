@@ -25,7 +25,4 @@ COPY --from=build --chown=app:app /workspace/target/java-api-service-*.jar /home
 USER app
 EXPOSE 8080
 
-HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=10 \
-    CMD curl --fail --silent http://localhost:8080/actuator/health >/dev/null || exit 1
-
 ENTRYPOINT ["java", "-XX:MaxRAMPercentage=75.0", "-jar", "/home/app/app.jar"]

@@ -34,7 +34,7 @@ class AppPropertiesTest {
                             "app.ocr.timeout-ms=120000",
                             "app.temporal.address=temporal:7233",
                             "app.temporal.namespace=default",
-                            "app.temporal.task-queue=case-dispute-task-queue",
+                            "app.temporal.legacy-task-queue=case-dispute-task-queue-v2",
                             "app.minio.endpoint=http://minio:9000",
                             "app.minio.access-key=minio-user",
                             "app.minio.secret-key=minio-password",
@@ -61,8 +61,9 @@ class AppPropertiesTest {
                     assertThat(context).hasSingleBean(AppProperties.class);
                     AppProperties properties = context.getBean(AppProperties.class);
 
-                    assertThat(properties.temporal().taskQueue())
-                            .isEqualTo("case-dispute-task-queue");
+                    assertThat(properties.temporal().namespace()).isEqualTo("default");
+                    assertThat(properties.temporal().legacyTaskQueue())
+                            .isEqualTo("case-dispute-task-queue-v2");
                     assertThat(properties.agent().timeoutMs()).isEqualTo(120000);
                     assertThat(properties.feature().humanReviewRequired()).isTrue();
                     assertThat(properties.feature().toolExecutorSimulation()).isTrue();

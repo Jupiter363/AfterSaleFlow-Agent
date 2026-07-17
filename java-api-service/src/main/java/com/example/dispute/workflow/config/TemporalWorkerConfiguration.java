@@ -1,47 +1,155 @@
-/*
- * 所属模块：Temporal 持久化编排。
- * 文件职责：在 Spring 启动期装配Temporal后台工作器所需 Bean 和基础设施参数。
- * 业务链路：核心入口/契约为 「caseWorkflowWorkerFactory」；串联举证窗口、共享庭审、按需评议、人工终审、确定性执行和结案恢复。
- * 关键边界：Workflow 代码必须可重放且不直接做网络或数据库 I/O；副作用放入 Activity
- */
 package com.example.dispute.workflow.config;
 
+import static com.example.dispute.workflow.contract.v1.TemporalTaskQueues.AGENT_EXECUTION;
+import static com.example.dispute.workflow.contract.v1.TemporalTaskQueues.CASE_CONTROL;
+import static com.example.dispute.workflow.contract.v1.TemporalTaskQueues.NOTIFICATION_AND_TOOLS;
+import static com.example.dispute.workflow.contract.v1.TemporalTaskQueues.ROOM_CONTROL;
+
 import com.example.dispute.config.AppProperties;
+import com.example.dispute.workflow.activity.domain.CaseProcessLedgerActivitiesImpl;
+import com.example.dispute.workflow.activity.domain.ProcessProjectionActivitiesImpl;
+import com.example.dispute.workflow.activity.system.TemporalWorkerProbeWorkflowImpl;
 import com.example.dispute.workflow.application.EvidenceWindowActivitiesAdapter;
+import com.example.dispute.workflow.contract.v1.TemporalTaskQueues;
 import com.example.dispute.workflow.temporal.EvidenceWindowWorkflowImpl;
+import com.example.dispute.workflow.temporal.caseprocess.CaseProcessWorkflowImpl;
+import com.example.dispute.workflow.temporal.room.common.RoomControlWorkflowImpl;
 import io.temporal.client.WorkflowClient;
 import io.temporal.worker.Worker;
 import io.temporal.worker.WorkerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Lazy;
 
-// 所属模块：【Temporal 持久化编排 / 核心业务层】类型「TemporalWorkerConfiguration」。
-// 类型职责：在 Spring 启动期装配Temporal后台工作器所需 Bean 和基础设施参数；本类型显式提供 「caseWorkflowWorkerFactory」。
-// 协作关系：由同模块控制器、应用服务或框架生命周期创建和调用。
-// 边界意义：Workflow 代码必须可重放且不直接做网络或数据库 I/O；副作用放入 Activity
-// Java 语法：class 同时封装状态与方法；final 依赖通过构造器注入后不可重新指向。
-@Configuration
+@Configuration(proxyBeanMethods = false)
 @ConditionalOnProperty(
-        name = "app.temporal.worker-enabled",
+        name = "app.temporal.worker.enabled",
         havingValue = "true")
 public class TemporalWorkerConfiguration {
 
-    // 所属模块：【Temporal 持久化编排 / 核心业务层】「TemporalWorkerConfiguration.caseWorkflowWorkerFactory(WorkflowClient,AppProperties,CaseFulfillmentDisputeActivitiesImpl,FinalWorkflowActivitiesAdapter,EvidenceWindowActivitiesAdapter)」。
-    // 具体功能：「TemporalWorkerConfiguration.caseWorkflowWorkerFactory(WorkflowClient,AppProperties,CaseFulfillmentDisputeActivitiesImpl,FinalWorkflowActivitiesAdapter,EvidenceWindowActivitiesAdapter)」：构建案件工作流后台工作器工厂；实际协作者为 「WorkerFactory.newInstance」、「factory.newWorker」、「worker.registerWorkflowImplementationTypes」、「worker.registerActivitiesImplementations」，最终返回「WorkerFactory」。
-    // 上游调用：「TemporalWorkerConfiguration.caseWorkflowWorkerFactory(WorkflowClient,AppProperties,CaseFulfillmentDisputeActivitiesImpl,FinalWorkflowActivitiesAdapter,EvidenceWindowActivitiesAdapter)」由 Spring ApplicationContext 启动过程调用，配置属性完成绑定后执行本工厂方法。
-    // 下游影响：「TemporalWorkerConfiguration.caseWorkflowWorkerFactory(WorkflowClient,AppProperties,CaseFulfillmentDisputeActivitiesImpl,FinalWorkflowActivitiesAdapter,EvidenceWindowActivitiesAdapter)」向下依次触达 「WorkerFactory.newInstance」、「factory.newWorker」、「worker.registerWorkflowImplementationTypes」、「worker.registerActivitiesImplementations」；计算结果以「WorkerFactory」交给调用方。
-    // 系统意义：「TemporalWorkerConfiguration.caseWorkflowWorkerFactory(WorkflowClient,AppProperties,CaseFulfillmentDisputeActivitiesImpl,FinalWorkflowActivitiesAdapter,EvidenceWindowActivitiesAdapter)」负责主链路中的“案件工作流后台工作器工厂”；Workflow 代码必须可重放且不直接做网络或数据库 I/O；副作用放入 Activity
     @Bean(destroyMethod = "shutdown")
-    WorkerFactory caseWorkflowWorkerFactory(
+    @Lazy(false)
+    @ConditionalOnProperty(
+            name = "app.temporal.worker.role",
+            havingValue = "CONTROL",
+            matchIfMissing = true)
+    WorkerFactory temporalControlWorkerFactory(
             WorkflowClient workflowClient,
-            AppProperties properties,
-            EvidenceWindowActivitiesAdapter evidenceWindowActivities) {
-        WorkerFactory factory = WorkerFactory.newInstance(workflowClient);
-        Worker worker = factory.newWorker(properties.temporal().taskQueue());
-        worker.registerWorkflowImplementationTypes(EvidenceWindowWorkflowImpl.class);
-        worker.registerActivitiesImplementations(evidenceWindowActivities);
-        factory.start();
-        return factory;
+            AppProperties appProperties,
+            TemporalWorkerProperties properties,
+            TemporalWorkerOptionsFactory optionsFactory,
+            EvidenceWindowActivitiesAdapter evidenceWindowActivities,
+            CaseProcessLedgerActivitiesImpl ledgerActivities,
+            ProcessProjectionActivitiesImpl projectionActivities) {
+        WorkerFactory factory =
+                WorkerFactory.newInstance(workflowClient, optionsFactory.factoryOptions());
+        return start(
+                factory,
+                () ->
+                        registerControlWorkers(
+                                factory,
+                                appProperties.temporal().legacyTaskQueue(),
+                                properties,
+                                optionsFactory,
+                                evidenceWindowActivities,
+                                ledgerActivities,
+                                projectionActivities));
+    }
+
+    @Bean(destroyMethod = "shutdown")
+    @Lazy(false)
+    @ConditionalOnProperty(
+            name = "app.temporal.worker.role",
+            havingValue = "AGENT")
+    WorkerFactory temporalAgentWorkerFactory(
+            WorkflowClient workflowClient,
+            TemporalWorkerProperties properties,
+            TemporalWorkerOptionsFactory optionsFactory) {
+        WorkerFactory factory =
+                WorkerFactory.newInstance(workflowClient, optionsFactory.factoryOptions());
+        return start(
+                factory,
+                () -> registerAgentWorker(factory, properties, optionsFactory));
+    }
+
+    private static void registerControlWorkers(
+            WorkerFactory factory,
+            String legacyTaskQueue,
+            TemporalWorkerProperties properties,
+            TemporalWorkerOptionsFactory optionsFactory,
+            EvidenceWindowActivitiesAdapter evidenceWindowActivities,
+            CaseProcessLedgerActivitiesImpl ledgerActivities,
+            ProcessProjectionActivitiesImpl projectionActivities) {
+        requireDedicatedLegacyTaskQueue(legacyTaskQueue);
+
+        Worker caseControl =
+                factory.newWorker(CASE_CONTROL, optionsFactory.workerOptions(CASE_CONTROL));
+        caseControl.registerWorkflowImplementationTypes(
+                CaseProcessWorkflowImpl.class, TemporalWorkerProbeWorkflowImpl.class);
+        caseControl.registerActivitiesImplementations(
+                ledgerActivities,
+                projectionActivities,
+                new TemporalWorkerProbeActivitiesImpl(properties, CASE_CONTROL));
+
+        Worker roomControl =
+                factory.newWorker(ROOM_CONTROL, optionsFactory.workerOptions(ROOM_CONTROL));
+        roomControl.registerWorkflowImplementationTypes(
+                RoomControlWorkflowImpl.class, TemporalWorkerProbeWorkflowImpl.class);
+        roomControl.registerActivitiesImplementations(
+                new TemporalWorkerProbeActivitiesImpl(properties, ROOM_CONTROL));
+
+        Worker notificationAndTools =
+                factory.newWorker(
+                        NOTIFICATION_AND_TOOLS,
+                        optionsFactory.workerOptions(NOTIFICATION_AND_TOOLS));
+        notificationAndTools.registerWorkflowImplementationTypes(
+                TemporalWorkerProbeWorkflowImpl.class);
+        notificationAndTools.registerActivitiesImplementations(
+                new TemporalWorkerProbeActivitiesImpl(properties, NOTIFICATION_AND_TOOLS));
+
+        Worker legacyEvidenceWindow =
+                factory.newWorker(
+                        legacyTaskQueue, optionsFactory.legacyControlWorkerOptions());
+        legacyEvidenceWindow.registerWorkflowImplementationTypes(
+                EvidenceWindowWorkflowImpl.class, TemporalWorkerProbeWorkflowImpl.class);
+        legacyEvidenceWindow.registerActivitiesImplementations(
+                evidenceWindowActivities,
+                new TemporalWorkerProbeActivitiesImpl(properties, legacyTaskQueue));
+    }
+
+    private static void registerAgentWorker(
+            WorkerFactory factory,
+            TemporalWorkerProperties properties,
+            TemporalWorkerOptionsFactory optionsFactory) {
+        Worker agentExecution =
+                factory.newWorker(
+                        AGENT_EXECUTION, optionsFactory.workerOptions(AGENT_EXECUTION));
+        agentExecution.registerWorkflowImplementationTypes(
+                TemporalWorkerProbeWorkflowImpl.class);
+        agentExecution.registerActivitiesImplementations(
+                new TemporalWorkerProbeActivitiesImpl(properties, AGENT_EXECUTION));
+    }
+
+    private static WorkerFactory start(WorkerFactory factory, Runnable registration) {
+        try {
+            registration.run();
+            factory.start();
+            return factory;
+        } catch (RuntimeException failure) {
+            factory.shutdownNow();
+            throw failure;
+        }
+    }
+
+    private static void requireDedicatedLegacyTaskQueue(String legacyTaskQueue) {
+        if (legacyTaskQueue == null || legacyTaskQueue.isBlank()) {
+            throw new IllegalArgumentException(
+                    "legacy EvidenceWindow task queue must be configured");
+        }
+        if (TemporalTaskQueues.all().contains(legacyTaskQueue)) {
+            throw new IllegalArgumentException(
+                    "legacy EvidenceWindow task queue must be distinct from protocol task queues");
+        }
     }
 }

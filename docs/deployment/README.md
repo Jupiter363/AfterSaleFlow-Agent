@@ -39,6 +39,70 @@ cp .env.example .env
 RUN_SMOKE_TEST=false ./scripts/dev-up.sh
 ```
 
+## Java 进程与 Temporal Worker 拓扑
+
+同一个 Java 镜像通过 Spring Profile 拆成三个独立进程，禁止在 API 进程内顺带启动
+Temporal Worker：
+
+| Compose 服务 | Profile | 职责 | 轮询队列 |
+|---|---|---|---|
+| `java-api-service` | `local,api` | HTTP、鉴权、领域事务、命令接收与恢复投递 | 无 |
+| `java-control-worker` | `local,control-worker` | Case/Room Workflow、Timer、领域与投影 Activity | `case-control`、`room-control`、`notification-and-tools` |
+| `java-agent-worker` | `local,agent-worker` | 隔离模型与 Agent 执行容量 | `agent-execution` |
+
+CONTROL Worker 的启动依赖只包含 PostgreSQL、Redis、MinIO、Elasticsearch 和 Temporal，
+不依赖 Python Agent 或 OCR 健康状态；模型侧故障不得阻断 Timer、取消和案件控制任务。
+
+四条正式协议队列的名称固定，不得按环境、租户或版本动态拼接：
+
+- `case-control`：案件宏观控制、命令顺序与 Continue-As-New。
+- `room-control`：房间 Child Workflow、Timer、取消和外部等待。
+- `agent-execution`：模型/Agent Activity；拥塞不得占用控制面容量。
+- `notification-and-tools`：通知与工具 Activity；其并发和速率独立受限。
+
+队列的并发执行数、poller 数和 Activity 每秒速率由
+`app.temporal.worker.*` 配置。Workflow poller 下限为 2；低于下限会在启动时失败，
+不会交给 SDK 静默改写。API 和两个 Worker 必须使用同一 Temporal namespace，
+但应作为独立 Deployment/HPA/故障域发布。
+
+### EvidenceWindow 兼容队列
+
+`TEMPORAL_TASK_QUEUE` 是现有 EvidenceWindow History 的 legacy compatibility queue，
+默认值为 `case-dispute-task-queue`。它不是第五条正式协议队列：
+
+- EvidenceWindow 的新启动和既有 Workflow/Activity replay 继续使用该队列。
+- 只有 CONTROL Worker 轮询该队列，并注册旧 Workflow 与 Activity 实现。
+- 该值必须与四条正式协议队列不同，否则 CONTROL Worker 启动失败。
+- 新 Case/Room 控制面不得向该队列投递。
+
+只有 `REL-010` 查询确认该队列上没有 Running、Continued-As-New 或待处理的
+EvidenceWindow Workflow/Activity，且 Evidence 房间已经完成新 epoch 的 writer 切换和回滚演练后，
+才允许停止兼容 Worker并删除配置。不得以代码已经迁移为理由提前清理旧 Worker。
+
+## Worker 版本发布
+
+`TEMPORAL_WORKER_VERSIONING_MODE` 支持以下模式：
+
+| 模式 | 用途 | 约束 |
+|---|---|---|
+| `NONE` | 本地开发、bootstrap、无版本路由的测试集群 | 不允许用它做生产滚动混部 |
+| `BUILD_ID` | Temporal legacy Build ID routing 兼容路径 | 必须先为每条队列建立 compatibility/default routing；SDK 接口已进入 legacy 状态 |
+| `DEPLOYMENT` | 推荐的 Worker Deployment 路径 | Server 必须实际支持 Worker Deployment；Workflow 默认使用 `PINNED` 行为 |
+
+本地 Compose 固定 Temporal `1.25.2` 并默认 `NONE`。不能因为 Java SDK 提供
+Worker Deployment API，就假定该本地 Server 支持对应控制面能力。切换到
+`BUILD_ID` 或 `DEPLOYMENT` 前，发布流水线必须完成以下步骤：
+
+1. 使用不可变发布标识设置 control/agent 的 deployment name 与 build ID；禁止复用 build ID。
+2. 在目标 Temporal Server 上注册新版本，并确认该版本已在角色所属的每条队列产生 poller。
+3. 对仍活跃的旧 History 运行 replay/兼容性测试；legacy EvidenceWindow 队列也必须覆盖。
+4. 先部署 Worker，再通过 Temporal Operator API/CLI 设置 current/default 或受控 ramp；禁止仅修改环境变量完成 promote。
+5. 运行 synthetic Workflow，核对 Workflow/Run/Build、task queue、search attributes 和 probe 返回值。
+
+回滚时先把 current/default/ramp 路由恢复到上一版本，同时保持上一版本 Worker 在线。
+`PINNED` Workflow 不会因为路由回滚自动迁移版本；新旧 Worker 都必须保留到 Visibility 查询
+证明没有活跃引用。任何 Worker/Build/Graph 清理都受 `REL-010` 门禁约束。
+
 ## 服务入口
 
 所有宿主机端口默认只绑定 `127.0.0.1`。

@@ -12,6 +12,8 @@ Set-StrictMode -Version Latest
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $stateDir = Join-Path $projectRoot ".local-dev"
 $javaPidFile = Join-Path $stateDir "java-api.pid"
+$javaControlWorkerPidFile = Join-Path $stateDir "java-control-worker.pid"
+$javaAgentWorkerPidFile = Join-Path $stateDir "java-agent-worker.pid"
 $frontendPidFile = Join-Path $stateDir "frontend.pid"
 $pythonAgentPidFile = Join-Path $stateDir "python-agent.pid"
 
@@ -216,6 +218,30 @@ function Wait-ForJavaHealth {
     throw "Java API did not become healthy on port 8080 within $TimeoutSeconds seconds."
 }
 
+function Wait-ForProcessLog {
+    param(
+        [Parameter(Mandatory = $true)][System.Diagnostics.Process]$Process,
+        [Parameter(Mandatory = $true)][string]$LogFile,
+        [Parameter(Mandatory = $true)][string]$Pattern,
+        [Parameter(Mandatory = $true)][string]$Name,
+        [int]$TimeoutSeconds = 180
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        $Process.Refresh()
+        if ($Process.HasExited) {
+            throw "$Name exited before becoming ready. Exit code: $($Process.ExitCode)."
+        }
+        $content = Get-Content -LiteralPath $LogFile -Raw -ErrorAction SilentlyContinue
+        if ($null -ne $content -and $content -match $Pattern) {
+            return
+        }
+        Start-Sleep -Seconds 2
+    } while ((Get-Date) -lt $deadline)
+    throw "$Name did not report readiness within $TimeoutSeconds seconds."
+}
+
 # 业务位置：【开发与运维脚本】Assert-ProjectListener：核验 当前阶段业务数据 的权限、Schema 和阶段边界，阻止越权或不完整结果进入 可重复的初始化、启动或校验动作。上游：本地环境变量和容器服务。下游：可重复的初始化、启动或校验动作。边界：脚本不得写入真实生产数据。
 function Assert-ProjectListener {
     param(
@@ -242,6 +268,8 @@ function Assert-ProjectListener {
 }
 
 Stop-TrackedProcess -PidFile $javaPidFile
+Stop-TrackedProcess -PidFile $javaControlWorkerPidFile
+Stop-TrackedProcess -PidFile $javaAgentWorkerPidFile
 Stop-TrackedProcess -PidFile $frontendPidFile
 Stop-TrackedProcess -PidFile $pythonAgentPidFile
 Stop-ProjectListener -Port 5173
@@ -253,7 +281,7 @@ Stop-ProjectListener `
     -ExpectedCommandPattern "uvicorn|python-agent-service|app\.main:create_app"
 
 if ($Stop) {
-    Write-Output "Local Java API and frontend processes stopped."
+    Write-Output "Local Java API, Temporal workers, Python Agent, and frontend processes stopped."
     exit 0
 }
 
@@ -274,9 +302,9 @@ New-Item -ItemType Directory -Path $stateDir -Force | Out-Null
 Push-Location $projectRoot
 # 业务位置：【开发与运维脚本】try：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 本地环境变量和容器服务 正确进入 可重复的初始化、启动或校验动作。上游：本地环境变量和容器服务。下游：可重复的初始化、启动或校验动作。边界：脚本不得写入真实生产数据。
 try {
-    docker compose stop nginx java-api-service python-agent-service | Out-Host
+    docker compose stop nginx java-api-service java-control-worker java-agent-worker python-agent-service | Out-Host
     if ($LASTEXITCODE -ne 0) {
-        throw "Failed to stop Docker nginx/java-api-service/python-agent-service before local dev startup."
+        throw "Failed to stop Docker application processes before local dev startup."
     }
 
     $env:JAVA_API_SERVICE_URL = "http://host.docker.internal:8080"
@@ -304,6 +332,7 @@ $env:REDIS_PORT = $env:REDIS_HOST_PORT
 $env:MINIO_ENDPOINT = "http://127.0.0.1:$($env:MINIO_HOST_PORT)"
 $env:ELASTICSEARCH_URL = "http://127.0.0.1:$($env:ELASTICSEARCH_HOST_PORT)"
 $env:TEMPORAL_ADDRESS = "127.0.0.1:$($env:TEMPORAL_HOST_PORT)"
+$env:APP_TEMPORAL_WORKER_ENABLED = "false"
 $env:PYTHON_AGENT_SERVICE_URL = "http://127.0.0.1:$($env:PYTHON_AGENT_PORT)"
 $env:OCR_SERVICE_URL = "http://127.0.0.1:$($env:OCR_SERVICE_PORT)"
 $env:OCR_CALLBACK_BASE_URL = "http://host.docker.internal:8080"
@@ -318,15 +347,98 @@ $env:VITE_OCR_API_PROXY_TARGET = "http://127.0.0.1:$($env:OCR_SERVICE_PORT)"
 
 $javaOut = Join-Path $stateDir "java-api.out.log"
 $javaErr = Join-Path $stateDir "java-api.err.log"
+$javaControlWorkerOut = Join-Path $stateDir "java-control-worker.out.log"
+$javaControlWorkerErr = Join-Path $stateDir "java-control-worker.err.log"
+$javaAgentWorkerOut = Join-Path $stateDir "java-agent-worker.out.log"
+$javaAgentWorkerErr = Join-Path $stateDir "java-agent-worker.err.log"
 $frontendOut = Join-Path $stateDir "frontend.out.log"
 $frontendErr = Join-Path $stateDir "frontend.err.log"
 $pythonAgentOut = Join-Path $stateDir "python-agent.out.log"
 $pythonAgentErr = Join-Path $stateDir "python-agent.err.log"
 
-foreach ($logFile in @($javaOut, $javaErr, $frontendOut, $frontendErr, $pythonAgentOut, $pythonAgentErr)) {
+foreach (
+    $logFile in @(
+        $javaOut,
+        $javaErr,
+        $javaControlWorkerOut,
+        $javaControlWorkerErr,
+        $javaAgentWorkerOut,
+        $javaAgentWorkerErr,
+        $frontendOut,
+        $frontendErr,
+        $pythonAgentOut,
+        $pythonAgentErr
+    )
+) {
     New-Item -ItemType File -Path $logFile -Force | Out-Null
     Clear-Content -LiteralPath $logFile
 }
+
+$javaServiceDir = Join-Path $projectRoot "java-api-service"
+$mavenCommand = Get-Command "mvn.cmd" -ErrorAction SilentlyContinue
+$mavenExecutable =
+    if ($null -ne $mavenCommand) {
+        $mavenCommand.Source
+    }
+    else {
+        Join-Path $javaServiceDir "mvnw.cmd"
+    }
+
+Push-Location $javaServiceDir
+try {
+    & $mavenExecutable -q -Dmaven.test.skip=true package
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to build the shared Java runtime before local startup."
+    }
+}
+finally {
+    Pop-Location
+}
+
+$javaJar =
+    Get-ChildItem -LiteralPath (Join-Path $javaServiceDir "target") `
+        -Filter "java-api-service-*.jar" |
+    Sort-Object LastWriteTimeUtc -Descending |
+    Select-Object -First 1
+if ($null -eq $javaJar) {
+    throw "Built Java runtime JAR was not found."
+}
+$javaExecutable = (Get-Command "java.exe" -ErrorAction Stop).Source
+$workerVersioningMode =
+    if ([string]::IsNullOrWhiteSpace($env:TEMPORAL_WORKER_VERSIONING_MODE)) {
+        "NONE"
+    }
+    else {
+        $env:TEMPORAL_WORKER_VERSIONING_MODE
+    }
+$controlDeploymentName =
+    if ([string]::IsNullOrWhiteSpace($env:TEMPORAL_CONTROL_DEPLOYMENT_NAME)) {
+        "after-sale-control"
+    }
+    else {
+        $env:TEMPORAL_CONTROL_DEPLOYMENT_NAME
+    }
+$controlBuildId =
+    if ([string]::IsNullOrWhiteSpace($env:TEMPORAL_CONTROL_BUILD_ID)) {
+        "local-dev"
+    }
+    else {
+        $env:TEMPORAL_CONTROL_BUILD_ID
+    }
+$agentDeploymentName =
+    if ([string]::IsNullOrWhiteSpace($env:TEMPORAL_AGENT_DEPLOYMENT_NAME)) {
+        "after-sale-agent"
+    }
+    else {
+        $env:TEMPORAL_AGENT_DEPLOYMENT_NAME
+    }
+$agentBuildId =
+    if ([string]::IsNullOrWhiteSpace($env:TEMPORAL_AGENT_BUILD_ID)) {
+        "local-dev"
+    }
+    else {
+        $env:TEMPORAL_AGENT_BUILD_ID
+    }
 
 $pythonExe = $env:PYTHON_EXE
 if ([string]::IsNullOrWhiteSpace($pythonExe)) {
@@ -353,14 +465,42 @@ $pythonAgentProcess =
 
 $javaProcess =
     Start-Process `
-        -FilePath "cmd.exe" `
-        -ArgumentList "/d", "/c", ".\mvnw.cmd -q -Dmaven.test.skip=true spring-boot:run" `
-        -WorkingDirectory (Join-Path $projectRoot "java-api-service") `
+        -FilePath $javaExecutable `
+        -ArgumentList "-Xms128m", "-Xmx1024m", "-XX:+ExitOnOutOfMemoryError", "-jar", $javaJar.FullName, "--spring.profiles.active=local,api", "--app.temporal.worker.enabled=false" `
+        -WorkingDirectory $javaServiceDir `
         -WindowStyle Hidden `
         -RedirectStandardOutput $javaOut `
         -RedirectStandardError $javaErr `
         -PassThru
 [System.IO.File]::WriteAllText($javaPidFile, $javaProcess.Id.ToString())
+
+$javaControlWorkerProcess =
+    Start-Process `
+        -FilePath $javaExecutable `
+        -ArgumentList "-Xms128m", "-Xmx1536m", "-XX:+ExitOnOutOfMemoryError", "-jar", $javaJar.FullName, "--spring.profiles.active=local,control-worker", "--app.temporal.worker.enabled=true", "--app.temporal.worker.role=CONTROL", "--app.temporal.worker.versioning-mode=$workerVersioningMode", "--app.temporal.worker.deployment-name=$controlDeploymentName", "--app.temporal.worker.build-id=$controlBuildId" `
+        -WorkingDirectory $javaServiceDir `
+        -WindowStyle Hidden `
+        -RedirectStandardOutput $javaControlWorkerOut `
+        -RedirectStandardError $javaControlWorkerErr `
+        -PassThru
+[System.IO.File]::WriteAllText(
+    $javaControlWorkerPidFile,
+    $javaControlWorkerProcess.Id.ToString()
+)
+
+$javaAgentWorkerProcess =
+    Start-Process `
+        -FilePath $javaExecutable `
+        -ArgumentList "-Xms128m", "-Xmx1024m", "-XX:+ExitOnOutOfMemoryError", "-jar", $javaJar.FullName, "--spring.profiles.active=local,agent-worker", "--app.temporal.worker.enabled=true", "--app.temporal.worker.role=AGENT", "--app.temporal.worker.versioning-mode=$workerVersioningMode", "--app.temporal.worker.deployment-name=$agentDeploymentName", "--app.temporal.worker.build-id=$agentBuildId" `
+        -WorkingDirectory $javaServiceDir `
+        -WindowStyle Hidden `
+        -RedirectStandardOutput $javaAgentWorkerOut `
+        -RedirectStandardError $javaAgentWorkerErr `
+        -PassThru
+[System.IO.File]::WriteAllText(
+    $javaAgentWorkerPidFile,
+    $javaAgentWorkerProcess.Id.ToString()
+)
 
 $frontendProcess =
     Start-Process `
@@ -380,6 +520,16 @@ try {
         -Name "Python Agent" `
         -Process $pythonAgentProcess
     Wait-ForJavaHealth -Process $javaProcess
+    Wait-ForProcessLog `
+        -Process $javaControlWorkerProcess `
+        -LogFile $javaControlWorkerOut `
+        -Pattern "Started DisputeApplication" `
+        -Name "Java Control Worker"
+    Wait-ForProcessLog `
+        -Process $javaAgentWorkerProcess `
+        -LogFile $javaAgentWorkerOut `
+        -Pattern "Started DisputeApplication" `
+        -Name "Java Agent Worker"
     Wait-ForHttp `
         -Url "http://127.0.0.1:5173/@vite/client" `
         -Name "Frontend" `
@@ -401,12 +551,20 @@ catch {
     Write-Error $_
     Get-Content -LiteralPath $pythonAgentErr -Tail 60 -ErrorAction SilentlyContinue
     Get-Content -LiteralPath $javaErr -Tail 60 -ErrorAction SilentlyContinue
+    Get-Content -LiteralPath $javaControlWorkerErr -Tail 60 -ErrorAction SilentlyContinue
+    Get-Content -LiteralPath $javaAgentWorkerErr -Tail 60 -ErrorAction SilentlyContinue
     Get-Content -LiteralPath $frontendErr -Tail 60 -ErrorAction SilentlyContinue
+    Stop-TrackedProcess -PidFile $javaPidFile
+    Stop-TrackedProcess -PidFile $javaControlWorkerPidFile
+    Stop-TrackedProcess -PidFile $javaAgentWorkerPidFile
+    Stop-TrackedProcess -PidFile $frontendPidFile
+    Stop-TrackedProcess -PidFile $pythonAgentPidFile
     throw
 }
 
 Write-Output "Local development services are ready."
 Write-Output "Frontend: http://127.0.0.1:5173"
 Write-Output "Java API: http://127.0.0.1:8080"
+Write-Output "Java Temporal workers: CONTROL and AGENT are running as separate local processes."
 Write-Output "Python Agent: http://127.0.0.1:$($env:PYTHON_AGENT_PORT) (local uvicorn --reload)"
 Write-Output "Stop them with: .\scripts\dev-local.ps1 -Stop"

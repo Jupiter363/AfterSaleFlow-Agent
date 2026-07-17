@@ -64,7 +64,8 @@ class EvidenceWindowCoordinatorTest {
                 new AppProperties.Security("secret"),
                 null,
                 null,
-                new AppProperties.Temporal("localhost:7233", "default", "test-task-queue"),
+                new AppProperties.Temporal(
+                        "localhost:7233", "default", "legacy-evidence-window"),
                 null,
                 null,
                 null,

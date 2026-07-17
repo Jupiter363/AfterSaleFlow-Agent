@@ -35,8 +35,38 @@ app:
   temporal:
     address: ${TEMPORAL_ADDRESS:temporal-server:7233}
     namespace: ${TEMPORAL_NAMESPACE:default}
-    task-queue: ${TEMPORAL_TASK_QUEUE:case-dispute-task-queue-v2}
-    worker-enabled: ${APP_TEMPORAL_WORKER_ENABLED:true}
+    legacy-task-queue: ${TEMPORAL_TASK_QUEUE:case-dispute-task-queue-v2}
+    worker:
+      enabled: ${APP_TEMPORAL_WORKER_ENABLED:false}
+      role: ${TEMPORAL_WORKER_ROLE:CONTROL}
+      versioning-mode: ${TEMPORAL_WORKER_VERSIONING_MODE:NONE}
+      deployment-name: ${TEMPORAL_WORKER_DEPLOYMENT_NAME:after-sale-control}
+      build-id: ${TEMPORAL_WORKER_BUILD_ID:local-dev}
+      max-workflow-threads: ${TEMPORAL_MAX_WORKFLOW_THREADS:512}
+      case-control:
+        max-concurrent-workflow-tasks: ${TEMPORAL_CASE_MAX_WORKFLOW_TASKS:64}
+        max-concurrent-activities: ${TEMPORAL_CASE_MAX_ACTIVITIES:32}
+        workflow-pollers: ${TEMPORAL_CASE_WORKFLOW_POLLERS:4}
+        activity-pollers: ${TEMPORAL_CASE_ACTIVITY_POLLERS:4}
+        max-activities-per-second: ${TEMPORAL_CASE_MAX_ACTIVITIES_PER_SECOND:0}
+      room-control:
+        max-concurrent-workflow-tasks: ${TEMPORAL_ROOM_MAX_WORKFLOW_TASKS:128}
+        max-concurrent-activities: ${TEMPORAL_ROOM_MAX_ACTIVITIES:16}
+        workflow-pollers: ${TEMPORAL_ROOM_WORKFLOW_POLLERS:8}
+        activity-pollers: ${TEMPORAL_ROOM_ACTIVITY_POLLERS:2}
+        max-activities-per-second: ${TEMPORAL_ROOM_MAX_ACTIVITIES_PER_SECOND:0}
+      agent-execution:
+        max-concurrent-workflow-tasks: ${TEMPORAL_AGENT_MAX_WORKFLOW_TASKS:8}
+        max-concurrent-activities: ${TEMPORAL_AGENT_MAX_ACTIVITIES:96}
+        workflow-pollers: ${TEMPORAL_AGENT_WORKFLOW_POLLERS:2}
+        activity-pollers: ${TEMPORAL_AGENT_ACTIVITY_POLLERS:8}
+        max-activities-per-second: ${TEMPORAL_AGENT_MAX_ACTIVITIES_PER_SECOND:0}
+      notification-and-tools:
+        max-concurrent-workflow-tasks: ${TEMPORAL_TOOLS_MAX_WORKFLOW_TASKS:8}
+        max-concurrent-activities: ${TEMPORAL_TOOLS_MAX_ACTIVITIES:32}
+        workflow-pollers: ${TEMPORAL_TOOLS_WORKFLOW_POLLERS:2}
+        activity-pollers: ${TEMPORAL_TOOLS_ACTIVITY_POLLERS:4}
+        max-activities-per-second: ${TEMPORAL_TOOLS_MAX_ACTIVITIES_PER_SECOND:0}
   approval:
     refund-threshold: ${APPROVAL_REFUND_THRESHOLD:500.00}
     reship-threshold: ${APPROVAL_RESHIP_THRESHOLD:300.00}

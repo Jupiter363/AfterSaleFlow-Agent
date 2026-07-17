@@ -37,7 +37,7 @@ class InfrastructureClientConfigurationTest {
                         new AppProperties.Integration(
                                 "http://ocr:8010", "ocr-secret", 120000),
                         new AppProperties.Temporal(
-                                "localhost:7233", "default", "case-dispute-task-queue"),
+                                "localhost:7233", "default", "legacy-evidence-window"),
                         new AppProperties.Minio(
                                 "http://localhost:19000",
                                 "minio-user",

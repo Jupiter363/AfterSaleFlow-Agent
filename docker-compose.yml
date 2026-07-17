@@ -8,6 +8,78 @@ x-common: &common
   networks:
     - dispute-network
 
+x-java-build: &java-build
+  context: ./java-api-service
+
+x-java-environment: &java-environment
+  APP_ENV: ${APP_ENV:-local}
+  POSTGRES_HOST: postgresql
+  POSTGRES_PORT: 5432
+  POSTGRES_USER: ${POSTGRES_USER}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+  JAVA_DB_NAME: ${JAVA_DB_NAME:-dispute_system}
+  REDIS_HOST: redis
+  REDIS_PORT: 6379
+  REDIS_PASSWORD: ${REDIS_PASSWORD}
+  MINIO_ENDPOINT: http://minio:9000
+  MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+  MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+  ELASTICSEARCH_URL: http://elasticsearch:9200
+  TEMPORAL_ADDRESS: temporal-server:7233
+  TEMPORAL_NAMESPACE: default
+  TEMPORAL_TASK_QUEUE: ${TEMPORAL_TASK_QUEUE:-case-dispute-task-queue}
+  EVIDENCE_WINDOW: ${EVIDENCE_WINDOW:-PT2H}
+  HEARING_WINDOW: ${HEARING_WINDOW:-PT3H}
+  HEARING_PARTY_STAGE_WINDOW: ${HEARING_PARTY_STAGE_WINDOW:-PT20M}
+  SSE_HEARTBEAT: ${SSE_HEARTBEAT:-PT15S}
+  SEED_DEMO_DISPUTES: ${SEED_DEMO_DISPUTES:-false}
+  APPROVAL_REFUND_THRESHOLD: ${APPROVAL_REFUND_THRESHOLD:-500.00}
+  APPROVAL_RESHIP_THRESHOLD: ${APPROVAL_RESHIP_THRESHOLD:-300.00}
+  APPROVAL_PACKET_EXPIRY_HOURS: ${APPROVAL_PACKET_EXPIRY_HOURS:-168}
+  APPROVAL_REVIEW_DUE_BUSINESS_DAYS: ${APPROVAL_REVIEW_DUE_BUSINESS_DAYS:-1}
+  PYTHON_AGENT_SERVICE_URL: http://python-agent-service:8000
+  APP_AGENT_TIMEOUT_MS: ${APP_AGENT_TIMEOUT_MS:-300000}
+  APP_TENANT_SURROGATE: ${APP_TENANT_SURROGATE:-legacy-default}
+  APP_ORCHESTRATION_COMMAND_V1_ENABLED: ${APP_ORCHESTRATION_COMMAND_V1_ENABLED:-false}
+  APP_ORCHESTRATION_COMMAND_OUTBOX_BATCH_SIZE: ${APP_ORCHESTRATION_COMMAND_OUTBOX_BATCH_SIZE:-32}
+  APP_ORCHESTRATION_COMMAND_OUTBOX_LEASE_DURATION: ${APP_ORCHESTRATION_COMMAND_OUTBOX_LEASE_DURATION:-PT1M}
+  APP_ORCHESTRATION_COMMAND_OUTBOX_MAX_ATTEMPTS: ${APP_ORCHESTRATION_COMMAND_OUTBOX_MAX_ATTEMPTS:-8}
+  APP_ORCHESTRATION_COMMAND_OUTBOX_BASE_BACKOFF: ${APP_ORCHESTRATION_COMMAND_OUTBOX_BASE_BACKOFF:-PT1S}
+  APP_ORCHESTRATION_COMMAND_OUTBOX_MAX_BACKOFF: ${APP_ORCHESTRATION_COMMAND_OUTBOX_MAX_BACKOFF:-PT5M}
+  APP_ORCHESTRATION_COMMAND_OUTBOX_POLL_INTERVAL: ${APP_ORCHESTRATION_COMMAND_OUTBOX_POLL_INTERVAL:-PT5S}
+  OCR_SERVICE_URL: http://ocr-parser-service:8010
+  JAVA_SERVICE_SECRET: ${JAVA_SERVICE_SECRET}
+  PYTHON_AGENT_SERVICE_SECRET: ${PYTHON_AGENT_SERVICE_SECRET}
+  OCR_SERVICE_SECRET: ${OCR_SERVICE_SECRET}
+  FEATURE_HUMAN_REVIEW_REQUIRED: "true"
+  FEATURE_TOOL_EXECUTOR_SIMULATION: "true"
+  ENABLE_AUDIT_LOG: "true"
+  ENABLE_SENSITIVE_LOG_MASKING: "true"
+
+x-java-core-depends-on: &java-core-depends-on
+  postgresql:
+    condition: service_healthy
+  redis:
+    condition: service_healthy
+  minio-init:
+    condition: service_healthy
+  elasticsearch-init:
+    condition: service_healthy
+  temporal-server:
+    condition: service_healthy
+
+x-java-api-depends-on: &java-api-depends-on
+  <<: *java-core-depends-on
+  python-agent-service:
+    condition: service_healthy
+  ocr-parser-service:
+    condition: service_healthy
+
+x-java-agent-depends-on: &java-agent-depends-on
+  <<: *java-core-depends-on
+  python-agent-service:
+    condition: service_healthy
+
 services:
   postgresql:
     <<: *common
@@ -285,76 +357,63 @@ services:
 
   java-api-service:
     <<: *common
-    build:
-      context: ./java-api-service
+    image: ${JAVA_RUNTIME_IMAGE:-after-sale-flow/java-runtime:local}
+    build: *java-build
     environment:
-      APP_ENV: ${APP_ENV:-local}
-      POSTGRES_HOST: postgresql
-      POSTGRES_PORT: 5432
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      JAVA_DB_NAME: ${JAVA_DB_NAME:-dispute_system}
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      REDIS_PASSWORD: ${REDIS_PASSWORD}
-      MINIO_ENDPOINT: http://minio:9000
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
-      ELASTICSEARCH_URL: http://elasticsearch:9200
-      TEMPORAL_ADDRESS: temporal-server:7233
-      TEMPORAL_NAMESPACE: default
-      TEMPORAL_TASK_QUEUE: case-dispute-task-queue
-      APP_TEMPORAL_WORKER_ENABLED: "true"
-      EVIDENCE_WINDOW: ${EVIDENCE_WINDOW:-PT2H}
-      HEARING_WINDOW: ${HEARING_WINDOW:-PT3H}
-      HEARING_PARTY_STAGE_WINDOW: ${HEARING_PARTY_STAGE_WINDOW:-PT20M}
-      SSE_HEARTBEAT: ${SSE_HEARTBEAT:-PT15S}
-      SEED_DEMO_DISPUTES: ${SEED_DEMO_DISPUTES:-false}
-      APPROVAL_REFUND_THRESHOLD: ${APPROVAL_REFUND_THRESHOLD:-500.00}
-      APPROVAL_RESHIP_THRESHOLD: ${APPROVAL_RESHIP_THRESHOLD:-300.00}
-      APPROVAL_PACKET_EXPIRY_HOURS: ${APPROVAL_PACKET_EXPIRY_HOURS:-168}
-      APPROVAL_REVIEW_DUE_BUSINESS_DAYS: ${APPROVAL_REVIEW_DUE_BUSINESS_DAYS:-1}
-      PYTHON_AGENT_SERVICE_URL: http://python-agent-service:8000
-      APP_AGENT_TIMEOUT_MS: ${APP_AGENT_TIMEOUT_MS:-300000}
-      APP_TENANT_SURROGATE: ${APP_TENANT_SURROGATE:-legacy-default}
-      APP_ORCHESTRATION_COMMAND_V1_ENABLED: ${APP_ORCHESTRATION_COMMAND_V1_ENABLED:-false}
+      <<: *java-environment
+      SPRING_PROFILES_ACTIVE: local,api
+      APP_TEMPORAL_WORKER_ENABLED: "false"
       APP_ORCHESTRATION_COMMAND_OUTBOX_ENABLED: ${APP_ORCHESTRATION_COMMAND_OUTBOX_ENABLED:-false}
-      APP_ORCHESTRATION_COMMAND_OUTBOX_BATCH_SIZE: ${APP_ORCHESTRATION_COMMAND_OUTBOX_BATCH_SIZE:-32}
-      APP_ORCHESTRATION_COMMAND_OUTBOX_LEASE_DURATION: ${APP_ORCHESTRATION_COMMAND_OUTBOX_LEASE_DURATION:-PT1M}
-      APP_ORCHESTRATION_COMMAND_OUTBOX_MAX_ATTEMPTS: ${APP_ORCHESTRATION_COMMAND_OUTBOX_MAX_ATTEMPTS:-8}
-      APP_ORCHESTRATION_COMMAND_OUTBOX_BASE_BACKOFF: ${APP_ORCHESTRATION_COMMAND_OUTBOX_BASE_BACKOFF:-PT1S}
-      APP_ORCHESTRATION_COMMAND_OUTBOX_MAX_BACKOFF: ${APP_ORCHESTRATION_COMMAND_OUTBOX_MAX_BACKOFF:-PT5M}
-      APP_ORCHESTRATION_COMMAND_OUTBOX_POLL_INTERVAL: ${APP_ORCHESTRATION_COMMAND_OUTBOX_POLL_INTERVAL:-PT5S}
-      OCR_SERVICE_URL: http://ocr-parser-service:8010
-      JAVA_SERVICE_SECRET: ${JAVA_SERVICE_SECRET}
-      PYTHON_AGENT_SERVICE_SECRET: ${PYTHON_AGENT_SERVICE_SECRET}
-      OCR_SERVICE_SECRET: ${OCR_SERVICE_SECRET}
-      FEATURE_HUMAN_REVIEW_REQUIRED: "true"
-      FEATURE_TOOL_EXECUTOR_SIMULATION: "true"
-      ENABLE_AUDIT_LOG: "true"
-      ENABLE_SENSITIVE_LOG_MASKING: "true"
     ports:
       - "127.0.0.1:${JAVA_API_PORT:-8080}:8080"
-    depends_on:
-      postgresql:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      minio-init:
-        condition: service_healthy
-      elasticsearch-init:
-        condition: service_healthy
-      temporal-server:
-        condition: service_healthy
-      python-agent-service:
-        condition: service_healthy
-      ocr-parser-service:
-        condition: service_healthy
+    depends_on: *java-api-depends-on
     healthcheck:
       test: ["CMD-SHELL", "curl --fail --silent http://localhost:8080/actuator/health | grep UP"]
       interval: 15s
       timeout: 10s
       retries: 20
+      start_period: 30s
+
+  java-control-worker:
+    <<: *common
+    image: ${JAVA_RUNTIME_IMAGE:-after-sale-flow/java-runtime:local}
+    build: *java-build
+    environment:
+      <<: *java-environment
+      SPRING_PROFILES_ACTIVE: local,control-worker
+      APP_TEMPORAL_WORKER_ENABLED: "true"
+      TEMPORAL_WORKER_ROLE: CONTROL
+      TEMPORAL_WORKER_DEPLOYMENT_NAME: ${TEMPORAL_CONTROL_DEPLOYMENT_NAME:-after-sale-control}
+      TEMPORAL_WORKER_BUILD_ID: ${TEMPORAL_CONTROL_BUILD_ID:-local-dev}
+      TEMPORAL_WORKER_VERSIONING_MODE: ${TEMPORAL_WORKER_VERSIONING_MODE:-NONE}
+      APP_ORCHESTRATION_COMMAND_OUTBOX_ENABLED: "false"
+    depends_on: *java-core-depends-on
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  java-agent-worker:
+    <<: *common
+    image: ${JAVA_RUNTIME_IMAGE:-after-sale-flow/java-runtime:local}
+    build: *java-build
+    environment:
+      <<: *java-environment
+      SPRING_PROFILES_ACTIVE: local,agent-worker
+      APP_TEMPORAL_WORKER_ENABLED: "true"
+      TEMPORAL_WORKER_ROLE: AGENT
+      TEMPORAL_WORKER_DEPLOYMENT_NAME: ${TEMPORAL_AGENT_DEPLOYMENT_NAME:-after-sale-agent}
+      TEMPORAL_WORKER_BUILD_ID: ${TEMPORAL_AGENT_BUILD_ID:-local-dev}
+      TEMPORAL_WORKER_VERSIONING_MODE: ${TEMPORAL_WORKER_VERSIONING_MODE:-NONE}
+      APP_ORCHESTRATION_COMMAND_OUTBOX_ENABLED: "false"
+    depends_on: *java-agent-depends-on
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
       start_period: 30s
 
   frontend:

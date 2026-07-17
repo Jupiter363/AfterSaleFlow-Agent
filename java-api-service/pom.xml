@@ -165,7 +165,7 @@
                         <exclude>**/RoomTurnMemoryPersistenceTest.java</exclude>
                     </excludes>
                     <systemPropertyVariables>
-                        <app.temporal.worker-enabled>false</app.temporal.worker-enabled>
+                        <app.temporal.worker.enabled>false</app.temporal.worker.enabled>
                         <dispute.scheduling.enabled>false</dispute.scheduling.enabled>
                     </systemPropertyVariables>
                 </configuration>

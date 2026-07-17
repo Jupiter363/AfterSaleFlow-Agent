@@ -2,6 +2,7 @@ package com.example.dispute.workflow.infrastructure.persistence.repository;
 
 import com.example.dispute.workflow.infrastructure.persistence.entity.CaseCommandEntity;
 import jakarta.persistence.LockModeType;
+import java.util.List;
 import java.util.Optional;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Lock;
@@ -14,6 +15,13 @@ public interface CaseCommandRepository extends JpaRepository<CaseCommandEntity, 
             String tenantSurrogate, String commandId);
 
     Optional<CaseCommandEntity> findFirstByCaseIdOrderByCaseCommandSequenceDesc(String caseId);
+
+    List<CaseCommandEntity>
+            findByTenantSurrogateAndCaseIdAndCaseCommandSequenceBetweenOrderByCaseCommandSequenceAsc(
+                    String tenantSurrogate,
+                    String caseId,
+                    long fromSequenceInclusive,
+                    long toSequenceInclusive);
 
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select command from CaseCommandEntity command where command.id = :id")

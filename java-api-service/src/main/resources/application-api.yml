@@ -1,0 +1,4 @@
+app:
+  temporal:
+    worker:
+      enabled: false

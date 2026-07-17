@@ -1,0 +1,15 @@
+spring:
+  main:
+    lazy-initialization: true
+    web-application-type: none
+
+app:
+  temporal:
+    worker:
+      enabled: true
+      role: AGENT
+      deployment-name: after-sale-agent
+
+dispute:
+  scheduling:
+    enabled: false

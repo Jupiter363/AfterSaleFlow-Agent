@@ -11,8 +11,8 @@ public final class CaseProcessWorkflowProtocol {
 
     public static final String CASE_WORKFLOW_TYPE = "CaseProcessWorkflow";
     public static final String ROOM_WORKFLOW_TYPE = "RoomControlWorkflow";
-    public static final String CASE_CONTROL_TASK_QUEUE = "case-control";
-    public static final String ROOM_CONTROL_TASK_QUEUE = "room-control";
+    public static final String CASE_CONTROL_TASK_QUEUE = TemporalTaskQueues.CASE_CONTROL;
+    public static final String ROOM_CONTROL_TASK_QUEUE = TemporalTaskQueues.ROOM_CONTROL;
     public static final String ACCEPT_COMMAND_UPDATE = "acceptCommand";
     public static final String DOMAIN_EVENT_SIGNAL = "domainEventCommitted";
     public static final String RETRY_SEQUENCE_GAP_SIGNAL = "retrySequenceGap";
