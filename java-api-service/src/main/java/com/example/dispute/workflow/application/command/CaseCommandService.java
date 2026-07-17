@@ -12,7 +12,6 @@ import com.example.dispute.infrastructure.persistence.repository.AuditLogReposit
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.workflow.contract.v1.CaseCommandRef;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRef;
-import com.example.dispute.workflow.contract.v1.ContractTypes.PayloadRef;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.infrastructure.persistence.entity.CaseCommandEntity;
 import com.example.dispute.workflow.infrastructure.persistence.entity.CaseCommandOutboxEntity;
@@ -24,7 +23,6 @@ import com.example.dispute.workflow.infrastructure.persistence.repository.CaseCo
 import com.example.dispute.workflow.infrastructure.persistence.repository.CaseProcessProjectionRepository;
 import com.example.dispute.workflow.infrastructure.persistence.repository.CaseRoomEpochRepository;
 import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -34,7 +32,6 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
 import java.util.HexFormat;
-import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.regex.Pattern;
@@ -49,8 +46,6 @@ public class CaseCommandService {
             Pattern.compile("[A-Za-z0-9][A-Za-z0-9._:-]{0,127}");
     private static final String WORKFLOW_TYPE = "CaseProcessWorkflow";
     private static final String CASE_CONTROL_TASK_QUEUE = "case-control";
-    private static final TypeReference<List<String>> STRING_LIST = new TypeReference<>() {};
-
     private final FulfillmentCaseRepository caseRepository;
     private final CaseCommandRepository commandRepository;
     private final CaseCommandOutboxRepository outboxRepository;
@@ -58,6 +53,7 @@ public class CaseCommandService {
     private final CaseRoomEpochRepository roomEpochRepository;
     private final AuditLogRepository auditLogRepository;
     private final TenantAuthority tenantAuthority;
+    private final CaseCommandDeliveryTrigger deliveryTrigger;
     private final ObjectMapper objectMapper;
     private final Clock clock;
 
@@ -69,6 +65,7 @@ public class CaseCommandService {
             CaseRoomEpochRepository roomEpochRepository,
             AuditLogRepository auditLogRepository,
             TenantAuthority tenantAuthority,
+            CaseCommandDeliveryTrigger deliveryTrigger,
             ObjectMapper objectMapper,
             Clock clock) {
         this.caseRepository = caseRepository;
@@ -78,6 +75,7 @@ public class CaseCommandService {
         this.roomEpochRepository = roomEpochRepository;
         this.auditLogRepository = auditLogRepository;
         this.tenantAuthority = tenantAuthority;
+        this.deliveryTrigger = deliveryTrigger;
         this.objectMapper = objectMapper;
         this.clock = clock;
     }
@@ -166,7 +164,7 @@ public class CaseCommandService {
                 CaseCommandEntity.pending(
                         id("CMD_"), reference, json(actorRef.actorScopes()), acceptedAt);
         commandRepository.save(commandEntity);
-        outboxRepository.save(
+        CaseCommandOutboxEntity outbox =
                 CaseCommandOutboxEntity.pending(
                         id("COUT_"),
                         commandEntity.getId(),
@@ -174,7 +172,9 @@ public class CaseCommandService {
                         workflowId(tenantSurrogate, caseId),
                         WORKFLOW_TYPE,
                         CASE_CONTROL_TASK_QUEUE,
-                        acceptedAt));
+                        acceptedAt);
+        outboxRepository.save(outbox);
+        deliveryTrigger.deliveryRequested(outbox.getId());
         return acceptance(commandEntity, reference, false);
     }
 
@@ -186,7 +186,10 @@ public class CaseCommandService {
             String traceId,
             String requestId) {
         if (existing.getRequestHash().equals(requestHash)) {
-            return acceptance(existing, toReference(existing), true);
+            return acceptance(
+                    existing,
+                    CaseCommandReferenceMapper.fromEntity(existing, objectMapper),
+                    true);
         }
         auditLogRepository.save(
                 AuditLogEntity.idempotencyConflict(
@@ -263,35 +266,6 @@ public class CaseCommandService {
                     "room epoch is not active",
                     Map.of("room_epoch_status", epoch.getLifecycleStatus().name()));
         }
-    }
-
-    private CaseCommandRef toReference(CaseCommandEntity entity) {
-        List<String> scopes;
-        try {
-            scopes = objectMapper.readValue(entity.getActorScopesJson(), STRING_LIST);
-        } catch (JsonProcessingException exception) {
-            throw new IllegalStateException("stored actor scopes are invalid", exception);
-        }
-        return new CaseCommandRef(
-                "case-command-ref.v1",
-                entity.getCommandId(),
-                entity.getTenantSurrogate(),
-                entity.getCaseId(),
-                entity.getCaseCommandSequence(),
-                entity.getCommandType(),
-                entity.getRoomType(),
-                entity.getRoomEpoch(),
-                new ActorRef(entity.getActorId(), entity.getActorRole(), scopes),
-                new PayloadRef(
-                        entity.getPayloadSchemaVersion(),
-                        entity.getPayloadUri(),
-                        entity.getPayloadSha256(),
-                        entity.getPayloadSizeBytes()),
-                entity.getExpectedProcessRevision(),
-                entity.getOccurredAt().toInstant(),
-                entity.getDeadlineAt().toInstant(),
-                entity.getTraceparent(),
-                entity.getRequestHash());
     }
 
     private static CaseCommandAcceptance acceptance(

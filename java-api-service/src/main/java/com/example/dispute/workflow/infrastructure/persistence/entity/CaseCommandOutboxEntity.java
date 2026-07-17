@@ -158,4 +158,53 @@ public class CaseCommandOutboxEntity extends AbstractEntity {
     public int getAttemptCount() {
         return attemptCount;
     }
+
+    public String getLeaseOwner() {
+        return leaseOwner;
+    }
+
+    public OffsetDateTime getLeaseExpiresAt() {
+        return leaseExpiresAt;
+    }
+
+    public OffsetDateTime getDeliveredAt() {
+        return deliveredAt;
+    }
+
+    public String getTemporalRunId() {
+        return temporalRunId;
+    }
+
+    public String getLastErrorCode() {
+        return lastErrorCode;
+    }
+
+    public void claim(
+            String leaseToken, OffsetDateTime claimedAt, OffsetDateTime leaseUntil) {
+        Objects.requireNonNull(leaseToken, "leaseToken must not be null");
+        Objects.requireNonNull(claimedAt, "claimedAt must not be null");
+        Objects.requireNonNull(leaseUntil, "leaseUntil must not be null");
+        if (leaseToken.isBlank() || leaseToken.length() > 128) {
+            throw new IllegalArgumentException("leaseToken is invalid");
+        }
+        if (!leaseUntil.isAfter(claimedAt)) {
+            throw new IllegalArgumentException("leaseUntil must be after claimedAt");
+        }
+        boolean available =
+                (outboxStatus == OutboxStatus.PENDING || outboxStatus == OutboxStatus.RETRY)
+                        && !availableAt.isAfter(claimedAt);
+        boolean expiredClaim =
+                outboxStatus == OutboxStatus.CLAIMED
+                        && leaseExpiresAt != null
+                        && !leaseExpiresAt.isAfter(claimedAt);
+        if (!available && !expiredClaim) {
+            throw new IllegalStateException("outbox row is not claimable");
+        }
+        outboxStatus = OutboxStatus.CLAIMED;
+        attemptCount = Math.incrementExact(attemptCount);
+        leaseOwner = leaseToken;
+        leaseExpiresAt = leaseUntil;
+        lastAttemptAt = claimedAt;
+        updatedAt = claimedAt;
+    }
 }

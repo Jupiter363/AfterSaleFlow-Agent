@@ -50,6 +50,14 @@ app:
       surrogate: ${APP_TENANT_SURROGATE:legacy-default}
   orchestration:
     command-v1-enabled: ${APP_ORCHESTRATION_COMMAND_V1_ENABLED:false}
+    command-outbox:
+      enabled: ${APP_ORCHESTRATION_COMMAND_OUTBOX_ENABLED:false}
+      batch-size: ${APP_ORCHESTRATION_COMMAND_OUTBOX_BATCH_SIZE:32}
+      lease-duration: ${APP_ORCHESTRATION_COMMAND_OUTBOX_LEASE_DURATION:PT1M}
+      max-attempts: ${APP_ORCHESTRATION_COMMAND_OUTBOX_MAX_ATTEMPTS:8}
+      base-backoff: ${APP_ORCHESTRATION_COMMAND_OUTBOX_BASE_BACKOFF:PT1S}
+      max-backoff: ${APP_ORCHESTRATION_COMMAND_OUTBOX_MAX_BACKOFF:PT5M}
+      poll-interval: ${APP_ORCHESTRATION_COMMAND_OUTBOX_POLL_INTERVAL:PT5S}
 
 dispute:
   evidence-window: ${EVIDENCE_WINDOW:PT2H}

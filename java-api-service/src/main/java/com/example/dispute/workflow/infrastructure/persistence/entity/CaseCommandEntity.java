@@ -237,4 +237,38 @@ public class CaseCommandEntity extends AbstractEntity {
     public OffsetDateTime getAcceptedAt() {
         return acceptedAt;
     }
+
+    public String getStatusReasonCode() {
+        return statusReasonCode;
+    }
+
+    public OffsetDateTime getOrchestratedAt() {
+        return orchestratedAt;
+    }
+
+    public void markOrchestrationAccepted(OffsetDateTime acceptedByOrchestratorAt) {
+        Objects.requireNonNull(
+                acceptedByOrchestratorAt, "acceptedByOrchestratorAt must not be null");
+        if (commandStatus != CommandStatus.PENDING_ORCHESTRATION) {
+            return;
+        }
+        commandStatus = CommandStatus.ORCHESTRATION_ACCEPTED;
+        statusReasonCode = null;
+        orchestratedAt = acceptedByOrchestratorAt;
+        updatedAt = acceptedByOrchestratorAt;
+    }
+
+    public void markOrchestrationFailed(String reasonCode, OffsetDateTime failedAt) {
+        Objects.requireNonNull(reasonCode, "reasonCode must not be null");
+        Objects.requireNonNull(failedAt, "failedAt must not be null");
+        if (reasonCode.isBlank() || reasonCode.length() > 64) {
+            throw new IllegalArgumentException("reasonCode is invalid");
+        }
+        if (commandStatus != CommandStatus.PENDING_ORCHESTRATION) {
+            return;
+        }
+        commandStatus = CommandStatus.FAILED;
+        statusReasonCode = reasonCode;
+        updatedAt = failedAt;
+    }
 }

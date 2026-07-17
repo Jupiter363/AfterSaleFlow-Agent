@@ -18,6 +18,7 @@ import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEnti
 import com.example.dispute.infrastructure.persistence.repository.AuditLogRepository;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.workflow.application.command.AcceptCaseCommand;
+import com.example.dispute.workflow.application.command.CaseCommandDeliveryTrigger;
 import com.example.dispute.workflow.application.command.CaseCommandService;
 import com.example.dispute.workflow.application.command.TenantAuthority;
 import com.example.dispute.workflow.contract.v1.ContractTypes.CommandType;
@@ -56,6 +57,7 @@ class CaseCommandServiceTest {
     @Mock private CaseProcessProjectionRepository projectionRepository;
     @Mock private CaseRoomEpochRepository roomEpochRepository;
     @Mock private AuditLogRepository auditLogRepository;
+    @Mock private CaseCommandDeliveryTrigger deliveryTrigger;
     @Mock private FulfillmentCaseEntity disputeCase;
     @Mock private CaseProcessProjectionEntity projection;
     @Mock private CaseRoomEpochEntity roomEpoch;
@@ -74,6 +76,7 @@ class CaseCommandServiceTest {
                         roomEpochRepository,
                         auditLogRepository,
                         tenantAuthority,
+                        deliveryTrigger,
                         JsonMapper.builder().build(),
                         Clock.fixed(NOW, ZoneOffset.UTC));
 
@@ -108,6 +111,7 @@ class CaseCommandServiceTest {
         assertThat(first.command().traceparent())
                 .matches("00-[0-9a-f]{32}-[0-9a-f]{16}-01");
         verify(outboxRepository).save(any(CaseCommandOutboxEntity.class));
+        verify(deliveryTrigger).deliveryRequested(any());
 
         when(commandRepository.findByTenantSurrogateAndCommandId(
                         "legacy-default", "command.same"))

@@ -10,6 +10,7 @@ import com.example.dispute.config.TenantAuthorityProperties;
 import com.example.dispute.infrastructure.persistence.repository.AuditLogRepository;
 import com.example.dispute.workflow.application.command.AcceptCaseCommand;
 import com.example.dispute.workflow.application.command.CaseCommandAcceptance;
+import com.example.dispute.workflow.application.command.CaseCommandDeliveryTrigger;
 import com.example.dispute.workflow.application.command.CaseCommandService;
 import com.example.dispute.workflow.contract.v1.ContractTypes.CommandType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.PayloadRef;
@@ -417,6 +418,11 @@ class CaseCommandServiceIntegrationTest {
         @Primary
         ObjectMapper commandObjectMapper() {
             return JsonMapper.builder().build();
+        }
+
+        @Bean
+        CaseCommandDeliveryTrigger commandDeliveryTrigger() {
+            return outboxId -> {};
         }
     }
 }
