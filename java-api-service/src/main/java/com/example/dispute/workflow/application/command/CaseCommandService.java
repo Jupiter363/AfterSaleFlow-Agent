@@ -11,6 +11,7 @@ import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEnti
 import com.example.dispute.infrastructure.persistence.repository.AuditLogRepository;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.workflow.contract.v1.CaseCommandRef;
+import com.example.dispute.workflow.contract.v1.CaseProcessWorkflowProtocol;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRef;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.infrastructure.persistence.entity.CaseCommandEntity;
@@ -24,14 +25,10 @@ import com.example.dispute.workflow.infrastructure.persistence.repository.CasePr
 import com.example.dispute.workflow.infrastructure.persistence.repository.CaseRoomEpochRepository;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
-import java.util.HexFormat;
 import java.util.Map;
 import java.util.UUID;
 import java.util.regex.Pattern;
@@ -44,8 +41,6 @@ public class CaseCommandService {
     private static final Pattern CASE_ID = Pattern.compile("CASE_[A-Za-z0-9]{1,59}");
     private static final Pattern COMMAND_ID =
             Pattern.compile("[A-Za-z0-9][A-Za-z0-9._:-]{0,127}");
-    private static final String WORKFLOW_TYPE = "CaseProcessWorkflow";
-    private static final String CASE_CONTROL_TASK_QUEUE = "case-control";
     private final FulfillmentCaseRepository caseRepository;
     private final CaseCommandRepository commandRepository;
     private final CaseCommandOutboxRepository outboxRepository;
@@ -169,9 +164,10 @@ public class CaseCommandService {
                         id("COUT_"),
                         commandEntity.getId(),
                         reference,
-                        workflowId(tenantSurrogate, caseId),
-                        WORKFLOW_TYPE,
-                        CASE_CONTROL_TASK_QUEUE,
+                        CaseProcessWorkflowProtocol.caseWorkflowId(
+                                tenantSurrogate, caseId),
+                        CaseProcessWorkflowProtocol.CASE_WORKFLOW_TYPE,
+                        CaseProcessWorkflowProtocol.CASE_CONTROL_TASK_QUEUE,
                         acceptedAt);
         outboxRepository.save(outbox);
         deliveryTrigger.deliveryRequested(outbox.getId());
@@ -307,22 +303,6 @@ public class CaseCommandService {
             return objectMapper.writeValueAsString(value);
         } catch (JsonProcessingException exception) {
             throw new IllegalStateException("command audit value cannot be serialized", exception);
-        }
-    }
-
-    private static String workflowId(String tenantSurrogate, String caseId) {
-        String candidate = "case-process:" + tenantSurrogate + ":" + caseId;
-        return candidate.length() <= 128 ? candidate : "case-process:" + sha256(candidate);
-    }
-
-    private static String sha256(String value) {
-        try {
-            return HexFormat.of()
-                    .formatHex(
-                            MessageDigest.getInstance("SHA-256")
-                                    .digest(value.getBytes(StandardCharsets.UTF_8)));
-        } catch (NoSuchAlgorithmException exception) {
-            throw new IllegalStateException("SHA-256 is unavailable", exception);
         }
     }
 

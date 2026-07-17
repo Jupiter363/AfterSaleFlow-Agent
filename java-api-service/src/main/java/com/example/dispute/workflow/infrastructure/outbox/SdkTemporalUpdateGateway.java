@@ -2,8 +2,9 @@ package com.example.dispute.workflow.infrastructure.outbox;
 
 import static io.temporal.api.enums.v1.WorkflowIdConflictPolicy.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING;
 import static io.temporal.api.enums.v1.WorkflowIdReusePolicy.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE;
-import static io.temporal.client.WorkflowUpdateStage.ADMITTED;
+import static io.temporal.client.WorkflowUpdateStage.ACCEPTED;
 
+import com.example.dispute.workflow.contract.v1.CaseProcessWorkflowProtocol;
 import io.grpc.Status;
 import io.grpc.StatusException;
 import io.grpc.StatusRuntimeException;
@@ -18,8 +19,6 @@ import org.springframework.stereotype.Component;
 
 @Component
 public final class SdkTemporalUpdateGateway implements TemporalUpdateGateway {
-
-    static final String UPDATE_NAME = "acceptCommand";
 
     private final WorkflowClient workflowClient;
 
@@ -44,9 +43,10 @@ public final class SdkTemporalUpdateGateway implements TemporalUpdateGateway {
                             request.workflowType(), workflowOptions);
             UpdateOptions<Void> updateOptions =
                     UpdateOptions.newBuilder(Void.class)
-                            .setUpdateName(UPDATE_NAME)
+                            .setUpdateName(
+                                    CaseProcessWorkflowProtocol.ACCEPT_COMMAND_UPDATE)
                             .setUpdateId(request.updateId())
-                            .setWaitForStage(ADMITTED)
+                            .setWaitForStage(ACCEPTED)
                             .build();
             WorkflowUpdateHandle<Void> handle =
                     workflow.startUpdateWithStart(

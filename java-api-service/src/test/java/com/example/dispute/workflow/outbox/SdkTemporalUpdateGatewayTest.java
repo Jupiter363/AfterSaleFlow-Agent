@@ -2,7 +2,7 @@ package com.example.dispute.workflow.outbox;
 
 import static io.temporal.api.enums.v1.WorkflowIdConflictPolicy.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING;
 import static io.temporal.api.enums.v1.WorkflowIdReusePolicy.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE;
-import static io.temporal.client.WorkflowUpdateStage.ADMITTED;
+import static io.temporal.client.WorkflowUpdateStage.ACCEPTED;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
@@ -94,7 +94,7 @@ class SdkTemporalUpdateGatewayTest {
                         startArguments.capture());
         assertThat(updateOptions.getValue().getUpdateName()).isEqualTo("acceptCommand");
         assertThat(updateOptions.getValue().getUpdateId()).isEqualTo("command-1");
-        assertThat(updateOptions.getValue().getWaitForStage()).isEqualTo(ADMITTED);
+        assertThat(updateOptions.getValue().getWaitForStage()).isEqualTo(ACCEPTED);
         assertThat(updateArguments.getValue()).containsExactly(request.command());
         assertThat(startArguments.getValue()).isEmpty();
         assertThat(receipt.temporalRunId()).isEqualTo("run-1");
