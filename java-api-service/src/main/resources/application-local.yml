@@ -36,6 +36,14 @@ app:
     address: ${TEMPORAL_ADDRESS:temporal-server:7233}
     namespace: ${TEMPORAL_NAMESPACE:default}
     legacy-task-queue: ${TEMPORAL_TASK_QUEUE:case-dispute-task-queue-v2}
+    observability:
+      tracing-enabled: ${OTEL_TRACING_ENABLED:false}
+      search-attributes-enabled: ${TEMPORAL_SEARCH_ATTRIBUTES_ENABLED:false}
+    payload-protection:
+      mode: ${TEMPORAL_PAYLOAD_CODEC_MODE:DISABLED}
+      active-key-id: ${TEMPORAL_PAYLOAD_CODEC_ACTIVE_KEY_ID:}
+      active-key-base64: ${TEMPORAL_PAYLOAD_CODEC_ACTIVE_KEY_BASE64:}
+      decryption-keys: {}
     worker:
       enabled: ${APP_TEMPORAL_WORKER_ENABLED:false}
       role: ${TEMPORAL_WORKER_ROLE:CONTROL}

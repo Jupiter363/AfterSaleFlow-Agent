@@ -68,7 +68,8 @@ class MinioEvidenceStorageIntegrationTest {
                         new AppProperties.Security("java-secret"),
                         new AppProperties.Integration("http://agent", "secret", 1000),
                         new AppProperties.Integration("http://ocr", "secret", 1000),
-                        new AppProperties.Temporal("localhost:7233", "default", "queue"),
+                        AppProperties.Temporal.defaults(
+                                "localhost:7233", "default", "queue"),
                         new AppProperties.Minio(
                                 endpoint,
                                 ACCESS_KEY,

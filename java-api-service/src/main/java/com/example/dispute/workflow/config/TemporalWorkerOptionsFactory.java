@@ -3,26 +3,41 @@ package com.example.dispute.workflow.config;
 import static io.temporal.common.VersioningBehavior.PINNED;
 
 import com.example.dispute.workflow.config.TemporalWorkerProperties.QueueCapacity;
+import com.example.dispute.workflow.observability.TemporalTracingWorkerInterceptor;
 import io.temporal.common.WorkerDeploymentVersion;
 import io.temporal.worker.WorkerDeploymentOptions;
 import io.temporal.worker.WorkerFactoryOptions;
 import io.temporal.worker.WorkerOptions;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 @Component
 public final class TemporalWorkerOptionsFactory {
 
     private final TemporalWorkerProperties properties;
+    private final TemporalTracingWorkerInterceptor tracingInterceptor;
 
     public TemporalWorkerOptionsFactory(TemporalWorkerProperties properties) {
+        this(properties, null);
+    }
+
+    @Autowired
+    public TemporalWorkerOptionsFactory(
+            TemporalWorkerProperties properties,
+            TemporalTracingWorkerInterceptor tracingInterceptor) {
         this.properties = properties;
+        this.tracingInterceptor = tracingInterceptor;
     }
 
     public WorkerFactoryOptions factoryOptions() {
-        return WorkerFactoryOptions.newBuilder()
-                .setMaxWorkflowThreadCount(properties.maxWorkflowThreads())
-                .setEnableLoggingInReplay(false)
-                .build();
+        WorkerFactoryOptions.Builder builder =
+                WorkerFactoryOptions.newBuilder()
+                        .setMaxWorkflowThreadCount(properties.maxWorkflowThreads())
+                        .setEnableLoggingInReplay(false);
+        if (tracingInterceptor != null) {
+            builder.setWorkerInterceptors(tracingInterceptor);
+        }
+        return builder.build();
     }
 
     public WorkerOptions workerOptions(String taskQueue) {

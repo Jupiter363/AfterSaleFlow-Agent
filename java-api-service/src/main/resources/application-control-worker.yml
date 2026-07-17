@@ -1,4 +1,6 @@
 spring:
+  application:
+    name: java-control-worker
   main:
     lazy-initialization: true
     web-application-type: none

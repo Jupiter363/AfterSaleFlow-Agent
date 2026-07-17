@@ -6,11 +6,15 @@
  */
 package com.example.dispute.config;
 
+import com.example.dispute.workflow.observability.TemporalTraceContextPropagator;
+import com.example.dispute.workflow.observability.TemporalTracingClientInterceptor;
 import io.minio.MinioClient;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowClientOptions;
+import io.temporal.common.converter.DataConverter;
 import io.temporal.serviceclient.WorkflowServiceStubs;
 import io.temporal.serviceclient.WorkflowServiceStubsOptions;
+import java.util.List;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -57,10 +61,17 @@ public class InfrastructureClientConfiguration {
     // 系统意义：「InfrastructureClientConfiguration.workflowClient(WorkflowServiceStubs,AppProperties)」负责主链路中的“工作流客户端”；调用方身份只能来自可信请求头映射，不能由业务请求体自行声明
     @Bean
     WorkflowClient workflowClient(
-            WorkflowServiceStubs serviceStubs, AppProperties properties) {
+            WorkflowServiceStubs serviceStubs,
+            AppProperties properties,
+            DataConverter temporalDataConverter,
+            TemporalTraceContextPropagator traceContextPropagator,
+            TemporalTracingClientInterceptor tracingClientInterceptor) {
         WorkflowClientOptions options =
                 WorkflowClientOptions.newBuilder()
                         .setNamespace(properties.temporal().namespace())
+                        .setDataConverter(temporalDataConverter)
+                        .setContextPropagators(List.of(traceContextPropagator))
+                        .setInterceptors(tracingClientInterceptor)
                         .build();
         return WorkflowClient.newInstance(serviceStubs, options);
     }

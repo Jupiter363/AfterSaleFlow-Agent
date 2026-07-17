@@ -19,6 +19,7 @@ import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.infrastructure.outbox.SdkTemporalUpdateGateway;
 import com.example.dispute.workflow.infrastructure.outbox.TemporalUpdateDeliveryException;
 import com.example.dispute.workflow.infrastructure.outbox.TemporalUpdateGateway;
+import com.example.dispute.workflow.observability.TemporalSearchAttributes;
 import io.grpc.Status;
 import io.temporal.api.common.v1.WorkflowExecution;
 import io.temporal.client.UpdateOptions;
@@ -119,6 +120,42 @@ class SdkTemporalUpdateGatewayTest {
                             assertThat(exception.errorCode())
                                     .isEqualTo("TEMPORAL_UNAVAILABLE");
                         });
+    }
+
+    @Test
+    void writesOnlyTheApprovedTypedVisibilityAttributesOnStart() {
+        gateway =
+                new SdkTemporalUpdateGateway(
+                        workflowClient, TemporalSearchAttributes.enabled());
+        when(workflowClient.newUntypedWorkflowStub(
+                        eq("CaseProcessWorkflow"), any(WorkflowOptions.class)))
+                .thenReturn(workflowStub);
+        when(workflowStub.startUpdateWithStart(
+                        any(UpdateOptions.class),
+                        any(Object[].class),
+                        any(Object[].class)))
+                .thenReturn(updateHandle);
+        when(updateHandle.getExecution())
+                .thenReturn(
+                        WorkflowExecution.newBuilder()
+                                .setWorkflowId("case-process:tenant:CASE_1")
+                                .setRunId("run-visibility")
+                                .build());
+
+        gateway.deliver(request());
+
+        var options = ArgumentCaptor.forClass(WorkflowOptions.class);
+        verify(workflowClient)
+                .newUntypedWorkflowStub(eq("CaseProcessWorkflow"), options.capture());
+        var visibility = options.getValue().getTypedSearchAttributes();
+        assertThat(visibility.getUntypedValues().keySet())
+                .extracting(key -> key.getName())
+                .containsExactlyInAnyOrderElementsOf(
+                        TemporalSearchAttributes.allowedKeyNames());
+        assertThat(visibility.get(TemporalSearchAttributes.CASE_SURROGATE))
+                .isEqualTo("CASE_1");
+        assertThat(visibility.get(TemporalSearchAttributes.ROOM_TYPE))
+                .isEqualTo("EVIDENCE");
     }
 
     private static TemporalUpdateGateway.UpdateWithStartRequest request() {

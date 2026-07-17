@@ -83,7 +83,8 @@ class CaseApplicationServiceTest {
                         new AppProperties.Security("secret"),
                         new AppProperties.Integration("http://agent", "secret", 100),
                         new AppProperties.Integration("http://ocr", "secret", 100),
-                        new AppProperties.Temporal("localhost:7233", "default", "queue"),
+                        AppProperties.Temporal.defaults(
+                                "localhost:7233", "default", "queue"),
                         new AppProperties.Minio(
                                 "http://minio",
                                 "key",

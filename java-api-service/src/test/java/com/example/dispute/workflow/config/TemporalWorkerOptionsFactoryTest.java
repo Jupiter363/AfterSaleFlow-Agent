@@ -4,10 +4,12 @@ import static com.example.dispute.workflow.contract.v1.TemporalTaskQueues.AGENT_
 import static com.example.dispute.workflow.contract.v1.TemporalTaskQueues.CASE_CONTROL;
 import static io.temporal.common.VersioningBehavior.PINNED;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
 
 import com.example.dispute.workflow.config.TemporalWorkerProperties.QueueCapacity;
 import com.example.dispute.workflow.config.TemporalWorkerProperties.VersioningMode;
 import com.example.dispute.workflow.config.TemporalWorkerProperties.WorkerRole;
+import com.example.dispute.workflow.observability.TemporalTracingWorkerInterceptor;
 import org.junit.jupiter.api.Test;
 
 class TemporalWorkerOptionsFactoryTest {
@@ -42,6 +44,18 @@ class TemporalWorkerOptionsFactoryTest {
         assertThat(options.getDeploymentOptions().getDefaultVersioningBehavior())
                 .isEqualTo(PINNED);
         assertThat(factory.factoryOptions().getMaxWorkflowThreadCount()).isEqualTo(512);
+    }
+
+    @Test
+    void registersTheTracingInterceptorAtWorkerFactoryScope() {
+        TemporalTracingWorkerInterceptor interceptor =
+                mock(TemporalTracingWorkerInterceptor.class);
+        TemporalWorkerOptionsFactory factory =
+                new TemporalWorkerOptionsFactory(
+                        properties(VersioningMode.NONE), interceptor);
+
+        assertThat(factory.factoryOptions().getWorkerInterceptors())
+                .containsExactly(interceptor);
     }
 
     private static TemporalWorkerProperties properties(VersioningMode versioningMode) {

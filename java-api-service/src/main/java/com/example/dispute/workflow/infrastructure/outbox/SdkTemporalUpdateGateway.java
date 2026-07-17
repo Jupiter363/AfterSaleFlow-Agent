@@ -5,6 +5,7 @@ import static io.temporal.api.enums.v1.WorkflowIdReusePolicy.WORKFLOW_ID_REUSE_P
 import static io.temporal.client.WorkflowUpdateStage.ACCEPTED;
 
 import com.example.dispute.workflow.contract.v1.CaseProcessWorkflowProtocol;
+import com.example.dispute.workflow.observability.TemporalSearchAttributes;
 import io.grpc.Status;
 import io.grpc.StatusException;
 import io.grpc.StatusRuntimeException;
@@ -15,32 +16,45 @@ import io.temporal.client.WorkflowOptions;
 import io.temporal.client.WorkflowStub;
 import io.temporal.client.WorkflowUpdateException;
 import io.temporal.client.WorkflowUpdateHandle;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 @Component
 public final class SdkTemporalUpdateGateway implements TemporalUpdateGateway {
 
     private final WorkflowClient workflowClient;
+    private final TemporalSearchAttributes searchAttributes;
 
     public SdkTemporalUpdateGateway(WorkflowClient workflowClient) {
+        this(workflowClient, TemporalSearchAttributes.disabled());
+    }
+
+    @Autowired
+    public SdkTemporalUpdateGateway(
+            WorkflowClient workflowClient,
+            TemporalSearchAttributes searchAttributes) {
         this.workflowClient = workflowClient;
+        this.searchAttributes = searchAttributes;
     }
 
     @Override
     public DeliveryReceipt deliver(UpdateWithStartRequest request) {
         try {
-            WorkflowOptions workflowOptions =
+            WorkflowOptions.Builder workflowOptions =
                     WorkflowOptions.newBuilder()
                             .setWorkflowId(request.workflowId())
                             .setTaskQueue(request.taskQueue())
                             .setWorkflowIdConflictPolicy(
                                     WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING)
                             .setWorkflowIdReusePolicy(
-                                    WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE)
-                            .build();
+                                    WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE);
+            var visibility = searchAttributes.caseProcess(request.command());
+            if (visibility.size() > 0) {
+                workflowOptions.setTypedSearchAttributes(visibility);
+            }
             WorkflowStub workflow =
                     workflowClient.newUntypedWorkflowStub(
-                            request.workflowType(), workflowOptions);
+                            request.workflowType(), workflowOptions.build());
             UpdateOptions<Void> updateOptions =
                     UpdateOptions.newBuilder(Void.class)
                             .setUpdateName(

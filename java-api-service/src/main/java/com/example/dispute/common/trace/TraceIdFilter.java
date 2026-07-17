@@ -6,11 +6,13 @@
  */
 package com.example.dispute.common.trace;
 
+import io.opentelemetry.api.trace.Span;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.regex.Pattern;
 import org.slf4j.MDC;
@@ -25,7 +27,7 @@ import org.springframework.web.filter.OncePerRequestFilter;
 // 边界意义：公共组件不得暗含具体案件裁决规则
 // Java 语法：class 同时封装状态与方法；final 依赖通过构造器注入后不可重新指向。
 @Component
-@Order(Ordered.HIGHEST_PRECEDENCE)
+@Order(Ordered.HIGHEST_PRECEDENCE + 10)
 public final class TraceIdFilter extends OncePerRequestFilter {
 
     public static final String TRACE_HEADER = "X-Trace-Id";
@@ -47,7 +49,12 @@ public final class TraceIdFilter extends OncePerRequestFilter {
     protected void doFilterInternal(
             HttpServletRequest request, HttpServletResponse response, FilterChain filterChain)
             throws ServletException, IOException {
-        String traceId = correlationId(request.getHeader(TRACE_HEADER), "TRACE_");
+        String traceId =
+                currentOtelTraceId()
+                        .orElseGet(
+                                () ->
+                                        correlationId(
+                                                request.getHeader(TRACE_HEADER), "TRACE_"));
         String requestId = correlationId(request.getHeader(REQUEST_HEADER), "REQ_");
 
         request.setAttribute(TRACE_ATTRIBUTE, traceId);
@@ -75,5 +82,12 @@ public final class TraceIdFilter extends OncePerRequestFilter {
             return candidate;
         }
         return prefix + UUID.randomUUID().toString().replace("-", "");
+    }
+
+    private static Optional<String> currentOtelTraceId() {
+        var spanContext = Span.current().getSpanContext();
+        return spanContext.isValid()
+                ? Optional.of("TRACE_" + spanContext.getTraceId())
+                : Optional.empty();
     }
 }

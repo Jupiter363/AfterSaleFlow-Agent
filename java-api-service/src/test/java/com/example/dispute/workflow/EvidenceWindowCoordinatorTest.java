@@ -64,7 +64,7 @@ class EvidenceWindowCoordinatorTest {
                 new AppProperties.Security("secret"),
                 null,
                 null,
-                new AppProperties.Temporal(
+                AppProperties.Temporal.defaults(
                         "localhost:7233", "default", "legacy-evidence-window"),
                 null,
                 null,

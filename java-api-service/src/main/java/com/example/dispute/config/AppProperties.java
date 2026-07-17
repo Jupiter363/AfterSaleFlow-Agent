@@ -6,6 +6,7 @@
  */
 package com.example.dispute.config;
 
+import java.util.Map;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 // 所属模块：【身份鉴权与运行配置 / 核心业务层】类型「AppProperties」。
@@ -44,7 +45,62 @@ public record AppProperties(
     // 协作关系：由同模块控制器、应用服务或框架生命周期创建和调用。
     // 边界意义：调用方身份只能来自可信请求头映射，不能由业务请求体自行声明
     // Java 语法：record 用于不可变数据载体，编译器会生成组件访问器和值语义方法。
-    public record Temporal(String address, String namespace, String legacyTaskQueue) {}
+    public record Temporal(
+            String address,
+            String namespace,
+            String legacyTaskQueue,
+            Observability observability,
+            PayloadProtection payloadProtection) {
+
+        public Temporal {
+            observability = observability == null ? Observability.defaults() : observability;
+            payloadProtection =
+                    payloadProtection == null
+                            ? PayloadProtection.disabled()
+                            : payloadProtection;
+        }
+
+        public static Temporal defaults(
+                String address, String namespace, String legacyTaskQueue) {
+            return new Temporal(
+                    address,
+                    namespace,
+                    legacyTaskQueue,
+                    Observability.defaults(),
+                    PayloadProtection.disabled());
+        }
+
+        public record Observability(
+                boolean tracingEnabled, boolean searchAttributesEnabled) {
+
+            public static Observability defaults() {
+                return new Observability(true, false);
+            }
+        }
+
+        public record PayloadProtection(
+                Mode mode,
+                String activeKeyId,
+                String activeKeyBase64,
+                Map<String, String> decryptionKeys) {
+
+            public PayloadProtection {
+                mode = mode == null ? Mode.DISABLED : mode;
+                decryptionKeys =
+                        decryptionKeys == null ? Map.of() : Map.copyOf(decryptionKeys);
+            }
+
+            public static PayloadProtection disabled() {
+                return new PayloadProtection(Mode.DISABLED, "", "", Map.of());
+            }
+
+            public enum Mode {
+                DISABLED,
+                DECRYPT_ONLY,
+                ENCRYPT
+            }
+        }
+    }
 
     // 所属模块：【身份鉴权与运行配置 / 核心业务层】类型「Minio」。
     // 类型职责：定义Minio跨层传递时使用的不可变数据契约；本类型显式提供 框架生成的默认访问器。

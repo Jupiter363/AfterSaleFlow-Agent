@@ -8,6 +8,11 @@ package com.example.dispute.common.trace;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.api.trace.SpanContext;
+import io.opentelemetry.api.trace.TraceFlags;
+import io.opentelemetry.api.trace.TraceState;
+import io.opentelemetry.context.Context;
 import jakarta.servlet.ServletException;
 import java.io.IOException;
 import java.util.concurrent.atomic.AtomicReference;
@@ -78,5 +83,27 @@ class TraceIdFilterTest {
 
         assertThat(response.getHeader(TraceIdFilter.TRACE_HEADER)).matches("TRACE_[0-9a-f]{32}");
         assertThat(response.getHeader(TraceIdFilter.REQUEST_HEADER)).matches("REQ_[0-9a-f]{32}");
+    }
+
+    @Test
+    void keepsTheLegacyCorrelationPrefixWhileUsingTheCurrentOtelTraceId()
+            throws ServletException, IOException {
+        SpanContext spanContext =
+                SpanContext.create(
+                        "0123456789abcdef0123456789abcdef",
+                        "0123456789abcdef",
+                        TraceFlags.getSampled(),
+                        TraceState.getDefault());
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        try (var ignored = Context.root().with(Span.wrap(spanContext)).makeCurrent()) {
+            new TraceIdFilter()
+                    .doFilter(
+                            new MockHttpServletRequest(),
+                            response,
+                            (ignoredRequest, ignoredResponse) -> {});
+        }
+
+        assertThat(response.getHeader(TraceIdFilter.TRACE_HEADER))
+                .isEqualTo("TRACE_0123456789abcdef0123456789abcdef");
     }
 }

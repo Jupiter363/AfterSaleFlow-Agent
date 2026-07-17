@@ -11,6 +11,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import io.minio.MinioClient;
 import io.temporal.client.WorkflowClient;
 import io.temporal.serviceclient.WorkflowServiceStubs;
+import com.example.dispute.common.trace.OpenTelemetryTraceConfiguration;
+import com.example.dispute.workflow.observability.TemporalPayloadCodecConfiguration;
+import com.example.dispute.workflow.observability.TemporalTraceContextPropagator;
+import com.example.dispute.workflow.observability.TemporalTracingClientInterceptor;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 
@@ -36,7 +40,7 @@ class InfrastructureClientConfigurationTest {
                                 "http://agent:8000", "agent-secret", 120000),
                         new AppProperties.Integration(
                                 "http://ocr:8010", "ocr-secret", 120000),
-                        new AppProperties.Temporal(
+                        AppProperties.Temporal.defaults(
                                 "localhost:7233", "default", "legacy-evidence-window"),
                         new AppProperties.Minio(
                                 "http://localhost:19000",
@@ -50,17 +54,30 @@ class InfrastructureClientConfigurationTest {
 
         new ApplicationContextRunner()
                 .withBean(AppProperties.class, () -> properties)
-                .withUserConfiguration(InfrastructureClientConfiguration.class)
+                .withUserConfiguration(
+                        InfrastructureClientConfiguration.class,
+                        OpenTelemetryTraceConfiguration.class,
+                        TemporalPayloadCodecConfiguration.class,
+                        TemporalTraceContextPropagator.class,
+                        TemporalTracingClientInterceptor.class)
                 .run(
                         context -> {
                             assertThat(context).hasSingleBean(MinioClient.class);
                             assertThat(context).hasSingleBean(WorkflowServiceStubs.class);
                             assertThat(context).hasSingleBean(WorkflowClient.class);
+                            WorkflowClient workflowClient =
+                                    context.getBean(WorkflowClient.class);
                             assertThat(
                                             context.getBean(WorkflowServiceStubs.class)
                                                     .getOptions()
                                                     .getTarget())
                                     .isEqualTo("localhost:7233");
+                            assertThat(workflowClient.getOptions().getContextPropagators())
+                                    .singleElement()
+                                    .isInstanceOf(TemporalTraceContextPropagator.class);
+                            assertThat(workflowClient.getOptions().getInterceptors())
+                                    .singleElement()
+                                    .isInstanceOf(TemporalTracingClientInterceptor.class);
                         });
     }
 }

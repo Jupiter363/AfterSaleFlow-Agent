@@ -28,6 +28,24 @@ spring:
       max-request-size: 26MB
 
 management:
+  tracing:
+    enabled: ${OTEL_TRACING_ENABLED:false}
+    propagation:
+      type: w3c
+    sampling:
+      probability: ${OTEL_TRACES_SAMPLING_PROBABILITY:1.0}
+  otlp:
+    tracing:
+      endpoint: ${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:http://127.0.0.1:4318/v1/traces}
+      timeout: ${OTEL_EXPORTER_OTLP_TRACES_TIMEOUT:10s}
+      export:
+        enabled: ${OTEL_TRACING_ENABLED:false}
+    logging:
+      export:
+        enabled: false
+    metrics:
+      export:
+        enabled: false
   endpoints:
     web:
       exposure:

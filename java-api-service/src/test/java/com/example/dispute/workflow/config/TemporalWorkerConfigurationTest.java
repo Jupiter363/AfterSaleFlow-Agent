@@ -100,7 +100,7 @@ class TemporalWorkerConfigurationTest {
         AppProperties appProperties = mock(AppProperties.class);
         when(appProperties.temporal())
                 .thenReturn(
-                        new AppProperties.Temporal(
+                        AppProperties.Temporal.defaults(
                                 "localhost:7233", "default", legacyTaskQueue));
         TemporalWorkerConfiguration configuration = new TemporalWorkerConfiguration();
         TemporalWorkerOptionsFactory optionsFactory =

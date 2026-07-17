@@ -1,5 +1,6 @@
 package com.example.dispute.workflow.application.command;
 
+import com.example.dispute.common.trace.W3cTraceContext;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -14,6 +15,10 @@ final class TraceparentBridge {
     private TraceparentBridge() {}
 
     static String resolve(String incoming, String traceId, String requestId) {
+        var current = W3cTraceContext.currentTraceparent();
+        if (current.isPresent()) {
+            return current.orElseThrow();
+        }
         if (incoming != null && !incoming.isBlank()) {
             var matcher = TRACEPARENT.matcher(incoming);
             if (!matcher.matches()

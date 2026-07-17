@@ -35,6 +35,12 @@ class AppPropertiesTest {
                             "app.temporal.address=temporal:7233",
                             "app.temporal.namespace=default",
                             "app.temporal.legacy-task-queue=case-dispute-task-queue-v2",
+                            "app.temporal.observability.tracing-enabled=true",
+                            "app.temporal.observability.search-attributes-enabled=true",
+                            "app.temporal.payload-protection.mode=ENCRYPT",
+                            "app.temporal.payload-protection.active-key-id=payload-key-v2",
+                            "app.temporal.payload-protection.active-key-base64=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                            "app.temporal.payload-protection.decryption-keys[payload-key-v1]=AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
                             "app.minio.endpoint=http://minio:9000",
                             "app.minio.access-key=minio-user",
                             "app.minio.secret-key=minio-password",
@@ -64,6 +70,17 @@ class AppPropertiesTest {
                     assertThat(properties.temporal().namespace()).isEqualTo("default");
                     assertThat(properties.temporal().legacyTaskQueue())
                             .isEqualTo("case-dispute-task-queue-v2");
+                    assertThat(properties.temporal().observability().tracingEnabled()).isTrue();
+                    assertThat(
+                                    properties.temporal()
+                                            .observability()
+                                            .searchAttributesEnabled())
+                            .isTrue();
+                    assertThat(properties.temporal().payloadProtection().mode())
+                            .isEqualTo(
+                                    AppProperties.Temporal.PayloadProtection.Mode.ENCRYPT);
+                    assertThat(properties.temporal().payloadProtection().decryptionKeys())
+                            .containsKey("payload-key-v1");
                     assertThat(properties.agent().timeoutMs()).isEqualTo(120000);
                     assertThat(properties.feature().humanReviewRequired()).isTrue();
                     assertThat(properties.feature().toolExecutorSimulation()).isTrue();
