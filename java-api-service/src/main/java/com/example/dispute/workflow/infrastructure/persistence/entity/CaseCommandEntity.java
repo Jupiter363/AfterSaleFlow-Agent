@@ -1,6 +1,7 @@
 package com.example.dispute.workflow.infrastructure.persistence.entity;
 
 import com.example.dispute.infrastructure.persistence.entity.AbstractEntity;
+import com.example.dispute.workflow.contract.v1.CaseCommandRef;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
 import com.example.dispute.workflow.contract.v1.ContractTypes.CommandType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
@@ -12,6 +13,8 @@ import jakarta.persistence.Enumerated;
 import jakarta.persistence.Table;
 import jakarta.persistence.Version;
 import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+import java.util.Objects;
 import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
 
@@ -114,6 +117,43 @@ public class CaseCommandEntity extends AbstractEntity {
 
     protected CaseCommandEntity() {}
 
+    private CaseCommandEntity(String id) {
+        super(id);
+    }
+
+    public static CaseCommandEntity pending(
+            String id,
+            CaseCommandRef command,
+            String actorScopesJson,
+            OffsetDateTime acceptedAt) {
+        Objects.requireNonNull(command, "command must not be null");
+        CaseCommandEntity entity = new CaseCommandEntity(id);
+        entity.commandId = command.commandId();
+        entity.tenantSurrogate = command.tenantSurrogate();
+        entity.caseId = command.caseId();
+        entity.caseCommandSequence = command.caseCommandSequence();
+        entity.commandType = command.commandType();
+        entity.roomType = command.roomType();
+        entity.roomEpoch = command.roomEpoch();
+        entity.actorId = command.actorRef().actorId();
+        entity.actorRole = command.actorRef().actorRole();
+        entity.actorScopesJson = Objects.requireNonNull(actorScopesJson, "actorScopesJson");
+        entity.payloadSchemaVersion = command.payloadRef().schemaVersion();
+        entity.payloadUri = command.payloadRef().uri();
+        entity.payloadSha256 = command.payloadRef().sha256();
+        entity.payloadSizeBytes = command.payloadRef().sizeBytes();
+        entity.expectedProcessRevision = command.expectedProcessRevision();
+        entity.occurredAt = OffsetDateTime.ofInstant(command.occurredAt(), ZoneOffset.UTC);
+        entity.deadlineAt = OffsetDateTime.ofInstant(command.deadlineAt(), ZoneOffset.UTC);
+        entity.traceparent = command.traceparent();
+        entity.requestHash = command.requestHash();
+        entity.commandStatus = CommandStatus.PENDING_ORCHESTRATION;
+        entity.acceptedAt = Objects.requireNonNull(acceptedAt, "acceptedAt");
+        entity.createdAt = acceptedAt;
+        entity.updatedAt = acceptedAt;
+        return entity;
+    }
+
     public String getCommandId() {
         return commandId;
     }
@@ -136,5 +176,65 @@ public class CaseCommandEntity extends AbstractEntity {
 
     public CommandStatus getCommandStatus() {
         return commandStatus;
+    }
+
+    public CommandType getCommandType() {
+        return commandType;
+    }
+
+    public RoomType getRoomType() {
+        return roomType;
+    }
+
+    public long getRoomEpoch() {
+        return roomEpoch;
+    }
+
+    public String getActorId() {
+        return actorId;
+    }
+
+    public ActorRole getActorRole() {
+        return actorRole;
+    }
+
+    public String getActorScopesJson() {
+        return actorScopesJson;
+    }
+
+    public String getPayloadSchemaVersion() {
+        return payloadSchemaVersion;
+    }
+
+    public String getPayloadUri() {
+        return payloadUri;
+    }
+
+    public String getPayloadSha256() {
+        return payloadSha256;
+    }
+
+    public long getPayloadSizeBytes() {
+        return payloadSizeBytes;
+    }
+
+    public long getExpectedProcessRevision() {
+        return expectedProcessRevision;
+    }
+
+    public OffsetDateTime getOccurredAt() {
+        return occurredAt;
+    }
+
+    public OffsetDateTime getDeadlineAt() {
+        return deadlineAt;
+    }
+
+    public String getTraceparent() {
+        return traceparent;
+    }
+
+    public OffsetDateTime getAcceptedAt() {
+        return acceptedAt;
     }
 }

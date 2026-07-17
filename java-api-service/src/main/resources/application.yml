@@ -44,6 +44,13 @@ springdoc:
   swagger-ui:
     path: /swagger-ui.html
 
+app:
+  security:
+    tenant-authority:
+      surrogate: ${APP_TENANT_SURROGATE:legacy-default}
+  orchestration:
+    command-v1-enabled: ${APP_ORCHESTRATION_COMMAND_V1_ENABLED:false}
+
 dispute:
   evidence-window: ${EVIDENCE_WINDOW:PT2H}
   hearing-window: ${HEARING_WINDOW:PT3H}

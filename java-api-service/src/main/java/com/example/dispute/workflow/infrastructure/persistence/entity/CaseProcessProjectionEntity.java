@@ -83,6 +83,14 @@ public class CaseProcessProjectionEntity {
         return caseId;
     }
 
+    public String getTenantSurrogate() {
+        return tenantSurrogate;
+    }
+
+    public String getCurrentRoom() {
+        return currentRoom;
+    }
+
     public WriterMode getWriterMode() {
         return writerMode;
     }

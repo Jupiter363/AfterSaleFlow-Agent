@@ -92,6 +92,10 @@ public class CaseRoomEpochEntity extends AbstractEntity {
         return caseId;
     }
 
+    public String getTenantSurrogate() {
+        return tenantSurrogate;
+    }
+
     public RoomType getRoomType() {
         return roomType;
     }
@@ -110,5 +114,9 @@ public class CaseRoomEpochEntity extends AbstractEntity {
 
     public long getFencingToken() {
         return fencingToken;
+    }
+
+    public long getProcessRevision() {
+        return processRevision;
     }
 }

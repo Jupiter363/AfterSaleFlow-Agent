@@ -173,6 +173,35 @@ public class AuditLogEntity extends AbstractEntity {
                 afterJson);
     }
 
+    public static AuditLogEntity idempotencyConflict(
+            String id,
+            String caseId,
+            String traceId,
+            String requestId,
+            String userId,
+            String role,
+            String commandId,
+            String beforeJson,
+            String afterJson,
+            String metadataJson) {
+        AuditLogEntity entity =
+                new AuditLogEntity(
+                        id,
+                        caseId,
+                        traceId,
+                        requestId,
+                        userId,
+                        role,
+                        "CASE_COMMAND_IDEMPOTENCY_CONFLICT",
+                        "CASE_COMMAND",
+                        commandId,
+                        beforeJson,
+                        afterJson);
+        entity.outcome = "CONFLICT";
+        entity.metadataJson = metadataJson;
+        return entity;
+    }
+
     // 所属模块：【PostgreSQL 事实模型 / JPA 实体层】「AuditLogEntity.prePersist()」。
     // 具体功能：「AuditLogEntity.prePersist()」：在 JPA 首次 INSERT 前初始化 「createdAt」，保证即使调用方没有显式赋值，数据库中的审计字段也完整。
     // 上游调用：「AuditLogEntity.prePersist()」由使用「AuditLogEntity」的控制器、应用服务、Workflow Activity 或测试场景触发。

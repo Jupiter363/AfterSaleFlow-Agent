@@ -1,6 +1,7 @@
 package com.example.dispute.workflow.infrastructure.persistence.entity;
 
 import com.example.dispute.infrastructure.persistence.entity.AbstractEntity;
+import com.example.dispute.workflow.contract.v1.CaseCommandRef;
 import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.DeliveryKind;
 import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.OutboxStatus;
 import jakarta.persistence.Column;
@@ -10,6 +11,7 @@ import jakarta.persistence.Enumerated;
 import jakarta.persistence.Table;
 import jakarta.persistence.Version;
 import java.time.OffsetDateTime;
+import java.util.Objects;
 
 @Entity
 @Table(name = "case_command_outbox")
@@ -83,6 +85,36 @@ public class CaseCommandOutboxEntity extends AbstractEntity {
 
     protected CaseCommandOutboxEntity() {}
 
+    private CaseCommandOutboxEntity(String id) {
+        super(id);
+    }
+
+    public static CaseCommandOutboxEntity pending(
+            String id,
+            String caseCommandId,
+            CaseCommandRef command,
+            String workflowId,
+            String workflowType,
+            String taskQueue,
+            OffsetDateTime availableAt) {
+        Objects.requireNonNull(command, "command must not be null");
+        CaseCommandOutboxEntity entity = new CaseCommandOutboxEntity(id);
+        entity.caseCommandId = Objects.requireNonNull(caseCommandId, "caseCommandId");
+        entity.tenantSurrogate = command.tenantSurrogate();
+        entity.caseId = command.caseId();
+        entity.workflowId = Objects.requireNonNull(workflowId, "workflowId");
+        entity.workflowType = Objects.requireNonNull(workflowType, "workflowType");
+        entity.taskQueue = Objects.requireNonNull(taskQueue, "taskQueue");
+        entity.deliveryKind = DeliveryKind.UPDATE_WITH_START;
+        entity.updateId = command.commandId();
+        entity.outboxStatus = OutboxStatus.PENDING;
+        entity.availableAt = Objects.requireNonNull(availableAt, "availableAt");
+        entity.attemptCount = 0;
+        entity.createdAt = availableAt;
+        entity.updatedAt = availableAt;
+        return entity;
+    }
+
     public String getCaseCommandId() {
         return caseCommandId;
     }
@@ -101,5 +133,29 @@ public class CaseCommandOutboxEntity extends AbstractEntity {
 
     public OffsetDateTime getAvailableAt() {
         return availableAt;
+    }
+
+    public String getTenantSurrogate() {
+        return tenantSurrogate;
+    }
+
+    public String getCaseId() {
+        return caseId;
+    }
+
+    public String getWorkflowType() {
+        return workflowType;
+    }
+
+    public String getTaskQueue() {
+        return taskQueue;
+    }
+
+    public DeliveryKind getDeliveryKind() {
+        return deliveryKind;
+    }
+
+    public int getAttemptCount() {
+        return attemptCount;
     }
 }
