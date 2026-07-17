@@ -12,6 +12,7 @@ import jakarta.persistence.Enumerated;
 import jakarta.persistence.Table;
 import jakarta.persistence.Version;
 import java.time.OffsetDateTime;
+import java.util.Objects;
 import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
 
@@ -93,6 +94,53 @@ public class ProcessReconciliationIssueEntity extends AbstractEntity {
 
     protected ProcessReconciliationIssueEntity() {}
 
+    private ProcessReconciliationIssueEntity(String id) {
+        super(id);
+    }
+
+    public static ProcessReconciliationIssueEntity detected(
+            String id,
+            String issueKey,
+            String tenantSurrogate,
+            String caseId,
+            String issueType,
+            ReconciliationScope issueScope,
+            ReconciliationSeverity severity,
+            RoomType roomType,
+            long roomEpoch,
+            long processRevision,
+            long fencingToken,
+            String expectedRef,
+            String expectedSha256,
+            String actualRef,
+            String actualSha256,
+            String detailsJson,
+            OffsetDateTime detectedAt) {
+        ProcessReconciliationIssueEntity entity =
+                new ProcessReconciliationIssueEntity(id);
+        entity.issueKey = Objects.requireNonNull(issueKey, "issueKey");
+        entity.tenantSurrogate =
+                Objects.requireNonNull(tenantSurrogate, "tenantSurrogate");
+        entity.caseId = Objects.requireNonNull(caseId, "caseId");
+        entity.issueType = Objects.requireNonNull(issueType, "issueType");
+        entity.issueScope = Objects.requireNonNull(issueScope, "issueScope");
+        entity.severity = Objects.requireNonNull(severity, "severity");
+        entity.issueStatus = ReconciliationStatus.OPEN;
+        entity.roomType = roomType;
+        entity.roomEpoch = roomEpoch;
+        entity.processRevision = processRevision;
+        entity.fencingToken = fencingToken;
+        entity.expectedRef = expectedRef;
+        entity.expectedSha256 = expectedSha256;
+        entity.actualRef = actualRef;
+        entity.actualSha256 = actualSha256;
+        entity.detailsJson = Objects.requireNonNull(detailsJson, "detailsJson");
+        entity.detectedAt = Objects.requireNonNull(detectedAt, "detectedAt");
+        entity.createdAt = detectedAt;
+        entity.updatedAt = detectedAt;
+        return entity;
+    }
+
     public String getIssueKey() {
         return issueKey;
     }
@@ -101,11 +149,44 @@ public class ProcessReconciliationIssueEntity extends AbstractEntity {
         return caseId;
     }
 
+    public String getIssueType() {
+        return issueType;
+    }
+
+    public ReconciliationScope getIssueScope() {
+        return issueScope;
+    }
+
     public ReconciliationSeverity getSeverity() {
         return severity;
     }
 
     public ReconciliationStatus getIssueStatus() {
         return issueStatus;
+    }
+
+    public OffsetDateTime getResolvedAt() {
+        return resolvedAt;
+    }
+
+    public void markResolved(OffsetDateTime resolvedAt) {
+        Objects.requireNonNull(resolvedAt, "resolvedAt must not be null");
+        if (issueStatus == ReconciliationStatus.RESOLVED) {
+            return;
+        }
+        issueStatus = ReconciliationStatus.RESOLVED;
+        this.resolvedAt = resolvedAt;
+        updatedAt = resolvedAt;
+    }
+
+    public void reopenIfResolved(OffsetDateTime reopenedAt) {
+        Objects.requireNonNull(reopenedAt, "reopenedAt must not be null");
+        if (issueStatus != ReconciliationStatus.RESOLVED) {
+            return;
+        }
+        issueStatus = ReconciliationStatus.OPEN;
+        acknowledgedAt = null;
+        resolvedAt = null;
+        updatedAt = reopenedAt;
     }
 }

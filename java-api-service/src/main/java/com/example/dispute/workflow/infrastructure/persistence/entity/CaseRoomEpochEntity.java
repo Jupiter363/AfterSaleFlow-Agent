@@ -119,4 +119,24 @@ public class CaseRoomEpochEntity extends AbstractEntity {
     public long getProcessRevision() {
         return processRevision;
     }
+
+    public long getRoomRevision() {
+        return roomRevision;
+    }
+
+    public String getTemporalWorkflowId() {
+        return temporalWorkflowId;
+    }
+
+    public String getTemporalRunId() {
+        return temporalRunId;
+    }
+
+    public String getTemporalBuildId() {
+        return temporalBuildId;
+    }
+
+    public long getVersion() {
+        return version;
+    }
 }

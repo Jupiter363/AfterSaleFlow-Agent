@@ -10,6 +10,7 @@ import jakarta.persistence.Enumerated;
 import jakarta.persistence.Table;
 import jakarta.persistence.Version;
 import java.time.OffsetDateTime;
+import java.util.Objects;
 
 @Entity
 @Table(name = "domain_operation")
@@ -80,12 +81,75 @@ public class DomainOperationEntity extends AbstractEntity {
 
     protected DomainOperationEntity() {}
 
+    private DomainOperationEntity(String id) {
+        super(id);
+    }
+
+    public static DomainOperationEntity started(
+            String id,
+            String operationKey,
+            String tenantSurrogate,
+            String caseId,
+            String caseCommandId,
+            String operationType,
+            RoomType roomType,
+            long roomEpoch,
+            long processRevision,
+            long fencingToken,
+            String requestHash,
+            OffsetDateTime startedAt) {
+        DomainOperationEntity entity = new DomainOperationEntity(id);
+        entity.operationKey = Objects.requireNonNull(operationKey, "operationKey");
+        entity.tenantSurrogate = Objects.requireNonNull(tenantSurrogate, "tenantSurrogate");
+        entity.caseId = Objects.requireNonNull(caseId, "caseId");
+        entity.caseCommandId = caseCommandId;
+        entity.operationType = Objects.requireNonNull(operationType, "operationType");
+        entity.roomType = roomType;
+        entity.roomEpoch = roomEpoch;
+        entity.processRevision = processRevision;
+        entity.fencingToken = fencingToken;
+        entity.requestHash = Objects.requireNonNull(requestHash, "requestHash");
+        entity.operationStatus = OperationStatus.STARTED;
+        entity.startedAt = Objects.requireNonNull(startedAt, "startedAt");
+        entity.createdAt = startedAt;
+        entity.updatedAt = startedAt;
+        return entity;
+    }
+
     public String getOperationKey() {
         return operationKey;
     }
 
     public String getCaseId() {
         return caseId;
+    }
+
+    public String getTenantSurrogate() {
+        return tenantSurrogate;
+    }
+
+    public String getCaseCommandId() {
+        return caseCommandId;
+    }
+
+    public String getOperationType() {
+        return operationType;
+    }
+
+    public RoomType getRoomType() {
+        return roomType;
+    }
+
+    public long getRoomEpoch() {
+        return roomEpoch;
+    }
+
+    public long getProcessRevision() {
+        return processRevision;
+    }
+
+    public long getFencingToken() {
+        return fencingToken;
     }
 
     public String getRequestHash() {
@@ -98,5 +162,33 @@ public class DomainOperationEntity extends AbstractEntity {
 
     public String getResultUri() {
         return resultUri;
+    }
+
+    public String getResultSha256() {
+        return resultSha256;
+    }
+
+    public OffsetDateTime getCompletedAt() {
+        return completedAt;
+    }
+
+    public void markCompleted(
+            String completedResultUri,
+            String completedResultSha256,
+            OffsetDateTime completedAt) {
+        Objects.requireNonNull(completedAt, "completedAt must not be null");
+        if ((completedResultUri == null) != (completedResultSha256 == null)) {
+            throw new IllegalArgumentException("operation result reference is incomplete");
+        }
+        if (operationStatus != OperationStatus.STARTED) {
+            throw new IllegalStateException("only a started operation can complete");
+        }
+        operationStatus = OperationStatus.COMPLETED;
+        resultUri = completedResultUri;
+        resultSha256 = completedResultSha256;
+        failureCode = null;
+        failureDetail = null;
+        this.completedAt = completedAt;
+        updatedAt = completedAt;
     }
 }

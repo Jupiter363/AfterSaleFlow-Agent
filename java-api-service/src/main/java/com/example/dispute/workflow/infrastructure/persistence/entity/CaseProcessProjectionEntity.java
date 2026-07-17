@@ -91,6 +91,14 @@ public class CaseProcessProjectionEntity {
         return currentRoom;
     }
 
+    public String getMacroPhase() {
+        return macroPhase;
+    }
+
+    public String getRoomPhase() {
+        return roomPhase;
+    }
+
     public WriterMode getWriterMode() {
         return writerMode;
     }
@@ -109,5 +117,37 @@ public class CaseProcessProjectionEntity {
 
     public String getTemporalWorkflowId() {
         return temporalWorkflowId;
+    }
+
+    public String getTemporalRunId() {
+        return temporalRunId;
+    }
+
+    public String getTemporalBuildId() {
+        return temporalBuildId;
+    }
+
+    public long getLastCommandSequence() {
+        return lastCommandSequence;
+    }
+
+    public long getLastCaseEventSequence() {
+        return lastCaseEventSequence;
+    }
+
+    public OffsetDateTime getProjectedDeadlineAt() {
+        return projectedDeadlineAt;
+    }
+
+    public String getProjectionRef() {
+        return projectionRef;
+    }
+
+    public String getProjectionSha256() {
+        return projectionSha256;
+    }
+
+    public long getVersion() {
+        return version;
     }
 }

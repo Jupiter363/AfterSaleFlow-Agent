@@ -246,6 +246,18 @@ public class CaseCommandEntity extends AbstractEntity {
         return orchestratedAt;
     }
 
+    public String getResultUri() {
+        return resultUri;
+    }
+
+    public String getResultSha256() {
+        return resultSha256;
+    }
+
+    public OffsetDateTime getAppliedAt() {
+        return appliedAt;
+    }
+
     public void markOrchestrationAccepted(OffsetDateTime acceptedByOrchestratorAt) {
         Objects.requireNonNull(
                 acceptedByOrchestratorAt, "acceptedByOrchestratorAt must not be null");
@@ -270,5 +282,36 @@ public class CaseCommandEntity extends AbstractEntity {
         commandStatus = CommandStatus.FAILED;
         statusReasonCode = reasonCode;
         updatedAt = failedAt;
+    }
+
+    public void markApplied(
+            String appliedResultUri,
+            String appliedResultSha256,
+            OffsetDateTime appliedByDomainAt) {
+        Objects.requireNonNull(appliedByDomainAt, "appliedByDomainAt must not be null");
+        if ((appliedResultUri == null) != (appliedResultSha256 == null)) {
+            throw new IllegalArgumentException("applied result reference is incomplete");
+        }
+        if (commandStatus == CommandStatus.APPLIED) {
+            if (!Objects.equals(resultUri, appliedResultUri)
+                    || !Objects.equals(resultSha256, appliedResultSha256)) {
+                throw new IllegalStateException(
+                        "applied command is bound to another result");
+            }
+            return;
+        }
+        if (commandStatus != CommandStatus.PENDING_ORCHESTRATION
+                && commandStatus != CommandStatus.ORCHESTRATION_ACCEPTED) {
+            throw new IllegalStateException("command cannot transition to APPLIED");
+        }
+        commandStatus = CommandStatus.APPLIED;
+        statusReasonCode = null;
+        resultUri = appliedResultUri;
+        resultSha256 = appliedResultSha256;
+        if (orchestratedAt == null) {
+            orchestratedAt = appliedByDomainAt;
+        }
+        appliedAt = appliedByDomainAt;
+        updatedAt = appliedByDomainAt;
     }
 }
