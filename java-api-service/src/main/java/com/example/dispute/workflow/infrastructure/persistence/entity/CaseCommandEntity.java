@@ -1,0 +1,140 @@
+package com.example.dispute.workflow.infrastructure.persistence.entity;
+
+import com.example.dispute.infrastructure.persistence.entity.AbstractEntity;
+import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
+import com.example.dispute.workflow.contract.v1.ContractTypes.CommandType;
+import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
+import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.CommandStatus;
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
+import jakarta.persistence.Table;
+import jakarta.persistence.Version;
+import java.time.OffsetDateTime;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
+
+@Entity
+@Table(name = "case_command")
+public class CaseCommandEntity extends AbstractEntity {
+
+    @Column(name = "command_id", length = 128, nullable = false, updatable = false)
+    private String commandId;
+
+    @Column(name = "tenant_surrogate", length = 128, nullable = false, updatable = false)
+    private String tenantSurrogate;
+
+    @Column(name = "case_id", length = 64, nullable = false, updatable = false)
+    private String caseId;
+
+    @Column(name = "case_command_sequence", nullable = false, updatable = false)
+    private long caseCommandSequence;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "command_type", length = 64, nullable = false, updatable = false)
+    private CommandType commandType;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "room_type", length = 32, nullable = false, updatable = false)
+    private RoomType roomType;
+
+    @Column(name = "room_epoch", nullable = false, updatable = false)
+    private long roomEpoch;
+
+    @Column(name = "actor_id", length = 128, nullable = false, updatable = false)
+    private String actorId;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "actor_role", length = 32, nullable = false, updatable = false)
+    private ActorRole actorRole;
+
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "actor_scopes_json", nullable = false, updatable = false, columnDefinition = "jsonb")
+    private String actorScopesJson;
+
+    @Column(name = "payload_schema_version", length = 128, nullable = false, updatable = false)
+    private String payloadSchemaVersion;
+
+    @Column(name = "payload_uri", length = 1024, nullable = false, updatable = false)
+    private String payloadUri;
+
+    @Column(name = "payload_sha256", length = 64, nullable = false, updatable = false)
+    private String payloadSha256;
+
+    @Column(name = "payload_size_bytes", nullable = false, updatable = false)
+    private long payloadSizeBytes;
+
+    @Column(name = "expected_process_revision", nullable = false, updatable = false)
+    private long expectedProcessRevision;
+
+    @Column(name = "occurred_at", nullable = false, updatable = false)
+    private OffsetDateTime occurredAt;
+
+    @Column(name = "deadline_at", nullable = false, updatable = false)
+    private OffsetDateTime deadlineAt;
+
+    @Column(name = "traceparent", length = 55, nullable = false, updatable = false)
+    private String traceparent;
+
+    @Column(name = "request_hash", length = 64, nullable = false, updatable = false)
+    private String requestHash;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "command_status", length = 32, nullable = false)
+    private CommandStatus commandStatus;
+
+    @Column(name = "status_reason_code", length = 64)
+    private String statusReasonCode;
+
+    @Column(name = "result_uri", length = 1024)
+    private String resultUri;
+
+    @Column(name = "result_sha256", length = 64)
+    private String resultSha256;
+
+    @Column(name = "accepted_at", nullable = false, updatable = false)
+    private OffsetDateTime acceptedAt;
+
+    @Column(name = "orchestrated_at")
+    private OffsetDateTime orchestratedAt;
+
+    @Column(name = "applied_at")
+    private OffsetDateTime appliedAt;
+
+    @Column(name = "created_at", nullable = false, updatable = false)
+    private OffsetDateTime createdAt;
+
+    @Column(name = "updated_at", nullable = false)
+    private OffsetDateTime updatedAt;
+
+    @Version
+    @Column(name = "version", nullable = false)
+    private long version;
+
+    protected CaseCommandEntity() {}
+
+    public String getCommandId() {
+        return commandId;
+    }
+
+    public String getTenantSurrogate() {
+        return tenantSurrogate;
+    }
+
+    public String getCaseId() {
+        return caseId;
+    }
+
+    public long getCaseCommandSequence() {
+        return caseCommandSequence;
+    }
+
+    public String getRequestHash() {
+        return requestHash;
+    }
+
+    public CommandStatus getCommandStatus() {
+        return commandStatus;
+    }
+}

@@ -70,7 +70,7 @@ class MigrationIntegrationTest {
         MigrateResult first = flyway.migrate();
         MigrateResult second = flyway.migrate();
 
-        assertThat(first.migrationsExecuted).isEqualTo(37);
+        assertThat(first.migrationsExecuted).isEqualTo(40);
         assertThat(second.migrationsExecuted).isZero();
 
         try (Connection connection =
@@ -137,7 +137,15 @@ class MigrationIntegrationTest {
                             "hearing_flow_stage",
                             "hearing_flow_action",
                             "hearing_trial_dossier",
-                            "hearing_flow_artifact");
+                            "hearing_flow_artifact",
+                            "case_command",
+                            "case_command_outbox",
+                            "case_process_projection",
+                            "case_room_epoch",
+                            "domain_operation",
+                            "process_reconciliation_issue",
+                            "immutable_payload_snapshot",
+                            "agent_execution_manifest");
             assertThat(
                             countRows(
                                     connection,
@@ -196,7 +204,15 @@ class MigrationIntegrationTest {
                             "uq_evidence_completion_participant",
                             "uq_hearing_flow_action_generated",
                             "uq_hearing_flow_action_party",
-                            "uq_hearing_flow_artifact_case_type");
+                            "uq_hearing_flow_artifact_case_type",
+                            "uq_case_command_tenant_command",
+                            "uq_case_command_case_sequence",
+                            "idx_case_command_outbox_pending",
+                            "uq_case_process_projection_workflow",
+                            "uq_case_room_epoch_case_room_epoch",
+                            "uq_domain_operation_tenant_key",
+                            "idx_payload_snapshot_case_visibility",
+                            "uq_agent_execution_manifest_logical_run");
             assertThat(
                             countRows(
                                     connection,
@@ -210,7 +226,9 @@ class MigrationIntegrationTest {
                             "trg_case_timeline_event_append_only",
                             "trg_hearing_flow_action_append_only",
                             "trg_hearing_trial_dossier_append_only",
-                            "trg_hearing_flow_artifact_append_only");
+                            "trg_hearing_flow_artifact_append_only",
+                            "trg_immutable_payload_snapshot_append_only",
+                            "trg_agent_execution_manifest_append_only");
             assertFormalJuryReportUniqueness(connection);
             assertAppendOnlyTablesRejectMutation(connection);
         }
@@ -359,11 +377,13 @@ class MigrationIntegrationTest {
                     """
                     insert into fulfillment_dispute_case (
                         id, user_id, merchant_id, creation_idempotency_key,
-                        case_type, case_status, initiator_role, risk_level, title, description,
+                        case_type, case_status, initiator_role, initiator_id,
+                        respondent_role, respondent_id, risk_level, title, description,
                         created_by, updated_by
                     ) values (
                         'CASE_APPEND_ONLY', 'user-local', 'merchant-local', 'append-only-case',
-                        'DISPUTE', 'EVIDENCE_OPEN', 'USER', 'HIGH', 'Append-only test',
+                        'DISPUTE', 'EVIDENCE_OPEN', 'USER', 'user-local',
+                        'MERCHANT', 'merchant-local', 'HIGH', 'Append-only test',
                         'Database immutability test', 'test', 'test'
                     )
                     """);
@@ -422,11 +442,13 @@ class MigrationIntegrationTest {
                     """
                     insert into fulfillment_dispute_case (
                         id, user_id, merchant_id, creation_idempotency_key,
-                        case_type, case_status, initiator_role, hearing_route, risk_level,
+                        case_type, case_status, initiator_role, initiator_id,
+                        respondent_role, respondent_id, hearing_route, risk_level,
                         title, description, current_room, created_by, updated_by
                     ) values (
                         'CASE_ROUND_FIVE', 'user-local', 'merchant-local',
-                        'round-five-case', 'DISPUTE', 'HEARING', 'USER', 'FULL_HEARING',
+                        'round-five-case', 'DISPUTE', 'HEARING', 'USER', 'user-local',
+                        'MERCHANT', 'merchant-local', 'FULL_HEARING',
                         'HIGH', 'Round five test',
                         'Database constraint must match configurable hearing rounds.',
                         'HEARING', 'test', 'test'
@@ -471,11 +493,13 @@ class MigrationIntegrationTest {
                     """
                     insert into fulfillment_dispute_case (
                         id, user_id, merchant_id, creation_idempotency_key,
-                        case_type, case_status, initiator_role, risk_level, title, description,
+                        case_type, case_status, initiator_role, initiator_id,
+                        respondent_role, respondent_id, risk_level, title, description,
                         created_by, updated_by
                     ) values (
                         'CASE_A2A_UNIQUENESS', 'user-local', 'merchant-local',
-                        'a2a-uniqueness-case', 'DISPUTE', 'HEARING', 'USER', 'HIGH',
+                        'a2a-uniqueness-case', 'DISPUTE', 'HEARING', 'USER', 'user-local',
+                        'MERCHANT', 'merchant-local', 'HIGH',
                         'A2A uniqueness test', 'Formal jury reports must be unique.',
                         'test', 'test'
                     )

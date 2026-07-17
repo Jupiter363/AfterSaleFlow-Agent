@@ -198,12 +198,12 @@ class DemoCasePurgeMigrationIntegrationTest {
                         """
                         insert into room_message (
                             id, case_id, room_id, sequence_no, sender_type,
-                            sender_role, sender_id, message_type, message_text,
+                            sender_role, sender_id, message_source, message_type, message_text,
                             idempotency_key, created_by
                         ) values (
                             'MESSAGE_PURGE_INTAKE', 'CASE_PURGE_INTAKE',
                             'ROOM_PURGE_INTAKE', 1, 'PARTY', 'USER', 'user-local',
-                            'PARTY_TEXT', 'intake message', 'purge-intake-message',
+                            'PARTY_ACTION', 'PARTY_TEXT', 'intake message', 'purge-intake-message',
                             'user-local'
                         )
                         """);
@@ -279,12 +279,12 @@ class DemoCasePurgeMigrationIntegrationTest {
                         """
                         insert into room_message (
                             id, case_id, room_id, sequence_no, sender_type,
-                            sender_role, sender_id, message_type, message_text,
+                            sender_role, sender_id, message_source, message_type, message_text,
                             idempotency_key, created_by
                         ) values (
                             'MESSAGE_PURGE_APPEND', 'CASE_PURGE_APPEND',
                             'ROOM_PURGE_APPEND', 1, 'PARTY', 'USER', 'user-local',
-                            'PARTY_TEXT', 'demo message', 'purge-append-message',
+                            'PARTY_ACTION', 'PARTY_TEXT', 'demo message', 'purge-append-message',
                             'user-local'
                         )
                         """);
@@ -378,10 +378,11 @@ class DemoCasePurgeMigrationIntegrationTest {
                     """
                     insert into room_message (
                         id, case_id, room_id, sequence_no, sender_type, sender_role,
-                        sender_id, message_type, message_text, idempotency_key, created_by
+                        sender_id, message_source, message_type, message_text,
+                        idempotency_key, created_by
                     ) values (
                         'MESSAGE_PURGE_DEMO', 'CASE_PURGE_DEMO', 'ROOM_PURGE_DEMO', 1,
-                        'PARTY', 'USER', 'user-local', 'PARTY_TEXT', 'demo message',
+                        'PARTY', 'USER', 'user-local', 'PARTY_ACTION', 'PARTY_TEXT', 'demo message',
                         'purge-demo-message', 'user-local'
                     )
                     """);
@@ -512,11 +513,13 @@ class DemoCasePurgeMigrationIntegrationTest {
                         """
                         insert into fulfillment_dispute_case (
                             id, user_id, merchant_id, creation_idempotency_key,
-                            case_type, case_status, initiator_role, risk_level,
+                            case_type, case_status, initiator_role, initiator_id,
+                            respondent_role, respondent_id, risk_level,
                             title, description, source_type, source_system,
                             external_case_ref, created_by, updated_by
                         ) values (?, 'user-local', 'merchant-local', ?, 'DISPUTE',
-                                  'INTAKE_PENDING', 'USER', 'MEDIUM', ?, 'Demo',
+                                  'INTAKE_PENDING', 'USER', 'user-local',
+                                  'MERCHANT', 'merchant-local', 'MEDIUM', ?, 'Demo',
                                   ?, ?, ?, 'test', 'test')
                         """)) {
             statement.setString(1, caseId);
