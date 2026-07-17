@@ -1,0 +1,23 @@
+{
+  "case": "artifact hash is not SHA-256",
+  "schema": "artifact-ref.schema.json",
+  "instance": {
+    "schema_version": "artifact-ref.v1",
+    "artifact_id": "artifact.judge-v2.1",
+    "artifact_type": "adjudication-draft",
+    "content_schema_version": "adjudication-draft.v2",
+    "storage_ref": "s3://formal-artifacts/case-001/judge-v2.json",
+    "content_hash": "not-a-sha256",
+    "size_bytes": 8192,
+    "parent_refs": [
+      {
+        "artifact_id": "artifact.jury.1",
+        "content_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      }
+    ],
+    "visibility": "PARTIES",
+    "created_by_run_id": "run-001",
+    "created_at": "2026-07-17T08:00:00Z"
+  },
+  "expected_error": "content_hash pattern"
+}

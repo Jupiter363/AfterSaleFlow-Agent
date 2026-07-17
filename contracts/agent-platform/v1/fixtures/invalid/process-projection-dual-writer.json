@@ -1,0 +1,24 @@
+{
+  "case": "projection attempts dual writer mode",
+  "schema": "process-projection.schema.json",
+  "instance": {
+    "schema_version": "process-projection.v1",
+    "tenant_surrogate": "tenant-demo",
+    "case_id": "case-001",
+    "workflow_id": "case-process-case-001",
+    "workflow_run_id": "workflow-run-001",
+    "workflow_build_id": "java-worker-1.0.0",
+    "writer_mode": "DUAL",
+    "macro_phase": "HEARING",
+    "room_type": "HEARING",
+    "room_phase": "PARTY_ANSWERS_OPEN",
+    "room_epoch": 3,
+    "process_revision": 12,
+    "room_revision": 5,
+    "fencing_token": 3,
+    "source_event_sequence": 44,
+    "pending_state": "WAITING_PARTY",
+    "projected_at": "2026-07-17T08:00:00Z"
+  },
+  "expected_error": "writer_mode enum"
+}

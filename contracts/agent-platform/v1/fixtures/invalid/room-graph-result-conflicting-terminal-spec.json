@@ -1,0 +1,35 @@
+{
+  "case": "completed result also attempts to request input",
+  "schema": "room-graph-result.schema.json",
+  "instance": {
+    "schema_version": "room-graph-result.v1",
+    "command_id": "graph-cmd-001",
+    "logical_run_id": "run-001",
+    "attempt_id": "attempt-001",
+    "graph_key": "intake.v2",
+    "graph_version": "1.0.0",
+    "checkpoint_id": "checkpoint-001",
+    "cognitive_revision": 2,
+    "status": "COMPLETED",
+    "public_event_proposals": [],
+    "artifact_operations": [],
+    "needs_input": {
+      "reason_code": "MORE_FACTS",
+      "required_actor_scopes": ["room.write"]
+    },
+    "output_hash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "usage": {
+      "input_tokens": 1200,
+      "output_tokens": 240,
+      "total_tokens": 1440
+    },
+    "execution_metadata": {
+      "prompt_version": "intake.user.v1",
+      "model_profile_id": "qwen3.7-plus.structured.v1",
+      "schema_version": "intake-turn.v2",
+      "policy_version": "intake-policy.v1",
+      "guardrail_version": "intake-guardrail.v1"
+    }
+  },
+  "expected_error": "COMPLETED forbids needs_input"
+}

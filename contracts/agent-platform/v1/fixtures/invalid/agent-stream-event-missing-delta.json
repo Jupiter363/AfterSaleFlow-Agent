@@ -1,0 +1,18 @@
+{
+  "case": "visible delta omits delta text",
+  "schema": "agent-stream-event.schema.json",
+  "instance": {
+    "schema_version": "agent-stream.v2",
+    "run_id": "run-001",
+    "attempt_id": "attempt-001",
+    "sequence_no": 1,
+    "event_type": "visible_delta",
+    "audience": "USER",
+    "occurred_at": "2026-07-17T08:00:00Z",
+    "payload": {
+      "node": "intake.reason",
+      "field": "room_utterance"
+    }
+  },
+  "expected_error": "visible_delta requires delta"
+}

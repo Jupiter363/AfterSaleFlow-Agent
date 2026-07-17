@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.after-sale-flow.example/agent-platform/v1/process-projection.schema.json",
+  "title": "ProcessProjection v1",
+  "description": "Fenced Java query projection of Temporal process state.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "tenant_surrogate",
+    "case_id",
+    "workflow_id",
+    "workflow_run_id",
+    "workflow_build_id",
+    "writer_mode",
+    "macro_phase",
+    "room_type",
+    "room_phase",
+    "room_epoch",
+    "process_revision",
+    "room_revision",
+    "fencing_token",
+    "source_event_sequence",
+    "pending_state",
+    "projected_at"
+  ],
+  "properties": {
+    "schema_version": {"type": "string", "const": "process-projection.v1"},
+    "tenant_surrogate": {"$ref": "#/$defs/identifier"},
+    "case_id": {"$ref": "#/$defs/identifier"},
+    "workflow_id": {"$ref": "#/$defs/identifier"},
+    "workflow_run_id": {"$ref": "#/$defs/identifier"},
+    "workflow_build_id": {"$ref": "#/$defs/identifier"},
+    "writer_mode": {"type": "string", "enum": ["LEGACY", "SHADOW", "TEMPORAL"]},
+    "macro_phase": {"$ref": "#/$defs/identifier"},
+    "room_type": {"type": "string", "enum": ["INTAKE", "EVIDENCE", "HEARING", "REVIEW"]},
+    "room_phase": {"$ref": "#/$defs/identifier"},
+    "room_epoch": {"type": "integer", "minimum": 0},
+    "process_revision": {"type": "integer", "minimum": 0},
+    "room_revision": {"type": "integer", "minimum": 0},
+    "fencing_token": {"type": "integer", "minimum": 0},
+    "source_event_sequence": {"type": "integer", "minimum": 0},
+    "pending_state": {
+      "type": "string",
+      "enum": [
+        "NONE",
+        "WAITING_PARTY",
+        "WAITING_TIMER",
+        "AGENT_RUNNING",
+        "REVIEW_PENDING",
+        "TOOL_RUNNING",
+        "FAILED"
+      ]
+    },
+    "projected_at": {"type": "string", "format": "date-time"}
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    }
+  }
+}

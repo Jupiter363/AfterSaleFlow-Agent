@@ -1,0 +1,73 @@
+{
+  "case": "manifest attempts to persist hidden reasoning",
+  "schema": "agent-execution-manifest.schema.json",
+  "instance": {
+    "schema_version": "agent-execution-manifest.v1",
+    "manifest_id": "manifest-001",
+    "tenant_surrogate": "tenant-demo",
+    "case_id": "case-001",
+    "room_epoch": 1,
+    "process_revision": 2,
+    "fencing_token": 1,
+    "workflow": {
+      "workflow_id": "case-process-case-001",
+      "run_id": "workflow-run-001",
+      "workflow_type": "IntakeRoomWorkflow",
+      "build_id": "java-worker-1.0.0"
+    },
+    "agent_run": {
+      "logical_run_id": "run-001",
+      "attempt_id": "attempt-001",
+      "logical_idempotency_key": "intake-turn-case-001-1"
+    },
+    "graph": {
+      "graph_key": "intake.v2",
+      "graph_version": "1.0.0",
+      "checkpoint_schema_version": "checkpoint.v1",
+      "checkpoint_id": "checkpoint-001",
+      "cognitive_revision": 2
+    },
+    "model": {
+      "prompt_version": "intake.user.v1",
+      "model_profile_id": "qwen3.7-plus.structured.v1",
+      "provider": "dashscope",
+      "model": "qwen3.7-plus",
+      "request_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "response_hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    "contract_versions": {
+      "graph_command": "room-graph-command.v1",
+      "graph_result": "room-graph-result.v1",
+      "stream": "agent-stream.v2"
+    },
+    "policy_version": "intake-policy.v1",
+    "guardrail_version": "intake-guardrail.v1",
+    "tool_versions": [
+      "order-reader.v1"
+    ],
+    "inputs": [
+      {
+        "artifact_id": "snapshot.case-001.1",
+        "schema_version": "case-snapshot.v1",
+        "uri": "s3://graph-input/case-001/snapshot-1.json",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    ],
+    "output": {
+      "artifact_id": "artifact.output.1",
+      "schema_version": "intake-dossier.v2",
+      "uri": "s3://graph-output/case-001/output-1.json",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "usage": {
+      "input_tokens": 1200,
+      "output_tokens": 240,
+      "total_tokens": 1440,
+      "latency_ms": 2100
+    },
+    "traceparent": "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
+    "finalized_at": "2026-07-17T08:00:00Z",
+    "hidden_reasoning": "must never be stored"
+  },
+  "expected_error": "additionalProperties rejects hidden_reasoning"
+}

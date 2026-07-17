@@ -1,0 +1,31 @@
+{
+  "case": "command payload attempts arbitrary network URI",
+  "schema": "case-command-ref.schema.json",
+  "instance": {
+    "schema_version": "case-command-ref.v1",
+    "command_id": "cmd.case-001.2",
+    "tenant_surrogate": "tenant-demo",
+    "case_id": "case-001",
+    "case_command_sequence": 2,
+    "command_type": "INTAKE_MESSAGE",
+    "room_type": "INTAKE",
+    "room_epoch": 1,
+    "actor_ref": {
+      "actor_id": "user-001",
+      "actor_role": "USER",
+      "actor_scopes": ["room.write"]
+    },
+    "payload_ref": {
+      "schema_version": "intake-message.v1",
+      "uri": "https://untrusted.example/payload.json",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "size_bytes": 512
+    },
+    "expected_process_revision": 0,
+    "occurred_at": "2026-07-17T08:00:00Z",
+    "deadline_at": "2026-07-17T08:10:00Z",
+    "traceparent": "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
+    "request_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "expected_error": "payload_ref.uri permits only authorized object or URN schemes"
+}

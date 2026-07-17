@@ -1,0 +1,58 @@
+{
+  "case": "provider retry budget exceeds approved bound",
+  "schema": "room-graph-command.schema.json",
+  "instance": {
+    "schema_version": "room-graph-command.v1",
+    "command_id": "graph-cmd-001",
+    "logical_run_id": "run-001",
+    "attempt_id": "attempt-001",
+    "tenant_surrogate": "tenant-demo",
+    "case_id": "case-001",
+    "room_type": "INTAKE",
+    "room_epoch": 1,
+    "graph_key": "intake.v2",
+    "graph_version": "1.0.0",
+    "checkpoint_schema_version": "checkpoint.v1",
+    "thread_id": "tenant-demo.case-001.intake.1.user-001",
+    "actor_scope": {
+      "actor_id": "user-001",
+      "actor_role": "USER",
+      "audience": "USER",
+      "capabilities": [
+        "order.read"
+      ]
+    },
+    "process_revision": 2,
+    "stage_code": "INTAKE_ACTIVE",
+    "stage_sequence": 1,
+    "domain_snapshot_ref": {
+      "artifact_id": "snapshot.case-001.1",
+      "schema_version": "case-snapshot.v1",
+      "uri": "s3://graph-input/case-001/snapshot-1.json",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "size_bytes": 4096
+    },
+    "invocation_context": {
+      "agent_profile_id": "dispute-intake-officer.v1",
+      "prompt_profile_id": "intake.user.v1",
+      "model_profile_id": "qwen3.7-plus.structured.v1",
+      "output_schema_version": "intake-turn.v2",
+      "policy_version": "intake-policy.v1",
+      "guardrail_version": "intake-guardrail.v1",
+      "tool_capabilities": [
+        "order.read"
+      ],
+      "envelope_key_id": "java-invocation-es256-1",
+      "envelope_nonce": "nonce-001"
+    },
+    "retry_budget": {
+      "provider_attempts_remaining": 3,
+      "activity_attempts_remaining": 3,
+      "repairs_remaining": 1
+    },
+    "deadline_at": "2026-07-17T08:10:00Z",
+    "traceparent": "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
+    "request_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  },
+  "expected_error": "provider_attempts_remaining maximum"
+}

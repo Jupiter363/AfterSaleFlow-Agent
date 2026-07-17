@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.after-sale-flow.example/agent-platform/v1/artifact-ref.schema.json",
+  "title": "ArtifactRef v1",
+  "description": "Immutable, authorized reference to a formal or proposed artifact.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "artifact_id",
+    "artifact_type",
+    "content_schema_version",
+    "storage_ref",
+    "content_hash",
+    "size_bytes",
+    "parent_refs",
+    "visibility",
+    "created_by_run_id",
+    "created_at"
+  ],
+  "properties": {
+    "schema_version": {"type": "string", "const": "artifact-ref.v1"},
+    "artifact_id": {"$ref": "#/$defs/identifier"},
+    "artifact_type": {"$ref": "#/$defs/identifier"},
+    "content_schema_version": {"$ref": "#/$defs/identifier"},
+    "storage_ref": {"type": "string", "format": "uri", "pattern": "^(s3|minio|urn):", "maxLength": 1024},
+    "content_hash": {"$ref": "#/$defs/sha256"},
+    "size_bytes": {"type": "integer", "minimum": 0, "maximum": 1073741824},
+    "parent_refs": {
+      "type": "array",
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/parent_ref"}
+    },
+    "visibility": {
+      "type": "string",
+      "enum": ["PRIVATE", "PARTIES", "PLATFORM", "INTERNAL"]
+    },
+    "created_by_run_id": {"$ref": "#/$defs/identifier"},
+    "created_at": {"type": "string", "format": "date-time"}
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "parent_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_id", "content_hash"],
+      "properties": {
+        "artifact_id": {"$ref": "#/$defs/identifier"},
+        "content_hash": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  }
+}
