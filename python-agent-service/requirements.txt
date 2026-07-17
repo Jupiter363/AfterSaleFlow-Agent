@@ -4,3 +4,5 @@ pydantic-settings==2.14.0
 httpx==0.28.1
 langgraph==1.2.6
 langfuse==4.11.0
+jsonschema==4.26.0
+rfc8785==0.1.4

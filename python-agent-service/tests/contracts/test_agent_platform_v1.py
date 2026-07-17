@@ -1,0 +1,66 @@
+from __future__ import annotations
+
+import hashlib
+import json
+from copy import deepcopy
+from pathlib import Path
+
+import pytest
+
+from app.contracts.v1.codec import ContractCodec, canonical_sha256, canonicalize
+from app.contracts.v1.models import MODEL_BY_SCHEMA
+
+ROOT = Path(__file__).resolve().parents[3]
+CONTRACT_ROOT = ROOT / "contracts/agent-platform/v1"
+FIXTURE_ROOT = CONTRACT_ROOT / "fixtures"
+
+
+@pytest.fixture(scope="module")
+def codec() -> ContractCodec:
+    return ContractCodec(CONTRACT_ROOT)
+
+
+@pytest.mark.parametrize("path", sorted((FIXTURE_ROOT / "valid").glob("*.json")))
+def test_valid_shared_fixture_round_trips(path: Path, codec: ContractCodec) -> None:
+    fixture = json.loads(path.read_text(encoding="utf-8"))
+    model = codec.decode(fixture["schema"], fixture["instance"])
+
+    assert isinstance(model, MODEL_BY_SCHEMA[fixture["schema"]])
+    encoded = codec.encode(fixture["schema"], model)
+    assert encoded == fixture["instance"]
+
+
+@pytest.mark.parametrize("path", sorted((FIXTURE_ROOT / "invalid").glob("*.json")))
+def test_invalid_shared_fixture_fails_closed(path: Path, codec: ContractCodec) -> None:
+    fixture = json.loads(path.read_text(encoding="utf-8"))
+
+    with pytest.raises(ValueError):
+        codec.decode(fixture["schema"], fixture["instance"])
+
+
+def test_unknown_schema_file_fails_closed(codec: ContractCodec) -> None:
+    with pytest.raises(ValueError, match="unknown contract schema"):
+        codec.decode("room-graph-command.v99.schema.json", {})
+
+
+def test_schema_valid_shape_still_respects_total_payload_limit(codec: ContractCodec) -> None:
+    fixture = json.loads(
+        (FIXTURE_ROOT / "valid/room-graph-result-valid.json").read_text(encoding="utf-8")
+    )
+    instance = fixture["instance"]
+    proposal = deepcopy(instance["public_event_proposals"][0])
+    proposal["payload_ref"] = "s3://bucket/" + "a" * 980
+    instance["public_event_proposals"] = [deepcopy(proposal) for _ in range(100)]
+
+    with pytest.raises(ValueError, match="exceeds max_serialized_bytes"):
+        codec.decode(fixture["schema"], instance)
+
+
+@pytest.mark.parametrize("path", sorted((FIXTURE_ROOT / "canonical-hash").glob("*.json")))
+def test_rfc8785_vectors_match_shared_bytes_and_hash(path: Path) -> None:
+    fixture = json.loads(path.read_text(encoding="utf-8"))
+
+    canonical = canonicalize(fixture["input"])
+    assert canonical.decode("utf-8") == fixture["canonical_utf8"]
+    assert canonical_sha256(fixture["input"]) == fixture["sha256"]
+    assert hashlib.sha256(canonical).hexdigest() == fixture["sha256"]

@@ -1,0 +1,148 @@
+package com.example.dispute.workflow.contract.v1;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Map;
+import java.util.stream.Stream;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
+
+class AgentPlatformContractV1Test {
+
+    private static final Path CONTRACT_ROOT =
+            Path.of("..", "contracts", "agent-platform", "v1").normalize();
+    private static final Path FIXTURE_ROOT = CONTRACT_ROOT.resolve("fixtures");
+    private static final ObjectMapper MAPPER = JsonMapper.builder().findAndAddModules().build();
+    private static final Map<String, Class<?>> TYPES =
+            Map.of(
+                    "case-command-ref.schema.json", CaseCommandRef.class,
+                    "room-graph-command.schema.json", RoomGraphCommand.class,
+                    "room-graph-result.schema.json", RoomGraphResult.class,
+                    "artifact-ref.schema.json", ArtifactRef.class,
+                    "process-projection.schema.json", ProcessProjection.class,
+                    "agent-stream-event.schema.json", AgentStreamEvent.class,
+                    "agent-execution-manifest.schema.json", AgentExecutionManifest.class);
+
+    private static AgentPlatformContractCodec codec;
+
+    @BeforeAll
+    static void setUp() {
+        codec = new AgentPlatformContractCodec(CONTRACT_ROOT);
+    }
+
+    static Stream<Path> validFixtures() throws IOException {
+        try (Stream<Path> paths = Files.list(FIXTURE_ROOT.resolve("valid"))) {
+            return paths.filter(path -> path.toString().endsWith(".json"))
+                    .sorted()
+                    .toList()
+                    .stream();
+        }
+    }
+
+    static Stream<Path> invalidFixtures() throws IOException {
+        try (Stream<Path> paths = Files.list(FIXTURE_ROOT.resolve("invalid"))) {
+            return paths.filter(path -> path.toString().endsWith(".json"))
+                    .sorted()
+                    .toList()
+                    .stream();
+        }
+    }
+
+    static Stream<Path> canonicalFixtures() throws IOException {
+        try (Stream<Path> paths = Files.list(FIXTURE_ROOT.resolve("canonical-hash"))) {
+            return paths.filter(path -> path.toString().endsWith(".json"))
+                    .sorted()
+                    .toList()
+                    .stream();
+        }
+    }
+
+    @ParameterizedTest
+    @MethodSource("validFixtures")
+    void validSharedFixtureRoundTrips(Path path) throws IOException {
+        JsonNode fixture = MAPPER.readTree(path.toFile());
+        String schemaFile = fixture.required("schema").asText();
+        JsonNode instance = fixture.required("instance");
+
+        Object decoded = codec.decode(schemaFile, instance, TYPES.get(schemaFile));
+        JsonNode encoded = codec.encode(schemaFile, decoded);
+
+        assertThat(ContractJson.canonicalize(encoded))
+                .isEqualTo(ContractJson.canonicalize(instance));
+    }
+
+    @ParameterizedTest
+    @MethodSource("invalidFixtures")
+    void invalidSharedFixtureFailsClosed(Path path) throws IOException {
+        JsonNode fixture = MAPPER.readTree(path.toFile());
+        String schemaFile = fixture.required("schema").asText();
+
+        assertThatThrownBy(
+                        () ->
+                                codec.decode(
+                                        schemaFile,
+                                        fixture.required("instance"),
+                                        TYPES.get(schemaFile)))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void unknownSchemaFailsClosed() {
+        assertThatThrownBy(
+                        () ->
+                                codec.decode(
+                                        "room-graph-command.v99.schema.json",
+                                        MAPPER.createObjectNode(),
+                                        RoomGraphCommand.class))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("unknown contract schema");
+    }
+
+    @Test
+    void schemaValidShapeStillRespectsTotalPayloadLimit() throws IOException {
+        JsonNode fixture =
+                MAPPER.readTree(
+                        FIXTURE_ROOT.resolve("valid/room-graph-result-valid.json").toFile());
+        ObjectNode instance = (ObjectNode) fixture.required("instance").deepCopy();
+        ObjectNode proposal =
+                (ObjectNode) instance.required("public_event_proposals").required(0).deepCopy();
+        proposal.put("payload_ref", "s3://bucket/" + "a".repeat(980));
+        ArrayNode proposals = MAPPER.createArrayNode();
+        for (int index = 0; index < 100; index++) {
+            proposals.add(proposal.deepCopy());
+        }
+        instance.set("public_event_proposals", proposals);
+
+        assertThatThrownBy(
+                        () ->
+                                codec.decode(
+                                        fixture.required("schema").asText(),
+                                        instance,
+                                        RoomGraphResult.class))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("exceeds max_serialized_bytes");
+    }
+
+    @ParameterizedTest
+    @MethodSource("canonicalFixtures")
+    void rfc8785VectorsMatchSharedBytesAndHash(Path path) throws IOException {
+        JsonNode fixture = MAPPER.readTree(path.toFile());
+        JsonNode input = fixture.required("input");
+
+        assertThat(new String(ContractJson.canonicalize(input), StandardCharsets.UTF_8))
+                .isEqualTo(fixture.required("canonical_utf8").asText());
+        assertThat(ContractJson.sha256Hex(input)).isEqualTo(fixture.required("sha256").asText());
+    }
+}

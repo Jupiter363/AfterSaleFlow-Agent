@@ -1,0 +1,1 @@
+"""Versioned cross-service contracts."""

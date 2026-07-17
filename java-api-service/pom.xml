@@ -29,6 +29,8 @@
         <minio.version>8.6.0</minio.version>
         <okhttp.version>5.1.0</okhttp.version>
         <testcontainers.version>2.0.5</testcontainers.version>
+        <json-schema-validator.version>1.5.6</json-schema-validator.version>
+        <json-canonicalization.version>1.1</json-canonicalization.version>
     </properties>
 
     <dependencies>
@@ -100,6 +102,16 @@
             <groupId>io.temporal</groupId>
             <artifactId>temporal-sdk</artifactId>
             <version>${temporal.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.networknt</groupId>
+            <artifactId>json-schema-validator</artifactId>
+            <version>${json-schema-validator.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.github.erdtman</groupId>
+            <artifactId>java-json-canonicalization</artifactId>
+            <version>${json-canonicalization.version}</version>
         </dependency>
 
         <dependency>
