@@ -1,5 +1,6 @@
 package com.example.dispute.workflow.caseprocess;
 
+import static io.temporal.api.enums.v1.EventType.EVENT_TYPE_WORKFLOW_EXECUTION_CONTINUED_AS_NEW;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -25,8 +26,11 @@ import com.example.dispute.workflow.temporal.room.common.RoomControlWorkflow;
 import com.example.dispute.workflow.temporal.room.common.RoomControlWorkflowImpl;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowUpdateException;
+import io.temporal.common.WorkflowExecutionHistory;
 import io.temporal.testing.TestWorkflowEnvironment;
+import io.temporal.testing.WorkflowReplayer;
 import io.temporal.worker.Worker;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -362,6 +366,39 @@ class CaseProcessWorkflowTest {
                         snapshot -> snapshot.processedCommandCount() == 2);
         assertThat(room.recentCommandIds())
                 .containsExactly("command-1", "command-2");
+    }
+
+    @Test
+    void runAgeTimerContinuesAsNewAndTheCapturedClosedHistoryReplays()
+            throws Exception {
+        CaseCommandRef first = command(1, RoomType.EVIDENCE, 0);
+        ledger.put(first);
+        startWith(first);
+        CaseProcessSnapshot initial =
+                awaitProcess(snapshot -> snapshot.nextCommandSequence() == 2);
+
+        environment.sleep(Duration.ofHours(24));
+
+        CaseProcessSnapshot continued =
+                awaitProcess(
+                        snapshot ->
+                                snapshot.runGeneration() == 1
+                                        && !snapshot.workflowRunId()
+                                                .equals(initial.workflowRunId()));
+        WorkflowExecutionHistory captured =
+                client.fetchHistory(WORKFLOW_ID, initial.workflowRunId());
+        WorkflowExecutionHistory serializedCapture =
+                WorkflowExecutionHistory.fromJson(captured.toJson(true), WORKFLOW_ID);
+
+        assertThat(captured.getWorkflowExecution().getWorkflowId())
+                .isEqualTo(WORKFLOW_ID);
+        assertThat(serializedCapture.getLastEvent().getEventType())
+                .isEqualTo(EVENT_TYPE_WORKFLOW_EXECUTION_CONTINUED_AS_NEW);
+        assertThat(continued.nextCommandSequence()).isEqualTo(2);
+        assertThat(continued.processedCommandCount()).isEqualTo(1);
+
+        WorkflowReplayer.replayWorkflowExecution(
+                serializedCapture, CaseProcessWorkflowImpl.class);
     }
 
     @Test

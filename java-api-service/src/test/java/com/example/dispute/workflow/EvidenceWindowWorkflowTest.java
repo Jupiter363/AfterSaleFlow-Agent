@@ -6,6 +6,7 @@
  */
 package com.example.dispute.workflow;
 
+import static io.temporal.api.enums.v1.EventType.EVENT_TYPE_TIMER_STARTED;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.example.dispute.workflow.domain.EvidenceWindowCommand;
@@ -18,8 +19,8 @@ import io.temporal.client.WorkflowOptions;
 import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.worker.Worker;
 import java.time.Duration;
-import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -82,6 +83,7 @@ class EvidenceWindowWorkflowTest {
                 workflow::run,
                 new EvidenceWindowCommand("CASE_TIMEOUT", Duration.ofHours(2)));
         workflow.partyCompleted("USER");
+        workflow.partyCompleted("USER");
 
         EvidenceWindowResult result =
                 io.temporal.client.WorkflowStub.fromTyped(workflow)
@@ -96,14 +98,99 @@ class EvidenceWindowWorkflowTest {
                         startedAt + Duration.ofHours(2).toMillis());
     }
 
+    @Test
+    void bothPartiesCompleteBeforeTheWarningWithoutSchedulingSideEffects() {
+        EvidenceWindowWorkflow workflow = workflow("CASE_EARLY");
+        WorkflowClient.start(
+                workflow::run,
+                new EvidenceWindowCommand("CASE_EARLY", Duration.ofHours(2)));
+
+        workflow.partyCompleted("USER");
+        workflow.partyCompleted("MERCHANT");
+
+        EvidenceWindowResult result = result(workflow);
+        assertThat(result.stopReason()).isEqualTo("BOTH_PARTIES_COMPLETED");
+        assertThat(result.completedRoles()).containsExactly("USER", "MERCHANT");
+        assertThat(activities.warnedCases).isEmpty();
+        assertThat(activities.expiredCases).isEmpty();
+    }
+
+    @Test
+    void warningFiresAtTheSharedDeadlineAndBothPartiesCanStillComplete() {
+        long startedAt = environment.currentTimeMillis();
+        EvidenceWindowWorkflow workflow = workflow("CASE_WARNED");
+        WorkflowClient.start(
+                workflow::run,
+                new EvidenceWindowCommand("CASE_WARNED", Duration.ofHours(2)));
+
+        awaitTimerStarted("evidence-window-CASE_WARNED");
+        environment.sleep(Duration.ofMinutes(90).plusSeconds(1));
+        awaitRecorded(activities.warnedCases, "CASE_WARNED");
+        workflow.partyCompleted("USER");
+        workflow.partyCompleted("MERCHANT");
+
+        EvidenceWindowResult result = result(workflow);
+        assertThat(result.stopReason()).isEqualTo("BOTH_PARTIES_COMPLETED");
+        assertThat(activities.warnedCases).containsExactly("CASE_WARNED");
+        assertThat(activities.expiredCases).isEmpty();
+        assertThat(environment.currentTimeMillis())
+                .isGreaterThanOrEqualTo(startedAt + Duration.ofMinutes(90).toMillis());
+    }
+
+    private EvidenceWindowWorkflow workflow(String caseId) {
+        return client.newWorkflowStub(
+                EvidenceWindowWorkflow.class,
+                WorkflowOptions.newBuilder()
+                        .setWorkflowId("evidence-window-" + caseId)
+                        .setTaskQueue(TASK_QUEUE)
+                        .build());
+    }
+
+    private static EvidenceWindowResult result(EvidenceWindowWorkflow workflow) {
+        return io.temporal.client.WorkflowStub.fromTyped(workflow)
+                .getResult(EvidenceWindowResult.class);
+    }
+
+    private void awaitTimerStarted(String workflowId) {
+        long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
+        while (System.nanoTime() < deadline) {
+            if (client.fetchHistory(workflowId).getEvents().stream()
+                    .anyMatch(event -> event.getEventType() == EVENT_TYPE_TIMER_STARTED)) {
+                return;
+            }
+            sleepBriefly();
+        }
+        throw new AssertionError("evidence window timer was not scheduled");
+    }
+
+    private static void awaitRecorded(List<String> values, String expected) {
+        long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
+        while (System.nanoTime() < deadline) {
+            if (values.contains(expected)) {
+                return;
+            }
+            sleepBriefly();
+        }
+        throw new AssertionError("expected activity was not recorded: " + expected);
+    }
+
+    private static void sleepBriefly() {
+        try {
+            Thread.sleep(10);
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new AssertionError("test interrupted", exception);
+        }
+    }
+
     // 所属模块：【Temporal 持久化编排 / 自动化测试层】类型「RecordingActivities」。
     // 类型职责：定义Recording可由 Temporal 重试的 Activity 契约；本类型显式提供 「warn」、「expire」。
     // 协作关系：由 JUnit 发现并执行其中带 @Test 的场景。
     // 边界意义：Workflow 代码必须可重放且不直接做网络或数据库 I/O；副作用放入 Activity
     // Java 语法：class 同时封装状态与方法；final 依赖通过构造器注入后不可重新指向。
     static final class RecordingActivities implements EvidenceWindowActivities {
-        final List<String> expiredCases = new ArrayList<>();
-        final List<String> warnedCases = new ArrayList<>();
+        final List<String> expiredCases = new CopyOnWriteArrayList<>();
+        final List<String> warnedCases = new CopyOnWriteArrayList<>();
 
         // 所属模块：【Temporal 持久化编排 / 自动化测试层】「EvidenceWindowWorkflowTest.RecordingActivities.warn(String)」。
         // 具体功能：「EvidenceWindowWorkflowTest.RecordingActivities.warn(String)」：作为「RecordingActivities」测试替身实现「warn」：按当前场景返回固定结果且不访问真实基础设施，让被测编排能够观察到确定、可断言的协作者行为。

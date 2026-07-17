@@ -186,6 +186,44 @@ class ProcessProjectionFencingIntegrationTest {
     }
 
     @Test
+    void delayedWriterThatWasValidAtDispatchCannotOverwriteANewerRevision() {
+        Fixture fixture = insertFixture("DELAYED_WRITER");
+        ApplyProjectionCommand delayed =
+                insertNextRevisionCommand(
+                        fixture,
+                        "projection:delayed-writer",
+                        12,
+                        5,
+                        3,
+                        4,
+                        RUN_1);
+
+        service.apply(command(fixture, "projection:winner"));
+
+        assertThatThrownBy(() -> service.apply(delayed))
+                .isInstanceOfSatisfying(
+                        ProjectionWriteRejectedException.class,
+                        failure ->
+                                assertThat(failure.reasonCode())
+                                        .isEqualTo("PROCESS_REVISION_STALE"));
+        assertThat(longValue("case_process_projection", "process_revision", fixture.caseId()))
+                .isEqualTo(6);
+        assertThat(
+                        longValue(
+                                "case_process_projection",
+                                "last_command_sequence",
+                                fixture.caseId()))
+                .isEqualTo(11);
+        assertThat(countOperations(fixture.caseId())).isEqualTo(1);
+        assertThat(
+                        stringValue(
+                                "case_command",
+                                "command_status",
+                                fixture.commandRowId() + "Next"))
+                .isEqualTo("ORCHESTRATION_ACCEPTED");
+    }
+
+    @Test
     void aProjectionFailureRollsBackEpochOperationAndCommandChanges() {
         Fixture fixture = insertFixture("ROLLBACK");
         installRejectingProjectionTrigger();
@@ -597,7 +635,13 @@ class ProcessProjectionFencingIntegrationTest {
 
     private static String allowedColumn(String column) {
         return switch (column) {
-            case "process_revision", "room_revision", "command_status", "operation_status", "temporal_run_id" -> column;
+            case "process_revision",
+                            "room_revision",
+                            "last_command_sequence",
+                            "command_status",
+                            "operation_status",
+                            "temporal_run_id" ->
+                    column;
             default -> throw new IllegalArgumentException("unsupported column");
         };
     }
