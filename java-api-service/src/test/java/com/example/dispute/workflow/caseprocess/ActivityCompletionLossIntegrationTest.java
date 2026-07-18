@@ -1,13 +1,21 @@
 package com.example.dispute.workflow.caseprocess;
 
 import static io.temporal.api.enums.v1.EventType.EVENT_TYPE_ACTIVITY_TASK_STARTED;
+import static io.temporal.api.enums.v1.WorkflowIdConflictPolicy.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING;
+import static io.temporal.api.enums.v1.WorkflowIdReusePolicy.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE;
+import static io.temporal.client.WorkflowUpdateStage.COMPLETED;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.example.dispute.workflow.activity.domain.CaseProcessLedgerActivitiesImpl;
 import com.example.dispute.workflow.contract.v1.CaseCommandRef;
 import com.example.dispute.workflow.contract.v1.CaseProcessWorkflowProtocol;
+import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
+import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
+import com.example.dispute.workflow.contract.v1.ProvisionRoomEpoch;
+import com.example.dispute.workflow.contract.v1.ProvisionRoomEpochReceipt;
 import com.example.dispute.workflow.infrastructure.outbox.SdkTemporalUpdateGateway;
 import com.example.dispute.workflow.infrastructure.outbox.TemporalUpdateGateway;
+import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState;
 import com.example.dispute.workflow.temporal.caseprocess.CaseDomainEventRef;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessLedgerActivities;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessLedgerActivities.CaseCommandLedgerEntry;
@@ -19,7 +27,10 @@ import com.example.dispute.workflow.temporal.caseprocess.CaseProcessWorkflowImpl
 import com.example.dispute.workflow.temporal.room.common.RoomControlWorkflowImpl;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.temporal.activity.Activity;
+import io.temporal.client.UpdateOptions;
 import io.temporal.client.WorkflowClient;
+import io.temporal.client.WorkflowOptions;
+import io.temporal.client.WorkflowStub;
 import io.temporal.testing.TestEnvironmentOptions;
 import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.worker.Worker;
@@ -117,6 +128,7 @@ class ActivityCompletionLossIntegrationTest {
             environment.start();
 
             WorkflowClient client = environment.getWorkflowClient();
+            provisionRoomEpoch(client);
             new SdkTemporalUpdateGateway(client)
                     .deliver(
                             new TemporalUpdateGateway.UpdateWithStartRequest(
@@ -163,6 +175,70 @@ class ActivityCompletionLossIntegrationTest {
                                     CASE_ID))
                     .isEqualTo("OPEN");
         }
+    }
+
+    private static void provisionRoomEpoch(WorkflowClient client) {
+        ProvisionRoomEpoch request =
+                new ProvisionRoomEpoch(
+                        ProvisionRoomEpoch.SCHEMA_VERSION,
+                        "EPOCH_ACTIVITY_COMPLETION_LOSS",
+                        TENANT,
+                        CASE_ID,
+                        "ROOM_ACTIVITY_COMPLETION_LOSS",
+                        RoomType.EVIDENCE,
+                        0,
+                        0,
+                        0,
+                        1,
+                        "EVIDENCE_OPEN",
+                        "EVIDENCE",
+                        "OPEN",
+                        WriterMode.SHADOW,
+                        WORKFLOW_ID,
+                        CaseProcessWorkflowProtocol.roomWorkflowId(
+                                CASE_ID, RoomType.EVIDENCE, 0),
+                        "room-epoch-selection.v1",
+                        "case-process-contract.v1",
+                        CaseProcessWorkflowProtocol.CASE_WORKFLOW_TYPE,
+                        "build-activity-completion-loss",
+                        "evidence.v2",
+                        "1.0.0",
+                        "checkpoint.v1",
+                        "agent_stream.v1",
+                        0,
+                        0,
+                        1,
+                        1,
+                        NOW.plusSeconds(3600),
+                        null,
+                        null,
+                        NOW);
+        WorkflowStub workflow =
+                client.newUntypedWorkflowStub(
+                        CaseProcessWorkflowProtocol.CASE_WORKFLOW_TYPE,
+                        WorkflowOptions.newBuilder()
+                                .setWorkflowId(WORKFLOW_ID)
+                                .setTaskQueue(
+                                        CaseProcessWorkflowProtocol.CASE_CONTROL_TASK_QUEUE)
+                                .setWorkflowIdConflictPolicy(
+                                        WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING)
+                                .setWorkflowIdReusePolicy(
+                                        WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE)
+                                .build());
+        ProvisionRoomEpochReceipt receipt =
+                workflow
+                        .startUpdateWithStart(
+                                UpdateOptions.newBuilder(ProvisionRoomEpochReceipt.class)
+                                        .setUpdateName(
+                                                CaseProcessWorkflowProtocol
+                                                        .PROVISION_ROOM_EPOCH_UPDATE)
+                                        .setUpdateId(request.updateId())
+                                        .setWaitForStage(COMPLETED)
+                                        .build(),
+                                new Object[] {request},
+                                new Object[] {CaseProcessCarryState.initial()})
+                        .getResult();
+        assertThat(receipt.matches(request)).isTrue();
     }
 
     private static CaseProcessSnapshot awaitProcess(
