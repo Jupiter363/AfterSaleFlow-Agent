@@ -8,6 +8,9 @@
 
 本文不是 `MIG-001` 的通过证明，也不替代正式证据包、发布审批或
 [`phase-1-mig-001.md`](./phase-1-mig-001.md)。
+日常开发只需先读
+[`phase-1-lessons-quick-reference.md`](./phase-1-lessons-quick-reference.md)，
+需要完整证据和根因时再读本文。
 
 ## 2. 结论与状态边界
 
