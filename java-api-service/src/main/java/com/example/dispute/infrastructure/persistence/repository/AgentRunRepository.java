@@ -21,6 +21,9 @@ import org.springframework.data.repository.query.Param;
 // 边界意义：实体记录是 API 查询投影和审计依据，写入必须服从上层事务与状态机
 // Java 语法：interface 只定义能力契约，调用方依赖接口而不是具体适配器。
 public interface AgentRunRepository extends JpaRepository<AgentRunEntity, String> {
+
+    Optional<AgentRunEntity> findByCaseIdAndLogicalIdempotencyKey(
+            String caseId, String logicalIdempotencyKey);
     // 所属模块：【PostgreSQL 事实模型 / 仓储接口层】「AgentRunRepository.findAllByCaseIdOrderByCreatedAtAsc(String)」。
     // 具体功能：「AgentRunRepository.findAllByCaseIdOrderByCreatedAtAsc(String)」：声明按案件标识访问Agent运行的 Spring Data 查询，由框架根据方法签名生成 SQL，并以「List<AgentRunEntity>」返回。
     // 上游调用：「AgentRunRepository.findAllByCaseIdOrderByCreatedAtAsc(String)」的上游调用点包括 「HearingPersistenceIntegrationTest.activityCallsAgentOutsideTransactionAndPersistsEveryNodeAndDraft」、「HearingPersistenceIntegrationTest.hearingAgentFailureDoesNotPersistASyntheticManualReviewDraft」。

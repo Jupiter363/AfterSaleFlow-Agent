@@ -70,7 +70,7 @@ class MigrationIntegrationTest {
         MigrateResult first = flyway.migrate();
         MigrateResult second = flyway.migrate();
 
-        assertThat(first.migrationsExecuted).isEqualTo(44);
+        assertThat(first.migrationsExecuted).isEqualTo(45);
         assertThat(second.migrationsExecuted).isZero();
 
         try (Connection connection =
@@ -100,6 +100,7 @@ class MigrationIntegrationTest {
                             "human_review_record",
                             "action_record",
                             "agent_run",
+                            "agent_run_attempt",
                             "agent_run_stream_event",
                             "agent_tool_call",
                             "agent_guardrail_event",
@@ -191,6 +192,9 @@ class MigrationIntegrationTest {
                             "idx_review_task_status",
                             "idx_action_record_case_id",
                             "idx_agent_run_case",
+                            "uq_agent_run_logical_idempotency_v2",
+                            "uq_agent_run_attempt_number",
+                            "uq_agent_run_stream_event_attempt_sequence_v2",
                             "idx_deliberation_case",
                             "idx_audit_log_case_id",
                             "uq_policy_rule_code_version",

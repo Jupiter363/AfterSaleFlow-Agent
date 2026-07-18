@@ -7,8 +7,12 @@
 package com.example.dispute.agentstream.infrastructure.persistence;
 
 import com.example.dispute.infrastructure.persistence.entity.AbstractEntity;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunProtocol;
+import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
 import jakarta.persistence.Table;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
@@ -44,6 +48,19 @@ public class AgentRunStreamEventEntity extends AbstractEntity {
 
     @Column(name = "created_by", length = 128, nullable = false, updatable = false)
     private String createdBy;
+
+    @Column(name = "agent_run_attempt_id", length = 128)
+    private String agentRunAttemptId;
+
+    @Column(name = "stream_protocol", length = 32, nullable = false)
+    private String streamProtocol;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "audience", length = 32)
+    private Audience audience;
+
+    @Column(name = "payload_hash", length = 64)
+    private String payloadHash;
 
     // 所属模块：【Agent 流式运行 / 持久化适配层】「AgentRunStreamEventEntity.AgentRunStreamEventEntity()」。
     // 具体功能：「AgentRunStreamEventEntity.AgentRunStreamEventEntity()」：使用 无显式入参 创建 JPA 实体骨架并初始化主键；其余业务字段由显式工厂方法或 Hibernate 回填，避免无参构造被误当作完整业务对象。
@@ -82,8 +99,28 @@ public class AgentRunStreamEventEntity extends AbstractEntity {
         event.sequenceNo = sequenceNo;
         event.eventType = required(eventType, "eventType");
         event.payloadJson = required(payloadJson, "payloadJson");
+        event.agentRunAttemptId = event.agentRunId;
+        event.streamProtocol = AgentRunProtocol.V1.wireValue();
         event.createdAt = OffsetDateTime.now(ZoneOffset.UTC);
         event.createdBy = "agent-stream";
+        return event;
+    }
+
+    public static AgentRunStreamEventEntity createV2(
+            String id,
+            String agentRunId,
+            String attemptId,
+            long sequenceNo,
+            String eventType,
+            Audience audience,
+            String payloadJson,
+            String payloadHash) {
+        AgentRunStreamEventEntity event =
+                create(id, agentRunId, sequenceNo, eventType, payloadJson);
+        event.agentRunAttemptId = required(attemptId, "attemptId");
+        event.streamProtocol = AgentRunProtocol.V2.wireValue();
+        event.audience = java.util.Objects.requireNonNull(audience, "audience must not be null");
+        event.payloadHash = requireSha256(payloadHash);
         return event;
     }
 
@@ -132,6 +169,22 @@ public class AgentRunStreamEventEntity extends AbstractEntity {
         return createdAt;
     }
 
+    public String getAgentRunAttemptId() {
+        return agentRunAttemptId;
+    }
+
+    public String getStreamProtocol() {
+        return streamProtocol;
+    }
+
+    public Audience getAudience() {
+        return audience;
+    }
+
+    public String getPayloadHash() {
+        return payloadHash;
+    }
+
     // 所属模块：【Agent 流式运行 / 持久化适配层】「AgentRunStreamEventEntity.required(String,String)」。
     // 具体功能：「AgentRunStreamEventEntity.required(String,String)」：校验字符串；不满足前置条件时抛出 「IllegalArgumentException」，最终返回「String」。
     // 上游调用：「AgentRunStreamEventEntity.required(String,String)」的上游调用点包括 「AgentRunStreamEventEntity.create」。
@@ -140,6 +193,13 @@ public class AgentRunStreamEventEntity extends AbstractEntity {
     private static String required(String value, String field) {
         if (value == null || value.isBlank()) {
             throw new IllegalArgumentException(field + " must not be blank");
+        }
+        return value;
+    }
+
+    private static String requireSha256(String value) {
+        if (value == null || !value.matches("[0-9a-f]{64}")) {
+            throw new IllegalArgumentException("payloadHash must be a lowercase SHA-256");
         }
         return value;
     }

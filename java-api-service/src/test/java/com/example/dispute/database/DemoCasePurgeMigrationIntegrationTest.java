@@ -111,6 +111,8 @@ class DemoCasePurgeMigrationIntegrationTest {
                     .isZero();
             assertThat(count(connection, "agent_memory_entry", "CASE_PURGE_DEMO"))
                     .isZero();
+            assertThat(countById(connection, "agent_run_attempt", "RUN_PURGE_DEMO"))
+                    .isZero();
             assertThat(count(connection, "agent_a2a_message", "CASE_PURGE_DEMO"))
                     .isZero();
             assertThat(count(connection, "notification", "CASE_PURGE_DEMO"))

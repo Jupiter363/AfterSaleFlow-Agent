@@ -6,11 +6,21 @@
  */
 package com.example.dispute.infrastructure.persistence.entity;
 
+import com.example.dispute.agentstream.application.AgentRunLedger.CreateLogicalRun;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunExecutorKind;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunProtocol;
+import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
+import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
 import jakarta.persistence.PrePersist;
 import jakarta.persistence.Table;
+import jakarta.persistence.Version;
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import org.hibernate.annotations.JdbcTypeCode;
@@ -146,6 +156,72 @@ public class AgentRunEntity extends AbstractEntity {
     @Column(name = "updated_at", nullable = false)
     private OffsetDateTime updatedAt;
 
+    @Column(name = "tenant_surrogate", length = 128, nullable = false)
+    private String tenantSurrogate;
+
+    @Column(name = "protocol", length = 32, nullable = false)
+    private String protocol;
+
+    @Column(name = "logical_idempotency_key", length = 128, nullable = false)
+    private String logicalIdempotencyKey;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "executor_kind", length = 32, nullable = false)
+    private AgentRunExecutorKind executorKind;
+
+    @Column(name = "finalization_status", length = 32, nullable = false)
+    private String finalizationStatus;
+
+    @Column(name = "room_epoch_id", length = 64)
+    private String roomEpochId;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "room_type", length = 32)
+    private RoomType roomType;
+
+    @Column(name = "room_epoch", nullable = false)
+    private long roomEpoch;
+
+    @Column(name = "process_revision", nullable = false)
+    private long processRevision;
+
+    @Column(name = "fencing_token", nullable = false)
+    private long fencingToken;
+
+    @Column(name = "request_hash", length = 64)
+    private String requestHash;
+
+    @Column(name = "attempt_limit", nullable = false)
+    private int attemptLimit;
+
+    @Column(name = "deadline_at")
+    private OffsetDateTime deadlineAt;
+
+    @Column(name = "result_ready_attempt_id", length = 128)
+    private String resultReadyAttemptId;
+
+    @Column(name = "committed_attempt_id", length = 128)
+    private String committedAttemptId;
+
+    @Column(name = "final_result_hash", length = 64)
+    private String finalResultHash;
+
+    @Column(name = "committed_manifest_id", length = 64)
+    private String committedManifestId;
+
+    @Column(name = "committed_manifest_hash", length = 64)
+    private String committedManifestHash;
+
+    @Column(name = "final_stream_sequence_no")
+    private Long finalStreamSequenceNo;
+
+    @Column(name = "finalized_at")
+    private OffsetDateTime finalizedAt;
+
+    @Version
+    @Column(name = "logical_version", nullable = false)
+    private long logicalVersion;
+
     // 所属模块：【PostgreSQL 事实模型 / JPA 实体层】「AgentRunEntity.AgentRunEntity()」。
     // 具体功能：「AgentRunEntity.AgentRunEntity()」：使用 无显式入参 创建 JPA 实体骨架并初始化主键；其余业务字段由显式工厂方法或 Hibernate 回填，避免无参构造被误当作完整业务对象。
     // 上游调用：「AgentRunEntity.AgentRunEntity()」的上游创建点包括 「AgentRunEntity.completed」、「AgentRunEntity.streamingPending」。
@@ -266,6 +342,48 @@ public class AgentRunEntity extends AbstractEntity {
         return run;
     }
 
+    public static AgentRunEntity logicalV2(CreateLogicalRun command) {
+        AgentRunEntity run = new AgentRunEntity(required(command.agentRunId(), "agentRunId"));
+        run.caseId = required(command.caseId(), "caseId");
+        run.roomId = required(command.roomId(), "roomId");
+        run.workflowId = "AGENT_RUN_" + command.agentRunId();
+        run.agentId = "agent-stream:" + required(command.operation(), "operation").toLowerCase();
+        run.agentRole = "SYSTEM";
+        run.profileVersion = "runtime";
+        run.promptVersion = "runtime";
+        run.skillVersion = "runtime";
+        run.rulesetVersion = AgentRunProtocol.V2.wireValue();
+        run.runStatus = "PENDING";
+        run.inputRefsJson = "[]";
+        run.validationJson = "{}";
+        run.riskFlagsJson = "[]";
+        run.startedAt = at(command.createdAt(), "createdAt");
+        run.traceId = "agent-run-v2:" + command.agentRunId();
+        run.createdBy = "temporal-agent-run";
+        run.streamOperation = command.operation();
+        run.streamRequestJson = "{}";
+        run.streamRequestHash = requiredSha256(command.requestHash(), "requestHash");
+        run.streamAudienceJson = "[]";
+        run.streamAudienceActorIdsJson = "[]";
+        run.streamIdempotencyKey = required(command.logicalIdempotencyKey(), "logicalIdempotencyKey");
+        run.streamRequestId = command.agentRunId();
+        run.updatedAt = run.startedAt;
+        run.tenantSurrogate = required(command.tenantSurrogate(), "tenantSurrogate");
+        run.protocol = required(command.protocol(), "protocol").wireValue();
+        run.logicalIdempotencyKey = command.logicalIdempotencyKey();
+        run.executorKind = required(command.executorKind(), "executorKind");
+        run.finalizationStatus = "UNCOMMITTED";
+        run.roomEpochId = required(command.roomEpochId(), "roomEpochId");
+        run.roomType = required(command.roomType(), "roomType");
+        run.roomEpoch = nonNegative(command.roomEpoch(), "roomEpoch");
+        run.processRevision = nonNegative(command.processRevision(), "processRevision");
+        run.fencingToken = positive(command.fencingToken(), "fencingToken");
+        run.requestHash = run.streamRequestHash;
+        run.attemptLimit = boundedAttempts(command.attemptLimit());
+        run.deadlineAt = at(command.deadlineAt(), "deadlineAt");
+        return run;
+    }
+
     // 所属模块：【PostgreSQL 事实模型 / JPA 实体层】「AgentRunEntity.prePersist()」。
     // 具体功能：「AgentRunEntity.prePersist()」：在 JPA 首次 INSERT 前初始化 「now」、「createdAt」、「updatedAt」、「updatedAt」，保证即使调用方没有显式赋值，数据库中的审计字段也完整。
     // 上游调用：「AgentRunEntity.prePersist()」由使用「AgentRunEntity」的控制器、应用服务、Workflow Activity 或测试场景触发。
@@ -274,10 +392,146 @@ public class AgentRunEntity extends AbstractEntity {
     @PrePersist
     void prePersist() {
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
-        createdAt = now;
+        if (createdAt == null) {
+            createdAt = now;
+        }
         if (updatedAt == null) {
             updatedAt = now;
         }
+        if (tenantSurrogate == null) {
+            tenantSurrogate = "legacy-default";
+            protocol = AgentRunProtocol.V1.wireValue();
+            logicalIdempotencyKey = "legacy:" + getId();
+            executorKind = AgentRunExecutorKind.LEGACY_WORKER;
+            finalizationStatus = "COMPLETED".equals(runStatus)
+                    ? "LEGACY_COMMITTED"
+                    : "UNCOMMITTED";
+            attemptLimit = 1;
+            requestHash = streamRequestHash;
+            if ("COMPLETED".equals(runStatus)) {
+                resultReadyAttemptId = getId();
+                committedAttemptId = getId();
+            }
+        }
+    }
+
+    public void requireSameLogicalCommand(CreateLogicalRun command) {
+        requireEqual(tenantSurrogate, command.tenantSurrogate(), "tenantSurrogate");
+        requireEqual(caseId, command.caseId(), "caseId");
+        requireEqual(roomId, command.roomId(), "roomId");
+        requireEqual(streamOperation, command.operation(), "operation");
+        requireEqual(logicalIdempotencyKey, command.logicalIdempotencyKey(), "logicalIdempotencyKey");
+        requireEqual(protocol, command.protocol().wireValue(), "protocol");
+        requireEqual(executorKind, command.executorKind(), "executorKind");
+        requireEqual(roomEpochId, command.roomEpochId(), "roomEpochId");
+        requireEqual(roomType, command.roomType(), "roomType");
+        requireEqual(roomEpoch, command.roomEpoch(), "roomEpoch");
+        requireEqual(processRevision, command.processRevision(), "processRevision");
+        requireEqual(fencingToken, command.fencingToken(), "fencingToken");
+        requireEqual(requestHash, command.requestHash(), "requestHash");
+        requireEqual(attemptLimit, command.attemptLimit(), "attemptLimit");
+    }
+
+    public void requireAttemptRequest(ExecuteAgentRunRequest request) {
+        requireEqual(getId(), request.agentRunId(), "agentRunId");
+        requireEqual(getId(), request.logicalRunId(), "logicalRunId");
+        requireEqual(AgentRunProtocol.V2.wireValue(), request.streamProtocol(), "streamProtocol");
+        requireEqual(tenantSurrogate, request.command().tenantSurrogate(), "tenantSurrogate");
+        requireEqual(caseId, request.command().caseId(), "caseId");
+        requireEqual(roomType, request.command().roomType(), "roomType");
+        requireEqual(roomEpoch, request.command().roomEpoch(), "roomEpoch");
+        requireEqual(processRevision, request.command().processRevision(), "processRevision");
+        requireEqual(requestHash, request.command().requestHash(), "requestHash");
+        requireEqual(deadlineAt.toInstant(), request.command().deadlineAt(), "deadlineAt");
+    }
+
+    public void bindV2Audience(String actorRole, String audienceJson, String actorIdsJson) {
+        if (!AgentRunProtocol.V2.wireValue().equals(protocol)) {
+            throw new IllegalStateException("operation requires an AgentRun V2 row");
+        }
+        if ("[]".equals(streamAudienceJson) && "[]".equals(streamAudienceActorIdsJson)) {
+            this.agentRole = required(actorRole, "actorRole");
+            this.streamAudienceJson = required(audienceJson, "audienceJson");
+            this.streamAudienceActorIdsJson = required(actorIdsJson, "actorIdsJson");
+            return;
+        }
+        requireEqual(this.agentRole, actorRole, "actorRole");
+        requireEqual(this.streamAudienceJson, audienceJson, "audienceJson");
+        requireEqual(this.streamAudienceActorIdsJson, actorIdsJson, "actorIdsJson");
+    }
+
+    public void markV2AttemptStarted() {
+        requireV2Mutable();
+        if (!"PENDING".equals(runStatus) && !"RUNNING".equals(runStatus)) {
+            throw new IllegalStateException("logical AgentRun cannot start another attempt from " + runStatus);
+        }
+        runStatus = "RUNNING";
+        updatedAt = OffsetDateTime.now(ZoneOffset.UTC);
+    }
+
+    public void markV2ResultReady(String attemptId, String resultHash, Instant completedAt) {
+        requireV2Mutable();
+        if ("RESULT_READY".equals(runStatus)) {
+            requireEqual(resultReadyAttemptId, attemptId, "resultReadyAttemptId");
+            requireEqual(finalResultHash, resultHash, "finalResultHash");
+            return;
+        }
+        if (!"RUNNING".equals(runStatus)) {
+            throw new IllegalStateException("logical AgentRun is not running");
+        }
+        resultReadyAttemptId = required(attemptId, "attemptId");
+        finalResultHash = requiredSha256(resultHash, "resultHash");
+        runStatus = "RESULT_READY";
+        updatedAt = at(completedAt, "completedAt");
+    }
+
+    public void markV2AttemptFailed(
+            AgentRunAttemptStatus attemptStatus, boolean retryable, Instant completedAt) {
+        requireV2Mutable();
+        if (attemptStatus != AgentRunAttemptStatus.FAILED
+                && attemptStatus != AgentRunAttemptStatus.ABORTED
+                && attemptStatus != AgentRunAttemptStatus.CANCELLED) {
+            throw new IllegalArgumentException("attemptStatus is not terminal failure");
+        }
+        runStatus = retryable ? "PENDING" : attemptStatus.name();
+        updatedAt = at(completedAt, "completedAt");
+        if (!retryable) {
+            this.completedAt = updatedAt;
+        }
+    }
+
+    public void commitV2Final(
+            String attemptId,
+            String resultHash,
+            String manifestId,
+            String manifestHash,
+            long finalSequenceNo,
+            Instant committedAt) {
+        if ("COMMITTED".equals(finalizationStatus)) {
+            requireEqual(committedAttemptId, attemptId, "committedAttemptId");
+            requireEqual(finalResultHash, resultHash, "finalResultHash");
+            requireEqual(committedManifestId, manifestId, "committedManifestId");
+            requireEqual(committedManifestHash, manifestHash, "committedManifestHash");
+            requireEqual(finalStreamSequenceNo, finalSequenceNo, "finalStreamSequenceNo");
+            return;
+        }
+        if (!"RESULT_READY".equals(runStatus)) {
+            throw new IllegalStateException("logical AgentRun result is not ready");
+        }
+        requireEqual(resultReadyAttemptId, attemptId, "resultReadyAttemptId");
+        requireEqual(finalResultHash, resultHash, "finalResultHash");
+        committedAttemptId = required(attemptId, "attemptId");
+        committedManifestId = required(manifestId, "manifestId");
+        committedManifestHash = requiredSha256(manifestHash, "manifestHash");
+        if (finalSequenceNo < 0) {
+            throw new IllegalArgumentException("finalSequenceNo must not be negative");
+        }
+        finalStreamSequenceNo = finalSequenceNo;
+        finalizedAt = at(committedAt, "committedAt");
+        completedAt = finalizedAt;
+        updatedAt = finalizedAt;
+        finalizationStatus = "COMMITTED";
+        runStatus = "COMPLETED";
     }
 
     // 所属模块：【PostgreSQL 事实模型 / JPA 实体层】「AgentRunEntity.markRunning()」。
@@ -596,6 +850,90 @@ public class AgentRunEntity extends AbstractEntity {
         return updatedAt;
     }
 
+    public String getTenantSurrogate() {
+        return tenantSurrogate;
+    }
+
+    public String getProtocol() {
+        return protocol;
+    }
+
+    public String getLogicalIdempotencyKey() {
+        return logicalIdempotencyKey;
+    }
+
+    public AgentRunExecutorKind getExecutorKind() {
+        return executorKind;
+    }
+
+    public String getFinalizationStatus() {
+        return finalizationStatus;
+    }
+
+    public String getRoomEpochId() {
+        return roomEpochId;
+    }
+
+    public RoomType getRoomType() {
+        return roomType;
+    }
+
+    public long getRoomEpoch() {
+        return roomEpoch;
+    }
+
+    public long getProcessRevision() {
+        return processRevision;
+    }
+
+    public long getFencingToken() {
+        return fencingToken;
+    }
+
+    public String getRequestHash() {
+        return requestHash;
+    }
+
+    public int getAttemptLimit() {
+        return attemptLimit;
+    }
+
+    public OffsetDateTime getDeadlineAt() {
+        return deadlineAt;
+    }
+
+    public String getResultReadyAttemptId() {
+        return resultReadyAttemptId;
+    }
+
+    public String getCommittedAttemptId() {
+        return committedAttemptId;
+    }
+
+    public String getFinalResultHash() {
+        return finalResultHash;
+    }
+
+    public String getCommittedManifestId() {
+        return committedManifestId;
+    }
+
+    public String getCommittedManifestHash() {
+        return committedManifestHash;
+    }
+
+    public Long getFinalStreamSequenceNo() {
+        return finalStreamSequenceNo;
+    }
+
+    public OffsetDateTime getFinalizedAt() {
+        return finalizedAt;
+    }
+
+    public long getLogicalVersion() {
+        return logicalVersion;
+    }
+
     // 所属模块：【PostgreSQL 事实模型 / JPA 实体层】「AgentRunEntity.isTerminal()」。
     // 具体功能：「AgentRunEntity.isTerminal()」：判断是否Terminal；处理的关键状态/协议值包括 「COMPLETED」、「FAILED」，最终返回「boolean」。
     // 上游调用：「AgentRunEntity.isTerminal()」由使用「AgentRunEntity」的控制器、应用服务、Workflow Activity 或测试场景触发。
@@ -615,5 +953,60 @@ public class AgentRunEntity extends AbstractEntity {
             throw new IllegalArgumentException(field + " must not be blank");
         }
         return value;
+    }
+
+    private static <T> T required(T value, String field) {
+        if (value == null) {
+            throw new IllegalArgumentException(field + " must not be null");
+        }
+        return value;
+    }
+
+    private static String requiredSha256(String value, String field) {
+        if (value == null || !value.matches("[0-9a-f]{64}")) {
+            throw new IllegalArgumentException(field + " must be a lowercase SHA-256");
+        }
+        return value;
+    }
+
+    private static OffsetDateTime at(Instant value, String field) {
+        required(value, field);
+        return value.atOffset(ZoneOffset.UTC);
+    }
+
+    private static long nonNegative(long value, String field) {
+        if (value < 0) {
+            throw new IllegalArgumentException(field + " must not be negative");
+        }
+        return value;
+    }
+
+    private static long positive(long value, String field) {
+        if (value < 1) {
+            throw new IllegalArgumentException(field + " must be positive");
+        }
+        return value;
+    }
+
+    private static int boundedAttempts(int value) {
+        if (value < 1 || value > 100) {
+            throw new IllegalArgumentException("attemptLimit must be between 1 and 100");
+        }
+        return value;
+    }
+
+    private static void requireEqual(Object actual, Object expected, String field) {
+        if (!java.util.Objects.equals(actual, expected)) {
+            throw new IllegalStateException(field + " conflicts with the logical AgentRun");
+        }
+    }
+
+    private void requireV2Mutable() {
+        if (!AgentRunProtocol.V2.wireValue().equals(protocol)) {
+            throw new IllegalStateException("operation requires an AgentRun V2 row");
+        }
+        if ("COMMITTED".equals(finalizationStatus)) {
+            throw new IllegalStateException("logical AgentRun already has a committed final");
+        }
     }
 }
