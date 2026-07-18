@@ -198,7 +198,7 @@ batches:
       - id: java_shared_contract
         cwd: java-api-service
         command: >-
-          .\mvnw.cmd -Dtest=AgentPlatformContractV1Test test
+          .\mvnw.cmd -Dtest=AgentPlatformContractV1Test,AgentRunV2ContractTest,AgentRunV2PropertiesTest test
       - id: python_shared_contract
         cwd: python-agent-service
         command: >-

@@ -119,6 +119,36 @@ public final class ContractTypes {
         }
     }
 
+    public enum AgentRunProtocol {
+        V1("agent_stream.v1"),
+        V2("agent-stream.v2");
+
+        private final String wireValue;
+
+        AgentRunProtocol(String wireValue) {
+            this.wireValue = wireValue;
+        }
+
+        public String wireValue() {
+            return wireValue;
+        }
+    }
+
+    public enum AgentRunExecutorKind {
+        LEGACY_WORKER,
+        TEMPORAL_ACTIVITY
+    }
+
+    public enum AgentRunAttemptStatus {
+        PENDING,
+        RUNNING,
+        RESULT_READY,
+        COMPLETED,
+        FAILED,
+        ABORTED,
+        CANCELLED
+    }
+
     public enum GraphStatus {
         COMPLETED,
         NEEDS_INPUT,

@@ -148,6 +148,9 @@ frontend/src/components/room/AgentStreamingMessage.test.js
 
 ### Wave 0：主代理合同包 P2.0
 
+冻结结果见
+[`P2.0 Shared Contract Pack`](../docs/runbooks/temporal-first/phase-2-p2.0-contract-pack.md)。
+
 主代理先完成一个小提交，只冻结接口，不实现完整业务：
 
 - 复核既有 `agent-stream.v2` JSON Schema、Java record 和 Pydantic model，不兼容变化必须先走 ADR。

@@ -63,6 +63,13 @@ springdoc:
     path: /swagger-ui.html
 
 app:
+  agent-run-v2:
+    enabled: ${APP_AGENT_RUN_V2_ENABLED:false}
+    protocol-default: ${APP_AGENT_RUN_V2_PROTOCOL_DEFAULT:V1}
+    scheduler-mode: ${APP_AGENT_RUN_V2_SCHEDULER_MODE:EXECUTOR}
+    start-to-close-timeout: ${APP_AGENT_RUN_V2_START_TO_CLOSE_TIMEOUT:PT10M}
+    heartbeat-timeout: ${APP_AGENT_RUN_V2_HEARTBEAT_TIMEOUT:PT15S}
+    progress-heartbeat-interval: ${APP_AGENT_RUN_V2_PROGRESS_HEARTBEAT_INTERVAL:PT5S}
   security:
     tenant-authority:
       surrogate: ${APP_TENANT_SURROGATE:legacy-default}
