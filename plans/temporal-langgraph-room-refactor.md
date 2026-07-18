@@ -1,10 +1,12 @@
 # Temporal + LangGraph 房间重构可执行计划
 
-> 状态：`PLAN_REVIEW_REQUIRED`
+> 状态：`IN_PROGRESS_PHASE_1_PROMOTION_PENDING`
 > 计划日期：2026-07-17
 > 工作分支：`codex/temporal-langgraph-room-refactor`
 > 盘点基线：`f69c17f32090303a82c3c4662a0e244d0c4e5f04`
-> 实施状态：尚未开始。本文中的测试、Trace、History、SQL、负载和灾备结果全部为 `TODO`，不得视为已通过。
+> 实施状态：Phase 0 证据门禁 `PASS`；Phase 1 engineering checkpoint `PASS`，promotion gate
+> `PENDING`；Phase 2 `BLOCKED`；Phase 3-8 `TODO`。尚未采集或审批的生产级 Trace、History、SQL、
+> 负载和灾备证据仍为 `TODO`，不得由工程检查点推定为已通过。
 
 ## 1. 执行摘要
 
@@ -1181,5 +1183,6 @@ python -m pytest tests/static/test_temporal_refactor_traceability.py \
 - 证据保存到`test-reports/temporal-first/{release-id}/phase-0/p0.1/`，但只有测试事实可标PASS，
   `MIG-000`须等P0后续Java/Pydantic双向合同PR及全部ADR审批完成后才能PASS。
 
-本PR合并后，下一PR才实现Java/Pydantic合同类型和双向fixture；再下一PR才进入V039/V040和Temporal
-foundation。本文保持`PLAN_REVIEW_REQUIRED`，在用户明确批准前不得开始`P0.1`。
+上述实施顺序为计划制定时的基线。当前以本文顶部阶段状态为准：Phase 0 已通过，Phase 1 工程检查点
+已通过但 promotion 仍待外部证据与审批；在 `MIG-001` 通过或获得正式的 `OFF/SHADOW` 开发例外前，
+不得开始 Phase 2 实现。

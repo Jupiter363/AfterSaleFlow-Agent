@@ -49,8 +49,9 @@ postgresql_version, temporal_server_version, kms_key_id,
 artifact_retention_days, skip_approval
 ```
 
-设置演练标识。`CASE_ID/EPOCH_ID/BOOTSTRAP_UPDATE_ID/COMMAND_ID` 必须在场景驱动前生成并保持
-不变；Workflow ID 必须来自 allocator 的持久化选择，Run ID 在 bootstrap receipt 后填写：
+设置演练标识。`SCENARIO_ID/COMMAND_ID` 必须在场景驱动前生成并保持不变；`CASE_ID/EPOCH_ID`、
+bootstrap update ID 和 Workflow ID 必须来自受控驱动器及 allocator 的持久化结果，禁止由操作员
+猜测或直接写表。Run ID 在 bootstrap receipt 后填写：
 
 ```bash
 export RELEASE_ID="phase1-$(date -u +%Y%m%dT%H%M%SZ)"
@@ -64,14 +65,17 @@ export TEMPORAL_SERVER_VERSION="<version>"
 export EVIDENCE_KMS_KEY_ID="<non-secret-key-id>"
 export ARTIFACT_RETENTION_DAYS="30"
 
-export CASE_ID="CASE_MIG001_<synthetic-id>"
-export EPOCH_ID="EPOCH_MIG001_<synthetic-id>"
-export BOOTSTRAP_UPDATE_ID="bootstrap-mig001-<synthetic-id>"
+export SCENARIO_ID="$(openssl rand -hex 16)"
 export COMMAND_ID="command-mig001-<synthetic-id>"
-export CASE_WORKFLOW_ID="<persisted-case-workflow-id>"
-export ROOM_WORKFLOW_ID="<persisted-room-workflow-id>"
+export CASE_ID=""
+export EPOCH_ID=""
+export BOOTSTRAP_UPDATE_ID=""
+export CASE_WORKFLOW_ID=""
+export ROOM_WORKFLOW_ID=""
 export CASE_RUN_ID=""
 export ROOM_RUN_ID=""
+export MIG001_API_URL="http://localhost:8080"
+export MIG001_SERVICE_IDENTITY="mig001-release-driver"
 
 export RAW_DIR="java-api-service/target/mig-001/${RELEASE_ID}/raw"
 export ARTIFACT_ROOT="${MIG001_ARTIFACT_ROOT:-../phase-evidence-artifacts}"
@@ -102,15 +106,68 @@ cd ..
 
 ## 4. SHADOW bootstrap 故障演练
 
-确认新 epoch selector 为 SHADOW，并确认没有任何真实业务 case 进入 canary。停止 Control Worker：
+受控驱动器必须只在隔离的 synthetic 环境启用，并同时满足以下三个条件：
+
+- Spring profile 包含 `mig001-driver`。
+- `app.orchestration.mig001-driver-enabled=true`。
+- `app.orchestration.new-epoch-mode=SHADOW`；`LEGACY` 或 `TEMPORAL` 必须在启动时 fail closed。
+
+完整演练还必须启用 `command-v1`、bootstrap relay 和 command outbox。Compose 必须显式覆盖 API
+profile；这些变量默认均保持关闭：
+
+```bash
+export JAVA_API_SPRING_PROFILES_ACTIVE="local,api,mig001-driver"
+export APP_ORCHESTRATION_MIG001_DRIVER_ENABLED=true
+export APP_ORCHESTRATION_NEW_EPOCH_MODE=SHADOW
+export APP_ORCHESTRATION_COMMAND_V1_ENABLED=true
+export APP_ORCHESTRATION_COMMAND_OUTBOX_ENABLED=true
+export APP_ORCHESTRATION_ROOM_EPOCH_BOOTSTRAP_ENABLED=true
+docker compose up -d --build java-api-service java-control-worker
+```
+
+缺少 driver profile 或 driver-enabled property 时，`/internal/orchestration/mig001/**` 必须不存在；端点只接受经可信入口
+注入 `X-Service-Identity` 的 SYSTEM 身份。演练结束后移除 profile 和 property，禁止把该驱动器加入
+常规开发、共享测试或生产部署。确认没有任何真实业务 case 进入 canary，然后停止 Control Worker：
 
 ```bash
 docker compose stop java-control-worker
 docker compose ps java-control-worker temporal-server postgresql java-api-service
 ```
 
-通过批准的 synthetic MIG-001 场景驱动器创建 `CASE_ID/EPOCH_ID`。不要提交业务 command。
-事务提交后必须同时看到：
+通过受控端点创建 synthetic、非 PII 的 `EVIDENCE_OPEN/EVIDENCE` case。创建操作只允许固定 demo actor，
+不得接受聊天、证据、订单号、用户标识或任意业务 payload；它只创建 case、SHADOW epoch、projection
+和 bootstrap outbox，不提交业务 command，也不触发 Intake Agent/model。使用相同 `scenario_id`
+重放必须返回同一 tuple：
+
+```bash
+curl -fsS -X POST "$MIG001_API_URL/internal/orchestration/mig001/scenarios" \
+  -H "X-Service-Identity: $MIG001_SERVICE_IDENTITY" \
+  -H "Content-Type: application/json" \
+  --data "{\"scenario_id\":\"$SCENARIO_ID\"}" \
+  > "$RAW_DIR/scenario-created.json"
+
+export CASE_ID="$(jq -er '.data.case_id' "$RAW_DIR/scenario-created.json")"
+curl -fsS \
+  -H "X-Service-Identity: $MIG001_SERVICE_IDENTITY" \
+  "$MIG001_API_URL/internal/orchestration/mig001/scenarios/$CASE_ID" \
+  > "$RAW_DIR/scenario-before.json"
+
+export EPOCH_ID="$(jq -er '.data.epoch_id' "$RAW_DIR/scenario-before.json")"
+export BOOTSTRAP_UPDATE_ID="$(jq -er '.data.bootstrap_update_id' "$RAW_DIR/scenario-before.json")"
+export CASE_WORKFLOW_ID="$(jq -er '.data.case_workflow_id' "$RAW_DIR/scenario-before.json")"
+export ROOM_WORKFLOW_ID="$(jq -er '.data.room_workflow_id' "$RAW_DIR/scenario-before.json")"
+test "$(jq -er '.data.source_system' "$RAW_DIR/scenario-before.json")" = "MIG001_SYNTHETIC"
+test "$(jq -er '.data.writer_mode' "$RAW_DIR/scenario-before.json")" = "SHADOW"
+test "$(jq -er '.data.projection_writer_mode' "$RAW_DIR/scenario-before.json")" = "SHADOW"
+test "$(jq -er '.data.room_type' "$RAW_DIR/scenario-before.json")" = "EVIDENCE"
+jq -e '.data.lifecycle_status == "ACTIVE"
+  and (.data.provisioning_status == "PENDING" or .data.provisioning_status == "PROVISIONING")
+  and (.data.writer_activation_status == "PREPARING" or .data.writer_activation_status == "PROVISIONING")' \
+  "$RAW_DIR/scenario-before.json" >/dev/null
+```
+
+若实现返回的 JSON 合同与上述字段不同，必须先同步本手册和静态合同测试，不得在现场用猜测的
+`jq` 路径继续。事务提交后必须同时看到：
 
 - 唯一 writer slot 为该 SHADOW epoch，`lifecycle_status=ACTIVE`。
 - `provisioning_status=PENDING|PROVISIONING`。
@@ -127,16 +184,56 @@ docker compose exec -T temporal-server tctl --ns "$TEMPORAL_NAMESPACE" taskqueue
   --taskqueue room-control --taskqueuetype workflow
 ```
 
-等待同一 bootstrap outbox 到达 `DELIVERED`。从 receipt 和 epoch 读取并交叉确认 Run ID：
+等待同一 bootstrap outbox 到达 `DELIVERED`。再次查询受控端点，从 receipt 和 epoch 读取并交叉
+确认 Run ID：
 
 ```bash
-export CASE_RUN_ID="<bootstrap-receipt-case-run-id>"
-export ROOM_RUN_ID="<bootstrap-receipt-room-run-id>"
+curl -fsS \
+  -H "X-Service-Identity: $MIG001_SERVICE_IDENTITY" \
+  "$MIG001_API_URL/internal/orchestration/mig001/scenarios/$CASE_ID" \
+  > "$RAW_DIR/scenario-ready.json"
+
+test "$(jq -er '.data.bootstrap_status' "$RAW_DIR/scenario-ready.json")" = "DELIVERED"
+test "$(jq -er '.data.provisioning_status' "$RAW_DIR/scenario-ready.json")" = "READY"
+test "$(jq -er '.data.writer_activation_status' "$RAW_DIR/scenario-ready.json")" = "READY"
+export CASE_RUN_ID="$(jq -er '.data.case_temporal_run_id' "$RAW_DIR/scenario-ready.json")"
+export ROOM_RUN_ID="$(jq -er '.data.room_temporal_run_id' "$RAW_DIR/scenario-ready.json")"
 ```
 
 确认该 SHADOW epoch 为 `ACTIVE + READY`、projection 为 `READY` 后，用预先生成的
-`COMMAND_ID` 提交合成 command。等待 command 变为 `SHADOW_COMPLETED` 且其 command outbox
-终止。SHADOW 输出不得正式推进 case、发送用户消息、创建正式审批或执行外部工具。
+`COMMAND_ID` 提交合成 command。请求中的 epoch 和 revision 必须来自刚才查询到的同一 tuple，deadline
+必须是未来时间；payload 只能是无业务含义的 synthetic URN：
+
+```bash
+export ROOM_EPOCH="$(jq -er '.data.room_epoch' "$RAW_DIR/scenario-ready.json")"
+export EXPECTED_PROCESS_REVISION="$(jq -er '.data.process_revision' "$RAW_DIR/scenario-ready.json")"
+export COMMAND_DEADLINE_AT="$(date -u -d '+10 minutes' +%Y-%m-%dT%H:%M:%SZ)"
+
+curl -fsS -X POST "$MIG001_API_URL/api/disputes/$CASE_ID/commands" \
+  -H "X-Service-Identity: $MIG001_SERVICE_IDENTITY" \
+  -H "Idempotency-Key: $COMMAND_ID" \
+  -H "Content-Type: application/json" \
+  --data @- > "$RAW_DIR/command-accepted.json" <<JSON
+{
+  "command_type": "EVIDENCE_SUBMIT",
+  "room_type": "EVIDENCE",
+  "room_epoch": $ROOM_EPOCH,
+  "payload_ref": {
+    "schema_version": "mig001.synthetic-command.v1",
+    "uri": "urn:mig001:synthetic:$SCENARIO_ID",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "size_bytes": 0
+  },
+  "expected_process_revision": $EXPECTED_PROCESS_REVISION,
+  "deadline_at": "$COMMAND_DEADLINE_AT"
+}
+JSON
+
+test "$(jq -er '.data.command.command_id' "$RAW_DIR/command-accepted.json")" = "$COMMAND_ID"
+```
+
+同一 `COMMAND_ID` 重放必须返回同一 acceptance。等待 command 变为 `SHADOW_COMPLETED` 且其 command
+outbox 终止。SHADOW 输出不得正式推进 case、发送用户消息、创建正式审批或执行外部工具。
 
 ## 5. Tuple-scoped SQL before/after
 

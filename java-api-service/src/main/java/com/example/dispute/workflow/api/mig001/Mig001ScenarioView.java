@@ -1,0 +1,26 @@
+package com.example.dispute.workflow.api.mig001;
+
+public record Mig001ScenarioView(
+        String scenarioId,
+        String caseId,
+        String sourceSystem,
+        String externalCaseReference,
+        String epochId,
+        String tenantSurrogate,
+        String roomId,
+        String roomType,
+        long roomEpoch,
+        long processRevision,
+        long roomRevision,
+        long fencingToken,
+        String writerMode,
+        String lifecycleStatus,
+        String provisioningStatus,
+        String projectionWriterMode,
+        String writerActivationStatus,
+        String caseWorkflowId,
+        String roomWorkflowId,
+        String bootstrapUpdateId,
+        String bootstrapStatus,
+        String caseTemporalRunId,
+        String roomTemporalRunId) {}

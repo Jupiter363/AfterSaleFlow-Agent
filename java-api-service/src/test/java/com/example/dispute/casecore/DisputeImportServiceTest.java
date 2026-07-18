@@ -371,6 +371,13 @@ class DisputeImportServiceTest {
         assertThat(activation.getValue().occurredAt())
                 .isEqualTo(OffsetDateTime.parse("2026-07-03T00:00:00Z"));
         verify(roomEpochAllocator, never()).recordTerminal(any());
+        verify(intakeAgentTurnService, never())
+                .startInitialTurn(
+                        any(String.class),
+                        any(AuthenticatedActor.class),
+                        any(IntakeLobbySeed.class),
+                        any(String.class),
+                        any(String.class));
     }
 
     @Test

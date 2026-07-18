@@ -379,9 +379,10 @@ services:
     build: *java-build
     environment:
       <<: *java-environment
-      SPRING_PROFILES_ACTIVE: local,api
+      SPRING_PROFILES_ACTIVE: ${JAVA_API_SPRING_PROFILES_ACTIVE:-local,api}
       APP_TEMPORAL_WORKER_ENABLED: "false"
       APP_ORCHESTRATION_COMMAND_OUTBOX_ENABLED: ${APP_ORCHESTRATION_COMMAND_OUTBOX_ENABLED:-false}
+      APP_ORCHESTRATION_MIG001_DRIVER_ENABLED: ${APP_ORCHESTRATION_MIG001_DRIVER_ENABLED:-false}
     ports:
       - "127.0.0.1:${JAVA_API_PORT:-8080}:8080"
     depends_on: *java-api-depends-on
