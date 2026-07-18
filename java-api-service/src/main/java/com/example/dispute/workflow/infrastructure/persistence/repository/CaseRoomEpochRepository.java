@@ -21,14 +21,86 @@ public interface CaseRoomEpochRepository extends JpaRepository<CaseRoomEpochEnti
     Optional<CaseRoomEpochEntity> findByCaseIdAndRoomTypeAndRoomEpoch(
             String caseId, RoomType roomType, long roomEpoch);
 
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query(
+            """
+            select epoch
+              from CaseRoomEpochEntity epoch
+             where epoch.caseId = :caseId
+               and epoch.roomType = :roomType
+               and epoch.roomEpoch = :roomEpoch
+            """)
+    Optional<CaseRoomEpochEntity> findByCaseIdAndRoomTypeAndRoomEpochForUpdate(
+            @Param("caseId") String caseId,
+            @Param("roomType") RoomType roomType,
+            @Param("roomEpoch") long roomEpoch);
+
     Optional<CaseRoomEpochEntity> findByCaseIdAndRoomTypeAndLifecycleStatus(
             String caseId, RoomType roomType, EpochLifecycleStatus lifecycleStatus);
 
-    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    Optional<CaseRoomEpochEntity>
+            findTopByCaseIdAndRoomTypeAndLifecycleStatusOrderByRoomEpochDesc(
+                    String caseId,
+                    RoomType roomType,
+                    EpochLifecycleStatus lifecycleStatus);
+
     @Query(
-            "select epoch from CaseRoomEpochEntity epoch where epoch.temporalWorkflowId = :temporalWorkflowId")
+            value =
+                    """
+                    select *
+                      from case_room_epoch
+                     where case_id = :caseId
+                       and lifecycle_status = 'ACTIVE'
+                     for update
+                    """,
+            nativeQuery = true)
+    Optional<CaseRoomEpochEntity> findActiveByCaseIdForUpdate(
+            @Param("caseId") String caseId);
+
+    @Query(
+            value =
+                    """
+                    select *
+                      from case_room_epoch
+                     where case_id = :caseId
+                       and lifecycle_status in ('PREPARING', 'PROVISIONING', 'ACTIVE')
+                     for update
+                    """,
+            nativeQuery = true)
+    Optional<CaseRoomEpochEntity> findWriterSlotByCaseIdForUpdate(
+            @Param("caseId") String caseId);
+
+    @Query(
+            value =
+                    """
+                    select *
+                      from case_room_epoch
+                     where temporal_workflow_id = :temporalWorkflowId
+                       and lifecycle_status = 'ACTIVE'
+                     for update
+                    """,
+            nativeQuery = true)
     Optional<CaseRoomEpochEntity> findByTemporalWorkflowIdForUpdate(
             @Param("temporalWorkflowId") String temporalWorkflowId);
+
+    @Query(
+            """
+            select max(epoch.roomEpoch)
+              from CaseRoomEpochEntity epoch
+             where epoch.caseId = :caseId
+               and epoch.roomType = :roomType
+            """)
+    Optional<Long> findMaxRoomEpoch(
+            @Param("caseId") String caseId,
+            @Param("roomType") RoomType roomType);
+
+    @Query(
+            """
+            select max(epoch.fencingToken)
+              from CaseRoomEpochEntity epoch
+             where epoch.caseId = :caseId
+            """)
+    Optional<Long> findMaxFencingToken(@Param("caseId") String caseId);
 
     @Query(
             """
@@ -61,7 +133,6 @@ public interface CaseRoomEpochRepository extends JpaRepository<CaseRoomEpochEnti
                     update case_room_epoch
                        set process_revision = :newProcessRevision,
                            room_revision = :newRoomRevision,
-                           temporal_run_id = :temporalRunId,
                            updated_at = :updatedAt,
                            version = version + 1
                      where case_id = :caseId
@@ -92,7 +163,6 @@ public interface CaseRoomEpochRepository extends JpaRepository<CaseRoomEpochEnti
             @Param("newRoomRevision") long newRoomRevision,
             @Param("temporalWorkflowId") String temporalWorkflowId,
             @Param("expectedTemporalRunId") String expectedTemporalRunId,
-            @Param("temporalRunId") String temporalRunId,
             @Param("temporalBuildId") String temporalBuildId,
             @Param("updatedAt") java.time.OffsetDateTime updatedAt);
 }

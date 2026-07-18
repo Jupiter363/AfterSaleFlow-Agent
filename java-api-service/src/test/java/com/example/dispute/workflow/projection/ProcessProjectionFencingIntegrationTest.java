@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.example.dispute.workflow.application.projection.DomainOperationConflictException;
 import com.example.dispute.workflow.application.projection.FencedProcessProjectionService;
 import com.example.dispute.workflow.application.projection.ProjectionWriteRejectedException;
+import com.example.dispute.workflow.contract.v1.CaseProcessWorkflowProtocol;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ProcessProjectionContract.ApplyProjectionCommand;
 import com.example.dispute.workflow.contract.v1.ProcessProjectionContract.ApplyProjectionOutcome;
@@ -166,21 +167,14 @@ class ProcessProjectionFencingIntegrationTest {
     }
 
     @Test
-    void oldRunCannotWriteAfterANewRunTakesOverTheProjectionBinding() {
+    void projectionAdvancePreservesTheFirstExecutionRunBinding() {
         Fixture fixture = insertFixture("RUN_TAKEOVER");
-        ApplyProjectionCommand takeover =
-                withNewRun(command(fixture, "projection:run-takeover"), "run-projection-2");
-        service.apply(takeover);
-        ApplyProjectionCommand lateOldRun =
-                insertNextRevisionCommand(
-                        fixture, "projection:late-old-run", 12, 6, 4, 5, RUN_1);
+        service.apply(command(fixture, "projection:run-binding-stable"));
 
-        assertThatThrownBy(() -> service.apply(lateOldRun))
-                .isInstanceOfSatisfying(
-                        ProjectionWriteRejectedException.class,
-                        failure -> assertThat(failure.reasonCode()).isEqualTo("WORKFLOW_RUN_STALE"));
         assertThat(stringValue("case_process_projection", "temporal_run_id", fixture.caseId()))
-                .isEqualTo("run-projection-2");
+                .isEqualTo(RUN_1);
+        assertThat(stringValue("case_room_epoch", "temporal_run_id", fixture.epochId()))
+                .isEqualTo(RUN_1);
         assertThat(longValue("case_process_projection", "process_revision", fixture.caseId()))
                 .isEqualTo(6);
     }
@@ -286,6 +280,8 @@ class ProcessProjectionFencingIntegrationTest {
         String commandRowId = "CMD_Projection" + suffix;
         String commandId = "command.projection." + suffix.toLowerCase().replace('_', '-');
         String workflowId = "case-process:" + TENANT + ":" + caseId;
+        String roomWorkflowId =
+                CaseProcessWorkflowProtocol.roomWorkflowId(caseId, RoomType.EVIDENCE, 2);
         jdbc.update(
                 """
                 insert into fulfillment_dispute_case (
@@ -316,11 +312,11 @@ class ProcessProjectionFencingIntegrationTest {
                 """
                 insert into case_process_projection (
                     case_id, tenant_surrogate, macro_phase, current_room, room_phase,
-                    writer_mode, process_revision, room_epoch, fencing_token,
+                    writer_mode, writer_activation_status, process_revision, room_epoch, fencing_token,
                     last_command_sequence, last_case_event_sequence,
                     temporal_workflow_id, temporal_run_id, temporal_build_id,
                     projected_at, updated_at
-                ) values (?, ?, 'EVIDENCE_OPEN', 'EVIDENCE', 'OPEN', 'TEMPORAL',
+                ) values (?, ?, 'EVIDENCE_OPEN', 'EVIDENCE', 'OPEN', 'TEMPORAL', 'READY',
                     5, 2, 17, 10, 20, ?, ?, ?, ?, ?)
                 """,
                 caseId,
@@ -334,11 +330,17 @@ class ProcessProjectionFencingIntegrationTest {
                 """
                 insert into case_room_epoch (
                     id, tenant_surrogate, case_id, room_id, room_type, room_epoch,
-                    writer_mode, lifecycle_status, process_revision, room_revision,
-                    fencing_token, temporal_workflow_id, temporal_run_id, temporal_build_id,
-                    stream_protocol, activated_at, created_at, updated_at
-                ) values (?, ?, ?, ?, 'EVIDENCE', 2, 'TEMPORAL', 'ACTIVE',
-                    5, 3, 17, ?, ?, ?, 'agent_stream.v1', ?, ?, ?)
+                    writer_mode, lifecycle_status, provisioning_status,
+                    process_revision, room_revision, fencing_token,
+                    temporal_workflow_id, temporal_run_id,
+                    room_temporal_workflow_id, room_temporal_run_id, temporal_build_id,
+                    graph_key, graph_version, checkpoint_schema_version, stream_protocol,
+                    selection_schema_version, process_contract_version, workflow_type,
+                    activated_at, provisioned_at, created_at, updated_at
+                ) values (?, ?, ?, ?, 'EVIDENCE', 2, 'TEMPORAL', 'ACTIVE', 'READY',
+                    5, 3, 17, ?, ?, ?, ?, ?, 'evidence.v2', '1.0.0', 'checkpoint.v1',
+                    'agent_stream.v1', 'room-epoch-selection.v1',
+                    'case-process-contract.v1', 'CaseProcessWorkflow', ?, ?, ?, ?)
                 """,
                 epochId,
                 TENANT,
@@ -346,7 +348,10 @@ class ProcessProjectionFencingIntegrationTest {
                 roomId,
                 workflowId,
                 RUN_1,
+                roomWorkflowId,
+                "room-run-projection-1",
                 BUILD_1,
+                OffsetDateTime.ofInstant(NOW.minusSeconds(60), ZoneOffset.UTC),
                 OffsetDateTime.ofInstant(NOW.minusSeconds(60), ZoneOffset.UTC),
                 OffsetDateTime.ofInstant(NOW.minusSeconds(60), ZoneOffset.UTC),
                 OffsetDateTime.ofInstant(NOW.minusSeconds(30), ZoneOffset.UTC));
@@ -512,55 +517,7 @@ class ProcessProjectionFencingIntegrationTest {
                 source.projectedDeadlineAt(),
                 source.temporalWorkflowId(),
                 expectedRunId,
-                source.temporalRunId(),
-                source.temporalBuildId(),
-                source.projectionRef(),
-                source.projectionSha256());
-    }
-
-    private static ApplyProjectionCommand withNewRun(
-            ApplyProjectionCommand source, String newRunId) {
-        return nextRevision(
-                source,
-                source.expectedProcessRevision(),
-                source.newProcessRevision(),
-                source.expectedRoomRevision(),
-                source.newRoomRevision(),
-                source.expectedTemporalRunId(),
-                newRunId);
-    }
-
-    private static ApplyProjectionCommand nextRevision(
-            ApplyProjectionCommand source,
-            long expectedRevision,
-            long newRevision,
-            long expectedRoomRevision,
-            long newRoomRevision,
-            String expectedRunId,
-            String newRunId) {
-        return new ApplyProjectionCommand(
-                source.schemaVersion(),
-                source.operationKey(),
-                source.tenantSurrogate(),
-                source.caseId(),
-                source.commandId(),
-                source.commandRequestHash(),
-                source.roomType(),
-                source.roomEpoch(),
-                source.fencingToken(),
-                expectedRevision,
-                newRevision,
-                expectedRoomRevision,
-                newRoomRevision,
-                source.macroPhase(),
-                source.currentRoom(),
-                source.roomPhase(),
-                source.lastCommandSequence(),
-                source.lastCaseEventSequence(),
-                source.projectedDeadlineAt(),
-                source.temporalWorkflowId(),
                 expectedRunId,
-                newRunId,
                 source.temporalBuildId(),
                 source.projectionRef(),
                 source.projectionSha256());

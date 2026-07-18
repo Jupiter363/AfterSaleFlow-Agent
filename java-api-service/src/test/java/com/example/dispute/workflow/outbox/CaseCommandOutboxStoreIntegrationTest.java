@@ -4,6 +4,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.dispute.workflow.infrastructure.outbox.CaseCommandOutboxStore;
+import com.example.dispute.workflow.infrastructure.outbox.CaseCommandOutboxStore.ExpirationResolution;
+import com.example.dispute.workflow.infrastructure.outbox.CaseCommandOutboxStore.PermanentFailureResolution;
 import com.example.dispute.workflow.infrastructure.outbox.ClaimedCaseCommandDelivery;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
@@ -20,6 +22,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
 import org.springframework.boot.test.context.TestConfiguration;
@@ -175,12 +179,12 @@ class CaseCommandOutboxStoreIntegrationTest {
                 store.claimById(outboxId, retryAt, LEASE).orElseThrow();
         assertThat(retry.attemptCount()).isEqualTo(2);
         assertThat(
-                        store.markDeadLetter(
+                        store.resolvePermanentFailure(
                                 retry,
                                 "TEMPORAL_INVALID_ARGUMENT",
                                 "invalid request",
                                 retryAt.plusSeconds(1)))
-                .isTrue();
+                .isEqualTo(PermanentFailureResolution.DEAD_LETTERED);
 
         assertThat(outboxStatus(outboxId)).isEqualTo("DEAD_LETTER");
         assertThat(commandStatus("CMD_DEAD")).isEqualTo("FAILED");
@@ -190,6 +194,159 @@ class CaseCommandOutboxStoreIntegrationTest {
                                 String.class,
                                 "CMD_DEAD"))
                 .isEqualTo("TEMPORAL_INVALID_ARGUMENT");
+    }
+
+    @ParameterizedTest
+    @ValueSource(
+            strings = {
+                "ORCHESTRATION_ACCEPTED",
+                "APPLIED",
+                "SHADOW_COMPLETED",
+                "REJECTED",
+                "FAILED",
+                "EXPIRED"
+            })
+    void permanentFailureReconcilesWhenTheCommandAlreadyLeftPending(
+            String existingStatus) {
+        String suffix = "RESOLVED_" + existingStatus;
+        String commandRowId = "CMD_" + suffix;
+        String outboxId = insertDelivery(suffix, NOW);
+        jdbc.update(
+                "update case_command set command_status = ?, updated_at = ? where id = ?",
+                existingStatus,
+                NOW.plusSeconds(1),
+                commandRowId);
+        ClaimedCaseCommandDelivery delivery =
+                store.claimById(outboxId, NOW.plusSeconds(2), LEASE).orElseThrow();
+
+        assertThat(
+                        store.resolvePermanentFailure(
+                                delivery,
+                                "TEMPORAL_UPDATE_REJECTED",
+                                "late permanent response",
+                                NOW.plusSeconds(3)))
+                .isEqualTo(PermanentFailureResolution.RECONCILED);
+
+        assertThat(outboxStatus(outboxId)).isEqualTo("RECONCILED");
+        assertThat(commandStatus(commandRowId)).isEqualTo(existingStatus);
+        assertThat(
+                        jdbc.queryForObject(
+                                "select last_error_code from case_command_outbox where id = ?",
+                                String.class,
+                                outboxId))
+                .isEqualTo("COMMAND_ALREADY_" + existingStatus);
+    }
+
+    @Test
+    void permanentFailureDoesNotResolveAnExpiredLease() {
+        String outboxId = insertDelivery("STALE_PERMANENT", NOW);
+        ClaimedCaseCommandDelivery delivery =
+                store.claimById(outboxId, NOW, LEASE).orElseThrow();
+
+        assertThat(
+                        store.resolvePermanentFailure(
+                                delivery,
+                                "TEMPORAL_UPDATE_REJECTED",
+                                "completion arrived after lease expiry",
+                                delivery.leaseExpiresAt()))
+                .isEqualTo(PermanentFailureResolution.STALE_LEASE);
+
+        assertThat(outboxStatus(outboxId)).isEqualTo("CLAIMED");
+        assertThat(commandStatus("CMD_STALE_PERMANENT"))
+                .isEqualTo("PENDING_ORCHESTRATION");
+    }
+
+    @Test
+    void permanentFailureOutboxAndCommandRollBackTogetherOnCommandFailure() {
+        String outboxId = insertDelivery("DEAD_ATOMIC", NOW);
+        ClaimedCaseCommandDelivery delivery =
+                store.claimById(outboxId, NOW, LEASE).orElseThrow();
+        installRejectingFailedCommandUpdateTrigger();
+        try {
+            assertThatThrownBy(
+                            () ->
+                                    store.resolvePermanentFailure(
+                                            delivery,
+                                            "TEMPORAL_UPDATE_REJECTED",
+                                            "forced transaction rollback",
+                                            NOW.plusSeconds(1)))
+                    .isInstanceOf(RuntimeException.class);
+        } finally {
+            removeRejectingFailedCommandUpdateTrigger();
+        }
+
+        assertThat(outboxStatus(outboxId)).isEqualTo("CLAIMED");
+        assertThat(commandStatus("CMD_DEAD_ATOMIC"))
+                .isEqualTo("PENDING_ORCHESTRATION");
+    }
+
+    @Test
+    void deadlineFailureAtomicallyExpiresTheCommandAndDeadLettersTheOutbox() {
+        String outboxId = insertDelivery("EXPIRED", NOW);
+        OffsetDateTime expiredAt = NOW.plusHours(1);
+        ClaimedCaseCommandDelivery delivery =
+                store.claimById(outboxId, expiredAt, LEASE).orElseThrow();
+
+        assertThat(
+                        store.markExpired(
+                                delivery,
+                                "COMMAND_DEADLINE_EXPIRED",
+                                "command deadline elapsed before Temporal execution",
+                                expiredAt))
+                .isEqualTo(ExpirationResolution.EXPIRED);
+
+        assertThat(outboxStatus(outboxId)).isEqualTo("DEAD_LETTER");
+        assertThat(commandStatus("CMD_EXPIRED")).isEqualTo("EXPIRED");
+        assertThat(
+                        jdbc.queryForObject(
+                                "select status_reason_code from case_command where id = ?",
+                                String.class,
+                                "CMD_EXPIRED"))
+                .isEqualTo("COMMAND_DEADLINE_EXPIRED");
+        assertThat(
+                        jdbc.queryForObject(
+                                "select last_error_code from case_command_outbox where id = ?",
+                                String.class,
+                                outboxId))
+                .isEqualTo("COMMAND_DEADLINE_EXPIRED");
+    }
+
+    @Test
+    void deadlineRejectionReconcilesTheOutboxWithoutOverwritingAnAppliedCommand() {
+        String outboxId = insertDelivery("APPLIED_EXPIRY_RACE", NOW);
+        OffsetDateTime appliedAt = NOW.plusMinutes(30);
+        OffsetDateTime resolvedAt = NOW.plusHours(1);
+        jdbc.update(
+                """
+                update case_command
+                   set command_status = 'APPLIED',
+                       orchestrated_at = ?,
+                       applied_at = ?,
+                       updated_at = ?
+                 where id = 'CMD_APPLIED_EXPIRY_RACE'
+                """,
+                appliedAt,
+                appliedAt,
+                appliedAt);
+        ClaimedCaseCommandDelivery delivery =
+                store.claimById(outboxId, resolvedAt, LEASE).orElseThrow();
+
+        assertThat(
+                        store.markExpired(
+                                delivery,
+                                "COMMAND_DEADLINE_EXPIRED",
+                                "workflow rejection arrived after the domain commit",
+                                resolvedAt))
+                .isEqualTo(ExpirationResolution.RECONCILED);
+
+        assertThat(outboxStatus(outboxId)).isEqualTo("RECONCILED");
+        assertThat(commandStatus("CMD_APPLIED_EXPIRY_RACE")).isEqualTo("APPLIED");
+        assertThat(
+                        jdbc.queryForObject(
+                                "select last_error_code from case_command_outbox where id = ?",
+                                String.class,
+                                outboxId))
+                .isEqualTo("COMMAND_ALREADY_APPLIED");
     }
 
     @Test
@@ -339,6 +496,35 @@ class CaseCommandOutboxStoreIntegrationTest {
         jdbc.execute(
                 "drop trigger if exists reject_outbox_test_command_update_trigger on case_command");
         jdbc.execute("drop function if exists reject_outbox_test_command_update()");
+    }
+
+    private void installRejectingFailedCommandUpdateTrigger() {
+        jdbc.execute(
+                """
+                create or replace function reject_outbox_test_failed_command_update()
+                returns trigger language plpgsql as $$
+                begin
+                    if new.id = 'CMD_DEAD_ATOMIC'
+                       and new.command_status = 'FAILED' then
+                        raise exception 'forced command failure transition rejection';
+                    end if;
+                    return new;
+                end;
+                $$
+                """);
+        jdbc.execute(
+                """
+                create trigger reject_outbox_test_failed_command_update_trigger
+                before update on case_command
+                for each row execute function reject_outbox_test_failed_command_update()
+                """);
+    }
+
+    private void removeRejectingFailedCommandUpdateTrigger() {
+        jdbc.execute(
+                "drop trigger if exists reject_outbox_test_failed_command_update_trigger on case_command");
+        jdbc.execute(
+                "drop function if exists reject_outbox_test_failed_command_update()");
     }
 
     @TestConfiguration(proxyBeanMethods = false)

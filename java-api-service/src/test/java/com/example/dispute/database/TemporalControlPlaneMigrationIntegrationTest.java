@@ -10,7 +10,9 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.UUID;
 import org.flywaydb.core.Flyway;
+import org.flywaydb.core.api.FlywayException;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.wait.strategy.Wait;
@@ -52,13 +54,22 @@ class TemporalControlPlaneMigrationIntegrationTest {
             insertLegacyCase(connection);
         }
 
+        var v040Result =
+                Flyway.configure()
+                        .dataSource(jdbcUrl, USERNAME, PASSWORD)
+                        .locations("classpath:db/migration")
+                        .target("40")
+                        .load()
+                        .migrate();
+        assertThat(v040Result.migrationsExecuted).isEqualTo(2);
+
         var result =
                 Flyway.configure()
                         .dataSource(jdbcUrl, USERNAME, PASSWORD)
                         .locations("classpath:db/migration")
                         .load()
                         .migrate();
-        assertThat(result.migrationsExecuted).isEqualTo(2);
+        assertThat(result.migrationsExecuted).isEqualTo(4);
 
         try (Connection connection =
                 DriverManager.getConnection(jdbcUrl, USERNAME, PASSWORD)) {
@@ -68,6 +79,7 @@ class TemporalControlPlaneMigrationIntegrationTest {
                             "case_command_outbox",
                             "case_process_projection",
                             "case_room_epoch",
+                            "room_epoch_bootstrap_outbox",
                             "domain_operation",
                             "process_reconciliation_issue",
                             "immutable_payload_snapshot",
@@ -106,10 +118,82 @@ class TemporalControlPlaneMigrationIntegrationTest {
                     .isZero();
             assertThat(count(connection, "select count(*) from case_command_outbox"))
                     .isZero();
+            assertThat(
+                            scalar(
+                                    connection,
+                                    """
+                                    select selection_schema_version || ':' ||
+                                           process_contract_version || ':' ||
+                                           workflow_type || ':' || temporal_build_id || ':' ||
+                                           graph_key || ':' || graph_version || ':' ||
+                                           checkpoint_schema_version || ':' || stream_protocol
+                                      from case_room_epoch
+                                     where case_id = 'CASE_LEGACY_CONTROL'
+                                       and room_type = 'EVIDENCE'
+                                    """))
+                    .isEqualTo(
+                            "room-epoch-selection.v1:case-process-contract.v1:"
+                                    + "LegacyJavaRoomState:legacy-java.v1:evidence.legacy:"
+                                    + "legacy.v1:legacy-checkpoint.v1:agent_stream.v1");
+            assertThat(
+                            scalar(
+                                    connection,
+                                    """
+                                    select character_maximum_length::text
+                                      from information_schema.columns
+                                     where table_schema = 'public'
+                                       and table_name = 'case_room_epoch'
+                                       and column_name = 'lifecycle_status'
+                                    """))
+                    .isEqualTo("24");
 
             assertCommandConstraints(connection);
             assertSnapshotAndManifestConstraints(connection);
+            assertRoomEpochLifecycleConstraints(connection);
         }
+    }
+
+    @Test
+    void rejectsAnExistingV040ActiveEpochWithoutARealRoomBinding() throws SQLException {
+        String schema = "missing_room_" + UUID.randomUUID().toString().replace("-", "");
+        Flyway.configure()
+                .dataSource(jdbcUrl(), USERNAME, PASSWORD)
+                .locations("classpath:db/migration")
+                .schemas(schema)
+                .defaultSchema(schema)
+                .createSchemas(true)
+                .target("38")
+                .load()
+                .migrate();
+
+        try (Connection connection = schemaConnection(schema)) {
+            insertLegacyCase(connection);
+            execute(connection, "delete from case_room where id = 'ROOM_LEGACY_CONTROL'");
+        }
+
+        Flyway.configure()
+                .dataSource(jdbcUrl(), USERNAME, PASSWORD)
+                .locations("classpath:db/migration")
+                .schemas(schema)
+                .defaultSchema(schema)
+                .createSchemas(true)
+                .target("40.2")
+                .load()
+                .migrate();
+
+        assertThatThrownBy(
+                        () ->
+                                Flyway.configure()
+                                        .dataSource(jdbcUrl(), USERNAME, PASSWORD)
+                                        .locations("classpath:db/migration")
+                                        .schemas(schema)
+                                        .defaultSchema(schema)
+                                        .createSchemas(true)
+                                        .load()
+                                        .migrate())
+                .isInstanceOf(FlywayException.class)
+                .hasStackTraceContaining(
+                        "an ACTIVE epoch has no valid room binding");
     }
 
     private static void insertLegacyCase(Connection connection) throws SQLException {
@@ -214,7 +298,7 @@ class TemporalControlPlaneMigrationIntegrationTest {
                 connection,
                 "update case_process_projection set process_revision = -1 "
                         + "where case_id = 'CASE_LEGACY_CONTROL'",
-                "ck_case_process_projection_revision");
+                "revisions, sequences, update time and version cannot move backward");
 
         execute(
                 connection,
@@ -367,7 +451,70 @@ class TemporalControlPlaneMigrationIntegrationTest {
         assertThat(columns(connection, "immutable_payload_snapshot"))
                 .doesNotContain("payload_json", "payload_body", "content_body");
         assertThat(columns(connection, "agent_execution_manifest"))
-                .doesNotContain("manifest_json", "prompt_text", "model_response");
+                    .doesNotContain("manifest_json", "prompt_text", "model_response");
+    }
+
+    private static void assertRoomEpochLifecycleConstraints(Connection connection)
+            throws SQLException {
+        execute(
+                connection,
+                """
+                update case_room_epoch
+                   set process_revision = 2,
+                       room_revision = 1,
+                       updated_at = updated_at + interval '1 second',
+                       version = version + 1
+                 where case_id = 'CASE_LEGACY_CONTROL'
+                   and room_type = 'EVIDENCE'
+                """);
+        assertSqlFails(
+                connection,
+                """
+                update case_room_epoch
+                   set process_revision = 1,
+                       updated_at = updated_at + interval '1 second',
+                       version = version + 1
+                 where case_id = 'CASE_LEGACY_CONTROL'
+                   and room_type = 'EVIDENCE'
+                """,
+                "revisions, update time and version cannot move backward");
+
+        execute(
+                connection,
+                """
+                update case_room_epoch
+                   set lifecycle_status = 'TERMINAL',
+                       process_revision = 3,
+                       room_revision = 2,
+                       terminal_at = updated_at + interval '1 second',
+                       updated_at = updated_at + interval '1 second',
+                       version = version + 1
+                 where case_id = 'CASE_LEGACY_CONTROL'
+                   and room_type = 'EVIDENCE'
+                """);
+        assertSqlFails(
+                connection,
+                """
+                update case_room_epoch
+                   set lifecycle_status = 'ACTIVE',
+                       terminal_at = null,
+                       process_revision = 4,
+                       room_revision = 3,
+                       updated_at = updated_at + interval '1 second',
+                       version = version + 1
+                 where case_id = 'CASE_LEGACY_CONTROL'
+                   and room_type = 'EVIDENCE'
+                """,
+                "TERMINAL lifecycle is immutable");
+        assertSqlFails(
+                connection,
+                """
+                update case_room_epoch
+                   set terminal_at = terminal_at + interval '1 second'
+                 where case_id = 'CASE_LEGACY_CONTROL'
+                   and room_type = 'EVIDENCE'
+                """,
+                "TERMINAL lifecycle is immutable");
     }
 
     private String jdbcUrl() {
@@ -377,6 +524,11 @@ class TemporalControlPlaneMigrationIntegrationTest {
                 + POSTGRESQL.getMappedPort(5432)
                 + "/"
                 + DATABASE_NAME;
+    }
+
+    private Connection schemaConnection(String schema) throws SQLException {
+        return DriverManager.getConnection(
+                jdbcUrl() + "?currentSchema=" + schema, USERNAME, PASSWORD);
     }
 
     private static Set<String> loadTables(Connection connection) throws SQLException {

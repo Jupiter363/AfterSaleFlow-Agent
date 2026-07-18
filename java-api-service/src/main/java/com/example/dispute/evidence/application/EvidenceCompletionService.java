@@ -24,6 +24,7 @@ import com.example.dispute.notification.domain.NotificationType;
 import com.example.dispute.room.application.CaseEventService;
 import com.example.dispute.room.application.IntakeProgressService;
 import com.example.dispute.room.application.IntakeMatrixLifecycleService;
+import com.example.dispute.room.domain.PhaseClockStatus;
 import com.example.dispute.room.domain.PhaseClockType;
 import com.example.dispute.room.domain.RoomStatus;
 import com.example.dispute.room.domain.RoomType;
@@ -32,11 +33,16 @@ import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity
 import com.example.dispute.room.infrastructure.persistence.repository.CasePhaseClockRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import java.time.Clock;
+import java.time.Instant;
 import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.Optional;
 import java.util.Map;
 import java.util.UUID;
 import com.example.dispute.workflow.application.EvidenceWindowCoordinator;
+import com.example.dispute.workflow.application.epoch.RoomEpochAllocator;
+import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.TransitionRoomEpoch;
+import com.example.dispute.workflow.contract.v1.ContractTypes;
 import com.example.dispute.hearing.application.HearingFlowRuntimeService;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -62,6 +68,7 @@ public class EvidenceCompletionService {
     private final NotificationService notificationService;
     private final CaseLifecycleNotificationService lifecycleNotifications;
     private final HearingFlowRuntimeService hearingFlowRuntimeService;
+    private final RoomEpochAllocator roomEpochAllocator;
     private final DisputeProperties disputeProperties;
     private final Clock clock;
 
@@ -85,6 +92,7 @@ public class EvidenceCompletionService {
             NotificationService notificationService,
             CaseLifecycleNotificationService lifecycleNotifications,
             HearingFlowRuntimeService hearingFlowRuntimeService,
+            RoomEpochAllocator roomEpochAllocator,
             DisputeProperties disputeProperties,
             Clock clock) {
         this.caseRepository = caseRepository;
@@ -100,6 +108,7 @@ public class EvidenceCompletionService {
         this.notificationService = notificationService;
         this.lifecycleNotifications = lifecycleNotifications;
         this.hearingFlowRuntimeService = hearingFlowRuntimeService;
+        this.roomEpochAllocator = roomEpochAllocator;
         this.disputeProperties = disputeProperties;
         this.clock = clock;
     }
@@ -138,6 +147,8 @@ public class EvidenceCompletionService {
                 caseRepository
                         .findByIdForUpdate(caseId)
                         .orElseThrow(() -> new IllegalArgumentException("case not found"));
+        Instant observedAt = clock.instant();
+        OffsetDateTime now = OffsetDateTime.ofInstant(observedAt, ZoneOffset.UTC);
         assertParty(dispute, actor);
         intakeProgressService.assertEvidenceAccess(dispute, actor);
         if (actor.actorId().equals(initiatorParticipantId(dispute))) {
@@ -161,7 +172,7 @@ public class EvidenceCompletionService {
                             actor.role(),
                             actor.actorId(),
                             idempotencyKey,
-                            clock.instant()));
+                            observedAt));
         }
         evidenceWindowCoordinator.signalPartyCompletedAfterCommit(
                 caseId, actor.role().name());
@@ -178,12 +189,12 @@ public class EvidenceCompletionService {
                     dispute.getCurrentDeadlineAt());
         }
         assertInitiatorHasSubmittedEvidence(dispute);
-        OffsetDateTime now = OffsetDateTime.now(clock);
         dossierFreezer.freeze(caseId, dossierVersion, actor.actorId());
         boolean transitioning = isEvidenceOpen(dispute);
-        CaseRoomEntity hearingRoom =
-                sealEvidenceAndOpenHearing(dispute, now, actor.actorId(), true);
         if (transitioning) {
+            CaseRoomEntity hearingRoom =
+                    sealEvidenceAndOpenHearing(dispute, now, actor.actorId(), true);
+            transitionToHearing(dispute, hearingRoom, now);
             announceHearingOpened(
                     dispute, hearingRoom, dossierVersion, "BOTH_PARTIES_COMPLETED");
             hearingFlowRuntimeService.startAfterEvidenceSealed(caseId);
@@ -250,22 +261,46 @@ public class EvidenceCompletionService {
         int dossierVersion = completionVersion(caseId);
         if (dispute.getCaseStatus() == CaseStatus.EVIDENCE_OPEN
                 || dispute.getCaseStatus() == CaseStatus.EVIDENCE_SEALED) {
+            OffsetDateTime now = OffsetDateTime.now(clock);
             intakeProgressService.markRespondentTimedOut(
-                    dispute, OffsetDateTime.now(clock));
+                    dispute, now);
             intakeMatrixLifecycleService.freezeRespondentTimeout(dispute);
             assertInitiatorHasSubmittedEvidence(dispute);
             dossierFreezer.freeze(caseId, dossierVersion, "evidence-deadline");
             CaseRoomEntity hearingRoom =
                     sealEvidenceAndOpenHearing(
                             dispute,
-                            OffsetDateTime.now(clock),
+                            now,
                             "evidence-deadline",
                             false);
+            transitionToHearing(dispute, hearingRoom, now);
             announceHearingOpened(
                     dispute, hearingRoom, dossierVersion, "DEADLINE_EXPIRED");
             hearingFlowRuntimeService.startAfterEvidenceSealed(caseId);
         }
         return status(caseId, new AuthenticatedActor("evidence-deadline", ActorRole.SYSTEM));
+    }
+
+    private void transitionToHearing(
+            FulfillmentCaseEntity dispute,
+            CaseRoomEntity hearingRoom,
+            OffsetDateTime occurredAt) {
+        if (dispute.getCaseStatus() != CaseStatus.HEARING_OPEN
+                || dispute.getCurrentDeadlineAt() == null
+                || hearingRoom.getRoomStatus() != RoomStatus.OPEN) {
+            throw new IllegalStateException(
+                    "hearing epoch requires an open hearing room and authoritative deadline");
+        }
+        roomEpochAllocator.transition(
+                new TransitionRoomEpoch(
+                        dispute.getId(),
+                        ContractTypes.RoomType.EVIDENCE,
+                        hearingRoom.getId(),
+                        ContractTypes.RoomType.HEARING,
+                        dispute.getCaseStatus().name(),
+                        hearingRoom.getRoomStatus().name(),
+                        dispute.getCurrentDeadlineAt(),
+                        occurredAt));
     }
 
     // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceCompletionService.completionVersion(String)」。
@@ -324,27 +359,46 @@ public class EvidenceCompletionService {
                                                         now,
                                                         actorId)));
         OffsetDateTime hearingDeadline =
-                now.plus(disputeProperties.hearingWindow());
-        if (clockRepository
-                .findByCaseIdAndClockType(dispute.getId(), PhaseClockType.HEARING)
-                .isEmpty()) {
-            clockRepository.save(
-                    CasePhaseClockEntity.running(
-                            "CLOCK_" + compactUuid(),
-                            dispute.getId(),
-                            hearingRoom.getId(),
-                            PhaseClockType.HEARING,
-                            now,
-                            hearingDeadline,
-                            "hearing-window-" + dispute.getId(),
-                            actorId));
-        }
+                authoritativeHearingDeadline(dispute, hearingRoom, now, actorId);
         if (dispute.getCaseStatus() == CaseStatus.EVIDENCE_OPEN
                 || dispute.getCaseStatus() == CaseStatus.EVIDENCE_SEALED) {
             dispute.openHearing(hearingDeadline, actorId);
             caseRepository.save(dispute);
         }
         return hearingRoom;
+    }
+
+    private OffsetDateTime authoritativeHearingDeadline(
+            FulfillmentCaseEntity dispute,
+            CaseRoomEntity hearingRoom,
+            OffsetDateTime now,
+            String actorId) {
+        Optional<CasePhaseClockEntity> existing =
+                clockRepository.findByCaseIdAndClockType(
+                        dispute.getId(), PhaseClockType.HEARING);
+        if (existing.isPresent()) {
+            CasePhaseClockEntity clock = existing.orElseThrow();
+            if (!hearingRoom.getId().equals(clock.getRoomId())
+                    || clock.getClockStatus() != PhaseClockStatus.RUNNING
+                    || !clock.getDeadlineAt().isAfter(now)) {
+                throw new IllegalStateException(
+                        "existing hearing clock does not own the open hearing room");
+            }
+            return clock.getDeadlineAt();
+        }
+
+        OffsetDateTime deadline = now.plus(disputeProperties.hearingWindow());
+        clockRepository.save(
+                CasePhaseClockEntity.running(
+                        "CLOCK_" + compactUuid(),
+                        dispute.getId(),
+                        hearingRoom.getId(),
+                        PhaseClockType.HEARING,
+                        now,
+                        deadline,
+                        "hearing-window-" + dispute.getId(),
+                        actorId));
+        return deadline;
     }
 
     // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceCompletionService.assertParty(FulfillmentCaseEntity,AuthenticatedActor)」。

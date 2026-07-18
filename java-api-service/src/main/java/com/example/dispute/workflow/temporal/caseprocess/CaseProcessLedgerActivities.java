@@ -11,6 +11,9 @@ public interface CaseProcessLedgerActivities {
     @ActivityMethod(name = "LoadCaseCommands")
     List<CaseCommandRef> loadCaseCommands(LoadSequenceRange request);
 
+    @ActivityMethod(name = "LoadCaseCommandLedgerEntries")
+    List<CaseCommandLedgerEntry> loadCaseCommandLedgerEntries(LoadSequenceRange request);
+
     @ActivityMethod(name = "LoadDomainEvents")
     List<CaseDomainEventRef> loadDomainEvents(LoadSequenceRange request);
 
@@ -20,6 +23,43 @@ public interface CaseProcessLedgerActivities {
     enum SequenceStream {
         COMMAND,
         DOMAIN_EVENT
+    }
+
+    enum CaseCommandLedgerState {
+        PENDING_ORCHESTRATION,
+        ORCHESTRATION_ACCEPTED,
+        APPLIED,
+        SHADOW_COMPLETED,
+        REJECTED,
+        FAILED,
+        EXPIRED;
+
+        public boolean routable() {
+            return this == PENDING_ORCHESTRATION || this == ORCHESTRATION_ACCEPTED;
+        }
+
+        public boolean successfulTerminal() {
+            return this == APPLIED || this == SHADOW_COMPLETED;
+        }
+    }
+
+    record CaseCommandLedgerEntry(
+            String schemaVersion,
+            CaseCommandRef command,
+            CaseCommandLedgerState state) {
+
+        public CaseCommandLedgerEntry {
+            if (!"case-command-ledger-entry.v1".equals(schemaVersion)) {
+                throw new IllegalArgumentException(
+                        "schemaVersion must be case-command-ledger-entry.v1");
+            }
+            if (command == null) {
+                throw new IllegalArgumentException("command must not be null");
+            }
+            if (state == null) {
+                throw new IllegalArgumentException("state must not be null");
+            }
+        }
     }
 
     record LoadSequenceRange(

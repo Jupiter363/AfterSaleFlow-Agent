@@ -430,6 +430,7 @@ def test_windows_secret_generator_defaults_to_project_root(tmp_path: Path) -> No
 # 系统意义：固定“跨服务契约测试 > test_repository_contract”的可观察契约，防止后续重构改变业务结果。
 def test_java_service_uses_java_21_multistage_nonroot_image() -> None:
     dockerfile = (ROOT / "java-api-service" / "Dockerfile").read_text(encoding="utf-8")
+    compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
 
     assert (
         "FROM mcr.microsoft.com/openjdk/jdk:21-ubuntu@sha256:"
@@ -441,4 +442,10 @@ def test_java_service_uses_java_21_multistage_nonroot_image() -> None:
         "FROM mcr.microsoft.com/openjdk/jdk:21-ubuntu@sha256:"
     ) == 2
     assert "USER app" in dockerfile
-    assert "HEALTHCHECK" in dockerfile
+
+    services = compose["services"]
+    api_healthcheck = " ".join(services["java-api-service"]["healthcheck"]["test"])
+    assert "http://localhost:8080/actuator/health" in api_healthcheck
+    for worker in ("java-control-worker", "java-agent-worker"):
+        worker_healthcheck = " ".join(services[worker]["healthcheck"]["test"])
+        assert "kill -0 1" in worker_healthcheck

@@ -12,6 +12,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -37,6 +38,7 @@ import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEnti
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.room.domain.PhaseClockType;
 import com.example.dispute.room.domain.RoomType;
+import com.example.dispute.room.domain.RoomStatus;
 import com.example.dispute.room.application.IntakeAgentTurnService;
 import com.example.dispute.room.application.IntakeLobbySeed;
 import com.example.dispute.room.application.ParticipantService;
@@ -44,6 +46,10 @@ import com.example.dispute.room.infrastructure.persistence.entity.CasePhaseClock
 import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
 import com.example.dispute.room.infrastructure.persistence.repository.CasePhaseClockRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
+import com.example.dispute.workflow.application.epoch.RoomEpochAllocator;
+import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.ActivateRoomEpoch;
+import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.TerminalRoomEpoch;
+import com.example.dispute.workflow.contract.v1.ContractTypes;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -83,6 +89,7 @@ class DisputeImportServiceTest {
     @Mock private ParticipantService participantService;
     @Mock private IntakeAgentTurnService intakeAgentTurnService;
     @Mock private SimulatedImportTemplateCursorRepository simulatedImportCursorRepository;
+    @Mock private RoomEpochAllocator roomEpochAllocator;
 
     private DisputeImportService service;
     private ExternalCaseImportTransactionService transactionService;
@@ -104,6 +111,7 @@ class DisputeImportServiceTest {
                         simulatedImportCursorRepository,
                         new SimulatedExternalDisputeTemplateCatalog(),
                         new PostCommitSideEffectExecutor(Runnable::run),
+                        roomEpochAllocator,
                         new DisputeProperties(
                                 Duration.ofHours(2),
                                 Duration.ofHours(3),
@@ -115,6 +123,9 @@ class DisputeImportServiceTest {
                                 ZoneOffset.UTC));
         service =
                 new DisputeImportService(transactionService, new SingleInstanceImportGate());
+        lenient()
+                .when(roomRepository.save(any(CaseRoomEntity.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
     }
 
     // 所属模块：【案件核心与导入 / 自动化测试层】「DisputeImportServiceTest.importsAnExternalDisputeWithOverviewState()」。
@@ -205,7 +216,8 @@ class DisputeImportServiceTest {
                             any(AuthenticatedActor.class),
                             any(IntakeLobbySeed.class),
                             any(String.class),
-                            any(String.class));
+                             any(String.class));
+            verify(roomEpochAllocator).activate(any(ActivateRoomEpoch.class));
             assertThat(TransactionSynchronizationManager.getSynchronizations()).hasSize(1);
 
             for (TransactionSynchronization synchronization :
@@ -324,14 +336,15 @@ class DisputeImportServiceTest {
         when(clockRepository.save(any()))
                 .thenAnswer(invocation -> invocation.getArgument(0));
 
-        service.importDispute(
-                command(
-                        "EXT-2001",
-                        CaseStatus.EVIDENCE_OPEN,
-                        "EVIDENCE",
-                        OffsetDateTime.parse("2026-07-03T02:00:00Z")),
-                new AuthenticatedActor("external-adapter", ActorRole.SYSTEM),
-                "import-ext-2001");
+        var imported =
+                service.importDispute(
+                        command(
+                                "EXT-2001",
+                                CaseStatus.EVIDENCE_OPEN,
+                                "EVIDENCE",
+                                null),
+                        new AuthenticatedActor("external-adapter", ActorRole.SYSTEM),
+                        "import-ext-2001");
 
         var room = org.mockito.ArgumentCaptor.forClass(CaseRoomEntity.class);
         var phaseClock =
@@ -343,6 +356,137 @@ class DisputeImportServiceTest {
                 .isEqualTo(PhaseClockType.EVIDENCE_SUBMISSION);
         assertThat(phaseClock.getValue().getDeadlineAt())
                 .isEqualTo(OffsetDateTime.parse("2026-07-03T02:00:00Z"));
+        assertThat(imported.currentDeadlineAt())
+                .isEqualTo(phaseClock.getValue().getDeadlineAt());
+        ArgumentCaptor<ActivateRoomEpoch> activation =
+                ArgumentCaptor.forClass(ActivateRoomEpoch.class);
+        verify(roomEpochAllocator).activate(activation.capture());
+        assertThat(activation.getValue().caseId()).isEqualTo(room.getValue().getCaseId());
+        assertThat(activation.getValue().roomId()).isEqualTo(room.getValue().getId());
+        assertThat(activation.getValue().roomType()).isEqualTo(ContractTypes.RoomType.EVIDENCE);
+        assertThat(activation.getValue().macroPhase()).isEqualTo(CaseStatus.EVIDENCE_OPEN.name());
+        assertThat(activation.getValue().roomPhase()).isEqualTo(RoomStatus.OPEN.name());
+        assertThat(activation.getValue().projectedDeadlineAt())
+                .isEqualTo(phaseClock.getValue().getDeadlineAt());
+        assertThat(activation.getValue().occurredAt())
+                .isEqualTo(OffsetDateTime.parse("2026-07-03T00:00:00Z"));
+        verify(roomEpochAllocator, never()).recordTerminal(any());
+    }
+
+    @Test
+    void terminalImportRecordsAClosedEpochWithoutStartingAClockOrAgent() {
+        when(repository.findBySourceSystemAndExternalCaseRef("OMS", "EXT-TERMINAL"))
+                .thenReturn(Optional.empty());
+        when(repository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        service.importDispute(
+                command(
+                        "EXT-TERMINAL",
+                        CaseStatus.NOT_ADMISSIBLE,
+                        "INTAKE",
+                        null),
+                new AuthenticatedActor("external-adapter", ActorRole.SYSTEM),
+                "import-ext-terminal");
+
+        ArgumentCaptor<TerminalRoomEpoch> terminal =
+                ArgumentCaptor.forClass(TerminalRoomEpoch.class);
+        verify(roomEpochAllocator).recordTerminal(terminal.capture());
+        assertThat(terminal.getValue().caseId()).isNotBlank();
+        assertThat(terminal.getValue().roomType()).isEqualTo(ContractTypes.RoomType.INTAKE);
+        assertThat(terminal.getValue().macroPhase()).isEqualTo(CaseStatus.NOT_ADMISSIBLE.name());
+        assertThat(terminal.getValue().roomPhase()).isEqualTo(RoomStatus.CLOSED.name());
+        assertThat(terminal.getValue().occurredAt())
+                .isEqualTo(OffsetDateTime.parse("2026-07-03T00:00:00Z"));
+        verify(roomEpochAllocator, never()).activate(any());
+        verify(clockRepository, never()).save(any());
+        verify(intakeAgentTurnService, never())
+                .startInitialTurn(
+                        any(String.class),
+                        any(AuthenticatedActor.class),
+                        any(IntakeLobbySeed.class),
+                        any(String.class),
+                        any(String.class));
+    }
+
+    @Test
+    void terminalReplayCompletesLegacyRunningClockAndClearsTheCaseDeadline() {
+        FulfillmentCaseEntity existing =
+                FulfillmentCaseEntity.imported(
+                        "CASE_TERMINAL_REPLAY",
+                        "ORDER-TERMINAL-REPLAY",
+                        null,
+                        "LOG-TERMINAL-REPLAY",
+                        "user-local",
+                        "merchant-local",
+                        "idem-terminal-replay",
+                        "SIGNED_NOT_RECEIVED",
+                        "Terminal imported dispute",
+                        "Legacy terminal import retained a running clock",
+                        RiskLevel.HIGH,
+                        CaseStatus.CLOSED,
+                        "EVIDENCE",
+                        OffsetDateTime.parse("2026-07-03T02:00:00Z"),
+                        "OMS",
+                        "EXT-TERMINAL-REPLAY",
+                        "external-adapter");
+        CaseRoomEntity evidenceRoom =
+                CaseRoomEntity.open(
+                        "ROOM_TERMINAL_REPLAY",
+                        existing.getId(),
+                        RoomType.EVIDENCE,
+                        OffsetDateTime.parse("2026-07-02T23:00:00Z"),
+                        "external-adapter");
+        CasePhaseClockEntity legacyClock =
+                CasePhaseClockEntity.running(
+                        "CLOCK_TERMINAL_REPLAY",
+                        existing.getId(),
+                        evidenceRoom.getId(),
+                        PhaseClockType.EVIDENCE_SUBMISSION,
+                        OffsetDateTime.parse("2026-07-02T23:00:00Z"),
+                        OffsetDateTime.parse("2026-07-03T02:00:00Z"),
+                        "evidence-window-" + existing.getId(),
+                        "external-adapter");
+        when(repository.findBySourceSystemAndExternalCaseRef(
+                        "OMS", "EXT-TERMINAL-REPLAY"))
+                .thenReturn(Optional.of(existing));
+        when(repository.findByIdForUpdate(existing.getId()))
+                .thenReturn(Optional.of(existing));
+        when(roomRepository.findByCaseIdAndRoomType(existing.getId(), RoomType.EVIDENCE))
+                .thenReturn(Optional.of(evidenceRoom));
+        when(clockRepository.findByCaseIdAndClockType(
+                        existing.getId(), PhaseClockType.EVIDENCE_SUBMISSION))
+                .thenReturn(Optional.of(legacyClock));
+        when(roomRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(clockRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+
+        var replay =
+                service.importDispute(
+                        command(
+                                "EXT-TERMINAL-REPLAY",
+                                CaseStatus.CLOSED,
+                                "EVIDENCE",
+                                OffsetDateTime.parse("2026-07-03T02:00:00Z")),
+                        new AuthenticatedActor("external-adapter", ActorRole.SYSTEM),
+                        "terminal-replay-request");
+
+        assertThat(replay.currentDeadlineAt()).isNull();
+        assertThat(existing.getCurrentDeadlineAt()).isNull();
+        assertThat(evidenceRoom.getRoomStatus()).isEqualTo(RoomStatus.CLOSED);
+        assertThat(legacyClock.getClockStatus())
+                .isEqualTo(com.example.dispute.room.domain.PhaseClockStatus.COMPLETED_EARLY);
+        assertThat(legacyClock.getCompletionReason()).isEqualTo("TERMINAL_IMPORT");
+        verify(repository).findByIdForUpdate(existing.getId());
+        verify(clockRepository).save(legacyClock);
+        verify(roomEpochAllocator).recordTerminal(any());
+        verify(roomEpochAllocator, never()).activate(any());
+        verify(intakeAgentTurnService, never())
+                .startInitialTurn(
+                        any(String.class),
+                        any(AuthenticatedActor.class),
+                        any(IntakeLobbySeed.class),
+                        any(String.class),
+                        any(String.class));
     }
 
     // 所属模块：【案件核心与导入 / 自动化测试层】「DisputeImportServiceTest.returnsTheExistingCaseForTheSameExternalReference()」。
@@ -373,6 +517,8 @@ class DisputeImportServiceTest {
                         "external-adapter");
         when(repository.findBySourceSystemAndExternalCaseRef("OMS", "EXT-1001"))
                 .thenReturn(Optional.of(existing));
+        when(repository.findByIdForUpdate(existing.getId()))
+                .thenReturn(Optional.of(existing));
 
         var imported =
                 service.importDispute(
@@ -381,6 +527,7 @@ class DisputeImportServiceTest {
                         "different-request-key");
 
         assertThat(imported.id()).isEqualTo("CASE_EXISTING");
+        verify(repository).findByIdForUpdate(existing.getId());
         verify(repository, never()).save(any());
         verify(intakeAgentTurnService, never())
                 .startInitialTurn(
@@ -421,14 +568,8 @@ class DisputeImportServiceTest {
                         "OMS",
                         "EXT-STATE-REPLAY"))
                 .thenReturn(Optional.of(existing));
-        when(roomRepository.save(any()))
-                .thenReturn(
-                        CaseRoomEntity.open(
-                                "ROOM_REPLAY_PAYLOAD",
-                                "CASE_EXISTING_STATE",
-                                RoomType.EVIDENCE,
-                                OffsetDateTime.parse("2026-07-03T00:00:00Z"),
-                                "external-adapter"));
+        when(repository.findByIdForUpdate(existing.getId()))
+                .thenReturn(Optional.of(existing));
 
         service.importDispute(
                 command(
@@ -445,6 +586,7 @@ class DisputeImportServiceTest {
                 .findByCaseIdAndRoomType(
                         "CASE_EXISTING_STATE",
                         RoomType.INTAKE);
+        verify(repository).findByIdForUpdate(existing.getId());
         verify(roomRepository, never())
                 .findByCaseIdAndRoomType(
                         "CASE_EXISTING_STATE",
@@ -479,6 +621,8 @@ class DisputeImportServiceTest {
                         "EXT-FIRST",
                         "external-adapter");
         when(repository.findByCreationIdempotencyKey("shared-import-key"))
+                .thenReturn(Optional.of(firstImport));
+        when(repository.findByIdForUpdate(firstImport.getId()))
                 .thenReturn(Optional.of(firstImport));
 
         assertThatThrownBy(

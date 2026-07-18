@@ -1,5 +1,7 @@
 package com.example.dispute.workflow.outbox;
 
+import static io.temporal.api.enums.v1.EventType.EVENT_TYPE_WORKFLOW_EXECUTION_UPDATE_ACCEPTED;
+import static io.temporal.api.enums.v1.EventType.EVENT_TYPE_WORKFLOW_EXECUTION_STARTED;
 import static io.temporal.api.enums.v1.WorkflowIdConflictPolicy.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING;
 import static io.temporal.api.enums.v1.WorkflowIdReusePolicy.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE;
 import static io.temporal.client.WorkflowUpdateStage.ACCEPTED;
@@ -22,13 +24,20 @@ import com.example.dispute.workflow.infrastructure.outbox.TemporalUpdateGateway;
 import com.example.dispute.workflow.observability.TemporalSearchAttributes;
 import io.grpc.Status;
 import io.temporal.api.common.v1.WorkflowExecution;
+import io.temporal.api.history.v1.History;
+import io.temporal.api.history.v1.HistoryEvent;
+import io.temporal.api.history.v1.WorkflowExecutionStartedEventAttributes;
+import io.temporal.api.history.v1.WorkflowExecutionUpdateAcceptedEventAttributes;
 import io.temporal.client.UpdateOptions;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowOptions;
 import io.temporal.client.WorkflowStub;
 import io.temporal.client.WorkflowUpdateHandle;
+import io.temporal.failure.ApplicationFailure;
+import io.temporal.common.WorkflowExecutionHistory;
 import java.time.Instant;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -66,6 +75,8 @@ class SdkTemporalUpdateGatewayTest {
                                 .setWorkflowId("case-process:tenant:CASE_1")
                                 .setRunId("run-1")
                                 .build());
+        when(updateHandle.getResultAsync())
+                .thenReturn(new CompletableFuture<>());
 
         var request = request();
         var receipt = gateway.deliver(request);
@@ -123,6 +134,85 @@ class SdkTemporalUpdateGatewayTest {
     }
 
     @Test
+    void preservesWorkflowDeadlineRejectionAsAnExplicitPermanentCode() {
+        when(workflowClient.newUntypedWorkflowStub(
+                        eq("CaseProcessWorkflow"), any(WorkflowOptions.class)))
+                .thenReturn(workflowStub);
+        when(workflowStub.startUpdateWithStart(
+                        any(UpdateOptions.class),
+                        any(Object[].class),
+                        any(Object[].class)))
+                .thenThrow(
+                        ApplicationFailure.newNonRetryableFailure(
+                                "command deadline elapsed",
+                                "CASE_PROCESS_COMMAND_DEADLINE_EXPIRED"));
+
+        assertThatThrownBy(() -> gateway.deliver(request()))
+                .isInstanceOfSatisfying(
+                        TemporalUpdateDeliveryException.class,
+                        exception -> {
+                            assertThat(exception.retryable()).isFalse();
+                            assertThat(exception.errorCode())
+                                    .isEqualTo("COMMAND_DEADLINE_EXPIRED");
+                        });
+    }
+
+    @Test
+    void anAcceptedUpdateFailureIsStillACompletedDelivery() {
+        when(workflowClient.newUntypedWorkflowStub(
+                        eq("CaseProcessWorkflow"), any(WorkflowOptions.class)))
+                .thenReturn(workflowStub);
+        when(workflowStub.startUpdateWithStart(
+                        any(UpdateOptions.class),
+                        any(Object[].class),
+                        any(Object[].class)))
+                .thenReturn(updateHandle);
+        WorkflowExecution execution =
+                WorkflowExecution.newBuilder()
+                        .setWorkflowId("case-process:tenant:CASE_1")
+                        .setRunId("run-accepted-failure")
+                        .build();
+        when(updateHandle.getExecution()).thenReturn(execution);
+        CompletableFuture<Void> completion = new CompletableFuture<>();
+        completion.completeExceptionally(
+                ApplicationFailure.newNonRetryableFailure(
+                        "handler failed after acceptance",
+                        "CASE_PROCESS_COMMAND_DEADLINE_EXPIRED"));
+        when(updateHandle.getResultAsync()).thenReturn(completion);
+        HistoryEvent accepted =
+                HistoryEvent.newBuilder()
+                        .setEventId(2)
+                        .setEventType(
+                                EVENT_TYPE_WORKFLOW_EXECUTION_UPDATE_ACCEPTED)
+                        .setWorkflowExecutionUpdateAcceptedEventAttributes(
+                                WorkflowExecutionUpdateAcceptedEventAttributes
+                                        .newBuilder()
+                                        .setProtocolInstanceId("command-1"))
+                        .build();
+        WorkflowExecutionHistory acceptedHistory =
+                new WorkflowExecutionHistory(
+                        History.newBuilder()
+                                .addEvents(
+                                        HistoryEvent.newBuilder()
+                                                .setEventId(1)
+                                                .setEventType(
+                                                        EVENT_TYPE_WORKFLOW_EXECUTION_STARTED)
+                                                .setWorkflowExecutionStartedEventAttributes(
+                                                        WorkflowExecutionStartedEventAttributes
+                                                                .getDefaultInstance()))
+                                .addEvents(accepted)
+                                .build());
+        when(workflowClient.fetchHistory(
+                        "case-process:tenant:CASE_1",
+                        "run-accepted-failure"))
+                .thenReturn(acceptedHistory);
+
+        var receipt = gateway.deliver(request());
+
+        assertThat(receipt.temporalRunId()).isEqualTo("run-accepted-failure");
+    }
+
+    @Test
     void writesOnlyTheApprovedTypedVisibilityAttributesOnStart() {
         gateway =
                 new SdkTemporalUpdateGateway(
@@ -141,6 +231,8 @@ class SdkTemporalUpdateGatewayTest {
                                 .setWorkflowId("case-process:tenant:CASE_1")
                                 .setRunId("run-visibility")
                                 .build());
+        when(updateHandle.getResultAsync())
+                .thenReturn(new CompletableFuture<>());
 
         gateway.deliver(request());
 

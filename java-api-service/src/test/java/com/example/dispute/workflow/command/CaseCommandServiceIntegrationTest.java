@@ -3,6 +3,8 @@ package com.example.dispute.workflow.command;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.example.dispute.common.api.ErrorCode;
+import com.example.dispute.common.exception.BusinessException;
 import com.example.dispute.common.exception.IdempotencyConflictException;
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
@@ -12,6 +14,7 @@ import com.example.dispute.workflow.application.command.AcceptCaseCommand;
 import com.example.dispute.workflow.application.command.CaseCommandAcceptance;
 import com.example.dispute.workflow.application.command.CaseCommandDeliveryTrigger;
 import com.example.dispute.workflow.application.command.CaseCommandService;
+import com.example.dispute.workflow.contract.v1.CaseProcessWorkflowProtocol;
 import com.example.dispute.workflow.contract.v1.ContractTypes.CommandType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.PayloadRef;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
@@ -183,37 +186,127 @@ class CaseCommandServiceIntegrationTest {
     }
 
     @Test
-    void allocatesStrictlyIncreasingSequencesForConcurrentCaseCommands() throws Exception {
+    void rejectsCommandV1WhenTheRoomEpochUsesTheLegacyWriter() {
+        String caseId = "CASE_CommandLegacyWriter";
+        String actorId = "user-legacy-writer";
+        insertLegacyEvidenceCase(caseId, actorId, "merchant-legacy-writer");
+
+        assertOwnershipRejected(
+                caseId,
+                actorId,
+                "command.legacy-writer",
+                "legacy room epochs do not accept Temporal commands");
+    }
+
+    @Test
+    void rejectsCommandWhileShadowEpochBootstrapIsPending() {
+        String caseId = "CASE_CommandShadowPending";
+        String actorId = "user-shadow-pending";
+        insertPendingShadowEvidenceCase(caseId, actorId, "merchant-shadow-pending");
+
+        assertOwnershipRejected(
+                caseId,
+                actorId,
+                "command.shadow-pending",
+                "room epoch provisioning is not ready");
+    }
+
+    @Test
+    void rejectsCommandWhenProjectionAndEpochWriterModesDiffer() {
+        String caseId = "CASE_CommandWriterMismatch";
+        String actorId = "user-writer-mismatch";
+        insertEvidenceCase(caseId, actorId, "merchant-writer-mismatch");
+        jdbc.update(
+                "update case_process_projection set writer_mode = 'SHADOW' where case_id = ?",
+                caseId);
+
+        assertOwnershipRejected(
+                caseId,
+                actorId,
+                "command.writer-mismatch",
+                "case process ownership binding is inconsistent");
+    }
+
+    @Test
+    void rejectsCommandWhenProjectionAndEpochFencingTokensDiffer() {
+        String caseId = "CASE_CommandFenceMismatch";
+        String actorId = "user-fence-mismatch";
+        insertEvidenceCase(caseId, actorId, "merchant-fence-mismatch");
+        jdbc.update(
+                """
+                update case_process_projection
+                   set room_epoch = 1, fencing_token = 2, process_revision = 1
+                 where case_id = ?
+                """,
+                caseId);
+
+        assertOwnershipRejected(
+                caseId,
+                actorId,
+                "command.fence-mismatch",
+                "case process ownership binding is inconsistent");
+    }
+
+    @Test
+    void rejectsCommandWhenProjectionAndEpochWorkflowBindingsDiffer() {
+        String caseId = "CASE_CommandWorkflowMismatch";
+        String actorId = "user-workflow-mismatch";
+        insertEvidenceCase(caseId, actorId, "merchant-workflow-mismatch");
+        jdbc.update(
+                """
+                update case_process_projection
+                   set temporal_workflow_id = temporal_workflow_id || ':projection'
+                 where case_id = ?
+                """,
+                caseId);
+
+        assertOwnershipRejected(
+                caseId,
+                actorId,
+                "command.workflow-mismatch",
+                "case process ownership binding is inconsistent");
+    }
+
+    @Test
+    void rejectsCommandWhenTheTemporalBindingDoesNotBelongToTheCase() {
+        String caseId = "CASE_CommandWrongWorkflow";
+        String actorId = "user-wrong-workflow";
+        String wrongWorkflowId = "case-process:legacy-default:CASE_OtherOwner";
+        insertEvidenceCase(caseId, actorId, "merchant-wrong-workflow", wrongWorkflowId);
+
+        assertOwnershipRejected(
+                caseId,
+                actorId,
+                "command.wrong-workflow",
+                "case process ownership binding is inconsistent");
+    }
+
+    @Test
+    void concurrentCommandsForTheSameExpectedRevisionHaveOneWinner() throws Exception {
         String caseId = "CASE_CommandSequence";
         insertEvidenceCase(caseId, "user-sequence", "merchant-sequence");
         int commandCount = 8;
         CountDownLatch start = new CountDownLatch(1);
 
         try (var executor = Executors.newFixedThreadPool(commandCount)) {
-            List<Future<CaseCommandAcceptance>> futures = new ArrayList<>();
+            List<Future<Object>> futures = new ArrayList<>();
             for (int index = 0; index < commandCount; index++) {
                 int commandIndex = index;
                 futures.add(
                         executor.submit(
-                                () -> {
-                                    start.await();
-                                    return service.accept(
-                                            caseId,
-                                            "command.sequence." + commandIndex,
-                                            command(
-                                                    "urn:command:sequence:"
-                                                            + commandIndex,
-                                                    "a".repeat(64)),
-                                            user("user-sequence"),
-                                            "TRACE_sequence_" + commandIndex,
-                                            "REQ_sequence_" + commandIndex,
-                                            null);
-                                }));
+                                () ->
+                                        acceptRevisionOrCapture(
+                                                start, caseId, commandIndex)));
             }
             start.countDown();
-            for (Future<CaseCommandAcceptance> future : futures) {
-                future.get(30, TimeUnit.SECONDS);
+            List<Object> results = new ArrayList<>();
+            for (Future<Object> future : futures) {
+                results.add(future.get(30, TimeUnit.SECONDS));
             }
+            assertThat(results.stream().filter(CaseCommandAcceptance.class::isInstance))
+                    .hasSize(1);
+            assertThat(results.stream().filter(BusinessException.class::isInstance))
+                    .hasSize(commandCount - 1);
         }
 
         assertThat(
@@ -221,13 +314,53 @@ class CaseCommandServiceIntegrationTest {
                                 "select case_command_sequence from case_command where case_id = ? order by case_command_sequence",
                                 Long.class,
                                 caseId))
-                .containsExactly(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L);
+                .containsExactly(1L);
         assertThat(
                         jdbc.queryForObject(
                                 "select count(*) from case_command_outbox where case_id = ?",
                                 Long.class,
                                 caseId))
-                .isEqualTo(commandCount);
+                .isEqualTo(1);
+    }
+
+    @Test
+    void aTerminalFailureReleasesTheRevisionReservation() {
+        String caseId = "CASE_CommandRetryRevision";
+        insertEvidenceCase(caseId, "user-retry-revision", "merchant-retry-revision");
+        service.accept(
+                caseId,
+                "command.retry-revision.1",
+                command("urn:command:retry-revision:1", "a".repeat(64)),
+                user("user-retry-revision"),
+                "TRACE_retry_revision_1",
+                "REQ_retry_revision_1",
+                null);
+        jdbc.update(
+                """
+                update case_command_outbox
+                   set outbox_status = 'DEAD_LETTER',
+                       last_error_code = 'TEMPORAL_INVALID_ARGUMENT'
+                 where update_id = 'command.retry-revision.1'
+                """);
+        jdbc.update(
+                """
+                update case_command
+                   set command_status = 'FAILED',
+                       status_reason_code = 'TEMPORAL_INVALID_ARGUMENT'
+                 where command_id = 'command.retry-revision.1'
+                """);
+
+        CaseCommandAcceptance retry =
+                service.accept(
+                        caseId,
+                        "command.retry-revision.2",
+                        command("urn:command:retry-revision:2", "b".repeat(64)),
+                        user("user-retry-revision"),
+                        "TRACE_retry_revision_2",
+                        "REQ_retry_revision_2",
+                        null);
+
+        assertThat(retry.command().caseCommandSequence()).isEqualTo(2);
     }
 
     @Test
@@ -288,6 +421,29 @@ class CaseCommandServiceIntegrationTest {
                 .isEqualTo(1);
     }
 
+    private void assertOwnershipRejected(
+            String caseId, String actorId, String commandId, String expectedMessage) {
+        assertThatThrownBy(
+                        () ->
+                                service.accept(
+                                        caseId,
+                                        commandId,
+                                        command("urn:command:" + commandId, "a".repeat(64)),
+                                        user(actorId),
+                                        "TRACE_" + commandId,
+                                        "REQ_" + commandId,
+                                        null))
+                .isInstanceOf(BusinessException.class)
+                .hasMessage(expectedMessage)
+                .satisfies(
+                        failure ->
+                                assertThat(((BusinessException) failure).errorCode())
+                                        .isEqualTo(ErrorCode.CASE_STATUS_INVALID));
+
+        assertThat(countRows("case_command", caseId)).isZero();
+        assertThat(countRows("case_command_outbox", caseId)).isZero();
+    }
+
     private Object acceptOrCapture(CountDownLatch start, String caseId, String hash)
             throws InterruptedException {
         start.await();
@@ -305,9 +461,119 @@ class CaseCommandServiceIntegrationTest {
         }
     }
 
+    private Object acceptRevisionOrCapture(
+            CountDownLatch start, String caseId, int commandIndex)
+            throws InterruptedException {
+        start.await();
+        try {
+            return service.accept(
+                    caseId,
+                    "command.sequence." + commandIndex,
+                    command(
+                            "urn:command:sequence:" + commandIndex,
+                            "a".repeat(64)),
+                    user("user-sequence"),
+                    "TRACE_sequence_" + commandIndex,
+                    "REQ_sequence_" + commandIndex,
+                    null);
+        } catch (BusinessException exception) {
+            return exception;
+        }
+    }
+
     private void insertEvidenceCase(String caseId, String userId, String merchantId) {
+        String workflowId =
+                com.example.dispute.workflow.contract.v1.CaseProcessWorkflowProtocol
+                        .caseWorkflowId("legacy-default", caseId);
+        insertEvidenceCase(caseId, userId, merchantId, workflowId);
+    }
+
+    private void insertEvidenceCase(
+            String caseId, String userId, String merchantId, String workflowId) {
+        insertEvidenceCase(
+                caseId,
+                userId,
+                merchantId,
+                "TEMPORAL",
+                workflowId,
+                "run-command-test",
+                "build-command-test",
+                "CaseProcessWorkflow");
+    }
+
+    private void insertLegacyEvidenceCase(String caseId, String userId, String merchantId) {
+        insertEvidenceCase(
+                caseId,
+                userId,
+                merchantId,
+                "LEGACY",
+                null,
+                null,
+                "legacy-java.v1",
+                "LegacyJavaRoomState");
+    }
+
+    private void insertPendingShadowEvidenceCase(
+            String caseId, String userId, String merchantId) {
+        insertEvidenceCase(
+                caseId,
+                userId,
+                merchantId,
+                "SHADOW",
+                CaseProcessWorkflowProtocol.caseWorkflowId("legacy-default", caseId),
+                null,
+                "build-command-test",
+                CaseProcessWorkflowProtocol.CASE_WORKFLOW_TYPE,
+                "PENDING",
+                "PREPARING");
+    }
+
+    private void insertEvidenceCase(
+            String caseId,
+            String userId,
+            String merchantId,
+            String writerMode,
+            String workflowId,
+            String runId,
+            String buildId,
+            String workflowType) {
+        boolean legacy = "LEGACY".equals(writerMode);
+        insertEvidenceCase(
+                caseId,
+                userId,
+                merchantId,
+                writerMode,
+                workflowId,
+                runId,
+                buildId,
+                workflowType,
+                legacy ? "NOT_REQUIRED" : "READY",
+                "READY");
+    }
+
+    private void insertEvidenceCase(
+            String caseId,
+            String userId,
+            String merchantId,
+            String writerMode,
+            String workflowId,
+            String runId,
+            String buildId,
+            String workflowType,
+            String provisioningStatus,
+            String activationStatus) {
         String roomId = "ROOM_" + caseId.substring("CASE_".length());
         String epochId = "EPOCH_" + caseId.substring("CASE_".length());
+        boolean legacy = "LEGACY".equals(writerMode);
+        String roomWorkflowId =
+                legacy
+                        ? null
+                        : CaseProcessWorkflowProtocol.roomWorkflowId(
+                                caseId, RoomType.EVIDENCE, 0);
+        String roomRunId =
+                legacy || !"READY".equals(provisioningStatus)
+                        ? null
+                        : "run-command-room-test";
         jdbc.update(
                 """
                 insert into fulfillment_dispute_case (
@@ -337,23 +603,46 @@ class CaseCommandServiceIntegrationTest {
                 """
                 insert into case_process_projection (
                     case_id, tenant_surrogate, macro_phase, current_room, room_phase,
-                    writer_mode, process_revision, room_epoch, fencing_token
+                    writer_mode, writer_activation_status, process_revision, room_epoch, fencing_token,
+                    temporal_workflow_id, temporal_run_id, temporal_build_id
                 ) values (?, 'legacy-default', 'EVIDENCE_OPEN', 'EVIDENCE', 'OPEN',
-                    'LEGACY', 0, 0, 0)
+                    ?, ?, 0, 0, 1, ?, ?, ?)
                 """,
-                caseId);
+                caseId,
+                writerMode,
+                activationStatus,
+                workflowId,
+                runId,
+                buildId);
         jdbc.update(
                 """
                 insert into case_room_epoch (
                     id, tenant_surrogate, case_id, room_id, room_type, room_epoch,
-                    writer_mode, lifecycle_status, process_revision, room_revision,
-                    fencing_token, stream_protocol, activated_at
-                ) values (?, 'legacy-default', ?, ?, 'EVIDENCE', 0, 'LEGACY',
-                    'ACTIVE', 0, 0, 0, 'agent_stream.v1', now())
+                    writer_mode, lifecycle_status, provisioning_status,
+                    process_revision, room_revision, fencing_token,
+                    temporal_workflow_id, temporal_run_id,
+                    room_temporal_workflow_id, room_temporal_run_id,
+                    temporal_build_id, graph_key, graph_version,
+                    checkpoint_schema_version, stream_protocol, selection_schema_version,
+                    process_contract_version, workflow_type, activated_at, provisioned_at
+                ) values (?, 'legacy-default', ?, ?, 'EVIDENCE', 0, ?,
+                    'ACTIVE', ?, 0, 0, 1, ?, ?, ?, ?, ?, 'evidence.v2', '1.0.0', 'checkpoint.v1',
+                    'agent_stream.v1', 'room-epoch-selection.v1',
+                    'case-process-contract.v1', ?, now(),
+                    case when ? = 'READY' then now() else null end)
                 """,
                 epochId,
                 caseId,
-                roomId);
+                roomId,
+                writerMode,
+                provisioningStatus,
+                workflowId,
+                runId,
+                roomWorkflowId,
+                roomRunId,
+                buildId,
+                workflowType,
+                provisioningStatus);
     }
 
     private void installFailingOutboxTrigger() {

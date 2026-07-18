@@ -103,6 +103,30 @@ Worker Deployment API，就假定该本地 Server 支持对应控制面能力。
 `PINNED` Workflow 不会因为路由回滚自动迁移版本；新旧 Worker 都必须保留到 Visibility 查询
 证明没有活跃引用。任何 Worker/Build/Graph 清理都受 `REL-010` 门禁约束。
 
+## Phase 1 恢复任务
+
+`APP_ORCHESTRATION_NEW_EPOCH_MODE` 只允许 `LEGACY`、`SHADOW` 或 `TEMPORAL`，默认
+`LEGACY`。Java 只在创建新 room epoch 时读取该 selector，并把结果持久化到
+`case_room_epoch.writer_mode`；已有 epoch、Temporal Workflow replay 和运行中的 Graph 不得
+重新读取动态值。回滚 selector 只影响后续新 epoch，不能把活跃 TEMPORAL epoch 原地交还旧 writer。
+
+Control Worker 承载两个默认关闭的有界恢复任务：
+
+- `APP_ORCHESTRATION_DOMAIN_EVENT_RECOVERY_ENABLED` 从 Java 的
+  `case_timeline_event` 持久账本补投 Case Workflow Signal。投递是 at-least-once，
+  Workflow 按 sequence 和 payload identity 去重；不得用进程内 after-commit 回调替代该 detector。
+- `APP_ORCHESTRATION_PROJECTION_RECONCILIATION_ENABLED` 扫描 SHADOW/TEMPORAL epoch。
+  Query 结果只能提供观测，不能单独授权 projection 修复。生产 reader 必须同时核对
+  bootstrap commitment、first/current Run 的 History chain，以及 History 中的
+  `case_process_authority_checkpoint_v1` memo。当前 Phase 1 仅允许尚未发生业务推进、且上述证据
+  完整一致的 bootstrap checkpoint 返回 `Verified`；后续状态继续 fail-closed 为
+  `SOURCE_INCOMPLETE`。SHADOW 始终只记录 drift，只有 TEMPORAL 的 `Verified` 结果可进入受 fencing
+  保护的修复事务；History 不可用时不得降级使用 Query。
+
+两个任务都限制单批大小并拒绝同 JVM 重入；多副本依靠 Signal 幂等和数据库 fencing 保持安全。
+只有 `MIG-001` 的 PostgreSQL、replay、Worker 恢复和 reconciliation 证据在同一 commit 通过后，
+才允许在 control worker 开启。回滚时先关闭这两个入口，保留账本、History 和 issue 记录。
+
 ## 服务入口
 
 所有宿主机端口默认只绑定 `127.0.0.1`。

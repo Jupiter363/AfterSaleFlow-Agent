@@ -1,6 +1,8 @@
 package com.example.dispute.workflow.infrastructure.outbox;
 
 import com.example.dispute.workflow.config.CommandOutboxProperties;
+import com.example.dispute.workflow.infrastructure.outbox.CaseCommandOutboxStore.ExpirationResolution;
+import com.example.dispute.workflow.infrastructure.outbox.CaseCommandOutboxStore.PermanentFailureResolution;
 import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.DeliveryKind;
 import com.example.dispute.workflow.observability.OutboxTraceInterceptor;
 import com.example.dispute.workflow.observability.OutboxTraceInterceptor.DeliveryOutcome;
@@ -10,7 +12,7 @@ import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
-import java.util.List;
+import java.util.Optional;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -22,6 +24,7 @@ public class TemporalCommandDispatcher {
     private static final Logger LOGGER =
             LoggerFactory.getLogger(TemporalCommandDispatcher.class);
     private static final int MAX_ERROR_DETAIL_LENGTH = 4096;
+    static final String COMMAND_DEADLINE_EXPIRED = "COMMAND_DEADLINE_EXPIRED";
 
     private final CaseCommandOutboxStore outboxStore;
     private final TemporalUpdateGateway temporalGateway;
@@ -68,24 +71,28 @@ public class TemporalCommandDispatcher {
     }
 
     public int dispatchAvailable() {
-        List<ClaimedCaseCommandDelivery> claimed =
-                outboxStore.claimBatch(
-                        now(), properties.leaseDuration(), properties.batchSize());
-        claimed.forEach(
-                delivery -> {
-                    try {
-                        dispatchClaimed(delivery);
-                    } catch (RuntimeException exception) {
-                        LOGGER.warn(
-                                "Temporal command delivery persistence failed: outbox_id={} update_id={} exception_type={} message={}",
-                                delivery.outboxId(),
-                                delivery.updateId(),
-                                exception.getClass().getName(),
-                                exception.getMessage(),
-                                exception);
-                    }
-                });
-        return claimed.size();
+        int claimedCount = 0;
+        while (claimedCount < properties.batchSize()) {
+            Optional<ClaimedCaseCommandDelivery> next =
+                    outboxStore.claimNext(now(), properties.leaseDuration());
+            if (next.isEmpty()) {
+                break;
+            }
+            ClaimedCaseCommandDelivery delivery = next.orElseThrow();
+            claimedCount++;
+            try {
+                dispatchClaimed(delivery);
+            } catch (RuntimeException exception) {
+                LOGGER.warn(
+                        "Temporal command delivery persistence failed: outbox_id={} update_id={} exception_type={} message={}",
+                        delivery.outboxId(),
+                        delivery.updateId(),
+                        exception.getClass().getName(),
+                        exception.getMessage(),
+                        exception);
+            }
+        }
+        return claimedCount;
     }
 
     private void dispatchClaimed(ClaimedCaseCommandDelivery delivery) {
@@ -136,37 +143,75 @@ public class TemporalCommandDispatcher {
             TemporalUpdateDeliveryException failure) {
         OffsetDateTime failedAt = now();
         String detail = truncate(exceptionDetail(failure));
-        boolean marked;
-        DeliveryOutcome outcome;
-        String effectiveErrorCode;
-        if (failure.retryable() && delivery.attemptCount() < properties.maxAttempts()) {
+        if (isDefinitiveDeadlineRejection(failure)) {
+            return markExpired(delivery, failedAt, detail);
+        }
+        if (failure.retryable()) {
             OffsetDateTime availableAt =
                     failedAt.plus(backoff(delivery.attemptCount()));
-            outcome = DeliveryOutcome.RETRY_SCHEDULED;
-            effectiveErrorCode = failure.errorCode();
-            marked =
+            boolean marked =
                     outboxStore.markRetry(
                             delivery,
-                            effectiveErrorCode,
+                            failure.errorCode(),
                             detail,
                             availableAt,
                             failedAt);
-        } else {
-            outcome = DeliveryOutcome.DEAD_LETTERED;
-            effectiveErrorCode =
-                    failure.retryable()
-                            ? "TEMPORAL_DELIVERY_EXHAUSTED"
-                            : failure.errorCode();
-            marked =
-                    outboxStore.markDeadLetter(
-                            delivery, effectiveErrorCode, detail, failedAt);
+            if (!marked) {
+                logStaleLease(delivery, "failed");
+                return DeliveryTraceResult.failure(
+                        DeliveryOutcome.STALE_LEASE, failure.errorCode());
+            }
+            return DeliveryTraceResult.failure(
+                    DeliveryOutcome.RETRY_SCHEDULED, failure.errorCode());
         }
-        if (!marked) {
+        return resolvePermanentFailure(delivery, failure.errorCode(), detail, failedAt);
+    }
+
+    private DeliveryTraceResult resolvePermanentFailure(
+            ClaimedCaseCommandDelivery delivery,
+            String errorCode,
+            String detail,
+            OffsetDateTime failedAt) {
+        PermanentFailureResolution resolution =
+                outboxStore.resolvePermanentFailure(
+                        delivery, errorCode, detail, failedAt);
+        if (resolution == PermanentFailureResolution.STALE_LEASE) {
             logStaleLease(delivery, "failed");
             return DeliveryTraceResult.failure(
-                    DeliveryOutcome.STALE_LEASE, failure.errorCode());
+                    DeliveryOutcome.STALE_LEASE, errorCode);
         }
-        return DeliveryTraceResult.failure(outcome, effectiveErrorCode);
+        if (resolution == PermanentFailureResolution.RECONCILED) {
+            return DeliveryTraceResult.success(DeliveryOutcome.RECONCILED);
+        }
+        return DeliveryTraceResult.failure(DeliveryOutcome.DEAD_LETTERED, errorCode);
+    }
+
+    private static boolean isDefinitiveDeadlineRejection(
+            TemporalUpdateDeliveryException failure) {
+        return !failure.retryable()
+                && COMMAND_DEADLINE_EXPIRED.equals(failure.errorCode());
+    }
+
+    private DeliveryTraceResult markExpired(
+            ClaimedCaseCommandDelivery delivery,
+            OffsetDateTime expiredAt,
+            String detail) {
+        ExpirationResolution resolution =
+                outboxStore.markExpired(
+                        delivery,
+                        COMMAND_DEADLINE_EXPIRED,
+                        truncate(detail),
+                        expiredAt);
+        if (resolution == ExpirationResolution.STALE_LEASE) {
+            logStaleLease(delivery, "expired");
+            return DeliveryTraceResult.failure(
+                    DeliveryOutcome.STALE_LEASE, COMMAND_DEADLINE_EXPIRED);
+        }
+        if (resolution == ExpirationResolution.RECONCILED) {
+            return DeliveryTraceResult.success(DeliveryOutcome.RECONCILED);
+        }
+        return DeliveryTraceResult.failure(
+                DeliveryOutcome.DEAD_LETTERED, COMMAND_DEADLINE_EXPIRED);
     }
 
     private Duration backoff(int attemptCount) {

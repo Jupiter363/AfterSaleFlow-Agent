@@ -24,7 +24,6 @@ class CommandOutboxPropertiesTest {
                     assertThat(properties.enabled()).isFalse();
                     assertThat(properties.batchSize()).isEqualTo(32);
                     assertThat(properties.leaseDuration()).isEqualTo(Duration.ofMinutes(1));
-                    assertThat(properties.maxAttempts()).isEqualTo(8);
                     assertThat(properties.baseBackoff()).isEqualTo(Duration.ofSeconds(1));
                     assertThat(properties.maxBackoff()).isEqualTo(Duration.ofMinutes(5));
                     assertThat(properties.pollInterval()).isEqualTo(Duration.ofSeconds(5));

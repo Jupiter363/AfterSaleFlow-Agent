@@ -105,11 +105,22 @@ def table_body(sql: str, table: str) -> str:
 # 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 协作调用 `MIGRATION_DIR.glob`。
 # 系统意义：固定“跨服务契约测试 > test_migration_contract”的可观察契约，防止后续重构改变业务结果。
 def test_ordered_flyway_migrations_exist() -> None:
-    actual = sorted(path.name for path in MIGRATION_DIR.glob("V*.sql"))
-    versions = [int(re.match(r"V(\d+)__", name).group(1)) for name in actual]
+    versioned_migrations: list[tuple[tuple[int, int], str]] = []
+    for path in MIGRATION_DIR.glob("V*.sql"):
+        match = re.fullmatch(r"V(\d+)(?:_(\d+))?__.+\.sql", path.name)
+        assert match, f"invalid Flyway migration name: {path.name}"
+        versioned_migrations.append(
+            ((int(match.group(1)), int(match.group(2) or 0)), path.name)
+        )
+
+    versioned_migrations.sort(key=lambda migration: migration[0])
+    versions = [version for version, _ in versioned_migrations]
+    actual = [name for _, name in versioned_migrations]
+    major_versions = sorted({major for major, _ in versions})
 
     assert actual[: len(BASELINE_MIGRATIONS)] == BASELINE_MIGRATIONS
-    assert versions == list(range(1, len(actual) + 1))
+    assert len(versions) == len(set(versions))
+    assert major_versions == list(range(1, max(major_versions) + 1))
 
 
 # 所属模块：跨服务契约测试 > test_migration_contract；函数角色：回归测试用例。

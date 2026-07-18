@@ -145,20 +145,25 @@ class WorkflowPersistenceRepositoryIntegrationTest {
 
                 insert into case_process_projection (
                     case_id, tenant_surrogate, macro_phase, current_room, room_phase,
-                    writer_mode, process_revision, room_epoch, fencing_token
+                    writer_mode, process_revision, room_epoch, fencing_token,
+                    temporal_build_id
                 ) values (
                     'CASE_REPO_CONTROL', 'tenant-repo', 'EVIDENCE_OPEN',
-                    'EVIDENCE', 'OPEN', 'LEGACY', 0, 0, 0
+                    'EVIDENCE', 'OPEN', 'LEGACY', 0, 0, 0, 'legacy-java.v1'
                 );
 
                 insert into case_room_epoch (
                     id, tenant_surrogate, case_id, room_id, room_type, room_epoch,
                     writer_mode, lifecycle_status, process_revision, room_revision,
-                    fencing_token, stream_protocol, activated_at
+                    fencing_token, temporal_build_id, graph_key, graph_version,
+                    checkpoint_schema_version, stream_protocol, selection_schema_version,
+                    process_contract_version, workflow_type, activated_at
                 ) values (
                     'EPOCH_REPO', 'tenant-repo', 'CASE_REPO_CONTROL',
                     'ROOM_REPO_CONTROL', 'EVIDENCE', 0, 'LEGACY', 'ACTIVE',
-                    0, 0, 0, 'agent_stream.v1', now()
+                    0, 0, 0, 'legacy-java.v1', 'evidence.v2', '1.0.0',
+                    'checkpoint.v1', 'agent_stream.v1', 'room-epoch-selection.v1',
+                    'case-process-contract.v1', 'LegacyJavaRoomState', now()
                 );
 
                 insert into case_command (

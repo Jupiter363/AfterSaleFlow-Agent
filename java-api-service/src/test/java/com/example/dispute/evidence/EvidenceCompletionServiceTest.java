@@ -40,6 +40,9 @@ import com.example.dispute.room.infrastructure.persistence.repository.CasePhaseC
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import com.example.dispute.infrastructure.persistence.repository.EvidenceItemRepository;
 import com.example.dispute.workflow.application.EvidenceWindowCoordinator;
+import com.example.dispute.workflow.application.epoch.RoomEpochAllocator;
+import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.TransitionRoomEpoch;
+import com.example.dispute.workflow.contract.v1.ContractTypes;
 import com.example.dispute.hearing.application.HearingFlowRuntimeService;
 import java.time.Clock;
 import java.time.Instant;
@@ -52,6 +55,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
+import org.mockito.ArgumentCaptor;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 // 所属模块：【证据与版本化卷宗 / 自动化测试层】类型「EvidenceCompletionServiceTest」。
@@ -75,6 +79,7 @@ class EvidenceCompletionServiceTest {
     @Mock private NotificationService notificationService;
     @Mock private CaseLifecycleNotificationService lifecycleNotifications;
     @Mock private HearingFlowRuntimeService hearingFlowRuntimeService;
+    @Mock private RoomEpochAllocator roomEpochAllocator;
 
     private EvidenceCompletionService service;
     private FulfillmentCaseEntity dispute;
@@ -107,6 +112,7 @@ class EvidenceCompletionServiceTest {
                         notificationService,
                         lifecycleNotifications,
                         hearingFlowRuntimeService,
+                        roomEpochAllocator,
                         new DisputeProperties(
                                 Duration.ofHours(2),
                                 Duration.ofHours(3),
@@ -228,6 +234,20 @@ class EvidenceCompletionServiceTest {
         assertThat(dispute.getCurrentRoom()).isEqualTo("HEARING");
         assertThat(dispute.getCurrentDeadlineAt())
                 .isEqualTo(OffsetDateTime.parse("2026-07-03T04:00:00Z"));
+        ArgumentCaptor<TransitionRoomEpoch> transition =
+                ArgumentCaptor.forClass(TransitionRoomEpoch.class);
+        verify(roomEpochAllocator).transition(transition.capture());
+        assertThat(transition.getValue().caseId()).isEqualTo(dispute.getId());
+        assertThat(transition.getValue().expectedRoomType())
+                .isEqualTo(ContractTypes.RoomType.EVIDENCE);
+        assertThat(transition.getValue().nextRoomType())
+                .isEqualTo(ContractTypes.RoomType.HEARING);
+        assertThat(transition.getValue().macroPhase()).isEqualTo(CaseStatus.HEARING_OPEN.name());
+        assertThat(transition.getValue().roomPhase()).isEqualTo(RoomStatus.OPEN.name());
+        assertThat(transition.getValue().projectedDeadlineAt())
+                .isEqualTo(OffsetDateTime.parse("2026-07-03T04:00:00Z"));
+        assertThat(transition.getValue().occurredAt())
+                .isEqualTo(OffsetDateTime.parse("2026-07-03T01:00:00Z"));
         verify(hearingFlowRuntimeService).startAfterEvidenceSealed(dispute.getId());
     }
 
@@ -269,6 +289,7 @@ class EvidenceCompletionServiceTest {
         assertThat(result.dossierVersion()).isEqualTo(1);
         assertThat(result.allPartiesCompleted()).isFalse();
         verify(completionRepository, never()).save(any());
+        verify(roomEpochAllocator, never()).transition(any());
     }
 
     @Test
@@ -306,6 +327,142 @@ class EvidenceCompletionServiceTest {
         assertThat(dispute.getCaseStatus()).isEqualTo(CaseStatus.EVIDENCE_OPEN);
         verify(evidenceWindowCoordinator)
                 .signalPartyCompletedAfterCommit(dispute.getId(), "MERCHANT");
+        verify(roomEpochAllocator, never()).transition(any());
+    }
+
+    @Test
+    void hearingReplayDoesNotResealRoomsOrTransitionTheEpochAgain() {
+        dispute.openHearing(
+                OffsetDateTime.parse("2026-07-03T04:00:00Z"),
+                "system");
+        when(dossierFreezer.latestVersion(dispute.getId())).thenReturn(1);
+        when(evidenceRepository.countByCaseIdAndSubmittedByIdAndSubmissionStatusAndDeletedAtIsNull(
+                        dispute.getId(), "user-local", com.example.dispute.evidence.domain.EvidenceSubmissionStatus.SUBMITTED))
+                .thenReturn(1L);
+        EvidencePartyCompletionEntity userCompletion =
+                EvidencePartyCompletionEntity.completed(
+                        "EVIDENCE_COMPLETE_REPLAY_USER",
+                        dispute.getId(),
+                        1,
+                        ActorRole.USER,
+                        "user-local",
+                        "user-complete-replay",
+                        Instant.parse("2026-07-03T00:30:00Z"));
+        EvidencePartyCompletionEntity merchantCompletion =
+                EvidencePartyCompletionEntity.completed(
+                        "EVIDENCE_COMPLETE_REPLAY_MERCHANT",
+                        dispute.getId(),
+                        1,
+                        ActorRole.MERCHANT,
+                        "merchant-local",
+                        "merchant-complete-replay",
+                        Instant.parse("2026-07-03T00:40:00Z"));
+        when(completionRepository.findByCaseIdAndIdempotencyKey(
+                        dispute.getId(), "merchant-complete-replay"))
+                .thenReturn(Optional.of(merchantCompletion));
+        when(completionRepository.findByCaseIdAndDossierVersionAndParticipantId(
+                        dispute.getId(), 1, "merchant-local"))
+                .thenReturn(Optional.of(merchantCompletion));
+        when(completionRepository.findAllByCaseIdAndDossierVersionAndCompletionStatus(
+                        dispute.getId(), 1, "COMPLETED"))
+                .thenReturn(List.of(userCompletion, merchantCompletion));
+
+        var result =
+                service.complete(
+                        dispute.getId(),
+                        new AuthenticatedActor("merchant-local", ActorRole.MERCHANT),
+                        "merchant-complete-replay");
+
+        assertThat(result.allPartiesCompleted()).isTrue();
+        assertThat(result.nextRoom()).isEqualTo("HEARING");
+        assertThat(result.nextDeadlineAt())
+                .isEqualTo(OffsetDateTime.parse("2026-07-03T04:00:00Z"));
+        verify(roomRepository, never()).save(any());
+        verify(clockRepository, never()).save(any());
+        verify(caseRepository, never()).save(any());
+        verify(roomEpochAllocator, never()).transition(any());
+        verify(hearingFlowRuntimeService, never()).startAfterEvidenceSealed(any());
+    }
+
+    @Test
+    void deadlineExpiryTransitionsOpenEvidenceExactlyOnce() {
+        arrangeExpiryTransition(CaseStatus.EVIDENCE_OPEN);
+
+        var result = service.expire(dispute.getId());
+
+        assertThat(result.sealed()).isTrue();
+        assertThat(result.nextRoom()).isEqualTo("HEARING");
+        assertExpiryTransition();
+    }
+
+    @Test
+    void deadlineExpiryTransitionsSealedEvidenceExactlyOnce() {
+        arrangeExpiryTransition(CaseStatus.EVIDENCE_SEALED);
+
+        var result = service.expire(dispute.getId());
+
+        assertThat(result.sealed()).isTrue();
+        assertThat(result.nextRoom()).isEqualTo("HEARING");
+        assertExpiryTransition();
+    }
+
+    @Test
+    void existingHearingClockRemainsTheAuthoritativeDeadlineDuringTransition() {
+        arrangeExpiryTransition(CaseStatus.EVIDENCE_OPEN);
+        CaseRoomEntity hearingRoom =
+                CaseRoomEntity.open(
+                        "ROOM_HEARING_EXISTING",
+                        dispute.getId(),
+                        RoomType.HEARING,
+                        OffsetDateTime.parse("2026-07-03T00:30:00Z"),
+                        "system");
+        OffsetDateTime existingDeadline =
+                OffsetDateTime.parse("2026-07-03T05:30:00Z");
+        CasePhaseClockEntity hearingClock =
+                CasePhaseClockEntity.running(
+                        "CLOCK_HEARING_EXISTING",
+                        dispute.getId(),
+                        hearingRoom.getId(),
+                        PhaseClockType.HEARING,
+                        OffsetDateTime.parse("2026-07-03T00:30:00Z"),
+                        existingDeadline,
+                        "hearing-window-existing",
+                        "system");
+        when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.HEARING))
+                .thenReturn(Optional.of(hearingRoom));
+        when(clockRepository.findByCaseIdAndClockType(
+                        dispute.getId(), PhaseClockType.HEARING))
+                .thenReturn(Optional.of(hearingClock));
+
+        service.expire(dispute.getId());
+
+        assertThat(dispute.getCurrentDeadlineAt()).isEqualTo(existingDeadline);
+        ArgumentCaptor<TransitionRoomEpoch> transition =
+                ArgumentCaptor.forClass(TransitionRoomEpoch.class);
+        verify(roomEpochAllocator).transition(transition.capture());
+        assertThat(transition.getValue().projectedDeadlineAt())
+                .isEqualTo(existingDeadline);
+    }
+
+    @Test
+    void deadlineExpiryReplayFromHearingDoesNotTransitionAgain() {
+        dispute.openHearing(
+                OffsetDateTime.parse("2026-07-03T04:00:00Z"),
+                "system");
+        when(caseRepository.findById(dispute.getId())).thenReturn(Optional.of(dispute));
+        when(dossierFreezer.latestVersion(dispute.getId())).thenReturn(1);
+        when(completionRepository.findAllByCaseIdAndDossierVersionAndCompletionStatus(
+                        dispute.getId(), 1, "COMPLETED"))
+                .thenReturn(List.of());
+
+        var result = service.expire(dispute.getId());
+
+        assertThat(result.nextRoom()).isEqualTo("HEARING");
+        verify(roomEpochAllocator, never()).transition(any());
+        verify(roomRepository, never()).save(any());
+        verify(clockRepository, never()).save(any());
+        verify(caseRepository, never()).save(any());
+        verify(hearingFlowRuntimeService, never()).startAfterEvidenceSealed(any());
     }
 
     // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceCompletionServiceTest.initiatorCannotCompleteEvidenceWithoutSubmittedEvidence()」。
@@ -342,5 +499,95 @@ class EvidenceCompletionServiceTest {
                 .evidenceDeadlineWarning(
                         dispute,
                         OffsetDateTime.parse("2026-07-03T02:00:00Z"));
+    }
+
+    private void arrangeExpiryTransition(CaseStatus status) {
+        if (status == CaseStatus.EVIDENCE_SEALED) {
+            dispute = importedEvidenceCase(status);
+            evidenceRoom =
+                    CaseRoomEntity.open(
+                            "ROOM_EVIDENCE",
+                            dispute.getId(),
+                            RoomType.EVIDENCE,
+                            OffsetDateTime.parse("2026-07-03T00:00:00Z"),
+                            "system");
+            evidenceRoom.seal(
+                    OffsetDateTime.parse("2026-07-03T00:30:00Z"),
+                    "system");
+            evidenceClock =
+                    CasePhaseClockEntity.running(
+                            "CLOCK_EVIDENCE",
+                            dispute.getId(),
+                            evidenceRoom.getId(),
+                            PhaseClockType.EVIDENCE_SUBMISSION,
+                            OffsetDateTime.parse("2026-07-03T00:00:00Z"),
+                            OffsetDateTime.parse("2026-07-03T02:00:00Z"),
+                            "evidence-window",
+                            "system");
+            when(caseRepository.findByIdForUpdate(dispute.getId()))
+                    .thenReturn(Optional.of(dispute));
+        }
+        when(evidenceRepository.countByCaseIdAndSubmittedByIdAndSubmissionStatusAndDeletedAtIsNull(
+                        dispute.getId(),
+                        "user-local",
+                        com.example.dispute.evidence.domain.EvidenceSubmissionStatus.SUBMITTED))
+                .thenReturn(1L);
+        when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.EVIDENCE))
+                .thenReturn(Optional.of(evidenceRoom));
+        when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.HEARING))
+                .thenReturn(Optional.empty());
+        when(roomRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(clockRepository.findByCaseIdAndClockType(
+                        dispute.getId(), PhaseClockType.EVIDENCE_SUBMISSION))
+                .thenReturn(Optional.of(evidenceClock));
+        when(clockRepository.findByCaseIdAndClockType(
+                        dispute.getId(), PhaseClockType.HEARING))
+                .thenReturn(Optional.empty());
+        when(clockRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(caseRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(caseRepository.findById(dispute.getId())).thenReturn(Optional.of(dispute));
+        when(dossierFreezer.latestVersion(dispute.getId())).thenReturn(1);
+        when(completionRepository.findAllByCaseIdAndDossierVersionAndCompletionStatus(
+                        dispute.getId(), 1, "COMPLETED"))
+                .thenReturn(List.of());
+    }
+
+    private void assertExpiryTransition() {
+        ArgumentCaptor<TransitionRoomEpoch> transition =
+                ArgumentCaptor.forClass(TransitionRoomEpoch.class);
+        verify(roomEpochAllocator).transition(transition.capture());
+        assertThat(transition.getValue().expectedRoomType())
+                .isEqualTo(ContractTypes.RoomType.EVIDENCE);
+        assertThat(transition.getValue().nextRoomType())
+                .isEqualTo(ContractTypes.RoomType.HEARING);
+        assertThat(transition.getValue().nextRoomId()).isNotBlank();
+        assertThat(transition.getValue().macroPhase())
+                .isEqualTo(CaseStatus.HEARING_OPEN.name());
+        assertThat(transition.getValue().roomPhase()).isEqualTo(RoomStatus.OPEN.name());
+        assertThat(transition.getValue().projectedDeadlineAt())
+                .isEqualTo(OffsetDateTime.parse("2026-07-03T04:00:00Z"));
+        assertThat(transition.getValue().occurredAt())
+                .isEqualTo(OffsetDateTime.parse("2026-07-03T01:00:00Z"));
+    }
+
+    private static FulfillmentCaseEntity importedEvidenceCase(CaseStatus status) {
+        return FulfillmentCaseEntity.imported(
+                "CASE_EVIDENCE_COMPLETE",
+                "ORDER-1",
+                null,
+                "LOG-1",
+                "user-local",
+                "merchant-local",
+                "idem-complete",
+                "SIGNED_NOT_RECEIVED",
+                "Evidence dispute",
+                "Evidence collection in progress",
+                RiskLevel.HIGH,
+                status,
+                "EVIDENCE",
+                OffsetDateTime.parse("2026-07-03T02:00:00Z"),
+                "OMS",
+                "EXT-COMPLETE",
+                "external-adapter");
     }
 }

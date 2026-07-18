@@ -93,13 +93,14 @@ def test_frontend_is_partitioned_by_final_workspace_responsibility() -> None:
 # 系统意义：固定“跨服务契约测试 > test_final_repository_structure”的可观察契约，防止后续重构改变业务结果。
 def test_repository_documentation_names_the_final_product_and_boundaries() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    module_map = (
-        ROOT / "docs" / "architecture" / "final-module-map.md"
+    architecture = (
+        ROOT / "docs" / "architecture" / "temporal-first-agent-platform.md"
     ).read_text(encoding="utf-8")
+    normalized_readme = " ".join(readme.split())
 
     assert readme.startswith("# AI Native 履约争端审理系统")
-    assert "Agent Runtime Harness" in readme
-    assert "Platform Human Review" in readme
-    assert "Tool Executor" in readme
-    assert "业务事实" in module_map
-    assert "禁止依赖" in module_map
+    assert "Python Agent Runtime Harness" in normalized_readme
+    assert "平台人工终审承担最终责任" in normalized_readme
+    assert "Tool Executor 只执行已批准" in normalized_readme
+    assert "Java and PostgreSQL are the authoritative domain ledger" in architecture
+    assert "No state field has two authoritative writers" in architecture

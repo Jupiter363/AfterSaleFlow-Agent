@@ -10,7 +10,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
@@ -25,6 +24,7 @@ import com.example.dispute.casecore.infrastructure.persistence.repository.Simula
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.config.DisputeProperties;
+import com.example.dispute.common.transaction.PostCommitSideEffectExecutor;
 import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.RiskLevel;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
@@ -34,6 +34,12 @@ import com.example.dispute.room.application.ParticipantService;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseParticipantRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CasePhaseClockRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
+import com.example.dispute.workflow.application.epoch.TransactionalRoomEpochAllocator;
+import com.example.dispute.workflow.contract.v1.ContractTypes;
+import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.EpochLifecycleStatus;
+import com.example.dispute.workflow.infrastructure.persistence.repository.CaseProcessProjectionRepository;
+import com.example.dispute.workflow.infrastructure.persistence.repository.CaseRoomEpochRepository;
+import com.example.dispute.workflow.room.RoomEpochAllocatorTestConfiguration;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -89,6 +95,8 @@ import org.testcontainers.utility.DockerImageName;
     SingleInstanceImportGate.class,
     SimulatedExternalDisputeTemplateCatalog.class,
     ParticipantService.class,
+    TransactionalRoomEpochAllocator.class,
+    RoomEpochAllocatorTestConfiguration.class,
     DisputeImportServiceIntegrationTest.FixedClockConfiguration.class,
     DisputeImportServiceIntegrationTest.EmptyLookupBarrierConfiguration.class,
     DisputeImportServiceIntegrationTest.ImportGateObservationConfiguration.class
@@ -136,6 +144,8 @@ class DisputeImportServiceIntegrationTest {
     @Autowired private EmptyLookupBarrier emptyLookupBarrier;
     @Autowired private ObservingImportGate observingImportGate;
     @Autowired private PlatformTransactionManager transactionManager;
+    @Autowired private CaseRoomEpochRepository roomEpochRepository;
+    @Autowired private CaseProcessProjectionRepository processProjectionRepository;
     @MockitoBean private IntakeAgentTurnService intakeAgentTurnService;
 
     // 所属模块：【案件核心与导入 / 自动化测试层】「DisputeImportServiceIntegrationTest.facadeSuspendsCallerTransactionBeforeAcquiringTheImportGate()」。
@@ -209,6 +219,17 @@ class DisputeImportServiceIntegrationTest {
                     .isOne();
             assertThat(roomRepository.findAllByCaseId(firstResult.id())).hasSize(1);
             assertThat(participantRepository.findAllByCaseId(firstResult.id())).hasSize(2);
+            assertThat(
+                            roomEpochRepository.findByCaseIdAndRoomTypeAndLifecycleStatus(
+                                    firstResult.id(),
+                                    ContractTypes.RoomType.INTAKE,
+                                    EpochLifecycleStatus.ACTIVE))
+                    .isPresent();
+            assertThat(processProjectionRepository.findById(firstResult.id()))
+                    .hasValueSatisfying(
+                            projection ->
+                                    assertThat(projection.getCurrentRoom())
+                                            .isEqualTo("INTAKE"));
             verify(intakeAgentTurnService, times(1))
                     .startInitialTurn(
                             any(String.class),
@@ -229,7 +250,7 @@ class DisputeImportServiceIntegrationTest {
     // Java 语法：@Transactional 由 Spring 代理拦截；只有通过代理调用时才会开启或加入事务。
     @Test
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
-    void failedInitialTurnRollsBackTheImportAndRetryCreatesExactlyOneCase() {
+    void failedInitialTurnDoesNotRollBackTheImportAndReplayKeepsOneCase() {
         String externalReference = "EXT-ROLLBACK-RETRY";
         AtomicReference<String> failedCaseId = new AtomicReference<>();
         doAnswer(
@@ -246,42 +267,38 @@ class DisputeImportServiceIntegrationTest {
                         any(String.class),
                         any(String.class));
 
-        assertThatThrownBy(
-                        () ->
-                                service.importDispute(
-                                        command(externalReference),
-                                        systemActor(),
-                                        "import-first-attempt"))
-                .isInstanceOf(InvalidDataAccessApiUsageException.class)
-                .hasMessage("simulated intake persistence failure");
-
-        assertThat(
-                        caseRepository.findBySourceSystemAndExternalCaseRef(
-                                "OMS", externalReference))
-                .isEmpty();
-        assertThat(roomRepository.findAllByCaseId(failedCaseId.get())).isEmpty();
-        assertThat(participantRepository.findAllByCaseId(failedCaseId.get())).isEmpty();
-        assertThat(clockRepository.count()).isZero();
-
-        doNothing()
-                .when(intakeAgentTurnService)
-                .startInitialTurn(
-                        any(String.class),
-                        any(AuthenticatedActor.class),
-                        any(IntakeLobbySeed.class),
-                        any(String.class),
-                        any(String.class));
-
         var imported =
                 service.importDispute(
                         command(externalReference),
                         systemActor(),
-                        "import-retry-success");
+                        "import-first-attempt");
+
+        assertThat(failedCaseId.get()).isEqualTo(imported.id());
+        assertThat(
+                        caseRepository.findBySourceSystemAndExternalCaseRef(
+                                "OMS", externalReference))
+                .hasValueSatisfying(saved -> assertThat(saved.getId()).isEqualTo(imported.id()));
+        assertThat(roomRepository.findAllByCaseId(imported.id())).hasSize(1);
+        assertThat(participantRepository.findAllByCaseId(imported.id())).hasSize(2);
+        assertThat(
+                        clockRepository.findByCaseIdAndClockType(
+                                imported.id(),
+                                com.example.dispute.room.domain.PhaseClockType.EVIDENCE_SUBMISSION))
+                .isEmpty();
+        String initialEpochId =
+                roomEpochRepository
+                        .findByCaseIdAndRoomTypeAndLifecycleStatus(
+                                imported.id(),
+                                ContractTypes.RoomType.INTAKE,
+                                EpochLifecycleStatus.ACTIVE)
+                        .orElseThrow()
+                        .getId();
+
         var replayed =
                 service.importDispute(
                         command(externalReference),
                         systemActor(),
-                        "import-replay-success");
+                        "import-retry-success");
 
         assertThat(replayed.id()).isEqualTo(imported.id());
         assertThat(
@@ -290,7 +307,16 @@ class DisputeImportServiceIntegrationTest {
                 .hasValueSatisfying(saved -> assertThat(saved.getId()).isEqualTo(imported.id()));
         assertThat(roomRepository.findAllByCaseId(imported.id())).hasSize(1);
         assertThat(participantRepository.findAllByCaseId(imported.id())).hasSize(2);
-        verify(intakeAgentTurnService, times(2))
+        assertThat(
+                        roomEpochRepository
+                                .findByCaseIdAndRoomTypeAndLifecycleStatus(
+                                        imported.id(),
+                                        ContractTypes.RoomType.INTAKE,
+                                        EpochLifecycleStatus.ACTIVE)
+                                .orElseThrow()
+                                .getId())
+                .isEqualTo(initialEpochId);
+        verify(intakeAgentTurnService, times(1))
                 .startInitialTurn(
                         any(String.class),
                         any(AuthenticatedActor.class),
@@ -307,7 +333,7 @@ class DisputeImportServiceIntegrationTest {
     // Java 语法：@Transactional 由 Spring 代理拦截；只有通过代理调用时才会开启或加入事务。
     @Test
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
-    void simulatedImportRollsBackTheCaseAndTemplateCursorWhenIntakeFails() {
+    void simulatedImportCommitsCaseAndCursorWhenPostCommitIntakeFails() {
         jdbcTemplate.update(
                 "update simulated_import_template_cursor set next_template_no = 1"
                         + " where id = 'external-case-template'");
@@ -325,24 +351,24 @@ class DisputeImportServiceIntegrationTest {
                         any(String.class),
                         any(String.class));
 
-        assertThatThrownBy(
-                        () ->
-                                service.simulateExternalImport(
-                                        simulationCommand(),
-                                        systemActor(),
-                                        creationKey,
-                                        "template-rollback-trace",
-                                        "template-rollback-request"))
-                .isInstanceOf(InvalidDataAccessApiUsageException.class)
-                .hasMessage("simulated template intake failure");
+        var imported =
+                service.simulateExternalImport(
+                        simulationCommand(),
+                        systemActor(),
+                        creationKey,
+                        "template-rollback-trace",
+                        "template-rollback-request");
 
-        assertThat(caseRepository.findByCreationIdempotencyKey(creationKey)).isEmpty();
+        assertThat(imported.items()).hasSize(1);
+        assertThat(caseRepository.findByCreationIdempotencyKey(creationKey))
+                .hasValueSatisfying(
+                        saved -> assertThat(saved.getId()).isEqualTo(imported.items().getFirst().id()));
         assertThat(
                         cursorRepository
                                 .findById("external-case-template")
                                 .orElseThrow()
                                 .getNextTemplateNo())
-                .isEqualTo(1);
+                .isEqualTo(2);
     }
 
     // 所属模块：【案件核心与导入 / 自动化测试层】「DisputeImportServiceIntegrationTest.concurrentTransactionalSimulationsConsumeAdjacentTemplates()」。
@@ -511,6 +537,11 @@ class DisputeImportServiceIntegrationTest {
             return Clock.fixed(
                     Instant.parse("2026-07-10T00:00:00Z"),
                     ZoneOffset.UTC);
+        }
+
+        @Bean
+        PostCommitSideEffectExecutor postCommitSideEffectExecutor() {
+            return new PostCommitSideEffectExecutor(Runnable::run);
         }
     }
 

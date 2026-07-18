@@ -36,6 +36,7 @@ import com.example.dispute.room.domain.RoomType;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
 import com.example.dispute.room.infrastructure.persistence.repository.CasePhaseClockRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
+import com.example.dispute.workflow.application.epoch.RoomEpochAllocator;
 import jakarta.persistence.LockModeType;
 import java.time.Clock;
 import java.time.Duration;
@@ -76,6 +77,7 @@ class SimulatedExternalImportTemplateCycleTest {
     @Mock private ParticipantService participantService;
     @Mock private IntakeAgentTurnService intakeAgentTurnService;
     @Mock private SimulatedImportTemplateCursorRepository cursorRepository;
+    @Mock private RoomEpochAllocator roomEpochAllocator;
 
     private final SimulatedExternalDisputeTemplateCatalog catalog =
             new SimulatedExternalDisputeTemplateCatalog();
@@ -103,6 +105,14 @@ class SimulatedExternalImportTemplateCycleTest {
                         });
         when(caseRepository.findBySourceSystemAndExternalCaseRef(anyString(), anyString()))
                 .thenReturn(Optional.empty());
+        when(caseRepository.findByIdForUpdate(anyString()))
+                .thenAnswer(
+                        invocation -> {
+                            String caseId = invocation.getArgument(0);
+                            return casesByCreationKey.values().stream()
+                                    .filter(item -> item.getId().equals(caseId))
+                                    .findFirst();
+                        });
         when(caseRepository.save(any(FulfillmentCaseEntity.class)))
                 .thenAnswer(
                         invocation -> {
@@ -383,6 +393,7 @@ class SimulatedExternalImportTemplateCycleTest {
                 cursorRepository,
                 catalog,
                 postCommit,
+                roomEpochAllocator,
                 new DisputeProperties(
                         Duration.ofHours(2),
                         Duration.ofHours(3),

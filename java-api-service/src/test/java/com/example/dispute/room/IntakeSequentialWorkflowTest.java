@@ -32,6 +32,9 @@ import com.example.dispute.room.infrastructure.persistence.repository.CasePartic
 import com.example.dispute.room.infrastructure.persistence.repository.CasePhaseClockRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import com.example.dispute.workflow.application.EvidenceWindowCoordinator;
+import com.example.dispute.workflow.application.epoch.RoomEpochAllocator;
+import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.TransitionRoomEpoch;
+import com.example.dispute.workflow.contract.v1.ContractTypes;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -58,6 +61,7 @@ class IntakeSequentialWorkflowTest {
         CaseLifecycleNotificationService lifecycle =
                 mock(CaseLifecycleNotificationService.class);
         EvidenceWindowCoordinator evidenceWindow = mock(EvidenceWindowCoordinator.class);
+        RoomEpochAllocator roomEpochAllocator = mock(RoomEpochAllocator.class);
         CaseEventService events = mock(CaseEventService.class);
         FulfillmentCaseEntity dispute = pendingCase();
         CaseRoomEntity intakeRoom =
@@ -117,6 +121,7 @@ class IntakeSequentialWorkflowTest {
                         lifecycle,
                         evidenceWindow,
                         events,
+                        roomEpochAllocator,
                         new DisputeProperties(
                                 Duration.ofHours(2),
                                 Duration.ofHours(3),
@@ -155,10 +160,48 @@ class IntakeSequentialWorkflowTest {
         verify(clockRepository, times(1)).save(savedClock.capture());
         assertThat(savedClock.getValue().getDeadlineAt())
                 .isEqualTo(respondentResult.deadlineAt());
+        ArgumentCaptor<CaseRoomEntity> savedRooms =
+                ArgumentCaptor.forClass(CaseRoomEntity.class);
+        verify(roomRepository, times(2)).save(savedRooms.capture());
+        CaseRoomEntity evidenceRoom =
+                savedRooms.getAllValues().stream()
+                        .filter(room -> room.getRoomType() == RoomType.EVIDENCE)
+                        .findFirst()
+                        .orElseThrow();
+        ArgumentCaptor<TransitionRoomEpoch> transition =
+                ArgumentCaptor.forClass(TransitionRoomEpoch.class);
+        verify(roomEpochAllocator, times(1)).transition(transition.capture());
+        assertThat(transition.getValue().caseId()).isEqualTo(dispute.getId());
+        assertThat(transition.getValue().expectedRoomType())
+                .isEqualTo(ContractTypes.RoomType.INTAKE);
+        assertThat(transition.getValue().nextRoomType())
+                .isEqualTo(ContractTypes.RoomType.EVIDENCE);
+        assertThat(transition.getValue().nextRoomId())
+                .isEqualTo(evidenceRoom.getId());
+        assertThat(transition.getValue().macroPhase()).isEqualTo(CaseStatus.EVIDENCE_OPEN.name());
+        assertThat(transition.getValue().roomPhase()).isEqualTo(RoomStatus.OPEN.name());
+        assertThat(transition.getValue().projectedDeadlineAt())
+                .isEqualTo(respondentResult.deadlineAt());
+        assertThat(transition.getValue().occurredAt())
+                .isEqualTo(OffsetDateTime.parse("2026-07-15T00:00:00Z"));
         verify(evidenceWindow, times(1))
                 .startAfterCommit(dispute.getId(), Duration.ofHours(2));
         verify(progress).completeInitiator(any(), any(), any());
         verify(progress).completeRespondent(any(), any(), any());
+
+        when(progress.isCompleted(dispute, ActorRole.MERCHANT)).thenReturn(true);
+        var replay =
+                service.confirm(
+                        dispute.getId(),
+                        new AuthenticatedActor("merchant-local", ActorRole.MERCHANT),
+                        new IntakeConfirmationCommand(
+                                true, "PRODUCT_QUALITY", RiskLevel.MEDIUM, "replay"));
+
+        assertThat(replay.currentRoom()).isEqualTo(RoomType.EVIDENCE);
+        assertThat(replay.deadlineAt()).isEqualTo(respondentResult.deadlineAt());
+        verify(roomEpochAllocator, times(2)).activate(any());
+        verify(roomEpochAllocator, times(1)).transition(any());
+        verify(clockRepository, times(1)).save(any());
     }
 
     private static FulfillmentCaseEntity pendingCase() {

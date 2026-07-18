@@ -157,6 +157,10 @@ public class CasePhaseClockEntity extends AbstractEntity {
         return clockType;
     }
 
+    public String getRoomId() {
+        return roomId;
+    }
+
     // 所属模块：【房间协作与权限 / JPA 实体层】「CasePhaseClockEntity.getClockStatus()」。
     // 具体功能：「CasePhaseClockEntity.getClockStatus()」：读取「CasePhaseClockEntity」中的「clockStatus」状态，向 JPA、应用服务或序列化层返回「PhaseClockStatus」。
     // 上游调用：「CasePhaseClockEntity.getClockStatus()」的上游调用点包括 「EvidenceCompletionServiceTest.bothPartyCompletionsSealEvidenceEarlyAndOpenTheThreeHourHearing」。

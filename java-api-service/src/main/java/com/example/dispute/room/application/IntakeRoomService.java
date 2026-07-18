@@ -9,6 +9,7 @@ package com.example.dispute.room.application;
 import com.example.dispute.casecore.domain.CasePartyPosition;
 import com.example.dispute.common.api.ErrorCode;
 import com.example.dispute.common.exception.BadRequestException;
+import com.example.dispute.common.exception.BusinessException;
 import com.example.dispute.common.exception.ForbiddenException;
 import com.example.dispute.common.exception.NotFoundException;
 import com.example.dispute.config.AuthenticatedActor;
@@ -21,6 +22,7 @@ import com.example.dispute.notification.application.CaseLifecycleNotificationSer
 import com.example.dispute.notification.application.NotificationService;
 import com.example.dispute.notification.domain.NotificationType;
 import com.example.dispute.room.domain.PhaseClockType;
+import com.example.dispute.room.domain.RoomStatus;
 import com.example.dispute.room.domain.RoomType;
 import com.example.dispute.room.infrastructure.persistence.entity.CasePhaseClockEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
@@ -33,6 +35,11 @@ import java.time.OffsetDateTime;
 import java.util.Map;
 import java.util.UUID;
 import com.example.dispute.workflow.application.EvidenceWindowCoordinator;
+import com.example.dispute.workflow.application.epoch.RoomEpochAllocator;
+import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.ActivateRoomEpoch;
+import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.TerminateRoomEpoch;
+import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.TransitionRoomEpoch;
+import com.example.dispute.workflow.contract.v1.ContractTypes;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -57,6 +64,7 @@ public class IntakeRoomService {
     private final CaseLifecycleNotificationService lifecycleNotifications;
     private final EvidenceWindowCoordinator evidenceWindowCoordinator;
     private final CaseEventService caseEventService;
+    private final RoomEpochAllocator roomEpochAllocator;
     private final DisputeProperties disputeProperties;
     private final Clock clock;
     private final ObjectMapper objectMapper = new ObjectMapper();
@@ -78,6 +86,7 @@ public class IntakeRoomService {
             CaseLifecycleNotificationService lifecycleNotifications,
             EvidenceWindowCoordinator evidenceWindowCoordinator,
             CaseEventService caseEventService,
+            RoomEpochAllocator roomEpochAllocator,
             DisputeProperties disputeProperties,
             Clock clock) {
         this.caseRepository = caseRepository;
@@ -90,6 +99,7 @@ public class IntakeRoomService {
         this.lifecycleNotifications = lifecycleNotifications;
         this.evidenceWindowCoordinator = evidenceWindowCoordinator;
         this.caseEventService = caseEventService;
+        this.roomEpochAllocator = roomEpochAllocator;
         this.disputeProperties = disputeProperties;
         this.clock = clock;
     }
@@ -116,6 +126,16 @@ public class IntakeRoomService {
                                                 Map.of("case_id", caseId)));
         OffsetDateTime now = OffsetDateTime.now(clock);
         ActorRole confirmationRole = confirmationRole(dispute, actor);
+        if (confirmationRole != dispute.getInitiatorRole() && !command.admissible()) {
+            throw new BadRequestException(
+                    "respondent cannot change the intake admissibility decision",
+                    Map.of("case_id", dispute.getId()));
+        }
+        if (intakeProgressService.isCompleted(dispute, confirmationRole)) {
+            assertCompletedReplayState(dispute, confirmationRole);
+            return completedReplay(dispute);
+        }
+        assertIntakeActionAllowed(dispute);
         CaseRoomEntity intakeRoom =
                 roomRepository
                         .findByCaseIdAndRoomType(caseId, RoomType.INTAKE)
@@ -128,16 +148,8 @@ public class IntakeRoomService {
                                                         RoomType.INTAKE,
                                                         now,
                                                         actor.actorId())));
-        if (confirmationRole == dispute.getInitiatorRole()
-                && intakeProgressService.isCompleted(dispute, confirmationRole)) {
-            return new IntakeConfirmationView(
-                    caseId,
-                    dispute.getCaseStatus(),
-                    dispute.getCaseStatus() == com.example.dispute.domain.model.CaseStatus.EVIDENCE_OPEN
-                            ? RoomType.EVIDENCE
-                            : RoomType.INTAKE,
-                    dispute.getCurrentDeadlineAt());
-        }
+        assertOpenIntakeRoom(dispute, intakeRoom);
+        ensureIntakeEpoch(dispute, intakeRoom, now);
         if (confirmationRole != dispute.getInitiatorRole()) {
             return confirmRespondent(dispute, intakeRoom, actor, command, now);
         }
@@ -152,6 +164,7 @@ public class IntakeRoomService {
                     dispute.getIntakeResultJson(),
                     actor.actorId());
             caseRepository.save(dispute);
+            terminateIntakeEpoch(dispute, now);
             caseEventService.recordLifecycleEvent(
                     caseId,
                     intakeRoom.getId(),
@@ -194,18 +207,6 @@ public class IntakeRoomService {
             AuthenticatedActor actor,
             IntakeConfirmationCommand command,
             OffsetDateTime now) {
-        if (!command.admissible()) {
-            throw new BadRequestException(
-                    "respondent cannot change the intake admissibility decision",
-                    Map.of("case_id", dispute.getId()));
-        }
-        if (intakeProgressService.isCompleted(dispute, actor.role())) {
-            return new IntakeConfirmationView(
-                    dispute.getId(),
-                    dispute.getCaseStatus(),
-                    RoomType.EVIDENCE,
-                    dispute.getCurrentDeadlineAt());
-        }
         String finalIntakeResultJson = acceptedIntakeResultJson(dispute);
         assertBilateralMatrixReady(dispute.getId(), finalIntakeResultJson);
         intakeProgressService.completeRespondent(dispute, actor, now);
@@ -243,6 +244,16 @@ public class IntakeRoomService {
                 deadline,
                 actor.actorId());
         caseRepository.save(dispute);
+        roomEpochAllocator.transition(
+                new TransitionRoomEpoch(
+                        dispute.getId(),
+                        ContractTypes.RoomType.INTAKE,
+                        evidenceRoom.getId(),
+                        ContractTypes.RoomType.EVIDENCE,
+                        dispute.getCaseStatus().name(),
+                        evidenceRoom.getRoomStatus().name(),
+                        deadline,
+                        now));
         caseEventService.recordLifecycleEvent(
                 dispute.getId(),
                 intakeRoom.getId(),
@@ -341,22 +352,27 @@ public class IntakeRoomService {
         if (confirmationRole(dispute, actor) != dispute.getInitiatorRole()) {
             throw new ForbiddenException("only the intake initiator can cancel the dispute");
         }
+        assertIntakeActionAllowed(dispute);
         OffsetDateTime now = OffsetDateTime.now(clock);
         CaseRoomEntity intakeRoom =
                 roomRepository
                         .findByCaseIdAndRoomType(caseId, RoomType.INTAKE)
                         .orElseGet(
                                 () ->
-                                        CaseRoomEntity.closed(
-                                                roomId(),
-                                                caseId,
-                                                RoomType.INTAKE,
-                                                now,
-                                                actor.actorId()));
+                                        roomRepository.save(
+                                                CaseRoomEntity.open(
+                                                        roomId(),
+                                                        caseId,
+                                                        RoomType.INTAKE,
+                                                        now,
+                                                        actor.actorId())));
+        assertOpenIntakeRoom(dispute, intakeRoom);
+        ensureIntakeEpoch(dispute, intakeRoom, now);
         intakeRoom.close(now, actor.actorId());
         roomRepository.save(intakeRoom);
         dispute.cancelIntake(actor.actorId(), now);
         caseRepository.save(dispute);
+        terminateIntakeEpoch(dispute, now);
         caseEventService.recordLifecycleEvent(
                 caseId,
                 intakeRoom.getId(),
@@ -369,6 +385,95 @@ public class IntakeRoomService {
                 "intake-cancelled:" + caseId,
                 actor.actorId());
         return new IntakeConfirmationView(caseId, dispute.getCaseStatus(), null, null);
+    }
+
+    private void assertCompletedReplayState(
+            FulfillmentCaseEntity dispute, ActorRole confirmationRole) {
+        if (confirmationRole != dispute.getInitiatorRole()
+                && RoomType.INTAKE.name().equals(dispute.getCurrentRoom())) {
+            throw invalidIntakeState(dispute, "respondent completion has no committed room transition");
+        }
+    }
+
+    private static IntakeConfirmationView completedReplay(FulfillmentCaseEntity dispute) {
+        return new IntakeConfirmationView(
+                dispute.getId(),
+                dispute.getCaseStatus(),
+                roomTypeOrNull(dispute.getCurrentRoom()),
+                dispute.getCurrentDeadlineAt());
+    }
+
+    private static RoomType roomTypeOrNull(String currentRoom) {
+        if (currentRoom == null || currentRoom.isBlank()) {
+            return null;
+        }
+        try {
+            return RoomType.valueOf(currentRoom);
+        } catch (IllegalArgumentException ignored) {
+            return null;
+        }
+    }
+
+    private static void assertIntakeActionAllowed(FulfillmentCaseEntity dispute) {
+        boolean intakeStatus =
+                dispute.getCaseStatus()
+                                == com.example.dispute.domain.model.CaseStatus.INTAKE_PENDING
+                        || dispute.getCaseStatus()
+                                == com.example.dispute.domain.model.CaseStatus.INTAKE_IN_PROGRESS
+                        || dispute.getCaseStatus()
+                                == com.example.dispute.domain.model.CaseStatus.WAITING_SLOT_COMPLETION
+                        || dispute.getCaseStatus()
+                                == com.example.dispute.domain.model.CaseStatus.INTAKE_COMPLETED;
+        if (!intakeStatus
+                || !RoomType.INTAKE.name().equals(dispute.getCurrentRoom())
+                || dispute.getCurrentDeadlineAt() != null) {
+            throw invalidIntakeState(dispute, "intake action is not allowed from the current case state");
+        }
+    }
+
+    private static void assertOpenIntakeRoom(
+            FulfillmentCaseEntity dispute, CaseRoomEntity intakeRoom) {
+        if (intakeRoom.getRoomStatus() != RoomStatus.OPEN) {
+            throw invalidIntakeState(dispute, "intake action requires an open intake room");
+        }
+    }
+
+    private static BusinessException invalidIntakeState(
+            FulfillmentCaseEntity dispute, String message) {
+        return new BusinessException(
+                ErrorCode.CASE_STATUS_INVALID,
+                message,
+                Map.of(
+                        "case_id", dispute.getId(),
+                        "case_status", dispute.getCaseStatus().name(),
+                        "current_room", String.valueOf(dispute.getCurrentRoom()),
+                        "current_deadline_at", String.valueOf(dispute.getCurrentDeadlineAt())));
+    }
+
+    private void ensureIntakeEpoch(
+            FulfillmentCaseEntity dispute,
+            CaseRoomEntity intakeRoom,
+            OffsetDateTime occurredAt) {
+        roomEpochAllocator.activate(
+                new ActivateRoomEpoch(
+                        dispute.getId(),
+                        intakeRoom.getId(),
+                        ContractTypes.RoomType.INTAKE,
+                        dispute.getCaseStatus().name(),
+                        intakeRoom.getRoomStatus().name(),
+                        dispute.getCurrentDeadlineAt(),
+                        occurredAt));
+    }
+
+    private void terminateIntakeEpoch(
+            FulfillmentCaseEntity dispute, OffsetDateTime occurredAt) {
+        roomEpochAllocator.terminate(
+                new TerminateRoomEpoch(
+                        dispute.getId(),
+                        ContractTypes.RoomType.INTAKE,
+                        dispute.getCaseStatus().name(),
+                        "CLOSED",
+                        occurredAt));
     }
 
     // 所属模块：【房间协作与权限 / 应用编排层】「IntakeRoomService.sendCounterpartySummons(FulfillmentCaseEntity,AuthenticatedActor,OffsetDateTime)」。

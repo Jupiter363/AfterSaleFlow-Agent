@@ -60,18 +60,18 @@ public final class TemporalTracingWorkerInterceptor extends WorkerInterceptorBas
 
         @Override
         public WorkflowOutput execute(WorkflowInput input) {
-            Context parent = parent(input.getHeader());
             try {
+                Context parent = parent(input.getHeader());
                 if (!enabled || Workflow.isReplaying()) {
                     return inContext(parent, () -> super.execute(input));
                 }
                 var info = Workflow.getInfo();
-                return traced(
-                        parent,
-                        "temporal.workflow.run",
-                        info.getWorkflowType(),
-                        info.getTaskQueue(),
-                        () -> super.execute(input));
+                Context activation =
+                        activationContext(
+                                parent,
+                                info.getWorkflowType(),
+                                info.getTaskQueue());
+                return inContext(activation, () -> super.execute(input));
             } finally {
                 TemporalTraceContextPropagator.clear();
             }
@@ -79,41 +79,88 @@ public final class TemporalTracingWorkerInterceptor extends WorkerInterceptorBas
 
         @Override
         public UpdateOutput executeUpdate(UpdateInput input) {
-            Context parent = parent(input.getHeader());
-            if (!enabled || Workflow.isReplaying()) {
-                return inContext(parent, () -> super.executeUpdate(input));
+            try {
+                Context parent = parent(input.getHeader());
+                if (!enabled || Workflow.isReplaying()) {
+                    return inContext(parent, () -> super.executeUpdate(input));
+                }
+                var info = Workflow.getInfo();
+                return traced(
+                        parent,
+                        "temporal.workflow.update",
+                        info.getWorkflowType(),
+                        info.getTaskQueue(),
+                        () -> super.executeUpdate(input));
+            } finally {
+                TemporalTraceContextPropagator.clear();
             }
-            var info = Workflow.getInfo();
-            return traced(
-                    parent,
-                    "temporal.workflow.update",
-                    info.getWorkflowType(),
-                    info.getTaskQueue(),
-                    () -> super.executeUpdate(input));
         }
 
         @Override
         public void handleSignal(SignalInput input) {
-            Context parent = parent(input.getHeader());
-            if (!enabled || Workflow.isReplaying()) {
-                inContext(
+            try {
+                Context parent = parent(input.getHeader());
+                if (!enabled || Workflow.isReplaying()) {
+                    inContext(
+                            parent,
+                            () -> {
+                                super.handleSignal(input);
+                                return null;
+                            });
+                    return;
+                }
+                var info = Workflow.getInfo();
+                traced(
                         parent,
+                        "temporal.workflow.signal",
+                        info.getWorkflowType(),
+                        info.getTaskQueue(),
                         () -> {
                             super.handleSignal(input);
                             return null;
                         });
-                return;
+            } finally {
+                TemporalTraceContextPropagator.clear();
             }
-            var info = Workflow.getInfo();
-            traced(
-                    parent,
-                    "temporal.workflow.signal",
-                    info.getWorkflowType(),
-                    info.getTaskQueue(),
-                    () -> {
-                        super.handleSignal(input);
-                        return null;
-                    });
+        }
+
+        @Override
+        public void validateUpdate(UpdateInput input) {
+            try {
+                Context parent = parent(input.getHeader());
+                inContext(
+                        parent,
+                        () -> {
+                            super.validateUpdate(input);
+                            return null;
+                        });
+            } catch (RuntimeException | Error failure) {
+                // Validation and execution share one Update WorkflowThread. A
+                // successful validator must retain the fallback parent until
+                // executeUpdate finishes; a rejected Update has no executor.
+                TemporalTraceContextPropagator.clear();
+                throw failure;
+            }
+        }
+
+        @Override
+        public QueryOutput handleQuery(QueryInput input) {
+            try {
+                Context parent = parent(input.getHeader());
+                return inContext(parent, () -> super.handleQuery(input));
+            } finally {
+                TemporalTraceContextPropagator.clear();
+            }
+        }
+
+        @Override
+        public Object newWorkflowMethodThread(Runnable runnable, String name) {
+            return super.newWorkflowMethodThread(clearAfter(runnable), name);
+        }
+
+        @Override
+        public Object newCallbackThread(Runnable runnable, String name) {
+            return super.newCallbackThread(clearAfter(runnable), name);
         }
 
         private Context parent(io.temporal.common.interceptors.Header header) {
@@ -148,6 +195,32 @@ public final class TemporalTracingWorkerInterceptor extends WorkerInterceptorBas
                 span.end();
             }
         }
+
+        private Context activationContext(
+                Context parent, String workflowType, String taskQueue) {
+            Span span =
+                    tracer.spanBuilder("temporal.workflow.activate")
+                            .setParent(parent)
+                            .setSpanKind(SpanKind.CONSUMER)
+                            .setAttribute("temporal.workflow.type", workflowType)
+                            .setAttribute("temporal.task_queue", taskQueue)
+                            .startSpan();
+            span.setStatus(StatusCode.OK);
+            span.end();
+            // The ended span remains a valid async parent without retaining an open
+            // span for the lifetime of a durable Workflow.
+            return parent.with(span);
+        }
+
+        private Runnable clearAfter(Runnable runnable) {
+            return () -> {
+                try {
+                    runnable.run();
+                } finally {
+                    TemporalTraceContextPropagator.clear();
+                }
+            };
+        }
     }
 
     private static final class ActivityCalls extends ActivityInboundCallsInterceptorBase {
@@ -171,11 +244,11 @@ public final class TemporalTracingWorkerInterceptor extends WorkerInterceptorBas
 
         @Override
         public ActivityOutput execute(ActivityInput input) {
-            Context parent = TemporalTraceContextPropagator.fromHeader(input.getHeader());
-            if (!Span.fromContext(parent).getSpanContext().isValid()) {
-                parent = TemporalTraceContextPropagator.currentPropagatedContext();
-            }
             try {
+                Context parent = TemporalTraceContextPropagator.fromHeader(input.getHeader());
+                if (!Span.fromContext(parent).getSpanContext().isValid()) {
+                    parent = TemporalTraceContextPropagator.currentPropagatedContext();
+                }
                 if (!enabled) {
                     return inContext(parent, () -> super.execute(input));
                 }

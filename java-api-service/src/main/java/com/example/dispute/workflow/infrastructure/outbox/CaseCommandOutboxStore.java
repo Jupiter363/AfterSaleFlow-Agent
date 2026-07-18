@@ -3,11 +3,13 @@ package com.example.dispute.workflow.infrastructure.outbox;
 import static com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.OutboxStatus.CLAIMED;
 import static com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.OutboxStatus.DEAD_LETTER;
 import static com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.OutboxStatus.DELIVERED;
+import static com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.OutboxStatus.RECONCILED;
 import static com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.OutboxStatus.RETRY;
 
 import com.example.dispute.workflow.application.command.CaseCommandReferenceMapper;
 import com.example.dispute.workflow.infrastructure.persistence.entity.CaseCommandEntity;
 import com.example.dispute.workflow.infrastructure.persistence.entity.CaseCommandOutboxEntity;
+import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.CommandStatus;
 import com.example.dispute.workflow.infrastructure.persistence.repository.CaseCommandOutboxRepository;
 import com.example.dispute.workflow.infrastructure.persistence.repository.CaseCommandRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -42,6 +44,15 @@ public class CaseCommandOutboxStore {
         requireLeaseDuration(leaseDuration);
         return outboxRepository
                 .lockDeliverableById(outboxId, now)
+                .map(outbox -> claim(outbox, now, leaseDuration));
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public Optional<ClaimedCaseCommandDelivery> claimNext(
+            OffsetDateTime now, Duration leaseDuration) {
+        requireLeaseDuration(leaseDuration);
+        return outboxRepository.lockNextDeliverable(now, 1).stream()
+                .findFirst()
                 .map(outbox -> claim(outbox, now, leaseDuration));
     }
 
@@ -103,11 +114,38 @@ public class CaseCommandOutboxStore {
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
-    public boolean markDeadLetter(
+    public PermanentFailureResolution resolvePermanentFailure(
             ClaimedCaseCommandDelivery delivery,
             String errorCode,
             String errorDetail,
             OffsetDateTime failedAt) {
+        if (outboxRepository
+                .lockClaimedById(
+                        delivery.outboxId(),
+                        delivery.leaseToken(),
+                        failedAt,
+                        CLAIMED)
+                .isEmpty()) {
+            return PermanentFailureResolution.STALE_LEASE;
+        }
+        CaseCommandEntity command = lockedCommand(delivery.caseCommandId());
+        CommandStatus currentStatus = command.getCommandStatus();
+        if (currentStatus != CommandStatus.PENDING_ORCHESTRATION) {
+            // Admission cannot be revoked from a later delivery error, and terminal command
+            // states remain business truth. Reconcile only the delivery ledger in both cases.
+            int reconciled =
+                    outboxRepository.markReconciled(
+                            delivery.outboxId(),
+                            delivery.leaseToken(),
+                            "COMMAND_ALREADY_" + currentStatus.name(),
+                            errorDetail,
+                            failedAt,
+                            CLAIMED,
+                            RECONCILED);
+            return reconciled == 1
+                    ? PermanentFailureResolution.RECONCILED
+                    : PermanentFailureResolution.STALE_LEASE;
+        }
         int updated =
                 outboxRepository.markDeadLetter(
                         delivery.outboxId(),
@@ -118,11 +156,62 @@ public class CaseCommandOutboxStore {
                         CLAIMED,
                         DEAD_LETTER);
         if (updated == 0) {
-            return false;
+            return PermanentFailureResolution.STALE_LEASE;
+        }
+        // The bulk outbox update clears the persistence context, so reload before mutating.
+        lockedCommand(delivery.caseCommandId()).markOrchestrationFailed(errorCode, failedAt);
+        return PermanentFailureResolution.DEAD_LETTERED;
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public ExpirationResolution markExpired(
+            ClaimedCaseCommandDelivery delivery,
+            String errorCode,
+            String errorDetail,
+            OffsetDateTime expiredAt) {
+        if (outboxRepository
+                .lockClaimedById(
+                        delivery.outboxId(),
+                        delivery.leaseToken(),
+                        expiredAt,
+                        CLAIMED)
+                .isEmpty()) {
+            return ExpirationResolution.STALE_LEASE;
         }
         CaseCommandEntity command = lockedCommand(delivery.caseCommandId());
-        command.markOrchestrationFailed(errorCode, failedAt);
-        return true;
+        CommandStatus currentStatus = command.getCommandStatus();
+        if (currentStatus == CommandStatus.APPLIED
+                || currentStatus == CommandStatus.SHADOW_COMPLETED
+                || currentStatus == CommandStatus.REJECTED
+                || currentStatus == CommandStatus.FAILED) {
+            int reconciled =
+                    outboxRepository.markReconciled(
+                            delivery.outboxId(),
+                            delivery.leaseToken(),
+                            "COMMAND_ALREADY_" + currentStatus.name(),
+                            errorDetail,
+                            expiredAt,
+                            CLAIMED,
+                            RECONCILED);
+            return reconciled == 1
+                    ? ExpirationResolution.RECONCILED
+                    : ExpirationResolution.STALE_LEASE;
+        }
+        int updated =
+                outboxRepository.markDeadLetter(
+                        delivery.outboxId(),
+                        delivery.leaseToken(),
+                        errorCode,
+                        errorDetail,
+                        expiredAt,
+                        CLAIMED,
+                        DEAD_LETTER);
+        if (updated == 0) {
+            return ExpirationResolution.STALE_LEASE;
+        }
+        // The bulk outbox update clears the persistence context, so reload before mutating.
+        lockedCommand(delivery.caseCommandId()).markExpired(errorCode, expiredAt);
+        return ExpirationResolution.EXPIRED;
     }
 
     private ClaimedCaseCommandDelivery claim(
@@ -164,5 +253,17 @@ public class CaseCommandOutboxStore {
         if (leaseDuration == null || leaseDuration.isZero() || leaseDuration.isNegative()) {
             throw new IllegalArgumentException("leaseDuration must be positive");
         }
+    }
+
+    public enum ExpirationResolution {
+        EXPIRED,
+        RECONCILED,
+        STALE_LEASE
+    }
+
+    public enum PermanentFailureResolution {
+        DEAD_LETTERED,
+        RECONCILED,
+        STALE_LEASE
     }
 }

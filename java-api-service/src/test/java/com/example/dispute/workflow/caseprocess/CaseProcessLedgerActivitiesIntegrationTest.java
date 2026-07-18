@@ -4,17 +4,26 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.dispute.workflow.activity.domain.CaseProcessLedgerActivitiesImpl;
+import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
+import com.example.dispute.workflow.contract.v1.CaseProcessWorkflowProtocol;
+import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.CommandLifecycleOutcome;
+import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.ExpireCaseCommand;
+import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.RecordCaseCommandRouted;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessLedgerActivities.LoadSequenceRange;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessLedgerActivities.SequenceGapReport;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessLedgerActivities.SequenceStream;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.temporal.failure.ApplicationFailure;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
 import java.time.Instant;
+import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.HexFormat;
+import java.util.List;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
@@ -24,6 +33,9 @@ import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
@@ -68,6 +80,21 @@ class CaseProcessLedgerActivitiesIntegrationTest {
 
     @Autowired private CaseProcessLedgerActivitiesImpl activities;
     @Autowired private JdbcTemplate jdbc;
+
+    @AfterEach
+    void cleanCommittedRoutingFixtures() {
+        if (TransactionSynchronizationManager.isActualTransactionActive()) {
+            return;
+        }
+        jdbc.update(
+                "delete from process_reconciliation_issue where case_id = ?",
+                CASE_ID);
+        jdbc.update("delete from case_command where case_id = ?", CASE_ID);
+        jdbc.update("delete from case_room_epoch where case_id = ?", CASE_ID);
+        jdbc.update("delete from case_process_projection where case_id = ?", CASE_ID);
+        jdbc.update("delete from case_room where case_id = ?", CASE_ID);
+        jdbc.update("delete from fulfillment_dispute_case where id = ?", CASE_ID);
+    }
 
     @Test
     void loadsOnlyTheRequestedTenantScopedCommandRangeInSequenceOrder() {
@@ -183,6 +210,312 @@ class CaseProcessLedgerActivitiesIntegrationTest {
                 .isEqualTo("COMMAND_SEQUENCE_GAP");
     }
 
+    @Test
+    void workflowExpirationIsIdempotentlyPersistedAsAnExplicitTerminalStatus() {
+        insertCaseProjectionAndRoom();
+        insertCommand(1);
+        ExpireCaseCommand expiration =
+                new ExpireCaseCommand(
+                        "expire-case-command.v1",
+                        TENANT,
+                        CASE_ID,
+                        "command-ledger-1",
+                        1,
+                        "1".repeat(64),
+                        Instant.parse("2026-07-17T10:05:00Z"),
+                        Instant.parse("2026-07-17T10:05:00Z"),
+                        "case-process:tenant-ledger:CASE_LEDGER",
+                        "run-ledger-expiration");
+
+        activities.expireCaseCommand(expiration);
+        activities.expireCaseCommand(expiration);
+
+        assertThat(
+                        jdbc.queryForObject(
+                                "select command_status from case_command where id = 'CMD_LEDGER_1'",
+                                String.class))
+                .isEqualTo("EXPIRED");
+        assertThat(
+                        jdbc.queryForObject(
+                                "select status_reason_code from case_command where id = 'CMD_LEDGER_1'",
+                                String.class))
+                .isEqualTo("COMMAND_DEADLINE_EXPIRED");
+    }
+
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void shadowRoutingLifecycleIsPersistedAndIdempotent() {
+        insertRoutingFixture("SHADOW", 7);
+        insertCommand(1);
+        RecordCaseCommandRouted acceptedRequest =
+                routingRequest(1, TENANT, 7, workflowId(TENANT), NOW.plusSeconds(60));
+        RecordCaseCommandRouted completedRequest =
+                routingRequest(1, TENANT, 7, workflowId(TENANT), NOW.plusSeconds(120));
+        assertThat(commandLifecycleSnapshot(1).commandStatus())
+                .isEqualTo("PENDING_ORCHESTRATION");
+
+        assertThat(activities.recordCaseCommandRouted(acceptedRequest).outcome())
+                .isEqualTo(CommandLifecycleOutcome.ORCHESTRATION_ACCEPTED);
+        CommandLifecycleSnapshot accepted = commandLifecycleSnapshot(1);
+        assertThat(accepted.commandStatus()).isEqualTo("ORCHESTRATION_ACCEPTED");
+        assertThat(accepted.orchestratedAt())
+                .isEqualTo(OffsetDateTime.ofInstant(NOW.plusSeconds(60), ZoneOffset.UTC));
+
+        assertThat(activities.recordCaseCommandRouted(acceptedRequest).outcome())
+                .isEqualTo(CommandLifecycleOutcome.ORCHESTRATION_ACCEPTED);
+        assertThat(commandLifecycleSnapshot(1)).isEqualTo(accepted);
+
+        assertThat(activities.completeCaseCommandRouting(completedRequest).outcome())
+                .isEqualTo(CommandLifecycleOutcome.SHADOW_COMPLETED);
+        CommandLifecycleSnapshot completed = commandLifecycleSnapshot(1);
+        assertThat(completed.commandStatus()).isEqualTo("SHADOW_COMPLETED");
+        assertThat(completed.orchestratedAt()).isEqualTo(accepted.orchestratedAt());
+        assertThat(completed.updatedAt())
+                .isEqualTo(OffsetDateTime.ofInstant(NOW.plusSeconds(120), ZoneOffset.UTC));
+
+        assertThat(activities.completeCaseCommandRouting(completedRequest).outcome())
+                .isEqualTo(CommandLifecycleOutcome.ALREADY_SHADOW_COMPLETED);
+        assertThat(commandLifecycleSnapshot(1)).isEqualTo(completed);
+    }
+
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void temporalCompletionKeepsTheCommandOrchestrationAccepted() {
+        insertRoutingFixture("TEMPORAL", 7);
+        insertCommand(1);
+        RecordCaseCommandRouted acceptedRequest =
+                routingRequest(1, TENANT, 7, workflowId(TENANT), NOW.plusSeconds(60));
+        RecordCaseCommandRouted completedRequest =
+                routingRequest(1, TENANT, 7, workflowId(TENANT), NOW.plusSeconds(120));
+
+        assertThat(activities.recordCaseCommandRouted(acceptedRequest).outcome())
+                .isEqualTo(CommandLifecycleOutcome.ORCHESTRATION_ACCEPTED);
+        CommandLifecycleSnapshot accepted = commandLifecycleSnapshot(1);
+
+        assertThat(activities.completeCaseCommandRouting(completedRequest).outcome())
+                .isEqualTo(CommandLifecycleOutcome.ORCHESTRATION_ACCEPTED);
+        assertThat(commandLifecycleSnapshot(1)).isEqualTo(accepted);
+        assertThat(commandLifecycleSnapshot(1).commandStatus())
+                .isEqualTo("ORCHESTRATION_ACCEPTED");
+    }
+
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void legacyEpochRejectsBothRoutingLifecycleActivitiesWithoutMutation() {
+        insertRoutingFixture("LEGACY", 7);
+        insertCommand(1);
+        RecordCaseCommandRouted request =
+                routingRequest(1, TENANT, 7, workflowId(TENANT), NOW.plusSeconds(60));
+        CommandLifecycleSnapshot pending = commandLifecycleSnapshot(1);
+
+        assertPermanentFailure(
+                () -> activities.recordCaseCommandRouted(request),
+                "CASE_COMMAND_ROUTING_WRITER_REJECTED");
+        assertPermanentFailure(
+                () -> activities.completeCaseCommandRouting(request),
+                "CASE_COMMAND_ROUTING_WRITER_REJECTED");
+        assertThat(commandLifecycleSnapshot(1)).isEqualTo(pending);
+    }
+
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void routingRejectsTenantWorkflowAndCommandEpochScopeMismatches() {
+        insertRoutingFixture("SHADOW", 8);
+        insertCommand(1);
+        CommandLifecycleSnapshot pending = commandLifecycleSnapshot(1);
+
+        assertRoutingScopeRejected(
+                routingRequest(
+                        1,
+                        "another-tenant",
+                        8,
+                        workflowId("another-tenant"),
+                        NOW.plusSeconds(60)),
+                "CASE_COMMAND_LEDGER_MISSING");
+        assertRoutingScopeRejected(
+                routingRequest(
+                        1,
+                        TENANT,
+                        8,
+                        "case-process:tenant-ledger:another-case",
+                        NOW.plusSeconds(60)),
+                "CASE_COMMAND_ROUTING_SCOPE_MISMATCH");
+        assertRoutingScopeRejected(
+                routingRequest(1, TENANT, 8, workflowId(TENANT), NOW.plusSeconds(60)),
+                "CASE_COMMAND_ROUTING_SCOPE_MISMATCH");
+        assertThat(commandLifecycleSnapshot(1)).isEqualTo(pending);
+    }
+
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void routingTreatsMissingDurableScopeAsNonRetryableCorruption() {
+        assertPermanentFailure(
+                () ->
+                        activities.recordCaseCommandRouted(
+                                routingRequest(
+                                        1,
+                                        TENANT,
+                                        99,
+                                        workflowId(TENANT),
+                                        NOW.plusSeconds(60))),
+                "CASE_COMMAND_LEDGER_MISSING");
+
+        insertCaseProjectionAndRoom();
+        insertCommand(1);
+        assertPermanentFailure(
+                () ->
+                        activities.recordCaseCommandRouted(
+                                routingRequest(
+                                        1,
+                                        TENANT,
+                                        7,
+                                        workflowId(TENANT),
+                                        NOW.plusSeconds(60))),
+                "CASE_COMMAND_ROUTING_EPOCH_MISSING");
+    }
+
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void routingLifecycleReturnsTerminalTombstonesWithoutRewritingCommands() {
+        insertRoutingFixture("SHADOW", 7);
+        List<TerminalCommand> terminalCommands =
+                List.of(
+                        new TerminalCommand(
+                                1, "APPLIED", CommandLifecycleOutcome.ALREADY_APPLIED),
+                        new TerminalCommand(
+                                2,
+                                "SHADOW_COMPLETED",
+                                CommandLifecycleOutcome.ALREADY_SHADOW_COMPLETED),
+                        new TerminalCommand(
+                                3, "REJECTED", CommandLifecycleOutcome.ALREADY_REJECTED),
+                        new TerminalCommand(
+                                4, "FAILED", CommandLifecycleOutcome.ALREADY_FAILED),
+                        new TerminalCommand(
+                                5, "EXPIRED", CommandLifecycleOutcome.ALREADY_EXPIRED));
+
+        terminalCommands.forEach(
+                fixture -> {
+                    insertCommand(fixture.sequence());
+                    markCommandTerminal(fixture.sequence(), fixture.commandStatus());
+                });
+
+        terminalCommands.forEach(
+                fixture -> {
+                    RecordCaseCommandRouted request =
+                            routingRequest(
+                                    fixture.sequence(),
+                                    TENANT,
+                                    7,
+                                    workflowId(TENANT),
+                                    NOW.plusSeconds(180));
+                    CommandLifecycleSnapshot before =
+                            commandLifecycleSnapshot(fixture.sequence());
+
+                    assertThat(activities.recordCaseCommandRouted(request).outcome())
+                            .isEqualTo(fixture.outcome());
+                    assertThat(activities.completeCaseCommandRouting(request).outcome())
+                            .isEqualTo(fixture.outcome());
+                    assertThat(commandLifecycleSnapshot(fixture.sequence()))
+                            .isEqualTo(before);
+                });
+    }
+
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void routingUsesTheWorkflowTimestampAtTheMicrosecondDeadlineBoundary() {
+        insertRoutingFixture("SHADOW", 7);
+        insertCommand(1);
+        insertCommand(2);
+        Instant justBeforeDeadline = Instant.parse("2026-07-17T10:04:59.999999Z");
+        Instant justAfterDeadline = Instant.parse("2026-07-17T10:05:00.000001Z");
+
+        assertThat(
+                        activities
+                                .recordCaseCommandRouted(
+                                        routingRequest(
+                                                1,
+                                                TENANT,
+                                                7,
+                                                workflowId(TENANT),
+                                                justBeforeDeadline))
+                                .outcome())
+                .isEqualTo(CommandLifecycleOutcome.ORCHESTRATION_ACCEPTED);
+        CommandLifecycleSnapshot accepted = commandLifecycleSnapshot(1);
+        assertThat(accepted.orchestratedAt())
+                .isEqualTo(OffsetDateTime.ofInstant(justBeforeDeadline, ZoneOffset.UTC));
+
+        assertThat(
+                        activities
+                                .recordCaseCommandRouted(
+                                        routingRequest(
+                                                1,
+                                                TENANT,
+                                                7,
+                                                workflowId(TENANT),
+                                                justAfterDeadline))
+                                .outcome())
+                .isEqualTo(CommandLifecycleOutcome.ORCHESTRATION_ACCEPTED);
+        assertThat(commandLifecycleSnapshot(1)).isEqualTo(accepted);
+
+        assertThat(
+                        activities
+                                .recordCaseCommandRouted(
+                                        routingRequest(
+                                                2,
+                                                TENANT,
+                                                7,
+                                                workflowId(TENANT),
+                                                justAfterDeadline))
+                                .outcome())
+                .isEqualTo(CommandLifecycleOutcome.EXPIRED);
+        assertThat(commandLifecycleSnapshot(2).updatedAt())
+                .isEqualTo(OffsetDateTime.ofInstant(justAfterDeadline, ZoneOffset.UTC));
+    }
+
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void committedRoutingResultsRemainIdempotentAfterTheEpochCloses() {
+        insertRoutingFixture("SHADOW", 7);
+        insertCommand(1);
+        RecordCaseCommandRouted request =
+                routingRequest(1, TENANT, 7, workflowId(TENANT), NOW.plusSeconds(60));
+
+        assertThat(activities.recordCaseCommandRouted(request).outcome())
+                .isEqualTo(CommandLifecycleOutcome.ORCHESTRATION_ACCEPTED);
+        assertThat(activities.completeCaseCommandRouting(request).outcome())
+                .isEqualTo(CommandLifecycleOutcome.SHADOW_COMPLETED);
+        CommandLifecycleSnapshot completed = commandLifecycleSnapshot(1);
+        closeRoutingEpoch();
+
+        assertThat(activities.recordCaseCommandRouted(request).outcome())
+                .isEqualTo(CommandLifecycleOutcome.ALREADY_SHADOW_COMPLETED);
+        assertThat(activities.completeCaseCommandRouting(request).outcome())
+                .isEqualTo(CommandLifecycleOutcome.ALREADY_SHADOW_COMPLETED);
+        assertThat(commandLifecycleSnapshot(1)).isEqualTo(completed);
+    }
+
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void temporalAcceptedCompletionRemainsIdempotentAfterTheEpochCloses() {
+        insertRoutingFixture("TEMPORAL", 7);
+        insertCommand(1);
+        RecordCaseCommandRouted request =
+                routingRequest(1, TENANT, 7, workflowId(TENANT), NOW.plusSeconds(60));
+
+        assertThat(activities.recordCaseCommandRouted(request).outcome())
+                .isEqualTo(CommandLifecycleOutcome.ORCHESTRATION_ACCEPTED);
+        assertThat(activities.completeCaseCommandRouting(request).outcome())
+                .isEqualTo(CommandLifecycleOutcome.ORCHESTRATION_ACCEPTED);
+        CommandLifecycleSnapshot accepted = commandLifecycleSnapshot(1);
+        closeRoutingEpoch();
+
+        assertThat(activities.recordCaseCommandRouted(request).outcome())
+                .isEqualTo(CommandLifecycleOutcome.ORCHESTRATION_ACCEPTED);
+        assertThat(activities.completeCaseCommandRouting(request).outcome())
+                .isEqualTo(CommandLifecycleOutcome.ORCHESTRATION_ACCEPTED);
+        assertThat(commandLifecycleSnapshot(1)).isEqualTo(accepted);
+    }
+
     private LoadSequenceRange range(long from, long to, int limit) {
         return new LoadSequenceRange(
                 "load-sequence-range.v1", TENANT, CASE_ID, from, to, limit);
@@ -200,6 +533,48 @@ class CaseProcessLedgerActivitiesIntegrationTest {
                 7,
                 recoveryAttempts,
                 "SEQUENCE_GAP_EXHAUSTED");
+    }
+
+    private RecordCaseCommandRouted routingRequest(
+            long sequence,
+            String tenantSurrogate,
+            long roomEpoch,
+            String workflowId,
+            Instant routedAt) {
+        return new RecordCaseCommandRouted(
+                "record-case-command-routed.v1",
+                tenantSurrogate,
+                CASE_ID,
+                "command-ledger-" + sequence,
+                sequence,
+                requestHash(sequence),
+                RoomType.EVIDENCE,
+                roomEpoch,
+                routedAt,
+                workflowId,
+                "run-ledger-routing");
+    }
+
+    private String workflowId(String tenantSurrogate) {
+        return "case-process:" + tenantSurrogate + ":" + CASE_ID;
+    }
+
+    private void assertRoutingScopeRejected(
+            RecordCaseCommandRouted request, String expectedType) {
+        assertPermanentFailure(
+                () -> activities.recordCaseCommandRouted(request), expectedType);
+        assertPermanentFailure(
+                () -> activities.completeCaseCommandRouting(request), expectedType);
+    }
+
+    private void assertPermanentFailure(Runnable invocation, String expectedType) {
+        assertThatThrownBy(invocation::run)
+                .isInstanceOfSatisfying(
+                        ApplicationFailure.class,
+                        failure -> {
+                            assertThat(failure.getType()).isEqualTo(expectedType);
+                            assertThat(failure.isNonRetryable()).isTrue();
+                        });
     }
 
     private void insertCaseProjectionAndRoom() {
@@ -228,10 +603,11 @@ class CaseProcessLedgerActivitiesIntegrationTest {
 
                 insert into case_process_projection (
                     case_id, tenant_surrogate, macro_phase, current_room, room_phase,
-                    writer_mode, process_revision, room_epoch, fencing_token
+                    writer_mode, process_revision, room_epoch, fencing_token,
+                    temporal_build_id
                 ) values (
                     'CASE_LEDGER', 'tenant-ledger', 'EVIDENCE_OPEN',
-                    'EVIDENCE', 'OPEN', 'LEGACY', 3, 7, 11
+                    'EVIDENCE', 'OPEN', 'LEGACY', 3, 7, 11, 'legacy-java.v1'
                 );
                 """);
     }
@@ -246,14 +622,15 @@ class CaseProcessLedgerActivitiesIntegrationTest {
                     payload_schema_version, payload_uri, payload_sha256,
                     payload_size_bytes, expected_process_revision,
                     occurred_at, deadline_at, traceparent, request_hash,
-                    command_status
+                    command_status, accepted_at, created_at, updated_at
                 ) values (
                     ?, ?, 'tenant-ledger', 'CASE_LEDGER', ?, 'EVIDENCE_SUBMIT',
                     'EVIDENCE', 7, 'user-ledger', 'USER', '["case:write"]',
                     'evidence-command.v1', ?, ?, 16, 3,
                     '2026-07-17T10:00:00Z', '2026-07-17T10:05:00Z',
                     '00-0123456789abcdef0123456789abcdef-0123456789abcdef-01',
-                    ?, 'PENDING_ORCHESTRATION'
+                    ?, 'PENDING_ORCHESTRATION', '2026-07-17T10:00:00Z',
+                    '2026-07-17T10:00:00Z', '2026-07-17T10:00:00Z'
                 )
                 """,
                 "CMD_LEDGER_" + sequence,
@@ -261,7 +638,146 @@ class CaseProcessLedgerActivitiesIntegrationTest {
                 sequence,
                 "urn:command:ledger:" + sequence,
                 Long.toString(sequence).repeat(64),
-                Integer.toHexString((int) sequence).repeat(64));
+                requestHash(sequence));
+    }
+
+    private void insertRoutingFixture(String writerMode, long roomEpoch) {
+        insertCaseProjectionAndRoom();
+        String temporalWorkflowId =
+                "LEGACY".equals(writerMode) ? null : workflowId(TENANT);
+        String temporalRunId = "LEGACY".equals(writerMode) ? null : "run-ledger-routing";
+        String temporalBuildId =
+                "LEGACY".equals(writerMode) ? "legacy-java.v1" : "build-ledger-routing";
+        String workflowType =
+                "LEGACY".equals(writerMode) ? "LegacyJavaRoomState" : "CaseProcessWorkflow";
+        String provisioningStatus =
+                "LEGACY".equals(writerMode) ? "NOT_REQUIRED" : "READY";
+        String roomWorkflowId =
+                "LEGACY".equals(writerMode)
+                        ? null
+                        : CaseProcessWorkflowProtocol.roomWorkflowId(
+                                CASE_ID, RoomType.EVIDENCE, roomEpoch);
+        String roomRunId =
+                "LEGACY".equals(writerMode) ? null : "run-ledger-room-routing";
+        jdbc.update(
+                """
+                update case_process_projection
+                set writer_mode = ?, writer_activation_status = 'READY', room_epoch = ?,
+                    temporal_workflow_id = ?, temporal_run_id = ?, temporal_build_id = ?
+                where case_id = ?
+                """,
+                writerMode,
+                roomEpoch,
+                temporalWorkflowId,
+                temporalRunId,
+                temporalBuildId,
+                CASE_ID);
+        jdbc.update(
+                """
+                insert into case_room_epoch (
+                    id, tenant_surrogate, case_id, room_id, room_type, room_epoch,
+                    writer_mode, lifecycle_status, provisioning_status,
+                    process_revision, room_revision, fencing_token,
+                    temporal_workflow_id, temporal_run_id,
+                    room_temporal_workflow_id, room_temporal_run_id, temporal_build_id,
+                    graph_key, graph_version, checkpoint_schema_version, stream_protocol,
+                    selection_schema_version, process_contract_version, workflow_type,
+                    activated_at, provisioned_at, created_at, updated_at
+                ) values (
+                    'EPOCH_LEDGER_ROUTING', ?, ?, ?, 'EVIDENCE', ?, ?, 'ACTIVE', ?,
+                    3, 0, 11, ?, ?, ?, ?, ?, 'evidence.v2', '1.0.0', 'checkpoint.v1',
+                    'agent_stream.v1', 'room-epoch-selection.v1',
+                    'case-process-contract.v1', ?,
+                    '2026-07-17T09:00:00Z',
+                    case when ? = 'READY' then '2026-07-17T09:00:00Z'::timestamptz else null end,
+                    '2026-07-17T09:00:00Z',
+                    '2026-07-17T09:00:00Z'
+                )
+                """,
+                TENANT,
+                CASE_ID,
+                ROOM_ID,
+                roomEpoch,
+                writerMode,
+                provisioningStatus,
+                temporalWorkflowId,
+                temporalRunId,
+                roomWorkflowId,
+                roomRunId,
+                temporalBuildId,
+                workflowType,
+                provisioningStatus);
+    }
+
+    private void markCommandTerminal(long sequence, String commandStatus) {
+        boolean applied = "APPLIED".equals(commandStatus);
+        boolean orchestrated = applied || "SHADOW_COMPLETED".equals(commandStatus);
+        String reasonCode =
+                switch (commandStatus) {
+                    case "REJECTED" -> "TEST_REJECTED";
+                    case "FAILED" -> "TEST_FAILED";
+                    case "EXPIRED" -> "COMMAND_DEADLINE_EXPIRED";
+                    default -> null;
+                };
+        OffsetDateTime orchestratedAt =
+                orchestrated ? OffsetDateTime.ofInstant(NOW.plusSeconds(60), ZoneOffset.UTC) : null;
+        OffsetDateTime appliedAt =
+                applied ? OffsetDateTime.ofInstant(NOW.plusSeconds(120), ZoneOffset.UTC) : null;
+        jdbc.update(
+                """
+                update case_command
+                set command_status = ?, status_reason_code = ?,
+                    result_uri = ?, result_sha256 = ?, orchestrated_at = ?,
+                    applied_at = ?, updated_at = '2026-07-17T10:03:00Z'
+                where command_id = ?
+                """,
+                commandStatus,
+                reasonCode,
+                applied ? "urn:command-result:ledger:" + sequence : null,
+                applied ? "a".repeat(64) : null,
+                orchestratedAt,
+                appliedAt,
+                "command-ledger-" + sequence);
+    }
+
+    private void closeRoutingEpoch() {
+        jdbc.update(
+                """
+                update case_room_epoch
+                set lifecycle_status = 'TERMINAL',
+                    process_revision = process_revision + 1,
+                    room_revision = room_revision + 1,
+                    terminal_at = '2026-07-17T10:02:00Z',
+                    updated_at = '2026-07-17T10:02:00Z',
+                    version = version + 1
+                where id = 'EPOCH_LEDGER_ROUTING'
+                """);
+    }
+
+    private CommandLifecycleSnapshot commandLifecycleSnapshot(long sequence) {
+        return jdbc.queryForObject(
+                """
+                select command_status, status_reason_code, result_uri, result_sha256,
+                       accepted_at, orchestrated_at, applied_at, updated_at, version
+                from case_command
+                where command_id = ?
+                """,
+                (resultSet, rowNumber) ->
+                        new CommandLifecycleSnapshot(
+                                resultSet.getString("command_status"),
+                                resultSet.getString("status_reason_code"),
+                                resultSet.getString("result_uri"),
+                                resultSet.getString("result_sha256"),
+                                resultSet.getObject("accepted_at", OffsetDateTime.class),
+                                resultSet.getObject("orchestrated_at", OffsetDateTime.class),
+                                resultSet.getObject("applied_at", OffsetDateTime.class),
+                                resultSet.getObject("updated_at", OffsetDateTime.class),
+                                resultSet.getLong("version")),
+                "command-ledger-" + sequence);
+    }
+
+    private static String requestHash(long sequence) {
+        return Integer.toHexString((int) sequence).repeat(64);
     }
 
     private void insertTimelineEvent() {
@@ -296,10 +812,15 @@ class CaseProcessLedgerActivitiesIntegrationTest {
                 insert into case_room_epoch (
                     id, tenant_surrogate, case_id, room_id, room_type, room_epoch,
                     writer_mode, lifecycle_status, process_revision, room_revision,
-                    fencing_token, stream_protocol, activated_at, terminal_at
+                    fencing_token, temporal_build_id, graph_key, graph_version,
+                    checkpoint_schema_version, stream_protocol, selection_schema_version,
+                    process_contract_version, workflow_type, activated_at, terminal_at
                 ) values (
                     ?, ?, 'CASE_LEDGER', 'ROOM_LEDGER', 'EVIDENCE', ?,
-                    'LEGACY', ?, 3, 0, 11, 'agent_stream.v1',
+                    'LEGACY', ?, 3, 0, 11, 'legacy-java.v1', 'evidence.v2',
+                    '1.0.0', 'checkpoint.v1', 'agent_stream.v1',
+                    'room-epoch-selection.v1', 'case-process-contract.v1',
+                    'LegacyJavaRoomState',
                     cast(? as timestamptz), cast(? as timestamptz)
                 )
                 """,
@@ -321,6 +842,22 @@ class CaseProcessLedgerActivitiesIntegrationTest {
             throw new IllegalStateException(exception);
         }
     }
+
+    private record TerminalCommand(
+            long sequence,
+            String commandStatus,
+            CommandLifecycleOutcome outcome) {}
+
+    private record CommandLifecycleSnapshot(
+            String commandStatus,
+            String statusReasonCode,
+            String resultUri,
+            String resultSha256,
+            OffsetDateTime acceptedAt,
+            OffsetDateTime orchestratedAt,
+            OffsetDateTime appliedAt,
+            OffsetDateTime updatedAt,
+            long version) {}
 
     @TestConfiguration(proxyBeanMethods = false)
     static class ActivityTestConfiguration {

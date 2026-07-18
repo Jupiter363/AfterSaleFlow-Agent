@@ -29,6 +29,9 @@ import com.example.dispute.room.application.IntakeStatusView;
 import com.example.dispute.room.domain.RoomType;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
+import com.example.dispute.workflow.application.epoch.RoomEpochAllocator;
+import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.ActivateRoomEpoch;
+import com.example.dispute.workflow.contract.v1.ContractTypes;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
@@ -57,6 +60,7 @@ public class CaseApplicationService {
     private final ParticipantService participantService;
     private final IntakeAgentTurnService intakeAgentTurnService;
     private final IntakeProgressService intakeProgressService;
+    private final RoomEpochAllocator roomEpochAllocator;
     private final AppProperties properties;
     private final Clock clock;
     private final ObjectMapper objectMapper;
@@ -74,6 +78,7 @@ public class CaseApplicationService {
             ParticipantService participantService,
             IntakeAgentTurnService intakeAgentTurnService,
             IntakeProgressService intakeProgressService,
+            RoomEpochAllocator roomEpochAllocator,
             AppProperties properties,
             Clock clock,
             ObjectMapper objectMapper) {
@@ -83,6 +88,7 @@ public class CaseApplicationService {
         this.participantService = participantService;
         this.intakeAgentTurnService = intakeAgentTurnService;
         this.intakeProgressService = intakeProgressService;
+        this.roomEpochAllocator = roomEpochAllocator;
         this.properties = properties;
         this.clock = clock;
         this.objectMapper = objectMapper;
@@ -268,13 +274,23 @@ public class CaseApplicationService {
                 actor.actorId());
         FulfillmentCaseEntity saved = caseRepository.save(entity);
         OffsetDateTime now = OffsetDateTime.now(clock);
-        roomRepository.save(
+        CaseRoomEntity intakeRoom =
+                roomRepository.save(
                 CaseRoomEntity.open(
                         "ROOM_" + compactUuid(),
                         caseId,
                         RoomType.INTAKE,
                         now,
                         actor.actorId()));
+        roomEpochAllocator.activate(
+                new ActivateRoomEpoch(
+                        saved.getId(),
+                        intakeRoom.getId(),
+                        ContractTypes.RoomType.INTAKE,
+                        saved.getCaseStatus().name(),
+                        intakeRoom.getRoomStatus().name(),
+                        saved.getCurrentDeadlineAt(),
+                        now));
         if (actor.role() == ActorRole.USER
                 || actor.role() == ActorRole.MERCHANT) {
             participantService.addInitiator(saved, actor, now);

@@ -284,6 +284,44 @@ public class CaseCommandEntity extends AbstractEntity {
         updatedAt = failedAt;
     }
 
+    public void markExpired(String reasonCode, OffsetDateTime expiredAt) {
+        Objects.requireNonNull(reasonCode, "reasonCode must not be null");
+        Objects.requireNonNull(expiredAt, "expiredAt must not be null");
+        if (reasonCode.isBlank() || reasonCode.length() > 64) {
+            throw new IllegalArgumentException("reasonCode is invalid");
+        }
+        if (commandStatus == CommandStatus.EXPIRED) {
+            if (!reasonCode.equals(statusReasonCode)) {
+                throw new IllegalStateException("expired command has another reason");
+            }
+            return;
+        }
+        if (commandStatus != CommandStatus.PENDING_ORCHESTRATION
+                && commandStatus != CommandStatus.ORCHESTRATION_ACCEPTED) {
+            throw new IllegalStateException("command cannot transition to EXPIRED");
+        }
+        commandStatus = CommandStatus.EXPIRED;
+        statusReasonCode = reasonCode;
+        updatedAt = expiredAt;
+    }
+
+    public void markShadowCompleted(OffsetDateTime completedAt) {
+        Objects.requireNonNull(completedAt, "completedAt must not be null");
+        if (commandStatus == CommandStatus.SHADOW_COMPLETED) {
+            return;
+        }
+        if (commandStatus != CommandStatus.PENDING_ORCHESTRATION
+                && commandStatus != CommandStatus.ORCHESTRATION_ACCEPTED) {
+            throw new IllegalStateException("command cannot transition to SHADOW_COMPLETED");
+        }
+        commandStatus = CommandStatus.SHADOW_COMPLETED;
+        statusReasonCode = null;
+        if (orchestratedAt == null) {
+            orchestratedAt = completedAt;
+        }
+        updatedAt = completedAt;
+    }
+
     public void markApplied(
             String appliedResultUri,
             String appliedResultSha256,

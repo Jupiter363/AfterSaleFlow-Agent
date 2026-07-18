@@ -2,10 +2,12 @@ package com.example.dispute.workflow.infrastructure.persistence.repository;
 
 import com.example.dispute.workflow.infrastructure.persistence.entity.CaseCommandOutboxEntity;
 import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.OutboxStatus;
+import jakarta.persistence.LockModeType;
 import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Optional;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
@@ -31,6 +33,22 @@ public interface CaseCommandOutboxRepository
             nativeQuery = true)
     Optional<CaseCommandOutboxEntity> lockDeliverableById(
             @Param("outboxId") String outboxId, @Param("now") OffsetDateTime now);
+
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query(
+            """
+            select outbox
+              from CaseCommandOutboxEntity outbox
+             where outbox.id = :outboxId
+               and outbox.outboxStatus = :claimedStatus
+               and outbox.leaseOwner = :leaseToken
+               and outbox.leaseExpiresAt > :resolvedAt
+            """)
+    Optional<CaseCommandOutboxEntity> lockClaimedById(
+            @Param("outboxId") String outboxId,
+            @Param("leaseToken") String leaseToken,
+            @Param("resolvedAt") OffsetDateTime resolvedAt,
+            @Param("claimedStatus") OutboxStatus claimedStatus);
 
     @Query(
             value =
@@ -127,4 +145,29 @@ public interface CaseCommandOutboxRepository
             @Param("failedAt") OffsetDateTime failedAt,
             @Param("claimedStatus") OutboxStatus claimedStatus,
             @Param("deadLetterStatus") OutboxStatus deadLetterStatus);
+
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query(
+            """
+            update CaseCommandOutboxEntity outbox
+               set outbox.outboxStatus = :reconciledStatus,
+                   outbox.leaseOwner = null,
+                   outbox.leaseExpiresAt = null,
+                   outbox.lastErrorCode = :reasonCode,
+                   outbox.lastErrorDetail = :reasonDetail,
+                   outbox.updatedAt = :reconciledAt,
+                   outbox.version = outbox.version + 1
+             where outbox.id = :outboxId
+               and outbox.outboxStatus = :claimedStatus
+               and outbox.leaseOwner = :leaseToken
+               and outbox.leaseExpiresAt > :reconciledAt
+            """)
+    int markReconciled(
+            @Param("outboxId") String outboxId,
+            @Param("leaseToken") String leaseToken,
+            @Param("reasonCode") String reasonCode,
+            @Param("reasonDetail") String reasonDetail,
+            @Param("reconciledAt") OffsetDateTime reconciledAt,
+            @Param("claimedStatus") OutboxStatus claimedStatus,
+            @Param("reconciledStatus") OutboxStatus reconciledStatus);
 }

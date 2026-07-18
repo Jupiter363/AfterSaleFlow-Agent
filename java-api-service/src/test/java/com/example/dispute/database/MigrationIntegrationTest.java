@@ -70,7 +70,7 @@ class MigrationIntegrationTest {
         MigrateResult first = flyway.migrate();
         MigrateResult second = flyway.migrate();
 
-        assertThat(first.migrationsExecuted).isEqualTo(40);
+        assertThat(first.migrationsExecuted).isEqualTo(44);
         assertThat(second.migrationsExecuted).isZero();
 
         try (Connection connection =
@@ -142,6 +142,7 @@ class MigrationIntegrationTest {
                             "case_command_outbox",
                             "case_process_projection",
                             "case_room_epoch",
+                            "room_epoch_bootstrap_outbox",
                             "domain_operation",
                             "process_reconciliation_issue",
                             "immutable_payload_snapshot",
@@ -210,6 +211,12 @@ class MigrationIntegrationTest {
                             "idx_case_command_outbox_pending",
                             "uq_case_process_projection_workflow",
                             "uq_case_room_epoch_case_room_epoch",
+                            "uq_case_room_epoch_active_case",
+                            "uq_case_room_epoch_active_workflow",
+                            "uq_case_room_epoch_writer_slot",
+                            "idx_case_room_epoch_workflow_history",
+                            "idx_room_epoch_bootstrap_pending",
+                            "idx_room_epoch_bootstrap_lease",
                             "uq_domain_operation_tenant_key",
                             "idx_payload_snapshot_case_visibility",
                             "uq_agent_execution_manifest_logical_run");
@@ -228,7 +235,9 @@ class MigrationIntegrationTest {
                             "trg_hearing_trial_dossier_append_only",
                             "trg_hearing_flow_artifact_append_only",
                             "trg_immutable_payload_snapshot_append_only",
-                            "trg_agent_execution_manifest_append_only");
+                            "trg_agent_execution_manifest_append_only",
+                            "trg_case_room_epoch_immutable_selection",
+                            "trg_case_process_projection_activation");
             assertFormalJuryReportUniqueness(connection);
             assertAppendOnlyTablesRejectMutation(connection);
         }

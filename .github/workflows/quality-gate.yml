@@ -43,7 +43,7 @@ jobs:
 
       - name: Java tests
         working-directory: java-api-service
-        run: ./mvnw -s .mvn/settings.xml -B -ntp test
+        run: bash ./mvnw -s .mvn/settings.xml -B -ntp test
 
       - name: Python Agent tests
         working-directory: python-agent-service
@@ -87,21 +87,71 @@ jobs:
       - name: Docker compose config
         run: docker compose config --quiet
 
-  compose-smoke:
+  phase-1-postgresql-integration:
     runs-on: ubuntu-latest
-    needs: static-and-unit
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Phase 1 PostgreSQL integration tests
+        working-directory: java-api-service
+        run: >
+          bash ./mvnw -s .mvn/settings.xml -B -ntp -Pintegration-test
+          -Dit.test=MigrationIntegrationTest,TemporalControlPlaneMigrationIntegrationTest,WorkflowPersistenceRepositoryIntegrationTest,CaseCommandServiceIntegrationTest,CaseCommandOutboxStoreIntegrationTest,CommandOutboxKillWindowIntegrationTest,CaseProcessLedgerActivitiesIntegrationTest,ActivityCompletionLossIntegrationTest,ProcessProjectionFencingIntegrationTest,ProcessProjectionReconcilerIntegrationTest,RoomEpochScanClaimStoreIntegrationTest,RoomEpochAllocatorIntegrationTest,RoomEpochBootstrapStoreIntegrationTest,IntakeRoomServiceIntegrationTest,EvidenceRoomIntegrationTest,DisputeImportServiceIntegrationTest
+          verify
+
+      - name: Upload Phase 1 Failsafe reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase-1-postgresql-failsafe-reports
+          path: java-api-service/target/failsafe-reports/
+          if-no-files-found: error
+          retention-days: 14
+
+  compose-smoke:
+    runs-on: ubuntu-latest
+    needs:
+      - static-and-unit
+      - phase-1-postgresql-integration
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
       - name: Build and start Compose stack
         env:
           DASHSCOPE_API_KEY: ci-placeholder-not-a-real-key
           DEFAULT_LLM_API_BASE: http://127.0.0.1:9
         run: docker compose up -d --build --wait --wait-timeout 360
+      - name: Temporal worker restart recovery
+        working-directory: java-api-service
+        run: >
+          bash ./mvnw -s .mvn/settings.xml -B -ntp -Pintegration-test
+          -Dit.test=TemporalWorkerRestartIntegrationTest
+          -Dtemporal.restart-test.enabled=true
+          -Dtemporal.restart-test.address=127.0.0.1:7233
+          verify
+      - name: Upload Temporal restart Failsafe reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: temporal-worker-restart-failsafe-reports
+          path: java-api-service/target/failsafe-reports/
+          if-no-files-found: warn
+          retention-days: 14
       - name: Smoke test
         env:
           DASHSCOPE_API_KEY: ci-placeholder-not-a-real-key
           DEFAULT_LLM_API_BASE: http://127.0.0.1:9
-        run: ./scripts/smoke-test.sh
+        run: bash ./scripts/smoke-test.sh
       - name: API, E2E, and load smoke tests
         run: python -m pytest tests/api tests/e2e tests/load -q
       - name: Compose logs on failure

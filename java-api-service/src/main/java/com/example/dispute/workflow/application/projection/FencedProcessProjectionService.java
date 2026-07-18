@@ -10,6 +10,7 @@ import static com.example.dispute.workflow.infrastructure.persistence.entity.Wor
 import com.example.dispute.workflow.contract.v1.ProcessProjectionContract.ApplyProjectionCommand;
 import com.example.dispute.workflow.contract.v1.ProcessProjectionContract.ApplyProjectionOutcome;
 import com.example.dispute.workflow.contract.v1.ProcessProjectionContract.ApplyProjectionResult;
+import com.example.dispute.workflow.application.epoch.RoomEpochReadiness;
 import com.example.dispute.workflow.infrastructure.persistence.entity.CaseCommandEntity;
 import com.example.dispute.workflow.infrastructure.persistence.entity.CaseProcessProjectionEntity;
 import com.example.dispute.workflow.infrastructure.persistence.entity.CaseRoomEpochEntity;
@@ -68,6 +69,11 @@ public class FencedProcessProjectionService {
         CaseCommandEntity command = requireCommand(request);
         CaseProcessProjectionEntity projection = requireProjection(request);
         CaseRoomEpochEntity epoch = requireEpoch(request);
+        if (!RoomEpochReadiness.isTemporalReady(epoch, projection)) {
+            throw rejected(
+                    "ROOM_EPOCH_NOT_READY",
+                    "room epoch provisioning is not ready for Temporal projection writes");
+        }
         validateProjectionFence(projection, request);
         validateEpochFence(epoch, request);
 
@@ -101,7 +107,6 @@ public class FencedProcessProjectionService {
                         request.newRoomRevision(),
                         request.temporalWorkflowId(),
                         request.expectedTemporalRunId(),
-                        request.temporalRunId(),
                         request.temporalBuildId(),
                         appliedAt);
         if (epochUpdated != 1) {
@@ -129,7 +134,6 @@ public class FencedProcessProjectionService {
                                         request.projectedDeadlineAt(), ZoneOffset.UTC),
                         request.temporalWorkflowId(),
                         request.expectedTemporalRunId(),
-                        request.temporalRunId(),
                         request.temporalBuildId(),
                         request.projectionRef(),
                         request.projectionSha256(),

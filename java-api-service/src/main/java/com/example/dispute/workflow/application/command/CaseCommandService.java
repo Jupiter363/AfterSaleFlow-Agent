@@ -14,10 +14,13 @@ import com.example.dispute.workflow.contract.v1.CaseCommandRef;
 import com.example.dispute.workflow.contract.v1.CaseProcessWorkflowProtocol;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRef;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
+import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
+import com.example.dispute.workflow.application.epoch.RoomEpochReadiness;
 import com.example.dispute.workflow.infrastructure.persistence.entity.CaseCommandEntity;
 import com.example.dispute.workflow.infrastructure.persistence.entity.CaseCommandOutboxEntity;
 import com.example.dispute.workflow.infrastructure.persistence.entity.CaseProcessProjectionEntity;
 import com.example.dispute.workflow.infrastructure.persistence.entity.CaseRoomEpochEntity;
+import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.CommandStatus;
 import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.EpochLifecycleStatus;
 import com.example.dispute.workflow.infrastructure.persistence.repository.CaseCommandOutboxRepository;
 import com.example.dispute.workflow.infrastructure.persistence.repository.CaseCommandRepository;
@@ -30,6 +33,8 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
 import org.springframework.stereotype.Service;
@@ -41,6 +46,10 @@ public class CaseCommandService {
     private static final Pattern CASE_ID = Pattern.compile("CASE_[A-Za-z0-9]{1,59}");
     private static final Pattern COMMAND_ID =
             Pattern.compile("[A-Za-z0-9][A-Za-z0-9._:-]{0,127}");
+    private static final Set<CommandStatus> REVISION_RESERVING_STATUSES =
+            Set.of(
+                    CommandStatus.PENDING_ORCHESTRATION,
+                    CommandStatus.ORCHESTRATION_ACCEPTED);
     private final FulfillmentCaseRepository caseRepository;
     private final CaseCommandRepository commandRepository;
     private final CaseCommandOutboxRepository outboxRepository;
@@ -112,6 +121,9 @@ public class CaseCommandService {
                         .findByIdForUpdate(caseId)
                         .orElseThrow(() -> caseNotFound(caseId));
         actorRef = CaseCommandAuthorization.authorize(lockedCase, command, actor);
+        requestHash =
+                CaseCommandRequestHasher.hash(
+                        tenantSurrogate, caseId, commandId, command, actorRef);
 
         commandRepository.lockTenantCommandId(tenantSurrogate, commandId);
         existing =
@@ -122,7 +134,7 @@ public class CaseCommandService {
                     existing.get(), requestHash, actor, caseId, traceId, requestId);
         }
 
-        validateProjection(tenantSurrogate, caseId, command);
+        validateAndReserveRevision(tenantSurrogate, caseId, command);
         OffsetDateTime acceptedAt =
                 OffsetDateTime.ofInstant(
                         clock.instant().truncatedTo(ChronoUnit.MICROS), ZoneOffset.UTC);
@@ -212,42 +224,11 @@ public class CaseCommandService {
                 "command id is already bound to a different authorized request");
     }
 
-    private void validateProjection(
+    private void validateAndReserveRevision(
             String tenantSurrogate, String caseId, AcceptCaseCommand command) {
-        CaseProcessProjectionEntity projection =
-                projectionRepository
-                        .findById(caseId)
-                        .orElseThrow(
-                                () ->
-                                        invalidState(
-                                                "case process projection is unavailable",
-                                                Map.of("case_id", caseId)));
-        if (!tenantSurrogate.equals(projection.getTenantSurrogate())) {
-            throw new ForbiddenException("case is outside the active tenant authority");
-        }
-        if (projection.getProcessRevision() != command.expectedProcessRevision()) {
-            throw invalidState(
-                    "expected process revision is stale",
-                    Map.of(
-                            "expected_process_revision",
-                            command.expectedProcessRevision(),
-                            "current_process_revision",
-                            projection.getProcessRevision()));
-        }
-        if (projection.getRoomEpoch() != command.roomEpoch()
-                || !roomMatchesProjection(command.roomType(), projection.getCurrentRoom())) {
-            throw invalidState(
-                    "command does not target the active room epoch",
-                    Map.of(
-                            "requested_room", command.roomType().name(),
-                            "requested_room_epoch", command.roomEpoch(),
-                            "current_room", String.valueOf(projection.getCurrentRoom()),
-                            "current_room_epoch", projection.getRoomEpoch()));
-        }
-
         CaseRoomEpochEntity epoch =
                 roomEpochRepository
-                        .findByCaseIdAndRoomTypeAndRoomEpoch(
+                        .findByCaseIdAndRoomTypeAndRoomEpochForUpdate(
                                 caseId, command.roomType(), command.roomEpoch())
                         .orElseThrow(
                                 () ->
@@ -261,6 +242,85 @@ public class CaseCommandService {
             throw invalidState(
                     "room epoch is not active",
                     Map.of("room_epoch_status", epoch.getLifecycleStatus().name()));
+        }
+
+        CaseProcessProjectionEntity projection =
+                projectionRepository
+                        .findByIdForUpdate(caseId)
+                        .orElseThrow(
+                                () ->
+                                        invalidState(
+                                                "case process projection is unavailable",
+                                                Map.of("case_id", caseId)));
+        if (!tenantSurrogate.equals(projection.getTenantSurrogate())) {
+            throw new ForbiddenException("case is outside the active tenant authority");
+        }
+        WriterMode writerMode = epoch.getWriterMode();
+        if (writerMode == WriterMode.LEGACY) {
+            throw invalidState(
+                    "legacy room epochs do not accept Temporal commands",
+                    Map.of("writer_mode", writerMode.name()));
+        }
+        String expectedWorkflowId =
+                CaseProcessWorkflowProtocol.caseWorkflowId(tenantSurrogate, caseId);
+        if (projection.getWriterMode() != writerMode
+                || projection.getFencingToken() != epoch.getFencingToken()
+                || !Objects.equals(
+                        projection.getTemporalWorkflowId(),
+                        epoch.getTemporalWorkflowId())
+                || !expectedWorkflowId.equals(epoch.getTemporalWorkflowId())) {
+            throw invalidState(
+                    "case process ownership binding is inconsistent",
+                    Map.of(
+                            "case_id", caseId,
+                            "writer_mode", writerMode.name(),
+                            "expected_workflow_id", expectedWorkflowId));
+        }
+        if (!RoomEpochReadiness.isTemporalReady(epoch, projection)) {
+            throw invalidState(
+                    "room epoch provisioning is not ready",
+                    Map.of(
+                            "case_id", caseId,
+                            "writer_mode", writerMode.name(),
+                            "epoch_provisioning_status",
+                                    epoch.getProvisioningStatus().name(),
+                            "projection_activation_status",
+                                    projection.getWriterActivationStatus().name()));
+        }
+        if (projection.getProcessRevision() != command.expectedProcessRevision()
+                || epoch.getProcessRevision() != command.expectedProcessRevision()) {
+            throw invalidState(
+                    "expected process revision is stale",
+                    Map.of(
+                            "expected_process_revision",
+                            command.expectedProcessRevision(),
+                            "current_process_revision",
+                            projection.getProcessRevision(),
+                            "epoch_process_revision",
+                            epoch.getProcessRevision()));
+        }
+        if (projection.getRoomEpoch() != command.roomEpoch()
+                || !roomMatchesProjection(command.roomType(), projection.getCurrentRoom())) {
+            throw invalidState(
+                    "command does not target the active room epoch",
+                    Map.of(
+                            "requested_room", command.roomType().name(),
+                            "requested_room_epoch", command.roomEpoch(),
+                            "current_room", String.valueOf(projection.getCurrentRoom()),
+                            "current_room_epoch", projection.getRoomEpoch()));
+        }
+        if (writerMode == WriterMode.TEMPORAL
+                && commandRepository
+                .existsByCaseIdAndExpectedProcessRevisionAndCommandStatusIn(
+                        caseId,
+                        command.expectedProcessRevision(),
+                        REVISION_RESERVING_STATUSES)) {
+            throw invalidState(
+                    "expected process revision is already reserved by an active command",
+                    Map.of(
+                            "case_id", caseId,
+                            "expected_process_revision",
+                            command.expectedProcessRevision()));
         }
     }
 

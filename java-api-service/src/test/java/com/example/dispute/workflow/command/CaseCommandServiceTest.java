@@ -21,9 +21,11 @@ import com.example.dispute.workflow.application.command.AcceptCaseCommand;
 import com.example.dispute.workflow.application.command.CaseCommandDeliveryTrigger;
 import com.example.dispute.workflow.application.command.CaseCommandService;
 import com.example.dispute.workflow.application.command.TenantAuthority;
+import com.example.dispute.workflow.contract.v1.CaseProcessWorkflowProtocol;
 import com.example.dispute.workflow.contract.v1.ContractTypes.CommandType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.PayloadRef;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
+import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
 import com.example.dispute.workflow.infrastructure.persistence.entity.CaseCommandEntity;
 import com.example.dispute.workflow.infrastructure.persistence.entity.CaseCommandOutboxEntity;
 import com.example.dispute.workflow.infrastructure.persistence.entity.CaseProcessProjectionEntity;
@@ -198,14 +200,29 @@ class CaseCommandServiceTest {
     private void arrangeWritableProjection() {
         when(disputeCase.getId()).thenReturn(CASE_ID);
         when(caseRepository.findByIdForUpdate(CASE_ID)).thenReturn(Optional.of(disputeCase));
-        when(projectionRepository.findById(CASE_ID)).thenReturn(Optional.of(projection));
+        when(projectionRepository.findByIdForUpdate(CASE_ID)).thenReturn(Optional.of(projection));
         when(projection.getTenantSurrogate()).thenReturn("legacy-default");
         when(projection.getCurrentRoom()).thenReturn("EVIDENCE");
-        when(roomEpochRepository.findByCaseIdAndRoomTypeAndRoomEpoch(
+        when(projection.getWriterMode()).thenReturn(WriterMode.SHADOW);
+        when(projection.getProcessRevision()).thenReturn(0L);
+        when(projection.getRoomEpoch()).thenReturn(0L);
+        when(projection.getFencingToken()).thenReturn(1L);
+        when(projection.getTemporalWorkflowId())
+                .thenReturn(
+                        CaseProcessWorkflowProtocol.caseWorkflowId(
+                                "legacy-default", CASE_ID));
+        when(roomEpochRepository.findByCaseIdAndRoomTypeAndRoomEpochForUpdate(
                         CASE_ID, RoomType.EVIDENCE, 0))
                 .thenReturn(Optional.of(roomEpoch));
         when(roomEpoch.getTenantSurrogate()).thenReturn("legacy-default");
         when(roomEpoch.getLifecycleStatus()).thenReturn(EpochLifecycleStatus.ACTIVE);
+        when(roomEpoch.getWriterMode()).thenReturn(WriterMode.SHADOW);
+        when(roomEpoch.getProcessRevision()).thenReturn(0L);
+        when(roomEpoch.getFencingToken()).thenReturn(1L);
+        when(roomEpoch.getTemporalWorkflowId())
+                .thenReturn(
+                        CaseProcessWorkflowProtocol.caseWorkflowId(
+                                "legacy-default", CASE_ID));
     }
 
     private static AcceptCaseCommand command(String payloadHash) {

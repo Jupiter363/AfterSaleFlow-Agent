@@ -20,11 +20,16 @@ import com.example.dispute.room.application.IntakeAgentTurnService;
 import com.example.dispute.room.application.IntakeLobbySeed;
 import com.example.dispute.room.application.ParticipantService;
 import com.example.dispute.room.domain.PhaseClockType;
+import com.example.dispute.room.domain.PhaseClockStatus;
 import com.example.dispute.room.domain.RoomType;
 import com.example.dispute.room.infrastructure.persistence.entity.CasePhaseClockEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
 import com.example.dispute.room.infrastructure.persistence.repository.CasePhaseClockRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
+import com.example.dispute.workflow.application.epoch.RoomEpochAllocator;
+import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.ActivateRoomEpoch;
+import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.TerminalRoomEpoch;
+import com.example.dispute.workflow.contract.v1.ContractTypes;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -59,6 +64,7 @@ public class ExternalCaseImportTransactionService {
     private final SimulatedImportTemplateCursorRepository simulatedImportCursorRepository;
     private final SimulatedExternalDisputeTemplateCatalog simulatedImportTemplates;
     private final PostCommitSideEffectExecutor postCommit;
+    private final RoomEpochAllocator roomEpochAllocator;
     private final DisputeProperties properties;
     private final Clock clock;
 
@@ -77,6 +83,7 @@ public class ExternalCaseImportTransactionService {
             SimulatedImportTemplateCursorRepository simulatedImportCursorRepository,
             SimulatedExternalDisputeTemplateCatalog simulatedImportTemplates,
             PostCommitSideEffectExecutor postCommit,
+            RoomEpochAllocator roomEpochAllocator,
             DisputeProperties properties,
             Clock clock) {
         this.repository = repository;
@@ -87,6 +94,7 @@ public class ExternalCaseImportTransactionService {
         this.simulatedImportCursorRepository = simulatedImportCursorRepository;
         this.simulatedImportTemplates = simulatedImportTemplates;
         this.postCommit = postCommit;
+        this.roomEpochAllocator = roomEpochAllocator;
         this.properties = properties;
         this.clock = clock;
     }
@@ -158,7 +166,8 @@ public class ExternalCaseImportTransactionService {
         var requestReplay =
                 repository.findByCreationIdempotencyKey(idempotencyKey);
         if (requestReplay.isPresent()) {
-            FulfillmentCaseEntity existing = requestReplay.orElseThrow();
+            FulfillmentCaseEntity existing =
+                    lockExisting(requestReplay.orElseThrow().getId());
             if (!Objects.equals(existing.getSourceSystem(), command.sourceSystem())
                     || !Objects.equals(
                             existing.getExternalCaseRef(),
@@ -166,7 +175,7 @@ public class ExternalCaseImportTransactionService {
                 throw new IdempotencyConflictException(
                         "import idempotency key already belongs to another external case");
             }
-            return restoreExisting(existing, actor);
+            return restoreLockedExisting(existing, actor);
         }
         return repository
                 .findBySourceSystemAndExternalCaseRef(
@@ -195,9 +204,13 @@ public class ExternalCaseImportTransactionService {
                                             command.externalCaseReference(),
                                             actor.actorId());
                             FulfillmentCaseEntity saved = repository.save(entity);
-                            materializeCurrentRoom(saved, command, actor.actorId());
+                            OffsetDateTime now = OffsetDateTime.now(clock);
+                            MaterializedRoom materializedRoom =
+                                    materializeCurrentRoom(
+                                            saved, command, actor.actorId(), now);
                             participantService.ensureImportedParties(
-                                    saved, actor, OffsetDateTime.now(clock));
+                                    saved, actor, now);
+                            recordRoomEpoch(saved, materializedRoom, now);
                             startIntakeIfNeeded(saved, command, initiatorRole, traceId, requestId);
                             return view(saved);
                         });
@@ -211,12 +224,30 @@ public class ExternalCaseImportTransactionService {
     private ImportedDisputeView restoreExisting(
             FulfillmentCaseEntity existing,
             AuthenticatedActor actor) {
-        materializePersistedCurrentRoom(existing, actor.actorId());
+        return restoreLockedExisting(lockExisting(existing.getId()), actor);
+    }
+
+    private ImportedDisputeView restoreLockedExisting(
+            FulfillmentCaseEntity locked,
+            AuthenticatedActor actor) {
+        OffsetDateTime now = OffsetDateTime.now(clock);
+        MaterializedRoom materializedRoom =
+                materializePersistedCurrentRoom(locked, actor.actorId(), now);
         participantService.ensureImportedParties(
-                existing,
+                locked,
                 actor,
-                OffsetDateTime.now(clock));
-        return view(existing);
+                now);
+        recordRoomEpoch(locked, materializedRoom, now);
+        return view(locked);
+    }
+
+    private FulfillmentCaseEntity lockExisting(String caseId) {
+        return repository
+                .findByIdForUpdate(caseId)
+                .orElseThrow(
+                        () ->
+                                new IllegalStateException(
+                                        "imported case disappeared during replay"));
     }
 
     // 所属模块：【案件核心与导入 / 应用编排层】「ExternalCaseImportTransactionService.startIntakeIfNeeded(FulfillmentCaseEntity,ImportDisputeCommand,ActorRole,String,String)」。
@@ -270,16 +301,18 @@ public class ExternalCaseImportTransactionService {
     // 上游调用：「ExternalCaseImportTransactionService.materializeCurrentRoom(FulfillmentCaseEntity,ImportDisputeCommand,String)」的上游调用点包括 「ExternalCaseImportTransactionService.importDispute」、「ExternalCaseImportTransactionService.materializeCurrentRoom」、「ExternalCaseImportTransactionService.materializePersistedCurrentRoom」。
     // 下游影响：「ExternalCaseImportTransactionService.materializeCurrentRoom(FulfillmentCaseEntity,ImportDisputeCommand,String)」向下依次触达 「command.caseStatus」、「command.currentRoom」、「command.currentDeadlineAt」、「materializeCurrentRoom」。
     // 系统意义：「ExternalCaseImportTransactionService.materializeCurrentRoom(FulfillmentCaseEntity,ImportDisputeCommand,String)」负责主链路中的“materializeCurrent房间”；Java/PostgreSQL 是案件状态事实源，导入重试不能创建重复案件
-    private void materializeCurrentRoom(
+    private MaterializedRoom materializeCurrentRoom(
             FulfillmentCaseEntity dispute,
             ImportDisputeCommand command,
-            String actorId) {
-        materializeCurrentRoom(
+            String actorId,
+            OffsetDateTime now) {
+        return materializeCurrentRoom(
                 dispute,
                 command.caseStatus(),
                 command.currentRoom(),
                 command.currentDeadlineAt(),
-                actorId);
+                actorId,
+                now);
     }
 
     // 所属模块：【案件核心与导入 / 应用编排层】「ExternalCaseImportTransactionService.materializePersistedCurrentRoom(FulfillmentCaseEntity,String)」。
@@ -287,15 +320,17 @@ public class ExternalCaseImportTransactionService {
     // 上游调用：「ExternalCaseImportTransactionService.materializePersistedCurrentRoom(FulfillmentCaseEntity,String)」的上游调用点包括 「ExternalCaseImportTransactionService.restoreExisting」。
     // 下游影响：「ExternalCaseImportTransactionService.materializePersistedCurrentRoom(FulfillmentCaseEntity,String)」向下依次触达 「dispute.getCaseStatus」、「dispute.getCurrentRoom」、「dispute.getCurrentDeadlineAt」、「materializeCurrentRoom」。
     // 系统意义：「ExternalCaseImportTransactionService.materializePersistedCurrentRoom(FulfillmentCaseEntity,String)」负责主链路中的“materializePersistedCurrent房间”；Java/PostgreSQL 是案件状态事实源，导入重试不能创建重复案件
-    private void materializePersistedCurrentRoom(
+    private MaterializedRoom materializePersistedCurrentRoom(
             FulfillmentCaseEntity dispute,
-            String actorId) {
-        materializeCurrentRoom(
+            String actorId,
+            OffsetDateTime now) {
+        return materializeCurrentRoom(
                 dispute,
                 dispute.getCaseStatus(),
                 dispute.getCurrentRoom(),
                 dispute.getCurrentDeadlineAt(),
-                actorId);
+                actorId,
+                now);
     }
 
     // 所属模块：【案件核心与导入 / 应用编排层】「ExternalCaseImportTransactionService.materializeCurrentRoom(FulfillmentCaseEntity,CaseStatus,String,OffsetDateTime,String)」。
@@ -303,14 +338,14 @@ public class ExternalCaseImportTransactionService {
     // 上游调用：「ExternalCaseImportTransactionService.materializeCurrentRoom(FulfillmentCaseEntity,CaseStatus,String,OffsetDateTime,String)」的上游调用点包括 「ExternalCaseImportTransactionService.importDispute」、「ExternalCaseImportTransactionService.materializeCurrentRoom」、「ExternalCaseImportTransactionService.materializePersistedCurrentRoom」。
     // 下游影响：「ExternalCaseImportTransactionService.materializeCurrentRoom(FulfillmentCaseEntity,CaseStatus,String,OffsetDateTime,String)」向下依次触达 「roomRepository.findByCaseIdAndRoomType」、「roomRepository.save」、「clockRepository.findByCaseIdAndClockType」、「clockRepository.save」。
     // 系统意义：「ExternalCaseImportTransactionService.materializeCurrentRoom(FulfillmentCaseEntity,CaseStatus,String,OffsetDateTime,String)」负责主链路中的“materializeCurrent房间”；Java/PostgreSQL 是案件状态事实源，导入重试不能创建重复案件
-    private void materializeCurrentRoom(
+    private MaterializedRoom materializeCurrentRoom(
             FulfillmentCaseEntity dispute,
             CaseStatus caseStatus,
             String currentRoom,
             OffsetDateTime currentDeadlineAt,
-            String actorId) {
+            String actorId,
+            OffsetDateTime now) {
         RoomType roomType = currentRoom(caseStatus, currentRoom);
-        OffsetDateTime now = OffsetDateTime.now(clock);
         CaseRoomEntity room =
                 roomRepository
                         .findByCaseIdAndRoomType(dispute.getId(), roomType)
@@ -330,12 +365,36 @@ public class ExternalCaseImportTransactionService {
                                                                 roomType,
                                                                 now,
                                                                 actorId)));
+        if (isTerminal(caseStatus)) {
+            if (room.getRoomStatus() != com.example.dispute.room.domain.RoomStatus.CLOSED) {
+                room.close(now, actorId);
+                roomRepository.save(room);
+            }
+            PhaseClockType terminalClockType = phaseClock(roomType);
+            if (terminalClockType != null) {
+                clockRepository
+                        .findByCaseIdAndClockType(dispute.getId(), terminalClockType)
+                        .filter(clock -> clock.getClockStatus() == PhaseClockStatus.RUNNING)
+                        .ifPresent(
+                                clock -> {
+                                    clock.complete(now, "TERMINAL_IMPORT", actorId);
+                                    clockRepository.save(clock);
+                                });
+            }
+            dispute.synchronizeImportedCurrentDeadline(null, actorId);
+            return new MaterializedRoom(room, null);
+        }
         PhaseClockType clockType = phaseClock(roomType);
-        if (clockType == null
-                || clockRepository
-                        .findByCaseIdAndClockType(dispute.getId(), clockType)
-                        .isPresent()) {
-            return;
+        if (clockType == null) {
+            return new MaterializedRoom(room, currentDeadlineAt);
+        }
+        var existingClock =
+                clockRepository.findByCaseIdAndClockType(dispute.getId(), clockType);
+        if (existingClock.isPresent()) {
+            OffsetDateTime deadline = existingClock.orElseThrow().getDeadlineAt();
+            dispute.synchronizeImportedCurrentDeadline(deadline, actorId);
+            return new MaterializedRoom(
+                    room, deadline);
         }
         OffsetDateTime deadline =
                 currentDeadlineAt == null
@@ -361,7 +420,41 @@ public class ExternalCaseImportTransactionService {
                         deadline,
                         workflowId(clockType, dispute.getId()),
                         actorId));
+        dispute.synchronizeImportedCurrentDeadline(deadline, actorId);
+        return new MaterializedRoom(room, deadline);
     }
+
+    private void recordRoomEpoch(
+            FulfillmentCaseEntity dispute,
+            MaterializedRoom materializedRoom,
+            OffsetDateTime occurredAt) {
+        CaseRoomEntity room = materializedRoom.room();
+        ContractTypes.RoomType roomType =
+                ContractTypes.RoomType.valueOf(room.getRoomType().name());
+        if (isTerminal(dispute.getCaseStatus())) {
+            roomEpochAllocator.recordTerminal(
+                    new TerminalRoomEpoch(
+                            dispute.getId(),
+                            room.getId(),
+                            roomType,
+                            dispute.getCaseStatus().name(),
+                            room.getRoomStatus().name(),
+                            occurredAt));
+            return;
+        }
+        roomEpochAllocator.activate(
+                new ActivateRoomEpoch(
+                        dispute.getId(),
+                        room.getId(),
+                        roomType,
+                        dispute.getCaseStatus().name(),
+                        room.getRoomStatus().name(),
+                        materializedRoom.projectedDeadlineAt(),
+                        occurredAt));
+    }
+
+    private record MaterializedRoom(
+            CaseRoomEntity room, OffsetDateTime projectedDeadlineAt) {}
 
     // 所属模块：【案件核心与导入 / 应用编排层】「ExternalCaseImportTransactionService.currentRoom(ImportDisputeCommand)」。
     // 具体功能：「ExternalCaseImportTransactionService.currentRoom(ImportDisputeCommand)」：提供「currentRoom」的便捷重载：接收 「command」(ImportDisputeCommand)，补齐默认选项后委托参数更完整的同名方法，保证两条入口共享同一套校验、事务和持久化逻辑。

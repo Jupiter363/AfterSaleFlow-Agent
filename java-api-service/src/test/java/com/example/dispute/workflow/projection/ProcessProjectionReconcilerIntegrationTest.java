@@ -12,10 +12,14 @@ import com.example.dispute.workflow.application.projection.AuthoritativeProcessS
 import com.example.dispute.workflow.application.projection.ProcessProjectionReconciler;
 import com.example.dispute.workflow.application.projection.ProcessProjectionReconciliationResult.Outcome;
 import com.example.dispute.workflow.application.projection.ProcessProjectionReconciliationService;
+import com.example.dispute.workflow.config.ProcessProjectionReconciliationProperties;
+import com.example.dispute.workflow.contract.v1.CaseProcessWorkflowProtocol;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
+import com.example.dispute.workflow.infrastructure.persistence.RoomEpochScanClaimStore;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
@@ -42,6 +46,7 @@ import org.testcontainers.utility.DockerImageName;
 @Import({
     ProcessProjectionReconciler.class,
     ProcessProjectionReconciliationService.class,
+    RoomEpochScanClaimStore.class,
     ProcessProjectionReconcilerIntegrationTest.ReconciliationTestConfiguration.class
 })
 @Transactional(propagation = Propagation.NOT_SUPPORTED)
@@ -84,7 +89,7 @@ class ProcessProjectionReconcilerIntegrationTest {
     @Test
     void missingTemporalProjectionIsRebuiltFromCompleteVerifiedState() {
         Fixture fixture = insertFixture("MISSING", WriterMode.TEMPORAL, false, 5, 3);
-        authoritativeStateReader.answer(verified(state(fixture, 6, 4, RUN_2)));
+        authoritativeStateReader.answer(verified(state(fixture, 6, 4, RUN_1)));
 
         var result = reconciler.reconcile(fixture.target());
 
@@ -98,7 +103,7 @@ class ProcessProjectionReconcilerIntegrationTest {
         assertThat(longValue("case_room_epoch", "room_revision", fixture.epochId()))
                 .isEqualTo(4);
         assertThat(stringValue("case_process_projection", "temporal_run_id", fixture.caseId()))
-                .isEqualTo(RUN_2);
+                .isEqualTo(RUN_1);
         assertThat(stringValue("process_reconciliation_issue", "issue_status", fixture.caseId()))
                 .isEqualTo("RESOLVED");
     }
@@ -106,7 +111,7 @@ class ProcessProjectionReconcilerIntegrationTest {
     @Test
     void staleTemporalProjectionAndEpochAreRepairedTogether() {
         Fixture fixture = insertFixture("STALE", WriterMode.TEMPORAL, true, 5, 3);
-        authoritativeStateReader.answer(verified(state(fixture, 6, 4, RUN_2)));
+        authoritativeStateReader.answer(verified(state(fixture, 6, 4, RUN_1)));
 
         var result = reconciler.reconcile(fixture.target());
 
@@ -118,7 +123,7 @@ class ProcessProjectionReconcilerIntegrationTest {
         assertThat(stringValue("case_process_projection", "room_phase", fixture.caseId()))
                 .isEqualTo("SEALED");
         assertThat(stringValue("case_room_epoch", "temporal_run_id", fixture.epochId()))
-                .isEqualTo(RUN_2);
+                .isEqualTo(RUN_1);
         assertThat(stringValue("process_reconciliation_issue", "issue_status", fixture.caseId()))
                 .isEqualTo("RESOLVED");
     }
@@ -126,7 +131,7 @@ class ProcessProjectionReconcilerIntegrationTest {
     @Test
     void shadowDriftIsDetectOnlyAndRepeatedScansReuseOneIssue() {
         Fixture fixture = insertFixture("SHADOW", WriterMode.SHADOW, true, 5, 3);
-        authoritativeStateReader.answer(verified(state(fixture, 6, 4, RUN_2)));
+        authoritativeStateReader.answer(verified(state(fixture, 6, 4, RUN_1)));
 
         var first = reconciler.reconcile(fixture.target());
         var repeated = reconciler.reconcile(fixture.target());
@@ -193,11 +198,9 @@ class ProcessProjectionReconcilerIntegrationTest {
 
     @Test
     void aProjectionBoundToAnotherFenceRequiresManualRecovery() {
-        Fixture fixture = insertFixture("PROJECTION_FENCE", WriterMode.TEMPORAL, true, 5, 3);
-        jdbc.update(
-                "update case_process_projection set fencing_token = 16 where case_id = ?",
-                fixture.caseId());
-        authoritativeStateReader.answer(verified(state(fixture, 6, 4, RUN_2)));
+        Fixture fixture =
+                insertFixture("PROJECTION_FENCE", WriterMode.TEMPORAL, true, 5, 3, 16);
+        authoritativeStateReader.answer(verified(state(fixture, 6, 4, RUN_1)));
 
         var result = reconciler.reconcile(fixture.target());
 
@@ -217,10 +220,23 @@ class ProcessProjectionReconcilerIntegrationTest {
             boolean includeProjection,
             long processRevision,
             long roomRevision) {
+        return insertFixture(
+                suffix, writerMode, includeProjection, processRevision, roomRevision, 17);
+    }
+
+    private Fixture insertFixture(
+            String suffix,
+            WriterMode writerMode,
+            boolean includeProjection,
+            long processRevision,
+            long roomRevision,
+            long projectionFencingToken) {
         String caseId = "CASE_Reconcile" + suffix;
         String roomId = "ROOM_Reconcile" + suffix;
         String epochId = "EPOCH_Reconcile" + suffix;
         String workflowId = "case-process:" + TENANT + ":" + caseId;
+        String roomWorkflowId =
+                CaseProcessWorkflowProtocol.roomWorkflowId(caseId, RoomType.EVIDENCE, 2);
         jdbc.update(
                 """
                 insert into fulfillment_dispute_case (
@@ -251,11 +267,17 @@ class ProcessProjectionReconcilerIntegrationTest {
                 """
                 insert into case_room_epoch (
                     id, tenant_surrogate, case_id, room_id, room_type, room_epoch,
-                    writer_mode, lifecycle_status, process_revision, room_revision,
-                    fencing_token, temporal_workflow_id, temporal_run_id, temporal_build_id,
-                    stream_protocol, activated_at, created_at, updated_at
-                ) values (?, ?, ?, ?, 'EVIDENCE', 2, ?, 'ACTIVE', ?, ?, 17,
-                    ?, ?, ?, 'agent_stream.v1', ?, ?, ?)
+                    writer_mode, lifecycle_status, provisioning_status,
+                    process_revision, room_revision, fencing_token,
+                    temporal_workflow_id, temporal_run_id,
+                    room_temporal_workflow_id, room_temporal_run_id, temporal_build_id,
+                    graph_key, graph_version, checkpoint_schema_version, stream_protocol,
+                    selection_schema_version, process_contract_version, workflow_type,
+                    activated_at, provisioned_at, created_at, updated_at
+                ) values (?, ?, ?, ?, 'EVIDENCE', 2, ?, 'ACTIVE', 'READY', ?, ?, 17,
+                    ?, ?, ?, ?, ?, 'evidence.v2', '1.0.0', 'checkpoint.v1',
+                    'agent_stream.v1', 'room-epoch-selection.v1',
+                    'case-process-contract.v1', 'CaseProcessWorkflow', ?, ?, ?, ?)
                 """,
                 epochId,
                 TENANT,
@@ -266,7 +288,10 @@ class ProcessProjectionReconcilerIntegrationTest {
                 roomRevision,
                 workflowId,
                 RUN_1,
+                roomWorkflowId,
+                "room-run-reconciliation-1",
                 BUILD,
+                OffsetDateTime.ofInstant(NOW.minusSeconds(60), ZoneOffset.UTC),
                 OffsetDateTime.ofInstant(NOW.minusSeconds(60), ZoneOffset.UTC),
                 OffsetDateTime.ofInstant(NOW.minusSeconds(60), ZoneOffset.UTC),
                 OffsetDateTime.ofInstant(NOW.minusSeconds(30), ZoneOffset.UTC));
@@ -275,17 +300,18 @@ class ProcessProjectionReconcilerIntegrationTest {
                     """
                     insert into case_process_projection (
                         case_id, tenant_surrogate, macro_phase, current_room, room_phase,
-                        writer_mode, process_revision, room_epoch, fencing_token,
+                        writer_mode, writer_activation_status, process_revision, room_epoch, fencing_token,
                         last_command_sequence, last_case_event_sequence,
                         temporal_workflow_id, temporal_run_id, temporal_build_id,
                         projected_at, updated_at
-                    ) values (?, ?, 'EVIDENCE_OPEN', 'EVIDENCE', 'OPEN', ?, ?, 2, 17,
+                    ) values (?, ?, 'EVIDENCE_OPEN', 'EVIDENCE', 'OPEN', ?, 'READY', ?, 2, ?,
                         10, 19, ?, ?, ?, ?, ?)
                     """,
                     caseId,
                     TENANT,
                     writerMode.name(),
                     processRevision,
+                    projectionFencingToken,
                     workflowId,
                     RUN_1,
                     BUILD,
@@ -390,6 +416,12 @@ class ProcessProjectionReconcilerIntegrationTest {
         @Bean
         MutableAuthoritativeProcessStateReader authoritativeProcessStateReader() {
             return new MutableAuthoritativeProcessStateReader();
+        }
+
+        @Bean
+        ProcessProjectionReconciliationProperties reconciliationProperties() {
+            return new ProcessProjectionReconciliationProperties(
+                    true, 32, Duration.ofMinutes(5), Duration.ofSeconds(30));
         }
     }
 }

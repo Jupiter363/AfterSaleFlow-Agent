@@ -9,7 +9,6 @@ public record CommandOutboxProperties(
         @DefaultValue("false") boolean enabled,
         @DefaultValue("32") int batchSize,
         @DefaultValue("PT1M") Duration leaseDuration,
-        @DefaultValue("8") int maxAttempts,
         @DefaultValue("PT1S") Duration baseBackoff,
         @DefaultValue("PT5M") Duration maxBackoff,
         @DefaultValue("PT5S") Duration pollInterval) {
@@ -17,9 +16,6 @@ public record CommandOutboxProperties(
     public CommandOutboxProperties {
         if (batchSize < 1 || batchSize > 1000) {
             throw new IllegalArgumentException("batchSize must be between 1 and 1000");
-        }
-        if (maxAttempts < 1 || maxAttempts > 1000) {
-            throw new IllegalArgumentException("maxAttempts must be between 1 and 1000");
         }
         requirePositive(leaseDuration, "leaseDuration");
         requirePositive(baseBackoff, "baseBackoff");

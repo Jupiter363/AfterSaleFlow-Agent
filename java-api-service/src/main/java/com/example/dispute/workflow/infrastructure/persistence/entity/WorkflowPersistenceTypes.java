@@ -8,6 +8,7 @@ public final class WorkflowPersistenceTypes {
         PENDING_ORCHESTRATION,
         ORCHESTRATION_ACCEPTED,
         APPLIED,
+        SHADOW_COMPLETED,
         REJECTED,
         FAILED,
         EXPIRED
@@ -24,12 +25,41 @@ public final class WorkflowPersistenceTypes {
         CLAIMED,
         RETRY,
         DELIVERED,
+        RECONCILED,
         DEAD_LETTER
     }
 
     public enum EpochLifecycleStatus {
+        PREPARING,
+        PROVISIONING,
         ACTIVE,
+        PROVISIONING_FAILED,
         TERMINAL
+    }
+
+    public enum EpochProvisioningStatus {
+        NOT_REQUIRED,
+        PENDING,
+        PROVISIONING,
+        READY,
+        FAILED
+    }
+
+    public enum WriterActivationStatus {
+        PREPARING,
+        PROVISIONING,
+        READY,
+        FAILED,
+        TERMINAL
+    }
+
+    public enum BootstrapOutboxStatus {
+        PENDING,
+        CLAIMED,
+        RETRY,
+        DELIVERED,
+        RECONCILED,
+        DEAD_LETTER
     }
 
     public enum OperationStatus {

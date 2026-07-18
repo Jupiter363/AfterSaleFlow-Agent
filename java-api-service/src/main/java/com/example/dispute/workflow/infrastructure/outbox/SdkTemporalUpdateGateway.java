@@ -2,6 +2,7 @@ package com.example.dispute.workflow.infrastructure.outbox;
 
 import static io.temporal.api.enums.v1.WorkflowIdConflictPolicy.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING;
 import static io.temporal.api.enums.v1.WorkflowIdReusePolicy.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE;
+import static io.temporal.api.enums.v1.EventType.EVENT_TYPE_WORKFLOW_EXECUTION_UPDATE_ACCEPTED;
 import static io.temporal.client.WorkflowUpdateStage.ACCEPTED;
 
 import com.example.dispute.workflow.contract.v1.CaseProcessWorkflowProtocol;
@@ -16,6 +17,8 @@ import io.temporal.client.WorkflowOptions;
 import io.temporal.client.WorkflowStub;
 import io.temporal.client.WorkflowUpdateException;
 import io.temporal.client.WorkflowUpdateHandle;
+import io.temporal.failure.ApplicationFailure;
+import java.util.concurrent.CompletableFuture;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
@@ -67,13 +70,29 @@ public final class SdkTemporalUpdateGateway implements TemporalUpdateGateway {
                             updateOptions,
                             new Object[] {request.command()},
                             new Object[0]);
-            if (handle == null
-                    || handle.getExecution() == null
+            if (handle == null) {
+                throw TemporalUpdateDeliveryException.retryable(
+                        "TEMPORAL_RECEIPT_INVALID",
+                        "Temporal admitted the request without a usable run id",
+                        null);
+            }
+            if (handle.getExecution() == null
                     || handle.getExecution().getRunId().isBlank()) {
                 throw TemporalUpdateDeliveryException.retryable(
                         "TEMPORAL_RECEIPT_INVALID",
                         "Temporal admitted the request without a usable run id",
                         null);
+            }
+            CompletableFuture<Void> completion = handle.getResultAsync();
+            if (completion.isCompletedExceptionally()) {
+                try {
+                    completion.join();
+                } catch (RuntimeException completionFailure) {
+                    if (!wasAccepted(
+                            handle.getExecution(), request.updateId())) {
+                        throw completionFailure;
+                    }
+                }
             }
             return new DeliveryReceipt(handle.getExecution().getRunId());
         } catch (TemporalUpdateDeliveryException exception) {
@@ -83,7 +102,39 @@ public final class SdkTemporalUpdateGateway implements TemporalUpdateGateway {
         }
     }
 
+    private boolean wasAccepted(
+            io.temporal.api.common.v1.WorkflowExecution execution,
+            String updateId) {
+        return workflowClient
+                .fetchHistory(execution.getWorkflowId(), execution.getRunId())
+                .getEvents()
+                .stream()
+                .filter(
+                        event ->
+                                event.getEventType()
+                                        == EVENT_TYPE_WORKFLOW_EXECUTION_UPDATE_ACCEPTED)
+                .anyMatch(
+                        event ->
+                                updateId.equals(
+                                        event
+                                                .getWorkflowExecutionUpdateAcceptedEventAttributes()
+                                                .getProtocolInstanceId()));
+    }
+
     private static TemporalUpdateDeliveryException classify(RuntimeException exception) {
+        ApplicationFailure applicationFailure = applicationFailure(exception);
+        if ((applicationFailure != null
+                        && "CASE_PROCESS_COMMAND_DEADLINE_EXPIRED"
+                                .equals(applicationFailure.getType()))
+                || containsFailureMarker(
+                        exception, "CASE_PROCESS_COMMAND_DEADLINE_EXPIRED")) {
+            return TemporalUpdateDeliveryException.permanent(
+                    "COMMAND_DEADLINE_EXPIRED", detail(exception), exception);
+        }
+        if (workflowUpdateException(exception) != null) {
+            return TemporalUpdateDeliveryException.permanent(
+                    "TEMPORAL_UPDATE_REJECTED", detail(exception), exception);
+        }
         Status.Code statusCode = grpcStatus(exception);
         if (statusCode != null) {
             String code = "TEMPORAL_" + statusCode.name();
@@ -108,6 +159,40 @@ public final class SdkTemporalUpdateGateway implements TemporalUpdateGateway {
         }
         return TemporalUpdateDeliveryException.retryable(
                 "TEMPORAL_CLIENT_FAILURE", detail(exception), exception);
+    }
+
+    private static ApplicationFailure applicationFailure(Throwable exception) {
+        Throwable current = exception;
+        for (int depth = 0; current != null && depth < 12; depth++) {
+            if (current instanceof ApplicationFailure failure) {
+                return failure;
+            }
+            current = current.getCause();
+        }
+        return null;
+    }
+
+    private static WorkflowUpdateException workflowUpdateException(Throwable exception) {
+        Throwable current = exception;
+        for (int depth = 0; current != null && depth < 32; depth++) {
+            if (current instanceof WorkflowUpdateException updateException) {
+                return updateException;
+            }
+            current = current.getCause();
+        }
+        return null;
+    }
+
+    private static boolean containsFailureMarker(Throwable exception, String marker) {
+        Throwable current = exception;
+        for (int depth = 0; current != null && depth < 32; depth++) {
+            String message = current.getMessage();
+            if (message != null && message.contains(marker)) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
     }
 
     private static Status.Code grpcStatus(Throwable exception) {

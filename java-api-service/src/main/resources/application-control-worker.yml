@@ -6,6 +6,9 @@ spring:
     web-application-type: none
 
 app:
+  orchestration:
+    control-recovery-scheduling:
+      enabled: true
   temporal:
     worker:
       enabled: true

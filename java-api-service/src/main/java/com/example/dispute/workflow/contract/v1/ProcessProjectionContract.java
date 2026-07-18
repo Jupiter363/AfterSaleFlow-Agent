@@ -80,6 +80,10 @@ public final class ProcessProjectionContract {
             requireText(temporalWorkflowId, 128, "temporalWorkflowId");
             requireText(expectedTemporalRunId, 128, "expectedTemporalRunId");
             requireText(temporalRunId, 128, "temporalRunId");
+            if (!expectedTemporalRunId.equals(temporalRunId)) {
+                throw new IllegalArgumentException(
+                        "temporalRunId must preserve the first-execution run binding");
+            }
             requireText(temporalBuildId, 128, "temporalBuildId");
             requireReference(projectionRef, projectionSha256);
         }

@@ -12,11 +12,14 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.config.DisputeProperties;
+import com.example.dispute.common.api.ErrorCode;
+import com.example.dispute.common.exception.BusinessException;
 import com.example.dispute.common.exception.ForbiddenException;
 import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.RiskLevel;
@@ -43,6 +46,10 @@ import com.example.dispute.room.infrastructure.persistence.repository.CasePhaseC
 import com.example.dispute.room.infrastructure.persistence.repository.CaseIntakeDossierRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import com.example.dispute.workflow.application.EvidenceWindowCoordinator;
+import com.example.dispute.workflow.application.epoch.RoomEpochAllocator;
+import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.ActivateRoomEpoch;
+import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.TerminateRoomEpoch;
+import com.example.dispute.workflow.contract.v1.ContractTypes;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.Duration;
@@ -78,6 +85,7 @@ class IntakeRoomServiceTest {
     @Mock private EvidenceWindowCoordinator evidenceWindowCoordinator;
     @Mock private CaseEventService caseEventService;
     @Mock private IntakeProgressService intakeProgressService;
+    @Mock private RoomEpochAllocator roomEpochAllocator;
 
     private IntakeRoomService service;
 
@@ -101,6 +109,7 @@ class IntakeRoomServiceTest {
                         lifecycleNotifications,
                         evidenceWindowCoordinator,
                         caseEventService,
+                        roomEpochAllocator,
                         new DisputeProperties(
                                 Duration.ofHours(2),
                                 Duration.ofHours(3),
@@ -167,6 +176,18 @@ class IntakeRoomServiceTest {
         assertThat(summons.getValue().deepLink())
                 .isEqualTo("/disputes/CASE_ACCEPTED/intake");
         verify(lifecycleNotifications, never()).evidenceRoomOpened(any(), any());
+        ArgumentCaptor<ActivateRoomEpoch> activation =
+                ArgumentCaptor.forClass(ActivateRoomEpoch.class);
+        verify(roomEpochAllocator).activate(activation.capture());
+        assertThat(activation.getValue().caseId()).isEqualTo("CASE_ACCEPTED");
+        assertThat(activation.getValue().roomType()).isEqualTo(ContractTypes.RoomType.INTAKE);
+        assertThat(activation.getValue().macroPhase()).isEqualTo(CaseStatus.INTAKE_PENDING.name());
+        assertThat(activation.getValue().roomPhase()).isEqualTo(RoomStatus.OPEN.name());
+        assertThat(activation.getValue().projectedDeadlineAt()).isNull();
+        assertThat(activation.getValue().occurredAt())
+                .isEqualTo(OffsetDateTime.parse("2026-07-03T00:00:00Z"));
+        verify(roomEpochAllocator, never()).transition(any());
+        verify(roomEpochAllocator, never()).terminate(any());
         verify(caseEventService)
                 .recordLifecycleEvent(
                         org.mockito.ArgumentMatchers.eq("CASE_ACCEPTED"),
@@ -341,6 +362,22 @@ class IntakeRoomServiceTest {
                 .containsOnly(RoomType.INTAKE);
         assertThat(rooms.getAllValues().getLast().getRoomStatus())
                 .isEqualTo(RoomStatus.CLOSED);
+        ArgumentCaptor<ActivateRoomEpoch> activation =
+                ArgumentCaptor.forClass(ActivateRoomEpoch.class);
+        ArgumentCaptor<TerminateRoomEpoch> termination =
+                ArgumentCaptor.forClass(TerminateRoomEpoch.class);
+        verify(roomEpochAllocator).activate(activation.capture());
+        verify(roomEpochAllocator).terminate(termination.capture());
+        assertThat(activation.getValue().caseId()).isEqualTo("CASE_REJECTED");
+        assertThat(activation.getValue().roomType()).isEqualTo(ContractTypes.RoomType.INTAKE);
+        assertThat(termination.getValue().caseId()).isEqualTo("CASE_REJECTED");
+        assertThat(termination.getValue().expectedRoomType())
+                .isEqualTo(ContractTypes.RoomType.INTAKE);
+        assertThat(termination.getValue().macroPhase()).isEqualTo(CaseStatus.NOT_ADMISSIBLE.name());
+        assertThat(termination.getValue().roomPhase()).isEqualTo(RoomStatus.CLOSED.name());
+        assertThat(termination.getValue().occurredAt())
+                .isEqualTo(OffsetDateTime.parse("2026-07-03T00:00:00Z"));
+        verify(roomEpochAllocator, never()).transition(any());
     }
 
     // 所属模块：【房间协作与权限 / 自动化测试层】「IntakeRoomServiceTest.resolvedIntakeCancellationClosesTheRoomWithoutOpeningEvidence()」。
@@ -380,6 +417,22 @@ class IntakeRoomServiceTest {
         verify(participantRepository, never()).saveAll(any());
         verify(phaseClockRepository, never()).save(any());
         verify(notificationService, never()).send(any());
+        ArgumentCaptor<ActivateRoomEpoch> activation =
+                ArgumentCaptor.forClass(ActivateRoomEpoch.class);
+        ArgumentCaptor<TerminateRoomEpoch> termination =
+                ArgumentCaptor.forClass(TerminateRoomEpoch.class);
+        verify(roomEpochAllocator).activate(activation.capture());
+        verify(roomEpochAllocator).terminate(termination.capture());
+        assertThat(activation.getValue().caseId()).isEqualTo("CASE_CANCELLED");
+        assertThat(activation.getValue().roomId()).isEqualTo("ROOM_CANCELLED_INTAKE");
+        assertThat(termination.getValue().caseId()).isEqualTo("CASE_CANCELLED");
+        assertThat(termination.getValue().expectedRoomType())
+                .isEqualTo(ContractTypes.RoomType.INTAKE);
+        assertThat(termination.getValue().macroPhase()).isEqualTo(CaseStatus.CANCELLED.name());
+        assertThat(termination.getValue().roomPhase()).isEqualTo(RoomStatus.CLOSED.name());
+        assertThat(termination.getValue().occurredAt())
+                .isEqualTo(OffsetDateTime.parse("2026-07-03T00:00:00Z"));
+        verify(roomEpochAllocator, never()).transition(any());
         verify(caseEventService)
                 .recordLifecycleEvent(
                         org.mockito.ArgumentMatchers.eq("CASE_CANCELLED"),
@@ -410,8 +463,99 @@ class IntakeRoomServiceTest {
         assertThat(dispute.getCaseStatus()).isEqualTo(CaseStatus.INTAKE_PENDING);
         verify(caseRepository, never()).save(any());
         verify(roomRepository, never()).save(any());
+        verifyNoInteractions(roomEpochAllocator);
         verify(caseEventService, never())
                 .recordLifecycleEvent(any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void completedInitiatorReplayReturnsWithoutRoomOrEpochInteractions() {
+        FulfillmentCaseEntity dispute = pendingCase("CASE_INITIATOR_REPLAY");
+        dispute.completeIntake(
+                "SIGNED_NOT_RECEIVED",
+                CaseStatus.INTAKE_COMPLETED,
+                RiskLevel.HIGH,
+                dispute.getIntakeResultJson(),
+                "user-local");
+        when(caseRepository.findByIdForUpdate(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+        when(intakeProgressService.isCompleted(dispute, ActorRole.USER))
+                .thenReturn(true);
+
+        var result =
+                service.confirm(
+                        dispute.getId(),
+                        new AuthenticatedActor("user-local", ActorRole.USER),
+                        new IntakeConfirmationCommand(
+                                true,
+                                "SIGNED_NOT_RECEIVED",
+                                RiskLevel.HIGH,
+                                "replayed confirmation"));
+
+        assertThat(result.caseStatus()).isEqualTo(CaseStatus.INTAKE_COMPLETED);
+        assertThat(result.currentRoom()).isEqualTo(RoomType.INTAKE);
+        verifyNoInteractions(roomRepository, roomEpochAllocator);
+        verify(caseRepository, never()).save(any());
+    }
+
+    @Test
+    void nonCompletedConfirmOutsideIntakeFailsBeforeRoomOrEpochInteractions() {
+        FulfillmentCaseEntity dispute = pendingCase("CASE_CONFIRM_AFTER_INTAKE");
+        dispute.admitToEvidence(
+                "SIGNED_NOT_RECEIVED",
+                RiskLevel.HIGH,
+                dispute.getIntakeResultJson(),
+                OffsetDateTime.parse("2026-07-03T02:00:00Z"),
+                "system");
+        when(caseRepository.findByIdForUpdate(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+
+        assertThatThrownBy(
+                        () ->
+                                service.confirm(
+                                        dispute.getId(),
+                                        new AuthenticatedActor("user-local", ActorRole.USER),
+                                        new IntakeConfirmationCommand(
+                                                true,
+                                                "SIGNED_NOT_RECEIVED",
+                                                RiskLevel.HIGH,
+                                                "late confirmation")))
+                .isInstanceOfSatisfying(
+                        BusinessException.class,
+                        exception ->
+                                assertThat(exception.errorCode())
+                                        .isEqualTo(ErrorCode.CASE_STATUS_INVALID));
+
+        verifyNoInteractions(roomRepository, roomEpochAllocator);
+        verify(caseRepository, never()).save(any());
+    }
+
+    @Test
+    void cancelFromEvidenceFailsBeforeRoomOrEpochInteractions() {
+        FulfillmentCaseEntity dispute = pendingCase("CASE_CANCEL_AFTER_INTAKE");
+        dispute.admitToEvidence(
+                "SIGNED_NOT_RECEIVED",
+                RiskLevel.HIGH,
+                dispute.getIntakeResultJson(),
+                OffsetDateTime.parse("2026-07-03T02:00:00Z"),
+                "system");
+        when(caseRepository.findByIdForUpdate(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+
+        assertThatThrownBy(
+                        () ->
+                                service.cancel(
+                                        dispute.getId(),
+                                        new AuthenticatedActor("user-local", ActorRole.USER),
+                                        "late cancellation"))
+                .isInstanceOfSatisfying(
+                        BusinessException.class,
+                        exception ->
+                                assertThat(exception.errorCode())
+                                        .isEqualTo(ErrorCode.CASE_STATUS_INVALID));
+
+        verifyNoInteractions(roomRepository, roomEpochAllocator);
+        verify(caseRepository, never()).save(any());
     }
 
     // 所属模块：【房间协作与权限 / 自动化测试层】「IntakeRoomServiceTest.acceptedIntakeSnapshotsTheLatestAgentDossierIntoTheCase()」。

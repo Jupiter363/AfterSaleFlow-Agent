@@ -11,6 +11,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -37,6 +38,9 @@ import com.example.dispute.room.application.IntakeLobbySeed;
 import com.example.dispute.room.application.IntakeStatusView;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
+import com.example.dispute.workflow.application.epoch.RoomEpochAllocator;
+import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.ActivateRoomEpoch;
+import com.example.dispute.workflow.contract.v1.ContractTypes;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.time.Clock;
@@ -49,6 +53,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -67,6 +72,7 @@ class CaseApplicationServiceTest {
     @Mock private ParticipantService participantService;
     @Mock private IntakeAgentTurnService intakeAgentTurnService;
     @Mock private IntakeProgressService intakeProgressService;
+    @Mock private RoomEpochAllocator roomEpochAllocator;
 
     private CaseApplicationService service;
 
@@ -102,6 +108,7 @@ class CaseApplicationServiceTest {
                         participantService,
                         intakeAgentTurnService,
                         intakeProgressService,
+                        roomEpochAllocator,
                         properties,
                         Clock.fixed(Instant.parse("2026-06-28T00:00:00Z"), ZoneOffset.UTC),
                         new ObjectMapper().findAndRegisterModules());
@@ -110,6 +117,9 @@ class CaseApplicationServiceTest {
                 .thenReturn(Optional.empty());
         lenient()
                 .when(caseRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        lenient()
+                .when(roomRepository.save(any()))
                 .thenAnswer(invocation -> invocation.getArgument(0));
     }
 
@@ -138,21 +148,40 @@ class CaseApplicationServiceTest {
         assertThat(result.riskLevel()).isEqualTo(RiskLevel.MEDIUM);
         assertThat(result.agentDegraded()).isFalse();
         assertThat(result.missingSlots()).isEmpty();
-        verify(roomRepository).save(any(CaseRoomEntity.class));
-        verify(participantService)
+        ArgumentCaptor<CaseRoomEntity> intakeRoom =
+                ArgumentCaptor.forClass(CaseRoomEntity.class);
+        ArgumentCaptor<ActivateRoomEpoch> activation =
+                ArgumentCaptor.forClass(ActivateRoomEpoch.class);
+        ArgumentCaptor<IntakeLobbySeed> lobbySeed =
+                ArgumentCaptor.forClass(IntakeLobbySeed.class);
+        InOrder creationOrder =
+                inOrder(
+                        roomRepository,
+                        roomEpochAllocator,
+                        participantService,
+                        intakeAgentTurnService);
+        creationOrder.verify(roomRepository).save(intakeRoom.capture());
+        creationOrder.verify(roomEpochAllocator).activate(activation.capture());
+        creationOrder.verify(participantService)
                 .addInitiator(
                         any(),
                         any(AuthenticatedActor.class),
                         any());
-        ArgumentCaptor<IntakeLobbySeed> lobbySeed =
-                ArgumentCaptor.forClass(IntakeLobbySeed.class);
-        verify(intakeAgentTurnService)
+        creationOrder.verify(intakeAgentTurnService)
                 .startInitialTurn(
                         any(),
                         any(AuthenticatedActor.class),
                         lobbySeed.capture(),
                         eq("TRACE_test"),
                         eq("REQ_test"));
+        assertThat(activation.getValue().caseId()).isEqualTo(result.id());
+        assertThat(activation.getValue().roomId()).isEqualTo(intakeRoom.getValue().getId());
+        assertThat(activation.getValue().roomType()).isEqualTo(ContractTypes.RoomType.INTAKE);
+        assertThat(activation.getValue().macroPhase()).isEqualTo(CaseStatus.INTAKE_COMPLETED.name());
+        assertThat(activation.getValue().roomPhase()).isEqualTo("OPEN");
+        assertThat(activation.getValue().projectedDeadlineAt()).isNull();
+        assertThat(activation.getValue().occurredAt())
+                .isEqualTo(OffsetDateTime.parse("2026-06-28T00:00:00Z"));
         assertThat(lobbySeed.getValue().orderReference()).isEqualTo("order-1");
         assertThat(lobbySeed.getValue().initiatorRole()).isEqualTo("USER");
         assertThat(lobbySeed.getValue().rawText()).contains("order-1");

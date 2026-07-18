@@ -23,6 +23,7 @@ import com.example.dispute.workflow.application.projection.AuthoritativeProcessS
 import com.example.dispute.workflow.application.projection.AuthoritativeProcessStateReader.ReconciliationTarget;
 import com.example.dispute.workflow.application.projection.AuthoritativeProcessStateReader.Unavailable;
 import com.example.dispute.workflow.application.projection.AuthoritativeProcessStateReader.Verified;
+import com.example.dispute.workflow.application.epoch.RoomEpochReadiness;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
 import com.example.dispute.workflow.infrastructure.persistence.entity.CaseProcessProjectionEntity;
@@ -89,6 +90,30 @@ public class ProcessProjectionReconciliationService {
         }
         if (epoch.getWriterMode() == LEGACY) {
             return result(NOT_OWNED, "LEGACY_WRITER_NOT_RECONCILED", null, projection, -1);
+        }
+        if (!RoomEpochReadiness.isEpochProvisioned(epoch)) {
+            String issueKey =
+                    recordIssue(
+                            target,
+                            issue(
+                                    "ROOM_EPOCH_PROVISIONING_NOT_READY",
+                                    scope(epoch.getWriterMode()),
+                                    CRITICAL,
+                                    epoch,
+                                    projection,
+                                    -1,
+                                    null,
+                                    null,
+                                    null,
+                                    "ROOM_EPOCH_PROVISIONING_NOT_READY",
+                                    null),
+                            false);
+            return result(
+                    REPAIR_REJECTED,
+                    "ROOM_EPOCH_PROVISIONING_NOT_READY",
+                    issueKey,
+                    projection,
+                    -1);
         }
         if (epoch.getLifecycleStatus() != ACTIVE) {
             String issueKey =
@@ -387,7 +412,6 @@ public class ProcessProjectionReconciliationService {
                             state.roomRevision(),
                             target.temporalWorkflowId(),
                             epoch.getTemporalRunId(),
-                            state.temporalRunId(),
                             epoch.getTemporalBuildId(),
                             repairedAt);
             requireSingleRepair(epochUpdated, "room epoch");
@@ -412,7 +436,6 @@ public class ProcessProjectionReconciliationService {
                             offset(state.projectedDeadlineAt()),
                             target.temporalWorkflowId(),
                             projection.getTemporalRunId(),
-                            state.temporalRunId(),
                             projection.getTemporalBuildId(),
                             state.projectionRef(),
                             state.projectionSha256(),

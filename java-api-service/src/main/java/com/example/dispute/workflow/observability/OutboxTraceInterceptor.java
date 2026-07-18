@@ -65,6 +65,7 @@ public final class OutboxTraceInterceptor {
                 }
                 span.setStatus(
                         deliveryResult.outcome() == DeliveryOutcome.DELIVERED
+                                || deliveryResult.outcome() == DeliveryOutcome.RECONCILED
                                         || deliveryResult.outcome()
                                                 == DeliveryOutcome.STALE_LEASE
                                 ? StatusCode.OK
@@ -109,6 +110,7 @@ public final class OutboxTraceInterceptor {
 
     public enum DeliveryOutcome {
         DELIVERED,
+        RECONCILED,
         RETRY_SCHEDULED,
         DEAD_LETTERED,
         STALE_LEASE

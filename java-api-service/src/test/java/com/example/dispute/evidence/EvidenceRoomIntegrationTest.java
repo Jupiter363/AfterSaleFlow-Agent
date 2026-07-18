@@ -33,6 +33,8 @@ import com.example.dispute.notification.application.CaseLifecycleNotificationSer
 import com.example.dispute.notification.infrastructure.persistence.repository.NotificationRepository;
 import com.example.dispute.room.application.AccessSessionResolver;
 import com.example.dispute.room.application.CaseEventService;
+import com.example.dispute.room.application.IntakeMatrixLifecycleService;
+import com.example.dispute.room.application.IntakeProgressService;
 import com.example.dispute.room.application.SessionPermissionService;
 import com.example.dispute.room.domain.PhaseClockStatus;
 import com.example.dispute.room.domain.PhaseClockType;
@@ -44,6 +46,15 @@ import com.example.dispute.room.infrastructure.persistence.repository.CasePhaseC
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseTimelineEventRepository;
 import com.example.dispute.workflow.application.EvidenceWindowCoordinator;
+import com.example.dispute.workflow.application.epoch.RoomEpochAllocator;
+import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.ActivateRoomEpoch;
+import com.example.dispute.workflow.application.epoch.TransactionalRoomEpochAllocator;
+import com.example.dispute.workflow.contract.v1.ContractTypes;
+import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.EpochLifecycleStatus;
+import com.example.dispute.workflow.infrastructure.persistence.repository.CaseProcessProjectionRepository;
+import com.example.dispute.workflow.infrastructure.persistence.repository.CaseRoomEpochRepository;
+import com.example.dispute.workflow.room.RoomEpochAllocatorTestConfiguration;
+import com.example.dispute.hearing.application.HearingFlowRuntimeService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.time.Instant;
@@ -78,6 +89,8 @@ import org.testcontainers.utility.DockerImageName;
     NotificationService.class,
     CaseLifecycleNotificationService.class,
     CaseEventService.class,
+    TransactionalRoomEpochAllocator.class,
+    RoomEpochAllocatorTestConfiguration.class,
     EvidenceRoomIntegrationTest.FixedClockConfiguration.class
 })
 @Testcontainers
@@ -123,9 +136,15 @@ class EvidenceRoomIntegrationTest {
     @Autowired private CasePhaseClockRepository clockRepository;
     @Autowired private NotificationRepository notificationRepository;
     @Autowired private CaseTimelineEventRepository eventRepository;
+    @Autowired private RoomEpochAllocator roomEpochAllocator;
+    @Autowired private CaseRoomEpochRepository roomEpochRepository;
+    @Autowired private CaseProcessProjectionRepository processProjectionRepository;
     @MockitoBean private EvidenceWindowCoordinator evidenceWindowCoordinator;
     @MockitoBean private AccessSessionResolver accessSessionResolver;
     @MockitoBean private SessionPermissionService sessionPermissionService;
+    @MockitoBean private IntakeProgressService intakeProgressService;
+    @MockitoBean private IntakeMatrixLifecycleService intakeMatrixLifecycleService;
+    @MockitoBean private HearingFlowRuntimeService hearingFlowRuntimeService;
 
     // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceRoomIntegrationTest.bothPartiesFreezeExactlyOneVersionAndRejectedEvidenceIsExcluded()」。
     // 具体功能：「EvidenceRoomIntegrationTest.bothPartiesFreezeExactlyOneVersionAndRejectedEvidenceIsExcluded()」：复现“核对完整业务行为（场景方法「bothPartiesFreezeExactlyOneVersionAndRejectedEvidenceIsExcluded」）”场景：驱动 「completionService.complete」、「caseRepository.flush」、「caseRepository.findById」、「clockRepository.findByCaseIdAndClockType」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_EARLY」、「EVIDENCE_INCLUDED」、「EVIDENCE_REJECTED」、「user-local」。
@@ -201,6 +220,7 @@ class EvidenceRoomIntegrationTest {
                         notification ->
                                 assertThat(notification.getDeepLink())
                                         .isEqualTo("/disputes/CASE_EARLY/hearing"));
+        assertHearingEpochTransition("CASE_EARLY");
     }
 
     // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceRoomIntegrationTest.deadlineExpiryWithOnePartySealsAndOpensHearing()」。
@@ -242,6 +262,7 @@ class EvidenceRoomIntegrationTest {
         assertThat(dossierRepository.findByCaseIdAndDossierVersion("CASE_EXPIRED", 1))
                 .hasValueSatisfying(
                         dossier -> assertThat(dossier.getDossierStatus()).isEqualTo("FROZEN"));
+        assertHearingEpochTransition("CASE_EXPIRED");
     }
 
     // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceRoomIntegrationTest.deadlineExpiryWithoutInitiatorEvidenceDoesNotOpenHearing()」。
@@ -315,6 +336,45 @@ class EvidenceRoomIntegrationTest {
                         OffsetDateTime.parse("2026-07-03T02:00:00Z"),
                         "evidence-window-" + caseId,
                         "system"));
+        roomEpochAllocator.activate(
+                new ActivateRoomEpoch(
+                        caseId,
+                        evidenceRoom.getId(),
+                        ContractTypes.RoomType.EVIDENCE,
+                        CaseStatus.EVIDENCE_OPEN.name(),
+                        RoomStatus.OPEN.name(),
+                        OffsetDateTime.parse("2026-07-03T02:00:00Z"),
+                        OffsetDateTime.parse("2026-07-03T00:00:00Z")));
+    }
+
+    private void assertHearingEpochTransition(String caseId) {
+        assertThat(
+                        roomEpochRepository.findByCaseIdAndRoomTypeAndLifecycleStatus(
+                                caseId,
+                                ContractTypes.RoomType.EVIDENCE,
+                                EpochLifecycleStatus.TERMINAL))
+                .hasValueSatisfying(
+                        epoch -> {
+                            assertThat(epoch.getProcessRevision()).isEqualTo(1L);
+                            assertThat(epoch.getFencingToken()).isEqualTo(1L);
+                        });
+        assertThat(
+                        roomEpochRepository.findByCaseIdAndRoomTypeAndLifecycleStatus(
+                                caseId,
+                                ContractTypes.RoomType.HEARING,
+                                EpochLifecycleStatus.ACTIVE))
+                .hasValueSatisfying(
+                        epoch -> {
+                            assertThat(epoch.getProcessRevision()).isEqualTo(1L);
+                            assertThat(epoch.getFencingToken()).isEqualTo(2L);
+                        });
+        assertThat(processProjectionRepository.findById(caseId))
+                .hasValueSatisfying(
+                        projection -> {
+                            assertThat(projection.getCurrentRoom()).isEqualTo("HEARING");
+                            assertThat(projection.getProjectedDeadlineAt())
+                                    .isEqualTo(OffsetDateTime.parse("2026-07-03T04:00:00Z"));
+                        });
     }
 
     // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceRoomIntegrationTest.addEvidence(String,String,EvidenceVerificationStatus)」。

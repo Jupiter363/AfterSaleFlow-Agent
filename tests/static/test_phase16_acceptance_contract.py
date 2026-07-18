@@ -54,7 +54,9 @@ def test_phase16_ci_quality_gate_exists() -> None:
 def test_phase16_release_review_and_rollback_docs_exist() -> None:
     contributing = read("CONTRIBUTING.md")
     deployment = read("docs/deployment/README.md")
-    codex = read("docs/codex/README.md")
+    verification = read(
+        "docs/acceptance/temporal-first-agent-platform-verification-checklist.md"
+    )
     release = read("docs/release/README.md")
     for required in (
         "Code Review",
@@ -62,5 +64,5 @@ def test_phase16_release_review_and_rollback_docs_exist() -> None:
         "release",
         "smoke-test",
     ):
-        combined = "\n".join([contributing, deployment, codex, release])
+        combined = "\n".join([contributing, deployment, verification, release])
         assert required in combined

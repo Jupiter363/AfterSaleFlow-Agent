@@ -23,6 +23,7 @@ import com.example.dispute.notification.infrastructure.persistence.repository.No
 import com.example.dispute.room.application.IntakeConfirmationCommand;
 import com.example.dispute.room.application.IntakeRoomService;
 import com.example.dispute.room.application.IntakeAgentTurnService;
+import com.example.dispute.room.application.IntakeProgressService;
 import com.example.dispute.room.application.AccessSessionResolver;
 import com.example.dispute.room.application.EvidenceAgentTurnService;
 import com.example.dispute.room.application.ParticipantService;
@@ -36,11 +37,19 @@ import com.example.dispute.room.domain.PhaseClockType;
 import com.example.dispute.room.domain.RoomStatus;
 import com.example.dispute.room.domain.RoomType;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseParticipantRepository;
+import com.example.dispute.room.infrastructure.persistence.entity.CaseIntakeDossierEntity;
+import com.example.dispute.room.infrastructure.persistence.repository.CaseIntakeDossierRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CasePhaseClockRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseTimelineEventRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.RoomMessageRepository;
 import com.example.dispute.workflow.application.EvidenceWindowCoordinator;
+import com.example.dispute.workflow.application.epoch.TransactionalRoomEpochAllocator;
+import com.example.dispute.workflow.contract.v1.ContractTypes;
+import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.EpochLifecycleStatus;
+import com.example.dispute.workflow.infrastructure.persistence.repository.CaseProcessProjectionRepository;
+import com.example.dispute.workflow.infrastructure.persistence.repository.CaseRoomEpochRepository;
+import com.example.dispute.workflow.room.RoomEpochAllocatorTestConfiguration;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.time.Instant;
@@ -72,11 +81,14 @@ import org.testcontainers.utility.DockerImageName;
 @EnableConfigurationProperties(DisputeProperties.class)
 @Import({
     IntakeRoomService.class,
+    IntakeProgressService.class,
     ParticipantService.class,
     NotificationService.class,
     CaseLifecycleNotificationService.class,
     CaseEventService.class,
     RoomMessageService.class,
+    TransactionalRoomEpochAllocator.class,
+    RoomEpochAllocatorTestConfiguration.class,
     IntakeRoomServiceIntegrationTest.FixedClockConfiguration.class
 })
 @Testcontainers
@@ -116,11 +128,14 @@ class IntakeRoomServiceIntegrationTest {
     @Autowired private CaseParticipantRepository participantRepository;
     @Autowired private CaseRoomRepository roomRepository;
     @Autowired private CasePhaseClockRepository clockRepository;
+    @Autowired private CaseIntakeDossierRepository intakeDossierRepository;
     @Autowired private NotificationRepository notificationRepository;
     @Autowired private NotificationOutboxRepository outboxRepository;
     @Autowired private RoomMessageService roomMessageService;
     @Autowired private RoomMessageRepository messageRepository;
     @Autowired private CaseTimelineEventRepository eventRepository;
+    @Autowired private CaseRoomEpochRepository roomEpochRepository;
+    @Autowired private CaseProcessProjectionRepository processProjectionRepository;
     @MockitoBean private EvidenceWindowCoordinator evidenceWindowCoordinator;
     @MockitoBean private IntakeAgentTurnService intakeAgentTurnService;
     @MockitoBean private AccessSessionResolver accessSessionResolver;
@@ -155,6 +170,25 @@ class IntakeRoomServiceIntegrationTest {
                         "EXT-INTEGRATION",
                         "external-adapter");
         caseRepository.saveAndFlush(dispute);
+        intakeDossierRepository.saveAndFlush(
+                CaseIntakeDossierEntity.create(
+                        "INTAKE_DOSSIER_INTEGRATION",
+                        dispute.getId(),
+                        RoomType.INTAKE,
+                        """
+                        {
+                          "schema_version":"intake_case_detail.v1",
+                          "case_fact_matrix":{
+                            "schema_version":"case_fact_matrix.v2",
+                            "matrix_kind":"BILATERAL_FROZEN"
+                          }
+                        }
+                        """,
+                        90,
+                        true,
+                        "ACCEPTED",
+                        1,
+                        "dispute-intake-officer"));
 
         service.confirm(
                 dispute.getId(),
@@ -164,6 +198,14 @@ class IntakeRoomServiceIntegrationTest {
                         "SIGNED_NOT_RECEIVED",
                         RiskLevel.HIGH,
                         "确认信息无误，同意发起争议审理"));
+        service.confirm(
+                dispute.getId(),
+                new AuthenticatedActor("merchant-local", ActorRole.MERCHANT),
+                new IntakeConfirmationCommand(
+                        true,
+                        "SIGNED_NOT_RECEIVED",
+                        RiskLevel.HIGH,
+                        "确认回应并进入举证"));
         caseRepository.flush();
 
         FulfillmentCaseEntity persisted =
@@ -194,22 +236,56 @@ class IntakeRoomServiceIntegrationTest {
                                                     "2026-07-03T02:00:00Z"));
                         });
         assertThat(
-                        notificationRepository
-                                .findAllByRecipientIdOrderByCreatedAtDesc(
-                                        "merchant-local"))
+                        roomEpochRepository.findByCaseIdAndRoomTypeAndLifecycleStatus(
+                                dispute.getId(),
+                                ContractTypes.RoomType.INTAKE,
+                                EpochLifecycleStatus.TERMINAL))
+                .hasValueSatisfying(
+                        epoch -> {
+                            assertThat(epoch.getProcessRevision()).isEqualTo(1L);
+                            assertThat(epoch.getFencingToken()).isEqualTo(1L);
+                        });
+        assertThat(
+                        roomEpochRepository.findByCaseIdAndRoomTypeAndLifecycleStatus(
+                                dispute.getId(),
+                                ContractTypes.RoomType.EVIDENCE,
+                                EpochLifecycleStatus.ACTIVE))
+                .hasValueSatisfying(
+                        epoch -> {
+                            assertThat(epoch.getProcessRevision()).isEqualTo(1L);
+                            assertThat(epoch.getFencingToken()).isEqualTo(2L);
+                        });
+        assertThat(processProjectionRepository.findById(dispute.getId()))
+                .hasValueSatisfying(
+                        projection -> {
+                            assertThat(projection.getCurrentRoom()).isEqualTo("EVIDENCE");
+                            assertThat(projection.getProjectedDeadlineAt())
+                                    .isEqualTo(persisted.getCurrentDeadlineAt());
+                        });
+        var merchantNotifications =
+                notificationRepository
+                        .findAllByRecipientIdOrderByCreatedAtDesc("merchant-local");
+        assertThat(merchantNotifications)
                 .extracting(notification -> notification.getNotificationType())
                 .containsExactlyInAnyOrder(
                         NotificationType.DISPUTE_SUMMONS,
                         NotificationType.EVIDENCE_ROOM_OPENED);
-        assertThat(
-                        notificationRepository
-                                .findAllByRecipientIdOrderByCreatedAtDesc(
-                                        "merchant-local"))
-                .allSatisfy(
+        assertThat(merchantNotifications)
+                .anySatisfy(
                         notification ->
-                                assertThat(notification.getDeepLink())
-                                        .isEqualTo(
-                                                "/disputes/CASE_INTEGRATION/evidence"));
+                                {
+                                    assertThat(notification.getNotificationType())
+                                            .isEqualTo(NotificationType.DISPUTE_SUMMONS);
+                                    assertThat(notification.getDeepLink())
+                                            .isEqualTo("/disputes/CASE_INTEGRATION/intake");
+                                })
+                .anySatisfy(
+                        notification -> {
+                            assertThat(notification.getNotificationType())
+                                    .isEqualTo(NotificationType.EVIDENCE_ROOM_OPENED);
+                            assertThat(notification.getDeepLink())
+                                    .isEqualTo("/disputes/CASE_INTEGRATION/evidence");
+                        });
         assertThat(outboxRepository.count()).isEqualTo(2);
 
         var posted =
@@ -242,8 +318,10 @@ class IntakeRoomServiceIntegrationTest {
                                         + ":"
                                         + event.getEventType())
                 .containsExactly(
-                        "1:EVIDENCE_OPENED",
-                        "2:ROOM_MESSAGE_CREATED");
+                        "1:INITIATOR_INTAKE_COMPLETED",
+                        "2:RESPONDENT_INTAKE_COMPLETED",
+                        "3:EVIDENCE_OPENED",
+                        "4:ROOM_MESSAGE_CREATED");
     }
 
     // 所属模块：【房间协作与权限 / 自动化测试层】「IntakeRoomServiceIntegrationTest.notAdmissiblePersistsOnlyTheInitiatorAndTerminatesAfterIntake()」。
@@ -308,6 +386,19 @@ class IntakeRoomServiceIntegrationTest {
                                 "intake-confirmed:" + dispute.getId()))
                 .hasValueSatisfying(
                         event -> assertThat(event.getEventType()).isEqualTo("INTAKE_REJECTED"));
+        assertThat(
+                        roomEpochRepository.findByCaseIdAndRoomTypeAndLifecycleStatus(
+                                dispute.getId(),
+                                ContractTypes.RoomType.INTAKE,
+                                EpochLifecycleStatus.TERMINAL))
+                .isPresent();
+        assertThat(processProjectionRepository.findById(dispute.getId()))
+                .hasValueSatisfying(
+                        projection -> {
+                            assertThat(projection.getCurrentRoom()).isNull();
+                            assertThat(projection.getMacroPhase())
+                                    .isEqualTo(CaseStatus.NOT_ADMISSIBLE.name());
+                        });
     }
 
     // 所属模块：【房间协作与权限 / 自动化测试层】类型「FixedClockConfiguration」。

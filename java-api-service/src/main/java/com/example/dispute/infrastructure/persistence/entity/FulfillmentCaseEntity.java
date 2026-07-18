@@ -428,6 +428,18 @@ public class FulfillmentCaseEntity extends AbstractEntity {
         return entity;
     }
 
+    public void synchronizeImportedCurrentDeadline(
+            OffsetDateTime deadlineAt, String actorId) {
+        if (sourceType != CaseSourceType.EXTERNAL_IMPORT) {
+            throw new IllegalStateException("only an imported case can reconcile its phase deadline");
+        }
+        if (Objects.equals(currentDeadlineAt, deadlineAt)) {
+            return;
+        }
+        currentDeadlineAt = deadlineAt;
+        updatedBy = required(actorId, "actorId");
+    }
+
     // 所属模块：【PostgreSQL 事实模型 / JPA 实体层】「FulfillmentCaseEntity.completeIntake(String,CaseStatus,RiskLevel,String,String)」。
     // 具体功能：「FulfillmentCaseEntity.completeIntake(String,CaseStatus,RiskLevel,String,String)」：完成接待：先更新内部状态 「disputeType」、「caseStatus」、「riskLevel」、「intakeResultJson」；实际协作者为 「Objects.requireNonNull」、「required」；处理的关键状态/协议值包括 「intakeResultJson」、「actorId」，最终返回「void」。
     // 上游调用：「FulfillmentCaseEntity.completeIntake(String,CaseStatus,RiskLevel,String,String)」由使用「FulfillmentCaseEntity」的控制器、应用服务、Workflow Activity 或测试场景触发。
