@@ -12,6 +12,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -25,6 +26,7 @@ import com.example.dispute.agentstream.application.AgentStreamOperationRegistry;
 import com.example.dispute.agentstream.application.AgentStreamProtocolException;
 import com.example.dispute.infrastructure.persistence.entity.AgentRunEntity;
 import com.example.dispute.infrastructure.persistence.repository.AgentRunRepository;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunProtocol;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.Optional;
@@ -93,6 +95,19 @@ class AgentRunLifecycleServiceTest {
                 .isEqualTo("/internal/agents/intake/turn/stream");
         assertThat(descriptor.visibleFieldPaths())
                 .contains("room_utterance", "case_detail.case_story", "case_detail.intake_quality");
+    }
+
+    @Test
+    void legacyClaimRejectsATemporalOwnedV2Run() {
+        AgentRunEntity run = mock(AgentRunEntity.class);
+        when(run.getRunStatus()).thenReturn("PENDING");
+        when(run.getProtocol()).thenReturn(AgentRunProtocol.V2.wireValue());
+        when(runRepository.findByIdForUpdate(RUN_ID)).thenReturn(Optional.of(run));
+
+        assertThatThrownBy(() -> lifecycleService.claim(RUN_ID))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("legacy AgentRun worker");
+        verify(run, never()).markRunning();
     }
 
     // 所属模块：【Agent 流式运行 / 自动化测试层】「AgentRunLifecycleServiceTest.legalVisibleDeltaPersistsOnlyThePublicEnvelopeAndText()」。

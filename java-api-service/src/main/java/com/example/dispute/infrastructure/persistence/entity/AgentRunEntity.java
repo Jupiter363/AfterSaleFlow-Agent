@@ -338,6 +338,13 @@ public class AgentRunEntity extends AbstractEntity {
                 required(audienceActorIdsJson, "audienceActorIdsJson");
         run.streamIdempotencyKey = required(idempotencyKey, "idempotencyKey");
         run.streamRequestId = required(requestId, "requestId");
+        run.tenantSurrogate = "legacy-default";
+        run.protocol = AgentRunProtocol.V1.wireValue();
+        run.logicalIdempotencyKey = run.streamIdempotencyKey;
+        run.executorKind = AgentRunExecutorKind.LEGACY_WORKER;
+        run.finalizationStatus = "UNCOMMITTED";
+        run.requestHash = run.streamRequestHash;
+        run.attemptLimit = 1;
         run.updatedAt = run.startedAt;
         return run;
     }

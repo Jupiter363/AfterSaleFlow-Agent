@@ -7,6 +7,7 @@
 package com.example.dispute.infrastructure.persistence.repository;
 
 import com.example.dispute.infrastructure.persistence.entity.AgentRunEntity;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunExecutorKind;
 import jakarta.persistence.LockModeType;
 import java.util.List;
 import java.util.Optional;
@@ -75,7 +76,9 @@ public interface AgentRunRepository extends JpaRepository<AgentRunEntity, String
     // 系统意义：「AgentRunRepository.findTop20ByRunStatusAndStreamOperationIsNotNullOrderByCreatedAtAsc(String)」直接影响 PostgreSQL 事实投影；实体记录是 API 查询投影和审计依据，写入必须服从上层事务与状态机
     // Java 语法：接口方法以分号结束，只声明契约；运行时执行实现类中的同签名方法。
     List<AgentRunEntity>
-            findTop20ByRunStatusAndStreamOperationIsNotNullOrderByCreatedAtAsc(
+            findTop20ByProtocolAndExecutorKindAndRunStatusAndStreamOperationIsNotNullOrderByCreatedAtAsc(
+                    String protocol,
+                    AgentRunExecutorKind executorKind,
                     String runStatus);
 
     // 所属模块：【PostgreSQL 事实模型 / 仓储接口层】「AgentRunRepository.findTop20ByCaseIdAndRoomIdAndRunStatusInAndStreamOperationIsNotNullOrderByCreatedAtDesc(String,String,List)」。

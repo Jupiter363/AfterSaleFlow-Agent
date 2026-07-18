@@ -10,9 +10,16 @@ import com.example.dispute.common.transaction.PostCommitSideEffectExecutor;
 import com.example.dispute.config.AppProperties;
 import com.example.dispute.infrastructure.persistence.entity.AgentRunEntity;
 import com.example.dispute.infrastructure.persistence.repository.AgentRunRepository;
+import com.example.dispute.workflow.config.AgentRunV2Properties;
+import com.example.dispute.workflow.config.AgentRunV2Properties.SchedulerMode;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunExecutorKind;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunProtocol;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.List;
 import java.util.Map;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -24,11 +31,15 @@ import org.springframework.stereotype.Component;
 @Component
 public class AgentRunRecoveryScheduler {
 
+    private static final Logger LOGGER =
+            LoggerFactory.getLogger(AgentRunRecoveryScheduler.class);
+
     private final AgentRunRepository runRepository;
     private final AgentRunWorker worker;
     private final AgentRunLifecycleService lifecycleService;
     private final AgentRunStreamEventService eventService;
     private final PostCommitSideEffectExecutor executor;
+    private final SchedulerMode schedulerMode;
     private final long staleAfterMillis;
 
     // 所属模块：【Agent 流式运行 / 应用编排层】「AgentRunRecoveryScheduler.AgentRunRecoveryScheduler(AgentRunRepository,AgentRunWorker,AgentRunLifecycleService,AgentRunStreamEventService,PostCommitSideEffectExecutor,AppProperties)」。
@@ -43,12 +54,14 @@ public class AgentRunRecoveryScheduler {
             AgentRunLifecycleService lifecycleService,
             AgentRunStreamEventService eventService,
             PostCommitSideEffectExecutor executor,
-            AppProperties properties) {
+            AppProperties properties,
+            AgentRunV2Properties v2Properties) {
         this.runRepository = runRepository;
         this.worker = worker;
         this.lifecycleService = lifecycleService;
         this.eventService = eventService;
         this.executor = executor;
+        this.schedulerMode = v2Properties.schedulerMode();
         this.staleAfterMillis = Math.max(30_000L, properties.agent().timeoutMs() + 30_000L);
     }
 
@@ -60,8 +73,19 @@ public class AgentRunRecoveryScheduler {
     // Java 语法：stream/lambda 把集合处理写成管道；lambda 中引用的外部局部变量必须保持 effectively final。
     @Scheduled(fixedDelayString = "${dispute.agent-run-recovery-delay:PT5S}")
     public void recoverPendingRuns() {
+        if (schedulerMode == SchedulerMode.OFF) {
+            return;
+        }
+        if (schedulerMode == SchedulerMode.DETECTOR) {
+            detectTemporalOwnedRuns();
+            return;
+        }
+
         runRepository
-                .findTop20ByRunStatusAndStreamOperationIsNotNullOrderByCreatedAtAsc("PENDING")
+                .findTop20ByProtocolAndExecutorKindAndRunStatusAndStreamOperationIsNotNullOrderByCreatedAtAsc(
+                        AgentRunProtocol.V1.wireValue(),
+                        AgentRunExecutorKind.LEGACY_WORKER,
+                        "PENDING")
                 .forEach(
                         run ->
                                 executor.execute(
@@ -71,7 +95,10 @@ public class AgentRunRecoveryScheduler {
         OffsetDateTime staleBefore =
                 OffsetDateTime.now(ZoneOffset.UTC).minusNanos(staleAfterMillis * 1_000_000L);
         runRepository
-                .findTop20ByRunStatusAndStreamOperationIsNotNullOrderByCreatedAtAsc("RUNNING")
+                .findTop20ByProtocolAndExecutorKindAndRunStatusAndStreamOperationIsNotNullOrderByCreatedAtAsc(
+                        AgentRunProtocol.V1.wireValue(),
+                        AgentRunExecutorKind.LEGACY_WORKER,
+                        "RUNNING")
                 .stream()
                 .filter(
                         run -> {
@@ -83,6 +110,25 @@ public class AgentRunRecoveryScheduler {
                                     && lastProgressAt.isBefore(staleBefore);
                         })
                 .forEach(this::failStale);
+    }
+
+    private void detectTemporalOwnedRuns() {
+        List<AgentRunEntity> pending = temporalOwned("PENDING");
+        List<AgentRunEntity> running = temporalOwned("RUNNING");
+        if (!pending.isEmpty() || !running.isEmpty()) {
+            LOGGER.info(
+                    "Legacy AgentRun scheduler detected Temporal-owned runs without executing them: pending={}, running={}",
+                    pending.size(),
+                    running.size());
+        }
+    }
+
+    private List<AgentRunEntity> temporalOwned(String status) {
+        return runRepository
+                .findTop20ByProtocolAndExecutorKindAndRunStatusAndStreamOperationIsNotNullOrderByCreatedAtAsc(
+                        AgentRunProtocol.V2.wireValue(),
+                        AgentRunExecutorKind.TEMPORAL_ACTIVITY,
+                        status);
     }
 
     // 所属模块：【Agent 流式运行 / 应用编排层】「AgentRunRecoveryScheduler.failStale(AgentRunEntity)」。

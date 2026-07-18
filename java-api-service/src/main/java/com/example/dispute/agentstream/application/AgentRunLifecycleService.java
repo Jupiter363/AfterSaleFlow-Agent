@@ -8,6 +8,8 @@ package com.example.dispute.agentstream.application;
 
 import com.example.dispute.infrastructure.persistence.entity.AgentRunEntity;
 import com.example.dispute.infrastructure.persistence.repository.AgentRunRepository;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunExecutorKind;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunProtocol;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -68,6 +70,11 @@ public class AgentRunLifecycleService {
                         .orElseThrow(() -> new IllegalArgumentException("agent run not found"));
         if (!"PENDING".equals(run.getRunStatus())) {
             return Optional.empty();
+        }
+        if (!AgentRunProtocol.V1.wireValue().equals(run.getProtocol())
+                || run.getExecutorKind() != AgentRunExecutorKind.LEGACY_WORKER) {
+            throw new IllegalStateException(
+                    "legacy AgentRun worker cannot claim a V2 or Temporal-owned run");
         }
         AgentStreamOperationRegistry.OperationDefinition operation =
                 operationRegistry.require(run.getStreamOperation());
