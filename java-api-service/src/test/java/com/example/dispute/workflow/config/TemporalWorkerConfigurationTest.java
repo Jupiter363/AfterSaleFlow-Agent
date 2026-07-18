@@ -10,6 +10,9 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import com.example.dispute.config.AppProperties;
+import com.example.dispute.agentstream.application.AgentRunLedger;
+import com.example.dispute.workflow.activity.agent.AgentRunExecutionGateway;
+import com.example.dispute.workflow.activity.agent.AgentRunFinalizationGateway;
 import com.example.dispute.workflow.activity.domain.CaseProcessLedgerActivitiesImpl;
 import com.example.dispute.workflow.activity.domain.ProcessProjectionActivitiesImpl;
 import com.example.dispute.workflow.activity.system.TemporalWorkerProbeActivities.TemporalWorkerDescription;
@@ -18,6 +21,7 @@ import com.example.dispute.workflow.application.EvidenceWindowActivitiesAdapter;
 import com.example.dispute.workflow.config.TemporalWorkerProperties.QueueCapacity;
 import com.example.dispute.workflow.config.TemporalWorkerProperties.VersioningMode;
 import com.example.dispute.workflow.config.TemporalWorkerProperties.WorkerRole;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunProtocol;
 import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.worker.WorkerFactory;
 import io.temporal.client.WorkflowOptions;
@@ -88,6 +92,32 @@ class TemporalWorkerConfigurationTest {
         }
     }
 
+    @Test
+    void v2AgentWorkerFailsClosedWhenExecutionGatewayIsMissing() {
+        TemporalWorkerProperties properties = properties(WorkerRole.AGENT);
+        AgentRunV2Properties v2Properties = new AgentRunV2Properties(
+                true,
+                AgentRunProtocol.V1,
+                AgentRunV2Properties.SchedulerMode.OFF,
+                Duration.ofMinutes(10),
+                Duration.ofSeconds(15),
+                Duration.ofSeconds(5));
+
+        try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+            TemporalWorkerConfiguration configuration = new TemporalWorkerConfiguration();
+            assertThatThrownBy(() -> configuration.temporalAgentWorkerFactory(
+                            environment.getWorkflowClient(),
+                            properties,
+                            new TemporalWorkerOptionsFactory(properties),
+                            v2Properties,
+                            provider(mock(AgentRunLedger.class)),
+                            mockProvider(AgentRunExecutionGateway.class),
+                            provider(mock(AgentRunFinalizationGateway.class))))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("exactly one AgentRunExecutionGateway");
+        }
+    }
+
     private static WorkerFactory createFactory(
             TestWorkflowEnvironment environment, TemporalWorkerProperties properties) {
         return createFactory(environment, properties, LEGACY_EVIDENCE_WINDOW);
@@ -107,7 +137,19 @@ class TemporalWorkerConfigurationTest {
                 new TemporalWorkerOptionsFactory(properties);
         if (properties.role() == WorkerRole.AGENT) {
             return configuration.temporalAgentWorkerFactory(
-                    environment.getWorkflowClient(), properties, optionsFactory);
+                    environment.getWorkflowClient(),
+                    properties,
+                    optionsFactory,
+                    new AgentRunV2Properties(
+                            false,
+                            AgentRunProtocol.V1,
+                            AgentRunV2Properties.SchedulerMode.EXECUTOR,
+                            Duration.ofMinutes(10),
+                            Duration.ofSeconds(15),
+                            Duration.ofSeconds(5)),
+                    mockProvider(AgentRunLedger.class),
+                    mockProvider(AgentRunExecutionGateway.class),
+                    mockProvider(AgentRunFinalizationGateway.class));
         }
         return configuration.temporalControlWorkerFactory(
                 environment.getWorkflowClient(),
@@ -117,6 +159,20 @@ class TemporalWorkerConfigurationTest {
                 mock(EvidenceWindowActivitiesAdapter.class),
                 mock(CaseProcessLedgerActivitiesImpl.class),
                 mock(ProcessProjectionActivitiesImpl.class));
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <T> org.springframework.beans.factory.ObjectProvider<T> mockProvider(
+            Class<T> type) {
+        return mock(org.springframework.beans.factory.ObjectProvider.class);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <T> org.springframework.beans.factory.ObjectProvider<T> provider(T value) {
+        org.springframework.beans.factory.ObjectProvider<T> provider =
+                mock(org.springframework.beans.factory.ObjectProvider.class);
+        when(provider.getIfUnique()).thenReturn(value);
+        return provider;
     }
 
     private static TemporalWorkerProperties properties(WorkerRole role) {

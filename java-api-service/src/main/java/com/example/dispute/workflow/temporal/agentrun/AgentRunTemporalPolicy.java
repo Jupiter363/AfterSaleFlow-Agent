@@ -13,6 +13,7 @@ public final class AgentRunTemporalPolicy {
     public static final Duration START_TO_CLOSE_TIMEOUT = Duration.ofMinutes(10);
     public static final Duration HEARTBEAT_TIMEOUT = Duration.ofSeconds(15);
     public static final Duration PROGRESS_HEARTBEAT_INTERVAL = Duration.ofSeconds(5);
+    public static final Duration FINALIZER_START_TO_CLOSE_TIMEOUT = Duration.ofMinutes(2);
     public static final int MAXIMUM_ACTIVITY_ATTEMPTS = 3;
 
     private AgentRunTemporalPolicy() {}
@@ -49,5 +50,22 @@ public final class AgentRunTemporalPolicy {
 
     public static int boundedActivityAttempts(int activityAttemptsRemaining) {
         return Math.min(MAXIMUM_ACTIVITY_ATTEMPTS, Math.max(0, activityAttemptsRemaining));
+    }
+
+    /** Finalizer retries are independent and unbounded; its domain write is idempotent and fenced. */
+    public static ActivityOptions finalizerActivityOptions() {
+        return ActivityOptions.newBuilder()
+                .setTaskQueue(AGENT_EXECUTION)
+                .setStartToCloseTimeout(FINALIZER_START_TO_CLOSE_TIMEOUT)
+                .setCancellationType(ActivityCancellationType.WAIT_CANCELLATION_COMPLETED)
+                .setRetryOptions(
+                        RetryOptions.newBuilder()
+                                .setInitialInterval(Duration.ofSeconds(1))
+                                .setBackoffCoefficient(2.0)
+                                .setMaximumInterval(Duration.ofSeconds(30))
+                                .setMaximumAttempts(0)
+                                .setDoNotRetry("AgentRunFinalizationRejected")
+                                .build())
+                .build();
     }
 }

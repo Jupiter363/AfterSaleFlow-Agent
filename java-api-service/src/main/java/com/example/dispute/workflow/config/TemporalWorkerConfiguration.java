@@ -6,18 +6,25 @@ import static com.example.dispute.workflow.contract.v1.TemporalTaskQueues.NOTIFI
 import static com.example.dispute.workflow.contract.v1.TemporalTaskQueues.ROOM_CONTROL;
 
 import com.example.dispute.config.AppProperties;
+import com.example.dispute.agentstream.application.AgentRunLedger;
+import com.example.dispute.workflow.activity.agent.AgentRunExecutionGateway;
+import com.example.dispute.workflow.activity.agent.AgentRunFinalizationGateway;
+import com.example.dispute.workflow.activity.agent.ExecuteAgentRunActivityImpl;
+import com.example.dispute.workflow.activity.agent.FinalizeAgentRunActivityImpl;
 import com.example.dispute.workflow.activity.domain.CaseProcessLedgerActivitiesImpl;
 import com.example.dispute.workflow.activity.domain.ProcessProjectionActivitiesImpl;
 import com.example.dispute.workflow.activity.system.TemporalWorkerProbeWorkflowImpl;
 import com.example.dispute.workflow.application.EvidenceWindowActivitiesAdapter;
 import com.example.dispute.workflow.contract.v1.TemporalTaskQueues;
 import com.example.dispute.workflow.temporal.EvidenceWindowWorkflowImpl;
+import com.example.dispute.workflow.temporal.agentrun.AgentRunWorkflowImpl;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessWorkflowImpl;
 import com.example.dispute.workflow.temporal.room.common.RoomControlWorkflowImpl;
 import io.temporal.client.WorkflowClient;
 import io.temporal.worker.Worker;
 import io.temporal.worker.WorkerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Lazy;
@@ -65,12 +72,24 @@ public class TemporalWorkerConfiguration {
     WorkerFactory temporalAgentWorkerFactory(
             WorkflowClient workflowClient,
             TemporalWorkerProperties properties,
-            TemporalWorkerOptionsFactory optionsFactory) {
+            TemporalWorkerOptionsFactory optionsFactory,
+            AgentRunV2Properties agentRunV2Properties,
+            ObjectProvider<AgentRunLedger> ledgerProvider,
+            ObjectProvider<AgentRunExecutionGateway> executionGatewayProvider,
+            ObjectProvider<AgentRunFinalizationGateway> finalizationGatewayProvider) {
         WorkerFactory factory =
                 WorkerFactory.newInstance(workflowClient, optionsFactory.factoryOptions());
         return start(
                 factory,
-                () -> registerAgentWorker(factory, properties, optionsFactory));
+                () ->
+                        registerAgentWorker(
+                                factory,
+                                properties,
+                                optionsFactory,
+                                agentRunV2Properties,
+                                ledgerProvider,
+                                executionGatewayProvider,
+                                finalizationGatewayProvider));
     }
 
     private static void registerControlWorkers(
@@ -121,14 +140,42 @@ public class TemporalWorkerConfiguration {
     private static void registerAgentWorker(
             WorkerFactory factory,
             TemporalWorkerProperties properties,
-            TemporalWorkerOptionsFactory optionsFactory) {
+            TemporalWorkerOptionsFactory optionsFactory,
+            AgentRunV2Properties agentRunV2Properties,
+            ObjectProvider<AgentRunLedger> ledgerProvider,
+            ObjectProvider<AgentRunExecutionGateway> executionGatewayProvider,
+            ObjectProvider<AgentRunFinalizationGateway> finalizationGatewayProvider) {
         Worker agentExecution =
                 factory.newWorker(
                         AGENT_EXECUTION, optionsFactory.workerOptions(AGENT_EXECUTION));
+        if (!agentRunV2Properties.enabled()) {
+            agentExecution.registerWorkflowImplementationTypes(
+                    TemporalWorkerProbeWorkflowImpl.class);
+            agentExecution.registerActivitiesImplementations(
+                    new TemporalWorkerProbeActivitiesImpl(properties, AGENT_EXECUTION));
+            return;
+        }
+
+        AgentRunLedger ledger = requireUnique(ledgerProvider, "AgentRunLedger");
+        AgentRunExecutionGateway executionGateway =
+                requireUnique(executionGatewayProvider, "AgentRunExecutionGateway");
+        AgentRunFinalizationGateway finalizationGateway =
+                requireUnique(finalizationGatewayProvider, "AgentRunFinalizationGateway");
         agentExecution.registerWorkflowImplementationTypes(
-                TemporalWorkerProbeWorkflowImpl.class);
+                AgentRunWorkflowImpl.class, TemporalWorkerProbeWorkflowImpl.class);
         agentExecution.registerActivitiesImplementations(
+                new ExecuteAgentRunActivityImpl(ledger, executionGateway),
+                new FinalizeAgentRunActivityImpl(finalizationGateway),
                 new TemporalWorkerProbeActivitiesImpl(properties, AGENT_EXECUTION));
+    }
+
+    private static <T> T requireUnique(ObjectProvider<T> provider, String dependency) {
+        T value = provider.getIfUnique();
+        if (value == null) {
+            throw new IllegalStateException(
+                    "AgentRun V2 requires exactly one " + dependency);
+        }
+        return value;
     }
 
     private static WorkerFactory start(WorkerFactory factory, Runnable registration) {
