@@ -73,7 +73,9 @@ final class ResilientAgentRunStreamWakeupSubscription implements SmartLifecycle 
             RedisConnection connection = null;
             try {
                 connection = connectionFactory.getConnection();
-                activeConnection = connection;
+                if (!activate(connection, subscriptionGeneration)) {
+                    return;
+                }
                 connection.subscribe(subscriber, CHANNEL);
             } catch (RuntimeException failure) {
                 if (isCurrent(subscriptionGeneration)) {
@@ -89,6 +91,15 @@ final class ResilientAgentRunStreamWakeupSubscription implements SmartLifecycle 
                 return;
             }
         }
+    }
+
+    private synchronized boolean activate(
+            RedisConnection connection, long subscriptionGeneration) {
+        if (!isCurrent(subscriptionGeneration)) {
+            return false;
+        }
+        activeConnection = connection;
+        return true;
     }
 
     private boolean awaitRetry(long subscriptionGeneration) {

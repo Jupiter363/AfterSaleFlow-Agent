@@ -10,10 +10,13 @@ import static org.mockito.Mockito.when;
 import com.example.dispute.agentstream.application.AgentRunStreamEventService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 import org.springframework.context.SmartLifecycle;
 import org.springframework.data.redis.RedisConnectionFailureException;
+import org.springframework.data.redis.connection.RedisConnection;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
 
 class RedisAgentRunStreamWakeupSubscriberTest {
@@ -64,6 +67,54 @@ class RedisAgentRunStreamWakeupSubscriberTest {
             verify(connectionFactory, timeout(1_000).atLeastOnce()).getConnection();
         } finally {
             lifecycle.stop();
+        }
+    }
+
+    @Test
+    void lifecycleStopClosesAConnectionThatArrivesDuringShutdown() throws Exception {
+        RedisConnectionFactory connectionFactory =
+                Mockito.mock(RedisConnectionFactory.class);
+        RedisConnection connection = Mockito.mock(RedisConnection.class);
+        CountDownLatch connectionRequested = new CountDownLatch(1);
+        CountDownLatch releaseConnection = new CountDownLatch(1);
+        when(connectionFactory.getConnection()).thenAnswer(ignored -> {
+            connectionRequested.countDown();
+            awaitUninterruptibly(releaseConnection);
+            return connection;
+        });
+        RedisAgentRunStreamWakeupSubscriber subscriber =
+                new RedisAgentRunStreamWakeupSubscriber(objectMapper, eventService);
+        SmartLifecycle lifecycle = new AgentRunStreamWakeupSubscriptionConfiguration()
+                .agentRunStreamWakeupSubscription(connectionFactory, subscriber);
+
+        try {
+            lifecycle.start();
+            assertThat(connectionRequested.await(1, TimeUnit.SECONDS)).isTrue();
+
+            lifecycle.stop();
+            releaseConnection.countDown();
+
+            verify(connection, timeout(1_000)).close();
+            verify(connection, never())
+                    .subscribe(Mockito.any(), Mockito.any(byte[][].class));
+        } finally {
+            releaseConnection.countDown();
+            lifecycle.stop();
+        }
+    }
+
+    private static void awaitUninterruptibly(CountDownLatch latch) {
+        boolean interrupted = false;
+        while (true) {
+            try {
+                latch.await();
+                break;
+            } catch (InterruptedException failure) {
+                interrupted = true;
+            }
+        }
+        if (interrupted) {
+            Thread.currentThread().interrupt();
         }
     }
 }
