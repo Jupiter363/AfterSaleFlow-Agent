@@ -15,6 +15,7 @@ import com.example.dispute.agentstream.application.AgentRunDomainResultCommitter
 import com.example.dispute.agentstream.application.AgentRunFormalResultCommitter;
 import com.example.dispute.agentstream.application.AgentRunFormalResultCommitter.FormalResultCommit;
 import com.example.dispute.agentstream.application.AgentRunLedger;
+import com.example.dispute.workflow.application.TemporalAgentRunV2WorkflowLauncher;
 import com.example.dispute.workflow.contract.v1.AgentExecutionManifest;
 import com.example.dispute.workflow.contract.v1.AgentRunFinalizationReceipt;
 import com.example.dispute.workflow.contract.v1.AgentRunFinalizationReceipt.CommitStatus;
@@ -197,7 +198,7 @@ class AgentRunFormalResultCommitterTest {
                 command.processRevision(),
                 FENCING_TOKEN,
                 new AgentExecutionManifest.WorkflowRef(
-                        "agent-run-v2/" + request.logicalRunId(),
+                        TemporalAgentRunV2WorkflowLauncher.workflowId(request.logicalRunId()),
                         "temporal-run-001",
                         "AgentRunV2Workflow",
                         "test-build"),
