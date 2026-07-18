@@ -1,0 +1,133 @@
+package com.example.dispute.workflow.agentrun;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+import com.example.dispute.agentstream.application.AgentRunLedger;
+import com.example.dispute.workflow.activity.agent.AgentRunActivityContext;
+import com.example.dispute.workflow.activity.agent.AgentRunExecutionGateway;
+import com.example.dispute.workflow.activity.agent.AgentRunProgress;
+import com.example.dispute.workflow.activity.agent.ExecuteAgentRunActivityImpl;
+import com.example.dispute.workflow.contract.v1.AgentRunAttemptHeartbeat;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
+import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
+import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
+import com.example.dispute.workflow.contract.v1.RoomGraphResult;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.json.JsonMapper;
+import io.temporal.client.ActivityCanceledException;
+import java.nio.file.Path;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import org.junit.jupiter.api.Test;
+
+class ExecuteAgentRunActivityCancellationTest {
+
+    private static final ObjectMapper MAPPER = JsonMapper.builder().findAndAddModules().build();
+    private static final Path FIXTURES =
+            Path.of("..", "contracts", "agent-platform", "v1", "fixtures", "valid");
+    private static final Instant NOW = Instant.parse("2026-07-17T08:00:00Z");
+
+    @Test
+    void cancellationClosesTheStreamAndRejectsALateFinal() throws Exception {
+        ExecuteAgentRunRequest request = request();
+        RoomGraphResult graphResult = graphResult();
+        AgentRunLedger ledger = mock(AgentRunLedger.class);
+        AgentRunExecutionGateway gateway = mock(AgentRunExecutionGateway.class);
+        when(ledger.startNextAttempt(request.agentRunId(), request, NOW))
+                .thenReturn(runningAttempt());
+        AtomicInteger heartbeatCount = new AtomicInteger();
+        AgentRunActivityContext context = new AgentRunActivityContext() {
+            @Override
+            public int temporalAttempt() {
+                return 1;
+            }
+
+            @Override
+            public void heartbeat(AgentRunAttemptHeartbeat details) {
+                if (heartbeatCount.incrementAndGet() == 2) {
+                    throw new ActivityCanceledException();
+                }
+            }
+        };
+        AtomicBoolean streamClosed = new AtomicBoolean();
+        when(gateway.execute(eq(request), any(), any()))
+                .thenAnswer(invocation -> {
+                    AgentRunExecutionGateway.ProgressListener listener = invocation.getArgument(1);
+                    com.example.dispute.workflow.activity.agent.AgentRunCancellationToken token =
+                            invocation.getArgument(2);
+                    token.onCancellation(() -> streamClosed.set(true));
+                    try {
+                        listener.onProgress(new AgentRunProgress(1, true, false));
+                    } catch (ActivityCanceledException ignored) {
+                        // Simulate a transport racing cancellation and returning a stale final.
+                    }
+                    return new AgentRunExecutionGateway.Completion(graphResult, 7, true);
+                });
+        ExecuteAgentRunActivityImpl activity = new ExecuteAgentRunActivityImpl(
+                ledger,
+                gateway,
+                () -> context,
+                Clock.fixed(NOW, ZoneOffset.UTC),
+                Duration.ofHours(1),
+                Executors::newSingleThreadScheduledExecutor);
+
+        assertThatThrownBy(() -> activity.execute(request))
+                .isInstanceOf(ActivityCanceledException.class);
+
+        assertThat(streamClosed).isTrue();
+        verify(ledger).recordAttemptFailure(
+                request.agentRunId(),
+                request.attemptId(),
+                request.attemptNo(),
+                AgentRunAttemptStatus.CANCELLED,
+                "AGENT_RUN_CANCELLED",
+                false,
+                NOW);
+        verify(ledger, never()).recordResultReady(any());
+    }
+
+    private static AgentRunLedger.Attempt runningAttempt() {
+        return new AgentRunLedger.Attempt(
+                "attempt-001",
+                "agent-run-001",
+                1,
+                AgentRunAttemptStatus.RUNNING,
+                false,
+                0,
+                null,
+                NOW,
+                null,
+                0);
+    }
+
+    private static ExecuteAgentRunRequest request() throws Exception {
+        return new ExecuteAgentRunRequest(
+                ExecuteAgentRunRequest.SCHEMA_VERSION,
+                "agent-run-001",
+                1,
+                "agent-stream.v2",
+                fixture("room-graph-command-valid.json", RoomGraphCommand.class));
+    }
+
+    private static RoomGraphResult graphResult() throws Exception {
+        return fixture("room-graph-result-valid.json", RoomGraphResult.class);
+    }
+
+    private static <T> T fixture(String file, Class<T> type) throws Exception {
+        JsonNode wrapper = MAPPER.readTree(FIXTURES.resolve(file).toFile());
+        return MAPPER.treeToValue(wrapper.required("instance"), type);
+    }
+}
