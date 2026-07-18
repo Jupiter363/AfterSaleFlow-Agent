@@ -1,5 +1,9 @@
 # Phase 1 MIG-001 SHADOW 证据归档与切流手册
 
+Phase 2-8 开始前应先阅读
+[`phase-1-retrospective.md`](./phase-1-retrospective.md)，复核 Phase 1 已出现的问题、
+故障分类规则和防复发检查项。本手册负责正式证据和切流边界，复盘负责开发过程改进，二者不能互相替代。
+
 ## 1. 门禁边界
 
 本手册生成 `temporal-first-phase-evidence.v1` 的 MIG-001 技术证据。Phase 1 只验证

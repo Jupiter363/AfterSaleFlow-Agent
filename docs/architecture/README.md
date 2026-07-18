@@ -20,6 +20,8 @@ Temporal-first 架构为准。任何重构既要通过目标架构门禁，也�
 - [数据库说明](../database/README.md)
 - [部署说明](../deployment/README.md)
 - [发布说明](../release/README.md)
+- [Phase 1 Temporal 控制面实施复盘](../runbooks/temporal-first/phase-1-retrospective.md)：
+  Phase 2-8 开始前必须复核的问题、根因、防复发规则和阶段执行清单。
 
 ## 历史归档
 

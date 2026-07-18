@@ -374,6 +374,10 @@ flowchart LR
 每阶段只做聚焦验证。每次切 writer 都必须有 server-side persisted epoch choice、shadow/parity 报告、
 单一 writer SQL 检查和明确回滚命令。下面的证据路径在实施前均为 `TODO`。
 
+Phase 2-8 开始前必须阅读
+[`Phase 1 Temporal 控制面实施复盘`](../docs/runbooks/temporal-first/phase-1-retrospective.md)，
+执行其中的入口预检、纵向 slice、故障分类、复跑和证据归档规则；若与本计划门禁冲突，以本计划和正式 ADR 为准。
+
 ### 7.1 Phase 0: Decisions and contracts (`MIG-000`)
 
 **目标**：在写 runtime 代码前冻结状态所有权、SLO、重试分类、版本策略、合同和行为变更；建立自动检查
