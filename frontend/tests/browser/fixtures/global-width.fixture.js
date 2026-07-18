@@ -397,6 +397,25 @@ export async function installGlobalWidthFixture(page, options = {}) {
     }
     if (
       method === "GET" &&
+      path === `/api/disputes/${GLOBAL_CASE_IDS.intake}/intake/status`
+    ) {
+      return fulfillJson(route, {
+        current_actor_completed: false,
+        can_use_intake: true,
+        can_enter_evidence: false,
+      });
+    }
+    if (
+      method === "GET" &&
+      (path ===
+        `/api/disputes/${GLOBAL_CASE_IDS.evidence}/rooms/INTAKE/turn-memory/latest` ||
+        path ===
+          `/api/disputes/${GLOBAL_CASE_IDS.evidence}/rooms/EVIDENCE/turn-memory/latest`)
+    ) {
+      return fulfillJson(route, {});
+    }
+    if (
+      method === "GET" &&
       path === `/api/disputes/${GLOBAL_CASE_IDS.evidence}/evidence`
     ) {
       return fulfillJson(route, evidenceCatalog(GLOBAL_CASE_IDS.evidence));
@@ -432,11 +451,31 @@ export async function installGlobalWidthFixture(page, options = {}) {
     ) {
       return fulfillJson(route, []);
     }
+    const activeAgentRun = path.match(
+      /^\/api\/disputes\/([^/]+)\/rooms\/(INTAKE|EVIDENCE|HEARING)\/agent-runs\/active$/,
+    );
+    if (
+      method === "GET" &&
+      activeAgentRun &&
+      isKnownCaseId(activeAgentRun[1])
+    ) {
+      return fulfillJson(route, []);
+    }
+    const eventReplay = path.match(/^\/api\/disputes\/([^/]+)\/events\/replay$/);
+    if (method === "GET" && eventReplay && isKnownCaseId(eventReplay[1])) {
+      return fulfillJson(route, []);
+    }
     if (
       method === "GET" &&
       path === `/api/disputes/${GLOBAL_CASE_IDS.outcome}/outcome`
     ) {
       return fulfillJson(route, outcomeSnapshot());
+    }
+    if (
+      method === "GET" &&
+      path === `/api/disputes/${GLOBAL_CASE_IDS.outcome}/evidence`
+    ) {
+      return fulfillJson(route, evidenceCatalog(GLOBAL_CASE_IDS.outcome));
     }
     if (method === "GET" && path === "/api/reviews") {
       return fulfillJson(route, reviewTasks());

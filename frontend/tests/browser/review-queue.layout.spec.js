@@ -58,6 +58,14 @@ async function installReviewQueueFixture(page, scenario = "normal") {
     ) {
       return fulfillJson(route, { unread_count: 0 });
     }
+    if (request.method() === "GET" && url.pathname === "/api/disputes") {
+      return fulfillJson(route, {
+        items: [],
+        page: 0,
+        size: 20,
+        total_elements: 0,
+      });
+    }
     if (request.method() === "GET" && url.pathname === "/api/reviews") {
       return fulfillJson(route, [
         {

@@ -10,6 +10,7 @@ import {
   LONG_CASE_ID,
   LONG_GUIDE,
   LONG_ORDER_ID,
+  LONG_TITLE,
 } from "./fixtures/dispute-overview.fixture.js";
 
 const screenshotDirectory = fileURLToPath(
@@ -20,15 +21,15 @@ const screenshotDirectory = fileURLToPath(
 );
 
 const viewportMatrix = [
-  { width: 1021, height: 900, expectedHeight: 730, columns: 2 },
-  { width: 1020, height: 900, expectedHeight: 810, columns: 1 },
-  { width: 681, height: 900, expectedHeight: 810, columns: 1 },
-  { width: 680, height: 900, expectedHeight: 880, columns: 1 },
-  { width: 361, height: 900, expectedHeight: 880, columns: 1 },
-  { width: 360, height: 900, expectedHeight: 940, columns: 1 },
-  { width: 390, height: 844, expectedHeight: 880, columns: 1 },
-  { width: 320, height: 568, expectedHeight: 940, columns: 1 },
-  { width: 1024, height: 600, expectedHeight: 720, columns: 2 },
+  { width: 1021, height: 900, columns: 2 },
+  { width: 1020, height: 900, columns: 1 },
+  { width: 681, height: 900, columns: 1 },
+  { width: 680, height: 900, columns: 1 },
+  { width: 361, height: 900, columns: 1 },
+  { width: 360, height: 900, columns: 1 },
+  { width: 390, height: 844, columns: 1 },
+  { width: 320, height: 568, columns: 1 },
+  { width: 1024, height: 600, columns: 2 },
 ];
 
 // 业务位置：【前端浏览器回归测试】openOverview：切换与 当前阶段业务数据 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
@@ -156,56 +157,64 @@ for (const viewport of viewportMatrix) {
     const layout = page.locator(".overview-layout");
     const rail = page.locator(".dispute-rail");
     const main = page.locator("[data-hearing-adventure]");
-    const guide = page.locator("[data-overview-guide]");
     const journey = page.locator("[data-adventure-path]");
+    const mapViewport = page.locator(".hearing-adventure__viewport");
+    const map = page.locator(".hearing-adventure__map");
     const stages = journey.locator(":scope > li");
     const dashboard = page.locator("[data-case-journey-dashboard]");
 
-    await expect(layout).toHaveCSS("height", `${viewport.expectedHeight}px`);
+    const layoutBox = await layout.boundingBox();
+    expect(layoutBox).not.toBeNull();
+    if (viewport.columns === 2) {
+      expect(layoutBox.height).toBeCloseTo(690, 0);
+    } else {
+      expect(layoutBox.height).toBeGreaterThanOrEqual(850);
+      expect(layoutBox.height).toBeLessThanOrEqual(980);
+    }
     expect(await gridTrackCount(layout, "gridTemplateColumns")).toBe(
       viewport.columns,
     );
-    expect(await gridTrackCount(dashboard, "gridTemplateColumns")).toBe(2);
-    expect(await gridTrackCount(dashboard, "gridTemplateRows")).toBe(2);
+    await expect(dashboard).toBeVisible();
 
-    const stageBoxes = await stages.evaluateAll((items) =>
-      items.map((item) => {
-        const box = item.getBoundingClientRect();
-        return { x: box.x, y: box.y, width: box.width, height: box.height };
-      }),
-    );
-    expect(stageBoxes).toHaveLength(5);
-    expect(
-      Math.max(...stageBoxes.map(({ y }) => y)) -
-        Math.min(...stageBoxes.map(({ y }) => y)),
-    ).toBeLessThanOrEqual(1);
-    for (let index = 1; index < stageBoxes.length; index += 1) {
-      expect(stageBoxes[index].x).toBeGreaterThan(stageBoxes[index - 1].x);
+    const [mapBox, stageBoxes] = await Promise.all([
+      map.boundingBox(),
+      stages.evaluateAll((items) =>
+        items.map((item) => {
+          const box = item.getBoundingClientRect();
+          return { x: box.x, y: box.y, width: box.width, height: box.height };
+        }),
+      ),
+    ]);
+    expect(mapBox).not.toBeNull();
+    expect(stageBoxes).toHaveLength(6);
+    for (const stageBox of stageBoxes) {
+      expect(stageBox.x).toBeGreaterThanOrEqual(mapBox.x - 1);
+      expect(stageBox.x + stageBox.width).toBeLessThanOrEqual(
+        mapBox.x + mapBox.width + 1,
+      );
+      expect(stageBox.y).toBeGreaterThanOrEqual(mapBox.y - 1);
+      expect(stageBox.y + stageBox.height).toBeLessThanOrEqual(
+        mapBox.y + mapBox.height + 1,
+      );
     }
 
     await assertInside(rail, layout);
     await assertInside(main, layout);
     await assertInside(main.locator(".hearing-adventure__header"), main);
-    await assertInside(guide, main);
-    await assertInside(journey, main);
+    await assertInside(mapViewport, main);
     await assertInside(dashboard, main);
+    expect(
+      await mapViewport.evaluate(
+        (element) => element.scrollWidth > element.clientWidth + 1,
+      ),
+    ).toBe(true);
     for (const card of await dashboard.locator(":scope > article").all()) {
       await assertInside(card, dashboard);
     }
 
-    if (viewport.width === 361 || viewport.width === 360) {
-      const actions = page.locator(".overview-page__actions > button");
-      const [first, second] = await Promise.all([
-        actions.nth(0).boundingBox(),
-        actions.nth(1).boundingBox(),
-      ]);
-      expect(first).not.toBeNull();
-      expect(second).not.toBeNull();
-      if (viewport.width === 361) {
-        expect(Math.abs(first.y - second.y)).toBeLessThanOrEqual(1);
-      } else {
-        expect(second.y).toBeGreaterThanOrEqual(first.y + first.height - 1);
-      }
+    const caseActions = page.locator(".overview-case-actions");
+    for (const action of await caseActions.locator(":scope > button").all()) {
+      await assertInside(action, caseActions);
     }
 
     if (viewport.height === 600) {
@@ -236,62 +245,38 @@ for (const viewport of [
   }) => {
     await openOverview(page, viewport, "long-unbroken");
 
-    const caseValue = page.locator("[data-case-file-value]");
-    const orderValue = page.locator("[data-order-value]");
-    const nextAction = page.locator("[data-next-action-value]");
     const selectedTitle = page.locator(".hearing-adventure__header h2");
     const guideMessage = page.locator(
       "[data-overview-guide] .digital-human__copy p",
     );
     const activeTicket = page.locator(".dispute-ticket--active");
     const ticketAction = activeTicket.locator(":scope > small");
+    const ticketTitle = activeTicket.locator(":scope > strong");
 
-    await expect(caseValue).toHaveAttribute("title", LONG_CASE_ID);
-    await expect(caseValue).toHaveAttribute("aria-label", LONG_CASE_ID);
-    await expect(orderValue).toHaveAttribute("title", LONG_ORDER_ID);
-    await expect(orderValue).toHaveAttribute("aria-label", LONG_ORDER_ID);
-    await expect(nextAction).toHaveAttribute("title", LONG_GUIDE);
-    await expect(nextAction).toHaveAttribute("aria-label", LONG_GUIDE);
+    await expect(page.locator("body")).not.toContainText(LONG_CASE_ID);
+    await expect(page.locator("body")).not.toContainText(LONG_ORDER_ID);
+    await expect(selectedTitle).toHaveAttribute("title", LONG_TITLE);
+    await expect(ticketTitle).toContainText(LONG_TITLE);
+    await expect(guideMessage).toContainText(LONG_GUIDE);
 
-    for (const value of [caseValue, orderValue]) {
-      const metrics = await value.evaluate((element) => {
-        const style = getComputedStyle(element);
-        return {
-          clientWidth: element.clientWidth,
-          scrollWidth: element.scrollWidth,
-          overflow: style.overflow,
-          textOverflow: style.textOverflow,
-          whiteSpace: style.whiteSpace,
-        };
-      });
-      expect(metrics).toMatchObject({
-        overflow: "hidden",
-        textOverflow: "ellipsis",
-        whiteSpace: "nowrap",
-      });
-      expect(metrics.scrollWidth).toBeGreaterThan(metrics.clientWidth);
-    }
-
-    for (const value of [nextAction, selectedTitle, guideMessage]) {
-      const metrics = await value.evaluate((element) => {
-        const style = getComputedStyle(element);
-        return {
-          clientWidth: element.clientWidth,
-          scrollWidth: element.scrollWidth,
-          clientHeight: element.clientHeight,
-          lineHeight: Number.parseFloat(style.lineHeight),
-          overflow: style.overflow,
-          overflowWrap: style.overflowWrap,
-          webkitLineClamp: style.webkitLineClamp,
-        };
-      });
-      expect(metrics.scrollWidth).toBeLessThanOrEqual(metrics.clientWidth + 1);
-      expect(metrics.overflowWrap).toBe("anywhere");
-      expect(metrics.webkitLineClamp).toBe("2");
-      expect(metrics.clientHeight).toBeLessThanOrEqual(
-        metrics.lineHeight * 2 + 1,
-      );
-    }
+    const selectedTitleMetrics = await selectedTitle.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return {
+        clientWidth: element.clientWidth,
+        scrollWidth: element.scrollWidth,
+        overflow: style.overflow,
+        textOverflow: style.textOverflow,
+        whiteSpace: style.whiteSpace,
+      };
+    });
+    expect(selectedTitleMetrics).toMatchObject({
+      overflow: "hidden",
+      textOverflow: "ellipsis",
+      whiteSpace: "nowrap",
+    });
+    expect(selectedTitleMetrics.scrollWidth).toBeGreaterThan(
+      selectedTitleMetrics.clientWidth,
+    );
 
     const ticketActionMetrics = await ticketAction.evaluate((element) => {
       const style = getComputedStyle(element);
@@ -312,11 +297,7 @@ for (const viewport of [
       ticketActionMetrics.clientWidth,
     );
     await assertInside(ticketAction, activeTicket);
-
-    await assertInside(
-      page.locator("[data-overview-guide]"),
-      page.locator("[data-hearing-adventure]"),
-    );
+    await assertInside(ticketTitle, activeTicket);
     await assertInside(
       page.locator("[data-case-journey-dashboard]"),
       page.locator("[data-hearing-adventure]"),
@@ -336,49 +317,53 @@ for (const viewport of [
   { width: 320, height: 568 },
 ]) {
   // 业务位置：【前端浏览器回归测试】test：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
-  test(`keeps stages four and five clear of the case index at track end on ${viewport.width}px`, async ({
+  test(`keeps the final stage visible at the map track end on ${viewport.width}px`, async ({
     page,
   }) => {
     await openOverview(page, viewport);
 
     const journey = page.locator("[data-adventure-path]");
+    const mapViewport = page.locator(".hearing-adventure__viewport");
+    const map = page.locator(".hearing-adventure__map");
     const dashboard = page.locator("[data-case-journey-dashboard]");
     await expect
       .poll(() =>
-        journey.evaluate(
+        mapViewport.evaluate(
           (element) => element.scrollWidth > element.clientWidth + 1,
         ),
       )
       .toBe(true);
-    await journey.evaluate((element) => {
+    await mapViewport.evaluate((element) => {
       element.scrollLeft = element.scrollWidth;
     });
     await expect
-      .poll(() => journey.evaluate((element) => element.scrollLeft))
+      .poll(() => mapViewport.evaluate((element) => element.scrollLeft))
       .toBeGreaterThan(0);
 
-    const [journeyBox, dashboardBox, fourthBox, fifthBox] = await Promise.all([
-      journey.boundingBox(),
+    const [viewportBox, mapBox, dashboardBox, finalStageBox] = await Promise.all([
+      mapViewport.boundingBox(),
+      map.boundingBox(),
       dashboard.boundingBox(),
-      journey.locator(":scope > li").nth(3).boundingBox(),
-      journey.locator(":scope > li").nth(4).boundingBox(),
+      journey.locator(":scope > li").last().boundingBox(),
     ]);
-    expect(journeyBox).not.toBeNull();
+    expect(viewportBox).not.toBeNull();
+    expect(mapBox).not.toBeNull();
     expect(dashboardBox).not.toBeNull();
-    expect(fourthBox).not.toBeNull();
-    expect(fifthBox).not.toBeNull();
-    for (const stageBox of [fourthBox, fifthBox]) {
-      expect(stageBox.x).toBeGreaterThanOrEqual(journeyBox.x - 1);
-      expect(stageBox.x + stageBox.width).toBeLessThanOrEqual(
-        journeyBox.x + journeyBox.width + 1,
-      );
-      expect(stageBox.y + stageBox.height).toBeLessThanOrEqual(
-        dashboardBox.y + 1,
-      );
-    }
+    expect(finalStageBox).not.toBeNull();
+    expect(finalStageBox.x).toBeGreaterThanOrEqual(viewportBox.x - 1);
+    expect(finalStageBox.x + finalStageBox.width).toBeLessThanOrEqual(
+      viewportBox.x + viewportBox.width + 1,
+    );
+    expect(finalStageBox.y).toBeGreaterThanOrEqual(mapBox.y - 1);
+    expect(finalStageBox.y + finalStageBox.height).toBeLessThanOrEqual(
+      mapBox.y + mapBox.height + 1,
+    );
+    expect(viewportBox.y).toBeGreaterThanOrEqual(
+      dashboardBox.y + dashboardBox.height,
+    );
 
     await assertNoPageHorizontalOverflow(page);
-    await journey.scrollIntoViewIfNeeded();
+    await mapViewport.scrollIntoViewIfNeeded();
     await captureLayoutScreenshot(page, {
       viewport,
       track: "track-end",

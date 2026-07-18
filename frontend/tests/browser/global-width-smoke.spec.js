@@ -25,7 +25,7 @@ const routes = [
     name: "evidence room",
     path: `/disputes/${GLOBAL_CASE_IDS.evidence}/evidence`,
     role: "USER",
-    ready: "[data-evidence-card]",
+    ready: "[data-evidence-board-panel]",
   },
   {
     name: "hearing court",
@@ -37,7 +37,7 @@ const routes = [
     name: "outcome",
     path: `/disputes/${GLOBAL_CASE_IDS.outcome}/outcome`,
     role: "USER",
-    ready: ".verdict-card",
+    ready: "[data-outcome-summary-layout]",
   },
   {
     name: "review queue",

@@ -163,6 +163,17 @@ export async function installHearingCourtFixture(page, options = {}) {
     }
     if (
       request.method() === "GET" &&
+      url.pathname === `/api/disputes/${CASE_ID}`
+    ) {
+      return fulfillJson(route, {
+        id: CASE_ID,
+        status: "HEARING",
+        current_room: "HEARING",
+        initiator_role: "USER",
+      });
+    }
+    if (
+      request.method() === "GET" &&
       url.pathname === `/api/disputes/${CASE_ID}/hearing`
     ) {
       if (options.loadError) {

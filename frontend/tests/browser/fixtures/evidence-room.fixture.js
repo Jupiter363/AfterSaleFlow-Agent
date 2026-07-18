@@ -26,6 +26,7 @@ function buildEvidenceCatalog({
   return {
     case_id: CASE_ID,
     initiator_role: initiatorRole,
+    initiator_id: actors[initiatorRole]?.id || actors.USER.id,
     items: Array.from({ length: count }, (_, index) => {
       const sequence = index + 1;
       return {
@@ -33,6 +34,7 @@ function buildEvidenceCatalog({
         evidence_type:
           index % 2 === 0 ? "DELIVERY_RECORD" : "CHAT_SCREENSHOT",
         submitted_by_role: role,
+        submitted_by_id: actors[role].id,
         visibility: "PRIVATE",
         content_url: null,
         redacted: false,
@@ -197,6 +199,28 @@ export async function installEvidenceRoomFixture(page, options = {}) {
       url.pathname === `/api/disputes/${CASE_ID}/rooms/EVIDENCE/messages`
     ) {
       return fulfillJson(route, messages);
+    }
+    if (
+      request.method() === "GET" &&
+      (url.pathname ===
+        `/api/disputes/${CASE_ID}/rooms/INTAKE/turn-memory/latest` ||
+        url.pathname ===
+          `/api/disputes/${CASE_ID}/rooms/EVIDENCE/turn-memory/latest`)
+    ) {
+      return fulfillJson(route, {});
+    }
+    if (
+      request.method() === "GET" &&
+      url.pathname ===
+        `/api/disputes/${CASE_ID}/rooms/EVIDENCE/agent-runs/active`
+    ) {
+      return fulfillJson(route, []);
+    }
+    if (
+      request.method() === "GET" &&
+      url.pathname === `/api/disputes/${CASE_ID}/events/replay`
+    ) {
+      return fulfillJson(route, []);
     }
     if (
       request.method() === "POST" &&

@@ -175,6 +175,7 @@ const pendingActionLabels = {
   TRACK_EXECUTION: "跟踪执行",
   VIEW_OUTCOME: "查看处理结果",
   CONTINUE_CASE: "继续处理",
+  CONTINUE_PROCESSING: "继续处理",
 };
 
 const currentRoomIndex = computed(() => {

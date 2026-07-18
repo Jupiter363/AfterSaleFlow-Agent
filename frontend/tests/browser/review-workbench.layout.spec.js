@@ -98,6 +98,7 @@ function packet(scenario = "normal") {
 
 // 业务位置：【前端浏览器回归测试】installWorkbenchFixture：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
 async function installWorkbenchFixture(page, scenario = "normal") {
+  const fixturePacket = packet(scenario);
   await page.addInitScript((value) => {
     localStorage.setItem("dispute-actor", JSON.stringify(value));
   }, reviewer);
@@ -119,11 +120,44 @@ async function installWorkbenchFixture(page, scenario = "normal") {
     ) {
       return fulfillJson(route, { unread_count: 0 });
     }
+    if (request.method() === "GET" && url.pathname === "/api/disputes") {
+      return fulfillJson(route, {
+        items: [],
+        page: 0,
+        size: 20,
+        total_elements: 0,
+      });
+    }
+    if (request.method() === "GET" && url.pathname === "/api/reviews") {
+      return fulfillJson(route, [
+        {
+          id: REVIEW_ID,
+          case_id: fixturePacket.case_id,
+          status: "PENDING",
+          required_role: "PLATFORM_REVIEWER",
+        },
+      ]);
+    }
     if (
       request.method() === "GET" &&
       url.pathname === `/api/reviews/${REVIEW_ID}/packet`
     ) {
-      return fulfillJson(route, packet(scenario));
+      return fulfillJson(route, fixturePacket);
+    }
+    if (
+      request.method() === "GET" &&
+      url.pathname === `/api/disputes/${fixturePacket.case_id}/evidence`
+    ) {
+      return fulfillJson(route, {
+        case_id: fixturePacket.case_id,
+        items: [],
+      });
+    }
+    if (
+      request.method() === "GET" &&
+      url.pathname === `/api/reviews/${REVIEW_ID}/copilot/active`
+    ) {
+      return fulfillJson(route, []);
     }
 
     throw new Error(

@@ -163,6 +163,14 @@ export async function installIntakeRoomFixture(page, options = {}) {
     ) {
       return fulfillJson(route, { unread_count: 0 });
     }
+    if (request.method() === "GET" && url.pathname === "/api/disputes") {
+      return fulfillJson(route, {
+        items: [],
+        page: 0,
+        size: 20,
+        total_elements: 0,
+      });
+    }
     if (
       request.method() === "GET" &&
       url.pathname === `/api/disputes/${CASE_ID}`
@@ -185,6 +193,31 @@ export async function installIntakeRoomFixture(page, options = {}) {
       url.pathname === `/api/disputes/${CASE_ID}/rooms/INTAKE/messages`
     ) {
       return fulfillJson(route, messages);
+    }
+    if (
+      request.method() === "GET" &&
+      url.pathname === `/api/disputes/${CASE_ID}/intake/status`
+    ) {
+      return fulfillJson(route, {
+        initiator_status: "OPEN",
+        respondent_status: "WAITING",
+        current_actor_completed: false,
+        can_use_intake: true,
+        can_enter_evidence: false,
+      });
+    }
+    if (
+      request.method() === "GET" &&
+      url.pathname ===
+        `/api/disputes/${CASE_ID}/rooms/INTAKE/agent-runs/active`
+    ) {
+      return fulfillJson(route, []);
+    }
+    if (
+      request.method() === "GET" &&
+      url.pathname === `/api/disputes/${CASE_ID}/events/replay`
+    ) {
+      return fulfillJson(route, []);
     }
     if (
       request.method() === "GET" &&

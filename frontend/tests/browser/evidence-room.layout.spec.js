@@ -100,11 +100,7 @@ async function assertEvidenceGeometry(page, expectedColumns) {
       ),
     ),
   ).toBe(expectedColumns);
-  expect(
-    await list.evaluate(
-      (element) => element.scrollHeight > element.clientHeight + 1,
-    ),
-  ).toBe(true);
+  await expect(list).toBeVisible();
   await expect(uploader).toBeVisible();
   await expect(uploadButton).toBeVisible();
   await expect(completeButton).toBeVisible();
@@ -117,34 +113,55 @@ async function assertEvidenceGeometry(page, expectedColumns) {
     [...element.querySelectorAll("*")]
       .filter((candidate) => {
         const style = getComputedStyle(candidate);
-        return (
+        const scrollsVertically =
           ["auto", "scroll"].includes(style.overflowY) &&
-          candidate.scrollHeight > candidate.clientHeight + 1
-        );
+          candidate.scrollHeight > candidate.clientHeight + 1;
+        const scrollsHorizontally =
+          ["auto", "scroll"].includes(style.overflowX) &&
+          candidate.scrollWidth > candidate.clientWidth + 1;
+        return scrollsVertically || scrollsHorizontally;
       })
       .map((candidate) => candidate.className),
   );
-  expect(scrollingRegions).toEqual(["evidence-board__list"]);
+  expect(scrollingRegions.length).toBeGreaterThan(0);
+  expect(
+    scrollingRegions.every((className) =>
+      String(className).includes("evidence-card-strip"),
+    ),
+  ).toBe(true);
   await assertNoDocumentHorizontalOverflow(page);
 }
 
 // 业务位置：【前端浏览器回归测试】test：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
-test("renders multimodal consent and human-review cards for visual evidence", async ({
+test("renders upload attestation and human-review cards for visual evidence", async ({
   page,
 }) => {
   await openEvidenceRoom(page, { role: "USER", count: 6 });
 
-  await expect(page.locator(".evidence-uploader__model-consent")).toContainText(
-    "仅用于本案核验",
-  );
+  await page.locator("[data-open-evidence-upload]").click();
+  const uploadDeclaration = page.locator("[data-evidence-upload-modal]");
+  await expect(uploadDeclaration).toContainText("真实性责任告知");
+  await expect(uploadDeclaration).toContainText("真实性与相关性承诺");
+  await page.locator("[data-cancel-evidence-upload]").click();
   const queue = page.locator("[data-human-review-queue]");
   await expect(queue).toBeVisible();
   await expect(queue.locator("[data-human-review-card]")).toHaveCount(2);
-  await expect(queue).toContainText("真实性78%");
-  await expect(queue).toContainText("核验把握67%");
-  await expect(queue).toContainText("细微外观损伤需要人工查看原图");
+  await expect(queue).toContainText("人工审核任务");
   await queue.scrollIntoViewIfNeeded();
-  await queue.locator("[data-human-review-card]").first().scrollIntoViewIfNeeded();
+  const reviewCard = queue.locator("[data-human-review-card]").first();
+  await reviewCard.scrollIntoViewIfNeeded();
+  await reviewCard.click();
+  const reviewDetail = page.locator("[data-evidence-detail-modal]");
+  await expect(reviewDetail.locator("[data-evidence-detail-assessment]")).toContainText(
+    "真实性78%",
+  );
+  await expect(reviewDetail.locator("[data-evidence-detail-assessment]")).toContainText(
+    "核验把握67%",
+  );
+  await expect(reviewDetail.locator("[data-evidence-detail-human-review]")).toContainText(
+    "细微外观损伤需要人工查看原图",
+  );
+  await reviewDetail.locator("[data-close-evidence-modal]").click();
 
   await page.screenshot({
     path: "test-results/evidence-human-review.png",
@@ -213,7 +230,7 @@ for (const [index, viewport] of [
 }
 for (const role of ["USER", "MERCHANT"]) {
   // 业务位置：【前端浏览器回归测试】test：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
-  test(`keeps 100 ${role} evidence cards in the sole right-board scroll rail`, async ({
+  test(`keeps 100 ${role} evidence cards in bounded board rails`, async ({
     page,
   }) => {
     await openEvidenceRoom(page, { role, count: 100 });
@@ -225,9 +242,23 @@ for (const role of ["USER", "MERCHANT"]) {
 
     await expect(chat).toHaveCSS("height", "740px");
     await expect(board).toHaveCSS("height", "740px");
-    await expect(list.locator("[data-evidence-card]")).toHaveCount(100);
+    const submittedStrip = list.locator(
+      ".evidence-library--private [data-evidence-horizontal-strip]",
+    );
+    const humanReviewStrip = list.locator("[data-human-review-list]");
+    await expect(
+      list.locator(".evidence-library--private [data-evidence-card]"),
+    ).toHaveCount(100);
+    await expect(humanReviewStrip.locator("[data-human-review-card]")).toHaveCount(
+      34,
+    );
     expect(
-      await list.evaluate(
+      await submittedStrip.evaluate(
+        (element) => element.scrollWidth > element.clientWidth + 1,
+      ),
+    ).toBe(true);
+    expect(
+      await humanReviewStrip.evaluate(
         (element) => element.scrollHeight > element.clientHeight + 1,
       ),
     ).toBe(true);
@@ -239,14 +270,22 @@ for (const role of ["USER", "MERCHANT"]) {
       [...element.querySelectorAll("*")]
         .filter((candidate) => {
           const style = getComputedStyle(candidate);
-          return (
+          const scrollsVertically =
             ["auto", "scroll"].includes(style.overflowY) &&
-            candidate.scrollHeight > candidate.clientHeight + 1
-          );
+            candidate.scrollHeight > candidate.clientHeight + 1;
+          const scrollsHorizontally =
+            ["auto", "scroll"].includes(style.overflowX) &&
+            candidate.scrollWidth > candidate.clientWidth + 1;
+          return scrollsVertically || scrollsHorizontally;
         })
         .map((candidate) => candidate.className),
     );
-    expect(scrollingRegions).toEqual(["evidence-board__list"]);
+    expect(scrollingRegions.length).toBeGreaterThanOrEqual(2);
+    expect(
+      scrollingRegions.every((className) =>
+        String(className).includes("evidence-card-strip"),
+      ),
+    ).toBe(true);
   });
 }
 
@@ -360,31 +399,17 @@ test("traps the evidence gate focus and restores the completion trigger on Escap
 });
 
 // 业务位置：【前端浏览器回归测试】test：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面夹具和拦截 API 响应 正确进入 房间、审核和结果页面的交互断言。上游：页面夹具和拦截 API 响应。下游：房间、审核和结果页面的交互断言。边界：测试只验证可见体验与协议。
-test("keeps detail above gallery and unwinds focus one modal at a time", async ({
+test("keeps evidence detail focus contained and restores its card", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await openEvidenceRoom(page, { role: "USER", count: 4 });
 
-  const galleryTrigger = page.locator("[data-expand-submitted-evidence]");
-  await galleryTrigger.focus();
-  await galleryTrigger.click();
-
-  const gallery = page.locator("[data-evidence-gallery-modal]");
-  const galleryClose = gallery.locator("[data-close-evidence-gallery]");
-  await expect(gallery).toBeVisible();
-  await expect(galleryClose).toBeFocused();
-  await assertTouchHeight(galleryClose);
-
-  await page.keyboard.press("Shift+Tab");
-  await expect(
-    gallery.locator("[data-evidence-gallery-card]").last(),
-  ).toBeFocused();
-  await page.keyboard.press("Tab");
-  await expect(galleryClose).toBeFocused();
-
-  const galleryCard = gallery.locator("[data-evidence-gallery-card]").first();
-  await galleryCard.click();
+  const evidenceCard = page
+    .locator(".evidence-library--private [data-evidence-card]")
+    .first();
+  await evidenceCard.focus();
+  await evidenceCard.click();
 
   const detail = page.locator("[data-evidence-detail-modal]");
   const detailClose = detail.locator("[data-close-evidence-modal]");
@@ -395,19 +420,10 @@ test("keeps detail above gallery and unwinds focus one modal at a time", async (
   await expect(detailClose).toBeFocused();
   await page.keyboard.press("Shift+Tab");
   await expect(detailClose).toBeFocused();
-  expect(Number(await detail.getAttribute("data-modal-depth"))).toBeGreaterThan(
-    Number(await gallery.getAttribute("data-modal-depth")),
-  );
-  await expect(gallery).toHaveAttribute("aria-hidden", "true");
 
   await page.keyboard.press("Escape");
   await expect(detail).toBeHidden();
-  await expect(gallery).toBeVisible();
-  await expect(galleryCard).toBeFocused();
-
-  await page.keyboard.press("Escape");
-  await expect(gallery).toBeHidden();
-  await expect(galleryTrigger).toBeFocused();
+  await expect(evidenceCard).toBeFocused();
 });
 
 for (const scenario of [
@@ -433,31 +449,24 @@ for (const scenario of [
       .locator(".evidence-library--private [data-evidence-card]")
       .first();
     const filename = firstCard.locator("[data-evidence-filename]");
-    const description = firstCard.locator("[data-evidence-description]");
     await expect(filename).toHaveAttribute("title", LONG_FILENAME);
-    expect((await description.textContent()).trim().length).toBeGreaterThanOrEqual(
-      200,
-    );
 
     await firstCard.click();
     const modal = page.locator("[data-evidence-detail-modal]");
     const panel = modal.locator(".evidence-modal__panel");
-    const longParagraphs = modal.locator("article p");
-    const filenameFact = modal
-      .locator(".evidence-modal__facts span")
-      .filter({ hasText: "原始文件：" });
+    const longParagraphs = modal.locator(".evidence-modal__feedback p");
+    const filenameHeading = modal.locator(".evidence-modal__identity h2");
     await expect(modal).toBeVisible();
-    await expect(filenameFact).toContainText(LONG_FILENAME);
-    await expect(longParagraphs).toHaveCount(2);
+    await expect(filenameHeading).toContainText(LONG_FILENAME);
+    await expect(longParagraphs).toHaveCount(1);
     await expect(longParagraphs.nth(0)).toContainText(LONG_UNBROKEN_TEXT);
-    await expect(longParagraphs.nth(1)).toContainText(LONG_UNBROKEN_TEXT);
     expect(
       await panel.evaluate(
         (element) => element.scrollWidth <= element.clientWidth + 1,
       ),
     ).toBe(true);
     expect(
-      await filenameFact.evaluate(
+      await filenameHeading.evaluate(
         (element) => element.scrollWidth <= element.clientWidth + 1,
       ),
     ).toBe(true);

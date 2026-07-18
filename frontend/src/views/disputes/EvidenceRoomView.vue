@@ -4094,9 +4094,10 @@ onBeforeUnmount(() => {
 }
 
 .evidence-modal__panel .evidence-modal__close {
-  width: 36px;
-  min-width: 36px;
-  min-height: 36px;
+  width: 44px;
+  min-width: 44px;
+  height: 44px;
+  min-height: 44px;
   padding: 0;
   color: #75849a;
   background: #edf3f9;
