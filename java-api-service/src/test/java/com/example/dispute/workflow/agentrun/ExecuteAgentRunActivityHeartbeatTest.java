@@ -117,6 +117,14 @@ class ExecuteAgentRunActivityHeartbeatTest {
         assertThat(options.getRetryOptions().getMaximumAttempts()).isEqualTo(3);
         assertThat(options.getCancellationType())
                 .isEqualTo(ActivityCancellationType.WAIT_CANCELLATION_COMPLETED);
+        assertThat(AgentRunTemporalPolicy.activityOptions(2)
+                        .getRetryOptions()
+                        .getMaximumAttempts())
+                .isEqualTo(2);
+        assertThat(AgentRunTemporalPolicy.activityOptions(0)
+                        .getRetryOptions()
+                        .getMaximumAttempts())
+                .isEqualTo(1);
     }
 
     private static AgentRunActivityContext noOpContext() {

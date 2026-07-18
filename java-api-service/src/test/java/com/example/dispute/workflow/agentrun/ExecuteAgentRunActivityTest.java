@@ -15,6 +15,7 @@ import com.example.dispute.workflow.activity.agent.AgentRunActivityContext;
 import com.example.dispute.workflow.activity.agent.AgentRunActivityContextProvider;
 import com.example.dispute.workflow.activity.agent.AgentRunExecutionException;
 import com.example.dispute.workflow.activity.agent.AgentRunExecutionGateway;
+import com.example.dispute.workflow.activity.agent.AgentRunExecutionGateway.ExecutionMode;
 import com.example.dispute.workflow.activity.agent.AgentRunProgress;
 import com.example.dispute.workflow.activity.agent.ExecuteAgentRunActivityImpl;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
@@ -51,12 +52,15 @@ class ExecuteAgentRunActivityTest {
         AgentRunLedger ledger = mock(AgentRunLedger.class);
         AgentRunExecutionGateway gateway = mock(AgentRunExecutionGateway.class);
         AgentRunActivityContext context = context(1);
-        AgentRunLedger.Attempt attempt = runningAttempt(0, false);
-        when(ledger.startNextAttempt(request.agentRunId(), request, NOW)).thenReturn(attempt);
-        when(gateway.execute(eq(request), any(), any()))
+        when(ledger.startNextAttempt(request.agentRunId(), request, NOW))
+                .thenReturn(runningAttempt(0, false), resultReadyAttempt(7, true));
+        when(gateway.execute(eq(request), any(ExecutionMode.class), any(), any()))
                 .thenAnswer(invocation -> {
-                    AgentRunExecutionGateway.ProgressListener listener = invocation.getArgument(1);
-                    listener.onProgress(new AgentRunProgress(2, true, false));
+                    if (invocation.getArgument(1) == ExecutionMode.EXECUTE_OR_RECONCILE) {
+                        AgentRunExecutionGateway.ProgressListener listener =
+                                invocation.getArgument(2);
+                        listener.onProgress(new AgentRunProgress(2, true, false));
+                    }
                     return new AgentRunExecutionGateway.Completion(graphResult, 7, true);
                 });
         ExecuteAgentRunActivityImpl activity = activity(ledger, gateway, () -> context);
@@ -69,6 +73,16 @@ class ExecuteAgentRunActivityTest {
         assertThat(first.resultHash()).isEqualTo(graphResult.outputHash());
         verify(ledger, times(2)).startNextAttempt(request.agentRunId(), request, NOW);
         verify(ledger, times(2)).recordResultReady(first);
+        verify(gateway).execute(
+                eq(request),
+                eq(ExecutionMode.EXECUTE_OR_RECONCILE),
+                any(),
+                any());
+        verify(gateway).execute(
+                eq(request),
+                eq(ExecutionMode.RECONCILE_ONLY),
+                any(),
+                any());
         verify(ledger, never()).createOrLoad(any());
     }
 
@@ -85,11 +99,13 @@ class ExecuteAgentRunActivityTest {
         when(ledger.startNextAttempt(request.agentRunId(), request, NOW))
                 .thenReturn(runningAttempt(0, false), runningAttempt(3, true));
         List<ExecuteAgentRunRequest> gatewayRequests = new ArrayList<>();
+        List<ExecutionMode> executionModes = new ArrayList<>();
         AtomicInteger invocation = new AtomicInteger();
-        when(gateway.execute(eq(request), any(), any()))
+        when(gateway.execute(eq(request), any(ExecutionMode.class), any(), any()))
                 .thenAnswer(call -> {
                     gatewayRequests.add(call.getArgument(0));
-                    AgentRunExecutionGateway.ProgressListener listener = call.getArgument(1);
+                    executionModes.add(call.getArgument(1));
+                    AgentRunExecutionGateway.ProgressListener listener = call.getArgument(2);
                     if (invocation.getAndIncrement() == 0) {
                         listener.onProgress(new AgentRunProgress(3, true, false));
                         throw AgentRunExecutionException.retryable(
@@ -117,6 +133,10 @@ class ExecuteAgentRunActivityTest {
         ExecuteAgentRunResult cached = activity.execute(request);
 
         assertThat(gatewayRequests).containsExactly(request, request);
+        assertThat(executionModes)
+                .containsExactly(
+                        ExecutionMode.EXECUTE_OR_RECONCILE,
+                        ExecutionMode.RECONCILE_ONLY);
         assertThat(gatewayRequests)
                 .allSatisfy(replayed -> {
                     assertThat(replayed.command().commandId())
@@ -144,9 +164,13 @@ class ExecuteAgentRunActivityTest {
         AgentRunExecutionGateway gateway = mock(AgentRunExecutionGateway.class);
         when(ledger.startNextAttempt(request.agentRunId(), request, NOW))
                 .thenReturn(runningAttempt(0, false));
-        when(gateway.execute(eq(request), any(), any()))
+        when(gateway.execute(
+                        eq(request),
+                        eq(ExecutionMode.EXECUTE_OR_RECONCILE),
+                        any(),
+                        any()))
                 .thenAnswer(call -> {
-                    AgentRunExecutionGateway.ProgressListener listener = call.getArgument(1);
+                    AgentRunExecutionGateway.ProgressListener listener = call.getArgument(2);
                     listener.onProgress(new AgentRunProgress(4, true, false));
                     throw AgentRunExecutionException.retryable(
                             "AGENT_STREAM_INTERRUPTED",
@@ -173,15 +197,156 @@ class ExecuteAgentRunActivityTest {
                 NOW);
     }
 
+    @Test
+    void deterministicAttemptConflictIsNonRetryableAndNeverReachesPython()
+            throws Exception {
+        ExecuteAgentRunRequest request = request();
+        AgentRunLedger ledger = mock(AgentRunLedger.class);
+        AgentRunExecutionGateway gateway = mock(AgentRunExecutionGateway.class);
+        when(ledger.startNextAttempt(request.agentRunId(), request, NOW))
+                .thenThrow(new IllegalStateException("attempt request hash conflicts"));
+        ExecuteAgentRunActivityImpl activity = activity(ledger, gateway, () -> context(1));
+
+        assertThatThrownBy(() -> activity.execute(request))
+                .isInstanceOfSatisfying(
+                        ApplicationFailure.class,
+                        failure -> {
+                            assertThat(failure.getType())
+                                    .isEqualTo(
+                                            ExecuteAgentRunActivityImpl.NON_RETRYABLE_FAILURE_TYPE);
+                            assertThat(failure.isNonRetryable()).isTrue();
+                        });
+        verify(gateway, never()).execute(any(), any(), any(), any());
+    }
+
+    @Test
+    void transientAttemptAllocationFailureUsesTheBoundedTemporalRetryType()
+            throws Exception {
+        ExecuteAgentRunRequest request = request();
+        AgentRunLedger ledger = mock(AgentRunLedger.class);
+        AgentRunExecutionGateway gateway = mock(AgentRunExecutionGateway.class);
+        when(ledger.startNextAttempt(request.agentRunId(), request, NOW))
+                .thenThrow(new RuntimeException("database failover"));
+        ExecuteAgentRunActivityImpl activity = activity(ledger, gateway, () -> context(1));
+
+        assertThatThrownBy(() -> activity.execute(request))
+                .isInstanceOfSatisfying(
+                        ApplicationFailure.class,
+                        failure -> {
+                            assertThat(failure.getType())
+                                    .isEqualTo(ExecuteAgentRunActivityImpl.RETRYABLE_FAILURE_TYPE);
+                            assertThat(failure.isNonRetryable()).isFalse();
+                            assertThat(failure.getNextRetryDelay()).isPositive();
+                        });
+        verify(gateway, never()).execute(any(), any(), any(), any());
+    }
+
+    @Test
+    void resultReadyAfterDeadlineAndBudgetExhaustionReconcilesTheCachedHash()
+            throws Exception {
+        ExecuteAgentRunRequest request = requestWithActivityBudget(0);
+        RoomGraphResult graphResult = graphResult();
+        AgentRunLedger ledger = mock(AgentRunLedger.class);
+        AgentRunExecutionGateway gateway = mock(AgentRunExecutionGateway.class);
+        Instant afterDeadline = request.command().deadlineAt().plusSeconds(30);
+        when(ledger.startNextAttempt(request.agentRunId(), request, afterDeadline))
+                .thenReturn(resultReadyAttempt(7, true));
+        when(gateway.execute(
+                        eq(request),
+                        eq(ExecutionMode.RECONCILE_ONLY),
+                        any(),
+                        any()))
+                .thenReturn(new AgentRunExecutionGateway.Completion(graphResult, 7, true));
+        ExecuteAgentRunActivityImpl activity = activity(
+                ledger,
+                gateway,
+                () -> context(1),
+                Clock.fixed(afterDeadline, ZoneOffset.UTC));
+
+        ExecuteAgentRunResult reconciled = activity.execute(request);
+
+        assertThat(reconciled.outcome()).isEqualTo(ExecuteAgentRunResult.Outcome.COMPLETED);
+        assertThat(reconciled.resultHash()).isEqualTo(graphResult.outputHash());
+        verify(ledger).recordResultReady(reconciled);
+        verify(ledger, never())
+                .recordAttemptFailure(
+                        any(),
+                        any(),
+                        org.mockito.ArgumentMatchers.anyLong(),
+                        any(),
+                        any(),
+                        org.mockito.ArgumentMatchers.anyBoolean(),
+                        any());
+    }
+
+    @Test
+    void resultReadyCacheMissFailsClosedWithoutReversingTheDurableAttempt()
+            throws Exception {
+        ExecuteAgentRunRequest request = requestWithActivityBudget(0);
+        AgentRunLedger ledger = mock(AgentRunLedger.class);
+        AgentRunExecutionGateway gateway = mock(AgentRunExecutionGateway.class);
+        Instant afterDeadline = request.command().deadlineAt().plusSeconds(30);
+        when(ledger.startNextAttempt(request.agentRunId(), request, afterDeadline))
+                .thenReturn(resultReadyAttempt(7, true));
+        when(gateway.execute(
+                        eq(request),
+                        eq(ExecutionMode.RECONCILE_ONLY),
+                        any(),
+                        any()))
+                .thenThrow(AgentRunExecutionException.nonRetryable(
+                        "AGENT_RUN_RECONCILIATION_MISS",
+                        "cached command result was not found",
+                        7,
+                        true,
+                        null));
+        ExecuteAgentRunActivityImpl activity = activity(
+                ledger,
+                gateway,
+                () -> context(1),
+                Clock.fixed(afterDeadline, ZoneOffset.UTC));
+
+        assertThatThrownBy(() -> activity.execute(request))
+                .isInstanceOfSatisfying(
+                        ApplicationFailure.class,
+                        failure -> {
+                            assertThat(failure.getType())
+                                    .isEqualTo(
+                                            ExecuteAgentRunActivityImpl.NON_RETRYABLE_FAILURE_TYPE);
+                            assertThat(failure.isNonRetryable()).isTrue();
+                        });
+        verify(ledger, never()).recordResultReady(any());
+        verify(ledger, never())
+                .recordAttemptFailure(
+                        any(),
+                        any(),
+                        org.mockito.ArgumentMatchers.anyLong(),
+                        any(),
+                        any(),
+                        org.mockito.ArgumentMatchers.anyBoolean(),
+                        any());
+    }
+
     private static ExecuteAgentRunActivityImpl activity(
             AgentRunLedger ledger,
             AgentRunExecutionGateway gateway,
             AgentRunActivityContextProvider contexts) {
+        return activity(
+                ledger,
+                gateway,
+                contexts,
+                Clock.fixed(NOW, ZoneOffset.UTC));
+    }
+
+    private static ExecuteAgentRunActivityImpl activity(
+            AgentRunLedger ledger,
+            AgentRunExecutionGateway gateway,
+            AgentRunActivityContextProvider contexts,
+            Clock clock) {
         return new ExecuteAgentRunActivityImpl(
                 ledger,
                 gateway,
                 contexts,
-                Clock.fixed(NOW, ZoneOffset.UTC),
+                clock,
                 Duration.ofHours(1),
                 Executors::newSingleThreadScheduledExecutor);
     }
@@ -202,11 +367,30 @@ class ExecuteAgentRunActivityTest {
     private static AgentRunLedger.Attempt runningAttempt(
             long lastSequenceNo,
             boolean publicOutputEmitted) {
+        return attempt(
+                AgentRunAttemptStatus.RUNNING,
+                lastSequenceNo,
+                publicOutputEmitted);
+    }
+
+    private static AgentRunLedger.Attempt resultReadyAttempt(
+            long lastSequenceNo,
+            boolean publicOutputEmitted) {
+        return attempt(
+                AgentRunAttemptStatus.RESULT_READY,
+                lastSequenceNo,
+                publicOutputEmitted);
+    }
+
+    private static AgentRunLedger.Attempt attempt(
+            AgentRunAttemptStatus status,
+            long lastSequenceNo,
+            boolean publicOutputEmitted) {
         return new AgentRunLedger.Attempt(
                 "attempt-001",
                 "agent-run-001",
                 1,
-                AgentRunAttemptStatus.RUNNING,
+                status,
                 publicOutputEmitted,
                 lastSequenceNo,
                 null,
@@ -222,6 +406,24 @@ class ExecuteAgentRunActivityTest {
                 1,
                 "agent-stream.v2",
                 fixture("room-graph-command-valid.json", RoomGraphCommand.class));
+    }
+
+    private static ExecuteAgentRunRequest requestWithActivityBudget(int remaining)
+            throws Exception {
+        JsonNode wrapper = MAPPER.readTree(
+                FIXTURES.resolve("room-graph-command-valid.json").toFile());
+        ((com.fasterxml.jackson.databind.node.ObjectNode) wrapper
+                        .required("instance")
+                        .required("retry_budget"))
+                .put("activity_attempts_remaining", remaining);
+        RoomGraphCommand command =
+                MAPPER.treeToValue(wrapper.required("instance"), RoomGraphCommand.class);
+        return new ExecuteAgentRunRequest(
+                ExecuteAgentRunRequest.SCHEMA_VERSION,
+                "agent-run-001",
+                1,
+                "agent-stream.v2",
+                command);
     }
 
     private static RoomGraphResult graphResult() throws Exception {

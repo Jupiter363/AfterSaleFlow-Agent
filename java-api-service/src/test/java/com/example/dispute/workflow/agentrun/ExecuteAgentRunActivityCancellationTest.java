@@ -12,6 +12,7 @@ import static org.mockito.Mockito.when;
 import com.example.dispute.agentstream.application.AgentRunLedger;
 import com.example.dispute.workflow.activity.agent.AgentRunActivityContext;
 import com.example.dispute.workflow.activity.agent.AgentRunExecutionGateway;
+import com.example.dispute.workflow.activity.agent.AgentRunExecutionGateway.ExecutionMode;
 import com.example.dispute.workflow.activity.agent.AgentRunProgress;
 import com.example.dispute.workflow.activity.agent.ExecuteAgentRunActivityImpl;
 import com.example.dispute.workflow.contract.v1.AgentRunAttemptHeartbeat;
@@ -63,11 +64,15 @@ class ExecuteAgentRunActivityCancellationTest {
             }
         };
         AtomicBoolean streamClosed = new AtomicBoolean();
-        when(gateway.execute(eq(request), any(), any()))
+        when(gateway.execute(
+                        eq(request),
+                        eq(ExecutionMode.EXECUTE_OR_RECONCILE),
+                        any(),
+                        any()))
                 .thenAnswer(invocation -> {
-                    AgentRunExecutionGateway.ProgressListener listener = invocation.getArgument(1);
+                    AgentRunExecutionGateway.ProgressListener listener = invocation.getArgument(2);
                     com.example.dispute.workflow.activity.agent.AgentRunCancellationToken token =
-                            invocation.getArgument(2);
+                            invocation.getArgument(3);
                     token.onCancellation(() -> streamClosed.set(true));
                     try {
                         listener.onProgress(new AgentRunProgress(1, true, false));

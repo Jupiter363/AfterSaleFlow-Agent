@@ -1,6 +1,7 @@
 package com.example.dispute.workflow.activity.agent;
 
 import com.example.dispute.agentstream.application.AgentRunLedger;
+import com.example.dispute.workflow.activity.agent.AgentRunExecutionGateway.ExecutionMode;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
@@ -63,7 +64,10 @@ public final class ExecuteAgentRunActivityImpl implements ExecuteAgentRunActivit
 
     @Override
     public ExecuteAgentRunResult execute(ExecuteAgentRunRequest request) {
-        Objects.requireNonNull(request, "request");
+        if (request == null) {
+            throw ApplicationFailure.newNonRetryableFailure(
+                    "agent run request is required", NON_RETRYABLE_FAILURE_TYPE);
+        }
         AgentRunActivityContext context =
                 Objects.requireNonNull(contextProvider.current(), "activityContext");
         if (context.temporalAttempt() < 1) {
@@ -71,9 +75,9 @@ public final class ExecuteAgentRunActivityImpl implements ExecuteAgentRunActivit
                     "invalid Temporal Activity attempt", NON_RETRYABLE_FAILURE_TYPE);
         }
 
-        AgentRunLedger.Attempt attempt =
-                ledger.startNextAttempt(request.agentRunId(), request, clock.instant());
+        AgentRunLedger.Attempt attempt = startAttempt(request, context);
         validateAttempt(request, attempt);
+        ExecutionMode executionMode = executionMode(request, attempt, context);
 
         AgentRunCancellationToken cancellationToken = new AgentRunCancellationToken();
         AgentRunHeartbeatMonitor heartbeat = new AgentRunHeartbeatMonitor(
@@ -87,23 +91,12 @@ public final class ExecuteAgentRunActivityImpl implements ExecuteAgentRunActivit
                 schedulerFactory.get());
         try (heartbeat) {
             heartbeat.start();
-            if (!clock.instant().isBefore(request.command().deadlineAt())) {
-                return terminalFailure(
-                        request,
-                        heartbeat.snapshot(),
-                        "AGENT_RUN_DEADLINE_EXCEEDED",
-                        AgentRunAttemptStatus.FAILED);
-            }
-            if (allowedActivityAttempts(request.command()) < 1) {
-                return terminalFailure(
-                        request,
-                        heartbeat.snapshot(),
-                        "AGENT_RUN_RETRY_BUDGET_EXHAUSTED",
-                        AgentRunAttemptStatus.FAILED);
-            }
-
             AgentRunExecutionGateway.Completion completion =
-                    gateway.execute(request, heartbeat::progress, cancellationToken);
+                    gateway.execute(
+                            request,
+                            executionMode,
+                            heartbeat::progress,
+                            cancellationToken);
             // A heartbeat can discover cancellation while the adapter is returning a late final.
             cancellationToken.throwIfCancellationRequested();
             validateCompletion(request, completion);
@@ -135,14 +128,52 @@ public final class ExecuteAgentRunActivityImpl implements ExecuteAgentRunActivit
             RuntimeException termination = cancellationToken.terminationCause();
             return handleFailure(
                     request,
+                    attempt,
+                    executionMode,
                     context,
                     heartbeat.snapshot(),
                     termination == null ? failure : termination);
         }
     }
 
+    private AgentRunLedger.Attempt startAttempt(
+            ExecuteAgentRunRequest request,
+            AgentRunActivityContext context) {
+        try {
+            return ledger.startNextAttempt(request.agentRunId(), request, clock.instant());
+        } catch (ActivityCompletionException completionFailure) {
+            throw completionFailure;
+        } catch (ApplicationFailure applicationFailure) {
+            throw applicationFailure;
+        } catch (IllegalArgumentException | IllegalStateException deterministicFailure) {
+            throw ApplicationFailure.newNonRetryableFailure(
+                    "agent run attempt allocation was rejected",
+                    NON_RETRYABLE_FAILURE_TYPE,
+                    request.agentRunId(),
+                    request.attemptId(),
+                    "AGENT_RUN_ATTEMPT_REJECTED");
+        } catch (RuntimeException infrastructureFailure) {
+            int retryLimit = Math.max(1, allowedActivityAttempts(request.command()));
+            if (clock.instant().isBefore(request.command().deadlineAt())
+                    && context.temporalAttempt() < retryLimit) {
+                throw retryFailure(
+                        request,
+                        context.temporalAttempt(),
+                        "AGENT_RUN_ATTEMPT_ALLOCATION_FAILED");
+            }
+            throw ApplicationFailure.newNonRetryableFailure(
+                    "agent run attempt allocation failed",
+                    NON_RETRYABLE_FAILURE_TYPE,
+                    request.agentRunId(),
+                    request.attemptId(),
+                    "AGENT_RUN_ATTEMPT_ALLOCATION_FAILED");
+        }
+    }
+
     private ExecuteAgentRunResult handleFailure(
             ExecuteAgentRunRequest request,
+            AgentRunLedger.Attempt attempt,
+            ExecutionMode executionMode,
             AgentRunActivityContext context,
             AgentRunProgress heartbeat,
             RuntimeException failure) {
@@ -178,25 +209,39 @@ public final class ExecuteAgentRunActivityImpl implements ExecuteAgentRunActivit
                 Math.max(heartbeat.lastSequenceNo(), executionFailure.lastSequenceNo());
         boolean publicOutputEmitted =
                 heartbeat.publicOutputEmitted() || executionFailure.publicOutputEmitted();
+        boolean completionObserved =
+                attempt.status() == AgentRunAttemptStatus.RESULT_READY
+                        || heartbeat.finalFrameObserved();
         boolean safeAfterVisibleOutput =
-                executionFailure.commandReplaySafe() || heartbeat.finalFrameObserved();
-        boolean beforeDeadline = clock.instant().isBefore(request.command().deadlineAt());
+                executionFailure.commandReplaySafe()
+                        || completionObserved
+                        || executionMode == ExecutionMode.RECONCILE_ONLY;
+        boolean withinRecoveryWindow =
+                completionObserved || clock.instant().isBefore(request.command().deadlineAt());
+        int retryLimit = Math.max(1, allowedActivityAttempts(request.command()));
         boolean retryable =
                 executionFailure.retryable()
                         && (!publicOutputEmitted || safeAfterVisibleOutput)
-                        && beforeDeadline
-                        && context.temporalAttempt() < allowedActivityAttempts(request.command());
+                        && withinRecoveryWindow
+                        && context.temporalAttempt() < retryLimit;
         if (retryable) {
             // Stable request/command/attempt identities make this a command-ledger replay, not a
             // second logical run. Temporal applies the bounded, deterministic jittered delay.
-            ApplicationFailure retryFailure = ApplicationFailure.newFailure(
-                    "agent run infrastructure failure",
-                    RETRYABLE_FAILURE_TYPE,
+            throw retryFailure(
+                    request,
+                    context.temporalAttempt(),
+                    executionFailure.errorCode());
+        }
+
+        if (completionObserved) {
+            // RESULT_READY/final-observed is forward-only. Keep it recoverable for a later
+            // workflow or operator instead of corrupting it into a terminal failure.
+            throw ApplicationFailure.newNonRetryableFailure(
+                    "completed agent run result could not be reconciled",
+                    NON_RETRYABLE_FAILURE_TYPE,
                     request.agentRunId(),
                     request.attemptId(),
                     executionFailure.errorCode());
-            retryFailure.setNextRetryDelay(retryDelay(request.command(), context.temporalAttempt()));
-            throw retryFailure;
         }
 
         AgentRunAttemptStatus status =
@@ -225,26 +270,6 @@ public final class ExecuteAgentRunActivityImpl implements ExecuteAgentRunActivit
                 executionFailure.errorCode(),
                 lastSequenceNo,
                 publicOutputEmitted);
-    }
-
-    private ExecuteAgentRunResult terminalFailure(
-            ExecuteAgentRunRequest request,
-            AgentRunProgress progress,
-            String errorCode,
-            AgentRunAttemptStatus status) {
-        ledger.recordAttemptFailure(
-                request.agentRunId(),
-                request.attemptId(),
-                request.attemptNo(),
-                status,
-                errorCode,
-                false,
-                clock.instant());
-        return failedResult(
-                request,
-                errorCode,
-                progress.lastSequenceNo(),
-                progress.publicOutputEmitted());
     }
 
     private ExecuteAgentRunResult failedResult(
@@ -333,9 +358,39 @@ public final class ExecuteAgentRunActivityImpl implements ExecuteAgentRunActivit
     }
 
     private static int allowedActivityAttempts(RoomGraphCommand command) {
-        return Math.min(
-                AgentRunTemporalPolicy.MAXIMUM_ACTIVITY_ATTEMPTS,
-                Math.max(0, command.retryBudget().activityAttemptsRemaining()));
+        return AgentRunTemporalPolicy.boundedActivityAttempts(
+                command.retryBudget().activityAttemptsRemaining());
+    }
+
+    private ExecutionMode executionMode(
+            ExecuteAgentRunRequest request,
+            AgentRunLedger.Attempt attempt,
+            AgentRunActivityContext context) {
+        int allowedAttempts = allowedActivityAttempts(request.command());
+        boolean executionWindowClosed =
+                allowedAttempts < 1
+                        || context.temporalAttempt() > allowedAttempts
+                        || !clock.instant().isBefore(request.command().deadlineAt());
+        boolean existingVisibleAttempt =
+                attempt.status() == AgentRunAttemptStatus.RESULT_READY
+                        || attempt.publicOutputEmitted();
+        return executionWindowClosed || existingVisibleAttempt
+                ? ExecutionMode.RECONCILE_ONLY
+                : ExecutionMode.EXECUTE_OR_RECONCILE;
+    }
+
+    private ApplicationFailure retryFailure(
+            ExecuteAgentRunRequest request,
+            int temporalAttempt,
+            String errorCode) {
+        ApplicationFailure retryFailure = ApplicationFailure.newFailure(
+                "agent run infrastructure failure",
+                RETRYABLE_FAILURE_TYPE,
+                request.agentRunId(),
+                request.attemptId(),
+                errorCode);
+        retryFailure.setNextRetryDelay(retryDelay(request.command(), temporalAttempt));
+        return retryFailure;
     }
 
     private Duration retryDelay(RoomGraphCommand command, int temporalAttempt) {

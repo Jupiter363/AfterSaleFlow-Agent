@@ -7,13 +7,14 @@ import io.temporal.workflow.Workflow;
 
 public class AgentRunWorkflowImpl implements AgentRunWorkflow {
 
-    private final ExecuteAgentRunActivity activity =
-            Workflow.newActivityStub(
-                    ExecuteAgentRunActivity.class,
-                    AgentRunTemporalPolicy.activityOptions());
-
     @Override
     public ExecuteAgentRunResult run(ExecuteAgentRunRequest request) {
+        int remainingAttempts = request == null
+                ? 0
+                : request.command().retryBudget().activityAttemptsRemaining();
+        ExecuteAgentRunActivity activity = Workflow.newActivityStub(
+                ExecuteAgentRunActivity.class,
+                AgentRunTemporalPolicy.activityOptions(remainingAttempts));
         return activity.execute(request);
     }
 }

@@ -18,6 +18,17 @@ public final class AgentRunTemporalPolicy {
     private AgentRunTemporalPolicy() {}
 
     public static ActivityOptions activityOptions() {
+        return activityOptions(MAXIMUM_ACTIVITY_ATTEMPTS);
+    }
+
+    /**
+     * Applies the command's remaining infrastructure budget at Temporal's scheduling boundary.
+     *
+     * <p>Temporal requires at least one attempt to run the Activity. A zero budget therefore gets
+     * one reconciliation-only invocation, which cannot start graph or model execution.
+     */
+    public static ActivityOptions activityOptions(int activityAttemptsRemaining) {
+        int scheduledAttempts = Math.max(1, boundedActivityAttempts(activityAttemptsRemaining));
         return ActivityOptions.newBuilder()
                 .setTaskQueue(AGENT_EXECUTION)
                 .setStartToCloseTimeout(START_TO_CLOSE_TIMEOUT)
@@ -28,11 +39,15 @@ public final class AgentRunTemporalPolicy {
                                 .setInitialInterval(Duration.ofSeconds(1))
                                 .setBackoffCoefficient(2.0)
                                 .setMaximumInterval(Duration.ofSeconds(30))
-                                .setMaximumAttempts(MAXIMUM_ACTIVITY_ATTEMPTS)
+                                .setMaximumAttempts(scheduledAttempts)
                                 .setDoNotRetry(
                                         IllegalArgumentException.class.getName(),
                                         "AgentRunNonRetryableFailure")
                                 .build())
                 .build();
+    }
+
+    public static int boundedActivityAttempts(int activityAttemptsRemaining) {
+        return Math.min(MAXIMUM_ACTIVITY_ATTEMPTS, Math.max(0, activityAttemptsRemaining));
     }
 }
