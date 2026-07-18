@@ -10,12 +10,19 @@ import com.example.dispute.common.exception.ForbiddenException;
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.infrastructure.persistence.entity.AgentRunEntity;
+import com.example.dispute.infrastructure.persistence.entity.AgentRunAttemptEntity;
+import com.example.dispute.infrastructure.persistence.repository.AgentRunAttemptRepository;
 import com.example.dispute.infrastructure.persistence.repository.AgentRunRepository;
 import com.example.dispute.room.application.AccessSessionResolver;
 import com.example.dispute.room.application.SessionPermissionService;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseAccessSessionEntity;
 import com.example.dispute.agentstream.infrastructure.persistence.AgentRunStreamEventEntity;
 import com.example.dispute.agentstream.infrastructure.persistence.AgentRunStreamEventRepository;
+import com.example.dispute.workflow.contract.v1.AgentStreamEvent;
+import com.example.dispute.workflow.contract.v1.ContractJson;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunProtocol;
+import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
+import com.example.dispute.workflow.contract.v1.ContractTypes.StreamEventType;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -26,8 +33,8 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.atomic.AtomicLong;
 import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
@@ -42,8 +49,11 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 public class AgentRunStreamEventService {
 
     private static final long EMITTER_TIMEOUT_MS = 4 * 60 * 60 * 1000L;
+    private static final int SSE_CATCH_UP_BATCH_SIZE = 256;
+    private static final int REPLAY_BATCH_SIZE = 1_000;
 
     private final AgentRunRepository runRepository;
+    private final AgentRunAttemptRepository attemptRepository;
     private final AgentRunStreamEventRepository eventRepository;
     private final AccessSessionResolver accessSessionResolver;
     private final SessionPermissionService permissionService;
@@ -59,11 +69,13 @@ public class AgentRunStreamEventService {
     // Java 语法：构造器名称与类名相同且没有返回类型；参数通常由 Spring 按类型注入。
     public AgentRunStreamEventService(
             AgentRunRepository runRepository,
+            AgentRunAttemptRepository attemptRepository,
             AgentRunStreamEventRepository eventRepository,
             AccessSessionResolver accessSessionResolver,
             SessionPermissionService permissionService,
             ObjectMapper objectMapper) {
         this.runRepository = runRepository;
+        this.attemptRepository = attemptRepository;
         this.eventRepository = eventRepository;
         this.accessSessionResolver = accessSessionResolver;
         this.permissionService = permissionService;
@@ -120,13 +132,15 @@ public class AgentRunStreamEventService {
     // 系统意义：「AgentRunStreamEventService.replay(String,long,AuthenticatedActor)」位于模型输出的信任边界，决定哪些内容可持久化和对前端可见，并保证断线后能够按序回放。
     public List<AgentRunEventView> replay(
             String runId, long afterSequence, AuthenticatedActor actor) {
+        return replay(runId, Long.toString(afterSequence), actor);
+    }
+
+    public List<AgentRunEventView> replay(
+            String runId, String rawCursor, AuthenticatedActor actor) {
         AgentRunEntity run = requireVisibleRun(runId, actor);
-        return eventRepository
-                .findAllByAgentRunIdAndSequenceNoGreaterThanOrderBySequenceNoAsc(
-                        run.getId(), afterSequence)
-                .stream()
-                .map(this::view)
-                .toList();
+        AgentRunProtocol protocol = protocol(run);
+        AgentRunStreamCursor cursor = AgentRunStreamCursor.parse(rawCursor, protocol);
+        return replayAuthorized(run, cursor, REPLAY_BATCH_SIZE);
     }
 
     // 所属模块：【Agent 流式运行 / 应用编排层】「AgentRunStreamEventService.subscribe(String,long,AuthenticatedActor)」。
@@ -136,10 +150,16 @@ public class AgentRunStreamEventService {
     // 系统意义：「AgentRunStreamEventService.subscribe(String,long,AuthenticatedActor)」位于模型输出的信任边界，决定哪些内容可持久化和对前端可见，并保证断线后能够按序回放。
     public SseEmitter subscribe(
             String runId, long afterSequence, AuthenticatedActor actor) {
-        requireVisibleRun(runId, actor);
+        return subscribe(runId, Long.toString(afterSequence), actor);
+    }
+
+    public SseEmitter subscribe(
+            String runId, String rawCursor, AuthenticatedActor actor) {
+        AgentRunEntity run = requireVisibleRun(runId, actor);
+        AgentRunStreamCursor cursor =
+                AgentRunStreamCursor.parse(rawCursor, protocol(run));
         SseEmitter emitter = new SseEmitter(EMITTER_TIMEOUT_MS);
-        Subscription subscription =
-                new Subscription(actor, emitter, new AtomicLong(afterSequence));
+        Subscription subscription = new Subscription(actor, emitter, cursor);
         // 每条浏览器连接维护独立游标；同一个 Run 可以被断线重连的同一角色、
         // 或多个获授权平台角色同时订阅，彼此不会推进对方的 lastSequence。
         add(runId, subscription);
@@ -177,6 +197,14 @@ public class AgentRunStreamEventService {
                                 }));
     }
 
+    /** Redis calls this only as a hint; every subscriber still catches up from PostgreSQL. */
+    public void wakeUp(String runId) {
+        if (runId == null || runId.isBlank()) {
+            throw new IllegalArgumentException("runId must not be blank");
+        }
+        publish(runId);
+    }
+
     // 所属模块：【Agent 流式运行 / 应用编排层】「AgentRunStreamEventService.requireVisibleRun(String,AuthenticatedActor)」。
     // 具体功能：「AgentRunStreamEventService.requireVisibleRun(String,AuthenticatedActor)」：确认 Run 属于流式操作，并通过案件访问会话、房间读权限和 audience 白名单三层校验当前操作者，最终返回「AgentRunEntity」。
     // 上游调用：「AgentRunStreamEventService.requireVisibleRun(String,AuthenticatedActor)」的上游调用点包括 「AgentRunQueryService.get」、「AgentRunQueryService.active」、「AgentRunStreamEventService.replay」、「AgentRunStreamEventService.subscribe」。
@@ -211,13 +239,23 @@ public class AgentRunStreamEventService {
             try {
                 // 权限在每次追赶时重新校验，而不是只在建立 SSE 时校验。
                 // 长连接期间案件参与关系变化后，旧连接不能继续读取新事件。
-                requireVisibleRun(runId, subscription.actor());
-                eventRepository
-                        .findAllByAgentRunIdAndSequenceNoGreaterThanOrderBySequenceNoAsc(
-                                runId, subscription.lastSequence().get())
-                        .stream()
-                        .map(this::view)
-                        .forEach(event -> sendLocked(subscription, event));
+                AgentRunEntity run = requireVisibleRun(runId, subscription.actor());
+                List<AgentRunEventView> events = replayAuthorized(
+                        run, subscription.cursor(), SSE_CATCH_UP_BATCH_SIZE + 1);
+                int sendCount = Math.min(events.size(), SSE_CATCH_UP_BATCH_SIZE);
+                for (int index = 0; index < sendCount; index++) {
+                    if (sendLocked(subscription, events.get(index))) {
+                        remove(runId, subscription);
+                        return false;
+                    }
+                }
+                if (events.size() > SSE_CATCH_UP_BATCH_SIZE) {
+                    removeDisconnected(
+                            runId,
+                            subscription,
+                            new IllegalStateException("SSE catch-up batch limit reached"));
+                    return false;
+                }
                 return true;
             } catch (RuntimeException failure) {
                 removeDisconnected(runId, subscription, failure);
@@ -231,23 +269,182 @@ public class AgentRunStreamEventService {
     // 上游调用：「AgentRunStreamEventService.sendLocked(Subscription,AgentRunEventView)」的上游调用点包括 「AgentRunStreamEventService.catchUp」。
     // 下游影响：「AgentRunStreamEventService.sendLocked(Subscription,AgentRunEventView)」向下依次触达 「SseEmitter.event」、「event.sequence」、「subscription.lastSequence」、「subscription.emitter」。
     // 系统意义：「AgentRunStreamEventService.sendLocked(Subscription,AgentRunEventView)」位于模型输出的信任边界，决定哪些内容可持久化和对前端可见，并保证断线后能够按序回放。
-    private void sendLocked(Subscription subscription, AgentRunEventView event) {
-        if (event.sequence() <= subscription.lastSequence().get()) {
-            return;
+    private boolean sendLocked(Subscription subscription, AgentRunEventView event) {
+        if (event.cursor().equals(subscription.cursor().wireValue())) {
+            return false;
         }
         try {
             subscription.emitter().send(
                     SseEmitter.event()
-                            .id(Long.toString(event.sequence()))
+                            .id(event.cursor())
                             .name(event.type())
                             .data(event));
-            subscription.lastSequence().set(event.sequence());
+            subscription.cursor(
+                    AgentRunStreamCursor.parse(event.cursor(), subscription.cursor().protocol()));
             if ("final".equals(event.type()) || "error".equals(event.type())) {
                 subscription.emitter().complete();
+                return true;
             }
+            return false;
         } catch (IOException failure) {
             throw new EventDeliveryException(failure);
         }
+    }
+
+    private List<AgentRunEventView> replayAuthorized(
+            AgentRunEntity run, AgentRunStreamCursor cursor, int limit) {
+        if (limit < 1 || limit > REPLAY_BATCH_SIZE + 1) {
+            throw new IllegalArgumentException("stream replay limit is invalid");
+        }
+        if (cursor.protocol() == AgentRunProtocol.V1) {
+            return eventRepository
+                    .findV1ReplayPage(
+                            run.getId(), cursor.sequence(), PageRequest.of(0, limit))
+                    .stream()
+                    .map(this::viewV1)
+                    .toList();
+        }
+
+        Audience runAudience = requireV2Audience(run);
+        List<AgentRunAttemptEntity> attempts =
+                attemptRepository.findAllByAgentRunIdOrderByAttemptNoAsc(run.getId());
+        int cursorIndex = -1;
+        AgentRunEventView cursorEvent = null;
+        if (cursor.attemptId() != null) {
+            for (int index = 0; index < attempts.size(); index++) {
+                if (attempts.get(index).getId().equals(cursor.attemptId())) {
+                    cursorIndex = index;
+                    break;
+                }
+            }
+            if (cursorIndex < 0) {
+                throw new IllegalArgumentException("V2 cursor attempt does not belong to this run");
+            }
+            if (cursor.sequence() >= 0) {
+                AgentRunAttemptEntity attempt = attempts.get(cursorIndex);
+                AgentRunStreamEventEntity entity = eventRepository
+                        .findV2Event(run.getId(), attempt.getId(), cursor.sequence())
+                        .orElseThrow(() -> new IllegalArgumentException(
+                                "V2 cursor does not identify a persisted event"));
+                cursorEvent = viewV2(entity, attempt.getAttemptNo(), runAudience);
+            }
+        }
+
+        List<AgentRunEventView> events = new java.util.ArrayList<>();
+        int firstAttempt = Math.max(0, cursorIndex);
+        boolean globalTerminal = isGlobalTerminal(cursorEvent);
+        for (int index = firstAttempt; index < attempts.size(); index++) {
+            if (events.size() >= limit) {
+                break;
+            }
+            AgentRunAttemptEntity attempt = attempts.get(index);
+            long afterSequence = index == cursorIndex ? cursor.sequence() : -1;
+            int remaining = limit - events.size();
+            List<AgentRunEventView> attemptEvents = eventRepository
+                    .findV2ReplayPage(
+                            run.getId(),
+                            attempt.getId(),
+                            afterSequence,
+                            PageRequest.of(0, remaining))
+                    .stream()
+                    .map(entity -> viewV2(entity, attempt.getAttemptNo(), runAudience))
+                    .toList();
+            if (globalTerminal && !attemptEvents.isEmpty()) {
+                throw new IllegalStateException("V2 stream contains events after a global terminal");
+            }
+            AgentRunEventView attemptCursor = index == cursorIndex ? cursorEvent : null;
+            validateAttemptPage(
+                    attempts,
+                    index,
+                    afterSequence,
+                    attemptCursor,
+                    attemptEvents);
+            events.addAll(attemptEvents);
+            globalTerminal = globalTerminal
+                    || attemptEvents.stream().anyMatch(AgentRunStreamEventService::isGlobalTerminal);
+            if (globalTerminal && index + 1 < attempts.size()) {
+                throw new IllegalStateException("V2 stream contains an attempt after a global terminal");
+            }
+        }
+        return List.copyOf(events);
+    }
+
+    private void validateAttemptPage(
+            List<AgentRunAttemptEntity> attempts,
+            int attemptIndex,
+            long afterSequence,
+            AgentRunEventView cursorEvent,
+            List<AgentRunEventView> events) {
+        String previousAttemptId = attemptIndex == 0
+                ? null
+                : attempts.get(attemptIndex - 1).getId();
+        boolean started = afterSequence > 0;
+        boolean terminal = isAttemptTerminal(cursorEvent);
+        if (cursorEvent != null) {
+            if (cursorEvent.sequence() == 0
+                    && !"attempt_started".equals(cursorEvent.type())) {
+                throw new IllegalStateException(
+                        "V2 attempt must begin at sequence 0 with attempt_started");
+            }
+            validateAttemptEvent(cursorEvent, previousAttemptId, started);
+            started = started || "attempt_started".equals(cursorEvent.type());
+        }
+        for (int index = 0; index < events.size(); index++) {
+            AgentRunEventView event = events.get(index);
+            if (terminal) {
+                throw new IllegalStateException("V2 stream contains events after an attempt terminal");
+            }
+            if (afterSequence == -1 && index == 0
+                    && (event.sequence() != 0
+                            || !"attempt_started".equals(event.type()))) {
+                throw new IllegalStateException(
+                        "V2 attempt must begin at sequence 0 with attempt_started");
+            }
+            validateAttemptEvent(event, previousAttemptId, started);
+            started = started || "attempt_started".equals(event.type());
+            terminal = isAttemptTerminal(event);
+        }
+    }
+
+    private static void validateAttemptEvent(
+            AgentRunEventView event, String previousAttemptId, boolean started) {
+        if ("attempt_started".equals(event.type())) {
+            if (started || event.sequence() != 0) {
+                throw new IllegalStateException("V2 attempt contains a duplicate attempt_started");
+            }
+            return;
+        }
+        if ("attempt_reset".equals(event.type())
+                && (previousAttemptId == null
+                        || !previousAttemptId.equals(event.resetAttemptId()))) {
+            throw new IllegalStateException(
+                    "V2 attempt_reset must reference the immediately prior attempt");
+        }
+    }
+
+    private Audience requireV2Audience(AgentRunEntity run) {
+        try {
+            List<Audience> audiences = objectMapper.readValue(
+                    run.getStreamAudienceJson(), new TypeReference<>() {});
+            if (audiences == null || audiences.size() != 1 || audiences.get(0) == null) {
+                throw new IllegalStateException("V2 run must bind exactly one stream audience");
+            }
+            return audiences.get(0);
+        } catch (JsonProcessingException exception) {
+            throw new IllegalStateException("invalid V2 agent run audience", exception);
+        }
+    }
+
+    private static boolean isAttemptTerminal(AgentRunEventView event) {
+        return event != null
+                && ("final".equals(event.type())
+                        || "error".equals(event.type())
+                        || "attempt_aborted".equals(event.type()));
+    }
+
+    private static boolean isGlobalTerminal(AgentRunEventView event) {
+        return event != null
+                && ("final".equals(event.type()) || "error".equals(event.type()));
     }
 
     // 所属模块：【Agent 流式运行 / 应用编排层】「AgentRunStreamEventService.visibleTo(AgentRunEntity,CaseAccessSessionEntity)」。
@@ -282,14 +479,21 @@ public class AgentRunStreamEventService {
     // 上游调用：「AgentRunStreamEventService.view(AgentRunStreamEventEntity)」只由「AgentRunStreamEventService」内部流程使用，负责封装“视图”这一步校验、映射或状态转换。
     // 下游影响：「AgentRunStreamEventService.view(AgentRunStreamEventEntity)」向下依次触达 「objectMapper.readTree」、「entity.getPayloadJson」、「entity.getAgentRunId」、「entity.getSequenceNo」；计算结果以「AgentRunEventView」交给调用方。
     // 系统意义：「AgentRunStreamEventService.view(AgentRunStreamEventEntity)」位于模型输出的信任边界，决定哪些内容可持久化和对前端可见，并保证断线后能够按序回放。
-    private AgentRunEventView view(AgentRunStreamEventEntity entity) {
+    private AgentRunEventView viewV1(AgentRunStreamEventEntity entity) {
         try {
             JsonNode payload = objectMapper.readTree(entity.getPayloadJson());
             return new AgentRunEventView(
                     payload.path("schema_version").asText("agent_stream.v1"),
+                    AgentRunProtocol.V1.wireValue(),
                     entity.getAgentRunId(),
+                    null,
+                    null,
                     entity.getSequenceNo(),
+                    Long.toString(entity.getSequenceNo()),
                     entity.getEventType(),
+                    null,
+                    null,
+                    null,
                     textOrNull(payload.get("operation")),
                     textOrNull(payload.get("node_name")),
                     textOrNull(payload.get("field")),
@@ -306,6 +510,77 @@ public class AgentRunStreamEventService {
         } catch (JsonProcessingException exception) {
             throw new IllegalStateException("invalid persisted agent stream event", exception);
         }
+    }
+
+    private AgentRunEventView viewV2(
+            AgentRunStreamEventEntity entity, long attemptNo, Audience runAudience) {
+        try {
+            JsonNode encoded = objectMapper.readTree(entity.getPayloadJson());
+            if (entity.getPayloadHash() == null
+                    || !ContractJson.sha256Hex(encoded).equals(entity.getPayloadHash())) {
+                throw new IllegalStateException("V2 stream payload hash verification failed");
+            }
+            AgentStreamEvent event = objectMapper.treeToValue(encoded, AgentStreamEvent.class);
+            if (!entity.getAgentRunId().equals(event.runId())
+                    || !entity.getAgentRunAttemptId().equals(event.attemptId())
+                    || entity.getSequenceNo() != event.sequenceNo()
+                    || !entity.getEventType().equals(event.eventType().wireValue())
+                    || entity.getAudience() != event.audience()
+                    || event.audience() != runAudience
+                    || !AgentRunProtocol.V2.wireValue().equals(entity.getStreamProtocol())) {
+                throw new IllegalStateException(
+                        "V2 stream columns conflict with the hash-bound event");
+            }
+            JsonNode payload = objectMapper.valueToTree(event.payload());
+            JsonNode usage = event.payload().usage() == null
+                    ? null
+                    : objectMapper.valueToTree(event.payload().usage());
+            JsonNode response = event.eventType() == StreamEventType.FINAL
+                    ? payload.deepCopy()
+                    : null;
+            String cursor = new AgentRunStreamCursor(
+                            AgentRunProtocol.V2, event.attemptId(), event.sequenceNo())
+                    .wireValue();
+            return new AgentRunEventView(
+                    event.schemaVersion(),
+                    AgentRunProtocol.V2.wireValue(),
+                    event.runId(),
+                    event.attemptId(),
+                    attemptNo,
+                    event.sequenceNo(),
+                    cursor,
+                    event.eventType().wireValue(),
+                    event.audience().name(),
+                    event.payload().resetAttemptId(),
+                    payload,
+                    null,
+                    event.payload().node(),
+                    event.payload().field(),
+                    event.payload().delta(),
+                    usage,
+                    null,
+                    null,
+                    response,
+                    event.payload().errorCode(),
+                    event.eventType() == StreamEventType.ERROR
+                            ? "数字人生成失败，请稍后重试。"
+                            : null,
+                    event.payload().retryable(),
+                    null,
+                    entity.getCreatedAt());
+        } catch (JsonProcessingException exception) {
+            throw new IllegalStateException("invalid persisted V2 agent stream event", exception);
+        }
+    }
+
+    private static AgentRunProtocol protocol(AgentRunEntity run) {
+        if (AgentRunProtocol.V1.wireValue().equals(run.getProtocol())) {
+            return AgentRunProtocol.V1;
+        }
+        if (AgentRunProtocol.V2.wireValue().equals(run.getProtocol())) {
+            return AgentRunProtocol.V2;
+        }
+        throw new IllegalStateException("unsupported persisted agent run protocol");
     }
 
     // 所属模块：【Agent 流式运行 / 应用编排层】「AgentRunStreamEventService.publishAfterCommit(String)」。
@@ -463,8 +738,36 @@ public class AgentRunStreamEventService {
     // 协作关系：由同模块控制器、应用服务或框架生命周期创建和调用。
     // 边界意义：运行必须绑定案件、房间和受众；任何协议越界都要在内容公开前终止
     // Java 语法：record 用于不可变数据载体，编译器会生成组件访问器和值语义方法。
-    private record Subscription(
-            AuthenticatedActor actor, SseEmitter emitter, AtomicLong lastSequence) {}
+    private static final class Subscription {
+        private final AuthenticatedActor actor;
+        private final SseEmitter emitter;
+        private AgentRunStreamCursor cursor;
+
+        private Subscription(
+                AuthenticatedActor actor,
+                SseEmitter emitter,
+                AgentRunStreamCursor cursor) {
+            this.actor = actor;
+            this.emitter = emitter;
+            this.cursor = cursor;
+        }
+
+        private AuthenticatedActor actor() {
+            return actor;
+        }
+
+        private SseEmitter emitter() {
+            return emitter;
+        }
+
+        private AgentRunStreamCursor cursor() {
+            return cursor;
+        }
+
+        private void cursor(AgentRunStreamCursor cursor) {
+            this.cursor = cursor;
+        }
+    }
 
     // 所属模块：【Agent 流式运行 / 应用编排层】类型「EventDeliveryException」。
     // 类型职责：表达事件投递失败语义，使上层能够区分业务拒绝、协议错误和可重试故障；本类型显式提供 「EventDeliveryException」。

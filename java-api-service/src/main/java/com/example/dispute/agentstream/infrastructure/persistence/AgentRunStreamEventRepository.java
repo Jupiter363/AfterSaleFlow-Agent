@@ -11,6 +11,7 @@ import java.util.Optional;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
+import org.springframework.data.domain.Pageable;
 
 // 所属模块：【Agent 流式运行 / 持久化适配层】类型「AgentRunStreamEventRepository」。
 // 类型职责：声明Agent运行流事件在 PostgreSQL 中的查询与写入契约；本类型显式提供 「findAllByAgentRunIdAndSequenceNoGreaterThanOrderBySequenceNoAsc」、「findByAgentRunIdAndSequenceNo」、「existsByAgentRunIdAndEventType」、「findMaxSequenceByAgentRunId」。
@@ -30,6 +31,12 @@ public interface AgentRunStreamEventRepository
     List<AgentRunStreamEventEntity>
             findAllByAgentRunIdAndSequenceNoGreaterThanOrderBySequenceNoAsc(
                     @Param("runId") String agentRunId, @Param("sequenceNo") long sequenceNo);
+
+    @Query("select event from AgentRunStreamEventEntity event where event.agentRunId = :runId and event.streamProtocol = 'agent_stream.v1' and event.sequenceNo > :sequenceNo order by event.sequenceNo asc")
+    List<AgentRunStreamEventEntity> findV1ReplayPage(
+            @Param("runId") String runId,
+            @Param("sequenceNo") long sequenceNo,
+            Pageable pageable);
 
     // 所属模块：【Agent 流式运行 / 持久化适配层】「AgentRunStreamEventRepository.findByAgentRunIdAndSequenceNo(String,long)」。
     // 具体功能：「AgentRunStreamEventRepository.findByAgentRunIdAndSequenceNo(String,long)」：声明按Agent运行标识、序号编号访问Agent运行流事件的 Spring Data 查询，由框架根据方法签名生成 SQL，并以「Optional<AgentRunStreamEventEntity>」返回。
@@ -65,6 +72,13 @@ public interface AgentRunStreamEventRepository
             @Param("runId") String runId,
             @Param("attemptId") String attemptId,
             @Param("sequenceNo") long sequenceNo);
+
+    @Query("select event from AgentRunStreamEventEntity event where event.agentRunId = :runId and event.agentRunAttemptId = :attemptId and event.streamProtocol = 'agent-stream.v2' and event.sequenceNo > :sequenceNo order by event.sequenceNo asc")
+    List<AgentRunStreamEventEntity> findV2ReplayPage(
+            @Param("runId") String runId,
+            @Param("attemptId") String attemptId,
+            @Param("sequenceNo") long sequenceNo,
+            Pageable pageable);
 
     @Query("select event from AgentRunStreamEventEntity event where event.agentRunId = :runId and event.agentRunAttemptId = :attemptId and event.streamProtocol = 'agent-stream.v2' and event.sequenceNo = :sequenceNo")
     Optional<AgentRunStreamEventEntity> findV2Event(

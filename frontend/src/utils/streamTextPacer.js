@@ -4,6 +4,7 @@
 const FRAME_DURATION_MS = 16;
 const DEFAULT_TARGET_CATCH_UP_MS = 1000;
 const DEFAULT_MAX_CHARACTERS_PER_FRAME = 2048;
+const DEFAULT_MAX_PENDING_CHARACTERS = 256 * 1024;
 
 function shouldRevealImmediately() {
   if (typeof document !== "undefined" && document.visibilityState === "hidden") {
@@ -106,6 +107,7 @@ export function createStreamTextPacer({
   onReveal,
   targetCatchUpMs = DEFAULT_TARGET_CATCH_UP_MS,
   maxCharactersPerFrame = DEFAULT_MAX_CHARACTERS_PER_FRAME,
+  maxPendingCharacters = DEFAULT_MAX_PENDING_CHARACTERS,
   scheduleFrame = scheduleVisualFrame,
   cancelFrame = cancelVisualFrame,
 } = {}) {
@@ -120,6 +122,7 @@ export function createStreamTextPacer({
     Math.round(Number(targetCatchUpMs || 0) / FRAME_DURATION_MS),
   );
   const maxPerFrame = Math.max(1, Number(maxCharactersPerFrame) || 1);
+  const maxPending = Math.max(1, Number(maxPendingCharacters) || 1);
   let pendingCharacters = 0;
   let charactersPerFrame = 1;
   let frameToken = null;
@@ -200,6 +203,7 @@ export function createStreamTextPacer({
   function enqueue(fieldPath, value) {
     const text = String(value || "");
     if (stopped || !text) return;
+    assertCapacity(text);
     const characters = codePointLength(text);
     const lastItem = queue.at(-1);
     if (lastItem?.fieldPath === fieldPath) {
@@ -217,6 +221,18 @@ export function createStreamTextPacer({
       ),
     );
     scheduleTick();
+  }
+
+  function assertCapacity(value) {
+    const text = String(value || "");
+    if (stopped || !text) return;
+    const characters = codePointLength(text);
+    if (pendingCharacters + characters > maxPending) {
+      const error = new Error("stream display buffer exceeded its bounded capacity");
+      error.code = "AGENT_STREAM_SLOW_CONSUMER";
+      error.retryable = true;
+      throw error;
+    }
   }
 
   function drain() {
@@ -241,6 +257,7 @@ export function createStreamTextPacer({
   }
 
   return {
+    assertCapacity,
     enqueue,
     drain,
     cancel,

@@ -123,6 +123,57 @@ function rebuildReceivedContent(run) {
     .join("\n\n");
 }
 
+function installDisplayPacer(run) {
+  run.displayPacer = markRaw(createStreamTextPacer({
+    onReveal: (pacedFieldKey, fragment) => {
+      const meta = run.pacedFieldMeta[pacedFieldKey] || {
+        fieldPath: pacedFieldKey,
+        cardKey: "default",
+      };
+      const fieldPath = meta.fieldPath;
+      if (!run.fieldOrder.includes(pacedFieldKey)) {
+        run.fieldOrder.push(pacedFieldKey);
+      }
+      run.fieldText[pacedFieldKey] = (run.fieldText[pacedFieldKey] || "") + fragment;
+      const card = run.cards[meta.cardKey] || run.cards.default;
+      if (!card.fieldOrder.includes(pacedFieldKey)) {
+        card.fieldOrder.push(pacedFieldKey);
+      }
+      card.fieldText[pacedFieldKey] = (card.fieldText[pacedFieldKey] || "") + fragment;
+      rebuildCardContent(card);
+      rebuildVisibleContent(run);
+    },
+  }));
+}
+
+function resetAttemptProjection(run, resetAttemptId, nextAttemptId) {
+  if (run.currentAttemptId && run.currentAttemptId !== resetAttemptId) {
+    const error = new Error("数字人 reset 与当前 attempt 不匹配");
+    error.code = "AGENT_STREAM_RESET_MISMATCH";
+    throw error;
+  }
+  run.displayPacer?.cancel();
+  run.content = "";
+  run.fieldText = {};
+  run.fieldOrder = [];
+  run.receivedContent = "";
+  run.receivedFieldText = {};
+  run.receivedFieldOrder = [];
+  run.cards = {};
+  run.cardOrder = [];
+  run.activeCardKey = "default";
+  run.pacedFieldMeta = {};
+  run.currentAttemptId = nextAttemptId;
+  run.pendingAttemptId = "";
+  run.resetCount += 1;
+  ensureStreamCard(run, {});
+  installDisplayPacer(run);
+}
+
+function eventIdentity(event) {
+  return `${event.protocol || "v1"}:${event.attemptId || "legacy"}:${event.sequence}`;
+}
+
 // 业务位置：【前端状态仓库】wait：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 API 响应、SSE 增量和用户操作 正确进入 跨组件一致的案件/房间/证据状态。上游：API 响应、SSE 增量和用户操作。下游：跨组件一致的案件/房间/证据状态。边界：本地状态不能替代服务端事实。
 function wait(ms, signal) {
   return new Promise((resolve, reject) => {
@@ -284,6 +335,11 @@ export async function consumeAgentRun({
     actorRole: String(actor?.role || "").toUpperCase(),
     agentLabel,
     senderRole,
+    protocol: "",
+    currentAttemptId: "",
+    pendingAttemptId: "",
+    resetCount: 0,
+    attempts: {},
     status: "PENDING",
     content: "",
     fieldText: {},
@@ -296,7 +352,7 @@ export async function consumeAgentRun({
     activeCardKey: "default",
     pacedFieldMeta: {},
     seenEventSequences: markRaw(new Set()),
-    lastEventId: -1,
+    lastEventId: "-1",
     usage: null,
     finalResult: null,
     error: null,
@@ -310,26 +366,7 @@ export async function consumeAgentRun({
     promise: null,
   });
   ensureStreamCard(run, {});
-  run.displayPacer = markRaw(createStreamTextPacer({
-    onReveal: (pacedFieldKey, fragment) => {
-      const meta = run.pacedFieldMeta[pacedFieldKey] || {
-        fieldPath: pacedFieldKey,
-        cardKey: "default",
-      };
-      const fieldPath = meta.fieldPath;
-      if (!run.fieldOrder.includes(pacedFieldKey)) {
-        run.fieldOrder.push(pacedFieldKey);
-      }
-      run.fieldText[pacedFieldKey] = (run.fieldText[pacedFieldKey] || "") + fragment;
-      const card = run.cards[meta.cardKey] || run.cards.default;
-      if (!card.fieldOrder.includes(pacedFieldKey)) {
-        card.fieldOrder.push(pacedFieldKey);
-      }
-      card.fieldText[pacedFieldKey] = (card.fieldText[pacedFieldKey] || "") + fragment;
-      rebuildCardContent(card);
-      rebuildVisibleContent(run);
-    },
-  }));
+  installDisplayPacer(run);
   agentStreamStore.runs[run.runId] = run;
 
   // 业务位置：【前端状态仓库】execute：执行 当前阶段业务数据 对应的业务动作，并将结果交给 跨组件一致的案件/房间/证据状态。上游：API 响应、SSE 增量和用户操作。下游：跨组件一致的案件/房间/证据状态。边界：本地状态不能替代服务端事实。
@@ -347,20 +384,64 @@ export async function consumeAgentRun({
             fetchImpl,
             signal: controller.signal,
             onEvent: async (event) => {
-              if (
-                event.sequence >= 0 &&
-                run.seenEventSequences.has(event.sequence)
-              ) {
-                return;
+              const identity = eventIdentity(event);
+              if (run.seenEventSequences.has(identity)) return;
+              if (run.protocol && run.protocol !== event.protocol) {
+                const error = new Error("数字人流协议在运行中发生变化");
+                error.code = "AGENT_STREAM_PROTOCOL_CHANGED";
+                throw error;
               }
-              if (event.sequence >= 0) run.seenEventSequences.add(event.sequence);
-              run.lastEventId = Math.max(run.lastEventId, event.sequence || 0);
-              if (event.event === "start") {
+              run.protocol ||= event.protocol;
+
+              const isV2 = event.protocol === "agent-stream.v2";
+              if (isV2 && event.event === "attempt_started") {
+                run.attempts[event.attemptId] = {
+                  status: "STREAMING",
+                  startedAt: Date.now(),
+                };
+                if (!run.currentAttemptId) run.currentAttemptId = event.attemptId;
+                else if (run.currentAttemptId !== event.attemptId) {
+                  run.pendingAttemptId = event.attemptId;
+                }
+              }
+              if (isV2 && event.event === "attempt_reset") {
+                if (!event.resetAttemptId || !event.attemptId) {
+                  const error = new Error("数字人 reset 缺少 attempt 绑定");
+                  error.code = "AGENT_STREAM_RESET_INVALID";
+                  throw error;
+                }
+                resetAttemptProjection(run, event.resetAttemptId, event.attemptId);
+                if (run.attempts[event.resetAttemptId]) {
+                  run.attempts[event.resetAttemptId].status = "RESET";
+                }
+                run.attempts[event.attemptId] ||= { startedAt: Date.now() };
+                run.attempts[event.attemptId].status = "STREAMING";
+              } else if (
+                isV2 &&
+                !["attempt_started"].includes(event.event) &&
+                run.currentAttemptId !== event.attemptId
+              ) {
+                const error = new Error("数字人事件来自未激活的 attempt");
+                error.code = "AGENT_STREAM_ATTEMPT_OUT_OF_ORDER";
+                throw error;
+              }
+
+              if (event.event === "start" || event.event === "attempt_started") {
                 run.status = "STREAMING";
               } else if (event.event === "visible_delta") {
-                if (!isVisibleField(event.fieldPath) || !event.delta) return;
+                if (!isVisibleField(event.fieldPath) || !event.delta) {
+                  run.seenEventSequences.add(identity);
+                  run.lastEventId = event.cursor;
+                  return;
+                }
+                const structuredField = isStructuredVisibleField(event.fieldPath);
+                // Capacity failure is replayable. Check it before mutating received/card
+                // projections so the same durable event can be applied exactly once later.
+                if (!structuredField) {
+                  run.displayPacer.assertCapacity(event.delta);
+                }
                 run.status = "STREAMING";
-                const card = isStructuredVisibleField(event.fieldPath)
+                const card = structuredField
                   ? null
                   : ensureStreamCard(run, event);
                 if (card) run.activeCardKey = card.key;
@@ -370,7 +451,7 @@ export async function consumeAgentRun({
                 run.receivedFieldText[event.fieldPath] =
                   (run.receivedFieldText[event.fieldPath] || "") + event.delta;
                 rebuildReceivedContent(run);
-                if (isStructuredVisibleField(event.fieldPath)) {
+                if (structuredField) {
                   if (!run.fieldOrder.includes(event.fieldPath)) {
                     run.fieldOrder.push(event.fieldPath);
                   }
@@ -388,6 +469,13 @@ export async function consumeAgentRun({
                 }
               } else if (event.event === "usage") {
                 run.usage = event.usage;
+              } else if (event.event === "attempt_aborted") {
+                if (run.attempts[event.attemptId]) {
+                  run.attempts[event.attemptId].status = "ABORTED";
+                }
+                run.status = "RECONNECTING";
+              } else if (event.event === "attempt_reset") {
+                run.status = "STREAMING";
               } else if (event.event === "final") {
                 terminal = true;
                 await run.displayPacer.drain();
@@ -411,19 +499,29 @@ export async function consumeAgentRun({
                 }
                 run.status = "COMPLETED";
                 run.completedAt = Date.now();
+                if (event.attemptId && run.attempts[event.attemptId]) {
+                  run.attempts[event.attemptId].status = "COMPLETED";
+                }
               } else if (event.event === "error") {
                 terminal = true;
                 throw streamFailure(event.error);
               }
               await onEvent?.(event, run);
+              run.seenEventSequences.add(identity);
+              run.lastEventId = event.cursor;
             },
           });
-          run.lastEventId = Math.max(run.lastEventId, Number(consumed.cursor) || 0);
+          run.lastEventId = String(consumed.cursor ?? run.lastEventId);
           terminal ||= consumed.terminal;
           if (!terminal) throw new Error("数字人流在完成前断开");
         } catch (failure) {
           if (controller.signal.aborted) throw failure;
-          if (failure?.code && failure.code !== "AGENT_STREAM_CONNECTION_FAILED") {
+          if (failure?.code === "AGENT_STREAM_SLOW_CONSUMER") {
+            await run.displayPacer.drain();
+          } else if (
+            failure?.code &&
+            failure.code !== "AGENT_STREAM_CONNECTION_FAILED"
+          ) {
             throw failure;
           }
           if (attempts >= reconnectAttempts) throw failure;

@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   clearAgentStreams,
   consumeAgentRun,
+  durableMessagesOutsideActiveStreams,
   getAgentStreamRun,
 } from "./agentStream";
 
@@ -21,6 +22,7 @@ function streamResponse(frames) {
 
 afterEach(() => {
   clearAgentStreams({}, { abort: true });
+  vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
@@ -84,5 +86,79 @@ describe("agentStreamStore", () => {
     });
 
     expect(getAgentStreamRun("AGENT_RUN_PRIVATE")?.content).toBe("");
+  });
+
+  it("clears the aborted attempt before revealing replacement attempt text", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(streamResponse([
+      'id: v2:ATTEMPT_1:0\nevent: attempt_started\ndata: {"protocol":"agent-stream.v2","runId":"AGENT_RUN_RESET","attemptId":"ATTEMPT_1","sequence":0,"cursor":"v2:ATTEMPT_1:0","audience":"USER","payload":{"node":"turn"}}\n\n',
+      'id: v2:ATTEMPT_1:1\nevent: visible_delta\ndata: {"protocol":"agent-stream.v2","runId":"AGENT_RUN_RESET","attemptId":"ATTEMPT_1","sequence":1,"cursor":"v2:ATTEMPT_1:1","audience":"USER","payload":{"node":"turn","field":"room_utterance","delta":"旧文本"}}\n\n',
+      'id: v2:ATTEMPT_1:2\nevent: attempt_aborted\ndata: {"protocol":"agent-stream.v2","runId":"AGENT_RUN_RESET","attemptId":"ATTEMPT_1","sequence":2,"cursor":"v2:ATTEMPT_1:2","audience":"USER","payload":{"reasonCode":"TRANSPORT_LOST"}}\n\n',
+      'id: v2:ATTEMPT_2:0\nevent: attempt_started\ndata: {"protocol":"agent-stream.v2","runId":"AGENT_RUN_RESET","attemptId":"ATTEMPT_2","sequence":0,"cursor":"v2:ATTEMPT_2:0","audience":"USER","payload":{"node":"turn"}}\n\n',
+      'id: v2:ATTEMPT_2:1\nevent: attempt_reset\ndata: {"protocol":"agent-stream.v2","runId":"AGENT_RUN_RESET","attemptId":"ATTEMPT_2","sequence":1,"cursor":"v2:ATTEMPT_2:1","audience":"USER","resetAttemptId":"ATTEMPT_1","payload":{"reasonCode":"RETRY","resetAttemptId":"ATTEMPT_1"}}\n\n',
+      'id: v2:ATTEMPT_2:2\nevent: visible_delta\ndata: {"protocol":"agent-stream.v2","runId":"AGENT_RUN_RESET","attemptId":"ATTEMPT_2","sequence":2,"cursor":"v2:ATTEMPT_2:2","audience":"USER","payload":{"node":"turn","field":"room_utterance","delta":"新文本"}}\n\n',
+      'id: v2:ATTEMPT_2:3\nevent: final\ndata: {"protocol":"agent-stream.v2","runId":"AGENT_RUN_RESET","attemptId":"ATTEMPT_2","sequence":3,"cursor":"v2:ATTEMPT_2:3","audience":"USER","response":{"finalResultHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"payload":{"finalResultHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}\n\n',
+    ]));
+
+    await consumeAgentRun({
+      actor,
+      caseId: "CASE_1",
+      roomType: "INTAKE",
+      descriptor: {
+        runId: "AGENT_RUN_RESET",
+        streamUrl: "/api/agent-runs/AGENT_RUN_RESET/events",
+      },
+      fetchImpl,
+    });
+
+    const run = getAgentStreamRun("AGENT_RUN_RESET");
+    expect(run.content).toBe("新文本");
+    expect(run.content).not.toContain("旧文本");
+    expect(run.currentAttemptId).toBe("ATTEMPT_2");
+    expect(run.resetCount).toBe(1);
+    expect(run.lastEventId).toBe("v2:ATTEMPT_2:3");
+  });
+
+  it("replays an overflowed delta without duplicating received or durable fallback text", async () => {
+    vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: true })));
+    const accepted = "A".repeat(256 * 1024);
+    const firstResponse = streamResponse([
+      'id: 0\nevent: start\ndata: {"schemaVersion":"agent_stream.v1","runId":"AGENT_RUN_SLOW","sequence":0,"type":"start"}\n\n',
+      `id: 1\nevent: visible_delta\ndata: ${JSON.stringify({
+        schemaVersion: "agent_stream.v1",
+        runId: "AGENT_RUN_SLOW",
+        sequence: 1,
+        type: "visible_delta",
+        field: "room_utterance",
+        delta: accepted,
+      })}\n\n`,
+      'id: 2\nevent: visible_delta\ndata: {"schemaVersion":"agent_stream.v1","runId":"AGENT_RUN_SLOW","sequence":2,"type":"visible_delta","field":"room_utterance","delta":"B"}\n\n',
+    ]);
+    const replayResponse = streamResponse([
+      'id: 2\nevent: visible_delta\ndata: {"schemaVersion":"agent_stream.v1","runId":"AGENT_RUN_SLOW","sequence":2,"type":"visible_delta","field":"room_utterance","delta":"B"}\n\n',
+      'id: 3\nevent: final\ndata: {"schemaVersion":"agent_stream.v1","runId":"AGENT_RUN_SLOW","sequence":3,"type":"final","response":{"ok":true}}\n\n',
+    ]);
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(firstResponse)
+      .mockResolvedValueOnce(replayResponse);
+
+    await consumeAgentRun({
+      actor,
+      caseId: "CASE_1",
+      roomType: "INTAKE",
+      descriptor: {
+        runId: "AGENT_RUN_SLOW",
+        streamUrl: "/api/agent-runs/AGENT_RUN_SLOW/events",
+      },
+      reconnectBaseDelayMs: 1,
+      fetchImpl,
+    });
+
+    const run = getAgentStreamRun("AGENT_RUN_SLOW");
+    expect(run.reconnectCount).toBe(1);
+    expect(run.receivedContent).toBe(`${accepted}B`);
+    expect(run.receivedContent.endsWith("BB")).toBe(false);
+    expect(durableMessagesOutsideActiveStreams([
+      { senderRole: "AGENT", messageText: `${accepted}B` },
+    ], [run])).toEqual([]);
   });
 });

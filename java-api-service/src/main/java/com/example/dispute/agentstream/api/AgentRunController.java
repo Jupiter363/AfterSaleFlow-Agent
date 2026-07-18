@@ -85,17 +85,13 @@ public class AgentRunController {
     public ResponseEntity<SseEmitter> events(
             @PathVariable @Pattern(regexp = "AGENT_RUN_[A-Za-z0-9]{1,54}") String runId,
             @RequestHeader(value = "Last-Event-ID", required = false)
-                    Long lastEventId,
+                    String lastEventId,
             @RequestParam(value = "last_event_id", required = false)
-                    Long queryCursor,
+                    String queryCursor,
             Authentication authentication) {
-        long cursor =
-                lastEventId != null
-                        ? lastEventId
-                        : queryCursor == null ? -1L : queryCursor;
-        if (cursor < -1) {
-            throw new IllegalArgumentException("last event id must be at least -1");
-        }
+        String cursor = lastEventId != null
+                ? lastEventId
+                : queryCursor == null ? "-1" : queryCursor;
         SseEmitter emitter = eventService.subscribe(runId, cursor, actor(authentication));
         return ResponseEntity.ok()
                 .header("Cache-Control", "no-cache, no-transform")
@@ -111,15 +107,17 @@ public class AgentRunController {
     @GetMapping("/events/replay")
     public ApiResponse<List<AgentRunEventView>> replay(
             @PathVariable @Pattern(regexp = "AGENT_RUN_[A-Za-z0-9]{1,54}") String runId,
-            @RequestParam(value = "after_sequence", defaultValue = "-1")
-                    long afterSequence,
+            @RequestParam(value = "after_sequence", required = false)
+                    Long afterSequence,
+            @RequestParam(value = "after_cursor", required = false)
+                    String afterCursor,
             Authentication authentication,
             HttpServletRequest request) {
-        if (afterSequence < -1) {
-            throw new IllegalArgumentException("after sequence must be at least -1");
-        }
+        String cursor = afterCursor != null
+                ? afterCursor
+                : Long.toString(afterSequence == null ? -1 : afterSequence);
         return ApiResponse.success(
-                eventService.replay(runId, afterSequence, actor(authentication)),
+                eventService.replay(runId, cursor, actor(authentication)),
                 correlationId(request, TraceIdFilter.REQUEST_ATTRIBUTE),
                 correlationId(request, TraceIdFilter.TRACE_ATTRIBUTE),
                 Instant.now(clock));

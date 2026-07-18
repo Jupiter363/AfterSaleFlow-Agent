@@ -11,6 +11,66 @@ import {
 
 const actor = { id: "user-local", role: "USER" };
 
+function v1Event(options = {}) {
+  const { event = "visible_delta", data = {} } = options;
+  const id = Object.hasOwn(options, "id") ? options.id : 2;
+  return {
+    id,
+    event,
+    data: {
+      schemaVersion: "agent_stream.v1",
+      runId: "AGENT_RUN_1",
+      sequence: 2,
+      type: event,
+      field: "room_utterance",
+      delta: "请补充发生时间。",
+      ...data,
+    },
+  };
+}
+
+function v2Event(options = {}) {
+  const { event = "attempt_reset", data = {} } = options;
+  const id = Object.hasOwn(options, "id") ? options.id : "v2:ATTEMPT:2:1";
+  return {
+    id,
+    event,
+    data: {
+      protocol: "agent-stream.v2",
+      schemaVersion: "agent-stream.v2",
+      runId: "AGENT_RUN_V2",
+      attemptId: "ATTEMPT:2",
+      sequence: 1,
+      cursor: "v2:ATTEMPT:2:1",
+      audience: "USER",
+      resetAttemptId: "ATTEMPT_1",
+      payload: {
+        reasonCode: "RETRY",
+        resetAttemptId: "ATTEMPT_1",
+      },
+      ...data,
+    },
+  };
+}
+
+function captureFailure(callback) {
+  try {
+    callback();
+  } catch (error) {
+    return error;
+  }
+  throw new Error("expected protocol validation to fail");
+}
+
+function streamResponse(frames) {
+  return new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(frames));
+      controller.close();
+    },
+  }), { status: 200, headers: { "Content-Type": "text/event-stream" } });
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
 });
@@ -89,6 +149,162 @@ describe("agent stream protocol", () => {
       fieldPath: "room_utterance",
       delta: "请补充发生时间。",
     });
+  });
+
+  it("normalizes attempt-scoped V2 reset cursors without collapsing them to numbers", () => {
+    expect(normalizeAgentStreamEvent(
+      v2Event(),
+      "AGENT_RUN_V2",
+      "USER",
+    )).toMatchObject({
+      protocol: "agent-stream.v2",
+      runId: "AGENT_RUN_V2",
+      attemptId: "ATTEMPT:2",
+      event: "attempt_reset",
+      sequence: 1,
+      cursor: "v2:ATTEMPT:2:1",
+      resetAttemptId: "ATTEMPT_1",
+      terminal: false,
+    });
+  });
+
+  it.each([
+    ["missing", undefined],
+    ["string", "2"],
+    ["noninteger", 2.5],
+    ["negative", -1],
+    ["unsafe", Number.MAX_SAFE_INTEGER + 1],
+  ])("rejects a %s sequence instead of coercing it", (_label, sequence) => {
+    const failure = captureFailure(() => normalizeAgentStreamEvent(
+      v1Event({ data: { sequence } }),
+      "AGENT_RUN_1",
+    ));
+
+    expect(failure.code).toBe("AGENT_STREAM_SEQUENCE_INVALID");
+  });
+
+  it.each([
+    ["missing V1 cursor", v1Event({ id: undefined }), "AGENT_STREAM_CURSOR_INVALID"],
+    ["noncanonical V1 cursor", v1Event({ id: "02" }), "AGENT_STREAM_CURSOR_INVALID"],
+    ["wrong V1 sequence", v1Event({ id: 3 }), "AGENT_STREAM_CURSOR_INVALID"],
+    [
+      "missing V2 cursor",
+      v2Event({ id: undefined, data: { cursor: undefined } }),
+      "AGENT_STREAM_CURSOR_INVALID",
+    ],
+    [
+      "wrong V2 attempt",
+      v2Event({ id: "v2:OTHER:1", data: { cursor: "v2:OTHER:1" } }),
+      "AGENT_STREAM_CURSOR_MISMATCH",
+    ],
+    [
+      "noncanonical V2 sequence",
+      v2Event({ id: "v2:ATTEMPT:2:01", data: { cursor: "v2:ATTEMPT:2:01" } }),
+      "AGENT_STREAM_CURSOR_MISMATCH",
+    ],
+  ])("rejects %s", (_label, event, errorCode) => {
+    const expectedRunId = event.data.runId || "AGENT_RUN_1";
+    const failure = captureFailure(() => normalizeAgentStreamEvent(
+      event,
+      expectedRunId,
+      "USER",
+    ));
+
+    expect(failure.code).toBe(errorCode);
+  });
+
+  it("requires a declared run id instead of filling it from the descriptor", () => {
+    const failure = captureFailure(() => normalizeAgentStreamEvent(
+      v1Event({ data: { runId: undefined } }),
+      "AGENT_RUN_1",
+    ));
+
+    expect(failure.code).toBe("AGENT_STREAM_RUN_INVALID");
+  });
+
+  it.each([
+    ["missing", undefined],
+    ["non-string", 2],
+  ])("rejects a %s V2 attempt id", (_label, attemptId) => {
+    const failure = captureFailure(() => normalizeAgentStreamEvent(
+      v2Event({ data: { attemptId } }),
+      "AGENT_RUN_V2",
+      "USER",
+    ));
+
+    expect(failure.code).toBe("AGENT_STREAM_ATTEMPT_INVALID");
+  });
+
+  it.each([
+    ["protocol aliases", v2Event({ data: { schemaVersion: "agent_stream.v1" } }), "AGENT_STREAM_PROTOCOL_CONFLICT"],
+    ["run aliases", v1Event({ data: { run_id: "AGENT_RUN_OTHER" } }), "AGENT_STREAM_RUN_INVALID"],
+    ["attempt aliases", v2Event({ data: { attempt_id: "ATTEMPT_OTHER" } }), "AGENT_STREAM_ATTEMPT_INVALID"],
+    ["sequence aliases", v1Event({ data: { sequence_no: 3 } }), "AGENT_STREAM_SEQUENCE_CONFLICT"],
+    [
+      "cursor sources",
+      v2Event({ data: { payload: { cursor: "v2:ATTEMPT:2:0" } } }),
+      "AGENT_STREAM_CURSOR_CONFLICT",
+    ],
+    ["SSE and payload event types", v1Event({ data: { type: "final" } }), "AGENT_STREAM_EVENT_CONFLICT"],
+  ])("fails closed on conflicting %s", (_label, event, errorCode) => {
+    const failure = captureFailure(() => normalizeAgentStreamEvent(
+      event,
+      event.data.runId,
+      "USER",
+    ));
+
+    expect(failure.code).toBe(errorCode);
+  });
+
+  it("requires a valid V2 audience and enforces it for non-admin actors", () => {
+    expect(captureFailure(() => normalizeAgentStreamEvent(
+      v2Event({ data: { audience: undefined } }),
+      "AGENT_RUN_V2",
+      "USER",
+    )).code).toBe("AGENT_STREAM_AUDIENCE_INVALID");
+    expect(captureFailure(() => normalizeAgentStreamEvent(
+      v2Event({ data: { audience: "user" } }),
+      "AGENT_RUN_V2",
+      "USER",
+    )).code).toBe("AGENT_STREAM_AUDIENCE_INVALID");
+    expect(captureFailure(() => normalizeAgentStreamEvent(
+      v2Event({ data: { audience: "user" } }),
+      "AGENT_RUN_V2",
+      "ADMIN",
+    )).code).toBe("AGENT_STREAM_AUDIENCE_INVALID");
+    expect(captureFailure(() => normalizeAgentStreamEvent(
+      v2Event({ data: { audience: "MERCHANT" } }),
+      "AGENT_RUN_V2",
+      "USER",
+    )).code).toBe("AGENT_STREAM_AUDIENCE_MISMATCH");
+    expect(normalizeAgentStreamEvent(
+      v2Event({ data: { audience: "MERCHANT" } }),
+      "AGENT_RUN_V2",
+      "ADMIN",
+    ).audience).toBe("MERCHANT");
+  });
+
+  it("passes the consuming actor role into V2 audience validation", async () => {
+    const frame = 'id: v2:ATTEMPT_1:0\nevent: attempt_started\ndata: {"protocol":"agent-stream.v2","schemaVersion":"agent-stream.v2","runId":"AGENT_RUN_AUDIENCE","attemptId":"ATTEMPT_1","sequence":0,"cursor":"v2:ATTEMPT_1:0","audience":"MERCHANT","type":"attempt_started","payload":{"node":"turn"}}\n\n';
+    const descriptor = {
+      runId: "AGENT_RUN_AUDIENCE",
+      streamUrl: "/api/agent-runs/AGENT_RUN_AUDIENCE/events",
+    };
+
+    await expect(consumeAgentRunEvents({
+      actor,
+      descriptor,
+      fetchImpl: vi.fn().mockResolvedValue(streamResponse(frame)),
+    })).rejects.toMatchObject({ code: "AGENT_STREAM_AUDIENCE_MISMATCH" });
+
+    const onEvent = vi.fn();
+    await expect(consumeAgentRunEvents({
+      actor: { id: "admin-local", role: "ADMIN" },
+      descriptor,
+      fetchImpl: vi.fn().mockResolvedValue(streamResponse(frame)),
+      onEvent,
+    })).resolves.toMatchObject({ terminal: false });
+    expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({ audience: "MERCHANT" }));
   });
 
   // 业务位置：【前端 API/SSE 适配】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面操作和访问令牌 正确进入 Java HTTP 请求或 Agent 流事件。上游：页面操作和访问令牌。下游：Java HTTP 请求或 Agent 流事件。边界：统一处理错误和取消，不能伪造服务端状态。

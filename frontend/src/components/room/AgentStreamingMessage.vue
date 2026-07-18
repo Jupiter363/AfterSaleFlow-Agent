@@ -38,6 +38,7 @@ const cardIsActive = computed(() =>
   !props.card || props.run.activeCardKey === props.card.key,
 );
 const statusLabel = computed(() => {
+  if (props.run.pendingAttemptId) return "正在切换重试";
   if (props.run.status === "RECONNECTING") return "正在恢复连接";
   if (props.run.status === "FINALIZING") return "正在整理正式记录";
   if (!cardIsActive.value && displayContent.value) return "本段生成完成";
@@ -55,6 +56,8 @@ const statusLabel = computed(() => {
     :data-agent-run-id="run.runId"
     :data-agent-stream-card="card?.key || 'default'"
     :data-agent-stream-status="run.status"
+    :data-agent-attempt-id="run.currentAttemptId || undefined"
+    :data-agent-reset-count="run.resetCount || 0"
     data-agent-streaming-message
     aria-live="polite"
     :aria-busy="cardIsActive"

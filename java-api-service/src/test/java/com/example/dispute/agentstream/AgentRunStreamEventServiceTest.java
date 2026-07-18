@@ -11,6 +11,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.ArgumentMatchers.any;
 
 import com.example.dispute.agentstream.application.AgentRunStreamEventService;
 import com.example.dispute.agentstream.infrastructure.persistence.AgentRunStreamEventEntity;
@@ -19,12 +20,21 @@ import com.example.dispute.common.exception.ForbiddenException;
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.infrastructure.persistence.entity.AgentRunEntity;
+import com.example.dispute.infrastructure.persistence.entity.AgentRunAttemptEntity;
+import com.example.dispute.infrastructure.persistence.repository.AgentRunAttemptRepository;
 import com.example.dispute.infrastructure.persistence.repository.AgentRunRepository;
 import com.example.dispute.room.application.AccessSessionResolver;
 import com.example.dispute.room.application.SessionPermissionService;
 import com.example.dispute.room.domain.PermissionLevel;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseAccessSessionEntity;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.example.dispute.workflow.contract.v1.AgentStreamEvent;
+import com.example.dispute.workflow.contract.v1.ContractJson;
+import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
+import com.example.dispute.workflow.contract.v1.ContractTypes.StreamEventType;
+import com.example.dispute.agentstream.persistence.AgentRunPersistenceFixtures;
+import java.time.Instant;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.List;
@@ -35,6 +45,8 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.LongStream;
+import org.springframework.data.domain.Pageable;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -54,10 +66,11 @@ class AgentRunStreamEventServiceTest {
     private static final String RUN_ID = "ARUN_stream";
 
     @Mock private AgentRunRepository runRepository;
+    @Mock private AgentRunAttemptRepository attemptRepository;
     @Mock private AgentRunStreamEventRepository eventRepository;
     @Mock private AccessSessionResolver accessSessionResolver;
 
-    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final ObjectMapper objectMapper = JsonMapper.builder().findAndAddModules().build();
     private AgentRunStreamEventService service;
 
     // 所属模块：【Agent 流式运行 / 自动化测试层】「AgentRunStreamEventServiceTest.setUp()」。
@@ -70,6 +83,7 @@ class AgentRunStreamEventServiceTest {
         service =
                 new AgentRunStreamEventService(
                         runRepository,
+                        attemptRepository,
                         eventRepository,
                         accessSessionResolver,
                         new SessionPermissionService(),
@@ -86,8 +100,10 @@ class AgentRunStreamEventServiceTest {
         AuthenticatedActor actor = new AuthenticatedActor("user-local", ActorRole.USER);
         AgentRunEntity run = run(List.of("USER"), List.of("user-local"));
         allow(actor, run, session("user-local", ActorRole.USER, PermissionLevel.PARTY_USER));
-        when(eventRepository.findAllByAgentRunIdAndSequenceNoGreaterThanOrderBySequenceNoAsc(
-                        RUN_ID, 4L))
+        when(eventRepository.findV1ReplayPage(
+                        org.mockito.ArgumentMatchers.eq(RUN_ID),
+                        org.mockito.ArgumentMatchers.eq(4L),
+                        any()))
                 .thenReturn(
                         List.of(
                                 event(5, "visible_delta", "{\"field\":\"room_utterance\",\"delta\":\"甲\"}"),
@@ -101,6 +117,251 @@ class AgentRunStreamEventServiceTest {
                 .containsExactly("visible_delta", "visible_delta", "final");
         assertThat(replay.get(0).delta()).isEqualTo("甲");
         assertThat(replay.get(2).response().path("room_utterance").asText()).isEqualTo("甲乙");
+    }
+
+    @Test
+    void v2ReplayContinuesAcrossAttemptsWithAnAttemptScopedCursor() throws Exception {
+        String runId = AgentRunPersistenceFixtures.RUN_ID;
+        String caseId = AgentRunPersistenceFixtures.CASE_ID;
+        String firstAttemptId = "ATTEMPT_V2_FIRST";
+        String secondAttemptId = "ATTEMPT_V2_SECOND";
+        AgentRunEntity run = AgentRunEntity.logicalV2(AgentRunPersistenceFixtures.logicalRun());
+        run.bindV2Audience("USER", "[\"USER\"]", "[\"user-persistence\"]");
+        AgentRunAttemptEntity first = AgentRunAttemptEntity.start(
+                runId,
+                AgentRunPersistenceFixtures.request(1, firstAttemptId),
+                AgentRunPersistenceFixtures.STARTED_AT);
+        AgentRunAttemptEntity second = AgentRunAttemptEntity.start(
+                runId,
+                AgentRunPersistenceFixtures.request(2, secondAttemptId),
+                AgentRunPersistenceFixtures.STARTED_AT.plusSeconds(5));
+        AuthenticatedActor actor =
+                new AuthenticatedActor("user-persistence", ActorRole.USER);
+        when(runRepository.findById(runId)).thenReturn(Optional.of(run));
+        when(accessSessionResolver.resolve(caseId, actor))
+                .thenReturn(sessionForCase(
+                        caseId,
+                        "user-persistence",
+                        ActorRole.USER,
+                        PermissionLevel.PARTY_USER));
+        when(attemptRepository.findAllByAgentRunIdOrderByAttemptNoAsc(runId))
+                .thenReturn(List.of(first, second));
+        when(eventRepository.findV2Event(runId, firstAttemptId, 1L))
+                .thenReturn(Optional.of(v2Event(
+                        runId,
+                        firstAttemptId,
+                        1,
+                        StreamEventType.VISIBLE_DELTA,
+                        new AgentStreamEvent.Payload(
+                                "evidence_turn", "room_utterance", "old", null,
+                                null, null, null, null, null, null))));
+        when(eventRepository.findV2ReplayPage(
+                        org.mockito.ArgumentMatchers.eq(runId),
+                        org.mockito.ArgumentMatchers.eq(firstAttemptId),
+                        org.mockito.ArgumentMatchers.eq(1L),
+                        any()))
+                .thenReturn(List.of(v2Event(
+                        runId,
+                        firstAttemptId,
+                        2,
+                        StreamEventType.ATTEMPT_ABORTED,
+                        new AgentStreamEvent.Payload(
+                                null, null, null, null, "TRANSPORT_LOST", null,
+                                null, null, null, null))));
+        when(eventRepository.findV2ReplayPage(
+                        org.mockito.ArgumentMatchers.eq(runId),
+                        org.mockito.ArgumentMatchers.eq(secondAttemptId),
+                        org.mockito.ArgumentMatchers.eq(-1L),
+                        any()))
+                .thenReturn(List.of(
+                        v2Event(
+                                runId,
+                                secondAttemptId,
+                                0,
+                                StreamEventType.ATTEMPT_STARTED,
+                                new AgentStreamEvent.Payload(
+                                        "evidence_turn", null, null, null, null, null,
+                                        null, null, null, null)),
+                        v2Event(
+                                runId,
+                                secondAttemptId,
+                                1,
+                                StreamEventType.ATTEMPT_RESET,
+                                new AgentStreamEvent.Payload(
+                                        null, null, null, null, "RETRY", firstAttemptId,
+                                        null, null, null, null)),
+                        v2Event(
+                                runId,
+                                secondAttemptId,
+                                2,
+                                StreamEventType.VISIBLE_DELTA,
+                                new AgentStreamEvent.Payload(
+                                        "evidence_turn", "room_utterance", "new", null,
+                                        null, null, null, null, null, null))));
+
+        var replay = service.replay(runId, "v2:" + firstAttemptId + ":1", actor);
+
+        assertThat(replay).extracting(value -> value.cursor()).containsExactly(
+                "v2:" + firstAttemptId + ":2",
+                "v2:" + secondAttemptId + ":0",
+                "v2:" + secondAttemptId + ":1",
+                "v2:" + secondAttemptId + ":2");
+        assertThat(replay.get(2).resetAttemptId()).isEqualTo(firstAttemptId);
+        assertThat(replay.get(3).delta()).isEqualTo("new");
+        assertThat(replay.get(3).audience()).isEqualTo("USER");
+    }
+
+    @Test
+    void unknownPersistedProtocolIsRejected() throws Exception {
+        AuthenticatedActor actor = new AuthenticatedActor("user-local", ActorRole.USER);
+        AgentRunEntity run = run(List.of("USER"), List.of("user-local"));
+        allow(actor, run, session("user-local", ActorRole.USER, PermissionLevel.PARTY_USER));
+        Field protocol = AgentRunEntity.class.getDeclaredField("protocol");
+        protocol.setAccessible(true);
+        protocol.set(run, "agent-stream.v3");
+
+        assertThatThrownBy(() -> service.replay(RUN_ID, -1L, actor))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("unsupported persisted agent run protocol");
+    }
+
+    @Test
+    void v2CursorMustIdentifyAnExistingHashBoundEvent() {
+        AgentRunEntity run = v2Run();
+        AuthenticatedActor actor = allowV2(run);
+        AgentRunAttemptEntity attempt = v2Attempt(1, "ATTEMPT_CURSOR");
+        when(attemptRepository.findAllByAgentRunIdOrderByAttemptNoAsc(run.getId()))
+                .thenReturn(List.of(attempt));
+        when(eventRepository.findV2Event(run.getId(), attempt.getId(), 7L))
+                .thenReturn(Optional.empty());
+
+        assertThatThrownBy(
+                        () -> service.replay(
+                                run.getId(), "v2:" + attempt.getId() + ":7", actor))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("persisted event");
+    }
+
+    @Test
+    void v2EventAudienceMustMatchTheRunAudience() throws Exception {
+        AgentRunEntity run = v2Run();
+        AuthenticatedActor actor = allowV2(run);
+        AgentRunAttemptEntity attempt = v2Attempt(1, "ATTEMPT_AUDIENCE");
+        when(attemptRepository.findAllByAgentRunIdOrderByAttemptNoAsc(run.getId()))
+                .thenReturn(List.of(attempt));
+        when(eventRepository.findV2ReplayPage(
+                        org.mockito.ArgumentMatchers.eq(run.getId()),
+                        org.mockito.ArgumentMatchers.eq(attempt.getId()),
+                        org.mockito.ArgumentMatchers.eq(-1L),
+                        any()))
+                .thenReturn(List.of(v2Event(
+                        run.getId(),
+                        attempt.getId(),
+                        0,
+                        StreamEventType.ATTEMPT_STARTED,
+                        Audience.MERCHANT,
+                        new AgentStreamEvent.Payload(
+                                "hearing_turn", null, null, null, null, null,
+                                null, null, null, null))));
+
+        assertThatThrownBy(() -> service.replay(run.getId(), -1L, actor))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("hash-bound event");
+    }
+
+    @Test
+    void v2AttemptRejectsEventsAfterItsTerminalFrame() throws Exception {
+        AgentRunEntity run = v2Run();
+        AuthenticatedActor actor = allowV2(run);
+        AgentRunAttemptEntity attempt = v2Attempt(1, "ATTEMPT_TERMINAL");
+        when(attemptRepository.findAllByAgentRunIdOrderByAttemptNoAsc(run.getId()))
+                .thenReturn(List.of(attempt));
+        when(eventRepository.findV2ReplayPage(
+                        org.mockito.ArgumentMatchers.eq(run.getId()),
+                        org.mockito.ArgumentMatchers.eq(attempt.getId()),
+                        org.mockito.ArgumentMatchers.eq(-1L),
+                        any()))
+                .thenReturn(List.of(
+                        v2Event(
+                                run.getId(),
+                                attempt.getId(),
+                                0,
+                                StreamEventType.ATTEMPT_STARTED,
+                                new AgentStreamEvent.Payload(
+                                        "hearing_turn", null, null, null, null, null,
+                                        null, null, null, null)),
+                        v2Event(
+                                run.getId(),
+                                attempt.getId(),
+                                1,
+                                StreamEventType.FINAL,
+                                new AgentStreamEvent.Payload(
+                                        null, null, null, null, null, null,
+                                        "result-ref", "result-hash", null, null)),
+                        v2Event(
+                                run.getId(),
+                                attempt.getId(),
+                                2,
+                                StreamEventType.VISIBLE_DELTA,
+                                new AgentStreamEvent.Payload(
+                                        "hearing_turn", "room_utterance", "late", null,
+                                        null, null, null, null, null, null))));
+
+        assertThatThrownBy(() -> service.replay(run.getId(), -1L, actor))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("after an attempt terminal");
+    }
+
+    @Test
+    void v2AttemptResetMustReferenceTheImmediatelyPriorAttempt() throws Exception {
+        AgentRunEntity run = v2Run();
+        AuthenticatedActor actor = allowV2(run);
+        AgentRunAttemptEntity first = v2Attempt(1, "ATTEMPT_RESET_FIRST");
+        AgentRunAttemptEntity second = v2Attempt(2, "ATTEMPT_RESET_SECOND");
+        when(attemptRepository.findAllByAgentRunIdOrderByAttemptNoAsc(run.getId()))
+                .thenReturn(List.of(first, second));
+        when(eventRepository.findV2ReplayPage(
+                        org.mockito.ArgumentMatchers.eq(run.getId()),
+                        org.mockito.ArgumentMatchers.eq(first.getId()),
+                        org.mockito.ArgumentMatchers.eq(-1L),
+                        any()))
+                .thenReturn(List.of(
+                        v2Event(
+                                run.getId(),
+                                first.getId(),
+                                0,
+                                StreamEventType.ATTEMPT_STARTED,
+                                emptyV2Payload()),
+                        v2Event(
+                                run.getId(),
+                                first.getId(),
+                                1,
+                                StreamEventType.ATTEMPT_ABORTED,
+                                emptyV2Payload())));
+        when(eventRepository.findV2ReplayPage(
+                        org.mockito.ArgumentMatchers.eq(run.getId()),
+                        org.mockito.ArgumentMatchers.eq(second.getId()),
+                        org.mockito.ArgumentMatchers.eq(-1L),
+                        any()))
+                .thenReturn(List.of(
+                        v2Event(
+                                run.getId(),
+                                second.getId(),
+                                0,
+                                StreamEventType.ATTEMPT_STARTED,
+                                emptyV2Payload()),
+                        v2Event(
+                                run.getId(),
+                                second.getId(),
+                                1,
+                                StreamEventType.ATTEMPT_RESET,
+                                new AgentStreamEvent.Payload(
+                                        null, null, null, null, "RETRY", "NOT_THE_PREVIOUS_ATTEMPT",
+                                        null, null, null, null))));
+
+        assertThatThrownBy(() -> service.replay(run.getId(), -1L, actor))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("immediately prior attempt");
     }
 
     // 所属模块：【Agent 流式运行 / 自动化测试层】「AgentRunStreamEventServiceTest.appendIsIdempotentForAnExistingSequence()」。
@@ -172,9 +433,10 @@ class AgentRunStreamEventServiceTest {
                 .isInstanceOf(ForbiddenException.class)
                 .hasMessageContaining("cannot read");
         verify(eventRepository, never())
-                .findAllByAgentRunIdAndSequenceNoGreaterThanOrderBySequenceNoAsc(
+                .findV1ReplayPage(
                         org.mockito.ArgumentMatchers.anyString(),
-                        org.mockito.ArgumentMatchers.anyLong());
+                        org.mockito.ArgumentMatchers.anyLong(),
+                        any());
     }
 
     // 所属模块：【Agent 流式运行 / 自动化测试层】「AgentRunStreamEventServiceTest.actorAudienceRejectsAnotherUserWithTheSameRole()」。
@@ -210,8 +472,10 @@ class AgentRunStreamEventServiceTest {
                         "admin-local",
                         ActorRole.ADMIN,
                         PermissionLevel.ADMIN_ALL));
-        when(eventRepository.findAllByAgentRunIdAndSequenceNoGreaterThanOrderBySequenceNoAsc(
-                        RUN_ID, -1L))
+        when(eventRepository.findV1ReplayPage(
+                        org.mockito.ArgumentMatchers.eq(RUN_ID),
+                        org.mockito.ArgumentMatchers.eq(-1L),
+                        any()))
                 .thenReturn(List.of());
 
         assertThat(service.replay(RUN_ID, -1L, administrator)).isEmpty();
@@ -222,9 +486,10 @@ class AgentRunStreamEventServiceTest {
         AuthenticatedActor actor = new AuthenticatedActor("user-local", ActorRole.USER);
         AgentRunEntity run = run(List.of("USER"), List.of("user-local"));
         allow(actor, run, session("user-local", ActorRole.USER, PermissionLevel.PARTY_USER));
-        when(eventRepository.findAllByAgentRunIdAndSequenceNoGreaterThanOrderBySequenceNoAsc(
+        when(eventRepository.findV1ReplayPage(
                         org.mockito.ArgumentMatchers.eq(RUN_ID),
-                        org.mockito.ArgumentMatchers.anyLong()))
+                        org.mockito.ArgumentMatchers.anyLong(),
+                        any()))
                 .thenReturn(List.of());
 
         service.subscribe(RUN_ID, -1L, actor);
@@ -269,6 +534,34 @@ class AgentRunStreamEventServiceTest {
             gatedSubscriptions.releaseRemoval();
             executor.shutdownNow();
         }
+    }
+
+    @Test
+    void slowConsumerIsDisconnectedAfterABoundedCatchUpBatch() throws Exception {
+        AuthenticatedActor actor = new AuthenticatedActor("user-local", ActorRole.USER);
+        AgentRunEntity run = run(List.of("USER"), List.of("user-local"));
+        allow(actor, run, session("user-local", ActorRole.USER, PermissionLevel.PARTY_USER));
+        List<AgentRunStreamEventEntity> backlog = LongStream.range(0, 257)
+                .mapToObj(sequence -> event(
+                        sequence,
+                        "visible_delta",
+                        "{\"field\":\"room_utterance\",\"delta\":\"x\"}"))
+                .toList();
+        when(eventRepository.findV1ReplayPage(
+                        org.mockito.ArgumentMatchers.eq(RUN_ID),
+                        org.mockito.ArgumentMatchers.eq(-1L),
+                        any()))
+                .thenReturn(backlog);
+
+        service.subscribe(RUN_ID, -1L, actor);
+
+        ArgumentCaptor<Pageable> pageable = ArgumentCaptor.forClass(Pageable.class);
+        verify(eventRepository).findV1ReplayPage(
+                org.mockito.ArgumentMatchers.eq(RUN_ID),
+                org.mockito.ArgumentMatchers.eq(-1L),
+                pageable.capture());
+        assertThat(pageable.getValue().getPageSize()).isEqualTo(257);
+        assertThat(subscriptions()).doesNotContainKey(RUN_ID);
     }
 
     @SuppressWarnings("unchecked")
@@ -375,10 +668,18 @@ class AgentRunStreamEventServiceTest {
     // 系统意义：「AgentRunStreamEventServiceTest.session(String,ActorRole,PermissionLevel)」守住「Agent 流式运行」的可执行规格，尤其防止 「CAS_」、「TENANT_local」、「system」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static CaseAccessSessionEntity session(
             String actorId, ActorRole role, PermissionLevel permissionLevel) {
+        return sessionForCase(CASE_ID, actorId, role, permissionLevel);
+    }
+
+    private static CaseAccessSessionEntity sessionForCase(
+            String caseId,
+            String actorId,
+            ActorRole role,
+            PermissionLevel permissionLevel) {
         return CaseAccessSessionEntity.create(
                 "CAS_" + actorId,
                 "TENANT_local",
-                CASE_ID,
+                caseId,
                 actorId,
                 role,
                 permissionLevel,
@@ -394,6 +695,76 @@ class AgentRunStreamEventServiceTest {
             long sequence, String type, String payload) {
         return AgentRunStreamEventEntity.create(
                 "ARSE_" + sequence, RUN_ID, sequence, type, payload);
+    }
+
+    private AgentRunStreamEventEntity v2Event(
+            String runId,
+            String attemptId,
+            long sequence,
+            StreamEventType eventType,
+            AgentStreamEvent.Payload payload) throws Exception {
+        return v2Event(
+                runId, attemptId, sequence, eventType, Audience.USER, payload);
+    }
+
+    private AgentRunStreamEventEntity v2Event(
+            String runId,
+            String attemptId,
+            long sequence,
+            StreamEventType eventType,
+            Audience audience,
+            AgentStreamEvent.Payload payload) throws Exception {
+        AgentStreamEvent event = new AgentStreamEvent(
+                "agent-stream.v2",
+                runId,
+                attemptId,
+                sequence,
+                eventType,
+                audience,
+                Instant.parse("2026-07-19T01:00:00Z").plusSeconds(sequence),
+                payload);
+        var json = objectMapper.valueToTree(event);
+        return AgentRunStreamEventEntity.createV2(
+                "ARSE_V2_" + attemptId + '_' + sequence,
+                runId,
+                attemptId,
+                sequence,
+                eventType.wireValue(),
+                audience,
+                objectMapper.writeValueAsString(event),
+                ContractJson.sha256Hex(json));
+    }
+
+    private AgentRunEntity v2Run() {
+        AgentRunEntity run =
+                AgentRunEntity.logicalV2(AgentRunPersistenceFixtures.logicalRun());
+        run.bindV2Audience("USER", "[\"USER\"]", "[\"user-persistence\"]");
+        return run;
+    }
+
+    private AuthenticatedActor allowV2(AgentRunEntity run) {
+        AuthenticatedActor actor =
+                new AuthenticatedActor("user-persistence", ActorRole.USER);
+        when(runRepository.findById(run.getId())).thenReturn(Optional.of(run));
+        when(accessSessionResolver.resolve(run.getCaseId(), actor))
+                .thenReturn(sessionForCase(
+                        run.getCaseId(),
+                        "user-persistence",
+                        ActorRole.USER,
+                        PermissionLevel.PARTY_USER));
+        return actor;
+    }
+
+    private static AgentRunAttemptEntity v2Attempt(long attemptNo, String attemptId) {
+        return AgentRunAttemptEntity.start(
+                AgentRunPersistenceFixtures.RUN_ID,
+                AgentRunPersistenceFixtures.request(attemptNo, attemptId),
+                AgentRunPersistenceFixtures.STARTED_AT.plusSeconds(attemptNo));
+    }
+
+    private static AgentStreamEvent.Payload emptyV2Payload() {
+        return new AgentStreamEvent.Payload(
+                null, null, null, null, null, null, null, null, null, null);
     }
 
     // 所属模块：【Agent 流式运行 / 自动化测试层】「AgentRunStreamEventServiceTest.jsonArray(List)」。
