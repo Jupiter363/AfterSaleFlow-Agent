@@ -452,6 +452,11 @@ projection lag/drift；pending >60s 和 drift >0 告警。
 
 ### 7.3 Phase 2: AgentRun V2 (`MIG-002`)
 
+主代理与三个实现子代理的文件所有权、执行波次、交付模板和集中测试规则见
+[`Phase 2 AgentRun V2 多代理执行计划`](./phase-2-agent-run-v2-execution.md)及其
+[`测试批次矩阵`](./phase-2-agent-run-v2-test-batches.yaml)。在 `MIG-001` 进入条件满足前，
+这两份文件仅作为 READY 计划，不授权实现或切流。
+
 **目标**：把 AgentRun 变为 logical run + attempts 的正式执行账本，由 Temporal `ExecuteAgentRunActivity` 驱动；
 加入 heartbeat、retry budget、attempt reset、Finalizer fence 和 v1/v2 双读。
 **非目标**：Graph 仍可调用旧 Python operation endpoint；本阶段不迁移认知状态。

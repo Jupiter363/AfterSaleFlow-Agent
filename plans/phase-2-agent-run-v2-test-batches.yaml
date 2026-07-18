@@ -1,0 +1,326 @@
+schema_version: phase-test-batches.v1
+phase: 2
+name: agent-run-v2
+gate:
+  required_entry: MIG-001
+  current_status: BLOCKED
+  implementation_allowed_when:
+    - MIG-001_PASS
+    - APPROVED_OFF_SHADOW_DEVELOPMENT_EXCEPTION
+
+resources:
+  active_primary_agents: 1
+  active_child_agents: 3
+  heavy_test_slots: 1
+  light_test_slots: 2
+  playwright_workers: 1
+  docker_compose_owner: primary
+  batch_temporal_environment_owner: primary
+  heavy_resources:
+    - maven_full
+    - spring_context
+    - testcontainers
+    - temporal_test_server
+    - docker_compose
+    - frontend_build
+    - playwright
+  child_forbidden_commands:
+    - java_full_suite
+    - docker_compose_up_or_build
+    - frontend_production_build
+    - playwright_full_suite
+    - repository_full_regression
+
+test_token:
+  required_for:
+    - maven_test
+    - spring_context
+    - temporal_test_server
+    - postgresql
+    - redis
+    - docker_compose
+    - playwright
+  request_fields:
+    - task_id
+    - command
+    - expected_duration
+    - resource_class
+  grantor: primary
+  max_heavy_tokens: 1
+
+tiers:
+  T0:
+    owner: delegated_agent
+    max_duration_seconds: 180
+    services: none
+    purpose: syntax, schema, compile boundary, and exact pure unit checks
+  T1:
+    owner: primary
+    trigger: after_each_wave_merge
+    purpose: deduplicated affected-module unit and contract tests
+  T2:
+    owner: primary
+    trigger: after_phase_2_fault_and_integration_wave
+    purpose: Spring, PostgreSQL, Temporal recovery, Redis fallback, and replay
+  T3:
+    owner: primary
+    trigger: agreed_unified_verification_checkpoint_only
+    purpose: full repository and browser verification
+
+agents:
+  A:
+    tasks: [P2-A1, P2-A2]
+    change_routes:
+      - java-api-service/src/main/resources/db/migration/V041*
+      - java-api-service/src/main/java/com/example/dispute/infrastructure/persistence/entity/AgentRun*.java
+      - java-api-service/src/main/java/com/example/dispute/infrastructure/persistence/repository/AgentRun*.java
+      - java-api-service/src/main/java/com/example/dispute/agentstream/infrastructure/persistence/**
+      - java-api-service/src/main/java/com/example/dispute/agentstream/infrastructure/delivery/**
+      - java-api-service/src/main/java/com/example/dispute/workflow/infrastructure/persistence/entity/AgentExecutionManifestEntity.java
+      - java-api-service/src/main/java/com/example/dispute/workflow/infrastructure/persistence/repository/AgentExecutionManifestRepository.java
+    required_test_classes_to_create:
+      - AgentRunV2MigrationIntegrationTest
+      - AgentRunAttemptRepositoryIntegrationTest
+      - AgentRunAttemptEntityTest
+      - AgentExecutionManifestEntityTest
+      - AgentRunStreamReplayIntegrationTest
+      - AgentRunLiveWakeupIntegrationTest
+    check_ids:
+      - RUN-001
+      - RUN-002
+      - RUN-003
+      - RUN-009
+      - STREAM-008
+      - STREAM-010
+      - STREAM-011
+      - STREAM-012
+      - STREAM-013
+      - HA-007
+
+  B:
+    tasks: [P2-B1, P2-B2]
+    change_routes:
+      - java-api-service/src/main/java/com/example/dispute/workflow/activity/agent/**
+      - java-api-service/src/main/java/com/example/dispute/workflow/temporal/agentrun/**
+      - java-api-service/src/test/java/com/example/dispute/workflow/agentrun/**
+    required_test_classes_to_create:
+      - ExecuteAgentRunActivityTest
+      - ExecuteAgentRunActivityHeartbeatTest
+      - ExecuteAgentRunActivityCompletionLossTest
+      - ExecuteAgentRunActivityCancellationTest
+      - AgentRunWorkerRecoveryTest
+    check_ids:
+      - RUN-004
+      - RUN-005
+      - RUN-006
+      - RUN-007
+      - E2E-004
+      - E2E-005
+      - HA-002
+
+  C:
+    tasks: [P2-C1, P2-C2]
+    change_routes:
+      - java-api-service/src/main/java/com/example/dispute/agentstream/infrastructure/AgentNdjsonStreamClient.java
+      - java-api-service/src/main/java/com/example/dispute/agentstream/application/AgentStreamFrame.java
+      - java-api-service/src/main/java/com/example/dispute/agentstream/application/AgentRunStreamEventService.java
+      - python-agent-service/app/streaming.py
+      - python-agent-service/tests/test_streaming*.py
+      - frontend/src/api/agentStream.js
+      - frontend/src/api/agentStream.test.js
+      - frontend/src/stores/agentStream.js
+      - frontend/src/stores/agentStream.test.js
+      - frontend/src/components/room/AgentStreamingMessage.vue
+      - frontend/src/components/room/AgentStreamingMessage.test.js
+    required_tests_to_create_or_update:
+      java:
+        - AgentNdjsonStreamClientV2Test
+        - AgentRunStreamEventServiceTest
+        - AgentRunSlowConsumerTest
+      python:
+        - python-agent-service/tests/test_streaming_v2.py
+      frontend:
+        - frontend/src/api/agentStream.test.js
+        - frontend/src/stores/agentStream.test.js
+        - frontend/src/components/room/AgentStreamingMessage.test.js
+    check_ids:
+      - STREAM-001
+      - STREAM-002
+      - STREAM-003
+      - STREAM-004
+      - STREAM-005
+      - STREAM-006
+      - STREAM-007
+      - STREAM-009
+      - CORE-004
+      - CORE-005
+      - CORE-006
+      - CORE-007
+      - CORE-008
+      - CORE-009
+      - UI-004
+
+  R:
+    tasks: [P2-0, P2-R1, P2-R2]
+    required_test_classes_to_create_or_update:
+      - AgentRunCoordinatorTest
+      - AgentRunLifecycleServiceTest
+      - AgentRunFinalizerIdempotencyIntegrationTest
+      - AgentRunFinalizerFenceIntegrationTest
+      - AgentRunRecoverySchedulerTest
+      - TemporalWorkerConfigurationTest
+      - AgentRunV2ApplicationContextTest
+      - AgentRunV1V2CompatibilityTest
+    check_ids:
+      - JAVA-007
+      - JAVA-008
+      - JAVA-009
+      - JAVA-010
+      - RUN-006
+      - RUN-008
+      - E2E-006
+      - HA-001
+      - SEC-001
+      - SEC-002
+      - SEC-004
+      - MIG-002
+
+batches:
+  P2-BATCH-0:
+    tier: T0
+    trigger: P2_0_contract_pack
+    commands:
+      - id: root_static_contracts
+        cwd: .
+        command: >-
+          python -m pytest tests/static/test_agent_platform_schema_contracts.py
+          tests/static/test_temporal_refactor_traceability.py -q
+      - id: java_shared_contract
+        cwd: java-api-service
+        command: >-
+          .\mvnw.cmd -Dtest=AgentPlatformContractV1Test test
+      - id: python_shared_contract
+        cwd: python-agent-service
+        command: >-
+          python -m pytest tests/contracts/test_agent_platform_v1.py -q
+
+  P2-BATCH-1:
+    tier: T1
+    trigger: wave_1_merged
+    requires_tasks: [P2-A1, P2-B1, P2-C1]
+    java_test_classes:
+      - AgentRunAttemptEntityTest
+      - AgentExecutionManifestEntityTest
+      - ExecuteAgentRunActivityTest
+      - ExecuteAgentRunActivityHeartbeatTest
+      - AgentNdjsonStreamClientV2Test
+      - AgentRunStreamEventServiceTest
+      - AgentRunCoordinatorTest
+    python_tests:
+      - python-agent-service/tests/test_streaming.py
+      - python-agent-service/tests/test_streaming_v2.py
+    frontend_tests:
+      - frontend/src/api/agentStream.test.js
+      - frontend/src/stores/agentStream.test.js
+    execution:
+      heavy_parallelism: 1
+      light_parallelism: 2
+      java_fork_count: 1
+      frontend_max_workers: 2
+
+  P2-BATCH-2:
+    tier: T2
+    trigger: wave_2_merged
+    requires_tasks: [P2-R1, P2-A2, P2-B2, P2-C2]
+    java_test_classes:
+      - AgentRunV2MigrationIntegrationTest
+      - AgentRunAttemptRepositoryIntegrationTest
+      - AgentRunFinalizerIdempotencyIntegrationTest
+      - AgentRunFinalizerFenceIntegrationTest
+      - ExecuteAgentRunActivityCompletionLossTest
+      - ExecuteAgentRunActivityCancellationTest
+      - AgentRunWorkerRecoveryTest
+      - AgentRunStreamReplayIntegrationTest
+      - AgentRunLiveWakeupIntegrationTest
+      - AgentRunSlowConsumerTest
+      - AgentRunRecoverySchedulerTest
+      - AgentRunV2ApplicationContextTest
+      - AgentRunV1V2CompatibilityTest
+    python_tests:
+      - python-agent-service/tests/test_streaming.py
+      - python-agent-service/tests/test_streaming_v2.py
+    frontend_tests:
+      - frontend/src/api/agentStream.test.js
+      - frontend/src/stores/agentStream.test.js
+      - frontend/src/components/room/AgentStreamingMessage.test.js
+    execution:
+      order:
+        - java_postgresql_and_temporal
+        - python_protocol
+        - frontend_unit
+      heavy_parallelism: 1
+      playwright: none
+
+  P2-BATCH-3:
+    tier: T2
+    trigger: cross_review_fixes_merged
+    requires:
+      - clean_candidate_commit
+      - all_phase_2_check_ids_mapped
+      - batch_1_pass
+      - batch_2_pass
+    focused_phase_commands:
+      - id: java_phase_2
+        cwd: java-api-service
+        command_template: >-
+          .\mvnw.cmd -DforkCount=1 -Dtest=<deduplicated_phase_2_test_classes> test
+      - id: python_phase_2
+        cwd: python-agent-service
+        command_template: >-
+          python -m pytest <deduplicated_phase_2_test_files> -q
+      - id: frontend_phase_2
+        cwd: frontend
+        command_template: >-
+          pnpm exec vitest run <deduplicated_phase_2_test_files> --maxWorkers=2
+      - id: static_traceability
+        cwd: .
+        command: >-
+          python -m pytest tests/static/test_temporal_refactor_traceability.py -q
+    evidence:
+      root: test-reports/temporal-first/<release-id>/phase-2
+      required_files:
+        - phase-metrics.json
+        - batch-1-junit.xml
+        - batch-2-junit.xml
+        - batch-3-junit.xml
+        - check-id-coverage.json
+        - candidate-commit.txt
+
+  P2-UNIFIED-CHECKPOINT:
+    tier: T3
+    automatic: false
+    trigger: explicit_user_request_or_agreed_unified_checkpoint
+    owner: primary
+    commands:
+      - java_full_suite
+      - python_agent_full_suite
+      - ocr_full_suite
+      - root_static_contracts
+      - frontend_unit_and_build
+      - temporal_replay_and_recovery
+      - playwright_full_workers_1
+
+failure_policy:
+  PRODUCT:
+    action: fix_owner_code_then_run_exact_and_affected_batch
+  FIXTURE:
+    action: prove_contract_then_update_fixture_without_weakening_security
+  INFRA:
+    action: preserve_trace_restore_environment_rerun_exact_scenario_only
+  EXTERNAL_GATE:
+    action: retain_engineering_evidence_keep_promotion_pending
+  forbidden:
+    - unconditional_full_suite_retry
+    - weakening_assertions_for_green
+    - merging_results_from_different_commits
+    - allowing_multiple_v2_executors
