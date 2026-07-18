@@ -19,7 +19,7 @@ from uuid import uuid4
 
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 LOGGER = logging.getLogger(__name__)
@@ -100,6 +100,190 @@ AgentStreamEvent = (
     | StreamFinalEvent
     | StreamErrorEvent
 )
+
+
+class StreamV2Usage(_StrictStreamModel):
+    input_tokens: int = Field(ge=0)
+    output_tokens: int = Field(ge=0)
+    total_tokens: int = Field(ge=0)
+
+
+class StreamV2Payload(_StrictStreamModel):
+    node: str | None = None
+    field: str | None = None
+    delta: str | None = Field(default=None, min_length=1, max_length=4096)
+    usage: StreamV2Usage | None = None
+    reason_code: str | None = None
+    reset_attempt_id: str | None = None
+    final_result_ref: str | None = None
+    final_result_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    error_code: str | None = None
+    retryable: bool | None = None
+
+
+class AgentStreamV2Event(_StrictStreamModel):
+    schema_version: Literal["agent-stream.v2"] = "agent-stream.v2"
+    run_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+    attempt_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+    sequence_no: int = Field(ge=0)
+    event_type: Literal[
+        "attempt_started",
+        "visible_delta",
+        "usage",
+        "attempt_aborted",
+        "attempt_reset",
+        "final",
+        "error",
+    ]
+    audience: Literal["USER", "MERCHANT", "PLATFORM_REVIEWER", "SYSTEM"]
+    occurred_at: datetime
+    payload: StreamV2Payload
+
+    @model_validator(mode="after")
+    def validate_event_payload(self) -> AgentStreamV2Event:
+        required = {
+            "attempt_started": ("node",),
+            "visible_delta": ("node", "field", "delta"),
+            "usage": ("usage",),
+            "attempt_aborted": ("reason_code",),
+            "attempt_reset": ("reset_attempt_id", "reason_code"),
+            "final": ("final_result_ref", "final_result_hash"),
+            "error": ("error_code", "retryable"),
+        }[self.event_type]
+        missing = [name for name in required if getattr(self.payload, name) is None]
+        if missing:
+            raise ValueError(f"{self.event_type} is missing payload fields: {missing}")
+        if self.payload.final_result_ref is not None and not self.payload.final_result_ref.startswith(
+            ("s3:", "minio:", "urn:")
+        ):
+            raise ValueError("final_result_ref must use governed object storage")
+        return self
+
+
+def adapt_v1_event_to_v2(
+    event: AgentStreamEvent,
+    *,
+    attempt_id: str,
+    audience: Literal["USER", "MERCHANT", "PLATFORM_REVIEWER", "SYSTEM"],
+    allowed_fields: frozenset[str],
+    final_result_ref: str | None = None,
+    final_result_hash: str | None = None,
+) -> AgentStreamV2Event:
+    """Project a validated V1 event into V2 without carrying raw model JSON."""
+
+    common = {
+        "run_id": event.run_id,
+        "attempt_id": attempt_id,
+        "sequence_no": event.sequence,
+        "audience": audience,
+        "occurred_at": datetime.fromisoformat(event.timestamp.replace("Z", "+00:00")),
+    }
+    if isinstance(event, StreamStartEvent):
+        return AgentStreamV2Event(
+            **common,
+            event_type="attempt_started",
+            payload=StreamV2Payload(node=event.operation),
+        )
+    if isinstance(event, StreamVisibleDeltaEvent):
+        if event.field not in allowed_fields:
+            raise ValueError("V1 adapter rejected a non-public field")
+        return AgentStreamV2Event(
+            **common,
+            event_type="visible_delta",
+            payload=StreamV2Payload(
+                node=event.node_name,
+                field=event.field,
+                delta=event.delta,
+            ),
+        )
+    if isinstance(event, StreamUsageEvent):
+        usage = event.token_usage
+        input_tokens = int(usage.get("input_tokens", usage.get("prompt_tokens", 0)))
+        output_tokens = int(usage.get("output_tokens", usage.get("completion_tokens", 0)))
+        total_tokens = int(usage.get("total_tokens", input_tokens + output_tokens))
+        return AgentStreamV2Event(
+            **common,
+            event_type="usage",
+            payload=StreamV2Payload(
+                usage=StreamV2Usage(
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    total_tokens=total_tokens,
+                )
+            ),
+        )
+    if isinstance(event, StreamErrorEvent):
+        return AgentStreamV2Event(
+            **common,
+            event_type="error",
+            payload=StreamV2Payload(
+                error_code=event.code,
+                retryable=event.retryable,
+            ),
+        )
+    if isinstance(event, StreamFinalEvent):
+        if final_result_ref is None or final_result_hash is None:
+            raise ValueError("V1 final requires a persisted result reference before V2 projection")
+        return AgentStreamV2Event(
+            **common,
+            event_type="final",
+            payload=StreamV2Payload(
+                final_result_ref=final_result_ref,
+                final_result_hash=final_result_hash,
+            ),
+        )
+    raise TypeError(f"unsupported V1 stream event: {type(event).__name__}")
+
+
+class V2DeltaCoalescer:
+    """Coalesce adjacent public deltas for at most 75 ms or 4 KiB."""
+
+    def __init__(self, *, window_ms: int = 75, max_chars: int = 4096) -> None:
+        if not 50 <= window_ms <= 100 or not 1024 <= max_chars <= 4096:
+            raise ValueError("coalescer bounds violate the stream v2 contract")
+        self._window_ms = window_ms
+        self._max_chars = max_chars
+        self._pending: AgentStreamV2Event | None = None
+        self._pending_since_ms = 0
+
+    def push(self, event: AgentStreamV2Event, *, now_ms: int) -> list[AgentStreamV2Event]:
+        if event.event_type != "visible_delta":
+            emitted = self.flush()
+            emitted.append(event)
+            return emitted
+        if self._pending is None:
+            self._pending = event
+            self._pending_since_ms = now_ms
+            return []
+        current = self._pending
+        compatible = (
+            current.run_id == event.run_id
+            and current.attempt_id == event.attempt_id
+            and current.audience == event.audience
+            and current.payload.node == event.payload.node
+            and current.payload.field == event.payload.field
+        )
+        combined = (current.payload.delta or "") + (event.payload.delta or "")
+        if (
+            compatible
+            and now_ms - self._pending_since_ms <= self._window_ms
+            and len(combined) <= self._max_chars
+        ):
+            self._pending = current.model_copy(
+                update={"payload": current.payload.model_copy(update={"delta": combined})}
+            )
+            return []
+        emitted = self.flush()
+        self._pending = event
+        self._pending_since_ms = now_ms
+        return emitted
+
+    def flush(self) -> list[AgentStreamV2Event]:
+        if self._pending is None:
+            return []
+        pending = self._pending
+        self._pending = None
+        return [pending]
 
 
 @dataclass(frozen=True)
