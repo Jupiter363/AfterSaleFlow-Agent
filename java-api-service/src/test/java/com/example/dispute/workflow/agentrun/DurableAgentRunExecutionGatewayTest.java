@@ -2,6 +2,7 @@ package com.example.dispute.workflow.agentrun;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowableOfType;
 
 import com.example.dispute.agentstream.application.AgentRunV2StreamStore;
 import com.example.dispute.workflow.activity.agent.AgentGraphCommandClient;
@@ -81,7 +82,12 @@ class DurableAgentRunExecutionGatewayTest {
                 .put("model_profile_id", "unauthorized-model.v1");
         RoomGraphResult mismatchedResult =
                 MAPPER.treeToValue(wrapper.required("instance"), RoomGraphResult.class);
-        var gateway = gatewayReturning(request, mismatchedResult, mismatchedResult.outputHash());
+        List<Long> persisted = new ArrayList<>();
+        var gateway = gatewayReturning(
+                request,
+                mismatchedResult,
+                mismatchedResult.outputHash(),
+                recordingStore(persisted));
 
         assertThatThrownBy(() -> gateway.execute(
                         request,
@@ -91,13 +97,16 @@ class DurableAgentRunExecutionGatewayTest {
                 .isInstanceOf(AgentRunExecutionException.class)
                 .extracting(failure -> ((AgentRunExecutionException) failure).errorCode())
                 .isEqualTo("AGENT_RUN_STREAM_V2_INVALID");
+        assertThat(persisted).containsExactly(0L);
     }
 
     @Test
     void rejectsFinalHashThatDoesNotMatchGraphResult() throws Exception {
         ExecuteAgentRunRequest request = request();
         RoomGraphResult result = graphResult();
-        var gateway = gatewayReturning(request, result, "0".repeat(64));
+        List<Long> persisted = new ArrayList<>();
+        var gateway = gatewayReturning(
+                request, result, "0".repeat(64), recordingStore(persisted));
 
         assertThatThrownBy(() -> gateway.execute(
                         request,
@@ -106,6 +115,81 @@ class DurableAgentRunExecutionGatewayTest {
                         new AgentRunCancellationToken()))
                 .isInstanceOf(AgentRunExecutionException.class)
                 .hasMessageContaining("does not match the final stream");
+        assertThat(persisted).containsExactly(0L);
+    }
+
+    @Test
+    void rejectsGraphIdentityBeforePersistingFinal() throws Exception {
+        ExecuteAgentRunRequest request = request();
+        JsonNode wrapper = MAPPER.readTree(
+                FIXTURES.resolve("room-graph-result-valid.json").toFile());
+        ((com.fasterxml.jackson.databind.node.ObjectNode) wrapper.required("instance"))
+                .put("graph_version", "unrequested-graph.v2");
+        RoomGraphResult mismatchedResult =
+                MAPPER.treeToValue(wrapper.required("instance"), RoomGraphResult.class);
+        List<Long> persisted = new ArrayList<>();
+        var gateway = gatewayReturning(
+                request,
+                mismatchedResult,
+                mismatchedResult.outputHash(),
+                recordingStore(persisted));
+
+        assertThatThrownBy(() -> gateway.execute(
+                        request,
+                        ExecutionMode.EXECUTE_OR_RECONCILE,
+                        ignored -> {},
+                        new AgentRunCancellationToken()))
+                .isInstanceOf(AgentRunExecutionException.class)
+                .hasMessageContaining("does not match the final stream");
+        assertThat(persisted).containsExactly(0L);
+    }
+
+    @Test
+    void suppressesRegressingProgressForExactDuplicateReplay() throws Exception {
+        ExecuteAgentRunRequest request = request();
+        RoomGraphResult result = graphResult();
+        var gateway = gatewayReturning(
+                request,
+                result,
+                result.outputHash(),
+                event -> new AgentRunV2StreamStore.AppendReceipt(false, 1));
+        List<Long> progress = new ArrayList<>();
+
+        var completion = gateway.execute(
+                request,
+                ExecutionMode.RECONCILE_ONLY,
+                frame -> progress.add(frame.lastSequenceNo()),
+                new AgentRunCancellationToken());
+
+        assertThat(progress).isEmpty();
+        assertThat(completion.lastSequenceNo()).isEqualTo(1);
+        assertThat(completion.graphResult()).isEqualTo(result);
+    }
+
+    @Test
+    void treatsTransportLossAfterFinalAsReplaySafeWithoutPersistingFinal() throws Exception {
+        ExecuteAgentRunRequest request = request();
+        RoomGraphResult result = graphResult();
+        List<Long> persisted = new ArrayList<>();
+        AgentGraphCommandClient client = (actualRequest, mode, eventSink, cancellationToken) -> {
+            eventSink.accept(event(request, 0, StreamEventType.ATTEMPT_STARTED, null));
+            eventSink.accept(event(request, 1, StreamEventType.FINAL, result.outputHash()));
+            throw new IllegalStateException("transport closed before result return");
+        };
+        var gateway = new DurableAgentRunExecutionGateway(client, recordingStore(persisted));
+
+        AgentRunExecutionException failure = catchThrowableOfType(
+                AgentRunExecutionException.class,
+                () -> gateway.execute(
+                        request,
+                        ExecutionMode.EXECUTE_OR_RECONCILE,
+                        ignored -> {},
+                        new AgentRunCancellationToken()));
+
+        assertThat(failure.errorCode()).isEqualTo("AGENT_RUN_RESULT_AFTER_FINAL_UNAVAILABLE");
+        assertThat(failure.commandReplaySafe()).isTrue();
+        assertThat(failure.lastSequenceNo()).isZero();
+        assertThat(persisted).containsExactly(0L);
     }
 
     @Test
@@ -121,27 +205,38 @@ class DurableAgentRunExecutionGatewayTest {
                 client, event -> new AgentRunV2StreamStore.AppendReceipt(true, 0));
         List<Long> progress = new ArrayList<>();
 
-        assertThatThrownBy(() -> gateway.execute(
+        AgentRunExecutionException failure = catchThrowableOfType(
+                AgentRunExecutionException.class,
+                () -> gateway.execute(
                         request,
                         ExecutionMode.EXECUTE_OR_RECONCILE,
                         frame -> progress.add(frame.lastSequenceNo()),
-                        new AgentRunCancellationToken()))
-                .isInstanceOf(AgentRunExecutionException.class)
-                .extracting(failure -> ((AgentRunExecutionException) failure).errorCode())
-                .isEqualTo("AGENT_RUN_DURABLE_APPEND_LAGGED");
+                        new AgentRunCancellationToken()));
+
+        assertThat(failure.errorCode()).isEqualTo("AGENT_RUN_DURABLE_APPEND_LAGGED");
+        assertThat(failure.lastSequenceNo()).isZero();
+        assertThat(failure.publicOutputEmitted()).isFalse();
         assertThat(progress).containsExactly(0L);
     }
 
     private static DurableAgentRunExecutionGateway gatewayReturning(
-            ExecuteAgentRunRequest request, RoomGraphResult result, String finalHash) {
+            ExecuteAgentRunRequest request,
+            RoomGraphResult result,
+            String finalHash,
+            AgentRunV2StreamStore store) {
         AgentGraphCommandClient client = (actualRequest, mode, eventSink, cancellationToken) -> {
             eventSink.accept(event(request, 0, StreamEventType.ATTEMPT_STARTED, null));
             eventSink.accept(event(request, 1, StreamEventType.FINAL, finalHash));
             return result;
         };
-        return new DurableAgentRunExecutionGateway(
-                client,
-                event -> new AgentRunV2StreamStore.AppendReceipt(true, event.sequenceNo()));
+        return new DurableAgentRunExecutionGateway(client, store);
+    }
+
+    private static AgentRunV2StreamStore recordingStore(List<Long> persisted) {
+        return event -> {
+            persisted.add(event.sequenceNo());
+            return new AgentRunV2StreamStore.AppendReceipt(true, event.sequenceNo());
+        };
     }
 
     private static AgentStreamEvent event(
