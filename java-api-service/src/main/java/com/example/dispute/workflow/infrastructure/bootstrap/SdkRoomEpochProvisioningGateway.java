@@ -25,6 +25,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 @Component
@@ -56,6 +57,7 @@ public final class SdkRoomEpochProvisioningGateway
     private final Duration completionTimeout;
     private final ExecutorService completionExecutor;
 
+    @Autowired
     public SdkRoomEpochProvisioningGateway(
             WorkflowClient workflowClient, RoomEpochBootstrapProperties properties) {
         this(workflowClient, properties.completionTimeout(), Executors.newVirtualThreadPerTaskExecutor());

@@ -31,6 +31,8 @@ import com.example.dispute.workflow.infrastructure.persistence.entity.CaseComman
 import com.example.dispute.workflow.infrastructure.persistence.entity.CaseProcessProjectionEntity;
 import com.example.dispute.workflow.infrastructure.persistence.entity.CaseRoomEpochEntity;
 import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.EpochLifecycleStatus;
+import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.EpochProvisioningStatus;
+import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.WriterActivationStatus;
 import com.example.dispute.workflow.infrastructure.persistence.repository.CaseCommandOutboxRepository;
 import com.example.dispute.workflow.infrastructure.persistence.repository.CaseCommandRepository;
 import com.example.dispute.workflow.infrastructure.persistence.repository.CaseProcessProjectionRepository;
@@ -201,9 +203,11 @@ class CaseCommandServiceTest {
         when(disputeCase.getId()).thenReturn(CASE_ID);
         when(caseRepository.findByIdForUpdate(CASE_ID)).thenReturn(Optional.of(disputeCase));
         when(projectionRepository.findByIdForUpdate(CASE_ID)).thenReturn(Optional.of(projection));
+        when(projection.getCaseId()).thenReturn(CASE_ID);
         when(projection.getTenantSurrogate()).thenReturn("legacy-default");
         when(projection.getCurrentRoom()).thenReturn("EVIDENCE");
         when(projection.getWriterMode()).thenReturn(WriterMode.SHADOW);
+        when(projection.getWriterActivationStatus()).thenReturn(WriterActivationStatus.READY);
         when(projection.getProcessRevision()).thenReturn(0L);
         when(projection.getRoomEpoch()).thenReturn(0L);
         when(projection.getFencingToken()).thenReturn(1L);
@@ -211,11 +215,17 @@ class CaseCommandServiceTest {
                 .thenReturn(
                         CaseProcessWorkflowProtocol.caseWorkflowId(
                                 "legacy-default", CASE_ID));
+        when(projection.getTemporalRunId()).thenReturn("run-command-service");
+        when(projection.getTemporalBuildId()).thenReturn("build-command-service");
         when(roomEpochRepository.findByCaseIdAndRoomTypeAndRoomEpochForUpdate(
                         CASE_ID, RoomType.EVIDENCE, 0))
                 .thenReturn(Optional.of(roomEpoch));
+        when(roomEpoch.getCaseId()).thenReturn(CASE_ID);
         when(roomEpoch.getTenantSurrogate()).thenReturn("legacy-default");
+        when(roomEpoch.getRoomType()).thenReturn(RoomType.EVIDENCE);
+        when(roomEpoch.getRoomEpoch()).thenReturn(0L);
         when(roomEpoch.getLifecycleStatus()).thenReturn(EpochLifecycleStatus.ACTIVE);
+        when(roomEpoch.getProvisioningStatus()).thenReturn(EpochProvisioningStatus.READY);
         when(roomEpoch.getWriterMode()).thenReturn(WriterMode.SHADOW);
         when(roomEpoch.getProcessRevision()).thenReturn(0L);
         when(roomEpoch.getFencingToken()).thenReturn(1L);
@@ -223,6 +233,13 @@ class CaseCommandServiceTest {
                 .thenReturn(
                         CaseProcessWorkflowProtocol.caseWorkflowId(
                                 "legacy-default", CASE_ID));
+        when(roomEpoch.getTemporalRunId()).thenReturn("run-command-service");
+        when(roomEpoch.getRoomTemporalWorkflowId())
+                .thenReturn(
+                        CaseProcessWorkflowProtocol.roomWorkflowId(
+                                CASE_ID, RoomType.EVIDENCE, 0));
+        when(roomEpoch.getRoomTemporalRunId()).thenReturn("room-run-command-service");
+        when(roomEpoch.getTemporalBuildId()).thenReturn("build-command-service");
     }
 
     private static AcceptCaseCommand command(String payloadHash) {
