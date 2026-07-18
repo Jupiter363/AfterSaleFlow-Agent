@@ -157,7 +157,7 @@ class ExecuteAgentRunActivityTest {
     }
 
     @Test
-    void visibleOutputFailureWithoutReplayGuaranteeAbortsInsteadOfAutoRetrying()
+    void visibleOutputFailureMarksTheAttemptForResetBeforeTheNextLogicalAttempt()
             throws Exception {
         ExecuteAgentRunRequest request = request();
         AgentRunLedger ledger = mock(AgentRunLedger.class);
@@ -186,13 +186,48 @@ class ExecuteAgentRunActivityTest {
 
         assertThat(result.outcome()).isEqualTo(ExecuteAgentRunResult.Outcome.FAILED);
         assertThat(result.publicOutputEmitted()).isTrue();
-        assertThat(result.retryable()).isFalse();
+        assertThat(result.retryable()).isTrue();
         verify(ledger).recordAttemptFailure(
                 request.agentRunId(),
                 request.attemptId(),
                 request.attemptNo(),
                 AgentRunAttemptStatus.ABORTED,
                 "AGENT_STREAM_INTERRUPTED",
+                true,
+                NOW);
+    }
+
+    @Test
+    void exhaustedCommandLedgerRecoveryNeverEscalatesToAFreshCommand() throws Exception {
+        ExecuteAgentRunRequest request = request();
+        AgentRunLedger ledger = mock(AgentRunLedger.class);
+        AgentRunExecutionGateway gateway = mock(AgentRunExecutionGateway.class);
+        when(ledger.startNextAttempt(request.agentRunId(), request, NOW))
+                .thenReturn(runningAttempt(4, true));
+        when(gateway.execute(
+                        eq(request),
+                        eq(ExecutionMode.RECONCILE_ONLY),
+                        any(),
+                        any()))
+                .thenThrow(AgentRunExecutionException.retryable(
+                        "AGENT_RESPONSE_LOST",
+                        "the exact command remains recoverable from its ledger",
+                        true,
+                        4,
+                        true,
+                        null));
+        ExecuteAgentRunActivityImpl activity = activity(ledger, gateway, () -> context(3));
+
+        ExecuteAgentRunResult result = activity.execute(request);
+
+        assertThat(result.outcome()).isEqualTo(ExecuteAgentRunResult.Outcome.FAILED);
+        assertThat(result.retryable()).isFalse();
+        verify(ledger).recordAttemptFailure(
+                request.agentRunId(),
+                request.attemptId(),
+                request.attemptNo(),
+                AgentRunAttemptStatus.ABORTED,
+                "AGENT_RESPONSE_LOST",
                 false,
                 NOW);
     }
@@ -388,7 +423,7 @@ class ExecuteAgentRunActivityTest {
             boolean publicOutputEmitted) {
         return new AgentRunLedger.Attempt(
                 "attempt-001",
-                "agent-run-001",
+                "run-001",
                 1,
                 status,
                 publicOutputEmitted,
@@ -402,7 +437,7 @@ class ExecuteAgentRunActivityTest {
     private static ExecuteAgentRunRequest request() throws Exception {
         return new ExecuteAgentRunRequest(
                 ExecuteAgentRunRequest.SCHEMA_VERSION,
-                "agent-run-001",
+                "run-001",
                 1,
                 "agent-stream.v2",
                 fixture("room-graph-command-valid.json", RoomGraphCommand.class));
@@ -420,7 +455,7 @@ class ExecuteAgentRunActivityTest {
                 MAPPER.treeToValue(wrapper.required("instance"), RoomGraphCommand.class);
         return new ExecuteAgentRunRequest(
                 ExecuteAgentRunRequest.SCHEMA_VERSION,
-                "agent-run-001",
+                "run-001",
                 1,
                 "agent-stream.v2",
                 command);

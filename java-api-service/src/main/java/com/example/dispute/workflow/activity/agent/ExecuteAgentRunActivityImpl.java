@@ -219,12 +219,12 @@ public final class ExecuteAgentRunActivityImpl implements ExecuteAgentRunActivit
         boolean withinRecoveryWindow =
                 completionObserved || clock.instant().isBefore(request.command().deadlineAt());
         int retryLimit = Math.max(1, allowedActivityAttempts(request.command()));
-        boolean retryable =
+        boolean sameAttemptRetryable =
                 executionFailure.retryable()
                         && (!publicOutputEmitted || safeAfterVisibleOutput)
                         && withinRecoveryWindow
                         && context.temporalAttempt() < retryLimit;
-        if (retryable) {
+        if (sameAttemptRetryable) {
             // Stable request/command/attempt identities make this a command-ledger replay, not a
             // second logical run. Temporal applies the bounded, deterministic jittered delay.
             throw retryFailure(
@@ -248,6 +248,13 @@ public final class ExecuteAgentRunActivityImpl implements ExecuteAgentRunActivit
                 publicOutputEmitted
                         ? AgentRunAttemptStatus.ABORTED
                         : AgentRunAttemptStatus.FAILED;
+        boolean nextAttemptAllowed =
+                executionFailure.retryable()
+                        // A ledger-backed completion must keep its command identity for recovery.
+                        && !executionFailure.commandReplaySafe()
+                        && withinRecoveryWindow
+                        && request.attemptNo()
+                                < AgentRunTemporalPolicy.MAXIMUM_LOGICAL_ATTEMPTS;
         try {
             ledger.recordAttemptFailure(
                     request.agentRunId(),
@@ -255,7 +262,7 @@ public final class ExecuteAgentRunActivityImpl implements ExecuteAgentRunActivit
                     request.attemptNo(),
                     status,
                     executionFailure.errorCode(),
-                    false,
+                    nextAttemptAllowed,
                     clock.instant());
         } catch (RuntimeException persistenceFailure) {
             throw ApplicationFailure.newNonRetryableFailure(
@@ -269,14 +276,16 @@ public final class ExecuteAgentRunActivityImpl implements ExecuteAgentRunActivit
                 request,
                 executionFailure.errorCode(),
                 lastSequenceNo,
-                publicOutputEmitted);
+                publicOutputEmitted,
+                nextAttemptAllowed);
     }
 
     private ExecuteAgentRunResult failedResult(
             ExecuteAgentRunRequest request,
             String errorCode,
             long lastSequenceNo,
-            boolean publicOutputEmitted) {
+            boolean publicOutputEmitted,
+            boolean retryable) {
         return new ExecuteAgentRunResult(
                 ExecuteAgentRunResult.SCHEMA_VERSION,
                 request.agentRunId(),
@@ -289,7 +298,7 @@ public final class ExecuteAgentRunActivityImpl implements ExecuteAgentRunActivit
                 lastSequenceNo,
                 publicOutputEmitted,
                 errorCode,
-                false,
+                retryable,
                 clock.instant());
     }
 

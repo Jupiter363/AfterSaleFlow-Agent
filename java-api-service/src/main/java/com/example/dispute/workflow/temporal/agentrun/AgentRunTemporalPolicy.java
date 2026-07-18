@@ -5,6 +5,7 @@ import static com.example.dispute.workflow.contract.v1.TemporalTaskQueues.AGENT_
 import io.temporal.activity.ActivityCancellationType;
 import io.temporal.activity.ActivityOptions;
 import io.temporal.common.RetryOptions;
+
 import java.time.Duration;
 
 /** Phase 2 contract-fixed Temporal execution policy. */
@@ -15,6 +16,7 @@ public final class AgentRunTemporalPolicy {
     public static final Duration PROGRESS_HEARTBEAT_INTERVAL = Duration.ofSeconds(5);
     public static final Duration FINALIZER_START_TO_CLOSE_TIMEOUT = Duration.ofMinutes(2);
     public static final int MAXIMUM_ACTIVITY_ATTEMPTS = 3;
+    public static final int MAXIMUM_LOGICAL_ATTEMPTS = 3;
 
     private AgentRunTemporalPolicy() {}
 
@@ -52,7 +54,9 @@ public final class AgentRunTemporalPolicy {
         return Math.min(MAXIMUM_ACTIVITY_ATTEMPTS, Math.max(0, activityAttemptsRemaining));
     }
 
-    /** Finalizer retries are independent and unbounded; its domain write is idempotent and fenced. */
+    /**
+     * Finalizer retries are independent and unbounded; its domain write is idempotent and fenced.
+     */
     public static ActivityOptions finalizerActivityOptions() {
         return ActivityOptions.newBuilder()
                 .setTaskQueue(AGENT_EXECUTION)

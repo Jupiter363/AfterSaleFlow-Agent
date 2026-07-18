@@ -22,6 +22,8 @@ import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.worker.Worker;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -59,7 +61,7 @@ class AgentRunWorkerRecoveryTest {
                 .newWorkflowStub(
                         AgentRunWorkflow.class,
                         WorkflowOptions.newBuilder()
-                                .setWorkflowId("agent-run-v2/" + request.logicalRunId())
+                                .setWorkflowId("agent-run-v2:" + request.logicalRunId())
                                 .setTaskQueue(AGENT_EXECUTION)
                                 .build());
 
@@ -68,6 +70,34 @@ class AgentRunWorkerRecoveryTest {
         assertThat(result).isEqualTo(activities.result);
         assertThat(activities.executeCalls).hasValue(1);
         assertThat(activities.finalizerCalls).hasValue(2);
+        assertThat(activities.finalizationCommits).hasValue(1);
+    }
+
+    @Test
+    void temporalActivityRecoveryKeepsTheAttemptAndCommandIdentityStable() throws Exception {
+        activities.failFirstExecution = true;
+        ExecuteAgentRunRequest request = request();
+        AgentRunWorkflow workflow = environment.getWorkflowClient()
+                .newWorkflowStub(
+                        AgentRunWorkflow.class,
+                        WorkflowOptions.newBuilder()
+                                .setWorkflowId("agent-run-v2:" + request.logicalRunId())
+                                .setTaskQueue(AGENT_EXECUTION)
+                                .build());
+
+        ExecuteAgentRunResult result = workflow.run(request);
+
+        assertThat(result).isEqualTo(activities.result);
+        assertThat(activities.executeCalls).hasValue(2);
+        assertThat(activities.executionRequests)
+                .allSatisfy(replayed -> {
+                    assertThat(replayed.agentRunId()).isEqualTo(request.agentRunId());
+                    assertThat(replayed.attemptId()).isEqualTo(request.attemptId());
+                    assertThat(replayed.command().commandId())
+                            .isEqualTo(request.command().commandId());
+                });
+        assertThat(activities.finalizerCalls).hasValue(2);
+        assertThat(activities.finalizationCommits).hasValue(1);
     }
 
     private static final class RecordingActivities
@@ -77,6 +107,10 @@ class AgentRunWorkerRecoveryTest {
         private final ExecuteAgentRunResult result;
         private final AtomicInteger executeCalls = new AtomicInteger();
         private final AtomicInteger finalizerCalls = new AtomicInteger();
+        private final AtomicInteger finalizationCommits = new AtomicInteger();
+        private final List<ExecuteAgentRunRequest> executionRequests =
+                new CopyOnWriteArrayList<>();
+        private volatile boolean failFirstExecution;
 
         private RecordingActivities(
                 ExecuteAgentRunRequest request, ExecuteAgentRunResult result) {
@@ -87,7 +121,12 @@ class AgentRunWorkerRecoveryTest {
         @Override
         public ExecuteAgentRunResult execute(ExecuteAgentRunRequest actualRequest) {
             assertThat(actualRequest).isEqualTo(request);
-            executeCalls.incrementAndGet();
+            executionRequests.add(actualRequest);
+            if (executeCalls.incrementAndGet() == 1 && failFirstExecution) {
+                throw ApplicationFailure.newFailure(
+                        "worker response was lost",
+                        "AgentRunRetryableFailure");
+            }
             return result;
         }
 
@@ -97,8 +136,10 @@ class AgentRunWorkerRecoveryTest {
             assertThat(actualRequest).isEqualTo(request);
             assertThat(actualResult).isEqualTo(result);
             if (finalizerCalls.incrementAndGet() == 1) {
+                finalizationCommits.incrementAndGet();
                 throw ApplicationFailure.newFailure(
-                        "database unavailable", "AgentRunFinalizationInfrastructure");
+                        "completion was lost after the idempotent commit",
+                        "AgentRunFinalizationInfrastructure");
             }
             return new AgentRunFinalizationReceipt(
                     AgentRunFinalizationReceipt.SCHEMA_VERSION,
