@@ -72,7 +72,7 @@ class AgentRunV2MigrationIntegrationTest {
                                            finalization_status || ':' || committed_attempt_id
                                     from agent_run where id = 'RUN_LEGACY_V2'
                                     """))
-                    .isEqualTo("agent_stream.v1:legacy:RUN_LEGACY_V2:LEGACY_COMMITTED:RUN_LEGACY_V2");
+                    .isEqualTo("agent_stream.v1:legacy-stream-key:LEGACY_COMMITTED:RUN_LEGACY_V2");
             assertThat(
                             scalar(
                                     connection,
@@ -96,6 +96,7 @@ class AgentRunV2MigrationIntegrationTest {
                                     "select to_jsonb(manifest)::text from agent_execution_manifest manifest where id = 'MANIFEST_LEGACY_V2'"))
                     .isEqualTo(manifestBefore);
 
+            assertRollbackV1WriterCompatibility(connection);
             assertV2Uniqueness(connection);
         }
     }
@@ -123,13 +124,13 @@ class AgentRunV2MigrationIntegrationTest {
                         prompt_version, skill_version, ruleset_version, model,
                         run_status, token_usage, started_at, completed_at,
                         trace_id, created_by, stream_request_hash,
-                        stream_result_json, updated_at
+                        stream_result_json, stream_idempotency_key, updated_at
                     ) values (
                         'RUN_LEGACY_V2', 'CASE_LEGACY_V2', 'legacy-agent', 'SYSTEM',
                         'legacy-profile', 'legacy-prompt', 'legacy-skill', 'legacy-rules',
                         'legacy-model', 'COMPLETED', 21, now() - interval '1 second', now(),
                         'legacy-trace', 'migration-test', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-                        '{"status":"completed"}', now()
+                        '{"status":"completed"}', 'legacy-stream-key', now()
                     )
                     """);
             statement.executeUpdate(
@@ -173,6 +174,64 @@ class AgentRunV2MigrationIntegrationTest {
                     )
                     """);
         }
+    }
+
+    private static void assertRollbackV1WriterCompatibility(Connection connection)
+            throws SQLException {
+        try (var statement = connection.createStatement()) {
+            statement.executeUpdate(
+                    """
+                    insert into agent_run (
+                        id, case_id, agent_id, agent_role, profile_version,
+                        prompt_version, skill_version, ruleset_version, run_status,
+                        started_at, trace_id, created_by, stream_operation,
+                        stream_idempotency_key, updated_at
+                    ) values (
+                        'RUN_ROLLBACK_V1', 'CASE_LEGACY_V2', 'rollback-agent', 'SYSTEM',
+                        'v1', 'v1', 'v1', 'agent_stream.v1', 'PENDING', now(),
+                        'rollback-trace', 'rollback-writer', 'EVIDENCE_ANALYZE',
+                        'rollback-v1-key', now()
+                    )
+                    """);
+            statement.executeUpdate(
+                    """
+                    insert into agent_run_stream_event (
+                        id, agent_run_id, sequence_no, event_type, payload_json, created_by
+                    ) values (
+                        'EVENT_ROLLBACK_V1', 'RUN_ROLLBACK_V1', 0, 'start',
+                        '{"status":"started"}', 'rollback-writer'
+                    )
+                    """);
+            statement.executeUpdate(
+                    """
+                    update agent_run
+                    set run_status = 'COMPLETED',
+                        stream_result_json = '{"status":"completed"}',
+                        completed_at = now(),
+                        updated_at = now()
+                    where id = 'RUN_ROLLBACK_V1'
+                    """);
+        }
+
+        assertThat(
+                        scalar(
+                                connection,
+                                """
+                                select run.logical_idempotency_key || ':' || attempt.id || ':' ||
+                                       attempt.attempt_status || ':' || run.finalization_status
+                                from agent_run run
+                                join agent_run_attempt attempt on attempt.agent_run_id = run.id
+                                where run.id = 'RUN_ROLLBACK_V1'
+                                """))
+                .isEqualTo("rollback-v1-key:RUN_ROLLBACK_V1:COMPLETED:LEGACY_COMMITTED");
+        assertThat(
+                        scalar(
+                                connection,
+                                """
+                                select agent_run_attempt_id || ':' || stream_protocol
+                                from agent_run_stream_event where id = 'EVENT_ROLLBACK_V1'
+                                """))
+                .isEqualTo("RUN_ROLLBACK_V1:agent_stream.v1");
     }
 
     private static void assertV2Uniqueness(Connection connection) throws SQLException {

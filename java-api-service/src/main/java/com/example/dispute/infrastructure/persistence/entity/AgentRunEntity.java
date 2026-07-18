@@ -343,6 +343,12 @@ public class AgentRunEntity extends AbstractEntity {
     }
 
     public static AgentRunEntity logicalV2(CreateLogicalRun command) {
+        if (command.protocol() != AgentRunProtocol.V2) {
+            throw new IllegalArgumentException("logicalV2 requires protocol V2");
+        }
+        if (command.executorKind() != AgentRunExecutorKind.TEMPORAL_ACTIVITY) {
+            throw new IllegalArgumentException("AgentRun V2 requires the Temporal Activity executor");
+        }
         AgentRunEntity run = new AgentRunEntity(required(command.agentRunId(), "agentRunId"));
         run.caseId = required(command.caseId(), "caseId");
         run.roomId = required(command.roomId(), "roomId");
@@ -401,7 +407,9 @@ public class AgentRunEntity extends AbstractEntity {
         if (tenantSurrogate == null) {
             tenantSurrogate = "legacy-default";
             protocol = AgentRunProtocol.V1.wireValue();
-            logicalIdempotencyKey = "legacy:" + getId();
+            logicalIdempotencyKey = streamIdempotencyKey == null
+                    ? "legacy:" + getId()
+                    : streamIdempotencyKey;
             executorKind = AgentRunExecutorKind.LEGACY_WORKER;
             finalizationStatus = "COMPLETED".equals(runStatus)
                     ? "LEGACY_COMMITTED"

@@ -8,6 +8,7 @@ import com.example.dispute.infrastructure.persistence.repository.AgentRunReposit
 import com.example.dispute.workflow.contract.v1.AgentExecutionManifest;
 import com.example.dispute.workflow.contract.v1.AgentRunFinalizationReceipt;
 import com.example.dispute.workflow.contract.v1.AgentRunFinalizationReceipt.CommitStatus;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
 import com.example.dispute.workflow.infrastructure.persistence.entity.AgentExecutionManifestEntity;
 import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.ManifestTerminalStatus;
 import com.example.dispute.workflow.infrastructure.persistence.repository.AgentExecutionManifestRepository;
@@ -59,6 +60,10 @@ public class JpaAgentExecutionManifestStore implements AgentExecutionManifestSto
             requireEqual(persisted.getAttemptId(), manifest.agentRun().attemptId(), "attemptId");
             requireEqual(persisted.getManifestSha256(), commit.manifestHash(), "manifestHash");
             requireEqual(persisted.getOutputSha256(), commit.finalResultHash(), "finalResultHash");
+            requireEqual(
+                    run.getFinalStreamSequenceNo(),
+                    commit.finalStreamSequenceNo(),
+                    "finalStreamSequenceNo");
             return receipt(run, persisted, CommitStatus.ALREADY_COMMITTED);
         }
         if ("COMMITTED".equals(run.getFinalizationStatus())) {
@@ -71,7 +76,7 @@ public class JpaAgentExecutionManifestStore implements AgentExecutionManifestSto
                         .orElseThrow(() -> new IllegalStateException("AgentRun attempt was not found"));
         requireEqual(attempt.getAgentRunId(), run.getId(), "agentRunId");
         requireEqual(attempt.getResultHash(), commit.finalResultHash(), "finalResultHash");
-        attempt.markCommitted(manifest);
+        attempt.markCommitted(manifest, commit.finalStreamSequenceNo());
 
         AgentExecutionManifestEntity entity =
                 AgentExecutionManifestEntity.formal(
@@ -94,6 +99,11 @@ public class JpaAgentExecutionManifestStore implements AgentExecutionManifestSto
     @Override
     @Transactional(readOnly = true)
     public Optional<AgentRunFinalizationReceipt> findCommitted(String logicalRunId) {
+        Optional<AgentRunEntity> persistedRun = runRepository.findById(logicalRunId);
+        if (persistedRun.isEmpty()
+                || !"COMMITTED".equals(persistedRun.orElseThrow().getFinalizationStatus())) {
+            return Optional.empty();
+        }
         List<AgentExecutionManifestEntity> committed =
                 manifestRepository.findAllByLogicalAgentRunId(logicalRunId).stream()
                         .filter(entity -> entity.getTerminalStatus() == ManifestTerminalStatus.COMPLETED)
@@ -102,17 +112,13 @@ public class JpaAgentExecutionManifestStore implements AgentExecutionManifestSto
             throw new IllegalStateException("logicalRunId is ambiguous across manifest scopes");
         }
         if (committed.isEmpty()) {
-            return Optional.empty();
+            throw new IllegalStateException("committed logical AgentRun has no formal manifest");
         }
-        AgentRunEntity run =
-                runRepository
-                        .findById(logicalRunId)
-                        .orElseThrow(
-                                () ->
-                                        new IllegalStateException(
-                                                "manifest logical AgentRun was not found"));
         return Optional.of(
-                receipt(run, committed.getFirst(), CommitStatus.ALREADY_COMMITTED));
+                receipt(
+                        persistedRun.orElseThrow(),
+                        committed.getFirst(),
+                        CommitStatus.ALREADY_COMMITTED));
     }
 
     private void requireCommitIdentity(AgentRunEntity run, ManifestCommit commit) {
@@ -127,6 +133,9 @@ public class JpaAgentExecutionManifestStore implements AgentExecutionManifestSto
         requireEqual(run.getRoomEpoch(), manifest.roomEpoch(), "roomEpoch");
         requireEqual(run.getProcessRevision(), manifest.processRevision(), "processRevision");
         requireEqual(run.getFencingToken(), manifest.fencingToken(), "fencingToken");
+        requireEqual(run.getRequestHash(), manifest.model().requestHash(), "requestHash");
+        requireEqual(
+                commit.finalResultHash(), manifest.model().responseHash(), "responseHash");
         requireEqual(manifest.output().sha256(), commit.finalResultHash(), "outputHash");
         requireEqual(run.getFinalResultHash(), commit.finalResultHash(), "finalResultHash");
         sha256(commit.manifestHash(), "manifestHash");
@@ -140,10 +149,22 @@ public class JpaAgentExecutionManifestStore implements AgentExecutionManifestSto
             AgentRunEntity run,
             AgentExecutionManifestEntity manifest,
             CommitStatus status) {
+        if (!"COMMITTED".equals(run.getFinalizationStatus())) {
+            throw new IllegalStateException("formal manifest exists without a committed logical run");
+        }
+        requireEqual(run.getTenantSurrogate(), manifest.getTenantSurrogate(), "tenantSurrogate");
+        requireEqual(run.getCaseId(), manifest.getCaseId(), "caseId");
+        requireEqual(run.getId(), manifest.getLogicalAgentRunId(), "logicalRunId");
+        requireEqual(run.getFencingToken(), manifest.getFencingToken(), "fencingToken");
+        requireEqual(run.getFinalResultHash(), manifest.getOutputSha256(), "finalResultHash");
         AgentRunAttemptEntity attempt =
                 attemptRepository
                         .findById(manifest.getAttemptId())
                         .orElseThrow(() -> new IllegalStateException("manifest attempt was not found"));
+        requireEqual(attempt.getAgentRunId(), run.getId(), "agentRunId");
+        requireEqual(
+                attempt.getAttemptStatus(), AgentRunAttemptStatus.COMPLETED, "attemptStatus");
+        requireEqual(attempt.getResultHash(), run.getFinalResultHash(), "finalResultHash");
         requireEqual(run.getCommittedAttemptId(), attempt.getId(), "committedAttemptId");
         requireEqual(run.getCommittedManifestHash(), manifest.getManifestSha256(), "manifestHash");
         return new AgentRunFinalizationReceipt(

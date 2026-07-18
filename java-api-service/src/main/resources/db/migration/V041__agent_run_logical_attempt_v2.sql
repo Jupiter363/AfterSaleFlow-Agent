@@ -27,7 +27,11 @@ alter table agent_run
 update agent_run
 set tenant_surrogate = coalesce(tenant_surrogate, 'legacy-default'),
     protocol = coalesce(protocol, 'agent_stream.v1'),
-    logical_idempotency_key = coalesce(logical_idempotency_key, 'legacy:' || id),
+    logical_idempotency_key = coalesce(
+        logical_idempotency_key,
+        stream_idempotency_key,
+        'legacy:' || id
+    ),
     executor_kind = coalesce(executor_kind, 'LEGACY_WORKER'),
     finalization_status = case
         when run_status = 'COMPLETED' then 'LEGACY_COMMITTED'
@@ -303,7 +307,11 @@ as $$
 begin
     new.tenant_surrogate := coalesce(new.tenant_surrogate, 'legacy-default');
     new.protocol := coalesce(new.protocol, 'agent_stream.v1');
-    new.logical_idempotency_key := coalesce(new.logical_idempotency_key, 'legacy:' || new.id);
+    new.logical_idempotency_key := coalesce(
+        new.logical_idempotency_key,
+        new.stream_idempotency_key,
+        'legacy:' || new.id
+    );
     new.executor_kind := coalesce(new.executor_kind, 'LEGACY_WORKER');
     new.finalization_status := coalesce(new.finalization_status, 'UNCOMMITTED');
     new.room_epoch := coalesce(new.room_epoch, 0);

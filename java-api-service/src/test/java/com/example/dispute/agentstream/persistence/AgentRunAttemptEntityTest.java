@@ -8,6 +8,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.dispute.infrastructure.persistence.entity.AgentRunAttemptEntity;
+import com.example.dispute.workflow.contract.v1.AgentRunAttemptHeartbeat;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
 import org.junit.jupiter.api.Test;
 
@@ -80,5 +81,114 @@ class AgentRunAttemptEntityTest {
                                         COMPLETED_AT))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("errorCode");
+    }
+
+    @Test
+    void mergesHeartbeatDimensionsMonotonicallyAcrossClockSkewAndReordering() {
+        AgentRunAttemptEntity attempt =
+                AgentRunAttemptEntity.start(
+                        RUN_ID,
+                        AgentRunPersistenceFixtures.request(1, "ATTEMPT_V2_HEARTBEAT"),
+                        STARTED_AT);
+
+        attempt.recordHeartbeat(
+                new AgentRunAttemptHeartbeat(
+                        AgentRunAttemptHeartbeat.SCHEMA_VERSION,
+                        RUN_ID,
+                        "ATTEMPT_V2_HEARTBEAT",
+                        1,
+                        5,
+                        false,
+                        false,
+                        STARTED_AT.plusSeconds(5)));
+        attempt.recordHeartbeat(
+                new AgentRunAttemptHeartbeat(
+                        AgentRunAttemptHeartbeat.SCHEMA_VERSION,
+                        RUN_ID,
+                        "ATTEMPT_V2_HEARTBEAT",
+                        1,
+                        6,
+                        true,
+                        false,
+                        STARTED_AT.plusSeconds(4)));
+        attempt.recordHeartbeat(
+                new AgentRunAttemptHeartbeat(
+                        AgentRunAttemptHeartbeat.SCHEMA_VERSION,
+                        RUN_ID,
+                        "ATTEMPT_V2_HEARTBEAT",
+                        1,
+                        4,
+                        false,
+                        true,
+                        STARTED_AT.plusSeconds(6)));
+
+        assertThat(attempt.getLastSequenceNo()).isEqualTo(6);
+        assertThat(attempt.isPublicOutputEmitted()).isTrue();
+        assertThat(attempt.isFinalFrameObserved()).isTrue();
+        assertThat(attempt.getLastHeartbeatAt().toInstant()).isEqualTo(STARTED_AT.plusSeconds(6));
+    }
+
+    @Test
+    void formalCommitRejectsManifestProvenanceAndSequenceDrift() {
+        AgentRunAttemptEntity attempt =
+                AgentRunAttemptEntity.start(
+                        RUN_ID,
+                        AgentRunPersistenceFixtures.request(1, "ATTEMPT_V2_MANIFEST"),
+                        STARTED_AT);
+        attempt.recordResultReady(
+                AgentRunPersistenceFixtures.result(1, "ATTEMPT_V2_MANIFEST"),
+                "{\"result_hash\":\"" + RESULT_HASH + "\"}");
+
+        assertThatThrownBy(
+                        () ->
+                                attempt.markCommitted(
+                                        AgentRunPersistenceFixtures.manifestWithModelHashes(
+                                                "ATTEMPT_V2_MANIFEST",
+                                                "f".repeat(64),
+                                                RESULT_HASH),
+                                        3))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("requestHash");
+        assertThatThrownBy(
+                        () ->
+                                attempt.markCommitted(
+                                        AgentRunPersistenceFixtures.manifest(
+                                                "ATTEMPT_V2_MANIFEST"),
+                                        2))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("finalStreamSequenceNo");
+
+        attempt.markCommitted(
+                AgentRunPersistenceFixtures.manifest("ATTEMPT_V2_MANIFEST"), 3);
+        attempt.markCommitted(
+                AgentRunPersistenceFixtures.manifest("ATTEMPT_V2_MANIFEST"), 3);
+        assertThat(attempt.getAttemptStatus()).isEqualTo(AgentRunAttemptStatus.COMPLETED);
+        assertThat(attempt.getProvider()).isEqualTo("provider-v2");
+        assertThat(attempt.getModelVersion()).isEqualTo("model-v2");
+    }
+
+    @Test
+    void resultReadyRejectsResolvedExecutionMetadataOutsideTheAuthorizedRequest() {
+        AgentRunAttemptEntity attempt =
+                AgentRunAttemptEntity.start(
+                        RUN_ID,
+                        AgentRunPersistenceFixtures.request(1, "ATTEMPT_V2_METADATA"),
+                        STARTED_AT);
+
+        assertThatThrownBy(
+                        () ->
+                                attempt.recordResultReady(
+                                        AgentRunPersistenceFixtures.resultWithExecutionMetadata(
+                                                1,
+                                                "ATTEMPT_V2_METADATA",
+                                                "unapproved-model-profile",
+                                                "room-graph-result.v1",
+                                                "policy-v2",
+                                                "guardrail-v2"),
+                                        "{\"result_hash\":\"" + RESULT_HASH + "\"}"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("modelProfileId");
+        assertThat(attempt.getAttemptStatus()).isEqualTo(AgentRunAttemptStatus.RUNNING);
+        assertThat(attempt.getResultHash()).isNull();
     }
 }

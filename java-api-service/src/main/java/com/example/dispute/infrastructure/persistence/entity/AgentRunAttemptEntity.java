@@ -4,6 +4,7 @@ import com.example.dispute.workflow.contract.v1.AgentExecutionManifest;
 import com.example.dispute.workflow.contract.v1.AgentRunAttemptHeartbeat;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunExecutorKind;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunProtocol;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
@@ -176,6 +177,7 @@ public class AgentRunAttemptEntity extends AbstractEntity {
 
     public void requireSameRequest(ExecuteAgentRunRequest request) {
         requireEqual(agentRunId, request.agentRunId(), "agentRunId");
+        requireEqual(agentRunId, request.logicalRunId(), "logicalRunId");
         requireEqual(getId(), request.attemptId(), "attemptId");
         requireEqual(attemptNo, request.attemptNo(), "attemptNo");
         requireEqual(graphKey, request.command().graphKey(), "graphKey");
@@ -197,19 +199,19 @@ public class AgentRunAttemptEntity extends AbstractEntity {
             }
             throw new IllegalStateException("terminal attempt progress cannot advance");
         }
-        if (heartbeat.lastSequenceNo() < lastSequenceNo
-                || heartbeat.recordedAt().isBefore(lastHeartbeatAt.toInstant())) {
-            return;
-        }
-        lastSequenceNo = heartbeat.lastSequenceNo();
+        lastSequenceNo = Math.max(lastSequenceNo, heartbeat.lastSequenceNo());
         publicOutputEmitted |= heartbeat.publicOutputEmitted();
         finalFrameObserved |= heartbeat.finalFrameObserved();
-        lastHeartbeatAt = at(heartbeat.recordedAt(), "recordedAt");
+        OffsetDateTime recordedAt = at(heartbeat.recordedAt(), "recordedAt");
+        if (recordedAt.isAfter(lastHeartbeatAt)) {
+            lastHeartbeatAt = recordedAt;
+        }
         updatedAt = lastHeartbeatAt;
     }
 
     public void recordResultReady(ExecuteAgentRunResult result, String serializedResult) {
         requireIdentity(result.agentRunId(), result.attemptId(), result.attemptNo());
+        requireEqual(agentRunId, result.logicalRunId(), "logicalRunId");
         if (result.outcome() != ExecuteAgentRunResult.Outcome.COMPLETED) {
             throw new IllegalArgumentException("only a completed result can become RESULT_READY");
         }
@@ -225,12 +227,13 @@ public class AgentRunAttemptEntity extends AbstractEntity {
         RoomGraphResult graphResult = result.graphResult();
         requireEqual(graphKey, graphResult.graphKey(), "graphKey");
         requireEqual(graphVersion, graphResult.graphVersion(), "graphVersion");
+        RoomGraphResult.ExecutionMetadata metadata = graphResult.executionMetadata();
+        requireEqual(modelProfileId, metadata.modelProfileId(), "modelProfileId");
+        requireEqual(outputSchemaVersion, metadata.schemaVersion(), "outputSchemaVersion");
+        requireEqual(policyVersion, metadata.policyVersion(), "policyVersion");
+        requireEqual(guardrailVersion, metadata.guardrailVersion(), "guardrailVersion");
         checkpointId = required(graphResult.checkpointId(), "checkpointId");
-        promptVersion = required(graphResult.executionMetadata().promptVersion(), "promptVersion");
-        modelProfileId = required(graphResult.executionMetadata().modelProfileId(), "modelProfileId");
-        outputSchemaVersion = required(graphResult.executionMetadata().schemaVersion(), "schemaVersion");
-        policyVersion = required(graphResult.executionMetadata().policyVersion(), "policyVersion");
-        guardrailVersion = required(graphResult.executionMetadata().guardrailVersion(), "guardrailVersion");
+        promptVersion = required(metadata.promptVersion(), "promptVersion");
         resultHash = sha256(result.resultHash(), "resultHash");
         resultJson = required(serializedResult, "serializedResult");
         inputTokens = graphResult.usage().inputTokens();
@@ -271,15 +274,54 @@ public class AgentRunAttemptEntity extends AbstractEntity {
         updatedAt = completedAt;
     }
 
-    public void markCommitted(AgentExecutionManifest manifest) {
+    public void markCommitted(AgentExecutionManifest manifest, long finalStreamSequenceNo) {
         requireEqual(getId(), manifest.agentRun().attemptId(), "attemptId");
+        if (attemptStatus != AgentRunAttemptStatus.RESULT_READY
+                && attemptStatus != AgentRunAttemptStatus.COMPLETED) {
+            throw new IllegalStateException("attempt result is not ready for commit");
+        }
+        requireEqual(agentRunId, manifest.agentRun().logicalRunId(), "logicalRunId");
+        requireEqual(graphKey, manifest.graph().graphKey(), "graphKey");
+        requireEqual(graphVersion, manifest.graph().graphVersion(), "graphVersion");
+        requireEqual(
+                checkpointSchemaVersion,
+                manifest.graph().checkpointSchemaVersion(),
+                "checkpointSchemaVersion");
+        requireEqual(checkpointId, manifest.graph().checkpointId(), "checkpointId");
+        requireEqual(promptVersion, manifest.model().promptVersion(), "promptVersion");
+        requireEqual(modelProfileId, manifest.model().modelProfileId(), "modelProfileId");
+        requireEqual(requestHash, manifest.model().requestHash(), "requestHash");
+        requireEqual(resultHash, manifest.model().responseHash(), "responseHash");
+        requireEqual(resultHash, manifest.output().sha256(), "outputHash");
+        requireEqual(policyVersion, manifest.policyVersion(), "policyVersion");
+        requireEqual(guardrailVersion, manifest.guardrailVersion(), "guardrailVersion");
+        requireEqual(inputTokens, manifest.usage().inputTokens(), "inputTokens");
+        requireEqual(outputTokens, manifest.usage().outputTokens(), "outputTokens");
+        requireEqual(totalTokens, manifest.usage().totalTokens(), "totalTokens");
+        requireEqual(latencyMs, manifest.usage().latencyMs(), "latencyMs");
+        requireEqual(lastSequenceNo, finalStreamSequenceNo, "finalStreamSequenceNo");
+        if (!finalFrameObserved) {
+            throw new IllegalStateException("formal manifest requires an observed final frame");
+        }
+        requireEqual(
+                "room-graph-command.v1",
+                manifest.contractVersions().get("graph_command"),
+                "graphCommandSchemaVersion");
+        requireEqual(
+                outputSchemaVersion,
+                manifest.contractVersions().get("graph_result"),
+                "outputSchemaVersion");
+        requireEqual(
+                AgentRunProtocol.V2.wireValue(),
+                manifest.contractVersions().get("stream"),
+                "streamProtocol");
+        if (manifest.finalizedAt().isBefore(completedAt.toInstant())) {
+            throw new IllegalStateException("manifest finalizedAt precedes attempt completion");
+        }
         if (attemptStatus == AgentRunAttemptStatus.COMPLETED) {
             requireEqual(provider, manifest.model().provider(), "provider");
             requireEqual(modelVersion, manifest.model().model(), "modelVersion");
             return;
-        }
-        if (attemptStatus != AgentRunAttemptStatus.RESULT_READY) {
-            throw new IllegalStateException("attempt result is not ready for commit");
         }
         provider = required(manifest.model().provider(), "provider");
         modelVersion = required(manifest.model().model(), "modelVersion");

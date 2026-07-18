@@ -122,6 +122,22 @@ final class AgentRunPersistenceFixtures {
     }
 
     static ExecuteAgentRunResult result(long attemptNo, String attemptId) {
+        return resultWithExecutionMetadata(
+                attemptNo,
+                attemptId,
+                "model-profile-v2",
+                "room-graph-result.v1",
+                "policy-v2",
+                "guardrail-v2");
+    }
+
+    static ExecuteAgentRunResult resultWithExecutionMetadata(
+            long attemptNo,
+            String attemptId,
+            String modelProfileId,
+            String outputSchemaVersion,
+            String policyVersion,
+            String guardrailVersion) {
         RoomGraphResult graphResult =
                 new RoomGraphResult(
                         "room-graph-result.v1",
@@ -142,10 +158,10 @@ final class AgentRunPersistenceFixtures {
                         new Usage(100, 20, 120),
                         new RoomGraphResult.ExecutionMetadata(
                                 "prompt-v2",
-                                "model-profile-v2",
-                                "room-graph-result.v1",
-                                "policy-v2",
-                                "guardrail-v2"));
+                                modelProfileId,
+                                outputSchemaVersion,
+                                policyVersion,
+                                guardrailVersion));
         return new ExecuteAgentRunResult(
                 ExecuteAgentRunResult.SCHEMA_VERSION,
                 RUN_ID,
@@ -163,6 +179,11 @@ final class AgentRunPersistenceFixtures {
     }
 
     static AgentExecutionManifest manifest(String attemptId) {
+        return manifestWithModelHashes(attemptId, REQUEST_HASH, RESULT_HASH);
+    }
+
+    static AgentExecutionManifest manifestWithModelHashes(
+            String attemptId, String requestHash, String responseHash) {
         return new AgentExecutionManifest(
                 "agent-execution-manifest.v1",
                 "MANIFEST_V2_PERSISTENCE",
@@ -184,9 +205,12 @@ final class AgentRunPersistenceFixtures {
                         "model-profile-v2",
                         "provider-v2",
                         "model-v2",
-                        REQUEST_HASH,
-                        RESULT_HASH),
-                Map.of("room_graph_result", "room-graph-result.v1"),
+                        requestHash,
+                        responseHash),
+                Map.of(
+                        "graph_command", "room-graph-command.v1",
+                        "graph_result", "room-graph-result.v1",
+                        "stream", "agent-stream.v2"),
                 "policy-v2",
                 "guardrail-v2",
                 List.of("evidence.search.v1"),

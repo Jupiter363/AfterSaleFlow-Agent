@@ -9,6 +9,7 @@ import com.example.dispute.workflow.contract.v1.AgentRunAttemptHeartbeat;
 import com.example.dispute.workflow.contract.v1.AgentRunFinalizationReceipt;
 import com.example.dispute.workflow.contract.v1.AgentRunFinalizationReceipt.CommitStatus;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunExecutorKind;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunProtocol;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
@@ -45,6 +46,9 @@ public class JpaAgentRunLedger implements AgentRunLedger {
     public LogicalRun createOrLoad(CreateLogicalRun command) {
         if (command.protocol() != AgentRunProtocol.V2) {
             throw new IllegalArgumentException("logical AgentRun creation only accepts protocol V2");
+        }
+        if (command.executorKind() != AgentRunExecutorKind.TEMPORAL_ACTIVITY) {
+            throw new IllegalArgumentException("AgentRun V2 requires the Temporal Activity executor");
         }
         lockLogicalKey(command.caseId(), command.logicalIdempotencyKey());
         Optional<AgentRunEntity> existing =
@@ -177,6 +181,10 @@ public class JpaAgentRunLedger implements AgentRunLedger {
                 attemptRepository
                         .findById(run.getCommittedAttemptId())
                         .orElseThrow(() -> new IllegalStateException("committed attempt was not found"));
+        requireEqual(attempt.getAgentRunId(), run.getId(), "agentRunId");
+        requireEqual(
+                attempt.getAttemptStatus(), AgentRunAttemptStatus.COMPLETED, "attemptStatus");
+        requireEqual(attempt.getResultHash(), run.getFinalResultHash(), "finalResultHash");
         return Optional.of(
                 new AgentRunFinalizationReceipt(
                         AgentRunFinalizationReceipt.SCHEMA_VERSION,

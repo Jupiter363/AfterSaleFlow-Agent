@@ -5,7 +5,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.dispute.agentstream.application.AgentRunLedger;
 import com.example.dispute.agentstream.infrastructure.persistence.JpaAgentRunLedger;
+import com.example.dispute.infrastructure.persistence.entity.AgentRunEntity;
 import com.example.dispute.infrastructure.persistence.repository.AgentRunAttemptRepository;
+import com.example.dispute.infrastructure.persistence.repository.AgentRunRepository;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
@@ -56,11 +58,37 @@ class AgentRunAttemptRepositoryIntegrationTest {
     @Autowired private JdbcTemplate jdbc;
     @Autowired private AgentRunLedger ledger;
     @Autowired private AgentRunAttemptRepository attemptRepository;
+    @Autowired private AgentRunRepository runRepository;
 
     @Test
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
     void allocatesAttemptsUnderTheLogicalRunLockAndReplaysTheSameRequest() {
         insertCase();
+
+        AgentRunEntity legacyV1 =
+                AgentRunEntity.streamingPending(
+                        "RUN_V1_PERSISTENCE",
+                        AgentRunPersistenceFixtures.CASE_ID,
+                        "ROOM_V1_PERSISTENCE",
+                        "EVIDENCE_ANALYZE",
+                        "/internal/agents/evidence/analyze-stream",
+                        "USER",
+                        "{}",
+                        AgentRunPersistenceFixtures.REQUEST_HASH,
+                        "[\"USER\"]",
+                        "[\"user-persistence\"]",
+                        "legacy-stream-key",
+                        "trace-v1-persistence",
+                        "request-v1-persistence",
+                        "user-persistence");
+        runRepository.saveAndFlush(legacyV1);
+        assertThat(legacyV1.getLogicalIdempotencyKey()).isEqualTo("legacy-stream-key");
+        assertThat(attemptRepository.findById("RUN_V1_PERSISTENCE"))
+                .hasValueSatisfying(
+                        persisted -> {
+                            assertThat(persisted.getAgentRunId()).isEqualTo("RUN_V1_PERSISTENCE");
+                            assertThat(persisted.getAttemptNo()).isEqualTo(1);
+                        });
 
         AgentRunLedger.LogicalRun logical = ledger.createOrLoad(AgentRunPersistenceFixtures.logicalRun());
         AgentRunLedger.LogicalRun replayedLogical =
