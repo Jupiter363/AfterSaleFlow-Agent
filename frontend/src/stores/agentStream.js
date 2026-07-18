@@ -506,9 +506,9 @@ export async function consumeAgentRun({
                 terminal = true;
                 throw streamFailure(event.error);
               }
-              await onEvent?.(event, run);
               run.seenEventSequences.add(identity);
               run.lastEventId = event.cursor;
+              await onEvent?.(event, run);
             },
           });
           run.lastEventId = String(consumed.cursor ?? run.lastEventId);

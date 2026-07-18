@@ -161,4 +161,100 @@ describe("agentStreamStore", () => {
       { senderRole: "AGENT", messageText: `${accepted}B` },
     ], [run])).toEqual([]);
   });
+
+  it("commits a visible delta before an observer failure reconnects and replays it", async () => {
+    const firstResponse = streamResponse([
+      'id: 0\nevent: start\ndata: {"schemaVersion":"agent_stream.v1","runId":"AGENT_RUN_OBSERVER","sequence":0,"type":"start"}\n\n',
+      'id: 1\nevent: visible_delta\ndata: {"schemaVersion":"agent_stream.v1","runId":"AGENT_RUN_OBSERVER","sequence":1,"type":"visible_delta","field":"room_utterance","delta":"仅应用一次"}\n\n',
+    ]);
+    const replayResponse = streamResponse([
+      'id: 1\nevent: visible_delta\ndata: {"schemaVersion":"agent_stream.v1","runId":"AGENT_RUN_OBSERVER","sequence":1,"type":"visible_delta","field":"room_utterance","delta":"仅应用一次"}\n\n',
+      'id: 2\nevent: final\ndata: {"schemaVersion":"agent_stream.v1","runId":"AGENT_RUN_OBSERVER","sequence":2,"type":"final","response":{"ok":true}}\n\n',
+    ]);
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(firstResponse)
+      .mockResolvedValueOnce(replayResponse);
+    let failObserver = true;
+    const onEvent = vi.fn((event) => {
+      if (event.event === "visible_delta" && failObserver) {
+        failObserver = false;
+        throw new Error("observer failed once");
+      }
+    });
+
+    await consumeAgentRun({
+      actor,
+      caseId: "CASE_1",
+      roomType: "INTAKE",
+      descriptor: {
+        runId: "AGENT_RUN_OBSERVER",
+        streamUrl: "/api/agent-runs/AGENT_RUN_OBSERVER/events",
+      },
+      reconnectBaseDelayMs: 1,
+      fetchImpl,
+      onEvent,
+    });
+
+    const run = getAgentStreamRun("AGENT_RUN_OBSERVER");
+    expect(run.reconnectCount).toBe(1);
+    expect(run.receivedContent).toBe("仅应用一次");
+    expect(run.content).toBe("仅应用一次");
+    expect(onEvent.mock.calls.filter(([event]) => event.event === "visible_delta"))
+      .toHaveLength(1);
+    expect(fetchImpl.mock.calls[1][0]).toContain("last_event_id=1");
+    expect(fetchImpl.mock.calls[1][1].headers["Last-Event-ID"]).toBe("1");
+  });
+
+  it("commits an attempt reset before observer failure replay", async () => {
+    const firstResponse = streamResponse([
+      'id: v2:ATTEMPT_1:0\nevent: attempt_started\ndata: {"protocol":"agent-stream.v2","runId":"AGENT_RUN_RESET_REPLAY","attemptId":"ATTEMPT_1","sequence":0,"cursor":"v2:ATTEMPT_1:0","audience":"USER","payload":{"node":"turn"}}\n\n',
+      'id: v2:ATTEMPT_1:1\nevent: visible_delta\ndata: {"protocol":"agent-stream.v2","runId":"AGENT_RUN_RESET_REPLAY","attemptId":"ATTEMPT_1","sequence":1,"cursor":"v2:ATTEMPT_1:1","audience":"USER","payload":{"node":"turn","field":"room_utterance","delta":"旧文本"}}\n\n',
+      'id: v2:ATTEMPT_1:2\nevent: attempt_aborted\ndata: {"protocol":"agent-stream.v2","runId":"AGENT_RUN_RESET_REPLAY","attemptId":"ATTEMPT_1","sequence":2,"cursor":"v2:ATTEMPT_1:2","audience":"USER","payload":{"reasonCode":"TRANSPORT_LOST"}}\n\n',
+      'id: v2:ATTEMPT_2:0\nevent: attempt_started\ndata: {"protocol":"agent-stream.v2","runId":"AGENT_RUN_RESET_REPLAY","attemptId":"ATTEMPT_2","sequence":0,"cursor":"v2:ATTEMPT_2:0","audience":"USER","payload":{"node":"turn"}}\n\n',
+      'id: v2:ATTEMPT_2:1\nevent: attempt_reset\ndata: {"protocol":"agent-stream.v2","runId":"AGENT_RUN_RESET_REPLAY","attemptId":"ATTEMPT_2","sequence":1,"cursor":"v2:ATTEMPT_2:1","audience":"USER","resetAttemptId":"ATTEMPT_1","payload":{"reasonCode":"RETRY","resetAttemptId":"ATTEMPT_1"}}\n\n',
+    ]);
+    const replayResponse = streamResponse([
+      'id: v2:ATTEMPT_2:1\nevent: attempt_reset\ndata: {"protocol":"agent-stream.v2","runId":"AGENT_RUN_RESET_REPLAY","attemptId":"ATTEMPT_2","sequence":1,"cursor":"v2:ATTEMPT_2:1","audience":"USER","resetAttemptId":"ATTEMPT_1","payload":{"reasonCode":"RETRY","resetAttemptId":"ATTEMPT_1"}}\n\n',
+      'id: v2:ATTEMPT_2:2\nevent: visible_delta\ndata: {"protocol":"agent-stream.v2","runId":"AGENT_RUN_RESET_REPLAY","attemptId":"ATTEMPT_2","sequence":2,"cursor":"v2:ATTEMPT_2:2","audience":"USER","payload":{"node":"turn","field":"room_utterance","delta":"新文本"}}\n\n',
+      'id: v2:ATTEMPT_2:3\nevent: final\ndata: {"protocol":"agent-stream.v2","runId":"AGENT_RUN_RESET_REPLAY","attemptId":"ATTEMPT_2","sequence":3,"cursor":"v2:ATTEMPT_2:3","audience":"USER","response":{"finalResultHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"payload":{"finalResultHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}\n\n',
+    ]);
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(firstResponse)
+      .mockResolvedValueOnce(replayResponse);
+    let failObserver = true;
+    const onEvent = vi.fn((event) => {
+      if (event.event === "attempt_reset" && failObserver) {
+        failObserver = false;
+        throw new Error("observer failed once");
+      }
+    });
+
+    await consumeAgentRun({
+      actor,
+      caseId: "CASE_1",
+      roomType: "INTAKE",
+      descriptor: {
+        runId: "AGENT_RUN_RESET_REPLAY",
+        streamUrl: "/api/agent-runs/AGENT_RUN_RESET_REPLAY/events",
+      },
+      reconnectBaseDelayMs: 1,
+      fetchImpl,
+      onEvent,
+    });
+
+    const run = getAgentStreamRun("AGENT_RUN_RESET_REPLAY");
+    expect(run.reconnectCount).toBe(1);
+    expect(run.resetCount).toBe(1);
+    expect(run.currentAttemptId).toBe("ATTEMPT_2");
+    expect(run.content).toBe("新文本");
+    expect(run.content).not.toContain("旧文本");
+    expect(run.lastEventId).toBe("v2:ATTEMPT_2:3");
+    expect(onEvent.mock.calls.filter(([event]) => event.event === "attempt_reset"))
+      .toHaveLength(1);
+    expect(fetchImpl.mock.calls[1][0]).toContain(
+      "last_event_id=v2%3AATTEMPT_2%3A1",
+    );
+    expect(fetchImpl.mock.calls[1][1].headers["Last-Event-ID"])
+      .toBe("v2:ATTEMPT_2:1");
+  });
 });
