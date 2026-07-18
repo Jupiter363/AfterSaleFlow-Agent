@@ -24,19 +24,19 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 
-final class AgentRunPersistenceFixtures {
+public final class AgentRunPersistenceFixtures {
 
-    static final Instant STARTED_AT = Instant.parse("2026-07-19T01:00:00Z");
-    static final Instant COMPLETED_AT = Instant.parse("2026-07-19T01:00:03Z");
-    static final String RUN_ID = "RUN_V2_PERSISTENCE";
-    static final String CASE_ID = "CASE_V2_PERSISTENCE";
+    public static final Instant STARTED_AT = Instant.parse("2026-07-19T01:00:00Z");
+    public static final Instant COMPLETED_AT = Instant.parse("2026-07-19T01:00:03Z");
+    public static final String RUN_ID = "RUN_V2_PERSISTENCE";
+    public static final String CASE_ID = "CASE_V2_PERSISTENCE";
     static final String REQUEST_HASH = "a".repeat(64);
     static final String RESULT_HASH = "b".repeat(64);
     static final String MANIFEST_HASH = "c".repeat(64);
 
     private AgentRunPersistenceFixtures() {}
 
-    static CreateLogicalRun logicalRun() {
+    public static CreateLogicalRun logicalRun() {
         return new CreateLogicalRun(
                 RUN_ID,
                 "tenant-persistence",
@@ -57,7 +57,7 @@ final class AgentRunPersistenceFixtures {
                 STARTED_AT);
     }
 
-    static ExecuteAgentRunRequest request(long attemptNo, String attemptId) {
+    public static ExecuteAgentRunRequest request(long attemptNo, String attemptId) {
         RoomGraphCommand command =
                 new RoomGraphCommand(
                         "room-graph-command.v1",
