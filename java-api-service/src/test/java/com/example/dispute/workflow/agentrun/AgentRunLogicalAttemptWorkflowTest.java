@@ -81,6 +81,22 @@ class AgentRunLogicalAttemptWorkflowTest {
     }
 
     @Test
+    void retrievesTheCompletedAttemptTwoUpdateAfterTheWorkflowCloses() throws Exception {
+        ExecuteAgentRunRequest attemptOne = request(1, "attempt-closed-001");
+        ExecuteAgentRunRequest attemptTwo = request(2, "attempt-closed-002");
+        RunningWorkflow running = start(attemptOne);
+
+        ExecuteAgentRunResult completed = update(running.workflow(), attemptTwo);
+        assertThat(running.result().get(5, TimeUnit.SECONDS)).isEqualTo(completed);
+        int executionsAfterClose = activities.executedRequests.size();
+
+        ExecuteAgentRunResult retrieved = update(running.workflow(), attemptTwo);
+
+        assertThat(retrieved).isEqualTo(completed);
+        assertThat(activities.executedRequests).hasSize(executionsAfterClose);
+    }
+
+    @Test
     void rejectsAnotherLogicalAttemptWhileTheAcceptedAttemptIsExecuting() throws Exception {
         ExecuteAgentRunRequest attemptOne = request(1, "attempt-serial-001");
         ExecuteAgentRunRequest attemptTwo = request(2, "attempt-serial-002");
