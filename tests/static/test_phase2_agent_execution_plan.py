@@ -36,13 +36,13 @@ def expected_coverage_ids() -> set[str]:
     }
 
 
-def test_phase2_plan_stays_blocked_and_cpu_bounded() -> None:
+def test_phase2_plan_has_restricted_entry_and_stays_cpu_bounded() -> None:
     matrix = load_matrix()
 
     assert matrix["schema_version"] == "phase-test-batches.v1"
     assert matrix["gate"] == {
         "required_entry": "MIG-001",
-        "current_status": "BLOCKED",
+        "current_status": "APPROVED_OFF_SHADOW_DEVELOPMENT_EXCEPTION",
         "implementation_allowed_when": [
             "MIG-001_PASS",
             "APPROVED_OFF_SHADOW_DEVELOPMENT_EXCEPTION",
@@ -101,7 +101,8 @@ def test_phase2_plan_is_linked_and_owned_paths_do_not_duplicate() -> None:
     )
 
     for required in (
-        "engineering_execution: BLOCKED",
+        "engineering_execution: ALLOWED_WITH_OFF_SHADOW_RESTRICTIONS",
+        "ADR 0007",
         "primary + 3 delegated implementation agents",
         "TEST_REQUEST",
         "TEST_TOKEN",

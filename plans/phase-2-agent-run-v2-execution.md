@@ -4,9 +4,9 @@
 
 ```text
 plan_status: READY
-engineering_execution: BLOCKED
+engineering_execution: ALLOWED_WITH_OFF_SHADOW_RESTRICTIONS
 promotion_gate: MIG-001 PENDING
-next_phase_permission: BLOCKED
+next_phase_permission: PHASE_2_ENGINEERING_ONLY
 team_shape: primary + 3 delegated implementation agents
 ```
 
@@ -18,6 +18,11 @@ team_shape: primary + 3 delegated implementation agents
 2. 通过 ADR/计划变更明确批准仅在 `OFF/SHADOW` 下进行开发，并明确禁止切流。
 
 未满足条件时只能维护计划、测试清单和非运行时代码审查，不得实现 Phase 2 runtime。
+
+2026-07-19 已通过
+[`ADR 0007`](../docs/architecture/adr/0007-phase-2-off-shadow-development-exception.md)
+批准第 2 类例外。该批准只允许 Phase 2 工程实现与 synthetic `SHADOW` 验证，不改变
+`MIG-001` promotion 状态，也不允许生产部署或切流。
 
 ## 2. Phase 2 目标和不可变约束
 

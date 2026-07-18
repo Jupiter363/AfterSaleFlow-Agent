@@ -8,13 +8,13 @@
 ```text
 engineering_checkpoint: PASS
 promotion_gate: PENDING
-next_phase_permission: BLOCKED
+next_phase_permission: PHASE_2_ENGINEERING_ONLY
 ```
 
 - Phase 1 代码与本地验证检查点已完成。
 - `MIG-001` 未通过：受控 synthetic driver 已在仓库实现；真实环境执行证据、KMS、private ACL、
   不可变证据存储和签名审批仍缺失。
-- 当前计划禁止进入 Phase 2。若要仅在 `OFF/SHADOW` 下继续开发，必须先批准 ADR 或计划变更。
+- ADR 0007 已批准 Phase 2 仅在 `OFF/SHADOW` 下进行工程开发；生产部署与切流仍被禁止。
 
 ## Phase 1 关键数据
 

@@ -3,7 +3,7 @@ phase: 2
 name: agent-run-v2
 gate:
   required_entry: MIG-001
-  current_status: BLOCKED
+  current_status: APPROVED_OFF_SHADOW_DEVELOPMENT_EXCEPTION
   implementation_allowed_when:
     - MIG-001_PASS
     - APPROVED_OFF_SHADOW_DEVELOPMENT_EXCEPTION
