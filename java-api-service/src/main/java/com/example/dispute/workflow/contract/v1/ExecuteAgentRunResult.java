@@ -31,6 +31,10 @@ public record ExecuteAgentRunResult(
         required(logicalRunId, "logicalRunId");
         required(attemptId, "attemptId");
         required(outcome, "outcome");
+        if (!agentRunId.equals(logicalRunId)) {
+            throw new IllegalArgumentException(
+                    "agentRunId must equal logicalRunId");
+        }
         if (attemptNo < 1 || lastSequenceNo < 0) {
             throw new IllegalArgumentException("attemptNo and lastSequenceNo are invalid");
         }

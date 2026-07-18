@@ -26,6 +26,10 @@ public record ExecuteAgentRunRequest(
             throw new IllegalArgumentException("streamProtocol must be agent-stream.v2");
         }
         required(command, "command");
+        if (!agentRunId.equals(command.logicalRunId())) {
+            throw new IllegalArgumentException(
+                    "agentRunId must equal the graph logicalRunId");
+        }
     }
 
     public String logicalRunId() {

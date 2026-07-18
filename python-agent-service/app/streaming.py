@@ -36,6 +36,7 @@ STREAM_QUEUE_WAIT_POLL_SECONDS = 0.05
 STREAM_EVENT_MAX_DELTA_CHARS = 16 * 1024
 STREAM_MAX_VISIBLE_OUTPUT_CHARS = 512 * 1024
 STREAM_MAX_MODEL_DOCUMENT_CHARS = 2 * 1024 * 1024
+V2_IDENTIFIER_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
 
 
 class AgentStreamCancelled(RuntimeError):
@@ -109,22 +110,26 @@ class StreamV2Usage(_StrictStreamModel):
 
 
 class StreamV2Payload(_StrictStreamModel):
-    node: str | None = None
-    field: str | None = None
+    node: str | None = Field(default=None, pattern=V2_IDENTIFIER_PATTERN)
+    field: str | None = Field(default=None, pattern=V2_IDENTIFIER_PATTERN)
     delta: str | None = Field(default=None, min_length=1, max_length=4096)
     usage: StreamV2Usage | None = None
-    reason_code: str | None = None
-    reset_attempt_id: str | None = None
-    final_result_ref: str | None = None
+    reason_code: str | None = Field(default=None, pattern=V2_IDENTIFIER_PATTERN)
+    reset_attempt_id: str | None = Field(default=None, pattern=V2_IDENTIFIER_PATTERN)
+    final_result_ref: str | None = Field(
+        default=None,
+        max_length=1024,
+        pattern=r"^(?:s3|minio|urn):",
+    )
     final_result_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
-    error_code: str | None = None
+    error_code: str | None = Field(default=None, pattern=V2_IDENTIFIER_PATTERN)
     retryable: bool | None = None
 
 
 class AgentStreamV2Event(_StrictStreamModel):
     schema_version: Literal["agent-stream.v2"] = "agent-stream.v2"
-    run_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
-    attempt_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+    run_id: str = Field(pattern=V2_IDENTIFIER_PATTERN)
+    attempt_id: str = Field(pattern=V2_IDENTIFIER_PATTERN)
     sequence_no: int = Field(ge=0)
     event_type: Literal[
         "attempt_started",
@@ -153,10 +158,17 @@ class AgentStreamV2Event(_StrictStreamModel):
         missing = [name for name in required if getattr(self.payload, name) is None]
         if missing:
             raise ValueError(f"{self.event_type} is missing payload fields: {missing}")
-        if self.payload.final_result_ref is not None and not self.payload.final_result_ref.startswith(
-            ("s3:", "minio:", "urn:")
-        ):
-            raise ValueError("final_result_ref must use governed object storage")
+        present = {
+            name
+            for name, value in self.payload.model_dump().items()
+            if value is not None
+        }
+        unexpected = present.difference(required)
+        if unexpected:
+            raise ValueError(
+                f"{self.event_type} contains incompatible payload fields: "
+                f"{sorted(unexpected)}"
+            )
         return self
 
 

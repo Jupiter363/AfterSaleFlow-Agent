@@ -84,6 +84,37 @@ class AgentNdjsonStreamClientV2Test {
     }
 
     @Test
+    void rejectsIdentifiersAndReferencesOutsideTheFrozenSchema() {
+        assertThatThrownBy(
+                        () ->
+                                new AgentNdjsonStreamClient.V2ProtocolState(
+                                        "run with spaces",
+                                        "attempt-1",
+                                        Audience.USER,
+                                        Set.of("room_utterance")))
+                .isInstanceOf(AgentStreamProtocolException.class)
+                .hasMessageContaining("identifier");
+
+        var state = new AgentNdjsonStreamClient.V2ProtocolState(
+                "run-1", "attempt-1", Audience.USER, Set.of("room_utterance"));
+        parse(state, event(0, "attempt_started", "{\"node\":\"evidence_turn\"}"));
+        assertThatThrownBy(
+                        () ->
+                                parse(
+                                        state,
+                                        event(
+                                                1,
+                                                "final",
+                                                "{\"final_result_ref\":\"urn:"
+                                                        + "x".repeat(1025)
+                                                        + "\",\"final_result_hash\":\""
+                                                        + "a".repeat(64)
+                                                        + "\"}")))
+                .isInstanceOf(AgentStreamProtocolException.class)
+                .hasMessageContaining("reference");
+    }
+
+    @Test
     void v1AdapterProjectsOnlyPublicPreviewAndRejectsRawFinal() {
         AgentStreamFrame visible = new AgentStreamFrame(
                 1, "visible_delta", "evidence_turn", "room_utterance", "public",
@@ -111,6 +142,30 @@ class AgentNdjsonStreamClientV2Test {
                         Instant.parse("2026-07-19T00:00:00Z")))
                 .isInstanceOf(AgentStreamProtocolException.class)
                 .hasMessageContaining("persisted result reference");
+
+        AgentStreamFrame oversized = new AgentStreamFrame(
+                3,
+                "visible_delta",
+                "evidence_turn",
+                "room_utterance",
+                "x".repeat(4097),
+                null,
+                null,
+                null,
+                null,
+                null);
+        assertThatThrownBy(
+                        () ->
+                                AgentNdjsonStreamClient.adaptV1Frame(
+                                        oversized,
+                                        "run-1",
+                                        "attempt-1",
+                                        Audience.USER,
+                                        "evidence_turn",
+                                        Set.of("room_utterance"),
+                                        Instant.parse("2026-07-19T00:00:00Z")))
+                .isInstanceOf(AgentStreamProtocolException.class)
+                .hasMessageContaining("visible delta");
     }
 
     private static com.example.dispute.workflow.contract.v1.AgentStreamEvent parse(

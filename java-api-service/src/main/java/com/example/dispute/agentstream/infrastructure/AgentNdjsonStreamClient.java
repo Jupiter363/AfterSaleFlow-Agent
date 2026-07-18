@@ -251,9 +251,11 @@ public class AgentNdjsonStreamClient implements AgentStreamClient {
             throw new AgentStreamProtocolException("agent stream v2 event must be an object");
         }
         rejectUnknown(node, V2_ENVELOPE_FIELDS, "v2 envelope");
+        String runId = requiredV2Identifier(node, "run_id");
+        String attemptId = requiredV2Identifier(node, "attempt_id");
         if (!"agent-stream.v2".equals(node.path("schema_version").asText())
-                || !state.runId.equals(node.path("run_id").asText())
-                || !state.attemptId.equals(node.path("attempt_id").asText())) {
+                || !state.runId.equals(runId)
+                || !state.attemptId.equals(attemptId)) {
             throw new AgentStreamProtocolException("agent stream v2 identity does not match");
         }
         if (!node.path("sequence_no").isIntegralNumber()) {
@@ -296,21 +298,47 @@ public class AgentNdjsonStreamClient implements AgentStreamClient {
             String startNode,
             Set<String> visibleFieldPaths,
             Instant occurredAt) {
+        if (frame == null || frame.sequence() < 0 || occurredAt == null) {
+            throw new AgentStreamProtocolException("V1 adapter received an invalid envelope");
+        }
+        runId = requireV2Identifier(runId, "run_id");
+        attemptId = requireV2Identifier(attemptId, "attempt_id");
+        java.util.Objects.requireNonNull(audience, "audience");
+        visibleFieldPaths = Set.copyOf(
+                java.util.Objects.requireNonNull(visibleFieldPaths, "visibleFieldPaths"));
         AgentStreamEvent.Payload payload;
         StreamEventType eventType;
         switch (frame.event()) {
             case "start" -> {
                 eventType = StreamEventType.ATTEMPT_STARTED;
-                payload = payload(startNode, null, null, null, null, null, null, null, null, null);
+                payload = payload(
+                        requireV2Identifier(startNode, "node"),
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null);
             }
             case "visible_delta" -> {
                 if (!visibleFieldPaths.contains(frame.fieldPath())) {
                     throw new AgentStreamProtocolException(
                             "V1 adapter rejected a non-public field");
                 }
+                if (frame.delta() == null
+                        || frame.delta().isBlank()
+                        || frame.delta().length() > 4096) {
+                    throw new AgentStreamProtocolException(
+                            "V1 adapter received an invalid visible delta");
+                }
                 eventType = StreamEventType.VISIBLE_DELTA;
                 payload = payload(
-                        frame.nodeName(), frame.fieldPath(), frame.delta(), null,
+                        requireV2Identifier(frame.nodeName(), "node"),
+                        requireV2Identifier(frame.fieldPath(), "field"),
+                        frame.delta(), null,
                         null, null, null, null, null, null);
             }
             case "usage" -> {
@@ -328,9 +356,14 @@ public class AgentNdjsonStreamClient implements AgentStreamClient {
                         null, null, null, null, null, null);
             }
             case "error" -> {
+                if (frame.error() == null) {
+                    throw new AgentStreamProtocolException(
+                            "V1 adapter received an invalid error");
+                }
                 eventType = StreamEventType.ERROR;
                 payload = payload(null, null, null, null, null, null, null, null,
-                        frame.error().code(), frame.error().retryable());
+                        requireV2Identifier(frame.error().code(), "error_code"),
+                        frame.error().retryable());
             }
             case "final" -> throw new AgentStreamProtocolException(
                     "V1 final requires a persisted result reference before V2 projection");
@@ -385,10 +418,10 @@ public class AgentNdjsonStreamClient implements AgentStreamClient {
     private static void validateV2Payload(
             StreamEventType eventType, JsonNode payload, V2ProtocolState state) {
         switch (eventType) {
-            case ATTEMPT_STARTED -> requiredV2Text(payload, "node");
+            case ATTEMPT_STARTED -> requiredV2Identifier(payload, "node");
             case VISIBLE_DELTA -> {
-                requiredV2Text(payload, "node");
-                String field = requiredV2Text(payload, "field");
+                requiredV2Identifier(payload, "node");
+                String field = requiredV2Identifier(payload, "field");
                 if (!state.visibleFieldPaths.contains(field)) {
                     throw new AgentStreamProtocolException(
                             "agent stream v2 attempted to expose a non-public field");
@@ -416,14 +449,14 @@ public class AgentNdjsonStreamClient implements AgentStreamClient {
                     throw new AgentStreamProtocolException("agent stream v2 usage is invalid");
                 }
             }
-            case ATTEMPT_ABORTED -> requiredV2Text(payload, "reason_code");
+            case ATTEMPT_ABORTED -> requiredV2Identifier(payload, "reason_code");
             case ATTEMPT_RESET -> {
-                String resetAttemptId = requiredV2Text(payload, "reset_attempt_id");
+                String resetAttemptId = requiredV2Identifier(payload, "reset_attempt_id");
                 if (state.attemptId.equals(resetAttemptId)) {
                     throw new AgentStreamProtocolException(
                             "agent stream v2 reset must reference an older attempt");
                 }
-                requiredV2Text(payload, "reason_code");
+                requiredV2Identifier(payload, "reason_code");
             }
             case FINAL -> {
                 String reference = requiredV2Text(payload, "final_result_ref");
@@ -431,12 +464,13 @@ public class AgentNdjsonStreamClient implements AgentStreamClient {
                 if (!(reference.startsWith("s3:")
                                 || reference.startsWith("minio:")
                                 || reference.startsWith("urn:"))
+                        || reference.length() > 1024
                         || !hash.matches("[0-9a-f]{64}")) {
                     throw new AgentStreamProtocolException("agent stream v2 final reference is invalid");
                 }
             }
             case ERROR -> {
-                requiredV2Text(payload, "error_code");
+                requiredV2Identifier(payload, "error_code");
                 if (!payload.path("retryable").isBoolean()) {
                     throw new AgentStreamProtocolException("agent stream v2 retryable flag is invalid");
                 }
@@ -462,6 +496,18 @@ public class AgentNdjsonStreamClient implements AgentStreamClient {
             throw new AgentStreamProtocolException("agent stream v2 is missing " + field);
         }
         return value.asText();
+    }
+
+    private static String requiredV2Identifier(JsonNode node, String field) {
+        return requireV2Identifier(requiredV2Text(node, field), field);
+    }
+
+    private static String requireV2Identifier(String value, String field) {
+        if (value == null || !value.matches("[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")) {
+            throw new AgentStreamProtocolException(
+                    "agent stream v2 " + field + " is not a valid identifier");
+        }
+        return value;
     }
 
     private static void rejectUnknown(JsonNode node, Set<String> allowed, String scope) {
@@ -762,10 +808,13 @@ public class AgentNdjsonStreamClient implements AgentStreamClient {
                 String attemptId,
                 Audience audience,
                 Set<String> visibleFieldPaths) {
-            this.runId = java.util.Objects.requireNonNull(runId);
-            this.attemptId = java.util.Objects.requireNonNull(attemptId);
+            this.runId = requireV2Identifier(runId, "run_id");
+            this.attemptId = requireV2Identifier(attemptId, "attempt_id");
             this.audience = java.util.Objects.requireNonNull(audience);
-            this.visibleFieldPaths = Set.copyOf(visibleFieldPaths);
+            this.visibleFieldPaths = Set.copyOf(
+                    java.util.Objects.requireNonNull(visibleFieldPaths, "visibleFieldPaths"));
+            this.visibleFieldPaths.forEach(
+                    field -> requireV2Identifier(field, "visible field"));
         }
 
         private void accept(long sequence, StreamEventType eventType) {

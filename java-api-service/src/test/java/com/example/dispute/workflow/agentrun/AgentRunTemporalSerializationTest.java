@@ -26,12 +26,14 @@ class AgentRunTemporalSerializationTest {
 
     @Test
     void defaultTemporalConverterRoundTripsExecutionAndHeartbeatContracts() throws Exception {
+        RoomGraphCommand command =
+                fixture("room-graph-command-valid.json", RoomGraphCommand.class);
         ExecuteAgentRunRequest request = new ExecuteAgentRunRequest(
                 ExecuteAgentRunRequest.SCHEMA_VERSION,
-                "agent-run-001",
+                command.logicalRunId(),
                 1,
                 "agent-stream.v2",
-                fixture("room-graph-command-valid.json", RoomGraphCommand.class));
+                command);
         RoomGraphResult graphResult =
                 fixture("room-graph-result-valid.json", RoomGraphResult.class);
         ExecuteAgentRunResult result = new ExecuteAgentRunResult(

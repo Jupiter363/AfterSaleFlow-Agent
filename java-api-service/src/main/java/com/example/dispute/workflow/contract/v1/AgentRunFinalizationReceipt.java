@@ -29,6 +29,10 @@ public record AgentRunFinalizationReceipt(
         required(agentRunId, "agentRunId");
         required(logicalRunId, "logicalRunId");
         required(attemptId, "attemptId");
+        if (!agentRunId.equals(logicalRunId)) {
+            throw new IllegalArgumentException(
+                    "agentRunId must equal logicalRunId");
+        }
         if (attemptNo < 1 || fencingToken < 1 || finalStreamSequenceNo < 0) {
             throw new IllegalArgumentException("attempt, fence, or final sequence is invalid");
         }

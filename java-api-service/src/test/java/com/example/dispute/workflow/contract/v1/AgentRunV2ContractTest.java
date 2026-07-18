@@ -25,7 +25,7 @@ class AgentRunV2ContractTest {
         RoomGraphCommand command = fixture("room-graph-command-valid.json", RoomGraphCommand.class);
         ExecuteAgentRunRequest request = new ExecuteAgentRunRequest(
                 ExecuteAgentRunRequest.SCHEMA_VERSION,
-                "agent-run-001",
+                command.logicalRunId(),
                 1,
                 "agent-stream.v2",
                 command);
@@ -39,7 +39,7 @@ class AgentRunV2ContractTest {
         RoomGraphResult graphResult = fixture("room-graph-result-valid.json", RoomGraphResult.class);
         ExecuteAgentRunResult result = new ExecuteAgentRunResult(
                 ExecuteAgentRunResult.SCHEMA_VERSION,
-                "agent-run-001",
+                graphResult.logicalRunId(),
                 graphResult.logicalRunId(),
                 graphResult.attemptId(),
                 1,
@@ -68,7 +68,7 @@ class AgentRunV2ContractTest {
         assertThat(receipt.finalResultHash()).isEqualTo(graphResult.outputHash());
         assertThatThrownBy(() -> new ExecuteAgentRunResult(
                         ExecuteAgentRunResult.SCHEMA_VERSION,
-                        "agent-run-001",
+                        graphResult.logicalRunId(),
                         graphResult.logicalRunId(),
                         graphResult.attemptId(),
                         1,
@@ -82,6 +82,22 @@ class AgentRunV2ContractTest {
                         Instant.parse("2026-07-19T00:00:00Z")))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("identity or hash");
+    }
+
+    @Test
+    void executionEnvelopeRejectsAnIndependentAgentRunIdentity() throws Exception {
+        RoomGraphCommand command = fixture("room-graph-command-valid.json", RoomGraphCommand.class);
+
+        assertThatThrownBy(
+                        () ->
+                                new ExecuteAgentRunRequest(
+                                        ExecuteAgentRunRequest.SCHEMA_VERSION,
+                                        "different-run",
+                                        1,
+                                        "agent-stream.v2",
+                                        command))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("logicalRunId");
     }
 
     @Test
