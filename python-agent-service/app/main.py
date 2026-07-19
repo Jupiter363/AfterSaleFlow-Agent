@@ -64,6 +64,14 @@ from app.agents.review_copilot import ReviewCopilot
 from app.business.api.final_agents import FinalAgentServices
 from app.business.simulated_imports import SimulatedExternalImportWorkflow
 
+# ---- Graph SHADOW 平台 ----
+from app.api.graph_commands import create_graph_commands_router
+from app.api.graph_lifecycle import (
+    GraphRuntimeBindings,
+    GraphRuntimeHandle,
+    create_graph_readiness_router,
+)
+
 # ---- 配置 & 基础设施 ----
 from app.config import Settings, get_settings
 from app.harness.guardrails import GuardrailViolation
@@ -152,6 +160,8 @@ def create_app(
     final_agent_services: FinalAgentServices | None = None,
     simulated_import_workflow: SimulatedExternalImportWorkflow | None = None,
     hearing_flow_workflows: HearingFlowWorkflows | None = None,
+    graph_runtime_bindings: GraphRuntimeBindings | None = None,
+    graph_runtime_handle: GraphRuntimeHandle | None = None,
 ) -> FastAPI:
     """应用工厂：创建并配置 FastAPI 实例。
 
@@ -196,6 +206,10 @@ def create_app(
 
     # 解析配置：优先使用传入的配置，否则从环境变量加载
     resolved = settings or get_settings()
+    resolved_graph_runtime = graph_runtime_handle or GraphRuntimeHandle(
+        settings=resolved,
+        bindings=graph_runtime_bindings,
+    )
 
     # 构建各工作流实例：如果未传入则自动构建默认实现
     resolved_intake_workflow = intake_workflow or _build_intake_workflow(resolved)
@@ -226,7 +240,16 @@ def create_app(
     )
 
     # 创建 FastAPI 应用实例
-    app = FastAPI(title="Python Agent Service", version="1.0.0")
+    app = FastAPI(
+        title="Python Agent Service",
+        version="1.0.0",
+        lifespan=resolved_graph_runtime.lifespan,
+    )
+    app.state.graph_runtime = resolved_graph_runtime
+    app.include_router(
+        create_graph_commands_router(resolved_graph_runtime.endpoint_dependencies())
+    )
+    app.include_router(create_graph_readiness_router(resolved_graph_runtime))
 
     # ==================== 中间件 ====================
 
