@@ -6,6 +6,7 @@ import com.example.dispute.agentstream.application.AgentRunV2StreamStore.NonRunn
 import com.example.dispute.agentstream.application.AgentRunReconciledFinalStore;
 import com.example.dispute.workflow.contract.v1.AgentStreamEvent;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunRecoveryAction;
 import com.example.dispute.workflow.contract.v1.ContractTypes.StreamEventType;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.GraphReconcileResponse;
@@ -102,12 +103,26 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
             if (durableAppendFailure(failure)) {
                 throw failure;
             }
+            boolean terminalReconciliation = failure instanceof AgentRunExecutionException typed
+                    && typed.recoveryAction() == AgentRunRecoveryAction.RECONCILE_TERMINAL;
             flushBatch(
                     batch,
                     state,
-                    state.hasPendingFinal(),
+                    state.hasPendingFinal() || terminalReconciliation,
                     progressListener,
                     cancellationToken);
+            if (terminalReconciliation
+                    && reconciliationClient != null
+                    && reconciledFinalStore != null) {
+                return reconcileOnly(
+                        request,
+                        progressListener,
+                        cancellationToken,
+                        state.pendingFinal(),
+                        state.durableSequence(),
+                        state.publicOutputEmitted,
+                        true);
+            }
             if (state.hasPendingFinal()
                     && !(failure instanceof AgentRunExecutionException)) {
                 throw AgentRunExecutionException.reconcileTerminal(
@@ -147,12 +162,30 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
             ExecuteAgentRunRequest request,
             ProgressListener progressListener,
             AgentRunCancellationToken cancellationToken) {
+        return reconcileOnly(
+                request,
+                progressListener,
+                cancellationToken,
+                null,
+                request.publicSequenceOffset(),
+                false,
+                false);
+    }
+
+    private Completion reconcileOnly(
+            ExecuteAgentRunRequest request,
+            ProgressListener progressListener,
+            AgentRunCancellationToken cancellationToken,
+            AgentStreamEvent expectedFinal,
+            long baselineSequence,
+            boolean publicOutputEmitted,
+            boolean preserveTerminalRecovery) {
         if (reconciliationClient == null || reconciledFinalStore == null) {
             throw AgentRunExecutionException.failLogicalRun(
                     "AGENT_RUN_RECONCILIATION_NOT_CONFIGURED",
                     "result-only reconciliation dependencies are unavailable",
-                    request.publicSequenceOffset(),
-                    false,
+                    baselineSequence,
+                    publicOutputEmitted,
                     null);
         }
         cancellationToken.throwIfCancellationRequested();
@@ -161,9 +194,19 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
             response = reconciliationClient.reconcile(request, cancellationToken);
         } catch (GraphReconciliationException failure) {
             cancellationToken.throwIfCancellationRequested();
-            throw reconciliationFailure(failure, request.publicSequenceOffset());
+            throw reconciliationFailure(
+                    failure,
+                    baselineSequence,
+                    publicOutputEmitted,
+                    preserveTerminalRecovery,
+                    expectedFinal != null);
         }
-        requireReconciliationMatches(request, response);
+        requireReconciliationMatches(
+                request,
+                response,
+                expectedFinal,
+                baselineSequence,
+                publicOutputEmitted);
         cancellationToken.throwIfCancellationRequested();
 
         AgentRunReconciledFinalStore.Receipt receipt;
@@ -177,35 +220,35 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
                             response.resultHash()));
         } catch (NonRunningAttemptException failure) {
             if (staleAttemptStatus(failure.attemptStatus())) {
-                throw staleAttemptFinal(request.publicSequenceOffset(), false, failure);
+                throw staleAttemptFinal(baselineSequence, publicOutputEmitted, failure);
             }
             throw AgentRunExecutionException.reconcileTerminal(
                     "AGENT_RUN_RECONCILED_FINAL_APPEND_FAILED",
                     "durable reconciled final append failed",
-                    request.publicSequenceOffset(),
-                    false,
+                    baselineSequence,
+                    publicOutputEmitted,
                     failure);
         } catch (AgentRunReconciledFinalStore.ConflictException failure) {
             throw AgentRunExecutionException.failLogicalRun(
                     "AGENT_RUN_RECONCILED_FINAL_CONFLICT",
                     "durable reconciled final conflicts with public history",
-                    request.publicSequenceOffset(),
-                    false,
+                    baselineSequence,
+                    publicOutputEmitted,
                     failure);
         } catch (RuntimeException failure) {
             throw AgentRunExecutionException.reconcileTerminal(
                     "AGENT_RUN_RECONCILED_FINAL_APPEND_FAILED",
                     "durable reconciled final append failed",
-                    request.publicSequenceOffset(),
-                    false,
+                    baselineSequence,
+                    publicOutputEmitted,
                     failure);
         }
         if (receipt == null) {
             throw AgentRunExecutionException.failLogicalRun(
                     "AGENT_RUN_RECONCILED_FINAL_CONFLICT",
                     "durable reconciled final store returned no receipt",
-                    request.publicSequenceOffset(),
-                    false,
+                    baselineSequence,
+                    publicOutputEmitted,
                     null);
         }
         AgentStreamEvent finalEvent = receipt.finalEvent();
@@ -229,44 +272,65 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
     }
 
     private static AgentRunExecutionException reconciliationFailure(
-            GraphReconciliationException failure, long baselineSequence) {
+            GraphReconciliationException failure,
+            long baselineSequence,
+            boolean publicOutputEmitted,
+            boolean preserveTerminalRecovery,
+            boolean observedFinal) {
         return switch (failure.recoveryAction()) {
-            case RETRY_SAME_COMMAND -> AgentRunExecutionException.retrySameCommand(
-                    failure.errorCode(),
-                    "result-only reconciliation may retry the same command",
-                    baselineSequence,
-                    false,
-                    failure);
-            case CREATE_NEXT_ATTEMPT -> AgentRunExecutionException.createNextAttempt(
-                    failure.errorCode(),
-                    "result-only reconciliation requires a new AgentRun attempt",
-                    baselineSequence,
-                    false,
-                    failure);
+            case RETRY_SAME_COMMAND -> preserveTerminalRecovery
+                    ? AgentRunExecutionException.reconcileTerminal(
+                            failure.errorCode(),
+                            "terminal result reconciliation must be retried without execution",
+                            baselineSequence,
+                            publicOutputEmitted,
+                            failure)
+                    : AgentRunExecutionException.retrySameCommand(
+                            failure.errorCode(),
+                            "result-only reconciliation may retry the same command",
+                            baselineSequence,
+                            publicOutputEmitted,
+                            failure);
+            case CREATE_NEXT_ATTEMPT -> observedFinal
+                    ? AgentRunExecutionException.failLogicalRun(
+                            "AGENT_RUN_OBSERVED_FINAL_RECONCILIATION_CONFLICT",
+                            "an observed final cannot be replaced by a new AgentRun attempt",
+                            baselineSequence,
+                            publicOutputEmitted,
+                            failure)
+                    : AgentRunExecutionException.createNextAttempt(
+                            failure.errorCode(),
+                            "result-only reconciliation requires a new AgentRun attempt",
+                            baselineSequence,
+                            publicOutputEmitted,
+                            failure);
             case FAIL_LOGICAL_RUN -> AgentRunExecutionException.failLogicalRun(
                     failure.errorCode(),
                     "result-only reconciliation rejected the logical run",
                     baselineSequence,
-                    false,
+                    publicOutputEmitted,
                     failure);
             case RECONCILE_TERMINAL -> AgentRunExecutionException.failLogicalRun(
                     "AGENT_RUN_RECONCILIATION_ACTION_INVALID",
                     "result-only reconciliation returned a recursive recovery action",
                     baselineSequence,
-                    false,
+                    publicOutputEmitted,
                     failure);
         };
     }
 
     private static void requireReconciliationMatches(
             ExecuteAgentRunRequest request,
-            GraphReconcileResponse response) {
+            GraphReconcileResponse response,
+            AgentStreamEvent expectedFinal,
+            long baselineSequence,
+            boolean publicOutputEmitted) {
         if (response == null) {
             throw AgentRunExecutionException.failLogicalRun(
                     "AGENT_RUN_RECONCILIATION_RESULT_MISSING",
                     "result-only reconciliation returned no response",
-                    request.publicSequenceOffset(),
-                    false,
+                    baselineSequence,
+                    publicOutputEmitted,
                     null);
         }
         RoomGraphResult result = response.result();
@@ -293,8 +357,24 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
             throw AgentRunExecutionException.failLogicalRun(
                     "AGENT_RUN_RECONCILIATION_RESULT_INVALID",
                     "result-only reconciliation differs from its command",
-                    request.publicSequenceOffset(),
-                    false,
+                    baselineSequence,
+                    publicOutputEmitted,
+                    null);
+        }
+        if (expectedFinal != null
+                && (expectedFinal.eventType() != StreamEventType.FINAL
+                        || !request.logicalRunId().equals(expectedFinal.runId())
+                        || !request.attemptId().equals(expectedFinal.attemptId())
+                        || request.command().actorScope().audience() != expectedFinal.audience()
+                        || !response.resultRef().equals(
+                                expectedFinal.payload().finalResultRef())
+                        || !response.resultHash().equals(
+                                expectedFinal.payload().finalResultHash()))) {
+            throw AgentRunExecutionException.failLogicalRun(
+                    "AGENT_RUN_RECONCILIATION_RESULT_INVALID",
+                    "result-only reconciliation differs from the observed final",
+                    baselineSequence,
+                    publicOutputEmitted,
                     null);
         }
     }
@@ -574,6 +654,10 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
 
         private boolean hasPendingFinal() {
             return pendingFinal != null;
+        }
+
+        private AgentStreamEvent pendingFinal() {
+            return pendingFinal;
         }
 
         private long durableSequence() {

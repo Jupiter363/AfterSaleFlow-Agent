@@ -573,6 +573,214 @@ class DurableAgentRunExecutionGatewayTest {
     }
 
     @Test
+    void terminalReplayFailureReconcilesInlineWithoutASecondCommandExecution()
+            throws Exception {
+        ExecuteAgentRunRequest request = request();
+        GraphReconcileResponse reconciliation = reconciliation(request);
+        AtomicInteger commandCalls = new AtomicInteger();
+        AtomicInteger reconciliationCalls = new AtomicInteger();
+        AtomicInteger finalStoreCalls = new AtomicInteger();
+        List<Long> streamWrites = new ArrayList<>();
+        AgentRunExecutionException replayFailure = AgentRunExecutionException.reconcileTerminal(
+                "GRAPH_TERMINAL_REPLAY_REQUIRED",
+                "the terminal command cannot replay its execution stream",
+                request.publicSequenceOffset(),
+                false,
+                null);
+        AgentStreamEvent storedFinal = reconciledFinal(request, reconciliation, 1, NOW);
+        var gateway = new DurableAgentRunExecutionGateway(
+                (actualRequest, mode, sink, token) -> {
+                    commandCalls.incrementAndGet();
+                    throw replayFailure;
+                },
+                (actualRequest, token) -> {
+                    reconciliationCalls.incrementAndGet();
+                    assertThat(actualRequest).isEqualTo(request);
+                    return reconciliation;
+                },
+                recordingStore(streamWrites),
+                candidate -> {
+                    finalStoreCalls.incrementAndGet();
+                    assertThat(candidate.resultRef()).isEqualTo(reconciliation.resultRef());
+                    assertThat(candidate.resultHash()).isEqualTo(reconciliation.resultHash());
+                    return new AgentRunReconciledFinalStore.Receipt(
+                            storedFinal, true, storedFinal.sequenceNo(), false);
+                });
+
+        var completion = gateway.execute(
+                request,
+                ExecutionMode.EXECUTE_OR_RECONCILE,
+                ignored -> {
+                    throw new AssertionError("terminal reconciliation must not publish progress");
+                },
+                new AgentRunCancellationToken());
+
+        assertThat(commandCalls).hasValue(1);
+        assertThat(reconciliationCalls).hasValue(1);
+        assertThat(finalStoreCalls).hasValue(1);
+        assertThat(streamWrites).isEmpty();
+        assertThat(completion.graphResult()).isEqualTo(reconciliation.result());
+        assertThat(completion.lastSequenceNo()).isEqualTo(1);
+        assertThat(completion.publicOutputEmitted()).isFalse();
+    }
+
+    @Test
+    void pendingObservedFinalMustMatchTheReconciledReferenceAndHash() throws Exception {
+        ExecuteAgentRunRequest request = request();
+        GraphReconcileResponse reconciliation = reconciliation(request);
+        AgentStreamEvent exact = reconciledFinal(request, reconciliation, 1, NOW.plusSeconds(1));
+        List<AgentStreamEvent> mismatches = List.of(
+                withFinalBinding(exact, "urn:result:different", reconciliation.resultHash()),
+                withFinalBinding(exact, reconciliation.resultRef(), "0".repeat(64)));
+        AtomicInteger finalStoreCalls = new AtomicInteger();
+
+        for (AgentStreamEvent mismatch : mismatches) {
+            List<Long> streamWrites = new ArrayList<>();
+            AgentGraphCommandClient commandClient = (actualRequest, mode, sink, token) -> {
+                sink.accept(event(request, 0, StreamEventType.ATTEMPT_STARTED, null));
+                sink.accept(mismatch);
+                throw AgentRunExecutionException.reconcileTerminal(
+                        "GRAPH_TERMINAL_REPLAY_REQUIRED",
+                        "the terminal command cannot replay its execution stream",
+                        request.publicSequenceOffset(),
+                        false,
+                        null);
+            };
+            var gateway = new DurableAgentRunExecutionGateway(
+                    commandClient,
+                    (actualRequest, token) -> reconciliation,
+                    recordingStore(streamWrites),
+                    candidate -> {
+                        finalStoreCalls.incrementAndGet();
+                        throw new AssertionError("a mismatched observed final must not be stored");
+                    });
+
+            AgentRunExecutionException failure = catchThrowableOfType(
+                    AgentRunExecutionException.class,
+                    () -> gateway.execute(
+                            request,
+                            ExecutionMode.EXECUTE_OR_RECONCILE,
+                            ignored -> {},
+                            new AgentRunCancellationToken()));
+
+            assertThat(failure.errorCode())
+                    .isEqualTo("AGENT_RUN_RECONCILIATION_RESULT_INVALID");
+            assertThat(failure.recoveryAction())
+                    .isEqualTo(AgentRunRecoveryAction.FAIL_LOGICAL_RUN);
+            assertThat(failure.getMessage()).contains("differs from the observed final");
+            assertThat(streamWrites).isEmpty();
+        }
+        assertThat(finalStoreCalls).hasValue(0);
+    }
+
+    @Test
+    void inlineReconciliationFailurePreservesTerminalRecoveryAndDurableProgress()
+            throws Exception {
+        ExecuteAgentRunRequest request = requestWithReset();
+        AtomicInteger commandCalls = new AtomicInteger();
+        AtomicInteger reconciliationCalls = new AtomicInteger();
+        AtomicInteger finalStoreCalls = new AtomicInteger();
+        List<Long> streamWrites = new ArrayList<>();
+        List<AgentRunProgress> progress = new ArrayList<>();
+        GraphReconciliationException reconciliationFailure =
+                GraphReconciliationException.transport(
+                        new IllegalStateException("reconciliation transport unavailable"));
+        var gateway = new DurableAgentRunExecutionGateway(
+                (actualRequest, mode, sink, token) -> {
+                    commandCalls.incrementAndGet();
+                    sink.accept(event(request, 0, StreamEventType.ATTEMPT_STARTED, null));
+                    sink.accept(event(request, 1, StreamEventType.VISIBLE_DELTA, null));
+                    throw AgentRunExecutionException.reconcileTerminal(
+                            "GRAPH_TERMINAL_REPLAY_REQUIRED",
+                            "the remote command is already terminal",
+                            request.publicSequenceOffset(),
+                            false,
+                            null);
+                },
+                (actualRequest, token) -> {
+                    reconciliationCalls.incrementAndGet();
+                    throw reconciliationFailure;
+                },
+                recordingStore(streamWrites),
+                candidate -> {
+                    finalStoreCalls.incrementAndGet();
+                    throw new AssertionError("failed reconciliation has no final to store");
+                });
+
+        AgentRunExecutionException failure = catchThrowableOfType(
+                AgentRunExecutionException.class,
+                () -> gateway.execute(
+                        request,
+                        ExecutionMode.EXECUTE_OR_RECONCILE,
+                        progress::add,
+                        new AgentRunCancellationToken()));
+
+        assertThat(failure.errorCode()).isEqualTo("GRAPH_RECONCILIATION_TRANSPORT_FAILED");
+        assertThat(failure.recoveryAction())
+                .isEqualTo(AgentRunRecoveryAction.RECONCILE_TERMINAL);
+        assertThat(failure.lastSequenceNo()).isEqualTo(2);
+        assertThat(failure.publicOutputEmitted()).isTrue();
+        assertThat(failure.getCause()).isSameAs(reconciliationFailure);
+        assertThat(commandCalls).hasValue(1);
+        assertThat(reconciliationCalls).hasValue(1);
+        assertThat(finalStoreCalls).hasValue(0);
+        assertThat(streamWrites).containsExactly(2L);
+        assertThat(progress)
+                .extracting(AgentRunProgress::lastSequenceNo)
+                .containsExactly(2L);
+    }
+
+    @Test
+    void observedFinalCannotBeReplacedByAReconciliationDirectedNewAttempt()
+            throws Exception {
+        ExecuteAgentRunRequest request = request();
+        GraphReconcileResponse reconciliation = reconciliation(request);
+        AgentStreamEvent exact = reconciledFinal(request, reconciliation, 1, NOW);
+        AtomicInteger finalStoreCalls = new AtomicInteger();
+        GraphReconciliationException conflict = new GraphReconciliationException(
+                "GRAPH_NEW_AGENT_ATTEMPT_REQUIRED",
+                409,
+                false,
+                AgentRunRecoveryAction.CREATE_NEXT_ATTEMPT,
+                "the reconciliation endpoint did not observe the final",
+                null);
+        var gateway = new DurableAgentRunExecutionGateway(
+                (actualRequest, mode, sink, token) -> {
+                    sink.accept(event(request, 0, StreamEventType.ATTEMPT_STARTED, null));
+                    sink.accept(exact);
+                    throw AgentRunExecutionException.reconcileTerminal(
+                            "GRAPH_TERMINAL_REPLAY_REQUIRED",
+                            "the execution endpoint observed a final",
+                            request.publicSequenceOffset(),
+                            false,
+                            null);
+                },
+                (actualRequest, token) -> {
+                    throw conflict;
+                },
+                recordingStore(new ArrayList<>()),
+                candidate -> {
+                    finalStoreCalls.incrementAndGet();
+                    throw new AssertionError("a conflicting terminal must not be stored");
+                });
+
+        AgentRunExecutionException failure = catchThrowableOfType(
+                AgentRunExecutionException.class,
+                () -> gateway.execute(
+                        request,
+                        ExecutionMode.EXECUTE_OR_RECONCILE,
+                        ignored -> {},
+                        new AgentRunCancellationToken()));
+
+        assertThat(failure.errorCode())
+                .isEqualTo("AGENT_RUN_OBSERVED_FINAL_RECONCILIATION_CONFLICT");
+        assertThat(failure.recoveryAction())
+                .isEqualTo(AgentRunRecoveryAction.FAIL_LOGICAL_RUN);
+        assertThat(failure.getCause()).isSameAs(conflict);
+        assertThat(finalStoreCalls).hasValue(0);
+    }
+
+    @Test
     void reconcileOnlyUsesTheResultClientAndAppendsOnlyTheReturnedDurableFinal()
             throws Exception {
         ExecuteAgentRunRequest request = request();
@@ -1140,6 +1348,29 @@ class DurableAgentRunExecutionGatewayTest {
                         null,
                         reconciliation.resultRef(),
                         reconciliation.resultHash(),
+                        null,
+                        null));
+    }
+
+    private static AgentStreamEvent withFinalBinding(
+            AgentStreamEvent event, String resultRef, String resultHash) {
+        return new AgentStreamEvent(
+                event.schemaVersion(),
+                event.runId(),
+                event.attemptId(),
+                event.sequenceNo(),
+                event.eventType(),
+                event.audience(),
+                event.occurredAt(),
+                new AgentStreamEvent.Payload(
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        resultRef,
+                        resultHash,
                         null,
                         null));
     }

@@ -10,8 +10,9 @@ import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
 import com.example.dispute.workflow.contract.v1.ContractTypes.StreamEventType;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
-import java.util.Set;
 import java.time.Instant;
+import java.util.Map;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 
 class AgentNdjsonStreamClientV2Test {
@@ -81,6 +82,83 @@ class AgentNdjsonStreamClientV2Test {
                         "{\"node\":\"evidence_turn\",\"field\":\"room_utterance\",\"delta\":\"ok\",\"raw_response\":{}}")))
                 .isInstanceOf(AgentStreamProtocolException.class)
                 .hasMessageContaining("unknown fields");
+    }
+
+    @Test
+    void enforcesVisibleFieldsPerProducingNode() {
+        var state = new AgentNdjsonStreamClient.V2ProtocolState(
+                "run-1",
+                "attempt-1",
+                Audience.USER,
+                Map.of(
+                        "public_node", Set.of("answer"),
+                        "private_node", Set.of("summary")));
+        parse(state, event(0, "attempt_started", "{\"node\":\"public_node\"}"));
+
+        assertThatThrownBy(() -> parse(
+                        state,
+                        event(
+                                1,
+                                "visible_delta",
+                                "{\"node\":\"private_node\",\"field\":\"answer\","
+                                        + "\"delta\":\"must-not-cross-node-policy\"}")))
+                .isInstanceOf(AgentStreamProtocolException.class)
+                .hasMessageContaining("non-public field");
+    }
+
+    @Test
+    void requiresContiguousSequencesAndATerminalAtEndOfStream() {
+        var gap = new AgentNdjsonStreamClient.V2ProtocolState(
+                "run-1", "attempt-1", Audience.USER, Map.of());
+        parse(gap, event(0, "attempt_started", "{\"node\":\"start\"}"));
+        assertThatThrownBy(() -> parse(gap, event(2, "usage", usage())))
+                .isInstanceOf(AgentStreamProtocolException.class)
+                .hasMessageContaining("sequence");
+
+        var incomplete = new AgentNdjsonStreamClient.V2ProtocolState(
+                "run-1", "attempt-1", Audience.USER, Map.of());
+        parse(incomplete, event(0, "attempt_started", "{\"node\":\"start\"}"));
+        assertThatThrownBy(incomplete::assertComplete)
+                .isInstanceOf(AgentStreamProtocolException.class)
+                .hasMessageContaining("terminal");
+
+        var complete = new AgentNdjsonStreamClient.V2ProtocolState(
+                "run-1", "attempt-1", Audience.USER, Map.of());
+        parse(complete, event(0, "attempt_started", "{\"node\":\"start\"}"));
+        parse(
+                complete,
+                event(
+                        1,
+                        "final",
+                        "{\"final_result_ref\":\"urn:result:1\","
+                                + "\"final_result_hash\":\""
+                                + "a".repeat(64)
+                                + "\"}"));
+        complete.assertComplete();
+    }
+
+    @Test
+    void rejectsNegativeSequencesAndFractionalUsage() {
+        var negative = new AgentNdjsonStreamClient.V2ProtocolState(
+                "run-1", "attempt-1", Audience.USER, Map.of());
+        assertThatThrownBy(() -> parse(
+                        negative,
+                        event(-1, "attempt_started", "{\"node\":\"start\"}")))
+                .isInstanceOf(AgentStreamProtocolException.class)
+                .hasMessageContaining("sequence");
+
+        var fractional = new AgentNdjsonStreamClient.V2ProtocolState(
+                "run-1", "attempt-1", Audience.USER, Map.of());
+        parse(fractional, event(0, "attempt_started", "{\"node\":\"start\"}"));
+        assertThatThrownBy(() -> parse(
+                        fractional,
+                        event(
+                                1,
+                                "usage",
+                                "{\"usage\":{\"input_tokens\":1.5,"
+                                        + "\"output_tokens\":2,\"total_tokens\":3}}")))
+                .isInstanceOf(AgentStreamProtocolException.class)
+                .hasMessageContaining("usage");
     }
 
     @Test
@@ -171,6 +249,23 @@ class AgentNdjsonStreamClientV2Test {
                                                         + "\",\"final_result_hash\":\""
                                                         + "a".repeat(64)
                                                         + "\"}")))
+                .isInstanceOf(AgentStreamProtocolException.class)
+                .hasMessageContaining("reference");
+
+        var malformedReference = new AgentNdjsonStreamClient.V2ProtocolState(
+                "run-1", "attempt-1", Audience.USER, Set.of("room_utterance"));
+        parse(
+                malformedReference,
+                event(0, "attempt_started", "{\"node\":\"evidence_turn\"}"));
+        assertThatThrownBy(() -> parse(
+                        malformedReference,
+                        event(
+                                1,
+                                "final",
+                                "{\"final_result_ref\":\"urn:\","
+                                        + "\"final_result_hash\":\""
+                                        + "a".repeat(64)
+                                        + "\"}")))
                 .isInstanceOf(AgentStreamProtocolException.class)
                 .hasMessageContaining("reference");
     }

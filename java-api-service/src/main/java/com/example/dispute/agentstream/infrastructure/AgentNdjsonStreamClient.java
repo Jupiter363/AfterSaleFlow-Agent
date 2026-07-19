@@ -31,6 +31,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Set;
 import java.util.function.Consumer;
 import org.springframework.stereotype.Component;
@@ -262,6 +263,9 @@ public class AgentNdjsonStreamClient implements AgentStreamClient {
             throw new AgentStreamProtocolException("agent stream v2 sequence is invalid");
         }
         long sequence = node.path("sequence_no").asLong(-1);
+        if (sequence < 0) {
+            throw new AgentStreamProtocolException("agent stream v2 sequence is invalid");
+        }
         StreamEventType eventType;
         Audience audience;
         Instant occurredAt;
@@ -420,9 +424,9 @@ public class AgentNdjsonStreamClient implements AgentStreamClient {
         switch (eventType) {
             case ATTEMPT_STARTED -> requiredV2Identifier(payload, "node");
             case VISIBLE_DELTA -> {
-                requiredV2Identifier(payload, "node");
+                String node = requiredV2Identifier(payload, "node");
                 String field = requiredV2Identifier(payload, "field");
-                if (!state.visibleFieldPaths.contains(field)) {
+                if (!state.allowsVisibleField(node, field)) {
                     throw new AgentStreamProtocolException(
                             "agent stream v2 attempted to expose a non-public field");
                 }
@@ -440,9 +444,9 @@ public class AgentNdjsonStreamClient implements AgentStreamClient {
                         Set.of("input_tokens", "output_tokens", "total_tokens"),
                         "v2 usage");
                 if (!usage.isObject()
-                        || !usage.path("input_tokens").canConvertToLong()
-                        || !usage.path("output_tokens").canConvertToLong()
-                        || !usage.path("total_tokens").canConvertToLong()
+                        || !usage.path("input_tokens").isIntegralNumber()
+                        || !usage.path("output_tokens").isIntegralNumber()
+                        || !usage.path("total_tokens").isIntegralNumber()
                         || usage.path("input_tokens").asLong() < 0
                         || usage.path("output_tokens").asLong() < 0
                         || usage.path("total_tokens").asLong() < 0) {
@@ -461,10 +465,7 @@ public class AgentNdjsonStreamClient implements AgentStreamClient {
             case FINAL -> {
                 String reference = requiredV2Text(payload, "final_result_ref");
                 String hash = requiredV2Text(payload, "final_result_hash");
-                if (!(reference.startsWith("s3:")
-                                || reference.startsWith("minio:")
-                                || reference.startsWith("urn:"))
-                        || reference.length() > 1024
+                if (!validV2ResultReference(reference)
                         || !hash.matches("[0-9a-f]{64}")) {
                     throw new AgentStreamProtocolException("agent stream v2 final reference is invalid");
                 }
@@ -798,7 +799,8 @@ public class AgentNdjsonStreamClient implements AgentStreamClient {
         private final String runId;
         private final String attemptId;
         private final Audience audience;
-        private final Set<String> visibleFieldPaths;
+        private final Set<String> legacyVisibleFieldPaths;
+        private final Map<String, Set<String>> visibleFieldsByNode;
         private long lastSequence = -1;
         private int visibleCharacters;
         private boolean terminal;
@@ -811,14 +813,37 @@ public class AgentNdjsonStreamClient implements AgentStreamClient {
             this.runId = requireV2Identifier(runId, "run_id");
             this.attemptId = requireV2Identifier(attemptId, "attempt_id");
             this.audience = java.util.Objects.requireNonNull(audience);
-            this.visibleFieldPaths = Set.copyOf(
+            this.legacyVisibleFieldPaths = Set.copyOf(
                     java.util.Objects.requireNonNull(visibleFieldPaths, "visibleFieldPaths"));
-            this.visibleFieldPaths.forEach(
+            this.legacyVisibleFieldPaths.forEach(
                     field -> requireV2Identifier(field, "visible field"));
+            this.visibleFieldsByNode = null;
+        }
+
+        public V2ProtocolState(
+                String runId,
+                String attemptId,
+                Audience audience,
+                Map<String, Set<String>> visibleFieldsByNode) {
+            this.runId = requireV2Identifier(runId, "run_id");
+            this.attemptId = requireV2Identifier(attemptId, "attempt_id");
+            this.audience = java.util.Objects.requireNonNull(audience);
+            java.util.Objects.requireNonNull(visibleFieldsByNode, "visibleFieldsByNode");
+            this.visibleFieldsByNode = visibleFieldsByNode.entrySet().stream()
+                    .collect(java.util.stream.Collectors.toUnmodifiableMap(
+                            entry -> requireV2Identifier(entry.getKey(), "visible node"),
+                            entry -> Set.copyOf(java.util.Objects.requireNonNull(
+                                            entry.getValue(), "visible fields"))
+                                    .stream()
+                                    .map(field -> requireV2Identifier(field, "visible field"))
+                                    .collect(java.util.stream.Collectors.toUnmodifiableSet())));
+            this.legacyVisibleFieldPaths = null;
         }
 
         private void accept(long sequence, StreamEventType eventType) {
-            if (terminal || sequence <= lastSequence) {
+            if (terminal
+                    || lastSequence == Long.MAX_VALUE
+                    || sequence != lastSequence + 1) {
                 throw new AgentStreamProtocolException(
                         "agent stream v2 sequence or terminal state is invalid");
             }
@@ -834,6 +859,36 @@ public class AgentNdjsonStreamClient implements AgentStreamClient {
             terminal = eventType == StreamEventType.FINAL
                     || eventType == StreamEventType.ERROR
                     || eventType == StreamEventType.ATTEMPT_ABORTED;
+        }
+
+        public void assertComplete() {
+            if (lastSequence < 0 || !terminal) {
+                throw new AgentStreamProtocolException(
+                        "agent stream v2 ended without a terminal event");
+            }
+        }
+
+        private boolean allowsVisibleField(String node, String field) {
+            if (visibleFieldsByNode == null) {
+                return legacyVisibleFieldPaths.contains(field);
+            }
+            return visibleFieldsByNode.getOrDefault(node, Set.of()).contains(field);
+        }
+    }
+
+    private static boolean validV2ResultReference(String value) {
+        if (value.length() > 1024) {
+            return false;
+        }
+        try {
+            URI reference = URI.create(value);
+            String scheme = reference.getScheme();
+            return reference.isAbsolute()
+                    && Set.of("s3", "minio", "urn").contains(scheme)
+                    && reference.getRawSchemeSpecificPart() != null
+                    && !reference.getRawSchemeSpecificPart().isBlank();
+        } catch (IllegalArgumentException exception) {
+            return false;
         }
     }
 }

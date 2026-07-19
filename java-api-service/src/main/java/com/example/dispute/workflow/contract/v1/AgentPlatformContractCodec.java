@@ -11,7 +11,10 @@ import com.networknt.schema.JsonSchema;
 import com.networknt.schema.JsonSchemaFactory;
 import com.networknt.schema.SpecVersion;
 import com.networknt.schema.ValidationMessage;
+import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.io.InputStream;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.Map;
@@ -19,6 +22,8 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 public final class AgentPlatformContractCodec {
+
+    private static final String CLASSPATH_ROOT = "contracts/agent-platform/v1/";
 
     private static final Map<String, Class<?>> CONTRACT_TYPES =
             Map.of(
@@ -35,14 +40,32 @@ public final class AgentPlatformContractCodec {
     private final Map<String, JsonSchema> validators;
     private final Map<String, Integer> limits;
 
+    /** Loads the immutable contract pack embedded in the application artifact. */
+    public AgentPlatformContractCodec() {
+        this(fileName -> {
+            InputStream resource = AgentPlatformContractCodec.class
+                    .getClassLoader()
+                    .getResourceAsStream(CLASSPATH_ROOT + fileName);
+            if (resource == null) {
+                throw new FileNotFoundException(CLASSPATH_ROOT + fileName);
+            }
+            return resource;
+        });
+    }
+
     public AgentPlatformContractCodec(Path contractRoot) {
+        this(fileName -> Files.newInputStream(
+                contractRoot.toAbsolutePath().normalize().resolve(fileName)));
+    }
+
+    private AgentPlatformContractCodec(ContractResource contracts) {
         this.mapper = JsonMapper.builder().findAndAddModules().build();
         this.mapper.setSerializationInclusion(JsonInclude.Include.NON_NULL);
         this.mapper.enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
         this.mapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
         this.validators = new HashMap<>();
         this.limits = new HashMap<>();
-        loadContracts(contractRoot.toAbsolutePath().normalize());
+        loadContracts(contracts);
     }
 
     public <T> T decode(String schemaFile, JsonNode instance, Class<T> type) {
@@ -70,13 +93,11 @@ public final class AgentPlatformContractCodec {
         return instance;
     }
 
-    private void loadContracts(Path contractRoot) {
+    private void loadContracts(ContractResource contracts) {
         JsonSchemaFactory factory =
                 JsonSchemaFactory.getInstance(SpecVersion.VersionFlag.V202012);
-        try {
-            JsonNode matrix =
-                    mapper.readTree(
-                            contractRoot.resolve("compatibility-matrix.yaml").toFile());
+        try (InputStream matrixResource = contracts.open("compatibility-matrix.yaml")) {
+            JsonNode matrix = mapper.readTree(matrixResource);
             JsonNode rows = matrix.required("contracts");
             if (!rows.isArray()) {
                 throw new IllegalArgumentException(
@@ -93,8 +114,10 @@ public final class AgentPlatformContractCodec {
                     throw new IllegalArgumentException(
                             "invalid max_serialized_bytes for " + schemaFile);
                 }
-                JsonNode schemaNode = mapper.readTree(contractRoot.resolve(schemaFile).toFile());
-                validators.put(schemaFile, factory.getSchema(schemaNode));
+                try (InputStream schemaResource = contracts.open(schemaFile)) {
+                    JsonNode schemaNode = mapper.readTree(schemaResource);
+                    validators.put(schemaFile, factory.getSchema(schemaNode));
+                }
                 limits.put(schemaFile, limit);
             }
         } catch (IOException exception) {
@@ -134,5 +157,10 @@ public final class AgentPlatformContractCodec {
             throw new IllegalArgumentException("unknown contract schema: " + schemaFile);
         }
         return type;
+    }
+
+    @FunctionalInterface
+    private interface ContractResource {
+        InputStream open(String fileName) throws IOException;
     }
 }

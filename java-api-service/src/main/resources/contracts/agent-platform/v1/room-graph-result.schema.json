@@ -1,0 +1,170 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.after-sale-flow.example/agent-platform/v1/room-graph-result.schema.json",
+  "title": "RoomGraphResult v1",
+  "description": "Hash-bound graph proposal returned to a Java Finalizer.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "command_id",
+    "logical_run_id",
+    "attempt_id",
+    "graph_key",
+    "graph_version",
+    "checkpoint_id",
+    "cognitive_revision",
+    "status",
+    "public_event_proposals",
+    "artifact_operations",
+    "output_hash",
+    "usage",
+    "execution_metadata"
+  ],
+  "properties": {
+    "schema_version": {"type": "string", "const": "room-graph-result.v1"},
+    "command_id": {"$ref": "#/$defs/identifier"},
+    "logical_run_id": {"$ref": "#/$defs/identifier"},
+    "attempt_id": {"$ref": "#/$defs/identifier"},
+    "graph_key": {"$ref": "#/$defs/identifier"},
+    "graph_version": {"$ref": "#/$defs/identifier"},
+    "checkpoint_id": {"$ref": "#/$defs/identifier"},
+    "cognitive_revision": {"type": "integer", "minimum": 0},
+    "status": {"type": "string", "enum": ["COMPLETED", "NEEDS_INPUT", "NEEDS_REVIEW", "FAILED"]},
+    "public_event_proposals": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {"$ref": "#/$defs/event_proposal"}
+    },
+    "artifact_operations": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {"$ref": "#/$defs/artifact_operation"}
+    },
+    "needs_input": {"$ref": "#/$defs/needs_input"},
+    "needs_review": {"$ref": "#/$defs/needs_review"},
+    "error": {"$ref": "#/$defs/error"},
+    "output_hash": {"$ref": "#/$defs/sha256"},
+    "usage": {"$ref": "#/$defs/usage"},
+    "execution_metadata": {"$ref": "#/$defs/execution_metadata"}
+  },
+  "oneOf": [
+    {
+      "properties": {"status": {"const": "COMPLETED"}},
+      "not": {"anyOf": [{"required": ["needs_input"]}, {"required": ["needs_review"]}, {"required": ["error"]}]}
+    },
+    {
+      "required": ["needs_input"],
+      "properties": {"status": {"const": "NEEDS_INPUT"}},
+      "not": {"anyOf": [{"required": ["needs_review"]}, {"required": ["error"]}]}
+    },
+    {
+      "required": ["needs_review"],
+      "properties": {"status": {"const": "NEEDS_REVIEW"}},
+      "not": {"anyOf": [{"required": ["needs_input"]}, {"required": ["error"]}]}
+    },
+    {
+      "required": ["error"],
+      "properties": {"status": {"const": "FAILED"}},
+      "not": {"anyOf": [{"required": ["needs_input"]}, {"required": ["needs_review"]}]}
+    }
+  ],
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "artifact_pointer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_id", "schema_version", "uri", "sha256"],
+      "properties": {
+        "artifact_id": {"$ref": "#/$defs/identifier"},
+        "schema_version": {"$ref": "#/$defs/identifier"},
+        "uri": {"type": "string", "format": "uri", "pattern": "^(s3|minio|urn):", "maxLength": 1024},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "event_proposal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["event_type", "audience", "payload_ref", "payload_hash"],
+      "properties": {
+        "event_type": {"$ref": "#/$defs/identifier"},
+        "audience": {
+          "type": "string",
+          "enum": ["USER", "MERCHANT", "PLATFORM_REVIEWER", "SYSTEM"]
+        },
+        "payload_ref": {"type": "string", "format": "uri", "pattern": "^(s3|minio|urn):", "maxLength": 1024},
+        "payload_hash": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "artifact_operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation", "artifact"],
+      "properties": {
+        "operation": {"type": "string", "enum": ["PROPOSE_CREATE", "PROPOSE_PATCH"]},
+        "artifact": {"$ref": "#/$defs/artifact_pointer"}
+      }
+    },
+    "needs_input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reason_code", "required_actor_scopes"],
+      "properties": {
+        "reason_code": {"$ref": "#/$defs/identifier"},
+        "required_actor_scopes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/identifier"}
+        }
+      }
+    },
+    "needs_review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reason_code", "risk_level"],
+      "properties": {
+        "reason_code": {"$ref": "#/$defs/identifier"},
+        "risk_level": {"type": "string", "enum": ["LOW", "MEDIUM", "HIGH", "CRITICAL"]}
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "retryable"],
+      "properties": {
+        "code": {"$ref": "#/$defs/identifier"},
+        "retryable": {"type": "boolean"}
+      }
+    },
+    "usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["input_tokens", "output_tokens", "total_tokens"],
+      "properties": {
+        "input_tokens": {"type": "integer", "minimum": 0},
+        "output_tokens": {"type": "integer", "minimum": 0},
+        "total_tokens": {"type": "integer", "minimum": 0}
+      }
+    },
+    "execution_metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["prompt_version", "model_profile_id", "schema_version", "policy_version", "guardrail_version"],
+      "properties": {
+        "prompt_version": {"$ref": "#/$defs/identifier"},
+        "model_profile_id": {"$ref": "#/$defs/identifier"},
+        "schema_version": {"$ref": "#/$defs/identifier"},
+        "policy_version": {"$ref": "#/$defs/identifier"},
+        "guardrail_version": {"$ref": "#/$defs/identifier"}
+      }
+    }
+  }
+}

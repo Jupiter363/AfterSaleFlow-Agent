@@ -1,0 +1,103 @@
+{
+  "schema_version": "agent-platform-compatibility-matrix.v1",
+  "authority": "JSON Schema files in this directory",
+  "unknown_required_version": "REJECT",
+  "unknown_fields": "REJECT",
+  "release_order": [
+    "compatible_reader",
+    "additive_storage",
+    "new_writer",
+    "reference_audit",
+    "legacy_cleanup"
+  ],
+  "contracts": [
+    {
+      "schema_file": "case-command-ref.schema.json",
+      "schema_version": "case-command-ref.v1",
+      "max_serialized_bytes": 16384,
+      "current_reader": "ACCEPT",
+      "previous_reader": "NONE_FOR_INITIAL_VERSION",
+      "future_reader": "REJECT",
+      "writer": "CURRENT_ONLY",
+      "additive_optional_fields": "REQUIRES_NEW_SCHEMA_VERSION",
+      "removal_or_rename": "NEW_MAJOR_VERSION_AND_DUAL_READER"
+    },
+    {
+      "schema_file": "room-graph-command.schema.json",
+      "schema_version": "room-graph-command.v1",
+      "max_serialized_bytes": 65536,
+      "current_reader": "ACCEPT",
+      "previous_reader": "NONE_FOR_INITIAL_VERSION",
+      "future_reader": "REJECT",
+      "writer": "CURRENT_ONLY",
+      "additive_optional_fields": "REQUIRES_NEW_SCHEMA_VERSION",
+      "removal_or_rename": "NEW_MAJOR_VERSION_AND_DUAL_READER"
+    },
+    {
+      "schema_file": "room-graph-result.schema.json",
+      "schema_version": "room-graph-result.v1",
+      "max_serialized_bytes": 65536,
+      "current_reader": "ACCEPT",
+      "previous_reader": "NONE_FOR_INITIAL_VERSION",
+      "future_reader": "REJECT",
+      "writer": "CURRENT_ONLY",
+      "additive_optional_fields": "REQUIRES_NEW_SCHEMA_VERSION",
+      "removal_or_rename": "NEW_MAJOR_VERSION_AND_DUAL_READER"
+    },
+    {
+      "schema_file": "graph-reconcile-response.schema.json",
+      "schema_version": "graph-reconcile-response.v1",
+      "max_serialized_bytes": 131072,
+      "current_reader": "ACCEPT",
+      "previous_reader": "NONE_FOR_INITIAL_VERSION",
+      "future_reader": "REJECT",
+      "writer": "CURRENT_ONLY",
+      "additive_optional_fields": "REQUIRES_NEW_SCHEMA_VERSION",
+      "removal_or_rename": "NEW_MAJOR_VERSION_AND_DUAL_READER"
+    },
+    {
+      "schema_file": "artifact-ref.schema.json",
+      "schema_version": "artifact-ref.v1",
+      "max_serialized_bytes": 8192,
+      "current_reader": "ACCEPT",
+      "previous_reader": "NONE_FOR_INITIAL_VERSION",
+      "future_reader": "REJECT",
+      "writer": "CURRENT_ONLY",
+      "additive_optional_fields": "REQUIRES_NEW_SCHEMA_VERSION",
+      "removal_or_rename": "NEW_MAJOR_VERSION_AND_DUAL_READER"
+    },
+    {
+      "schema_file": "process-projection.schema.json",
+      "schema_version": "process-projection.v1",
+      "max_serialized_bytes": 16384,
+      "current_reader": "ACCEPT",
+      "previous_reader": "NONE_FOR_INITIAL_VERSION",
+      "future_reader": "REJECT",
+      "writer": "CURRENT_ONLY",
+      "additive_optional_fields": "REQUIRES_NEW_SCHEMA_VERSION",
+      "removal_or_rename": "NEW_MAJOR_VERSION_AND_DUAL_READER"
+    },
+    {
+      "schema_file": "agent-stream-event.schema.json",
+      "schema_version": "agent-stream.v2",
+      "max_serialized_bytes": 16384,
+      "current_reader": "ACCEPT",
+      "previous_reader": "NONE_FOR_INITIAL_VERSION",
+      "future_reader": "REJECT",
+      "writer": "CURRENT_ONLY",
+      "additive_optional_fields": "REQUIRES_NEW_SCHEMA_VERSION",
+      "removal_or_rename": "NEW_MAJOR_VERSION_AND_DUAL_READER"
+    },
+    {
+      "schema_file": "agent-execution-manifest.schema.json",
+      "schema_version": "agent-execution-manifest.v1",
+      "max_serialized_bytes": 131072,
+      "current_reader": "ACCEPT",
+      "previous_reader": "NONE_FOR_INITIAL_VERSION",
+      "future_reader": "REJECT",
+      "writer": "CURRENT_ONLY",
+      "additive_optional_fields": "REQUIRES_NEW_SCHEMA_VERSION",
+      "removal_or_rename": "NEW_MAJOR_VERSION_AND_DUAL_READER"
+    }
+  ]
+}

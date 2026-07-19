@@ -70,6 +70,10 @@ app:
     start-to-close-timeout: ${APP_AGENT_RUN_V2_START_TO_CLOSE_TIMEOUT:PT10M}
     heartbeat-timeout: ${APP_AGENT_RUN_V2_HEARTBEAT_TIMEOUT:PT15S}
     progress-heartbeat-interval: ${APP_AGENT_RUN_V2_PROGRESS_HEARTBEAT_INTERVAL:PT5S}
+    graph-client:
+      mode: ${APP_AGENT_RUN_V2_GRAPH_CLIENT_MODE:DISABLED}
+      request-timeout: ${APP_AGENT_RUN_V2_GRAPH_CLIENT_REQUEST_TIMEOUT:PT10M}
+      allow-plaintext-transport: ${APP_AGENT_RUN_V2_GRAPH_CLIENT_ALLOW_PLAINTEXT_TRANSPORT:false}
   security:
     tenant-authority:
       surrogate: ${APP_TENANT_SURROGATE:legacy-default}

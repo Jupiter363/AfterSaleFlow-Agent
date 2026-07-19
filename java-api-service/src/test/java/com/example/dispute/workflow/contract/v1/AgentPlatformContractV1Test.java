@@ -9,10 +9,12 @@ import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
+import java.util.TreeSet;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -109,6 +111,30 @@ class AgentPlatformContractV1Test {
                                         RoomGraphCommand.class))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("unknown contract schema");
+    }
+
+    @Test
+    void packagedContractCodecLoadsWithoutAnExternalFilesystemPath() {
+        AgentPlatformContractCodec packaged = new AgentPlatformContractCodec();
+
+        assertThat(packaged).isNotNull();
+    }
+
+    @Test
+    void packagedContractsExactlyMatchTheAuthoritativeContractPack() throws IOException {
+        TreeSet<String> files = new TreeSet<>(TYPES.keySet());
+        files.add("compatibility-matrix.yaml");
+        ClassLoader classLoader = AgentPlatformContractCodec.class.getClassLoader();
+
+        for (String file : files) {
+            try (InputStream packaged = classLoader.getResourceAsStream(
+                    "contracts/agent-platform/v1/" + file)) {
+                assertThat(packaged).as("packaged resource %s", file).isNotNull();
+                assertThat(packaged.readAllBytes())
+                        .as("packaged resource %s", file)
+                        .isEqualTo(Files.readAllBytes(CONTRACT_ROOT.resolve(file)));
+            }
+        }
     }
 
     @Test
