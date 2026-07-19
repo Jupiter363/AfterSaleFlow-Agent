@@ -249,6 +249,7 @@ batches:
       - AgentRunStreamEventServiceTest
       - AgentRunRecoverySchedulerTest
       - AgentRunLifecycleServiceTest
+      - TemporalWorkerConfigurationTest
       - AgentRunV2ApplicationContextTest
       - TemporalAgentRunV2WorkflowLauncherTest
     python_tests:
