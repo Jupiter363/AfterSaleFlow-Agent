@@ -65,7 +65,10 @@ from app.business.api.final_agents import FinalAgentServices
 from app.business.simulated_imports import SimulatedExternalImportWorkflow
 
 # ---- Graph SHADOW 平台 ----
-from app.api.graph_commands import create_graph_commands_router
+from app.api.graph_commands import (
+    create_graph_commands_router,
+    create_graph_reconciliation_router,
+)
 from app.api.graph_lifecycle import (
     GraphRuntimeBindings,
     GraphRuntimeHandle,
@@ -248,6 +251,11 @@ def create_app(
     app.state.graph_runtime = resolved_graph_runtime
     app.include_router(
         create_graph_commands_router(resolved_graph_runtime.endpoint_dependencies())
+    )
+    app.include_router(
+        create_graph_reconciliation_router(
+            resolved_graph_runtime.reconciliation_endpoint_dependencies()
+        )
     )
     app.include_router(create_graph_readiness_router(resolved_graph_runtime))
 

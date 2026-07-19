@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 import socket
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 from uuid import uuid4
 
 from fastapi import APIRouter
@@ -18,8 +18,14 @@ from fastapi.responses import JSONResponse
 from app.api.graph_commands import (
     GraphCommandEndpointDependencies,
     GraphCommandStreamService,
+    GraphReconciliationEndpointDependencies,
     TransportIdentityResolver,
+    TrustedReconciliationThreadIdentityResolver,
     TrustedThreadIdentityResolver,
+)
+from app.api.graph_reconciliation_service import (
+    GatewayBackedGraphReconciliationService,
+    GraphReconciliationService,
 )
 from app.api.graph_stream_service import (
     ExactShadowExecutorRegistry,
@@ -28,7 +34,7 @@ from app.api.graph_stream_service import (
 )
 from app.config import Settings
 from app.contracts.v1.codec import ContractCodec
-from app.contracts.v1.models import AgentStreamEvent, RoomGraphCommand
+from app.contracts.v1.models import AgentStreamEvent, GraphReconcileResponse, RoomGraphCommand
 from app.graph_runtime.checkpoint import FencedPostgresSaver, GraphCheckpointRuntime
 from app.graph_runtime.errors import GraphGatewayDisabledError
 from app.graph_runtime.gateway import GraphCommandGateway, ImmutableInputAuthorizer
@@ -41,9 +47,12 @@ from app.graph_runtime.persistence_models import (
 from app.graph_runtime.readiness import GraphPersistenceReadinessProbe
 from app.security.graph_runtime import GraphSecurityRuntime
 from app.security.invocation_envelope import (
+    InvocationEnvelopeError,
     InvocationEnvelopeVerifier,
+    ReconciliationEnvelopeVerifier,
     TransportIdentity,
     VerifiedInvocation,
+    VerifiedReconciliation,
 )
 from app.security.transport_identity import AsgiMtlsIdentityResolver
 
@@ -100,8 +109,10 @@ class GraphRuntimeReadiness:
 
 
 class GraphRuntimeInstance(Protocol):
-    verifier: InvocationEnvelopeVerifier
+    execution_verifier: InvocationEnvelopeVerifier
+    reconciliation_verifier: ReconciliationEnvelopeVerifier
     stream_service: GraphCommandStreamService
+    reconciliation_service: GraphReconciliationService
 
     @property
     def ready(self) -> bool: ...
@@ -128,16 +139,20 @@ class GraphApplicationRuntime:
         security_runtime: GraphSecurityRuntime,
         gateway: GraphCommandGateway,
         stream_service: GatewayBackedGraphCommandStreamService,
+        reconciliation_service: GatewayBackedGraphReconciliationService,
         admission_gate: GraphStreamAdmissionGate,
-        verifier: InvocationEnvelopeVerifier,
+        execution_verifier: InvocationEnvelopeVerifier,
+        reconciliation_verifier: ReconciliationEnvelopeVerifier,
     ) -> None:
         self._checkpoint_runtime = checkpoint_runtime
         self._persistence_probe = persistence_probe
         self._security_runtime = security_runtime
         self._gateway = gateway
         self.stream_service = stream_service
+        self.reconciliation_service = reconciliation_service
         self._admission_gate = admission_gate
-        self.verifier = verifier
+        self.execution_verifier = execution_verifier
+        self.reconciliation_verifier = reconciliation_verifier
         self._persistence_ready = True
         self._closed = False
         self._close_complete = False
@@ -214,10 +229,16 @@ class GraphApplicationRuntime:
             if executors.registration_count < 1:
                 raise ValueError("SHADOW Graph runtime requires an exact executor registration")
             gate = GraphStreamAdmissionGate()
+            owner_id = _process_owner_id()
             stream_service = GatewayBackedGraphCommandStreamService(
                 gateway=gateway,
                 executors=executors,
-                owner_id=_process_owner_id(),
+                owner_id=owner_id,
+                admission_gate=gate,
+            )
+            reconciliation_service = GatewayBackedGraphReconciliationService(
+                gateway=gateway,
+                owner_id=owner_id,
                 admission_gate=gate,
             )
             runtime = cls(
@@ -226,8 +247,12 @@ class GraphApplicationRuntime:
                 security_runtime=security_runtime,
                 gateway=gateway,
                 stream_service=stream_service,
+                reconciliation_service=reconciliation_service,
                 admission_gate=gate,
-                verifier=InvocationEnvelopeVerifier(
+                execution_verifier=InvocationEnvelopeVerifier(
+                    key_resolver=security_runtime.resolver,
+                ),
+                reconciliation_verifier=ReconciliationEnvelopeVerifier(
                     key_resolver=security_runtime.resolver,
                 ),
             )
@@ -338,8 +363,10 @@ class GraphRuntimeHandle:
             expected_spiffe_id=settings.graph_expected_spiffe_id
         )
         self._runtime: GraphRuntimeInstance | None = None
-        self._verifier = _RuntimeVerifier(self)
+        self._execution_verifier = _RuntimeExecutionVerifier(self)
+        self._reconciliation_verifier = _RuntimeReconciliationVerifier(self)
         self._stream_service = _RuntimeStreamService(self)
+        self._reconciliation_service = _RuntimeReconciliationService(self)
         self._thread_resolver = (
             bindings.thread_identity_resolver
             if bindings is not None
@@ -362,9 +389,25 @@ class GraphRuntimeHandle:
             mode=self._mode.value,
             codec=_contract_codec(),
             transport_identity_resolver=self._transport_identity_resolver,
-            envelope_verifier=self._verifier,
+            envelope_verifier=self._execution_verifier,
             thread_identity_resolver=self._thread_resolver,
             stream_service=self._stream_service,
+            ready=lambda: self.ready,
+        )
+
+    def reconciliation_endpoint_dependencies(
+        self,
+    ) -> GraphReconciliationEndpointDependencies:
+        return GraphReconciliationEndpointDependencies(
+            mode=self._mode.value,
+            codec=_contract_codec(),
+            transport_identity_resolver=self._transport_identity_resolver,
+            envelope_verifier=self._reconciliation_verifier,
+            thread_identity_resolver=cast(
+                TrustedReconciliationThreadIdentityResolver,
+                self._thread_resolver,
+            ),
+            reconciliation_service=self._reconciliation_service,
             ready=lambda: self.ready,
         )
 
@@ -431,7 +474,7 @@ class GraphRuntimeHandle:
         return runtime
 
 
-class _RuntimeVerifier:
+class _RuntimeExecutionVerifier:
     def __init__(self, handle: GraphRuntimeHandle) -> None:
         self._handle = handle
 
@@ -442,11 +485,39 @@ class _RuntimeVerifier:
         command: RoomGraphCommand,
         transport_identity: TransportIdentity,
     ) -> VerifiedInvocation:
-        return self._handle.require_runtime().verifier.verify(
+        verified = self._handle.require_runtime().execution_verifier.verify(
             token=token,
             command=command,
             transport_identity=transport_identity,
         )
+        if not isinstance(verified, VerifiedInvocation):
+            raise InvocationEnvelopeError(
+                "INVOCATION_EXECUTION_CREDENTIAL_TYPE_REJECTED"
+            )
+        return verified
+
+
+class _RuntimeReconciliationVerifier:
+    def __init__(self, handle: GraphRuntimeHandle) -> None:
+        self._handle = handle
+
+    def verify(
+        self,
+        *,
+        token: str,
+        command: RoomGraphCommand,
+        transport_identity: TransportIdentity,
+    ) -> VerifiedReconciliation:
+        verified = self._handle.require_runtime().reconciliation_verifier.verify(
+            token=token,
+            command=command,
+            transport_identity=transport_identity,
+        )
+        if not isinstance(verified, VerifiedReconciliation):
+            raise InvocationEnvelopeError(
+                "INVOCATION_RECONCILIATION_CREDENTIAL_TYPE_REJECTED"
+            )
+        return verified
 
 
 class _RuntimeStreamService:
@@ -467,13 +538,26 @@ class _RuntimeStreamService:
         )
 
 
-class _FailClosedThreadResolver:
-    async def resolve(
+class _RuntimeReconciliationService:
+    def __init__(self, handle: GraphRuntimeHandle) -> None:
+        self._handle = handle
+
+    async def reconcile(
         self,
         *,
         command: RoomGraphCommand,
-        verified_invocation: VerifiedInvocation,
-    ) -> ThreadIdentity:
+        verified_reconciliation: VerifiedReconciliation,
+        expected_thread: ThreadIdentity,
+    ) -> GraphReconcileResponse:
+        return await self._handle.require_runtime().reconciliation_service.reconcile(
+            command=command,
+            verified_reconciliation=verified_reconciliation,
+            expected_thread=expected_thread,
+        )
+
+
+class _FailClosedThreadResolver:
+    async def resolve(self, **kwargs: Any) -> ThreadIdentity:
         raise GraphGatewayDisabledError("GRAPH_TRUSTED_THREAD_RESOLVER_MISSING")
 
 

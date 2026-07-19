@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -24,6 +25,12 @@ from app.api.graph_stream_service import (
 from app.config import Settings
 from app.graph_runtime.persistence_models import GraphGatewayMode
 from app.graph_runtime.registry import VersionBinding
+from app.security.invocation_envelope import (
+    InvocationEnvelopeError,
+    TransportIdentity,
+    VerifiedInvocation,
+    VerifiedReconciliation,
+)
 
 
 BASE_SETTINGS = {
@@ -129,8 +136,10 @@ class _FakeRuntime:
         self._ready = ready
         self._ready_error = ready_error
         self._check_error = check_error
-        self.verifier = cast(Any, object())
+        self.execution_verifier = cast(Any, object())
+        self.reconciliation_verifier = cast(Any, object())
         self.stream_service = cast(Any, object())
+        self.reconciliation_service = cast(Any, object())
 
     @property
     def ready(self) -> bool:
@@ -269,6 +278,7 @@ async def test_disabled_lifespan_never_constructs_graph_dependencies() -> None:
     assert runtime_calls == 0
     assert registry_calls == 0
     assert handle.endpoint_dependencies().mode == "DISABLED"
+    assert handle.reconciliation_endpoint_dependencies().mode == "DISABLED"
 
 
 def test_disabled_readiness_route_is_dependency_free_and_noncacheable() -> None:
@@ -290,6 +300,23 @@ def test_disabled_readiness_route_is_dependency_free_and_noncacheable() -> None:
     assert response.headers["cache-control"] == "no-store, no-transform"
     assert response.headers["pragma"] == "no-cache"
     assert response.headers["x-content-type-options"] == "nosniff"
+
+
+def test_main_registers_execution_reconciliation_and_readiness_routes() -> None:
+    from app.main import create_app
+
+    application = create_app(settings=_settings())
+    with TestClient(application) as client:
+        execution = client.post("/internal/graphs/commands/stream")
+        reconciliation = client.post("/internal/graphs/commands/reconcile")
+        readiness = client.get("/ready/graph")
+
+    assert execution.status_code == 503
+    assert execution.json()["code"] == "GRAPH_GATEWAY_DISABLED"
+    assert reconciliation.status_code == 503
+    assert reconciliation.json()["code"] == "GRAPH_GATEWAY_DISABLED"
+    assert readiness.status_code == 200
+    assert readiness.json()["code"] == "GRAPH_DISABLED"
 
 
 @pytest.mark.asyncio
@@ -318,6 +345,120 @@ async def test_shadow_lifespan_installs_only_a_ready_runtime_and_closes_it() -> 
         assert report.code == "GRAPH_READY"
     assert handle.ready is False
     assert events == ["open", "check", "close"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_handle_exposes_distinct_typed_verifier_and_service_proxies() -> None:
+    events: list[str] = []
+    runtime = _FakeRuntime(events)
+    execution = VerifiedInvocation(
+        claims=cast(Any, object()),
+        key_id="execution-key",
+        request_hash="a" * 64,
+        transport_certificate_sha256="b" * 64,
+    )
+    reconciliation = VerifiedReconciliation(
+        claims=cast(Any, object()),
+        key_id="reconciliation-key",
+        request_hash="a" * 64,
+        transport_certificate_sha256="b" * 64,
+    )
+
+    class StaticVerifier:
+        def __init__(self, result: Any) -> None:
+            self.result = result
+
+        def verify(self, **kwargs: Any) -> Any:
+            return self.result
+
+    async def empty_stream():
+        if False:
+            yield None
+
+    stream = empty_stream()
+    reconciliation_response = object()
+
+    class StreamService:
+        async def open_stream(self, **kwargs: Any) -> Any:
+            return stream
+
+    class ReconciliationService:
+        async def reconcile(self, **kwargs: Any) -> Any:
+            return reconciliation_response
+
+    runtime.execution_verifier = cast(Any, StaticVerifier(execution))
+    runtime.reconciliation_verifier = cast(Any, StaticVerifier(reconciliation))
+    runtime.stream_service = cast(Any, StreamService())
+    runtime.reconciliation_service = cast(Any, ReconciliationService())
+
+    async def factory(settings: Settings, bindings: GraphRuntimeBindings) -> _FakeRuntime:
+        return runtime
+
+    handle = GraphRuntimeHandle(
+        settings=_shadow_settings(),
+        bindings=_bindings(),
+        runtime_factory=factory,
+    )
+    execution_dependencies = handle.endpoint_dependencies()
+    reconciliation_dependencies = handle.reconciliation_endpoint_dependencies()
+    command = cast(Any, object())
+    thread = cast(Any, object())
+    transport = TransportIdentity("java-api-service", True, "c" * 64)
+
+    assert execution_dependencies.envelope_verifier is not (
+        reconciliation_dependencies.envelope_verifier
+    )
+    assert execution_dependencies.stream_service is not (
+        reconciliation_dependencies.reconciliation_service
+    )
+    assert execution_dependencies.thread_identity_resolver is (
+        reconciliation_dependencies.thread_identity_resolver
+    )
+
+    async with handle.lifespan(None):
+        assert execution_dependencies.envelope_verifier.verify(
+            token="execution-token",
+            command=command,
+            transport_identity=transport,
+        ) is execution
+        assert reconciliation_dependencies.envelope_verifier.verify(
+            token="reconciliation-token",
+            command=command,
+            transport_identity=transport,
+        ) is reconciliation
+        assert await execution_dependencies.stream_service.open_stream(
+            command=command,
+            verified_invocation=execution,
+            expected_thread=thread,
+        ) is stream
+        assert await reconciliation_dependencies.reconciliation_service.reconcile(
+            command=command,
+            verified_reconciliation=reconciliation,
+            expected_thread=thread,
+        ) is reconciliation_response
+
+        runtime.execution_verifier = cast(Any, StaticVerifier(reconciliation))
+        runtime.reconciliation_verifier = cast(Any, StaticVerifier(execution))
+        with pytest.raises(
+            InvocationEnvelopeError,
+            match="EXECUTION_CREDENTIAL_TYPE_REJECTED",
+        ):
+            execution_dependencies.envelope_verifier.verify(
+                token="wrong-token",
+                command=command,
+                transport_identity=transport,
+            )
+        with pytest.raises(
+            InvocationEnvelopeError,
+            match="RECONCILIATION_CREDENTIAL_TYPE_REJECTED",
+        ):
+            reconciliation_dependencies.envelope_verifier.verify(
+                token="wrong-token",
+                command=command,
+                transport_identity=transport,
+            )
+
+    await stream.aclose()
 
 
 @pytest.mark.asyncio
@@ -395,11 +536,19 @@ async def test_shadow_application_runtime_rejects_a_missing_executor_factory() -
 
 
 @pytest.mark.asyncio
-async def test_shadow_executor_factory_receives_the_exact_runtime_kernel(
+async def test_shadow_services_share_the_runtime_kernel_owner_and_shutdown_gate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[str] = []
     saver, gateways = _install_open_dependencies(monkeypatch, events)
+    owner_calls = 0
+
+    def process_owner_id() -> str:
+        nonlocal owner_calls
+        owner_calls += 1
+        return "graph-replica:test-owner"
+
+    monkeypatch.setattr(graph_lifecycle, "_process_owner_id", process_owner_id)
 
     def executor_factory(kernel: GraphExecutorKernel) -> ExactShadowExecutorRegistry:
         events.append("executor_factory")
@@ -412,6 +561,11 @@ async def test_shadow_executor_factory_receives_the_exact_runtime_kernel(
         _bindings(executor_registry_factory=executor_factory),
     )
     assert len(gateways) == 1
+    assert owner_calls == 1
+    assert runtime.stream_service._owner_id == "graph-replica:test-owner"
+    assert runtime.reconciliation_service._owner_id == "graph-replica:test-owner"
+    assert runtime.stream_service._gate is runtime.reconciliation_service._gate
+    assert runtime.stream_service._gate is runtime._admission_gate
     assert await runtime.close() is True
     assert events == [
         "checkpoint_open",
@@ -602,9 +756,36 @@ def _application_runtime(
         security_runtime=cast(Any, security or _SecurityRuntime(events)),
         gateway=cast(Any, object()),
         stream_service=cast(Any, object()),
+        reconciliation_service=cast(Any, object()),
         admission_gate=cast(Any, gate or _AdmissionGate(events)),
-        verifier=cast(Any, object()),
+        execution_verifier=cast(Any, object()),
+        reconciliation_verifier=cast(Any, object()),
     )
+
+
+@pytest.mark.asyncio
+async def test_application_close_waits_for_both_shared_admission_tokens() -> None:
+    events: list[str] = []
+    gate = graph_lifecycle.GraphStreamAdmissionGate()
+    await gate.start()
+    stream_token = await gate.enter()
+    reconciliation_token = await gate.enter()
+    runtime = _application_runtime(
+        events=events,
+        gate=cast(Any, gate),
+    )
+
+    close_task = asyncio.create_task(runtime.close())
+    await asyncio.sleep(0)
+    assert close_task.done() is False
+
+    await gate.leave(stream_token)
+    await asyncio.sleep(0)
+    assert close_task.done() is False
+
+    await gate.leave(reconciliation_token)
+    assert await close_task is True
+    assert events == ["security_close", "checkpoint_close"]
 
 
 @pytest.mark.asyncio
