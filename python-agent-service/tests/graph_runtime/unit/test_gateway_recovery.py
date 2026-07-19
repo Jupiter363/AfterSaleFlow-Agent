@@ -7,8 +7,18 @@ from typing import Any
 import pytest
 
 from app.contracts.v1.codec import canonical_sha256
-from app.graph_runtime.errors import GraphRecoveryError, GraphTerminalBindingError
-from app.graph_runtime.lease import LeaseAcquisition, LeaseAcquisitionKind, LeaseRecord
+from app.graph_runtime.errors import (
+    GraphLeaseUnavailableError,
+    GraphRecoveryError,
+    GraphTerminalBindingError,
+)
+from app.graph_runtime.lease import (
+    LeaseAcquisition,
+    LeaseAcquisitionKind,
+    LeaseDisplacement,
+    LeaseInspection,
+    LeaseRecord,
+)
 from app.graph_runtime.ledger import (
     AttemptRecord,
     AttemptStatus,
@@ -95,7 +105,7 @@ def _attempt(provider_calls: int) -> AttemptRecord:
         attempt_no=1,
         owner_id="worker-old",
         fencing_token=1,
-        status=AttemptStatus.FAILED if provider_calls else AttemptStatus.EXECUTING,
+        status=AttemptStatus.EXECUTING,
         provider_call_count=provider_calls,
         error_code=None,
         error_classification=None,
@@ -143,11 +153,15 @@ def _result() -> ResultRecord:
     )
 
 
-def _lease(token: int = 2) -> LeaseRecord:
+def _lease(
+    token: int = 2,
+    *,
+    owner_id: str = "worker-new",
+) -> LeaseRecord:
     return LeaseRecord(
         thread_id=THREAD,
         command_id="command-1",
-        owner_id="worker-new",
+        owner_id=owner_id,
         fencing_token=token,
         lease_expires_at=NOW + timedelta(seconds=30),
         acquired_at=NOW,
@@ -281,6 +295,28 @@ class _InspectionLedger:
             provider_call_count=1,
         )
 
+    async def terminate(self, connection: Any, **kwargs: Any) -> CommandRecord:
+        return replace(
+            _command(CommandStatus.EXECUTING),
+            attempt_count=self.attempt_count,
+            status=CommandStatus.ABORTED,
+            error_code=kwargs["error_code"],
+            error_classification=kwargs["error_classification"],
+        )
+
+    async def finish_attempt(
+        self,
+        connection: Any,
+        attempt: AttemptRecord,
+        **kwargs: Any,
+    ) -> AttemptRecord:
+        return replace(
+            attempt,
+            status=kwargs["status"],
+            error_code=kwargs["error_code"],
+            error_classification=kwargs["error_classification"],
+        )
+
 
 class _RegisteredBudgetLedger:
     def __init__(self, *, deadline_open: bool) -> None:
@@ -327,6 +363,21 @@ async def test_recovery_uses_durable_db_deadline_and_call_count() -> None:
     decision = await coordinator.inspect(object(), binding=_binding())
 
     assert decision.action is RecoveryAction.REQUIRE_NEW_AGENT_ATTEMPT
+
+
+@pytest.mark.asyncio
+async def test_active_execution_lease_requires_retrying_the_same_command() -> None:
+    active = LeaseInspection(
+        lease=_lease(token=1, owner_id="worker-old"),
+        database_now=NOW,
+    )
+    coordinator = PostgresRecoveryCoordinator(
+        ledger=_InspectionLedger(deadline_open=True),  # type: ignore[arg-type]
+        leases=_Leases(inspection=active),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(GraphLeaseUnavailableError):
+        await coordinator.inspect(object(), binding=_binding())
 
 
 @pytest.mark.asyncio
@@ -430,15 +481,54 @@ class _Ledger:
 
 
 class _Leases:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        inspection: LeaseInspection | None = None,
+        displaced_command_id: str = "command-1",
+    ) -> None:
         self.locked = False
+        self.current_locked = False
         self.released = False
+        self.cancelled = False
+        self.inspection = inspection or LeaseInspection(
+            lease=_lease(token=1, owner_id="worker-old"),
+            database_now=NOW + timedelta(seconds=31),
+        )
+        self.displaced_command_id = displaced_command_id
+
+    async def lock_for_recovery(
+        self,
+        connection: Any,
+        **kwargs: Any,
+    ) -> LeaseInspection | None:
+        self.locked = True
+        return self.inspection
+
+    async def cancel(self, connection: Any, **kwargs: Any) -> LeaseRecord:
+        self.cancelled = True
+        return replace(
+            self.inspection.lease,
+            fencing_token=self.inspection.lease.fencing_token + 1,
+            cancelled_at=NOW,
+            cancelled_by_command_id=kwargs["cancellation_command_id"],
+            revision=self.inspection.lease.revision + 1,
+        )
 
     async def acquire(self, connection: Any, **kwargs: Any) -> LeaseAcquisition:
-        return LeaseAcquisition(LeaseAcquisitionKind.TAKEOVER, _lease())
+        return LeaseAcquisition(
+            LeaseAcquisitionKind.TAKEOVER,
+            _lease(),
+            LeaseDisplacement(
+                command_id=self.displaced_command_id,
+                owner_id="worker-old",
+                fencing_token=1,
+            ),
+        )
 
     async def lock_current(self, connection: Any, **kwargs: Any) -> LeaseRecord:
         self.locked = True
+        self.current_locked = True
         return _lease()
 
     async def release(self, connection: Any, **kwargs: Any) -> LeaseRecord:
@@ -481,6 +571,24 @@ async def test_terminal_reconciliation_locks_new_fence_and_uses_old_checkpoint_b
     assert ledger.completed_with_fence == 2
     assert completed.status is CommandStatus.COMPLETED
     assert result.result_hash == RESULT_HASH
+
+
+@pytest.mark.asyncio
+async def test_terminal_reconciliation_cannot_take_over_another_command() -> None:
+    ledger = _Ledger()
+    leases = _Leases(displaced_command_id="command-newer")
+    coordinator = PostgresRecoveryCoordinator(ledger=ledger, leases=leases)  # type: ignore[arg-type]
+
+    with pytest.raises(GraphRecoveryError, match="cannot displace another"):
+        await coordinator.reconcile_terminal(
+            _Connection(_metadata()),
+            binding=_binding(),
+            owner_id="worker-new",
+        )
+
+    assert leases.locked is True
+    assert leases.current_locked is False
+    assert ledger.completed_with_fence is None
 
 
 @pytest.mark.asyncio

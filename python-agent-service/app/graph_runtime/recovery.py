@@ -8,10 +8,15 @@ from enum import StrEnum
 import hmac
 from typing import Any, Final
 
-from app.graph_runtime.errors import GraphRecoveryError, GraphTerminalBindingError
-from app.graph_runtime.lease import PostgresLeaseRepository
+from app.graph_runtime.errors import (
+    GraphLeaseUnavailableError,
+    GraphRecoveryError,
+    GraphTerminalBindingError,
+)
+from app.graph_runtime.lease import LeaseInspection, PostgresLeaseRepository
 from app.graph_runtime.ledger import (
     AttemptRecord,
+    AttemptStatus,
     CommandBinding,
     CommandRecord,
     CommandStatus,
@@ -131,6 +136,10 @@ class PostgresRecoveryCoordinator:
         *,
         binding: CommandBinding,
     ) -> RecoveryDecision:
+        lease = await self._leases.lock_for_recovery(
+            connection,
+            thread_id=binding.thread_id,
+        )
         command = await self._ledger.load(
             connection,
             thread_id=binding.thread_id,
@@ -142,6 +151,14 @@ class PostgresRecoveryCoordinator:
             thread_id=binding.thread_id,
             command_id=binding.command_id,
         )
+        if command.status is CommandStatus.EXECUTING:
+            return await self._inspect_executing(
+                connection,
+                binding=binding,
+                command=command,
+                attempt=attempt,
+                lease=lease,
+            )
         budget = await self._ledger.load_recovery_budget(
             connection,
             thread_id=binding.thread_id,
@@ -189,6 +206,94 @@ class PostgresRecoveryCoordinator:
             retry_allowed=retry_allowed,
         )
 
+    async def _inspect_executing(
+        self,
+        connection: Any,
+        *,
+        binding: CommandBinding,
+        command: CommandRecord,
+        attempt: AttemptRecord | None,
+        lease: LeaseInspection | None,
+    ) -> RecoveryDecision:
+        """Serialize active observation or expiry fencing before recovery decides."""
+
+        if attempt is None:
+            raise GraphRecoveryError("GRAPH_EXECUTING_COMMAND_ATTEMPT_MISSING")
+        if (
+            command.fencing_token is None
+            or attempt.thread_id != binding.thread_id
+            or attempt.command_id != binding.command_id
+            or attempt.fencing_token != command.fencing_token
+            or attempt.status is not AttemptStatus.EXECUTING
+        ):
+            raise GraphRecoveryError("GRAPH_EXECUTING_FENCE_INCONSISTENT")
+
+        current = None if lease is None else lease.lease
+        same_execution = current is not None and (
+            current.thread_id,
+            current.command_id,
+            current.owner_id,
+            current.fencing_token,
+        ) == (
+            binding.thread_id,
+            binding.command_id,
+            attempt.owner_id,
+            command.fencing_token,
+        )
+        if same_execution and lease is not None and lease.active:
+            raise GraphLeaseUnavailableError(
+                "the durable Graph execution lease is still active"
+            )
+        if (
+            current is not None
+            and current.command_id == binding.command_id
+            and lease is not None
+            and lease.active
+            and not same_execution
+        ):
+            raise GraphRecoveryError("GRAPH_ACTIVE_LEASE_BINDING_INCONSISTENT")
+
+        if (
+            same_execution
+            and current is not None
+            and current.released_at is None
+            and current.cancelled_at is None
+        ):
+            await self._leases.cancel(
+                connection,
+                thread_id=binding.thread_id,
+                active_command_id=binding.command_id,
+                expected_fencing_token=command.fencing_token,
+                cancellation_command_id=binding.command_id,
+            )
+
+        aborted = await self._ledger.terminate(
+            connection,
+            binding=binding,
+            status=CommandStatus.ABORTED,
+            error_code="GRAPH_EXECUTION_LEASE_LOST",
+            error_classification="LEASE_LOST",
+        )
+        if aborted.status is not CommandStatus.ABORTED:
+            return decide_recovery(
+                aborted,
+                latest_attempt=attempt,
+                retry_allowed=False,
+            )
+        await self._ledger.finish_attempt(
+            connection,
+            attempt,
+            status=AttemptStatus.LEASE_LOST,
+            error_code="GRAPH_EXECUTION_LEASE_LOST",
+            error_classification="LEASE_LOST",
+        )
+        return RecoveryDecision(
+            RecoveryAction.REQUIRE_NEW_AGENT_ATTEMPT,
+            invoke_model=False,
+            emit_attempt_reset=False,
+            reason_code="GRAPH_EXECUTION_LEASE_LOST",
+        )
+
     async def reconcile_terminal(
         self,
         connection: Any,
@@ -198,6 +303,10 @@ class PostgresRecoveryCoordinator:
     ) -> tuple[CommandRecord, ResultRecord]:
         """Complete a committed terminal checkpoint without another model call."""
 
+        await self._leases.lock_for_recovery(
+            connection,
+            thread_id=binding.thread_id,
+        )
         command = await self._ledger.load(
             connection,
             thread_id=binding.thread_id,
@@ -229,6 +338,13 @@ class PostgresRecoveryCoordinator:
             command_id=binding.command_id,
             owner_id=owner_id,
         )
+        if (
+            acquisition.displaced is not None
+            and acquisition.displaced.command_id != binding.command_id
+        ):
+            raise GraphRecoveryError(
+                "terminal reconciliation cannot displace another Graph command"
+            )
         await self._leases.lock_current(
             connection,
             thread_id=binding.thread_id,

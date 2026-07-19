@@ -46,7 +46,12 @@ from app.graph_runtime.ledger import (
     CommandStatus,
     ResultRecord,
 )
-from app.graph_runtime.lease import LeaseAcquisition, LeaseAcquisitionKind, LeaseRecord
+from app.graph_runtime.lease import (
+    LeaseAcquisition,
+    LeaseAcquisitionKind,
+    LeaseDisplacement,
+    LeaseRecord,
+)
 from app.graph_runtime.persistence_models import GraphFenceContext, GraphGatewayMode
 from app.graph_runtime.registry import RegistryRecord, RegistryState, VersionBinding
 from app.security.invocation_envelope import (
@@ -145,7 +150,11 @@ def _verified(command: RoomGraphCommand) -> VerifiedInvocation:
         "nbf": int(NOW.timestamp()),
         "exp": int((NOW + timedelta(seconds=60)).timestamp()),
         "jti": "jti-1",
-        **invocation_binding_claims(command),
+        **invocation_binding_claims(
+            command,
+            registry_binding_hash="e" * 64,
+            tool_policy_version="tools.none.v1",
+        ),
     }
     return VerifiedInvocation(
         claims=InvocationClaims.model_validate(claims),
@@ -166,7 +175,11 @@ def _verified_reconciliation(command: RoomGraphCommand) -> VerifiedReconciliatio
         "nbf": int(NOW.timestamp()),
         "exp": int((NOW + timedelta(seconds=60)).timestamp()),
         "jti": "reconcile-jti-1",
-        **invocation_binding_claims(command),
+        **invocation_binding_claims(
+            command,
+            registry_binding_hash="e" * 64,
+            tool_policy_version="tools.none.v1",
+        ),
     }
     return VerifiedReconciliation(
         claims=ReconciliationClaims.model_validate(claims),
@@ -986,6 +999,11 @@ class _TakeoverLeases:
                 fencing_token=2,
                 revision=1,
             ),
+            LeaseDisplacement(
+                command_id=self.execution.lease.command_id,
+                owner_id=self.execution.lease.owner_id,
+                fencing_token=self.execution.lease.fencing_token,
+            ),
         )
 
 
@@ -1051,7 +1069,191 @@ async def test_fence_takeover_cannot_reuse_an_existing_public_agent_attempt() ->
         )
 
     assert ledger.begin_called is False
-    assert leases.called is False
+    assert leases.called is True
+    assert "transaction:rollback" in pool.events
+    assert "transaction:commit" not in pool.events
+
+
+class _DisplacedCommandLedger:
+    def __init__(self, admission: GatewayAdmission, old_status: CommandStatus) -> None:
+        self.new_record = admission.record
+        old_binding = replace(admission.binding, command_id="command-old")
+        self.old_record = replace(
+            admission.record,
+            binding=old_binding,
+            status=old_status,
+            attempt_count=1,
+            fencing_token=1,
+        )
+        self.old_attempt = AttemptRecord(
+            attempt_id="attempt-old",
+            thread_id=admission.binding.thread_id,
+            command_id="command-old",
+            attempt_no=1,
+            owner_id="worker-old",
+            fencing_token=1,
+            status=AttemptStatus.EXECUTING,
+            provider_call_count=1,
+            error_code=None,
+            error_classification=None,
+        )
+        self.events: list[str] = []
+
+    async def load(
+        self,
+        connection: Any,
+        *,
+        command_id: str,
+        **kwargs: Any,
+    ) -> CommandRecord:
+        return self.old_record if command_id == "command-old" else self.new_record
+
+    @staticmethod
+    def require_same_binding(actual: CommandBinding, expected: CommandBinding) -> None:
+        assert actual == expected
+
+    async def latest_attempt(
+        self,
+        connection: Any,
+        *,
+        command_id: str,
+        **kwargs: Any,
+    ) -> AttemptRecord | None:
+        return self.old_attempt if command_id == "command-old" else None
+
+    async def finish_attempt(
+        self,
+        connection: Any,
+        attempt: AttemptRecord,
+        **kwargs: Any,
+    ) -> AttemptRecord:
+        self.events.append("old_attempt_lease_lost")
+        assert attempt == self.old_attempt
+        assert kwargs["status"] is AttemptStatus.LEASE_LOST
+        return replace(attempt, status=AttemptStatus.LEASE_LOST)
+
+    async def terminate(self, connection: Any, **kwargs: Any) -> CommandRecord:
+        self.events.append("old_command_aborted")
+        assert kwargs["binding"] == self.old_record.binding
+        assert kwargs["status"] is CommandStatus.ABORTED
+        return replace(self.old_record, status=CommandStatus.ABORTED)
+
+    async def begin_attempt(
+        self,
+        connection: Any,
+        *,
+        binding: CommandBinding,
+        attempt_id: str,
+        owner_id: str,
+        fencing_token: int,
+    ) -> tuple[CommandRecord, AttemptRecord]:
+        self.events.append("new_attempt_started")
+        command = replace(
+            self.new_record,
+            status=CommandStatus.EXECUTING,
+            attempt_count=1,
+            fencing_token=fencing_token,
+        )
+        return command, AttemptRecord(
+            attempt_id=attempt_id,
+            thread_id=binding.thread_id,
+            command_id=binding.command_id,
+            attempt_no=1,
+            owner_id=owner_id,
+            fencing_token=fencing_token,
+            status=AttemptStatus.EXECUTING,
+            provider_call_count=0,
+            error_code=None,
+            error_classification=None,
+        )
+
+
+class _DisplacingLeases:
+    def __init__(self, admission: GatewayAdmission) -> None:
+        self.admission = admission
+
+    async def acquire(self, connection: Any, **kwargs: Any) -> LeaseAcquisition:
+        return LeaseAcquisition(
+            LeaseAcquisitionKind.TAKEOVER,
+            replace(
+                _execution().lease,
+                command_id=self.admission.binding.command_id,
+                owner_id="worker-new",
+                fencing_token=2,
+                revision=1,
+            ),
+            LeaseDisplacement(
+                command_id="command-old",
+                owner_id="worker-old",
+                fencing_token=1,
+            ),
+        )
+
+
+def _registered_admission() -> GatewayAdmission:
+    execution = _execution()
+    return replace(
+        execution.admission,
+        record=replace(
+            execution.admission.record,
+            status=CommandStatus.REGISTERED,
+            attempt_count=0,
+            fencing_token=None,
+        ),
+        action=AdmissionAction.ACQUIRE,
+        created=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_new_command_takeover_resolves_expired_execution_in_same_transaction() -> None:
+    admission = _registered_admission()
+    pool = _Pool()
+    ledger = _DisplacedCommandLedger(admission, CommandStatus.EXECUTING)
+    gateway = GraphCommandGateway(
+        mode=GraphGatewayMode.SHADOW,
+        pool=pool,
+        ledger=ledger,  # type: ignore[arg-type]
+        leases=_DisplacingLeases(admission),  # type: ignore[arg-type]
+        input_authorizer=_InputAuthorizer([]),
+    )
+
+    execution = await gateway.acquire_execution(
+        admission,
+        owner_id="worker-new",
+        attempt_id=admission.command.attempt_id,
+    )
+
+    assert execution.fence.fencing_token == 2
+    assert ledger.events == [
+        "old_attempt_lease_lost",
+        "old_command_aborted",
+        "new_attempt_started",
+    ]
+    assert "transaction:commit" in pool.events
+
+
+@pytest.mark.asyncio
+async def test_new_command_takeover_rolls_back_until_old_terminal_reconciles() -> None:
+    admission = _registered_admission()
+    pool = _Pool()
+    ledger = _DisplacedCommandLedger(admission, CommandStatus.RESULT_CHECKPOINTED)
+    gateway = GraphCommandGateway(
+        mode=GraphGatewayMode.SHADOW,
+        pool=pool,
+        ledger=ledger,  # type: ignore[arg-type]
+        leases=_DisplacingLeases(admission),  # type: ignore[arg-type]
+        input_authorizer=_InputAuthorizer([]),
+    )
+
+    with pytest.raises(GraphNewAgentAttemptRequiredError, match="must reconcile"):
+        await gateway.acquire_execution(
+            admission,
+            owner_id="worker-new",
+            attempt_id=admission.command.attempt_id,
+        )
+
+    assert ledger.events == []
     assert "transaction:rollback" in pool.events
     assert "transaction:commit" not in pool.events
 

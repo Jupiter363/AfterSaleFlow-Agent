@@ -68,9 +68,57 @@ class LeaseRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class LeaseDisplacement:
+    command_id: str
+    owner_id: str
+    fencing_token: int
+
+    def __post_init__(self) -> None:
+        _identifier(self.command_id, "displaced_command_id")
+        _identifier(self.owner_id, "displaced_owner_id")
+        if isinstance(self.fencing_token, bool) or self.fencing_token < 1:
+            raise GraphContractError("displaced_fencing_token must be positive")
+
+
+@dataclass(frozen=True, slots=True)
 class LeaseAcquisition:
     kind: LeaseAcquisitionKind
     lease: LeaseRecord
+    displaced: LeaseDisplacement | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.kind, LeaseAcquisitionKind):
+            raise GraphContractError("lease acquisition kind is invalid")
+        if (self.kind is LeaseAcquisitionKind.TAKEOVER) != (self.displaced is not None):
+            raise GraphContractError("only lease takeover may carry a displacement")
+        if self.displaced is not None and (
+            self.lease.fencing_token != self.displaced.fencing_token + 1
+        ):
+            raise GraphContractError("lease takeover must increment the displaced fence once")
+
+
+@dataclass(frozen=True, slots=True)
+class LeaseInspection:
+    """One lease row locked against the exact database clock used for recovery."""
+
+    lease: LeaseRecord
+    database_now: datetime
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.database_now, datetime)
+            or self.database_now.tzinfo is None
+            or self.database_now.utcoffset() is None
+        ):
+            raise GraphContractError("lease inspection database clock is invalid")
+
+    @property
+    def active(self) -> bool:
+        return (
+            self.lease.released_at is None
+            and self.lease.cancelled_at is None
+            and self.lease.lease_expires_at > self.database_now
+        )
 
 
 LEASE_COLUMNS: Final[str] = """
@@ -92,7 +140,22 @@ returning {LEASE_COLUMNS}
 """
 
 TAKEOVER_SQL: Final[str] = f"""
-with db_clock as materialized (select clock_timestamp() as now)
+with db_clock as materialized (select clock_timestamp() as now),
+displaced as materialized (
+    select lease.thread_id as target_thread_id,
+           lease.command_id as displaced_command_id,
+           lease.owner_id as displaced_owner_id,
+           lease.fencing_token as displaced_fencing_token
+      from agent_graph_lease lease
+     cross join db_clock
+     where lease.thread_id = %s
+       and (
+           lease.lease_expires_at <= db_clock.now
+           or lease.cancelled_at is not null
+           or lease.released_at is not null
+       )
+       for update
+)
 update agent_graph_lease lease
    set command_id = %s,
        owner_id = %s,
@@ -104,14 +167,12 @@ update agent_graph_lease lease
        cancelled_at = null,
        cancelled_by_command_id = null,
        lease_revision = lease.lease_revision + 1
-  from db_clock
- where lease.thread_id = %s
-    and (
-        lease.lease_expires_at <= db_clock.now
-        or lease.cancelled_at is not null
-        or lease.released_at is not null
-    )
-returning {LEASE_COLUMNS}
+  from db_clock, displaced
+ where lease.thread_id = displaced.target_thread_id
+returning {LEASE_COLUMNS},
+          displaced.displaced_command_id,
+          displaced.displaced_owner_id,
+          displaced.displaced_fencing_token
 """
 
 OBSERVE_SQL: Final[str] = f"""
@@ -171,6 +232,15 @@ select {LEASE_COLUMNS}
  for update
 """
 
+LOCK_FOR_RECOVERY_SQL: Final[str] = f"""
+with db_clock as materialized (select clock_timestamp() as now)
+select {LEASE_COLUMNS}, db_clock.now as database_now
+  from agent_graph_lease lease
+ cross join db_clock
+ where lease.thread_id = %s
+ for update of lease
+"""
+
 CANCEL_SQL: Final[str] = f"""
 with db_clock as materialized (select clock_timestamp() as now)
 update agent_graph_lease lease
@@ -212,11 +282,19 @@ class PostgresLeaseRepository:
         row = await (
             await connection.execute(
                 TAKEOVER_SQL,
-                (command_id, owner_id, thread_id),
+                (thread_id, command_id, owner_id),
             )
         ).fetchone()
         if row is not None:
-            return LeaseAcquisition(LeaseAcquisitionKind.TAKEOVER, self._from_row(row))
+            return LeaseAcquisition(
+                LeaseAcquisitionKind.TAKEOVER,
+                self._from_row(row),
+                LeaseDisplacement(
+                    command_id=row["displaced_command_id"],
+                    owner_id=row["displaced_owner_id"],
+                    fencing_token=row["displaced_fencing_token"],
+                ),
+            )
 
         observed = await self.observe(connection, thread_id=thread_id)
         if observed is not None and (
@@ -289,6 +367,29 @@ class PostgresLeaseRepository:
         if row is None:
             raise GraphLeaseLostError()
         return self._from_row(row)
+
+    async def lock_for_recovery(
+        self,
+        connection: Any,
+        *,
+        thread_id: str,
+    ) -> LeaseInspection | None:
+        """Lock the thread lease before recovery locks command and attempt rows."""
+
+        if THREAD_ID_PATTERN.fullmatch(thread_id) is None:
+            raise GraphContractError("thread_id must be an opaque grt.v1 ID")
+        row = await (
+            await connection.execute(LOCK_FOR_RECOVERY_SQL, (thread_id,))
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            return LeaseInspection(
+                lease=self._from_row(row),
+                database_now=row["database_now"],
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise GraphLeaseLostError("persisted recovery lease is invalid") from error
 
     async def cancel(
         self,

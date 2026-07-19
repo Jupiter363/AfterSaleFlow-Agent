@@ -28,6 +28,7 @@ from app.graph_runtime.identity import (
     ThreadLifecycle,
 )
 from app.graph_runtime.lease import (
+    LeaseAcquisition,
     LeaseAcquisitionKind,
     LeaseRecord,
     PostgresLeaseRepository,
@@ -220,6 +221,9 @@ class GraphCommandGateway:
                         checkpoint_schema_version=command.checkpoint_schema_version,
                     )
                     version = registry.binding
+                    self._require_registry_profile_binding(
+                        command, verified_invocation, registry
+                    )
                     binding = CommandBinding.from_command(
                         command,
                         tool_policy_version=version.tool_policy_version,
@@ -288,6 +292,22 @@ class GraphCommandGateway:
             raise GraphContractError("execution attempt differs from the signed command")
         async with self._pool.connection(timeout=self._acquire_timeout_seconds) as connection:
             async with connection.transaction():
+                acquisition = await self._leases.acquire(
+                    connection,
+                    thread_id=admission.binding.thread_id,
+                    command_id=admission.binding.command_id,
+                    owner_id=owner_id,
+                )
+                if acquisition.kind is LeaseAcquisitionKind.IDEMPOTENT:
+                    raise GraphNewAgentAttemptRequiredError(
+                        "an existing lease cannot start the public AgentRun attempt again"
+                    )
+                if acquisition.kind is LeaseAcquisitionKind.TAKEOVER:
+                    await self._resolve_displaced_execution(
+                        connection,
+                        acquisition=acquisition,
+                        next_binding=admission.binding,
+                    )
                 current = await self._ledger.load(
                     connection,
                     thread_id=admission.binding.thread_id,
@@ -302,16 +322,6 @@ class GraphCommandGateway:
                 if current.status is not CommandStatus.REGISTERED or candidate is not None:
                     raise GraphNewAgentAttemptRequiredError(
                         "a public AgentRun attempt can execute its Graph command only once"
-                    )
-                acquisition = await self._leases.acquire(
-                    connection,
-                    thread_id=admission.binding.thread_id,
-                    command_id=admission.binding.command_id,
-                    owner_id=owner_id,
-                )
-                if acquisition.kind is LeaseAcquisitionKind.IDEMPOTENT:
-                    raise GraphNewAgentAttemptRequiredError(
-                        "an existing lease cannot start the public AgentRun attempt again"
                     )
                 current, attempt = await self._ledger.begin_attempt(
                     connection,
@@ -349,6 +359,67 @@ class GraphCommandGateway:
         )
         return execution
 
+    async def _resolve_displaced_execution(
+        self,
+        connection: Any,
+        *,
+        acquisition: LeaseAcquisition,
+        next_binding: CommandBinding,
+    ) -> None:
+        displaced = acquisition.displaced
+        if displaced is None:
+            raise GraphContractError("lease takeover lost its displaced command binding")
+        if displaced.command_id == next_binding.command_id:
+            return
+
+        command = await self._ledger.load(
+            connection,
+            thread_id=next_binding.thread_id,
+            command_id=displaced.command_id,
+        )
+        if command.status is CommandStatus.RESULT_CHECKPOINTED:
+            raise GraphNewAgentAttemptRequiredError(
+                "the displaced terminal command must reconcile before another command"
+            )
+        if command.status in {
+            CommandStatus.COMPLETED,
+            CommandStatus.CANCELLED,
+            CommandStatus.ABORTED,
+        }:
+            return
+        if command.status is CommandStatus.EXECUTING:
+            attempt = await self._ledger.latest_attempt(
+                connection,
+                thread_id=next_binding.thread_id,
+                command_id=displaced.command_id,
+            )
+            if (
+                attempt is None
+                or attempt.status is not AttemptStatus.EXECUTING
+                or attempt.owner_id != displaced.owner_id
+                or attempt.fencing_token != displaced.fencing_token
+                or command.fencing_token != displaced.fencing_token
+            ):
+                raise GraphContractError(
+                    "displaced executing command has no matching active attempt"
+                )
+            await self._ledger.finish_attempt(
+                connection,
+                attempt,
+                status=AttemptStatus.LEASE_LOST,
+                error_code="GRAPH_LEASE_DISPLACED",
+                error_classification="LEASE_EXPIRED_TAKEOVER",
+            )
+        elif command.status is not CommandStatus.REGISTERED:
+            raise GraphContractError("displaced command has an unknown durable status")
+        await self._ledger.terminate(
+            connection,
+            binding=command.binding,
+            status=CommandStatus.ABORTED,
+            error_code="GRAPH_LEASE_DISPLACED",
+            error_classification="LEASE_EXPIRED_TAKEOVER",
+        )
+
     async def reconcile_only(
         self,
         *,
@@ -374,6 +445,9 @@ class GraphCommandGateway:
                         graph_key=command.graph_key,
                         graph_version=command.graph_version,
                         checkpoint_schema_version=command.checkpoint_schema_version,
+                    )
+                    self._require_registry_profile_binding(
+                        command, verified_reconciliation, registry
                     )
                     binding = CommandBinding.from_command(
                         command,
@@ -605,6 +679,8 @@ class GraphCommandGateway:
         expected = invocation_binding_claims(command)
         actual = invocation.claims.model_dump(mode="json")
         for name, value in expected.items():
+            if name == "profile_bindings_hash":
+                continue
             candidate = actual.get(name)
             if isinstance(value, int):
                 matches = type(candidate) is int and candidate == value
@@ -631,6 +707,8 @@ class GraphCommandGateway:
         expected = invocation_binding_claims(command)
         actual = invocation.claims.model_dump(mode="json")
         for name, value in expected.items():
+            if name == "profile_bindings_hash":
+                continue
             candidate = actual.get(name)
             if isinstance(value, int):
                 matches = type(candidate) is int and candidate == value
@@ -645,6 +723,25 @@ class GraphCommandGateway:
             != command.invocation_context.envelope_key_id
         ):
             raise GraphThreadBindingError("verified reconciliation transport binding differs")
+
+    @staticmethod
+    def _require_registry_profile_binding(
+        command: RoomGraphCommand,
+        invocation: VerifiedInvocation | VerifiedReconciliation,
+        registry: RegistryRecord,
+    ) -> None:
+        expected = invocation_binding_claims(
+            command,
+            registry_binding_hash=registry.binding.binding_hash,
+            tool_policy_version=registry.binding.tool_policy_version,
+        )["profile_bindings_hash"]
+        if not hmac.compare_digest(
+            invocation.claims.profile_bindings_hash,
+            str(expected),
+        ):
+            raise GraphThreadBindingError(
+                "verified invocation differs from the exact Graph registry profile"
+            )
 
     @staticmethod
     def _require_command_thread(

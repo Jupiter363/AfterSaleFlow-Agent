@@ -27,8 +27,11 @@ def _row(
     released: bool = False,
     expires_at: datetime | None = None,
     database_now: datetime = NOW,
+    displaced_command_id: str | None = None,
+    displaced_owner_id: str | None = None,
+    displaced_fencing_token: int | None = None,
 ) -> dict[str, Any]:
-    return {
+    row = {
         "thread_id": THREAD,
         "command_id": command_id,
         "owner_id": owner_id,
@@ -42,6 +45,15 @@ def _row(
         "lease_revision": fencing_token - 1,
         "database_now": database_now,
     }
+    if displaced_command_id is not None:
+        row.update(
+            {
+                "displaced_command_id": displaced_command_id,
+                "displaced_owner_id": displaced_owner_id,
+                "displaced_fencing_token": displaced_fencing_token,
+            }
+        )
+    return row
 
 
 class _Cursor:
@@ -83,7 +95,19 @@ async def test_first_lease_uses_database_clock_and_token_one() -> None:
 
 @pytest.mark.asyncio
 async def test_expired_lease_takeover_is_database_cas_and_increments_fence() -> None:
-    connection = _Connection([None, _row(command_id="command-2", owner_id="worker-2", fencing_token=2)])
+    connection = _Connection(
+        [
+            None,
+            _row(
+                command_id="command-2",
+                owner_id="worker-2",
+                fencing_token=2,
+                displaced_command_id="command-1",
+                displaced_owner_id="worker-1",
+                displaced_fencing_token=1,
+            ),
+        ]
+    )
 
     acquisition = await PostgresLeaseRepository().acquire(
         connection,
@@ -94,11 +118,17 @@ async def test_expired_lease_takeover_is_database_cas_and_increments_fence() -> 
 
     assert acquisition.kind is LeaseAcquisitionKind.TAKEOVER
     assert acquisition.lease.fencing_token == 2
+    assert acquisition.displaced is not None
+    assert acquisition.displaced.command_id == "command-1"
+    assert acquisition.displaced.owner_id == "worker-1"
+    assert acquisition.displaced.fencing_token == 1
     takeover_sql = connection.calls[1][0]
+    assert "for update" in takeover_sql
     assert "fencing_token = lease.fencing_token + 1" in takeover_sql
     assert "lease.lease_expires_at <= db_clock.now" in takeover_sql
     assert "lease.cancelled_at is not null" in takeover_sql
     assert "lease.released_at is not null" in takeover_sql
+    assert connection.calls[1][1] == (THREAD, "command-2", "worker-2")
 
 
 @pytest.mark.asyncio
@@ -241,3 +271,48 @@ async def test_fence_lock_is_same_transaction_ready_and_uses_db_expiry() -> None
     assert locked.fencing_token == 1
     assert "for update" in connection.calls[0][0]
     assert "lease_expires_at > clock_timestamp()" in connection.calls[0][0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("row", "active"),
+    [
+        (_row(), True),
+        (
+            _row(
+                expires_at=NOW + timedelta(seconds=1),
+                database_now=NOW + timedelta(seconds=2),
+            ),
+            False,
+        ),
+        (_row(cancelled=True), False),
+        (_row(released=True), False),
+    ],
+)
+async def test_recovery_inspection_locks_even_inactive_lease_at_database_clock(
+    row: dict[str, Any],
+    active: bool,
+) -> None:
+    connection = _Connection([row])
+
+    inspection = await PostgresLeaseRepository().lock_for_recovery(
+        connection,
+        thread_id=THREAD,
+    )
+
+    assert inspection is not None
+    assert inspection.active is active
+    assert inspection.database_now == row["database_now"]
+    assert "for update of lease" in connection.calls[0][0]
+
+
+@pytest.mark.asyncio
+async def test_recovery_inspection_allows_thread_without_a_lease() -> None:
+    connection = _Connection([None])
+
+    inspection = await PostgresLeaseRepository().lock_for_recovery(
+        connection,
+        thread_id=THREAD,
+    )
+
+    assert inspection is None
