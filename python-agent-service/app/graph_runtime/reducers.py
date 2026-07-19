@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Mapping
-from copy import deepcopy
-from typing import TypeVar
+from typing import TypeVar, cast
 
-from app.contracts.v1.codec import canonical_sha256, canonicalize
+from app.contracts.v1.codec import canonicalize
 
 
 T = TypeVar("T")
@@ -34,30 +35,27 @@ def merge_keyed_json(
     *,
     namespace: str = "state",
 ) -> dict[str, T]:
-    """Merge immutable JSON values by key, rejecting conflicting duplicates."""
+    """Merge immutable JSON values by key into one canonical Python representation."""
 
-    merged: dict[str, T] = {}
+    merged: dict[str, tuple[bytes, T]] = {}
     for key, value in (left or {}).items():
         _validate_key(key, namespace)
-        canonicalize(value)
-        merged[key] = deepcopy(value)
+        merged[key] = _normalize_json(value)
     for key, incoming in (right or {}).items():
         _validate_key(key, namespace)
+        incoming_bytes, normalized_incoming = _normalize_json(incoming)
         if key not in merged:
-            canonicalize(incoming)
-            merged[key] = deepcopy(incoming)
+            merged[key] = (incoming_bytes, normalized_incoming)
             continue
-        existing = merged[key]
-        existing_bytes = canonicalize(existing)
-        incoming_bytes = canonicalize(incoming)
+        existing_bytes, _ = merged[key]
         if existing_bytes != incoming_bytes:
             raise KeyedReducerConflict(
                 namespace=namespace,
                 key=key,
-                existing_sha256=canonical_sha256(existing),
-                incoming_sha256=canonical_sha256(incoming),
+                existing_sha256=hashlib.sha256(existing_bytes).hexdigest(),
+                incoming_sha256=hashlib.sha256(incoming_bytes).hexdigest(),
             )
-    return {key: merged[key] for key in sorted(merged)}
+    return {key: merged[key][1] for key in sorted(merged)}
 
 
 def merge_messages(
@@ -100,6 +98,11 @@ def merge_usage_by_invocation(
     left: Mapping[str, T] | None, right: Mapping[str, T] | None
 ) -> dict[str, T]:
     return merge_keyed_json(left, right, namespace="usage_by_invocation")
+
+
+def _normalize_json(value: T) -> tuple[bytes, T]:
+    canonical = canonicalize(value)
+    return canonical, cast(T, json.loads(canonical))
 
 
 def _validate_key(key: object, namespace: str) -> None:
