@@ -63,6 +63,9 @@ springdoc:
     path: /swagger-ui.html
 
 app:
+  graph-jwks:
+    enabled: ${APP_GRAPH_JWKS_ENABLED:false}
+    key-directory: ${APP_GRAPH_JWKS_KEY_DIRECTORY:}
   agent-run-v2:
     enabled: ${APP_AGENT_RUN_V2_ENABLED:false}
     protocol-default: ${APP_AGENT_RUN_V2_PROTOCOL_DEFAULT:V1}
@@ -72,8 +75,31 @@ app:
     progress-heartbeat-interval: ${APP_AGENT_RUN_V2_PROGRESS_HEARTBEAT_INTERVAL:PT5S}
     graph-client:
       mode: ${APP_AGENT_RUN_V2_GRAPH_CLIENT_MODE:DISABLED}
+      base-uri: ${APP_AGENT_RUN_V2_GRAPH_CLIENT_BASE_URI:}
       request-timeout: ${APP_AGENT_RUN_V2_GRAPH_CLIENT_REQUEST_TIMEOUT:PT10M}
       allow-plaintext-transport: ${APP_AGENT_RUN_V2_GRAPH_CLIENT_ALLOW_PLAINTEXT_TRANSPORT:false}
+      signing:
+        key-directory: ${APP_AGENT_RUN_V2_GRAPH_SIGNING_KEY_DIRECTORY:}
+        active-key-id: ${APP_AGENT_RUN_V2_GRAPH_SIGNING_ACTIVE_KEY_ID:}
+      tls:
+        key-store-path: ${APP_AGENT_RUN_V2_GRAPH_TLS_KEY_STORE_PATH:}
+        trust-store-path: ${APP_AGENT_RUN_V2_GRAPH_TLS_TRUST_STORE_PATH:}
+        connect-timeout: ${APP_AGENT_RUN_V2_GRAPH_TLS_CONNECT_TIMEOUT:PT2S}
+      registry:
+        bindings:
+          - graph-key: ${APP_AGENT_RUN_V2_GRAPH_BINDING_GRAPH_KEY:}
+            graph-version: ${APP_AGENT_RUN_V2_GRAPH_BINDING_GRAPH_VERSION:}
+            checkpoint-schema-version: ${APP_AGENT_RUN_V2_GRAPH_BINDING_CHECKPOINT_SCHEMA_VERSION:}
+            agent-profile-id: ${APP_AGENT_RUN_V2_GRAPH_BINDING_AGENT_PROFILE_ID:}
+            prompt-profile-id: ${APP_AGENT_RUN_V2_GRAPH_BINDING_PROMPT_PROFILE_ID:}
+            model-profile-id: ${APP_AGENT_RUN_V2_GRAPH_BINDING_MODEL_PROFILE_ID:}
+            output-schema-version: ${APP_AGENT_RUN_V2_GRAPH_BINDING_OUTPUT_SCHEMA_VERSION:}
+            policy-version: ${APP_AGENT_RUN_V2_GRAPH_BINDING_POLICY_VERSION:}
+            guardrail-version: ${APP_AGENT_RUN_V2_GRAPH_BINDING_GUARDRAIL_VERSION:}
+            audience: ${APP_AGENT_RUN_V2_GRAPH_BINDING_AUDIENCE:SYSTEM}
+            registry-binding-hash: ${APP_AGENT_RUN_V2_GRAPH_BINDING_REGISTRY_HASH:}
+            tool-policy-version: ${APP_AGENT_RUN_V2_GRAPH_BINDING_TOOL_POLICY_VERSION:}
+            visible-fields-by-node: {}
   security:
     tenant-authority:
       surrogate: ${APP_TENANT_SURROGATE:legacy-default}

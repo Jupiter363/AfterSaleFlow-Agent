@@ -7,13 +7,19 @@ import static org.mockito.Mockito.when;
 import com.example.dispute.agentstream.application.AgentRunReconciledFinalStore;
 import com.example.dispute.agentstream.application.AgentRunV2StreamStore;
 import com.example.dispute.workflow.activity.agent.AgentGraphCommandClient;
-import com.example.dispute.workflow.activity.agent.AgentGraphReconciliationClient;
 import com.example.dispute.workflow.activity.agent.AgentRunExecutionGateway;
+import com.example.dispute.workflow.activity.agent.GraphRegistryBindingPolicy;
 import com.example.dispute.workflow.activity.agent.GraphStreamVisibilityPolicy;
 import com.example.dispute.workflow.contract.v1.AgentPlatformContractCodec;
 import com.example.dispute.workflow.infrastructure.agent.GraphCommandHttpTransport;
+import com.example.dispute.workflow.infrastructure.agent.GraphReconciliationHttpTransport;
+import com.example.dispute.workflow.infrastructure.agent.GraphTransportBundle;
+import com.example.dispute.workflow.infrastructure.agent.GraphTransportSecurityProof;
+import com.example.dispute.workflow.infrastructure.agent.LocalGraphTransportFactory;
+import com.example.dispute.workflow.infrastructure.security.GraphEnvelopeSigningKey;
 import com.example.dispute.workflow.infrastructure.security.GraphEnvelopeSigningKeyResolver;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -40,7 +46,7 @@ class GraphCommandClientConfigurationTest {
 
     @Test
     void shadowModeCreatesOnlyTheSyntheticExecutionPathWithAllDependencies() {
-        shadowRunner(GraphCommandHttpTransport.TransportSecurity.MUTUAL_TLS)
+        withTestProfile(shadowRunner(GraphTransportSecurityProof.Mode.LOCAL_PLAINTEXT))
                 .run(context -> {
                     assertThat(context).hasNotFailed();
                     assertThat(context).hasSingleBean(AgentPlatformContractCodec.class);
@@ -53,12 +59,14 @@ class GraphCommandClientConfigurationTest {
     void shadowModeFailsClosedWhenAnyAuthorityDependencyIsMissing() {
         for (Class<?> missing : List.of(
                 GraphEnvelopeSigningKeyResolver.class,
-                GraphCommandHttpTransport.class,
+                GraphEnvelopeSigningKey.class,
+                GraphTransportBundle.class,
                 GraphStreamVisibilityPolicy.class,
-                AgentGraphReconciliationClient.class,
+                GraphRegistryBindingPolicy.class,
                 AgentRunV2StreamStore.class,
                 AgentRunReconciledFinalStore.class)) {
-            shadowRunner(GraphCommandHttpTransport.TransportSecurity.MUTUAL_TLS, missing)
+            withTestProfile(shadowRunner(
+                            GraphTransportSecurityProof.Mode.LOCAL_PLAINTEXT, missing))
                     .run(context -> {
                         assertThat(context).as("missing %s", missing.getSimpleName()).hasFailed();
                         assertThat(context.getStartupFailure())
@@ -70,7 +78,7 @@ class GraphCommandClientConfigurationTest {
 
     @Test
     void httpsShadowRejectsAnUnverifiedTransport() {
-        shadowRunner(GraphCommandHttpTransport.TransportSecurity.UNVERIFIED)
+        shadowRunner(GraphTransportSecurityProof.Mode.UNVERIFIED)
                 .run(context -> {
                     assertThat(context).hasFailed();
                     assertThat(context.getStartupFailure())
@@ -80,9 +88,9 @@ class GraphCommandClientConfigurationTest {
     }
 
     @Test
-    void plaintextIsRestrictedToAnExplicitLocalOrTestProfile() {
+    void factoryIssuedLocalBundleRequiresAnExplicitLocalOrTestProfile() {
         ApplicationContextRunner plaintext = shadowRunner(
-                        GraphCommandHttpTransport.TransportSecurity.LOCAL_PLAINTEXT)
+                GraphTransportSecurityProof.Mode.LOCAL_PLAINTEXT)
                 .withPropertyValues(
                         "app.agent-run-v2.graph-client.base-uri=http://127.0.0.1:18000",
                         "app.agent-run-v2.graph-client.allow-plaintext-transport=true");
@@ -93,7 +101,7 @@ class GraphCommandClientConfigurationTest {
                     .rootCause()
                     .hasMessageContaining("local or test profiles");
         });
-        plaintext.withInitializer(context -> context.getEnvironment().setActiveProfiles("test"))
+        withTestProfile(plaintext)
                 .run(context -> {
                     assertThat(context).hasNotFailed();
                     assertThat(context).hasSingleBean(AgentRunExecutionGateway.class);
@@ -102,7 +110,7 @@ class GraphCommandClientConfigurationTest {
 
     @Test
     void shadowGatewayCannotBackTheFormalAgentRunWriter() {
-        shadowRunner(GraphCommandHttpTransport.TransportSecurity.MUTUAL_TLS)
+        withTestProfile(shadowRunner(GraphTransportSecurityProof.Mode.LOCAL_PLAINTEXT))
                 .withPropertyValues(
                         "app.agent-run-v2.enabled=true",
                         "app.agent-run-v2.scheduler-mode=DETECTOR")
@@ -115,31 +123,44 @@ class GraphCommandClientConfigurationTest {
     }
 
     private static ApplicationContextRunner shadowRunner(
-            GraphCommandHttpTransport.TransportSecurity security,
+            GraphTransportSecurityProof.Mode security,
             Class<?>... omitted) {
         Set<Class<?>> missing = Set.of(omitted);
         ApplicationContextRunner runner = new ApplicationContextRunner()
                 .withUserConfiguration(GraphCommandClientConfiguration.class)
-                .withPropertyValues(MODE, HTTPS_ENDPOINT)
+                .withPropertyValues(
+                        MODE,
+                        security == GraphTransportSecurityProof.Mode.LOCAL_PLAINTEXT
+                                ? "app.agent-run-v2.graph-client.base-uri=http://127.0.0.1:18000"
+                                : HTTPS_ENDPOINT,
+                        "app.agent-run-v2.graph-client.allow-plaintext-transport="
+                                + (security
+                                        == GraphTransportSecurityProof.Mode.LOCAL_PLAINTEXT))
                 .withBean(ObjectMapper.class, () -> new ObjectMapper().findAndRegisterModules());
         if (!missing.contains(GraphEnvelopeSigningKeyResolver.class)) {
             runner = runner.withBean(
                     GraphEnvelopeSigningKeyResolver.class,
                     () -> mock(GraphEnvelopeSigningKeyResolver.class));
         }
-        if (!missing.contains(GraphCommandHttpTransport.class)) {
+        if (!missing.contains(GraphEnvelopeSigningKey.class)) {
             runner = runner.withBean(
-                    GraphCommandHttpTransport.class, () -> transport(security));
+                    GraphEnvelopeSigningKey.class,
+                    () -> mock(GraphEnvelopeSigningKey.class));
+        }
+        if (!missing.contains(GraphTransportBundle.class)) {
+            runner = runner.withBean(
+                    GraphTransportBundle.class, () -> transportBundle(security));
         }
         if (!missing.contains(GraphStreamVisibilityPolicy.class)) {
             runner = runner.withBean(
                     GraphStreamVisibilityPolicy.class,
                     () -> ignored -> Map.of("node", Set.of("field")));
         }
-        if (!missing.contains(AgentGraphReconciliationClient.class)) {
+        if (!missing.contains(GraphRegistryBindingPolicy.class)) {
             runner = runner.withBean(
-                    AgentGraphReconciliationClient.class,
-                    () -> (request, cancellationToken) -> null);
+                    GraphRegistryBindingPolicy.class,
+                    () -> ignored -> new GraphRegistryBindingPolicy.ExpectedBinding(
+                            "c".repeat(64), "tools.none.v1"));
         }
         if (!missing.contains(AgentRunV2StreamStore.class)) {
             runner = runner.withBean(
@@ -153,10 +174,23 @@ class GraphCommandClientConfigurationTest {
         return runner;
     }
 
-    private static GraphCommandHttpTransport transport(
-            GraphCommandHttpTransport.TransportSecurity security) {
-        GraphCommandHttpTransport transport = mock(GraphCommandHttpTransport.class);
-        when(transport.transportSecurity()).thenReturn(security);
-        return transport;
+    private static ApplicationContextRunner withTestProfile(ApplicationContextRunner runner) {
+        return runner.withInitializer(context ->
+                context.getEnvironment().setActiveProfiles("test"));
+    }
+
+    private static GraphTransportBundle transportBundle(
+            GraphTransportSecurityProof.Mode security) {
+        if (security == GraphTransportSecurityProof.Mode.LOCAL_PLAINTEXT) {
+            return LocalGraphTransportFactory.create(
+                    LocalGraphTransportFactory.Profile.TEST,
+                    Duration.ofSeconds(1));
+        }
+        GraphTransportBundle bundle = mock(GraphTransportBundle.class);
+        when(bundle.transportProof()).thenReturn(GraphTransportSecurityProof.unverified());
+        when(bundle.commandTransport()).thenReturn(mock(GraphCommandHttpTransport.class));
+        when(bundle.reconciliationTransport())
+                .thenReturn(mock(GraphReconciliationHttpTransport.class));
+        return bundle;
     }
 }

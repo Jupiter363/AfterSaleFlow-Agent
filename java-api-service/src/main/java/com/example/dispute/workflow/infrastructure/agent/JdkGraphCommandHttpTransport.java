@@ -22,25 +22,25 @@ public final class JdkGraphCommandHttpTransport implements GraphCommandHttpTrans
     private static final int READ_BUFFER_BYTES = 8 * 1024;
 
     private final HttpClient httpClient;
-    private final TransportSecurity transportSecurity;
+    private final GraphTransportSecurityProof transportProof;
 
     public JdkGraphCommandHttpTransport(HttpClient httpClient) {
-        this(httpClient, TransportSecurity.UNVERIFIED);
+        this(httpClient, GraphTransportSecurityProof.unverified());
     }
 
-    public JdkGraphCommandHttpTransport(
-            HttpClient httpClient, TransportSecurity transportSecurity) {
+    JdkGraphCommandHttpTransport(
+            HttpClient httpClient, GraphTransportSecurityProof transportProof) {
         this.httpClient = Objects.requireNonNull(httpClient, "httpClient");
-        this.transportSecurity =
-                Objects.requireNonNull(transportSecurity, "transportSecurity");
+        this.transportProof = Objects.requireNonNull(transportProof, "transportProof");
         if (httpClient.followRedirects() != HttpClient.Redirect.NEVER) {
             throw new IllegalArgumentException("Graph command transport must not follow redirects");
         }
+        requireTls13Client(httpClient, transportProof);
     }
 
     @Override
-    public TransportSecurity transportSecurity() {
-        return transportSecurity;
+    public GraphTransportSecurityProof transportProof() {
+        return transportProof;
     }
 
     @Override
@@ -190,6 +190,22 @@ public final class JdkGraphCommandHttpTransport implements GraphCommandHttpTrans
             input.close();
         } catch (IOException ignored) {
             // Cancellation or an earlier transport failure already owns the outcome.
+        }
+    }
+
+    private static void requireTls13Client(
+            HttpClient httpClient, GraphTransportSecurityProof transportProof) {
+        if (transportProof.mode() != GraphTransportSecurityProof.Mode.MUTUAL_TLS) {
+            return;
+        }
+        String[] protocols = httpClient.sslParameters().getProtocols();
+        if (!"TLSv1.3".equals(httpClient.sslContext().getProtocol())
+                || protocols.length != 1
+                || !"TLSv1.3".equals(protocols[0])
+                || !"HTTPS".equals(
+                        httpClient.sslParameters().getEndpointIdentificationAlgorithm())) {
+            throw new IllegalArgumentException(
+                    "Trusted Graph command transport requires HTTPS-verified TLSv1.3");
         }
     }
 }

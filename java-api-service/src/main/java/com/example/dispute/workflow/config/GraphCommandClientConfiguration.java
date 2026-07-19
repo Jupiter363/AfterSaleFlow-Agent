@@ -7,11 +7,17 @@ import com.example.dispute.workflow.activity.agent.AgentGraphReconciliationClien
 import com.example.dispute.workflow.activity.agent.AgentRunExecutionGateway;
 import com.example.dispute.workflow.activity.agent.DurableAgentRunExecutionGateway;
 import com.example.dispute.workflow.activity.agent.GraphCommandEnvelopeSigner;
+import com.example.dispute.workflow.activity.agent.GraphReconciliationEnvelopeSigner;
+import com.example.dispute.workflow.activity.agent.GraphRegistryBindingPolicy;
 import com.example.dispute.workflow.activity.agent.GraphStreamVisibilityPolicy;
 import com.example.dispute.workflow.contract.v1.AgentPlatformContractCodec;
-import com.example.dispute.workflow.infrastructure.agent.GraphCommandHttpTransport;
+import com.example.dispute.workflow.infrastructure.agent.GraphTransportBundle;
+import com.example.dispute.workflow.infrastructure.agent.GraphTransportSecurityProof;
 import com.example.dispute.workflow.infrastructure.agent.HttpAgentGraphCommandClient;
+import com.example.dispute.workflow.infrastructure.agent.HttpAgentGraphReconciliationClient;
 import com.example.dispute.workflow.infrastructure.security.Es256GraphCommandEnvelopeSigner;
+import com.example.dispute.workflow.infrastructure.security.Es256GraphReconciliationEnvelopeSigner;
+import com.example.dispute.workflow.infrastructure.security.GraphEnvelopeSigningKey;
 import com.example.dispute.workflow.infrastructure.security.GraphEnvelopeSigningKeyResolver;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
@@ -47,23 +53,54 @@ public class GraphCommandClientConfiguration {
     }
 
     @Bean
+    GraphReconciliationEnvelopeSigner graphReconciliationEnvelopeSigner(
+            GraphEnvelopeSigningKey activeSigningKey,
+            ObjectMapper objectMapper) {
+        return new Es256GraphReconciliationEnvelopeSigner(
+                activeSigningKey, objectMapper, Clock.systemUTC());
+    }
+
+    @Bean
+    AgentGraphReconciliationClient agentGraphReconciliationClient(
+            GraphTransportBundle transports,
+            GraphReconciliationEnvelopeSigner envelopeSigner,
+            GraphRegistryBindingPolicy registryBindingPolicy,
+            AgentPlatformContractCodec codec,
+            ObjectMapper objectMapper,
+            GraphCommandClientProperties properties,
+            Environment environment) {
+        requireTransportSecurity(transports, properties, environment);
+        return new HttpAgentGraphReconciliationClient(
+                transports.reconciliationTransport(),
+                envelopeSigner,
+                registryBindingPolicy,
+                codec,
+                objectMapper,
+                properties.baseUri(),
+                properties.requestTimeout(),
+                properties.allowPlaintextTransport());
+    }
+
+    @Bean
     AgentGraphCommandClient agentGraphCommandClient(
-            GraphCommandHttpTransport transport,
+            GraphTransportBundle transports,
             GraphCommandEnvelopeSigner envelopeSigner,
             AgentGraphReconciliationClient reconciliationClient,
             GraphStreamVisibilityPolicy visibilityPolicy,
+            GraphRegistryBindingPolicy registryBindingPolicy,
             AgentPlatformContractCodec codec,
             ObjectMapper objectMapper,
             GraphCommandClientProperties properties,
             AgentRunV2Properties agentRunV2Properties,
             Environment environment) {
         requireSyntheticShadow(agentRunV2Properties);
-        requireTransportSecurity(transport, properties, environment);
+        requireTransportSecurity(transports, properties, environment);
         return new HttpAgentGraphCommandClient(
-                transport,
+                transports.commandTransport(),
                 envelopeSigner,
                 reconciliationClient,
                 visibilityPolicy,
+                registryBindingPolicy,
                 codec,
                 objectMapper,
                 properties.baseUri(),
@@ -92,7 +129,7 @@ public class GraphCommandClientConfiguration {
     }
 
     private static void requireTransportSecurity(
-            GraphCommandHttpTransport transport,
+            GraphTransportBundle transports,
             GraphCommandClientProperties properties,
             Environment environment) {
         boolean localOrTest = environment.acceptsProfiles(Profiles.of("local", "test"));
@@ -100,12 +137,18 @@ public class GraphCommandClientConfiguration {
             throw new IllegalStateException(
                     "plaintext Graph transport is restricted to local or test profiles");
         }
+        GraphTransportSecurityProof proof = transports.transportProof();
+        if (proof.mode() == GraphTransportSecurityProof.Mode.LOCAL_PLAINTEXT && !localOrTest) {
+            throw new IllegalStateException(
+                    "local Graph transport proof is restricted to local or test profiles");
+        }
         boolean plaintextEndpoint =
                 "http".equalsIgnoreCase(properties.baseUri().getScheme());
-        GraphCommandHttpTransport.TransportSecurity expected = plaintextEndpoint
-                ? GraphCommandHttpTransport.TransportSecurity.LOCAL_PLAINTEXT
-                : GraphCommandHttpTransport.TransportSecurity.MUTUAL_TLS;
-        if (transport.transportSecurity() != expected) {
+        boolean valid = plaintextEndpoint
+                ? properties.allowPlaintextTransport()
+                        && proof.mode() == GraphTransportSecurityProof.Mode.LOCAL_PLAINTEXT
+                : proof.trustedMutualTls();
+        if (!valid) {
             throw new IllegalStateException(
                     "Graph command transport security does not match the configured endpoint");
         }

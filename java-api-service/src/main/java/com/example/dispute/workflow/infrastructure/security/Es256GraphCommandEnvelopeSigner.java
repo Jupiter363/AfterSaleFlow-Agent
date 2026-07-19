@@ -1,6 +1,7 @@
 package com.example.dispute.workflow.infrastructure.security;
 
 import com.example.dispute.workflow.activity.agent.GraphCommandEnvelopeSigner;
+import com.example.dispute.workflow.activity.agent.GraphRegistryBindingPolicy;
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import com.fasterxml.jackson.annotation.JsonInclude;
@@ -84,8 +85,11 @@ public final class Es256GraphCommandEnvelopeSigner implements GraphCommandEnvelo
     }
 
     @Override
-    public SignedEnvelope sign(RoomGraphCommand command) {
+    public SignedEnvelope sign(
+            RoomGraphCommand command,
+            GraphRegistryBindingPolicy.ExpectedBinding expectedRegistryBinding) {
         Objects.requireNonNull(command, "command");
+        Objects.requireNonNull(expectedRegistryBinding, "expectedRegistryBinding");
         String commandKeyId = identifier(
                 command.invocationContext().envelopeKeyId(),
                 "command envelopeKeyId");
@@ -111,7 +115,13 @@ public final class Es256GraphCommandEnvelopeSigner implements GraphCommandEnvelo
         header.put("alg", "ES256");
         header.put("kid", keyId);
         header.put("typ", "graph-command+jwt");
-        ObjectNode claims = claims(command, commandJson, jti, issuedAt, expiresAt);
+        ObjectNode claims = claims(
+                command,
+                commandJson,
+                expectedRegistryBinding,
+                jti,
+                issuedAt,
+                expiresAt);
 
         String encodedHeader = encodeJson(header);
         String encodedClaims = encodeJson(claims);
@@ -132,6 +142,7 @@ public final class Es256GraphCommandEnvelopeSigner implements GraphCommandEnvelo
     private ObjectNode claims(
             RoomGraphCommand command,
             ObjectNode commandJson,
+            GraphRegistryBindingPolicy.ExpectedBinding expectedRegistryBinding,
             String jti,
             Instant issuedAt,
             Instant expiresAt) {
@@ -150,6 +161,8 @@ public final class Es256GraphCommandEnvelopeSigner implements GraphCommandEnvelo
         profiles.put("output_schema_version", command.invocationContext().outputSchemaVersion());
         profiles.put("policy_version", command.invocationContext().policyVersion());
         profiles.put("guardrail_version", command.invocationContext().guardrailVersion());
+        profiles.put("registry_binding_hash", expectedRegistryBinding.registryBindingHash());
+        profiles.put("tool_policy_version", expectedRegistryBinding.toolPolicyVersion());
 
         ObjectNode claims = mapper.createObjectNode();
         claims.put("iss", "java-api-service");

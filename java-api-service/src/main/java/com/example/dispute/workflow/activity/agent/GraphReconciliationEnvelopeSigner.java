@@ -7,7 +7,9 @@ import java.util.Objects;
 /** Issues one short-lived, result-only delivery credential for an immutable Graph command. */
 public interface GraphReconciliationEnvelopeSigner {
 
-    SignedEnvelope sign(RoomGraphCommand command);
+    SignedEnvelope sign(
+            RoomGraphCommand command,
+            GraphRegistryBindingPolicy.ExpectedBinding expectedRegistryBinding);
 
     record SignedEnvelope(
             String compactJws,
@@ -22,9 +24,9 @@ public interface GraphReconciliationEnvelopeSigner {
             jti = requireText(jti, "jti");
             Objects.requireNonNull(issuedAt, "issuedAt");
             Objects.requireNonNull(expiresAt, "expiresAt");
-            if (compactJws.chars().filter(character -> character == '.').count() != 2
-                    || compactJws.indexOf(' ') >= 0) {
-                throw new IllegalArgumentException("compactJws must be a compact JWS");
+            if (!GraphCommandEnvelopeSigner.SignedEnvelope.isWellFormedCompactJws(compactJws)) {
+                throw new IllegalArgumentException(
+                        "compactJws must be a bounded ES256 compact JWS");
             }
             if (!expiresAt.isAfter(issuedAt)
                     || expiresAt.isAfter(issuedAt.plusSeconds(60))) {

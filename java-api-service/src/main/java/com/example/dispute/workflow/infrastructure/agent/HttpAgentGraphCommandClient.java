@@ -9,6 +9,7 @@ import com.example.dispute.workflow.activity.agent.AgentRunExecutionException;
 import com.example.dispute.workflow.activity.agent.AgentRunExecutionGateway.ExecutionMode;
 import com.example.dispute.workflow.activity.agent.GraphCommandEnvelopeSigner;
 import com.example.dispute.workflow.activity.agent.GraphReconciliationException;
+import com.example.dispute.workflow.activity.agent.GraphRegistryBindingPolicy;
 import com.example.dispute.workflow.activity.agent.GraphStreamVisibilityPolicy;
 import com.example.dispute.workflow.contract.v1.AgentPlatformContractCodec;
 import com.example.dispute.workflow.contract.v1.AgentStreamEvent;
@@ -53,6 +54,7 @@ public final class HttpAgentGraphCommandClient implements AgentGraphCommandClien
     private final GraphCommandEnvelopeSigner envelopeSigner;
     private final AgentGraphReconciliationClient reconciliationClient;
     private final GraphStreamVisibilityPolicy visibilityPolicy;
+    private final GraphRegistryBindingPolicy registryBindingPolicy;
     private final AgentPlatformContractCodec codec;
     private final ObjectMapper mapper;
     private final URI endpoint;
@@ -64,6 +66,7 @@ public final class HttpAgentGraphCommandClient implements AgentGraphCommandClien
             GraphCommandEnvelopeSigner envelopeSigner,
             AgentGraphReconciliationClient reconciliationClient,
             GraphStreamVisibilityPolicy visibilityPolicy,
+            GraphRegistryBindingPolicy registryBindingPolicy,
             AgentPlatformContractCodec codec,
             ObjectMapper objectMapper,
             URI baseUri,
@@ -73,6 +76,7 @@ public final class HttpAgentGraphCommandClient implements AgentGraphCommandClien
                 envelopeSigner,
                 reconciliationClient,
                 visibilityPolicy,
+                registryBindingPolicy,
                 codec,
                 objectMapper,
                 baseUri,
@@ -86,6 +90,7 @@ public final class HttpAgentGraphCommandClient implements AgentGraphCommandClien
             GraphCommandEnvelopeSigner envelopeSigner,
             AgentGraphReconciliationClient reconciliationClient,
             GraphStreamVisibilityPolicy visibilityPolicy,
+            GraphRegistryBindingPolicy registryBindingPolicy,
             AgentPlatformContractCodec codec,
             ObjectMapper objectMapper,
             URI baseUri,
@@ -96,6 +101,7 @@ public final class HttpAgentGraphCommandClient implements AgentGraphCommandClien
                 envelopeSigner,
                 reconciliationClient,
                 visibilityPolicy,
+                registryBindingPolicy,
                 codec,
                 objectMapper,
                 baseUri,
@@ -109,6 +115,7 @@ public final class HttpAgentGraphCommandClient implements AgentGraphCommandClien
             GraphCommandEnvelopeSigner envelopeSigner,
             AgentGraphReconciliationClient reconciliationClient,
             GraphStreamVisibilityPolicy visibilityPolicy,
+            GraphRegistryBindingPolicy registryBindingPolicy,
             AgentPlatformContractCodec codec,
             ObjectMapper objectMapper,
             URI baseUri,
@@ -120,6 +127,8 @@ public final class HttpAgentGraphCommandClient implements AgentGraphCommandClien
         this.reconciliationClient =
                 Objects.requireNonNull(reconciliationClient, "reconciliationClient");
         this.visibilityPolicy = Objects.requireNonNull(visibilityPolicy, "visibilityPolicy");
+        this.registryBindingPolicy =
+                Objects.requireNonNull(registryBindingPolicy, "registryBindingPolicy");
         this.codec = Objects.requireNonNull(codec, "codec");
         this.mapper = Objects.requireNonNull(objectMapper, "objectMapper").copy();
         this.mapper.setSerializationInclusion(JsonInclude.Include.NON_NULL);
@@ -159,15 +168,19 @@ public final class HttpAgentGraphCommandClient implements AgentGraphCommandClien
         RoomGraphCommand command = request.command();
         Duration requestTimeout = requestTimeout(request);
         Map<String, Set<String>> visibleFieldsByNode;
+        GraphRegistryBindingPolicy.ExpectedBinding expectedRegistryBinding;
         byte[] body;
         GraphCommandEnvelopeSigner.SignedEnvelope envelope;
         try {
+            GraphStreamVisibilityPolicy.Binding policyBinding =
+                    GraphStreamVisibilityPolicy.Binding.from(command);
             visibleFieldsByNode = GraphStreamVisibilityPolicy.immutablePolicy(
-                    visibilityPolicy.allowedVisibleFields(
-                            GraphStreamVisibilityPolicy.Binding.from(command)));
+                    visibilityPolicy.allowedVisibleFields(policyBinding));
+            expectedRegistryBinding = GraphRegistryBindingPolicy.requireExpected(
+                    registryBindingPolicy, policyBinding);
             JsonNode commandJson = codec.encode(COMMAND_SCHEMA, command);
             body = mapper.writeValueAsBytes(commandJson);
-            envelope = envelopeSigner.sign(command);
+            envelope = envelopeSigner.sign(command, expectedRegistryBinding);
             requireEnvelope(command, envelope);
         } catch (IllegalArgumentException | IOException | NullPointerException exception) {
             throw protocolFailure(
@@ -312,13 +325,19 @@ public final class HttpAgentGraphCommandClient implements AgentGraphCommandClien
                     "Graph command returned an unsupported terminal",
                     null);
         }
-        return reconcileFinal(request, terminal, session, cancellationToken);
+        return reconcileFinal(
+                request,
+                terminal,
+                session,
+                expectedRegistryBinding,
+                cancellationToken);
     }
 
     private RoomGraphResult reconcileFinal(
             ExecuteAgentRunRequest request,
             AgentStreamEvent terminal,
             StreamSession session,
+            GraphRegistryBindingPolicy.ExpectedBinding expectedRegistryBinding,
             AgentRunCancellationToken cancellationToken) {
         GraphReconcileResponse response;
         try {
@@ -357,7 +376,7 @@ public final class HttpAgentGraphCommandClient implements AgentGraphCommandClien
         }
 
         try {
-            requireFinalReconciliation(request, terminal, response);
+            requireFinalReconciliation(request, terminal, response, expectedRegistryBinding);
             return response.result();
         } catch (IllegalArgumentException | NullPointerException exception) {
             throw protocolFailure(
@@ -372,7 +391,8 @@ public final class HttpAgentGraphCommandClient implements AgentGraphCommandClien
     private void requireFinalReconciliation(
             ExecuteAgentRunRequest request,
             AgentStreamEvent terminal,
-            GraphReconcileResponse response) {
+            GraphReconcileResponse response,
+            GraphRegistryBindingPolicy.ExpectedBinding expectedRegistryBinding) {
         Objects.requireNonNull(response, "reconciliation response");
         RoomGraphCommand command = request.command();
         RoomGraphResult result = response.result();
@@ -398,7 +418,10 @@ public final class HttpAgentGraphCommandClient implements AgentGraphCommandClien
                 && declaredOutputHash.isTextual()
                 && response.resultHash().equals(declaredOutputHash.asText())
                 && SHA256.matcher(response.resultHash()).matches()
-                && SHA256.matcher(response.registryBindingHash()).matches()
+                && response.registryBindingHash().equals(
+                        expectedRegistryBinding.registryBindingHash())
+                && response.toolPolicyVersion().equals(
+                        expectedRegistryBinding.toolPolicyVersion())
                 && command.commandId().equals(result.commandId())
                 && request.logicalRunId().equals(result.logicalRunId())
                 && request.attemptId().equals(result.attemptId())
@@ -614,8 +637,10 @@ public final class HttpAgentGraphCommandClient implements AgentGraphCommandClien
         Objects.requireNonNull(envelope, "signed envelope");
         String keyId = command.invocationContext().envelopeKeyId();
         if (!keyId.equals(envelope.keyId())
-                || !ERROR_CODE.matcher(envelope.keyId()).matches()
-                || !ERROR_CODE.matcher(envelope.jti()).matches()
+                || !GraphCommandEnvelopeSigner.SignedEnvelope.isBoundedIdentifier(
+                        envelope.keyId())
+                || !GraphCommandEnvelopeSigner.SignedEnvelope.isBoundedIdentifier(
+                        envelope.jti())
                 || envelope.jti().equals(command.invocationContext().envelopeNonce())
                 || !GraphCommandEnvelopeSigner.SignedEnvelope.isWellFormedCompactJws(
                         envelope.compactJws())) {

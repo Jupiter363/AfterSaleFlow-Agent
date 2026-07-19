@@ -10,6 +10,7 @@ import com.example.dispute.workflow.activity.agent.AgentRunExecutionException;
 import com.example.dispute.workflow.activity.agent.AgentRunExecutionGateway.ExecutionMode;
 import com.example.dispute.workflow.activity.agent.GraphCommandEnvelopeSigner;
 import com.example.dispute.workflow.activity.agent.GraphReconciliationException;
+import com.example.dispute.workflow.activity.agent.GraphRegistryBindingPolicy;
 import com.example.dispute.workflow.activity.agent.GraphStreamVisibilityPolicy;
 import com.example.dispute.workflow.contract.v1.AgentPlatformContractCodec;
 import com.example.dispute.workflow.contract.v1.AgentStreamEvent;
@@ -99,7 +100,7 @@ class HttpAgentGraphCommandClientTest {
                             StreamEventType.VISIBLE_DELTA);
             assertThat(reconciliations).hasValue(0);
         });
-        GraphCommandEnvelopeSigner signer = command -> {
+        GraphCommandEnvelopeSigner signer = (command, expectedRegistryBinding) -> {
             assertThat(command).isEqualTo(request.command());
             signatures.incrementAndGet();
             return envelope();
@@ -406,7 +407,7 @@ class HttpAgentGraphCommandClientTest {
         AtomicInteger sideEffects = new AtomicInteger();
         FakeTransport transport = new FakeTransport((sent, token, listener) ->
                 sideEffects.incrementAndGet());
-        GraphCommandEnvelopeSigner signer = command -> {
+        GraphCommandEnvelopeSigner signer = (command, expectedRegistryBinding) -> {
             sideEffects.incrementAndGet();
             return envelope();
         };
@@ -459,7 +460,7 @@ class HttpAgentGraphCommandClientTest {
         AtomicInteger sideEffects = new AtomicInteger();
         FakeTransport expiredTransport = new FakeTransport((sent, token, listener) ->
                 sideEffects.incrementAndGet());
-        GraphCommandEnvelopeSigner expiredSigner = command -> {
+        GraphCommandEnvelopeSigner expiredSigner = (command, expectedRegistryBinding) -> {
             sideEffects.incrementAndGet();
             return envelope();
         };
@@ -491,22 +492,31 @@ class HttpAgentGraphCommandClientTest {
     void rejectsSignerBindingDriftAndReconcilesAfterTransportLossPastFinal()
             throws Exception {
         ExecuteAgentRunRequest request = request();
-        GraphCommandEnvelopeSigner wrongKey = command ->
+        GraphCommandEnvelopeSigner wrongKey = (command, expectedRegistryBinding) ->
                 new GraphCommandEnvelopeSigner.SignedEnvelope(
                         TEST_COMPACT_JWS,
                         "another-key",
                         "delivery-jti-001",
                         Instant.parse("2026-07-17T08:00:00Z"),
                         Instant.parse("2026-07-17T08:01:00Z"));
-        GraphCommandEnvelopeSigner reusedNonce = command ->
+        GraphCommandEnvelopeSigner reusedNonce = (command, expectedRegistryBinding) ->
                 new GraphCommandEnvelopeSigner.SignedEnvelope(
                         TEST_COMPACT_JWS,
                         "java-invocation-es256-1",
                         command.invocationContext().envelopeNonce(),
                         Instant.parse("2026-07-17T08:00:00Z"),
                         Instant.parse("2026-07-17T08:01:00Z"));
+        GraphCommandEnvelopeSigner leadingPunctuationJti =
+                (command, expectedRegistryBinding) ->
+                        new GraphCommandEnvelopeSigner.SignedEnvelope(
+                                TEST_COMPACT_JWS,
+                                "java-invocation-es256-1",
+                                "-delivery-jti-001",
+                                Instant.parse("2026-07-17T08:00:00Z"),
+                                Instant.parse("2026-07-17T08:01:00Z"));
         FakeTransport unused = new FakeTransport((sent, token, listener) -> {});
-        for (GraphCommandEnvelopeSigner invalidSigner : List.of(wrongKey, reusedNonce)) {
+        for (GraphCommandEnvelopeSigner invalidSigner :
+                List.of(wrongKey, reusedNonce, leadingPunctuationJti)) {
             AgentRunExecutionException bindingFailure = catchThrowableOfType(
                     AgentRunExecutionException.class,
                     () -> client(unused, invalidSigner, noReconciliation(), visibility())
@@ -621,6 +631,7 @@ class HttpAgentGraphCommandClientTest {
                 signer,
                 reconciliationClient,
                 visibilityPolicy,
+                registryPolicy(),
                 codec,
                 MAPPER,
                 URI.create("https://python-agent.internal/base"),
@@ -630,14 +641,14 @@ class HttpAgentGraphCommandClientTest {
     }
 
     private static GraphCommandEnvelopeSigner signer() {
-        return ignored -> envelope();
+        return (ignored, expectedRegistryBinding) -> envelope();
     }
 
     private static GraphCommandEnvelopeSigner.SignedEnvelope envelope() {
         return new GraphCommandEnvelopeSigner.SignedEnvelope(
                 TEST_COMPACT_JWS,
                 "java-invocation-es256-1",
-                "delivery-jti-001",
+                "delivery:jti-001",
                 Instant.parse("2026-07-17T08:00:00Z"),
                 Instant.parse("2026-07-17T08:01:00Z"));
     }
@@ -650,6 +661,11 @@ class HttpAgentGraphCommandClientTest {
 
     private static GraphStreamVisibilityPolicy visibility() {
         return ignored -> Map.of("intake.reason", Set.of("room_utterance"));
+    }
+
+    private static GraphRegistryBindingPolicy registryPolicy() {
+        return ignored -> new GraphRegistryBindingPolicy.ExpectedBinding(
+                "c".repeat(64), "intake-tools.v1");
     }
 
     private static FakeTransport finalTransport(

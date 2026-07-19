@@ -9,7 +9,9 @@ import java.util.regex.Pattern;
 /** Issues one short-lived execution credential for an immutable Graph command. */
 public interface GraphCommandEnvelopeSigner {
 
-    SignedEnvelope sign(RoomGraphCommand command);
+    SignedEnvelope sign(
+            RoomGraphCommand command,
+            GraphRegistryBindingPolicy.ExpectedBinding expectedRegistryBinding);
 
     record SignedEnvelope(
             String compactJws,
@@ -21,6 +23,8 @@ public interface GraphCommandEnvelopeSigner {
         private static final int MAXIMUM_COMPACT_JWS_CHARACTERS = 8_192;
         private static final Pattern BASE64_URL_SEGMENT =
                 Pattern.compile("[A-Za-z0-9_-]+");
+        private static final Pattern BOUNDED_IDENTIFIER =
+                Pattern.compile("[A-Za-z0-9][A-Za-z0-9._:-]{0,127}");
 
         public SignedEnvelope {
             compactJws = requireText(compactJws, "compactJws");
@@ -66,6 +70,10 @@ public interface GraphCommandEnvelopeSigner {
                 }
             }
             return true;
+        }
+
+        public static boolean isBoundedIdentifier(String value) {
+            return value != null && BOUNDED_IDENTIFIER.matcher(value).matches();
         }
 
         private static String requireText(String value, String field) {

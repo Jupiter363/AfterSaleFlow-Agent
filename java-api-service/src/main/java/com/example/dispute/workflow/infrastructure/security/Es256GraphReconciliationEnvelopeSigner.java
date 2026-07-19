@@ -1,6 +1,7 @@
 package com.example.dispute.workflow.infrastructure.security;
 
 import com.example.dispute.workflow.activity.agent.GraphReconciliationEnvelopeSigner;
+import com.example.dispute.workflow.activity.agent.GraphRegistryBindingPolicy;
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import com.fasterxml.jackson.annotation.JsonInclude;
@@ -67,10 +68,18 @@ public final class Es256GraphReconciliationEnvelopeSigner
     }
 
     @Override
-    public SignedEnvelope sign(RoomGraphCommand command) {
+    public SignedEnvelope sign(
+            RoomGraphCommand command,
+            GraphRegistryBindingPolicy.ExpectedBinding expectedRegistryBinding) {
         Objects.requireNonNull(command, "command");
+        Objects.requireNonNull(expectedRegistryBinding, "expectedRegistryBinding");
         String keyId = identifier(signingKey.keyId(), "keyId");
         String jti = identifier(jtiSupplier.get(), "jti");
+        if (MessageDigest.isEqual(
+                jti.getBytes(StandardCharsets.UTF_8),
+                command.invocationContext().envelopeNonce().getBytes(StandardCharsets.UTF_8))) {
+            throw new IllegalArgumentException("jti must not reuse command envelopeNonce");
+        }
         Instant issuedAt = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.SECONDS);
         Instant expiresAt = issuedAt.plusSeconds(lifetimeSeconds);
 
@@ -80,7 +89,13 @@ public final class Es256GraphReconciliationEnvelopeSigner
         header.put("alg", "ES256");
         header.put("kid", keyId);
         header.put("typ", "graph-reconcile+jwt");
-        ObjectNode claims = claims(command, commandJson, jti, issuedAt, expiresAt);
+        ObjectNode claims = claims(
+                command,
+                commandJson,
+                expectedRegistryBinding,
+                jti,
+                issuedAt,
+                expiresAt);
 
         String encodedHeader = encodeJson(header);
         String encodedClaims = encodeJson(claims);
@@ -100,6 +115,7 @@ public final class Es256GraphReconciliationEnvelopeSigner
     private ObjectNode claims(
             RoomGraphCommand command,
             ObjectNode commandJson,
+            GraphRegistryBindingPolicy.ExpectedBinding expectedRegistryBinding,
             String jti,
             Instant issuedAt,
             Instant expiresAt) {
@@ -117,6 +133,8 @@ public final class Es256GraphReconciliationEnvelopeSigner
         profiles.put("output_schema_version", command.invocationContext().outputSchemaVersion());
         profiles.put("policy_version", command.invocationContext().policyVersion());
         profiles.put("guardrail_version", command.invocationContext().guardrailVersion());
+        profiles.put("registry_binding_hash", expectedRegistryBinding.registryBindingHash());
+        profiles.put("tool_policy_version", expectedRegistryBinding.toolPolicyVersion());
 
         ObjectNode claims = mapper.createObjectNode();
         claims.put("iss", "java-api-service");

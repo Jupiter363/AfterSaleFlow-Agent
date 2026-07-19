@@ -3,6 +3,8 @@ package com.example.dispute.workflow.agentrun;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.example.dispute.workflow.activity.agent.GraphReconciliationEnvelopeSigner;
+import com.example.dispute.workflow.activity.agent.GraphRegistryBindingPolicy;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import com.example.dispute.workflow.infrastructure.security.Es256GraphReconciliationEnvelopeSigner;
 import com.example.dispute.workflow.infrastructure.security.GraphEnvelopeSigningKey;
@@ -37,6 +39,9 @@ class Es256GraphReconciliationEnvelopeSignerTest {
             "valid",
             "room-graph-command-valid.json");
     private static final Instant NOW = Instant.parse("2026-07-17T08:00:00Z");
+    private static final GraphRegistryBindingPolicy.ExpectedBinding REGISTRY_BINDING =
+            new GraphRegistryBindingPolicy.ExpectedBinding(
+                    "c".repeat(64), "tools.none.v1");
     private static KeyPair keyPair;
 
     @BeforeAll
@@ -56,7 +61,7 @@ class Es256GraphReconciliationEnvelopeSignerTest {
                 Duration.ofSeconds(60),
                 () -> "reconciliation-jti-001");
 
-        var envelope = signer.sign(command);
+        var envelope = signer.sign(command, REGISTRY_BINDING);
         String[] segments = envelope.compactJws().split("\\.", -1);
         ObjectNode header = decodeObject(segments[0]);
         ObjectNode claims = decodeObject(segments[1]);
@@ -91,7 +96,7 @@ class Es256GraphReconciliationEnvelopeSignerTest {
         assertThat(claims.path("capabilities_hash").asText())
                 .isEqualTo("80cd39b1d37bf6e8a2807e48af87a3a72c70b34f98812dae17a85386f7e8c31a");
         assertThat(claims.path("profile_bindings_hash").asText())
-                .isEqualTo("cacc32606bb568cc5f714676889c7ad30f9448c6274294b7d477d839c2b2e38e");
+                .isEqualTo("ccccb6cff9387ecad3d5dfe8c4ce086941e7711f17014ddd147889edd49e0340");
         assertThat(envelope.keyId()).isEqualTo("java-reconciliation-es256-2");
         assertThat(envelope.issuedAt()).isEqualTo(NOW);
         assertThat(envelope.expiresAt()).isEqualTo(NOW.plusSeconds(60));
@@ -115,7 +120,7 @@ class Es256GraphReconciliationEnvelopeSignerTest {
                 Duration.ofSeconds(60),
                 () -> "reconciliation-jti-001");
 
-        assertThatThrownBy(() -> signer.sign(command))
+        assertThatThrownBy(() -> signer.sign(command, REGISTRY_BINDING))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("requestHash does not bind");
     }
@@ -130,12 +135,20 @@ class Es256GraphReconciliationEnvelopeSignerTest {
                         () -> "reconciliation-jti-001"))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("1..60");
-        assertThatThrownBy(() -> signer(signingKey("invalid key"), "jti").sign(commandUnchecked()))
+        assertThatThrownBy(() -> signer(signingKey("invalid key"), "jti")
+                        .sign(commandUnchecked(), REGISTRY_BINDING))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("keyId");
-        assertThatThrownBy(() -> signer(signingKey("key-1"), "invalid jti").sign(commandUnchecked()))
+        assertThatThrownBy(() -> signer(signingKey("key-1"), "invalid jti")
+                        .sign(commandUnchecked(), REGISTRY_BINDING))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("jti");
+        assertThatThrownBy(() -> signer(
+                        signingKey("key-1"),
+                        commandUnchecked().invocationContext().envelopeNonce())
+                .sign(commandUnchecked(), REGISTRY_BINDING))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("must not reuse");
 
         GraphEnvelopeSigningKey shortSignature = new GraphEnvelopeSigningKey() {
             @Override
@@ -148,9 +161,26 @@ class Es256GraphReconciliationEnvelopeSignerTest {
                 return new byte[63];
             }
         };
-        assertThatThrownBy(() -> signer(shortSignature, "jti-1").sign(commandUnchecked()))
+        assertThatThrownBy(() -> signer(shortSignature, "jti-1")
+                        .sign(commandUnchecked(), REGISTRY_BINDING))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("64-byte");
+    }
+
+    @Test
+    void signedEnvelopeRejectsNoncanonicalAndOversizedCompactJws() {
+        assertThatThrownBy(() -> new GraphReconciliationEnvelopeSigner.SignedEnvelope(
+                        "a.b.AA", "key-1", "jti-1", NOW, NOW.plusSeconds(60)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("bounded ES256");
+        assertThatThrownBy(() -> new GraphReconciliationEnvelopeSigner.SignedEnvelope(
+                        "a".repeat(8_193) + ".b.c",
+                        "key-1",
+                        "jti-1",
+                        NOW,
+                        NOW.plusSeconds(60)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("bounded ES256");
     }
 
     private static Es256GraphReconciliationEnvelopeSigner signer(

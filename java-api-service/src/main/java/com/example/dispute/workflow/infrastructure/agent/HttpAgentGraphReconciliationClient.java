@@ -2,8 +2,11 @@ package com.example.dispute.workflow.infrastructure.agent;
 
 import com.example.dispute.workflow.activity.agent.AgentGraphReconciliationClient;
 import com.example.dispute.workflow.activity.agent.AgentRunCancellationToken;
+import com.example.dispute.workflow.activity.agent.GraphCommandEnvelopeSigner;
 import com.example.dispute.workflow.activity.agent.GraphReconciliationEnvelopeSigner;
 import com.example.dispute.workflow.activity.agent.GraphReconciliationException;
+import com.example.dispute.workflow.activity.agent.GraphRegistryBindingPolicy;
+import com.example.dispute.workflow.activity.agent.GraphStreamVisibilityPolicy;
 import com.example.dispute.workflow.contract.v1.AgentPlatformContractCodec;
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunRecoveryAction;
@@ -42,6 +45,7 @@ public final class HttpAgentGraphReconciliationClient
 
     private final GraphReconciliationHttpTransport transport;
     private final GraphReconciliationEnvelopeSigner envelopeSigner;
+    private final GraphRegistryBindingPolicy registryBindingPolicy;
     private final AgentPlatformContractCodec codec;
     private final ObjectMapper mapper;
     private final URI endpoint;
@@ -50,16 +54,26 @@ public final class HttpAgentGraphReconciliationClient
     public HttpAgentGraphReconciliationClient(
             GraphReconciliationHttpTransport transport,
             GraphReconciliationEnvelopeSigner envelopeSigner,
+            GraphRegistryBindingPolicy registryBindingPolicy,
             AgentPlatformContractCodec codec,
             ObjectMapper objectMapper,
             URI baseUri,
             Duration timeout) {
-        this(transport, envelopeSigner, codec, objectMapper, baseUri, timeout, false);
+        this(
+                transport,
+                envelopeSigner,
+                registryBindingPolicy,
+                codec,
+                objectMapper,
+                baseUri,
+                timeout,
+                false);
     }
 
     public HttpAgentGraphReconciliationClient(
             GraphReconciliationHttpTransport transport,
             GraphReconciliationEnvelopeSigner envelopeSigner,
+            GraphRegistryBindingPolicy registryBindingPolicy,
             AgentPlatformContractCodec codec,
             ObjectMapper objectMapper,
             URI baseUri,
@@ -67,6 +81,8 @@ public final class HttpAgentGraphReconciliationClient
             boolean allowPlaintextTransport) {
         this.transport = Objects.requireNonNull(transport, "transport");
         this.envelopeSigner = Objects.requireNonNull(envelopeSigner, "envelopeSigner");
+        this.registryBindingPolicy =
+                Objects.requireNonNull(registryBindingPolicy, "registryBindingPolicy");
         this.codec = Objects.requireNonNull(codec, "codec");
         this.mapper = Objects.requireNonNull(objectMapper, "objectMapper").copy();
         this.mapper.setSerializationInclusion(JsonInclude.Include.NON_NULL);
@@ -88,13 +104,18 @@ public final class HttpAgentGraphReconciliationClient
         Objects.requireNonNull(cancellationToken, "cancellationToken")
                 .throwIfCancellationRequested();
         RoomGraphCommand command = request.command();
+        GraphRegistryBindingPolicy.ExpectedBinding expectedRegistryBinding;
         byte[] body;
         GraphReconciliationEnvelopeSigner.SignedEnvelope envelope;
         try {
+            expectedRegistryBinding = GraphRegistryBindingPolicy.requireExpected(
+                    registryBindingPolicy,
+                    GraphStreamVisibilityPolicy.Binding.from(command));
             JsonNode commandJson = codec.encode(COMMAND_SCHEMA, command);
             body = mapper.writeValueAsBytes(commandJson);
-            envelope = envelopeSigner.sign(command);
-        } catch (IllegalArgumentException | IOException exception) {
+            envelope = envelopeSigner.sign(command, expectedRegistryBinding);
+            requireEnvelope(command, envelope);
+        } catch (IllegalArgumentException | IOException | NullPointerException exception) {
             throw GraphReconciliationException.protocol(
                     "Graph reconciliation request is invalid", exception);
         }
@@ -131,7 +152,7 @@ public final class HttpAgentGraphReconciliationClient
         cancellationToken.throwIfCancellationRequested();
         requireResponseMetadata(response);
         if (response.statusCode() == 200) {
-            return decodeSuccess(request, response.body());
+            return decodeSuccess(request, expectedRegistryBinding, response.body());
         }
         if (response.statusCode() >= 400 && response.statusCode() <= 599) {
             throw decodeRemoteError(response.statusCode(), response.body());
@@ -142,12 +163,13 @@ public final class HttpAgentGraphReconciliationClient
 
     private GraphReconcileResponse decodeSuccess(
             ExecuteAgentRunRequest request,
+            GraphRegistryBindingPolicy.ExpectedBinding expectedRegistryBinding,
             byte[] body) {
         try {
             JsonNode node = readObject(body);
             GraphReconcileResponse response = codec.decode(
                     RESPONSE_SCHEMA, node, GraphReconcileResponse.class);
-            requireExactResponse(request, response);
+            requireExactResponse(request, expectedRegistryBinding, response);
             return response;
         } catch (GraphReconciliationException exception) {
             throw exception;
@@ -191,6 +213,7 @@ public final class HttpAgentGraphReconciliationClient
 
     private void requireExactResponse(
             ExecuteAgentRunRequest request,
+            GraphRegistryBindingPolicy.ExpectedBinding expectedRegistryBinding,
             GraphReconcileResponse response) {
         RoomGraphCommand command = request.command();
         RoomGraphResult result = response.result();
@@ -214,7 +237,10 @@ public final class HttpAgentGraphReconciliationClient
                 && response.resultHash().equals(outputHash.asText())
                 && response.resultHash().equals(actualResultHash)
                 && SHA256.matcher(response.resultHash()).matches()
-                && SHA256.matcher(response.registryBindingHash()).matches()
+                && response.registryBindingHash().equals(
+                        expectedRegistryBinding.registryBindingHash())
+                && response.toolPolicyVersion().equals(
+                        expectedRegistryBinding.toolPolicyVersion())
                 && metadata.promptVersion().equals(invocation.promptProfileId())
                 && metadata.modelProfileId().equals(invocation.modelProfileId())
                 && metadata.schemaVersion().equals(invocation.outputSchemaVersion())
@@ -256,6 +282,22 @@ public final class HttpAgentGraphReconciliationClient
         if (action == AgentRunRecoveryAction.CREATE_NEXT_ATTEMPT
                 && (status != 409 || !"GRAPH_NEW_AGENT_ATTEMPT_REQUIRED".equals(code))) {
             throw new IllegalArgumentException("new-attempt action conflicts with error code");
+        }
+    }
+
+    private static void requireEnvelope(
+            RoomGraphCommand command,
+            GraphReconciliationEnvelopeSigner.SignedEnvelope envelope) {
+        Objects.requireNonNull(envelope, "signed envelope");
+        if (!GraphCommandEnvelopeSigner.SignedEnvelope.isBoundedIdentifier(
+                        envelope.keyId())
+                || !GraphCommandEnvelopeSigner.SignedEnvelope.isBoundedIdentifier(
+                        envelope.jti())
+                || envelope.jti().equals(command.invocationContext().envelopeNonce())
+                || !GraphCommandEnvelopeSigner.SignedEnvelope.isWellFormedCompactJws(
+                        envelope.compactJws())) {
+            throw new IllegalArgumentException(
+                    "Graph reconciliation credential conflicts with its immutable command");
         }
     }
 

@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.dispute.workflow.infrastructure.agent.GraphReconciliationHttpTransport;
 import com.example.dispute.workflow.infrastructure.agent.GraphReconciliationTransportException;
+import com.example.dispute.workflow.infrastructure.agent.GraphTransportSecurityProof;
 import com.example.dispute.workflow.infrastructure.agent.JdkGraphReconciliationHttpTransport;
 import com.sun.net.httpserver.HttpServer;
 import io.temporal.client.ActivityCanceledException;
@@ -22,6 +23,23 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
 class JdkGraphReconciliationHttpTransportTest {
+
+    @Test
+    void arbitraryHttpClientCanOnlyCreateAnUnverifiedTransport() {
+        HttpClient client = HttpClient.newBuilder()
+                .followRedirects(HttpClient.Redirect.NEVER)
+                .build();
+
+        JdkGraphReconciliationHttpTransport transport =
+                new JdkGraphReconciliationHttpTransport(client);
+
+        assertThat(transport.transportProof().mode())
+                .isEqualTo(GraphTransportSecurityProof.Mode.UNVERIFIED);
+        assertThat(JdkGraphReconciliationHttpTransport.class.getConstructors())
+                .hasSize(1)
+                .allSatisfy(constructor -> assertThat(constructor.getParameterTypes())
+                        .containsExactly(HttpClient.class));
+    }
 
     @Test
     void sendsOneBoundedPostAndReturnsHeadersAndBody() throws Exception {

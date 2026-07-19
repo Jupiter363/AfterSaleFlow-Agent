@@ -15,9 +15,21 @@ public interface GraphCommandHttpTransport {
     int MAXIMUM_LINE_BYTES = 32 * 1024;
     int MAXIMUM_RESPONSE_BYTES = 4 * 1024 * 1024;
 
-    /** Deployment attestation consumed by the fail-closed Spring assembly. */
+    /** Factory provenance. Arbitrary implementations receive only the unverified proof. */
+    default GraphTransportSecurityProof transportProof() {
+        return GraphTransportSecurityProof.unverified();
+    }
+
+    /**
+     * Legacy diagnostic projection. Production assembly must consume the factory bundle/proof.
+     */
+    @Deprecated(forRemoval = true)
     default TransportSecurity transportSecurity() {
-        return TransportSecurity.UNVERIFIED;
+        return switch (transportProof().mode()) {
+            case MUTUAL_TLS -> TransportSecurity.MUTUAL_TLS;
+            case LOCAL_PLAINTEXT -> TransportSecurity.LOCAL_PLAINTEXT;
+            case UNVERIFIED -> TransportSecurity.UNVERIFIED;
+        };
     }
 
     void stream(
@@ -90,6 +102,7 @@ public interface GraphCommandHttpTransport {
         void onLine(String line);
     }
 
+    @Deprecated(forRemoval = true)
     enum TransportSecurity {
         UNVERIFIED,
         MUTUAL_TLS,

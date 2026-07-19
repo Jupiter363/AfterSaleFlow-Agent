@@ -10,6 +10,11 @@ import java.util.Objects;
 /** HTTP exchange boundary whose production implementation is configured with the service identity. */
 public interface GraphReconciliationHttpTransport {
 
+    /** Factory provenance symmetric with the streaming command transport. */
+    default GraphTransportSecurityProof transportProof() {
+        return GraphTransportSecurityProof.unverified();
+    }
+
     Response exchange(Request request, AgentRunCancellationToken cancellationToken);
 
     record Request(

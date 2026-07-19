@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
+import com.example.dispute.workflow.activity.agent.GraphRegistryBindingPolicy;
 import com.example.dispute.workflow.infrastructure.security.Es256GraphCommandEnvelopeSigner;
 import com.example.dispute.workflow.infrastructure.security.GraphEnvelopeSigningKey;
 import com.example.dispute.workflow.infrastructure.security.GraphEnvelopeSigningKeyResolver;
@@ -40,6 +41,9 @@ class Es256GraphCommandEnvelopeSignerTest {
             "room-graph-command-valid.json");
     private static final String COMMAND_KEY_ID = "java-invocation-es256-1";
     private static final Instant NOW = Instant.parse("2026-07-17T08:00:00.789Z");
+    private static final GraphRegistryBindingPolicy.ExpectedBinding REGISTRY_BINDING =
+            new GraphRegistryBindingPolicy.ExpectedBinding(
+                    "c".repeat(64), "tools.none.v1");
     private static KeyPair keyPair;
 
     @BeforeAll
@@ -59,7 +63,7 @@ class Es256GraphCommandEnvelopeSignerTest {
                 Duration.ofSeconds(45),
                 () -> "execution-jti-001");
 
-        var envelope = signer.sign(command);
+        var envelope = signer.sign(command, REGISTRY_BINDING);
         String[] segments = envelope.compactJws().split("\\.", -1);
         ObjectNode header = decodeObject(segments[0]);
         ObjectNode claims = decodeObject(segments[1]);
@@ -107,7 +111,7 @@ class Es256GraphCommandEnvelopeSignerTest {
         assertThat(claims.path("capabilities_hash").asText())
                 .isEqualTo("80cd39b1d37bf6e8a2807e48af87a3a72c70b34f98812dae17a85386f7e8c31a");
         assertThat(claims.path("profile_bindings_hash").asText())
-                .isEqualTo("cacc32606bb568cc5f714676889c7ad30f9448c6274294b7d477d839c2b2e38e");
+                .isEqualTo("ccccb6cff9387ecad3d5dfe8c4ce086941e7711f17014ddd147889edd49e0340");
         assertThat(envelope.keyId()).isEqualTo(COMMAND_KEY_ID);
         assertThat(envelope.jti()).isEqualTo("execution-jti-001");
         assertThat(envelope.issuedAt()).isEqualTo(Instant.parse("2026-07-17T08:00:00Z"));
@@ -128,7 +132,7 @@ class Es256GraphCommandEnvelopeSignerTest {
         RoomGraphCommand command = MAPPER.treeToValue(fixture, RoomGraphCommand.class);
 
         assertThatThrownBy(() -> signer(signingKey(COMMAND_KEY_ID), () -> "execution-jti-001")
-                        .sign(command))
+                        .sign(command, REGISTRY_BINDING))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("requestHash does not bind");
     }
@@ -150,7 +154,7 @@ class Es256GraphCommandEnvelopeSignerTest {
         };
 
         assertThatThrownBy(() -> signer(wrongKey, () -> "execution-jti-001")
-                        .sign(commandUnchecked()))
+                        .sign(commandUnchecked(), REGISTRY_BINDING))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("does not match command envelopeKeyId");
         assertThat(calls).hasValue(0);
@@ -171,7 +175,7 @@ class Es256GraphCommandEnvelopeSignerTest {
                 Duration.ofSeconds(60),
                 () -> "recovery-delivery-jti-1");
 
-        var envelope = signer.sign(commandUnchecked());
+        var envelope = signer.sign(commandUnchecked(), REGISTRY_BINDING);
 
         assertThat(envelope.keyId()).isEqualTo(COMMAND_KEY_ID);
         assertThat(resolutions).hasValue(1);
@@ -188,7 +192,7 @@ class Es256GraphCommandEnvelopeSignerTest {
                 Duration.ofSeconds(60),
                 () -> "execution-jti-001");
 
-        assertThatThrownBy(() -> signer.sign(commandUnchecked()))
+        assertThatThrownBy(() -> signer.sign(commandUnchecked(), REGISTRY_BINDING))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("does not match command envelopeKeyId");
     }
@@ -220,21 +224,21 @@ class Es256GraphCommandEnvelopeSignerTest {
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("1..60");
         assertThatThrownBy(() -> signer(signingKey("invalid key"), () -> "jti-1")
-                        .sign(commandUnchecked()))
+                        .sign(commandUnchecked(), REGISTRY_BINDING))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("keyId");
         assertThatThrownBy(() -> signer(signingKey(COMMAND_KEY_ID), () -> "invalid jti")
-                        .sign(commandUnchecked()))
+                        .sign(commandUnchecked(), REGISTRY_BINDING))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("jti");
         assertThatThrownBy(() -> signer(signingKey(COMMAND_KEY_ID), () -> "x".repeat(129))
-                        .sign(commandUnchecked()))
+                        .sign(commandUnchecked(), REGISTRY_BINDING))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("jti");
         assertThatThrownBy(() -> signer(
                             signingKey(COMMAND_KEY_ID),
                             () -> commandUnchecked().invocationContext().envelopeNonce())
-                        .sign(commandUnchecked()))
+                        .sign(commandUnchecked(), REGISTRY_BINDING))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("must not reuse");
 
@@ -250,7 +254,7 @@ class Es256GraphCommandEnvelopeSignerTest {
             }
         };
         assertThatThrownBy(() -> signer(shortSignature, () -> "jti-1")
-                        .sign(commandUnchecked()))
+                        .sign(commandUnchecked(), REGISTRY_BINDING))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("64-byte");
     }
@@ -262,8 +266,8 @@ class Es256GraphCommandEnvelopeSignerTest {
                 signingKey(COMMAND_KEY_ID),
                 () -> "execution-jti-" + sequence.incrementAndGet());
 
-        var first = signer.sign(commandUnchecked());
-        var second = signer.sign(commandUnchecked());
+        var first = signer.sign(commandUnchecked(), REGISTRY_BINDING);
+        var second = signer.sign(commandUnchecked(), REGISTRY_BINDING);
 
         assertThat(first.jti()).isEqualTo("execution-jti-1");
         assertThat(second.jti()).isEqualTo("execution-jti-2");

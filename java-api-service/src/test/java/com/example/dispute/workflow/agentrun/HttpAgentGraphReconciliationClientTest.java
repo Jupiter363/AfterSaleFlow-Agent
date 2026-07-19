@@ -7,6 +7,7 @@ import static org.assertj.core.api.Assertions.catchThrowableOfType;
 import com.example.dispute.workflow.activity.agent.AgentRunCancellationToken;
 import com.example.dispute.workflow.activity.agent.GraphReconciliationEnvelopeSigner;
 import com.example.dispute.workflow.activity.agent.GraphReconciliationException;
+import com.example.dispute.workflow.activity.agent.GraphRegistryBindingPolicy;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunRecoveryAction;
 import com.example.dispute.workflow.contract.v1.AgentPlatformContractCodec;
 import com.example.dispute.workflow.contract.v1.ContractJson;
@@ -25,6 +26,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -37,6 +39,9 @@ import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 
 class HttpAgentGraphReconciliationClientTest {
+
+    private static final String TEST_COMPACT_JWS = "e30.e30."
+            + Base64.getUrlEncoder().withoutPadding().encodeToString(new byte[64]);
 
     private static final ObjectMapper MAPPER = JsonMapper.builder().findAndAddModules().build();
     private static final Path CONTRACT_ROOT =
@@ -54,13 +59,13 @@ class HttpAgentGraphReconciliationClientTest {
     void postsOneSignedExactCommandAndReturnsTheBoundResult() throws Exception {
         ExecuteAgentRunRequest request = request();
         AtomicInteger signatures = new AtomicInteger();
-        GraphReconciliationEnvelopeSigner signer = command -> {
+        GraphReconciliationEnvelopeSigner signer = (command, expectedRegistryBinding) -> {
             assertThat(command).isEqualTo(request.command());
             int sequence = signatures.incrementAndGet();
             return new GraphReconciliationEnvelopeSigner.SignedEnvelope(
-                    "header.payload.signature",
-                    "java-reconciliation-es256-2",
-                    "reconciliation-jti-" + sequence,
+                    TEST_COMPACT_JWS,
+                    "java:reconciliation-es256-2",
+                    "reconciliation:jti-" + sequence,
                     Instant.parse("2026-07-17T08:00:00Z"),
                     Instant.parse("2026-07-17T08:01:00Z"));
         };
@@ -78,7 +83,7 @@ class HttpAgentGraphReconciliationClientTest {
         assertThat(sent.uri().toString())
                 .isEqualTo("https://python-agent.internal/base/internal/graphs/commands/reconcile");
         assertThat(sent.headers()).containsEntry(
-                "Authorization", "Bearer header.payload.signature");
+                "Authorization", "Bearer " + TEST_COMPACT_JWS);
         assertThat(sent.headers()).containsEntry(
                 "Content-Type", "application/json; charset=utf-8");
         assertThat(sent.headers()).containsEntry("Content-Encoding", "identity");
@@ -88,6 +93,47 @@ class HttpAgentGraphReconciliationClientTest {
         JsonNode posted = MAPPER.readTree(sent.body());
         assertThat(ContractJson.canonicalize(posted)).isEqualTo(ContractJson.canonicalize(
                 codec.encode("room-graph-command.schema.json", request.command())));
+    }
+
+    @Test
+    void rejectsUnboundedOrCommandReusedSignerMetadataBeforeTransport() throws Exception {
+        ExecuteAgentRunRequest request = request();
+        List<GraphReconciliationEnvelopeSigner.SignedEnvelope> invalid = List.of(
+                envelope("key id with spaces", "reconciliation-jti-001"),
+                envelope("-leading-punctuation", "reconciliation-jti-001"),
+                envelope("java-reconciliation-es256-2", "j".repeat(129)),
+                envelope(
+                        "java-reconciliation-es256-2",
+                        request.command().invocationContext().envelopeNonce()));
+
+        for (GraphReconciliationEnvelopeSigner.SignedEnvelope signedEnvelope : invalid) {
+            FakeTransport transport = new FakeTransport(success(request.command()));
+            GraphReconciliationException failure = catchThrowableOfType(
+                    GraphReconciliationException.class,
+                    () -> client(
+                                    transport,
+                                    (command, expectedRegistryBinding) -> signedEnvelope,
+                                    URI.create("https://python-agent.internal"),
+                                    false)
+                            .reconcile(request, new AgentRunCancellationToken()));
+
+            assertThat(failure.errorCode()).isEqualTo("GRAPH_RECONCILIATION_PROTOCOL_REJECTED");
+            assertThat(failure.retryable()).isFalse();
+            assertThat(transport.calls).isEmpty();
+        }
+
+        FakeTransport nullEnvelopeTransport = new FakeTransport(success(request.command()));
+        GraphReconciliationException nullEnvelopeFailure = catchThrowableOfType(
+                GraphReconciliationException.class,
+                () -> client(
+                                nullEnvelopeTransport,
+                                (command, expectedRegistryBinding) -> null,
+                                URI.create("https://python-agent.internal"),
+                                false)
+                        .reconcile(request, new AgentRunCancellationToken()));
+        assertThat(nullEnvelopeFailure.errorCode())
+                .isEqualTo("GRAPH_RECONCILIATION_PROTOCOL_REJECTED");
+        assertThat(nullEnvelopeTransport.calls).isEmpty();
     }
 
     static Stream<Arguments> resultBindingDrifts() {
@@ -101,7 +147,9 @@ class HttpAgentGraphReconciliationClientTest {
                 Arguments.of("result_hash", (Consumer<ObjectNode>) root ->
                         root.put("result_hash", "1".repeat(64))),
                 Arguments.of("registry_binding_hash", (Consumer<ObjectNode>) root ->
-                        root.put("registry_binding_hash", "not-a-hash")),
+                        root.put("registry_binding_hash", "d".repeat(64))),
+                Arguments.of("tool_policy_version", (Consumer<ObjectNode>) root ->
+                        root.put("tool_policy_version", "forged-tools.v1")),
                 Arguments.of("profile", (Consumer<ObjectNode>) root ->
                         ((ObjectNode) root.required("result").required("execution_metadata"))
                                 .put("model_profile_id", "forged-model.v1")),
@@ -297,6 +345,8 @@ class HttpAgentGraphReconciliationClientTest {
         return new HttpAgentGraphReconciliationClient(
                 transport,
                 signer,
+                ignored -> new GraphRegistryBindingPolicy.ExpectedBinding(
+                        "c".repeat(64), "intake-tools.v1"),
                 codec,
                 MAPPER,
                 baseUri,
@@ -305,10 +355,16 @@ class HttpAgentGraphReconciliationClientTest {
     }
 
     private static GraphReconciliationEnvelopeSigner signer() {
-        return command -> new GraphReconciliationEnvelopeSigner.SignedEnvelope(
-                "header.payload.signature",
-                "java-reconciliation-es256-2",
-                "reconciliation-jti-001",
+        return (command, expectedRegistryBinding) ->
+                envelope("java-reconciliation-es256-2", "reconciliation-jti-001");
+    }
+
+    private static GraphReconciliationEnvelopeSigner.SignedEnvelope envelope(
+            String keyId, String jti) {
+        return new GraphReconciliationEnvelopeSigner.SignedEnvelope(
+                TEST_COMPACT_JWS,
+                keyId,
+                jti,
                 Instant.parse("2026-07-17T08:00:00Z"),
                 Instant.parse("2026-07-17T08:01:00Z"));
     }

@@ -17,13 +17,26 @@ public final class JdkGraphReconciliationHttpTransport
         implements GraphReconciliationHttpTransport {
 
     private final HttpClient httpClient;
+    private final GraphTransportSecurityProof transportProof;
 
     public JdkGraphReconciliationHttpTransport(HttpClient httpClient) {
+        this(httpClient, GraphTransportSecurityProof.unverified());
+    }
+
+    JdkGraphReconciliationHttpTransport(
+            HttpClient httpClient, GraphTransportSecurityProof transportProof) {
         this.httpClient = Objects.requireNonNull(httpClient, "httpClient");
+        this.transportProof = Objects.requireNonNull(transportProof, "transportProof");
         if (httpClient.followRedirects() != HttpClient.Redirect.NEVER) {
             throw new IllegalArgumentException(
                     "Graph reconciliation transport must not follow redirects");
         }
+        requireTls13Client(httpClient, transportProof);
+    }
+
+    @Override
+    public GraphTransportSecurityProof transportProof() {
+        return transportProof;
     }
 
     @Override
@@ -104,6 +117,22 @@ public final class JdkGraphReconciliationHttpTransport
             input.close();
         } catch (IOException ignored) {
             // Cancellation already owns the outcome.
+        }
+    }
+
+    private static void requireTls13Client(
+            HttpClient httpClient, GraphTransportSecurityProof transportProof) {
+        if (transportProof.mode() != GraphTransportSecurityProof.Mode.MUTUAL_TLS) {
+            return;
+        }
+        String[] protocols = httpClient.sslParameters().getProtocols();
+        if (!"TLSv1.3".equals(httpClient.sslContext().getProtocol())
+                || protocols.length != 1
+                || !"TLSv1.3".equals(protocols[0])
+                || !"HTTPS".equals(
+                        httpClient.sslParameters().getEndpointIdentificationAlgorithm())) {
+            throw new IllegalArgumentException(
+                    "Trusted Graph reconciliation transport requires HTTPS-verified TLSv1.3");
         }
     }
 }

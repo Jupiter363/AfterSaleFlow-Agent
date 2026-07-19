@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.catchThrowable;
 
 import com.example.dispute.workflow.infrastructure.agent.GraphCommandHttpTransport;
 import com.example.dispute.workflow.infrastructure.agent.GraphCommandTransportException;
+import com.example.dispute.workflow.infrastructure.agent.GraphTransportSecurityProof;
 import com.example.dispute.workflow.infrastructure.agent.JdkGraphCommandHttpTransport;
 import com.sun.net.httpserver.HttpServer;
 import io.temporal.client.ActivityCanceledException;
@@ -43,6 +44,22 @@ import javax.net.ssl.SSLSession;
 import org.junit.jupiter.api.Test;
 
 class JdkGraphCommandHttpTransportTest {
+
+    @Test
+    void arbitraryHttpClientCanOnlyCreateAnUnverifiedTransport() {
+        HttpClient client = HttpClient.newBuilder()
+                .followRedirects(HttpClient.Redirect.NEVER)
+                .build();
+
+        JdkGraphCommandHttpTransport transport = new JdkGraphCommandHttpTransport(client);
+
+        assertThat(transport.transportProof().mode())
+                .isEqualTo(GraphTransportSecurityProof.Mode.UNVERIFIED);
+        assertThat(JdkGraphCommandHttpTransport.class.getConstructors())
+                .hasSize(1)
+                .allSatisfy(constructor -> assertThat(constructor.getParameterTypes())
+                        .containsExactly(HttpClient.class));
+    }
 
     @Test
     void deliversTheResponseHeadAndLinesIncrementally() throws Exception {
