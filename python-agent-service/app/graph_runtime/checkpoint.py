@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import AbstractAsyncContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Final
 
 from langchain_core.runnables import RunnableConfig
@@ -25,9 +25,12 @@ from app.graph_runtime.persistence_models import (
     GraphFenceError,
     GraphPoolConfig,
 )
+from app.graph_runtime.ledger import PostgresCommandLedger, ResultRecord
 
 
 FENCE_CONTEXT_KEY: Final[str] = "__trusted_graph_fence_context__"
+TERMINAL_RESULT_CONTEXT_KEY: Final[str] = "__trusted_graph_terminal_result__"
+ROOM_GRAPH_RESULT_SCHEMA_VERSION: Final[str] = "room-graph-result.v1"
 
 FENCE_LOCK_SQL: Final[str] = """
 select fencing_token
@@ -148,6 +151,24 @@ def bind_fence_context(config: RunnableConfig, fence: GraphFenceContext) -> Runn
     return bound
 
 
+def bind_terminal_result_context(
+    config: RunnableConfig,
+    result: ResultRecord,
+) -> RunnableConfig:
+    """Attach a typed terminal result capability for the saver transaction only."""
+
+    if not isinstance(result, ResultRecord):
+        raise GraphBindingError("terminal result capability must be a ResultRecord")
+    configurable = dict(config.get("configurable") or {})
+    existing = configurable.get(TERMINAL_RESULT_CONTEXT_KEY)
+    if existing is not None and existing != result:
+        raise GraphBindingError("RunnableConfig already carries another terminal result")
+    configurable[TERMINAL_RESULT_CONTEXT_KEY] = result
+    bound = dict(config)
+    bound["configurable"] = configurable
+    return bound
+
+
 class FencedPostgresSaver(BaseCheckpointSaver[Any]):
     """Async saver that atomically checks the durable lease before every write.
 
@@ -162,6 +183,7 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
         acquire_timeout_seconds: float = 3.0,
         reader: BaseCheckpointSaver[Any] | None = None,
         direct_saver_factory: Callable[[Any, Any], AsyncPostgresSaver] | None = None,
+        ledger: PostgresCommandLedger | None = None,
     ) -> None:
         super().__init__()
         self._pool = pool
@@ -170,6 +192,7 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
         self._direct_saver_factory = direct_saver_factory or (
             lambda connection, serde: AsyncPostgresSaver(connection, serde=serde)
         )
+        self._ledger = ledger or PostgresCommandLedger()
 
     async def aget_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
         fence = self._require_fence(config)
@@ -211,10 +234,12 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
         new_versions: ChannelVersions,
     ) -> RunnableConfig:
         fence = self._require_fence(config)
-        bound_metadata = self._bind_metadata(metadata, fence)
+        terminal_result = self._terminal_result(config)
+        effective_fence = self._terminal_fence(fence, terminal_result)
+        bound_metadata = self._bind_metadata(metadata, effective_fence)
         async with self._connection() as connection:
             async with connection.transaction():
-                await self._lock_fence(connection, fence)
+                await self._lock_fence(connection, effective_fence)
                 saver = self._direct_saver_factory(connection, self.serde)
                 saved = await saver.aput(config, checkpoint, bound_metadata, new_versions)
                 checkpoint_config = saved.get("configurable") or {}
@@ -222,13 +247,30 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
                 checkpoint_id = str(checkpoint_config.get("checkpoint_id") or "")
                 if not checkpoint_id or len(checkpoint_id) > 128 or len(checkpoint_ns) > 128:
                     raise GraphBindingError("PostgresSaver returned an invalid checkpoint identity")
+                if terminal_result is not None and (
+                    terminal_result.checkpoint_ns != checkpoint_ns
+                    or terminal_result.checkpoint_id != checkpoint_id
+                ):
+                    raise GraphBindingError(
+                        "terminal result conflicts with the saved checkpoint identity"
+                    )
                 await self._bind_command_checkpoint(
                     connection,
-                    fence,
+                    effective_fence,
                     checkpoint_ns=checkpoint_ns,
                     checkpoint_id=checkpoint_id,
                 )
-        return bind_fence_context(saved, fence)
+                if terminal_result is not None:
+                    await self._ledger.store_terminal_result(
+                        connection,
+                        fence=effective_fence,
+                        result=terminal_result,
+                        expected_result_schema_version=ROOM_GRAPH_RESULT_SCHEMA_VERSION,
+                    )
+        return bind_fence_context(
+            self._without_terminal_result_context(saved),
+            effective_fence,
+        )
 
     async def aput_writes(
         self,
@@ -253,6 +295,47 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
 
     def _connection(self) -> AbstractAsyncContextManager[Any]:
         return self._pool.connection(timeout=self._acquire_timeout_seconds)
+
+    @staticmethod
+    def _terminal_result(config: RunnableConfig) -> ResultRecord | None:
+        value = (config.get("configurable") or {}).get(TERMINAL_RESULT_CONTEXT_KEY)
+        if value is None:
+            return None
+        if not isinstance(value, ResultRecord):
+            raise GraphBindingError("RunnableConfig has a forged terminal result capability")
+        return value
+
+    @staticmethod
+    def _without_terminal_result_context(config: RunnableConfig) -> RunnableConfig:
+        configurable = dict(config.get("configurable") or {})
+        configurable.pop(TERMINAL_RESULT_CONTEXT_KEY, None)
+        sanitized = dict(config)
+        sanitized["configurable"] = configurable
+        return sanitized
+
+    @staticmethod
+    def _terminal_fence(
+        fence: GraphFenceContext,
+        result: ResultRecord | None,
+    ) -> GraphFenceContext:
+        if result is None:
+            return fence
+        if (
+            result.thread_id != fence.thread_id
+            or result.command_id != fence.command_id
+            or result.request_hash != fence.request_hash
+        ):
+            raise GraphBindingError("terminal result identity conflicts with the Graph fence")
+        if fence.result_hash is not None and (
+            fence.result_hash != result.result_hash
+            or fence.result_ref != result.result_ref
+        ):
+            raise GraphBindingError("terminal result conflicts with an existing fence binding")
+        return replace(
+            fence,
+            result_hash=result.result_hash,
+            result_ref=result.result_ref,
+        )
 
     async def _lock_fence(self, connection: Any, fence: GraphFenceContext) -> None:
         cursor = await connection.execute(
