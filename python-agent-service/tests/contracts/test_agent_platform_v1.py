@@ -43,6 +43,23 @@ def test_unknown_schema_file_fails_closed(codec: ContractCodec) -> None:
         codec.decode("room-graph-command.v99.schema.json", {})
 
 
+def test_duplicate_json_member_fails_before_contract_or_hash_use(
+    codec: ContractCodec,
+) -> None:
+    fixture = json.loads(
+        (FIXTURE_ROOT / "valid/room-graph-command-valid.json").read_text(encoding="utf-8")
+    )
+    raw = json.dumps(fixture["instance"], separators=(",", ":"))
+    duplicate = raw.replace(
+        '"command_id":"graph-cmd-001",',
+        '"command_id":"graph-cmd-forged","command_id":"graph-cmd-001",',
+        1,
+    )
+
+    with pytest.raises(ValueError, match="duplicate JSON member: command_id"):
+        codec.decode(fixture["schema"], duplicate)
+
+
 def test_schema_valid_shape_still_respects_total_payload_limit(codec: ContractCodec) -> None:
     fixture = json.loads(
         (FIXTURE_ROOT / "valid/room-graph-result-valid.json").read_text(encoding="utf-8")

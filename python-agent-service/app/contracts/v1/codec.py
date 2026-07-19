@@ -12,6 +12,10 @@ from pydantic import BaseModel
 from app.contracts.v1.models import MODEL_BY_SCHEMA, StrictContractModel
 
 
+class DuplicateJsonMember(ValueError):
+    pass
+
+
 class ContractCodec:
     def __init__(self, contract_root: Path) -> None:
         self._root = contract_root.resolve()
@@ -66,12 +70,12 @@ class ContractCodec:
             raw = bytes(payload)
             if len(raw) > self._limits[schema_file]:
                 raise ValueError(f"{schema_file} exceeds max_serialized_bytes")
-            instance = json.loads(raw)
+            instance = _loads_without_duplicate_members(raw)
         elif isinstance(payload, str):
             raw = payload.encode("utf-8")
             if len(raw) > self._limits[schema_file]:
                 raise ValueError(f"{schema_file} exceeds max_serialized_bytes")
-            instance = json.loads(payload)
+            instance = _loads_without_duplicate_members(payload)
         else:
             instance = dict(payload)
             raw = json.dumps(
@@ -102,7 +106,7 @@ class ContractCodec:
 
     @staticmethod
     def _load_json(path: Path) -> dict[str, Any]:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = _loads_without_duplicate_members(path.read_text(encoding="utf-8"))
         if not isinstance(value, dict):
             raise ValueError(f"contract document must be an object: {path}")
         return value
@@ -127,3 +131,19 @@ def canonical_sha256_omitting(value: BaseModel | Mapping[str, Any], member: str)
         raise ValueError(f"self-hash member is missing: {member}")
     del instance[member]
     return canonical_sha256(instance)
+
+
+def _loads_without_duplicate_members(payload: bytes | str) -> Any:
+    try:
+        return json.loads(payload, object_pairs_hook=_unique_object)
+    except DuplicateJsonMember as error:
+        raise ValueError(f"duplicate JSON member: {error}") from error
+
+
+def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, member in pairs:
+        if key in value:
+            raise DuplicateJsonMember(key)
+        value[key] = member
+    return value
