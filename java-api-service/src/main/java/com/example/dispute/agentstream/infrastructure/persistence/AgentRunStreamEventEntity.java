@@ -14,6 +14,7 @@ import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
 import jakarta.persistence.Enumerated;
 import jakarta.persistence.Table;
+import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import org.hibernate.annotations.Immutable;
@@ -121,6 +122,32 @@ public class AgentRunStreamEventEntity extends AbstractEntity {
         event.streamProtocol = AgentRunProtocol.V2.wireValue();
         event.audience = java.util.Objects.requireNonNull(audience, "audience must not be null");
         event.payloadHash = requireSha256(payloadHash);
+        return event;
+    }
+
+    public static AgentRunStreamEventEntity createV2Prelude(
+            String id,
+            String agentRunId,
+            String attemptId,
+            long sequenceNo,
+            String eventType,
+            Audience audience,
+            String payloadJson,
+            String payloadHash,
+            Instant occurredAt) {
+        AgentRunStreamEventEntity event = createV2(
+                id,
+                agentRunId,
+                attemptId,
+                sequenceNo,
+                eventType,
+                audience,
+                payloadJson,
+                payloadHash);
+        event.createdAt = OffsetDateTime.ofInstant(
+                java.util.Objects.requireNonNull(occurredAt, "occurredAt must not be null"),
+                ZoneOffset.UTC);
+        event.createdBy = "agent-run-ledger";
         return event;
     }
 

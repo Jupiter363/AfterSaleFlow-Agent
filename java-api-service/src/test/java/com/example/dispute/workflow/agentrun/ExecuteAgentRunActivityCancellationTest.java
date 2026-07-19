@@ -3,6 +3,7 @@ package com.example.dispute.workflow.agentrun;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -19,6 +20,7 @@ import com.example.dispute.workflow.contract.v1.AgentRunAttemptHeartbeat;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunRecoveryAction;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
+import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import com.example.dispute.workflow.contract.v1.RoomGraphResult;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -43,9 +45,8 @@ class ExecuteAgentRunActivityCancellationTest {
     private static final Instant NOW = Instant.parse("2026-07-17T08:00:00Z");
 
     @Test
-    void cancellationClosesTheStreamAndRejectsALateFinal() throws Exception {
+    void cancellationBeforeDurableFinalClosesTheStreamAndCancelsTheAttempt() throws Exception {
         ExecuteAgentRunRequest request = request();
-        RoomGraphResult graphResult = graphResult();
         AgentRunLedger ledger = mock(AgentRunLedger.class);
         AgentRunExecutionGateway gateway = mock(AgentRunExecutionGateway.class);
         when(ledger.requireAllocatedAttempt(request))
@@ -75,12 +76,8 @@ class ExecuteAgentRunActivityCancellationTest {
                     com.example.dispute.workflow.activity.agent.AgentRunCancellationToken token =
                             invocation.getArgument(3);
                     token.onCancellation(() -> streamClosed.set(true));
-                    try {
-                        listener.onProgress(new AgentRunProgress(1, true, false));
-                    } catch (ActivityCanceledException ignored) {
-                        // Simulate a transport racing cancellation and returning a stale final.
-                    }
-                    return new AgentRunExecutionGateway.Completion(graphResult, 7, true);
+                    listener.onProgress(new AgentRunProgress(1, true, false));
+                    throw new AssertionError("cancellation must stop execution before final");
                 });
         ExecuteAgentRunActivityImpl activity = new ExecuteAgentRunActivityImpl(
                 ledger,
@@ -103,6 +100,66 @@ class ExecuteAgentRunActivityCancellationTest {
                 AgentRunRecoveryAction.FAIL_LOGICAL_RUN,
                 NOW);
         verify(ledger, never()).recordResultReady(any());
+    }
+
+    @Test
+    void cancellationAfterDurableGatewayCompletionCannotReverseResultReady() throws Exception {
+        ExecuteAgentRunRequest request = request();
+        RoomGraphResult graphResult = graphResult();
+        AgentRunLedger ledger = mock(AgentRunLedger.class);
+        AgentRunExecutionGateway gateway = mock(AgentRunExecutionGateway.class);
+        when(ledger.requireAllocatedAttempt(request)).thenReturn(runningAttempt());
+        AtomicInteger heartbeatCount = new AtomicInteger();
+        AgentRunActivityContext context = new AgentRunActivityContext() {
+            @Override
+            public int temporalAttempt() {
+                return 1;
+            }
+
+            @Override
+            public void heartbeat(AgentRunAttemptHeartbeat details) {
+                if (heartbeatCount.incrementAndGet() == 2) {
+                    throw new ActivityCanceledException();
+                }
+            }
+        };
+        AtomicBoolean streamClosed = new AtomicBoolean();
+        when(gateway.execute(
+                        eq(request),
+                        eq(ExecutionMode.EXECUTE_OR_RECONCILE),
+                        any(),
+                        any()))
+                .thenAnswer(invocation -> {
+                    AgentRunExecutionGateway.ProgressListener listener = invocation.getArgument(2);
+                    com.example.dispute.workflow.activity.agent.AgentRunCancellationToken token =
+                            invocation.getArgument(3);
+                    token.onCancellation(() -> streamClosed.set(true));
+                    // The gateway contract says this completion is already durable. The callback
+                    // only makes the concurrent cancellation visible to the Activity.
+                    try {
+                        listener.onProgress(new AgentRunProgress(7, true, false));
+                    } catch (ActivityCanceledException ignored) {
+                        // Cancellation raced the durable-final return.
+                    }
+                    return new AgentRunExecutionGateway.Completion(graphResult, 7, true);
+                });
+        ExecuteAgentRunActivityImpl activity = new ExecuteAgentRunActivityImpl(
+                ledger,
+                gateway,
+                () -> context,
+                Clock.fixed(NOW, ZoneOffset.UTC),
+                Duration.ofHours(1),
+                Executors::newSingleThreadScheduledExecutor);
+
+        var result = activity.execute(request);
+
+        assertThat(result.outcome()).isEqualTo(ExecuteAgentRunResult.Outcome.COMPLETED);
+        assertThat(result.lastSequenceNo()).isEqualTo(7);
+        assertThat(result.publicOutputEmitted()).isTrue();
+        assertThat(streamClosed).isTrue();
+        verify(ledger).recordResultReady(result);
+        verify(ledger, never()).recordAttemptFailure(
+                any(), any(), anyLong(), any(), any(), any(), any());
     }
 
     private static AgentRunLedger.Attempt runningAttempt() {

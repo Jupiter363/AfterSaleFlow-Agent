@@ -12,21 +12,27 @@ import com.example.dispute.infrastructure.persistence.repository.AgentRunReposit
 import com.example.dispute.workflow.contract.v1.AgentRunAttemptHeartbeat;
 import com.example.dispute.workflow.contract.v1.AgentRunFinalizationReceipt;
 import com.example.dispute.workflow.contract.v1.AgentRunFinalizationReceipt.CommitStatus;
+import com.example.dispute.workflow.contract.v1.AgentStreamEvent;
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunExecutorKind;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunProtocol;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunRecoveryAction;
+import com.example.dispute.workflow.contract.v1.ContractTypes.StreamEventType;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
 import jakarta.persistence.EntityManager;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -35,19 +41,26 @@ public class JpaAgentRunLedger implements AgentRunLedger {
 
     private final AgentRunRepository runRepository;
     private final AgentRunAttemptRepository attemptRepository;
+    private final AgentRunStreamEventRepository eventRepository;
     private final EntityManager entityManager;
     private final ObjectMapper objectMapper;
+    private final ObjectMapper streamObjectMapper;
     private final AgentRunCommandBindingFactory commandBindingFactory;
 
     public JpaAgentRunLedger(
             AgentRunRepository runRepository,
             AgentRunAttemptRepository attemptRepository,
+            AgentRunStreamEventRepository eventRepository,
             EntityManager entityManager,
             ObjectMapper objectMapper) {
         this.runRepository = runRepository;
         this.attemptRepository = attemptRepository;
+        this.eventRepository = eventRepository;
         this.entityManager = entityManager;
         this.objectMapper = objectMapper;
+        this.streamObjectMapper = objectMapper.copy();
+        this.streamObjectMapper.setSerializationInclusion(JsonInclude.Include.NON_NULL);
+        this.streamObjectMapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
         this.commandBindingFactory = new AgentRunCommandBindingFactory(objectMapper);
     }
 
@@ -91,6 +104,9 @@ public class JpaAgentRunLedger implements AgentRunLedger {
         if (allocation == null) {
             throw new IllegalArgumentException("allocation must not be null");
         }
+        Instant persistedStartedAt = java.util.Objects.requireNonNull(
+                        startedAt, "startedAt must not be null")
+                .truncatedTo(ChronoUnit.MICROS);
         RoomGraphCommand command = allocation.command();
         requireEqual(command.logicalRunId(), agentRunId, "logicalRunId");
         AgentRunEntity run = lockRun(agentRunId);
@@ -112,6 +128,7 @@ public class JpaAgentRunLedger implements AgentRunLedger {
             persisted.requireSameAllocation(verified);
             requireCanonicalCommand(persisted, binding);
             requirePersistedPredecessor(persisted, binding.logicalInputHash());
+            requirePersistedPrelude(persisted, command);
             return attempt(persisted);
         }
         attemptRepository
@@ -147,6 +164,7 @@ public class JpaAgentRunLedger implements AgentRunLedger {
         String previousAttemptId = null;
         boolean resetRequired = false;
         int publicSequenceOffset = 0;
+        String resetReasonCode = null;
         if (nextAttemptNo == 1) {
             requireEqual(run.getRequestHash(), binding.commandRequestHash(), "commandRequestHash");
             run.bindFirstAttemptLineage(binding.logicalInputHash());
@@ -165,6 +183,7 @@ public class JpaAgentRunLedger implements AgentRunLedger {
             previousAttemptId = predecessor.getId();
             resetRequired = hasDurableVisibleOutput(agentRunId, predecessor.getId());
             publicSequenceOffset = resetRequired ? 1 : 0;
+            resetReasonCode = predecessor.getTerminationCode();
         }
 
         AgentRunAttemptEntity created =
@@ -174,9 +193,11 @@ public class JpaAgentRunLedger implements AgentRunLedger {
                         previousAttemptId,
                         resetRequired,
                         publicSequenceOffset,
-                        startedAt);
+                        persistedStartedAt);
         run.markV2AttemptStarted();
         attemptRepository.saveAndFlush(created);
+        persistPublicPrelude(created, command, resetReasonCode);
+        requirePersistedPrelude(created, command);
         return attempt(created);
     }
 
@@ -203,6 +224,7 @@ public class JpaAgentRunLedger implements AgentRunLedger {
         persisted.requireAllocatedRequest(request);
         requireCanonicalCommand(persisted, binding);
         requirePersistedPredecessor(persisted, binding.logicalInputHash());
+        requirePersistedPrelude(persisted, request.command());
         return attempt(persisted);
     }
 
@@ -449,6 +471,167 @@ public class JpaAgentRunLedger implements AgentRunLedger {
                 binding.canonicalCommandJson(),
                 "canonicalCommandJson");
     }
+
+    private void persistPublicPrelude(
+            AgentRunAttemptEntity attempt, RoomGraphCommand command, String resetReasonCode) {
+        List<PublicPreludeEvent> prelude = publicPrelude(attempt, command, resetReasonCode);
+        // These immutable public rows are also the durable outbox. Redis carries only a
+        // best-effort high-watermark hint; replay always reads these PostgreSQL facts.
+        eventRepository.saveAllAndFlush(prelude.stream()
+                .map(item -> AgentRunStreamEventEntity.createV2Prelude(
+                        "ARSE2_" + UUID.randomUUID().toString().replace("-", ""),
+                        item.event().runId(),
+                        item.event().attemptId(),
+                        item.event().sequenceNo(),
+                        item.event().eventType().wireValue(),
+                        item.event().audience(),
+                        item.canonicalJson(),
+                        item.payloadHash(),
+                        item.event().occurredAt()))
+                .toList());
+    }
+
+    private void requirePersistedPrelude(
+            AgentRunAttemptEntity attempt, RoomGraphCommand command) {
+        List<PublicPreludeEvent> expected = publicPrelude(
+                attempt,
+                command,
+                attempt.isResetRequired()
+                        ? AgentRunRecoveryAction.CREATE_NEXT_ATTEMPT.name()
+                        : null);
+        for (PublicPreludeEvent item : expected) {
+            AgentRunStreamEventEntity persisted = eventRepository
+                    .findV2Event(
+                            attempt.getAgentRunId(),
+                            attempt.getId(),
+                            item.event().sequenceNo())
+                    .orElseThrow(() -> new IllegalStateException(
+                            "allocated AgentRun attempt is missing its durable public prelude"));
+            requireEqual(
+                    persisted.getAgentRunId(), item.event().runId(), "publicPreludeRunId");
+            requireEqual(
+                    persisted.getAgentRunAttemptId(),
+                    item.event().attemptId(),
+                    "publicPreludeAttemptId");
+            requireEqual(
+                    persisted.getSequenceNo(),
+                    item.event().sequenceNo(),
+                    "publicPreludeSequenceNo");
+            requireEqual(
+                    persisted.getEventType(),
+                    item.event().eventType().wireValue(),
+                    "publicPreludeEventType");
+            requireEqual(
+                    persisted.getStreamProtocol(),
+                    AgentRunProtocol.V2.wireValue(),
+                    "publicPreludeProtocol");
+            requireEqual(
+                    persisted.getAudience(), item.event().audience(), "publicPreludeAudience");
+            requireEqual(
+                    persisted.getCreatedAt().toInstant(),
+                    item.event().occurredAt(),
+                    "publicPreludeOccurredAt");
+
+            JsonNode persistedJson = streamJson(persisted.getPayloadJson());
+            String persistedHash = ContractJson.sha256Hex(persistedJson);
+            requireEqual(
+                    persisted.getPayloadHash(), persistedHash, "publicPreludeStoredHash");
+            requireEqual(
+                    persisted.getPayloadHash(), item.payloadHash(), "publicPreludePayloadHash");
+            requireEqual(
+                    ContractJson.canonicalString(persistedJson),
+                    item.canonicalJson(),
+                    "publicPreludePayloadJson");
+        }
+        if (!attempt.isResetRequired()) {
+            eventRepository
+                    .findV2Event(attempt.getAgentRunId(), attempt.getId(), 1)
+                    .filter(event -> StreamEventType.ATTEMPT_RESET.wireValue()
+                            .equals(event.getEventType()))
+                    .ifPresent(ignored -> {
+                        throw new IllegalStateException(
+                                "allocated AgentRun attempt has an unauthorized reset prelude");
+                    });
+        }
+        if (attempt.getLastSequenceNo() < attempt.getPublicSequenceOffset()) {
+            throw new IllegalStateException(
+                    "allocated AgentRun attempt progress is behind its durable public prelude");
+        }
+    }
+
+    private List<PublicPreludeEvent> publicPrelude(
+            AgentRunAttemptEntity attempt, RoomGraphCommand command, String resetReasonCode) {
+        Instant occurredAt = attempt.getStartedAt().toInstant();
+        AgentStreamEvent started = new AgentStreamEvent(
+                AgentRunProtocol.V2.wireValue(),
+                attempt.getAgentRunId(),
+                attempt.getId(),
+                0,
+                StreamEventType.ATTEMPT_STARTED,
+                command.actorScope().audience(),
+                occurredAt,
+                new AgentStreamEvent.Payload(
+                        command.graphKey(),
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null));
+        if (!attempt.isResetRequired()) {
+            return List.of(publicPreludeEvent(started));
+        }
+        requireEqual(
+                resetReasonCode,
+                AgentRunRecoveryAction.CREATE_NEXT_ATTEMPT.name(),
+                "resetReasonCode");
+        AgentStreamEvent reset = new AgentStreamEvent(
+                AgentRunProtocol.V2.wireValue(),
+                attempt.getAgentRunId(),
+                attempt.getId(),
+                1,
+                StreamEventType.ATTEMPT_RESET,
+                command.actorScope().audience(),
+                occurredAt,
+                new AgentStreamEvent.Payload(
+                        null,
+                        null,
+                        null,
+                        null,
+                        resetReasonCode,
+                        attempt.getPreviousAttemptId(),
+                        null,
+                        null,
+                        null,
+                        null));
+        return List.of(publicPreludeEvent(started), publicPreludeEvent(reset));
+    }
+
+    private PublicPreludeEvent publicPreludeEvent(AgentStreamEvent event) {
+        JsonNode json = streamObjectMapper.valueToTree(event);
+        return new PublicPreludeEvent(
+                event,
+                ContractJson.canonicalString(json),
+                ContractJson.sha256Hex(json));
+    }
+
+    private JsonNode streamJson(String value) {
+        if (value == null || value.isBlank()) {
+            throw new IllegalStateException("persisted public prelude JSON is missing");
+        }
+        try {
+            return streamObjectMapper.readTree(value);
+        } catch (JsonProcessingException exception) {
+            throw new IllegalStateException(
+                    "persisted public prelude JSON is invalid", exception);
+        }
+    }
+
+    private record PublicPreludeEvent(
+            AgentStreamEvent event, String canonicalJson, String payloadHash) {}
 
     private AgentRunEntity lockRun(String agentRunId) {
         return runRepository

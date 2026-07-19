@@ -3,6 +3,8 @@ package com.example.dispute.workflow.agentrun;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.catchThrowableOfType;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
 
 import com.example.dispute.agentstream.application.AgentRunReconciledFinalStore;
 import com.example.dispute.agentstream.application.AgentRunV2StreamStore;
@@ -33,6 +35,7 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
@@ -92,8 +95,7 @@ class DurableAgentRunExecutionGatewayTest {
                 .containsExactly(
                         "persist-[1, 2]",
                         "progress-2",
-                        "persist-[3]",
-                        "progress-3");
+                        "persist-[3]");
         assertThat(completion.graphResult()).isEqualTo(result);
         assertThat(completion.lastSequenceNo()).isEqualTo(3);
         assertThat(completion.publicOutputEmitted()).isTrue();
@@ -125,6 +127,46 @@ class DurableAgentRunExecutionGatewayTest {
 
         assertThat(batches).containsExactly(List.of(1L, 2L));
         assertThat(completion.lastSequenceNo()).isEqualTo(2);
+    }
+
+    @Test
+    void cancellationRacingASuccessfulFinalAppendCannotReverseCompletion() throws Exception {
+        ExecuteAgentRunRequest request = request();
+        RoomGraphResult result = graphResult();
+        AtomicBoolean finalCommitted = new AtomicBoolean();
+        ActivityCanceledException cancellation = new ActivityCanceledException();
+        AgentRunCancellationToken token = mock(AgentRunCancellationToken.class);
+        doAnswer(invocation -> {
+                    if (finalCommitted.get()) {
+                        throw cancellation;
+                    }
+                    return null;
+                })
+                .when(token)
+                .throwIfCancellationRequested();
+        AgentGraphCommandClient client = (actualRequest, mode, eventSink, cancellationToken) -> {
+            eventSink.accept(event(request, 0, StreamEventType.ATTEMPT_STARTED, null));
+            eventSink.accept(event(request, 1, StreamEventType.FINAL, result.outputHash()));
+            return result;
+        };
+        AgentRunV2StreamStore store = batchStore(events -> {
+            assertThat(events.getLast().eventType()).isEqualTo(StreamEventType.FINAL);
+            finalCommitted.set(true);
+            return receipt(events, true, events.getLast().sequenceNo());
+        });
+
+        var completion = new DurableAgentRunExecutionGateway(client, store)
+                .execute(
+                        request,
+                        ExecutionMode.EXECUTE_OR_RECONCILE,
+                        ignored -> {
+                            throw new AssertionError("durable final must not invoke progress");
+                        },
+                        token);
+
+        assertThat(finalCommitted).isTrue();
+        assertThat(completion.graphResult()).isEqualTo(result);
+        assertThat(completion.lastSequenceNo()).isEqualTo(1);
     }
 
     @Test
@@ -167,7 +209,7 @@ class DurableAgentRunExecutionGatewayTest {
         assertThat(handshake.sequenceNo()).isZero();
         assertThat(delta.sequenceNo()).isEqualTo(1);
         assertThat(finalCandidate.sequenceNo()).isEqualTo(2);
-        assertThat(progress).containsExactly(3L);
+        assertThat(progress).isEmpty();
         assertThat(completion.lastSequenceNo()).isEqualTo(3);
         assertThat(completion.publicOutputEmitted()).isTrue();
     }
@@ -602,7 +644,7 @@ class DurableAgentRunExecutionGatewayTest {
                 request.command().actorScope().audience(),
                 reconciliation.resultRef(),
                 reconciliation.resultHash()));
-        assertThat(progress).containsExactly(new AgentRunProgress(4, true, true));
+        assertThat(progress).isEmpty();
         assertThat(completion.graphResult()).isEqualTo(reconciliation.result());
         assertThat(completion.lastSequenceNo()).isEqualTo(4);
         assertThat(completion.publicOutputEmitted()).isTrue();
@@ -663,7 +705,7 @@ class DurableAgentRunExecutionGatewayTest {
                 new AgentRunCancellationToken());
 
         assertThat(first).isEqualTo(retry);
-        assertThat(firstProgress).containsExactly(new AgentRunProgress(2, false, true));
+        assertThat(firstProgress).isEmpty();
         assertThat(retryProgress).isEmpty();
         assertThat(appends).hasValue(2);
         assertThat(storedFinal.occurredAt()).isEqualTo(NOW);
@@ -672,7 +714,7 @@ class DurableAgentRunExecutionGatewayTest {
     @Test
     void mismatchedReconciliationNeverReachesEitherDurableStreamStore()
             throws Exception {
-        ExecuteAgentRunRequest request = request();
+        ExecuteAgentRunRequest request = requestWithReset();
         GraphReconcileResponse exact = reconciliation(request);
         GraphReconcileResponse mismatched = new GraphReconcileResponse(
                 exact.schemaVersion(),
@@ -715,6 +757,7 @@ class DurableAgentRunExecutionGatewayTest {
 
         assertThat(failure.errorCode()).isEqualTo("AGENT_RUN_RECONCILIATION_RESULT_INVALID");
         assertThat(failure.retryable()).isFalse();
+        assertThat(failure.lastSequenceNo()).isEqualTo(1);
         assertThat(streamWrites).isEmpty();
         assertThat(finalStoreCalls).hasValue(0);
     }
@@ -722,7 +765,7 @@ class DurableAgentRunExecutionGatewayTest {
     @Test
     void reconciledFinalConflictFailsClosedWhilePersistenceLossIsReplaySafe()
             throws Exception {
-        ExecuteAgentRunRequest request = request();
+        ExecuteAgentRunRequest request = requestWithReset();
         GraphReconcileResponse reconciliation = reconciliation(request);
         AgentGraphCommandClient forbidden =
                 (actualRequest, mode, sink, token) -> {
@@ -746,6 +789,7 @@ class DurableAgentRunExecutionGatewayTest {
                                 new AgentRunCancellationToken()));
         assertThat(conflict.errorCode()).isEqualTo("AGENT_RUN_RECONCILED_FINAL_CONFLICT");
         assertThat(conflict.retryable()).isFalse();
+        assertThat(conflict.lastSequenceNo()).isEqualTo(1);
 
         AgentRunExecutionException transientFailure = catchThrowableOfType(
                 AgentRunExecutionException.class,
@@ -767,6 +811,7 @@ class DurableAgentRunExecutionGatewayTest {
         assertThat(transientFailure.commandReplaySafe()).isTrue();
         assertThat(transientFailure.recoveryAction().name())
                 .isEqualTo("RECONCILE_TERMINAL");
+        assertThat(transientFailure.lastSequenceNo()).isEqualTo(1);
     }
 
     @Test
@@ -810,7 +855,7 @@ class DurableAgentRunExecutionGatewayTest {
     @Test
     void reconciliationRecoveryActionsAreMappedWithoutOpeningAStreamOrWritingAFinal()
             throws Exception {
-        ExecuteAgentRunRequest request = request();
+        ExecuteAgentRunRequest request = requestWithReset();
         AtomicInteger streamCalls = new AtomicInteger();
         AtomicInteger finalStoreCalls = new AtomicInteger();
         AgentGraphCommandClient forbidden =
@@ -884,6 +929,7 @@ class DurableAgentRunExecutionGatewayTest {
             }
             assertThat(mapped.getCause()).isSameAs(remoteFailure);
             assertThat(mapped.getMessage()).doesNotContain("private remote detail");
+            assertThat(mapped.lastSequenceNo()).isEqualTo(1);
         }
 
         assertThat(streamCalls).hasValue(0);
@@ -893,7 +939,7 @@ class DurableAgentRunExecutionGatewayTest {
     @Test
     void reconciliationCancellationPropagatesWithoutOpeningAStreamOrWritingAFinal()
             throws Exception {
-        ExecuteAgentRunRequest request = request();
+        ExecuteAgentRunRequest request = requestWithReset();
         ActivityCanceledException cancellation = new ActivityCanceledException();
         AtomicInteger streamCalls = new AtomicInteger();
         AtomicInteger finalStoreCalls = new AtomicInteger();
@@ -923,7 +969,7 @@ class DurableAgentRunExecutionGatewayTest {
 
     @Test
     void reconciledFinalMustBeTheDurableHighWatermark() throws Exception {
-        ExecuteAgentRunRequest request = request();
+        ExecuteAgentRunRequest request = requestWithReset();
         GraphReconcileResponse reconciliation = reconciliation(request);
         AgentStreamEvent storedFinal = reconciledFinal(request, reconciliation, 2, NOW);
         AgentRunExecutionException failure = catchThrowableOfType(
@@ -962,6 +1008,7 @@ class DurableAgentRunExecutionGatewayTest {
         assertThat(missingReceipt.errorCode())
                 .isEqualTo("AGENT_RUN_RECONCILED_FINAL_CONFLICT");
         assertThat(missingReceipt.retryable()).isFalse();
+        assertThat(missingReceipt.lastSequenceNo()).isEqualTo(1);
     }
 
     @Test
@@ -980,12 +1027,13 @@ class DurableAgentRunExecutionGatewayTest {
                 () -> new DurableAgentRunExecutionGateway(
                                 commandClient, recordingStore(new ArrayList<>()))
                         .execute(
-                                request(),
+                                requestWithReset(),
                                 ExecutionMode.RECONCILE_ONLY,
                                 ignored -> {},
                                 new AgentRunCancellationToken()));
 
         assertThat(failure.errorCode()).isEqualTo("AGENT_RUN_RECONCILIATION_NOT_CONFIGURED");
+        assertThat(failure.lastSequenceNo()).isEqualTo(1);
         assertThat(streamCalls).hasValue(0);
     }
 

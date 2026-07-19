@@ -16,6 +16,22 @@ import org.junit.jupiter.api.Test;
 class AgentRunAttemptEntityTest {
 
     @Test
+    void initializesProgressAtTheJavaOwnedPreludeHighWatermark() {
+        AgentRunAttemptEntity attempt =
+                AgentRunAttemptEntity.start(
+                        RUN_ID,
+                        AgentRunPersistenceFixtures.allocation(2, "ATTEMPT_V2_RESET"),
+                        "ATTEMPT_V2_1",
+                        true,
+                        1,
+                        STARTED_AT);
+
+        assertThat(attempt.getLastSequenceNo()).isEqualTo(1);
+        assertThat(attempt.isPublicOutputEmitted()).isFalse();
+        assertThat(attempt.isFinalFrameObserved()).isFalse();
+    }
+
+    @Test
     void retainsExecutionMetadataProgressUsageAndResultAcrossReplay() {
         AgentRunAttemptEntity attempt =
                 AgentRunAttemptEntity.start(

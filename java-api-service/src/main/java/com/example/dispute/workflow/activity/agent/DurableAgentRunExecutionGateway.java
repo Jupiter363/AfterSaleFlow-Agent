@@ -151,7 +151,7 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
             throw AgentRunExecutionException.failLogicalRun(
                     "AGENT_RUN_RECONCILIATION_NOT_CONFIGURED",
                     "result-only reconciliation dependencies are unavailable",
-                    0,
+                    request.publicSequenceOffset(),
                     false,
                     null);
         }
@@ -161,7 +161,7 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
             response = reconciliationClient.reconcile(request, cancellationToken);
         } catch (GraphReconciliationException failure) {
             cancellationToken.throwIfCancellationRequested();
-            throw reconciliationFailure(failure);
+            throw reconciliationFailure(failure, request.publicSequenceOffset());
         }
         requireReconciliationMatches(request, response);
         cancellationToken.throwIfCancellationRequested();
@@ -176,30 +176,27 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
                             response.resultRef(),
                             response.resultHash()));
         } catch (NonRunningAttemptException failure) {
-            cancellationToken.throwIfCancellationRequested();
             if (staleAttemptStatus(failure.attemptStatus())) {
                 throw staleAttemptFinal(request.publicSequenceOffset(), false, failure);
             }
             throw AgentRunExecutionException.reconcileTerminal(
                     "AGENT_RUN_RECONCILED_FINAL_APPEND_FAILED",
                     "durable reconciled final append failed",
-                    0,
+                    request.publicSequenceOffset(),
                     false,
                     failure);
         } catch (AgentRunReconciledFinalStore.ConflictException failure) {
-            cancellationToken.throwIfCancellationRequested();
             throw AgentRunExecutionException.failLogicalRun(
                     "AGENT_RUN_RECONCILED_FINAL_CONFLICT",
                     "durable reconciled final conflicts with public history",
-                    0,
+                    request.publicSequenceOffset(),
                     false,
                     failure);
         } catch (RuntimeException failure) {
-            cancellationToken.throwIfCancellationRequested();
             throw AgentRunExecutionException.reconcileTerminal(
                     "AGENT_RUN_RECONCILED_FINAL_APPEND_FAILED",
                     "durable reconciled final append failed",
-                    0,
+                    request.publicSequenceOffset(),
                     false,
                     failure);
         }
@@ -207,7 +204,7 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
             throw AgentRunExecutionException.failLogicalRun(
                     "AGENT_RUN_RECONCILED_FINAL_CONFLICT",
                     "durable reconciled final store returned no receipt",
-                    0,
+                    request.publicSequenceOffset(),
                     false,
                     null);
         }
@@ -225,13 +222,6 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
                     receipt.publicOutputEmitted(),
                     null);
         }
-        cancellationToken.throwIfCancellationRequested();
-        if (receipt.inserted()) {
-            progressListener.onProgress(new AgentRunProgress(
-                    finalEvent.sequenceNo(),
-                    receipt.publicOutputEmitted(),
-                    true));
-        }
         return new Completion(
                 response.result(),
                 finalEvent.sequenceNo(),
@@ -239,30 +229,30 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
     }
 
     private static AgentRunExecutionException reconciliationFailure(
-            GraphReconciliationException failure) {
+            GraphReconciliationException failure, long baselineSequence) {
         return switch (failure.recoveryAction()) {
             case RETRY_SAME_COMMAND -> AgentRunExecutionException.retrySameCommand(
                     failure.errorCode(),
                     "result-only reconciliation may retry the same command",
-                    0,
+                    baselineSequence,
                     false,
                     failure);
             case CREATE_NEXT_ATTEMPT -> AgentRunExecutionException.createNextAttempt(
                     failure.errorCode(),
                     "result-only reconciliation requires a new AgentRun attempt",
-                    0,
+                    baselineSequence,
                     false,
                     failure);
             case FAIL_LOGICAL_RUN -> AgentRunExecutionException.failLogicalRun(
                     failure.errorCode(),
                     "result-only reconciliation rejected the logical run",
-                    0,
+                    baselineSequence,
                     false,
                     failure);
             case RECONCILE_TERMINAL -> AgentRunExecutionException.failLogicalRun(
                     "AGENT_RUN_RECONCILIATION_ACTION_INVALID",
                     "result-only reconciliation returned a recursive recovery action",
-                    0,
+                    baselineSequence,
                     false,
                     failure);
         };
@@ -275,7 +265,7 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
             throw AgentRunExecutionException.failLogicalRun(
                     "AGENT_RUN_RECONCILIATION_RESULT_MISSING",
                     "result-only reconciliation returned no response",
-                    0,
+                    request.publicSequenceOffset(),
                     false,
                     null);
         }
@@ -303,7 +293,7 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
             throw AgentRunExecutionException.failLogicalRun(
                     "AGENT_RUN_RECONCILIATION_RESULT_INVALID",
                     "result-only reconciliation differs from its command",
-                    0,
+                    request.publicSequenceOffset(),
                     false,
                     null);
         }
@@ -319,6 +309,10 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
             return;
         }
         List<AgentStreamEvent> events = batch.events();
+        boolean commitsFinal = events.getLast().eventType() == StreamEventType.FINAL;
+        if (commitsFinal) {
+            cancellationToken.throwIfCancellationRequested();
+        }
         BatchAppendReceipt receipt;
         try {
             receipt = Objects.requireNonNull(
@@ -364,7 +358,7 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
             state.commit(events.get(index));
             inserted |= receipt.inserted().get(index);
         }
-        AgentRunProgress notification = inserted ? state.snapshot() : null;
+        AgentRunProgress notification = inserted && !commitsFinal ? state.snapshot() : null;
         batch.clear();
         if (notification != null) {
             cancellationToken.throwIfCancellationRequested();

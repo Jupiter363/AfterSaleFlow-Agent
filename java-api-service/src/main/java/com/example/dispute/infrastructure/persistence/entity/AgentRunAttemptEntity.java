@@ -227,6 +227,7 @@ public class AgentRunAttemptEntity extends AbstractEntity {
         attempt.previousAttemptId = previousAttemptId;
         attempt.resetRequired = resetRequired;
         attempt.publicSequenceOffset = publicSequenceOffset;
+        attempt.lastSequenceNo = publicSequenceOffset;
         attempt.startedAt = at(startedAt, "startedAt");
         attempt.lastHeartbeatAt = attempt.startedAt;
         attempt.createdAt = attempt.startedAt;

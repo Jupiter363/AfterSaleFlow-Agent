@@ -2,6 +2,7 @@ package com.example.dispute.agentstream.infrastructure.persistence;
 
 import com.example.dispute.agentstream.application.AgentRunV2StreamStore;
 import com.example.dispute.agentstream.application.AgentRunV2StreamStore.BatchAppendReceipt;
+import com.example.dispute.agentstream.application.AgentRunV2StreamStore.NonRunningAttemptException;
 import com.example.dispute.agentstream.application.AgentRunReconciledFinalStore;
 import com.example.dispute.workflow.contract.v1.AgentStreamEvent;
 import com.example.dispute.workflow.contract.v1.ContractJson;
@@ -168,7 +169,7 @@ public class PostgresAgentRunV2EventStore {
         this.namedJdbc = new NamedParameterJdbcTemplate(jdbc);
         this.objectMapper =
                 Objects.requireNonNull(objectMapper, "objectMapper must not be null").copy();
-        this.objectMapper.setSerializationInclusion(JsonInclude.Include.ALWAYS);
+        this.objectMapper.setSerializationInclusion(JsonInclude.Include.NON_NULL);
         this.objectMapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
         this.writeTransaction = new TransactionTemplate(transactionManager);
         this.writeTransaction.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
@@ -308,9 +309,7 @@ public class PostgresAgentRunV2EventStore {
         for (PersistedEvent candidate : batch) {
             String storedHash = storedHashes.get(candidate.event().sequenceNo());
             if (storedHash == null) {
-                throw new IllegalStateException(
-                        "new durable stream events require a RUNNING attempt; status is "
-                                + attemptStatus);
+                throw new NonRunningAttemptException(attemptStatus);
             }
             if (!storedHash.equals(candidate.payloadHash())) {
                 throw new IllegalStateException(
@@ -397,6 +396,11 @@ public class PostgresAgentRunV2EventStore {
         if (attemptStatus != AgentRunAttemptStatus.RUNNING
                 && attemptStatus != AgentRunAttemptStatus.RESULT_READY
                 && attemptStatus != AgentRunAttemptStatus.COMPLETED) {
+            if (attemptStatus == AgentRunAttemptStatus.FAILED
+                    || attemptStatus == AgentRunAttemptStatus.ABORTED
+                    || attemptStatus == AgentRunAttemptStatus.CANCELLED) {
+                throw new NonRunningAttemptException(attemptStatus);
+            }
             throw new AgentRunReconciledFinalStore.ConflictException(
                     "reconciled final conflicts with terminal attempt status " + attemptStatus);
         }

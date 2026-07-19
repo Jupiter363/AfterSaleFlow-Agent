@@ -13,6 +13,11 @@ import com.example.dispute.workflow.contract.v1.RoomGraphResult;
  */
 public interface AgentRunExecutionGateway {
 
+    /**
+     * Executes or reconciles one attempt and returns only after its public {@code final} is durable.
+     * Cancellation observed before that append must fail the call; cancellation racing after the
+     * append cannot replace the returned completion.
+     */
     Completion execute(
             ExecuteAgentRunRequest request,
             ExecutionMode executionMode,
@@ -38,6 +43,13 @@ public interface AgentRunExecutionGateway {
         void onProgress(AgentRunProgress progress);
     }
 
+    /**
+     * Proof that the exact graph result and its public {@code final} are durably bound.
+     *
+     * <p>Implementations must honor cancellation before appending {@code final}. Once this value is
+     * returned, later cancellation cannot reverse the attempt to {@code CANCELLED}; callers recover
+     * any subsequent persistence loss through terminal reconciliation.
+     */
     record Completion(
             RoomGraphResult graphResult,
             long lastSequenceNo,

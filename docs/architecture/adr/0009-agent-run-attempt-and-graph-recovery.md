@@ -249,6 +249,11 @@ Java writes the new attempt, predecessor binding, reset decision, and public-pre
 transaction. Temporal dispatch occurs after that transaction. Duplicate dispatch uses
 `attempt_id` as the Update ID.
 
+For this implementation, the immutable `agent_run_stream_event` prelude rows are the durable
+outbox and the public replay fact; there is no second prelude table or relay that could become a
+competing source of truth. Redis publishes only a best-effort high-watermark hint. A missed hint
+delays a live subscriber until PostgreSQL catch-up but cannot lose or regenerate the prelude.
+
 The required recovery behavior is:
 
 | Crash point | Recovery |
@@ -279,6 +284,11 @@ into an AgentRun attempt.
    read-only and never receive synthetic V2 resets.
 7. Run the tests below from one candidate commit. Promotion remains blocked until every contract
    delta is resolved and independent environment evidence is approved.
+
+The versioned build in step 4 also corrects pre-production SHADOW serialization to omit absent
+optional Agent Stream fields, as required by the V2 JSON Schema. Attempts whose hashes were
+created by the earlier null-emitting serializer stay pinned to and drain on their old build; they
+must not be replayed through the corrected serializer.
 
 Rollback stops admission of new V2 attempts and drains the pinned build. It never deletes a reset,
 renumbers a stream, changes an event hash, or turns an active V2 logical run into a V1 executor.

@@ -101,6 +101,33 @@ public final class AgentRunHeartbeatMonitor implements AutoCloseable {
         heartbeatNow();
     }
 
+    /** Advances the local snapshot after public final commit without any cancellable callback. */
+    public void durableFinal(AgentRunProgress update) {
+        Objects.requireNonNull(update, "update");
+        if (!update.finalFrameObserved()) {
+            throw new IllegalArgumentException("durable final progress must observe the final frame");
+        }
+        boolean regressed;
+        AgentRunProgress durableSnapshot;
+        synchronized (stateLock) {
+            requireActive();
+            regressed = update.lastSequenceNo() < progress.lastSequenceNo();
+            progress = new AgentRunProgress(
+                    Math.max(update.lastSequenceNo(), progress.lastSequenceNo()),
+                    progress.publicOutputEmitted() || update.publicOutputEmitted(),
+                    true);
+            durableSnapshot = progress;
+        }
+        if (regressed) {
+            throw AgentRunExecutionException.reconcileTerminal(
+                    "AGENT_RUN_PROGRESS_REGRESSED",
+                    "durable final sequence regressed",
+                    durableSnapshot.lastSequenceNo(),
+                    durableSnapshot.publicOutputEmitted(),
+                    null);
+        }
+    }
+
     public void heartbeatNow() {
         synchronized (heartbeatLock) {
             cancellationToken.throwIfCancellationRequested();

@@ -6,6 +6,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -413,6 +414,39 @@ class ExecuteAgentRunActivityTest {
                             assertThat(failure.isNonRetryable()).isTrue();
                         });
         verify(ledger, never()).recordResultReady(any());
+        verify(ledger, never()).recordAttemptFailureResult(any(), any());
+    }
+
+    @Test
+    void resultReadyPersistenceLossAfterDurableCompletionRequiresTerminalReconciliation()
+            throws Exception {
+        ExecuteAgentRunRequest request = request();
+        RoomGraphResult graphResult = graphResult();
+        AgentRunLedger ledger = mock(AgentRunLedger.class);
+        AgentRunExecutionGateway gateway = mock(AgentRunExecutionGateway.class);
+        when(ledger.requireAllocatedAttempt(request)).thenReturn(runningAttempt(0, false));
+        when(gateway.execute(
+                        eq(request),
+                        eq(ExecutionMode.EXECUTE_OR_RECONCILE),
+                        any(),
+                        any()))
+                .thenReturn(new AgentRunExecutionGateway.Completion(graphResult, 7, true));
+        doThrow(new IllegalStateException("result-ready commit unavailable"))
+                .when(ledger)
+                .recordResultReady(any());
+
+        assertThatThrownBy(() -> activity(ledger, gateway, () -> context(1)).execute(request))
+                .isInstanceOfSatisfying(
+                        ApplicationFailure.class,
+                        failure -> {
+                            assertThat(failure.getType())
+                                    .isEqualTo(ExecuteAgentRunActivityImpl.RETRYABLE_FAILURE_TYPE);
+                            assertThat(failure.getDetails().get(2, String.class))
+                                    .isEqualTo("AGENT_RUN_ACTIVITY_FAILED");
+                            assertThat(failure.getDetails().get(3, String.class))
+                                    .isEqualTo(AgentRunRecoveryAction.RECONCILE_TERMINAL.name());
+                        });
+        verify(ledger).recordResultReady(any());
         verify(ledger, never()).recordAttemptFailureResult(any(), any());
     }
 

@@ -102,14 +102,12 @@ public final class ExecuteAgentRunActivityImpl implements ExecuteAgentRunActivit
                             executionMode,
                             heartbeat::progress,
                             cancellationToken);
-            // A heartbeat can discover cancellation while the adapter is returning a late final.
-            cancellationToken.throwIfCancellationRequested();
             validateCompletion(request, completion);
-            heartbeat.progress(new AgentRunProgress(
-                    completion.lastSequenceNo(),
-                    completion.publicOutputEmitted(),
-                    true));
-            cancellationToken.throwIfCancellationRequested();
+            // A valid Completion proves a durable public final. From here the attempt is forward-only.
+            if (completion != null) {
+                heartbeat.durableFinal(new AgentRunProgress(
+                        completion.lastSequenceNo(), completion.publicOutputEmitted(), true));
+            }
 
             RoomGraphResult graphResult = completion.graphResult();
             ExecuteAgentRunResult result = new ExecuteAgentRunResult(
@@ -131,13 +129,16 @@ public final class ExecuteAgentRunActivityImpl implements ExecuteAgentRunActivit
             ledger.recordResultReady(result);
             return result;
         } catch (RuntimeException failure) {
+            AgentRunProgress durableProgress = heartbeat.snapshot();
             RuntimeException termination = cancellationToken.terminationCause();
             return handleFailure(
                     request,
                     attempt,
                     context,
-                    heartbeat.snapshot(),
-                    termination == null ? failure : termination);
+                    durableProgress,
+                    termination == null || durableProgress.finalFrameObserved()
+                            ? failure
+                            : termination);
         }
     }
 
@@ -182,7 +183,8 @@ public final class ExecuteAgentRunActivityImpl implements ExecuteAgentRunActivit
             AgentRunActivityContext context,
             AgentRunProgress heartbeat,
             RuntimeException failure) {
-        if (failure instanceof ActivityCanceledException cancelled) {
+        if (failure instanceof ActivityCanceledException cancelled
+                && !heartbeat.finalFrameObserved()) {
             recordCancellationPreserving(request, cancelled);
             throw cancelled;
         }

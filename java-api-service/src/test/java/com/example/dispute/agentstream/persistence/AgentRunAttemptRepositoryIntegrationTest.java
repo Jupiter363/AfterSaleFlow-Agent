@@ -13,11 +13,16 @@ import com.example.dispute.workflow.activity.agent.AgentRunExecutionException;
 import com.example.dispute.workflow.activity.agent.AgentRunExecutionGateway;
 import com.example.dispute.workflow.activity.agent.AgentRunProgress;
 import com.example.dispute.workflow.activity.agent.ExecuteAgentRunActivityImpl;
+import com.example.dispute.workflow.contract.v1.AgentPlatformContractCodec;
 import com.example.dispute.workflow.contract.v1.AgentRunAttemptHeartbeat;
+import com.example.dispute.workflow.contract.v1.AgentStreamEvent;
+import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunRecoveryAction;
+import com.example.dispute.workflow.contract.v1.ContractTypes.StreamEventType;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -31,10 +36,12 @@ import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
@@ -44,6 +51,10 @@ import org.testcontainers.utility.DockerImageName;
 @Testcontainers
 @Import({JpaAgentRunLedger.class, AgentRunAttemptRepositoryIntegrationTest.JsonTestConfig.class})
 class AgentRunAttemptRepositoryIntegrationTest {
+
+    private static final AgentPlatformContractCodec CONTRACT_CODEC =
+            new AgentPlatformContractCodec(
+                    Path.of("..", "contracts", "agent-platform", "v1"));
 
     @Container
     private static final GenericContainer<?> POSTGRESQL =
@@ -73,6 +84,8 @@ class AgentRunAttemptRepositoryIntegrationTest {
     @Autowired private AgentRunLedger ledger;
     @Autowired private AgentRunAttemptRepository attemptRepository;
     @Autowired private AgentRunRepository runRepository;
+    @Autowired private ObjectMapper objectMapper;
+    @Autowired private PlatformTransactionManager transactionManager;
 
     @Test
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
@@ -110,6 +123,20 @@ class AgentRunAttemptRepositoryIntegrationTest {
         assertThat(replayedLogical.agentRunId()).isEqualTo(logical.agentRunId());
 
         var firstAllocation = AgentRunPersistenceFixtures.allocation(1, "ATTEMPT_V2_1");
+        TransactionTemplate allocationTransaction =
+                new TransactionTemplate(transactionManager);
+        allocationTransaction.executeWithoutResult(status -> {
+            ledger.startNextAttempt(
+                    logical.agentRunId(),
+                    firstAllocation,
+                    AgentRunPersistenceFixtures.STARTED_AT);
+            assertThat(attemptCount(logical.agentRunId())).isEqualTo(1);
+            assertThat(preludeCount(logical.agentRunId(), "ATTEMPT_V2_1")).isEqualTo(1);
+            status.setRollbackOnly();
+        });
+        assertThat(attemptCount(logical.agentRunId())).isZero();
+        assertThat(preludeCount(logical.agentRunId(), "ATTEMPT_V2_1")).isZero();
+
         AgentRunLedger.Attempt first =
                 ledger.startNextAttempt(logical.agentRunId(), firstAllocation, AgentRunPersistenceFixtures.STARTED_AT);
         AgentRunLedger.Attempt replayed =
@@ -123,6 +150,11 @@ class AgentRunAttemptRepositoryIntegrationTest {
         assertThat(first.previousAttemptId()).isNull();
         assertThat(first.resetRequired()).isFalse();
         assertThat(first.publicSequenceOffset()).isZero();
+        assertThat(first.lastSequenceNo()).isZero();
+        AgentStreamEvent firstPrelude = prelude(logical.agentRunId(), first.attemptId(), 0);
+        assertThat(firstPrelude.eventType()).isEqualTo(StreamEventType.ATTEMPT_STARTED);
+        assertThat(firstPrelude.occurredAt()).isEqualTo(AgentRunPersistenceFixtures.STARTED_AT);
+        assertThat(firstPrelude.payload().node()).isEqualTo("evidence.graph");
 
         var firstRequest = AgentRunPersistenceFixtures.request(1, first.attemptId());
         Instant nanosecondClock =
@@ -188,6 +220,52 @@ class AgentRunAttemptRepositoryIntegrationTest {
                         AgentRunPersistenceFixtures.request(
                                 2, second.attemptId(), first.attemptId(), false)))
                 .isEqualTo(second);
+        assertThat(second.lastSequenceNo()).isZero();
+        assertThat(prelude(logical.agentRunId(), second.attemptId(), 0).eventType())
+                .isEqualTo(StreamEventType.ATTEMPT_STARTED);
+        assertThat(preludeCount(logical.agentRunId(), second.attemptId())).isEqualTo(1);
+
+        TransactionTemplate corruptDispatch = new TransactionTemplate(transactionManager);
+        assertThatThrownBy(() -> corruptDispatch.executeWithoutResult(status -> {
+                    jdbc.update(
+                            """
+                            update agent_run_stream_event
+                               set payload_hash = ?
+                             where agent_run_id = ?
+                               and agent_run_attempt_id = ?
+                               and sequence_no = 0
+                               and stream_protocol = 'agent-stream.v2'
+                            """,
+                            "f".repeat(64),
+                            logical.agentRunId(),
+                            first.attemptId());
+                    ledger.requireAllocatedAttempt(firstRequest);
+                }))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("publicPreludeStoredHash");
+
+        TransactionTemplate corruptReplay = new TransactionTemplate(transactionManager);
+        assertThatThrownBy(() -> corruptReplay.executeWithoutResult(status -> {
+                    jdbc.update(
+                            """
+                            update agent_run_stream_event
+                               set payload_hash = ?
+                             where agent_run_id = ?
+                               and agent_run_attempt_id = ?
+                               and sequence_no = 0
+                               and stream_protocol = 'agent-stream.v2'
+                            """,
+                            "e".repeat(64),
+                            logical.agentRunId(),
+                            first.attemptId());
+                    ledger.startNextAttempt(
+                            logical.agentRunId(),
+                            firstAllocation,
+                            AgentRunPersistenceFixtures.STARTED_AT.plusSeconds(30));
+                }))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("publicPreludeStoredHash");
+
         ledger.recordResultReady(AgentRunPersistenceFixtures.result(2, second.attemptId()));
         ledger.recordResultReady(AgentRunPersistenceFixtures.result(2, second.attemptId()));
 
@@ -231,6 +309,56 @@ class AgentRunAttemptRepositoryIntegrationTest {
                 """,
                 AgentRunPersistenceFixtures.CASE_ID,
                 "idem-" + AgentRunPersistenceFixtures.CASE_ID);
+    }
+
+    private long attemptCount(String runId) {
+        return jdbc.queryForObject(
+                "select count(*) from agent_run_attempt where agent_run_id = ?",
+                Long.class,
+                runId);
+    }
+
+    private long preludeCount(String runId, String attemptId) {
+        return jdbc.queryForObject(
+                """
+                select count(*)
+                  from agent_run_stream_event
+                 where agent_run_id = ?
+                   and agent_run_attempt_id = ?
+                   and stream_protocol = 'agent-stream.v2'
+                   and event_type in ('attempt_started', 'attempt_reset')
+                """,
+                Long.class,
+                runId,
+                attemptId);
+    }
+
+    private AgentStreamEvent prelude(String runId, String attemptId, long sequenceNo) {
+        return jdbc.queryForObject(
+                """
+                select payload_json::text, payload_hash
+                  from agent_run_stream_event
+                 where agent_run_id = ?
+                   and agent_run_attempt_id = ?
+                   and stream_protocol = 'agent-stream.v2'
+                   and sequence_no = ?
+                """,
+                (resultSet, rowNumber) -> {
+                    try {
+                        String encoded = resultSet.getString("payload_json");
+                        var json = objectMapper.readTree(encoded);
+                        assertThat(resultSet.getString("payload_hash"))
+                                .isEqualTo(ContractJson.sha256Hex(json));
+                        return CONTRACT_CODEC.decode(
+                                "agent-stream-event.schema.json", json, AgentStreamEvent.class);
+                    } catch (com.fasterxml.jackson.core.JsonProcessingException exception) {
+                        throw new IllegalStateException(
+                                "persisted prelude fixture cannot be decoded", exception);
+                    }
+                },
+                runId,
+                attemptId,
+                sequenceNo);
     }
 
     @TestConfiguration

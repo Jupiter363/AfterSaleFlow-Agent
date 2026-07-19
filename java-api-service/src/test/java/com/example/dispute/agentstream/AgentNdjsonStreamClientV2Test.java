@@ -84,6 +84,67 @@ class AgentNdjsonStreamClientV2Test {
     }
 
     @Test
+    void frozenV2ReaderParsesAttemptResetForCompatibilityWithoutMakingItTerminal() {
+        var state = new AgentNdjsonStreamClient.V2ProtocolState(
+                "run-1", "attempt-1", Audience.USER, Set.of("room_utterance"));
+        parse(state, event(0, "attempt_started", "{\"node\":\"evidence_turn\"}"));
+
+        var reset = parse(
+                state,
+                event(
+                        1,
+                        "attempt_reset",
+                        "{\"reset_attempt_id\":\"attempt-previous\","
+                                + "\"reason_code\":\"VISIBLE_OUTPUT_SUPERSEDED\"}"));
+        var finalEvent = parse(
+                state,
+                event(
+                        2,
+                        "final",
+                        "{\"final_result_ref\":\"urn:result:1\",\"final_result_hash\":\""
+                                + "a".repeat(64)
+                                + "\"}"));
+
+        assertThat(reset.eventType()).isEqualTo(StreamEventType.ATTEMPT_RESET);
+        assertThat(reset.payload().resetAttemptId()).isEqualTo("attempt-previous");
+        assertThat(reset.payload().reasonCode()).isEqualTo("VISIBLE_OUTPUT_SUPERSEDED");
+        assertThat(finalEvent.eventType()).isEqualTo(StreamEventType.FINAL);
+    }
+
+    @Test
+    void frozenV2ReaderRejectsSelfReferentialAndMalformedAttemptResetPayloads() {
+        var selfReference = new AgentNdjsonStreamClient.V2ProtocolState(
+                "run-1", "attempt-1", Audience.USER, Set.of("room_utterance"));
+        parse(
+                selfReference,
+                event(0, "attempt_started", "{\"node\":\"evidence_turn\"}"));
+
+        assertThatThrownBy(() -> parse(
+                        selfReference,
+                        event(
+                                1,
+                                "attempt_reset",
+                                "{\"reset_attempt_id\":\"attempt-1\","
+                                        + "\"reason_code\":\"VISIBLE_OUTPUT_SUPERSEDED\"}")))
+                .isInstanceOf(AgentStreamProtocolException.class)
+                .hasMessageContaining("older attempt");
+
+        var missingReason = new AgentNdjsonStreamClient.V2ProtocolState(
+                "run-1", "attempt-1", Audience.USER, Set.of("room_utterance"));
+        parse(
+                missingReason,
+                event(0, "attempt_started", "{\"node\":\"evidence_turn\"}"));
+        assertThatThrownBy(() -> parse(
+                        missingReason,
+                        event(
+                                1,
+                                "attempt_reset",
+                                "{\"reset_attempt_id\":\"attempt-previous\"}")))
+                .isInstanceOf(AgentStreamProtocolException.class)
+                .hasMessageContaining("reason_code");
+    }
+
+    @Test
     void rejectsIdentifiersAndReferencesOutsideTheFrozenSchema() {
         assertThatThrownBy(
                         () ->

@@ -112,7 +112,7 @@ class AgentRunLiveWakeupIntegrationTest {
         listener.start();
         try {
             AgentRunV2StreamStore.AppendReceipt first =
-                    streamStore.append(event(attempt.attemptId(), 0, "first"));
+                    streamStore.append(event(attempt.attemptId(), 1, "first"));
             AgentRunStreamWakeup wakeup = wakeups.poll(5, TimeUnit.SECONDS);
 
             assertThat(first.inserted()).isTrue();
@@ -122,20 +122,20 @@ class AgentRunLiveWakeupIntegrationTest {
                                     AgentRunStreamWakeup.SCHEMA_VERSION,
                                     logical.agentRunId(),
                                     attempt.attemptId(),
-                                    0));
+                                    1));
         } finally {
             listener.stop();
         }
 
         REDIS.stop();
         AgentRunV2StreamStore.AppendReceipt duringRedisFailure =
-                streamStore.append(event(attempt.attemptId(), 1, "still durable"));
+                streamStore.append(event(attempt.attemptId(), 2, "still durable"));
 
         assertThat(duringRedisFailure.inserted()).isTrue();
-        assertThat(duringRedisFailure.durableHighWatermark()).isEqualTo(1);
+        assertThat(duringRedisFailure.durableHighWatermark()).isEqualTo(2);
         assertThat(eventStore.replay(logical.agentRunId(), attempt.attemptId(), -1, 100))
                 .extracting(AgentStreamEvent::sequenceNo)
-                .containsExactly(0L, 1L);
+                .containsExactly(0L, 1L, 2L);
     }
 
     private AgentStreamEvent event(String attemptId, long sequence, String delta) {
