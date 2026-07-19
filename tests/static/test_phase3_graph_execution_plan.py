@@ -190,3 +190,57 @@ def test_phase3_plan_is_linked_from_repository_instructions() -> None:
     assert MATRIX.name in agents_text
     assert PLAN.name in master_text
     assert MATRIX.name in master_text
+
+
+def test_phase3_candidate_batch_covers_cross_language_execution_boundaries() -> None:
+    batch = load_matrix()["batches"]["P3-BATCH-3"]
+    commands = {item["id"]: item["command"] for item in batch["focused_commands"]}
+
+    assert set(commands) == {"python_phase_3", "root_phase_3_static", "java_phase_3"}
+    for required in (
+        "tests/static/test_phase3_candidate_evidence.py",
+        "tests/api/test_graph_commands.py",
+        "tests/api/test_graph_reconciliation.py",
+        "tests/api/test_graph_reconciliation_service.py",
+        "tests/api/test_graph_stream_service.py",
+        "tests/api/test_graph_lifecycle.py",
+        "tests/harness/test_model_runner.py",
+        "tests/model_runtime",
+        "tests/graph_runtime",
+    ):
+        selected_command = (
+            commands["root_phase_3_static"]
+            if required.startswith("tests/static/")
+            else commands["python_phase_3"]
+        )
+        assert required in selected_command
+
+    for required in (
+        "HttpAgentGraphCommandClientTest",
+        "HttpAgentGraphReconciliationClientTest",
+        "JdkGraphCommandHttpTransportTest",
+        "JdkGraphReconciliationHttpTransportTest",
+        "TrustedGraphTransportFactoryTest",
+        "Es256GraphCommandEnvelopeSignerTest",
+        "Es256GraphReconciliationEnvelopeSignerTest",
+        "MountedPemGraphEnvelopeKeySetTest",
+        "DurableAgentRunExecutionGatewayTest",
+        "GraphCommandClientConfigurationTest",
+        "GraphShadowRegistryPropertiesTest",
+        "GraphTransportConfigurationTest",
+        "GraphShadowAssemblyTest",
+        "AgentPlatformContractV1Test",
+    ):
+        assert required in commands["java_phase_3"]
+
+    execution = batch["execution"]
+    assert execution["strategy"] == (
+        "deduplicated_source_suites_then_derived_batch_views"
+    )
+    assert execution["heavy_parallelism"] == 1
+    assert execution["database_workers"] == 1
+    assert set(execution["source_reports"]) == {
+        "python-phase3-junit.xml",
+        "static-phase3-junit.xml",
+        "java-phase3-junit.xml",
+    }

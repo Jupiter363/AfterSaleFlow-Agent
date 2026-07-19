@@ -287,6 +287,10 @@ batches:
       - python-agent-service/tests/model_runtime
       - python-agent-service/tests/security
       - python-agent-service/tests/api/test_graph_commands.py
+      - python-agent-service/tests/api/test_graph_reconciliation.py
+      - python-agent-service/tests/api/test_graph_reconciliation_service.py
+      - python-agent-service/tests/api/test_graph_stream_service.py
+      - python-agent-service/tests/api/test_graph_lifecycle.py
       - python-agent-service/tests/harness/test_model_runner.py
     execution:
       order: [postgresql_migration_and_fence, gateway_recovery, model_runtime, api_security]
@@ -304,22 +308,49 @@ batches:
     focused_commands:
       - id: python_phase_3
         cwd: python-agent-service
-        command: D:\miniconda\python.exe -m pytest tests/graph_runtime tests/model_runtime tests/security tests/api/test_graph_commands.py tests/contracts/test_agent_platform_v1.py -q
+        command: >-
+          D:\miniconda\python.exe -m pytest
+          tests/graph_runtime
+          tests/model_runtime
+          tests/security
+          tests/api/test_graph_commands.py
+          tests/api/test_graph_reconciliation.py
+          tests/api/test_graph_reconciliation_service.py
+          tests/api/test_graph_stream_service.py
+          tests/api/test_graph_lifecycle.py
+          tests/harness/test_model_runner.py
+          tests/contracts/test_agent_platform_v1.py
+          -q
       - id: root_phase_3_static
         cwd: .
-        command: D:\miniconda\python.exe -m pytest tests/static/test_phase3_graph_execution_plan.py tests/static/test_graph_import_boundaries.py tests/static/test_agent_platform_schema_contracts.py tests/static/test_temporal_refactor_traceability.py -q
-      - id: java_contract_vectors
+        command: D:\miniconda\python.exe -m pytest tests/static/test_phase3_graph_execution_plan.py tests/static/test_phase3_candidate_evidence.py tests/static/test_graph_import_boundaries.py tests/static/test_agent_platform_schema_contracts.py tests/static/test_temporal_refactor_traceability.py -q
+      - id: java_phase_3
         cwd: java-api-service
-        command: .\mvnw.cmd -Dtest=AgentPlatformContractV1Test test
-      - id: async_100_component
-        cwd: python-agent-service
-        command: D:\miniconda\python.exe -m pytest tests/model_runtime/test_governed_chat_model_concurrency.py -q
+        command: >-
+          .\mvnw.cmd
+          "-Dtest=AgentNdjsonStreamClientV2Test,AgentRunCommandBindingFactoryTest,AgentRunFormalResultCommitterTest,AgentRunStreamEventServiceTest,AgentRunV2CoordinatorTest,AgentRunV2FinalizationGatewayTest,AgentRunV2ManifestFactoryTest,AgentRunLiveWakeupIntegrationTest,WakeupPublishingAgentRunV2StreamStoreTest,RedisAgentRunStreamWakeupPublisherTest,AgentExecutionManifestEntityTest,AgentRunAttemptEntityTest,AgentRunAttemptRepositoryIntegrationTest,AgentRunStreamReplayIntegrationTest,AgentRunV2MigrationIntegrationTest,JdkGraphCommandHttpTransportTest,JdkGraphReconciliationHttpTransportTest,TrustedGraphTransportFactoryTest,AgentRunHeartbeatMonitorTest,AgentRunLogicalAttemptWorkflowTest,AgentRunTemporalSerializationTest,AgentRunWorkerRecoveryTest,DurableAgentRunExecutionGatewayTest,Es256GraphCommandEnvelopeSignerTest,Es256GraphReconciliationEnvelopeSignerTest,MountedPemGraphEnvelopeKeySetTest,ExecuteAgentRunActivityCancellationTest,ExecuteAgentRunActivityHeartbeatTest,ExecuteAgentRunActivityTest,FinalizeAgentRunActivityTest,HttpAgentGraphCommandClientTest,HttpAgentGraphReconciliationClientTest,TemporalAgentRunV2WorkflowLauncherTest,GraphCommandClientConfigurationTest,GraphCommandClientPropertiesTest,GraphShadowRegistryPropertiesTest,GraphTransportConfigurationTest,GraphShadowAssemblyTest,AgentRunV2ApplicationContextTest,TemporalWorkerConfigurationTest,AgentPlatformContractV1Test,AgentRunV2ContractTest,DisputeApplicationTest"
+          test
+    execution:
+      strategy: deduplicated_source_suites_then_derived_batch_views
+      heavy_parallelism: 1
+      database_workers: 1
+      source_reports:
+        - python-phase3-junit.xml
+        - static-phase3-junit.xml
+        - java-phase3-junit.xml
+      derived_views:
+        - batch-1-junit.xml
+        - batch-2-junit.xml
+        - batch-3-junit.xml
     evidence:
       root: test-reports/temporal-first/<release-id>/phase-3
       required_files:
         - phase-metrics.json
         - check-id-coverage.json
         - candidate-commit.txt
+        - python-phase3-junit.xml
+        - static-phase3-junit.xml
+        - java-phase3-junit.xml
         - batch-1-junit.xml
         - batch-2-junit.xml
         - batch-3-junit.xml
