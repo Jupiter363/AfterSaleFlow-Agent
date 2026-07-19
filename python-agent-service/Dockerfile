@@ -9,11 +9,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-COPY requirements.txt .
-RUN python -m pip install --upgrade pip \
-    && python -m pip install --requirement requirements.txt
+COPY requirements.txt requirements.lock ./
+RUN python -m pip install --require-hashes --requirement requirements.lock \
+    && python -m pip check
 
 COPY app ./app
+COPY migrations ./migrations
 
 RUN useradd --create-home --uid 10001 app \
     && chown -R app:app /app

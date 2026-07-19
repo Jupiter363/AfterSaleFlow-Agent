@@ -81,6 +81,13 @@ foreach ($line in [System.IO.File]::ReadAllLines($ExampleFile)) {
 
 Set-GeneratedValue "POSTGRES_USER" ("user_" + (New-SecureHex 4))
 Set-GeneratedValue "POSTGRES_PASSWORD" (New-SecureHex 24)
+Set-GeneratedValue "JAVA_DB_PASSWORD" (New-SecureHex 24)
+Set-GeneratedValue "TEMPORAL_DB_PASSWORD" (New-SecureHex 24)
+Set-GeneratedValue "LANGFUSE_DB_PASSWORD" (New-SecureHex 24)
+Set-GeneratedValue "LITELLM_DB_PASSWORD" (New-SecureHex 24)
+Set-GeneratedValue "GRAPH_MIGRATOR_PASSWORD" (New-SecureHex 24)
+Set-GeneratedValue "GRAPH_RUNTIME_PASSWORD" (New-SecureHex 24)
+Set-GeneratedValue "GRAPH_RETENTION_PASSWORD" (New-SecureHex 24)
 Set-GeneratedValue "REDIS_PASSWORD" (New-SecureHex 24)
 Set-GeneratedValue "MINIO_ROOT_USER" ("user_" + (New-SecureHex 4))
 Set-GeneratedValue "MINIO_ROOT_PASSWORD" (New-SecureHex 24)

@@ -46,6 +46,13 @@ replace_if_placeholder() {
 
 replace_if_placeholder "POSTGRES_USER" "$(generate_user)"
 replace_if_placeholder "POSTGRES_PASSWORD" "$(generate_secret)"
+replace_if_placeholder "JAVA_DB_PASSWORD" "$(generate_secret)"
+replace_if_placeholder "TEMPORAL_DB_PASSWORD" "$(generate_secret)"
+replace_if_placeholder "LANGFUSE_DB_PASSWORD" "$(generate_secret)"
+replace_if_placeholder "LITELLM_DB_PASSWORD" "$(generate_secret)"
+replace_if_placeholder "GRAPH_MIGRATOR_PASSWORD" "$(generate_secret)"
+replace_if_placeholder "GRAPH_RUNTIME_PASSWORD" "$(generate_secret)"
+replace_if_placeholder "GRAPH_RETENTION_PASSWORD" "$(generate_secret)"
 replace_if_placeholder "REDIS_PASSWORD" "$(generate_secret)"
 replace_if_placeholder "MINIO_ROOT_USER" "$(generate_user)"
 replace_if_placeholder "MINIO_ROOT_PASSWORD" "$(generate_secret)"
