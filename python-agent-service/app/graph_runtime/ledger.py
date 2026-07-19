@@ -308,6 +308,7 @@ select distinct nonce.key_id
    and command.command_id = nonce.command_id
    and command.request_hash = nonce.request_hash
  where command.status in ('REGISTERED', 'EXECUTING', 'RESULT_CHECKPOINTED')
+    or nonce.retained_until > clock_timestamp()
 """
 
 RECOVERY_BUDGET_SQL: Final[str] = """

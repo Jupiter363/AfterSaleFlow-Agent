@@ -187,7 +187,7 @@ async def test_real_fenced_saver_rejects_stale_writer_and_restores_after_pool_re
     graph_database: _Database,
 ) -> None:
     await _migration_runner(graph_database).run()
-    await _seed_executable_command(graph_database)
+    await _seed_executable_command(graph_database, include_expired_nonce=True)
 
     pool = _runtime_pool(graph_database)
     await pool.open(wait=True, timeout=10)
@@ -301,6 +301,7 @@ async def test_real_fenced_saver_rejects_stale_writer_and_restores_after_pool_re
                     binding=command_before.binding,
                     owner_id="worker-never-acquires",
                 )
+                retained_keys = await ledger.referenced_verification_key_ids(connection)
     finally:
         await replacement_pool.close(timeout=10)
 
@@ -312,6 +313,7 @@ async def test_real_fenced_saver_rejects_stale_writer_and_restores_after_pool_re
     assert result.checkpoint_id == terminal_checkpoint_id
     assert cached == completed
     assert cached_result == result
+    assert retained_keys == frozenset({"key-integration-old"})
 
 
 @pytest.mark.asyncio
@@ -381,7 +383,7 @@ async def test_real_command_ledger_is_hash_idempotent_and_nonce_replay_safe(
     finally:
         await pool.close(timeout=10)
 
-    assert referenced_keys == frozenset({"key-1"})
+    assert referenced_keys == frozenset({"key-1", "key-integration-old"})
     assert nonce_count == 2
 
 
@@ -510,6 +512,7 @@ async def _seed_executable_command(
     database: _Database,
     *,
     ensure_lease: bool = True,
+    include_expired_nonce: bool = False,
 ) -> None:
     binding = _command_binding(COMMAND_ID, variant="execution")
     async with await AsyncConnection.connect(
@@ -590,6 +593,37 @@ async def _seed_executable_command(
                         binding.request_hash,
                     ),
                 )
+                await connection.execute(
+                    """
+                    insert into agent_graph_invocation_nonce (
+                        issuer, key_id, jti, thread_id, command_id, request_hash,
+                        issued_at, token_expires_at, retained_until
+                    ) values (
+                        'java-api-service', 'key-integration-old',
+                        'integration-delivery-jti', %s, %s, %s,
+                        clock_timestamp() - interval '2 minutes',
+                        clock_timestamp() - interval '1 minute 1 second',
+                        clock_timestamp() + interval '24 hours'
+                    ) on conflict do nothing
+                    """,
+                    (THREAD_ID, COMMAND_ID, binding.request_hash),
+                )
+                if include_expired_nonce:
+                    await connection.execute(
+                        """
+                        insert into agent_graph_invocation_nonce (
+                            issuer, key_id, jti, thread_id, command_id, request_hash,
+                            issued_at, token_expires_at, retained_until
+                        ) values (
+                            'java-api-service', 'key-integration-expired',
+                            'integration-expired-jti', %s, %s, %s,
+                            clock_timestamp() - interval '25 hours 2 minutes',
+                            clock_timestamp() - interval '25 hours 1 minute 1 second',
+                            clock_timestamp() - interval '1 hour'
+                        ) on conflict do nothing
+                        """,
+                        (THREAD_ID, COMMAND_ID, binding.request_hash),
+                    )
                 if not ensure_lease:
                     return
                 await connection.execute(

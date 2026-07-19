@@ -299,7 +299,13 @@ class GraphPersistenceReadinessProbe:
                    has_table_privilege(
                        current_user, %s || '.checkpoints', 'INSERT'
                    ) and has_table_privilege(
+                       current_user, %s || '.checkpoints', 'UPDATE'
+                   ) and has_table_privilege(
+                       current_user, %s || '.checkpoint_blobs', 'INSERT'
+                   ) and has_table_privilege(
                        current_user, %s || '.checkpoint_writes', 'INSERT'
+                   ) and has_table_privilege(
+                       current_user, %s || '.checkpoint_writes', 'UPDATE'
                    ) as can_write_checkpoints,
                    has_table_privilege(
                        current_user, %s || '.agent_graph_version_registry', 'SELECT'
@@ -340,7 +346,7 @@ class GraphPersistenceReadinessProbe:
                     ) as can_mutate_append_only
             """,
             (
-                *((self._config.schema,) * 14),
+                *((self._config.schema,) * 17),
                 list(RUNTIME_DELETE_FORBIDDEN_RELATIONS),
                 self._config.schema,
                 list(RUNTIME_APPEND_ONLY_RELATIONS),

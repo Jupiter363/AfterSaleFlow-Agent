@@ -260,7 +260,7 @@ async def test_repeated_identical_infrastructure_termination_is_idempotent() -> 
 
 
 @pytest.mark.asyncio
-async def test_nonterminal_jwks_kids_are_returned_as_a_set() -> None:
+async def test_recovery_window_jwks_kids_include_terminal_commands() -> None:
     connection = _Connection(
         [[{"key_id": "java-key-2"}, {"key_id": "java-key-1"}, {"key_id": "java-key-2"}]]
     )
@@ -268,7 +268,10 @@ async def test_nonterminal_jwks_kids_are_returned_as_a_set() -> None:
     keys = await PostgresCommandLedger().referenced_verification_key_ids(connection)
 
     assert keys == frozenset({"java-key-1", "java-key-2"})
-    assert "result_checkpointed" in connection.calls[0][0]
+    sql = " ".join(connection.calls[0][0].lower().split())
+    assert "join agent_graph_command command" in sql
+    assert "command.status in ('registered', 'executing', 'result_checkpointed')" in sql
+    assert "nonce.retained_until > clock_timestamp()" in sql
 
 
 @pytest.mark.asyncio

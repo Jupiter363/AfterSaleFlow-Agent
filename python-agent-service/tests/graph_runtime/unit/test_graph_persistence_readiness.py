@@ -70,6 +70,7 @@ class _Connection:
         environment_generation: str | None = None,
         unsafe_privilege: str | None = None,
         can_create_temporary: bool = False,
+        can_write_checkpoints: bool = True,
         migration_status: str = "CURRENT",
         restore_status: str = "VERIFIED",
         inconsistent_check: str | None = None,
@@ -82,6 +83,7 @@ class _Connection:
         )
         self.unsafe_privilege = unsafe_privilege
         self.can_create_temporary = can_create_temporary
+        self.can_write_checkpoints = can_write_checkpoints
         self.migration_status = migration_status
         self.restore_status = restore_status
         self.inconsistent_check = inconsistent_check
@@ -114,7 +116,7 @@ class _Connection:
                     "owns_relation": False,
                     "can_read_command": True,
                     "can_write_command": True,
-                    "can_write_checkpoints": True,
+                    "can_write_checkpoints": self.can_write_checkpoints,
                     "can_read_registry": True,
                     "can_mutate_registry": self.unsafe_privilege == "registry",
                     "can_mutate_control": self.unsafe_privilege == "control",
@@ -239,6 +241,16 @@ async def test_shadow_readiness_uses_only_bounded_read_only_queries() -> None:
     assert connection.statements[0] == "set transaction read only"
     forbidden = ("create ", "alter ", "insert ", "update ", "delete ", "setup")
     assert not any(statement.startswith(forbidden) for statement in connection.statements)
+    privilege_probe = next(
+        statement
+        for statement in connection.statements
+        if "has_database_privilege" in statement
+    )
+    assert ".checkpoints', 'insert'" in privilege_probe
+    assert ".checkpoints', 'update'" in privilege_probe
+    assert ".checkpoint_blobs', 'insert'" in privilege_probe
+    assert ".checkpoint_writes', 'insert'" in privilege_probe
+    assert ".checkpoint_writes', 'update'" in privilege_probe
 
 
 @pytest.mark.asyncio
@@ -305,6 +317,18 @@ async def test_runtime_role_with_temporary_privilege_is_not_ready() -> None:
     report = await GraphPersistenceReadinessProbe(
         config,
         _Pool(_Connection(config, can_create_temporary=True)),
+    ).check()
+
+    assert not report.ready
+    assert report.code == "GRAPH_RUNTIME_ROLE_PRIVILEGED"
+
+
+@pytest.mark.asyncio
+async def test_runtime_role_without_checkpoint_write_privileges_is_not_ready() -> None:
+    config = _config()
+    report = await GraphPersistenceReadinessProbe(
+        config,
+        _Pool(_Connection(config, can_write_checkpoints=False)),
     ).check()
 
     assert not report.ready
