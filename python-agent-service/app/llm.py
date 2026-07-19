@@ -9,8 +9,9 @@ import logging
 import re
 import threading
 import time
-from collections.abc import Iterator
-from dataclasses import dataclass
+from collections.abc import AsyncIterator, Iterator
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from io import StringIO
 from typing import Any, Literal, Protocol, TypeVar
 
@@ -130,7 +131,13 @@ class AgentOutputSchemaError(RuntimeError):
 class AgentServiceUnavailable(RuntimeError):
     """模型服务、LiteLLM 网关或网络不可用时抛出。"""
 
-    pass
+    def __init__(self, message: str, *, provider_attempts_used: int = 1) -> None:
+        super().__init__(message)
+        self.provider_attempts_used = provider_attempts_used
+
+
+class AgentProviderContractError(AgentServiceUnavailable):
+    """The provider replied, but its governed identity or metrics were invalid."""
 
 
 @dataclass(frozen=True)
@@ -145,6 +152,77 @@ class StructuredGeneration:
     model: str
     latency_ms: int
     token_usage: dict[str, int]
+    provider_attempts_used: int = 1
+    repairs_used: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class GovernedProviderRequest:
+    """Immutable provider controls resolved before any untrusted prompt data is read."""
+
+    provider: str
+    model: str
+    temperature: float
+    max_output_tokens: int
+    response_format: Literal["STRICT_JSON_SCHEMA"]
+    tool_allowlist: tuple[str, ...]
+    deadline_at: datetime
+    provider_attempts_remaining: int
+    repairs_remaining: int
+    traceparent: str | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.provider, str)
+            or not self.provider.strip()
+            or len(self.provider) > 64
+            or not isinstance(self.model, str)
+            or not self.model.strip()
+            or len(self.model) > 128
+        ):
+            raise ValueError("governed provider and model must be non-empty")
+        if (
+            isinstance(self.temperature, bool)
+            or not isinstance(self.temperature, (int, float))
+            or not 0 <= self.temperature <= 2
+        ):
+            raise ValueError("governed temperature is outside the supported range")
+        if (
+            isinstance(self.max_output_tokens, bool)
+            or not isinstance(self.max_output_tokens, int)
+            or not 1 <= self.max_output_tokens <= _MAX_COMPLETION_TOKENS
+        ):
+            raise ValueError("governed output token budget is outside the supported range")
+        if self.response_format != "STRICT_JSON_SCHEMA":
+            raise ValueError("governed response format must use strict JSON Schema")
+        if not isinstance(self.tool_allowlist, tuple):
+            raise ValueError("governed tool allowlist must be immutable")
+        if not isinstance(self.deadline_at, datetime) or self.deadline_at.utcoffset() is None:
+            raise ValueError("governed provider deadline must be timezone-aware")
+        if (
+            isinstance(self.provider_attempts_remaining, bool)
+            or not isinstance(self.provider_attempts_remaining, int)
+            or not 0 <= self.provider_attempts_remaining <= 2
+        ):
+            raise ValueError("governed provider attempt budget is outside the supported range")
+        if (
+            isinstance(self.repairs_remaining, bool)
+            or not isinstance(self.repairs_remaining, int)
+            or not 0 <= self.repairs_remaining <= 1
+        ):
+            raise ValueError("governed repair budget is outside the supported range")
+        if self.traceparent is not None and re.fullmatch(
+            r"00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}",
+            self.traceparent,
+        ) is None:
+            raise ValueError("governed traceparent is invalid")
+        if len(self.tool_allowlist) > 32 or len(set(self.tool_allowlist)) != len(
+            self.tool_allowlist
+        ) or any(
+            not isinstance(item, str) or not item or len(item) > 128
+            for item in self.tool_allowlist
+        ):
+            raise ValueError("governed tool allowlist must contain unique non-empty names")
 
 
 @dataclass(frozen=True)
@@ -186,6 +264,7 @@ class StructuredLlmClient(Protocol):
         user_prompt: str,
         output_type: type[T],
         user_content_parts: list[dict[str, Any]] | None = None,
+        governed_request: GovernedProviderRequest | None = None,
     ) -> StructuredGeneration: ...
 
     # 所属模块：LLM 网关 > 客户端协议 > 单请求流式结构化能力合同。
@@ -201,6 +280,7 @@ class StructuredLlmClient(Protocol):
         output_type: type[T],
         visible_fields: tuple[VisibleFieldSpec, ...] = (),
         user_content_parts: list[dict[str, Any]] | None = None,
+        governed_request: GovernedProviderRequest | None = None,
     ) -> Iterator[StructuredStreamUpdate]: ...
 
 
@@ -210,6 +290,8 @@ class LiteLlmProxyClient:
     本项目通过 LiteLLM 统一访问不同模型供应商。这里使用 OpenAI 兼容接口，
     并额外做了 JSON 模式降级、响应大小限制、多模态图片校验和流式投影。
     """
+
+    supports_governed_provider_request = True
 
     # 所属模块：LLM 网关 > LiteLLM 适配器 > 连接配置初始化。
     # 具体功能：`__init__` 固定代理 base_url、模型别名、Bearer API key、总超时和可测试 httpx transport；去除尾斜杠供 URL 统一拼接。
@@ -222,16 +304,35 @@ class LiteLlmProxyClient:
         api_key: str,
         timeout_seconds: float = 120.0,
         transport: httpx.BaseTransport | None = None,
+        async_transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._api_key = api_key
         self._timeout = timeout_seconds
         self._transport = transport
+        self._async_transport = async_transport or (
+            transport if isinstance(transport, httpx.AsyncBaseTransport) else None
+        )
         self._health_lock = threading.Lock()
         self._health_cached_at = 0.0
         self._health_cached_result: dict[str, Any] | None = None
         self._health_failed_at = 0.0
+
+    @property
+    def governed_provider(self) -> str:
+        return "litellm"
+
+    @property
+    def governed_model(self) -> str:
+        return self._model
+
+    def governed_max_output_tokens(self, node_name: str) -> int:
+        return _generation_budget_for(node_name).max_completion_tokens
+
+    @property
+    def governed_max_provider_attempts(self) -> int:
+        return 2
 
     # 所属模块：LLM 网关 > LiteLLM 适配器 > 真实模型可用性探测。
     # 具体功能：`check_available` 发送 temperature=0、max_tokens=3 的最小 chat completion，在最多 15 秒内验证 HTTP、响应 JSON 和 choices，并返回实际模型名与耗时。
@@ -307,7 +408,7 @@ class LiteLlmProxyClient:
         except httpx.HTTPError as exception:
             raise AgentServiceUnavailable("LLM health check failed") from exception
         return {
-            "model": str(payload.get("model") or self._model),
+            "model": _provider_model(payload, self._model),
             "latency_ms": int((time.perf_counter() - started) * 1000),
         }
 
@@ -323,6 +424,7 @@ class LiteLlmProxyClient:
         user_prompt: str,
         output_type: type[T],
         user_content_parts: list[dict[str, Any]] | None = None,
+        governed_request: GovernedProviderRequest | None = None,
     ) -> StructuredGeneration:
         """非流式结构化调用。
 
@@ -344,6 +446,7 @@ class LiteLlmProxyClient:
                 output_type=output_type,
                 visible_fields=observer.visible_fields_for(node_name),
                 user_content_parts=user_content_parts,
+                governed_request=governed_request,
             ):
                 if isinstance(update, StructuredStreamDelta):
                     observer.visible_delta(
@@ -364,6 +467,8 @@ class LiteLlmProxyClient:
             return completed
 
         started = time.perf_counter()
+        provider_attempts_used = 0
+        repairs_used = 0
         try:
             with httpx.Client(
                 timeout=self._timeout, transport=self._transport
@@ -373,6 +478,7 @@ class LiteLlmProxyClient:
                 allow_json_extraction = False
                 # 第一请求要求供应商执行 strict JSON Schema；只有明确兼容性问题才允许第二请求，不对认证、限流等错误盲目重试。
                 try:
+                    provider_attempts_used += 1
                     payload = self._request_completion(
                         client,
                         node_name=node_name,
@@ -381,10 +487,16 @@ class LiteLlmProxyClient:
                         user_prompt=user_prompt,
                         user_content_parts=user_content_parts,
                         json_mode=True,
+                        governed_request=governed_request,
                     )
                 except httpx.HTTPStatusError as exception:
-                    if not self._is_response_format_rejection(exception):
+                    if not self._fallback_allowed(
+                        exception,
+                        governed_request=governed_request,
+                    ):
                         raise
+                    provider_attempts_used += 1
+                    repairs_used = 1
                     payload = self._request_completion(
                         client,
                         node_name=node_name,
@@ -393,6 +505,7 @@ class LiteLlmProxyClient:
                         user_prompt=user_prompt,
                         user_content_parts=user_content_parts,
                         json_mode=False,
+                        governed_request=governed_request,
                     )
                     allow_json_extraction = True
                 try:
@@ -403,39 +516,61 @@ class LiteLlmProxyClient:
                     )
                 # 某些代理声称接受 response_format 却仍返回不合 Schema 内容；只在首次严格解析失败时用普通模式重试一次。
                 except (KeyError, IndexError, TypeError, ValidationError, ValueError):
-                    if allow_json_extraction:
+                    if allow_json_extraction or not self._repair_allowed(governed_request):
                         raise
-                    payload = self._request_completion(
-                        client,
-                        node_name=node_name,
-                        output_type=output_type,
-                        system_prompt=system_prompt,
-                        user_prompt=user_prompt,
-                        user_content_parts=user_content_parts,
-                        json_mode=False,
-                    )
+                    repairs_used = 1
+                    if governed_request is None:
+                        provider_attempts_used += 1
+                        payload = self._request_completion(
+                            client,
+                            node_name=node_name,
+                            output_type=output_type,
+                            system_prompt=system_prompt,
+                            user_prompt=user_prompt,
+                            user_content_parts=user_content_parts,
+                            json_mode=False,
+                            governed_request=None,
+                        )
                     value = self._parse_structured_payload(
                         payload,
                         output_type,
                         allow_json_extraction=True,
                     )
+                provider_model = _provider_model(
+                    payload,
+                    self._effective_model(governed_request),
+                    required=governed_request is not None,
+                )
+                token_usage = _provider_token_usage(
+                    payload,
+                    required=governed_request is not None,
+                )
+        except AgentProviderContractError:
+            raise
+        except AgentServiceUnavailable as exception:
+            if exception.provider_attempts_used >= provider_attempts_used:
+                raise
+            raise AgentServiceUnavailable(
+                str(exception),
+                provider_attempts_used=max(1, provider_attempts_used),
+            ) from exception
         except httpx.HTTPError as exception:
-            raise AgentServiceUnavailable("LLM request failed") from exception
+            raise AgentServiceUnavailable(
+                "LLM request failed",
+                provider_attempts_used=max(1, provider_attempts_used),
+            ) from exception
         except (KeyError, IndexError, TypeError, ValidationError, ValueError) as exception:
             raise AgentOutputSchemaError(
                 node_name, f"{node_name} returned invalid structured output"
             ) from exception
         latency_ms = int((time.perf_counter() - started) * 1000)
-        usage = payload.get("usage") or {}
         generation = StructuredGeneration(
             value=value,
-            model=str(payload.get("model") or self._model),
+            model=provider_model,
             latency_ms=latency_ms,
-            token_usage={
-                "input": int(usage.get("prompt_tokens") or 0),
-                "output": int(usage.get("completion_tokens") or 0),
-                "total": int(usage.get("total_tokens") or 0),
-            },
+            token_usage=token_usage,
+            provider_attempts_used=max(1, provider_attempts_used),
+            repairs_used=repairs_used,
         )
         if observer is not None:
             observer.raise_if_cancelled()
@@ -453,6 +588,200 @@ class LiteLlmProxyClient:
             )
         return generation
 
+    async def agenerate(
+        self,
+        *,
+        node_name: str,
+        system_prompt: str,
+        user_prompt: str,
+        output_type: type[T],
+        user_content_parts: list[dict[str, Any]] | None = None,
+        governed_request: GovernedProviderRequest | None = None,
+    ) -> StructuredGeneration:
+        """Native async equivalent of ``generate`` without thread-pool offload."""
+
+        started = time.perf_counter()
+        provider_attempts_used = 0
+        repairs_used = 0
+        try:
+            async with httpx.AsyncClient(
+                timeout=self._timeout,
+                transport=self._async_transport,
+            ) as client:
+                allow_json_extraction = False
+                try:
+                    provider_attempts_used += 1
+                    payload = await self._arequest_completion(
+                        client,
+                        node_name=node_name,
+                        output_type=output_type,
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                        user_content_parts=user_content_parts,
+                        json_mode=True,
+                        governed_request=governed_request,
+                    )
+                except httpx.HTTPStatusError as exception:
+                    if not self._fallback_allowed(
+                        exception,
+                        governed_request=governed_request,
+                    ):
+                        raise
+                    provider_attempts_used += 1
+                    repairs_used = 1
+                    payload = await self._arequest_completion(
+                        client,
+                        node_name=node_name,
+                        output_type=output_type,
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                        user_content_parts=user_content_parts,
+                        json_mode=False,
+                        governed_request=governed_request,
+                    )
+                    allow_json_extraction = True
+                try:
+                    value = self._parse_structured_payload(
+                        payload,
+                        output_type,
+                        allow_json_extraction=allow_json_extraction,
+                    )
+                except (KeyError, IndexError, TypeError, ValidationError, ValueError):
+                    if allow_json_extraction or not self._repair_allowed(governed_request):
+                        raise
+                    repairs_used = 1
+                    if governed_request is None:
+                        provider_attempts_used += 1
+                        payload = await self._arequest_completion(
+                            client,
+                            node_name=node_name,
+                            output_type=output_type,
+                            system_prompt=system_prompt,
+                            user_prompt=user_prompt,
+                            user_content_parts=user_content_parts,
+                            json_mode=False,
+                            governed_request=None,
+                        )
+                    value = self._parse_structured_payload(
+                        payload,
+                        output_type,
+                        allow_json_extraction=True,
+                    )
+                provider_model = _provider_model(
+                    payload,
+                    self._effective_model(governed_request),
+                    required=governed_request is not None,
+                )
+                token_usage = _provider_token_usage(
+                    payload,
+                    required=governed_request is not None,
+                )
+        except AgentProviderContractError:
+            raise
+        except AgentServiceUnavailable as exception:
+            if exception.provider_attempts_used >= provider_attempts_used:
+                raise
+            raise AgentServiceUnavailable(
+                str(exception),
+                provider_attempts_used=max(1, provider_attempts_used),
+            ) from exception
+        except httpx.HTTPError as exception:
+            raise AgentServiceUnavailable(
+                "LLM request failed",
+                provider_attempts_used=max(1, provider_attempts_used),
+            ) from exception
+        except (KeyError, IndexError, TypeError, ValidationError, ValueError) as exception:
+            raise AgentOutputSchemaError(
+                node_name, f"{node_name} returned invalid structured output"
+            ) from exception
+        return StructuredGeneration(
+            value=value,
+            model=provider_model,
+            latency_ms=int((time.perf_counter() - started) * 1000),
+            token_usage=token_usage,
+            provider_attempts_used=max(1, provider_attempts_used),
+            repairs_used=repairs_used,
+        )
+
+    async def agenerate_stream(
+        self,
+        *,
+        node_name: str,
+        system_prompt: str,
+        user_prompt: str,
+        output_type: type[T],
+        visible_fields: tuple[VisibleFieldSpec, ...] = (),
+        user_content_parts: list[dict[str, Any]] | None = None,
+        governed_request: GovernedProviderRequest | None = None,
+    ) -> AsyncIterator[StructuredStreamUpdate]:
+        """Perform one native async provider stream and parse one final JSON document."""
+
+        state = _AsyncStructuredStreamState(
+            node_name=node_name,
+            output_type=output_type,
+            visible_fields=visible_fields,
+            default_model=self._effective_model(governed_request),
+            require_model_identity=governed_request is not None,
+            require_usage=governed_request is not None,
+        )
+        request_timeout = self._request_timeout_seconds(governed_request)
+        try:
+            async with httpx.AsyncClient(
+                timeout=self._timeout,
+                transport=self._async_transport,
+            ) as client:
+                request_body = self._completion_request_body(
+                    node_name=node_name,
+                    output_type=output_type,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    user_content_parts=user_content_parts,
+                    json_mode=True,
+                    governed_request=governed_request,
+                )
+                request_body["stream"] = True
+                request_body["stream_options"] = {"include_usage": True}
+                async with client.stream(
+                    "POST",
+                    self._chat_completions_url(),
+                    headers=self._provider_headers(
+                        governed_request,
+                        streaming=True,
+                    ),
+                    json=request_body,
+                    timeout=request_timeout,
+                ) as response:
+                    response.raise_for_status()
+                    async for raw_line in _aiter_limited_lines(
+                        response,
+                        max_line_bytes=_MAX_STREAM_EVENT_BYTES,
+                    ):
+                        if state.elapsed_seconds() > request_timeout:
+                            raise AgentServiceUnavailable(
+                                "LiteLLM proxy stream exceeded the request deadline"
+                            )
+                        line = raw_line.strip()
+                        if not line or line.startswith(b":"):
+                            continue
+                        if line.startswith((b"event:", b"id:", b"retry:")):
+                            continue
+                        if line.startswith(b"data:"):
+                            line = line[5:].strip()
+                        if line == b"[DONE]":
+                            state.done_received = True
+                            break
+                        try:
+                            payload = json.loads(line)
+                        except ValueError as exception:
+                            raise AgentServiceUnavailable(
+                                "LiteLLM proxy returned an invalid stream event"
+                            ) from exception
+                        for update in state.accept(payload):
+                            yield update
+        except httpx.HTTPError as exception:
+            raise AgentServiceUnavailable("LLM streaming request failed") from exception
+        yield state.completed()
+
     # 所属模块：LLM 网关 > LiteLLM 适配器 > 单请求 SSE 结构化流。
     # 具体功能：`generate_stream` 发起一次 provider strict JSON Schema 流请求，逐行限长解析 SSE，仅累计 delta.content；同时经 IncrementalVisibleJsonProjector 投影白名单字段，完整收齐后再用 output_type 校验并产出唯一 completed。
     # 上下游：上游是 `generate` 的 observer 路径或 HarnessModelRunner.invoke_structured_stream；下游是 StructuredStreamDelta/Completed Iterator。
@@ -466,6 +795,7 @@ class LiteLlmProxyClient:
         output_type: type[T],
         visible_fields: tuple[VisibleFieldSpec, ...] = (),
         user_content_parts: list[dict[str, Any]] | None = None,
+        governed_request: GovernedProviderRequest | None = None,
     ) -> Iterator[StructuredStreamUpdate]:
         """Perform one real provider stream and validate its final JSON.
 
@@ -482,11 +812,13 @@ class LiteLlmProxyClient:
         # Python 对象开销可能远大于正文。
         content_buffer = StringIO()
         content_bytes = 0
-        model = self._model
+        model = self._effective_model(governed_request)
+        model_reported = False
         usage: dict[str, Any] = {}
         stream_observer = current_stream_observer()
         done_received = False
         finish_reason: str | None = None
+        request_timeout = self._request_timeout_seconds(governed_request)
 
         try:
             with httpx.Client(
@@ -500,19 +832,19 @@ class LiteLlmProxyClient:
                     user_prompt=user_prompt,
                     user_content_parts=user_content_parts,
                     json_mode=True,
+                    governed_request=governed_request,
                 )
                 request_body["stream"] = True
                 request_body["stream_options"] = {"include_usage": True}
                 with client.stream(
                     "POST",
                     self._chat_completions_url(),
-                    headers={
-                        "Authorization": f"Bearer {self._api_key}",
-                        # Avoid compressed response expansion before the stream
-                        # event and cumulative document limits can be enforced.
-                        "Accept-Encoding": "identity",
-                    },
+                    headers=self._provider_headers(
+                        governed_request,
+                        streaming=True,
+                    ),
                     json=request_body,
+                    timeout=request_timeout,
                 ) as response:
                     response.raise_for_status()
                     # SSE 流通常是一行一个 data: {...} 事件；这里逐行读取并设置单行上限。
@@ -522,7 +854,7 @@ class LiteLlmProxyClient:
                     ):
                         if stream_observer is not None:
                             stream_observer.raise_if_cancelled()
-                        if time.perf_counter() - started > self._timeout:
+                        if time.perf_counter() - started > request_timeout:
                             raise AgentServiceUnavailable(
                                 "LiteLLM proxy stream exceeded the request deadline"
                             )
@@ -550,8 +882,14 @@ class LiteLlmProxyClient:
                             raise AgentServiceUnavailable(
                                 "LiteLLM proxy returned a stream error"
                             )
-                        model = str(payload.get("model") or model)
-                        if isinstance(payload.get("usage"), dict):
+                        if payload.get("model") is not None:
+                            model_reported = True
+                        model = _provider_model(payload, model)
+                        if payload.get("usage") is not None:
+                            if not isinstance(payload["usage"], dict):
+                                raise AgentServiceUnavailable(
+                                    "LiteLLM proxy returned invalid token usage"
+                                )
                             usage = payload["usage"]
                         choices = payload.get("choices")
                         if not isinstance(choices, list) or not choices:
@@ -608,6 +946,10 @@ class LiteLlmProxyClient:
             raise AgentServiceUnavailable("LLM streaming request failed") from exception
 
         content = content_buffer.getvalue()
+        if governed_request is not None and not model_reported:
+            raise AgentServiceUnavailable(
+                "LiteLLM proxy stream omitted the governed model identifier"
+            )
         if not done_received:
             LOGGER.warning(
                 "structured stream terminated before done: node=%s "
@@ -679,11 +1021,10 @@ class LiteLlmProxyClient:
                 value=value,
                 model=model,
                 latency_ms=latency_ms,
-                token_usage={
-                    "input": int(usage.get("prompt_tokens") or 0),
-                    "output": int(usage.get("completion_tokens") or 0),
-                    "total": int(usage.get("total_tokens") or 0),
-                },
+                token_usage=_validated_usage_mapping(
+                    usage,
+                    required=governed_request is not None,
+                ),
             ),
         )
 
@@ -701,6 +1042,7 @@ class LiteLlmProxyClient:
         user_prompt: str,
         user_content_parts: list[dict[str, Any]] | None,
         json_mode: bool,
+        governed_request: GovernedProviderRequest | None,
     ) -> dict[str, Any]:
         request_body = self._completion_request_body(
             node_name=node_name,
@@ -709,14 +1051,53 @@ class LiteLlmProxyClient:
             user_prompt=user_prompt,
             user_content_parts=user_content_parts,
             json_mode=json_mode,
+            governed_request=governed_request,
         )
+        request_timeout = self._request_timeout_seconds(governed_request)
         response = _post_with_limited_response(
             client,
             self._chat_completions_url(),
-            headers={"Authorization": f"Bearer {self._api_key}"},
+            headers=self._provider_headers(governed_request),
             json_body=request_body,
             max_body_bytes=_MAX_MODEL_RESPONSE_BYTES,
-            deadline_seconds=self._timeout,
+            deadline_seconds=request_timeout,
+        )
+        response.raise_for_status()
+        try:
+            payload: dict[str, Any] = response.json()
+        except ValueError as exception:
+            raise AgentServiceUnavailable("LiteLLM proxy returned invalid JSON") from exception
+        return payload
+
+    async def _arequest_completion(
+        self,
+        client: httpx.AsyncClient,
+        *,
+        node_name: str,
+        output_type: type[BaseModel],
+        system_prompt: str,
+        user_prompt: str,
+        user_content_parts: list[dict[str, Any]] | None,
+        json_mode: bool,
+        governed_request: GovernedProviderRequest | None,
+    ) -> dict[str, Any]:
+        request_body = self._completion_request_body(
+            node_name=node_name,
+            output_type=output_type,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            user_content_parts=user_content_parts,
+            json_mode=json_mode,
+            governed_request=governed_request,
+        )
+        request_timeout = self._request_timeout_seconds(governed_request)
+        response = await _apost_with_limited_response(
+            client,
+            self._chat_completions_url(),
+            headers=self._provider_headers(governed_request),
+            json_body=request_body,
+            max_body_bytes=_MAX_MODEL_RESPONSE_BYTES,
+            deadline_seconds=request_timeout,
         )
         response.raise_for_status()
         try:
@@ -738,6 +1119,7 @@ class LiteLlmProxyClient:
         user_prompt: str,
         user_content_parts: list[dict[str, Any]] | None,
         json_mode: bool,
+        governed_request: GovernedProviderRequest | None = None,
     ) -> dict[str, Any]:
         """组装 OpenAI-compatible chat/completions 请求体。"""
 
@@ -748,14 +1130,21 @@ class LiteLlmProxyClient:
                 *self._validated_multimodal_parts(user_content_parts),
             ]
         budget = _generation_budget_for(node_name)
+        model = self._effective_model(governed_request)
+        temperature = governed_request.temperature if governed_request is not None else 0
+        max_output_tokens = (
+            governed_request.max_output_tokens
+            if governed_request is not None
+            else budget.max_completion_tokens
+        )
         request_body: dict[str, Any] = {
-            "model": self._model,
+            "model": model,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
             ],
-            "temperature": 0,
-            "max_tokens": budget.max_completion_tokens,
+            "temperature": temperature,
+            "max_tokens": max_output_tokens,
             # 当前正式调用统一关闭 Qwen 隐藏推理；不再传 thinking_budget，避免网关或供应商误判为仍需推理。
             "enable_thinking": False,
         }
@@ -771,6 +1160,57 @@ class LiteLlmProxyClient:
                 },
             }
         return request_body
+
+    def _effective_model(
+        self,
+        governed_request: GovernedProviderRequest | None,
+    ) -> str:
+        return governed_request.model if governed_request is not None else self._model
+
+    def _provider_headers(
+        self,
+        governed_request: GovernedProviderRequest | None,
+        *,
+        streaming: bool = False,
+    ) -> dict[str, str]:
+        headers = {"Authorization": f"Bearer {self._api_key}"}
+        if streaming:
+            headers["Accept-Encoding"] = "identity"
+        if governed_request is not None and governed_request.traceparent is not None:
+            headers["traceparent"] = governed_request.traceparent
+        return headers
+
+    def _request_timeout_seconds(
+        self,
+        governed_request: GovernedProviderRequest | None,
+    ) -> float:
+        if governed_request is None:
+            return self._timeout
+        remaining = (
+            governed_request.deadline_at - datetime.now(timezone.utc)
+        ).total_seconds()
+        if remaining <= 0:
+            raise AgentServiceUnavailable("governed model deadline has expired")
+        return min(self._timeout, remaining)
+
+    @staticmethod
+    def _repair_allowed(governed_request: GovernedProviderRequest | None) -> bool:
+        return governed_request is None or governed_request.repairs_remaining > 0
+
+    def _fallback_allowed(
+        self,
+        exception: httpx.HTTPStatusError,
+        *,
+        governed_request: GovernedProviderRequest | None,
+    ) -> bool:
+        if not self._is_response_format_rejection(exception):
+            return False
+        if governed_request is None:
+            return True
+        return (
+            governed_request.repairs_remaining > 0
+            and governed_request.provider_attempts_remaining >= 2
+        )
 
     # 所属模块：LLM 网关 > 多模态边界 > content parts 二次验收。
     # 具体功能：`_validated_multimodal_parts` 只接受纯文本或内联 PNG/JPEG/WebP data URL，校验 URL 长度、严格 base64、单图/总字节、magic bytes 与 detail 枚举，并重建最小安全对象。
@@ -851,8 +1291,10 @@ class LiteLlmProxyClient:
         """从供应商响应中取出 assistant.content，并校验为指定 Pydantic 模型。"""
 
         message = payload["choices"][0]["message"]
+        if not isinstance(message, dict) or not isinstance(message.get("content"), str):
+            raise ValueError("provider response must contain text assistant content")
         # 即使供应商返回 reasoning_content，也不读取；业务载荷唯一来源是 assistant.content。
-        content = str(message.get("content") or "")
+        content = message["content"]
         if allow_json_extraction:
             content = LiteLlmProxyClient._extract_json_object(content)
         return output_type.model_validate_json(content)
@@ -893,6 +1335,86 @@ class LiteLlmProxyClient:
 # 具体功能：`_inline_image_matches_mime` 对 PNG/JPEG 检查固定文件头，对 WebP 同时检查 RIFF 和 WEBP 标记，其他 MIME 返回 False。
 # 上下游：上游是已严格 base64 解码的图片 bytes 与 data URL 声明 MIME；下游是多模态 parts 验收通过/拒绝。
 # 系统意义：data URL 标签仍是不可信文本，必须与真实二进制格式一致后才发送给模型供应商。
+def _provider_model(
+    payload: dict[str, Any],
+    default_model: str,
+    *,
+    required: bool = False,
+) -> str:
+    value = payload.get("model")
+    if value is None:
+        if required:
+            raise AgentProviderContractError(
+                "LiteLLM proxy omitted the governed model identifier"
+            )
+        return default_model
+    if not isinstance(value, str) or not value:
+        raise AgentProviderContractError(
+            "LiteLLM proxy returned an invalid model identifier"
+        )
+    return value
+
+
+def _provider_token_usage(
+    payload: dict[str, Any],
+    *,
+    required: bool = False,
+) -> dict[str, int]:
+    usage = payload.get("usage")
+    if usage is None:
+        if required:
+            raise AgentProviderContractError(
+                "LiteLLM proxy omitted governed token usage"
+            )
+        return {"input": 0, "output": 0, "total": 0}
+    if not isinstance(usage, dict):
+        raise AgentProviderContractError("LiteLLM proxy returned invalid token usage")
+    return _validated_usage_mapping(usage, required=required)
+
+
+def _validated_usage_mapping(
+    usage: dict[str, Any],
+    *,
+    required: bool = False,
+) -> dict[str, int]:
+    if required and not {
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+    }.issubset(usage):
+        raise AgentProviderContractError("LiteLLM proxy omitted governed token usage")
+    input_tokens = _nonnegative_provider_integer(usage.get("prompt_tokens"), "prompt_tokens")
+    output_tokens = _nonnegative_provider_integer(
+        usage.get("completion_tokens"),
+        "completion_tokens",
+    )
+    raw_total = usage.get("total_tokens")
+    total_tokens = (
+        input_tokens + output_tokens
+        if raw_total is None
+        else _nonnegative_provider_integer(raw_total, "total_tokens")
+    )
+    if total_tokens != input_tokens + output_tokens:
+        raise AgentProviderContractError(
+            "LiteLLM proxy returned inconsistent token usage"
+        )
+    return {
+        "input": input_tokens,
+        "output": output_tokens,
+        "total": total_tokens,
+    }
+
+
+def _nonnegative_provider_integer(value: Any, field_name: str) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise AgentProviderContractError(
+            f"LiteLLM proxy returned invalid {field_name} usage"
+        )
+    return value
+
+
 def _inline_image_matches_mime(payload: bytes, mime_type: str) -> bool:
     if mime_type == "image/png":
         return payload.startswith(b"\x89PNG\r\n\x1a\n")
@@ -917,10 +1439,140 @@ def _stream_text_content(value: Any) -> str:
         return ""
     # 部分 OpenAI 兼容网关把文本拆成 typed parts；只接受明确的答案文本类型，其他类型全部忽略。
     return "".join(
-        str(part.get("text") or "")
+        part["text"]
         for part in value
-        if isinstance(part, dict) and part.get("type") in {"text", "output_text"}
+        if (
+            isinstance(part, dict)
+            and part.get("type") in {"text", "output_text"}
+            and isinstance(part.get("text"), str)
+        )
     )
+
+
+@dataclass
+class _AsyncStructuredStreamState:
+    node_name: str
+    output_type: type[BaseModel]
+    visible_fields: tuple[VisibleFieldSpec, ...]
+    default_model: str
+    require_model_identity: bool = False
+    require_usage: bool = False
+    done_received: bool = False
+    finish_reason: str | None = None
+    model: str = field(init=False)
+    model_reported: bool = False
+    usage: dict[str, Any] = field(default_factory=dict)
+    content_bytes: int = 0
+    _started: float = field(default_factory=time.perf_counter)
+    _buffer: StringIO = field(default_factory=StringIO)
+    _projector: IncrementalVisibleJsonProjector = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.model = self.default_model
+        self._projector = IncrementalVisibleJsonProjector(self.visible_fields)
+
+    def elapsed_seconds(self) -> float:
+        return time.perf_counter() - self._started
+
+    def accept(self, payload: object) -> list[StructuredStreamDelta]:
+        if not isinstance(payload, dict) or payload.get("error") is not None:
+            raise AgentServiceUnavailable("LiteLLM proxy returned an invalid stream event")
+        if payload.get("model") is not None:
+            self.model_reported = True
+        self.model = _provider_model(payload, self.model)
+        if payload.get("usage") is not None:
+            if not isinstance(payload["usage"], dict):
+                raise AgentServiceUnavailable(
+                    "LiteLLM proxy returned invalid token usage"
+                )
+            self.usage = payload["usage"]
+        choices = payload.get("choices")
+        if not isinstance(choices, list) or not choices:
+            return []
+        choice = choices[0]
+        if not isinstance(choice, dict):
+            return []
+        candidate_finish_reason = choice.get("finish_reason")
+        if candidate_finish_reason is not None:
+            if not isinstance(candidate_finish_reason, str):
+                raise AgentServiceUnavailable(
+                    "LiteLLM proxy returned an invalid stream finish_reason"
+                )
+            self.finish_reason = candidate_finish_reason
+        delta_payload = choice.get("delta")
+        if not isinstance(delta_payload, dict):
+            return []
+        content_delta = _stream_text_content(delta_payload.get("content"))
+        if not content_delta:
+            return []
+        try:
+            delta_bytes = len(content_delta.encode("utf-8"))
+        except UnicodeEncodeError as exception:
+            raise AgentServiceUnavailable(
+                "LiteLLM proxy returned invalid Unicode content"
+            ) from exception
+        if delta_bytes > _MAX_STREAM_DELTA_BYTES:
+            raise AgentOutputSchemaError(
+                self.node_name,
+                f"{self.node_name} streamed a content delta above the size limit",
+            )
+        self.content_bytes += delta_bytes
+        if self.content_bytes > _MAX_MODEL_RESPONSE_BYTES:
+            raise AgentOutputSchemaError(
+                self.node_name,
+                f"{self.node_name} streamed output above the size limit",
+            )
+        projected = self._projector.feed(content_delta)
+        self._buffer.write(content_delta)
+        return [
+            StructuredStreamDelta(kind="visible_delta", field=field_name, delta=delta)
+            for field_name, delta in projected
+        ]
+
+    def completed(self) -> StructuredStreamCompleted:
+        content = self._buffer.getvalue()
+        if self.require_model_identity and not self.model_reported:
+            raise AgentServiceUnavailable(
+                "LiteLLM proxy stream omitted the governed model identifier"
+            )
+        if not self.done_received:
+            raise AgentServiceUnavailable("LiteLLM proxy stream ended before [DONE]")
+        if self.finish_reason is None:
+            raise AgentServiceUnavailable(
+                "LiteLLM proxy stream ended without finish_reason"
+            )
+        if self.finish_reason == "length":
+            raise AgentServiceUnavailable(
+                "LiteLLM proxy stream reached the output token limit"
+            )
+        if self.finish_reason == "content_filter":
+            raise AgentServiceUnavailable(
+                "LiteLLM proxy stream was stopped by the content filter"
+            )
+        if self.finish_reason != "stop":
+            raise AgentServiceUnavailable(
+                "LiteLLM proxy stream stopped with provider finish_reason "
+                f"{self.finish_reason!r}"
+            )
+        try:
+            value = self.output_type.model_validate_json(content)
+        except (TypeError, ValidationError, ValueError) as exception:
+            raise AgentOutputSchemaError(
+                self.node_name,
+                f"{self.node_name} returned invalid streamed structured output",
+            ) from exception
+        return StructuredStreamCompleted(
+            kind="completed",
+            generation=StructuredGeneration(
+                value=value,
+                model=self.model,
+                latency_ms=int(self.elapsed_seconds() * 1_000),
+                token_usage=_validated_usage_mapping(
+                    self.usage,
+                    required=self.require_usage,
+                ),
+            ),
+        )
 
 
 # 所属模块：LLM 网关 > HTTP 资源边界 > 限长 POST 包装。
@@ -944,8 +1596,39 @@ def _post_with_limited_response(
         url,
         headers=request_headers,
         json=json_body,
+        timeout=deadline_seconds,
     ) as streamed_response:
         body = _read_limited_body(
+            streamed_response,
+            max_body_bytes=max_body_bytes,
+            deadline_seconds=deadline_seconds,
+        )
+        return httpx.Response(
+            status_code=streamed_response.status_code,
+            headers=streamed_response.headers,
+            content=body,
+            request=streamed_response.request,
+        )
+
+
+async def _apost_with_limited_response(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    headers: dict[str, str],
+    json_body: dict[str, Any],
+    max_body_bytes: int,
+    deadline_seconds: float,
+) -> httpx.Response:
+    request_headers = {**headers, "Accept-Encoding": "identity"}
+    async with client.stream(
+        "POST",
+        url,
+        headers=request_headers,
+        json=json_body,
+        timeout=deadline_seconds,
+    ) as streamed_response:
+        body = await _aread_limited_body(
             streamed_response,
             max_body_bytes=max_body_bytes,
             deadline_seconds=deadline_seconds,
@@ -993,6 +1676,36 @@ def _read_limited_body(
     return bytes(body)
 
 
+async def _aread_limited_body(
+    response: httpx.Response,
+    *,
+    max_body_bytes: int,
+    deadline_seconds: float,
+) -> bytes:
+    content_length = response.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > max_body_bytes:
+                raise AgentServiceUnavailable(
+                    "LiteLLM proxy response exceeded the size limit"
+                )
+        except ValueError:
+            pass
+    body = bytearray()
+    deadline = time.monotonic() + deadline_seconds
+    async for chunk in response.aiter_bytes(chunk_size=16 * 1024):
+        if time.monotonic() > deadline:
+            raise AgentServiceUnavailable(
+                "LiteLLM proxy response exceeded the request deadline"
+            )
+        if len(body) + len(chunk) > max_body_bytes:
+            raise AgentServiceUnavailable(
+                "LiteLLM proxy response exceeded the size limit"
+            )
+        body.extend(chunk)
+    return bytes(body)
+
+
 # 所属模块：LLM 网关 > SSE 解析 > 有界传输行生成器。
 # 具体功能：`_iter_limited_lines` 用最多 max_line_bytes 的 pending bytearray 跨 chunk 拼行，找到换行就 yield bytes 并原地删除已消费前缀；无换行超限立即失败，流尾剩余内容作为最后一行。
 # 上下游：上游是 httpx SSE response.iter_bytes；下游是 generate_stream 逐行解析 data/event/id/retry 协议。
@@ -1009,6 +1722,32 @@ def _iter_limited_lines(
     # 指定 16 KiB 会触发 ByteChunker 聚合，小型 SSE 回复可能直到攒满或流结束
     # 才释放首行，导致供应商已经生成的 token 无法及时投影到前端。
     for chunk in response.iter_bytes():
+        pending.extend(chunk)
+        while True:
+            newline_index = pending.find(b"\n")
+            if newline_index < 0:
+                break
+            if newline_index > max_line_bytes:
+                raise AgentServiceUnavailable(
+                    "LiteLLM proxy stream event exceeded the size limit"
+                )
+            yield bytes(pending[:newline_index])
+            del pending[: newline_index + 1]
+        if len(pending) > max_line_bytes:
+            raise AgentServiceUnavailable(
+                "LiteLLM proxy stream event exceeded the size limit"
+            )
+    if pending:
+        yield bytes(pending)
+
+
+async def _aiter_limited_lines(
+    response: httpx.Response,
+    *,
+    max_line_bytes: int,
+) -> AsyncIterator[bytes]:
+    pending = bytearray()
+    async for chunk in response.aiter_bytes():
         pending.extend(chunk)
         while True:
             newline_index = pending.find(b"\n")

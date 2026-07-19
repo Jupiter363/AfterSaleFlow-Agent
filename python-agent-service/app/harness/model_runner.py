@@ -2,23 +2,31 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any, Generic, Literal, TypeVar
 
-from langchain_core.messages import BaseMessage
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.messages import AIMessage, BaseMessage
 from pydantic import BaseModel
+from typing_extensions import TypedDict
 
+from app.graph_runtime.state_lens import StateLens
 from app.harness.context_window import AssembledPromptContext, ContextWindowManager, PromptSection
 from app.harness.context_pack import ContextPack
 from app.harness.prompt_composer import PromptRepository
-from app.llm import (
-    StructuredGeneration,
-    StructuredLlmClient,
-    StructuredStreamCompleted,
-    StructuredStreamDelta,
+from app.llm import StructuredLlmClient
+from app.model_runtime.callbacks import (
+    InvocationMetadataCapture,
+    governed_events_from_chunk,
 )
+from app.model_runtime.profiles import (
+    ModelInvocationPolicy,
+    ModelProfile,
+    system_prompt_sha256,
+)
+from app.model_runtime.runnable_factory import ModelNodeSpec, build_model_node
+from app.model_runtime.transports import StructuredClientTransport
 from app.streaming import VisibleFieldSpec
 
 
@@ -59,6 +67,24 @@ class HarnessStreamCompleted(Generic[T]):
 
 
 HarnessStreamUpdate = HarnessStreamDelta | HarnessStreamCompleted[T]
+
+
+class _HarnessPromptInput(TypedDict):
+    human_prompt: str
+
+
+class _HarnessPatch(TypedDict):
+    value: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class _PreparedHarnessInvocation:
+    context: AssembledPromptContext
+    system_prompt: str
+    user_prompt: str
+    trusted_context: dict[str, Any]
+    raw_trusted_context: dict[str, Any]
+    resolved_prompt_profile_id: str | None
 
 
 class HarnessModelRunner:
@@ -106,69 +132,38 @@ class HarnessModelRunner:
     ) -> HarnessGeneration[T]:
         """执行一次非流式结构化模型调用。"""
 
-        # 二选一：ContextPack 是按节点合同治理后的首选输入；旧调用仍可直接传 PromptSection 列表。
-        assembled_context = self._context_window.assemble(
-            context_pack.prompt_sections() if context_pack is not None else context_sections or [],
+        prepared = self._prepare(
+            node_name=node_name,
+            case_data=case_data,
+            output_type=output_type,
+            context_sections=context_sections,
+            context_pack=context_pack,
             max_input_tokens=max_input_tokens,
+            agent_context=agent_context,
+            prompt_profile_id=prompt_profile_id,
         )
-        trusted_agent_context = _trusted_agent_context_payload(agent_context)
-        # prompt_profile_id 可以来自显式参数，也可以来自可信 agent_context。
-        # 例如不同角色可选择 user/merchant 专属提示词模板。
-        resolved_prompt_profile_id = prompt_profile_id or trusted_agent_context.get(
-            "prompt_profile_id"
+        built = self._build_node(
+            node_name=node_name,
+            output_type=output_type,
+            prepared=prepared,
+            visible_fields=(),
+            multimodal_parts=multimodal_parts or (),
         )
-        # `**case_data` 是字典展开；harness_context 使用固定键覆盖同名调用方值，防止伪造裁剪结果。
-        enriched_case_data = {
-            **case_data,
-            "harness_context": assembled_context.as_prompt_payload(),
-        }
-        # 只附加合同版本和 display-only 名称，不把 display-only 段正文重新塞回模型。
-        if context_pack is not None:
-            enriched_case_data["harness_context_pack"] = {
-                "node_name": context_pack.node_name,
-                "configuration_profile_key": context_pack.configuration_profile_key,
-                "configuration_source": context_pack.configuration_source,
-                "display_only_section_names": list(
-                    context_pack.display_only_section_names
-                ),
-            }
-        system_prompt, user_prompt = self._prompts.render(
-            node_name,
-            enriched_case_data,
-            output_type.model_json_schema(),
-            prompt_profile_id=resolved_prompt_profile_id,
-            trusted_agent_context=trusted_agent_context or None,
+        capture = InvocationMetadataCapture()
+        state = {"human_prompt": prepared.user_prompt}
+        patch = built.runnable.invoke(
+            state,
+            config={"callbacks": [capture], "tags": ["governed-lcel", node_name]},
         )
-        # 把消息保存为 tuple（不可变序列），使测试/审计看到的正是底层客户端接收的两个消息内容。
-        messages = tuple(
-            # ChatPromptTemplate 来自 LangChain。这里不是让 LangChain 调模型，
-            # 只是复用它的 message 格式化能力，最终仍由 app.llm 里的客户端发 HTTP。
-            ChatPromptTemplate.from_messages(
-                [
-                    ("system", "{system_prompt}"),
-                    ("human", "{user_prompt}"),
-                ]
-            ).format_messages(
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-            )
-        )
-        # generation_args 只在确有多模态附件时增加 user_content_parts，普通文本调用不改变底层请求形状。
-        generation_args = {
-            "node_name": node_name,
-            "system_prompt": str(messages[0].content),
-            "user_prompt": str(messages[1].content),
-            "output_type": output_type,
-        }
-        if multimodal_parts:
-            generation_args["user_content_parts"] = multimodal_parts
-        generation: StructuredGeneration = self._llm.generate(**generation_args)
+        value = output_type.model_validate(patch["value"])
+        messages = tuple(built.prompt.invoke(state).messages)
+        metadata = capture.metadata
         return HarnessGeneration(
-            value=generation.value,  # type: ignore[arg-type]
-            model=generation.model,
-            latency_ms=generation.latency_ms,
-            token_usage=generation.token_usage,
-            context=assembled_context,
+            value=value,
+            model=str(metadata["model"]),
+            latency_ms=int(metadata["latency_ms"]),
+            token_usage=dict(metadata["token_usage"]),
+            context=prepared.context,
             messages=messages,
         )
 
@@ -192,6 +187,73 @@ class HarnessModelRunner:
     ) -> Iterator[HarnessStreamUpdate[T]]:
         """Stream one structured Harness invocation without a second model call."""
 
+        prepared = self._prepare(
+            node_name=node_name,
+            case_data=case_data,
+            output_type=output_type,
+            context_sections=context_sections,
+            context_pack=context_pack,
+            max_input_tokens=max_input_tokens,
+            agent_context=agent_context,
+            prompt_profile_id=prompt_profile_id,
+        )
+        built = self._build_node(
+            node_name=node_name,
+            output_type=output_type,
+            prepared=prepared,
+            visible_fields=visible_fields,
+            multimodal_parts=multimodal_parts or (),
+        )
+        capture = InvocationMetadataCapture()
+        state = {"human_prompt": prepared.user_prompt}
+        prompt_input = built.lens.invoke(state)
+        prompt_value = built.prompt.invoke(prompt_input)
+        messages = tuple(prompt_value.messages)
+        final_document: str | None = None
+        for chunk in built.model.stream(
+            prompt_value,
+            config={"callbacks": [capture], "tags": ["governed-lcel", node_name]},
+        ):
+            for event in governed_events_from_chunk(chunk):
+                yield HarnessStreamDelta(
+                    kind="visible_delta",
+                    field=event["field"],
+                    delta=event["delta"],
+                )
+            if chunk.content:
+                if not isinstance(chunk.content, str) or final_document is not None:
+                    raise RuntimeError("governed stream must emit one final JSON document")
+                final_document = chunk.content
+        if final_document is None:
+            raise RuntimeError("governed stream ended without a final JSON document")
+        parsed = built.parser.invoke(AIMessage(content=final_document))
+        guarded = built.guardrail.invoke(parsed)
+        patch = built.patch_projector.invoke(guarded)
+        metadata = capture.metadata
+        yield HarnessStreamCompleted(
+            kind="completed",
+            generation=HarnessGeneration(
+                value=output_type.model_validate(patch["value"]),
+                model=str(metadata["model"]),
+                latency_ms=int(metadata["latency_ms"]),
+                token_usage=dict(metadata["token_usage"]),
+                context=prepared.context,
+                messages=messages,
+            ),
+        )
+
+    def _prepare(
+        self,
+        *,
+        node_name: str,
+        case_data: dict[str, Any],
+        output_type: type[BaseModel],
+        context_sections: list[PromptSection] | None,
+        context_pack: ContextPack | None,
+        max_input_tokens: int | None,
+        agent_context: Any | None,
+        prompt_profile_id: str | None,
+    ) -> _PreparedHarnessInvocation:
         assembled_context = self._context_window.assemble(
             (
                 context_pack.prompt_sections()
@@ -200,8 +262,9 @@ class HarnessModelRunner:
             ),
             max_input_tokens=max_input_tokens,
         )
-        trusted_agent_context = _trusted_agent_context_payload(agent_context)
-        resolved_prompt_profile_id = prompt_profile_id or trusted_agent_context.get(
+        raw_trusted_context = _trusted_agent_context_mapping(agent_context)
+        trusted_context = _trusted_agent_context_payload(agent_context)
+        resolved_prompt_profile_id = prompt_profile_id or trusted_context.get(
             "prompt_profile_id"
         )
         enriched_case_data = {
@@ -222,55 +285,58 @@ class HarnessModelRunner:
             enriched_case_data,
             output_type.model_json_schema(),
             prompt_profile_id=resolved_prompt_profile_id,
-            trusted_agent_context=trusted_agent_context or None,
+            trusted_agent_context=trusted_context or None,
         )
-        messages = tuple(
-            ChatPromptTemplate.from_messages(
-                [
-                    ("system", "{system_prompt}"),
-                    ("human", "{user_prompt}"),
-                ]
-            ).format_messages(
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-            )
+        return _PreparedHarnessInvocation(
+            context=assembled_context,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            trusted_context=trusted_context,
+            raw_trusted_context=raw_trusted_context,
+            resolved_prompt_profile_id=resolved_prompt_profile_id,
         )
-        generation_args = {
-            "node_name": node_name,
-            "system_prompt": str(messages[0].content),
-            "user_prompt": str(messages[1].content),
-            "output_type": output_type,
-            "visible_fields": visible_fields,
-        }
-        if multimodal_parts:
-            generation_args["user_content_parts"] = multimodal_parts
 
-        # `yield` 使本函数成为生成器：调用者逐条拉取事件，函数不会一次把所有增量存进内存。
-        for update in self._llm.generate_stream(**generation_args):
-            # isinstance 用来判断对象实际类型。流里有两类事件：
-            # 1. StructuredStreamDelta：可见字段增量；
-            # 2. StructuredStreamCompleted：完整 JSON 校验后的最终结果。
-            if isinstance(update, StructuredStreamDelta):
-                yield HarnessStreamDelta(
-                    kind="visible_delta",
-                    field=update.field,
-                    delta=update.delta,
-                )
-                continue
-            # 底层协议只有 Delta/Completed 两种；assert 在开发期捕获网关新增事件却未同步适配的错误。
-            assert isinstance(update, StructuredStreamCompleted)
-            generation = update.generation
-            yield HarnessStreamCompleted(
-                kind="completed",
-                generation=HarnessGeneration(
-                    value=generation.value,  # type: ignore[arg-type]
-                    model=generation.model,
-                    latency_ms=generation.latency_ms,
-                    token_usage=generation.token_usage,
-                    context=assembled_context,
-                    messages=messages,
-                ),
-            )
+    def _build_node(
+        self,
+        *,
+        node_name: str,
+        output_type: type[T],
+        prepared: _PreparedHarnessInvocation,
+        visible_fields: tuple[VisibleFieldSpec, ...],
+        multimodal_parts: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+    ):
+        lens = StateLens(
+            name=f"{node_name}.harness_lens",
+            source_fields=("human_prompt",),
+            selector=_select_harness_prompt,
+            output_type=_HarnessPromptInput,
+        )
+        profile = _model_profile(node_name, prepared.raw_trusted_context, self._llm)
+        policy = _invocation_policy(
+            node_name=node_name,
+            output_type=output_type,
+            system_prompt=prepared.system_prompt,
+            raw_trusted_context=prepared.raw_trusted_context,
+            prompt_version=prepared.resolved_prompt_profile_id,
+        )
+        spec = ModelNodeSpec(
+            node_name=node_name,
+            lens=lens,
+            trusted_system_prompt=prepared.system_prompt,
+            human_prompt_template="{human_prompt}",
+            output_type=output_type,
+            patch_type=_HarnessPatch,
+            guardrail=_identity_guardrail,
+            patch_projector=_harness_patch,
+            profile=profile,
+            policy=policy,
+            visible_fields=visible_fields,
+            user_content_parts=tuple(dict(part) for part in multimodal_parts),
+        )
+        return build_model_node(
+            spec,
+            transport=StructuredClientTransport(self._llm),
+        )
 
 
 # 所属模块：Agent Harness > 模型执行中枢 > 可信调用上下文最小披露。
@@ -284,15 +350,7 @@ def _trusted_agent_context_payload(agent_context: Any | None) -> dict[str, Any]:
     防止未来新增敏感字段时自动进入 prompt。
     """
 
-    if agent_context is None:
-        return {}
-    # `isinstance` 分支兼容强类型 Pydantic 上下文和历史 dict 调用；其他类型不尝试反射属性。
-    if isinstance(agent_context, BaseModel):
-        raw_context = agent_context.model_dump(mode="json")
-    elif isinstance(agent_context, dict):
-        raw_context = dict(agent_context)
-    else:
-        return {}
+    raw_context = _trusted_agent_context_mapping(agent_context)
 
     allowed_fields = (
         "case_id",
@@ -313,3 +371,109 @@ def _trusted_agent_context_payload(agent_context: Any | None) -> dict[str, Any]:
         for field in allowed_fields
         if raw_context.get(field) is not None
     }
+
+
+def _trusted_agent_context_mapping(agent_context: Any | None) -> dict[str, Any]:
+    if isinstance(agent_context, BaseModel):
+        return agent_context.model_dump(mode="python")
+    if isinstance(agent_context, dict):
+        return dict(agent_context)
+    return {}
+
+
+def _select_harness_prompt(state: Mapping[str, Any]) -> Mapping[str, Any]:
+    return {"human_prompt": state["human_prompt"]}
+
+
+def _identity_guardrail(value: T) -> T:
+    return value
+
+
+def _harness_patch(value: BaseModel) -> Mapping[str, Any]:
+    return {"value": value.model_dump(mode="json")}
+
+
+def _model_profile(
+    node_name: str,
+    raw_context: dict[str, Any],
+    llm: StructuredLlmClient,
+) -> ModelProfile:
+    profile_id = raw_context.get("model_profile_id") or "legacy:model-profile.v1"
+    raw_tools = raw_context.get("tool_capabilities") or ()
+    if not isinstance(profile_id, str):
+        raise ValueError("trusted model profile id must be a string")
+    if not isinstance(raw_tools, (list, tuple)) or any(
+        not isinstance(item, str) for item in raw_tools
+    ):
+        raise ValueError("trusted tool capabilities must be a string sequence")
+    tools = tuple(raw_tools)
+    provider = getattr(llm, "governed_provider", "structured-client")
+    model = getattr(llm, "governed_model", "fake-model")
+    if not isinstance(provider, str) or not provider:
+        raise ValueError("structured client must declare a valid governed provider")
+    if not isinstance(model, str) or not model:
+        raise ValueError("structured client must declare a valid governed model")
+    budget_resolver = getattr(llm, "governed_max_output_tokens", None)
+    max_output_tokens = 8_192
+    if budget_resolver is not None:
+        if not callable(budget_resolver):
+            raise ValueError("structured client declared an invalid token budget resolver")
+        max_output_tokens = budget_resolver(node_name)
+    max_provider_attempts = getattr(llm, "governed_max_provider_attempts", 1)
+    if (
+        isinstance(max_output_tokens, bool)
+        or not isinstance(max_output_tokens, int)
+        or isinstance(max_provider_attempts, bool)
+        or not isinstance(max_provider_attempts, int)
+    ):
+        raise ValueError("structured client declared invalid governed model limits")
+    return ModelProfile(
+        profile_id=profile_id,
+        provider=provider,
+        model=model,
+        temperature=0,
+        max_output_tokens=max_output_tokens,
+        tool_allowlist=tools,
+        max_provider_attempts=max_provider_attempts,
+    )
+
+
+def _invocation_policy(
+    *,
+    node_name: str,
+    output_type: type[BaseModel],
+    system_prompt: str,
+    raw_trusted_context: dict[str, Any],
+    prompt_version: str | None,
+) -> ModelInvocationPolicy:
+    retry_budget = raw_trusted_context.get("retry_budget")
+    if not isinstance(retry_budget, dict):
+        retry_budget = {}
+    return ModelInvocationPolicy(
+        invocation_id=raw_trusted_context.get("agent_invocation_id")
+        or f"legacy:{node_name}:invocation",
+        node_name=node_name,
+        deadline_at=_trusted_deadline(raw_trusted_context.get("deadline_at")),
+        provider_attempts_remaining=retry_budget.get("provider_attempts_remaining", 1),
+        repairs_remaining=retry_budget.get("repairs_remaining", 0),
+        prompt_version=prompt_version or f"{node_name}:prompt:v1",
+        output_schema_version=raw_trusted_context.get("output_schema_version")
+        or f"{output_type.__name__}:schema:v1",
+        policy_version=raw_trusted_context.get("policy_version") or "legacy:policy:v1",
+        guardrail_version=raw_trusted_context.get("guardrail_version")
+        or "legacy:guardrail:v1",
+        trusted_system_sha256=system_prompt_sha256(system_prompt),
+        traceparent=raw_trusted_context.get("traceparent"),
+    )
+
+
+def _trusted_deadline(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        deadline = value
+    elif isinstance(value, str):
+        deadline = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    else:
+        deadline = datetime.now(timezone.utc) + timedelta(seconds=120)
+    if deadline.utcoffset() is None:
+        raise ValueError("trusted model deadline must be timezone-aware")
+    return deadline

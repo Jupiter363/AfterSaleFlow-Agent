@@ -5,9 +5,18 @@ from __future__ import annotations
 from pydantic import BaseModel
 
 from app.harness.context_window import ContextWindowManager, PromptSection
-from app.harness.model_runner import HarnessModelRunner
+from app.harness.model_runner import (
+    HarnessModelRunner,
+    HarnessStreamCompleted,
+    HarnessStreamDelta,
+)
 from app.harness.prompt_composer import PromptRepository
-from app.llm import StructuredGeneration
+from app.llm import (
+    StructuredGeneration,
+    StructuredStreamCompleted,
+    StructuredStreamDelta,
+)
+from app.streaming import VisibleFieldSpec
 
 
 class RunnerOutput(BaseModel):
@@ -15,12 +24,20 @@ class RunnerOutput(BaseModel):
 
 
 class RecordingLlm:
+    supports_governed_provider_request = True
+    governed_provider = "test-provider"
+    governed_model = "fake-model"
+    governed_max_provider_attempts = 2
+
     # 所属模块：Agent Harness > test_model_runner；函数角色：对象依赖初始化。
     # 具体功能：`__init__` 注入并保存处理本阶段状态需要的客户端、配置或策略依赖。
     # 上下游：上游为 Java 可信快照、调用身份、上下文合同、角色模板；下游为 受 Token、权限、Schema、审计约束的模型输入或结果。
     # 系统意义：该函数在系统中的业务边界是：隔离参与方会话；不可信案件文本不能升级为系统指令。
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
+
+    def governed_max_output_tokens(self, node_name: str) -> int:
+        return 4_096 if node_name == "intake_analyze" else 8_192
 
     # 所属模块：Agent Harness > test_model_runner；函数角色：类/闭包内部方法。
     # 具体功能：`generate` 围绕本阶段状态计算该函数独立负责的业务派生值；关键协作调用：`self.calls.append`、`StructuredGeneration`、`output_type`。
@@ -34,6 +51,7 @@ class RecordingLlm:
         user_prompt,
         output_type,
         user_content_parts=None,
+        governed_request=None,
     ):
         self.calls.append(
             {
@@ -42,6 +60,7 @@ class RecordingLlm:
                 "user_prompt": user_prompt,
                 "output_type": output_type,
                 "user_content_parts": user_content_parts,
+                "governed_request": governed_request,
             }
         )
         return StructuredGeneration(
@@ -49,6 +68,43 @@ class RecordingLlm:
             model="fake-model",
             latency_ms=12,
             token_usage={"input": 30, "output": 5, "total": 35},
+        )
+
+    def generate_stream(
+        self,
+        *,
+        node_name,
+        system_prompt,
+        user_prompt,
+        output_type,
+        visible_fields=(),
+        user_content_parts=None,
+        governed_request=None,
+    ):
+        self.calls.append(
+            {
+                "node_name": node_name,
+                "system_prompt": system_prompt,
+                "user_prompt": user_prompt,
+                "output_type": output_type,
+                "visible_fields": visible_fields,
+                "user_content_parts": user_content_parts,
+                "governed_request": governed_request,
+            }
+        )
+        yield StructuredStreamDelta(
+            kind="visible_delta",
+            field="answer",
+            delta="智能接待回复",
+        )
+        yield StructuredStreamCompleted(
+            kind="completed",
+            generation=StructuredGeneration(
+                value=output_type(answer="智能接待回复"),
+                model="fake-model",
+                latency_ms=12,
+                token_usage={"input": 30, "output": 5, "total": 35},
+            ),
         )
 
 
@@ -90,6 +146,7 @@ def test_model_runner_composes_prompt_with_managed_context_window() -> None:
     assert len(llm.calls) == 1
     call = llm.calls[0]
     assert call["node_name"] == "intake_analyze"
+    assert call["governed_request"].max_output_tokens == 4_096
     assert "人工智能原生编排框架通用安全边界" in str(call["system_prompt"])
     assert "中立争议接待官" in str(call["system_prompt"])
     assert "harness_context" in str(call["user_prompt"])
@@ -118,6 +175,12 @@ def test_model_runner_passes_prompt_profile_and_trusted_agent_context() -> None:
         "case_id": "CASE_model_runner",
         "room_type": "EVIDENCE",
         "agent_invocation_id": "INVOCATION_model_runner",
+        "model_profile_id": "model:test:v1",
+        "retry_budget": {
+            "provider_attempts_remaining": 1,
+            "repairs_remaining": 0,
+        },
+        "traceparent": "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
     }
 
     runner.invoke_structured(
@@ -136,6 +199,12 @@ def test_model_runner_passes_prompt_profile_and_trusted_agent_context() -> None:
     assert "EVIDENCE_CLERK:USER:v1" in str(call["system_prompt"])
     assert "MALICIOUS_CASE_DATA" not in str(call["system_prompt"])
     assert "MALICIOUS_CASE_DATA" in str(call["user_prompt"])
+    governed = call["governed_request"]
+    assert governed.provider == "test-provider"
+    assert governed.model == "fake-model"
+    assert governed.provider_attempts_remaining == 1
+    assert governed.repairs_remaining == 0
+    assert governed.traceparent == agent_context["traceparent"]
 
 
 # 所属模块：Agent Harness > test_model_runner；函数角色：回归测试用例。
@@ -165,6 +234,26 @@ def test_model_runner_forwards_multimodal_parts_only_to_llm_transport() -> None:
 
     assert llm.calls[0]["user_content_parts"] == parts
     assert "data:image" not in str(llm.calls[0]["user_prompt"])
+
+
+def test_model_runner_streams_public_callbacks_and_parses_one_final_document() -> None:
+    llm = RecordingLlm()
+    runner = HarnessModelRunner(llm=llm, prompts=PromptRepository())
+
+    updates = list(
+        runner.invoke_structured_stream(
+            node_name="intake_analyze",
+            case_data={"raw_text": "用户文本"},
+            output_type=RunnerOutput,
+            visible_fields=(VisibleFieldSpec("answer", "answer"),),
+        )
+    )
+
+    assert len(llm.calls) == 1
+    assert isinstance(updates[0], HarnessStreamDelta)
+    assert updates[0].delta == "智能接待回复"
+    assert isinstance(updates[1], HarnessStreamCompleted)
+    assert updates[1].generation.value.answer == "智能接待回复"
 
 
 # 所属模块：Agent Harness > test_model_runner；函数角色：回归测试用例。
