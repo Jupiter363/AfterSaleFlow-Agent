@@ -23,8 +23,10 @@ from app.graph_runtime.gateway import (
 )
 from app.graph_runtime.identity import ThreadIdentity
 from app.graph_runtime.ledger import AttemptStatus, ResultRecord
+from app.graph_runtime.provider_intent import GatewayProviderCallIntentRecorder
 from app.graph_runtime.recovery import RecoveryAction, RecoveryDecision
 from app.graph_runtime.registry import RegistryRecord, VersionBinding
+from app.llm import bind_provider_call_intent_recorder
 from app.security.invocation_envelope import VerifiedInvocation
 
 
@@ -63,6 +65,11 @@ class GraphGatewayPort(Protocol):
 
     async def renew_execution(self, execution: GatewayExecution) -> Any: ...
 
+    async def record_provider_call(
+        self,
+        execution: GatewayExecution,
+    ) -> GatewayExecution: ...
+
     async def finish_execution_attempt(
         self,
         execution: GatewayExecution,
@@ -81,15 +88,40 @@ class GraphGatewayPort(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class ProviderRuntimeBinding:
+    model_profile_id: str
+    provider: str
+    model: str
+    allowed_nodes: frozenset[str]
+
+    def __post_init__(self) -> None:
+        if (
+            not self.model_profile_id
+            or len(self.model_profile_id) > 128
+            or not self.provider
+            or len(self.provider) > 64
+            or not self.model
+            or len(self.model) > 128
+            or not self.allowed_nodes
+            or len(self.allowed_nodes) > 64
+            or any(not node or len(node) > 128 for node in self.allowed_nodes)
+        ):
+            raise GraphContractError("provider runtime binding is invalid")
+
+
+@dataclass(frozen=True, slots=True)
 class ShadowExecutorRegistration:
     """One process-local executor pinned to the complete immutable registry binding."""
 
     binding: VersionBinding
     executor: ShadowGraphExecutor
+    provider_binding: ProviderRuntimeBinding
 
     def __post_init__(self) -> None:
         if not callable(getattr(self.executor, "stream", None)):
             raise GraphContractError("Graph executor must expose an async stream method")
+        if self.provider_binding.model_profile_id != self.binding.model_profile_id:
+            raise GraphContractError("executor provider profile binding conflicts with registry")
 
 
 class ExactShadowExecutorRegistry:
@@ -109,11 +141,17 @@ class ExactShadowExecutorRegistry:
         return len(self._entries)
 
     def resolve(self, record: RegistryRecord) -> ShadowGraphExecutor:
+        return self.resolve_registration(record).executor
+
+    def resolve_registration(
+        self,
+        record: RegistryRecord,
+    ) -> ShadowExecutorRegistration:
         record.require_new_shadow_command()
         registration = self._entries.get(self._key(record.binding))
         if registration is None or registration.binding != record.binding:
             raise GraphVersionUnavailableError("GRAPH_EXECUTOR_BINDING_UNAVAILABLE")
-        return registration.executor
+        return registration
 
     @staticmethod
     def _key(binding: VersionBinding) -> tuple[str, str, str]:
@@ -283,7 +321,7 @@ class GatewayBackedGraphCommandStreamService:
         ):
             raise GraphContractError("unsupported durable Graph recovery decision")
 
-        executor = self._executors.resolve(admission.registry)
+        registration = self._executors.resolve_registration(admission.registry)
         execution = await self._gateway.acquire_execution(
             admission,
             owner_id=self._owner_id,
@@ -291,7 +329,7 @@ class GatewayBackedGraphCommandStreamService:
         )
         source: AsyncIterator[AgentStreamEvent] | None = None
         try:
-            source = executor.stream(execution)
+            source = self._provider_bound_stream(registration, execution)
             validated = self._gateway.execute_stream(
                 execution=execution,
                 executor=_Executor(source),
@@ -305,6 +343,36 @@ class GatewayBackedGraphCommandStreamService:
             raise
         async for event in self._renewing_stream(validated, execution):
             yield event
+
+    def _provider_bound_stream(
+        self,
+        registration: ShadowExecutorRegistration,
+        execution: GatewayExecution,
+    ) -> AsyncIterator[AgentStreamEvent]:
+        recorder = GatewayProviderCallIntentRecorder(
+            gateway=self._gateway,
+            execution=execution,
+            provider=registration.provider_binding.provider,
+            model=registration.provider_binding.model,
+            allowed_nodes=registration.provider_binding.allowed_nodes,
+        )
+
+        async def stream() -> AsyncIterator[AgentStreamEvent]:
+            with bind_provider_call_intent_recorder(recorder):
+                iterator = registration.executor.stream(execution).__aiter__()
+            try:
+                while True:
+                    try:
+                        with bind_provider_call_intent_recorder(recorder):
+                            event = await anext(iterator)
+                    except StopAsyncIteration:
+                        return
+                    yield event
+            finally:
+                with bind_provider_call_intent_recorder(recorder):
+                    await _close_iterator_safely(iterator)
+
+        return stream()
 
     async def _reconcile_without_synthetic_replay(
         self,

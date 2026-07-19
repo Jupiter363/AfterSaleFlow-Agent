@@ -12,9 +12,11 @@ from app.llm import (
     AgentServiceUnavailable,
     GovernedProviderRequest,
     LiteLlmProxyClient,
+    ProviderCallIntent,
     StructuredGeneration,
     StructuredStreamCompleted,
     StructuredStreamDelta,
+    bind_provider_call_intent_recorder,
 )
 from app.model_runtime.transports import (
     ModelTransportCompleted,
@@ -27,6 +29,20 @@ from app.model_runtime.transports import (
 )
 from app.streaming import VisibleFieldSpec
 from tests.model_runtime.helpers import Answer
+
+
+class _ProviderCallRecorder:
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+        self.intents: list[ProviderCallIntent] = []
+
+    def record_provider_call(self, intent: ProviderCallIntent) -> None:
+        self.events.append("intent")
+        self.intents.append(intent)
+
+    async def arecord_provider_call(self, intent: ProviderCallIntent) -> None:
+        self.events.append("intent")
+        self.intents.append(intent)
 
 
 def _request(
@@ -186,6 +202,120 @@ async def test_litellm_native_async_nonstream_and_stream_use_bounded_http() -> N
     assert sum(bool(call.get("stream")) for call in calls) == 1
     assert isinstance(streamed[-1], ModelTransportCompleted)
     assert "reasoning" not in streamed[-1].result.json_document
+
+
+@pytest.mark.asyncio
+async def test_provider_intent_is_recorded_before_async_nonstream_and_stream_http() -> None:
+    events: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        events.append("http")
+        body = json.loads(request.content)
+        if body.get("stream"):
+            payload = {
+                "model": "native-model",
+                "choices": [
+                    {
+                        "delta": {"content": '{"answer":"native"}'},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 2,
+                    "completion_tokens": 1,
+                    "total_tokens": 3,
+                },
+            }
+            return httpx.Response(
+                200,
+                content=f"data: {json.dumps(payload)}\n\ndata: [DONE]\n\n".encode(),
+            )
+        return httpx.Response(
+            200,
+            json={
+                "model": "native-model",
+                "choices": [{"message": {"content": '{"answer":"native"}'}}],
+                "usage": {
+                    "prompt_tokens": 2,
+                    "completion_tokens": 1,
+                    "total_tokens": 3,
+                },
+            },
+        )
+
+    mock = httpx.MockTransport(handler)
+    client = LiteLlmProxyClient(
+        "http://litellm:4000",
+        "native-model",
+        "key",
+        transport=mock,
+        async_transport=mock,
+    )
+    transport = StructuredClientTransport(client)
+    recorder = _ProviderCallRecorder(events)
+
+    with bind_provider_call_intent_recorder(recorder):
+        await transport.agenerate(_request(model="native-model"))
+        assert [update async for update in transport.astream(
+            _request(visible=True, model="native-model")
+        )]
+
+    assert events == ["intent", "http", "intent", "http"]
+    assert [intent.node_name for intent in recorder.intents] == ["test_node", "test_node"]
+    assert all(intent.provider == "litellm" for intent in recorder.intents)
+    assert all(intent.model == "native-model" for intent in recorder.intents)
+
+
+def test_each_governed_sync_repair_http_has_its_own_provider_intent() -> None:
+    events: list[str] = []
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        events.append("http")
+        calls += 1
+        if calls == 1:
+            return httpx.Response(
+                400,
+                json={"error": {"message": "response_format is not supported"}},
+            )
+        return httpx.Response(
+            200,
+            json={
+                "model": "native-model",
+                "choices": [{"message": {"content": '{"answer":"repaired"}'}}],
+                "usage": {
+                    "prompt_tokens": 2,
+                    "completion_tokens": 1,
+                    "total_tokens": 3,
+                },
+            },
+        )
+
+    client = LiteLlmProxyClient(
+        "http://litellm:4000",
+        "native-model",
+        "key",
+        transport=httpx.MockTransport(handler),
+    )
+    recorder = _ProviderCallRecorder(events)
+
+    with bind_provider_call_intent_recorder(recorder):
+        result = client.generate(
+            node_name="test_node",
+            system_prompt="system",
+            user_prompt="human",
+            output_type=Answer,
+            governed_request=_request(
+                model="native-model",
+                repairs=1,
+                attempts=2,
+            ).governed_request,
+        )
+
+    assert result.value.answer == "repaired"
+    assert events == ["intent", "http", "intent", "http"]
+    assert len(recorder.intents) == 2
 
 
 @pytest.mark.asyncio

@@ -8,12 +8,15 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
+import httpx
 import pytest
+from pydantic import BaseModel
 
 from app.api.graph_stream_service import (
     ExactShadowExecutorRegistry,
     GatewayBackedGraphCommandStreamService,
     GraphStreamAdmissionGate,
+    ProviderRuntimeBinding,
     ShadowExecutorRegistration,
 )
 from app.contracts.v1.models import AgentStreamEvent, AgentStreamPayload, RoomGraphCommand
@@ -41,6 +44,7 @@ from app.graph_runtime.ledger import (
 from app.graph_runtime.persistence_models import GraphFenceContext
 from app.graph_runtime.recovery import RecoveryAction, RecoveryDecision
 from app.graph_runtime.registry import RegistryRecord, RegistryState, VersionBinding
+from app.llm import GovernedProviderRequest, LiteLlmProxyClient
 from app.security.invocation_envelope import VerifiedInvocation
 
 
@@ -75,6 +79,15 @@ def _version(command: RoomGraphCommand) -> VersionBinding:
         tool_policy_version="tools.none.v1",
         binding_hash="b" * 64,
         code_build_id="build.v1",
+    )
+
+
+def _provider_binding() -> ProviderRuntimeBinding:
+    return ProviderRuntimeBinding(
+        model_profile_id=_command().invocation_context.model_profile_id,
+        provider="litellm",
+        model="qwen3.7-plus",
+        allowed_nodes=frozenset({"test_node"}),
     )
 
 
@@ -213,6 +226,64 @@ class _Executor:
             yield _event(execution.admission.command, 1, "final")
 
 
+class _Answer(BaseModel):
+    answer: str
+
+
+class _ProviderCallingExecutor(_Executor):
+    def __init__(self) -> None:
+        super().__init__()
+        self.http_calls = 0
+
+    async def stream(self, execution: GatewayExecution):
+        self.calls += 1
+        yield _event(execution.admission.command, 0, "attempt_started")
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            self.http_calls += 1
+            return httpx.Response(
+                200,
+                json={
+                    "model": "qwen3.7-plus",
+                    "choices": [{"message": {"content": '{"answer":"ok"}'}}],
+                    "usage": {
+                        "prompt_tokens": 1,
+                        "completion_tokens": 1,
+                        "total_tokens": 2,
+                    },
+                },
+            )
+
+        transport = httpx.MockTransport(handler)
+        client = LiteLlmProxyClient(
+            "http://litellm:4000",
+            "qwen3.7-plus",
+            "key",
+            transport=transport,
+            async_transport=transport,
+        )
+        result = await client.agenerate(
+            node_name="test_node",
+            system_prompt="system",
+            user_prompt="human",
+            output_type=_Answer,
+            governed_request=GovernedProviderRequest(
+                provider="litellm",
+                model="qwen3.7-plus",
+                temperature=0,
+                max_output_tokens=32,
+                response_format="STRICT_JSON_SCHEMA",
+                tool_allowlist=(),
+                deadline_at=datetime.now(timezone.utc) + timedelta(minutes=1),
+                provider_attempts_remaining=1,
+                repairs_remaining=0,
+                traceparent=execution.admission.command.traceparent,
+            ),
+        )
+        assert result.value.answer == "ok"
+        yield _event(execution.admission.command, 1, "final")
+
+
 class _Gateway:
     def __init__(
         self,
@@ -231,6 +302,7 @@ class _Gateway:
         self.reconciled = 0
         self.renewed = 0
         self.finished = 0
+        self.provider_calls = 0
 
     async def admit(self, **kwargs: Any) -> GatewayAdmission:
         return self.admission
@@ -249,6 +321,16 @@ class _Gateway:
     async def renew_execution(self, execution: GatewayExecution) -> LeaseRecord:
         self.renewed += 1
         return execution.lease
+
+    async def record_provider_call(self, execution: GatewayExecution) -> GatewayExecution:
+        self.provider_calls += 1
+        return replace(
+            execution,
+            attempt=replace(
+                execution.attempt,
+                provider_call_count=execution.attempt.provider_call_count + 1,
+            ),
+        )
 
     async def finish_execution_attempt(self, execution: GatewayExecution, **kwargs: Any):
         self.finished += 1
@@ -283,7 +365,13 @@ async def _service(
     gate = GraphStreamAdmissionGate()
     await gate.start()
     registry = ExactShadowExecutorRegistry(
-        [ShadowExecutorRegistration(gateway.admission.registry.binding, executor)]
+        [
+            ShadowExecutorRegistration(
+                gateway.admission.registry.binding,
+                executor,
+                _provider_binding(),
+            )
+        ]
     )
     return (
         GatewayBackedGraphCommandStreamService(
@@ -301,7 +389,13 @@ def test_executor_registry_requires_the_complete_immutable_binding() -> None:
     admission = _admission(AdmissionAction.ACQUIRE)
     executor = _Executor()
     registry = ExactShadowExecutorRegistry(
-        [ShadowExecutorRegistration(admission.registry.binding, executor)]
+        [
+            ShadowExecutorRegistration(
+                admission.registry.binding,
+                executor,
+                _provider_binding(),
+            )
+        ]
     )
 
     assert registry.resolve(admission.registry) is executor
@@ -316,9 +410,23 @@ def test_executor_registry_requires_the_complete_immutable_binding() -> None:
     with pytest.raises(GraphContractError, match="duplicate"):
         ExactShadowExecutorRegistry(
             [
-                ShadowExecutorRegistration(admission.registry.binding, executor),
-                ShadowExecutorRegistration(admission.registry.binding, _Executor()),
+                ShadowExecutorRegistration(
+                    admission.registry.binding,
+                    executor,
+                    _provider_binding(),
+                ),
+                ShadowExecutorRegistration(
+                    admission.registry.binding,
+                    _Executor(),
+                    _provider_binding(),
+                ),
             ]
+        )
+    with pytest.raises(GraphContractError, match="provider profile binding"):
+        ShadowExecutorRegistration(
+            admission.registry.binding,
+            executor,
+            replace(_provider_binding(), model_profile_id="model.other.v1"),
         )
 
 
@@ -542,6 +650,26 @@ async def test_truncated_gateway_stream_aborts_attempt_and_never_fakes_a_termina
         _ = [event async for event in stream]
 
     assert gateway.finished == 1
+    assert await gate.drain(0.01) is True
+
+
+@pytest.mark.asyncio
+async def test_exact_executor_provider_http_is_ledgered_before_transport() -> None:
+    admission = _admission(AdmissionAction.ACQUIRE)
+    gateway = _Gateway(admission)
+    executor = _ProviderCallingExecutor()
+    service, gate = await _service(gateway, executor)
+
+    stream = await service.open_stream(
+        command=admission.command,
+        verified_invocation=cast(VerifiedInvocation, object()),
+        expected_thread=admission.thread,
+    )
+    events = [event async for event in stream]
+
+    assert [event.event_type for event in events] == ["attempt_started", "final"]
+    assert gateway.provider_calls == 1
+    assert executor.http_calls == 1
     assert await gate.drain(0.01) is True
 
 

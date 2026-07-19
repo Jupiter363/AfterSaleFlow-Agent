@@ -10,6 +10,8 @@ import re
 import threading
 import time
 from collections.abc import AsyncIterator, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from io import StringIO
@@ -223,6 +225,45 @@ class GovernedProviderRequest:
             for item in self.tool_allowlist
         ):
             raise ValueError("governed tool allowlist must contain unique non-empty names")
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderCallIntent:
+    """Bounded metadata persisted immediately before one provider transport call."""
+
+    node_name: str
+    provider: str
+    model: str
+    traceparent: str | None
+
+
+class ProviderCallIntentRecorder(Protocol):
+    def record_provider_call(self, intent: ProviderCallIntent) -> None: ...
+
+    async def arecord_provider_call(self, intent: ProviderCallIntent) -> None: ...
+
+
+_ACTIVE_PROVIDER_CALL_RECORDER: ContextVar[ProviderCallIntentRecorder | None] = ContextVar(
+    "active_provider_call_intent_recorder",
+    default=None,
+)
+
+
+@contextmanager
+def bind_provider_call_intent_recorder(
+    recorder: ProviderCallIntentRecorder,
+) -> Iterator[None]:
+    """Bind one execution-scoped durable provider-call recorder."""
+
+    if not callable(getattr(recorder, "record_provider_call", None)) or not callable(
+        getattr(recorder, "arecord_provider_call", None)
+    ):
+        raise TypeError("provider call recorder must support sync and async execution")
+    token = _ACTIVE_PROVIDER_CALL_RECORDER.set(recorder)
+    try:
+        yield
+    finally:
+        _ACTIVE_PROVIDER_CALL_RECORDER.reset(token)
 
 
 @dataclass(frozen=True)
@@ -741,6 +782,7 @@ class LiteLlmProxyClient:
                 )
                 request_body["stream"] = True
                 request_body["stream_options"] = {"include_usage": True}
+                await self._arecord_provider_call_intent(node_name, governed_request)
                 async with client.stream(
                     "POST",
                     self._chat_completions_url(),
@@ -836,6 +878,7 @@ class LiteLlmProxyClient:
                 )
                 request_body["stream"] = True
                 request_body["stream_options"] = {"include_usage": True}
+                self._record_provider_call_intent(node_name, governed_request)
                 with client.stream(
                     "POST",
                     self._chat_completions_url(),
@@ -1054,6 +1097,7 @@ class LiteLlmProxyClient:
             governed_request=governed_request,
         )
         request_timeout = self._request_timeout_seconds(governed_request)
+        self._record_provider_call_intent(node_name, governed_request)
         response = _post_with_limited_response(
             client,
             self._chat_completions_url(),
@@ -1091,6 +1135,7 @@ class LiteLlmProxyClient:
             governed_request=governed_request,
         )
         request_timeout = self._request_timeout_seconds(governed_request)
+        await self._arecord_provider_call_intent(node_name, governed_request)
         response = await _apost_with_limited_response(
             client,
             self._chat_completions_url(),
@@ -1105,6 +1150,50 @@ class LiteLlmProxyClient:
         except ValueError as exception:
             raise AgentServiceUnavailable("LiteLLM proxy returned invalid JSON") from exception
         return payload
+
+    @staticmethod
+    def _provider_call_intent(
+        node_name: str,
+        governed_request: GovernedProviderRequest | None,
+    ) -> tuple[ProviderCallIntentRecorder, ProviderCallIntent] | None:
+        recorder = _ACTIVE_PROVIDER_CALL_RECORDER.get()
+        if recorder is None:
+            return None
+        if governed_request is None:
+            raise RuntimeError(
+                "provider call intent recorder requires a governed provider request"
+            )
+        return (
+            recorder,
+            ProviderCallIntent(
+                node_name=node_name,
+                provider=governed_request.provider,
+                model=governed_request.model,
+                traceparent=governed_request.traceparent,
+            ),
+        )
+
+    @classmethod
+    def _record_provider_call_intent(
+        cls,
+        node_name: str,
+        governed_request: GovernedProviderRequest | None,
+    ) -> None:
+        bound = cls._provider_call_intent(node_name, governed_request)
+        if bound is not None:
+            recorder, intent = bound
+            recorder.record_provider_call(intent)
+
+    @classmethod
+    async def _arecord_provider_call_intent(
+        cls,
+        node_name: str,
+        governed_request: GovernedProviderRequest | None,
+    ) -> None:
+        bound = cls._provider_call_intent(node_name, governed_request)
+        if bound is not None:
+            recorder, intent = bound
+            await recorder.arecord_provider_call(intent)
 
     # 所属模块：LLM 网关 > LiteLLM 适配器 > OpenAI 兼容请求体构造。
     # 具体功能：`_completion_request_body` 固定 system/user 消息、temperature=0、节点输出预算并关闭 Thinking；有图片时先二次校验，json_mode 时把 output_type 的 Pydantic JSON Schema 作为 strict provider response_format。
