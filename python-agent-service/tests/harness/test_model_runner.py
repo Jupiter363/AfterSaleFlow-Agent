@@ -385,21 +385,15 @@ def test_model_runner_does_not_trust_mapping_or_arbitrary_model_context(
     llm = RecordingLlm()
     runner = HarnessModelRunner(llm=llm, prompts=PromptRepository())
 
-    runner.invoke_structured(
-        node_name="evidence_turn",
-        case_data={"case_id": "CASE_untrusted_context"},
-        output_type=RunnerOutput,
-        agent_context=untrusted_context,  # type: ignore[arg-type]
-    )
+    with pytest.raises(TypeError, match="validated AgentInvocationContext"):
+        runner.invoke_structured(
+            node_name="evidence_turn",
+            case_data={"case_id": "CASE_untrusted_context"},
+            output_type=RunnerOutput,
+            agent_context=untrusted_context,  # type: ignore[arg-type]
+        )
 
-    call = llm.calls[0]
-    assert "SESSION_attacker" not in str(call["system_prompt"])
-    governed = call["governed_request"]
-    assert governed.tool_allowlist == ()
-    assert governed.provider_attempts_remaining == 1
-    assert governed.repairs_remaining == 0
-    assert governed.traceparent is None
-    assert governed.deadline_at < datetime.now(timezone.utc) + timedelta(minutes=3)
+    assert llm.calls == []
 
 
 def test_model_runner_rejects_prompt_profile_override_of_trusted_context() -> None:
@@ -422,7 +416,7 @@ def test_model_runner_rejects_explicit_profile_backed_only_by_mapping() -> None:
     llm = RecordingLlm()
     runner = HarnessModelRunner(llm=llm, prompts=PromptRepository())
 
-    with pytest.raises(ValueError, match="requires a validated agent context"):
+    with pytest.raises(TypeError, match="validated AgentInvocationContext"):
         runner.invoke_structured(
             node_name="evidence_turn",
             case_data={"case_id": "CASE_mapping_profile"},
@@ -431,6 +425,21 @@ def test_model_runner_rejects_explicit_profile_backed_only_by_mapping() -> None:
                 "prompt_profile_id": "EVIDENCE_CLERK:MERCHANT:v1"
             },
             prompt_profile_id="EVIDENCE_CLERK:MERCHANT:v1",
+        )
+
+    assert llm.calls == []
+
+
+def test_model_runner_rejects_nonempty_untyped_agent_context_without_profile() -> None:
+    llm = RecordingLlm()
+    runner = HarnessModelRunner(llm=llm, prompts=PromptRepository())
+
+    with pytest.raises(TypeError, match="validated AgentInvocationContext"):
+        runner.invoke_structured(
+            node_name="evidence_turn",
+            case_data={"case_id": "CASE_untyped_context"},
+            output_type=RunnerOutput,
+            agent_context={"actor_role": "MERCHANT"},  # type: ignore[arg-type]
         )
 
     assert llm.calls == []

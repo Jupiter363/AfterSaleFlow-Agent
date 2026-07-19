@@ -407,8 +407,10 @@ def _trusted_agent_context_payload(
 def _validated_agent_context(
     agent_context: Any | None,
 ) -> AgentInvocationContext | None:
-    if type(agent_context) is not AgentInvocationContext:
+    if agent_context is None:
         return None
+    if type(agent_context) is not AgentInvocationContext:
+        raise TypeError("agent context must be a validated AgentInvocationContext")
     return AgentInvocationContext.model_validate(
         agent_context.model_dump(mode="python")
     )
