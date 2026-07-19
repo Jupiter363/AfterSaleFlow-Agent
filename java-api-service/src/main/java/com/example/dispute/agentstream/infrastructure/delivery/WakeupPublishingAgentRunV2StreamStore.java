@@ -2,6 +2,7 @@ package com.example.dispute.agentstream.infrastructure.delivery;
 
 import com.example.dispute.agentstream.application.AgentRunV2StreamStore;
 import com.example.dispute.agentstream.application.AgentRunV2StreamStore.BatchAppendReceipt;
+import com.example.dispute.agentstream.application.AgentRunReconciledFinalStore;
 import com.example.dispute.agentstream.infrastructure.persistence.AgentRunStreamRetentionManifest;
 import com.example.dispute.agentstream.infrastructure.persistence.PostgresAgentRunV2EventStore;
 import com.example.dispute.workflow.contract.v1.AgentStreamEvent;
@@ -14,7 +15,8 @@ import org.springframework.stereotype.Component;
 
 /** Commits PostgreSQL first, then emits a best-effort Redis wake-up. */
 @Component
-public class WakeupPublishingAgentRunV2StreamStore implements AgentRunV2StreamStore {
+public class WakeupPublishingAgentRunV2StreamStore
+        implements AgentRunV2StreamStore, AgentRunReconciledFinalStore {
 
     private static final Logger LOGGER =
             LoggerFactory.getLogger(WakeupPublishingAgentRunV2StreamStore.class);
@@ -42,6 +44,20 @@ public class WakeupPublishingAgentRunV2StreamStore implements AgentRunV2StreamSt
         BatchAppendReceipt receipt = eventStore.appendBatch(events);
         AgentStreamEvent first = events.getFirst();
         publishBestEffort(first.runId(), first.attemptId(), receipt.durableHighWatermark());
+        return receipt;
+    }
+
+    @Override
+    public AgentRunReconciledFinalStore.Receipt appendOrLoad(
+            AgentRunReconciledFinalStore.Request request) {
+        AgentRunReconciledFinalStore.Receipt receipt =
+                eventStore.appendOrLoadReconciledFinal(request);
+        if (receipt.inserted()) {
+            publishBestEffort(
+                    request.logicalRunId(),
+                    request.attemptId(),
+                    receipt.durableHighWatermark());
+        }
         return receipt;
     }
 

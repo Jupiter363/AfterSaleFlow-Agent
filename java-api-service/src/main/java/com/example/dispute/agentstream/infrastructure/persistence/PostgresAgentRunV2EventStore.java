@@ -2,8 +2,11 @@ package com.example.dispute.agentstream.infrastructure.persistence;
 
 import com.example.dispute.agentstream.application.AgentRunV2StreamStore;
 import com.example.dispute.agentstream.application.AgentRunV2StreamStore.BatchAppendReceipt;
+import com.example.dispute.agentstream.application.AgentRunReconciledFinalStore;
 import com.example.dispute.workflow.contract.v1.AgentStreamEvent;
 import com.example.dispute.workflow.contract.v1.ContractJson;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
+import com.example.dispute.workflow.contract.v1.ContractTypes.StreamEventType;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -12,12 +15,14 @@ import com.fasterxml.jackson.databind.SerializationFeature;
 import java.sql.PreparedStatement;
 import java.sql.Statement;
 import java.sql.Timestamp;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
@@ -72,6 +77,35 @@ public class PostgresAgentRunV2EventStore {
              where agent_run_id = ?
                and agent_run_attempt_id = ?
                and stream_protocol = 'agent-stream.v2'
+            """;
+
+    private static final String LOCK_ATTEMPT_SQL =
+            """
+            select attempt_status
+              from agent_run_attempt
+             where agent_run_id = ? and id = ?
+             for update
+            """;
+
+    private static final String ATTEMPT_EVENTS_SQL =
+            """
+            select sequence_no, event_type, audience, payload_hash, payload_json::text
+              from agent_run_stream_event
+             where agent_run_id = ?
+               and agent_run_attempt_id = ?
+               and stream_protocol = 'agent-stream.v2'
+             order by sequence_no asc
+            """;
+
+    private static final String LAST_EVENT_TYPE_SQL =
+            """
+            select event_type
+              from agent_run_stream_event
+             where agent_run_id = ?
+               and agent_run_attempt_id = ?
+               and stream_protocol = 'agent-stream.v2'
+             order by sequence_no desc
+             limit 1
             """;
 
     private static final String RETENTION_MANIFEST_SQL =
@@ -139,6 +173,17 @@ public class PostgresAgentRunV2EventStore {
                 writeTransaction.execute(status -> appendInTransaction(batch));
         if (receipt == null) {
             throw new IllegalStateException("durable stream transaction returned no receipt");
+        }
+        return receipt;
+    }
+
+    public AgentRunReconciledFinalStore.Receipt appendOrLoadReconciledFinal(
+            AgentRunReconciledFinalStore.Request request) {
+        Objects.requireNonNull(request, "request");
+        AgentRunReconciledFinalStore.Receipt receipt = writeTransaction.execute(
+                status -> appendOrLoadReconciledFinalInTransaction(request));
+        if (receipt == null) {
+            throw new IllegalStateException("reconciled final transaction returned no receipt");
         }
         return receipt;
     }
@@ -232,6 +277,14 @@ public class PostgresAgentRunV2EventStore {
     }
 
     private BatchAppendReceipt appendInTransaction(List<PersistedEvent> batch) {
+        AgentStreamEvent first = batch.getFirst().event();
+        lockAttempt(first.runId(), first.attemptId());
+        return appendLocked(batch);
+    }
+
+    private BatchAppendReceipt appendLocked(List<PersistedEvent> batch) {
+        AgentStreamEvent first = batch.getFirst().event();
+        requireAppendPosition(batch);
         int[] updateCounts =
                 jdbc.batchUpdate(
                         INSERT_SQL,
@@ -283,7 +336,6 @@ public class PostgresAgentRunV2EventStore {
             }
         }
 
-        AgentStreamEvent first = batch.getFirst().event();
         long highWatermark = durableHighWatermark(first.runId(), first.attemptId());
         long appendedMaximum =
                 batch.stream().mapToLong(item -> item.event().sequenceNo()).max().orElseThrow();
@@ -291,6 +343,179 @@ public class PostgresAgentRunV2EventStore {
             throw new IllegalStateException("PostgreSQL high-watermark is behind the append batch");
         }
         return new BatchAppendReceipt(inserted, highWatermark);
+    }
+
+    private AgentRunReconciledFinalStore.Receipt appendOrLoadReconciledFinalInTransaction(
+            AgentRunReconciledFinalStore.Request request) {
+        AgentRunAttemptStatus attemptStatus =
+                lockAttempt(request.logicalRunId(), request.attemptId());
+        if (attemptStatus != AgentRunAttemptStatus.RUNNING
+                && attemptStatus != AgentRunAttemptStatus.RESULT_READY
+                && attemptStatus != AgentRunAttemptStatus.COMPLETED) {
+            throw new AgentRunReconciledFinalStore.ConflictException(
+                    "reconciled final conflicts with terminal attempt status " + attemptStatus);
+        }
+        List<AgentStreamEvent> events = loadAttemptEvents(
+                request.logicalRunId(), request.attemptId());
+        if (events.isEmpty()
+                || events.getFirst().sequenceNo() != 0
+                || events.getFirst().eventType() != StreamEventType.ATTEMPT_STARTED) {
+            throw new AgentRunReconciledFinalStore.ConflictException(
+                    "reconciled final requires a durable attempt_started prelude");
+        }
+        boolean publicOutputEmitted = false;
+        for (int index = 0; index < events.size(); index++) {
+            AgentStreamEvent event = events.get(index);
+            if (event.sequenceNo() != index
+                    || !event.runId().equals(request.logicalRunId())
+                    || !event.attemptId().equals(request.attemptId())
+                    || event.audience() != request.audience()
+                    || (index > 0 && event.eventType() == StreamEventType.ATTEMPT_STARTED)) {
+                throw new AgentRunReconciledFinalStore.ConflictException(
+                        "durable public attempt history is inconsistent");
+            }
+            publicOutputEmitted |= event.eventType() == StreamEventType.VISIBLE_DELTA;
+            if (event.eventType() == StreamEventType.FINAL) {
+                if (index != events.size() - 1
+                        || !request.resultRef().equals(event.payload().finalResultRef())
+                        || !request.resultHash().equals(event.payload().finalResultHash())) {
+                    throw new AgentRunReconciledFinalStore.ConflictException(
+                            "durable final differs from the reconciled result");
+                }
+                return new AgentRunReconciledFinalStore.Receipt(
+                        event,
+                        false,
+                        event.sequenceNo(),
+                        publicOutputEmitted);
+            }
+            if (event.eventType() == StreamEventType.ERROR
+                    || event.eventType() == StreamEventType.ATTEMPT_ABORTED) {
+                throw new AgentRunReconciledFinalStore.ConflictException(
+                        "durable public attempt already has another terminal event");
+            }
+        }
+
+        long sequence = events.getLast().sequenceNo() + 1;
+        Instant occurredAt = databaseNow();
+        AgentStreamEvent finalEvent = new AgentStreamEvent(
+                "agent-stream.v2",
+                request.logicalRunId(),
+                request.attemptId(),
+                sequence,
+                StreamEventType.FINAL,
+                request.audience(),
+                occurredAt,
+                new AgentStreamEvent.Payload(
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        request.resultRef(),
+                        request.resultHash(),
+                        null,
+                        null));
+        BatchAppendReceipt appended = appendLocked(prepareBatch(List.of(finalEvent)));
+        if (!appended.inserted().getFirst()
+                || appended.durableHighWatermark() != sequence) {
+            throw new AgentRunReconciledFinalStore.ConflictException(
+                    "reconciled final was not the next durable event");
+        }
+        return new AgentRunReconciledFinalStore.Receipt(
+                finalEvent,
+                true,
+                sequence,
+                publicOutputEmitted);
+    }
+
+    private AgentRunAttemptStatus lockAttempt(String runId, String attemptId) {
+        List<String> statuses = jdbc.query(
+                LOCK_ATTEMPT_SQL,
+                (resultSet, rowNumber) -> resultSet.getString("attempt_status"),
+                runId,
+                attemptId);
+        if (statuses.size() != 1) {
+            throw new AgentRunReconciledFinalStore.ConflictException(
+                    "public AgentRun attempt is missing or ambiguous");
+        }
+        try {
+            return AgentRunAttemptStatus.valueOf(statuses.getFirst());
+        } catch (IllegalArgumentException exception) {
+            throw new AgentRunReconciledFinalStore.ConflictException(
+                    "public AgentRun attempt has an invalid status", exception);
+        }
+    }
+
+    private List<AgentStreamEvent> loadAttemptEvents(String runId, String attemptId) {
+        return jdbc.query(
+                ATTEMPT_EVENTS_SQL,
+                (resultSet, rowNumber) -> decodeAndVerify(
+                        runId,
+                        attemptId,
+                        resultSet.getLong("sequence_no"),
+                        resultSet.getString("event_type"),
+                        resultSet.getString("audience"),
+                        resultSet.getString("payload_hash"),
+                        resultSet.getString("payload_json")),
+                runId,
+                attemptId);
+    }
+
+    private Instant databaseNow() {
+        Timestamp timestamp = jdbc.queryForObject(
+                "select clock_timestamp()", Timestamp.class);
+        if (timestamp == null) {
+            throw new IllegalStateException("database clock returned no timestamp");
+        }
+        return timestamp.toInstant();
+    }
+
+    private void requireAppendPosition(List<PersistedEvent> batch) {
+        AgentStreamEvent first = batch.getFirst().event();
+        long highWatermark = durableHighWatermark(first.runId(), first.attemptId());
+        List<PersistedEvent> newEvents = batch.stream()
+                .filter(candidate -> candidate.event().sequenceNo() > highWatermark)
+                .toList();
+        if (newEvents.isEmpty()) {
+            return;
+        }
+        if (newEvents.getFirst().event().sequenceNo() != highWatermark + 1) {
+            throw new IllegalStateException("durable stream append would create a sequence gap");
+        }
+        List<String> lastTypes = jdbc.query(
+                LAST_EVENT_TYPE_SQL,
+                (resultSet, rowNumber) -> resultSet.getString("event_type"),
+                first.runId(),
+                first.attemptId());
+        if (lastTypes.size() > 1
+                || (!lastTypes.isEmpty()
+                        && Set.of("final", "error", "attempt_aborted").contains(
+                                lastTypes.getFirst()))) {
+            throw new IllegalStateException("durable stream append follows a terminal event");
+        }
+        long expected = highWatermark + 1;
+        boolean terminal = false;
+        for (PersistedEvent candidate : newEvents) {
+            AgentStreamEvent event = candidate.event();
+            if (event.sequenceNo() != expected++ || terminal) {
+                throw new IllegalStateException(
+                        "durable stream append is not contiguous or follows a terminal");
+            }
+            if (event.sequenceNo() == 0
+                    && event.eventType() != StreamEventType.ATTEMPT_STARTED) {
+                throw new IllegalStateException(
+                        "durable stream must begin with attempt_started");
+            }
+            if (event.sequenceNo() > 0
+                    && event.eventType() == StreamEventType.ATTEMPT_STARTED) {
+                throw new IllegalStateException(
+                        "durable stream cannot repeat attempt_started");
+            }
+            terminal = event.eventType() == StreamEventType.FINAL
+                    || event.eventType() == StreamEventType.ERROR
+                    || event.eventType() == StreamEventType.ATTEMPT_ABORTED;
+        }
     }
 
     private Map<Long, String> loadStoredHashes(List<PersistedEvent> batch) {

@@ -2,9 +2,11 @@ package com.example.dispute.workflow.activity.agent;
 
 import com.example.dispute.agentstream.application.AgentRunV2StreamStore;
 import com.example.dispute.agentstream.application.AgentRunV2StreamStore.BatchAppendReceipt;
+import com.example.dispute.agentstream.application.AgentRunReconciledFinalStore;
 import com.example.dispute.workflow.contract.v1.AgentStreamEvent;
 import com.example.dispute.workflow.contract.v1.ContractTypes.StreamEventType;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
+import com.example.dispute.workflow.contract.v1.GraphReconcileResponse;
 import com.example.dispute.workflow.contract.v1.RoomGraphResult;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -20,13 +22,25 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
     static final int MAX_BATCH_EVENTS = 32;
 
     private final AgentGraphCommandClient commandClient;
+    private final AgentGraphReconciliationClient reconciliationClient;
     private final AgentRunV2StreamStore streamStore;
+    private final AgentRunReconciledFinalStore reconciledFinalStore;
 
     public DurableAgentRunExecutionGateway(
             AgentGraphCommandClient commandClient,
             AgentRunV2StreamStore streamStore) {
+        this(commandClient, null, streamStore, null);
+    }
+
+    public DurableAgentRunExecutionGateway(
+            AgentGraphCommandClient commandClient,
+            AgentGraphReconciliationClient reconciliationClient,
+            AgentRunV2StreamStore streamStore,
+            AgentRunReconciledFinalStore reconciledFinalStore) {
         this.commandClient = Objects.requireNonNull(commandClient, "commandClient");
+        this.reconciliationClient = reconciliationClient;
         this.streamStore = Objects.requireNonNull(streamStore, "streamStore");
+        this.reconciledFinalStore = reconciledFinalStore;
     }
 
     @Override
@@ -39,6 +53,9 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
         Objects.requireNonNull(executionMode, "executionMode");
         Objects.requireNonNull(progressListener, "progressListener");
         Objects.requireNonNull(cancellationToken, "cancellationToken");
+        if (executionMode == ExecutionMode.RECONCILE_ONLY) {
+            return reconcileOnly(request, progressListener, cancellationToken);
+        }
 
         ProgressState state = new ProgressState(request);
         PendingBatch batch = new PendingBatch();
@@ -121,6 +138,164 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
                 progressListener,
                 cancellationToken);
         return new Completion(result, state.lastSequence, state.publicOutputEmitted);
+    }
+
+    private Completion reconcileOnly(
+            ExecuteAgentRunRequest request,
+            ProgressListener progressListener,
+            AgentRunCancellationToken cancellationToken) {
+        if (reconciliationClient == null || reconciledFinalStore == null) {
+            throw AgentRunExecutionException.nonRetryable(
+                    "AGENT_RUN_RECONCILIATION_NOT_CONFIGURED",
+                    "result-only reconciliation dependencies are unavailable",
+                    0,
+                    false,
+                    null);
+        }
+        cancellationToken.throwIfCancellationRequested();
+        GraphReconcileResponse response;
+        try {
+            response = reconciliationClient.reconcile(request, cancellationToken);
+        } catch (GraphReconciliationException failure) {
+            cancellationToken.throwIfCancellationRequested();
+            throw reconciliationFailure(failure);
+        }
+        requireReconciliationMatches(request, response);
+        cancellationToken.throwIfCancellationRequested();
+
+        AgentRunReconciledFinalStore.Receipt receipt;
+        try {
+            receipt = reconciledFinalStore.appendOrLoad(
+                    new AgentRunReconciledFinalStore.Request(
+                            request.logicalRunId(),
+                            request.attemptId(),
+                            request.command().actorScope().audience(),
+                            response.resultRef(),
+                            response.resultHash()));
+        } catch (AgentRunReconciledFinalStore.ConflictException failure) {
+            cancellationToken.throwIfCancellationRequested();
+            throw AgentRunExecutionException.nonRetryable(
+                    "AGENT_RUN_RECONCILED_FINAL_CONFLICT",
+                    "durable reconciled final conflicts with public history",
+                    0,
+                    false,
+                    failure);
+        } catch (RuntimeException failure) {
+            cancellationToken.throwIfCancellationRequested();
+            throw AgentRunExecutionException.retryable(
+                    "AGENT_RUN_RECONCILED_FINAL_APPEND_FAILED",
+                    "durable reconciled final append failed",
+                    true,
+                    0,
+                    false,
+                    failure);
+        }
+        if (receipt == null) {
+            throw AgentRunExecutionException.nonRetryable(
+                    "AGENT_RUN_RECONCILED_FINAL_CONFLICT",
+                    "durable reconciled final store returned no receipt",
+                    0,
+                    false,
+                    null);
+        }
+        AgentStreamEvent finalEvent = receipt.finalEvent();
+        if (!request.logicalRunId().equals(finalEvent.runId())
+                || !request.attemptId().equals(finalEvent.attemptId())
+                || request.command().actorScope().audience() != finalEvent.audience()
+                || !response.resultRef().equals(finalEvent.payload().finalResultRef())
+                || !response.resultHash().equals(finalEvent.payload().finalResultHash())
+                || receipt.durableHighWatermark() != finalEvent.sequenceNo()) {
+            throw AgentRunExecutionException.nonRetryable(
+                    "AGENT_RUN_RECONCILED_FINAL_CONFLICT",
+                    "durable reconciled final differs from the exact result",
+                    receipt.durableHighWatermark(),
+                    receipt.publicOutputEmitted(),
+                    null);
+        }
+        cancellationToken.throwIfCancellationRequested();
+        if (receipt.inserted()) {
+            progressListener.onProgress(new AgentRunProgress(
+                    finalEvent.sequenceNo(),
+                    receipt.publicOutputEmitted(),
+                    true));
+        }
+        return new Completion(
+                response.result(),
+                finalEvent.sequenceNo(),
+                receipt.publicOutputEmitted());
+    }
+
+    private static AgentRunExecutionException reconciliationFailure(
+            GraphReconciliationException failure) {
+        return switch (failure.recoveryAction()) {
+            case RETRY_SAME_COMMAND -> AgentRunExecutionException.retryable(
+                    failure.errorCode(),
+                    "result-only reconciliation may retry the same command",
+                    true,
+                    0,
+                    false,
+                    failure);
+            case CREATE_NEXT_ATTEMPT -> AgentRunExecutionException.retryable(
+                    failure.errorCode(),
+                    "result-only reconciliation requires a new AgentRun attempt",
+                    false,
+                    0,
+                    false,
+                    failure);
+            case FAIL_LOGICAL_RUN -> AgentRunExecutionException.nonRetryable(
+                    failure.errorCode(),
+                    "result-only reconciliation rejected the logical run",
+                    0,
+                    false,
+                    failure);
+            case RECONCILE_TERMINAL -> AgentRunExecutionException.nonRetryable(
+                    "AGENT_RUN_RECONCILIATION_ACTION_INVALID",
+                    "result-only reconciliation returned a recursive recovery action",
+                    0,
+                    false,
+                    failure);
+        };
+    }
+
+    private static void requireReconciliationMatches(
+            ExecuteAgentRunRequest request,
+            GraphReconcileResponse response) {
+        if (response == null) {
+            throw AgentRunExecutionException.nonRetryable(
+                    "AGENT_RUN_RECONCILIATION_RESULT_MISSING",
+                    "result-only reconciliation returned no response",
+                    0,
+                    false,
+                    null);
+        }
+        RoomGraphResult result = response.result();
+        var command = request.command();
+        var invocation = command.invocationContext();
+        RoomGraphResult.ExecutionMetadata metadata = result.executionMetadata();
+        if (!command.threadId().equals(response.threadId())
+                || !command.commandId().equals(response.commandId())
+                || !command.requestHash().equals(response.requestHash())
+                || !request.logicalRunId().equals(response.logicalRunId())
+                || !request.attemptId().equals(response.attemptId())
+                || !command.graphKey().equals(response.graphKey())
+                || !command.graphVersion().equals(response.graphVersion())
+                || !command.checkpointSchemaVersion().equals(
+                        response.checkpointSchemaVersion())
+                || !response.resultHash().equals(result.outputHash())
+                || !response.checkpointId().equals(result.checkpointId())
+                || metadata == null
+                || !invocation.promptProfileId().equals(metadata.promptVersion())
+                || !invocation.modelProfileId().equals(metadata.modelProfileId())
+                || !invocation.outputSchemaVersion().equals(metadata.schemaVersion())
+                || !invocation.policyVersion().equals(metadata.policyVersion())
+                || !invocation.guardrailVersion().equals(metadata.guardrailVersion())) {
+            throw AgentRunExecutionException.nonRetryable(
+                    "AGENT_RUN_RECONCILIATION_RESULT_INVALID",
+                    "result-only reconciliation differs from its command",
+                    0,
+                    false,
+                    null);
+        }
     }
 
     private void flushBatch(

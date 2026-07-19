@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.dispute.agentstream.application.AgentRunLedger;
+import com.example.dispute.agentstream.application.AgentRunReconciledFinalStore;
 import com.example.dispute.agentstream.application.AgentRunV2StreamStore.AppendReceipt;
 import com.example.dispute.agentstream.application.AgentRunV2StreamStore.BatchAppendReceipt;
 import com.example.dispute.agentstream.infrastructure.persistence.PostgresAgentRunV2EventStore;
@@ -95,6 +96,13 @@ class AgentRunStreamReplayIntegrationTest {
         assertThat(duplicateBatch.inserted()).containsExactly(false, false, false);
         assertThat(duplicateBatch.insertedCount()).isZero();
         assertThat(duplicateBatch.durableHighWatermark()).isEqualTo(2);
+        AgentStreamEvent newSuffix =
+                event(first.attemptId(), 3, StreamEventType.VISIBLE_DELTA, " gamma");
+        BatchAppendReceipt duplicatePrefixAndNewSuffix =
+                eventStore.appendBatch(List.of(firstBatch.get(1), firstBatch.get(2), newSuffix));
+        assertThat(duplicatePrefixAndNewSuffix.inserted()).containsExactly(false, false, true);
+        assertThat(duplicatePrefixAndNewSuffix.insertedCount()).isEqualTo(1);
+        assertThat(duplicatePrefixAndNewSuffix.durableHighWatermark()).isEqualTo(3);
         assertThatThrownBy(
                         () ->
                                 eventStore.appendBatch(
@@ -106,7 +114,7 @@ class AgentRunStreamReplayIntegrationTest {
                 .satisfies(
                         duplicate -> {
                             assertThat(duplicate.inserted()).isFalse();
-                            assertThat(duplicate.durableHighWatermark()).isEqualTo(2);
+                            assertThat(duplicate.durableHighWatermark()).isEqualTo(3);
                         });
         assertThatThrownBy(
                         () ->
@@ -119,7 +127,7 @@ class AgentRunStreamReplayIntegrationTest {
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("payload hash");
         assertThat(eventStore.durableHighWatermark(logical.agentRunId(), first.attemptId()))
-                .isEqualTo(2);
+                .isEqualTo(3);
 
         ledger.recordAttemptFailure(
                 logical.agentRunId(),
@@ -129,6 +137,15 @@ class AgentRunStreamReplayIntegrationTest {
                 "PROVIDER_TIMEOUT",
                 true,
                 AgentRunPersistenceFixtures.COMPLETED_AT);
+        assertThatThrownBy(() -> eventStore.appendOrLoadReconciledFinal(
+                        new AgentRunReconciledFinalStore.Request(
+                                logical.agentRunId(),
+                                first.attemptId(),
+                                Audience.USER,
+                                "urn:after-sale-flow:graph-result:" + "d".repeat(64),
+                                "d".repeat(64))))
+                .isInstanceOf(AgentRunReconciledFinalStore.ConflictException.class)
+                .hasMessageContaining("terminal attempt status FAILED");
         AgentRunLedger.Attempt second =
                 ledger.startNextAttempt(
                         logical.agentRunId(),
@@ -180,8 +197,73 @@ class AgentRunStreamReplayIntegrationTest {
                         org.assertj.core.groups.Tuple.tuple(second.attemptId(), 0L),
                         org.assertj.core.groups.Tuple.tuple(second.attemptId(), 1L));
         assertThat(eventStore.replay(logical.agentRunId(), first.attemptId(), -1, 100))
-                .hasSize(3)
+                .hasSize(4)
                 .allMatch(event -> event.attemptId().equals(first.attemptId()));
+
+        AgentRunReconciledFinalStore.Request finalRequest =
+                new AgentRunReconciledFinalStore.Request(
+                        logical.agentRunId(),
+                        second.attemptId(),
+                        Audience.USER,
+                        "urn:after-sale-flow:graph-result:" + "f".repeat(64),
+                        "f".repeat(64));
+        AtomicReference<AgentRunReconciledFinalStore.Receipt> insertedFinalReference =
+                new AtomicReference<>();
+        outerTransaction.executeWithoutResult(
+                status -> {
+                    jdbc.update(
+                            "update fulfillment_dispute_case set title = ? where id = ?",
+                            "reconciled final outer transaction must roll back",
+                            AgentRunPersistenceFixtures.CASE_ID);
+                    insertedFinalReference.set(
+                            eventStore.appendOrLoadReconciledFinal(finalRequest));
+                    status.setRollbackOnly();
+                });
+        AgentRunReconciledFinalStore.Receipt insertedFinal = insertedFinalReference.get();
+        AgentRunReconciledFinalStore.Receipt cachedFinal =
+                eventStore.appendOrLoadReconciledFinal(finalRequest);
+
+        assertThat(insertedFinal).isNotNull();
+        assertThat(insertedFinal.inserted()).isTrue();
+        assertThat(insertedFinal.durableHighWatermark()).isEqualTo(2);
+        assertThat(insertedFinal.publicOutputEmitted()).isTrue();
+        assertThat(cachedFinal.inserted()).isFalse();
+        assertThat(cachedFinal.finalEvent()).isEqualTo(insertedFinal.finalEvent());
+        assertThat(cachedFinal.finalEvent().occurredAt())
+                .isEqualTo(insertedFinal.finalEvent().occurredAt());
+        assertThat(cachedFinal.durableHighWatermark()).isEqualTo(2);
+        assertThat(
+                        jdbc.queryForObject(
+                                "select title from fulfillment_dispute_case where id = ?",
+                                String.class,
+                                AgentRunPersistenceFixtures.CASE_ID))
+                .isEqualTo(committedTitle);
+        assertThatThrownBy(() -> eventStore.appendOrLoadReconciledFinal(
+                        new AgentRunReconciledFinalStore.Request(
+                                logical.agentRunId(),
+                                second.attemptId(),
+                                Audience.USER,
+                                "urn:after-sale-flow:graph-result:" + "e".repeat(64),
+                                "e".repeat(64))))
+                .isInstanceOf(AgentRunReconciledFinalStore.ConflictException.class)
+                .hasMessageContaining("differs");
+        assertThat(eventStore.replay(logical.agentRunId(), second.attemptId(), -1, 100))
+                .extracting(AgentStreamEvent::eventType, AgentStreamEvent::sequenceNo)
+                .containsExactly(
+                        org.assertj.core.groups.Tuple.tuple(
+                                StreamEventType.ATTEMPT_STARTED, 0L),
+                        org.assertj.core.groups.Tuple.tuple(
+                                StreamEventType.VISIBLE_DELTA, 1L),
+                        org.assertj.core.groups.Tuple.tuple(StreamEventType.FINAL, 2L));
+        assertThat(eventStore.replay(logical.agentRunId(), second.attemptId(), -1, 100).getLast())
+                .isEqualTo(insertedFinal.finalEvent());
+        assertThatThrownBy(() -> eventStore.append(event(
+                        second.attemptId(),
+                        3,
+                        StreamEventType.VISIBLE_DELTA,
+                        "late")))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("terminal");
     }
 
     private AgentStreamEvent event(
