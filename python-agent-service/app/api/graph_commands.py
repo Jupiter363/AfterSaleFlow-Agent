@@ -10,33 +10,45 @@ from typing import Any, Protocol, cast
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from app.api.graph_reconciliation_service import GraphReconciliationService
 from app.contracts.v1.codec import ContractCodec
 from app.contracts.v1.models import (
     AgentStreamEvent,
     AgentStreamPayload,
+    GraphReconcileResponse,
     RoomGraphCommand,
 )
 from app.graph_runtime.errors import (
+    GraphCommandAbortedError,
+    GraphCommandCancelledError,
     GraphCommandDeadlineError,
+    GraphCommandNotFoundError,
+    GraphCommandStateError,
     GraphGatewayDisabledError,
     GraphLeaseLostError,
     GraphLeaseUnavailableError,
+    GraphNewAgentAttemptRequiredError,
     GraphNonceReplayError,
+    GraphResultNotCommittedError,
     GraphRuntimeError,
 )
 from app.graph_runtime.identity import ThreadIdentity
 from app.security.invocation_envelope import (
     InvocationEnvelopeError,
+    ReconciliationClaims,
     TransportIdentity,
     VerifiedInvocation,
+    VerifiedReconciliation,
     extract_bearer_token,
 )
 
 
 GRAPH_COMMAND_SCHEMA = "room-graph-command.schema.json"
 AGENT_STREAM_SCHEMA = "agent-stream-event.schema.json"
+GRAPH_RECONCILE_RESPONSE_SCHEMA = "graph-reconcile-response.schema.json"
 GRAPH_COMMAND_MAX_BYTES = 65_536
 GRAPH_STREAM_PATH = "/internal/graphs/commands/stream"
+GRAPH_RECONCILE_PATH = "/internal/graphs/commands/reconcile"
 _TERMINAL_EVENTS = frozenset({"attempt_aborted", "final", "error"})
 _NO_STORE_HEADERS: Mapping[str, str] = {
     "Cache-Control": "no-store, no-transform",
@@ -69,6 +81,16 @@ class InvocationEnvelopeVerifierPort(Protocol):
     ) -> VerifiedInvocation: ...
 
 
+class ReconciliationEnvelopeVerifierPort(Protocol):
+    def verify(
+        self,
+        *,
+        token: str,
+        command: RoomGraphCommand,
+        transport_identity: TransportIdentity,
+    ) -> VerifiedReconciliation: ...
+
+
 class GraphCommandStreamService(Protocol):
     async def open_stream(
         self,
@@ -90,6 +112,17 @@ class TrustedThreadIdentityResolver(Protocol):
     ) -> ThreadIdentity: ...
 
 
+class TrustedReconciliationThreadIdentityResolver(Protocol):
+    """Resolve the same trusted historical thread for result reconciliation."""
+
+    async def resolve(
+        self,
+        *,
+        command: RoomGraphCommand,
+        verified_reconciliation: VerifiedReconciliation,
+    ) -> ThreadIdentity: ...
+
+
 @dataclass(frozen=True, slots=True)
 class GraphCommandEndpointDependencies:
     mode: str
@@ -98,6 +131,17 @@ class GraphCommandEndpointDependencies:
     envelope_verifier: InvocationEnvelopeVerifierPort
     thread_identity_resolver: TrustedThreadIdentityResolver
     stream_service: GraphCommandStreamService
+    ready: Callable[[], bool]
+
+
+@dataclass(frozen=True, slots=True)
+class GraphReconciliationEndpointDependencies:
+    mode: str
+    codec: ContractCodec
+    transport_identity_resolver: TransportIdentityResolver
+    envelope_verifier: ReconciliationEnvelopeVerifierPort
+    thread_identity_resolver: TrustedReconciliationThreadIdentityResolver
+    reconciliation_service: GraphReconciliationService
     ready: Callable[[], bool]
 
 
@@ -273,6 +317,176 @@ def create_graph_commands_router(
     return router
 
 
+def create_graph_reconciliation_router(
+    dependencies: GraphReconciliationEndpointDependencies,
+) -> APIRouter:
+    """Expose result-only recovery without granting Graph execution authority."""
+
+    router = APIRouter()
+
+    @router.post(GRAPH_RECONCILE_PATH, response_model=None)
+    async def reconcile_graph_command(request: Request) -> JSONResponse:
+        if dependencies.mode != "SHADOW":
+            return _reconciliation_error_response(
+                503,
+                GraphGatewayDisabledError.code,
+                False,
+                "FAIL_LOGICAL_RUN",
+            )
+        try:
+            ready = dependencies.ready()
+        except Exception:
+            ready = False
+        if not ready:
+            return _reconciliation_error_response(
+                503,
+                "GRAPH_GATEWAY_NOT_READY",
+                True,
+                "RETRY_SAME_COMMAND",
+            )
+        if not _has_json_utf8_content_type(request):
+            return _reconciliation_error_response(
+                415,
+                "GRAPH_CONTENT_TYPE_REJECTED",
+                False,
+                "FAIL_LOGICAL_RUN",
+            )
+        if not _has_identity_content_encoding(request):
+            return _reconciliation_error_response(
+                415,
+                "GRAPH_CONTENT_ENCODING_REJECTED",
+                False,
+                "FAIL_LOGICAL_RUN",
+            )
+
+        try:
+            authorization = request.headers.getlist("authorization")
+            if len(authorization) > 1:
+                raise InvocationEnvelopeError("INVOCATION_AUTHORIZATION_REJECTED")
+            token = extract_bearer_token(authorization[0] if authorization else None)
+            transport_identity = dependencies.transport_identity_resolver.resolve(
+                request.scope
+            )
+            if not isinstance(transport_identity, TransportIdentity):
+                raise InvocationEnvelopeError("INVOCATION_MTLS_IDENTITY_REJECTED")
+        except InvocationEnvelopeError as error:
+            return _reconciliation_error_response(
+                401,
+                error.code,
+                False,
+                "FAIL_LOGICAL_RUN",
+            )
+        except Exception as error:
+            _log_safe_failure("reconciliation transport identity resolution", error)
+            return _reconciliation_error_response(
+                500,
+                "GRAPH_RECONCILIATION_INTERNAL_ERROR",
+                False,
+                "FAIL_LOGICAL_RUN",
+            )
+
+        try:
+            body_text = await _read_bounded_body(request, GRAPH_COMMAND_MAX_BYTES)
+            command = dependencies.codec.decode(GRAPH_COMMAND_SCHEMA, body_text)
+            if not isinstance(command, RoomGraphCommand):
+                raise ValueError("decoded contract is not a RoomGraphCommand")
+        except _BodyTooLarge:
+            return _reconciliation_error_response(
+                413,
+                "GRAPH_COMMAND_TOO_LARGE",
+                False,
+                "FAIL_LOGICAL_RUN",
+            )
+        except (UnicodeDecodeError, ValueError):
+            return _reconciliation_error_response(
+                400,
+                "GRAPH_COMMAND_REJECTED",
+                False,
+                "FAIL_LOGICAL_RUN",
+            )
+        except Exception as error:
+            _log_safe_failure("reconciliation command decoding", error)
+            return _reconciliation_error_response(
+                500,
+                "GRAPH_RECONCILIATION_INTERNAL_ERROR",
+                False,
+                "FAIL_LOGICAL_RUN",
+            )
+
+        try:
+            verified = dependencies.envelope_verifier.verify(
+                token=token,
+                command=command,
+                transport_identity=transport_identity,
+            )
+            if not isinstance(verified, VerifiedReconciliation) or not isinstance(
+                verified.claims,
+                ReconciliationClaims,
+            ):
+                raise InvocationEnvelopeError(
+                    "INVOCATION_RECONCILIATION_CREDENTIAL_TYPE_REJECTED"
+                )
+        except InvocationEnvelopeError as error:
+            return _reconciliation_error_response(
+                401,
+                error.code,
+                False,
+                "FAIL_LOGICAL_RUN",
+            )
+        except Exception as error:
+            _log_safe_failure("reconciliation envelope verification", error)
+            return _reconciliation_error_response(
+                500,
+                "GRAPH_RECONCILIATION_INTERNAL_ERROR",
+                False,
+                "FAIL_LOGICAL_RUN",
+            )
+
+        try:
+            expected_thread = await dependencies.thread_identity_resolver.resolve(
+                command=command,
+                verified_reconciliation=verified,
+            )
+            if not isinstance(expected_thread, ThreadIdentity):
+                raise TypeError("trusted resolver returned an invalid thread identity")
+            response = await dependencies.reconciliation_service.reconcile(
+                command=command,
+                verified_reconciliation=verified,
+                expected_thread=expected_thread,
+            )
+            if not isinstance(response, GraphReconcileResponse):
+                raise TypeError("reconciliation service returned an invalid response")
+            encoded = dependencies.codec.encode(
+                GRAPH_RECONCILE_RESPONSE_SCHEMA,
+                response,
+            )
+        except GraphRuntimeError as error:
+            return _reconciliation_runtime_error(error)
+        except (TypeError, ValueError):
+            return _reconciliation_error_response(
+                502,
+                "GRAPH_RECONCILIATION_PROTOCOL_REJECTED",
+                False,
+                "FAIL_LOGICAL_RUN",
+            )
+        except Exception as error:
+            _log_safe_failure("graph result reconciliation", error)
+            return _reconciliation_error_response(
+                500,
+                "GRAPH_RECONCILIATION_INTERNAL_ERROR",
+                False,
+                "FAIL_LOGICAL_RUN",
+            )
+
+        return JSONResponse(
+            status_code=200,
+            content=encoded,
+            headers=dict(_NO_STORE_HEADERS),
+        )
+
+    return router
+
+
 async def _read_bounded_body(request: Request, maximum: int) -> str:
     content_lengths = request.headers.getlist("content-length")
     if len(content_lengths) > 1:
@@ -414,10 +628,89 @@ def _graph_runtime_error(error: GraphRuntimeError) -> JSONResponse:
     return _error_response(status_code, error.code, error.retryable)
 
 
+def _reconciliation_runtime_error(error: GraphRuntimeError) -> JSONResponse:
+    if isinstance(error, GraphCommandNotFoundError):
+        return _reconciliation_error_response(
+            404,
+            error.code,
+            False,
+            "FAIL_LOGICAL_RUN",
+        )
+    if isinstance(error, GraphNewAgentAttemptRequiredError):
+        return _reconciliation_error_response(
+            409,
+            error.code,
+            False,
+            "CREATE_NEXT_ATTEMPT",
+        )
+    if isinstance(error, GraphNonceReplayError):
+        return _reconciliation_error_response(
+            409,
+            error.code,
+            True,
+            "RETRY_SAME_COMMAND",
+        )
+    if isinstance(
+        error,
+        (GraphGatewayDisabledError, GraphLeaseUnavailableError, GraphLeaseLostError),
+    ):
+        return _reconciliation_error_response(
+            503,
+            error.code,
+            True,
+            "RETRY_SAME_COMMAND",
+        )
+    if isinstance(
+        error,
+        (
+            GraphResultNotCommittedError,
+            GraphCommandCancelledError,
+            GraphCommandAbortedError,
+            GraphCommandStateError,
+        ),
+    ):
+        return _reconciliation_error_response(
+            409,
+            error.code,
+            False,
+            "FAIL_LOGICAL_RUN",
+        )
+    return _reconciliation_error_response(
+        409,
+        error.code,
+        False,
+        "FAIL_LOGICAL_RUN",
+    )
+
+
 def _error_response(status_code: int, code: str, retryable: bool) -> JSONResponse:
     return JSONResponse(
         status_code=status_code,
         content={"code": code, "retryable": retryable},
+        headers=dict(_NO_STORE_HEADERS),
+    )
+
+
+def _reconciliation_error_response(
+    status_code: int,
+    code: str,
+    retryable: bool,
+    recovery_action: str,
+) -> JSONResponse:
+    if recovery_action not in {
+        "RETRY_SAME_COMMAND",
+        "CREATE_NEXT_ATTEMPT",
+        "RECONCILE_TERMINAL",
+        "FAIL_LOGICAL_RUN",
+    }:
+        raise ValueError("reconciliation recovery action is not closed")
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "code": code,
+            "retryable": retryable,
+            "recovery_action": recovery_action,
+        },
         headers=dict(_NO_STORE_HEADERS),
     )
 
