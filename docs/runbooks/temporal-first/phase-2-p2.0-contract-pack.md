@@ -18,8 +18,9 @@ executor. JSON Schema remains authoritative for the existing `RoomGraphCommand`,
 - `ExecuteAgentRunRequest` wraps the existing `RoomGraphCommand`; identity fields must not be copied
   into another independently mutable structure.
 - Activity heartbeats use `AgentRunAttemptHeartbeat` and persist only public progress metadata.
-- `ExecuteAgentRunResult` is hash-bound to `RoomGraphResult.output_hash`; failed or cancelled results
-  cannot carry a graph result.
+- `ExecuteAgentRunResult.v3` is hash-bound to `RoomGraphResult.output_hash`; failed or cancelled
+  results cannot carry a graph result and must carry one closed recovery action. Temporal routing
+  uses that action, never the `retryable` compatibility summary by itself.
 - `AgentRunFinalizationReceipt` binds attempt, fence, result hash, manifest hash, and final stream
   sequence. `ALREADY_COMMITTED` is a successful idempotent replay, not a second commit.
 - Start-to-close, heartbeat timeout, and progress heartbeat interval are fixed at 10 minutes,

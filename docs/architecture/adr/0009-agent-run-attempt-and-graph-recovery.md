@@ -316,19 +316,23 @@ them: `jti` is already outside the RoomGraphCommand body, while `command_nonce` 
 the stable command. A retry signs the unchanged body with the same retained `kid` and a fresh
 `jti`; V1 must never be weakened to accept replay of a consumed `jti`.
 
+The explicit recovery-action delta is resolved in `ExecuteAgentRunResult.v3`. Java now carries the
+closed `RETRY_SAME_COMMAND`, `CREATE_NEXT_ATTEMPT`, `RECONCILE_TERMINAL`, or `FAIL_LOGICAL_RUN`
+action through the gateway, Activity, Temporal payload, and Workflow decision. The legacy
+`retryable` field remains only as a constructor-enforced compatibility summary and is not a routing
+authority. `v3` must be introduced on a new pinned Temporal worker build; existing histories that
+contain `ExecuteAgentRunResult.v2` remain assigned to their prior compatible build and are not
+replayed through the `v3` constructor.
+
 1. **Logical hash versus attempt hash.** Java `CreateLogicalRun` and `AgentRunEntity` currently bind
    the first command `request_hash` as a logical invariant. They require an explicit
    `logical_input_hash` and per-attempt `command_request_hash`; later attempt command hashes are
    expected to differ.
-2. **Explicit recovery action.** `ExecuteAgentRunResult` exposes only `retryable`. The next version
-   must carry or durably map a closed enum such as `RETRY_SAME_COMMAND`, `CREATE_NEXT_ATTEMPT`,
-   `RECONCILE_TERMINAL`, and `FAIL_LOGICAL_RUN`. Until then Java must use the stable code table and
-   never the boolean alone.
-3. **Temporal predecessor binding.** The current `ExecuteAgentRunRequest` lacks
+2. **Temporal predecessor binding.** The current `ExecuteAgentRunRequest` lacks
    `previous_attempt_id` and `logical_input_hash`. Java can derive them under the row lock for Phase
    3 SHADOW, but a versioned Temporal payload is required before cross-build replay and
    Continue-As-New promotion.
-4. **Standalone manifest lineage.** `agent-execution-manifest.v1` identifies the winning attempt but
+3. **Standalone manifest lineage.** `agent-execution-manifest.v1` identifies the winning attempt but
    not its attempt number or predecessor. The Java ledger and stream are authoritative for V1. If a
    standalone exported manifest must prove the retry chain, that is an additive manifest V2, not an
    in-place V1 field.
