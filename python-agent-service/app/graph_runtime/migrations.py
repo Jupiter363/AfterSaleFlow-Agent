@@ -36,6 +36,25 @@ MIGRATION_FILENAMES: Final[tuple[str, ...]] = (
 MIGRATIONS_DIRECTORY: Final[Path] = Path(__file__).resolve().parents[2] / "migrations" / "graph"
 CONTROL_KEY: Final[str] = "primary"
 ZERO_SHA256: Final[str] = "0" * 64
+SCHEMA_ADVISORY_LOCK_PREFIX: Final[str] = "after-sale-flow:graph-schema"
+REQUIRED_MIGRATION_RELATIONS: Final[tuple[str, ...]] = (
+    "checkpoint_migrations",
+    "checkpoints",
+    "checkpoint_blobs",
+    "checkpoint_writes",
+    "graph_schema_migration",
+    "graph_runtime_control",
+    "graph_thread_registry",
+    "agent_graph_command",
+    "agent_graph_command_attempt",
+    "agent_graph_result",
+    "agent_graph_lease",
+    "agent_graph_invocation_nonce",
+    "agent_graph_version_registry",
+    "agent_graph_version_active_reference",
+    "agent_graph_shadow_comparison",
+    "agent_graph_shadow_cleanup_receipt",
+)
 PINNED_PACKAGE_VERSIONS: Final[dict[str, str]] = {
     "langgraph": "1.2.6",
     "langchain-core": "1.4.9",
@@ -209,6 +228,46 @@ def graph_migration_verification_hash(
     return sha256(encoded).hexdigest()
 
 
+def graph_schema_advisory_lock_key(schema: str) -> str:
+    """Return the one session-lock identity shared by migration and restore validation."""
+
+    return f"{SCHEMA_ADVISORY_LOCK_PREFIX}:{require_sql_identifier(schema, 'schema')}"
+
+
+async def acquire_graph_schema_advisory_lock(
+    connection: AsyncConnection[Any],
+    schema: str,
+) -> str:
+    """Fail closed instead of waiting without a bound behind another privileged job."""
+
+    lock_key = graph_schema_advisory_lock_key(schema)
+    row = await (
+        await connection.execute(
+            "select pg_try_advisory_lock(hashtextextended(%s, 0)) as acquired",
+            (lock_key,),
+        )
+    ).fetchone()
+    if row is None or not row["acquired"]:
+        raise GraphMigrationError(
+            "another Graph schema migration or restore validation is already running"
+        )
+    return lock_key
+
+
+async def release_graph_schema_advisory_lock(
+    connection: AsyncConnection[Any],
+    lock_key: str,
+) -> None:
+    row = await (
+        await connection.execute(
+            "select pg_advisory_unlock(hashtextextended(%s, 0)) as released",
+            (lock_key,),
+        )
+    ).fetchone()
+    if row is None or not row["released"]:
+        raise GraphMigrationError("Graph schema advisory lock ownership was lost")
+
+
 class GraphMigrationRunner:
     def __init__(
         self,
@@ -257,13 +316,36 @@ class GraphMigrationRunner:
             row_factory=dict_row,
         ) as connection:
             database_name = await self._prepare_session(connection)
-            lock_key = f"after-sale-flow:graph-migration:{self._schema}"
-            await connection.execute(
-                "select pg_advisory_lock(hashtextextended(%s, 0))", (lock_key,)
-            )
+            lock_key = await acquire_graph_schema_advisory_lock(connection, self._schema)
             try:
-                await AsyncPostgresSaver(connection).setup()
-                await connection.execute(BOOTSTRAP_SQL, prepare=False)
+                control_exists = await self._relation_exists(connection, "graph_runtime_control")
+                if not control_exists:
+                    await connection.execute(BOOTSTRAP_SQL, prepare=False)
+                schema_current = await self._schema_is_exactly_current(
+                    connection,
+                    migrations=migrations,
+                    checkpoint_migration=checkpoint_migration,
+                    package_versions=package_versions,
+                )
+                if not schema_current:
+                    if control_exists:
+                        await self._mark_migration_dirty(
+                            connection,
+                            application_signature=application_signature,
+                            checkpoint_migration=checkpoint_migration,
+                            database_name=database_name,
+                            package_versions=package_versions,
+                        )
+                    await connection.execute(BOOTSTRAP_SQL, prepare=False)
+                    if not control_exists:
+                        await self._mark_migration_dirty(
+                            connection,
+                            application_signature=application_signature,
+                            checkpoint_migration=checkpoint_migration,
+                            database_name=database_name,
+                            package_versions=package_versions,
+                        )
+                    await AsyncPostgresSaver(connection).setup()
                 await self._reject_unknown_applied_versions(connection, migrations)
                 for migration in migrations:
                     if await self._apply_one(
@@ -284,10 +366,11 @@ class GraphMigrationRunner:
                     database_name=database_name,
                     package_versions=package_versions,
                 )
-            finally:
-                await connection.execute(
-                    "select pg_advisory_unlock(hashtextextended(%s, 0))", (lock_key,)
-                )
+            except BaseException:
+                # Closing the direct session releases the lock without masking the root failure.
+                raise
+            else:
+                await release_graph_schema_advisory_lock(connection, lock_key)
 
         return GraphMigrationReport(
             application_signature=application_signature,
@@ -308,12 +391,8 @@ class GraphMigrationRunner:
             raise GraphMigrationError("cannot read Graph migration database identity")
         if self._expected_user is not None and identity["session_user"] != self._expected_user:
             raise GraphMigrationError("Graph migrations are not using the expected migrator role")
-        await connection.execute(
-            sql.SQL("set role {}").format(sql.Identifier(self._owner_role))
-        )
-        owner = await (
-            await connection.execute("select current_user as current_user")
-        ).fetchone()
+        await connection.execute(sql.SQL("set role {}").format(sql.Identifier(self._owner_role)))
+        owner = await (await connection.execute("select current_user as current_user")).fetchone()
         if owner is None or owner["current_user"] != self._owner_role:
             raise GraphMigrationError("Graph migrator cannot assume the non-login owner role")
         await connection.execute(
@@ -323,9 +402,121 @@ class GraphMigrationRunner:
             )
         )
         await connection.execute(
-            sql.SQL("set search_path to {}, pg_catalog").format(sql.Identifier(self._schema))
+            sql.SQL("set search_path to {}, pg_catalog, pg_temp").format(
+                sql.Identifier(self._schema)
+            )
         )
         return identity["database_name"]
+
+    async def _relation_exists(
+        self,
+        connection: AsyncConnection[Any],
+        relation: str,
+    ) -> bool:
+        require_sql_identifier(relation, "relation")
+        row = await (
+            await connection.execute(
+                "select to_regclass(%s) as relation",
+                (f"{self._schema}.{relation}",),
+            )
+        ).fetchone()
+        return bool(row and row["relation"] is not None)
+
+    async def _schema_is_exactly_current(
+        self,
+        connection: AsyncConnection[Any],
+        *,
+        migrations: tuple[GraphMigration, ...],
+        checkpoint_migration: int,
+        package_versions: dict[str, str],
+    ) -> bool:
+        relation_rows = await (
+            await connection.execute(
+                """
+                select required.relation_name,
+                       to_regclass(%s || '.' || required.relation_name) is not null as present
+                  from unnest(%s::text[]) as required(relation_name)
+                 order by required.relation_name
+                """,
+                (self._schema, list(REQUIRED_MIGRATION_RELATIONS)),
+            )
+        ).fetchall()
+        if {row["relation_name"] for row in relation_rows if row["present"]} != set(
+            REQUIRED_MIGRATION_RELATIONS
+        ):
+            return False
+
+        rows = await (
+            await connection.execute(
+                """
+                select version, sha256, package_versions
+                  from graph_schema_migration
+                 order by version
+                """
+            )
+        ).fetchall()
+        actual = tuple((row["version"], row["sha256"], row["package_versions"]) for row in rows)
+        expected = tuple(
+            (migration.version, migration.sha256, package_versions) for migration in migrations
+        )
+        if actual != expected:
+            return False
+
+        checkpoint_rows = await (
+            await connection.execute("select v as version from checkpoint_migrations order by v")
+        ).fetchall()
+        return tuple(row["version"] for row in checkpoint_rows) == tuple(
+            range(checkpoint_migration + 1)
+        )
+
+    async def _mark_migration_dirty(
+        self,
+        connection: AsyncConnection[Any],
+        *,
+        application_signature: str,
+        checkpoint_migration: int,
+        database_name: str,
+        package_versions: dict[str, str],
+    ) -> None:
+        verification_hash = graph_migration_verification_hash(
+            database_name=database_name,
+            schema=self._schema,
+            environment_generation=self._environment_generation,
+            application_signature=application_signature,
+            checkpoint_migration=checkpoint_migration,
+            package_versions=package_versions,
+        )
+        async with connection.transaction():
+            await connection.execute(
+                """
+                insert into graph_runtime_control (
+                    control_key, environment_generation, restore_verification_hash,
+                    migration_status, restore_status,
+                    expected_application_signature, expected_checkpoint_migration,
+                    verified_at, verification_hash
+                ) values (
+                    %s, %s, %s, 'DIRTY', 'UNVERIFIED', %s, %s,
+                    clock_timestamp(), %s
+                )
+                on conflict (control_key) do update
+                set environment_generation = excluded.environment_generation,
+                    restore_verification_hash = excluded.restore_verification_hash,
+                    migration_status = 'DIRTY',
+                    restore_status = 'UNVERIFIED',
+                    expected_application_signature = excluded.expected_application_signature,
+                    expected_checkpoint_migration = excluded.expected_checkpoint_migration,
+                    verified_at = excluded.verified_at,
+                    verification_hash = excluded.verification_hash
+                """,
+                (
+                    CONTROL_KEY,
+                    self._environment_generation,
+                    ZERO_SHA256,
+                    application_signature,
+                    checkpoint_migration,
+                    verification_hash,
+                ),
+            )
 
     async def _reject_unknown_applied_versions(
         self,
@@ -349,28 +540,29 @@ class GraphMigrationRunner:
         package_versions: dict[str, str],
         execution_id: str,
     ) -> bool:
-        existing = await (
-            await connection.execute(
-                """
-                select sha256, package_versions
-                  from graph_schema_migration
-                 where version = %s
-                """,
-                (migration.version,),
-            )
-        ).fetchone()
-        if existing is not None:
-            if existing["sha256"] != migration.sha256:
-                raise GraphMigrationError(
-                    f"checksum conflict for Graph migration {migration.version}"
-                )
-            if existing["package_versions"] != package_versions:
-                raise GraphMigrationError(
-                    f"package pin conflict for Graph migration {migration.version}"
-                )
-            return False
-
         async with connection.transaction():
+            existing = await (
+                await connection.execute(
+                    """
+                    select sha256, package_versions
+                      from graph_schema_migration
+                     where version = %s
+                     for update
+                    """,
+                    (migration.version,),
+                )
+            ).fetchone()
+            if existing is not None:
+                if existing["sha256"] != migration.sha256:
+                    raise GraphMigrationError(
+                        f"checksum conflict for Graph migration {migration.version}"
+                    )
+                if existing["package_versions"] != package_versions:
+                    raise GraphMigrationError(
+                        f"package pin conflict for Graph migration {migration.version}"
+                    )
+                return False
+
             await connection.execute(migration.sql_text, prepare=False)
             await connection.execute(
                 """
@@ -400,7 +592,6 @@ class GraphMigrationRunner:
             "agent_graph_command",
             "agent_graph_command_attempt",
             "agent_graph_lease",
-            "agent_graph_invocation_nonce",
         )
         runtime_read_only = (
             "checkpoint_migrations",
@@ -455,23 +646,33 @@ class GraphMigrationRunner:
                 )
             )
             await connection.execute(
-                sql.SQL(
-                    "grant select, insert on {}.agent_graph_shadow_comparison to {}"
-                ).format(schema, runtime)
+                sql.SQL("grant select, insert on {}.agent_graph_invocation_nonce to {}").format(
+                    schema, runtime
+                )
             )
             await connection.execute(
-                sql.SQL(
-                    "grant select, delete on {}.agent_graph_shadow_comparison to {}"
-                ).format(schema, retention)
+                sql.SQL("grant select, insert on {}.agent_graph_shadow_comparison to {}").format(
+                    schema, runtime
+                )
             )
             await connection.execute(
-                sql.SQL(
-                    "grant select, insert on {}.agent_graph_shadow_cleanup_receipt to {}"
-                ).format(schema, retention)
+                sql.SQL("grant select, delete on {}.agent_graph_shadow_comparison to {}").format(
+                    schema, retention
+                )
             )
             await connection.execute(
-                sql.SQL("revoke execute on all functions in schema {} from public").format(
-                    schema
+                sql.SQL("grant select, delete on {}.agent_graph_invocation_nonce to {}").format(
+                    schema, retention
+                )
+            )
+            await connection.execute(
+                sql.SQL("grant select on {}.agent_graph_shadow_cleanup_receipt to {}").format(
+                    schema, retention
+                )
+            )
+            await connection.execute(
+                sql.SQL("revoke execute on all functions in schema {} from public, {}, {}").format(
+                    schema, runtime, retention
                 )
             )
             await connection.execute(
@@ -514,20 +715,7 @@ class GraphMigrationRunner:
         ):
             raise GraphMigrationError("PostgresSaver migration ledger is not exactly current")
 
-        required_tables = (
-            "checkpoints",
-            "checkpoint_blobs",
-            "checkpoint_writes",
-            "graph_thread_registry",
-            "agent_graph_command",
-            "agent_graph_command_attempt",
-            "agent_graph_result",
-            "agent_graph_lease",
-            "agent_graph_invocation_nonce",
-            "agent_graph_version_registry",
-            "agent_graph_shadow_comparison",
-        )
-        for table in required_tables:
+        for table in REQUIRED_MIGRATION_RELATIONS:
             exists = await (
                 await connection.execute("select to_regclass(%s) as relation", (table,))
             ).fetchone()

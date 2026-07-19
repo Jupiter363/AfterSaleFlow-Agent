@@ -10,9 +10,12 @@ from app.graph_runtime.migrations import (
     GraphMigrationRunner,
     MIGRATION_FILENAMES,
     PINNED_PACKAGE_VERSIONS,
+    REQUIRED_MIGRATION_RELATIONS,
+    acquire_graph_schema_advisory_lock,
     expected_checkpoint_migration,
     graph_application_signature,
     graph_migration_verification_hash,
+    graph_schema_advisory_lock_key,
     graph_verification_hash,
     load_graph_migrations,
     pinned_package_versions,
@@ -140,3 +143,235 @@ def test_migration_job_cannot_self_authorize_a_restore_generation() -> None:
     assert "set restore_verification_hash = %s" in restore_source
     assert "restore_status = 'VERIFIED'" in restore_source
     assert "CONSISTENCY_QUERIES" in restore_source
+
+
+class _Cursor:
+    def __init__(self, row: object = None, rows: list[object] | None = None) -> None:
+        self._row = row
+        self._rows = rows or []
+
+    async def fetchone(self) -> object:
+        return self._row
+
+    async def fetchall(self) -> list[object]:
+        return self._rows
+
+
+class _Transaction:
+    def __init__(self, events: list[str]) -> None:
+        self._events = events
+
+    async def __aenter__(self) -> None:
+        self._events.append("transaction:enter")
+
+    async def __aexit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        self._events.append("transaction:rollback" if exc_type else "transaction:commit")
+
+
+class _MigrationConnection:
+    def __init__(self, existing: object = None) -> None:
+        self.existing = existing
+        self.events: list[str] = []
+
+    def transaction(self) -> _Transaction:
+        return _Transaction(self.events)
+
+    async def execute(
+        self,
+        query: object,
+        params: object = None,
+        *,
+        prepare: bool | None = None,
+    ) -> _Cursor:
+        normalized = " ".join(str(query).split()).lower()
+        if "from graph_schema_migration" in normalized:
+            self.events.append("sql:checksum-for-update")
+            assert normalized.endswith("for update")
+            return _Cursor(self.existing)
+        if normalized.startswith("insert into graph_schema_migration"):
+            self.events.append("sql:ledger-insert")
+            return _Cursor()
+        self.events.append("sql:migration-ddl")
+        assert prepare is False
+        return _Cursor()
+
+
+@pytest.mark.asyncio
+async def test_checksum_is_locked_and_checked_before_migration_sql() -> None:
+    migration = load_graph_migrations()[0]
+    connection = _MigrationConnection(
+        {"sha256": SHA_A, "package_versions": PINNED_PACKAGE_VERSIONS}
+    )
+    runner = GraphMigrationRunner(
+        "postgresql://unused",
+        environment_generation="generation-7",
+    )
+
+    with pytest.raises(GraphMigrationError, match="checksum conflict"):
+        await runner._apply_one(  # noqa: SLF001 - verifies the migration transaction contract
+            connection,  # type: ignore[arg-type]
+            migration,
+            package_versions=PINNED_PACKAGE_VERSIONS,
+            execution_id="gm-test",
+        )
+
+    assert connection.events == [
+        "transaction:enter",
+        "sql:checksum-for-update",
+        "transaction:rollback",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_migration_sql_and_ledger_insert_share_the_checksum_transaction() -> None:
+    migration = load_graph_migrations()[0]
+    connection = _MigrationConnection()
+    runner = GraphMigrationRunner(
+        "postgresql://unused",
+        environment_generation="generation-7",
+    )
+
+    applied = await runner._apply_one(  # noqa: SLF001 - verifies transaction ordering
+        connection,  # type: ignore[arg-type]
+        migration,
+        package_versions=PINNED_PACKAGE_VERSIONS,
+        execution_id="gm-test",
+    )
+
+    assert applied
+    assert connection.events == [
+        "transaction:enter",
+        "sql:checksum-for-update",
+        "sql:migration-ddl",
+        "sql:ledger-insert",
+        "transaction:commit",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_schema_lock_fails_fast_when_migration_or_restore_owns_it() -> None:
+    class Connection:
+        async def execute(self, query: str, params: object = None) -> _Cursor:
+            assert "pg_try_advisory_lock" in query
+            assert params == (graph_schema_advisory_lock_key("graph_runtime"),)
+            return _Cursor({"acquired": False})
+
+    with pytest.raises(GraphMigrationError, match="already running"):
+        await acquire_graph_schema_advisory_lock(  # type: ignore[arg-type]
+            Connection(), "graph_runtime"
+        )
+
+
+def test_migration_and_restore_validation_use_the_same_schema_lock() -> None:
+    migration_source = inspect.getsource(GraphMigrationRunner.run)
+    restore_source = inspect.getsource(GraphRestoreValidationRunner.run)
+
+    assert "acquire_graph_schema_advisory_lock(connection, self._schema)" in migration_source
+    assert "acquire_graph_schema_advisory_lock(connection, self._schema)" in restore_source
+    assert graph_schema_advisory_lock_key("graph_runtime") == (
+        "after-sale-flow:graph-schema:graph_runtime"
+    )
+
+
+@pytest.mark.asyncio
+async def test_schema_change_marks_control_dirty_before_any_owned_ddl() -> None:
+    events: list[str] = []
+
+    class Transaction:
+        async def __aenter__(self) -> None:
+            events.append("transaction:enter")
+
+        async def __aexit__(self, exc_type: object, exc: object, traceback: object) -> None:
+            events.append("transaction:commit")
+
+    class Connection:
+        def transaction(self) -> Transaction:
+            return Transaction()
+
+        async def execute(self, query: str, params: object = None) -> _Cursor:
+            normalized = " ".join(query.split()).lower()
+            assert "'dirty', 'unverified'" in normalized
+            assert params is not None
+            events.append("sql:dirty-control")
+            return _Cursor()
+
+    runner = GraphMigrationRunner(
+        "postgresql://unused",
+        environment_generation="generation-7",
+    )
+    await runner._mark_migration_dirty(  # noqa: SLF001 - verifies the fail-closed gate
+        Connection(),  # type: ignore[arg-type]
+        application_signature=SHA_A,
+        checkpoint_migration=9,
+        database_name="graph_db",
+        package_versions=PINNED_PACKAGE_VERSIONS,
+    )
+
+    assert events == ["transaction:enter", "sql:dirty-control", "transaction:commit"]
+
+
+def test_migration_runner_only_invalidates_restore_when_schema_is_not_current() -> None:
+    source = inspect.getsource(GraphMigrationRunner.run)
+    current_check = source.index("schema_current = await self._schema_is_exactly_current")
+    dirty_mark = source.index("await self._mark_migration_dirty")
+    checkpointer_setup = source.index("await AsyncPostgresSaver(connection).setup()")
+
+    assert current_check < dirty_mark < checkpointer_setup
+    assert "if not schema_current:" in source
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("missing_relation", "expected"), [(None, True), ("checkpoints", False)])
+async def test_exact_schema_probe_includes_relations_checksums_and_checkpointer_ledger(
+    missing_relation: str | None,
+    expected: bool,
+) -> None:
+    migrations = load_graph_migrations()
+
+    class Connection:
+        async def execute(self, query: str, params: object = None) -> _Cursor:
+            normalized = " ".join(query.split()).lower()
+            if "from unnest" in normalized:
+                return _Cursor(
+                    rows=[
+                        {
+                            "relation_name": relation,
+                            "present": relation != missing_relation,
+                        }
+                        for relation in REQUIRED_MIGRATION_RELATIONS
+                    ]
+                )
+            if "from graph_schema_migration" in normalized:
+                return _Cursor(
+                    rows=[
+                        {
+                            "version": migration.version,
+                            "sha256": migration.sha256,
+                            "package_versions": PINNED_PACKAGE_VERSIONS,
+                        }
+                        for migration in migrations
+                    ]
+                )
+            if "from checkpoint_migrations" in normalized:
+                return _Cursor(
+                    rows=[
+                        {"version": version}
+                        for version in range(expected_checkpoint_migration() + 1)
+                    ]
+                )
+            raise AssertionError(f"unexpected SQL: {normalized}")
+
+    runner = GraphMigrationRunner(
+        "postgresql://unused",
+        environment_generation="generation-7",
+    )
+
+    assert (
+        await runner._schema_is_exactly_current(  # noqa: SLF001 - migration gate contract
+            Connection(),  # type: ignore[arg-type]
+            migrations=migrations,
+            checkpoint_migration=expected_checkpoint_migration(),
+            package_versions=PINNED_PACKAGE_VERSIONS,
+        )
+        is expected
+    )

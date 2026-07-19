@@ -69,6 +69,10 @@ class _Connection:
         missing_relation: str | None = None,
         environment_generation: str | None = None,
         unsafe_privilege: str | None = None,
+        can_create_temporary: bool = False,
+        migration_status: str = "CURRENT",
+        restore_status: str = "VERIFIED",
+        inconsistent_check: str | None = None,
     ) -> None:
         self.config = config
         self.can_create = can_create
@@ -77,6 +81,10 @@ class _Connection:
             environment_generation or config.expected_environment_generation
         )
         self.unsafe_privilege = unsafe_privilege
+        self.can_create_temporary = can_create_temporary
+        self.migration_status = migration_status
+        self.restore_status = restore_status
+        self.inconsistent_check = inconsistent_check
         self.statements: list[str] = []
 
     def transaction(self) -> _Transaction:
@@ -100,6 +108,7 @@ class _Connection:
                 row={
                     "can_create_database": self.can_create,
                     "can_connect_database": True,
+                    "can_create_temporary": self.can_create_temporary,
                     "can_create_schema": self.can_create,
                     "can_use_schema": True,
                     "owns_relation": False,
@@ -110,6 +119,7 @@ class _Connection:
                     "can_mutate_registry": self.unsafe_privilege == "registry",
                     "can_mutate_control": self.unsafe_privilege == "control",
                     "can_delete_runtime_rows": self.unsafe_privilege == "delete",
+                    "can_mutate_append_only": self.unsafe_privilege == "append_only",
                 }
             )
         if "from unnest" in normalized:
@@ -154,15 +164,21 @@ class _Connection:
                 row={
                     "environment_generation": generation,
                     "restore_verification_hash": RESTORE_HASH,
-                    "migration_status": "CURRENT",
-                    "restore_status": "VERIFIED",
+                    "migration_status": self.migration_status,
+                    "restore_status": self.restore_status,
                     "expected_application_signature": signature,
                     "expected_checkpoint_migration": expected_checkpoint_migration(),
                     "verification_hash": verification_hash,
                 }
             )
         if "as inconsistent" in normalized:
-            return _Cursor(row={"inconsistent": False})
+            return _Cursor(
+                row={
+                    "inconsistent": bool(
+                        self.inconsistent_check and self.inconsistent_check in normalized
+                    )
+                }
+            )
         raise AssertionError(f"unexpected readiness SQL: {normalized}")
 
 
@@ -238,6 +254,40 @@ async def test_restored_marker_from_another_generation_fails_closed() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("migration_status", "restore_status"),
+    [("DIRTY", "UNVERIFIED"), ("CURRENT", "UNVERIFIED")],
+)
+async def test_dirty_or_unverified_restore_control_fails_closed(
+    migration_status: str,
+    restore_status: str,
+) -> None:
+    config = _config()
+    connection = _Connection(
+        config,
+        migration_status=migration_status,
+        restore_status=restore_status,
+    )
+
+    report = await GraphPersistenceReadinessProbe(config, _Pool(connection)).check()
+
+    assert not report.ready
+    assert report.code == "GRAPH_RESTORE_UNVERIFIED"
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_metadata_binding_corruption_fails_restore_readiness() -> None:
+    config = _config()
+    connection = _Connection(config, inconsistent_check="checkpoint.metadata ->>")
+
+    report = await GraphPersistenceReadinessProbe(config, _Pool(connection)).check()
+
+    assert not report.ready
+    assert report.code == "GRAPH_RESTORE_INCONSISTENT"
+    assert report.checks["checkpoint_rows_consistent"] is False
+
+
+@pytest.mark.asyncio
 async def test_runtime_role_with_create_privilege_is_not_ready() -> None:
     config = _config()
     report = await GraphPersistenceReadinessProbe(
@@ -250,7 +300,19 @@ async def test_runtime_role_with_create_privilege_is_not_ready() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("unsafe_privilege", ["registry", "control", "delete"])
+async def test_runtime_role_with_temporary_privilege_is_not_ready() -> None:
+    config = _config()
+    report = await GraphPersistenceReadinessProbe(
+        config,
+        _Pool(_Connection(config, can_create_temporary=True)),
+    ).check()
+
+    assert not report.ready
+    assert report.code == "GRAPH_RUNTIME_ROLE_PRIVILEGED"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unsafe_privilege", ["registry", "control", "delete", "append_only"])
 async def test_runtime_role_with_admin_or_delete_privilege_is_not_ready(
     unsafe_privilege: str,
 ) -> None:

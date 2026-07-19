@@ -72,9 +72,15 @@ class _Transaction:
 
 
 class _Connection:
-    def __init__(self, *, fence_current: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        fence_current: bool = True,
+        binding_current: bool = True,
+    ) -> None:
         self.events: list[str] = []
         self.fence_current = fence_current
+        self.binding_current = binding_current
 
     def transaction(self) -> _Transaction:
         return _Transaction(self.events)
@@ -89,7 +95,9 @@ class _Connection:
             return _Cursor({"metadata": _metadata()})
         if "update agent_graph_command" in normalized:
             self.events.append("sql:bind-command")
-            return _Cursor({"status": "EXECUTING", "result_hash": None})
+            return _Cursor(
+                {"status": "EXECUTING", "result_hash": None} if self.binding_current else None
+            )
         raise AssertionError(f"unexpected SQL: {normalized}")
 
 
@@ -212,6 +220,40 @@ async def test_stale_fence_rolls_back_before_the_saver_is_called() -> None:
 
 
 @pytest.mark.asyncio
+async def test_takeover_that_changes_the_fence_rejects_the_late_writer() -> None:
+    connection = _Connection(fence_current=False)
+    saver, direct_savers = _saver(connection)
+
+    with pytest.raises(GraphFenceError, match="stale"):
+        await saver.aput_writes(
+            _config(checkpoint=True),
+            [("late-provider-output", "must-not-commit")],
+            "task-late",
+        )
+
+    assert direct_savers == []
+    assert connection.events == ["transaction:enter", "sql:fence", "transaction:rollback"]
+
+
+@pytest.mark.asyncio
+async def test_command_binding_conflict_rolls_back_the_same_connection_checkpoint() -> None:
+    connection = _Connection(binding_current=False)
+    saver, direct_savers = _saver(connection)
+
+    with pytest.raises(GraphBindingError, match="durable Graph command binding"):
+        await saver.aput(_config(), {}, {}, {})  # type: ignore[arg-type]
+
+    assert direct_savers[0].connection is connection
+    assert connection.events == [
+        "transaction:enter",
+        "sql:fence",
+        "saver:put",
+        "sql:bind-command",
+        "transaction:rollback",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_forged_mapping_is_not_a_trusted_fence_capability() -> None:
     connection = _Connection()
     saver, direct_savers = _saver(connection)
@@ -268,3 +310,54 @@ async def test_checkpoint_read_rejects_another_graph_binding() -> None:
 
     with pytest.raises(GraphBindingError, match="graph_key"):
         await saver.aget_tuple(_config())
+
+
+@pytest.mark.asyncio
+async def test_replacement_saver_restores_a_durable_thread_without_process_state() -> None:
+    item = CheckpointTuple(
+        config={
+            "configurable": {
+                "thread_id": _fence().thread_id,
+                "checkpoint_ns": "hearing",
+                "checkpoint_id": "cp-durable",
+            }
+        },
+        checkpoint={"id": "cp-durable"},  # type: ignore[arg-type]
+        metadata=_metadata(),  # type: ignore[arg-type]
+        parent_config=None,
+        pending_writes=None,
+    )
+
+    class DurableReader(_Reader):
+        async def aget_tuple(self, config: dict[str, Any]) -> CheckpointTuple:
+            return item
+
+    replacement = FencedPostgresSaver(
+        _Pool(_Connection()),  # type: ignore[arg-type]
+        reader=DurableReader(),  # type: ignore[arg-type]
+    )
+
+    restored = await replacement.aget_tuple(_config())
+
+    assert restored is not None
+    assert restored.checkpoint == {"id": "cp-durable"}
+    assert restored.config["configurable"][FENCE_CONTEXT_KEY] == _fence()
+
+
+@pytest.mark.asyncio
+async def test_reconnected_saver_rechecks_fence_after_database_failover() -> None:
+    before_failover = _Connection()
+    active_saver, _ = _saver(before_failover)
+    await active_saver.aput(_config(), {}, {}, {})  # type: ignore[arg-type]
+
+    after_failover = _Connection(fence_current=False)
+    stale_saver, direct_savers = _saver(after_failover)
+    with pytest.raises(GraphFenceError, match="stale"):
+        await stale_saver.aput(_config(), {}, {}, {})  # type: ignore[arg-type]
+
+    assert direct_savers == []
+    assert after_failover.events == [
+        "transaction:enter",
+        "sql:fence",
+        "transaction:rollback",
+    ]

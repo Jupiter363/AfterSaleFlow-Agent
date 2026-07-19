@@ -10,6 +10,7 @@ from app.graph_runtime.persistence_models import (
     GraphPersistenceConfigurationError,
     GraphPoolConfig,
 )
+from app.graph_runtime.checkpoint import create_graph_pool
 
 
 SHA_A = "a" * 64
@@ -108,3 +109,12 @@ def test_pool_waiter_bound_cannot_be_smaller_than_pool_capacity() -> None:
         GraphPoolConfig(max_size=16, max_waiting=15)
 
     assert GraphPoolConfig(max_size=16, max_waiting=16).max_waiting == 16
+
+
+def test_graph_pool_search_path_puts_temporary_objects_last() -> None:
+    pool = create_graph_pool(
+        "postgresql://graph_runtime:unused@localhost/graph_db",
+        GraphPoolConfig(schema="graph_runtime"),
+    )
+
+    assert "-csearch_path=graph_runtime,pg_catalog,pg_temp" in pool.kwargs["options"]

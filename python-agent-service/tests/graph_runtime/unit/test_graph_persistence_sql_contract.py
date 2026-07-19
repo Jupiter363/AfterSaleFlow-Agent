@@ -134,9 +134,78 @@ def test_lease_insert_starts_at_one_and_updates_keep_the_fence_monotonic() -> No
     assert insert_guards
     assert "new.fencing_token < old.fencing_token" in guard
     assert "new.fencing_token <> old.fencing_token + 1" in guard
-    assert "lease renewal or release cannot change the fence" in guard
+    assert "only cancellation or eligible takeover may increment the fence" in guard
     lease_window = _constraint(sql_text, "ck_agent_graph_lease_window")
     assert "lease_expires_at <= renewed_at + interval '30 seconds'" in lease_window
+
+
+def test_cancelled_released_and_expired_leases_allow_exactly_one_fenced_takeover() -> None:
+    sql_text = _sql("G001_graph_runtime.sql")
+    guard = _function(sql_text, "guard_agent_graph_lease_update()")
+
+    for eligible_state in (
+        "old.lease_expires_at <= clock_timestamp()",
+        "old.cancelled_at is not null",
+        "old.released_at is not null",
+    ):
+        assert eligible_state in guard
+    for cleared_state in (
+        "new.cancelled_at is null",
+        "new.cancelled_by_command_id is null",
+        "new.released_at is null",
+    ):
+        assert cleared_state in guard
+    assert "new.fencing_token = old.fencing_token + 1" in guard
+    assert "identity_changed and not taking_over" in guard
+    assert "not taking_over and new.acquired_at <> old.acquired_at" in guard
+
+
+def test_nonce_retention_has_an_expiry_guarded_cleanup_path() -> None:
+    sql_text = _sql("G001_graph_runtime.sql")
+    guard = _function(sql_text, "guard_agent_graph_nonce_delete()")
+
+    assert "old.retained_until > statement_timestamp()" in guard
+    assert "before delete on agent_graph_invocation_nonce" in _compact(sql_text)
+    assert "before update on agent_graph_invocation_nonce" in _compact(sql_text)
+
+    migration_source = (
+        (SERVICE_ROOT / "app" / "graph_runtime" / "migrations.py")
+        .read_text(encoding="utf-8")
+        .lower()
+    )
+    assert "grant select, delete on {}.agent_graph_invocation_nonce to {}" in migration_source
+    assert "grant select, insert on {}.agent_graph_invocation_nonce to {}" in migration_source
+    assert 'agent_graph_invocation_nonce",\n        )' not in migration_source
+    readiness_source = (
+        (SERVICE_ROOT / "app" / "graph_runtime" / "readiness.py")
+        .read_text(encoding="utf-8")
+        .lower()
+    )
+    assert "runtime_delete_forbidden_relations" in readiness_source
+    assert "runtime_append_only_relations" in readiness_source
+    assert "can_mutate_append_only" in readiness_source
+
+
+def test_checkpoint_restore_probe_binds_full_command_and_manifest_identity() -> None:
+    readiness_source = (
+        (SERVICE_ROOT / "app" / "graph_runtime" / "readiness.py")
+        .read_text(encoding="utf-8")
+        .lower()
+    )
+
+    for metadata_key in (
+        "graph_thread_id",
+        "graph_command_id",
+        "graph_request_hash",
+        "graph_room_epoch",
+        "graph_key",
+        "graph_version",
+        "graph_checkpoint_schema_version",
+        "graph_fencing_token",
+        "graph_result_hash",
+        "graph_result_ref",
+    ):
+        assert f"checkpoint.metadata ->> '{metadata_key}'" in readiness_source
 
 
 def test_attempt_identity_state_and_provider_count_are_forward_only() -> None:
@@ -182,7 +251,19 @@ def test_registry_shadow_is_loadable_and_retirement_is_reference_guarded() -> No
         assert required_reference in reference_view
 
     guard = _function(sql_text, "guard_agent_graph_version_update()")
+    reference_counter = _function(sql_text, "agent_graph_shadow_comparison_reference_count(")
+    assert "set search_path from current" in reference_counter
+    assert "set search_path from current" in guard
     assert "new.registry_state = 'retired'" in guard
+    assert "referenced graph version must remain loadable" in guard
+    for reference_count in (
+        "thread_count",
+        "command_count",
+        "result_count",
+        "checkpoint_count",
+        "shadow_comparison_count",
+    ):
+        assert f"active_reference.{reference_count} > 0" in guard
     assert "before delete on agent_graph_version_registry" in _compact(sql_text)
 
 
@@ -203,6 +284,17 @@ def test_shadow_comparison_delete_is_expiry_and_evidence_guarded_with_a_receipt(
         and any("delete from agent_graph_shadow_comparison" in block for block in cleanup_guards)
     )
     assert "before update or delete on agent_graph_shadow_cleanup_receipt" in compact
+    delete_guard = _function(sql_text, "guard_agent_graph_shadow_delete()")
+    assert "security definer set search_path from current" in delete_guard
+    assert "old.expires_at, session_user" in delete_guard
+
+    migration_source = (
+        (SERVICE_ROOT / "app" / "graph_runtime" / "migrations.py")
+        .read_text(encoding="utf-8")
+        .lower()
+    )
+    assert "grant select on {}.agent_graph_shadow_cleanup_receipt to {}" in migration_source
+    assert "grant select, insert on {}.agent_graph_shadow_cleanup_receipt" not in migration_source
 
 
 def test_shadow_comparison_identity_is_bound_to_the_command_and_registry_version() -> None:
@@ -237,3 +329,20 @@ def test_shadow_comparison_identity_is_bound_to_the_command_and_registry_version
     assert composite_foreign_key or identity_guards
     if identity_guards:
         assert "before insert on agent_graph_shadow_comparison" in compact
+        assert all("set search_path from current" in guard for guard in identity_guards)
+
+
+def test_privileged_database_sessions_put_temporary_objects_last() -> None:
+    migration_source = (
+        (SERVICE_ROOT / "app" / "graph_runtime" / "migrations.py")
+        .read_text(encoding="utf-8")
+        .lower()
+    )
+    restore_source = (
+        (SERVICE_ROOT / "app" / "graph_runtime" / "restore_validation.py")
+        .read_text(encoding="utf-8")
+        .lower()
+    )
+
+    assert "set search_path to {}, pg_catalog, pg_temp" in migration_source
+    assert "set search_path to {}, pg_catalog, pg_temp" in restore_source

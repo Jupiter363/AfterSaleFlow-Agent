@@ -255,8 +255,11 @@ create table agent_graph_lease (
         ),
     constraint ck_agent_graph_lease_cancel
         check (
-            (cancelled_at is null and cancelled_by_command_id is null)
-            or (cancelled_at is not null and cancelled_by_command_id is not null)
+            (
+                (cancelled_at is null and cancelled_by_command_id is null)
+                or (cancelled_at is not null and cancelled_by_command_id is not null)
+            )
+            and not (released_at is not null and cancelled_at is not null)
         )
 );
 
@@ -294,6 +297,35 @@ create table agent_graph_invocation_nonce (
 );
 
 create index idx_agent_graph_nonce_retention on agent_graph_invocation_nonce(retained_until);
+
+create function guard_agent_graph_nonce_delete()
+returns trigger
+language plpgsql
+as $function$
+begin
+    if old.retained_until > statement_timestamp() then
+        raise exception using errcode = '23514', message = 'graph invocation nonce is retained';
+    end if;
+    return old;
+end;
+$function$;
+
+create trigger trg_guard_agent_graph_nonce_delete
+before delete on agent_graph_invocation_nonce
+for each row execute function guard_agent_graph_nonce_delete();
+
+create function reject_agent_graph_nonce_update()
+returns trigger
+language plpgsql
+as $function$
+begin
+    raise exception using errcode = '23514', message = 'graph invocation nonces are immutable';
+end;
+$function$;
+
+create trigger trg_reject_agent_graph_nonce_update
+before update on agent_graph_invocation_nonce
+for each row execute function reject_agent_graph_nonce_update();
 
 create function guard_graph_thread_update()
 returns trigger
@@ -458,6 +490,7 @@ as $function$
 declare
     identity_changed boolean;
     cancelling boolean;
+    taking_over boolean;
 begin
     if new.fencing_token < old.fencing_token then
         raise exception using errcode = '23514', message = 'lease fence cannot decrease';
@@ -465,32 +498,60 @@ begin
     identity_changed := row(new.owner_id, new.command_id)
         is distinct from row(old.owner_id, old.command_id);
     cancelling := old.cancelled_at is null and new.cancelled_at is not null;
-    if identity_changed and new.fencing_token <> old.fencing_token + 1 then
+    taking_over := new.fencing_token = old.fencing_token + 1
+        and new.cancelled_at is null
+        and new.cancelled_by_command_id is null
+        and new.released_at is null
+        and (
+            old.lease_expires_at <= clock_timestamp()
+            or old.cancelled_at is not null
+            or old.released_at is not null
+        );
+
+    if cancelling and (
+        new.fencing_token <> old.fencing_token + 1
+        or identity_changed
+        or old.released_at is not null
+    ) then
         raise exception using errcode = '23514',
-            message = 'lease takeover must increment the fence exactly once';
+            message = 'lease cancellation must fence one active owner exactly once';
     end if;
-    if cancelling and new.fencing_token <> old.fencing_token + 1 then
-        raise exception using errcode = '23514',
-            message = 'lease cancellation must increment the fence exactly once';
-    end if;
-    if not identity_changed and not cancelling
+    if not cancelling and not taking_over
         and new.fencing_token <> old.fencing_token then
         raise exception using errcode = '23514',
-            message = 'lease renewal or release cannot change the fence';
+            message = 'only cancellation or eligible takeover may increment the fence';
     end if;
-    if not identity_changed and new.acquired_at <> old.acquired_at then
+    if identity_changed and not taking_over then
+        raise exception using errcode = '23514',
+            message = 'lease identity can change only during takeover';
+    end if;
+    if not taking_over and new.acquired_at <> old.acquired_at then
         raise exception using errcode = '23514',
             message = 'lease renewal cannot rewrite acquisition time';
+    end if;
+    if taking_over and new.acquired_at < old.renewed_at then
+        raise exception using errcode = '23514',
+            message = 'lease takeover acquisition cannot move backwards';
     end if;
     if new.renewed_at < old.renewed_at then
         raise exception using errcode = '23514', message = 'lease renewal cannot move backwards';
     end if;
-    if old.released_at is not null and new.released_at is distinct from old.released_at then
+    if old.released_at is not null and not taking_over
+        and new.released_at is distinct from old.released_at then
         raise exception using errcode = '23514', message = 'lease release is forward-only';
     end if;
-    if old.cancelled_at is not null and row(new.cancelled_at, new.cancelled_by_command_id)
+    if old.cancelled_at is not null and not taking_over
+        and row(new.cancelled_at, new.cancelled_by_command_id)
         is distinct from row(old.cancelled_at, old.cancelled_by_command_id) then
         raise exception using errcode = '23514', message = 'lease cancellation is forward-only';
+    end if;
+    if old.released_at is not null and not taking_over and new is distinct from old then
+        raise exception using errcode = '23514',
+            message = 'released lease can change only through fenced takeover';
+    end if;
+    if old.cancelled_at is not null and not taking_over and new is distinct from old then
+        raise exception using errcode = '23514',
+            message = 'cancelled lease can change only through fenced takeover';
     end if;
     if new.lease_revision < old.lease_revision then
         raise exception using errcode = '23514', message = 'lease revision cannot decrease';

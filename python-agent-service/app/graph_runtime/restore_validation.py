@@ -14,11 +14,13 @@ from psycopg.rows import dict_row
 from app.graph_runtime.migrations import (
     CONTROL_KEY,
     ZERO_SHA256,
+    acquire_graph_schema_advisory_lock,
     expected_checkpoint_migration,
     graph_application_signature,
     graph_verification_hash,
     load_graph_migrations,
     pinned_package_versions,
+    release_graph_schema_advisory_lock,
 )
 from app.graph_runtime.persistence_models import (
     GraphMigrationError,
@@ -85,10 +87,7 @@ class GraphRestoreValidationRunner:
             row_factory=dict_row,
         ) as connection:
             database_name = await self._prepare_session(connection)
-            lock_key = f"after-sale-flow:graph-restore-validation:{self._schema}"
-            await connection.execute(
-                "select pg_advisory_lock(hashtextextended(%s, 0))", (lock_key,)
-            )
+            lock_key = await acquire_graph_schema_advisory_lock(connection, self._schema)
             try:
                 async with connection.transaction():
                     control = await (
@@ -204,10 +203,11 @@ class GraphRestoreValidationRunner:
                     ).fetchone()
                     if updated is None:
                         raise GraphMigrationError("restore marker update lost its generation fence")
-            finally:
-                await connection.execute(
-                    "select pg_advisory_unlock(hashtextextended(%s, 0))", (lock_key,)
-                )
+            except BaseException:
+                # Closing the direct session releases the lock without masking the root failure.
+                raise
+            else:
+                await release_graph_schema_advisory_lock(connection, lock_key)
 
         return GraphRestoreValidationReport(
             environment_generation=self._environment_generation,
@@ -226,16 +226,12 @@ class GraphRestoreValidationRunner:
             raise GraphMigrationError("cannot read restore validation database identity")
         if self._expected_user is not None and identity["session_user"] != self._expected_user:
             raise GraphMigrationError("restore validation is not using the expected role")
-        await connection.execute(
-            sql.SQL("set role {}").format(sql.Identifier(self._owner_role))
-        )
-        owner = await (
-            await connection.execute("select current_user as current_user")
-        ).fetchone()
+        await connection.execute(sql.SQL("set role {}").format(sql.Identifier(self._owner_role)))
+        owner = await (await connection.execute("select current_user as current_user")).fetchone()
         if owner is None or owner["current_user"] != self._owner_role:
             raise GraphMigrationError("restore validator cannot assume the Graph owner role")
         await connection.execute(
-            sql.SQL("set search_path to {}, pg_catalog").format(
+            sql.SQL("set search_path to {}, pg_catalog, pg_temp").format(
                 sql.Identifier(self._schema)
             )
         )
@@ -269,14 +265,10 @@ def main() -> None:
         run_graph_restore_validation(
             connection_string,
             schema=os.environ.get("GRAPH_DB_SCHEMA", "graph_runtime"),
-            expected_user=os.environ.get(
-                "GRAPH_MIGRATION_EXPECTED_USER", "graph_migrator"
-            ),
+            expected_user=os.environ.get("GRAPH_MIGRATION_EXPECTED_USER", "graph_migrator"),
             owner_role=os.environ.get("GRAPH_OWNER_USER", "graph_owner"),
             environment_generation=os.environ.get("GRAPH_DB_ENVIRONMENT_GENERATION"),
-            restore_verification_hash=os.environ.get(
-                "GRAPH_DB_RESTORE_VERIFICATION_HASH"
-            ),
+            restore_verification_hash=os.environ.get("GRAPH_DB_RESTORE_VERIFICATION_HASH"),
         )
     )
     print(

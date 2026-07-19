@@ -91,6 +91,7 @@ create table agent_graph_shadow_cleanup_receipt (
 create function reject_agent_graph_shadow_mutation()
 returns trigger
 language plpgsql
+set search_path from current
 as $function$
 begin
     if new is not distinct from old then
@@ -109,6 +110,7 @@ $function$;
 create function guard_agent_graph_shadow_insert()
 returns trigger
 language plpgsql
+set search_path from current
 as $function$
 begin
     if not exists (
@@ -138,6 +140,8 @@ $function$;
 create function guard_agent_graph_shadow_delete()
 returns trigger
 language plpgsql
+security definer
+set search_path from current
 as $function$
 begin
     if old.expires_at > statement_timestamp() or old.evidence_manifest_ref is not null then
@@ -149,7 +153,7 @@ begin
         expired_at, deleted_by
     ) values (
         old.comparison_id, old.comparison_id, old.comparison_hash,
-        old.expires_at, current_user
+        old.expires_at, session_user
     );
     return old;
 end;

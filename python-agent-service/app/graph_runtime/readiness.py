@@ -39,6 +39,13 @@ REQUIRED_RELATIONS: Final[tuple[str, ...]] = (
     "agent_graph_shadow_comparison",
     "agent_graph_shadow_cleanup_receipt",
 )
+RUNTIME_DELETE_FORBIDDEN_RELATIONS: Final[tuple[str, ...]] = REQUIRED_RELATIONS
+RUNTIME_APPEND_ONLY_RELATIONS: Final[tuple[str, ...]] = (
+    "agent_graph_result",
+    "agent_graph_invocation_nonce",
+    "agent_graph_shadow_comparison",
+    "agent_graph_shadow_cleanup_receipt",
+)
 
 CONSISTENCY_QUERIES: Final[tuple[tuple[str, str], ...]] = (
     (
@@ -73,7 +80,21 @@ CONSISTENCY_QUERIES: Final[tuple[tuple[str, str], ...]] = (
                           command.committed_checkpoint_ns, ''
                       )
                       and checkpoint.checkpoint_id = command.committed_checkpoint_id
-               )
+                      and checkpoint.metadata ->> 'graph_thread_id' = command.thread_id
+                      and checkpoint.metadata ->> 'graph_command_id' = command.command_id
+                      and checkpoint.metadata ->> 'graph_request_hash' = command.request_hash
+                      and checkpoint.metadata ->> 'graph_room_epoch' = command.room_epoch::text
+                      and checkpoint.metadata ->> 'graph_key' = command.graph_key
+                      and checkpoint.metadata ->> 'graph_version' = command.graph_version
+                      and checkpoint.metadata ->> 'graph_checkpoint_schema_version'
+                          = command.checkpoint_schema_version
+                      and checkpoint.metadata ->> 'graph_fencing_token'
+                          = command.fencing_token::text
+                      and checkpoint.metadata ->> 'graph_result_hash'
+                          is not distinct from command.result_hash
+                      and checkpoint.metadata ->> 'graph_result_ref'
+                          is not distinct from command.result_ref
+                )
              limit 1
         ) as inconsistent
         """,
@@ -250,6 +271,9 @@ class GraphPersistenceReadinessProbe:
                    has_database_privilege(
                        current_user, current_database(), 'CONNECT'
                    ) as can_connect_database,
+                   has_database_privilege(
+                       current_user, current_database(), 'TEMPORARY'
+                   ) as can_create_temporary,
                    has_schema_privilege(
                        current_user, %s, 'CREATE'
                    ) as can_create_schema,
@@ -292,19 +316,42 @@ class GraphPersistenceReadinessProbe:
                    ) or has_table_privilege(
                        current_user, %s || '.graph_runtime_control', 'UPDATE'
                    ) as can_mutate_control,
-                   has_table_privilege(
-                       current_user, %s || '.agent_graph_result', 'DELETE'
-                   ) or has_table_privilege(
-                       current_user, %s || '.agent_graph_lease', 'DELETE'
-                   ) or has_table_privilege(
-                       current_user, %s || '.agent_graph_shadow_comparison', 'DELETE'
-                   ) as can_delete_runtime_rows
+                    exists (
+                        select 1
+                          from unnest(%s::text[]) as forbidden(relation_name)
+                         where has_table_privilege(
+                             current_user,
+                             %s || '.' || forbidden.relation_name,
+                             'DELETE'
+                         )
+                    ) as can_delete_runtime_rows,
+                    exists (
+                        select 1
+                          from unnest(%s::text[]) as append_only(relation_name)
+                         where has_table_privilege(
+                             current_user,
+                             %s || '.' || append_only.relation_name,
+                             'UPDATE'
+                         )
+                    ) or has_table_privilege(
+                        current_user,
+                        %s || '.agent_graph_shadow_cleanup_receipt',
+                        'INSERT'
+                    ) as can_mutate_append_only
             """,
-            (self._config.schema,) * 17,
+            (
+                *((self._config.schema,) * 14),
+                list(RUNTIME_DELETE_FORBIDDEN_RELATIONS),
+                self._config.schema,
+                list(RUNTIME_APPEND_ONLY_RELATIONS),
+                self._config.schema,
+                self._config.schema,
+            ),
         )
         checks["runtime_role_read_only"] = bool(
             row
             and not row["can_create_database"]
+            and not row["can_create_temporary"]
             and not row["can_create_schema"]
             and row["can_connect_database"]
             and row["can_use_schema"]
@@ -316,6 +363,7 @@ class GraphPersistenceReadinessProbe:
             and not row["can_mutate_registry"]
             and not row["can_mutate_control"]
             and not row["can_delete_runtime_rows"]
+            and not row["can_mutate_append_only"]
         )
         self._require(checks["runtime_role_read_only"], "GRAPH_RUNTIME_ROLE_PRIVILEGED", checks)
 

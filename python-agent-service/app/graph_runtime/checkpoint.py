@@ -102,7 +102,7 @@ def create_graph_pool(
     selected = config or GraphPoolConfig()
     options = " ".join(
         (
-            f"-csearch_path={selected.schema},pg_catalog",
+            f"-csearch_path={selected.schema},pg_catalog,pg_temp",
             f"-cstatement_timeout={selected.statement_timeout_ms}",
             f"-clock_timeout={selected.lock_timeout_ms}",
             f"-cidle_in_transaction_session_timeout={selected.idle_in_transaction_timeout_ms}",

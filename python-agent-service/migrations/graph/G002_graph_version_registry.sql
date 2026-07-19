@@ -60,6 +60,7 @@ create function agent_graph_shadow_comparison_reference_count(
 returns bigint
 stable
 language plpgsql
+set search_path from current
 as $function$
 declare
     reference_count bigint;
@@ -140,6 +141,7 @@ from agent_graph_version_registry registry;
 create function guard_agent_graph_version_update()
 returns trigger
 language plpgsql
+set search_path from current
 as $function$
 begin
     if row(
@@ -179,6 +181,24 @@ begin
         ) then
         raise exception using errcode = '23514',
             message = 'referenced graph version cannot retire';
+    end if;
+    if not new.loadable and old.loadable
+        and exists (
+            select 1
+              from agent_graph_version_active_reference active_reference
+             where active_reference.graph_key = old.graph_key
+               and active_reference.graph_version = old.graph_version
+               and active_reference.checkpoint_schema_version = old.checkpoint_schema_version
+               and (
+                   active_reference.thread_count > 0
+                   or active_reference.command_count > 0
+                   or active_reference.result_count > 0
+                   or active_reference.checkpoint_count > 0
+                   or active_reference.shadow_comparison_count > 0
+               )
+        ) then
+        raise exception using errcode = '23514',
+            message = 'referenced graph version must remain loadable';
     end if;
     if new.registry_revision < old.registry_revision then
         raise exception using errcode = '23514', message = 'registry revision cannot decrease';
