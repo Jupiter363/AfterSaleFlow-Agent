@@ -114,3 +114,16 @@ def canonicalize(value: Any) -> bytes:
 
 def canonical_sha256(value: Any) -> str:
     return hashlib.sha256(canonicalize(value)).hexdigest()
+
+
+def canonical_sha256_omitting(value: BaseModel | Mapping[str, Any], member: str) -> str:
+    """Hash a contract object after omitting one top-level self-hash member."""
+
+    if isinstance(value, BaseModel):
+        instance = value.model_dump(mode="json", exclude_none=True)
+    else:
+        instance = dict(value)
+    if member not in instance:
+        raise ValueError(f"self-hash member is missing: {member}")
+    del instance[member]
+    return canonical_sha256(instance)

@@ -339,6 +339,11 @@ Private claims bind command ID, request hash, tenant surrogate, case, room epoch
 and checkpoint versions, plus SHA-256 bindings for actor scope, effective capabilities, and all
 prompt, model, schema, policy, guardrail, and tool profile versions. Python verifies the signature,
 claims, every body binding, and a durable nonce record before it creates or replays a graph command.
+Their exact wire names are `command_id`, `command_nonce`, `request_hash`, `tenant_surrogate`,
+`case_id`, `room_epoch`, `thread_id`, `graph_key`, `graph_version`,
+`checkpoint_schema_version`, `actor_scope_hash`, `capabilities_hash`, and
+`profile_bindings_hash`. `command_nonce` binds the stable command-body `envelope_nonce`; `jti` is a
+fresh transport replay nonce and does not reuse `command_nonce`.
 
 Verification keys rotate through KMS and overlapping verification keys keep valid in-flight work
 readable. Unknown algorithm, key ID, issuer, audience, capability, profile, or binding fails closed.
@@ -347,7 +352,8 @@ authorization source.
 
 The verifier resolves public keys from the configured Java JWKS/KMS adapter and caches only keys
 whose `kid`, curve `P-256`, and `use=sig` are valid. Current and previous verification keys overlap
-for at least 65 seconds. The durable nonce key is `(issuer, kid, jti)` and is retained for 24 hours;
+for at least 65 seconds and remain verifiable while a nonterminal command references their `kid`.
+The durable nonce key is `(issuer, kid, jti)` and is retained for 24 hours;
 an exact token replay is rejected even for an idempotent command. A transport or Activity retry
 must re-sign the identical body and request hash with a fresh `jti`, `iat`, and `exp`. Nonce
 insertion and command registration share one Graph PostgreSQL transaction; after a failed insertion
