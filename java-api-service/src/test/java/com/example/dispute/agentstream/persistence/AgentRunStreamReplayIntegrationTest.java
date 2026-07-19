@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.dispute.agentstream.application.AgentRunLedger;
+import com.example.dispute.agentstream.application.AgentRunV2StreamStore.AppendReceipt;
 import com.example.dispute.agentstream.infrastructure.persistence.PostgresAgentRunV2EventStore;
 import com.example.dispute.workflow.contract.v1.AgentStreamEvent;
 import com.example.dispute.workflow.contract.v1.AgentStreamEvent.Payload;
@@ -13,6 +14,7 @@ import com.example.dispute.workflow.contract.v1.ContractTypes.StreamEventType;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Instant;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
@@ -21,8 +23,10 @@ import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
@@ -57,10 +61,11 @@ class AgentRunStreamReplayIntegrationTest {
     @Autowired private JdbcTemplate jdbc;
     @Autowired private AgentRunLedger ledger;
     @Autowired private PostgresAgentRunV2EventStore eventStore;
+    @Autowired private PlatformTransactionManager transactionManager;
 
     @Test
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
-    void batchAppendReplaysAnExclusiveAttemptCursorAndRejectsHashConflicts() {
+    void batchAppendAndRequiresNewPreserveReplayAcrossConflictsAttemptsAndOuterRollback() {
         insertCase();
         AgentRunLedger.LogicalRun logical =
                 ledger.createOrLoad(AgentRunPersistenceFixtures.logicalRun());
@@ -119,11 +124,49 @@ class AgentRunStreamReplayIntegrationTest {
                         AgentRunPersistenceFixtures.COMPLETED_AT.plusSeconds(1));
         eventStore.append(event(second.attemptId(), 0, StreamEventType.ATTEMPT_STARTED, null));
 
+        String committedTitle =
+                jdbc.queryForObject(
+                        "select title from fulfillment_dispute_case where id = ?",
+                        String.class,
+                        AgentRunPersistenceFixtures.CASE_ID);
+        AtomicReference<AppendReceipt> appendReceipt = new AtomicReference<>();
+        TransactionTemplate outerTransaction = new TransactionTemplate(transactionManager);
+        outerTransaction.executeWithoutResult(
+                status -> {
+                    jdbc.update(
+                            "update fulfillment_dispute_case set title = ? where id = ?",
+                            "outer transaction must roll back",
+                            AgentRunPersistenceFixtures.CASE_ID);
+                    appendReceipt.set(
+                            eventStore.append(
+                                    event(
+                                            second.attemptId(),
+                                            1,
+                                            StreamEventType.VISIBLE_DELTA,
+                                            "durable after outer rollback")));
+                    status.setRollbackOnly();
+                });
+
         assertThat(eventStore.durableHighWatermark(logical.agentRunId(), second.attemptId()))
-                .isZero();
+                .isEqualTo(1);
+        assertThat(appendReceipt.get())
+                .isNotNull()
+                .satisfies(
+                        durableReceipt -> {
+                            assertThat(durableReceipt.inserted()).isTrue();
+                            assertThat(durableReceipt.durableHighWatermark()).isEqualTo(1);
+                        });
+        assertThat(
+                        jdbc.queryForObject(
+                                "select title from fulfillment_dispute_case where id = ?",
+                                String.class,
+                                AgentRunPersistenceFixtures.CASE_ID))
+                .isEqualTo(committedTitle);
         assertThat(eventStore.replay(logical.agentRunId(), second.attemptId(), -1, 100))
                 .extracting(AgentStreamEvent::attemptId, AgentStreamEvent::sequenceNo)
-                .containsExactly(org.assertj.core.groups.Tuple.tuple(second.attemptId(), 0L));
+                .containsExactly(
+                        org.assertj.core.groups.Tuple.tuple(second.attemptId(), 0L),
+                        org.assertj.core.groups.Tuple.tuple(second.attemptId(), 1L));
         assertThat(eventStore.replay(logical.agentRunId(), first.attemptId(), -1, 100))
                 .hasSize(3)
                 .allMatch(event -> event.attemptId().equals(first.attemptId()));
