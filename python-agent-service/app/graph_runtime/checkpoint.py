@@ -26,6 +26,12 @@ from app.graph_runtime.persistence_models import (
     GraphPoolConfig,
 )
 from app.graph_runtime.ledger import PostgresCommandLedger, ResultRecord
+from app.graph_runtime.result import (
+    TERMINAL_DRAFT_ADAPTER,
+    ResultBindings,
+    TerminalDraft,
+    project_room_graph_result,
+)
 
 
 FENCE_CONTEXT_KEY: Final[str] = "__trusted_graph_fence_context__"
@@ -153,20 +159,62 @@ def bind_fence_context(config: RunnableConfig, fence: GraphFenceContext) -> Runn
 
 def bind_terminal_result_context(
     config: RunnableConfig,
-    result: ResultRecord,
+    materializer: TerminalResultMaterializer,
 ) -> RunnableConfig:
     """Attach a typed terminal result capability for the saver transaction only."""
 
-    if not isinstance(result, ResultRecord):
-        raise GraphBindingError("terminal result capability must be a ResultRecord")
+    if type(materializer) is not TerminalResultMaterializer:
+        raise GraphBindingError("terminal result capability has an invalid type")
     configurable = dict(config.get("configurable") or {})
     existing = configurable.get(TERMINAL_RESULT_CONTEXT_KEY)
-    if existing is not None and existing != result:
+    if existing is not None and existing != materializer:
         raise GraphBindingError("RunnableConfig already carries another terminal result")
-    configurable[TERMINAL_RESULT_CONTEXT_KEY] = result
+    configurable[TERMINAL_RESULT_CONTEXT_KEY] = materializer
     bound = dict(config)
     bound["configurable"] = configurable
     return bound
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalResultMaterializer:
+    """Pure immutable projection evaluated only after the database fence is locked."""
+
+    thread_id: str
+    request_hash: str
+    draft: TerminalDraft
+    bindings: ResultBindings
+
+    def __post_init__(self) -> None:
+        try:
+            draft = TERMINAL_DRAFT_ADAPTER.validate_python(self.draft)
+        except ValueError as error:
+            raise TypeError("terminal result materializer draft is invalid") from error
+        if not isinstance(self.bindings, ResultBindings):
+            raise TypeError("terminal result materializer bindings are invalid")
+        object.__setattr__(self, "draft", draft)
+
+    def materialize(self, checkpoint_ns: str, checkpoint_id: str) -> ResultRecord:
+        if len(checkpoint_ns) > 128 or not checkpoint_id or len(checkpoint_id) > 128:
+            raise GraphBindingError("terminal checkpoint identity is invalid")
+        bindings = self.bindings.model_copy(update={"checkpoint_id": checkpoint_id})
+        result = project_room_graph_result(self.draft, bindings)
+        result_json = result.model_dump(mode="json", exclude_none=True)
+        result_ref = f"urn:after-sale-flow:graph-result:{result.output_hash}"
+        return ResultRecord(
+            result_id=f"result.{result.output_hash[:32]}",
+            thread_id=self.thread_id,
+            command_id=bindings.command_id,
+            request_hash=self.request_hash,
+            result_schema_version=result.schema_version,
+            checkpoint_ns=checkpoint_ns,
+            checkpoint_id=checkpoint_id,
+            cognitive_revision=result.cognitive_revision,
+            terminal_status=result.status,
+            result_json=result_json,
+            result_ref=result_ref,
+            result_hash=result.output_hash,
+            usage_json=result.usage.model_dump(mode="json"),
+        )
 
 
 class FencedPostgresSaver(BaseCheckpointSaver[Any]):
@@ -234,14 +282,25 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
         new_versions: ChannelVersions,
     ) -> RunnableConfig:
         fence = self._require_fence(config)
-        terminal_result = self._terminal_result(config)
-        effective_fence = self._terminal_fence(fence, terminal_result)
-        bound_metadata = self._bind_metadata(metadata, effective_fence)
+        materializer = self._terminal_materializer(config)
         async with self._connection() as connection:
             async with connection.transaction():
-                await self._lock_fence(connection, effective_fence)
+                await self._lock_fence(connection, fence)
+                terminal_result, checkpoint_to_save = self._materialize_terminal_result(
+                    config,
+                    checkpoint,
+                    new_versions,
+                    materializer,
+                )
+                effective_fence = self._terminal_fence(fence, terminal_result)
+                bound_metadata = self._bind_metadata(metadata, effective_fence)
                 saver = self._direct_saver_factory(connection, self.serde)
-                saved = await saver.aput(config, checkpoint, bound_metadata, new_versions)
+                saved = await saver.aput(
+                    config,
+                    checkpoint_to_save,
+                    bound_metadata,
+                    new_versions,
+                )
                 checkpoint_config = saved.get("configurable") or {}
                 checkpoint_ns = str(checkpoint_config.get("checkpoint_ns") or "")
                 checkpoint_id = str(checkpoint_config.get("checkpoint_id") or "")
@@ -297,13 +356,103 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
         return self._pool.connection(timeout=self._acquire_timeout_seconds)
 
     @staticmethod
-    def _terminal_result(config: RunnableConfig) -> ResultRecord | None:
+    def _terminal_materializer(
+        config: RunnableConfig,
+    ) -> TerminalResultMaterializer | None:
         value = (config.get("configurable") or {}).get(TERMINAL_RESULT_CONTEXT_KEY)
         if value is None:
             return None
-        if not isinstance(value, ResultRecord):
+        if type(value) is not TerminalResultMaterializer:
             raise GraphBindingError("RunnableConfig has a forged terminal result capability")
         return value
+
+    @staticmethod
+    def _materialize_terminal_result(
+        config: RunnableConfig,
+        checkpoint: Checkpoint,
+        new_versions: ChannelVersions,
+        materializer: TerminalResultMaterializer | None,
+    ) -> tuple[ResultRecord | None, Checkpoint]:
+        if materializer is None:
+            return None, checkpoint
+        configurable = config.get("configurable") or {}
+        checkpoint_ns = str(configurable.get("checkpoint_ns") or "")
+        checkpoint_id = str(checkpoint.get("id") or "")
+        channel_values = checkpoint.get("channel_values")
+        channel_versions = checkpoint.get("channel_versions")
+        if (
+            len(checkpoint_ns) > 128
+            or not checkpoint_id
+            or len(checkpoint_id) > 128
+            or not isinstance(channel_values, dict)
+            or not isinstance(channel_versions, dict)
+            or "result_json" not in channel_values
+            or "result_json" not in new_versions
+            or channel_versions.get("result_json") != new_versions.get("result_json")
+        ):
+            raise GraphBindingError(
+                "terminal materialization requires a versioned result_json checkpoint value"
+            )
+        result = materializer.materialize(checkpoint_ns, checkpoint_id)
+        if result.checkpoint_ns != checkpoint_ns or result.checkpoint_id != checkpoint_id:
+            raise GraphBindingError("terminal materializer returned another checkpoint identity")
+        FencedPostgresSaver._require_terminal_state_matches_result(channel_values, result)
+        materialized = dict(checkpoint)
+        materialized_values = dict(channel_values)
+        materialized_values["result_json"] = dict(result.result_json)
+        materialized["channel_values"] = materialized_values
+        return result, materialized  # type: ignore[return-value]
+
+    @staticmethod
+    def _require_terminal_state_matches_result(
+        channel_values: dict[str, Any],
+        result: ResultRecord,
+    ) -> None:
+        if channel_values.get("cognitive_revision") != result.cognitive_revision:
+            raise GraphBindingError("terminal result revision differs from its checkpoint state")
+        result_json = result.result_json
+        expected_draft: dict[str, Any] = {"status": result.terminal_status}
+        detail_field = {
+            "COMPLETED": None,
+            "NEEDS_INPUT": "needs_input",
+            "NEEDS_REVIEW": "needs_review",
+            "FAILED": "error",
+        }.get(result.terminal_status)
+        if result.terminal_status not in {
+            "COMPLETED",
+            "NEEDS_INPUT",
+            "NEEDS_REVIEW",
+            "FAILED",
+        }:
+            raise GraphBindingError("terminal result status is invalid")
+        if detail_field is not None:
+            detail = result_json.get(detail_field)
+            if not isinstance(detail, dict):
+                raise GraphBindingError("terminal result detail is missing")
+            expected_draft[detail_field] = detail
+        if channel_values.get("terminal_draft") != expected_draft:
+            raise GraphBindingError("terminal result draft differs from its checkpoint state")
+
+        usage_by_invocation = channel_values.get("usage_by_invocation")
+        if not isinstance(usage_by_invocation, dict):
+            raise GraphBindingError("terminal checkpoint usage is not a mapping")
+        totals = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+        for usage in usage_by_invocation.values():
+            if not isinstance(usage, dict) or set(usage) != set(totals):
+                raise GraphBindingError("terminal checkpoint usage is invalid")
+            for field in totals:
+                value = usage[field]
+                if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                    raise GraphBindingError("terminal checkpoint usage is invalid")
+                totals[field] += value
+            if usage["total_tokens"] != usage["input_tokens"] + usage["output_tokens"]:
+                raise GraphBindingError("terminal checkpoint usage is inconsistent")
+        if (
+            totals["total_tokens"] != totals["input_tokens"] + totals["output_tokens"]
+            or dict(result.usage_json) != totals
+            or result_json.get("usage") != totals
+        ):
+            raise GraphBindingError("terminal result usage differs from its checkpoint state")
 
     @staticmethod
     def _without_terminal_result_context(config: RunnableConfig) -> RunnableConfig:
@@ -327,8 +476,7 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
         ):
             raise GraphBindingError("terminal result identity conflicts with the Graph fence")
         if fence.result_hash is not None and (
-            fence.result_hash != result.result_hash
-            or fence.result_ref != result.result_ref
+            fence.result_hash != result.result_hash or fence.result_ref != result.result_ref
         ):
             raise GraphBindingError("terminal result conflicts with an existing fence binding")
         return replace(

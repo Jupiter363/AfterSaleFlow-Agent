@@ -5,10 +5,12 @@ from typing import Any
 
 import pytest
 
+from app.contracts.v1.models import ExecutionMetadata, Usage
 from app.graph_runtime.checkpoint import (
     FENCE_CONTEXT_KEY,
     TERMINAL_RESULT_CONTEXT_KEY,
     FencedPostgresSaver,
+    TerminalResultMaterializer,
     bind_fence_context,
     bind_terminal_result_context,
 )
@@ -18,6 +20,7 @@ from app.graph_runtime.persistence_models import (
     GraphFenceContext,
     GraphFenceError,
 )
+from app.graph_runtime.result import CompletedDraft, ResultBindings
 from langgraph.checkpoint.base import CheckpointTuple
 
 
@@ -52,21 +55,66 @@ def _metadata(**overrides: Any) -> dict[str, Any]:
     return values
 
 
-def _result(*, checkpoint_id: str = "cp-1") -> ResultRecord:
-    return ResultRecord(
-        result_id="result-1",
+def _materializer() -> TerminalResultMaterializer:
+    return TerminalResultMaterializer(
         thread_id=_fence().thread_id,
-        command_id=_fence().command_id,
         request_hash=_fence().request_hash,
-        result_schema_version="room-graph-result.v1",
-        checkpoint_ns="hearing",
-        checkpoint_id=checkpoint_id,
-        cognitive_revision=4,
-        terminal_status="COMPLETED",
-        result_json={"output_hash": SHA_B},
-        result_ref="urn:graph-result:command-1",
-        result_hash=SHA_B,
-        usage_json={"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+        draft=CompletedDraft(status="COMPLETED"),
+        bindings=ResultBindings(
+            command_id=_fence().command_id,
+            logical_run_id="run-1",
+            attempt_id="attempt-1",
+            graph_key=_fence().graph_key,
+            graph_version=_fence().graph_version,
+            checkpoint_id="pending",
+            cognitive_revision=4,
+            public_event_proposals=(),
+            artifact_operations=(),
+            usage=Usage(input_tokens=1, output_tokens=1, total_tokens=2),
+            execution_metadata=ExecutionMetadata(
+                prompt_version="prompt.v1",
+                model_profile_id="model.v1",
+                schema_version="output.v1",
+                policy_version="policy.v1",
+                guardrail_version="guardrail.v1",
+            ),
+        ),
+    )
+
+
+def _result(
+    *,
+    checkpoint_ns: str = "hearing",
+    checkpoint_id: str = "cp-1",
+) -> ResultRecord:
+    return _materializer().materialize(checkpoint_ns, checkpoint_id)
+
+
+def _terminal_checkpoint() -> dict[str, Any]:
+    return {
+        "id": "cp-1",
+        "channel_values": {
+            "cognitive_revision": 4,
+            "terminal_draft": {"status": "COMPLETED"},
+            "usage_by_invocation": {
+                "invocation-1": {
+                    "input_tokens": 1,
+                    "output_tokens": 1,
+                    "total_tokens": 2,
+                }
+            },
+            "result_json": {"pending": True},
+        },
+        "channel_versions": {"result_json": "v-result-1"},
+    }
+
+
+def _terminal_config(
+    materializer: TerminalResultMaterializer | None = None,
+) -> dict[str, Any]:
+    return bind_terminal_result_context(
+        _config(checkpoint=True),
+        materializer or _materializer(),
     )
 
 
@@ -122,9 +170,7 @@ class _Connection:
                 {"status": "RESULT_CHECKPOINTED", "result_hash": result_hash}
                 if self.binding_current and result_hash is not None
                 else (
-                    {"status": "EXECUTING", "result_hash": None}
-                    if self.binding_current
-                    else None
+                    {"status": "EXECUTING", "result_hash": None} if self.binding_current else None
                 )
             )
         raise AssertionError(f"unexpected SQL: {normalized}")
@@ -167,6 +213,7 @@ class _DirectSaver:
     def __init__(self, connection: _Connection) -> None:
         self.connection = connection
         self.put_calls: list[dict[str, Any]] = []
+        self.checkpoints: list[dict[str, Any]] = []
         self.write_calls: list[tuple[Any, ...]] = []
 
     async def aput(
@@ -178,6 +225,7 @@ class _DirectSaver:
     ) -> dict[str, Any]:
         self.connection.events.append("saver:put")
         self.put_calls.append(metadata)
+        self.checkpoints.append(checkpoint)
         return {
             "configurable": {
                 "thread_id": _fence().thread_id,
@@ -265,9 +313,14 @@ async def test_terminal_checkpoint_result_and_command_commit_on_one_connection()
     connection = _Connection()
     ledger = _TerminalLedger(connection.events)
     saver, direct_savers = _saver(connection, ledger=ledger)
-    config = bind_terminal_result_context(_config(), _result())
+    config = _terminal_config()
 
-    saved = await saver.aput(config, {}, {}, {})  # type: ignore[arg-type]
+    saved = await saver.aput(
+        config,
+        _terminal_checkpoint(),  # type: ignore[arg-type]
+        {},
+        {"result_json": "v-result-1"},
+    )
 
     assert connection.events == [
         "transaction:enter",
@@ -281,30 +334,168 @@ async def test_terminal_checkpoint_result_and_command_commit_on_one_connection()
     assert ledger.calls[0][2] == _result()
     assert ledger.calls[0][3] == "room-graph-result.v1"
     terminal_fence = ledger.calls[0][1]
-    assert terminal_fence.result_hash == SHA_B
+    assert terminal_fence.result_hash == _result().result_hash
     assert terminal_fence.result_ref == _result().result_ref
     assert direct_savers[0].put_calls == [
-        _metadata(graph_result_hash=SHA_B, graph_result_ref=_result().result_ref)
+        _metadata(
+            graph_result_hash=_result().result_hash,
+            graph_result_ref=_result().result_ref,
+        )
     ]
+    assert direct_savers[0].checkpoints[0]["channel_values"]["result_json"] == dict(
+        _result().result_json
+    )
     assert saved["configurable"][FENCE_CONTEXT_KEY] == terminal_fence
     assert TERMINAL_RESULT_CONTEXT_KEY not in saved["configurable"]
 
 
 @pytest.mark.asyncio
-async def test_terminal_result_checkpoint_mismatch_rolls_back_before_ledger_write() -> None:
+async def test_terminal_materializer_uses_langgraph_checkpoint_id_after_fence_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     connection = _Connection()
     ledger = _TerminalLedger(connection.events)
-    saver, _ = _saver(connection, ledger=ledger)
-    config = bind_terminal_result_context(_config(), _result(checkpoint_id="cp-other"))
+    saver, direct_savers = _saver(connection, ledger=ledger)
+    calls: list[tuple[str, str]] = []
+    expected = _result()
 
-    with pytest.raises(GraphBindingError, match="saved checkpoint identity"):
-        await saver.aput(config, {}, {}, {})  # type: ignore[arg-type]
+    original = TerminalResultMaterializer.materialize
 
+    def materialize(
+        materializer: TerminalResultMaterializer,
+        checkpoint_ns: str,
+        checkpoint_id: str,
+    ) -> ResultRecord:
+        connection.events.append("terminal:materialize")
+        calls.append((checkpoint_ns, checkpoint_id))
+        return original(materializer, checkpoint_ns, checkpoint_id)
+
+    monkeypatch.setattr(TerminalResultMaterializer, "materialize", materialize)
+    config = _terminal_config()
+
+    await saver.aput(
+        config,
+        _terminal_checkpoint(),  # type: ignore[arg-type]
+        {},
+        {"result_json": "v-result-1"},
+    )
+
+    assert calls == [("hearing", "cp-1")]
+    assert connection.events[:3] == [
+        "transaction:enter",
+        "sql:fence",
+        "terminal:materialize",
+    ]
+    assert direct_savers[0].checkpoints[0]["channel_values"]["result_json"] == dict(
+        expected.result_json
+    )
+    assert ledger.calls[0][2] == expected
+
+
+@pytest.mark.asyncio
+async def test_terminal_materializer_requires_a_versioned_result_channel() -> None:
+    connection = _Connection()
+    ledger = _TerminalLedger(connection.events)
+    saver, direct_savers = _saver(connection, ledger=ledger)
+    config = _terminal_config()
+
+    with pytest.raises(GraphBindingError, match="versioned result_json"):
+        await saver.aput(
+            config,
+            {
+                "id": "cp-1",
+                "channel_values": {"result_json": {"pending": True}},
+                "channel_versions": {"result_json": "v-result-1"},
+            },  # type: ignore[arg-type]
+            {},
+            {},
+        )
+
+    assert connection.events == [
+        "transaction:enter",
+        "sql:fence",
+        "transaction:rollback",
+    ]
+    assert direct_savers == []
+    assert ledger.calls == []
+
+
+@pytest.mark.asyncio
+async def test_terminal_materializer_failure_rolls_back_after_fence_before_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = _Connection()
+    saver, direct_savers = _saver(connection)
+
+    def fail(
+        materializer: TerminalResultMaterializer,
+        checkpoint_ns: str,
+        checkpoint_id: str,
+    ) -> ResultRecord:
+        connection.events.append("terminal:materialize")
+        raise GraphBindingError("terminal projection failed")
+
+    monkeypatch.setattr(TerminalResultMaterializer, "materialize", fail)
+    with pytest.raises(GraphBindingError, match="terminal projection failed"):
+        await saver.aput(
+            _terminal_config(),
+            _terminal_checkpoint(),  # type: ignore[arg-type]
+            {},
+            {"result_json": "v-result-1"},
+        )
+
+    assert direct_savers == []
+    assert connection.events == [
+        "transaction:enter",
+        "sql:fence",
+        "terminal:materialize",
+        "transaction:rollback",
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("cognitive_revision", 5, "revision"),
+        ("terminal_draft", {"status": "NEEDS_INPUT"}, "draft"),
+        (
+            "usage_by_invocation",
+            {
+                "invocation-1": {
+                    "input_tokens": 2,
+                    "output_tokens": 1,
+                    "total_tokens": 3,
+                }
+            },
+            "usage",
+        ),
+    ],
+)
+async def test_terminal_result_must_match_the_checkpoint_state(
+    field: str,
+    value: Any,
+    message: str,
+) -> None:
+    connection = _Connection()
+    ledger = _TerminalLedger(connection.events)
+    saver, direct_savers = _saver(connection, ledger=ledger)
+    checkpoint = _terminal_checkpoint()
+    checkpoint["channel_values"][field] = value
+
+    with pytest.raises(GraphBindingError, match=message):
+        await saver.aput(
+            _terminal_config(),
+            checkpoint,  # type: ignore[arg-type]
+            {},
+            {"result_json": "v-result-1"},
+        )
+
+    assert direct_savers == []
     assert ledger.calls == []
     assert connection.events == [
         "transaction:enter",
         "sql:fence",
-        "saver:put",
         "transaction:rollback",
     ]
 
@@ -317,10 +508,15 @@ async def test_terminal_result_failure_rolls_back_checkpoint_and_command_binding
         failure=GraphBindingError("immutable result conflict"),
     )
     saver, _ = _saver(connection, ledger=ledger)
-    config = bind_terminal_result_context(_config(), _result())
+    config = _terminal_config()
 
     with pytest.raises(GraphBindingError, match="immutable result conflict"):
-        await saver.aput(config, {}, {}, {})  # type: ignore[arg-type]
+        await saver.aput(
+            config,
+            _terminal_checkpoint(),  # type: ignore[arg-type]
+            {},
+            {"result_json": "v-result-1"},
+        )
 
     assert connection.events == [
         "transaction:enter",
@@ -346,6 +542,11 @@ async def test_forged_terminal_result_capability_is_rejected_before_database_acc
     assert direct_savers == []
 
 
+def test_prebuilt_result_cannot_bypass_terminal_checkpoint_materialization() -> None:
+    with pytest.raises(GraphBindingError, match="invalid type"):
+        bind_terminal_result_context(_config(), _result())  # type: ignore[arg-type]
+
+
 @pytest.mark.asyncio
 async def test_stale_fence_rolls_back_before_the_saver_is_called() -> None:
     connection = _Connection(fence_current=False)
@@ -354,6 +555,38 @@ async def test_stale_fence_rolls_back_before_the_saver_is_called() -> None:
     with pytest.raises(GraphFenceError, match="stale"):
         await saver.aput(_config(), {}, {}, {})  # type: ignore[arg-type]
 
+    assert direct_savers == []
+    assert connection.events == ["transaction:enter", "sql:fence", "transaction:rollback"]
+
+
+@pytest.mark.asyncio
+async def test_stale_fence_rejects_terminal_write_before_materialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = _Connection(fence_current=False)
+    saver, direct_savers = _saver(connection)
+    calls: list[tuple[str, str]] = []
+
+    original = TerminalResultMaterializer.materialize
+
+    def materialize(
+        materializer: TerminalResultMaterializer,
+        checkpoint_ns: str,
+        checkpoint_id: str,
+    ) -> ResultRecord:
+        calls.append((checkpoint_ns, checkpoint_id))
+        return original(materializer, checkpoint_ns, checkpoint_id)
+
+    monkeypatch.setattr(TerminalResultMaterializer, "materialize", materialize)
+    with pytest.raises(GraphFenceError, match="stale"):
+        await saver.aput(
+            _terminal_config(),
+            _terminal_checkpoint(),  # type: ignore[arg-type]
+            {},
+            {"result_json": "v-result-1"},
+        )
+
+    assert calls == []
     assert direct_savers == []
     assert connection.events == ["transaction:enter", "sql:fence", "transaction:rollback"]
 
