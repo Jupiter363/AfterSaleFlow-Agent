@@ -468,6 +468,35 @@ async def test_admission_uses_one_explicit_transaction_for_thread_registry_and_n
 
 
 @pytest.mark.asyncio
+async def test_signed_registry_profile_mismatch_fails_before_thread_or_ledger_write() -> None:
+    pool = _Pool()
+    audit = _Audit()
+    gateway = _gateway(pool, _Ledger(pool.events), audit)
+    command = _command()
+    verified = _verified(command)
+    forged = VerifiedInvocation(
+        claims=verified.claims.model_copy(
+            update={"profile_bindings_hash": "0" * 64}
+        ),
+        key_id=verified.key_id,
+        request_hash=verified.request_hash,
+        transport_certificate_sha256=verified.transport_certificate_sha256,
+    )
+
+    with pytest.raises(GraphThreadBindingError, match="exact Graph registry profile"):
+        await gateway.admit(
+            command=command,
+            verified_invocation=forged,
+            expected_thread=_thread(),
+        )
+
+    assert "repo:registry" in pool.events
+    assert "repo:thread" not in pool.events
+    assert "repo:command+nonce" not in pool.events
+    assert "transaction:rollback" in pool.events
+
+
+@pytest.mark.asyncio
 async def test_nonce_replay_rolls_back_the_whole_admission_transaction() -> None:
     pool = _Pool()
     audit = _Audit()
@@ -754,6 +783,36 @@ async def test_reconcile_only_returns_exact_existing_result_without_execution_pa
 
 
 @pytest.mark.asyncio
+async def test_reconcile_only_rejects_registry_profile_drift_before_nonce_consumption() -> None:
+    gateway, pool, _, recovery = _reconciliation_gateway(
+        status=CommandStatus.COMPLETED,
+    )
+    command = _command()
+    verified = _verified_reconciliation(command)
+    forged = VerifiedReconciliation(
+        claims=verified.claims.model_copy(
+            update={"profile_bindings_hash": "0" * 64}
+        ),
+        key_id=verified.key_id,
+        request_hash=verified.request_hash,
+        transport_certificate_sha256=verified.transport_certificate_sha256,
+    )
+
+    with pytest.raises(GraphThreadBindingError, match="exact Graph registry profile"):
+        await gateway.reconcile_only(
+            command=command,
+            verified_reconciliation=forged,
+            expected_thread=_thread(),
+            owner_id="worker-reconcile-1",
+        )
+
+    assert "repo:registry-restore" in pool.events
+    assert "repo:existing-command+nonce" not in pool.events
+    assert "transaction:rollback" in pool.events
+    assert recovery.calls == 0
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("status", "error_type"),
     [
@@ -1008,12 +1067,24 @@ class _TakeoverLeases:
 
 
 class _FinishLedger:
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+
+    async def load(self, connection: Any, **kwargs: Any) -> CommandRecord:
+        self.events.append("command_locked")
+        return _execution().admission.record
+
+    @staticmethod
+    def require_same_binding(actual: CommandBinding, expected: CommandBinding) -> None:
+        assert actual == expected
+
     async def finish_attempt(
         self,
         connection: Any,
         attempt: AttemptRecord,
         **kwargs: Any,
     ) -> AttemptRecord:
+        self.events.append("attempt_finished")
         return replace(
             attempt,
             status=kwargs["status"],
@@ -1030,6 +1101,7 @@ class _FinishLedger:
         error_code: str,
         error_classification: str,
     ) -> CommandRecord:
+        self.events.append("command_terminated")
         return replace(
             _execution().admission.record,
             status=status,
@@ -1039,12 +1111,20 @@ class _FinishLedger:
 
 
 class _ReleaseLeases:
-    def __init__(self) -> None:
+    def __init__(self, events: list[str]) -> None:
         self.called = False
+        self.events = events
 
-    async def release(self, connection: Any, **kwargs: Any) -> LeaseRecord:
+    async def cancel(self, connection: Any, **kwargs: Any) -> LeaseRecord:
         self.called = True
-        return replace(_execution().lease, released_at=NOW)
+        self.events.append("lease_cancelled")
+        return replace(
+            _execution().lease,
+            fencing_token=2,
+            cancelled_at=NOW,
+            cancelled_by_command_id=kwargs["cancellation_command_id"],
+            revision=1,
+        )
 
 
 @pytest.mark.asyncio
@@ -1259,13 +1339,14 @@ async def test_new_command_takeover_rolls_back_until_old_terminal_reconciles() -
 
 
 @pytest.mark.asyncio
-async def test_terminal_attempt_failure_releases_its_lease_for_the_next_command() -> None:
+async def test_terminal_attempt_failure_fences_lease_before_command_and_attempt() -> None:
     pool = _Pool()
-    leases = _ReleaseLeases()
+    ordering: list[str] = []
+    leases = _ReleaseLeases(ordering)
     gateway = GraphCommandGateway(
         mode=GraphGatewayMode.SHADOW,
         pool=pool,
-        ledger=_FinishLedger(),  # type: ignore[arg-type]
+        ledger=_FinishLedger(ordering),  # type: ignore[arg-type]
         leases=leases,  # type: ignore[arg-type]
         input_authorizer=_InputAuthorizer([]),
     )
@@ -1280,8 +1361,15 @@ async def test_terminal_attempt_failure_releases_its_lease_for_the_next_command(
     assert finished.attempt.status is AttemptStatus.FAILED
     assert finished.admission.record.status is CommandStatus.ABORTED
     assert finished.admission.action is AdmissionAction.RETURN_ABORTED
-    assert finished.lease.released_at == NOW
+    assert finished.lease.cancelled_at == NOW
+    assert finished.lease.fencing_token == 2
     assert leases.called is True
+    assert ordering == [
+        "lease_cancelled",
+        "command_locked",
+        "command_terminated",
+        "attempt_finished",
+    ]
     assert "transaction:commit" in pool.events
 
 

@@ -14,7 +14,6 @@ from app.graph_runtime.errors import (
     GraphCommandCancelledError,
     GraphContractError,
     GraphGatewayDisabledError,
-    GraphLeaseLostError,
     GraphNewAgentAttemptRequiredError,
     GraphResultNotCommittedError,
     GraphRuntimeError,
@@ -535,35 +534,48 @@ class GraphCommandGateway:
         self._require_shadow()
         async with self._pool.connection(timeout=self._acquire_timeout_seconds) as connection:
             async with connection.transaction():
-                attempt = await self._ledger.finish_attempt(
+                lease = await self._leases.cancel(
                     connection,
-                    execution.attempt,
-                    status=status,
-                    error_code=error_code,
-                    error_classification=error_classification,
+                    thread_id=execution.fence.thread_id,
+                    active_command_id=execution.fence.command_id,
+                    expected_fencing_token=execution.fence.fencing_token,
+                    cancellation_command_id=execution.fence.command_id,
                 )
-                command_status = (
-                    CommandStatus.CANCELLED
-                    if status is AttemptStatus.CANCELLED
-                    else CommandStatus.ABORTED
-                )
-                command = await self._ledger.terminate(
+                current = await self._ledger.load(
                     connection,
-                    binding=execution.admission.binding,
-                    status=command_status,
-                    error_code=error_code,
-                    error_classification=error_classification,
+                    thread_id=execution.admission.binding.thread_id,
+                    command_id=execution.admission.binding.command_id,
                 )
-                try:
-                    lease = await self._leases.release(
-                        connection,
-                        thread_id=execution.fence.thread_id,
-                        command_id=execution.fence.command_id,
-                        owner_id=execution.fence.owner_id,
-                        fencing_token=execution.fence.fencing_token,
+                self._ledger.require_same_binding(
+                    current.binding,
+                    execution.admission.binding,
+                )
+                if current.status in {
+                    CommandStatus.RESULT_CHECKPOINTED,
+                    CommandStatus.COMPLETED,
+                }:
+                    command = current
+                    attempt = execution.attempt
+                else:
+                    command_status = (
+                        CommandStatus.CANCELLED
+                        if status is AttemptStatus.CANCELLED
+                        else CommandStatus.ABORTED
                     )
-                except GraphLeaseLostError:
-                    lease = execution.lease
+                    command = await self._ledger.terminate(
+                        connection,
+                        binding=execution.admission.binding,
+                        status=command_status,
+                        error_code=error_code,
+                        error_classification=error_classification,
+                    )
+                    attempt = await self._ledger.finish_attempt(
+                        connection,
+                        execution.attempt,
+                        status=status,
+                        error_code=error_code,
+                        error_classification=error_classification,
+                    )
         admission = replace(
             execution.admission,
             record=command,

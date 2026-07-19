@@ -335,11 +335,9 @@ class GatewayBackedGraphCommandStreamService:
                 executor=_Executor(source),
             )
         except BaseException as error:
-            try:
-                if source is not None:
-                    await _close_iterator_safely(source)
-            finally:
-                await self._best_effort_abort(execution, error)
+            await self._best_effort_abort(execution, error)
+            if source is not None:
+                await _close_iterator_safely(source)
             raise
         async for event in self._renewing_stream(validated, execution):
             yield event
@@ -430,9 +428,10 @@ class GatewayBackedGraphCommandStreamService:
             if not terminal_seen:
                 raise GraphContractError("gateway stream ended without a terminal event")
         except BaseException as error:
-            # Provider cancellation must complete before the durable attempt/command is
-            # terminated. Otherwise a still-running provider task can re-enter the
-            # ledger with a fence whose command has already been aborted.
+            if not terminal_seen:
+                # Persist the cancellation fence before touching provider tasks. A task
+                # that suppresses cancellation can no longer checkpoint with the old token.
+                await self._best_effort_abort(execution, error)
             await _cancel_task(next_event)
             next_event = None
             await _cancel_task(renewal)
@@ -440,8 +439,6 @@ class GatewayBackedGraphCommandStreamService:
             if iterator is not None:
                 await _close_iterator_safely(iterator)
                 iterator = None
-            if not terminal_seen:
-                await self._best_effort_abort(execution, error)
             raise
         finally:
             await _cancel_task(next_event)
@@ -458,13 +455,12 @@ class GatewayBackedGraphCommandStreamService:
         execution: GatewayExecution,
         error: BaseException,
     ) -> None:
-        code = "GRAPH_STREAM_CANCELLED" if isinstance(error, asyncio.CancelledError) else (
-            "GRAPH_STREAM_INTERRUPTED"
-        )
+        cancelled = isinstance(error, (asyncio.CancelledError, GeneratorExit))
+        code = "GRAPH_STREAM_CANCELLED" if cancelled else "GRAPH_STREAM_INTERRUPTED"
         try:
             await self._gateway.finish_execution_attempt(
                 execution,
-                status=AttemptStatus.FAILED,
+                status=(AttemptStatus.CANCELLED if cancelled else AttemptStatus.FAILED),
                 error_code=code,
                 error_classification="STREAM_INTERRUPTED",
             )

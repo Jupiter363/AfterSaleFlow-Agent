@@ -302,6 +302,7 @@ class _Gateway:
         self.reconciled = 0
         self.renewed = 0
         self.finished = 0
+        self.finished_statuses: list[AttemptStatus] = []
         self.provider_calls = 0
 
     async def admit(self, **kwargs: Any) -> GatewayAdmission:
@@ -334,6 +335,7 @@ class _Gateway:
 
     async def finish_execution_attempt(self, execution: GatewayExecution, **kwargs: Any):
         self.finished += 1
+        self.finished_statuses.append(kwargs["status"])
         return execution
 
     async def reconcile_terminal(self, admission: GatewayAdmission, **kwargs: Any):
@@ -654,7 +656,7 @@ async def test_truncated_gateway_stream_aborts_attempt_and_never_fakes_a_termina
 
 
 @pytest.mark.asyncio
-async def test_stream_cancellation_stops_provider_before_aborting_durable_attempt() -> None:
+async def test_stream_cancellation_persists_fence_before_stopping_provider() -> None:
     admission = _admission(AdmissionAction.ACQUIRE)
     ordering: list[str] = []
     provider_waiting = asyncio.Event()
@@ -692,8 +694,9 @@ async def test_stream_cancellation_stops_provider_before_aborting_durable_attemp
     with pytest.raises(asyncio.CancelledError):
         await pending
 
-    assert ordering == ["provider_stopped", "durable_attempt_aborted"]
+    assert ordering == ["durable_attempt_aborted", "provider_stopped"]
     assert gateway.finished == 1
+    assert gateway.finished_statuses == [AttemptStatus.CANCELLED]
     assert await gate.drain(0.01) is True
 
 
