@@ -1,0 +1,876 @@
+from __future__ import annotations
+
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
+from typing import Any
+
+import pytest
+
+from app.contracts.v1.codec import canonical_sha256
+from app.contracts.v1.models import AgentStreamEvent, RoomGraphCommand
+from app.graph_runtime.errors import (
+    GraphContractError,
+    GraphGatewayDisabledError,
+    GraphNewAgentAttemptRequiredError,
+    GraphNonceReplayError,
+    GraphThreadBindingError,
+    GraphVersionUnavailableError,
+)
+from app.graph_runtime.gateway import (
+    AdmissionAction,
+    GatewayAuditEvent,
+    GatewayAdmission,
+    GatewayExecution,
+    GraphCommandGateway,
+)
+from app.graph_runtime.identity import (
+    ActorRole,
+    ActorScopeBinding,
+    Audience,
+    RoomType,
+    ThreadIdentity,
+    ThreadLifecycle,
+    ThreadRecord,
+)
+from app.graph_runtime.ledger import (
+    AttemptRecord,
+    AttemptStatus,
+    CommandBinding,
+    CommandRecord,
+    CommandRegistration,
+    CommandStatus,
+    ResultRecord,
+)
+from app.graph_runtime.lease import LeaseAcquisition, LeaseAcquisitionKind, LeaseRecord
+from app.graph_runtime.persistence_models import GraphFenceContext, GraphGatewayMode
+from app.graph_runtime.registry import RegistryRecord, RegistryState, VersionBinding
+from app.security.invocation_envelope import (
+    InvocationClaims,
+    VerifiedInvocation,
+    invocation_binding_claims,
+)
+
+
+NOW = datetime(2026, 7, 19, 8, 0, tzinfo=timezone.utc)
+THREAD = f"grt.v1.{'5' * 32}"
+
+
+def _command() -> RoomGraphCommand:
+    payload: dict[str, Any] = {
+        "schema_version": "room-graph-command.v1",
+        "command_id": "command-1",
+        "logical_run_id": "run-1",
+        "attempt_id": "attempt-1",
+        "tenant_surrogate": "tenant-1",
+        "case_id": "case-1",
+        "room_type": "INTAKE",
+        "room_epoch": 2,
+        "graph_key": "intake.flow",
+        "graph_version": "intake.v2",
+        "checkpoint_schema_version": "intake.checkpoint.v2",
+        "thread_id": THREAD,
+        "actor_scope": {
+            "actor_id": "user-1",
+            "actor_role": "USER",
+            "audience": "USER",
+            "capabilities": ["order.read"],
+        },
+        "process_revision": 3,
+        "stage_code": "INTAKE_ACTIVE",
+        "stage_sequence": 1,
+        "domain_snapshot_ref": {
+            "artifact_id": "snapshot-1",
+            "schema_version": "case-snapshot.v1",
+            "uri": "s3://graph-input/snapshot-1.json",
+            "sha256": "a" * 64,
+            "size_bytes": 128,
+        },
+        "invocation_context": {
+            "agent_profile_id": "intake-agent.v2",
+            "prompt_profile_id": "intake.prompt.v2",
+            "model_profile_id": "model.standard.v1",
+            "output_schema_version": "intake.output.v2",
+            "policy_version": "policy.v2",
+            "guardrail_version": "guardrail.v2",
+            "tool_capabilities": ["order.read"],
+            "envelope_key_id": "java-key-1",
+            "envelope_nonce": "envelope-nonce-1",
+        },
+        "retry_budget": {
+            "provider_attempts_remaining": 2,
+            "activity_attempts_remaining": 3,
+            "repairs_remaining": 1,
+        },
+        "deadline_at": "2026-07-19T08:01:00Z",
+        "traceparent": "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
+    }
+    payload["request_hash"] = canonical_sha256(payload)
+    return RoomGraphCommand.model_validate(payload)
+
+
+def _thread() -> ThreadIdentity:
+    return ThreadIdentity(
+        thread_id=THREAD,
+        tenant_surrogate="tenant-1",
+        case_id="case-1",
+        room_type=RoomType.INTAKE,
+        room_epoch=2,
+        actor_scope=ActorScopeBinding(
+            actor_id="user-1",
+            actor_role=ActorRole.USER,
+            audience=Audience.USER,
+            capabilities=("order.read",),
+        ),
+        agent_session_id="agent-session-1",
+        shared_session=False,
+        graph_key="intake.flow",
+        graph_version="intake.v2",
+        checkpoint_schema_version="intake.checkpoint.v2",
+    )
+
+
+def _verified(command: RoomGraphCommand) -> VerifiedInvocation:
+    claims = {
+        "iss": "java-api-service",
+        "aud": "python-agent-service",
+        "sub": "graph-command",
+        "iat": int(NOW.timestamp()),
+        "nbf": int(NOW.timestamp()),
+        "exp": int((NOW + timedelta(seconds=60)).timestamp()),
+        "jti": "jti-1",
+        **invocation_binding_claims(command),
+    }
+    return VerifiedInvocation(
+        claims=InvocationClaims.model_validate(claims),
+        key_id="java-key-1",
+        request_hash=command.request_hash,
+        transport_certificate_sha256="c" * 64,
+    )
+
+
+def _registry() -> RegistryRecord:
+    return RegistryRecord(
+        binding=VersionBinding(
+            graph_key="intake.flow",
+            graph_version="intake.v2",
+            checkpoint_schema_version="intake.checkpoint.v2",
+            state_schema_version="intake.state.v2",
+            state_schema_hash="d" * 64,
+            command_schema_version="room-graph-command.v1",
+            result_schema_version="room-graph-result.v1",
+            prompt_version="intake.prompt.v2",
+            model_profile_id="model.standard.v1",
+            output_schema_version="intake.output.v2",
+            policy_version="policy.v2",
+            guardrail_version="guardrail.v2",
+            tool_policy_version="tools.none.v1",
+            binding_hash="e" * 64,
+            code_build_id="build-1",
+        ),
+        state=RegistryState.SHADOW,
+        loadable=True,
+        revision=1,
+    )
+
+
+class _Cursor:
+    async def fetchone(self) -> None:
+        return None
+
+
+class _Transaction:
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+
+    async def __aenter__(self) -> None:
+        self.events.append("transaction:enter")
+
+    async def __aexit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        self.events.append("transaction:rollback" if exc_type else "transaction:commit")
+
+
+class _Connection:
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+
+    def transaction(self) -> _Transaction:
+        return _Transaction(self.events)
+
+    async def execute(self, query: str, params: Any = None) -> _Cursor:
+        raise AssertionError("stub repositories own this test")
+
+
+class _ConnectionContext:
+    def __init__(self, connection: _Connection) -> None:
+        self.connection = connection
+
+    async def __aenter__(self) -> _Connection:
+        self.connection.events.append("connection:enter")
+        return self.connection
+
+    async def __aexit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        self.connection.events.append("connection:exit")
+
+
+class _Pool:
+    def __init__(self) -> None:
+        self.events: list[str] = []
+        self.connection_value = _Connection(self.events)
+
+    def connection(self, *, timeout: float) -> _ConnectionContext:
+        assert timeout == 3.0
+        return _ConnectionContext(self.connection_value)
+
+
+class _Threads:
+    def __init__(
+        self,
+        events: list[str],
+        lifecycle: ThreadLifecycle = ThreadLifecycle.ACTIVE,
+    ) -> None:
+        self.events = events
+        self.lifecycle = lifecycle
+
+    async def ensure_registered(
+        self,
+        connection: Any,
+        expected: ThreadIdentity,
+    ) -> ThreadRecord:
+        self.events.append("repo:thread")
+        return ThreadRecord(
+            identity=expected,
+            lifecycle=self.lifecycle,
+            cognitive_revision=0,
+            last_checkpoint_ns=None,
+            last_checkpoint_id=None,
+        )
+
+
+class _Registry:
+    def __init__(
+        self,
+        events: list[str],
+        state: RegistryState = RegistryState.SHADOW,
+    ) -> None:
+        self.events = events
+        self.state = state
+
+    async def load(self, connection: Any, **kwargs: Any) -> RegistryRecord:
+        self.events.append("repo:registry")
+        return replace(_registry(), state=self.state)
+
+
+class _Ledger:
+    def __init__(
+        self,
+        events: list[str],
+        *,
+        replay: bool = False,
+        status: CommandStatus = CommandStatus.REGISTERED,
+        created: bool = True,
+    ) -> None:
+        self.events = events
+        self.replay = replay
+        self.status = status
+        self.created = created
+
+    async def register_with_nonce(self, connection: Any, *, binding: Any, nonce: Any) -> CommandRegistration:
+        self.events.append("repo:command+nonce")
+        if self.replay:
+            raise GraphNonceReplayError()
+        record = CommandRecord(
+            binding=binding,
+            status=self.status,
+            attempt_count=0,
+            fencing_token=None,
+            start_checkpoint_ns=None,
+            start_checkpoint_id=None,
+            committed_checkpoint_ns=None,
+            committed_checkpoint_id=None,
+            result_ref=None,
+            result_hash=None,
+            error_code=None,
+            error_classification=None,
+            revision=0,
+        )
+        return CommandRegistration(record, self.created)
+
+    async def referenced_verification_key_ids(self, connection: Any) -> frozenset[str]:
+        self.events.append("repo:kids")
+        return frozenset({"java-key-1", "java-key-previous"})
+
+
+class _InputAuthorizer:
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+
+    async def authorize(self, **kwargs: Any) -> None:
+        self.events.append("input:authorized")
+
+
+class _RejectingInputAuthorizer:
+    async def authorize(self, **kwargs: Any) -> None:
+        raise GraphThreadBindingError("IMMUTABLE_INPUT_REJECTED")
+
+
+class _Audit:
+    def __init__(self) -> None:
+        self.events: list[GatewayAuditEvent] = []
+
+    async def emit(self, event: GatewayAuditEvent) -> None:
+        self.events.append(event)
+
+
+def _gateway(pool: _Pool, ledger: _Ledger, audit: _Audit) -> GraphCommandGateway:
+    return GraphCommandGateway(
+        mode=GraphGatewayMode.SHADOW,
+        pool=pool,
+        threads=_Threads(pool.events),  # type: ignore[arg-type]
+        registry=_Registry(pool.events),  # type: ignore[arg-type]
+        ledger=ledger,  # type: ignore[arg-type]
+        input_authorizer=_InputAuthorizer(pool.events),
+        audit_sink=audit,
+    )
+
+
+@pytest.mark.asyncio
+async def test_admission_uses_one_explicit_transaction_for_thread_registry_and_nonce() -> None:
+    pool = _Pool()
+    audit = _Audit()
+    gateway = _gateway(pool, _Ledger(pool.events), audit)
+    command = _command()
+
+    admission = await gateway.admit(
+        command=command,
+        verified_invocation=_verified(command),
+        expected_thread=_thread(),
+    )
+
+    assert admission.action is AdmissionAction.ACQUIRE
+    assert pool.events == [
+        "input:authorized",
+        "connection:enter",
+        "transaction:enter",
+        "repo:registry",
+        "repo:thread",
+        "repo:command+nonce",
+        "transaction:commit",
+        "connection:exit",
+    ]
+    assert audit.events[0].request_hash == command.request_hash
+
+
+@pytest.mark.asyncio
+async def test_nonce_replay_rolls_back_the_whole_admission_transaction() -> None:
+    pool = _Pool()
+    audit = _Audit()
+    gateway = _gateway(pool, _Ledger(pool.events, replay=True), audit)
+    command = _command()
+
+    with pytest.raises(GraphNonceReplayError):
+        await gateway.admit(
+            command=command,
+            verified_invocation=_verified(command),
+            expected_thread=_thread(),
+        )
+
+    assert "transaction:rollback" in pool.events
+    assert "transaction:commit" not in pool.events
+    assert audit.events[-1].code == "GRAPH_INVOCATION_NONCE_REPLAY"
+
+
+@pytest.mark.asyncio
+async def test_pre_database_authorization_rejection_is_security_audited() -> None:
+    pool = _Pool()
+    audit = _Audit()
+    gateway = GraphCommandGateway(
+        mode=GraphGatewayMode.SHADOW,
+        pool=pool,
+        threads=_Threads(pool.events),  # type: ignore[arg-type]
+        registry=_Registry(pool.events),  # type: ignore[arg-type]
+        ledger=_Ledger(pool.events),  # type: ignore[arg-type]
+        input_authorizer=_RejectingInputAuthorizer(),
+        audit_sink=audit,
+    )
+    command = _command()
+
+    with pytest.raises(GraphThreadBindingError, match="IMMUTABLE_INPUT_REJECTED"):
+        await gateway.admit(
+            command=command,
+            verified_invocation=_verified(command),
+            expected_thread=_thread(),
+        )
+
+    assert pool.events == []
+    assert audit.events[-1].event_type == "graph.command.rejected"
+    assert audit.events[-1].code == "GRAPH_THREAD_BINDING_CONFLICT"
+
+
+@pytest.mark.asyncio
+async def test_retired_version_and_thread_can_replay_an_existing_cached_result() -> None:
+    pool = _Pool()
+    audit = _Audit()
+    gateway = GraphCommandGateway(
+        mode=GraphGatewayMode.SHADOW,
+        pool=pool,
+        threads=_Threads(pool.events, ThreadLifecycle.RETIRED),  # type: ignore[arg-type]
+        registry=_Registry(pool.events, RegistryState.RETIRED),  # type: ignore[arg-type]
+        ledger=_Ledger(  # type: ignore[arg-type]
+            pool.events,
+            status=CommandStatus.COMPLETED,
+            created=False,
+        ),
+        input_authorizer=_InputAuthorizer(pool.events),
+        audit_sink=audit,
+    )
+    command = _command()
+
+    admission = await gateway.admit(
+        command=command,
+        verified_invocation=_verified(command),
+        expected_thread=_thread(),
+    )
+
+    assert admission.action is AdmissionAction.RETURN_CACHED
+    assert admission.registry.state is RegistryState.RETIRED
+    assert "transaction:commit" in pool.events
+
+
+@pytest.mark.asyncio
+async def test_retired_version_rejects_new_command_and_rolls_back_registration() -> None:
+    pool = _Pool()
+    audit = _Audit()
+    gateway = GraphCommandGateway(
+        mode=GraphGatewayMode.SHADOW,
+        pool=pool,
+        threads=_Threads(pool.events),  # type: ignore[arg-type]
+        registry=_Registry(pool.events, RegistryState.RETIRED),  # type: ignore[arg-type]
+        ledger=_Ledger(pool.events, created=True),  # type: ignore[arg-type]
+        input_authorizer=_InputAuthorizer(pool.events),
+        audit_sink=audit,
+    )
+    command = _command()
+
+    with pytest.raises(GraphVersionUnavailableError):
+        await gateway.admit(
+            command=command,
+            verified_invocation=_verified(command),
+            expected_thread=_thread(),
+        )
+
+    assert "repo:command+nonce" in pool.events
+    assert "transaction:rollback" in pool.events
+    assert "transaction:commit" not in pool.events
+
+
+@pytest.mark.asyncio
+async def test_jwks_retention_port_reads_nonterminal_command_kids() -> None:
+    pool = _Pool()
+    audit = _Audit()
+    gateway = _gateway(pool, _Ledger(pool.events), audit)
+
+    kids = await gateway.referenced_verification_key_ids()
+
+    assert kids == frozenset({"java-key-1", "java-key-previous"})
+    assert pool.events == [
+        "connection:enter",
+        "transaction:enter",
+        "repo:kids",
+        "transaction:commit",
+        "connection:exit",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_disabled_gateway_has_no_database_or_unsigned_fallback() -> None:
+    gateway = GraphCommandGateway(mode=GraphGatewayMode.DISABLED, pool=None)
+    command = _command()
+
+    with pytest.raises(GraphGatewayDisabledError):
+        await gateway.admit(
+            command=command,
+            verified_invocation=_verified(command),
+            expected_thread=_thread(),
+        )
+
+
+def _execution() -> GatewayExecution:
+    command = _command()
+    registry = _registry()
+    binding = CommandBinding.from_command(
+        command,
+        tool_policy_version=registry.binding.tool_policy_version,
+    )
+    record = CommandRecord(
+        binding=binding,
+        status=CommandStatus.EXECUTING,
+        attempt_count=1,
+        fencing_token=1,
+        start_checkpoint_ns=None,
+        start_checkpoint_id=None,
+        committed_checkpoint_ns=None,
+        committed_checkpoint_id=None,
+        result_ref=None,
+        result_hash=None,
+        error_code=None,
+        error_classification=None,
+        revision=1,
+    )
+    admission = GatewayAdmission(
+        command=command,
+        binding=binding,
+        thread=_thread(),
+        registry=registry,
+        record=record,
+        action=AdmissionAction.OBSERVE_OR_TAKEOVER,
+        created=False,
+    )
+    attempt = AttemptRecord(
+        attempt_id=command.attempt_id,
+        thread_id=command.thread_id,
+        command_id=command.command_id,
+        attempt_no=1,
+        owner_id="worker-1",
+        fencing_token=1,
+        status=AttemptStatus.EXECUTING,
+        provider_call_count=1,
+        error_code=None,
+        error_classification=None,
+    )
+    lease = LeaseRecord(
+        thread_id=command.thread_id,
+        command_id=command.command_id,
+        owner_id="worker-1",
+        fencing_token=1,
+        lease_expires_at=NOW + timedelta(seconds=30),
+        acquired_at=NOW,
+        renewed_at=NOW,
+        released_at=None,
+        cancelled_at=None,
+        cancelled_by_command_id=None,
+        revision=0,
+    )
+    fence = GraphFenceContext(
+        thread_id=command.thread_id,
+        command_id=command.command_id,
+        owner_id="worker-1",
+        fencing_token=1,
+        request_hash=command.request_hash,
+        room_epoch=command.room_epoch,
+        graph_key=command.graph_key,
+        graph_version=command.graph_version,
+        checkpoint_schema_version=command.checkpoint_schema_version,
+    )
+    return GatewayExecution(admission, attempt, lease, fence)
+
+
+class _Executor:
+    def __init__(self, events: list[AgentStreamEvent]) -> None:
+        self.events = events
+
+    async def stream(self, execution: GatewayExecution):
+        for event in self.events:
+            yield event
+
+
+class _StreamGateway(GraphCommandGateway):
+    def __init__(self) -> None:
+        super().__init__(
+            mode=GraphGatewayMode.SHADOW,
+            pool=object(),
+            input_authorizer=_InputAuthorizer([]),
+        )
+        self.reconciled = False
+        self.finished = False
+
+    async def reconcile_terminal(self, admission: GatewayAdmission, *, owner_id: str):
+        self.reconciled = True
+        result = ResultRecord(
+            result_id="result-1",
+            thread_id=admission.binding.thread_id,
+            command_id=admission.binding.command_id,
+            request_hash=admission.binding.request_hash,
+            result_schema_version="room-graph-result.v1",
+            checkpoint_ns="",
+            checkpoint_id="checkpoint-1",
+            cognitive_revision=1,
+            terminal_status="COMPLETED",
+            result_json={"output_hash": "f" * 64},
+            result_ref="s3://graph-results/result-1.json",
+            result_hash="f" * 64,
+            usage_json={},
+        )
+        return admission.record, result
+
+    async def finish_execution_attempt(self, execution: GatewayExecution, **kwargs: Any):
+        self.finished = True
+        return execution
+
+
+def _event(sequence: int, event_type: str, payload: dict[str, Any]) -> AgentStreamEvent:
+    return AgentStreamEvent.model_validate(
+        {
+            "schema_version": "agent-stream.v2",
+            "run_id": "run-1",
+            "attempt_id": "attempt-1",
+            "sequence_no": sequence,
+            "event_type": event_type,
+            "audience": "USER",
+            "occurred_at": NOW,
+            "payload": payload,
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_execution_attempt_must_match_signed_command_before_database_access() -> None:
+    with pytest.raises(GraphContractError, match="signed command"):
+        await _StreamGateway().acquire_execution(
+            _execution().admission,
+            owner_id="worker-1",
+            attempt_id="forged-attempt",
+        )
+
+
+class _TakeoverLedger:
+    def __init__(self, execution: GatewayExecution) -> None:
+        self.execution = execution
+        self.begin_called = False
+
+    async def load(self, connection: Any, **kwargs: Any) -> CommandRecord:
+        return self.execution.admission.record
+
+    @staticmethod
+    def require_same_binding(actual: CommandBinding, expected: CommandBinding) -> None:
+        assert actual == expected
+
+    async def latest_attempt(self, connection: Any, **kwargs: Any) -> AttemptRecord:
+        return self.execution.attempt
+
+    async def begin_attempt(self, connection: Any, **kwargs: Any) -> None:
+        self.begin_called = True
+        raise AssertionError("takeover must not allocate a second public attempt")
+
+
+class _TakeoverLeases:
+    def __init__(self, execution: GatewayExecution) -> None:
+        self.execution = execution
+        self.called = False
+
+    async def acquire(self, connection: Any, **kwargs: Any) -> LeaseAcquisition:
+        self.called = True
+        return LeaseAcquisition(
+            LeaseAcquisitionKind.TAKEOVER,
+            replace(
+                self.execution.lease,
+                owner_id="worker-2",
+                fencing_token=2,
+                revision=1,
+            ),
+        )
+
+
+class _FinishLedger:
+    async def finish_attempt(
+        self,
+        connection: Any,
+        attempt: AttemptRecord,
+        **kwargs: Any,
+    ) -> AttemptRecord:
+        return replace(
+            attempt,
+            status=kwargs["status"],
+            error_code=kwargs["error_code"],
+            error_classification=kwargs["error_classification"],
+        )
+
+    async def terminate(
+        self,
+        connection: Any,
+        *,
+        binding: CommandBinding,
+        status: CommandStatus,
+        error_code: str,
+        error_classification: str,
+    ) -> CommandRecord:
+        return replace(
+            _execution().admission.record,
+            status=status,
+            error_code=error_code,
+            error_classification=error_classification,
+        )
+
+
+class _ReleaseLeases:
+    def __init__(self) -> None:
+        self.called = False
+
+    async def release(self, connection: Any, **kwargs: Any) -> LeaseRecord:
+        self.called = True
+        return replace(_execution().lease, released_at=NOW)
+
+
+@pytest.mark.asyncio
+async def test_fence_takeover_cannot_reuse_an_existing_public_agent_attempt() -> None:
+    execution = _execution()
+    pool = _Pool()
+    ledger = _TakeoverLedger(execution)
+    leases = _TakeoverLeases(execution)
+    gateway = GraphCommandGateway(
+        mode=GraphGatewayMode.SHADOW,
+        pool=pool,
+        ledger=ledger,  # type: ignore[arg-type]
+        leases=leases,  # type: ignore[arg-type]
+        input_authorizer=_InputAuthorizer([]),
+    )
+
+    with pytest.raises(GraphNewAgentAttemptRequiredError):
+        await gateway.acquire_execution(
+            execution.admission,
+            owner_id="worker-2",
+            attempt_id=execution.admission.command.attempt_id,
+        )
+
+    assert ledger.begin_called is False
+    assert leases.called is False
+    assert "transaction:rollback" in pool.events
+    assert "transaction:commit" not in pool.events
+
+
+@pytest.mark.asyncio
+async def test_terminal_attempt_failure_releases_its_lease_for_the_next_command() -> None:
+    pool = _Pool()
+    leases = _ReleaseLeases()
+    gateway = GraphCommandGateway(
+        mode=GraphGatewayMode.SHADOW,
+        pool=pool,
+        ledger=_FinishLedger(),  # type: ignore[arg-type]
+        leases=leases,  # type: ignore[arg-type]
+        input_authorizer=_InputAuthorizer([]),
+    )
+
+    finished = await gateway.finish_execution_attempt(
+        _execution(),
+        status=AttemptStatus.FAILED,
+        error_code="PROVIDER_TIMEOUT",
+        error_classification="RECOVERABLE_ATTEMPT",
+    )
+
+    assert finished.attempt.status is AttemptStatus.FAILED
+    assert finished.admission.record.status is CommandStatus.ABORTED
+    assert finished.admission.action is AdmissionAction.RETURN_ABORTED
+    assert finished.lease.released_at == NOW
+    assert leases.called is True
+    assert "transaction:commit" in pool.events
+
+
+@pytest.mark.asyncio
+async def test_stream_reconciles_durable_result_before_yielding_final() -> None:
+    gateway = _StreamGateway()
+    executor = _Executor(
+        [
+            _event(0, "attempt_started", {"node": "intake.start"}),
+            _event(
+                1,
+                "final",
+                {
+                    "final_result_ref": "s3://graph-results/result-1.json",
+                    "final_result_hash": "f" * 64,
+                },
+            ),
+        ]
+    )
+
+    events = [event async for event in gateway.execute_stream(execution=_execution(), executor=executor)]
+
+    assert [event.event_type for event in events] == ["attempt_started", "final"]
+    assert gateway.reconciled is True
+
+
+@pytest.mark.asyncio
+async def test_attempt_aborted_is_durable_terminal_for_one_http_attempt() -> None:
+    gateway = _StreamGateway()
+    executor = _Executor(
+        [
+            _event(0, "attempt_started", {"node": "intake.start"}),
+            _event(1, "attempt_aborted", {"reason_code": "PROVIDER_TIMEOUT"}),
+        ]
+    )
+
+    events = [event async for event in gateway.execute_stream(execution=_execution(), executor=executor)]
+
+    assert events[-1].event_type == "attempt_aborted"
+    assert gateway.finished is True
+
+
+@pytest.mark.asyncio
+async def test_stream_rejects_incompatible_payload_before_durable_terminal_work() -> None:
+    gateway = _StreamGateway()
+    executor = _Executor(
+        [
+            _event(
+                0,
+                "attempt_started",
+                {"node": "intake.start", "reason_code": "INJECTED_FIELD"},
+            )
+        ]
+    )
+
+    with pytest.raises(GraphContractError, match="payload fields"):
+        _ = [
+            event
+            async for event in gateway.execute_stream(
+                execution=_execution(),
+                executor=executor,
+            )
+        ]
+
+    assert gateway.reconciled is False
+    assert gateway.finished is False
+
+
+@pytest.mark.asyncio
+async def test_stream_rejects_duplicate_attempt_started() -> None:
+    gateway = _StreamGateway()
+    executor = _Executor(
+        [
+            _event(0, "attempt_started", {"node": "intake.start"}),
+            _event(1, "attempt_started", {"node": "intake.again"}),
+        ]
+    )
+
+    with pytest.raises(GraphContractError, match="another attempt_started"):
+        _ = [
+            event
+            async for event in gateway.execute_stream(
+                execution=_execution(),
+                executor=executor,
+            )
+        ]
+
+
+@pytest.mark.asyncio
+async def test_python_stream_cannot_claim_java_attempt_reset_authority() -> None:
+    gateway = _StreamGateway()
+    executor = _Executor(
+        [
+            _event(0, "attempt_started", {"node": "intake.start"}),
+            _event(
+                1,
+                "attempt_reset",
+                {
+                    "reset_attempt_id": "attempt-prior",
+                    "reason_code": "MODEL_RESPONSE_NOT_CHECKPOINTED",
+                },
+            ),
+        ]
+    )
+
+    with pytest.raises(GraphContractError, match="RESET_AUTHORITY_VIOLATION"):
+        _ = [
+            event
+            async for event in gateway.execute_stream(
+                execution=_execution(),
+                executor=executor,
+            )
+        ]
