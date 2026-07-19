@@ -112,6 +112,48 @@ def test_migration_runner_requires_external_environment_generation() -> None:
     )
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("schema_row", "message"),
+    [
+        (None, "must be preprovisioned"),
+        (
+            {"schema_name": "graph_runtime", "schema_owner": "unexpected_owner"},
+            "configured owner role",
+        ),
+    ],
+)
+async def test_migration_session_requires_the_preprovisioned_owned_schema(
+    schema_row: object,
+    message: str,
+) -> None:
+    class Connection:
+        async def execute(self, query: object, params: object = None) -> _Cursor:
+            normalized = " ".join(str(query).split()).lower()
+            if "session_user" in normalized:
+                return _Cursor(
+                    {"session_user": "graph_migrator", "database_name": "graph_db"}
+                )
+            if "set role" in normalized:
+                return _Cursor()
+            if "current_user" in normalized:
+                return _Cursor({"current_user": "graph_owner"})
+            if "information_schema.schemata" in normalized:
+                assert params == ("graph_runtime",)
+                return _Cursor(schema_row)
+            raise AssertionError(f"unexpected SQL: {normalized}")
+
+    runner = GraphMigrationRunner(
+        "postgresql://unused",
+        environment_generation="generation-7",
+    )
+
+    with pytest.raises(GraphMigrationError, match=message):
+        await runner._prepare_session(  # noqa: SLF001 - validates the role boundary
+            Connection()  # type: ignore[arg-type]
+        )
+
+
 @pytest.mark.parametrize(
     ("generation", "restore_hash", "message"),
     [

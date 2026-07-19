@@ -395,12 +395,20 @@ class GraphMigrationRunner:
         owner = await (await connection.execute("select current_user as current_user")).fetchone()
         if owner is None or owner["current_user"] != self._owner_role:
             raise GraphMigrationError("Graph migrator cannot assume the non-login owner role")
-        await connection.execute(
-            sql.SQL("create schema if not exists {} authorization {}").format(
-                sql.Identifier(self._schema),
-                sql.Identifier(self._owner_role),
+        schema = await (
+            await connection.execute(
+                """
+                select schema_name, schema_owner
+                  from information_schema.schemata
+                 where schema_name = %s
+                """,
+                (self._schema,),
             )
-        )
+        ).fetchone()
+        if schema is None:
+            raise GraphMigrationError("Graph schema must be preprovisioned by the database owner")
+        if schema["schema_owner"] != self._owner_role:
+            raise GraphMigrationError("Graph schema is not owned by the configured owner role")
         await connection.execute(
             sql.SQL("set search_path to {}, pg_catalog, pg_temp").format(
                 sql.Identifier(self._schema)

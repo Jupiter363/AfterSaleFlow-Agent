@@ -54,7 +54,7 @@ select fencing_token
 BIND_CHECKPOINT_SQL: Final[str] = """
 update agent_graph_command
    set status = case
-           when %s is not null then 'RESULT_CHECKPOINTED'
+           when %s::text is not null then 'RESULT_CHECKPOINTED'
            else status
        end,
        fencing_token = %s,
@@ -63,7 +63,7 @@ update agent_graph_command
        result_ref = coalesce(%s, result_ref),
        result_hash = coalesce(%s, result_hash),
        result_checkpointed_at = case
-           when %s is not null then coalesce(result_checkpointed_at, clock_timestamp())
+           when %s::text is not null then coalesce(result_checkpointed_at, clock_timestamp())
            else result_checkpointed_at
        end,
        updated_at = clock_timestamp(),
