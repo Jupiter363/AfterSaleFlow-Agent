@@ -1,9 +1,11 @@
 # 文件作用：Python Agent 服务代码文件，承载售后争议智能体的 API、配置、模型调用或业务流程。
 
 from functools import lru_cache
-from typing import ClassVar
+import re
+from typing import ClassVar, Literal, Self
+from urllib.parse import parse_qs, unquote, urlsplit
 
-from pydantic import Field
+from pydantic import AnyHttpUrl, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -41,6 +43,58 @@ class Settings(BaseSettings):
     prompt_version: str = "hearing-v1"
     evaluation_prompt_version: str = "evaluation-v1"
     enable_sensitive_log_masking: bool = True
+    graph_gateway_mode: Literal["DISABLED", "SHADOW"] = "DISABLED"
+    graph_database_dsn: SecretStr | None = None
+    graph_database_name: str = "dispute_graph"
+    graph_database_user: str = "graph_runtime"
+    graph_database_schema: str = "graph_runtime"
+    graph_pool_min_size: int = Field(default=2, ge=0, le=64)
+    graph_pool_max_size: int = Field(default=16, ge=1, le=64)
+    graph_pool_max_waiting: int = Field(default=64, ge=1, le=1024)
+    graph_pool_acquire_timeout_seconds: float = Field(default=3.0, gt=0, le=30)
+    graph_pool_max_idle_seconds: float = Field(default=300.0, gt=0, le=3600)
+    graph_pool_max_lifetime_seconds: float = Field(default=1800.0, gt=0, le=86400)
+    graph_readiness_timeout_seconds: float = Field(default=2.0, gt=0, le=30)
+    graph_jwks_url: AnyHttpUrl | None = None
+    graph_jwks_refresh_seconds: float = Field(default=30.0, ge=5, le=3600)
+    graph_jwks_timeout_seconds: float = Field(default=2.0, gt=0, le=30)
+    graph_expected_spiffe_id: str = "spiffe://after-sale-flow/java-api-service"
+
+    @model_validator(mode="after")
+    def validate_graph_runtime(self) -> Self:
+        identifier = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
+        for name in ("graph_database_name", "graph_database_user", "graph_database_schema"):
+            if not identifier.fullmatch(getattr(self, name)):
+                raise ValueError(f"{name} must be a safe lowercase PostgreSQL identifier")
+        if self.graph_database_schema == "public":
+            raise ValueError("graph_database_schema cannot use public")
+        if self.graph_pool_min_size > self.graph_pool_max_size:
+            raise ValueError("graph pool min size cannot exceed max size")
+        if self.graph_pool_max_waiting < self.graph_pool_max_size:
+            raise ValueError("graph pool max waiting cannot be below max size")
+        if self.app_env.lower() not in {"local", "test"} and self.graph_pool_min_size < 1:
+            raise ValueError("production graph pool min size must be positive")
+        if not self.graph_expected_spiffe_id.startswith("spiffe://"):
+            raise ValueError("graph_expected_spiffe_id must be a SPIFFE URI")
+        if self.graph_gateway_mode == "SHADOW":
+            if self.graph_database_dsn is None:
+                raise ValueError("SHADOW graph mode requires graph_database_dsn")
+            if self.graph_jwks_url is None:
+                raise ValueError("SHADOW graph mode requires graph_jwks_url")
+            self._validate_graph_runtime_dsn(self.graph_database_dsn.get_secret_value())
+        return self
+
+    def _validate_graph_runtime_dsn(self, value: str) -> None:
+        parsed = urlsplit(value)
+        if parsed.scheme not in {"postgres", "postgresql"} or not parsed.hostname:
+            raise ValueError("graph_database_dsn must be a PostgreSQL URL")
+        if unquote(parsed.username or "") != self.graph_database_user:
+            raise ValueError("graph_database_dsn must use the runtime-only Graph role")
+        if unquote(parsed.path.removeprefix("/")) != self.graph_database_name:
+            raise ValueError("graph_database_dsn must target the isolated Graph database")
+        query = parse_qs(parsed.query, keep_blank_values=True)
+        if "options" in query or parsed.fragment:
+            raise ValueError("graph_database_dsn cannot override search_path or use a fragment")
 
     # 所属模块：Python 支撑模块 > config；函数角色：只读派生属性。
     # 具体功能：`resolved_llm_base_url` 当前实际使用的 LLM 网关地址。保留 resolved_* 命名便于未来兼容多配置来源。
