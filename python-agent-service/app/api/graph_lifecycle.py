@@ -29,7 +29,7 @@ from app.api.graph_stream_service import (
 from app.config import Settings
 from app.contracts.v1.codec import ContractCodec
 from app.contracts.v1.models import AgentStreamEvent, RoomGraphCommand
-from app.graph_runtime.checkpoint import GraphCheckpointRuntime
+from app.graph_runtime.checkpoint import FencedPostgresSaver, GraphCheckpointRuntime
 from app.graph_runtime.errors import GraphGatewayDisabledError
 from app.graph_runtime.gateway import GraphCommandGateway, ImmutableInputAuthorizer
 from app.graph_runtime.identity import ThreadIdentity
@@ -53,12 +53,30 @@ GRAPH_SHUTDOWN_DRAIN_SECONDS = 5.0
 
 
 @dataclass(frozen=True, slots=True)
+class GraphExecutorKernel:
+    """Process-owned resources that every compiled Graph executor must share."""
+
+    saver: FencedPostgresSaver
+    gateway: GraphCommandGateway
+
+
+class ExecutorRegistryFactory(Protocol):
+    """Build exact executor registrations from the live process kernel."""
+
+    def __call__(
+        self,
+        kernel: GraphExecutorKernel,
+        /,
+    ) -> ExactShadowExecutorRegistry: ...
+
+
+@dataclass(frozen=True, slots=True)
 class GraphRuntimeBindings:
     """Trusted process-local dependencies that cannot be selected by a command body."""
 
     thread_identity_resolver: TrustedThreadIdentityResolver
     input_authorizer: ImmutableInputAuthorizer
-    executors: ExactShadowExecutorRegistry
+    executor_registry_factory: ExecutorRegistryFactory
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,8 +155,8 @@ class GraphApplicationRuntime:
             raise ValueError("Graph application runtime opens only in SHADOW mode")
         if settings.graph_database_dsn is None or settings.graph_jwks_url is None:
             raise ValueError("SHADOW Graph dependencies are incomplete")
-        if bindings.executors.registration_count < 1:
-            raise ValueError("SHADOW Graph runtime requires an exact executor registration")
+        if not callable(bindings.executor_registry_factory):
+            raise ValueError("SHADOW Graph runtime requires an executor registry factory")
 
         pool_config = GraphPoolConfig(
             schema=settings.graph_database_schema,
@@ -158,9 +176,7 @@ class GraphApplicationRuntime:
             expected_database=settings.graph_database_name,
             expected_user=settings.graph_database_user,
             expected_environment_generation=settings.graph_expected_environment_generation,
-            expected_restore_verification_hash=(
-                settings.graph_expected_restore_verification_hash
-            ),
+            expected_restore_verification_hash=(settings.graph_expected_restore_verification_hash),
             schema=settings.graph_database_schema,
             timeout_seconds=settings.graph_readiness_timeout_seconds,
         )
@@ -185,10 +201,22 @@ class GraphApplicationRuntime:
                 refresh_interval_seconds=settings.graph_jwks_refresh_seconds,
                 referenced_key_ids=gateway.referenced_verification_key_ids,
             )
+            executors = bindings.executor_registry_factory(
+                GraphExecutorKernel(
+                    saver=checkpoint_runtime.saver,
+                    gateway=gateway,
+                )
+            )
+            if type(executors) is not ExactShadowExecutorRegistry:
+                raise TypeError(
+                    "SHADOW Graph executor factory must return an exact executor registry"
+                )
+            if executors.registration_count < 1:
+                raise ValueError("SHADOW Graph runtime requires an exact executor registration")
             gate = GraphStreamAdmissionGate()
             stream_service = GatewayBackedGraphCommandStreamService(
                 gateway=gateway,
-                executors=bindings.executors,
+                executors=executors,
                 owner_id=_process_owner_id(),
                 admission_gate=gate,
             )
@@ -266,13 +294,9 @@ class GraphApplicationRuntime:
             code=code,
             accepting=self._admission_gate.accepting,
             persistence_code=(
-                persistence.code
-                if persistence is not None
-                else "GRAPH_PERSISTENCE_CHECK_FAILED"
+                persistence.code if persistence is not None else "GRAPH_PERSISTENCE_CHECK_FAILED"
             ),
-            security_code=(
-                security.code if security is not None else "GRAPH_JWKS_CHECK_FAILED"
-            ),
+            security_code=(security.code if security is not None else "GRAPH_JWKS_CHECK_FAILED"),
         )
 
     async def close(self) -> bool:
@@ -283,9 +307,7 @@ class GraphApplicationRuntime:
             drained = False
             try:
                 try:
-                    drained = await self._admission_gate.drain(
-                        GRAPH_SHUTDOWN_DRAIN_SECONDS
-                    )
+                    drained = await self._admission_gate.drain(GRAPH_SHUTDOWN_DRAIN_SECONDS)
                 finally:
                     try:
                         await self._security_runtime.close()
@@ -312,9 +334,8 @@ class GraphRuntimeHandle:
         self._mode = GraphGatewayMode(settings.graph_gateway_mode)
         self._bindings = bindings
         self._runtime_factory = runtime_factory or GraphApplicationRuntime.open
-        self._transport_identity_resolver = (
-            transport_identity_resolver
-            or AsgiMtlsIdentityResolver(expected_spiffe_id=settings.graph_expected_spiffe_id)
+        self._transport_identity_resolver = transport_identity_resolver or AsgiMtlsIdentityResolver(
+            expected_spiffe_id=settings.graph_expected_spiffe_id
         )
         self._runtime: GraphRuntimeInstance | None = None
         self._verifier = _RuntimeVerifier(self)
@@ -357,9 +378,7 @@ class GraphRuntimeHandle:
         runtime = await self._runtime_factory(self._settings, self._bindings)
         try:
             if not runtime.ready:
-                raise RuntimeError(
-                    "SHADOW Graph runtime did not become ready during startup"
-                )
+                raise RuntimeError("SHADOW Graph runtime did not become ready during startup")
             self._runtime = runtime
             try:
                 yield

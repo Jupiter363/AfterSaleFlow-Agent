@@ -10,14 +10,20 @@ from fastapi.testclient import TestClient
 import app.api.graph_lifecycle as graph_lifecycle
 from app.api.graph_lifecycle import (
     GraphApplicationRuntime,
+    GraphExecutorKernel,
     GraphRuntimeBindings,
     GraphRuntimeHandle,
     GraphRuntimeReadiness,
     create_graph_readiness_router,
 )
-from app.api.graph_stream_service import ExactShadowExecutorRegistry
+from app.api.graph_stream_service import (
+    ExactShadowExecutorRegistry,
+    ProviderRuntimeBinding,
+    ShadowExecutorRegistration,
+)
 from app.config import Settings
 from app.graph_runtime.persistence_models import GraphGatewayMode
+from app.graph_runtime.registry import VersionBinding
 
 
 BASE_SETTINGS = {
@@ -36,9 +42,7 @@ def _settings(**overrides: Any) -> Settings:
 def _shadow_settings() -> Settings:
     return _settings(
         graph_gateway_mode="SHADOW",
-        graph_database_dsn=(
-            "postgresql://graph_runtime:secret@postgresql:5432/dispute_graph"
-        ),
+        graph_database_dsn=("postgresql://graph_runtime:secret@postgresql:5432/dispute_graph"),
         graph_jwks_url="http://java-api-service:8080/.well-known/graph-jwks.json",
         graph_expected_environment_generation="graphenv-test-001",
         graph_expected_restore_verification_hash="a" * 64,
@@ -55,11 +59,60 @@ class _InputAuthorizer:
         return None
 
 
-def _bindings() -> GraphRuntimeBindings:
+class _Executor:
+    async def stream(self, execution: Any):
+        raise AssertionError("not used")
+        yield
+
+
+def _registered_executors() -> ExactShadowExecutorRegistry:
+    binding = VersionBinding(
+        graph_key="test.graph",
+        graph_version="1.0.0",
+        checkpoint_schema_version="checkpoint.v1",
+        state_schema_version="state.v1",
+        state_schema_hash="a" * 64,
+        command_schema_version="room-graph-command.v1",
+        result_schema_version="room-graph-result.v1",
+        prompt_version="prompt.v1",
+        model_profile_id="model.v1",
+        output_schema_version="output.v1",
+        policy_version="policy.v1",
+        guardrail_version="guardrail.v1",
+        tool_policy_version="tools.none.v1",
+        binding_hash="b" * 64,
+        code_build_id="build.v1",
+    )
+    return ExactShadowExecutorRegistry(
+        [
+            ShadowExecutorRegistration(
+                binding=binding,
+                executor=cast(Any, _Executor()),
+                provider_binding=ProviderRuntimeBinding(
+                    model_profile_id=binding.model_profile_id,
+                    provider="litellm",
+                    model="qwen3.7-plus",
+                    allowed_nodes=frozenset({"test_node"}),
+                ),
+            )
+        ]
+    )
+
+
+def _empty_executor_registry_factory(
+    kernel: GraphExecutorKernel,
+) -> ExactShadowExecutorRegistry:
+    return ExactShadowExecutorRegistry()
+
+
+def _bindings(
+    *,
+    executor_registry_factory: Any = _empty_executor_registry_factory,
+) -> GraphRuntimeBindings:
     return GraphRuntimeBindings(
         thread_identity_resolver=cast(Any, _ThreadResolver()),
         input_authorizer=cast(Any, _InputAuthorizer()),
-        executors=ExactShadowExecutorRegistry(),
+        executor_registry_factory=executor_registry_factory,
     )
 
 
@@ -104,17 +157,106 @@ class _FakeRuntime:
         return True
 
 
+def _install_open_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+    events: list[str],
+    *,
+    gate_start_error: Exception | None = None,
+    security_close_error: Exception | None = None,
+) -> tuple[Any, list[Any]]:
+    pool = object()
+    saver = object()
+    gateways: list[Any] = []
+
+    class CheckpointRuntime:
+        def __init__(self) -> None:
+            self.pool = pool
+            self.saver = saver
+
+        @classmethod
+        async def open(cls, dsn: str, config: Any) -> CheckpointRuntime:
+            events.append("checkpoint_open")
+            return cls()
+
+        async def close(self) -> None:
+            events.append("checkpoint_close")
+
+    class PersistenceProbe:
+        def __init__(self, config: Any, actual_pool: Any) -> None:
+            assert actual_pool is pool
+
+        async def check(self) -> Any:
+            events.append("persistence_check")
+            return SimpleNamespace(ready=True, code="GRAPH_PERSISTENCE_READY")
+
+    class Gateway:
+        def __init__(self, **kwargs: Any) -> None:
+            assert kwargs["pool"] is pool
+            gateways.append(self)
+
+        async def referenced_verification_key_ids(self) -> frozenset[str]:
+            return frozenset()
+
+    class SecurityRuntime:
+        resolver = object()
+
+        @classmethod
+        async def open(cls, **kwargs: Any) -> SecurityRuntime:
+            events.append("security_open")
+            return cls()
+
+        def readiness(self) -> Any:
+            return SimpleNamespace(ready=True, code="GRAPH_JWKS_READY")
+
+        async def close(self) -> None:
+            events.append("security_close")
+            if security_close_error is not None:
+                raise security_close_error
+
+    class AdmissionGate:
+        accepting = False
+
+        async def start(self) -> None:
+            events.append("gate_start")
+            if gate_start_error is not None:
+                raise gate_start_error
+            self.accepting = True
+
+        async def drain(self, timeout_seconds: float) -> bool:
+            events.append("drain")
+            self.accepting = False
+            return True
+
+    monkeypatch.setattr(graph_lifecycle, "GraphCheckpointRuntime", CheckpointRuntime)
+    monkeypatch.setattr(graph_lifecycle, "GraphPersistenceReadinessProbe", PersistenceProbe)
+    monkeypatch.setattr(graph_lifecycle, "GraphCommandGateway", Gateway)
+    monkeypatch.setattr(graph_lifecycle, "GraphSecurityRuntime", SecurityRuntime)
+    monkeypatch.setattr(graph_lifecycle, "GraphStreamAdmissionGate", AdmissionGate)
+    return saver, gateways
+
+
 @pytest.mark.asyncio
 async def test_disabled_lifespan_never_constructs_graph_dependencies() -> None:
-    calls = 0
+    runtime_calls = 0
+    registry_calls = 0
 
     async def forbidden_factory(settings: Settings, bindings: GraphRuntimeBindings):
-        nonlocal calls
-        calls += 1
+        nonlocal runtime_calls
+        runtime_calls += 1
         raise AssertionError("disabled mode must not open Graph dependencies")
+
+    def forbidden_registry_factory(
+        kernel: GraphExecutorKernel,
+    ) -> ExactShadowExecutorRegistry:
+        nonlocal registry_calls
+        registry_calls += 1
+        raise AssertionError("disabled mode must not construct Graph executors")
 
     handle = GraphRuntimeHandle(
         settings=_settings(),
+        bindings=_bindings(
+            executor_registry_factory=forbidden_registry_factory,
+        ),
         runtime_factory=forbidden_factory,
     )
 
@@ -124,7 +266,8 @@ async def test_disabled_lifespan_never_constructs_graph_dependencies() -> None:
         assert report.code == "GRAPH_DISABLED"
         assert handle.ready is False
 
-    assert calls == 0
+    assert runtime_calls == 0
+    assert registry_calls == 0
     assert handle.endpoint_dependencies().mode == "DISABLED"
 
 
@@ -244,9 +387,109 @@ async def test_shadow_mode_without_trusted_bindings_fails_before_factory() -> No
 
 
 @pytest.mark.asyncio
-async def test_shadow_application_runtime_rejects_an_empty_executor_registry() -> None:
+async def test_shadow_application_runtime_rejects_a_missing_executor_factory() -> None:
+    bindings = _bindings(executor_registry_factory=cast(Any, None))
+
+    with pytest.raises(ValueError, match="executor registry factory"):
+        await GraphApplicationRuntime.open(_shadow_settings(), bindings)
+
+
+@pytest.mark.asyncio
+async def test_shadow_executor_factory_receives_the_exact_runtime_kernel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    saver, gateways = _install_open_dependencies(monkeypatch, events)
+
+    def executor_factory(kernel: GraphExecutorKernel) -> ExactShadowExecutorRegistry:
+        events.append("executor_factory")
+        assert kernel.saver is saver
+        assert kernel.gateway is gateways[0]
+        return _registered_executors()
+
+    runtime = await GraphApplicationRuntime.open(
+        _shadow_settings(),
+        _bindings(executor_registry_factory=executor_factory),
+    )
+    assert len(gateways) == 1
+    assert await runtime.close() is True
+    assert events == [
+        "checkpoint_open",
+        "persistence_check",
+        "security_open",
+        "executor_factory",
+        "gate_start",
+        "drain",
+        "security_close",
+        "checkpoint_close",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_shadow_application_runtime_rejects_an_empty_executor_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    _install_open_dependencies(monkeypatch, events)
+
     with pytest.raises(ValueError, match="exact executor registration"):
         await GraphApplicationRuntime.open(_shadow_settings(), _bindings())
+
+    assert events == [
+        "checkpoint_open",
+        "persistence_check",
+        "security_open",
+        "security_close",
+        "checkpoint_close",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_shadow_application_runtime_rejects_a_forged_executor_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    _install_open_dependencies(monkeypatch, events)
+
+    def forged_factory(kernel: GraphExecutorKernel) -> Any:
+        return SimpleNamespace(registration_count=1)
+
+    with pytest.raises(TypeError, match="exact executor registry"):
+        await GraphApplicationRuntime.open(
+            _shadow_settings(),
+            _bindings(executor_registry_factory=forged_factory),
+        )
+
+    assert events[-2:] == ["security_close", "checkpoint_close"]
+
+
+@pytest.mark.asyncio
+async def test_shadow_executor_factory_failure_closes_security_then_checkpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    saver, gateways = _install_open_dependencies(monkeypatch, events)
+
+    def failing_factory(kernel: GraphExecutorKernel) -> ExactShadowExecutorRegistry:
+        events.append("executor_factory")
+        assert kernel.saver is saver
+        assert kernel.gateway is gateways[0]
+        raise RuntimeError("executor construction failed")
+
+    with pytest.raises(RuntimeError, match="executor construction failed"):
+        await GraphApplicationRuntime.open(
+            _shadow_settings(),
+            _bindings(executor_registry_factory=failing_factory),
+        )
+
+    assert events == [
+        "checkpoint_open",
+        "persistence_check",
+        "security_open",
+        "executor_factory",
+        "security_close",
+        "checkpoint_close",
+    ]
 
 
 @pytest.mark.asyncio
@@ -419,67 +662,18 @@ async def test_partial_open_closes_pool_even_when_security_cleanup_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[str] = []
-
-    class CheckpointRuntime:
-        pool = object()
-
-        @classmethod
-        async def open(cls, dsn: str, config: Any) -> CheckpointRuntime:
-            events.append("checkpoint_open")
-            return cls()
-
-        async def close(self) -> None:
-            events.append("checkpoint_close")
-
-    class PersistenceProbe:
-        def __init__(self, config: Any, pool: Any) -> None:
-            pass
-
-        async def check(self) -> Any:
-            events.append("persistence_check")
-            return SimpleNamespace(ready=True, code="GRAPH_PERSISTENCE_READY")
-
-    class Gateway:
-        def __init__(self, **kwargs: Any) -> None:
-            pass
-
-        async def referenced_verification_key_ids(self) -> frozenset[str]:
-            return frozenset()
-
-    class SecurityRuntime:
-        resolver = object()
-
-        @classmethod
-        async def open(cls, **kwargs: Any) -> SecurityRuntime:
-            events.append("security_open")
-            return cls()
-
-        async def close(self) -> None:
-            events.append("security_close")
-            raise RuntimeError("security cleanup failed")
-
-    class AdmissionGate:
-        accepting = False
-
-        async def start(self) -> None:
-            events.append("gate_start")
-            raise RuntimeError("gate start failed")
-
-    monkeypatch.setattr(graph_lifecycle, "GraphCheckpointRuntime", CheckpointRuntime)
-    monkeypatch.setattr(graph_lifecycle, "GraphPersistenceReadinessProbe", PersistenceProbe)
-    monkeypatch.setattr(graph_lifecycle, "GraphCommandGateway", Gateway)
-    monkeypatch.setattr(graph_lifecycle, "GraphSecurityRuntime", SecurityRuntime)
-    monkeypatch.setattr(graph_lifecycle, "GraphStreamAdmissionGate", AdmissionGate)
-
-    bindings = _bindings()
-    bindings = GraphRuntimeBindings(
-        thread_identity_resolver=bindings.thread_identity_resolver,
-        input_authorizer=bindings.input_authorizer,
-        executors=cast(Any, SimpleNamespace(registration_count=1)),
+    _install_open_dependencies(
+        monkeypatch,
+        events,
+        gate_start_error=RuntimeError("gate start failed"),
+        security_close_error=RuntimeError("security cleanup failed"),
     )
 
     with pytest.raises(RuntimeError, match="security cleanup failed"):
-        await GraphApplicationRuntime.open(_shadow_settings(), bindings)
+        await GraphApplicationRuntime.open(
+            _shadow_settings(),
+            _bindings(executor_registry_factory=lambda kernel: _registered_executors()),
+        )
 
     assert events == [
         "checkpoint_open",
