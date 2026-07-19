@@ -1,0 +1,65 @@
+{
+  "case": "cached immutable graph result reconciliation",
+  "schema": "graph-reconcile-response.schema.json",
+  "instance": {
+    "schema_version": "graph-reconcile-response.v1",
+    "disposition": "RETURN_CACHED",
+    "thread_id": "grt.v1.019bdf9f4a7279d3a23b7fd5c1e4a901",
+    "command_id": "graph-cmd-001",
+    "request_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "logical_run_id": "run-001",
+    "attempt_id": "attempt-001",
+    "graph_key": "intake.v2",
+    "graph_version": "1.0.0",
+    "checkpoint_schema_version": "checkpoint.v1",
+    "checkpoint_ns": "",
+    "checkpoint_id": "checkpoint-001",
+    "result_ref": "urn:after-sale-flow:graph-result:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "result_hash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "registry_binding_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "tool_policy_version": "intake-tools.v1",
+    "result": {
+      "schema_version": "room-graph-result.v1",
+      "command_id": "graph-cmd-001",
+      "logical_run_id": "run-001",
+      "attempt_id": "attempt-001",
+      "graph_key": "intake.v2",
+      "graph_version": "1.0.0",
+      "checkpoint_id": "checkpoint-001",
+      "cognitive_revision": 2,
+      "status": "COMPLETED",
+      "public_event_proposals": [
+        {
+          "event_type": "room.utterance",
+          "audience": "USER",
+          "payload_ref": "s3://graph-output/case-001/public-event-1.json",
+          "payload_hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        }
+      ],
+      "artifact_operations": [
+        {
+          "operation": "PROPOSE_PATCH",
+          "artifact": {
+            "artifact_id": "artifact.output.1",
+            "schema_version": "intake-dossier.v2",
+            "uri": "s3://graph-output/case-001/output-1.json",
+            "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          }
+        }
+      ],
+      "output_hash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "usage": {
+        "input_tokens": 1200,
+        "output_tokens": 240,
+        "total_tokens": 1440
+      },
+      "execution_metadata": {
+        "prompt_version": "intake.user.v1",
+        "model_profile_id": "qwen3.7-plus.structured.v1",
+        "schema_version": "intake-turn.v2",
+        "policy_version": "intake-policy.v1",
+        "guardrail_version": "intake-guardrail.v1"
+      }
+    }
+  }
+}

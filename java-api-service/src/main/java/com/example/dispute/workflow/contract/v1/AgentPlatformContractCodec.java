@@ -25,6 +25,7 @@ public final class AgentPlatformContractCodec {
                     "case-command-ref.schema.json", CaseCommandRef.class,
                     "room-graph-command.schema.json", RoomGraphCommand.class,
                     "room-graph-result.schema.json", RoomGraphResult.class,
+                    "graph-reconcile-response.schema.json", GraphReconcileResponse.class,
                     "artifact-ref.schema.json", ArtifactRef.class,
                     "process-projection.schema.json", ProcessProjection.class,
                     "agent-stream-event.schema.json", AgentStreamEvent.class,

@@ -45,6 +45,17 @@
       "removal_or_rename": "NEW_MAJOR_VERSION_AND_DUAL_READER"
     },
     {
+      "schema_file": "graph-reconcile-response.schema.json",
+      "schema_version": "graph-reconcile-response.v1",
+      "max_serialized_bytes": 131072,
+      "current_reader": "ACCEPT",
+      "previous_reader": "NONE_FOR_INITIAL_VERSION",
+      "future_reader": "REJECT",
+      "writer": "CURRENT_ONLY",
+      "additive_optional_fields": "REQUIRES_NEW_SCHEMA_VERSION",
+      "removal_or_rename": "NEW_MAJOR_VERSION_AND_DUAL_READER"
+    },
+    {
       "schema_file": "artifact-ref.schema.json",
       "schema_version": "artifact-ref.v1",
       "max_serialized_bytes": 8192,

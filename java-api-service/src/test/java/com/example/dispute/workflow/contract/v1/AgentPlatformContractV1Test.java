@@ -30,6 +30,7 @@ class AgentPlatformContractV1Test {
                     "case-command-ref.schema.json", CaseCommandRef.class,
                     "room-graph-command.schema.json", RoomGraphCommand.class,
                     "room-graph-result.schema.json", RoomGraphResult.class,
+                    "graph-reconcile-response.schema.json", GraphReconcileResponse.class,
                     "artifact-ref.schema.json", ArtifactRef.class,
                     "process-projection.schema.json", ProcessProjection.class,
                     "agent-stream-event.schema.json", AgentStreamEvent.class,
@@ -133,6 +134,26 @@ class AgentPlatformContractV1Test {
                                         RoomGraphResult.class))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("exceeds max_serialized_bytes");
+    }
+
+    @Test
+    void reconcileWrapperMustMatchItsNestedImmutableResult() throws IOException {
+        JsonNode fixture =
+                MAPPER.readTree(
+                        FIXTURE_ROOT
+                                .resolve("valid/graph-reconcile-response-valid.json")
+                                .toFile());
+        ObjectNode instance = (ObjectNode) fixture.required("instance").deepCopy();
+        ((ObjectNode) instance.required("result")).put("attempt_id", "attempt-forged");
+
+        assertThatThrownBy(
+                        () ->
+                                codec.decode(
+                                        fixture.required("schema").asText(),
+                                        instance,
+                                        GraphReconcileResponse.class))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("cannot be decoded");
     }
 
     @ParameterizedTest

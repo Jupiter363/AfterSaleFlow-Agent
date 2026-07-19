@@ -13,8 +13,7 @@ from app.contracts.v1.codec import (
     canonical_sha256_omitting,
     canonicalize,
 )
-from app.contracts.v1.models import RoomGraphCommand
-from app.contracts.v1.models import MODEL_BY_SCHEMA
+from app.contracts.v1.models import MODEL_BY_SCHEMA, GraphReconcileResponse, RoomGraphCommand
 
 ROOT = Path(__file__).resolve().parents[3]
 CONTRACT_ROOT = ROOT / "contracts/agent-platform/v1"
@@ -90,6 +89,23 @@ def test_schema_valid_shape_still_respects_total_payload_limit(codec: ContractCo
 
     with pytest.raises(ValueError, match="exceeds max_serialized_bytes"):
         codec.decode(fixture["schema"], instance)
+
+
+def test_reconcile_wrapper_must_match_its_nested_immutable_result(
+    codec: ContractCodec,
+) -> None:
+    fixture = json.loads(
+        (FIXTURE_ROOT / "valid/graph-reconcile-response-valid.json").read_text(encoding="utf-8")
+    )
+    instance = deepcopy(fixture["instance"])
+    instance["result"]["attempt_id"] = "attempt-forged"
+
+    with pytest.raises(ValueError, match="nested result"):
+        codec.decode(fixture["schema"], instance)
+
+    decoded = codec.decode(fixture["schema"], fixture["instance"])
+    assert isinstance(decoded, GraphReconcileResponse)
+    assert decoded.result.output_hash == decoded.result_hash
 
 
 @pytest.mark.parametrize("path", sorted((FIXTURE_ROOT / "canonical-hash").glob("*.json")))

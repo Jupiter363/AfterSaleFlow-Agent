@@ -19,6 +19,7 @@ EXPECTED_SCHEMAS = {
     "agent-stream-event.schema.json",
     "artifact-ref.schema.json",
     "case-command-ref.schema.json",
+    "graph-reconcile-response.schema.json",
     "process-projection.schema.json",
     "room-graph-command.schema.json",
     "room-graph-result.schema.json",
@@ -344,6 +345,19 @@ def test_compatibility_matrix_covers_every_contract() -> None:
             separators=(",", ":"),
         ).encode("utf-8")
         assert len(serialized) <= row["max_serialized_bytes"]
+
+
+def test_reconcile_response_embeds_the_exact_room_graph_result_contract() -> None:
+    result_schema = _load(CONTRACT_ROOT / "room-graph-result.schema.json")
+    reconcile_schema = _load(CONTRACT_ROOT / "graph-reconcile-response.schema.json")
+    expected_result = {
+        key: result_schema[key]
+        for key in ("type", "additionalProperties", "required", "properties", "oneOf")
+    }
+
+    assert reconcile_schema["$defs"]["room_graph_result"] == expected_result
+    for name, definition in result_schema["$defs"].items():
+        assert reconcile_schema["$defs"][name] == definition
 
 
 def test_restricted_rfc8785_canonical_hash_vectors_are_fixed() -> None:

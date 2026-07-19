@@ -32,6 +32,10 @@ GraphThreadId = Annotated[
     str,
     StringConstraints(pattern=r"^grt\.v1\.[0-9a-f]{32}$"),
 ]
+CheckpointNamespace = Annotated[
+    str,
+    StringConstraints(max_length=128, pattern=r"^[A-Za-z0-9._:-]{0,128}$"),
+]
 ActorRole = Literal["USER", "MERCHANT", "PLATFORM_REVIEWER", "ADMIN", "SYSTEM"]
 Audience = Literal["USER", "MERCHANT", "PLATFORM_REVIEWER", "SYSTEM"]
 RoomType = Literal["INTAKE", "EVIDENCE", "HEARING", "REVIEW"]
@@ -333,6 +337,50 @@ class RoomGraphResult(StrictContractModel):
         return self
 
 
+class GraphReconcileResponse(StrictContractModel):
+    schema_version: Literal["graph-reconcile-response.v1"]
+    disposition: Literal["RETURN_CACHED", "RECONCILED_TERMINAL"]
+    thread_id: GraphThreadId
+    command_id: Identifier
+    request_hash: Sha256
+    logical_run_id: Identifier
+    attempt_id: Identifier
+    graph_key: Identifier
+    graph_version: Identifier
+    checkpoint_schema_version: Identifier
+    checkpoint_ns: CheckpointNamespace
+    checkpoint_id: Identifier
+    result_ref: ObjectUri
+    result_hash: Sha256
+    registry_binding_hash: Sha256
+    tool_policy_version: Identifier
+    result: RoomGraphResult
+
+    @model_validator(mode="after")
+    def validate_result_binding(self) -> GraphReconcileResponse:
+        expected = (
+            self.command_id,
+            self.logical_run_id,
+            self.attempt_id,
+            self.graph_key,
+            self.graph_version,
+            self.checkpoint_id,
+            self.result_hash,
+        )
+        actual = (
+            self.result.command_id,
+            self.result.logical_run_id,
+            self.result.attempt_id,
+            self.result.graph_key,
+            self.result.graph_version,
+            self.result.checkpoint_id,
+            self.result.output_hash,
+        )
+        if actual != expected:
+            raise ValueError("reconciliation response conflicts with its nested result")
+        return self
+
+
 class WorkflowRef(StrictContractModel):
     workflow_id: Identifier
     run_id: Identifier
@@ -394,6 +442,7 @@ MODEL_BY_SCHEMA: dict[str, type[StrictContractModel]] = {
     "case-command-ref.schema.json": CaseCommandRef,
     "room-graph-command.schema.json": RoomGraphCommand,
     "room-graph-result.schema.json": RoomGraphResult,
+    "graph-reconcile-response.schema.json": GraphReconcileResponse,
     "artifact-ref.schema.json": ArtifactRef,
     "process-projection.schema.json": ProcessProjection,
     "agent-stream-event.schema.json": AgentStreamEvent,
