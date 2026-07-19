@@ -52,31 +52,24 @@ class VerificationKeyResolver(Protocol):
     def resolve(self, kid: str) -> ResolvedVerificationKey: ...
 
 
-class InvocationClaims(BaseModel):
+class _BoundInvocationClaims(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     iss: Literal["java-api-service"]
     aud: Literal["python-agent-service"]
-    sub: Literal["graph-command"]
     iat: int = Field(ge=0)
     nbf: int = Field(ge=0)
     exp: int = Field(ge=0)
     jti: str = Field(min_length=1, max_length=128, pattern=_IDENTIFIER_PATTERN.pattern)
     command_id: str = Field(min_length=1, max_length=128, pattern=_IDENTIFIER_PATTERN.pattern)
-    command_nonce: str = Field(
-        min_length=1, max_length=128, pattern=_IDENTIFIER_PATTERN.pattern
-    )
+    command_nonce: str = Field(min_length=1, max_length=128, pattern=_IDENTIFIER_PATTERN.pattern)
     request_hash: str = Field(pattern=_SHA256_PATTERN.pattern)
-    tenant_surrogate: str = Field(
-        min_length=1, max_length=128, pattern=_IDENTIFIER_PATTERN.pattern
-    )
+    tenant_surrogate: str = Field(min_length=1, max_length=128, pattern=_IDENTIFIER_PATTERN.pattern)
     case_id: str = Field(min_length=1, max_length=128, pattern=_IDENTIFIER_PATTERN.pattern)
     room_epoch: int = Field(ge=0)
     thread_id: str = Field(pattern=_THREAD_PATTERN.pattern)
     graph_key: str = Field(min_length=1, max_length=128, pattern=_IDENTIFIER_PATTERN.pattern)
-    graph_version: str = Field(
-        min_length=1, max_length=128, pattern=_IDENTIFIER_PATTERN.pattern
-    )
+    graph_version: str = Field(min_length=1, max_length=128, pattern=_IDENTIFIER_PATTERN.pattern)
     checkpoint_schema_version: str = Field(
         min_length=1, max_length=128, pattern=_IDENTIFIER_PATTERN.pattern
     )
@@ -85,9 +78,31 @@ class InvocationClaims(BaseModel):
     profile_bindings_hash: str = Field(pattern=_SHA256_PATTERN.pattern)
 
 
+class InvocationClaims(_BoundInvocationClaims):
+    sub: Literal["graph-command"]
+
+
+class ReconciliationClaims(_BoundInvocationClaims):
+    sub: Literal["graph-reconcile"]
+    capability: Literal["RECONCILE_ONLY"]
+    original_envelope_key_id: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=_IDENTIFIER_PATTERN.pattern,
+    )
+
+
 @dataclass(frozen=True)
 class VerifiedInvocation:
     claims: InvocationClaims
+    key_id: str
+    request_hash: str
+    transport_certificate_sha256: str
+
+
+@dataclass(frozen=True)
+class VerifiedReconciliation:
+    claims: ReconciliationClaims
     key_id: str
     request_hash: str
     transport_certificate_sha256: str
@@ -142,6 +157,13 @@ class InvocationEnvelopeVerifier:
 
     @staticmethod
     def _decode_header(token: str) -> Mapping[str, str]:
+        return InvocationEnvelopeVerifier._decode_header_for(
+            token,
+            expected_type="graph-command+jwt",
+        )
+
+    @staticmethod
+    def _decode_header_for(token: str, *, expected_type: str) -> Mapping[str, str]:
         if len(token.encode("utf-8")) > _MAX_JWS_BYTES or token.count(".") != 2:
             raise InvocationEnvelopeError("INVOCATION_JWS_MALFORMED")
         try:
@@ -150,7 +172,7 @@ class InvocationEnvelopeVerifier:
             raise InvocationEnvelopeError("INVOCATION_JWS_MALFORMED") from error
         if set(header) != _EXPECTED_HEADER_KEYS:
             raise InvocationEnvelopeError("INVOCATION_JWS_HEADER_REJECTED")
-        if header.get("alg") != "ES256" or header.get("typ") != "graph-command+jwt":
+        if header.get("alg") != "ES256" or header.get("typ") != expected_type:
             raise InvocationEnvelopeError("INVOCATION_JWS_HEADER_REJECTED")
         kid = header.get("kid")
         if not isinstance(kid, str) or not _IDENTIFIER_PATTERN.fullmatch(kid):
@@ -162,12 +184,7 @@ class InvocationEnvelopeVerifier:
             key = self._key_resolver.resolve(kid)
         except Exception as error:
             raise InvocationEnvelopeError("INVOCATION_JWS_KEY_UNAVAILABLE") from error
-        if (
-            key.kid != kid
-            or key.algorithm != "ES256"
-            or key.curve != "P-256"
-            or key.use != "sig"
-        ):
+        if key.kid != kid or key.algorithm != "ES256" or key.curve != "P-256" or key.use != "sig":
             raise InvocationEnvelopeError("INVOCATION_JWS_KEY_REJECTED")
         return key
 
@@ -191,7 +208,30 @@ class InvocationEnvelopeVerifier:
         except (jwt.PyJWTError, ValueError) as error:
             raise InvocationEnvelopeError("INVOCATION_JWS_CLAIMS_REJECTED") from error
 
-    def _verify_time_window(self, claims: InvocationClaims) -> None:
+    @staticmethod
+    def _decode_reconciliation_claims(
+        token: str,
+        key: ResolvedVerificationKey,
+    ) -> ReconciliationClaims:
+        try:
+            payload = jwt.decode(
+                token,
+                key.public_key,
+                algorithms=["ES256"],
+                audience="python-agent-service",
+                issuer="java-api-service",
+                options={
+                    "require": ["iss", "aud", "sub", "iat", "nbf", "exp", "jti"],
+                    "verify_exp": False,
+                    "verify_iat": False,
+                    "verify_nbf": False,
+                },
+            )
+            return ReconciliationClaims.model_validate(payload)
+        except (jwt.PyJWTError, ValueError) as error:
+            raise InvocationEnvelopeError("INVOCATION_JWS_CLAIMS_REJECTED") from error
+
+    def _verify_time_window(self, claims: _BoundInvocationClaims) -> None:
         now = self._now()
         if claims.exp <= claims.iat or claims.exp - claims.iat > _MAX_TOKEN_LIFETIME_SECONDS:
             raise InvocationEnvelopeError("INVOCATION_JWS_LIFETIME_REJECTED")
@@ -203,6 +243,39 @@ class InvocationEnvelopeVerifier:
             raise InvocationEnvelopeError("INVOCATION_JWS_NOT_YET_VALID")
         if claims.exp < now - _MAX_CLOCK_SKEW_SECONDS:
             raise InvocationEnvelopeError("INVOCATION_JWS_EXPIRED")
+
+
+class ReconciliationEnvelopeVerifier(InvocationEnvelopeVerifier):
+    """Verify a distinct no-model credential against an exact historical command body."""
+
+    def verify(
+        self,
+        *,
+        token: str,
+        command: RoomGraphCommand,
+        transport_identity: TransportIdentity,
+    ) -> VerifiedReconciliation:
+        self._verify_transport_identity(transport_identity)
+        header = self._decode_header_for(token, expected_type="graph-reconcile+jwt")
+        key = self._resolve_key(header["kid"])
+        claims = self._decode_reconciliation_claims(token, key)
+        self._verify_time_window(claims)
+        expected = {
+            **invocation_binding_claims(command),
+            "original_envelope_key_id": command.invocation_context.envelope_key_id,
+        }
+        if not hmac.compare_digest(command.request_hash, str(expected["request_hash"])):
+            raise InvocationEnvelopeError("INVOCATION_COMMAND_SELF_HASH_MISMATCH")
+        actual = claims.model_dump(mode="json")
+        for name, value in expected.items():
+            if not _constant_time_equal(actual[name], value):
+                raise InvocationEnvelopeError(f"INVOCATION_{name.upper()}_MISMATCH")
+        return VerifiedReconciliation(
+            claims=claims,
+            key_id=key.kid,
+            request_hash=expected["request_hash"],
+            transport_certificate_sha256=transport_identity.certificate_sha256,
+        )
 
 
 def extract_bearer_token(authorization: str | None) -> str:

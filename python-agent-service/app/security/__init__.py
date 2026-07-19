@@ -3,9 +3,12 @@
 from app.security.invocation_envelope import (
     InvocationEnvelopeError,
     InvocationEnvelopeVerifier,
+    ReconciliationClaims,
+    ReconciliationEnvelopeVerifier,
     ResolvedVerificationKey,
     TransportIdentity,
     VerifiedInvocation,
+    VerifiedReconciliation,
     extract_bearer_token,
     invocation_binding_claims,
 )
@@ -22,6 +25,8 @@ from app.security.jwks_loader import (
 __all__ = [
     "InvocationEnvelopeError",
     "InvocationEnvelopeVerifier",
+    "ReconciliationClaims",
+    "ReconciliationEnvelopeVerifier",
     "GraphSecurityReadiness",
     "GraphSecurityRuntime",
     "AsgiMtlsIdentityResolver",
@@ -35,6 +40,7 @@ __all__ = [
     "ResolvedVerificationKey",
     "TransportIdentity",
     "VerifiedInvocation",
+    "VerifiedReconciliation",
     "extract_bearer_token",
     "invocation_binding_claims",
 ]

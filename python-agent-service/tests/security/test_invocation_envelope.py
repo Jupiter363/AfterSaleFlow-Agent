@@ -11,6 +11,7 @@ from app.contracts.v1.models import RoomGraphCommand
 from app.security.invocation_envelope import (
     InvocationEnvelopeError,
     InvocationEnvelopeVerifier,
+    ReconciliationEnvelopeVerifier,
     ResolvedVerificationKey,
     TransportIdentity,
     extract_bearer_token,
@@ -20,8 +21,7 @@ from app.security.invocation_envelope import (
 
 ROOT = Path(__file__).resolve().parents[3]
 VECTOR = (
-    ROOT
-    / "contracts/agent-platform/v1/fixtures/canonical-hash/room-graph-command-self-hash.json"
+    ROOT / "contracts/agent-platform/v1/fixtures/canonical-hash/room-graph-command-self-hash.json"
 )
 NOW = 2_000_000_000
 KID = "java-invocation-es256-1"
@@ -99,12 +99,51 @@ def signed_token(
     return jwt.encode(claims, private_key, algorithm="ES256", headers=headers)
 
 
+def signed_reconciliation_token(
+    private_key: ec.EllipticCurvePrivateKey,
+    command: RoomGraphCommand,
+    *,
+    kid: str = KID,
+    claim_overrides: dict[str, object] | None = None,
+) -> str:
+    claims: dict[str, object] = {
+        "iss": "java-api-service",
+        "aud": "python-agent-service",
+        "sub": "graph-reconcile",
+        "capability": "RECONCILE_ONLY",
+        "original_envelope_key_id": command.invocation_context.envelope_key_id,
+        "iat": NOW,
+        "nbf": NOW,
+        "exp": NOW + 60,
+        "jti": "reconcile-transport-nonce-001",
+        **invocation_binding_claims(command),
+        **(claim_overrides or {}),
+    }
+    return jwt.encode(
+        claims,
+        private_key,
+        algorithm="ES256",
+        headers={"alg": "ES256", "kid": kid, "typ": "graph-reconcile+jwt"},
+    )
+
+
 def verifier(
     private_key: ec.EllipticCurvePrivateKey,
     *,
     resolver: StaticKeyResolver | None = None,
 ) -> InvocationEnvelopeVerifier:
     return InvocationEnvelopeVerifier(
+        key_resolver=resolver or StaticKeyResolver(private_key.public_key()),
+        now=lambda: NOW,
+    )
+
+
+def reconciliation_verifier(
+    private_key: ec.EllipticCurvePrivateKey,
+    *,
+    resolver: StaticKeyResolver | None = None,
+) -> ReconciliationEnvelopeVerifier:
+    return ReconciliationEnvelopeVerifier(
         key_resolver=resolver or StaticKeyResolver(private_key.public_key()),
         now=lambda: NOW,
     )
@@ -129,6 +168,85 @@ def test_valid_es256_envelope_binds_body_and_transport_without_reusing_command_n
     assert verified.claims.jti == "transport-nonce-001"
     assert verified.claims.jti != verified.claims.command_nonce
     assert verified.transport_certificate_sha256 == CERTIFICATE_SHA256
+
+
+def test_reconciliation_uses_a_current_key_and_preserves_original_key_lineage(
+    private_key: ec.EllipticCurvePrivateKey,
+    command: RoomGraphCommand,
+    transport_identity: TransportIdentity,
+) -> None:
+    current_kid = "java-invocation-es256-2"
+    resolver = StaticKeyResolver(private_key.public_key(), kid=current_kid)
+    token = signed_reconciliation_token(
+        private_key,
+        command,
+        kid=current_kid,
+    )
+
+    verified = reconciliation_verifier(private_key, resolver=resolver).verify(
+        token=token,
+        command=command,
+        transport_identity=transport_identity,
+    )
+
+    assert verified.key_id == current_kid
+    assert verified.key_id != command.invocation_context.envelope_key_id
+    assert verified.claims.original_envelope_key_id == command.invocation_context.envelope_key_id
+    assert verified.claims.capability == "RECONCILE_ONLY"
+    assert verified.request_hash == command.request_hash
+
+
+def test_execution_and_reconciliation_credentials_are_not_interchangeable(
+    private_key: ec.EllipticCurvePrivateKey,
+    command: RoomGraphCommand,
+    transport_identity: TransportIdentity,
+) -> None:
+    with pytest.raises(InvocationEnvelopeError) as execution_error:
+        verifier(private_key).verify(
+            token=signed_reconciliation_token(private_key, command),
+            command=command,
+            transport_identity=transport_identity,
+        )
+    assert execution_error.value.code == "INVOCATION_JWS_HEADER_REJECTED"
+
+    with pytest.raises(InvocationEnvelopeError) as reconciliation_error:
+        reconciliation_verifier(private_key).verify(
+            token=signed_token(private_key, command),
+            command=command,
+            transport_identity=transport_identity,
+        )
+    assert reconciliation_error.value.code == "INVOCATION_JWS_HEADER_REJECTED"
+
+
+@pytest.mark.parametrize(
+    ("claim_overrides", "code"),
+    [
+        ({"capability": "EXECUTE"}, "INVOCATION_JWS_CLAIMS_REJECTED"),
+        (
+            {"original_envelope_key_id": "java-invocation-es256-forged"},
+            "INVOCATION_ORIGINAL_ENVELOPE_KEY_ID_MISMATCH",
+        ),
+        ({"sub": "graph-command"}, "INVOCATION_JWS_CLAIMS_REJECTED"),
+    ],
+)
+def test_reconciliation_purpose_capability_and_lineage_fail_closed(
+    private_key: ec.EllipticCurvePrivateKey,
+    command: RoomGraphCommand,
+    transport_identity: TransportIdentity,
+    claim_overrides: dict[str, object],
+    code: str,
+) -> None:
+    with pytest.raises(InvocationEnvelopeError) as captured:
+        reconciliation_verifier(private_key).verify(
+            token=signed_reconciliation_token(
+                private_key,
+                command,
+                claim_overrides=claim_overrides,
+            ),
+            command=command,
+            transport_identity=transport_identity,
+        )
+    assert captured.value.code == code
 
 
 @pytest.mark.parametrize(
