@@ -8,6 +8,7 @@ import com.example.dispute.agentstream.application.AgentRunReconciledFinalStore;
 import com.example.dispute.agentstream.application.AgentRunV2StreamStore;
 import com.example.dispute.agentstream.application.AgentRunV2StreamStore.AppendReceipt;
 import com.example.dispute.agentstream.application.AgentRunV2StreamStore.BatchAppendReceipt;
+import com.example.dispute.agentstream.application.AgentRunV2StreamStore.NonRunningAttemptException;
 import com.example.dispute.workflow.activity.agent.AgentGraphCommandClient;
 import com.example.dispute.workflow.activity.agent.AgentGraphReconciliationClient;
 import com.example.dispute.workflow.activity.agent.AgentRunCancellationToken;
@@ -17,6 +18,7 @@ import com.example.dispute.workflow.activity.agent.AgentRunProgress;
 import com.example.dispute.workflow.activity.agent.DurableAgentRunExecutionGateway;
 import com.example.dispute.workflow.activity.agent.GraphReconciliationException;
 import com.example.dispute.workflow.contract.v1.AgentStreamEvent;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunRecoveryAction;
 import com.example.dispute.workflow.contract.v1.ContractTypes.StreamEventType;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
@@ -85,11 +87,9 @@ class DurableAgentRunExecutionGatewayTest {
                 new AgentRunCancellationToken());
 
         assertThat(observedMode.get()).isEqualTo(ExecutionMode.EXECUTE_OR_RECONCILE);
-        assertThat(batches).containsExactly(List.of(0L), List.of(1L, 2L), List.of(3L));
+        assertThat(batches).containsExactly(List.of(1L, 2L), List.of(3L));
         assertThat(order)
                 .containsExactly(
-                        "persist-[0]",
-                        "progress-0",
                         "persist-[1, 2]",
                         "progress-2",
                         "persist-[3]",
@@ -123,8 +123,84 @@ class DurableAgentRunExecutionGatewayTest {
                         ignored -> {},
                         new AgentRunCancellationToken());
 
-        assertThat(batches).containsExactly(List.of(0L), List.of(1L, 2L));
+        assertThat(batches).containsExactly(List.of(1L, 2L));
         assertThat(completion.lastSequenceNo()).isEqualTo(2);
+    }
+
+    @Test
+    void consumesPythonHandshakeAndMapsOnlyCanonicalEventsAfterAJavaResetPrelude()
+            throws Exception {
+        ExecuteAgentRunRequest request = requestWithReset();
+        RoomGraphResult result = graphResult();
+        AgentStreamEvent handshake = event(request, 0, StreamEventType.ATTEMPT_STARTED, null);
+        AgentStreamEvent delta = event(request, 1, StreamEventType.VISIBLE_DELTA, null);
+        AgentStreamEvent finalCandidate =
+                event(request, 2, StreamEventType.FINAL, result.outputHash());
+        List<AgentStreamEvent> persisted = new ArrayList<>();
+        AgentGraphCommandClient client = (actualRequest, mode, eventSink, cancellationToken) -> {
+            eventSink.accept(handshake);
+            eventSink.accept(delta);
+            eventSink.accept(finalCandidate);
+            return result;
+        };
+        AgentRunV2StreamStore store = batchStore(events -> {
+            persisted.addAll(events);
+            return receipt(events, true, events.getLast().sequenceNo());
+        });
+        List<Long> progress = new ArrayList<>();
+
+        var completion = new DurableAgentRunExecutionGateway(client, store)
+                .execute(
+                        request,
+                        ExecutionMode.EXECUTE_OR_RECONCILE,
+                        frame -> progress.add(frame.lastSequenceNo()),
+                        new AgentRunCancellationToken());
+
+        assertThat(sequences(persisted)).containsExactly(2L, 3L);
+        assertThat(persisted)
+                .extracting(AgentStreamEvent::eventType)
+                .containsExactly(StreamEventType.VISIBLE_DELTA, StreamEventType.FINAL);
+        assertThat(persisted.getFirst().occurredAt()).isEqualTo(delta.occurredAt());
+        assertThat(persisted.getFirst().payload()).isSameAs(delta.payload());
+        assertThat(persisted.getLast().occurredAt()).isEqualTo(finalCandidate.occurredAt());
+        assertThat(persisted.getLast().payload()).isSameAs(finalCandidate.payload());
+        assertThat(handshake.sequenceNo()).isZero();
+        assertThat(delta.sequenceNo()).isEqualTo(1);
+        assertThat(finalCandidate.sequenceNo()).isEqualTo(2);
+        assertThat(progress).containsExactly(3L);
+        assertThat(completion.lastSequenceNo()).isEqualTo(3);
+        assertThat(completion.publicOutputEmitted()).isTrue();
+    }
+
+    @Test
+    void rejectsPythonAttemptResetWithoutPersistingIt() throws Exception {
+        ExecuteAgentRunRequest request = requestWithReset();
+        AtomicInteger storeCalls = new AtomicInteger();
+        AgentGraphCommandClient client = (actualRequest, mode, eventSink, cancellationToken) -> {
+            eventSink.accept(event(request, 0, StreamEventType.ATTEMPT_STARTED, null));
+            eventSink.accept(event(request, 1, StreamEventType.ATTEMPT_RESET, null));
+            throw new AssertionError("attempt_reset must fail in the governed gateway");
+        };
+        AgentRunV2StreamStore store = batchStore(events -> {
+            storeCalls.incrementAndGet();
+            throw new AssertionError("the Python reset must never reach durable storage");
+        });
+
+        AgentRunExecutionException failure = catchThrowableOfType(
+                AgentRunExecutionException.class,
+                () -> new DurableAgentRunExecutionGateway(client, store)
+                        .execute(
+                                request,
+                                ExecutionMode.EXECUTE_OR_RECONCILE,
+                                ignored -> {},
+                                new AgentRunCancellationToken()));
+
+        assertThat(failure.errorCode())
+                .isEqualTo("AGENT_RUN_STREAM_RESET_AUTHORITY_VIOLATION");
+        assertThat(failure.retryable()).isFalse();
+        assertThat(failure.commandReplaySafe()).isFalse();
+        assertThat(failure.lastSequenceNo()).isEqualTo(1);
+        assertThat(storeCalls).hasValue(0);
     }
 
     @Test
@@ -152,7 +228,7 @@ class DurableAgentRunExecutionGatewayTest {
                 .isInstanceOf(AgentRunExecutionException.class)
                 .extracting(failure -> ((AgentRunExecutionException) failure).errorCode())
                 .isEqualTo("AGENT_RUN_STREAM_V2_INVALID");
-        assertThat(persisted).containsExactly(0L);
+        assertThat(persisted).isEmpty();
     }
 
     @Test
@@ -170,7 +246,7 @@ class DurableAgentRunExecutionGatewayTest {
                         new AgentRunCancellationToken()))
                 .isInstanceOf(AgentRunExecutionException.class)
                 .hasMessageContaining("does not match the final stream");
-        assertThat(persisted).containsExactly(0L);
+        assertThat(persisted).isEmpty();
     }
 
     @Test
@@ -196,7 +272,7 @@ class DurableAgentRunExecutionGatewayTest {
                         new AgentRunCancellationToken()))
                 .isInstanceOf(AgentRunExecutionException.class)
                 .hasMessageContaining("does not match the final stream");
-        assertThat(persisted).containsExactly(0L);
+        assertThat(persisted).isEmpty();
     }
 
     @Test
@@ -220,18 +296,47 @@ class DurableAgentRunExecutionGatewayTest {
                                 new AgentRunCancellationToken()));
 
         assertThat(failure.errorCode()).isEqualTo("AGENT_RUN_STREAM_V2_INVALID");
-        assertThat(persisted).containsExactly(0L, 1L);
+        assertThat(persisted).containsExactly(1L);
+    }
+
+    @Test
+    void rejectsACandidateSequenceGapBeforeDurableStorage() throws Exception {
+        ExecuteAgentRunRequest request = request();
+        AtomicInteger storeCalls = new AtomicInteger();
+        AgentGraphCommandClient client = (actualRequest, mode, eventSink, cancellationToken) -> {
+            eventSink.accept(event(request, 0, StreamEventType.ATTEMPT_STARTED, null));
+            eventSink.accept(event(request, 2, StreamEventType.VISIBLE_DELTA, null));
+            throw new AssertionError("the sequence gap must fail in the governed gateway");
+        };
+        AgentRunV2StreamStore store = batchStore(events -> {
+            storeCalls.incrementAndGet();
+            throw new AssertionError("an invalid candidate must not reach durable storage");
+        });
+
+        AgentRunExecutionException failure = catchThrowableOfType(
+                AgentRunExecutionException.class,
+                () -> new DurableAgentRunExecutionGateway(client, store)
+                        .execute(
+                                request,
+                                ExecutionMode.EXECUTE_OR_RECONCILE,
+                                ignored -> {},
+                                new AgentRunCancellationToken()));
+
+        assertThat(failure.errorCode()).isEqualTo("AGENT_RUN_STREAM_V2_INVALID");
+        assertThat(failure.retryable()).isFalse();
+        assertThat(failure.lastSequenceNo()).isZero();
+        assertThat(storeCalls).hasValue(0);
     }
 
     @Test
     void suppressesProgressForExactDuplicateBatchReplay() throws Exception {
-        ExecuteAgentRunRequest request = request();
+        ExecuteAgentRunRequest request = requestWithReset();
         RoomGraphResult result = graphResult();
         var gateway = gatewayReturning(
                 request,
                 result,
                 result.outputHash(),
-                batchStore(events -> receipt(events, false, 1)));
+                batchStore(events -> receipt(events, false, 2)));
         List<Long> progress = new ArrayList<>();
 
         var completion = gateway.execute(
@@ -241,8 +346,71 @@ class DurableAgentRunExecutionGatewayTest {
                 new AgentRunCancellationToken());
 
         assertThat(progress).isEmpty();
-        assertThat(completion.lastSequenceNo()).isEqualTo(1);
+        assertThat(completion.lastSequenceNo()).isEqualTo(2);
         assertThat(completion.graphResult()).isEqualTo(result);
+    }
+
+    @Test
+    void rejectsALatePythonFinalFromEverySupersededAttemptStatus() throws Exception {
+        ExecuteAgentRunRequest request = request();
+        RoomGraphResult result = graphResult();
+
+        for (AgentRunAttemptStatus status : List.of(
+                AgentRunAttemptStatus.FAILED,
+                AgentRunAttemptStatus.ABORTED,
+                AgentRunAttemptStatus.CANCELLED)) {
+            NonRunningAttemptException nonRunning = new NonRunningAttemptException(status);
+            AgentRunExecutionException failure = catchThrowableOfType(
+                    AgentRunExecutionException.class,
+                    () -> gatewayReturning(
+                                    request,
+                                    result,
+                                    result.outputHash(),
+                                    batchStore(events -> {
+                                        assertThat(events.getLast().eventType())
+                                                .isEqualTo(StreamEventType.FINAL);
+                                        throw nonRunning;
+                                    }))
+                            .execute(
+                                    request,
+                                    ExecutionMode.EXECUTE_OR_RECONCILE,
+                                    ignored -> {},
+                                    new AgentRunCancellationToken()));
+
+            assertThat(failure.errorCode()).isEqualTo("AGENT_RUN_STALE_ATTEMPT_FINAL");
+            assertThat(failure.retryable()).isFalse();
+            assertThat(failure.commandReplaySafe()).isFalse();
+            assertThat(failure.recoveryAction()).isEqualTo(AgentRunRecoveryAction.FAIL_LOGICAL_RUN);
+            assertThat(failure.lastSequenceNo()).isZero();
+            assertThat(failure.publicOutputEmitted()).isFalse();
+            assertThat(failure.getCause()).isSameAs(nonRunning);
+        }
+    }
+
+    @Test
+    void doesNotMisclassifyANonSupersededAppendFailureAsAStaleFinal() throws Exception {
+        ExecuteAgentRunRequest request = request();
+        RoomGraphResult result = graphResult();
+
+        AgentRunExecutionException failure = catchThrowableOfType(
+                AgentRunExecutionException.class,
+                () -> gatewayReturning(
+                                request,
+                                result,
+                                result.outputHash(),
+                                batchStore(events -> {
+                                    throw new NonRunningAttemptException(
+                                            AgentRunAttemptStatus.PENDING);
+                                }))
+                        .execute(
+                                request,
+                                ExecutionMode.EXECUTE_OR_RECONCILE,
+                                ignored -> {},
+                                new AgentRunCancellationToken()));
+
+        assertThat(failure.errorCode()).isEqualTo("AGENT_RUN_DURABLE_APPEND_FAILED");
+        assertThat(failure.recoveryAction())
+                .isEqualTo(AgentRunRecoveryAction.RECONCILE_TERMINAL);
     }
 
     @Test
@@ -269,7 +437,7 @@ class DurableAgentRunExecutionGatewayTest {
         assertThat(failure.commandReplaySafe()).isTrue();
         assertThat(failure.recoveryAction().name()).isEqualTo("RECONCILE_TERMINAL");
         assertThat(failure.lastSequenceNo()).isZero();
-        assertThat(persisted).containsExactly(0L);
+        assertThat(persisted).isEmpty();
     }
 
     @Test
@@ -296,7 +464,7 @@ class DurableAgentRunExecutionGatewayTest {
         assertThat(failure.errorCode()).isEqualTo("AGENT_RUN_DURABLE_APPEND_LAGGED");
         assertThat(failure.lastSequenceNo()).isZero();
         assertThat(failure.publicOutputEmitted()).isFalse();
-        assertThat(progress).containsExactly(0L);
+        assertThat(progress).isEmpty();
     }
 
     @Test
@@ -311,7 +479,7 @@ class DurableAgentRunExecutionGatewayTest {
             return result;
         };
         AgentRunV2StreamStore store = batchStore(events -> {
-            if (invocation.incrementAndGet() == 2) {
+            if (invocation.incrementAndGet() == 1) {
                 throw new IllegalStateException("postgres unavailable");
             }
             return receipt(events, true, events.getLast().sequenceNo());
@@ -332,7 +500,7 @@ class DurableAgentRunExecutionGatewayTest {
         assertThat(failure.recoveryAction().name()).isEqualTo("RECONCILE_TERMINAL");
         assertThat(failure.lastSequenceNo()).isZero();
         assertThat(failure.publicOutputEmitted()).isFalse();
-        assertThat(progress).containsExactly(0L);
+        assertThat(progress).isEmpty();
     }
 
     @Test
@@ -358,8 +526,8 @@ class DurableAgentRunExecutionGatewayTest {
                                 new AgentRunCancellationToken()))
                 .isInstanceOf(ActivityCanceledException.class);
 
-        assertThat(batches).containsExactly(List.of(0L), List.of(1L));
-        assertThat(progress).containsExactly(0L, 1L);
+        assertThat(batches).containsExactly(List.of(1L));
+        assertThat(progress).containsExactly(1L);
     }
 
     @Test
@@ -599,6 +767,44 @@ class DurableAgentRunExecutionGatewayTest {
         assertThat(transientFailure.commandReplaySafe()).isTrue();
         assertThat(transientFailure.recoveryAction().name())
                 .isEqualTo("RECONCILE_TERMINAL");
+    }
+
+    @Test
+    void rejectsAReconciledFinalFromEverySupersededAttemptStatus() throws Exception {
+        ExecuteAgentRunRequest request = requestWithReset();
+        GraphReconcileResponse reconciliation = reconciliation(request);
+        AgentGraphCommandClient forbidden = (actualRequest, mode, sink, token) -> {
+            throw new AssertionError("stream client must not be called");
+        };
+
+        for (AgentRunAttemptStatus status : List.of(
+                AgentRunAttemptStatus.FAILED,
+                AgentRunAttemptStatus.ABORTED,
+                AgentRunAttemptStatus.CANCELLED)) {
+            NonRunningAttemptException nonRunning = new NonRunningAttemptException(status);
+            AgentRunExecutionException failure = catchThrowableOfType(
+                    AgentRunExecutionException.class,
+                    () -> new DurableAgentRunExecutionGateway(
+                                    forbidden,
+                                    (actualRequest, token) -> reconciliation,
+                                    recordingStore(new ArrayList<>()),
+                                    candidate -> {
+                                        throw nonRunning;
+                                    })
+                            .execute(
+                                    request,
+                                    ExecutionMode.RECONCILE_ONLY,
+                                    ignored -> {},
+                                    new AgentRunCancellationToken()));
+
+            assertThat(failure.errorCode()).isEqualTo("AGENT_RUN_STALE_ATTEMPT_FINAL");
+            assertThat(failure.retryable()).isFalse();
+            assertThat(failure.commandReplaySafe()).isFalse();
+            assertThat(failure.recoveryAction()).isEqualTo(AgentRunRecoveryAction.FAIL_LOGICAL_RUN);
+            assertThat(failure.lastSequenceNo()).isEqualTo(1);
+            assertThat(failure.publicOutputEmitted()).isFalse();
+            assertThat(failure.getCause()).isSameAs(nonRunning);
+        }
     }
 
     @Test
@@ -901,6 +1107,20 @@ class DurableAgentRunExecutionGatewayTest {
                 null,
                 false,
                 0,
+                command);
+    }
+
+    private static ExecuteAgentRunRequest requestWithReset() throws Exception {
+        RoomGraphCommand command = fixture("room-graph-command-valid.json", RoomGraphCommand.class);
+        return new ExecuteAgentRunRequest(
+                ExecuteAgentRunRequest.SCHEMA_VERSION,
+                command.logicalRunId(),
+                2,
+                "agent-stream.v2",
+                "b".repeat(64),
+                "ATTEMPT_PREVIOUS_1",
+                true,
+                1,
                 command);
     }
 

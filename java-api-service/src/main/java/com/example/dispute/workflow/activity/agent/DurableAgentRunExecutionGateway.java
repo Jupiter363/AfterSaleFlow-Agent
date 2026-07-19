@@ -2,8 +2,10 @@ package com.example.dispute.workflow.activity.agent;
 
 import com.example.dispute.agentstream.application.AgentRunV2StreamStore;
 import com.example.dispute.agentstream.application.AgentRunV2StreamStore.BatchAppendReceipt;
+import com.example.dispute.agentstream.application.AgentRunV2StreamStore.NonRunningAttemptException;
 import com.example.dispute.agentstream.application.AgentRunReconciledFinalStore;
 import com.example.dispute.workflow.contract.v1.AgentStreamEvent;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
 import com.example.dispute.workflow.contract.v1.ContractTypes.StreamEventType;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.GraphReconcileResponse;
@@ -66,12 +68,16 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
                     executionMode,
                     event -> {
                         cancellationToken.throwIfCancellationRequested();
-                        state.validateCandidate(event);
-                        if (event.eventType() == StreamEventType.FINAL) {
-                            state.stageFinal(event);
+                        ProjectedCandidate candidate = state.projectCandidate(event);
+                        if (candidate == null) {
                             return;
                         }
-                        if (batch.shouldFlushBefore(event)) {
+                        AgentStreamEvent publicEvent = candidate.publicEvent();
+                        if (publicEvent.eventType() == StreamEventType.FINAL) {
+                            state.stageFinal(candidate);
+                            return;
+                        }
+                        if (batch.shouldFlushBefore(publicEvent)) {
                             flushBatch(
                                     batch,
                                     state,
@@ -79,11 +85,9 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
                                     progressListener,
                                     cancellationToken);
                         }
-                        state.accept(event);
-                        batch.add(event);
-                        if (event.eventType() == StreamEventType.ATTEMPT_STARTED
-                                || terminal(event.eventType())
-                                || batch.shouldFlush()) {
+                        state.accept(candidate);
+                        batch.add(publicEvent);
+                        if (terminal(publicEvent.eventType()) || batch.shouldFlush()) {
                             flushBatch(
                                     batch,
                                     state,
@@ -171,6 +175,17 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
                             request.command().actorScope().audience(),
                             response.resultRef(),
                             response.resultHash()));
+        } catch (NonRunningAttemptException failure) {
+            cancellationToken.throwIfCancellationRequested();
+            if (staleAttemptStatus(failure.attemptStatus())) {
+                throw staleAttemptFinal(request.publicSequenceOffset(), false, failure);
+            }
+            throw AgentRunExecutionException.reconcileTerminal(
+                    "AGENT_RUN_RECONCILED_FINAL_APPEND_FAILED",
+                    "durable reconciled final append failed",
+                    0,
+                    false,
+                    failure);
         } catch (AgentRunReconciledFinalStore.ConflictException failure) {
             cancellationToken.throwIfCancellationRequested();
             throw AgentRunExecutionException.failLogicalRun(
@@ -312,6 +327,18 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
                 throw new IllegalStateException(
                         "durable batch receipt does not describe every event");
             }
+        } catch (NonRunningAttemptException failure) {
+            if (events.getLast().eventType() == StreamEventType.FINAL
+                    && staleAttemptStatus(failure.attemptStatus())) {
+                throw staleAttemptFinal(
+                        state.durableSequence(), state.publicOutputEmitted, failure);
+            }
+            throw durableAppendFailure(
+                    reconcileTerminal,
+                    "AGENT_RUN_DURABLE_APPEND_FAILED",
+                    "durable stream batch append failed",
+                    state,
+                    failure);
         } catch (RuntimeException failure) {
             throw durableAppendFailure(
                     reconcileTerminal,
@@ -375,6 +402,22 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
                 cause);
     }
 
+    private static boolean staleAttemptStatus(AgentRunAttemptStatus status) {
+        return status == AgentRunAttemptStatus.FAILED
+                || status == AgentRunAttemptStatus.ABORTED
+                || status == AgentRunAttemptStatus.CANCELLED;
+    }
+
+    private static AgentRunExecutionException staleAttemptFinal(
+            long lastSequenceNo, boolean publicOutputEmitted, Throwable cause) {
+        return AgentRunExecutionException.failLogicalRun(
+                "AGENT_RUN_STALE_ATTEMPT_FINAL",
+                "a superseded attempt cannot publish a final event",
+                lastSequenceNo,
+                publicOutputEmitted,
+                cause);
+    }
+
     private static boolean terminal(StreamEventType eventType) {
         return eventType == StreamEventType.ERROR
                 || eventType == StreamEventType.ATTEMPT_ABORTED;
@@ -418,11 +461,13 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
         }
     }
 
+    private record ProjectedCandidate(long candidateSequence, AgentStreamEvent publicEvent) {}
+
     private static final class ProgressState {
         private final ExecuteAgentRunRequest request;
-        private long lastSequence = -1;
-        private long acceptedSequence = -1;
-        private boolean acceptedStarted;
+        private long lastSequence;
+        private long acceptedCandidateSequence = -1;
+        private boolean handshakeAccepted;
         private boolean acceptedTerminal;
         private boolean finalObserved;
         private boolean publicOutputEmitted;
@@ -430,40 +475,76 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
 
         private ProgressState(ExecuteAgentRunRequest request) {
             this.request = request;
+            this.lastSequence = request.publicSequenceOffset();
         }
 
-        private void validateCandidate(AgentStreamEvent event) {
+        private ProjectedCandidate projectCandidate(AgentStreamEvent event) {
             if (event == null
                     || !request.agentRunId().equals(event.runId())
                     || !request.attemptId().equals(event.attemptId())
                     || request.command().actorScope().audience() != event.audience()) {
                 throw protocolFailure("stream event identity or audience does not match");
             }
+            if (event.eventType() == StreamEventType.ATTEMPT_RESET) {
+                throw AgentRunExecutionException.failLogicalRun(
+                        "AGENT_RUN_STREAM_RESET_AUTHORITY_VIOLATION",
+                        "Python cannot publish an attempt_reset event",
+                        durableSequence(),
+                        publicOutputEmitted,
+                        null);
+            }
+            long expectedCandidateSequence;
+            try {
+                expectedCandidateSequence = Math.addExact(acceptedCandidateSequence, 1);
+            } catch (ArithmeticException failure) {
+                throw protocolFailure("stream event sequence exceeds the candidate sequence range");
+            }
             if (acceptedTerminal
                     || pendingFinal != null
-                    || event.sequenceNo() <= acceptedSequence) {
+                    || event.sequenceNo() != expectedCandidateSequence) {
                 throw protocolFailure("stream event sequence or terminal state is invalid");
             }
-            if (!acceptedStarted) {
+            if (!handshakeAccepted) {
                 if (event.sequenceNo() != 0
                         || event.eventType() != StreamEventType.ATTEMPT_STARTED) {
                     throw protocolFailure("stream must begin with attempt_started sequence zero");
                 }
-            } else if (event.eventType() == StreamEventType.ATTEMPT_STARTED) {
+                handshakeAccepted = true;
+                acceptedCandidateSequence = 0;
+                return null;
+            }
+            if (event.eventType() == StreamEventType.ATTEMPT_STARTED) {
                 throw protocolFailure("stream cannot contain another attempt_started event");
             }
+            long publicSequence;
+            try {
+                publicSequence = Math.addExact(
+                        event.sequenceNo(), (long) request.publicSequenceOffset());
+            } catch (ArithmeticException failure) {
+                throw protocolFailure("stream event sequence exceeds the public sequence range");
+            }
+            return new ProjectedCandidate(
+                    event.sequenceNo(),
+                    new AgentStreamEvent(
+                            event.schemaVersion(),
+                            event.runId(),
+                            event.attemptId(),
+                            publicSequence,
+                            event.eventType(),
+                            event.audience(),
+                            event.occurredAt(),
+                            event.payload()));
         }
 
-        private void accept(AgentStreamEvent event) {
-            acceptedStarted = true;
-            acceptedSequence = event.sequenceNo();
-            acceptedTerminal = event.eventType() == StreamEventType.FINAL
-                    || terminal(event.eventType());
+        private void accept(ProjectedCandidate candidate) {
+            acceptedCandidateSequence = candidate.candidateSequence();
+            acceptedTerminal = candidate.publicEvent().eventType() == StreamEventType.FINAL
+                    || terminal(candidate.publicEvent().eventType());
         }
 
-        private void stageFinal(AgentStreamEvent event) {
-            accept(event);
-            pendingFinal = event;
+        private void stageFinal(ProjectedCandidate candidate) {
+            accept(candidate);
+            pendingFinal = candidate.publicEvent();
         }
 
         private void commit(AgentStreamEvent event) {
@@ -481,7 +562,7 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
 
         private AgentStreamEvent validatedFinal(RoomGraphResult result) {
             if (result == null
-                    || !acceptedStarted
+                    || !handshakeAccepted
                     || pendingFinal == null
                     || !request.command().commandId().equals(result.commandId())
                     || !request.logicalRunId().equals(result.logicalRunId())
