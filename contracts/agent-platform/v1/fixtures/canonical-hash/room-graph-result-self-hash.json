@@ -1,0 +1,49 @@
+{
+  "contract": "room-graph-result.v1",
+  "hash_field": "output_hash",
+  "preimage_rule": "omit top-level output_hash",
+  "input": {
+    "schema_version": "room-graph-result.v1",
+    "command_id": "graph-cmd-001",
+    "logical_run_id": "run-001",
+    "attempt_id": "attempt-001",
+    "graph_key": "intake.v2",
+    "graph_version": "1.0.0",
+    "checkpoint_id": "checkpoint-001",
+    "cognitive_revision": 2,
+    "status": "COMPLETED",
+    "public_event_proposals": [
+      {
+        "event_type": "room.utterance",
+        "audience": "USER",
+        "payload_ref": "s3://graph-output/case-001/public-event-1.json",
+        "payload_hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      }
+    ],
+    "artifact_operations": [
+      {
+        "operation": "PROPOSE_PATCH",
+        "artifact": {
+          "artifact_id": "artifact.output.1",
+          "schema_version": "intake-dossier.v2",
+          "uri": "s3://graph-output/case-001/output-1.json",
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      }
+    ],
+    "usage": {
+      "input_tokens": 1200,
+      "output_tokens": 240,
+      "total_tokens": 1440
+    },
+    "execution_metadata": {
+      "prompt_version": "intake.user.v1",
+      "model_profile_id": "qwen3.7-plus.structured.v1",
+      "schema_version": "intake-turn.v2",
+      "policy_version": "intake-policy.v1",
+      "guardrail_version": "intake-guardrail.v1"
+    }
+  },
+  "canonical_utf8": "{\"artifact_operations\":[{\"artifact\":{\"artifact_id\":\"artifact.output.1\",\"schema_version\":\"intake-dossier.v2\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"uri\":\"s3://graph-output/case-001/output-1.json\"},\"operation\":\"PROPOSE_PATCH\"}],\"attempt_id\":\"attempt-001\",\"checkpoint_id\":\"checkpoint-001\",\"cognitive_revision\":2,\"command_id\":\"graph-cmd-001\",\"execution_metadata\":{\"guardrail_version\":\"intake-guardrail.v1\",\"model_profile_id\":\"qwen3.7-plus.structured.v1\",\"policy_version\":\"intake-policy.v1\",\"prompt_version\":\"intake.user.v1\",\"schema_version\":\"intake-turn.v2\"},\"graph_key\":\"intake.v2\",\"graph_version\":\"1.0.0\",\"logical_run_id\":\"run-001\",\"public_event_proposals\":[{\"audience\":\"USER\",\"event_type\":\"room.utterance\",\"payload_hash\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"payload_ref\":\"s3://graph-output/case-001/public-event-1.json\"}],\"schema_version\":\"room-graph-result.v1\",\"status\":\"COMPLETED\",\"usage\":{\"input_tokens\":1200,\"output_tokens\":240,\"total_tokens\":1440}}",
+  "sha256": "e6b5249a7d55115cc65bf8ce902aa9e4311952ac4d6b288ea8fa3a5090298628"
+}

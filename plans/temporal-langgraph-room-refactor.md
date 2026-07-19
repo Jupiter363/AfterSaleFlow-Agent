@@ -498,10 +498,16 @@ V1 scheduler消费 V2 run。
 
 ### 7.4 Phase 3: Python Graph and governed LCEL platform (`MIG-003`)
 
+多代理所有权、执行波次和聚焦测试调度以
+[`Phase 3 Graph And Governed LCEL Execution Plan`](./phase-3-graph-lcel-execution.md)及其
+[`test batch matrix`](./phase-3-graph-lcel-test-batches.yaml)为准。共享实现合同冻结在
+[`Phase 3 P3.0 Contract Pack`](../docs/runbooks/temporal-first/phase-3-p3.0-contract-pack.md)。
+
 **目标**：建立可复用但不隐藏拓扑的 Graph kernel、PostgreSQL checkpoint、command ledger、lease/fencing、
 GraphRegistry、State Lens、Reducer 库和真实 LCEL 模型协议。
 **非目标**：不切换任何正式房间 graph writer；旧 operation endpoint 暂作 adapter。
-**进入条件**：`MIG-002=PASS`；Graph DB/凭据/备份方案可用；contract v1 已在 Java 部署。
+**进入条件**：正式迁移要求 `MIG-002=PASS`；ADR 0008 仅允许在 `DISABLED/SHADOW` 下提前完成
+P3.1-P3.8 工程实现。Graph DB/凭据/备份方案和独立生产审批完成前不得部署或切流。
 
 | 顺序 | PR/提交级任务 | 精确影响 |
 | --- | --- | --- |

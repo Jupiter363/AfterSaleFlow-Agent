@@ -1,0 +1,350 @@
+schema_version: phase-test-batches.v1
+phase: 3
+name: graph-governed-lcel
+
+gate:
+  required_entry: PHASE_2_ENGINEERING_CHECKPOINT
+  current_status: APPROVED_DISABLED_SHADOW_DEVELOPMENT_EXCEPTION
+  implementation_allowed_when:
+    - PHASE_2_ENGINEERING_CHECKPOINT_PASS
+    - ADR_0008_APPROVED
+  runtime_modes_allowed: [DISABLED, SHADOW]
+  formal_room_writer_allowed: false
+
+resources:
+  active_primary_agents: 1
+  active_child_agents: 3
+  heavy_test_slots: 1
+  light_test_slots: 2
+  pytest_db_workers: 1
+  docker_compose_owner: primary
+  heavy_resources:
+    - maven_test
+    - postgresql
+    - testcontainers
+    - docker_compose
+    - async_100_concurrency
+    - repository_full_regression
+  child_forbidden_commands:
+    - java_full_suite
+    - python_full_suite
+    - docker_compose_up_or_build
+    - browser_or_playwright_suite
+    - repository_full_regression
+
+test_token:
+  required_for:
+    - maven_test
+    - postgresql
+    - testcontainers
+    - docker_compose
+    - async_100_concurrency
+  request_fields: [task_id, command, expected_duration, resource_class]
+  grantor: primary
+  max_heavy_tokens: 1
+
+dependency_pins:
+  runtime:
+    - langgraph==1.2.6
+    - langchain-core==1.4.9
+    - langgraph-checkpoint-postgres==3.1.0
+    - psycopg[binary]==3.3.4
+    - psycopg-pool==3.3.1
+    - PyJWT[crypto]==2.13.0
+    - opentelemetry-api==1.44.0
+    - opentelemetry-sdk==1.44.0
+    - opentelemetry-exporter-otlp-proto-http==1.44.0
+  development:
+    - hypothesis==6.156.9
+    - testcontainers[postgres]==4.14.2
+    - pip-tools==7.6.0
+  deployment_lock:
+    file: python-agent-service/requirements.lock
+    require_hashes: true
+
+tiers:
+  T0:
+    owner: delegated_agent
+    max_duration_seconds: 180
+    services: none
+    purpose: syntax, format, schema, import boundary, pure unit and property examples
+  T1:
+    owner: primary
+    trigger: after_wave_1_merge
+    purpose: deduplicated unit, property and contract tests
+  T2:
+    owner: primary
+    trigger: after_wave_2_and_cross_review
+    purpose: PostgreSQL, recovery, security endpoint and 100-async component verification
+  T3:
+    owner: primary
+    trigger: later_unified_verification_checkpoint
+    automatic: false
+    purpose: full repository, browser, 1000-room, soak, DR and production failover
+
+agents:
+  A:
+    tasks: [P3-A1, P3-A2]
+    change_routes:
+      - python-agent-service/requirements*.txt
+      - python-agent-service/requirements.lock
+      - python-agent-service/pyproject.toml
+      - python-agent-service/migrations/graph/**
+      - python-agent-service/app/graph_runtime/checkpoint.py
+      - python-agent-service/app/graph_runtime/migrations.py
+      - python-agent-service/app/graph_runtime/readiness.py
+      - python-agent-service/app/graph_runtime/persistence_models.py
+      - python-agent-service/tests/graph_runtime/**/test_graph_persistence_*.py
+      - python-agent-service/tests/graph_runtime/unit/test_checkpoint_*.py
+    check_ids:
+      - GRAPH-001
+      - GRAPH-002
+      - GRAPH-010
+      - HA-011
+      - SEC-005
+      - OBS-003
+
+  B:
+    tasks: [P3-B1, P3-B2]
+    change_routes:
+      - python-agent-service/app/graph_runtime/errors.py
+      - python-agent-service/app/graph_runtime/identity.py
+      - python-agent-service/app/graph_runtime/ledger.py
+      - python-agent-service/app/graph_runtime/lease.py
+      - python-agent-service/app/graph_runtime/registry.py
+      - python-agent-service/app/graph_runtime/gateway.py
+      - python-agent-service/app/graph_runtime/recovery.py
+      - python-agent-service/tests/graph_runtime/unit/test_ledger*.py
+      - python-agent-service/tests/graph_runtime/unit/test_lease*.py
+      - python-agent-service/tests/graph_runtime/unit/test_registry*.py
+      - python-agent-service/tests/graph_runtime/unit/test_gateway*.py
+      - python-agent-service/tests/graph_runtime/integration/test_graph_gateway*.py
+    check_ids:
+      - GRAPH-003
+      - GRAPH-004
+      - GRAPH-005
+      - GRAPH-006
+      - GRAPH-007
+      - GRAPH-008
+      - GRAPH-009
+      - GRAPH-021
+      - GRAPH-022
+      - HA-003
+      - HA-004
+      - HA-005
+      - SEC-003
+      - OBS-002
+      - OBS-004
+
+  C:
+    tasks: [P3-C1, P3-C2]
+    change_routes:
+      - python-agent-service/app/graph_runtime/state.py
+      - python-agent-service/app/graph_runtime/state_lens.py
+      - python-agent-service/app/graph_runtime/reducers.py
+      - python-agent-service/app/graph_runtime/result.py
+      - python-agent-service/app/graph_runtime/topology.py
+      - python-agent-service/app/model_runtime/**
+      - python-agent-service/app/harness/model_runner.py
+      - python-agent-service/app/llm.py
+      - python-agent-service/tests/graph_runtime/unit/test_state*.py
+      - python-agent-service/tests/graph_runtime/unit/test_reducer*.py
+      - python-agent-service/tests/graph_runtime/unit/test_result*.py
+      - python-agent-service/tests/model_runtime/**
+      - python-agent-service/tests/harness/test_model_runner.py
+    check_ids:
+      - GRAPH-011
+      - GRAPH-012
+      - GRAPH-013
+      - GRAPH-014
+      - GRAPH-015
+      - GRAPH-016
+      - GRAPH-017
+      - GRAPH-018
+      - GRAPH-019
+      - GRAPH-020
+      - LCEL-001
+      - LCEL-002
+      - LCEL-003
+      - LCEL-004
+      - LCEL-005
+      - LCEL-006
+      - LCEL-007
+      - LCEL-008
+      - LCEL-009
+      - LCEL-010
+      - LCEL-011
+      - LCEL-012
+      - LCEL-013
+      - LCEL-014
+      - HA-008
+      - HA-009
+      - SEC-007
+      - SEC-008
+      - SEC-009
+      - SEC-010
+      - OBS-001
+
+  R:
+    tasks: [P3-0, P3-R1, P3-R2]
+    change_routes:
+      - contracts/agent-platform/v1/**
+      - python-agent-service/app/graph_runtime/__init__.py
+      - python-agent-service/app/model_runtime/__init__.py
+      - python-agent-service/app/security/**
+      - python-agent-service/app/api/graph_commands.py
+      - python-agent-service/app/config.py
+      - python-agent-service/app/main.py
+      - python-agent-service/Dockerfile
+      - docker-compose.yml
+      - .env.example
+      - deploy/postgresql/init-multiple-databases.sh
+      - tests/static/test_graph_import_boundaries.py
+      - tests/static/test_phase3_graph_execution_plan.py
+      - plans/phase-3-*
+      - docs/runbooks/temporal-first/phase-3-*
+      - scripts/*phase*3*
+      - test-reports/temporal-first/*/phase-3/**
+    check_ids:
+      - CONTRACT-001
+      - CONTRACT-002
+      - CONTRACT-003
+      - CONTRACT-004
+      - CONTRACT-005
+      - CONTRACT-006
+      - CONTRACT-007
+      - CONTRACT-008
+      - CONTRACT-009
+      - CONTRACT-010
+      - CONTRACT-011
+      - CONTRACT-012
+      - CONTRACT-013
+      - SEC-002
+      - SEC-004
+      - SEC-006
+      - MIG-003
+
+waves:
+  wave_0:
+    tasks: [P3-0]
+    runtime_changes_allowed: false
+    required_commit_contents:
+      - P3.0 contract pack
+      - canonical self-hash vectors
+      - execution plan
+      - test batch matrix
+      - static entry-gate test
+  wave_1:
+    tasks: [P3-A1, P3-B1, P3-C1, P3-R1]
+    integrate_order: [A, B, C, R]
+    test_batch: P3-BATCH-1
+  wave_2:
+    tasks: [P3-A2, P3-B2, P3-C2, P3-R1]
+    integrate_order: [A, B, C, R]
+    test_batch: P3-BATCH-2
+  wave_3:
+    tasks: [P3-R2]
+    cross_review: [A_reviews_B, B_reviews_C, C_reviews_A, R_reviews_all]
+    test_batch: P3-BATCH-3
+
+batches:
+  P3-BATCH-0:
+    tier: T0
+    trigger: P3_0_contract_commit
+    commands:
+      - id: root_phase3_gate
+        cwd: .
+        command: D:\miniconda\python.exe -m pytest tests/static/test_phase3_graph_execution_plan.py tests/static/test_agent_platform_schema_contracts.py -q
+      - id: python_contract_vectors
+        cwd: python-agent-service
+        command: D:\miniconda\python.exe -m pytest tests/contracts/test_agent_platform_v1.py -q
+      - id: java_contract_vectors
+        cwd: java-api-service
+        command: .\mvnw.cmd -Dtest=AgentPlatformContractV1Test test
+
+  P3-BATCH-1:
+    tier: T1
+    trigger: wave_1_merged
+    requires_tasks: [P3-A1, P3-B1, P3-C1, P3-R1]
+    python_tests:
+      - python-agent-service/tests/graph_runtime/unit
+      - python-agent-service/tests/contracts/test_agent_platform_v1.py
+      - python-agent-service/tests/security
+    static_tests:
+      - tests/static/test_graph_import_boundaries.py
+      - tests/static/test_phase3_graph_execution_plan.py
+    execution:
+      heavy_parallelism: 1
+      light_parallelism: 2
+      database: none
+
+  P3-BATCH-2:
+    tier: T2
+    trigger: wave_2_merged
+    requires_tasks: [P3-A2, P3-B2, P3-C2, P3-R1]
+    python_tests:
+      - python-agent-service/tests/graph_runtime
+      - python-agent-service/tests/model_runtime
+      - python-agent-service/tests/security
+      - python-agent-service/tests/api/test_graph_commands.py
+      - python-agent-service/tests/harness/test_model_runner.py
+    execution:
+      order: [postgresql_migration_and_fence, gateway_recovery, model_runtime, api_security]
+      heavy_parallelism: 1
+      database_workers: 1
+
+  P3-BATCH-3:
+    tier: T2
+    trigger: cross_review_fixes_merged
+    requires:
+      - clean_candidate_commit
+      - batch_1_pass
+      - batch_2_pass
+      - all_phase_3_check_ids_mapped
+    focused_commands:
+      - id: python_phase_3
+        cwd: python-agent-service
+        command: D:\miniconda\python.exe -m pytest tests/graph_runtime tests/model_runtime tests/security tests/api/test_graph_commands.py tests/contracts/test_agent_platform_v1.py -q
+      - id: root_phase_3_static
+        cwd: .
+        command: D:\miniconda\python.exe -m pytest tests/static/test_phase3_graph_execution_plan.py tests/static/test_graph_import_boundaries.py tests/static/test_agent_platform_schema_contracts.py tests/static/test_temporal_refactor_traceability.py -q
+      - id: java_contract_vectors
+        cwd: java-api-service
+        command: .\mvnw.cmd -Dtest=AgentPlatformContractV1Test test
+      - id: async_100_component
+        cwd: python-agent-service
+        command: D:\miniconda\python.exe -m pytest tests/model_runtime/test_governed_chat_model_concurrency.py -q
+    evidence:
+      root: test-reports/temporal-first/<release-id>/phase-3
+      required_files:
+        - phase-metrics.json
+        - check-id-coverage.json
+        - candidate-commit.txt
+        - batch-1-junit.xml
+        - batch-2-junit.xml
+        - batch-3-junit.xml
+
+  P3-UNIFIED-CHECKPOINT:
+    tier: T3
+    automatic: false
+    owner: primary
+    commands:
+      - repository_full_regression
+      - browser_full_regression
+      - 1000_room_load
+      - soak
+      - dr_restore
+      - production_equivalent_failover
+
+failure_policy:
+  PRODUCT: fix_owner_code_then_run_exact_and_affected_batch
+  FIXTURE: prove_contract_then_update_fixture_without_weakening_security
+  INFRA: preserve_trace_restore_environment_rerun_exact_scenario_only
+  EXTERNAL_GATE: retain_engineering_evidence_keep_promotion_pending
+  forbidden:
+    - unconditional_full_suite_retry
+    - weakening_assertions_for_green
+    - mixing_results_from_different_candidate_commits
+    - MemorySaver_or_in_memory_recovery_fallback
+    - unsigned_or_static_secret_graph_endpoint
+    - formal_writer_mode_in_phase_3
