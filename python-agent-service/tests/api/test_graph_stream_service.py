@@ -654,6 +654,50 @@ async def test_truncated_gateway_stream_aborts_attempt_and_never_fakes_a_termina
 
 
 @pytest.mark.asyncio
+async def test_stream_cancellation_stops_provider_before_aborting_durable_attempt() -> None:
+    admission = _admission(AdmissionAction.ACQUIRE)
+    ordering: list[str] = []
+    provider_waiting = asyncio.Event()
+
+    class CancellationAwareExecutor:
+        async def stream(self, execution: GatewayExecution):
+            yield _event(execution.admission.command, 0, "attempt_started")
+            try:
+                provider_waiting.set()
+                await asyncio.Event().wait()
+            finally:
+                ordering.append("provider_stopped")
+
+    class OrderingGateway(_Gateway):
+        async def finish_execution_attempt(
+            self,
+            execution: GatewayExecution,
+            **kwargs: Any,
+        ):
+            ordering.append("durable_attempt_aborted")
+            return await super().finish_execution_attempt(execution, **kwargs)
+
+    gateway = OrderingGateway(admission)
+    service, gate = await _service(gateway, cast(Any, CancellationAwareExecutor()))
+    stream = await service.open_stream(
+        command=admission.command,
+        verified_invocation=cast(VerifiedInvocation, object()),
+        expected_thread=admission.thread,
+    )
+
+    assert (await anext(stream)).event_type == "attempt_started"
+    pending = asyncio.create_task(anext(stream))
+    await provider_waiting.wait()
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+
+    assert ordering == ["provider_stopped", "durable_attempt_aborted"]
+    assert gateway.finished == 1
+    assert await gate.drain(0.01) is True
+
+
+@pytest.mark.asyncio
 async def test_exact_executor_provider_http_is_ledgered_before_transport() -> None:
     admission = _admission(AdmissionAction.ACQUIRE)
     gateway = _Gateway(admission)

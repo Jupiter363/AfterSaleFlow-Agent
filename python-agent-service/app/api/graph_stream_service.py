@@ -430,6 +430,16 @@ class GatewayBackedGraphCommandStreamService:
             if not terminal_seen:
                 raise GraphContractError("gateway stream ended without a terminal event")
         except BaseException as error:
+            # Provider cancellation must complete before the durable attempt/command is
+            # terminated. Otherwise a still-running provider task can re-enter the
+            # ledger with a fence whose command has already been aborted.
+            await _cancel_task(next_event)
+            next_event = None
+            await _cancel_task(renewal)
+            renewal = None
+            if iterator is not None:
+                await _close_iterator_safely(iterator)
+                iterator = None
             if not terminal_seen:
                 await self._best_effort_abort(execution, error)
             raise
