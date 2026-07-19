@@ -324,6 +324,43 @@ services:
       retries: 20
       start_period: 30s
 
+  graph-migrate:
+    <<: *common
+    profiles: ["graph-shadow"]
+    restart: "no"
+    build:
+      context: ./python-agent-service
+    command: ["python", "-m", "app.graph_runtime.migrations"]
+    depends_on:
+      postgresql:
+        condition: service_healthy
+    environment:
+      GRAPH_MIGRATION_DATABASE_DSN: postgresql://${GRAPH_MIGRATOR_USER:-graph_migrator}:${GRAPH_MIGRATOR_PASSWORD}@postgresql:5432/${GRAPH_DB_NAME:-dispute_graph}
+      GRAPH_MIGRATION_EXPECTED_USER: ${GRAPH_MIGRATOR_USER:-graph_migrator}
+      GRAPH_OWNER_USER: ${GRAPH_OWNER_USER:-graph_owner}
+      GRAPH_RUNTIME_USER: ${GRAPH_RUNTIME_USER:-graph_runtime}
+      GRAPH_RETENTION_USER: ${GRAPH_RETENTION_USER:-graph_retention}
+      GRAPH_DB_SCHEMA: ${GRAPH_DB_SCHEMA:-graph_runtime}
+      GRAPH_DB_ENVIRONMENT_GENERATION: ${GRAPH_DB_ENVIRONMENT_GENERATION}
+
+  graph-restore-validation:
+    <<: *common
+    profiles: ["graph-shadow"]
+    restart: "no"
+    build:
+      context: ./python-agent-service
+    command: ["python", "-m", "app.graph_runtime.restore_validation"]
+    depends_on:
+      graph-migrate:
+        condition: service_completed_successfully
+    environment:
+      GRAPH_MIGRATION_DATABASE_DSN: postgresql://${GRAPH_MIGRATOR_USER:-graph_migrator}:${GRAPH_MIGRATOR_PASSWORD}@postgresql:5432/${GRAPH_DB_NAME:-dispute_graph}
+      GRAPH_MIGRATION_EXPECTED_USER: ${GRAPH_MIGRATOR_USER:-graph_migrator}
+      GRAPH_OWNER_USER: ${GRAPH_OWNER_USER:-graph_owner}
+      GRAPH_DB_SCHEMA: ${GRAPH_DB_SCHEMA:-graph_runtime}
+      GRAPH_DB_ENVIRONMENT_GENERATION: ${GRAPH_DB_ENVIRONMENT_GENERATION}
+      GRAPH_DB_RESTORE_VERIFICATION_HASH: ${GRAPH_DB_RESTORE_VERIFICATION_HASH}
+
   python-agent-service:
     <<: *common
     build:
@@ -349,6 +386,8 @@ services:
       GRAPH_DATABASE_SCHEMA: ${GRAPH_DB_SCHEMA:-graph_runtime}
       GRAPH_JWKS_URL: ${GRAPH_JWKS_URL:-http://java-api-service:8080/.well-known/graph-jwks.json}
       GRAPH_EXPECTED_SPIFFE_ID: ${GRAPH_EXPECTED_SPIFFE_ID:-spiffe://after-sale-flow/java-api-service}
+      GRAPH_EXPECTED_ENVIRONMENT_GENERATION: ${GRAPH_DB_ENVIRONMENT_GENERATION}
+      GRAPH_EXPECTED_RESTORE_VERIFICATION_HASH: ${GRAPH_DB_RESTORE_VERIFICATION_HASH}
     ports:
       - "127.0.0.1:${PYTHON_AGENT_PORT:-18000}:8000"
     depends_on:
@@ -356,6 +395,9 @@ services:
         condition: service_healthy
       langfuse:
         condition: service_healthy
+      graph-restore-validation:
+        condition: service_completed_successfully
+        required: false
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
       interval: 15s

@@ -59,6 +59,15 @@ class Settings(BaseSettings):
     graph_jwks_refresh_seconds: float = Field(default=30.0, ge=5, le=3600)
     graph_jwks_timeout_seconds: float = Field(default=2.0, gt=0, le=30)
     graph_expected_spiffe_id: str = "spiffe://after-sale-flow/java-api-service"
+    graph_expected_environment_generation: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+    )
+    graph_expected_restore_verification_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
 
     @model_validator(mode="after")
     def validate_graph_runtime(self) -> Self:
@@ -81,6 +90,14 @@ class Settings(BaseSettings):
                 raise ValueError("SHADOW graph mode requires graph_database_dsn")
             if self.graph_jwks_url is None:
                 raise ValueError("SHADOW graph mode requires graph_jwks_url")
+            if self.graph_expected_environment_generation is None:
+                raise ValueError(
+                    "SHADOW graph mode requires graph_expected_environment_generation"
+                )
+            if self.graph_expected_restore_verification_hash is None:
+                raise ValueError(
+                    "SHADOW graph mode requires graph_expected_restore_verification_hash"
+                )
             self._validate_graph_runtime_dsn(self.graph_database_dsn.get_secret_value())
         return self
 

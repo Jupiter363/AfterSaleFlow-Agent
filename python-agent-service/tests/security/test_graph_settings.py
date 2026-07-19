@@ -13,6 +13,10 @@ BASE = {
     "java_service_secret": "test-java-service-secret",
     "python_agent_service_secret": "test-python-service-secret",
 }
+GRAPH_GENERATION = {
+    "graph_expected_environment_generation": "graphenv-test-001",
+    "graph_expected_restore_verification_hash": "a" * 64,
+}
 
 
 def settings(**overrides) -> Settings:
@@ -39,10 +43,26 @@ def test_shadow_requires_isolated_runtime_dsn_and_jwks() -> None:
             ),
         )
 
+    with pytest.raises(ValidationError, match="graph_expected_environment_generation"):
+        settings(
+            graph_gateway_mode="SHADOW",
+            graph_database_dsn="postgresql://graph_runtime:secret@postgresql:5432/dispute_graph",
+            graph_jwks_url="http://java-api-service:8080/.well-known/graph-jwks.json",
+        )
+
+    with pytest.raises(ValidationError, match="graph_expected_restore_verification_hash"):
+        settings(
+            graph_gateway_mode="SHADOW",
+            graph_database_dsn="postgresql://graph_runtime:secret@postgresql:5432/dispute_graph",
+            graph_jwks_url="http://java-api-service:8080/.well-known/graph-jwks.json",
+            graph_expected_environment_generation="graphenv-test-001",
+        )
+
     configured = settings(
         graph_gateway_mode="SHADOW",
         graph_database_dsn="postgresql://graph_runtime:secret@postgresql:5432/dispute_graph",
         graph_jwks_url="http://java-api-service:8080/.well-known/graph-jwks.json",
+        **GRAPH_GENERATION,
     )
     assert configured.graph_database_dsn is not None
     assert "graph_runtime:secret" not in repr(configured)
@@ -66,6 +86,7 @@ def test_shadow_rejects_owner_migrator_domain_and_search_path_dsn(dsn: str) -> N
             graph_gateway_mode="SHADOW",
             graph_database_dsn=dsn,
             graph_jwks_url="http://java-api-service:8080/.well-known/graph-jwks.json",
+            **GRAPH_GENERATION,
         )
 
 
