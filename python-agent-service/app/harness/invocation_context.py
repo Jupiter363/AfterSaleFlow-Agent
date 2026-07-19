@@ -6,7 +6,15 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictInt,
+    StringConstraints,
+    field_validator,
+)
 
 
 Identifier = Annotated[str, StringConstraints(min_length=3, max_length=128)]
@@ -36,8 +44,20 @@ ScopeType = Literal[
 ]
 
 
+class ModelRetryBudget(StrictModel):
+    """Provider-local retry authority carried by a validated invocation context."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    provider_attempts_remaining: StrictInt = Field(default=1, ge=0, le=2)
+    activity_attempts_remaining: StrictInt = Field(default=0, ge=0, le=3)
+    repairs_remaining: StrictInt = Field(default=0, ge=0, le=1)
+
+
 class AgentInvocationContext(StrictModel):
     """Java 为一次 LLM 回合提供的访问/会话信封，是参与方隔离与审计关联的根上下文。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     tenant_id: Identifier = "default"
     case_id: Identifier
@@ -56,6 +76,19 @@ class AgentInvocationContext(StrictModel):
     allowed_actor_roles: list[Identifier] = Field(default_factory=list)
     prompt_profile_id: Identifier
     memory_policy_id: Identifier
+    model_profile_id: Identifier | None = None
+    output_schema_version: Identifier | None = None
+    policy_version: Identifier | None = None
+    guardrail_version: Identifier | None = None
+    tool_capabilities: Annotated[list[Identifier], Field(max_length=32)] = Field(
+        default_factory=list
+    )
+    retry_budget: ModelRetryBudget | None = None
+    deadline_at: AwareDatetime | None = None
+    traceparent: Annotated[
+        str,
+        StringConstraints(pattern=r"^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$"),
+    ] | None = None
 
     # 所属模块：Agent Harness > 调用身份信封 > 必填标量校验。
     # 具体功能：`reject_blank_scalar` 是 Pydantic 字段验证器，在构造上下文时逐个拒绝只含空白的租户、案件、参与方、会话、Agent 与策略标识。
@@ -87,10 +120,17 @@ class AgentInvocationContext(StrictModel):
     # 具体功能：`reject_blank_list_items` 检查 permission_scopes、allowed_actor_ids、allowed_actor_roles 中每一项，并在错误里保留列表下标。
     # 上下游：上游同样是 Pydantic 请求解析；下游是证据/消息可见性过滤与参与方会话授权判断。
     # 系统意义：空元素不能被解释成通配符或默认角色；失败关闭可防止权限列表在服务间传递时语义扩大。
-    @field_validator("permission_scopes", "allowed_actor_ids", "allowed_actor_roles")
+    @field_validator(
+        "permission_scopes",
+        "allowed_actor_ids",
+        "allowed_actor_roles",
+        "tool_capabilities",
+    )
     @classmethod
     def reject_blank_list_items(cls, values: list[str], info) -> list[str]:
         for index, value in enumerate(values):
             if not value.strip():
                 raise ValueError(f"{info.field_name}[{index}] must not be blank")
+        if info.field_name == "tool_capabilities" and len(set(values)) != len(values):
+            raise ValueError(f"{info.field_name} must not contain duplicates")
         return values

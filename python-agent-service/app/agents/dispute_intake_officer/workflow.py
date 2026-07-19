@@ -19,6 +19,7 @@ from app.agents.dispute_intake_officer.skills.dossier.dossier_skill import (
     _question_targets_resolved_intake_field,
 )
 from app.harness.context_pack import build_context_pack
+from app.harness.invocation_context import AgentInvocationContext
 from app.llm import AgentOutputSchemaError, AgentServiceUnavailable
 from app.schemas import IntakeTurnRequest, IntakeTurnResult
 from app.streaming import current_stream_observer
@@ -135,14 +136,14 @@ def _load_context(state: IntakeTurnGraphState) -> dict[str, Any]:
     """从请求里抽取本轮最重要的文本、角色和记忆摘要。"""
 
     request = state["request"]
-    agent_context = request["agent_context"]
+    agent_context = AgentInvocationContext.model_validate(request["agent_context"])
     current = request.get("current_user_message") or {}
     initial_facts = request.get("initial_case_facts") or {}
     source_text = str(
         current.get("text") or initial_facts.get("form_description") or ""
     )
     actor_role = str(
-        agent_context.get("actor_role")
+        agent_context.actor_role
         or current.get("role")
         or (request.get("initial_case_facts") or {}).get("initiator_role")
         or "USER"
@@ -181,7 +182,9 @@ def _reason_with_llm_node(model_runner: Any | None):
     # 系统意义：LLM 负责自然语言理解但不能直接写库；配置缺失、Schema 错误和未知异常都失败关闭，且日志用 invocation_id 关联而不降级成伪造结论。
     def reason_with_llm(state: IntakeTurnGraphState) -> dict[str, Any]:
         request = state["request"]
-        agent_context = request["agent_context"]
+        agent_context = AgentInvocationContext.model_validate(
+            request["agent_context"]
+        )
         if model_runner is None:
             raise AgentServiceUnavailable("intake turn model runner is not configured")
         try:
@@ -221,7 +224,7 @@ def _reason_with_llm_node(model_runner: Any | None):
                 },
                 output_type=IntakeCaseDetailLlmOutput,
                 agent_context=agent_context,
-                prompt_profile_id=agent_context.get("prompt_profile_id"),
+                prompt_profile_id=agent_context.prompt_profile_id,
                 context_pack=context_pack,
             )
             return {
@@ -235,7 +238,7 @@ def _reason_with_llm_node(model_runner: Any | None):
                 "agent_invocation_id=%s error_type=%s error=%s",
                 request.get("case_id"),
                 request.get("turn_source"),
-                agent_context.get("agent_invocation_id"),
+                agent_context.agent_invocation_id,
                 type(failure).__name__,
                 failure,
                 exc_info=True,

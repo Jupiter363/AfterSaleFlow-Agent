@@ -2,9 +2,21 @@
 
 from __future__ import annotations
 
+import base64
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
+import hashlib
+
+import httpx
+import pytest
 from pydantic import BaseModel
 
 from app.harness.context_window import ContextWindowManager, PromptSection
+from app.harness.evidence_asset_loader import (
+    EvidenceAssetLoader,
+    LoadedEvidenceAssets,
+)
+from app.harness.invocation_context import AgentInvocationContext
 from app.harness.model_runner import (
     HarnessModelRunner,
     HarnessStreamCompleted,
@@ -17,10 +29,159 @@ from app.llm import (
     StructuredStreamDelta,
 )
 from app.streaming import VisibleFieldSpec
+from app.schemas import EvidenceContextEnvelopeV1
 
 
 class RunnerOutput(BaseModel):
     answer: str
+
+
+class ArbitraryAgentContext(BaseModel):
+    agent_session_id: str
+    prompt_profile_id: str
+    model_profile_id: str
+    tool_capabilities: list[str]
+    deadline_at: str
+
+
+def _trusted_agent_context() -> AgentInvocationContext:
+    return AgentInvocationContext.model_validate(
+        {
+            "tenant_id": "default",
+            "case_id": "CASE_model_runner",
+            "room_type": "EVIDENCE",
+            "actor_id": "USER_local_1",
+            "actor_role": "USER",
+            "access_session_id": "ACCESS_model_runner",
+            "permission_level": "PARTY_USER",
+            "permission_scopes": [],
+            "agent_key": "EVIDENCE_CLERK",
+            "agent_invocation_id": "INVOCATION_model_runner",
+            "agent_session_id": "SESSION_evidence_user",
+            "conversation_scope": "default:CASE_model_runner:EVIDENCE:USER_local_1",
+            "scope_type": "EVIDENCE_PARTY_PRIVATE",
+            "allowed_actor_ids": ["USER_local_1"],
+            "allowed_actor_roles": ["USER"],
+            "prompt_profile_id": "EVIDENCE_CLERK:USER:v1",
+            "memory_policy_id": "MEMORY_POLICY_TEST_V1",
+            "model_profile_id": "model:test:v1",
+            "output_schema_version": "evidence:test:v1",
+            "policy_version": "policy:test:v1",
+            "guardrail_version": "guardrail:test:v1",
+            "tool_capabilities": ["evidence.read"],
+            "retry_budget": {
+                "provider_attempts_remaining": 1,
+                "repairs_remaining": 0,
+            },
+            "deadline_at": datetime.now(timezone.utc) + timedelta(minutes=1),
+            "traceparent": (
+                "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"
+            ),
+        }
+    )
+
+
+def _loaded_png_assets() -> LoadedEvidenceAssets:
+    image = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    )
+    evidence_hash = hashlib.sha256(image).hexdigest()
+    envelope = EvidenceContextEnvelopeV1.model_validate(
+        {
+            "schema_version": "evidence_context_envelope.v1",
+            "captured_at": "2026-07-20T04:00:00+08:00",
+            "case_snapshot": {
+                "case_id": "CASE_multimodal",
+                "case_version": 1,
+                "case_status": "EVIDENCE_IN_PROGRESS",
+                "case_type": "AFTER_SALE_DISPUTE",
+                "dispute_type": None,
+                "title": "Multimodal evidence",
+                "description": "Authorized image input",
+                "risk_level": "MEDIUM",
+                "route_type": None,
+                "order_id": None,
+                "after_sale_id": None,
+                "logistics_id": None,
+                "source_type": "LOCAL",
+                "initiator_role": "USER",
+                "source_system": None,
+                "external_case_ref": None,
+                "current_room": "EVIDENCE",
+                "current_deadline_at": None,
+            },
+            "intake_dossier_snapshot": None,
+            "actor_snapshot": {
+                "actor_id": "USER_local_1",
+                "actor_role": "USER",
+                "initiator_role": "USER",
+                "access_session_id": "ACCESS_multimodal",
+                "agent_session_id": "SESSION_multimodal",
+                "conversation_scope": "default:CASE_multimodal:EVIDENCE:USER_local_1",
+                "prompt_profile_id": "EVIDENCE_CLERK:USER:v1",
+                "memory_policy_id": "MEMORY_POLICY_TEST_V1",
+            },
+            "current_event": {
+                "event_id": "MESSAGE_multimodal",
+                "event_type": "PARTY_MESSAGE",
+                "message_type": "PARTY_EVIDENCE_REFERENCE",
+                "actor_id": "USER_local_1",
+                "actor_role": "USER",
+                "text": "Inspect the attached image.",
+                "attachment_refs": ["EVIDENCE_image"],
+                "turn_no": 1,
+                "occurred_at": "2026-07-20T04:00:00+08:00",
+            },
+            "visible_evidence": [
+                {
+                    "evidence_id": "EVIDENCE_image",
+                    "dossier_id": "DOSSIER_multimodal",
+                    "evidence_type": "IMAGE",
+                    "source_type": "PARTY_UPLOAD",
+                    "submitted_by_role": "USER",
+                    "submitted_by_id": "USER_local_1",
+                    "original_filename": "proof.png",
+                    "content_type": "image/png",
+                    "file_size": len(image),
+                    "file_hash": evidence_hash,
+                    "parsed_text": None,
+                    "parse_status": "PARSED",
+                    "visibility": "PARTY_PRIVATE",
+                    "desensitized": True,
+                    "metadata": {},
+                    "extraction": {},
+                    "occurred_at": None,
+                    "created_at": "2026-07-20T04:00:00+08:00",
+                    "submitted_at": "2026-07-20T04:00:00+08:00",
+                    "submission_status": "SUBMITTED",
+                    "submission_batch_id": None,
+                    "content_url": "/internal/evidence/EVIDENCE_image/content",
+                }
+            ],
+            "private_conversation": {
+                "agent_session_id": "SESSION_multimodal",
+                "conversation_scope": "default:CASE_multimodal:EVIDENCE:USER_local_1",
+                "source_count": 0,
+                "truncated": False,
+                "recent_turns": [],
+            },
+            "room_policy": {
+                "room_id": "ROOM_multimodal",
+                "room_type": "EVIDENCE",
+                "room_status": "OPEN",
+                "current_deadline_at": None,
+                "initiator_role": "USER",
+                "initiator_evidence_required": True,
+            },
+        }
+    )
+    return EvidenceAssetLoader(
+        java_api_service_url="http://java-api-service:8080",
+        java_service_secret="test-java-service-secret",
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, content=image)
+        ),
+    ).load(envelope)
 
 
 class RecordingLlm:
@@ -164,24 +325,7 @@ def test_model_runner_passes_prompt_profile_and_trusted_agent_context() -> None:
         llm=llm,
         prompts=PromptRepository(),
     )
-    agent_context = {
-        "agent_key": "EVIDENCE_CLERK",
-        "actor_id": "USER_local_1",
-        "actor_role": "USER",
-        "agent_session_id": "SESSION_evidence_user",
-        "scope_type": "EVIDENCE_PARTY_PRIVATE",
-        "allowed_actor_ids": ["USER_local_1"],
-        "prompt_profile_id": "EVIDENCE_CLERK:USER:v1",
-        "case_id": "CASE_model_runner",
-        "room_type": "EVIDENCE",
-        "agent_invocation_id": "INVOCATION_model_runner",
-        "model_profile_id": "model:test:v1",
-        "retry_budget": {
-            "provider_attempts_remaining": 1,
-            "repairs_remaining": 0,
-        },
-        "traceparent": "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
-    }
+    agent_context = _trusted_agent_context()
 
     runner.invoke_structured(
         node_name="evidence_turn",
@@ -202,16 +346,101 @@ def test_model_runner_passes_prompt_profile_and_trusted_agent_context() -> None:
     governed = call["governed_request"]
     assert governed.provider == "test-provider"
     assert governed.model == "fake-model"
+    assert governed.tool_allowlist == ("evidence.read",)
     assert governed.provider_attempts_remaining == 1
     assert governed.repairs_remaining == 0
-    assert governed.traceparent == agent_context["traceparent"]
+    assert governed.deadline_at == agent_context.deadline_at
+    assert governed.traceparent == agent_context.traceparent
+
+
+@pytest.mark.parametrize(
+    "untrusted_context",
+    [
+        {
+            "agent_session_id": "SESSION_attacker",
+            "prompt_profile_id": "EVIDENCE_CLERK:MERCHANT:v1",
+            "model_profile_id": "model:attacker:v1",
+            "tool_capabilities": ["admin.write"],
+            "retry_budget": {
+                "provider_attempts_remaining": 2,
+                "repairs_remaining": 1,
+            },
+            "deadline_at": "2099-01-01T00:00:00Z",
+            "traceparent": (
+                "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01"
+            ),
+        },
+        ArbitraryAgentContext(
+            agent_session_id="SESSION_attacker",
+            prompt_profile_id="EVIDENCE_CLERK:MERCHANT:v1",
+            model_profile_id="model:attacker:v1",
+            tool_capabilities=["admin.write"],
+            deadline_at="2099-01-01T00:00:00Z",
+        ),
+    ],
+)
+def test_model_runner_does_not_trust_mapping_or_arbitrary_model_context(
+    untrusted_context: object,
+) -> None:
+    llm = RecordingLlm()
+    runner = HarnessModelRunner(llm=llm, prompts=PromptRepository())
+
+    runner.invoke_structured(
+        node_name="evidence_turn",
+        case_data={"case_id": "CASE_untrusted_context"},
+        output_type=RunnerOutput,
+        agent_context=untrusted_context,  # type: ignore[arg-type]
+    )
+
+    call = llm.calls[0]
+    assert "SESSION_attacker" not in str(call["system_prompt"])
+    governed = call["governed_request"]
+    assert governed.tool_allowlist == ()
+    assert governed.provider_attempts_remaining == 1
+    assert governed.repairs_remaining == 0
+    assert governed.traceparent is None
+    assert governed.deadline_at < datetime.now(timezone.utc) + timedelta(minutes=3)
+
+
+def test_model_runner_rejects_prompt_profile_override_of_trusted_context() -> None:
+    llm = RecordingLlm()
+    runner = HarnessModelRunner(llm=llm, prompts=PromptRepository())
+
+    with pytest.raises(ValueError, match="conflicts with trusted agent context"):
+        runner.invoke_structured(
+            node_name="evidence_turn",
+            case_data={"case_id": "CASE_profile_override"},
+            output_type=RunnerOutput,
+            agent_context=_trusted_agent_context(),
+            prompt_profile_id="EVIDENCE_CLERK:MERCHANT:v1",
+        )
+
+    assert llm.calls == []
+
+
+def test_model_runner_rejects_explicit_profile_backed_only_by_mapping() -> None:
+    llm = RecordingLlm()
+    runner = HarnessModelRunner(llm=llm, prompts=PromptRepository())
+
+    with pytest.raises(ValueError, match="requires a validated agent context"):
+        runner.invoke_structured(
+            node_name="evidence_turn",
+            case_data={"case_id": "CASE_mapping_profile"},
+            output_type=RunnerOutput,
+            agent_context={  # type: ignore[arg-type]
+                "prompt_profile_id": "EVIDENCE_CLERK:MERCHANT:v1"
+            },
+            prompt_profile_id="EVIDENCE_CLERK:MERCHANT:v1",
+        )
+
+    assert llm.calls == []
 
 
 # 所属模块：Agent Harness > test_model_runner；函数角色：回归测试用例。
-# 具体功能：`test_model_runner_forwards_multimodal_parts_only_to_llm_transport` 验证结构化模型调用在固定案例中的输出、边界和失败行为；关键协作调用：`RecordingLlm`、`HarnessModelRunner`、`runner.invoke_structured`。
+# 具体功能：`test_model_runner_rejects_raw_multimodal_parts` 验证 Harness 不再接受调用方自行拼装的图片内容列表。
 # 上下游：上游为 Java 可信快照、调用身份、上下文合同、角色模板；下游为 协作调用 `RecordingLlm`、`HarnessModelRunner`、`runner.invoke_structured`、`PromptRepository`。
 # 系统意义：固定“Agent Harness > test_model_runner”的可观察契约，防止后续重构改变业务结果。
-def test_model_runner_forwards_multimodal_parts_only_to_llm_transport() -> None:
+def test_model_runner_rejects_raw_multimodal_parts() -> None:
     llm = RecordingLlm()
     runner = HarnessModelRunner(llm=llm, prompts=PromptRepository())
     parts = [
@@ -225,15 +454,66 @@ def test_model_runner_forwards_multimodal_parts_only_to_llm_transport() -> None:
         },
     ]
 
+    with pytest.raises(TypeError, match="multimodal_parts"):
+        runner.invoke_structured(
+            node_name="evidence_turn",
+            case_data={"case_id": "CASE_multimodal"},
+            output_type=RunnerOutput,
+            multimodal_parts=parts,  # type: ignore[call-arg]
+        )
+
+    assert llm.calls == []
+
+
+def test_model_runner_accepts_only_loader_issued_evidence_capability() -> None:
+    llm = RecordingLlm()
+    runner = HarnessModelRunner(llm=llm, prompts=PromptRepository())
+    assets = _loaded_png_assets()
+
     runner.invoke_structured(
         node_name="evidence_turn",
         case_data={"case_id": "CASE_multimodal"},
         output_type=RunnerOutput,
-        multimodal_parts=parts,
+        evidence_assets=assets,
     )
 
-    assert llm.calls[0]["user_content_parts"] == parts
+    assert llm.calls[0]["user_content_parts"] == list(assets.content_parts)
     assert "data:image" not in str(llm.calls[0]["user_prompt"])
+
+    forged = object.__new__(LoadedEvidenceAssets)
+    with pytest.raises(ValueError, match="capability provenance"):
+        runner.invoke_structured(
+            node_name="evidence_turn",
+            case_data={"case_id": "CASE_multimodal"},
+            output_type=RunnerOutput,
+            evidence_assets=forged,
+        )
+    assert len(llm.calls) == 1
+
+    tampered = _loaded_png_assets()
+    image_record = getattr(tampered, "_images")[0]
+    tampered_payload = b"\x89PNG\r\n\x1a\nforged-pixels"
+    object.__setattr__(
+        tampered,
+        "_images",
+        (
+            replace(
+                image_record,
+                data_url=(
+                    "data:image/png;base64,"
+                    + base64.b64encode(tampered_payload).decode("ascii")
+                ),
+            ),
+        ),
+    )
+    with pytest.raises(ValueError, match="pixel hash"):
+        runner.invoke_structured(
+            node_name="evidence_turn",
+            case_data={"case_id": "CASE_multimodal"},
+            output_type=RunnerOutput,
+            evidence_assets=tampered,
+        )
+    assert len(llm.calls) == 1
 
 
 def test_model_runner_streams_public_callbacks_and_parses_one_final_document() -> None:

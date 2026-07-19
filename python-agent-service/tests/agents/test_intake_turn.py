@@ -16,6 +16,7 @@ from app.agents.dispute_intake_officer.skills.dossier.dossier_skill import (
     SUBJECTIVE_RESPONDENT_SOURCE,
 )
 from app.intake_turn import IntakeTurnWorkflow
+from app.harness.invocation_context import AgentInvocationContext
 from app.agents.dispute_intake_officer.workflow import (
     _limit_follow_up_questions,
     _subjective_only_snapshot,
@@ -560,7 +561,9 @@ def test_intake_turn_workflow_uses_agent_case_detail_node_and_memory_context() -
     )
 
     assert runner.calls[0]["node_name"] == "intake_turn_case_detail"
-    assert runner.calls[0]["agent_context"]["agent_session_id"] == (
+    trusted_context = runner.calls[0]["agent_context"]
+    assert isinstance(trusted_context, AgentInvocationContext)
+    assert trusted_context.agent_session_id == (
         "SESSION_CASE_intake_turn_llm_user_intake"
     )
     assert runner.calls[0]["prompt_profile_id"] == "DISPUTE_INTAKE_OFFICER:USER:v1"

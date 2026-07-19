@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
+from app.harness.invocation_context import AgentInvocationContext
 from app.schemas import EvidenceTurnRequest, IntakeTurnRequest
 
 
@@ -346,3 +347,22 @@ def test_agent_context_rejects_blank_agent_session_id() -> None:
         IntakeTurnRequest.model_validate(payload)
 
     assert "agent_session_id must not be blank" in str(failure.value)
+
+
+@pytest.mark.parametrize(
+    "authority_fields",
+    [
+        {"tool_capabilities": ["evidence.read", "evidence.read"]},
+        {"retry_budget": {"provider_attempts_remaining": 3}},
+        {"retry_budget": {"provider_attempts_remaining": True}},
+        {"deadline_at": "2026-07-20T04:00:00"},
+        {"traceparent": "forged-traceparent"},
+    ],
+)
+def test_agent_context_rejects_invalid_model_authority(
+    authority_fields: dict[str, object],
+) -> None:
+    payload = {**_agent_context(), **authority_fields}
+
+    with pytest.raises(ValidationError):
+        AgentInvocationContext.model_validate(payload)

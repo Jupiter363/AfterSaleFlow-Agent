@@ -17,6 +17,7 @@ from app.harness.evidence_context_assembler import (
     EvidenceTurnWorkingSet,
 )
 from app.harness.evidence_asset_loader import EvidenceAssetLoader
+from app.harness.invocation_context import AgentInvocationContext
 from app.harness.localization_policy import localize_internal_text
 from app.llm import AgentServiceUnavailable
 from app.schemas import (
@@ -180,7 +181,9 @@ def _reason_with_llm_node(
     def reason_with_llm(state: EvidenceTurnGraphState) -> dict[str, Any]:
         assembled = state["assembled_context"]
         working_set = assembled.working_set
-        agent_context = assembled.agent_context
+        agent_context = AgentInvocationContext.model_validate(
+            assembled.agent_context.model_dump(mode="python")
+        )
         if model_runner is None:
             raise AgentServiceUnavailable("evidence clerk model runner is unavailable")
         try:
@@ -203,8 +206,8 @@ def _reason_with_llm_node(
                 ),
                 "manifest": asset_manifest,
                 "trust_note": (
-                    "只有 visual_input_status 为 LOADED 或 "
-                    "LOADED_WITHOUT_HASH 的证据实际进入多模态模型。"
+                    "只有 visual_input_status 为 LOADED 且入库 SHA-256 "
+                    "与下载内容一致的证据实际进入多模态模型。"
                 ),
             }
             context_pack = build_context_pack(
@@ -212,18 +215,18 @@ def _reason_with_llm_node(
                 context_sources,
                 actor_role=working_set.actor_role,
             )
-            # invocation 字典统一文本和多模态路径；只有存在已授权 content_parts 才追加 multimodal_parts。
-            invocation = {
+            # invocation 字典统一文本和多模态路径；图片只能以 Loader 签发的能力对象进入 Harness。
+            invocation: dict[str, Any] = {
                 "node_name": "evidence_turn",
                 "case_data": assembled.case_data,
                 "output_type": EvidenceTurnLlmOutput,
-                "agent_context": agent_context.model_dump(mode="json"),
+                "agent_context": agent_context,
                 "prompt_profile_id": agent_context.prompt_profile_id,
                 "context_pack": context_pack,
             }
-            if loaded_assets is not None and loaded_assets.content_parts:
-                # 只有 asset_loader 判定可用的内容才进入多模态输入。
-                invocation["multimodal_parts"] = list(loaded_assets.content_parts)
+            if loaded_assets is not None:
+                # Harness 只接受 loader 签发的能力对象，不接受可伪造的原始 parts 列表。
+                invocation["evidence_assets"] = loaded_assets
             generation = model_runner.invoke_structured(
                 **invocation,
             )

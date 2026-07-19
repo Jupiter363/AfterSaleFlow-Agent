@@ -14,6 +14,11 @@ from typing_extensions import TypedDict
 from app.graph_runtime.state_lens import StateLens
 from app.harness.context_window import AssembledPromptContext, ContextWindowManager, PromptSection
 from app.harness.context_pack import ContextPack
+from app.harness.evidence_asset_loader import (
+    LoadedEvidenceAssets,
+    validated_evidence_content_parts,
+)
+from app.harness.invocation_context import AgentInvocationContext
 from app.harness.prompt_composer import PromptRepository
 from app.llm import StructuredLlmClient
 from app.model_runtime.callbacks import (
@@ -115,7 +120,7 @@ class HarnessModelRunner:
 
     # 所属模块：Agent Harness > 模型执行中枢 > 非流式结构化调用。
     # 具体功能：`invoke_structured` 裁剪 ContextPack/sections、白名单化 Agent 身份、选择角色 Prompt、注入上下文审计元数据，生成 system/human messages 后仅调用一次 `llm.generate`。
-    # 上下游：上游是 LangGraph 业务节点提供的 node_name、case_data、Pydantic output_type 和可选多模态内容；下游是 StructuredLlmClient 及带模型/延迟/Token/最终 Prompt 的 HarnessGeneration。
+    # 上下游：上游是 LangGraph 业务节点提供的 node_name、case_data、Pydantic output_type 和可选证据能力；下游是 StructuredLlmClient 及带模型/延迟/Token/最终 Prompt 的 HarnessGeneration。
     # 系统意义：模型自由文本必须先解析成 output_type 才返回业务层；不可信案件数据只进 human message，可信身份也只暴露白名单字段。
     def invoke_structured(
         self,
@@ -126,12 +131,17 @@ class HarnessModelRunner:
         context_sections: list[PromptSection] | None = None,
         context_pack: ContextPack | None = None,
         max_input_tokens: int | None = None,
-        agent_context: Any | None = None,
+        agent_context: AgentInvocationContext | None = None,
         prompt_profile_id: str | None = None,
-        multimodal_parts: list[dict[str, Any]] | None = None,
+        evidence_assets: LoadedEvidenceAssets | None = None,
     ) -> HarnessGeneration[T]:
         """执行一次非流式结构化模型调用。"""
 
+        user_content_parts = (
+            validated_evidence_content_parts(evidence_assets)
+            if evidence_assets is not None
+            else ()
+        )
         prepared = self._prepare(
             node_name=node_name,
             case_data=case_data,
@@ -147,7 +157,7 @@ class HarnessModelRunner:
             output_type=output_type,
             prepared=prepared,
             visible_fields=(),
-            multimodal_parts=multimodal_parts or (),
+            user_content_parts=user_content_parts,
         )
         capture = InvocationMetadataCapture()
         state = {"human_prompt": prepared.user_prompt}
@@ -181,12 +191,17 @@ class HarnessModelRunner:
         context_sections: list[PromptSection] | None = None,
         context_pack: ContextPack | None = None,
         max_input_tokens: int | None = None,
-        agent_context: Any | None = None,
+        agent_context: AgentInvocationContext | None = None,
         prompt_profile_id: str | None = None,
-        multimodal_parts: list[dict[str, Any]] | None = None,
+        evidence_assets: LoadedEvidenceAssets | None = None,
     ) -> Iterator[HarnessStreamUpdate[T]]:
         """Stream one structured Harness invocation without a second model call."""
 
+        user_content_parts = (
+            validated_evidence_content_parts(evidence_assets)
+            if evidence_assets is not None
+            else ()
+        )
         prepared = self._prepare(
             node_name=node_name,
             case_data=case_data,
@@ -202,7 +217,7 @@ class HarnessModelRunner:
             output_type=output_type,
             prepared=prepared,
             visible_fields=visible_fields,
-            multimodal_parts=multimodal_parts or (),
+            user_content_parts=user_content_parts,
         )
         capture = InvocationMetadataCapture()
         state = {"human_prompt": prepared.user_prompt}
@@ -251,7 +266,7 @@ class HarnessModelRunner:
         context_sections: list[PromptSection] | None,
         context_pack: ContextPack | None,
         max_input_tokens: int | None,
-        agent_context: Any | None,
+        agent_context: AgentInvocationContext | None,
         prompt_profile_id: str | None,
     ) -> _PreparedHarnessInvocation:
         assembled_context = self._context_window.assemble(
@@ -262,11 +277,25 @@ class HarnessModelRunner:
             ),
             max_input_tokens=max_input_tokens,
         )
-        raw_trusted_context = _trusted_agent_context_mapping(agent_context)
-        trusted_context = _trusted_agent_context_payload(agent_context)
-        resolved_prompt_profile_id = prompt_profile_id or trusted_context.get(
-            "prompt_profile_id"
-        )
+        validated_agent_context = _validated_agent_context(agent_context)
+        raw_trusted_context = _trusted_agent_context_mapping(validated_agent_context)
+        trusted_context = _trusted_agent_context_payload(validated_agent_context)
+        if validated_agent_context is None:
+            if prompt_profile_id is not None:
+                raise ValueError(
+                    "explicit prompt profile requires a validated agent context"
+                )
+            resolved_prompt_profile_id = None
+        else:
+            signed_prompt_profile_id = validated_agent_context.prompt_profile_id
+            if (
+                prompt_profile_id is not None
+                and prompt_profile_id != signed_prompt_profile_id
+            ):
+                raise ValueError(
+                    "explicit prompt profile conflicts with trusted agent context"
+                )
+            resolved_prompt_profile_id = signed_prompt_profile_id
         enriched_case_data = {
             **case_data,
             "harness_context": assembled_context.as_prompt_payload(),
@@ -303,7 +332,7 @@ class HarnessModelRunner:
         output_type: type[T],
         prepared: _PreparedHarnessInvocation,
         visible_fields: tuple[VisibleFieldSpec, ...],
-        multimodal_parts: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+        user_content_parts: tuple[dict[str, Any], ...],
     ):
         lens = StateLens(
             name=f"{node_name}.harness_lens",
@@ -331,7 +360,7 @@ class HarnessModelRunner:
             profile=profile,
             policy=policy,
             visible_fields=visible_fields,
-            user_content_parts=tuple(dict(part) for part in multimodal_parts),
+            user_content_parts=tuple(dict(part) for part in user_content_parts),
         )
         return build_model_node(
             spec,
@@ -340,13 +369,15 @@ class HarnessModelRunner:
 
 
 # 所属模块：Agent Harness > 模型执行中枢 > 可信调用上下文最小披露。
-# 具体功能：`_trusted_agent_context_payload` 接受 Pydantic 或 dict 调用上下文，只复制案件、房间、参与方、Agent、会话范围与 Prompt Profile 等显式字段；未知对象返回空字典。
+# 具体功能：`_trusted_agent_context_payload` 只接受重新校验过的 AgentInvocationContext，并仅复制案件、房间、参与方、Agent、会话范围与 Prompt Profile 等显式字段。
 # 上下游：上游是 Java 签发的 AgentInvocationContext；下游是 PromptComposer 的 `<trusted_agent_context>` system 片段和角色模板选择。
 # 系统意义：即使服务端上下文整体可信，也不能随模型演进自动暴露 tenant、权限细节、密钥或未来新增敏感字段；白名单要求新增披露经过代码审查。
-def _trusted_agent_context_payload(agent_context: Any | None) -> dict[str, Any]:
+def _trusted_agent_context_payload(
+    agent_context: AgentInvocationContext | None,
+) -> dict[str, Any]:
     """只把白名单字段注入 prompt。
 
-    agent_context 是可信系统上下文，但也不能整包塞给模型。这里显式列出允许暴露的字段，
+    agent_context 是已校验的可信系统上下文，但也不能整包塞给模型。这里显式列出允许暴露的字段，
     防止未来新增敏感字段时自动进入 prompt。
     """
 
@@ -373,11 +404,21 @@ def _trusted_agent_context_payload(agent_context: Any | None) -> dict[str, Any]:
     }
 
 
-def _trusted_agent_context_mapping(agent_context: Any | None) -> dict[str, Any]:
-    if isinstance(agent_context, BaseModel):
+def _validated_agent_context(
+    agent_context: Any | None,
+) -> AgentInvocationContext | None:
+    if type(agent_context) is not AgentInvocationContext:
+        return None
+    return AgentInvocationContext.model_validate(
+        agent_context.model_dump(mode="python")
+    )
+
+
+def _trusted_agent_context_mapping(
+    agent_context: AgentInvocationContext | None,
+) -> dict[str, Any]:
+    if type(agent_context) is AgentInvocationContext:
         return agent_context.model_dump(mode="python")
-    if isinstance(agent_context, dict):
-        return dict(agent_context)
     return {}
 
 

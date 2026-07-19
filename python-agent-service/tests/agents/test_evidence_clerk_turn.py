@@ -14,6 +14,8 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from app.config import Settings
+from app.harness.evidence_asset_loader import LoadedEvidenceAssets
+from app.harness.invocation_context import AgentInvocationContext
 from app.harness.prompt_composer import PromptRepository
 from app.main import create_app
 
@@ -592,6 +594,7 @@ class FakeEvidenceRunner:
         context_pack=None,
         agent_context=None,
         prompt_profile_id=None,
+        evidence_assets=None,
     ):
         resolved_sections = (
             context_pack.prompt_sections() if context_pack is not None else context_sections
@@ -605,6 +608,7 @@ class FakeEvidenceRunner:
                 "context_pack": context_pack,
                 "agent_context": agent_context,
                 "prompt_profile_id": prompt_profile_id,
+                "evidence_assets": evidence_assets,
             }
         )
         return SimpleNamespace(
@@ -814,7 +818,9 @@ def test_evidence_turn_workflow_uses_harness_node_with_memory_dossier_and_eviden
         "EVIDENCE_signature_photo"
     )
     assert actor_visible_evidence["items"][0]["source_type"] == "USER"
-    assert runner.calls[0]["agent_context"]["agent_session_id"] == (
+    trusted_context = runner.calls[0]["agent_context"]
+    assert isinstance(trusted_context, AgentInvocationContext)
+    assert trusted_context.agent_session_id == (
         "SESSION_CASE_evidence_turn_llm_USER_evidence"
     )
     assert runner.calls[0]["prompt_profile_id"] == "EVIDENCE_CLERK:USER:v1"
@@ -898,7 +904,9 @@ def test_evidence_turn_workflow_places_asset_manifest_in_context_pack() -> None:
     observation = json.loads(sections["multimodal_observation"])
     assert observation["manifest"]["loaded_image_count"] == 1
     assert observation["manifest"]["items"][0]["visual_input_status"] == "LOADED"
-    assert call["multimodal_parts"][1]["type"] == "image_url"
+    evidence_assets = call["evidence_assets"]
+    assert isinstance(evidence_assets, LoadedEvidenceAssets)
+    assert evidence_assets.content_parts[1]["type"] == "image_url"
     assert result.evidence_assessments[0].analysis_method == "HYBRID"
     assert len(result.fact_matrix_patch) == 1
     assert result.fact_matrix_patch[0].operation == "UPSERT_LINK"
@@ -1775,7 +1783,7 @@ def test_evidence_asset_loader_blocks_declared_image_with_invalid_magic() -> Non
 # 具体功能：`test_evidence_asset_loader_marks_missing_hash_as_provenance_gap` 读取并按案件、角色或会话范围筛选当前可见证据；关键协作调用：`base64.b64decode`、`load`、`EvidenceTurnRequest.model_validate`。
 # 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_java_evidence_turn_command_payload`。
 # 系统意义：固定“Agent 角色能力 > test_evidence_clerk_turn”的可观察契约，防止后续重构改变业务结果。
-def test_evidence_asset_loader_marks_missing_hash_as_provenance_gap() -> None:
+def test_evidence_asset_loader_blocks_missing_hash_from_model_input() -> None:
     from app.harness.evidence_asset_loader import EvidenceAssetLoader
     from app.schemas import EvidenceTurnRequest
 
@@ -1796,10 +1804,35 @@ def test_evidence_asset_loader_marks_missing_hash_as_provenance_gap() -> None:
         ),
     ).load(envelope)
 
-    assert loaded.manifest["loaded_image_count"] == 1
-    assert loaded.manifest["items"][0]["visual_input_status"] == (
-        "LOADED_WITHOUT_HASH"
+    assert loaded.content_parts == ()
+    assert loaded.manifest["loaded_image_count"] == 0
+    assert loaded.manifest["items"][0]["visual_input_status"] == "HASH_MISSING"
+
+
+def test_evidence_asset_loader_blocks_invalid_hash_from_model_input() -> None:
+    from app.harness.evidence_asset_loader import EvidenceAssetLoader
+    from app.schemas import EvidenceTurnRequest
+
+    image = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
     )
+    payload = _java_evidence_turn_command_payload()
+    evidence = payload["context_envelope"]["visible_evidence"][0]
+    evidence["content_type"] = "image/png"
+    evidence["desensitized"] = True
+    evidence["file_hash"] = "not-a-sha256"
+    envelope = EvidenceTurnRequest.model_validate(payload).context_envelope
+    loaded = EvidenceAssetLoader(
+        java_api_service_url="http://java-api-service:8080",
+        java_service_secret="test-java-service-secret",
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, content=image)
+        ),
+    ).load(envelope)
+
+    assert loaded.content_parts == ()
+    assert loaded.manifest["loaded_image_count"] == 0
+    assert loaded.manifest["items"][0]["visual_input_status"] == "HASH_INVALID"
 
 
 # 所属模块：Agent 角色能力 > test_evidence_clerk_turn；函数角色：回归测试用例。
