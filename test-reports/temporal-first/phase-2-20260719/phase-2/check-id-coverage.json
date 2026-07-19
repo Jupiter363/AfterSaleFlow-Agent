@@ -1,0 +1,68 @@
+{
+  "schema_version": "temporal-first-check-id-coverage.v1",
+  "phase": 2,
+  "candidate_commit": "7b93cccd7052cac8af7f98be8ec02a9897a3e673",
+  "scope": "OFF_SHADOW_ENGINEERING_ONLY",
+  "summary": {
+    "PASS_ENGINEERING": 26,
+    "PARTIAL_ENGINEERING": 7,
+    "PENDING_PHASE_3": 3,
+    "PENDING_PHASE_8": 2,
+    "PENDING_EXTERNAL": 2,
+    "PENDING_PROMOTION": 1,
+    "BASELINE_PENDING_UNIFIED_CHECKPOINT": 2,
+    "total": 43
+  },
+  "checks": [
+    {"id":"RUN-001","status":"PASS_ENGINEERING","evidence":["AgentRunV2MigrationIntegrationTest","AgentRunFormalResultCommitterTest"]},
+    {"id":"RUN-002","status":"PASS_ENGINEERING","evidence":["AgentRunV2MigrationIntegrationTest","AgentRunAttemptRepositoryIntegrationTest"]},
+    {"id":"RUN-003","status":"PASS_ENGINEERING","evidence":["AgentRunAttemptEntityTest","AgentRunAttemptRepositoryIntegrationTest"]},
+    {"id":"RUN-004","status":"PASS_ENGINEERING","evidence":["AgentRunWorkerRecoveryTest","AgentRunLogicalAttemptWorkflowTest"]},
+    {"id":"RUN-005","status":"PENDING_PHASE_3","evidence":["DurableAgentRunExecutionGatewayTest#treatsTransportLossAfterFinalAsReplaySafeWithoutPersistingFinal"],"note":"Production Python command ledger and transport do not exist yet."},
+    {"id":"RUN-006","status":"PASS_ENGINEERING","evidence":["AgentRunWorkerRecoveryTest#finalizerRetryDoesNotReexecuteTheCompletedModelActivity","AgentRunFormalResultCommitterTest"]},
+    {"id":"RUN-007","status":"PASS_ENGINEERING","evidence":["ExecuteAgentRunActivityHeartbeatTest","ExecuteAgentRunActivityTest"]},
+    {"id":"RUN-008","status":"PASS_ENGINEERING","evidence":["AgentRunRecoverySchedulerTest","AgentRunV2PropertiesTest","AgentRunV2ApplicationContextTest"]},
+    {"id":"RUN-009","status":"PASS_ENGINEERING","evidence":["AgentRunStreamReplayIntegrationTest","AgentRunV2MigrationIntegrationTest"]},
+
+    {"id":"STREAM-001","status":"PASS_ENGINEERING","evidence":["AgentRunV2ContractTest","test_streaming_v2.py"]},
+    {"id":"STREAM-002","status":"PASS_ENGINEERING","evidence":["AgentRunLifecycleServiceTest","agentStream.test.js"]},
+    {"id":"STREAM-003","status":"PASS_ENGINEERING","evidence":["agentStream.test.js","AgentStreamingMessage.test.js"]},
+    {"id":"STREAM-004","status":"PASS_ENGINEERING","evidence":["DurableAgentRunExecutionGatewayTest","AgentRunFormalResultCommitterTest"]},
+    {"id":"STREAM-005","status":"PASS_ENGINEERING","evidence":["AgentNdjsonStreamClientV2Test","test_streaming.py","test_streaming_v2.py"]},
+    {"id":"STREAM-006","status":"PASS_ENGINEERING","evidence":["agentStream.test.js","AgentRunStreamEventServiceTest"]},
+    {"id":"STREAM-007","status":"PARTIAL_ENGINEERING","evidence":["test_streaming_v2.py#test_delta_coalescer_batches_only_compatible_bounded_deltas","DurableAgentRunExecutionGatewayTest#persistsRealBoundedBatchesBeforeProgressAndPassesExecutionMode"],"note":"Bounded components exist; the Phase 3 production graph transport must wire the coalescer."},
+    {"id":"STREAM-008","status":"PARTIAL_ENGINEERING","evidence":["DurableAgentRunExecutionGatewayTest","AgentRunStreamReplayIntegrationTest"],"note":"Production appendBatch is used by the gateway; 100-call load-budget evidence remains pending."},
+    {"id":"STREAM-009","status":"PASS_ENGINEERING","evidence":["AgentRunStreamEventServiceTest#slowConsumerIsDisconnectedAfterABoundedCatchUpBatch","streamTextPacer.test.js"]},
+    {"id":"STREAM-010","status":"PASS_ENGINEERING","evidence":["AgentRunLiveWakeupIntegrationTest","RedisAgentRunStreamWakeupSubscriberTest"]},
+    {"id":"STREAM-011","status":"PASS_ENGINEERING","evidence":["AgentRunLiveWakeupIntegrationTest","AgentRunStreamReplayIntegrationTest"]},
+    {"id":"STREAM-012","status":"PENDING_PHASE_8","evidence":["AgentRunStreamRetentionManifestTest"],"note":"Partitioning, compression and hot-retention deletion are Phase 8 work."},
+    {"id":"STREAM-013","status":"PENDING_PHASE_8","evidence":["AgentRunStreamRetentionManifestTest"],"note":"Archive verification and partition deletion are Phase 8 work."},
+
+    {"id":"JAVA-007","status":"PARTIAL_ENGINEERING","evidence":["AgentRunV2FinalizationGatewayTest","AgentRunV2ManifestFactoryTest"],"note":"Real room facts providers and every domain committer are not assembled yet."},
+    {"id":"JAVA-008","status":"PASS_ENGINEERING","evidence":["AgentRunFormalResultCommitterTest","AgentExecutionManifestEntityTest"]},
+    {"id":"JAVA-009","status":"PARTIAL_ENGINEERING","evidence":["AgentRunFormalResultCommitterTest"],"note":"The generic transaction boundary is covered; real room transaction committers arrive in later room phases."},
+    {"id":"JAVA-010","status":"PARTIAL_ENGINEERING","evidence":["DurableAgentRunExecutionGatewayTest","AgentRunLifecycleServiceTest"],"note":"Protocol rejection is covered, but real room committers are not active in Phase 2."},
+
+    {"id":"E2E-004","status":"PENDING_PHASE_3","evidence":["DurableAgentRunExecutionGatewayTest#treatsTransportLossAfterFinalAsReplaySafeWithoutPersistingFinal"],"note":"Requires the PostgreSQL Graph command ledger."},
+    {"id":"E2E-005","status":"PASS_ENGINEERING","evidence":["AgentRunWorkerRecoveryTest#finalizerRetryDoesNotReexecuteTheCompletedModelActivity","AgentRunLogicalAttemptWorkflowTest"]},
+    {"id":"E2E-006","status":"PARTIAL_ENGINEERING","evidence":["AgentRunV2FinalizationGatewayTest","AgentRunV2CoordinatorTest"],"note":"Run and fence rejection is covered; production stage and snapshot facts providers remain pending."},
+
+    {"id":"HA-001","status":"PENDING_EXTERNAL","evidence":[],"note":"No real Java API pod kill/reconnect exercise was run."},
+    {"id":"HA-002","status":"PENDING_EXTERNAL","evidence":["AgentRunWorkerRecoveryTest"],"note":"Recovery semantics are covered; no real compatible Worker kill/takeover was run."},
+    {"id":"HA-007","status":"PASS_ENGINEERING","evidence":["AgentRunLiveWakeupIntegrationTest","RedisAgentRunStreamWakeupPublisherTest"],"note":"Synthetic complete Redis loss preserves PostgreSQL replay; real cluster failover remains a promotion exercise."},
+
+    {"id":"CORE-004","status":"PASS_ENGINEERING","evidence":["AgentRunStreamEventServiceTest","agentStream.test.js","test_streaming.py"]},
+    {"id":"CORE-005","status":"PASS_ENGINEERING","evidence":["agentStream.test.js","AgentRunLifecycleServiceTest"]},
+    {"id":"CORE-006","status":"PASS_ENGINEERING","evidence":["AgentNdjsonStreamClientV2Test","test_streaming.py"]},
+    {"id":"CORE-007","status":"PASS_ENGINEERING","evidence":["AgentNdjsonStreamClientV2Test","test_streaming_v2.py","agentStream.test.js"]},
+    {"id":"CORE-008","status":"PASS_ENGINEERING","evidence":["DurableAgentRunExecutionGatewayTest","AgentRunFormalResultCommitterTest"]},
+    {"id":"CORE-009","status":"PASS_ENGINEERING","evidence":["AgentRunLifecycleServiceTest","agentStream.test.js","AgentStreamingMessage.test.js"]},
+
+    {"id":"SEC-001","status":"BASELINE_PENDING_UNIFIED_CHECKPOINT","evidence":[],"note":"Full controller authorization and cross-scope baseline is reserved for the unified checkpoint."},
+    {"id":"SEC-002","status":"PENDING_PHASE_3","evidence":["AgentPlatformContractV1Test"],"note":"mTLS plus signed expiry/nonce envelope is Phase 3 work."},
+    {"id":"SEC-004","status":"PARTIAL_ENGINEERING","evidence":["agentStream.test.js#requires a valid V2 audience and enforces it for non-admin actors","AgentNdjsonStreamClientV2Test"],"note":"V2 audience checks pass; full role matrix remains in the unified checkpoint."},
+    {"id":"UI-004","status":"BASELINE_PENDING_UNIFIED_CHECKPOINT","evidence":["AgentStreamingMessage.test.js"],"note":"Attempt/reset rendering passes; long-file, long-error and 1500-character courtroom layout remain in the UI checkpoint."},
+
+    {"id":"MIG-002","status":"PENDING_PROMOTION","evidence":["batch-3-junit.xml","phase-metrics.json"],"note":"Engineering is green under OFF/SHADOW. Promotion requires open checks, external approval, and cutover evidence."}
+  ]
+}

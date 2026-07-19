@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites name="vitest tests" tests="35" failures="0" errors="0" time="0.7716621">
+    <testsuite name="src/api/agentStream.test.js" timestamp="2026-07-19T06:03:48.974Z" hostname="LAPTOP-VJM9RQM6" tests="27" failures="0" errors="0" skipped="0" time="0.0215682">
+        <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; discovers active room runs after refresh with actor isolation headers" time="0.0052444">
+        </testcase>
+        <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; accepts both Java camelCase and public snake_case run descriptors" time="0.001084">
+        </testcase>
+        <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; normalizes the persisted Java SSE event view" time="0.0007986">
+        </testcase>
+        <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; normalizes attempt-scoped V2 reset cursors without collapsing them to numbers" time="0.0003277">
+        </testcase>
+        <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; rejects a missing sequence instead of coercing it" time="0.0003199">
+        </testcase>
+        <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; rejects a string sequence instead of coercing it" time="0.0002521">
+        </testcase>
+        <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; rejects a noninteger sequence instead of coercing it" time="0.0002065">
+        </testcase>
+        <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; rejects a negative sequence instead of coercing it" time="0.0001653">
+        </testcase>
+        <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; rejects a unsafe sequence instead of coercing it" time="0.0001389">
+        </testcase>
+        <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; rejects missing V1 cursor" time="0.0002708">
+        </testcase>
+        <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; rejects noncanonical V1 cursor" time="0.0001259">
+        </testcase>
+        <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; rejects wrong V1 sequence" time="0.0001005">
+        </testcase>
+        <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; rejects missing V2 cursor" time="0.0000991">
+        </testcase>
+        <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; rejects wrong V2 attempt" time="0.0001207">
+        </testcase>
+        <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; rejects noncanonical V2 sequence" time="0.0001007">
+        </testcase>
+        <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; requires a declared run id instead of filling it from the descriptor" time="0.0001525">
+        </testcase>
+        <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; rejects a missing V2 attempt id" time="0.0001949">
+        </testcase>
+        <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; rejects a non-string V2 attempt id" time="0.0001336">
+        </testcase>
+        <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; fails closed on conflicting protocol aliases" time="0.0001685">
+        </testcase>
+        <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; fails closed on conflicting run aliases" time="0.0000887">
+        </testcase>
+        <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; fails closed on conflicting attempt aliases" time="0.0002208">
+        </testcase>
+        <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; fails closed on conflicting sequence aliases" time="0.000138">
+        </testcase>
+        <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; fails closed on conflicting cursor sources" time="0.0001505">
+        </testcase>
+        <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; fails closed on conflicting SSE and payload event types" time="0.0001636">
+        </testcase>
+        <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; requires a valid V2 audience and enforces it for non-admin actors" time="0.000654">
+        </testcase>
+        <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; passes the consuming actor role into V2 audience validation" time="0.0067641">
+        </testcase>
+        <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; uses authenticated fetch, resumes at Last-Event-ID and stops at final" time="0.0017162">
+        </testcase>
+    </testsuite>
+    <testsuite name="src/stores/agentStream.test.js" timestamp="2026-07-19T06:03:48.987Z" hostname="LAPTOP-VJM9RQM6" tests="6" failures="0" errors="0" skipped="0" time="0.724271">
+        <testcase classname="src/stores/agentStream.test.js" name="agentStreamStore &gt; collects approved deltas and keeps the temporary message until final refresh completes" time="0.2543818">
+        </testcase>
+        <testcase classname="src/stores/agentStream.test.js" name="agentStreamStore &gt; does not render internal reasoning fields even if a malformed relay emits one" time="0.0193973">
+        </testcase>
+        <testcase classname="src/stores/agentStream.test.js" name="agentStreamStore &gt; clears the aborted attempt before revealing replacement attempt text" time="0.0905104">
+        </testcase>
+        <testcase classname="src/stores/agentStream.test.js" name="agentStreamStore &gt; replays an overflowed delta without duplicating received or durable fallback text" time="0.1081202">
+        </testcase>
+        <testcase classname="src/stores/agentStream.test.js" name="agentStreamStore &gt; commits a visible delta before an observer failure reconnects and replays it" time="0.1341229">
+        </testcase>
+        <testcase classname="src/stores/agentStream.test.js" name="agentStreamStore &gt; commits an attempt reset before observer failure replay" time="0.1164338">
+        </testcase>
+    </testsuite>
+    <testsuite name="src/utils/streamTextPacer.test.js" timestamp="2026-07-19T06:03:48.990Z" hostname="LAPTOP-VJM9RQM6" tests="1" failures="0" errors="0" skipped="0" time="0.0038697">
+        <testcase classname="src/utils/streamTextPacer.test.js" name="streamTextPacer bounded queue &gt; fails with a replayable slow-consumer signal before exceeding capacity" time="0.0028997">
+        </testcase>
+    </testsuite>
+    <testsuite name="src/components/room/AgentStreamingMessage.test.js" timestamp="2026-07-19T06:03:48.991Z" hostname="LAPTOP-VJM9RQM6" tests="1" failures="0" errors="0" skipped="0" time="0.0219532">
+        <testcase classname="src/components/room/AgentStreamingMessage.test.js" name="AgentStreamingMessage &gt; exposes the active V2 attempt and reset count without rendering discarded text" time="0.0210925">
+        </testcase>
+    </testsuite>
+</testsuites>
