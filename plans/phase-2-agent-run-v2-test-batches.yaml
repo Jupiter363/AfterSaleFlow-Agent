@@ -106,9 +106,10 @@ agents:
     required_test_classes_to_create:
       - ExecuteAgentRunActivityTest
       - ExecuteAgentRunActivityHeartbeatTest
-      - ExecuteAgentRunActivityCompletionLossTest
       - ExecuteAgentRunActivityCancellationTest
+      - DurableAgentRunExecutionGatewayTest
       - AgentRunWorkerRecoveryTest
+      - AgentRunLogicalAttemptWorkflowTest
     check_ids:
       - RUN-004
       - RUN-005
@@ -136,7 +137,6 @@ agents:
       java:
         - AgentNdjsonStreamClientV2Test
         - AgentRunStreamEventServiceTest
-        - AgentRunSlowConsumerTest
       python:
         - python-agent-service/tests/test_streaming_v2.py
       frontend:
@@ -165,12 +165,13 @@ agents:
     required_test_classes_to_create_or_update:
       - AgentRunCoordinatorTest
       - AgentRunLifecycleServiceTest
-      - AgentRunFinalizerIdempotencyIntegrationTest
-      - AgentRunFinalizerFenceIntegrationTest
+      - AgentRunFormalResultCommitterTest
+      - AgentExecutionManifestEntityTest
+      - AgentRunV2FinalizationGatewayTest
       - AgentRunRecoverySchedulerTest
       - TemporalWorkerConfigurationTest
       - AgentRunV2ApplicationContextTest
-      - AgentRunV1V2CompatibilityTest
+      - AgentRunStreamEventServiceTest
     check_ids:
       - JAVA-007
       - JAVA-008
@@ -235,17 +236,21 @@ batches:
     java_test_classes:
       - AgentRunV2MigrationIntegrationTest
       - AgentRunAttemptRepositoryIntegrationTest
-      - AgentRunFinalizerIdempotencyIntegrationTest
-      - AgentRunFinalizerFenceIntegrationTest
-      - ExecuteAgentRunActivityCompletionLossTest
+      - AgentExecutionManifestEntityTest
+      - AgentRunFormalResultCommitterTest
+      - AgentRunV2FinalizationGatewayTest
+      - DurableAgentRunExecutionGatewayTest
+      - ExecuteAgentRunActivityTest
       - ExecuteAgentRunActivityCancellationTest
       - AgentRunWorkerRecoveryTest
+      - AgentRunLogicalAttemptWorkflowTest
       - AgentRunStreamReplayIntegrationTest
       - AgentRunLiveWakeupIntegrationTest
-      - AgentRunSlowConsumerTest
+      - AgentRunStreamEventServiceTest
       - AgentRunRecoverySchedulerTest
+      - AgentRunLifecycleServiceTest
       - AgentRunV2ApplicationContextTest
-      - AgentRunV1V2CompatibilityTest
+      - TemporalAgentRunV2WorkflowLauncherTest
     python_tests:
       - python-agent-service/tests/test_streaming.py
       - python-agent-service/tests/test_streaming_v2.py
@@ -324,3 +329,21 @@ failure_policy:
     - weakening_assertions_for_green
     - merging_results_from_different_commits
     - allowing_multiple_v2_executors
+
+scenario_coverage:
+  finalizer_idempotency:
+    - AgentRunFormalResultCommitterTest#committedReplayReturnsSameReceiptWithoutCallingDomainWriterAgain
+    - AgentExecutionManifestEntityTest#storeCommitsOneHashBoundManifestAndReplaysTheSameReceipt
+    - AgentRunWorkerRecoveryTest#finalizerRetryDoesNotReexecuteTheCompletedModelActivity
+  finalizer_fence:
+    - AgentRunFormalResultCommitterTest#staleStageReceiptFailsClosedBeforeManifestAppend
+    - AgentRunV2FinalizationGatewayTest#rejectsAStaleFenceBeforeManifestConstructionOrFormalCommit
+  activity_completion_loss:
+    - AgentRunWorkerRecoveryTest#finalizerRetryDoesNotReexecuteTheCompletedModelActivity
+    - AgentRunWorkerRecoveryTest#temporalActivityRecoveryKeepsTheAttemptAndCommandIdentityStable
+  slow_consumer:
+    - AgentRunStreamEventServiceTest#slowConsumerIsDisconnectedAfterABoundedCatchUpBatch
+  v1_v2_compatibility:
+    - AgentRunLifecycleServiceTest#legacyClaimRejectsATemporalOwnedV2Run
+    - AgentRunRecoverySchedulerTest#executorModeClaimsOnlyLegacyV1Rows
+    - AgentRunRecoverySchedulerTest#detectorModeObservesV2RowsWithoutExecutingOrFailingThem
