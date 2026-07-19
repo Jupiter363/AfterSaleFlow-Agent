@@ -191,6 +191,12 @@ public class AgentRunEntity extends AbstractEntity {
     @Column(name = "request_hash", length = 64)
     private String requestHash;
 
+    @Column(name = "lineage_schema_version", length = 64)
+    private String lineageSchemaVersion;
+
+    @Column(name = "logical_input_hash", length = 64)
+    private String logicalInputHash;
+
     @Column(name = "attempt_limit", nullable = false)
     private int attemptLimit;
 
@@ -907,6 +913,14 @@ public class AgentRunEntity extends AbstractEntity {
 
     public String getRequestHash() {
         return requestHash;
+    }
+
+    public String getLogicalInputHash() {
+        return logicalInputHash;
+    }
+
+    public String getLineageSchemaVersion() {
+        return lineageSchemaVersion;
     }
 
     public int getAttemptLimit() {

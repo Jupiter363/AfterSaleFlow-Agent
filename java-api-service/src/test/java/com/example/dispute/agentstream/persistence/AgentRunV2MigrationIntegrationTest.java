@@ -60,7 +60,7 @@ class AgentRunV2MigrationIntegrationTest {
                         .dataSource(jdbcUrl, USERNAME, PASSWORD)
                         .locations("classpath:db/migration")
                         .load();
-        assertThat(latest.migrate().migrationsExecuted).isOne();
+        assertThat(latest.migrate().migrationsExecuted).isEqualTo(2);
         assertThat(latest.migrate().migrationsExecuted).isZero();
 
         try (Connection connection = DriverManager.getConnection(jdbcUrl, USERNAME, PASSWORD)) {
@@ -95,9 +95,15 @@ class AgentRunV2MigrationIntegrationTest {
                                     connection,
                                     "select to_jsonb(manifest)::text from agent_execution_manifest manifest where id = 'MANIFEST_LEGACY_V2'"))
                     .isEqualTo(manifestBefore);
+            assertThat(
+                            scalar(
+                                    connection,
+                                    "select coalesce(lineage_schema_version, 'legacy') from agent_run_attempt where id = 'RUN_LEGACY_V2'"))
+                    .isEqualTo("legacy");
 
             assertRollbackV1WriterCompatibility(connection);
             assertV2Uniqueness(connection);
+            assertLineageConstraints(connection);
         }
     }
 
@@ -331,6 +337,83 @@ class AgentRunV2MigrationIntegrationTest {
                 """.formatted(id, attemptId, sequenceNo);
     }
 
+    private static void assertLineageConstraints(Connection connection) throws SQLException {
+        try (var statement = connection.createStatement()) {
+            statement.executeUpdate(
+                    """
+                    update agent_run
+                    set lineage_schema_version = 'agent-run-lineage.v1',
+                        logical_input_hash = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+                    where id = 'RUN_DB_V2'
+                    """);
+            statement.executeUpdate(
+                    lineageAttemptInsert(
+                            "ATTEMPT_DB_V2_3",
+                            3,
+                            "COMMAND_DB_V2_3",
+                            "ATTEMPT_DB_V2_2",
+                            true,
+                            1));
+        }
+
+        assertUniqueViolation(
+                connection,
+                lineageAttemptInsert(
+                        "ATTEMPT_DB_V2_4_DUP_COMMAND",
+                        4,
+                        "COMMAND_DB_V2_3",
+                        "ATTEMPT_DB_V2_3",
+                        false,
+                        0),
+                "uq_agent_run_attempt_command");
+        assertCheckViolation(
+                connection,
+                lineageAttemptInsert(
+                        "ATTEMPT_DB_V2_4_BAD_OFFSET",
+                        4,
+                        "COMMAND_DB_V2_4",
+                        "ATTEMPT_DB_V2_3",
+                        true,
+                        0),
+                "ck_agent_run_attempt_sequence_offset");
+    }
+
+    private static String lineageAttemptInsert(
+            String id,
+            long attemptNo,
+            String commandId,
+            String previousAttemptId,
+            boolean resetRequired,
+            int publicSequenceOffset) {
+        return """
+                insert into agent_run_attempt (
+                    id, agent_run_id, attempt_no, attempt_status, executor_kind,
+                    graph_key, graph_version, checkpoint_schema_version,
+                    model_profile_id, prompt_version, output_schema_version,
+                    policy_version, guardrail_version, request_hash,
+                    lineage_schema_version, command_id, command_request_hash,
+                    logical_input_hash, command_json, previous_attempt_id,
+                    reset_required, public_sequence_offset, started_at, created_by
+                ) values (
+                    '%s', 'RUN_DB_V2', %d, 'RUNNING', 'TEMPORAL_ACTIVITY',
+                    'evidence.graph', 'graph-v2', 'checkpoint-v2',
+                    'model-v2', 'prompt-v2', 'result-v1', 'policy-v2', 'guardrail-v2',
+                    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                    'agent-run-attempt-lineage.v1', '%s',
+                    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                    'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                    '{"command_id":"%s"}', '%s', %s, %d, now(), 'migration-test'
+                )
+                """.formatted(
+                id,
+                attemptNo,
+                commandId,
+                commandId,
+                previousAttemptId,
+                resetRequired,
+                publicSequenceOffset);
+    }
+
     private static void assertUniqueViolation(
             Connection connection, String sql, String constraint) {
         assertThatThrownBy(() -> connection.createStatement().executeUpdate(sql))
@@ -339,6 +422,18 @@ class AgentRunV2MigrationIntegrationTest {
                         failure -> {
                             SQLException sqlFailure = (SQLException) failure;
                             assertThat(sqlFailure.getSQLState()).isEqualTo("23505");
+                            assertThat(sqlFailure.getMessage()).contains(constraint);
+                        });
+    }
+
+    private static void assertCheckViolation(
+            Connection connection, String sql, String constraint) {
+        assertThatThrownBy(() -> connection.createStatement().executeUpdate(sql))
+                .isInstanceOf(SQLException.class)
+                .satisfies(
+                        failure -> {
+                            SQLException sqlFailure = (SQLException) failure;
+                            assertThat(sqlFailure.getSQLState()).isEqualTo("23514");
                             assertThat(sqlFailure.getMessage()).contains(constraint);
                         });
     }

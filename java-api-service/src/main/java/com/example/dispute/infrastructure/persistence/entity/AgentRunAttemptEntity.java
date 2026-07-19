@@ -81,6 +81,34 @@ public class AgentRunAttemptEntity extends AbstractEntity {
     @Column(name = "request_hash", length = 64)
     private String requestHash;
 
+    @Column(name = "lineage_schema_version", length = 64)
+    private String lineageSchemaVersion;
+
+    @Column(name = "command_id", length = 128)
+    private String commandId;
+
+    @Column(name = "command_request_hash", length = 64)
+    private String commandRequestHash;
+
+    @Column(name = "logical_input_hash", length = 64)
+    private String logicalInputHash;
+
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "command_json", columnDefinition = "jsonb")
+    private String commandJson;
+
+    @Column(name = "previous_attempt_id", length = 128)
+    private String previousAttemptId;
+
+    @Column(name = "reset_required", nullable = false)
+    private boolean resetRequired;
+
+    @Column(name = "public_sequence_offset", nullable = false)
+    private int publicSequenceOffset;
+
+    @Column(name = "termination_code", length = 128)
+    private String terminationCode;
+
     @Column(name = "result_hash", length = 64)
     private String resultHash;
 
@@ -404,6 +432,42 @@ public class AgentRunAttemptEntity extends AbstractEntity {
 
     public String getRequestHash() {
         return requestHash;
+    }
+
+    public String getLineageSchemaVersion() {
+        return lineageSchemaVersion;
+    }
+
+    public String getCommandId() {
+        return commandId;
+    }
+
+    public String getCommandRequestHash() {
+        return commandRequestHash;
+    }
+
+    public String getLogicalInputHash() {
+        return logicalInputHash;
+    }
+
+    public String getCommandJson() {
+        return commandJson;
+    }
+
+    public String getPreviousAttemptId() {
+        return previousAttemptId;
+    }
+
+    public boolean isResetRequired() {
+        return resetRequired;
+    }
+
+    public int getPublicSequenceOffset() {
+        return publicSequenceOffset;
+    }
+
+    public String getTerminationCode() {
+        return terminationCode;
     }
 
     public String getResultHash() {
