@@ -9,10 +9,14 @@ import pytest
 from app.contracts.v1.codec import canonical_sha256
 from app.contracts.v1.models import AgentStreamEvent, RoomGraphCommand
 from app.graph_runtime.errors import (
+    GraphCommandAbortedError,
+    GraphCommandCancelledError,
+    GraphCommandNotFoundError,
     GraphContractError,
     GraphGatewayDisabledError,
     GraphNewAgentAttemptRequiredError,
     GraphNonceReplayError,
+    GraphResultNotCommittedError,
     GraphThreadBindingError,
     GraphVersionUnavailableError,
 )
@@ -22,6 +26,7 @@ from app.graph_runtime.gateway import (
     GatewayAdmission,
     GatewayExecution,
     GraphCommandGateway,
+    ReconciliationDisposition,
 )
 from app.graph_runtime.identity import (
     ActorRole,
@@ -46,7 +51,9 @@ from app.graph_runtime.persistence_models import GraphFenceContext, GraphGateway
 from app.graph_runtime.registry import RegistryRecord, RegistryState, VersionBinding
 from app.security.invocation_envelope import (
     InvocationClaims,
+    ReconciliationClaims,
     VerifiedInvocation,
+    VerifiedReconciliation,
     invocation_binding_claims,
 )
 
@@ -143,6 +150,27 @@ def _verified(command: RoomGraphCommand) -> VerifiedInvocation:
     return VerifiedInvocation(
         claims=InvocationClaims.model_validate(claims),
         key_id="java-key-1",
+        request_hash=command.request_hash,
+        transport_certificate_sha256="c" * 64,
+    )
+
+
+def _verified_reconciliation(command: RoomGraphCommand) -> VerifiedReconciliation:
+    claims = {
+        "iss": "java-api-service",
+        "aud": "python-agent-service",
+        "sub": "graph-reconcile",
+        "capability": "RECONCILE_ONLY",
+        "original_envelope_key_id": command.invocation_context.envelope_key_id,
+        "iat": int(NOW.timestamp()),
+        "nbf": int(NOW.timestamp()),
+        "exp": int((NOW + timedelta(seconds=60)).timestamp()),
+        "jti": "reconcile-jti-1",
+        **invocation_binding_claims(command),
+    }
+    return VerifiedReconciliation(
+        claims=ReconciliationClaims.model_validate(claims),
+        key_id="java-key-2",
         request_hash=command.request_hash,
         transport_certificate_sha256="c" * 64,
     )
@@ -245,6 +273,20 @@ class _Threads:
             last_checkpoint_id=None,
         )
 
+    async def require_binding(
+        self,
+        connection: Any,
+        expected: ThreadIdentity,
+    ) -> ThreadRecord:
+        self.events.append("repo:thread-binding")
+        return ThreadRecord(
+            identity=expected,
+            lifecycle=self.lifecycle,
+            cognitive_revision=0,
+            last_checkpoint_ns=None,
+            last_checkpoint_id=None,
+        )
+
 
 class _Registry:
     def __init__(
@@ -258,6 +300,16 @@ class _Registry:
     async def load(self, connection: Any, **kwargs: Any) -> RegistryRecord:
         self.events.append("repo:registry")
         return replace(_registry(), state=self.state)
+
+    async def require_thread_restore(
+        self,
+        connection: Any,
+        **kwargs: Any,
+    ) -> RegistryRecord:
+        self.events.append("repo:registry-restore")
+        record = replace(_registry(), state=self.state)
+        record.require_thread_restore()
+        return record
 
 
 class _Ledger:
@@ -274,7 +326,9 @@ class _Ledger:
         self.status = status
         self.created = created
 
-    async def register_with_nonce(self, connection: Any, *, binding: Any, nonce: Any) -> CommandRegistration:
+    async def register_with_nonce(
+        self, connection: Any, *, binding: Any, nonce: Any
+    ) -> CommandRegistration:
         self.events.append("repo:command+nonce")
         if self.replay:
             raise GraphNonceReplayError()
@@ -294,6 +348,46 @@ class _Ledger:
             revision=0,
         )
         return CommandRegistration(record, self.created)
+
+    async def consume_nonce_for_existing(
+        self,
+        connection: Any,
+        *,
+        binding: CommandBinding,
+        nonce: Any,
+    ) -> CommandRecord:
+        self.events.append("repo:existing-command+nonce")
+        return CommandRecord(
+            binding=binding,
+            status=self.status,
+            attempt_count=1,
+            fencing_token=1 if self.status is not CommandStatus.REGISTERED else None,
+            start_checkpoint_ns="",
+            start_checkpoint_id="checkpoint-start",
+            committed_checkpoint_ns=(
+                ""
+                if self.status in {CommandStatus.RESULT_CHECKPOINTED, CommandStatus.COMPLETED}
+                else None
+            ),
+            committed_checkpoint_id=(
+                "checkpoint-1"
+                if self.status in {CommandStatus.RESULT_CHECKPOINTED, CommandStatus.COMPLETED}
+                else None
+            ),
+            result_ref=(
+                "urn:after-sale-flow:graph-result:test"
+                if self.status in {CommandStatus.RESULT_CHECKPOINTED, CommandStatus.COMPLETED}
+                else None
+            ),
+            result_hash=(
+                "f" * 64
+                if self.status in {CommandStatus.RESULT_CHECKPOINTED, CommandStatus.COMPLETED}
+                else None
+            ),
+            error_code=None,
+            error_classification=None,
+            revision=1,
+        )
 
     async def referenced_verification_key_ids(self, connection: Any) -> frozenset[str]:
         self.events.append("repo:kids")
@@ -492,6 +586,231 @@ async def test_disabled_gateway_has_no_database_or_unsigned_fallback() -> None:
             verified_invocation=_verified(command),
             expected_thread=_thread(),
         )
+
+
+def _reconciliation_result(binding: CommandBinding) -> ResultRecord:
+    payload: dict[str, Any] = {
+        "schema_version": "room-graph-result.v1",
+        "command_id": binding.command_id,
+        "logical_run_id": "run-1",
+        "attempt_id": "attempt-1",
+        "graph_key": binding.graph_key,
+        "graph_version": binding.graph_version,
+        "checkpoint_id": "checkpoint-1",
+        "cognitive_revision": 1,
+        "status": "COMPLETED",
+        "public_event_proposals": [],
+        "artifact_operations": [],
+        "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+        "execution_metadata": {
+            "prompt_version": binding.profile.prompt_version,
+            "model_profile_id": binding.profile.model_profile_id,
+            "schema_version": binding.profile.output_schema_version,
+            "policy_version": binding.profile.policy_version,
+            "guardrail_version": binding.profile.guardrail_version,
+        },
+    }
+    payload["output_hash"] = canonical_sha256(payload)
+    return ResultRecord(
+        result_id="result-1",
+        thread_id=binding.thread_id,
+        command_id=binding.command_id,
+        request_hash=binding.request_hash,
+        result_schema_version="room-graph-result.v1",
+        checkpoint_ns="",
+        checkpoint_id="checkpoint-1",
+        cognitive_revision=1,
+        terminal_status="COMPLETED",
+        result_json=payload,
+        result_ref=f"urn:after-sale-flow:graph-result:{payload['output_hash']}",
+        result_hash=payload["output_hash"],
+        usage_json={"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+    )
+
+
+class _ReconcileRecovery:
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+        self.calls = 0
+
+    async def reconcile_terminal(
+        self,
+        connection: Any,
+        *,
+        binding: CommandBinding,
+        owner_id: str,
+    ) -> tuple[CommandRecord, ResultRecord]:
+        self.events.append("recovery:terminal")
+        self.calls += 1
+        result = _reconciliation_result(binding)
+        return (
+            CommandRecord(
+                binding=binding,
+                status=CommandStatus.COMPLETED,
+                attempt_count=1,
+                fencing_token=2,
+                start_checkpoint_ns="",
+                start_checkpoint_id="checkpoint-start",
+                committed_checkpoint_ns=result.checkpoint_ns,
+                committed_checkpoint_id=result.checkpoint_id,
+                result_ref=result.result_ref,
+                result_hash=result.result_hash,
+                error_code=None,
+                error_classification=None,
+                revision=2,
+            ),
+            result,
+        )
+
+
+class _MissingExistingLedger(_Ledger):
+    async def consume_nonce_for_existing(self, connection: Any, **kwargs: Any) -> CommandRecord:
+        self.events.append("repo:existing-command-missing")
+        raise GraphCommandNotFoundError()
+
+
+def _reconciliation_gateway(
+    *,
+    status: CommandStatus,
+    registry_state: RegistryState = RegistryState.SHADOW,
+    ledger: _Ledger | None = None,
+) -> tuple[GraphCommandGateway, _Pool, _Audit, _ReconcileRecovery]:
+    pool = _Pool()
+    audit = _Audit()
+    selected_ledger = ledger or _Ledger(pool.events, status=status, created=False)
+    gateway = GraphCommandGateway(
+        mode=GraphGatewayMode.SHADOW,
+        pool=pool,
+        threads=_Threads(pool.events, ThreadLifecycle.RETIRED),  # type: ignore[arg-type]
+        registry=_Registry(pool.events, registry_state),  # type: ignore[arg-type]
+        ledger=selected_ledger,  # type: ignore[arg-type]
+        input_authorizer=_InputAuthorizer(pool.events),
+        audit_sink=audit,
+    )
+    recovery = _ReconcileRecovery(pool.events)
+    gateway._recovery = recovery  # type: ignore[assignment]
+    return gateway, pool, audit, recovery
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "disposition"),
+    [
+        (CommandStatus.COMPLETED, ReconciliationDisposition.RETURN_CACHED),
+        (
+            CommandStatus.RESULT_CHECKPOINTED,
+            ReconciliationDisposition.RECONCILED_TERMINAL,
+        ),
+    ],
+)
+async def test_reconcile_only_returns_exact_existing_result_without_execution_path(
+    status: CommandStatus,
+    disposition: ReconciliationDisposition,
+) -> None:
+    gateway, pool, audit, recovery = _reconciliation_gateway(
+        status=status,
+        registry_state=RegistryState.RETIRED,
+    )
+    command = _command()
+
+    reconciled = await gateway.reconcile_only(
+        command=command,
+        verified_reconciliation=_verified_reconciliation(command),
+        expected_thread=_thread(),
+        owner_id="worker-reconcile-1",
+    )
+
+    assert reconciled.disposition is disposition
+    assert reconciled.command.status is CommandStatus.COMPLETED
+    assert reconciled.result.result_hash == reconciled.command.result_hash
+    assert reconciled.registry.state is RegistryState.RETIRED
+    assert recovery.calls == 1
+    assert "input:authorized" not in pool.events
+    assert pool.events == [
+        "connection:enter",
+        "transaction:enter",
+        "repo:thread-binding",
+        "repo:registry-restore",
+        "repo:existing-command+nonce",
+        "recovery:terminal",
+        "transaction:commit",
+        "connection:exit",
+    ]
+    assert audit.events[-1].event_type == "graph.command.result_reconciled"
+    assert audit.events[-1].code == disposition.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "error_type"),
+    [
+        (CommandStatus.REGISTERED, GraphResultNotCommittedError),
+        (CommandStatus.EXECUTING, GraphNewAgentAttemptRequiredError),
+        (CommandStatus.CANCELLED, GraphCommandCancelledError),
+        (CommandStatus.ABORTED, GraphCommandAbortedError),
+    ],
+)
+async def test_reconcile_only_rejects_every_non_result_state_before_recovery(
+    status: CommandStatus,
+    error_type: type[Exception],
+) -> None:
+    gateway, pool, audit, recovery = _reconciliation_gateway(status=status)
+    command = _command()
+
+    with pytest.raises(error_type):
+        await gateway.reconcile_only(
+            command=command,
+            verified_reconciliation=_verified_reconciliation(command),
+            expected_thread=_thread(),
+            owner_id="worker-reconcile-1",
+        )
+
+    assert recovery.calls == 0
+    assert "transaction:rollback" in pool.events
+    assert audit.events[-1].event_type == "graph.command.result_rejected"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_only_missing_command_never_registers_or_executes() -> None:
+    pool = _Pool()
+    ledger = _MissingExistingLedger(pool.events, status=CommandStatus.COMPLETED)
+    gateway, pool, audit, recovery = _reconciliation_gateway(
+        status=CommandStatus.COMPLETED,
+        ledger=ledger,
+    )
+    ledger.events = pool.events
+    command = _command()
+
+    with pytest.raises(GraphCommandNotFoundError):
+        await gateway.reconcile_only(
+            command=command,
+            verified_reconciliation=_verified_reconciliation(command),
+            expected_thread=_thread(),
+            owner_id="worker-reconcile-1",
+        )
+
+    assert recovery.calls == 0
+    assert "repo:existing-command-missing" in pool.events
+    assert "repo:command+nonce" not in pool.events
+    assert audit.events[-1].code == "GRAPH_COMMAND_NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_only_rejects_execution_credential_before_database_access() -> None:
+    gateway, pool, audit, recovery = _reconciliation_gateway(status=CommandStatus.COMPLETED)
+    command = _command()
+
+    with pytest.raises(GraphThreadBindingError, match="credential type"):
+        await gateway.reconcile_only(
+            command=command,
+            verified_reconciliation=_verified(command),  # type: ignore[arg-type]
+            expected_thread=_thread(),
+            owner_id="worker-reconcile-1",
+        )
+
+    assert pool.events == []
+    assert recovery.calls == 0
+    assert audit.events[-1].code == "GRAPH_THREAD_BINDING_CONFLICT"
 
 
 def _execution() -> GatewayExecution:
@@ -781,7 +1100,9 @@ async def test_stream_reconciles_durable_result_before_yielding_final() -> None:
         ]
     )
 
-    events = [event async for event in gateway.execute_stream(execution=_execution(), executor=executor)]
+    events = [
+        event async for event in gateway.execute_stream(execution=_execution(), executor=executor)
+    ]
 
     assert [event.event_type for event in events] == ["attempt_started", "final"]
     assert gateway.reconciled is True
@@ -797,7 +1118,9 @@ async def test_attempt_aborted_is_durable_terminal_for_one_http_attempt() -> Non
         ]
     )
 
-    events = [event async for event in gateway.execute_stream(execution=_execution(), executor=executor)]
+    events = [
+        event async for event in gateway.execute_stream(execution=_execution(), executor=executor)
+    ]
 
     assert events[-1].event_type == "attempt_aborted"
     assert gateway.finished is True

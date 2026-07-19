@@ -9,6 +9,7 @@ import pytest
 from app.contracts.v1.codec import canonical_sha256, canonicalize
 from app.graph_runtime.errors import (
     GraphCommandHashConflictError,
+    GraphCommandNotFoundError,
     GraphCommandStateError,
     GraphNonceReplayError,
     GraphTerminalBindingError,
@@ -199,6 +200,39 @@ async def test_exact_jws_replay_is_rejected_even_for_idempotent_command() -> Non
             binding=binding,
             nonce=_nonce(),
         )
+
+
+@pytest.mark.asyncio
+async def test_existing_only_nonce_consumption_never_inserts_a_command() -> None:
+    binding = _binding()
+    connection = _Connection([_command_row(binding, status="COMPLETED"), {"jti": "jti-2"}])
+
+    command = await PostgresCommandLedger().consume_nonce_for_existing(
+        connection,
+        binding=binding,
+        nonce=_nonce("jti-2"),
+    )
+
+    assert command.status is CommandStatus.COMPLETED
+    assert "select" in connection.calls[0][0]
+    assert "for update" in connection.calls[0][0]
+    assert "insert into agent_graph_command " not in connection.calls[0][0]
+    assert "insert into agent_graph_invocation_nonce" in connection.calls[1][0]
+
+
+@pytest.mark.asyncio
+async def test_existing_only_nonce_consumption_has_no_side_effect_for_missing_command() -> None:
+    connection = _Connection([None])
+
+    with pytest.raises(GraphCommandNotFoundError):
+        await PostgresCommandLedger().consume_nonce_for_existing(
+            connection,
+            binding=_binding(),
+            nonce=_nonce(),
+        )
+
+    assert len(connection.calls) == 1
+    assert "insert" not in connection.calls[0][0]
 
 
 @pytest.mark.asyncio
@@ -469,9 +503,7 @@ async def test_attempt_success_cannot_bypass_checkpointed_completion() -> None:
 
 def test_cached_result_must_match_original_run_attempt_and_profiles() -> None:
     binding = _binding()
-    command = PostgresCommandLedger._command_from_row(
-        _command_row(binding, status="COMPLETED")
-    )
+    command = PostgresCommandLedger._command_from_row(_command_row(binding, status="COMPLETED"))
     payload: dict[str, Any] = {
         "schema_version": "room-graph-result.v1",
         "command_id": binding.command_id,

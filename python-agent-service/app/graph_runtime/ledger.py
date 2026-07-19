@@ -525,7 +525,50 @@ class PostgresCommandLedger:
                 raise GraphCommandDeadlineError()
         record = self._command_from_row(row)
         self.require_same_binding(record.binding, binding)
+        await self._consume_nonce(connection, binding=binding, nonce=nonce)
+        return CommandRegistration(record, created)
 
+    async def consume_nonce_for_existing(
+        self,
+        connection: Any,
+        *,
+        binding: CommandBinding,
+        nonce: InvocationNonce,
+    ) -> CommandRecord:
+        """Lock an existing exact command and consume a transport nonce without registration."""
+
+        record = await self.load(
+            connection,
+            thread_id=binding.thread_id,
+            command_id=binding.command_id,
+        )
+        self.require_same_binding(record.binding, binding)
+        await self._consume_nonce(connection, binding=binding, nonce=nonce)
+        return record
+
+    async def load(
+        self,
+        connection: Any,
+        *,
+        thread_id: str,
+        command_id: str,
+    ) -> CommandRecord:
+        row = await (await connection.execute(LOAD_COMMAND_SQL, (thread_id, command_id))).fetchone()
+        if row is None:
+            raise GraphCommandNotFoundError()
+        return self._command_from_row(row)
+
+    async def referenced_verification_key_ids(self, connection: Any) -> frozenset[str]:
+        rows = await (await connection.execute(REFERENCED_KEY_IDS_SQL)).fetchall()
+        return frozenset(_identifier(row["key_id"], "key_id") for row in rows)
+
+    @staticmethod
+    async def _consume_nonce(
+        connection: Any,
+        *,
+        binding: CommandBinding,
+        nonce: InvocationNonce,
+    ) -> None:
         nonce_row = await (
             await connection.execute(
                 INSERT_NONCE_SQL,
@@ -544,25 +587,6 @@ class PostgresCommandLedger:
         ).fetchone()
         if nonce_row is None:
             raise GraphNonceReplayError()
-        return CommandRegistration(record, created)
-
-    async def load(
-        self,
-        connection: Any,
-        *,
-        thread_id: str,
-        command_id: str,
-    ) -> CommandRecord:
-        row = await (
-            await connection.execute(LOAD_COMMAND_SQL, (thread_id, command_id))
-        ).fetchone()
-        if row is None:
-            raise GraphCommandNotFoundError()
-        return self._command_from_row(row)
-
-    async def referenced_verification_key_ids(self, connection: Any) -> frozenset[str]:
-        rows = await (await connection.execute(REFERENCED_KEY_IDS_SQL)).fetchall()
-        return frozenset(_identifier(row["key_id"], "key_id") for row in rows)
 
     async def load_recovery_budget(
         self,
@@ -757,9 +781,7 @@ class PostgresCommandLedger:
         thread_id: str,
         command_id: str,
     ) -> ResultRecord:
-        row = await (
-            await connection.execute(LOAD_RESULT_SQL, (thread_id, command_id))
-        ).fetchone()
+        row = await (await connection.execute(LOAD_RESULT_SQL, (thread_id, command_id))).fetchone()
         if row is None:
             raise GraphTerminalBindingError("terminal result row is missing")
         return self._result_from_row(row)
@@ -1118,9 +1140,11 @@ class PostgresCommandLedger:
         _identifier(result.command_id, "command_id")
         _sha256(result.request_hash, "request_hash")
         _identifier(result.result_schema_version, "result_schema_version")
-        if len(result.checkpoint_ns) > 128 or not result.checkpoint_id or len(
-            result.checkpoint_id
-        ) > 128:
+        if (
+            len(result.checkpoint_ns) > 128
+            or not result.checkpoint_id
+            or len(result.checkpoint_id) > 128
+        ):
             raise GraphTerminalBindingError("result checkpoint identity is invalid")
         if result.cognitive_revision < 0:
             raise GraphTerminalBindingError("result cognitive revision is invalid")

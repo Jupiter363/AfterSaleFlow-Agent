@@ -10,10 +10,13 @@ from typing import Any, Final, Protocol
 
 from app.contracts.v1.models import AgentStreamEvent, RoomGraphCommand
 from app.graph_runtime.errors import (
+    GraphCommandAbortedError,
+    GraphCommandCancelledError,
     GraphContractError,
     GraphGatewayDisabledError,
     GraphLeaseLostError,
     GraphNewAgentAttemptRequiredError,
+    GraphResultNotCommittedError,
     GraphRuntimeError,
     GraphTerminalBindingError,
     GraphThreadBindingError,
@@ -46,7 +49,9 @@ from app.graph_runtime.registry import (
     RegistryRecord,
 )
 from app.security.invocation_envelope import (
+    ReconciliationClaims,
     VerifiedInvocation,
+    VerifiedReconciliation,
     invocation_binding_claims,
 )
 
@@ -58,6 +63,11 @@ class AdmissionAction(StrEnum):
     RETURN_CACHED = "RETURN_CACHED"
     RETURN_CANCELLED = "RETURN_CANCELLED"
     RETURN_ABORTED = "RETURN_ABORTED"
+
+
+class ReconciliationDisposition(StrEnum):
+    RETURN_CACHED = "RETURN_CACHED"
+    RECONCILED_TERMINAL = "RECONCILED_TERMINAL"
 
 
 _STREAM_PAYLOAD_FIELDS: Final[dict[str, frozenset[str]]] = {
@@ -88,6 +98,14 @@ class GatewayExecution:
     attempt: AttemptRecord
     lease: LeaseRecord
     fence: GraphFenceContext
+
+
+@dataclass(frozen=True, slots=True)
+class GraphReconciliation:
+    disposition: ReconciliationDisposition
+    command: CommandRecord
+    result: ResultRecord
+    registry: RegistryRecord
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,9 +211,7 @@ class GraphCommandGateway:
             self._require_command_thread(command, expected_thread)
             await self._input_authorizer.authorize(command=command, thread=expected_thread)
             nonce = InvocationNonce.from_verified_invocation(verified_invocation)
-            async with self._pool.connection(
-                timeout=self._acquire_timeout_seconds
-            ) as connection:
+            async with self._pool.connection(timeout=self._acquire_timeout_seconds) as connection:
                 async with connection.transaction():
                     registry = await self._registry.load(
                         connection,
@@ -219,10 +235,14 @@ class GraphCommandGateway:
                         registry.require_new_shadow_command()
                     else:
                         registry.require_thread_restore()
-                    if registration.command.status in {
-                        CommandStatus.REGISTERED,
-                        CommandStatus.EXECUTING,
-                    } and thread.lifecycle is not ThreadLifecycle.ACTIVE:
+                    if (
+                        registration.command.status
+                        in {
+                            CommandStatus.REGISTERED,
+                            CommandStatus.EXECUTING,
+                        }
+                        and thread.lifecycle is not ThreadLifecycle.ACTIVE
+                    ):
                         raise GraphThreadBindingError("GRAPH_THREAD_NOT_ACTIVE")
             action = self._admission_action(registration.command.status)
             admission = GatewayAdmission(
@@ -328,6 +348,83 @@ class GraphCommandGateway:
             fencing_token=fence.fencing_token,
         )
         return execution
+
+    async def reconcile_only(
+        self,
+        *,
+        command: RoomGraphCommand,
+        verified_reconciliation: VerifiedReconciliation,
+        expected_thread: ThreadIdentity,
+        owner_id: str,
+    ) -> GraphReconciliation:
+        """Return or reconcile one existing durable result without execution authority."""
+
+        try:
+            self._require_shadow()
+            if not owner_id or len(owner_id) > 128:
+                raise GraphContractError("Graph reconciliation owner is invalid")
+            self._require_reconciliation_binding(command, verified_reconciliation)
+            self._require_command_thread(command, expected_thread)
+            nonce = InvocationNonce.from_verified_invocation(verified_reconciliation)
+            async with self._pool.connection(timeout=self._acquire_timeout_seconds) as connection:
+                async with connection.transaction():
+                    await self._threads.require_binding(connection, expected_thread)
+                    registry = await self._registry.require_thread_restore(
+                        connection,
+                        graph_key=command.graph_key,
+                        graph_version=command.graph_version,
+                        checkpoint_schema_version=command.checkpoint_schema_version,
+                    )
+                    binding = CommandBinding.from_command(
+                        command,
+                        tool_policy_version=registry.binding.tool_policy_version,
+                    )
+                    registry.binding.require_profile(binding.profile)
+                    existing = await self._ledger.consume_nonce_for_existing(
+                        connection,
+                        binding=binding,
+                        nonce=nonce,
+                    )
+                    disposition = self._reconciliation_disposition(existing.status)
+                    completed, result = await self._recovery.reconcile_terminal(
+                        connection,
+                        binding=binding,
+                        owner_id=owner_id,
+                    )
+            reconciliation = GraphReconciliation(
+                disposition=disposition,
+                command=completed,
+                result=result,
+                registry=registry,
+            )
+            await self._audit.emit(
+                GatewayAuditEvent(
+                    event_type="graph.command.result_reconciled",
+                    code=disposition.value,
+                    command_id=binding.command_id,
+                    thread_id=binding.thread_id,
+                    request_hash=binding.request_hash,
+                    graph_key=binding.graph_key,
+                    graph_version=binding.graph_version,
+                    traceparent=command.traceparent,
+                    fencing_token=completed.fencing_token,
+                )
+            )
+            return reconciliation
+        except GraphRuntimeError as error:
+            await self._audit.emit(
+                GatewayAuditEvent(
+                    event_type="graph.command.result_rejected",
+                    code=error.code,
+                    command_id=command.command_id,
+                    thread_id=command.thread_id,
+                    request_hash=command.request_hash,
+                    graph_key=command.graph_key,
+                    graph_version=command.graph_version,
+                    traceparent=command.traceparent,
+                )
+            )
+            raise
 
     async def renew_execution(self, execution: GatewayExecution) -> LeaseRecord:
         self._require_shadow()
@@ -522,6 +619,34 @@ class GraphCommandGateway:
             raise GraphThreadBindingError("verified invocation transport binding differs")
 
     @staticmethod
+    def _require_reconciliation_binding(
+        command: RoomGraphCommand,
+        invocation: VerifiedReconciliation,
+    ) -> None:
+        if not isinstance(invocation, VerifiedReconciliation) or not isinstance(
+            invocation.claims,
+            ReconciliationClaims,
+        ):
+            raise GraphThreadBindingError("reconciliation credential type differs")
+        expected = invocation_binding_claims(command)
+        actual = invocation.claims.model_dump(mode="json")
+        for name, value in expected.items():
+            candidate = actual.get(name)
+            if isinstance(value, int):
+                matches = type(candidate) is int and candidate == value
+            else:
+                matches = isinstance(candidate, str) and hmac.compare_digest(candidate, value)
+            if not matches:
+                raise GraphThreadBindingError(f"verified reconciliation differs at {name}")
+        if (
+            not hmac.compare_digest(invocation.request_hash, command.request_hash)
+            or invocation.claims.capability != "RECONCILE_ONLY"
+            or invocation.claims.original_envelope_key_id
+            != command.invocation_context.envelope_key_id
+        ):
+            raise GraphThreadBindingError("verified reconciliation transport binding differs")
+
+    @staticmethod
     def _require_command_thread(
         command: RoomGraphCommand,
         thread: ThreadIdentity,
@@ -562,6 +687,26 @@ class GraphCommandGateway:
             CommandStatus.CANCELLED: AdmissionAction.RETURN_CANCELLED,
             CommandStatus.ABORTED: AdmissionAction.RETURN_ABORTED,
         }[status]
+
+    @staticmethod
+    def _reconciliation_disposition(
+        status: CommandStatus,
+    ) -> ReconciliationDisposition:
+        if status is CommandStatus.COMPLETED:
+            return ReconciliationDisposition.RETURN_CACHED
+        if status is CommandStatus.RESULT_CHECKPOINTED:
+            return ReconciliationDisposition.RECONCILED_TERMINAL
+        if status is CommandStatus.REGISTERED:
+            raise GraphResultNotCommittedError()
+        if status is CommandStatus.EXECUTING:
+            raise GraphNewAgentAttemptRequiredError(
+                "executing command requires a new public AgentRun attempt"
+            )
+        if status is CommandStatus.CANCELLED:
+            raise GraphCommandCancelledError()
+        if status is CommandStatus.ABORTED:
+            raise GraphCommandAbortedError()
+        raise GraphContractError("unknown durable Graph command status")
 
     @staticmethod
     def _require_stream_identity(

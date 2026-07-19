@@ -61,6 +61,18 @@ class GraphCommandStateError(GraphRuntimeError):
     code = "GRAPH_COMMAND_STATE_CONFLICT"
 
 
+class GraphResultNotCommittedError(GraphCommandStateError):
+    code = "GRAPH_RESULT_NOT_COMMITTED"
+
+
+class GraphCommandCancelledError(GraphCommandStateError):
+    code = "GRAPH_COMMAND_CANCELLED"
+
+
+class GraphCommandAbortedError(GraphCommandStateError):
+    code = "GRAPH_COMMAND_ABORTED"
+
+
 class GraphCommandDeadlineError(GraphRuntimeError):
     code = "GRAPH_COMMAND_DEADLINE_EXCEEDED"
 
