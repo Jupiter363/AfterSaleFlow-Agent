@@ -28,6 +28,10 @@ ObjectUri = Annotated[
     str,
     StringConstraints(max_length=1024, pattern=r"^(s3|minio|urn):"),
 ]
+GraphThreadId = Annotated[
+    str,
+    StringConstraints(pattern=r"^grt\.v1\.[0-9a-f]{32}$"),
+]
 ActorRole = Literal["USER", "MERCHANT", "PLATFORM_REVIEWER", "ADMIN", "SYSTEM"]
 Audience = Literal["USER", "MERCHANT", "PLATFORM_REVIEWER", "SYSTEM"]
 RoomType = Literal["INTAKE", "EVIDENCE", "HEARING", "REVIEW"]
@@ -233,7 +237,7 @@ class RoomGraphCommand(StrictContractModel):
     graph_key: Identifier
     graph_version: Identifier
     checkpoint_schema_version: Identifier
-    thread_id: Identifier
+    thread_id: GraphThreadId
     actor_scope: ActorScope
     process_revision: int = Field(ge=0)
     stage_code: Identifier

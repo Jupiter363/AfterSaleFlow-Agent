@@ -7,7 +7,13 @@ from pathlib import Path
 
 import pytest
 
-from app.contracts.v1.codec import ContractCodec, canonical_sha256, canonicalize
+from app.contracts.v1.codec import (
+    ContractCodec,
+    canonical_sha256,
+    canonical_sha256_omitting,
+    canonicalize,
+)
+from app.contracts.v1.models import RoomGraphCommand
 from app.contracts.v1.models import MODEL_BY_SCHEMA
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -41,6 +47,19 @@ def test_invalid_shared_fixture_fails_closed(path: Path, codec: ContractCodec) -
 def test_unknown_schema_file_fails_closed(codec: ContractCodec) -> None:
     with pytest.raises(ValueError, match="unknown contract schema"):
         codec.decode("room-graph-command.v99.schema.json", {})
+
+
+def test_valid_room_graph_command_uses_opaque_identity_and_exact_self_hash(
+    codec: ContractCodec,
+) -> None:
+    fixture = json.loads(
+        (FIXTURE_ROOT / "valid/room-graph-command-valid.json").read_text(encoding="utf-8")
+    )
+    command = codec.decode(fixture["schema"], fixture["instance"])
+
+    assert isinstance(command, RoomGraphCommand)
+    assert command.thread_id == "grt.v1.019bdf9f4a7279d3a23b7fd5c1e4a901"
+    assert canonical_sha256_omitting(command, "request_hash") == command.request_hash
 
 
 def test_duplicate_json_member_fails_before_contract_or_hash_use(

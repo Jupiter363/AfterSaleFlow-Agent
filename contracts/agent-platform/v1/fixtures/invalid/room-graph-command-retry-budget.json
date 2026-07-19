@@ -13,7 +13,7 @@
     "graph_key": "intake.v2",
     "graph_version": "1.0.0",
     "checkpoint_schema_version": "checkpoint.v1",
-    "thread_id": "tenant-demo.case-001.intake.1.user-001",
+    "thread_id": "grt.v1.019bdf9f4a7279d3a23b7fd5c1e4a901",
     "actor_scope": {
       "actor_id": "user-001",
       "actor_role": "USER",

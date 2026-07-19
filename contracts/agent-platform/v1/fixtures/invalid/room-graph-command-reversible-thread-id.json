@@ -1,5 +1,5 @@
 {
-  "case": "signed and version-pinned intake graph command",
+  "case": "reversible authority-bearing thread identifiers are forbidden",
   "schema": "room-graph-command.schema.json",
   "instance": {
     "schema_version": "room-graph-command.v1",
@@ -13,14 +13,12 @@
     "graph_key": "intake.v2",
     "graph_version": "1.0.0",
     "checkpoint_schema_version": "checkpoint.v1",
-    "thread_id": "grt.v1.019bdf9f4a7279d3a23b7fd5c1e4a901",
+    "thread_id": "tenant-demo.case-001.intake.1.user-001",
     "actor_scope": {
       "actor_id": "user-001",
       "actor_role": "USER",
       "audience": "USER",
-      "capabilities": [
-        "order.read"
-      ]
+      "capabilities": ["order.read"]
     },
     "process_revision": 2,
     "stage_code": "INTAKE_ACTIVE",
@@ -39,9 +37,7 @@
       "output_schema_version": "intake-turn.v2",
       "policy_version": "intake-policy.v1",
       "guardrail_version": "intake-guardrail.v1",
-      "tool_capabilities": [
-        "order.read"
-      ],
+      "tool_capabilities": ["order.read"],
       "envelope_key_id": "java-invocation-es256-1",
       "envelope_nonce": "nonce-001"
     },
@@ -53,5 +49,6 @@
     "deadline_at": "2026-07-17T08:10:00Z",
     "traceparent": "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
     "request_hash": "78aa57b57feda88e27adf9bc1b2cacd6aa3c2deb4281fb89533e9f8fb774e430"
-  }
+  },
+  "expected_error": "thread_id opaque Graph ID pattern"
 }
