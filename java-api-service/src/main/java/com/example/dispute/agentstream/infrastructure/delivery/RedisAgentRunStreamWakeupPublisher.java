@@ -11,6 +11,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
 
@@ -29,6 +30,7 @@ public class RedisAgentRunStreamWakeupPublisher
     private final ThreadPoolExecutor deliveryExecutor;
     private final AtomicLong nextFailureLog = new AtomicLong();
 
+    @Autowired
     public RedisAgentRunStreamWakeupPublisher(
             StringRedisTemplate redis, ObjectMapper objectMapper) {
         this(redis, objectMapper, newDeliveryExecutor());
