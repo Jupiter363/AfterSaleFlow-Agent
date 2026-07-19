@@ -175,8 +175,13 @@ def test_graph_database_bootstrap_and_image_are_least_privilege_and_locked() -> 
         "revoke all on database %I from public",
         "revoke all on schema public from public",
         "grant usage on schema %I to %I, %I",
+        'create_isolated_database "${GRAPH_DB_NAME}" "${POSTGRES_USER}"',
+        "revoke temporary on database %I from public, %I, %I, %I, %I",
+        "set search_path to %I, pg_catalog, pg_temp",
     ):
         assert required in bootstrap
+
+    assert 'create_isolated_database "${GRAPH_DB_NAME}" "${GRAPH_OWNER_USER}"' not in bootstrap
 
     assert "COPY requirements.txt requirements.lock ./" in dockerfile
     assert "--require-hashes --requirement requirements.lock" in dockerfile

@@ -141,7 +141,7 @@ create_isolated_database "${TEMPORAL_DB_NAME}" "${TEMPORAL_DB_USER}"
 create_isolated_database "temporal_visibility" "${TEMPORAL_DB_USER}"
 create_isolated_database "${LANGFUSE_DB_NAME}" "${LANGFUSE_DB_USER}"
 create_isolated_database "${LITELLM_DB_NAME}" "${LITELLM_DB_USER}"
-create_isolated_database "${GRAPH_DB_NAME}" "${GRAPH_OWNER_USER}"
+create_isolated_database "${GRAPH_DB_NAME}" "${POSTGRES_USER}"
 
 psql --username "${POSTGRES_USER}" --dbname "${GRAPH_DB_NAME}" \
   --set ON_ERROR_STOP=1 \
@@ -156,16 +156,21 @@ select format('create schema if not exists %I authorization %I', :'graph_schema'
 revoke all on schema public from public;
 select format('revoke all on schema %I from public', :'graph_schema')
 \gexec
+select format(
+    'revoke temporary on database %I from public, %I, %I, %I, %I',
+    :'graph_database', :'graph_owner', :'graph_migrator', :'graph_runtime', :'graph_retention'
+)
+\gexec
 select format('grant connect on database %I to %I, %I, %I',
               :'graph_database', :'graph_migrator', :'graph_runtime', :'graph_retention')
 \gexec
 select format('grant usage on schema %I to %I, %I',
               :'graph_schema', :'graph_runtime', :'graph_retention')
 \gexec
-select format('alter role %I in database %I set search_path to %I, pg_catalog',
+select format('alter role %I in database %I set search_path to %I, pg_catalog, pg_temp',
               :'graph_runtime', :'graph_database', :'graph_schema')
 \gexec
-select format('alter role %I in database %I set search_path to %I, pg_catalog',
+select format('alter role %I in database %I set search_path to %I, pg_catalog, pg_temp',
               :'graph_retention', :'graph_database', :'graph_schema')
 \gexec
 SQL
