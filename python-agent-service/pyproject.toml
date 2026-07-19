@@ -9,6 +9,9 @@ requires-python = ">=3.11"
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+markers = [
+    "graph_postgres: requires an isolated PostgreSQL 16 Graph database",
+]
 
 [tool.ruff]
 line-length = 100
