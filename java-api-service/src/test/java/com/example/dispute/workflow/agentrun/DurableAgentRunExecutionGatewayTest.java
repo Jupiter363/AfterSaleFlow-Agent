@@ -5,6 +5,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.catchThrowableOfType;
 
 import com.example.dispute.agentstream.application.AgentRunV2StreamStore;
+import com.example.dispute.agentstream.application.AgentRunV2StreamStore.AppendReceipt;
+import com.example.dispute.agentstream.application.AgentRunV2StreamStore.BatchAppendReceipt;
 import com.example.dispute.workflow.activity.agent.AgentGraphCommandClient;
 import com.example.dispute.workflow.activity.agent.AgentRunCancellationToken;
 import com.example.dispute.workflow.activity.agent.AgentRunExecutionException;
@@ -18,10 +20,12 @@ import com.example.dispute.workflow.contract.v1.RoomGraphResult;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
+import io.temporal.client.ActivityCanceledException;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
@@ -33,23 +37,39 @@ class DurableAgentRunExecutionGatewayTest {
     private static final Instant NOW = Instant.parse("2026-07-17T08:00:00Z");
 
     @Test
-    void persistsEveryFrameBeforeProgressAndPassesExecutionMode() throws Exception {
+    void persistsRealBoundedBatchesBeforeProgressAndPassesExecutionMode() throws Exception {
         ExecuteAgentRunRequest request = request();
         RoomGraphResult result = graphResult();
         List<String> order = new ArrayList<>();
+        List<List<Long>> batches = new ArrayList<>();
         AtomicReference<ExecutionMode> observedMode = new AtomicReference<>();
         AgentGraphCommandClient client = (actualRequest, mode, eventSink, cancellationToken) -> {
             assertThat(actualRequest).isEqualTo(request);
             observedMode.set(mode);
             eventSink.accept(event(request, 0, StreamEventType.ATTEMPT_STARTED, null));
-            eventSink.accept(event(request, 1, StreamEventType.VISIBLE_DELTA, null));
-            eventSink.accept(event(request, 2, StreamEventType.FINAL, result.outputHash()));
+            eventSink.accept(
+                    event(
+                            request,
+                            1,
+                            StreamEventType.VISIBLE_DELTA,
+                            null,
+                            "a".repeat(600)));
+            eventSink.accept(
+                    event(
+                            request,
+                            2,
+                            StreamEventType.VISIBLE_DELTA,
+                            null,
+                            "b".repeat(600)));
+            eventSink.accept(event(request, 3, StreamEventType.FINAL, result.outputHash()));
             return result;
         };
-        AgentRunV2StreamStore store = event -> {
-            order.add("persist-" + event.sequenceNo());
-            return new AgentRunV2StreamStore.AppendReceipt(true, event.sequenceNo());
-        };
+        AgentRunV2StreamStore store = batchStore(events -> {
+            List<Long> sequences = sequences(events);
+            batches.add(sequences);
+            order.add("persist-" + sequences);
+            return receipt(events, true, sequences.getLast());
+        });
         var gateway = new DurableAgentRunExecutionGateway(client, store);
 
         var completion = gateway.execute(
@@ -59,17 +79,46 @@ class DurableAgentRunExecutionGatewayTest {
                 new AgentRunCancellationToken());
 
         assertThat(observedMode.get()).isEqualTo(ExecutionMode.RECONCILE_ONLY);
+        assertThat(batches).containsExactly(List.of(0L), List.of(1L, 2L), List.of(3L));
         assertThat(order)
                 .containsExactly(
-                        "persist-0",
+                        "persist-[0]",
                         "progress-0",
-                        "persist-1",
-                        "progress-1",
-                        "persist-2",
-                        "progress-2");
+                        "persist-[1, 2]",
+                        "progress-2",
+                        "persist-[3]",
+                        "progress-3");
         assertThat(completion.graphResult()).isEqualTo(result);
-        assertThat(completion.lastSequenceNo()).isEqualTo(2);
+        assertThat(completion.lastSequenceNo()).isEqualTo(3);
         assertThat(completion.publicOutputEmitted()).isTrue();
+    }
+
+    @Test
+    void finalFlushCommitsATrailingSmallDeltaInOneBatch() throws Exception {
+        ExecuteAgentRunRequest request = request();
+        RoomGraphResult result = graphResult();
+        List<List<Long>> batches = new ArrayList<>();
+        AgentGraphCommandClient client = (actualRequest, mode, eventSink, cancellationToken) -> {
+            eventSink.accept(event(request, 0, StreamEventType.ATTEMPT_STARTED, null));
+            eventSink.accept(event(request, 1, StreamEventType.VISIBLE_DELTA, null));
+            eventSink.accept(event(request, 2, StreamEventType.FINAL, result.outputHash()));
+            return result;
+        };
+        AgentRunV2StreamStore store = batchStore(events -> {
+            List<Long> sequences = sequences(events);
+            batches.add(sequences);
+            return receipt(events, true, sequences.getLast());
+        });
+
+        var completion = new DurableAgentRunExecutionGateway(client, store)
+                .execute(
+                        request,
+                        ExecutionMode.EXECUTE_OR_RECONCILE,
+                        ignored -> {},
+                        new AgentRunCancellationToken());
+
+        assertThat(batches).containsExactly(List.of(0L), List.of(1L, 2L));
+        assertThat(completion.lastSequenceNo()).isEqualTo(2);
     }
 
     @Test
@@ -145,14 +194,38 @@ class DurableAgentRunExecutionGatewayTest {
     }
 
     @Test
-    void suppressesRegressingProgressForExactDuplicateReplay() throws Exception {
+    void rejectsADuplicateSequenceWhileEarlierEventsAreStillBuffered() throws Exception {
+        ExecuteAgentRunRequest request = request();
+        List<Long> persisted = new ArrayList<>();
+        AgentGraphCommandClient client = (actualRequest, mode, eventSink, cancellationToken) -> {
+            eventSink.accept(event(request, 0, StreamEventType.ATTEMPT_STARTED, null));
+            eventSink.accept(event(request, 1, StreamEventType.VISIBLE_DELTA, null));
+            eventSink.accept(event(request, 1, StreamEventType.VISIBLE_DELTA, null));
+            throw new AssertionError("duplicate sequence must fail in the event sink");
+        };
+
+        AgentRunExecutionException failure = catchThrowableOfType(
+                AgentRunExecutionException.class,
+                () -> new DurableAgentRunExecutionGateway(client, recordingStore(persisted))
+                        .execute(
+                                request,
+                                ExecutionMode.EXECUTE_OR_RECONCILE,
+                                ignored -> {},
+                                new AgentRunCancellationToken()));
+
+        assertThat(failure.errorCode()).isEqualTo("AGENT_RUN_STREAM_V2_INVALID");
+        assertThat(persisted).containsExactly(0L, 1L);
+    }
+
+    @Test
+    void suppressesProgressForExactDuplicateBatchReplay() throws Exception {
         ExecuteAgentRunRequest request = request();
         RoomGraphResult result = graphResult();
         var gateway = gatewayReturning(
                 request,
                 result,
                 result.outputHash(),
-                event -> new AgentRunV2StreamStore.AppendReceipt(false, 1));
+                batchStore(events -> receipt(events, false, 1)));
         List<Long> progress = new ArrayList<>();
 
         var completion = gateway.execute(
@@ -202,7 +275,7 @@ class DurableAgentRunExecutionGatewayTest {
             return result;
         };
         var gateway = new DurableAgentRunExecutionGateway(
-                client, event -> new AgentRunV2StreamStore.AppendReceipt(true, 0));
+                client, batchStore(events -> receipt(events, true, 0)));
         List<Long> progress = new ArrayList<>();
 
         AgentRunExecutionException failure = catchThrowableOfType(
@@ -219,6 +292,68 @@ class DurableAgentRunExecutionGatewayTest {
         assertThat(progress).containsExactly(0L);
     }
 
+    @Test
+    void appendFailureDoesNotPublishTheUncommittedBatch() throws Exception {
+        ExecuteAgentRunRequest request = request();
+        RoomGraphResult result = graphResult();
+        AtomicInteger invocation = new AtomicInteger();
+        AgentGraphCommandClient client = (actualRequest, mode, eventSink, cancellationToken) -> {
+            eventSink.accept(event(request, 0, StreamEventType.ATTEMPT_STARTED, null));
+            eventSink.accept(event(request, 1, StreamEventType.VISIBLE_DELTA, null));
+            eventSink.accept(event(request, 2, StreamEventType.FINAL, result.outputHash()));
+            return result;
+        };
+        AgentRunV2StreamStore store = batchStore(events -> {
+            if (invocation.incrementAndGet() == 2) {
+                throw new IllegalStateException("postgres unavailable");
+            }
+            return receipt(events, true, events.getLast().sequenceNo());
+        });
+        List<Long> progress = new ArrayList<>();
+
+        AgentRunExecutionException failure = catchThrowableOfType(
+                AgentRunExecutionException.class,
+                () -> new DurableAgentRunExecutionGateway(client, store)
+                        .execute(
+                                request,
+                                ExecutionMode.EXECUTE_OR_RECONCILE,
+                                frame -> progress.add(frame.lastSequenceNo()),
+                                new AgentRunCancellationToken()));
+
+        assertThat(failure.errorCode()).isEqualTo("AGENT_RUN_DURABLE_APPEND_FAILED");
+        assertThat(failure.commandReplaySafe()).isTrue();
+        assertThat(failure.lastSequenceNo()).isZero();
+        assertThat(failure.publicOutputEmitted()).isFalse();
+        assertThat(progress).containsExactly(0L);
+    }
+
+    @Test
+    void flushesAcceptedFramesBeforePropagatingTransportCancellation() throws Exception {
+        ExecuteAgentRunRequest request = request();
+        List<List<Long>> batches = new ArrayList<>();
+        AgentGraphCommandClient client = (actualRequest, mode, eventSink, cancellationToken) -> {
+            eventSink.accept(event(request, 0, StreamEventType.ATTEMPT_STARTED, null));
+            eventSink.accept(event(request, 1, StreamEventType.VISIBLE_DELTA, null));
+            throw new ActivityCanceledException();
+        };
+        AgentRunV2StreamStore store = batchStore(events -> {
+            batches.add(sequences(events));
+            return receipt(events, true, events.getLast().sequenceNo());
+        });
+        List<Long> progress = new ArrayList<>();
+
+        assertThatThrownBy(() -> new DurableAgentRunExecutionGateway(client, store)
+                        .execute(
+                                request,
+                                ExecutionMode.EXECUTE_OR_RECONCILE,
+                                frame -> progress.add(frame.lastSequenceNo()),
+                                new AgentRunCancellationToken()))
+                .isInstanceOf(ActivityCanceledException.class);
+
+        assertThat(batches).containsExactly(List.of(0L), List.of(1L));
+        assertThat(progress).containsExactly(0L, 1L);
+    }
+
     private static DurableAgentRunExecutionGateway gatewayReturning(
             ExecuteAgentRunRequest request,
             RoomGraphResult result,
@@ -233,10 +368,36 @@ class DurableAgentRunExecutionGatewayTest {
     }
 
     private static AgentRunV2StreamStore recordingStore(List<Long> persisted) {
-        return event -> {
-            persisted.add(event.sequenceNo());
-            return new AgentRunV2StreamStore.AppendReceipt(true, event.sequenceNo());
+        return batchStore(events -> {
+            persisted.addAll(sequences(events));
+            return receipt(events, true, events.getLast().sequenceNo());
+        });
+    }
+
+    private static AgentRunV2StreamStore batchStore(BatchAppender appender) {
+        return new AgentRunV2StreamStore() {
+            @Override
+            public AppendReceipt append(AgentStreamEvent event) {
+                BatchAppendReceipt receipt = appendBatch(List.of(event));
+                return new AppendReceipt(
+                        receipt.inserted().getFirst(), receipt.durableHighWatermark());
+            }
+
+            @Override
+            public BatchAppendReceipt appendBatch(List<AgentStreamEvent> events) {
+                return appender.append(List.copyOf(events));
+            }
         };
+    }
+
+    private static BatchAppendReceipt receipt(
+            List<AgentStreamEvent> events, boolean inserted, long highWatermark) {
+        return new BatchAppendReceipt(
+                events.stream().map(ignored -> inserted).toList(), highWatermark);
+    }
+
+    private static List<Long> sequences(List<AgentStreamEvent> events) {
+        return events.stream().map(AgentStreamEvent::sequenceNo).toList();
     }
 
     private static AgentStreamEvent event(
@@ -244,6 +405,15 @@ class DurableAgentRunExecutionGatewayTest {
             long sequenceNo,
             StreamEventType eventType,
             String finalHash) {
+        return event(request, sequenceNo, eventType, finalHash, "public");
+    }
+
+    private static AgentStreamEvent event(
+            ExecuteAgentRunRequest request,
+            long sequenceNo,
+            StreamEventType eventType,
+            String finalHash,
+            String delta) {
         return new AgentStreamEvent(
                 "agent-stream.v2",
                 request.agentRunId(),
@@ -255,7 +425,7 @@ class DurableAgentRunExecutionGatewayTest {
                 new AgentStreamEvent.Payload(
                         "node",
                         eventType == StreamEventType.VISIBLE_DELTA ? "room_utterance" : null,
-                        eventType == StreamEventType.VISIBLE_DELTA ? "public" : null,
+                        eventType == StreamEventType.VISIBLE_DELTA ? delta : null,
                         null,
                         null,
                         null,
@@ -282,5 +452,10 @@ class DurableAgentRunExecutionGatewayTest {
     private static <T> T fixture(String file, Class<T> type) throws Exception {
         JsonNode wrapper = MAPPER.readTree(FIXTURES.resolve(file).toFile());
         return MAPPER.treeToValue(wrapper.required("instance"), type);
+    }
+
+    @FunctionalInterface
+    private interface BatchAppender {
+        BatchAppendReceipt append(List<AgentStreamEvent> events);
     }
 }

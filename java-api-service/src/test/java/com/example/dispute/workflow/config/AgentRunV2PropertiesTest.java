@@ -43,8 +43,30 @@ class AgentRunV2PropertiesTest {
                     assertThat(context).hasFailed();
                     assertThat(context.getStartupFailure())
                             .rootCause()
-                            .hasMessageContaining("cannot execute V2");
+                            .hasMessageContaining("cannot use the legacy scheduler EXECUTOR");
                 });
+    }
+
+    @Test
+    void enabledV2CapabilityRejectsLegacyExecutionEvenWhenV1RemainsTheDefault() {
+        contextRunner
+                .withPropertyValues(
+                        "app.agent-run-v2.enabled=true",
+                        "app.agent-run-v2.protocol-default=V1",
+                        "app.agent-run-v2.scheduler-mode=EXECUTOR")
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure())
+                            .rootCause()
+                            .hasMessageContaining("cannot use the legacy scheduler EXECUTOR");
+                });
+
+        contextRunner
+                .withPropertyValues(
+                        "app.agent-run-v2.enabled=true",
+                        "app.agent-run-v2.protocol-default=V1",
+                        "app.agent-run-v2.scheduler-mode=DETECTOR")
+                .run(context -> assertThat(context).hasNotFailed());
     }
 
     @Configuration(proxyBeanMethods = false)

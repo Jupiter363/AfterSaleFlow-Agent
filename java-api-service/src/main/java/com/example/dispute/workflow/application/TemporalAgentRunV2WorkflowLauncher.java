@@ -52,15 +52,16 @@ public final class TemporalAgentRunV2WorkflowLauncher implements AgentRunV2Workf
         if (request.attemptNo() > 1) {
             return updateExistingAttempt(request, workflowId);
         }
-        AgentRunWorkflow workflow =
-                workflowClient.newWorkflowStub(
-                        AgentRunWorkflow.class,
-                        WorkflowOptions.newBuilder()
-                                .setWorkflowId(workflowId)
-                                .setTaskQueue(AGENT_EXECUTION)
-                                .setWorkflowIdReusePolicy(WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE)
-                                .build());
         try {
+            AgentRunWorkflow workflow =
+                    workflowClient.newWorkflowStub(
+                            AgentRunWorkflow.class,
+                            WorkflowOptions.newBuilder()
+                                    .setWorkflowId(workflowId)
+                                    .setTaskQueue(AGENT_EXECUTION)
+                                    .setWorkflowIdReusePolicy(
+                                            WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE)
+                                    .build());
             WorkflowExecution execution = WorkflowClient.start(workflow::run, request);
             return receipt(execution, workflowId, StartDisposition.STARTED);
         } catch (WorkflowExecutionAlreadyStarted duplicate) {

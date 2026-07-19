@@ -88,6 +88,13 @@ class AgentRunV2ManifestFactoryTest {
                 .hasMessageContaining("output artifact hash");
     }
 
+    @Test
+    void rejectsANonPositiveFinalizationFence() {
+        assertThatThrownBy(() -> facts(0, result.resultHash()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("fencingToken must be positive");
+    }
+
     FinalizationFacts facts(long fencingToken, String outputHash) {
         return new FinalizationFacts(
                 fencingToken,

@@ -1,6 +1,7 @@
 package com.example.dispute.agentstream.infrastructure.persistence;
 
 import com.example.dispute.agentstream.application.AgentRunV2StreamStore;
+import com.example.dispute.agentstream.application.AgentRunV2StreamStore.BatchAppendReceipt;
 import com.example.dispute.workflow.contract.v1.AgentStreamEvent;
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -125,7 +126,7 @@ public class PostgresAgentRunV2EventStore {
     public AgentRunV2StreamStore.AppendReceipt append(AgentStreamEvent event) {
         BatchAppendReceipt batch = appendBatch(List.of(requireEvent(event)));
         return new AgentRunV2StreamStore.AppendReceipt(
-                batch.insertedCount() == 1, batch.durableHighWatermark());
+                batch.inserted().getFirst(), batch.durableHighWatermark());
     }
 
     /**
@@ -258,14 +259,15 @@ public class PostgresAgentRunV2EventStore {
                             }
                         });
 
-        int insertedCount = 0;
+        if (updateCounts.length != batch.size()) {
+            throw new IllegalStateException("durable stream batch returned incomplete results");
+        }
+        List<Boolean> inserted = new ArrayList<>(updateCounts.length);
         for (int updateCount : updateCounts) {
             if (updateCount == Statement.EXECUTE_FAILED) {
                 throw new IllegalStateException("durable stream batch insert failed");
             }
-            if (updateCount > 0 || updateCount == Statement.SUCCESS_NO_INFO) {
-                insertedCount++;
-            }
+            inserted.add(updateCount > 0 || updateCount == Statement.SUCCESS_NO_INFO);
         }
 
         Map<Long, String> storedHashes = loadStoredHashes(batch);
@@ -288,7 +290,7 @@ public class PostgresAgentRunV2EventStore {
         if (highWatermark < appendedMaximum) {
             throw new IllegalStateException("PostgreSQL high-watermark is behind the append batch");
         }
-        return new BatchAppendReceipt(insertedCount, highWatermark);
+        return new BatchAppendReceipt(inserted, highWatermark);
     }
 
     private Map<Long, String> loadStoredHashes(List<PersistedEvent> batch) {
@@ -319,11 +321,17 @@ public class PostgresAgentRunV2EventStore {
         List<PersistedEvent> prepared = new ArrayList<>(events.size());
         String runId = null;
         String attemptId = null;
+        long previousSequence = -1;
         for (AgentStreamEvent event : events) {
             requireEvent(event);
             if (event.sequenceNo() < 0) {
                 throw new IllegalArgumentException("sequenceNo must not be negative");
             }
+            if (event.sequenceNo() <= previousSequence) {
+                throw new IllegalArgumentException(
+                        "append batch sequences must be strictly increasing");
+            }
+            previousSequence = event.sequenceNo();
             if (runId == null) {
                 runId = event.runId();
                 attemptId = event.attemptId();
@@ -385,15 +393,4 @@ public class PostgresAgentRunV2EventStore {
     private record PersistedEvent(
             String id, AgentStreamEvent event, String canonicalJson, String payloadHash) {}
 
-    public record BatchAppendReceipt(int insertedCount, long durableHighWatermark) {
-        public BatchAppendReceipt {
-            if (insertedCount < 0) {
-                throw new IllegalArgumentException("insertedCount must not be negative");
-            }
-            if (durableHighWatermark < 0) {
-                throw new IllegalArgumentException(
-                        "durableHighWatermark must not be negative after append");
-            }
-        }
-    }
 }

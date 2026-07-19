@@ -46,7 +46,6 @@ import org.testcontainers.utility.DockerImageName;
 @Import({
     PostgresAgentRunV2EventStore.class,
     WakeupPublishingAgentRunV2StreamStore.class,
-    RedisAgentRunStreamWakeupPublisher.class,
     JpaAgentRunLedger.class,
     AgentRunLiveWakeupIntegrationTest.InfrastructureConfig.class
 })
@@ -209,6 +208,12 @@ class AgentRunLiveWakeupIntegrationTest {
         @Bean
         StringRedisTemplate stringRedisTemplate(RedisConnectionFactory connectionFactory) {
             return new StringRedisTemplate(connectionFactory);
+        }
+
+        @Bean
+        RedisAgentRunStreamWakeupPublisher redisAgentRunStreamWakeupPublisher(
+                StringRedisTemplate redis, ObjectMapper objectMapper) {
+            return new RedisAgentRunStreamWakeupPublisher(redis, objectMapper);
         }
     }
 }

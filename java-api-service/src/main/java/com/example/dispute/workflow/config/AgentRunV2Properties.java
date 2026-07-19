@@ -21,8 +21,9 @@ public record AgentRunV2Properties(
         if (!enabled && protocolDefault == AgentRunProtocol.V2) {
             throw new IllegalArgumentException("V2 protocol default requires agent-run-v2.enabled=true");
         }
-        if (protocolDefault == AgentRunProtocol.V2 && schedulerMode == SchedulerMode.EXECUTOR) {
-            throw new IllegalArgumentException("legacy scheduler cannot execute V2 runs");
+        if (enabled && schedulerMode == SchedulerMode.EXECUTOR) {
+            throw new IllegalArgumentException(
+                    "enabled AgentRun V2 cannot use the legacy scheduler EXECUTOR mode");
         }
         if (!Duration.ofMinutes(10).equals(startToCloseTimeout)
                 || !Duration.ofSeconds(15).equals(heartbeatTimeout)

@@ -82,11 +82,11 @@ public final class AgentRunV2Coordinator {
         StartReceipt workflow;
         try {
             workflow = workflowLauncher.start(request);
+            requireWorkflow(workflow, request);
         } catch (AgentRunV2WorkflowLaunchException failure) {
             recordPermanentAdmissionFailure(attempt, request, failure);
             throw failure;
         }
-        requireWorkflow(workflow, request);
         return new StartOutcome(logicalRun, attempt, request, workflow);
     }
 
@@ -107,7 +107,11 @@ public final class AgentRunV2Coordinator {
                     false,
                     clock.instant());
         } catch (RuntimeException persistenceFailure) {
-            failure.addSuppressed(persistenceFailure);
+            AgentRunV2WorkflowLaunchException retryable =
+                    AgentRunV2WorkflowLaunchException.retryable(
+                            "AGENT_RUN_ADMISSION_FAILURE_UNPERSISTED", persistenceFailure);
+            retryable.addSuppressed(failure);
+            throw retryable;
         }
     }
 
@@ -166,8 +170,10 @@ public final class AgentRunV2Coordinator {
                         : workflow != null
                                 && workflow.disposition() == StartDisposition.ATTEMPT_ACCEPTED;
         if (!validDisposition || !expectedWorkflowId.equals(workflow.workflowId())) {
-            throw new IllegalStateException(
-                    "Temporal workflow receipt conflicts with the AgentRun attempt");
+            throw AgentRunV2WorkflowLaunchException.permanent(
+                    "TEMPORAL_RECEIPT_CONFLICT",
+                    new IllegalStateException(
+                            "Temporal workflow receipt conflicts with the AgentRun attempt"));
         }
     }
 

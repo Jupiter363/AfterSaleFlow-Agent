@@ -107,7 +107,7 @@ class ExecuteAgentRunActivityCancellationTest {
     private static AgentRunLedger.Attempt runningAttempt() {
         return new AgentRunLedger.Attempt(
                 "attempt-001",
-                "agent-run-001",
+                "run-001",
                 1,
                 AgentRunAttemptStatus.RUNNING,
                 false,
@@ -121,7 +121,7 @@ class ExecuteAgentRunActivityCancellationTest {
     private static ExecuteAgentRunRequest request() throws Exception {
         return new ExecuteAgentRunRequest(
                 ExecuteAgentRunRequest.SCHEMA_VERSION,
-                "agent-run-001",
+                "run-001",
                 1,
                 "agent-stream.v2",
                 fixture("room-graph-command-valid.json", RoomGraphCommand.class));

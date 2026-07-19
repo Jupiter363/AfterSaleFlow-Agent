@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -137,8 +138,21 @@ class AgentRunV2CoordinatorTest {
                                 StartDisposition.STARTED));
 
         assertThatThrownBy(() -> coordinator(enabled()).start(command(Selection.SHADOW, 1)))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("workflow receipt");
+                .isInstanceOfSatisfying(
+                        AgentRunV2WorkflowLaunchException.class,
+                        failure -> {
+                            assertThat(failure.retryable()).isFalse();
+                            assertThat(failure.code()).isEqualTo("TEMPORAL_RECEIPT_CONFLICT");
+                        });
+        verify(ledger)
+                .recordAttemptFailure(
+                        graphCommand.logicalRunId(),
+                        graphCommand.attemptId(),
+                        1,
+                        AgentRunAttemptStatus.FAILED,
+                        "TEMPORAL_RECEIPT_CONFLICT",
+                        false,
+                        NOW);
     }
 
     @Test
@@ -183,14 +197,49 @@ class AgentRunV2CoordinatorTest {
     }
 
     @Test
+    void retriesReconciliationWhenAPermanentRejectionCannotBePersisted() {
+        when(ledger.createOrLoad(any())).thenReturn(logicalRun());
+        when(ledger.startNextAttempt(any(), any(), any()))
+                .thenReturn(attempt(AgentRunAttemptStatus.RUNNING));
+        AgentRunV2WorkflowLaunchException rejected =
+                AgentRunV2WorkflowLaunchException.permanent(
+                        "TEMPORAL_UPDATE_REJECTED",
+                        new IllegalArgumentException("validator rejected the attempt"));
+        when(launcher.start(any())).thenThrow(rejected);
+        IllegalStateException persistenceFailure =
+                new IllegalStateException("database unavailable");
+        doThrow(persistenceFailure)
+                .when(ledger)
+                .recordAttemptFailure(
+                        graphCommand.logicalRunId(),
+                        graphCommand.attemptId(),
+                        1,
+                        AgentRunAttemptStatus.FAILED,
+                        "TEMPORAL_UPDATE_REJECTED",
+                        false,
+                        NOW);
+
+        assertThatThrownBy(() -> coordinator(enabled()).start(command(Selection.SHADOW, 1)))
+                .isInstanceOfSatisfying(
+                        AgentRunV2WorkflowLaunchException.class,
+                        failure -> {
+                            assertThat(failure.retryable()).isTrue();
+                            assertThat(failure.code())
+                                    .isEqualTo("AGENT_RUN_ADMISSION_FAILURE_UNPERSISTED");
+                            assertThat(failure.getCause()).isSameAs(persistenceFailure);
+                            assertThat(failure.getSuppressed()).containsExactly(rejected);
+                        });
+    }
+
+    @Test
     void failsClosedWhenV2IsOffOrTheLegacySchedulerWouldExecuteIt() {
         assertThatThrownBy(() -> coordinator(disabled()).start(command(Selection.SHADOW, 1)))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("OFF");
 
         assertThatThrownBy(() -> coordinator(executorMode()).start(command(Selection.SHADOW, 1)))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("legacy scheduler");
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("cannot use the legacy scheduler EXECUTOR");
 
         assertThatThrownBy(() -> coordinator(enabled()).start(command(Selection.OFF, 1)))
                 .isInstanceOf(IllegalStateException.class)

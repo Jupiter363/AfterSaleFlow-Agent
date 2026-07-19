@@ -1,6 +1,7 @@
 package com.example.dispute.agentstream.infrastructure.delivery;
 
 import com.example.dispute.agentstream.application.AgentRunV2StreamStore;
+import com.example.dispute.agentstream.application.AgentRunV2StreamStore.BatchAppendReceipt;
 import com.example.dispute.agentstream.infrastructure.persistence.AgentRunStreamRetentionManifest;
 import com.example.dispute.agentstream.infrastructure.persistence.PostgresAgentRunV2EventStore;
 import com.example.dispute.workflow.contract.v1.AgentStreamEvent;
@@ -36,9 +37,9 @@ public class WakeupPublishingAgentRunV2StreamStore implements AgentRunV2StreamSt
         return receipt;
     }
 
-    public PostgresAgentRunV2EventStore.BatchAppendReceipt appendBatch(
-            List<AgentStreamEvent> events) {
-        PostgresAgentRunV2EventStore.BatchAppendReceipt receipt = eventStore.appendBatch(events);
+    @Override
+    public BatchAppendReceipt appendBatch(List<AgentStreamEvent> events) {
+        BatchAppendReceipt receipt = eventStore.appendBatch(events);
         AgentStreamEvent first = events.getFirst();
         publishBestEffort(first.runId(), first.attemptId(), receipt.durableHighWatermark());
         return receipt;

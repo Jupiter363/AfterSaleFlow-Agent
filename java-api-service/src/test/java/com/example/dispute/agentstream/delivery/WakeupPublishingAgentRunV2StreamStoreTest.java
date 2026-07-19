@@ -7,6 +7,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.example.dispute.agentstream.application.AgentRunV2StreamStore.AppendReceipt;
+import com.example.dispute.agentstream.application.AgentRunV2StreamStore.BatchAppendReceipt;
 import com.example.dispute.agentstream.infrastructure.delivery.AgentRunStreamWakeup;
 import com.example.dispute.agentstream.infrastructure.delivery.AgentRunStreamWakeupPublisher;
 import com.example.dispute.agentstream.infrastructure.delivery.WakeupPublishingAgentRunV2StreamStore;
@@ -16,6 +17,7 @@ import com.example.dispute.workflow.contract.v1.AgentStreamEvent.Payload;
 import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
 import com.example.dispute.workflow.contract.v1.ContractTypes.StreamEventType;
 import java.time.Instant;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
 
@@ -57,6 +59,31 @@ class WakeupPublishingAgentRunV2StreamStoreTest {
 
         assertThat(receipt).isEqualTo(new AppendReceipt(true, 5));
         verify(postgres).append(event);
+    }
+
+    @Test
+    void publishesOneHighWatermarkOnlyAfterTheWholePostgresBatchCommits() {
+        PostgresAgentRunV2EventStore postgres = mock(PostgresAgentRunV2EventStore.class);
+        AgentRunStreamWakeupPublisher publisher = mock(AgentRunStreamWakeupPublisher.class);
+        List<AgentStreamEvent> events = List.of(event(6), event(7));
+        BatchAppendReceipt durable =
+                new BatchAppendReceipt(List.of(true, true), 7);
+        when(postgres.appendBatch(events)).thenReturn(durable);
+        WakeupPublishingAgentRunV2StreamStore store =
+                new WakeupPublishingAgentRunV2StreamStore(postgres, publisher);
+
+        BatchAppendReceipt receipt = store.appendBatch(events);
+
+        AgentRunStreamWakeup expected =
+                new AgentRunStreamWakeup(
+                        AgentRunStreamWakeup.SCHEMA_VERSION,
+                        "RUN_1",
+                        "ATTEMPT_1",
+                        7);
+        InOrder ordered = inOrder(postgres, publisher);
+        ordered.verify(postgres).appendBatch(events);
+        ordered.verify(publisher).publish(expected);
+        assertThat(receipt).isEqualTo(durable);
     }
 
     private AgentStreamEvent event(long sequence) {

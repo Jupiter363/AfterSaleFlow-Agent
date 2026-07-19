@@ -171,9 +171,9 @@ public final class AgentRunV2ManifestFactory {
             long latencyMs,
             Instant finalizedAt) {
         public FinalizationFacts {
-            if (fencingToken < 0 || latencyMs < 0) {
+            if (fencingToken < 1 || latencyMs < 0) {
                 throw new IllegalArgumentException(
-                        "fencingToken and latencyMs must not be negative");
+                        "fencingToken must be positive and latencyMs must not be negative");
             }
             required(logicalIdempotencyKey, "logicalIdempotencyKey");
             required(workflowId, "workflowId");

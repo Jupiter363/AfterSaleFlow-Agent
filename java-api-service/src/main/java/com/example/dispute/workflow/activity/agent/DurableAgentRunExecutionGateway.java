@@ -1,14 +1,23 @@
 package com.example.dispute.workflow.activity.agent;
 
 import com.example.dispute.agentstream.application.AgentRunV2StreamStore;
+import com.example.dispute.agentstream.application.AgentRunV2StreamStore.BatchAppendReceipt;
 import com.example.dispute.workflow.contract.v1.AgentStreamEvent;
 import com.example.dispute.workflow.contract.v1.ContractTypes.StreamEventType;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.RoomGraphResult;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 
-/** Persists every public event before exposing its progress to the Temporal Activity. */
+/** Persists bounded public-event batches before exposing their progress to the Activity. */
 public final class DurableAgentRunExecutionGateway implements AgentRunExecutionGateway {
+
+    // The command sink is synchronous, so ADR 0003's size arm bounds batching without a timer
+    // thread racing cancellation or final-result validation.
+    static final int TARGET_DELTA_BATCH_BYTES = 1_024;
+    static final int MAX_BATCH_EVENTS = 32;
 
     private final AgentGraphCommandClient commandClient;
     private final AgentRunV2StreamStore streamStore;
@@ -32,6 +41,7 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
         Objects.requireNonNull(cancellationToken, "cancellationToken");
 
         ProgressState state = new ProgressState(request);
+        PendingBatch batch = new PendingBatch();
         RoomGraphResult result;
         try {
             result = commandClient.execute(
@@ -44,16 +54,39 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
                             state.stageFinal(event);
                             return;
                         }
-                        appendAndPublish(
-                                state,
-                                event,
-                                false,
-                                progressListener,
-                                cancellationToken);
+                        if (batch.shouldFlushBefore(event)) {
+                            flushBatch(
+                                    batch,
+                                    state,
+                                    false,
+                                    progressListener,
+                                    cancellationToken);
+                        }
+                        state.accept(event);
+                        batch.add(event);
+                        if (event.eventType() == StreamEventType.ATTEMPT_STARTED
+                                || terminal(event.eventType())
+                                || batch.shouldFlush()) {
+                            flushBatch(
+                                    batch,
+                                    state,
+                                    false,
+                                    progressListener,
+                                    cancellationToken);
+                        }
                     },
                     cancellationToken);
         } catch (RuntimeException failure) {
             cancellationToken.throwIfCancellationRequested();
+            if (durableAppendFailure(failure)) {
+                throw failure;
+            }
+            flushBatch(
+                    batch,
+                    state,
+                    state.hasPendingFinal(),
+                    progressListener,
+                    cancellationToken);
             if (state.hasPendingFinal()
                     && !(failure instanceof AgentRunExecutionException)) {
                 throw AgentRunExecutionException.retryable(
@@ -66,62 +99,140 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
             }
             throw failure;
         }
+
         cancellationToken.throwIfCancellationRequested();
-        AgentStreamEvent finalEvent = state.validatedFinal(result);
-        appendAndPublish(
+        AgentStreamEvent finalEvent;
+        try {
+            finalEvent = state.validatedFinal(result);
+        } catch (RuntimeException failure) {
+            flushBatch(
+                    batch,
+                    state,
+                    false,
+                    progressListener,
+                    cancellationToken);
+            throw failure;
+        }
+        batch.add(finalEvent);
+        flushBatch(
+                batch,
                 state,
-                finalEvent,
                 true,
                 progressListener,
                 cancellationToken);
         return new Completion(result, state.lastSequence, state.publicOutputEmitted);
     }
 
-    private void appendAndPublish(
+    private void flushBatch(
+            PendingBatch batch,
             ProgressState state,
-            AgentStreamEvent event,
             boolean commandReplaySafe,
             ProgressListener progressListener,
             AgentRunCancellationToken cancellationToken) {
-        AgentRunV2StreamStore.AppendReceipt receipt;
+        if (batch.isEmpty()) {
+            return;
+        }
+        List<AgentStreamEvent> events = batch.events();
+        BatchAppendReceipt receipt;
         try {
             receipt = Objects.requireNonNull(
-                    streamStore.append(event), "durable append receipt");
+                    streamStore.appendBatch(events), "durable batch append receipt");
+            if (receipt.inserted().size() != events.size()) {
+                throw new IllegalStateException(
+                        "durable batch receipt does not describe every event");
+            }
         } catch (RuntimeException failure) {
             throw AgentRunExecutionException.retryable(
                     "AGENT_RUN_DURABLE_APPEND_FAILED",
-                    "durable stream append failed",
+                    "durable stream batch append failed",
                     commandReplaySafe,
                     state.durableSequence(),
                     state.publicOutputEmitted,
                     failure);
         }
-        if (receipt.durableHighWatermark() < event.sequenceNo()) {
+
+        long maximumSequence =
+                events.stream().mapToLong(AgentStreamEvent::sequenceNo).max().orElseThrow();
+        if (receipt.durableHighWatermark() < maximumSequence) {
             throw AgentRunExecutionException.retryable(
                     "AGENT_RUN_DURABLE_APPEND_LAGGED",
-                    "durable stream high-watermark did not reach the event",
+                    "durable stream high-watermark did not reach the batch",
                     commandReplaySafe,
                     state.durableSequence(),
                     state.publicOutputEmitted,
                     null);
         }
-        state.commit(event);
-        if (!receipt.inserted()) {
-            return;
+
+        boolean inserted = false;
+        for (int index = 0; index < events.size(); index++) {
+            state.commit(events.get(index));
+            inserted |= receipt.inserted().get(index);
         }
-        cancellationToken.throwIfCancellationRequested();
-        progressListener.onProgress(
-                new AgentRunProgress(
-                        state.lastSequence,
-                        state.publicOutputEmitted,
-                        state.finalObserved));
+        AgentRunProgress notification = inserted ? state.snapshot() : null;
+        batch.clear();
+        if (notification != null) {
+            cancellationToken.throwIfCancellationRequested();
+            progressListener.onProgress(notification);
+        }
+    }
+
+    private static boolean durableAppendFailure(RuntimeException failure) {
+        if (!(failure instanceof AgentRunExecutionException executionFailure)) {
+            return false;
+        }
+        return "AGENT_RUN_DURABLE_APPEND_FAILED".equals(executionFailure.errorCode())
+                || "AGENT_RUN_DURABLE_APPEND_LAGGED".equals(executionFailure.errorCode());
+    }
+
+    private static boolean terminal(StreamEventType eventType) {
+        return eventType == StreamEventType.ERROR
+                || eventType == StreamEventType.ATTEMPT_ABORTED;
+    }
+
+    private static final class PendingBatch {
+        private final List<AgentStreamEvent> events = new ArrayList<>();
+        private int deltaBytes;
+
+        private boolean shouldFlushBefore(AgentStreamEvent event) {
+            return !events.isEmpty()
+                    && deltaBytes(event) >= TARGET_DELTA_BATCH_BYTES;
+        }
+
+        private void add(AgentStreamEvent event) {
+            events.add(event);
+            deltaBytes += deltaBytes(event);
+        }
+
+        private boolean shouldFlush() {
+            return deltaBytes >= TARGET_DELTA_BATCH_BYTES
+                    || events.size() >= MAX_BATCH_EVENTS;
+        }
+
+        private boolean isEmpty() {
+            return events.isEmpty();
+        }
+
+        private List<AgentStreamEvent> events() {
+            return List.copyOf(events);
+        }
+
+        private void clear() {
+            events.clear();
+            deltaBytes = 0;
+        }
+
+        private static int deltaBytes(AgentStreamEvent event) {
+            String delta = event.payload().delta();
+            return delta == null ? 0 : delta.getBytes(StandardCharsets.UTF_8).length;
+        }
     }
 
     private static final class ProgressState {
         private final ExecuteAgentRunRequest request;
         private long lastSequence = -1;
-        private boolean started;
-        private boolean terminal;
+        private long acceptedSequence = -1;
+        private boolean acceptedStarted;
+        private boolean acceptedTerminal;
         private boolean finalObserved;
         private boolean publicOutputEmitted;
         private AgentStreamEvent pendingFinal;
@@ -137,10 +248,12 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
                     || request.command().actorScope().audience() != event.audience()) {
                 throw protocolFailure("stream event identity or audience does not match");
             }
-            if (terminal || pendingFinal != null || event.sequenceNo() <= lastSequence) {
+            if (acceptedTerminal
+                    || pendingFinal != null
+                    || event.sequenceNo() <= acceptedSequence) {
                 throw protocolFailure("stream event sequence or terminal state is invalid");
             }
-            if (!started) {
+            if (!acceptedStarted) {
                 if (event.sequenceNo() != 0
                         || event.eventType() != StreamEventType.ATTEMPT_STARTED) {
                     throw protocolFailure("stream must begin with attempt_started sequence zero");
@@ -150,26 +263,34 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
             }
         }
 
+        private void accept(AgentStreamEvent event) {
+            acceptedStarted = true;
+            acceptedSequence = event.sequenceNo();
+            acceptedTerminal = event.eventType() == StreamEventType.FINAL
+                    || terminal(event.eventType());
+        }
+
         private void stageFinal(AgentStreamEvent event) {
+            accept(event);
             pendingFinal = event;
         }
 
         private void commit(AgentStreamEvent event) {
-            started = true;
             lastSequence = event.sequenceNo();
             publicOutputEmitted |= event.eventType() == StreamEventType.VISIBLE_DELTA;
-            terminal = event.eventType() == StreamEventType.FINAL
-                    || event.eventType() == StreamEventType.ERROR
-                    || event.eventType() == StreamEventType.ATTEMPT_ABORTED;
             if (event.eventType() == StreamEventType.FINAL) {
                 finalObserved = true;
                 pendingFinal = null;
             }
         }
 
+        private AgentRunProgress snapshot() {
+            return new AgentRunProgress(lastSequence, publicOutputEmitted, finalObserved);
+        }
+
         private AgentStreamEvent validatedFinal(RoomGraphResult result) {
             if (result == null
-                    || !started
+                    || !acceptedStarted
                     || pendingFinal == null
                     || !request.command().commandId().equals(result.commandId())
                     || !request.logicalRunId().equals(result.logicalRunId())
@@ -179,7 +300,8 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
                     || !executionMetadataMatches(result.executionMetadata())
                     || !Objects.equals(
                             pendingFinal.payload().finalResultHash(), result.outputHash())) {
-                throw protocolFailure("cached or executed graph result does not match the final stream");
+                throw protocolFailure(
+                        "cached or executed graph result does not match the final stream");
             }
             return pendingFinal;
         }

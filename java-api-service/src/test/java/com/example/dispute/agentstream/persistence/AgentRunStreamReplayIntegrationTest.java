@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.dispute.agentstream.application.AgentRunLedger;
 import com.example.dispute.agentstream.application.AgentRunV2StreamStore.AppendReceipt;
+import com.example.dispute.agentstream.application.AgentRunV2StreamStore.BatchAppendReceipt;
 import com.example.dispute.agentstream.infrastructure.persistence.PostgresAgentRunV2EventStore;
 import com.example.dispute.workflow.contract.v1.AgentStreamEvent;
 import com.example.dispute.workflow.contract.v1.AgentStreamEvent.Payload;
@@ -81,14 +82,25 @@ class AgentRunStreamReplayIntegrationTest {
                         event(first.attemptId(), 1, StreamEventType.VISIBLE_DELTA, "alpha"),
                         event(first.attemptId(), 2, StreamEventType.VISIBLE_DELTA, " beta"));
 
-        PostgresAgentRunV2EventStore.BatchAppendReceipt receipt =
-                eventStore.appendBatch(firstBatch);
+        BatchAppendReceipt receipt = eventStore.appendBatch(firstBatch);
 
         assertThat(receipt.insertedCount()).isEqualTo(3);
+        assertThat(receipt.inserted()).containsExactly(true, true, true);
         assertThat(receipt.durableHighWatermark()).isEqualTo(2);
         assertThat(eventStore.replay(logical.agentRunId(), first.attemptId(), 0, 100))
                 .extracting(AgentStreamEvent::sequenceNo)
                 .containsExactly(1L, 2L);
+
+        BatchAppendReceipt duplicateBatch = eventStore.appendBatch(firstBatch);
+        assertThat(duplicateBatch.inserted()).containsExactly(false, false, false);
+        assertThat(duplicateBatch.insertedCount()).isZero();
+        assertThat(duplicateBatch.durableHighWatermark()).isEqualTo(2);
+        assertThatThrownBy(
+                        () ->
+                                eventStore.appendBatch(
+                                        List.of(firstBatch.get(2), firstBatch.get(1))))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("strictly increasing");
 
         assertThat(eventStore.append(firstBatch.get(1)))
                 .satisfies(

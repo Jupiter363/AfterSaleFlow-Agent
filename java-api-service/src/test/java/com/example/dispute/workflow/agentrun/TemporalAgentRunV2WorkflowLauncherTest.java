@@ -79,6 +79,23 @@ class TemporalAgentRunV2WorkflowLauncherTest {
     }
 
     @Test
+    void classifiesFirstAttemptStubCreationFailureAsRetryableAdmission() throws Exception {
+        ExecuteAgentRunRequest request = request(1);
+        WorkflowClient client = mock(WorkflowClient.class);
+        when(client.newWorkflowStub(
+                        eq(AgentRunWorkflow.class), any(WorkflowOptions.class)))
+                .thenThrow(new IllegalStateException("Temporal client is unavailable"));
+
+        assertThatThrownBy(() -> new TemporalAgentRunV2WorkflowLauncher(client).start(request))
+                .isInstanceOfSatisfying(
+                        AgentRunV2WorkflowLaunchException.class,
+                        failure -> {
+                            assertThat(failure.retryable()).isTrue();
+                            assertThat(failure.code()).isEqualTo("TEMPORAL_DISPATCH_FAILED");
+                        });
+    }
+
+    @Test
     void sendsLaterAttemptsDirectlyAsDeterministicUpdates() throws Exception {
         ExecuteAgentRunRequest request = request(2);
         String workflowId = TemporalAgentRunV2WorkflowLauncher.workflowId(request.logicalRunId());
