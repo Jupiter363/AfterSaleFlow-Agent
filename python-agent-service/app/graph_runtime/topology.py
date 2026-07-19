@@ -4,11 +4,13 @@ import re
 from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Send
 
+from app.contracts.v1.codec import canonicalize
 from app.graph_runtime.state import CommonGraphState
 
 
@@ -30,6 +32,11 @@ class ClosedRouter:
         for route, node in self.allowed_routes.items():
             if not _ROUTE.fullmatch(route) or not _ROUTE.fullmatch(node):
                 raise GraphRouteError("router route and node names must be bounded identifiers")
+        object.__setattr__(
+            self,
+            "allowed_routes",
+            MappingProxyType(dict(sorted(self.allowed_routes.items()))),
+        )
 
     def __call__(self, state: Mapping[str, Any]) -> str:
         route = state.get(self.route_field)
@@ -52,6 +59,11 @@ def bounded_sends(
         raise GraphRouteError("room Send fan-out exceeds the configured maximum")
     if any(not _ROUTE.fullmatch(key) for key in work_items):
         raise GraphRouteError("Send work item keys must be bounded identifiers")
+    for item in work_items.values():
+        try:
+            canonicalize(item)
+        except (TypeError, ValueError) as error:
+            raise GraphRouteError("Send work item must be canonical JSON") from error
     return [
         Send(
             target_node,

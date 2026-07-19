@@ -107,6 +107,19 @@ def test_lens_rejects_missing_sources_invalid_output_and_runtime_overrides() -> 
     with pytest.raises(StateLensError, match="output failed validation"):
         invalid.invoke(state())
 
+    extra = StateLens(
+        name="extra_output",
+        source_fields=("bindings",),
+        selector=lambda scoped: {
+            "case_id": scoped["bindings"]["case_id"],
+            "summary": "summary",
+            "private_state": "must not pass",
+        },
+        output_type=PromptInput,
+    )
+    with pytest.raises(StateLensError, match="undeclared prompt fields"):
+        extra.invoke(state())
+
     with pytest.raises(StateLensError, match="does not accept invocation overrides"):
         lens().invoke(state(), override="unsafe")
 

@@ -109,7 +109,9 @@ def test_terminal_draft_rejects_sibling_detail_and_unknown_status() -> None:
 
 
 def test_closed_router_is_exhaustive_and_unknown_values_fail_closed() -> None:
-    router = ClosedRouter({"continue": "execute_graph", "finish": "project_result"})
+    routes = {"continue": "execute_graph", "finish": "project_result"}
+    router = ClosedRouter(routes)
+    routes["forged"] = "project_result"
 
     assert router({"route": "continue"}) == "execute_graph"
     assert router({"route": "finish"}) == "project_result"
@@ -117,6 +119,8 @@ def test_closed_router_is_exhaustive_and_unknown_values_fail_closed() -> None:
         router({"route": "model_invented"})
     with pytest.raises(GraphRouteError, match="unknown or missing"):
         router({})
+    with pytest.raises(GraphRouteError, match="unknown or missing"):
+        router({"route": "forged"})
 
 
 def test_send_fanout_is_bounded_sorted_and_detached() -> None:
@@ -131,6 +135,11 @@ def test_send_fanout_is_bounded_sorted_and_detached() -> None:
     with pytest.raises(GraphRouteError, match="fan-out"):
         bounded_sends(
             {f"work_{index}": {"value": index} for index in range(9)},
+            target_node="execute_graph",
+        )
+    with pytest.raises(GraphRouteError, match="canonical JSON"):
+        bounded_sends(
+            {"work_invalid": {"client": object()}},
             target_node="execute_graph",
         )
 

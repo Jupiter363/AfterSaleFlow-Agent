@@ -78,11 +78,16 @@ class StateLens(Runnable[StateT, PromptInputT], Generic[StateT, PromptInputT]):
             {field: deepcopy(state[field]) for field in self.source_fields}
         )
         try:
-            selected = self._adapter.validate_python(self._selector(scoped))
+            raw = self._selector(scoped)
+            if not isinstance(raw, Mapping):
+                raise StateLensError("State Lens output must be a prompt mapping")
+            selected = self._adapter.validate_python(raw, strict=True)
         except (KeyError, ValidationError, TypeError, ValueError) as error:
             raise StateLensError(f"State Lens output failed validation: {self.name}") from error
         if not isinstance(selected, Mapping):
             raise StateLensError("State Lens output must be a prompt mapping")
+        if set(raw) != set(selected):
+            raise StateLensError("State Lens output contains undeclared prompt fields")
         return cast(PromptInputT, dict(selected))
 
     async def _aselect(self, state: StateT) -> PromptInputT:
