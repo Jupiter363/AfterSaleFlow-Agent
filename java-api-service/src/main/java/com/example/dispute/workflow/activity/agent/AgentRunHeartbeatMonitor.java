@@ -50,7 +50,8 @@ public final class AgentRunHeartbeatMonitor implements AutoCloseable {
         }
         AgentRunLedger.Attempt initialAttempt = Objects.requireNonNull(attempt, "attempt");
         boolean finalObserved =
-                initialAttempt.status() == AgentRunAttemptStatus.RESULT_READY
+                initialAttempt.finalFrameObserved()
+                        || initialAttempt.status() == AgentRunAttemptStatus.RESULT_READY
                         || initialAttempt.status() == AgentRunAttemptStatus.COMPLETED;
         this.progress = new AgentRunProgress(
                 initialAttempt.lastSequenceNo(),
@@ -85,7 +86,7 @@ public final class AgentRunHeartbeatMonitor implements AutoCloseable {
         synchronized (stateLock) {
             requireActive();
             if (update.lastSequenceNo() < progress.lastSequenceNo()) {
-                throw AgentRunExecutionException.nonRetryable(
+                throw AgentRunExecutionException.failLogicalRun(
                         "AGENT_RUN_PROGRESS_REGRESSED",
                         "agent run progress sequence regressed",
                         progress.lastSequenceNo(),

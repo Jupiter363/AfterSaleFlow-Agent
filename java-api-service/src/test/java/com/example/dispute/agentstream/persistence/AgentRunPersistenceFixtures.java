@@ -175,6 +175,7 @@ public final class AgentRunPersistenceFixtures {
                 true,
                 null,
                 false,
+                null,
                 COMPLETED_AT);
     }
 

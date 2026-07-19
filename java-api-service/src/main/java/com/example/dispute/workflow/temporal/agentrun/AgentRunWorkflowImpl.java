@@ -3,6 +3,7 @@ package com.example.dispute.workflow.temporal.agentrun;
 import com.example.dispute.workflow.activity.agent.ExecuteAgentRunActivity;
 import com.example.dispute.workflow.activity.agent.FinalizeAgentRunActivity;
 import com.example.dispute.workflow.contract.v1.AgentRunFinalizationReceipt;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunRecoveryAction;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
@@ -191,7 +192,7 @@ public class AgentRunWorkflowImpl implements AgentRunWorkflow {
     private static boolean canAcceptAnotherAttempt(
             ExecuteAgentRunRequest request, ExecuteAgentRunResult result) {
         return result.outcome() == ExecuteAgentRunResult.Outcome.FAILED
-                && result.retryable()
+                && result.recoveryAction() == AgentRunRecoveryAction.CREATE_NEXT_ATTEMPT
                 && request.attemptNo() < AgentRunTemporalPolicy.MAXIMUM_LOGICAL_ATTEMPTS
                 && Workflow.currentTimeMillis() < request.command().deadlineAt().toEpochMilli();
     }

@@ -16,8 +16,8 @@ import com.example.dispute.workflow.activity.agent.AgentRunExecutionGateway.Exec
 import com.example.dispute.workflow.activity.agent.AgentRunProgress;
 import com.example.dispute.workflow.activity.agent.DurableAgentRunExecutionGateway;
 import com.example.dispute.workflow.activity.agent.GraphReconciliationException;
-import com.example.dispute.workflow.activity.agent.GraphReconciliationException.RecoveryAction;
 import com.example.dispute.workflow.contract.v1.AgentStreamEvent;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunRecoveryAction;
 import com.example.dispute.workflow.contract.v1.ContractTypes.StreamEventType;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.GraphReconcileResponse;
@@ -267,6 +267,7 @@ class DurableAgentRunExecutionGatewayTest {
 
         assertThat(failure.errorCode()).isEqualTo("AGENT_RUN_RESULT_AFTER_FINAL_UNAVAILABLE");
         assertThat(failure.commandReplaySafe()).isTrue();
+        assertThat(failure.recoveryAction().name()).isEqualTo("RECONCILE_TERMINAL");
         assertThat(failure.lastSequenceNo()).isZero();
         assertThat(persisted).containsExactly(0L);
     }
@@ -328,6 +329,7 @@ class DurableAgentRunExecutionGatewayTest {
 
         assertThat(failure.errorCode()).isEqualTo("AGENT_RUN_DURABLE_APPEND_FAILED");
         assertThat(failure.commandReplaySafe()).isTrue();
+        assertThat(failure.recoveryAction().name()).isEqualTo("RECONCILE_TERMINAL");
         assertThat(failure.lastSequenceNo()).isZero();
         assertThat(failure.publicOutputEmitted()).isFalse();
         assertThat(progress).containsExactly(0L);
@@ -595,6 +597,8 @@ class DurableAgentRunExecutionGatewayTest {
                 .isEqualTo("AGENT_RUN_RECONCILED_FINAL_APPEND_FAILED");
         assertThat(transientFailure.retryable()).isTrue();
         assertThat(transientFailure.commandReplaySafe()).isTrue();
+        assertThat(transientFailure.recoveryAction().name())
+                .isEqualTo("RECONCILE_TERMINAL");
     }
 
     @Test
@@ -613,9 +617,9 @@ class DurableAgentRunExecutionGatewayTest {
             throw new AssertionError("a rejected reconciliation has no final to persist");
         };
 
-        for (RecoveryAction action : RecoveryAction.values()) {
-            boolean remoteRetryable = action == RecoveryAction.RETRY_SAME_COMMAND;
-            String remoteCode = action == RecoveryAction.CREATE_NEXT_ATTEMPT
+        for (AgentRunRecoveryAction action : AgentRunRecoveryAction.values()) {
+            boolean remoteRetryable = action == AgentRunRecoveryAction.RETRY_SAME_COMMAND;
+            String remoteCode = action == AgentRunRecoveryAction.CREATE_NEXT_ATTEMPT
                     ? "GRAPH_NEW_AGENT_ATTEMPT_REQUIRED"
                     : "GRAPH_RECONCILIATION_" + action.name();
             GraphReconciliationException remoteFailure = new GraphReconciliationException(
@@ -646,22 +650,30 @@ class DurableAgentRunExecutionGatewayTest {
                     assertThat(mapped.errorCode()).isEqualTo(remoteCode);
                     assertThat(mapped.retryable()).isTrue();
                     assertThat(mapped.commandReplaySafe()).isTrue();
+                    assertThat(mapped.recoveryAction().name())
+                            .isEqualTo("RETRY_SAME_COMMAND");
                 }
                 case CREATE_NEXT_ATTEMPT -> {
                     assertThat(mapped.errorCode()).isEqualTo(remoteCode);
                     assertThat(mapped.retryable()).isTrue();
                     assertThat(mapped.commandReplaySafe()).isFalse();
+                    assertThat(mapped.recoveryAction().name())
+                            .isEqualTo("CREATE_NEXT_ATTEMPT");
                 }
                 case FAIL_LOGICAL_RUN -> {
                     assertThat(mapped.errorCode()).isEqualTo(remoteCode);
                     assertThat(mapped.retryable()).isFalse();
                     assertThat(mapped.commandReplaySafe()).isFalse();
+                    assertThat(mapped.recoveryAction().name())
+                            .isEqualTo("FAIL_LOGICAL_RUN");
                 }
                 case RECONCILE_TERMINAL -> {
                     assertThat(mapped.errorCode())
                             .isEqualTo("AGENT_RUN_RECONCILIATION_ACTION_INVALID");
                     assertThat(mapped.retryable()).isFalse();
                     assertThat(mapped.commandReplaySafe()).isFalse();
+                    assertThat(mapped.recoveryAction().name())
+                            .isEqualTo("FAIL_LOGICAL_RUN");
                 }
             }
             assertThat(mapped.getCause()).isSameAs(remoteFailure);

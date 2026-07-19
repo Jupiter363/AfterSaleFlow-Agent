@@ -19,6 +19,7 @@ import com.example.dispute.workflow.activity.agent.AgentRunExecutionGateway.Exec
 import com.example.dispute.workflow.activity.agent.AgentRunProgress;
 import com.example.dispute.workflow.activity.agent.ExecuteAgentRunActivityImpl;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunRecoveryAction;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
@@ -108,10 +109,9 @@ class ExecuteAgentRunActivityTest {
                     AgentRunExecutionGateway.ProgressListener listener = call.getArgument(2);
                     if (invocation.getAndIncrement() == 0) {
                         listener.onProgress(new AgentRunProgress(3, true, false));
-                        throw AgentRunExecutionException.retryable(
+                        throw AgentRunExecutionException.retrySameCommand(
                                 "AGENT_RESPONSE_LOST",
                                 "response lost after command-ledger commit",
-                                true,
                                 3,
                                 true,
                                 null);
@@ -157,6 +157,34 @@ class ExecuteAgentRunActivityTest {
     }
 
     @Test
+    void durableFinalHeartbeatForcesResultOnlyReconciliationWithoutVisibleOutput()
+            throws Exception {
+        ExecuteAgentRunRequest request = request();
+        RoomGraphResult graphResult = graphResult();
+        AgentRunLedger ledger = mock(AgentRunLedger.class);
+        AgentRunExecutionGateway gateway = mock(AgentRunExecutionGateway.class);
+        when(ledger.startNextAttempt(request.agentRunId(), request, NOW))
+                .thenReturn(runningAttempt(2, false, true));
+        when(gateway.execute(
+                        eq(request),
+                        eq(ExecutionMode.RECONCILE_ONLY),
+                        any(),
+                        any()))
+                .thenReturn(new AgentRunExecutionGateway.Completion(graphResult, 2, false));
+
+        ExecuteAgentRunResult result =
+                activity(ledger, gateway, () -> context(2)).execute(request);
+
+        assertThat(result.outcome()).isEqualTo(ExecuteAgentRunResult.Outcome.COMPLETED);
+        assertThat(result.recoveryAction()).isNull();
+        verify(gateway).execute(
+                eq(request),
+                eq(ExecutionMode.RECONCILE_ONLY),
+                any(),
+                any());
+    }
+
+    @Test
     void visibleOutputFailureMarksTheAttemptForResetBeforeTheNextLogicalAttempt()
             throws Exception {
         ExecuteAgentRunRequest request = request();
@@ -172,10 +200,9 @@ class ExecuteAgentRunActivityTest {
                 .thenAnswer(call -> {
                     AgentRunExecutionGateway.ProgressListener listener = call.getArgument(2);
                     listener.onProgress(new AgentRunProgress(4, true, false));
-                    throw AgentRunExecutionException.retryable(
+                    throw AgentRunExecutionException.createNextAttempt(
                             "AGENT_STREAM_INTERRUPTED",
                             "stream interrupted before durable completion",
-                            false,
                             4,
                             true,
                             null);
@@ -187,6 +214,8 @@ class ExecuteAgentRunActivityTest {
         assertThat(result.outcome()).isEqualTo(ExecuteAgentRunResult.Outcome.FAILED);
         assertThat(result.publicOutputEmitted()).isTrue();
         assertThat(result.retryable()).isTrue();
+        assertThat(result.recoveryAction())
+                .isEqualTo(AgentRunRecoveryAction.CREATE_NEXT_ATTEMPT);
         verify(ledger).recordAttemptFailure(
                 request.agentRunId(),
                 request.attemptId(),
@@ -209,10 +238,9 @@ class ExecuteAgentRunActivityTest {
                         eq(ExecutionMode.RECONCILE_ONLY),
                         any(),
                         any()))
-                .thenThrow(AgentRunExecutionException.retryable(
+                .thenThrow(AgentRunExecutionException.retrySameCommand(
                         "AGENT_RESPONSE_LOST",
                         "the exact command remains recoverable from its ledger",
-                        true,
                         4,
                         true,
                         null));
@@ -222,6 +250,8 @@ class ExecuteAgentRunActivityTest {
 
         assertThat(result.outcome()).isEqualTo(ExecuteAgentRunResult.Outcome.FAILED);
         assertThat(result.retryable()).isFalse();
+        assertThat(result.recoveryAction())
+                .isEqualTo(AgentRunRecoveryAction.FAIL_LOGICAL_RUN);
         verify(ledger).recordAttemptFailure(
                 request.agentRunId(),
                 request.attemptId(),
@@ -328,7 +358,7 @@ class ExecuteAgentRunActivityTest {
                         eq(ExecutionMode.RECONCILE_ONLY),
                         any(),
                         any()))
-                .thenThrow(AgentRunExecutionException.nonRetryable(
+                .thenThrow(AgentRunExecutionException.failLogicalRun(
                         "AGENT_RUN_RECONCILIATION_MISS",
                         "cached command result was not found",
                         7,
@@ -402,10 +432,18 @@ class ExecuteAgentRunActivityTest {
     private static AgentRunLedger.Attempt runningAttempt(
             long lastSequenceNo,
             boolean publicOutputEmitted) {
+        return runningAttempt(lastSequenceNo, publicOutputEmitted, false);
+    }
+
+    private static AgentRunLedger.Attempt runningAttempt(
+            long lastSequenceNo,
+            boolean publicOutputEmitted,
+            boolean finalFrameObserved) {
         return attempt(
                 AgentRunAttemptStatus.RUNNING,
                 lastSequenceNo,
-                publicOutputEmitted);
+                publicOutputEmitted,
+                finalFrameObserved);
     }
 
     private static AgentRunLedger.Attempt resultReadyAttempt(
@@ -414,19 +452,22 @@ class ExecuteAgentRunActivityTest {
         return attempt(
                 AgentRunAttemptStatus.RESULT_READY,
                 lastSequenceNo,
-                publicOutputEmitted);
+                publicOutputEmitted,
+                true);
     }
 
     private static AgentRunLedger.Attempt attempt(
             AgentRunAttemptStatus status,
             long lastSequenceNo,
-            boolean publicOutputEmitted) {
+            boolean publicOutputEmitted,
+            boolean finalFrameObserved) {
         return new AgentRunLedger.Attempt(
                 "attempt-001",
                 "run-001",
                 1,
                 status,
                 publicOutputEmitted,
+                finalFrameObserved,
                 lastSequenceNo,
                 null,
                 NOW,

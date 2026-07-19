@@ -78,6 +78,7 @@ public interface AgentRunLedger {
             long attemptNo,
             AgentRunAttemptStatus status,
             boolean publicOutputEmitted,
+            boolean finalFrameObserved,
             long lastSequenceNo,
             Instant lastHeartbeatAt,
             Instant startedAt,

@@ -3,6 +3,7 @@ package com.example.dispute.workflow.contract.v1;
 import static com.example.dispute.workflow.contract.v1.ContractTypes.required;
 import static com.example.dispute.workflow.contract.v1.ContractTypes.version;
 
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunRecoveryAction;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import com.fasterxml.jackson.databind.annotation.JsonNaming;
 import java.time.Instant;
@@ -21,9 +22,10 @@ public record ExecuteAgentRunResult(
         boolean publicOutputEmitted,
         String errorCode,
         boolean retryable,
+        AgentRunRecoveryAction recoveryAction,
         Instant completedAt) {
 
-    public static final String SCHEMA_VERSION = "execute-agent-run-result.v2";
+    public static final String SCHEMA_VERSION = "execute-agent-run-result.v3";
 
     public ExecuteAgentRunResult {
         schemaVersion = version(schemaVersion, SCHEMA_VERSION);
@@ -46,7 +48,7 @@ public record ExecuteAgentRunResult(
                     || !resultHash.equals(graphResult.outputHash())) {
                 throw new IllegalArgumentException("completed result identity or hash does not match");
             }
-            if (errorCode != null || retryable) {
+            if (errorCode != null || retryable || recoveryAction != null) {
                 throw new IllegalArgumentException("completed result cannot contain an error");
             }
         } else {
@@ -54,6 +56,17 @@ public record ExecuteAgentRunResult(
                 throw new IllegalArgumentException("non-completed result cannot contain a graph result");
             }
             required(errorCode, "errorCode");
+            required(recoveryAction, "recoveryAction");
+            if (recoveryAction == AgentRunRecoveryAction.RETRY_SAME_COMMAND
+                    || recoveryAction == AgentRunRecoveryAction.RECONCILE_TERMINAL) {
+                throw new IllegalArgumentException(
+                        "Activity-local recovery actions cannot escape in a result");
+            }
+            if (retryable
+                    != (recoveryAction == AgentRunRecoveryAction.CREATE_NEXT_ATTEMPT)) {
+                throw new IllegalArgumentException(
+                        "retryable must agree with the closed recovery action");
+            }
         }
         required(completedAt, "completedAt");
     }

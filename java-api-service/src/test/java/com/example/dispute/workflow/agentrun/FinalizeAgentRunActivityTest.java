@@ -112,6 +112,7 @@ class FinalizeAgentRunActivityTest {
                 true,
                 null,
                 false,
+                null,
                 NOW);
     }
 

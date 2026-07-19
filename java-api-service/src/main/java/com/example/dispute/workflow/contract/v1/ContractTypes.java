@@ -149,6 +149,13 @@ public final class ContractTypes {
         CANCELLED
     }
 
+    public enum AgentRunRecoveryAction {
+        RETRY_SAME_COMMAND,
+        CREATE_NEXT_ATTEMPT,
+        RECONCILE_TERMINAL,
+        FAIL_LOGICAL_RUN
+    }
+
     public enum GraphStatus {
         COMPLETED,
         NEEDS_INPUT,

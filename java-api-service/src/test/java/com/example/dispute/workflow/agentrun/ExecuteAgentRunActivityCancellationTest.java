@@ -111,6 +111,7 @@ class ExecuteAgentRunActivityCancellationTest {
                 1,
                 AgentRunAttemptStatus.RUNNING,
                 false,
+                false,
                 0,
                 null,
                 NOW,

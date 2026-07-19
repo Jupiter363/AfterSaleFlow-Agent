@@ -61,6 +61,7 @@ class AgentRunV2ManifestFactoryTest {
                         true,
                         null,
                         false,
+                        null,
                         NOW);
     }
 

@@ -8,6 +8,7 @@ import com.example.dispute.workflow.activity.agent.ExecuteAgentRunActivity;
 import com.example.dispute.workflow.activity.agent.FinalizeAgentRunActivity;
 import com.example.dispute.workflow.contract.v1.AgentRunFinalizationReceipt;
 import com.example.dispute.workflow.contract.v1.AgentRunFinalizationReceipt.CommitStatus;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunRecoveryAction;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
@@ -20,6 +21,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import io.temporal.client.UpdateOptions;
 import io.temporal.client.WorkflowClient;
+import io.temporal.client.WorkflowNotFoundException;
 import io.temporal.client.WorkflowOptions;
 import io.temporal.client.WorkflowStub;
 import io.temporal.client.WorkflowUpdateException;
@@ -188,6 +190,27 @@ class AgentRunLogicalAttemptWorkflowTest {
         assertThat(activities.maximumConcurrentExecutions).hasValue(1);
     }
 
+    @Test
+    void failLogicalRunActionClosesBeforeTheAttemptBudgetIsExhausted() throws Exception {
+        ExecuteAgentRunRequest attemptOne = request(1, "attempt-terminal-001");
+        ExecuteAgentRunRequest attemptTwo = request(2, "attempt-terminal-002");
+        ExecuteAgentRunRequest attemptThree = request(3, "attempt-terminal-003");
+        activities.terminalFailureAttempts.add(2L);
+        RunningWorkflow running = start(attemptOne);
+
+        ExecuteAgentRunResult terminal = update(running.workflow(), attemptTwo);
+
+        assertThat(terminal.retryable()).isFalse();
+        assertThat(terminal.recoveryAction())
+                .isEqualTo(AgentRunRecoveryAction.FAIL_LOGICAL_RUN);
+        assertThat(running.result().get(5, TimeUnit.SECONDS)).isEqualTo(terminal);
+        assertThatThrownBy(() -> update(running.workflow(), attemptThree))
+                .isInstanceOfAny(
+                        WorkflowUpdateException.class,
+                        WorkflowNotFoundException.class);
+        assertThat(activities.executedAttemptNumbers()).containsExactly(1L, 2L);
+    }
+
     private RunningWorkflow start(ExecuteAgentRunRequest attemptOne) throws Exception {
         AgentRunWorkflow workflow =
                 environment
@@ -288,6 +311,7 @@ class AgentRunLogicalAttemptWorkflowTest {
                 true,
                 null,
                 false,
+                null,
                 NOW.plusSeconds(request.attemptNo()));
     }
 
@@ -305,6 +329,26 @@ class AgentRunLogicalAttemptWorkflowTest {
                 request.attemptNo() > 1,
                 "PROVIDER_UNAVAILABLE",
                 true,
+                AgentRunRecoveryAction.CREATE_NEXT_ATTEMPT,
+                NOW.plusSeconds(request.attemptNo()));
+    }
+
+    private static ExecuteAgentRunResult terminalFailureResult(
+            ExecuteAgentRunRequest request) {
+        return new ExecuteAgentRunResult(
+                ExecuteAgentRunResult.SCHEMA_VERSION,
+                request.agentRunId(),
+                request.logicalRunId(),
+                request.attemptId(),
+                request.attemptNo(),
+                ExecuteAgentRunResult.Outcome.FAILED,
+                null,
+                null,
+                1,
+                false,
+                "GRAPH_COMMAND_HASH_CONFLICT",
+                false,
+                AgentRunRecoveryAction.FAIL_LOGICAL_RUN,
                 NOW.plusSeconds(request.attemptNo()));
     }
 
@@ -346,6 +390,7 @@ class AgentRunLogicalAttemptWorkflowTest {
                 new CopyOnWriteArrayList<>();
         private final List<Long> finalizedAttempts = new CopyOnWriteArrayList<>();
         private final Set<Long> retryableAttempts = ConcurrentHashMap.newKeySet();
+        private final Set<Long> terminalFailureAttempts = ConcurrentHashMap.newKeySet();
         private final CountDownLatch firstAttemptFinished = new CountDownLatch(1);
         private final CountDownLatch blockedAttemptEntered = new CountDownLatch(1);
         private final CountDownLatch releaseBlockedAttempt = new CountDownLatch(1);
@@ -375,6 +420,9 @@ class AgentRunLogicalAttemptWorkflowTest {
                 }
                 if (request.attemptNo() == staleResultOnAttemptNo) {
                     return completedResult(staleResultSource);
+                }
+                if (terminalFailureAttempts.contains(request.attemptNo())) {
+                    return terminalFailureResult(request);
                 }
                 return retryableAttempts.contains(request.attemptNo())
                         ? failedResult(request)

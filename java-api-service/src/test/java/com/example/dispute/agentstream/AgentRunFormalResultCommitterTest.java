@@ -171,6 +171,7 @@ class AgentRunFormalResultCommitterTest {
                 true,
                 null,
                 false,
+                null,
                 NOW);
         AgentExecutionManifest manifest = manifest(request, result);
         String manifestHash = ContractJson.sha256Hex(MAPPER.valueToTree(manifest));

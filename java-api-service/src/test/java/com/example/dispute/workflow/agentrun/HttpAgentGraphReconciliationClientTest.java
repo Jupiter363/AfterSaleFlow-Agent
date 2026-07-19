@@ -7,7 +7,7 @@ import static org.assertj.core.api.Assertions.catchThrowableOfType;
 import com.example.dispute.workflow.activity.agent.AgentRunCancellationToken;
 import com.example.dispute.workflow.activity.agent.GraphReconciliationEnvelopeSigner;
 import com.example.dispute.workflow.activity.agent.GraphReconciliationException;
-import com.example.dispute.workflow.activity.agent.GraphReconciliationException.RecoveryAction;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunRecoveryAction;
 import com.example.dispute.workflow.contract.v1.AgentPlatformContractCodec;
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
@@ -127,7 +127,8 @@ class HttpAgentGraphReconciliationClientTest {
 
         assertThat(failure.errorCode()).isEqualTo("GRAPH_RECONCILIATION_PROTOCOL_REJECTED");
         assertThat(failure.retryable()).isFalse();
-        assertThat(failure.recoveryAction()).isEqualTo(RecoveryAction.FAIL_LOGICAL_RUN);
+        assertThat(failure.recoveryAction())
+                .isEqualTo(AgentRunRecoveryAction.FAIL_LOGICAL_RUN);
     }
 
     static Stream<Arguments> remoteErrors() {
@@ -137,25 +138,25 @@ class HttpAgentGraphReconciliationClientTest {
                         "GRAPH_COMMAND_NOT_FOUND",
                         false,
                         "FAIL_LOGICAL_RUN",
-                        RecoveryAction.FAIL_LOGICAL_RUN),
+                        AgentRunRecoveryAction.FAIL_LOGICAL_RUN),
                 Arguments.of(
                         409,
                         "GRAPH_NEW_AGENT_ATTEMPT_REQUIRED",
                         false,
                         "CREATE_NEXT_ATTEMPT",
-                        RecoveryAction.CREATE_NEXT_ATTEMPT),
+                        AgentRunRecoveryAction.CREATE_NEXT_ATTEMPT),
                 Arguments.of(
                         409,
                         "GRAPH_INVOCATION_NONCE_REPLAY",
                         true,
                         "RETRY_SAME_COMMAND",
-                        RecoveryAction.RETRY_SAME_COMMAND),
+                        AgentRunRecoveryAction.RETRY_SAME_COMMAND),
                 Arguments.of(
                         503,
                         "GRAPH_GATEWAY_NOT_READY",
                         true,
                         "RETRY_SAME_COMMAND",
-                        RecoveryAction.RETRY_SAME_COMMAND));
+                        AgentRunRecoveryAction.RETRY_SAME_COMMAND));
     }
 
     @ParameterizedTest
@@ -165,7 +166,7 @@ class HttpAgentGraphReconciliationClientTest {
             String code,
             boolean retryable,
             String action,
-            RecoveryAction expected) throws Exception {
+            AgentRunRecoveryAction expected) throws Exception {
         ExecuteAgentRunRequest request = request();
         ObjectNode error = MAPPER.createObjectNode();
         error.put("code", code);
@@ -208,7 +209,7 @@ class HttpAgentGraphReconciliationClientTest {
                     .isInstanceOf(GraphReconciliationException.class)
                     .extracting(failure ->
                             ((GraphReconciliationException) failure).recoveryAction())
-                    .isEqualTo(RecoveryAction.FAIL_LOGICAL_RUN);
+                    .isEqualTo(AgentRunRecoveryAction.FAIL_LOGICAL_RUN);
         }
     }
 
@@ -245,7 +246,7 @@ class HttpAgentGraphReconciliationClientTest {
                     .isInstanceOf(GraphReconciliationException.class)
                     .extracting(failure ->
                             ((GraphReconciliationException) failure).recoveryAction())
-                    .isEqualTo(RecoveryAction.FAIL_LOGICAL_RUN);
+                    .isEqualTo(AgentRunRecoveryAction.FAIL_LOGICAL_RUN);
         }
     }
 
@@ -262,7 +263,8 @@ class HttpAgentGraphReconciliationClientTest {
 
         assertThat(failure.errorCode()).isEqualTo("GRAPH_RECONCILIATION_TRANSPORT_FAILED");
         assertThat(failure.retryable()).isTrue();
-        assertThat(failure.recoveryAction()).isEqualTo(RecoveryAction.RETRY_SAME_COMMAND);
+        assertThat(failure.recoveryAction())
+                .isEqualTo(AgentRunRecoveryAction.RETRY_SAME_COMMAND);
         assertThat(failure.getMessage()).doesNotContain("connection lost");
         assertThatThrownBy(() -> client(
                         new FakeTransport(success(request.command())),

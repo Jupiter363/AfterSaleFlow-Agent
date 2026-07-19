@@ -290,6 +290,7 @@ class AgentRunV2CoordinatorTest {
                 1,
                 status,
                 false,
+                false,
                 0,
                 NOW,
                 NOW,

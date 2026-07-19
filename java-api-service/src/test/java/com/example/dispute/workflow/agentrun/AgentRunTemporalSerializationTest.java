@@ -3,6 +3,7 @@ package com.example.dispute.workflow.agentrun;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.example.dispute.workflow.contract.v1.AgentRunAttemptHeartbeat;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunRecoveryAction;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
@@ -49,6 +50,7 @@ class AgentRunTemporalSerializationTest {
                 true,
                 null,
                 false,
+                null,
                 NOW);
         AgentRunAttemptHeartbeat heartbeat = new AgentRunAttemptHeartbeat(
                 AgentRunAttemptHeartbeat.SCHEMA_VERSION,
@@ -59,9 +61,26 @@ class AgentRunTemporalSerializationTest {
                 true,
                 true,
                 NOW);
+        ExecuteAgentRunResult retryableFailure = new ExecuteAgentRunResult(
+                ExecuteAgentRunResult.SCHEMA_VERSION,
+                request.agentRunId(),
+                request.logicalRunId(),
+                request.attemptId(),
+                request.attemptNo(),
+                ExecuteAgentRunResult.Outcome.FAILED,
+                null,
+                null,
+                7,
+                true,
+                "GRAPH_NEW_AGENT_ATTEMPT_REQUIRED",
+                true,
+                AgentRunRecoveryAction.CREATE_NEXT_ATTEMPT,
+                NOW);
 
         assertThat(roundTrip(request, ExecuteAgentRunRequest.class)).isEqualTo(request);
         assertThat(roundTrip(result, ExecuteAgentRunResult.class)).isEqualTo(result);
+        assertThat(roundTrip(retryableFailure, ExecuteAgentRunResult.class))
+                .isEqualTo(retryableFailure);
         assertThat(roundTrip(heartbeat, AgentRunAttemptHeartbeat.class)).isEqualTo(heartbeat);
     }
 

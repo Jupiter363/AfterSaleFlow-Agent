@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.example.dispute.workflow.config.AgentRunV2Properties;
 import com.example.dispute.workflow.config.AgentRunV2Properties.SchedulerMode;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunProtocol;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunRecoveryAction;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
@@ -50,6 +51,7 @@ class AgentRunV2ContractTest {
                 true,
                 null,
                 false,
+                null,
                 Instant.parse("2026-07-19T00:00:00Z"));
         AgentRunFinalizationReceipt receipt = new AgentRunFinalizationReceipt(
                 AgentRunFinalizationReceipt.SCHEMA_VERSION,
@@ -79,6 +81,7 @@ class AgentRunV2ContractTest {
                         true,
                         null,
                         false,
+                        null,
                         Instant.parse("2026-07-19T00:00:00Z")))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("identity or hash");
@@ -101,6 +104,26 @@ class AgentRunV2ContractTest {
     }
 
     @Test
+    void failedResultRequiresAClosedRecoveryActionConsistentWithRetryable() {
+        ExecuteAgentRunResult retryable = failedResult(
+                true, AgentRunRecoveryAction.CREATE_NEXT_ATTEMPT);
+
+        assertThat(retryable.schemaVersion()).isEqualTo("execute-agent-run-result.v3");
+        assertThat(retryable.recoveryAction())
+                .isEqualTo(AgentRunRecoveryAction.CREATE_NEXT_ATTEMPT);
+        assertThatThrownBy(() -> failedResult(true, AgentRunRecoveryAction.FAIL_LOGICAL_RUN))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("closed recovery action");
+        assertThatThrownBy(() -> failedResult(false, null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessageContaining("recoveryAction");
+        assertThatThrownBy(
+                        () -> failedResult(false, AgentRunRecoveryAction.RETRY_SAME_COMMAND))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Activity-local");
+    }
+
+    @Test
     void configurationRejectsLegacyExecutionOfV2() {
         AgentRunV2Properties defaults = new AgentRunV2Properties(
                 false,
@@ -120,6 +143,25 @@ class AgentRunV2ContractTest {
                         Duration.ofSeconds(5)))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("cannot use the legacy scheduler EXECUTOR");
+    }
+
+    private static ExecuteAgentRunResult failedResult(
+            boolean retryable, AgentRunRecoveryAction recoveryAction) {
+        return new ExecuteAgentRunResult(
+                ExecuteAgentRunResult.SCHEMA_VERSION,
+                "run-001",
+                "run-001",
+                "attempt-001",
+                1,
+                ExecuteAgentRunResult.Outcome.FAILED,
+                null,
+                null,
+                0,
+                false,
+                "GRAPH_RECOVERY_REQUIRED",
+                retryable,
+                recoveryAction,
+                Instant.parse("2026-07-19T00:00:00Z"));
     }
 
     private static <T> T fixture(String file, Class<T> type) throws Exception {

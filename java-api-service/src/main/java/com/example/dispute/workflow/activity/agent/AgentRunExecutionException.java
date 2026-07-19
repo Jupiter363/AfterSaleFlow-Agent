@@ -1,5 +1,6 @@
 package com.example.dispute.workflow.activity.agent;
 
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunRecoveryAction;
 import java.util.Objects;
 import java.util.regex.Pattern;
 
@@ -9,16 +10,14 @@ public final class AgentRunExecutionException extends RuntimeException {
     private static final Pattern ERROR_CODE = Pattern.compile("[A-Za-z0-9_.-]{1,128}");
 
     private final String errorCode;
-    private final boolean retryable;
-    private final boolean commandReplaySafe;
+    private final AgentRunRecoveryAction recoveryAction;
     private final long lastSequenceNo;
     private final boolean publicOutputEmitted;
 
     public AgentRunExecutionException(
             String errorCode,
             String internalMessage,
-            boolean retryable,
-            boolean commandReplaySafe,
+            AgentRunRecoveryAction recoveryAction,
             long lastSequenceNo,
             boolean publicOutputEmitted,
             Throwable cause) {
@@ -29,34 +28,29 @@ public final class AgentRunExecutionException extends RuntimeException {
         if (lastSequenceNo < 0) {
             throw new IllegalArgumentException("lastSequenceNo must not be negative");
         }
-        if (commandReplaySafe && !retryable) {
-            throw new IllegalArgumentException("commandReplaySafe requires a retryable failure");
-        }
         this.errorCode = errorCode;
-        this.retryable = retryable;
-        this.commandReplaySafe = commandReplaySafe;
+        this.recoveryAction =
+                Objects.requireNonNull(recoveryAction, "recoveryAction must not be null");
         this.lastSequenceNo = lastSequenceNo;
         this.publicOutputEmitted = publicOutputEmitted;
     }
 
-    public static AgentRunExecutionException retryable(
+    public static AgentRunExecutionException retrySameCommand(
             String errorCode,
             String internalMessage,
-            boolean commandReplaySafe,
             long lastSequenceNo,
             boolean publicOutputEmitted,
             Throwable cause) {
         return new AgentRunExecutionException(
                 errorCode,
                 internalMessage,
-                true,
-                commandReplaySafe,
+                AgentRunRecoveryAction.RETRY_SAME_COMMAND,
                 lastSequenceNo,
                 publicOutputEmitted,
                 cause);
     }
 
-    public static AgentRunExecutionException nonRetryable(
+    public static AgentRunExecutionException createNextAttempt(
             String errorCode,
             String internalMessage,
             long lastSequenceNo,
@@ -65,8 +59,37 @@ public final class AgentRunExecutionException extends RuntimeException {
         return new AgentRunExecutionException(
                 errorCode,
                 internalMessage,
-                false,
-                false,
+                AgentRunRecoveryAction.CREATE_NEXT_ATTEMPT,
+                lastSequenceNo,
+                publicOutputEmitted,
+                cause);
+    }
+
+    public static AgentRunExecutionException reconcileTerminal(
+            String errorCode,
+            String internalMessage,
+            long lastSequenceNo,
+            boolean publicOutputEmitted,
+            Throwable cause) {
+        return new AgentRunExecutionException(
+                errorCode,
+                internalMessage,
+                AgentRunRecoveryAction.RECONCILE_TERMINAL,
+                lastSequenceNo,
+                publicOutputEmitted,
+                cause);
+    }
+
+    public static AgentRunExecutionException failLogicalRun(
+            String errorCode,
+            String internalMessage,
+            long lastSequenceNo,
+            boolean publicOutputEmitted,
+            Throwable cause) {
+        return new AgentRunExecutionException(
+                errorCode,
+                internalMessage,
+                AgentRunRecoveryAction.FAIL_LOGICAL_RUN,
                 lastSequenceNo,
                 publicOutputEmitted,
                 cause);
@@ -76,13 +99,19 @@ public final class AgentRunExecutionException extends RuntimeException {
         return errorCode;
     }
 
+    /** Compatibility summary only; recovery decisions must use {@link #recoveryAction()}. */
     public boolean retryable() {
-        return retryable;
+        return recoveryAction != AgentRunRecoveryAction.FAIL_LOGICAL_RUN;
     }
 
-    /** True only when Python guarantees this exact command returns its cached result. */
+    /** Compatibility summary only; recovery decisions must use {@link #recoveryAction()}. */
     public boolean commandReplaySafe() {
-        return commandReplaySafe;
+        return recoveryAction == AgentRunRecoveryAction.RETRY_SAME_COMMAND
+                || recoveryAction == AgentRunRecoveryAction.RECONCILE_TERMINAL;
+    }
+
+    public AgentRunRecoveryAction recoveryAction() {
+        return recoveryAction;
     }
 
     public long lastSequenceNo() {

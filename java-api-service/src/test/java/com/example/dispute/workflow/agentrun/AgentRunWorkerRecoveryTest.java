@@ -183,6 +183,7 @@ class AgentRunWorkerRecoveryTest {
                 true,
                 null,
                 false,
+                null,
                 NOW);
     }
 

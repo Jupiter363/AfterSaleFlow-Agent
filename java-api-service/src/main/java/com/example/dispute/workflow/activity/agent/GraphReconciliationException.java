@@ -1,5 +1,6 @@
 package com.example.dispute.workflow.activity.agent;
 
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunRecoveryAction;
 import java.util.Objects;
 import java.util.regex.Pattern;
 
@@ -11,13 +12,13 @@ public final class GraphReconciliationException extends RuntimeException {
     private final String errorCode;
     private final int httpStatus;
     private final boolean retryable;
-    private final RecoveryAction recoveryAction;
+    private final AgentRunRecoveryAction recoveryAction;
 
     public GraphReconciliationException(
             String errorCode,
             int httpStatus,
             boolean retryable,
-            RecoveryAction recoveryAction,
+            AgentRunRecoveryAction recoveryAction,
             String internalMessage,
             Throwable cause) {
         super(internalMessage == null ? "Graph reconciliation failed" : internalMessage, cause);
@@ -28,10 +29,10 @@ public final class GraphReconciliationException extends RuntimeException {
             throw new IllegalArgumentException("httpStatus is invalid");
         }
         this.recoveryAction = Objects.requireNonNull(recoveryAction, "recoveryAction");
-        if (recoveryAction == RecoveryAction.RETRY_SAME_COMMAND && !retryable) {
+        if (recoveryAction == AgentRunRecoveryAction.RETRY_SAME_COMMAND && !retryable) {
             throw new IllegalArgumentException("RETRY_SAME_COMMAND must be retryable");
         }
-        if (recoveryAction != RecoveryAction.RETRY_SAME_COMMAND && retryable) {
+        if (recoveryAction != AgentRunRecoveryAction.RETRY_SAME_COMMAND && retryable) {
             throw new IllegalArgumentException("only RETRY_SAME_COMMAND may be retryable");
         }
         this.errorCode = errorCode;
@@ -44,7 +45,7 @@ public final class GraphReconciliationException extends RuntimeException {
                 "GRAPH_RECONCILIATION_TRANSPORT_FAILED",
                 0,
                 true,
-                RecoveryAction.RETRY_SAME_COMMAND,
+                AgentRunRecoveryAction.RETRY_SAME_COMMAND,
                 "Graph reconciliation transport failed",
                 cause);
     }
@@ -54,7 +55,7 @@ public final class GraphReconciliationException extends RuntimeException {
                 "GRAPH_RECONCILIATION_PROTOCOL_REJECTED",
                 0,
                 false,
-                RecoveryAction.FAIL_LOGICAL_RUN,
+                AgentRunRecoveryAction.FAIL_LOGICAL_RUN,
                 message,
                 cause);
     }
@@ -71,14 +72,7 @@ public final class GraphReconciliationException extends RuntimeException {
         return retryable;
     }
 
-    public RecoveryAction recoveryAction() {
+    public AgentRunRecoveryAction recoveryAction() {
         return recoveryAction;
-    }
-
-    public enum RecoveryAction {
-        RETRY_SAME_COMMAND,
-        CREATE_NEXT_ATTEMPT,
-        RECONCILE_TERMINAL,
-        FAIL_LOGICAL_RUN
     }
 }

@@ -4,9 +4,9 @@ import com.example.dispute.workflow.activity.agent.AgentGraphReconciliationClien
 import com.example.dispute.workflow.activity.agent.AgentRunCancellationToken;
 import com.example.dispute.workflow.activity.agent.GraphReconciliationEnvelopeSigner;
 import com.example.dispute.workflow.activity.agent.GraphReconciliationException;
-import com.example.dispute.workflow.activity.agent.GraphReconciliationException.RecoveryAction;
 import com.example.dispute.workflow.contract.v1.AgentPlatformContractCodec;
 import com.example.dispute.workflow.contract.v1.ContractJson;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunRecoveryAction;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.GraphReconcileResponse;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
@@ -171,7 +171,7 @@ public final class HttpAgentGraphReconciliationClient
             }
             String code = node.required("code").asText();
             boolean retryable = node.required("retryable").asBoolean();
-            RecoveryAction action = RecoveryAction.valueOf(
+            AgentRunRecoveryAction action = AgentRunRecoveryAction.valueOf(
                     node.required("recovery_action").asText());
             requireRemoteAction(status, code, retryable, action);
             return new GraphReconciliationException(
@@ -243,8 +243,8 @@ public final class HttpAgentGraphReconciliationClient
             int status,
             String code,
             boolean retryable,
-            RecoveryAction action) {
-        if (action == RecoveryAction.RETRY_SAME_COMMAND) {
+            AgentRunRecoveryAction action) {
+        if (action == AgentRunRecoveryAction.RETRY_SAME_COMMAND) {
             if (!retryable || (status != 409 && status != 503)) {
                 throw new IllegalArgumentException("retry action conflicts with HTTP status");
             }
@@ -253,7 +253,7 @@ public final class HttpAgentGraphReconciliationClient
         if (retryable) {
             throw new IllegalArgumentException("non-retry action cannot be retryable");
         }
-        if (action == RecoveryAction.CREATE_NEXT_ATTEMPT
+        if (action == AgentRunRecoveryAction.CREATE_NEXT_ATTEMPT
                 && (status != 409 || !"GRAPH_NEW_AGENT_ATTEMPT_REQUIRED".equals(code))) {
             throw new IllegalArgumentException("new-attempt action conflicts with error code");
         }

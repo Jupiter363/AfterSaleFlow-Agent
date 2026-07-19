@@ -229,6 +229,7 @@ public class JpaAgentRunLedger implements AgentRunLedger {
                 entity.getAttemptNo(),
                 entity.getAttemptStatus(),
                 entity.isPublicOutputEmitted(),
+                entity.isFinalFrameObserved(),
                 entity.getLastSequenceNo(),
                 instant(entity.getLastHeartbeatAt()),
                 instant(entity.getStartedAt()),
