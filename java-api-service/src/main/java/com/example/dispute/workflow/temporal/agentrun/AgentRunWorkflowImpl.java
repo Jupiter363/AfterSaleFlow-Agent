@@ -32,7 +32,6 @@ public class AgentRunWorkflowImpl implements AgentRunWorkflow {
     private AcceptedAttempt pendingAttempt;
     private RuntimeException terminalFailure;
     private long lastAcceptedAttemptNo;
-    private boolean updateAttemptActive;
     private boolean closed;
 
     @Override
@@ -92,8 +91,8 @@ public class AgentRunWorkflowImpl implements AgentRunWorkflow {
             throw rejected("attempt one must be started by the Workflow method");
         }
 
-        if (closed) {
-            throw rejected("logical AgentRun no longer accepts attempts");
+        if (closed || pendingAttempt != null) {
+            throw rejected("logical AgentRun is not ready for another attempt");
         }
         validateNewAttempt(request);
 
@@ -101,7 +100,6 @@ public class AgentRunWorkflowImpl implements AgentRunWorkflow {
                 AcceptedAttempt.updated(request, Workflow.<ExecuteAgentRunResult>newPromise());
         acceptedAttempts.put(request.attemptNo(), next);
         lastAcceptedAttemptNo = request.attemptNo();
-        updateAttemptActive = true;
         pendingAttempt = next;
         return next.completion().get();
     }
@@ -113,7 +111,7 @@ public class AgentRunWorkflowImpl implements AgentRunWorkflow {
             throw new IllegalArgumentException(
                     "attempt one must be started by the Workflow method");
         }
-        if (request.attemptNo() > AgentRunTemporalPolicy.MAXIMUM_LOGICAL_ATTEMPTS) {
+        if (request.attemptNo() > request.attemptLimit()) {
             throw new IllegalArgumentException("AgentRun attempt limit is exhausted");
         }
         if (initialRequest == null) {
@@ -128,7 +126,7 @@ public class AgentRunWorkflowImpl implements AgentRunWorkflow {
             requireSameRequest(accepted.request(), request);
             return;
         }
-        if (closed || updateAttemptActive) {
+        if (closed || pendingAttempt != null) {
             throw new IllegalStateException("logical AgentRun is not ready for another attempt");
         }
         validateNewAttempt(request);
@@ -142,7 +140,6 @@ public class AgentRunWorkflowImpl implements AgentRunWorkflow {
         lastResult = result;
         closed = !canAcceptAnotherAttempt(request, result);
         if (accepted != null) {
-            updateAttemptActive = false;
             accepted.complete(result);
         }
         if (closed) {
@@ -172,10 +169,29 @@ public class AgentRunWorkflowImpl implements AgentRunWorkflow {
 
     private void validateNewAttempt(ExecuteAgentRunRequest request) {
         if (request.attemptNo() != lastAcceptedAttemptNo + 1
-                || request.attemptNo() > AgentRunTemporalPolicy.MAXIMUM_LOGICAL_ATTEMPTS) {
+                || request.attemptNo() > initialRequest.attemptLimit()) {
             throw new IllegalArgumentException("AgentRun attempts must be sequential and bounded");
         }
         requireSameLogicalRun(initialRequest, request);
+        AcceptedAttempt predecessor = acceptedAttempts.get(lastAcceptedAttemptNo);
+        ExecuteAgentRunResult predecessorResult = completedAttempts.get(lastAcceptedAttemptNo);
+        if (predecessor == null
+                || !predecessor.request().attemptId().equals(request.previousAttemptId())) {
+            throw new IllegalArgumentException(
+                    "AgentRun attempt must bind its immediate predecessor");
+        }
+        if (!retryBudgetDoesNotIncrease(
+                predecessor.request().command(), request.command())) {
+            throw new IllegalArgumentException(
+                    "AgentRun residual retry budget cannot increase");
+        }
+        if (predecessorResult != null
+                && (predecessorResult.outcome() != ExecuteAgentRunResult.Outcome.FAILED
+                || predecessorResult.recoveryAction()
+                        != AgentRunRecoveryAction.CREATE_NEXT_ATTEMPT)) {
+            throw new IllegalStateException(
+                    "the preceding attempt did not authorize another AgentRun attempt");
+        }
         for (AcceptedAttempt accepted : acceptedAttempts.values()) {
             RoomGraphCommand previous = accepted.request().command();
             if (previous.commandId().equals(request.command().commandId())) {
@@ -193,7 +209,7 @@ public class AgentRunWorkflowImpl implements AgentRunWorkflow {
             ExecuteAgentRunRequest request, ExecuteAgentRunResult result) {
         return result.outcome() == ExecuteAgentRunResult.Outcome.FAILED
                 && result.recoveryAction() == AgentRunRecoveryAction.CREATE_NEXT_ATTEMPT
-                && request.attemptNo() < AgentRunTemporalPolicy.MAXIMUM_LOGICAL_ATTEMPTS
+                && request.attemptNo() < request.attemptLimit()
                 && Workflow.currentTimeMillis() < request.command().deadlineAt().toEpochMilli();
     }
 
@@ -205,7 +221,6 @@ public class AgentRunWorkflowImpl implements AgentRunWorkflow {
     private void closeWithFailure(RuntimeException failure) {
         terminalFailure = Objects.requireNonNull(failure, "failure");
         closed = true;
-        updateAttemptActive = false;
         rejectPendingAttempt();
     }
 
@@ -213,7 +228,6 @@ public class AgentRunWorkflowImpl implements AgentRunWorkflow {
         AcceptedAttempt pending = pendingAttempt;
         pendingAttempt = null;
         if (pending != null) {
-            updateAttemptActive = false;
             pending.fail(
                     terminalFailure != null
                             ? terminalFailure
@@ -250,7 +264,9 @@ public class AgentRunWorkflowImpl implements AgentRunWorkflow {
         RoomGraphCommand actual = candidate.command();
         if (!initial.agentRunId().equals(candidate.agentRunId())
                 || !initial.logicalRunId().equals(candidate.logicalRunId())
+                || initial.attemptLimit() != candidate.attemptLimit()
                 || !initial.streamProtocol().equals(candidate.streamProtocol())
+                || !initial.logicalInputHash().equals(candidate.logicalInputHash())
                 || !expected.tenantSurrogate().equals(actual.tenantSurrogate())
                 || !expected.caseId().equals(actual.caseId())
                 || expected.roomType() != actual.roomType()
@@ -268,7 +284,7 @@ public class AgentRunWorkflowImpl implements AgentRunWorkflow {
                 || !sameInvocationPolicy(
                         expected.invocationContext(), actual.invocationContext())
                 || !expected.deadlineAt().equals(actual.deadlineAt())
-                || !expected.requestHash().equals(actual.requestHash())) {
+                || !retryBudgetDoesNotIncrease(expected, actual)) {
             throw new IllegalArgumentException("AgentRun attempt conflicts with its logical run");
         }
     }
@@ -281,8 +297,17 @@ public class AgentRunWorkflowImpl implements AgentRunWorkflow {
                 && expected.outputSchemaVersion().equals(actual.outputSchemaVersion())
                 && expected.policyVersion().equals(actual.policyVersion())
                 && expected.guardrailVersion().equals(actual.guardrailVersion())
-                && expected.toolCapabilities().equals(actual.toolCapabilities())
-                && expected.envelopeKeyId().equals(actual.envelopeKeyId());
+                && expected.toolCapabilities().equals(actual.toolCapabilities());
+    }
+
+    private static boolean retryBudgetDoesNotIncrease(
+            RoomGraphCommand expected, RoomGraphCommand actual) {
+        return actual.retryBudget().providerAttemptsRemaining()
+                        <= expected.retryBudget().providerAttemptsRemaining()
+                && actual.retryBudget().activityAttemptsRemaining()
+                        <= expected.retryBudget().activityAttemptsRemaining()
+                && actual.retryBudget().repairsRemaining()
+                        <= expected.retryBudget().repairsRemaining();
     }
 
     private static void requireResultMatchesRequest(

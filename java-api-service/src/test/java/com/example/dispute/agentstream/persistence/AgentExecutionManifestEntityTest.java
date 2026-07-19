@@ -1,7 +1,6 @@
 package com.example.dispute.agentstream.persistence;
 
 import static com.example.dispute.agentstream.persistence.AgentRunPersistenceFixtures.MANIFEST_HASH;
-import static com.example.dispute.agentstream.persistence.AgentRunPersistenceFixtures.REQUEST_HASH;
 import static com.example.dispute.agentstream.persistence.AgentRunPersistenceFixtures.RESULT_HASH;
 import static com.example.dispute.agentstream.persistence.AgentRunPersistenceFixtures.RUN_ID;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -20,6 +19,7 @@ import com.example.dispute.infrastructure.persistence.entity.AgentRunEntity;
 import com.example.dispute.infrastructure.persistence.repository.AgentRunAttemptRepository;
 import com.example.dispute.infrastructure.persistence.repository.AgentRunRepository;
 import com.example.dispute.workflow.contract.v1.AgentRunFinalizationReceipt.CommitStatus;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.infrastructure.persistence.entity.AgentExecutionManifestEntity;
 import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.ManifestTerminalStatus;
@@ -72,13 +72,22 @@ class AgentExecutionManifestEntityTest {
     void storeCommitsOneHashBoundManifestAndReplaysTheSameReceipt() {
         AgentRunEntity run = AgentRunEntity.logicalV2(AgentRunPersistenceFixtures.logicalRun());
         run.markV2AttemptStarted();
+        run.markV2AttemptFailed(
+                AgentRunAttemptStatus.FAILED,
+                true,
+                AgentRunPersistenceFixtures.STARTED_AT.plusSeconds(1));
+        run.markV2AttemptStarted();
+        var allocation = AgentRunPersistenceFixtures.allocation(2, "ATTEMPT_V2_MANIFEST");
         AgentRunAttemptEntity attempt =
                 AgentRunAttemptEntity.start(
                         RUN_ID,
-                        AgentRunPersistenceFixtures.request(1, "ATTEMPT_V2_MANIFEST"),
+                        allocation,
+                        "ATTEMPT_V2_1",
+                        false,
+                        0,
                         AgentRunPersistenceFixtures.STARTED_AT);
         attempt.recordResultReady(
-                AgentRunPersistenceFixtures.result(1, "ATTEMPT_V2_MANIFEST"),
+                AgentRunPersistenceFixtures.result(2, "ATTEMPT_V2_MANIFEST"),
                 "{\"result_hash\":\"" + RESULT_HASH + "\"}");
         run.markV2ResultReady(
                 "ATTEMPT_V2_MANIFEST",
@@ -118,7 +127,7 @@ class AgentExecutionManifestEntityTest {
                 new ManifestCommit(
                         AgentRunPersistenceFixtures.manifestWithModelHashes(
                                 "ATTEMPT_V2_MANIFEST",
-                                REQUEST_HASH,
+                                allocation.binding().commandRequestHash(),
                                 "e".repeat(64)),
                         RoomType.EVIDENCE,
                         "s3://manifests/MANIFEST_V2_PERSISTENCE.json",
@@ -130,9 +139,13 @@ class AgentExecutionManifestEntityTest {
                 .hasMessageContaining("responseHash");
         verify(manifestRepository, never()).saveAndFlush(any());
 
+        var manifest = AgentRunPersistenceFixtures.manifestWithModelHashes(
+                "ATTEMPT_V2_MANIFEST",
+                allocation.binding().commandRequestHash(),
+                RESULT_HASH);
         ManifestCommit commit =
                 new ManifestCommit(
-                        AgentRunPersistenceFixtures.manifest("ATTEMPT_V2_MANIFEST"),
+                        manifest,
                         RoomType.EVIDENCE,
                         "s3://manifests/MANIFEST_V2_PERSISTENCE.json",
                         MANIFEST_HASH,

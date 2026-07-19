@@ -370,6 +370,10 @@ class HttpAgentGraphReconciliationClientTest {
                 command.logicalRunId(),
                 1,
                 "agent-stream.v2",
+                "b".repeat(64),
+                null,
+                false,
+                0,
                 command);
     }
 

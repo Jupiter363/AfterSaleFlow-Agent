@@ -77,6 +77,7 @@ public class TemporalWorkerConfiguration {
             ObjectProvider<AgentRunLedger> ledgerProvider,
             ObjectProvider<AgentRunExecutionGateway> executionGatewayProvider,
             ObjectProvider<AgentRunFinalizationGateway> finalizationGatewayProvider) {
+        requireVersionedAgentRunWorker(properties, agentRunV2Properties);
         WorkerFactory factory =
                 WorkerFactory.newInstance(workflowClient, optionsFactory.factoryOptions());
         return start(
@@ -176,6 +177,17 @@ public class TemporalWorkerConfiguration {
                     "AgentRun V2 requires exactly one " + dependency);
         }
         return value;
+    }
+
+    private static void requireVersionedAgentRunWorker(
+            TemporalWorkerProperties properties,
+            AgentRunV2Properties agentRunV2Properties) {
+        if (agentRunV2Properties.enabled()
+                && properties.versioningMode()
+                        == TemporalWorkerProperties.VersioningMode.NONE) {
+            throw new IllegalStateException(
+                    "AgentRun v3 requires Temporal versioningMode BUILD_ID or DEPLOYMENT");
+        }
     }
 
     private static WorkerFactory start(WorkerFactory factory, Runnable registration) {

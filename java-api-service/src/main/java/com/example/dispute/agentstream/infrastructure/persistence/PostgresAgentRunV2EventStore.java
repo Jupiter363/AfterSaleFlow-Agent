@@ -105,7 +105,24 @@ public class PostgresAgentRunV2EventStore {
                and agent_run_attempt_id = ?
                and stream_protocol = 'agent-stream.v2'
              order by sequence_no desc
-             limit 1
+            limit 1
+            """;
+
+    private static final String PROJECT_ATTEMPT_PROGRESS_SQL =
+            """
+            update agent_run_attempt
+               set last_sequence_no = greatest(last_sequence_no, ?),
+                   public_output_emitted = public_output_emitted or ?,
+                   final_frame_observed = final_frame_observed or ?,
+                   updated_at = greatest(updated_at, clock_timestamp()),
+                   attempt_version = attempt_version + 1
+             where agent_run_id = ?
+               and id = ?
+               and (
+                    last_sequence_no < ?
+                    or (? and not public_output_emitted)
+                    or (? and not final_frame_observed)
+               )
             """;
 
     private static final String RETENTION_MANIFEST_SQL =
@@ -278,8 +295,34 @@ public class PostgresAgentRunV2EventStore {
 
     private BatchAppendReceipt appendInTransaction(List<PersistedEvent> batch) {
         AgentStreamEvent first = batch.getFirst().event();
-        lockAttempt(first.runId(), first.attemptId());
+        AgentRunAttemptStatus attemptStatus = lockAttempt(first.runId(), first.attemptId());
+        if (attemptStatus != AgentRunAttemptStatus.RUNNING) {
+            return loadExactReplayLocked(batch, attemptStatus);
+        }
         return appendLocked(batch);
+    }
+
+    private BatchAppendReceipt loadExactReplayLocked(
+            List<PersistedEvent> batch, AgentRunAttemptStatus attemptStatus) {
+        Map<Long, String> storedHashes = loadStoredHashes(batch);
+        for (PersistedEvent candidate : batch) {
+            String storedHash = storedHashes.get(candidate.event().sequenceNo());
+            if (storedHash == null) {
+                throw new IllegalStateException(
+                        "new durable stream events require a RUNNING attempt; status is "
+                                + attemptStatus);
+            }
+            if (!storedHash.equals(candidate.payloadHash())) {
+                throw new IllegalStateException(
+                        "durable stream sequence is bound to another payload hash");
+            }
+        }
+
+        AgentStreamEvent first = batch.getFirst().event();
+        long highWatermark = durableHighWatermark(first.runId(), first.attemptId());
+        projectAttemptProgress(batch.stream().map(PersistedEvent::event).toList());
+        return new BatchAppendReceipt(
+                java.util.Collections.nCopies(batch.size(), false), highWatermark);
     }
 
     private BatchAppendReceipt appendLocked(List<PersistedEvent> batch) {
@@ -342,6 +385,8 @@ public class PostgresAgentRunV2EventStore {
         if (highWatermark < appendedMaximum) {
             throw new IllegalStateException("PostgreSQL high-watermark is behind the append batch");
         }
+        projectAttemptProgress(
+                batch.stream().map(PersistedEvent::event).toList());
         return new BatchAppendReceipt(inserted, highWatermark);
     }
 
@@ -382,6 +427,7 @@ public class PostgresAgentRunV2EventStore {
                     throw new AgentRunReconciledFinalStore.ConflictException(
                             "durable final differs from the reconciled result");
                 }
+                projectAttemptProgress(events);
                 return new AgentRunReconciledFinalStore.Receipt(
                         event,
                         false,
@@ -427,6 +473,40 @@ public class PostgresAgentRunV2EventStore {
                 true,
                 sequence,
                 publicOutputEmitted);
+    }
+
+    private void projectAttemptProgress(List<AgentStreamEvent> events) {
+        if (events.isEmpty()) {
+            return;
+        }
+        AgentStreamEvent first = events.getFirst();
+        long lastSequenceNo = -1;
+        boolean publicOutputEmitted = false;
+        boolean finalFrameObserved = false;
+        for (AgentStreamEvent event : events) {
+            if (!first.runId().equals(event.runId())
+                    || !first.attemptId().equals(event.attemptId())) {
+                throw new IllegalArgumentException(
+                        "attempt progress projection requires one run attempt");
+            }
+            lastSequenceNo = Math.max(lastSequenceNo, event.sequenceNo());
+            publicOutputEmitted |= event.eventType() == StreamEventType.VISIBLE_DELTA;
+            finalFrameObserved |= event.eventType() == StreamEventType.FINAL;
+        }
+        int updated = jdbc.update(
+                PROJECT_ATTEMPT_PROGRESS_SQL,
+                lastSequenceNo,
+                publicOutputEmitted,
+                finalFrameObserved,
+                first.runId(),
+                first.attemptId(),
+                lastSequenceNo,
+                publicOutputEmitted,
+                finalFrameObserved);
+        if (updated < 0 || updated > 1) {
+            throw new IllegalStateException(
+                    "durable stream progress projection updated an invalid attempt count");
+        }
     }
 
     private AgentRunAttemptStatus lockAttempt(String runId, String attemptId) {

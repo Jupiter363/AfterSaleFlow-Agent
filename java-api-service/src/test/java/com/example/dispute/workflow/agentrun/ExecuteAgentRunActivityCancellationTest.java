@@ -17,6 +17,7 @@ import com.example.dispute.workflow.activity.agent.AgentRunProgress;
 import com.example.dispute.workflow.activity.agent.ExecuteAgentRunActivityImpl;
 import com.example.dispute.workflow.contract.v1.AgentRunAttemptHeartbeat;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunRecoveryAction;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import com.example.dispute.workflow.contract.v1.RoomGraphResult;
@@ -47,7 +48,7 @@ class ExecuteAgentRunActivityCancellationTest {
         RoomGraphResult graphResult = graphResult();
         AgentRunLedger ledger = mock(AgentRunLedger.class);
         AgentRunExecutionGateway gateway = mock(AgentRunExecutionGateway.class);
-        when(ledger.startNextAttempt(request.agentRunId(), request, NOW))
+        when(ledger.requireAllocatedAttempt(request))
                 .thenReturn(runningAttempt());
         AtomicInteger heartbeatCount = new AtomicInteger();
         AgentRunActivityContext context = new AgentRunActivityContext() {
@@ -99,7 +100,7 @@ class ExecuteAgentRunActivityCancellationTest {
                 request.attemptNo(),
                 AgentRunAttemptStatus.CANCELLED,
                 "AGENT_RUN_CANCELLED",
-                false,
+                AgentRunRecoveryAction.FAIL_LOGICAL_RUN,
                 NOW);
         verify(ledger, never()).recordResultReady(any());
     }
@@ -116,7 +117,16 @@ class ExecuteAgentRunActivityCancellationTest {
                 null,
                 NOW,
                 null,
-                0);
+                0,
+                "agent-run-attempt-lineage.v1",
+                "graph-cmd-001",
+                "78aa57b57feda88e27adf9bc1b2cacd6aa3c2deb4281fb89533e9f8fb774e430",
+                "b".repeat(64),
+                "{}",
+                null,
+                false,
+                0,
+                null);
     }
 
     private static ExecuteAgentRunRequest request() throws Exception {
@@ -125,6 +135,10 @@ class ExecuteAgentRunActivityCancellationTest {
                 "run-001",
                 1,
                 "agent-stream.v2",
+                "b".repeat(64),
+                null,
+                false,
+                0,
                 fixture("room-graph-command-valid.json", RoomGraphCommand.class));
     }
 

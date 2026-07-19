@@ -11,6 +11,7 @@ import com.example.dispute.agentstream.infrastructure.persistence.PostgresAgentR
 import com.example.dispute.workflow.contract.v1.AgentStreamEvent;
 import com.example.dispute.workflow.contract.v1.AgentStreamEvent.Payload;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunRecoveryAction;
 import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
 import com.example.dispute.workflow.contract.v1.ContractTypes.StreamEventType;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -70,11 +71,11 @@ class AgentRunStreamReplayIntegrationTest {
     void batchAppendAndRequiresNewPreserveReplayAcrossConflictsAttemptsAndOuterRollback() {
         insertCase();
         AgentRunLedger.LogicalRun logical =
-                ledger.createOrLoad(AgentRunPersistenceFixtures.logicalRun());
+                ledger.createOrLoad(AgentRunPersistenceFixtures.logicalRun("ATTEMPT_STREAM_1"));
         AgentRunLedger.Attempt first =
                 ledger.startNextAttempt(
                         logical.agentRunId(),
-                        AgentRunPersistenceFixtures.request(1, "ATTEMPT_STREAM_1"),
+                        AgentRunPersistenceFixtures.allocation(1, "ATTEMPT_STREAM_1"),
                         AgentRunPersistenceFixtures.STARTED_AT);
 
         List<AgentStreamEvent> firstBatch =
@@ -88,6 +89,8 @@ class AgentRunStreamReplayIntegrationTest {
         assertThat(receipt.insertedCount()).isEqualTo(3);
         assertThat(receipt.inserted()).containsExactly(true, true, true);
         assertThat(receipt.durableHighWatermark()).isEqualTo(2);
+        assertThat(attemptProgress(first.attemptId()))
+                .isEqualTo(new AttemptProgress(2, true, false));
         assertThat(eventStore.replay(logical.agentRunId(), first.attemptId(), 0, 100))
                 .extracting(AgentStreamEvent::sequenceNo)
                 .containsExactly(1L, 2L);
@@ -135,8 +138,70 @@ class AgentRunStreamReplayIntegrationTest {
                 1,
                 AgentRunAttemptStatus.FAILED,
                 "PROVIDER_TIMEOUT",
-                true,
+                AgentRunRecoveryAction.CREATE_NEXT_ATTEMPT,
                 AgentRunPersistenceFixtures.COMPLETED_AT);
+        jdbc.update(
+                """
+                update agent_run_attempt
+                   set last_sequence_no = 0,
+                       public_output_emitted = false
+                 where id = ?
+                """,
+                first.attemptId());
+        AttemptProgress terminalProgress = new AttemptProgress(3, true, false);
+        AgentStreamEvent lateVisibleDelta =
+                event(first.attemptId(), 4, StreamEventType.VISIBLE_DELTA, "too late");
+        for (AgentRunAttemptStatus nonRunningStatus :
+                List.of(
+                        AgentRunAttemptStatus.PENDING,
+                        AgentRunAttemptStatus.RESULT_READY,
+                        AgentRunAttemptStatus.COMPLETED,
+                        AgentRunAttemptStatus.FAILED,
+                        AgentRunAttemptStatus.ABORTED,
+                        AgentRunAttemptStatus.CANCELLED)) {
+            jdbc.update(
+                    "update agent_run_attempt set attempt_status = ? where id = ?",
+                    nonRunningStatus.name(),
+                    first.attemptId());
+
+            assertThat(eventStore.append(newSuffix))
+                    .satisfies(
+                            replay -> {
+                                assertThat(replay.inserted()).isFalse();
+                                assertThat(replay.durableHighWatermark()).isEqualTo(3);
+                            });
+            assertThat(attemptProgress(first.attemptId())).isEqualTo(terminalProgress);
+            assertThatThrownBy(() -> eventStore.append(lateVisibleDelta))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("require a RUNNING attempt")
+                    .hasMessageContaining(nonRunningStatus.name());
+            assertThat(eventStore.durableHighWatermark(logical.agentRunId(), first.attemptId()))
+                    .isEqualTo(3);
+            assertThat(attemptProgress(first.attemptId())).isEqualTo(terminalProgress);
+        }
+        assertThatThrownBy(() -> eventStore.append(event(
+                        first.attemptId(),
+                        3,
+                        StreamEventType.VISIBLE_DELTA,
+                        "conflicting terminal replay")))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("payload hash");
+        assertThat(jdbc.queryForObject(
+                        """
+                        select count(*)
+                          from agent_run_stream_event
+                         where agent_run_id = ?
+                           and agent_run_attempt_id = ?
+                           and sequence_no = 4
+                           and stream_protocol = 'agent-stream.v2'
+                        """,
+                        Long.class,
+                        logical.agentRunId(),
+                        first.attemptId()))
+                .isZero();
+        jdbc.update(
+                "update agent_run_attempt set attempt_status = 'FAILED' where id = ?",
+                first.attemptId());
         assertThatThrownBy(() -> eventStore.appendOrLoadReconciledFinal(
                         new AgentRunReconciledFinalStore.Request(
                                 logical.agentRunId(),
@@ -149,8 +214,11 @@ class AgentRunStreamReplayIntegrationTest {
         AgentRunLedger.Attempt second =
                 ledger.startNextAttempt(
                         logical.agentRunId(),
-                        AgentRunPersistenceFixtures.request(2, "ATTEMPT_STREAM_2"),
+                        AgentRunPersistenceFixtures.allocation(2, "ATTEMPT_STREAM_2"),
                         AgentRunPersistenceFixtures.COMPLETED_AT.plusSeconds(1));
+        assertThat(second.previousAttemptId()).isEqualTo(first.attemptId());
+        assertThat(second.resetRequired()).isTrue();
+        assertThat(second.publicSequenceOffset()).isEqualTo(1);
         eventStore.append(event(second.attemptId(), 0, StreamEventType.ATTEMPT_STARTED, null));
 
         String committedTitle =
@@ -178,6 +246,8 @@ class AgentRunStreamReplayIntegrationTest {
 
         assertThat(eventStore.durableHighWatermark(logical.agentRunId(), second.attemptId()))
                 .isEqualTo(1);
+        assertThat(attemptProgress(second.attemptId()))
+                .isEqualTo(new AttemptProgress(1, true, false));
         assertThat(appendReceipt.get())
                 .isNotNull()
                 .satisfies(
@@ -220,6 +290,17 @@ class AgentRunStreamReplayIntegrationTest {
                     status.setRollbackOnly();
                 });
         AgentRunReconciledFinalStore.Receipt insertedFinal = insertedFinalReference.get();
+        assertThat(attemptProgress(second.attemptId()))
+                .isEqualTo(new AttemptProgress(2, true, true));
+        jdbc.update(
+                """
+                update agent_run_attempt
+                   set last_sequence_no = 0,
+                       public_output_emitted = false,
+                       final_frame_observed = false
+                 where id = ?
+                """,
+                second.attemptId());
         AgentRunReconciledFinalStore.Receipt cachedFinal =
                 eventStore.appendOrLoadReconciledFinal(finalRequest);
 
@@ -232,6 +313,8 @@ class AgentRunStreamReplayIntegrationTest {
         assertThat(cachedFinal.finalEvent().occurredAt())
                 .isEqualTo(insertedFinal.finalEvent().occurredAt());
         assertThat(cachedFinal.durableHighWatermark()).isEqualTo(2);
+        assertThat(attemptProgress(second.attemptId()))
+                .isEqualTo(new AttemptProgress(2, true, true));
         assertThat(
                         jdbc.queryForObject(
                                 "select title from fulfillment_dispute_case where id = ?",
@@ -265,6 +348,25 @@ class AgentRunStreamReplayIntegrationTest {
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("terminal");
     }
+
+    private AttemptProgress attemptProgress(String attemptId) {
+        return jdbc.queryForObject(
+                """
+                select last_sequence_no, public_output_emitted, final_frame_observed
+                  from agent_run_attempt
+                 where id = ?
+                """,
+                (resultSet, rowNumber) -> new AttemptProgress(
+                        resultSet.getLong("last_sequence_no"),
+                        resultSet.getBoolean("public_output_emitted"),
+                        resultSet.getBoolean("final_frame_observed")),
+                attemptId);
+    }
+
+    private record AttemptProgress(
+            long lastSequenceNo,
+            boolean publicOutputEmitted,
+            boolean finalFrameObserved) {}
 
     private AgentStreamEvent event(
             String attemptId, long sequence, StreamEventType eventType, String delta) {

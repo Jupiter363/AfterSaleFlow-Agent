@@ -29,10 +29,81 @@ class AgentRunV2ContractTest {
                 command.logicalRunId(),
                 1,
                 "agent-stream.v2",
+                "b".repeat(64),
+                null,
+                false,
+                0,
                 command);
 
         assertThat(request.logicalRunId()).isEqualTo(command.logicalRunId());
         assertThat(request.attemptId()).isEqualTo(command.attemptId());
+        assertThat(request.schemaVersion()).isEqualTo("execute-agent-run.v3");
+        assertThat(request.logicalInputHash()).isEqualTo("b".repeat(64));
+        assertThat(request.attemptLimit()).isEqualTo(3);
+        assertThat(MAPPER.valueToTree(request).required("attempt_limit").asInt())
+                .isEqualTo(3);
+    }
+
+    @Test
+    void executionEnvelopeRequiresProofCarryingAttemptLineage() throws Exception {
+        RoomGraphCommand command = fixture("room-graph-command-valid.json", RoomGraphCommand.class);
+
+        assertThatThrownBy(() -> new ExecuteAgentRunRequest(
+                        ExecuteAgentRunRequest.SCHEMA_VERSION,
+                        command.logicalRunId(),
+                        2,
+                        "agent-stream.v2",
+                        "b".repeat(64),
+                        null,
+                        false,
+                        0,
+                        command))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessageContaining("previousAttemptId");
+        assertThatThrownBy(() -> new ExecuteAgentRunRequest(
+                        ExecuteAgentRunRequest.SCHEMA_VERSION,
+                        command.logicalRunId(),
+                        2,
+                        "agent-stream.v2",
+                        "b".repeat(64),
+                        "attempt-previous-001",
+                        true,
+                        0,
+                        command))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("publicSequenceOffset");
+    }
+
+    @Test
+    void executionEnvelopeBindsTheConfiguredLogicalAttemptLimit() throws Exception {
+        RoomGraphCommand command = fixture("room-graph-command-valid.json", RoomGraphCommand.class);
+
+        assertThatThrownBy(() -> new ExecuteAgentRunRequest(
+                        ExecuteAgentRunRequest.SCHEMA_VERSION,
+                        command.logicalRunId(),
+                        2,
+                        1,
+                        "agent-stream.v2",
+                        "b".repeat(64),
+                        "attempt-previous-001",
+                        false,
+                        0,
+                        command))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("attemptNo exceeds attemptLimit");
+        assertThatThrownBy(() -> new ExecuteAgentRunRequest(
+                        ExecuteAgentRunRequest.SCHEMA_VERSION,
+                        command.logicalRunId(),
+                        1,
+                        4,
+                        "agent-stream.v2",
+                        "b".repeat(64),
+                        null,
+                        false,
+                        0,
+                        command))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("attemptLimit");
     }
 
     @Test
@@ -98,6 +169,10 @@ class AgentRunV2ContractTest {
                                         "different-run",
                                         1,
                                         "agent-stream.v2",
+                                        "b".repeat(64),
+                                        null,
+                                        false,
+                                        0,
                                         command))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("logicalRunId");

@@ -47,7 +47,14 @@ public class JpaAgentExecutionManifestStore implements AgentExecutionManifestSto
                 runRepository
                         .findByIdForUpdate(logicalRunId)
                         .orElseThrow(() -> new IllegalStateException("logical AgentRun was not found"));
-        requireCommitIdentity(run, commit);
+        AgentRunAttemptEntity attempt =
+                attemptRepository
+                        .findByIdForUpdate(manifest.agentRun().attemptId())
+                        .orElseThrow(() -> new IllegalStateException("AgentRun attempt was not found"));
+        requireEqual(attempt.getAgentRunId(), run.getId(), "agentRunId");
+        attempt.requireProofCarryingLineage();
+        requireCommitIdentity(run, attempt, commit);
+        requireEqual(attempt.getResultHash(), commit.finalResultHash(), "finalResultHash");
 
         Optional<AgentExecutionManifestEntity> existing =
                 manifestRepository.findByTenantSurrogateAndCaseIdAndLogicalAgentRunId(
@@ -70,12 +77,6 @@ public class JpaAgentExecutionManifestStore implements AgentExecutionManifestSto
             throw new IllegalStateException("logical AgentRun is committed without its manifest row");
         }
 
-        AgentRunAttemptEntity attempt =
-                attemptRepository
-                        .findByIdForUpdate(manifest.agentRun().attemptId())
-                        .orElseThrow(() -> new IllegalStateException("AgentRun attempt was not found"));
-        requireEqual(attempt.getAgentRunId(), run.getId(), "agentRunId");
-        requireEqual(attempt.getResultHash(), commit.finalResultHash(), "finalResultHash");
         attempt.markCommitted(manifest, commit.finalStreamSequenceNo());
 
         AgentExecutionManifestEntity entity =
@@ -121,7 +122,8 @@ public class JpaAgentExecutionManifestStore implements AgentExecutionManifestSto
                         CommitStatus.ALREADY_COMMITTED));
     }
 
-    private void requireCommitIdentity(AgentRunEntity run, ManifestCommit commit) {
+    private void requireCommitIdentity(
+            AgentRunEntity run, AgentRunAttemptEntity attempt, ManifestCommit commit) {
         AgentExecutionManifest manifest = commit.manifest();
         requireEqual(run.getTenantSurrogate(), manifest.tenantSurrogate(), "tenantSurrogate");
         requireEqual(run.getCaseId(), manifest.caseId(), "caseId");
@@ -133,7 +135,10 @@ public class JpaAgentExecutionManifestStore implements AgentExecutionManifestSto
         requireEqual(run.getRoomEpoch(), manifest.roomEpoch(), "roomEpoch");
         requireEqual(run.getProcessRevision(), manifest.processRevision(), "processRevision");
         requireEqual(run.getFencingToken(), manifest.fencingToken(), "fencingToken");
-        requireEqual(run.getRequestHash(), manifest.model().requestHash(), "requestHash");
+        requireEqual(
+                attempt.getCommandRequestHash(),
+                manifest.model().requestHash(),
+                "requestHash");
         requireEqual(
                 commit.finalResultHash(), manifest.model().responseHash(), "responseHash");
         requireEqual(manifest.output().sha256(), commit.finalResultHash(), "outputHash");

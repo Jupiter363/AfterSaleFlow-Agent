@@ -86,11 +86,12 @@ class AgentRunLiveWakeupIntegrationTest {
     void publishesOnlyAWakeupAfterCommitAndRecoversFromRedisLossByReplay() throws Exception {
         insertCase();
         AgentRunLedger.LogicalRun logical =
-                ledger.createOrLoad(AgentRunPersistenceFixtures.logicalRun());
+                ledger.createOrLoad(
+                        AgentRunPersistenceFixtures.logicalRun("ATTEMPT_WAKEUP_1"));
         AgentRunLedger.Attempt attempt =
                 ledger.startNextAttempt(
                         logical.agentRunId(),
-                        AgentRunPersistenceFixtures.request(1, "ATTEMPT_WAKEUP_1"),
+                        AgentRunPersistenceFixtures.allocation(1, "ATTEMPT_WAKEUP_1"),
                         AgentRunPersistenceFixtures.STARTED_AT);
 
         LinkedBlockingQueue<AgentRunStreamWakeup> wakeups = new LinkedBlockingQueue<>();

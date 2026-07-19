@@ -1,6 +1,10 @@
 package com.example.dispute.agentstream.persistence;
 
 import com.example.dispute.agentstream.application.AgentRunLedger.CreateLogicalRun;
+import com.example.dispute.agentstream.application.AgentRunLedger.AttemptAllocation;
+import com.example.dispute.agentstream.application.AgentRunCommandBindingFactory;
+import com.example.dispute.agentstream.application.AgentRunCommandBindingFactory.Binding;
+import com.example.dispute.agentstream.application.AgentRunCommandBindingFactory.Context;
 import com.example.dispute.workflow.contract.v1.AgentExecutionManifest;
 import com.example.dispute.workflow.contract.v1.AgentExecutionManifest.AgentRunRef;
 import com.example.dispute.workflow.contract.v1.AgentExecutionManifest.GraphRef;
@@ -8,9 +12,11 @@ import com.example.dispute.workflow.contract.v1.AgentExecutionManifest.ManifestU
 import com.example.dispute.workflow.contract.v1.AgentExecutionManifest.ModelRef;
 import com.example.dispute.workflow.contract.v1.AgentExecutionManifest.WorkflowRef;
 import com.example.dispute.workflow.contract.v1.AgentRunAttemptHeartbeat;
+import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunExecutorKind;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunProtocol;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunRecoveryAction;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ArtifactPointer;
 import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
 import com.example.dispute.workflow.contract.v1.ContractTypes.GraphStatus;
@@ -20,23 +26,47 @@ import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import com.example.dispute.workflow.contract.v1.RoomGraphResult;
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 
 public final class AgentRunPersistenceFixtures {
 
+    private static final ObjectMapper MAPPER = JsonMapper.builder()
+            .findAndAddModules()
+            .serializationInclusion(JsonInclude.Include.NON_NULL)
+            .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
+            .build();
+    private static final AgentRunCommandBindingFactory BINDING_FACTORY =
+            new AgentRunCommandBindingFactory(MAPPER);
+    private static final Context BINDING_CONTEXT = new Context(
+            "ROOM_V2_PERSISTENCE",
+            "EPOCH_V2_PERSISTENCE",
+            "EVIDENCE_ANALYZE",
+            "logical-persistence-key");
     public static final Instant STARTED_AT = Instant.parse("2026-07-19T01:00:00Z");
     public static final Instant COMPLETED_AT = Instant.parse("2026-07-19T01:00:03Z");
     public static final String RUN_ID = "RUN_V2_PERSISTENCE";
     public static final String CASE_ID = "CASE_V2_PERSISTENCE";
-    static final String REQUEST_HASH = "a".repeat(64);
+    static final String REQUEST_HASH = command(1, "ATTEMPT_V2_1").requestHash();
+    static final String LOGICAL_INPUT_HASH =
+            binding(command(1, "ATTEMPT_V2_1")).logicalInputHash();
     static final String RESULT_HASH = "b".repeat(64);
     static final String MANIFEST_HASH = "c".repeat(64);
 
     private AgentRunPersistenceFixtures() {}
 
     public static CreateLogicalRun logicalRun() {
+        return logicalRun("ATTEMPT_V2_1");
+    }
+
+    public static CreateLogicalRun logicalRun(String firstAttemptId) {
+        RoomGraphCommand firstCommand = command(1, firstAttemptId);
         return new CreateLogicalRun(
                 RUN_ID,
                 "tenant-persistence",
@@ -51,17 +81,74 @@ public final class AgentRunPersistenceFixtures {
                 2,
                 7,
                 11,
-                REQUEST_HASH,
+                firstCommand.requestHash(),
+                binding(firstCommand).logicalInputHash(),
                 3,
                 STARTED_AT.plusSeconds(600),
                 STARTED_AT);
     }
 
     public static ExecuteAgentRunRequest request(long attemptNo, String attemptId) {
-        RoomGraphCommand command =
+        return request(
+                attemptNo,
+                attemptId,
+                attemptNo == 1 ? null : "ATTEMPT_V2_1",
+                false);
+    }
+
+    public static ExecuteAgentRunRequest request(
+            long attemptNo,
+            String attemptId,
+            String previousAttemptId,
+            boolean resetRequired) {
+        RoomGraphCommand command = command(attemptNo, attemptId);
+        Binding binding = binding(command);
+        return new ExecuteAgentRunRequest(
+                ExecuteAgentRunRequest.SCHEMA_VERSION,
+                RUN_ID,
+                attemptNo,
+                AgentRunProtocol.V2.wireValue(),
+                binding.logicalInputHash(),
+                previousAttemptId,
+                resetRequired,
+                resetRequired ? 1 : 0,
+                command);
+    }
+
+    public static AttemptAllocation allocation(long attemptNo, String attemptId) {
+        RoomGraphCommand command = command(attemptNo, attemptId);
+        return new AttemptAllocation(attemptNo, command, binding(command));
+    }
+
+    public static AttemptAllocation allocationWithRetryBudget(
+            long attemptNo,
+            String attemptId,
+            int providerAttempts,
+            int activityAttempts,
+            int repairs) {
+        RoomGraphCommand command = command(
+                attemptNo,
+                attemptId,
+                new RoomGraphCommand.RetryBudget(
+                        providerAttempts, activityAttempts, repairs));
+        return new AttemptAllocation(attemptNo, command, binding(command));
+    }
+
+    private static RoomGraphCommand command(long attemptNo, String attemptId) {
+        return command(
+                attemptNo,
+                attemptId,
+                new RoomGraphCommand.RetryBudget(2, 2, 1));
+    }
+
+    private static RoomGraphCommand command(
+            long attemptNo,
+            String attemptId,
+            RoomGraphCommand.RetryBudget retryBudget) {
+        RoomGraphCommand unsigned =
                 new RoomGraphCommand(
                         "room-graph-command.v1",
-                        "command-persistence",
+                        "command-persistence-" + attemptNo,
                         RUN_ID,
                         attemptId,
                         "tenant-persistence",
@@ -96,17 +183,24 @@ public final class AgentRunPersistenceFixtures {
                                 "guardrail-v2",
                                 List.of("evidence.search"),
                                 "kms-key-v2",
-                                "nonce-v2"),
-                        new RoomGraphCommand.RetryBudget(2, 2, 1),
+                                "nonce-v2-" + attemptNo),
+                        retryBudget,
                         STARTED_AT.plusSeconds(600),
-                        "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
-                        REQUEST_HASH);
-        return new ExecuteAgentRunRequest(
-                ExecuteAgentRunRequest.SCHEMA_VERSION,
-                RUN_ID,
-                attemptNo,
-                AgentRunProtocol.V2.wireValue(),
-                command);
+                        "00-0123456789abcdef0123456789abcdef-%016x-01"
+                                .formatted(attemptNo),
+                        "0".repeat(64));
+        ObjectNode commandJson = MAPPER.valueToTree(unsigned);
+        commandJson.remove("request_hash");
+        commandJson.put("request_hash", ContractJson.sha256Hex(commandJson));
+        try {
+            return MAPPER.treeToValue(commandJson, RoomGraphCommand.class);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException exception) {
+            throw new IllegalStateException("test command encoding failed", exception);
+        }
+    }
+
+    private static Binding binding(RoomGraphCommand command) {
+        return BINDING_FACTORY.bind(BINDING_CONTEXT, command);
     }
 
     static AgentRunAttemptHeartbeat heartbeat(long attemptNo, String attemptId, long sequenceNo) {
@@ -131,6 +225,29 @@ public final class AgentRunPersistenceFixtures {
                 "guardrail-v2");
     }
 
+    static ExecuteAgentRunResult failureResult(
+            long attemptNo,
+            String attemptId,
+            long lastSequenceNo,
+            boolean publicOutputEmitted,
+            AgentRunRecoveryAction recoveryAction) {
+        return new ExecuteAgentRunResult(
+                ExecuteAgentRunResult.SCHEMA_VERSION,
+                RUN_ID,
+                RUN_ID,
+                attemptId,
+                attemptNo,
+                ExecuteAgentRunResult.Outcome.FAILED,
+                null,
+                null,
+                lastSequenceNo,
+                publicOutputEmitted,
+                "PROVIDER_TIMEOUT",
+                recoveryAction == AgentRunRecoveryAction.CREATE_NEXT_ATTEMPT,
+                recoveryAction,
+                COMPLETED_AT);
+    }
+
     static ExecuteAgentRunResult resultWithExecutionMetadata(
             long attemptNo,
             String attemptId,
@@ -141,7 +258,7 @@ public final class AgentRunPersistenceFixtures {
         RoomGraphResult graphResult =
                 new RoomGraphResult(
                         "room-graph-result.v1",
-                        "command-persistence",
+                        "command-persistence-" + attemptNo,
                         RUN_ID,
                         attemptId,
                         "evidence.graph",
@@ -180,7 +297,8 @@ public final class AgentRunPersistenceFixtures {
     }
 
     static AgentExecutionManifest manifest(String attemptId) {
-        return manifestWithModelHashes(attemptId, REQUEST_HASH, RESULT_HASH);
+        return manifestWithModelHashes(
+                attemptId, command(1, attemptId).requestHash(), RESULT_HASH);
     }
 
     static AgentExecutionManifest manifestWithModelHashes(

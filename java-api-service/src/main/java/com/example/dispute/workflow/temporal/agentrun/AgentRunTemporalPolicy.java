@@ -2,6 +2,8 @@ package com.example.dispute.workflow.temporal.agentrun;
 
 import static com.example.dispute.workflow.contract.v1.TemporalTaskQueues.AGENT_EXECUTION;
 
+import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
+
 import io.temporal.activity.ActivityCancellationType;
 import io.temporal.activity.ActivityOptions;
 import io.temporal.common.RetryOptions;
@@ -16,7 +18,8 @@ public final class AgentRunTemporalPolicy {
     public static final Duration PROGRESS_HEARTBEAT_INTERVAL = Duration.ofSeconds(5);
     public static final Duration FINALIZER_START_TO_CLOSE_TIMEOUT = Duration.ofMinutes(2);
     public static final int MAXIMUM_ACTIVITY_ATTEMPTS = 3;
-    public static final int MAXIMUM_LOGICAL_ATTEMPTS = 3;
+    public static final int MAXIMUM_LOGICAL_ATTEMPTS =
+            ExecuteAgentRunRequest.MAXIMUM_ATTEMPT_LIMIT;
 
     private AgentRunTemporalPolicy() {}
 

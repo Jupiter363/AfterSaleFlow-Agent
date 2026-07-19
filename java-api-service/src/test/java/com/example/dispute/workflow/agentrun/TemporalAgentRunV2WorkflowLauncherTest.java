@@ -165,6 +165,10 @@ class TemporalAgentRunV2WorkflowLauncherTest {
                 command.logicalRunId(),
                 attemptNo,
                 "agent-stream.v2",
+                "b".repeat(64),
+                attemptNo == 1 ? null : "previous-attempt-001",
+                false,
+                0,
                 command);
     }
 }

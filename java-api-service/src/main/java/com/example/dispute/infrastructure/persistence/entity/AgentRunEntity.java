@@ -6,12 +6,15 @@
  */
 package com.example.dispute.infrastructure.persistence.entity;
 
+import static com.example.dispute.agentstream.application.AgentRunLedger.LOGICAL_LINEAGE_SCHEMA_VERSION;
+
 import com.example.dispute.agentstream.application.AgentRunLedger.CreateLogicalRun;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunExecutorKind;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunProtocol;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
+import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
@@ -398,6 +401,9 @@ public class AgentRunEntity extends AbstractEntity {
         run.processRevision = nonNegative(command.processRevision(), "processRevision");
         run.fencingToken = positive(command.fencingToken(), "fencingToken");
         run.requestHash = run.streamRequestHash;
+        run.lineageSchemaVersion = LOGICAL_LINEAGE_SCHEMA_VERSION;
+        run.logicalInputHash =
+                requiredSha256(command.logicalInputHash(), "logicalInputHash");
         run.attemptLimit = boundedAttempts(command.attemptLimit());
         run.deadlineAt = at(command.deadlineAt(), "deadlineAt");
         return run;
@@ -449,21 +455,46 @@ public class AgentRunEntity extends AbstractEntity {
         requireEqual(roomEpoch, command.roomEpoch(), "roomEpoch");
         requireEqual(processRevision, command.processRevision(), "processRevision");
         requireEqual(fencingToken, command.fencingToken(), "fencingToken");
-        requireEqual(requestHash, command.requestHash(), "requestHash");
+        requireBoundLineage(command.logicalInputHash());
         requireEqual(attemptLimit, command.attemptLimit(), "attemptLimit");
+        requireEqual(deadlineAt.toInstant(), command.deadlineAt(), "deadlineAt");
+    }
+
+    public void requireAttemptCommand(RoomGraphCommand command) {
+        requireEqual(getId(), command.logicalRunId(), "logicalRunId");
+        requireEqual(tenantSurrogate, command.tenantSurrogate(), "tenantSurrogate");
+        requireEqual(caseId, command.caseId(), "caseId");
+        requireEqual(roomType, command.roomType(), "roomType");
+        requireEqual(roomEpoch, command.roomEpoch(), "roomEpoch");
+        requireEqual(processRevision, command.processRevision(), "processRevision");
+        requireEqual(deadlineAt.toInstant(), command.deadlineAt(), "deadlineAt");
     }
 
     public void requireAttemptRequest(ExecuteAgentRunRequest request) {
         requireEqual(getId(), request.agentRunId(), "agentRunId");
         requireEqual(getId(), request.logicalRunId(), "logicalRunId");
+        requireEqual(attemptLimit, request.attemptLimit(), "attemptLimit");
         requireEqual(AgentRunProtocol.V2.wireValue(), request.streamProtocol(), "streamProtocol");
-        requireEqual(tenantSurrogate, request.command().tenantSurrogate(), "tenantSurrogate");
-        requireEqual(caseId, request.command().caseId(), "caseId");
-        requireEqual(roomType, request.command().roomType(), "roomType");
-        requireEqual(roomEpoch, request.command().roomEpoch(), "roomEpoch");
-        requireEqual(processRevision, request.command().processRevision(), "processRevision");
-        requireEqual(requestHash, request.command().requestHash(), "requestHash");
-        requireEqual(deadlineAt.toInstant(), request.command().deadlineAt(), "deadlineAt");
+        requireAttemptCommand(request.command());
+        requireBoundLineage(request.logicalInputHash());
+    }
+
+    public void bindFirstAttemptLineage(String value) {
+        String hash = requiredSha256(value, "logicalInputHash");
+        if (lineageSchemaVersion == null && logicalInputHash == null) {
+            lineageSchemaVersion = LOGICAL_LINEAGE_SCHEMA_VERSION;
+            logicalInputHash = hash;
+            return;
+        }
+        requireBoundLineage(hash);
+    }
+
+    public void requireBoundLineage(String value) {
+        requireEqual(
+                lineageSchemaVersion,
+                LOGICAL_LINEAGE_SCHEMA_VERSION,
+                "lineageSchemaVersion");
+        requireEqual(logicalInputHash, requiredSha256(value, "logicalInputHash"), "logicalInputHash");
     }
 
     public void bindV2Audience(String actorRole, String audienceJson, String actorIdsJson) {

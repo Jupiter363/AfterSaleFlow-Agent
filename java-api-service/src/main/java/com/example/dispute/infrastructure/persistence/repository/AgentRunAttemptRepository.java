@@ -15,7 +15,12 @@ public interface AgentRunAttemptRepository
     Optional<AgentRunAttemptEntity> findByAgentRunIdAndAttemptNo(
             String agentRunId, long attemptNo);
 
+    Optional<AgentRunAttemptEntity> findByAgentRunIdAndCommandId(
+            String agentRunId, String commandId);
+
     List<AgentRunAttemptEntity> findAllByAgentRunIdOrderByAttemptNoAsc(String agentRunId);
+
+    long countByAgentRunId(String agentRunId);
 
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select attempt from AgentRunAttemptEntity attempt where attempt.id = :id")

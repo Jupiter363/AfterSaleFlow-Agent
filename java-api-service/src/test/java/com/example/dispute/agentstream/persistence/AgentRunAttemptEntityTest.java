@@ -10,15 +10,21 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.example.dispute.infrastructure.persistence.entity.AgentRunAttemptEntity;
 import com.example.dispute.workflow.contract.v1.AgentRunAttemptHeartbeat;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunRecoveryAction;
 import org.junit.jupiter.api.Test;
 
 class AgentRunAttemptEntityTest {
 
     @Test
     void retainsExecutionMetadataProgressUsageAndResultAcrossReplay() {
-        var request = AgentRunPersistenceFixtures.request(1, "ATTEMPT_V2_1");
         AgentRunAttemptEntity attempt =
-                AgentRunAttemptEntity.start(RUN_ID, request, STARTED_AT);
+                AgentRunAttemptEntity.start(
+                        RUN_ID,
+                        AgentRunPersistenceFixtures.allocation(1, "ATTEMPT_V2_1"),
+                        null,
+                        false,
+                        0,
+                        STARTED_AT);
 
         attempt.recordHeartbeat(
                 AgentRunPersistenceFixtures.heartbeat(1, "ATTEMPT_V2_1", 2));
@@ -44,6 +50,12 @@ class AgentRunAttemptEntityTest {
         assertThat(attempt.getTotalTokens()).isEqualTo(120);
         assertThat(attempt.getLatencyMs()).isEqualTo(3000);
         assertThat(attempt.getResultHash()).isEqualTo(RESULT_HASH);
+        assertThat(attempt.getLineageSchemaVersion())
+                .isEqualTo("agent-run-attempt-lineage.v1");
+        assertThat(attempt.getCommandId()).isEqualTo("command-persistence-1");
+        assertThat(attempt.getCommandRequestHash()).matches("[0-9a-f]{64}");
+        assertThat(attempt.getLogicalInputHash()).matches("[0-9a-f]{64}");
+        assertThat(attempt.getCommandJson()).contains("command-persistence-1");
         assertThat(attempt.getLastSequenceNo()).isEqualTo(3);
         assertThat(attempt.isPublicOutputEmitted()).isTrue();
         assertThat(attempt.isFinalFrameObserved()).isTrue();
@@ -55,29 +67,40 @@ class AgentRunAttemptEntityTest {
         AgentRunAttemptEntity attempt =
                 AgentRunAttemptEntity.start(
                         RUN_ID,
-                        AgentRunPersistenceFixtures.request(1, "ATTEMPT_V2_FAILURE"),
+                        AgentRunPersistenceFixtures.allocation(1, "ATTEMPT_V2_FAILURE"),
+                        null,
+                        false,
+                        0,
                         STARTED_AT);
 
         attempt.recordFailure(
                 AgentRunAttemptStatus.FAILED,
                 "PROVIDER_TIMEOUT",
-                true,
+                AgentRunRecoveryAction.CREATE_NEXT_ATTEMPT,
                 COMPLETED_AT);
         attempt.recordFailure(
                 AgentRunAttemptStatus.FAILED,
                 "PROVIDER_TIMEOUT",
-                true,
+                AgentRunRecoveryAction.CREATE_NEXT_ATTEMPT,
                 COMPLETED_AT.plusSeconds(5));
 
         assertThat(attempt.getAttemptStatus()).isEqualTo(AgentRunAttemptStatus.FAILED);
         assertThat(attempt.getErrorCode()).isEqualTo("PROVIDER_TIMEOUT");
         assertThat(attempt.getErrorRetryable()).isTrue();
+        assertThat(attempt.getTerminationCode()).isEqualTo("CREATE_NEXT_ATTEMPT");
+        assertThatThrownBy(() -> attempt.recordFailure(
+                        AgentRunAttemptStatus.FAILED,
+                        "PROVIDER_TIMEOUT",
+                        AgentRunRecoveryAction.RETRY_SAME_COMMAND,
+                        COMPLETED_AT))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Activity-local");
         assertThatThrownBy(
                         () ->
                                 attempt.recordFailure(
                                         AgentRunAttemptStatus.FAILED,
                                         "DIFFERENT_FAILURE",
-                                        true,
+                                        AgentRunRecoveryAction.CREATE_NEXT_ATTEMPT,
                                         COMPLETED_AT))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("errorCode");
@@ -88,7 +111,10 @@ class AgentRunAttemptEntityTest {
         AgentRunAttemptEntity attempt =
                 AgentRunAttemptEntity.start(
                         RUN_ID,
-                        AgentRunPersistenceFixtures.request(1, "ATTEMPT_V2_HEARTBEAT"),
+                        AgentRunPersistenceFixtures.allocation(1, "ATTEMPT_V2_HEARTBEAT"),
+                        null,
+                        false,
+                        0,
                         STARTED_AT);
 
         attempt.recordHeartbeat(
@@ -133,7 +159,10 @@ class AgentRunAttemptEntityTest {
         AgentRunAttemptEntity attempt =
                 AgentRunAttemptEntity.start(
                         RUN_ID,
-                        AgentRunPersistenceFixtures.request(1, "ATTEMPT_V2_MANIFEST"),
+                        AgentRunPersistenceFixtures.allocation(1, "ATTEMPT_V2_MANIFEST"),
+                        null,
+                        false,
+                        0,
                         STARTED_AT);
         attempt.recordResultReady(
                 AgentRunPersistenceFixtures.result(1, "ATTEMPT_V2_MANIFEST"),
@@ -172,7 +201,10 @@ class AgentRunAttemptEntityTest {
         AgentRunAttemptEntity attempt =
                 AgentRunAttemptEntity.start(
                         RUN_ID,
-                        AgentRunPersistenceFixtures.request(1, "ATTEMPT_V2_METADATA"),
+                        AgentRunPersistenceFixtures.allocation(1, "ATTEMPT_V2_METADATA"),
+                        null,
+                        false,
+                        0,
                         STARTED_AT);
 
         assertThatThrownBy(

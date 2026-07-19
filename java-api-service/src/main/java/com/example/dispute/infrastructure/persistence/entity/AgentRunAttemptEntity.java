@@ -1,10 +1,14 @@
 package com.example.dispute.infrastructure.persistence.entity;
 
+import static com.example.dispute.agentstream.application.AgentRunLedger.ATTEMPT_LINEAGE_SCHEMA_VERSION;
+
+import com.example.dispute.agentstream.application.AgentRunLedger.AttemptAllocation;
 import com.example.dispute.workflow.contract.v1.AgentExecutionManifest;
 import com.example.dispute.workflow.contract.v1.AgentRunAttemptHeartbeat;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunExecutorKind;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunProtocol;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunRecoveryAction;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
@@ -20,6 +24,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.time.temporal.ChronoUnit;
 import java.util.Objects;
 import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
@@ -172,15 +177,31 @@ public class AgentRunAttemptEntity extends AbstractEntity {
     }
 
     public static AgentRunAttemptEntity start(
-            String agentRunId, ExecuteAgentRunRequest request, Instant startedAt) {
-        requireEqual(agentRunId, request.agentRunId(), "agentRunId");
-        RoomGraphCommand command = request.command();
+            String agentRunId,
+            AttemptAllocation allocation,
+            String previousAttemptId,
+            boolean resetRequired,
+            int publicSequenceOffset,
+            Instant startedAt) {
+        Objects.requireNonNull(allocation, "allocation");
+        RoomGraphCommand command = allocation.command();
         requireEqual(command.logicalRunId(), agentRunId, "logicalRunId");
-        requireEqual(command.attemptId(), request.attemptId(), "attemptId");
+        requireEqual(command.requestHash(), allocation.binding().commandRequestHash(), "commandRequestHash");
+        long attemptNo = positive(allocation.attemptNo(), "attemptNo");
+        if (attemptNo == 1) {
+            requireEqual(previousAttemptId, null, "previousAttemptId");
+        } else {
+            required(previousAttemptId, "previousAttemptId");
+            if (command.attemptId().equals(previousAttemptId)) {
+                throw new IllegalArgumentException("previousAttemptId cannot name the new attempt");
+            }
+        }
+        requireSequenceOffset(resetRequired, publicSequenceOffset);
 
-        AgentRunAttemptEntity attempt = new AgentRunAttemptEntity(required(request.attemptId(), "attemptId"));
+        AgentRunAttemptEntity attempt =
+                new AgentRunAttemptEntity(required(command.attemptId(), "attemptId"));
         attempt.agentRunId = required(agentRunId, "agentRunId");
-        attempt.attemptNo = positive(request.attemptNo(), "attemptNo");
+        attempt.attemptNo = attemptNo;
         attempt.attemptStatus = AgentRunAttemptStatus.RUNNING;
         attempt.executorKind = AgentRunExecutorKind.TEMPORAL_ACTIVITY;
         attempt.modelProfileId = required(command.invocationContext().modelProfileId(), "modelProfileId");
@@ -195,6 +216,17 @@ public class AgentRunAttemptEntity extends AbstractEntity {
         attempt.guardrailVersion =
                 required(command.invocationContext().guardrailVersion(), "guardrailVersion");
         attempt.requestHash = sha256(command.requestHash(), "requestHash");
+        attempt.lineageSchemaVersion = ATTEMPT_LINEAGE_SCHEMA_VERSION;
+        attempt.commandId = required(command.commandId(), "commandId");
+        attempt.commandRequestHash =
+                sha256(allocation.binding().commandRequestHash(), "commandRequestHash");
+        attempt.logicalInputHash =
+                sha256(allocation.binding().logicalInputHash(), "logicalInputHash");
+        attempt.commandJson =
+                required(allocation.binding().canonicalCommandJson(), "canonicalCommandJson");
+        attempt.previousAttemptId = previousAttemptId;
+        attempt.resetRequired = resetRequired;
+        attempt.publicSequenceOffset = publicSequenceOffset;
         attempt.startedAt = at(startedAt, "startedAt");
         attempt.lastHeartbeatAt = attempt.startedAt;
         attempt.createdAt = attempt.startedAt;
@@ -203,18 +235,86 @@ public class AgentRunAttemptEntity extends AbstractEntity {
         return attempt;
     }
 
-    public void requireSameRequest(ExecuteAgentRunRequest request) {
+    public void requireSameAllocation(AttemptAllocation allocation) {
+        Objects.requireNonNull(allocation, "allocation");
+        requireProofCarryingLineage();
+        RoomGraphCommand command = allocation.command();
+        requireEqual(agentRunId, command.logicalRunId(), "logicalRunId");
+        requireEqual(getId(), command.attemptId(), "attemptId");
+        requireEqual(attemptNo, allocation.attemptNo(), "attemptNo");
+        requireEqual(commandId, command.commandId(), "commandId");
+        requireEqual(
+                commandRequestHash,
+                allocation.binding().commandRequestHash(),
+                "commandRequestHash");
+        requireEqual(
+                logicalInputHash,
+                allocation.binding().logicalInputHash(),
+                "logicalInputHash");
+        requireEqual(graphKey, command.graphKey(), "graphKey");
+        requireEqual(graphVersion, command.graphVersion(), "graphVersion");
+        requireEqual(requestHash, command.requestHash(), "requestHash");
+        requireEqual(
+                modelProfileId,
+                command.invocationContext().modelProfileId(),
+                "modelProfileId");
+    }
+
+    public void requireAllocatedRequest(ExecuteAgentRunRequest request) {
+        Objects.requireNonNull(request, "request");
+        requireProofCarryingLineage();
         requireEqual(agentRunId, request.agentRunId(), "agentRunId");
         requireEqual(agentRunId, request.logicalRunId(), "logicalRunId");
         requireEqual(getId(), request.attemptId(), "attemptId");
         requireEqual(attemptNo, request.attemptNo(), "attemptNo");
+        requireEqual(commandId, request.command().commandId(), "commandId");
+        requireEqual(commandRequestHash, request.command().requestHash(), "commandRequestHash");
+        requireEqual(logicalInputHash, request.logicalInputHash(), "logicalInputHash");
+        requireEqual(previousAttemptId, request.previousAttemptId(), "previousAttemptId");
+        requireEqual(resetRequired, request.resetRequired(), "resetRequired");
+        requireEqual(
+                publicSequenceOffset,
+                request.publicSequenceOffset(),
+                "publicSequenceOffset");
         requireEqual(graphKey, request.command().graphKey(), "graphKey");
         requireEqual(graphVersion, request.command().graphVersion(), "graphVersion");
-        requireEqual(requestHash, request.command().requestHash(), "requestHash");
         requireEqual(
                 modelProfileId,
                 request.command().invocationContext().modelProfileId(),
                 "modelProfileId");
+    }
+
+    public void requireProofCarryingLineage() {
+        requireEqual(
+                lineageSchemaVersion,
+                ATTEMPT_LINEAGE_SCHEMA_VERSION,
+                "lineageSchemaVersion");
+        required(commandId, "commandId");
+        sha256(commandRequestHash, "commandRequestHash");
+        sha256(logicalInputHash, "logicalInputHash");
+        required(commandJson, "commandJson");
+        if (attemptNo == 1) {
+            requireEqual(previousAttemptId, null, "previousAttemptId");
+        } else {
+            required(previousAttemptId, "previousAttemptId");
+        }
+        requireSequenceOffset(resetRequired, publicSequenceOffset);
+    }
+
+    public void requireCanPrecede(long nextAttemptNo, String nextLogicalInputHash) {
+        requireProofCarryingLineage();
+        requireEqual(attemptNo + 1, nextAttemptNo, "attemptNo");
+        requireEqual(logicalInputHash, nextLogicalInputHash, "logicalInputHash");
+        requireEqual(
+                terminationCode,
+                AgentRunRecoveryAction.CREATE_NEXT_ATTEMPT.name(),
+                "terminationCode");
+        if (attemptStatus != AgentRunAttemptStatus.FAILED
+                && attemptStatus != AgentRunAttemptStatus.ABORTED
+                && attemptStatus != AgentRunAttemptStatus.CANCELLED) {
+            throw new IllegalStateException(
+                    "CREATE_NEXT_ATTEMPT requires a terminal predecessor");
+        }
     }
 
     public void recordHeartbeat(AgentRunAttemptHeartbeat heartbeat) {
@@ -253,6 +353,7 @@ public class AgentRunAttemptEntity extends AbstractEntity {
         }
 
         RoomGraphResult graphResult = result.graphResult();
+        requireEqual(commandId, graphResult.commandId(), "commandId");
         requireEqual(graphKey, graphResult.graphKey(), "graphKey");
         requireEqual(graphVersion, graphResult.graphVersion(), "graphVersion");
         RoomGraphResult.ExecutionMetadata metadata = graphResult.executionMetadata();
@@ -279,16 +380,27 @@ public class AgentRunAttemptEntity extends AbstractEntity {
     public void recordFailure(
             AgentRunAttemptStatus status,
             String errorCode,
-            boolean retryable,
+            AgentRunRecoveryAction recoveryAction,
             Instant failedAt) {
         if (status != AgentRunAttemptStatus.FAILED
                 && status != AgentRunAttemptStatus.ABORTED
                 && status != AgentRunAttemptStatus.CANCELLED) {
             throw new IllegalArgumentException("status must be a terminal attempt failure");
         }
+        Objects.requireNonNull(recoveryAction, "recoveryAction");
+        if (recoveryAction == AgentRunRecoveryAction.RETRY_SAME_COMMAND
+                || recoveryAction == AgentRunRecoveryAction.RECONCILE_TERMINAL) {
+            throw new IllegalArgumentException(
+                    "Activity-local recovery cannot terminalize an AgentRun attempt");
+        }
+        boolean retryable = recoveryAction == AgentRunRecoveryAction.CREATE_NEXT_ATTEMPT;
         if (attemptStatus == status) {
             requireEqual(this.errorCode, errorCode, "errorCode");
             requireEqual(this.errorRetryable, retryable, "errorRetryable");
+            requireEqual(
+                    terminationCode,
+                    recoveryAction.name(),
+                    "terminationCode");
             return;
         }
         if (attemptStatus != AgentRunAttemptStatus.RUNNING) {
@@ -297,9 +409,65 @@ public class AgentRunAttemptEntity extends AbstractEntity {
         attemptStatus = status;
         this.errorCode = required(errorCode, "errorCode");
         errorRetryable = retryable;
+        terminationCode = recoveryAction.name();
         completedAt = at(failedAt, "failedAt");
         latencyMs = Math.max(0, Duration.between(startedAt, completedAt).toMillis());
         updatedAt = completedAt;
+    }
+
+    public void recordFailureResult(
+            AgentRunAttemptStatus status,
+            ExecuteAgentRunResult result,
+            String serializedResult) {
+        String encoded = required(serializedResult, "serializedResult");
+        if (resultJson != null) {
+            requireEqual(attemptStatus, status, "attemptStatus");
+            requireDurableFailureResult(result);
+            return;
+        }
+        requireDurableFailureResult(status, result);
+        recordFailure(
+                status,
+                result.errorCode(),
+                result.recoveryAction(),
+                result.completedAt());
+        resultJson = encoded;
+    }
+
+    public void requireDurableFailureResult(ExecuteAgentRunResult result) {
+        requireDurableFailureResult(attemptStatus, result);
+        requireEqual(errorCode, result.errorCode(), "errorCode");
+        requireEqual(terminationCode, result.recoveryAction().name(), "terminationCode");
+        requireEqual(completedAt, at(result.completedAt(), "completedAt"), "completedAt");
+    }
+
+    private void requireDurableFailureResult(
+            AgentRunAttemptStatus status, ExecuteAgentRunResult result) {
+        Objects.requireNonNull(result, "result");
+        if (!result.completedAt().equals(
+                result.completedAt().truncatedTo(ChronoUnit.MICROS))) {
+            throw new IllegalArgumentException(
+                    "durable failure completedAt must use PostgreSQL microsecond precision");
+        }
+        if (status != AgentRunAttemptStatus.FAILED
+                && status != AgentRunAttemptStatus.ABORTED) {
+            throw new IllegalArgumentException(
+                    "durable Activity failure status must be FAILED or ABORTED");
+        }
+        requireIdentity(result.agentRunId(), result.attemptId(), result.attemptNo());
+        requireEqual(agentRunId, result.logicalRunId(), "logicalRunId");
+        requireEqual(result.outcome(), ExecuteAgentRunResult.Outcome.FAILED, "outcome");
+        requireEqual(lastSequenceNo, result.lastSequenceNo(), "lastSequenceNo");
+        requireEqual(
+                publicOutputEmitted,
+                result.publicOutputEmitted(),
+                "publicOutputEmitted");
+        requireEqual(
+                status,
+                result.publicOutputEmitted()
+                        ? AgentRunAttemptStatus.ABORTED
+                        : AgentRunAttemptStatus.FAILED,
+                "attemptStatus");
     }
 
     public void markCommitted(AgentExecutionManifest manifest, long finalStreamSequenceNo) {
@@ -549,6 +717,14 @@ public class AgentRunAttemptEntity extends AbstractEntity {
             throw new IllegalArgumentException(field + " must be positive");
         }
         return value;
+    }
+
+    private static void requireSequenceOffset(boolean resetRequired, int publicSequenceOffset) {
+        int expected = resetRequired ? 1 : 0;
+        if (publicSequenceOffset != expected) {
+            throw new IllegalArgumentException(
+                    "publicSequenceOffset must be derived from resetRequired");
+        }
     }
 
     private static OffsetDateTime at(Instant value, String field) {

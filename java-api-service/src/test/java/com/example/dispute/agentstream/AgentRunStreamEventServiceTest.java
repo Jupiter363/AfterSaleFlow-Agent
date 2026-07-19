@@ -129,11 +129,17 @@ class AgentRunStreamEventServiceTest {
         run.bindV2Audience("USER", "[\"USER\"]", "[\"user-persistence\"]");
         AgentRunAttemptEntity first = AgentRunAttemptEntity.start(
                 runId,
-                AgentRunPersistenceFixtures.request(1, firstAttemptId),
+                AgentRunPersistenceFixtures.allocation(1, firstAttemptId),
+                null,
+                false,
+                0,
                 AgentRunPersistenceFixtures.STARTED_AT);
         AgentRunAttemptEntity second = AgentRunAttemptEntity.start(
                 runId,
-                AgentRunPersistenceFixtures.request(2, secondAttemptId),
+                AgentRunPersistenceFixtures.allocation(2, secondAttemptId),
+                firstAttemptId,
+                true,
+                1,
                 AgentRunPersistenceFixtures.STARTED_AT.plusSeconds(5));
         AuthenticatedActor actor =
                 new AuthenticatedActor("user-persistence", ActorRole.USER);
@@ -758,7 +764,10 @@ class AgentRunStreamEventServiceTest {
     private static AgentRunAttemptEntity v2Attempt(long attemptNo, String attemptId) {
         return AgentRunAttemptEntity.start(
                 AgentRunPersistenceFixtures.RUN_ID,
-                AgentRunPersistenceFixtures.request(attemptNo, attemptId),
+                AgentRunPersistenceFixtures.allocation(attemptNo, attemptId),
+                attemptNo == 1 ? null : "PREVIOUS_ATTEMPT_" + (attemptNo - 1),
+                false,
+                0,
                 AgentRunPersistenceFixtures.STARTED_AT.plusSeconds(attemptNo));
     }
 

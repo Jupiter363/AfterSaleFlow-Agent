@@ -96,6 +96,8 @@ class AgentRunV2FinalizationGatewayTest {
                 "RESULT_READY",
                 null,
                 result.resultHash(),
+                "agent-run-lineage.v1",
+                request.logicalInputHash(),
                 3,
                 request.command().deadlineAt(),
                 2);

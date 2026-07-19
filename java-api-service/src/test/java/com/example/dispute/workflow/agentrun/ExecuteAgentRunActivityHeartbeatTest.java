@@ -151,7 +151,16 @@ class ExecuteAgentRunActivityHeartbeatTest {
                 null,
                 NOW,
                 null,
-                0);
+                0,
+                "agent-run-attempt-lineage.v1",
+                "graph-cmd-001",
+                "78aa57b57feda88e27adf9bc1b2cacd6aa3c2deb4281fb89533e9f8fb774e430",
+                "b".repeat(64),
+                "{}",
+                null,
+                false,
+                0,
+                null);
     }
 
     private static ExecuteAgentRunRequest request() throws Exception {
@@ -171,6 +180,10 @@ class ExecuteAgentRunActivityHeartbeatTest {
                 command.logicalRunId(),
                 1,
                 "agent-stream.v2",
+                "b".repeat(64),
+                null,
+                false,
+                0,
                 command);
     }
 }

@@ -7,6 +7,7 @@ import static com.example.dispute.workflow.contract.v1.TemporalTaskQueues.ROOM_C
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import com.example.dispute.config.AppProperties;
@@ -93,15 +94,68 @@ class TemporalWorkerConfigurationTest {
     }
 
     @Test
-    void v2AgentWorkerFailsClosedWhenExecutionGatewayIsMissing() {
+    void enabledAgentRunWorkerRejectsUnversionedRoutingBeforeResolvingDependencies() {
         TemporalWorkerProperties properties = properties(WorkerRole.AGENT);
-        AgentRunV2Properties v2Properties = new AgentRunV2Properties(
-                true,
-                AgentRunProtocol.V1,
-                AgentRunV2Properties.SchedulerMode.OFF,
-                Duration.ofMinutes(10),
-                Duration.ofSeconds(15),
-                Duration.ofSeconds(5));
+        AgentRunV2Properties v2Properties = enabledAgentRunProperties();
+        org.springframework.beans.factory.ObjectProvider<AgentRunLedger> ledgerProvider =
+                mockProvider(AgentRunLedger.class);
+        org.springframework.beans.factory.ObjectProvider<AgentRunExecutionGateway>
+                executionGatewayProvider = mockProvider(AgentRunExecutionGateway.class);
+        org.springframework.beans.factory.ObjectProvider<AgentRunFinalizationGateway>
+                finalizationGatewayProvider = mockProvider(AgentRunFinalizationGateway.class);
+
+        try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+            TemporalWorkerConfiguration configuration = new TemporalWorkerConfiguration();
+            assertThatThrownBy(() -> configuration.temporalAgentWorkerFactory(
+                            environment.getWorkflowClient(),
+                            properties,
+                            new TemporalWorkerOptionsFactory(properties),
+                            v2Properties,
+                            ledgerProvider,
+                            executionGatewayProvider,
+                            finalizationGatewayProvider))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining(
+                            "requires Temporal versioningMode BUILD_ID or DEPLOYMENT");
+        }
+
+        verifyNoInteractions(
+                ledgerProvider, executionGatewayProvider, finalizationGatewayProvider);
+    }
+
+    @Test
+    void enabledAgentRunWorkerStartsWithBuildIdVersioningAndPreservesRoleIsolation() {
+        TemporalWorkerProperties properties =
+                properties(WorkerRole.AGENT, VersioningMode.BUILD_ID);
+
+        try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+            TemporalWorkerConfiguration configuration = new TemporalWorkerConfiguration();
+            WorkerFactory factory = configuration.temporalAgentWorkerFactory(
+                    environment.getWorkflowClient(),
+                    properties,
+                    new TemporalWorkerOptionsFactory(properties),
+                    enabledAgentRunProperties(),
+                    provider(mock(AgentRunLedger.class)),
+                    provider(mock(AgentRunExecutionGateway.class)),
+                    provider(mock(AgentRunFinalizationGateway.class)));
+            try {
+                assertThat(factory.isStarted()).isTrue();
+                assertThat(factory.tryGetWorker(AGENT_EXECUTION)).isNotNull();
+                assertThat(factory.tryGetWorker(CASE_CONTROL)).isNull();
+                assertThat(factory.tryGetWorker(ROOM_CONTROL)).isNull();
+                assertThat(factory.tryGetWorker(NOTIFICATION_AND_TOOLS)).isNull();
+                assertThat(factory.tryGetWorker(LEGACY_EVIDENCE_WINDOW)).isNull();
+            } finally {
+                shutdown(factory);
+            }
+        }
+    }
+
+    @Test
+    void v2AgentWorkerFailsClosedWhenExecutionGatewayIsMissing() {
+        TemporalWorkerProperties properties =
+                properties(WorkerRole.AGENT, VersioningMode.BUILD_ID);
+        AgentRunV2Properties v2Properties = enabledAgentRunProperties();
 
         try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
             TemporalWorkerConfiguration configuration = new TemporalWorkerConfiguration();
@@ -176,6 +230,11 @@ class TemporalWorkerConfigurationTest {
     }
 
     private static TemporalWorkerProperties properties(WorkerRole role) {
+        return properties(role, VersioningMode.NONE);
+    }
+
+    private static TemporalWorkerProperties properties(
+            WorkerRole role, VersioningMode versioningMode) {
         QueueCapacity control = new QueueCapacity(64, 32, 2, 2, 0);
         QueueCapacity room = new QueueCapacity(64, 16, 2, 2, 0);
         QueueCapacity agent = new QueueCapacity(8, 32, 2, 2, 0);
@@ -183,7 +242,7 @@ class TemporalWorkerConfigurationTest {
         return new TemporalWorkerProperties(
                 true,
                 role,
-                VersioningMode.NONE,
+                versioningMode,
                 role == WorkerRole.CONTROL ? "after-sale-control" : "after-sale-agent",
                 "test-build",
                 256,
@@ -191,6 +250,16 @@ class TemporalWorkerConfigurationTest {
                 room,
                 agent,
                 tools);
+    }
+
+    private static AgentRunV2Properties enabledAgentRunProperties() {
+        return new AgentRunV2Properties(
+                true,
+                AgentRunProtocol.V1,
+                AgentRunV2Properties.SchedulerMode.OFF,
+                Duration.ofMinutes(10),
+                Duration.ofSeconds(15),
+                Duration.ofSeconds(5));
     }
 
     private static void assertProbe(

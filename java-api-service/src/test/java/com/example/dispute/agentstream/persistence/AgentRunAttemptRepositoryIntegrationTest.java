@@ -8,8 +8,22 @@ import com.example.dispute.agentstream.infrastructure.persistence.JpaAgentRunLed
 import com.example.dispute.infrastructure.persistence.entity.AgentRunEntity;
 import com.example.dispute.infrastructure.persistence.repository.AgentRunAttemptRepository;
 import com.example.dispute.infrastructure.persistence.repository.AgentRunRepository;
+import com.example.dispute.workflow.activity.agent.AgentRunActivityContext;
+import com.example.dispute.workflow.activity.agent.AgentRunExecutionException;
+import com.example.dispute.workflow.activity.agent.AgentRunExecutionGateway;
+import com.example.dispute.workflow.activity.agent.AgentRunProgress;
+import com.example.dispute.workflow.activity.agent.ExecuteAgentRunActivityImpl;
+import com.example.dispute.workflow.contract.v1.AgentRunAttemptHeartbeat;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunRecoveryAction;
+import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.temporal.ChronoUnit;
+import java.util.concurrent.Executors;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
@@ -95,38 +109,85 @@ class AgentRunAttemptRepositoryIntegrationTest {
                 ledger.createOrLoad(AgentRunPersistenceFixtures.logicalRun());
         assertThat(replayedLogical.agentRunId()).isEqualTo(logical.agentRunId());
 
-        var firstRequest = AgentRunPersistenceFixtures.request(1, "ATTEMPT_V2_1");
+        var firstAllocation = AgentRunPersistenceFixtures.allocation(1, "ATTEMPT_V2_1");
         AgentRunLedger.Attempt first =
-                ledger.startNextAttempt(logical.agentRunId(), firstRequest, AgentRunPersistenceFixtures.STARTED_AT);
+                ledger.startNextAttempt(logical.agentRunId(), firstAllocation, AgentRunPersistenceFixtures.STARTED_AT);
         AgentRunLedger.Attempt replayed =
-                ledger.startNextAttempt(logical.agentRunId(), firstRequest, AgentRunPersistenceFixtures.STARTED_AT.plusSeconds(1));
+                ledger.startNextAttempt(logical.agentRunId(), firstAllocation, AgentRunPersistenceFixtures.STARTED_AT.plusSeconds(1));
         assertThat(replayed.attemptId()).isEqualTo(first.attemptId());
         assertThat(replayed.attemptNo()).isEqualTo(1);
+        assertThat(first.lineageSchemaVersion())
+                .isEqualTo(AgentRunLedger.ATTEMPT_LINEAGE_SCHEMA_VERSION);
+        assertThat(first.commandRequestHash()).isEqualTo(firstAllocation.binding().commandRequestHash());
+        assertThat(first.logicalInputHash()).isEqualTo(logical.logicalInputHash());
+        assertThat(first.previousAttemptId()).isNull();
+        assertThat(first.resetRequired()).isFalse();
+        assertThat(first.publicSequenceOffset()).isZero();
 
-        ledger.recordHeartbeat(AgentRunPersistenceFixtures.heartbeat(1, first.attemptId(), 2));
-        ledger.recordAttemptFailure(
-                logical.agentRunId(),
-                first.attemptId(),
-                1,
-                AgentRunAttemptStatus.FAILED,
-                "PROVIDER_TIMEOUT",
-                true,
-                AgentRunPersistenceFixtures.COMPLETED_AT);
-        ledger.recordAttemptFailure(
-                logical.agentRunId(),
-                first.attemptId(),
-                1,
-                AgentRunAttemptStatus.FAILED,
-                "PROVIDER_TIMEOUT",
-                true,
-                AgentRunPersistenceFixtures.COMPLETED_AT.plusSeconds(1));
+        var firstRequest = AgentRunPersistenceFixtures.request(1, first.attemptId());
+        Instant nanosecondClock =
+                AgentRunPersistenceFixtures.COMPLETED_AT.plusNanos(789);
+        AgentRunExecutionGateway failingGateway =
+                (request, executionMode, progressListener, cancellationToken) -> {
+                    progressListener.onProgress(new AgentRunProgress(2, true, false));
+                    throw AgentRunExecutionException.createNextAttempt(
+                            "PROVIDER_TIMEOUT",
+                            "provider timed out",
+                            2,
+                            true,
+                            null);
+                };
+        ExecuteAgentRunActivityImpl activity = new ExecuteAgentRunActivityImpl(
+                ledger,
+                failingGateway,
+                () -> new AgentRunActivityContext() {
+                    @Override
+                    public int temporalAttempt() {
+                        return 1;
+                    }
 
-        var secondRequest = AgentRunPersistenceFixtures.request(2, "ATTEMPT_V2_2");
+                    @Override
+                    public void heartbeat(AgentRunAttemptHeartbeat details) {}
+                },
+                Clock.fixed(nanosecondClock, ZoneOffset.UTC),
+                Duration.ofHours(1),
+                Executors::newSingleThreadScheduledExecutor);
+
+        ExecuteAgentRunResult durableFailure = activity.execute(firstRequest);
+
+        assertThat(durableFailure.completedAt())
+                .isEqualTo(nanosecondClock.truncatedTo(ChronoUnit.MICROS));
+        assertThat(durableFailure.completedAt()).isNotEqualTo(nanosecondClock);
+        assertThat(durableFailure.recoveryAction())
+                .isEqualTo(AgentRunRecoveryAction.CREATE_NEXT_ATTEMPT);
+        assertThat(ledger.requireAllocatedAttempt(
+                                firstRequest)
+                        .durableFailureResult())
+                .isEqualTo(durableFailure);
+
+        assertThatThrownBy(() -> ledger.startNextAttempt(
+                        logical.agentRunId(),
+                        AgentRunPersistenceFixtures.allocationWithRetryBudget(
+                                2, "ATTEMPT_V2_BUDGET_INCREASE", 3, 2, 1),
+                        AgentRunPersistenceFixtures.COMPLETED_AT))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("budget cannot increase");
+
+        var secondAllocation = AgentRunPersistenceFixtures.allocation(2, "ATTEMPT_V2_2");
         AgentRunLedger.Attempt second =
                 ledger.startNextAttempt(
                         logical.agentRunId(),
-                        secondRequest,
+                        secondAllocation,
                         AgentRunPersistenceFixtures.COMPLETED_AT);
+        assertThat(second.previousAttemptId()).isEqualTo(first.attemptId());
+        assertThat(second.logicalInputHash()).isEqualTo(first.logicalInputHash());
+        assertThat(second.commandRequestHash()).isNotEqualTo(first.commandRequestHash());
+        assertThat(second.resetRequired()).isFalse();
+        assertThat(second.publicSequenceOffset()).isZero();
+        assertThat(ledger.requireAllocatedAttempt(
+                        AgentRunPersistenceFixtures.request(
+                                2, second.attemptId(), first.attemptId(), false)))
+                .isEqualTo(second);
         ledger.recordResultReady(AgentRunPersistenceFixtures.result(2, second.attemptId()));
         ledger.recordResultReady(AgentRunPersistenceFixtures.result(2, second.attemptId()));
 
@@ -148,7 +209,7 @@ class AgentRunAttemptRepositoryIntegrationTest {
                         () ->
                                 ledger.startNextAttempt(
                                         logical.agentRunId(),
-                                        AgentRunPersistenceFixtures.request(2, "ATTEMPT_V2_CONFLICT"),
+                                        AgentRunPersistenceFixtures.allocation(2, "ATTEMPT_V2_CONFLICT"),
                                         AgentRunPersistenceFixtures.COMPLETED_AT.plusSeconds(3)))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("attemptId");

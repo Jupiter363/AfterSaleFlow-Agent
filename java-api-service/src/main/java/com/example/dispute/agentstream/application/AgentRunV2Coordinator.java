@@ -1,8 +1,11 @@
 package com.example.dispute.agentstream.application;
 
 import com.example.dispute.agentstream.application.AgentRunLedger.Attempt;
+import com.example.dispute.agentstream.application.AgentRunLedger.AttemptAllocation;
 import com.example.dispute.agentstream.application.AgentRunLedger.CreateLogicalRun;
 import com.example.dispute.agentstream.application.AgentRunLedger.LogicalRun;
+import com.example.dispute.agentstream.application.AgentRunCommandBindingFactory.Binding;
+import com.example.dispute.agentstream.application.AgentRunCommandBindingFactory.Context;
 import com.example.dispute.workflow.application.AgentRunV2WorkflowLaunchException;
 import com.example.dispute.workflow.application.AgentRunV2WorkflowLauncher;
 import com.example.dispute.workflow.application.AgentRunV2WorkflowLauncher.StartDisposition;
@@ -13,6 +16,7 @@ import com.example.dispute.workflow.config.AgentRunV2Properties.SchedulerMode;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunExecutorKind;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunProtocol;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunRecoveryAction;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import com.example.dispute.workflow.temporal.agentrun.AgentRunTemporalPolicy;
@@ -28,16 +32,20 @@ import java.util.Objects;
 public final class AgentRunV2Coordinator {
 
     private final AgentRunLedger ledger;
+    private final AgentRunCommandBindingFactory commandBindingFactory;
     private final AgentRunV2WorkflowLauncher workflowLauncher;
     private final AgentRunV2Properties properties;
     private final Clock clock;
 
     public AgentRunV2Coordinator(
             AgentRunLedger ledger,
+            AgentRunCommandBindingFactory commandBindingFactory,
             AgentRunV2WorkflowLauncher workflowLauncher,
             AgentRunV2Properties properties,
             Clock clock) {
         this.ledger = Objects.requireNonNull(ledger, "ledger");
+        this.commandBindingFactory =
+                Objects.requireNonNull(commandBindingFactory, "commandBindingFactory");
         this.workflowLauncher = Objects.requireNonNull(workflowLauncher, "workflowLauncher");
         this.properties = Objects.requireNonNull(properties, "properties");
         this.clock = Objects.requireNonNull(clock, "clock");
@@ -48,6 +56,13 @@ public final class AgentRunV2Coordinator {
         requireShadowSelection(command.selection());
         RoomGraphCommand graphCommand = command.graphCommand();
         Instant startedAt = clock.instant();
+        Binding binding = commandBindingFactory.bind(
+                new Context(
+                        command.roomId(),
+                        command.roomEpochId(),
+                        command.operation(),
+                        command.logicalIdempotencyKey()),
+                graphCommand);
         CreateLogicalRun create =
                 new CreateLogicalRun(
                         graphCommand.logicalRunId(),
@@ -64,20 +79,28 @@ public final class AgentRunV2Coordinator {
                         graphCommand.processRevision(),
                         command.fencingToken(),
                         graphCommand.requestHash(),
+                        binding.logicalInputHash(),
                         command.attemptLimit(),
                         graphCommand.deadlineAt(),
                         startedAt);
         LogicalRun logicalRun = ledger.createOrLoad(create);
-        requireLogicalRun(logicalRun, graphCommand, command);
+        requireLogicalRun(logicalRun, graphCommand, command, binding);
 
-        ExecuteAgentRunRequest request =
-                new ExecuteAgentRunRequest(
-                        ExecuteAgentRunRequest.SCHEMA_VERSION,
-                        logicalRun.agentRunId(),
-                        command.attemptNo(),
-                        AgentRunProtocol.V2.wireValue(),
-                        graphCommand);
-        Attempt attempt = ledger.startNextAttempt(logicalRun.agentRunId(), request, startedAt);
+        Attempt attempt = ledger.startNextAttempt(
+                logicalRun.agentRunId(),
+                new AttemptAllocation(command.attemptNo(), graphCommand, binding),
+                startedAt);
+        ExecuteAgentRunRequest request = new ExecuteAgentRunRequest(
+                ExecuteAgentRunRequest.SCHEMA_VERSION,
+                logicalRun.agentRunId(),
+                command.attemptNo(),
+                logicalRun.attemptLimit(),
+                AgentRunProtocol.V2.wireValue(),
+                attempt.logicalInputHash(),
+                attempt.previousAttemptId(),
+                attempt.resetRequired(),
+                attempt.publicSequenceOffset(),
+                graphCommand);
         requireAttempt(attempt, request);
         StartReceipt workflow;
         try {
@@ -104,7 +127,7 @@ public final class AgentRunV2Coordinator {
                     request.attemptNo(),
                     AgentRunAttemptStatus.FAILED,
                     failure.code(),
-                    false,
+                    AgentRunRecoveryAction.FAIL_LOGICAL_RUN,
                     clock.instant());
         } catch (RuntimeException persistenceFailure) {
             AgentRunV2WorkflowLaunchException retryable =
@@ -128,7 +151,10 @@ public final class AgentRunV2Coordinator {
     }
 
     private static void requireLogicalRun(
-            LogicalRun logicalRun, RoomGraphCommand graphCommand, StartCommand command) {
+            LogicalRun logicalRun,
+            RoomGraphCommand graphCommand,
+            StartCommand command,
+            Binding binding) {
         if (logicalRun == null
                 || !graphCommand.logicalRunId().equals(logicalRun.agentRunId())
                 || !graphCommand.caseId().equals(logicalRun.caseId())
@@ -139,6 +165,9 @@ public final class AgentRunV2Coordinator {
                 || graphCommand.roomEpoch() != logicalRun.roomEpoch()
                 || graphCommand.processRevision() != logicalRun.processRevision()
                 || command.fencingToken() != logicalRun.fencingToken()
+                || !AgentRunLedger.LOGICAL_LINEAGE_SCHEMA_VERSION.equals(
+                        logicalRun.lineageSchemaVersion())
+                || !binding.logicalInputHash().equals(logicalRun.logicalInputHash())
                 || command.attemptLimit() != logicalRun.attemptLimit()
                 || !Objects.equals(graphCommand.deadlineAt(), logicalRun.deadlineAt())) {
             throw new IllegalStateException(
@@ -151,6 +180,13 @@ public final class AgentRunV2Coordinator {
                 || !request.agentRunId().equals(attempt.agentRunId())
                 || !request.attemptId().equals(attempt.attemptId())
                 || request.attemptNo() != attempt.attemptNo()
+                || !request.logicalInputHash().equals(attempt.logicalInputHash())
+                || !Objects.equals(
+                        request.previousAttemptId(), attempt.previousAttemptId())
+                || request.resetRequired() != attempt.resetRequired()
+                || request.publicSequenceOffset() != attempt.publicSequenceOffset()
+                || !request.command().commandId().equals(attempt.commandId())
+                || !request.command().requestHash().equals(attempt.commandRequestHash())
                 || (attempt.status() != AgentRunAttemptStatus.RUNNING
                         && attempt.status() != AgentRunAttemptStatus.RESULT_READY
                         && attempt.status() != AgentRunAttemptStatus.COMPLETED)) {

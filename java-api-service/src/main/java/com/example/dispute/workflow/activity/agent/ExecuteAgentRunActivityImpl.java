@@ -15,6 +15,7 @@ import io.temporal.failure.ApplicationFailure;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.Objects;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -76,8 +77,11 @@ public final class ExecuteAgentRunActivityImpl implements ExecuteAgentRunActivit
                     "invalid Temporal Activity attempt", NON_RETRYABLE_FAILURE_TYPE);
         }
 
-        AgentRunLedger.Attempt attempt = startAttempt(request, context);
+        AgentRunLedger.Attempt attempt = loadAttempt(request, context);
         validateAttempt(request, attempt);
+        if (attempt.durableFailureResult() != null) {
+            return attempt.durableFailureResult();
+        }
         ExecutionMode executionMode = executionMode(request, attempt, context);
 
         AgentRunCancellationToken cancellationToken = new AgentRunCancellationToken();
@@ -122,7 +126,7 @@ public final class ExecuteAgentRunActivityImpl implements ExecuteAgentRunActivit
                     null,
                     false,
                     null,
-                    clock.instant());
+                    durableTimestamp());
             heartbeat.close();
             ledger.recordResultReady(result);
             return result;
@@ -137,22 +141,22 @@ public final class ExecuteAgentRunActivityImpl implements ExecuteAgentRunActivit
         }
     }
 
-    private AgentRunLedger.Attempt startAttempt(
+    private AgentRunLedger.Attempt loadAttempt(
             ExecuteAgentRunRequest request,
             AgentRunActivityContext context) {
         try {
-            return ledger.startNextAttempt(request.agentRunId(), request, clock.instant());
+            return ledger.requireAllocatedAttempt(request);
         } catch (ActivityCompletionException completionFailure) {
             throw completionFailure;
         } catch (ApplicationFailure applicationFailure) {
             throw applicationFailure;
         } catch (IllegalArgumentException | IllegalStateException deterministicFailure) {
             throw ApplicationFailure.newNonRetryableFailure(
-                    "agent run attempt allocation was rejected",
+                    "agent run attempt lineage was rejected",
                     NON_RETRYABLE_FAILURE_TYPE,
                     request.agentRunId(),
                     request.attemptId(),
-                    "AGENT_RUN_ATTEMPT_REJECTED");
+                    "AGENT_RUN_LINEAGE_CONFLICT");
         } catch (RuntimeException infrastructureFailure) {
             int retryLimit = Math.max(1, allowedActivityAttempts(request.command()));
             if (clock.instant().isBefore(request.command().deadlineAt())
@@ -160,15 +164,15 @@ public final class ExecuteAgentRunActivityImpl implements ExecuteAgentRunActivit
                 throw retryFailure(
                         request,
                         context.temporalAttempt(),
-                        "AGENT_RUN_ATTEMPT_ALLOCATION_FAILED",
+                        "AGENT_RUN_ATTEMPT_LOAD_FAILED",
                         AgentRunRecoveryAction.RETRY_SAME_COMMAND);
             }
             throw ApplicationFailure.newNonRetryableFailure(
-                    "agent run attempt allocation failed",
+                    "agent run attempt load failed",
                     NON_RETRYABLE_FAILURE_TYPE,
                     request.agentRunId(),
                     request.attemptId(),
-                    "AGENT_RUN_ATTEMPT_ALLOCATION_FAILED");
+                    "AGENT_RUN_ATTEMPT_LOAD_FAILED");
         }
     }
 
@@ -257,17 +261,20 @@ public final class ExecuteAgentRunActivityImpl implements ExecuteAgentRunActivit
         boolean nextAttemptAllowed =
                 recoveryAction == AgentRunRecoveryAction.CREATE_NEXT_ATTEMPT
                         && withinRecoveryWindow
-                        && request.attemptNo()
-                                < AgentRunTemporalPolicy.MAXIMUM_LOGICAL_ATTEMPTS;
+                        && request.attemptNo() < request.attemptLimit();
+        Instant completedAt = durableTimestamp();
+        ExecuteAgentRunResult result =
+                failedResult(
+                        request,
+                        executionFailure.errorCode(),
+                        lastSequenceNo,
+                        publicOutputEmitted,
+                        nextAttemptAllowed
+                                ? AgentRunRecoveryAction.CREATE_NEXT_ATTEMPT
+                                : AgentRunRecoveryAction.FAIL_LOGICAL_RUN,
+                        completedAt);
         try {
-            ledger.recordAttemptFailure(
-                    request.agentRunId(),
-                    request.attemptId(),
-                    request.attemptNo(),
-                    status,
-                    executionFailure.errorCode(),
-                    nextAttemptAllowed,
-                    clock.instant());
+            ledger.recordAttemptFailureResult(status, result);
         } catch (RuntimeException persistenceFailure) {
             throw ApplicationFailure.newNonRetryableFailure(
                     "agent run terminal failure could not be persisted",
@@ -276,14 +283,7 @@ public final class ExecuteAgentRunActivityImpl implements ExecuteAgentRunActivit
                     request.attemptId(),
                     executionFailure.errorCode());
         }
-        return failedResult(
-                request,
-                executionFailure.errorCode(),
-                lastSequenceNo,
-                publicOutputEmitted,
-                nextAttemptAllowed
-                        ? AgentRunRecoveryAction.CREATE_NEXT_ATTEMPT
-                        : AgentRunRecoveryAction.FAIL_LOGICAL_RUN);
+        return result;
     }
 
     private ExecuteAgentRunResult failedResult(
@@ -291,7 +291,8 @@ public final class ExecuteAgentRunActivityImpl implements ExecuteAgentRunActivit
             String errorCode,
             long lastSequenceNo,
             boolean publicOutputEmitted,
-            AgentRunRecoveryAction recoveryAction) {
+            AgentRunRecoveryAction recoveryAction,
+            Instant completedAt) {
         boolean retryable = recoveryAction == AgentRunRecoveryAction.CREATE_NEXT_ATTEMPT;
         return new ExecuteAgentRunResult(
                 ExecuteAgentRunResult.SCHEMA_VERSION,
@@ -307,7 +308,11 @@ public final class ExecuteAgentRunActivityImpl implements ExecuteAgentRunActivit
                 errorCode,
                 retryable,
                 recoveryAction,
-                clock.instant());
+                completedAt);
+    }
+
+    private Instant durableTimestamp() {
+        return clock.instant().truncatedTo(ChronoUnit.MICROS);
     }
 
     private void recordCancellationPreserving(
@@ -320,7 +325,7 @@ public final class ExecuteAgentRunActivityImpl implements ExecuteAgentRunActivit
                     request.attemptNo(),
                     AgentRunAttemptStatus.CANCELLED,
                     "AGENT_RUN_CANCELLED",
-                    false,
+                    AgentRunRecoveryAction.FAIL_LOGICAL_RUN,
                     clock.instant());
         } catch (RuntimeException ledgerFailure) {
             cancellation.addSuppressed(ledgerFailure);
@@ -333,10 +338,25 @@ public final class ExecuteAgentRunActivityImpl implements ExecuteAgentRunActivit
         if (attempt == null
                 || !request.agentRunId().equals(attempt.agentRunId())
                 || !request.attemptId().equals(attempt.attemptId())
-                || request.attemptNo() != attempt.attemptNo()) {
+                || request.attemptNo() != attempt.attemptNo()
+                || !request.logicalInputHash().equals(attempt.logicalInputHash())
+                || !Objects.equals(request.previousAttemptId(), attempt.previousAttemptId())
+                || request.resetRequired() != attempt.resetRequired()
+                || request.publicSequenceOffset() != attempt.publicSequenceOffset()
+                || !request.command().commandId().equals(attempt.commandId())
+                || !request.command().requestHash().equals(attempt.commandRequestHash())) {
             throw ApplicationFailure.newNonRetryableFailure(
                     "attempt identity does not match the execution request",
                     NON_RETRYABLE_FAILURE_TYPE);
+        }
+        if (attempt.durableFailureResult() != null) {
+            if (attempt.status() != AgentRunAttemptStatus.FAILED
+                    && attempt.status() != AgentRunAttemptStatus.ABORTED) {
+                throw ApplicationFailure.newNonRetryableFailure(
+                        "durable failure result conflicts with attempt status",
+                        NON_RETRYABLE_FAILURE_TYPE);
+            }
+            return;
         }
         if (attempt.status() != AgentRunAttemptStatus.RUNNING
                 && attempt.status() != AgentRunAttemptStatus.RESULT_READY) {

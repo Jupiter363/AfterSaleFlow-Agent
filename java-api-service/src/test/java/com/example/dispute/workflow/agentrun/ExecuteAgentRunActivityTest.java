@@ -8,6 +8,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import com.example.dispute.agentstream.application.AgentRunLedger;
@@ -53,7 +54,7 @@ class ExecuteAgentRunActivityTest {
         AgentRunLedger ledger = mock(AgentRunLedger.class);
         AgentRunExecutionGateway gateway = mock(AgentRunExecutionGateway.class);
         AgentRunActivityContext context = context(1);
-        when(ledger.startNextAttempt(request.agentRunId(), request, NOW))
+        when(ledger.requireAllocatedAttempt(request))
                 .thenReturn(runningAttempt(0, false), resultReadyAttempt(7, true));
         when(gateway.execute(eq(request), any(ExecutionMode.class), any(), any()))
                 .thenAnswer(invocation -> {
@@ -72,7 +73,7 @@ class ExecuteAgentRunActivityTest {
         assertThat(first).isEqualTo(duplicate);
         assertThat(first.outcome()).isEqualTo(ExecuteAgentRunResult.Outcome.COMPLETED);
         assertThat(first.resultHash()).isEqualTo(graphResult.outputHash());
-        verify(ledger, times(2)).startNextAttempt(request.agentRunId(), request, NOW);
+        verify(ledger, times(2)).requireAllocatedAttempt(request);
         verify(ledger, times(2)).recordResultReady(first);
         verify(gateway).execute(
                 eq(request),
@@ -97,7 +98,7 @@ class ExecuteAgentRunActivityTest {
         AgentRunActivityContext secondContext = context(2);
         AgentRunActivityContextProvider contexts = mock(AgentRunActivityContextProvider.class);
         when(contexts.current()).thenReturn(firstContext, secondContext);
-        when(ledger.startNextAttempt(request.agentRunId(), request, NOW))
+        when(ledger.requireAllocatedAttempt(request))
                 .thenReturn(runningAttempt(0, false), runningAttempt(3, true));
         List<ExecuteAgentRunRequest> gatewayRequests = new ArrayList<>();
         List<ExecutionMode> executionModes = new ArrayList<>();
@@ -145,15 +146,7 @@ class ExecuteAgentRunActivityTest {
                     assertThat(replayed.attemptNo()).isEqualTo(request.attemptNo());
                 });
         assertThat(cached.resultHash()).isEqualTo(graphResult.outputHash());
-        verify(ledger, never())
-                .recordAttemptFailure(
-                        any(),
-                        any(),
-                        org.mockito.ArgumentMatchers.anyLong(),
-                        any(),
-                        any(),
-                        org.mockito.ArgumentMatchers.anyBoolean(),
-                        any());
+        verify(ledger, never()).recordAttemptFailureResult(any(), any());
     }
 
     @Test
@@ -163,7 +156,7 @@ class ExecuteAgentRunActivityTest {
         RoomGraphResult graphResult = graphResult();
         AgentRunLedger ledger = mock(AgentRunLedger.class);
         AgentRunExecutionGateway gateway = mock(AgentRunExecutionGateway.class);
-        when(ledger.startNextAttempt(request.agentRunId(), request, NOW))
+        when(ledger.requireAllocatedAttempt(request))
                 .thenReturn(runningAttempt(2, false, true));
         when(gateway.execute(
                         eq(request),
@@ -190,7 +183,7 @@ class ExecuteAgentRunActivityTest {
         ExecuteAgentRunRequest request = request();
         AgentRunLedger ledger = mock(AgentRunLedger.class);
         AgentRunExecutionGateway gateway = mock(AgentRunExecutionGateway.class);
-        when(ledger.startNextAttempt(request.agentRunId(), request, NOW))
+        when(ledger.requireAllocatedAttempt(request))
                 .thenReturn(runningAttempt(0, false));
         when(gateway.execute(
                         eq(request),
@@ -216,14 +209,7 @@ class ExecuteAgentRunActivityTest {
         assertThat(result.retryable()).isTrue();
         assertThat(result.recoveryAction())
                 .isEqualTo(AgentRunRecoveryAction.CREATE_NEXT_ATTEMPT);
-        verify(ledger).recordAttemptFailure(
-                request.agentRunId(),
-                request.attemptId(),
-                request.attemptNo(),
-                AgentRunAttemptStatus.ABORTED,
-                "AGENT_STREAM_INTERRUPTED",
-                true,
-                NOW);
+        verify(ledger).recordAttemptFailureResult(AgentRunAttemptStatus.ABORTED, result);
     }
 
     @Test
@@ -231,7 +217,7 @@ class ExecuteAgentRunActivityTest {
         ExecuteAgentRunRequest request = request();
         AgentRunLedger ledger = mock(AgentRunLedger.class);
         AgentRunExecutionGateway gateway = mock(AgentRunExecutionGateway.class);
-        when(ledger.startNextAttempt(request.agentRunId(), request, NOW))
+        when(ledger.requireAllocatedAttempt(request))
                 .thenReturn(runningAttempt(4, true));
         when(gateway.execute(
                         eq(request),
@@ -252,14 +238,69 @@ class ExecuteAgentRunActivityTest {
         assertThat(result.retryable()).isFalse();
         assertThat(result.recoveryAction())
                 .isEqualTo(AgentRunRecoveryAction.FAIL_LOGICAL_RUN);
-        verify(ledger).recordAttemptFailure(
+        verify(ledger).recordAttemptFailureResult(AgentRunAttemptStatus.ABORTED, result);
+    }
+
+    @Test
+    void replaysADurableFailureWithoutCallingTheGatewayAfterCompletionLoss()
+            throws Exception {
+        ExecuteAgentRunRequest request = request();
+        ExecuteAgentRunResult durable = new ExecuteAgentRunResult(
+                ExecuteAgentRunResult.SCHEMA_VERSION,
                 request.agentRunId(),
+                request.logicalRunId(),
                 request.attemptId(),
                 request.attemptNo(),
-                AgentRunAttemptStatus.ABORTED,
-                "AGENT_RESPONSE_LOST",
-                false,
+                ExecuteAgentRunResult.Outcome.FAILED,
+                null,
+                null,
+                4,
+                true,
+                "AGENT_STREAM_INTERRUPTED",
+                true,
+                AgentRunRecoveryAction.CREATE_NEXT_ATTEMPT,
                 NOW);
+        AgentRunLedger ledger = mock(AgentRunLedger.class);
+        AgentRunExecutionGateway gateway = mock(AgentRunExecutionGateway.class);
+        when(ledger.requireAllocatedAttempt(request))
+                .thenReturn(durableFailureAttempt(durable));
+
+        ExecuteAgentRunResult replayed =
+                activity(ledger, gateway, () -> context(2)).execute(request);
+
+        assertThat(replayed).isEqualTo(durable);
+        verifyNoInteractions(gateway);
+        verify(ledger, never()).recordAttemptFailureResult(any(), any());
+    }
+
+    @Test
+    void configuredAttemptLimitPreventsCreatingAnUnallocatableAttempt()
+            throws Exception {
+        ExecuteAgentRunRequest request = withAttemptLimit(request(), 1);
+        AgentRunLedger ledger = mock(AgentRunLedger.class);
+        AgentRunExecutionGateway gateway = mock(AgentRunExecutionGateway.class);
+        when(ledger.requireAllocatedAttempt(request)).thenReturn(runningAttempt(0, false));
+        when(gateway.execute(eq(request), any(), any(), any()))
+                .thenThrow(AgentRunExecutionException.createNextAttempt(
+                        "PROVIDER_UNAVAILABLE",
+                        "provider is unavailable",
+                        0,
+                        false,
+                        null));
+
+        ExecuteAgentRunResult result =
+                activity(
+                                ledger,
+                                gateway,
+                                () -> context(1),
+                                Clock.fixed(NOW.plusNanos(123), ZoneOffset.UTC))
+                        .execute(request);
+
+        assertThat(result.recoveryAction())
+                .isEqualTo(AgentRunRecoveryAction.FAIL_LOGICAL_RUN);
+        assertThat(result.retryable()).isFalse();
+        assertThat(result.completedAt()).isEqualTo(NOW);
+        verify(ledger).recordAttemptFailureResult(AgentRunAttemptStatus.FAILED, result);
     }
 
     @Test
@@ -268,7 +309,7 @@ class ExecuteAgentRunActivityTest {
         ExecuteAgentRunRequest request = request();
         AgentRunLedger ledger = mock(AgentRunLedger.class);
         AgentRunExecutionGateway gateway = mock(AgentRunExecutionGateway.class);
-        when(ledger.startNextAttempt(request.agentRunId(), request, NOW))
+        when(ledger.requireAllocatedAttempt(request))
                 .thenThrow(new IllegalStateException("attempt request hash conflicts"));
         ExecuteAgentRunActivityImpl activity = activity(ledger, gateway, () -> context(1));
 
@@ -290,7 +331,7 @@ class ExecuteAgentRunActivityTest {
         ExecuteAgentRunRequest request = request();
         AgentRunLedger ledger = mock(AgentRunLedger.class);
         AgentRunExecutionGateway gateway = mock(AgentRunExecutionGateway.class);
-        when(ledger.startNextAttempt(request.agentRunId(), request, NOW))
+        when(ledger.requireAllocatedAttempt(request))
                 .thenThrow(new RuntimeException("database failover"));
         ExecuteAgentRunActivityImpl activity = activity(ledger, gateway, () -> context(1));
 
@@ -314,7 +355,7 @@ class ExecuteAgentRunActivityTest {
         AgentRunLedger ledger = mock(AgentRunLedger.class);
         AgentRunExecutionGateway gateway = mock(AgentRunExecutionGateway.class);
         Instant afterDeadline = request.command().deadlineAt().plusSeconds(30);
-        when(ledger.startNextAttempt(request.agentRunId(), request, afterDeadline))
+        when(ledger.requireAllocatedAttempt(request))
                 .thenReturn(resultReadyAttempt(7, true));
         when(gateway.execute(
                         eq(request),
@@ -333,15 +374,7 @@ class ExecuteAgentRunActivityTest {
         assertThat(reconciled.outcome()).isEqualTo(ExecuteAgentRunResult.Outcome.COMPLETED);
         assertThat(reconciled.resultHash()).isEqualTo(graphResult.outputHash());
         verify(ledger).recordResultReady(reconciled);
-        verify(ledger, never())
-                .recordAttemptFailure(
-                        any(),
-                        any(),
-                        org.mockito.ArgumentMatchers.anyLong(),
-                        any(),
-                        any(),
-                        org.mockito.ArgumentMatchers.anyBoolean(),
-                        any());
+        verify(ledger, never()).recordAttemptFailureResult(any(), any());
     }
 
     @Test
@@ -351,7 +384,7 @@ class ExecuteAgentRunActivityTest {
         AgentRunLedger ledger = mock(AgentRunLedger.class);
         AgentRunExecutionGateway gateway = mock(AgentRunExecutionGateway.class);
         Instant afterDeadline = request.command().deadlineAt().plusSeconds(30);
-        when(ledger.startNextAttempt(request.agentRunId(), request, afterDeadline))
+        when(ledger.requireAllocatedAttempt(request))
                 .thenReturn(resultReadyAttempt(7, true));
         when(gateway.execute(
                         eq(request),
@@ -380,15 +413,7 @@ class ExecuteAgentRunActivityTest {
                             assertThat(failure.isNonRetryable()).isTrue();
                         });
         verify(ledger, never()).recordResultReady(any());
-        verify(ledger, never())
-                .recordAttemptFailure(
-                        any(),
-                        any(),
-                        org.mockito.ArgumentMatchers.anyLong(),
-                        any(),
-                        any(),
-                        org.mockito.ArgumentMatchers.anyBoolean(),
-                        any());
+        verify(ledger, never()).recordAttemptFailureResult(any(), any());
     }
 
     private static ExecuteAgentRunActivityImpl activity(
@@ -456,6 +481,33 @@ class ExecuteAgentRunActivityTest {
                 true);
     }
 
+    private static AgentRunLedger.Attempt durableFailureAttempt(
+            ExecuteAgentRunResult result) {
+        return new AgentRunLedger.Attempt(
+                result.attemptId(),
+                result.agentRunId(),
+                result.attemptNo(),
+                AgentRunAttemptStatus.ABORTED,
+                result.publicOutputEmitted(),
+                false,
+                result.lastSequenceNo(),
+                NOW,
+                NOW.minusSeconds(1),
+                result.completedAt(),
+                1,
+                "agent-run-attempt-lineage.v1",
+                "graph-cmd-001",
+                "78aa57b57feda88e27adf9bc1b2cacd6aa3c2deb4281fb89533e9f8fb774e430",
+                "b".repeat(64),
+                "{}",
+                null,
+                false,
+                0,
+                result.recoveryAction().name(),
+                result.errorCode(),
+                result);
+    }
+
     private static AgentRunLedger.Attempt attempt(
             AgentRunAttemptStatus status,
             long lastSequenceNo,
@@ -472,7 +524,16 @@ class ExecuteAgentRunActivityTest {
                 null,
                 NOW,
                 null,
-                0);
+                0,
+                "agent-run-attempt-lineage.v1",
+                "graph-cmd-001",
+                "78aa57b57feda88e27adf9bc1b2cacd6aa3c2deb4281fb89533e9f8fb774e430",
+                "b".repeat(64),
+                "{}",
+                null,
+                false,
+                0,
+                null);
     }
 
     private static ExecuteAgentRunRequest request() throws Exception {
@@ -481,7 +542,26 @@ class ExecuteAgentRunActivityTest {
                 "run-001",
                 1,
                 "agent-stream.v2",
+                "b".repeat(64),
+                null,
+                false,
+                0,
                 fixture("room-graph-command-valid.json", RoomGraphCommand.class));
+    }
+
+    private static ExecuteAgentRunRequest withAttemptLimit(
+            ExecuteAgentRunRequest request, int attemptLimit) {
+        return new ExecuteAgentRunRequest(
+                request.schemaVersion(),
+                request.agentRunId(),
+                request.attemptNo(),
+                attemptLimit,
+                request.streamProtocol(),
+                request.logicalInputHash(),
+                request.previousAttemptId(),
+                request.resetRequired(),
+                request.publicSequenceOffset(),
+                request.command());
     }
 
     private static ExecuteAgentRunRequest requestWithActivityBudget(int remaining)
@@ -499,6 +579,10 @@ class ExecuteAgentRunActivityTest {
                 "run-001",
                 1,
                 "agent-stream.v2",
+                "b".repeat(64),
+                null,
+                false,
+                0,
                 command);
     }
 

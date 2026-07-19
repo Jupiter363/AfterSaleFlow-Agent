@@ -157,6 +157,10 @@ class AgentRunFormalResultCommitterTest {
                 graphCommand.logicalRunId(),
                 1,
                 "agent-stream.v2",
+                "b".repeat(64),
+                null,
+                false,
+                0,
                 graphCommand);
         ExecuteAgentRunResult result = new ExecuteAgentRunResult(
                 ExecuteAgentRunResult.SCHEMA_VERSION,

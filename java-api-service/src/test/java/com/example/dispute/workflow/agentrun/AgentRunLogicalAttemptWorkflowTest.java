@@ -8,6 +8,7 @@ import com.example.dispute.workflow.activity.agent.ExecuteAgentRunActivity;
 import com.example.dispute.workflow.activity.agent.FinalizeAgentRunActivity;
 import com.example.dispute.workflow.contract.v1.AgentRunFinalizationReceipt;
 import com.example.dispute.workflow.contract.v1.AgentRunFinalizationReceipt.CommitStatus;
+import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunRecoveryAction;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
@@ -16,14 +17,18 @@ import com.example.dispute.workflow.contract.v1.RoomGraphCommand.InvocationConte
 import com.example.dispute.workflow.contract.v1.RoomGraphResult;
 import com.example.dispute.workflow.temporal.agentrun.AgentRunWorkflow;
 import com.example.dispute.workflow.temporal.agentrun.AgentRunWorkflowImpl;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.temporal.client.UpdateOptions;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowNotFoundException;
 import io.temporal.client.WorkflowOptions;
 import io.temporal.client.WorkflowStub;
+import io.temporal.client.WorkflowUpdateHandle;
 import io.temporal.client.WorkflowUpdateException;
 import io.temporal.client.WorkflowUpdateStage;
 import io.temporal.testing.TestWorkflowEnvironment;
@@ -46,6 +51,10 @@ import org.junit.jupiter.api.Test;
 class AgentRunLogicalAttemptWorkflowTest {
 
     private static final ObjectMapper MAPPER = JsonMapper.builder().findAndAddModules().build();
+    private static final ObjectMapper COMMAND_MAPPER = MAPPER.copy()
+            .setSerializationInclusion(JsonInclude.Include.NON_NULL)
+            .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+    private static final String LOGICAL_INPUT_HASH = "b".repeat(64);
     private static final Path FIXTURES =
             Path.of("..", "contracts", "agent-platform", "v1", "fixtures", "valid");
     private static final Instant NOW = Instant.parse("2026-07-19T07:00:00Z");
@@ -77,9 +86,79 @@ class AgentRunLogicalAttemptWorkflowTest {
         ExecuteAgentRunResult secondResult = update(running.workflow(), attemptTwo);
 
         assertThat(secondResult.outcome()).isEqualTo(ExecuteAgentRunResult.Outcome.COMPLETED);
+        assertThat(attemptTwo.command().requestHash())
+                .isNotEqualTo(attemptOne.command().requestHash());
+        assertThat(attemptTwo.command().invocationContext().envelopeNonce())
+                .isNotEqualTo(attemptOne.command().invocationContext().envelopeNonce());
         assertThat(running.result().get(5, TimeUnit.SECONDS)).isEqualTo(secondResult);
         assertThat(activities.executedAttemptNumbers()).containsExactly(1L, 2L);
         assertThat(activities.finalizedAttempts).containsExactly(2L);
+    }
+
+    @Test
+    void rejectsAChangedLogicalHashOrNonImmediatePredecessor() throws Exception {
+        ExecuteAgentRunRequest attemptOne = request(1, "attempt-lineage-001");
+        ExecuteAgentRunRequest attemptTwo = request(2, "attempt-lineage-002");
+        RunningWorkflow running = start(attemptOne);
+
+        ExecuteAgentRunRequest changedHash = copyLineage(
+                attemptTwo, "c".repeat(64), attemptOne.attemptId());
+        assertThatThrownBy(() -> update(running.workflow(), changedHash))
+                .isInstanceOf(WorkflowUpdateException.class);
+
+        ExecuteAgentRunRequest skippedPredecessor = copyLineage(
+                attemptTwo, LOGICAL_INPUT_HASH, "attempt-unrelated-001");
+        assertThatThrownBy(() -> update(running.workflow(), skippedPredecessor))
+                .isInstanceOf(WorkflowUpdateException.class);
+        assertThat(activities.executedAttemptNumbers()).containsExactly(1L);
+    }
+
+    @Test
+    void rejectsAnIncreasingResidualRetryBudget() throws Exception {
+        ExecuteAgentRunRequest attemptOne = request(1, "attempt-budget-001");
+        ExecuteAgentRunRequest attemptTwo = request(2, "attempt-budget-002");
+        RunningWorkflow running = start(attemptOne);
+
+        ObjectNode commandJson = COMMAND_MAPPER.valueToTree(attemptTwo.command());
+        ObjectNode retryBudget = commandJson.withObject("retry_budget");
+        retryBudget.put(
+                "provider_attempts_remaining",
+                attemptOne.command().retryBudget().providerAttemptsRemaining() + 1);
+        commandJson.remove("request_hash");
+        commandJson.put("request_hash", ContractJson.sha256Hex(commandJson));
+        RoomGraphCommand increased =
+                COMMAND_MAPPER.treeToValue(commandJson, RoomGraphCommand.class);
+        ExecuteAgentRunRequest invalid = new ExecuteAgentRunRequest(
+                attemptTwo.schemaVersion(),
+                attemptTwo.agentRunId(),
+                attemptTwo.attemptNo(),
+                attemptTwo.streamProtocol(),
+                attemptTwo.logicalInputHash(),
+                attemptTwo.previousAttemptId(),
+                attemptTwo.resetRequired(),
+                attemptTwo.publicSequenceOffset(),
+                increased);
+
+        assertThatThrownBy(() -> update(running.workflow(), invalid))
+                .isInstanceOf(WorkflowUpdateException.class);
+        assertThat(activities.executedAttemptNumbers()).containsExactly(1L);
+    }
+
+    @Test
+    void rejectsABudgetIncreaseRelativeToTheImmediatePredecessor() throws Exception {
+        ExecuteAgentRunRequest attemptOne = request(1, "attempt-budget-chain-001");
+        ExecuteAgentRunRequest attemptTwo = withRetryBudget(
+                request(2, "attempt-budget-chain-002"), 1, 1, 0);
+        ExecuteAgentRunRequest attemptThree = withRetryBudget(
+                request(3, "attempt-budget-chain-003"), 2, 2, 1);
+        activities.retryableAttempts.add(2L);
+        RunningWorkflow running = start(attemptOne);
+
+        assertThat(update(running.workflow(), attemptTwo).recoveryAction())
+                .isEqualTo(AgentRunRecoveryAction.CREATE_NEXT_ATTEMPT);
+        assertThatThrownBy(() -> update(running.workflow(), attemptThree))
+                .isInstanceOf(WorkflowUpdateException.class);
+        assertThat(activities.executedAttemptNumbers()).containsExactly(1L, 2L);
     }
 
     @Test
@@ -99,28 +178,59 @@ class AgentRunLogicalAttemptWorkflowTest {
     }
 
     @Test
-    void rejectsAnotherLogicalAttemptWhileTheAcceptedAttemptIsExecuting() throws Exception {
+    void acceptsOneAuthorizedSuccessorWhileThePredecessorUpdateIsFinishing()
+            throws Exception {
         ExecuteAgentRunRequest attemptOne = request(1, "attempt-serial-001");
         ExecuteAgentRunRequest attemptTwo = request(2, "attempt-serial-002");
         ExecuteAgentRunRequest attemptThree = request(3, "attempt-serial-003");
+        activities.retryableAttempts.add(2L);
         activities.blockAttemptNo = 2;
         RunningWorkflow running = start(attemptOne);
 
         CompletableFuture<ExecuteAgentRunResult> second =
                 CompletableFuture.supplyAsync(() -> update(running.workflow(), attemptTwo));
         assertThat(activities.blockedAttemptEntered.await(5, TimeUnit.SECONDS)).isTrue();
+        WorkflowUpdateHandle<ExecuteAgentRunResult> third =
+                startAcceptedUpdate(running.workflow(), attemptThree);
         try {
-            assertThatThrownBy(() -> update(running.workflow(), attemptThree))
-                    .isInstanceOf(WorkflowUpdateException.class);
             assertThat(activities.maximumConcurrentExecutions).hasValue(1);
             assertThat(activities.executedAttemptNumbers()).containsExactly(1L, 2L);
         } finally {
             activities.releaseBlockedAttempt.countDown();
         }
 
-        ExecuteAgentRunResult completed = second.get(5, TimeUnit.SECONDS);
+        assertThat(second.get(5, TimeUnit.SECONDS).recoveryAction())
+                .isEqualTo(AgentRunRecoveryAction.CREATE_NEXT_ATTEMPT);
+        ExecuteAgentRunResult completed = third.getResult();
         assertThat(running.result().get(5, TimeUnit.SECONDS)).isEqualTo(completed);
+        assertThat(activities.executedAttemptNumbers()).containsExactly(1L, 2L, 3L);
         assertThat(activities.maximumConcurrentExecutions).hasValue(1);
+    }
+
+    @Test
+    void rejectsAnEarlyAcceptedSuccessorWhenThePredecessorDoesNotAuthorizeIt()
+            throws Exception {
+        ExecuteAgentRunRequest attemptOne = request(1, "attempt-pending-terminal-001");
+        ExecuteAgentRunRequest attemptTwo = request(2, "attempt-pending-terminal-002");
+        ExecuteAgentRunRequest attemptThree = request(3, "attempt-pending-terminal-003");
+        activities.terminalFailureAttempts.add(2L);
+        activities.blockAttemptNo = 2;
+        RunningWorkflow running = start(attemptOne);
+
+        CompletableFuture<ExecuteAgentRunResult> second =
+                CompletableFuture.supplyAsync(() -> update(running.workflow(), attemptTwo));
+        assertThat(activities.blockedAttemptEntered.await(5, TimeUnit.SECONDS)).isTrue();
+        WorkflowUpdateHandle<ExecuteAgentRunResult> third =
+                startAcceptedUpdate(running.workflow(), attemptThree);
+        activities.releaseBlockedAttempt.countDown();
+
+        ExecuteAgentRunResult terminal = second.get(5, TimeUnit.SECONDS);
+        assertThat(terminal.recoveryAction())
+                .isEqualTo(AgentRunRecoveryAction.FAIL_LOGICAL_RUN);
+        assertThatThrownBy(third::getResult)
+                .isInstanceOf(WorkflowUpdateException.class);
+        assertThat(running.result().get(5, TimeUnit.SECONDS)).isEqualTo(terminal);
+        assertThat(activities.executedAttemptNumbers()).containsExactly(1L, 2L);
     }
 
     @Test
@@ -128,10 +238,18 @@ class AgentRunLogicalAttemptWorkflowTest {
             throws Exception {
         ExecuteAgentRunRequest attemptOne = request(1, "attempt-command-001");
         ExecuteAgentRunRequest reusedCommand =
-                request(2, "attempt-command-reused", attemptOne.command().commandId());
+                request(
+                        2,
+                        "attempt-command-reused",
+                        attemptOne.command().commandId(),
+                        attemptOne.attemptId());
         ExecuteAgentRunRequest attemptTwo = request(2, "attempt-command-002");
         ExecuteAgentRunRequest reusedByAttemptThree =
-                request(3, "attempt-command-reused-003", attemptTwo.command().commandId());
+                request(
+                        3,
+                        "attempt-command-reused-003",
+                        attemptTwo.command().commandId(),
+                        attemptTwo.attemptId());
         ExecuteAgentRunRequest attemptThree = request(3, "attempt-command-003");
         activities.retryableAttempts.add(2L);
         RunningWorkflow running = start(attemptOne);
@@ -241,6 +359,18 @@ class AgentRunLogicalAttemptWorkflowTest {
                 .getResult();
     }
 
+    private static WorkflowUpdateHandle<ExecuteAgentRunResult> startAcceptedUpdate(
+            AgentRunWorkflow workflow, ExecuteAgentRunRequest request) {
+        return WorkflowStub.fromTyped(workflow)
+                .startUpdate(
+                        UpdateOptions.newBuilder(ExecuteAgentRunResult.class)
+                                .setUpdateName(AgentRunWorkflow.ATTEMPT_UPDATE)
+                                .setUpdateId(request.attemptId())
+                                .setWaitForStage(WorkflowUpdateStage.ACCEPTED)
+                                .build(),
+                        request);
+    }
+
     private static ExecuteAgentRunRequest request(long attemptNo, String attemptId)
             throws Exception {
         RoomGraphCommand fixture = fixture("room-graph-command-valid.json", RoomGraphCommand.class);
@@ -249,6 +379,14 @@ class AgentRunLogicalAttemptWorkflowTest {
 
     private static ExecuteAgentRunRequest request(
             long attemptNo, String attemptId, String commandId) throws Exception {
+        return request(attemptNo, attemptId, commandId, predecessorId(attemptNo, attemptId));
+    }
+
+    private static ExecuteAgentRunRequest request(
+            long attemptNo,
+            String attemptId,
+            String commandId,
+            String previousAttemptId) throws Exception {
         RoomGraphCommand fixture = fixture("room-graph-command-valid.json", RoomGraphCommand.class);
         InvocationContext context = fixture.invocationContext();
         InvocationContext attemptContext =
@@ -262,7 +400,7 @@ class AgentRunLogicalAttemptWorkflowTest {
                         context.toolCapabilities(),
                         context.envelopeKeyId(),
                         context.envelopeNonce() + "-" + attemptNo);
-        RoomGraphCommand command =
+        RoomGraphCommand unsigned =
                 new RoomGraphCommand(
                         fixture.schemaVersion(),
                         commandId,
@@ -286,12 +424,73 @@ class AgentRunLogicalAttemptWorkflowTest {
                         fixture.retryBudget(),
                         Instant.parse("2099-01-01T00:00:00Z"),
                         fixture.traceparent(),
-                        fixture.requestHash());
+                        "0".repeat(64));
+        ObjectNode commandJson = COMMAND_MAPPER.valueToTree(unsigned);
+        commandJson.remove("request_hash");
+        commandJson.put("request_hash", ContractJson.sha256Hex(commandJson));
+        RoomGraphCommand command = COMMAND_MAPPER.treeToValue(commandJson, RoomGraphCommand.class);
         return new ExecuteAgentRunRequest(
                 ExecuteAgentRunRequest.SCHEMA_VERSION,
                 command.logicalRunId(),
                 attemptNo,
                 "agent-stream.v2",
+                LOGICAL_INPUT_HASH,
+                previousAttemptId,
+                false,
+                0,
+                command);
+    }
+
+    private static String predecessorId(long attemptNo, String attemptId) {
+        if (attemptNo == 1) {
+            return null;
+        }
+        int separator = attemptId.lastIndexOf('-');
+        if (separator < 0) {
+            throw new IllegalArgumentException("test attemptId has no numeric suffix");
+        }
+        return attemptId.substring(0, separator + 1) + "%03d".formatted(attemptNo - 1);
+    }
+
+    private static ExecuteAgentRunRequest copyLineage(
+            ExecuteAgentRunRequest request,
+            String logicalInputHash,
+            String previousAttemptId) {
+        return new ExecuteAgentRunRequest(
+                request.schemaVersion(),
+                request.agentRunId(),
+                request.attemptNo(),
+                request.streamProtocol(),
+                logicalInputHash,
+                previousAttemptId,
+                request.resetRequired(),
+                request.publicSequenceOffset(),
+                request.command());
+    }
+
+    private static ExecuteAgentRunRequest withRetryBudget(
+            ExecuteAgentRunRequest request,
+            int providerAttempts,
+            int activityAttempts,
+            int repairs) throws Exception {
+        ObjectNode commandJson = COMMAND_MAPPER.valueToTree(request.command());
+        ObjectNode retryBudget = commandJson.withObject("retry_budget");
+        retryBudget.put("provider_attempts_remaining", providerAttempts);
+        retryBudget.put("activity_attempts_remaining", activityAttempts);
+        retryBudget.put("repairs_remaining", repairs);
+        commandJson.remove("request_hash");
+        commandJson.put("request_hash", ContractJson.sha256Hex(commandJson));
+        RoomGraphCommand command =
+                COMMAND_MAPPER.treeToValue(commandJson, RoomGraphCommand.class);
+        return new ExecuteAgentRunRequest(
+                request.schemaVersion(),
+                request.agentRunId(),
+                request.attemptNo(),
+                request.streamProtocol(),
+                request.logicalInputHash(),
+                request.previousAttemptId(),
+                request.resetRequired(),
+                request.publicSequenceOffset(),
                 command);
     }
 

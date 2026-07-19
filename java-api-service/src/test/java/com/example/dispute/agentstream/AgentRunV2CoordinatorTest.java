@@ -11,8 +11,11 @@ import static org.mockito.Mockito.when;
 
 import com.example.dispute.agentstream.application.AgentRunLedger;
 import com.example.dispute.agentstream.application.AgentRunLedger.Attempt;
+import com.example.dispute.agentstream.application.AgentRunLedger.AttemptAllocation;
 import com.example.dispute.agentstream.application.AgentRunLedger.CreateLogicalRun;
 import com.example.dispute.agentstream.application.AgentRunLedger.LogicalRun;
+import com.example.dispute.agentstream.application.AgentRunCommandBindingFactory;
+import com.example.dispute.agentstream.application.AgentRunCommandBindingFactory.Context;
 import com.example.dispute.agentstream.application.AgentRunV2Coordinator;
 import com.example.dispute.agentstream.application.AgentRunV2Coordinator.Selection;
 import com.example.dispute.agentstream.application.AgentRunV2Coordinator.StartCommand;
@@ -26,6 +29,7 @@ import com.example.dispute.workflow.config.AgentRunV2Properties.SchedulerMode;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunExecutorKind;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunProtocol;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunRecoveryAction;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -64,11 +68,13 @@ class AgentRunV2CoordinatorTest {
     @Mock private AgentRunV2WorkflowLauncher launcher;
 
     private RoomGraphCommand graphCommand;
+    private AgentRunCommandBindingFactory bindingFactory;
 
     @BeforeEach
     void setUp() throws Exception {
         JsonNode wrapper = MAPPER.readTree(FIXTURE.toFile());
         graphCommand = MAPPER.treeToValue(wrapper.required("instance"), RoomGraphCommand.class);
+        bindingFactory = new AgentRunCommandBindingFactory(MAPPER);
     }
 
     @Test
@@ -93,17 +99,21 @@ class AgentRunV2CoordinatorTest {
         assertThat(logicalCaptor.getValue().executorKind())
                 .isEqualTo(AgentRunExecutorKind.TEMPORAL_ACTIVITY);
 
-        ArgumentCaptor<ExecuteAgentRunRequest> requestCaptor =
-                ArgumentCaptor.forClass(ExecuteAgentRunRequest.class);
+        ArgumentCaptor<AttemptAllocation> allocationCaptor =
+                ArgumentCaptor.forClass(AttemptAllocation.class);
         verify(ledger)
                 .startNextAttempt(
                         org.mockito.ArgumentMatchers.eq(logical.agentRunId()),
-                        requestCaptor.capture(),
+                        allocationCaptor.capture(),
                         org.mockito.ArgumentMatchers.eq(NOW));
-        assertThat(requestCaptor.getValue().attemptNo()).isEqualTo(1);
-        assertThat(requestCaptor.getValue().attemptId()).isEqualTo(graphCommand.attemptId());
+        assertThat(allocationCaptor.getValue().attemptNo()).isEqualTo(1);
+        assertThat(allocationCaptor.getValue().command().attemptId())
+                .isEqualTo(graphCommand.attemptId());
+        assertThat(allocationCaptor.getValue().binding().logicalInputHash())
+                .isEqualTo(outcome.request().logicalInputHash());
         assertThat(outcome.workflow().workflowId()).isEqualTo(workflowId);
-        assertThat(outcome.request()).isEqualTo(requestCaptor.getValue());
+        assertThat(outcome.request().attemptLimit()).isEqualTo(command.attemptLimit());
+        assertThat(outcome.request().command()).isEqualTo(graphCommand);
     }
 
     @Test
@@ -151,7 +161,7 @@ class AgentRunV2CoordinatorTest {
                         1,
                         AgentRunAttemptStatus.FAILED,
                         "TEMPORAL_RECEIPT_CONFLICT",
-                        false,
+                        AgentRunRecoveryAction.FAIL_LOGICAL_RUN,
                         NOW);
     }
 
@@ -175,7 +185,7 @@ class AgentRunV2CoordinatorTest {
                         1,
                         AgentRunAttemptStatus.FAILED,
                         "TEMPORAL_UPDATE_REJECTED",
-                        false,
+                        AgentRunRecoveryAction.FAIL_LOGICAL_RUN,
                         NOW);
     }
 
@@ -193,7 +203,14 @@ class AgentRunV2CoordinatorTest {
         assertThatThrownBy(() -> coordinator(enabled()).start(command(Selection.SHADOW, 1)))
                 .isSameAs(unavailable);
         verify(ledger, never())
-                .recordAttemptFailure(any(), any(), eq(1L), any(), any(), eq(false), any());
+                .recordAttemptFailure(
+                        any(),
+                        any(),
+                        eq(1L),
+                        any(),
+                        any(),
+                        eq(AgentRunRecoveryAction.FAIL_LOGICAL_RUN),
+                        any());
     }
 
     @Test
@@ -216,7 +233,7 @@ class AgentRunV2CoordinatorTest {
                         1,
                         AgentRunAttemptStatus.FAILED,
                         "TEMPORAL_UPDATE_REJECTED",
-                        false,
+                        AgentRunRecoveryAction.FAIL_LOGICAL_RUN,
                         NOW);
 
         assertThatThrownBy(() -> coordinator(enabled()).start(command(Selection.SHADOW, 1)))
@@ -248,7 +265,11 @@ class AgentRunV2CoordinatorTest {
 
     private AgentRunV2Coordinator coordinator(AgentRunV2Properties properties) {
         return new AgentRunV2Coordinator(
-                ledger, launcher, properties, Clock.fixed(NOW, ZoneOffset.UTC));
+                ledger,
+                bindingFactory,
+                launcher,
+                properties,
+                Clock.fixed(NOW, ZoneOffset.UTC));
     }
 
     private StartCommand command(Selection selection, int attemptNo) {
@@ -278,12 +299,28 @@ class AgentRunV2CoordinatorTest {
                 "RUNNING",
                 null,
                 null,
+                "agent-run-lineage.v1",
+                bindingFactory.bind(
+                                new Context(
+                                        "ROOM_EVIDENCE_001",
+                                        "EPOCH_EVIDENCE_001",
+                                        "EVIDENCE_ANALYZE",
+                                        "logical-key-001"),
+                                graphCommand)
+                        .logicalInputHash(),
                 3,
                 graphCommand.deadlineAt(),
                 1);
     }
 
     private Attempt attempt(AgentRunAttemptStatus status) {
+        var binding = bindingFactory.bind(
+                new Context(
+                        "ROOM_EVIDENCE_001",
+                        "EPOCH_EVIDENCE_001",
+                        "EVIDENCE_ANALYZE",
+                        "logical-key-001"),
+                graphCommand);
         return new Attempt(
                 graphCommand.attemptId(),
                 graphCommand.logicalRunId(),
@@ -295,7 +332,16 @@ class AgentRunV2CoordinatorTest {
                 NOW,
                 NOW,
                 status == AgentRunAttemptStatus.COMPLETED ? NOW : null,
-                1);
+                1,
+                "agent-run-attempt-lineage.v1",
+                graphCommand.commandId(),
+                binding.commandRequestHash(),
+                binding.logicalInputHash(),
+                binding.canonicalCommandJson(),
+                null,
+                false,
+                0,
+                null);
     }
 
     private static AgentRunV2Properties enabled() {
