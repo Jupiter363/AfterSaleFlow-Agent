@@ -132,11 +132,14 @@ class InvocationEnvelopeVerifier:
         key = self._resolve_key(header["kid"])
         claims = self._decode_claims(token, key)
         self._verify_time_window(claims)
+        self._verify_fresh_delivery_nonce(claims)
         expected = invocation_binding_claims(command)
         if not hmac.compare_digest(command.request_hash, str(expected["request_hash"])):
             raise InvocationEnvelopeError("INVOCATION_COMMAND_SELF_HASH_MISMATCH")
         actual = claims.model_dump(mode="json")
         for name, value in expected.items():
+            if name == "profile_bindings_hash":
+                continue
             if not _constant_time_equal(actual[name], value):
                 raise InvocationEnvelopeError(f"INVOCATION_{name.upper()}_MISMATCH")
         if command.invocation_context.envelope_key_id != key.kid:
@@ -244,6 +247,11 @@ class InvocationEnvelopeVerifier:
         if claims.exp < now - _MAX_CLOCK_SKEW_SECONDS:
             raise InvocationEnvelopeError("INVOCATION_JWS_EXPIRED")
 
+    @staticmethod
+    def _verify_fresh_delivery_nonce(claims: _BoundInvocationClaims) -> None:
+        if hmac.compare_digest(claims.jti, claims.command_nonce):
+            raise InvocationEnvelopeError("INVOCATION_JWS_NONCE_REUSE_REJECTED")
+
 
 class ReconciliationEnvelopeVerifier(InvocationEnvelopeVerifier):
     """Verify a distinct no-model credential against an exact historical command body."""
@@ -260,6 +268,7 @@ class ReconciliationEnvelopeVerifier(InvocationEnvelopeVerifier):
         key = self._resolve_key(header["kid"])
         claims = self._decode_reconciliation_claims(token, key)
         self._verify_time_window(claims)
+        self._verify_fresh_delivery_nonce(claims)
         expected = {
             **invocation_binding_claims(command),
             "original_envelope_key_id": command.invocation_context.envelope_key_id,
@@ -268,6 +277,8 @@ class ReconciliationEnvelopeVerifier(InvocationEnvelopeVerifier):
             raise InvocationEnvelopeError("INVOCATION_COMMAND_SELF_HASH_MISMATCH")
         actual = claims.model_dump(mode="json")
         for name, value in expected.items():
+            if name == "profile_bindings_hash":
+                continue
             if not _constant_time_equal(actual[name], value):
                 raise InvocationEnvelopeError(f"INVOCATION_{name.upper()}_MISMATCH")
         return VerifiedReconciliation(
@@ -294,7 +305,12 @@ def extract_bearer_token(authorization: str | None) -> str:
     return token
 
 
-def invocation_binding_claims(command: RoomGraphCommand) -> dict[str, str | int]:
+def invocation_binding_claims(
+    command: RoomGraphCommand,
+    *,
+    registry_binding_hash: str | None = None,
+    tool_policy_version: str | None = None,
+) -> dict[str, str | int]:
     actor_scope = command.actor_scope.model_dump(mode="json")
     invocation = command.invocation_context
     capabilities = {
@@ -309,6 +325,17 @@ def invocation_binding_claims(command: RoomGraphCommand) -> dict[str, str | int]
         "policy_version": invocation.policy_version,
         "guardrail_version": invocation.guardrail_version,
     }
+    if (registry_binding_hash is None) != (tool_policy_version is None):
+        raise ValueError(
+            "registry binding hash and tool policy version must be supplied together"
+        )
+    if registry_binding_hash is not None and tool_policy_version is not None:
+        if _SHA256_PATTERN.fullmatch(registry_binding_hash) is None:
+            raise ValueError("registry binding hash must be lowercase SHA-256")
+        if _IDENTIFIER_PATTERN.fullmatch(tool_policy_version) is None:
+            raise ValueError("tool policy version must be a bounded identifier")
+        profile_bindings["registry_binding_hash"] = registry_binding_hash
+        profile_bindings["tool_policy_version"] = tool_policy_version
     return {
         "command_id": command.command_id,
         "command_nonce": invocation.envelope_nonce,

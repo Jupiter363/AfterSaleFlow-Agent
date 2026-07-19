@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, replace
 from typing import Any, Final
@@ -97,6 +97,29 @@ select metadata
    and checkpoint_ns = %s
    and checkpoint_id = %s
  for share
+"""
+
+ADVANCE_THREAD_CHECKPOINT_SQL: Final[str] = """
+update graph_thread_registry
+   set cognitive_revision = %s,
+       last_checkpoint_ns = %s,
+       last_checkpoint_id = %s,
+       updated_at = clock_timestamp()
+ where thread_id = %s
+   and room_epoch = %s
+   and graph_key = %s
+   and graph_version = %s
+   and checkpoint_schema_version = %s
+   and lifecycle_status = 'ACTIVE'
+   and (
+       cognitive_revision = %s
+       or (
+           cognitive_revision = %s
+           and last_checkpoint_ns is not distinct from %s
+           and last_checkpoint_id = %s
+       )
+   )
+returning cognitive_revision, last_checkpoint_ns, last_checkpoint_id
 """
 
 
@@ -286,6 +309,7 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
         async with self._connection() as connection:
             async with connection.transaction():
                 await self._lock_fence(connection, fence)
+                cognitive_revision = self._checkpoint_revision(checkpoint)
                 terminal_result, checkpoint_to_save = self._materialize_terminal_result(
                     config,
                     checkpoint,
@@ -293,7 +317,11 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
                     materializer,
                 )
                 effective_fence = self._terminal_fence(fence, terminal_result)
-                bound_metadata = self._bind_metadata(metadata, effective_fence)
+                bound_metadata = self._bind_metadata(
+                    metadata,
+                    effective_fence,
+                    cognitive_revision,
+                )
                 saver = self._direct_saver_factory(connection, self.serde)
                 saved = await saver.aput(
                     config,
@@ -319,6 +347,14 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
                     checkpoint_ns=checkpoint_ns,
                     checkpoint_id=checkpoint_id,
                 )
+                if self._checkpoint_has_applied_revision(checkpoint_to_save):
+                    await self._advance_thread_checkpoint(
+                        connection,
+                        effective_fence,
+                        cognitive_revision=cognitive_revision,
+                        checkpoint_ns=checkpoint_ns,
+                        checkpoint_id=checkpoint_id,
+                    )
                 if terminal_result is not None:
                     await self._ledger.store_terminal_result(
                         connection,
@@ -537,6 +573,42 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
         if fence.result_hash is not None and row["result_hash"] != fence.result_hash:
             raise GraphBindingError("terminal checkpoint result hash was not durably bound")
 
+    async def _advance_thread_checkpoint(
+        self,
+        connection: Any,
+        fence: GraphFenceContext,
+        *,
+        cognitive_revision: int,
+        checkpoint_ns: str,
+        checkpoint_id: str,
+    ) -> None:
+        cursor = await connection.execute(
+            ADVANCE_THREAD_CHECKPOINT_SQL,
+            (
+                cognitive_revision,
+                checkpoint_ns,
+                checkpoint_id,
+                fence.thread_id,
+                fence.room_epoch,
+                fence.graph_key,
+                fence.graph_version,
+                fence.checkpoint_schema_version,
+                cognitive_revision - 1,
+                cognitive_revision,
+                checkpoint_ns,
+                checkpoint_id,
+            ),
+        )
+        row = await cursor.fetchone()
+        if row is None or (
+            row["cognitive_revision"],
+            row["last_checkpoint_ns"],
+            row["last_checkpoint_id"],
+        ) != (cognitive_revision, checkpoint_ns, checkpoint_id):
+            raise GraphBindingError(
+                "checkpoint does not advance the durable thread revision exactly once"
+            )
+
     async def _validate_pending_write_target(
         self,
         connection: Any,
@@ -571,13 +643,42 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
     def _bind_metadata(
         metadata: CheckpointMetadata,
         fence: GraphFenceContext,
+        cognitive_revision: int,
     ) -> CheckpointMetadata:
         bound = dict(metadata)
-        for key, value in fence.checkpoint_metadata().items():
+        expected = {
+            **fence.checkpoint_metadata(),
+            "graph_cognitive_revision": cognitive_revision,
+        }
+        for key, value in expected.items():
             if key in bound and bound[key] != value:
                 raise GraphBindingError(f"checkpoint metadata conflicts at {key}")
             bound[key] = value
         return bound  # type: ignore[return-value]
+
+    @staticmethod
+    def _checkpoint_revision(checkpoint: Checkpoint) -> int:
+        values = checkpoint.get("channel_values")
+        revision: Any = None
+        if isinstance(values, dict):
+            revision = values.get("cognitive_revision")
+            pending_input = values.get("__start__")
+            if revision is None and isinstance(pending_input, Mapping):
+                revision = pending_input.get("cognitive_revision")
+        if (
+            not isinstance(revision, int)
+            or isinstance(revision, bool)
+            or revision < 1
+        ):
+            raise GraphBindingError(
+                "every Graph checkpoint must carry a positive cognitive revision"
+            )
+        return revision
+
+    @staticmethod
+    def _checkpoint_has_applied_revision(checkpoint: Checkpoint) -> bool:
+        values = checkpoint.get("channel_values")
+        return isinstance(values, dict) and "cognitive_revision" in values
 
     @classmethod
     def _validate_checkpoint_tuple(
@@ -622,6 +723,13 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
             raise GraphBindingError("checkpoint metadata has an invalid fencing token")
         if fencing_token < 1:
             raise GraphBindingError("checkpoint metadata has an invalid fencing token")
+        cognitive_revision = metadata.get("graph_cognitive_revision")
+        if (
+            not isinstance(cognitive_revision, int)
+            or isinstance(cognitive_revision, bool)
+            or cognitive_revision < 1
+        ):
+            raise GraphBindingError("checkpoint metadata has an invalid cognitive revision")
         result_hash = metadata.get("graph_result_hash")
         result_ref = metadata.get("graph_result_ref")
         if (result_hash is None) != (result_ref is None):

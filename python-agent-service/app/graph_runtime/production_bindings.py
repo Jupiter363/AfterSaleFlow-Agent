@@ -1,0 +1,566 @@
+"""Deployment-owned bindings for the Phase 3 signed-synthetic SHADOW runtime."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+import hmac
+import re
+from typing import Any, cast
+
+from app.api.graph_lifecycle import (
+    GraphExecutorKernel,
+    GraphRuntimeBindings,
+)
+from app.api.graph_stream_service import (
+    ExactShadowExecutorRegistry,
+    ProviderRuntimeBinding,
+    ShadowExecutorRegistration,
+)
+from app.config import (
+    GraphShadowBindingSettings,
+    GraphShadowInputSettings,
+    GraphShadowThreadSettings,
+    Settings,
+)
+from app.contracts.v1.codec import canonical_sha256
+from app.contracts.v1.models import ExecutionMetadata, RoomGraphCommand, SnapshotRef, Usage
+from app.graph_runtime.compiled_executor import (
+    CompiledGraphShadowExecutor,
+    CompiledStateGraphPort,
+    TerminalResultPlan,
+)
+from app.graph_runtime.errors import (
+    GraphContractError,
+    GraphThreadBindingError,
+)
+from app.graph_runtime.gateway import GatewayExecution
+from app.graph_runtime.identity import (
+    ActorRole,
+    ActorScopeBinding,
+    Audience,
+    RoomType,
+    ThreadIdentity,
+    ThreadRecord,
+)
+from app.graph_runtime.registry import VersionBinding
+from app.graph_runtime.result import ResultBindings, TERMINAL_DRAFT_ADAPTER
+from app.graph_runtime.state import CommonGraphState, validate_graph_state
+from app.graph_runtime.topology import build_shadow_kernel_graph
+from app.security.invocation_envelope import (
+    InvocationClaims,
+    ReconciliationClaims,
+    VerifiedInvocation,
+    VerifiedReconciliation,
+    invocation_binding_claims,
+)
+
+
+_MAX_COGNITIVE_REVISION = (1 << 63) - 1
+_SYNTHETIC_COMMIT_STEPS = 5
+
+
+class DeploymentManifestThreadResolver:
+    """Resolve only complete thread tuples frozen in the deployment manifest."""
+
+    def __init__(
+        self,
+        bindings: tuple[GraphShadowBindingSettings, ...],
+        threads: tuple[GraphShadowThreadSettings, ...],
+    ) -> None:
+        self._bindings = {
+            _binding_key(binding): binding for binding in bindings
+        }
+        self._settings = {thread.thread_id: thread for thread in threads}
+        self._identities = {
+            thread.thread_id: _thread_identity(thread) for thread in threads
+        }
+
+    async def resolve(
+        self,
+        *,
+        command: RoomGraphCommand,
+        verified_invocation: VerifiedInvocation | None = None,
+        verified_reconciliation: VerifiedReconciliation | None = None,
+    ) -> ThreadIdentity:
+        binding = self._bindings.get(
+            (
+                command.graph_key,
+                command.graph_version,
+                command.checkpoint_schema_version,
+            )
+        )
+        if binding is None:
+            raise GraphThreadBindingError("Graph binding is absent from the synthetic manifest")
+        _require_manifest_command(command, binding)
+        _require_verified_credential(
+            command=command,
+            binding=binding,
+            verified_invocation=verified_invocation,
+            verified_reconciliation=verified_reconciliation,
+        )
+
+        configured = self._settings.get(command.thread_id)
+        expected = self._identities.get(command.thread_id)
+        if configured is None or expected is None:
+            raise GraphThreadBindingError("thread is absent from the synthetic manifest")
+        actual_scope = ActorScopeBinding.from_json(
+            command.actor_scope.model_dump(mode="json")
+        )
+        actual = (
+            command.thread_id,
+            command.tenant_surrogate,
+            command.case_id,
+            command.room_type,
+            command.room_epoch,
+            actual_scope,
+            command.graph_key,
+            command.graph_version,
+            command.checkpoint_schema_version,
+            command.request_hash,
+        )
+        required = (
+            expected.thread_id,
+            expected.tenant_surrogate,
+            expected.case_id,
+            expected.room_type.value,
+            expected.room_epoch,
+            expected.actor_scope,
+            expected.graph_key,
+            expected.graph_version,
+            expected.checkpoint_schema_version,
+            configured.request_hash,
+        )
+        if actual != required:
+            raise GraphThreadBindingError(
+                "signed command differs from the synthetic thread manifest"
+            )
+        return expected
+
+
+class DeploymentManifestInputAuthorizer:
+    """Allow only exact hash-bound synthetic inputs; it never loads their contents."""
+
+    def __init__(
+        self,
+        bindings: tuple[GraphShadowBindingSettings, ...],
+        threads: tuple[GraphShadowThreadSettings, ...],
+    ) -> None:
+        self._bindings = {
+            _binding_key(binding): binding for binding in bindings
+        }
+        self._threads = {thread.thread_id: thread for thread in threads}
+        self._identities = {
+            thread.thread_id: _thread_identity(thread) for thread in threads
+        }
+        self._inputs = {
+            thread.thread_id: {
+                _configured_input_key(item): item for item in thread.allowed_inputs
+            }
+            for thread in threads
+        }
+
+    async def authorize(
+        self,
+        *,
+        command: RoomGraphCommand,
+        thread: ThreadIdentity,
+    ) -> None:
+        configured_thread = self._threads.get(command.thread_id)
+        expected_thread = self._identities.get(command.thread_id)
+        binding = self._bindings.get(
+            (
+                command.graph_key,
+                command.graph_version,
+                command.checkpoint_schema_version,
+            )
+        )
+        if (
+            configured_thread is None
+            or expected_thread is None
+            or thread != expected_thread
+            or binding is None
+            or not hmac.compare_digest(
+                command.request_hash,
+                configured_thread.request_hash,
+            )
+        ):
+            raise GraphThreadBindingError(
+                "command is outside the signed-synthetic deployment manifest"
+            )
+
+        _require_manifest_command(command, binding)
+
+        approved = self._inputs[command.thread_id]
+        references = [command.domain_snapshot_ref]
+        if command.event_ref is not None:
+            references.append(command.event_ref)
+        for reference in references:
+            configured_input = approved.get(_snapshot_key(reference))
+            if configured_input is None or (
+                thread.shared_session and configured_input.visibility != "FORMAL"
+            ):
+                raise GraphThreadBindingError(
+                    "command input is absent from the immutable synthetic manifest"
+                )
+
+
+def build_graph_runtime_bindings(settings: Settings) -> GraphRuntimeBindings:
+    """Build non-overridable Phase 3 bindings from validated deployment settings."""
+
+    if settings.graph_gateway_mode != "SHADOW":
+        raise ValueError("production Graph bindings are available only in SHADOW mode")
+    bindings = tuple(settings.graph_shadow_bindings)
+    threads = tuple(settings.graph_shadow_threads)
+    if not bindings or not threads:
+        raise ValueError("signed-synthetic SHADOW bindings are incomplete")
+
+    resolver = DeploymentManifestThreadResolver(bindings, threads)
+    authorizer = DeploymentManifestInputAuthorizer(bindings, threads)
+
+    def executor_registry_factory(
+        kernel: GraphExecutorKernel,
+    ) -> ExactShadowExecutorRegistry:
+        registrations = [
+            _executor_registration(binding, kernel)
+            for binding in bindings
+        ]
+        return ExactShadowExecutorRegistry(registrations)
+
+    return GraphRuntimeBindings(
+        thread_identity_resolver=resolver,
+        input_authorizer=authorizer,
+        executor_registry_factory=executor_registry_factory,
+    )
+
+
+def _executor_registration(
+    configured: GraphShadowBindingSettings,
+    kernel: GraphExecutorKernel,
+) -> ShadowExecutorRegistration:
+    binding = _version_binding(configured)
+    builder = build_shadow_kernel_graph(
+        validate_command=_validate_synthetic_state,
+        execute_graph=_advance_revision,
+        project_result=_project_synthetic_result,
+    )
+    graph = builder.compile(checkpointer=kernel.saver)
+    executor = CompiledGraphShadowExecutor(
+        graph=cast(CompiledStateGraphPort, graph),
+        saver=kernel.saver,
+        initial_state=_initial_state,
+        terminal_plan=_terminal_plan,
+        start_node="validate_command",
+    )
+    return ShadowExecutorRegistration(
+        binding=binding,
+        executor=executor,
+        provider_binding=ProviderRuntimeBinding(
+            model_profile_id=binding.model_profile_id,
+            provider="none",
+            model="deterministic-synthetic",
+            allowed_nodes=frozenset({"execute_graph"}),
+        ),
+    )
+
+
+def _initial_state(execution: GatewayExecution) -> Mapping[str, Any]:
+    record = execution.thread_record
+    if not isinstance(record, ThreadRecord):
+        raise GraphContractError(
+            "signed-synthetic execution has no authoritative thread revision"
+        )
+    command = execution.admission.command
+    invocation = command.invocation_context
+    registry = execution.admission.registry.binding
+    baseline_revision = record.cognitive_revision
+    if (
+        not isinstance(baseline_revision, int)
+        or isinstance(baseline_revision, bool)
+        or baseline_revision < 0
+        or baseline_revision > _MAX_COGNITIVE_REVISION - _SYNTHETIC_COMMIT_STEPS
+    ):
+        raise GraphContractError("signed-synthetic thread revision cannot advance safely")
+    return {
+        "bindings": {
+            "schema_version": "graph-command-binding.v1",
+            "command_id": command.command_id,
+            "logical_run_id": command.logical_run_id,
+            "attempt_id": command.attempt_id,
+            "tenant_surrogate": command.tenant_surrogate,
+            "case_id": command.case_id,
+            "room_type": command.room_type,
+            "room_epoch": command.room_epoch,
+            "actor_scope_hash": canonical_sha256(
+                command.actor_scope.model_dump(mode="json")
+            ),
+            "thread_id": command.thread_id,
+        },
+        "version_pins": {
+            "schema_version": "graph-version-pins.v1",
+            "graph_key": command.graph_key,
+            "graph_version": command.graph_version,
+            "checkpoint_schema_version": command.checkpoint_schema_version,
+            "state_schema_version": registry.state_schema_version,
+            "prompt_version": invocation.prompt_profile_id,
+            "model_profile_id": invocation.model_profile_id,
+            "output_schema_version": invocation.output_schema_version,
+            "policy_version": invocation.policy_version,
+            "guardrail_version": invocation.guardrail_version,
+            "tool_policy_version": registry.tool_policy_version,
+        },
+        "cognitive_revision": baseline_revision + 1,
+        "messages": {},
+        "work_items": {},
+        "work_results": {},
+        "artifact_refs": {},
+        "node_results": {},
+        "execution_receipts": {},
+        "usage_by_invocation": {},
+    }
+
+
+def _validate_synthetic_state(state: CommonGraphState) -> dict[str, Any]:
+    validate_graph_state(cast(dict[str, object], dict(state)))
+    return {"cognitive_revision": _next_revision(state)}
+
+
+def _advance_revision(state: CommonGraphState) -> dict[str, Any]:
+    validate_graph_state(cast(dict[str, object], dict(state)))
+    return {"cognitive_revision": _next_revision(state)}
+
+
+def _project_synthetic_result(state: CommonGraphState) -> dict[str, Any]:
+    validate_graph_state(cast(dict[str, object], dict(state)))
+    return {
+        "cognitive_revision": _next_revision(state),
+        "terminal_draft": {"status": "COMPLETED"},
+    }
+
+
+def _next_revision(state: Mapping[str, Any]) -> int:
+    revision = _current_revision(state)
+    if revision >= _MAX_COGNITIVE_REVISION:
+        raise GraphContractError("synthetic Graph cognitive revision is exhausted")
+    return revision + 1
+
+
+def _current_revision(state: Mapping[str, Any]) -> int:
+    revision = state.get("cognitive_revision")
+    if not isinstance(revision, int) or isinstance(revision, bool) or revision < 0:
+        raise GraphContractError("synthetic Graph cognitive revision is invalid")
+    return revision
+
+
+def _terminal_plan(
+    execution: GatewayExecution,
+    state: Mapping[str, Any],
+) -> TerminalResultPlan:
+    command = execution.admission.command
+    invocation = command.invocation_context
+    revision = state.get("cognitive_revision")
+    if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
+        raise GraphContractError("synthetic terminal revision is invalid")
+    try:
+        draft = TERMINAL_DRAFT_ADAPTER.validate_python(state.get("terminal_draft"))
+    except ValueError as error:
+        raise GraphContractError("synthetic terminal draft is invalid") from error
+    if draft.status != "COMPLETED":
+        raise GraphContractError("synthetic terminal result must be COMPLETED")
+    for field in (
+        "messages",
+        "work_items",
+        "work_results",
+        "artifact_refs",
+        "node_results",
+        "execution_receipts",
+        "usage_by_invocation",
+    ):
+        if state.get(field) != {}:
+            raise GraphContractError(
+                "synthetic terminal state contains model, tool, or domain effects"
+            )
+    if "result_json" in state:
+        raise GraphContractError("synthetic terminal state already contains a result")
+    return TerminalResultPlan(
+        draft=draft,
+        bindings=ResultBindings(
+            command_id=command.command_id,
+            logical_run_id=command.logical_run_id,
+            attempt_id=command.attempt_id,
+            graph_key=command.graph_key,
+            graph_version=command.graph_version,
+            checkpoint_id="pending",
+            cognitive_revision=revision,
+            public_event_proposals=(),
+            artifact_operations=(),
+            usage=Usage(input_tokens=0, output_tokens=0, total_tokens=0),
+            execution_metadata=ExecutionMetadata(
+                prompt_version=invocation.prompt_profile_id,
+                model_profile_id=invocation.model_profile_id,
+                schema_version=invocation.output_schema_version,
+                policy_version=invocation.policy_version,
+                guardrail_version=invocation.guardrail_version,
+            ),
+        ),
+    )
+
+
+def _require_manifest_command(
+    command: RoomGraphCommand,
+    binding: GraphShadowBindingSettings,
+) -> None:
+    invocation = command.invocation_context
+    profile = (
+        command.schema_version,
+        invocation.agent_profile_id,
+        invocation.prompt_profile_id,
+        invocation.model_profile_id,
+        invocation.output_schema_version,
+        invocation.policy_version,
+        invocation.guardrail_version,
+    )
+    expected_profile = (
+        binding.command_schema_version,
+        binding.agent_profile_id,
+        binding.prompt_version,
+        binding.model_profile_id,
+        binding.output_schema_version,
+        binding.policy_version,
+        binding.guardrail_version,
+    )
+    if (
+        command.room_type not in binding.allowed_room_types
+        or command.stage_code not in binding.allowed_stage_codes
+        or profile != expected_profile
+        or invocation.tool_capabilities
+    ):
+        raise GraphThreadBindingError(
+            "command profile, room, stage, or tools differ from the deterministic SHADOW binding"
+        )
+
+
+def _require_verified_credential(
+    *,
+    command: RoomGraphCommand,
+    binding: GraphShadowBindingSettings,
+    verified_invocation: VerifiedInvocation | None,
+    verified_reconciliation: VerifiedReconciliation | None,
+) -> None:
+    if verified_invocation is not None:
+        if verified_reconciliation is not None or type(verified_invocation) is not VerifiedInvocation:
+            raise GraphThreadBindingError("trusted invocation credential type differs")
+        verified: VerifiedInvocation | VerifiedReconciliation = verified_invocation
+        if type(verified.claims) is not InvocationClaims:
+            raise GraphThreadBindingError("trusted invocation claims type differs")
+        if verified.key_id != command.invocation_context.envelope_key_id:
+            raise GraphThreadBindingError("trusted invocation key binding differs")
+    elif verified_reconciliation is not None:
+        if type(verified_reconciliation) is not VerifiedReconciliation:
+            raise GraphThreadBindingError("trusted reconciliation credential type differs")
+        verified = verified_reconciliation
+        if type(verified.claims) is not ReconciliationClaims:
+            raise GraphThreadBindingError("trusted reconciliation claims type differs")
+        if (
+            verified.claims.capability != "RECONCILE_ONLY"
+            or verified.claims.original_envelope_key_id
+            != command.invocation_context.envelope_key_id
+        ):
+            raise GraphThreadBindingError("trusted reconciliation authority differs")
+    else:
+        raise GraphThreadBindingError("trusted invocation credential is missing")
+
+    expected = invocation_binding_claims(
+        command,
+        registry_binding_hash=binding.binding_hash,
+        tool_policy_version=binding.tool_policy_version,
+    )
+    actual = verified.claims.model_dump(mode="json")
+    for name, value in expected.items():
+        candidate = actual.get(name)
+        if isinstance(value, int):
+            matches = type(candidate) is int and candidate == value
+        else:
+            matches = isinstance(candidate, str) and hmac.compare_digest(candidate, value)
+        if not matches:
+            raise GraphThreadBindingError(
+                f"trusted invocation differs from the manifest at {name}"
+            )
+    if (
+        not hmac.compare_digest(command.request_hash, str(expected["request_hash"]))
+        or not hmac.compare_digest(verified.request_hash, command.request_hash)
+        or re.fullmatch(r"[0-9a-f]{64}", verified.transport_certificate_sha256) is None
+    ):
+        raise GraphThreadBindingError("trusted invocation transport or self-hash differs")
+
+
+def _version_binding(configured: GraphShadowBindingSettings) -> VersionBinding:
+    return VersionBinding(
+        graph_key=configured.graph_key,
+        graph_version=configured.graph_version,
+        checkpoint_schema_version=configured.checkpoint_schema_version,
+        state_schema_version=configured.state_schema_version,
+        state_schema_hash=configured.state_schema_hash,
+        command_schema_version=configured.command_schema_version,
+        result_schema_version=configured.result_schema_version,
+        prompt_version=configured.prompt_version,
+        model_profile_id=configured.model_profile_id,
+        output_schema_version=configured.output_schema_version,
+        policy_version=configured.policy_version,
+        guardrail_version=configured.guardrail_version,
+        tool_policy_version=configured.tool_policy_version,
+        binding_hash=configured.binding_hash,
+        code_build_id=configured.code_build_id,
+    )
+
+
+def _thread_identity(configured: GraphShadowThreadSettings) -> ThreadIdentity:
+    return ThreadIdentity(
+        thread_id=configured.thread_id,
+        tenant_surrogate=configured.tenant_surrogate,
+        case_id=configured.case_id,
+        room_type=RoomType(configured.room_type),
+        room_epoch=configured.room_epoch,
+        actor_scope=ActorScopeBinding(
+            actor_id=configured.actor_id,
+            actor_role=ActorRole(configured.actor_role),
+            audience=Audience(configured.audience),
+            capabilities=configured.actor_capabilities,
+        ),
+        agent_session_id=configured.agent_session_id,
+        shared_session=configured.shared_session,
+        graph_key=configured.graph_key,
+        graph_version=configured.graph_version,
+        checkpoint_schema_version=configured.checkpoint_schema_version,
+    )
+
+
+def _binding_key(
+    configured: GraphShadowBindingSettings,
+) -> tuple[str, str, str]:
+    return (
+        configured.graph_key,
+        configured.graph_version,
+        configured.checkpoint_schema_version,
+    )
+
+
+def _configured_input_key(
+    configured: GraphShadowInputSettings,
+) -> tuple[str, str, str, str, int]:
+    return (
+        configured.artifact_id,
+        configured.schema_version,
+        configured.uri,
+        configured.sha256,
+        configured.size_bytes,
+    )
+
+
+def _snapshot_key(reference: SnapshotRef) -> tuple[str, str, str, str, int]:
+    return (
+        reference.artifact_id,
+        reference.schema_version,
+        reference.uri,
+        reference.sha256,
+        reference.size_bytes,
+    )

@@ -1136,6 +1136,7 @@ async def test_fence_takeover_cannot_reuse_an_existing_public_agent_attempt() ->
     gateway = GraphCommandGateway(
         mode=GraphGatewayMode.SHADOW,
         pool=pool,
+        threads=_Threads(pool.events),
         ledger=ledger,  # type: ignore[arg-type]
         leases=leases,  # type: ignore[arg-type]
         input_authorizer=_InputAuthorizer([]),
@@ -1293,6 +1294,7 @@ async def test_new_command_takeover_resolves_expired_execution_in_same_transacti
     gateway = GraphCommandGateway(
         mode=GraphGatewayMode.SHADOW,
         pool=pool,
+        threads=_Threads(pool.events),  # type: ignore[arg-type]
         ledger=ledger,  # type: ignore[arg-type]
         leases=_DisplacingLeases(admission),  # type: ignore[arg-type]
         input_authorizer=_InputAuthorizer([]),

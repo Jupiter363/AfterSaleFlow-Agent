@@ -224,18 +224,22 @@ class CompiledGraphShadowExecutor:
         if not isinstance(plan, TerminalResultPlan):
             raise GraphContractError("terminal plan factory returned an invalid type")
         self._require_terminal_state_binding(plan, state, emitted_usage)
-        materializer = plan.to_materializer(execution)
+        terminal_plan = self._terminal_checkpoint_plan(plan)
+        materializer = terminal_plan.to_materializer(execution)
         terminal_config = bind_terminal_result_context(checkpoint_config, materializer)
         saved = await self._graph.aupdate_state(
             terminal_config,
-            {"result_json": {"status": "PENDING_TERMINAL_COMMIT"}},
+            {
+                "cognitive_revision": terminal_plan.bindings.cognitive_revision,
+                "result_json": {"status": "PENDING_TERMINAL_COMMIT"},
+            },
             as_node=self._terminal_node,
         )
         final_snapshot = await self._graph.aget_state(saved)
         final_state, final_config = self._snapshot(final_snapshot, execution)
         validate_graph_state(final_state)
         self._require_state_identity(final_state, execution)
-        self._require_terminal_state_binding(plan, final_state, emitted_usage)
+        self._require_terminal_state_binding(terminal_plan, final_state, emitted_usage)
         result_json = final_state.get("result_json")
         if not isinstance(result_json, Mapping):
             raise GraphTerminalBindingError("terminal checkpoint has no result JSON")
@@ -405,6 +409,18 @@ class CompiledGraphShadowExecutor:
             raise GraphTerminalBindingError(
                 "terminal result usage differs from its state or public updates"
             )
+
+    @staticmethod
+    def _terminal_checkpoint_plan(plan: TerminalResultPlan) -> TerminalResultPlan:
+        revision = plan.bindings.cognitive_revision
+        if revision >= (1 << 63) - 1:
+            raise GraphTerminalBindingError("terminal result revision is exhausted")
+        return TerminalResultPlan(
+            draft=plan.draft,
+            bindings=plan.bindings.model_copy(
+                update={"cognitive_revision": revision + 1}
+            ),
+        )
 
     @staticmethod
     def _aggregate_usage(value: Any, *, source: str) -> Usage:

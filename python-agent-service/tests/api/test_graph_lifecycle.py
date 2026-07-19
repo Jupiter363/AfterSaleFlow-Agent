@@ -319,6 +319,31 @@ def test_main_registers_execution_reconciliation_and_readiness_routes() -> None:
     assert readiness.json()["code"] == "GRAPH_DISABLED"
 
 
+def test_main_rejects_shadow_startup_without_a_deployment_manifest() -> None:
+    from app.main import create_app
+
+    with pytest.raises(ValueError, match="signed-synthetic SHADOW bindings are incomplete"):
+        create_app(settings=_shadow_settings())
+
+
+def test_main_rejects_injected_shadow_authority_outside_local_or_test() -> None:
+    from app.main import create_app
+
+    settings = _shadow_settings().model_copy(update={"app_env": "production"})
+    with pytest.raises(ValueError, match="deployment-owned exact bindings"):
+        create_app(
+            settings=settings,
+            graph_runtime_bindings=_bindings(),
+        )
+
+    handle = GraphRuntimeHandle(settings=settings, bindings=_bindings())
+    with pytest.raises(ValueError, match="deployment-owned exact bindings"):
+        create_app(
+            settings=settings,
+            graph_runtime_handle=handle,
+        )
+
+
 @pytest.mark.asyncio
 async def test_shadow_lifespan_installs_only_a_ready_runtime_and_closes_it() -> None:
     events: list[str] = []

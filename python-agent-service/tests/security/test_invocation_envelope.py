@@ -26,6 +26,8 @@ VECTOR = (
 NOW = 2_000_000_000
 KID = "java-invocation-es256-1"
 CERTIFICATE_SHA256 = "c" * 64
+REGISTRY_BINDING_HASH = "e" * 64
+TOOL_POLICY_VERSION = "tools.none.v1"
 
 
 class StaticKeyResolver:
@@ -87,7 +89,11 @@ def signed_token(
         "nbf": NOW,
         "exp": NOW + 60,
         "jti": "transport-nonce-001",
-        **invocation_binding_claims(command),
+        **invocation_binding_claims(
+            command,
+            registry_binding_hash=REGISTRY_BINDING_HASH,
+            tool_policy_version=TOOL_POLICY_VERSION,
+        ),
         **(claim_overrides or {}),
     }
     headers: dict[str, object] = {
@@ -116,7 +122,11 @@ def signed_reconciliation_token(
         "nbf": NOW,
         "exp": NOW + 60,
         "jti": "reconcile-transport-nonce-001",
-        **invocation_binding_claims(command),
+        **invocation_binding_claims(
+            command,
+            registry_binding_hash=REGISTRY_BINDING_HASH,
+            tool_policy_version=TOOL_POLICY_VERSION,
+        ),
         **(claim_overrides or {}),
     }
     return jwt.encode(
@@ -249,6 +259,32 @@ def test_reconciliation_purpose_capability_and_lineage_fail_closed(
     assert captured.value.code == code
 
 
+@pytest.mark.parametrize("reconciliation", [False, True])
+def test_execution_and_reconciliation_reject_command_nonce_as_delivery_jti(
+    private_key: ec.EllipticCurvePrivateKey,
+    command: RoomGraphCommand,
+    transport_identity: TransportIdentity,
+    reconciliation: bool,
+) -> None:
+    token_factory = signed_reconciliation_token if reconciliation else signed_token
+    selected_verifier = (
+        reconciliation_verifier(private_key) if reconciliation else verifier(private_key)
+    )
+
+    with pytest.raises(InvocationEnvelopeError) as captured:
+        selected_verifier.verify(
+            token=token_factory(
+                private_key,
+                command,
+                claim_overrides={"jti": command.invocation_context.envelope_nonce},
+            ),
+            command=command,
+            transport_identity=transport_identity,
+        )
+
+    assert captured.value.code == "INVOCATION_JWS_NONCE_REUSE_REJECTED"
+
+
 @pytest.mark.parametrize(
     ("authorization", "code"),
     [
@@ -315,7 +351,6 @@ def test_command_self_hash_is_recomputed_instead_of_trusting_the_field(
             "INVOCATION_THREAD_ID_MISMATCH",
         ),
         ({"capabilities_hash": "1" * 64}, "INVOCATION_CAPABILITIES_HASH_MISMATCH"),
-        ({"profile_bindings_hash": "2" * 64}, "INVOCATION_PROFILE_BINDINGS_HASH_MISMATCH"),
     ],
 )
 def test_forged_scope_and_governance_claims_fail_closed(
@@ -332,6 +367,29 @@ def test_forged_scope_and_governance_claims_fail_closed(
             transport_identity=transport_identity,
         )
     assert captured.value.code == code
+
+
+def test_registry_and_tool_policy_are_part_of_the_signed_profile_hash(
+    command: RoomGraphCommand,
+) -> None:
+    expected = invocation_binding_claims(
+        command,
+        registry_binding_hash=REGISTRY_BINDING_HASH,
+        tool_policy_version=TOOL_POLICY_VERSION,
+    )["profile_bindings_hash"]
+    different_registry = invocation_binding_claims(
+        command,
+        registry_binding_hash="f" * 64,
+        tool_policy_version=TOOL_POLICY_VERSION,
+    )["profile_bindings_hash"]
+    different_tools = invocation_binding_claims(
+        command,
+        registry_binding_hash=REGISTRY_BINDING_HASH,
+        tool_policy_version="tools.read-only.v2",
+    )["profile_bindings_hash"]
+
+    assert expected != different_registry
+    assert expected != different_tools
 
 
 @pytest.mark.parametrize(

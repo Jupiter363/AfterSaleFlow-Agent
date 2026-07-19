@@ -74,6 +74,7 @@ from app.api.graph_lifecycle import (
     GraphRuntimeHandle,
     create_graph_readiness_router,
 )
+from app.graph_runtime.production_bindings import build_graph_runtime_bindings
 
 # ---- 配置 & 基础设施 ----
 from app.config import Settings, get_settings
@@ -209,9 +210,26 @@ def create_app(
 
     # 解析配置：优先使用传入的配置，否则从环境变量加载
     resolved = settings or get_settings()
+    if graph_runtime_handle is not None and graph_runtime_bindings is not None:
+        raise ValueError("Graph runtime handle and bindings cannot both be injected")
+    if (
+        resolved.graph_gateway_mode == "SHADOW"
+        and resolved.app_env.lower() not in {"local", "test"}
+        and (graph_runtime_handle is not None or graph_runtime_bindings is not None)
+    ):
+        raise ValueError(
+            "production SHADOW runtime must use deployment-owned exact bindings"
+        )
+    resolved_graph_bindings = graph_runtime_bindings
+    if (
+        graph_runtime_handle is None
+        and resolved_graph_bindings is None
+        and resolved.graph_gateway_mode == "SHADOW"
+    ):
+        resolved_graph_bindings = build_graph_runtime_bindings(resolved)
     resolved_graph_runtime = graph_runtime_handle or GraphRuntimeHandle(
         settings=resolved,
-        bindings=graph_runtime_bindings,
+        bindings=resolved_graph_bindings,
     )
 
     # 构建各工作流实例：如果未传入则自动构建默认实现

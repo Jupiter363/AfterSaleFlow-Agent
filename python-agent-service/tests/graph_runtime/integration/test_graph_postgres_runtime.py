@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import json
+from typing import Any
 from urllib.parse import quote
 
 import psycopg
@@ -198,7 +199,13 @@ async def test_real_fenced_saver_rejects_stale_writer_and_restores_after_pool_re
     )
     saver = FencedPostgresSaver(pool, acquire_timeout_seconds=5)
     try:
-        first_saved = await saver.aput(first_config, empty_checkpoint(), {}, {})
+        first_checkpoint, first_versions = _revision_checkpoint(1)
+        first_saved = await saver.aput(
+            first_config,
+            first_checkpoint,
+            {},
+            first_versions,
+        )
         first_checkpoint_id = first_saved["configurable"]["checkpoint_id"]
 
         async with pool.connection(timeout=5) as connection:
@@ -233,19 +240,31 @@ async def test_real_fenced_saver_rejects_stale_writer_and_restores_after_pool_re
                 )
 
         with pytest.raises(GraphFenceError, match="stale"):
-            await saver.aput(first_config, empty_checkpoint(), {}, {})
+            stale_checkpoint, stale_versions = _revision_checkpoint(2)
+            await saver.aput(
+                first_config,
+                stale_checkpoint,
+                {},
+                stale_versions,
+            )
 
         second_fence = _fence(owner_id="worker-2", fencing_token=2)
         second_config = bind_fence_context(
             {"configurable": {"thread_id": THREAD_ID, "checkpoint_ns": "hearing"}},
             second_fence,
         )
-        second_saved = await saver.aput(second_config, empty_checkpoint(), {}, {})
+        second_checkpoint, second_versions = _revision_checkpoint(2)
+        second_saved = await saver.aput(
+            second_config,
+            second_checkpoint,
+            {},
+            second_versions,
+        )
         second_checkpoint_id = second_saved["configurable"]["checkpoint_id"]
 
         terminal_checkpoint = empty_checkpoint()
         terminal_checkpoint["channel_values"] = {
-            "cognitive_revision": 4,
+            "cognitive_revision": 3,
             "terminal_draft": {"status": "COMPLETED"},
             "usage_by_invocation": {
                 "invocation-integration": {
@@ -256,7 +275,10 @@ async def test_real_fenced_saver_rejects_stale_writer_and_restores_after_pool_re
             },
             "result_json": {"pending": True},
         }
-        terminal_checkpoint["channel_versions"] = {"result_json": "v-result-1"}
+        terminal_checkpoint["channel_versions"] = {
+            "cognitive_revision": "v-revision-3",
+            "result_json": "v-result-1",
+        }
         terminal_config = bind_terminal_result_context(
             second_config,
             _terminal_materializer(),
@@ -265,7 +287,10 @@ async def test_real_fenced_saver_rejects_stale_writer_and_restores_after_pool_re
             terminal_config,
             terminal_checkpoint,
             {},
-            {"result_json": "v-result-1"},
+            {
+                "cognitive_revision": "v-revision-3",
+                "result_json": "v-result-1",
+            },
         )
         terminal_checkpoint_id = terminal_saved["configurable"]["checkpoint_id"]
     finally:
@@ -302,6 +327,16 @@ async def test_real_fenced_saver_rejects_stale_writer_and_restores_after_pool_re
                     owner_id="worker-never-acquires",
                 )
                 retained_keys = await ledger.referenced_verification_key_ids(connection)
+                thread_checkpoint = await (
+                    await connection.execute(
+                        """
+                        select cognitive_revision, last_checkpoint_ns, last_checkpoint_id
+                          from graph_thread_registry
+                         where thread_id = %s
+                        """,
+                        (THREAD_ID,),
+                    )
+                ).fetchone()
     finally:
         await replacement_pool.close(timeout=10)
 
@@ -314,6 +349,11 @@ async def test_real_fenced_saver_rejects_stale_writer_and_restores_after_pool_re
     assert cached == completed
     assert cached_result == result
     assert retained_keys == frozenset({"key-integration-old"})
+    assert thread_checkpoint == {
+        "cognitive_revision": 3,
+        "last_checkpoint_ns": "hearing",
+        "last_checkpoint_id": terminal_checkpoint_id,
+    }
 
 
 @pytest.mark.asyncio
@@ -413,6 +453,14 @@ def _runtime_pool(database: _Database):
     )
 
 
+def _revision_checkpoint(revision: int) -> tuple[dict[str, Any], dict[str, str]]:
+    checkpoint = empty_checkpoint()
+    version = f"v-revision-{revision}"
+    checkpoint["channel_values"] = {"cognitive_revision": revision}
+    checkpoint["channel_versions"] = {"cognitive_revision": version}
+    return checkpoint, {"cognitive_revision": version}
+
+
 def _fence(*, owner_id: str, fencing_token: int) -> GraphFenceContext:
     return GraphFenceContext(
         thread_id=THREAD_ID,
@@ -439,7 +487,7 @@ def _terminal_materializer() -> TerminalResultMaterializer:
             graph_key="hearing_flow",
             graph_version="hearing_flow.v2",
             checkpoint_id="pending",
-            cognitive_revision=4,
+            cognitive_revision=3,
             public_event_proposals=(),
             artifact_operations=(),
             usage=Usage(input_tokens=1, output_tokens=1, total_tokens=2),

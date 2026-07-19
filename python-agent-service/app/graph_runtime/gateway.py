@@ -25,6 +25,7 @@ from app.graph_runtime.identity import (
     PostgresThreadIdentityRepository,
     ThreadIdentity,
     ThreadLifecycle,
+    ThreadRecord,
 )
 from app.graph_runtime.lease import (
     LeaseAcquisition,
@@ -98,6 +99,7 @@ class GatewayExecution:
     attempt: AttemptRecord
     lease: LeaseRecord
     fence: GraphFenceContext
+    thread_record: ThreadRecord | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -322,6 +324,12 @@ class GraphCommandGateway:
                     raise GraphNewAgentAttemptRequiredError(
                         "a public AgentRun attempt can execute its Graph command only once"
                     )
+                thread_record = await self._threads.require_binding(
+                    connection,
+                    admission.thread,
+                )
+                if thread_record.lifecycle is not ThreadLifecycle.ACTIVE:
+                    raise GraphThreadBindingError("GRAPH_THREAD_NOT_ACTIVE")
                 current, attempt = await self._ledger.begin_attempt(
                     connection,
                     binding=admission.binding,
@@ -349,7 +357,13 @@ class GraphCommandGateway:
             action=admission.action,
             created=admission.created,
         )
-        execution = GatewayExecution(updated_admission, attempt, acquisition.lease, fence)
+        execution = GatewayExecution(
+            updated_admission,
+            attempt,
+            acquisition.lease,
+            fence,
+            thread_record,
+        )
         await self._emit(
             updated_admission,
             event_type="graph.command.execution_acquired",

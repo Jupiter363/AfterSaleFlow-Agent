@@ -51,8 +51,17 @@ def _config(*, checkpoint: bool = False) -> dict[str, Any]:
 
 def _metadata(**overrides: Any) -> dict[str, Any]:
     values = _fence().checkpoint_metadata()
+    values["graph_cognitive_revision"] = 1
     values.update(overrides)
     return values
+
+
+def _checkpoint(revision: int = 1) -> dict[str, Any]:
+    return {
+        "id": "cp-1",
+        "channel_values": {"cognitive_revision": revision},
+        "channel_versions": {},
+    }
 
 
 def _materializer() -> TerminalResultMaterializer:
@@ -147,10 +156,12 @@ class _Connection:
         *,
         fence_current: bool = True,
         binding_current: bool = True,
+        thread_current: bool = True,
     ) -> None:
         self.events: list[str] = []
         self.fence_current = fence_current
         self.binding_current = binding_current
+        self.thread_current = thread_current
 
     def transaction(self) -> _Transaction:
         return _Transaction(self.events)
@@ -172,6 +183,17 @@ class _Connection:
                 else (
                     {"status": "EXECUTING", "result_hash": None} if self.binding_current else None
                 )
+            )
+        if "update graph_thread_registry" in normalized:
+            self.events.append("sql:advance-thread")
+            if not self.thread_current:
+                return _Cursor(None)
+            return _Cursor(
+                {
+                    "cognitive_revision": params[0],
+                    "last_checkpoint_ns": params[1],
+                    "last_checkpoint_id": params[2],
+                }
             )
         raise AssertionError(f"unexpected SQL: {normalized}")
 
@@ -294,7 +316,32 @@ async def test_checkpoint_write_locks_fence_and_uses_one_connection() -> None:
     connection = _Connection()
     saver, direct_savers = _saver(connection)
 
-    saved = await saver.aput(_config(), {}, {}, {})  # type: ignore[arg-type]
+    saved = await saver.aput(_config(), _checkpoint(), {}, {})  # type: ignore[arg-type]
+
+    assert connection.events == [
+        "transaction:enter",
+        "sql:fence",
+        "saver:put",
+        "sql:bind-command",
+        "sql:advance-thread",
+        "transaction:commit",
+    ]
+    assert direct_savers[0].connection is connection
+    assert direct_savers[0].put_calls == [_metadata()]
+    assert saved["configurable"][FENCE_CONTEXT_KEY] == _fence()
+
+
+@pytest.mark.asyncio
+async def test_langgraph_bootstrap_checkpoint_is_fenced_without_advancing_thread_state() -> None:
+    connection = _Connection()
+    saver, direct_savers = _saver(connection)
+    checkpoint = {
+        "id": "cp-bootstrap",
+        "channel_values": {"__start__": {"cognitive_revision": 1}},
+        "channel_versions": {},
+    }
+
+    await saver.aput(_config(), checkpoint, {}, {})  # type: ignore[arg-type]
 
     assert connection.events == [
         "transaction:enter",
@@ -303,11 +350,26 @@ async def test_checkpoint_write_locks_fence_and_uses_one_connection() -> None:
         "sql:bind-command",
         "transaction:commit",
     ]
-    assert direct_savers[0].connection is connection
     assert direct_savers[0].put_calls == [_metadata()]
-    assert saved["configurable"][FENCE_CONTEXT_KEY] == _fence()
 
 
+@pytest.mark.asyncio
+async def test_thread_revision_conflict_rolls_back_the_checkpoint_transaction() -> None:
+    connection = _Connection(thread_current=False)
+    saver, direct_savers = _saver(connection)
+
+    with pytest.raises(GraphBindingError, match="advance the durable thread revision"):
+        await saver.aput(_config(), _checkpoint(), {}, {})  # type: ignore[arg-type]
+
+    assert len(direct_savers) == 1
+    assert connection.events == [
+        "transaction:enter",
+        "sql:fence",
+        "saver:put",
+        "sql:bind-command",
+        "sql:advance-thread",
+        "transaction:rollback",
+    ]
 @pytest.mark.asyncio
 async def test_terminal_checkpoint_result_and_command_commit_on_one_connection() -> None:
     connection = _Connection()
@@ -327,6 +389,7 @@ async def test_terminal_checkpoint_result_and_command_commit_on_one_connection()
         "sql:fence",
         "saver:put",
         "sql:bind-command",
+        "sql:advance-thread",
         "ledger:store-result",
         "transaction:commit",
     ]
@@ -338,6 +401,7 @@ async def test_terminal_checkpoint_result_and_command_commit_on_one_connection()
     assert terminal_fence.result_ref == _result().result_ref
     assert direct_savers[0].put_calls == [
         _metadata(
+            graph_cognitive_revision=4,
             graph_result_hash=_result().result_hash,
             graph_result_ref=_result().result_ref,
         )
@@ -404,7 +468,10 @@ async def test_terminal_materializer_requires_a_versioned_result_channel() -> No
             config,
             {
                 "id": "cp-1",
-                "channel_values": {"result_json": {"pending": True}},
+                "channel_values": {
+                    "cognitive_revision": 4,
+                    "result_json": {"pending": True},
+                },
                 "channel_versions": {"result_json": "v-result-1"},
             },  # type: ignore[arg-type]
             {},
@@ -523,6 +590,7 @@ async def test_terminal_result_failure_rolls_back_checkpoint_and_command_binding
         "sql:fence",
         "saver:put",
         "sql:bind-command",
+        "sql:advance-thread",
         "ledger:store-result",
         "transaction:rollback",
     ]
@@ -553,7 +621,7 @@ async def test_stale_fence_rolls_back_before_the_saver_is_called() -> None:
     saver, direct_savers = _saver(connection)
 
     with pytest.raises(GraphFenceError, match="stale"):
-        await saver.aput(_config(), {}, {}, {})  # type: ignore[arg-type]
+        await saver.aput(_config(), _checkpoint(), {}, {})  # type: ignore[arg-type]
 
     assert direct_savers == []
     assert connection.events == ["transaction:enter", "sql:fence", "transaction:rollback"]
@@ -613,7 +681,7 @@ async def test_command_binding_conflict_rolls_back_the_same_connection_checkpoin
     saver, direct_savers = _saver(connection)
 
     with pytest.raises(GraphBindingError, match="durable Graph command binding"):
-        await saver.aput(_config(), {}, {}, {})  # type: ignore[arg-type]
+        await saver.aput(_config(), _checkpoint(), {}, {})  # type: ignore[arg-type]
 
     assert direct_savers[0].connection is connection
     assert connection.events == [
@@ -720,12 +788,12 @@ async def test_replacement_saver_restores_a_durable_thread_without_process_state
 async def test_reconnected_saver_rechecks_fence_after_database_failover() -> None:
     before_failover = _Connection()
     active_saver, _ = _saver(before_failover)
-    await active_saver.aput(_config(), {}, {}, {})  # type: ignore[arg-type]
+    await active_saver.aput(_config(), _checkpoint(), {}, {})  # type: ignore[arg-type]
 
     after_failover = _Connection(fence_current=False)
     stale_saver, direct_savers = _saver(after_failover)
     with pytest.raises(GraphFenceError, match="stale"):
-        await stale_saver.aput(_config(), {}, {}, {})  # type: ignore[arg-type]
+        await stale_saver.aput(_config(), _checkpoint(), {}, {})  # type: ignore[arg-type]
 
     assert direct_savers == []
     assert after_failover.events == [

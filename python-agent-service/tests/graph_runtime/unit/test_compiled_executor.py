@@ -249,7 +249,11 @@ class _Graph:
                 FENCE_CONTEXT_KEY: effective_fence,
             }
         }
-        self.final_state = {**self.state, "result_json": dict(result.result_json)}
+        self.final_state = {
+            **self.state,
+            **values,
+            "result_json": dict(result.result_json),
+        }
         return self.final_config
 
 
@@ -274,7 +278,12 @@ async def test_compiled_executor_streams_only_typed_updates_and_checkpointed_fin
     ]
     assert events[1].payload.delta == "visible"
     assert events[-1].payload.final_result_hash == graph.final_state["result_json"]["output_hash"]
-    assert graph.update_values == {"result_json": {"status": "PENDING_TERMINAL_COMMIT"}}
+    assert graph.update_values == {
+        "cognitive_revision": 2,
+        "result_json": {"status": "PENDING_TERMINAL_COMMIT"},
+    }
+    assert graph.final_state["cognitive_revision"] == 2
+    assert graph.final_state["result_json"]["cognitive_revision"] == 2
     assert TERMINAL_RESULT_CONTEXT_KEY not in graph.final_config["configurable"]
     assert graph.stream_closed is True
 
@@ -287,6 +296,19 @@ def test_compiled_executor_requires_the_runtime_fenced_saver_instance() -> None:
             initial_state=lambda execution: _state(),
             terminal_plan=_plan,
         )
+
+
+def test_terminal_checkpoint_revision_cannot_overflow_postgres_bigint() -> None:
+    plan = _plan(_execution(), _state())
+    exhausted = TerminalResultPlan(
+        draft=plan.draft,
+        bindings=plan.bindings.model_copy(
+            update={"cognitive_revision": (1 << 63) - 1}
+        ),
+    )
+
+    with pytest.raises(GraphTerminalBindingError, match="revision is exhausted"):
+        CompiledGraphShadowExecutor._terminal_checkpoint_plan(exhausted)
 
 
 @pytest.mark.asyncio
@@ -466,10 +488,11 @@ class _MemoryFencedSaver(FencedPostgresSaver):
             materializer,
         )
         effective_fence = self._terminal_fence(fence, result)
+        cognitive_revision = self._checkpoint_revision(checkpoint)
         saved = await self._memory.aput(
             self._without_terminal_result_context(config),
             checkpoint_to_save,
-            self._bind_metadata(metadata, effective_fence),
+            self._bind_metadata(metadata, effective_fence, cognitive_revision),
             new_versions,
         )
         if result is not None:
@@ -551,7 +574,7 @@ async def test_real_langgraph_terminal_update_materializes_the_versioned_result_
             GraphPublicUpdate.usage(Usage(input_tokens=2, output_tokens=1, total_tokens=3))
         )
         return {
-            "cognitive_revision": 1,
+            "cognitive_revision": 2,
             "terminal_draft": {"status": "COMPLETED"},
         }
 
@@ -580,6 +603,7 @@ async def test_real_langgraph_terminal_update_materializes_the_versioned_result_
     result = saver.terminal_results[0]
     assert result.result_hash == events[-1].payload.final_result_hash
     assert result.checkpoint_id
+    assert result.cognitive_revision == 3
     snapshot = await graph.aget_state(
         bind_fence_context(
             {
@@ -592,6 +616,7 @@ async def test_real_langgraph_terminal_update_materializes_the_versioned_result_
         )
     )
     assert snapshot.values["result_json"] == dict(result.result_json)
+    assert snapshot.values["cognitive_revision"] == 3
     assert snapshot.next == ()
     assert snapshot.tasks == ()
     assert snapshot.interrupts == ()

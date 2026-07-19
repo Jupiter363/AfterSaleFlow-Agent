@@ -5,8 +5,174 @@ import re
 from typing import ClassVar, Literal, Self
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from pydantic import AnyHttpUrl, Field, SecretStr, model_validator
+from pydantic import (
+    AnyHttpUrl,
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class GraphShadowBindingSettings(BaseModel):
+    """Deployment-owned metadata for one fixed synthetic SHADOW graph."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    graph_key: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+    graph_version: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+    checkpoint_schema_version: str = Field(
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    )
+    state_schema_version: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+    state_schema_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    command_schema_version: Literal["room-graph-command.v1"]
+    result_schema_version: Literal["room-graph-result.v1"]
+    agent_profile_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+    prompt_version: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+    model_profile_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+    output_schema_version: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+    policy_version: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+    guardrail_version: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+    tool_policy_version: Literal["tools.none.v1"]
+    binding_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    code_build_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+    allowed_room_types: tuple[
+        Literal["INTAKE", "EVIDENCE", "HEARING", "REVIEW"], ...
+    ] = Field(min_length=1, max_length=4)
+    allowed_stage_codes: tuple[str, ...] = Field(min_length=1, max_length=32)
+
+    @field_validator("allowed_stage_codes")
+    @classmethod
+    def validate_identifiers(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        identifier = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+        if len(values) != len(set(values)) or any(
+            identifier.fullmatch(value) is None for value in values
+        ):
+            raise ValueError("Graph SHADOW identifiers must be unique bounded wire values")
+        return values
+
+    @field_validator("allowed_room_types")
+    @classmethod
+    def validate_room_types(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        if len(values) != len(set(values)):
+            raise ValueError("Graph SHADOW room types must be unique")
+        return values
+
+
+class GraphShadowInputSettings(BaseModel):
+    """One immutable, deployment-approved synthetic input reference."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    artifact_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+    schema_version: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+    uri: str = Field(min_length=1, max_length=1024)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    size_bytes: int = Field(ge=0, le=16 * 1024 * 1024)
+    visibility: Literal["PRIVATE", "FORMAL"]
+
+    @field_validator("uri")
+    @classmethod
+    def validate_input_uri(cls, value: str) -> str:
+        parsed = urlsplit(value)
+        decoded_path = unquote(parsed.path)
+        if (
+            parsed.scheme not in {"s3", "minio"}
+            or not parsed.netloc
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or not decoded_path.startswith("/")
+            or decoded_path.endswith("/")
+            or "\\" in decoded_path
+            or "//" in decoded_path
+            or any(part in {"", ".", ".."} for part in decoded_path.split("/")[1:])
+        ):
+            raise ValueError("Graph SHADOW inputs must use canonical s3/minio object URIs")
+        return value
+
+
+class GraphShadowThreadSettings(BaseModel):
+    """Exact Java-issued synthetic thread identity and its approved input manifest."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    thread_id: str = Field(pattern=r"^grt\.v1\.[0-9a-f]{32}$")
+    tenant_surrogate: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+    case_id: str = Field(min_length=1, max_length=64)
+    room_type: Literal["INTAKE", "EVIDENCE", "HEARING", "REVIEW"]
+    room_epoch: int = Field(ge=0)
+    actor_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+    actor_role: Literal["USER", "MERCHANT", "PLATFORM_REVIEWER", "SYSTEM"]
+    audience: Literal["USER", "MERCHANT", "PLATFORM_REVIEWER", "SYSTEM"]
+    actor_capabilities: tuple[str, ...] = Field(default=(), max_length=32)
+    agent_session_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+    shared_session: bool = False
+    graph_key: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+    graph_version: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+    checkpoint_schema_version: str = Field(
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    )
+    request_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    allowed_inputs: tuple[GraphShadowInputSettings, ...] = Field(
+        min_length=1,
+        max_length=64,
+    )
+
+    @field_validator("case_id")
+    @classmethod
+    def validate_case_id(cls, value: str) -> str:
+        if "\x00" in value:
+            raise ValueError("Graph SHADOW case ID cannot contain NUL")
+        return value
+
+    @field_validator("actor_capabilities")
+    @classmethod
+    def validate_capabilities(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        identifier = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+        if len(values) != len(set(values)) or any(
+            identifier.fullmatch(value) is None for value in values
+        ):
+            raise ValueError("Graph SHADOW capabilities must be unique wire identifiers")
+        return values
+
+    @model_validator(mode="after")
+    def validate_scope(self) -> Self:
+        party_scope = (
+            self.actor_role == "USER" and self.audience == "USER"
+        ) or (
+            self.actor_role == "MERCHANT" and self.audience == "MERCHANT"
+        )
+        if self.shared_session:
+            if (
+                self.room_type != "HEARING"
+                or self.actor_role != "SYSTEM"
+                or self.audience != "SYSTEM"
+                or any(item.visibility != "FORMAL" for item in self.allowed_inputs)
+            ):
+                raise ValueError(
+                    "shared SHADOW Hearing threads require SYSTEM scope and formal inputs"
+                )
+        elif self.room_type in {"INTAKE", "EVIDENCE", "HEARING"}:
+            if not party_scope:
+                raise ValueError("private SHADOW room threads require an exact party scope")
+        elif (
+            self.actor_role != "PLATFORM_REVIEWER"
+            or self.audience != "PLATFORM_REVIEWER"
+        ):
+            raise ValueError("SHADOW Review threads require platform reviewer scope")
+        input_keys = {
+            (item.artifact_id, item.schema_version, item.uri, item.sha256, item.size_bytes)
+            for item in self.allowed_inputs
+        }
+        if len(input_keys) != len(self.allowed_inputs):
+            raise ValueError("Graph SHADOW input manifest contains a duplicate reference")
+        return self
 
 
 class Settings(BaseSettings):
@@ -68,6 +234,14 @@ class Settings(BaseSettings):
         default=None,
         pattern=r"^[0-9a-f]{64}$",
     )
+    graph_shadow_bindings: tuple[GraphShadowBindingSettings, ...] = Field(
+        default=(),
+        max_length=16,
+    )
+    graph_shadow_threads: tuple[GraphShadowThreadSettings, ...] = Field(
+        default=(),
+        max_length=64,
+    )
 
     @model_validator(mode="after")
     def validate_graph_runtime(self) -> Self:
@@ -99,6 +273,57 @@ class Settings(BaseSettings):
                     "SHADOW graph mode requires graph_expected_restore_verification_hash"
                 )
             self._validate_graph_runtime_dsn(self.graph_database_dsn.get_secret_value())
+        binding_keys = {
+            (
+                binding.graph_key,
+                binding.graph_version,
+                binding.checkpoint_schema_version,
+            )
+            for binding in self.graph_shadow_bindings
+        }
+        if len(binding_keys) != len(self.graph_shadow_bindings):
+            raise ValueError("graph_shadow_bindings contains a duplicate exact version")
+        thread_ids = {thread.thread_id for thread in self.graph_shadow_threads}
+        if len(thread_ids) != len(self.graph_shadow_threads):
+            raise ValueError("graph_shadow_threads contains a duplicate thread ID")
+        scope_keys = {
+            (
+                thread.tenant_surrogate,
+                thread.case_id,
+                thread.room_type,
+                thread.room_epoch,
+                thread.actor_id,
+                thread.actor_role,
+                thread.audience,
+                thread.actor_capabilities,
+                thread.agent_session_id,
+                thread.graph_key,
+                thread.graph_version,
+                thread.checkpoint_schema_version,
+            )
+            for thread in self.graph_shadow_threads
+        }
+        if len(scope_keys) != len(self.graph_shadow_threads):
+            raise ValueError("graph_shadow_threads contains a duplicate authority scope")
+        bindings_by_key = {
+            (
+                binding.graph_key,
+                binding.graph_version,
+                binding.checkpoint_schema_version,
+            ): binding
+            for binding in self.graph_shadow_bindings
+        }
+        for thread in self.graph_shadow_threads:
+            key = (
+                thread.graph_key,
+                thread.graph_version,
+                thread.checkpoint_schema_version,
+            )
+            binding = bindings_by_key.get(key)
+            if binding is None or thread.room_type not in binding.allowed_room_types:
+                raise ValueError(
+                    "graph_shadow_threads must reference an allowed exact graph binding"
+                )
         return self
 
     def _validate_graph_runtime_dsn(self, value: str) -> None:

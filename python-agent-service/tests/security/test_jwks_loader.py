@@ -105,7 +105,7 @@ async def test_http_fetcher_rejects_empty_and_oversized_documents() -> None:
 
 
 @pytest.mark.asyncio
-async def test_rotation_honors_overlap_and_nonterminal_key_references() -> None:
+async def test_rotation_honors_overlap_and_durable_recovery_key_references() -> None:
     old = public_jwk("key-old")
     current = public_jwk("key-current")
     document = {"keys": [old]}
