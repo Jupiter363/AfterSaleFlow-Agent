@@ -438,6 +438,9 @@ begin
     if position('delete from agent_run where case_id = p_case_id;' in purge_definition) = 0 then
         raise exception 'V041 could not locate the AgentRun demo purge step';
     end if;
+    if position('delete from case_room_epoch where case_id = p_case_id;' in purge_definition) = 0 then
+        raise exception 'V041 could not locate the room epoch demo purge step';
+    end if;
 
     purge_definition := replace(
         purge_definition,
@@ -458,6 +461,12 @@ begin
                 select id from agent_run where case_id = p_case_id
             )
         ),'
+    );
+    purge_definition := replace(
+        purge_definition,
+        'delete from case_room_epoch where case_id = p_case_id;',
+        'delete from room_epoch_bootstrap_outbox where case_id = p_case_id;
+    delete from case_room_epoch where case_id = p_case_id;'
     );
     execute purge_definition;
 end;

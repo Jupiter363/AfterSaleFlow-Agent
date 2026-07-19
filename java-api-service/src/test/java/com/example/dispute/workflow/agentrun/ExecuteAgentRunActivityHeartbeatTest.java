@@ -142,7 +142,7 @@ class ExecuteAgentRunActivityHeartbeatTest {
     private static AgentRunLedger.Attempt runningAttempt() {
         return new AgentRunLedger.Attempt(
                 "attempt-001",
-                "agent-run-001",
+                "run-001",
                 1,
                 AgentRunAttemptStatus.RUNNING,
                 false,
@@ -167,7 +167,7 @@ class ExecuteAgentRunActivityHeartbeatTest {
                 MAPPER.treeToValue(wrapper.required("instance"), RoomGraphCommand.class);
         return new ExecuteAgentRunRequest(
                 ExecuteAgentRunRequest.SCHEMA_VERSION,
-                "agent-run-001",
+                command.logicalRunId(),
                 1,
                 "agent-stream.v2",
                 command);

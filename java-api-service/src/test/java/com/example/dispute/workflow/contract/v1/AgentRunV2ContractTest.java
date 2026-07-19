@@ -119,7 +119,7 @@ class AgentRunV2ContractTest {
                         Duration.ofSeconds(15),
                         Duration.ofSeconds(5)))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("cannot execute V2");
+                .hasMessageContaining("cannot use the legacy scheduler EXECUTOR");
     }
 
     private static <T> T fixture(String file, Class<T> type) throws Exception {

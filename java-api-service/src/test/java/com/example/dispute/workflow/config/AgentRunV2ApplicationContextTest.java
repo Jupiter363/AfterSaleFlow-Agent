@@ -124,7 +124,7 @@ class AgentRunV2ApplicationContextTest {
                             assertThat(context.getStartupFailure())
                                     .rootCause()
                                     .hasMessageContaining(
-                                            "legacy scheduler cannot execute V2 runs");
+                                            "cannot use the legacy scheduler EXECUTOR");
                         });
     }
 
