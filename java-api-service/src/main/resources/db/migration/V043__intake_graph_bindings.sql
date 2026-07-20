@@ -1,6 +1,9 @@
 -- Phase 4 Intake Graph bindings. Payload bodies remain in immutable object storage;
 -- Domain PostgreSQL stores only authorization tuples, version pins, and references.
 
+alter table domain_operation
+    alter column operation_key type varchar(256);
+
 alter table case_room_epoch
     add column room_workflow_type varchar(128),
     add column room_workflow_build_id varchar(128),

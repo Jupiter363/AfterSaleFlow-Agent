@@ -2,6 +2,7 @@ package com.example.dispute.database;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.fasterxml.jackson.databind.json.JsonMapper;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Locale;
@@ -31,6 +32,30 @@ class IntakeGraphBindingMigrationTest {
                 .doesNotContain(
                         "create or replace function reject_case_room_epoch_selection_rewrite()");
         assertThat(count(sql, "create table case_intake_")).isEqualTo(2);
+    }
+
+    @Test
+    void expandsTheExistingOperationLedgerForTheFrozenFinalizationKey() throws Exception {
+        String sql = normalizedSql();
+        Path receiptFixture = Path.of(
+                "..",
+                "contracts",
+                "agent-platform",
+                "intake",
+                "v2",
+                "fixtures",
+                "valid",
+                "intake-finalization-receipt-valid.json");
+        String operationKey = JsonMapper.builder()
+                .build()
+                .readTree(receiptFixture.toFile())
+                .required("operation_key")
+                .asText();
+
+        assertThat(sql)
+                .contains(
+                        "alter table domain_operation alter column operation_key type varchar(256)");
+        assertThat(operationKey.length()).isGreaterThan(128).isLessThanOrEqualTo(256);
     }
 
     @Test
