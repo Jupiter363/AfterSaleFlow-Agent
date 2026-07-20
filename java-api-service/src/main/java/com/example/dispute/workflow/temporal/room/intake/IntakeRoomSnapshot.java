@@ -27,7 +27,9 @@ public record IntakeRoomSnapshot(
     IntakeTerminalReason terminalReason,
     long processRevision,
     long roomRevision,
-    String protocolErrorCode) {
+    String protocolErrorCode,
+    int runGeneration,
+    IntakeActivityExecutionState activityExecution) {
 
   public IntakeRoomSnapshot {
     if (!"intake-room-snapshot.v1".equals(schemaVersion)) {
@@ -41,5 +43,13 @@ public record IntakeRoomSnapshot(
 
   public String pendingOperationKey() {
     return pendingCommand == null ? null : pendingCommand.operationKey();
+  }
+
+  public String rootCorrelationKey() {
+    return pendingOperationKey();
+  }
+
+  public String currentActivityOperationKey() {
+    return activityExecution == null ? null : activityExecution.stageOperationKey();
   }
 }

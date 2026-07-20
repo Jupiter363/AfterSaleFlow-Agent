@@ -24,9 +24,55 @@ public record IntakeRoomStart(
     String guardrailVersion,
     String toolPolicyVersion,
     String initiatorActorScopeHash,
-    String respondentActorScopeHash) {
+    String respondentActorScopeHash,
+    IntakeRoomCarryState carryState) {
 
   private static final Pattern IDENTIFIER = Pattern.compile("[A-Za-z0-9][A-Za-z0-9._:-]{0,127}");
+
+  public IntakeRoomStart(
+      String schemaVersion,
+      String tenantSurrogate,
+      String caseId,
+      long roomEpoch,
+      long fencingToken,
+      long initialProcessRevision,
+      long initialRoomRevision,
+      long firstCommandSequence,
+      long firstEventSequence,
+      String workflowBuildId,
+      String graphVersion,
+      String checkpointSchemaVersion,
+      String promptVersion,
+      String modelProfileId,
+      String outputSchemaVersion,
+      String policyVersion,
+      String guardrailVersion,
+      String toolPolicyVersion,
+      String initiatorActorScopeHash,
+      String respondentActorScopeHash) {
+    this(
+        schemaVersion,
+        tenantSurrogate,
+        caseId,
+        roomEpoch,
+        fencingToken,
+        initialProcessRevision,
+        initialRoomRevision,
+        firstCommandSequence,
+        firstEventSequence,
+        workflowBuildId,
+        graphVersion,
+        checkpointSchemaVersion,
+        promptVersion,
+        modelProfileId,
+        outputSchemaVersion,
+        policyVersion,
+        guardrailVersion,
+        toolPolicyVersion,
+        initiatorActorScopeHash,
+        respondentActorScopeHash,
+        null);
+  }
 
   public IntakeRoomStart {
     if (!"intake-room-start.v1".equals(schemaVersion)) {
@@ -57,6 +103,31 @@ public record IntakeRoomStart(
     if (firstCommandSequence < 1 || firstEventSequence < 1) {
       throw new IllegalArgumentException("first sequences must be positive");
     }
+  }
+
+  public IntakeRoomStart withCarryState(IntakeRoomCarryState nextCarryState) {
+    return new IntakeRoomStart(
+        schemaVersion,
+        tenantSurrogate,
+        caseId,
+        roomEpoch,
+        fencingToken,
+        initialProcessRevision,
+        initialRoomRevision,
+        firstCommandSequence,
+        firstEventSequence,
+        workflowBuildId,
+        graphVersion,
+        checkpointSchemaVersion,
+        promptVersion,
+        modelProfileId,
+        outputSchemaVersion,
+        policyVersion,
+        guardrailVersion,
+        toolPolicyVersion,
+        initiatorActorScopeHash,
+        respondentActorScopeHash,
+        nextCarryState);
   }
 
   private static void requireIdentifier(String value, String field) {

@@ -18,7 +18,41 @@ public record IntakeWorkflowCommand(
     String payloadRef,
     String payloadHash,
     String operationKey,
-    String requestHash) {
+    String requestHash,
+    IntakeCommandExecutionContext executionContext) {
+
+  public IntakeWorkflowCommand(
+      String schemaVersion,
+      String commandId,
+      String tenantSurrogate,
+      String caseId,
+      long roomEpoch,
+      long fencingToken,
+      long sequence,
+      IntakeCommandType commandType,
+      IntakeParty party,
+      String actorScopeHash,
+      String payloadRef,
+      String payloadHash,
+      String operationKey,
+      String requestHash) {
+    this(
+        schemaVersion,
+        commandId,
+        tenantSurrogate,
+        caseId,
+        roomEpoch,
+        fencingToken,
+        sequence,
+        commandType,
+        party,
+        actorScopeHash,
+        payloadRef,
+        payloadHash,
+        operationKey,
+        requestHash,
+        null);
+  }
 
   public IntakeWorkflowCommand {
     if (!"intake-workflow-command.v1".equals(schemaVersion)) {
@@ -38,6 +72,8 @@ public record IntakeWorkflowCommand(
     if (commandType == null || party == null) {
       throw new IllegalArgumentException("commandType and party must not be null");
     }
+    if (executionContext != null) {
+      executionContext.requireCompatible(commandType, party);
+    }
   }
-
 }

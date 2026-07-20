@@ -1,7 +1,27 @@
 package com.example.dispute.workflow.temporal.room.intake;
 
+import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.ActivityEnvelope;
+import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.BranchCommitReceipt;
+import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.BranchCommitRequest;
+import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.BranchOperation;
+import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.GraphExecutionReceipt;
+import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.GraphExecutionRequest;
+import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.OperationReceipt;
+import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.PinnedVersions;
+import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.RetryBudget;
+import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.SnapshotPublicationReceipt;
+import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.SnapshotPublicationRequest;
+import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.TurnFinalizationReceipt;
+import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.TurnFinalizationRequest;
+import io.temporal.failure.ActivityFailure;
+import io.temporal.failure.ApplicationFailure;
+import io.temporal.failure.CanceledFailure;
+import io.temporal.workflow.ContinueAsNewOptions;
 import io.temporal.workflow.Workflow;
+import java.time.Duration;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.EnumMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
@@ -9,10 +29,16 @@ import java.util.Objects;
 public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
 
   private static final int RECENT_CAPACITY = 256;
+  private static final String CARRY_STATE_MEMO_KEY = "intake_room_carry_state_v1";
+  private static final String ROLLOVER_CHANGE_ID = "intake-room-rollover-v1";
+  private static final long HISTORY_EVENT_LIMIT = 2_000;
+  private static final Duration RUN_MAX_AGE = Duration.ofHours(24);
 
   private final ArrayDeque<InboxItem> inbox = new ArrayDeque<>();
   private final Map<String, CommandObservation> commandObservations = new LinkedHashMap<>();
   private final Map<String, EventObservation> eventObservations = new LinkedHashMap<>();
+  private final Map<IntakeParty, IntakeThreadInitialization> threadInitializations =
+      new EnumMap<>(IntakeParty.class);
 
   private IntakeRoomStart start;
   private IntakeRoomPhase roomPhase = IntakeRoomPhase.OPEN;
@@ -36,16 +62,26 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
   private long roomRevision;
   private String protocolErrorCode;
   private IntakeCommandDecision lastDecision;
+  private IntakeActivityExecutionState activityExecution;
+  private int runGeneration;
+  private io.temporal.workflow.Promise<Void> runMaxAgeTimer;
+  private boolean rolloverEnabled;
 
   @Override
   public IntakeRoomSnapshot run(IntakeRoomStart start) {
     this.start = Objects.requireNonNull(start, "start must not be null");
-    nextCommandSequence = start.firstCommandSequence();
-    nextEventSequence = start.firstEventSequence();
-    processRevision = start.initialProcessRevision();
-    roomRevision = start.initialRoomRevision();
+    restoreCarryState(start.carryState());
+    rolloverEnabled =
+        Workflow.getVersion(ROLLOVER_CHANGE_ID, Workflow.DEFAULT_VERSION, 1) == 1;
+    if (rolloverEnabled) {
+      runMaxAgeTimer = Workflow.newTimer(RUN_MAX_AGE);
+    }
 
     while (true) {
+      if (shouldContinueAsNew() && canContinueAsNew()) {
+        continueAsNew();
+        return null;
+      }
       if (!inbox.isEmpty()) {
         processNextInput(inbox.removeFirst());
         continue;
@@ -57,7 +93,10 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
         }
         continue;
       }
-      Workflow.await(() -> !inbox.isEmpty());
+      Workflow.await(
+          () ->
+              !inbox.isEmpty()
+                  || (shouldContinueAsNew() && canContinueAsNew()));
     }
   }
 
@@ -100,7 +139,9 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
         terminalReason,
         processRevision,
         roomRevision,
-        protocolErrorCode);
+        protocolErrorCode,
+        runGeneration,
+        activityExecution);
   }
 
   @Override
@@ -125,6 +166,11 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
       }
       if (observed.decision() != null) {
         replayCommand(observed);
+        if (pendingCommand != null
+            && pendingCommand.commandId().equals(command.commandId())
+            && command.executionContext() != null) {
+          orchestrate(command);
+        }
         return;
       }
     } else {
@@ -149,6 +195,16 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
       rejectCommand(command, "COMMAND_ACTOR_SCOPE_MISMATCH", true);
       return;
     }
+    if (command.executionContext() != null) {
+      if (command.executionContext().deadlineEpochMillis() <= Workflow.currentTimeMillis()) {
+        rejectCommand(command, "COMMAND_DEADLINE_EXPIRED", true);
+        return;
+      }
+      if (!bindsThread(command)) {
+        rejectCommand(command, "COMMAND_THREAD_BINDING_MISMATCH", true);
+        return;
+      }
+    }
     String rejection = businessRejection(command);
     if (rejection != null) {
       rejectCommand(command, rejection, true);
@@ -168,9 +224,17 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
         decision(command, "ACCEPTED", null);
     lastDecision = accepted;
     commandObservations.put(command.commandId(), new CommandObservation(command, accepted));
+    if (command.executionContext() != null) {
+      orchestrate(command);
+    }
   }
 
   private void processEvent(IntakeDomainEventRef event) {
+    processEvent(event, null);
+  }
+
+  private void processEvent(
+      IntakeDomainEventRef event, String expectedActivityOperationKey) {
     EventObservation observed = eventObservations.get(event.eventId());
     if (observed != null) {
       if (!observed.event().equals(event)) {
@@ -215,7 +279,13 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
       protocolErrorCode = "EVENT_COMMAND_MISMATCH";
       return;
     }
-    if (!pendingCommand.operationKey().equals(event.operationKey())) {
+    boolean rootOperation = pendingCommand.operationKey().equals(event.operationKey());
+    boolean stageOperation =
+        (expectedActivityOperationKey != null
+                && expectedActivityOperationKey.equals(event.operationKey()))
+            || (activityExecution != null
+                && activityExecution.stageOperationKey().equals(event.operationKey()));
+    if (!rootOperation && !stageOperation) {
       protocolErrorCode = "EVENT_OPERATION_KEY_MISMATCH";
       return;
     }
@@ -263,6 +333,7 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
       lastGraphExecutionRef = event.graphExecutionRef();
     }
     pendingCommand = null;
+    activityExecution = null;
     protocolErrorCode = null;
   }
 
@@ -278,6 +349,279 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
             roomPhase,
             previous.requestHash());
     protocolErrorCode = previous.reasonCode();
+  }
+
+  /** Runs only immutable-reference Activities; all formal state still arrives as a committed ref. */
+  private void orchestrate(IntakeWorkflowCommand command) {
+    IntakeCommandExecutionContext context = command.executionContext();
+    try {
+      IntakeRoomActivities activities =
+          Workflow.newActivityStub(
+              IntakeRoomActivities.class, IntakeActivityTemporalPolicy.options(context.retryBudget()));
+      ActivityEnvelope envelope = activityEnvelope(command, context);
+      if (command.commandType() == IntakeCommandType.INTAKE_MESSAGE) {
+        ensureSnapshot(activities, envelope, command, context);
+        GraphExecutionReceipt graph = executeGraph(activities, envelope, command, context);
+        TurnFinalizationReceipt finalization =
+            finalizeTurn(activities, envelope, command, context, graph);
+        processEvent(finalization.committedEvent(), finalization.operation().operationKey());
+        return;
+      }
+      BranchCommitReceipt branch = executeBranch(activities, envelope, command, context);
+      processEvent(branch.committedEvent(), branch.operation().operationKey());
+    } catch (ActivityFailure failure) {
+      if (failure.getCause() instanceof CanceledFailure) {
+        throw failure;
+      }
+      protocolErrorCode = activityFailureCode(failure);
+    } catch (RuntimeException failure) {
+      // Receipt validation failures are fail-closed and leave the command pending for recovery.
+      protocolErrorCode = "INTAKE_ACTIVITY_RECEIPT_INVALID";
+    }
+  }
+
+  private void ensureSnapshot(
+      IntakeRoomActivities activities,
+      ActivityEnvelope envelope,
+      IntakeWorkflowCommand command,
+      IntakeCommandExecutionContext context) {
+    IntakeThreadInitialization existing = threadInitializations.get(command.party());
+    if (existing != null) {
+      requireThreadBinding(existing, command, context);
+      return;
+    }
+    long domainRevision = processRevision;
+    String operationKey =
+        IntakeOperationKeys.snapshotPublish(
+            command.caseId(), command.roomEpoch(), command.actorScopeHash(), domainRevision);
+    setActivityStage(command, context, IntakeActivityStage.SNAPSHOT_PUBLICATION, operationKey);
+    SnapshotPublicationRequest request =
+        new SnapshotPublicationRequest(
+            "intake-snapshot-publication-request.v1",
+            envelope,
+            context.threadId(),
+            context.agentSessionId(),
+            domainRevision,
+            operationKey,
+            command.requestHash());
+    SnapshotPublicationReceipt receipt = activities.publishSnapshot(request);
+    requireOperation(receipt.operation(), operationKey, command.requestHash());
+    if (receipt.domainRevision() != domainRevision) {
+      throw new IllegalArgumentException("snapshot receipt revision does not match the request");
+    }
+    threadInitializations.put(
+        command.party(),
+        new IntakeThreadInitialization(
+            "intake-thread-initialization.v1",
+            command.party(),
+            command.actorScopeHash(),
+            context.threadId(),
+            context.agentSessionId(),
+            domainRevision,
+            receipt));
+  }
+
+  private GraphExecutionReceipt executeGraph(
+      IntakeRoomActivities activities,
+      ActivityEnvelope envelope,
+      IntakeWorkflowCommand command,
+      IntakeCommandExecutionContext context) {
+    String operationKey =
+        IntakeOperationKeys.graphExecute(
+            command.caseId(), command.roomEpoch(), context.threadId(), command.commandId());
+    setActivityStage(command, context, IntakeActivityStage.GRAPH_EXECUTION, operationKey);
+    GraphExecutionReceipt receipt =
+        activities.executeGraph(
+            new GraphExecutionRequest(
+                "intake-graph-execution-request.v1",
+                envelope,
+                context.threadId(),
+                context.agentSessionId(),
+                operationKey,
+                command.requestHash()));
+    requireOperation(receipt.operation(), operationKey, command.requestHash());
+    return receipt;
+  }
+
+  private TurnFinalizationReceipt finalizeTurn(
+      IntakeRoomActivities activities,
+      ActivityEnvelope envelope,
+      IntakeWorkflowCommand command,
+      IntakeCommandExecutionContext context,
+      GraphExecutionReceipt graph) {
+    String operationKey =
+        IntakeOperationKeys.turnFinalize(
+            command.caseId(),
+            command.roomEpoch(),
+            context.threadId(),
+            command.commandId(),
+            graph.operation().resultHash());
+    setActivityStage(command, context, IntakeActivityStage.TURN_FINALIZATION, operationKey);
+    TurnFinalizationReceipt receipt =
+        activities.finalizeTurn(
+            new TurnFinalizationRequest(
+                "intake-turn-finalization-request.v1",
+                envelope,
+                context.threadId(),
+                context.agentSessionId(),
+                graph,
+                operationKey,
+                command.requestHash()));
+    requireOperation(receipt.operation(), operationKey, command.requestHash());
+    if (!graph.operation().resultHash().equals(receipt.operation().resultHash())) {
+      throw new IllegalArgumentException("finalization result does not match graph result");
+    }
+    return receipt;
+  }
+
+  private BranchCommitReceipt executeBranch(
+      IntakeRoomActivities activities,
+      ActivityEnvelope envelope,
+      IntakeWorkflowCommand command,
+      IntakeCommandExecutionContext context) {
+    BranchOperation operation = context.branchOperation();
+    IntakeActivityStage stage =
+        switch (operation) {
+          case INITIATOR_ACCEPT -> IntakeActivityStage.INITIATOR_ACCEPTANCE;
+          case INITIATOR_REJECT -> IntakeActivityStage.INITIATOR_REJECTION;
+          case CANCEL -> IntakeActivityStage.CANCELLATION;
+          case RESPONDENT_CONFIRM -> IntakeActivityStage.RESPONDENT_CONFIRMATION;
+        };
+    String operationKey = branchOperationKey(operation, command);
+    setActivityStage(command, context, stage, operationKey);
+    BranchCommitRequest request =
+        new BranchCommitRequest(
+            "intake-branch-commit-request.v1",
+            envelope,
+            operation,
+            operationKey,
+            command.requestHash());
+    BranchCommitReceipt receipt =
+        switch (operation) {
+      case INITIATOR_ACCEPT -> activities.acceptInitiator(request);
+      case INITIATOR_REJECT -> activities.rejectInitiator(request);
+      case CANCEL -> activities.cancelIntake(request);
+      case RESPONDENT_CONFIRM -> activities.confirmRespondent(request);
+    };
+    requireOperation(receipt.operation(), operationKey, command.requestHash());
+    return receipt;
+  }
+
+  private ActivityEnvelope activityEnvelope(
+      IntakeWorkflowCommand command, IntakeCommandExecutionContext context) {
+    PinnedVersions versions =
+        new PinnedVersions(
+            "intake-pinned-versions.v1",
+            start.workflowBuildId(),
+            start.graphVersion(),
+            start.checkpointSchemaVersion(),
+            start.promptVersion(),
+            start.modelProfileId(),
+            start.outputSchemaVersion(),
+            start.policyVersion(),
+            start.guardrailVersion(),
+            start.toolPolicyVersion());
+    return new ActivityEnvelope(
+        "intake-activity-envelope.v1",
+        command.tenantSurrogate(),
+        command.caseId(),
+        command.roomEpoch(),
+        command.fencingToken(),
+        command.commandId(),
+        command.sequence(),
+        command.commandType(),
+        command.party(),
+        command.actorScopeHash(),
+        command.payloadRef(),
+        command.payloadHash(),
+        processRevision,
+        roomRevision,
+        context.deadlineEpochMillis(),
+        context.retryBudget(),
+        versions);
+  }
+
+  private void setActivityStage(
+      IntakeWorkflowCommand command,
+      IntakeCommandExecutionContext context,
+      IntakeActivityStage stage,
+      String operationKey) {
+    activityExecution =
+        new IntakeActivityExecutionState(
+            "intake-activity-execution-state.v1",
+            command.commandId(),
+            command.operationKey(),
+            stage,
+            operationKey,
+            command.requestHash(),
+            context.threadId(),
+            context.agentSessionId(),
+            context.deadlineEpochMillis(),
+            context.retryBudget());
+  }
+
+  private static void requireOperation(
+      OperationReceipt receipt, String expectedOperationKey, String expectedRequestHash) {
+    if (receipt == null
+        || !expectedOperationKey.equals(receipt.operationKey())
+        || !expectedRequestHash.equals(receipt.requestHash())) {
+      throw new IllegalArgumentException("Activity receipt does not match its request");
+    }
+  }
+
+  private static String branchOperationKey(
+      BranchOperation operation, IntakeWorkflowCommand command) {
+    return switch (operation) {
+      case INITIATOR_ACCEPT ->
+          IntakeOperationKeys.initiatorAccept(
+              command.caseId(), command.roomEpoch(), command.commandId());
+      case INITIATOR_REJECT ->
+          IntakeOperationKeys.initiatorReject(
+              command.caseId(), command.roomEpoch(), command.commandId());
+      case CANCEL ->
+          IntakeOperationKeys.cancel(command.caseId(), command.roomEpoch(), command.commandId());
+      case RESPONDENT_CONFIRM ->
+          IntakeOperationKeys.respondentConfirm(
+              command.caseId(), command.roomEpoch(), command.commandId());
+    };
+  }
+
+  private boolean bindsThread(
+      IntakeWorkflowCommand command) {
+    IntakeCommandExecutionContext context = command.executionContext();
+    IntakeThreadInitialization existing = threadInitializations.get(command.party());
+    if (existing != null) {
+      try {
+        requireThreadBinding(existing, command, context);
+      } catch (IllegalArgumentException mismatch) {
+        return false;
+      }
+    }
+    for (IntakeThreadInitialization initialization : threadInitializations.values()) {
+      if (initialization.party() != command.party()
+          && initialization.threadId().equals(context.threadId())) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private static void requireThreadBinding(
+      IntakeThreadInitialization existing,
+      IntakeWorkflowCommand command,
+      IntakeCommandExecutionContext context) {
+    if (!existing.actorScopeHash().equals(command.actorScopeHash())
+        || !existing.threadId().equals(context.threadId())
+        || !existing.agentSessionId().equals(context.agentSessionId())) {
+      throw new IllegalArgumentException("command does not match the private thread binding");
+    }
+  }
+
+  private static String activityFailureCode(ActivityFailure failure) {
+    if (failure.getCause() instanceof ApplicationFailure applicationFailure) {
+      return applicationFailure.getType();
+    }
+    return "INTAKE_ACTIVITY_RETRY_EXHAUSTED";
   }
 
   private String businessRejection(IntakeWorkflowCommand command) {
@@ -412,6 +756,117 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
         reasonCode,
         roomPhase,
         command.requestHash());
+  }
+
+  private void restoreCarryState(IntakeRoomCarryState carry) {
+    if (carry == null && Workflow.getInfo().getContinuedExecutionRunId().isPresent()) {
+      carry =
+          (IntakeRoomCarryState)
+              Workflow.getMemo(CARRY_STATE_MEMO_KEY, IntakeRoomCarryState.class);
+      if (carry == null) {
+        throw new IllegalStateException("continued Intake workflow is missing carry state");
+      }
+    }
+    if (carry == null) {
+      nextCommandSequence = start.firstCommandSequence();
+      nextEventSequence = start.firstEventSequence();
+      processRevision = start.initialProcessRevision();
+      roomRevision = start.initialRoomRevision();
+      return;
+    }
+    roomPhase = carry.roomPhase();
+    activeParty = carry.activeParty();
+    nextCommandSequence = carry.nextCommandSequence();
+    nextEventSequence = carry.nextEventSequence();
+    processedCommandCount = carry.processedCommandCount();
+    processedEventCount = carry.processedEventCount();
+    initiatorComplete = carry.initiatorComplete();
+    respondentUnlocked = carry.respondentUnlocked();
+    respondentComplete = carry.respondentComplete();
+    readinessParty = carry.readinessParty();
+    lastEventId = carry.lastEventId();
+    lastEventRef = carry.lastEventRef();
+    lastEventHash = carry.lastEventHash();
+    lastAgentRunRef = carry.lastAgentRunRef();
+    lastGraphExecutionRef = carry.lastGraphExecutionRef();
+    terminalReason = carry.terminalReason();
+    processRevision = carry.processRevision();
+    roomRevision = carry.roomRevision();
+    protocolErrorCode = carry.protocolErrorCode();
+    runGeneration = carry.runGeneration();
+    lastDecision = carry.lastDecision();
+    carry.observedCommands()
+        .forEach(
+            observed ->
+                commandObservations.put(
+                    observed.command().commandId(),
+                    new CommandObservation(observed.command(), observed.decision())));
+    carry.observedEvents()
+        .forEach(
+            observed ->
+                eventObservations.put(
+                    observed.event().eventId(), new EventObservation(observed.event(), observed.applied())));
+    carry.threadInitializations()
+        .forEach(initialization -> threadInitializations.put(initialization.party(), initialization));
+  }
+
+  private boolean shouldContinueAsNew() {
+    return rolloverEnabled
+        && ((runMaxAgeTimer != null && runMaxAgeTimer.isCompleted())
+            || Workflow.getInfo().isContinueAsNewSuggested()
+            || Workflow.getInfo().getHistoryLength() >= HISTORY_EVENT_LIMIT);
+  }
+
+  private boolean canContinueAsNew() {
+    return roomPhase != IntakeRoomPhase.COMPLETED
+        && inbox.isEmpty()
+        && pendingCommand == null
+        && activityExecution == null
+        && Workflow.isEveryHandlerFinished();
+  }
+
+  private void continueAsNew() {
+    Workflow.await(Workflow::isEveryHandlerFinished);
+    IntakeRoomCarryState carry =
+        new IntakeRoomCarryState(
+            "intake-room-carry-state.v1",
+            roomPhase,
+            activeParty,
+            nextCommandSequence,
+            nextEventSequence,
+            processedCommandCount,
+            processedEventCount,
+            initiatorComplete,
+            respondentUnlocked,
+            respondentComplete,
+            readinessParty,
+            lastEventId,
+            lastEventRef,
+            lastEventHash,
+            lastAgentRunRef,
+            lastGraphExecutionRef,
+            terminalReason,
+            processRevision,
+            roomRevision,
+            protocolErrorCode,
+            runGeneration + 1,
+            lastDecision,
+            commandObservations.values().stream()
+                .map(
+                    observed ->
+                        new IntakeRoomCarryState.ObservedCommand(
+                            "intake-observed-command.v1", observed.command(), observed.decision()))
+                .toList(),
+            eventObservations.values().stream()
+                .map(
+                    observed ->
+                        new IntakeRoomCarryState.ObservedEvent(
+                            "intake-observed-event.v1", observed.event(), observed.applied()))
+                .toList(),
+            new ArrayList<>(threadInitializations.values()));
+    ContinueAsNewOptions options =
+        ContinueAsNewOptions.newBuilder().setMemo(Map.of(CARRY_STATE_MEMO_KEY, carry)).build();
+    Workflow.continueAsNew(options, start.withCarryState(carry));
   }
 
   private boolean matchesEnvelope(IntakeWorkflowCommand command) {
