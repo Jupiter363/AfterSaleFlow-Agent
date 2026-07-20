@@ -27,6 +27,12 @@ class IntakeFinalizationReceiptTest {
                 MAPPER.readValue(RECEIPT_FIXTURE.toFile(), IntakeFinalizationReceipt.class);
 
         fixture.requireCanonicalHash();
+        assertThat(fixture.operationKey())
+                .isEqualTo(
+                        "intake.turn.finalize:CASE_P4_SYNTHETIC_1:1:"
+                                + "grt.v1.018f6b7ec30a7430982fffc520c8195c:"
+                                + "COMMAND_P4_USER_2:"
+                                + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
         IntakeFinalizationReceipt regenerated = IntakeFinalizationReceipt.committed(
                 new IntakeFinalizationReceipt.CommitFacts(
                         fixture.operationKey(),

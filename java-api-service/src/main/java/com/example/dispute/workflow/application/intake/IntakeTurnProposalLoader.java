@@ -54,9 +54,10 @@ public final class IntakeTurnProposalLoader {
             stored = Objects.requireNonNull(reader.load(reference), "stored proposal");
         } catch (IntakeFinalizationRejectedException failure) {
             throw failure;
+        } catch (IntakeProposalLoadException failure) {
+            throw failure;
         } catch (RuntimeException failure) {
-            throw new IntakeFinalizationRejectedException(
-                    "INTAKE_PROPOSAL_LOAD_FAILED", "proposal object could not be loaded", failure);
+            throw new IntakeProposalLoadException("proposal object could not be loaded", failure);
         }
         requireExactReceipt(reference, stored);
         byte[] payload = stored.payload();

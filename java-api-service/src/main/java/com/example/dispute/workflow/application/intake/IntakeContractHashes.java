@@ -1,6 +1,7 @@
 package com.example.dispute.workflow.application.intake;
 
 import com.example.dispute.workflow.contract.v1.ContractJson;
+import com.example.dispute.workflow.contract.v1.RoomGraphResult;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -41,6 +42,11 @@ public final class IntakeContractHashes {
 
     public static String graphCommandHash(Object command) {
         return canonicalHashExcluding(toTree(command), "request_hash");
+    }
+
+    /** Returns the canonical self-hash carried by a room-graph-result.v1 envelope. */
+    public static String graphResultHash(RoomGraphResult result) {
+        return canonicalHashExcluding(toTree(result), "output_hash");
     }
 
     static JsonNode toTree(Object value) {

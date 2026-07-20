@@ -7,6 +7,7 @@ import com.example.dispute.workflow.application.intake.IntakeContractHashes;
 import com.example.dispute.workflow.application.intake.IntakeFinalizationRejectedException;
 import com.example.dispute.workflow.application.intake.IntakeImmutableProposalReader;
 import com.example.dispute.workflow.application.intake.IntakeProposalAuthority;
+import com.example.dispute.workflow.application.intake.IntakeProposalLoadException;
 import com.example.dispute.workflow.application.intake.IntakeProposalReference;
 import com.example.dispute.workflow.application.intake.IntakeTurnProposal;
 import com.example.dispute.workflow.application.intake.IntakeTurnProposalLoader;
@@ -61,6 +62,22 @@ class IntakeTurnProposalLoaderTest {
         assertRejected(
                 "INTAKE_PROPOSAL_REFERENCE_MISMATCH",
                 () -> new IntakeTurnProposalLoader(reader).load(reference, authority(fixture)));
+    }
+
+    @Test
+    void preservesTransientObjectStoreFailuresAsRetryableAccessErrors() throws Exception {
+        JsonNode fixture = fixture();
+        byte[] payload = ContractJson.canonicalize(fixture);
+        IntakeProposalReference reference = reference(fixture, payload);
+        IntakeImmutableProposalReader reader = ignored -> {
+            throw new IllegalStateException("object store timeout");
+        };
+
+        assertThatThrownBy(() -> new IntakeTurnProposalLoader(reader)
+                        .load(reference, authority(fixture)))
+                .isInstanceOf(IntakeProposalLoadException.class)
+                .isNotInstanceOf(IntakeFinalizationRejectedException.class)
+                .hasMessage("proposal object could not be loaded");
     }
 
     @Test
