@@ -30,6 +30,51 @@ NonNegativeInt = Annotated[int, Field(strict=True, ge=0)]
 PositiveInt = Annotated[int, Field(strict=True, ge=1)]
 
 
+MODEL_CONTROLLED_FORBIDDEN_FIELDS = frozenset(
+    {
+        "memory_frame",
+        "internal_handoff",
+        "handoff_notes",
+        "hidden_reasoning",
+        "chain_of_thought",
+        "tool_calls",
+        "tool_parameters",
+        "writer_mode",
+        "credentials",
+        "credential",
+        "password",
+        "api_key",
+        "access_token",
+        "refresh_token",
+        "authorization_header",
+        "private_key",
+        "client_secret",
+        "raw_audit_records",
+        "audit_records",
+        "reviewer_notes",
+        "other_party_private_messages",
+        "opposing_party_private_messages",
+        "process_state",
+        "case_status",
+        "room_transition",
+        "evidence_deadline",
+        "review_instructions",
+        "tool_instructions",
+        "open_evidence",
+        "complete_party",
+        "send_summons",
+        "execute_tool",
+        "admit_case",
+        "cancel_case",
+        "cancel_intake",
+        "freeze_matrix",
+        "open_room",
+        "set_deadline",
+        "invite_participant",
+    }
+)
+
+
 class StrictIntakeModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -139,6 +184,9 @@ class IntakeCognitionDraft(StrictIntakeModel):
             raise ValueError("missing_fields must be unique")
         if self.readiness == "READY_TO_CONFIRM" and self.missing_fields:
             raise ValueError("ready draft cannot contain missing fields")
+        _reject_model_controlled_fields(
+            self.model_dump(mode="python", exclude_none=True, exclude_unset=True)
+        )
         return self
 
 
@@ -184,3 +232,14 @@ class IntakeTurnProposal(StrictIntakeModel):
         if "source_event_hash" in self.model_fields_set and self.source_event_hash is None:
             raise ValueError("source_event_hash cannot be null")
         return self
+
+
+def _reject_model_controlled_fields(value: Any) -> None:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if key in MODEL_CONTROLLED_FORBIDDEN_FIELDS:
+                raise ValueError(f"model-controlled field is forbidden: {key}")
+            _reject_model_controlled_fields(child)
+    elif isinstance(value, list | tuple):
+        for child in value:
+            _reject_model_controlled_fields(child)

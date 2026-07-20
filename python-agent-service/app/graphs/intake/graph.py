@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from typing import Any
+
+from langchain_core.runnables import Runnable, RunnableLambda
 from langgraph.graph import END, START, StateGraph
 
 from app.graph_runtime.topology import ClosedRouter
@@ -17,13 +20,19 @@ from app.graphs.intake.nodes import (
     unconfigured_intake_lcel,
     validate_readiness,
 )
+from app.graphs.intake.errors import IntakeGraphContractError
 from app.graphs.intake.state import IntakeGraphStateV2, IntakeTurnContext
 
 
 def build_intake_v2_graph(
     *,
-    intake_lcel: IntakeCognitionNode = unconfigured_intake_lcel,
+    intake_lcel: IntakeCognitionNode | Runnable = unconfigured_intake_lcel,
 ) -> StateGraph:
+    if isinstance(intake_lcel, RunnableLambda):
+        raise IntakeGraphContractError("INTAKE_LCEL_LEGACY_WRAPPER_FORBIDDEN")
+    cognition_node = (
+        intake_lcel if isinstance(intake_lcel, Runnable) else guard_intake_cognition(intake_lcel)
+    )
     builder = StateGraph(IntakeGraphStateV2, context_schema=IntakeTurnContext)
     builder.add_node("authorize_and_load", authorize_and_load)
     builder.add_node(
@@ -32,7 +41,7 @@ def build_intake_v2_graph(
     )
     builder.add_node("route_turn", route_turn)
     builder.add_node("deterministic_seed", deterministic_seed)
-    builder.add_node("intake_lcel", guard_intake_cognition(intake_lcel))
+    builder.add_node("intake_lcel", cognition_node)
     builder.add_node("cached_terminal_projection", cached_terminal_projection)
     builder.add_node("apply_dossier_patch", apply_dossier_patch)
     builder.add_node("validate_readiness", validate_readiness)
@@ -67,6 +76,7 @@ def build_intake_v2_graph(
 
 def compile_intake_v2_graph(
     *,
-    intake_lcel: IntakeCognitionNode = unconfigured_intake_lcel,
+    intake_lcel: IntakeCognitionNode | Runnable = unconfigured_intake_lcel,
+    checkpointer: Any = None,
 ):
-    return build_intake_v2_graph(intake_lcel=intake_lcel).compile()
+    return build_intake_v2_graph(intake_lcel=intake_lcel).compile(checkpointer=checkpointer)
