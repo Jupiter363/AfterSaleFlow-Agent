@@ -39,6 +39,19 @@ public record IntakeGraphFinalizationRequest(
         proposalReference = Objects.requireNonNull(proposalReference, "proposalReference");
     }
 
+    public String canonicalRequestHash() {
+        return IntakeContractHashes.finalizationRequestHash(this);
+    }
+
+    public void requireCanonicalRequestHash() {
+        String canonical = canonicalRequestHash();
+        if (!requestHash.equals(canonical)) {
+            throw new IntakeFinalizationRejectedException(
+                    "INTAKE_FINALIZATION_REQUEST_HASH_MISMATCH",
+                    "finalization request hash is not canonical");
+        }
+    }
+
     /** Values copied from the signed Activity/epoch authority and rechecked against every input. */
     public record Authority(
             String tenantSurrogate,

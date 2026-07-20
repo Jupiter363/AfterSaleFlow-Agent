@@ -60,6 +60,10 @@ public record IntakeTurnProposal(
         }
         readiness = Objects.requireNonNull(readiness, "readiness");
         missingFields = IntakeContractSupport.identifiers(missingFields, 0, 30, "missingFields");
+        if (readiness == Readiness.READY_TO_CONFIRM && !missingFields.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "READY_TO_CONFIRM proposals cannot contain missing fields");
+        }
         recommendation = Objects.requireNonNull(recommendation, "recommendation");
         knowledgeAnswerMode = Objects.requireNonNull(knowledgeAnswerMode, "knowledgeAnswerMode");
         confidence = Objects.requireNonNull(confidence, "confidence");

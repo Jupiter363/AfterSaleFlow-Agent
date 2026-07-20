@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.example.dispute.workflow.application.intake.IntakeContractHashes;
 import com.example.dispute.workflow.application.intake.IntakeEventReference;
 import com.example.dispute.workflow.application.intake.IntakeFinalizationReceipt;
+import com.example.dispute.workflow.application.intake.IntakeFinalizationReceiptReader;
 import com.example.dispute.workflow.application.intake.IntakeFinalizationRejectedException;
 import com.example.dispute.workflow.application.intake.IntakeFormalCommitPort;
 import com.example.dispute.workflow.application.intake.IntakeGraphFinalizationRequest;
@@ -33,6 +34,7 @@ import com.fasterxml.jackson.databind.json.JsonMapper;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
+import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
 class IntakeGraphResultFinalizerTest {
@@ -70,6 +72,27 @@ class IntakeGraphResultFinalizerTest {
     }
 
     @Test
+    void committedReceiptBypassesProposalReloadAfterActivityCompletionLoss() throws Exception {
+        Fixture fixture = fixture(WriterMode.TEMPORAL);
+        RecordingCommitPort committedPort = new RecordingCommitPort();
+        IntakeFinalizationReceipt committed =
+                finalizer(fixture, committedPort).finalizeResult(fixture.request());
+        RecordingCommitPort replayPort = new RecordingCommitPort();
+        IntakeImmutableProposalReader unavailableReader = ignored -> {
+            throw new AssertionError("a committed finalization must not reload the proposal");
+        };
+        IntakeFinalizationReceiptReader receiptReader =
+                (tenantSurrogate, operationKey, requestHash) -> Optional.of(committed);
+        IntakeGraphResultFinalizer finalizer = new IntakeGraphResultFinalizer(
+                new IntakeTurnProposalLoader(unavailableReader), replayPort, receiptReader);
+
+        IntakeFinalizationReceipt replay = finalizer.finalizeResult(fixture.request());
+
+        assertThat(replay).isEqualTo(committed);
+        assertThat(replayPort.calls).isZero();
+    }
+
+    @Test
     void invalidGraphHashNeverCallsTheFormalPort() throws Exception {
         Fixture fixture = fixture(WriterMode.TEMPORAL);
         RoomGraphResult invalid = copyResult(fixture.result(), "0".repeat(64));
@@ -79,6 +102,36 @@ class IntakeGraphResultFinalizerTest {
                 "INTAKE_RESULT_HASH_MISMATCH",
                 () -> finalizer(fixture.withResult(invalid), port)
                         .finalizeResult(fixture.withResult(invalid).request()));
+        assertThat(port.calls).isZero();
+    }
+
+    @Test
+    void nonCanonicalFinalizationRequestHashNeverReadsTheProposalOrCallsTheFormalPort()
+            throws Exception {
+        Fixture fixture = fixture(WriterMode.TEMPORAL);
+        String incorrectHash = fixture.request().requestHash().startsWith("0")
+                ? "1" + fixture.request().requestHash().substring(1)
+                : "0" + fixture.request().requestHash().substring(1);
+        IntakeGraphFinalizationRequest invalid = new IntakeGraphFinalizationRequest(
+                fixture.request().operationKey(),
+                incorrectHash,
+                fixture.authority(),
+                fixture.command(),
+                fixture.result(),
+                fixture.binding(),
+                fixture.snapshot(),
+                fixture.event(),
+                fixture.proposalReference());
+        RecordingCommitPort port = new RecordingCommitPort();
+        IntakeImmutableProposalReader unavailableReader = ignored -> {
+            throw new AssertionError("a malformed request must not read the proposal");
+        };
+        IntakeGraphResultFinalizer finalizer = new IntakeGraphResultFinalizer(
+                new IntakeTurnProposalLoader(unavailableReader), port);
+
+        assertRejected(
+                "INTAKE_FINALIZATION_REQUEST_HASH_MISMATCH",
+                () -> finalizer.finalizeResult(invalid));
         assertThat(port.calls).isZero();
     }
 
@@ -221,9 +274,8 @@ class IntakeGraphResultFinalizerTest {
                 + authority.caseId() + ":" + authority.roomEpoch() + ":"
                 + authority.threadId() + ":" + authority.commandId() + ":"
                 + authority.resultHash();
-        IntakeGraphFinalizationRequest request = new IntakeGraphFinalizationRequest(
+        IntakeGraphFinalizationRequest request = canonicalRequest(
                 operationKey,
-                "c".repeat(64),
                 authority,
                 command,
                 result,
@@ -362,6 +414,37 @@ class IntakeGraphResultFinalizerTest {
                 source.executionMetadata());
     }
 
+    private static IntakeGraphFinalizationRequest canonicalRequest(
+            String operationKey,
+            IntakeGraphFinalizationRequest.Authority authority,
+            RoomGraphCommand command,
+            RoomGraphResult result,
+            IntakeGraphThreadBinding binding,
+            IntakeSnapshotReference snapshot,
+            IntakeEventReference event,
+            IntakeProposalReference proposalReference) {
+        IntakeGraphFinalizationRequest unsigned = new IntakeGraphFinalizationRequest(
+                operationKey,
+                "0".repeat(64),
+                authority,
+                command,
+                result,
+                binding,
+                snapshot,
+                event,
+                proposalReference);
+        return new IntakeGraphFinalizationRequest(
+                operationKey,
+                unsigned.canonicalRequestHash(),
+                authority,
+                command,
+                result,
+                binding,
+                snapshot,
+                event,
+                proposalReference);
+    }
+
     private static void assertRejected(String code, ThrowingCall call) {
         assertThatThrownBy(call::run)
                 .isInstanceOf(IntakeFinalizationRejectedException.class)
@@ -396,8 +479,8 @@ class IntakeGraphResultFinalizerTest {
                     authority.profileVersions());
             String key = "intake.turn.finalize:" + next.caseId() + ":" + next.roomEpoch() + ":"
                     + next.threadId() + ":" + next.commandId() + ":" + next.resultHash();
-            IntakeGraphFinalizationRequest nextRequest = new IntakeGraphFinalizationRequest(
-                    key, request.requestHash(), next, command, value, binding, snapshot, event,
+            IntakeGraphFinalizationRequest nextRequest = canonicalRequest(
+                    key, next, command, value, binding, snapshot, event,
                     proposalReference);
             return new Fixture(nextRequest, next, command, value, binding, snapshot, event,
                     proposalReference, storedProposal);
@@ -412,8 +495,8 @@ class IntakeGraphResultFinalizerTest {
                 IntakeGraphFinalizationRequest.Authority value) {
             String key = "intake.turn.finalize:" + value.caseId() + ":" + value.roomEpoch() + ":"
                     + value.threadId() + ":" + value.commandId() + ":" + value.resultHash();
-            return new IntakeGraphFinalizationRequest(
-                    key, request.requestHash(), value, command, result, binding, snapshot, event,
+            return canonicalRequest(
+                    key, value, command, result, binding, snapshot, event,
                     proposalReference);
         }
     }

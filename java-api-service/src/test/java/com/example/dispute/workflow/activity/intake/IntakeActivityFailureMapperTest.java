@@ -3,11 +3,23 @@ package com.example.dispute.workflow.activity.intake;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.example.dispute.workflow.application.intake.IntakeFinalizationRejectedException;
+import com.example.dispute.workflow.application.intake.IntakeFinalizationPersistenceException;
 import com.example.dispute.workflow.application.intake.IntakeProposalLoadException;
 import io.temporal.failure.ApplicationFailure;
 import org.junit.jupiter.api.Test;
 
 class IntakeActivityFailureMapperTest {
+
+    @Test
+    void persistenceResourceFailureRemainsRetryable() {
+        ApplicationFailure failure = IntakeActivityFailureMapper.toApplicationFailure(
+                new IntakeFinalizationPersistenceException(
+                        "database unavailable", new IllegalStateException("connection lost")));
+
+        assertThat(failure.getType())
+                .isEqualTo(IntakeActivityFailureMapper.RETRYABLE_FINALIZATION_PERSISTENCE);
+        assertThat(failure.isNonRetryable()).isFalse();
+    }
 
     @Test
     void mapsFormalRejectionsToNonRetryableApplicationFailures() {

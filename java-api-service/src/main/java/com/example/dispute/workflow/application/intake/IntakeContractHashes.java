@@ -49,6 +49,20 @@ public final class IntakeContractHashes {
         return canonicalHashExcluding(toTree(result), "output_hash");
     }
 
+    /**
+     * Computes the idempotency hash for the complete trusted finalization request.
+     *
+     * <p>The request hash is deliberately derived from every request member except the hash
+     * itself.  This keeps the ledger key collision-safe when an Activity retries with a changed
+     * authority, reference, or graph envelope, while leaving the request type framework-free.
+     */
+    public static String finalizationRequestHash(IntakeGraphFinalizationRequest request) {
+        if (request == null) {
+            throw new IllegalArgumentException("request must not be null");
+        }
+        return canonicalHashExcluding(toTree(request), "requestHash");
+    }
+
     static JsonNode toTree(Object value) {
         return MAPPER.valueToTree(value);
     }

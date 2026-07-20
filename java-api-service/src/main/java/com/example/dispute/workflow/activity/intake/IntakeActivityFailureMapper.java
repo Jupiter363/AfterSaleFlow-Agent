@@ -1,6 +1,7 @@
 package com.example.dispute.workflow.activity.intake;
 
 import com.example.dispute.workflow.application.intake.IntakeFinalizationRejectedException;
+import com.example.dispute.workflow.application.intake.IntakeFinalizationPersistenceException;
 import com.example.dispute.workflow.application.intake.IntakeProposalLoadException;
 import io.temporal.failure.ApplicationFailure;
 import java.util.Objects;
@@ -9,6 +10,8 @@ import java.util.Objects;
 public final class IntakeActivityFailureMapper {
 
     public static final String RETRYABLE_PROPOSAL_ACCESS = "IntakeProposalAccessRetryable";
+    public static final String RETRYABLE_FINALIZATION_PERSISTENCE =
+            "IntakeFinalizationPersistenceRetryable";
     public static final String UNCLASSIFIED_FINALIZATION_FAILURE =
             "IntakeFinalizationUnclassified";
 
@@ -23,6 +26,13 @@ public final class IntakeActivityFailureMapper {
             return ApplicationFailure.newFailureWithCause(
                     "Intake proposal access is temporarily unavailable",
                     RETRYABLE_PROPOSAL_ACCESS,
+                    failure,
+                    failure.getClass().getSimpleName());
+        }
+        if (failure instanceof IntakeFinalizationPersistenceException) {
+            return ApplicationFailure.newFailureWithCause(
+                    "Intake finalization persistence is temporarily unavailable",
+                    RETRYABLE_FINALIZATION_PERSISTENCE,
                     failure,
                     failure.getClass().getSimpleName());
         }

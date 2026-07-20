@@ -11,6 +11,7 @@ import com.example.dispute.workflow.contract.v1.RoomGraphResult;
 import com.example.dispute.workflow.contract.v1.RoomGraphResult.ArtifactOperation;
 import com.example.dispute.workflow.contract.v1.RoomGraphResult.ExecutionMetadata;
 import java.util.Objects;
+import java.util.Optional;
 
 /**
  * Validates a graph proposal and hands it to exactly one formal commit port.
@@ -22,16 +23,45 @@ public final class IntakeGraphResultFinalizer {
 
     private final IntakeTurnProposalLoader proposalLoader;
     private final IntakeFormalCommitPort commitPort;
+    private final Optional<IntakeFinalizationReceiptReader> receiptReader;
 
     public IntakeGraphResultFinalizer(
             IntakeTurnProposalLoader proposalLoader, IntakeFormalCommitPort commitPort) {
+        this(
+                proposalLoader,
+                commitPort,
+                commitPort instanceof IntakeFinalizationReceiptReader reader ? reader : null);
+    }
+
+    /**
+     * Creates a Finalizer with an optional committed-receipt lookup for Activity completion loss.
+     *
+     * <p>The reader is intentionally supplied as an explicit port. It is not a Spring dependency,
+     * so the Phase 4 SHADOW graph cannot discover the formal boundary.
+     */
+    public IntakeGraphResultFinalizer(
+            IntakeTurnProposalLoader proposalLoader,
+            IntakeFormalCommitPort commitPort,
+            IntakeFinalizationReceiptReader receiptReader) {
         this.proposalLoader = Objects.requireNonNull(proposalLoader, "proposalLoader");
         this.commitPort = Objects.requireNonNull(commitPort, "commitPort");
+        this.receiptReader = Optional.ofNullable(receiptReader);
     }
 
     public IntakeFinalizationReceipt finalizeResult(IntakeGraphFinalizationRequest request) {
         Objects.requireNonNull(request, "request");
         validateRequest(request);
+
+        Optional<IntakeFinalizationReceipt> existing = receiptReader.flatMap(reader ->
+                reader.findCommitted(
+                        request.authority().tenantSurrogate(),
+                        request.operationKey(),
+                        request.requestHash()));
+        if (existing.isPresent()) {
+            IntakeFinalizationReceipt receipt = existing.orElseThrow();
+            validateReceipt(request, receipt);
+            return receipt;
+        }
 
         IntakeGraphFinalizationRequest.Authority authority = request.authority();
         IntakeProposalAuthority proposalAuthority = new IntakeProposalAuthority(
@@ -108,6 +138,16 @@ public final class IntakeGraphResultFinalizer {
     }
 
     private static void validateRequest(IntakeGraphFinalizationRequest request) {
+        try {
+            request.requireCanonicalRequestHash();
+        } catch (IntakeFinalizationRejectedException failure) {
+            throw failure;
+        } catch (RuntimeException failure) {
+            throw rejected(
+                    "INTAKE_FINALIZATION_REQUEST_HASH_INVALID",
+                    "finalization request cannot be canonically hashed",
+                    failure);
+        }
         IntakeGraphFinalizationRequest.Authority authority = request.authority();
         IntakeGraphThreadBinding binding = request.threadBinding();
         IntakePrivateThreadRegistration registration = binding.registration();
