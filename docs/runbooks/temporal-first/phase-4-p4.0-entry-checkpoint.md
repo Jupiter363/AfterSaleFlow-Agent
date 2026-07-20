@@ -81,3 +81,27 @@ Runtime remains limited to `DISABLED` or signed synthetic `SHADOW`. The followin
 - canary, production promotion, or any claim that `MIG-003` or `MIG-004` passed.
 
 The unrelated user deletion `docs/api/README.md` remained untouched and unstaged.
+
+## Contract Erratum Re-authentication
+
+An independent C2 review found that the exact frozen Finalizer operation-key formula can reach 403
+characters when its legal identifiers are at their contract bounds, while the original receipt and
+ledger bound was 256. Commit `f626fca3` corrects the dedicated `operation_key` capacity to 512 in
+the receipt schema, Java validator, JPA mapping, and V043. The formula remains lossless; no field is
+truncated or replaced with another derived hash.
+
+The amended contract was re-authenticated on 2026-07-21 from clean detached worktree
+`.codex-run/phase4-erratum-f626fca3` at exact candidate
+`f626fca36265af70bee061829f242d3cd1b67cb9`:
+
+| Source suite | Tests | Failures | Errors | Skipped | Exit |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Static contract and boundary gates | 25 | 0 | 0 | 0 | 0 |
+| Python Intake, stream, security, and Runnable baseline | 70 | 0 | 0 | 0 | 0 |
+| Java Intake, session, persistence, selector, and stream baseline | 83 | 0 | 0 | 0 | 0 |
+| Frontend Intake, overview, shell, stream, and room-store baseline | 120 | 0 | 0 | 0 | 0 |
+| **Total** | **298** | **0** | **0** | **0** | **0** |
+
+This supersedes `cf1ae353` only as the current P4.0 contract baseline. It does not authorize a new
+runtime mode or formal traffic: engineering execution remains restricted to `DISABLED` or signed
+synthetic `SHADOW`, and `promotion_gate`, `MIG-003`, and `MIG-004` remain `PENDING`.
