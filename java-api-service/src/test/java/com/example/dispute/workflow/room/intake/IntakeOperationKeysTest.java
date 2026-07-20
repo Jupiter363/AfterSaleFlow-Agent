@@ -52,7 +52,7 @@ class IntakeOperationKeysTest {
   }
 
   @Test
-  void acceptsTheFrozen165CharacterFinalizerKeyAndRejectsOversizedKeys() {
+  void acceptsTheFrozenAndMaximumContractFinalizerKeysAndRejectsOversizedKeys() {
     String frozenKey =
         "intake.turn.finalize:CASE_P4_SYNTHETIC_1:1:"
             + "grt.v1.018f6b7ec30a7430982fffc520c8195c:"
@@ -61,10 +61,18 @@ class IntakeOperationKeysTest {
 
     assertThat(frozenKey).hasSize(165);
     assertThat(IntakeOperationKeys.requireValid(frozenKey)).isEqualTo(frozenKey);
+    String maximumContractKey =
+        IntakeOperationKeys.turnFinalize(
+            "C".repeat(128),
+            Long.MAX_VALUE,
+            THREAD_ID,
+            "M".repeat(128),
+            RESULT_HASH);
+    assertThat(maximumContractKey).hasSize(403);
     assertThatThrownBy(
             () ->
-                IntakeOperationKeys.requireValid("intake.cancel:" + "A".repeat(300) + ":1:COMMAND"))
+                IntakeOperationKeys.requireValid("intake.cancel:" + "A".repeat(600) + ":1:COMMAND"))
         .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining("256");
+        .hasMessageContaining("512");
   }
 }

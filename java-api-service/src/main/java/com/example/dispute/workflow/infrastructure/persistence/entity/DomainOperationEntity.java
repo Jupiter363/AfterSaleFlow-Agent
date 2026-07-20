@@ -16,7 +16,7 @@ import java.util.Objects;
 @Table(name = "domain_operation")
 public class DomainOperationEntity extends AbstractEntity {
 
-    @Column(name = "operation_key", length = 256, nullable = false, updatable = false)
+    @Column(name = "operation_key", length = 512, nullable = false, updatable = false)
     private String operationKey;
 
     @Column(name = "tenant_surrogate", length = 128, nullable = false, updatable = false)

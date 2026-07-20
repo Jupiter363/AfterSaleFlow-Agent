@@ -13,7 +13,7 @@
   ],
   "properties": {
     "schema_version": {"const": "intake-finalization-receipt.v1"},
-    "operation_key": {"$ref": "#/$defs/identifier"},
+    "operation_key": {"$ref": "#/$defs/operation_key"},
     "tenant_surrogate": {"$ref": "#/$defs/identifier"},
     "case_id": {"$ref": "#/$defs/identifier"},
     "room_epoch": {"type": "integer", "minimum": 0},
@@ -44,6 +44,10 @@
     "receipt_hash": {"$ref": "#/$defs/sha256"}
   },
   "$defs": {
+    "operation_key": {
+      "type": "string", "minLength": 1, "maxLength": 512,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,511}$"
+    },
     "identifier": {
       "type": "string", "minLength": 1, "maxLength": 256,
       "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$"

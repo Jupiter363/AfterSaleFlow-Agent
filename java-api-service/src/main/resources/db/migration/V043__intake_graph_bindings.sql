@@ -2,7 +2,7 @@
 -- Domain PostgreSQL stores only authorization tuples, version pins, and references.
 
 alter table domain_operation
-    alter column operation_key type varchar(256);
+    alter column operation_key type varchar(512);
 
 alter table case_room_epoch
     add column room_workflow_type varchar(128),

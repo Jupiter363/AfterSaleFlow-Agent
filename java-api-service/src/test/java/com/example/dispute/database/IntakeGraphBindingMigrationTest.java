@@ -54,8 +54,8 @@ class IntakeGraphBindingMigrationTest {
 
         assertThat(sql)
                 .contains(
-                        "alter table domain_operation alter column operation_key type varchar(256)");
-        assertThat(operationKey.length()).isGreaterThan(128).isLessThanOrEqualTo(256);
+                        "alter table domain_operation alter column operation_key type varchar(512)");
+        assertThat(operationKey.length()).isGreaterThan(128).isLessThanOrEqualTo(512);
     }
 
     @Test

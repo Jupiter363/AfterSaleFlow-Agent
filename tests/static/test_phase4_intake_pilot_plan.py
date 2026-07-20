@@ -339,6 +339,22 @@ def test_phase4_valid_contracts_exclude_memory_and_formal_authority() -> None:
     assert not (forbidden & set(re.findall(r'"([a-z_]+)"\s*:', valid_text)))
 
 
+def test_phase4_finalization_key_capacity_covers_the_exact_frozen_formula() -> None:
+    schema = json.loads(
+        (CONTRACT_ROOT / "intake-finalization-receipt.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    operation_key = schema["$defs"]["operation_key"]
+    maximum_formula_length = (
+        len("intake.turn.finalize:") + 128 + 1 + 19 + 1 + 39 + 1 + 128 + 1 + 64
+    )
+
+    assert maximum_formula_length == 403
+    assert operation_key["maxLength"] >= maximum_formula_length
+    assert operation_key["pattern"].endswith("{0,511}$")
+
+
 def test_phase4_runtime_defaults_require_two_nonlegacy_activation_locks() -> None:
     properties = (
         ROOT

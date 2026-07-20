@@ -109,7 +109,7 @@ public final class IntakeOperationKeys {
     requireBoundedAscii(operationKey);
     if (!VALID_OPERATION_KEY.matcher(operationKey).matches()) {
       throw new IllegalArgumentException(
-          "operationKey must be a frozen Intake operation key of at most 256 characters");
+          "operationKey must be a frozen Intake operation key of at most 512 characters");
     }
     return operationKey;
   }
@@ -143,10 +143,10 @@ public final class IntakeOperationKeys {
   private static void requireBoundedAscii(String operationKey) {
     if (operationKey == null
         || operationKey.isEmpty()
-        || operationKey.length() > 256
+        || operationKey.length() > 512
         || !operationKey.chars().allMatch(character -> character >= 0x20 && character <= 0x7e)) {
       throw new IllegalArgumentException(
-          "operationKey must be non-empty ASCII of at most 256 characters");
+          "operationKey must be non-empty ASCII of at most 512 characters");
     }
   }
 }

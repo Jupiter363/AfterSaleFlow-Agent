@@ -333,6 +333,11 @@ intake.cancel:{case_id}:{room_epoch}:{command_id}
 intake.respondent.confirm:{case_id}:{room_epoch}:{command_id}
 ```
 
+`operation_key` has a dedicated 512-character bound. This is intentionally wider than ordinary
+identifiers so the exact Finalizer key remains lossless when both legal 128-character identifiers,
+the opaque thread ID, the epoch, and the result hash are present; keys are never truncated or
+silently replaced with a second derived hash.
+
 An identical key/hash returns the committed receipt. A different request hash conflicts. Business,
 authorization, schema, stale revision, stale fence, and guardrail failures are non-retryable.
 Infrastructure retries share the end-to-end deadline and budget; Java commit followed by lost
