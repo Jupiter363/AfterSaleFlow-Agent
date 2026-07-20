@@ -3,14 +3,21 @@
 ## Status
 
 ```text
-plan_status: READY
+plan_status: ENGINEERING_CHECKPOINT_COMPLETE
 engineering_execution: ALLOWED_WITH_DISABLED_SHADOW_RESTRICTIONS
 promotion_gate: MIG-003 PENDING
-next_phase_permission: PHASE_3_ENGINEERING_ONLY
+engineering_checkpoint: PASS
+next_phase_permission: PHASE_4_ENGINEERING_ONLY
 team_shape: primary + 3 delegated implementation agents
 runtime_default: DISABLED
 formal_room_writer: FORBIDDEN
 ```
+
+The engineering candidate `9351a9d65230ce5bfc332bc59ec567ecb8a964c5` passed the unified
+checkpoint on 2026-07-20: 525 Python, 30 static, and 273 Java tests, with no failures,
+errors, or skips. The archived result and its exact limitations are recorded in
+[Phase 3 Engineering Checkpoint](../docs/runbooks/temporal-first/phase-3-engineering-checkpoint.md)
+and `test-reports/temporal-first/phase-3-20260720-r2/phase-3/`.
 
 ADR 0008 authorizes engineering work only. Phase 3 may execute signed synthetic `SHADOW`
 commands after its dependencies are ready, but it may not migrate a room epoch, call a formal
