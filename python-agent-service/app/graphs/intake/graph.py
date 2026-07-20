@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from langchain_core.runnables import Runnable, RunnableLambda
+from langchain_core.runnables import Runnable, RunnableConfig, RunnableLambda
 from langgraph.graph import END, START, StateGraph
 
 from app.graph_runtime.topology import ClosedRouter
+from app.graphs.intake.errors import IntakeGraphContractError
 from app.graphs.intake.nodes import (
     IntakeCognitionNode,
     apply_dossier_patch,
@@ -20,19 +21,47 @@ from app.graphs.intake.nodes import (
     unconfigured_intake_lcel,
     validate_readiness,
 )
-from app.graphs.intake.errors import IntakeGraphContractError
 from app.graphs.intake.state import IntakeGraphStateV2, IntakeTurnContext
+from app.graphs.intake.validators import validate_cognition_patch
+
+
+class _ValidatedIntakeCognitionRunnable(Runnable[IntakeGraphStateV2, dict[str, Any]]):
+    def __init__(self, delegate: Runnable) -> None:
+        self._delegate = delegate
+
+    def invoke(
+        self,
+        input: IntakeGraphStateV2,
+        config: RunnableConfig | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        patch = self._delegate.invoke(input, config=config, **kwargs)
+        return validate_cognition_patch(input, patch)
+
+    async def ainvoke(
+        self,
+        input: IntakeGraphStateV2,
+        config: RunnableConfig | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        patch = await self._delegate.ainvoke(input, config=config, **kwargs)
+        return validate_cognition_patch(input, patch)
+
+
+def _reject_legacy_runnable_lambda(runnable: Runnable) -> None:
+    if any(isinstance(node.data, RunnableLambda) for node in runnable.get_graph().nodes.values()):
+        raise IntakeGraphContractError("INTAKE_LCEL_LEGACY_WRAPPER_FORBIDDEN")
 
 
 def build_intake_v2_graph(
     *,
     intake_lcel: IntakeCognitionNode | Runnable = unconfigured_intake_lcel,
 ) -> StateGraph:
-    if isinstance(intake_lcel, RunnableLambda):
-        raise IntakeGraphContractError("INTAKE_LCEL_LEGACY_WRAPPER_FORBIDDEN")
-    cognition_node = (
-        intake_lcel if isinstance(intake_lcel, Runnable) else guard_intake_cognition(intake_lcel)
-    )
+    if isinstance(intake_lcel, Runnable):
+        _reject_legacy_runnable_lambda(intake_lcel)
+        cognition_node = _ValidatedIntakeCognitionRunnable(intake_lcel)
+    else:
+        cognition_node = guard_intake_cognition(intake_lcel)
     builder = StateGraph(IntakeGraphStateV2, context_schema=IntakeTurnContext)
     builder.add_node("authorize_and_load", authorize_and_load)
     builder.add_node(

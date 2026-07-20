@@ -4,6 +4,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, cast
 
+from langgraph.checkpoint.base import BaseCheckpointSaver
+
 from app.graph_runtime.state import VersionPinsState
 from app.graphs.intake.contracts import IntakeTurnProposal
 from app.graphs.intake.errors import IntakeGraphContractError
@@ -55,11 +57,13 @@ def build_intake_runtime_bundle(
     transport: ModelTransport,
     profile: ModelProfile,
     policy: ModelInvocationPolicy,
-    checkpointer: Any,
+    checkpointer: BaseCheckpointSaver[Any],
     trusted_system_prompt: str = INTAKE_SYSTEM_PROMPT,
 ) -> IntakeRuntimeBundle:
     if checkpointer is None:
         raise IntakeGraphContractError("INTAKE_RUNTIME_CHECKPOINTER_REQUIRED")
+    if not isinstance(checkpointer, BaseCheckpointSaver):
+        raise IntakeGraphContractError("INTAKE_RUNTIME_CHECKPOINTER_INVALID")
     model_node = build_intake_model_node(
         transport=transport,
         profile=profile,

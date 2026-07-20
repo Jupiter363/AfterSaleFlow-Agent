@@ -11,6 +11,7 @@ from langchain_core.runnables import Runnable, RunnableConfig
 from langgraph.checkpoint.memory import InMemorySaver
 
 from app.contracts.v1.codec import canonical_sha256_omitting
+from app.graphs.intake.errors import IntakeGraphContractError
 from app.graphs.intake.graph import compile_intake_v2_graph
 from app.graphs.intake.lcel import INTAKE_SYSTEM_PROMPT, build_intake_model_node
 from app.graphs.intake.runtime import (
@@ -213,6 +214,28 @@ def _baseline_hash(bindings, version_pins, snapshot, event) -> str:
         context=IntakeTurnContext("EVENT", event),
     )
     return extract_intake_terminal_proposal(result).proposal_hash
+
+
+@pytest.mark.parametrize(
+    "checkpointer",
+    [
+        pytest.param(None, id="none"),
+        pytest.param(False, id="false"),
+        pytest.param(True, id="true"),
+        pytest.param(object(), id="object"),
+    ],
+)
+def test_runtime_bundle_requires_checkpoint_saver(checkpointer) -> None:
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_RUNTIME_CHECKPOINTER_(REQUIRED|INVALID)",
+    ):
+        build_intake_runtime_bundle(
+            transport=RecoveryTransport(),
+            profile=_profile(),
+            policy=_policy(),
+            checkpointer=checkpointer,
+        )
 
 
 @pytest.mark.parametrize(

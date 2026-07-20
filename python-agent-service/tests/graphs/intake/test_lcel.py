@@ -9,12 +9,12 @@ from langchain_core.exceptions import OutputParserException
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.runnables import RunnableLambda, RunnableSequence
+from langchain_core.runnables import RunnableLambda, RunnablePassthrough, RunnableSequence
 
 from app.contracts.v1.codec import canonical_sha256_omitting
 from app.graph_runtime.state_lens import StateLens
 from app.graphs.intake.errors import IntakeGraphContractError
-from app.graphs.intake.graph import compile_intake_v2_graph
+from app.graphs.intake.graph import build_intake_v2_graph, compile_intake_v2_graph
 from app.graphs.intake.lcel import (
     INTAKE_SYSTEM_PROMPT,
     build_intake_model_node,
@@ -171,9 +171,7 @@ def test_real_intake_lcel_is_governed_object_flow_with_human_text_isolation(
     assert result["execution_receipts"]["ATTEMPT_P4_USER_2_1"] == {
         "invocation_id": "ATTEMPT_P4_USER_2_1",
         "node_name": "intake_lcel",
-        "output_hash": result["execution_receipts"]["ATTEMPT_P4_USER_2_1"][
-            "output_hash"
-        ],
+        "output_hash": result["execution_receipts"]["ATTEMPT_P4_USER_2_1"]["output_hash"],
     }
     assert result["usage_by_invocation"]["ATTEMPT_P4_USER_2_1"] == {
         "input_tokens": 8,
@@ -188,6 +186,51 @@ def test_real_intake_lcel_is_governed_object_flow_with_human_text_isolation(
     assert marker in str(messages[1].content)
     assert bindings["private"]["actor_scope_hash"] not in str(messages)
     assert bindings["private"]["agent_session_id"] not in str(messages)
+
+
+@pytest.mark.parametrize(
+    "runnable",
+    [
+        pytest.param(
+            RunnablePassthrough() | RunnableLambda(lambda value: value),
+            id="sequence",
+        ),
+        pytest.param(
+            RunnableLambda(lambda value: value).with_config(tags=["legacy"]),
+            id="binding",
+        ),
+    ],
+)
+def test_nested_legacy_runnable_lambda_is_rejected(runnable) -> None:
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_LCEL_LEGACY_WRAPPER_FORBIDDEN",
+    ):
+        build_intake_v2_graph(intake_lcel=runnable)
+
+
+def test_arbitrary_runnable_patch_is_validated_at_graph_boundary(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+) -> None:
+    graph = compile_intake_v2_graph(intake_lcel=RunnablePassthrough())
+    state = graph.invoke(
+        new_intake_graph_state(bindings=bindings, version_pins=version_pins),
+        context=IntakeTurnContext("SNAPSHOT", snapshot),
+    )
+    state["bindings"]["command"].update(
+        command_id="COMMAND_P4_USER_2",
+        logical_run_id="RUN_P4_USER_2",
+        attempt_id="ATTEMPT_P4_USER_2_1",
+    )
+
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_COGNITION_PATCH_FIELDS_INVALID",
+    ):
+        graph.invoke(state, context=IntakeTurnContext("EVENT", event))
 
 
 def test_state_lens_exposes_only_authorized_window_summary_dossier_refs_and_versions(
@@ -264,6 +307,19 @@ def test_strict_parser_rejects_unknown_and_formal_action_fields(mutation) -> Non
 
     with pytest.raises(OutputParserException):
         built.parser.invoke(json.dumps(document))
+
+
+@pytest.mark.parametrize("confidence", [True, "0.9"])
+def test_strict_parser_rejects_non_numeric_confidence(confidence) -> None:
+    built = build_intake_model_node(
+        transport=IntakeTransport(),
+        profile=_profile(),
+        policy=_policy(),
+    )
+    import json
+
+    with pytest.raises(OutputParserException):
+        built.parser.invoke(json.dumps(_draft(confidence=confidence)))
 
 
 @pytest.mark.parametrize(

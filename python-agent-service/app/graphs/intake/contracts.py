@@ -176,7 +176,7 @@ class IntakeCognitionDraft(StrictIntakeModel):
     missing_fields: tuple[Identifier, ...] = Field(max_length=30)
     recommendation: Literal["ACCEPTED", "NEED_MORE_INFO", "NOT_ADMISSIBLE"]
     knowledge_answer_mode: Literal["NONE", "STUB"]
-    confidence: float = Field(ge=0, le=1, allow_inf_nan=False)
+    confidence: float = Field(strict=True, ge=0, le=1, allow_inf_nan=False)
 
     @model_validator(mode="after")
     def draft_invariants(self) -> IntakeCognitionDraft:
@@ -221,7 +221,7 @@ class IntakeTurnProposal(StrictIntakeModel):
     missing_fields: tuple[Identifier, ...] = Field(max_length=30)
     recommendation: Literal["ACCEPTED", "NEED_MORE_INFO", "NOT_ADMISSIBLE"]
     knowledge_answer_mode: Literal["NONE", "STUB"]
-    confidence: float = Field(ge=0, le=1)
+    confidence: float = Field(strict=True, ge=0, le=1, allow_inf_nan=False)
     profile_versions: ProposalProfileVersions
     proposal_hash: Sha256
 
