@@ -16,7 +16,10 @@ import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.
 import io.temporal.failure.ActivityFailure;
 import io.temporal.failure.ApplicationFailure;
 import io.temporal.failure.CanceledFailure;
+import io.temporal.workflow.Async;
+import io.temporal.workflow.CancellationScope;
 import io.temporal.workflow.ContinueAsNewOptions;
+import io.temporal.workflow.Promise;
 import io.temporal.workflow.Workflow;
 import java.time.Duration;
 import java.util.ArrayDeque;
@@ -66,6 +69,12 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
   private int runGeneration;
   private io.temporal.workflow.Promise<Void> runMaxAgeTimer;
   private boolean rolloverEnabled;
+  private boolean continueAsNewRequested;
+  private Promise<Void> activeOrchestration;
+  private CancellationScope activeCancellationScope;
+  private String activeOrchestrationCommandId;
+  private boolean activeCancellationRequested;
+  private IntakeWorkflowCommand deferredCancellation;
 
   @Override
   public IntakeRoomSnapshot run(IntakeRoomStart start) {
@@ -78,6 +87,10 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
     }
 
     while (true) {
+      if (activeOrchestration != null && activeOrchestration.isCompleted()) {
+        settleActiveOrchestration();
+        continue;
+      }
       if (shouldContinueAsNew() && canContinueAsNew()) {
         continueAsNew();
         return null;
@@ -87,6 +100,10 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
         continue;
       }
       if (roomPhase == IntakeRoomPhase.COMPLETED) {
+        if (activeOrchestration != null) {
+          Workflow.await(activeOrchestration::isCompleted);
+          continue;
+        }
         Workflow.await(Workflow::isEveryHandlerFinished);
         if (inbox.isEmpty()) {
           return state();
@@ -96,6 +113,7 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
       Workflow.await(
           () ->
               !inbox.isEmpty()
+                  || (activeOrchestration != null && activeOrchestration.isCompleted())
                   || (shouldContinueAsNew() && canContinueAsNew()));
     }
   }
@@ -108,6 +126,11 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
   @Override
   public void domainEventCommitted(IntakeDomainEventRef event) {
     inbox.addLast(new EventInput(Objects.requireNonNull(event, "event must not be null")));
+  }
+
+  @Override
+  public void requestContinueAsNew() {
+    continueAsNewRequested = true;
   }
 
   @Override
@@ -168,8 +191,9 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
         replayCommand(observed);
         if (pendingCommand != null
             && pendingCommand.commandId().equals(command.commandId())
-            && command.executionContext() != null) {
-          orchestrate(command);
+            && command.executionContext() != null
+            && activeOrchestration == null) {
+          startOrchestration(command);
         }
         return;
       }
@@ -205,6 +229,9 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
         return;
       }
     }
+    if (preemptsActivityCommand(command) && deferCancellation(command)) {
+      return;
+    }
     String rejection = businessRejection(command);
     if (rejection != null) {
       rejectCommand(command, rejection, true);
@@ -225,7 +252,7 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
     lastDecision = accepted;
     commandObservations.put(command.commandId(), new CommandObservation(command, accepted));
     if (command.executionContext() != null) {
-      orchestrate(command);
+      startOrchestration(command);
     }
   }
 
@@ -330,6 +357,11 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
     if (!applyEvent(event)) {
       return;
     }
+    if (expectedActivityOperationKey == null
+        && activeCancellationScope != null
+        && pendingCommand.commandId().equals(activeOrchestrationCommandId)) {
+      activeCancellationScope.cancel();
+    }
 
     eventObservations.put(event.eventId(), new EventObservation(event, true));
     nextEventSequence++;
@@ -379,6 +411,8 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
       processEvent(branch.committedEvent(), branch.operation().operationKey());
     } catch (IntakeActivityDeadlineExceeded failure) {
       protocolErrorCode = "INTAKE_ACTIVITY_DEADLINE_EXPIRED";
+    } catch (CanceledFailure failure) {
+      throw failure;
     } catch (ActivityFailure failure) {
       if (failure.getCause() instanceof CanceledFailure) {
         throw failure;
@@ -388,6 +422,82 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
       // Receipt validation failures are fail-closed and leave the command pending for recovery.
       protocolErrorCode = "INTAKE_ACTIVITY_RECEIPT_INVALID";
     }
+  }
+
+  private void startOrchestration(IntakeWorkflowCommand command) {
+    if (activeOrchestration != null) {
+      throw new IllegalStateException("an Intake Activity orchestration is already running");
+    }
+    activeOrchestrationCommandId = command.commandId();
+    activeCancellationRequested = false;
+    activeCancellationScope = Workflow.newCancellationScope(() -> orchestrate(command));
+    activeOrchestration = Async.procedure(activeCancellationScope::run);
+  }
+
+  private void settleActiveOrchestration() {
+    Promise<Void> completed = activeOrchestration;
+    String completedCommandId = activeOrchestrationCommandId;
+    boolean cancellationRequested = activeCancellationRequested;
+    IntakeWorkflowCommand cancellation = deferredCancellation;
+    try {
+      completed.get();
+    } catch (RuntimeException failure) {
+      if (!isCancellation(failure)) {
+        protocolErrorCode = "INTAKE_ACTIVITY_ORCHESTRATION_FAILED";
+      }
+    }
+    activeOrchestration = null;
+    activeCancellationScope = null;
+    activeOrchestrationCommandId = null;
+    activeCancellationRequested = false;
+    deferredCancellation = null;
+    if (cancellationRequested
+        && pendingCommand != null
+        && pendingCommand.commandId().equals(completedCommandId)) {
+      pendingCommand = null;
+      activityExecution = null;
+      protocolErrorCode = null;
+    }
+    if (cancellation != null) {
+      processCommand(cancellation);
+    }
+  }
+
+  private boolean preemptsActivityCommand(IntakeWorkflowCommand command) {
+    return command.commandType() == IntakeCommandType.INTAKE_CANCEL
+        && command.party() == IntakeParty.INITIATOR
+        && pendingCommand != null
+        && pendingCommand.executionContext() != null;
+  }
+
+  private boolean deferCancellation(IntakeWorkflowCommand command) {
+    if (activeOrchestration == null) {
+      pendingCommand = null;
+      activityExecution = null;
+      protocolErrorCode = null;
+      return false;
+    }
+    if (deferredCancellation != null) {
+      if (!deferredCancellation.equals(command)) {
+        rejectCommand(command, "CANCELLATION_ALREADY_PENDING", true);
+      }
+      return true;
+    }
+    deferredCancellation = command;
+    activeCancellationRequested = true;
+    activeCancellationScope.cancel();
+    return true;
+  }
+
+  private static boolean isCancellation(Throwable failure) {
+    Throwable current = failure;
+    while (current != null) {
+      if (current instanceof CanceledFailure) {
+        return true;
+      }
+      current = current.getCause();
+    }
+    return false;
   }
 
   private void ensureSnapshot(
@@ -828,10 +938,11 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
   }
 
   private boolean shouldContinueAsNew() {
-    return rolloverEnabled
-        && ((runMaxAgeTimer != null && runMaxAgeTimer.isCompleted())
+    return continueAsNewRequested
+        || (rolloverEnabled
+            && ((runMaxAgeTimer != null && runMaxAgeTimer.isCompleted())
             || Workflow.getInfo().isContinueAsNewSuggested()
-            || Workflow.getInfo().getHistoryLength() >= HISTORY_EVENT_LIMIT);
+            || Workflow.getInfo().getHistoryLength() >= HISTORY_EVENT_LIMIT));
   }
 
   private boolean canContinueAsNew() {
@@ -839,6 +950,8 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
         && inbox.isEmpty()
         && pendingCommand == null
         && activityExecution == null
+        && activeOrchestration == null
+        && deferredCancellation == null
         && Workflow.isEveryHandlerFinished();
   }
 

@@ -17,6 +17,9 @@ public interface IntakeRoomWorkflow {
   @SignalMethod(name = IntakeWorkflowProtocol.DOMAIN_EVENT_SIGNAL)
   void domainEventCommitted(IntakeDomainEventRef event);
 
+  @SignalMethod(name = IntakeWorkflowProtocol.REQUEST_CONTINUE_AS_NEW_SIGNAL)
+  void requestContinueAsNew();
+
   @QueryMethod(name = IntakeWorkflowProtocol.STATE_QUERY)
   IntakeRoomSnapshot state();
 

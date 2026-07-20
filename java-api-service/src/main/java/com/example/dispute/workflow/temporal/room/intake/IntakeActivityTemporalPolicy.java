@@ -13,6 +13,7 @@ public final class IntakeActivityTemporalPolicy {
 
   public static final Duration START_TO_CLOSE_TIMEOUT = Duration.ofMinutes(10);
   public static final Duration SCHEDULE_TO_CLOSE_TIMEOUT = Duration.ofMinutes(15);
+  public static final Duration HEARTBEAT_TIMEOUT = Duration.ofSeconds(15);
   public static final int MAXIMUM_ACTIVITY_ATTEMPTS = 3;
 
   private IntakeActivityTemporalPolicy() {}
@@ -27,6 +28,7 @@ public final class IntakeActivityTemporalPolicy {
     }
     Duration scheduleToClose = min(SCHEDULE_TO_CLOSE_TIMEOUT, remaining);
     Duration startToClose = min(START_TO_CLOSE_TIMEOUT, scheduleToClose);
+    Duration heartbeat = min(HEARTBEAT_TIMEOUT, startToClose);
     int attempts =
         Math.max(
             1,
@@ -36,6 +38,7 @@ public final class IntakeActivityTemporalPolicy {
         .setTaskQueue(AGENT_EXECUTION)
         .setStartToCloseTimeout(startToClose)
         .setScheduleToCloseTimeout(scheduleToClose)
+        .setHeartbeatTimeout(heartbeat)
         .setCancellationType(ActivityCancellationType.WAIT_CANCELLATION_COMPLETED)
         .setRetryOptions(
             RetryOptions.newBuilder()

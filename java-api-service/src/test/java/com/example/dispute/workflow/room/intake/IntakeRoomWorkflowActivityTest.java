@@ -33,18 +33,25 @@ import com.example.dispute.workflow.temporal.room.intake.IntakeRoomSnapshot;
 import com.example.dispute.workflow.temporal.room.intake.IntakeRoomStart;
 import com.example.dispute.workflow.temporal.room.intake.IntakeRoomWorkflow;
 import com.example.dispute.workflow.temporal.room.intake.IntakeRoomWorkflowImpl;
+import com.example.dispute.workflow.temporal.room.intake.IntakeTerminalReason;
 import com.example.dispute.workflow.temporal.room.intake.IntakeWorkflowCommand;
+import io.temporal.activity.Activity;
 import io.temporal.activity.ActivityOptions;
+import io.temporal.client.ActivityCompletionException;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowOptions;
+import io.temporal.client.WorkflowStub;
 import io.temporal.failure.ApplicationFailure;
 import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.worker.Worker;
 import java.time.Duration;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Predicate;
 import org.junit.jupiter.api.Test;
 
 class IntakeRoomWorkflowActivityTest {
@@ -236,6 +243,113 @@ class IntakeRoomWorkflowActivityTest {
     }
   }
 
+  @Test
+  void initiatorCancellationStopsTheRunningGraphBeforeItsTerminalCommit() {
+    try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+      String workflowQueue = "phase4-intake-running-cancellation";
+      FakeActivities activities = new FakeActivities(false, false, false, true);
+      Worker workflowWorker = environment.newWorker(workflowQueue);
+      workflowWorker.registerWorkflowImplementationTypes(IntakeRoomWorkflowImpl.class);
+      Worker activityWorker = environment.newWorker(AGENT_EXECUTION);
+      activityWorker.registerActivitiesImplementations(activities);
+      environment.start();
+
+      IntakeRoomWorkflow workflow = workflow(environment, workflowQueue, "running-cancellation");
+      WorkflowClient.start(workflow::run, start());
+      workflow.commandAccepted(
+          command(1, "CMD_RUNNING_GRAPH", IntakeCommandType.INTAKE_MESSAGE, null));
+      awaitTrue(activities.graphStarted, "Graph Activity did not start");
+
+      workflow.commandAccepted(
+          command(
+              2,
+              "CMD_CANCEL_RUNNING_GRAPH",
+              IntakeCommandType.INTAKE_CANCEL,
+              BranchOperation.CANCEL));
+      IntakeRoomSnapshot terminal =
+          WorkflowStub.fromTyped(workflow).getResult(IntakeRoomSnapshot.class);
+
+      assertThat(terminal.terminalReason()).isEqualTo(IntakeTerminalReason.CANCELLED);
+      assertThat(terminal.nextCommandSequence()).isEqualTo(3);
+      assertThat(terminal.nextEventSequence()).isEqualTo(2);
+      assertThat(activities.graphCancellations).hasValue(1);
+      assertThat(activities.finalizationRequests).isEmpty();
+      assertThat(activities.cancelRequests).hasSize(1);
+    }
+  }
+
+  @Test
+  void continueAsNewCarriesSequencesDedupeAndOneTimeSnapshotInitialization() {
+    try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+      String workflowQueue = "phase4-intake-continue-as-new";
+      FakeActivities activities = new FakeActivities();
+      Worker workflowWorker = environment.newWorker(workflowQueue);
+      workflowWorker.registerWorkflowImplementationTypes(IntakeRoomWorkflowImpl.class);
+      Worker activityWorker = environment.newWorker(AGENT_EXECUTION);
+      activityWorker.registerActivitiesImplementations(activities);
+      environment.start();
+
+      IntakeRoomWorkflow workflow = workflow(environment, workflowQueue, "continue-as-new");
+      WorkflowClient.start(workflow::run, start());
+      workflow.commandAccepted(
+          command(1, "CMD_BEFORE_ROLLOVER", IntakeCommandType.INTAKE_MESSAGE, null));
+      awaitState(workflow, state -> state.nextEventSequence() == 2);
+
+      workflow.requestContinueAsNew();
+      IntakeRoomSnapshot carried = awaitState(workflow, state -> state.runGeneration() == 1);
+      assertThat(carried.nextCommandSequence()).isEqualTo(2);
+      assertThat(carried.nextEventSequence()).isEqualTo(2);
+
+      workflow.commandAccepted(
+          command(2, "CMD_AFTER_ROLLOVER", IntakeCommandType.INTAKE_MESSAGE, null));
+      IntakeRoomSnapshot after = awaitState(workflow, state -> state.nextEventSequence() == 3);
+      assertThat(after.runGeneration()).isEqualTo(1);
+      assertThat(after.processedCommandCount()).isEqualTo(2);
+      assertThat(after.processedEventCount()).isEqualTo(2);
+      assertThat(activities.snapshotRequests).hasSize(1);
+      assertThat(activities.graphRequests).hasSize(2);
+      assertThat(activities.finalizationRequests).hasSize(2);
+    }
+  }
+
+  private static IntakeRoomSnapshot awaitState(
+      IntakeRoomWorkflow workflow, Predicate<IntakeRoomSnapshot> predicate) {
+    long deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
+    IntakeRoomSnapshot last = null;
+    while (System.nanoTime() < deadline) {
+      try {
+        last = workflow.state();
+        if (predicate.test(last)) {
+          return last;
+        }
+      } catch (RuntimeException ignored) {
+        // A Continue-As-New run can briefly move between executions while the query retries.
+      }
+      try {
+        Thread.sleep(10);
+      } catch (InterruptedException exception) {
+        Thread.currentThread().interrupt();
+        throw new AssertionError("test interrupted", exception);
+      }
+    }
+    throw new AssertionError("Intake state did not converge; last=" + last);
+  }
+
+  private static void awaitTrue(AtomicBoolean value, String failureMessage) {
+    long deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
+    while (!value.get() && System.nanoTime() < deadline) {
+      try {
+        Thread.sleep(10);
+      } catch (InterruptedException exception) {
+        Thread.currentThread().interrupt();
+        throw new AssertionError("test interrupted", exception);
+      }
+    }
+    if (!value.get()) {
+      throw new AssertionError(failureMessage);
+    }
+  }
+
   private static IntakeRoomWorkflow workflow(
       TestWorkflowEnvironment environment, String taskQueue, String suffix) {
     return environment
@@ -307,32 +421,45 @@ class IntakeRoomWorkflowActivityTest {
     return Long.toString(Math.abs(value) % 10).repeat(64);
   }
 
-  private static final class FakeActivities implements IntakeRoomActivities {
+  static final class FakeActivities implements IntakeRoomActivities {
 
-    private final boolean failGraph;
-    private final boolean loseFirstFinalizationCompletion;
-    private final boolean staleFinalization;
-    private final List<SnapshotPublicationRequest> snapshotRequests = new ArrayList<>();
-    private final List<GraphExecutionRequest> graphRequests = new ArrayList<>();
-    private final List<TurnFinalizationRequest> finalizationRequests = new ArrayList<>();
-    private final List<BranchCommitRequest> acceptRequests = new ArrayList<>();
-    private final Set<String> finalizationCommits = ConcurrentHashMap.newKeySet();
+    final boolean failGraph;
+    final boolean loseFirstFinalizationCompletion;
+    final boolean staleFinalization;
+    final boolean blockGraph;
+    final List<SnapshotPublicationRequest> snapshotRequests = new CopyOnWriteArrayList<>();
+    final List<GraphExecutionRequest> graphRequests = new CopyOnWriteArrayList<>();
+    final List<TurnFinalizationRequest> finalizationRequests = new CopyOnWriteArrayList<>();
+    final List<BranchCommitRequest> acceptRequests = new CopyOnWriteArrayList<>();
+    final List<BranchCommitRequest> cancelRequests = new CopyOnWriteArrayList<>();
+    final Set<String> finalizationCommits = ConcurrentHashMap.newKeySet();
+    final AtomicBoolean graphStarted = new AtomicBoolean();
+    final AtomicInteger graphCancellations = new AtomicInteger();
 
-    private FakeActivities() {
-      this(false, false, false);
+    FakeActivities() {
+      this(false, false, false, false);
     }
 
-    private FakeActivities(boolean failGraph) {
-      this(failGraph, false, false);
+    FakeActivities(boolean failGraph) {
+      this(failGraph, false, false, false);
     }
 
-    private FakeActivities(
+    FakeActivities(
         boolean failGraph,
         boolean loseFirstFinalizationCompletion,
         boolean staleFinalization) {
+      this(failGraph, loseFirstFinalizationCompletion, staleFinalization, false);
+    }
+
+    FakeActivities(
+        boolean failGraph,
+        boolean loseFirstFinalizationCompletion,
+        boolean staleFinalization,
+        boolean blockGraph) {
       this.failGraph = failGraph;
       this.loseFirstFinalizationCompletion = loseFirstFinalizationCompletion;
       this.staleFinalization = staleFinalization;
+      this.blockGraph = blockGraph;
     }
 
     @Override
@@ -356,6 +483,23 @@ class IntakeRoomWorkflowActivityTest {
     @Override
     public GraphExecutionReceipt executeGraph(GraphExecutionRequest request) {
       graphRequests.add(request);
+      if (blockGraph) {
+        graphStarted.set(true);
+        try {
+          while (true) {
+            Activity.getExecutionContext().heartbeat("waiting-for-cancellation");
+            Thread.sleep(10);
+          }
+        } catch (ActivityCompletionException failure) {
+          graphCancellations.incrementAndGet();
+          throw failure;
+        } catch (InterruptedException failure) {
+          Thread.currentThread().interrupt();
+          throw ApplicationFailure.newFailure(
+              "synthetic Graph worker interrupted",
+              IntakeActivityFailureTypes.INFRASTRUCTURE_RETRYABLE);
+        }
+      }
       if (failGraph) {
         throw ApplicationFailure.newNonRetryableFailure(
             "synthetic schema rejection", IntakeActivityFailureTypes.SCHEMA);
@@ -425,6 +569,7 @@ class IntakeRoomWorkflowActivityTest {
           event(
               "EVENT_" + request.envelope().commandId(),
               request.envelope(),
+              request.envelope().commandSequence(),
               IntakeDomainEventType.TURN_READY_TO_CONFIRM,
               request.operationKey(),
               graph.operation().resultHash(),
@@ -451,6 +596,7 @@ class IntakeRoomWorkflowActivityTest {
 
     @Override
     public BranchCommitReceipt cancelIntake(BranchCommitRequest request) {
+      cancelRequests.add(request);
       return branchReceipt(request, IntakeDomainEventType.CANCELLED);
     }
 
@@ -459,14 +605,19 @@ class IntakeRoomWorkflowActivityTest {
       return branchReceipt(request, IntakeDomainEventType.RESPONDENT_CONFIRMED);
     }
 
-    private static BranchCommitReceipt branchReceipt(
+    private BranchCommitReceipt branchReceipt(
         BranchCommitRequest request, IntakeDomainEventType eventType) {
       long revision = request.envelope().commandSequence();
+      long eventSequence =
+          blockGraph && request.operation() == BranchOperation.CANCEL
+              ? 1
+              : request.envelope().commandSequence();
       String resultHash = hash(9);
       IntakeDomainEventRef event =
           event(
               "EVENT_" + request.envelope().commandId(),
               request.envelope(),
+              eventSequence,
               eventType,
               request.operationKey(),
               resultHash,
@@ -512,6 +663,7 @@ class IntakeRoomWorkflowActivityTest {
     private static IntakeDomainEventRef event(
         String eventId,
         ActivityEnvelope envelope,
+        long eventSequence,
         IntakeDomainEventType eventType,
         String operationKey,
         String resultHash,
@@ -523,7 +675,7 @@ class IntakeRoomWorkflowActivityTest {
           eventId,
           "urn:after-sale-flow:intake-event:" + eventId,
           hash(5),
-          envelope.commandSequence(),
+          eventSequence,
           eventType,
           envelope.party(),
           envelope.commandId(),
