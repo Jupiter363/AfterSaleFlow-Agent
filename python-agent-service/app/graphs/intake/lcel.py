@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Literal, cast
@@ -17,7 +17,6 @@ from langchain_core.runnables import (
     RunnablePassthrough,
     RunnableSequence,
 )
-from pydantic import PrivateAttr
 from typing_extensions import TypedDict
 
 from app.contracts.v1.codec import canonical_sha256, canonicalize
@@ -97,25 +96,93 @@ _IntakeModelTestPhase = Literal["before_model", "after_model_before_checkpoint"]
 _IntakeModelTestHook = Callable[[_IntakeModelTestPhase], None]
 
 
-class _VettedIntakeModelRunnable(RunnableSequence):
-    _vetted_token: object = PrivateAttr()
-    _sealed_steps: tuple[Runnable, ...] = PrivateAttr()
-    _test_hook: _IntakeModelTestHook | None = PrivateAttr(default=None)
+@dataclass(frozen=True, slots=True)
+class _RunnableStructureSeal:
+    runnable: Runnable
+    sequence_middle: list[Runnable] | None
+    parallel_steps: dict[str, Runnable] | None
+    children: tuple[tuple[str, _RunnableStructureSeal], ...]
 
+
+def _seal_runnable_structure(runnable: Runnable) -> _RunnableStructureSeal:
+    if type(runnable) is RunnableSequence:
+        sequence = cast(RunnableSequence, runnable)
+        children = (
+            ("first", _seal_runnable_structure(sequence.first)),
+            *tuple(
+                (f"middle:{index}", _seal_runnable_structure(step))
+                for index, step in enumerate(sequence.middle)
+            ),
+            ("last", _seal_runnable_structure(sequence.last)),
+        )
+        return _RunnableStructureSeal(
+            runnable=runnable,
+            sequence_middle=sequence.middle,
+            parallel_steps=None,
+            children=children,
+        )
+    if type(runnable) is RunnableParallel:
+        parallel = cast(RunnableParallel, runnable)
+        return _RunnableStructureSeal(
+            runnable=runnable,
+            sequence_middle=None,
+            parallel_steps=parallel.steps__,
+            children=tuple(
+                (key, _seal_runnable_structure(step)) for key, step in parallel.steps__.items()
+            ),
+        )
+    return _RunnableStructureSeal(
+        runnable=runnable,
+        sequence_middle=None,
+        parallel_steps=None,
+        children=(),
+    )
+
+
+def _matches_runnable_structure(value: Runnable, seal: _RunnableStructureSeal) -> bool:
+    if value is not seal.runnable or type(value) is not type(seal.runnable):
+        return False
+    if type(value) is RunnableSequence:
+        sequence = cast(RunnableSequence, value)
+        if sequence.middle is not seal.sequence_middle:
+            return False
+        expected_steps = [child.runnable for _, child in seal.children]
+        current_steps = [sequence.first, *sequence.middle, sequence.last]
+        return len(current_steps) == len(expected_steps) and all(
+            _matches_runnable_structure(current, child)
+            for current, (_, child) in zip(current_steps, seal.children)
+        )
+    if type(value) is RunnableParallel:
+        parallel = cast(RunnableParallel, value)
+        if parallel.steps__ is not seal.parallel_steps:
+            return False
+        if tuple(parallel.steps__) != tuple(key for key, _ in seal.children):
+            return False
+        return all(
+            _matches_runnable_structure(parallel.steps__[key], child)
+            for key, child in seal.children
+        )
+    return not seal.children
+
+
+class _VettedIntakeModelRunnable(Runnable[IntakeGraphStateV2, dict[str, Any]]):
     def __init__(
         self,
-        *steps: Runnable,
-        name: str | None = None,
+        pipeline: RunnableSequence,
+        component_seal: _IntakeComponentSeal,
         _token: object,
+        name: str | None = None,
         _test_hook: _IntakeModelTestHook | None = None,
     ) -> None:
         if _token is not _VETTED_INTAKE_RUNNABLE_TOKEN:
             raise IntakeGraphContractError("INTAKE_LCEL_RUNNABLE_NOT_VETTED")
         if _test_hook is not None and not callable(_test_hook):
             raise IntakeGraphContractError("INTAKE_LCEL_TEST_HOOK_INVALID")
-        super().__init__(*steps, name=name)
+        self.name = name
         self._vetted_token = _token
-        self._sealed_steps = tuple(self.steps)
+        self._pipeline = pipeline
+        self._structure_seal = _seal_runnable_structure(pipeline)
+        self._component_seal = component_seal
         self._test_hook = _test_hook
 
     def invoke(
@@ -124,11 +191,9 @@ class _VettedIntakeModelRunnable(RunnableSequence):
         config: RunnableConfig | None = None,
         **kwargs: Any,
     ) -> Any:
-        self._require_sealed()
-        self._run_test_hook("before_model")
-        self._require_sealed()
-        output = super().invoke(input, config=config, **kwargs)
-        self._run_test_hook("after_model_before_checkpoint")
+        self._before_execution()
+        output = self._pipeline.invoke(input, config=config, **kwargs)
+        self._after_execution()
         return output
 
     async def ainvoke(
@@ -137,20 +202,110 @@ class _VettedIntakeModelRunnable(RunnableSequence):
         config: RunnableConfig | None = None,
         **kwargs: Any,
     ) -> Any:
+        self._before_execution()
+        output = await self._pipeline.ainvoke(input, config=config, **kwargs)
+        self._after_execution()
+        return output
+
+    def batch(
+        self,
+        inputs: list[IntakeGraphStateV2],
+        config: RunnableConfig | list[RunnableConfig] | None = None,
+        *,
+        return_exceptions: bool = False,
+        **kwargs: Any,
+    ) -> list[dict[str, Any]]:
+        self._before_execution()
+        output = self._pipeline.batch(
+            inputs,
+            config=config,
+            return_exceptions=return_exceptions,
+            **kwargs,
+        )
+        self._after_execution()
+        return output
+
+    async def abatch(
+        self,
+        inputs: list[IntakeGraphStateV2],
+        config: RunnableConfig | list[RunnableConfig] | None = None,
+        *,
+        return_exceptions: bool = False,
+        **kwargs: Any,
+    ) -> list[dict[str, Any]]:
+        self._before_execution()
+        output = await self._pipeline.abatch(
+            inputs,
+            config=config,
+            return_exceptions=return_exceptions,
+            **kwargs,
+        )
+        self._after_execution()
+        return output
+
+    def stream(
+        self,
+        input: IntakeGraphStateV2,
+        config: RunnableConfig | None = None,
+        **kwargs: Any,
+    ) -> Iterator[dict[str, Any]]:
+        self._before_execution()
+        for chunk in self._pipeline.stream(input, config=config, **kwargs):
+            self._require_sealed()
+            yield chunk
+        self._after_execution()
+
+    async def astream(
+        self,
+        input: IntakeGraphStateV2,
+        config: RunnableConfig | None = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[dict[str, Any]]:
+        self._before_execution()
+        async for chunk in self._pipeline.astream(input, config=config, **kwargs):
+            self._require_sealed()
+            yield chunk
+        self._after_execution()
+
+    def transform(
+        self,
+        input: Iterator[IntakeGraphStateV2],
+        config: RunnableConfig | None = None,
+        **kwargs: Any,
+    ) -> Iterator[dict[str, Any]]:
+        self._before_execution()
+        for chunk in self._pipeline.transform(input, config=config, **kwargs):
+            self._require_sealed()
+            yield chunk
+        self._after_execution()
+
+    async def atransform(
+        self,
+        input: AsyncIterator[IntakeGraphStateV2],
+        config: RunnableConfig | None = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[dict[str, Any]]:
+        self._before_execution()
+        async for chunk in self._pipeline.atransform(input, config=config, **kwargs):
+            self._require_sealed()
+            yield chunk
+        self._after_execution()
+
+    def _is_sealed(self) -> bool:
+        return (
+            self._vetted_token is _VETTED_INTAKE_RUNNABLE_TOKEN
+            and _matches_runnable_structure(self._pipeline, self._structure_seal)
+            and _matches_intake_component_seal(self._component_seal)
+        )
+
+    def _before_execution(self) -> None:
         self._require_sealed()
         self._run_test_hook("before_model")
         self._require_sealed()
-        output = await super().ainvoke(input, config=config, **kwargs)
-        self._run_test_hook("after_model_before_checkpoint")
-        return output
 
-    def _is_sealed(self) -> bool:
-        current_steps = self.steps
-        return (
-            self._vetted_token is _VETTED_INTAKE_RUNNABLE_TOKEN
-            and len(current_steps) == len(self._sealed_steps)
-            and all(current is sealed for current, sealed in zip(current_steps, self._sealed_steps))
-        )
+    def _after_execution(self) -> None:
+        self._run_test_hook("after_model_before_checkpoint")
+        self._require_sealed()
 
     def _run_test_hook(self, phase: _IntakeModelTestPhase) -> None:
         if self._test_hook is not None:
@@ -167,12 +322,14 @@ _VETTED_INTAKE_RUNNABLES: WeakValueDictionary[int, _VettedIntakeModelRunnable] =
 
 
 def _create_vetted_intake_model_runnable(
-    *steps: Runnable,
+    pipeline: RunnableSequence,
+    component_seal: _IntakeComponentSeal,
     name: str | None = None,
     test_hook: _IntakeModelTestHook | None = None,
 ) -> _VettedIntakeModelRunnable:
     runnable = _VettedIntakeModelRunnable(
-        *steps,
+        pipeline,
+        component_seal,
         name=name,
         _token=_VETTED_INTAKE_RUNNABLE_TOKEN,
         _test_hook=test_hook,
@@ -400,6 +557,138 @@ class IntakePatchProjectorRunnable(Runnable[Mapping[str, Any], dict[str, Any]]):
         return validate_cognition_patch(state, patch)
 
 
+@dataclass(frozen=True, slots=True)
+class _IntakeComponentSeal:
+    lens: StateLens[IntakeGraphStateV2, IntakePromptInput]
+    lens_name: str
+    lens_source_fields: tuple[str, ...]
+    lens_selector: Callable[[Mapping[str, Any]], Mapping[str, Any]]
+    lens_adapter: Any
+    prompt: ChatPromptTemplate
+    prompt_messages: list[Any]
+    prompt_messages_snapshot: list[Any]
+    prompt_input_variables: tuple[str, ...]
+    prompt_optional_variables: tuple[str, ...]
+    prompt_input_types: dict[str, Any]
+    prompt_partial_variables: dict[str, Any]
+    prompt_output_parser: Any
+    prompt_validate_template: bool
+    model: GovernedChatModel
+    model_profile: ModelProfile
+    model_policy: ModelInvocationPolicy
+    model_output_type: type[IntakeCognitionDraft]
+    parser: PydanticOutputParser[IntakeCognitionDraft]
+    parser_pydantic_object: type[IntakeCognitionDraft]
+    parser_diff: bool
+    preflight: IntakeModelPreflightRunnable
+    guardrail: IntakeGuardrailRunnable
+    patch_projector: IntakePatchProjectorRunnable
+    profile: ModelProfile
+    policy: ModelInvocationPolicy
+    profile_snapshot: ModelProfile
+    policy_snapshot: ModelInvocationPolicy
+
+
+def _seal_intake_components(
+    *,
+    lens: StateLens[IntakeGraphStateV2, IntakePromptInput],
+    prompt: ChatPromptTemplate,
+    model: GovernedChatModel,
+    parser: PydanticOutputParser[IntakeCognitionDraft],
+    preflight: IntakeModelPreflightRunnable,
+    guardrail: IntakeGuardrailRunnable,
+    patch_projector: IntakePatchProjectorRunnable,
+    profile: ModelProfile,
+    policy: ModelInvocationPolicy,
+) -> _IntakeComponentSeal:
+    return _IntakeComponentSeal(
+        lens=lens,
+        lens_name=lens.name,
+        lens_source_fields=lens.source_fields,
+        lens_selector=lens._selector,
+        lens_adapter=lens._adapter,
+        prompt=prompt,
+        prompt_messages=prompt.messages,
+        prompt_messages_snapshot=deepcopy(prompt.messages),
+        prompt_input_variables=tuple(prompt.input_variables),
+        prompt_optional_variables=tuple(prompt.optional_variables),
+        prompt_input_types=deepcopy(prompt.input_types),
+        prompt_partial_variables=deepcopy(prompt.partial_variables),
+        prompt_output_parser=prompt.output_parser,
+        prompt_validate_template=prompt.validate_template,
+        model=model,
+        model_profile=model.profile,
+        model_policy=model.policy,
+        model_output_type=model._output_type,
+        parser=parser,
+        parser_pydantic_object=parser.pydantic_object,
+        parser_diff=parser.diff,
+        preflight=preflight,
+        guardrail=guardrail,
+        patch_projector=patch_projector,
+        profile=profile,
+        policy=policy,
+        profile_snapshot=deepcopy(profile),
+        policy_snapshot=deepcopy(policy),
+    )
+
+
+def _matches_intake_component_seal(seal: _IntakeComponentSeal) -> bool:
+    lens = seal.lens
+    if (
+        lens.name != seal.lens_name
+        or lens.source_fields != seal.lens_source_fields
+        or lens._selector is not seal.lens_selector
+        or lens._adapter is not seal.lens_adapter
+    ):
+        return False
+
+    prompt = seal.prompt
+    if (
+        prompt.messages is not seal.prompt_messages
+        or prompt.messages != seal.prompt_messages_snapshot
+        or tuple(prompt.input_variables) != seal.prompt_input_variables
+        or tuple(prompt.optional_variables) != seal.prompt_optional_variables
+        or prompt.input_types != seal.prompt_input_types
+        or prompt.partial_variables != seal.prompt_partial_variables
+        or prompt.output_parser is not seal.prompt_output_parser
+        or prompt.validate_template is not seal.prompt_validate_template
+    ):
+        return False
+
+    model = seal.model
+    if (
+        model.profile is not seal.model_profile
+        or model.policy is not seal.model_policy
+        or model._output_type is not seal.model_output_type
+        or model.profile != seal.profile_snapshot
+        or model.policy != seal.policy_snapshot
+    ):
+        return False
+
+    parser = seal.parser
+    if (
+        parser.pydantic_object is not seal.parser_pydantic_object
+        or parser.diff is not seal.parser_diff
+    ):
+        return False
+
+    return (
+        seal.preflight._profile is seal.profile
+        and seal.preflight._policy is seal.policy
+        and seal.preflight._profile == seal.profile_snapshot
+        and seal.preflight._policy == seal.policy_snapshot
+        and seal.guardrail._profile is seal.profile
+        and seal.guardrail._policy is seal.policy
+        and seal.guardrail._profile == seal.profile_snapshot
+        and seal.guardrail._policy == seal.policy_snapshot
+        and seal.patch_projector._profile is seal.profile
+        and seal.patch_projector._policy is seal.policy
+        and seal.patch_projector._profile == seal.profile_snapshot
+        and seal.patch_projector._policy == seal.policy_snapshot
+    )
+
+
 def build_intake_model_node(
     *,
     transport: ModelTransport,
@@ -459,8 +748,20 @@ def build_intake_model_node(
     guardrail = IntakeGuardrailRunnable(profile=profile, policy=policy)
     patch_projector = IntakePatchProjectorRunnable(profile=profile, policy=policy)
     pipeline = preflight | state_and_generation | guardrail | patch_projector
+    component_seal = _seal_intake_components(
+        lens=lens,
+        prompt=prompt,
+        model=model,
+        parser=parser,
+        preflight=preflight,
+        guardrail=guardrail,
+        patch_projector=patch_projector,
+        profile=profile,
+        policy=policy,
+    )
     runnable = _create_vetted_intake_model_runnable(
-        *cast(RunnableSequence, pipeline).steps,
+        cast(RunnableSequence, pipeline),
+        component_seal,
         name="intake_lcel.vetted",
         test_hook=_test_hook,
     )

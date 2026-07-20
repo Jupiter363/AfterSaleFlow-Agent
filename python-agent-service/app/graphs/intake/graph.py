@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+from weakref import WeakSet
 
 from langchain_core.runnables import Runnable, RunnableConfig
 from langgraph.graph import END, START, StateGraph
@@ -49,16 +50,53 @@ class _ValidatedIntakeCognitionRunnable(Runnable[IntakeGraphStateV2, dict[str, A
         return validate_cognition_patch(input, patch)
 
 
+_TEST_ONLY_INTAKE_COGNITION_TOKEN = object()
+
+
+class _TestOnlyIntakeCognition:
+    __slots__ = ("_node", "_token", "__weakref__")
+
+    def __init__(self, node: IntakeCognitionNode, *, _token: object) -> None:
+        if _token is not _TEST_ONLY_INTAKE_COGNITION_TOKEN or not callable(node):
+            raise IntakeGraphContractError("INTAKE_LCEL_RUNNABLE_NOT_VETTED")
+        self._node = node
+        self._token = _token
+
+
+_TEST_ONLY_INTAKE_COGNITION_NODES: WeakSet[_TestOnlyIntakeCognition] = WeakSet()
+
+
+def _create_test_only_intake_cognition(
+    node: IntakeCognitionNode,
+) -> _TestOnlyIntakeCognition:
+    wrapped = _TestOnlyIntakeCognition(
+        node,
+        _token=_TEST_ONLY_INTAKE_COGNITION_TOKEN,
+    )
+    _TEST_ONLY_INTAKE_COGNITION_NODES.add(wrapped)
+    return wrapped
+
+
+def _is_test_only_intake_cognition(value: Any) -> bool:
+    return (
+        type(value) is _TestOnlyIntakeCognition
+        and value in _TEST_ONLY_INTAKE_COGNITION_NODES
+        and value._token is _TEST_ONLY_INTAKE_COGNITION_TOKEN
+    )
+
+
 def build_intake_v2_graph(
     *,
-    intake_lcel: IntakeCognitionNode | Runnable = unconfigured_intake_lcel,
+    intake_lcel: Runnable | _TestOnlyIntakeCognition | None = None,
 ) -> StateGraph:
-    if isinstance(intake_lcel, Runnable):
-        if not _is_vetted_intake_model_runnable(intake_lcel):
-            raise IntakeGraphContractError("INTAKE_LCEL_RUNNABLE_NOT_VETTED")
+    if intake_lcel is None:
+        cognition_node = guard_intake_cognition(unconfigured_intake_lcel)
+    elif _is_vetted_intake_model_runnable(intake_lcel):
         cognition_node = _ValidatedIntakeCognitionRunnable(intake_lcel)
+    elif _is_test_only_intake_cognition(intake_lcel):
+        cognition_node = guard_intake_cognition(intake_lcel._node)
     else:
-        cognition_node = guard_intake_cognition(intake_lcel)
+        raise IntakeGraphContractError("INTAKE_LCEL_RUNNABLE_NOT_VETTED")
     builder = StateGraph(IntakeGraphStateV2, context_schema=IntakeTurnContext)
     builder.add_node("authorize_and_load", authorize_and_load)
     builder.add_node(
@@ -102,7 +140,7 @@ def build_intake_v2_graph(
 
 def compile_intake_v2_graph(
     *,
-    intake_lcel: IntakeCognitionNode | Runnable = unconfigured_intake_lcel,
+    intake_lcel: Runnable | _TestOnlyIntakeCognition | None = None,
     checkpointer: Any = None,
 ):
     return build_intake_v2_graph(intake_lcel=intake_lcel).compile(checkpointer=checkpointer)

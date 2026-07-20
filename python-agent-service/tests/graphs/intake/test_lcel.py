@@ -13,6 +13,7 @@ from langchain_core.runnables import (
     RouterRunnable,
     RunnableBranch,
     RunnableLambda,
+    RunnableParallel,
     RunnablePassthrough,
     RunnableSequence,
 )
@@ -20,7 +21,11 @@ from langchain_core.runnables import (
 from app.contracts.v1.codec import canonical_sha256_omitting
 from app.graph_runtime.state_lens import StateLens
 from app.graphs.intake.errors import IntakeGraphContractError
-from app.graphs.intake.graph import build_intake_v2_graph, compile_intake_v2_graph
+from app.graphs.intake.graph import (
+    _create_test_only_intake_cognition,
+    build_intake_v2_graph,
+    compile_intake_v2_graph,
+)
 from app.graphs.intake.lcel import (
     INTAKE_SYSTEM_PROMPT,
     build_intake_model_node,
@@ -123,7 +128,9 @@ def _policy() -> ModelInvocationPolicy:
 
 
 def _event_state(bindings, version_pins, snapshot, event):
-    graph = compile_intake_v2_graph(intake_lcel=deterministic_message_fallback)
+    graph = compile_intake_v2_graph(
+        intake_lcel=_create_test_only_intake_cognition(deterministic_message_fallback)
+    )
     state = graph.invoke(
         new_intake_graph_state(bindings=bindings, version_pins=version_pins),
         context=IntakeTurnContext("SNAPSHOT", snapshot),
@@ -170,8 +177,8 @@ def test_real_intake_lcel_is_governed_object_flow_with_human_text_isolation(
     assert isinstance(built.prompt, ChatPromptTemplate)
     assert isinstance(built.model, GovernedChatModel)
     assert isinstance(built.parser, PydanticOutputParser)
-    assert isinstance(built.runnable, RunnableSequence)
-    assert all(not isinstance(step, RunnableLambda) for step in built.runnable.steps)
+    assert not isinstance(built.runnable, RunnableSequence)
+    assert not hasattr(built.runnable, "steps")
     assert transport.generate_calls == 1
     assert result["result_json"]["readiness"] == "READY_TO_CONFIRM"
     assert result["execution_receipts"]["ATTEMPT_P4_USER_2_1"] == {
@@ -231,12 +238,33 @@ def test_unvetted_runnable_is_rejected(runnable) -> None:
         build_intake_v2_graph(intake_lcel=runnable)
 
 
-def test_vetted_runnable_identity_and_steps_are_sealed() -> None:
+def test_raw_callable_is_rejected_without_the_test_only_factory() -> None:
+    def raw_callable(state, runtime):
+        del state, runtime
+        return {}
+
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_LCEL_RUNNABLE_NOT_VETTED",
+    ):
+        build_intake_v2_graph(intake_lcel=raw_callable)
+
+
+def _mutate_nested_parallel_step(runnable) -> None:
+    pipeline = runnable._pipeline
+    assert isinstance(pipeline, RunnableSequence)
+    state_and_generation = pipeline.middle[0]
+    assert isinstance(state_and_generation, RunnableParallel)
+    state_and_generation.steps__["generation"] = RunnablePassthrough()
+
+
+def test_vetted_runnable_identity_and_full_nested_structure_are_sealed() -> None:
     copied = build_intake_model_node(
         transport=IntakeTransport(),
         profile=_profile(),
         policy=_policy(),
-    ).runnable.model_copy()
+    ).runnable
+    copied = copy.copy(copied)
     with pytest.raises(
         IntakeGraphContractError,
         match="INTAKE_LCEL_RUNNABLE_NOT_VETTED",
@@ -248,7 +276,7 @@ def test_vetted_runnable_identity_and_steps_are_sealed() -> None:
         profile=_profile(),
         policy=_policy(),
     ).runnable
-    mutated.middle.append(RunnablePassthrough())
+    _mutate_nested_parallel_step(mutated)
     with pytest.raises(
         IntakeGraphContractError,
         match="INTAKE_LCEL_RUNNABLE_NOT_VETTED",
@@ -259,6 +287,178 @@ def test_vetted_runnable_identity_and_steps_are_sealed() -> None:
         match="INTAKE_LCEL_RUNNABLE_NOT_VETTED",
     ):
         build_intake_v2_graph(intake_lcel=mutated)
+
+    model_flow_mutated = build_intake_model_node(
+        transport=IntakeTransport(),
+        profile=_profile(),
+        policy=_policy(),
+    )
+    assert isinstance(model_flow_mutated.model_flow, RunnableSequence)
+    model_flow_mutated.model_flow.middle[0] = RunnablePassthrough()
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_LCEL_RUNNABLE_NOT_VETTED",
+    ):
+        model_flow_mutated.runnable.invoke({})
+
+    parser_flow_mutated = build_intake_model_node(
+        transport=IntakeTransport(),
+        profile=_profile(),
+        policy=_policy(),
+    )
+    parsed_generation = parser_flow_mutated.model_flow.last
+    assert isinstance(parsed_generation, RunnableParallel)
+    parsed_generation.steps__["draft"] = RunnablePassthrough()
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_LCEL_RUNNABLE_NOT_VETTED",
+    ):
+        parser_flow_mutated.runnable.invoke({})
+
+
+@pytest.mark.parametrize("entrypoint", ["invoke", "batch", "stream", "transform"])
+def test_nested_mutation_fails_closed_for_all_sync_execution_entrypoints(entrypoint) -> None:
+    runnable = build_intake_model_node(
+        transport=IntakeTransport(),
+        profile=_profile(),
+        policy=_policy(),
+    ).runnable
+    _mutate_nested_parallel_step(runnable)
+
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_LCEL_RUNNABLE_NOT_VETTED",
+    ):
+        if entrypoint == "invoke":
+            runnable.invoke({})
+        elif entrypoint == "batch":
+            runnable.batch([{}])
+        elif entrypoint == "stream":
+            list(runnable.stream({}))
+        else:
+            list(runnable.transform(iter([{}])))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entrypoint", ["ainvoke", "abatch", "astream", "atransform"])
+async def test_nested_mutation_fails_closed_for_all_async_execution_entrypoints(
+    entrypoint,
+) -> None:
+    runnable = build_intake_model_node(
+        transport=IntakeTransport(),
+        profile=_profile(),
+        policy=_policy(),
+    ).runnable
+    _mutate_nested_parallel_step(runnable)
+
+    async def inputs():
+        yield {}
+
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_LCEL_RUNNABLE_NOT_VETTED",
+    ):
+        if entrypoint == "ainvoke":
+            await runnable.ainvoke({})
+        elif entrypoint == "abatch":
+            await runnable.abatch([{}])
+        elif entrypoint == "astream":
+            [chunk async for chunk in runnable.astream({})]
+        else:
+            [chunk async for chunk in runnable.atransform(inputs())]
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        pytest.param(
+            lambda built: built.prompt.messages.__setitem__(
+                0,
+                SystemMessage(content="untrusted system replacement"),
+            ),
+            id="prompt-messages",
+        ),
+        pytest.param(
+            lambda built: setattr(built.lens, "_selector", lambda state: state),
+            id="lens-selector",
+        ),
+        pytest.param(
+            lambda built: object.__setattr__(
+                built.model,
+                "profile",
+                _profile().model_copy(update={"profile_id": "untrusted-model"}),
+            ),
+            id="model-profile",
+        ),
+        pytest.param(
+            lambda built: object.__setattr__(
+                built.model.profile,
+                "profile_id",
+                "untrusted-profile-in-place",
+            ),
+            id="model-profile-in-place",
+        ),
+        pytest.param(
+            lambda built: object.__setattr__(
+                built.model,
+                "policy",
+                _policy().model_copy(update={"policy_version": "untrusted-policy"}),
+            ),
+            id="model-policy",
+        ),
+        pytest.param(
+            lambda built: object.__setattr__(
+                built.model.policy,
+                "policy_version",
+                "untrusted-policy-in-place",
+            ),
+            id="model-policy-in-place",
+        ),
+        pytest.param(
+            lambda built: setattr(built.parser, "pydantic_object", dict),
+            id="parser-output-type",
+        ),
+        pytest.param(
+            lambda built: setattr(
+                built.preflight,
+                "_policy",
+                _policy().model_copy(update={"policy_version": "untrusted-preflight"}),
+            ),
+            id="preflight-policy",
+        ),
+        pytest.param(
+            lambda built: setattr(
+                built.guardrail,
+                "_profile",
+                _profile().model_copy(update={"profile_id": "untrusted-guardrail"}),
+            ),
+            id="guardrail-profile",
+        ),
+        pytest.param(
+            lambda built: setattr(
+                built.patch_projector,
+                "_policy",
+                _policy().model_copy(update={"policy_version": "untrusted-projector"}),
+            ),
+            id="patch-projector-policy",
+        ),
+    ],
+)
+def test_leaf_component_mutation_fails_closed_before_model_invocation(mutation) -> None:
+    transport = IntakeTransport()
+    built = build_intake_model_node(
+        transport=transport,
+        profile=_profile(),
+        policy=_policy(),
+    )
+    mutation(built)
+
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_LCEL_RUNNABLE_NOT_VETTED",
+    ):
+        built.runnable.invoke({})
+    assert transport.generate_calls == 0
 
 
 def test_state_lens_exposes_only_authorized_window_summary_dossier_refs_and_versions(

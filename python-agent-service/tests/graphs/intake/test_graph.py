@@ -10,7 +10,11 @@ from langgraph.checkpoint.memory import InMemorySaver
 
 from app.contracts.v1.codec import canonical_sha256_omitting
 from app.graphs.intake.errors import IntakeGraphContractError
-from app.graphs.intake.graph import build_intake_v2_graph, compile_intake_v2_graph
+from app.graphs.intake.graph import (
+    _create_test_only_intake_cognition,
+    build_intake_v2_graph,
+    compile_intake_v2_graph,
+)
 from app.graphs.intake.nodes import deterministic_message_fallback
 from app.graphs.intake.state import IntakeTurnContext, new_intake_graph_state
 
@@ -24,7 +28,9 @@ SCHEMA = json.loads(
 
 
 def _run_snapshot(bindings, version_pins, snapshot):
-    graph = compile_intake_v2_graph(intake_lcel=deterministic_message_fallback)
+    graph = compile_intake_v2_graph(
+        intake_lcel=_create_test_only_intake_cognition(deterministic_message_fallback)
+    )
     state = new_intake_graph_state(bindings=bindings, version_pins=version_pins)
     return graph, graph.invoke(
         state,
@@ -54,9 +60,9 @@ def test_persisted_state_accepts_command_delta_but_rejects_private_drift(
     snapshot,
     event,
 ) -> None:
-    graph = build_intake_v2_graph(intake_lcel=deterministic_message_fallback).compile(
-        checkpointer=InMemorySaver()
-    )
+    graph = build_intake_v2_graph(
+        intake_lcel=_create_test_only_intake_cognition(deterministic_message_fallback)
+    ).compile(checkpointer=InMemorySaver())
     config = {"configurable": {"thread_id": "intake-private-binding-test"}}
     state = new_intake_graph_state(bindings=bindings, version_pins=version_pins)
     first = graph.invoke(
@@ -128,7 +134,7 @@ def test_event_applies_once_and_uses_injected_cognition(
             },
         }
 
-    graph = compile_intake_v2_graph(intake_lcel=cognition)
+    graph = compile_intake_v2_graph(intake_lcel=_create_test_only_intake_cognition(cognition))
     state = new_intake_graph_state(bindings=bindings, version_pins=version_pins)
     state = graph.invoke(state, context=IntakeTurnContext("SNAPSHOT", snapshot))
     next_bindings = copy.deepcopy(bindings)
@@ -418,7 +424,7 @@ def test_cognition_cannot_overwrite_authority_state(
             "bindings": copy.deepcopy(state["bindings"]),
         }
 
-    graph = compile_intake_v2_graph(intake_lcel=cognition)
+    graph = compile_intake_v2_graph(intake_lcel=_create_test_only_intake_cognition(cognition))
     state = new_intake_graph_state(bindings=bindings, version_pins=version_pins)
     state = graph.invoke(state, context=IntakeTurnContext("SNAPSHOT", snapshot))
     state["bindings"]["command"].update(
@@ -453,7 +459,7 @@ def test_cognition_draft_is_rejected_before_an_oversized_state_patch(
             },
         }
 
-    graph = compile_intake_v2_graph(intake_lcel=cognition)
+    graph = compile_intake_v2_graph(intake_lcel=_create_test_only_intake_cognition(cognition))
     state = new_intake_graph_state(bindings=bindings, version_pins=version_pins)
     state = graph.invoke(state, context=IntakeTurnContext("SNAPSHOT", snapshot))
     state["bindings"]["command"].update(
@@ -524,7 +530,7 @@ def test_dossier_patch_cannot_delete_or_rebind_stable_fact_sources(
             },
         }
 
-    graph = compile_intake_v2_graph(intake_lcel=cognition)
+    graph = compile_intake_v2_graph(intake_lcel=_create_test_only_intake_cognition(cognition))
     state = new_intake_graph_state(bindings=bindings, version_pins=version_pins)
     state = graph.invoke(state, context=IntakeTurnContext("SNAPSHOT", snapshot))
     state["bindings"]["command"].update(
