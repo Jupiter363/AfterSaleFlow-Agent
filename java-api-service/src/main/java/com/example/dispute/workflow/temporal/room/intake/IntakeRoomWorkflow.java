@@ -14,8 +14,8 @@ public interface IntakeRoomWorkflow {
   @SignalMethod(name = IntakeWorkflowProtocol.COMMAND_SIGNAL)
   void commandAccepted(IntakeWorkflowCommand command);
 
-  @SignalMethod(name = IntakeWorkflowProtocol.DOMAIN_RECEIPT_SIGNAL)
-  void domainReceiptCommitted(IntakeDomainReceipt receipt);
+  @SignalMethod(name = IntakeWorkflowProtocol.DOMAIN_EVENT_SIGNAL)
+  void domainEventCommitted(IntakeDomainEventRef event);
 
   @QueryMethod(name = IntakeWorkflowProtocol.STATE_QUERY)
   IntakeRoomSnapshot state();

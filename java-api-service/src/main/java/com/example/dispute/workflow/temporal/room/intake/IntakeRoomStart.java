@@ -1,5 +1,7 @@
 package com.example.dispute.workflow.temporal.room.intake;
 
+import static com.example.dispute.workflow.temporal.room.intake.IntakeProtocolValidation.requireHash;
+
 import java.util.regex.Pattern;
 
 public record IntakeRoomStart(
@@ -20,7 +22,9 @@ public record IntakeRoomStart(
     String outputSchemaVersion,
     String policyVersion,
     String guardrailVersion,
-    String toolPolicyVersion) {
+    String toolPolicyVersion,
+    String initiatorActorScopeHash,
+    String respondentActorScopeHash) {
 
   private static final Pattern IDENTIFIER = Pattern.compile("[A-Za-z0-9][A-Za-z0-9._:-]{0,127}");
 
@@ -39,6 +43,11 @@ public record IntakeRoomStart(
     requireIdentifier(policyVersion, "policyVersion");
     requireIdentifier(guardrailVersion, "guardrailVersion");
     requireIdentifier(toolPolicyVersion, "toolPolicyVersion");
+    requireHash(initiatorActorScopeHash, "initiatorActorScopeHash");
+    requireHash(respondentActorScopeHash, "respondentActorScopeHash");
+    if (initiatorActorScopeHash.equals(respondentActorScopeHash)) {
+      throw new IllegalArgumentException("party actor scopes must be distinct");
+    }
     if (roomEpoch < 0 || fencingToken < 1) {
       throw new IllegalArgumentException("roomEpoch and fencingToken must be valid");
     }

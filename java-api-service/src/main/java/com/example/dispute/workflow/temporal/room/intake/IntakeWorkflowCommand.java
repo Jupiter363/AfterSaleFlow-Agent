@@ -1,6 +1,8 @@
 package com.example.dispute.workflow.temporal.room.intake;
 
-import java.util.regex.Pattern;
+import static com.example.dispute.workflow.temporal.room.intake.IntakeProtocolValidation.requireHash;
+import static com.example.dispute.workflow.temporal.room.intake.IntakeProtocolValidation.requireIdentifier;
+import static com.example.dispute.workflow.temporal.room.intake.IntakeProtocolValidation.requireReference;
 
 public record IntakeWorkflowCommand(
     String schemaVersion,
@@ -18,9 +20,6 @@ public record IntakeWorkflowCommand(
     String operationKey,
     String requestHash) {
 
-  private static final Pattern IDENTIFIER = Pattern.compile("[A-Za-z0-9][A-Za-z0-9._:-]{0,127}");
-  private static final Pattern SHA256 = Pattern.compile("[0-9a-f]{64}");
-
   public IntakeWorkflowCommand {
     if (!"intake-workflow-command.v1".equals(schemaVersion)) {
       throw new IllegalArgumentException("schemaVersion must be intake-workflow-command.v1");
@@ -28,7 +27,7 @@ public record IntakeWorkflowCommand(
     requireIdentifier(commandId, "commandId");
     requireIdentifier(tenantSurrogate, "tenantSurrogate");
     requireIdentifier(caseId, "caseId");
-    requireIdentifier(payloadRef, "payloadRef");
+    requireReference(payloadRef, "payloadRef");
     requireIdentifier(operationKey, "operationKey");
     requireHash(actorScopeHash, "actorScopeHash");
     requireHash(payloadHash, "payloadHash");
@@ -41,15 +40,4 @@ public record IntakeWorkflowCommand(
     }
   }
 
-  private static void requireIdentifier(String value, String field) {
-    if (value == null || !IDENTIFIER.matcher(value).matches()) {
-      throw new IllegalArgumentException(field + " must be a bounded identifier");
-    }
-  }
-
-  private static void requireHash(String value, String field) {
-    if (value == null || !SHA256.matcher(value).matches()) {
-      throw new IllegalArgumentException(field + " must be a SHA-256 value");
-    }
-  }
 }

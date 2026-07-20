@@ -6,7 +6,10 @@ public record IntakeRoomSnapshot(
     String caseId,
     long roomEpoch,
     long fencingToken,
+    String initiatorActorScopeHash,
+    String respondentActorScopeHash,
     IntakeRoomPhase roomPhase,
+    IntakeParty activeParty,
     long nextCommandSequence,
     long nextEventSequence,
     long processedCommandCount,
@@ -15,8 +18,12 @@ public record IntakeRoomSnapshot(
     boolean respondentUnlocked,
     boolean respondentComplete,
     IntakeParty readinessParty,
-    String pendingCommandId,
-    String pendingOperationKey,
+    IntakePendingCommand pendingCommand,
+    String lastEventId,
+    String lastEventRef,
+    String lastEventHash,
+    IntakeAgentRunRef lastAgentRunRef,
+    IntakeGraphExecutionRef lastGraphExecutionRef,
     IntakeTerminalReason terminalReason,
     long processRevision,
     long roomRevision,
@@ -26,5 +33,13 @@ public record IntakeRoomSnapshot(
     if (!"intake-room-snapshot.v1".equals(schemaVersion)) {
       throw new IllegalArgumentException("schemaVersion must be intake-room-snapshot.v1");
     }
+  }
+
+  public String pendingCommandId() {
+    return pendingCommand == null ? null : pendingCommand.commandId();
+  }
+
+  public String pendingOperationKey() {
+    return pendingCommand == null ? null : pendingCommand.operationKey();
   }
 }

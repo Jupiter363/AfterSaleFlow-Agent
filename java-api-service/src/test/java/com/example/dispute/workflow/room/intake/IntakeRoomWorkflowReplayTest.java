@@ -2,10 +2,12 @@ package com.example.dispute.workflow.room.intake;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.example.dispute.workflow.temporal.room.intake.IntakeAgentRunRef;
 import com.example.dispute.workflow.temporal.room.intake.IntakeCommandType;
-import com.example.dispute.workflow.temporal.room.intake.IntakeDomainReceipt;
+import com.example.dispute.workflow.temporal.room.intake.IntakeDomainEventRef;
+import com.example.dispute.workflow.temporal.room.intake.IntakeDomainEventType;
+import com.example.dispute.workflow.temporal.room.intake.IntakeGraphExecutionRef;
 import com.example.dispute.workflow.temporal.room.intake.IntakeParty;
-import com.example.dispute.workflow.temporal.room.intake.IntakeReceiptType;
 import com.example.dispute.workflow.temporal.room.intake.IntakeRoomSnapshot;
 import com.example.dispute.workflow.temporal.room.intake.IntakeRoomStart;
 import com.example.dispute.workflow.temporal.room.intake.IntakeRoomWorkflow;
@@ -26,6 +28,8 @@ class IntakeRoomWorkflowReplayTest {
   private static final String CASE_ID = "CASE_P4_INTAKE_REPLAY";
   private static final long EPOCH = 2;
   private static final long FENCE = 11;
+  private static final String INITIATOR_SCOPE = "8".repeat(64);
+  private static final String RESPONDENT_SCOPE = "9".repeat(64);
 
   @Test
   void terminalNotAdmissibleHistoryReplaysDeterministically() throws Exception {
@@ -45,26 +49,32 @@ class IntakeRoomWorkflowReplayTest {
                   .setTaskQueue(taskQueue)
                   .build());
       WorkflowClient.start(workflow::run, start());
-      workflow.commandAccepted(command(1, "CMD_REPLAY_MESSAGE", IntakeCommandType.INTAKE_MESSAGE));
-      workflow.domainReceiptCommitted(
-          receipt(
+
+      IntakeWorkflowCommand message =
+          command(1, "CMD_REPLAY_MESSAGE", IntakeCommandType.INTAKE_MESSAGE);
+      workflow.commandAccepted(message);
+      workflow.domainEventCommitted(
+          event(
               1,
-              1,
-              "RCP_REPLAY_READY",
-              "CMD_REPLAY_MESSAGE",
-              IntakeReceiptType.TURN_READY_TO_CONFIRM));
-      workflow.commandAccepted(command(2, "CMD_REPLAY_CONFIRM", IntakeCommandType.INTAKE_CONFIRM));
-      workflow.domainReceiptCommitted(
-          receipt(
+              "EVENT_REPLAY_READY",
+              message,
+              IntakeDomainEventType.TURN_READY_TO_CONFIRM));
+
+      IntakeWorkflowCommand confirm =
+          command(2, "CMD_REPLAY_CONFIRM", IntakeCommandType.INTAKE_CONFIRM);
+      workflow.commandAccepted(confirm);
+      workflow.domainEventCommitted(
+          event(
               2,
-              2,
-              "RCP_REPLAY_REJECT",
-              "CMD_REPLAY_CONFIRM",
-              IntakeReceiptType.NOT_ADMISSIBLE));
+              "EVENT_REPLAY_REJECT",
+              confirm,
+              IntakeDomainEventType.NOT_ADMISSIBLE));
 
       IntakeRoomSnapshot result =
           WorkflowStub.fromTyped(workflow).getResult(IntakeRoomSnapshot.class);
       assertThat(result.terminalReason()).isEqualTo(IntakeTerminalReason.NOT_ADMISSIBLE);
+      assertThat(result.nextCommandSequence()).isEqualTo(3);
+      assertThat(result.nextEventSequence()).isEqualTo(3);
       history = client.fetchHistory(workflowId);
     }
 
@@ -90,7 +100,9 @@ class IntakeRoomWorkflowReplayTest {
         "intake-turn-proposal.v2",
         "intake-policy.v2",
         "intake-guardrail.v2",
-        "no-tools.v1");
+        "no-tools.v1",
+        INITIATOR_SCOPE,
+        RESPONDENT_SCOPE);
   }
 
   private static IntakeWorkflowCommand command(
@@ -105,36 +117,65 @@ class IntakeRoomWorkflowReplayTest {
         sequence,
         type,
         IntakeParty.INITIATOR,
-        hash(8),
-        "REF_" + commandId,
+        INITIATOR_SCOPE,
+        "urn:after-sale-flow:intake-command:" + commandId,
         hash(sequence),
         operationKey(commandId),
         hash(sequence));
   }
 
-  private static IntakeDomainReceipt receipt(
+  private static IntakeDomainEventRef event(
       long eventSequence,
-      long commandSequence,
-      String receiptId,
-      String commandId,
-      IntakeReceiptType type) {
-    return new IntakeDomainReceipt(
-        "intake-domain-receipt.v1",
-        receiptId,
-        commandId,
+      String eventId,
+      IntakeWorkflowCommand command,
+      IntakeDomainEventType eventType) {
+    String resultHash = hash(eventSequence + 4);
+    boolean turnEvent =
+        eventType == IntakeDomainEventType.TURN_NEEDS_INPUT
+            || eventType == IntakeDomainEventType.TURN_READY_TO_CONFIRM;
+    IntakeAgentRunRef agentRunRef =
+        turnEvent
+            ? new IntakeAgentRunRef(
+                "intake-agent-run-ref.v1",
+                "RUN_" + command.commandId(),
+                "ATTEMPT_" + command.commandId(),
+                resultHash)
+            : null;
+    IntakeGraphExecutionRef graphExecutionRef =
+        turnEvent
+            ? new IntakeGraphExecutionRef(
+                "intake-graph-execution-ref.v1",
+                "grt.v1." + "b".repeat(32),
+                command.commandId(),
+                "intake.v2",
+                "2.0.0",
+                "CHECKPOINT_" + command.commandId(),
+                "urn:after-sale-flow:graph-result:" + command.commandId(),
+                resultHash,
+                "urn:after-sale-flow:intake-proposal:" + command.commandId(),
+                hash(eventSequence + 6))
+            : null;
+    return new IntakeDomainEventRef(
+        "intake-domain-event-ref.v1",
+        eventId,
+        "urn:after-sale-flow:intake-event:" + eventId,
+        hash(eventSequence + 5),
+        eventSequence,
+        eventType,
+        IntakeParty.INITIATOR,
+        command.commandId(),
         TENANT,
         CASE_ID,
         EPOCH,
         FENCE,
+        INITIATOR_SCOPE,
+        command.operationKey(),
+        command.requestHash(),
+        resultHash,
         eventSequence,
         eventSequence,
-        eventSequence,
-        type,
-        IntakeParty.INITIATOR,
-        operationKey(commandId),
-        hash(commandSequence),
-        hash(eventSequence + 4),
-        hash(eventSequence + 5));
+        agentRunRef,
+        graphExecutionRef);
   }
 
   private static String operationKey(String commandId) {
