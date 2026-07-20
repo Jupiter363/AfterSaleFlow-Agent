@@ -4,6 +4,7 @@ import re
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from copy import deepcopy
 from dataclasses import dataclass
+from inspect import getattr_static
 from typing import Any, Literal, cast
 from weakref import WeakValueDictionary
 
@@ -94,6 +95,76 @@ class IntakePromptInput(TypedDict):
 
 _IntakeModelTestPhase = Literal["before_model", "after_model_before_checkpoint"]
 _IntakeModelTestHook = Callable[[_IntakeModelTestPhase], None]
+_EXECUTION_METHOD_NAMES = (
+    "invoke",
+    "ainvoke",
+    "batch",
+    "abatch",
+    "stream",
+    "astream",
+    "transform",
+    "atransform",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _BehaviorMethodSeal:
+    owner: Any
+    name: str
+    implementation: Any
+
+
+def _iter_runnable_nodes(runnable: Runnable) -> Iterator[Runnable]:
+    yield runnable
+    if type(runnable) is RunnableSequence:
+        sequence = cast(RunnableSequence, runnable)
+        yield from _iter_runnable_nodes(sequence.first)
+        for step in sequence.middle:
+            yield from _iter_runnable_nodes(step)
+        yield from _iter_runnable_nodes(sequence.last)
+    elif type(runnable) is RunnableParallel:
+        parallel = cast(RunnableParallel, runnable)
+        for step in parallel.steps__.values():
+            yield from _iter_runnable_nodes(step)
+
+
+def _seal_behavior_methods(
+    pipeline: RunnableSequence,
+    explicit_methods: tuple[tuple[Any, tuple[str, ...]], ...],
+) -> tuple[_BehaviorMethodSeal, ...]:
+    targets = tuple((node, _EXECUTION_METHOD_NAMES) for node in _iter_runnable_nodes(pipeline))
+    targets += explicit_methods
+    seals: list[_BehaviorMethodSeal] = []
+    seen: set[tuple[int, str]] = set()
+    for owner, names in targets:
+        for name in names:
+            key = (id(owner), name)
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                implementation = getattr_static(owner, name)
+            except AttributeError as error:
+                raise IntakeGraphContractError("INTAKE_LCEL_COMPONENT_SEAL_INVALID") from error
+            seals.append(
+                _BehaviorMethodSeal(
+                    owner=owner,
+                    name=name,
+                    implementation=implementation,
+                )
+            )
+    return tuple(seals)
+
+
+def _matches_behavior_methods(seals: tuple[_BehaviorMethodSeal, ...]) -> bool:
+    for seal in seals:
+        try:
+            implementation = getattr_static(seal.owner, seal.name)
+        except AttributeError:
+            return False
+        if implementation is not seal.implementation:
+            return False
+    return True
 
 
 @dataclass(frozen=True, slots=True)
@@ -587,6 +658,14 @@ class _IntakeComponentSeal:
     policy: ModelInvocationPolicy
     profile_snapshot: ModelProfile
     policy_snapshot: ModelInvocationPolicy
+    behavior_methods: tuple[_BehaviorMethodSeal, ...]
+    model_transport: ModelTransport
+    model_clock: Callable[[], Any]
+    model_cancelled: Callable[[], bool]
+    model_user_content_parts: tuple[dict[str, Any], ...]
+    model_user_content_parts_snapshot: tuple[dict[str, Any], ...]
+    model_visible_fields: tuple[Any, ...]
+    model_visible_field_names: frozenset[str]
 
 
 def _seal_intake_components(
@@ -600,7 +679,29 @@ def _seal_intake_components(
     patch_projector: IntakePatchProjectorRunnable,
     profile: ModelProfile,
     policy: ModelInvocationPolicy,
+    pipeline: RunnableSequence,
 ) -> _IntakeComponentSeal:
+    explicit_methods = (
+        (lens, ("_select", "_aselect")),
+        (preflight, ("_validate",)),
+        (guardrail, ("_guard",)),
+        (patch_projector, ("_project",)),
+        (
+            model,
+            (
+                "_generate",
+                "_agenerate",
+                "_stream",
+                "_astream",
+                "_generate_with_retry",
+                "_agenerate_with_retry",
+                "_request",
+                "_message",
+                "_attempts_allowed",
+            ),
+        ),
+        (parser, ("parse", "aparse", "parse_result", "aparse_result", "_parse_obj")),
+    )
     return _IntakeComponentSeal(
         lens=lens,
         lens_name=lens.name,
@@ -630,6 +731,14 @@ def _seal_intake_components(
         policy=policy,
         profile_snapshot=deepcopy(profile),
         policy_snapshot=deepcopy(policy),
+        behavior_methods=_seal_behavior_methods(pipeline, explicit_methods),
+        model_transport=model._transport,
+        model_clock=model._clock,
+        model_cancelled=model._cancelled,
+        model_user_content_parts=model._user_content_parts,
+        model_user_content_parts_snapshot=deepcopy(model._user_content_parts),
+        model_visible_fields=model._visible_fields,
+        model_visible_field_names=model._visible_field_names,
     )
 
 
@@ -663,6 +772,13 @@ def _matches_intake_component_seal(seal: _IntakeComponentSeal) -> bool:
         or model._output_type is not seal.model_output_type
         or model.profile != seal.profile_snapshot
         or model.policy != seal.policy_snapshot
+        or model._transport is not seal.model_transport
+        or model._clock is not seal.model_clock
+        or model._cancelled is not seal.model_cancelled
+        or model._user_content_parts is not seal.model_user_content_parts
+        or model._user_content_parts != seal.model_user_content_parts_snapshot
+        or model._visible_fields is not seal.model_visible_fields
+        or model._visible_field_names is not seal.model_visible_field_names
     ):
         return False
 
@@ -673,7 +789,7 @@ def _matches_intake_component_seal(seal: _IntakeComponentSeal) -> bool:
     ):
         return False
 
-    return (
+    return _matches_behavior_methods(seal.behavior_methods) and (
         seal.preflight._profile is seal.profile
         and seal.preflight._policy is seal.policy
         and seal.preflight._profile == seal.profile_snapshot
@@ -747,7 +863,10 @@ def build_intake_model_node(
     )
     guardrail = IntakeGuardrailRunnable(profile=profile, policy=policy)
     patch_projector = IntakePatchProjectorRunnable(profile=profile, policy=policy)
-    pipeline = preflight | state_and_generation | guardrail | patch_projector
+    pipeline = cast(
+        RunnableSequence,
+        preflight | state_and_generation | guardrail | patch_projector,
+    )
     component_seal = _seal_intake_components(
         lens=lens,
         prompt=prompt,
@@ -758,9 +877,10 @@ def build_intake_model_node(
         patch_projector=patch_projector,
         profile=profile,
         policy=policy,
+        pipeline=pipeline,
     )
     runnable = _create_vetted_intake_model_runnable(
-        cast(RunnableSequence, pipeline),
+        pipeline,
         component_seal,
         name="intake_lcel.vetted",
         test_hook=_test_hook,

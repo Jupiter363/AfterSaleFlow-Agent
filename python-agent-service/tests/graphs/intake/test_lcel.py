@@ -442,6 +442,50 @@ async def test_nested_mutation_fails_closed_for_all_async_execution_entrypoints(
             ),
             id="patch-projector-policy",
         ),
+        pytest.param(
+            lambda built: _override_instance_method(built.preflight, "_validate"),
+            id="preflight-validate-method",
+        ),
+        pytest.param(
+            lambda built: _override_instance_method(built.preflight, "invoke"),
+            id="preflight-invoke-method",
+        ),
+        pytest.param(
+            lambda built: _override_instance_method(built.guardrail, "_guard"),
+            id="guardrail-guard-method",
+        ),
+        pytest.param(
+            lambda built: _override_instance_method(built.guardrail, "ainvoke"),
+            id="guardrail-ainvoke-method",
+        ),
+        pytest.param(
+            lambda built: _override_instance_method(built.patch_projector, "_project"),
+            id="patch-projector-project-method",
+        ),
+        pytest.param(
+            lambda built: setattr(built.model, "_transport", IntakeTransport()),
+            id="model-transport",
+        ),
+        pytest.param(
+            lambda built: setattr(built.model, "_clock", lambda: datetime.now(timezone.utc)),
+            id="model-clock",
+        ),
+        pytest.param(
+            lambda built: setattr(built.model, "_user_content_parts", ({"text": "untrusted"},)),
+            id="model-user-content-parts",
+        ),
+        pytest.param(
+            lambda built: _override_instance_method(built.model, "_generate"),
+            id="model-generate-method",
+        ),
+        pytest.param(
+            lambda built: _override_instance_method(built.parser, "parse_result"),
+            id="parser-parse-result-method",
+        ),
+        pytest.param(
+            lambda built: _override_instance_method(built.parser, "invoke"),
+            id="parser-invoke-method",
+        ),
     ],
 )
 def test_leaf_component_mutation_fails_closed_before_model_invocation(mutation) -> None:
@@ -458,6 +502,42 @@ def test_leaf_component_mutation_fails_closed_before_model_invocation(mutation) 
         match="INTAKE_LCEL_RUNNABLE_NOT_VETTED",
     ):
         built.runnable.invoke({})
+    assert transport.generate_calls == 0
+
+
+def _override_instance_method(instance, name: str) -> None:
+    instance.__dict__[name] = lambda *args, **kwargs: {}
+
+
+def test_projector_instance_override_fails_closed_on_real_event_route(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+) -> None:
+    transport = IntakeTransport()
+    built = build_intake_model_node(
+        transport=transport,
+        profile=_profile(),
+        policy=_policy(),
+    )
+    graph = compile_intake_v2_graph(intake_lcel=built.runnable)
+    state = graph.invoke(
+        new_intake_graph_state(bindings=bindings, version_pins=version_pins),
+        context=IntakeTurnContext("SNAPSHOT", snapshot),
+    )
+    state["bindings"]["command"].update(
+        command_id="COMMAND_P4_USER_2",
+        logical_run_id="RUN_P4_USER_2",
+        attempt_id="ATTEMPT_P4_USER_2_1",
+    )
+    _override_instance_method(built.patch_projector, "_project")
+
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_LCEL_RUNNABLE_NOT_VETTED",
+    ):
+        graph.invoke(state, context=IntakeTurnContext("EVENT", event))
     assert transport.generate_calls == 0
 
 
