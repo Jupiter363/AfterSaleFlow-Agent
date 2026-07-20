@@ -71,6 +71,15 @@ def test_snapshot_rejects_other_party_private_message(bindings, version_pins, sn
         validate_snapshot(state, snapshot)
 
 
+def test_snapshot_rejects_nested_credentials(bindings, version_pins, snapshot) -> None:
+    state = new_intake_graph_state(bindings=bindings, version_pins=version_pins)
+    snapshot["initial_case_facts"]["credentials"] = {"access_token": "not-checkpointed"}
+    snapshot["snapshot_hash"] = canonical_sha256_omitting(snapshot, "snapshot_hash")
+
+    with pytest.raises(IntakeGraphContractError, match="INTAKE_FORBIDDEN_FIELD"):
+        validate_snapshot(state, snapshot)
+
+
 def test_snapshot_rejects_duplicate_stable_message_id(bindings, version_pins, snapshot) -> None:
     state = new_intake_graph_state(bindings=bindings, version_pins=version_pins)
     duplicate = copy.deepcopy(snapshot["own_messages"][0])

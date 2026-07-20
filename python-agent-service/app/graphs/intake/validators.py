@@ -99,6 +99,20 @@ _FORBIDDEN_KEYS = frozenset(
         "tool_calls",
         "tool_parameters",
         "writer_mode",
+        "credentials",
+        "credential",
+        "password",
+        "api_key",
+        "access_token",
+        "refresh_token",
+        "authorization_header",
+        "private_key",
+        "client_secret",
+        "raw_audit_records",
+        "audit_records",
+        "reviewer_notes",
+        "other_party_private_messages",
+        "opposing_party_private_messages",
         "open_evidence",
         "complete_party",
         "send_summons",
@@ -161,6 +175,7 @@ def validate_snapshot(
     snapshot: Mapping[str, Any],
 ) -> None:
     _validate_model(IntakeDomainSnapshot, snapshot, "INTAKE_SNAPSHOT_SCHEMA_INVALID")
+    _reject_forbidden_keys(snapshot)
     if _canonical_size(snapshot, "INTAKE_SNAPSHOT_SCHEMA_INVALID") > 262_144:
         raise IntakeGraphContractError("INTAKE_SNAPSHOT_TOO_LARGE")
     if snapshot.get("schema_version") != "intake-domain-snapshot.v2":
@@ -195,6 +210,7 @@ def validate_snapshot(
 
 def validate_event(state: IntakeGraphStateV2, event: Mapping[str, Any]) -> None:
     _validate_model(IntakeTurnEvent, event, "INTAKE_EVENT_SCHEMA_INVALID")
+    _reject_forbidden_keys(event)
     if _canonical_size(event, "INTAKE_EVENT_SCHEMA_INVALID") > 32_768:
         raise IntakeGraphContractError("INTAKE_EVENT_TOO_LARGE")
     if event.get("schema_version") != "intake-turn-event.v2":
