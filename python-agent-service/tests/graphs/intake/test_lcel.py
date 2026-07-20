@@ -9,7 +9,13 @@ from langchain_core.exceptions import OutputParserException
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.runnables import RunnableLambda, RunnablePassthrough, RunnableSequence
+from langchain_core.runnables import (
+    RouterRunnable,
+    RunnableBranch,
+    RunnableLambda,
+    RunnablePassthrough,
+    RunnableSequence,
+)
 
 from app.contracts.v1.codec import canonical_sha256_omitting
 from app.graph_runtime.state_lens import StateLens
@@ -191,6 +197,7 @@ def test_real_intake_lcel_is_governed_object_flow_with_human_text_isolation(
 @pytest.mark.parametrize(
     "runnable",
     [
+        pytest.param(RunnablePassthrough(), id="direct"),
         pytest.param(
             RunnablePassthrough() | RunnableLambda(lambda value: value),
             id="sequence",
@@ -199,38 +206,59 @@ def test_real_intake_lcel_is_governed_object_flow_with_human_text_isolation(
             RunnableLambda(lambda value: value).with_config(tags=["legacy"]),
             id="binding",
         ),
+        pytest.param(
+            RunnableBranch(
+                (lambda value: True, RunnableLambda(lambda value: value)),
+                RunnablePassthrough(),
+            ),
+            id="branch",
+        ),
+        pytest.param(
+            RunnablePassthrough().with_fallbacks([RunnableLambda(lambda value: value)]),
+            id="with-fallbacks",
+        ),
+        pytest.param(
+            RouterRunnable({"legacy": RunnableLambda(lambda value: value)}),
+            id="router",
+        ),
     ],
 )
-def test_nested_legacy_runnable_lambda_is_rejected(runnable) -> None:
+def test_unvetted_runnable_is_rejected(runnable) -> None:
     with pytest.raises(
         IntakeGraphContractError,
-        match="INTAKE_LCEL_LEGACY_WRAPPER_FORBIDDEN",
+        match="INTAKE_LCEL_RUNNABLE_NOT_VETTED",
     ):
         build_intake_v2_graph(intake_lcel=runnable)
 
 
-def test_arbitrary_runnable_patch_is_validated_at_graph_boundary(
-    bindings,
-    version_pins,
-    snapshot,
-    event,
-) -> None:
-    graph = compile_intake_v2_graph(intake_lcel=RunnablePassthrough())
-    state = graph.invoke(
-        new_intake_graph_state(bindings=bindings, version_pins=version_pins),
-        context=IntakeTurnContext("SNAPSHOT", snapshot),
-    )
-    state["bindings"]["command"].update(
-        command_id="COMMAND_P4_USER_2",
-        logical_run_id="RUN_P4_USER_2",
-        attempt_id="ATTEMPT_P4_USER_2_1",
-    )
-
+def test_vetted_runnable_identity_and_steps_are_sealed() -> None:
+    copied = build_intake_model_node(
+        transport=IntakeTransport(),
+        profile=_profile(),
+        policy=_policy(),
+    ).runnable.model_copy()
     with pytest.raises(
         IntakeGraphContractError,
-        match="INTAKE_COGNITION_PATCH_FIELDS_INVALID",
+        match="INTAKE_LCEL_RUNNABLE_NOT_VETTED",
     ):
-        graph.invoke(state, context=IntakeTurnContext("EVENT", event))
+        build_intake_v2_graph(intake_lcel=copied)
+
+    mutated = build_intake_model_node(
+        transport=IntakeTransport(),
+        profile=_profile(),
+        policy=_policy(),
+    ).runnable
+    mutated.middle.append(RunnablePassthrough())
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_LCEL_RUNNABLE_NOT_VETTED",
+    ):
+        mutated.invoke({})
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_LCEL_RUNNABLE_NOT_VETTED",
+    ):
+        build_intake_v2_graph(intake_lcel=mutated)
 
 
 def test_state_lens_exposes_only_authorized_window_summary_dossier_refs_and_versions(

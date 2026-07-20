@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, Literal, cast
+from weakref import WeakValueDictionary
 
 from langchain_core.messages import AIMessage, SystemMessage
 from langchain_core.output_parsers import PydanticOutputParser
@@ -14,7 +15,9 @@ from langchain_core.runnables import (
     RunnableConfig,
     RunnableParallel,
     RunnablePassthrough,
+    RunnableSequence,
 )
+from pydantic import PrivateAttr
 from typing_extensions import TypedDict
 
 from app.contracts.v1.codec import canonical_sha256, canonicalize
@@ -58,6 +61,7 @@ _HUMAN_PROMPT = """Authorized audience: {audience}
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _NO_TOOLS_POLICY_VERSION = "no-tools.v1"
+_VETTED_INTAKE_RUNNABLE_TOKEN = object()
 _INTERNAL_OUTPUT_FIELDS = frozenset(
     {
         "actor_id",
@@ -87,6 +91,102 @@ class IntakePromptInput(TypedDict):
     dossier_json: str
     source_refs_json: str
     version_ids_json: str
+
+
+_IntakeModelTestPhase = Literal["before_model", "after_model_before_checkpoint"]
+_IntakeModelTestHook = Callable[[_IntakeModelTestPhase], None]
+
+
+class _VettedIntakeModelRunnable(RunnableSequence):
+    _vetted_token: object = PrivateAttr()
+    _sealed_steps: tuple[Runnable, ...] = PrivateAttr()
+    _test_hook: _IntakeModelTestHook | None = PrivateAttr(default=None)
+
+    def __init__(
+        self,
+        *steps: Runnable,
+        name: str | None = None,
+        _token: object,
+        _test_hook: _IntakeModelTestHook | None = None,
+    ) -> None:
+        if _token is not _VETTED_INTAKE_RUNNABLE_TOKEN:
+            raise IntakeGraphContractError("INTAKE_LCEL_RUNNABLE_NOT_VETTED")
+        if _test_hook is not None and not callable(_test_hook):
+            raise IntakeGraphContractError("INTAKE_LCEL_TEST_HOOK_INVALID")
+        super().__init__(*steps, name=name)
+        self._vetted_token = _token
+        self._sealed_steps = tuple(self.steps)
+        self._test_hook = _test_hook
+
+    def invoke(
+        self,
+        input: Any,
+        config: RunnableConfig | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        self._require_sealed()
+        self._run_test_hook("before_model")
+        self._require_sealed()
+        output = super().invoke(input, config=config, **kwargs)
+        self._run_test_hook("after_model_before_checkpoint")
+        return output
+
+    async def ainvoke(
+        self,
+        input: Any,
+        config: RunnableConfig | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        self._require_sealed()
+        self._run_test_hook("before_model")
+        self._require_sealed()
+        output = await super().ainvoke(input, config=config, **kwargs)
+        self._run_test_hook("after_model_before_checkpoint")
+        return output
+
+    def _is_sealed(self) -> bool:
+        current_steps = self.steps
+        return (
+            self._vetted_token is _VETTED_INTAKE_RUNNABLE_TOKEN
+            and len(current_steps) == len(self._sealed_steps)
+            and all(current is sealed for current, sealed in zip(current_steps, self._sealed_steps))
+        )
+
+    def _run_test_hook(self, phase: _IntakeModelTestPhase) -> None:
+        if self._test_hook is not None:
+            self._test_hook(phase)
+
+    def _require_sealed(self) -> None:
+        if not _is_vetted_intake_model_runnable(self):
+            raise IntakeGraphContractError("INTAKE_LCEL_RUNNABLE_NOT_VETTED")
+
+
+_VETTED_INTAKE_RUNNABLES: WeakValueDictionary[int, _VettedIntakeModelRunnable] = (
+    WeakValueDictionary()
+)
+
+
+def _create_vetted_intake_model_runnable(
+    *steps: Runnable,
+    name: str | None = None,
+    test_hook: _IntakeModelTestHook | None = None,
+) -> _VettedIntakeModelRunnable:
+    runnable = _VettedIntakeModelRunnable(
+        *steps,
+        name=name,
+        _token=_VETTED_INTAKE_RUNNABLE_TOKEN,
+        _test_hook=test_hook,
+    )
+    _VETTED_INTAKE_RUNNABLES[id(runnable)] = runnable
+    return runnable
+
+
+def _is_vetted_intake_model_runnable(value: Any) -> bool:
+    return (
+        type(value) is _VettedIntakeModelRunnable
+        and _VETTED_INTAKE_RUNNABLES.get(id(value)) is value
+        and value._is_sealed()
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -306,6 +406,7 @@ def build_intake_model_node(
     profile: ModelProfile,
     policy: ModelInvocationPolicy,
     trusted_system_prompt: str = INTAKE_SYSTEM_PROMPT,
+    _test_hook: _IntakeModelTestHook | None = None,
 ) -> BuiltIntakeModelNode:
     if policy.node_name != "intake_lcel":
         raise IntakeGraphContractError("INTAKE_LCEL_NODE_BINDING_INVALID")
@@ -357,7 +458,12 @@ def build_intake_model_node(
     )
     guardrail = IntakeGuardrailRunnable(profile=profile, policy=policy)
     patch_projector = IntakePatchProjectorRunnable(profile=profile, policy=policy)
-    runnable = preflight | state_and_generation | guardrail | patch_projector
+    pipeline = preflight | state_and_generation | guardrail | patch_projector
+    runnable = _create_vetted_intake_model_runnable(
+        *cast(RunnableSequence, pipeline).steps,
+        name="intake_lcel.vetted",
+        test_hook=_test_hook,
+    )
     return BuiltIntakeModelNode(
         lens=lens,
         prompt=prompt,

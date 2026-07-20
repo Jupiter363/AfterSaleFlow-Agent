@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from langchain_core.runnables import Runnable, RunnableConfig, RunnableLambda
+from langchain_core.runnables import Runnable, RunnableConfig
 from langgraph.graph import END, START, StateGraph
 
 from app.graph_runtime.topology import ClosedRouter
 from app.graphs.intake.errors import IntakeGraphContractError
+from app.graphs.intake.lcel import _is_vetted_intake_model_runnable
 from app.graphs.intake.nodes import (
     IntakeCognitionNode,
     apply_dossier_patch,
@@ -48,17 +49,13 @@ class _ValidatedIntakeCognitionRunnable(Runnable[IntakeGraphStateV2, dict[str, A
         return validate_cognition_patch(input, patch)
 
 
-def _reject_legacy_runnable_lambda(runnable: Runnable) -> None:
-    if any(isinstance(node.data, RunnableLambda) for node in runnable.get_graph().nodes.values()):
-        raise IntakeGraphContractError("INTAKE_LCEL_LEGACY_WRAPPER_FORBIDDEN")
-
-
 def build_intake_v2_graph(
     *,
     intake_lcel: IntakeCognitionNode | Runnable = unconfigured_intake_lcel,
 ) -> StateGraph:
     if isinstance(intake_lcel, Runnable):
-        _reject_legacy_runnable_lambda(intake_lcel)
+        if not _is_vetted_intake_model_runnable(intake_lcel):
+            raise IntakeGraphContractError("INTAKE_LCEL_RUNNABLE_NOT_VETTED")
         cognition_node = _ValidatedIntakeCognitionRunnable(intake_lcel)
     else:
         cognition_node = guard_intake_cognition(intake_lcel)

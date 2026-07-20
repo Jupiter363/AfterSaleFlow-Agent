@@ -7,13 +7,15 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from langchain_core.runnables import Runnable, RunnableConfig
 from langgraph.checkpoint.memory import InMemorySaver
 
 from app.contracts.v1.codec import canonical_sha256_omitting
 from app.graphs.intake.errors import IntakeGraphContractError
 from app.graphs.intake.graph import compile_intake_v2_graph
-from app.graphs.intake.lcel import INTAKE_SYSTEM_PROMPT, build_intake_model_node
+from app.graphs.intake.lcel import (
+    INTAKE_SYSTEM_PROMPT,
+    build_intake_model_node,
+)
 from app.graphs.intake.runtime import (
     build_intake_runtime_bundle,
     extract_intake_terminal_proposal,
@@ -132,26 +134,15 @@ class RecoveryTransport:
         yield
 
 
-class CrashBoundaryRunnable(Runnable[dict[str, Any], dict[str, Any]]):
-    def __init__(self, delegate: Runnable, *, boundary: str) -> None:
-        self.delegate = delegate
+class CrashBoundaryHook:
+    def __init__(self, *, boundary: str) -> None:
         self.boundary = boundary
         self.crashed = False
 
-    def invoke(
-        self,
-        input: dict[str, Any],
-        config: RunnableConfig | None = None,
-        **kwargs: Any,
-    ) -> dict[str, Any]:
-        if not self.crashed and self.boundary == "before_model":
+    def __call__(self, phase: str) -> None:
+        if not self.crashed and self.boundary == phase:
             self.crashed = True
-            raise RuntimeError("synthetic crash before model")
-        patch = self.delegate.invoke(input, config=config, **kwargs)
-        if not self.crashed and self.boundary == "after_model_before_checkpoint":
-            self.crashed = True
-            raise RuntimeError("synthetic crash after model before checkpoint")
-        return dict(patch)
+            raise RuntimeError(f"synthetic crash at {phase}")
 
 
 def _profile() -> ModelProfile:
@@ -255,14 +246,14 @@ def test_crash_before_terminal_checkpoint_resumes_to_identical_proposal_hash(
 ) -> None:
     saver = InMemorySaver()
     transport = RecoveryTransport()
-    built = build_intake_model_node(
+    crashing_built = build_intake_model_node(
         transport=transport,
         profile=_profile(),
         policy=_policy(),
+        _test_hook=CrashBoundaryHook(boundary=boundary),
     )
-    crash = CrashBoundaryRunnable(built.runnable, boundary=boundary)
     crashing_graph = compile_intake_v2_graph(
-        intake_lcel=crash,
+        intake_lcel=crashing_built.runnable,
         checkpointer=saver,
     )
     config = {"configurable": {"thread_id": f"intake-crash-{boundary}"}}
@@ -275,8 +266,13 @@ def test_crash_before_terminal_checkpoint_resumes_to_identical_proposal_hash(
             context=IntakeTurnContext("EVENT", event),
         )
 
+    recovered_built = build_intake_model_node(
+        transport=transport,
+        profile=_profile(),
+        policy=_policy(),
+    )
     recovered_graph = compile_intake_v2_graph(
-        intake_lcel=built.runnable,
+        intake_lcel=recovered_built.runnable,
         checkpointer=saver,
     )
     recovered = recovered_graph.invoke(
