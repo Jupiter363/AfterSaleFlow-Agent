@@ -37,7 +37,7 @@ public record IntakeDomainEventRef(
     requireIdentifier(tenantSurrogate, "tenantSurrogate");
     requireIdentifier(caseId, "caseId");
     requireHash(actorScopeHash, "actorScopeHash");
-    requireIdentifier(operationKey, "operationKey");
+    IntakeOperationKeys.requireEventCorrelationKey(operationKey);
     requireHash(requestHash, "requestHash");
     requireHash(resultHash, "resultHash");
     if (eventSequence < 1 || roomEpoch < 0 || fencingToken < 1) {
@@ -59,7 +59,8 @@ public record IntakeDomainEventRef(
       throw new IllegalArgumentException("turn events require AgentRun and Graph references");
     }
     if (!turnEvent && agentRunRef != null) {
-      throw new IllegalArgumentException("non-turn events must not carry AgentRun or Graph references");
+      throw new IllegalArgumentException(
+          "non-turn events must not carry AgentRun or Graph references");
     }
     if (agentRunRef != null
         && (!resultHash.equals(agentRunRef.finalResultHash())
