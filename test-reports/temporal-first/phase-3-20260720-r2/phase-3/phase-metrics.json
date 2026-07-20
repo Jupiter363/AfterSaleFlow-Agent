@@ -1,0 +1,121 @@
+{
+  "schema_version": "temporal-first-phase-metrics.v1",
+  "release_id": "phase-3-20260720-r2",
+  "phase": 3,
+  "name": "graph-governed-lcel",
+  "scope": "SIGNED_SYNTHETIC_SHADOW_ENGINEERING_ONLY",
+  "base_commit": "5052779d2a52850a8926be713a2c2f0ad57f06bb",
+  "candidate_commit": "9351a9d65230ce5bfc332bc59ec567ecb8a964c5",
+  "engineering_started_at": "2026-07-19T14:48:00+08:00",
+  "verification_started_at": "2026-07-20T08:12:21.179+00:00",
+  "verification_finished_at": "2026-07-20T08:16:12.457+00:00",
+  "verification_wall_clock_seconds": 231.278,
+  "change_summary": {
+    "commits": 54,
+    "files_changed": 239,
+    "insertions": 50216,
+    "deletions": 722
+  },
+  "candidate_verification": {
+    "deduplicated_execution": true,
+    "distinct_tests": 828,
+    "python_tests": 525,
+    "static_tests": 30,
+    "java_tests": 273,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "commands": [
+    {
+      "id": "python_phase_3",
+      "cwd": "python-agent-service",
+      "command_sha256": "cdba73e2dd10b60f1b7acade091f7fa1a973f308f3b43db8b0a0df5d9ebf4c05",
+      "started_at": "2026-07-20T08:12:21.183+00:00",
+      "finished_at": "2026-07-20T08:13:18.178+00:00",
+      "duration_seconds": 56.995,
+      "exit_code": 0
+    },
+    {
+      "id": "root_phase_3_static",
+      "cwd": ".",
+      "command_sha256": "c6cce2b88ad3b6e299bc85379f32411bdccf62ff989314ab10235dba7f3f4d62",
+      "started_at": "2026-07-20T08:13:18.510+00:00",
+      "finished_at": "2026-07-20T08:13:23.147+00:00",
+      "duration_seconds": 4.637,
+      "exit_code": 0
+    },
+    {
+      "id": "java_phase_3",
+      "cwd": "java-api-service",
+      "command_sha256": "7f5a01961e9e4365239b851affe5f7c59d64d8d96445c28a1163a391a606f099",
+      "started_at": "2026-07-20T08:13:23.423+00:00",
+      "finished_at": "2026-07-20T08:16:12.010+00:00",
+      "duration_seconds": 168.587,
+      "exit_code": 0
+    }
+  ],
+  "batch_views": [
+    {
+      "id": "P3-BATCH-1",
+      "tests": 352,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "report": "batch-1-junit.xml",
+      "sha256": "fa61491e9e7df3969d9c1d4bd12ad746f0d0d54a23c99d6b0e9fb5f4b1032108"
+    },
+    {
+      "id": "P3-BATCH-2",
+      "tests": 497,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "report": "batch-2-junit.xml",
+      "sha256": "b252673b9b07f96fea58c2d4b1d5d1790f3a436c1e29aed10547ff0e2f031126"
+    },
+    {
+      "id": "P3-BATCH-3",
+      "tests": 828,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "report": "batch-3-junit.xml",
+      "sha256": "88294fb3412bfa54118756f8224ba32d469735ee3b5aa1cec8b7cc3eb7103e0a"
+    }
+  ],
+  "source_reports": [
+    {
+      "name": "python-phase3-junit.xml",
+      "command_id": "python_phase_3",
+      "tests": 525,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "sha256": "ffb78baee1b00b32b14e722def1dce2a516ffb0bb3342db150788b4194596329"
+    },
+    {
+      "name": "static-phase3-junit.xml",
+      "command_id": "root_phase_3_static",
+      "tests": 30,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "sha256": "73ebc3ceea1d24a17415fbbaba5f718cfd9729fc9dff4b07b5819b8de9787438"
+    },
+    {
+      "name": "java-phase3-junit.xml",
+      "command_id": "java_phase_3",
+      "tests": 273,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "sha256": "aa1e978d748ebf8c8811586d7625269ef8e428912ca8f89e0c0505010c274233"
+    }
+  ],
+  "status": {
+    "engineering_checkpoint": "PASS",
+    "promotion_gate": "PENDING",
+    "next_phase_permission": "PHASE_4_ENGINEERING_ONLY"
+  }
+}
