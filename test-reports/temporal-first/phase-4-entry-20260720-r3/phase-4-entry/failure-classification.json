@@ -1,0 +1,49 @@
+{
+  "schema_version": "phase-4-entry-failure-classification.v1",
+  "accepted_candidate_commit": "cf1ae3533bf2525ee43574e81c45621f29e338a0",
+  "accepted_release_id": "phase-4-entry-20260720-r3",
+  "open_product_failures": [],
+  "accepted_source_suite_failures": [],
+  "quarantined_attempts": [
+    {
+      "candidate_commit": "fd8d1a1b99ff982ad60bc694fff94e840ec432f7",
+      "classification": "FIXTURE",
+      "reason": "RoomEpochAllocatorTestConfiguration bypassed the production terminal LEGACY selection contract; the exact parent reproduced both Java errors.",
+      "observed_result": "static 24 passed; python 70 passed; java 81 passed and 2 errors",
+      "reports_reused": false,
+      "quarantine_path": ".codex-run/phase4-entry-fd8d1a1b"
+    },
+    {
+      "candidate_commit": "e123d3e33447481e2190295e1a6b931f8cdf105f",
+      "classification": "FIXTURE",
+      "reason": "Vitest host-derived minimum workers exceeded maxWorkers=2 and pnpm exec was unsafe for the detached dependency junction.",
+      "observed_result": "static 24 passed; python 70 passed; java 83 passed; accepted frontend command executed zero tests",
+      "diagnostic_frontend_result": "120 passed with explicit min/max workers and direct Node invocation",
+      "reports_reused": false,
+      "diagnostic_reports_reused": false,
+      "quarantine_path": ".codex-run/phase4-entry-e123d3e3"
+    }
+  ],
+  "accepted_candidate_preflight_events": [
+    {
+      "event": "PowerShell metadata expression failed to parse before Maven invocation",
+      "classification": "FIXTURE",
+      "tests_executed": 0,
+      "report_reused": false
+    },
+    {
+      "event": "Unquoted Surefire report suffix was parsed as an unknown Maven lifecycle phase",
+      "classification": "FIXTURE",
+      "started_at": "2026-07-20T11:59:31.2446116Z",
+      "finished_at": "2026-07-20T11:59:34.3093346Z",
+      "exit_code": 1,
+      "tests_executed": 0,
+      "report_reused": false
+    }
+  ],
+  "decision": {
+    "P4.0": "PASS",
+    "implementation_blocked_by_product_failure": false,
+    "historical_or_preflight_reports_mixed_into_accepted_evidence": false
+  }
+}

@@ -1,0 +1,120 @@
+<?xml version='1.0' encoding='utf-8'?>
+<testsuites name="java-entry-junit" tests="83" failures="0" errors="0" skipped="0" time="10.739" candidate_commit="cf1ae3533bf2525ee43574e81c45621f29e338a0" source_command_id="p4_entry_java">
+  <testsuite name="com.example.dispute.agentstream.AgentRunStreamEventServiceTest(phase4-entry-cf1ae353-r3)" source_report="java-entry-junit.xml" tests="14" failures="0" errors="0" skipped="0" time="6.258">
+    <testcase name="actorAudienceRejectsAnotherUserWithTheSameRole" classname="com.example.dispute.agentstream.AgentRunStreamEventServiceTest" time="0.01" />
+    <testcase name="administratorCanReadAnActorScopedRun" classname="com.example.dispute.agentstream.AgentRunStreamEventServiceTest" time="0.055" />
+    <testcase name="appendIsIdempotentForAnExistingSequence" classname="com.example.dispute.agentstream.AgentRunStreamEventServiceTest" time="0.051" />
+    <testcase name="appendPersistsASequenceOnlyOnce" classname="com.example.dispute.agentstream.AgentRunStreamEventServiceTest" time="0.031" />
+    <testcase name="reconnectRegistrationIsNotLostDuringConcurrentOldConnectionRemoval" classname="com.example.dispute.agentstream.AgentRunStreamEventServiceTest" time="1.034" />
+    <testcase name="replayUsesExclusiveCursorAndPreservesSequenceOrder" classname="com.example.dispute.agentstream.AgentRunStreamEventServiceTest" time="0.01" />
+    <testcase name="roleAudienceRejectsAnActorWithTheWrongRole" classname="com.example.dispute.agentstream.AgentRunStreamEventServiceTest" time="4.425">
+      </testcase>
+    <testcase name="slowConsumerIsDisconnectedAfterABoundedCatchUpBatch" classname="com.example.dispute.agentstream.AgentRunStreamEventServiceTest" time="0.044" />
+    <testcase name="unknownPersistedProtocolIsRejected" classname="com.example.dispute.agentstream.AgentRunStreamEventServiceTest" time="0.006" />
+    <testcase name="v2AttemptRejectsEventsAfterItsTerminalFrame" classname="com.example.dispute.agentstream.AgentRunStreamEventServiceTest" time="0.021" />
+    <testcase name="v2AttemptResetMustReferenceTheImmediatelyPriorAttempt" classname="com.example.dispute.agentstream.AgentRunStreamEventServiceTest" time="0.027" />
+    <testcase name="v2CursorMustIdentifyAnExistingHashBoundEvent" classname="com.example.dispute.agentstream.AgentRunStreamEventServiceTest" time="0.012" />
+    <testcase name="v2EventAudienceMustMatchTheRunAudience" classname="com.example.dispute.agentstream.AgentRunStreamEventServiceTest" time="0.017" />
+    <testcase name="v2ReplayContinuesAcrossAttemptsWithAnAttemptScopedCursor" classname="com.example.dispute.agentstream.AgentRunStreamEventServiceTest" time="0.515" />
+  </testsuite>
+  <testsuite name="com.example.dispute.room.AgentConversationSessionResolverTest(phase4-entry-cf1ae353-r3)" source_report="java-entry-junit.xml" tests="4" failures="0" errors="0" skipped="0" time="0.146">
+    <testcase name="createsSessionWithDeterministicScopeAndAccessSessionLink" classname="com.example.dispute.room.AgentConversationSessionResolverTest" time="0.135" />
+    <testcase name="differentAgentKeysDoNotShareSession" classname="com.example.dispute.room.AgentConversationSessionResolverTest" time="0.004" />
+    <testcase name="initializesMissingAgentSessionInIndependentTransactionWhenCallerIsReadOnly" classname="com.example.dispute.room.AgentConversationSessionResolverTest" time="0.005" />
+    <testcase name="resolvesSameActorRoomAgentAndProfileToExistingSession" classname="com.example.dispute.room.AgentConversationSessionResolverTest" time="0.002" />
+  </testsuite>
+  <testsuite name="com.example.dispute.room.IntakeAgentTurnServiceTest(phase4-entry-cf1ae353-r3)" source_report="java-entry-junit.xml" tests="8" failures="0" errors="0" skipped="0" time="0.812">
+    <testcase name="initialTurnOmitsShortLobbySeedReferencesBeforeCallingAgent" classname="com.example.dispute.room.IntakeAgentTurnServiceTest" time="0.068" />
+    <testcase name="initialTurnParticipatesInTheCallerTransactionSoFreshCasesCanBeSeeded" classname="com.example.dispute.room.IntakeAgentTurnServiceTest" time="0.601" />
+    <testcase name="initialTurnUsesLobbySeedAndPersistsAgentScrollSnapshot" classname="com.example.dispute.room.IntakeAgentTurnServiceTest" time="0.025" />
+    <testcase name="participantTurnDoesNotRepeatInitialFormFacts" classname="com.example.dispute.room.IntakeAgentTurnServiceTest" time="0.02" />
+    <testcase name="participantTurnFailsClosedWithoutPersistingSyntheticAgentMemory" classname="com.example.dispute.room.IntakeAgentTurnServiceTest" time="0.026">
+      </testcase>
+    <testcase name="participantTurnPersistsUserAnswerAndSendsPreviousScrollSnapshotToAgent" classname="com.example.dispute.room.IntakeAgentTurnServiceTest" time="0.026" />
+    <testcase name="participantTurnSendsTheCompleteOrderedTranscriptBeyondTheRecentTurnWindow" classname="com.example.dispute.room.IntakeAgentTurnServiceTest" time="0.033" />
+    <testcase name="respondentOpeningUsesOnlyTheFrozenMatrixAndDoesNotMutateTheDossier" classname="com.example.dispute.room.IntakeAgentTurnServiceTest" time="0.013" />
+  </testsuite>
+  <testsuite name="com.example.dispute.room.IntakeProgressServiceTest(phase4-entry-cf1ae353-r3)" source_report="java-entry-junit.xml" tests="1" failures="0" errors="0" skipped="0" time="0.106">
+    <testcase name="respondentMovesFromLockedIntakeToOpenIntakeThenSharedEvidence" classname="com.example.dispute.room.IntakeProgressServiceTest" time="0.106" />
+  </testsuite>
+  <testsuite name="com.example.dispute.room.IntakeRoomControllerTest(phase4-entry-cf1ae353-r3)" source_report="java-entry-junit.xml" tests="1" failures="0" errors="0" skipped="0" time="0.417">
+    <testcase name="confirmsAdmissionWithoutLegacyConfirmationNoteInput" classname="com.example.dispute.room.IntakeRoomControllerTest" time="0.417">
+      </testcase>
+  </testsuite>
+  <testsuite name="com.example.dispute.room.IntakeRoomServiceIntegrationTest(phase4-entry-cf1ae353-r3)" source_report="java-entry-junit.xml" tests="2" failures="0" errors="0" skipped="0" time="0.96">
+    <testcase name="acceptedIntakePersistsParticipantsRoomsAndTheAuthoritativeDeadline" classname="com.example.dispute.room.IntakeRoomServiceIntegrationTest" time="0.846">
+      </testcase>
+    <testcase name="notAdmissiblePersistsOnlyTheInitiatorAndTerminatesAfterIntake" classname="com.example.dispute.room.IntakeRoomServiceIntegrationTest" time="0.114">
+      </testcase>
+  </testsuite>
+  <testsuite name="com.example.dispute.room.IntakeRoomServiceTest(phase4-entry-cf1ae353-r3)" source_report="java-entry-junit.xml" tests="12" failures="0" errors="0" skipped="0" time="0.493">
+    <testcase name="acceptedImportedIntakeClosesTheExistingRoomInsteadOfInsertingADuplicate" classname="com.example.dispute.room.IntakeRoomServiceTest" time="0.003" />
+    <testcase name="acceptedInitiatorIntakeInvitesRespondentWithoutOpeningEvidence" classname="com.example.dispute.room.IntakeRoomServiceTest" time="0.005" />
+    <testcase name="acceptedIntakeAllowsEmptyConfirmationNoteAndKeepsHandoffRemarkFromDossier" classname="com.example.dispute.room.IntakeRoomServiceTest" time="0.003" />
+    <testcase name="acceptedIntakeSnapshotsTheLatestAgentDossierIntoTheCase" classname="com.example.dispute.room.IntakeRoomServiceTest" time="0.004" />
+    <testcase name="acceptedSlotCompletionIntakeCanBeConfirmedAfterTheAgentDossierIsReady" classname="com.example.dispute.room.IntakeRoomServiceTest" time="0.003" />
+    <testcase name="cancelFromEvidenceFailsBeforeRoomOrEpochInteractions" classname="com.example.dispute.room.IntakeRoomServiceTest" time="0.447" />
+    <testcase name="completedInitiatorReplayReturnsWithoutRoomOrEpochInteractions" classname="com.example.dispute.room.IntakeRoomServiceTest" time="0.003" />
+    <testcase name="nonCompletedConfirmOutsideIntakeFailsBeforeRoomOrEpochInteractions" classname="com.example.dispute.room.IntakeRoomServiceTest" time="0.004" />
+    <testcase name="notAdmissibleEndsAfterIntakeWithoutInvitingMerchantOrOpeningEvidence" classname="com.example.dispute.room.IntakeRoomServiceTest" time="0.005" />
+    <testcase name="platformReviewerCanAcceptImportedIntakeAndSummonBothParties" classname="com.example.dispute.room.IntakeRoomServiceTest" time="0.009" />
+    <testcase name="resolvedIntakeCancellationClosesTheRoomWithoutOpeningEvidence" classname="com.example.dispute.room.IntakeRoomServiceTest" time="0.004" />
+    <testcase name="respondentCannotCancelTheInitiatorsPendingDispute" classname="com.example.dispute.room.IntakeRoomServiceTest" time="0.003" />
+  </testsuite>
+  <testsuite name="com.example.dispute.room.IntakeSequentialWorkflowTest(phase4-entry-cf1ae353-r3)" source_report="java-entry-junit.xml" tests="1" failures="0" errors="0" skipped="0" time="0.009">
+    <testcase name="respondentCompletionStartsTheOnlyEvidenceClock" classname="com.example.dispute.room.IntakeSequentialWorkflowTest" time="0.009" />
+  </testsuite>
+  <testsuite name="com.example.dispute.room.RoomMessageAndEventServiceTest(phase4-entry-cf1ae353-r3)" source_report="java-entry-junit.xml" tests="21" failures="0" errors="0" skipped="0" time="0.241">
+    <testcase name="evidencePartyEvidenceReferenceTriggersTheEvidenceAgentTurnAfterTheMessageIsPersisted" classname="com.example.dispute.room.RoomMessageAndEventServiceTest" time="0.01" />
+    <testcase name="evidencePartyTextAndReferenceMessagesAreVisibleOnlyToSamePartyAndTrustedRoles" classname="com.example.dispute.room.RoomMessageAndEventServiceTest" time="0.014" />
+    <testcase name="evidenceRoomPartyMessagesAreScopedToTheSpeakingPartyAndTrustedPlatformRoles" classname="com.example.dispute.room.RoomMessageAndEventServiceTest" time="0.007" />
+    <testcase name="evidenceRoomStillAcceptsBothDisputePartiesAfterAdmission" classname="com.example.dispute.room.RoomMessageAndEventServiceTest" time="0.007" />
+    <testcase name="hearingEvidenceReferenceIsBoundToTheCurrentRoundWithoutCountingAsRoundStatement" classname="com.example.dispute.room.RoomMessageAndEventServiceTest" time="0.007" />
+    <testcase name="hearingPartyTextIsRejectedOutsideStructuredEndpoints" classname="com.example.dispute.room.RoomMessageAndEventServiceTest" time="0.005" />
+    <testcase name="heartbeatRemovesDisconnectedSseSubscriptionWhenSendThrowsRuntimeException" classname="com.example.dispute.room.RoomMessageAndEventServiceTest" time="0.012" />
+    <testcase name="intakeHistoryIsHiddenFromTheNonInitiatingParty" classname="com.example.dispute.room.RoomMessageAndEventServiceTest" time="0.002" />
+    <testcase name="intakeOpeningIsGatedByRespondentProgressAndDelegatedToTheIntakeOfficer" classname="com.example.dispute.room.RoomMessageAndEventServiceTest" time="0.003" />
+    <testcase name="intakePartyTextTriggersTheIntakeAgentTurnAfterTheMessageIsPersisted" classname="com.example.dispute.room.RoomMessageAndEventServiceTest" time="0.013" />
+    <testcase name="intakeRoomUsesThePartyProgressGate" classname="com.example.dispute.room.RoomMessageAndEventServiceTest" time="0.006" />
+    <testcase name="persistedMessagesAndEventsAreMappedAsImmutableAppendOnlyRecords" classname="com.example.dispute.room.RoomMessageAndEventServiceTest" time="0.004" />
+    <testcase name="platformReviewerCannotPostAPartyStatement" classname="com.example.dispute.room.RoomMessageAndEventServiceTest" time="0.005" />
+    <testcase name="rejectsReusingAnIdempotencyKeyForDifferentImmutableMessageContent" classname="com.example.dispute.room.RoomMessageAndEventServiceTest" time="0.005" />
+    <testcase name="replayFiltersPrivateEventsByExactActorWithinTheSameRole" classname="com.example.dispute.room.RoomMessageAndEventServiceTest" time="0.005" />
+    <testcase name="replayStartsAfterTheCursorAndFiltersMerchantPrivateEventsFromUser" classname="com.example.dispute.room.RoomMessageAndEventServiceTest" time="0.101" />
+    <testcase name="roomHistoryFiltersPrivateMessagesByExactActorWithinTheSameRole" classname="com.example.dispute.room.RoomMessageAndEventServiceTest" time="0.005" />
+    <testcase name="roomHistoryFiltersReviewerOnlyMessagesForAParty" classname="com.example.dispute.room.RoomMessageAndEventServiceTest" time="0.006" />
+    <testcase name="roomMessageViewCarriesTheHearingRoundForCourtTimelineGrouping" classname="com.example.dispute.room.RoomMessageAndEventServiceTest" time="0.006" />
+    <testcase name="subscriptionCatchesUpFromDurableStorageBeforeDeliveringANewerLiveEvent" classname="com.example.dispute.room.RoomMessageAndEventServiceTest" time="0.009" />
+    <testcase name="writesAnImmutableIdempotentMessageAndMonotonicCaseEventTogether" classname="com.example.dispute.room.RoomMessageAndEventServiceTest" time="0.009" />
+  </testsuite>
+  <testsuite name="com.example.dispute.room.RoomTurnMemoryQueryServiceTest(phase4-entry-cf1ae353-r3)" source_report="java-entry-junit.xml" tests="4" failures="0" errors="0" skipped="0" time="0.036">
+    <testcase name="latestAgentMemoryRejectsActorsOutsideTheDispute" classname="com.example.dispute.room.RoomTurnMemoryQueryServiceTest" time="0.007" />
+    <testcase name="latestAgentMemoryReturnsStructuredScrollSnapshotForCaseOwner" classname="com.example.dispute.room.RoomTurnMemoryQueryServiceTest" time="0.016" />
+    <testcase name="latestEvidenceAgentMemoryIsScopedToTheRequestingParty" classname="com.example.dispute.room.RoomTurnMemoryQueryServiceTest" time="0.007" />
+    <testcase name="respondentWithoutPrivateMemoryReceivesOnlyTheStructuredIntakeDossier" classname="com.example.dispute.room.RoomTurnMemoryQueryServiceTest" time="0.006" />
+  </testsuite>
+  <testsuite name="com.example.dispute.workflow.api.mig001.Mig001ScenarioServiceTest(phase4-entry-cf1ae353-r3)" source_report="java-entry-junit.xml" tests="5" failures="0" errors="0" skipped="0" time="0.971">
+    <testcase name="createsSyntheticEvidenceScenarioThroughTheImportFacade" classname="com.example.dispute.workflow.api.mig001.Mig001ScenarioServiceTest" time="0.006" />
+    <testcase name="registersOnlyWithProfilePropertyAndShadowMode" classname="com.example.dispute.workflow.api.mig001.Mig001ScenarioServiceTest" time="0.52">
+      </testcase>
+    <testcase name="rejectsAProjectionEpochBootstrapMismatch" classname="com.example.dispute.workflow.api.mig001.Mig001ScenarioServiceTest" time="0.004" />
+    <testcase name="rejectsNonShadowModeNonSystemAndUnboundCases" classname="com.example.dispute.workflow.api.mig001.Mig001ScenarioServiceTest" time="0.125" />
+    <testcase name="replayUsesTheSameBusinessIdentityAndReturnsTheSameTuple" classname="com.example.dispute.workflow.api.mig001.Mig001ScenarioServiceTest" time="0.316" />
+  </testsuite>
+  <testsuite name="com.example.dispute.workflow.application.ConfiguredRoomEpochSelectorTest(phase4-entry-cf1ae353-r3)" source_report="java-entry-junit.xml" tests="5" failures="0" errors="0" skipped="0" time="0.147">
+    <testcase name="keepsLegacyAllocationAvailableWithBothLocksClosed" classname="com.example.dispute.workflow.application.ConfiguredRoomEpochSelectorTest" time="0.004" />
+    <testcase name="permitsExplicitShadowWithoutOpeningTheTemporalWriter" classname="com.example.dispute.workflow.application.ConfiguredRoomEpochSelectorTest" time="0.001" />
+    <testcase name="rejectsShadowWhenNonLegacyAllocationIsNotExplicitlyEnabled" classname="com.example.dispute.workflow.application.ConfiguredRoomEpochSelectorTest" time="0.004" />
+    <testcase name="rejectsTemporalWhenOnlyTheNonLegacyLockIsOpen" classname="com.example.dispute.workflow.application.ConfiguredRoomEpochSelectorTest" time="0.004" />
+    <testcase name="requiresBothLocksForAnExplicitTemporalSelection" classname="com.example.dispute.workflow.application.ConfiguredRoomEpochSelectorTest" time="0.134" />
+  </testsuite>
+  <testsuite name="com.example.dispute.workflow.config.OrchestrationCutoverPropertiesTest(phase4-entry-cf1ae353-r3)" source_report="java-entry-junit.xml" tests="5" failures="0" errors="0" skipped="0" time="0.143">
+    <testcase name="bindsAnExplicitImmutableEpochSelection" classname="com.example.dispute.workflow.config.OrchestrationCutoverPropertiesTest" time="0.022" />
+    <testcase name="bindsTheTwoIndependentNonLegacyActivationLocks" classname="com.example.dispute.workflow.config.OrchestrationCutoverPropertiesTest" time="0.018" />
+    <testcase name="defaultsNewEpochsToLegacy" classname="com.example.dispute.workflow.config.OrchestrationCutoverPropertiesTest" time="0.024" />
+    <testcase name="rejectsTemporalActivationWithoutTheNonLegacyLock" classname="com.example.dispute.workflow.config.OrchestrationCutoverPropertiesTest" time="0.028">
+      </testcase>
+    <testcase name="rejectsUnknownEpochModesAtStartup" classname="com.example.dispute.workflow.config.OrchestrationCutoverPropertiesTest" time="0.051">
+      </testcase>
+  </testsuite>
+</testsuites>
