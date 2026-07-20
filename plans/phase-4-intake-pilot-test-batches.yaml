@@ -269,6 +269,7 @@ agents:
       - java-api-service/src/main/java/com/example/dispute/workflow/application/epoch/ConfiguredRoomEpochSelector.java
       - java-api-service/src/test/java/com/example/dispute/workflow/config/OrchestrationCutoverPropertiesTest.java
       - java-api-service/src/test/java/com/example/dispute/workflow/application/ConfiguredRoomEpochSelectorTest.java
+      - java-api-service/src/test/java/com/example/dispute/workflow/room/RoomEpochAllocatorTestConfiguration.java
       - java-api-service/src/main/resources/application.yml
       - python-agent-service/app/config.py
       - python-agent-service/app/main.py
@@ -294,7 +295,7 @@ task_contracts:
     owner: R
     depends_on: [P4-0]
     objective: Add only the fail-closed non-LEGACY epoch-allocation guard required to make the engineering defaults enforceable.
-    outputs: [selector_guard, configuration_guard, focused_context_tests]
+    outputs: [selector_guard, configuration_guard, authenticated_legacy_epoch_fixture, focused_context_tests]
     definition_of_done: Default or partially configured deployments cannot allocate SHADOW or TEMPORAL real epochs; the synthetic driver requires explicit enablement.
   P4-A1:
     owner: A

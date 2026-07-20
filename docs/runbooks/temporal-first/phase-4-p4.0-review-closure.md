@@ -28,3 +28,17 @@ Typed child dispatch, V043, Graph/LCEL Intake runtime, Temporal branches, formal
 selector replacement, parity, and recovery remain implementation work assigned to their owners.
 Current runtime behavior remains `LEGACY`/`DISABLED`, except explicitly enabled signed synthetic
 infrastructure that still cannot reach a formal sink.
+
+## Baseline Authentication Finding
+
+The first Batch 0 Java attempt on contract candidate `fd8d1a1b` exposed two errors in
+`IntakeRoomServiceIntegrationTest`. The exact class failed identically on parent `a047118c`, proving
+the issue was pre-existing. `RoomEpochAllocatorTestConfiguration` described itself as the shared
+legacy service integration fixture but returned `SHADOW` without the durable bootstrap that every
+non-legacy epoch requires. The failure was classified `FIXTURE`, not infrastructure or a P4 product
+regression.
+
+The fixture now delegates to `ConfiguredRoomEpochSelector.terminalLegacySelection`. The exact two
+scenarios pass with the production allocator and PostgreSQL Testcontainers. Candidate `fd8d1a1b`
+and all of its reports are quarantined; the corrected candidate must rerun all four Batch 0 source
+suites from scratch.
