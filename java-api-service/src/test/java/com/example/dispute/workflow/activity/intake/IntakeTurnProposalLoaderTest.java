@@ -69,15 +69,30 @@ class IntakeTurnProposalLoaderTest {
         JsonNode fixture = fixture();
         byte[] payload = ContractJson.canonicalize(fixture);
         IntakeProposalReference reference = reference(fixture, payload);
+        IntakeProposalLoadException transientFailure = new IntakeProposalLoadException(
+                "proposal object store is temporarily unavailable",
+                new IllegalStateException("object store timeout"));
         IntakeImmutableProposalReader reader = ignored -> {
-            throw new IllegalStateException("object store timeout");
+            throw transientFailure;
         };
 
         assertThatThrownBy(() -> new IntakeTurnProposalLoader(reader)
                         .load(reference, authority(fixture)))
-                .isInstanceOf(IntakeProposalLoadException.class)
-                .isNotInstanceOf(IntakeFinalizationRejectedException.class)
-                .hasMessage("proposal object could not be loaded");
+                .isSameAs(transientFailure);
+    }
+
+    @Test
+    void rejectsAnUnclassifiedReaderFailureWithoutRetryingIt() throws Exception {
+        JsonNode fixture = fixture();
+        byte[] payload = ContractJson.canonicalize(fixture);
+        IntakeProposalReference reference = reference(fixture, payload);
+        IntakeImmutableProposalReader reader = ignored -> {
+            throw new IllegalStateException("unclassified SDK failure");
+        };
+
+        assertRejected(
+                "INTAKE_PROPOSAL_READER_UNEXPECTED",
+                () -> new IntakeTurnProposalLoader(reader).load(reference, authority(fixture)));
     }
 
     @Test

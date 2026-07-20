@@ -23,11 +23,12 @@ public record IntakeGraphFinalizationRequest(
         IntakeProposalReference proposalReference) {
 
     private static final Pattern OPERATION_KEY =
-            Pattern.compile("[A-Za-z0-9][A-Za-z0-9._:-]{0,255}");
+            Pattern.compile("[A-Za-z0-9][A-Za-z0-9._:-]{0,511}");
 
     public IntakeGraphFinalizationRequest {
         if (operationKey == null || !OPERATION_KEY.matcher(operationKey).matches()) {
-            throw new IllegalArgumentException("operationKey must be a bounded ASCII identifier");
+            throw new IllegalArgumentException(
+                    "operationKey must be a bounded 512-character ASCII identifier");
         }
         requestHash = IntakeContractSupport.sha256(requestHash, "requestHash");
         authority = Objects.requireNonNull(authority, "authority");

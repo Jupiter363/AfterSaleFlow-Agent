@@ -1,5 +1,6 @@
 package com.example.dispute.workflow.application.intake;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import com.fasterxml.jackson.databind.annotation.JsonNaming;
 import java.time.Instant;
@@ -9,6 +10,7 @@ import java.util.Objects;
 import java.util.regex.Pattern;
 
 /** Exact intake-finalization-receipt.v1 returned by the atomic Domain commit. */
+@JsonInclude(JsonInclude.Include.NON_NULL)
 @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
 public record IntakeFinalizationReceipt(
         String schemaVersion,
@@ -38,6 +40,8 @@ public record IntakeFinalizationReceipt(
 
     private static final Pattern IDENTIFIER_256 =
             Pattern.compile("[A-Za-z0-9][A-Za-z0-9._:-]{0,255}");
+    private static final Pattern OPERATION_KEY_512 =
+            Pattern.compile("[A-Za-z0-9][A-Za-z0-9._:-]{0,511}");
     private static final String ZERO_HASH = "0".repeat(64);
 
     public IntakeFinalizationReceipt {
@@ -45,7 +49,7 @@ public record IntakeFinalizationReceipt(
             throw new IllegalArgumentException(
                     "schemaVersion must be intake-finalization-receipt.v1");
         }
-        operationKey = identifier256(operationKey, "operationKey");
+        operationKey = operationKey(operationKey);
         tenantSurrogate = identifier256(tenantSurrogate, "tenantSurrogate");
         caseId = identifier256(caseId, "caseId");
         IntakeContractSupport.nonNegative(roomEpoch, "roomEpoch");
@@ -79,14 +83,11 @@ public record IntakeFinalizationReceipt(
     public static IntakeFinalizationReceipt committed(CommitFacts facts) {
         Objects.requireNonNull(facts, "facts");
         IntakeFinalizationReceipt unsigned = facts.toReceipt(ZERO_HASH);
-        return facts.toReceipt(
-                IntakeContractHashes.canonicalHashExcluding(
-                        IntakeContractHashes.toTree(unsigned), "receipt_hash"));
+        return facts.toReceipt(IntakeFinalizationReceiptCodec.receiptHash(unsigned));
     }
 
     public void requireCanonicalHash() {
-        String canonical = IntakeContractHashes.canonicalHashExcluding(
-                IntakeContractHashes.toTree(this), "receipt_hash");
+        String canonical = IntakeFinalizationReceiptCodec.receiptHash(this);
         if (!receiptHash.equals(canonical)) {
             throw new IntakeFinalizationRejectedException(
                     "INTAKE_RECEIPT_HASH_MISMATCH", "receipt hash is not canonical");
@@ -96,6 +97,14 @@ public record IntakeFinalizationReceipt(
     private static String identifier256(String value, String field) {
         if (value == null || !IDENTIFIER_256.matcher(value).matches()) {
             throw new IllegalArgumentException(field + " must be a bounded identifier");
+        }
+        return value;
+    }
+
+    private static String operationKey(String value) {
+        if (value == null || !OPERATION_KEY_512.matcher(value).matches()) {
+            throw new IllegalArgumentException(
+                    "operationKey must be a bounded 512-character identifier");
         }
         return value;
     }

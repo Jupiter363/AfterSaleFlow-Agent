@@ -57,7 +57,10 @@ public final class IntakeTurnProposalLoader {
         } catch (IntakeProposalLoadException failure) {
             throw failure;
         } catch (RuntimeException failure) {
-            throw new IntakeProposalLoadException("proposal object could not be loaded", failure);
+            throw new IntakeFinalizationRejectedException(
+                    "INTAKE_PROPOSAL_READER_UNEXPECTED",
+                    "proposal reader failed without a classified access result",
+                    failure);
         }
         requireExactReceipt(reference, stored);
         byte[] payload = stored.payload();

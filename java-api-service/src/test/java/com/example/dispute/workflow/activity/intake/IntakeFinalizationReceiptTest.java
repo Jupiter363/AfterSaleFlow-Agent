@@ -3,6 +3,10 @@ package com.example.dispute.workflow.activity.intake;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.example.dispute.workflow.application.intake.IntakeFinalizationReceipt;
+import com.example.dispute.workflow.application.intake.IntakeFinalizationReceiptCodec;
+import com.example.dispute.workflow.application.intake.IntakeFinalizationOperationKey;
+import com.example.dispute.workflow.contract.v1.ContractJson;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import java.nio.file.Path;
@@ -59,5 +63,36 @@ class IntakeFinalizationReceiptTest {
 
         assertThat(regenerated).isEqualTo(fixture);
         assertThat(regenerated.operationKey()).hasSizeGreaterThan(128);
+        JsonNode frozenWire = MAPPER.readTree(RECEIPT_FIXTURE.toFile());
+        assertThat(IntakeFinalizationReceiptCodec.canonicalBytes(regenerated))
+                .containsExactly(ContractJson.canonicalize(frozenWire));
+        assertThat(IntakeFinalizationReceiptCodec.toTree(regenerated).has("matrix_version"))
+                .isFalse();
+    }
+
+    @Test
+    void operationKeyKeepsTheExactFormulaForMaximumContractIdentifiers() {
+        String caseId = "C".repeat(128);
+        String commandId = "D".repeat(128);
+        String resultHash = "a".repeat(64);
+
+        String operationKey = IntakeFinalizationOperationKey.create(
+                caseId,
+                Long.MAX_VALUE,
+                "grt.v1.018f6b7ec30a7430982fffc520c8195c",
+                commandId,
+                resultHash);
+
+        assertThat(operationKey)
+                .isEqualTo(
+                        "intake.turn.finalize:"
+                                + caseId
+                                + ":"
+                                + Long.MAX_VALUE
+                                + ":grt.v1.018f6b7ec30a7430982fffc520c8195c:"
+                                + commandId
+                                + ":"
+                                + resultHash)
+                .hasSizeLessThanOrEqualTo(IntakeFinalizationOperationKey.MAX_KEY_LENGTH);
     }
 }

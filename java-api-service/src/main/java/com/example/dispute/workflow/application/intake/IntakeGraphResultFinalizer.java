@@ -295,17 +295,20 @@ public final class IntakeGraphResultFinalizer {
             throw rejected("INTAKE_RESULT_USAGE_INVALID", "graph result usage cannot be negative");
         }
 
-        String expectedOperation =
-                "intake.turn.finalize:"
-                        + authority.caseId()
-                        + ":"
-                        + authority.roomEpoch()
-                        + ":"
-                        + authority.threadId()
-                        + ":"
-                        + authority.commandId()
-                        + ":"
-                        + authority.resultHash();
+        String expectedOperation;
+        try {
+            expectedOperation = IntakeFinalizationOperationKey.create(
+                    authority.caseId(),
+                    authority.roomEpoch(),
+                    authority.threadId(),
+                    authority.commandId(),
+                    authority.resultHash());
+        } catch (IllegalArgumentException failure) {
+            throw rejected(
+                    "INTAKE_OPERATION_KEY_INPUT_INVALID",
+                    "finalization identifiers exceed the frozen operation-key bounds",
+                    failure);
+        }
         requireEqual(request.operationKey(), expectedOperation, "finalization operation key");
     }
 
