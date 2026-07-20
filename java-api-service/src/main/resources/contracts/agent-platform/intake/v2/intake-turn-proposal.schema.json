@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.after-sale-flow.example/agent-platform/intake/v2/intake-turn-proposal.schema.json",
+  "title": "Intake Turn Proposal v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "command_id", "logical_run_id", "attempt_id", "case_id",
+    "room_epoch", "thread_id", "actor_scope_hash", "agent_session_id",
+    "cognitive_revision", "source_snapshot_hash", "room_utterance", "dossier_patch",
+    "readiness", "missing_fields", "recommendation", "knowledge_answer_mode",
+    "confidence", "profile_versions", "proposal_hash"
+  ],
+  "properties": {
+    "schema_version": {"const": "intake-turn-proposal.v2"},
+    "command_id": {"$ref": "#/$defs/identifier"},
+    "logical_run_id": {"$ref": "#/$defs/identifier"},
+    "attempt_id": {"$ref": "#/$defs/identifier"},
+    "case_id": {"$ref": "#/$defs/identifier"},
+    "room_epoch": {"type": "integer", "minimum": 0},
+    "thread_id": {"$ref": "#/$defs/thread_id"},
+    "actor_scope_hash": {"$ref": "#/$defs/sha256"},
+    "agent_session_id": {"$ref": "#/$defs/identifier"},
+    "cognitive_revision": {"type": "integer", "minimum": 1},
+    "source_snapshot_hash": {"$ref": "#/$defs/sha256"},
+    "source_event_hash": {"$ref": "#/$defs/sha256"},
+    "room_utterance": {"type": "string", "minLength": 1, "maxLength": 20000},
+    "dossier_patch": {"$ref": "#/$defs/dossier_patch"},
+    "matrix_patch": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/bounded_branch"}
+      ]
+    },
+    "readiness": {"enum": ["INCOMPLETE", "READY_TO_CONFIRM", "NEEDS_REVIEW"]},
+    "missing_fields": {
+      "type": "array", "maxItems": 30, "uniqueItems": true,
+      "items": {"$ref": "#/$defs/identifier"}
+    },
+    "recommendation": {"enum": ["ACCEPTED", "NEED_MORE_INFO", "NOT_ADMISSIBLE"]},
+    "knowledge_answer_mode": {"enum": ["NONE", "STUB"]},
+    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    "profile_versions": {"$ref": "#/$defs/profile_versions"},
+    "proposal_hash": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string", "minLength": 1, "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "thread_id": {"type": "string", "pattern": "^grt\\.v1\\.[0-9a-f]{32}$"},
+    "bounded_branch": {
+      "type": "object",
+      "maxProperties": 64,
+      "propertyNames": {"not": {"$ref": "#/$defs/forbidden_key"}},
+      "additionalProperties": {"$ref": "#/$defs/safe_json"}
+    },
+    "safe_json": {
+      "oneOf": [
+        {"type": "string", "maxLength": 20000},
+        {"type": "number"},
+        {"type": "boolean"},
+        {"type": "null"},
+        {
+          "type": "array",
+          "maxItems": 128,
+          "items": {"$ref": "#/$defs/safe_json"}
+        },
+        {"$ref": "#/$defs/bounded_branch"}
+      ]
+    },
+    "forbidden_key": {
+      "enum": [
+        "memory_frame", "internal_handoff", "handoff_notes", "hidden_reasoning",
+        "chain_of_thought", "tool_calls", "tool_parameters", "writer_mode",
+        "open_evidence", "complete_party", "send_summons", "execute_tool"
+      ]
+    },
+    "dossier_patch": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 18,
+      "properties": {
+        "schema_version": {"const": "intake-dossier.v2"},
+        "case_story": {"$ref": "#/$defs/bounded_branch"},
+        "references": {"$ref": "#/$defs/bounded_branch"},
+        "party_positions": {"$ref": "#/$defs/bounded_branch"},
+        "dispute_focus": {"$ref": "#/$defs/bounded_branch"},
+        "requested_resolution": {"$ref": "#/$defs/bounded_branch"},
+        "claim_resolution": {"$ref": "#/$defs/bounded_branch"},
+        "respondent_attitude": {"$ref": "#/$defs/bounded_branch"},
+        "dispute_core_state": {"$ref": "#/$defs/bounded_branch"},
+        "risk_assessment": {"$ref": "#/$defs/bounded_branch"},
+        "missing_information": {"$ref": "#/$defs/bounded_branch"},
+        "intake_quality": {"$ref": "#/$defs/bounded_branch"},
+        "admission": {"$ref": "#/$defs/bounded_branch"},
+        "case_fact_matrix": {"$ref": "#/$defs/bounded_branch"},
+        "unilateral_case_matrix": {"$ref": "#/$defs/bounded_branch"}
+      }
+    },
+    "profile_versions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "graph_version", "checkpoint_schema_version", "prompt_version", "model_profile_id",
+        "output_schema_version", "policy_version", "guardrail_version", "tool_policy_version"
+      ],
+      "properties": {
+        "graph_version": {"$ref": "#/$defs/identifier"},
+        "checkpoint_schema_version": {"$ref": "#/$defs/identifier"},
+        "prompt_version": {"$ref": "#/$defs/identifier"},
+        "model_profile_id": {"$ref": "#/$defs/identifier"},
+        "output_schema_version": {"const": "intake-turn-proposal.v2"},
+        "policy_version": {"$ref": "#/$defs/identifier"},
+        "guardrail_version": {"$ref": "#/$defs/identifier"},
+        "tool_policy_version": {"$ref": "#/$defs/identifier"}
+      }
+    }
+  }
+}
