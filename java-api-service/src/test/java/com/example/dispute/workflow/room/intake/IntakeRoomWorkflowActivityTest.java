@@ -43,6 +43,8 @@ import io.temporal.worker.Worker;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import org.junit.jupiter.api.Test;
 
 class IntakeRoomWorkflowActivityTest {
@@ -135,6 +137,14 @@ class IntakeRoomWorkflowActivityTest {
             new com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.RetryBudget(
                 "intake-retry-budget.v1", 0, 0, 0));
     assertThat(reconciliationOnly.getRetryOptions().getMaximumAttempts()).isEqualTo(1);
+
+    ActivityOptions deadlineBounded =
+        IntakeActivityTemporalPolicy.options(
+            new com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.RetryBudget(
+                "intake-retry-budget.v1", 2, 3, 1),
+            Duration.ofSeconds(2));
+    assertThat(deadlineBounded.getStartToCloseTimeout()).isEqualTo(Duration.ofSeconds(2));
+    assertThat(deadlineBounded.getScheduleToCloseTimeout()).isEqualTo(Duration.ofSeconds(2));
   }
 
   @Test
@@ -173,15 +183,84 @@ class IntakeRoomWorkflowActivityTest {
     }
   }
 
+  @Test
+  void finalizerCompletionLossRetriesOnlyTheIdempotentStage() {
+    try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+      String workflowQueue = "phase4-intake-finalizer-completion-loss";
+      FakeActivities activities = new FakeActivities(false, true, false);
+      Worker workflowWorker = environment.newWorker(workflowQueue);
+      workflowWorker.registerWorkflowImplementationTypes(IntakeRoomWorkflowImpl.class);
+      Worker activityWorker = environment.newWorker(AGENT_EXECUTION);
+      activityWorker.registerActivitiesImplementations(activities);
+      environment.start();
+
+      IntakeRoomWorkflow workflow =
+          workflow(environment, workflowQueue, "completion-loss");
+      WorkflowClient.start(workflow::run, start());
+      workflow.commandAccepted(
+          command(1, "CMD_COMPLETION_LOSS", IntakeCommandType.INTAKE_MESSAGE, null));
+      environment.sleep(Duration.ofSeconds(2));
+
+      assertThat(workflow.state().roomPhase()).isEqualTo(IntakeRoomPhase.READY_TO_CONFIRM);
+      assertThat(activities.snapshotRequests).hasSize(1);
+      assertThat(activities.graphRequests).hasSize(1);
+      assertThat(activities.finalizationRequests).hasSize(2);
+      assertThat(activities.finalizationCommits).hasSize(1);
+    }
+  }
+
+  @Test
+  void staleFinalizationReceiptCannotAdvanceThePendingStage() {
+    try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+      String workflowQueue = "phase4-intake-stale-finalization";
+      FakeActivities activities = new FakeActivities(false, false, true);
+      Worker workflowWorker = environment.newWorker(workflowQueue);
+      workflowWorker.registerWorkflowImplementationTypes(IntakeRoomWorkflowImpl.class);
+      Worker activityWorker = environment.newWorker(AGENT_EXECUTION);
+      activityWorker.registerActivitiesImplementations(activities);
+      environment.start();
+
+      IntakeRoomWorkflow workflow = workflow(environment, workflowQueue, "stale-finalization");
+      WorkflowClient.start(workflow::run, start(5));
+      workflow.commandAccepted(
+          command(1, "CMD_STALE_FINALIZATION", IntakeCommandType.INTAKE_MESSAGE, null));
+      environment.sleep(Duration.ofSeconds(1));
+
+      IntakeRoomSnapshot state = workflow.state();
+      assertThat(state.protocolErrorCode()).isEqualTo("EVENT_STALE_REVISION");
+      assertThat(state.processRevision()).isEqualTo(5);
+      assertThat(state.pendingCommandId()).isEqualTo("CMD_STALE_FINALIZATION");
+      assertThat(state.activityExecution().stage())
+          .isEqualTo(IntakeActivityStage.TURN_FINALIZATION);
+      assertThat(activities.finalizationCommits).hasSize(1);
+    }
+  }
+
+  private static IntakeRoomWorkflow workflow(
+      TestWorkflowEnvironment environment, String taskQueue, String suffix) {
+    return environment
+        .getWorkflowClient()
+        .newWorkflowStub(
+            IntakeRoomWorkflow.class,
+            WorkflowOptions.newBuilder()
+                .setWorkflowId("intake-room:" + CASE_ID + ":" + EPOCH + ":" + suffix)
+                .setTaskQueue(taskQueue)
+                .build());
+  }
+
   private static IntakeRoomStart start() {
+    return start(0);
+  }
+
+  private static IntakeRoomStart start(long initialRevision) {
     return new IntakeRoomStart(
         "intake-room-start.v1",
         TENANT,
         CASE_ID,
         EPOCH,
         FENCE,
-        0,
-        0,
+        initialRevision,
+        initialRevision,
         1,
         1,
         "intake-workflow.synthetic.v1",
@@ -231,17 +310,29 @@ class IntakeRoomWorkflowActivityTest {
   private static final class FakeActivities implements IntakeRoomActivities {
 
     private final boolean failGraph;
+    private final boolean loseFirstFinalizationCompletion;
+    private final boolean staleFinalization;
     private final List<SnapshotPublicationRequest> snapshotRequests = new ArrayList<>();
     private final List<GraphExecutionRequest> graphRequests = new ArrayList<>();
     private final List<TurnFinalizationRequest> finalizationRequests = new ArrayList<>();
     private final List<BranchCommitRequest> acceptRequests = new ArrayList<>();
+    private final Set<String> finalizationCommits = ConcurrentHashMap.newKeySet();
 
     private FakeActivities() {
-      this(false);
+      this(false, false, false);
     }
 
     private FakeActivities(boolean failGraph) {
+      this(failGraph, false, false);
+    }
+
+    private FakeActivities(
+        boolean failGraph,
+        boolean loseFirstFinalizationCompletion,
+        boolean staleFinalization) {
       this.failGraph = failGraph;
+      this.loseFirstFinalizationCompletion = loseFirstFinalizationCompletion;
+      this.staleFinalization = staleFinalization;
     }
 
     @Override
@@ -317,7 +408,18 @@ class IntakeRoomWorkflowActivityTest {
     @Override
     public TurnFinalizationReceipt finalizeTurn(TurnFinalizationRequest request) {
       finalizationRequests.add(request);
-      long revision = request.envelope().commandSequence();
+      boolean firstCommit = finalizationCommits.add(request.operationKey());
+      if (loseFirstFinalizationCompletion && firstCommit) {
+        throw ApplicationFailure.newFailure(
+            "completion lost after idempotent finalization commit",
+            IntakeActivityFailureTypes.INFRASTRUCTURE_RETRYABLE);
+      }
+      long revision =
+          staleFinalization
+              ? Math.max(0, request.envelope().processRevision() - 1)
+              : Math.max(
+                  request.envelope().processRevision(),
+                  request.envelope().commandSequence());
       GraphExecutionReceipt graph = request.graphExecution();
       IntakeDomainEventRef event =
           event(

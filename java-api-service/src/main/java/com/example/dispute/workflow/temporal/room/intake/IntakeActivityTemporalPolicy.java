@@ -18,6 +18,15 @@ public final class IntakeActivityTemporalPolicy {
   private IntakeActivityTemporalPolicy() {}
 
   public static ActivityOptions options(RetryBudget retryBudget) {
+    return options(retryBudget, SCHEDULE_TO_CLOSE_TIMEOUT);
+  }
+
+  public static ActivityOptions options(RetryBudget retryBudget, Duration remaining) {
+    if (remaining == null || remaining.isZero() || remaining.isNegative()) {
+      throw new IllegalArgumentException("remaining Activity deadline must be positive");
+    }
+    Duration scheduleToClose = min(SCHEDULE_TO_CLOSE_TIMEOUT, remaining);
+    Duration startToClose = min(START_TO_CLOSE_TIMEOUT, scheduleToClose);
     int attempts =
         Math.max(
             1,
@@ -25,8 +34,8 @@ public final class IntakeActivityTemporalPolicy {
                 MAXIMUM_ACTIVITY_ATTEMPTS, retryBudget.activityAttemptsRemaining()));
     return ActivityOptions.newBuilder()
         .setTaskQueue(AGENT_EXECUTION)
-        .setStartToCloseTimeout(START_TO_CLOSE_TIMEOUT)
-        .setScheduleToCloseTimeout(SCHEDULE_TO_CLOSE_TIMEOUT)
+        .setStartToCloseTimeout(startToClose)
+        .setScheduleToCloseTimeout(scheduleToClose)
         .setCancellationType(ActivityCancellationType.WAIT_CANCELLATION_COMPLETED)
         .setRetryOptions(
             RetryOptions.newBuilder()
@@ -44,5 +53,9 @@ public final class IntakeActivityTemporalPolicy {
                     IllegalArgumentException.class.getName())
                 .build())
         .build();
+  }
+
+  private static Duration min(Duration left, Duration right) {
+    return left.compareTo(right) <= 0 ? left : right;
   }
 }

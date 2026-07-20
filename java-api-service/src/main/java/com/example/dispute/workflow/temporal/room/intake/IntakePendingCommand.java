@@ -10,7 +10,33 @@ public record IntakePendingCommand(
     String payloadRef,
     String payloadHash,
     String operationKey,
-    String requestHash) {
+    String requestHash,
+    IntakeCommandExecutionContext executionContext) {
+
+  public IntakePendingCommand(
+      String schemaVersion,
+      String commandId,
+      long sequence,
+      IntakeCommandType commandType,
+      IntakeParty party,
+      String actorScopeHash,
+      String payloadRef,
+      String payloadHash,
+      String operationKey,
+      String requestHash) {
+    this(
+        schemaVersion,
+        commandId,
+        sequence,
+        commandType,
+        party,
+        actorScopeHash,
+        payloadRef,
+        payloadHash,
+        operationKey,
+        requestHash,
+        null);
+  }
 
   public IntakePendingCommand {
     if (!"intake-pending-command.v1".equals(schemaVersion)) {
@@ -29,6 +55,7 @@ public record IntakePendingCommand(
         command.payloadRef(),
         command.payloadHash(),
         command.operationKey(),
-        command.requestHash());
+        command.requestHash(),
+        command.executionContext());
   }
 }
