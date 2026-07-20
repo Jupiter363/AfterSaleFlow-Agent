@@ -7,9 +7,14 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.example.dispute.workflow.activity.agent.AgentRunFinalizationGateway;
+import com.example.dispute.workflow.activity.agent.AgentRunFinalizationFailureClassifier;
 import com.example.dispute.workflow.activity.agent.FinalizeAgentRunActivityImpl;
+import com.example.dispute.workflow.application.intake.IntakeFinalizationPersistenceException;
+import com.example.dispute.workflow.application.intake.IntakeFinalizationRejectedException;
+import com.example.dispute.workflow.application.intake.IntakeProposalLoadException;
 import com.example.dispute.workflow.contract.v1.AgentRunFinalizationReceipt;
 import com.example.dispute.workflow.contract.v1.AgentRunFinalizationReceipt.CommitStatus;
+import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
@@ -21,6 +26,7 @@ import com.fasterxml.jackson.databind.json.JsonMapper;
 import io.temporal.failure.ApplicationFailure;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 
 class FinalizeAgentRunActivityTest {
@@ -74,6 +80,72 @@ class FinalizeAgentRunActivityTest {
         assertThatThrownBy(() ->
                         new FinalizeAgentRunActivityImpl(gateway).finalizeResult(request, result))
                 .isSameAs(databaseFailure);
+    }
+
+    @Test
+    void intakeTypedRejectionsPreserveTheirExactNonRetryableCodes() throws Exception {
+        ExecuteAgentRunRequest request = intakeRequest(request());
+        ExecuteAgentRunResult result = result(request);
+
+        for (String code : List.of(
+                "INTAKE_STALE_FENCE",
+                "INTAKE_AGENT_SESSION_REVOKED",
+                "INTAKE_PROPOSAL_SCHEMA_INVALID",
+                "INTAKE_FINALIZATION_OPERATION_CONFLICT")) {
+            ApplicationFailure failure = invokeFailure(
+                    request,
+                    result,
+                    new IntakeFinalizationRejectedException(code, "typed rejection"));
+
+            assertThat(failure.getType()).isEqualTo(code);
+            assertThat(failure.isNonRetryable()).isTrue();
+        }
+    }
+
+    @Test
+    void intakeTypedResourceFailuresRemainRetryable() throws Exception {
+        ExecuteAgentRunRequest request = intakeRequest(request());
+        ExecuteAgentRunResult result = result(request);
+
+        ApplicationFailure proposal = invokeFailure(
+                request,
+                result,
+                new IntakeProposalLoadException(
+                        "object store temporarily unavailable", new RuntimeException("timeout")));
+        ApplicationFailure database = invokeFailure(
+                request,
+                result,
+                new IntakeFinalizationPersistenceException(
+                        "database temporarily unavailable", new RuntimeException("connection")));
+
+        assertThat(proposal.getType()).isEqualTo(IntakeProposalLoadException.CODE);
+        assertThat(proposal.isNonRetryable()).isFalse();
+        assertThat(database.getType()).isEqualTo(IntakeFinalizationPersistenceException.CODE);
+        assertThat(database.isNonRetryable()).isFalse();
+    }
+
+    @Test
+    void unknownIntakeRuntimeFailsClosedAtTheActivityBoundary() throws Exception {
+        ExecuteAgentRunRequest request = intakeRequest(request());
+        ApplicationFailure failure = invokeFailure(
+                request, result(request), new RuntimeException("unclassified Intake failure"));
+
+        assertThat(failure.getType())
+                .isEqualTo(AgentRunFinalizationFailureClassifier.INTAKE_UNCLASSIFIED);
+        assertThat(failure.isNonRetryable()).isTrue();
+    }
+
+    @Test
+    void unknownNonIntakeRuntimeKeepsTheExistingEscapeSemantics() throws Exception {
+        ExecuteAgentRunRequest request = request();
+        ExecuteAgentRunResult result = result(request);
+        RuntimeException unknown = new RuntimeException("unclassified Evidence failure");
+        AgentRunFinalizationGateway gateway = mock(AgentRunFinalizationGateway.class);
+        when(gateway.finalizeResult(request, result)).thenThrow(unknown);
+
+        assertThatThrownBy(() ->
+                        new FinalizeAgentRunActivityImpl(gateway).finalizeResult(request, result))
+                .isSameAs(unknown);
     }
 
     @Test
@@ -137,6 +209,59 @@ class FinalizeAgentRunActivityTest {
                 result.lastSequenceNo(),
                 status,
                 NOW);
+    }
+
+    private static ApplicationFailure invokeFailure(
+            ExecuteAgentRunRequest request,
+            ExecuteAgentRunResult result,
+            RuntimeException failure) {
+        AgentRunFinalizationGateway gateway = mock(AgentRunFinalizationGateway.class);
+        when(gateway.finalizeResult(request, result)).thenThrow(failure);
+        try {
+            new FinalizeAgentRunActivityImpl(gateway).finalizeResult(request, result);
+            throw new AssertionError("finalization failure was not propagated");
+        } catch (ApplicationFailure applicationFailure) {
+            return applicationFailure;
+        }
+    }
+
+    private static ExecuteAgentRunRequest intakeRequest(ExecuteAgentRunRequest source) {
+        RoomGraphCommand command = source.command();
+        RoomGraphCommand intake = new RoomGraphCommand(
+                command.schemaVersion(),
+                command.commandId(),
+                command.logicalRunId(),
+                command.attemptId(),
+                command.tenantSurrogate(),
+                command.caseId(),
+                RoomType.INTAKE,
+                command.roomEpoch(),
+                "intake.v2",
+                command.graphVersion(),
+                command.checkpointSchemaVersion(),
+                command.threadId(),
+                command.actorScope(),
+                command.processRevision(),
+                command.stageCode(),
+                command.stageSequence(),
+                command.domainSnapshotRef(),
+                command.eventRef(),
+                command.invocationContext(),
+                command.retryBudget(),
+                command.deadlineAt(),
+                command.traceparent(),
+                command.requestHash());
+        return new ExecuteAgentRunRequest(
+                source.schemaVersion(),
+                source.agentRunId(),
+                source.attemptNo(),
+                source.attemptLimit(),
+                source.streamProtocol(),
+                source.logicalInputHash(),
+                source.previousAttemptId(),
+                source.resetRequired(),
+                source.publicSequenceOffset(),
+                intake);
     }
 
     private static <T> T fixture(String file, Class<T> type) throws Exception {

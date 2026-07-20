@@ -1,7 +1,10 @@
 package com.example.dispute.workflow.application.intake;
 
+import com.example.dispute.agentstream.application.AgentRunFinalizationFailure;
+
 /** Non-retryable schema, authority, fencing, or domain rejection at the formal boundary. */
-public final class IntakeFinalizationRejectedException extends RuntimeException {
+public final class IntakeFinalizationRejectedException extends RuntimeException
+        implements AgentRunFinalizationFailure {
 
     private final String code;
 
@@ -17,5 +20,10 @@ public final class IntakeFinalizationRejectedException extends RuntimeException 
 
     public String code() {
         return code;
+    }
+
+    @Override
+    public boolean retryable() {
+        return false;
     }
 }

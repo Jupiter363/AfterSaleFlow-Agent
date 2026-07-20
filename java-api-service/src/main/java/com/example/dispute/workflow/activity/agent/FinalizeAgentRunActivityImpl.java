@@ -3,13 +3,13 @@ package com.example.dispute.workflow.activity.agent;
 import com.example.dispute.workflow.contract.v1.AgentRunFinalizationReceipt;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
-import io.temporal.failure.ApplicationFailure;
 import java.util.Objects;
 
 /** Validates the immutable execution result around the retryable Java-domain commit. */
 public final class FinalizeAgentRunActivityImpl implements FinalizeAgentRunActivity {
 
-    public static final String NON_RETRYABLE_FAILURE_TYPE = "AgentRunFinalizationRejected";
+    public static final String NON_RETRYABLE_FAILURE_TYPE =
+            AgentRunFinalizationFailureClassifier.GENERIC_REJECTION;
 
     private final AgentRunFinalizationGateway gateway;
 
@@ -25,15 +25,8 @@ public final class FinalizeAgentRunActivityImpl implements FinalizeAgentRunActiv
             AgentRunFinalizationReceipt receipt = gateway.finalizeResult(request, result);
             validateReceipt(request, result, receipt);
             return receipt;
-        } catch (ApplicationFailure failure) {
-            throw failure;
-        } catch (IllegalArgumentException | IllegalStateException rejected) {
-            throw ApplicationFailure.newNonRetryableFailure(
-                    "agent run finalization was rejected",
-                    NON_RETRYABLE_FAILURE_TYPE,
-                    request == null ? "unknown-run" : request.agentRunId(),
-                    request == null ? "unknown-attempt" : request.attemptId(),
-                    "AGENT_RUN_FINALIZATION_REJECTED");
+        } catch (RuntimeException failure) {
+            throw AgentRunFinalizationFailureClassifier.classify(request, failure);
         }
     }
 
