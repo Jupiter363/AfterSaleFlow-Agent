@@ -362,11 +362,13 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
           return false;
         }
         activeParty = IntakeParty.INITIATOR;
+        readinessParty = null;
         terminalReason = IntakeTerminalReason.NOT_ADMISSIBLE;
         roomPhase = IntakeRoomPhase.COMPLETED;
       }
       case CANCELLED -> {
         activeParty = IntakeParty.INITIATOR;
+        readinessParty = null;
         terminalReason = IntakeTerminalReason.CANCELLED;
         roomPhase = IntakeRoomPhase.COMPLETED;
       }
@@ -379,6 +381,7 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
         }
         respondentComplete = true;
         activeParty = IntakeParty.RESPONDENT;
+        readinessParty = null;
         terminalReason = IntakeTerminalReason.ADMITTED;
         roomPhase = IntakeRoomPhase.COMPLETED;
       }

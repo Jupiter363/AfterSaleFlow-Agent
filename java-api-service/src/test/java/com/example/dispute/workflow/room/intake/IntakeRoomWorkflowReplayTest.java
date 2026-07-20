@@ -73,6 +73,8 @@ class IntakeRoomWorkflowReplayTest {
       IntakeRoomSnapshot result =
           WorkflowStub.fromTyped(workflow).getResult(IntakeRoomSnapshot.class);
       assertThat(result.terminalReason()).isEqualTo(IntakeTerminalReason.NOT_ADMISSIBLE);
+      assertThat(result.readinessParty()).isNull();
+      assertThat(result.pendingCommand()).isNull();
       assertThat(result.nextCommandSequence()).isEqualTo(3);
       assertThat(result.nextEventSequence()).isEqualTo(3);
       history = client.fetchHistory(workflowId);

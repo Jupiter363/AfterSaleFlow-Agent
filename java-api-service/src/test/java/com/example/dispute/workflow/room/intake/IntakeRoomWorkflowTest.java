@@ -129,6 +129,8 @@ class IntakeRoomWorkflowTest {
     assertThat(terminal.roomPhase()).isEqualTo(IntakeRoomPhase.COMPLETED);
     assertThat(terminal.terminalReason()).isEqualTo(IntakeTerminalReason.ADMITTED);
     assertThat(terminal.respondentComplete()).isTrue();
+    assertThat(terminal.readinessParty()).isNull();
+    assertThat(terminal.pendingCommand()).isNull();
   }
 
   @Test
@@ -136,6 +138,11 @@ class IntakeRoomWorkflowTest {
     workflow.commandAccepted(
         command(1, "CMD_RESP_LOCKED", IntakeCommandType.INTAKE_MESSAGE, IntakeParty.RESPONDENT));
     assertDecision("REJECTED", "RESPONDENT_LOCKED");
+    assertUnadvancedOpenState();
+
+    workflow.commandAccepted(
+        command(1, "CMD_RESP_CANCEL", IntakeCommandType.INTAKE_CANCEL, IntakeParty.RESPONDENT));
+    assertDecision("REJECTED", "RESPONDENT_CANCEL_FORBIDDEN");
     assertUnadvancedOpenState();
 
     IntakeWorkflowCommand wrongScope =
@@ -156,6 +163,21 @@ class IntakeRoomWorkflowTest {
     assertThat(workflow.state().nextCommandSequence()).isEqualTo(2);
     assertThat(workflow.state().processedCommandCount()).isEqualTo(1);
     assertThat(workflow.state().roomPhase()).isEqualTo(IntakeRoomPhase.AGENT_RUNNING);
+  }
+
+  @Test
+  void commandSequenceGapDoesNotConsumeSequenceAndCorrectCommandCanRecover() {
+    workflow.commandAccepted(
+        command(2, "CMD_COMMAND_GAP", IntakeCommandType.INTAKE_CANCEL, IntakeParty.INITIATOR));
+    assertDecision("REJECTED", "COMMAND_SEQUENCE_GAP");
+    assertUnadvancedOpenState();
+
+    workflow.commandAccepted(
+        command(1, "CMD_AFTER_GAP", IntakeCommandType.INTAKE_MESSAGE, IntakeParty.INITIATOR));
+    assertDecision("ACCEPTED", null);
+    assertThat(workflow.state().nextCommandSequence()).isEqualTo(2);
+    assertThat(workflow.state().processedCommandCount()).isEqualTo(1);
+    assertThat(workflow.state().pendingCommandId()).isEqualTo("CMD_AFTER_GAP");
   }
 
   @Test
@@ -295,22 +317,44 @@ class IntakeRoomWorkflowTest {
     workflow.domainEventCommitted(
         event(1, "EVENT_READY", message, IntakeDomainEventType.TURN_READY_TO_CONFIRM));
     assertPhase(IntakeRoomPhase.READY_TO_CONFIRM);
+
+    IntakeDomainEventRef applied =
+        event(1, "EVENT_READY", message, IntakeDomainEventType.TURN_READY_TO_CONFIRM);
+    workflow.domainEventCommitted(applied);
+    tick();
+    assertThat(workflow.state().protocolErrorCode()).isNull();
+    assertThat(workflow.state().nextEventSequence()).isEqualTo(2);
+    assertThat(workflow.state().processedEventCount()).isEqualTo(1);
+    assertThat(workflow.state().roomPhase()).isEqualTo(IntakeRoomPhase.READY_TO_CONFIRM);
   }
 
   @Test
-  void initiatorCancellationUsesOnlyItsCommittedCancellationEvent() {
+  void initiatorCancellationAfterReadinessClearsPendingReadiness() {
+    IntakeWorkflowCommand message =
+        command(1, "CMD_CANCEL_READY", IntakeCommandType.INTAKE_MESSAGE, IntakeParty.INITIATOR);
+    workflow.commandAccepted(message);
+    workflow.domainEventCommitted(
+        graphEvent(
+            1,
+            "EVENT_CANCEL_READY",
+            message,
+            IntakeDomainEventType.TURN_READY_TO_CONFIRM));
+    assertPhase(IntakeRoomPhase.READY_TO_CONFIRM);
+
     IntakeWorkflowCommand cancel =
-        command(1, "CMD_CANCEL", IntakeCommandType.INTAKE_CANCEL, IntakeParty.INITIATOR);
+        command(2, "CMD_CANCEL", IntakeCommandType.INTAKE_CANCEL, IntakeParty.INITIATOR);
     workflow.commandAccepted(cancel);
     assertDecision("ACCEPTED", null);
     workflow.domainEventCommitted(
-        event(1, "EVENT_CANCEL", cancel, IntakeDomainEventType.CANCELLED));
+        event(2, "EVENT_CANCEL", cancel, IntakeDomainEventType.CANCELLED));
 
     IntakeRoomSnapshot terminal =
         WorkflowStub.fromTyped(workflow).getResult(IntakeRoomSnapshot.class);
     assertThat(terminal.terminalReason()).isEqualTo(IntakeTerminalReason.CANCELLED);
     assertThat(terminal.initiatorComplete()).isFalse();
     assertThat(terminal.respondentUnlocked()).isFalse();
+    assertThat(terminal.readinessParty()).isNull();
+    assertThat(terminal.pendingCommand()).isNull();
   }
 
   @Test
