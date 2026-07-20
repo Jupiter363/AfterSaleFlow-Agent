@@ -71,10 +71,21 @@ class IntakeGraphBindingMigrationTest {
                                 + "and retired_at is null")
                 .contains(
                         "registration_status = 'registered' and registered_at is not null "
-                                + "and registered_at >= issued_at and retired_at is null")
+                                + "and registered_at >= created_at and retired_at is null")
                 .contains(
                         "registration_status = 'retired' and retired_at is not null "
-                                + "and retired_at >= coalesce(registered_at, issued_at)");
+                                + "and retired_at >= coalesce(registered_at, created_at)")
+                .contains(
+                        "binding_type = 'initial' and schema_version = "
+                                + "'intake-domain-snapshot.v2' and initialization_marker and "
+                                + "room_revision is not null and projection_revision is not null "
+                                + "and initial_last_sequence is not null and "
+                                + "initial_last_sequence >= 0")
+                .contains(
+                        "binding_type = 'event' and schema_version = 'intake-turn-event.v2' "
+                                + "and not initialization_marker and room_revision is null and "
+                                + "projection_revision is null and initial_last_sequence is null")
+                .doesNotContain("created_at >= issued_at");
     }
 
     @Test
@@ -91,6 +102,7 @@ class IntakeGraphBindingMigrationTest {
                 .contains("event_id")
                 .contains("message_id")
                 .contains("event_sequence")
+                .contains("initial_last_sequence")
                 .doesNotContain("payload_json")
                 .doesNotContain("snapshot_body")
                 .doesNotContain("message_text")

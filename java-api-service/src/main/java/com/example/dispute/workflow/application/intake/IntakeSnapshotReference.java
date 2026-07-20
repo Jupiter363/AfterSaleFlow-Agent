@@ -20,6 +20,7 @@ public record IntakeSnapshotReference(
         long domainRevision,
         long roomRevision,
         long projectionRevision,
+        long initialLastSequence,
         Instant createdAt) {
 
     public IntakeSnapshotReference {
@@ -50,6 +51,7 @@ public record IntakeSnapshotReference(
         IntakeContractSupport.nonNegative(domainRevision, "domainRevision");
         IntakeContractSupport.nonNegative(roomRevision, "roomRevision");
         IntakeContractSupport.nonNegative(projectionRevision, "projectionRevision");
+        IntakeContractSupport.nonNegative(initialLastSequence, "initialLastSequence");
         createdAt = Objects.requireNonNull(createdAt, "createdAt must not be null");
     }
 }

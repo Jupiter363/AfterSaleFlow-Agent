@@ -8,6 +8,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -17,11 +18,14 @@ import com.example.dispute.workflow.application.intake.IntakeGraphBindingConflic
 import com.example.dispute.workflow.application.intake.IntakeGraphThreadBinding;
 import com.example.dispute.workflow.application.intake.IntakeSnapshotReference;
 import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
+import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import java.util.List;
 import java.util.Locale;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -56,7 +60,7 @@ class JdbcIntakeGraphBindingStoreTest {
         assertThat(store.register(IntakeTestFixtures.binding()).created()).isTrue();
 
         ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
-        verify(jdbc, org.mockito.Mockito.times(2))
+        verify(jdbc, times(2))
                 .queryForObject(
                         sql.capture(), any(MapSqlParameterSource.class), eq(Integer.class));
         String authoritySql = String.join(" ", sql.getAllValues())
@@ -65,11 +69,35 @@ class JdbcIntakeGraphBindingStoreTest {
         assertThat(authoritySql)
                 .contains("selection_schema_version = 'room-epoch-selection.v2'")
                 .contains("lifecycle_status = 'active'")
-                .contains("tenant_id = :tenantsurrogate")
-                .contains("actor_id = :actorid")
-                .contains("actor_role = :actorrole")
-                .contains("prompt_profile_id = :promptversion")
-                .contains("status = 'active'");
+                .contains("join case_access_session access")
+                .contains("access.id = session.access_session_id")
+                .contains("access.tenant_id = :tenantsurrogate")
+                .contains("access.case_id = :caseid")
+                .contains("access.actor_id = :actorid")
+                .contains("access.actor_role = :actorrole")
+                .contains("access.status = 'active'")
+                .contains("when :actorrole = 'user' then 'party_user'")
+                .contains("when :actorrole = 'merchant' then 'party_merchant'")
+                .contains("access.permission_scopes_json @> cast(:requiredaccessscopes as jsonb)")
+                .contains("session.prompt_profile_id = :promptversion")
+                .contains("session.status = 'active'");
+    }
+
+    @Test
+    void revokedOrInactiveAccessSessionCannotIssueAPrivateThread() {
+        when(jdbc.queryForObject(
+                        anyString(), any(MapSqlParameterSource.class), eq(Integer.class)))
+                .thenAnswer(
+                        invocation ->
+                                invocation.<String>getArgument(0)
+                                                .contains("join case_access_session access")
+                                        ? 0
+                                        : 1);
+
+        assertThatThrownBy(() -> store.register(IntakeTestFixtures.binding()))
+                .isInstanceOf(IntakeGraphBindingConflictException.class)
+                .hasMessageContaining("session");
+        verify(jdbc, never()).update(anyString(), any(SqlParameterSource.class));
     }
 
     @Test
@@ -112,6 +140,7 @@ class JdbcIntakeGraphBindingStoreTest {
                 valid.domainRevision(),
                 valid.roomRevision(),
                 valid.projectionRevision(),
+                valid.initialLastSequence(),
                 valid.createdAt());
         stubLockedThread(binding);
 
@@ -152,11 +181,122 @@ class JdbcIntakeGraphBindingStoreTest {
         verify(jdbc, never()).update(anyString(), any(SqlParameterSource.class));
     }
 
+    @ParameterizedTest
+    @ValueSource(longs = {1, 3})
+    void firstEventRejectsDuplicateOrGapAgainstTheInitialSequenceWatermark(long sequence) {
+        IntakeGraphThreadBinding binding = IntakeTestFixtures.binding();
+        IntakeEventReference event = eventAtSequence(binding, sequence);
+        stubLockedThread(binding);
+        stubInitialSequence(1);
+
+        assertThatThrownBy(() -> store.bindEvent(event))
+                .isInstanceOf(IntakeGraphBindingConflictException.class)
+                .hasMessageContaining("next ordered reference");
+        verify(jdbc, never()).update(anyString(), any(SqlParameterSource.class));
+    }
+
+    @Test
+    void nextFirstEventInsertsOnceAndThenReplaysExactly() {
+        IntakeGraphThreadBinding binding = IntakeTestFixtures.binding();
+        IntakeEventReference event = eventAtSequence(binding, 2);
+        stubLockedThread(binding);
+        stubInitialSequence(1);
+        when(jdbc.query(
+                        contains("binding_type = 'EVENT'"),
+                        any(SqlParameterSource.class),
+                        org.mockito.ArgumentMatchers.<RowMapper<IntakeEventReference>>any()))
+                .thenReturn(List.of())
+                .thenReturn(List.of(event));
+        when(jdbc.update(
+                        contains("insert into case_intake_snapshot_binding"),
+                        any(MapSqlParameterSource.class)))
+                .thenReturn(1);
+
+        var created = store.bindEvent(event);
+        var replayed = store.bindEvent(event);
+
+        assertThat(created.created()).isTrue();
+        assertThat(replayed.created()).isFalse();
+        assertThat(replayed.value()).isEqualTo(event);
+        verify(jdbc, times(1))
+                .update(
+                        contains("insert into case_intake_snapshot_binding"),
+                        any(MapSqlParameterSource.class));
+    }
+
+    @Test
+    void existingEventLedgerRejectsALaterGap() {
+        IntakeGraphThreadBinding binding = IntakeTestFixtures.binding();
+        IntakeEventReference gap = eventAtSequence(binding, 4);
+        stubLockedThread(binding);
+        stubInitialSequence(1);
+        when(jdbc.queryForObject(
+                        contains("select max(event_sequence)"), anyMap(), eq(Long.class)))
+                .thenReturn(2L);
+
+        assertThatThrownBy(() -> store.bindEvent(gap))
+                .isInstanceOf(IntakeGraphBindingConflictException.class)
+                .hasMessageContaining("next ordered reference");
+        verify(jdbc, never()).update(anyString(), any(SqlParameterSource.class));
+    }
+
+    @Test
+    void emptySnapshotWatermarkAcceptsSequenceOne() {
+        IntakeGraphThreadBinding binding = IntakeTestFixtures.binding();
+        IntakeEventReference event = eventAtSequence(binding, 1);
+        stubLockedThread(binding);
+        stubInitialSequence(0);
+        when(jdbc.update(
+                        contains("insert into case_intake_snapshot_binding"),
+                        any(MapSqlParameterSource.class)))
+                .thenReturn(1);
+
+        assertThat(store.bindEvent(event).created()).isTrue();
+    }
+
     private void stubLockedThread(IntakeGraphThreadBinding binding) {
         when(jdbc.query(
                         contains("for update"),
                         anyMap(),
                         org.mockito.ArgumentMatchers.<RowMapper<IntakeGraphThreadBinding>>any()))
                 .thenReturn(List.of(binding));
+    }
+
+    private void stubInitialSequence(long sequence) {
+        when(jdbc.queryForList(
+                        contains("select initial_last_sequence"),
+                        anyMap(),
+                        eq(Long.class)))
+                .thenReturn(List.of(sequence));
+    }
+
+    private static IntakeEventReference eventAtSequence(
+            IntakeGraphThreadBinding binding, long sequence) {
+        var registration = binding.registration();
+        String eventId = "EVENT_P4_SEQUENCE_" + sequence;
+        return new IntakeEventReference(
+                eventId,
+                registration.registrationId(),
+                eventId,
+                "MESSAGE_P4_SEQUENCE_" + sequence,
+                registration.tenantSurrogate(),
+                registration.caseId(),
+                registration.roomEpoch(),
+                binding.fencingToken(),
+                registration.threadId(),
+                registration.actorScopeHash(),
+                registration.agentSessionId(),
+                new RoomGraphCommand.SnapshotRef(
+                        eventId,
+                        "intake-turn-event.v2",
+                        "urn:intake:event:" + eventId,
+                        "5".repeat(64),
+                        512),
+                "version-1",
+                sequence,
+                5,
+                Audience.USER,
+                IntakeTestFixtures.ISSUED_AT.plusSeconds(sequence * 60),
+                IntakeTestFixtures.ISSUED_AT.plusSeconds(sequence * 60 + 1));
     }
 }

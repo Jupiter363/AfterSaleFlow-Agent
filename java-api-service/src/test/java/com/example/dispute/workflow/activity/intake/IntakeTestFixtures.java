@@ -80,6 +80,7 @@ final class IntakeTestFixtures {
                 4,
                 2,
                 4,
+                1,
                 Instant.parse("2026-07-20T08:01:00Z"));
     }
 

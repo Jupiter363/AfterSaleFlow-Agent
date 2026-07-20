@@ -31,6 +31,8 @@ import org.springframework.transaction.annotation.Transactional;
 public class JdbcIntakeGraphBindingStore implements IntakeGraphBindingStore {
 
     private static final ObjectMapper MAPPER = JsonMapper.builder().findAndAddModules().build();
+    private static final String REQUIRED_ACCESS_SCOPES_JSON =
+            "[\"CASE_READ\",\"INTAKE_PRIVATE_READ\",\"INTAKE_PARTICIPATE\",\"AGENT_SESSION_WRITE\"]";
 
     private static final String REGISTRATION_COLUMNS =
             """
@@ -48,7 +50,8 @@ public class JdbcIntakeGraphBindingStore implements IntakeGraphBindingStore {
             binding_id, thread_registration_id, tenant_surrogate, case_id, room_epoch,
             fencing_token, thread_id, actor_scope_hash, agent_session_id, artifact_id,
             schema_version, object_uri, object_version, content_sha256, size_bytes,
-            domain_revision, room_revision, projection_revision, created_at
+            domain_revision, room_revision, projection_revision, initial_last_sequence,
+            created_at
             """;
 
     private static final String EVENT_COLUMNS =
@@ -133,13 +136,14 @@ public class JdbcIntakeGraphBindingStore implements IntakeGraphBindingStore {
                     room_epoch, fencing_token, thread_id, actor_scope_hash, agent_session_id,
                     actor_audience, binding_type, schema_version, artifact_id, object_uri,
                     object_version, content_sha256, size_bytes, visibility, domain_revision,
-                    room_revision, projection_revision, initialization_marker, created_at
+                    room_revision, projection_revision, initial_last_sequence,
+                    initialization_marker, created_at
                 ) values (
                     :bindingId, :threadRegistrationId, :tenantSurrogate, :caseId, 'INTAKE',
                     :roomEpoch, :fencingToken, :threadId, :actorScopeHash, :agentSessionId,
                     :actorAudience, 'INITIAL', :schemaVersion, :artifactId, :objectUri,
                     :objectVersion, :contentSha256, :sizeBytes, 'PRIVATE', :domainRevision,
-                    :roomRevision, :projectionRevision, true, :createdAt
+                    :roomRevision, :projectionRevision, :initialLastSequence, true, :createdAt
                 )
                 on conflict do nothing
                 """,
@@ -160,7 +164,7 @@ public class JdbcIntakeGraphBindingStore implements IntakeGraphBindingStore {
     public WriteReceipt<IntakeEventReference> bindEvent(IntakeEventReference reference) {
         IntakeGraphThreadBinding thread = lockThread(reference.threadRegistrationId());
         requireReferenceScope(thread, reference);
-        requireInitialSnapshot(reference.threadRegistrationId());
+        long initialLastSequence = requireInitialSnapshot(reference.threadRegistrationId());
         Optional<IntakeEventReference> replay = findEvent(reference);
         if (replay.isPresent()) {
             if (!replay.get().equals(reference)) {
@@ -169,8 +173,8 @@ public class JdbcIntakeGraphBindingStore implements IntakeGraphBindingStore {
             return WriteReceipt.replayed(replay.get());
         }
         Optional<Long> maximumSequence = maximumEventSequence(reference.threadRegistrationId());
-        if (maximumSequence.isPresent()
-                && reference.sequenceNo() != Math.addExact(maximumSequence.get(), 1L)) {
+        long previousSequence = Math.max(initialLastSequence, maximumSequence.orElse(0L));
+        if (reference.sequenceNo() != Math.addExact(previousSequence, 1L)) {
             throw conflict("event sequence is not the next ordered reference");
         }
         int inserted = jdbc.update(
@@ -254,15 +258,28 @@ public class JdbcIntakeGraphBindingStore implements IntakeGraphBindingStore {
         Integer sessionCount = jdbc.queryForObject(
                 """
                 select count(*)
-                 from agent_conversation_session
-                 where id = :agentSessionId
-                   and tenant_id = :tenantSurrogate
-                   and case_id = :caseId
-                   and room_type = 'INTAKE'
-                   and actor_id = :actorId
-                   and actor_role = :actorRole
-                   and prompt_profile_id = :promptVersion
-                   and status = 'ACTIVE'
+                  from agent_conversation_session session
+                  join case_access_session access
+                    on access.id = session.access_session_id
+                 where session.id = :agentSessionId
+                   and session.tenant_id = :tenantSurrogate
+                   and session.case_id = :caseId
+                   and session.room_type = 'INTAKE'
+                   and session.actor_id = :actorId
+                   and session.actor_role = :actorRole
+                   and session.prompt_profile_id = :promptVersion
+                   and session.status = 'ACTIVE'
+                   and access.tenant_id = :tenantSurrogate
+                   and access.case_id = :caseId
+                   and access.actor_id = :actorId
+                   and access.actor_role = :actorRole
+                   and access.status = 'ACTIVE'
+                   and access.permission_level = case
+                       when :actorRole = 'USER' then 'PARTY_USER'
+                       when :actorRole = 'MERCHANT' then 'PARTY_MERCHANT'
+                       else '__DENY__'
+                   end
+                   and access.permission_scopes_json @> cast(:requiredAccessScopes as jsonb)
                 """,
                 registrationParameters(binding),
                 Integer.class);
@@ -374,19 +391,20 @@ public class JdbcIntakeGraphBindingStore implements IntakeGraphBindingStore {
         }
     }
 
-    private void requireInitialSnapshot(String registrationId) {
-        Integer count = jdbc.queryForObject(
+    private long requireInitialSnapshot(String registrationId) {
+        List<Long> rows = jdbc.queryForList(
                 """
-                select count(*)
+                select initial_last_sequence
                   from case_intake_snapshot_binding
                  where thread_registration_id = :registrationId
                    and initialization_marker
                 """,
                 Map.of("registrationId", registrationId),
-                Integer.class);
-        if (count == null || count != 1) {
+                Long.class);
+        if (rows.size() != 1 || rows.getFirst() == null) {
             throw conflict("event cannot precede the initial snapshot");
         }
+        return rows.getFirst();
     }
 
     private Optional<Long> maximumEventSequence(String registrationId) {
@@ -431,6 +449,7 @@ public class JdbcIntakeGraphBindingStore implements IntakeGraphBindingStore {
                 .addValue("toolPolicyVersion", registration.toolPolicyVersion())
                 .addValue("writerMode", registration.writerMode().name())
                 .addValue("registrationHash", registration.registrationHash())
+                .addValue("requiredAccessScopes", REQUIRED_ACCESS_SCOPES_JSON)
                 .addValue("issuedAt", atOffset(registration.issuedAt()));
     }
 
@@ -450,7 +469,8 @@ public class JdbcIntakeGraphBindingStore implements IntakeGraphBindingStore {
                         reference.domainRevision(),
                         reference.createdAt())
                 .addValue("roomRevision", reference.roomRevision())
-                .addValue("projectionRevision", reference.projectionRevision());
+                .addValue("projectionRevision", reference.projectionRevision())
+                .addValue("initialLastSequence", reference.initialLastSequence());
     }
 
     private static MapSqlParameterSource eventParameters(IntakeEventReference reference) {
@@ -562,6 +582,7 @@ public class JdbcIntakeGraphBindingStore implements IntakeGraphBindingStore {
                 row.getLong("domain_revision"),
                 row.getLong("room_revision"),
                 row.getLong("projection_revision"),
+                row.getLong("initial_last_sequence"),
                 row.getObject("created_at", OffsetDateTime.class).toInstant());
     }
 

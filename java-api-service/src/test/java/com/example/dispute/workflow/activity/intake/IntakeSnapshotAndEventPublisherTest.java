@@ -39,6 +39,7 @@ class IntakeSnapshotAndEventPublisherTest {
 
         assertThat(created.created()).isTrue();
         assertThat(replayed.created()).isFalse();
+        assertThat(created.value().initialLastSequence()).isEqualTo(1);
         assertThat(created.value().payloadRef().sha256())
                 .isEqualTo(fixture.required("snapshot_hash").asText());
         assertThat(MAPPER.readTree(objects.last.canonicalPayload())).isEqualTo(fixture);
@@ -61,6 +62,27 @@ class IntakeSnapshotAndEventPublisherTest {
                 request.createdAt());
         assertThatThrownBy(() -> publisher.publish(drift))
                 .isInstanceOf(IntakeGraphBindingConflictException.class);
+    }
+
+    @Test
+    void emptyInitialMessageWindowUsesZeroAsTheSequenceWatermark() {
+        SnapshotRequest valid = snapshotRequest();
+        SnapshotRequest empty = new SnapshotRequest(
+                "SNAPSHOT_P4_USER_EMPTY",
+                valid.threadBinding(),
+                valid.domainRevision(),
+                valid.roomRevision(),
+                valid.projectionRevision(),
+                List.of("CASE_FACT_P4_USER_1"),
+                valid.initialCaseFacts(),
+                valid.shareableProjection(),
+                List.of(),
+                valid.currentDossier(),
+                valid.createdAt());
+        var publisher = new IntakeDomainSnapshotPublisher(
+                new CapturingPublisher(), new IntakeTestFixtures.SingleBindingStore());
+
+        assertThat(publisher.publish(empty).value().initialLastSequence()).isZero();
     }
 
     @Test

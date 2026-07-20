@@ -111,8 +111,7 @@ create table case_intake_graph_thread_binding (
         check (registration_status in ('PENDING', 'REGISTERED', 'FAILED', 'RETIRED')),
     constraint ck_intake_graph_thread_status_time
         check (
-            created_at >= issued_at
-            and (
+            (
                 (
                     registration_status in ('PENDING', 'FAILED')
                     and registered_at is null
@@ -122,14 +121,14 @@ create table case_intake_graph_thread_binding (
                 (
                     registration_status = 'REGISTERED'
                     and registered_at is not null
-                    and registered_at >= issued_at
+                    and registered_at >= created_at
                     and retired_at is null
                 )
                 or
                 (
                     registration_status = 'RETIRED'
                     and retired_at is not null
-                    and retired_at >= coalesce(registered_at, issued_at)
+                    and retired_at >= coalesce(registered_at, created_at)
                 )
             )
         )
@@ -262,6 +261,7 @@ create table case_intake_snapshot_binding (
     domain_revision bigint not null,
     room_revision bigint,
     projection_revision bigint,
+    initial_last_sequence bigint,
     event_id varchar(128),
     message_id varchar(128),
     event_sequence bigint,
@@ -333,6 +333,8 @@ create table case_intake_snapshot_binding (
                 and initialization_marker
                 and room_revision is not null
                 and projection_revision is not null
+                and initial_last_sequence is not null
+                and initial_last_sequence >= 0
                 and event_id is null
                 and message_id is null
                 and event_sequence is null
@@ -346,6 +348,7 @@ create table case_intake_snapshot_binding (
                 and not initialization_marker
                 and room_revision is null
                 and projection_revision is null
+                and initial_last_sequence is null
                 and event_id is not null
                 and message_id is not null
                 and event_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'

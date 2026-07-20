@@ -37,7 +37,8 @@ public final class IntakeDomainSnapshotPublisher {
         if (request.createdAt().isBefore(registration.issuedAt())) {
             throw new IllegalArgumentException("snapshot cannot predate its thread registration");
         }
-        validateMessages(request, registration.actorScope().audience());
+        long initialLastSequence =
+                validateMessages(request, registration.actorScope().audience());
         IntakePrivatePayloadValidator.requireSafeObject(
                 request.initialCaseFacts(), "initialCaseFacts");
         IntakePrivatePayloadValidator.requireSafeObject(
@@ -78,6 +79,7 @@ public final class IntakeDomainSnapshotPublisher {
                         request.domainRevision(),
                         request.roomRevision(),
                         request.projectionRevision(),
+                        initialLastSequence,
                         request.createdAt());
         var receipt = Objects.requireNonNull(
                 bindingStore.bindInitialSnapshot(reference), "snapshot binding receipt");
@@ -135,7 +137,7 @@ public final class IntakeDomainSnapshotPublisher {
         return root;
     }
 
-    private static void validateMessages(SnapshotRequest request, Audience expectedAudience) {
+    private static long validateMessages(SnapshotRequest request, Audience expectedAudience) {
         if (request.ownMessages().size() > 6) {
             throw new IllegalArgumentException("ownMessages exceeds the six-message window");
         }
@@ -154,6 +156,7 @@ public final class IntakeDomainSnapshotPublisher {
             }
             previousSequence = message.sequence();
         }
+        return Math.max(previousSequence, 0);
     }
 
     public record SnapshotRequest(
