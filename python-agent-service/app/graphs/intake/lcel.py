@@ -113,6 +113,7 @@ _RUNNABLE_CONFIG_METHOD_NAMES = (
 )
 _PASSTHROUGH_BEHAVIOR_ATTRIBUTE_NAMES = ("func", "afunc", "input_type")
 _VETTED_WRAPPER_METHOD_NAMES = _EXECUTION_METHOD_NAMES + (
+    "__getattribute__",
     "_is_sealed",
     "_before_execution",
     "_after_execution",
@@ -296,6 +297,11 @@ def _matches_runnable_structure(value: Runnable, seal: _RunnableStructureSeal) -
 
 
 class _VettedIntakeModelRunnable(Runnable[IntakeGraphStateV2, dict[str, Any]]):
+    def __getattribute__(self, name: str) -> Any:
+        if name in _EXECUTION_METHOD_NAMES and not _is_vetted_intake_model_runnable(self):
+            raise IntakeGraphContractError("INTAKE_LCEL_RUNNABLE_NOT_VETTED")
+        return super().__getattribute__(name)
+
     def __init__(
         self,
         pipeline: RunnableSequence,

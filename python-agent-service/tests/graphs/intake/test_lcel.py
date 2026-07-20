@@ -278,20 +278,10 @@ def _mutate_internal_passthrough_func(built) -> None:
     state_passthrough.func = lambda value: value
 
 
-@pytest.mark.parametrize(
-    "method_name",
-    [
-        "invoke",
-        "ainvoke",
-        "batch",
-        "abatch",
-        "stream",
-        "astream",
-        "transform",
-        "atransform",
-    ],
-)
-def test_wrapper_execution_entrypoint_replacement_invalidates_vetting(method_name) -> None:
+@pytest.mark.parametrize("method_name", ["invoke", "batch", "stream", "transform"])
+def test_sync_wrapper_entrypoint_replacement_fails_closed_on_direct_call(
+    method_name,
+) -> None:
     built = build_intake_model_node(
         transport=IntakeTransport(),
         profile=_profile(),
@@ -304,7 +294,45 @@ def test_wrapper_execution_entrypoint_replacement_invalidates_vetting(method_nam
         IntakeGraphContractError,
         match="INTAKE_LCEL_RUNNABLE_NOT_VETTED",
     ):
-        build_intake_v2_graph(intake_lcel=built.runnable)
+        if method_name == "invoke":
+            built.runnable.invoke({})
+        elif method_name == "batch":
+            built.runnable.batch([{}])
+        elif method_name == "stream":
+            list(built.runnable.stream({}))
+        else:
+            list(built.runnable.transform(iter([{}])))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method_name", ["ainvoke", "abatch", "astream", "atransform"])
+async def test_async_wrapper_entrypoint_replacement_fails_closed_on_direct_call(
+    method_name,
+) -> None:
+    built = build_intake_model_node(
+        transport=IntakeTransport(),
+        profile=_profile(),
+        policy=_policy(),
+    )
+    _override_instance_method(built.runnable, method_name)
+
+    assert not _is_vetted_intake_model_runnable(built.runnable)
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_LCEL_RUNNABLE_NOT_VETTED",
+    ):
+        if method_name == "ainvoke":
+            await built.runnable.ainvoke({})
+        elif method_name == "abatch":
+            await built.runnable.abatch([{}])
+        elif method_name == "astream":
+            _ = [chunk async for chunk in built.runnable.astream({})]
+        else:
+
+            async def inputs():
+                yield {}
+
+            _ = [chunk async for chunk in built.runnable.atransform(inputs())]
 
 
 @pytest.mark.parametrize(
