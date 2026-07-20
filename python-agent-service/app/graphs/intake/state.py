@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Annotated, Literal, TypeAlias
 
@@ -17,16 +18,14 @@ from app.graph_runtime.state import (
     UsageState,
     VersionPinsState,
 )
+from app.graphs.intake.errors import IntakeGraphContractError
 
 
 JsonObject: TypeAlias = dict[str, JsonValue]
 
 
-class IntakeCommandBindings(TypedDict):
-    schema_version: Literal["graph-command-binding.v1"]
-    command_id: str
-    logical_run_id: str
-    attempt_id: str
+class IntakePrivateBindings(TypedDict):
+    schema_version: Literal["intake-private-binding.v1"]
     tenant_surrogate: str
     case_id: str
     room_type: Literal["INTAKE"]
@@ -35,6 +34,49 @@ class IntakeCommandBindings(TypedDict):
     thread_id: str
     agent_session_id: str
     audience: Literal["USER", "MERCHANT"]
+
+
+class IntakeCommandBindings(TypedDict):
+    schema_version: Literal["intake-command-binding.v1"]
+    command_id: str
+    logical_run_id: str
+    attempt_id: str
+
+
+class IntakeGraphBindings(TypedDict):
+    schema_version: Literal["intake-graph-bindings.v2"]
+    private: IntakePrivateBindings
+    command: IntakeCommandBindings
+
+
+def merge_intake_bindings(
+    left: IntakeGraphBindings | None,
+    right: IntakeGraphBindings | None,
+) -> IntakeGraphBindings:
+    if right is None:
+        if not isinstance(left, dict) or not left:
+            raise IntakeGraphContractError("INTAKE_BINDINGS_MISSING")
+        return deepcopy(left)
+    if not isinstance(right, dict) or (left is not None and not isinstance(left, dict)):
+        raise IntakeGraphContractError("INTAKE_BINDINGS_INVALID")
+    if left and left.get("private") != right.get("private"):
+        raise IntakeGraphContractError("INTAKE_PRIVATE_BINDING_IMMUTABLE")
+    return deepcopy(right)
+
+
+def merge_intake_version_pins(
+    left: VersionPinsState | None,
+    right: VersionPinsState | None,
+) -> VersionPinsState:
+    if right is None:
+        if not isinstance(left, dict) or not left:
+            raise IntakeGraphContractError("INTAKE_VERSION_PINS_INVALID")
+        return deepcopy(left)
+    if not isinstance(right, dict) or (left is not None and not isinstance(left, dict)):
+        raise IntakeGraphContractError("INTAKE_VERSION_PINS_INVALID")
+    if left and left != right:
+        raise IntakeGraphContractError("INTAKE_VERSION_PINS_IMMUTABLE")
+    return deepcopy(right)
 
 
 class IntakeMessageState(TypedDict):
@@ -56,17 +98,20 @@ def merge_intake_messages(
     right: dict[str, IntakeMessageState] | None,
 ) -> dict[str, IntakeMessageState]:
     merged = merge_keyed_json(left, right, namespace="intake_messages")
-    ordered = sorted(
-        merged.items(),
-        key=lambda item: (item[1]["sequence"], item[0]),
-    )
+    try:
+        ordered = sorted(
+            merged.items(),
+            key=lambda item: (item[1]["sequence"], item[0]),
+        )
+    except (KeyError, TypeError) as error:
+        raise IntakeGraphContractError("INTAKE_MESSAGE_REDUCER_INVALID") from error
     return dict(ordered[-6:])
 
 
 class IntakeGraphStateV2(TypedDict):
     schema_version: Literal["intake-graph-state.v2"]
-    bindings: IntakeCommandBindings
-    version_pins: VersionPinsState
+    bindings: Annotated[IntakeGraphBindings, merge_intake_bindings]
+    version_pins: Annotated[VersionPinsState, merge_intake_version_pins]
     cognitive_revision: int
     messages: Annotated[dict[str, IntakeMessageState], merge_intake_messages]
     memory_summary: str
@@ -75,9 +120,7 @@ class IntakeGraphStateV2(TypedDict):
     missing_fields: list[str]
     recommendation: Literal["ACCEPTED", "NEED_MORE_INFO", "NOT_ADMISSIBLE"]
     node_results: Annotated[dict[str, JsonObject], merge_node_results]
-    execution_receipts: Annotated[
-        dict[str, ExecutionReceiptState], merge_execution_receipts
-    ]
+    execution_receipts: Annotated[dict[str, ExecutionReceiptState], merge_execution_receipts]
     usage_by_invocation: Annotated[dict[str, UsageState], merge_usage_by_invocation]
     initial_snapshot_ref: NotRequired[str]
     initial_snapshot_hash: NotRequired[str]
@@ -98,13 +141,13 @@ class IntakeTurnContext:
 
 def new_intake_graph_state(
     *,
-    bindings: IntakeCommandBindings,
+    bindings: IntakeGraphBindings,
     version_pins: VersionPinsState,
 ) -> IntakeGraphStateV2:
     return {
         "schema_version": "intake-graph-state.v2",
-        "bindings": bindings,
-        "version_pins": version_pins,
+        "bindings": merge_intake_bindings(None, bindings),
+        "version_pins": merge_intake_version_pins(None, version_pins),
         "cognitive_revision": 0,
         "messages": {},
         "memory_summary": "",

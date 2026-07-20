@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Callable, Mapping
 from copy import deepcopy
 from typing import Any, TypeAlias, cast
@@ -16,7 +17,11 @@ from app.graphs.intake.state import (
 )
 from app.graphs.intake.validators import (
     ingress,
+    validate_cognition_patch,
+    validate_dossier_transition,
     validate_event,
+    validate_node_patch,
+    validate_proposal_binding,
     validate_snapshot,
     validate_state,
     validate_terminal_proposal,
@@ -48,6 +53,16 @@ _DOSSIER_BRANCHES = frozenset(
 )
 
 
+def guard_intake_cognition(node: IntakeCognitionNode) -> IntakeCognitionNode:
+    def guarded(
+        state: IntakeGraphStateV2,
+        runtime: Runtime[IntakeTurnContext],
+    ) -> Mapping[str, Any]:
+        return validate_cognition_patch(state, node(state, runtime))
+
+    return guarded
+
+
 def authorize_and_load(
     state: IntakeGraphStateV2,
     runtime: Runtime[IntakeTurnContext],
@@ -56,21 +71,9 @@ def authorize_and_load(
     kind, payload = ingress(runtime.context)
     if kind == "SNAPSHOT":
         validate_snapshot(state, payload)
-        source_id = cast(str, payload["snapshot_id"])
-        source_hash = cast(str, payload["snapshot_hash"])
     else:
         validate_event(state, payload)
-        source_id = cast(str, payload["event_id"])
-        source_hash = cast(str, payload["event_hash"])
-    return {
-        "node_results": {
-            f"authorized:{state['bindings']['command_id']}": {
-                "kind": kind,
-                "source_id": source_id,
-                "source_hash": source_hash,
-            }
-        }
-    }
+    return {}
 
 
 def import_snapshot_once_or_apply_event(
@@ -79,8 +82,8 @@ def import_snapshot_once_or_apply_event(
 ) -> dict[str, Any]:
     kind, payload = ingress(runtime.context)
     if kind == "SNAPSHOT":
-        return _import_snapshot(state, payload)
-    return _apply_event(state, payload)
+        return validate_node_patch(state, _import_snapshot(state, payload))
+    return validate_node_patch(state, _apply_event(state, payload))
 
 
 def route_turn(state: IntakeGraphStateV2) -> dict[str, Any]:
@@ -95,19 +98,30 @@ def deterministic_seed(
     runtime: Runtime[IntakeTurnContext],
 ) -> dict[str, Any]:
     del runtime
-    return {
-        "cognitive_revision": state["cognitive_revision"] + 1,
-        "terminal_draft": {
-            "room_utterance": "Please provide the missing Intake details.",
-            "dossier_patch": {},
-            "matrix_patch": None,
-            "readiness": "INCOMPLETE",
-            "missing_fields": ["requested_resolution_detail"],
-            "recommendation": "NEED_MORE_INFO",
-            "knowledge_answer_mode": "NONE",
-            "confidence": 0.0,
+    return validate_cognition_patch(
+        state,
+        {
+            "cognitive_revision": state["cognitive_revision"] + 1,
+            "terminal_draft": {
+                "room_utterance": "Please provide the missing Intake details.",
+                "dossier_patch": {},
+                "matrix_patch": None,
+                "readiness": "INCOMPLETE",
+                "missing_fields": ["requested_resolution_detail"],
+                "recommendation": "NEED_MORE_INFO",
+                "knowledge_answer_mode": "NONE",
+                "confidence": 0.0,
+            },
         },
-    }
+    )
+
+
+def unconfigured_intake_lcel(
+    state: IntakeGraphStateV2,
+    runtime: Runtime[IntakeTurnContext],
+) -> dict[str, Any]:
+    del state, runtime
+    raise IntakeGraphContractError("INTAKE_LCEL_NOT_CONFIGURED")
 
 
 def deterministic_message_fallback(
@@ -134,11 +148,18 @@ def cached_terminal_projection(
     state: IntakeGraphStateV2,
     runtime: Runtime[IntakeTurnContext],
 ) -> dict[str, Any]:
-    del runtime
     cached = state.get("result_json")
     if not isinstance(cached, dict):
         raise IntakeGraphContractError("INTAKE_REPLAY_RESULT_MISSING")
-    return {"terminal_draft": deepcopy(cached)}
+    validate_terminal_proposal(cached)
+    validate_proposal_binding(state, cached)
+    kind, payload = ingress(runtime.context)
+    if kind == "SNAPSHOT":
+        if cached.get("source_event_hash") is not None or state.get("last_event_hash") is not None:
+            raise IntakeGraphContractError("INTAKE_REPLAY_SOURCE_MISMATCH")
+    elif cached.get("source_event_hash") != payload.get("event_hash"):
+        raise IntakeGraphContractError("INTAKE_REPLAY_SOURCE_MISMATCH")
+    return validate_node_patch(state, {"terminal_draft": deepcopy(cached)})
 
 
 def apply_dossier_patch(state: IntakeGraphStateV2) -> dict[str, Any]:
@@ -149,7 +170,8 @@ def apply_dossier_patch(state: IntakeGraphStateV2) -> dict[str, Any]:
     if not isinstance(patch, dict) or not set(patch) <= _DOSSIER_BRANCHES:
         raise IntakeGraphContractError("INTAKE_DOSSIER_PATCH_INVALID")
     dossier = _merge_object(state["dossier_draft"], patch)
-    return {"dossier_draft": dossier}
+    validate_dossier_transition(state["dossier_draft"], dossier)
+    return validate_node_patch(state, {"dossier_draft": dossier})
 
 
 def validate_readiness(state: IntakeGraphStateV2) -> dict[str, Any]:
@@ -163,39 +185,41 @@ def validate_readiness(state: IntakeGraphStateV2) -> dict[str, Any]:
         raise IntakeGraphContractError("INTAKE_READINESS_INVALID")
     if recommendation not in {"ACCEPTED", "NEED_MORE_INFO", "NOT_ADMISSIBLE"}:
         raise IntakeGraphContractError("INTAKE_RECOMMENDATION_INVALID")
-    if not isinstance(missing, list) or not all(
-        isinstance(item, str) and item for item in missing
-    ):
+    if not isinstance(missing, list) or not all(isinstance(item, str) and item for item in missing):
         raise IntakeGraphContractError("INTAKE_MISSING_FIELDS_INVALID")
     normalized_missing = sorted(set(missing))
     if readiness == "READY_TO_CONFIRM" and normalized_missing:
         raise IntakeGraphContractError("INTAKE_READY_WITH_MISSING_FIELDS")
-    return {
-        "readiness": {
-            "status": readiness,
-            "evaluated_revision": state["cognitive_revision"],
+    return validate_node_patch(
+        state,
+        {
+            "readiness": {
+                "status": readiness,
+                "evaluated_revision": state["cognitive_revision"],
+            },
+            "missing_fields": normalized_missing,
+            "recommendation": recommendation,
         },
-        "missing_fields": normalized_missing,
-        "recommendation": recommendation,
-    }
+    )
 
 
 def project_intake_proposal(state: IntakeGraphStateV2) -> dict[str, Any]:
     if state.get("route") == "replay":
         return {}
     draft = _turn_draft(state)
-    bindings = state["bindings"]
+    private = state["bindings"]["private"]
+    command = state["bindings"]["command"]
     pins = state["version_pins"]
     proposal: JsonObject = {
         "schema_version": "intake-turn-proposal.v2",
-        "command_id": bindings["command_id"],
-        "logical_run_id": bindings["logical_run_id"],
-        "attempt_id": bindings["attempt_id"],
-        "case_id": bindings["case_id"],
-        "room_epoch": bindings["room_epoch"],
-        "thread_id": bindings["thread_id"],
-        "actor_scope_hash": bindings["actor_scope_hash"],
-        "agent_session_id": bindings["agent_session_id"],
+        "command_id": command["command_id"],
+        "logical_run_id": command["logical_run_id"],
+        "attempt_id": command["attempt_id"],
+        "case_id": private["case_id"],
+        "room_epoch": private["room_epoch"],
+        "thread_id": private["thread_id"],
+        "actor_scope_hash": private["actor_scope_hash"],
+        "agent_session_id": private["agent_session_id"],
         "cognitive_revision": state["cognitive_revision"],
         "source_snapshot_hash": state["initial_snapshot_hash"],
         "room_utterance": _required_text(draft, "room_utterance"),
@@ -221,7 +245,8 @@ def project_intake_proposal(state: IntakeGraphStateV2) -> dict[str, Any]:
         proposal["source_event_hash"] = state["last_event_hash"]
     proposal["proposal_hash"] = canonical_sha256(proposal)
     validate_terminal_proposal(proposal)
-    return {"terminal_draft": proposal}
+    validate_proposal_binding(state, proposal)
+    return validate_node_patch(state, {"terminal_draft": proposal})
 
 
 def checkpoint_terminal(state: IntakeGraphStateV2) -> dict[str, Any]:
@@ -229,7 +254,8 @@ def checkpoint_terminal(state: IntakeGraphStateV2) -> dict[str, Any]:
     if not isinstance(proposal, dict):
         raise IntakeGraphContractError("INTAKE_TERMINAL_DRAFT_MISSING")
     validate_terminal_proposal(proposal)
-    return {"result_json": deepcopy(proposal)}
+    validate_proposal_binding(state, proposal)
+    return validate_node_patch(state, {"result_json": deepcopy(proposal)})
 
 
 def _import_snapshot(
@@ -243,6 +269,7 @@ def _import_snapshot(
             raise IntakeGraphContractError("INTAKE_SNAPSHOT_REIMPORT_CONFLICT")
         return {"route": "replay"}
     messages: dict[str, IntakeMessageState] = {}
+    stable_records: dict[str, JsonObject] = {}
     for value in cast(list[dict[str, Any]], snapshot["own_messages"]):
         message: IntakeMessageState = {
             "message_id": cast(str, value["message_id"]),
@@ -253,6 +280,12 @@ def _import_snapshot(
             "source_hash": cast(str, value["source_hash"]),
         }
         messages[message["message_id"]] = message
+        stable_records[_stable_record_key("message", message["message_id"])] = {
+            "kind": "MESSAGE",
+            "stable_id": message["message_id"],
+            "content_hash": message["source_hash"],
+            "sequence": message["sequence"],
+        }
     last_sequence = max(
         (message["sequence"] for message in messages.values()),
         default=0,
@@ -262,6 +295,7 @@ def _import_snapshot(
         "initial_snapshot_hash": snapshot_hash,
         "initial_domain_revision": snapshot["domain_revision"],
         "messages": messages,
+        "node_results": stable_records,
         "last_event_sequence": last_sequence,
         "dossier_draft": deepcopy(snapshot["current_dossier"]),
         "route": "initialize",
@@ -277,7 +311,14 @@ def _apply_event(
     sequence = cast(int, event["sequence_no"])
     event_hash = cast(str, event["event_hash"])
     event_id = cast(str, event["event_id"])
+    message_id = cast(str, event["message_id"])
     previous_sequence = state.get("last_event_sequence", 0)
+    _reject_stable_record_rebinding(state, "event", event_id, event_hash)
+    _reject_stable_record_rebinding(state, "message", message_id, event_hash)
+    if event_id == state.get("last_event_ref"):
+        if sequence == previous_sequence and event_hash == state.get("last_event_hash"):
+            return {"route": "replay"}
+        raise IntakeGraphContractError("INTAKE_EVENT_REPLAY_CONFLICT")
     if sequence == previous_sequence and event_hash == state.get("last_event_hash"):
         return {"route": "replay"}
     if sequence == previous_sequence:
@@ -285,7 +326,7 @@ def _apply_event(
     if sequence != previous_sequence + 1:
         raise IntakeGraphContractError("INTAKE_EVENT_SEQUENCE_INVALID")
     message: IntakeMessageState = {
-        "message_id": cast(str, event["message_id"]),
+        "message_id": message_id,
         "role": "HUMAN",
         "audience": cast(Any, event["audience"]),
         "content": cast(str, event["text"]),
@@ -297,8 +338,41 @@ def _apply_event(
         "last_event_hash": event_hash,
         "last_event_sequence": sequence,
         "messages": {message["message_id"]: message},
+        "node_results": {
+            _stable_record_key("event", event_id): {
+                "kind": "EVENT",
+                "stable_id": event_id,
+                "content_hash": event_hash,
+                "sequence": sequence,
+                "message_id": message_id,
+            },
+            _stable_record_key("message", message_id): {
+                "kind": "MESSAGE",
+                "stable_id": message_id,
+                "content_hash": event_hash,
+                "sequence": sequence,
+            },
+        },
         "route": "message",
     }
+
+
+def _reject_stable_record_rebinding(
+    state: IntakeGraphStateV2,
+    kind: str,
+    stable_id: str,
+    content_hash: str,
+) -> None:
+    record = state["node_results"].get(_stable_record_key(kind, stable_id))
+    if record is not None and (
+        record.get("stable_id") != stable_id or record.get("content_hash") != content_hash
+    ):
+        raise IntakeGraphContractError("INTAKE_STABLE_ID_REBINDING")
+
+
+def _stable_record_key(kind: str, stable_id: str) -> str:
+    digest = hashlib.sha256(stable_id.encode("utf-8")).hexdigest()
+    return f"{kind}:{digest}"
 
 
 def _turn_draft(state: IntakeGraphStateV2) -> JsonObject:

@@ -9,11 +9,12 @@ from app.graphs.intake.nodes import (
     authorize_and_load,
     cached_terminal_projection,
     checkpoint_terminal,
-    deterministic_message_fallback,
     deterministic_seed,
+    guard_intake_cognition,
     import_snapshot_once_or_apply_event,
     project_intake_proposal,
     route_turn,
+    unconfigured_intake_lcel,
     validate_readiness,
 )
 from app.graphs.intake.state import IntakeGraphStateV2, IntakeTurnContext
@@ -21,7 +22,7 @@ from app.graphs.intake.state import IntakeGraphStateV2, IntakeTurnContext
 
 def build_intake_v2_graph(
     *,
-    intake_lcel: IntakeCognitionNode = deterministic_message_fallback,
+    intake_lcel: IntakeCognitionNode = unconfigured_intake_lcel,
 ) -> StateGraph:
     builder = StateGraph(IntakeGraphStateV2, context_schema=IntakeTurnContext)
     builder.add_node("authorize_and_load", authorize_and_load)
@@ -31,7 +32,7 @@ def build_intake_v2_graph(
     )
     builder.add_node("route_turn", route_turn)
     builder.add_node("deterministic_seed", deterministic_seed)
-    builder.add_node("intake_lcel", intake_lcel)
+    builder.add_node("intake_lcel", guard_intake_cognition(intake_lcel))
     builder.add_node("cached_terminal_projection", cached_terminal_projection)
     builder.add_node("apply_dossier_patch", apply_dossier_patch)
     builder.add_node("validate_readiness", validate_readiness)
@@ -66,6 +67,6 @@ def build_intake_v2_graph(
 
 def compile_intake_v2_graph(
     *,
-    intake_lcel: IntakeCognitionNode = deterministic_message_fallback,
+    intake_lcel: IntakeCognitionNode = unconfigured_intake_lcel,
 ):
     return build_intake_v2_graph(intake_lcel=intake_lcel).compile()

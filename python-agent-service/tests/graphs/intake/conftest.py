@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from app.graphs.intake.state import IntakeCommandBindings
+from app.graphs.intake.state import IntakeGraphBindings
 from app.graph_runtime.state import VersionPinsState
 
 
@@ -29,20 +29,31 @@ def event() -> dict:
 
 
 @pytest.fixture
-def bindings(snapshot: dict) -> IntakeCommandBindings:
+def proposal() -> dict:
+    return copy.deepcopy(_fixture("intake-turn-proposal-valid.json"))
+
+
+@pytest.fixture
+def bindings(snapshot: dict) -> IntakeGraphBindings:
     return {
-        "schema_version": "graph-command-binding.v1",
-        "command_id": "COMMAND_P4_USER_1",
-        "logical_run_id": "RUN_P4_USER_1",
-        "attempt_id": "ATTEMPT_P4_USER_1_1",
-        "tenant_surrogate": snapshot["tenant_surrogate"],
-        "case_id": snapshot["case_id"],
-        "room_type": "INTAKE",
-        "room_epoch": snapshot["room_epoch"],
-        "actor_scope_hash": snapshot["actor_scope_hash"],
-        "thread_id": snapshot["thread_id"],
-        "agent_session_id": snapshot["agent_session_id"],
-        "audience": "USER",
+        "schema_version": "intake-graph-bindings.v2",
+        "private": {
+            "schema_version": "intake-private-binding.v1",
+            "tenant_surrogate": snapshot["tenant_surrogate"],
+            "case_id": snapshot["case_id"],
+            "room_type": "INTAKE",
+            "room_epoch": snapshot["room_epoch"],
+            "actor_scope_hash": snapshot["actor_scope_hash"],
+            "thread_id": snapshot["thread_id"],
+            "agent_session_id": snapshot["agent_session_id"],
+            "audience": "USER",
+        },
+        "command": {
+            "schema_version": "intake-command-binding.v1",
+            "command_id": "COMMAND_P4_USER_1",
+            "logical_run_id": "RUN_P4_USER_1",
+            "attempt_id": "ATTEMPT_P4_USER_1_1",
+        },
     }
 
 

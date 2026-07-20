@@ -6,28 +6,25 @@ from pathlib import Path
 
 import jsonschema
 import pytest
+from langgraph.checkpoint.memory import InMemorySaver
 
 from app.contracts.v1.codec import canonical_sha256_omitting
 from app.graphs.intake.errors import IntakeGraphContractError
 from app.graphs.intake.graph import build_intake_v2_graph, compile_intake_v2_graph
+from app.graphs.intake.nodes import deterministic_message_fallback
 from app.graphs.intake.state import IntakeTurnContext, new_intake_graph_state
 
 
 ROOT = Path(__file__).resolve().parents[4]
 SCHEMA = json.loads(
     (
-        ROOT
-        / "contracts"
-        / "agent-platform"
-        / "intake"
-        / "v2"
-        / "intake-turn-proposal.schema.json"
+        ROOT / "contracts" / "agent-platform" / "intake" / "v2" / "intake-turn-proposal.schema.json"
     ).read_text(encoding="utf-8")
 )
 
 
 def _run_snapshot(bindings, version_pins, snapshot):
-    graph = compile_intake_v2_graph()
+    graph = compile_intake_v2_graph(intake_lcel=deterministic_message_fallback)
     state = new_intake_graph_state(bindings=bindings, version_pins=version_pins)
     return graph, graph.invoke(
         state,
@@ -49,6 +46,46 @@ def test_topology_is_fixed_and_exhaustive() -> None:
         "project_intake_proposal",
         "checkpoint_terminal",
     }
+
+
+def test_persisted_state_accepts_command_delta_but_rejects_private_drift(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+) -> None:
+    graph = build_intake_v2_graph(intake_lcel=deterministic_message_fallback).compile(
+        checkpointer=InMemorySaver()
+    )
+    config = {"configurable": {"thread_id": "intake-private-binding-test"}}
+    state = new_intake_graph_state(bindings=bindings, version_pins=version_pins)
+    first = graph.invoke(
+        state,
+        config,
+        context=IntakeTurnContext("SNAPSHOT", snapshot),
+    )
+    next_bindings = copy.deepcopy(first["bindings"])
+    next_bindings["command"].update(
+        command_id="COMMAND_P4_USER_2",
+        logical_run_id="RUN_P4_USER_2",
+        attempt_id="ATTEMPT_P4_USER_2_1",
+    )
+    second = graph.invoke(
+        {"bindings": next_bindings},
+        config,
+        context=IntakeTurnContext("EVENT", event),
+    )
+
+    assert second["result_json"]["command_id"] == "COMMAND_P4_USER_2"
+    drifted = copy.deepcopy(next_bindings)
+    drifted["private"]["case_id"] = "CASE_OTHER"
+    drifted["command"]["command_id"] = "COMMAND_P4_USER_3"
+    with pytest.raises(IntakeGraphContractError, match="INTAKE_PRIVATE_BINDING_IMMUTABLE"):
+        graph.invoke(
+            {"bindings": drifted},
+            config,
+            context=IntakeTurnContext("EVENT", event),
+        )
 
 
 def test_snapshot_import_produces_schema_valid_proposal(
@@ -94,8 +131,8 @@ def test_event_applies_once_and_uses_injected_cognition(
     graph = compile_intake_v2_graph(intake_lcel=cognition)
     state = new_intake_graph_state(bindings=bindings, version_pins=version_pins)
     state = graph.invoke(state, context=IntakeTurnContext("SNAPSHOT", snapshot))
-    next_bindings = dict(bindings)
-    next_bindings.update(
+    next_bindings = copy.deepcopy(bindings)
+    next_bindings["command"].update(
         command_id="COMMAND_P4_USER_2",
         logical_run_id="RUN_P4_USER_2",
         attempt_id="ATTEMPT_P4_USER_2_1",
@@ -137,8 +174,8 @@ def test_snapshot_reimport_with_another_hash_fails_closed(
     changed = copy.deepcopy(snapshot)
     changed["current_dossier"]["case_story"] = {"summary": "different"}
     changed["snapshot_hash"] = canonical_sha256_omitting(changed, "snapshot_hash")
-    changed_bindings = dict(first["bindings"])
-    changed_bindings["command_id"] = "COMMAND_P4_USER_CONFLICT"
+    changed_bindings = copy.deepcopy(first["bindings"])
+    changed_bindings["command"]["command_id"] = "COMMAND_P4_USER_CONFLICT"
     first["bindings"] = changed_bindings
 
     with pytest.raises(IntakeGraphContractError, match="INTAKE_SNAPSHOT_REIMPORT_CONFLICT"):
@@ -159,8 +196,8 @@ def test_identical_event_replay_uses_cached_proposal(
     event,
 ) -> None:
     graph, state = _run_snapshot(bindings, version_pins, snapshot)
-    next_bindings = dict(bindings)
-    next_bindings.update(
+    next_bindings = copy.deepcopy(bindings)
+    next_bindings["command"].update(
         command_id="COMMAND_P4_USER_2",
         logical_run_id="RUN_P4_USER_2",
         attempt_id="ATTEMPT_P4_USER_2_1",
@@ -175,3 +212,326 @@ def test_identical_event_replay_uses_cached_proposal(
     assert replay["route"] == "replay"
     assert replay["cognitive_revision"] == first["cognitive_revision"]
     assert replay["result_json"] == first["result_json"]
+
+
+def test_message_route_fails_closed_until_governed_lcel_is_bound(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+) -> None:
+    graph = compile_intake_v2_graph()
+    state = new_intake_graph_state(bindings=bindings, version_pins=version_pins)
+    state = graph.invoke(state, context=IntakeTurnContext("SNAPSHOT", snapshot))
+    state["bindings"]["command"].update(
+        command_id="COMMAND_P4_USER_2",
+        logical_run_id="RUN_P4_USER_2",
+        attempt_id="ATTEMPT_P4_USER_2_1",
+    )
+
+    with pytest.raises(IntakeGraphContractError, match="INTAKE_LCEL_NOT_CONFIGURED"):
+        graph.invoke(state, context=IntakeTurnContext("EVENT", event))
+
+
+def test_event_replay_requires_the_exact_cached_command_binding(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+) -> None:
+    graph, state = _run_snapshot(bindings, version_pins, snapshot)
+    state["bindings"]["command"].update(
+        command_id="COMMAND_P4_USER_2",
+        logical_run_id="RUN_P4_USER_2",
+        attempt_id="ATTEMPT_P4_USER_2_1",
+    )
+    state = graph.invoke(state, context=IntakeTurnContext("EVENT", event))
+    state["bindings"]["command"].update(
+        command_id="COMMAND_P4_USER_REBOUND",
+        logical_run_id="RUN_P4_USER_REBOUND",
+        attempt_id="ATTEMPT_P4_USER_REBOUND_1",
+    )
+
+    with pytest.raises(IntakeGraphContractError, match="INTAKE_PROPOSAL_BINDING_MISMATCH"):
+        graph.invoke(state, context=IntakeTurnContext("EVENT", copy.deepcopy(event)))
+
+
+def test_stable_event_id_cannot_be_rebound_to_another_hash(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+) -> None:
+    graph, state = _run_snapshot(bindings, version_pins, snapshot)
+    state["bindings"]["command"].update(
+        command_id="COMMAND_P4_USER_2",
+        logical_run_id="RUN_P4_USER_2",
+        attempt_id="ATTEMPT_P4_USER_2_1",
+    )
+    state = graph.invoke(state, context=IntakeTurnContext("EVENT", event))
+    changed = copy.deepcopy(event)
+    changed.update(
+        sequence_no=3,
+        message_id="MESSAGE_P4_USER_3",
+        text="Conflicting event payload.",
+        source_refs=["MESSAGE_P4_USER_3"],
+    )
+    changed["event_hash"] = canonical_sha256_omitting(changed, "event_hash")
+    state["bindings"]["command"].update(
+        command_id="COMMAND_P4_USER_3",
+        logical_run_id="RUN_P4_USER_3",
+        attempt_id="ATTEMPT_P4_USER_3_1",
+    )
+
+    with pytest.raises(IntakeGraphContractError, match="INTAKE_STABLE_ID_REBINDING"):
+        graph.invoke(state, context=IntakeTurnContext("EVENT", changed))
+
+
+def test_historical_event_id_remains_hash_bound(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+) -> None:
+    graph, state = _run_snapshot(bindings, version_pins, snapshot)
+    state["bindings"]["command"].update(
+        command_id="COMMAND_P4_USER_2",
+        logical_run_id="RUN_P4_USER_2",
+        attempt_id="ATTEMPT_P4_USER_2_1",
+    )
+    state = graph.invoke(state, context=IntakeTurnContext("EVENT", event))
+    next_event = copy.deepcopy(event)
+    next_event.update(
+        event_id="EVENT_P4_USER_3",
+        message_id="MESSAGE_P4_USER_3",
+        sequence_no=3,
+        text="A later accepted event.",
+        source_refs=["MESSAGE_P4_USER_3"],
+    )
+    next_event["event_hash"] = canonical_sha256_omitting(next_event, "event_hash")
+    state["bindings"]["command"].update(
+        command_id="COMMAND_P4_USER_3",
+        logical_run_id="RUN_P4_USER_3",
+        attempt_id="ATTEMPT_P4_USER_3_1",
+    )
+    state = graph.invoke(state, context=IntakeTurnContext("EVENT", next_event))
+    rebound = copy.deepcopy(event)
+    rebound.update(
+        sequence_no=4,
+        message_id="MESSAGE_P4_USER_4",
+        text="Rebound historical event ID.",
+        source_refs=["MESSAGE_P4_USER_4"],
+    )
+    rebound["event_hash"] = canonical_sha256_omitting(rebound, "event_hash")
+    state["bindings"]["command"].update(
+        command_id="COMMAND_P4_USER_4",
+        logical_run_id="RUN_P4_USER_4",
+        attempt_id="ATTEMPT_P4_USER_4_1",
+    )
+
+    with pytest.raises(IntakeGraphContractError, match="INTAKE_STABLE_ID_REBINDING"):
+        graph.invoke(state, context=IntakeTurnContext("EVENT", rebound))
+
+
+def test_message_id_remains_hash_bound_after_leaving_six_message_window(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+) -> None:
+    graph, state = _run_snapshot(bindings, version_pins, snapshot)
+    for sequence in range(2, 8):
+        next_event = copy.deepcopy(event)
+        next_event.update(
+            event_id=f"EVENT_P4_USER_{sequence}",
+            message_id=f"MESSAGE_P4_USER_{sequence}",
+            sequence_no=sequence,
+            text=f"Accepted event {sequence}.",
+            source_refs=[f"MESSAGE_P4_USER_{sequence}"],
+        )
+        next_event["event_hash"] = canonical_sha256_omitting(next_event, "event_hash")
+        state["bindings"]["command"].update(
+            command_id=f"COMMAND_P4_USER_{sequence}",
+            logical_run_id=f"RUN_P4_USER_{sequence}",
+            attempt_id=f"ATTEMPT_P4_USER_{sequence}_1",
+        )
+        state = graph.invoke(state, context=IntakeTurnContext("EVENT", next_event))
+
+    assert "MESSAGE_P4_USER_1" not in state["messages"]
+    rebound = copy.deepcopy(event)
+    rebound.update(
+        event_id="EVENT_P4_USER_8",
+        message_id="MESSAGE_P4_USER_1",
+        sequence_no=8,
+        text="Rebound evicted message ID.",
+        source_refs=["MESSAGE_P4_USER_1"],
+    )
+    rebound["event_hash"] = canonical_sha256_omitting(rebound, "event_hash")
+    state["bindings"]["command"].update(
+        command_id="COMMAND_P4_USER_8",
+        logical_run_id="RUN_P4_USER_8",
+        attempt_id="ATTEMPT_P4_USER_8_1",
+    )
+
+    with pytest.raises(IntakeGraphContractError, match="INTAKE_STABLE_ID_REBINDING"):
+        graph.invoke(state, context=IntakeTurnContext("EVENT", rebound))
+
+
+def test_snapshot_cannot_replay_the_latest_event_proposal(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+) -> None:
+    graph, state = _run_snapshot(bindings, version_pins, snapshot)
+    state["bindings"]["command"].update(
+        command_id="COMMAND_P4_USER_2",
+        logical_run_id="RUN_P4_USER_2",
+        attempt_id="ATTEMPT_P4_USER_2_1",
+    )
+    state = graph.invoke(state, context=IntakeTurnContext("EVENT", event))
+
+    with pytest.raises(IntakeGraphContractError, match="INTAKE_REPLAY_SOURCE_MISMATCH"):
+        graph.invoke(state, context=IntakeTurnContext("SNAPSHOT", copy.deepcopy(snapshot)))
+
+
+def test_cognition_cannot_overwrite_authority_state(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+) -> None:
+    def cognition(state, runtime):
+        del runtime
+        return {
+            "cognitive_revision": state["cognitive_revision"] + 1,
+            "terminal_draft": {
+                "room_utterance": "Attempted authority mutation.",
+                "dossier_patch": {},
+                "matrix_patch": None,
+                "readiness": "INCOMPLETE",
+                "missing_fields": [],
+                "recommendation": "NEED_MORE_INFO",
+                "knowledge_answer_mode": "NONE",
+                "confidence": 0.0,
+            },
+            "bindings": copy.deepcopy(state["bindings"]),
+        }
+
+    graph = compile_intake_v2_graph(intake_lcel=cognition)
+    state = new_intake_graph_state(bindings=bindings, version_pins=version_pins)
+    state = graph.invoke(state, context=IntakeTurnContext("SNAPSHOT", snapshot))
+    state["bindings"]["command"].update(
+        command_id="COMMAND_P4_USER_2",
+        logical_run_id="RUN_P4_USER_2",
+        attempt_id="ATTEMPT_P4_USER_2_1",
+    )
+
+    with pytest.raises(IntakeGraphContractError, match="INTAKE_COGNITION_PATCH_FIELDS_INVALID"):
+        graph.invoke(state, context=IntakeTurnContext("EVENT", event))
+
+
+def test_cognition_draft_is_rejected_before_an_oversized_state_patch(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+) -> None:
+    def cognition(state, runtime):
+        del runtime
+        return {
+            "cognitive_revision": state["cognitive_revision"] + 1,
+            "terminal_draft": {
+                "room_utterance": "Bounded response.",
+                "dossier_patch": {"case_story": {"bulk": ["x" * 1000] * 70}},
+                "matrix_patch": None,
+                "readiness": "INCOMPLETE",
+                "missing_fields": [],
+                "recommendation": "NEED_MORE_INFO",
+                "knowledge_answer_mode": "NONE",
+                "confidence": 0.0,
+            },
+        }
+
+    graph = compile_intake_v2_graph(intake_lcel=cognition)
+    state = new_intake_graph_state(bindings=bindings, version_pins=version_pins)
+    state = graph.invoke(state, context=IntakeTurnContext("SNAPSHOT", snapshot))
+    state["bindings"]["command"].update(
+        command_id="COMMAND_P4_USER_2",
+        logical_run_id="RUN_P4_USER_2",
+        attempt_id="ATTEMPT_P4_USER_2_1",
+    )
+
+    with pytest.raises(IntakeGraphContractError, match="INTAKE_COGNITION_DRAFT_TOO_LARGE"):
+        graph.invoke(state, context=IntakeTurnContext("EVENT", event))
+
+
+@pytest.mark.parametrize(
+    ("matrix_patch", "error_code"),
+    [
+        (
+            {"fact_rows": [], "source_refs": []},
+            "INTAKE_DOSSIER_STABLE_ID_DELETED",
+        ),
+        (
+            {
+                "fact_rows": [
+                    {
+                        "fact_id": "FACT_DAMAGE",
+                        "category": "PRODUCT",
+                        "fact_target": "A rebound fact target.",
+                    }
+                ],
+                "source_refs": ["MESSAGE_P4_USER_1"],
+            },
+            "INTAKE_DOSSIER_STABLE_ID_REBOUND",
+        ),
+    ],
+)
+def test_dossier_patch_cannot_delete_or_rebind_stable_fact_sources(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+    matrix_patch,
+    error_code,
+) -> None:
+    snapshot["current_dossier"]["case_fact_matrix"] = {
+        "fact_rows": [
+            {
+                "fact_id": "FACT_DAMAGE",
+                "category": "PRODUCT",
+                "fact_target": "The product arrived damaged.",
+            }
+        ],
+        "source_refs": ["MESSAGE_P4_USER_1"],
+    }
+    snapshot["snapshot_hash"] = canonical_sha256_omitting(snapshot, "snapshot_hash")
+
+    def cognition(state, runtime):
+        del runtime
+        return {
+            "cognitive_revision": state["cognitive_revision"] + 1,
+            "terminal_draft": {
+                "room_utterance": "Structured update.",
+                "dossier_patch": {"case_fact_matrix": matrix_patch},
+                "matrix_patch": None,
+                "readiness": "INCOMPLETE",
+                "missing_fields": [],
+                "recommendation": "NEED_MORE_INFO",
+                "knowledge_answer_mode": "NONE",
+                "confidence": 0.0,
+            },
+        }
+
+    graph = compile_intake_v2_graph(intake_lcel=cognition)
+    state = new_intake_graph_state(bindings=bindings, version_pins=version_pins)
+    state = graph.invoke(state, context=IntakeTurnContext("SNAPSHOT", snapshot))
+    state["bindings"]["command"].update(
+        command_id="COMMAND_P4_USER_2",
+        logical_run_id="RUN_P4_USER_2",
+        attempt_id="ATTEMPT_P4_USER_2_1",
+    )
+
+    with pytest.raises(IntakeGraphContractError, match=error_code):
+        graph.invoke(state, context=IntakeTurnContext("EVENT", event))
