@@ -2,10 +2,12 @@ package com.example.dispute.workflow.room.intake;
 
 import static com.example.dispute.workflow.contract.v1.TemporalTaskQueues.AGENT_EXECUTION;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityTemporalPolicy;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityFailureTypes;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.ActivityEnvelope;
+import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.ActivityInvocationMode;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.BranchCommitReceipt;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.BranchCommitRequest;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.BranchOperation;
@@ -28,6 +30,7 @@ import com.example.dispute.workflow.temporal.room.intake.IntakeGraphExecutionRef
 import com.example.dispute.workflow.temporal.room.intake.IntakeOperationKeys;
 import com.example.dispute.workflow.temporal.room.intake.IntakeParty;
 import com.example.dispute.workflow.temporal.room.intake.IntakeRoomActivities;
+import com.example.dispute.workflow.temporal.room.intake.IntakeRoomCarryState;
 import com.example.dispute.workflow.temporal.room.intake.IntakeRoomPhase;
 import com.example.dispute.workflow.temporal.room.intake.IntakeRoomSnapshot;
 import com.example.dispute.workflow.temporal.room.intake.IntakeRoomStart;
@@ -39,13 +42,16 @@ import io.temporal.activity.Activity;
 import io.temporal.activity.ActivityOptions;
 import io.temporal.client.ActivityCompletionException;
 import io.temporal.client.WorkflowClient;
+import io.temporal.client.WorkflowFailedException;
 import io.temporal.client.WorkflowOptions;
 import io.temporal.client.WorkflowStub;
 import io.temporal.failure.ApplicationFailure;
 import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.worker.Worker;
+import io.temporal.worker.WorkflowImplementationOptions;
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -109,7 +115,9 @@ class IntakeRoomWorkflowActivityTest {
               IntakeOperationKeys.turnFinalize(
                   CASE_ID, EPOCH, THREAD_ID, message.commandId(), hash(7)));
       assertThat(activities.graphRequests.getFirst().envelope().retryBudget().activityAttemptsRemaining())
-          .isEqualTo(2);
+          .isEqualTo(1);
+      assertThat(activities.graphRequests.getFirst().envelope().invocation().mode())
+          .isEqualTo(ActivityInvocationMode.FIRST_EXECUTION);
 
       IntakeWorkflowCommand accept =
           command(
@@ -137,7 +145,7 @@ class IntakeRoomWorkflowActivityTest {
             new com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.RetryBudget(
                 "intake-retry-budget.v1", 2, 2, 1));
     assertThat(options.getTaskQueue()).isEqualTo(AGENT_EXECUTION);
-    assertThat(options.getRetryOptions().getMaximumAttempts()).isEqualTo(2);
+    assertThat(options.getRetryOptions().getMaximumAttempts()).isEqualTo(1);
 
     ActivityOptions reconciliationOnly =
         IntakeActivityTemporalPolicy.options(
@@ -191,6 +199,51 @@ class IntakeRoomWorkflowActivityTest {
   }
 
   @Test
+  void sharedInfrastructureRetryPoolDoesNotChargeTheFirstExecutionOfANewStage() {
+    try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+      String workflowQueue = "phase4-intake-shared-retry-pool";
+      FakeActivities activities = new FakeActivities();
+      activities.snapshotInfrastructureFailures.set(1);
+      activities.graphInfrastructureFailures.set(1);
+      Worker workflowWorker = environment.newWorker(workflowQueue);
+      workflowWorker.registerWorkflowImplementationTypes(IntakeRoomWorkflowImpl.class);
+      Worker activityWorker = environment.newWorker(AGENT_EXECUTION);
+      activityWorker.registerActivitiesImplementations(activities);
+      environment.start();
+
+      IntakeRoomWorkflow workflow = workflow(environment, workflowQueue, "shared-retry-pool");
+      WorkflowClient.start(workflow::run, start());
+      workflow.commandAccepted(
+          command(1, "CMD_SHARED_RETRY_POOL", IntakeCommandType.INTAKE_MESSAGE, null, 2));
+      IntakeRoomSnapshot exhausted =
+          awaitState(
+              workflow,
+              state ->
+                  IntakeActivityFailureTypes.RETRY_BUDGET_EXHAUSTED.equals(
+                      state.protocolErrorCode()));
+
+      assertThat(exhausted.pendingCommandId()).isEqualTo("CMD_SHARED_RETRY_POOL");
+      assertThat(exhausted.activityExecution().stage())
+          .isEqualTo(IntakeActivityStage.GRAPH_EXECUTION);
+      assertThat(exhausted.activityExecution().invocation().mode())
+          .isEqualTo(ActivityInvocationMode.RECONCILE_ONLY);
+      assertThat(
+              activities.snapshotRequests.stream()
+                  .map(request -> request.envelope().invocation().mode()))
+          .containsExactly(
+              ActivityInvocationMode.FIRST_EXECUTION,
+              ActivityInvocationMode.INFRASTRUCTURE_RETRY);
+      assertThat(
+              activities.graphRequests.stream()
+                  .map(request -> request.envelope().invocation().mode()))
+          .containsExactly(
+              ActivityInvocationMode.FIRST_EXECUTION,
+              ActivityInvocationMode.RECONCILE_ONLY);
+      assertThat(activities.finalizationRequests).isEmpty();
+    }
+  }
+
+  @Test
   void finalizerCompletionLossRetriesOnlyTheIdempotentStage() {
     try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
       String workflowQueue = "phase4-intake-finalizer-completion-loss";
@@ -205,7 +258,7 @@ class IntakeRoomWorkflowActivityTest {
           workflow(environment, workflowQueue, "completion-loss");
       WorkflowClient.start(workflow::run, start());
       workflow.commandAccepted(
-          command(1, "CMD_COMPLETION_LOSS", IntakeCommandType.INTAKE_MESSAGE, null));
+          command(1, "CMD_COMPLETION_LOSS", IntakeCommandType.INTAKE_MESSAGE, null, 1));
       environment.sleep(Duration.ofSeconds(2));
 
       assertThat(workflow.state().roomPhase()).isEqualTo(IntakeRoomPhase.READY_TO_CONFIRM);
@@ -213,6 +266,92 @@ class IntakeRoomWorkflowActivityTest {
       assertThat(activities.graphRequests).hasSize(1);
       assertThat(activities.finalizationRequests).hasSize(2);
       assertThat(activities.finalizationCommits).hasSize(1);
+      assertThat(
+              activities.finalizationRequests.stream()
+                  .map(request -> request.envelope().invocation().mode()))
+          .containsExactly(
+              ActivityInvocationMode.FIRST_EXECUTION,
+              ActivityInvocationMode.RECONCILE_ONLY);
+    }
+  }
+
+  @Test
+  void committedFinalizerCompletionSettlesBeforeTheNextCommandStarts() {
+    try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+      String workflowQueue = "phase4-intake-finalizer-settlement";
+      FakeActivities activities = new FakeActivities();
+      activities.blockFinalizationAfterCommit.set(true);
+      Worker workflowWorker = environment.newWorker(workflowQueue);
+      workflowWorker.registerWorkflowImplementationTypes(IntakeRoomWorkflowImpl.class);
+      Worker activityWorker = environment.newWorker(AGENT_EXECUTION);
+      activityWorker.registerActivitiesImplementations(activities);
+      environment.start();
+
+      IntakeRoomWorkflow workflow = workflow(environment, workflowQueue, "finalizer-settlement");
+      WorkflowClient.start(workflow::run, start());
+      workflow.commandAccepted(
+          command(1, "CMD_VISIBLE_FINALIZER", IntakeCommandType.INTAKE_MESSAGE, null));
+      awaitTrue(activities.finalizationCommitVisible, "Finalizer commit was not made visible");
+
+      TurnFinalizationReceipt committed =
+          activities.finalizationReceipts.values().iterator().next();
+      workflow.domainEventCommitted(wrongStageEvent(committed.committedEvent()));
+      awaitState(
+          workflow,
+          state -> "EVENT_ACTIVITY_STAGE_MISMATCH".equals(state.protocolErrorCode()));
+
+      workflow.commandAccepted(
+          command(
+              2,
+              "CMD_AFTER_VISIBLE_FINALIZER",
+              IntakeCommandType.INTAKE_CONFIRM,
+              BranchOperation.INITIATOR_ACCEPT));
+      activities.releaseFinalizationAfterCommit.set(true);
+      IntakeRoomSnapshot accepted = awaitState(workflow, IntakeRoomSnapshot::respondentUnlocked);
+
+      assertThat(accepted.roomPhase()).isEqualTo(IntakeRoomPhase.WAITING_PARTY);
+      assertThat(accepted.protocolErrorCode()).isNull();
+      assertThat(accepted.nextCommandSequence()).isEqualTo(3);
+      assertThat(accepted.processedCommandCount()).isEqualTo(2);
+      assertThat(activities.finalizationRequests).hasSize(1);
+      assertThat(activities.finalizationCancellations).hasValue(0);
+      assertThat(activities.acceptRequests).hasSize(1);
+    }
+  }
+
+  @Test
+  void branchReceiptMustMatchTheExactRequestAuthority() {
+    try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+      String workflowQueue = "phase4-intake-branch-receipt-authority";
+      FakeActivities activities = new FakeActivities();
+      Worker workflowWorker = environment.newWorker(workflowQueue);
+      workflowWorker.registerWorkflowImplementationTypes(IntakeRoomWorkflowImpl.class);
+      Worker activityWorker = environment.newWorker(AGENT_EXECUTION);
+      activityWorker.registerActivitiesImplementations(activities);
+      environment.start();
+
+      IntakeRoomWorkflow workflow = workflow(environment, workflowQueue, "branch-authority");
+      WorkflowClient.start(workflow::run, start());
+      workflow.commandAccepted(
+          command(1, "CMD_READY_FOR_BAD_BRANCH", IntakeCommandType.INTAKE_MESSAGE, null));
+      awaitState(workflow, state -> state.roomPhase() == IntakeRoomPhase.READY_TO_CONFIRM);
+
+      activities.corruptAcceptanceAuthority.set(true);
+      workflow.commandAccepted(
+          command(
+              2,
+              "CMD_BAD_BRANCH_AUTHORITY",
+              IntakeCommandType.INTAKE_CONFIRM,
+              BranchOperation.INITIATOR_ACCEPT));
+      IntakeRoomSnapshot rejected =
+          awaitState(
+              workflow,
+              state -> "INTAKE_ACTIVITY_RECEIPT_INVALID".equals(state.protocolErrorCode()));
+
+      assertThat(rejected.pendingCommandId()).isEqualTo("CMD_BAD_BRANCH_AUTHORITY");
+      assertThat(rejected.respondentUnlocked()).isFalse();
+      assertThat(rejected.activityExecution().stage())
+          .isEqualTo(IntakeActivityStage.INITIATOR_ACCEPTANCE);
     }
   }
 
@@ -312,6 +451,29 @@ class IntakeRoomWorkflowActivityTest {
     }
   }
 
+  @Test
+  void initialRunRejectsCallerSuppliedCarryState() {
+    try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+      String workflowQueue = "phase4-intake-untrusted-carry";
+      Worker workflowWorker = environment.newWorker(workflowQueue);
+      workflowWorker.registerWorkflowImplementationTypes(
+          WorkflowImplementationOptions.newBuilder()
+              .setFailWorkflowExceptionTypes(IllegalStateException.class)
+              .build(),
+          IntakeRoomWorkflowImpl.class);
+      environment.start();
+
+      IntakeRoomWorkflow workflow = workflow(environment, workflowQueue, "untrusted-carry");
+      WorkflowClient.start(workflow::run, start().withCarryState(IntakeRoomCarryState.initial()));
+
+      assertThatThrownBy(
+              () ->
+                  WorkflowStub.fromTyped(workflow)
+                      .getResult(IntakeRoomSnapshot.class))
+          .isInstanceOf(WorkflowFailedException.class);
+    }
+  }
+
   private static IntakeRoomSnapshot awaitState(
       IntakeRoomWorkflow workflow, Predicate<IntakeRoomSnapshot> predicate) {
     long deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
@@ -392,6 +554,15 @@ class IntakeRoomWorkflowActivityTest {
 
   private static IntakeWorkflowCommand command(
       long sequence, String commandId, IntakeCommandType type, BranchOperation branchOperation) {
+    return command(sequence, commandId, type, branchOperation, 2);
+  }
+
+  private static IntakeWorkflowCommand command(
+      long sequence,
+      String commandId,
+      IntakeCommandType type,
+      BranchOperation branchOperation,
+      int activityAttemptsRemaining) {
     return new IntakeWorkflowCommand(
         "intake-workflow-command.v1",
         commandId,
@@ -413,8 +584,32 @@ class IntakeRoomWorkflowActivityTest {
             AGENT_SESSION,
             Long.MAX_VALUE,
             new com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.RetryBudget(
-                "intake-retry-budget.v1", 2, 2, 1),
+                "intake-retry-budget.v1", 2, activityAttemptsRemaining, 1),
             branchOperation));
+  }
+
+  private static IntakeDomainEventRef wrongStageEvent(IntakeDomainEventRef committed) {
+    return new IntakeDomainEventRef(
+        "intake-domain-event-ref.v1",
+        committed.eventId() + "_WRONG_STAGE",
+        committed.eventRef() + ":wrong-stage",
+        hash(4),
+        committed.eventSequence(),
+        IntakeDomainEventType.INITIATOR_ACCEPTED,
+        committed.party(),
+        committed.commandId(),
+        committed.tenantSurrogate(),
+        committed.caseId(),
+        committed.roomEpoch(),
+        committed.fencingToken(),
+        committed.actorScopeHash(),
+        committed.operationKey(),
+        committed.requestHash(),
+        committed.resultHash(),
+        committed.processRevision(),
+        committed.roomRevision(),
+        null,
+        null);
   }
 
   private static String hash(long value) {
@@ -427,14 +622,22 @@ class IntakeRoomWorkflowActivityTest {
     final boolean loseFirstFinalizationCompletion;
     final boolean staleFinalization;
     final boolean blockGraph;
+    final AtomicInteger snapshotInfrastructureFailures = new AtomicInteger();
+    final AtomicInteger graphInfrastructureFailures = new AtomicInteger();
+    final AtomicBoolean blockFinalizationAfterCommit = new AtomicBoolean();
+    final AtomicBoolean releaseFinalizationAfterCommit = new AtomicBoolean();
+    final AtomicBoolean finalizationCommitVisible = new AtomicBoolean();
+    final AtomicBoolean corruptAcceptanceAuthority = new AtomicBoolean();
     final List<SnapshotPublicationRequest> snapshotRequests = new CopyOnWriteArrayList<>();
     final List<GraphExecutionRequest> graphRequests = new CopyOnWriteArrayList<>();
     final List<TurnFinalizationRequest> finalizationRequests = new CopyOnWriteArrayList<>();
     final List<BranchCommitRequest> acceptRequests = new CopyOnWriteArrayList<>();
     final List<BranchCommitRequest> cancelRequests = new CopyOnWriteArrayList<>();
     final Set<String> finalizationCommits = ConcurrentHashMap.newKeySet();
+    final Map<String, TurnFinalizationReceipt> finalizationReceipts = new ConcurrentHashMap<>();
     final AtomicBoolean graphStarted = new AtomicBoolean();
     final AtomicInteger graphCancellations = new AtomicInteger();
+    final AtomicInteger finalizationCancellations = new AtomicInteger();
 
     FakeActivities() {
       this(false, false, false, false);
@@ -465,6 +668,11 @@ class IntakeRoomWorkflowActivityTest {
     @Override
     public SnapshotPublicationReceipt publishSnapshot(SnapshotPublicationRequest request) {
       snapshotRequests.add(request);
+      if (consumeFailure(snapshotInfrastructureFailures)) {
+        throw ApplicationFailure.newFailure(
+            "synthetic snapshot infrastructure failure",
+            IntakeActivityFailureTypes.INFRASTRUCTURE_RETRYABLE);
+      }
       return new SnapshotPublicationReceipt(
           "intake-snapshot-publication-receipt.v1",
           operation(request.operationKey(), request.requestHash(), hash(1), 0, 0),
@@ -503,6 +711,14 @@ class IntakeRoomWorkflowActivityTest {
       if (failGraph) {
         throw ApplicationFailure.newNonRetryableFailure(
             "synthetic schema rejection", IntakeActivityFailureTypes.SCHEMA);
+      }
+      if (consumeFailure(graphInfrastructureFailures)) {
+        throw ApplicationFailure.newFailure(
+            "synthetic Graph infrastructure failure",
+            IntakeActivityFailureTypes.INFRASTRUCTURE_RETRYABLE);
+      }
+      if (request.envelope().invocation().mode() == ActivityInvocationMode.RECONCILE_ONLY) {
+        return null;
       }
       String resultHash = hash(7);
       String proposalHash = hash(8);
@@ -552,12 +768,6 @@ class IntakeRoomWorkflowActivityTest {
     @Override
     public TurnFinalizationReceipt finalizeTurn(TurnFinalizationRequest request) {
       finalizationRequests.add(request);
-      boolean firstCommit = finalizationCommits.add(request.operationKey());
-      if (loseFirstFinalizationCompletion && firstCommit) {
-        throw ApplicationFailure.newFailure(
-            "completion lost after idempotent finalization commit",
-            IntakeActivityFailureTypes.INFRASTRUCTURE_RETRYABLE);
-      }
       long revision =
           staleFinalization
               ? Math.max(0, request.envelope().processRevision() - 1)
@@ -576,17 +786,81 @@ class IntakeRoomWorkflowActivityTest {
               revision,
               graph.agentRunRef(),
               graph.graphExecutionRef());
-      return new TurnFinalizationReceipt(
-          "intake-turn-finalization-activity-receipt.v1",
-          operation(request.operationKey(), request.requestHash(), graph.operation().resultHash(), revision, revision),
-          formalReceipt(request, event, revision),
-          event);
+      TurnFinalizationReceipt produced =
+          new TurnFinalizationReceipt(
+              "intake-turn-finalization-activity-receipt.v1",
+              operation(
+                  request.operationKey(),
+                  request.requestHash(),
+                  graph.operation().resultHash(),
+                  revision,
+                  revision),
+              formalReceipt(request, event, revision),
+              event);
+      TurnFinalizationReceipt existing =
+          finalizationReceipts.putIfAbsent(request.operationKey(), produced);
+      TurnFinalizationReceipt committed = existing == null ? produced : existing;
+      boolean firstCommit = finalizationCommits.add(request.operationKey());
+      if (firstCommit) {
+        finalizationCommitVisible.set(true);
+        if (blockFinalizationAfterCommit.get()) {
+          try {
+            while (!releaseFinalizationAfterCommit.get()) {
+              Activity.getExecutionContext().heartbeat("committed-awaiting-completion");
+              Thread.sleep(10);
+            }
+          } catch (ActivityCompletionException failure) {
+            finalizationCancellations.incrementAndGet();
+            throw failure;
+          } catch (InterruptedException failure) {
+            Thread.currentThread().interrupt();
+            throw ApplicationFailure.newFailure(
+                "synthetic Finalizer worker interrupted",
+                IntakeActivityFailureTypes.INFRASTRUCTURE_RETRYABLE);
+          }
+        }
+        if (loseFirstFinalizationCompletion) {
+          throw ApplicationFailure.newFailure(
+              "completion lost after idempotent finalization commit",
+              IntakeActivityFailureTypes.INFRASTRUCTURE_RETRYABLE);
+        }
+      }
+      return committed;
     }
 
     @Override
     public BranchCommitReceipt acceptInitiator(BranchCommitRequest request) {
       acceptRequests.add(request);
-      return branchReceipt(request, IntakeDomainEventType.INITIATOR_ACCEPTED);
+      BranchCommitReceipt receipt =
+          branchReceipt(request, IntakeDomainEventType.INITIATOR_ACCEPTED);
+      if (!corruptAcceptanceAuthority.get()) {
+        return receipt;
+      }
+      IntakeDomainEventRef event = receipt.committedEvent();
+      IntakeDomainEventRef corrupted =
+          new IntakeDomainEventRef(
+              event.schemaVersion(),
+              event.eventId(),
+              event.eventRef(),
+              event.eventHash(),
+              event.eventSequence(),
+              event.eventType(),
+              event.party(),
+              event.commandId(),
+              "tenant-corrupted",
+              event.caseId(),
+              event.roomEpoch(),
+              event.fencingToken(),
+              event.actorScopeHash(),
+              event.operationKey(),
+              event.requestHash(),
+              event.resultHash(),
+              event.processRevision(),
+              event.roomRevision(),
+              event.agentRunRef(),
+              event.graphExecutionRef());
+      return new BranchCommitReceipt(
+          receipt.schemaVersion(), receipt.branchOperation(), receipt.operation(), corrupted);
     }
 
     @Override
@@ -706,6 +980,18 @@ class IntakeRoomWorkflowActivityTest {
           resultHash,
           processRevision,
           roomRevision);
+    }
+
+    private static boolean consumeFailure(AtomicInteger failures) {
+      while (true) {
+        int remaining = failures.get();
+        if (remaining == 0) {
+          return false;
+        }
+        if (failures.compareAndSet(remaining, remaining - 1)) {
+          return true;
+        }
+      }
     }
   }
 }

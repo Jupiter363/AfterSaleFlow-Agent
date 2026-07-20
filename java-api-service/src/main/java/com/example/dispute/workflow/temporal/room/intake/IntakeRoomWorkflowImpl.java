@@ -1,6 +1,8 @@
 package com.example.dispute.workflow.temporal.room.intake;
 
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.ActivityEnvelope;
+import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.ActivityInvocation;
+import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.ActivityInvocationMode;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.BranchCommitReceipt;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.BranchCommitRequest;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.BranchOperation;
@@ -25,9 +27,11 @@ import java.time.Duration;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.EnumMap;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.Function;
 
 public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
 
@@ -66,6 +70,8 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
   private String protocolErrorCode;
   private IntakeCommandDecision lastDecision;
   private IntakeActivityExecutionState activityExecution;
+  private int sharedActivityRetriesRemaining;
+  private boolean activityExecutionAuthorized;
   private int runGeneration;
   private io.temporal.workflow.Promise<Void> runMaxAgeTimer;
   private boolean rolloverEnabled;
@@ -79,7 +85,7 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
   @Override
   public IntakeRoomSnapshot run(IntakeRoomStart start) {
     this.start = Objects.requireNonNull(start, "start must not be null");
-    restoreCarryState(start.carryState());
+    restoreCarryState();
     rolloverEnabled =
         Workflow.getVersion(ROLLOVER_CHANGE_ID, Workflow.DEFAULT_VERSION, 1) == 1;
     if (rolloverEnabled) {
@@ -91,9 +97,24 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
         settleActiveOrchestration();
         continue;
       }
+      if (activeOrchestration != null && activeCancellationRequested) {
+        Workflow.await(activeOrchestration::isCompleted);
+        settleActiveOrchestration();
+        continue;
+      }
       if (shouldContinueAsNew() && canContinueAsNew()) {
         continueAsNew();
         return null;
+      }
+      if (activeOrchestration != null) {
+        InboxItem interrupting = pollInterruptingInput();
+        if (interrupting != null) {
+          processNextInput(interrupting);
+          continue;
+        }
+        Workflow.await(
+            () -> activeOrchestration.isCompleted() || hasInterruptingInput());
+        continue;
       }
       if (!inbox.isEmpty()) {
         processNextInput(inbox.removeFirst());
@@ -180,6 +201,30 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
     processEvent(((EventInput) input).event());
   }
 
+  private InboxItem pollInterruptingInput() {
+    Iterator<InboxItem> iterator = inbox.iterator();
+    while (iterator.hasNext()) {
+      InboxItem item = iterator.next();
+      if (isInterruptingInput(item)) {
+        iterator.remove();
+        return item;
+      }
+    }
+    return null;
+  }
+
+  private boolean hasInterruptingInput() {
+    return inbox.stream().anyMatch(this::isInterruptingInput);
+  }
+
+  private boolean isInterruptingInput(InboxItem input) {
+    if (input instanceof EventInput) {
+      return true;
+    }
+    return input instanceof CommandInput commandInput
+        && preemptsActivityCommand(commandInput.command());
+  }
+
   private void processCommand(IntakeWorkflowCommand command) {
     CommandObservation observed = commandObservations.get(command.commandId());
     if (observed != null) {
@@ -242,6 +287,14 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
     processedCommandCount++;
     protocolErrorCode = null;
     pendingCommand = IntakePendingCommand.from(command);
+    if (command.executionContext() != null) {
+      int attempts = command.executionContext().retryBudget().activityAttemptsRemaining();
+      activityExecutionAuthorized = attempts > 0;
+      sharedActivityRetriesRemaining = Math.max(0, attempts - 1);
+    } else {
+      activityExecutionAuthorized = false;
+      sharedActivityRetriesRemaining = 0;
+    }
     activeParty = command.party();
     if (command.commandType() == IntakeCommandType.INTAKE_MESSAGE) {
       roomPhase = IntakeRoomPhase.AGENT_RUNNING;
@@ -310,12 +363,18 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
         pendingCommand.executionContext() == null
             && pendingCommand.operationKey().equals(event.operationKey());
     boolean stageOperation =
-        (expectedActivityOperationKey != null
-                && expectedActivityOperationKey.equals(event.operationKey()))
-            || (activityExecution != null
-                && activityExecution.stageOperationKey().equals(event.operationKey()));
+        activityExecution != null
+            && activityExecution.commandId().equals(pendingCommand.commandId())
+            && activityExecution.stageOperationKey().equals(event.operationKey())
+            && (expectedActivityOperationKey == null
+                || expectedActivityOperationKey.equals(activityExecution.stageOperationKey()));
     if (!rootOperation && !stageOperation) {
       protocolErrorCode = "EVENT_OPERATION_KEY_MISMATCH";
+      return;
+    }
+    if (stageOperation
+        && !eventAllowedForActivityStage(activityExecution.stage(), event.eventType())) {
+      protocolErrorCode = "EVENT_ACTIVITY_STAGE_MISMATCH";
       return;
     }
     if (!pendingCommand.requestHash().equals(event.requestHash())) {
@@ -360,6 +419,7 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
     if (expectedActivityOperationKey == null
         && activeCancellationScope != null
         && pendingCommand.commandId().equals(activeOrchestrationCommandId)) {
+      activeCancellationRequested = true;
       activeCancellationScope.cancel();
     }
 
@@ -377,6 +437,8 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
     }
     pendingCommand = null;
     activityExecution = null;
+    sharedActivityRetriesRemaining = 0;
+    activityExecutionAuthorized = false;
     protocolErrorCode = null;
   }
 
@@ -398,16 +460,18 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
   private void orchestrate(IntakeWorkflowCommand command) {
     IntakeCommandExecutionContext context = command.executionContext();
     try {
-      ActivityEnvelope envelope = activityEnvelope(command, context);
       if (command.commandType() == IntakeCommandType.INTAKE_MESSAGE) {
-        ensureSnapshot(envelope, command, context);
-        GraphExecutionReceipt graph = executeGraph(envelope, command, context);
+        ensureSnapshot(command, context);
+        GraphExecutionReceipt graph = completedGraphFor(command, context);
+        if (graph == null) {
+          graph = executeGraph(command, context);
+        }
         TurnFinalizationReceipt finalization =
-            finalizeTurn(envelope, command, context, graph);
+            finalizeTurn(command, context, graph);
         processEvent(finalization.committedEvent(), finalization.operation().operationKey());
         return;
       }
-      BranchCommitReceipt branch = executeBranch(envelope, command, context);
+      BranchCommitReceipt branch = executeBranch(command, context);
       processEvent(branch.committedEvent(), branch.operation().operationKey());
     } catch (IntakeActivityDeadlineExceeded failure) {
       protocolErrorCode = "INTAKE_ACTIVITY_DEADLINE_EXPIRED";
@@ -418,6 +482,8 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
         throw failure;
       }
       protocolErrorCode = activityFailureCode(failure);
+    } catch (IntakeActivityReconciliationMiss failure) {
+      protocolErrorCode = IntakeActivityFailureTypes.RETRY_BUDGET_EXHAUSTED;
     } catch (RuntimeException failure) {
       // Receipt validation failures are fail-closed and leave the command pending for recovery.
       protocolErrorCode = "INTAKE_ACTIVITY_RECEIPT_INVALID";
@@ -456,6 +522,8 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
         && pendingCommand.commandId().equals(completedCommandId)) {
       pendingCommand = null;
       activityExecution = null;
+      sharedActivityRetriesRemaining = 0;
+      activityExecutionAuthorized = false;
       protocolErrorCode = null;
     }
     if (cancellation != null) {
@@ -474,6 +542,8 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
     if (activeOrchestration == null) {
       pendingCommand = null;
       activityExecution = null;
+      sharedActivityRetriesRemaining = 0;
+      activityExecutionAuthorized = false;
       protocolErrorCode = null;
       return false;
     }
@@ -501,9 +571,7 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
   }
 
   private void ensureSnapshot(
-      ActivityEnvelope envelope,
-      IntakeWorkflowCommand command,
-      IntakeCommandExecutionContext context) {
+      IntakeWorkflowCommand command, IntakeCommandExecutionContext context) {
     IntakeThreadInitialization existing = threadInitializations.get(command.party());
     if (existing != null) {
       requireThreadBinding(existing, command, context);
@@ -513,17 +581,23 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
     String operationKey =
         IntakeOperationKeys.snapshotPublish(
             command.caseId(), command.roomEpoch(), command.actorScopeHash(), domainRevision);
-    setActivityStage(command, context, IntakeActivityStage.SNAPSHOT_PUBLICATION, operationKey);
-    SnapshotPublicationRequest request =
-        new SnapshotPublicationRequest(
-            "intake-snapshot-publication-request.v1",
-            envelope,
-            context.threadId(),
-            context.agentSessionId(),
-            domainRevision,
+    SnapshotPublicationReceipt receipt =
+        invokeStage(
+            command,
+            context,
+            IntakeActivityStage.SNAPSHOT_PUBLICATION,
             operationKey,
-            command.requestHash());
-    SnapshotPublicationReceipt receipt = activities(context).publishSnapshot(request);
+            envelope ->
+                activities(context)
+                    .publishSnapshot(
+                        new SnapshotPublicationRequest(
+                            "intake-snapshot-publication-request.v1",
+                            envelope,
+                            context.threadId(),
+                            context.agentSessionId(),
+                            domainRevision,
+                            operationKey,
+                            command.requestHash())));
     requireOperation(receipt.operation(), operationKey, command.requestHash());
     if (receipt.domainRevision() != domainRevision) {
       throw new IllegalArgumentException("snapshot receipt revision does not match the request");
@@ -541,28 +615,32 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
   }
 
   private GraphExecutionReceipt executeGraph(
-      ActivityEnvelope envelope,
-      IntakeWorkflowCommand command,
-      IntakeCommandExecutionContext context) {
+      IntakeWorkflowCommand command, IntakeCommandExecutionContext context) {
     String operationKey =
         IntakeOperationKeys.graphExecute(
             command.caseId(), command.roomEpoch(), context.threadId(), command.commandId());
-    setActivityStage(command, context, IntakeActivityStage.GRAPH_EXECUTION, operationKey);
     GraphExecutionReceipt receipt =
-        activities(context).executeGraph(
-            new GraphExecutionRequest(
-                "intake-graph-execution-request.v1",
-                envelope,
-                context.threadId(),
-                context.agentSessionId(),
-                operationKey,
-                command.requestHash()));
+        invokeStage(
+            command,
+            context,
+            IntakeActivityStage.GRAPH_EXECUTION,
+            operationKey,
+            envelope ->
+                activities(context)
+                    .executeGraph(
+                        new GraphExecutionRequest(
+                            "intake-graph-execution-request.v1",
+                            envelope,
+                            context.threadId(),
+                            context.agentSessionId(),
+                            operationKey,
+                            command.requestHash())));
     requireOperation(receipt.operation(), operationKey, command.requestHash());
+    activityExecution = activityExecution.withGraphExecution(receipt);
     return receipt;
   }
 
   private TurnFinalizationReceipt finalizeTurn(
-      ActivityEnvelope envelope,
       IntakeWorkflowCommand command,
       IntakeCommandExecutionContext context,
       GraphExecutionReceipt graph) {
@@ -573,17 +651,23 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
             context.threadId(),
             command.commandId(),
             graph.operation().resultHash());
-    setActivityStage(command, context, IntakeActivityStage.TURN_FINALIZATION, operationKey);
     TurnFinalizationReceipt receipt =
-        activities(context).finalizeTurn(
-            new TurnFinalizationRequest(
-                "intake-turn-finalization-request.v1",
-                envelope,
-                context.threadId(),
-                context.agentSessionId(),
-                graph,
-                operationKey,
-                command.requestHash()));
+        invokeStage(
+            command,
+            context,
+            IntakeActivityStage.TURN_FINALIZATION,
+            operationKey,
+            envelope ->
+                activities(context)
+                    .finalizeTurn(
+                        new TurnFinalizationRequest(
+                            "intake-turn-finalization-request.v1",
+                            envelope,
+                            context.threadId(),
+                            context.agentSessionId(),
+                            graph,
+                            operationKey,
+                            command.requestHash())));
     requireOperation(receipt.operation(), operationKey, command.requestHash());
     if (!graph.operation().resultHash().equals(receipt.operation().resultHash())) {
       throw new IllegalArgumentException("finalization result does not match graph result");
@@ -592,7 +676,6 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
   }
 
   private BranchCommitReceipt executeBranch(
-      ActivityEnvelope envelope,
       IntakeWorkflowCommand command,
       IntakeCommandExecutionContext context) {
     BranchOperation operation = context.branchOperation();
@@ -604,27 +687,41 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
           case RESPONDENT_CONFIRM -> IntakeActivityStage.RESPONDENT_CONFIRMATION;
         };
     String operationKey = branchOperationKey(operation, command);
-    setActivityStage(command, context, stage, operationKey);
-    BranchCommitRequest request =
-        new BranchCommitRequest(
-            "intake-branch-commit-request.v1",
-            envelope,
-            operation,
-            operationKey,
-            command.requestHash());
     BranchCommitReceipt receipt =
-        switch (operation) {
-      case INITIATOR_ACCEPT -> activities(context).acceptInitiator(request);
-      case INITIATOR_REJECT -> activities(context).rejectInitiator(request);
-      case CANCEL -> activities(context).cancelIntake(request);
-      case RESPONDENT_CONFIRM -> activities(context).confirmRespondent(request);
-    };
+        invokeStage(
+            command,
+            context,
+            stage,
+            operationKey,
+            envelope -> {
+              BranchCommitRequest request =
+                  new BranchCommitRequest(
+                      "intake-branch-commit-request.v1",
+                      envelope,
+                      operation,
+                      operationKey,
+                      command.requestHash());
+              BranchCommitReceipt branchReceipt =
+                  switch (operation) {
+                    case INITIATOR_ACCEPT -> activities(context).acceptInitiator(request);
+                    case INITIATOR_REJECT -> activities(context).rejectInitiator(request);
+                    case CANCEL -> activities(context).cancelIntake(request);
+                    case RESPONDENT_CONFIRM -> activities(context).confirmRespondent(request);
+                  };
+              branchReceipt.requireMatches(request);
+              return branchReceipt;
+            });
     requireOperation(receipt.operation(), operationKey, command.requestHash());
+    if (receipt.branchOperation() != operation) {
+      throw new IllegalArgumentException("branch receipt does not match its exact request");
+    }
     return receipt;
   }
 
   private ActivityEnvelope activityEnvelope(
-      IntakeWorkflowCommand command, IntakeCommandExecutionContext context) {
+      IntakeWorkflowCommand command,
+      IntakeCommandExecutionContext context,
+      ActivityInvocation invocation) {
     PinnedVersions versions =
         new PinnedVersions(
             "intake-pinned-versions.v1",
@@ -637,6 +734,12 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
             start.policyVersion(),
             start.guardrailVersion(),
             start.toolPolicyVersion());
+    RetryBudget invocationBudget =
+        new RetryBudget(
+            "intake-retry-budget.v1",
+            context.retryBudget().providerAttemptsRemaining(),
+            invocation.mode() == ActivityInvocationMode.RECONCILE_ONLY ? 0 : 1,
+            context.retryBudget().repairsRemaining());
     return new ActivityEnvelope(
         "intake-activity-envelope.v1",
         command.tenantSurrogate(),
@@ -653,8 +756,9 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
         processRevision,
         roomRevision,
         context.deadlineEpochMillis(),
-        context.retryBudget(),
-        versions);
+        invocationBudget,
+        versions,
+        invocation);
   }
 
   private IntakeRoomActivities activities(IntakeCommandExecutionContext context) {
@@ -672,7 +776,14 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
       IntakeWorkflowCommand command,
       IntakeCommandExecutionContext context,
       IntakeActivityStage stage,
-      String operationKey) {
+      String operationKey,
+      ActivityInvocation invocation) {
+    GraphExecutionReceipt graphReceipt =
+        activityExecution != null
+                && activityExecution.commandId().equals(command.commandId())
+                && activityExecution.completedGraphExecution() != null
+            ? activityExecution.completedGraphExecution()
+            : null;
     activityExecution =
         new IntakeActivityExecutionState(
             "intake-activity-execution-state.v1",
@@ -684,7 +795,114 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
             context.threadId(),
             context.agentSessionId(),
             context.deadlineEpochMillis(),
-            context.retryBudget());
+            new RetryBudget(
+                "intake-retry-budget.v1",
+                context.retryBudget().providerAttemptsRemaining(),
+                invocation.mode() == ActivityInvocationMode.RECONCILE_ONLY ? 0 : 1,
+                context.retryBudget().repairsRemaining()),
+            invocation,
+            graphReceipt);
+  }
+
+  private GraphExecutionReceipt completedGraphFor(
+      IntakeWorkflowCommand command, IntakeCommandExecutionContext context) {
+    if (activityExecution == null
+        || !activityExecution.commandId().equals(command.commandId())
+        || activityExecution.completedGraphExecution() == null) {
+      return null;
+    }
+    GraphExecutionReceipt graph = activityExecution.completedGraphExecution();
+    String expectedKey =
+        IntakeOperationKeys.graphExecute(
+            command.caseId(), command.roomEpoch(), context.threadId(), command.commandId());
+    requireOperation(graph.operation(), expectedKey, command.requestHash());
+    return graph;
+  }
+
+  /** Executes one stable operation at a time while consuming the command-wide retry pool. */
+  private <T> T invokeStage(
+      IntakeWorkflowCommand command,
+      IntakeCommandExecutionContext context,
+      IntakeActivityStage stage,
+      String operationKey,
+      Function<ActivityEnvelope, T> invocation) {
+    while (true) {
+      ActivityInvocation next = nextInvocation(command, context, stage, operationKey);
+      setActivityStage(command, context, stage, operationKey, next);
+      try {
+        T result = invocation.apply(activityEnvelope(command, context, next));
+        if (next.mode() == ActivityInvocationMode.RECONCILE_ONLY
+            && result == null) {
+          throw new IntakeActivityReconciliationMiss();
+        }
+        return result;
+      } catch (CanceledFailure failure) {
+        throw failure;
+      } catch (ActivityFailure failure) {
+        if (failure.getCause() instanceof CanceledFailure || isCancellation(failure)) {
+          throw failure;
+        }
+        if (next.mode() == ActivityInvocationMode.RECONCILE_ONLY) {
+          throw new IntakeActivityReconciliationMiss();
+        }
+        String failureCode = activityFailureCode(failure);
+        if (!IntakeActivityFailureTypes.isRetryable(failureCode)) {
+          activityExecution =
+              activityExecution.withInvocation(
+                  new ActivityInvocation(
+                      "intake-activity-invocation.v1",
+                      ActivityInvocationMode.RECONCILE_ONLY,
+                      0));
+          throw failure;
+        }
+        if (sharedActivityRetriesRemaining > 0) {
+          sharedActivityRetriesRemaining--;
+          activityExecution =
+              activityExecution.withInvocation(
+                  new ActivityInvocation(
+                      "intake-activity-invocation.v1",
+                      ActivityInvocationMode.INFRASTRUCTURE_RETRY,
+                      sharedActivityRetriesRemaining));
+          continue;
+        }
+        // The next invocation may only read the operation ledger/receipt.
+        activityExecution =
+            activityExecution.withInvocation(
+                new ActivityInvocation(
+                    "intake-activity-invocation.v1",
+                    ActivityInvocationMode.RECONCILE_ONLY,
+                    0));
+        continue;
+      } catch (IntakeActivityReconciliationMiss failure) {
+        protocolErrorCode = IntakeActivityFailureTypes.RETRY_BUDGET_EXHAUSTED;
+        throw failure;
+      }
+    }
+  }
+
+  private ActivityInvocation nextInvocation(
+      IntakeWorkflowCommand command,
+      IntakeCommandExecutionContext context,
+      IntakeActivityStage stage,
+      String operationKey) {
+    if (activityExecution != null
+        && activityExecution.commandId().equals(command.commandId())
+        && activityExecution.stage() == stage
+        && activityExecution.stageOperationKey().equals(operationKey)) {
+      ActivityInvocation current = activityExecution.invocation();
+      if (current.mode() == ActivityInvocationMode.RECONCILE_ONLY) {
+        return current;
+      }
+      if (current.mode() == ActivityInvocationMode.INFRASTRUCTURE_RETRY) {
+        return current;
+      }
+    }
+    return new ActivityInvocation(
+        "intake-activity-invocation.v1",
+        activityExecutionAuthorized
+            ? ActivityInvocationMode.FIRST_EXECUTION
+            : ActivityInvocationMode.RECONCILE_ONLY,
+        sharedActivityRetriesRemaining);
   }
 
   private static void requireOperation(
@@ -802,6 +1020,20 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
     };
   }
 
+  private static boolean eventAllowedForActivityStage(
+      IntakeActivityStage stage, IntakeDomainEventType eventType) {
+    return switch (stage) {
+      case SNAPSHOT_PUBLICATION, GRAPH_EXECUTION -> false;
+      case TURN_FINALIZATION ->
+          eventType == IntakeDomainEventType.TURN_NEEDS_INPUT
+              || eventType == IntakeDomainEventType.TURN_READY_TO_CONFIRM;
+      case INITIATOR_ACCEPTANCE -> eventType == IntakeDomainEventType.INITIATOR_ACCEPTED;
+      case INITIATOR_REJECTION -> eventType == IntakeDomainEventType.NOT_ADMISSIBLE;
+      case CANCELLATION -> eventType == IntakeDomainEventType.CANCELLED;
+      case RESPONDENT_CONFIRMATION -> eventType == IntakeDomainEventType.RESPONDENT_CONFIRMED;
+    };
+  }
+
   private boolean applyEvent(IntakeDomainEventRef event) {
     switch (event.eventType()) {
       case TURN_NEEDS_INPUT -> {
@@ -885,22 +1117,28 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
         command.requestHash());
   }
 
-  private void restoreCarryState(IntakeRoomCarryState carry) {
-    if (carry == null && Workflow.getInfo().getContinuedExecutionRunId().isPresent()) {
-      carry =
-          (IntakeRoomCarryState)
-              Workflow.getMemo(CARRY_STATE_MEMO_KEY, IntakeRoomCarryState.class);
-      if (carry == null) {
-        throw new IllegalStateException("continued Intake workflow is missing carry state");
+  private void restoreCarryState() {
+    boolean continued = Workflow.getInfo().getContinuedExecutionRunId().isPresent();
+    IntakeRoomCarryState supplied = start.carryState();
+    if (!continued) {
+      if (supplied != null) {
+        throw new IllegalStateException("initial Intake workflow cannot provide carry state");
       }
-    }
-    if (carry == null) {
       nextCommandSequence = start.firstCommandSequence();
       nextEventSequence = start.firstEventSequence();
       processRevision = start.initialProcessRevision();
       roomRevision = start.initialRoomRevision();
       return;
     }
+    IntakeRoomCarryState memo =
+        (IntakeRoomCarryState) Workflow.getMemo(CARRY_STATE_MEMO_KEY, IntakeRoomCarryState.class);
+    if (memo == null && supplied == null) {
+      throw new IllegalStateException("continued Intake workflow is missing carry state");
+    }
+    if (memo != null && supplied != null && !memo.equals(supplied)) {
+      throw new IllegalStateException("continued Intake carry state conflicts with its memo");
+    }
+    IntakeRoomCarryState carry = supplied != null ? supplied : memo;
     roomPhase = carry.roomPhase();
     activeParty = carry.activeParty();
     nextCommandSequence = carry.nextCommandSequence();
@@ -1041,4 +1279,6 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
   private record EventObservation(IntakeDomainEventRef event, boolean applied) {}
 
   private static final class IntakeActivityDeadlineExceeded extends RuntimeException {}
+
+  private static final class IntakeActivityReconciliationMiss extends RuntimeException {}
 }

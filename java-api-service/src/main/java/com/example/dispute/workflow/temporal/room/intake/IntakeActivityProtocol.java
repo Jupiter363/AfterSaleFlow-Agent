@@ -28,6 +28,35 @@ public final class IntakeActivityProtocol {
     DIFFERENT_OPERATION
   }
 
+  /** Governs whether an Activity may create work or may only read an existing receipt. */
+  public enum ActivityInvocationMode {
+    FIRST_EXECUTION,
+    INFRASTRUCTURE_RETRY,
+    RECONCILE_ONLY
+  }
+
+  /** Deterministic command-wide retry state attached to every stable stage invocation. */
+  public record ActivityInvocation(
+      String schemaVersion,
+      ActivityInvocationMode mode,
+      int sharedRetriesRemaining) {
+
+    public ActivityInvocation {
+      requireSchema(schemaVersion, "intake-activity-invocation.v1");
+      Objects.requireNonNull(mode, "mode must not be null");
+      if (sharedRetriesRemaining < 0 || sharedRetriesRemaining > 2) {
+        throw new IllegalArgumentException("sharedRetriesRemaining must be between 0 and 2");
+      }
+      if (mode == ActivityInvocationMode.RECONCILE_ONLY && sharedRetriesRemaining != 0) {
+        throw new IllegalArgumentException("reconciliation cannot retain an execution retry");
+      }
+    }
+
+    public boolean permitsExecution() {
+      return mode != ActivityInvocationMode.RECONCILE_ONLY;
+    }
+  }
+
   public record RetryBudget(
       String schemaVersion,
       int providerAttemptsRemaining,
@@ -127,7 +156,52 @@ public final class IntakeActivityProtocol {
       long roomRevision,
       long deadlineEpochMillis,
       RetryBudget retryBudget,
-      PinnedVersions pinnedVersions) {
+      PinnedVersions pinnedVersions,
+      ActivityInvocation invocation) {
+
+    public ActivityEnvelope(
+        String schemaVersion,
+        String tenantSurrogate,
+        String caseId,
+        long roomEpoch,
+        long fencingToken,
+        String commandId,
+        long commandSequence,
+        IntakeCommandType commandType,
+        IntakeParty party,
+        String actorScopeHash,
+        String commandPayloadRef,
+        String commandPayloadHash,
+        long processRevision,
+        long roomRevision,
+        long deadlineEpochMillis,
+        RetryBudget retryBudget,
+        PinnedVersions pinnedVersions) {
+      this(
+          schemaVersion,
+          tenantSurrogate,
+          caseId,
+          roomEpoch,
+          fencingToken,
+          commandId,
+          commandSequence,
+          commandType,
+          party,
+          actorScopeHash,
+          commandPayloadRef,
+          commandPayloadHash,
+          processRevision,
+          roomRevision,
+          deadlineEpochMillis,
+          invocationBudget(retryBudget),
+          pinnedVersions,
+          new ActivityInvocation(
+              "intake-activity-invocation.v1",
+              retryBudget.activityAttemptsRemaining() == 0
+                  ? ActivityInvocationMode.RECONCILE_ONLY
+                  : ActivityInvocationMode.FIRST_EXECUTION,
+              Math.max(0, retryBudget.activityAttemptsRemaining() - 1)));
+    }
 
     public ActivityEnvelope {
       requireSchema(schemaVersion, "intake-activity-envelope.v1");
@@ -146,9 +220,18 @@ public final class IntakeActivityProtocol {
         throw new IllegalArgumentException(
             "epoch, fence, sequence, revisions, and deadline must be valid");
       }
-      if (commandType == null || party == null || retryBudget == null || pinnedVersions == null) {
+      if (commandType == null
+          || party == null
+          || retryBudget == null
+          || pinnedVersions == null
+          || invocation == null) {
         throw new IllegalArgumentException(
-            "commandType, party, retryBudget, and pinnedVersions must not be null");
+            "commandType, party, retryBudget, pinnedVersions, and invocation must not be null");
+      }
+      int expectedAttempts = invocation.permitsExecution() ? 1 : 0;
+      if (retryBudget.activityAttemptsRemaining() != expectedAttempts) {
+        throw new IllegalArgumentException(
+            "Activity retry budget must match the explicit invocation mode");
       }
     }
   }
@@ -423,13 +506,31 @@ public final class IntakeActivityProtocol {
         throw new IllegalArgumentException(
             branchOperation + " requires committed event type " + expected);
       }
+      requireOperationPrefix(operation, branchOperationPrefix(branchOperation));
       requireOperationEventBinding(operation, committedEvent);
+    }
+
+    public void requireMatches(BranchCommitRequest request) {
+      Objects.requireNonNull(request, "request must not be null");
+      if (branchOperation != request.operation()
+          || !operation.operationKey().equals(request.operationKey())
+          || !operation.requestHash().equals(request.requestHash())
+          || !committedEvent.commandId().equals(request.envelope().commandId())
+          || !committedEvent.tenantSurrogate().equals(request.envelope().tenantSurrogate())
+          || !committedEvent.caseId().equals(request.envelope().caseId())
+          || committedEvent.roomEpoch() != request.envelope().roomEpoch()
+          || committedEvent.fencingToken() != request.envelope().fencingToken()
+          || committedEvent.party() != request.envelope().party()
+          || !committedEvent.actorScopeHash().equals(request.envelope().actorScopeHash())) {
+        throw new IllegalArgumentException("branch receipt does not match its exact request");
+      }
     }
   }
 
   public static List<Class<?>> payloadTypes() {
     return List.of(
         RetryBudget.class,
+        ActivityInvocation.class,
         PinnedVersions.class,
         ImmutablePayloadRef.class,
         ActivityEnvelope.class,
@@ -480,6 +581,15 @@ public final class IntakeActivityProtocol {
     if (!expected.equals(actual)) {
       throw new IllegalArgumentException("schemaVersion must be " + expected);
     }
+  }
+
+  private static RetryBudget invocationBudget(RetryBudget source) {
+    Objects.requireNonNull(source, "retryBudget must not be null");
+    return new RetryBudget(
+        source.schemaVersion(),
+        source.providerAttemptsRemaining(),
+        source.activityAttemptsRemaining() == 0 ? 0 : 1,
+        source.repairsRemaining());
   }
 
   private static void requireEnvelope(ActivityEnvelope envelope) {
@@ -597,6 +707,15 @@ public final class IntakeActivityProtocol {
       case INITIATOR_REJECT -> IntakeDomainEventType.NOT_ADMISSIBLE;
       case CANCEL -> IntakeDomainEventType.CANCELLED;
       case RESPONDENT_CONFIRM -> IntakeDomainEventType.RESPONDENT_CONFIRMED;
+    };
+  }
+
+  private static String branchOperationPrefix(BranchOperation operation) {
+    return switch (operation) {
+      case INITIATOR_ACCEPT -> "intake.initiator.accept:";
+      case INITIATOR_REJECT -> "intake.initiator.reject:";
+      case CANCEL -> "intake.cancel:";
+      case RESPONDENT_CONFIRM -> "intake.respondent.confirm:";
     };
   }
 

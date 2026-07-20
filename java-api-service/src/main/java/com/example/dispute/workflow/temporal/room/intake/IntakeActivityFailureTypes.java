@@ -10,10 +10,19 @@ public final class IntakeActivityFailureTypes {
   public static final String STALE_REVISION = "INTAKE_STALE_REVISION";
   public static final String STALE_FENCE = "INTAKE_STALE_FENCE";
   public static final String GUARDRAIL = "INTAKE_GUARDRAIL_REJECTED";
+  public static final String RETRY_BUDGET_EXHAUSTED =
+      "INTAKE_ACTIVITY_RETRY_BUDGET_EXHAUSTED";
   public static final String INFRASTRUCTURE_RETRYABLE = "INTAKE_INFRASTRUCTURE_RETRYABLE";
 
   private static final Set<String> KNOWN_NON_RETRYABLE =
-      Set.of(BUSINESS, AUTHORIZATION, SCHEMA, STALE_REVISION, STALE_FENCE, GUARDRAIL);
+      Set.of(
+          BUSINESS,
+          AUTHORIZATION,
+          SCHEMA,
+          STALE_REVISION,
+          STALE_FENCE,
+          GUARDRAIL,
+          RETRY_BUDGET_EXHAUSTED);
 
   private IntakeActivityFailureTypes() {}
 
