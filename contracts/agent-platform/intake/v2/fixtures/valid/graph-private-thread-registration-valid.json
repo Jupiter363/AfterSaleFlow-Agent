@@ -1,0 +1,30 @@
+{
+  "schema_version": "graph-private-thread-registration.v1",
+  "registration_id": "REG_P4_INTAKE_USER_1",
+  "tenant_surrogate": "tenant-synthetic",
+  "case_id": "CASE_P4_SYNTHETIC_1",
+  "room_type": "INTAKE",
+  "room_epoch": 1,
+  "thread_id": "grt.v1.018f6b7ec30a7430982fffc520c8195c",
+  "actor_scope": {
+    "actor_id": "user-synthetic",
+    "actor_role": "USER",
+    "audience": "USER",
+    "capabilities": ["graph.command.execute"]
+  },
+  "actor_scope_hash": "52f01901287fe5e5465ddcd7d7baf9074aa77e3d88a64da747bf1f530916a5d2",
+  "agent_session_id": "AGENT_SESSION_P4_USER_1",
+  "graph_key": "intake.v2",
+  "graph_version": "2.0.0",
+  "checkpoint_schema_version": "intake-checkpoint.v2",
+  "state_schema_version": "intake-graph-state.v2",
+  "prompt_version": "intake-prompt.v2",
+  "model_profile_id": "intake-model.synthetic.v1",
+  "output_schema_version": "intake-turn-proposal.v2",
+  "policy_version": "intake-policy.v2",
+  "guardrail_version": "intake-guardrail.v2",
+  "tool_policy_version": "no-tools.v1",
+  "writer_mode": "SHADOW",
+  "issued_at": "2026-07-20T08:00:00Z",
+  "registration_hash": "d4cdcf3fa79c2e00a7c46799eb9682277a33ca2d9c9c5b09eea71ee80fdbca79"
+}

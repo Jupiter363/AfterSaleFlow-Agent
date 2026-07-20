@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.after-sale-flow.example/agent-platform/intake/v2/intake-domain-snapshot.schema.json",
+  "title": "Intake Domain Snapshot v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "snapshot_id", "tenant_surrogate", "case_id", "room_type",
+    "room_epoch", "thread_id", "actor_scope_hash", "agent_session_id", "domain_revision",
+    "room_revision", "projection_revision", "visibility", "source_refs",
+    "initial_case_facts", "shareable_projection", "own_messages", "current_dossier",
+    "created_at", "snapshot_hash"
+  ],
+  "properties": {
+    "schema_version": {"const": "intake-domain-snapshot.v2"},
+    "snapshot_id": {"$ref": "#/$defs/identifier"},
+    "tenant_surrogate": {"$ref": "#/$defs/identifier"},
+    "case_id": {"$ref": "#/$defs/identifier"},
+    "room_type": {"const": "INTAKE"},
+    "room_epoch": {"type": "integer", "minimum": 0},
+    "thread_id": {"$ref": "#/$defs/thread_id"},
+    "actor_scope_hash": {"$ref": "#/$defs/sha256"},
+    "agent_session_id": {"$ref": "#/$defs/identifier"},
+    "domain_revision": {"type": "integer", "minimum": 0},
+    "room_revision": {"type": "integer", "minimum": 0},
+    "projection_revision": {"type": "integer", "minimum": 0},
+    "visibility": {"const": "PRIVATE"},
+    "source_refs": {
+      "type": "array", "minItems": 1, "maxItems": 128, "uniqueItems": true,
+      "items": {"$ref": "#/$defs/identifier"}
+    },
+    "initial_case_facts": {"$ref": "#/$defs/bounded_object"},
+    "shareable_projection": {"$ref": "#/$defs/bounded_object"},
+    "own_messages": {
+      "type": "array", "maxItems": 6,
+      "items": {"$ref": "#/$defs/message"}
+    },
+    "current_dossier": {"$ref": "#/$defs/bounded_object"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "snapshot_hash": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string", "minLength": 1, "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "thread_id": {"type": "string", "pattern": "^grt\\.v1\\.[0-9a-f]{32}$"},
+    "bounded_object": {
+      "type": "object",
+      "maxProperties": 64,
+      "propertyNames": {"not": {"$ref": "#/$defs/forbidden_key"}},
+      "additionalProperties": {"$ref": "#/$defs/safe_json"}
+    },
+    "safe_json": {
+      "oneOf": [
+        {"type": "string", "maxLength": 20000},
+        {"type": "number"},
+        {"type": "boolean"},
+        {"type": "null"},
+        {
+          "type": "array",
+          "maxItems": 128,
+          "items": {"$ref": "#/$defs/safe_json"}
+        },
+        {"$ref": "#/$defs/bounded_object"}
+      ]
+    },
+    "forbidden_key": {
+      "enum": [
+        "memory_frame", "internal_handoff", "handoff_notes", "hidden_reasoning",
+        "chain_of_thought", "tool_calls", "tool_parameters", "open_evidence",
+        "complete_party", "send_summons", "execute_tool"
+      ]
+    },
+    "message": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["message_id", "role", "audience", "sequence", "text", "source_hash"],
+      "properties": {
+        "message_id": {"$ref": "#/$defs/identifier"},
+        "role": {"enum": ["HUMAN", "AI"]},
+        "audience": {"enum": ["USER", "MERCHANT"]},
+        "sequence": {"type": "integer", "minimum": 0},
+        "text": {"type": "string", "maxLength": 8192},
+        "source_hash": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "schema_version": "intake-turn-proposal.v2",
+  "command_id": "COMMAND_P4_USER_2",
+  "logical_run_id": "RUN_P4_USER_2",
+  "attempt_id": "ATTEMPT_P4_USER_2_1",
+  "case_id": "CASE_P4_SYNTHETIC_1",
+  "room_epoch": 1,
+  "thread_id": "grt.v1.018f6b7ec30a7430982fffc520c8195c",
+  "actor_scope_hash": "52f01901287fe5e5465ddcd7d7baf9074aa77e3d88a64da747bf1f530916a5d2",
+  "agent_session_id": "AGENT_SESSION_P4_USER_1",
+  "cognitive_revision": 2,
+  "source_snapshot_hash": "7deb1aa13efc125244aa0e122b6e02dc4343f97afc0423c94a00308b217fea0d",
+  "source_event_hash": "5da4ebd5b5ff75ea8af5c955c01f2cf18138892d07ad6ca74be7c7fb50ff5815",
+  "room_utterance": "Please confirm the requested resolution before submission.",
+  "dossier_patch": {
+    "schema_version": "intake-dossier.v2",
+    "case_story": {"one_sentence_summary": "Synthetic damaged-order dispute."},
+    "requested_resolution": {"kind": "REFUND"}
+  },
+  "matrix_patch": null,
+  "readiness": "INCOMPLETE",
+  "missing_fields": ["requested_resolution_detail"],
+  "recommendation": "NEED_MORE_INFO",
+  "knowledge_answer_mode": "NONE",
+  "confidence": 0.82,
+  "profile_versions": {
+    "graph_version": "2.0.0",
+    "checkpoint_schema_version": "intake-checkpoint.v2",
+    "prompt_version": "intake-prompt.v2",
+    "model_profile_id": "intake-model.synthetic.v1",
+    "output_schema_version": "intake-turn-proposal.v2",
+    "policy_version": "intake-policy.v2",
+    "guardrail_version": "intake-guardrail.v2",
+    "tool_policy_version": "no-tools.v1"
+  },
+  "proposal_hash": "ef2b73e230b41ee1efe44f05edc7e3e569d53ddbac46d887160e63e0a6921e39"
+}

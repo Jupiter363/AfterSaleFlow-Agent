@@ -61,7 +61,9 @@ class Mig001ScenarioServiceTest {
         tupleReader = new Mig001ScenarioTupleReader(
                 caseRepository, projectionRepository, epochRepository, bootstrapRepository);
         service = new Mig001ScenarioService(
-                new OrchestrationCutoverProperties(WriterMode.SHADOW), importService, tupleReader);
+                new OrchestrationCutoverProperties(WriterMode.SHADOW, false, false),
+                importService,
+                tupleReader);
     }
 
     @Test
@@ -104,7 +106,9 @@ class Mig001ScenarioServiceTest {
     @Test
     void rejectsNonShadowModeNonSystemAndUnboundCases() {
         assertThatThrownBy(() -> new Mig001ScenarioService(
-                new OrchestrationCutoverProperties(WriterMode.TEMPORAL), importService, tupleReader))
+                new OrchestrationCutoverProperties(WriterMode.TEMPORAL, false, false),
+                importService,
+                tupleReader))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("new-epoch-mode=SHADOW");
         assertThatThrownBy(() -> service.status(
@@ -145,21 +149,21 @@ class Mig001ScenarioServiceTest {
                 .withBean(Mig001ScenarioTupleReader.class, () -> tupleReader);
 
         runner.withBean(OrchestrationCutoverProperties.class,
-                        () -> new OrchestrationCutoverProperties(WriterMode.SHADOW))
+                        () -> new OrchestrationCutoverProperties(WriterMode.SHADOW, false, false))
                 .run(context -> assertThat(context).doesNotHaveBean(Mig001ScenarioService.class));
         runner.withPropertyValues("spring.profiles.active=mig001-driver")
                 .withBean(OrchestrationCutoverProperties.class,
-                        () -> new OrchestrationCutoverProperties(WriterMode.SHADOW))
+                        () -> new OrchestrationCutoverProperties(WriterMode.SHADOW, false, false))
                 .run(context -> assertThat(context).doesNotHaveBean(Mig001ScenarioService.class));
         runner.withPropertyValues("spring.profiles.active=mig001-driver",
                         "app.orchestration.mig001-driver-enabled=true")
                 .withBean(OrchestrationCutoverProperties.class,
-                        () -> new OrchestrationCutoverProperties(WriterMode.SHADOW))
+                        () -> new OrchestrationCutoverProperties(WriterMode.SHADOW, false, false))
                 .run(context -> assertThat(context).hasSingleBean(Mig001ScenarioService.class));
         runner.withPropertyValues("spring.profiles.active=mig001-driver",
                         "app.orchestration.mig001-driver-enabled=true")
                 .withBean(OrchestrationCutoverProperties.class,
-                        () -> new OrchestrationCutoverProperties(WriterMode.LEGACY))
+                        () -> new OrchestrationCutoverProperties(WriterMode.LEGACY, false, false))
                 .run(context -> assertThat(context.getStartupFailure()).isNotNull());
     }
 

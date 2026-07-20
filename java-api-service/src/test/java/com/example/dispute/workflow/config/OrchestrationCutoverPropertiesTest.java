@@ -20,6 +20,16 @@ class OrchestrationCutoverPropertiesTest {
                     assertThat(context).hasNotFailed();
                     assertThat(context.getBean(OrchestrationCutoverProperties.class).newEpochMode())
                             .isEqualTo(WriterMode.LEGACY);
+                    assertThat(
+                                    context
+                                            .getBean(OrchestrationCutoverProperties.class)
+                                            .nonLegacyEpochAllocationEnabled())
+                            .isFalse();
+                    assertThat(
+                                    context
+                                            .getBean(OrchestrationCutoverProperties.class)
+                                            .temporalWriterEnabled())
+                            .isFalse();
                 });
     }
 
@@ -49,6 +59,38 @@ class OrchestrationCutoverPropertiesTest {
                             assertThat(context.getStartupFailure())
                                     .rootCause()
                                     .hasMessageContaining("DUAL_WRITE");
+                        });
+    }
+
+    @Test
+    void bindsTheTwoIndependentNonLegacyActivationLocks() {
+        contextRunner
+                .withPropertyValues(
+                        "app.orchestration.new-epoch-mode=TEMPORAL",
+                        "app.orchestration.non-legacy-epoch-allocation-enabled=true",
+                        "app.orchestration.temporal-writer-enabled=true")
+                .run(
+                        context -> {
+                            assertThat(context).hasNotFailed();
+                            OrchestrationCutoverProperties properties =
+                                    context.getBean(OrchestrationCutoverProperties.class);
+                            assertThat(properties.newEpochMode()).isEqualTo(WriterMode.TEMPORAL);
+                            assertThat(properties.nonLegacyEpochAllocationEnabled()).isTrue();
+                            assertThat(properties.temporalWriterEnabled()).isTrue();
+                        });
+    }
+
+    @Test
+    void rejectsTemporalActivationWithoutTheNonLegacyLock() {
+        contextRunner
+                .withPropertyValues("app.orchestration.temporal-writer-enabled=true")
+                .run(
+                        context -> {
+                            assertThat(context).hasFailed();
+                            assertThat(context.getStartupFailure())
+                                    .rootCause()
+                                    .hasMessageContaining(
+                                            "temporalWriterEnabled requires nonLegacyEpochAllocationEnabled");
                         });
     }
 

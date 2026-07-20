@@ -1,0 +1,23 @@
+{
+  "schema_version": "room-epoch-selection.v2",
+  "room_type": "EVIDENCE",
+  "writer_mode": "TEMPORAL",
+  "case_workflow_type": "CaseProcessWorkflow",
+  "case_workflow_build_id": "after-sale-control.local-dev",
+  "room_workflow_type": "EvidenceRoomWorkflow",
+  "room_workflow_build_id": "evidence-room.forbidden.v1",
+  "process_contract_version": "case-process-contract.v1",
+  "graph_key": "evidence.v2",
+  "graph_version": "2.0.0",
+  "checkpoint_schema_version": "evidence-checkpoint.v2",
+  "state_schema_version": "evidence-graph-state.v2",
+  "stream_protocol": "agent-stream.v2",
+  "prompt_version": "evidence-prompt.v2",
+  "model_profile_id": "evidence-model.synthetic.v1",
+  "output_schema_version": "evidence-result.v2",
+  "policy_version": "evidence-policy.v2",
+  "guardrail_version": "evidence-guardrail.v2",
+  "tool_policy_version": "no-tools.v1",
+  "cohort_policy_version": "global-temporal.forbidden.v1",
+  "selection_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+}

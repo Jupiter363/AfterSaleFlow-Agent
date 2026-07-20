@@ -1,0 +1,20 @@
+{
+  "schema_version": "intake-turn-event.v2",
+  "event_id": "EVENT_P4_USER_2",
+  "message_id": "MESSAGE_P4_USER_2",
+  "tenant_surrogate": "tenant-synthetic",
+  "case_id": "CASE_P4_SYNTHETIC_1",
+  "room_type": "INTAKE",
+  "room_epoch": 1,
+  "thread_id": "grt.v1.018f6b7ec30a7430982fffc520c8195c",
+  "actor_scope_hash": "52f01901287fe5e5465ddcd7d7baf9074aa77e3d88a64da747bf1f530916a5d2",
+  "agent_session_id": "AGENT_SESSION_P4_USER_1",
+  "sequence_no": 2,
+  "domain_revision": 5,
+  "audience": "USER",
+  "source_type": "ROOM_MESSAGE",
+  "text": "The package photo is referenced by MESSAGE_P4_USER_2.",
+  "source_refs": ["MESSAGE_P4_USER_2"],
+  "occurred_at": "2026-07-20T08:02:00Z",
+  "event_hash": "5da4ebd5b5ff75ea8af5c955c01f2cf18138892d07ad6ca74be7c7fb50ff5815"
+}

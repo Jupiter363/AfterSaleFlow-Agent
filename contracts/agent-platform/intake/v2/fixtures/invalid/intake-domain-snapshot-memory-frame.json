@@ -1,0 +1,23 @@
+{
+  "schema_version": "intake-domain-snapshot.v2",
+  "snapshot_id": "SNAPSHOT_P4_BAD_MEMORY",
+  "tenant_surrogate": "tenant-synthetic",
+  "case_id": "CASE_P4_SYNTHETIC_1",
+  "room_type": "INTAKE",
+  "room_epoch": 1,
+  "thread_id": "grt.v1.018f6b7ec30a7430982fffc520c8195c",
+  "actor_scope_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "agent_session_id": "AGENT_SESSION_P4_USER_1",
+  "domain_revision": 4,
+  "room_revision": 2,
+  "projection_revision": 4,
+  "visibility": "PRIVATE",
+  "source_refs": ["MESSAGE_P4_USER_1"],
+  "initial_case_facts": {},
+  "shareable_projection": {},
+  "own_messages": [],
+  "current_dossier": {},
+  "memory_frame": {"private": "must-not-cross"},
+  "created_at": "2026-07-20T08:01:00Z",
+  "snapshot_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+}

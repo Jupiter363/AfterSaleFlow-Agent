@@ -106,6 +106,8 @@ app:
   orchestration:
     command-v1-enabled: ${APP_ORCHESTRATION_COMMAND_V1_ENABLED:false}
     new-epoch-mode: ${APP_ORCHESTRATION_NEW_EPOCH_MODE:LEGACY}
+    non-legacy-epoch-allocation-enabled: ${APP_ORCHESTRATION_NON_LEGACY_EPOCH_ALLOCATION_ENABLED:false}
+    temporal-writer-enabled: ${APP_ORCHESTRATION_TEMPORAL_WRITER_ENABLED:false}
     command-outbox:
       enabled: ${APP_ORCHESTRATION_COMMAND_OUTBOX_ENABLED:false}
       batch-size: ${APP_ORCHESTRATION_COMMAND_OUTBOX_BATCH_SIZE:32}

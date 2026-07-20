@@ -544,6 +544,16 @@ Python 任意副本可恢复；`MIG-003=PASS`。
 
 ### 7.5 Phase 4: Intake pilot (`MIG-004`)
 
+Phase 4 engineering execution is governed by
+[`Phase 4 Intake Pilot Execution Plan`](./phase-4-intake-pilot-execution.md), its
+[`test batch matrix`](./phase-4-intake-pilot-test-batches.yaml), the
+[`P4.0 contract pack`](../docs/runbooks/temporal-first/phase-4-p4.0-contract-pack.md), and
+[`ADR 0011`](../docs/architecture/adr/0011-phase-4-intake-engineering-exception.md). The logical
+team is one primary plus five delegated implementation owners executed in two waves when only three
+child slots are available. Engineering starts only after the separate P4.0 entry-evidence commit;
+the current exception permits only `DISABLED` or signed synthetic `SHADOW` and does not satisfy the
+formal `MIG-003=PASS` migration condition below.
+
 **目标**：以接待室作为第一个正式 canary，把双方私有 cognitive thread 迁到 `intake.v2`，外部 party wait 和
 受理后的房间推进交给 Temporal；Java 继续唯一写消息、接待完成和矩阵 Artifact。
 **非目标**：不迁移证据/庭审；不把 Java 历史 `memory_frame` 当成新 Graph 的权威 checkpoint。

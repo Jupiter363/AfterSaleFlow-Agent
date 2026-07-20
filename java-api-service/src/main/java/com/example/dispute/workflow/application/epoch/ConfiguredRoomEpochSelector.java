@@ -31,6 +31,7 @@ public final class ConfiguredRoomEpochSelector implements RoomEpochSelector {
     @Override
     public RoomEpochSelection selectForNewEpoch(RoomType roomType) {
         WriterMode writerMode = cutoverProperties.newEpochMode();
+        requireAllocationEnabled(writerMode);
         boolean legacy = writerMode == WriterMode.LEGACY;
         return new RoomEpochSelection(
                 writerMode,
@@ -44,6 +45,18 @@ public final class ConfiguredRoomEpochSelector implements RoomEpochSelector {
                 GRAPH_VERSION,
                 CHECKPOINT_SCHEMA_VERSION,
                 STREAM_PROTOCOL);
+    }
+
+    private void requireAllocationEnabled(WriterMode writerMode) {
+        if (writerMode != WriterMode.LEGACY
+                && !cutoverProperties.nonLegacyEpochAllocationEnabled()) {
+            throw new IllegalStateException(
+                    "non-LEGACY room epoch allocation is disabled");
+        }
+        if (writerMode == WriterMode.TEMPORAL
+                && !cutoverProperties.temporalWriterEnabled()) {
+            throw new IllegalStateException("TEMPORAL room writer activation is disabled");
+        }
     }
 
     public static RoomEpochSelection terminalLegacySelection(RoomType roomType) {

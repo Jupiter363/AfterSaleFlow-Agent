@@ -1,0 +1,35 @@
+schema_version: intake-contract-compatibility.v1
+contracts:
+  room-epoch-selection.v2:
+    current: room-epoch-selection.v2
+    accepts: [room-epoch-selection.v2]
+    legacy_reader: room-epoch-selection.v1
+    rejects_unknown_future: true
+  graph-private-thread-registration.v1:
+    current: graph-private-thread-registration.v1
+    accepts: [graph-private-thread-registration.v1]
+    rejects_unknown_future: true
+  intake-domain-snapshot.v2:
+    current: intake-domain-snapshot.v2
+    accepts: [intake-domain-snapshot.v2]
+    rejects_unknown_future: true
+  intake-turn-event.v2:
+    current: intake-turn-event.v2
+    accepts: [intake-turn-event.v2]
+    rejects_unknown_future: true
+  intake-turn-proposal.v2:
+    current: intake-turn-proposal.v2
+    accepts: [intake-turn-proposal.v2]
+    rejects_unknown_future: true
+  intake-finalization-receipt.v1:
+    current: intake-finalization-receipt.v1
+    accepts: [intake-finalization-receipt.v1]
+    rejects_unknown_future: true
+rules:
+  unknown_fields: reject
+  missing_required_fields: reject
+  self_hash_preimage: omit_top_level_self_hash_member
+  canonicalization: RFC_8785
+  digest: SHA_256
+  additive_optional_fields: require_new_schema_version
+  authority_field_changes: require_new_schema_version_and_ADR

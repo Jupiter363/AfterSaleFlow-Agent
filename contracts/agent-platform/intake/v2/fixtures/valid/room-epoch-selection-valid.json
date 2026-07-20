@@ -1,0 +1,23 @@
+{
+  "schema_version": "room-epoch-selection.v2",
+  "room_type": "INTAKE",
+  "writer_mode": "SHADOW",
+  "case_workflow_type": "CaseProcessWorkflow",
+  "case_workflow_build_id": "after-sale-control.local-dev",
+  "room_workflow_type": "IntakeRoomWorkflow",
+  "room_workflow_build_id": "intake-room.synthetic.v1",
+  "process_contract_version": "case-process-contract.v1",
+  "graph_key": "intake.v2",
+  "graph_version": "2.0.0",
+  "checkpoint_schema_version": "intake-checkpoint.v2",
+  "state_schema_version": "intake-graph-state.v2",
+  "stream_protocol": "agent-stream.v2",
+  "prompt_version": "intake-prompt.v2",
+  "model_profile_id": "intake-model.synthetic.v1",
+  "output_schema_version": "intake-turn-proposal.v2",
+  "policy_version": "intake-policy.v2",
+  "guardrail_version": "intake-guardrail.v2",
+  "tool_policy_version": "no-tools.v1",
+  "cohort_policy_version": "intake-cohort.disabled.v1",
+  "selection_hash": "2bccecb2ba0d0d69ffad60581bc04653d81be293652338782ffb6e14c0ed318a"
+}

@@ -1,0 +1,909 @@
+schema_version: phase-test-batches.v1
+phase: 4
+name: intake-pilot-engineering-shadow
+
+gate:
+  contract_gate: P4.0
+  required_entry: PHASE_3_ENGINEERING_CHECKPOINT
+  observed_entry_state:
+    engineering_checkpoint: PASS
+    promotion_gate: PENDING
+    next_phase_permission: PHASE_4_ENGINEERING_ONLY
+    MIG-003: PENDING_PROMOTION
+  entry_decision: ENGINEERING_ONLY
+  implementation_allowed_when:
+    - P4_0_CONTRACT_GATE_COMMITTED
+    - P4_0_BATCH_0_PASSED_ON_EXACT_CONTRACT_CANDIDATE_SHA
+    - P4_0_ENTRY_EVIDENCE_COMMITTED
+    - PHASE_3_ENGINEERING_CHECKPOINT_PASS
+    - PHASE_4_ENGINEERING_ONLY_PERMISSION_RECORDED
+  runtime_modes_allowed: [DISABLED, SIGNED_SYNTHETIC_SHADOW]
+  traffic_constraints:
+    formal_room_writer_allowed: false
+    temporal_intake_writer_allowed: false
+    real_case_shadow_allowed: false
+    production_traffic_allowed: false
+    canary_allowed: false
+    promotion_allowed: false
+    synthetic_fixtures_only: true
+  invariants:
+    - Java remains the only formal business writer.
+    - Python has no Domain DB credentials or formal side-effect capability.
+    - Graph results remain proposals and cannot advance a room.
+    - Existing formal intake traffic remains on the legacy writer.
+    - MIG-004 cannot become PASS while MIG-003 is PENDING_PROMOTION.
+  gate_change_policy:
+    - A later MIG-003 approval does not implicitly relax this matrix.
+    - Formal traffic requires an explicit amended gate and a new candidate checkpoint.
+
+resources:
+  active_primary_agents: 1
+  logical_child_owners: 5
+  max_active_child_agents: 3
+  max_active_agents_total: 4
+  execution_waves: 2
+  heavy_test_slots: 1
+  light_test_slots: 2
+  pytest_db_workers: 1
+  maven_fork_count: 1
+  frontend_max_workers: 2
+  docker_compose_owner: primary
+  temporal_test_environment_owner: primary
+  candidate_checkpoint_owner: primary
+  heavy_resources:
+    - maven_test
+    - spring_context
+    - postgresql
+    - testcontainers
+    - temporal_test_server
+    - docker_compose
+    - frontend_build
+    - browser_or_playwright
+    - repository_full_regression
+  child_forbidden_commands:
+    - java_full_suite
+    - python_full_suite
+    - docker_compose_up_or_build
+    - frontend_production_build
+    - browser_or_playwright_suite
+    - repository_full_regression
+
+test_token:
+  required_for:
+    - maven_test
+    - spring_context
+    - postgresql
+    - testcontainers
+    - temporal_test_server
+    - docker_compose
+    - browser_or_playwright
+  request_fields: [task_id, command, expected_duration, resource_class]
+  grantor: primary
+  max_heavy_tokens: 1
+
+tiers:
+  T0:
+    owner: delegated_agent
+    max_duration_seconds: 180
+    services: none
+    purpose: syntax, schema, import boundary, pure graph, workflow, domain, and UI unit checks
+  T1:
+    owner: primary
+    trigger: wave_1_merged
+    purpose: deduplicated signed-synthetic minimum-chain and foundation checks
+  T2:
+    owner: primary
+    trigger: wave_2_merged
+    purpose: PostgreSQL, Temporal time-skipping, recovery, projection, stream, and UI integration
+  T3:
+    owner: primary
+    trigger: explicit_unified_verification_checkpoint_only
+    automatic: false
+    purpose: full repository, browser E2E, real canary, load, soak, DR, and production-equivalent validation
+
+baseline_ids:
+  intake: [INT-001, INT-002, INT-003, INT-004, INT-005, INT-006, INT-007, INT-008, INT-009, INT-010]
+  overview: [OVR-003]
+  recovery_stream_history: [CORE-004, CORE-005, CORE-006, CORE-007, CORE-008, CORE-009, CORE-010]
+  security: [SEC-001, SEC-002, SEC-003, SEC-004, SEC-005, SEC-006]
+  ui: [UI-001, UI-003, UI-004]
+
+check_ids:
+  room_intake: [ROOM-INTAKE-001, ROOM-INTAKE-002, ROOM-INTAKE-003, ROOM-INTAKE-004]
+  graph: [GRAPH-007, GRAPH-008, GRAPH-020, GRAPH-021, GRAPH-022]
+  temporal: [TEMP-020, TEMP-021, TEMP-022, TEMP-023]
+  java: [JAVA-007, JAVA-008, JAVA-009, JAVA-010, JAVA-011]
+  migration: [MIG-004]
+
+supporting_regression_check_ids:
+  lcel: [LCEL-001, LCEL-002, LCEL-004, LCEL-005, LCEL-006, LCEL-007, LCEL-008, LCEL-010, LCEL-012, LCEL-014]
+  contract: [CONTRACT-003, CONTRACT-004, CONTRACT-005, CONTRACT-006, CONTRACT-007, CONTRACT-012, CONTRACT-013]
+
+claim_status_policy:
+  PASS_ENGINEERING:
+    - ROOM-INTAKE-001
+    - ROOM-INTAKE-002
+    - ROOM-INTAKE-003
+    - ROOM-INTAKE-004
+    - GRAPH-007
+    - GRAPH-008
+    - GRAPH-020
+    - GRAPH-021
+    - GRAPH-022
+    - TEMP-021
+    - TEMP-022
+    - JAVA-007
+    - JAVA-008
+    - JAVA-009
+    - JAVA-010
+    - JAVA-011
+  PARTIAL_ENGINEERING:
+    TEMP-020: Intake has no product deadline; prove durable waiting and no implicit timeout without claiming the Evidence reminder/deadline requirement.
+    TEMP-023: synthetic worker-kill and replay evidence is engineering support; production-equivalent worker topology remains external.
+  PENDING_PROMOTION:
+    MIG-004: real shadow, privacy scan, formal writer cutover, and cohort observation are forbidden under the current gate.
+
+agents:
+  A:
+    role: Intake Graph and governed LCEL
+    tasks: [P4-A1, P4-A2]
+    slices: [P4-S1, P4-S3, P4-S5]
+    test_routes:
+      - python-agent-service/tests/graphs/intake/**
+      - python-agent-service/tests/agents/test_intake_*.py
+      - python-agent-service/tests/graph_runtime/**/test_*intake*.py
+    change_routes:
+      - python-agent-service/app/graphs/intake/**
+      - python-agent-service/app/agents/dispute_intake_officer/workflow.py
+      - python-agent-service/tests/graphs/intake/test_state.py
+      - python-agent-service/tests/graphs/intake/test_nodes.py
+      - python-agent-service/tests/graphs/intake/test_graph.py
+      - python-agent-service/tests/graphs/intake/test_validators.py
+      - python-agent-service/tests/graphs/intake/test_lcel.py
+      - python-agent-service/tests/graphs/intake/test_snapshot_import.py
+      - python-agent-service/tests/agents/test_intake_*.py
+      - python-agent-service/tests/graph_runtime/**/test_*intake*.py
+    primary_check_ids: [GRAPH-007, GRAPH-008, GRAPH-020, GRAPH-021, GRAPH-022, ROOM-INTAKE-003]
+    supporting_baseline_ids: [INT-001, INT-005, INT-008, INT-009, INT-010, SEC-004, SEC-005, SEC-006]
+
+  B:
+    role: Temporal Intake process
+    tasks: [P4-B1, P4-B2]
+    slices: [P4-S1, P4-S2, P4-S3, P4-S5]
+    test_routes:
+      - java-api-service/src/test/java/com/example/dispute/workflow/room/intake/**
+      - java-api-service/src/test/java/com/example/dispute/workflow/recovery/*Intake*
+    change_routes:
+      - java-api-service/src/main/java/com/example/dispute/workflow/temporal/room/intake/**
+      - java-api-service/src/test/java/com/example/dispute/workflow/room/intake/**
+    primary_check_ids: [TEMP-020, TEMP-021, TEMP-022, TEMP-023, ROOM-INTAKE-004]
+    supporting_baseline_ids: [INT-002, INT-003, INT-004, INT-005, INT-006, INT-007]
+
+  C:
+    role: Java domain ledger and Finalizer
+    tasks: [P4-C1, P4-C2]
+    slices: [P4-S1, P4-S2, P4-S3, P4-S5]
+    test_routes:
+      - java-api-service/src/test/java/com/example/dispute/room/*Intake*
+      - java-api-service/src/test/java/com/example/dispute/workflow/activity/intake/**
+      - java-api-service/src/test/java/com/example/dispute/database/*Intake*
+    change_routes:
+      - java-api-service/src/main/resources/db/migration/V043__intake_graph_bindings.sql
+      - java-api-service/src/main/java/com/example/dispute/workflow/activity/intake/**
+      - java-api-service/src/main/java/com/example/dispute/workflow/application/intake/**
+      - java-api-service/src/main/java/com/example/dispute/room/application/IntakeAgentTurnService.java
+      - java-api-service/src/main/java/com/example/dispute/room/application/IntakeRoomService.java
+      - java-api-service/src/main/java/com/example/dispute/room/application/IntakeMatrixLifecycleService.java
+      - java-api-service/src/main/java/com/example/dispute/room/application/RoomMessageService.java
+      - java-api-service/src/main/java/com/example/dispute/room/application/AgentConversationSessionResolver.java
+      - java-api-service/src/main/java/com/example/dispute/caseintake/application/CaseApplicationService.java
+      - java-api-service/src/main/java/com/example/dispute/room/infrastructure/persistence/*IntakeGraph*
+      - java-api-service/src/test/java/com/example/dispute/room/IntakeAgentTurnServiceTest.java
+      - java-api-service/src/test/java/com/example/dispute/room/IntakeRoomServiceTest.java
+      - java-api-service/src/test/java/com/example/dispute/room/IntakeRoomServiceIntegrationTest.java
+      - java-api-service/src/test/java/com/example/dispute/room/IntakeSequentialWorkflowTest.java
+      - java-api-service/src/test/java/com/example/dispute/workflow/activity/intake/**
+      - java-api-service/src/test/java/com/example/dispute/database/*Intake*
+    primary_check_ids: [JAVA-007, JAVA-008, JAVA-009, JAVA-010, ROOM-INTAKE-002]
+    supporting_baseline_ids: [INT-001, INT-003, INT-004, INT-005, INT-006, INT-007, INT-008, INT-010, SEC-001, SEC-002, SEC-003]
+
+  D:
+    role: Projection, stream, and frontend compatibility
+    tasks: [P4-D1, P4-D2]
+    slices: [P4-S4]
+    test_routes:
+      - java-api-service/src/test/java/com/example/dispute/workflow/projection/*Intake*
+      - frontend/src/views/disputes/IntakeRoomView.test.js
+      - frontend/src/views/disputes/DisputeOverviewView.test.js
+      - frontend/src/api/agentStream.test.js
+      - frontend/src/stores/agentStream.test.js
+      - frontend/src/stores/room.test.js
+    change_routes:
+      - java-api-service/src/main/java/com/example/dispute/workflow/projection/intake/**
+      - java-api-service/src/main/java/com/example/dispute/room/api/IntakeRoomController.java
+      - java-api-service/src/main/java/com/example/dispute/room/application/IntakeProgressService.java
+      - java-api-service/src/test/java/com/example/dispute/workflow/projection/*Intake*
+      - frontend/src/views/disputes/IntakeRoomView.vue
+      - frontend/src/views/disputes/IntakeRoomView.test.js
+      - frontend/src/views/disputes/DisputeOverviewView.test.js
+      - frontend/src/api/agentStream.*
+      - frontend/src/stores/agentStream.*
+      - frontend/src/stores/room.*
+    primary_check_ids: [ROOM-INTAKE-001, JAVA-011]
+    supporting_baseline_ids: [OVR-003, CORE-004, CORE-005, CORE-006, CORE-007, CORE-008, CORE-009, CORE-010, INT-009, INT-010, UI-001, UI-003, UI-004]
+
+  E:
+    role: Shadow parity, fault injection, and rollback hardening
+    tasks: [P4-E1, P4-E2]
+    slices: [P4-S1, P4-S5]
+    test_routes:
+      - java-api-service/src/test/java/com/example/dispute/workflow/shadow/*Intake*
+      - java-api-service/src/test/java/com/example/dispute/workflow/recovery/*Intake*
+      - python-agent-service/tests/graphs/intake/test_*recovery*.py
+      - tests/static/test_phase4_*.py
+    change_routes:
+      - java-api-service/src/main/java/com/example/dispute/workflow/shadow/intake/**
+      - java-api-service/src/main/java/com/example/dispute/workflow/config/IntakeEpochSelectionProperties.java
+      - java-api-service/src/main/java/com/example/dispute/workflow/config/IntakeEpochSelector.java
+      - java-api-service/src/test/java/com/example/dispute/workflow/shadow/*Intake*
+      - java-api-service/src/test/java/com/example/dispute/workflow/recovery/*Intake*
+      - python-agent-service/tests/graphs/intake/test_*recovery*.py
+    primary_check_ids: [MIG-004]
+    supporting_baseline_ids: [INT-001, INT-002, INT-005, INT-006, INT-008, INT-009, INT-010, CORE-004, CORE-005, SEC-001, SEC-002, SEC-003, SEC-004, SEC-005, SEC-006]
+
+  R:
+    role: Primary contract, integration, review, and evidence
+    tasks: [P4-0, P4-R0G, P4-R1, P4-R2]
+    slices: [P4-S1, P4-S2, P4-S3, P4-S4, P4-S5]
+    test_routes:
+      - tests/static/test_phase4_*.py
+      - contracts/agent-platform/v1/**
+      - plans/phase-4-*
+      - docs/runbooks/temporal-first/phase-4-*
+      - scripts/*phase*4*
+      - test-reports/temporal-first/*/phase-4/**
+    change_routes:
+      - contracts/agent-platform/intake/v2/**
+      - java-api-service/src/main/java/com/example/dispute/workflow/config/TemporalWorkerConfiguration.java
+      - java-api-service/src/main/java/com/example/dispute/workflow/config/OrchestrationCutoverProperties.java
+      - java-api-service/src/main/java/com/example/dispute/workflow/application/epoch/ConfiguredRoomEpochSelector.java
+      - java-api-service/src/test/java/com/example/dispute/workflow/config/OrchestrationCutoverPropertiesTest.java
+      - java-api-service/src/test/java/com/example/dispute/workflow/application/ConfiguredRoomEpochSelectorTest.java
+      - java-api-service/src/main/resources/application.yml
+      - python-agent-service/app/config.py
+      - python-agent-service/app/main.py
+      - python-agent-service/app/graph_runtime/production_bindings.py
+      - java-api-service/src/main/java/com/example/dispute/workflow/temporal/caseprocess/CaseProcessWorkflowImpl.java
+      - tests/static/test_phase4_*.py
+      - plans/phase-4-*
+      - docs/runbooks/temporal-first/phase-4-*
+      - scripts/*phase*4*
+      - test-reports/temporal-first/*/phase-4/**
+    owns_candidate_checkpoint: true
+    owns_failure_classification: true
+    owns_external_gate_record: true
+
+task_contracts:
+  P4-0:
+    owner: R
+    depends_on: []
+    objective: Freeze ADR 0011, the P4.0 contract pack, schemas, fixtures, execution plan, test matrix, baseline inventory, and static entry gate.
+    outputs: [contract_candidate_commit]
+    definition_of_done: All wire and authority choices are closed and no feature runtime is enabled.
+  P4-R0G:
+    owner: R
+    depends_on: [P4-0]
+    objective: Add only the fail-closed non-LEGACY epoch-allocation guard required to make the engineering defaults enforceable.
+    outputs: [selector_guard, configuration_guard, focused_context_tests]
+    definition_of_done: Default or partially configured deployments cannot allocate SHADOW or TEMPORAL real epochs; the synthetic driver requires explicit enablement.
+  P4-A1:
+    owner: A
+    depends_on: [P4-0, P4-R0G]
+    objective: Implement typed intake.v2 state, one-time snapshot import, event application, exhaustive routing, validators, and proposal projection.
+    inputs: [graph-private-thread-registration.v1, intake-domain-snapshot.v2, intake-turn-event.v2, intake-turn-proposal.v2]
+    outputs: [compiled_intake_v2_graph, focused_graph_tests]
+    definition_of_done: Service-free tests prove exact private bindings, bounded state, no memory_frame, no long interrupt, and proposal-only output.
+  P4-A2:
+    owner: A
+    depends_on: [P4-A1]
+    objective: Bind the Intake State Lens and governed LCEL chain to the Phase 3 executor and harden checkpoint replay and recovery behavior.
+    inputs: [governed_runnable_protocol, graph_runtime_v1]
+    outputs: [intake_lcel_pipeline, graph_recovery_tests]
+    definition_of_done: Runnable object capture, guardrails, cached replay, and crash-boundary tests pass without a formal sink.
+  P4-B1:
+    owner: B
+    depends_on: [P4-0, P4-R0G]
+    objective: Implement the pure deterministic Intake Workflow kernel, five states, enqueue-only handlers, sequencing, and branch receipts.
+    inputs: [intake_workflow_protocol, frozen_activity_ports]
+    outputs: [intake_room_workflow, time_skipping_unit_tests]
+    definition_of_done: Accept, reject, cancel, respondent lock, durable wait, duplicate, and out-of-order cases are deterministic and replayable.
+  P4-B2:
+    owner: B
+    depends_on: [P4-B1]
+    objective: Add Activity orchestration, cancellation, retry-budget propagation, Continue-As-New carry state, replay, and worker-kill tests against fakes.
+    inputs: [frozen_activity_receipts, operation_keys]
+    outputs: [workflow_activity_orchestration, workflow_recovery_tests]
+    definition_of_done: Commit/completion loss and stale results converge without repeated side effects; no repository or model client enters Workflow code.
+  P4-C1:
+    owner: C
+    depends_on: [P4-0, P4-R0G]
+    objective: Implement V043, Java private-thread registration, immutable snapshot publication, event refs, and Graph command construction.
+    inputs: [thread_registration_contract, snapshot_event_contracts]
+    outputs: [V043, thread_factory, snapshot_publisher, graph_command_factory]
+    definition_of_done: Hash, scope, epoch, session, visibility, idempotency, and no-private-crossing tests pass with no Graph DB access from Java.
+  P4-C2:
+    owner: C
+    depends_on: [P4-C1]
+    objective: Implement proposal loading/hash verification, typed Finalizer, domain Activities, legacy mode guards, and idempotent receipts behind unreachable formal wiring.
+    inputs: [intake-turn-proposal.v2, intake-finalization-receipt.v1, workflow_activity_ports]
+    outputs: [formal_ports, transaction_tests, legacy_strangler_guards]
+    definition_of_done: Atomicity, replay, stale fence, actor isolation, and all Intake branch invariants pass; SHADOW cannot resolve these ports.
+  P4-D1:
+    owner: D
+    depends_on: [P4-B2, P4-C2, P4-R1]
+    objective: Implement the versioned Java Intake projection/reader and API compatibility fields.
+    inputs: [workflow_snapshot, finalization_receipt, process_projection]
+    outputs: [projection_adapter, API_compatibility_tests]
+    definition_of_done: Legacy and future projections preserve authorization and return explicit lag/pending/version state without inference.
+  P4-D2:
+    owner: D
+    depends_on: [P4-D1]
+    objective: Update Vue/store compatibility for versioned projection, active-run recovery, history lock, private stream, layout, and accessibility.
+    inputs: [compatible_intake_API, agent_stream_v2]
+    outputs: [frontend_compatibility, focused_UI_tests]
+    definition_of_done: OVR, CORE, INT, SEC, and UI focused baselines pass without route or layout regressions.
+  P4-E1:
+    owner: E
+    depends_on: [P4-A2, P4-B2, P4-C2, P4-R1]
+    objective: Replace global cutover semantics with a room-specific stable Intake selector and implement isolated synthetic parity and bounded telemetry.
+    inputs: [epoch_selection_contract, normalized_parity_contract]
+    outputs: [intake_epoch_selector, shadow_comparison, observability]
+    definition_of_done: Other rooms remain LEGACY, real traffic remains forbidden, formal sink reachability is zero, and parity contains no private text.
+  P4-E2:
+    owner: E
+    depends_on: [P4-E1, P4-D2]
+    objective: Implement the crash/race/rollback harness and Phase 4 evidence policy without running the final candidate checkpoint.
+    inputs: [all_slice_receipts, rollback_protocol]
+    outputs: [fault_harness, evidence_policy, rollback_checks]
+    definition_of_done: Synthetic failure cases are classified and reproducible, with no claim that external gates passed.
+  P4-R1:
+    owner: R
+    depends_on: [P4-A1, P4-B1, P4-C1]
+    objective: Integrate shared proposal transport, exact Graph registration/runtime binding, versioned typed-child dispatch, worker registration, and no-formal-sink assembly.
+    inputs: [A_foundation, B_ports, C_foundation]
+    outputs: [minimum_signed_synthetic_chain, shared_integration_tests]
+    definition_of_done: Case Workflow dispatch honors persisted workflow_type with a Temporal version marker, and the S1 chain ends only in comparison storage.
+  P4-R2:
+    owner: R
+    depends_on: [P4-A2, P4-B2, P4-C2, P4-D2, P4-E2, P4-R1]
+    objective: Close reviews, freeze one candidate, run the deduplicated checkpoint, classify failures, and archive evidence.
+    outputs: [phase4_candidate, phase4_evidence_bundle, engineering_checkpoint]
+    definition_of_done: One candidate SHA supplies all accepted reports and promotion remains PENDING.
+
+slices:
+  P4-S1:
+    name: minimum-signed-synthetic-intake-v2-chain
+    objective: Exercise snapshot binding, private thread identity, intake.v2 Graph, typed proposal, and shadow comparison without a formal write.
+    allowed_runtime_modes: [DISABLED, SIGNED_SYNTHETIC_SHADOW]
+    formal_side_effects_allowed: false
+    baseline_ids: [INT-008, INT-009, INT-010, CORE-006, CORE-007, CORE-008, CORE-009, SEC-004, SEC-005, SEC-006]
+    check_ids: [ROOM-INTAKE-003, GRAPH-007, GRAPH-008, GRAPH-020, GRAPH-021, GRAPH-022, JAVA-007, JAVA-010]
+    focused_test_groups:
+      - intake_graph_state_router_and_validator_units
+      - trusted_snapshot_and_thread_identity_contracts
+      - governed_lcel_object_flow_and_guardrails
+      - proposal_only_shadow_transport
+      - legacy_adapter_compatibility
+
+  P4-S2:
+    name: initiator-accept-reject-cancel
+    objective: Verify initiator branch semantics in deterministic Workflow and Java domain fixtures while formal Temporal ownership remains disabled.
+    allowed_runtime_modes: [DISABLED, SIGNED_SYNTHETIC_SHADOW]
+    formal_side_effects_allowed: false
+    baseline_ids: [INT-003, INT-004, INT-007, SEC-001, SEC-003]
+    check_ids: [ROOM-INTAKE-004, TEMP-020, TEMP-021, JAVA-007, JAVA-008, JAVA-009, JAVA-010, JAVA-011]
+    focused_test_groups:
+      - initiator_ready_but_java_admission_rejects
+      - accept_invites_and_stays_in_intake
+      - not_admissible_terminal_branch
+      - initiator_cancelled_terminal_branch
+      - respondent_cannot_cancel_or_preempt
+
+  P4-S3:
+    name: respondent-private-supplement-freeze-and-evidence-open
+    objective: Preserve actor isolation and sequential admission through independent respondent readiness and bilateral freeze.
+    allowed_runtime_modes: [DISABLED, SIGNED_SYNTHETIC_SHADOW]
+    formal_side_effects_allowed: false
+    baseline_ids: [INT-001, INT-002, INT-005, INT-006, OVR-003, SEC-001, SEC-002, SEC-003, SEC-004, SEC-005, SEC-006]
+    check_ids: [ROOM-INTAKE-001, ROOM-INTAKE-003, ROOM-INTAKE-004, GRAPH-008, GRAPH-020, TEMP-020, TEMP-021, JAVA-007, JAVA-009, JAVA-011]
+    focused_test_groups:
+      - exact_actor_private_thread_isolation
+      - respondent_locked_until_initiator_acceptance
+      - respondent_readiness_recomputed_independently
+      - bilateral_frozen_matrix_once
+      - evidence_open_and_timer_start_once
+
+  P4-S4:
+    name: projection-stream-and-ui-compatibility
+    objective: Preserve the existing URL, projection semantics, active-run recovery, public stream, history mode, layout, and accessibility behavior.
+    allowed_runtime_modes: [DISABLED, SIGNED_SYNTHETIC_SHADOW]
+    formal_side_effects_allowed: false
+    baseline_ids: [OVR-003, CORE-004, CORE-005, CORE-006, CORE-007, CORE-008, CORE-009, CORE-010, INT-009, INT-010, UI-001, UI-003, UI-004]
+    check_ids: [ROOM-INTAKE-001, JAVA-010, JAVA-011]
+    focused_test_groups:
+      - process_projection_version_and_pending_state
+      - active_run_refresh_and_stream_replay
+      - role_switch_late_response_rejection
+      - history_mode_write_lock
+      - intake_shell_breakpoint_long_content_and_dialog_focus
+
+  P4-S5:
+    name: crash-race-parity-and-rollback-hardening
+    objective: Prove deterministic recovery and rollback invariants at synthetic crash and race points without enabling a formal writer or canary.
+    allowed_runtime_modes: [DISABLED, SIGNED_SYNTHETIC_SHADOW]
+    formal_side_effects_allowed: false
+    baseline_ids: [INT-001, INT-002, INT-003, INT-004, INT-005, INT-006, INT-007, INT-008, INT-009, INT-010, CORE-004, CORE-005, SEC-001, SEC-002, SEC-003, SEC-004, SEC-005, SEC-006]
+    check_ids: [ROOM-INTAKE-001, ROOM-INTAKE-002, ROOM-INTAKE-003, ROOM-INTAKE-004, GRAPH-007, GRAPH-021, GRAPH-022, TEMP-022, TEMP-023, JAVA-007, JAVA-008, JAVA-009, JAVA-010, JAVA-011, MIG-004]
+    focused_test_groups:
+      - same_command_same_hash_and_different_hash
+      - model_and_checkpoint_four_crash_points
+      - simultaneous_party_confirmation
+      - respondent_wait_and_submission_replay_without_implicit_timeout
+      - java_commit_then_signal_or_completion_loss
+      - stale_epoch_and_late_final_rejection
+      - normalized_shadow_invariant_diff
+      - disabled_mode_and_higher_epoch_rollback_contract
+
+waves:
+  wave_0:
+    active_roles: [R]
+    tasks: [P4-0, P4-R0G]
+    trigger: P4_0_contract_gate_commit
+    runtime_changes_allowed: gate_hardening_only
+    allowed_runtime_change_routes:
+      - Java non-LEGACY epoch allocation guard with fail-closed defaults
+      - static proof that signed synthetic SHADOW cannot resolve a formal Finalizer
+    feature_implementation_allowed: false
+    test_batch: P4-BATCH-0
+
+  wave_1:
+    active_roles: [A, B, C]
+    tasks: [P4-A1, P4-A2, P4-B1, P4-B2, P4-C1, P4-C2]
+    slices: [P4-S1, P4-S2, P4-S3]
+    max_active_children: 3
+    test_batch: P4-BATCH-1
+
+  wave_2:
+    active_roles: [D, E, R]
+    tasks: [P4-D1, P4-D2, P4-E1, P4-E2, P4-R1]
+    reused_completed_slots: true
+    slices: [P4-S2, P4-S3, P4-S4, P4-S5]
+    max_active_children: 2
+    test_batch: P4-BATCH-2
+
+  candidate_wave:
+    active_roles: [R]
+    tasks: [P4-R2]
+    requires_cross_review: true
+    test_batch: P4-BATCH-3
+
+batches:
+  P4-BATCH-0:
+    tier: T1
+    trigger: P4_0_contract_gate_commit
+    purpose: Authenticate the entry state and freeze the legacy Intake baseline before implementation.
+    requires:
+      - phase_3_engineering_checkpoint_pass
+      - MIG_003_recorded_as_PENDING_PROMOTION
+      - runtime_restricted_to_DISABLED_or_SIGNED_SYNTHETIC_SHADOW
+      - protected_unrelated_worktree_changes_recorded
+    static_tests:
+      - tests/static/test_phase4_intake_pilot_plan.py
+      - tests/static/test_temporal_refactor_traceability.py
+      - tests/static/test_graph_import_boundaries.py
+      - tests/static/test_agent_platform_schema_contracts.py
+    source_commands:
+      - id: p4_entry_static
+        cwd: .
+        command: >-
+          D:\miniconda\python.exe -m pytest
+          tests/static/test_phase4_intake_pilot_plan.py
+          tests/static/test_temporal_refactor_traceability.py
+          tests/static/test_graph_import_boundaries.py
+          tests/static/test_agent_platform_schema_contracts.py
+          -q
+      - id: p4_entry_python
+        cwd: python-agent-service
+        command: >-
+          D:\miniconda\python.exe -m pytest
+          tests/agents/test_intake_turn.py
+          tests/agents/test_intake_case_detail_dossier.py
+          tests/agents/test_intake_prompt_compaction.py
+          tests/agents/test_intake_resource_bounds.py
+          tests/test_streaming.py
+          tests/test_streaming_v2.py
+          tests/security/test_graph_security_runtime.py
+          tests/model_runtime/test_runnable_factory.py
+          -q
+      - id: p4_entry_java
+        cwd: java-api-service
+        command: >-
+          .\mvnw.cmd -DforkCount=1
+          "-Dtest=IntakeRoomServiceTest,IntakeRoomServiceIntegrationTest,IntakeAgentTurnServiceTest,IntakeProgressServiceTest,IntakeRoomControllerTest,IntakeSequentialWorkflowTest,AgentConversationSessionResolverTest,RoomTurnMemoryQueryServiceTest,RoomMessageAndEventServiceTest,AgentRunStreamEventServiceTest,OrchestrationCutoverPropertiesTest,ConfiguredRoomEpochSelectorTest,Mig001ScenarioServiceTest"
+          test
+      - id: p4_entry_frontend
+        cwd: frontend
+        command: >-
+          pnpm exec vitest run
+          src/views/disputes/IntakeRoomView.test.js
+          src/views/disputes/DisputeOverviewView.test.js
+          src/components/room/RoomShell.test.js
+          src/api/agentStream.test.js
+          src/stores/agentStream.test.js
+          src/stores/room.test.js
+          --maxWorkers=2
+    baseline_suites:
+      java:
+        - IntakeRoomServiceTest
+        - IntakeRoomServiceIntegrationTest
+        - IntakeAgentTurnServiceTest
+        - IntakeProgressServiceTest
+        - IntakeRoomControllerTest
+        - IntakeSequentialWorkflowTest
+        - AgentConversationSessionResolverTest
+        - RoomTurnMemoryQueryServiceTest
+        - RoomMessageAndEventServiceTest
+        - AgentRunStreamEventServiceTest
+      python:
+        - python-agent-service/tests/agents/test_intake_turn.py
+        - python-agent-service/tests/agents/test_intake_case_detail_dossier.py
+        - python-agent-service/tests/agents/test_intake_prompt_compaction.py
+        - python-agent-service/tests/agents/test_intake_resource_bounds.py
+        - python-agent-service/tests/test_streaming.py
+        - python-agent-service/tests/test_streaming_v2.py
+        - python-agent-service/tests/security/test_graph_security_runtime.py
+        - python-agent-service/tests/model_runtime/test_runnable_factory.py
+      frontend:
+        - frontend/src/views/disputes/IntakeRoomView.test.js
+        - frontend/src/views/disputes/DisputeOverviewView.test.js
+        - frontend/src/components/room/RoomShell.test.js
+        - frontend/src/api/agentStream.test.js
+        - frontend/src/stores/agentStream.test.js
+        - frontend/src/stores/room.test.js
+    coverage_required:
+      baseline_ids:
+        - INT-001
+        - INT-002
+        - INT-003
+        - INT-004
+        - INT-005
+        - INT-006
+        - INT-007
+        - INT-008
+        - INT-009
+        - INT-010
+        - OVR-003
+        - CORE-004
+        - CORE-005
+        - CORE-006
+        - CORE-007
+        - CORE-008
+        - CORE-009
+        - CORE-010
+        - SEC-001
+        - SEC-002
+        - SEC-003
+        - SEC-004
+        - SEC-005
+        - SEC-006
+        - UI-001
+        - UI-003
+        - UI-004
+    entry_failure_behavior:
+      PRODUCT: block_implementation_until_baseline_is_restored_or_known_failure_is_approved
+      FIXTURE: prove_legacy_contract_then_correct_fixture_and_rerun_exact_suite
+      INFRA: preserve_trace_restore_environment_and_rerun_exact_suite
+      EXTERNAL_GATE: retain_engineering_exception_and_keep_all_formal_traffic_blocked
+    execution:
+      strategy: exact_contract_candidate_source_suites
+      heavy_parallelism: 1
+      light_parallelism: 2
+      database_workers: 1
+      candidate_sha_must_be_clean_and_detached: true
+      evidence_commit_must_be_later_than_tested_sha: true
+
+  P4-BATCH-1:
+    tier: T1
+    trigger: wave_1_merged
+    purpose: Verify the service-free P4-S1 contracts and Graph, Workflow-kernel, and Java foundations once after Wave 1 integration.
+    requires_tasks: [P4-A1, P4-B1, P4-C1]
+    slices: [P4-S1]
+    python_tests:
+      - python-agent-service/tests/graphs/intake
+      - python-agent-service/tests/agents/test_intake_turn.py
+      - python-agent-service/tests/agents/test_intake_case_detail_dossier.py
+    java_test_classes:
+      - IntakeGraphCommandFactoryTest
+      - IntakeGraphResultFinalizerTest
+      - IntakeRoomWorkflowTest
+      - IntakeRoomServiceTest
+      - IntakeAgentTurnServiceTest
+    static_tests:
+      - tests/static/test_phase4_intake_pilot_plan.py
+      - tests/static/test_graph_import_boundaries.py
+    execution:
+      heavy_parallelism: 1
+      light_parallelism: 2
+      database: none
+      real_provider: forbidden
+      formal_finalizer: forbidden
+      claims_deferred_to_P4_BATCH_2:
+        - PostgreSQL checkpoint persistence
+        - four Graph crash boundaries
+        - cross-process cached terminal recovery
+        - Java transactional Finalizer recovery
+
+  P4-BATCH-2:
+    tier: T2
+    trigger: wave_2_merged
+    purpose: Run S2-S4 integration and S5 fault hardening once after all owner changes and cross-owner fixes are merged.
+    requires_tasks: [P4-A2, P4-B2, P4-C2, P4-D1, P4-D2, P4-E1, P4-E2, P4-R1]
+    slices: [P4-S2, P4-S3, P4-S4, P4-S5]
+    python_tests:
+      - python-agent-service/tests/graphs/intake
+      - python-agent-service/tests/agents/test_intake_turn.py
+      - python-agent-service/tests/agents/test_intake_case_detail_dossier.py
+      - python-agent-service/tests/agents/test_intake_prompt_compaction.py
+      - python-agent-service/tests/agents/test_intake_resource_bounds.py
+      - python-agent-service/tests/test_streaming.py
+      - python-agent-service/tests/test_streaming_v2.py
+      - python-agent-service/tests/graph_runtime/unit/test_compiled_executor.py
+      - python-agent-service/tests/graph_runtime/unit/test_registry_identity.py
+      - python-agent-service/tests/security/test_graph_security_runtime.py
+      - python-agent-service/tests/model_runtime/test_runnable_factory.py
+    java_test_classes:
+      - IntakeRoomWorkflowTest
+      - IntakeRoomWorkflowReplayTest
+      - IntakeRoomWorkflowRecoveryTest
+      - IntakeTemporalCutoverIntegrationTest
+      - IntakeGraphCommandFactoryTest
+      - IntakeGraphResultFinalizerTest
+      - IntakeProcessProjectionAdapterTest
+      - IntakeShadowParityServiceTest
+      - IntakeCutoverRollbackTest
+      - IntakeRoomServiceTest
+      - IntakeRoomServiceIntegrationTest
+      - IntakeAgentTurnServiceTest
+      - IntakeProgressServiceTest
+      - IntakeRoomControllerTest
+      - IntakeSequentialWorkflowTest
+      - AgentConversationSessionResolverTest
+      - RoomTurnMemoryQueryServiceTest
+      - RoomMessageAndEventServiceTest
+      - AgentRunStreamEventServiceTest
+      - ProcessProjectionFencingIntegrationTest
+      - TemporalCommandDispatcherTest
+    frontend_tests:
+      - frontend/src/views/disputes/IntakeRoomView.test.js
+      - frontend/src/views/disputes/DisputeOverviewView.test.js
+      - frontend/src/components/room/RoomShell.test.js
+      - frontend/src/api/agentStream.test.js
+      - frontend/src/stores/agentStream.test.js
+      - frontend/src/stores/room.test.js
+    execution:
+      order:
+        - graph_and_privacy
+        - java_postgresql_and_temporal_time_skipping
+        - projection_stream_and_frontend
+        - crash_race_parity_and_rollback
+      heavy_parallelism: 1
+      light_parallelism: 2
+      database_workers: 1
+      temporal_test_environments: 1
+      frontend_workers: 2
+      browser_or_playwright: none
+      real_provider: forbidden
+      formal_finalizer: forbidden
+
+  P4-BATCH-3:
+    tier: T2
+    trigger: cross_review_fixes_merged
+    purpose: Produce the one accepted Phase 4 engineering candidate checkpoint and evidence bundle.
+    requires:
+      - clean_detached_candidate_worktree
+      - fixed_candidate_commit_before_first_command
+      - batch_0_pass
+      - batch_1_pass
+      - batch_2_pass
+      - all_phase_4_baseline_ids_mapped
+      - all_phase_4_check_ids_mapped
+      - no_open_PRODUCT_failures
+      - MIG_003_still_recorded_as_PENDING_PROMOTION
+      - formal_traffic_still_disabled
+    candidate_policy:
+      accepted_candidate_count: 1
+      candidate_sha_immutable_during_run: true
+      source_suites_execute_once_per_accepted_candidate: true
+      derived_batch_views_must_reference_source_reports: true
+      mixed_commit_results_forbidden: true
+      mixed_candidate_results_forbidden: true
+      quarantined_attempts_not_reused: true
+      code_change_invalidates_entire_candidate_checkpoint: true
+      infra_retry_same_sha_only: true
+    source_commands:
+      - id: python_phase_4
+        cwd: python-agent-service
+        command: >-
+          D:\miniconda\python.exe -m pytest
+          tests/graphs/intake
+          tests/agents/test_intake_turn.py
+          tests/agents/test_intake_case_detail_dossier.py
+          tests/agents/test_intake_prompt_compaction.py
+          tests/agents/test_intake_resource_bounds.py
+          tests/test_streaming.py
+          tests/test_streaming_v2.py
+          tests/graph_runtime/unit/test_compiled_executor.py
+          tests/graph_runtime/unit/test_registry_identity.py
+          tests/security/test_graph_security_runtime.py
+          tests/model_runtime/test_runnable_factory.py
+          -q
+      - id: java_phase_4
+        cwd: java-api-service
+        command_template: >-
+          .\mvnw.cmd -DforkCount=1
+          -Dtest=<deduplicated_phase_4_intake_test_classes>
+          test
+      - id: frontend_phase_4
+        cwd: frontend
+        command: >-
+          pnpm exec vitest run
+          src/views/disputes/IntakeRoomView.test.js
+          src/views/disputes/DisputeOverviewView.test.js
+          src/components/room/RoomShell.test.js
+          src/api/agentStream.test.js
+          src/stores/agentStream.test.js
+          src/stores/room.test.js
+          --maxWorkers=2
+      - id: static_phase_4
+        cwd: .
+        command: >-
+          D:\miniconda\python.exe -m pytest
+          tests/static/test_phase4_intake_pilot_plan.py
+          tests/static/test_graph_import_boundaries.py
+          tests/static/test_agent_platform_schema_contracts.py
+          tests/static/test_temporal_refactor_traceability.py
+          -q
+    execution:
+      strategy: deduplicated_source_suites_then_derived_batch_views
+      heavy_parallelism: 1
+      light_parallelism: 2
+      database_workers: 1
+      source_reports:
+        - python-phase4-junit.xml
+        - java-phase4-junit.xml
+        - frontend-phase4-junit.xml
+        - static-phase4-junit.xml
+      derived_views:
+        - batch-0-junit.xml
+        - batch-1-junit.xml
+        - batch-2-junit.xml
+        - batch-3-junit.xml
+    evidence:
+      root: test-reports/temporal-first/<release-id>/phase-4
+      required_files:
+        - phase-metrics.json
+        - baseline-id-coverage.json
+        - check-id-coverage.json
+        - failure-classification.json
+        - external-gates.json
+        - candidate-commit.txt
+        - python-phase4-junit.xml
+        - java-phase4-junit.xml
+        - frontend-phase4-junit.xml
+        - static-phase4-junit.xml
+        - batch-0-junit.xml
+        - batch-1-junit.xml
+        - batch-2-junit.xml
+        - batch-3-junit.xml
+      required_status_output:
+        engineering_checkpoint: PASS_or_FAIL
+        promotion_gate: PENDING
+        next_phase_permission: PHASE_5_ENGINEERING_ONLY_or_BLOCKED
+        MIG-004: PENDING_PROMOTION
+
+  P4-UNIFIED-CHECKPOINT:
+    tier: T3
+    automatic: false
+    trigger: explicit_user_request_or_agreed_unified_checkpoint
+    owner: primary
+    classification: EXTERNAL_GATE
+    commands:
+      - repository_full_regression
+      - browser_full_regression
+      - production_equivalent_mtls
+      - real_case_shadow_privacy_scan
+      - temporal_worker_kill_matrix
+      - graph_postgresql_failover
+      - 1000_room_load
+      - soak_24h
+      - dr_restore_and_failover
+
+failure_classification:
+  required_values: [PRODUCT, FIXTURE, INFRA, EXTERNAL_GATE]
+  classify_before_rerun: true
+  exactly_one_classification_per_failure: true
+  PRODUCT:
+    criteria:
+      - deterministic product, contract, privacy, recovery, or baseline assertion fails at the candidate SHA
+      - implementation violates a writer, epoch, fence, idempotency, or audience invariant
+    action: fix_owner_code_run_exact_test_and_affected_batch_then_create_a_new_candidate_SHA
+    blocks_engineering_checkpoint: true
+    blocks_promotion: true
+  FIXTURE:
+    criteria:
+      - product contract is independently proven and the test data, golden result, or harness expectation is stale or malformed
+    action: record_contract_proof_update_fixture_without_weakening_assertions_then_run_exact_test_and_affected_batch
+    blocks_engineering_checkpoint_until_resolved: true
+    blocks_promotion_until_resolved: true
+  INFRA:
+    criteria:
+      - environment failure such as Docker, port, disk, network, Testcontainers, or Temporal test server failure occurs without a product assertion
+    action: preserve_trace_restore_environment_and_rerun_only_the_failed_source_suite_on_the_same_SHA
+    evidence_rule: quarantine_failed_attempt_and_do_not_mix_it_into_derived_views
+    code_change_allowed: false
+  EXTERNAL_GATE:
+    criteria:
+      - approval, real identity, production-equivalent traffic, canary observation, load, soak, DR, or another externally controlled condition is unavailable
+    action: retain_engineering_evidence_and_keep_promotion_MIG_003_and_MIG_004_pending
+    blocks_engineering_checkpoint: false
+    blocks_promotion: true
+  forbidden:
+    - unconditional_full_suite_retry
+    - weakening_security_privacy_or_writer_assertions_for_green
+    - reclassifying_a_deterministic_product_failure_as_infrastructure
+    - mixing_results_from_different_candidate_commits
+    - mixing_quarantined_and_accepted_attempt_reports
+    - formal_writer_or_real_traffic_in_phase_4_engineering
+
+external_gates:
+  current_status: PENDING
+  classification: EXTERNAL_GATE
+  excluded_from_engineering_pass: true
+  required_before_formal_canary:
+    - MIG_003_PROMOTED
+    - production_mTLS_identity_and_key_rotation_approved
+    - production_equivalent_signed_driver_approved
+    - formal_writer_cutover_runbook_approved
+    - rollback_authority_and_observers_assigned
+  required_before_MIG_004_PASS:
+    - all_engineering_batches_pass_on_one_candidate
+    - real_shadow_privacy_scan_zero_leakage
+    - canary_1_percent_new_epochs_observation_pass
+    - canary_5_percent_new_epochs_observation_pass
+    - canary_25_percent_new_epochs_observation_pass
+    - canary_100_percent_new_epochs_observation_pass
+    - no_active_epoch_implicitly_changes_graph_or_workflow_version
+    - Java_no_longer_round_trips_memory_frame_as_cognitive_truth
+    - production_approval_recorded
+  current_engineering_result_must_report:
+    promotion_gate: PENDING
+    MIG-003: PENDING_PROMOTION
+    MIG-004: PENDING_PROMOTION
+
+verification_schedule:
+  delegated_slice_loop:
+    - run_owned_T0_tests_only
+    - record_command_duration_exit_code_and_touched_slice
+    - request_heavy_test_token_instead_of_starting_services
+    - hand_off_focused_failures_with_classification
+  primary_wave_loop:
+    - run_P4_BATCH_0_once_at_entry
+    - run_P4_BATCH_1_once_after_wave_1_merge
+    - run_P4_BATCH_2_once_after_wave_2_merge_and_fixes
+    - freeze_one_candidate_SHA_after_cross_review
+    - run_P4_BATCH_3_once_for_accepted_candidate_evidence
+  deferred:
+    - full_repository_regression
+    - browser_E2E
+    - real_canary
+    - load_soak_and_DR
