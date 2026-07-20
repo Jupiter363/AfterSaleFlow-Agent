@@ -105,6 +105,13 @@ _EXECUTION_METHOD_NAMES = (
     "transform",
     "atransform",
 )
+_RUNNABLE_CONFIG_METHOD_NAMES = (
+    "_call_with_config",
+    "_acall_with_config",
+    "_transform_stream_with_config",
+    "_atransform_stream_with_config",
+)
+_PASSTHROUGH_BEHAVIOR_ATTRIBUTE_NAMES = ("func", "afunc", "input_type")
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +119,14 @@ class _BehaviorMethodSeal:
     owner: Any
     name: str
     implementation: Any
+
+
+@dataclass(frozen=True, slots=True)
+class _BehaviorAttributeSeal:
+    owner: Any
+    name: str
+    value: Any
+    snapshot: Any
 
 
 def _iter_runnable_nodes(runnable: Runnable) -> Iterator[Runnable]:
@@ -132,7 +147,10 @@ def _seal_behavior_methods(
     pipeline: RunnableSequence,
     explicit_methods: tuple[tuple[Any, tuple[str, ...]], ...],
 ) -> tuple[_BehaviorMethodSeal, ...]:
-    targets = tuple((node, _EXECUTION_METHOD_NAMES) for node in _iter_runnable_nodes(pipeline))
+    targets = tuple(
+        (node, _EXECUTION_METHOD_NAMES + _RUNNABLE_CONFIG_METHOD_NAMES)
+        for node in _iter_runnable_nodes(pipeline)
+    )
     targets += explicit_methods
     seals: list[_BehaviorMethodSeal] = []
     seen: set[tuple[int, str]] = set()
@@ -156,6 +174,29 @@ def _seal_behavior_methods(
     return tuple(seals)
 
 
+def _seal_behavior_attributes(
+    pipeline: RunnableSequence,
+) -> tuple[_BehaviorAttributeSeal, ...]:
+    seals: list[_BehaviorAttributeSeal] = []
+    for node in _iter_runnable_nodes(pipeline):
+        if type(node) is not RunnablePassthrough:
+            continue
+        for name in _PASSTHROUGH_BEHAVIOR_ATTRIBUTE_NAMES:
+            try:
+                value = getattr_static(node, name)
+            except AttributeError as error:
+                raise IntakeGraphContractError("INTAKE_LCEL_COMPONENT_SEAL_INVALID") from error
+            seals.append(
+                _BehaviorAttributeSeal(
+                    owner=node,
+                    name=name,
+                    value=value,
+                    snapshot=deepcopy(value),
+                )
+            )
+    return tuple(seals)
+
+
 def _matches_behavior_methods(seals: tuple[_BehaviorMethodSeal, ...]) -> bool:
     for seal in seals:
         try:
@@ -163,6 +204,17 @@ def _matches_behavior_methods(seals: tuple[_BehaviorMethodSeal, ...]) -> bool:
         except AttributeError:
             return False
         if implementation is not seal.implementation:
+            return False
+    return True
+
+
+def _matches_behavior_attributes(seals: tuple[_BehaviorAttributeSeal, ...]) -> bool:
+    for seal in seals:
+        try:
+            value = getattr_static(seal.owner, seal.name)
+        except AttributeError:
+            return False
+        if value is not seal.value or value != seal.snapshot:
             return False
     return True
 
@@ -659,6 +711,7 @@ class _IntakeComponentSeal:
     profile_snapshot: ModelProfile
     policy_snapshot: ModelInvocationPolicy
     behavior_methods: tuple[_BehaviorMethodSeal, ...]
+    behavior_attributes: tuple[_BehaviorAttributeSeal, ...]
     model_transport: ModelTransport
     model_clock: Callable[[], Any]
     model_cancelled: Callable[[], bool]
@@ -683,6 +736,19 @@ def _seal_intake_components(
 ) -> _IntakeComponentSeal:
     explicit_methods = (
         (lens, ("_select", "_aselect")),
+        (
+            prompt,
+            (
+                "_validate_input",
+                "_merge_partial_and_user_variables",
+                "_format_prompt_with_error_handling",
+                "_aformat_prompt_with_error_handling",
+                "format_prompt",
+                "aformat_prompt",
+                "format_messages",
+                "aformat_messages",
+            ),
+        ),
         (preflight, ("_validate",)),
         (guardrail, ("_guard",)),
         (patch_projector, ("_project",)),
@@ -696,11 +762,44 @@ def _seal_intake_components(
                 "_generate_with_retry",
                 "_agenerate_with_retry",
                 "_request",
+                "_sync_generate",
+                "_sync_stream",
+                "_sync_call",
+                "_validated_result",
+                "_validated_visible_delta",
                 "_message",
+                "_visible_chunk",
+                "_final_chunk",
+                "_metadata",
                 "_attempts_allowed",
+                "_guard",
+                "_remaining_seconds",
+                "_retry_possible",
+                "_sync_backoff",
+                "_async_backoff",
+                "generate_prompt",
+                "agenerate_prompt",
+                "generate",
+                "agenerate",
+                "_generate_with_cache",
+                "_agenerate_with_cache",
+                "_should_stream",
             ),
         ),
-        (parser, ("parse", "aparse", "parse_result", "aparse_result", "_parse_obj")),
+        (
+            parser,
+            (
+                "parse",
+                "aparse",
+                "parse_result",
+                "aparse_result",
+                "_parse_obj",
+                "_parser_exception",
+                "_transform",
+                "_atransform",
+            ),
+        ),
+        (model._transport, ("generate", "agenerate", "stream", "astream")),
     )
     return _IntakeComponentSeal(
         lens=lens,
@@ -732,6 +831,7 @@ def _seal_intake_components(
         profile_snapshot=deepcopy(profile),
         policy_snapshot=deepcopy(policy),
         behavior_methods=_seal_behavior_methods(pipeline, explicit_methods),
+        behavior_attributes=_seal_behavior_attributes(pipeline),
         model_transport=model._transport,
         model_clock=model._clock,
         model_cancelled=model._cancelled,
@@ -789,19 +889,23 @@ def _matches_intake_component_seal(seal: _IntakeComponentSeal) -> bool:
     ):
         return False
 
-    return _matches_behavior_methods(seal.behavior_methods) and (
-        seal.preflight._profile is seal.profile
-        and seal.preflight._policy is seal.policy
-        and seal.preflight._profile == seal.profile_snapshot
-        and seal.preflight._policy == seal.policy_snapshot
-        and seal.guardrail._profile is seal.profile
-        and seal.guardrail._policy is seal.policy
-        and seal.guardrail._profile == seal.profile_snapshot
-        and seal.guardrail._policy == seal.policy_snapshot
-        and seal.patch_projector._profile is seal.profile
-        and seal.patch_projector._policy is seal.policy
-        and seal.patch_projector._profile == seal.profile_snapshot
-        and seal.patch_projector._policy == seal.policy_snapshot
+    return (
+        _matches_behavior_methods(seal.behavior_methods)
+        and _matches_behavior_attributes(seal.behavior_attributes)
+        and (
+            seal.preflight._profile is seal.profile
+            and seal.preflight._policy is seal.policy
+            and seal.preflight._profile == seal.profile_snapshot
+            and seal.preflight._policy == seal.policy_snapshot
+            and seal.guardrail._profile is seal.profile
+            and seal.guardrail._policy is seal.policy
+            and seal.guardrail._profile == seal.profile_snapshot
+            and seal.guardrail._policy == seal.policy_snapshot
+            and seal.patch_projector._profile is seal.profile
+            and seal.patch_projector._policy is seal.policy
+            and seal.patch_projector._profile == seal.profile_snapshot
+            and seal.patch_projector._policy == seal.policy_snapshot
+        )
     )
 
 

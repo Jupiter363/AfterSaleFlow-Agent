@@ -28,6 +28,7 @@ from app.graphs.intake.graph import (
 )
 from app.graphs.intake.lcel import (
     INTAKE_SYSTEM_PROMPT,
+    _is_vetted_intake_model_runnable,
     build_intake_model_node,
 )
 from app.graphs.intake.nodes import deterministic_message_fallback
@@ -258,6 +259,16 @@ def _mutate_nested_parallel_step(runnable) -> None:
     state_and_generation.steps__["generation"] = RunnablePassthrough()
 
 
+def _mutate_internal_passthrough_func(built) -> None:
+    pipeline = built.runnable._pipeline
+    assert isinstance(pipeline, RunnableSequence)
+    state_and_generation = pipeline.middle[0]
+    assert isinstance(state_and_generation, RunnableParallel)
+    state_passthrough = state_and_generation.steps__["state"]
+    assert isinstance(state_passthrough, RunnablePassthrough)
+    state_passthrough.func = lambda value: value
+
+
 def test_vetted_runnable_identity_and_full_nested_structure_are_sealed() -> None:
     copied = build_intake_model_node(
         transport=IntakeTransport(),
@@ -463,8 +474,19 @@ async def test_nested_mutation_fails_closed_for_all_async_execution_entrypoints(
             id="patch-projector-project-method",
         ),
         pytest.param(
+            lambda built: _override_instance_method(
+                built.patch_projector,
+                "_call_with_config",
+            ),
+            id="patch-projector-call-with-config-method",
+        ),
+        pytest.param(
             lambda built: setattr(built.model, "_transport", IntakeTransport()),
             id="model-transport",
+        ),
+        pytest.param(
+            lambda built: _override_instance_method(built.model._transport, "generate"),
+            id="model-transport-generate-method",
         ),
         pytest.param(
             lambda built: setattr(built.model, "_clock", lambda: datetime.now(timezone.utc)),
@@ -479,12 +501,24 @@ async def test_nested_mutation_fails_closed_for_all_async_execution_entrypoints(
             id="model-generate-method",
         ),
         pytest.param(
+            lambda built: _override_instance_method(built.model, "_validated_result"),
+            id="model-validated-result-method",
+        ),
+        pytest.param(
+            lambda built: _override_instance_method(built.prompt, "format_prompt"),
+            id="prompt-format-method",
+        ),
+        pytest.param(
             lambda built: _override_instance_method(built.parser, "parse_result"),
             id="parser-parse-result-method",
         ),
         pytest.param(
             lambda built: _override_instance_method(built.parser, "invoke"),
             id="parser-invoke-method",
+        ),
+        pytest.param(
+            lambda built: _mutate_internal_passthrough_func(built),
+            id="passthrough-func",
         ),
     ],
 )
@@ -497,6 +531,7 @@ def test_leaf_component_mutation_fails_closed_before_model_invocation(mutation) 
     )
     mutation(built)
 
+    assert not _is_vetted_intake_model_runnable(built.runnable)
     with pytest.raises(
         IntakeGraphContractError,
         match="INTAKE_LCEL_RUNNABLE_NOT_VETTED",
@@ -507,6 +542,39 @@ def test_leaf_component_mutation_fails_closed_before_model_invocation(mutation) 
 
 def _override_instance_method(instance, name: str) -> None:
     instance.__dict__[name] = lambda *args, **kwargs: {}
+
+
+def test_passthrough_behavior_mutation_fails_closed_for_stream() -> None:
+    built = build_intake_model_node(
+        transport=IntakeTransport(),
+        profile=_profile(),
+        policy=_policy(),
+    )
+    _mutate_internal_passthrough_func(built)
+
+    assert not _is_vetted_intake_model_runnable(built.runnable)
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_LCEL_RUNNABLE_NOT_VETTED",
+    ):
+        list(built.runnable.stream({}))
+
+
+@pytest.mark.asyncio
+async def test_config_helper_mutation_fails_closed_for_ainvoke() -> None:
+    built = build_intake_model_node(
+        transport=IntakeTransport(),
+        profile=_profile(),
+        policy=_policy(),
+    )
+    _override_instance_method(built.patch_projector, "_acall_with_config")
+
+    assert not _is_vetted_intake_model_runnable(built.runnable)
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_LCEL_RUNNABLE_NOT_VETTED",
+    ):
+        await built.runnable.ainvoke({})
 
 
 def test_projector_instance_override_fails_closed_on_real_event_route(
