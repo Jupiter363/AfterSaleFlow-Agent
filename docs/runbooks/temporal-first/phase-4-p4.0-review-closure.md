@@ -42,3 +42,14 @@ The fixture now delegates to `ConfiguredRoomEpochSelector.terminalLegacySelectio
 scenarios pass with the production allocator and PostgreSQL Testcontainers. Candidate `fd8d1a1b`
 and all of its reports are quarantined; the corrected candidate must rerun all four Batch 0 source
 suites from scratch.
+
+Candidate `e123d3e3` then authenticated the corrected Java baseline (`83/83`) but exposed a second
+fixture issue before any frontend assertion: Vitest 3's host-derived minimum worker count exceeded
+the matrix's `--maxWorkers=2`, producing a worker-range startup error and a zero-test JUnit file.
+Adding the explicit pair `--minWorkers=1 --maxWorkers=2` executes all six files and passes `120/120`.
+This is classified `FIXTURE`; `e123d3e3` reports remain diagnostic only, and the matrix correction
+requires another clean candidate with all four source suites rerun.
+
+The accepted matrix invokes `node node_modules/vitest/vitest.mjs` directly, with both worker bounds.
+This avoids `pnpm exec` attempting dependency mutation in a non-interactive detached worktree. The
+entry and final candidate commands are locked to the same exact invocation by the Phase 4 static gate.

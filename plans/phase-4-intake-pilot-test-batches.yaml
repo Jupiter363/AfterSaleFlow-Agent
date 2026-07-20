@@ -535,13 +535,14 @@ batches:
       - id: p4_entry_frontend
         cwd: frontend
         command: >-
-          pnpm exec vitest run
+          node node_modules/vitest/vitest.mjs run
           src/views/disputes/IntakeRoomView.test.js
           src/views/disputes/DisputeOverviewView.test.js
           src/components/room/RoomShell.test.js
           src/api/agentStream.test.js
           src/stores/agentStream.test.js
           src/stores/room.test.js
+          --minWorkers=1
           --maxWorkers=2
     baseline_suites:
       java:
@@ -757,13 +758,14 @@ batches:
       - id: frontend_phase_4
         cwd: frontend
         command: >-
-          pnpm exec vitest run
+          node node_modules/vitest/vitest.mjs run
           src/views/disputes/IntakeRoomView.test.js
           src/views/disputes/DisputeOverviewView.test.js
           src/components/room/RoomShell.test.js
           src/api/agentStream.test.js
           src/stores/agentStream.test.js
           src/stores/room.test.js
+          --minWorkers=1
           --maxWorkers=2
       - id: static_phase_4
         cwd: .

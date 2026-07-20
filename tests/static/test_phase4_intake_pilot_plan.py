@@ -198,9 +198,13 @@ def test_phase4_batch_policy_defers_heavy_recovery_and_freezes_one_candidate() -
     assert candidate["execution"]["database_workers"] == 1
     assert batches["P4-UNIFIED-CHECKPOINT"]["automatic"] is False
 
-    entry_commands = {
-        item["id"]: item["command"]
+    entry_sources = {
+        item["id"]: item
         for item in batches["P4-BATCH-0"]["source_commands"]
+    }
+    entry_commands = {
+        source_id: source["command"]
+        for source_id, source in entry_sources.items()
     }
     assert set(entry_commands) == {
         "p4_entry_static",
@@ -222,6 +226,34 @@ def test_phase4_batch_policy_defers_heavy_recovery_and_freezes_one_candidate() -
         "agentStream.test.js",
     ):
         assert any(required in command for command in entry_commands.values())
+
+    expected_frontend_command = " ".join(
+        (
+            "node node_modules/vitest/vitest.mjs run",
+            "src/views/disputes/IntakeRoomView.test.js",
+            "src/views/disputes/DisputeOverviewView.test.js",
+            "src/components/room/RoomShell.test.js",
+            "src/api/agentStream.test.js",
+            "src/stores/agentStream.test.js",
+            "src/stores/room.test.js",
+            "--minWorkers=1",
+            "--maxWorkers=2",
+        )
+    )
+    assert entry_commands["p4_entry_frontend"] == expected_frontend_command
+    assert entry_sources["p4_entry_frontend"]["cwd"] == "frontend"
+
+    candidate_sources = {
+        item["id"]: item
+        for item in candidate["source_commands"]
+        if "command" in item
+    }
+    candidate_commands = {
+        source_id: source["command"]
+        for source_id, source in candidate_sources.items()
+    }
+    assert candidate_commands["frontend_phase_4"] == expected_frontend_command
+    assert candidate_sources["frontend_phase_4"]["cwd"] == "frontend"
 
 
 def test_phase4_schemas_validate_positive_and_reject_negative_fixtures() -> None:
