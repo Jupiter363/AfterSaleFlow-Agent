@@ -6,7 +6,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from inspect import getattr_static
 from typing import Any, Literal, cast
-from weakref import WeakValueDictionary
+from weakref import WeakKeyDictionary
 
 from langchain_core.messages import AIMessage, SystemMessage
 from langchain_core.output_parsers import PydanticOutputParser
@@ -112,6 +112,13 @@ _RUNNABLE_CONFIG_METHOD_NAMES = (
     "_atransform_stream_with_config",
 )
 _PASSTHROUGH_BEHAVIOR_ATTRIBUTE_NAMES = ("func", "afunc", "input_type")
+_VETTED_WRAPPER_METHOD_NAMES = _EXECUTION_METHOD_NAMES + (
+    "_is_sealed",
+    "_before_execution",
+    "_after_execution",
+    "_run_test_hook",
+    "_require_sealed",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -314,9 +321,9 @@ class _VettedIntakeModelRunnable(Runnable[IntakeGraphStateV2, dict[str, Any]]):
         config: RunnableConfig | None = None,
         **kwargs: Any,
     ) -> Any:
-        self._before_execution()
+        _VettedIntakeModelRunnable._before_execution(self)
         output = self._pipeline.invoke(input, config=config, **kwargs)
-        self._after_execution()
+        _VettedIntakeModelRunnable._after_execution(self)
         return output
 
     async def ainvoke(
@@ -325,9 +332,9 @@ class _VettedIntakeModelRunnable(Runnable[IntakeGraphStateV2, dict[str, Any]]):
         config: RunnableConfig | None = None,
         **kwargs: Any,
     ) -> Any:
-        self._before_execution()
+        _VettedIntakeModelRunnable._before_execution(self)
         output = await self._pipeline.ainvoke(input, config=config, **kwargs)
-        self._after_execution()
+        _VettedIntakeModelRunnable._after_execution(self)
         return output
 
     def batch(
@@ -338,14 +345,14 @@ class _VettedIntakeModelRunnable(Runnable[IntakeGraphStateV2, dict[str, Any]]):
         return_exceptions: bool = False,
         **kwargs: Any,
     ) -> list[dict[str, Any]]:
-        self._before_execution()
+        _VettedIntakeModelRunnable._before_execution(self)
         output = self._pipeline.batch(
             inputs,
             config=config,
             return_exceptions=return_exceptions,
             **kwargs,
         )
-        self._after_execution()
+        _VettedIntakeModelRunnable._after_execution(self)
         return output
 
     async def abatch(
@@ -356,14 +363,14 @@ class _VettedIntakeModelRunnable(Runnable[IntakeGraphStateV2, dict[str, Any]]):
         return_exceptions: bool = False,
         **kwargs: Any,
     ) -> list[dict[str, Any]]:
-        self._before_execution()
+        _VettedIntakeModelRunnable._before_execution(self)
         output = await self._pipeline.abatch(
             inputs,
             config=config,
             return_exceptions=return_exceptions,
             **kwargs,
         )
-        self._after_execution()
+        _VettedIntakeModelRunnable._after_execution(self)
         return output
 
     def stream(
@@ -372,11 +379,11 @@ class _VettedIntakeModelRunnable(Runnable[IntakeGraphStateV2, dict[str, Any]]):
         config: RunnableConfig | None = None,
         **kwargs: Any,
     ) -> Iterator[dict[str, Any]]:
-        self._before_execution()
+        _VettedIntakeModelRunnable._before_execution(self)
         for chunk in self._pipeline.stream(input, config=config, **kwargs):
-            self._require_sealed()
+            _VettedIntakeModelRunnable._require_sealed(self)
             yield chunk
-        self._after_execution()
+        _VettedIntakeModelRunnable._after_execution(self)
 
     async def astream(
         self,
@@ -384,11 +391,11 @@ class _VettedIntakeModelRunnable(Runnable[IntakeGraphStateV2, dict[str, Any]]):
         config: RunnableConfig | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[dict[str, Any]]:
-        self._before_execution()
+        _VettedIntakeModelRunnable._before_execution(self)
         async for chunk in self._pipeline.astream(input, config=config, **kwargs):
-            self._require_sealed()
+            _VettedIntakeModelRunnable._require_sealed(self)
             yield chunk
-        self._after_execution()
+        _VettedIntakeModelRunnable._after_execution(self)
 
     def transform(
         self,
@@ -396,11 +403,11 @@ class _VettedIntakeModelRunnable(Runnable[IntakeGraphStateV2, dict[str, Any]]):
         config: RunnableConfig | None = None,
         **kwargs: Any,
     ) -> Iterator[dict[str, Any]]:
-        self._before_execution()
+        _VettedIntakeModelRunnable._before_execution(self)
         for chunk in self._pipeline.transform(input, config=config, **kwargs):
-            self._require_sealed()
+            _VettedIntakeModelRunnable._require_sealed(self)
             yield chunk
-        self._after_execution()
+        _VettedIntakeModelRunnable._after_execution(self)
 
     async def atransform(
         self,
@@ -408,27 +415,23 @@ class _VettedIntakeModelRunnable(Runnable[IntakeGraphStateV2, dict[str, Any]]):
         config: RunnableConfig | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[dict[str, Any]]:
-        self._before_execution()
+        _VettedIntakeModelRunnable._before_execution(self)
         async for chunk in self._pipeline.atransform(input, config=config, **kwargs):
-            self._require_sealed()
+            _VettedIntakeModelRunnable._require_sealed(self)
             yield chunk
-        self._after_execution()
+        _VettedIntakeModelRunnable._after_execution(self)
 
     def _is_sealed(self) -> bool:
-        return (
-            self._vetted_token is _VETTED_INTAKE_RUNNABLE_TOKEN
-            and _matches_runnable_structure(self._pipeline, self._structure_seal)
-            and _matches_intake_component_seal(self._component_seal)
-        )
+        return _is_vetted_intake_model_runnable(self)
 
     def _before_execution(self) -> None:
-        self._require_sealed()
-        self._run_test_hook("before_model")
-        self._require_sealed()
+        _VettedIntakeModelRunnable._require_sealed(self)
+        _VettedIntakeModelRunnable._run_test_hook(self, "before_model")
+        _VettedIntakeModelRunnable._require_sealed(self)
 
     def _after_execution(self) -> None:
-        self._run_test_hook("after_model_before_checkpoint")
-        self._require_sealed()
+        _VettedIntakeModelRunnable._run_test_hook(self, "after_model_before_checkpoint")
+        _VettedIntakeModelRunnable._require_sealed(self)
 
     def _run_test_hook(self, phase: _IntakeModelTestPhase) -> None:
         if self._test_hook is not None:
@@ -439,9 +442,37 @@ class _VettedIntakeModelRunnable(Runnable[IntakeGraphStateV2, dict[str, Any]]):
             raise IntakeGraphContractError("INTAKE_LCEL_RUNNABLE_NOT_VETTED")
 
 
-_VETTED_INTAKE_RUNNABLES: WeakValueDictionary[int, _VettedIntakeModelRunnable] = (
-    WeakValueDictionary()
-)
+@dataclass(frozen=True, slots=True)
+class _VettedIntakeRunnableRegistration:
+    pipeline: RunnableSequence
+    structure_seal: _RunnableStructureSeal
+    component_seal: _IntakeComponentSeal
+    test_hook: _IntakeModelTestHook | None
+    behavior_methods: tuple[tuple[str, Any], ...]
+
+
+_VETTED_INTAKE_RUNNABLES: WeakKeyDictionary[
+    _VettedIntakeModelRunnable,
+    _VettedIntakeRunnableRegistration,
+] = WeakKeyDictionary()
+
+
+def _register_vetted_intake_model_runnable(
+    runnable: _VettedIntakeModelRunnable,
+) -> None:
+    try:
+        behavior_methods = tuple(
+            (name, getattr_static(runnable, name)) for name in _VETTED_WRAPPER_METHOD_NAMES
+        )
+    except AttributeError as error:
+        raise IntakeGraphContractError("INTAKE_LCEL_COMPONENT_SEAL_INVALID") from error
+    _VETTED_INTAKE_RUNNABLES[runnable] = _VettedIntakeRunnableRegistration(
+        pipeline=runnable._pipeline,
+        structure_seal=runnable._structure_seal,
+        component_seal=runnable._component_seal,
+        test_hook=runnable._test_hook,
+        behavior_methods=behavior_methods,
+    )
 
 
 def _create_vetted_intake_model_runnable(
@@ -457,15 +488,63 @@ def _create_vetted_intake_model_runnable(
         _token=_VETTED_INTAKE_RUNNABLE_TOKEN,
         _test_hook=test_hook,
     )
-    _VETTED_INTAKE_RUNNABLES[id(runnable)] = runnable
+    _register_vetted_intake_model_runnable(runnable)
     return runnable
 
 
 def _is_vetted_intake_model_runnable(value: Any) -> bool:
-    return (
-        type(value) is _VettedIntakeModelRunnable
-        and _VETTED_INTAKE_RUNNABLES.get(id(value)) is value
-        and value._is_sealed()
+    if type(value) is not _VettedIntakeModelRunnable:
+        return False
+    registration = _VETTED_INTAKE_RUNNABLES.get(value)
+    if registration is None:
+        return False
+    try:
+        if (
+            getattr_static(value, "_vetted_token") is not _VETTED_INTAKE_RUNNABLE_TOKEN
+            or getattr_static(value, "_pipeline") is not registration.pipeline
+            or getattr_static(value, "_structure_seal") is not registration.structure_seal
+            or getattr_static(value, "_component_seal") is not registration.component_seal
+            or getattr_static(value, "_test_hook") is not registration.test_hook
+        ):
+            return False
+        for name, implementation in registration.behavior_methods:
+            if getattr_static(value, name) is not implementation:
+                return False
+    except AttributeError:
+        return False
+    return _matches_runnable_structure(
+        registration.pipeline,
+        registration.structure_seal,
+    ) and _matches_intake_component_seal(registration.component_seal)
+
+
+def _invoke_vetted_intake_model_runnable(
+    value: Any,
+    input: IntakeGraphStateV2,
+    config: RunnableConfig | None = None,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    if not _is_vetted_intake_model_runnable(value):
+        raise IntakeGraphContractError("INTAKE_LCEL_RUNNABLE_NOT_VETTED")
+    runnable = cast(_VettedIntakeModelRunnable, value)
+    return cast(
+        dict[str, Any],
+        _VettedIntakeModelRunnable.invoke(runnable, input, config=config, **kwargs),
+    )
+
+
+async def _ainvoke_vetted_intake_model_runnable(
+    value: Any,
+    input: IntakeGraphStateV2,
+    config: RunnableConfig | None = None,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    if not _is_vetted_intake_model_runnable(value):
+        raise IntakeGraphContractError("INTAKE_LCEL_RUNNABLE_NOT_VETTED")
+    runnable = cast(_VettedIntakeModelRunnable, value)
+    return cast(
+        dict[str, Any],
+        await _VettedIntakeModelRunnable.ainvoke(runnable, input, config=config, **kwargs),
     )
 
 
@@ -747,6 +826,7 @@ def _seal_intake_components(
                 "aformat_prompt",
                 "format_messages",
                 "aformat_messages",
+                "get_name",
             ),
         ),
         (preflight, ("_validate",)),
@@ -784,6 +864,8 @@ def _seal_intake_components(
                 "_generate_with_cache",
                 "_agenerate_with_cache",
                 "_should_stream",
+                "_get_invocation_params",
+                "_convert_input",
             ),
         ),
         (
@@ -797,6 +879,7 @@ def _seal_intake_components(
                 "_parser_exception",
                 "_transform",
                 "_atransform",
+                "get_name",
             ),
         ),
         (model._transport, ("generate", "agenerate", "stream", "astream")),

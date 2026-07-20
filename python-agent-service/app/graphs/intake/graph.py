@@ -8,7 +8,11 @@ from langgraph.graph import END, START, StateGraph
 
 from app.graph_runtime.topology import ClosedRouter
 from app.graphs.intake.errors import IntakeGraphContractError
-from app.graphs.intake.lcel import _is_vetted_intake_model_runnable
+from app.graphs.intake.lcel import (
+    _ainvoke_vetted_intake_model_runnable,
+    _invoke_vetted_intake_model_runnable,
+    _is_vetted_intake_model_runnable,
+)
 from app.graphs.intake.nodes import (
     IntakeCognitionNode,
     apply_dossier_patch,
@@ -37,7 +41,12 @@ class _ValidatedIntakeCognitionRunnable(Runnable[IntakeGraphStateV2, dict[str, A
         config: RunnableConfig | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        patch = self._delegate.invoke(input, config=config, **kwargs)
+        patch = _invoke_vetted_intake_model_runnable(
+            self._delegate,
+            input,
+            config=config,
+            **kwargs,
+        )
         return validate_cognition_patch(input, patch)
 
     async def ainvoke(
@@ -46,7 +55,12 @@ class _ValidatedIntakeCognitionRunnable(Runnable[IntakeGraphStateV2, dict[str, A
         config: RunnableConfig | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        patch = await self._delegate.ainvoke(input, config=config, **kwargs)
+        patch = await _ainvoke_vetted_intake_model_runnable(
+            self._delegate,
+            input,
+            config=config,
+            **kwargs,
+        )
         return validate_cognition_patch(input, patch)
 
 

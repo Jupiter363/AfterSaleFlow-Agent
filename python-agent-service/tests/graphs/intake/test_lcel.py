@@ -40,6 +40,7 @@ from app.model_runtime.profiles import (
     system_prompt_sha256,
 )
 from app.model_runtime.transports import (
+    ModelTransportCompleted,
     ModelTransportRequest,
     ModelTransportResult,
 )
@@ -99,6 +100,14 @@ class IntakeTransport:
     async def astream(self, request: ModelTransportRequest):
         raise AssertionError("stream is outside this focused contract")
         yield
+
+
+class StreamingIntakeTransport(IntakeTransport):
+    def stream(self, request: ModelTransportRequest):
+        yield ModelTransportCompleted(result=self.generate(request))
+
+    async def astream(self, request: ModelTransportRequest):
+        yield ModelTransportCompleted(result=await self.agenerate(request))
 
 
 def _profile() -> ModelProfile:
@@ -267,6 +276,85 @@ def _mutate_internal_passthrough_func(built) -> None:
     state_passthrough = state_and_generation.steps__["state"]
     assert isinstance(state_passthrough, RunnablePassthrough)
     state_passthrough.func = lambda value: value
+
+
+@pytest.mark.parametrize(
+    "method_name",
+    [
+        "invoke",
+        "ainvoke",
+        "batch",
+        "abatch",
+        "stream",
+        "astream",
+        "transform",
+        "atransform",
+    ],
+)
+def test_wrapper_execution_entrypoint_replacement_invalidates_vetting(method_name) -> None:
+    built = build_intake_model_node(
+        transport=IntakeTransport(),
+        profile=_profile(),
+        policy=_policy(),
+    )
+    _override_instance_method(built.runnable, method_name)
+
+    assert not _is_vetted_intake_model_runnable(built.runnable)
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_LCEL_RUNNABLE_NOT_VETTED",
+    ):
+        build_intake_v2_graph(intake_lcel=built.runnable)
+
+
+@pytest.mark.parametrize(
+    "method_name",
+    [
+        "_is_sealed",
+        "_before_execution",
+        "_after_execution",
+        "_run_test_hook",
+        "_require_sealed",
+    ],
+)
+def test_wrapper_dispatch_method_replacement_fails_closed(method_name) -> None:
+    transport = IntakeTransport()
+    built = build_intake_model_node(
+        transport=transport,
+        profile=_profile(),
+        policy=_policy(),
+    )
+    _override_instance_method(built.runnable, method_name)
+
+    assert not _is_vetted_intake_model_runnable(built.runnable)
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_LCEL_RUNNABLE_NOT_VETTED",
+    ):
+        built.runnable.invoke({})
+    assert transport.generate_calls == 0
+
+
+@pytest.mark.parametrize(
+    "attribute",
+    ["_vetted_token", "_pipeline", "_structure_seal", "_component_seal"],
+)
+def test_wrapper_critical_reference_replacement_fails_closed(attribute) -> None:
+    transport = IntakeTransport()
+    built = build_intake_model_node(
+        transport=transport,
+        profile=_profile(),
+        policy=_policy(),
+    )
+    setattr(built.runnable, attribute, object())
+
+    assert not _is_vetted_intake_model_runnable(built.runnable)
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_LCEL_RUNNABLE_NOT_VETTED",
+    ):
+        built.runnable.invoke({})
+    assert transport.generate_calls == 0
 
 
 def test_vetted_runnable_identity_and_full_nested_structure_are_sealed() -> None:
@@ -505,8 +593,23 @@ async def test_nested_mutation_fails_closed_for_all_async_execution_entrypoints(
             id="model-validated-result-method",
         ),
         pytest.param(
+            lambda built: _override_instance_method(
+                built.model,
+                "_get_invocation_params",
+            ),
+            id="model-get-invocation-params-method",
+        ),
+        pytest.param(
+            lambda built: _override_instance_method(built.model, "_convert_input"),
+            id="model-convert-input-method",
+        ),
+        pytest.param(
             lambda built: _override_instance_method(built.prompt, "format_prompt"),
             id="prompt-format-method",
+        ),
+        pytest.param(
+            lambda built: _override_instance_method(built.prompt, "get_name"),
+            id="prompt-get-name-method",
         ),
         pytest.param(
             lambda built: _override_instance_method(built.parser, "parse_result"),
@@ -515,6 +618,10 @@ async def test_nested_mutation_fails_closed_for_all_async_execution_entrypoints(
         pytest.param(
             lambda built: _override_instance_method(built.parser, "invoke"),
             id="parser-invoke-method",
+        ),
+        pytest.param(
+            lambda built: _override_instance_method(built.parser, "get_name"),
+            id="parser-get-name-method",
         ),
         pytest.param(
             lambda built: _mutate_internal_passthrough_func(built),
@@ -542,6 +649,173 @@ def test_leaf_component_mutation_fails_closed_before_model_invocation(mutation) 
 
 def _override_instance_method(instance, name: str) -> None:
     instance.__dict__[name] = lambda *args, **kwargs: {}
+
+
+def _assert_accounting(patch: dict[str, Any]) -> None:
+    assert patch["usage_by_invocation"]["ATTEMPT_P4_USER_2_1"] == {
+        "input_tokens": 8,
+        "output_tokens": 5,
+        "total_tokens": 13,
+    }
+    assert patch["execution_receipts"]["ATTEMPT_P4_USER_2_1"]["node_name"] == "intake_lcel"
+
+
+def test_test_hook_identity_is_sealed_and_normal_hook_still_runs(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+) -> None:
+    state = _event_state(bindings, version_pins, snapshot, event)
+    phases: list[str] = []
+    built = build_intake_model_node(
+        transport=IntakeTransport(),
+        profile=_profile(),
+        policy=_policy(),
+        _test_hook=phases.append,
+    )
+
+    patch = built.runnable.invoke(state)
+
+    assert phases == ["before_model", "after_model_before_checkpoint"]
+    _assert_accounting(patch)
+
+    built.runnable._test_hook = lambda phase: phases.append(f"replacement:{phase}")
+    assert not _is_vetted_intake_model_runnable(built.runnable)
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_LCEL_RUNNABLE_NOT_VETTED",
+    ):
+        built.runnable.invoke(state)
+    assert phases == ["before_model", "after_model_before_checkpoint"]
+
+
+@pytest.mark.parametrize("entrypoint", ["invoke", "batch", "stream", "transform"])
+def test_normal_sync_wrapper_entrypoints_preserve_accounting(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+    entrypoint,
+) -> None:
+    state = _event_state(bindings, version_pins, snapshot, event)
+    built = build_intake_model_node(
+        transport=StreamingIntakeTransport(),
+        profile=_profile(),
+        policy=_policy(),
+    )
+
+    if entrypoint == "invoke":
+        patches = [built.runnable.invoke(state)]
+    elif entrypoint == "batch":
+        patches = built.runnable.batch([state])
+    elif entrypoint == "stream":
+        patches = list(built.runnable.stream(state))
+    else:
+        patches = list(built.runnable.transform(iter([state])))
+
+    assert len(patches) == 1
+    _assert_accounting(patches[0])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entrypoint", ["ainvoke", "abatch", "astream", "atransform"])
+async def test_normal_async_wrapper_entrypoints_preserve_accounting(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+    entrypoint,
+) -> None:
+    state = _event_state(bindings, version_pins, snapshot, event)
+    built = build_intake_model_node(
+        transport=StreamingIntakeTransport(),
+        profile=_profile(),
+        policy=_policy(),
+    )
+
+    if entrypoint == "ainvoke":
+        patches = [await built.runnable.ainvoke(state)]
+    elif entrypoint == "abatch":
+        patches = await built.runnable.abatch([state])
+    elif entrypoint == "astream":
+        patches = [chunk async for chunk in built.runnable.astream(state)]
+    else:
+
+        async def inputs():
+            yield state
+
+        patches = [chunk async for chunk in built.runnable.atransform(inputs())]
+
+    assert len(patches) == 1
+    _assert_accounting(patches[0])
+
+
+def test_compiled_graph_rechecks_delegate_before_sync_model_route(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+) -> None:
+    transport = IntakeTransport()
+    built = build_intake_model_node(
+        transport=transport,
+        profile=_profile(),
+        policy=_policy(),
+    )
+    graph = compile_intake_v2_graph(intake_lcel=built.runnable)
+    state = graph.invoke(
+        new_intake_graph_state(bindings=bindings, version_pins=version_pins),
+        context=IntakeTurnContext("SNAPSHOT", snapshot),
+    )
+    state["bindings"]["command"].update(
+        command_id="COMMAND_P4_USER_2",
+        logical_run_id="RUN_P4_USER_2",
+        attempt_id="ATTEMPT_P4_USER_2_1",
+    )
+    _override_instance_method(built.runnable, "invoke")
+
+    assert not _is_vetted_intake_model_runnable(built.runnable)
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_LCEL_RUNNABLE_NOT_VETTED",
+    ):
+        graph.invoke(state, context=IntakeTurnContext("EVENT", event))
+    assert transport.generate_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_compiled_graph_rechecks_delegate_before_async_model_route(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+) -> None:
+    transport = IntakeTransport()
+    built = build_intake_model_node(
+        transport=transport,
+        profile=_profile(),
+        policy=_policy(),
+    )
+    graph = compile_intake_v2_graph(intake_lcel=built.runnable)
+    state = await graph.ainvoke(
+        new_intake_graph_state(bindings=bindings, version_pins=version_pins),
+        context=IntakeTurnContext("SNAPSHOT", snapshot),
+    )
+    state["bindings"]["command"].update(
+        command_id="COMMAND_P4_USER_2",
+        logical_run_id="RUN_P4_USER_2",
+        attempt_id="ATTEMPT_P4_USER_2_1",
+    )
+    _override_instance_method(built.runnable, "ainvoke")
+
+    assert not _is_vetted_intake_model_runnable(built.runnable)
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_LCEL_RUNNABLE_NOT_VETTED",
+    ):
+        await graph.ainvoke(state, context=IntakeTurnContext("EVENT", event))
+    assert transport.generate_calls == 0
 
 
 def test_passthrough_behavior_mutation_fails_closed_for_stream() -> None:
