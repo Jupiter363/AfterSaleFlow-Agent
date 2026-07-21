@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.after-sale-flow.example/agent-platform/intake/v2/intake-human-input-command.schema.json",
+  "title": "Intake Human Input Command v1",
+  "type": "object",
+  "additionalProperties": false,
+  "x-max-encoded-bytes": 32768,
+  "required": [
+    "schema_version",
+    "command_id",
+    "tenant_surrogate",
+    "case_id",
+    "room_type",
+    "room_epoch",
+    "party",
+    "actor_id",
+    "actor_role",
+    "access_session_id",
+    "registration_id",
+    "message_id",
+    "text",
+    "occurred_at_epoch_micros"
+  ],
+  "properties": {
+    "schema_version": {"const": "intake-human-input-command.v1"},
+    "command_id": {"$ref": "#/$defs/identifier"},
+    "tenant_surrogate": {"$ref": "#/$defs/identifier"},
+    "case_id": {"$ref": "#/$defs/identifier"},
+    "room_type": {"const": "INTAKE"},
+    "room_epoch": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "party": {"enum": ["INITIATOR", "RESPONDENT"]},
+    "actor_id": {"$ref": "#/$defs/identifier"},
+    "actor_role": {"enum": ["USER", "MERCHANT"]},
+    "access_session_id": {"$ref": "#/$defs/identifier"},
+    "registration_id": {"$ref": "#/$defs/identifier"},
+    "message_id": {"$ref": "#/$defs/identifier"},
+    "text": {"type": "string", "minLength": 1, "maxLength": 8192},
+    "occurred_at_epoch_micros": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    }
+  }
+}

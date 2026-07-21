@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.after-sale-flow.example/agent-platform/intake/v2/intake-branch-command.schema.json",
+  "title": "Intake Branch Command v1",
+  "type": "object",
+  "additionalProperties": false,
+  "x-max-encoded-bytes": 16384,
+  "required": ["schema_version", "command_id", "command_type", "party", "operation"],
+  "properties": {
+    "schema_version": {"const": "intake-branch-command.v1"},
+    "command_id": {"$ref": "#/$defs/identifier"},
+    "command_type": {"enum": ["INTAKE_CONFIRM", "INTAKE_CANCEL"]},
+    "party": {"enum": ["INITIATOR", "RESPONDENT"]},
+    "operation": {
+      "enum": ["INITIATOR_ACCEPT", "INITIATOR_REJECT", "RESPONDENT_CONFIRM", "CANCEL"]
+    },
+    "admissible": {"type": "boolean"},
+    "dispute_type": {"$ref": "#/$defs/identifier"},
+    "risk_level": {"enum": ["LOW", "MEDIUM", "HIGH"]},
+    "confirmation_note": {"type": "string", "minLength": 1, "maxLength": 2000},
+    "cancellation_reason": {"type": "string", "minLength": 0, "maxLength": 2000}
+  },
+  "oneOf": [
+    {
+      "required": ["admissible", "dispute_type", "risk_level"],
+      "properties": {
+        "command_type": {"const": "INTAKE_CONFIRM"},
+        "party": {"const": "INITIATOR"},
+        "operation": {"const": "INITIATOR_ACCEPT"},
+        "admissible": {"const": true}
+      },
+      "not": {"required": ["cancellation_reason"]}
+    },
+    {
+      "required": ["admissible", "dispute_type", "risk_level"],
+      "properties": {
+        "command_type": {"const": "INTAKE_CONFIRM"},
+        "party": {"const": "INITIATOR"},
+        "operation": {"const": "INITIATOR_REJECT"},
+        "admissible": {"const": false}
+      },
+      "not": {"required": ["cancellation_reason"]}
+    },
+    {
+      "required": ["admissible", "dispute_type", "risk_level"],
+      "properties": {
+        "command_type": {"const": "INTAKE_CONFIRM"},
+        "party": {"const": "RESPONDENT"},
+        "operation": {"const": "RESPONDENT_CONFIRM"},
+        "admissible": {"const": true}
+      },
+      "not": {"required": ["cancellation_reason"]}
+    },
+    {
+      "required": ["cancellation_reason"],
+      "properties": {
+        "command_type": {"const": "INTAKE_CANCEL"},
+        "party": {"const": "INITIATOR"},
+        "operation": {"const": "CANCEL"}
+      },
+      "not": {
+        "anyOf": [
+          {"required": ["admissible"]},
+          {"required": ["dispute_type"]},
+          {"required": ["risk_level"]},
+          {"required": ["confirmation_note"]}
+        ]
+      }
+    }
+  ],
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    }
+  }
+}

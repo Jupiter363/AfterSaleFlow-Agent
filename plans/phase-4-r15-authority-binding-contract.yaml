@@ -10,6 +10,15 @@ purpose: >-
   registration, access-session, AgentSession, payload, and command authority
   without accepting a client-selected thread or session.
 
+migration_contract:
+  file: V043_1__intake_authority_bindings.sql
+  predecessor: V043__intake_graph_bindings.sql
+  mode: EXPAND_ONLY
+  reserved_versions_untouched:
+    V044: phase_6_hearing_temporal_projection
+    V045: outcome_execution_compensation
+  implementation_present_in_this_gate: false
+
 runtime_gate:
   allowed_modes: [DISABLED, SIGNED_SYNTHETIC_SHADOW]
   real_case_shadow_allowed: false
@@ -35,15 +44,48 @@ execution_matrix:
 authority_tables:
   case_intake_epoch_selection_binding:
     cardinality: exactly_one_per_v2_intake_epoch
+    columns:
+      epoch_id: {sql_type: varchar, length: 64, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      tenant_surrogate: {sql_type: varchar, length: 128, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      case_id: {sql_type: varchar, length: 64, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      room_type: {sql_type: varchar, length: 32, nullable: false, default: NO_DEFAULT, checks: [constant_INTAKE]}
+      room_epoch: {sql_type: bigint, length: null, nullable: false, default: NO_DEFAULT, checks: [non_negative]}
+      fencing_token: {sql_type: bigint, length: null, nullable: false, default: NO_DEFAULT, checks: [positive]}
+      selection_hash: {sql_type: varchar, length: 64, nullable: false, default: NO_DEFAULT, checks: [lowercase_sha256]}
+      writer_mode: {sql_type: varchar, length: 16, nullable: false, default: NO_DEFAULT, checks: [constant_SHADOW]}
+      case_workflow_type: {sql_type: varchar, length: 128, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      case_workflow_build_id: {sql_type: varchar, length: 128, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      room_workflow_type: {sql_type: varchar, length: 128, nullable: false, default: NO_DEFAULT, checks: [constant_IntakeRoomWorkflow]}
+      room_workflow_build_id: {sql_type: varchar, length: 128, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      process_contract_version: {sql_type: varchar, length: 128, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      graph_key: {sql_type: varchar, length: 128, nullable: false, default: NO_DEFAULT, checks: [constant_intake_v2]}
+      graph_version: {sql_type: varchar, length: 128, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      checkpoint_schema_version: {sql_type: varchar, length: 128, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      state_schema_version: {sql_type: varchar, length: 128, nullable: false, default: NO_DEFAULT, checks: [constant_intake_graph_state_v2]}
+      stream_protocol: {sql_type: varchar, length: 128, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      prompt_version: {sql_type: varchar, length: 128, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      model_profile_id: {sql_type: varchar, length: 128, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      output_schema_version: {sql_type: varchar, length: 128, nullable: false, default: NO_DEFAULT, checks: [constant_intake_turn_proposal_v2]}
+      policy_version: {sql_type: varchar, length: 128, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      guardrail_version: {sql_type: varchar, length: 128, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      tool_policy_version: {sql_type: varchar, length: 128, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      cohort_policy_version: {sql_type: varchar, length: 128, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      agent_key: {sql_type: varchar, length: 128, nullable: false, default: NO_DEFAULT, checks: [constant_DISPUTE_INTAKE_OFFICER]}
+      agent_session_profile_version: {sql_type: varchar, length: 128, nullable: false, default: NO_DEFAULT, checks: [constant_agent_session_profile_v1]}
+      memory_policy_id: {sql_type: varchar, length: 128, nullable: false, default: NO_DEFAULT, checks: [constant_GRAPH_PRIVATE_NO_MEMORY_FRAME_V1]}
+      created_at: {sql_type: timestamptz, length: null, nullable: false, default: CURRENT_TIMESTAMP, checks: []}
     primary_key: [epoch_id]
     unique_keys:
+      - [epoch_id, tenant_surrogate, case_id, room_type, room_epoch, fencing_token]
+    candidate_keys:
+      - [epoch_id]
       - [epoch_id, tenant_surrogate, case_id, room_type, room_epoch, fencing_token]
     foreign_keys:
       - columns: [epoch_id, tenant_surrogate, case_id, room_type, room_epoch, fencing_token]
         references:
           table: case_room_epoch
           columns: [id, tenant_surrogate, case_id, room_type, room_epoch, fencing_token]
-          candidate_key_added_by_V044: true
+          candidate_key_added_by_V043_1: true
     immutable: true
     required_pins:
       - selection_hash
@@ -68,11 +110,70 @@ authority_tables:
       - agent_key
       - agent_session_profile_version
       - memory_policy_id
+    check_constraints:
+      ck_r15_selection_constants:
+        all:
+          - room_type_EQUALS_INTAKE
+          - writer_mode_EQUALS_SHADOW
+          - room_workflow_type_EQUALS_IntakeRoomWorkflow
+          - graph_key_EQUALS_intake.v2
+          - state_schema_version_EQUALS_intake-graph-state.v2
+          - output_schema_version_EQUALS_intake-turn-proposal.v2
+          - agent_key_EQUALS_DISPUTE_INTAKE_OFFICER
+          - agent_session_profile_version_EQUALS_agent-session-profile.v1
+          - memory_policy_id_EQUALS_GRAPH_PRIVATE_NO_MEMORY_FRAME_V1
+      ck_r15_selection_epoch: [room_epoch_GTE_0, fencing_token_GT_0]
+      ck_r15_selection_hash: [selection_hash_MATCHES_lowercase_sha256]
 
   case_intake_epoch_party_authority:
     cardinality: exactly_one_initiator_and_one_respondent_per_bound_epoch
+    columns:
+      authority_id: {sql_type: varchar, length: 128, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      epoch_id: {sql_type: varchar, length: 64, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      party: {sql_type: varchar, length: 16, nullable: false, default: NO_DEFAULT, checks: [enum_INITIATOR_RESPONDENT]}
+      tenant_surrogate: {sql_type: varchar, length: 128, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      case_id: {sql_type: varchar, length: 64, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      session_tenant_id: {sql_type: varchar, length: 64, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      session_case_id: {sql_type: varchar, length: 64, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      room_type: {sql_type: varchar, length: 32, nullable: false, default: NO_DEFAULT, checks: [constant_INTAKE]}
+      room_epoch: {sql_type: bigint, length: null, nullable: false, default: NO_DEFAULT, checks: [non_negative]}
+      fencing_token: {sql_type: bigint, length: null, nullable: false, default: NO_DEFAULT, checks: [positive]}
+      registration_id: {sql_type: varchar, length: 128, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      registration_hash: {sql_type: varchar, length: 64, nullable: false, default: NO_DEFAULT, checks: [lowercase_sha256]}
+      thread_id: {sql_type: varchar, length: 64, nullable: false, default: NO_DEFAULT, checks: [graph_thread_id_v1]}
+      actor_id: {sql_type: varchar, length: 128, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      actor_role: {sql_type: varchar, length: 32, nullable: false, default: NO_DEFAULT, checks: [enum_USER_MERCHANT]}
+      audience: {sql_type: varchar, length: 32, nullable: false, default: NO_DEFAULT, checks: [enum_USER_MERCHANT]}
+      actor_scope_hash: {sql_type: varchar, length: 64, nullable: false, default: NO_DEFAULT, checks: [lowercase_sha256]}
+      access_session_id: {sql_type: varchar, length: 64, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      permission_level: {sql_type: varchar, length: 64, nullable: false, default: NO_DEFAULT, checks: [enum_PARTY_USER_PARTY_MERCHANT]}
+      agent_session_id: {sql_type: varchar, length: 64, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      agent_key: {sql_type: varchar, length: 128, nullable: false, default: NO_DEFAULT, checks: [constant_DISPUTE_INTAKE_OFFICER]}
+      prompt_version: {sql_type: varchar, length: 128, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      agent_session_profile_version: {sql_type: varchar, length: 128, nullable: false, default: NO_DEFAULT, checks: [constant_agent_session_profile_v1]}
+      prompt_profile_id: {sql_type: varchar, length: 128, nullable: false, default: NO_DEFAULT, checks: [agent_session_profile_hash_id]}
+      memory_policy_id: {sql_type: varchar, length: 128, nullable: false, default: NO_DEFAULT, checks: [constant_GRAPH_PRIVATE_NO_MEMORY_FRAME_V1]}
+      created_at: {sql_type: timestamptz, length: null, nullable: false, default: CURRENT_TIMESTAMP, checks: []}
     primary_key: [authority_id]
     unique_keys:
+      - [epoch_id, party]
+      -
+        - authority_id
+        - epoch_id
+        - tenant_surrogate
+        - case_id
+        - room_type
+        - room_epoch
+        - fencing_token
+        - access_session_id
+        - registration_id
+        - thread_id
+        - actor_id
+        - actor_role
+        - actor_scope_hash
+        - agent_session_id
+    candidate_keys:
+      - [authority_id]
       - [epoch_id, party]
       -
         - authority_id
@@ -98,6 +199,7 @@ authority_tables:
           - registration_id
           - tenant_surrogate
           - case_id
+          - room_type
           - room_epoch
           - fencing_token
           - thread_id
@@ -113,6 +215,7 @@ authority_tables:
             - registration_id
             - tenant_surrogate
             - case_id
+            - room_type
             - room_epoch
             - fencing_token
             - thread_id
@@ -122,7 +225,7 @@ authority_tables:
             - actor_scope_hash
             - agent_session_id
             - registration_hash
-          candidate_key_added_by_V044: true
+          candidate_key_added_by_V043_1: true
       - columns:
           - access_session_id
           - session_tenant_id
@@ -139,7 +242,7 @@ authority_tables:
             - actor_id
             - actor_role
             - permission_level
-          candidate_key_added_by_V044: true
+          candidate_key_added_by_V043_1: true
       - columns:
           - agent_session_id
           - session_tenant_id
@@ -149,8 +252,6 @@ authority_tables:
           - actor_id
           - actor_role
           - agent_key
-          - prompt_version
-          - agent_session_profile_version
           - prompt_profile_id
           - memory_policy_id
         references:
@@ -164,11 +265,9 @@ authority_tables:
             - actor_id
             - actor_role
             - agent_key
-            - prompt_version
-            - agent_session_profile_version
             - prompt_profile_id
             - memory_policy_id
-          candidate_key_added_by_V044: true
+          candidate_key_added_by_V043_1: true
     immutable: true
     required_pins:
       - party
@@ -194,6 +293,42 @@ authority_tables:
       - prompt_profile_id
       - agent_session_profile_version
       - memory_policy_id
+    check_constraints:
+      ck_r15_party_scope:
+        all:
+          - party_IN_INITIATOR_RESPONDENT
+          - room_type_EQUALS_INTAKE
+          - session_tenant_id_EQUALS_tenant_surrogate
+          - session_case_id_EQUALS_case_id
+          - actor_role_EQUALS_audience
+      ck_r15_party_permission:
+        any:
+          - actor_role_EQUALS_USER_AND_permission_level_EQUALS_PARTY_USER
+          - actor_role_EQUALS_MERCHANT_AND_permission_level_EQUALS_PARTY_MERCHANT
+      ck_r15_party_profile:
+        all:
+          - agent_key_EQUALS_DISPUTE_INTAKE_OFFICER
+          - agent_session_profile_version_EQUALS_agent-session-profile.v1
+          - prompt_profile_id_MATCHES_asp.v1.lowercase_sha256
+          - memory_policy_id_EQUALS_GRAPH_PRIVATE_NO_MEMORY_FRAME_V1
+    agent_session_profile_proof:
+      existing_V019_fk_columns:
+        - agent_session_id
+        - session_tenant_id
+        - session_case_id
+        - room_type
+        - access_session_id
+        - actor_id
+        - actor_role
+        - agent_key
+        - prompt_profile_id
+        - memory_policy_id
+      party_local_hash_inputs: [agent_key, actor_role, prompt_version, agent_session_profile_version]
+      prompt_profile_id_formula: "asp.v1.{lowercase_sha256_of_rfc8785_utf8_hash_inputs}"
+      registry_requirement: immutable_exact_input_and_id_match
+      epoch_prompt_and_profile_versions_must_equal_party: true
+      registration_prompt_version_must_equal_party: true
+      V019_column_addition_or_backfill_required: false
     scope_checks:
       party_enum: [INITIATOR, RESPONDENT]
       session_tenant_id_equals_tenant_surrogate: true
@@ -206,12 +341,15 @@ authority_tables:
       epoch_binding_transaction:
         case_access_session: ACTIVE
         agent_conversation_session: ACTIVE
+        case_intake_graph_thread_binding: REGISTERED
       acceptance_transaction:
         case_access_session: ACTIVE
         agent_conversation_session: ACTIVE
+        case_intake_graph_thread_binding: REGISTERED
       start_read_transaction:
         case_access_session: ACTIVE
         agent_conversation_session: ACTIVE
+        case_intake_graph_thread_binding: REGISTERED
       status_columns_in_foreign_keys: false
       reason: ACTIVE_is_mutable_and_must_not_be_part_of_an_immutable_candidate_key
     bootstrap_cardinality_assertion:
@@ -223,6 +361,37 @@ authority_tables:
 
   case_intake_command_payload_authority:
     cardinality: exactly_one_server_bound_payload_per_bound_command
+    columns:
+      payload_authority_id: {sql_type: varchar, length: 128, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      command_id: {sql_type: varchar, length: 128, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      epoch_id: {sql_type: varchar, length: 64, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      party_authority_id: {sql_type: varchar, length: 128, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      access_session_id: {sql_type: varchar, length: 64, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      registration_id: {sql_type: varchar, length: 128, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      tenant_surrogate: {sql_type: varchar, length: 128, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      case_id: {sql_type: varchar, length: 64, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      room_type: {sql_type: varchar, length: 32, nullable: false, default: NO_DEFAULT, checks: [constant_INTAKE]}
+      room_epoch: {sql_type: bigint, length: null, nullable: false, default: NO_DEFAULT, checks: [non_negative]}
+      fencing_token: {sql_type: bigint, length: null, nullable: false, default: NO_DEFAULT, checks: [positive]}
+      thread_id: {sql_type: varchar, length: 64, nullable: false, default: NO_DEFAULT, checks: [graph_thread_id_v1]}
+      actor_id: {sql_type: varchar, length: 128, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      actor_role: {sql_type: varchar, length: 32, nullable: false, default: NO_DEFAULT, checks: [enum_USER_MERCHANT]}
+      actor_scope_hash: {sql_type: varchar, length: 64, nullable: false, default: NO_DEFAULT, checks: [lowercase_sha256]}
+      agent_session_id: {sql_type: varchar, length: 64, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      source_kind: {sql_type: varchar, length: 32, nullable: false, default: NO_DEFAULT, checks: [payload_source_kind_enum]}
+      existing_event_binding_id: {sql_type: varchar, length: 128, nullable: true, default: NO_DEFAULT, checks: [identifier_when_present]}
+      artifact_id: {sql_type: varchar, length: 128, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      schema_version: {sql_type: varchar, length: 128, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      object_uri: {sql_type: varchar, length: 1024, nullable: false, default: NO_DEFAULT, checks: [immutable_uri]}
+      object_version: {sql_type: varchar, length: 128, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      content_sha256: {sql_type: varchar, length: 64, nullable: false, default: NO_DEFAULT, checks: [lowercase_sha256]}
+      size_bytes: {sql_type: bigint, length: null, nullable: false, default: NO_DEFAULT, checks: [positive_source_bounded]}
+      put_receipt_schema_version: {sql_type: varchar, length: 128, nullable: true, default: NO_DEFAULT, checks: [constant_put_receipt_v1_when_present]}
+      put_receipt_id: {sql_type: varchar, length: 128, nullable: true, default: NO_DEFAULT, checks: [identifier_when_present]}
+      put_idempotency_key: {sql_type: varchar, length: 72, nullable: true, default: NO_DEFAULT, checks: [put_key_v1_when_present]}
+      put_receipt_stored_at_epoch_micros: {sql_type: bigint, length: null, nullable: true, default: NO_DEFAULT, checks: [epoch_micros_when_present]}
+      put_receipt_hash: {sql_type: varchar, length: 64, nullable: true, default: NO_DEFAULT, checks: [lowercase_sha256_when_present]}
+      created_at: {sql_type: timestamptz, length: null, nullable: false, default: CURRENT_TIMESTAMP, checks: []}
     primary_key: [payload_authority_id]
     unique_keys:
       - [tenant_surrogate, artifact_id]
@@ -240,6 +409,25 @@ authority_tables:
         - thread_id
         - actor_scope_hash
         - agent_session_id
+        - command_id
+    candidate_keys:
+      - [payload_authority_id]
+      - [tenant_surrogate, artifact_id]
+      -
+        - payload_authority_id
+        - epoch_id
+        - party_authority_id
+        - access_session_id
+        - registration_id
+        - tenant_surrogate
+        - case_id
+        - room_type
+        - room_epoch
+        - fencing_token
+        - thread_id
+        - actor_scope_hash
+        - agent_session_id
+        - command_id
     foreign_keys:
       - columns:
           - party_authority_id
@@ -273,49 +461,14 @@ authority_tables:
             - actor_role
             - actor_scope_hash
             - agent_session_id
-      - columns:
-          - existing_event_binding_id
-          - registration_id
-          - tenant_surrogate
-          - case_id
-          - room_type
-          - room_epoch
-          - fencing_token
-          - thread_id
-          - actor_scope_hash
-          - agent_session_id
-          - actor_role
-          - existing_event_binding_type
-          - schema_version
-          - artifact_id
-          - object_uri
-          - object_version
-          - content_sha256
-          - size_bytes
+      - columns: [existing_event_binding_id, registration_id]
         references:
           table: case_intake_snapshot_binding
-          columns:
-            - binding_id
-            - thread_registration_id
-            - tenant_surrogate
-            - case_id
-            - room_type
-            - room_epoch
-            - fencing_token
-            - thread_id
-            - actor_scope_hash
-            - agent_session_id
-            - actor_audience
-            - binding_type
-            - schema_version
-            - artifact_id
-            - object_uri
-            - object_version
-            - content_sha256
-            - size_bytes
-          candidate_key_added_by_V044: true
+          columns: [binding_id, thread_registration_id]
+          candidate_key_added_by_V043_1: true
     immutable: true
     required_pins:
+      - command_id
       - epoch_id
       - party_authority_id
       - access_session_id
@@ -341,6 +494,7 @@ authority_tables:
       database_check_constraint_required: true
       common_non_null_columns:
         - payload_authority_id
+        - command_id
         - epoch_id
         - party_authority_id
         - access_session_id
@@ -365,59 +519,132 @@ authority_tables:
       EXISTING_PRIVATE_EVENT:
         required_values:
           source_kind: EXISTING_PRIVATE_EVENT
-          existing_event_binding_type: EVENT
           schema_version: intake-turn-event.v2
+          size_bytes_minimum: 1
+          size_bytes_maximum: 32768
         event_composite_non_null_columns:
           - existing_event_binding_id
           - registration_id
-          - tenant_surrogate
-          - case_id
-          - room_type
-          - room_epoch
-          - fencing_token
-          - thread_id
-          - actor_scope_hash
-          - agent_session_id
-          - actor_role
-          - existing_event_binding_type
-          - schema_version
-          - artifact_id
-          - object_uri
-          - object_version
-          - content_sha256
-          - size_bytes
         null_columns:
           - put_receipt_schema_version
           - put_receipt_id
-          - put_receipt_stored_at
+          - put_idempotency_key
+          - put_receipt_stored_at_epoch_micros
           - put_receipt_hash
       SERVER_MINTED_HUMAN_INPUT:
         required_values:
           source_kind: SERVER_MINTED_HUMAN_INPUT
           schema_version: intake-human-input-command.v1
           put_receipt_schema_version: intake-command-payload-put-receipt.v1
+          size_bytes_minimum: 1
+          size_bytes_maximum: 32768
         non_null_columns:
           - put_receipt_schema_version
           - put_receipt_id
-          - put_receipt_stored_at
+          - put_idempotency_key
+          - put_receipt_stored_at_epoch_micros
           - put_receipt_hash
-        null_columns: [existing_event_binding_id, existing_event_binding_type]
+        null_columns: [existing_event_binding_id]
       SERVER_CANONICAL_BRANCH:
         required_values:
           source_kind: SERVER_CANONICAL_BRANCH
           schema_version: intake-branch-command.v1
           put_receipt_schema_version: intake-command-payload-put-receipt.v1
+          size_bytes_minimum: 1
+          size_bytes_maximum: 16384
         non_null_columns:
           - put_receipt_schema_version
           - put_receipt_id
-          - put_receipt_stored_at
+          - put_idempotency_key
+          - put_receipt_stored_at_epoch_micros
           - put_receipt_hash
-        null_columns: [existing_event_binding_id, existing_event_binding_type]
+        null_columns: [existing_event_binding_id]
+    check_constraints:
+      ck_r15_payload_common:
+        all:
+          - room_type_EQUALS_INTAKE
+          - room_epoch_GTE_0
+          - fencing_token_GT_0
+          - content_sha256_MATCHES_lowercase_sha256
+          - object_uri_MATCHES_immutable_scheme
+      ck_r15_payload_source_shape:
+        exactly_one:
+          - source_kind_EXISTING_PRIVATE_EVENT_AND_schema_intake-turn-event.v2_AND_size_1_TO_32768_AND_event_binding_NOT_NULL_AND_all_put_receipt_columns_NULL
+          - source_kind_SERVER_MINTED_HUMAN_INPUT_AND_schema_intake-human-input-command.v1_AND_size_1_TO_32768_AND_event_binding_NULL_AND_all_put_receipt_columns_NOT_NULL
+          - source_kind_SERVER_CANONICAL_BRANCH_AND_schema_intake-branch-command.v1_AND_size_1_TO_16384_AND_event_binding_NULL_AND_all_put_receipt_columns_NOT_NULL
+    existing_private_event_assertion:
+      mechanism: V043_1_DEFERRABLE_CONSTRAINT_TRIGGER
+      timing: AFTER_INSERT
+      deferrable: true
+      initially: IMMEDIATE
+      compact_foreign_key: [existing_event_binding_id, registration_id]
+      v043_candidate_key: [binding_id, thread_registration_id]
+      v043_required_constants:
+        binding_type: EVENT
+        schema_version: intake-turn-event.v2
+        room_type: INTAKE
+        visibility: PRIVATE
+        initialization_marker: false
+      exact_column_comparison:
+        tenant_surrogate: tenant_surrogate
+        case_id: case_id
+        room_type: room_type
+        room_epoch: room_epoch
+        fencing_token: fencing_token
+        thread_id: thread_id
+        actor_scope_hash: actor_scope_hash
+        agent_session_id: agent_session_id
+        actor_audience: actor_role
+        schema_version: schema_version
+        artifact_id: artifact_id
+        object_uri: object_uri
+        object_version: object_version
+        content_sha256: content_sha256
+        size_bytes: size_bytes
+      functional_dependencies:
+        - payload_authority_id_determines_immutable_payload_row
+        - party_authority_id_determines_exact_registration_route
+        - binding_id_and_thread_registration_id_determine_immutable_V043_event_row
+      concurrency_safety:
+        - compact_FK_waits_for_referenced_V043_insert_commit
+        - V043_binding_is_update_delete_truncate_immutable
+        - constraint_trigger_reads_one_visible_row_by_compact_candidate_key
+        - payload_authority_is_insert_only
+      indexed_columns_forbidden: [object_uri]
 
   case_intake_command_authority:
     cardinality: exactly_one_per_bound_command
+    columns:
+      case_command_id: {sql_type: varchar, length: 64, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      command_id: {sql_type: varchar, length: 128, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      case_command_sequence: {sql_type: bigint, length: null, nullable: false, default: NO_DEFAULT, checks: [positive]}
+      command_type: {sql_type: varchar, length: 64, nullable: false, default: NO_DEFAULT, checks: [enum_INTAKE_MESSAGE_CONFIRM_CANCEL]}
+      epoch_id: {sql_type: varchar, length: 64, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      party_authority_id: {sql_type: varchar, length: 128, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      access_session_id: {sql_type: varchar, length: 64, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      registration_id: {sql_type: varchar, length: 128, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      tenant_surrogate: {sql_type: varchar, length: 128, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      case_id: {sql_type: varchar, length: 64, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      room_type: {sql_type: varchar, length: 32, nullable: false, default: NO_DEFAULT, checks: [constant_INTAKE]}
+      room_epoch: {sql_type: bigint, length: null, nullable: false, default: NO_DEFAULT, checks: [non_negative]}
+      fencing_token: {sql_type: bigint, length: null, nullable: false, default: NO_DEFAULT, checks: [positive]}
+      thread_id: {sql_type: varchar, length: 64, nullable: false, default: NO_DEFAULT, checks: [graph_thread_id_v1]}
+      actor_id: {sql_type: varchar, length: 128, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      actor_role: {sql_type: varchar, length: 32, nullable: false, default: NO_DEFAULT, checks: [enum_USER_MERCHANT]}
+      actor_scope_hash: {sql_type: varchar, length: 64, nullable: false, default: NO_DEFAULT, checks: [lowercase_sha256]}
+      agent_session_id: {sql_type: varchar, length: 64, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      payload_authority_id: {sql_type: varchar, length: 128, nullable: false, default: NO_DEFAULT, checks: [identifier]}
+      request_hash: {sql_type: varchar, length: 64, nullable: false, default: NO_DEFAULT, checks: [lowercase_sha256]}
+      accepted_room_revision: {sql_type: bigint, length: null, nullable: false, default: NO_DEFAULT, checks: [non_negative]}
+      execution_disposition: {sql_type: varchar, length: 32, nullable: false, default: NO_DEFAULT, checks: [enum_INERT_EXTERNAL_EVENT_ACTIVITY_ORCHESTRATED]}
+      created_at: {sql_type: timestamptz, length: null, nullable: false, default: CURRENT_TIMESTAMP, checks: []}
     primary_key: [case_command_id]
     unique_keys:
+      - [tenant_surrogate, command_id]
+      - [case_command_id, tenant_surrogate, case_id, command_id, request_hash]
+      - [payload_authority_id]
+    candidate_keys:
+      - [case_command_id]
       - [tenant_surrogate, command_id]
       - [case_command_id, tenant_surrogate, case_id, command_id, request_hash]
       - [payload_authority_id]
@@ -426,7 +653,7 @@ authority_tables:
         references:
           table: case_command
           columns: [id, tenant_surrogate, case_id, command_id, request_hash]
-          candidate_key_added_by_V044: true
+          candidate_key_added_by_V043_1: true
       - columns:
           - party_authority_id
           - epoch_id
@@ -473,6 +700,7 @@ authority_tables:
           - thread_id
           - actor_scope_hash
           - agent_session_id
+          - command_id
         references:
           table: case_intake_command_payload_authority
           columns:
@@ -489,6 +717,7 @@ authority_tables:
             - thread_id
             - actor_scope_hash
             - agent_session_id
+            - command_id
     immutable: true
     required_pins:
       - command_id
@@ -515,14 +744,89 @@ authority_tables:
     binding_source: authenticated_actor_and_server_resolved_access_session
     transaction_boundary: same_as_payload_authority_case_command_and_command_outbox
     replay_policy: exact_command_payload_and_authority_or_fail_closed
+    check_constraints:
+      ck_r15_command_scope:
+        all:
+          - command_type_IN_INTAKE_MESSAGE_CONFIRM_CANCEL
+          - room_type_EQUALS_INTAKE
+          - room_epoch_GTE_0
+          - fencing_token_GT_0
+          - case_command_sequence_GT_0
+          - accepted_room_revision_GTE_0
+          - request_hash_MATCHES_lowercase_sha256
+      ck_r15_command_disposition:
+        allowed: [INERT_EXTERNAL_EVENT, ACTIVITY_ORCHESTRATED]
 
 creation_order:
-  epoch_authority: >-
-    Persist the selection row and both case-party rows atomically before the
-    bootstrap outbox becomes deliverable.
-  command_authority: >-
-    Verify or mint the payload authority and persist it, command authority,
-    case_command, and command outbox atomically before delivery is visible.
+  epoch_authority:
+    transaction_order:
+      - lock_access_agent_registration_rows
+      - persist_epoch_selection
+      - persist_initiator_party_authority
+      - persist_respondent_party_authority
+      - assert_exact_two_parties
+      - persist_bootstrap_outbox
+    bootstrap_outbox_delivery_position: after_transaction_commit
+  command_authority:
+    pre_transaction_order:
+      - canonicalize_and_hash_payload
+      - idempotent_immutable_put_when_server_minted
+      - verify_put_receipt_or_V043_event_binding
+    transaction_order:
+      - lock_access_agent_registration_rows
+      - persist_case_command
+      - persist_payload_authority
+      - persist_command_authority
+      - persist_command_outbox
+    command_outbox_delivery_position: after_transaction_commit
+
+revocation_lock_protocol:
+  protocol_version: intake-authority-revocation-lock.v1
+  applies_to:
+    - epoch_binding
+    - command_acceptance
+    - access_session_revocation
+    - agent_session_revocation
+    - graph_registration_retirement_or_failure
+  fixed_row_order:
+    - case_access_session
+    - agent_conversation_session
+    - case_intake_graph_thread_binding
+  intra_table_row_order:
+    case_access_session: id_ASC
+    agent_conversation_session: id_ASC
+    case_intake_graph_thread_binding: registration_id_ASC
+  acceptance:
+    lock_mode: FOR_SHARE
+    status_checks_after_all_locks:
+      case_access_session: ACTIVE
+      agent_conversation_session: ACTIVE
+      case_intake_graph_thread_binding: REGISTERED
+    holds_locks_until: transaction_commit_or_rollback
+  revocation_writers:
+    lock_mode: FOR_UPDATE
+    must_use_fixed_row_order: true
+    update_after_all_locks: true
+    holds_locks_until: transaction_commit_or_rollback
+  postgresql_conflict_matrix:
+    FOR_SHARE_conflicts_with: [FOR_UPDATE, FOR_NO_KEY_UPDATE]
+    FOR_UPDATE_conflicts_with: [FOR_SHARE, FOR_KEY_SHARE, FOR_NO_KEY_UPDATE, FOR_UPDATE]
+    application_revocation_mode: FOR_UPDATE
+  linearization:
+    winner: first_lock_owner_to_commit
+    revoke_commits_first: acceptance_waits_rechecks_status_and_rejects_without_command_or_outbox
+    acceptance_commits_first: later_revocation_does_not_invalidate_accepted_inert_snapshot
+    deadlock_prevention: every_bootstrap_acceptance_and_revocation_writer_uses_table_and_intra_table_order
+  activity_read:
+    isolation: REPEATABLE_READ
+    row_locks: none
+    accepted_inert_replay_reopens_authorization: false
+  required_race_tests:
+    - access_revoke_vs_accept_lock_order
+    - agent_session_revoke_vs_accept_lock_order
+    - registration_retire_vs_accept_lock_order
+    - accept_commit_then_revoke_inert_replay
+    - revoke_commit_then_accept_rejected
 
 selection_rules:
   schema_version: room-epoch-selection.v2
@@ -591,6 +895,23 @@ payload_contract:
     - EXISTING_PRIVATE_EVENT
     - SERVER_MINTED_HUMAN_INPUT
     - SERVER_CANONICAL_BRANCH
+  formal_schemas:
+    intake-human-input-command.v1:
+      file: contracts/agent-platform/intake/v2/intake-human-input-command.schema.json
+      draft: DRAFT_2020_12
+      additional_properties: false
+      maximum_bytes: 32768
+    intake-branch-command.v1:
+      file: contracts/agent-platform/intake/v2/intake-branch-command.schema.json
+      draft: DRAFT_2020_12
+      additional_properties: false
+      maximum_bytes: 16384
+    intake-command-payload-put-receipt.v1:
+      file: contracts/agent-platform/intake/v2/intake-command-payload-put-receipt.schema.json
+      draft: DRAFT_2020_12
+      additional_properties: false
+      maximum_bytes: 16384
+      self_hash: receipt_hash
   command_schema_matrix:
     - command_type: INTAKE_MESSAGE
       source_kind: EXISTING_PRIVATE_EVENT
@@ -621,6 +942,9 @@ payload_contract:
     required_binding_type: EVENT
     required_schema_version: intake-turn-event.v2
     composite_foreign_key_required: true
+    composite_foreign_key_columns: [existing_event_binding_id, registration_id]
+    V043_candidate_key: [binding_id, thread_registration_id]
+    artifact_and_route_verification: V043_1_constraint_trigger_exact_column_comparison
     exact_route_registration_required: true
     nullable_binding_columns_for_other_source_kinds: true
     exact_route_fields:
@@ -661,8 +985,10 @@ payload_contract:
     receipt_schema_version: intake-command-payload-put-receipt.v1
     provenance_receipt_required: true
     provenance_receipt_exact_fields:
-      - receipt_schema_version
+      - schema_version
       - receipt_id
+      - put_idempotency_key
+      - command_id
       - tenant_surrogate
       - case_id
       - registration_id
@@ -670,12 +996,12 @@ payload_contract:
       - access_session_id
       - source_kind
       - artifact_id
-      - schema_version
+      - payload_schema_version
       - object_uri
       - object_version
       - content_sha256
       - size_bytes
-      - stored_at
+      - stored_at_epoch_micros
       - receipt_hash
     authority_receipt_snapshot: required_and_rfc8785_recomputed
     database_failure_result: no_deliverable_command_or_outbox
@@ -685,6 +1011,8 @@ payload_contract:
       serialized_with_put_key: true
       acceptance_retry_reuses_receipt_before_abandonment: true
       retry_after_terminal_abandonment: forbidden
+      cleanup_tombstone: durable_put_key_content_hash_object_version_and_terminal_reason
+      tombstone_reuse_policy: same_put_key_is_terminal_and_cannot_create_another_object
       repeat_result: ALREADY_ABSENT_OR_DELETED
       committed_authority_object_deletion_forbidden: true
   server_canonical_branch:
@@ -708,8 +1036,10 @@ payload_contract:
     receipt_schema_version: intake-command-payload-put-receipt.v1
     provenance_receipt_required: true
     provenance_receipt_exact_fields:
-      - receipt_schema_version
+      - schema_version
       - receipt_id
+      - put_idempotency_key
+      - command_id
       - tenant_surrogate
       - case_id
       - registration_id
@@ -717,12 +1047,12 @@ payload_contract:
       - access_session_id
       - source_kind
       - artifact_id
-      - schema_version
+      - payload_schema_version
       - object_uri
       - object_version
       - content_sha256
       - size_bytes
-      - stored_at
+      - stored_at_epoch_micros
       - receipt_hash
     authority_receipt_snapshot: required_and_rfc8785_recomputed
     database_failure_result: no_deliverable_command_or_outbox
@@ -732,6 +1062,8 @@ payload_contract:
       serialized_with_put_key: true
       acceptance_retry_reuses_receipt_before_abandonment: true
       retry_after_terminal_abandonment: forbidden
+      cleanup_tombstone: durable_put_key_content_hash_object_version_and_terminal_reason
+      tombstone_reuse_policy: same_put_key_is_terminal_and_cannot_create_another_object
       repeat_result: ALREADY_ABSENT_OR_DELETED
       committed_authority_object_deletion_forbidden: true
     additional_properties: false
@@ -761,16 +1093,22 @@ payload_contract:
     authority_columns:
       - put_receipt_schema_version
       - put_receipt_id
-      - put_receipt_stored_at
+      - put_idempotency_key
+      - command_id
+      - put_receipt_stored_at_epoch_micros
       - put_receipt_hash
     authority_column_constraints:
       put_receipt_schema_version: intake-command-payload-put-receipt.v1
       put_receipt_id: identifier_max_128
-      put_receipt_stored_at: non_null_timestamptz
+      put_idempotency_key: iput_v1_plus_64_lowercase_hex
+      command_id: identifier_max_128
+      put_receipt_stored_at_epoch_micros: integer_0_to_9007199254740991
       put_receipt_hash: lowercase_sha256
     exact_field_mapping:
-      receipt_schema_version: put_receipt_schema_version
+      schema_version: put_receipt_schema_version
       receipt_id: put_receipt_id
+      put_idempotency_key: put_idempotency_key
+      command_id: command_id
       tenant_surrogate: tenant_surrogate
       case_id: case_id
       registration_id: registration_id
@@ -778,16 +1116,18 @@ payload_contract:
       access_session_id: access_session_id
       source_kind: source_kind
       artifact_id: artifact_id
-      schema_version: schema_version
+      payload_schema_version: schema_version
       object_uri: object_uri
       object_version: object_version
       content_sha256: content_sha256
       size_bytes: size_bytes
-      stored_at: put_receipt_stored_at
+      stored_at_epoch_micros: put_receipt_stored_at_epoch_micros
       receipt_hash: put_receipt_hash
     receipt_hash_input_fields:
-      - receipt_schema_version
+      - schema_version
       - receipt_id
+      - put_idempotency_key
+      - command_id
       - tenant_surrogate
       - case_id
       - registration_id
@@ -795,12 +1135,12 @@ payload_contract:
       - access_session_id
       - source_kind
       - artifact_id
-      - schema_version
+      - payload_schema_version
       - object_uri
       - object_version
       - content_sha256
       - size_bytes
-      - stored_at
+      - stored_at_epoch_micros
     receipt_hash_recomputation: SHA_256_of_RFC_8785_UTF_8_authority_snapshot
     persisted_snapshot_immutable: true
   case_command_ref_payload_ref:
@@ -813,7 +1153,7 @@ payload_contract:
       - artifact_id
       - object_version
     artifact_and_object_version_proof:
-      EXISTING_PRIVATE_EVENT: exact_V043_composite_foreign_key
+      EXISTING_PRIVATE_EVENT: compact_V043_binding_FK_plus_V043_1_exact_assertion
       SERVER_MINTED_HUMAN_INPUT: exact_immutable_put_provenance_receipt
       SERVER_CANONICAL_BRANCH: exact_server_canonicalization_and_immutable_put_receipt
 
@@ -923,15 +1263,19 @@ compatibility:
 implementation_gate:
   required_before_P4_D1_or_P4_E1:
     - contract_schema_and_exact_static_tests
+    - table_column_type_length_null_default_check_map_tests
     - migration_pk_uk_fk_and_immutability_tests
     - atomic_epoch_authority_before_bootstrap_test
     - exact_two_party_bootstrap_cardinality_test
     - atomic_command_payload_authority_and_outbox_test
     - payload_source_kind_command_schema_matrix_tests
+    - formal_payload_schema_positive_negative_fixture_tests
     - payload_source_kind_row_shape_check_tests
     - existing_private_event_exact_V043_fk_test
+    - compact_V043_fk_and_constraint_trigger_exact_comparison_tests
     - immutable_put_receipt_and_orphan_cleanup_tests
     - put_receipt_snapshot_recomputation_test
+    - put_receipt_epoch_micros_precision_test
     - deterministic_put_retry_conflict_and_cleanup_tests
     - canonical_branch_payload_boundaries
     - command_payload_authority_one_to_one_test
@@ -941,6 +1285,7 @@ implementation_gate:
     - payload_cross_session_rejection_test
     - read_port_unit_and_postgresql_tests
     - revoke_before_and_after_acceptance_races
+    - revocation_lock_conflict_matrix_race_tests
     - commit_before_event_delivery_loss_test
     - repeatable_read_concurrency_test
     - v1_completed_and_uncompleted_history_compatibility_tests

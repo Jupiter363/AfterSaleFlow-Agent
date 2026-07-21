@@ -1,0 +1,20 @@
+{
+  "schema_version": "intake-command-payload-put-receipt.v1",
+  "receipt_id": "PUT_RECEIPT_P4_R15_UNSAFE_TIME",
+  "put_idempotency_key": "iput.v1.ed1a01a9d77a5b404ec6f60116fe76247e1f761455c9ee2d355182a6c9955cc4",
+  "command_id": "CMD_P4_R15_MESSAGE_1",
+  "tenant_surrogate": "tenant-synthetic",
+  "case_id": "CASE_P4_SYNTHETIC_1",
+  "registration_id": "REG_P4_USER_1",
+  "actor_id": "USER_P4_1",
+  "access_session_id": "ACCESS_P4_USER_1",
+  "source_kind": "SERVER_MINTED_HUMAN_INPUT",
+  "artifact_id": "ARTIFACT_P4_R15_INPUT_1",
+  "payload_schema_version": "intake-human-input-command.v1",
+  "object_uri": "s3://intake-command-payload/CASE_P4_SYNTHETIC_1/CMD_P4_R15_MESSAGE_1.json",
+  "object_version": "version-1",
+  "content_sha256": "8ffcd36dc1bdd92adbb24300ec62e225cceb1d0b655ad4937454626f518acdba",
+  "size_bytes": 455,
+  "stored_at_epoch_micros": 9007199254740992,
+  "receipt_hash": "230ed06c2b9a30ce5f5bebb4679cc709c53e3dd3e16224749bd06b8b1c6b72db"
+}

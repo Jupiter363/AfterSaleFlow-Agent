@@ -1,0 +1,16 @@
+{
+  "schema_version": "intake-human-input-command.v1",
+  "command_id": "CMD_P4_R15_MESSAGE_1",
+  "tenant_surrogate": "tenant-synthetic",
+  "case_id": "CASE_P4_SYNTHETIC_1",
+  "room_type": "INTAKE",
+  "room_epoch": 1,
+  "party": "INITIATOR",
+  "actor_id": "USER_P4_1",
+  "actor_role": "USER",
+  "access_session_id": "ACCESS_P4_USER_1",
+  "registration_id": "REG_P4_USER_1",
+  "message_id": "MESSAGE_P4_USER_3",
+  "text": "The parcel arrived with the seal broken.",
+  "occurred_at_epoch_micros": 1784534580000000
+}

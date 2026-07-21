@@ -6,6 +6,9 @@ Normative artifacts:
 
 - [Authority manifest](../../../plans/phase-4-r15-authority-binding-contract.yaml)
 - [Manifest schema](../../../plans/phase-4-r15-authority-binding-contract.schema.json)
+- [Human input schema](../../../contracts/agent-platform/intake/v2/intake-human-input-command.schema.json)
+- [Branch command schema](../../../contracts/agent-platform/intake/v2/intake-branch-command.schema.json)
+- [Immutable put receipt schema](../../../contracts/agent-platform/intake/v2/intake-command-payload-put-receipt.schema.json)
 
 This contract closes a P4-R1 integration gap. V043 permits multiple private Graph registrations
 for one case actor because Agent Session is part of the private tuple. The generic Case command and
@@ -29,11 +32,13 @@ The three identities have different meanings and must not be conflated:
 
 No trusted browser field selects an access session, Agent Session, registration, or thread.
 
-## V044 Relations
+## V043_1 Relations
 
-Four immutable relations define the bridge authority. V044 adds every candidate key needed by the
-declared composite foreign keys; two unrelated single-column foreign keys are not an equivalent
-proof.
+The expand-only migration is `V043_1__intake_authority_bindings.sql`, immediately after
+`V043__intake_graph_bindings.sql`. V044 remains reserved for the Phase 6 hearing Temporal
+projection and V045 remains reserved for outcome execution compensation. Four immutable relations
+define the bridge authority. V043_1 adds every candidate key needed by the declared composite
+foreign keys; two unrelated single-column foreign keys are not an equivalent proof.
 
 ### Epoch Selection
 
@@ -96,20 +101,22 @@ agent_session_profile_version, memory_policy_id
 ```
 
 The row directly references `case_access_session` by the exact composite
-`(id, tenant_id, case_id, actor_id, actor_role, permission_level)`. It references
-`agent_conversation_session` by the exact composite
+`(id, tenant_id, case_id, actor_id, actor_role, permission_level)`. It references the existing V019
+`agent_conversation_session` columns by the exact composite
 `(id, tenant_id, case_id, room_type, access_session_id, actor_id, actor_role, agent_key,
-prompt_version, agent_session_profile_version, prompt_profile_id, memory_policy_id)`. V044 adds
-the two explicit version columns for new v2 sessions and adds those candidate keys; historical
-sessions remain readable. Separate composite foreign keys prove the complete epoch and V043
-registration tuples. The row checks
+prompt_profile_id, memory_policy_id)`. V043_1 adds the matching candidate keys but does not add or
+backfill `prompt_version` or `agent_session_profile_version` on V019. The party authority stores
+those versions locally and proves them through the immutable `asp.v1.<sha256>` registry lookup
+described above. Separate composite foreign keys prove the complete epoch and V043 registration
+tuples. The row checks
 `session_tenant_id=tenant_surrogate`, `session_case_id=case_id`, and the role/permission matrix
 `USER/PARTY_USER` or `MERCHANT/PARTY_MERCHANT`.
 
-`case_access_session.status=ACTIVE` and `agent_conversation_session.status=ACTIVE` are checked in
-the epoch-binding transaction, the command-acceptance transaction, and again by the start read.
-Status is mutable and is therefore deliberately absent from every foreign key and immutable
-candidate key. The database constrains `party` to `INITIATOR | RESPONDENT`, but
+`case_access_session.status=ACTIVE`, `agent_conversation_session.status=ACTIVE`, and
+`case_intake_graph_thread_binding.status=REGISTERED` are checked in the epoch-binding transaction,
+the command-acceptance transaction, and again by the start read. Status is mutable and is therefore
+deliberately absent from every foreign key and immutable candidate key. The database constrains
+`party` to `INITIATOR | RESPONDENT`, but
 `UNIQUE(epoch_id, party)` proves only at most one row for each value. The epoch-binding transaction
 must insert both rows, assert exact count two with both enum members present, and only then make the
 bootstrap outbox deliverable. V043 may
@@ -144,25 +151,38 @@ The command/schema matrix is also closed:
 | `INTAKE_CANCEL` | `SERVER_CANONICAL_BRANCH` | `intake-branch-command.v1` | 16 KiB | `ACTIVITY_ORCHESTRATED`; forbidden until P4-E1 |
 
 A database CHECK enforces the row shape. Every source has the complete non-null party route and
-artifact tuple. `EXISTING_PRIVATE_EVENT` additionally requires every V043 EVENT composite column
-to be non-null and requires `put_receipt_schema_version`, `put_receipt_id`,
-`put_receipt_stored_at`, and `put_receipt_hash` to be null. Both server-minted kinds require those
-four put-receipt snapshot
-columns to be non-null and require
-`existing_event_binding_id/existing_event_binding_type` to be null. The schema constants in the
-matrix are part of the same CHECK; a mixed EVENT/put-receipt row is invalid.
+artifact tuple. `EXISTING_PRIVATE_EVENT` additionally requires
+`existing_event_binding_id` and `registration_id` to be non-null and requires
+`put_receipt_schema_version`, `put_receipt_id`,
+`put_idempotency_key`, `put_receipt_stored_at_epoch_micros`, and `put_receipt_hash` to be null.
+Both server-minted kinds require those five put-receipt snapshot columns to be non-null and require
+`existing_event_binding_id` to be null. The schema constants and source-specific size ranges
+(`1..32768` for EVENT/human input and `1..16384` for branch) are part of the same CHECK; a mixed
+EVENT/put-receipt row is invalid.
 
-An `EXISTING_PRIVATE_EVENT` has a direct composite foreign key to the immutable V043
-`case_intake_snapshot_binding` row. The key includes `binding_type=EVENT`, schema, artifact
-ID/URI/object version/hash/size, and the exact registration, tenant, case, room, epoch, fence,
-thread, actor scope, Agent Session, and audience route. A binding on another registration is not a
+An `EXISTING_PRIVATE_EVENT` uses the compact foreign key
+`(existing_event_binding_id, registration_id) ->
+case_intake_snapshot_binding(binding_id, thread_registration_id)`. V043_1 adds that candidate key.
+A deferrable, initially-immediate `AFTER INSERT` constraint trigger then reads exactly that visible
+immutable V043 row and verifies `binding_type=EVENT`, `schema_version=intake-turn-event.v2`,
+`room_type=INTAKE`, `visibility=PRIVATE`, `initialization_marker=false`, and every tenant, case,
+room, epoch, fence, thread, actor scope, Agent Session, audience, schema, artifact ID, URI, object
+version, hash, and size column against the payload authority row. The compact FK waits for a
+concurrent referenced insert to commit; V043 and the payload authority are immutable. This gives
+the trigger a stable one-row functional dependency without placing the 1024-character
+`object_uri` in a primary, unique, or candidate key. A binding on another registration is not a
 candidate even if its artifact fields match.
 
 For `SERVER_MINTED_HUMAN_INPUT`, Java RFC 8785-canonicalizes and bounds the payload, performs an
 immutable object put before opening the authority database transaction, and verifies an
 `intake-command-payload-put-receipt.v1`. The receipt binds the exact tenant, case, registration,
 actor, access session, source kind, artifact, schema, URI, object version, hash, size, storage time,
-and receipt hash. If the database transaction fails, no command/outbox is deliverable. Cleanup uses
+command ID, put idempotency key, and receipt hash. Its wire names are `schema_version`,
+`put_idempotency_key`, `command_id`, `payload_schema_version`, and
+`stored_at_epoch_micros`; the timestamp integer is restricted to `0..9007199254740991` so RFC 8785
+canonicalization is identical across Java, Python, and JavaScript. Human-input `room_epoch` and
+`occurred_at_epoch_micros` use the same safe-integer ceiling. If the database transaction fails,
+no command/outbox is deliverable. Cleanup uses
 `intake.payload.orphan-cleanup:{tenant_surrogate}:{artifact_id}:{object_version}` and may delete
 only that exact object version after the put is terminally abandoned and while no committed
 payload authority references it. Cleanup and retry serialize on the put key. Repeated cleanup
@@ -172,9 +192,11 @@ A `SERVER_CANONICAL_BRANCH` is generated from validated Java domain input, never
 payload reference. Its RFC 8785 `intake-branch-command.v1` object is limited to 16 KiB and rejects
 additional fields. IDs and dispute type are at most 128 characters; confirmation/cancellation text
 is at most 2,000 characters. The allowed operations are initiator accept/reject, respondent
-confirm, and initiator cancel. Respondent cancel remains forbidden. The canonical object is put
-immutably before the database transaction and its artifact ID/object version are verified by the
-same exact `intake-command-payload-put-receipt.v1` fields and orphan-cleanup protocol.
+confirm, and initiator cancel. Respondent cancel remains forbidden. An empty initiator
+`cancellation_reason` remains valid to preserve the current `/cancel` contract. The canonical
+object is put immutably before the database transaction and its artifact ID/object version are
+verified by the same exact `intake-command-payload-put-receipt.v1` fields and orphan-cleanup
+protocol.
 
 Both server-minted sources derive a bounded 72-character put key:
 
@@ -188,18 +210,20 @@ creating another object. Acceptance retries must reuse the receipt before termin
 cleanup is allowed only after abandonment, and that command key cannot be retried afterward. This
 keeps object identity, command ID, and request-hash semantics stable across database rollback/retry.
 
-The authority row persists the receipt's schema version, ID, storage timestamp, and receipt hash;
-its existing route/artifact columns persist every other receipt field. A read reconstructs the
-receipt snapshot, excludes `receipt_hash` from its canonical input, recomputes SHA-256 over RFC
-8785 UTF-8 bytes, and compares the stored hash. Receipt identity therefore remains independently
-auditable without trusting a transient object-store response.
+The authority row persists `put_receipt_schema_version`, `put_receipt_id`,
+`put_idempotency_key`, `command_id`, `put_receipt_stored_at_epoch_micros`, and
+`put_receipt_hash`; its existing route/artifact columns persist every other receipt field. A read
+reconstructs the exact wire snapshot, excludes `receipt_hash` from its canonical input, recomputes
+SHA-256 over RFC 8785 UTF-8 bytes, and compares the stored hash. Receipt identity therefore remains
+independently auditable without trusting a transient object-store response.
 
 `CaseCommandRef.payloadRef` contains only schema version, URI, SHA-256, and byte size. Those four
 values must exactly equal the authority row's `schema_version`, `object_uri`, `content_sha256`, and
 `size_bytes`. `artifact_id` and `object_version` do not exist in `CaseCommandRef`; they are proven
-separately by the V043 composite foreign key or the exact immutable-put provenance receipt. This
-prevents a valid actor from referencing another Agent Session's private artifact under the same
-case access scope without pretending the wire ref proves fields it does not carry.
+separately by the compact V043 foreign key plus V043_1 constraint trigger or the exact immutable-put
+provenance receipt. This prevents a valid actor from referencing another Agent Session's private
+artifact under the same case access scope without pretending the wire ref proves fields it does not
+carry.
 
 ### Command Authority
 
@@ -209,7 +233,7 @@ payload rows through composite foreign keys. The one-to-one payload constraint p
 authority artifact from authorizing two commands. It pins the access session, complete route,
 request hash, command sequence/type, accepted room revision, and execution disposition. The direct
 `case_command` composite foreign key is
-`(id, tenant_surrogate, case_id, command_id, request_hash)`; V044 adds the matching candidate key.
+`(id, tenant_surrogate, case_id, command_id, request_hash)`; V043_1 adds the matching candidate key.
 The canonical request hash binds actor and the four-field payload ref.
 
 `CaseCommandService` resolves the access session from the authenticated actor. It verifies the
@@ -235,9 +259,26 @@ R1.5 chooses an explicit acceptance linearization for inert commands:
 - `ACTIVITY_ORCHESTRATED` remains blocked until P4-E1 defines an atomic terminal disposition for
   revoke-after-accept and supplies the signed synthetic driver.
 
+Bootstrap, command acceptance, and every revocation writer lock the same tables in this order:
+
+```text
+case_access_session             ORDER BY id ASC
+agent_conversation_session      ORDER BY id ASC
+case_intake_graph_thread_binding ORDER BY registration_id ASC
+```
+
+Acceptance uses `FOR SHARE`, acquires every required row in the fixed table and intra-table order,
+and checks `ACTIVE`, `ACTIVE`, and `REGISTERED` only after all locks are held. Access-session
+revocation, Agent Session revocation, and registration retirement/failure use `FOR UPDATE` in the
+same order and perform updates only after all locks are held. Locks remain held until commit or
+rollback. PostgreSQL makes these modes conflict, so the first lock owner to commit defines the
+linearization point: revoke-first causes acceptance to wait, recheck, and reject without command or
+outbox; accept-first preserves the immutable inert snapshot through later revocation. Activity
+reads remain lock-free `REPEATABLE_READ` snapshots and inert replay never reopens authorization.
+
 This removes timing-dependent behavior from Activity retry while keeping the current R1.5 path
-side-effect free. Tests cover revoke-before-accept, revoke-after-accept, and committed-event
-delivery loss.
+side-effect free. Tests cover each revoke/retire-versus-accept lock race, both commit orders,
+committed-event delivery loss, and the fixed row ordering that prevents cross-table deadlocks.
 
 ## Read Transactions
 
@@ -257,7 +298,7 @@ duplicates and then select one.
 
 ### Start Read
 
-The start read joins the exact epoch, unique bootstrap outbox, V044 selection, and both exact
+The start read joins the exact epoch, unique bootstrap outbox, V043_1 selection, and both exact
 case-party rows. It reparses `payload_json`, recomputes the provisioning hash, and compares every
 Workflow, Graph, profile, epoch, fence, registration, and session pin.
 
@@ -285,7 +326,7 @@ AgentRun nor Graph references.
 
 ## Temporal Compatibility
 
-V044 applies only to new bridge Activity names:
+V043_1 authority applies only to new bridge Activity names:
 
 ```text
 BindIntakeChildStartV2
@@ -297,7 +338,7 @@ The Case Workflow selects them behind `typed-intake-bridge-authority-v1`. A comp
 result replays from History. A scheduled or retrying v1 Activity remains pinned to the old worker
 build until drained; it is not executed by the v2 reader. Old-build retirement requires visibility
 evidence of zero open or pending v1 bridge Activities. Ambiguous v1 data is never backfilled by
-guessing. Missing V044 authority fails closed only on the v2 path.
+guessing. Missing V043_1 authority fails closed only on the v2 path.
 
 Tests cover completed v1 replay, scheduled-but-uncompleted v1 routing/build pinning, and v2 missing
 authority.
@@ -318,7 +359,7 @@ no-formal-sink gates remain mandatory.
 Implementation begins only from a commit containing the manifest, schema, runbook, and exact
 static gate. R1.5 completion requires:
 
-- V044 PK/UK/FK and immutability tests;
+- V043_1 PK/UK/FK, constraint-trigger, and immutability tests;
 - atomic epoch authority/bootstrap and command/payload/outbox transaction tests;
 - both case-party orientations and cross-session payload rejection;
 - focused JDBC/PostgreSQL and REPEATABLE_READ race tests;

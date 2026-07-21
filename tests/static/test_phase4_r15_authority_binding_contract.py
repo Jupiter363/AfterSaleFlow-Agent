@@ -7,6 +7,7 @@ from pathlib import Path
 
 import jsonschema
 import pytest
+import rfc8785
 import yaml
 
 
@@ -17,6 +18,10 @@ RUNBOOK = (
     ROOT / "docs/runbooks/temporal-first/phase-4-p4-r1.5-authority-binding-contract.md"
 )
 PHASE4_PLAN = ROOT / "plans/phase-4-intake-pilot-execution.md"
+PHASE4_BATCHES = ROOT / "plans/phase-4-intake-pilot-test-batches.yaml"
+INTAKE_CONTRACT_ROOT = ROOT / "contracts/agent-platform/intake/v2"
+SAFE_INTEGER_MAX = 9_007_199_254_740_991
+R15_STATIC_TEST = "tests/static/test_phase4_r15_authority_binding_contract.py"
 
 PARTY_ROUTE_KEY = [
     "authority_id",
@@ -48,10 +53,13 @@ PAYLOAD_ROUTE_KEY = [
     "thread_id",
     "actor_scope_hash",
     "agent_session_id",
+    "command_id",
 ]
 PUT_RECEIPT_FIELDS = [
-    "receipt_schema_version",
+    "schema_version",
     "receipt_id",
+    "put_idempotency_key",
+    "command_id",
     "tenant_surrogate",
     "case_id",
     "registration_id",
@@ -59,12 +67,12 @@ PUT_RECEIPT_FIELDS = [
     "access_session_id",
     "source_kind",
     "artifact_id",
-    "schema_version",
+    "payload_schema_version",
     "object_uri",
     "object_version",
     "content_sha256",
     "size_bytes",
-    "stored_at",
+    "stored_at_epoch_micros",
     "receipt_hash",
 ]
 
@@ -75,6 +83,28 @@ def load_manifest() -> dict:
 
 def load_schema() -> dict:
     return json.loads(SCHEMA.read_text(encoding="utf-8"))
+
+
+def manifest_validator() -> jsonschema.Draft202012Validator:
+    return jsonschema.Draft202012Validator(load_schema())
+
+
+def load_wire_schema(filename: str) -> dict:
+    return json.loads((INTAKE_CONTRACT_ROOT / filename).read_text(encoding="utf-8"))
+
+
+def wire_validator(filename: str) -> jsonschema.Draft202012Validator:
+    schema = load_wire_schema(filename)
+    jsonschema.Draft202012Validator.check_schema(schema)
+    return jsonschema.Draft202012Validator(
+        schema,
+        format_checker=jsonschema.FormatChecker(),
+    )
+
+
+def load_fixture(kind: str, filename: str) -> dict:
+    path = INTAKE_CONTRACT_ROOT / "fixtures" / kind / filename
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def foreign_key(table: dict, referenced_table: str) -> dict:
@@ -88,7 +118,64 @@ def foreign_key(table: dict, referenced_table: str) -> dict:
 def test_r15_manifest_validates_against_its_schema() -> None:
     schema = load_schema()
     jsonschema.Draft202012Validator.check_schema(schema)
-    jsonschema.Draft202012Validator(schema).validate(load_manifest())
+    manifest_validator().validate(load_manifest())
+
+
+@pytest.mark.parametrize(
+    ("path", "bad_value", "remove"),
+    [
+        (("execution_matrix", "DISABLED", "INERT_EXTERNAL_EVENT"), "allowed", False),
+        (("selection_rules", "current_writer_mode"), "TEMPORAL", False),
+        (
+            ("creation_order", "epoch_authority", "transaction_order"),
+            [
+                "persist_bootstrap_outbox",
+                "lock_access_agent_registration_rows",
+                "persist_epoch_selection",
+                "persist_initiator_party_authority",
+                "persist_respondent_party_authority",
+                "assert_exact_two_parties",
+            ],
+            False,
+        ),
+        (("compatibility", "old_worker_retirement_gate"), None, True),
+        (
+            ("event_rules", "source_hash_recomputed_from"),
+            "case_timeline_event.id",
+            False,
+        ),
+        (
+            (
+                "source_and_route_authority",
+                "registration_agent_session_must_belong_to_access_session",
+            ),
+            False,
+            False,
+        ),
+    ],
+    ids=[
+        "disabled-allows-inert",
+        "selection-temporal",
+        "bootstrap-outbox-visible-first",
+        "v1-drain-gate-removed",
+        "event-hash-from-event-id",
+        "registration-session-membership-disabled",
+    ],
+)
+def test_r15_schema_rejects_security_and_ordering_drift(
+    path: tuple[str, ...], bad_value: object, remove: bool
+) -> None:
+    contract = copy.deepcopy(load_manifest())
+    parent = contract
+    for key in path[:-1]:
+        parent = parent[key]
+    if remove:
+        del parent[path[-1]]
+    else:
+        parent[path[-1]] = bad_value
+
+    with pytest.raises(jsonschema.ValidationError):
+        manifest_validator().validate(contract)
 
 
 def test_r15_schema_rejects_payload_source_kind_drift() -> None:
@@ -131,6 +218,147 @@ def test_r15_schema_rejects_command_fk_without_request_hash() -> None:
         jsonschema.Draft202012Validator(load_schema()).validate(contract)
 
 
+@pytest.mark.parametrize(
+    ("schema_filename", "fixture_filename"),
+    [
+        (
+            "intake-human-input-command.schema.json",
+            "intake-human-input-command-valid.json",
+        ),
+        (
+            "intake-branch-command.schema.json",
+            "intake-branch-command-valid.json",
+        ),
+        (
+            "intake-branch-command.schema.json",
+            "intake-branch-command-cancel-empty-valid.json",
+        ),
+        (
+            "intake-command-payload-put-receipt.schema.json",
+            "intake-command-payload-put-receipt-valid.json",
+        ),
+    ],
+)
+def test_r15_formal_wire_schemas_accept_positive_fixtures(
+    schema_filename: str, fixture_filename: str
+) -> None:
+    wire_validator(schema_filename).validate(load_fixture("valid", fixture_filename))
+
+
+@pytest.mark.parametrize(
+    ("schema_filename", "fixture_filename"),
+    [
+        (
+            "intake-human-input-command.schema.json",
+            "intake-human-input-command-extra-authority.json",
+        ),
+        (
+            "intake-branch-command.schema.json",
+            "intake-branch-command-respondent-cancel.json",
+        ),
+        (
+            "intake-command-payload-put-receipt.schema.json",
+            "intake-command-payload-put-receipt-branch-oversize.json",
+        ),
+        (
+            "intake-command-payload-put-receipt.schema.json",
+            "intake-command-payload-put-receipt-unsafe-epoch-micros.json",
+        ),
+    ],
+)
+def test_r15_formal_wire_schemas_reject_negative_fixtures(
+    schema_filename: str, fixture_filename: str
+) -> None:
+    with pytest.raises(jsonschema.ValidationError):
+        wire_validator(schema_filename).validate(
+            load_fixture("invalid", fixture_filename)
+        )
+
+
+def test_r15_put_receipt_schema_rejects_invalid_object_uri() -> None:
+    receipt = load_fixture("valid", "intake-command-payload-put-receipt-valid.json")
+    receipt["object_uri"] = "not an immutable object URI"
+
+    with pytest.raises(jsonschema.ValidationError):
+        wire_validator("intake-command-payload-put-receipt.schema.json").validate(
+            receipt
+        )
+
+
+def test_r15_wire_schema_integer_fields_are_jcs_safe() -> None:
+    expected_integer_paths = {
+        "intake-human-input-command.schema.json": {
+            ("properties", "room_epoch"),
+            ("properties", "occurred_at_epoch_micros"),
+        },
+        "intake-branch-command.schema.json": set(),
+        "intake-command-payload-put-receipt.schema.json": {
+            ("properties", "size_bytes"),
+            ("properties", "stored_at_epoch_micros"),
+        },
+    }
+
+    for schema_filename, expected_paths in expected_integer_paths.items():
+        pending: list[tuple[tuple[str, ...], object]] = [
+            ((), load_wire_schema(schema_filename))
+        ]
+        integer_nodes: dict[tuple[str, ...], dict] = {}
+        while pending:
+            path, node = pending.pop()
+            if isinstance(node, dict):
+                if node.get("type") == "integer":
+                    integer_nodes[path] = node
+                pending.extend(((*path, key), value) for key, value in node.items())
+            elif isinstance(node, list):
+                pending.extend(
+                    ((*path, str(index)), value) for index, value in enumerate(node)
+                )
+
+        assert set(integer_nodes) == expected_paths
+        for node in integer_nodes.values():
+            assert node["minimum"] >= -SAFE_INTEGER_MAX
+            assert node["maximum"] <= SAFE_INTEGER_MAX
+
+
+def test_r15_formal_schema_manifest_links_are_exact() -> None:
+    formal_schemas = load_manifest()["payload_contract"]["formal_schemas"]
+    assert formal_schemas == {
+        "intake-human-input-command.v1": {
+            "file": (
+                "contracts/agent-platform/intake/v2/"
+                "intake-human-input-command.schema.json"
+            ),
+            "draft": "DRAFT_2020_12",
+            "additional_properties": False,
+            "maximum_bytes": 32768,
+        },
+        "intake-branch-command.v1": {
+            "file": (
+                "contracts/agent-platform/intake/v2/intake-branch-command.schema.json"
+            ),
+            "draft": "DRAFT_2020_12",
+            "additional_properties": False,
+            "maximum_bytes": 16384,
+        },
+        "intake-command-payload-put-receipt.v1": {
+            "file": (
+                "contracts/agent-platform/intake/v2/"
+                "intake-command-payload-put-receipt.schema.json"
+            ),
+            "draft": "DRAFT_2020_12",
+            "additional_properties": False,
+            "maximum_bytes": 16384,
+            "self_hash": "receipt_hash",
+        },
+    }
+    for contract in formal_schemas.values():
+        schema_path = ROOT / contract["file"]
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
+        assert schema["additionalProperties"] is contract["additional_properties"]
+        assert schema["x-max-encoded-bytes"] == contract["maximum_bytes"]
+
+
 def test_r15_contract_is_frozen_and_keeps_all_runtime_gates_closed() -> None:
     contract = load_manifest()
 
@@ -156,6 +384,59 @@ def test_r15_contract_is_frozen_and_keeps_all_runtime_gates_closed() -> None:
         value.startswith("forbidden")
         for value in contract["execution_matrix"]["TEMPORAL"].values()
     )
+
+
+def test_r15_migration_identity_preserves_phase6_and_outcome_reservations() -> None:
+    assert load_manifest()["migration_contract"] == {
+        "file": "V043_1__intake_authority_bindings.sql",
+        "predecessor": "V043__intake_graph_bindings.sql",
+        "mode": "EXPAND_ONLY",
+        "reserved_versions_untouched": {
+            "V044": "phase_6_hearing_temporal_projection",
+            "V045": "outcome_execution_compensation",
+        },
+        "implementation_present_in_this_gate": False,
+    }
+
+
+def test_r15_all_four_table_column_maps_are_exact_and_complete() -> None:
+    tables = load_manifest()["authority_tables"]
+    column_maps = {name: table["columns"] for name, table in tables.items()}
+
+    assert set(column_maps) == {
+        "case_intake_epoch_selection_binding",
+        "case_intake_epoch_party_authority",
+        "case_intake_command_payload_authority",
+        "case_intake_command_authority",
+    }
+    assert all(
+        set(column_contract)
+        == {
+            "sql_type",
+            "length",
+            "nullable",
+            "default",
+            "checks",
+        }
+        for columns in column_maps.values()
+        for column_contract in columns.values()
+    )
+    canonical_hash = hashlib.sha256(rfc8785.dumps(column_maps)).hexdigest()
+    assert (
+        canonical_hash
+        == "689081c325608a810eee87083f5376b7bcdaaed784aaca45d5b7bd6858e12ab7"
+    )
+
+
+def test_r15_long_object_uri_is_not_in_any_primary_unique_or_candidate_key() -> None:
+    for table_name, table in load_manifest()["authority_tables"].items():
+        keys = [table["primary_key"], *table["unique_keys"], *table["candidate_keys"]]
+        for key in keys:
+            assert "object_uri" not in key, (
+                f"object_uri is indexed by {table_name}: {key}"
+            )
+            for column_name in key:
+                assert table["columns"][column_name]["length"] != 1024
 
 
 def test_r15_selection_relation_freezes_exact_epoch_key_and_profile_pins() -> None:
@@ -189,7 +470,7 @@ def test_r15_selection_relation_freezes_exact_epoch_key_and_profile_pins() -> No
         "room_epoch",
         "fencing_token",
     ]
-    assert epoch_fk["references"]["candidate_key_added_by_V044"] is True
+    assert epoch_fk["references"]["candidate_key_added_by_V043_1"] is True
     assert {
         "selection_hash",
         "prompt_version",
@@ -223,7 +504,7 @@ def test_r15_party_authority_directly_binds_exact_access_session_scope() -> None
                 "actor_role",
                 "permission_level",
             ],
-            "candidate_key_added_by_V044": True,
+            "candidate_key_added_by_V043_1": True,
         },
     }
     assert party["scope_checks"] == {
@@ -251,8 +532,6 @@ def test_r15_party_authority_binds_exact_agent_session_scope_and_profiles() -> N
         "actor_id",
         "actor_role",
         "agent_key",
-        "prompt_version",
-        "agent_session_profile_version",
         "prompt_profile_id",
         "memory_policy_id",
     ]
@@ -267,12 +546,10 @@ def test_r15_party_authority_binds_exact_agent_session_scope_and_profiles() -> N
             "actor_id",
             "actor_role",
             "agent_key",
-            "prompt_version",
-            "agent_session_profile_version",
             "prompt_profile_id",
             "memory_policy_id",
         ],
-        "candidate_key_added_by_V044": True,
+        "candidate_key_added_by_V043_1": True,
     }
     assert {
         "session_tenant_id",
@@ -306,7 +583,7 @@ def test_r15_party_authority_binds_exact_epoch_and_registration() -> None:
     assert epoch_fk["columns"] == epoch_fk["references"]["columns"]
 
     registration_fk = foreign_key(party, "case_intake_graph_thread_binding")
-    assert registration_fk["references"]["candidate_key_added_by_V044"] is True
+    assert registration_fk["references"]["candidate_key_added_by_V043_1"] is True
     assert registration_fk["columns"] == registration_fk["references"]["columns"]
     assert {
         "registration_id",
@@ -327,14 +604,17 @@ def test_r15_active_status_is_transactional_and_never_a_foreign_key_pin() -> Non
         "epoch_binding_transaction": {
             "case_access_session": "ACTIVE",
             "agent_conversation_session": "ACTIVE",
+            "case_intake_graph_thread_binding": "REGISTERED",
         },
         "acceptance_transaction": {
             "case_access_session": "ACTIVE",
             "agent_conversation_session": "ACTIVE",
+            "case_intake_graph_thread_binding": "REGISTERED",
         },
         "start_read_transaction": {
             "case_access_session": "ACTIVE",
             "agent_conversation_session": "ACTIVE",
+            "case_intake_graph_thread_binding": "REGISTERED",
         },
         "status_columns_in_foreign_keys": False,
         "reason": "ACTIVE_is_mutable_and_must_not_be_part_of_an_immutable_candidate_key",
@@ -463,6 +743,7 @@ def test_r15_payload_source_kind_row_shapes_are_database_checked() -> None:
     assert shape["database_check_constraint_required"] is True
     assert shape["common_non_null_columns"] == [
         "payload_authority_id",
+        "command_id",
         "epoch_id",
         "party_authority_id",
         "access_session_id",
@@ -488,33 +769,19 @@ def test_r15_payload_source_kind_row_shapes_are_database_checked() -> None:
     existing = shape["EXISTING_PRIVATE_EVENT"]
     assert existing["required_values"] == {
         "source_kind": "EXISTING_PRIVATE_EVENT",
-        "existing_event_binding_type": "EVENT",
         "schema_version": "intake-turn-event.v2",
+        "size_bytes_minimum": 1,
+        "size_bytes_maximum": 32768,
     }
     assert existing["event_composite_non_null_columns"] == [
         "existing_event_binding_id",
         "registration_id",
-        "tenant_surrogate",
-        "case_id",
-        "room_type",
-        "room_epoch",
-        "fencing_token",
-        "thread_id",
-        "actor_scope_hash",
-        "agent_session_id",
-        "actor_role",
-        "existing_event_binding_type",
-        "schema_version",
-        "artifact_id",
-        "object_uri",
-        "object_version",
-        "content_sha256",
-        "size_bytes",
     ]
     receipt_columns = [
         "put_receipt_schema_version",
         "put_receipt_id",
-        "put_receipt_stored_at",
+        "put_idempotency_key",
+        "put_receipt_stored_at_epoch_micros",
         "put_receipt_hash",
     ]
     assert existing["null_columns"] == receipt_columns
@@ -523,18 +790,22 @@ def test_r15_payload_source_kind_row_shapes_are_database_checked() -> None:
             "source_kind": "SERVER_MINTED_HUMAN_INPUT",
             "schema_version": "intake-human-input-command.v1",
             "put_receipt_schema_version": "intake-command-payload-put-receipt.v1",
+            "size_bytes_minimum": 1,
+            "size_bytes_maximum": 32768,
         },
         "non_null_columns": receipt_columns,
-        "null_columns": ["existing_event_binding_id", "existing_event_binding_type"],
+        "null_columns": ["existing_event_binding_id"],
     }
     assert shape["SERVER_CANONICAL_BRANCH"] == {
         "required_values": {
             "source_kind": "SERVER_CANONICAL_BRANCH",
             "schema_version": "intake-branch-command.v1",
             "put_receipt_schema_version": "intake-command-payload-put-receipt.v1",
+            "size_bytes_minimum": 1,
+            "size_bytes_maximum": 16384,
         },
         "non_null_columns": receipt_columns,
-        "null_columns": ["existing_event_binding_id", "existing_event_binding_type"],
+        "null_columns": ["existing_event_binding_id"],
     }
 
 
@@ -543,56 +814,84 @@ def test_r15_existing_private_event_has_exact_v043_binding_and_route_fk() -> Non
     payload = contract["authority_tables"]["case_intake_command_payload_authority"]
     event_fk = foreign_key(payload, "case_intake_snapshot_binding")
 
-    assert event_fk["columns"] == [
-        "existing_event_binding_id",
-        "registration_id",
-        "tenant_surrogate",
-        "case_id",
-        "room_type",
-        "room_epoch",
-        "fencing_token",
-        "thread_id",
-        "actor_scope_hash",
-        "agent_session_id",
-        "actor_role",
-        "existing_event_binding_type",
-        "schema_version",
-        "artifact_id",
-        "object_uri",
-        "object_version",
-        "content_sha256",
-        "size_bytes",
-    ]
+    assert event_fk["columns"] == ["existing_event_binding_id", "registration_id"]
     assert event_fk["references"] == {
         "table": "case_intake_snapshot_binding",
-        "columns": [
-            "binding_id",
-            "thread_registration_id",
-            "tenant_surrogate",
-            "case_id",
-            "room_type",
-            "room_epoch",
-            "fencing_token",
-            "thread_id",
-            "actor_scope_hash",
-            "agent_session_id",
-            "actor_audience",
-            "binding_type",
-            "schema_version",
-            "artifact_id",
-            "object_uri",
-            "object_version",
-            "content_sha256",
-            "size_bytes",
-        ],
-        "candidate_key_added_by_V044": True,
+        "columns": ["binding_id", "thread_registration_id"],
+        "candidate_key_added_by_V043_1": True,
     }
     event = contract["payload_contract"]["existing_private_event"]
     assert event["required_v043_table"] == "case_intake_snapshot_binding"
     assert event["required_binding_type"] == "EVENT"
     assert event["required_schema_version"] == "intake-turn-event.v2"
     assert event["composite_foreign_key_required"] is True
+    assert event["composite_foreign_key_columns"] == [
+        "existing_event_binding_id",
+        "registration_id",
+    ]
+    assert event["V043_candidate_key"] == ["binding_id", "thread_registration_id"]
+    assert event["artifact_and_route_verification"] == (
+        "V043_1_constraint_trigger_exact_column_comparison"
+    )
     assert event["exact_route_registration_required"] is True
+
+
+def test_r15_existing_event_constraint_trigger_compares_every_artifact_and_route_pin() -> (
+    None
+):
+    payload = load_manifest()["authority_tables"][
+        "case_intake_command_payload_authority"
+    ]
+    assertion = payload["existing_private_event_assertion"]
+
+    assert assertion["mechanism"] == "V043_1_DEFERRABLE_CONSTRAINT_TRIGGER"
+    assert assertion["timing"] == "AFTER_INSERT"
+    assert assertion["deferrable"] is True
+    assert assertion["initially"] == "IMMEDIATE"
+    assert assertion["compact_foreign_key"] == [
+        "existing_event_binding_id",
+        "registration_id",
+    ]
+    assert assertion["v043_candidate_key"] == [
+        "binding_id",
+        "thread_registration_id",
+    ]
+    assert assertion["v043_required_constants"] == {
+        "binding_type": "EVENT",
+        "schema_version": "intake-turn-event.v2",
+        "room_type": "INTAKE",
+        "visibility": "PRIVATE",
+        "initialization_marker": False,
+    }
+    assert assertion["exact_column_comparison"] == {
+        "tenant_surrogate": "tenant_surrogate",
+        "case_id": "case_id",
+        "room_type": "room_type",
+        "room_epoch": "room_epoch",
+        "fencing_token": "fencing_token",
+        "thread_id": "thread_id",
+        "actor_scope_hash": "actor_scope_hash",
+        "agent_session_id": "agent_session_id",
+        "actor_audience": "actor_role",
+        "schema_version": "schema_version",
+        "artifact_id": "artifact_id",
+        "object_uri": "object_uri",
+        "object_version": "object_version",
+        "content_sha256": "content_sha256",
+        "size_bytes": "size_bytes",
+    }
+    assert assertion["functional_dependencies"] == [
+        "payload_authority_id_determines_immutable_payload_row",
+        "party_authority_id_determines_exact_registration_route",
+        "binding_id_and_thread_registration_id_determine_immutable_V043_event_row",
+    ]
+    assert assertion["concurrency_safety"] == [
+        "compact_FK_waits_for_referenced_V043_insert_commit",
+        "V043_binding_is_update_delete_truncate_immutable",
+        "constraint_trigger_reads_one_visible_row_by_compact_candidate_key",
+        "payload_authority_is_insert_only",
+    ]
+    assert assertion["indexed_columns_forbidden"] == ["object_uri"]
 
 
 def test_r15_server_minted_human_input_is_put_before_db_with_exact_receipt() -> None:
@@ -627,6 +926,12 @@ def test_r15_server_minted_payload_orphan_cleanup_is_idempotent(
         "serialized_with_put_key": True,
         "acceptance_retry_reuses_receipt_before_abandonment": True,
         "retry_after_terminal_abandonment": "forbidden",
+        "cleanup_tombstone": (
+            "durable_put_key_content_hash_object_version_and_terminal_reason"
+        ),
+        "tombstone_reuse_policy": (
+            "same_put_key_is_terminal_and_cannot_create_another_object"
+        ),
         "repeat_result": "ALREADY_ABSENT_OR_DELETED",
         "committed_authority_object_deletion_forbidden": True,
     }
@@ -695,18 +1000,24 @@ def test_r15_put_receipt_snapshot_is_persisted_and_rfc8785_recomputed() -> None:
     assert snapshot["authority_columns"] == [
         "put_receipt_schema_version",
         "put_receipt_id",
-        "put_receipt_stored_at",
+        "put_idempotency_key",
+        "command_id",
+        "put_receipt_stored_at_epoch_micros",
         "put_receipt_hash",
     ]
     assert snapshot["authority_column_constraints"] == {
         "put_receipt_schema_version": "intake-command-payload-put-receipt.v1",
         "put_receipt_id": "identifier_max_128",
-        "put_receipt_stored_at": "non_null_timestamptz",
+        "put_idempotency_key": "iput_v1_plus_64_lowercase_hex",
+        "command_id": "identifier_max_128",
+        "put_receipt_stored_at_epoch_micros": ("integer_0_to_9007199254740991"),
         "put_receipt_hash": "lowercase_sha256",
     }
     assert snapshot["exact_field_mapping"] == {
-        "receipt_schema_version": "put_receipt_schema_version",
+        "schema_version": "put_receipt_schema_version",
         "receipt_id": "put_receipt_id",
+        "put_idempotency_key": "put_idempotency_key",
+        "command_id": "command_id",
         "tenant_surrogate": "tenant_surrogate",
         "case_id": "case_id",
         "registration_id": "registration_id",
@@ -714,12 +1025,12 @@ def test_r15_put_receipt_snapshot_is_persisted_and_rfc8785_recomputed() -> None:
         "access_session_id": "access_session_id",
         "source_kind": "source_kind",
         "artifact_id": "artifact_id",
-        "schema_version": "schema_version",
+        "payload_schema_version": "schema_version",
         "object_uri": "object_uri",
         "object_version": "object_version",
         "content_sha256": "content_sha256",
         "size_bytes": "size_bytes",
-        "stored_at": "put_receipt_stored_at",
+        "stored_at_epoch_micros": "put_receipt_stored_at_epoch_micros",
         "receipt_hash": "put_receipt_hash",
     }
     assert snapshot["receipt_hash_input_fields"] == PUT_RECEIPT_FIELDS[:-1]
@@ -727,6 +1038,49 @@ def test_r15_put_receipt_snapshot_is_persisted_and_rfc8785_recomputed() -> None:
         "SHA_256_of_RFC_8785_UTF_8_authority_snapshot"
     )
     assert snapshot["persisted_snapshot_immutable"] is True
+
+
+def test_r15_fixture_jcs_hash_size_put_key_and_receipt_self_hash_are_linked() -> None:
+    human = load_fixture("valid", "intake-human-input-command-valid.json")
+    receipt = load_fixture("valid", "intake-command-payload-put-receipt-valid.json")
+
+    canonical_payload = rfc8785.dumps(human)
+    assert len(canonical_payload) == receipt["size_bytes"] == 455
+    assert hashlib.sha256(canonical_payload).hexdigest() == receipt["content_sha256"]
+    assert receipt["content_sha256"] == (
+        "8ffcd36dc1bdd92adbb24300ec62e225cceb1d0b655ad4937454626f518acdba"
+    )
+    assert receipt["command_id"] == human["command_id"]
+    assert receipt["payload_schema_version"] == human["schema_version"]
+
+    put_key_input = {
+        key: receipt[key]
+        for key in ["tenant_surrogate", "case_id", "command_id", "source_kind"]
+    }
+    computed_put_key = (
+        "iput.v1." + hashlib.sha256(rfc8785.dumps(put_key_input)).hexdigest()
+    )
+    assert computed_put_key == receipt["put_idempotency_key"]
+    assert computed_put_key == (
+        "iput.v1.ed1a01a9d77a5b404ec6f60116fe76247e1f761455c9ee2d355182a6c9955cc4"
+    )
+
+    receipt_hash_input = {
+        key: receipt[key] for key in PUT_RECEIPT_FIELDS if key != "receipt_hash"
+    }
+    computed_receipt_hash = hashlib.sha256(
+        rfc8785.dumps(receipt_hash_input)
+    ).hexdigest()
+    assert computed_receipt_hash == receipt["receipt_hash"]
+    assert computed_receipt_hash == (
+        "230ed06c2b9a30ce5f5bebb4679cc709c53e3dd3e16224749bd06b8b1c6b72db"
+    )
+
+
+def test_r15_empty_cancellation_reason_preserves_current_cancel_contract() -> None:
+    cancel = load_fixture("valid", "intake-branch-command-cancel-empty-valid.json")
+    assert cancel["cancellation_reason"] == ""
+    wire_validator("intake-branch-command.schema.json").validate(cancel)
 
 
 def test_r15_case_command_ref_compares_only_its_four_wire_fields() -> None:
@@ -742,7 +1096,9 @@ def test_r15_case_command_ref_compares_only_its_four_wire_fields() -> None:
         "object_version",
     ]
     assert comparison["artifact_and_object_version_proof"] == {
-        "EXISTING_PRIVATE_EVENT": "exact_V043_composite_foreign_key",
+        "EXISTING_PRIVATE_EVENT": (
+            "compact_V043_binding_FK_plus_V043_1_exact_assertion"
+        ),
         "SERVER_MINTED_HUMAN_INPUT": "exact_immutable_put_provenance_receipt",
         "SERVER_CANONICAL_BRANCH": (
             "exact_server_canonicalization_and_immutable_put_receipt"
@@ -791,7 +1147,7 @@ def test_r15_payload_and_command_relations_are_one_to_one_and_atomic() -> None:
                 "command_id",
                 "request_hash",
             ],
-            "candidate_key_added_by_V044": True,
+            "candidate_key_added_by_V043_1": True,
         },
     }
     assert {"case_command_sequence", "command_type", "request_hash"} <= set(
@@ -839,6 +1195,102 @@ def test_r15_case_party_and_route_authorities_are_server_owned() -> None:
     assert authority["route_target_client_selectable"] is False
     assert authority["payload"]["raw_client_uri_or_hash_is_authority"] is False
     assert authority["payload"]["case_command_payload_ref_must_equal_authority"] is True
+
+
+def test_r15_creation_order_keeps_authority_before_outbox_visibility() -> None:
+    order = load_manifest()["creation_order"]
+    assert order == {
+        "epoch_authority": {
+            "transaction_order": [
+                "lock_access_agent_registration_rows",
+                "persist_epoch_selection",
+                "persist_initiator_party_authority",
+                "persist_respondent_party_authority",
+                "assert_exact_two_parties",
+                "persist_bootstrap_outbox",
+            ],
+            "bootstrap_outbox_delivery_position": "after_transaction_commit",
+        },
+        "command_authority": {
+            "pre_transaction_order": [
+                "canonicalize_and_hash_payload",
+                "idempotent_immutable_put_when_server_minted",
+                "verify_put_receipt_or_V043_event_binding",
+            ],
+            "transaction_order": [
+                "lock_access_agent_registration_rows",
+                "persist_case_command",
+                "persist_payload_authority",
+                "persist_command_authority",
+                "persist_command_outbox",
+            ],
+            "command_outbox_delivery_position": "after_transaction_commit",
+        },
+    }
+
+
+def test_r15_revocation_lock_order_and_conflict_matrix_are_closed() -> None:
+    protocol = load_manifest()["revocation_lock_protocol"]
+    assert protocol["fixed_row_order"] == [
+        "case_access_session",
+        "agent_conversation_session",
+        "case_intake_graph_thread_binding",
+    ]
+    assert protocol["intra_table_row_order"] == {
+        "case_access_session": "id_ASC",
+        "agent_conversation_session": "id_ASC",
+        "case_intake_graph_thread_binding": "registration_id_ASC",
+    }
+    assert protocol["acceptance"] == {
+        "lock_mode": "FOR_SHARE",
+        "status_checks_after_all_locks": {
+            "case_access_session": "ACTIVE",
+            "agent_conversation_session": "ACTIVE",
+            "case_intake_graph_thread_binding": "REGISTERED",
+        },
+        "holds_locks_until": "transaction_commit_or_rollback",
+    }
+    assert protocol["revocation_writers"] == {
+        "lock_mode": "FOR_UPDATE",
+        "must_use_fixed_row_order": True,
+        "update_after_all_locks": True,
+        "holds_locks_until": "transaction_commit_or_rollback",
+    }
+    assert protocol["postgresql_conflict_matrix"] == {
+        "FOR_SHARE_conflicts_with": ["FOR_UPDATE", "FOR_NO_KEY_UPDATE"],
+        "FOR_UPDATE_conflicts_with": [
+            "FOR_SHARE",
+            "FOR_KEY_SHARE",
+            "FOR_NO_KEY_UPDATE",
+            "FOR_UPDATE",
+        ],
+        "application_revocation_mode": "FOR_UPDATE",
+    }
+    assert protocol["linearization"] == {
+        "winner": "first_lock_owner_to_commit",
+        "revoke_commits_first": (
+            "acceptance_waits_rechecks_status_and_rejects_without_command_or_outbox"
+        ),
+        "acceptance_commits_first": (
+            "later_revocation_does_not_invalidate_accepted_inert_snapshot"
+        ),
+        "deadlock_prevention": (
+            "every_bootstrap_acceptance_and_revocation_writer_uses_table_and_"
+            "intra_table_order"
+        ),
+    }
+    assert protocol["activity_read"] == {
+        "isolation": "REPEATABLE_READ",
+        "row_locks": "none",
+        "accepted_inert_replay_reopens_authorization": False,
+    }
+    assert protocol["required_race_tests"] == [
+        "access_revoke_vs_accept_lock_order",
+        "agent_session_revoke_vs_accept_lock_order",
+        "registration_retire_vs_accept_lock_order",
+        "accept_commit_then_revoke_inert_replay",
+        "revoke_commit_then_accept_rejected",
+    ]
 
 
 def test_r15_read_linearization_is_replay_stable_and_fail_closed() -> None:
@@ -963,15 +1415,19 @@ def test_r15_exit_gate_and_phase4_links_cover_every_review_finding() -> None:
     )
     assert {
         "contract_schema_and_exact_static_tests",
+        "table_column_type_length_null_default_check_map_tests",
         "migration_pk_uk_fk_and_immutability_tests",
         "atomic_epoch_authority_before_bootstrap_test",
         "exact_two_party_bootstrap_cardinality_test",
         "atomic_command_payload_authority_and_outbox_test",
         "payload_source_kind_command_schema_matrix_tests",
+        "formal_payload_schema_positive_negative_fixture_tests",
         "payload_source_kind_row_shape_check_tests",
         "existing_private_event_exact_V043_fk_test",
+        "compact_V043_fk_and_constraint_trigger_exact_comparison_tests",
         "immutable_put_receipt_and_orphan_cleanup_tests",
         "put_receipt_snapshot_recomputation_test",
+        "put_receipt_epoch_micros_precision_test",
         "deterministic_put_retry_conflict_and_cleanup_tests",
         "canonical_branch_payload_boundaries",
         "command_payload_authority_one_to_one_test",
@@ -979,11 +1435,15 @@ def test_r15_exit_gate_and_phase4_links_cover_every_review_finding() -> None:
         "agent_session_profile_hash_boundary_tests",
         "user_and_merchant_initiated_party_tests",
         "payload_cross_session_rejection_test",
+        "read_port_unit_and_postgresql_tests",
         "revoke_before_and_after_acceptance_races",
+        "revocation_lock_conflict_matrix_race_tests",
         "commit_before_event_delivery_loss_test",
+        "repeatable_read_concurrency_test",
         "v1_completed_and_uncompleted_history_compatibility_tests",
         "worker_registration_context_smoke",
         "no_formal_sink_gate",
+        "typed_child_replay_tests",
         "independent_review_pass",
     } <= required
 
@@ -1000,3 +1460,39 @@ def test_r15_exit_gate_and_phase4_links_cover_every_review_finding() -> None:
     assert "UNIQUE(payload_authority_id)" in runbook
     assert RUNBOOK.name in plan
     assert "P4-R1.5 Authority-Binding Gate" in plan
+
+
+def test_r15_phase4_task_dag_and_batches_enforce_the_gate() -> None:
+    schedule = yaml.safe_load(PHASE4_BATCHES.read_text(encoding="utf-8"))
+    assert "P4-R1.5" in schedule["agents"]["R"]["tasks"]
+    assert schedule["gate"]["authority_binding_gate"] == {
+        "gate_id": "P4-R1.5",
+        "status": "FROZEN_FOR_IMPLEMENTATION",
+        "manifest": "plans/phase-4-r15-authority-binding-contract.yaml",
+        "schema": "plans/phase-4-r15-authority-binding-contract.schema.json",
+        "static_gate": R15_STATIC_TEST,
+        "required_before_tasks": ["P4-R1", "P4-D1", "P4-E1"],
+        "runtime_effect": "none",
+    }
+    for task_name in ["P4-R1", "P4-D1", "P4-E1"]:
+        assert "P4-R1.5" in schedule["task_contracts"][task_name]["depends_on"]
+
+    batches = schedule["batches"]
+    for batch_name in ["P4-BATCH-1", "P4-BATCH-2"]:
+        batch = batches[batch_name]
+        assert "P4-R1.5" in batch["requires_tasks"]
+        assert R15_STATIC_TEST in batch["static_tests"]
+        assert any(
+            R15_STATIC_TEST in command["command"]
+            for command in batch["source_commands"]
+        )
+
+    checkpoint = batches["P4-BATCH-3"]
+    assert "P4-R1.5" in checkpoint["requires_tasks"]
+    assert "P4_R1_5_authority_binding_gate_pass" in checkpoint["requires"]
+    static_command = next(
+        command
+        for command in checkpoint["source_commands"]
+        if command["id"] == "static_phase_4"
+    )
+    assert R15_STATIC_TEST in static_command["command"]

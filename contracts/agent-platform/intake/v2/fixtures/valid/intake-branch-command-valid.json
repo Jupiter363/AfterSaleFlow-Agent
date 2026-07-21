@@ -1,0 +1,11 @@
+{
+  "schema_version": "intake-branch-command.v1",
+  "command_id": "CMD_P4_R15_CONFIRM_1",
+  "command_type": "INTAKE_CONFIRM",
+  "party": "INITIATOR",
+  "operation": "INITIATOR_ACCEPT",
+  "admissible": true,
+  "dispute_type": "DAMAGED_DELIVERY",
+  "risk_level": "MEDIUM",
+  "confirmation_note": "Proceed to respondent intake."
+}

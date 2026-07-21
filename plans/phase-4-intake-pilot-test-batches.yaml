@@ -35,6 +35,14 @@ gate:
   gate_change_policy:
     - A later MIG-003 approval does not implicitly relax this matrix.
     - Formal traffic requires an explicit amended gate and a new candidate checkpoint.
+  authority_binding_gate:
+    gate_id: P4-R1.5
+    status: FROZEN_FOR_IMPLEMENTATION
+    manifest: plans/phase-4-r15-authority-binding-contract.yaml
+    schema: plans/phase-4-r15-authority-binding-contract.schema.json
+    static_gate: tests/static/test_phase4_r15_authority_binding_contract.py
+    required_before_tasks: [P4-R1, P4-D1, P4-E1]
+    runtime_effect: none
 
 resources:
   active_primary_agents: 1
@@ -253,7 +261,7 @@ agents:
 
   R:
     role: Primary contract, integration, review, and evidence
-    tasks: [P4-0, P4-R0G, P4-R1, P4-R2]
+    tasks: [P4-0, P4-R0G, P4-R1.5, P4-R1, P4-R2]
     slices: [P4-S1, P4-S2, P4-S3, P4-S4, P4-S5]
     test_routes:
       - tests/static/test_phase4_*.py
@@ -341,7 +349,7 @@ task_contracts:
     definition_of_done: Atomicity, replay, stale fence, actor isolation, and all Intake branch invariants pass; SHADOW cannot resolve these ports.
   P4-D1:
     owner: D
-    depends_on: [P4-B2, P4-C2, P4-R1]
+    depends_on: [P4-B2, P4-C2, P4-R1.5, P4-R1]
     objective: Implement the versioned Java Intake projection/reader and API compatibility fields.
     inputs: [workflow_snapshot, finalization_receipt, process_projection]
     outputs: [projection_adapter, API_compatibility_tests]
@@ -355,7 +363,7 @@ task_contracts:
     definition_of_done: OVR, CORE, INT, SEC, and UI focused baselines pass without route or layout regressions.
   P4-E1:
     owner: E
-    depends_on: [P4-A2, P4-B2, P4-C2, P4-R1]
+    depends_on: [P4-A2, P4-B2, P4-C2, P4-R1.5, P4-R1]
     objective: Replace global cutover semantics with a room-specific stable Intake selector and implement isolated synthetic parity and bounded telemetry.
     inputs: [epoch_selection_contract, normalized_parity_contract]
     outputs: [intake_epoch_selector, shadow_comparison, observability]
@@ -367,16 +375,23 @@ task_contracts:
     inputs: [all_slice_receipts, rollback_protocol]
     outputs: [fault_harness, evidence_policy, rollback_checks]
     definition_of_done: Synthetic failure cases are classified and reproducible, with no claim that external gates passed.
-  P4-R1:
+  P4-R1.5:
     owner: R
     depends_on: [P4-A1, P4-B1, P4-C1]
+    objective: Freeze the exact V043_1 authority relations, source payload schemas, revocation linearization, and static contract gate before shared worker assembly or Wave B consumers advance.
+    inputs: [A_foundation, B_ports, C_foundation, V043_immutable_bindings]
+    outputs: [r15_authority_manifest, r15_wire_schemas, r15_static_gate]
+    definition_of_done: The manifest validates against a closed schema, positive and negative wire fixtures pass, runtime gates remain closed, and independent review accepts the contract commit.
+  P4-R1:
+    owner: R
+    depends_on: [P4-A1, P4-B1, P4-C1, P4-R1.5]
     objective: Integrate shared proposal transport, exact Graph registration/runtime binding, versioned typed-child dispatch, worker registration, and no-formal-sink assembly.
     inputs: [A_foundation, B_ports, C_foundation]
     outputs: [minimum_signed_synthetic_chain, shared_integration_tests]
     definition_of_done: Case Workflow dispatch honors persisted workflow_type with a Temporal version marker, and the S1 chain ends only in comparison storage.
   P4-R2:
     owner: R
-    depends_on: [P4-A2, P4-B2, P4-C2, P4-D2, P4-E2, P4-R1]
+    depends_on: [P4-A2, P4-B2, P4-C2, P4-D2, P4-E2, P4-R1.5, P4-R1]
     objective: Close reviews, freeze one candidate, run the deduplicated checkpoint, classify failures, and archive evidence.
     outputs: [phase4_candidate, phase4_evidence_bundle, engineering_checkpoint]
     definition_of_done: One candidate SHA supplies all accepted reports and promotion remains PENDING.
@@ -476,7 +491,7 @@ waves:
 
   wave_2:
     active_roles: [D, E, R]
-    tasks: [P4-D1, P4-D2, P4-E1, P4-E2, P4-R1]
+    tasks: [P4-R1.5, P4-R1, P4-D1, P4-D2, P4-E1, P4-E2]
     reused_completed_slots: true
     slices: [P4-S2, P4-S3, P4-S4, P4-S5]
     max_active_children: 2
@@ -620,7 +635,7 @@ batches:
     tier: T1
     trigger: wave_1_merged
     purpose: Verify the service-free P4-S1 contracts and Graph, Workflow-kernel, and Java foundations once after Wave 1 integration.
-    requires_tasks: [P4-A1, P4-B1, P4-C1]
+    requires_tasks: [P4-A1, P4-B1, P4-C1, P4-R1.5]
     slices: [P4-S1]
     python_tests:
       - python-agent-service/tests/graphs/intake
@@ -636,6 +651,14 @@ batches:
       - tests/static/test_phase4_intake_pilot_plan.py
       - tests/static/test_graph_import_boundaries.py
       - tests/static/test_phase4_matrix_authority_erratum.py
+      - tests/static/test_phase4_r15_authority_binding_contract.py
+    source_commands:
+      - id: p4_r15_contract_static_batch_1
+        cwd: .
+        command: >-
+          D:\miniconda\python.exe -m pytest
+          tests/static/test_phase4_r15_authority_binding_contract.py
+          -q
     execution:
       heavy_parallelism: 1
       light_parallelism: 2
@@ -652,7 +675,7 @@ batches:
     tier: T2
     trigger: wave_2_merged
     purpose: Run S2-S4 integration and S5 fault hardening once after all owner changes and cross-owner fixes are merged.
-    requires_tasks: [P4-A2, P4-B2, P4-C2, P4-D1, P4-D2, P4-E1, P4-E2, P4-R1]
+    requires_tasks: [P4-A2, P4-B2, P4-C2, P4-D1, P4-D2, P4-E1, P4-E2, P4-R1.5, P4-R1]
     slices: [P4-S2, P4-S3, P4-S4, P4-S5]
     static_tests:
       - tests/static/test_phase4_no_formal_sink_assembly.py
@@ -698,6 +721,15 @@ batches:
       - frontend/src/api/agentStream.test.js
       - frontend/src/stores/agentStream.test.js
       - frontend/src/stores/room.test.js
+    static_tests:
+      - tests/static/test_phase4_r15_authority_binding_contract.py
+    source_commands:
+      - id: p4_r15_contract_static_batch_2
+        cwd: .
+        command: >-
+          D:\miniconda\python.exe -m pytest
+          tests/static/test_phase4_r15_authority_binding_contract.py
+          -q
     execution:
       order:
         - graph_and_privacy
@@ -728,6 +760,8 @@ batches:
       - no_open_PRODUCT_failures
       - MIG_003_still_recorded_as_PENDING_PROMOTION
       - formal_traffic_still_disabled
+      - P4_R1_5_authority_binding_gate_pass
+    requires_tasks: [P4-R1.5]
     candidate_policy:
       accepted_candidate_count: 1
       candidate_sha_immutable_during_run: true
@@ -784,6 +818,7 @@ batches:
           tests/static/test_temporal_refactor_traceability.py
           tests/static/test_phase4_matrix_authority_erratum.py
           tests/static/test_phase4_no_formal_sink_assembly.py
+          tests/static/test_phase4_r15_authority_binding_contract.py
           -q
     execution:
       strategy: deduplicated_source_suites_then_derived_batch_views

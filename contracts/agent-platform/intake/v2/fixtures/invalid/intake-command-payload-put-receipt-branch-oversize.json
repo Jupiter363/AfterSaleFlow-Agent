@@ -1,0 +1,20 @@
+{
+  "schema_version": "intake-command-payload-put-receipt.v1",
+  "receipt_id": "PUT_RECEIPT_P4_R15_2",
+  "put_idempotency_key": "iput.v1.2222222222222222222222222222222222222222222222222222222222222222",
+  "command_id": "CMD_P4_R15_CONFIRM_1",
+  "tenant_surrogate": "tenant-synthetic",
+  "case_id": "CASE_P4_SYNTHETIC_1",
+  "registration_id": "REG_P4_USER_1",
+  "actor_id": "USER_P4_1",
+  "access_session_id": "ACCESS_P4_USER_1",
+  "source_kind": "SERVER_CANONICAL_BRANCH",
+  "artifact_id": "ARTIFACT_P4_R15_BRANCH_1",
+  "payload_schema_version": "intake-branch-command.v1",
+  "object_uri": "s3://intake-command-payload/CASE_P4_SYNTHETIC_1/CMD_P4_R15_CONFIRM_1.json",
+  "object_version": "version-1",
+  "content_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "size_bytes": 16385,
+  "stored_at_epoch_micros": 1784534580000001,
+  "receipt_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+}

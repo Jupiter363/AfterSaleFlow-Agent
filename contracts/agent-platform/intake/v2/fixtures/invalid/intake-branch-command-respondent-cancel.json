@@ -1,0 +1,8 @@
+{
+  "schema_version": "intake-branch-command.v1",
+  "command_id": "CMD_P4_R15_CANCEL_1",
+  "command_type": "INTAKE_CANCEL",
+  "party": "RESPONDENT",
+  "operation": "CANCEL",
+  "cancellation_reason": "Respondent cannot cancel Intake."
+}

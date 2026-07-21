@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.after-sale-flow.example/agent-platform/intake/v2/intake-command-payload-put-receipt.schema.json",
+  "title": "Intake Command Payload Put Receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "x-max-encoded-bytes": 16384,
+  "required": [
+    "schema_version",
+    "receipt_id",
+    "put_idempotency_key",
+    "command_id",
+    "tenant_surrogate",
+    "case_id",
+    "registration_id",
+    "actor_id",
+    "access_session_id",
+    "source_kind",
+    "artifact_id",
+    "payload_schema_version",
+    "object_uri",
+    "object_version",
+    "content_sha256",
+    "size_bytes",
+    "stored_at_epoch_micros",
+    "receipt_hash"
+  ],
+  "properties": {
+    "schema_version": {"const": "intake-command-payload-put-receipt.v1"},
+    "receipt_id": {"$ref": "#/$defs/identifier"},
+    "put_idempotency_key": {
+      "type": "string",
+      "pattern": "^iput\\.v1\\.[0-9a-f]{64}$"
+    },
+    "command_id": {"$ref": "#/$defs/identifier"},
+    "tenant_surrogate": {"$ref": "#/$defs/identifier"},
+    "case_id": {"$ref": "#/$defs/identifier"},
+    "registration_id": {"$ref": "#/$defs/identifier"},
+    "actor_id": {"$ref": "#/$defs/identifier"},
+    "access_session_id": {"$ref": "#/$defs/identifier"},
+    "source_kind": {
+      "enum": ["SERVER_MINTED_HUMAN_INPUT", "SERVER_CANONICAL_BRANCH"]
+    },
+    "artifact_id": {"$ref": "#/$defs/identifier"},
+    "payload_schema_version": {"$ref": "#/$defs/identifier"},
+    "object_uri": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^(s3|minio|urn):",
+      "maxLength": 1024
+    },
+    "object_version": {"$ref": "#/$defs/identifier"},
+    "content_sha256": {"$ref": "#/$defs/sha256"},
+    "size_bytes": {"type": "integer", "minimum": 1, "maximum": 32768},
+    "stored_at_epoch_micros": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "receipt_hash": {"$ref": "#/$defs/sha256"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"source_kind": {"const": "SERVER_MINTED_HUMAN_INPUT"}}},
+      "then": {
+        "properties": {
+          "payload_schema_version": {"const": "intake-human-input-command.v1"},
+          "size_bytes": {"maximum": 32768}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"source_kind": {"const": "SERVER_CANONICAL_BRANCH"}}},
+      "then": {
+        "properties": {
+          "payload_schema_version": {"const": "intake-branch-command.v1"},
+          "size_bytes": {"maximum": 16384}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}
