@@ -480,17 +480,23 @@ as $$
 declare
     access_status varchar(32);
     agent_status varchar(32);
-    registration_status varchar(24);
+    graph_registration_status varchar(24);
 begin
-    select status into access_status
-      from case_access_session where id = new.access_session_id for share;
-    select status into agent_status
-      from agent_conversation_session where id = new.agent_session_id for share;
-    select registration_status into registration_status
-      from case_intake_graph_thread_binding where registration_id = new.registration_id for share;
+    select access_row.status into access_status
+      from case_access_session access_row
+     where access_row.id = new.access_session_id
+     for share;
+    select agent_row.status into agent_status
+      from agent_conversation_session agent_row
+     where agent_row.id = new.agent_session_id
+     for share;
+    select registration_row.registration_status into graph_registration_status
+      from case_intake_graph_thread_binding registration_row
+     where registration_row.registration_id = new.registration_id
+     for share;
     if access_status is distinct from 'ACTIVE'
        or agent_status is distinct from 'ACTIVE'
-       or registration_status is distinct from 'REGISTERED' then
+       or graph_registration_status is distinct from 'REGISTERED' then
         raise exception using errcode = '23514',
             message = 'P4-R1.5 authority requires ACTIVE access/agent and REGISTERED graph binding';
     end if;
