@@ -16,7 +16,7 @@ import java.util.Map;
 import java.util.Set;
 
 /** Builds the non-frozen unilateral projection from a model-authored semantic draft. */
-final class IntakeUnilateralMatrixPolicy {
+public final class IntakeUnilateralMatrixPolicy {
 
     private static final Set<String> DRAFT_FIELDS =
             Set.of("schema_version", "fact_rows", "summary_source_fact_keys");
@@ -96,7 +96,7 @@ final class IntakeUnilateralMatrixPolicy {
             "NEED_MORE_INFO",
             "NOT_ADDRESSED");
 
-    void validateExisting(ObjectNode matrix, MatrixAuthority authority) {
+    public void validateExisting(ObjectNode matrix, MatrixAuthority authority) {
         validateProjection(matrix, authority);
     }
 

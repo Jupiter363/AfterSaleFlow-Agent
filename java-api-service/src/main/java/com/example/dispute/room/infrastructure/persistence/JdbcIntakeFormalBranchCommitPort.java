@@ -1,0 +1,1006 @@
+package com.example.dispute.room.infrastructure.persistence;
+
+import com.example.dispute.config.ActorRole;
+import com.example.dispute.config.AuthenticatedActor;
+import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
+import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
+import com.example.dispute.room.application.IntakeBranchDomainService;
+import com.example.dispute.room.application.IntakeBranchDomainService.BranchResult;
+import com.example.dispute.room.application.IntakeConfirmationCommand;
+import com.example.dispute.room.domain.RoomType;
+import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
+import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
+import com.example.dispute.workflow.application.intake.IntakeFinalizationPersistenceException;
+import com.example.dispute.workflow.application.intake.IntakeFinalizationRejectedException;
+import com.example.dispute.workflow.application.intake.IntakeFormalBranchCommandResolver;
+import com.example.dispute.workflow.application.intake.IntakeFormalBranchCommandResolver.ResolvedBranchCommand;
+import com.example.dispute.workflow.application.intake.IntakeFormalBranchCommitPort;
+import com.example.dispute.workflow.contract.v1.ContractJson;
+import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.ActivityEnvelope;
+import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.BranchCommitReceipt;
+import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.BranchCommitRequest;
+import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.BranchOperation;
+import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.OperationReceipt;
+import com.example.dispute.workflow.temporal.room.intake.IntakeDomainEventRef;
+import com.example.dispute.workflow.temporal.room.intake.IntakeDomainEventType;
+import com.example.dispute.workflow.temporal.room.intake.IntakeParty;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.time.Clock;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+import java.time.temporal.ChronoUnit;
+import java.util.HexFormat;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import org.springframework.dao.DataAccessException;
+import org.springframework.jdbc.core.RowCallbackHandler;
+import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
+import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
+
+/**
+ * Exact TEMPORAL authority and atomic operation ledger for Intake terminal branches.
+ *
+ * <p>This adapter has no Spring stereotype and is not registered in the Phase 4 worker. Tests may
+ * assemble it explicitly. Every domain mutation, committed event and operation receipt uses one
+ * caller-supplied transaction manager.
+ */
+public final class JdbcIntakeFormalBranchCommitPort implements IntakeFormalBranchCommitPort {
+
+    private static final String EVENT_REF_PREFIX = "urn:after-sale-flow:intake-event:";
+
+    private final NamedParameterJdbcTemplate jdbc;
+    private final TransactionTemplate transactions;
+    private final FulfillmentCaseRepository caseRepository;
+    private final CaseRoomRepository roomRepository;
+    private final IntakeBranchDomainService domainService;
+    private final IntakeFormalBranchCommandResolver commandResolver;
+    private final ObjectMapper objectMapper;
+    private final Clock clock;
+
+    public JdbcIntakeFormalBranchCommitPort(
+            NamedParameterJdbcTemplate jdbc,
+            PlatformTransactionManager transactionManager,
+            FulfillmentCaseRepository caseRepository,
+            CaseRoomRepository roomRepository,
+            IntakeBranchDomainService domainService,
+            IntakeFormalBranchCommandResolver commandResolver,
+            ObjectMapper objectMapper,
+            Clock clock) {
+        this.jdbc = Objects.requireNonNull(jdbc, "jdbc");
+        this.transactions = new TransactionTemplate(
+                Objects.requireNonNull(transactionManager, "transactionManager"));
+        this.caseRepository = Objects.requireNonNull(caseRepository, "caseRepository");
+        this.roomRepository = Objects.requireNonNull(roomRepository, "roomRepository");
+        this.domainService = Objects.requireNonNull(domainService, "domainService");
+        this.commandResolver = Objects.requireNonNull(commandResolver, "commandResolver");
+        this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper");
+        this.clock = Objects.requireNonNull(clock, "clock");
+    }
+
+    @Override
+    public BranchCommitReceipt commit(BranchCommitRequest request) {
+        Objects.requireNonNull(request, "request");
+        try {
+            BranchCommitReceipt receipt = transactions.execute(status -> commitInTransaction(request));
+            return Objects.requireNonNull(receipt, "branch transaction returned null");
+        } catch (IntakeFinalizationRejectedException failure) {
+            throw failure;
+        } catch (DataAccessException failure) {
+            throw new IntakeFinalizationPersistenceException(
+                    "Intake branch persistence is temporarily unavailable", failure);
+        } catch (RuntimeException failure) {
+            throw rejected(
+                    "INTAKE_BRANCH_DOMAIN_REJECTED",
+                    failure.getMessage() == null
+                            ? "Intake branch failed closed"
+                            : failure.getMessage(),
+                    failure);
+        }
+    }
+
+    private BranchCommitReceipt commitInTransaction(BranchCommitRequest request) {
+        OffsetDateTime now = clock.instant()
+                .truncatedTo(ChronoUnit.MICROS)
+                .atOffset(ZoneOffset.UTC);
+        lockOperationKey(request);
+        CommandRow command = requireCommand(request);
+        int inserted = "ORCHESTRATION_ACCEPTED".equals(command.status())
+                ? startOperation(request, command, now)
+                : 0;
+        OperationRow operation = lockOperation(request);
+        requireOperationBinding(request, command, operation);
+        if ("COMPLETED".equals(operation.status())) {
+            requireCommittedCommandBinding(command, operation);
+            return readCompletedReceipt(request, operation);
+        }
+        if (!"ORCHESTRATION_ACCEPTED".equals(command.status())
+                || inserted == 0
+                || !"STARTED".equals(operation.status())) {
+            throw rejected(
+                    "INTAKE_BRANCH_OPERATION_INCOMPLETE",
+                    "branch operation ledger contains a non-replayable unfinished result");
+        }
+
+        AuthorityRows authority = requireCurrentAuthority(request, command);
+        ResolvedBranchCommand resolved = Objects.requireNonNull(
+                commandResolver.resolve(request), "resolved branch command");
+        resolved.requireMatches(request);
+        if (!command.payloadSchema().equals(resolved.payloadSchema())) {
+            throw rejected(
+                    "INTAKE_BRANCH_PAYLOAD_SCHEMA_MISMATCH",
+                    "resolved branch command schema does not match the immutable command ledger");
+        }
+        FulfillmentCaseEntity dispute = caseRepository.findByIdForUpdate(request.envelope().caseId())
+                .orElseThrow(() -> rejected(
+                        "INTAKE_BRANCH_CASE_MISSING", "locked Intake case no longer exists"));
+        CaseRoomEntity intakeRoom = roomRepository
+                .findByCaseIdAndRoomType(request.envelope().caseId(), RoomType.INTAKE)
+                .orElseThrow(() -> rejected(
+                        "INTAKE_BRANCH_ROOM_MISSING", "locked Intake room no longer exists"));
+        AuthenticatedActor actor =
+                new AuthenticatedActor(authority.actorId(), ActorRole.valueOf(authority.actorRole()));
+
+        BranchResult result = applyBranch(request, resolved, dispute, intakeRoom, actor, now);
+        long eventSequence = nextEventSequence(request.envelope().caseId());
+        RevisionRows revisions = advanceProjection(request, dispute, eventSequence, now);
+        EventReceipt event = writeCommittedEvent(
+                request, result, authority, revisions, dispute, eventSequence, now);
+        markCommandApplied(command, event, now);
+        completeOperation(operation, event, now);
+        BranchCommitReceipt receipt = new BranchCommitReceipt(
+                "intake-branch-commit-receipt.v1",
+                request.operation(),
+                new OperationReceipt(
+                        "intake-operation-receipt.v1",
+                        request.operationKey(),
+                        request.requestHash(),
+                        event.resultHash(),
+                        revisions.processRevision(),
+                        revisions.roomRevision()),
+                event.event());
+        receipt.requireMatches(request);
+        return receipt;
+    }
+
+    private BranchResult applyBranch(
+            BranchCommitRequest request,
+            ResolvedBranchCommand resolved,
+            FulfillmentCaseEntity dispute,
+            CaseRoomEntity intakeRoom,
+            AuthenticatedActor actor,
+            OffsetDateTime now) {
+        return switch (request.operation()) {
+            case INITIATOR_ACCEPT -> {
+                BranchResult result = domainService.acceptInitiator(
+                        dispute,
+                        intakeRoom,
+                        actor,
+                        requiredConfirmation(resolved),
+                        now);
+                domainService.requireFormalInitiatorMatrix(dispute);
+                yield result;
+            }
+            case INITIATOR_REJECT -> domainService.rejectInitiator(
+                    dispute,
+                    intakeRoom,
+                    actor,
+                    requiredConfirmation(resolved),
+                    now);
+            case CANCEL -> domainService.cancel(
+                    dispute, intakeRoom, actor, resolved.cancellationReason(), now);
+            case RESPONDENT_CONFIRM -> {
+                domainService.requireFormalBilateralMatrix(dispute);
+                throw rejected(
+                        "INTAKE_RESPONDENT_DELTA_GATE_PENDING",
+                        "respondent formal commit remains disabled until the delta contract is re-authenticated");
+            }
+        };
+    }
+
+    private RevisionRows advanceProjection(
+            BranchCommitRequest request,
+            FulfillmentCaseEntity dispute,
+            long eventSequence,
+            OffsetDateTime now) {
+        ActivityEnvelope envelope = request.envelope();
+        long processRevision = Math.addExact(envelope.processRevision(), 1);
+        long roomRevision = Math.addExact(envelope.roomRevision(), 1);
+        boolean terminal = request.operation() == BranchOperation.INITIATOR_REJECT
+                || request.operation() == BranchOperation.CANCEL;
+        int epochChanged = jdbc.update(
+                """
+                update case_room_epoch
+                   set lifecycle_status = case when :terminal then 'TERMINAL' else lifecycle_status end,
+                       process_revision = :processRevision,
+                       room_revision = :roomRevision,
+                       terminal_at = case when :terminal then :now else terminal_at end,
+                       updated_at = :now,
+                       version = version + 1
+                 where tenant_surrogate = :tenantSurrogate
+                   and case_id = :caseId
+                   and room_type = 'INTAKE'
+                   and room_epoch = :roomEpoch
+                   and fencing_token = :fencingToken
+                   and writer_mode = 'TEMPORAL'
+                   and lifecycle_status = 'ACTIVE'
+                   and process_revision = :expectedProcessRevision
+                   and room_revision = :expectedRoomRevision
+                """,
+                parameters(request)
+                        .addValue("terminal", terminal)
+                        .addValue("processRevision", processRevision)
+                        .addValue("roomRevision", roomRevision)
+                        .addValue("now", now));
+        if (epochChanged != 1) {
+            throw rejected(
+                    "INTAKE_BRANCH_STALE_EPOCH",
+                    "Intake epoch changed before the branch transition committed");
+        }
+        String phase = terminal ? "CLOSED" : "WAITING_PARTY";
+        int projectionChanged = jdbc.update(
+                """
+                update case_process_projection
+                   set macro_phase = :macroPhase,
+                       current_room = case when :terminal then null else 'INTAKE' end,
+                       room_phase = :roomPhase,
+                       writer_activation_status = case when :terminal then 'TERMINAL' else writer_activation_status end,
+                       process_revision = :processRevision,
+                       last_command_sequence = :commandSequence,
+                       last_case_event_sequence = :eventSequence,
+                       projected_deadline_at = null,
+                       projected_at = :now,
+                       updated_at = :now,
+                       version = version + 1
+                 where tenant_surrogate = :tenantSurrogate
+                   and case_id = :caseId
+                   and current_room = 'INTAKE'
+                   and writer_mode = 'TEMPORAL'
+                   and writer_activation_status = 'READY'
+                   and room_epoch = :roomEpoch
+                   and fencing_token = :fencingToken
+                   and process_revision = :expectedProcessRevision
+                """,
+                parameters(request)
+                        .addValue("terminal", terminal)
+                        .addValue("macroPhase", dispute.getCaseStatus().name())
+                        .addValue("roomPhase", phase)
+                        .addValue("processRevision", processRevision)
+                        .addValue("eventSequence", eventSequence)
+                        .addValue("now", now));
+        if (projectionChanged != 1) {
+            throw rejected(
+                    "INTAKE_BRANCH_STALE_PROJECTION",
+                    "Intake projection changed before the branch transition committed");
+        }
+        return new RevisionRows(processRevision, roomRevision);
+    }
+
+    private CommandRow requireCommand(BranchCommitRequest request) {
+        List<CommandRow> rows = jdbc.query(
+                """
+                select id, case_command_sequence, command_type, room_type, room_epoch,
+                       actor_id, actor_role,
+                       payload_schema_version, payload_uri, payload_sha256,
+                       expected_process_revision, request_hash, command_status,
+                       result_uri, result_sha256, applied_at
+                  from case_command
+                 where tenant_surrogate = :tenantSurrogate
+                   and case_id = :caseId
+                   and command_id = :commandId
+                 for update
+                """,
+                parameters(request),
+                (row, ignored) -> new CommandRow(
+                        row.getString("id"),
+                        row.getLong("case_command_sequence"),
+                        row.getString("command_type"),
+                        row.getString("room_type"),
+                        row.getLong("room_epoch"),
+                        row.getString("actor_id"),
+                        row.getString("actor_role"),
+                        row.getString("payload_schema_version"),
+                        row.getString("payload_uri"),
+                        row.getString("payload_sha256"),
+                        row.getLong("expected_process_revision"),
+                        row.getString("request_hash"),
+                        row.getString("command_status"),
+                        row.getString("result_uri"),
+                        row.getString("result_sha256"),
+                        row.getObject("applied_at", OffsetDateTime.class)));
+        if (rows.size() != 1) {
+            throw rejected(
+                    "INTAKE_BRANCH_COMMAND_MISSING",
+                    "branch command is not present in the Java command ledger");
+        }
+        CommandRow command = rows.getFirst();
+        ActivityEnvelope envelope = request.envelope();
+        if (command.sequence() != envelope.commandSequence()
+                || !command.commandType().equals(envelope.commandType().name())
+                || !"INTAKE".equals(command.roomType())
+                || command.roomEpoch() != envelope.roomEpoch()
+                || !command.payloadUri().equals(envelope.commandPayloadRef())
+                || !command.payloadHash().equals(envelope.commandPayloadHash())
+                || command.expectedProcessRevision() != envelope.processRevision()
+                || !command.requestHash().equals(request.requestHash())
+                || !List.of("ORCHESTRATION_ACCEPTED", "APPLIED").contains(command.status())) {
+            throw rejected(
+                    "INTAKE_BRANCH_COMMAND_CONFLICT",
+                    "branch Activity does not match the exact accepted or applied Java command");
+        }
+        return command;
+    }
+
+    private static void requireCommittedCommandBinding(
+            CommandRow command, OperationRow operation) {
+        if (!"APPLIED".equals(command.status())
+                || command.appliedAt() == null
+                || !Objects.equals(command.resultUri(), operation.resultUri())
+                || !Objects.equals(command.resultHash(), operation.resultHash())) {
+            throw rejected(
+                    "INTAKE_BRANCH_RECEIPT_CONFLICT",
+                    "completed operation is not bound to the exact applied command receipt");
+        }
+    }
+
+    private AuthorityRows requireCurrentAuthority(
+            BranchCommitRequest request, CommandRow command) {
+        ActivityEnvelope envelope = request.envelope();
+        List<AuthorityRows> rows = jdbc.query(
+                """
+                select binding.actor_id, binding.actor_role, epoch.room_id,
+                       projection.room_phase, dispute.initiator_id, dispute.initiator_role,
+                       dispute.respondent_id, dispute.respondent_role
+                  from case_intake_graph_thread_binding binding
+                  join case_room_epoch epoch
+                    on epoch.tenant_surrogate = binding.tenant_surrogate
+                   and epoch.case_id = binding.case_id
+                   and epoch.room_type = binding.room_type
+                   and epoch.room_epoch = binding.room_epoch
+                   and epoch.fencing_token = binding.fencing_token
+                  join case_process_projection projection on projection.case_id = epoch.case_id
+                  join case_room room
+                    on room.id = epoch.room_id
+                   and room.case_id = epoch.case_id
+                   and room.room_type = epoch.room_type
+                  join fulfillment_dispute_case dispute on dispute.id = epoch.case_id
+                 where binding.tenant_surrogate = :tenantSurrogate
+                   and binding.case_id = :caseId
+                   and binding.room_type = 'INTAKE'
+                   and binding.room_epoch = :roomEpoch
+                   and binding.fencing_token = :fencingToken
+                   and binding.actor_scope_hash = :actorScopeHash
+                   and binding.registration_status = 'REGISTERED'
+                   and binding.writer_mode = 'TEMPORAL'
+                   and binding.graph_key = 'intake.v2'
+                   and binding.graph_version = :graphVersion
+                   and binding.checkpoint_schema_version = :checkpointSchemaVersion
+                   and binding.prompt_version = :promptVersion
+                   and binding.model_profile_id = :modelProfileId
+                   and binding.output_schema_version = :outputSchemaVersion
+                   and binding.policy_version = :policyVersion
+                   and binding.guardrail_version = :guardrailVersion
+                   and binding.tool_policy_version = :toolPolicyVersion
+                   and epoch.writer_mode = 'TEMPORAL'
+                   and epoch.lifecycle_status = 'ACTIVE'
+                   and epoch.provisioning_status = 'READY'
+                   and epoch.selection_schema_version = 'room-epoch-selection.v2'
+                   and epoch.process_revision = :expectedProcessRevision
+                   and epoch.room_revision = :expectedRoomRevision
+                   and projection.tenant_surrogate = :tenantSurrogate
+                   and projection.current_room = 'INTAKE'
+                   and projection.writer_mode = 'TEMPORAL'
+                   and projection.writer_activation_status = 'READY'
+                   and projection.room_epoch = :roomEpoch
+                   and projection.fencing_token = :fencingToken
+                   and projection.process_revision = :expectedProcessRevision
+                   and projection.last_command_sequence <= :commandSequence
+                   and room.room_status = 'OPEN'
+                   and dispute.current_room = 'INTAKE'
+                   and dispute.current_deadline_at is null
+                   and dispute.case_status in (
+                       'INTAKE_PENDING', 'INTAKE_IN_PROGRESS',
+                       'WAITING_SLOT_COMPLETION', 'INTAKE_COMPLETED'
+                   )
+                   and not exists (
+                       select 1
+                         from case_command earlier
+                        where earlier.tenant_surrogate = :tenantSurrogate
+                          and earlier.case_id = :caseId
+                          and earlier.case_command_sequence < :commandSequence
+                          and earlier.command_status in (
+                              'PENDING_ORCHESTRATION', 'ORCHESTRATION_ACCEPTED'
+                          )
+                   )
+                 for update of binding, epoch, projection, room, dispute
+                """,
+                parameters(request),
+                (row, ignored) -> new AuthorityRows(
+                        row.getString("actor_id"),
+                        row.getString("actor_role"),
+                        row.getString("room_id"),
+                        row.getString("room_phase"),
+                        row.getString("initiator_id"),
+                        row.getString("initiator_role"),
+                        row.getString("respondent_id"),
+                        row.getString("respondent_role")));
+        if (rows.isEmpty()) {
+            throw rejected(
+                    "INTAKE_BRANCH_STALE_AUTHORITY",
+                    "active TEMPORAL Intake authority, epoch, fence, or revisions are stale");
+        }
+        AuthorityRows authority = rows.getFirst();
+        if (rows.stream().anyMatch(candidate -> !candidate.equals(authority))) {
+            throw rejected(
+                    "INTAKE_BRANCH_AMBIGUOUS_AUTHORITY",
+                    "matching Intake thread bindings disagree on Java actor authority");
+        }
+        boolean initiator = authority.actorId().equals(authority.initiatorId())
+                && authority.actorRole().equals(authority.initiatorRole());
+        boolean respondent = authority.actorId().equals(authority.respondentId())
+                && authority.actorRole().equals(authority.respondentRole());
+        IntakeParty expectedParty = respondent ? IntakeParty.RESPONDENT : IntakeParty.INITIATOR;
+        if ((!initiator && !respondent)
+                || expectedParty != envelope.party()
+                || !authority.actorId().equals(command.actorId())
+                || !authority.actorRole().equals(command.actorRole())) {
+            throw rejected(
+                    "INTAKE_BRANCH_ACTOR_REJECTED",
+                    "branch command actor does not match the exact Java party authority");
+        }
+        if (request.operation() != BranchOperation.CANCEL
+                && !"READY_TO_CONFIRM".equals(authority.roomPhase())) {
+            throw rejected(
+                    "INTAKE_BRANCH_NOT_READY",
+                    "formal Intake confirmation requires READY_TO_CONFIRM Java authority");
+        }
+        if (request.operation() == BranchOperation.CANCEL
+                && !List.of("OPEN", "WAITING_PARTY", "AGENT_RUNNING", "READY_TO_CONFIRM")
+                        .contains(authority.roomPhase())) {
+            throw rejected(
+                    "INTAKE_BRANCH_NOT_CANCELLABLE",
+                    "formal Intake cancellation is not allowed from the current room phase");
+        }
+        requirePartyCompletionState(request, authority);
+        return authority;
+    }
+
+    private void requirePartyCompletionState(
+            BranchCommitRequest request, AuthorityRows authority) {
+        Integer initiatorComplete = completionCount(
+                request.envelope().caseId(), authority.initiatorId(), authority.initiatorRole());
+        Integer respondentComplete = completionCount(
+                request.envelope().caseId(), authority.respondentId(), authority.respondentRole());
+        if (request.operation() == BranchOperation.RESPONDENT_CONFIRM) {
+            if (initiatorComplete != 1 || respondentComplete != 0) {
+                throw rejected(
+                        "INTAKE_RESPONDENT_AUTHORITY_REJECTED",
+                        "respondent must be independently incomplete after initiator unlock");
+            }
+            return;
+        }
+        if (initiatorComplete != 0 || respondentComplete != 0) {
+            throw rejected(
+                    "INTAKE_INITIATOR_AUTHORITY_REJECTED",
+                    "initiator branch cannot replay another committed party completion");
+        }
+    }
+
+    private int completionCount(String caseId, String actorId, String actorRole) {
+        Integer count = jdbc.queryForObject(
+                """
+                select count(*)
+                  from case_intake_party_completion
+                 where case_id = :caseId
+                   and participant_id = :actorId
+                   and participant_role = :actorRole
+                   and completion_status = 'COMPLETED'
+                """,
+                Map.of("caseId", caseId, "actorId", actorId, "actorRole", actorRole),
+                Integer.class);
+        return count == null ? 0 : count;
+    }
+
+    private void lockOperationKey(BranchCommitRequest request) {
+        jdbc.query(
+                "select pg_advisory_xact_lock(hashtextextended(:lockKey, 0))",
+                Map.of(
+                        "lockKey",
+                        request.envelope().tenantSurrogate() + ':' + request.operationKey()),
+                (RowCallbackHandler) ignored -> {});
+    }
+
+    private int startOperation(
+            BranchCommitRequest request, CommandRow command, OffsetDateTime now) {
+        return jdbc.update(
+                """
+                insert into domain_operation (
+                    id, operation_key, tenant_surrogate, case_id, case_command_id,
+                    operation_type, room_type, room_epoch, process_revision, fencing_token,
+                    request_hash, operation_status, started_at, created_at, updated_at, version
+                ) values (
+                    :id, :operationKey, :tenantSurrogate, :caseId, :caseCommandId,
+                    :operationType, 'INTAKE', :roomEpoch, :expectedProcessRevision, :fencingToken,
+                    :requestHash, 'STARTED', :now, :now, :now, 0
+                ) on conflict (tenant_surrogate, operation_key) do nothing
+                """,
+                parameters(request)
+                        .addValue("id", deterministicId("INBR_", request.operationKey(), "operation"))
+                        .addValue("caseCommandId", command.id())
+                        .addValue("operationType", operationType(request.operation()))
+                        .addValue("now", now));
+    }
+
+    private OperationRow lockOperation(BranchCommitRequest request) {
+        List<OperationRow> rows = jdbc.query(
+                """
+                select id, case_id, case_command_id, operation_type, room_epoch,
+                       process_revision, fencing_token, request_hash, operation_status,
+                       result_uri, result_sha256, completed_at, version
+                  from domain_operation
+                 where tenant_surrogate = :tenantSurrogate
+                   and operation_key = :operationKey
+                 for update
+                """,
+                parameters(request),
+                (row, ignored) -> new OperationRow(
+                        row.getString("id"),
+                        row.getString("case_id"),
+                        row.getString("case_command_id"),
+                        row.getString("operation_type"),
+                        row.getLong("room_epoch"),
+                        row.getLong("process_revision"),
+                        row.getLong("fencing_token"),
+                        row.getString("request_hash"),
+                        row.getString("operation_status"),
+                        row.getString("result_uri"),
+                        row.getString("result_sha256"),
+                        row.getObject("completed_at", OffsetDateTime.class),
+                        row.getLong("version")));
+        if (rows.size() != 1) {
+            throw rejected(
+                    "INTAKE_BRANCH_OPERATION_MISSING",
+                    "branch operation row could not be locked");
+        }
+        return rows.getFirst();
+    }
+
+    private static void requireOperationBinding(
+            BranchCommitRequest request, CommandRow command, OperationRow operation) {
+        ActivityEnvelope envelope = request.envelope();
+        if (!operation.caseId().equals(envelope.caseId())
+                || !operation.caseCommandId().equals(command.id())
+                || !operation.operationType().equals(operationType(request.operation()))
+                || operation.roomEpoch() != envelope.roomEpoch()
+                || operation.processRevision() != envelope.processRevision()
+                || operation.fencingToken() != envelope.fencingToken()
+                || !operation.requestHash().equals(request.requestHash())) {
+            throw rejected(
+                    "INTAKE_BRANCH_OPERATION_CONFLICT",
+                    "operation key is already bound to another exact branch request");
+        }
+    }
+
+    private EventReceipt writeCommittedEvent(
+            BranchCommitRequest request,
+            BranchResult result,
+            AuthorityRows authority,
+            RevisionRows revisions,
+            FulfillmentCaseEntity dispute,
+            long sequence,
+            OffsetDateTime now) {
+        String eventId = deterministicId("EVIB_", request.operationKey(), "event");
+        String eventRef = EVENT_REF_PREFIX + eventId;
+        ObjectNode resultFacts = objectMapper.createObjectNode();
+        resultFacts.put("schema_version", "intake-branch-result.v1");
+        resultFacts.put("operation", request.operation().name());
+        resultFacts.put("case_id", request.envelope().caseId());
+        resultFacts.put("case_status", dispute.getCaseStatus().name());
+        if (dispute.getCurrentRoom() == null) {
+            resultFacts.putNull("current_room");
+        } else {
+            resultFacts.put("current_room", dispute.getCurrentRoom());
+        }
+        if (dispute.getCurrentDeadlineAt() == null) {
+            resultFacts.putNull("deadline_at");
+        } else {
+            resultFacts.put("deadline_at", dispute.getCurrentDeadlineAt().toString());
+        }
+        resultFacts.put("process_revision", revisions.processRevision());
+        resultFacts.put("room_revision", revisions.roomRevision());
+        if (result.matrixKind() != null) {
+            resultFacts.put("matrix_kind", result.matrixKind());
+        }
+        if (result.matrixHash() != null) {
+            resultFacts.put("matrix_hash", result.matrixHash());
+        }
+        String resultHash = ContractJson.sha256Hex(resultFacts);
+
+        ObjectNode eventJson = objectMapper.createObjectNode();
+        eventJson.put("schema_version", "intake-branch-committed-event.v1");
+        eventJson.put("event_id", eventId);
+        eventJson.put("event_ref", eventRef);
+        eventJson.put("event_sequence", sequence);
+        eventJson.put("event_type", eventType(request.operation()).name());
+        eventJson.put("party", request.envelope().party().name());
+        eventJson.put("command_id", request.envelope().commandId());
+        eventJson.put("tenant_surrogate", request.envelope().tenantSurrogate());
+        eventJson.put("case_id", request.envelope().caseId());
+        eventJson.put("room_epoch", request.envelope().roomEpoch());
+        eventJson.put("fencing_token", request.envelope().fencingToken());
+        eventJson.put("actor_scope_hash", request.envelope().actorScopeHash());
+        eventJson.put("operation_key", request.operationKey());
+        eventJson.put("request_hash", request.requestHash());
+        eventJson.put("result_hash", resultHash);
+        eventJson.put("process_revision", revisions.processRevision());
+        eventJson.put("room_revision", revisions.roomRevision());
+        eventJson.set("result", resultFacts);
+        String eventHash = ContractJson.sha256Hex(eventJson);
+        eventJson.put("event_hash", eventHash);
+        int inserted = jdbc.update(
+                """
+                insert into case_timeline_event (
+                    id, case_id, dossier_id, sequence_no, room_id, event_type, event_time,
+                    source_refs_json, event_json, audience_json, audience_actor_ids_json,
+                    event_key, created_at, created_by
+                ) values (
+                    :id, :caseId, null, :sequence, :roomId, :eventType, :now,
+                    cast(:sourceRefs as jsonb), cast(:eventJson as jsonb),
+                    cast(:audience as jsonb), cast(:actorIds as jsonb),
+                    :eventKey, :now, :actorId
+                )
+                """,
+                new MapSqlParameterSource()
+                        .addValue("id", eventId)
+                        .addValue("caseId", request.envelope().caseId())
+                        .addValue("sequence", sequence)
+                        .addValue("roomId", authority.roomId())
+                        .addValue("eventType", eventType(request.operation()).name())
+                        .addValue("now", now)
+                        .addValue("sourceRefs", json(List.of(request.envelope().commandPayloadRef())))
+                        .addValue("eventJson", ContractJson.canonicalString(eventJson))
+                        .addValue("audience", json(List.of(authority.actorRole())))
+                        .addValue("actorIds", json(List.of(authority.actorId())))
+                        .addValue("eventKey", "intake-branch:" + sha256(request.operationKey()))
+                        .addValue("actorId", authority.actorId()));
+        if (inserted != 1) {
+            throw rejected(
+                    "INTAKE_BRANCH_EVENT_WRITE_FAILED",
+                    "typed branch event was not committed");
+        }
+        IntakeDomainEventRef event = new IntakeDomainEventRef(
+                "intake-domain-event-ref.v1",
+                eventId,
+                eventRef,
+                eventHash,
+                sequence,
+                eventType(request.operation()),
+                request.envelope().party(),
+                request.envelope().commandId(),
+                request.envelope().tenantSurrogate(),
+                request.envelope().caseId(),
+                request.envelope().roomEpoch(),
+                request.envelope().fencingToken(),
+                request.envelope().actorScopeHash(),
+                request.operationKey(),
+                request.requestHash(),
+                resultHash,
+                revisions.processRevision(),
+                revisions.roomRevision(),
+                null,
+                null);
+        return new EventReceipt(event, resultHash);
+    }
+
+    private void markCommandApplied(
+            CommandRow command, EventReceipt event, OffsetDateTime now) {
+        int changed = jdbc.update(
+                """
+                update case_command
+                   set command_status = 'APPLIED',
+                       status_reason_code = null,
+                       result_uri = :resultUri,
+                       result_sha256 = :resultHash,
+                       applied_at = :now,
+                       updated_at = :now,
+                       version = version + 1
+                 where id = :id
+                   and command_status = 'ORCHESTRATION_ACCEPTED'
+                   and request_hash = :requestHash
+                """,
+                Map.of(
+                        "resultUri", event.event().eventRef(),
+                        "resultHash", event.resultHash(),
+                        "now", now,
+                        "id", command.id(),
+                        "requestHash", command.requestHash()));
+        if (changed != 1) {
+            throw rejected(
+                    "INTAKE_BRANCH_COMMAND_STALE",
+                    "command changed before its branch result committed");
+        }
+    }
+
+    private void completeOperation(
+            OperationRow operation, EventReceipt event, OffsetDateTime now) {
+        int changed = jdbc.update(
+                """
+                update domain_operation
+                   set operation_status = 'COMPLETED',
+                       result_uri = :resultUri,
+                       result_sha256 = :resultHash,
+                       failure_code = null,
+                       failure_detail = null,
+                       completed_at = :now,
+                       updated_at = :now,
+                       version = version + 1
+                 where id = :id
+                   and operation_status = 'STARTED'
+                   and version = :version
+                """,
+                Map.of(
+                        "resultUri", event.event().eventRef(),
+                        "resultHash", event.resultHash(),
+                        "now", now,
+                        "id", operation.id(),
+                        "version", operation.version()));
+        if (changed != 1) {
+            throw rejected(
+                    "INTAKE_BRANCH_OPERATION_STALE",
+                    "operation ledger changed before receipt completion");
+        }
+    }
+
+    private BranchCommitReceipt readCompletedReceipt(
+            BranchCommitRequest request, OperationRow operation) {
+        if (operation.resultUri() == null
+                || operation.resultHash() == null
+                || operation.completedAt() == null
+                || !operation.resultUri().startsWith(EVENT_REF_PREFIX)) {
+            throw rejected(
+                    "INTAKE_BRANCH_RECEIPT_MISSING",
+                    "completed branch operation has no persisted event receipt");
+        }
+        String eventId = operation.resultUri().substring(EVENT_REF_PREFIX.length());
+        List<StoredEventRow> values = jdbc.query(
+                """
+                select case_id, sequence_no, event_type, event_json::text as event_json
+                  from case_timeline_event
+                 where id = :eventId
+                """,
+                Map.of("eventId", eventId),
+                (row, ignored) -> new StoredEventRow(
+                        row.getString("case_id"),
+                        row.getLong("sequence_no"),
+                        row.getString("event_type"),
+                        row.getString("event_json")));
+        if (values.size() != 1) {
+            throw rejected(
+                    "INTAKE_BRANCH_RECEIPT_MISSING",
+                    "persisted branch event is missing");
+        }
+        try {
+            StoredEventRow stored = values.getFirst();
+            JsonNode json = objectMapper.readTree(stored.eventJson());
+            if (!json.isObject()) {
+                throw rejected(
+                        "INTAKE_BRANCH_RECEIPT_INVALID",
+                        "persisted branch receipt must be an object");
+            }
+            ObjectNode hashInput = ((ObjectNode) json).deepCopy();
+            JsonNode storedEventHash = hashInput.remove("event_hash");
+            if (storedEventHash == null || !storedEventHash.isTextual()) {
+                throw rejected(
+                        "INTAKE_BRANCH_RECEIPT_HASH_INVALID",
+                        "persisted branch receipt has no event hash");
+            }
+            String eventHash = storedEventHash.asText();
+            JsonNode result = json.required("result");
+            if (!eventHash.equals(ContractJson.sha256Hex(hashInput))
+                    || !operation.resultHash().equals(json.required("result_hash").asText())
+                    || !result.isObject()
+                    || !operation.resultHash().equals(ContractJson.sha256Hex(result))
+                    || !eventId.equals(json.required("event_id").asText())
+                    || !operation.resultUri().equals(json.required("event_ref").asText())
+                    || !request.envelope().caseId().equals(stored.caseId())
+                    || stored.sequence() != json.required("event_sequence").asLong()
+                    || !stored.eventType().equals(json.required("event_type").asText())
+                    || !request.operation().name().equals(result.required("operation").asText())
+                    || !request.envelope().caseId().equals(result.required("case_id").asText())
+                    || json.required("process_revision").asLong()
+                            != result.required("process_revision").asLong()
+                    || json.required("room_revision").asLong()
+                            != result.required("room_revision").asLong()) {
+                throw rejected(
+                        "INTAKE_BRANCH_RECEIPT_HASH_INVALID",
+                        "persisted branch receipt hash is invalid");
+            }
+            IntakeDomainEventRef event = new IntakeDomainEventRef(
+                    "intake-domain-event-ref.v1",
+                    json.required("event_id").asText(),
+                    json.required("event_ref").asText(),
+                    eventHash,
+                    json.required("event_sequence").asLong(),
+                    IntakeDomainEventType.valueOf(json.required("event_type").asText()),
+                    IntakeParty.valueOf(json.required("party").asText()),
+                    json.required("command_id").asText(),
+                    json.required("tenant_surrogate").asText(),
+                    json.required("case_id").asText(),
+                    json.required("room_epoch").asLong(),
+                    json.required("fencing_token").asLong(),
+                    json.required("actor_scope_hash").asText(),
+                    json.required("operation_key").asText(),
+                    json.required("request_hash").asText(),
+                    json.required("result_hash").asText(),
+                    json.required("process_revision").asLong(),
+                    json.required("room_revision").asLong(),
+                    null,
+                    null);
+            BranchCommitReceipt receipt = new BranchCommitReceipt(
+                    "intake-branch-commit-receipt.v1",
+                    request.operation(),
+                    new OperationReceipt(
+                            "intake-operation-receipt.v1",
+                            request.operationKey(),
+                            request.requestHash(),
+                            event.resultHash(),
+                            event.processRevision(),
+                            event.roomRevision()),
+                    event);
+            receipt.requireMatches(request);
+            return receipt;
+        } catch (IntakeFinalizationRejectedException failure) {
+            throw failure;
+        } catch (JsonProcessingException | IllegalArgumentException failure) {
+            throw rejected(
+                    "INTAKE_BRANCH_RECEIPT_INVALID",
+                    "persisted branch receipt cannot be decoded",
+                    failure);
+        }
+    }
+
+    private long nextEventSequence(String caseId) {
+        Long value = jdbc.queryForObject(
+                "select coalesce(max(sequence_no), 0) + 1 from case_timeline_event where case_id = :caseId",
+                Map.of("caseId", caseId),
+                Long.class);
+        return Objects.requireNonNull(value, "next event sequence");
+    }
+
+    private MapSqlParameterSource parameters(BranchCommitRequest request) {
+        ActivityEnvelope envelope = request.envelope();
+        var versions = envelope.pinnedVersions();
+        return new MapSqlParameterSource()
+                .addValue("tenantSurrogate", envelope.tenantSurrogate())
+                .addValue("caseId", envelope.caseId())
+                .addValue("roomEpoch", envelope.roomEpoch())
+                .addValue("fencingToken", envelope.fencingToken())
+                .addValue("commandId", envelope.commandId())
+                .addValue("commandSequence", envelope.commandSequence())
+                .addValue("actorScopeHash", envelope.actorScopeHash())
+                .addValue("expectedProcessRevision", envelope.processRevision())
+                .addValue("expectedRoomRevision", envelope.roomRevision())
+                .addValue("requestHash", request.requestHash())
+                .addValue("operationKey", request.operationKey())
+                .addValue("graphVersion", versions.graphVersion())
+                .addValue("checkpointSchemaVersion", versions.checkpointSchemaVersion())
+                .addValue("promptVersion", versions.promptVersion())
+                .addValue("modelProfileId", versions.modelProfileId())
+                .addValue("outputSchemaVersion", versions.outputSchemaVersion())
+                .addValue("policyVersion", versions.policyVersion())
+                .addValue("guardrailVersion", versions.guardrailVersion())
+                .addValue("toolPolicyVersion", versions.toolPolicyVersion());
+    }
+
+    private String json(Object value) {
+        try {
+            return objectMapper.writeValueAsString(value);
+        } catch (JsonProcessingException failure) {
+            throw new IllegalStateException("cannot encode Intake branch JSON", failure);
+        }
+    }
+
+    private static IntakeConfirmationCommand requiredConfirmation(
+            ResolvedBranchCommand resolved) {
+        return Objects.requireNonNull(resolved.confirmation(), "resolved confirmation");
+    }
+
+    private static String operationType(BranchOperation operation) {
+        return switch (operation) {
+            case INITIATOR_ACCEPT -> "INTAKE_INITIATOR_ACCEPT";
+            case INITIATOR_REJECT -> "INTAKE_INITIATOR_REJECT";
+            case CANCEL -> "INTAKE_CANCEL";
+            case RESPONDENT_CONFIRM -> "INTAKE_RESPONDENT_CONFIRM";
+        };
+    }
+
+    private static IntakeDomainEventType eventType(BranchOperation operation) {
+        return switch (operation) {
+            case INITIATOR_ACCEPT -> IntakeDomainEventType.INITIATOR_ACCEPTED;
+            case INITIATOR_REJECT -> IntakeDomainEventType.NOT_ADMISSIBLE;
+            case CANCEL -> IntakeDomainEventType.CANCELLED;
+            case RESPONDENT_CONFIRM -> IntakeDomainEventType.RESPONDENT_CONFIRMED;
+        };
+    }
+
+    private static String deterministicId(
+            String prefix, String operationKey, String purpose) {
+        return prefix + sha256(operationKey + ':' + purpose).substring(0, 64 - prefix.length());
+    }
+
+    private static String sha256(String value) {
+        try {
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                    .digest(value.getBytes(StandardCharsets.UTF_8)));
+        } catch (NoSuchAlgorithmException impossible) {
+            throw new IllegalStateException("SHA-256 is unavailable", impossible);
+        }
+    }
+
+    private static IntakeFinalizationRejectedException rejected(String code, String message) {
+        return new IntakeFinalizationRejectedException(code, message);
+    }
+
+    private static IntakeFinalizationRejectedException rejected(
+            String code, String message, Throwable cause) {
+        return new IntakeFinalizationRejectedException(code, message, cause);
+    }
+
+    private record CommandRow(
+            String id,
+            long sequence,
+            String commandType,
+            String roomType,
+            long roomEpoch,
+            String actorId,
+            String actorRole,
+            String payloadSchema,
+            String payloadUri,
+            String payloadHash,
+            long expectedProcessRevision,
+            String requestHash,
+            String status,
+            String resultUri,
+            String resultHash,
+            OffsetDateTime appliedAt) {}
+
+    private record AuthorityRows(
+            String actorId,
+            String actorRole,
+            String roomId,
+            String roomPhase,
+            String initiatorId,
+            String initiatorRole,
+            String respondentId,
+            String respondentRole) {}
+
+    private record OperationRow(
+            String id,
+            String caseId,
+            String caseCommandId,
+            String operationType,
+            long roomEpoch,
+            long processRevision,
+            long fencingToken,
+            String requestHash,
+            String status,
+            String resultUri,
+            String resultHash,
+            OffsetDateTime completedAt,
+            long version) {}
+
+    private record RevisionRows(long processRevision, long roomRevision) {}
+
+    private record EventReceipt(IntakeDomainEventRef event, String resultHash) {}
+
+    private record StoredEventRow(
+            String caseId, long sequence, String eventType, String eventJson) {}
+}
