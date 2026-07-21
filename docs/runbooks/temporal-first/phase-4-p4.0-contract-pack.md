@@ -493,5 +493,10 @@ frozen formal matrix. The total proposal limit remains 64 KiB. This correction r
 exact-SHA Batch 0 re-authentication before its implementation can enter the Phase 4 integration
 candidate. `MIG-003` and `MIG-004` remain `PENDING_PROMOTION`.
 
+Delta fact keys are unique and summary keys reference rows in the same proposal. `NOT_ADDRESSED`
+is restricted to an existing `FACT_*` carried with `PREVIOUS_MATRIX` and no asserted value;
+`NEW_*` rows cannot use either `NOT_ADDRESSED` or `PREVIOUS_MATRIX`. Python and Java enforce the
+same relational rules independently before any Java-owned formal merge.
+
 An incompatible change requires an additive schema/contract version or accepted ADR, updated
 cross-language fixtures, and explicit notification to every affected owner.

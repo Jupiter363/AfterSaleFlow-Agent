@@ -34,18 +34,10 @@ ERRATUM_PATH = (
     / "phase-4-p4.0-matrix-authority-erratum.md"
 )
 PACK_PATH = (
-    ROOT
-    / "docs"
-    / "runbooks"
-    / "temporal-first"
-    / "phase-4-p4.0-contract-pack.md"
+    ROOT / "docs" / "runbooks" / "temporal-first" / "phase-4-p4.0-contract-pack.md"
 )
 ENTRY_PATH = (
-    ROOT
-    / "docs"
-    / "runbooks"
-    / "temporal-first"
-    / "phase-4-p4.0-entry-checkpoint.md"
+    ROOT / "docs" / "runbooks" / "temporal-first" / "phase-4-p4.0-entry-checkpoint.md"
 )
 
 
@@ -57,6 +49,22 @@ def _validator() -> jsonschema.Draft202012Validator:
     schema = _load(SCHEMA_PATH)
     jsonschema.Draft202012Validator.check_schema(schema)
     return jsonschema.Draft202012Validator(schema)
+
+
+def _delta_relational_errors(proposal: dict) -> set[str]:
+    patch = proposal.get("matrix_patch")
+    if (
+        not isinstance(patch, dict)
+        or patch.get("schema_version") != "case_fact_matrix.delta.v2"
+    ):
+        return set()
+    keys = [row.get("fact_key") for row in patch.get("fact_rows", [])]
+    errors: set[str] = set()
+    if len(keys) != len(set(keys)):
+        errors.add("UNIQUE_FACT_KEYS")
+    if not set(patch.get("summary_source_fact_keys", [])).issubset(set(keys)):
+        errors.add("SUMMARY_KEYS_REFERENCE_ROWS")
+    return errors
 
 
 def test_matrix_patch_union_and_dual_schema_copies_are_exact() -> None:
@@ -92,6 +100,18 @@ def test_matrix_patch_union_and_dual_schema_copies_are_exact() -> None:
     ]
     assert delta["properties"]["fact_rows"]["maxItems"] == 200
     assert delta["properties"]["summary_source_fact_keys"]["maxItems"] == 200
+    assert delta["x-semantic-constraints"] == [
+        {
+            "id": "UNIQUE_FACT_KEYS",
+            "rule": "fact_rows[*].fact_key values MUST be unique",
+        },
+        {
+            "id": "SUMMARY_KEYS_REFERENCE_ROWS",
+            "rule": (
+                "summary_source_fact_keys MUST be a subset of fact_rows[*].fact_key"
+            ),
+        },
+    ]
     assert set(definitions["case_fact_delta"]["properties"]) == {
         "fact_key",
         "category",
@@ -106,7 +126,52 @@ def test_matrix_patch_union_and_dual_schema_copies_are_exact() -> None:
     }
 
 
-def test_null_unilateral_and_respondent_delta_fixtures_are_valid_and_hash_bound() -> None:
+def test_delta_row_conditionals_and_cross_row_rules_reject_invalid_mutations() -> None:
+    validator = _validator()
+    valid = _load(VALID_ROOT / "intake-turn-proposal-respondent-delta-valid.json")
+
+    row_mutations = (
+        {
+            "fact_key": "NEW_UNADDRESSED",
+            "stance": "NOT_ADDRESSED",
+            "source_scope": "CURRENT_SOURCE",
+        },
+        {
+            "fact_key": "FACT_DAMAGE",
+            "stance": "NOT_ADDRESSED",
+            "source_scope": "CURRENT_SOURCE",
+        },
+        {
+            "fact_key": "FACT_DAMAGE",
+            "stance": "NOT_ADDRESSED",
+            "source_scope": "PREVIOUS_MATRIX",
+            "asserted_value": "model-invented-value",
+        },
+        {
+            "fact_key": "NEW_PREVIOUS",
+            "stance": "CONFIRM",
+            "source_scope": "PREVIOUS_MATRIX",
+        },
+    )
+    for mutation in row_mutations:
+        candidate = copy.deepcopy(valid)
+        candidate["matrix_patch"]["fact_rows"][0].update(mutation)
+        assert list(validator.iter_errors(candidate)), mutation
+
+    duplicate = copy.deepcopy(valid)
+    duplicate["matrix_patch"]["fact_rows"].append(
+        copy.deepcopy(duplicate["matrix_patch"]["fact_rows"][0])
+    )
+    assert _delta_relational_errors(duplicate) == {"UNIQUE_FACT_KEYS"}
+
+    unknown_summary = copy.deepcopy(valid)
+    unknown_summary["matrix_patch"]["summary_source_fact_keys"] = ["FACT_NOT_IN_ROWS"]
+    assert _delta_relational_errors(unknown_summary) == {"SUMMARY_KEYS_REFERENCE_ROWS"}
+
+
+def test_null_unilateral_and_respondent_delta_fixtures_are_valid_and_hash_bound() -> (
+    None
+):
     validator = _validator()
     for fixture_name in (
         "intake-turn-proposal-valid.json",
@@ -117,7 +182,9 @@ def test_null_unilateral_and_respondent_delta_fixtures_are_valid_and_hash_bound(
         validator.validate(proposal)
         expected_hash = proposal.pop("proposal_hash")
         assert hashlib.sha256(rfc8785.dumps(proposal)).hexdigest() == expected_hash
-        assert len(rfc8785.dumps({**proposal, "proposal_hash": expected_hash})) <= 65_536
+        assert (
+            len(rfc8785.dumps({**proposal, "proposal_hash": expected_hash})) <= 65_536
+        )
 
 
 def test_formal_matrix_fields_and_frozen_projection_are_rejected() -> None:
@@ -127,7 +194,9 @@ def test_formal_matrix_fields_and_frozen_projection_are_rejected() -> None:
         "intake-turn-proposal-matrix-formal-bilateral.json",
         "intake-turn-proposal-dossier-matrix-bypass.json",
     ):
-        assert list(validator.iter_errors(_load(INVALID_ROOT / fixture_name))), fixture_name
+        assert list(validator.iter_errors(_load(INVALID_ROOT / fixture_name))), (
+            fixture_name
+        )
 
     unilateral = _load(VALID_ROOT / "intake-turn-proposal-unilateral-matrix-valid.json")
     delta = _load(VALID_ROOT / "intake-turn-proposal-respondent-delta-valid.json")

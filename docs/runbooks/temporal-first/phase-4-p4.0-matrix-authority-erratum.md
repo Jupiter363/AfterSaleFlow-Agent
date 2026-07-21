@@ -80,9 +80,13 @@ Each delta row requires `fact_key`, `category`, `fact_target`, `materiality`, `s
 bounds.
 
 `FACT_*` is a reference to a stable fact already present in the Java-authorized visible matrix;
-`NEW_*` is only a proposal-local key. `summary_source_fact_keys` can reference only rows in the same
-proposal. `PREVIOUS_MATRIX` cannot introduce a `NEW_*` fact. Python rejects unauthorized or rebound
-references, and Java repeats the authoritative membership and merge checks.
+`NEW_*` is only a proposal-local key. Every `fact_key` in one proposal must be unique, and every
+`summary_source_fact_keys` entry must reference a row in that same proposal. `NOT_ADDRESSED` is
+valid only for a prior `FACT_*` row carried with `PREVIOUS_MATRIX` and no non-null
+`asserted_value`. A `NEW_*` row can never use `NOT_ADDRESSED` or `PREVIOUS_MATRIX`. JSON Schema
+conditionals enforce the row-local rules; the schema's `x-semantic-constraints` freezes the two
+cross-row rules that standard JSON Schema cannot express. Python and Java must both enforce all
+relational rules, then Java repeats authoritative fact membership and merge checks.
 
 The complete canonical `intake-turn-proposal.v2` remains limited to 65,536 UTF-8 bytes. Both schema
 copies and their positive/negative fixtures must remain identical and independently validated.

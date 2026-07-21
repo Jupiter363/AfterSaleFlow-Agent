@@ -151,6 +151,16 @@
     "case_matrix_delta": {
       "type": "object",
       "additionalProperties": false,
+      "x-semantic-constraints": [
+        {
+          "id": "UNIQUE_FACT_KEYS",
+          "rule": "fact_rows[*].fact_key values MUST be unique"
+        },
+        {
+          "id": "SUMMARY_KEYS_REFERENCE_ROWS",
+          "rule": "summary_source_fact_keys MUST be a subset of fact_rows[*].fact_key"
+        }
+      ],
       "required": ["schema_version", "fact_rows", "summary_source_fact_keys"],
       "properties": {
         "schema_version": {"const": "case_fact_matrix.delta.v2"},
@@ -208,7 +218,34 @@
             {"type": "string", "minLength": 1, "maxLength": 20000}
           ]
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": ["stance"],
+            "properties": {"stance": {"const": "NOT_ADDRESSED"}}
+          },
+          "then": {
+            "properties": {
+              "fact_key": {"pattern": "^FACT_[A-Za-z0-9_:-]{1,123}$"},
+              "source_scope": {"const": "PREVIOUS_MATRIX"},
+              "asserted_value": {"type": "null"}
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["fact_key"],
+            "properties": {"fact_key": {"pattern": "^NEW_"}}
+          },
+          "then": {
+            "properties": {
+              "stance": {"not": {"const": "NOT_ADDRESSED"}},
+              "source_scope": {"not": {"const": "PREVIOUS_MATRIX"}}
+            }
+          }
+        }
+      ]
     },
     "respondent_claim_delta": {
       "type": "object",
