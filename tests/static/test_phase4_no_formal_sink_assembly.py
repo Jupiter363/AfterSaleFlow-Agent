@@ -175,6 +175,7 @@ def test_archunit_rule_and_compiled_fixture_contract_exist() -> None:
         "resolveServiceProviders",
         "scanClassPathEntries",
         "canonicalClassPathEntry",
+        "ClassPathTraversalKey",
         "parseManifestClassPath",
         "stale-third-party-manifest",
         "Attributes.Name.CLASS_PATH",
@@ -187,6 +188,8 @@ def test_archunit_rule_and_compiled_fixture_contract_exist() -> None:
         "shortestFormalSinkChain",
         "isAssemblyRoot(neutralContract)",
         "isAssemblyRoot(comparisonAdapter)",
+        "DynamicInvocationEvidence",
+        "invocationOrdinal",
     ):
         assert required in source
 
@@ -232,6 +235,8 @@ def test_archunit_rule_and_compiled_fixture_contract_exist() -> None:
         "ObjectProvider<SafeComparisonActivities>",
         "class OpaqueProvider",
         "class ManifestOnlyFormalProvider",
+        "class HardlinkManifestFormalProvider",
+        "class SymlinkManifestFormalProvider",
         "class SafeIntakeRoomActivitiesMetricsProvider",
         "SafePlugin.class",
         'Class.forName("java.util.ArrayList")',
@@ -239,6 +244,14 @@ def test_archunit_rule_and_compiled_fixture_contract_exist() -> None:
         "context.getBean(SafeComparisonActivities.class)",
         "runtimeClassName",
         "runtimeBeanName",
+        "MixedSafeAndRuntimeReflectiveAssembly",
+        "SameLineAmbiguousDynamicAssembly",
+        "MixedSafeAndRuntimeConstructorAssembly",
+        "MixedSafeAndRuntimeMethodAssembly",
+        "MixedSafeAndRuntimeFieldAssembly",
+        "UnresolvedConfigurationDynamicAssembly",
+        "UnresolvedComponentDynamicAssembly",
+        "UnresolvedNamedDynamicAssembly",
     ):
         assert required in fixture_source
 

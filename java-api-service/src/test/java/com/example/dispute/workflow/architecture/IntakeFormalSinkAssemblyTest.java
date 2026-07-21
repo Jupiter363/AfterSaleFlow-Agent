@@ -40,6 +40,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
@@ -157,7 +158,7 @@ class IntakeFormalSinkAssemblyTest {
                     "getBeansWithAnnotation",
                     "findAnnotationOnBean");
 
-    private static final Map<DynamicCodeUnitKey, DynamicTargetEvidence>
+    private static final Map<DynamicCodeUnitKey, DynamicMethodEvidence>
             DYNAMIC_TARGET_EVIDENCE = new ConcurrentHashMap<>();
 
     @ArchTest
@@ -200,7 +201,9 @@ class IntakeFormalSinkAssemblyTest {
         ServiceDescriptorCatalog scannedDescriptors =
                 createAndScanServiceDescriptorFixtures(tempDirectory, combinedDescriptor);
         assertThat(scannedDescriptors.ownedProviderNames())
-                .contains(FIXTURE_PACKAGE + ".ManifestOnlyFormalProvider");
+                .contains(
+                        FIXTURE_PACKAGE + ".ManifestOnlyFormalProvider",
+                        FIXTURE_PACKAGE + ".HardlinkManifestFormalProvider");
         ServiceDescriptorCatalog allFixtureDescriptors =
                 ServiceDescriptorCatalog.merge(injectedDescriptors, scannedDescriptors);
         ServiceProviderResolution injectedResolution =
@@ -228,6 +231,7 @@ class IntakeFormalSinkAssemblyTest {
                 .contains("WorkerRegistrationMethodReferenceAssembly")
                 .contains("MetaAnnotatedFormalAssembly")
                 .contains("ManifestOnlyFormalProvider")
+                .contains("HardlinkManifestFormalProvider")
                 .contains("FixtureFormalFactory")
                 .contains("CrossFileFormalDelegate")
                 .contains("IntakeFormalCommitPort")
@@ -258,6 +262,15 @@ class IntakeFormalSinkAssemblyTest {
                                 + FIXTURE_PACKAGE
                                 + ".CrossFileFormalDelegate -> "
                                 + "com.example.dispute.workflow.application.intake.IntakeFormalCommitPort")
+                .contains(
+                        "formal Intake sink is reachable: "
+                                + FIXTURE_PACKAGE
+                                + ".HardlinkManifestFormalProvider -> "
+                                + FIXTURE_PACKAGE
+                                + ".CrossFileFormalWrapper -> "
+                                + FIXTURE_PACKAGE
+                                + ".CrossFileFormalDelegate -> "
+                                + "com.example.dispute.workflow.application.intake.IntakeFormalCommitPort")
                 .doesNotContain("SafeComparisonAssembly")
                 .doesNotContain("LocalShadowingSafeRegistrar")
                 .doesNotContain("SafeComparisonActivities")
@@ -283,6 +296,24 @@ class IntakeFormalSinkAssemblyTest {
                 .contains(
                         "UnresolvedBeanLookupAssembly -> "
                                 + "org.springframework.context.ApplicationContext.getBean")
+                .contains(
+                        "MixedSafeAndRuntimeReflectiveAssembly -> java.lang.Class.forName")
+                .contains(
+                        "SameLineAmbiguousDynamicAssembly -> java.lang.Class.forName")
+                .contains(
+                        "MixedSafeAndRuntimeConstructorAssembly -> "
+                                + "java.lang.reflect.Constructor.newInstance")
+                .contains(
+                        "MixedSafeAndRuntimeMethodAssembly -> "
+                                + "java.lang.reflect.Method.invoke")
+                .contains(
+                        "MixedSafeAndRuntimeFieldAssembly -> java.lang.reflect.Field.get")
+                .contains(
+                        "UnresolvedConfigurationDynamicAssembly -> java.lang.Class.forName")
+                .contains(
+                        "UnresolvedComponentDynamicAssembly -> java.lang.Class.forName")
+                .contains(
+                        "UnresolvedNamedDynamicAssembly -> java.lang.Class.forName")
                 .doesNotContain("SafeServiceLoaderAssembly")
                 .doesNotContain("SafeServiceProviderLoader")
                 .doesNotContain("SafeReflectiveAssembly")
@@ -573,8 +604,8 @@ class IntakeFormalSinkAssemblyTest {
         if (!isDynamicAssemblyApi(access)) {
             return false;
         }
-        DynamicTargetEvidence evidence = dynamicTargetEvidence(access.getOrigin());
-        if (!evidence.inspected()) {
+        DynamicTargetEvidence evidence = dynamicTargetEvidence(access);
+        if (!evidence.inspected() || evidence.ambiguous()) {
             return true;
         }
         if (hasFormalDynamicTarget(evidence)
@@ -584,9 +615,7 @@ class IntakeFormalSinkAssemblyTest {
         if (hasResolvedDynamicTarget(evidence)) {
             return false;
         }
-        return isWorkerRegistrationRoot(root)
-                || declaresBeanMethod(root)
-                || serviceProviderRoots.contains(root.getName());
+        return isAssemblyRoot(root, serviceProviderRoots);
     }
 
     private static boolean isDynamicAssemblyApi(JavaCodeUnitAccess<?> access) {
@@ -654,30 +683,63 @@ class IntakeFormalSinkAssemblyTest {
                 || (lowerCase.contains("intake") && lowerCase.contains("formal"));
     }
 
-    private static DynamicTargetEvidence dynamicTargetEvidence(JavaCodeUnit origin) {
+    private static DynamicTargetEvidence dynamicTargetEvidence(
+            JavaCodeUnitAccess<?> access) {
+        JavaCodeUnit origin = access.getOrigin();
         DynamicCodeUnitKey key =
                 new DynamicCodeUnitKey(
                         origin.getOwner().getName(),
                         origin.getName(),
                         origin.getDescriptor());
-        return DYNAMIC_TARGET_EVIDENCE.computeIfAbsent(
-                key, ignored -> readDynamicTargetEvidence(origin));
+        DynamicMethodEvidence methodEvidence =
+                DYNAMIC_TARGET_EVIDENCE.computeIfAbsent(
+                        key, ignored -> readDynamicMethodEvidence(origin));
+        if (!methodEvidence.inspected()) {
+            return DynamicTargetEvidence.uninspected();
+        }
+        String targetDescriptor =
+                access.getTarget().resolveMember().stream()
+                        .filter(JavaCodeUnit.class::isInstance)
+                        .map(JavaCodeUnit.class::cast)
+                        .map(JavaCodeUnit::getDescriptor)
+                        .findFirst()
+                        .orElse(null);
+        List<DynamicInvocationEvidence> signatureMatches =
+                methodEvidence.invocations().stream()
+                        .filter(
+                                invocation ->
+                                        invocation.matchesSignature(
+                                                access.getTargetOwner().getName(),
+                                                access.getName(),
+                                                targetDescriptor))
+                        .toList();
+        List<DynamicInvocationEvidence> lineMatches =
+                signatureMatches.stream()
+                        .filter(invocation -> invocation.lineNumber() == access.getLineNumber())
+                        .toList();
+        List<DynamicInvocationEvidence> candidates =
+                lineMatches.isEmpty() ? signatureMatches : lineMatches;
+        if (candidates.size() != 1) {
+            return candidates.isEmpty()
+                    ? DynamicTargetEvidence.uninspected()
+                    : DynamicTargetEvidence.ambiguousTarget();
+        }
+        return candidates.getFirst().targetEvidence();
     }
 
-    private static DynamicTargetEvidence readDynamicTargetEvidence(JavaCodeUnit origin) {
+    private static DynamicMethodEvidence readDynamicMethodEvidence(JavaCodeUnit origin) {
         String resourceName =
                 origin.getOwner().getName().replace('.', '/') + ".class";
         ClassLoader classLoader = IntakeFormalSinkAssemblyTest.class.getClassLoader();
         try (InputStream input = classLoader.getResourceAsStream(resourceName)) {
             if (input == null) {
-                return DynamicTargetEvidence.uninspected();
+                return DynamicMethodEvidence.uninspected();
             }
             byte[] classBytes = input.readNBytes(MAX_DYNAMIC_CLASS_BYTES + 1);
             if (classBytes.length > MAX_DYNAMIC_CLASS_BYTES) {
-                return DynamicTargetEvidence.uninspected();
+                return DynamicMethodEvidence.uninspected();
             }
-            Set<String> stringConstants = new TreeSet<>();
-            Set<String> typeConstants = new TreeSet<>();
+            List<DynamicInvocationEvidence> invocations = new ArrayList<>();
             boolean[] matchedOrigin = {false};
             ClassReader reader = new ClassReader(classBytes);
             reader.accept(
@@ -694,87 +756,14 @@ class IntakeFormalSinkAssemblyTest {
                                 return null;
                             }
                             matchedOrigin[0] = true;
-                            return new MethodVisitor(Opcodes.ASM9) {
-                                private final Set<String> recentStrings = new HashSet<>();
-                                private final Set<String> recentTypes = new HashSet<>();
-
-                                @Override
-                                public void visitLdcInsn(Object value) {
-                                    if (value instanceof String stringValue) {
-                                        recentStrings.add(stringValue);
-                                    } else if (value instanceof Type typeValue
-                                            && (typeValue.getSort() == Type.OBJECT
-                                                    || typeValue.getSort() == Type.ARRAY)) {
-                                        recentTypes.add(typeValue.getClassName());
-                                    }
-                                }
-
-                                @Override
-                                public void visitMethodInsn(
-                                        int opcode,
-                                        String owner,
-                                        String name,
-                                        String methodDescriptor,
-                                        boolean isInterface) {
-                                    if (isDynamicTargetInvocation(owner, name)) {
-                                        stringConstants.addAll(recentStrings);
-                                        typeConstants.addAll(recentTypes);
-                                    }
-                                    clearRecentConstants();
-                                }
-
-                                @Override
-                                public void visitInsn(int opcode) {
-                                    clearRecentConstants();
-                                }
-
-                                @Override
-                                public void visitIntInsn(int opcode, int operand) {
-                                    clearRecentConstants();
-                                }
-
-                                @Override
-                                public void visitVarInsn(int opcode, int variable) {
-                                    clearRecentConstants();
-                                }
-
-                                @Override
-                                public void visitTypeInsn(int opcode, String type) {
-                                    clearRecentConstants();
-                                }
-
-                                @Override
-                                public void visitFieldInsn(
-                                        int opcode, String owner, String name, String descriptor) {
-                                    clearRecentConstants();
-                                }
-
-                                @Override
-                                public void visitInvokeDynamicInsn(
-                                        String name,
-                                        String descriptor,
-                                        org.springframework.asm.Handle bootstrapMethodHandle,
-                                        Object... bootstrapMethodArguments) {
-                                    clearRecentConstants();
-                                }
-
-                                @Override
-                                public void visitJumpInsn(int opcode, org.springframework.asm.Label label) {
-                                    clearRecentConstants();
-                                }
-
-                                private void clearRecentConstants() {
-                                    recentStrings.clear();
-                                    recentTypes.clear();
-                                }
-                            };
+                            return new DynamicEvidenceMethodVisitor(
+                                    access, descriptor, invocations);
                         }
                     },
-                    ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
-            return new DynamicTargetEvidence(
-                    matchedOrigin[0], stringConstants, typeConstants);
+                    ClassReader.SKIP_FRAMES);
+            return new DynamicMethodEvidence(matchedOrigin[0], invocations);
         } catch (IOException | RuntimeException failure) {
-            return DynamicTargetEvidence.uninspected();
+            return DynamicMethodEvidence.uninspected();
         }
     }
 
@@ -798,6 +787,588 @@ class IntakeFormalSinkAssemblyTest {
                         && methodName.equals("fromMethodDescriptorString"))
                 || (owner.equals("java/lang/reflect/Proxy")
                         && methodName.equals("newProxyInstance"));
+    }
+
+    private static boolean isDynamicBytecodeInvocation(String owner, String methodName) {
+        if (isDynamicTargetInvocation(owner, methodName)
+                || owner.startsWith("java/util/ServiceLoader")) {
+            return true;
+        }
+        if (owner.equals("java/lang/Class")
+                && REFLECTIVE_CLASS_METHODS.contains(methodName)) {
+            return true;
+        }
+        if (owner.endsWith("ClassLoader")
+                && (methodName.equals("loadClass") || methodName.equals("<init>"))) {
+            return true;
+        }
+        return (owner.equals("java/lang/reflect/Constructor")
+                        && methodName.equals("newInstance"))
+                || (owner.equals("java/lang/reflect/Method")
+                        && methodName.equals("invoke"))
+                || (owner.equals("java/lang/reflect/Field")
+                        && Set.of("get", "set").contains(methodName));
+    }
+
+    private static final class DynamicEvidenceMethodVisitor extends MethodVisitor {
+
+        private final List<DynamicInvocationEvidence> invocations;
+        private final List<DynamicStackValue> operandStack = new ArrayList<>();
+        private final Map<Integer, DynamicStackValue> locals = new HashMap<>();
+        private final Set<Integer> resolvedDeferredInvocations = new HashSet<>();
+        private boolean ambiguousControlFlow;
+        private int currentLine = -1;
+        private int invocationOrdinal;
+
+        private DynamicEvidenceMethodVisitor(
+                int methodAccess,
+                String methodDescriptor,
+                List<DynamicInvocationEvidence> invocations) {
+            super(Opcodes.ASM9);
+            this.invocations = invocations;
+            int localIndex = 0;
+            if ((methodAccess & Opcodes.ACC_STATIC) == 0) {
+                locals.put(localIndex++, DynamicStackValue.unresolved(1));
+            }
+            for (Type argumentType : Type.getArgumentTypes(methodDescriptor)) {
+                locals.put(
+                        localIndex,
+                        DynamicStackValue.unresolved(argumentType.getSize()));
+                localIndex += argumentType.getSize();
+            }
+        }
+
+        @Override
+        public void visitLineNumber(int line, org.springframework.asm.Label start) {
+            currentLine = line;
+        }
+
+        @Override
+        public void visitLdcInsn(Object value) {
+            if (value instanceof String stringValue) {
+                push(DynamicStackValue.stringConstant(stringValue));
+            } else if (value instanceof Type typeValue
+                    && (typeValue.getSort() == Type.OBJECT
+                            || typeValue.getSort() == Type.ARRAY)) {
+                push(DynamicStackValue.typeConstant(typeValue.getClassName()));
+            } else {
+                push(
+                        DynamicStackValue.unresolved(
+                                value instanceof Long || value instanceof Double ? 2 : 1));
+            }
+        }
+
+        @Override
+        public void visitVarInsn(int opcode, int variable) {
+            switch (opcode) {
+                case Opcodes.ILOAD, Opcodes.FLOAD, Opcodes.ALOAD ->
+                        push(locals.getOrDefault(variable, DynamicStackValue.unresolved(1)));
+                case Opcodes.LLOAD, Opcodes.DLOAD ->
+                        push(locals.getOrDefault(variable, DynamicStackValue.unresolved(2)));
+                case Opcodes.ISTORE, Opcodes.FSTORE, Opcodes.ASTORE ->
+                        locals.put(variable, pop(1));
+                case Opcodes.LSTORE, Opcodes.DSTORE -> locals.put(variable, pop(2));
+                case Opcodes.RET -> invalidateProvenance();
+                default -> invalidateProvenance();
+            }
+        }
+
+        @Override
+        public void visitIntInsn(int opcode, int operand) {
+            switch (opcode) {
+                case Opcodes.BIPUSH, Opcodes.SIPUSH ->
+                        push(DynamicStackValue.unresolved(1));
+                case Opcodes.NEWARRAY -> {
+                    pop(1);
+                    push(DynamicStackValue.unresolved(1));
+                }
+                default -> invalidateProvenance();
+            }
+        }
+
+        @Override
+        public void visitTypeInsn(int opcode, String type) {
+            switch (opcode) {
+                case Opcodes.NEW -> push(DynamicStackValue.unresolved(1));
+                case Opcodes.ANEWARRAY -> {
+                    pop(1);
+                    push(DynamicStackValue.unresolved(1));
+                }
+                case Opcodes.CHECKCAST -> push(pop(1));
+                case Opcodes.INSTANCEOF -> {
+                    pop(1);
+                    push(DynamicStackValue.unresolved(1));
+                }
+                default -> invalidateProvenance();
+            }
+        }
+
+        @Override
+        public void visitFieldInsn(
+                int opcode, String owner, String name, String descriptor) {
+            Type fieldType = Type.getType(descriptor);
+            switch (opcode) {
+                case Opcodes.GETSTATIC ->
+                        push(DynamicStackValue.unresolved(fieldType.getSize()));
+                case Opcodes.PUTSTATIC -> pop(fieldType.getSize());
+                case Opcodes.GETFIELD -> {
+                    pop(1);
+                    push(DynamicStackValue.unresolved(fieldType.getSize()));
+                }
+                case Opcodes.PUTFIELD -> {
+                    pop(fieldType.getSize());
+                    pop(1);
+                }
+                default -> invalidateProvenance();
+            }
+        }
+
+        @Override
+        public void visitMethodInsn(
+                int opcode,
+                String owner,
+                String name,
+                String methodDescriptor,
+                boolean isInterface) {
+            Type[] argumentTypes = Type.getArgumentTypes(methodDescriptor);
+            DynamicStackValue[] arguments = new DynamicStackValue[argumentTypes.length];
+            for (int index = argumentTypes.length - 1; index >= 0; index--) {
+                arguments[index] = pop(argumentTypes[index].getSize());
+            }
+            DynamicStackValue receiver =
+                    opcode == Opcodes.INVOKESTATIC ? null : pop(1);
+            boolean dynamicInvocation = isDynamicBytecodeInvocation(owner, name);
+            if (!dynamicInvocation) {
+                resolveDeferredInvocations(owner, name, receiver, arguments);
+            }
+            DynamicTargetEvidence targetEvidence =
+                    dynamicInvocation
+                            ? targetEvidence(
+                                    owner,
+                                    name,
+                                    receiver,
+                                    argumentTypes,
+                                    arguments)
+                            : DynamicTargetEvidence.unresolved();
+            invocations.add(
+                    new DynamicInvocationEvidence(
+                            owner.replace('/', '.'),
+                            name,
+                            methodDescriptor,
+                            currentLine,
+                            invocationOrdinal++,
+                            targetEvidence));
+
+            Type returnType = Type.getReturnType(methodDescriptor);
+            if (returnType.getSort() != Type.VOID) {
+                DynamicTargetEvidence returnEvidence =
+                        dynamicInvocation
+                                ? targetEvidence
+                                : carrierReturnEvidence(owner, name, receiver);
+                push(
+                        new DynamicStackValue(
+                                returnType.getSize(), returnEvidence, Set.of()));
+            }
+        }
+
+        @Override
+        public void visitInvokeDynamicInsn(
+                String name,
+                String descriptor,
+                org.springframework.asm.Handle bootstrapMethodHandle,
+                Object... bootstrapMethodArguments) {
+            Type[] argumentTypes = Type.getArgumentTypes(descriptor);
+            for (int index = argumentTypes.length - 1; index >= 0; index--) {
+                pop(argumentTypes[index].getSize());
+            }
+            Set<Integer> deferredInvocations = new HashSet<>();
+            for (Object argument : bootstrapMethodArguments) {
+                if (!(argument instanceof org.springframework.asm.Handle handle)) {
+                    continue;
+                }
+                int invocationIndex = invocations.size();
+                boolean dynamicHandle =
+                        isDynamicBytecodeInvocation(
+                                handle.getOwner(), handle.getName());
+                invocations.add(
+                        new DynamicInvocationEvidence(
+                                handle.getOwner().replace('/', '.'),
+                                handle.getName(),
+                                handle.getDesc(),
+                                currentLine,
+                                invocationOrdinal++,
+                                dynamicHandle
+                                        ? DynamicTargetEvidence.ambiguousTarget()
+                                        : DynamicTargetEvidence.unresolved()));
+                if (dynamicHandle) {
+                    deferredInvocations.add(invocationIndex);
+                }
+            }
+            Type returnType = Type.getReturnType(descriptor);
+            if (returnType.getSort() != Type.VOID) {
+                push(
+                        new DynamicStackValue(
+                                returnType.getSize(),
+                                DynamicTargetEvidence.unresolved(),
+                                deferredInvocations));
+            }
+        }
+
+        @Override
+        public void visitJumpInsn(int opcode, org.springframework.asm.Label label) {
+            invalidateProvenance();
+        }
+
+        @Override
+        public void visitTableSwitchInsn(
+                int min,
+                int max,
+                org.springframework.asm.Label defaultLabel,
+                org.springframework.asm.Label... labels) {
+            invalidateProvenance();
+        }
+
+        @Override
+        public void visitLookupSwitchInsn(
+                org.springframework.asm.Label defaultLabel,
+                int[] keys,
+                org.springframework.asm.Label[] labels) {
+            invalidateProvenance();
+        }
+
+        @Override
+        public void visitTryCatchBlock(
+                org.springframework.asm.Label start,
+                org.springframework.asm.Label end,
+                org.springframework.asm.Label handler,
+                String type) {
+            invalidateProvenance();
+        }
+
+        @Override
+        public void visitIincInsn(int variable, int increment) {
+            locals.put(variable, DynamicStackValue.unresolved(1));
+        }
+
+        @Override
+        public void visitMultiANewArrayInsn(String descriptor, int dimensions) {
+            for (int index = 0; index < dimensions; index++) {
+                pop(1);
+            }
+            push(DynamicStackValue.unresolved(1));
+        }
+
+        @Override
+        public void visitInsn(int opcode) {
+            switch (opcode) {
+                case Opcodes.NOP -> {
+                    // No stack effect.
+                }
+                case Opcodes.ACONST_NULL,
+                                Opcodes.ICONST_M1,
+                                Opcodes.ICONST_0,
+                                Opcodes.ICONST_1,
+                                Opcodes.ICONST_2,
+                                Opcodes.ICONST_3,
+                                Opcodes.ICONST_4,
+                                Opcodes.ICONST_5,
+                                Opcodes.FCONST_0,
+                                Opcodes.FCONST_1,
+                                Opcodes.FCONST_2 -> push(DynamicStackValue.unresolved(1));
+                case Opcodes.LCONST_0,
+                                Opcodes.LCONST_1,
+                                Opcodes.DCONST_0,
+                                Opcodes.DCONST_1 -> push(DynamicStackValue.unresolved(2));
+                case Opcodes.IALOAD,
+                                Opcodes.FALOAD,
+                                Opcodes.AALOAD,
+                                Opcodes.BALOAD,
+                                Opcodes.CALOAD,
+                                Opcodes.SALOAD -> arrayLoad(1);
+                case Opcodes.LALOAD, Opcodes.DALOAD -> arrayLoad(2);
+                case Opcodes.IASTORE,
+                                Opcodes.FASTORE,
+                                Opcodes.AASTORE,
+                                Opcodes.BASTORE,
+                                Opcodes.CASTORE,
+                                Opcodes.SASTORE -> arrayStore(1);
+                case Opcodes.LASTORE, Opcodes.DASTORE -> arrayStore(2);
+                case Opcodes.POP -> pop(1);
+                case Opcodes.POP2 -> popTwoSlots();
+                case Opcodes.DUP -> duplicateTop();
+                case Opcodes.DUP_X1 -> duplicateTopUnderOne();
+                case Opcodes.DUP2 -> duplicateTwoSlots();
+                case Opcodes.SWAP -> swapTop();
+                case Opcodes.IADD,
+                                Opcodes.ISUB,
+                                Opcodes.IMUL,
+                                Opcodes.IDIV,
+                                Opcodes.IREM,
+                                Opcodes.IAND,
+                                Opcodes.IOR,
+                                Opcodes.IXOR,
+                                Opcodes.ISHL,
+                                Opcodes.ISHR,
+                                Opcodes.IUSHR,
+                                Opcodes.FADD,
+                                Opcodes.FSUB,
+                                Opcodes.FMUL,
+                                Opcodes.FDIV,
+                                Opcodes.FREM -> binaryOperation(1);
+                case Opcodes.LADD,
+                                Opcodes.LSUB,
+                                Opcodes.LMUL,
+                                Opcodes.LDIV,
+                                Opcodes.LREM,
+                                Opcodes.LAND,
+                                Opcodes.LOR,
+                                Opcodes.LXOR,
+                                Opcodes.LSHL,
+                                Opcodes.LSHR,
+                                Opcodes.LUSHR,
+                                Opcodes.DADD,
+                                Opcodes.DSUB,
+                                Opcodes.DMUL,
+                                Opcodes.DDIV,
+                                Opcodes.DREM -> binaryOperation(2);
+                case Opcodes.INEG, Opcodes.FNEG -> unaryOperation(1);
+                case Opcodes.LNEG, Opcodes.DNEG -> unaryOperation(2);
+                case Opcodes.I2F,
+                                Opcodes.L2I,
+                                Opcodes.L2F,
+                                Opcodes.F2I,
+                                Opcodes.D2I,
+                                Opcodes.D2F,
+                                Opcodes.I2B,
+                                Opcodes.I2C,
+                                Opcodes.I2S -> convert(1);
+                case Opcodes.I2L,
+                                Opcodes.I2D,
+                                Opcodes.F2L,
+                                Opcodes.F2D,
+                                Opcodes.L2D,
+                                Opcodes.D2L -> convert(2);
+                case Opcodes.LCMP,
+                                Opcodes.FCMPL,
+                                Opcodes.FCMPG,
+                                Opcodes.DCMPL,
+                                Opcodes.DCMPG -> binaryOperation(1);
+                case Opcodes.IRETURN,
+                                Opcodes.FRETURN,
+                                Opcodes.ARETURN,
+                                Opcodes.ATHROW,
+                                Opcodes.MONITORENTER,
+                                Opcodes.MONITOREXIT -> pop(1);
+                case Opcodes.LRETURN, Opcodes.DRETURN -> pop(2);
+                case Opcodes.RETURN -> {
+                    // No stack effect.
+                }
+                case Opcodes.ARRAYLENGTH -> {
+                    pop(1);
+                    push(DynamicStackValue.unresolved(1));
+                }
+                default -> invalidateProvenance();
+            }
+        }
+
+        private DynamicTargetEvidence targetEvidence(
+                String owner,
+                String name,
+                DynamicStackValue receiver,
+                Type[] argumentTypes,
+                DynamicStackValue[] arguments) {
+            if (ambiguousControlFlow) {
+                return DynamicTargetEvidence.ambiguousTarget();
+            }
+            if (isDynamicTargetInvocation(owner, name)) {
+                int targetArgumentIndex = targetArgumentIndex(owner, argumentTypes);
+                return targetArgumentIndex < arguments.length
+                        ? arguments[targetArgumentIndex].targetEvidence()
+                        : DynamicTargetEvidence.unresolved();
+            }
+            return receiver == null
+                    ? DynamicTargetEvidence.unresolved()
+                    : receiver.targetEvidence();
+        }
+
+        private static int targetArgumentIndex(
+                String owner, Type[] argumentTypes) {
+            if (owner.equals("java/lang/reflect/Proxy")) {
+                return 1;
+            }
+            if (owner.equals("java/util/ServiceLoader")) {
+                for (int index = 0; index < argumentTypes.length; index++) {
+                    if (argumentTypes[index].getSort() == Type.OBJECT
+                            && argumentTypes[index]
+                                    .getClassName()
+                                    .equals("java.lang.Class")) {
+                        return index;
+                    }
+                }
+            }
+            return 0;
+        }
+
+        private void resolveDeferredInvocations(
+                String owner,
+                String name,
+                DynamicStackValue receiver,
+                DynamicStackValue[] arguments) {
+            if (ambiguousControlFlow
+                    || receiver == null
+                    || !isDeferredServiceProviderConsumer(owner, name)) {
+                return;
+            }
+            for (DynamicStackValue argument : arguments) {
+                for (int invocationIndex : argument.deferredInvocationIndexes()) {
+                    DynamicInvocationEvidence deferred =
+                            invocations.get(invocationIndex);
+                    if (!deferred.targetOwnerName()
+                                    .equals("java.util.ServiceLoader$Provider")
+                            || !deferred.targetName().equals("get")) {
+                        continue;
+                    }
+                    DynamicTargetEvidence evidence = receiver.targetEvidence();
+                    if (!resolvedDeferredInvocations.add(invocationIndex)) {
+                        evidence = DynamicTargetEvidence.ambiguousTarget();
+                    }
+                    invocations.set(
+                            invocationIndex,
+                            deferred.withTargetEvidence(evidence));
+                }
+            }
+        }
+
+        private static boolean isDeferredServiceProviderConsumer(
+                String owner, String name) {
+            return (owner.equals("java/util/Optional")
+                            && Set.of("filter", "flatMap", "map").contains(name))
+                    || (owner.equals("java/util/stream/Stream")
+                            && Set.of("filter", "flatMap", "map", "peek")
+                                    .contains(name));
+        }
+
+        private static DynamicTargetEvidence carrierReturnEvidence(
+                String owner, String name, DynamicStackValue receiver) {
+            if (receiver == null) {
+                return DynamicTargetEvidence.unresolved();
+            }
+            if (owner.equals("java/util/stream/Stream")
+                    && Set.of(
+                                    "filter",
+                                    "findAny",
+                                    "findFirst",
+                                    "peek")
+                            .contains(name)) {
+                return receiver.targetEvidence();
+            }
+            if (owner.equals("java/util/Optional")
+                    && Set.of(
+                                    "filter",
+                                    "get",
+                                    "orElseThrow")
+                            .contains(name)) {
+                return receiver.targetEvidence();
+            }
+            return DynamicTargetEvidence.unresolved();
+        }
+
+        private void arrayLoad(int resultSize) {
+            pop(1);
+            pop(1);
+            push(DynamicStackValue.unresolved(resultSize));
+        }
+
+        private void arrayStore(int valueSize) {
+            pop(valueSize);
+            pop(1);
+            pop(1);
+        }
+
+        private void binaryOperation(int resultSize) {
+            popAny();
+            popAny();
+            push(DynamicStackValue.unresolved(resultSize));
+        }
+
+        private void unaryOperation(int resultSize) {
+            popAny();
+            push(DynamicStackValue.unresolved(resultSize));
+        }
+
+        private void convert(int resultSize) {
+            popAny();
+            push(DynamicStackValue.unresolved(resultSize));
+        }
+
+        private void popTwoSlots() {
+            DynamicStackValue top = popAny();
+            if (top.size() == 1) {
+                pop(1);
+            }
+        }
+
+        private void duplicateTop() {
+            DynamicStackValue top = pop(1);
+            push(top);
+            push(top);
+        }
+
+        private void duplicateTopUnderOne() {
+            DynamicStackValue top = pop(1);
+            DynamicStackValue below = pop(1);
+            push(top);
+            push(below);
+            push(top);
+        }
+
+        private void duplicateTwoSlots() {
+            DynamicStackValue top = popAny();
+            if (top.size() == 2) {
+                push(top);
+                push(top);
+                return;
+            }
+            DynamicStackValue below = pop(1);
+            push(below);
+            push(top);
+            push(below);
+            push(top);
+        }
+
+        private void swapTop() {
+            DynamicStackValue top = pop(1);
+            DynamicStackValue below = pop(1);
+            push(top);
+            push(below);
+        }
+
+        private DynamicStackValue pop(int expectedSize) {
+            DynamicStackValue value = popAny();
+            if (value.size() != expectedSize) {
+                invalidateProvenance();
+                return DynamicStackValue.ambiguous(expectedSize);
+            }
+            return value;
+        }
+
+        private DynamicStackValue popAny() {
+            if (operandStack.isEmpty()) {
+                invalidateProvenance();
+                return DynamicStackValue.ambiguous(1);
+            }
+            return operandStack.removeLast();
+        }
+
+        private void push(DynamicStackValue value) {
+            operandStack.add(value);
+        }
+
+        private void invalidateProvenance() {
+            ambiguousControlFlow = true;
+            operandStack.clear();
+            locals.clear();
+        }
     }
 
     private static ServiceDescriptorCatalog createAndScanServiceDescriptorFixtures(
@@ -871,6 +1442,36 @@ class IntakeFormalSinkAssemblyTest {
                                         + "../manifest-libs/./formal-provider.bin "
                                         + "../manifest-safe-classes/")));
 
+        Path physicalOwnerDirectory = tempDirectory.resolve("manifest-alias-00-physical");
+        Path hardlinkOwnerDirectory = tempDirectory.resolve("manifest-alias-10-hardlink");
+        Path symlinkOwnerDirectory = tempDirectory.resolve("manifest-alias-20-symlink");
+        Files.createDirectories(physicalOwnerDirectory);
+        Files.createDirectories(hardlinkOwnerDirectory);
+        Files.createDirectories(symlinkOwnerDirectory);
+        Path physicalOwnerArchive = physicalOwnerDirectory.resolve("owner.bin");
+        writeArchive(
+                physicalOwnerArchive,
+                Map.of(MANIFEST_PATH, manifestBytes("relative-provider.bin")));
+        Path hardlinkOwnerArchive = hardlinkOwnerDirectory.resolve("owner.bin");
+        Files.createLink(hardlinkOwnerArchive, physicalOwnerArchive);
+        writeArchive(
+                hardlinkOwnerDirectory.resolve("relative-provider.bin"),
+                Map.of(
+                        descriptorEntry,
+                        (FIXTURE_PACKAGE + ".HardlinkManifestFormalProvider")
+                                .getBytes(StandardCharsets.UTF_8)));
+        Optional<Path> symlinkOwnerArchive =
+                tryCreateSymbolicLink(
+                        symlinkOwnerDirectory.resolve("owner.bin"), physicalOwnerArchive);
+        if (symlinkOwnerArchive.isPresent()) {
+            writeArchive(
+                    symlinkOwnerDirectory.resolve("relative-provider.bin"),
+                    Map.of(
+                            descriptorEntry,
+                            (FIXTURE_PACKAGE + ".SymlinkManifestFormalProvider")
+                                    .getBytes(StandardCharsets.UTF_8)));
+        }
+
         Path plainFile = tempDirectory.resolve("not-an-archive.txt");
         Files.writeString(plainFile, "not a ZIP archive", StandardCharsets.UTF_8);
         assertThatThrownBy(
@@ -920,10 +1521,17 @@ class IntakeFormalSinkAssemblyTest {
         fixtureClassPath.add(bootClassesArchive.toString());
         fixtureClassPath.add(nestedBootArchive.toString());
         fixtureClassPath.add(manifestRootArchive.toString());
+        fixtureClassPath.add(physicalOwnerArchive.toString());
+        fixtureClassPath.add(hardlinkOwnerArchive.toString());
+        symlinkOwnerArchive.ifPresent(path -> fixtureClassPath.add(path.toString()));
         ServiceDescriptorCatalog catalog = scanClassPathEntries(fixtureClassPath);
+        symlinkOwnerArchive.ifPresent(
+                ignored ->
+                        assertThat(catalog.ownedProviderNames())
+                                .contains(FIXTURE_PACKAGE + ".SymlinkManifestFormalProvider"));
         assertThat(catalog.descriptors())
                 .filteredOn(descriptor -> descriptor.source().contains(tempDirectory.toString()))
-                .hasSize(8);
+                .hasSize(symlinkOwnerArchive.isPresent() ? 10 : 9);
         assertScannerBudgets(tempDirectory);
         return catalog;
     }
@@ -942,6 +1550,14 @@ class IntakeFormalSinkAssemblyTest {
     private static void writeArchive(
             Path archive, Map<String, byte[]> entries) throws IOException {
         Files.write(archive, archiveBytes(entries));
+    }
+
+    private static Optional<Path> tryCreateSymbolicLink(Path link, Path target) {
+        try {
+            return Optional.of(Files.createSymbolicLink(link, target));
+        } catch (IOException | UnsupportedOperationException | SecurityException ignored) {
+            return Optional.empty();
+        }
     }
 
     private static byte[] archiveBytes(Map<String, byte[]> entries) throws IOException {
@@ -1470,7 +2086,7 @@ class IntakeFormalSinkAssemblyTest {
                         .peek(entry -> budget.recordResolvedClassPathEntry(entry.source()))
                         .sorted(Comparator.comparing(entry -> entry.path().toString()))
                         .collect(Collectors.toCollection(ArrayDeque::new));
-        Set<String> visitedIdentities = new HashSet<>();
+        Set<ClassPathTraversalKey> visitedEntries = new HashSet<>();
         List<ServiceDescriptor> descriptors = new ArrayList<>();
         while (!pending.isEmpty()) {
             ClassPathScanEntry candidate = pending.removeFirst();
@@ -1480,7 +2096,7 @@ class IntakeFormalSinkAssemblyTest {
             }
             CanonicalClassPathEntry canonical =
                     canonicalClassPathEntry(candidate.path(), candidate.source());
-            if (!visitedIdentities.add(canonical.identity())) {
+            if (!visitedEntries.add(canonical.traversalKey())) {
                 continue;
             }
             budget.checkManifestHopDepth(
@@ -1521,7 +2137,8 @@ class IntakeFormalSinkAssemblyTest {
                     "classpath entry is not readable: " + classPathEntry + " from " + source);
         }
         try {
-            Path canonicalPath = classPathEntry.toRealPath();
+            Path lexicalPath = classPathEntry.toAbsolutePath().normalize();
+            Path canonicalPath = lexicalPath.toRealPath();
             BasicFileAttributes attributes =
                     Files.readAttributes(canonicalPath, BasicFileAttributes.class);
             Object fileKey = attributes.fileKey();
@@ -1533,7 +2150,16 @@ class IntakeFormalSinkAssemblyTest {
                     fileKey == null
                             ? "path:" + normalizedPath
                             : "file:" + canonicalPath.getRoot() + ":" + fileKey;
-            return new CanonicalClassPathEntry(canonicalPath, identity);
+            Path manifestBase =
+                    Files.isDirectory(lexicalPath) ? lexicalPath : lexicalPath.getParent();
+            if (manifestBase == null) {
+                throw new IllegalStateException(
+                        "classpath entry has no lexical manifest base: " + lexicalPath);
+            }
+            return new CanonicalClassPathEntry(
+                    lexicalPath,
+                    new ClassPathTraversalKey(
+                            identity, manifestBase.toUri().normalize().toASCIIString()));
         } catch (IOException failure) {
             throw new UncheckedIOException(
                     "cannot resolve canonical classpath entry "
@@ -2340,6 +2966,7 @@ class IntakeFormalSinkAssemblyTest {
 
     private record DynamicTargetEvidence(
             boolean inspected,
+            boolean ambiguous,
             Set<String> stringConstants,
             Set<String> typeConstants) {
 
@@ -2349,7 +2976,93 @@ class IntakeFormalSinkAssemblyTest {
         }
 
         private static DynamicTargetEvidence uninspected() {
-            return new DynamicTargetEvidence(false, Set.of(), Set.of());
+            return new DynamicTargetEvidence(false, true, Set.of(), Set.of());
+        }
+
+        private static DynamicTargetEvidence unresolved() {
+            return new DynamicTargetEvidence(true, false, Set.of(), Set.of());
+        }
+
+        private static DynamicTargetEvidence ambiguousTarget() {
+            return new DynamicTargetEvidence(true, true, Set.of(), Set.of());
+        }
+    }
+
+    private record DynamicMethodEvidence(
+            boolean inspected, List<DynamicInvocationEvidence> invocations) {
+
+        private DynamicMethodEvidence {
+            invocations = List.copyOf(invocations);
+        }
+
+        private static DynamicMethodEvidence uninspected() {
+            return new DynamicMethodEvidence(false, List.of());
+        }
+    }
+
+    private record DynamicInvocationEvidence(
+            String targetOwnerName,
+            String targetName,
+            String targetDescriptor,
+            int lineNumber,
+            int invocationOrdinal,
+            DynamicTargetEvidence targetEvidence) {
+
+        private boolean matchesSignature(
+                String ownerName, String name, String descriptor) {
+            return targetOwnerName.equals(ownerName)
+                    && targetName.equals(name)
+                    && (descriptor == null || targetDescriptor.equals(descriptor));
+        }
+
+        private DynamicInvocationEvidence withTargetEvidence(
+                DynamicTargetEvidence evidence) {
+            return new DynamicInvocationEvidence(
+                    targetOwnerName,
+                    targetName,
+                    targetDescriptor,
+                    lineNumber,
+                    invocationOrdinal,
+                    evidence);
+        }
+    }
+
+    private record DynamicStackValue(
+            int size,
+            DynamicTargetEvidence targetEvidence,
+            Set<Integer> deferredInvocationIndexes) {
+
+        private DynamicStackValue {
+            if (size != 1 && size != 2) {
+                throw new IllegalArgumentException("JVM stack value size must be one or two");
+            }
+            deferredInvocationIndexes = Set.copyOf(deferredInvocationIndexes);
+        }
+
+        private static DynamicStackValue unresolved(int size) {
+            return new DynamicStackValue(
+                    size, DynamicTargetEvidence.unresolved(), Set.of());
+        }
+
+        private static DynamicStackValue ambiguous(int size) {
+            return new DynamicStackValue(
+                    size, DynamicTargetEvidence.ambiguousTarget(), Set.of());
+        }
+
+        private static DynamicStackValue stringConstant(String value) {
+            return new DynamicStackValue(
+                    1,
+                    new DynamicTargetEvidence(
+                            true, false, Set.of(value), Set.of()),
+                    Set.of());
+        }
+
+        private static DynamicStackValue typeConstant(String value) {
+            return new DynamicStackValue(
+                    1,
+                    new DynamicTargetEvidence(
+                            true, false, Set.of(), Set.of(value)),
+                    Set.of());
         }
     }
 
@@ -2399,7 +3112,11 @@ class IntakeFormalSinkAssemblyTest {
     private record ClassPathScanEntry(
             Path path, int manifestHopDepth, String source) {}
 
-    private record CanonicalClassPathEntry(Path path, String identity) {}
+    private record ClassPathTraversalKey(
+            String canonicalFileIdentity, String lexicalManifestBase) {}
+
+    private record CanonicalClassPathEntry(
+            Path path, ClassPathTraversalKey traversalKey) {}
 
     private record ManifestScanContext(Path ownerArchive, int manifestHopDepth) {}
 

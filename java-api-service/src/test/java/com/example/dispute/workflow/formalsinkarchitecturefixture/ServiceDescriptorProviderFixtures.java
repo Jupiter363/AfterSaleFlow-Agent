@@ -53,3 +53,29 @@ final class ManifestOnlyFormalProvider {
         return wrapper;
     }
 }
+
+final class HardlinkManifestFormalProvider {
+
+    private final CrossFileFormalWrapper wrapper;
+
+    HardlinkManifestFormalProvider(CrossFileFormalWrapper wrapper) {
+        this.wrapper = wrapper;
+    }
+
+    Object value() {
+        return wrapper;
+    }
+}
+
+final class SymlinkManifestFormalProvider {
+
+    private final CrossFileFormalWrapper wrapper;
+
+    SymlinkManifestFormalProvider(CrossFileFormalWrapper wrapper) {
+        this.wrapper = wrapper;
+    }
+
+    Object value() {
+        return wrapper;
+    }
+}
