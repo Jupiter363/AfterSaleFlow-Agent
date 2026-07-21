@@ -25,6 +25,7 @@ import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.net.URI;
 import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
@@ -74,11 +75,20 @@ class IntakeFormalSinkAssemblyTest {
             "BOOT-INF/classes/META-INF/services/";
     private static final String BOOT_LIB_PATH = "BOOT-INF/lib/";
     private static final int MAX_NESTED_ARCHIVE_DEPTH = 8;
+    private static final int MAX_EOCD_BYTES = 65_557;
+    private static final long EOCD_SIGNATURE = 0x06054b50L;
+    private static final long ZIP64_EOCD_LOCATOR_SIGNATURE = 0x07064b50L;
+    private static final long CENTRAL_FILE_HEADER_SIGNATURE = 0x02014b50L;
+    private static final long LOCAL_FILE_HEADER_SIGNATURE = 0x04034b50L;
 
     private static final ScanLimits PRODUCTION_SCAN_LIMITS =
             new ScanLimits(
                     1_048_576,
                     67_108_864,
+                    1_073_741_824,
+                    4_096,
+                    67_108_864,
+                    5_000_000,
                     2_048,
                     2_000_000,
                     100_000,
@@ -692,7 +702,7 @@ class IntakeFormalSinkAssemblyTest {
                 descriptorDirectory,
                 exactDescriptor.getBytes(StandardCharsets.UTF_8));
 
-        ScanLimits descriptorBoundary = new ScanLimits(32, 4_096, 1, 4, 4, 8_192);
+        ScanLimits descriptorBoundary = testScanLimits(32, 4_096, 1, 4, 4, 8_192);
         scanClassPathEntries(List.of(descriptorDirectory.toString()), descriptorBoundary);
         Files.writeString(
                 descriptorDirectory
@@ -718,7 +728,7 @@ class IntakeFormalSinkAssemblyTest {
                 Map.of(BOOT_LIB_PATH + "nested.library", nestedArchive));
         long exactExpandedBytes = nestedArchive.length + nestedDescriptor.length;
         ScanLimits exactNestedBoundary =
-                new ScanLimits(
+                testScanLimits(
                         nestedDescriptor.length,
                         nestedArchive.length,
                         1,
@@ -729,7 +739,7 @@ class IntakeFormalSinkAssemblyTest {
 
         assertBudgetExceeded(
                 outerArchive,
-                new ScanLimits(
+                testScanLimits(
                         nestedDescriptor.length,
                         nestedArchive.length - 1L,
                         1,
@@ -739,7 +749,7 @@ class IntakeFormalSinkAssemblyTest {
                 "nested archive byte limit");
         assertBudgetExceeded(
                 outerArchive,
-                new ScanLimits(
+                testScanLimits(
                         nestedDescriptor.length,
                         nestedArchive.length,
                         0,
@@ -749,7 +759,7 @@ class IntakeFormalSinkAssemblyTest {
                 "nested archive count limit");
         assertBudgetExceeded(
                 outerArchive,
-                new ScanLimits(
+                testScanLimits(
                         nestedDescriptor.length,
                         nestedArchive.length,
                         1,
@@ -759,7 +769,7 @@ class IntakeFormalSinkAssemblyTest {
                 "nested archive entry limit");
         assertBudgetExceeded(
                 outerArchive,
-                new ScanLimits(
+                testScanLimits(
                         nestedDescriptor.length,
                         nestedArchive.length,
                         1,
@@ -769,7 +779,7 @@ class IntakeFormalSinkAssemblyTest {
                 "relevant entry limit");
         assertBudgetExceeded(
                 outerArchive,
-                new ScanLimits(
+                testScanLimits(
                         nestedDescriptor.length,
                         nestedArchive.length,
                         1,
@@ -777,6 +787,191 @@ class IntakeFormalSinkAssemblyTest {
                         2,
                         exactExpandedBytes - 1L),
                 "total relevant expanded byte limit");
+        assertRawArchivePreflight(tempDirectory);
+        assertCleanupFailurePolicy(tempDirectory);
+    }
+
+    private static void assertRawArchivePreflight(Path tempDirectory) throws IOException {
+        Path zip64Sentinel = tempDirectory.resolve("zip64-sentinel.bin");
+        Files.write(zip64Sentinel, fakeEocdArchive(0xffff, 0xffffffffL, 0xffffffffL));
+        assertThatThrownBy(
+                        () ->
+                                scanClassPathEntries(
+                                        List.of(zip64Sentinel.toString()),
+                                        testScanLimits(64, 4_096, 1, 10, 10, 8_192)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("ZIP64 archives are unsupported");
+
+        Path forgedEntryCount = tempDirectory.resolve("forged-entry-count.bin");
+        Files.write(forgedEntryCount, fakeEocdArchive(100, 0, 0));
+        ScanLimits tenArchiveEntries =
+                withArchivePreflightLimits(
+                        testScanLimits(64, 4_096, 1, 10, 10, 8_192),
+                        1_048_576,
+                        10,
+                        1_048_576,
+                        10);
+        assertThatThrownBy(
+                        () ->
+                                scanClassPathEntries(
+                                        List.of(forgedEntryCount.toString()),
+                                        tenArchiveEntries))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("total archive entry limit");
+
+        Path forgedCentralSize = tempDirectory.resolve("forged-central-size.bin");
+        Files.write(forgedCentralSize, fakeEocdArchive(0, 100, 0));
+        ScanLimits tenCentralBytes =
+                withArchivePreflightLimits(
+                        testScanLimits(64, 4_096, 1, 10, 10, 8_192),
+                        1_048_576,
+                        10,
+                        10,
+                        1_000);
+        assertThatThrownBy(
+                        () ->
+                                scanClassPathEntries(
+                                        List.of(forgedCentralSize.toString()),
+                                        tenCentralBytes))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("central directory byte limit");
+
+        byte[] validArchive =
+                archiveBytes(
+                        Map.of(
+                                SERVICES_PATH + "a.B",
+                                "a.B".getBytes(StandardCharsets.UTF_8)));
+        Path localNameMismatch = tempDirectory.resolve("local-name-mismatch.bin");
+        byte[] mismatchedArchive = validArchive.clone();
+        mismatchedArchive[30] ^= 1;
+        Files.write(localNameMismatch, mismatchedArchive);
+        assertThatThrownBy(
+                        () ->
+                                scanClassPathEntries(
+                                        List.of(localNameMismatch.toString()),
+                                        testScanLimits(64, 4_096, 1, 10, 10, 8_192)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("local and central raw entry names differ");
+
+        Path firstArchive = tempDirectory.resolve("archive-count-first.bin");
+        Path secondArchive = tempDirectory.resolve("archive-count-second.bin");
+        Files.write(firstArchive, validArchive);
+        Files.write(secondArchive, validArchive);
+        ScanLimits oneClasspathArchive =
+                withArchivePreflightLimits(
+                        testScanLimits(64, 4_096, 1, 10, 10, 8_192),
+                        1_048_576,
+                        1,
+                        1_048_576,
+                        1_000);
+        assertThatThrownBy(
+                        () ->
+                                scanClassPathEntries(
+                                        List.of(
+                                                firstArchive.toString(),
+                                                secondArchive.toString()),
+                                        oneClasspathArchive))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("classpath archive count limit");
+
+        ScanLimits smallerThanArchive =
+                withArchivePreflightLimits(
+                        testScanLimits(64, 4_096, 1, 10, 10, 8_192),
+                        validArchive.length - 1L,
+                        10,
+                        1_048_576,
+                        1_000);
+        assertThatThrownBy(
+                        () ->
+                                scanClassPathEntries(
+                                        List.of(firstArchive.toString()),
+                                        smallerThanArchive))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("archive file byte limit");
+    }
+
+    private static byte[] fakeEocdArchive(
+            int entryCount, long centralDirectoryBytes, long centralDirectoryOffset) {
+        int prefixBytes =
+                centralDirectoryBytes <= 1_024
+                        ? Math.toIntExact(centralDirectoryBytes)
+                        : 0;
+        byte[] archive = new byte[prefixBytes + 22];
+        int eocd = prefixBytes;
+        putUnsignedInt(archive, eocd, EOCD_SIGNATURE);
+        putUnsignedShort(archive, eocd + 8, entryCount);
+        putUnsignedShort(archive, eocd + 10, entryCount);
+        putUnsignedInt(archive, eocd + 12, centralDirectoryBytes);
+        putUnsignedInt(archive, eocd + 16, centralDirectoryOffset);
+        return archive;
+    }
+
+    private static void assertCleanupFailurePolicy(Path tempDirectory) throws IOException {
+        Path stagedArchive = tempDirectory.resolve("cleanup-policy.tmp");
+        Files.writeString(stagedArchive, "fixture", StandardCharsets.UTF_8);
+        IllegalStateException primaryFailure =
+                new IllegalStateException("primary scan failure");
+        cleanupTemporaryArchive(
+                stagedArchive,
+                primaryFailure,
+                ignored -> {
+                    throw new IOException("synthetic cleanup failure");
+                });
+        assertThat(primaryFailure.getSuppressed()).hasSize(1);
+        assertThat(primaryFailure.getSuppressed()[0])
+                .isInstanceOf(UncheckedIOException.class)
+                .hasMessageContaining("cannot delete nested archive staging file");
+        assertThatThrownBy(
+                        () ->
+                                cleanupTemporaryArchive(
+                                        stagedArchive,
+                                        null,
+                                        ignored -> {
+                                            throw new IOException(
+                                                    "synthetic cleanup failure");
+                                        }))
+                .isInstanceOf(UncheckedIOException.class)
+                .hasMessageContaining("cannot delete nested archive staging file");
+        Files.deleteIfExists(stagedArchive);
+    }
+
+    private static ScanLimits testScanLimits(
+            long maxDescriptorBytes,
+            long maxNestedArchiveBytes,
+            long maxNestedArchiveCount,
+            long maxNestedArchiveEntries,
+            long maxRelevantEntries,
+            long maxTotalRelevantExpandedBytes) {
+        return new ScanLimits(
+                maxDescriptorBytes,
+                maxNestedArchiveBytes,
+                1_048_576,
+                100,
+                1_048_576,
+                1_000,
+                maxNestedArchiveCount,
+                maxNestedArchiveEntries,
+                maxRelevantEntries,
+                maxTotalRelevantExpandedBytes);
+    }
+
+    private static ScanLimits withArchivePreflightLimits(
+            ScanLimits limits,
+            long maxArchiveFileBytes,
+            long maxClasspathArchiveCount,
+            long maxCentralDirectoryBytes,
+            long maxTotalArchiveEntries) {
+        return new ScanLimits(
+                limits.maxDescriptorBytes(),
+                limits.maxNestedArchiveBytes(),
+                maxArchiveFileBytes,
+                maxClasspathArchiveCount,
+                maxCentralDirectoryBytes,
+                maxTotalArchiveEntries,
+                limits.maxNestedArchiveCount(),
+                limits.maxNestedArchiveEntries(),
+                limits.maxRelevantEntries(),
+                limits.maxTotalRelevantExpandedBytes());
     }
 
     private static void assertBudgetExceeded(
@@ -891,13 +1086,19 @@ class IntakeFormalSinkAssemblyTest {
             Path archivePath,
             List<ServiceDescriptor> descriptors,
             ScanBudget budget) {
-        try (JarFile archive = new JarFile(archivePath.toFile())) {
-            scanArchiveEntries(
-                    archive,
-                    archivePath.toString(),
-                    0,
-                    descriptors,
-                    budget);
+        try {
+            String source = archivePath.toString();
+            budget.reserveClasspathArchive(Files.size(archivePath), source);
+            ZipPreflight preflight =
+                    preflightArchive(archivePath, source, 0, budget);
+            try (JarFile archive = new JarFile(archivePath.toFile())) {
+                scanArchiveEntries(
+                        archive,
+                        source,
+                        preflight,
+                        descriptors,
+                        budget);
+            }
         } catch (ZipException failure) {
             throw new IllegalStateException(
                     "classpath entry is not a readable ZIP archive: " + archivePath,
@@ -909,25 +1110,318 @@ class IntakeFormalSinkAssemblyTest {
         }
     }
 
+    private static ZipPreflight preflightArchive(
+            Path archivePath,
+            String source,
+            int nestedDepth,
+            ScanBudget budget) throws IOException {
+        long archiveSize = Files.size(archivePath);
+        budget.checkArchiveFileBytes(archiveSize, source);
+        try (FileChannel archive = FileChannel.open(archivePath)) {
+            EndOfCentralDirectory eocd =
+                    readEndOfCentralDirectory(archive, archiveSize, source);
+            rejectZip64Locator(archive, eocd.offset(), source);
+            budget.recordCentralDirectoryBytes(eocd.centralDirectoryBytes(), source);
+            budget.recordArchiveEntries(
+                    eocd.entryCount(), nestedDepth > 0, source);
+
+            if (eocd.centralDirectoryBytes() > eocd.offset()
+                    || eocd.centralDirectoryOffset()
+                            != eocd.offset() - eocd.centralDirectoryBytes()) {
+                throw new IllegalStateException(
+                        "central directory offset/size is inconsistent in " + source);
+            }
+
+            byte[] centralDirectory =
+                    readFileRange(
+                            archive,
+                            eocd.centralDirectoryOffset(),
+                            Math.toIntExact(eocd.centralDirectoryBytes()),
+                            source);
+            List<String> entryNames =
+                    validateCentralDirectory(
+                            archive,
+                            centralDirectory,
+                            eocd,
+                            source);
+            entryNames.sort(String::compareTo);
+            return new ZipPreflight(List.copyOf(entryNames), nestedDepth);
+        }
+    }
+
+    private static EndOfCentralDirectory readEndOfCentralDirectory(
+            FileChannel archive, long archiveSize, String source) throws IOException {
+        if (archiveSize < 22) {
+            throw new ZipException(
+                    "archive has no complete ZIP end-of-central-directory record: "
+                            + source);
+        }
+        int tailLength = (int) Math.min(archiveSize, MAX_EOCD_BYTES);
+        long tailOffset = archiveSize - tailLength;
+        byte[] tail = readFileRange(archive, tailOffset, tailLength, source);
+        for (int cursor = tail.length - 22; cursor >= 0; cursor--) {
+            if (unsignedInt(tail, cursor) != EOCD_SIGNATURE) {
+                continue;
+            }
+            int commentLength = unsignedShort(tail, cursor + 20);
+            long eocdOffset = tailOffset + cursor;
+            if (eocdOffset + 22L + commentLength != archiveSize) {
+                continue;
+            }
+            int diskNumber = unsignedShort(tail, cursor + 4);
+            int centralDirectoryDisk = unsignedShort(tail, cursor + 6);
+            int entriesOnDisk = unsignedShort(tail, cursor + 8);
+            int entryCount = unsignedShort(tail, cursor + 10);
+            long centralDirectoryBytes = unsignedInt(tail, cursor + 12);
+            long centralDirectoryOffset = unsignedInt(tail, cursor + 16);
+            if (entriesOnDisk == 0xffff
+                    || entryCount == 0xffff
+                    || centralDirectoryBytes == 0xffffffffL
+                    || centralDirectoryOffset == 0xffffffffL) {
+                throw new IllegalStateException(
+                        "ZIP64 archives are unsupported by the bounded preflight: "
+                                + source);
+            }
+            if (diskNumber != 0
+                    || centralDirectoryDisk != 0
+                    || entriesOnDisk != entryCount) {
+                throw new IllegalStateException(
+                        "multi-disk ZIP archives are unsupported: " + source);
+            }
+            return new EndOfCentralDirectory(
+                    eocdOffset,
+                    centralDirectoryOffset,
+                    centralDirectoryBytes,
+                    entryCount);
+        }
+        throw new ZipException(
+                "archive has no valid ZIP end-of-central-directory record: "
+                        + source);
+    }
+
+    private static void rejectZip64Locator(
+            FileChannel archive, long eocdOffset, String source) throws IOException {
+        if (eocdOffset < 20) {
+            return;
+        }
+        byte[] possibleLocator =
+                readFileRange(archive, eocdOffset - 20, 4, source);
+        if (unsignedInt(possibleLocator, 0) == ZIP64_EOCD_LOCATOR_SIGNATURE) {
+            throw new IllegalStateException(
+                    "ZIP64 archives are unsupported by the bounded preflight: "
+                            + source);
+        }
+    }
+
+    private static List<String> validateCentralDirectory(
+            FileChannel archive,
+            byte[] centralDirectory,
+            EndOfCentralDirectory eocd,
+            String source) throws IOException {
+        List<String> entryNames = new ArrayList<>();
+        int cursor = 0;
+        for (int index = 0; index < eocd.entryCount(); index++) {
+            if (centralDirectory.length - cursor < 46
+                    || unsignedInt(centralDirectory, cursor)
+                            != CENTRAL_FILE_HEADER_SIGNATURE) {
+                throw new IllegalStateException(
+                        "invalid central directory entry " + index + " in " + source);
+            }
+            long compressedBytes = unsignedInt(centralDirectory, cursor + 20);
+            long uncompressedBytes = unsignedInt(centralDirectory, cursor + 24);
+            int fileNameBytes = unsignedShort(centralDirectory, cursor + 28);
+            int extraBytes = unsignedShort(centralDirectory, cursor + 30);
+            int commentBytes = unsignedShort(centralDirectory, cursor + 32);
+            int startDisk = unsignedShort(centralDirectory, cursor + 34);
+            long localHeaderOffset = unsignedInt(centralDirectory, cursor + 42);
+            if (compressedBytes == 0xffffffffL
+                    || uncompressedBytes == 0xffffffffL
+                    || startDisk == 0xffff
+                    || localHeaderOffset == 0xffffffffL) {
+                throw new IllegalStateException(
+                        "ZIP64 central entry is unsupported in " + source);
+            }
+            if (startDisk != 0 || fileNameBytes == 0) {
+                throw new IllegalStateException(
+                        "invalid central directory entry metadata in " + source);
+            }
+            long entryBytes = 46L + fileNameBytes + extraBytes + commentBytes;
+            if (entryBytes > centralDirectory.length - cursor) {
+                throw new IllegalStateException(
+                        "truncated central directory entry in " + source);
+            }
+            int fileNameOffset = cursor + 46;
+            byte[] rawFileName =
+                    Arrays.copyOfRange(
+                            centralDirectory,
+                            fileNameOffset,
+                            fileNameOffset + fileNameBytes);
+            validateNoZip64ExtraField(
+                    centralDirectory,
+                    fileNameOffset + fileNameBytes,
+                    extraBytes,
+                    source);
+            validateLocalHeader(
+                    archive,
+                    localHeaderOffset,
+                    rawFileName,
+                    eocd.centralDirectoryOffset(),
+                    source);
+            entryNames.add(decodeZipEntryName(rawFileName, source));
+            cursor = Math.toIntExact(cursor + entryBytes);
+        }
+        if (cursor != centralDirectory.length) {
+            throw new IllegalStateException(
+                    "central directory size/count is inconsistent in " + source);
+        }
+        return entryNames;
+    }
+
+    private static void validateNoZip64ExtraField(
+            byte[] centralDirectory,
+            int extraOffset,
+            int extraLength,
+            String source) {
+        int cursor = extraOffset;
+        int end = extraOffset + extraLength;
+        while (cursor < end) {
+            if (end - cursor < 4) {
+                throw new IllegalStateException(
+                        "truncated central directory extra field in " + source);
+            }
+            int headerId = unsignedShort(centralDirectory, cursor);
+            int valueLength = unsignedShort(centralDirectory, cursor + 2);
+            cursor += 4;
+            if (valueLength > end - cursor) {
+                throw new IllegalStateException(
+                        "truncated central directory extra value in " + source);
+            }
+            if (headerId == 0x0001) {
+                throw new IllegalStateException(
+                        "ZIP64 central entry is unsupported in " + source);
+            }
+            cursor += valueLength;
+        }
+    }
+
+    private static void validateLocalHeader(
+            FileChannel archive,
+            long localHeaderOffset,
+            byte[] centralFileName,
+            long centralDirectoryOffset,
+            String source) throws IOException {
+        if (localHeaderOffset > centralDirectoryOffset - 30) {
+            throw new IllegalStateException(
+                    "local header offset points outside file data in " + source);
+        }
+        byte[] localHeader =
+                readFileRange(archive, localHeaderOffset, 30, source);
+        if (unsignedInt(localHeader, 0) != LOCAL_FILE_HEADER_SIGNATURE) {
+            throw new IllegalStateException(
+                    "central entry has no matching local header signature in "
+                            + source);
+        }
+        int localFileNameBytes = unsignedShort(localHeader, 26);
+        int localExtraBytes = unsignedShort(localHeader, 28);
+        if (localHeaderOffset + 30L + localFileNameBytes + localExtraBytes
+                > centralDirectoryOffset) {
+            throw new IllegalStateException(
+                    "local header overlaps the central directory in " + source);
+        }
+        byte[] localFileName =
+                readFileRange(
+                        archive,
+                        localHeaderOffset + 30,
+                        localFileNameBytes,
+                        source);
+        if (!Arrays.equals(localFileName, centralFileName)) {
+            throw new IllegalStateException(
+                    "local and central raw entry names differ in " + source);
+        }
+    }
+
+    private static String decodeZipEntryName(byte[] rawName, String source) {
+        try {
+            return StandardCharsets.UTF_8
+                    .newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+                    .decode(ByteBuffer.wrap(rawName))
+                    .toString();
+        } catch (CharacterCodingException failure) {
+            throw new IllegalStateException(
+                    "ZIP entry name is not valid UTF-8 in " + source,
+                    failure);
+        }
+    }
+
+    private static byte[] readFileRange(
+            FileChannel file,
+            long offset,
+            int length,
+            String source) throws IOException {
+        if (offset < 0 || length < 0 || offset > file.size() - length) {
+            throw new IllegalStateException(
+                    "ZIP structure points outside archive bounds in " + source);
+        }
+        ByteBuffer buffer = ByteBuffer.allocate(length);
+        while (buffer.hasRemaining()) {
+            int read = file.read(buffer, offset + buffer.position());
+            if (read < 0) {
+                throw new IllegalStateException(
+                        "truncated ZIP structure in " + source);
+            }
+        }
+        return buffer.array();
+    }
+
+    private static int unsignedShort(byte[] bytes, int offset) {
+        return (bytes[offset] & 0xff) | ((bytes[offset + 1] & 0xff) << 8);
+    }
+
+    private static void putUnsignedShort(byte[] bytes, int offset, int value) {
+        bytes[offset] = (byte) value;
+        bytes[offset + 1] = (byte) (value >>> 8);
+    }
+
+    private static long unsignedInt(byte[] bytes, int offset) {
+        return (bytes[offset] & 0xffL)
+                | ((bytes[offset + 1] & 0xffL) << 8)
+                | ((bytes[offset + 2] & 0xffL) << 16)
+                | ((bytes[offset + 3] & 0xffL) << 24);
+    }
+
+    private static void putUnsignedInt(byte[] bytes, int offset, long value) {
+        bytes[offset] = (byte) value;
+        bytes[offset + 1] = (byte) (value >>> 8);
+        bytes[offset + 2] = (byte) (value >>> 16);
+        bytes[offset + 3] = (byte) (value >>> 24);
+    }
+
     private static void scanArchiveEntries(
             JarFile archive,
             String source,
-            int nestedDepth,
+            ZipPreflight preflight,
             List<ServiceDescriptor> descriptors,
             ScanBudget budget) throws IOException {
         List<JarEntry> relevantEntries = new ArrayList<>();
+        List<String> jarEntryNames = new ArrayList<>();
         var entries = archive.entries();
         while (entries.hasMoreElements()) {
             JarEntry entry = entries.nextElement();
-            if (nestedDepth > 0) {
-                budget.recordNestedArchiveEntry(source);
-            }
+            jarEntryNames.add(entry.getName());
             if (!entry.isDirectory()
                     && (descriptorContract(entry.getName()).isPresent()
                             || isBootNestedArchive(entry.getName()))) {
                 budget.recordRelevantEntry(source + "!/" + entry.getName());
                 relevantEntries.add(entry);
             }
+        }
+        jarEntryNames.sort(String::compareTo);
+        if (!jarEntryNames.equals(preflight.sortedEntryNames())) {
+            throw new IllegalStateException(
+                    "JarFile entry names differ from raw central directory preflight: "
+                            + source);
         }
         relevantEntries.sort(Comparator.comparing(JarEntry::getName));
 
@@ -955,7 +1449,7 @@ class IntakeFormalSinkAssemblyTest {
                 scanNestedArchive(
                         nestedArchive,
                         entrySource,
-                        nestedDepth + 1,
+                        preflight.nestedDepth() + 1,
                         descriptors,
                         budget);
             }
@@ -976,32 +1470,59 @@ class IntakeFormalSinkAssemblyTest {
                             + source);
         }
         Path temporaryArchive = null;
+        Throwable primaryFailure = null;
         try {
             temporaryArchive = Files.createTempFile("intake-service-provider-", ".zip");
             Files.write(temporaryArchive, archiveBytes);
+            ZipPreflight preflight =
+                    preflightArchive(
+                            temporaryArchive, source, depth, budget);
             try (JarFile archive = new JarFile(temporaryArchive.toFile())) {
                 scanArchiveEntries(
-                        archive, source, depth, descriptors, budget);
+                        archive, source, preflight, descriptors, budget);
             }
         } catch (ZipException failure) {
-            throw new IllegalStateException(
+            IllegalStateException wrapped = new IllegalStateException(
                     "BOOT-INF/lib entry has no valid ZIP central directory: " + source,
                     failure);
+            primaryFailure = wrapped;
+            throw wrapped;
         } catch (IOException failure) {
-            throw new UncheckedIOException(
+            UncheckedIOException wrapped = new UncheckedIOException(
                     "cannot scan nested BOOT-INF/lib archive " + source,
                     failure);
+            primaryFailure = wrapped;
+            throw wrapped;
+        } catch (RuntimeException | Error failure) {
+            primaryFailure = failure;
+            throw failure;
         } finally {
             if (temporaryArchive != null) {
-                try {
-                    Files.deleteIfExists(temporaryArchive);
-                } catch (IOException failure) {
-                    throw new UncheckedIOException(
+                cleanupTemporaryArchive(
+                        temporaryArchive,
+                        primaryFailure,
+                        Files::deleteIfExists);
+            }
+        }
+    }
+
+    private static void cleanupTemporaryArchive(
+            Path temporaryArchive,
+            Throwable primaryFailure,
+            TemporaryArchiveDeleter deleter) {
+        try {
+            deleter.delete(temporaryArchive);
+        } catch (IOException failure) {
+            UncheckedIOException cleanupFailure =
+                    new UncheckedIOException(
                             "cannot delete nested archive staging file "
                                     + temporaryArchive,
                             failure);
-                }
+            if (primaryFailure != null) {
+                primaryFailure.addSuppressed(cleanupFailure);
+                return;
             }
+            throw cleanupFailure;
         }
     }
 
@@ -1227,6 +1748,10 @@ class IntakeFormalSinkAssemblyTest {
     private record ScanLimits(
             long maxDescriptorBytes,
             long maxNestedArchiveBytes,
+            long maxArchiveFileBytes,
+            long maxClasspathArchiveCount,
+            long maxCentralDirectoryBytes,
+            long maxTotalArchiveEntries,
             long maxNestedArchiveCount,
             long maxNestedArchiveEntries,
             long maxRelevantEntries,
@@ -1235,6 +1760,10 @@ class IntakeFormalSinkAssemblyTest {
         private ScanLimits {
             if (maxDescriptorBytes < 0
                     || maxNestedArchiveBytes < 0
+                    || maxArchiveFileBytes < 0
+                    || maxClasspathArchiveCount < 0
+                    || maxCentralDirectoryBytes < 0
+                    || maxTotalArchiveEntries < 0
                     || maxNestedArchiveCount < 0
                     || maxNestedArchiveEntries < 0
                     || maxRelevantEntries < 0
@@ -1246,9 +1775,29 @@ class IntakeFormalSinkAssemblyTest {
 
     private record EntryReadBudget(long maxBytes, String limitName) {}
 
+    private record EndOfCentralDirectory(
+            long offset,
+            long centralDirectoryOffset,
+            long centralDirectoryBytes,
+            int entryCount) {}
+
+    private record ZipPreflight(List<String> sortedEntryNames, int nestedDepth) {
+
+        private ZipPreflight {
+            sortedEntryNames = List.copyOf(sortedEntryNames);
+        }
+    }
+
+    @FunctionalInterface
+    private interface TemporaryArchiveDeleter {
+        boolean delete(Path path) throws IOException;
+    }
+
     private static final class ScanBudget {
 
         private final ScanLimits limits;
+        private long classpathArchiveCount;
+        private long totalArchiveEntries;
         private long nestedArchiveCount;
         private long nestedArchiveEntries;
         private long relevantEntries;
@@ -1256,6 +1805,47 @@ class IntakeFormalSinkAssemblyTest {
 
         private ScanBudget(ScanLimits limits) {
             this.limits = limits;
+        }
+
+        private void reserveClasspathArchive(long archiveBytes, String source) {
+            classpathArchiveCount++;
+            if (classpathArchiveCount > limits.maxClasspathArchiveCount()) {
+                throw new IllegalStateException(
+                        "classpath archive count limit exceeded at " + source);
+            }
+            checkArchiveFileBytes(archiveBytes, source);
+        }
+
+        private void checkArchiveFileBytes(long archiveBytes, String source) {
+            if (archiveBytes > limits.maxArchiveFileBytes()) {
+                throw new IllegalStateException(
+                        "archive file byte limit exceeded at " + source);
+            }
+        }
+
+        private void recordCentralDirectoryBytes(long bytes, String source) {
+            if (bytes > limits.maxCentralDirectoryBytes()) {
+                throw new IllegalStateException(
+                        "central directory byte limit exceeded in " + source);
+            }
+        }
+
+        private void recordArchiveEntries(
+                long entries, boolean nestedArchive, String source) {
+            if (entries > limits.maxTotalArchiveEntries() - totalArchiveEntries) {
+                throw new IllegalStateException(
+                        "total archive entry limit exceeded in " + source);
+            }
+            totalArchiveEntries += entries;
+            if (nestedArchive) {
+                if (entries
+                        > limits.maxNestedArchiveEntries()
+                                - nestedArchiveEntries) {
+                    throw new IllegalStateException(
+                            "nested archive entry limit exceeded in " + source);
+                }
+                nestedArchiveEntries += entries;
+            }
         }
 
         private EntryReadBudget descriptorReadBudget() {
@@ -1282,14 +1872,6 @@ class IntakeFormalSinkAssemblyTest {
             if (nestedArchiveCount > limits.maxNestedArchiveCount()) {
                 throw new IllegalStateException(
                         "nested archive count limit exceeded at " + source);
-            }
-        }
-
-        private void recordNestedArchiveEntry(String source) {
-            nestedArchiveEntries++;
-            if (nestedArchiveEntries > limits.maxNestedArchiveEntries()) {
-                throw new IllegalStateException(
-                        "nested archive entry limit exceeded in " + source);
             }
         }
 
