@@ -37,6 +37,8 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
   private static final int RECENT_CAPACITY = 256;
   private static final String CARRY_STATE_MEMO_KEY = "intake_room_carry_state_v1";
   private static final String ROLLOVER_CHANGE_ID = "intake-room-rollover-v1";
+  private static final String CANCELLATION_RECONCILIATION_CHANGE_ID =
+      "intake-room-cancellation-reconciliation-v1";
   private static final long HISTORY_EVENT_LIMIT = 2_000;
   private static final Duration RUN_MAX_AGE = Duration.ofHours(24);
 
@@ -99,6 +101,12 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
       if (activeOrchestration != null && activeCancellationRequested) {
         Workflow.await(activeOrchestration::isCompleted);
         settleActiveOrchestration();
+        continue;
+      }
+      if (activeOrchestration == null
+          && deferredCancellation != null
+          && pendingCommand == null) {
+        processDeferredCancellation();
         continue;
       }
       if (shouldContinueAsNew() && canContinueAsNew()) {
@@ -510,7 +518,6 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
   private void settleActiveOrchestration() {
     Promise<Void> completed = activeOrchestration;
     String completedCommandId = activeOrchestrationCommandId;
-    boolean cancellationRequested = activeCancellationRequested;
     IntakeWorkflowCommand cancellation = deferredCancellation;
     try {
       completed.get();
@@ -523,19 +530,17 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
     activeCancellationScope = null;
     activeOrchestrationCommandId = null;
     activeCancellationRequested = false;
-    deferredCancellation = null;
     consumeQueuedCommittedEvent(completedCommandId);
-    if (cancellationRequested
-        && pendingCommand != null
-        && pendingCommand.commandId().equals(completedCommandId)) {
-      pendingCommand = null;
-      activityExecution = null;
-      sharedActivityRetriesRemaining = 0;
-      activityExecutionAuthorized = false;
-      protocolErrorCode = null;
+    if (cancellation != null && hasPendingActivityCommand(completedCommandId)) {
+      if (!cancellationReconciliationEnabled()) {
+        clearPendingActivity(completedCommandId);
+        protocolErrorCode = null;
+      } else if (!resolvePendingActivityForCancellation(completedCommandId)) {
+        return;
+      }
     }
     if (cancellation != null) {
-      processCommand(cancellation);
+      processDeferredCancellation();
     }
   }
 
@@ -547,28 +552,280 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
   }
 
   private boolean deferCancellation(IntakeWorkflowCommand command) {
-    if (activeOrchestration == null) {
-      consumeQueuedCommittedEvent(
-          pendingCommand == null ? null : pendingCommand.commandId());
-      if (pendingCommand != null && pendingCommand.executionContext() != null) {
-        pendingCommand = null;
-        activityExecution = null;
-        sharedActivityRetriesRemaining = 0;
-        activityExecutionAuthorized = false;
-        protocolErrorCode = null;
-      }
-      return false;
-    }
     if (deferredCancellation != null) {
       if (!deferredCancellation.equals(command)) {
         rejectCommand(command, "CANCELLATION_ALREADY_PENDING", true);
+        return true;
       }
+    } else {
+      deferredCancellation = command;
+    }
+    if (activeOrchestration != null) {
+      activeCancellationRequested = true;
+      activeCancellationScope.cancel();
       return true;
     }
-    deferredCancellation = command;
-    activeCancellationRequested = true;
-    activeCancellationScope.cancel();
-    return true;
+    String pendingCommandId = pendingCommand.commandId();
+    consumeQueuedCommittedEvent(pendingCommandId);
+    if (hasPendingActivityCommand(pendingCommandId)) {
+      if (!cancellationReconciliationEnabled()) {
+        clearPendingActivity(pendingCommandId);
+        protocolErrorCode = null;
+      } else if (!resolvePendingActivityForCancellation(pendingCommandId)) {
+        return true;
+      }
+    }
+    deferredCancellation = null;
+    return false;
+  }
+
+  private void processDeferredCancellation() {
+    IntakeWorkflowCommand cancellation = deferredCancellation;
+    deferredCancellation = null;
+    if (cancellation != null) {
+      processCommand(cancellation);
+    }
+  }
+
+  private boolean resolvePendingActivityForCancellation(String commandId) {
+    consumeQueuedCommittedEvent(commandId);
+    if (!hasPendingActivityCommand(commandId)) {
+      return true;
+    }
+    if (hasUnresolvedQueuedActivityEvent(commandId)) {
+      if (protocolErrorCode == null) {
+        protocolErrorCode = "INTAKE_ACTIVITY_RECONCILIATION_UNRESOLVED";
+      }
+      return false;
+    }
+    IntakeWorkflowCommand originalCommand = pendingWorkflowCommand();
+    CancellationReconciliation reconciliation = reconcileCanceledStage(originalCommand);
+    return switch (reconciliation.status()) {
+      case UNRESOLVED -> false;
+      case ABSENT -> {
+        clearPendingActivity(commandId);
+        protocolErrorCode = null;
+        yield true;
+      }
+      case COMMITTED -> settleCommittedReconciliation(commandId, reconciliation);
+    };
+  }
+
+  private boolean settleCommittedReconciliation(
+      String commandId, CancellationReconciliation reconciliation) {
+    if (reconciliation.committedEvent() == null) {
+      // Snapshot and Graph receipts contain no formal event and are safe to abandon on cancellation.
+      clearPendingActivity(commandId);
+      protocolErrorCode = null;
+      return true;
+    }
+    processEvent(reconciliation.committedEvent(), reconciliation.operationKey());
+    return !hasPendingActivityCommand(commandId);
+  }
+
+  private CancellationReconciliation reconcileCanceledStage(
+      IntakeWorkflowCommand command) {
+    IntakeActivityExecutionState canceledStage = activityExecution;
+    if (canceledStage == null
+        || !canceledStage.commandId().equals(command.commandId())) {
+      protocolErrorCode = "INTAKE_ACTIVITY_RECONCILIATION_UNRESOLVED";
+      return CancellationReconciliation.unresolved();
+    }
+    sharedActivityRetriesRemaining = 0;
+    activityExecutionAuthorized = false;
+    CancellationReconciliation[] result = new CancellationReconciliation[1];
+    CancellationScope reconciliationScope =
+        Workflow.newDetachedCancellationScope(
+            () -> result[0] = reconcileStageReceipt(command, canceledStage));
+    try {
+      reconciliationScope.run();
+      if (result[0] != null) {
+        return result[0];
+      }
+      protocolErrorCode = "INTAKE_ACTIVITY_RECONCILIATION_UNRESOLVED";
+    } catch (IntakeActivityDeadlineExceeded failure) {
+      protocolErrorCode = "INTAKE_ACTIVITY_DEADLINE_EXPIRED";
+    } catch (ActivityFailure failure) {
+      protocolErrorCode = activityFailureCode(failure);
+    } catch (RuntimeException failure) {
+      protocolErrorCode =
+          failure instanceof IllegalArgumentException
+              ? "INTAKE_ACTIVITY_RECEIPT_INVALID"
+              : "INTAKE_ACTIVITY_RECONCILIATION_UNRESOLVED";
+    }
+    return CancellationReconciliation.unresolved();
+  }
+
+  private CancellationReconciliation reconcileStageReceipt(
+      IntakeWorkflowCommand command, IntakeActivityExecutionState canceledStage) {
+    IntakeCommandExecutionContext context = command.executionContext();
+    String operationKey = canceledStage.stageOperationKey();
+    ActivityInvocation invocation =
+        new ActivityInvocation(
+            "intake-activity-invocation.v1", ActivityInvocationMode.RECONCILE_ONLY, 0);
+    setActivityStage(command, context, canceledStage.stage(), operationKey, invocation);
+    if (canceledStage.terminalFailure() != null) {
+      activityExecution =
+          activityExecution.withTerminalFailure(canceledStage.terminalFailure().failureType());
+    }
+    ActivityEnvelope envelope = activityEnvelope(command, context, invocation);
+    return switch (canceledStage.stage()) {
+      case SNAPSHOT_PUBLICATION -> {
+        long domainRevision = processRevision;
+        SnapshotPublicationRequest request =
+            new SnapshotPublicationRequest(
+                "intake-snapshot-publication-request.v1",
+                envelope,
+                context.threadId(),
+                context.agentSessionId(),
+                domainRevision,
+                operationKey,
+                command.requestHash());
+        SnapshotPublicationReceipt receipt = activities(context).publishSnapshot(request);
+        if (receipt == null) {
+          yield CancellationReconciliation.absent(operationKey);
+        }
+        requireOperation(receipt.operation(), operationKey, command.requestHash());
+        if (receipt.domainRevision() != domainRevision) {
+          throw new IllegalArgumentException(
+              "snapshot reconciliation receipt revision does not match the request");
+        }
+        yield CancellationReconciliation.committed(operationKey, null);
+      }
+      case GRAPH_EXECUTION -> {
+        GraphExecutionRequest request =
+            new GraphExecutionRequest(
+                "intake-graph-execution-request.v1",
+                envelope,
+                context.threadId(),
+                context.agentSessionId(),
+                operationKey,
+                command.requestHash());
+        GraphExecutionReceipt receipt = activities(context).executeGraph(request);
+        if (receipt == null) {
+          yield CancellationReconciliation.absent(operationKey);
+        }
+        requireOperation(receipt.operation(), operationKey, command.requestHash());
+        if (!context.threadId().equals(receipt.graphExecutionRef().threadId())
+            || !command.commandId().equals(receipt.graphExecutionRef().graphCommandId())
+            || !start.graphVersion().equals(receipt.graphExecutionRef().graphVersion())) {
+          throw new IllegalArgumentException(
+              "Graph reconciliation receipt does not match the command");
+        }
+        yield CancellationReconciliation.committed(operationKey, null);
+      }
+      case TURN_FINALIZATION -> {
+        GraphExecutionReceipt graph = canceledStage.completedGraphExecution();
+        if (graph == null) {
+          throw new IllegalStateException(
+              "turn finalization reconciliation requires the completed Graph receipt");
+        }
+        TurnFinalizationRequest request =
+            new TurnFinalizationRequest(
+                "intake-turn-finalization-request.v1",
+                envelope,
+                context.threadId(),
+                context.agentSessionId(),
+                graph,
+                operationKey,
+                command.requestHash());
+        TurnFinalizationReceipt receipt = activities(context).finalizeTurn(request);
+        if (receipt == null) {
+          yield CancellationReconciliation.absent(operationKey);
+        }
+        receipt.requireMatches(request);
+        requireOperation(receipt.operation(), operationKey, command.requestHash());
+        yield CancellationReconciliation.committed(operationKey, receipt.committedEvent());
+      }
+      case INITIATOR_ACCEPTANCE,
+          INITIATOR_REJECTION,
+          CANCELLATION,
+          RESPONDENT_CONFIRMATION ->
+          reconcileBranchStage(command, context, canceledStage.stage(), envelope, operationKey);
+    };
+  }
+
+  private CancellationReconciliation reconcileBranchStage(
+      IntakeWorkflowCommand command,
+      IntakeCommandExecutionContext context,
+      IntakeActivityStage stage,
+      ActivityEnvelope envelope,
+      String operationKey) {
+    BranchOperation operation = context.branchOperation();
+    IntakeActivityStage expectedStage =
+        switch (operation) {
+          case INITIATOR_ACCEPT -> IntakeActivityStage.INITIATOR_ACCEPTANCE;
+          case INITIATOR_REJECT -> IntakeActivityStage.INITIATOR_REJECTION;
+          case CANCEL -> IntakeActivityStage.CANCELLATION;
+          case RESPONDENT_CONFIRM -> IntakeActivityStage.RESPONDENT_CONFIRMATION;
+        };
+    if (stage != expectedStage) {
+      throw new IllegalArgumentException(
+          "branch reconciliation stage does not match its operation");
+    }
+    BranchCommitRequest request =
+        new BranchCommitRequest(
+            "intake-branch-commit-request.v1",
+            envelope,
+            operation,
+            operationKey,
+            command.requestHash());
+    BranchCommitReceipt receipt =
+        switch (operation) {
+          case INITIATOR_ACCEPT -> activities(context).acceptInitiator(request);
+          case INITIATOR_REJECT -> activities(context).rejectInitiator(request);
+          case CANCEL -> activities(context).cancelIntake(request);
+          case RESPONDENT_CONFIRM -> activities(context).confirmRespondent(request);
+        };
+    if (receipt == null) {
+      return CancellationReconciliation.absent(operationKey);
+    }
+    receipt.requireMatches(request);
+    requireOperation(receipt.operation(), operationKey, command.requestHash());
+    return CancellationReconciliation.committed(operationKey, receipt.committedEvent());
+  }
+
+  private IntakeWorkflowCommand pendingWorkflowCommand() {
+    IntakePendingCommand pending = pendingCommand;
+    return new IntakeWorkflowCommand(
+        "intake-workflow-command.v1",
+        pending.commandId(),
+        start.tenantSurrogate(),
+        start.caseId(),
+        start.roomEpoch(),
+        start.fencingToken(),
+        pending.sequence(),
+        pending.commandType(),
+        pending.party(),
+        pending.actorScopeHash(),
+        pending.payloadRef(),
+        pending.payloadHash(),
+        pending.operationKey(),
+        pending.requestHash(),
+        pending.executionContext());
+  }
+
+  private boolean hasPendingActivityCommand(String commandId) {
+    return commandId != null
+        && pendingCommand != null
+        && pendingCommand.commandId().equals(commandId)
+        && pendingCommand.executionContext() != null;
+  }
+
+  private void clearPendingActivity(String commandId) {
+    if (!hasPendingActivityCommand(commandId)) {
+      return;
+    }
+    pendingCommand = null;
+    activityExecution = null;
+    sharedActivityRetriesRemaining = 0;
+    activityExecutionAuthorized = false;
+  }
+
+  private static boolean cancellationReconciliationEnabled() {
+    return Workflow.getVersion(
+            CANCELLATION_RECONCILIATION_CHANGE_ID, Workflow.DEFAULT_VERSION, 1)
+        == 1;
   }
 
   private boolean consumeQueuedCommittedEvent(String commandId) {
@@ -599,6 +856,19 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
       }
     }
     return false;
+  }
+
+  private boolean hasUnresolvedQueuedActivityEvent(String commandId) {
+    if (!hasPendingActivityCommand(commandId) || activityExecution == null) {
+      return false;
+    }
+    String operationKey = activityExecution.stageOperationKey();
+    return eventObservations.values().stream()
+        .anyMatch(
+            observation ->
+                !observation.applied()
+                    && observation.event().commandId().equals(commandId)
+                    && observation.event().operationKey().equals(operationKey));
   }
 
   private static boolean isCancellation(Throwable failure) {
@@ -1334,6 +1604,34 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
       IntakeWorkflowCommand command, IntakeCommandDecision decision) {}
 
   private record EventObservation(IntakeDomainEventRef event, boolean applied) {}
+
+  private enum CancellationReconciliationStatus {
+    COMMITTED,
+    ABSENT,
+    UNRESOLVED
+  }
+
+  private record CancellationReconciliation(
+      CancellationReconciliationStatus status,
+      String operationKey,
+      IntakeDomainEventRef committedEvent) {
+
+    private static CancellationReconciliation committed(
+        String operationKey, IntakeDomainEventRef committedEvent) {
+      return new CancellationReconciliation(
+          CancellationReconciliationStatus.COMMITTED, operationKey, committedEvent);
+    }
+
+    private static CancellationReconciliation absent(String operationKey) {
+      return new CancellationReconciliation(
+          CancellationReconciliationStatus.ABSENT, operationKey, null);
+    }
+
+    private static CancellationReconciliation unresolved() {
+      return new CancellationReconciliation(
+          CancellationReconciliationStatus.UNRESOLVED, null, null);
+    }
+  }
 
   private static final class IntakeActivityDeadlineExceeded extends RuntimeException {}
 

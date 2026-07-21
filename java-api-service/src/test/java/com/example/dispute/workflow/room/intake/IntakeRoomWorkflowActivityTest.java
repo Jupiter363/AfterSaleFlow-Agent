@@ -556,6 +556,222 @@ class IntakeRoomWorkflowActivityTest {
   }
 
   @Test
+  void lateCommittedTurnIsReconciledBeforeCancellationStarts() {
+    try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+      String workflowQueue = "phase4-intake-late-finalization-cancel";
+      FakeActivities activities = new FakeActivities();
+      activities.blockFinalizationAfterCommit.set(true);
+      activities.blockFinalizationCancellationCompletion.set(true);
+      activities.blockFinalizationReconciliation.set(true);
+      activities.blockCancellation.set(true);
+      Worker workflowWorker = environment.newWorker(workflowQueue);
+      workflowWorker.registerWorkflowImplementationTypes(IntakeRoomWorkflowImpl.class);
+      Worker activityWorker = environment.newWorker(AGENT_EXECUTION);
+      activityWorker.registerActivitiesImplementations(activities);
+      environment.start();
+
+      IntakeRoomWorkflow workflow =
+          workflow(environment, workflowQueue, "late-finalization-cancel");
+      WorkflowClient.start(workflow::run, start());
+      String commandId = "CMD_LATE_FINALIZATION_CANCEL";
+      workflow.commandAccepted(
+          command(1, commandId, IntakeCommandType.INTAKE_MESSAGE, null));
+      awaitTrue(activities.finalizationCommitVisible, "Finalizer commit was not made visible");
+      TurnFinalizationReceipt committed =
+          activities.finalizationReceipts.values().iterator().next();
+
+      workflow.commandAccepted(
+          command(
+              2,
+              "CMD_CANCEL_AFTER_LATE_FINALIZATION",
+              IntakeCommandType.INTAKE_CANCEL,
+              BranchOperation.CANCEL));
+      awaitCount(
+          activities.finalizationCancellations,
+          1,
+          "Cancellation did not reach the committed Finalizer completion");
+      assertThat(activities.finalizationReconciliationRequests).hasValue(0);
+
+      activities.releaseFinalizationCancellationCompletion.set(true);
+      awaitTrue(
+          activities.finalizationReconciliationStarted,
+          "Finalizer reconciliation did not start after cancellation completed");
+      assertThat(activities.cancelRequests).isEmpty();
+      assertThat(activities.finalizationReconciliationRequests).hasValue(1);
+      assertThat(
+              activities.finalizationRequests.stream()
+                  .map(request -> request.envelope().invocation().mode()))
+          .containsExactly(
+              ActivityInvocationMode.FIRST_EXECUTION,
+              ActivityInvocationMode.RECONCILE_ONLY);
+      TurnFinalizationRequest firstFinalization = activities.finalizationRequests.getFirst();
+      TurnFinalizationRequest reconciliation = activities.finalizationRequests.getLast();
+      assertThat(reconciliation.operationKey()).isEqualTo(firstFinalization.operationKey());
+      assertThat(reconciliation.requestHash()).isEqualTo(firstFinalization.requestHash());
+      assertThat(activities.snapshotRequests).hasSize(1);
+      assertThat(activities.graphRequests).hasSize(1);
+
+      activities.releaseFinalizationReconciliation.set(true);
+      awaitTrue(
+          activities.cancellationStarted,
+          "Cancellation Activity did not start after committed receipt reconciliation");
+      IntakeRoomSnapshot cancellationActive =
+          awaitState(
+              workflow,
+              state ->
+                  state.processedEventCount() == 1
+                      && "CMD_CANCEL_AFTER_LATE_FINALIZATION".equals(
+                          state.pendingCommandId()));
+      assertThat(cancellationActive.lastEventId()).isEqualTo(committed.committedEvent().eventId());
+      workflow.domainEventCommitted(committed.committedEvent());
+      activities.releaseCancellation.set(true);
+
+      IntakeRoomSnapshot terminal =
+          WorkflowStub.fromTyped(workflow).getResult(IntakeRoomSnapshot.class);
+      assertThat(terminal.terminalReason()).isEqualTo(IntakeTerminalReason.CANCELLED);
+      assertThat(terminal.processedEventCount()).isEqualTo(2);
+      assertThat(terminal.nextEventSequence()).isEqualTo(3);
+      assertThat(activities.finalizationCommits).hasSize(1);
+      assertThat(activities.finalizationReceipts).hasSize(1);
+      assertThat(activities.cancelRequests).hasSize(1);
+    }
+  }
+
+  @Test
+  void definitiveAbsentFinalizationAllowsCancellationOnlyAfterReconciliation() {
+    try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+      String workflowQueue = "phase4-intake-absent-finalization-cancel";
+      FakeActivities activities = new FakeActivities();
+      activities.blockFinalizationBeforeCommit.set(true);
+      activities.blockFinalizationReconciliation.set(true);
+      Worker workflowWorker = environment.newWorker(workflowQueue);
+      workflowWorker.registerWorkflowImplementationTypes(IntakeRoomWorkflowImpl.class);
+      Worker activityWorker = environment.newWorker(AGENT_EXECUTION);
+      activityWorker.registerActivitiesImplementations(activities);
+      environment.start();
+
+      IntakeRoomWorkflow workflow =
+          workflow(environment, workflowQueue, "absent-finalization-cancel");
+      WorkflowClient.start(workflow::run, start());
+      workflow.commandAccepted(
+          command(1, "CMD_ABSENT_FINALIZATION", IntakeCommandType.INTAKE_MESSAGE, null));
+      awaitTrue(
+          activities.finalizationExecutionStarted,
+          "Finalizer did not start before the cancellation signal");
+
+      workflow.commandAccepted(
+          command(
+              2,
+              "CMD_CANCEL_ABSENT_FINALIZATION",
+              IntakeCommandType.INTAKE_CANCEL,
+              BranchOperation.CANCEL));
+      awaitCount(
+          activities.finalizationCancellations,
+          1,
+          "Cancellation did not stop the uncommitted Finalizer");
+      awaitTrue(
+          activities.finalizationReconciliationStarted,
+          "Finalizer reconciliation did not start after cancellation completed");
+      assertThat(activities.finalizationReceipts).isEmpty();
+      assertThat(activities.cancelRequests).isEmpty();
+
+      activities.releaseFinalizationReconciliation.set(true);
+      awaitTrue(
+          activities.cancellationStarted,
+          "Cancellation Activity did not start after definitive absence");
+      IntakeRoomSnapshot terminal =
+          WorkflowStub.fromTyped(workflow).getResult(IntakeRoomSnapshot.class);
+
+      assertThat(terminal.terminalReason()).isEqualTo(IntakeTerminalReason.CANCELLED);
+      assertThat(terminal.processedEventCount()).isEqualTo(1);
+      assertThat(terminal.nextEventSequence()).isEqualTo(2);
+      assertThat(activities.finalizationReconciliationRequests).hasValue(1);
+      assertThat(activities.cancelRequests).hasSize(1);
+    }
+  }
+
+  @Test
+  void finalizationReconciliationInfrastructureFailureKeepsCancellationFailClosed() {
+    try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+      String workflowQueue = "phase4-intake-unresolved-finalization-cancel";
+      FakeActivities activities = new FakeActivities();
+      activities.blockFinalizationBeforeCommit.set(true);
+      activities.finalizationReconciliationInfrastructureFailures.set(1);
+      Worker workflowWorker = environment.newWorker(workflowQueue);
+      workflowWorker.registerWorkflowImplementationTypes(IntakeRoomWorkflowImpl.class);
+      Worker activityWorker = environment.newWorker(AGENT_EXECUTION);
+      activityWorker.registerActivitiesImplementations(activities);
+      environment.start();
+
+      IntakeRoomWorkflow workflow =
+          workflow(environment, workflowQueue, "unresolved-finalization-cancel");
+      WorkflowClient.start(workflow::run, start());
+      String originalCommandId = "CMD_UNRESOLVED_FINALIZATION";
+      workflow.commandAccepted(
+          command(1, originalCommandId, IntakeCommandType.INTAKE_MESSAGE, null));
+      awaitTrue(
+          activities.finalizationExecutionStarted,
+          "Finalizer did not start before the cancellation signal");
+
+      workflow.commandAccepted(
+          command(
+              2,
+              "CMD_CANCEL_UNRESOLVED_FINALIZATION",
+              IntakeCommandType.INTAKE_CANCEL,
+              BranchOperation.CANCEL));
+      awaitCount(
+          activities.finalizationCancellations,
+          1,
+          "Cancellation did not stop the uncommitted Finalizer");
+      IntakeRoomSnapshot unresolved =
+          awaitState(
+              workflow,
+              state ->
+                  IntakeActivityFailureTypes.INFRASTRUCTURE_RETRYABLE.equals(
+                      state.protocolErrorCode()));
+
+      assertThat(unresolved.pendingCommandId()).isEqualTo(originalCommandId);
+      assertThat(unresolved.activityExecution().stage())
+          .isEqualTo(IntakeActivityStage.TURN_FINALIZATION);
+      assertThat(unresolved.activityExecution().invocation().mode())
+          .isEqualTo(ActivityInvocationMode.RECONCILE_ONLY);
+      assertThat(unresolved.nextCommandSequence()).isEqualTo(2);
+      assertThat(unresolved.processedCommandCount()).isEqualTo(1);
+      assertThat(activities.finalizationReconciliationRequests).hasValue(1);
+      assertThat(activities.cancelRequests).isEmpty();
+
+      TurnFinalizationRequest canceledRequest = activities.finalizationRequests.getFirst();
+      GraphExecutionReceipt graph = canceledRequest.graphExecution();
+      long revision =
+          Math.max(
+              canceledRequest.envelope().processRevision(),
+              canceledRequest.envelope().commandSequence());
+      IntakeDomainEventRef lateCommitted =
+          FakeActivities.event(
+              "EVENT_" + originalCommandId,
+              canceledRequest.envelope(),
+              canceledRequest.envelope().commandSequence(),
+              IntakeDomainEventType.TURN_READY_TO_CONFIRM,
+              canceledRequest.operationKey(),
+              graph.operation().resultHash(),
+              revision,
+              graph.agentRunRef(),
+              graph.graphExecutionRef());
+      activities.blockFinalizationBeforeCommit.set(false);
+      workflow.domainEventCommitted(lateCommitted);
+
+      awaitTrue(
+          activities.cancellationStarted,
+          "Deferred cancellation was not retained after reconciliation failure");
+      IntakeRoomSnapshot terminal =
+          WorkflowStub.fromTyped(workflow).getResult(IntakeRoomSnapshot.class);
+      assertThat(terminal.terminalReason()).isEqualTo(IntakeTerminalReason.CANCELLED);
+      assertThat(terminal.processedEventCount()).isEqualTo(2);
+      assertThat(activities.cancelRequests).hasSize(1);
+    }
+  }
+
+  @Test
   void continueAsNewCarriesSequencesDedupeAndOneTimeSnapshotInitialization() {
     try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
       String workflowQueue = "phase4-intake-continue-as-new";
@@ -860,21 +1076,34 @@ class IntakeRoomWorkflowActivityTest {
     final AtomicInteger graphInfrastructureFailures = new AtomicInteger();
     final Queue<TimeoutType> graphTimeoutFailures = new ConcurrentLinkedQueue<>();
     final AtomicBoolean releaseGraph = new AtomicBoolean();
+    final AtomicBoolean blockFinalizationBeforeCommit = new AtomicBoolean();
     final AtomicBoolean blockFinalizationAfterCommit = new AtomicBoolean();
     final AtomicBoolean releaseFinalizationAfterCommit = new AtomicBoolean();
     final AtomicBoolean blockFinalizationCancellationCompletion = new AtomicBoolean();
     final AtomicBoolean releaseFinalizationCancellationCompletion = new AtomicBoolean();
+    final AtomicBoolean blockFinalizationReconciliation = new AtomicBoolean();
+    final AtomicBoolean releaseFinalizationReconciliation = new AtomicBoolean();
+    final AtomicBoolean finalizationExecutionStarted = new AtomicBoolean();
+    final AtomicBoolean finalizationReconciliationStarted = new AtomicBoolean();
     final AtomicBoolean finalizationCommitVisible = new AtomicBoolean();
+    final AtomicBoolean blockCancellation = new AtomicBoolean();
+    final AtomicBoolean releaseCancellation = new AtomicBoolean();
+    final AtomicBoolean cancellationStarted = new AtomicBoolean();
     final AtomicBoolean corruptAcceptanceAuthority = new AtomicBoolean();
     final AtomicBoolean corruptFinalizationGraphBinding = new AtomicBoolean();
     final AtomicBoolean failFinalizationAfterCommitNonRetryable = new AtomicBoolean();
+    final AtomicInteger finalizationReconciliationInfrastructureFailures = new AtomicInteger();
+    final AtomicInteger finalizationReconciliationRequests = new AtomicInteger();
     final List<SnapshotPublicationRequest> snapshotRequests = new CopyOnWriteArrayList<>();
     final List<GraphExecutionRequest> graphRequests = new CopyOnWriteArrayList<>();
     final List<TurnFinalizationRequest> finalizationRequests = new CopyOnWriteArrayList<>();
     final List<BranchCommitRequest> acceptRequests = new CopyOnWriteArrayList<>();
     final List<BranchCommitRequest> cancelRequests = new CopyOnWriteArrayList<>();
     final Set<String> finalizationCommits = ConcurrentHashMap.newKeySet();
+    final Map<String, SnapshotPublicationReceipt> snapshotReceipts = new ConcurrentHashMap<>();
+    final Map<String, GraphExecutionReceipt> graphReceipts = new ConcurrentHashMap<>();
     final Map<String, TurnFinalizationReceipt> finalizationReceipts = new ConcurrentHashMap<>();
+    final Map<String, BranchCommitReceipt> branchReceipts = new ConcurrentHashMap<>();
     final AtomicBoolean graphStarted = new AtomicBoolean();
     final AtomicInteger graphCancellations = new AtomicInteger();
     final AtomicInteger finalizationCancellations = new AtomicInteger();
@@ -908,29 +1137,39 @@ class IntakeRoomWorkflowActivityTest {
     @Override
     public SnapshotPublicationReceipt publishSnapshot(SnapshotPublicationRequest request) {
       snapshotRequests.add(request);
+      if (request.envelope().invocation().mode() == ActivityInvocationMode.RECONCILE_ONLY) {
+        return snapshotReceipts.get(request.operationKey());
+      }
       if (consumeFailure(snapshotInfrastructureFailures)) {
         throw ApplicationFailure.newFailure(
             "synthetic snapshot infrastructure failure",
             IntakeActivityFailureTypes.INFRASTRUCTURE_RETRYABLE);
       }
-      return new SnapshotPublicationReceipt(
-          "intake-snapshot-publication-receipt.v1",
-          operation(request.operationKey(), request.requestHash(), hash(1), 0, 0),
-          new ImmutablePayloadRef(
-              "immutable-payload-ref.v1",
-              "SNAPSHOT_" + request.envelope().commandId(),
-              "INTAKE_SNAPSHOT",
-              "intake-domain-snapshot.v2",
-              "urn:after-sale-flow:intake-snapshot:" + request.envelope().commandId(),
-              "VERSION_SNAPSHOT_" + request.envelope().commandId(),
-              hash(2),
-              1024),
-          request.domainRevision());
+      SnapshotPublicationReceipt produced =
+          new SnapshotPublicationReceipt(
+              "intake-snapshot-publication-receipt.v1",
+              operation(request.operationKey(), request.requestHash(), hash(1), 0, 0),
+              new ImmutablePayloadRef(
+                  "immutable-payload-ref.v1",
+                  "SNAPSHOT_" + request.envelope().commandId(),
+                  "INTAKE_SNAPSHOT",
+                  "intake-domain-snapshot.v2",
+                  "urn:after-sale-flow:intake-snapshot:" + request.envelope().commandId(),
+                  "VERSION_SNAPSHOT_" + request.envelope().commandId(),
+                  hash(2),
+                  1024),
+              request.domainRevision());
+      SnapshotPublicationReceipt existing =
+          snapshotReceipts.putIfAbsent(request.operationKey(), produced);
+      return existing == null ? produced : existing;
     }
 
     @Override
     public GraphExecutionReceipt executeGraph(GraphExecutionRequest request) {
       graphRequests.add(request);
+      if (request.envelope().invocation().mode() == ActivityInvocationMode.RECONCILE_ONLY) {
+        return graphReceipts.get(request.operationKey());
+      }
       if (blockGraph && !releaseGraph.get()) {
         graphStarted.set(true);
         try {
@@ -964,9 +1203,6 @@ class IntakeRoomWorkflowActivityTest {
             "SYNTHETIC_TIMEOUT_WRAPPER",
             new TimeoutFailure("synthetic Graph timeout", null, timeoutType));
       }
-      if (request.envelope().invocation().mode() == ActivityInvocationMode.RECONCILE_ONLY) {
-        return null;
-      }
       String resultHash = hash(7);
       String proposalHash = hash(8);
       IntakeAgentRunRef run =
@@ -987,34 +1223,76 @@ class IntakeRoomWorkflowActivityTest {
               resultHash,
               "urn:after-sale-flow:intake-proposal:" + request.envelope().commandId(),
               proposalHash);
-      return new GraphExecutionReceipt(
-          "intake-graph-execution-receipt.v1",
-          operation(request.operationKey(), request.requestHash(), resultHash, 0, 0),
-          run,
-          graph,
-          new ImmutablePayloadRef(
-              "immutable-payload-ref.v1",
-              "RESULT_" + request.envelope().commandId(),
-              "GRAPH_RESULT",
-              "room-graph-result.v1",
-              graph.resultRef(),
-              "VERSION_RESULT_" + request.envelope().commandId(),
-              resultHash,
-              1024),
-          new ImmutablePayloadRef(
-              "immutable-payload-ref.v1",
-              "PROPOSAL_" + request.envelope().commandId(),
-              "INTAKE_PROPOSAL",
-              "intake-turn-proposal.v2",
-              graph.proposalRef(),
-              "VERSION_PROPOSAL_" + request.envelope().commandId(),
-              proposalHash,
-              1024));
+      GraphExecutionReceipt produced =
+          new GraphExecutionReceipt(
+              "intake-graph-execution-receipt.v1",
+              operation(request.operationKey(), request.requestHash(), resultHash, 0, 0),
+              run,
+              graph,
+              new ImmutablePayloadRef(
+                  "immutable-payload-ref.v1",
+                  "RESULT_" + request.envelope().commandId(),
+                  "GRAPH_RESULT",
+                  "room-graph-result.v1",
+                  graph.resultRef(),
+                  "VERSION_RESULT_" + request.envelope().commandId(),
+                  resultHash,
+                  1024),
+              new ImmutablePayloadRef(
+                  "immutable-payload-ref.v1",
+                  "PROPOSAL_" + request.envelope().commandId(),
+                  "INTAKE_PROPOSAL",
+                  "intake-turn-proposal.v2",
+                  graph.proposalRef(),
+                  "VERSION_PROPOSAL_" + request.envelope().commandId(),
+                  proposalHash,
+                  1024));
+      GraphExecutionReceipt existing = graphReceipts.putIfAbsent(request.operationKey(), produced);
+      return existing == null ? produced : existing;
     }
 
     @Override
     public TurnFinalizationReceipt finalizeTurn(TurnFinalizationRequest request) {
       finalizationRequests.add(request);
+      if (request.envelope().invocation().mode() == ActivityInvocationMode.RECONCILE_ONLY) {
+        finalizationReconciliationRequests.incrementAndGet();
+        finalizationReconciliationStarted.set(true);
+        try {
+          while (blockFinalizationReconciliation.get()
+              && !releaseFinalizationReconciliation.get()) {
+            Activity.getExecutionContext().heartbeat("reconciling-finalization-receipt");
+            Thread.sleep(10);
+          }
+        } catch (InterruptedException failure) {
+          Thread.currentThread().interrupt();
+          throw ApplicationFailure.newFailure(
+              "synthetic Finalizer reconciliation interrupted",
+              IntakeActivityFailureTypes.INFRASTRUCTURE_RETRYABLE);
+        }
+        if (consumeFailure(finalizationReconciliationInfrastructureFailures)) {
+          throw ApplicationFailure.newFailure(
+              "synthetic Finalizer reconciliation infrastructure failure",
+              IntakeActivityFailureTypes.INFRASTRUCTURE_RETRYABLE);
+        }
+        return finalizationReceipts.get(request.operationKey());
+      }
+      finalizationExecutionStarted.set(true);
+      if (blockFinalizationBeforeCommit.get()) {
+        try {
+          while (true) {
+            Activity.getExecutionContext().heartbeat("finalization-before-commit");
+            Thread.sleep(10);
+          }
+        } catch (ActivityCompletionException failure) {
+          finalizationCancellations.incrementAndGet();
+          throw failure;
+        } catch (InterruptedException failure) {
+          Thread.currentThread().interrupt();
+          throw ApplicationFailure.newFailure(
+              "synthetic Finalizer worker interrupted before commit",
+              IntakeActivityFailureTypes.INFRASTRUCTURE_RETRYABLE);
+        }
+      }
       long revision =
           staleFinalization
               ? Math.max(0, request.envelope().processRevision() - 1)
@@ -1093,6 +1371,9 @@ class IntakeRoomWorkflowActivityTest {
 
     @Override
     public BranchCommitReceipt acceptInitiator(BranchCommitRequest request) {
+      if (request.envelope().invocation().mode() == ActivityInvocationMode.RECONCILE_ONLY) {
+        return branchReceipts.get(request.operationKey());
+      }
       acceptRequests.add(request);
       BranchCommitReceipt receipt =
           branchReceipt(request, IntakeDomainEventType.INITIATOR_ACCEPTED);
@@ -1128,17 +1409,40 @@ class IntakeRoomWorkflowActivityTest {
 
     @Override
     public BranchCommitReceipt rejectInitiator(BranchCommitRequest request) {
+      if (request.envelope().invocation().mode() == ActivityInvocationMode.RECONCILE_ONLY) {
+        return branchReceipts.get(request.operationKey());
+      }
       return branchReceipt(request, IntakeDomainEventType.NOT_ADMISSIBLE);
     }
 
     @Override
     public BranchCommitReceipt cancelIntake(BranchCommitRequest request) {
+      if (request.envelope().invocation().mode() == ActivityInvocationMode.RECONCILE_ONLY) {
+        return branchReceipts.get(request.operationKey());
+      }
       cancelRequests.add(request);
+      cancellationStarted.set(true);
+      if (blockCancellation.get()) {
+        try {
+          while (!releaseCancellation.get()) {
+            Activity.getExecutionContext().heartbeat("cancellation-active");
+            Thread.sleep(10);
+          }
+        } catch (InterruptedException failure) {
+          Thread.currentThread().interrupt();
+          throw ApplicationFailure.newFailure(
+              "synthetic cancellation worker interrupted",
+              IntakeActivityFailureTypes.INFRASTRUCTURE_RETRYABLE);
+        }
+      }
       return branchReceipt(request, IntakeDomainEventType.CANCELLED);
     }
 
     @Override
     public BranchCommitReceipt confirmRespondent(BranchCommitRequest request) {
+      if (request.envelope().invocation().mode() == ActivityInvocationMode.RECONCILE_ONLY) {
+        return branchReceipts.get(request.operationKey());
+      }
       return branchReceipt(request, IntakeDomainEventType.RESPONDENT_CONFIRMED);
     }
 
@@ -1146,7 +1450,8 @@ class IntakeRoomWorkflowActivityTest {
         BranchCommitRequest request, IntakeDomainEventType eventType) {
       long revision = request.envelope().commandSequence();
       long eventSequence =
-          blockGraph && request.operation() == BranchOperation.CANCEL
+          (blockGraph || blockFinalizationBeforeCommit.get())
+                  && request.operation() == BranchOperation.CANCEL
               ? 1
               : request.envelope().commandSequence();
       String resultHash = hash(9);
@@ -1161,11 +1466,15 @@ class IntakeRoomWorkflowActivityTest {
               revision,
               null,
               null);
-      return new BranchCommitReceipt(
-          "intake-branch-commit-receipt.v1",
-          request.operation(),
-          operation(request.operationKey(), request.requestHash(), resultHash, revision, revision),
-          event);
+      BranchCommitReceipt produced =
+          new BranchCommitReceipt(
+              "intake-branch-commit-receipt.v1",
+              request.operation(),
+              operation(
+                  request.operationKey(), request.requestHash(), resultHash, revision, revision),
+              event);
+      BranchCommitReceipt existing = branchReceipts.putIfAbsent(request.operationKey(), produced);
+      return existing == null ? produced : existing;
     }
 
     private static FormalFinalizationReceipt formalReceipt(
