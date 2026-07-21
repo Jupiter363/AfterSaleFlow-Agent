@@ -162,8 +162,11 @@ class IntakeFormalSinkAssemblyTest {
             DYNAMIC_TARGET_EVIDENCE = new ConcurrentHashMap<>();
 
     @ArchTest
-    static final ArchRule ASSEMBLY_ROOTS_MUST_NOT_REACH_A_FORMAL_INTAKE_SINK =
-            noFormalSinkAssemblyRule(PRODUCTION_SERVICE_DESCRIPTORS.ownedProviderNames());
+    static void assemblyRootsMustNotReachAFormalIntakeSink(JavaClasses classes) {
+        noFormalSinkAssemblyRule(
+                        PRODUCTION_SERVICE_DESCRIPTORS.ownedProviderNames(), classes)
+                .check(classes);
+    }
 
     @ArchTest
     static void productionServiceDescriptorsMustResolveEveryOwnedProvider(JavaClasses classes) {
@@ -212,7 +215,8 @@ class IntakeFormalSinkAssemblyTest {
         assertThat(injectedResolution.externalProviderRegistrations())
                 .contains("com.vendor.Plugin -> com.vendor.ExternalMetricsProvider");
         ArchRule fixtureRule =
-                noFormalSinkAssemblyRule(injectedResolution.ownedProviderNames());
+                noFormalSinkAssemblyRule(
+                        injectedResolution.ownedProviderNames(), fixtures);
 
         String violations =
                 String.join(
@@ -285,6 +289,15 @@ class IntakeFormalSinkAssemblyTest {
                         "ReflectiveFormalAdapterAssembly -> "
                                 + FIXTURE_PACKAGE
                                 + ".FormalAdapterClassResolver -> java.lang.Class.forName")
+                .contains(
+                        "formal Intake sink is reachable: "
+                                + FIXTURE_PACKAGE
+                                + ".NeutralReflectiveHelperAssembly -> "
+                                + FIXTURE_PACKAGE
+                                + ".NeutralReflectiveHelper -> "
+                                + FIXTURE_PACKAGE
+                                + ".HiddenFinalizerAdapter -> "
+                                + "com.example.dispute.workflow.application.intake.IntakeFormalCommitPort")
                 .contains(
                         "SpringStringBeanLookupAssembly -> "
                                 + FIXTURE_PACKAGE
@@ -394,7 +407,7 @@ class IntakeFormalSinkAssemblyTest {
         JavaClass comparisonAdapter = fixtures.get(FIXTURE_PACKAGE + ".SafeComparisonActivities");
         assertThat(isAssemblyRoot(neutralContract)).isFalse();
         assertThat(isAssemblyRoot(comparisonAdapter)).isFalse();
-        assertThat(shortestFormalSinkChain(comparisonAdapter)).isEmpty();
+        assertThat(shortestFormalSinkChain(comparisonAdapter, ownedClassIndex(fixtures))).isEmpty();
 
         assertThatThrownBy(
                         () ->
@@ -428,13 +441,15 @@ class IntakeFormalSinkAssemblyTest {
             JavaClasses classes, String rootSimpleName, String... expectedSimpleNames) {
         JavaClass root = classes.get(FIXTURE_PACKAGE + "." + rootSimpleName);
         List<String> actualSimpleNames =
-                shortestFormalSinkChain(root).orElseThrow().stream()
+                shortestFormalSinkChain(root, ownedClassIndex(classes)).orElseThrow().stream()
                         .map(JavaClass::getSimpleName)
                         .toList();
         assertThat(actualSimpleNames).containsExactly(expectedSimpleNames);
     }
 
-    private static ArchRule noFormalSinkAssemblyRule(Set<String> serviceProviderRoots) {
+    private static ArchRule noFormalSinkAssemblyRule(
+            Set<String> serviceProviderRoots, JavaClasses importedClasses) {
+        Map<String, JavaClass> ownedClasses = ownedClassIndex(importedClasses);
         return ArchRuleDefinition.classes()
                 .that(
                         new DescribedPredicate<>("are discoverable assembly or Temporal activity registration roots") {
@@ -448,7 +463,7 @@ class IntakeFormalSinkAssemblyTest {
                                 "not reach a formal Intake sink or use dynamic assembly APIs") {
                             @Override
                             public void check(JavaClass root, ConditionEvents events) {
-                                shortestFormalSinkChain(root)
+                                shortestFormalSinkChain(root, ownedClasses)
                                         .ifPresent(
                                                 chain ->
                                                         events.add(
@@ -457,7 +472,7 @@ class IntakeFormalSinkAssemblyTest {
                                                                         "formal Intake sink is reachable: "
                                                                                 + formatChain(chain))));
                                 addDynamicAssemblyViolations(
-                                        root, serviceProviderRoots, events);
+                                        root, serviceProviderRoots, ownedClasses, events);
                             }
                         })
                 .because(
@@ -524,14 +539,16 @@ class IntakeFormalSinkAssemblyTest {
                 && access.getName().equals(REGISTER_ACTIVITIES);
     }
 
-    private static Optional<List<JavaClass>> shortestFormalSinkChain(JavaClass root) {
-        return reachableOwnedPaths(root).stream()
+    private static Optional<List<JavaClass>> shortestFormalSinkChain(
+            JavaClass root, Map<String, JavaClass> ownedClasses) {
+        return reachableOwnedPaths(root, ownedClasses).stream()
                 .filter(path -> isFormalRoot(path.javaClass()))
                 .map(PathNode::path)
                 .findFirst();
     }
 
-    private static List<PathNode> reachableOwnedPaths(JavaClass root) {
+    private static List<PathNode> reachableOwnedPaths(
+            JavaClass root, Map<String, JavaClass> ownedClasses) {
         ArrayDeque<PathNode> pending = new ArrayDeque<>();
         Set<String> visited = new HashSet<>();
         List<PathNode> reachable = new ArrayList<>();
@@ -542,7 +559,13 @@ class IntakeFormalSinkAssemblyTest {
             PathNode current = pending.removeFirst();
             reachable.add(current);
 
-            directOwnedDependencies(current.javaClass()).stream()
+            List<JavaClass> directTargets =
+                    new ArrayList<>(directOwnedDependencies(current.javaClass()));
+            directTargets.addAll(
+                    directOwnedDynamicTargets(current.javaClass(), ownedClasses));
+            directTargets.stream()
+                    .distinct()
+                    .sorted(Comparator.comparing(JavaClass::getName))
                     .filter(dependency -> visited.add(dependency.getName()))
                     .forEach(
                             dependency -> {
@@ -554,14 +577,30 @@ class IntakeFormalSinkAssemblyTest {
         return reachable;
     }
 
+    private static List<JavaClass> directOwnedDynamicTargets(
+            JavaClass javaClass, Map<String, JavaClass> ownedClasses) {
+        return dynamicAssemblyAccesses(javaClass).stream()
+                .map(IntakeFormalSinkAssemblyTest::dynamicTargetEvidence)
+                .filter(evidence -> evidence.inspected() && !evidence.ambiguous())
+                .flatMap(
+                        evidence ->
+                                dynamicClassTargetNames(evidence).stream())
+                .map(ownedClasses::get)
+                .filter(java.util.Objects::nonNull)
+                .distinct()
+                .sorted(Comparator.comparing(JavaClass::getName))
+                .toList();
+    }
+
     private static void addDynamicAssemblyViolations(
             JavaClass root,
             Set<String> serviceProviderRoots,
+            Map<String, JavaClass> ownedClasses,
             ConditionEvents events) {
-        for (PathNode reachable : reachableOwnedPaths(root)) {
+        for (PathNode reachable : reachableOwnedPaths(root, ownedClasses)) {
             for (JavaCodeUnitAccess<?> access :
                     forbiddenDynamicAssemblyAccesses(
-                            reachable.javaClass(), root, serviceProviderRoots)) {
+                            reachable.javaClass(), root, serviceProviderRoots, ownedClasses)) {
                 events.add(
                         SimpleConditionEvent.violated(
                                 root,
@@ -578,16 +617,27 @@ class IntakeFormalSinkAssemblyTest {
     private static List<JavaCodeUnitAccess<?>> forbiddenDynamicAssemblyAccesses(
             JavaClass javaClass,
             JavaClass root,
-            Set<String> serviceProviderRoots) {
+            Set<String> serviceProviderRoots,
+            Map<String, JavaClass> ownedClasses) {
+        return dynamicAssemblyAccesses(javaClass).stream()
+                .filter(
+                        access ->
+                                isForbiddenDynamicAssemblyAccess(
+                                        access,
+                                        root,
+                                        serviceProviderRoots,
+                                        ownedClasses))
+                .toList();
+    }
+
+    private static List<JavaCodeUnitAccess<?>> dynamicAssemblyAccesses(
+            JavaClass javaClass) {
         List<JavaCodeUnitAccess<?>> accesses = new ArrayList<>();
         accesses.addAll(javaClass.getMethodCallsFromSelf());
         accesses.addAll(javaClass.getConstructorCallsFromSelf());
         accesses.addAll(javaClass.getMethodReferencesFromSelf());
         return accesses.stream()
-                .filter(
-                        access ->
-                                isForbiddenDynamicAssemblyAccess(
-                                        access, root, serviceProviderRoots))
+                .filter(IntakeFormalSinkAssemblyTest::isDynamicAssemblyApi)
                 .sorted(
                         Comparator.comparing(
                                         (JavaCodeUnitAccess<?> access) ->
@@ -600,22 +650,60 @@ class IntakeFormalSinkAssemblyTest {
     private static boolean isForbiddenDynamicAssemblyAccess(
             JavaCodeUnitAccess<?> access,
             JavaClass root,
-            Set<String> serviceProviderRoots) {
-        if (!isDynamicAssemblyApi(access)) {
-            return false;
-        }
+            Set<String> serviceProviderRoots,
+            Map<String, JavaClass> ownedClasses) {
         DynamicTargetEvidence evidence = dynamicTargetEvidence(access);
         if (!evidence.inspected() || evidence.ambiguous()) {
             return true;
         }
+        if (hasUnresolvedOwnedDynamicTarget(evidence, ownedClasses)) {
+            return true;
+        }
         if (hasFormalDynamicTarget(evidence)
-                || shortestFormalSinkChain(access.getOriginOwner()).isPresent()) {
+                || shortestFormalSinkChain(access.getOriginOwner(), ownedClasses)
+                        .isPresent()) {
             return true;
         }
         if (hasResolvedDynamicTarget(evidence)) {
             return false;
         }
         return isAssemblyRoot(root, serviceProviderRoots);
+    }
+
+    private static Map<String, JavaClass> ownedClassIndex(JavaClasses importedClasses) {
+        return importedClasses.stream()
+                .filter(javaClass -> javaClass.getName().startsWith(OWNED_PACKAGE_PREFIX))
+                .collect(
+                        Collectors.toUnmodifiableMap(
+                                JavaClass::getName,
+                                javaClass -> javaClass));
+    }
+
+    private static Set<String> dynamicClassTargetNames(
+            DynamicTargetEvidence evidence) {
+        return java.util.stream.Stream.concat(
+                        evidence.stringConstants().stream(),
+                        evidence.typeConstants().stream())
+                .map(IntakeFormalSinkAssemblyTest::normalizeDynamicClassName)
+                .filter(name -> name.startsWith(OWNED_PACKAGE_PREFIX))
+                .collect(Collectors.toUnmodifiableSet());
+    }
+
+    private static String normalizeDynamicClassName(String candidate) {
+        String normalized = candidate;
+        while (normalized.endsWith("[]")) {
+            normalized = normalized.substring(0, normalized.length() - 2);
+        }
+        if (normalized.startsWith("[L") && normalized.endsWith(";")) {
+            normalized = normalized.substring(2, normalized.length() - 1);
+        }
+        return normalized.replace('/', '.');
+    }
+
+    private static boolean hasUnresolvedOwnedDynamicTarget(
+            DynamicTargetEvidence evidence, Map<String, JavaClass> ownedClasses) {
+        return dynamicClassTargetNames(evidence).stream()
+                .anyMatch(name -> !ownedClasses.containsKey(name));
     }
 
     private static boolean isDynamicAssemblyApi(JavaCodeUnitAccess<?> access) {

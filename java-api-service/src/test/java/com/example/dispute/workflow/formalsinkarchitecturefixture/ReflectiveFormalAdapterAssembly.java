@@ -1,5 +1,6 @@
 package com.example.dispute.workflow.formalsinkarchitecturefixture;
 
+import com.example.dispute.workflow.application.intake.IntakeFormalCommitPort;
 import jakarta.inject.Named;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
@@ -29,6 +30,32 @@ final class FormalAdapterClassResolver {
                 "com.example.dispute.workflow.activity.intake.IntakeRoomActivitiesAdapter");
         return type.getDeclaredConstructor().newInstance();
     }
+}
+
+@Configuration
+class NeutralReflectiveHelperAssembly {
+
+    Object instantiate() throws ReflectiveOperationException {
+        Class<?> helper = Class.forName(
+                "com.example.dispute.workflow.formalsinkarchitecturefixture.NeutralReflectiveHelper");
+        return helper.getDeclaredConstructor().newInstance();
+    }
+}
+
+final class NeutralReflectiveHelper {
+
+    Object instantiate() throws ReflectiveOperationException {
+        Class<?> finalizer = Class.forName(
+                "com.example.dispute.workflow.formalsinkarchitecturefixture.HiddenFinalizerAdapter");
+        return finalizer.getDeclaredConstructor().newInstance();
+    }
+}
+
+final class HiddenFinalizerAdapter {
+
+    static final IntakeFormalCommitPort FORMAL_COMMIT_PORT = null;
+
+    HiddenFinalizerAdapter() {}
 }
 
 @Configuration
