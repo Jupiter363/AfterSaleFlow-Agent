@@ -37,6 +37,47 @@ def test_delta_requires_explicit_stance() -> None:
         )
 
 
+def test_delta_rejects_new_fact_sourced_only_from_previous_matrix() -> None:
+    with pytest.raises(ValueError, match="cannot come from PREVIOUS_MATRIX"):
+        CaseFactMatrixDeltaV2.model_validate(
+            {
+                "fact_rows": [
+                    {
+                        "fact_key": "NEW_PREVIOUS_ONLY",
+                        "category": "ORDER",
+                        "fact_target": "Whether the order exists.",
+                        "materiality": "CORE",
+                        "stance": "CONFIRM",
+                        "position_summary": "The actor confirmed the order.",
+                        "source_scope": "PREVIOUS_MATRIX",
+                    }
+                ],
+                "summary_source_fact_keys": ["NEW_PREVIOUS_ONLY"],
+            }
+        )
+
+
+def test_delta_allows_new_fact_with_previous_and_current_source() -> None:
+    delta = CaseFactMatrixDeltaV2.model_validate(
+        {
+            "fact_rows": [
+                {
+                    "fact_key": "NEW_MIXED_SOURCE",
+                    "category": "ORDER",
+                    "fact_target": "Whether the order exists.",
+                    "materiality": "CORE",
+                    "stance": "CONFIRM",
+                    "position_summary": "The current source confirms the prior context.",
+                    "source_scope": "PREVIOUS_AND_CURRENT_SOURCE",
+                }
+            ],
+            "summary_source_fact_keys": ["NEW_MIXED_SOURCE"],
+        }
+    )
+
+    assert delta.fact_rows[0].source_scope == "PREVIOUS_AND_CURRENT_SOURCE"
+
+
 def test_delta_can_carry_an_existing_unaddressed_fact_without_new_source() -> None:
     carried = CaseFactMatrixDeltaV2.model_validate(
         {

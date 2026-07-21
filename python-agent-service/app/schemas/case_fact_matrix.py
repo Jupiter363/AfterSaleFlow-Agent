@@ -257,6 +257,11 @@ class CaseFactDeltaRowV2(StrictModel):
 
     @model_validator(mode="after")
     def delta_position_is_substantive(self) -> "CaseFactDeltaRowV2":
+        if (
+            self.fact_key.startswith("NEW_")
+            and self.source_scope == CaseMatrixSourceScope.PREVIOUS_MATRIX
+        ):
+            raise ValueError("a new matrix fact cannot come from PREVIOUS_MATRIX")
         if self.stance == FactStance.NOT_ADDRESSED:
             if self.fact_key.startswith("NEW_"):
                 raise ValueError("a new matrix fact cannot be NOT_ADDRESSED")
