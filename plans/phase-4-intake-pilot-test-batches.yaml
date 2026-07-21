@@ -781,6 +781,7 @@ batches:
           tests/static/test_agent_platform_schema_contracts.py
           tests/static/test_temporal_refactor_traceability.py
           tests/static/test_phase4_matrix_authority_erratum.py
+          tests/static/test_phase4_no_formal_sink_assembly.py
           -q
     execution:
       strategy: deduplicated_source_suites_then_derived_batch_views
