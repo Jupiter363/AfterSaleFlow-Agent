@@ -33,7 +33,7 @@ source membership, and every business transition:
 | Java-authorized actor state | Graph proposal allowed | Java-owned result |
 | --- | --- | --- |
 | Current actor is the initiator | `unilateral_case_matrix.draft.v1` | Derive or update the formal unilateral matrix |
-| Current actor is the respondent and respondent Intake is unlocked by the locked initiator matrix | `case_fact_matrix.delta.v2` | Merge the delta with the locked initiator matrix and derive `BILATERAL_FROZEN` |
+| Current actor is the respondent and respondent Intake is unlocked by the locked initiator matrix | `case_fact_matrix.delta.v2` | Merge the delta with the locked initiator matrix; derive `BILATERAL_FROZEN` only from a complete `READY_TO_CONFIRM` proposal |
 | Any other or ambiguous state | `null` only; a non-null patch fails closed | No matrix transition |
 
 The Graph must not infer actor role or unlock from model text. Those facts come only from the
@@ -44,6 +44,12 @@ The model never emits `matrix_id`, `matrix_version`, `fact_id`, `source_binding`
 `source_refs`, `generation_ref`, `parent_ref`, `party_map`, `content_hash`, `matrix_kind`,
 `fact_indexes`, `truth_status`, a freeze flag, or a formal unilateral/bilateral schema. Java derives
 and validates those fields from current domain authority.
+
+An unlocked respondent delta with `INCOMPLETE` or `NEEDS_REVIEW` readiness remains a non-frozen
+proposal. Java may write `BILATERAL_FROZEN` only when the respondent proposal is
+`READY_TO_CONFIRM`, `missing_fields` is empty, and every authoritative membership and completeness
+check succeeds. `RESPONDENT_CONFIRM` reads an already frozen formal matrix; it never performs or
+implicitly repairs the freeze.
 
 ## Strict Proposal Shapes
 

@@ -487,9 +487,11 @@ The original `unilateral_or_bilateral_matrix_patch proposal` wording is refined 
 
 Neither non-null member is a formal matrix. Java alone authorizes the actor and unlock state,
 derives stable IDs, versions, provenance and canonical hashes, and creates or freezes the formal
-unilateral/bilateral projection. The total proposal limit remains 64 KiB. This correction requires
-a new exact-SHA Batch 0 re-authentication before its implementation can enter the Phase 4
-integration candidate. `MIG-003` and `MIG-004` remain `PENDING_PROMOTION`.
+unilateral/bilateral projection. A bilateral freeze requires a complete `READY_TO_CONFIRM`
+respondent proposal with empty `missing_fields`; respondent confirmation only reads an already
+frozen formal matrix. The total proposal limit remains 64 KiB. This correction requires a new
+exact-SHA Batch 0 re-authentication before its implementation can enter the Phase 4 integration
+candidate. `MIG-003` and `MIG-004` remain `PENDING_PROMOTION`.
 
 An incompatible change requires an additive schema/contract version or accepted ADR, updated
 cross-language fixtures, and explicit notification to every affected owner.

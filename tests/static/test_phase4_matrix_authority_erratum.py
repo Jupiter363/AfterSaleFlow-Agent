@@ -172,6 +172,8 @@ def test_erratum_requires_exact_sha_reauthentication_without_promotion() -> None
         assert "MIG-003" in document
         assert "MIG-004" in document
     assert "BILATERAL_FROZEN" in erratum
+    assert "`READY_TO_CONFIRM`, `missing_fields` is empty" in erratum
+    assert "`RESPONDENT_CONFIRM` reads an already frozen formal matrix" in erratum
     assert "Java remains the sole authority" in erratum
     assert "PENDING_PROMOTION" in erratum
     assert "PENDING_BATCH_0_REAUTHENTICATION" in entry
