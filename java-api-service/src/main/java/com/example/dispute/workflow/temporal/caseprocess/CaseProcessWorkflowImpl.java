@@ -2165,22 +2165,35 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
       targets.add(uncommittedChild.execution());
     }
     WorkflowExecution activeExecution = activeChildExecution();
-    if (activeExecution != null
-        && targets.stream().noneMatch(target -> sameExecution(target, activeExecution))) {
-      targets.add(activeExecution);
+    addCompensationTarget(targets, activeExecution);
+    for (UnreconciledChildExecution unreconciled : unreconciledChildren) {
+      addCompensationTarget(
+          targets,
+          WorkflowExecution.newBuilder()
+              .setWorkflowId(unreconciled.workflowId())
+              .setRunId(unreconciled.workflowRunId())
+              .build());
     }
     CompensationBatchOutcome batch =
         compensateChildren(
             targets,
             new ArrayList<>(unreconciledChildren),
             target -> cancelUncommittedChild(target, "CASE_PROCESS_PARENT_CANCELED"));
+    unreconciledChildren.clear();
+    unreconciledChildren.addAll(batch.unreconciledChildren());
     if (!batch.failures().isEmpty()) {
       provisioningManualRecoveryRequired = true;
-      unreconciledChildren.clear();
-      unreconciledChildren.addAll(batch.unreconciledChildren());
       batch.failures().forEach(parentCancellation::addSuppressed);
     }
     uncommittedChild = null;
+  }
+
+  private static void addCompensationTarget(
+      List<WorkflowExecution> targets, WorkflowExecution candidate) {
+    if (candidate != null
+        && targets.stream().noneMatch(target -> sameExecution(target, candidate))) {
+      targets.add(candidate);
+    }
   }
 
   static CompensationBatchOutcome compensateChildren(
@@ -2197,9 +2210,21 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
       if (outcome.requiresManualRecovery()) {
         unresolved = withUnreconciledChild(unresolved, target);
         failures.add(outcome.failure());
+      } else {
+        unresolved = withoutUnreconciledChild(unresolved, target);
       }
     }
     return new CompensationBatchOutcome(unresolved, failures);
+  }
+
+  private static List<UnreconciledChildExecution> withoutUnreconciledChild(
+      List<UnreconciledChildExecution> existing, WorkflowExecution reconciled) {
+    return existing.stream()
+        .filter(
+            child ->
+                !child.workflowId().equals(reconciled.getWorkflowId())
+                    || !child.workflowRunId().equals(reconciled.getRunId()))
+        .toList();
   }
 
   private WorkflowExecution activeChildExecution() {
