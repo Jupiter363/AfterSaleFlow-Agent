@@ -1,6 +1,7 @@
 package com.example.dispute.workflow.application.intake;
 
 import com.example.dispute.workflow.contract.v1.ContractJson;
+import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.math.RoundingMode;
@@ -9,6 +10,7 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 /** Deterministically applies an approved Intake patch without weakening stable fact bindings. */
@@ -27,9 +29,7 @@ public final class IntakeDossierProjectionMerger {
             "risk_assessment",
             "missing_information",
             "intake_quality",
-            "admission",
-            "case_fact_matrix",
-            "unilateral_case_matrix");
+            "admission");
 
     private static final Set<String> FORBIDDEN_KEYS = Set.of(
             "memory_frame",
@@ -40,12 +40,58 @@ public final class IntakeDossierProjectionMerger {
             "tool_calls",
             "tool_parameters",
             "writer_mode",
+            "credentials",
+            "credential",
+            "password",
+            "api_key",
+            "access_token",
+            "refresh_token",
+            "authorization_header",
+            "private_key",
+            "client_secret",
+            "raw_audit_records",
+            "audit_records",
+            "reviewer_notes",
+            "other_party_private_messages",
+            "opposing_party_private_messages",
+            "private_conversation",
+            "internal_notes",
+            "opposing_party_messages",
+            "opposing_party_private",
+            "other_party_messages",
+            "other_party_private",
+            "trusted_model_profile",
+            "prompt_version",
+            "model_profile_id",
+            "policy_version",
+            "guardrail_version",
+            "tool_policy_version",
             "open_evidence",
             "complete_party",
             "send_summons",
-            "execute_tool");
+            "execute_tool",
+            "process_state",
+            "case_status",
+            "room_transition",
+            "evidence_deadline",
+            "review_instructions",
+            "tool_instructions",
+            "admit_case",
+            "cancel_case",
+            "cancel_intake",
+            "freeze_matrix",
+            "open_room",
+            "set_deadline",
+            "invite_participant");
+
+    private final IntakeUnilateralMatrixPolicy matrixPolicy = new IntakeUnilateralMatrixPolicy();
 
     public MergeResult merge(JsonNode current, IntakeTurnProposal proposal) {
+        return merge(current, proposal, null);
+    }
+
+    public MergeResult merge(
+            JsonNode current, IntakeTurnProposal proposal, MatrixAuthority matrixAuthority) {
         if (current == null || !current.isObject()) {
             throw rejected("INTAKE_DOSSIER_CURRENT_INVALID", "persisted Intake dossier is not an object");
         }
@@ -54,6 +100,11 @@ public final class IntakeDossierProjectionMerger {
             throw rejected("INTAKE_DOSSIER_PATCH_INVALID", "dossier patch is not an object");
         }
         patch.fieldNames().forEachRemaining(name -> {
+            if ("case_fact_matrix".equals(name) || "unilateral_case_matrix".equals(name)) {
+                throw rejected(
+                        "INTAKE_MATRIX_PATCH_REQUIRED",
+                        "matrix changes must use the dedicated matrix_patch field");
+            }
             if (!DOSSIER_BRANCHES.contains(name)) {
                 throw rejected(
                         "INTAKE_DOSSIER_PATCH_INVALID",
@@ -64,29 +115,26 @@ public final class IntakeDossierProjectionMerger {
 
         ObjectNode merged = (ObjectNode) current.deepCopy();
         deepMerge(merged, (ObjectNode) patch);
-        boolean matrixChanged = patch.has("case_fact_matrix")
-                || patch.has("unilateral_case_matrix");
+        boolean matrixChanged = false;
 
         JsonNode matrixPatch = proposal.matrixPatch();
         if (matrixPatch != null) {
-            if (!matrixPatch.isObject()) {
-                throw rejected("INTAKE_MATRIX_PATCH_INVALID", "matrix patch is not an object");
-            }
-            if (matrixChanged) {
+            if (matrixAuthority == null) {
                 throw rejected(
-                        "INTAKE_MATRIX_PATCH_AMBIGUOUS",
-                        "matrix changes must use either dossier_patch or matrix_patch, not both");
+                        "INTAKE_MATRIX_AUTHORITY_REQUIRED",
+                        "matrix patch requires current Java case and source authority");
             }
             rejectForbiddenKeys(matrixPatch);
-            String target = matrixTarget(merged, matrixPatch);
-            ObjectNode targetValue = merged.path(target).isObject()
-                    ? (ObjectNode) merged.path(target).deepCopy()
-                    : merged.objectNode();
-            deepMerge(targetValue, (ObjectNode) matrixPatch);
-            merged.set(target, targetValue);
+            merged.set(
+                    "unilateral_case_matrix",
+                    matrixPolicy.apply(merged, matrixPatch, matrixAuthority));
             matrixChanged = true;
+        } else if (matrixAuthority != null && merged.path("unilateral_case_matrix").isObject()) {
+            matrixPolicy.validateExisting(
+                    (ObjectNode) merged.path("unilateral_case_matrix"), matrixAuthority);
         }
 
+        normalizeProjectionMetadata(merged, (ObjectNode) patch, proposal);
         requireStableTransition(current, merged);
         int qualityScore = qualityScore(merged, proposal);
         boolean ready = proposal.readiness() == IntakeTurnProposal.Readiness.READY_TO_CONFIRM;
@@ -97,24 +145,6 @@ public final class IntakeDossierProjectionMerger {
                 ready,
                 proposal.recommendation().name(),
                 matrixVersion);
-    }
-
-    private static String matrixTarget(ObjectNode dossier, JsonNode patch) {
-        String schema = patch.path("schema_version").asText();
-        if ("case_fact_matrix.v2".equals(schema)) {
-            return "case_fact_matrix";
-        }
-        if ("unilateral_case_matrix.v1".equals(schema)) {
-            return "unilateral_case_matrix";
-        }
-        boolean hasCase = dossier.path("case_fact_matrix").isObject();
-        boolean hasUnilateral = dossier.path("unilateral_case_matrix").isObject();
-        if (hasCase ^ hasUnilateral) {
-            return hasCase ? "case_fact_matrix" : "unilateral_case_matrix";
-        }
-        throw rejected(
-                "INTAKE_MATRIX_PATCH_TARGET_AMBIGUOUS",
-                "matrix patch does not identify exactly one formal matrix projection");
     }
 
     private static void deepMerge(ObjectNode target, ObjectNode patch) {
@@ -149,6 +179,35 @@ public final class IntakeDossierProjectionMerger {
                         "dossier patch rebinds a stable fact or source hash");
             }
         });
+    }
+
+    private static void normalizeProjectionMetadata(
+            ObjectNode dossier, ObjectNode patch, IntakeTurnProposal proposal) {
+        boolean ready = proposal.readiness() == IntakeTurnProposal.Readiness.READY_TO_CONFIRM;
+        JsonNode proposedReady = patch.path("intake_quality").path("ready_for_next_step");
+        if (!proposedReady.isMissingNode()
+                && (!proposedReady.isBoolean() || proposedReady.booleanValue() != ready)) {
+            throw rejected(
+                    "INTAKE_DOSSIER_READINESS_CONFLICT",
+                    "dossier readiness conflicts with the typed proposal readiness");
+        }
+        JsonNode proposedRecommendation = patch.path("admission").path("recommendation");
+        if (!proposedRecommendation.isMissingNode()
+                && (!proposedRecommendation.isTextual()
+                        || !proposal.recommendation().name().equals(
+                                proposedRecommendation.textValue()))) {
+            throw rejected(
+                    "INTAKE_DOSSIER_RECOMMENDATION_CONFLICT",
+                    "dossier recommendation conflicts with the typed proposal recommendation");
+        }
+        ObjectNode quality = dossier.path("intake_quality").isObject()
+                ? (ObjectNode) dossier.path("intake_quality")
+                : dossier.putObject("intake_quality");
+        quality.put("ready_for_next_step", ready);
+        ObjectNode admission = dossier.path("admission").isObject()
+                ? (ObjectNode) dossier.path("admission")
+                : dossier.putObject("admission");
+        admission.put("recommendation", proposal.recommendation().name());
     }
 
     private static void rejectForbiddenKeys(JsonNode value) {
@@ -234,27 +293,50 @@ public final class IntakeDossierProjectionMerger {
             if (value.isObject()) {
                 String factId = text(value, "fact_id");
                 if (factId != null) {
-                    factIds.add(factId);
+                    if (!factIds.add(factId)) {
+                        throw rejected(
+                                "INTAKE_DOSSIER_STABLE_ID_CONFLICT",
+                                "dossier contains a duplicate stable fact identifier");
+                    }
+                    boolean bound = false;
                     if (value.has("category") && value.has("fact_target")) {
                         ObjectNode binding = ((ObjectNode) value).objectNode();
                         binding.set("category", value.path("category").deepCopy());
                         binding.set("fact_target", value.path("fact_target").deepCopy());
                         register("fact:" + factId, binding);
+                        bound = true;
                     }
                     String contentHash = text(value, "content_hash");
                     if (contentHash != null) {
                         register("fact-hash:" + factId, value.path("content_hash"));
+                        bound = true;
+                    }
+                    if (!bound) {
+                        throw rejected(
+                                "INTAKE_DOSSIER_STABLE_ID_UNBOUND",
+                                "dossier contains a stable fact id without a semantic binding");
                     }
                 }
                 String sourceId = text(value, "source_id");
                 if (sourceId != null) {
-                    sourceRefs.add(sourceId);
+                    if (!sourceRefs.add(sourceId)) {
+                        throw rejected(
+                                "INTAKE_DOSSIER_STABLE_ID_CONFLICT",
+                                "dossier contains a duplicate stable source identifier");
+                    }
+                    ObjectNode sourceBinding = ((ObjectNode) value).objectNode();
                     for (String hashField : List.of("source_hash", "sha256", "content_hash")) {
-                        if (text(value, hashField) != null) {
-                            register("source:" + sourceId, value.path(hashField));
-                            break;
+                        String hash = text(value, hashField);
+                        if (hash != null) {
+                            sourceBinding.put(hashField, hash);
                         }
                     }
+                    if (sourceBinding.isEmpty()) {
+                        throw rejected(
+                                "INTAKE_DOSSIER_STABLE_ID_UNBOUND",
+                                "dossier contains a stable source id without a hash binding");
+                    }
+                    register("source:" + sourceId, sourceBinding);
                 }
                 JsonNode refs = value.path("source_refs");
                 if (refs.isArray()) {
@@ -283,6 +365,29 @@ public final class IntakeDossierProjectionMerger {
         private static String text(JsonNode value, String field) {
             JsonNode child = value.get(field);
             return child != null && child.isTextual() ? child.textValue() : null;
+        }
+    }
+
+    public record MatrixAuthority(
+            String caseId,
+            ActorRole actorRole,
+            ActorRole initiatorRole,
+            ActorRole respondentRole,
+            String sourceRef,
+            String sourceContextHash) {
+
+        public MatrixAuthority {
+            caseId = IntakeContractSupport.identifier(caseId, "caseId");
+            actorRole = Objects.requireNonNull(actorRole, "actorRole");
+            initiatorRole = Objects.requireNonNull(initiatorRole, "initiatorRole");
+            respondentRole = Objects.requireNonNull(respondentRole, "respondentRole");
+            if (initiatorRole == respondentRole
+                    || (actorRole != initiatorRole && actorRole != respondentRole)) {
+                throw new IllegalArgumentException("matrix party authority is invalid");
+            }
+            sourceRef = IntakeContractSupport.identifier(sourceRef, "sourceRef");
+            sourceContextHash =
+                    IntakeContractSupport.sha256(sourceContextHash, "sourceContextHash");
         }
     }
 }

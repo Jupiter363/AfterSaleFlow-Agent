@@ -24,6 +24,7 @@ public final class IntakeGraphResultFinalizer {
     private final IntakeTurnProposalLoader proposalLoader;
     private final IntakeFormalCommitPort commitPort;
     private final Optional<IntakeFinalizationReceiptReader> receiptReader;
+    private final Optional<AuthorityPreflight> authorityPreflight;
 
     public IntakeGraphResultFinalizer(
             IntakeTurnProposalLoader proposalLoader, IntakeFormalCommitPort commitPort) {
@@ -46,6 +47,9 @@ public final class IntakeGraphResultFinalizer {
         this.proposalLoader = Objects.requireNonNull(proposalLoader, "proposalLoader");
         this.commitPort = Objects.requireNonNull(commitPort, "commitPort");
         this.receiptReader = Optional.ofNullable(receiptReader);
+        this.authorityPreflight = commitPort instanceof AuthorityPreflight preflight
+                ? Optional.of(preflight)
+                : Optional.empty();
     }
 
     public IntakeFinalizationReceipt finalizeResult(IntakeGraphFinalizationRequest request) {
@@ -61,6 +65,25 @@ public final class IntakeGraphResultFinalizer {
             IntakeFinalizationReceipt receipt = existing.orElseThrow();
             validateReceipt(request, receipt);
             return receipt;
+        }
+
+        // The database-backed adapter performs a short read-only authority check here and repeats
+        // the same checks under write locks in commit(). This prevents stale or revoked work from
+        // reaching immutable object storage without weakening the final transaction boundary.
+        try {
+            authorityPreflight.ifPresent(preflight -> preflight.preflight(request));
+        } catch (RuntimeException preflightFailure) {
+            Optional<IntakeFinalizationReceipt> racedCommit = receiptReader.flatMap(reader ->
+                    reader.findCommitted(
+                            request.authority().tenantSurrogate(),
+                            request.operationKey(),
+                            request.requestHash()));
+            if (racedCommit.isPresent()) {
+                IntakeFinalizationReceipt receipt = racedCommit.orElseThrow();
+                validateReceipt(request, receipt);
+                return receipt;
+            }
+            throw preflightFailure;
         }
 
         IntakeGraphFinalizationRequest.Authority authority = request.authority();
@@ -261,6 +284,10 @@ public final class IntakeGraphResultFinalizer {
         requireEqual(snapshot.threadId(), authority.threadId(), "snapshot thread");
         requireEqual(snapshot.actorScopeHash(), authority.actorScopeHash(), "snapshot actor scope");
         requireEqual(snapshot.agentSessionId(), authority.agentSessionId(), "snapshot agent session");
+        requireEqual(
+                snapshot.threadRegistrationId(),
+                registration.registrationId(),
+                "snapshot thread registration");
         requireEqual(snapshot.payloadRef(), command.domainSnapshotRef(), "snapshot reference");
         if (request.event() == null) {
             if (command.eventRef() != null) {
@@ -275,10 +302,21 @@ public final class IntakeGraphResultFinalizer {
             requireEqual(event.threadId(), authority.threadId(), "event thread");
             requireEqual(event.actorScopeHash(), authority.actorScopeHash(), "event actor scope");
             requireEqual(event.agentSessionId(), authority.agentSessionId(), "event agent session");
+            requireEqual(
+                    event.threadRegistrationId(),
+                    registration.registrationId(),
+                    "event thread registration");
             requireEqual(event.audience(), registration.actorScope().audience(), "event audience");
             requireEqual(event.payloadRef(), command.eventRef(), "event reference");
             if (event.domainRevision() < snapshot.domainRevision()) {
                 throw rejected("INTAKE_EVENT_REVISION_INVALID", "event revision predates the snapshot");
+            }
+            if (event.sequenceNo() <= snapshot.initialLastSequence()
+                    || event.occurredAt().isBefore(snapshot.createdAt())
+                    || event.createdAt().isBefore(event.occurredAt())) {
+                throw rejected(
+                        "INTAKE_EVENT_ORDER_INVALID",
+                        "event sequence or timestamps predate the bound initialization snapshot");
             }
         }
 
@@ -396,5 +434,11 @@ public final class IntakeGraphResultFinalizer {
     private static IntakeFinalizationRejectedException rejected(
             String code, String message, Throwable cause) {
         return new IntakeFinalizationRejectedException(code, message, cause);
+    }
+
+    /** Optional two-pass authority boundary implemented by database-backed formal adapters. */
+    @FunctionalInterface
+    public interface AuthorityPreflight {
+        void preflight(IntakeGraphFinalizationRequest request);
     }
 }

@@ -11,6 +11,7 @@ import com.example.dispute.workflow.application.intake.IntakeFinalizationRejecte
 import com.example.dispute.workflow.application.intake.IntakeFormalCommitPort;
 import com.example.dispute.workflow.application.intake.IntakeGraphFinalizationRequest;
 import com.example.dispute.workflow.application.intake.IntakeGraphResultFinalizer;
+import com.example.dispute.workflow.application.intake.IntakeGraphResultFinalizer.AuthorityPreflight;
 import com.example.dispute.workflow.application.intake.IntakeGraphThreadBinding;
 import com.example.dispute.workflow.application.intake.IntakeImmutableProposalReader;
 import com.example.dispute.workflow.application.intake.IntakePrivateThreadRegistration;
@@ -61,6 +62,7 @@ class IntakeGraphResultFinalizerTest {
 
         assertThat(replay).isEqualTo(first);
         assertThat(port.calls).isEqualTo(2);
+        assertThat(port.preflightCalls).isEqualTo(2);
         assertThat(port.commands).allMatch(command ->
                 command.request().operationKey().equals(fixture.request().operationKey()));
         assertThat(port.commands.get(0).currentAuthority().actorId())
@@ -90,6 +92,122 @@ class IntakeGraphResultFinalizerTest {
 
         assertThat(replay).isEqualTo(committed);
         assertThat(replayPort.calls).isZero();
+        assertThat(replayPort.preflightCalls).isZero();
+    }
+
+    @Test
+    void databaseAuthorityPreflightRunsBeforeTheProposalIsRead() throws Exception {
+        Fixture fixture = fixture(WriterMode.TEMPORAL);
+        RecordingCommitPort port = new RecordingCommitPort();
+        IntakeImmutableProposalReader reader = ignored -> {
+            assertThat(port.preflightCalls).isOne();
+            return fixture.storedProposal();
+        };
+
+        new IntakeGraphResultFinalizer(new IntakeTurnProposalLoader(reader), port)
+                .finalizeResult(fixture.request());
+
+        assertThat(port.calls).isOne();
+    }
+
+    @Test
+    void commitRacingWithPreflightReturnsThePersistedReceiptWithoutProposalReload()
+            throws Exception {
+        Fixture fixture = fixture(WriterMode.TEMPORAL);
+        RecordingCommitPort initialPort = new RecordingCommitPort();
+        IntakeFinalizationReceipt committed =
+                finalizer(fixture, initialPort).finalizeResult(fixture.request());
+        RacingReplayPort racingPort = new RacingReplayPort(committed);
+        IntakeImmutableProposalReader unavailableReader = ignored -> {
+            throw new AssertionError("a raced committed result must not reload the proposal");
+        };
+
+        IntakeFinalizationReceipt replay = new IntakeGraphResultFinalizer(
+                        new IntakeTurnProposalLoader(unavailableReader), racingPort)
+                .finalizeResult(fixture.request());
+
+        assertThat(replay).isEqualTo(committed);
+        assertThat(racingPort.receiptReads).isEqualTo(2);
+        assertThat(racingPort.preflightCalls).isOne();
+        assertThat(racingPort.commitCalls).isZero();
+    }
+
+    @Test
+    void crossRegistrationSnapshotAndEventNeverReachPreflightOrProposalStorage() throws Exception {
+        Fixture fixture = fixture(WriterMode.TEMPORAL);
+        IntakeSnapshotReference snapshot = fixture.snapshot();
+        IntakeSnapshotReference crossRegistrationSnapshot = new IntakeSnapshotReference(
+                snapshot.bindingId(),
+                "REG_P4_INTAKE_OTHER",
+                snapshot.tenantSurrogate(),
+                snapshot.caseId(),
+                snapshot.roomEpoch(),
+                snapshot.fencingToken(),
+                snapshot.threadId(),
+                snapshot.actorScopeHash(),
+                snapshot.agentSessionId(),
+                snapshot.payloadRef(),
+                snapshot.objectVersion(),
+                snapshot.domainRevision(),
+                snapshot.roomRevision(),
+                snapshot.projectionRevision(),
+                snapshot.initialLastSequence(),
+                snapshot.createdAt());
+        IntakeGraphFinalizationRequest snapshotRequest = canonicalRequest(
+                fixture.request().operationKey(),
+                fixture.authority(),
+                fixture.command(),
+                fixture.result(),
+                fixture.binding(),
+                crossRegistrationSnapshot,
+                fixture.event(),
+                fixture.proposalReference());
+        RecordingCommitPort snapshotPort = new RecordingCommitPort();
+
+        assertRejected(
+                "INTAKE_AUTHORITY_MISMATCH",
+                () -> finalizer(fixture.withRequest(snapshotRequest), snapshotPort)
+                        .finalizeResult(snapshotRequest));
+        assertThat(snapshotPort.preflightCalls).isZero();
+        assertThat(snapshotPort.calls).isZero();
+
+        IntakeEventReference event = fixture.event();
+        IntakeEventReference crossRegistrationEvent = new IntakeEventReference(
+                event.bindingId(),
+                "REG_P4_INTAKE_OTHER",
+                event.eventId(),
+                event.messageId(),
+                event.tenantSurrogate(),
+                event.caseId(),
+                event.roomEpoch(),
+                event.fencingToken(),
+                event.threadId(),
+                event.actorScopeHash(),
+                event.agentSessionId(),
+                event.payloadRef(),
+                event.objectVersion(),
+                event.sequenceNo(),
+                event.domainRevision(),
+                event.audience(),
+                event.occurredAt(),
+                event.createdAt());
+        IntakeGraphFinalizationRequest eventRequest = canonicalRequest(
+                fixture.request().operationKey(),
+                fixture.authority(),
+                fixture.command(),
+                fixture.result(),
+                fixture.binding(),
+                fixture.snapshot(),
+                crossRegistrationEvent,
+                fixture.proposalReference());
+        RecordingCommitPort eventPort = new RecordingCommitPort();
+
+        assertRejected(
+                "INTAKE_AUTHORITY_MISMATCH",
+                () -> finalizer(fixture.withRequest(eventRequest), eventPort)
+                        .finalizeResult(eventRequest));
+        assertThat(eventPort.preflightCalls).isZero();
+        assertThat(eventPort.calls).isZero();
     }
 
     @Test
@@ -501,10 +619,17 @@ class IntakeGraphResultFinalizerTest {
         }
     }
 
-    private static final class RecordingCommitPort implements IntakeFormalCommitPort {
+    private static final class RecordingCommitPort
+            implements IntakeFormalCommitPort, AuthorityPreflight {
         private int calls;
+        private int preflightCalls;
         private final java.util.ArrayList<CommitCommand> commands = new java.util.ArrayList<>();
         private IntakeFinalizationReceipt receipt;
+
+        @Override
+        public void preflight(IntakeGraphFinalizationRequest request) {
+            preflightCalls++;
+        }
 
         @Override
         public IntakeFinalizationReceipt commit(CommitCommand command) {
@@ -538,6 +663,38 @@ class IntakeGraphResultFinalizerTest {
                                 Instant.parse("2026-07-20T08:03:00Z")));
             }
             return receipt;
+        }
+    }
+
+    private static final class RacingReplayPort
+            implements IntakeFormalCommitPort, AuthorityPreflight, IntakeFinalizationReceiptReader {
+        private final IntakeFinalizationReceipt receipt;
+        private int receiptReads;
+        private int preflightCalls;
+        private int commitCalls;
+
+        private RacingReplayPort(IntakeFinalizationReceipt receipt) {
+            this.receipt = receipt;
+        }
+
+        @Override
+        public Optional<IntakeFinalizationReceipt> findCommitted(
+                String tenantSurrogate, String operationKey, String requestHash) {
+            receiptReads++;
+            return receiptReads == 1 ? Optional.empty() : Optional.of(receipt);
+        }
+
+        @Override
+        public void preflight(IntakeGraphFinalizationRequest request) {
+            preflightCalls++;
+            throw new IntakeFinalizationRejectedException(
+                    "INTAKE_AGENT_RUN_NOT_ELIGIBLE", "the concurrent commit won the race");
+        }
+
+        @Override
+        public IntakeFinalizationReceipt commit(CommitCommand command) {
+            commitCalls++;
+            throw new AssertionError("a raced committed result must not commit twice");
         }
     }
 }

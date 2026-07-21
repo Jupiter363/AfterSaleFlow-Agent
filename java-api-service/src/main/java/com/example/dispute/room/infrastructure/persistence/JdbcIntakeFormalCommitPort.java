@@ -1,6 +1,7 @@
 package com.example.dispute.room.infrastructure.persistence;
 
 import com.example.dispute.workflow.application.intake.IntakeDossierProjectionMerger;
+import com.example.dispute.workflow.application.intake.IntakeDossierProjectionMerger.MatrixAuthority;
 import com.example.dispute.workflow.application.intake.IntakeDossierProjectionMerger.MergeResult;
 import com.example.dispute.workflow.application.intake.IntakeFinalizationPersistenceException;
 import com.example.dispute.workflow.application.intake.IntakeFinalizationReceipt;
@@ -10,9 +11,11 @@ import com.example.dispute.workflow.application.intake.IntakeFinalizationReceipt
 import com.example.dispute.workflow.application.intake.IntakeFinalizationRejectedException;
 import com.example.dispute.workflow.application.intake.IntakeFormalCommitPort;
 import com.example.dispute.workflow.application.intake.IntakeGraphFinalizationRequest;
+import com.example.dispute.workflow.application.intake.IntakeGraphResultFinalizer.AuthorityPreflight;
 import com.example.dispute.workflow.application.intake.IntakePrivateThreadRegistration;
 import com.example.dispute.workflow.application.intake.IntakeTurnProposal;
 import com.example.dispute.workflow.contract.v1.ContractJson;
+import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -37,6 +40,7 @@ import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.jdbc.core.RowCallbackHandler;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.TransactionException;
 import org.springframework.transaction.support.TransactionTemplate;
 
@@ -49,7 +53,7 @@ import org.springframework.transaction.support.TransactionTemplate;
  * manifest and AgentRun terminal update that follow this domain commit.
  */
 public final class JdbcIntakeFormalCommitPort
-        implements IntakeFormalCommitPort, IntakeFinalizationReceiptReader {
+        implements IntakeFormalCommitPort, IntakeFinalizationReceiptReader, AuthorityPreflight {
 
     private static final String AGENT_ID = "dispute-intake-officer";
     private static final String AGENT_ROLE = "DISPUTE_INTAKE_OFFICER";
@@ -61,6 +65,7 @@ public final class JdbcIntakeFormalCommitPort
 
     private final NamedParameterJdbcTemplate jdbc;
     private final TransactionTemplate transactions;
+    private final TransactionTemplate preflightTransactions;
     private final ObjectMapper objectMapper;
     private final Clock clock;
     private final IntakeDossierProjectionMerger dossierMerger;
@@ -71,8 +76,13 @@ public final class JdbcIntakeFormalCommitPort
             ObjectMapper objectMapper,
             Clock clock) {
         this.jdbc = Objects.requireNonNull(jdbc, "jdbc");
-        this.transactions = new TransactionTemplate(
-                Objects.requireNonNull(transactionManager, "transactionManager"));
+        PlatformTransactionManager requiredTransactionManager =
+                Objects.requireNonNull(transactionManager, "transactionManager");
+        this.transactions = new TransactionTemplate(requiredTransactionManager);
+        this.preflightTransactions = new TransactionTemplate(requiredTransactionManager);
+        this.preflightTransactions.setPropagationBehavior(
+                TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        this.preflightTransactions.setReadOnly(true);
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper");
         this.clock = Objects.requireNonNull(clock, "clock");
         this.dossierMerger = new IntakeDossierProjectionMerger();
@@ -104,6 +114,36 @@ public final class JdbcIntakeFormalCommitPort
             throw new IntakeFinalizationPersistenceException(
                     "Intake formal transaction failed before its commit outcome was known",
                     failure);
+        }
+    }
+
+    @Override
+    public void preflight(IntakeGraphFinalizationRequest request) {
+        Objects.requireNonNull(request, "request");
+        request.requireCanonicalRequestHash();
+        try {
+            preflightTransactions.executeWithoutResult(ignored -> {
+                CurrentRows current = requireCurrentAuthority(request, false);
+                requirePersistedPrivateReferences(request, false);
+                requireSoleResultReadyAttempt(request, current.roomId(), false);
+            });
+        } catch (IntakeFinalizationRejectedException failure) {
+            throw failure;
+        } catch (DataAccessException failure) {
+            if (failure instanceof TransientDataAccessException
+                    || failure instanceof RecoverableDataAccessException
+                    || failure instanceof DataAccessResourceFailureException) {
+                throw new IntakeFinalizationPersistenceException(
+                        "Intake authority preflight failed due to a retryable database condition",
+                        failure);
+            }
+            throw rejected(
+                    "INTAKE_FINALIZATION_PERSISTENCE_INVARIANT",
+                    "Intake authority preflight violated a database invariant",
+                    failure);
+        } catch (TransactionException failure) {
+            throw new IntakeFinalizationPersistenceException(
+                    "Intake authority preflight transaction outcome was unknown", failure);
         }
     }
 
@@ -189,12 +229,12 @@ public final class JdbcIntakeFormalCommitPort
                     "operation ledger contains a non-replayable unfinished result");
         }
 
-        CurrentRows current = requireCurrentAuthority(command);
-        requirePersistedPrivateReferences(command);
-        AgentRunRow run = requireSoleResultReadyAttempt(command, current.roomId());
+        CurrentRows current = requireCurrentAuthority(request, true);
+        requirePersistedPrivateReferences(request, true);
+        AgentRunRow run = requireSoleResultReadyAttempt(request, current.roomId(), true);
 
         IntakeTurnProposal proposal = command.loadedProposal().proposal();
-        DossierWrite dossier = writeDossier(command, proposal, now);
+        DossierWrite dossier = writeDossier(command, proposal, current, now);
         String messageId = deterministicId("MSGI_", request.operationKey(), "message");
         writeFormalMessage(command, current.roomId(), run, messageId, now);
 
@@ -298,30 +338,37 @@ public final class JdbcIntakeFormalCommitPort
         return rows.getFirst();
     }
 
-    private CurrentRows requireCurrentAuthority(CommitCommand command) {
-        var required = command.currentAuthority();
-        MapSqlParameterSource parameters = authorityParameters(command);
+    private CurrentRows requireCurrentAuthority(
+            IntakeGraphFinalizationRequest request, boolean lockRows) {
+        MapSqlParameterSource parameters = authorityParameters(request);
         List<Map<String, Object>> cases = jdbc.queryForList(
                 """
-                select case_status, current_room
+                select case_status, current_room, current_deadline_at,
+                       initiator_id, initiator_role, respondent_id, respondent_role
                   from fulfillment_dispute_case
                  where id = :caseId
-                 for update
-                """,
+                """ + (lockRows ? " for update" : ""),
                 parameters);
+        Map<String, Object> caseRow = cases.size() == 1 ? cases.getFirst() : Map.of();
+        var actor = request.threadBinding().registration().actorScope();
+        boolean isInitiator = actor.actorId().equals(string(caseRow, "initiator_id"))
+                && actor.actorRole().name().equals(string(caseRow, "initiator_role"));
+        boolean isRespondent = actor.actorId().equals(string(caseRow, "respondent_id"))
+                && actor.actorRole().name().equals(string(caseRow, "respondent_role"));
         if (cases.size() != 1
-                || !"INTAKE".equals(string(cases.getFirst(), "current_room"))
+                || !"INTAKE".equals(string(caseRow, "current_room"))
+                || caseRow.get("current_deadline_at") != null
+                || (!isInitiator && !isRespondent)
                 || !List.of(
                                 "INTAKE_PENDING",
                                 "INTAKE_IN_PROGRESS",
                                 "WAITING_SLOT_COMPLETION",
                                 "INTAKE_COMPLETED")
-                        .contains(string(cases.getFirst(), "case_status"))) {
+                        .contains(string(caseRow, "case_status"))) {
             throw rejected(
                     "INTAKE_CURRENT_STAGE_REJECTED",
                     "case is no longer in a formalizable Intake state");
         }
-
         List<CurrentRows> rows = jdbc.query(
                 """
                 select epoch.room_id
@@ -350,10 +397,9 @@ public final class JdbcIntakeFormalCommitPort
                    and projection.process_revision = :processRevision
                    and projection.room_phase = :stageCode
                    and projection.last_command_sequence = :stageSequence
-                 for update of epoch, room, projection
-                """,
+                 """ + (lockRows ? " for update of epoch, room, projection" : ""),
                 parameters,
-                (row, ignored) -> new CurrentRows(row.getString("room_id")));
+                (row, ignored) -> new CurrentRows(row.getString("room_id"), null, null));
         if (rows.size() != 1) {
             throw rejected(
                     "INTAKE_STALE_AUTHORITY",
@@ -372,6 +418,8 @@ public final class JdbcIntakeFormalCommitPort
                     on participant.case_id = binding.case_id
                    and participant.actor_id = binding.actor_id
                    and participant.participant_role = binding.actor_role
+                  join fulfillment_dispute_case dispute
+                    on dispute.id = binding.case_id
                  where binding.registration_id = :registrationId
                    and binding.registration_status = 'REGISTERED'
                    and binding.tenant_surrogate = :tenantSurrogate
@@ -415,9 +463,36 @@ public final class JdbcIntakeFormalCommitPort
                        when :actorRole = 'MERCHANT' then 'PARTY_MERCHANT'
                        else '__DENY__'
                    end
-                   and access.permission_scopes_json @> cast(:requiredScopes as jsonb)
-                 for update of binding, session, access, participant
-                """,
+                    and access.permission_scopes_json @> cast(:requiredScopes as jsonb)
+                    and (
+                        (
+                            binding.actor_id = dispute.initiator_id
+                            and binding.actor_role = dispute.initiator_role
+                        )
+                        or (
+                            binding.actor_id = dispute.respondent_id
+                            and binding.actor_role = dispute.respondent_role
+                            and dispute.case_status = 'INTAKE_COMPLETED'
+                            and exists (
+                                select 1
+                                  from case_intake_party_completion initiator_completion
+                                 where initiator_completion.case_id = dispute.id
+                                   and initiator_completion.participant_id = dispute.initiator_id
+                                   and initiator_completion.participant_role = dispute.initiator_role
+                                   and initiator_completion.completion_status = 'COMPLETED'
+                            )
+                        )
+                    )
+                    and not exists (
+                        select 1
+                          from case_intake_party_completion actor_completion
+                         where actor_completion.case_id = dispute.id
+                           and actor_completion.participant_id = binding.actor_id
+                           and actor_completion.participant_role = binding.actor_role
+                    )
+                 """ + (lockRows
+                        ? " for update of binding, session, access, participant"
+                        : ""),
                 parameters,
                 String.class);
         if (privateAuthority.size() != 1) {
@@ -425,45 +500,65 @@ public final class JdbcIntakeFormalCommitPort
                     "INTAKE_AUTHORIZATION_REVOKED",
                     "private thread, participation, access, or Agent Session is no longer active");
         }
-        return rows.getFirst();
+        CurrentRows current = rows.getFirst();
+        return new CurrentRows(
+                current.roomId(),
+                string(caseRow, "initiator_role"),
+                string(caseRow, "respondent_role"));
     }
 
-    private void requirePersistedPrivateReferences(CommitCommand command) {
-        var request = command.request();
+    private void requirePersistedPrivateReferences(
+            IntakeGraphFinalizationRequest request, boolean lockRows) {
         var snapshot = request.initialSnapshot();
-        MapSqlParameterSource parameters = authorityParameters(command)
+        MapSqlParameterSource parameters = authorityParameters(request)
                 .addValue("snapshotBindingId", snapshot.bindingId())
+                .addValue("snapshotRegistrationId", snapshot.threadRegistrationId())
                 .addValue("snapshotArtifactId", snapshot.payloadRef().artifactId())
+                .addValue("snapshotSchema", snapshot.payloadRef().schemaVersion())
+                .addValue("snapshotUri", snapshot.payloadRef().uri())
                 .addValue("snapshotHash", snapshot.payloadRef().sha256())
+                .addValue("snapshotSize", snapshot.payloadRef().sizeBytes())
                 .addValue("snapshotObjectVersion", snapshot.objectVersion())
                 .addValue("snapshotDomainRevision", snapshot.domainRevision())
                 .addValue("snapshotRoomRevision", snapshot.roomRevision())
-                .addValue("snapshotProjectionRevision", snapshot.projectionRevision());
-        Integer initial = jdbc.queryForObject(
+                .addValue("snapshotProjectionRevision", snapshot.projectionRevision())
+                .addValue("snapshotInitialLastSequence", snapshot.initialLastSequence())
+                .addValue(
+                        "snapshotCreatedAt",
+                        snapshot.createdAt().atOffset(ZoneOffset.UTC));
+        List<String> initial = jdbc.queryForList(
                 """
-                select count(*)
+                select binding_id
                   from case_intake_snapshot_binding
                  where binding_id = :snapshotBindingId
-                   and thread_registration_id = :registrationId
-                   and tenant_surrogate = :tenantSurrogate
-                   and case_id = :caseId
-                   and room_epoch = :roomEpoch
-                   and fencing_token = :fencingToken
-                   and thread_id = :threadId
-                   and actor_scope_hash = :actorScopeHash
-                   and agent_session_id = :agentSessionId
-                   and binding_type = 'INITIAL'
-                   and initialization_marker
-                   and artifact_id = :snapshotArtifactId
-                   and object_version = :snapshotObjectVersion
-                   and content_sha256 = :snapshotHash
-                   and domain_revision = :snapshotDomainRevision
-                   and room_revision = :snapshotRoomRevision
-                   and projection_revision = :snapshotProjectionRevision
-                """,
+                    and thread_registration_id = :snapshotRegistrationId
+                    and tenant_surrogate = :tenantSurrogate
+                    and case_id = :caseId
+                    and room_type = 'INTAKE'
+                    and room_epoch = :roomEpoch
+                    and fencing_token = :fencingToken
+                    and thread_id = :threadId
+                    and actor_scope_hash = :actorScopeHash
+                    and agent_session_id = :agentSessionId
+                    and actor_audience = :audience
+                    and binding_type = 'INITIAL'
+                    and initialization_marker
+                    and schema_version = :snapshotSchema
+                    and artifact_id = :snapshotArtifactId
+                    and object_uri = :snapshotUri
+                    and object_version = :snapshotObjectVersion
+                    and content_sha256 = :snapshotHash
+                    and size_bytes = :snapshotSize
+                    and visibility = 'PRIVATE'
+                    and domain_revision = :snapshotDomainRevision
+                    and room_revision = :snapshotRoomRevision
+                    and projection_revision = :snapshotProjectionRevision
+                    and initial_last_sequence = :snapshotInitialLastSequence
+                    and created_at = :snapshotCreatedAt
+                """ + (lockRows ? " for share" : ""),
                 parameters,
-                Integer.class);
-        if (initial == null || initial != 1) {
+                String.class);
+        if (initial.size() != 1) {
             throw rejected(
                     "INTAKE_SNAPSHOT_BINDING_STALE",
                     "initial snapshot is not the current private thread binding");
@@ -473,50 +568,65 @@ public final class JdbcIntakeFormalCommitPort
         }
         var event = request.event();
         parameters.addValue("eventBindingId", event.bindingId())
+                .addValue("eventRegistrationId", event.threadRegistrationId())
                 .addValue("eventId", event.eventId())
                 .addValue("eventMessageId", event.messageId())
                 .addValue("eventArtifactId", event.payloadRef().artifactId())
+                .addValue("eventSchema", event.payloadRef().schemaVersion())
+                .addValue("eventUri", event.payloadRef().uri())
                 .addValue("eventHash", event.payloadRef().sha256())
+                .addValue("eventSize", event.payloadRef().sizeBytes())
                 .addValue("eventObjectVersion", event.objectVersion())
                 .addValue("eventSequence", event.sequenceNo())
-                .addValue("eventDomainRevision", event.domainRevision());
-        Integer eventCount = jdbc.queryForObject(
+                .addValue("eventDomainRevision", event.domainRevision())
+                .addValue("eventAudience", event.audience().name())
+                .addValue("eventOccurredAt", event.occurredAt().atOffset(ZoneOffset.UTC))
+                .addValue("eventCreatedAt", event.createdAt().atOffset(ZoneOffset.UTC));
+        List<String> persistedEvent = jdbc.queryForList(
                 """
-                select count(*)
+                select binding_id
                   from case_intake_snapshot_binding
                  where binding_id = :eventBindingId
-                   and thread_registration_id = :registrationId
-                   and tenant_surrogate = :tenantSurrogate
-                   and case_id = :caseId
-                   and room_epoch = :roomEpoch
-                   and fencing_token = :fencingToken
-                   and thread_id = :threadId
-                   and actor_scope_hash = :actorScopeHash
-                   and agent_session_id = :agentSessionId
-                   and binding_type = 'EVENT'
-                   and not initialization_marker
-                   and event_id = :eventId
-                   and message_id = :eventMessageId
-                   and artifact_id = :eventArtifactId
-                   and object_version = :eventObjectVersion
-                   and content_sha256 = :eventHash
-                   and event_sequence = :eventSequence
-                   and domain_revision = :eventDomainRevision
-                   and audience = :audience
-                """,
+                    and thread_registration_id = :eventRegistrationId
+                    and tenant_surrogate = :tenantSurrogate
+                    and case_id = :caseId
+                    and room_type = 'INTAKE'
+                    and room_epoch = :roomEpoch
+                    and fencing_token = :fencingToken
+                    and thread_id = :threadId
+                    and actor_scope_hash = :actorScopeHash
+                    and agent_session_id = :agentSessionId
+                    and actor_audience = :audience
+                    and binding_type = 'EVENT'
+                    and not initialization_marker
+                    and event_id = :eventId
+                    and message_id = :eventMessageId
+                    and schema_version = :eventSchema
+                    and artifact_id = :eventArtifactId
+                    and object_uri = :eventUri
+                    and object_version = :eventObjectVersion
+                    and content_sha256 = :eventHash
+                    and size_bytes = :eventSize
+                    and visibility = 'PRIVATE'
+                    and event_sequence = :eventSequence
+                    and domain_revision = :eventDomainRevision
+                    and audience = :eventAudience
+                    and occurred_at = :eventOccurredAt
+                    and created_at = :eventCreatedAt
+                """ + (lockRows ? " for share" : ""),
                 parameters,
-                Integer.class);
-        if (eventCount == null || eventCount != 1) {
+                String.class);
+        if (persistedEvent.size() != 1) {
             throw rejected(
                     "INTAKE_EVENT_BINDING_STALE",
                     "turn event is not the current ordered private reference");
         }
     }
 
-    private AgentRunRow requireSoleResultReadyAttempt(CommitCommand command, String roomId) {
-        var request = command.request();
+    private AgentRunRow requireSoleResultReadyAttempt(
+            IntakeGraphFinalizationRequest request, String roomId, boolean lockRows) {
         var authority = request.authority();
-        MapSqlParameterSource parameters = authorityParameters(command).addValue("roomId", roomId);
+        MapSqlParameterSource parameters = authorityParameters(request).addValue("roomId", roomId);
         List<AgentRunRow> rows = jdbc.query(
                 """
                 select attempt.last_sequence_no
@@ -560,8 +670,7 @@ public final class JdbcIntakeFormalCommitPort
                           and manifest.case_id = :caseId
                           and manifest.logical_agent_run_id = :logicalRunId
                    )
-                 for update of run, attempt
-                """,
+                 """ + (lockRows ? " for update of run, attempt" : ""),
                 parameters,
                 (row, ignored) -> new AgentRunRow(row.getLong("last_sequence_no")));
         if (rows.size() != 1) {
@@ -592,7 +701,10 @@ public final class JdbcIntakeFormalCommitPort
     }
 
     private DossierWrite writeDossier(
-            CommitCommand command, IntakeTurnProposal proposal, OffsetDateTime now) {
+            CommitCommand command,
+            IntakeTurnProposal proposal,
+            CurrentRows currentAuthority,
+            OffsetDateTime now) {
         var authority = command.request().authority();
         List<DossierRow> rows = jdbc.query(
                 """
@@ -618,10 +730,26 @@ public final class JdbcIntakeFormalCommitPort
                         "{}")
                 : rows.getFirst();
         JsonNode currentJson = readJson(current.json(), "persisted Intake dossier");
-        MergeResult merged = dossierMerger.merge(currentJson, proposal);
+        IntakeGraphFinalizationRequest request = command.request();
+        String sourceRef = request.event() == null
+                ? request.initialSnapshot().payloadRef().artifactId()
+                : request.event().messageId();
+        String sourceContextHash = request.event() == null
+                ? request.initialSnapshot().payloadRef().sha256()
+                : request.event().payloadRef().sha256();
+        MergeResult merged = dossierMerger.merge(
+                currentJson,
+                proposal,
+                new MatrixAuthority(
+                        authority.caseId(),
+                        request.threadBinding().registration().actorScope().actorRole(),
+                        ActorRole.valueOf(currentAuthority.initiatorRole()),
+                        ActorRole.valueOf(currentAuthority.respondentRole()),
+                        sourceRef,
+                        sourceContextHash));
         long version = current.version() + 1;
         int sourceTurn = sourceTurn(command.request());
-        MapSqlParameterSource parameters = authorityParameters(command)
+        MapSqlParameterSource parameters = authorityParameters(command.request())
                 .addValue("dossierId", current.id())
                 .addValue("dossierVersion", version)
                 .addValue("dossierJson", merged.canonicalDossierJson())
@@ -860,7 +988,7 @@ public final class JdbcIntakeFormalCommitPort
                     service, action, resource_type, resource_id, outcome,
                     before_json, after_json, metadata_json, source_ip, created_at, created_by
                 ) values (
-                    :id, null, :traceId, :requestId, :workflowId, :userId, 'SYSTEM',
+                    :id, :caseId, :traceId, :requestId, :workflowId, :userId, 'SYSTEM',
                     'java-api-service', 'INTAKE_TURN_FINALIZED', 'FULFILLMENT_DISPUTE_CASE',
                     :resourceId, 'SUCCESS', '{}'::jsonb, cast(:afterJson as jsonb),
                     cast(:metadataJson as jsonb), null, :now, :userId
@@ -868,6 +996,7 @@ public final class JdbcIntakeFormalCommitPort
                 """,
                 new MapSqlParameterSource()
                         .addValue("id", auditId)
+                        .addValue("caseId", receipt.caseId())
                         .addValue("traceId", command.request().command().traceparent())
                         .addValue("requestId", command.request().authority().commandId())
                         .addValue("workflowId", "agent-run:" + sha256(receipt.logicalRunId()))
@@ -976,8 +1105,7 @@ public final class JdbcIntakeFormalCommitPort
         }
     }
 
-    private MapSqlParameterSource authorityParameters(CommitCommand command) {
-        var request = command.request();
+    private MapSqlParameterSource authorityParameters(IntakeGraphFinalizationRequest request) {
         var authority = request.authority();
         IntakePrivateThreadRegistration registration = request.threadBinding().registration();
         var actor = registration.actorScope();
@@ -1090,7 +1218,7 @@ public final class JdbcIntakeFormalCommitPort
             OffsetDateTime completedAt,
             long version) {}
 
-    private record CurrentRows(String roomId) {}
+    private record CurrentRows(String roomId, String initiatorRole, String respondentRole) {}
 
     private record AgentRunRow(long lastSequenceNo) {}
 

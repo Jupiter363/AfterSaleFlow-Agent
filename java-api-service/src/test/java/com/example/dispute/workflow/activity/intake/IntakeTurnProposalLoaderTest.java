@@ -18,6 +18,8 @@ import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.nio.file.Path;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 class IntakeTurnProposalLoaderTest {
 
@@ -161,6 +163,115 @@ class IntakeTurnProposalLoaderTest {
                 "INTAKE_PROPOSAL_SCHEMA_INVALID",
                 () -> new IntakeTurnProposalLoader(new ExactReader(reference, payload))
                         .load(reference, authority(proposal)));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "credentials",
+        "credential",
+        "password",
+        "api_key",
+        "access_token",
+        "refresh_token",
+        "authorization_header",
+        "private_key",
+        "client_secret",
+        "raw_audit_records",
+        "audit_records",
+        "reviewer_notes",
+        "other_party_private_messages",
+        "opposing_party_private_messages",
+        "private_conversation",
+        "internal_notes",
+        "opposing_party_messages",
+        "opposing_party_private",
+        "other_party_messages",
+        "other_party_private",
+        "trusted_model_profile",
+        "prompt_version",
+        "model_profile_id",
+        "policy_version",
+        "guardrail_version",
+        "tool_policy_version",
+        "process_state",
+        "case_status",
+        "room_transition",
+        "evidence_deadline",
+        "review_instructions",
+        "tool_instructions",
+        "admit_case",
+        "cancel_case",
+        "cancel_intake",
+        "freeze_matrix",
+        "open_room",
+        "set_deadline",
+        "invite_participant"
+    })
+    void recursivelyRejectsEverySensitiveAndFormalActionKey(String forbiddenKey)
+            throws Exception {
+        ObjectNode proposal = (ObjectNode) fixture();
+        ObjectNode caseStory =
+                (ObjectNode) proposal.required("dossier_patch").required("case_story");
+        caseStory.putObject("nested").put(forbiddenKey, "blocked");
+        proposal.put(
+                "proposal_hash",
+                IntakeContractHashes.canonicalHashExcluding(proposal, "proposal_hash"));
+        byte[] payload = ContractJson.canonicalize(proposal);
+        IntakeProposalReference reference = reference(proposal, payload);
+
+        assertRejected(
+                "INTAKE_PROPOSAL_SCHEMA_INVALID",
+                () -> new IntakeTurnProposalLoader(new ExactReader(reference, payload))
+                        .load(reference, authority(proposal)));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"case_fact_matrix", "unilateral_case_matrix"})
+    void matrixChangesCannotBypassTheDedicatedMatrixPatch(String matrixBranch)
+            throws Exception {
+        ObjectNode proposal = (ObjectNode) fixture();
+        ((ObjectNode) proposal.required("dossier_patch"))
+                .set(matrixBranch, MAPPER.createObjectNode().put("schema_version", "untrusted"));
+        proposal.put(
+                "proposal_hash",
+                IntakeContractHashes.canonicalHashExcluding(proposal, "proposal_hash"));
+        byte[] payload = ContractJson.canonicalize(proposal);
+        IntakeProposalReference reference = reference(proposal, payload);
+
+        assertRejected(
+                "INTAKE_PROPOSAL_SCHEMA_INVALID",
+                () -> new IntakeTurnProposalLoader(new ExactReader(reference, payload))
+                        .load(reference, authority(proposal)));
+    }
+
+    @Test
+    void acceptsOnlyTheFrozenUnilateralSemanticDraftShapeForMatrixPatch() throws Exception {
+        ObjectNode proposal = (ObjectNode) fixture();
+        ObjectNode draft = MAPPER.createObjectNode();
+        draft.put("schema_version", "unilateral_case_matrix.draft.v1");
+        ObjectNode row = draft.putArray("fact_rows").addObject();
+        row.put("fact_key", "NEW_INSTALL_SCOPE");
+        row.put("category", "PRODUCT_PAGE");
+        row.put("fact_target", "The listing included installation.");
+        row.put("materiality", "CORE");
+        row.put("position_summary", "The buyer relied on the listing.");
+        row.put("asserted_value", "Installation included");
+        row.put("source_scope", "CURRENT_SOURCE");
+        draft.putArray("summary_source_fact_keys").add("NEW_INSTALL_SCOPE");
+        proposal.set("matrix_patch", draft);
+        proposal.put(
+                "proposal_hash",
+                IntakeContractHashes.canonicalHashExcluding(proposal, "proposal_hash"));
+        byte[] payload = ContractJson.canonicalize(proposal);
+        IntakeProposalReference reference = reference(proposal, payload);
+
+        IntakeTurnProposal loaded = new IntakeTurnProposalLoader(
+                        new ExactReader(reference, payload))
+                .load(reference, authority(proposal))
+                .proposal();
+
+        assertThat(loaded.matrixPatch().path("schema_version").asText())
+                .isEqualTo("unilateral_case_matrix.draft.v1");
     }
 
     @Test

@@ -241,6 +241,128 @@ class JdbcIntakeFormalCommitPortTest {
         assertCounts(fixture.caseId(), 0, 0, 0, 0, 0, 0);
     }
 
+    @Test
+    void preflightRejectsAnActorNoLongerAssignedAsTheExplicitCaseParty() {
+        Fixture fixture = fixture("PARTY_REBOUND_" + SEQUENCE.incrementAndGet());
+        insertFixture(fixture);
+        String replacement = "replacement-" + fixture.caseId();
+        jdbc.update(
+                "update fulfillment_dispute_case set user_id = ?, initiator_id = ? where id = ?",
+                replacement,
+                replacement,
+                fixture.caseId());
+
+        assertThatThrownBy(() -> port.preflight(fixture.request()))
+                .isInstanceOf(
+                        com.example.dispute.workflow.application.intake.IntakeFinalizationRejectedException.class)
+                .hasMessageContaining("formalizable Intake state");
+        assertCounts(fixture.caseId(), 0, 0, 0, 0, 0, 0);
+    }
+
+    @Test
+    void transactionRejectsACompletedPartyWithoutWritingAnyFormalEffect() {
+        Fixture fixture = fixture("PARTY_COMPLETED_" + SEQUENCE.incrementAndGet());
+        insertFixture(fixture);
+        insertPartyCompletion(
+                fixture,
+                ActorRole.USER,
+                fixture.binding().registration().actorScope().actorId());
+
+        assertThatThrownBy(() -> port.commit(fixture.commitCommand()))
+                .isInstanceOf(
+                        com.example.dispute.workflow.application.intake.IntakeFinalizationRejectedException.class)
+                .hasMessageContaining("no longer active");
+        assertCounts(fixture.caseId(), 0, 0, 0, 0, 0, 0);
+    }
+
+    @Test
+    void respondentRequiresExplicitInitiatorCompletionBeforePreflightAndCommit() {
+        Fixture fixture = fixture(
+                "RESPONDENT_LOCK_" + SEQUENCE.incrementAndGet(), ActorRole.MERCHANT);
+        insertFixture(fixture);
+
+        assertThatThrownBy(() -> port.preflight(fixture.request()))
+                .isInstanceOf(
+                        com.example.dispute.workflow.application.intake.IntakeFinalizationRejectedException.class)
+                .hasMessageContaining("no longer active");
+
+        String initiatorId = scalar(
+                "select initiator_id from fulfillment_dispute_case where id = ?",
+                fixture.caseId());
+        insertPartyCompletion(fixture, ActorRole.USER, initiatorId);
+        jdbc.update(
+                "update fulfillment_dispute_case set case_status = 'INTAKE_COMPLETED' where id = ?",
+                fixture.caseId());
+
+        port.preflight(fixture.request());
+        assertThat(port.commit(fixture.commitCommand()).caseId()).isEqualTo(fixture.caseId());
+        assertCounts(fixture.caseId(), 1, 1, 1, 1, 1, 1);
+    }
+
+    @Test
+    void rehashedRequestCannotChangePersistedSnapshotMetadata() {
+        Fixture fixture = fixture("SNAPSHOT_MUTATION_" + SEQUENCE.incrementAndGet());
+        insertFixture(fixture);
+        IntakeSnapshotReference source = fixture.snapshot();
+        IntakeSnapshotReference changed = new IntakeSnapshotReference(
+                source.bindingId(),
+                source.threadRegistrationId(),
+                source.tenantSurrogate(),
+                source.caseId(),
+                source.roomEpoch(),
+                source.fencingToken(),
+                source.threadId(),
+                source.actorScopeHash(),
+                source.agentSessionId(),
+                source.payloadRef(),
+                "version-mutated",
+                source.domainRevision(),
+                source.roomRevision(),
+                source.projectionRevision(),
+                source.initialLastSequence(),
+                source.createdAt());
+        IntakeGraphFinalizationRequest request = requestWith(fixture, changed, fixture.event());
+
+        assertThatThrownBy(() -> port.commit(commitCommand(request, fixture)))
+                .isInstanceOf(
+                        com.example.dispute.workflow.application.intake.IntakeFinalizationRejectedException.class)
+                .hasMessageContaining("initial snapshot");
+        assertCounts(fixture.caseId(), 0, 0, 0, 0, 0, 0);
+    }
+
+    @Test
+    void rehashedRequestCannotChangePersistedEventMetadata() {
+        Fixture fixture = fixture("EVENT_MUTATION_" + SEQUENCE.incrementAndGet());
+        insertFixture(fixture);
+        IntakeEventReference source = fixture.event();
+        IntakeEventReference changed = new IntakeEventReference(
+                source.bindingId(),
+                source.threadRegistrationId(),
+                source.eventId(),
+                source.messageId(),
+                source.tenantSurrogate(),
+                source.caseId(),
+                source.roomEpoch(),
+                source.fencingToken(),
+                source.threadId(),
+                source.actorScopeHash(),
+                source.agentSessionId(),
+                source.payloadRef(),
+                source.objectVersion(),
+                source.sequenceNo(),
+                source.domainRevision(),
+                source.audience(),
+                source.occurredAt(),
+                source.createdAt().plusSeconds(1));
+        IntakeGraphFinalizationRequest request = requestWith(fixture, fixture.snapshot(), changed);
+
+        assertThatThrownBy(() -> port.commit(commitCommand(request, fixture)))
+                .isInstanceOf(
+                        com.example.dispute.workflow.application.intake.IntakeFinalizationRejectedException.class)
+                .hasMessageContaining("turn event");
+        assertCounts(fixture.caseId(), 0, 0, 0, 0, 0, 0);
+    }
+
     private static void assertCounts(
             String caseId,
             int messages,
@@ -257,14 +379,17 @@ class JdbcIntakeFormalCommitPortTest {
                 .isEqualTo(events);
         assertThat(count("select count(*) from notification_outbox where case_id = ?", caseId))
                 .isEqualTo(outbox);
-        assertThat(count("select count(*) from audit_log where resource_id = ?", caseId))
+        assertThat(count(
+                        "select count(*) from audit_log where case_id = ? and resource_id = ?",
+                        caseId,
+                        caseId))
                 .isEqualTo(audits);
         assertThat(count("select count(*) from domain_operation where case_id = ?", caseId))
                 .isEqualTo(operations);
     }
 
-    private static long count(String sql, String value) {
-        return jdbc.queryForObject(sql, Long.class, value);
+    private static long count(String sql, Object... values) {
+        return jdbc.queryForObject(sql, Long.class, values);
     }
 
     private static String scalar(String sql, Object... args) {
@@ -304,6 +429,10 @@ class JdbcIntakeFormalCommitPortTest {
     }
 
     private static Fixture fixture(String suffix) {
+        return fixture(suffix, ActorRole.USER);
+    }
+
+    private static Fixture fixture(String suffix, ActorRole actorRole) {
         String caseId = "CASE_JDBC_" + suffix;
         String tenant = "tenant-jdbc";
         String threadId = "grt.v1." + sha256(suffix).substring(0, 32);
@@ -313,10 +442,13 @@ class JdbcIntakeFormalCommitPortTest {
         String runId = "RUN_JDBC_" + suffix;
         String attemptId = "ATTEMPT_JDBC_" + suffix;
         Instant issued = NOW.minus(5, ChronoUnit.MINUTES);
+        Audience audience = actorRole == ActorRole.USER ? Audience.USER : Audience.MERCHANT;
+        String actorId = (actorRole == ActorRole.USER ? "user-jdbc-" : "merchant-jdbc-")
+                + suffix;
         var actor = new IntakePrivateThreadRegistration.ActorScope(
-                "user-jdbc-" + suffix,
-                ActorRole.USER,
-                Audience.USER,
+                actorId,
+                actorRole,
+                audience,
                 List.of("graph.command.execute"));
         IntakeGraphThreadBinding binding =
                 new IntakePrivateThreadRegistrationFactory(() -> threadId)
@@ -381,7 +513,7 @@ class JdbcIntakeFormalCommitPortTest {
                 "version-1",
                 2,
                 5,
-                Audience.USER,
+                audience,
                 issued.plusSeconds(2),
                 issued.plusSeconds(3));
         RoomGraphCommand command = new IntakeGraphCommandFactory().create(
@@ -537,6 +669,49 @@ class JdbcIntakeFormalCommitPortTest {
                 stored);
     }
 
+    private static IntakeGraphFinalizationRequest requestWith(
+            Fixture fixture,
+            IntakeSnapshotReference snapshot,
+            IntakeEventReference event) {
+        IntakeGraphFinalizationRequest unsigned = new IntakeGraphFinalizationRequest(
+                fixture.request().operationKey(),
+                "0".repeat(64),
+                fixture.authority(),
+                fixture.command(),
+                fixture.result(),
+                fixture.binding(),
+                snapshot,
+                event,
+                fixture.proposalReference());
+        return new IntakeGraphFinalizationRequest(
+                unsigned.operationKey(),
+                unsigned.canonicalRequestHash(),
+                unsigned.authority(),
+                unsigned.command(),
+                unsigned.result(),
+                unsigned.threadBinding(),
+                unsigned.initialSnapshot(),
+                unsigned.event(),
+                unsigned.proposalReference());
+    }
+
+    private static void insertPartyCompletion(
+            Fixture fixture, ActorRole role, String participantId) {
+        jdbc.update(
+                """
+                insert into case_intake_party_completion (
+                    id, case_id, participant_role, participant_id, completion_status,
+                    completed_at, created_at, created_by
+                ) values (?, ?, ?, ?, 'COMPLETED', ?, ?, 'test')
+                """,
+                "COMPLETION_" + fixture.caseId() + '_' + role.name(),
+                fixture.caseId(),
+                role.name(),
+                participantId,
+                NOW.atOffset(ZoneOffset.UTC),
+                NOW.atOffset(ZoneOffset.UTC));
+    }
+
     private static String resultHash(RoomGraphCommand command, String proposalHash) {
         return "a".repeat(64);
     }
@@ -587,6 +762,9 @@ class JdbcIntakeFormalCommitPortTest {
         String roomId = "ROOM_" + c;
         String epochId = "EPOCH_" + c;
         String actorId = fixture.binding().registration().actorScope().actorId();
+        ActorRole actorRole = fixture.binding().registration().actorScope().actorRole();
+        String userId = actorRole == ActorRole.USER ? actorId : "user-" + c;
+        String merchantId = actorRole == ActorRole.MERCHANT ? actorId : "merchant-" + c;
         String sessionId = fixture.binding().registration().agentSessionId();
         OffsetDateTime now = NOW.atOffset(ZoneOffset.UTC);
         jdbc.update("""
@@ -596,11 +774,11 @@ class JdbcIntakeFormalCommitPortTest {
                     risk_level, title, description, current_room, created_by, updated_by
                 ) values (?, ?, ?, ?, 'DISPUTE', 'INTAKE_IN_PROGRESS', 'USER', ?,
                     'MERCHANT', ?, 'MEDIUM', 'JDBC Intake', 'formal ledger fixture', 'INTAKE', 'test', 'test')
-                """, c, actorId, "merchant-" + c, "create-" + c, actorId, "merchant-" + c);
+                """, c, userId, merchantId, "create-" + c, userId, merchantId);
         jdbc.update("insert into case_participant (id, case_id, actor_id, participant_role, participant_status, joined_at, created_at, updated_at, created_by, updated_by) values (?, ?, ?, 'USER', 'ACTIVE', ?, ?, ?, 'test', 'test')",
-                "PART_USER_" + c, c, actorId, now, now, now);
+                "PART_USER_" + c, c, userId, now, now, now);
         jdbc.update("insert into case_participant (id, case_id, actor_id, participant_role, participant_status, joined_at, created_at, updated_at, created_by, updated_by) values (?, ?, ?, 'MERCHANT', 'ACTIVE', ?, ?, ?, 'test', 'test')",
-                "PART_MERCHANT_" + c, c, "merchant-" + c, now, now, now);
+                "PART_MERCHANT_" + c, c, merchantId, now, now, now);
         jdbc.update("insert into case_room (id, case_id, room_type, room_status, opened_at, created_by, updated_by) values (?, ?, 'INTAKE', 'OPEN', ?, 'test', 'test')",
                 roomId, c, now);
         jdbc.update("""
@@ -627,10 +805,12 @@ class JdbcIntakeFormalCommitPortTest {
                     'CaseProcessWorkflow', 'IntakeRoomWorkflow', 'jdbc-room-build', ?, ?, ?, ?)
                 """, epochId, tenant, c, roomId, "CASE_WORKFLOW_" + c, "CASE_RUN_" + c,
                 "ROOM_WORKFLOW_" + c, "ROOM_RUN_" + c, now, now, now, now);
-        jdbc.update("insert into case_access_session (id, tenant_id, case_id, actor_id, actor_role, permission_level, permission_scopes_json, status, created_at, updated_at, created_by) values (?, ?, ?, ?, 'USER', 'PARTY_USER', cast(? as jsonb), 'ACTIVE', ?, ?, 'test')",
-                "ACCESS_" + c, tenant, c, actorId, "[\"CASE_READ\",\"INTAKE_PRIVATE_READ\",\"INTAKE_PARTICIPATE\",\"AGENT_SESSION_WRITE\"]", now, now);
-        jdbc.update("insert into agent_conversation_session (id, tenant_id, case_id, room_type, actor_id, actor_role, agent_key, access_session_id, prompt_profile_id, memory_policy_id, conversation_scope, status, created_at, updated_at, created_by) values (?, ?, ?, 'INTAKE', ?, 'USER', 'DISPUTE_INTAKE_OFFICER', ?, 'intake-prompt.v2', 'MEMORY_DEFAULT', ?, 'ACTIVE', ?, ?, 'test')",
-                sessionId, tenant, c, actorId, "ACCESS_" + c, "scope:" + c, now, now);
+        jdbc.update("insert into case_access_session (id, tenant_id, case_id, actor_id, actor_role, permission_level, permission_scopes_json, status, created_at, updated_at, created_by) values (?, ?, ?, ?, ?, ?, cast(? as jsonb), 'ACTIVE', ?, ?, 'test')",
+                "ACCESS_" + c, tenant, c, actorId, actorRole.name(),
+                actorRole == ActorRole.USER ? "PARTY_USER" : "PARTY_MERCHANT",
+                "[\"CASE_READ\",\"INTAKE_PRIVATE_READ\",\"INTAKE_PARTICIPATE\",\"AGENT_SESSION_WRITE\"]", now, now);
+        jdbc.update("insert into agent_conversation_session (id, tenant_id, case_id, room_type, actor_id, actor_role, agent_key, access_session_id, prompt_profile_id, memory_policy_id, conversation_scope, status, created_at, updated_at, created_by) values (?, ?, ?, 'INTAKE', ?, ?, 'DISPUTE_INTAKE_OFFICER', ?, 'intake-prompt.v2', 'MEMORY_DEFAULT', ?, 'ACTIVE', ?, ?, 'test')",
+                sessionId, tenant, c, actorId, actorRole.name(), "ACCESS_" + c, "scope:" + c, now, now);
 
         NamedParameterJdbcTemplate named = new NamedParameterJdbcTemplate(jdbc.getDataSource());
         JdbcIntakeGraphBindingStore bindings = new JdbcIntakeGraphBindingStore(named);
