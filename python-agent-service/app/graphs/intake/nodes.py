@@ -16,7 +16,9 @@ from app.graphs.intake.state import (
     JsonObject,
 )
 from app.graphs.intake.validators import (
+    MATRIX_AUTHORITY_RECORD_KEY,
     ingress,
+    matrix_authority_record,
     validate_cognition_patch,
     validate_dossier_transition,
     validate_event,
@@ -47,8 +49,6 @@ _DOSSIER_BRANCHES = frozenset(
         "missing_information",
         "intake_quality",
         "admission",
-        "case_fact_matrix",
-        "unilateral_case_matrix",
     }
 )
 
@@ -269,7 +269,9 @@ def _import_snapshot(
             raise IntakeGraphContractError("INTAKE_SNAPSHOT_REIMPORT_CONFLICT")
         return {"route": "replay"}
     messages: dict[str, IntakeMessageState] = {}
-    stable_records: dict[str, JsonObject] = {}
+    stable_records: dict[str, JsonObject] = {
+        MATRIX_AUTHORITY_RECORD_KEY: matrix_authority_record(state, snapshot)
+    }
     for value in cast(list[dict[str, Any]], snapshot["own_messages"]):
         message: IntakeMessageState = {
             "message_id": cast(str, value["message_id"]),

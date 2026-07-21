@@ -21,6 +21,12 @@ Identifier = Annotated[
     ),
 ]
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+MatrixFactKey = Annotated[
+    str,
+    StringConstraints(
+        pattern=r"^(?:FACT_[A-Za-z0-9_:-]{1,123}|NEW_[A-Za-z0-9_:-]{1,123})$",
+    ),
+]
 ThreadId = Annotated[
     str,
     StringConstraints(pattern=r"^grt\.v1\.[0-9a-f]{32}$"),
@@ -54,6 +60,18 @@ MODEL_CONTROLLED_FORBIDDEN_FIELDS = frozenset(
         "reviewer_notes",
         "other_party_private_messages",
         "opposing_party_private_messages",
+        "private_conversation",
+        "internal_notes",
+        "opposing_party_messages",
+        "opposing_party_private",
+        "other_party_messages",
+        "other_party_private",
+        "trusted_model_profile",
+        "prompt_version",
+        "model_profile_id",
+        "policy_version",
+        "guardrail_version",
+        "tool_policy_version",
         "process_state",
         "case_status",
         "room_transition",
@@ -158,8 +176,6 @@ class DossierPatch(StrictIntakeModel):
     missing_information: dict[str, Any] | None = Field(default=None, max_length=64)
     intake_quality: dict[str, Any] | None = Field(default=None, max_length=64)
     admission: dict[str, Any] | None = Field(default=None, max_length=64)
-    case_fact_matrix: dict[str, Any] | None = Field(default=None, max_length=64)
-    unilateral_case_matrix: dict[str, Any] | None = Field(default=None, max_length=64)
 
     @model_validator(mode="after")
     def reject_explicit_null_branches(self) -> DossierPatch:
@@ -168,10 +184,162 @@ class DossierPatch(StrictIntakeModel):
         return self
 
 
+class UnilateralFactDraft(StrictIntakeModel):
+    fact_key: MatrixFactKey
+    category: Literal[
+        "ORDER",
+        "PRODUCT_PAGE",
+        "PAYMENT",
+        "FULFILLMENT",
+        "LOGISTICS",
+        "PRODUCT_STATE",
+        "COMMUNICATION",
+        "AFTER_SALES",
+        "TIME",
+        "OTHER",
+    ]
+    fact_target: str = Field(min_length=1, max_length=20000)
+    materiality: Literal["CORE", "SUPPORTING", "CONTEXT"]
+    position_summary: str = Field(min_length=1, max_length=20000)
+    asserted_value: str = Field(min_length=1, max_length=2000)
+    source_scope: Literal[
+        "CURRENT_SOURCE",
+        "PREVIOUS_MATRIX",
+        "PREVIOUS_AND_CURRENT_SOURCE",
+    ]
+
+    @model_validator(mode="after")
+    def reject_blank_semantics(self) -> UnilateralFactDraft:
+        for field in ("fact_target", "position_summary", "asserted_value"):
+            if not getattr(self, field).strip():
+                raise ValueError(f"{field} cannot be blank")
+        return self
+
+
+class UnilateralCaseMatrixDraftV1(StrictIntakeModel):
+    schema_version: Literal["unilateral_case_matrix.draft.v1"]
+    fact_rows: tuple[UnilateralFactDraft, ...] = Field(min_length=1, max_length=100)
+    summary_source_fact_keys: tuple[MatrixFactKey, ...] = Field(
+        min_length=1,
+        max_length=100,
+    )
+
+    @model_validator(mode="after")
+    def validate_local_fact_keys(self) -> UnilateralCaseMatrixDraftV1:
+        fact_keys = tuple(row.fact_key for row in self.fact_rows)
+        if len(fact_keys) != len(set(fact_keys)):
+            raise ValueError("matrix draft fact keys must be unique")
+        summary_keys = self.summary_source_fact_keys
+        if len(summary_keys) != len(set(summary_keys)):
+            raise ValueError("matrix summary fact keys must be unique")
+        if not set(summary_keys) <= set(fact_keys):
+            raise ValueError("matrix summary keys must reference draft fact rows")
+        return self
+
+
+class CaseFactDeltaRowV2(StrictIntakeModel):
+    fact_key: MatrixFactKey
+    category: Literal[
+        "ORDER",
+        "PRODUCT_PAGE",
+        "PAYMENT",
+        "FULFILLMENT",
+        "LOGISTICS",
+        "PRODUCT_STATE",
+        "COMMUNICATION",
+        "AFTER_SALES",
+        "TIME",
+        "OTHER",
+    ]
+    fact_target: str = Field(min_length=1, max_length=20000)
+    materiality: Literal["CORE", "SUPPORTING", "CONTEXT"]
+    stance: Literal["CONFIRM", "DENY", "PARTIAL", "UNKNOWN", "NOT_ADDRESSED"]
+    position_summary: str = Field(min_length=1, max_length=20000)
+    asserted_value: str | None = Field(default=None, min_length=1, max_length=2000)
+    source_scope: Literal[
+        "CURRENT_SOURCE",
+        "PREVIOUS_MATRIX",
+        "PREVIOUS_AND_CURRENT_SOURCE",
+    ]
+    agreed_statement: str | None = Field(default=None, min_length=1, max_length=20000)
+    conflict_summary: str | None = Field(default=None, min_length=1, max_length=20000)
+
+    @model_validator(mode="after")
+    def validate_delta_semantics(self) -> CaseFactDeltaRowV2:
+        for field in (
+            "fact_target",
+            "position_summary",
+            "asserted_value",
+            "agreed_statement",
+            "conflict_summary",
+        ):
+            value = getattr(self, field)
+            if isinstance(value, str) and not value.strip():
+                raise ValueError(f"{field} cannot be blank")
+        if self.fact_key.startswith("NEW_"):
+            if self.stance == "NOT_ADDRESSED":
+                raise ValueError("a new matrix fact cannot be NOT_ADDRESSED")
+            if self.source_scope == "PREVIOUS_MATRIX":
+                raise ValueError("a new matrix fact cannot come from PREVIOUS_MATRIX")
+        if self.stance == "NOT_ADDRESSED" and (
+            not self.fact_key.startswith("FACT_")
+            or self.source_scope != "PREVIOUS_MATRIX"
+            or self.asserted_value is not None
+        ):
+            raise ValueError("NOT_ADDRESSED requires a prior FACT_ row without asserted_value")
+        return self
+
+
+class RespondentClaimDeltaV2(StrictIntakeModel):
+    attitude: Literal[
+        "AGREE",
+        "PARTIALLY_AGREE",
+        "DISAGREE",
+        "ALTERNATIVE_PROPOSED",
+        "NEED_MORE_INFO",
+        "NOT_ADDRESSED",
+    ]
+    position_summary: str = Field(min_length=1, max_length=20000)
+    alternative_proposal: str | None = Field(default=None, min_length=1, max_length=20000)
+
+    @model_validator(mode="after")
+    def reject_blank_semantics(self) -> RespondentClaimDeltaV2:
+        for field in ("position_summary", "alternative_proposal"):
+            value = getattr(self, field)
+            if isinstance(value, str) and not value.strip():
+                raise ValueError(f"{field} cannot be blank")
+        return self
+
+
+class CaseFactMatrixDeltaV2(StrictIntakeModel):
+    schema_version: Literal["case_fact_matrix.delta.v2"]
+    fact_rows: tuple[CaseFactDeltaRowV2, ...] = Field(min_length=1, max_length=200)
+    summary_source_fact_keys: tuple[MatrixFactKey, ...] = Field(
+        min_length=1,
+        max_length=200,
+    )
+    respondent_claim: RespondentClaimDeltaV2 | None = None
+
+    @model_validator(mode="after")
+    def validate_local_fact_keys(self) -> CaseFactMatrixDeltaV2:
+        fact_keys = tuple(row.fact_key for row in self.fact_rows)
+        if len(fact_keys) != len(set(fact_keys)):
+            raise ValueError("matrix delta fact keys must be unique")
+        summary_keys = self.summary_source_fact_keys
+        if len(summary_keys) != len(set(summary_keys)):
+            raise ValueError("matrix delta summary fact keys must be unique")
+        if not set(summary_keys) <= set(fact_keys):
+            raise ValueError("matrix delta summary keys must reference delta fact rows")
+        return self
+
+
+MatrixPatch = UnilateralCaseMatrixDraftV1 | CaseFactMatrixDeltaV2
+
+
 class IntakeCognitionDraft(StrictIntakeModel):
     room_utterance: str = Field(min_length=1, max_length=20000)
     dossier_patch: DossierPatch
-    matrix_patch: dict[str, Any] | None = Field(default=None, max_length=64)
+    matrix_patch: MatrixPatch | None = None
     readiness: Literal["INCOMPLETE", "READY_TO_CONFIRM", "NEEDS_REVIEW"]
     missing_fields: tuple[Identifier, ...] = Field(max_length=30)
     recommendation: Literal["ACCEPTED", "NEED_MORE_INFO", "NOT_ADMISSIBLE"]
@@ -216,7 +384,7 @@ class IntakeTurnProposal(StrictIntakeModel):
     source_event_hash: Sha256 | None = None
     room_utterance: str = Field(min_length=1, max_length=20000)
     dossier_patch: DossierPatch
-    matrix_patch: dict[str, Any] | None = Field(default=None, max_length=64)
+    matrix_patch: MatrixPatch | None = None
     readiness: Literal["INCOMPLETE", "READY_TO_CONFIRM", "NEEDS_REVIEW"]
     missing_fields: tuple[Identifier, ...] = Field(max_length=30)
     recommendation: Literal["ACCEPTED", "NEED_MORE_INFO", "NOT_ADMISSIBLE"]

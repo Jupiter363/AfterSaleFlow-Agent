@@ -18,10 +18,12 @@ from app.graph_runtime.state import (
 )
 from app.graphs.intake.errors import IntakeGraphContractError
 from app.graphs.intake.contracts import (
+    CaseFactMatrixDeltaV2,
     IntakeCognitionDraft,
     IntakeDomainSnapshot,
     IntakeTurnEvent,
     IntakeTurnProposal,
+    UnilateralCaseMatrixDraftV1,
 )
 from app.graphs.intake.state import (
     IntakeGraphStateV2,
@@ -35,6 +37,23 @@ from app.graphs.intake.state import (
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _THREAD_ID = re.compile(r"^grt\.v1\.[0-9a-f]{32}$")
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_MATRIX_FACT_ID = re.compile(r"^FACT_[A-Za-z0-9_:-]{1,123}$")
+MATRIX_AUTHORITY_RECORD_KEY = "matrix-authority:v1"
+_MATRIX_AUTHORITY_FIELDS = frozenset(
+    {
+        "schema_version",
+        "kind",
+        "source_snapshot_hash",
+        "case_id",
+        "room_epoch",
+        "thread_id",
+        "actor_scope_hash",
+        "actor_role",
+        "initiator_role",
+        "proposal_mode",
+        "formal_matrix_hash",
+    }
+)
 _MAX_COGNITIVE_REVISION = (1 << 63) - 1
 _STATE_FIELDS = frozenset(
     {
@@ -113,6 +132,12 @@ _FORBIDDEN_KEYS = frozenset(
         "reviewer_notes",
         "other_party_private_messages",
         "opposing_party_private_messages",
+        "private_conversation",
+        "internal_notes",
+        "opposing_party_messages",
+        "opposing_party_private",
+        "other_party_messages",
+        "other_party_private",
         "open_evidence",
         "complete_party",
         "send_summons",
@@ -260,6 +285,7 @@ def validate_cognition_patch(
     _validate_safe_json(draft)
     if _canonical_size(draft, "INTAKE_COGNITION_DRAFT_INVALID") > 65_536:
         raise IntakeGraphContractError("INTAKE_COGNITION_DRAFT_TOO_LARGE")
+    validate_matrix_patch(state, draft.get("matrix_patch"))
     return validate_node_patch(state, patch)
 
 
@@ -328,6 +354,274 @@ def validate_proposal_binding(
     }
     if proposal.get("profile_versions") != expected_profiles:
         raise IntakeGraphContractError("INTAKE_PROPOSAL_PROFILE_MISMATCH")
+    validate_matrix_patch(state, proposal.get("matrix_patch"))
+
+
+def validate_matrix_patch(
+    state: IntakeGraphStateV2,
+    matrix_patch: Any,
+) -> None:
+    if matrix_patch is None:
+        return
+    if not isinstance(matrix_patch, Mapping):
+        raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_INVALID")
+    schema_version = matrix_patch.get("schema_version")
+    if schema_version == "unilateral_case_matrix.draft.v1":
+        model_type = UnilateralCaseMatrixDraftV1
+        required_mode = "UNILATERAL"
+    elif schema_version == "case_fact_matrix.delta.v2":
+        model_type = CaseFactMatrixDeltaV2
+        required_mode = "RESPONDENT_DELTA"
+    else:
+        raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_INVALID")
+    _validate_model(model_type, matrix_patch, "INTAKE_MATRIX_PATCH_INVALID")
+    actor_role = _require_matrix_authority(state, required_mode=required_mode)
+    current_source = state.get("last_event_ref") or state.get("initial_snapshot_ref")
+    if not isinstance(current_source, str) or not _IDENTIFIER.fullmatch(current_source):
+        raise IntakeGraphContractError("INTAKE_MATRIX_CURRENT_SOURCE_MISSING")
+
+    previous_by_id, previous_by_fingerprint = _visible_matrix_fact_index(state.get("dossier_draft"))
+    resolved_by_key: dict[str, tuple[str, bytes | str]] = {}
+    resolved: set[tuple[str, bytes | str]] = set()
+    rows = matrix_patch["fact_rows"]
+    for row in rows:
+        fact_key = row["fact_key"]
+        fingerprint = canonicalize(
+            {
+                "category": row["category"],
+                "fact_target": row["fact_target"],
+            }
+        )
+        prior: Mapping[str, Any] | None
+        if fact_key.startswith("FACT_"):
+            prior = previous_by_id.get(fact_key)
+            if prior is None:
+                raise IntakeGraphContractError("INTAKE_MATRIX_FACT_UNKNOWN")
+            if fingerprint != _matrix_row_fingerprint(prior):
+                raise IntakeGraphContractError("INTAKE_MATRIX_FACT_REBOUND")
+            resolution: tuple[str, bytes | str] = ("FACT", fact_key)
+        else:
+            if row["source_scope"] == "PREVIOUS_MATRIX":
+                raise IntakeGraphContractError("INTAKE_MATRIX_SOURCE_SCOPE_INVALID")
+            prior_id = previous_by_fingerprint.get(fingerprint)
+            if prior_id is not None:
+                raise IntakeGraphContractError("INTAKE_MATRIX_FACT_REBOUND")
+            prior = None
+            resolution = ("NEW", fingerprint)
+
+        if resolution in resolved:
+            raise IntakeGraphContractError("INTAKE_MATRIX_FACT_ID_CONFLICT")
+        resolved.add(resolution)
+        resolved_by_key[fact_key] = resolution
+
+        if row["source_scope"] == "PREVIOUS_MATRIX":
+            if prior is None or not _matches_previous_matrix_semantics(
+                row,
+                prior,
+                actor_role=actor_role,
+                patch_kind=required_mode,
+            ):
+                raise IntakeGraphContractError("INTAKE_MATRIX_PREVIOUS_FACT_MUTATED")
+
+    summary_resolutions: set[tuple[str, bytes | str]] = set()
+    for fact_key in matrix_patch["summary_source_fact_keys"]:
+        resolution = resolved_by_key.get(fact_key)
+        if resolution is None or resolution in summary_resolutions:
+            raise IntakeGraphContractError("INTAKE_MATRIX_SUMMARY_SOURCE_INVALID")
+        summary_resolutions.add(resolution)
+
+
+def matrix_authority_record(
+    state: IntakeGraphStateV2,
+    snapshot: Mapping[str, Any],
+) -> dict[str, Any]:
+    private = state["bindings"]["private"]
+    actor_role = private["audience"]
+    initial_facts = snapshot.get("initial_case_facts")
+    initiator_role = (
+        initial_facts.get("initiator_role") if isinstance(initial_facts, Mapping) else None
+    )
+    proposal_mode = "NONE"
+    formal_matrix_hash: str | None = None
+    if initiator_role in {"USER", "MERCHANT"}:
+        if actor_role == initiator_role:
+            proposal_mode = "UNILATERAL"
+        else:
+            formal_matrix_hash = _locked_initiator_matrix_hash(
+                snapshot.get("current_dossier"),
+                case_id=private["case_id"],
+                initiator_role=initiator_role,
+                respondent_role=actor_role,
+            )
+            if formal_matrix_hash is not None:
+                proposal_mode = "RESPONDENT_DELTA"
+    return {
+        "schema_version": "intake-matrix-authority.v1",
+        "kind": "MATRIX_AUTHORITY",
+        "source_snapshot_hash": snapshot["snapshot_hash"],
+        "case_id": private["case_id"],
+        "room_epoch": private["room_epoch"],
+        "thread_id": private["thread_id"],
+        "actor_scope_hash": private["actor_scope_hash"],
+        "actor_role": actor_role,
+        "initiator_role": initiator_role if initiator_role in {"USER", "MERCHANT"} else None,
+        "proposal_mode": proposal_mode,
+        "formal_matrix_hash": formal_matrix_hash,
+    }
+
+
+def _require_matrix_authority(
+    state: IntakeGraphStateV2,
+    *,
+    required_mode: str,
+) -> str:
+    record = state.get("node_results", {}).get(MATRIX_AUTHORITY_RECORD_KEY)
+    private = state["bindings"]["private"]
+    if not isinstance(record, Mapping) or set(record) != _MATRIX_AUTHORITY_FIELDS:
+        raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_UNAUTHORIZED")
+    expected = {
+        "schema_version": "intake-matrix-authority.v1",
+        "kind": "MATRIX_AUTHORITY",
+        "source_snapshot_hash": state.get("initial_snapshot_hash"),
+        "case_id": private["case_id"],
+        "room_epoch": private["room_epoch"],
+        "thread_id": private["thread_id"],
+        "actor_scope_hash": private["actor_scope_hash"],
+        "actor_role": private["audience"],
+    }
+    if any(record.get(field) != value for field, value in expected.items()):
+        raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_UNAUTHORIZED")
+    actor_role = record.get("actor_role")
+    initiator_role = record.get("initiator_role")
+    if (
+        actor_role not in {"USER", "MERCHANT"}
+        or initiator_role not in {"USER", "MERCHANT"}
+        or record.get("proposal_mode") != required_mode
+    ):
+        raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_UNAUTHORIZED")
+    if required_mode == "UNILATERAL":
+        if actor_role != initiator_role or record.get("formal_matrix_hash") is not None:
+            raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_UNAUTHORIZED")
+    elif required_mode == "RESPONDENT_DELTA":
+        actual_hash = _locked_initiator_matrix_hash(
+            state.get("dossier_draft"),
+            case_id=private["case_id"],
+            initiator_role=initiator_role,
+            respondent_role=actor_role,
+        )
+        if actor_role == initiator_role or actual_hash != record.get("formal_matrix_hash"):
+            raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_UNAUTHORIZED")
+    else:
+        raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_UNAUTHORIZED")
+    return actor_role
+
+
+def _locked_initiator_matrix_hash(
+    dossier: Any,
+    *,
+    case_id: str,
+    initiator_role: str,
+    respondent_role: str,
+) -> str | None:
+    if not isinstance(dossier, Mapping):
+        return None
+    matrix = dossier.get("case_fact_matrix")
+    if not isinstance(matrix, Mapping):
+        return None
+    party_map = matrix.get("party_map")
+    generation = matrix.get("generation_ref")
+    fact_rows = matrix.get("fact_rows")
+    content_hash = matrix.get("content_hash")
+    matrix_version = matrix.get("matrix_version")
+    if (
+        matrix.get("schema_version") != "case_fact_matrix.v2"
+        or matrix.get("case_id") != case_id
+        or matrix.get("matrix_kind") != "INITIATOR_FROZEN"
+        or matrix.get("parent_ref") is not None
+        or not isinstance(matrix.get("matrix_id"), str)
+        or not _IDENTIFIER.fullmatch(matrix["matrix_id"])
+        or isinstance(matrix_version, bool)
+        or not isinstance(matrix_version, int)
+        or matrix_version < 1
+        or not isinstance(content_hash, str)
+        or not _SHA256.fullmatch(content_hash)
+        or not isinstance(party_map, Mapping)
+        or party_map.get("initiator_role") != initiator_role
+        or party_map.get("respondent_role") != respondent_role
+        or not isinstance(generation, Mapping)
+        or generation.get("actor_role") != initiator_role
+        or generation.get("source_stage") != "INITIATOR_INTAKE"
+        or not isinstance(fact_rows, list)
+        or not 1 <= len(fact_rows) <= 200
+    ):
+        return None
+    return content_hash
+
+
+def _visible_matrix_fact_index(
+    dossier: Any,
+) -> tuple[dict[str, Mapping[str, Any]], dict[bytes, str]]:
+    if not isinstance(dossier, Mapping):
+        raise IntakeGraphContractError("INTAKE_DOSSIER_INVALID")
+    by_id: dict[str, Mapping[str, Any]] = {}
+    by_fingerprint: dict[bytes, str] = {}
+    for branch in ("unilateral_case_matrix", "case_fact_matrix"):
+        matrix = dossier.get(branch)
+        if matrix is None:
+            continue
+        if not isinstance(matrix, Mapping):
+            raise IntakeGraphContractError("INTAKE_MATRIX_CURRENT_INVALID")
+        rows = matrix.get("fact_rows")
+        max_rows = 200 if branch == "case_fact_matrix" else 100
+        if not isinstance(rows, list) or not 1 <= len(rows) <= max_rows:
+            raise IntakeGraphContractError("INTAKE_MATRIX_CURRENT_INVALID")
+        for row in rows:
+            if not isinstance(row, Mapping):
+                raise IntakeGraphContractError("INTAKE_MATRIX_CURRENT_INVALID")
+            fact_id = row.get("fact_id")
+            if not isinstance(fact_id, str) or not _MATRIX_FACT_ID.fullmatch(fact_id):
+                raise IntakeGraphContractError("INTAKE_MATRIX_CURRENT_INVALID")
+            fingerprint = _matrix_row_fingerprint(row)
+            existing = by_id.get(fact_id)
+            if existing is not None and _matrix_row_fingerprint(existing) != fingerprint:
+                raise IntakeGraphContractError("INTAKE_DOSSIER_STABLE_ID_CONFLICT")
+            by_id[fact_id] = row
+            by_fingerprint.setdefault(fingerprint, fact_id)
+    return by_id, by_fingerprint
+
+
+def _matrix_row_fingerprint(row: Mapping[str, Any]) -> bytes:
+    category = row.get("category")
+    fact_target = row.get("fact_target")
+    if not isinstance(category, str) or not isinstance(fact_target, str) or not fact_target.strip():
+        raise IntakeGraphContractError("INTAKE_MATRIX_CURRENT_INVALID")
+    return canonicalize({"category": category, "fact_target": fact_target})
+
+
+def _matches_previous_matrix_semantics(
+    draft: Mapping[str, Any],
+    previous: Mapping[str, Any],
+    *,
+    actor_role: str,
+    patch_kind: str,
+) -> bool:
+    if draft.get("materiality") != previous.get("materiality"):
+        return False
+    if patch_kind == "RESPONDENT_DELTA" and draft.get("stance") == "NOT_ADDRESSED":
+        return True
+    positions = previous.get("positions")
+    position = positions.get(actor_role) if isinstance(positions, Mapping) else None
+    if not isinstance(position, Mapping):
+        position = previous.get("initiator_position")
+    if not isinstance(position, Mapping):
+        return False
+    expected = {
+        "position_summary": position.get("position_summary"),
+        "asserted_value": position.get("asserted_value"),
+    }
+    if patch_kind == "RESPONDENT_DELTA":
+        expected["stance"] = position.get("stance")
+    return all(draft.get(field) == value for field, value in expected.items())
 
 
 def validate_dossier_transition(previous: Mapping[str, Any], current: Mapping[str, Any]) -> None:

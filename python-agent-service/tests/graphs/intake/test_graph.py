@@ -473,34 +473,27 @@ def test_cognition_draft_is_rejected_before_an_oversized_state_patch(
 
 
 @pytest.mark.parametrize(
-    ("matrix_patch", "error_code"),
+    "matrix_patch",
     [
-        (
-            {"fact_rows": [], "source_refs": []},
-            "INTAKE_DOSSIER_STABLE_ID_DELETED",
-        ),
-        (
-            {
-                "fact_rows": [
-                    {
-                        "fact_id": "FACT_DAMAGE",
-                        "category": "PRODUCT",
-                        "fact_target": "A rebound fact target.",
-                    }
-                ],
-                "source_refs": ["MESSAGE_P4_USER_1"],
-            },
-            "INTAKE_DOSSIER_STABLE_ID_REBOUND",
-        ),
+        {"fact_rows": [], "source_refs": []},
+        {
+            "fact_rows": [
+                {
+                    "fact_id": "FACT_DAMAGE",
+                    "category": "PRODUCT",
+                    "fact_target": "A rebound fact target.",
+                }
+            ],
+            "source_refs": ["MESSAGE_P4_USER_1"],
+        },
     ],
 )
-def test_dossier_patch_cannot_delete_or_rebind_stable_fact_sources(
+def test_dossier_patch_cannot_bypass_the_dedicated_matrix_patch(
     bindings,
     version_pins,
     snapshot,
     event,
     matrix_patch,
-    error_code,
 ) -> None:
     snapshot["current_dossier"]["case_fact_matrix"] = {
         "fact_rows": [
@@ -539,5 +532,5 @@ def test_dossier_patch_cannot_delete_or_rebind_stable_fact_sources(
         attempt_id="ATTEMPT_P4_USER_2_1",
     )
 
-    with pytest.raises(IntakeGraphContractError, match=error_code):
+    with pytest.raises(IntakeGraphContractError, match="INTAKE_COGNITION_DRAFT_INVALID"):
         graph.invoke(state, context=IntakeTurnContext("EVENT", event))

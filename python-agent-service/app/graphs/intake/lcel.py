@@ -31,6 +31,7 @@ from app.graphs.intake.state import IntakeGraphStateV2
 from app.graphs.intake.validators import (
     validate_cognition_patch,
     validate_dossier_transition,
+    validate_matrix_patch,
     validate_state,
 )
 from app.model_runtime.governed_chat_model import GovernedChatModel
@@ -1207,6 +1208,7 @@ def _validate_business_output(
         existing_fact_ids=existing_fact_ids,
         inherited_refs=frozenset(),
     )
+    validate_matrix_patch(state, output.get("matrix_patch"))
     patch = output.get("dossier_patch", {})
     if not isinstance(patch, dict):
         raise IntakeGraphContractError("INTAKE_LCEL_DOSSIER_PATCH_INVALID")

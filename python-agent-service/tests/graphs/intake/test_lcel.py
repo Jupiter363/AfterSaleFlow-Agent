@@ -987,6 +987,56 @@ def test_strict_parser_rejects_unknown_and_formal_action_fields(mutation) -> Non
         built.parser.invoke(json.dumps(document))
 
 
+def test_strict_parser_accepts_delta_but_requires_explicit_stance() -> None:
+    matrix_patch = {
+        "schema_version": "case_fact_matrix.delta.v2",
+        "fact_rows": [
+            {
+                "fact_key": "FACT_DAMAGE",
+                "category": "PRODUCT_STATE",
+                "fact_target": "Whether the order arrived damaged.",
+                "materiality": "CORE",
+                "stance": "DENY",
+                "position_summary": "The current actor disputes the reported damage.",
+                "source_scope": "CURRENT_SOURCE",
+            }
+        ],
+        "summary_source_fact_keys": ["FACT_DAMAGE"],
+    }
+    built = build_intake_model_node(
+        transport=IntakeTransport(),
+        profile=_profile(),
+        policy=_policy(),
+    )
+    import json
+
+    parsed = built.parser.invoke(
+        json.dumps(
+            _draft(
+                matrix_patch=matrix_patch,
+                readiness="INCOMPLETE",
+                missing_fields=["supporting_evidence"],
+                recommendation="NEED_MORE_INFO",
+            )
+        )
+    )
+    assert parsed.matrix_patch is not None
+    assert parsed.matrix_patch.fact_rows[0].stance == "DENY"
+
+    matrix_patch["fact_rows"][0].pop("stance")
+    with pytest.raises(OutputParserException, match="stance"):
+        built.parser.invoke(
+            json.dumps(
+                _draft(
+                    matrix_patch=matrix_patch,
+                    readiness="INCOMPLETE",
+                    missing_fields=["supporting_evidence"],
+                    recommendation="NEED_MORE_INFO",
+                )
+            )
+        )
+
+
 @pytest.mark.parametrize("confidence", [True, "0.9"])
 def test_strict_parser_rejects_non_numeric_confidence(confidence) -> None:
     built = build_intake_model_node(
