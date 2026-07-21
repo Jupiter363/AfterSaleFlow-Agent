@@ -59,6 +59,34 @@ class TemporalWorkerConfigurationTest {
     }
 
     @Test
+    void controlWorkerRejectsUnversionedRoutingBeforeResolvingAuthorityDependencies() {
+        TemporalWorkerProperties properties = properties(WorkerRole.CONTROL, VersioningMode.NONE);
+        org.springframework.beans.factory.ObjectProvider<IntakeChildBridgeReadPort>
+                intakeChildBridgeReadPortProvider = mockProvider(IntakeChildBridgeReadPort.class);
+        AppProperties appProperties = mock(AppProperties.class);
+
+        try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+            TemporalWorkerConfiguration configuration = new TemporalWorkerConfiguration();
+            assertThatThrownBy(
+                            () ->
+                                    configuration.temporalControlWorkerFactory(
+                                            environment.getWorkflowClient(),
+                                            appProperties,
+                                            properties,
+                                            new TemporalWorkerOptionsFactory(properties),
+                                            mock(EvidenceWindowActivitiesAdapter.class),
+                                            mock(CaseProcessLedgerActivitiesImpl.class),
+                                            mock(ProcessProjectionActivitiesImpl.class),
+                                            intakeChildBridgeReadPortProvider))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining(
+                            "requires Temporal versioningMode BUILD_ID or DEPLOYMENT");
+        }
+
+        verifyNoInteractions(intakeChildBridgeReadPortProvider);
+    }
+
+    @Test
     void agentRolePollsOnlyTheAgentExecutionQueue() {
         TemporalWorkerProperties properties = properties(WorkerRole.AGENT);
 
@@ -232,7 +260,11 @@ class TemporalWorkerConfigurationTest {
     }
 
     private static TemporalWorkerProperties properties(WorkerRole role) {
-        return properties(role, VersioningMode.NONE);
+        return properties(
+                role,
+                role == WorkerRole.CONTROL
+                        ? VersioningMode.BUILD_ID
+                        : VersioningMode.NONE);
     }
 
     private static TemporalWorkerProperties properties(
@@ -282,7 +314,8 @@ class TemporalWorkerConfigurationTest {
         assertThat(description.role()).isEqualTo(role.name());
         assertThat(description.taskQueue()).isEqualTo(taskQueue);
         assertThat(description.buildId()).isEqualTo("test-build");
-        assertThat(description.versioningMode()).isEqualTo("NONE");
+        assertThat(description.versioningMode())
+                .isEqualTo(role == WorkerRole.CONTROL ? "BUILD_ID" : "NONE");
     }
 
     private static void shutdown(WorkerFactory factory) {

@@ -5,9 +5,12 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.dispute.workflow.config.TemporalWorkerProperties.VersioningMode;
 import com.example.dispute.workflow.config.TemporalWorkerProperties.WorkerRole;
+import java.io.IOException;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.boot.env.YamlPropertySourceLoader;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.context.annotation.Configuration;
 
 class TemporalWorkerPropertiesTest {
@@ -45,6 +48,23 @@ class TemporalWorkerPropertiesTest {
         assertThatThrownBy(() -> new TemporalWorkerProperties.QueueCapacity(8, 8, 1, 2, 0))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("workflowPollers must be between 2 and 64");
+    }
+
+    @Test
+    void controlWorkerProfileRequiresLegacyBuildIdRouting() throws IOException {
+        var profile =
+                new YamlPropertySourceLoader()
+                        .load(
+                                "control-worker",
+                                new ClassPathResource("application-control-worker.yml"))
+                        .getFirst();
+
+        assertThat(profile.getProperty("app.temporal.worker.enabled")).isEqualTo(true);
+        assertThat(profile.getProperty("app.temporal.worker.role")).isEqualTo("CONTROL");
+        assertThat(profile.getProperty("app.temporal.worker.versioning-mode"))
+                .isEqualTo("BUILD_ID");
+        assertThat(profile.getProperty("app.temporal.worker.deployment-name"))
+                .isEqualTo("after-sale-control");
     }
 
     @Configuration(proxyBeanMethods = false)

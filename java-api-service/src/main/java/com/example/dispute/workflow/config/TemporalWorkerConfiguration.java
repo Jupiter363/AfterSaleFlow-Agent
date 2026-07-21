@@ -62,6 +62,7 @@ public class TemporalWorkerConfiguration {
             CaseProcessLedgerActivitiesImpl ledgerActivities,
             ProcessProjectionActivitiesImpl projectionActivities,
             ObjectProvider<IntakeChildBridgeReadPort> intakeChildBridgeReadPortProvider) {
+        requireVersionedControlWorker(properties);
         IntakeAuthorityWorkerRegistration intakeAuthorityRegistration =
                 IntakeAuthorityWorkerRegistration.fromReadPortProvider(intakeChildBridgeReadPortProvider);
         WorkerFactory factory =
@@ -222,6 +223,13 @@ public class TemporalWorkerConfiguration {
                         == TemporalWorkerProperties.VersioningMode.NONE) {
             throw new IllegalStateException(
                     "AgentRun v3 requires Temporal versioningMode BUILD_ID or DEPLOYMENT");
+        }
+    }
+
+    private static void requireVersionedControlWorker(TemporalWorkerProperties properties) {
+        if (properties.versioningMode() == TemporalWorkerProperties.VersioningMode.NONE) {
+            throw new IllegalStateException(
+                    "Control worker requires Temporal versioningMode BUILD_ID or DEPLOYMENT for v1 activity compatibility");
         }
     }
 

@@ -106,7 +106,7 @@ class IntakeAuthorityWorkerRegistrationTest {
                                 registration.caseControlActivityImplementations(
                                         v2Bridge, registration.bridgeActivities()))
                 .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("must not register legacy");
+                .hasMessageContaining("exactly one authority-backed");
         assertThat(TestV2BridgeActivities.class.isAssignableFrom(IntakeChildBridgeActivities.class))
                 .isFalse();
     }

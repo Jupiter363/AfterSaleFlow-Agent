@@ -13,6 +13,8 @@ app:
     worker:
       enabled: true
       role: CONTROL
+      # Retained prior builds drain scheduled/retrying v1 bridge Activities.
+      versioning-mode: BUILD_ID
       deployment-name: after-sale-control
 
 dispute:
