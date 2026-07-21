@@ -497,6 +497,39 @@ def test_delta_rejects_materiality_rebind_for_every_source_scope(
         validate_matrix_patch(state, patch)
 
 
+def test_delta_allows_new_fact_with_mixed_scope_under_current_source_authority(
+    bindings,
+    version_pins,
+    snapshot,
+) -> None:
+    _, _, state = _respondent_state(bindings, version_pins, snapshot)
+    patch = _delta_patch()
+    new_row = {
+        "fact_key": "NEW_DISPATCH_CONDITION",
+        "category": "PRODUCT_STATE",
+        "fact_target": "Whether the item was undamaged when dispatched.",
+        "materiality": "SUPPORTING",
+        "stance": "CONFIRM",
+        "position_summary": "The respondent reports an undamaged dispatch condition.",
+        "asserted_value": "undamaged at dispatch",
+        "source_scope": "PREVIOUS_AND_CURRENT_SOURCE",
+    }
+    patch["fact_rows"].append(new_row)
+    patch["summary_source_fact_keys"].append(new_row["fact_key"])
+
+    current_source = state.get("last_event_ref") or state.get("initial_snapshot_ref")
+    assert isinstance(current_source, str)
+    assert "source_refs" not in new_row
+    validate_matrix_patch(state, patch)
+    assert new_row["source_scope"] == "PREVIOUS_AND_CURRENT_SOURCE"
+
+    missing_current_source = copy.deepcopy(state)
+    missing_current_source["last_event_ref"] = None
+    missing_current_source["initial_snapshot_ref"] = None
+    with pytest.raises(IntakeGraphContractError, match="INTAKE_MATRIX_CURRENT_SOURCE_MISSING"):
+        validate_matrix_patch(missing_current_source, patch)
+
+
 def test_not_addressed_only_carries_a_prior_fact_without_asserted_value(
     bindings,
     version_pins,

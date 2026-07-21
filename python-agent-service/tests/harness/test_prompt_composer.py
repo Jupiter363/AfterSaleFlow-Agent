@@ -34,12 +34,16 @@ def test_prompt_repository_loads_common_fragments_and_agent_prompt() -> None:
 # 上下游：上游为 Java 可信快照、调用身份、上下文合同、角色模板；下游为 协作调用 `render`、`PromptRepository`。
 # 系统意义：固定“Agent Harness > test_prompt_composer”的可观察契约，防止后续重构改变业务结果。
 def test_intake_officer_prompt_declares_context_pack_workflow_contract() -> None:
-    system_prompt, _ = PromptRepository().render(
+    repository = PromptRepository()
+    system_prompt, _ = repository.render(
         "intake_turn_case_detail",
         {"case_id": "CASE_prompt_contract"},
         {"type": "object"},
     )
 
+    assert repository.template_path("intake_turn_case_detail") == Path(
+        "app/agents/prompts/dispute_intake_officer/intake_turn_case_detail.md"
+    )
     assert "上下文包" in system_prompt
     assert "current_user_message" in system_prompt
     assert "initial_case_facts" in system_prompt
@@ -62,6 +66,14 @@ def test_intake_officer_prompt_declares_context_pack_workflow_contract() -> None
     assert "dispute_core_state" in system_prompt
     assert "发起方主观转述或尚未回应" in system_prompt
     assert "发起方单方陈述（主观）" in system_prompt
+    assert (
+        "FACT_* 行无论使用 CURRENT_SOURCE、PREVIOUS_MATRIX 还是 "
+        "PREVIOUS_AND_CURRENT_SOURCE" in system_prompt
+    )
+    assert "必须与上一版冻结事实的 materiality 完全一致" in system_prompt
+    assert "NEW_* 禁止使用 PREVIOUS_MATRIX" in system_prompt
+    assert "NEW_* 使用 PREVIOUS_AND_CURRENT_SOURCE 合法" in system_prompt
+    assert "只提供当前授权来源" in system_prompt
     assert len(system_prompt) < 10_000
 
 
