@@ -679,6 +679,7 @@ batches:
     slices: [P4-S2, P4-S3, P4-S4, P4-S5]
     static_tests:
       - tests/static/test_phase4_no_formal_sink_assembly.py
+      - tests/static/test_phase4_r15_authority_binding_contract.py
     python_tests:
       - python-agent-service/tests/graphs/intake
       - python-agent-service/tests/agents/test_intake_turn.py
@@ -721,13 +722,12 @@ batches:
       - frontend/src/api/agentStream.test.js
       - frontend/src/stores/agentStream.test.js
       - frontend/src/stores/room.test.js
-    static_tests:
-      - tests/static/test_phase4_r15_authority_binding_contract.py
     source_commands:
       - id: p4_r15_contract_static_batch_2
         cwd: .
         command: >-
           D:\miniconda\python.exe -m pytest
+          tests/static/test_phase4_no_formal_sink_assembly.py
           tests/static/test_phase4_r15_authority_binding_contract.py
           -q
     execution:
