@@ -7,14 +7,25 @@ import static io.temporal.api.enums.v1.WorkflowIdReusePolicy.WORKFLOW_ID_REUSE_P
 
 import com.example.dispute.workflow.contract.v1.CaseCommandRef;
 import com.example.dispute.workflow.contract.v1.CaseProcessWorkflowProtocol;
+import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
+import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
 import com.example.dispute.workflow.contract.v1.ProvisionRoomEpoch;
 import com.example.dispute.workflow.contract.v1.ProvisionRoomEpochReceipt;
 import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.CommandLifecycleOutcome;
 import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.ExpireCaseCommand;
 import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.RecordCaseCommandRouted;
 import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.RecordCaseCommandRoutedResult;
+import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.ActiveChildDescriptor;
+import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.ActiveChildKind;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.ClosedRoomTuple;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.ProvisionedRoomEpochHighWater;
+import com.example.dispute.workflow.temporal.caseprocess.IntakeChildBridgeActivities.ActiveChildBinding;
+import com.example.dispute.workflow.temporal.caseprocess.IntakeChildBridgeActivities.CommandBinding;
+import com.example.dispute.workflow.temporal.caseprocess.IntakeChildBridgeActivities.CommandRequest;
+import com.example.dispute.workflow.temporal.caseprocess.IntakeChildBridgeActivities.DomainEventBinding;
+import com.example.dispute.workflow.temporal.caseprocess.IntakeChildBridgeActivities.DomainEventRequest;
+import com.example.dispute.workflow.temporal.caseprocess.IntakeChildBridgeActivities.StartBinding;
+import com.example.dispute.workflow.temporal.caseprocess.IntakeChildBridgeActivities.StartRequest;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessLedgerActivities.CaseCommandLedgerEntry;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessLedgerActivities.CaseCommandLedgerState;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessLedgerActivities.LoadSequenceRange;
@@ -22,6 +33,7 @@ import com.example.dispute.workflow.temporal.caseprocess.CaseProcessLedgerActivi
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessLedgerActivities.SequenceStream;
 import com.example.dispute.workflow.temporal.room.common.RoomControlStart;
 import com.example.dispute.workflow.temporal.room.common.RoomControlWorkflow;
+import com.example.dispute.workflow.temporal.room.intake.IntakeRoomWorkflow;
 import io.temporal.activity.ActivityOptions;
 import io.temporal.api.common.v1.WorkflowExecution;
 import io.temporal.common.RetryOptions;
@@ -65,8 +77,14 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
       "case-process-room-epoch-provision-v1";
   private static final String AUTHORITY_CHECKPOINT_CHANGE_ID =
       "case-process-authority-checkpoint-v1";
+  private static final String TYPED_INTAKE_CHILD_CHANGE_ID = "typed-intake-room-child-v1";
   private static final String AUTHORITY_CHECKPOINT_MEMO_KEY =
       "case_process_authority_checkpoint_v1";
+  private static final String SELECTION_V1 = "room-epoch-selection.v1";
+  private static final String SELECTION_V2 = "room-epoch-selection.v2";
+  private static final String INTAKE_ROOM_WORKFLOW_TYPE = "IntakeRoomWorkflow";
+  private static final String INTAKE_ROOM_WORKFLOW_BUILD_ID = "intake-room.synthetic.v1";
+  private static final String INTAKE_GRAPH_KEY = "intake.v2";
   private static final int INBOX_CAPACITY = 128;
   private static final int LOAD_BATCH_SIZE = 64;
   private static final int MAX_GAP_RECOVERY_ATTEMPTS = 3;
@@ -104,6 +122,23 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
                       .setMaximumAttempts(0)
                       .build())
               .build());
+  private final IntakeChildBridgeActivities intakeChildBridgeActivities =
+      Workflow.newActivityStub(
+          IntakeChildBridgeActivities.class,
+          ActivityOptions.newBuilder()
+              .setTaskQueue(CASE_CONTROL_TASK_QUEUE)
+              .setStartToCloseTimeout(Duration.ofSeconds(10))
+              .setScheduleToCloseTimeout(Duration.ofSeconds(30))
+              .setRetryOptions(
+                  RetryOptions.newBuilder()
+                      .setInitialInterval(Duration.ofSeconds(1))
+                      .setMaximumInterval(Duration.ofSeconds(5))
+                      .setMaximumAttempts(3)
+                      .setDoNotRetry(
+                          "INTAKE_CHILD_BRIDGE_INVARIANT",
+                          "INTAKE_CHILD_BRIDGE_READ_UNCLASSIFIED")
+                      .build())
+              .build());
   private final WorkflowQueue<PendingCommand> commandInbox = Workflow.newQueue(INBOX_CAPACITY);
   private final WorkflowQueue<CaseDomainEventRef> eventInbox = Workflow.newQueue(INBOX_CAPACITY);
   private final WorkflowQueue<PendingProvisioning> provisioningInbox =
@@ -124,12 +159,14 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
 
   private String tenantSurrogate;
   private String caseId;
-  private com.example.dispute.workflow.contract.v1.ContractTypes.RoomType activeRoomType;
+  private RoomType activeRoomType;
   private long activeRoomEpoch = -1;
   private String activeChildWorkflowId;
   private String activeChildWorkflowRunId;
   private long activeFencingToken;
   private RoomControlWorkflow activeRoomChild;
+  private IntakeRoomWorkflow activeIntakeChild;
+  private ActiveChildDescriptor activeChildDescriptor;
   private long observedProcessRevision;
   private long nextCommandSequence = 1;
   private long nextCaseEventSequence = 1;
@@ -151,6 +188,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
   private Boolean futureRoomEventRetentionEnabled;
   private Boolean provisioningEnabled;
   private boolean authorityCheckpointEnabled;
+  private int typedIntakeChildVersion;
   private boolean provisioningSwitchInProgress;
   private String protocolErrorCode;
   private Promise<Void> runMaxAgeTimer;
@@ -162,6 +200,9 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
         Workflow.getVersion(ROOM_EPOCH_PROVISION_CHANGE_ID, Workflow.DEFAULT_VERSION, 1) == 1;
     authorityCheckpointEnabled =
         Workflow.getVersion(AUTHORITY_CHECKPOINT_CHANGE_ID, Workflow.DEFAULT_VERSION, 1) == 1;
+    typedIntakeChildVersion =
+        Workflow.getVersion(TYPED_INTAKE_CHILD_CHANGE_ID, Workflow.DEFAULT_VERSION, 1);
+    restoreActiveChildStub();
     restoreAuthorityCheckpoint();
     runMaxAgeTimer = Workflow.newTimer(RUN_MAX_AGE);
     while (true) {
@@ -325,7 +366,11 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
         provisioningCommitments.size(),
         currentProvisioningCommitment() == null
             ? null
-            : currentProvisioningCommitment().payloadSha256());
+            : currentProvisioningCommitment().payloadSha256(),
+        activeChildDescriptor == null ? null : activeChildDescriptor.kind(),
+        activeChildDescriptor == null ? null : activeChildDescriptor.selectionSchemaVersion(),
+        activeChildDescriptor == null ? null : activeChildDescriptor.roomWorkflowType(),
+        activeChildDescriptor == null ? null : activeChildDescriptor.roomWorkflowBuildId());
   }
 
   @Override
@@ -360,6 +405,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
     activeChildWorkflowId = carry.activeChildWorkflowId();
     activeChildWorkflowRunId = carry.activeChildWorkflowRunId();
     activeFencingToken = carry.activeFencingToken();
+    activeChildDescriptor = carry.activeChildDescriptor();
     observedProcessRevision = carry.observedProcessRevision();
     nextCommandSequence = carry.nextCommandSequence();
     nextCaseEventSequence = carry.nextCaseEventSequence();
@@ -383,13 +429,118 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
         .highestProvisionedEpochs()
         .forEach(
             highWater -> highestProvisionedEpochs.put(highWater.roomType(), highWater.roomEpoch()));
-    if (activeChildWorkflowId != null) {
-      activeRoomChild =
-          Workflow.newExternalWorkflowStub(RoomControlWorkflow.class, activeChildWorkflowId);
-    }
+    normalizeAndValidateActiveChildDescriptor();
     if (tenantSurrogate != null) {
       requireWorkflowIdentity(tenantSurrogate, caseId);
     }
+  }
+
+  private void restoreActiveChildStub() {
+    if (!hasActiveChild()) {
+      return;
+    }
+    if (activeChildDescriptor.kind() == ActiveChildKind.GENERIC_ROOM_CONTROL) {
+      activeRoomChild =
+          Workflow.newExternalWorkflowStub(RoomControlWorkflow.class, activeChildWorkflowId);
+      return;
+    }
+    if (typedIntakeChildVersion != 1) {
+      throw protocolFailure(
+          "INTAKE_CHILD_ACTIVE_BINDING_INVALID",
+          "typed Intake carry state requires the typed child version marker");
+    }
+    validateTypedDescriptor(activeChildDescriptor);
+    activeIntakeChild =
+        Workflow.newExternalWorkflowStub(IntakeRoomWorkflow.class, activeChildWorkflowId);
+  }
+
+  private void normalizeAndValidateActiveChildDescriptor() {
+    if (activeChildWorkflowId == null) {
+      if (activeChildDescriptor != null) {
+        throw protocolFailure(
+            "INTAKE_CHILD_ACTIVE_BINDING_INVALID",
+            "inactive carry state contains an active child descriptor");
+      }
+      return;
+    }
+    if (activeChildDescriptor == null) {
+      ProvisioningCommitment commitment = currentProvisioningCommitment();
+      if (commitment != null) {
+        activeChildDescriptor =
+            descriptor(
+                commitment.request(),
+                ActiveChildKind.GENERIC_ROOM_CONTROL,
+                activeChildWorkflowRunId);
+      } else {
+        activeChildDescriptor =
+            new ActiveChildDescriptor(
+                ActiveChildKind.GENERIC_ROOM_CONTROL,
+                SELECTION_V1,
+                WriterMode.LEGACY,
+                CaseProcessWorkflowProtocol.CASE_WORKFLOW_TYPE,
+                "legacy-case-control.v1",
+                null,
+                null,
+                activeRoomType,
+                activeRoomEpoch,
+                activeFencingToken,
+                activeChildWorkflowId,
+                activeChildWorkflowRunId);
+      }
+    }
+    if (activeChildDescriptor.roomType() != activeRoomType
+        || activeChildDescriptor.roomEpoch() != activeRoomEpoch
+        || activeChildDescriptor.fencingToken() != activeFencingToken
+        || !activeChildDescriptor.workflowId().equals(activeChildWorkflowId)
+        || !Objects.equals(activeChildDescriptor.startedRunId(), activeChildWorkflowRunId)) {
+      throw protocolFailure(
+          "INTAKE_CHILD_ACTIVE_BINDING_INVALID",
+          "active child descriptor does not match the carried child identity");
+    }
+    validatePersistedDescriptor(activeChildDescriptor);
+  }
+
+  private static void validatePersistedDescriptor(ActiveChildDescriptor descriptor) {
+    if (SELECTION_V1.equals(descriptor.selectionSchemaVersion())) {
+      if (descriptor.kind() != ActiveChildKind.GENERIC_ROOM_CONTROL) {
+        throw protocolFailure(
+            "INTAKE_CHILD_ACTIVE_BINDING_INVALID",
+            "v1 selection cannot restore a typed child");
+      }
+      return;
+    }
+    if (!SELECTION_V2.equals(descriptor.selectionSchemaVersion())
+        || descriptor.writerMode() == WriterMode.LEGACY
+        || descriptor.roomType() != RoomType.INTAKE
+        || !CaseProcessWorkflowProtocol.CASE_WORKFLOW_TYPE.equals(descriptor.caseWorkflowType())
+        || !INTAKE_ROOM_WORKFLOW_TYPE.equals(descriptor.roomWorkflowType())
+        || !INTAKE_ROOM_WORKFLOW_BUILD_ID.equals(descriptor.roomWorkflowBuildId())) {
+      throw protocolFailure(
+          "INTAKE_CHILD_ACTIVE_BINDING_INVALID",
+          "persisted active child selection is invalid");
+    }
+  }
+
+  private static void validateTypedDescriptor(ActiveChildDescriptor descriptor) {
+    if (descriptor != null) {
+      validatePersistedDescriptor(descriptor);
+    }
+    if (descriptor == null
+        || descriptor.kind() != ActiveChildKind.TYPED_INTAKE
+        || !SELECTION_V2.equals(descriptor.selectionSchemaVersion())
+        || descriptor.writerMode() == WriterMode.LEGACY
+        || descriptor.roomType() != RoomType.INTAKE
+        || descriptor.fencingToken() < 1
+        || !CaseProcessWorkflowProtocol.CASE_WORKFLOW_TYPE.equals(descriptor.caseWorkflowType())
+        || !INTAKE_ROOM_WORKFLOW_TYPE.equals(descriptor.roomWorkflowType())
+        || !INTAKE_ROOM_WORKFLOW_BUILD_ID.equals(descriptor.roomWorkflowBuildId())) {
+      throw protocolFailure(
+          "INTAKE_CHILD_ACTIVE_BINDING_INVALID", "persisted typed Intake binding is invalid");
+    }
+  }
+
+  private boolean hasActiveChild() {
+    return activeChildDescriptor != null;
   }
 
   private boolean processNextProvisioning() {
@@ -413,7 +564,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
       }
       boolean initialBootstrap =
           provisioningCommitments.isEmpty()
-              && activeRoomChild == null
+              && !hasActiveChild()
               && processedCommandCount == 0
               && processedEventCount == 0;
       if ((!initialBootstrap && request.initialProcessRevision() != observedProcessRevision)
@@ -423,67 +574,21 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
             "provisioning process revision does not match case authority");
       }
       bindIdentity(request.tenantSurrogate(), request.caseId());
+      ActiveChildKind childKind = selectProvisionedChildKind(request);
+      StartedChild started = startProvisionedChild(request, pending.payloadSha256(), childKind);
 
-      RoomControlWorkflow child =
-          Workflow.newChildWorkflowStub(
-              RoomControlWorkflow.class,
-              ChildWorkflowOptions.newBuilder()
-                  .setWorkflowId(request.roomWorkflowId())
-                  .setTaskQueue(ROOM_CONTROL_TASK_QUEUE)
-                  .setWorkflowIdReusePolicy(WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE)
-                  .setParentClosePolicy(PARENT_CLOSE_POLICY_ABANDON)
-                  .build());
-      RoomControlStart start =
-          new RoomControlStart(
-              "room-control-start.v1",
-              request.tenantSurrogate(),
-              request.caseId(),
-              request.epochId(),
-              request.roomId(),
-              request.roomType(),
-              request.roomEpoch(),
-              request.caseWorkflowId(),
-              request.roomWorkflowId(),
-              request.firstCommandSequence(),
-              request.firstCaseEventSequence(),
-              request.fencingToken(),
-              request.initialProcessRevision(),
-              request.initialRoomRevision(),
-              request.macroPhase(),
-              request.currentRoom(),
-              request.roomPhase(),
-              request.projectedDeadlineAt(),
-              request.writerMode(),
-              request.selectionSchemaVersion(),
-              request.processContractVersion(),
-              request.workflowType(),
-              request.temporalBuildId(),
-              request.roomWorkflowType(),
-              request.roomWorkflowBuildId(),
-              request.graphKey(),
-              request.graphVersion(),
-              request.checkpointSchemaVersion(),
-              request.streamProtocol(),
-              request.lastCommandSequence(),
-              request.lastCaseEventSequence(),
-              request.projectionRef(),
-              request.projectionSha256(),
-              request.requestedAt(),
-              Workflow.getInfo().getFirstExecutionRunId(),
-              pending.payloadSha256());
-      Promise<Void> childCompletion = Async.procedure(child::run, start);
-      childCompletion.exceptionally(failure -> null);
-      WorkflowExecution childExecution = Workflow.getWorkflowExecution(child).get();
-
-      if (activeRoomChild != null) {
-        closeActiveRoomChild("ROOM_CONTROL_REPLACED_BY_PROVISIONING");
+      if (hasActiveChild()) {
+        retireActiveChild("ROOM_CONTROL_REPLACED_BY_PROVISIONING");
       }
-      activeRoomChild = child;
+      activeRoomChild = started.genericChild();
+      activeIntakeChild = started.typedIntakeChild();
       activeRoomType = request.roomType();
       activeRoomEpoch = request.roomEpoch();
       activeChildWorkflowId = request.roomWorkflowId();
-      activeChildWorkflowRunId = childExecution.getRunId();
+      activeChildWorkflowRunId = started.execution().getRunId();
       activeFencingToken = request.fencingToken();
+      activeChildDescriptor =
+          descriptor(request, childKind, activeChildWorkflowRunId);
       observedProcessRevision = request.initialProcessRevision();
 
       ProvisionRoomEpochReceipt receipt =
@@ -523,7 +628,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
               Workflow.getInfo().getWorkflowId(),
               Workflow.getInfo().getFirstExecutionRunId(),
               request.roomWorkflowId(),
-              childExecution.getRunId(),
+              started.execution().getRunId(),
               pending.payloadSha256());
       ProvisioningCommitment commitment =
           new ProvisioningCommitment(pending.updateId(), pending.payloadSha256(), request, receipt);
@@ -534,6 +639,9 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
         Workflow.upsertMemo(Map.of(AUTHORITY_CHECKPOINT_MEMO_KEY, receipt));
       }
       pending.complete(receipt);
+    } catch (TypedChildOperationFailure failure) {
+      protocolErrorCode = failure.errorCode();
+      pending.fail(protocolFailure(failure.errorCode(), failure.getMessage()));
     } catch (ApplicationFailure failure) {
       protocolErrorCode = failure.getType();
       pending.fail(failure);
@@ -549,6 +657,283 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
       pendingProvisioningByUpdateId.remove(pending.updateId());
     }
     return true;
+  }
+
+  private void routeCommandToActiveChild(CaseCommandRef command) {
+    if (activeChildDescriptor.kind() == ActiveChildKind.GENERIC_ROOM_CONTROL) {
+      if (activeRoomChild == null) {
+        throw new TypedChildOperationFailure(
+            "INTAKE_CHILD_ACTIVE_BINDING_INVALID",
+            "generic active child stub is missing",
+            null);
+      }
+      activeRoomChild.commandAccepted(command);
+      return;
+    }
+    ActiveChildBinding expected = activeBinding();
+    CommandBinding binding;
+    try {
+      binding =
+          intakeChildBridgeActivities.bindCommand(
+              new CommandRequest("intake-child-command-request.v1", command, expected));
+    } catch (ActivityFailure failure) {
+      rethrowIfCanceled(failure);
+      throw new TypedChildOperationFailure(
+          "INTAKE_CHILD_BRIDGE_COMMAND_FAILED",
+          "typed Intake command binding Activity failed",
+          failure);
+    }
+    requireReturnedActiveBinding(binding == null ? null : binding.activeBinding(), expected);
+    if (binding.command() == null) {
+      throw new TypedChildOperationFailure(
+          "INTAKE_CHILD_BRIDGE_COMMAND_BINDING_INVALID",
+          "typed Intake command binding is missing its command",
+          null);
+    }
+    if (activeIntakeChild == null) {
+      throw new TypedChildOperationFailure(
+          "INTAKE_CHILD_ACTIVE_BINDING_INVALID",
+          "typed Intake active child stub is missing",
+          null);
+    }
+    try {
+      activeIntakeChild.commandAccepted(binding.command());
+    } catch (CanceledFailure failure) {
+      throw failure;
+    } catch (SignalExternalWorkflowException | TemporalFailure failure) {
+      throw new TypedChildOperationFailure(
+          "INTAKE_CHILD_COMMAND_SIGNAL_FAILED",
+          "typed Intake child could not accept the command",
+          failure);
+    }
+  }
+
+  private ActiveChildKind selectProvisionedChildKind(ProvisionRoomEpoch request) {
+    return selectProvisionedChildKind(
+        typedIntakeChildVersion,
+        request.selectionSchemaVersion(),
+        request.writerMode(),
+        request.roomType(),
+        request.caseWorkflowType(),
+        request.roomWorkflowType(),
+        request.roomWorkflowBuildId(),
+        request.graphKey());
+  }
+
+  static ActiveChildKind selectProvisionedChildKind(
+      int markerVersion,
+      String selectionSchemaVersion,
+      WriterMode writerMode,
+      RoomType roomType,
+      String caseWorkflowType,
+      String roomWorkflowType,
+      String roomWorkflowBuildId,
+      String graphKey) {
+    if (SELECTION_V1.equals(selectionSchemaVersion)) {
+      if (roomWorkflowType != null || roomWorkflowBuildId != null) {
+        throw protocolFailure(
+            "INTAKE_CHILD_SELECTION_VERSION_INVALID",
+            "v1 selection cannot contain a room child Workflow binding");
+      }
+      return ActiveChildKind.GENERIC_ROOM_CONTROL;
+    }
+    if (!SELECTION_V2.equals(selectionSchemaVersion)) {
+      throw protocolFailure(
+          "INTAKE_CHILD_SELECTION_VERSION_INVALID",
+          "unsupported room epoch selection version");
+    }
+    if (writerMode != WriterMode.SHADOW && writerMode != WriterMode.TEMPORAL) {
+      throw protocolFailure(
+          "INTAKE_CHILD_WRITER_MODE_INVALID",
+          "typed Intake selection requires SHADOW or TEMPORAL writer mode");
+    }
+    if (roomType != RoomType.INTAKE) {
+      throw protocolFailure(
+          "INTAKE_CHILD_ROOM_TYPE_INVALID",
+          "typed room selection is restricted to Intake");
+    }
+    if (!CaseProcessWorkflowProtocol.CASE_WORKFLOW_TYPE.equals(caseWorkflowType)) {
+      throw protocolFailure(
+          "INTAKE_CHILD_CASE_WORKFLOW_TYPE_INVALID",
+          "v2 selection does not bind the CaseProcessWorkflow case type");
+    }
+    if (!INTAKE_ROOM_WORKFLOW_TYPE.equals(roomWorkflowType)) {
+      throw protocolFailure(
+          "INTAKE_CHILD_WORKFLOW_TYPE_INVALID",
+          "v2 Intake selection has an unsupported room child type");
+    }
+    if (!INTAKE_ROOM_WORKFLOW_BUILD_ID.equals(roomWorkflowBuildId)) {
+      throw protocolFailure(
+          "INTAKE_CHILD_WORKFLOW_BUILD_INVALID",
+          "v2 Intake selection has an unsupported room child build");
+    }
+    if (!INTAKE_GRAPH_KEY.equals(graphKey)) {
+      throw protocolFailure(
+          "INTAKE_CHILD_SELECTION_INVALID", "v2 Intake selection has an invalid graph binding");
+    }
+    return markerVersion == 1
+        ? ActiveChildKind.TYPED_INTAKE
+        : ActiveChildKind.GENERIC_ROOM_CONTROL;
+  }
+
+  private StartedChild startProvisionedChild(
+      ProvisionRoomEpoch request, String provisioningHash, ActiveChildKind childKind) {
+    if (childKind == ActiveChildKind.TYPED_INTAKE) {
+      return startTypedIntakeChild(request, provisioningHash);
+    }
+    RoomControlWorkflow child =
+        Workflow.newChildWorkflowStub(
+            RoomControlWorkflow.class, childOptions(request.roomWorkflowId()));
+    RoomControlStart start =
+        new RoomControlStart(
+            "room-control-start.v1",
+            request.tenantSurrogate(),
+            request.caseId(),
+            request.epochId(),
+            request.roomId(),
+            request.roomType(),
+            request.roomEpoch(),
+            request.caseWorkflowId(),
+            request.roomWorkflowId(),
+            request.firstCommandSequence(),
+            request.firstCaseEventSequence(),
+            request.fencingToken(),
+            request.initialProcessRevision(),
+            request.initialRoomRevision(),
+            request.macroPhase(),
+            request.currentRoom(),
+            request.roomPhase(),
+            request.projectedDeadlineAt(),
+            request.writerMode(),
+            request.selectionSchemaVersion(),
+            request.processContractVersion(),
+            request.workflowType(),
+            request.temporalBuildId(),
+            request.roomWorkflowType(),
+            request.roomWorkflowBuildId(),
+            request.graphKey(),
+            request.graphVersion(),
+            request.checkpointSchemaVersion(),
+            request.streamProtocol(),
+            request.lastCommandSequence(),
+            request.lastCaseEventSequence(),
+            request.projectionRef(),
+            request.projectionSha256(),
+            request.requestedAt(),
+            Workflow.getInfo().getFirstExecutionRunId(),
+            provisioningHash);
+    Promise<Void> childCompletion = Async.procedure(child::run, start);
+    childCompletion.exceptionally(failure -> null);
+    return new StartedChild(
+        child, null, Workflow.getWorkflowExecution(child).get());
+  }
+
+  private StartedChild startTypedIntakeChild(
+      ProvisionRoomEpoch request, String provisioningHash) {
+    ActiveChildBinding expected = activeBinding(request);
+    StartBinding binding;
+    try {
+      binding =
+          intakeChildBridgeActivities.bindStart(
+              new StartRequest("intake-child-start-request.v1", request, expected));
+    } catch (ActivityFailure failure) {
+      rethrowIfCanceled(failure);
+      throw new TypedChildOperationFailure(
+          "INTAKE_CHILD_BRIDGE_START_FAILED",
+          "typed Intake start binding Activity failed",
+          failure);
+    }
+    requireReturnedActiveBinding(binding == null ? null : binding.activeBinding(), expected);
+    if (!provisioningHash.equals(binding.provisioningRequestHash())
+        || binding.start() == null
+        || !request.tenantSurrogate().equals(binding.start().tenantSurrogate())
+        || !request.caseId().equals(binding.start().caseId())
+        || request.roomEpoch() != binding.start().roomEpoch()
+        || request.fencingToken() != binding.start().fencingToken()
+        || request.initialProcessRevision() != binding.start().initialProcessRevision()
+        || request.initialRoomRevision() != binding.start().initialRoomRevision()
+        || request.firstCommandSequence() != binding.start().firstCommandSequence()
+        || request.firstCaseEventSequence() != binding.start().firstEventSequence()
+        || !request.roomWorkflowBuildId().equals(binding.start().workflowBuildId())
+        || !request.graphVersion().equals(binding.start().graphVersion())
+        || !request.checkpointSchemaVersion().equals(binding.start().checkpointSchemaVersion())) {
+      throw new TypedChildOperationFailure(
+          "INTAKE_CHILD_BRIDGE_START_BINDING_INVALID",
+          "typed Intake start binding does not match persisted provisioning",
+          null);
+    }
+    IntakeRoomWorkflow child =
+        Workflow.newChildWorkflowStub(
+            IntakeRoomWorkflow.class, childOptions(request.roomWorkflowId()));
+    Promise<?> childCompletion = Async.function(child::run, binding.start());
+    childCompletion.exceptionally(failure -> null);
+    return new StartedChild(
+        null, child, Workflow.getWorkflowExecution(child).get());
+  }
+
+  private static ChildWorkflowOptions childOptions(String workflowId) {
+    return ChildWorkflowOptions.newBuilder()
+        .setWorkflowId(workflowId)
+        .setTaskQueue(ROOM_CONTROL_TASK_QUEUE)
+        .setWorkflowIdReusePolicy(WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE)
+        .setParentClosePolicy(PARENT_CLOSE_POLICY_ABANDON)
+        .build();
+  }
+
+  private ActiveChildBinding activeBinding(ProvisionRoomEpoch request) {
+    return new ActiveChildBinding(
+        "active-intake-child-binding.v1",
+        request.tenantSurrogate(),
+        request.caseId(),
+        request.roomEpoch(),
+        request.fencingToken(),
+        request.selectionSchemaVersion(),
+        request.caseWorkflowType(),
+        request.caseWorkflowBuildId(),
+        request.roomWorkflowType(),
+        request.roomWorkflowBuildId());
+  }
+
+  private ActiveChildBinding activeBinding() {
+    validateTypedDescriptor(activeChildDescriptor);
+    return new ActiveChildBinding(
+        "active-intake-child-binding.v1",
+        tenantSurrogate,
+        caseId,
+        activeChildDescriptor.roomEpoch(),
+        activeChildDescriptor.fencingToken(),
+        activeChildDescriptor.selectionSchemaVersion(),
+        activeChildDescriptor.caseWorkflowType(),
+        activeChildDescriptor.caseWorkflowBuildId(),
+        activeChildDescriptor.roomWorkflowType(),
+        activeChildDescriptor.roomWorkflowBuildId());
+  }
+
+  private static void requireReturnedActiveBinding(
+      ActiveChildBinding returned, ActiveChildBinding expected) {
+    if (!expected.equals(returned)) {
+      throw new TypedChildOperationFailure(
+          "INTAKE_CHILD_ACTIVE_BINDING_INVALID",
+          "bridge returned an active child binding that does not match persisted authority",
+          null);
+    }
+  }
+
+  private static ActiveChildDescriptor descriptor(
+      ProvisionRoomEpoch request, ActiveChildKind kind, String startedRunId) {
+    return new ActiveChildDescriptor(
+        kind,
+        request.selectionSchemaVersion(),
+        request.writerMode(),
+        request.caseWorkflowType(),
+        request.caseWorkflowBuildId(),
+        request.roomWorkflowType(),
+        request.roomWorkflowBuildId(),
+        request.roomType(),
+        request.roomEpoch(),
+        request.fencingToken(),
+        request.roomWorkflowId(),
+        startedRunId);
   }
 
   private void validateProvisionRequest(ProvisionRoomEpoch request) {
@@ -854,7 +1239,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
         }
       }
       ensureRoomChild(command);
-      activeRoomChild.commandAccepted(command);
+      routeCommandToActiveChild(command);
       if (commandLifecycleEnabled) {
         RecordCaseCommandRoutedResult completion =
             commandLifecycleActivities.completeCaseCommandRouting(routing);
@@ -877,6 +1262,11 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
       commandManualRecoveryRequired = false;
       clearRecoveryError(SequenceStream.COMMAND);
       pending.complete();
+    } catch (TypedChildOperationFailure failure) {
+      orderedCommands.put(nextCommandSequence, pending);
+      protocolErrorCode = failure.errorCode();
+      commandManualRecoveryRequired = true;
+      pending.fail(protocolFailure(failure.errorCode(), failure.getMessage()));
     } catch (ActivityFailure failure) {
       orderedCommands.put(nextCommandSequence, pending);
       rethrowIfCanceled(failure);
@@ -1042,11 +1432,15 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
     if (event == null || waitsForFutureRoom(event)) {
       return false;
     }
-    if (activeRoomChild != null
+    if (hasActiveChild()
         && activeRoomType == event.roomType()
         && activeRoomEpoch == event.roomEpoch()) {
       try {
-        Async.procedure(activeRoomChild::domainEventCommitted, event).get();
+        routeEventToActiveChild(event);
+      } catch (TypedChildOperationFailure failure) {
+        protocolErrorCode = failure.errorCode();
+        eventManualRecoveryRequired = true;
+        return true;
       } catch (CanceledFailure failure) {
         throw failure;
       } catch (SignalExternalWorkflowException | TemporalFailure failure) {
@@ -1065,6 +1459,55 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
     }
     clearRecoveryError(SequenceStream.DOMAIN_EVENT);
     return true;
+  }
+
+  private void routeEventToActiveChild(CaseDomainEventRef event) {
+    if (activeChildDescriptor.kind() == ActiveChildKind.GENERIC_ROOM_CONTROL) {
+      if (activeRoomChild == null) {
+        throw new TypedChildOperationFailure(
+            "INTAKE_CHILD_ACTIVE_BINDING_INVALID",
+            "generic active child stub is missing",
+            null);
+      }
+      Async.procedure(activeRoomChild::domainEventCommitted, event).get();
+      return;
+    }
+    ActiveChildBinding expected = activeBinding();
+    DomainEventBinding binding;
+    try {
+      binding =
+          intakeChildBridgeActivities.bindDomainEvent(
+              new DomainEventRequest("intake-child-domain-event-request.v1", event, expected));
+    } catch (ActivityFailure failure) {
+      rethrowIfCanceled(failure);
+      throw new TypedChildOperationFailure(
+          "INTAKE_CHILD_BRIDGE_EVENT_FAILED",
+          "typed Intake domain event binding Activity failed",
+          failure);
+    }
+    requireReturnedActiveBinding(binding == null ? null : binding.activeBinding(), expected);
+    if (binding.event() == null) {
+      throw new TypedChildOperationFailure(
+          "INTAKE_CHILD_BRIDGE_EVENT_BINDING_INVALID",
+          "typed Intake domain event binding is missing its event",
+          null);
+    }
+    if (activeIntakeChild == null) {
+      throw new TypedChildOperationFailure(
+          "INTAKE_CHILD_ACTIVE_BINDING_INVALID",
+          "typed Intake active child stub is missing",
+          null);
+    }
+    try {
+      Async.procedure(activeIntakeChild::domainEventCommitted, binding.event()).get();
+    } catch (CanceledFailure failure) {
+      throw failure;
+    } catch (SignalExternalWorkflowException | TemporalFailure failure) {
+      throw new TypedChildOperationFailure(
+          "INTAKE_CHILD_EVENT_SIGNAL_FAILED",
+          "typed Intake child could not accept the domain event",
+          failure);
+    }
   }
 
   private boolean waitsForFutureRoom(CaseDomainEventRef event) {
@@ -1089,7 +1532,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
 
   private boolean isRoomMismatch(CaseDomainEventRef event) {
     return event.roomType() != null
-        && (activeRoomChild == null
+        && (!hasActiveChild()
             || activeRoomType != event.roomType()
             || activeRoomEpoch != event.roomEpoch());
   }
@@ -1329,26 +1772,52 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
     Promise<Void> childCompletion = Async.procedure(child::run, start);
     childCompletion.exceptionally(failure -> null);
     WorkflowExecution childExecution = Workflow.getWorkflowExecution(child).get();
-    if (activeRoomChild != null) {
-      closeActiveRoomChild("ROOM_CONTROL_REPLACED");
+    if (hasActiveChild()) {
+      retireActiveChild("ROOM_CONTROL_REPLACED");
     }
     activeRoomChild = child;
+    activeIntakeChild = null;
     activeRoomType = command.roomType();
     activeRoomEpoch = command.roomEpoch();
     activeChildWorkflowId = desiredChildId;
     activeChildWorkflowRunId = childExecution.getRunId();
     activeFencingToken = 0;
+    activeChildDescriptor =
+        new ActiveChildDescriptor(
+            ActiveChildKind.GENERIC_ROOM_CONTROL,
+            SELECTION_V1,
+            WriterMode.LEGACY,
+            CaseProcessWorkflowProtocol.CASE_WORKFLOW_TYPE,
+            "legacy-case-control.v1",
+            null,
+            null,
+            command.roomType(),
+            command.roomEpoch(),
+            0,
+            desiredChildId,
+            childExecution.getRunId());
   }
 
-  private void closeActiveRoomChild(String reason) {
-    try {
-      activeRoomChild.close(reason);
-    } catch (CanceledFailure failure) {
-      throw failure;
-    } catch (SignalExternalWorkflowException | TemporalFailure failure) {
-      protocolErrorCode = "ROOM_CONTROL_CLOSE_FAILED";
+  private void retireActiveChild(String reason) {
+    ActiveChildDescriptor retiring = activeChildDescriptor;
+    if (retiring.kind() == ActiveChildKind.GENERIC_ROOM_CONTROL) {
+      try {
+        activeRoomChild.close(reason);
+      } catch (CanceledFailure failure) {
+        throw failure;
+      } catch (SignalExternalWorkflowException | TemporalFailure failure) {
+        protocolErrorCode = "ROOM_CONTROL_CLOSE_FAILED";
+      }
+    } else {
+      try {
+        Workflow.newUntypedExternalWorkflowStub(retiring.workflowId()).cancel(reason);
+      } catch (CanceledFailure failure) {
+        throw failure;
+      } catch (RuntimeException failure) {
+        protocolErrorCode = "INTAKE_ROOM_EXTERNAL_CANCEL_FAILED";
+      }
     }
-    rememberClosedRoom(activeRoomType, activeRoomEpoch);
+    rememberClosedRoom(retiring.roomType(), retiring.roomEpoch());
   }
 
   private void rememberClosedRoom(
@@ -1433,13 +1902,22 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
               protocolErrorCode.equals("COMMAND_SEQUENCE_NOT_FOUND")
                   || protocolErrorCode.equals("COMMAND_LEDGER_UNAVAILABLE")
                   || protocolErrorCode.equals("COMMAND_LEDGER_RESPONSE_INVALID")
-                  || protocolErrorCode.equals("COMMAND_REPLAY_LEDGER_UNAVAILABLE");
+                  || protocolErrorCode.equals("COMMAND_REPLAY_LEDGER_UNAVAILABLE")
+                  || protocolErrorCode.equals("CASE_PROCESS_ROOM_ROUTING_FAILED")
+                  || protocolErrorCode.equals("INTAKE_CHILD_BRIDGE_COMMAND_FAILED")
+                  || protocolErrorCode.equals("INTAKE_CHILD_BRIDGE_COMMAND_BINDING_INVALID")
+                  || protocolErrorCode.equals("INTAKE_CHILD_COMMAND_SIGNAL_FAILED")
+                  || protocolErrorCode.equals("INTAKE_CHILD_ACTIVE_BINDING_INVALID");
           case DOMAIN_EVENT ->
               protocolErrorCode.equals("DOMAIN_EVENT_SEQUENCE_NOT_FOUND")
                   || protocolErrorCode.equals("DOMAIN_EVENT_LEDGER_UNAVAILABLE")
                   || protocolErrorCode.equals("DOMAIN_EVENT_LEDGER_RESPONSE_INVALID")
                   || protocolErrorCode.equals("CASE_PROCESS_EVENT_INBOX_FULL")
-                  || protocolErrorCode.equals("CASE_PROCESS_ROOM_EVENT_ROUTING_FAILED");
+                  || protocolErrorCode.equals("CASE_PROCESS_ROOM_EVENT_ROUTING_FAILED")
+                  || protocolErrorCode.equals("INTAKE_CHILD_BRIDGE_EVENT_FAILED")
+                  || protocolErrorCode.equals("INTAKE_CHILD_BRIDGE_EVENT_BINDING_INVALID")
+                  || protocolErrorCode.equals("INTAKE_CHILD_EVENT_SIGNAL_FAILED")
+                  || protocolErrorCode.equals("INTAKE_CHILD_ACTIVE_BINDING_INVALID");
         };
     if (recoverable) {
       protocolErrorCode = null;
@@ -1526,7 +2004,8 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
             new ArrayList<>(provisioningCommitments.values()),
             highestProvisionedEpochs.entrySet().stream()
                 .map(entry -> new ProvisionedRoomEpochHighWater(entry.getKey(), entry.getValue()))
-                .toList());
+                .toList(),
+            activeChildDescriptor);
     ContinueAsNewOptions options =
         ContinueAsNewOptions.newBuilder()
             .setTaskQueue(CASE_CONTROL_TASK_QUEUE)
@@ -1737,6 +2216,24 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
   private static boolean isNonRetryableActivityFailure(ActivityFailure failure) {
     return failure.getCause() instanceof ApplicationFailure applicationFailure
         && applicationFailure.isNonRetryable();
+  }
+
+  private record StartedChild(
+      RoomControlWorkflow genericChild,
+      IntakeRoomWorkflow typedIntakeChild,
+      WorkflowExecution execution) {}
+
+  private static final class TypedChildOperationFailure extends RuntimeException {
+    private final String errorCode;
+
+    private TypedChildOperationFailure(String errorCode, String message, Throwable cause) {
+      super(message, cause);
+      this.errorCode = errorCode;
+    }
+
+    String errorCode() {
+      return errorCode;
+    }
   }
 
   private record PendingProvisioning(

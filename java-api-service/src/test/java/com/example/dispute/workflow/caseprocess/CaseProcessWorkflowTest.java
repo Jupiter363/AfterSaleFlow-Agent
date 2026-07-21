@@ -578,19 +578,17 @@ class CaseProcessWorkflowTest {
   }
 
   @Test
-  void v2ProvisioningCarriesRoomWorkflowBindingIntoBothReceipts() {
+  void v2ProvisioningFailsClosedWhenTheTypedBridgeIsNotRegistered() {
     startWorkflow();
     ProvisionRoomEpoch request = v2Provisioning();
 
-    ProvisionRoomEpochReceipt caseReceipt = provision(request);
+    assertThatThrownBy(() -> provision(request)).isInstanceOf(WorkflowUpdateException.class);
 
-    assertThat(caseReceipt.matches(request)).isTrue();
-    assertThat(caseReceipt.roomWorkflowType()).isEqualTo("IntakeRoomWorkflow");
-    assertThat(caseReceipt.roomWorkflowBuildId()).isEqualTo("intake-room.synthetic.v1");
-    assertThat(workflow().provisioningReceipt()).isEqualTo(caseReceipt);
-    RoomControlWorkflow genericRoom =
-        client.newWorkflowStub(RoomControlWorkflow.class, caseReceipt.roomWorkflowId());
-    assertThat(genericRoom.provisioningReceipt()).isEqualTo(caseReceipt);
+    CaseProcessSnapshot state =
+        awaitProcess(
+            snapshot -> "INTAKE_CHILD_BRIDGE_START_FAILED".equals(snapshot.protocolErrorCode()));
+    assertThat(state.activeChildWorkflowId()).isNull();
+    assertThat(state.provisioningCommitmentCount()).isZero();
   }
 
   @Test

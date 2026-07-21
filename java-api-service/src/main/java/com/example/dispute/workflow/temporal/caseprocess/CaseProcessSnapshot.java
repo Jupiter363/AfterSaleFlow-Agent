@@ -1,6 +1,7 @@
 package com.example.dispute.workflow.temporal.caseprocess;
 
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
+import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.ActiveChildKind;
 import java.util.List;
 
 public record CaseProcessSnapshot(
@@ -30,7 +31,11 @@ public record CaseProcessSnapshot(
     long activeFencingToken,
     String activeChildWorkflowRunId,
     int provisioningCommitmentCount,
-    String activeProvisioningSha256) {
+    String activeProvisioningSha256,
+    ActiveChildKind activeChildKind,
+    String activeSelectionSchemaVersion,
+    String activeRoomWorkflowType,
+    String activeRoomWorkflowBuildId) {
 
   public CaseProcessSnapshot(
       String schemaVersion,
@@ -83,6 +88,72 @@ public record CaseProcessSnapshot(
         0,
         null,
         0,
+        null,
+        null,
+        null,
+        null,
+        null);
+  }
+
+  public CaseProcessSnapshot(
+      String schemaVersion,
+      String workflowId,
+      String workflowRunId,
+      String tenantSurrogate,
+      String caseId,
+      String macroPhase,
+      RoomType activeRoomType,
+      long activeRoomEpoch,
+      String activeChildWorkflowId,
+      long observedProcessRevision,
+      long nextCommandSequence,
+      long nextCaseEventSequence,
+      long processedCommandCount,
+      long processedEventCount,
+      int pendingCommandCount,
+      int bufferedEventCount,
+      int recentCommandCount,
+      long highestObservedCommandSequence,
+      long highestObservedEventSequence,
+      int runGeneration,
+      String blockedReason,
+      String protocolErrorCode,
+      List<String> recentCommandIds,
+      long activeFencingToken,
+      String activeChildWorkflowRunId,
+      int provisioningCommitmentCount,
+      String activeProvisioningSha256) {
+    this(
+        schemaVersion,
+        workflowId,
+        workflowRunId,
+        tenantSurrogate,
+        caseId,
+        macroPhase,
+        activeRoomType,
+        activeRoomEpoch,
+        activeChildWorkflowId,
+        observedProcessRevision,
+        nextCommandSequence,
+        nextCaseEventSequence,
+        processedCommandCount,
+        processedEventCount,
+        pendingCommandCount,
+        bufferedEventCount,
+        recentCommandCount,
+        highestObservedCommandSequence,
+        highestObservedEventSequence,
+        runGeneration,
+        blockedReason,
+        protocolErrorCode,
+        recentCommandIds,
+        activeFencingToken,
+        activeChildWorkflowRunId,
+        provisioningCommitmentCount,
+        activeProvisioningSha256,
+        null,
+        null,
+        null,
         null);
   }
 
