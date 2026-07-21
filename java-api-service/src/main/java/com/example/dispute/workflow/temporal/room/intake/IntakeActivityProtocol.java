@@ -392,6 +392,15 @@ public final class IntakeActivityProtocol {
               envelope.commandId(),
               graphExecutionRef.resultHash()));
       requireHash(requestHash, "requestHash");
+      String expectedGraphOperationKey =
+          IntakeOperationKeys.graphExecute(
+              envelope.caseId(), envelope.roomEpoch(), threadId, envelope.commandId());
+      if (envelope.commandType() != IntakeCommandType.INTAKE_MESSAGE
+          || !expectedGraphOperationKey.equals(graphExecution.operation().operationKey())
+          || !requestHash.equals(graphExecution.operation().requestHash())) {
+        throw new IllegalArgumentException(
+            "Graph execution receipt does not match the finalization request");
+      }
     }
   }
 
@@ -487,6 +496,47 @@ public final class IntakeActivityProtocol {
       requireOperationPrefix(operation, "intake.turn.finalize:");
       Objects.requireNonNull(formalReceipt, "formalReceipt must not be null");
       requireTurnReceiptBindings(operation, formalReceipt, committedEvent);
+    }
+
+    public void requireMatches(TurnFinalizationRequest request) {
+      Objects.requireNonNull(request, "request must not be null");
+      ActivityEnvelope envelope = request.envelope();
+      GraphExecutionReceipt graph = request.graphExecution();
+      IntakeAgentRunRef agentRun = graph.agentRunRef();
+      IntakeGraphExecutionRef graphRef = graph.graphExecutionRef();
+      if (!operation.operationKey().equals(request.operationKey())
+          || !operation.requestHash().equals(request.requestHash())
+          || !operation.resultHash().equals(graph.operation().resultHash())
+          || operation.processRevision() < envelope.processRevision()
+          || operation.roomRevision() < envelope.roomRevision()
+          || !formalReceipt.operationKey().equals(request.operationKey())
+          || !formalReceipt.tenantSurrogate().equals(envelope.tenantSurrogate())
+          || !formalReceipt.caseId().equals(envelope.caseId())
+          || formalReceipt.roomEpoch() != envelope.roomEpoch()
+          || formalReceipt.fencingToken() != envelope.fencingToken()
+          || !formalReceipt.threadId().equals(request.threadId())
+          || !formalReceipt.actorScopeHash().equals(envelope.actorScopeHash())
+          || !formalReceipt.agentSessionId().equals(request.agentSessionId())
+          || !formalReceipt.commandId().equals(envelope.commandId())
+          || !formalReceipt.logicalRunId().equals(agentRun.logicalRunId())
+          || !formalReceipt.attemptId().equals(agentRun.attemptId())
+          || !formalReceipt.resultHash().equals(agentRun.finalResultHash())
+          || !formalReceipt.proposalHash().equals(graphRef.proposalHash())
+          || !committedEvent.commandId().equals(envelope.commandId())
+          || !committedEvent.tenantSurrogate().equals(envelope.tenantSurrogate())
+          || !committedEvent.caseId().equals(envelope.caseId())
+          || committedEvent.roomEpoch() != envelope.roomEpoch()
+          || committedEvent.fencingToken() != envelope.fencingToken()
+          || committedEvent.party() != envelope.party()
+          || !committedEvent.actorScopeHash().equals(envelope.actorScopeHash())
+          || !committedEvent.operationKey().equals(request.operationKey())
+          || !committedEvent.requestHash().equals(request.requestHash())
+          || !committedEvent.resultHash().equals(graph.operation().resultHash())
+          || !agentRun.equals(committedEvent.agentRunRef())
+          || !graphRef.equals(committedEvent.graphExecutionRef())) {
+        throw new IllegalArgumentException(
+            "turn finalization receipt does not match its exact request");
+      }
     }
   }
 

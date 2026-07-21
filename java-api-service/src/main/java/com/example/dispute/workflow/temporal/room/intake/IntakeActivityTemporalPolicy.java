@@ -53,6 +53,7 @@ public final class IntakeActivityTemporalPolicy {
                     IntakeActivityFailureTypes.STALE_FENCE,
                     IntakeActivityFailureTypes.GUARDRAIL,
                     IntakeActivityFailureTypes.RETRY_BUDGET_EXHAUSTED,
+                    IntakeActivityFailureTypes.UNCLASSIFIED,
                     IllegalArgumentException.class.getName())
                 .build())
         .build();

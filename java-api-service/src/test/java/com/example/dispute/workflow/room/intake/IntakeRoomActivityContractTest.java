@@ -29,7 +29,10 @@ import com.example.dispute.workflow.temporal.room.intake.IntakeGraphExecutionRef
 import com.example.dispute.workflow.temporal.room.intake.IntakeOperationKeys;
 import com.example.dispute.workflow.temporal.room.intake.IntakeParty;
 import com.example.dispute.workflow.temporal.room.intake.IntakeRoomActivities;
+import io.temporal.api.enums.v1.TimeoutType;
 import io.temporal.activity.ActivityMethod;
+import io.temporal.failure.ApplicationFailure;
+import io.temporal.failure.TimeoutFailure;
 import java.lang.reflect.RecordComponent;
 import java.util.Arrays;
 import java.util.List;
@@ -237,6 +240,80 @@ class IntakeRoomActivityContractTest {
   }
 
   @Test
+  void finalizationReceiptRequiresTheExactSessionAndCompleteGraphExecutionIdentity() {
+    ActivityEnvelope message = envelope(IntakeCommandType.INTAKE_MESSAGE, IntakeParty.INITIATOR);
+    GraphExecutionReceipt graph = graphExecutionReceipt();
+    TurnFinalizationRequest request =
+        new TurnFinalizationRequest(
+            "intake-turn-finalization-request.v1",
+            message,
+            THREAD_ID,
+            "AGENT_SESSION_P4_B2",
+            graph,
+            IntakeOperationKeys.turnFinalize(
+                CASE_ID, ROOM_EPOCH, THREAD_ID, COMMAND_ID, RESULT_HASH),
+            REQUEST_HASH);
+    IntakeDomainEventRef event =
+        domainEvent(
+            "EVENT_EXACT_P4_B2",
+            7,
+            IntakeDomainEventType.TURN_READY_TO_CONFIRM,
+            IntakeParty.INITIATOR,
+            request.operationKey(),
+            agentRunRef(),
+            graphExecutionRef());
+    TurnFinalizationReceipt exact =
+        new TurnFinalizationReceipt(
+            "intake-turn-finalization-activity-receipt.v1",
+            operationReceipt(request.operationKey()),
+            formalFinalizationReceipt(event),
+            event);
+
+    exact.requireMatches(request);
+
+    TurnFinalizationReceipt wrongSession =
+        new TurnFinalizationReceipt(
+            exact.schemaVersion(),
+            exact.operation(),
+            formalFinalizationReceipt(event, "AGENT_SESSION_OTHER"),
+            event);
+    assertThatThrownBy(() -> wrongSession.requireMatches(request))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("exact request");
+
+    IntakeGraphExecutionRef wrongCheckpoint =
+        new IntakeGraphExecutionRef(
+            "intake-graph-execution-ref.v1",
+            THREAD_ID,
+            COMMAND_ID,
+            "intake.v2",
+            "2.0.0",
+            "CHECKPOINT_OTHER",
+            graphExecutionRef().resultRef(),
+            RESULT_HASH,
+            graphExecutionRef().proposalRef(),
+            PROPOSAL_HASH);
+    IntakeDomainEventRef wrongGraphEvent =
+        domainEvent(
+            "EVENT_WRONG_GRAPH_P4_B2",
+            7,
+            IntakeDomainEventType.TURN_READY_TO_CONFIRM,
+            IntakeParty.INITIATOR,
+            request.operationKey(),
+            agentRunRef(),
+            wrongCheckpoint);
+    TurnFinalizationReceipt wrongGraph =
+        new TurnFinalizationReceipt(
+            exact.schemaVersion(),
+            exact.operation(),
+            formalFinalizationReceipt(wrongGraphEvent),
+            wrongGraphEvent);
+    assertThatThrownBy(() -> wrongGraph.requireMatches(request))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("exact request");
+  }
+
+  @Test
   void keepsTheFrozenFormalReceiptSeparateFromTheActivityWrapper() {
     Set<String> frozenFields =
         Arrays.stream(FormalFinalizationReceipt.class.getRecordComponents())
@@ -287,6 +364,23 @@ class IntakeRoomActivityContractTest {
     assertThat(IntakeActivityFailureTypes.isNonRetryable(IntakeActivityFailureTypes.BUSINESS))
         .isTrue();
     assertThat(IntakeActivityFailureTypes.isNonRetryable("UNRECOGNIZED_FAILURE")).isTrue();
+
+    TimeoutFailure timeout =
+        new TimeoutFailure(
+            "synthetic heartbeat timeout", null, TimeoutType.TIMEOUT_TYPE_HEARTBEAT);
+    RuntimeException nested =
+        new RuntimeException(
+            "outer worker failure",
+            ApplicationFailure.newFailureWithCause(
+                "timeout wrapper", "UNRECOGNIZED_FAILURE", timeout));
+    assertThat(IntakeActivityFailureTypes.classify(nested))
+        .isEqualTo(IntakeActivityFailureTypes.INFRASTRUCTURE_RETRYABLE);
+    assertThat(
+            IntakeActivityFailureTypes.classify(
+                ApplicationFailure.newFailure("unknown", "UNRECOGNIZED_FAILURE")))
+        .isEqualTo(IntakeActivityFailureTypes.UNCLASSIFIED);
+    assertThat(IntakeActivityFailureTypes.classify(new RuntimeException("unknown")))
+        .isEqualTo(IntakeActivityFailureTypes.UNCLASSIFIED);
   }
 
   @Test
@@ -515,6 +609,11 @@ class IntakeRoomActivityContractTest {
   }
 
   private static FormalFinalizationReceipt formalFinalizationReceipt(IntakeDomainEventRef event) {
+    return formalFinalizationReceipt(event, "AGENT_SESSION_P4_B2");
+  }
+
+  private static FormalFinalizationReceipt formalFinalizationReceipt(
+      IntakeDomainEventRef event, String agentSessionId) {
     return new FormalFinalizationReceipt(
         "intake-finalization-receipt.v1",
         event.operationKey(),
@@ -523,7 +622,7 @@ class IntakeRoomActivityContractTest {
         ROOM_EPOCH,
         THREAD_ID,
         ACTOR_SCOPE_HASH,
-        "AGENT_SESSION_P4_B2",
+        agentSessionId,
         COMMAND_ID,
         "RUN_P4_B2",
         "ATTEMPT_P4_B2",

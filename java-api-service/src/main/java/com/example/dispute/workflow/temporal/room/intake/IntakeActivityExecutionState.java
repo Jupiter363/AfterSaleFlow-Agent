@@ -23,7 +23,8 @@ public record IntakeActivityExecutionState(
     long deadlineEpochMillis,
     RetryBudget retryBudget,
     ActivityInvocation invocation,
-    GraphExecutionReceipt completedGraphExecution) {
+    GraphExecutionReceipt completedGraphExecution,
+    IntakeActivityTerminalFailure terminalFailure) {
 
   public IntakeActivityExecutionState(
       String schemaVersion,
@@ -53,6 +54,7 @@ public record IntakeActivityExecutionState(
                 ? ActivityInvocationMode.RECONCILE_ONLY
                 : ActivityInvocationMode.FIRST_EXECUTION,
             Math.max(0, retryBudget.activityAttemptsRemaining() - 1)),
+        null,
         null);
   }
 
@@ -91,6 +93,17 @@ public record IntakeActivityExecutionState(
             || stage == IntakeActivityStage.RESPONDENT_CONFIRMATION)) {
       throw new IllegalArgumentException("completed Graph receipt is invalid for this Activity stage");
     }
+    if (terminalFailure != null) {
+      if (terminalFailure.stage() != stage
+          || !terminalFailure.operationKey().equals(stageOperationKey)) {
+        throw new IllegalArgumentException(
+            "terminal Activity failure must match the exact stage operation");
+      }
+      if (invocation.mode() != ActivityInvocationMode.RECONCILE_ONLY) {
+        throw new IllegalArgumentException(
+            "terminal Activity failure cannot retain execution authority");
+      }
+    }
   }
 
   public IntakeActivityExecutionState withGraphExecution(
@@ -107,11 +120,16 @@ public record IntakeActivityExecutionState(
         deadlineEpochMillis,
         retryBudget,
         invocation,
-        Objects.requireNonNull(graphExecutionReceipt, "graphExecutionReceipt must not be null"));
+        Objects.requireNonNull(graphExecutionReceipt, "graphExecutionReceipt must not be null"),
+        terminalFailure);
   }
 
   public IntakeActivityExecutionState withInvocation(ActivityInvocation nextInvocation) {
     Objects.requireNonNull(nextInvocation, "nextInvocation must not be null");
+    if (terminalFailure != null && nextInvocation.permitsExecution()) {
+      throw new IllegalArgumentException(
+          "terminal Activity failure cannot regain execution authority");
+    }
     RetryBudget nextBudget =
         new RetryBudget(
             retryBudget.schemaVersion(),
@@ -130,7 +148,35 @@ public record IntakeActivityExecutionState(
         deadlineEpochMillis,
         nextBudget,
         nextInvocation,
-        completedGraphExecution);
+        completedGraphExecution,
+        terminalFailure);
+  }
+
+  public IntakeActivityExecutionState withTerminalFailure(String failureType) {
+    ActivityInvocation terminalInvocation =
+        new ActivityInvocation(
+            "intake-activity-invocation.v1", ActivityInvocationMode.RECONCILE_ONLY, 0);
+    RetryBudget terminalBudget =
+        new RetryBudget(
+            retryBudget.schemaVersion(),
+            retryBudget.providerAttemptsRemaining(),
+            0,
+            retryBudget.repairsRemaining());
+    return new IntakeActivityExecutionState(
+        schemaVersion,
+        commandId,
+        rootCorrelationKey,
+        stage,
+        stageOperationKey,
+        requestHash,
+        threadId,
+        agentSessionId,
+        deadlineEpochMillis,
+        terminalBudget,
+        terminalInvocation,
+        completedGraphExecution,
+        new IntakeActivityTerminalFailure(
+            "intake-activity-terminal-failure.v1", failureType, stage, stageOperationKey));
   }
 
   private static void requireGraphReceipt(

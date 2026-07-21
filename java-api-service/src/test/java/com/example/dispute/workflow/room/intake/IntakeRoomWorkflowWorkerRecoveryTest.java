@@ -21,6 +21,7 @@ import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.worker.Worker;
 import io.temporal.worker.WorkerFactory;
 import io.temporal.worker.WorkerFactoryOptions;
+import io.temporal.worker.WorkerOptions;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -127,8 +128,16 @@ class IntakeRoomWorkflowWorkerRecoveryTest {
     WorkerFactory factory =
         WorkerFactory.newInstance(
             workerClient,
-            WorkerFactoryOptions.newBuilder().setWorkflowCacheSize(0).build());
-    Worker workflowWorker = factory.newWorker(workflowQueue);
+            WorkerFactoryOptions.newBuilder()
+                .setWorkflowCacheSize(0)
+                .setWorkflowHostLocalTaskQueueScheduleToStartTimeout(Duration.ofMillis(100))
+                .build());
+    Worker workflowWorker =
+        factory.newWorker(
+            workflowQueue,
+            WorkerOptions.newBuilder()
+                .setStickyQueueScheduleToStartTimeout(Duration.ofMillis(100))
+                .build());
     workflowWorker.registerWorkflowImplementationTypes(IntakeRoomWorkflowImpl.class);
     Worker activityWorker = factory.newWorker(AGENT_EXECUTION);
     activityWorker.registerActivitiesImplementations(activities);
