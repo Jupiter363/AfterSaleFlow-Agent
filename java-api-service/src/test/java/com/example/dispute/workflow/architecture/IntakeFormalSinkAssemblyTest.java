@@ -1,6 +1,7 @@
 package com.example.dispute.workflow.architecture;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.tngtech.archunit.base.DescribedPredicate;
 import com.tngtech.archunit.core.domain.Dependency;
@@ -17,14 +18,26 @@ import com.tngtech.archunit.lang.ArchRule;
 import com.tngtech.archunit.lang.ConditionEvents;
 import com.tngtech.archunit.lang.SimpleConditionEvent;
 import com.tngtech.archunit.lang.syntax.ArchRuleDefinition;
+import java.io.File;
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeSet;
+import java.util.jar.JarEntry;
+import java.util.jar.JarFile;
 import java.util.stream.Collectors;
+import javax.lang.model.SourceVersion;
 import org.junit.jupiter.api.Test;
 
 @AnalyzeClasses(
@@ -43,6 +56,10 @@ class IntakeFormalSinkAssemblyTest {
     private static final String SPRING_BEAN = "org.springframework.context.annotation.Bean";
     private static final String SPRING_BEAN_FACTORY =
             "org.springframework.beans.factory.BeanFactory";
+    private static final String SERVICES_PATH = "META-INF/services/";
+
+    private static final ServiceDescriptorCatalog PRODUCTION_SERVICE_DESCRIPTORS =
+            scanProductionServiceDescriptors();
 
     private static final Set<String> FORMAL_ROOT_SIMPLE_NAMES =
             Set.of(
@@ -87,7 +104,17 @@ class IntakeFormalSinkAssemblyTest {
 
     @ArchTest
     static final ArchRule ASSEMBLY_ROOTS_MUST_NOT_REACH_A_FORMAL_INTAKE_SINK =
-            noFormalSinkAssemblyRule();
+            noFormalSinkAssemblyRule(PRODUCTION_SERVICE_DESCRIPTORS.ownedProviderNames());
+
+    @ArchTest
+    static void productionServiceDescriptorsMustResolveEveryOwnedProvider(JavaClasses classes) {
+        ServiceProviderResolution resolution =
+                resolveServiceProviders(PRODUCTION_SERVICE_DESCRIPTORS, classes);
+        requireEveryOwnedProviderToResolve(resolution);
+        assertThat(resolution.externalProviderRegistrations())
+                .as("non-owned providers are explicitly recorded and excluded from owned roots")
+                .allMatch(registration -> registration.contains(" -> "));
+    }
 
     @Test
     void compiledFixturesProveBytecodeCoverageAndSafeComparisonAssembly() {
@@ -96,10 +123,28 @@ class IntakeFormalSinkAssemblyTest {
                         .withImportOption(new ImportOption.OnlyIncludeTests())
                         .importPackages(FIXTURE_PACKAGE);
 
+        ServiceDescriptorCatalog injectedDescriptors =
+                parseServiceDescriptors(
+                        Map.of(
+                                "com.vendor.Plugin",
+                                """
+                                # The contract and provider names intentionally reveal no formal role.
+                                com.example.dispute.workflow.formalsinkarchitecturefixture.OpaqueProvider
+                                com.example.dispute.workflow.formalsinkarchitecturefixture.SafeIntakeRoomActivitiesMetricsProvider
+                                com.vendor.ExternalMetricsProvider
+                                """));
+        ServiceProviderResolution injectedResolution =
+                resolveServiceProviders(injectedDescriptors, fixtures);
+        assertThat(injectedResolution.missingOwnedProviderRegistrations()).isEmpty();
+        assertThat(injectedResolution.externalProviderRegistrations())
+                .contains("com.vendor.Plugin -> com.vendor.ExternalMetricsProvider");
+        ArchRule fixtureRule =
+                noFormalSinkAssemblyRule(injectedResolution.ownedProviderNames());
+
         String violations =
                 String.join(
                         "\n",
-                        ASSEMBLY_ROOTS_MUST_NOT_REACH_A_FORMAL_INTAKE_SINK
+                        fixtureRule
                                 .evaluate(fixtures)
                                 .getFailureReport()
                                 .getDetails());
@@ -115,9 +160,19 @@ class IntakeFormalSinkAssemblyTest {
                 .contains("FixtureFormalFactory")
                 .contains("CrossFileFormalDelegate")
                 .contains("IntakeFormalCommitPort")
+                .contains(
+                        "formal Intake sink is reachable: "
+                                + FIXTURE_PACKAGE
+                                + ".OpaqueProvider -> "
+                                + FIXTURE_PACKAGE
+                                + ".CrossFileFormalWrapper -> "
+                                + FIXTURE_PACKAGE
+                                + ".CrossFileFormalDelegate -> "
+                                + "com.example.dispute.workflow.application.intake.IntakeFormalCommitPort")
                 .doesNotContain("SafeComparisonAssembly")
                 .doesNotContain("LocalShadowingSafeRegistrar")
-                .doesNotContain("SafeComparisonActivities");
+                .doesNotContain("SafeComparisonActivities")
+                .doesNotContain("SafeIntakeRoomActivitiesMetricsProvider");
 
         assertThat(violations)
                 .contains(
@@ -139,6 +194,13 @@ class IntakeFormalSinkAssemblyTest {
                 "StaticImportedFactoryBeanAssembly",
                 "StaticImportedFactoryBeanAssembly",
                 "FixtureFormalFactory",
+                "IntakeFormalCommitPort");
+        assertShortestChain(
+                fixtures,
+                "OpaqueProvider",
+                "OpaqueProvider",
+                "CrossFileFormalWrapper",
+                "CrossFileFormalDelegate",
                 "IntakeFormalCommitPort");
         assertShortestChain(
                 fixtures,
@@ -201,6 +263,25 @@ class IntakeFormalSinkAssemblyTest {
         assertThat(isAssemblyRoot(neutralContract)).isFalse();
         assertThat(isAssemblyRoot(comparisonAdapter)).isFalse();
         assertThat(shortestFormalSinkChain(comparisonAdapter)).isEmpty();
+
+        assertThatThrownBy(
+                        () ->
+                                parseServiceDescriptors(
+                                        Map.of("com.vendor.Plugin", "not-a-java-binary-name!")))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("invalid provider binary name");
+
+        ServiceDescriptorCatalog missingOwnedProvider =
+                parseServiceDescriptors(
+                        Map.of(
+                                "com.vendor.Plugin",
+                                FIXTURE_PACKAGE + ".MissingOwnedProvider"));
+        ServiceProviderResolution missingResolution =
+                resolveServiceProviders(missingOwnedProvider, fixtures);
+        assertThatThrownBy(() -> requireEveryOwnedProviderToResolve(missingResolution))
+                .isInstanceOf(AssertionError.class)
+                .hasMessageContaining(
+                        "com.vendor.Plugin -> " + FIXTURE_PACKAGE + ".MissingOwnedProvider");
     }
 
     private static void assertShortestChain(
@@ -213,13 +294,13 @@ class IntakeFormalSinkAssemblyTest {
         assertThat(actualSimpleNames).containsExactly(expectedSimpleNames);
     }
 
-    private static ArchRule noFormalSinkAssemblyRule() {
+    private static ArchRule noFormalSinkAssemblyRule(Set<String> serviceProviderRoots) {
         return ArchRuleDefinition.classes()
                 .that(
                         new DescribedPredicate<>("are discoverable assembly or Temporal activity registration roots") {
                             @Override
                             public boolean test(JavaClass javaClass) {
-                                return isAssemblyRoot(javaClass);
+                                return isAssemblyRoot(javaClass, serviceProviderRoots);
                             }
                         })
                 .should(
@@ -244,9 +325,16 @@ class IntakeFormalSinkAssemblyTest {
     }
 
     private static boolean isAssemblyRoot(JavaClass javaClass) {
+        return isAssemblyRoot(
+                javaClass, PRODUCTION_SERVICE_DESCRIPTORS.ownedProviderNames());
+    }
+
+    private static boolean isAssemblyRoot(
+            JavaClass javaClass, Set<String> serviceProviderRoots) {
         return hasDiscoverableClassAnnotation(javaClass)
                 || declaresBeanMethod(javaClass)
-                || isWorkerRegistrationRoot(javaClass);
+                || isWorkerRegistrationRoot(javaClass)
+                || serviceProviderRoots.contains(javaClass.getName());
     }
 
     private static boolean hasDiscoverableClassAnnotation(JavaClass javaClass) {
@@ -395,6 +483,161 @@ class IntakeFormalSinkAssemblyTest {
                 && owner.isAssignableTo(SPRING_BEAN_FACTORY);
     }
 
+    private static ServiceDescriptorCatalog scanProductionServiceDescriptors() {
+        List<ServiceDescriptor> descriptors = new ArrayList<>();
+        Arrays.stream(System.getProperty("java.class.path", "").split(File.pathSeparator))
+                .filter(entry -> !entry.isBlank())
+                .map(Path::of)
+                .map(path -> path.toAbsolutePath().normalize())
+                .distinct()
+                .sorted(Comparator.comparing(Path::toString))
+                .forEach(path -> scanClassPathEntry(path, descriptors));
+        return new ServiceDescriptorCatalog(descriptors);
+    }
+
+    private static void scanClassPathEntry(
+            Path classPathEntry, List<ServiceDescriptor> descriptors) {
+        if (Files.isDirectory(classPathEntry)) {
+            if (isMainClassesDirectory(classPathEntry)) {
+                scanServiceDescriptorDirectory(classPathEntry, descriptors);
+            }
+            return;
+        }
+        if (Files.isRegularFile(classPathEntry)
+                && classPathEntry.getFileName().toString().endsWith(".jar")) {
+            scanServiceDescriptorJar(classPathEntry, descriptors);
+        }
+    }
+
+    private static boolean isMainClassesDirectory(Path classPathEntry) {
+        String normalized = classPathEntry.toString().replace('\\', '/');
+        return normalized.endsWith("/target/classes");
+    }
+
+    private static void scanServiceDescriptorDirectory(
+            Path classesDirectory, List<ServiceDescriptor> descriptors) {
+        Path serviceRoot = classesDirectory.resolve("META-INF").resolve("services");
+        if (!Files.isDirectory(serviceRoot)) {
+            return;
+        }
+        try (var paths = Files.list(serviceRoot)) {
+            for (Path descriptor :
+                    paths.filter(Files::isRegularFile)
+                            .sorted(Comparator.comparing(Path::toString))
+                            .toList()) {
+                descriptors.add(
+                        parseServiceDescriptor(
+                                descriptor.toString(),
+                                descriptor.getFileName().toString(),
+                                Files.readString(descriptor, StandardCharsets.UTF_8)));
+            }
+        } catch (IOException failure) {
+            throw new UncheckedIOException(
+                    "cannot scan production service descriptors under " + serviceRoot,
+                    failure);
+        }
+    }
+
+    private static void scanServiceDescriptorJar(
+            Path jarPath, List<ServiceDescriptor> descriptors) {
+        try (JarFile jar = new JarFile(jarPath.toFile())) {
+            List<JarEntry> serviceEntries =
+                    jar.stream()
+                            .filter(entry -> !entry.isDirectory())
+                            .filter(entry -> entry.getName().startsWith(SERVICES_PATH))
+                            .filter(
+                                    entry ->
+                                            !entry.getName()
+                                                    .substring(SERVICES_PATH.length())
+                                                    .contains("/"))
+                            .sorted(Comparator.comparing(JarEntry::getName))
+                            .toList();
+            for (JarEntry entry : serviceEntries) {
+                String contract = entry.getName().substring(SERVICES_PATH.length());
+                String source = jarPath + "!/" + entry.getName();
+                String content =
+                        new String(
+                                jar.getInputStream(entry).readAllBytes(),
+                                StandardCharsets.UTF_8);
+                descriptors.add(parseServiceDescriptor(source, contract, content));
+            }
+        } catch (IOException failure) {
+            throw new UncheckedIOException(
+                    "cannot scan production service descriptors in " + jarPath,
+                    failure);
+        }
+    }
+
+    private static ServiceDescriptorCatalog parseServiceDescriptors(
+            Map<String, String> descriptors) {
+        List<ServiceDescriptor> parsed = new ArrayList<>();
+        descriptors.entrySet().stream()
+                .sorted(Map.Entry.comparingByKey())
+                .forEach(
+                        descriptor ->
+                                parsed.add(
+                                        parseServiceDescriptor(
+                                                "injected:" + descriptor.getKey(),
+                                                descriptor.getKey(),
+                                                descriptor.getValue())));
+        return new ServiceDescriptorCatalog(parsed);
+    }
+
+    private static ServiceDescriptor parseServiceDescriptor(
+            String source, String contractName, String content) {
+        requireJavaBinaryName(contractName, "service contract", source, 0);
+        Set<String> providers = new TreeSet<>();
+        String[] lines = content.split("\\R", -1);
+        for (int index = 0; index < lines.length; index++) {
+            String provider = lines[index].split("#", 2)[0].trim();
+            if (provider.isEmpty()) {
+                continue;
+            }
+            requireJavaBinaryName(provider, "provider", source, index + 1);
+            providers.add(provider);
+        }
+        return new ServiceDescriptor(source, contractName, providers);
+    }
+
+    private static void requireJavaBinaryName(
+            String candidate, String kind, String source, int lineNumber) {
+        if (!SourceVersion.isName(candidate, SourceVersion.RELEASE_21)) {
+            String location = lineNumber > 0 ? source + ":" + lineNumber : source;
+            throw new IllegalArgumentException(
+                    "invalid " + kind + " binary name '" + candidate + "' in " + location);
+        }
+    }
+
+    private static ServiceProviderResolution resolveServiceProviders(
+            ServiceDescriptorCatalog catalog, JavaClasses importedClasses) {
+        Set<String> ownedProviders = new TreeSet<>();
+        Set<String> missingOwnedProviders = new TreeSet<>();
+        Set<String> externalProviders = new TreeSet<>();
+        for (ServiceDescriptor descriptor : catalog.descriptors()) {
+            for (String provider : descriptor.providerNames()) {
+                String registration = descriptor.contractName() + " -> " + provider;
+                if (!provider.startsWith(OWNED_PACKAGE_PREFIX)) {
+                    externalProviders.add(registration);
+                } else if (importedClasses.contain(provider)) {
+                    ownedProviders.add(provider);
+                } else {
+                    missingOwnedProviders.add(registration);
+                }
+            }
+        }
+        return new ServiceProviderResolution(
+                Set.copyOf(ownedProviders),
+                List.copyOf(missingOwnedProviders),
+                List.copyOf(externalProviders));
+    }
+
+    private static void requireEveryOwnedProviderToResolve(
+            ServiceProviderResolution resolution) {
+        assertThat(resolution.missingOwnedProviderRegistrations())
+                .as("owned META-INF/services providers must resolve to imported production classes")
+                .isEmpty();
+    }
+
     private static List<JavaClass> directOwnedDependencies(JavaClass javaClass) {
         return javaClass.getDirectDependenciesFromSelf().stream()
                 .map(Dependency::getTargetClass)
@@ -420,4 +663,31 @@ class IntakeFormalSinkAssemblyTest {
     }
 
     private record PathNode(JavaClass javaClass, List<JavaClass> path) {}
+
+    private record ServiceDescriptor(
+            String source, String contractName, Set<String> providerNames) {
+
+        private ServiceDescriptor {
+            providerNames = Set.copyOf(providerNames);
+        }
+    }
+
+    private record ServiceDescriptorCatalog(List<ServiceDescriptor> descriptors) {
+
+        private ServiceDescriptorCatalog {
+            descriptors = List.copyOf(descriptors);
+        }
+
+        private Set<String> ownedProviderNames() {
+            return descriptors.stream()
+                    .flatMap(descriptor -> descriptor.providerNames().stream())
+                    .filter(provider -> provider.startsWith(OWNED_PACKAGE_PREFIX))
+                    .collect(Collectors.toUnmodifiableSet());
+        }
+    }
+
+    private record ServiceProviderResolution(
+            Set<String> ownedProviderNames,
+            List<String> missingOwnedProviderRegistrations,
+            List<String> externalProviderRegistrations) {}
 }

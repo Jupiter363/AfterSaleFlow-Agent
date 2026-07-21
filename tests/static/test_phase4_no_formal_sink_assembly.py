@@ -50,6 +50,10 @@ DISCOVERY_STEREOTYPE = re.compile(
     r"SpringBootApplication"
     r")\b"
 )
+JAVA_BINARY_NAME = re.compile(
+    r"[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*\Z"
+)
+SERVICE_PROVIDER_TRANSITIVE_AUTHORITY = "IntakeFormalSinkAssemblyTest"
 
 
 def test_production_activity_registration_has_no_direct_formal_sink_reference() -> None:
@@ -72,33 +76,45 @@ def test_formal_intake_adapters_are_not_discoverable_components() -> None:
         assert not DISCOVERY_STEREOTYPE.search(source), path
 
 
-def test_no_meta_inf_service_provider_can_assemble_an_intake_formal_sink() -> None:
+def _is_direct_formal_provider(provider: str) -> bool:
+    simple_name = provider.rsplit(".", 1)[-1]
+    return simple_name in FORMAL_ROOT_NAMES or simple_name.startswith(
+        "JdbcIntakeFormal"
+    )
+
+
+def test_meta_inf_service_descriptors_are_syntactically_valid_and_not_direct_formal() -> (
+    None
+):
     service_root = JAVA_RESOURCES / "META-INF/services"
     descriptors = (
         sorted(path for path in service_root.rglob("*") if path.is_file())
         if service_root.exists()
         else []
     )
-    forbidden_fragments = {
-        *FORMAL_ROOT_NAMES,
-        "IntakeRoomActivities",
-        "IntakeRoomActivitiesAdapter",
-        "JdbcIntakeFormal",
-    }
 
     for descriptor in descriptors:
         contract = descriptor.relative_to(service_root).as_posix().replace("/", ".")
+        assert JAVA_BINARY_NAME.fullmatch(contract), descriptor
         providers = {
             provider
             for line in descriptor.read_text(encoding="utf-8").splitlines()
             if (provider := line.split("#", 1)[0].strip())
         }
-        registrations = {contract, *providers}
-        assert not {
-            registration
-            for registration in registrations
-            if any(fragment in registration for fragment in forbidden_fragments)
-        }, descriptor
+        assert all(JAVA_BINARY_NAME.fullmatch(provider) for provider in providers), descriptor
+        assert not {provider for provider in providers if _is_direct_formal_provider(provider)}, (
+            descriptor
+        )
+
+    assert not _is_direct_formal_provider(
+        "com.example.dispute.SafeIntakeRoomActivitiesMetricsProvider"
+    )
+    assert _is_direct_formal_provider(
+        "com.example.dispute.workflow.application.intake.IntakeFormalCommitPort"
+    )
+    assert _is_direct_formal_provider(
+        "com.example.dispute.persistence.JdbcIntakeFormalOpaqueProvider"
+    )
 
 
 def test_archunit_rule_and_compiled_fixture_contract_exist() -> None:
@@ -124,6 +140,11 @@ def test_archunit_rule_and_compiled_fixture_contract_exist() -> None:
         '"java.lang.ClassLoader"',
         '"java.lang.invoke.MethodHandles"',
         '"org.springframework.beans.factory.BeanFactory"',
+        "scanProductionServiceDescriptors",
+        "parseServiceDescriptors",
+        "resolveServiceProviders",
+        "missingOwnedProviderRegistrations",
+        "externalProviderRegistrations",
         "shortestFormalSinkChain",
         "isAssemblyRoot(neutralContract)",
         "isAssemblyRoot(comparisonAdapter)",
@@ -141,6 +162,7 @@ def test_archunit_rule_and_compiled_fixture_contract_exist() -> None:
         "ReflectiveFormalAdapterAssembly.java",
         "SafeComparisonActivities.java",
         "SafeComparisonAssembly.java",
+        "ServiceDescriptorProviderFixtures.java",
         "ServiceLoaderHiddenProviderAssembly.java",
         "SpringStringBeanLookupAssembly.java",
         "StaticFieldAliasRegistrar.java",
@@ -169,8 +191,12 @@ def test_archunit_rule_and_compiled_fixture_contract_exist() -> None:
         'context.getBean("formalIntakeFinalizer")',
         "@NestedFixtureStereotype",
         "ObjectProvider<SafeComparisonActivities>",
+        "class OpaqueProvider",
+        "class SafeIntakeRoomActivitiesMetricsProvider",
     ):
         assert required in fixture_source
+
+    assert SERVICE_PROVIDER_TRANSITIVE_AUTHORITY in ARCHUNIT_TEST.name
 
 
 def test_gate_is_scheduled_in_batch_2_and_inherited_by_batch_3() -> None:
