@@ -27,12 +27,16 @@ import com.example.dispute.workflow.temporal.room.intake.IntakeCommandType;
 import com.example.dispute.workflow.temporal.room.intake.IntakeDomainEventType;
 import com.example.dispute.workflow.temporal.room.intake.IntakeParty;
 import io.temporal.failure.ApplicationFailure;
+import java.lang.reflect.Modifier;
 import java.time.Instant;
+import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.core.annotation.AnnotatedElementUtils;
 import org.springframework.stereotype.Component;
-import org.springframework.stereotype.Repository;
 
 class IntakeChildBridgeActivitiesTest {
 
@@ -120,6 +124,57 @@ class IntakeChildBridgeActivitiesTest {
 
         port.start = null;
         assertInvariant(() -> adapter.bindStart(startRequest(WriterMode.SHADOW)));
+    }
+
+    @Test
+    void rejectsProvisionedChildWorkflowTypeOrBuildDivergence() {
+        ProvisionRoomEpoch provision = provisioning(WriterMode.SHADOW);
+
+        ActiveChildBinding genericChild = activeBinding(
+                "room-epoch-selection.v2",
+                CaseProcessWorkflowProtocol.CASE_WORKFLOW_TYPE,
+                "RoomControlWorkflow",
+                "intake-room-build.v1");
+        port.start = startSource(genericChild, provision.payloadSha256());
+        assertInvariant(
+                () -> adapter.bindStart(startRequest(provision, genericChild)),
+                "room workflow type mismatch");
+
+        ActiveChildBinding otherBuild = activeBinding(
+                "room-epoch-selection.v2",
+                CaseProcessWorkflowProtocol.CASE_WORKFLOW_TYPE,
+                "IntakeRoomWorkflow",
+                "intake-room-build.v2");
+        port.start = startSource(otherBuild, provision.payloadSha256());
+        assertInvariant(
+                () -> adapter.bindStart(startRequest(provision, otherBuild)),
+                "room workflow build id mismatch");
+    }
+
+    @Test
+    void rejectsNonV2OrGenericWorkflowSelectionsForCommandsAndEvents() {
+        List.of(
+                        activeBinding(
+                                "room-epoch-selection.v1",
+                                CaseProcessWorkflowProtocol.CASE_WORKFLOW_TYPE,
+                                "IntakeRoomWorkflow",
+                                "intake-room-build.v1"),
+                        activeBinding(
+                                "room-epoch-selection.v999",
+                                CaseProcessWorkflowProtocol.CASE_WORKFLOW_TYPE,
+                                "IntakeRoomWorkflow",
+                                "intake-room-build.v1"),
+                        activeBinding(
+                                "room-epoch-selection.v2",
+                                "RoomControlWorkflow",
+                                "IntakeRoomWorkflow",
+                                "intake-room-build.v1"),
+                        activeBinding(
+                                "room-epoch-selection.v2",
+                                CaseProcessWorkflowProtocol.CASE_WORKFLOW_TYPE,
+                                "RoomControlWorkflow",
+                                "intake-room-build.v1"))
+                .forEach(this::assertCommandAndEventSelectionInvariant);
     }
 
     @Test
@@ -251,14 +306,48 @@ class IntakeChildBridgeActivitiesTest {
     }
 
     @Test
-    void adapterHasNoRuntimeDiscoveryOrRepositoryDependency() {
-        assertThat(IntakeChildBridgeActivitiesAdapter.class.isAnnotationPresent(Component.class))
+    void requestContractsExposeOnlyTheGenericReferenceAndActiveBinding() {
+        assertRecordComponents(
+                StartRequest.class,
+                Map.of(
+                        "schemaVersion", String.class,
+                        "provisioning", ProvisionRoomEpoch.class,
+                        "activeBinding", ActiveChildBinding.class));
+        assertRecordComponents(
+                CommandRequest.class,
+                Map.of(
+                        "schemaVersion", String.class,
+                        "command", CaseCommandRef.class,
+                        "activeBinding", ActiveChildBinding.class));
+        assertRecordComponents(
+                DomainEventRequest.class,
+                Map.of(
+                        "schemaVersion", String.class,
+                        "event", CaseDomainEventRef.class,
+                        "activeBinding", ActiveChildBinding.class));
+    }
+
+    @Test
+    void adapterIsPlainAndDependsOnlyOnTheReadPort() {
+        assertThat(AnnotatedElementUtils.hasAnnotation(
+                        IntakeChildBridgeActivitiesAdapter.class, Component.class))
                 .isFalse();
-        assertThat(IntakeChildBridgeActivitiesAdapter.class.isAnnotationPresent(Repository.class))
-                .isFalse();
+        assertThat(Arrays.stream(IntakeChildBridgeActivitiesAdapter.class.getAnnotations())
+                        .map(annotation -> annotation.annotationType().getPackageName()))
+                .noneMatch(packageName -> packageName.startsWith("org.springframework"));
+
+        assertThat(Arrays.stream(IntakeChildBridgeActivitiesAdapter.class.getDeclaredFields())
+                        .filter(field -> !Modifier.isStatic(field.getModifiers()))
+                        .map(field -> field.getType().getName()))
+                .containsExactly(IntakeChildBridgeReadPort.class.getName());
         assertThat(IntakeChildBridgeActivitiesAdapter.class.getDeclaredFields())
-                .extracting(field -> field.getType().getSimpleName())
-                .noneMatch(name -> name.contains("Repository"));
+                .extracting(field -> field.getType().getName())
+                .containsOnly(String.class.getName(), IntakeChildBridgeReadPort.class.getName());
+        assertThat(IntakeChildBridgeActivitiesAdapter.class.getDeclaredConstructors()).hasSize(1);
+        assertThat(IntakeChildBridgeActivitiesAdapter.class
+                        .getDeclaredConstructors()[0]
+                        .getParameterTypes())
+                .containsExactly(IntakeChildBridgeReadPort.class);
     }
 
     private void assertCommandInvariant(CommandSource source) {
@@ -271,12 +360,44 @@ class IntakeChildBridgeActivitiesTest {
         assertInvariant(() -> adapter.bindDomainEvent(eventRequest("INTAKE_CANCELLED")));
     }
 
+    private void assertCommandAndEventSelectionInvariant(ActiveChildBinding binding) {
+        port.command = commandSource(
+                binding,
+                "CMD_BRIDGE", TENANT, CASE_ID, EPOCH, FENCE, COMMAND_SEQUENCE,
+                CommandType.INTAKE_CANCEL, PAYLOAD_HASH, REQUEST_HASH,
+                PROCESS_REVISION, ROOM_REVISION, ActorRole.USER);
+        assertInvariant(() -> adapter.bindCommand(
+                commandRequest(CommandType.INTAKE_CANCEL, ActorRole.USER, binding)));
+
+        port.event = eventSource(
+                binding,
+                "INTAKE_CANCELLED", IntakeDomainEventType.CANCELLED,
+                "EVT_BRIDGE", TENANT, CASE_ID, EPOCH, FENCE, EVENT_SEQUENCE,
+                PAYLOAD_HASH, PROCESS_REVISION, ROOM_REVISION,
+                IntakeParty.INITIATOR, INITIATOR_SCOPE);
+        assertInvariant(() -> adapter.bindDomainEvent(eventRequest("INTAKE_CANCELLED", binding)));
+    }
+
+    private static void assertRecordComponents(Class<?> recordType, Map<String, Class<?>> expected) {
+        Map<String, Class<?>> actual = Arrays.stream(recordType.getRecordComponents())
+                .collect(Collectors.toMap(
+                        component -> component.getName(), component -> component.getType()));
+        assertThat(actual).containsExactlyInAnyOrderEntriesOf(expected);
+    }
+
     private static void assertInvariant(Runnable invocation) {
+        assertInvariant(invocation, null);
+    }
+
+    private static void assertInvariant(Runnable invocation, String expectedCauseMessage) {
         assertThatThrownBy(invocation::run)
                 .isInstanceOfSatisfying(ApplicationFailure.class, failure -> {
                     assertThat(failure.getType())
                             .isEqualTo(IntakeChildBridgeActivitiesAdapter.INVARIANT_FAILURE);
                     assertThat(failure.isNonRetryable()).isTrue();
+                    if (expectedCauseMessage != null) {
+                        assertThat(failure.getCause()).hasMessage(expectedCauseMessage);
+                    }
                 });
     }
 
@@ -285,20 +406,35 @@ class IntakeChildBridgeActivitiesTest {
                 "intake-child-start-request.v1", provisioning(writerMode), activeBinding());
     }
 
+    private static StartRequest startRequest(
+            ProvisionRoomEpoch provision, ActiveChildBinding binding) {
+        return new StartRequest("intake-child-start-request.v1", provision, binding);
+    }
+
     private static CommandRequest commandRequest() {
         return commandRequest(CommandType.INTAKE_CANCEL, ActorRole.USER);
     }
 
     private static CommandRequest commandRequest(CommandType type, ActorRole role) {
+        return commandRequest(type, role, activeBinding());
+    }
+
+    private static CommandRequest commandRequest(
+            CommandType type, ActorRole role, ActiveChildBinding binding) {
         return new CommandRequest(
-                "intake-child-command-request.v1", command(type, role), activeBinding());
+                "intake-child-command-request.v1", command(type, role), binding);
     }
 
     private static DomainEventRequest eventRequest(String sourceEventType) {
+        return eventRequest(sourceEventType, activeBinding());
+    }
+
+    private static DomainEventRequest eventRequest(
+            String sourceEventType, ActiveChildBinding binding) {
         return new DomainEventRequest(
                 "intake-child-domain-event-request.v1",
                 event(sourceEventType),
-                activeBinding());
+                binding);
     }
 
     private static ActiveChildBinding activeBinding() {
@@ -306,22 +442,54 @@ class IntakeChildBridgeActivitiesTest {
     }
 
     private static ActiveChildBinding activeBinding(long fence) {
+        return activeBinding(
+                fence,
+                "room-epoch-selection.v2",
+                CaseProcessWorkflowProtocol.CASE_WORKFLOW_TYPE,
+                "IntakeRoomWorkflow",
+                "intake-room-build.v1");
+    }
+
+    private static ActiveChildBinding activeBinding(
+            String selectionSchemaVersion,
+            String caseWorkflowType,
+            String roomWorkflowType,
+            String roomWorkflowBuildId) {
+        return activeBinding(
+                FENCE,
+                selectionSchemaVersion,
+                caseWorkflowType,
+                roomWorkflowType,
+                roomWorkflowBuildId);
+    }
+
+    private static ActiveChildBinding activeBinding(
+            long fence,
+            String selectionSchemaVersion,
+            String caseWorkflowType,
+            String roomWorkflowType,
+            String roomWorkflowBuildId) {
         return new ActiveChildBinding(
                 "active-intake-child-binding.v1",
                 TENANT,
                 CASE_ID,
                 EPOCH,
                 fence,
-                "room-epoch-selection.v2",
-                CaseProcessWorkflowProtocol.CASE_WORKFLOW_TYPE,
+                selectionSchemaVersion,
+                caseWorkflowType,
                 "case-workflow-build.v1",
-                "IntakeRoomWorkflow",
-                "intake-room-build.v1");
+                roomWorkflowType,
+                roomWorkflowBuildId);
     }
 
     private static StartSource startSource(String provisioningHash) {
+        return startSource(activeBinding(), provisioningHash);
+    }
+
+    private static StartSource startSource(
+            ActiveChildBinding binding, String provisioningHash) {
         return new StartSource(
-                activeBinding(),
+                binding,
                 provisioningHash,
                 "intake-prompt.v2",
                 "intake-model.synthetic.v1",
@@ -346,11 +514,30 @@ class IntakeChildBridgeActivitiesTest {
             long processRevision,
             long roomRevision,
             ActorRole actorRole) {
+        return commandSource(
+                activeBinding(), commandId, tenant, caseId, epoch, fence, sequence, type,
+                payloadHash, requestHash, processRevision, roomRevision, actorRole);
+    }
+
+    private static CommandSource commandSource(
+            ActiveChildBinding binding,
+            String commandId,
+            String tenant,
+            String caseId,
+            long epoch,
+            long fence,
+            long sequence,
+            CommandType type,
+            String payloadHash,
+            String requestHash,
+            long processRevision,
+            long roomRevision,
+            ActorRole actorRole) {
         IntakeParty party = actorRole == ActorRole.MERCHANT
                 ? IntakeParty.RESPONDENT : IntakeParty.INITIATOR;
         String scope = party == IntakeParty.RESPONDENT ? RESPONDENT_SCOPE : INITIATOR_SCOPE;
         return new CommandSource(
-                activeBinding(),
+                binding,
                 commandId,
                 tenant,
                 caseId,
@@ -399,8 +586,28 @@ class IntakeChildBridgeActivitiesTest {
             long roomRevision,
             IntakeParty party,
             String actorScopeHash) {
+        return eventSource(
+                activeBinding(), sourceEventType, type, eventId, tenant, caseId, epoch, fence,
+                sequence, payloadHash, processRevision, roomRevision, party, actorScopeHash);
+    }
+
+    private static DomainEventSource eventSource(
+            ActiveChildBinding binding,
+            String sourceEventType,
+            IntakeDomainEventType type,
+            String eventId,
+            String tenant,
+            String caseId,
+            long epoch,
+            long fence,
+            long sequence,
+            String payloadHash,
+            long processRevision,
+            long roomRevision,
+            IntakeParty party,
+            String actorScopeHash) {
         return new DomainEventSource(
-                activeBinding(),
+                binding,
                 eventId,
                 sourceEventType,
                 type,

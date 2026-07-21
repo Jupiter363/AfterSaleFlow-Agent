@@ -75,6 +75,7 @@ public final class IntakeChildBridgeActivitiesAdapter implements IntakeChildBrid
         ActiveChildBinding active = request.activeBinding();
         requireActiveBinding(active, source.persistedBinding());
         requireProvisioningScope(provision, active);
+        requireTypedSelection(active);
         requireEqual(source.provisioningRequestHash(), provision.payloadSha256(),
                 "provisioning request hash");
         requireIdentifier(source.promptVersion(), "prompt version");
@@ -123,6 +124,7 @@ public final class IntakeChildBridgeActivitiesAdapter implements IntakeChildBrid
         CaseCommandRef command = request.command();
         ActiveChildBinding active = request.activeBinding();
         requireActiveBinding(active, source.persistedBinding());
+        requireTypedSelection(active);
         requireEqual(source.commandId(), command.commandId(), "command id");
         requireEqual(source.tenantSurrogate(), command.tenantSurrogate(), "tenant");
         requireEqual(source.caseId(), command.caseId(), "case");
@@ -185,6 +187,7 @@ public final class IntakeChildBridgeActivitiesAdapter implements IntakeChildBrid
         CaseDomainEventRef event = request.event();
         ActiveChildBinding active = request.activeBinding();
         requireActiveBinding(active, source.persistedBinding());
+        requireTypedSelection(active);
         requireEqual(source.eventId(), event.eventId(), "event id");
         requireEqual(source.sourceEventType(), event.eventType(), "source event type");
         requireEqual(source.tenantSurrogate(), event.tenantSurrogate(), "tenant");
@@ -249,14 +252,23 @@ public final class IntakeChildBridgeActivitiesAdapter implements IntakeChildBrid
         requireEqual(provision.workflowType(), active.caseWorkflowType(), "case workflow type");
         requireEqual(provision.temporalBuildId(), active.caseWorkflowBuildId(),
                 "case workflow build id");
+        requireEqual(provision.roomWorkflowType(), active.roomWorkflowType(),
+                "room workflow type");
+        requireEqual(provision.roomWorkflowBuildId(), active.roomWorkflowBuildId(),
+                "room workflow build id");
         if (provision.writerMode() != WriterMode.SHADOW
                 && provision.writerMode() != WriterMode.TEMPORAL) {
             throw new IllegalArgumentException("typed Intake bridge requires SHADOW or TEMPORAL");
         }
+        if (!GRAPH_KEY.equals(provision.graphKey())) {
+            throw new IllegalArgumentException("persisted typed Intake selection is invalid");
+        }
+    }
+
+    private static void requireTypedSelection(ActiveChildBinding active) {
         if (!SELECTION_V2.equals(active.selectionSchemaVersion())
                 || !CaseProcessWorkflowProtocol.CASE_WORKFLOW_TYPE.equals(active.caseWorkflowType())
-                || !ROOM_WORKFLOW_TYPE.equals(active.roomWorkflowType())
-                || !GRAPH_KEY.equals(provision.graphKey())) {
+                || !ROOM_WORKFLOW_TYPE.equals(active.roomWorkflowType())) {
             throw new IllegalArgumentException("persisted typed Intake selection is invalid");
         }
     }
