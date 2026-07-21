@@ -4,6 +4,7 @@ import com.example.dispute.workflow.application.intake.IntakeFormalBranchCommitP
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.BranchCommitReceipt;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.BranchCommitRequest;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.BranchOperation;
+import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.ActivityInvocationMode;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.GraphExecutionReceipt;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.GraphExecutionRequest;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.SnapshotPublicationReceipt;
@@ -80,16 +81,25 @@ public final class IntakeRoomActivitiesAdapter implements IntakeRoomActivities {
 
     private BranchCommitReceipt commit(
             BranchCommitRequest request, BranchOperation expectedOperation) {
-        return invoke(() -> {
+        try {
             Objects.requireNonNull(request, "request");
             if (request.operation() != expectedOperation) {
                 throw new IllegalArgumentException(
                         "Activity method does not match the requested Intake branch");
             }
             BranchCommitReceipt receipt = branches.commit(request);
-            Objects.requireNonNull(receipt, "branch receipt").requireMatches(request);
+            if (receipt == null) {
+                if (request.envelope().invocation().mode()
+                        == ActivityInvocationMode.RECONCILE_ONLY) {
+                    return null;
+                }
+                throw new NullPointerException("branch receipt");
+            }
+            receipt.requireMatches(request);
             return receipt;
-        });
+        } catch (RuntimeException failure) {
+            throw IntakeActivityFailureMapper.toApplicationFailure(failure);
+        }
     }
 
     private static <T> T invoke(Supplier<T> invocation) {

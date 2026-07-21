@@ -3,10 +3,13 @@ package com.example.dispute.workflow.activity.intake;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import com.example.dispute.domain.model.CaseStatus;
@@ -15,15 +18,19 @@ import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEnti
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.room.application.IntakeBranchDomainService;
 import com.example.dispute.room.application.IntakeBranchDomainService.BranchResult;
+import com.example.dispute.room.application.IntakeBranchDomainService.TimelineEventMode;
 import com.example.dispute.room.application.IntakeConfirmationCommand;
 import com.example.dispute.room.application.IntakeConfirmationView;
 import com.example.dispute.room.domain.RoomType;
 import com.example.dispute.room.infrastructure.persistence.JdbcIntakeFormalBranchCommitPort;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
+import com.example.dispute.workflow.application.intake.IntakeFinalizationPersistenceException;
 import com.example.dispute.workflow.application.intake.IntakeFinalizationRejectedException;
 import com.example.dispute.workflow.application.intake.IntakeFormalBranchCommandResolver.ResolvedBranchCommand;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.ActivityEnvelope;
+import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.ActivityInvocation;
+import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.ActivityInvocationMode;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.BranchCommitReceipt;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.BranchCommitRequest;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.BranchOperation;
@@ -50,10 +57,13 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.dao.TransientDataAccessResourceException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.transaction.CannotCreateTransactionException;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.wait.strategy.Wait;
@@ -109,8 +119,11 @@ class JdbcIntakeFormalBranchCommitPortTest {
 
         BranchCommitReceipt first = harness.port().commit(fixture.request());
         BranchCommitReceipt replay = harness.port().commit(fixture.request());
+        BranchCommitReceipt reconciled =
+                harness.port().commit(reconciliationRequest(fixture.request()));
 
         assertThat(replay).isEqualTo(first);
+        assertThat(reconciled).isEqualTo(first);
         assertThat(scalar("select command_status from case_command where command_id = ?",
                         fixture.envelope().commandId()))
                 .isEqualTo("APPLIED");
@@ -133,7 +146,55 @@ class JdbcIntakeFormalBranchCommitPortTest {
                 .isEqualTo("DOMAIN_INITIATOR_ACCEPT");
         assertCommandAndOperationReceiptsMatch(fixture);
         verify(harness.domainService(), times(1))
-                .acceptInitiator(any(), any(), any(), any(), any());
+                .acceptInitiator(
+                        any(),
+                        any(),
+                        any(),
+                        any(),
+                        any(),
+                        eq(TimelineEventMode.FORMAL_TYPED_ONLY));
+    }
+
+    @Test
+    void reconciliationReturnsNullOnlyWhenTheReceiptLedgerIsAbsentAndWritesNothing() {
+        Fixture fixture = fixture("RECONCILE_ABSENT", BranchOperation.INITIATOR_ACCEPT);
+        Harness harness = harness(fixture);
+
+        BranchCommitReceipt receipt =
+                harness.port().commit(reconciliationRequest(fixture.request()));
+
+        assertThat(receipt).isNull();
+        assertThat(count("select count(*) from domain_operation where operation_key = ?",
+                        fixture.request().operationKey()))
+                .isZero();
+        assertThat(count("select count(*) from case_timeline_event where case_id = ?",
+                        fixture.caseId()))
+                .isZero();
+        verifyNoInteractions(harness.domainService());
+    }
+
+    @Test
+    void reconciliationTreatsAnExistingStartedOperationAsRetryableUnresolved() {
+        Fixture fixture = fixture("RECONCILE_STARTED", BranchOperation.INITIATOR_ACCEPT);
+        insertFixture(fixture);
+        insertStartedOperation(fixture);
+        Harness harness = harness(fixture);
+
+        assertThatThrownBy(
+                        () -> harness.port().commit(reconciliationRequest(fixture.request())))
+                .isInstanceOf(IntakeFinalizationPersistenceException.class)
+                .hasMessageContaining("without a committed receipt");
+
+        assertThat(scalar("select operation_status from domain_operation where operation_key = ?",
+                        fixture.request().operationKey()))
+                .isEqualTo("STARTED");
+        assertThat(scalar("select command_status from case_command where command_id = ?",
+                        fixture.envelope().commandId()))
+                .isEqualTo("ORCHESTRATION_ACCEPTED");
+        assertThat(count("select count(*) from case_timeline_event where case_id = ?",
+                        fixture.caseId()))
+                .isZero();
+        verifyNoInteractions(harness.domainService());
     }
 
     @ParameterizedTest
@@ -253,6 +314,112 @@ class JdbcIntakeFormalBranchCommitPortTest {
     }
 
     @Test
+    void cancellationAllowsEitherInitiatorCompletionStateButNoRespondentCompletion() {
+        Fixture completedInitiator = fixture("CANCEL_AFTER_INITIATOR", BranchOperation.CANCEL);
+        insertFixture(completedInitiator);
+        insertInitiatorCompletion(completedInitiator);
+
+        BranchCommitReceipt receipt =
+                harness(completedInitiator).port().commit(completedInitiator.request());
+
+        assertThat(receipt.branchOperation()).isEqualTo(BranchOperation.CANCEL);
+        assertThat(count("select count(*) from case_timeline_event where case_id = ?",
+                        completedInitiator.caseId()))
+                .isEqualTo(1);
+
+        Fixture completedRespondent = fixture("CANCEL_AFTER_RESPONDENT", BranchOperation.CANCEL);
+        insertFixture(completedRespondent);
+        insertRespondentCompletion(completedRespondent);
+
+        assertRejectedWithNoWrites(
+                completedRespondent, harness(completedRespondent), completedRespondent.request());
+    }
+
+    @ParameterizedTest
+    @EnumSource(
+            value = BranchOperation.class,
+            names = {"INITIATOR_ACCEPT", "INITIATOR_REJECT"})
+    void initiatorDecisionsRequireBothPartiesToRemainIncomplete(BranchOperation operation) {
+        Fixture completedInitiator = fixture("DECISION_INITIATOR_" + operation, operation);
+        insertFixture(completedInitiator);
+        insertInitiatorCompletion(completedInitiator);
+        assertRejectedWithNoWrites(
+                completedInitiator, harness(completedInitiator), completedInitiator.request());
+
+        Fixture completedRespondent = fixture("DECISION_RESPONDENT_" + operation, operation);
+        insertFixture(completedRespondent);
+        insertRespondentCompletion(completedRespondent);
+        assertRejectedWithNoWrites(
+                completedRespondent, harness(completedRespondent), completedRespondent.request());
+    }
+
+    @Test
+    void respondentConfirmationRequiresAnInitiatorCompletionBeforeTheDeltaGate() {
+        Fixture fixture = fixture("RESPONDENT_WITHOUT_INITIATOR", BranchOperation.RESPONDENT_CONFIRM);
+        insertFixture(fixture);
+
+        assertThatThrownBy(() -> harness(fixture).port().commit(fixture.request()))
+                .isInstanceOf(IntakeFinalizationRejectedException.class)
+                .satisfies(failure -> assertThat(
+                                ((IntakeFinalizationRejectedException) failure).code())
+                        .isEqualTo("INTAKE_RESPONDENT_AUTHORITY_REJECTED"));
+
+        assertThat(count("select count(*) from domain_operation where case_id = ?", fixture.caseId()))
+                .isZero();
+    }
+
+    @Test
+    void retryableAndDeterministicDatabaseFailuresKeepDistinctTemporalSemantics() {
+        Fixture retryable = fixture("RETRYABLE_DATABASE", BranchOperation.INITIATOR_ACCEPT);
+        insertFixture(retryable);
+        Harness retryableHarness = harness(retryable);
+        doThrow(new TransientDataAccessResourceException("database connection lost"))
+                .when(retryableHarness.domainService())
+                .acceptInitiator(any(), any(), any(), any(), any(), any());
+
+        assertThatThrownBy(() -> retryableHarness.port().commit(retryable.request()))
+                .isInstanceOf(IntakeFinalizationPersistenceException.class);
+        assertThat(count("select count(*) from domain_operation where case_id = ?", retryable.caseId()))
+                .isZero();
+
+        Fixture invariant = fixture("DATABASE_INVARIANT", BranchOperation.INITIATOR_ACCEPT);
+        insertFixture(invariant);
+        Harness invariantHarness = harness(invariant);
+        doThrow(new DataIntegrityViolationException("deterministic constraint violation"))
+                .when(invariantHarness.domainService())
+                .acceptInitiator(any(), any(), any(), any(), any(), any());
+
+        assertThatThrownBy(() -> invariantHarness.port().commit(invariant.request()))
+                .isInstanceOf(IntakeFinalizationRejectedException.class)
+                .satisfies(failure -> assertThat(
+                                ((IntakeFinalizationRejectedException) failure).code())
+                        .isEqualTo("INTAKE_BRANCH_PERSISTENCE_INVARIANT"));
+        assertThat(count("select count(*) from domain_operation where case_id = ?", invariant.caseId()))
+                .isZero();
+    }
+
+    @Test
+    void unknownTransactionOutcomeRemainsRetryable() {
+        Fixture fixture = fixture("TRANSACTION_UNKNOWN", BranchOperation.INITIATOR_ACCEPT);
+        PlatformTransactionManager unavailable = mock(PlatformTransactionManager.class);
+        when(unavailable.getTransaction(any()))
+                .thenThrow(new CannotCreateTransactionException("transaction manager unavailable"));
+        JdbcIntakeFormalBranchCommitPort port = new JdbcIntakeFormalBranchCommitPort(
+                namedJdbc,
+                unavailable,
+                mock(FulfillmentCaseRepository.class),
+                mock(CaseRoomRepository.class),
+                mock(IntakeBranchDomainService.class),
+                request -> fixture.resolved(),
+                objectMapper,
+                Clock.fixed(NOW, ZoneOffset.UTC));
+
+        assertThatThrownBy(() -> port.commit(fixture.request()))
+                .isInstanceOf(IntakeFinalizationPersistenceException.class)
+                .hasMessageContaining("commit outcome was known");
+    }
+
+    @Test
     void respondentConfirmationRemainsFailClosedBehindTheErratumGate() {
         Fixture fixture = fixture("RESPONDENT", BranchOperation.RESPONDENT_CONFIRM);
         insertFixture(fixture);
@@ -313,7 +480,7 @@ class JdbcIntakeFormalBranchCommitPortTest {
                             return result;
                         })
                         .when(domainService)
-                        .acceptInitiator(any(), any(), any(), any(), any());
+                        .acceptInitiator(any(), any(), any(), any(), any(), any());
                 when(domainService.requireFormalInitiatorMatrix(dispute))
                         .thenReturn(new IntakeBranchDomainService.ObjectNodeAuthority(
                                 "INITIATOR_FROZEN", "d".repeat(64)));
@@ -323,13 +490,13 @@ class JdbcIntakeFormalBranchCommitPortTest {
                         return result;
                     })
                     .when(domainService)
-                    .rejectInitiator(any(), any(), any(), any(), any());
+                    .rejectInitiator(any(), any(), any(), any(), any(), any());
             case CANCEL -> doAnswer(ignored -> {
                         applyDomainMutation(fixture, resultStatus, currentRoom);
                         return result;
                     })
                     .when(domainService)
-                    .cancel(any(), any(), any(), any(), any());
+                    .cancel(any(), any(), any(), any(), any(), any());
             case RESPONDENT_CONFIRM -> when(domainService.requireFormalBilateralMatrix(dispute))
                     .thenReturn(new IntakeBranchDomainService.ObjectNodeAuthority(
                             "BILATERAL_FROZEN", "e".repeat(64)));
@@ -497,6 +664,42 @@ class JdbcIntakeFormalBranchCommitPortTest {
                 source.invocation());
     }
 
+    private static BranchCommitRequest reconciliationRequest(BranchCommitRequest source) {
+        ActivityEnvelope envelope = source.envelope();
+        ActivityEnvelope reconciliationEnvelope = new ActivityEnvelope(
+                envelope.schemaVersion(),
+                envelope.tenantSurrogate(),
+                envelope.caseId(),
+                envelope.roomEpoch(),
+                envelope.fencingToken(),
+                envelope.commandId(),
+                envelope.commandSequence(),
+                envelope.commandType(),
+                envelope.party(),
+                envelope.actorScopeHash(),
+                envelope.commandPayloadRef(),
+                envelope.commandPayloadHash(),
+                envelope.processRevision(),
+                envelope.roomRevision(),
+                envelope.deadlineEpochMillis(),
+                new RetryBudget(
+                        envelope.retryBudget().schemaVersion(),
+                        envelope.retryBudget().providerAttemptsRemaining(),
+                        0,
+                        envelope.retryBudget().repairsRemaining()),
+                envelope.pinnedVersions(),
+                new ActivityInvocation(
+                        "intake-activity-invocation.v1",
+                        ActivityInvocationMode.RECONCILE_ONLY,
+                        0));
+        return new BranchCommitRequest(
+                source.schemaVersion(),
+                reconciliationEnvelope,
+                source.operation(),
+                source.operationKey(),
+                source.requestHash());
+    }
+
     private static String operationKey(BranchOperation operation, ActivityEnvelope envelope) {
         return switch (operation) {
             case INITIATOR_ACCEPT -> IntakeOperationKeys.initiatorAccept(
@@ -648,8 +851,19 @@ class JdbcIntakeFormalBranchCommitPortTest {
     }
 
     private static void insertInitiatorCompletion(Fixture fixture) {
-        String initiator = scalar(
-                "select initiator_id from fulfillment_dispute_case where id = ?",
+        insertCompletion(fixture, "initiator");
+    }
+
+    private static void insertRespondentCompletion(Fixture fixture) {
+        insertCompletion(fixture, "respondent");
+    }
+
+    private static void insertCompletion(Fixture fixture, String party) {
+        String participantId = scalar(
+                "select " + party + "_id from fulfillment_dispute_case where id = ?",
+                fixture.caseId());
+        String participantRole = scalar(
+                "select " + party + "_role from fulfillment_dispute_case where id = ?",
                 fixture.caseId());
         OffsetDateTime now = NOW.atOffset(ZoneOffset.UTC);
         jdbc.update(
@@ -657,13 +871,48 @@ class JdbcIntakeFormalBranchCommitPortTest {
                 insert into case_intake_party_completion (
                     id, case_id, participant_role, participant_id, completion_status,
                     completed_at, created_at, created_by
-                ) values (?, ?, 'USER', ?, 'COMPLETED', ?, ?, 'test')
+                ) values (?, ?, ?, ?, 'COMPLETED', ?, ?, 'test')
                 """,
-                "COMP_" + fixture.caseId(),
+                "COMP_" + sha256(party + ':' + fixture.caseId()).substring(0, 59),
                 fixture.caseId(),
-                initiator,
+                participantRole,
+                participantId,
                 now,
                 now);
+    }
+
+    private static void insertStartedOperation(Fixture fixture) {
+        OffsetDateTime now = NOW.atOffset(ZoneOffset.UTC);
+        jdbc.update(
+                """
+                insert into domain_operation (
+                    id, operation_key, tenant_surrogate, case_id, case_command_id,
+                    operation_type, room_type, room_epoch, process_revision, fencing_token,
+                    request_hash, operation_status, started_at, created_at, updated_at, version
+                ) values (?, ?, ?, ?, ?, ?, 'INTAKE', ?, ?, ?, ?, 'STARTED', ?, ?, ?, 0)
+                """,
+                "INBR_STARTED_" + fixture.caseId(),
+                fixture.request().operationKey(),
+                fixture.tenant(),
+                fixture.caseId(),
+                "CMD_" + fixture.caseId(),
+                branchOperationType(fixture.operation()),
+                fixture.envelope().roomEpoch(),
+                fixture.envelope().processRevision(),
+                fixture.envelope().fencingToken(),
+                fixture.request().requestHash(),
+                now,
+                now,
+                now);
+    }
+
+    private static String branchOperationType(BranchOperation operation) {
+        return switch (operation) {
+            case INITIATOR_ACCEPT -> "INTAKE_INITIATOR_ACCEPT";
+            case INITIATOR_REJECT -> "INTAKE_INITIATOR_REJECT";
+            case CANCEL -> "INTAKE_CANCEL";
+            case RESPONDENT_CONFIRM -> "INTAKE_RESPONDENT_CONFIRM";
+        };
     }
 
     private static long count(String sql, Object... values) {

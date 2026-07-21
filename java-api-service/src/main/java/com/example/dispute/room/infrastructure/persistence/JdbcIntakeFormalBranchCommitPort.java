@@ -6,6 +6,7 @@ import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEnti
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.room.application.IntakeBranchDomainService;
 import com.example.dispute.room.application.IntakeBranchDomainService.BranchResult;
+import com.example.dispute.room.application.IntakeBranchDomainService.TimelineEventMode;
 import com.example.dispute.room.application.IntakeConfirmationCommand;
 import com.example.dispute.room.domain.RoomType;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
@@ -17,6 +18,7 @@ import com.example.dispute.workflow.application.intake.IntakeFormalBranchCommand
 import com.example.dispute.workflow.application.intake.IntakeFormalBranchCommitPort;
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.ActivityEnvelope;
+import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.ActivityInvocationMode;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.BranchCommitReceipt;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.BranchCommitRequest;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.BranchOperation;
@@ -40,10 +42,14 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import org.springframework.dao.DataAccessException;
+import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.dao.RecoverableDataAccessException;
+import org.springframework.dao.TransientDataAccessException;
 import org.springframework.jdbc.core.RowCallbackHandler;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionException;
 import org.springframework.transaction.support.TransactionTemplate;
 
 /**
@@ -90,13 +96,32 @@ public final class JdbcIntakeFormalBranchCommitPort implements IntakeFormalBranc
     public BranchCommitReceipt commit(BranchCommitRequest request) {
         Objects.requireNonNull(request, "request");
         try {
+            if (request.envelope().invocation().mode()
+                    == ActivityInvocationMode.RECONCILE_ONLY) {
+                return reconcileOnly(request);
+            }
             BranchCommitReceipt receipt = transactions.execute(status -> commitInTransaction(request));
             return Objects.requireNonNull(receipt, "branch transaction returned null");
         } catch (IntakeFinalizationRejectedException failure) {
             throw failure;
+        } catch (IntakeFinalizationPersistenceException failure) {
+            throw failure;
         } catch (DataAccessException failure) {
+            if (failure instanceof TransientDataAccessException
+                    || failure instanceof RecoverableDataAccessException
+                    || failure instanceof DataAccessResourceFailureException) {
+                throw new IntakeFinalizationPersistenceException(
+                        "Intake branch transaction failed due to a retryable database condition",
+                        failure);
+            }
+            throw rejected(
+                    "INTAKE_BRANCH_PERSISTENCE_INVARIANT",
+                    "Intake branch transaction violated a database invariant",
+                    failure);
+        } catch (TransactionException failure) {
             throw new IntakeFinalizationPersistenceException(
-                    "Intake branch persistence is temporarily unavailable", failure);
+                    "Intake branch transaction failed before its commit outcome was known",
+                    failure);
         } catch (RuntimeException failure) {
             throw rejected(
                     "INTAKE_BRANCH_DOMAIN_REJECTED",
@@ -105,6 +130,55 @@ public final class JdbcIntakeFormalBranchCommitPort implements IntakeFormalBranc
                             : failure.getMessage(),
                     failure);
         }
+    }
+
+    private BranchCommitReceipt reconcileOnly(BranchCommitRequest request) {
+        List<OperationRow> rows = jdbc.query(
+                """
+                select id, case_id, case_command_id, operation_type, room_epoch,
+                       process_revision, fencing_token, request_hash, operation_status,
+                       result_uri, result_sha256, completed_at, version
+                  from domain_operation
+                 where tenant_surrogate = :tenantSurrogate
+                   and operation_key = :operationKey
+                """,
+                parameters(request),
+                (row, ignored) -> new OperationRow(
+                        row.getString("id"),
+                        row.getString("case_id"),
+                        row.getString("case_command_id"),
+                        row.getString("operation_type"),
+                        row.getLong("room_epoch"),
+                        row.getLong("process_revision"),
+                        row.getLong("fencing_token"),
+                        row.getString("request_hash"),
+                        row.getString("operation_status"),
+                        row.getString("result_uri"),
+                        row.getString("result_sha256"),
+                        row.getObject("completed_at", OffsetDateTime.class),
+                        row.getLong("version")));
+        if (rows.isEmpty()) {
+            return null;
+        }
+        if (rows.size() != 1) {
+            throw rejected(
+                    "INTAKE_BRANCH_PERSISTENCE_INVARIANT",
+                    "branch receipt ledger contains duplicate operation keys");
+        }
+        OperationRow operation = rows.getFirst();
+        requireOperationBinding(request, operation);
+        if ("STARTED".equals(operation.status())) {
+            throw new IntakeFinalizationPersistenceException(
+                    "Intake branch reconciliation found an existing operation without a committed receipt",
+                    new IllegalStateException(
+                            "unresolved branch operation status: " + operation.status()));
+        }
+        if (!"COMPLETED".equals(operation.status())) {
+            throw rejected(
+                    "INTAKE_BRANCH_RECEIPT_UNAVAILABLE",
+                    "branch operation ended without a committed receipt");
+        }
+        return readCompletedReceipt(request, operation);
     }
 
     private BranchCommitReceipt commitInTransaction(BranchCommitRequest request) {
@@ -185,7 +259,8 @@ public final class JdbcIntakeFormalBranchCommitPort implements IntakeFormalBranc
                         intakeRoom,
                         actor,
                         requiredConfirmation(resolved),
-                        now);
+                        now,
+                        TimelineEventMode.FORMAL_TYPED_ONLY);
                 domainService.requireFormalInitiatorMatrix(dispute);
                 yield result;
             }
@@ -194,9 +269,15 @@ public final class JdbcIntakeFormalBranchCommitPort implements IntakeFormalBranc
                     intakeRoom,
                     actor,
                     requiredConfirmation(resolved),
-                    now);
+                    now,
+                    TimelineEventMode.FORMAL_TYPED_ONLY);
             case CANCEL -> domainService.cancel(
-                    dispute, intakeRoom, actor, resolved.cancellationReason(), now);
+                    dispute,
+                    intakeRoom,
+                    actor,
+                    resolved.cancellationReason(),
+                    now,
+                    TimelineEventMode.FORMAL_TYPED_ONLY);
             case RESPONDENT_CONFIRM -> {
                 domainService.requireFormalBilateralMatrix(dispute);
                 throw rejected(
@@ -449,6 +530,7 @@ public final class JdbcIntakeFormalBranchCommitPort implements IntakeFormalBranc
                 && authority.actorRole().equals(authority.respondentRole());
         IntakeParty expectedParty = respondent ? IntakeParty.RESPONDENT : IntakeParty.INITIATOR;
         if ((!initiator && !respondent)
+                || (request.operation() == BranchOperation.CANCEL && !initiator)
                 || expectedParty != envelope.party()
                 || !authority.actorId().equals(command.actorId())
                 || !authority.actorRole().equals(command.actorRole())) {
@@ -475,22 +557,33 @@ public final class JdbcIntakeFormalBranchCommitPort implements IntakeFormalBranc
 
     private void requirePartyCompletionState(
             BranchCommitRequest request, AuthorityRows authority) {
-        Integer initiatorComplete = completionCount(
+        int initiatorComplete = completionCount(
                 request.envelope().caseId(), authority.initiatorId(), authority.initiatorRole());
-        Integer respondentComplete = completionCount(
+        int respondentComplete = completionCount(
                 request.envelope().caseId(), authority.respondentId(), authority.respondentRole());
-        if (request.operation() == BranchOperation.RESPONDENT_CONFIRM) {
-            if (initiatorComplete != 1 || respondentComplete != 0) {
-                throw rejected(
-                        "INTAKE_RESPONDENT_AUTHORITY_REJECTED",
-                        "respondent must be independently incomplete after initiator unlock");
+        switch (request.operation()) {
+            case RESPONDENT_CONFIRM -> {
+                if (initiatorComplete != 1 || respondentComplete != 0) {
+                    throw rejected(
+                            "INTAKE_RESPONDENT_AUTHORITY_REJECTED",
+                            "respondent must be independently incomplete after initiator unlock");
+                }
             }
-            return;
-        }
-        if (initiatorComplete != 0 || respondentComplete != 0) {
-            throw rejected(
-                    "INTAKE_INITIATOR_AUTHORITY_REJECTED",
-                    "initiator branch cannot replay another committed party completion");
+            case CANCEL -> {
+                if ((initiatorComplete != 0 && initiatorComplete != 1)
+                        || respondentComplete != 0) {
+                    throw rejected(
+                            "INTAKE_INITIATOR_AUTHORITY_REJECTED",
+                            "initiator cancellation requires no respondent completion");
+                }
+            }
+            case INITIATOR_ACCEPT, INITIATOR_REJECT -> {
+                if (initiatorComplete != 0 || respondentComplete != 0) {
+                    throw rejected(
+                            "INTAKE_INITIATOR_AUTHORITY_REJECTED",
+                            "initiator decision requires both parties to be incomplete");
+                }
+            }
         }
     }
 
@@ -575,9 +668,18 @@ public final class JdbcIntakeFormalBranchCommitPort implements IntakeFormalBranc
 
     private static void requireOperationBinding(
             BranchCommitRequest request, CommandRow command, OperationRow operation) {
+        requireOperationBinding(request, operation);
+        if (!operation.caseCommandId().equals(command.id())) {
+            throw rejected(
+                    "INTAKE_BRANCH_OPERATION_CONFLICT",
+                    "operation key is already bound to another exact branch request");
+        }
+    }
+
+    private static void requireOperationBinding(
+            BranchCommitRequest request, OperationRow operation) {
         ActivityEnvelope envelope = request.envelope();
         if (!operation.caseId().equals(envelope.caseId())
-                || !operation.caseCommandId().equals(command.id())
                 || !operation.operationType().equals(operationType(request.operation()))
                 || operation.roomEpoch() != envelope.roomEpoch()
                 || operation.processRevision() != envelope.processRevision()

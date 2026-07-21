@@ -166,7 +166,13 @@ public class IntakeRoomService {
         legacyIntakeWriterGuard.assertLegacyWriteAllowed(caseId);
         if (confirmationRole != dispute.getInitiatorRole()) {
             IntakeBranchDomainService.BranchResult result = branchDomainService
-                    .confirmRespondent(dispute, intakeRoom, actor, command, now);
+                    .confirmRespondent(
+                            dispute,
+                            intakeRoom,
+                            actor,
+                            command,
+                            now,
+                            IntakeBranchDomainService.TimelineEventMode.LEGACY_LIFECYCLE);
             roomEpochAllocator.transition(
                     new TransitionRoomEpoch(
                             dispute.getId(),
@@ -182,13 +188,27 @@ public class IntakeRoomService {
 
         if (!command.admissible()) {
             IntakeConfirmationView result = branchDomainService
-                    .rejectInitiator(dispute, intakeRoom, actor, command, now)
+                    .rejectInitiator(
+                            dispute,
+                            intakeRoom,
+                            actor,
+                            command,
+                            now,
+                            IntakeBranchDomainService.TimelineEventMode.LEGACY_LIFECYCLE)
                     .view();
             terminateIntakeEpoch(dispute, now);
             return result;
         }
 
-        return branchDomainService.acceptInitiator(dispute, intakeRoom, actor, command, now).view();
+        return branchDomainService
+                .acceptInitiator(
+                        dispute,
+                        intakeRoom,
+                        actor,
+                        command,
+                        now,
+                        IntakeBranchDomainService.TimelineEventMode.LEGACY_LIFECYCLE)
+                .view();
     }
 
     private static ActorRole confirmationRole(
@@ -248,7 +268,15 @@ public class IntakeRoomService {
         ensureIntakeEpoch(dispute, intakeRoom, now);
         legacyIntakeWriterGuard.assertLegacyWriteAllowed(caseId);
         IntakeConfirmationView result =
-                branchDomainService.cancel(dispute, intakeRoom, actor, reason, now).view();
+                branchDomainService
+                        .cancel(
+                                dispute,
+                                intakeRoom,
+                                actor,
+                                reason,
+                                now,
+                                IntakeBranchDomainService.TimelineEventMode.LEGACY_LIFECYCLE)
+                        .view();
         terminateIntakeEpoch(dispute, now);
         return result;
     }

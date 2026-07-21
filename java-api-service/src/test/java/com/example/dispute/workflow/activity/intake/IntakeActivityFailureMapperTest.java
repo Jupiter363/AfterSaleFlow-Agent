@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.example.dispute.workflow.application.intake.IntakeFinalizationRejectedException;
 import com.example.dispute.workflow.application.intake.IntakeFinalizationPersistenceException;
 import com.example.dispute.workflow.application.intake.IntakeProposalLoadException;
+import com.example.dispute.workflow.temporal.room.intake.IntakeActivityFailureTypes;
 import io.temporal.failure.ApplicationFailure;
 import org.junit.jupiter.api.Test;
 
@@ -19,6 +20,11 @@ class IntakeActivityFailureMapperTest {
         assertThat(failure.getType())
                 .isEqualTo(IntakeActivityFailureMapper.RETRYABLE_FINALIZATION_PERSISTENCE);
         assertThat(failure.isNonRetryable()).isFalse();
+        assertThat(IntakeActivityFailureTypes.classify(failure))
+                .isEqualTo(IntakeActivityFailureTypes.INFRASTRUCTURE_RETRYABLE);
+        assertThat(IntakeActivityFailureTypes.isRetryable(
+                        IntakeActivityFailureTypes.classify(failure)))
+                .isTrue();
     }
 
     @Test
@@ -41,6 +47,8 @@ class IntakeActivityFailureMapperTest {
         assertThat(failure.getType())
                 .isEqualTo(IntakeActivityFailureMapper.RETRYABLE_PROPOSAL_ACCESS);
         assertThat(failure.isNonRetryable()).isFalse();
+        assertThat(IntakeActivityFailureTypes.classify(failure))
+                .isEqualTo(IntakeActivityFailureTypes.INFRASTRUCTURE_RETRYABLE);
     }
 
     @Test

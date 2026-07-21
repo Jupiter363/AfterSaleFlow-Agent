@@ -30,6 +30,7 @@ import com.example.dispute.notification.application.CaseLifecycleNotificationSer
 import com.example.dispute.notification.application.NotificationService;
 import com.example.dispute.notification.domain.NotificationType;
 import com.example.dispute.room.application.IntakeConfirmationCommand;
+import com.example.dispute.room.application.IntakeBranchDomainService;
 import com.example.dispute.room.application.IntakeRoomService;
 import com.example.dispute.room.application.IntakeProgressService;
 import com.example.dispute.room.application.ParticipantService;
@@ -51,6 +52,7 @@ import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.Activat
 import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.TerminateRoomEpoch;
 import com.example.dispute.workflow.application.intake.LegacyIntakeWriterGuard;
 import com.example.dispute.workflow.contract.v1.ContractTypes;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.Duration;
@@ -467,6 +469,48 @@ class IntakeRoomServiceTest {
         verify(caseRepository, never()).save(any());
         verify(roomRepository, never()).save(any());
         verifyNoInteractions(roomEpochAllocator);
+        verify(caseEventService, never())
+                .recordLifecycleEvent(any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void formalDomainMutationLeavesTimelineOwnershipToTheTypedCommitPort() {
+        FulfillmentCaseEntity dispute = pendingCase("CASE_FORMAL_EVENT_OWNER");
+        CaseRoomEntity intakeRoom = CaseRoomEntity.open(
+                "ROOM_FORMAL_EVENT_OWNER",
+                dispute.getId(),
+                RoomType.INTAKE,
+                OffsetDateTime.now(CLOCK),
+                "system");
+        IntakeBranchDomainService domainService = new IntakeBranchDomainService(
+                caseRepository,
+                roomRepository,
+                phaseClockRepository,
+                intakeDossierRepository,
+                intakeProgressService,
+                new ParticipantService(participantRepository),
+                notificationService,
+                lifecycleNotifications,
+                evidenceWindowCoordinator,
+                caseEventService,
+                new DisputeProperties(
+                        Duration.ofHours(2),
+                        Duration.ofHours(3),
+                        Duration.ofMinutes(20),
+                        Duration.ofSeconds(15),
+                        true),
+                new ObjectMapper());
+
+        domainService.cancel(
+                dispute,
+                intakeRoom,
+                new AuthenticatedActor("user-local", ActorRole.USER),
+                "resolved before admission",
+                OffsetDateTime.now(CLOCK),
+                IntakeBranchDomainService.TimelineEventMode.FORMAL_TYPED_ONLY);
+
+        assertThat(dispute.getCaseStatus()).isEqualTo(CaseStatus.CANCELLED);
+        assertThat(intakeRoom.getRoomStatus()).isEqualTo(RoomStatus.CLOSED);
         verify(caseEventService, never())
                 .recordLifecycleEvent(any(), any(), any(), any(), any(), any());
     }

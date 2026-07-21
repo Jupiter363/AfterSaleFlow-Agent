@@ -3,15 +3,17 @@ package com.example.dispute.workflow.activity.intake;
 import com.example.dispute.workflow.application.intake.IntakeFinalizationRejectedException;
 import com.example.dispute.workflow.application.intake.IntakeFinalizationPersistenceException;
 import com.example.dispute.workflow.application.intake.IntakeProposalLoadException;
+import com.example.dispute.workflow.temporal.room.intake.IntakeActivityFailureTypes;
 import io.temporal.failure.ApplicationFailure;
 import java.util.Objects;
 
 /** Converts typed formal-boundary failures into executable Temporal retry semantics. */
 public final class IntakeActivityFailureMapper {
 
-    public static final String RETRYABLE_PROPOSAL_ACCESS = "IntakeProposalAccessRetryable";
+    public static final String RETRYABLE_PROPOSAL_ACCESS =
+            IntakeActivityFailureTypes.INFRASTRUCTURE_RETRYABLE;
     public static final String RETRYABLE_FINALIZATION_PERSISTENCE =
-            "IntakeFinalizationPersistenceRetryable";
+            IntakeActivityFailureTypes.INFRASTRUCTURE_RETRYABLE;
     public static final String UNCLASSIFIED_FINALIZATION_FAILURE =
             "IntakeFinalizationUnclassified";
 

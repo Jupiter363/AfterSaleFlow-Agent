@@ -91,7 +91,9 @@ public final class IntakeBranchDomainService {
             CaseRoomEntity intakeRoom,
             AuthenticatedActor actor,
             IntakeConfirmationCommand command,
-            OffsetDateTime now) {
+            OffsetDateTime now,
+            TimelineEventMode eventMode) {
+        Objects.requireNonNull(eventMode, "eventMode");
         requireParty(dispute, actor, true);
         requireOpenIntake(dispute, intakeRoom);
         if (!command.admissible()) {
@@ -109,13 +111,15 @@ public final class IntakeBranchDomainService {
                 resultJson,
                 actor.actorId());
         caseRepository.save(dispute);
-        caseEventService.recordLifecycleEvent(
-                dispute.getId(),
-                intakeRoom.getId(),
-                "INITIATOR_INTAKE_COMPLETED",
-                Map.of("case_status", dispute.getCaseStatus().name()),
-                "intake-confirmed:" + dispute.getId(),
-                actor.actorId());
+        if (eventMode == TimelineEventMode.LEGACY_LIFECYCLE) {
+            caseEventService.recordLifecycleEvent(
+                    dispute.getId(),
+                    intakeRoom.getId(),
+                    "INITIATOR_INTAKE_COMPLETED",
+                    Map.of("case_status", dispute.getCaseStatus().name()),
+                    "intake-confirmed:" + dispute.getId(),
+                    actor.actorId());
+        }
         sendCounterpartySummons(dispute, actor, null);
         return new BranchResult(
                 new IntakeConfirmationView(
@@ -131,7 +135,9 @@ public final class IntakeBranchDomainService {
             CaseRoomEntity intakeRoom,
             AuthenticatedActor actor,
             IntakeConfirmationCommand command,
-            OffsetDateTime now) {
+            OffsetDateTime now,
+            TimelineEventMode eventMode) {
+        Objects.requireNonNull(eventMode, "eventMode");
         requireParty(dispute, actor, true);
         requireOpenIntake(dispute, intakeRoom);
         if (command.admissible()) {
@@ -146,13 +152,15 @@ public final class IntakeBranchDomainService {
                 dispute.getIntakeResultJson(),
                 actor.actorId());
         caseRepository.save(dispute);
-        caseEventService.recordLifecycleEvent(
-                dispute.getId(),
-                intakeRoom.getId(),
-                "INTAKE_REJECTED",
-                Map.of("case_status", dispute.getCaseStatus().name()),
-                "intake-confirmed:" + dispute.getId(),
-                actor.actorId());
+        if (eventMode == TimelineEventMode.LEGACY_LIFECYCLE) {
+            caseEventService.recordLifecycleEvent(
+                    dispute.getId(),
+                    intakeRoom.getId(),
+                    "INTAKE_REJECTED",
+                    Map.of("case_status", dispute.getCaseStatus().name()),
+                    "intake-confirmed:" + dispute.getId(),
+                    actor.actorId());
+        }
         return new BranchResult(
                 new IntakeConfirmationView(dispute.getId(), dispute.getCaseStatus(), null, null),
                 intakeRoom.getId(),
@@ -166,22 +174,26 @@ public final class IntakeBranchDomainService {
             CaseRoomEntity intakeRoom,
             AuthenticatedActor actor,
             String reason,
-            OffsetDateTime now) {
+            OffsetDateTime now,
+            TimelineEventMode eventMode) {
+        Objects.requireNonNull(eventMode, "eventMode");
         requireParty(dispute, actor, true);
         requireOpenIntake(dispute, intakeRoom);
         intakeRoom.close(now, actor.actorId());
         roomRepository.save(intakeRoom);
         dispute.cancelIntake(actor.actorId(), now);
         caseRepository.save(dispute);
-        caseEventService.recordLifecycleEvent(
-                dispute.getId(),
-                intakeRoom.getId(),
-                "INTAKE_CANCELLED",
-                Map.of(
-                        "case_status", dispute.getCaseStatus().name(),
-                        "reason", reason == null ? "" : reason),
-                "intake-cancelled:" + dispute.getId(),
-                actor.actorId());
+        if (eventMode == TimelineEventMode.LEGACY_LIFECYCLE) {
+            caseEventService.recordLifecycleEvent(
+                    dispute.getId(),
+                    intakeRoom.getId(),
+                    "INTAKE_CANCELLED",
+                    Map.of(
+                            "case_status", dispute.getCaseStatus().name(),
+                            "reason", reason == null ? "" : reason),
+                    "intake-cancelled:" + dispute.getId(),
+                    actor.actorId());
+        }
         return new BranchResult(
                 new IntakeConfirmationView(dispute.getId(), dispute.getCaseStatus(), null, null),
                 intakeRoom.getId(),
@@ -195,7 +207,9 @@ public final class IntakeBranchDomainService {
             CaseRoomEntity intakeRoom,
             AuthenticatedActor actor,
             IntakeConfirmationCommand command,
-            OffsetDateTime now) {
+            OffsetDateTime now,
+            TimelineEventMode eventMode) {
+        Objects.requireNonNull(eventMode, "eventMode");
         requireParty(dispute, actor, false);
         requireOpenIntake(dispute, intakeRoom);
         String finalIntakeResultJson = acceptedIntakeResultJson(dispute);
@@ -232,26 +246,28 @@ public final class IntakeBranchDomainService {
                 deadline,
                 actor.actorId());
         caseRepository.save(dispute);
-        caseEventService.recordLifecycleEvent(
-                dispute.getId(),
-                intakeRoom.getId(),
-                "RESPONDENT_INTAKE_COMPLETED",
-                Map.of(
-                        "case_status", dispute.getCaseStatus().name(),
-                        "deadline_at", deadline.toString(),
-                        "respondent_role", actor.role().name()),
-                "respondent-intake-completed:" + dispute.getId(),
-                actor.actorId());
-        caseEventService.recordLifecycleEvent(
-                dispute.getId(),
-                evidenceRoom.getId(),
-                "EVIDENCE_OPENED",
-                Map.of(
-                        "case_status", dispute.getCaseStatus().name(),
-                        "deadline_at", deadline.toString(),
-                        "matrix_kind", "BILATERAL_FROZEN"),
-                "evidence-opened-after-bilateral-intake:" + dispute.getId(),
-                actor.actorId());
+        if (eventMode == TimelineEventMode.LEGACY_LIFECYCLE) {
+            caseEventService.recordLifecycleEvent(
+                    dispute.getId(),
+                    intakeRoom.getId(),
+                    "RESPONDENT_INTAKE_COMPLETED",
+                    Map.of(
+                            "case_status", dispute.getCaseStatus().name(),
+                            "deadline_at", deadline.toString(),
+                            "respondent_role", actor.role().name()),
+                    "respondent-intake-completed:" + dispute.getId(),
+                    actor.actorId());
+            caseEventService.recordLifecycleEvent(
+                    dispute.getId(),
+                    evidenceRoom.getId(),
+                    "EVIDENCE_OPENED",
+                    Map.of(
+                            "case_status", dispute.getCaseStatus().name(),
+                            "deadline_at", deadline.toString(),
+                            "matrix_kind", "BILATERAL_FROZEN"),
+                    "evidence-opened-after-bilateral-intake:" + dispute.getId(),
+                    actor.actorId());
+        }
         lifecycleNotifications.evidenceRoomOpened(dispute, deadline);
         evidenceWindowCoordinator.startAfterCommit(dispute.getId(), evidenceWindow);
         return new BranchResult(
@@ -377,6 +393,11 @@ public final class IntakeBranchDomainService {
 
     private static String clockId() {
         return "CLOCK_" + UUID.randomUUID().toString().replace("-", "");
+    }
+
+    public enum TimelineEventMode {
+        LEGACY_LIFECYCLE,
+        FORMAL_TYPED_ONLY
     }
 
     public record BranchResult(

@@ -7,16 +7,12 @@ import com.example.dispute.room.infrastructure.persistence.entity.CaseIntakeDoss
 import com.example.dispute.room.infrastructure.persistence.repository.CaseIntakeDossierRepository;
 import com.example.dispute.workflow.application.intake.IntakeFinalizationRejectedException;
 import com.example.dispute.workflow.application.intake.IntakeInitiatorMatrixFreezer;
+import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.ArrayList;
-import java.util.HexFormat;
 import java.util.List;
 import org.springframework.stereotype.Service;
 
@@ -117,7 +113,7 @@ public class IntakeMatrixLifecycleService {
         if (hash == null
                 || !hash.isTextual()
                 || !hash.asText().matches("[0-9a-f]{64}")
-                || !hash.asText().equals(canonicalHash(hashInput))) {
+                || !hash.asText().equals(ContractJson.sha256Hex(hashInput))) {
             throw rejected(
                     "INTAKE_BILATERAL_MATRIX_HASH_INVALID",
                     "bilateral matrix content hash is not canonical");
@@ -214,9 +210,13 @@ public class IntakeMatrixLifecycleService {
         generation.put("actor_role", respondent.name());
         generation.put("source_stage", "RESPONDENT_TIMEOUT");
         generation.put("latest_source_ref", timeoutRef);
+        ObjectNode sourceContext = objectMapper.createObjectNode();
+        sourceContext.put("schema_version", "intake-timeout-source-context.v1");
+        sourceContext.put("case_id", dispute.getId());
+        sourceContext.put("parent_content_hash", parent.path("content_hash").asText());
         generation.put(
                 "source_context_hash",
-                sha256(dispute.getId() + ":" + parent.path("content_hash").asText()));
+                ContractJson.sha256Hex(sourceContext));
 
         ArrayNode rows = (ArrayNode) matrix.path("fact_rows");
         for (JsonNode value : rows) {
@@ -238,7 +238,7 @@ public class IntakeMatrixLifecycleService {
         }
         matrix.set("fact_indexes", factIndexes(rows));
         matrix.remove("content_hash");
-        matrix.put("content_hash", canonicalHash(matrix));
+        matrix.put("content_hash", ContractJson.sha256Hex(matrix));
         root.set("case_fact_matrix", matrix);
         String updated = write(root);
         dossier.replaceWith(
@@ -279,38 +279,6 @@ public class IntakeMatrixLifecycleService {
             indexes.withArray("requires_resolution_fact_ids").add(id);
         }
         return indexes;
-    }
-
-    private String canonicalHash(JsonNode value) {
-        return sha256(canonicalize(value).toString());
-    }
-
-    private JsonNode canonicalize(JsonNode value) {
-        if (value.isObject()) {
-            ObjectNode sorted = objectMapper.createObjectNode();
-            List<String> names = new ArrayList<>();
-            value.properties().forEach(entry -> names.add(entry.getKey()));
-            names.sort(String::compareTo);
-            names.forEach(name -> sorted.set(name, canonicalize(value.path(name))));
-            return sorted;
-        }
-        if (value.isArray()) {
-            ArrayNode array = objectMapper.createArrayNode();
-            value.forEach(item -> array.add(canonicalize(item)));
-            return array;
-        }
-        return value.deepCopy();
-    }
-
-    private static String sha256(String value) {
-        try {
-            return HexFormat.of()
-                    .formatHex(
-                            MessageDigest.getInstance("SHA-256")
-                                    .digest(value.getBytes(StandardCharsets.UTF_8)));
-        } catch (NoSuchAlgorithmException impossible) {
-            throw new IllegalStateException("SHA-256 unavailable", impossible);
-        }
     }
 
     private ObjectNode readObject(String value) {
