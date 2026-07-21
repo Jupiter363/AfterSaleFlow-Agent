@@ -61,6 +61,7 @@ class CaseProcessCarryStateCompatibilityTest {
     assertThat(carry.activeChildWorkflowId()).isEqualTo("room:CASE_Legacy:intake:3");
     assertThat(carry.activeRoomRevision()).isNull();
     assertThat(carry.protocolErrorOrigin()).isNull();
+    assertThat(carry.provisioningManualRecoveryRequired()).isFalse();
   }
 
   @Test
@@ -100,6 +101,24 @@ class CaseProcessCarryStateCompatibilityTest {
 
     assertThat(carry.protocolErrorCode()).isEqualTo("INTAKE_CHILD_ACTIVE_BINDING_INVALID");
     assertThat(carry.protocolErrorOrigin()).isNull();
+    assertThat(carry.provisioningManualRecoveryRequired()).isFalse();
+  }
+
+  @Test
+  void provisioningManualRecoveryOutcomeSurvivesCarryRoundTrip() throws Exception {
+    com.fasterxml.jackson.databind.node.ObjectNode node =
+        mapper.valueToTree(CaseProcessCarryState.initial());
+    node.put("provisioningManualRecoveryRequired", true);
+
+    CaseProcessCarryState restored =
+        mapper.readValue(mapper.writeValueAsBytes(node), CaseProcessCarryState.class);
+
+    assertThat(restored.provisioningManualRecoveryRequired()).isTrue();
+    assertThat(
+            mapper
+                .readValue(mapper.writeValueAsBytes(restored), CaseProcessCarryState.class)
+                .provisioningManualRecoveryRequired())
+        .isTrue();
   }
 
   @Test
@@ -199,6 +218,7 @@ class CaseProcessCarryStateCompatibilityTest {
     assertThat(snapshot.activeRoomWorkflowBuildId()).isNull();
     assertThat(snapshot.activeRoomRevision()).isNull();
     assertThat(snapshot.protocolErrorOrigin()).isNull();
+    assertThat(snapshot.provisioningManualRecoveryRequired()).isFalse();
   }
 
   @Test
@@ -273,7 +293,9 @@ class CaseProcessCarryStateCompatibilityTest {
         request.roomEpoch(),
         request.fencingToken(),
         request.roomWorkflowId(),
-        runId);
+        runId,
+        "a".repeat(64),
+        "b".repeat(64));
   }
 
   private static ProvisionRoomEpoch typedProvision() {

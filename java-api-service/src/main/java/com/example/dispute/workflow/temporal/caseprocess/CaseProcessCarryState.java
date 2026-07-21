@@ -34,7 +34,8 @@ public record CaseProcessCarryState(
     List<ProvisionedRoomEpochHighWater> highestProvisionedEpochs,
     ActiveChildDescriptor activeChildDescriptor,
     Long activeRoomRevision,
-    RecoveryErrorOrigin protocolErrorOrigin) {
+    RecoveryErrorOrigin protocolErrorOrigin,
+    boolean provisioningManualRecoveryRequired) {
 
   public static final int MAX_RECENT_COMMANDS = 256;
   public static final int MAX_BUFFERED_EVENTS = 128;
@@ -95,7 +96,8 @@ public record CaseProcessCarryState(
         highestProvisionedEpochs,
         null,
         null,
-        null);
+        null,
+        false);
   }
 
   public CaseProcessCarryState(
@@ -148,7 +150,8 @@ public record CaseProcessCarryState(
         List.of(),
         null,
         null,
-        null);
+        null,
+        false);
   }
 
   public CaseProcessCarryState(
@@ -206,7 +209,69 @@ public record CaseProcessCarryState(
         highestProvisionedEpochs,
         activeChildDescriptor,
         null,
-        null);
+        null,
+        false);
+  }
+
+  public CaseProcessCarryState(
+      String schemaVersion,
+      String tenantSurrogate,
+      String caseId,
+      RoomType activeRoomType,
+      long activeRoomEpoch,
+      String activeChildWorkflowId,
+      long observedProcessRevision,
+      long nextCommandSequence,
+      long nextCaseEventSequence,
+      long processedCommandCount,
+      long processedEventCount,
+      List<ProcessedCommandIdentity> recentCommands,
+      List<CaseDomainEventRef> bufferedEvents,
+      long highestObservedEventSequence,
+      int runGeneration,
+      int commandRecoveryAttempts,
+      int eventRecoveryAttempts,
+      boolean commandManualRecoveryRequired,
+      boolean eventManualRecoveryRequired,
+      String protocolErrorCode,
+      List<ClosedRoomTuple> closedRooms,
+      long activeFencingToken,
+      String activeChildWorkflowRunId,
+      List<ProvisioningCommitment> provisioningCommitments,
+      List<ProvisionedRoomEpochHighWater> highestProvisionedEpochs,
+      ActiveChildDescriptor activeChildDescriptor,
+      Long activeRoomRevision,
+      RecoveryErrorOrigin protocolErrorOrigin) {
+    this(
+        schemaVersion,
+        tenantSurrogate,
+        caseId,
+        activeRoomType,
+        activeRoomEpoch,
+        activeChildWorkflowId,
+        observedProcessRevision,
+        nextCommandSequence,
+        nextCaseEventSequence,
+        processedCommandCount,
+        processedEventCount,
+        recentCommands,
+        bufferedEvents,
+        highestObservedEventSequence,
+        runGeneration,
+        commandRecoveryAttempts,
+        eventRecoveryAttempts,
+        commandManualRecoveryRequired,
+        eventManualRecoveryRequired,
+        protocolErrorCode,
+        closedRooms,
+        activeFencingToken,
+        activeChildWorkflowRunId,
+        provisioningCommitments,
+        highestProvisionedEpochs,
+        activeChildDescriptor,
+        activeRoomRevision,
+        protocolErrorOrigin,
+        false);
   }
 
   public CaseProcessCarryState {
@@ -371,7 +436,39 @@ public record CaseProcessCarryState(
       long roomEpoch,
       long fencingToken,
       String workflowId,
-      String startedRunId) {
+      String startedRunId,
+      String initiatorActorScopeHash,
+      String respondentActorScopeHash) {
+
+    public ActiveChildDescriptor(
+        ActiveChildKind kind,
+        String selectionSchemaVersion,
+        WriterMode writerMode,
+        String caseWorkflowType,
+        String caseWorkflowBuildId,
+        String roomWorkflowType,
+        String roomWorkflowBuildId,
+        RoomType roomType,
+        long roomEpoch,
+        long fencingToken,
+        String workflowId,
+        String startedRunId) {
+      this(
+          kind,
+          selectionSchemaVersion,
+          writerMode,
+          caseWorkflowType,
+          caseWorkflowBuildId,
+          roomWorkflowType,
+          roomWorkflowBuildId,
+          roomType,
+          roomEpoch,
+          fencingToken,
+          workflowId,
+          startedRunId,
+          null,
+          null);
+    }
 
     public ActiveChildDescriptor {
       Objects.requireNonNull(kind, "active child kind must not be null");
@@ -387,6 +484,16 @@ public record CaseProcessCarryState(
       if (startedRunId != null && startedRunId.isBlank()) {
         throw new IllegalArgumentException("startedRunId must not be blank");
       }
+      if ((initiatorActorScopeHash == null) != (respondentActorScopeHash == null)) {
+        throw new IllegalArgumentException("active child party scope pins must be bound together");
+      }
+      if (initiatorActorScopeHash != null) {
+        requireHash(initiatorActorScopeHash, "initiatorActorScopeHash");
+        requireHash(respondentActorScopeHash, "respondentActorScopeHash");
+        if (initiatorActorScopeHash.equals(respondentActorScopeHash)) {
+          throw new IllegalArgumentException("active child party scope pins must be distinct");
+        }
+      }
       if ("room-epoch-selection.v1".equals(selectionSchemaVersion)) {
         if (roomWorkflowType != null || roomWorkflowBuildId != null) {
           throw new IllegalArgumentException("v1 descriptor cannot contain a room child binding");
@@ -399,7 +506,7 @@ public record CaseProcessCarryState(
       }
       if (kind == ActiveChildKind.TYPED_INTAKE
           && (!"room-epoch-selection.v2".equals(selectionSchemaVersion)
-              || writerMode == WriterMode.LEGACY
+              || writerMode != WriterMode.SHADOW
               || roomType != RoomType.INTAKE
               || !"IntakeRoomWorkflow".equals(roomWorkflowType)
               || !"intake-room.synthetic.v1".equals(roomWorkflowBuildId)
@@ -413,6 +520,16 @@ public record CaseProcessCarryState(
       if (value == null || value.isBlank()) {
         throw new IllegalArgumentException(field + " must not be blank");
       }
+    }
+
+    private static void requireHash(String value, String field) {
+      if (value == null || !value.matches("[0-9a-f]{64}")) {
+        throw new IllegalArgumentException(field + " must be a lowercase SHA-256 value");
+      }
+    }
+
+    boolean hasPartyScopePins() {
+      return initiatorActorScopeHash != null && respondentActorScopeHash != null;
     }
 
     boolean matches(ProvisioningCommitment commitment) {

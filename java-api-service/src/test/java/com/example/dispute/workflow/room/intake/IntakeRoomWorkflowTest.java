@@ -181,6 +181,43 @@ class IntakeRoomWorkflowTest {
   }
 
   @Test
+  void roomRevisionExplicitlyAcceptsEqualityAndForwardJumps() {
+    IntakeWorkflowCommand equalRevisionCommand =
+        command(1, "CMD_EQUAL_REVISION", IntakeCommandType.INTAKE_MESSAGE, IntakeParty.INITIATOR);
+    workflow.commandAccepted(equalRevisionCommand);
+    workflow.domainEventCommitted(
+        eventWithRevisions(
+            1,
+            "EVENT_EQUAL_REVISION",
+            equalRevisionCommand,
+            IntakeDomainEventType.TURN_NEEDS_INPUT,
+            INITIAL_PROCESS_REVISION,
+            INITIAL_ROOM_REVISION));
+
+    IntakeRoomSnapshot equal = workflow.state();
+    assertThat(equal.processedEventCount()).isEqualTo(1);
+    assertThat(equal.processRevision()).isEqualTo(INITIAL_PROCESS_REVISION);
+    assertThat(equal.roomRevision()).isEqualTo(INITIAL_ROOM_REVISION);
+
+    IntakeWorkflowCommand jumpRevisionCommand =
+        command(2, "CMD_JUMP_REVISION", IntakeCommandType.INTAKE_MESSAGE, IntakeParty.INITIATOR);
+    workflow.commandAccepted(jumpRevisionCommand);
+    workflow.domainEventCommitted(
+        eventWithRevisions(
+            2,
+            "EVENT_JUMP_REVISION",
+            jumpRevisionCommand,
+            IntakeDomainEventType.TURN_NEEDS_INPUT,
+            INITIAL_PROCESS_REVISION + 10,
+            INITIAL_ROOM_REVISION + 20));
+
+    IntakeRoomSnapshot jumped = workflow.state();
+    assertThat(jumped.processedEventCount()).isEqualTo(2);
+    assertThat(jumped.processRevision()).isEqualTo(INITIAL_PROCESS_REVISION + 10);
+    assertThat(jumped.roomRevision()).isEqualTo(INITIAL_ROOM_REVISION + 20);
+  }
+
+  @Test
   void commandIdReuseWithDifferentIdentityFailsClosed() {
     IntakeWorkflowCommand first =
         command(1, "CMD_REUSED", IntakeCommandType.INTAKE_MESSAGE, IntakeParty.INITIATOR);
@@ -526,6 +563,37 @@ class IntakeRoomWorkflowTest {
       IntakeWorkflowCommand command,
       IntakeDomainEventType eventType) {
     return eventForParty(eventSequence, eventId, command, eventType, command.party());
+  }
+
+  private static IntakeDomainEventRef eventWithRevisions(
+      long eventSequence,
+      String eventId,
+      IntakeWorkflowCommand command,
+      IntakeDomainEventType eventType,
+      long processRevision,
+      long roomRevision) {
+    IntakeDomainEventRef base = event(eventSequence, eventId, command, eventType);
+    return new IntakeDomainEventRef(
+        base.schemaVersion(),
+        base.eventId(),
+        base.eventRef(),
+        base.eventHash(),
+        base.eventSequence(),
+        base.eventType(),
+        base.party(),
+        base.commandId(),
+        base.tenantSurrogate(),
+        base.caseId(),
+        base.roomEpoch(),
+        base.fencingToken(),
+        base.actorScopeHash(),
+        base.operationKey(),
+        base.requestHash(),
+        base.resultHash(),
+        processRevision,
+        roomRevision,
+        base.agentRunRef(),
+        base.graphExecutionRef());
   }
 
   private static IntakeDomainEventRef eventForParty(

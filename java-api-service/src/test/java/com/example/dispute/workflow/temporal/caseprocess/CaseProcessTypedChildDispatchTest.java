@@ -30,16 +30,24 @@ import com.example.dispute.workflow.temporal.caseprocess.IntakeChildBridgeActivi
 import com.example.dispute.workflow.temporal.room.common.RoomControlWorkflow;
 import com.example.dispute.workflow.temporal.room.common.RoomControlWorkflowImpl;
 import com.example.dispute.workflow.temporal.room.intake.IntakeCommandDecision;
+import com.example.dispute.workflow.temporal.room.intake.IntakeCommandExecutionContext;
 import com.example.dispute.workflow.temporal.room.intake.IntakeCommandType;
 import com.example.dispute.workflow.temporal.room.intake.IntakeDomainEventRef;
 import com.example.dispute.workflow.temporal.room.intake.IntakeDomainEventType;
+import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.BranchOperation;
+import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.RetryBudget;
+import com.example.dispute.workflow.temporal.room.intake.IntakeAgentRunRef;
+import com.example.dispute.workflow.temporal.room.intake.IntakeGraphExecutionRef;
 import com.example.dispute.workflow.temporal.room.intake.IntakeParty;
 import com.example.dispute.workflow.temporal.room.intake.IntakeRoomPhase;
 import com.example.dispute.workflow.temporal.room.intake.IntakeRoomSnapshot;
 import com.example.dispute.workflow.temporal.room.intake.IntakeRoomStart;
 import com.example.dispute.workflow.temporal.room.intake.IntakeRoomWorkflow;
+import com.example.dispute.workflow.temporal.room.intake.IntakeRoomWorkflowImpl;
 import com.example.dispute.workflow.temporal.room.intake.IntakeWorkflowCommand;
+import io.temporal.activity.Activity;
 import io.temporal.client.UpdateOptions;
+import io.temporal.client.ActivityCompletionException;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowOptions;
 import io.temporal.client.WorkflowStub;
@@ -67,7 +75,9 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Predicate;
 import org.junit.jupiter.api.AfterEach;
@@ -102,7 +112,7 @@ class CaseProcessTypedChildDispatchTest {
     caseWorker.registerActivitiesImplementations(ledger, bridge);
     Worker roomWorker = environment.newWorker(CaseProcessWorkflowProtocol.ROOM_CONTROL_TASK_QUEUE);
     roomWorker.registerWorkflowImplementationTypes(
-        RoomControlWorkflowImpl.class, RecordingIntakeWorkflow.class);
+        RoomControlWorkflowImpl.class, IntakeRoomWorkflowImpl.class);
     environment.start();
     client = environment.getWorkflowClient();
   }
@@ -120,15 +130,20 @@ class CaseProcessTypedChildDispatchTest {
     assertThat(selection(1, "room-epoch-selection.v1", WriterMode.SHADOW, RoomType.INTAKE,
             null, null, "intake.v2"))
         .isEqualTo(ActiveChildKind.GENERIC_ROOM_CONTROL);
+    assertSelectionFailure(
+        "INTAKE_CHILD_WRITER_MODE_INVALID",
+        () -> selection(1, "room-epoch-selection.v1", WriterMode.TEMPORAL, RoomType.INTAKE,
+            null, null, "intake.v2"));
     assertThat(selection(Workflow.DEFAULT_VERSION, "room-epoch-selection.v2", WriterMode.SHADOW,
             RoomType.INTAKE, "IntakeRoomWorkflow", "intake-room.synthetic.v1", "intake.v2"))
         .isEqualTo(ActiveChildKind.GENERIC_ROOM_CONTROL);
     assertThat(selection(1, "room-epoch-selection.v2", WriterMode.SHADOW, RoomType.INTAKE,
             "IntakeRoomWorkflow", "intake-room.synthetic.v1", "intake.v2"))
         .isEqualTo(ActiveChildKind.TYPED_INTAKE);
-    assertThat(selection(1, "room-epoch-selection.v2", WriterMode.TEMPORAL, RoomType.INTAKE,
-            "IntakeRoomWorkflow", "intake-room.synthetic.v1", "intake.v2"))
-        .isEqualTo(ActiveChildKind.TYPED_INTAKE);
+    assertSelectionFailure(
+        "INTAKE_CHILD_WRITER_MODE_INVALID",
+        () -> selection(1, "room-epoch-selection.v2", WriterMode.TEMPORAL, RoomType.INTAKE,
+            "IntakeRoomWorkflow", "intake-room.synthetic.v1", "intake.v2"));
 
     assertSelectionFailure(
         "INTAKE_CHILD_SELECTION_VERSION_INVALID",
@@ -173,6 +188,57 @@ class CaseProcessTypedChildDispatchTest {
   }
 
   @Test
+  void typedCarryWithoutPartyScopePinsFailsClosed() {
+    ProvisionRoomEpoch request = typedProvision(RoomType.INTAKE, 0, 1, 0, 0, 0);
+    CaseProcessCarryState.ActiveChildDescriptor legacyTyped =
+        new CaseProcessCarryState.ActiveChildDescriptor(
+            ActiveChildKind.TYPED_INTAKE,
+            request.selectionSchemaVersion(),
+            request.writerMode(),
+            request.caseWorkflowType(),
+            request.caseWorkflowBuildId(),
+            request.roomWorkflowType(),
+            request.roomWorkflowBuildId(),
+            request.roomType(),
+            request.roomEpoch(),
+            request.fencingToken(),
+            request.roomWorkflowId(),
+            "legacy-run-without-party-pins");
+
+    assertThatThrownBy(() -> CaseProcessWorkflowImpl.validateTypedDescriptor(legacyTyped))
+        .isInstanceOfSatisfying(
+            ApplicationFailure.class,
+            failure -> assertThat(failure.getType()).isEqualTo("INTAKE_CHILD_ACTIVE_BINDING_INVALID"));
+  }
+
+  @Test
+  void commitmentPinsUpdateIdAndCarriedCaseFirstExecutionRun() {
+    startWorkflow();
+    ProvisionRoomEpoch request = typedProvision(RoomType.INTAKE, 0, 1, 0, 0, 0);
+    provision(request);
+    ProvisioningCommitment commitment = workflow().provisioningCommitment();
+
+    assertThatThrownBy(
+            () ->
+                new ProvisioningCommitment(
+                    request.updateId() + ":mismatch",
+                    request.payloadSha256(),
+                    request,
+                    commitment.receipt()))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("does not match payload");
+    CaseProcessWorkflowImpl.requireCarriedCaseWorkflowRunId(
+        commitment, commitment.receipt().caseWorkflowRunId());
+    assertThatThrownBy(
+            () -> CaseProcessWorkflowImpl.requireCarriedCaseWorkflowRunId(commitment, "wrong-run"))
+        .isInstanceOfSatisfying(
+            ApplicationFailure.class,
+            failure ->
+                assertThat(failure.getType())
+                    .isEqualTo("ROOM_EPOCH_CASE_WORKFLOW_RUN_ID_MISMATCH"));
+  }
+
+  @Test
   void activityCancellationPropagatesTheCanceledFailureInsteadOfItsWrapper() {
     CanceledFailure canceled = new CanceledFailure("bridge activity canceled");
     ActivityFailure wrapper =
@@ -188,6 +254,29 @@ class CaseProcessTypedChildDispatchTest {
 
     assertThatThrownBy(() -> CaseProcessWorkflowImpl.rethrowIfCanceled(wrapper))
         .isSameAs(canceled);
+  }
+
+  @Test
+  void parentCancellationReachesTheHeartbeatAwareBridgeActivity() {
+    bridge.blockStart = true;
+    startWorkflow();
+    CompletableFuture<Throwable> callerFailure =
+        CompletableFuture.supplyAsync(
+            () -> {
+              try {
+                provision(typedProvision(RoomType.INTAKE, 0, 1, 0, 0, 0));
+                return null;
+              } catch (Throwable failure) {
+                return failure;
+              }
+            });
+    awaitFlag(bridge.startEntered, "bridge start Activity did not begin");
+
+    client.newUntypedWorkflowStub(WORKFLOW_ID).cancel();
+
+    awaitFlag(bridge.startCanceled, "bridge start Activity did not observe cancellation");
+    awaitStatus(WORKFLOW_ID, WORKFLOW_EXECUTION_STATUS_CANCELED);
+    assertThat(callerFailure.join()).isNotNull();
   }
 
   @Test
@@ -224,6 +313,88 @@ class CaseProcessTypedChildDispatchTest {
     assertThat(signalNames(receipt.roomWorkflowId()))
         .contains("intakeCommandAccepted", "intakeDomainEventCommitted")
         .doesNotContain("roomCommandAccepted", "roomDomainEventCommitted", "roomClose");
+  }
+
+  @Test
+  void parentValidatesPersistedPartyScopeWithoutInferringPartyFromActorRole() {
+    startWorkflow();
+    ProvisionRoomEpochReceipt receipt =
+        provision(typedProvision(RoomType.INTAKE, 0, 1, 0, 0, 0));
+    CaseCommandRef merchantInitiated = command(1, 0, 0, ActorRole.MERCHANT);
+    ledger.put(merchantInitiated);
+
+    bridge.commandParty = IntakeParty.INITIATOR;
+    bridge.commandActorScopeHash = ACTOR_SCOPE;
+    workflow().acceptCommand(merchantInitiated);
+
+    assertThat(awaitProcess(snapshot -> snapshot.nextCommandSequence() == 2).protocolErrorCode())
+        .isNull();
+    assertThat(
+            awaitIntake(
+                    receipt.roomWorkflowId(), snapshot -> snapshot.processedCommandCount() == 1)
+                .pendingCommand()
+                .party())
+        .isEqualTo(IntakeParty.INITIATOR);
+  }
+
+  @Test
+  void parentRejectsBridgePartyScopeAndExecutionContextBeforeTypedSignal() {
+    startWorkflow();
+    ProvisionRoomEpochReceipt receipt =
+        provision(typedProvision(RoomType.INTAKE, 0, 1, 0, 0, 0));
+    CaseCommandRef command = command(1, 0, 0);
+    ledger.put(command);
+    bridge.commandActorScopeHash = RESPONDENT_SCOPE;
+
+    assertThatThrownBy(() -> workflow().acceptCommand(command))
+        .isInstanceOf(WorkflowUpdateException.class);
+    assertThat(
+            awaitProcess(
+                    snapshot ->
+                        "INTAKE_CHILD_BRIDGE_COMMAND_BINDING_INVALID"
+                            .equals(snapshot.protocolErrorCode()))
+                .nextCommandSequence())
+        .isEqualTo(1);
+    assertThat(awaitIntake(receipt.roomWorkflowId(), snapshot -> true).processedCommandCount())
+        .isZero();
+
+    bridge.commandActorScopeHash = ACTOR_SCOPE;
+    bridge.commandExecutionContext =
+        new IntakeCommandExecutionContext(
+            "intake-command-execution-context.v1",
+            "grt.v1." + "d".repeat(32),
+            "synthetic-session",
+            NOW.plusSeconds(600).toEpochMilli(),
+            new RetryBudget("intake-retry-budget.v1", 1, 1, 0),
+            (BranchOperation) null);
+    workflow().retrySequenceGap();
+
+    awaitProcess(snapshot -> bridge.commandCalls.get() >= 2);
+    assertThat(workflow().state().nextCommandSequence()).isEqualTo(1);
+    assertThat(awaitIntake(receipt.roomWorkflowId(), snapshot -> true).processedCommandCount())
+        .isZero();
+  }
+
+  @Test
+  void parentRejectsEventScopeThatDoesNotMatchThePersistedPartyPin() {
+    startWorkflow();
+    ProvisionRoomEpochReceipt receipt =
+        provision(typedProvision(RoomType.INTAKE, 0, 1, 0, 0, 0));
+    CaseCommandRef command = command(1, 0, 0);
+    ledger.put(command);
+    workflow().acceptCommand(command);
+    bridge.eventActorScopeHash = RESPONDENT_SCOPE;
+
+    workflow().domainEventCommitted(event(1, 0));
+
+    CaseProcessSnapshot blocked =
+        awaitProcess(
+            snapshot ->
+                "INTAKE_CHILD_BRIDGE_EVENT_BINDING_INVALID"
+                    .equals(snapshot.protocolErrorCode()));
+    assertThat(blocked.nextCaseEventSequence()).isEqualTo(1);
+    assertThat(awaitIntake(receipt.roomWorkflowId(), snapshot -> true).processedEventCount())
+        .isZero();
   }
 
   @Test
@@ -488,6 +659,17 @@ class CaseProcessTypedChildDispatchTest {
   }
 
   @Test
+  void ordinaryProvisioningRuntimeFailureKeepsItsOriginalDiagnosticAtTheUpdateBoundary() {
+    IllegalStateException original = new IllegalStateException("post-start failure");
+
+    ApplicationFailure exposed = CaseProcessWorkflowImpl.failClosedProvisioningRuntime(original);
+
+    assertThat(exposed.getType()).isEqualTo("ROOM_EPOCH_PROVISIONING_RUNTIME_FAILURE");
+    assertThat(exposed.isNonRetryable()).isTrue();
+    assertThat(exposed.getCause()).isSameAs(original);
+  }
+
+  @Test
   void invariantBridgeFailureIsNotRetriedAndDoesNotReplaceGenericChild() {
     startWorkflow();
     ProvisionRoomEpochReceipt generic =
@@ -722,6 +904,17 @@ class CaseProcessTypedChildDispatchTest {
     throw new AssertionError("workflow did not reach status " + expected);
   }
 
+  private static void awaitFlag(AtomicBoolean flag, String message) {
+    long deadline = System.nanoTime() + java.time.Duration.ofSeconds(10).toNanos();
+    while (System.nanoTime() < deadline) {
+      if (flag.get()) {
+        return;
+      }
+      sleepBriefly();
+    }
+    throw new AssertionError(message);
+  }
+
   private io.temporal.api.enums.v1.WorkflowExecutionStatus status(String workflowId) {
     return client.newUntypedWorkflowStub(workflowId).describe().getStatus();
   }
@@ -856,6 +1049,11 @@ class CaseProcessTypedChildDispatchTest {
   }
 
   private static CaseCommandRef command(int sequence, long roomEpoch, long expectedRevision) {
+    return command(sequence, roomEpoch, expectedRevision, ActorRole.USER);
+  }
+
+  private static CaseCommandRef command(
+      int sequence, long roomEpoch, long expectedRevision, ActorRole actorRole) {
     String hash = Integer.toHexString(sequence % 16).repeat(64);
     return new CaseCommandRef(
         "case-command-ref.v1",
@@ -866,7 +1064,7 @@ class CaseProcessTypedChildDispatchTest {
         CommandType.INTAKE_MESSAGE,
         RoomType.INTAKE,
         roomEpoch,
-        new ActorRef("user-typed", ActorRole.USER, List.of("intake:message")),
+        new ActorRef("party-typed", actorRole, List.of("intake:message")),
         new PayloadRef("intake-command.v1", "urn:test:command:" + sequence, hash, 32),
         expectedRevision,
         NOW.plusSeconds(sequence),
@@ -883,7 +1081,7 @@ class CaseProcessTypedChildDispatchTest {
         TENANT,
         CASE_ID,
         sequence,
-        "INTAKE_CANCELLED",
+        "INTAKE_TURN_NEEDS_INPUT",
         RoomType.INTAKE,
         roomEpoch,
         new PayloadRef("intake-event.v1", "urn:test:event:" + sequence, hash, 16),
@@ -1028,13 +1226,39 @@ class CaseProcessTypedChildDispatchTest {
     private volatile boolean startInvariantFailure;
     private volatile boolean eventInvariantFailure;
     private volatile boolean startActiveBindingMismatch;
+    private volatile boolean blockStart;
+    private final AtomicBoolean startEntered = new AtomicBoolean();
+    private final AtomicBoolean startCanceled = new AtomicBoolean();
     private volatile CommandBindingFault commandFault = CommandBindingFault.NONE;
     private volatile EventBindingFault eventFault = EventBindingFault.NONE;
     private volatile long commandRoomRevision;
+    private volatile long eventProcessRevision = 1;
+    private volatile long eventRoomRevision = 1;
+    private volatile IntakeParty commandParty = IntakeParty.INITIATOR;
+    private volatile String commandActorScopeHash = ACTOR_SCOPE;
+    private volatile IntakeCommandExecutionContext commandExecutionContext;
+    private volatile IntakeParty eventParty = IntakeParty.INITIATOR;
+    private volatile String eventActorScopeHash = ACTOR_SCOPE;
+    private volatile IntakeWorkflowCommand lastTypedCommand;
 
     @Override
     public StartBinding bindStart(StartRequest request) {
       int attempt = startCalls.incrementAndGet();
+      if (blockStart) {
+        startEntered.set(true);
+        try {
+          while (true) {
+            Activity.getExecutionContext().heartbeat("waiting-for-parent-cancellation");
+            Thread.sleep(20);
+          }
+        } catch (ActivityCompletionException canceled) {
+          startCanceled.set(true);
+          throw canceled;
+        } catch (InterruptedException interrupted) {
+          Thread.currentThread().interrupt();
+          throw new IllegalStateException("bridge start activity interrupted", interrupted);
+        }
+      }
       if (startInvariantFailure) {
         throw ApplicationFailure.newNonRetryableFailure(
             "invariant", "INTAKE_CHILD_BRIDGE_INVARIANT");
@@ -1090,12 +1314,14 @@ class CaseProcessTypedChildDispatchTest {
               request.activeBinding().fencingToken(),
               source.caseCommandSequence(),
               IntakeCommandType.INTAKE_MESSAGE,
-              IntakeParty.INITIATOR,
-              ACTOR_SCOPE,
+              commandParty,
+              commandActorScopeHash,
               source.payloadRef().uri(),
               source.payloadRef().sha256(),
               "intake.operation:" + source.caseId() + ":" + source.commandId(),
-              source.requestHash());
+              source.requestHash(),
+              commandExecutionContext);
+      lastTypedCommand = typed;
       return new CommandBinding(
           "intake-child-command-binding.v1",
           request.activeBinding(),
@@ -1119,7 +1345,17 @@ class CaseProcessTypedChildDispatchTest {
         return null;
       }
       CaseDomainEventRef source = request.event();
-      String requestHash = "e".repeat(64);
+      IntakeWorkflowCommand correlated = lastTypedCommand;
+      String commandId =
+          correlated == null
+              ? "command-event-" + source.caseEventSequence()
+              : correlated.commandId();
+      String operationKey =
+          correlated == null
+              ? "intake.operation:" + source.caseId() + ":" + commandId
+              : correlated.operationKey();
+      String requestHash = correlated == null ? "e".repeat(64) : correlated.requestHash();
+      String resultHash = "f".repeat(64);
       String typedEventId =
           eventFault == EventBindingFault.INNER_EVENT_ID
               ? source.eventId() + "-mismatch"
@@ -1131,22 +1367,33 @@ class CaseProcessTypedChildDispatchTest {
               source.payloadRef().uri(),
               source.payloadRef().sha256(),
               source.caseEventSequence(),
-              IntakeDomainEventType.CANCELLED,
-              IntakeParty.INITIATOR,
-              "command-event-" + source.caseEventSequence(),
+              IntakeDomainEventType.TURN_NEEDS_INPUT,
+              eventParty,
+              commandId,
               source.tenantSurrogate(),
               source.caseId(),
               source.roomEpoch(),
               request.activeBinding().fencingToken(),
-              ACTOR_SCOPE,
-              "intake.operation:" + source.caseId() + ":command-event-"
-                  + source.caseEventSequence(),
+              eventActorScopeHash,
+              operationKey,
               requestHash,
-              "f".repeat(64),
-              1,
-              1,
-              null,
-              null);
+              resultHash,
+              eventProcessRevision,
+              eventRoomRevision,
+              new IntakeAgentRunRef(
+                  "intake-agent-run-ref.v1", "run-" + commandId, "attempt-" + commandId,
+                  resultHash),
+              new IntakeGraphExecutionRef(
+                  "intake-graph-execution-ref.v1",
+                  "grt.v1." + "c".repeat(32),
+                  commandId,
+                  "intake.v2",
+                  "2.0.0",
+                  "checkpoint-" + commandId,
+                  "urn:test:graph-result:" + commandId,
+                  resultHash,
+                  "urn:test:intake-proposal:" + commandId,
+                  "a".repeat(64)));
       return new DomainEventBinding(
           "intake-child-domain-event-binding.v1",
           request.activeBinding(),
@@ -1154,8 +1401,8 @@ class CaseProcessTypedChildDispatchTest {
               ? "c".repeat(64)
               : source.payloadRef().sha256(),
           requestHash,
-          1,
-          1,
+          eventProcessRevision,
+          eventRoomRevision,
           typed);
     }
   }

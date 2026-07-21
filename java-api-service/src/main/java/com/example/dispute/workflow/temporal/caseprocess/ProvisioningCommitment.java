@@ -16,7 +16,8 @@ public record ProvisioningCommitment(
     if (request == null || receipt == null) {
       throw new IllegalArgumentException("provisioning commitment must be complete");
     }
-    if (payloadSha256 == null
+    if (!updateId.equals(request.updateId())
+        || payloadSha256 == null
         || !payloadSha256.equals(request.payloadSha256())
         || !receipt.matches(request)) {
       throw new IllegalArgumentException("provisioning commitment does not match payload");
