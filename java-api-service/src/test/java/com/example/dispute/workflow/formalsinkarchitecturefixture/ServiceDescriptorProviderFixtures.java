@@ -11,6 +11,19 @@ final class OpaqueProvider {
     Object value() {
         return wrapper;
     }
+
+    static final class NestedOpaqueProvider {
+
+        private final CrossFileFormalWrapper wrapper;
+
+        NestedOpaqueProvider(CrossFileFormalWrapper wrapper) {
+            this.wrapper = wrapper;
+        }
+
+        Object value() {
+            return wrapper;
+        }
+    }
 }
 
 final class SafeIntakeRoomActivitiesMetricsProvider {

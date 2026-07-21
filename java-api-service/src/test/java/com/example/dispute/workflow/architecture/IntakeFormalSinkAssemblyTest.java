@@ -18,15 +18,22 @@ import com.tngtech.archunit.lang.ArchRule;
 import com.tngtech.archunit.lang.ConditionEvents;
 import com.tngtech.archunit.lang.SimpleConditionEvent;
 import com.tngtech.archunit.lang.syntax.ArchRuleDefinition;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.net.URI;
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
@@ -37,8 +44,13 @@ import java.util.TreeSet;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
 import java.util.stream.Collectors;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipException;
+import java.util.zip.ZipInputStream;
+import java.util.zip.ZipOutputStream;
 import javax.lang.model.SourceVersion;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 @AnalyzeClasses(
         packages = "com.example.dispute",
@@ -57,6 +69,10 @@ class IntakeFormalSinkAssemblyTest {
     private static final String SPRING_BEAN_FACTORY =
             "org.springframework.beans.factory.BeanFactory";
     private static final String SERVICES_PATH = "META-INF/services/";
+    private static final String BOOT_CLASSES_SERVICES_PATH =
+            "BOOT-INF/classes/META-INF/services/";
+    private static final String BOOT_LIB_PATH = "BOOT-INF/lib/";
+    private static final int MAX_NESTED_ARCHIVE_DEPTH = 8;
 
     private static final ServiceDescriptorCatalog PRODUCTION_SERVICE_DESCRIPTORS =
             scanProductionServiceDescriptors();
@@ -117,24 +133,34 @@ class IntakeFormalSinkAssemblyTest {
     }
 
     @Test
-    void compiledFixturesProveBytecodeCoverageAndSafeComparisonAssembly() {
+    void compiledFixturesProveBytecodeCoverageAndSafeComparisonAssembly(
+            @TempDir Path tempDirectory) throws IOException {
         JavaClasses fixtures =
                 new ClassFileImporter()
                         .withImportOption(new ImportOption.OnlyIncludeTests())
                         .importPackages(FIXTURE_PACKAGE);
 
+        String combinedDescriptor =
+                """
+                \ufeff# A single leading BOM, comments, blanks, duplicates, and nested names are legal.
+
+                com.example.dispute.workflow.formalsinkarchitecturefixture.OpaqueProvider
+                com.example.dispute.workflow.formalsinkarchitecturefixture.OpaqueProvider$NestedOpaqueProvider
+                com.example.dispute.workflow.formalsinkarchitecturefixture.OpaqueProvider$NestedOpaqueProvider
+                com.example.dispute.workflow.formalsinkarchitecturefixture.SafeIntakeRoomActivitiesMetricsProvider
+                com.vendor.ExternalMetricsProvider
+                """;
         ServiceDescriptorCatalog injectedDescriptors =
                 parseServiceDescriptors(
                         Map.of(
                                 "com.vendor.Plugin",
-                                """
-                                # The contract and provider names intentionally reveal no formal role.
-                                com.example.dispute.workflow.formalsinkarchitecturefixture.OpaqueProvider
-                                com.example.dispute.workflow.formalsinkarchitecturefixture.SafeIntakeRoomActivitiesMetricsProvider
-                                com.vendor.ExternalMetricsProvider
-                                """));
+                                combinedDescriptor));
+        ServiceDescriptorCatalog scannedDescriptors =
+                createAndScanServiceDescriptorFixtures(tempDirectory, combinedDescriptor);
+        ServiceDescriptorCatalog allFixtureDescriptors =
+                ServiceDescriptorCatalog.merge(injectedDescriptors, scannedDescriptors);
         ServiceProviderResolution injectedResolution =
-                resolveServiceProviders(injectedDescriptors, fixtures);
+                resolveServiceProviders(allFixtureDescriptors, fixtures);
         assertThat(injectedResolution.missingOwnedProviderRegistrations()).isEmpty();
         assertThat(injectedResolution.externalProviderRegistrations())
                 .contains("com.vendor.Plugin -> com.vendor.ExternalMetricsProvider");
@@ -164,6 +190,15 @@ class IntakeFormalSinkAssemblyTest {
                         "formal Intake sink is reachable: "
                                 + FIXTURE_PACKAGE
                                 + ".OpaqueProvider -> "
+                                + FIXTURE_PACKAGE
+                                + ".CrossFileFormalWrapper -> "
+                                + FIXTURE_PACKAGE
+                                + ".CrossFileFormalDelegate -> "
+                                + "com.example.dispute.workflow.application.intake.IntakeFormalCommitPort")
+                .contains(
+                        "formal Intake sink is reachable: "
+                                + FIXTURE_PACKAGE
+                                + ".OpaqueProvider$NestedOpaqueProvider -> "
                                 + FIXTURE_PACKAGE
                                 + ".CrossFileFormalWrapper -> "
                                 + FIXTURE_PACKAGE
@@ -270,6 +305,14 @@ class IntakeFormalSinkAssemblyTest {
                                         Map.of("com.vendor.Plugin", "not-a-java-binary-name!")))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("invalid provider binary name");
+        assertThatThrownBy(
+                        () ->
+                                parseServiceDescriptors(
+                                        Map.of(
+                                                "com.vendor.Plugin",
+                                                "\ufeff" + FIXTURE_PACKAGE + ".OpaqueProvider\n\ufeff")))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("embedded UTF-8 BOM");
 
         ServiceDescriptorCatalog missingOwnedProvider =
                 parseServiceDescriptors(
@@ -483,35 +526,169 @@ class IntakeFormalSinkAssemblyTest {
                 && owner.isAssignableTo(SPRING_BEAN_FACTORY);
     }
 
+    private static ServiceDescriptorCatalog createAndScanServiceDescriptorFixtures(
+            Path tempDirectory, String descriptorContent) throws IOException {
+        String descriptorEntry = SERVICES_PATH + "com.vendor.Plugin";
+        byte[] descriptorBytes = descriptorContent.getBytes(StandardCharsets.UTF_8);
+
+        Path directoryEntry = tempDirectory.resolve("ordinary-classes");
+        writeDirectoryDescriptor(directoryEntry, descriptorBytes);
+
+        Path uriDirectoryEntry = tempDirectory.resolve("uri-classes");
+        writeDirectoryDescriptor(uriDirectoryEntry, descriptorBytes);
+
+        Path extensionlessArchive = tempDirectory.resolve("UPPERCASE_ARCHIVE");
+        writeArchive(extensionlessArchive, Map.of(descriptorEntry, descriptorBytes));
+
+        Path uriArchive = tempDirectory.resolve("uri-archive.data");
+        writeArchive(uriArchive, Map.of(descriptorEntry, descriptorBytes));
+
+        Path bootClassesArchive = tempDirectory.resolve("boot-classes.bin");
+        writeArchive(
+                bootClassesArchive,
+                Map.of(
+                        BOOT_CLASSES_SERVICES_PATH + "com.vendor.Plugin",
+                        descriptorBytes));
+
+        byte[] nestedLibrary = archiveBytes(Map.of(descriptorEntry, descriptorBytes));
+        Path nestedBootArchive = tempDirectory.resolve("nested-boot.bin");
+        writeArchive(
+                nestedBootArchive,
+                Map.of(BOOT_LIB_PATH + "opaque-provider.library", nestedLibrary));
+
+        Path plainFile = tempDirectory.resolve("not-an-archive.txt");
+        Files.writeString(plainFile, "not a ZIP archive", StandardCharsets.UTF_8);
+        assertThatThrownBy(
+                        () ->
+                                scanClassPathEntries(
+                                        List.of(plainFile.toString())))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("not a readable ZIP archive");
+
+        Path brokenNestedArchive = tempDirectory.resolve("broken-nested.bin");
+        writeArchive(
+                brokenNestedArchive,
+                Map.of(
+                        BOOT_LIB_PATH + "broken.library",
+                        "not a nested ZIP".getBytes(StandardCharsets.UTF_8)));
+        assertThatThrownBy(
+                        () ->
+                                scanClassPathEntries(
+                                        List.of(brokenNestedArchive.toString())))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("BOOT-INF/lib entry is not a readable ZIP archive");
+
+        Path invalidUtf8Archive = tempDirectory.resolve("invalid-utf8.bin");
+        writeArchive(
+                invalidUtf8Archive,
+                Map.of(descriptorEntry, new byte[] {(byte) 0xc3, 0x28}));
+        assertThatThrownBy(
+                        () ->
+                                scanClassPathEntries(
+                                        List.of(invalidUtf8Archive.toString())))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("not valid UTF-8");
+
+        ServiceDescriptorCatalog catalog =
+                scanClassPathEntries(
+                        List.of(
+                                directoryEntry.toString(),
+                                directoryEntry.toUri().toASCIIString(),
+                                directoryEntry.toString(),
+                                uriDirectoryEntry.toUri().toASCIIString(),
+                                extensionlessArchive.toString(),
+                                uriArchive.toUri().toASCIIString(),
+                                bootClassesArchive.toString(),
+                                nestedBootArchive.toString()));
+        assertThat(catalog.descriptors()).hasSize(6);
+        return catalog;
+    }
+
+    private static void writeDirectoryDescriptor(
+            Path classesDirectory, byte[] content) throws IOException {
+        Path descriptor =
+                classesDirectory
+                        .resolve("META-INF")
+                        .resolve("services")
+                        .resolve("com.vendor.Plugin");
+        Files.createDirectories(descriptor.getParent());
+        Files.write(descriptor, content);
+    }
+
+    private static void writeArchive(
+            Path archive, Map<String, byte[]> entries) throws IOException {
+        Files.write(archive, archiveBytes(entries));
+    }
+
+    private static byte[] archiveBytes(Map<String, byte[]> entries) throws IOException {
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        try (ZipOutputStream archive = new ZipOutputStream(bytes)) {
+            for (Map.Entry<String, byte[]> entry :
+                    entries.entrySet().stream()
+                            .sorted(Map.Entry.comparingByKey())
+                            .toList()) {
+                archive.putNextEntry(new ZipEntry(entry.getKey()));
+                archive.write(entry.getValue());
+                archive.closeEntry();
+            }
+        }
+        return bytes.toByteArray();
+    }
+
     private static ServiceDescriptorCatalog scanProductionServiceDescriptors() {
+        return scanClassPathEntries(
+                Arrays.asList(
+                        System.getProperty("java.class.path", "")
+                                .split(File.pathSeparator)));
+    }
+
+    private static ServiceDescriptorCatalog scanClassPathEntries(
+            List<String> rawEntries) {
+        Set<Path> classPathEntries =
+                rawEntries.stream()
+                        .filter(entry -> !entry.isBlank())
+                        .map(IntakeFormalSinkAssemblyTest::resolveClassPathEntry)
+                        .collect(
+                                Collectors.toCollection(
+                                        () -> new TreeSet<>(Comparator.comparing(Path::toString))));
         List<ServiceDescriptor> descriptors = new ArrayList<>();
-        Arrays.stream(System.getProperty("java.class.path", "").split(File.pathSeparator))
-                .filter(entry -> !entry.isBlank())
-                .map(Path::of)
-                .map(path -> path.toAbsolutePath().normalize())
-                .distinct()
-                .sorted(Comparator.comparing(Path::toString))
-                .forEach(path -> scanClassPathEntry(path, descriptors));
+        classPathEntries.forEach(path -> scanClassPathEntry(path, descriptors));
         return new ServiceDescriptorCatalog(descriptors);
+    }
+
+    private static Path resolveClassPathEntry(String rawEntry) {
+        try {
+            Path path =
+                    rawEntry.regionMatches(true, 0, "file:", 0, "file:".length())
+                            ? Path.of(URI.create(rawEntry))
+                            : Path.of(rawEntry);
+            return path.toAbsolutePath().normalize();
+        } catch (RuntimeException failure) {
+            throw new IllegalArgumentException(
+                    "invalid classpath entry '" + rawEntry + "'", failure);
+        }
     }
 
     private static void scanClassPathEntry(
             Path classPathEntry, List<ServiceDescriptor> descriptors) {
+        if (!Files.exists(classPathEntry)) {
+            throw new IllegalStateException(
+                    "classpath entry does not exist: " + classPathEntry);
+        }
+        if (!Files.isReadable(classPathEntry)) {
+            throw new IllegalStateException(
+                    "classpath entry is not readable: " + classPathEntry);
+        }
         if (Files.isDirectory(classPathEntry)) {
-            if (isMainClassesDirectory(classPathEntry)) {
-                scanServiceDescriptorDirectory(classPathEntry, descriptors);
-            }
+            scanServiceDescriptorDirectory(classPathEntry, descriptors);
             return;
         }
-        if (Files.isRegularFile(classPathEntry)
-                && classPathEntry.getFileName().toString().endsWith(".jar")) {
-            scanServiceDescriptorJar(classPathEntry, descriptors);
+        if (!Files.isRegularFile(classPathEntry)) {
+            throw new IllegalStateException(
+                    "classpath entry is neither a directory nor a regular archive: "
+                            + classPathEntry);
         }
-    }
-
-    private static boolean isMainClassesDirectory(Path classPathEntry) {
-        String normalized = classPathEntry.toString().replace('\\', '/');
-        return normalized.endsWith("/target/classes");
+        scanServiceDescriptorArchive(classPathEntry, descriptors);
     }
 
     private static void scanServiceDescriptorDirectory(
@@ -526,10 +703,10 @@ class IntakeFormalSinkAssemblyTest {
                             .sorted(Comparator.comparing(Path::toString))
                             .toList()) {
                 descriptors.add(
-                        parseServiceDescriptor(
+                        parseServiceDescriptorBytes(
                                 descriptor.toString(),
                                 descriptor.getFileName().toString(),
-                                Files.readString(descriptor, StandardCharsets.UTF_8)));
+                                Files.readAllBytes(descriptor)));
             }
         } catch (IOException failure) {
             throw new UncheckedIOException(
@@ -538,34 +715,112 @@ class IntakeFormalSinkAssemblyTest {
         }
     }
 
-    private static void scanServiceDescriptorJar(
-            Path jarPath, List<ServiceDescriptor> descriptors) {
-        try (JarFile jar = new JarFile(jarPath.toFile())) {
-            List<JarEntry> serviceEntries =
-                    jar.stream()
+    private static void scanServiceDescriptorArchive(
+            Path archivePath, List<ServiceDescriptor> descriptors) {
+        try (JarFile archive = new JarFile(archivePath.toFile())) {
+            List<JarEntry> entries =
+                    archive.stream()
                             .filter(entry -> !entry.isDirectory())
-                            .filter(entry -> entry.getName().startsWith(SERVICES_PATH))
-                            .filter(
-                                    entry ->
-                                            !entry.getName()
-                                                    .substring(SERVICES_PATH.length())
-                                                    .contains("/"))
                             .sorted(Comparator.comparing(JarEntry::getName))
                             .toList();
-            for (JarEntry entry : serviceEntries) {
-                String contract = entry.getName().substring(SERVICES_PATH.length());
-                String source = jarPath + "!/" + entry.getName();
-                String content =
-                        new String(
-                                jar.getInputStream(entry).readAllBytes(),
-                                StandardCharsets.UTF_8);
-                descriptors.add(parseServiceDescriptor(source, contract, content));
+            for (JarEntry entry : entries) {
+                String source = archivePath + "!/" + entry.getName();
+                Optional<String> contract = descriptorContract(entry.getName());
+                if (contract.isPresent()) {
+                    descriptors.add(
+                            parseServiceDescriptorBytes(
+                                    source,
+                                    contract.orElseThrow(),
+                                    archive.getInputStream(entry).readAllBytes()));
+                } else if (isBootNestedArchive(entry.getName())) {
+                    scanNestedArchive(
+                            archive.getInputStream(entry).readAllBytes(),
+                            source,
+                            1,
+                            descriptors);
+                }
+            }
+        } catch (ZipException failure) {
+            throw new IllegalStateException(
+                    "classpath entry is not a readable ZIP archive: " + archivePath,
+                    failure);
+        } catch (IOException failure) {
+            throw new UncheckedIOException(
+                    "cannot scan production service descriptors in " + archivePath,
+                    failure);
+        }
+    }
+
+    private static void scanNestedArchive(
+            byte[] archiveBytes,
+            String source,
+            int depth,
+            List<ServiceDescriptor> descriptors) {
+        if (depth > MAX_NESTED_ARCHIVE_DEPTH) {
+            throw new IllegalStateException(
+                    "nested BOOT-INF/lib archive depth exceeds "
+                            + MAX_NESTED_ARCHIVE_DEPTH
+                            + ": "
+                            + source);
+        }
+        if (!hasZipSignature(archiveBytes)) {
+            throw new IllegalStateException(
+                    "BOOT-INF/lib entry is not a readable ZIP archive: " + source);
+        }
+        try (ZipInputStream archive =
+                new ZipInputStream(new ByteArrayInputStream(archiveBytes))) {
+            for (ZipEntry entry = archive.getNextEntry();
+                    entry != null;
+                    entry = archive.getNextEntry()) {
+                if (entry.isDirectory()) {
+                    continue;
+                }
+                byte[] content = archive.readAllBytes();
+                String nestedSource = source + "!/" + entry.getName();
+                Optional<String> contract = descriptorContract(entry.getName());
+                if (contract.isPresent()) {
+                    descriptors.add(
+                            parseServiceDescriptorBytes(
+                                    nestedSource, contract.orElseThrow(), content));
+                } else if (isBootNestedArchive(entry.getName())) {
+                    scanNestedArchive(content, nestedSource, depth + 1, descriptors);
+                }
             }
         } catch (IOException failure) {
             throw new UncheckedIOException(
-                    "cannot scan production service descriptors in " + jarPath,
+                    "cannot scan nested BOOT-INF/lib archive " + source,
                     failure);
         }
+    }
+
+    private static Optional<String> descriptorContract(String entryName) {
+        for (String prefix : List.of(SERVICES_PATH, BOOT_CLASSES_SERVICES_PATH)) {
+            if (!entryName.startsWith(prefix)) {
+                continue;
+            }
+            String contract = entryName.substring(prefix.length());
+            if (!contract.isEmpty() && !contract.contains("/")) {
+                return Optional.of(contract);
+            }
+        }
+        return Optional.empty();
+    }
+
+    private static boolean isBootNestedArchive(String entryName) {
+        if (!entryName.startsWith(BOOT_LIB_PATH)) {
+            return false;
+        }
+        String relativeName = entryName.substring(BOOT_LIB_PATH.length());
+        return !relativeName.isEmpty() && !relativeName.contains("/");
+    }
+
+    private static boolean hasZipSignature(byte[] bytes) {
+        if (bytes.length < 4 || bytes[0] != 'P' || bytes[1] != 'K') {
+            return false;
+        }
+        return (bytes[2] == 3 && bytes[3] == 4)
+                || (bytes[2] == 5 && bytes[3] == 6)
+                || (bytes[2] == 7 && bytes[3] == 8);
     }
 
     private static ServiceDescriptorCatalog parseServiceDescriptors(
@@ -586,6 +841,13 @@ class IntakeFormalSinkAssemblyTest {
     private static ServiceDescriptor parseServiceDescriptor(
             String source, String contractName, String content) {
         requireJavaBinaryName(contractName, "service contract", source, 0);
+        if (content.startsWith("\ufeff")) {
+            content = content.substring(1);
+        }
+        if (content.indexOf('\ufeff') >= 0) {
+            throw new IllegalArgumentException(
+                    "embedded UTF-8 BOM in service descriptor " + source);
+        }
         Set<String> providers = new TreeSet<>();
         String[] lines = content.split("\\R", -1);
         for (int index = 0; index < lines.length; index++) {
@@ -597,6 +859,27 @@ class IntakeFormalSinkAssemblyTest {
             providers.add(provider);
         }
         return new ServiceDescriptor(source, contractName, providers);
+    }
+
+    private static ServiceDescriptor parseServiceDescriptorBytes(
+            String source, String contractName, byte[] content) {
+        return parseServiceDescriptor(
+                source, contractName, decodeStrictUtf8(content, source));
+    }
+
+    private static String decodeStrictUtf8(byte[] content, String source) {
+        try {
+            return StandardCharsets.UTF_8
+                    .newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+                    .decode(ByteBuffer.wrap(content))
+                    .toString();
+        } catch (CharacterCodingException failure) {
+            throw new IllegalArgumentException(
+                    "service descriptor is not valid UTF-8: " + source,
+                    failure);
+        }
     }
 
     private static void requireJavaBinaryName(
@@ -668,21 +951,37 @@ class IntakeFormalSinkAssemblyTest {
             String source, String contractName, Set<String> providerNames) {
 
         private ServiceDescriptor {
-            providerNames = Set.copyOf(providerNames);
+            providerNames = Collections.unmodifiableSet(new TreeSet<>(providerNames));
         }
     }
 
     private record ServiceDescriptorCatalog(List<ServiceDescriptor> descriptors) {
 
         private ServiceDescriptorCatalog {
-            descriptors = List.copyOf(descriptors);
+            descriptors =
+                    descriptors.stream()
+                            .distinct()
+                            .sorted(
+                                    Comparator.comparing(ServiceDescriptor::source)
+                                            .thenComparing(ServiceDescriptor::contractName))
+                            .toList();
+        }
+
+        private static ServiceDescriptorCatalog merge(
+                ServiceDescriptorCatalog... catalogs) {
+            return new ServiceDescriptorCatalog(
+                    Arrays.stream(catalogs)
+                            .flatMap(catalog -> catalog.descriptors().stream())
+                            .toList());
         }
 
         private Set<String> ownedProviderNames() {
-            return descriptors.stream()
+            Set<String> providers = new TreeSet<>();
+            descriptors.stream()
                     .flatMap(descriptor -> descriptor.providerNames().stream())
                     .filter(provider -> provider.startsWith(OWNED_PACKAGE_PREFIX))
-                    .collect(Collectors.toUnmodifiableSet());
+                    .forEach(providers::add);
+            return Collections.unmodifiableSet(providers);
         }
     }
 

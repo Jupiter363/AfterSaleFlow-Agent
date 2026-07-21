@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
 import yaml
 
 
@@ -83,6 +84,18 @@ def _is_direct_formal_provider(provider: str) -> bool:
     )
 
 
+def _read_service_descriptor(descriptor: Path) -> set[str]:
+    content = descriptor.read_text(encoding="utf-8-sig")
+    assert "\ufeff" not in content, f"embedded UTF-8 BOM: {descriptor}"
+    providers = {
+        provider
+        for line in content.splitlines()
+        if (provider := line.split("#", 1)[0].strip())
+    }
+    assert all(JAVA_BINARY_NAME.fullmatch(provider) for provider in providers), descriptor
+    return providers
+
+
 def test_meta_inf_service_descriptors_are_syntactically_valid_and_not_direct_formal() -> (
     None
 ):
@@ -96,12 +109,7 @@ def test_meta_inf_service_descriptors_are_syntactically_valid_and_not_direct_for
     for descriptor in descriptors:
         contract = descriptor.relative_to(service_root).as_posix().replace("/", ".")
         assert JAVA_BINARY_NAME.fullmatch(contract), descriptor
-        providers = {
-            provider
-            for line in descriptor.read_text(encoding="utf-8").splitlines()
-            if (provider := line.split("#", 1)[0].strip())
-        }
-        assert all(JAVA_BINARY_NAME.fullmatch(provider) for provider in providers), descriptor
+        providers = _read_service_descriptor(descriptor)
         assert not {provider for provider in providers if _is_direct_formal_provider(provider)}, (
             descriptor
         )
@@ -115,6 +123,28 @@ def test_meta_inf_service_descriptors_are_syntactically_valid_and_not_direct_for
     assert _is_direct_formal_provider(
         "com.example.dispute.persistence.JdbcIntakeFormalOpaqueProvider"
     )
+
+
+def test_service_descriptor_parser_is_bom_aware_and_deduplicates_nested_names(
+    tmp_path: Path,
+) -> None:
+    descriptor = tmp_path / "com.vendor.Plugin"
+    descriptor.write_text(
+        "\ufeff# comment\n\n"
+        "com.example.SafeProvider$Nested\n"
+        "com.example.SafeProvider$Nested # duplicate\n",
+        encoding="utf-8",
+    )
+    assert _read_service_descriptor(descriptor) == {
+        "com.example.SafeProvider$Nested"
+    }
+
+    descriptor.write_text(
+        "\ufeffcom.example.SafeProvider\n\ufeffcom.example.OtherProvider\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(AssertionError, match="embedded UTF-8 BOM"):
+        _read_service_descriptor(descriptor)
 
 
 def test_archunit_rule_and_compiled_fixture_contract_exist() -> None:
@@ -143,6 +173,10 @@ def test_archunit_rule_and_compiled_fixture_contract_exist() -> None:
         "scanProductionServiceDescriptors",
         "parseServiceDescriptors",
         "resolveServiceProviders",
+        "scanClassPathEntries",
+        "BOOT_CLASSES_SERVICES_PATH",
+        "BOOT_LIB_PATH",
+        "decodeStrictUtf8",
         "missingOwnedProviderRegistrations",
         "externalProviderRegistrations",
         "shortestFormalSinkChain",
