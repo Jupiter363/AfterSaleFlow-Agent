@@ -3,6 +3,7 @@ package com.example.dispute.workflow.application.intake;
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.math.RoundingMode;
 import java.util.HashMap;
@@ -84,7 +85,32 @@ public final class IntakeDossierProjectionMerger {
             "set_deadline",
             "invite_participant");
 
+    private static final Set<String> DERIVED_MATRIX_DOSSIER_KEYS = Set.of(
+            "case_fact_matrix",
+            "unilateral_case_matrix",
+            "matrix_patch",
+            "matrix_id",
+            "matrix_version",
+            "matrix_kind",
+            "generation_ref",
+            "parent_ref",
+            "party_map",
+            "fact_indexes",
+            "source_binding",
+            "truth_status",
+            "fact_relationships",
+            "summary_source_fact_ids",
+            "evidence_coverage_status");
+
+    private static final Set<String> FORMAL_MATRIX_SCHEMA_VERSIONS = Set.of(
+            "unilateral_case_matrix.v1",
+            "unilateral_case_matrix.draft.v1",
+            "case_fact_matrix.v2",
+            "case_fact_matrix.delta.v2");
+
     private final IntakeUnilateralMatrixPolicy matrixPolicy = new IntakeUnilateralMatrixPolicy();
+    private final IntakeRespondentMatrixFreezer respondentMatrixFreezer =
+            new IntakeRespondentMatrixFreezer();
 
     public MergeResult merge(JsonNode current, IntakeTurnProposal proposal) {
         return merge(current, proposal, null);
@@ -95,6 +121,7 @@ public final class IntakeDossierProjectionMerger {
         if (current == null || !current.isObject()) {
             throw rejected("INTAKE_DOSSIER_CURRENT_INVALID", "persisted Intake dossier is not an object");
         }
+        requireProposalOutcomeConsistency(proposal);
         JsonNode patch = proposal.dossierPatch();
         if (!patch.isObject()) {
             throw rejected("INTAKE_DOSSIER_PATCH_INVALID", "dossier patch is not an object");
@@ -112,6 +139,7 @@ public final class IntakeDossierProjectionMerger {
             }
         });
         rejectForbiddenKeys(patch);
+        rejectDerivedMatrixDossierKeys(patch);
 
         ObjectNode merged = (ObjectNode) current.deepCopy();
         deepMerge(merged, (ObjectNode) patch);
@@ -125,13 +153,56 @@ public final class IntakeDossierProjectionMerger {
                         "matrix patch requires current Java case and source authority");
             }
             rejectForbiddenKeys(matrixPatch);
-            merged.set(
-                    "unilateral_case_matrix",
-                    matrixPolicy.apply(merged, matrixPatch, matrixAuthority));
-            matrixChanged = true;
+            String matrixSchema = matrixPatch.path("schema_version").asText();
+            if ("unilateral_case_matrix.draft.v1".equals(matrixSchema)) {
+                merged.set(
+                        "unilateral_case_matrix",
+                        matrixPolicy.apply(merged, matrixPatch, matrixAuthority));
+                matrixChanged = true;
+            } else if ("case_fact_matrix.delta.v2".equals(matrixSchema)) {
+                if (matrixAuthority.actorRole() != matrixAuthority.respondentRole()) {
+                    throw rejected(
+                            "INTAKE_RESPONDENT_MATRIX_AUTHORITY_INVALID",
+                            "matrix delta requires the Java-authorized respondent actor");
+                }
+                JsonNode currentFormalMatrix = merged.path("case_fact_matrix");
+                if (!currentFormalMatrix.isObject()) {
+                    throw rejected(
+                            "INTAKE_RESPONDENT_MATRIX_PARENT_REQUIRED",
+                            "respondent delta requires the Java-owned initiator matrix");
+                }
+                ObjectNode bilateralCandidate = respondentMatrixFreezer.deriveCandidate(
+                        (ObjectNode) currentFormalMatrix, matrixPatch, matrixAuthority);
+                if (proposal.readiness() == IntakeTurnProposal.Readiness.READY_TO_CONFIRM
+                        && proposal.missingFields().isEmpty()) {
+                    respondentMatrixFreezer.requireCompleteForFreeze(
+                            bilateralCandidate, matrixAuthority);
+                    merged.set("case_fact_matrix", bilateralCandidate);
+                    matrixChanged = true;
+                }
+            } else {
+                if ("case_fact_matrix.v2".equals(matrixSchema)
+                        || matrixPatch.has("matrix_kind")) {
+                    throw rejected(
+                            "INTAKE_MATRIX_FORMAL_TRANSITION_FORBIDDEN",
+                            "matrix patch cannot create or revise a formal matrix");
+                }
+                throw rejected(
+                        "INTAKE_MATRIX_PATCH_INVALID",
+                        "matrix patch is not a supported semantic proposal");
+            }
         } else if (matrixAuthority != null && merged.path("unilateral_case_matrix").isObject()) {
             matrixPolicy.validateExisting(
                     (ObjectNode) merged.path("unilateral_case_matrix"), matrixAuthority);
+        }
+
+        if (proposal.readiness() == IntakeTurnProposal.Readiness.READY_TO_CONFIRM
+                && matrixAuthority != null
+                && matrixAuthority.actorRole() == matrixAuthority.respondentRole()
+                && !matrixChanged) {
+            throw rejected(
+                    "INTAKE_RESPONDENT_MATRIX_NOT_READY",
+                    "respondent readiness requires a complete bilateral matrix delta");
         }
 
         normalizeProjectionMetadata(merged, (ObjectNode) patch, proposal);
@@ -210,6 +281,19 @@ public final class IntakeDossierProjectionMerger {
         admission.put("recommendation", proposal.recommendation().name());
     }
 
+    private static void requireProposalOutcomeConsistency(IntakeTurnProposal proposal) {
+        boolean ready = proposal.readiness() == IntakeTurnProposal.Readiness.READY_TO_CONFIRM;
+        boolean accepted = proposal.recommendation() == IntakeTurnProposal.Recommendation.ACCEPTED;
+        if (ready != accepted
+                || (proposal.recommendation()
+                                == IntakeTurnProposal.Recommendation.NOT_ADMISSIBLE
+                        && proposal.readiness() != IntakeTurnProposal.Readiness.NEEDS_REVIEW)) {
+            throw rejected(
+                    "INTAKE_PROPOSAL_OUTCOME_CONFLICT",
+                    "proposal readiness and recommendation are inconsistent");
+        }
+    }
+
     private static void rejectForbiddenKeys(JsonNode value) {
         if (value.isObject()) {
             value.fields().forEachRemaining(field -> {
@@ -222,6 +306,29 @@ public final class IntakeDossierProjectionMerger {
             });
         } else if (value.isArray()) {
             value.forEach(IntakeDossierProjectionMerger::rejectForbiddenKeys);
+        }
+    }
+
+    private static void rejectDerivedMatrixDossierKeys(JsonNode value) {
+        if (value.isObject()) {
+            value.fields().forEachRemaining(field -> {
+                if (DERIVED_MATRIX_DOSSIER_KEYS.contains(field.getKey())) {
+                    throw rejected(
+                            "INTAKE_MATRIX_DERIVED_FIELD_FORBIDDEN",
+                            "dossier patch cannot carry Java-derived matrix authority");
+                }
+                if ("schema_version".equals(field.getKey())
+                        && field.getValue().isTextual()
+                        && FORMAL_MATRIX_SCHEMA_VERSIONS.contains(
+                                field.getValue().textValue())) {
+                    throw rejected(
+                            "INTAKE_MATRIX_DERIVED_FIELD_FORBIDDEN",
+                            "dossier patch cannot carry a matrix schema");
+                }
+                rejectDerivedMatrixDossierKeys(field.getValue());
+            });
+        } else if (value.isArray()) {
+            value.forEach(IntakeDossierProjectionMerger::rejectDerivedMatrixDossierKeys);
         }
     }
 
@@ -282,8 +389,21 @@ public final class IntakeDossierProjectionMerger {
 
         private static StableIndex from(JsonNode value) {
             StableIndex index = new StableIndex();
-            index.visit(value);
+            index.visitRoot(value);
             return index;
+        }
+
+        private void visitRoot(JsonNode value) {
+            if (value == null || !value.isObject()) {
+                visit(value);
+                return;
+            }
+            boolean hasFormalMatrix = value.path("case_fact_matrix").isObject();
+            value.fields().forEachRemaining(field -> {
+                if (!hasFormalMatrix || !"unilateral_case_matrix".equals(field.getKey())) {
+                    visit(field.getValue());
+                }
+            });
         }
 
         private void visit(JsonNode value) {
@@ -353,7 +473,9 @@ public final class IntakeDossierProjectionMerger {
         }
 
         private void register(String id, JsonNode value) {
-            String binding = ContractJson.sha256Hex(value);
+            ObjectNode material = JsonNodeFactory.instance.objectNode();
+            material.set("value", value.deepCopy());
+            String binding = ContractJson.sha256Hex(material);
             String previous = bindings.putIfAbsent(id, binding);
             if (previous != null && !previous.equals(binding)) {
                 throw rejected(

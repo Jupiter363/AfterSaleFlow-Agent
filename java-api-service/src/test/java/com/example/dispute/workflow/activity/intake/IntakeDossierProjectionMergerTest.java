@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.example.dispute.workflow.application.intake.IntakeDossierProjectionMerger;
 import com.example.dispute.workflow.application.intake.IntakeDossierProjectionMerger.MatrixAuthority;
 import com.example.dispute.workflow.application.intake.IntakeFinalizationRejectedException;
+import com.example.dispute.workflow.application.intake.IntakeInitiatorMatrixFreezer;
 import com.example.dispute.workflow.application.intake.IntakeTurnProposal;
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
@@ -217,6 +218,164 @@ class IntakeDossierProjectionMergerTest {
                         JSON.createObjectNode(),
                         proposal(completeDossierPatch(), unilateralDraft()),
                         matrixAuthority(ActorRole.MERCHANT)));
+
+        assertRejected(
+                "INTAKE_RESPONDENT_MATRIX_AUTHORITY_INVALID",
+                () -> merger.merge(
+                        JSON.createObjectNode(),
+                        proposal(
+                                JSON.createObjectNode(),
+                                respondentDelta("FACT_NOT_VISIBLE")),
+                        matrixAuthority(ActorRole.USER)));
+    }
+
+    @Test
+    void validatesRespondentDeltasButFreezesOnlyACompleteReadyProposal() throws Exception {
+        ObjectNode current = dossierWithInitiatorMatrix();
+        ObjectNode parent = ((ObjectNode) current.path("case_fact_matrix")).deepCopy();
+        JsonNode delta = respondentDelta(parent.at("/fact_rows/0/fact_id").asText());
+
+        var incomplete = merger.merge(
+                current,
+                proposal(
+                        JSON.createObjectNode(),
+                        delta,
+                        IntakeTurnProposal.Readiness.INCOMPLETE,
+                        List.of("respondent_supporting_evidence")),
+                matrixAuthority(ActorRole.MERCHANT));
+
+        assertThat(incomplete.dossier().path("case_fact_matrix")).isEqualTo(parent);
+        assertThat(incomplete.matrixVersion()).isNull();
+
+        var needsReview = merger.merge(
+                current,
+                proposal(
+                        JSON.createObjectNode(),
+                        delta,
+                        IntakeTurnProposal.Readiness.NEEDS_REVIEW,
+                        List.of()),
+                matrixAuthority(ActorRole.MERCHANT));
+
+        assertThat(needsReview.dossier().path("case_fact_matrix")).isEqualTo(parent);
+        assertThat(needsReview.matrixVersion()).isNull();
+
+        assertRejected(
+                "INTAKE_RESPONDENT_MATRIX_NOT_READY",
+                () -> merger.merge(
+                        current,
+                        proposal(
+                                JSON.createObjectNode(),
+                                null,
+                                IntakeTurnProposal.Readiness.READY_TO_CONFIRM,
+                                List.of()),
+                        matrixAuthority(ActorRole.MERCHANT)));
+
+        var ready = merger.merge(
+                current,
+                proposal(
+                        JSON.createObjectNode(),
+                        delta,
+                        IntakeTurnProposal.Readiness.READY_TO_CONFIRM,
+                        List.of()),
+                matrixAuthority(ActorRole.MERCHANT));
+
+        assertThat(ready.dossier().at("/case_fact_matrix/matrix_kind").asText())
+                .isEqualTo("BILATERAL_FROZEN");
+        assertThat(ready.dossier().at("/case_fact_matrix/parent_ref/content_hash"))
+                .isEqualTo(parent.path("content_hash"));
+        assertThat(ready.matrixVersion()).isEqualTo(2);
+    }
+
+    @Test
+    void rejectsInconsistentTypedReadinessAndRecommendation() {
+        assertRejected(
+                "INTAKE_PROPOSAL_OUTCOME_CONFLICT",
+                () -> merger.merge(
+                        JSON.createObjectNode(),
+                        proposal(
+                                JSON.createObjectNode(),
+                                null,
+                                IntakeTurnProposal.Readiness.READY_TO_CONFIRM,
+                                List.of(),
+                                IntakeTurnProposal.Recommendation.NEED_MORE_INFO)));
+        assertRejected(
+                "INTAKE_PROPOSAL_OUTCOME_CONFLICT",
+                () -> merger.merge(
+                        JSON.createObjectNode(),
+                        proposal(
+                                JSON.createObjectNode(),
+                                null,
+                                IntakeTurnProposal.Readiness.INCOMPLETE,
+                                List.of("admissibility_review"),
+                                IntakeTurnProposal.Recommendation.NOT_ADMISSIBLE)));
+    }
+
+    @Test
+    void rejectsJavaDerivedMatrixMetadataHiddenInOrdinaryDossierBranches() throws Exception {
+        for (String key : List.of(
+                "case_fact_matrix",
+                "unilateral_case_matrix",
+                "matrix_patch",
+                "matrix_id",
+                "matrix_version",
+                "matrix_kind",
+                "generation_ref",
+                "parent_ref",
+                "party_map",
+                "fact_indexes",
+                "source_binding",
+                "truth_status",
+                "fact_relationships",
+                "summary_source_fact_ids",
+                "evidence_coverage_status")) {
+            ObjectNode patch = JSON.createObjectNode();
+            patch.putObject("case_story")
+                    .putArray("nested")
+                    .addObject()
+                    .put(key, "model-owned");
+            assertRejected(
+                    "INTAKE_MATRIX_DERIVED_FIELD_FORBIDDEN",
+                    () -> merger.merge(
+                            JSON.createObjectNode(), proposal(patch, null)));
+        }
+
+        for (String schema : List.of(
+                "unilateral_case_matrix.v1",
+                "unilateral_case_matrix.draft.v1",
+                "case_fact_matrix.v2",
+                "case_fact_matrix.delta.v2")) {
+            ObjectNode patch = JSON.createObjectNode();
+            patch.putObject("case_story")
+                    .putArray("nested")
+                    .addObject()
+                    .put("schema_version", schema);
+            assertRejected(
+                    "INTAKE_MATRIX_DERIVED_FIELD_FORBIDDEN",
+                    () -> merger.merge(
+                            JSON.createObjectNode(), proposal(patch, null)));
+        }
+
+        ObjectNode ordinaryStableReferences = (ObjectNode) JSON.readTree(
+                """
+                {
+                  "party_positions":{"fact_rows":[{
+                    "fact_id":"FACT_ORDINARY",
+                    "category":"OTHER",
+                    "fact_target":"An ordinary dossier fact."
+                  }]},
+                  "references":{"source_refs":["MESSAGE_ORDINARY"]}
+                }
+                """);
+        ((ObjectNode) ordinaryStableReferences.at("/party_positions/fact_rows/0"))
+                .put("content_hash", "f".repeat(64));
+        var accepted = merger.merge(
+                JSON.createObjectNode(), proposal(ordinaryStableReferences, null));
+        assertThat(accepted.dossier().at("/party_positions/fact_rows/0/fact_id").asText())
+                .isEqualTo("FACT_ORDINARY");
+        assertThat(accepted.dossier().at("/references/source_refs/0").asText())
+                .isEqualTo("MESSAGE_ORDINARY");
+        assertThat(accepted.dossier().at("/party_positions/fact_rows/0/content_hash").asText())
+                .isEqualTo("f".repeat(64));
     }
 
     @Test
@@ -298,17 +457,78 @@ class IntakeDossierProjectionMergerTest {
                 """);
     }
 
+    private ObjectNode dossierWithInitiatorMatrix() throws Exception {
+        ObjectNode dossier = merger.merge(
+                        JSON.createObjectNode(),
+                        proposal(completeDossierPatch(), unilateralDraft()),
+                        matrixAuthority(ActorRole.USER))
+                .dossier();
+        ObjectNode formal = new IntakeInitiatorMatrixFreezer()
+                .freeze(
+                        "CASE_P4_SYNTHETIC_1",
+                        ActorRole.USER,
+                        ActorRole.MERCHANT,
+                        (ObjectNode) dossier.path("unilateral_case_matrix"));
+        dossier.set("case_fact_matrix", formal);
+        return dossier;
+    }
+
+    private static JsonNode respondentDelta(String factId) {
+        ObjectNode delta = JSON.createObjectNode();
+        delta.put("schema_version", "case_fact_matrix.delta.v2");
+        ObjectNode row = delta.putArray("fact_rows").addObject();
+        row.put("fact_key", factId);
+        row.put("category", "PRODUCT_PAGE");
+        row.put("fact_target", "The listing included basic installation.");
+        row.put("materiality", "CORE");
+        row.put("stance", "CONFIRM");
+        row.put("position_summary", "The merchant confirms the listing terms.");
+        row.put("asserted_value", "Installation included");
+        row.put("source_scope", "CURRENT_SOURCE");
+        delta.putArray("summary_source_fact_keys").add(factId);
+        delta.putObject("respondent_claim")
+                .put("attitude", "DISAGREE")
+                .put("position_summary", "The merchant disputes the requested refund.");
+        return delta;
+    }
+
     private static MatrixAuthority matrixAuthority(ActorRole actorRole) {
+        boolean respondent = actorRole == ActorRole.MERCHANT;
         return new MatrixAuthority(
                 "CASE_P4_SYNTHETIC_1",
                 actorRole,
                 ActorRole.USER,
                 ActorRole.MERCHANT,
-                "MESSAGE_P4_USER_2",
-                "c".repeat(64));
+                respondent ? "MESSAGE_P4_MERCHANT_2" : "MESSAGE_P4_USER_2",
+                (respondent ? "e" : "c").repeat(64));
     }
 
     private static IntakeTurnProposal proposal(JsonNode patch, JsonNode matrixPatch) {
+        return proposal(
+                patch,
+                matrixPatch,
+                IntakeTurnProposal.Readiness.INCOMPLETE,
+                List.of("requested_resolution_detail"));
+    }
+
+    private static IntakeTurnProposal proposal(
+            JsonNode patch,
+            JsonNode matrixPatch,
+            IntakeTurnProposal.Readiness readiness,
+            List<String> missingFields) {
+        IntakeTurnProposal.Recommendation recommendation =
+                readiness == IntakeTurnProposal.Readiness.READY_TO_CONFIRM
+                        ? IntakeTurnProposal.Recommendation.ACCEPTED
+                        : IntakeTurnProposal.Recommendation.NEED_MORE_INFO;
+        return proposal(patch, matrixPatch, readiness, missingFields, recommendation);
+    }
+
+    private static IntakeTurnProposal proposal(
+            JsonNode patch,
+            JsonNode matrixPatch,
+            IntakeTurnProposal.Readiness readiness,
+            List<String> missingFields,
+            IntakeTurnProposal.Recommendation recommendation) {
         return new IntakeTurnProposal(
                 "intake-turn-proposal.v2",
                 "COMMAND_P4_USER_2",
@@ -325,9 +545,9 @@ class IntakeDossierProjectionMergerTest {
                 "Please confirm the requested resolution.",
                 patch,
                 matrixPatch,
-                IntakeTurnProposal.Readiness.INCOMPLETE,
-                List.of("requested_resolution_detail"),
-                IntakeTurnProposal.Recommendation.NEED_MORE_INFO,
+                readiness,
+                missingFields,
+                recommendation,
                 IntakeTurnProposal.KnowledgeAnswerMode.NONE,
                 new BigDecimal("0.82"),
                 new IntakeTurnProposal.ProfileVersions(
