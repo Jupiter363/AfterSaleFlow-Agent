@@ -62,10 +62,10 @@ class TransactionalEpochAuthorityServiceTest {
                 false));
         when(jdbc.update(any(String.class), any(MapSqlParameterSource.class))).thenReturn(1);
         when(jdbc.queryForObject(
-                        contains("select authority_id"),
+                        contains("where authority_id = :authorityId"),
                         any(MapSqlParameterSource.class),
-                        eq(String.class)))
-                .thenReturn("AUTH-I", "AUTH-R");
+                        eq(Integer.class)))
+                .thenReturn(1);
         when(jdbc.queryForList(contains("select party"), anyMap(), eq(String.class)))
                 .thenReturn(List.of("INITIATOR", "RESPONDENT"));
         when(publisher.publish(any())).thenReturn("OUTBOX-1");
@@ -97,6 +97,22 @@ class TransactionalEpochAuthorityServiceTest {
                         EpochAuthorityException.class,
                         exception -> assertThat(exception.reasonCode())
                                 .isEqualTo("AUTHORITY_PARTY_CARDINALITY"));
+
+        verify(publisher, never()).publish(any());
+    }
+
+    @Test
+    void changedAuthorityTupleWithTheSameIdCannotReplay() {
+        when(jdbc.queryForObject(
+                        contains("where authority_id = :authorityId"),
+                        any(MapSqlParameterSource.class),
+                        eq(Integer.class)))
+                .thenReturn(0);
+
+        assertThatThrownBy(() -> service.bind(request()))
+                .isInstanceOf(EpochAuthorityException.class)
+                .extracting("reasonCode")
+                .isEqualTo("AUTHORITY_REBINDING");
 
         verify(publisher, never()).publish(any());
     }

@@ -250,19 +250,43 @@ public final class TransactionalEpochAuthorityService implements EpochAuthorityS
                 ) on conflict do nothing
                 """,
                 params);
-        String persistedAuthorityId = jdbc.queryForObject(
+        Integer exactAuthorityRows = jdbc.queryForObject(
                 """
-                select authority_id
+                select count(*)
                   from case_intake_epoch_party_authority
-                 where epoch_id = :epochId and party = :party
+                 where authority_id = :authorityId
+                   and epoch_id = :epochId
+                   and party = :party
+                   and tenant_surrogate = :tenant
+                   and case_id = :caseId
+                   and session_tenant_id = :sessionTenant
+                   and session_case_id = :sessionCase
+                   and room_type = 'INTAKE'
+                   and room_epoch = :roomEpoch
+                   and fencing_token = :fence
+                   and registration_id = :registrationId
+                   and registration_hash = :registrationHash
+                   and thread_id = :threadId
+                   and actor_id = :actorId
+                   and actor_role = :actorRole
+                   and audience = :audience
+                   and actor_scope_hash = :actorScopeHash
+                   and access_session_id = :accessSessionId
+                   and permission_level = :permissionLevel
+                   and agent_session_id = :agentSessionId
+                   and agent_key = :agentKey
+                   and prompt_version = :promptVersion
+                   and agent_session_profile_version = :agentSessionProfileVersion
+                   and prompt_profile_id = :promptProfileId
+                   and memory_policy_id = :memoryPolicyId
+                   and created_at = :createdAt
                 """,
-                new MapSqlParameterSource()
-                        .addValue("epochId", authority.epochId())
-                        .addValue("party", authority.party().name()),
-                String.class);
-        if (!authority.authorityId().equals(persistedAuthorityId)) {
+                params,
+                Integer.class);
+        if (exactAuthorityRows == null || exactAuthorityRows != 1) {
             throw new EpochAuthorityException(
-                    "AUTHORITY_REBINDING", "an epoch party cannot be rebound to a different authority");
+                    "AUTHORITY_REBINDING",
+                    "an epoch party retry must match the complete immutable authority tuple");
         }
     }
 

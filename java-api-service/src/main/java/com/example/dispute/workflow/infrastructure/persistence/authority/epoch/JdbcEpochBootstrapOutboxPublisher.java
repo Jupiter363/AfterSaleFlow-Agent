@@ -3,7 +3,6 @@ package com.example.dispute.workflow.infrastructure.persistence.authority.epoch;
 import com.example.dispute.workflow.application.authority.epoch.EpochAuthorityException;
 import com.example.dispute.workflow.application.authority.epoch.EpochBootstrapOutbox;
 import com.example.dispute.workflow.application.authority.epoch.EpochBootstrapOutboxPublisher;
-import java.util.Map;
 import java.util.Objects;
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
@@ -58,13 +57,33 @@ public final class JdbcEpochBootstrapOutboxPublisher implements EpochBootstrapOu
         } catch (DataAccessException ex) {
             throw new EpochAuthorityException("AUTHORITY_BOOTSTRAP_WRITE_FAILED", ex.getMessage());
         }
-        String existingHash = jdbc.queryForObject(
-                "select payload_sha256 from room_epoch_bootstrap_outbox where epoch_id = :epochId",
-                Map.of("epochId", outbox.epochId()),
-                String.class);
-        if (!outbox.payloadSha256().equals(existingHash)) {
+        Integer exactRows = jdbc.queryForObject(
+                """
+                select count(*)
+                  from room_epoch_bootstrap_outbox
+                 where id = :id
+                   and epoch_id = :epochId
+                   and tenant_surrogate = :tenant
+                   and case_id = :caseId
+                   and room_type = 'INTAKE'
+                   and room_epoch = :roomEpoch
+                   and fencing_token = :fence
+                   and writer_mode = :writerMode
+                   and case_workflow_id = :caseWorkflowId
+                   and room_workflow_id = :roomWorkflowId
+                   and workflow_type = :workflowType
+                   and task_queue = :taskQueue
+                   and update_id = :updateId
+                   and payload_json = :payloadJson
+                   and payload_sha256 = :payloadSha256
+                   and available_at = :availableAt
+                """,
+                params,
+                Integer.class);
+        if (exactRows == null || exactRows != 1) {
             throw new EpochAuthorityException(
-                    "AUTHORITY_BOOTSTRAP_CONFLICT", "bootstrap outbox payload is immutable");
+                    "AUTHORITY_BOOTSTRAP_CONFLICT",
+                    "bootstrap retry must match the complete immutable outbox tuple");
         }
         return outbox.outboxId();
     }
