@@ -578,6 +578,22 @@ class CaseProcessWorkflowTest {
   }
 
   @Test
+  void v2ProvisioningCarriesRoomWorkflowBindingIntoBothReceipts() {
+    startWorkflow();
+    ProvisionRoomEpoch request = v2Provisioning();
+
+    ProvisionRoomEpochReceipt caseReceipt = provision(request);
+
+    assertThat(caseReceipt.matches(request)).isTrue();
+    assertThat(caseReceipt.roomWorkflowType()).isEqualTo("IntakeRoomWorkflow");
+    assertThat(caseReceipt.roomWorkflowBuildId()).isEqualTo("intake-room.synthetic.v1");
+    assertThat(workflow().provisioningReceipt()).isEqualTo(caseReceipt);
+    RoomControlWorkflow genericRoom =
+        client.newWorkflowStub(RoomControlWorkflow.class, caseReceipt.roomWorkflowId());
+    assertThat(genericRoom.provisioningReceipt()).isEqualTo(caseReceipt);
+  }
+
+  @Test
   void globalFenceIncreasesWhileEpochZeroIsValidAcrossRoomTypes() {
     startWorkflow();
     provision(provisioning(RoomType.INTAKE, 0, 1, 0, 0, 0));
@@ -819,6 +835,45 @@ class CaseProcessWorkflowTest {
         OCCURRED_AT.plusSeconds(fencingToken));
   }
 
+  private static ProvisionRoomEpoch v2Provisioning() {
+    ProvisionRoomEpoch v1 = provisioning(RoomType.INTAKE, 0, 1, 0, 0, 0);
+    return new ProvisionRoomEpoch(
+        v1.schemaVersion(),
+        v1.epochId(),
+        v1.tenantSurrogate(),
+        v1.caseId(),
+        v1.roomId(),
+        v1.roomType(),
+        v1.roomEpoch(),
+        v1.initialProcessRevision(),
+        v1.initialRoomRevision(),
+        v1.fencingToken(),
+        v1.macroPhase(),
+        v1.currentRoom(),
+        v1.roomPhase(),
+        v1.writerMode(),
+        v1.caseWorkflowId(),
+        v1.roomWorkflowId(),
+        "room-epoch-selection.v2",
+        v1.processContractVersion(),
+        v1.workflowType(),
+        v1.temporalBuildId(),
+        "IntakeRoomWorkflow",
+        "intake-room.synthetic.v1",
+        v1.graphKey(),
+        "2.0.0",
+        "intake-checkpoint.v2",
+        v1.streamProtocol(),
+        v1.lastCommandSequence(),
+        v1.lastCaseEventSequence(),
+        v1.firstCommandSequence(),
+        v1.firstCaseEventSequence(),
+        v1.projectedDeadlineAt(),
+        v1.projectionRef(),
+        v1.projectionSha256(),
+        v1.requestedAt());
+  }
+
   private static ProvisionRoomEpoch withGraphVersion(
       ProvisionRoomEpoch request, String graphVersion) {
     return new ProvisionRoomEpoch(
@@ -842,6 +897,8 @@ class CaseProcessWorkflowTest {
         request.processContractVersion(),
         request.workflowType(),
         request.temporalBuildId(),
+        request.roomWorkflowType(),
+        request.roomWorkflowBuildId(),
         request.graphKey(),
         graphVersion,
         request.checkpointSchemaVersion(),

@@ -164,6 +164,8 @@ public class RoomControlWorkflowImpl implements RoomControlWorkflow {
         start.processContractVersion(),
         start.workflowType(),
         start.temporalBuildId(),
+        start.roomWorkflowType(),
+        start.roomWorkflowBuildId(),
         start.graphKey(),
         start.graphVersion(),
         start.checkpointSchemaVersion(),

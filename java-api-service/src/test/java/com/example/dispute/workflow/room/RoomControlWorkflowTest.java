@@ -1,6 +1,7 @@
 package com.example.dispute.workflow.room;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.dispute.workflow.contract.v1.CaseCommandRef;
 import com.example.dispute.workflow.contract.v1.CaseProcessWorkflowProtocol;
@@ -9,6 +10,8 @@ import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
 import com.example.dispute.workflow.contract.v1.ContractTypes.CommandType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.PayloadRef;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
+import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
+import com.example.dispute.workflow.contract.v1.ProvisionRoomEpochReceipt;
 import com.example.dispute.workflow.temporal.caseprocess.CaseDomainEventRef;
 import com.example.dispute.workflow.temporal.room.common.RoomControlSnapshot;
 import com.example.dispute.workflow.temporal.room.common.RoomControlStart;
@@ -165,6 +168,120 @@ class RoomControlWorkflowTest {
                         snapshot -> snapshot.processedCommandCount() == 261);
         assertThat(afterSentinel.recentCommandIds())
                 .contains("command-room-control-261");
+    }
+
+    @Test
+    void v2BindingSurvivesContinueAsNew() {
+        String workflowId =
+                CaseProcessWorkflowProtocol.roomWorkflowId(
+                        CASE_ID, RoomType.INTAKE, 0);
+        RoomControlWorkflow workflow =
+                client.newWorkflowStub(
+                        RoomControlWorkflow.class,
+                        WorkflowOptions.newBuilder()
+                                .setWorkflowId(workflowId)
+                                .setTaskQueue(
+                                        CaseProcessWorkflowProtocol
+                                                .ROOM_CONTROL_TASK_QUEUE)
+                                .build());
+        WorkflowClient.start(
+                workflow::run,
+                provisionedStart(
+                        RoomType.INTAKE,
+                        "room-epoch-selection.v2",
+                        CaseProcessWorkflowProtocol.CASE_WORKFLOW_TYPE,
+                        "IntakeRoomWorkflow",
+                        "intake-room.synthetic.v1"));
+        ProvisionRoomEpochReceipt before = workflow.provisioningReceipt();
+
+        environment.sleep(Duration.ofHours(24));
+
+        RoomControlSnapshot continued =
+                awaitState(workflow, snapshot -> snapshot.runGeneration() == 1);
+        assertThat(continued.selectionSchemaVersion()).isEqualTo("room-epoch-selection.v2");
+        assertThat(workflow.provisioningReceipt()).isEqualTo(before);
+        assertThat(before.roomWorkflowType()).isEqualTo("IntakeRoomWorkflow");
+        assertThat(before.roomWorkflowBuildId()).isEqualTo("intake-room.synthetic.v1");
+    }
+
+    @Test
+    void roomStartRejectsInconsistentSelectionBindings() {
+        assertThatThrownBy(
+                        () ->
+                                provisionedStart(
+                                        RoomType.INTAKE,
+                                        "room-epoch-selection.v1",
+                                        CaseProcessWorkflowProtocol.CASE_WORKFLOW_TYPE,
+                                        "IntakeRoomWorkflow",
+                                        "intake-room.synthetic.v1"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("v1 room start cannot contain a room Workflow binding");
+        assertThatThrownBy(
+                        () ->
+                                provisionedStart(
+                                        RoomType.INTAKE,
+                                        "room-epoch-selection.v2",
+                                        CaseProcessWorkflowProtocol.CASE_WORKFLOW_TYPE,
+                                        "IntakeRoomWorkflow",
+                                        ""))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("roomWorkflowBuildId is invalid");
+        assertThatThrownBy(
+                        () ->
+                                provisionedStart(
+                                        RoomType.EVIDENCE,
+                                        "room-epoch-selection.v2",
+                                        CaseProcessWorkflowProtocol.CASE_WORKFLOW_TYPE,
+                                        "IntakeRoomWorkflow",
+                                        "intake-room.synthetic.v1"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage(
+                        "non-LEGACY v2 room start requires the IntakeRoomWorkflow binding");
+    }
+
+    private static RoomControlStart provisionedStart(
+            RoomType roomType,
+            String selectionSchemaVersion,
+            String caseWorkflowType,
+            String roomWorkflowType,
+            String roomWorkflowBuildId) {
+        return new RoomControlStart(
+                "room-control-start.v1",
+                TENANT,
+                CASE_ID,
+                "epoch-" + roomType.name().toLowerCase(),
+                "room-" + roomType.name().toLowerCase(),
+                roomType,
+                0,
+                CaseProcessWorkflowProtocol.caseWorkflowId(TENANT, CASE_ID),
+                CaseProcessWorkflowProtocol.roomWorkflowId(CASE_ID, roomType, 0),
+                1,
+                1,
+                1,
+                0,
+                0,
+                "ACTIVE",
+                roomType.name(),
+                "ACTIVE",
+                NOW.plusSeconds(3600),
+                WriterMode.SHADOW,
+                selectionSchemaVersion,
+                "case-process-contract.v1",
+                caseWorkflowType,
+                "case-control.v1",
+                roomWorkflowType,
+                roomWorkflowBuildId,
+                roomType.name().toLowerCase() + ".v2",
+                "2.0.0",
+                "intake-checkpoint.v2",
+                "agent-stream.v2",
+                0,
+                0,
+                null,
+                null,
+                NOW,
+                "case-workflow-run-v1",
+                "a".repeat(64));
     }
 
     private static RoomControlSnapshot awaitState(

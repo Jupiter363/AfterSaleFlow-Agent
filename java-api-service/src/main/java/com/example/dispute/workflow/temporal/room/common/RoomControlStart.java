@@ -3,6 +3,7 @@ package com.example.dispute.workflow.temporal.room.common;
 import com.example.dispute.workflow.contract.v1.CaseProcessWorkflowProtocol;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.Locale;
@@ -32,6 +33,8 @@ public record RoomControlStart(
     String processContractVersion,
     String workflowType,
     String temporalBuildId,
+    @JsonInclude(JsonInclude.Include.NON_NULL) String roomWorkflowType,
+    @JsonInclude(JsonInclude.Include.NON_NULL) String roomWorkflowBuildId,
     String graphKey,
     String graphVersion,
     String checkpointSchemaVersion,
@@ -81,6 +84,8 @@ public record RoomControlStart(
         "case-process-contract.v1",
         "LegacyJavaRoomState",
         "legacy-java.v1",
+        null,
+        null,
         roomType.name().toLowerCase(Locale.ROOT) + ".legacy",
         "legacy.v1",
         "legacy-checkpoint.v1",
@@ -129,6 +134,8 @@ public record RoomControlStart(
         "case-process-contract.v1",
         "LegacyJavaRoomState",
         "legacy-java.v1",
+        null,
+        null,
         roomType.name().toLowerCase(Locale.ROOT) + ".legacy",
         "legacy.v1",
         "legacy-checkpoint.v1",
@@ -202,6 +209,85 @@ public record RoomControlStart(
         processContractVersion,
         workflowType,
         temporalBuildId,
+        null,
+        null,
+        graphKey,
+        graphVersion,
+        checkpointSchemaVersion,
+        streamProtocol,
+        lastCommandSequence,
+        lastCaseEventSequence,
+        projectionRef,
+        projectionSha256,
+        requestedAt,
+        parentWorkflowRunId,
+        provisioningSha256,
+        null);
+  }
+
+  public RoomControlStart(
+      String schemaVersion,
+      String tenantSurrogate,
+      String caseId,
+      String epochId,
+      String roomId,
+      RoomType roomType,
+      long roomEpoch,
+      String parentWorkflowId,
+      String roomWorkflowId,
+      long firstCommandSequence,
+      long firstCaseEventSequence,
+      long fencingToken,
+      long initialProcessRevision,
+      long initialRoomRevision,
+      String macroPhase,
+      String currentRoom,
+      String roomPhase,
+      Instant projectedDeadlineAt,
+      WriterMode writerMode,
+      String selectionSchemaVersion,
+      String processContractVersion,
+      String workflowType,
+      String temporalBuildId,
+      String roomWorkflowType,
+      String roomWorkflowBuildId,
+      String graphKey,
+      String graphVersion,
+      String checkpointSchemaVersion,
+      String streamProtocol,
+      long lastCommandSequence,
+      long lastCaseEventSequence,
+      String projectionRef,
+      String projectionSha256,
+      Instant requestedAt,
+      String parentWorkflowRunId,
+      String provisioningSha256) {
+    this(
+        schemaVersion,
+        tenantSurrogate,
+        caseId,
+        epochId,
+        roomId,
+        roomType,
+        roomEpoch,
+        parentWorkflowId,
+        roomWorkflowId,
+        firstCommandSequence,
+        firstCaseEventSequence,
+        fencingToken,
+        initialProcessRevision,
+        initialRoomRevision,
+        macroPhase,
+        currentRoom,
+        roomPhase,
+        projectedDeadlineAt,
+        writerMode,
+        selectionSchemaVersion,
+        processContractVersion,
+        workflowType,
+        temporalBuildId,
+        roomWorkflowType,
+        roomWorkflowBuildId,
         graphKey,
         graphVersion,
         checkpointSchemaVersion,
@@ -291,6 +377,13 @@ public record RoomControlStart(
     requireText(processContractVersion, "processContractVersion");
     requireText(workflowType, "workflowType");
     requireText(temporalBuildId, "temporalBuildId");
+    requireSelectionBinding(
+        selectionSchemaVersion,
+        roomType,
+        writerMode,
+        workflowType,
+        roomWorkflowType,
+        roomWorkflowBuildId);
     requireText(graphKey, "graphKey");
     requireText(graphVersion, "graphVersion");
     requireText(checkpointSchemaVersion, "checkpointSchemaVersion");
@@ -333,6 +426,8 @@ public record RoomControlStart(
         processContractVersion,
         workflowType,
         temporalBuildId,
+        roomWorkflowType,
+        roomWorkflowBuildId,
         graphKey,
         graphVersion,
         checkpointSchemaVersion,
@@ -347,9 +442,45 @@ public record RoomControlStart(
         carryState);
   }
 
+  private static void requireSelectionBinding(
+      String selectionSchemaVersion,
+      RoomType roomType,
+      WriterMode writerMode,
+      String caseWorkflowType,
+      String roomWorkflowType,
+      String roomWorkflowBuildId) {
+    if ("room-epoch-selection.v1".equals(selectionSchemaVersion)) {
+      if (roomWorkflowType != null || roomWorkflowBuildId != null) {
+        throw new IllegalArgumentException(
+            "v1 room start cannot contain a room Workflow binding");
+      }
+      return;
+    }
+    if (!"room-epoch-selection.v2".equals(selectionSchemaVersion)) {
+      throw new IllegalArgumentException("unsupported selectionSchemaVersion");
+    }
+    requireText(roomWorkflowType, 128, "roomWorkflowType");
+    requireText(roomWorkflowBuildId, 128, "roomWorkflowBuildId");
+    if (!CaseProcessWorkflowProtocol.CASE_WORKFLOW_TYPE.equals(caseWorkflowType)) {
+      throw new IllegalArgumentException(
+          "v2 room start requires the CaseProcessWorkflow case binding");
+    }
+    if (writerMode != WriterMode.LEGACY
+        && (roomType != RoomType.INTAKE || !"IntakeRoomWorkflow".equals(roomWorkflowType))) {
+      throw new IllegalArgumentException(
+          "non-LEGACY v2 room start requires the IntakeRoomWorkflow binding");
+    }
+  }
+
   private static void requireText(String value, String field) {
     if (value == null || value.isBlank()) {
       throw new IllegalArgumentException(field + " must not be blank");
+    }
+  }
+
+  private static void requireText(String value, int maxLength, String field) {
+    if (value == null || value.isBlank() || value.length() > maxLength) {
+      throw new IllegalArgumentException(field + " is invalid");
     }
   }
 
