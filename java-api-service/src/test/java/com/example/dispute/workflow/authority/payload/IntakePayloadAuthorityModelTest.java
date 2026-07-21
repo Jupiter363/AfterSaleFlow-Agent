@@ -8,6 +8,7 @@ import com.example.dispute.workflow.application.authority.payload.IntakeCommandA
 import com.example.dispute.workflow.application.authority.payload.IntakeHumanInputCommand;
 import com.example.dispute.workflow.application.authority.payload.IntakePayloadAuthority;
 import com.example.dispute.workflow.application.authority.payload.IntakePayloadPutReceipt;
+import com.example.dispute.workflow.application.authority.payload.IntakePayloadPutKey;
 import com.example.dispute.workflow.application.authority.payload.IntakePayloadSourceKind;
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
@@ -108,6 +109,16 @@ class IntakePayloadAuthorityModelTest {
                 .hasMessageContaining("route");
     }
 
+    @Test
+    void rejectsArbitraryWellFormedPutKey() {
+        assertThatThrownBy(() -> receipt(
+                        IntakePayloadSourceKind.SERVER_MINTED_HUMAN_INPUT,
+                        IntakePayloadSourceKind.SERVER_MINTED_HUMAN_INPUT.schemaVersion(),
+                        "iput.v1." + HASH))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("canonical intake put identity");
+    }
+
     private static IntakePayloadAuthority humanInputPayload() {
         IntakePayloadPutReceipt receipt = receipt(
                 IntakePayloadSourceKind.SERVER_MINTED_HUMAN_INPUT,
@@ -145,11 +156,21 @@ class IntakePayloadAuthorityModelTest {
 
     private static IntakePayloadPutReceipt receipt(
             IntakePayloadSourceKind sourceKind, String payloadSchemaVersion) {
-        String receiptHash = receiptHash(sourceKind, payloadSchemaVersion);
+        return receipt(
+                sourceKind,
+                payloadSchemaVersion,
+                IntakePayloadPutKey.derive("TENANT-1", "CASE-1", "COMMAND-1", sourceKind));
+    }
+
+    private static IntakePayloadPutReceipt receipt(
+            IntakePayloadSourceKind sourceKind,
+            String payloadSchemaVersion,
+            String putIdempotencyKey) {
+        String receiptHash = receiptHash(sourceKind, payloadSchemaVersion, putIdempotencyKey);
         return new IntakePayloadPutReceipt(
                 IntakePayloadPutReceipt.SCHEMA_VERSION,
                 "RECEIPT-1",
-                "iput.v1." + HASH,
+                putIdempotencyKey,
                 "COMMAND-1",
                 "TENANT-1",
                 "CASE-1",
@@ -167,11 +188,14 @@ class IntakePayloadAuthorityModelTest {
                 receiptHash);
     }
 
-    private static String receiptHash(IntakePayloadSourceKind sourceKind, String payloadSchemaVersion) {
+    private static String receiptHash(
+            IntakePayloadSourceKind sourceKind,
+            String payloadSchemaVersion,
+            String putIdempotencyKey) {
         var root = JsonNodeFactory.instance.objectNode();
         root.put("schema_version", IntakePayloadPutReceipt.SCHEMA_VERSION);
         root.put("receipt_id", "RECEIPT-1");
-        root.put("put_idempotency_key", "iput.v1." + HASH);
+        root.put("put_idempotency_key", putIdempotencyKey);
         root.put("command_id", "COMMAND-1");
         root.put("tenant_surrogate", "TENANT-1");
         root.put("case_id", "CASE-1");

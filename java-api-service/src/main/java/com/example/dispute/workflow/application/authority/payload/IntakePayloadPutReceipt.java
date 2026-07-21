@@ -32,9 +32,6 @@ public record IntakePayloadPutReceipt(
             throw new IllegalArgumentException("schemaVersion must be " + SCHEMA_VERSION);
         }
         identifier(receiptId, "receiptId", 128);
-        if (putIdempotencyKey == null || !putIdempotencyKey.matches("iput[.]v1[.][0-9a-f]{64}")) {
-            throw new IllegalArgumentException("putIdempotencyKey must be an intake put key");
-        }
         identifier(commandId, "commandId", 128);
         identifier(tenantSurrogate, "tenantSurrogate", 128);
         identifier(caseId, "caseId", 64);
@@ -44,6 +41,11 @@ public record IntakePayloadPutReceipt(
         Objects.requireNonNull(sourceKind, "sourceKind must not be null");
         if (!sourceKind.requiresPutReceipt()) {
             throw new IllegalArgumentException("existing private events cannot carry a put receipt");
+        }
+        if (!IntakePayloadPutKey.derive(tenantSurrogate, caseId, commandId, sourceKind)
+                .equals(putIdempotencyKey)) {
+            throw new IllegalArgumentException(
+                    "putIdempotencyKey does not match the canonical intake put identity");
         }
         identifier(artifactId, "artifactId", 128);
         requirePayload(sourceKind, payloadSchemaVersion, objectUri, objectVersion, contentSha256, sizeBytes);
