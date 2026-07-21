@@ -18,10 +18,10 @@ import com.tngtech.archunit.lang.ArchRule;
 import com.tngtech.archunit.lang.ConditionEvents;
 import com.tngtech.archunit.lang.SimpleConditionEvent;
 import com.tngtech.archunit.lang.syntax.ArchRuleDefinition;
-import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.net.URI;
 import java.nio.ByteBuffer;
@@ -43,10 +43,11 @@ import java.util.Set;
 import java.util.TreeSet;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
+import java.util.function.LongConsumer;
 import java.util.stream.Collectors;
+import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipException;
-import java.util.zip.ZipInputStream;
 import java.util.zip.ZipOutputStream;
 import javax.lang.model.SourceVersion;
 import org.junit.jupiter.api.Test;
@@ -73,6 +74,15 @@ class IntakeFormalSinkAssemblyTest {
             "BOOT-INF/classes/META-INF/services/";
     private static final String BOOT_LIB_PATH = "BOOT-INF/lib/";
     private static final int MAX_NESTED_ARCHIVE_DEPTH = 8;
+
+    private static final ScanLimits PRODUCTION_SCAN_LIMITS =
+            new ScanLimits(
+                    1_048_576,
+                    67_108_864,
+                    2_048,
+                    2_000_000,
+                    100_000,
+                    268_435_456);
 
     private static final ServiceDescriptorCatalog PRODUCTION_SERVICE_DESCRIPTORS =
             scanProductionServiceDescriptors();
@@ -528,6 +538,19 @@ class IntakeFormalSinkAssemblyTest {
 
     private static ServiceDescriptorCatalog createAndScanServiceDescriptorFixtures(
             Path tempDirectory, String descriptorContent) throws IOException {
+        String separator = File.pathSeparator;
+        assertThat(
+                        splitJavaClassPath(
+                                separator
+                                        + "alpha"
+                                        + separator
+                                        + separator
+                                        + "omega"
+                                        + separator))
+                .containsExactly("", "alpha", "", "omega", "");
+        assertThat(resolveClassPathEntry(""))
+                .isEqualTo(Path.of("").toAbsolutePath().normalize());
+
         String descriptorEntry = SERVICES_PATH + "com.vendor.Plugin";
         byte[] descriptorBytes = descriptorContent.getBytes(StandardCharsets.UTF_8);
 
@@ -570,13 +593,14 @@ class IntakeFormalSinkAssemblyTest {
                 brokenNestedArchive,
                 Map.of(
                         BOOT_LIB_PATH + "broken.library",
-                        "not a nested ZIP".getBytes(StandardCharsets.UTF_8)));
+                        localHeaderOnlyArchiveBytes(
+                                Map.of(descriptorEntry, descriptorBytes))));
         assertThatThrownBy(
                         () ->
                                 scanClassPathEntries(
                                         List.of(brokenNestedArchive.toString())))
                 .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("BOOT-INF/lib entry is not a readable ZIP archive");
+                .hasMessageContaining("valid ZIP central directory");
 
         Path invalidUtf8Archive = tempDirectory.resolve("invalid-utf8.bin");
         writeArchive(
@@ -589,18 +613,25 @@ class IntakeFormalSinkAssemblyTest {
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("not valid UTF-8");
 
-        ServiceDescriptorCatalog catalog =
-                scanClassPathEntries(
-                        List.of(
-                                directoryEntry.toString(),
-                                directoryEntry.toUri().toASCIIString(),
-                                directoryEntry.toString(),
-                                uriDirectoryEntry.toUri().toASCIIString(),
-                                extensionlessArchive.toString(),
-                                uriArchive.toUri().toASCIIString(),
-                                bootClassesArchive.toString(),
-                                nestedBootArchive.toString()));
-        assertThat(catalog.descriptors()).hasSize(6);
+        List<String> fixtureClassPath =
+                new ArrayList<>(
+                        splitJavaClassPath(
+                                separator
+                                        + directoryEntry
+                                        + separator
+                                        + separator
+                                        + extensionlessArchive
+                                        + separator));
+        fixtureClassPath.add(directoryEntry.toUri().toASCIIString());
+        fixtureClassPath.add(uriDirectoryEntry.toUri().toASCIIString());
+        fixtureClassPath.add(uriArchive.toUri().toASCIIString());
+        fixtureClassPath.add(bootClassesArchive.toString());
+        fixtureClassPath.add(nestedBootArchive.toString());
+        ServiceDescriptorCatalog catalog = scanClassPathEntries(fixtureClassPath);
+        assertThat(catalog.descriptors())
+                .filteredOn(descriptor -> descriptor.source().contains(tempDirectory.toString()))
+                .hasSize(6);
+        assertScannerBudgets(tempDirectory);
         return catalog;
     }
 
@@ -635,24 +666,156 @@ class IntakeFormalSinkAssemblyTest {
         return bytes.toByteArray();
     }
 
+    private static byte[] localHeaderOnlyArchiveBytes(
+            Map<String, byte[]> entries) throws IOException {
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        ZipOutputStream archive = new ZipOutputStream(bytes);
+        for (Map.Entry<String, byte[]> entry :
+                entries.entrySet().stream()
+                        .sorted(Map.Entry.comparingByKey())
+                        .toList()) {
+            archive.putNextEntry(new ZipEntry(entry.getKey()));
+            archive.write(entry.getValue());
+            archive.closeEntry();
+        }
+        archive.flush();
+        byte[] localHeadersOnly = bytes.toByteArray();
+        archive.close();
+        return localHeadersOnly;
+    }
+
+    private static void assertScannerBudgets(Path tempDirectory) throws IOException {
+        String descriptorEntry = SERVICES_PATH + "a.B";
+        String exactDescriptor = "a.B" + " ".repeat(29);
+        Path descriptorDirectory = tempDirectory.resolve("descriptor-budget");
+        writeDirectoryDescriptor(
+                descriptorDirectory,
+                exactDescriptor.getBytes(StandardCharsets.UTF_8));
+
+        ScanLimits descriptorBoundary = new ScanLimits(32, 4_096, 1, 4, 4, 8_192);
+        scanClassPathEntries(List.of(descriptorDirectory.toString()), descriptorBoundary);
+        Files.writeString(
+                descriptorDirectory
+                        .resolve("META-INF")
+                        .resolve("services")
+                        .resolve("com.vendor.Plugin"),
+                exactDescriptor + " ",
+                StandardCharsets.UTF_8);
+        assertThatThrownBy(
+                        () ->
+                                scanClassPathEntries(
+                                        List.of(descriptorDirectory.toString()),
+                                        descriptorBoundary))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("descriptor byte limit");
+
+        byte[] nestedDescriptor = "a.B".getBytes(StandardCharsets.UTF_8);
+        byte[] nestedArchive =
+                archiveBytes(Map.of(descriptorEntry, nestedDescriptor));
+        Path outerArchive = tempDirectory.resolve("budget-outer.bin");
+        writeArchive(
+                outerArchive,
+                Map.of(BOOT_LIB_PATH + "nested.library", nestedArchive));
+        long exactExpandedBytes = nestedArchive.length + nestedDescriptor.length;
+        ScanLimits exactNestedBoundary =
+                new ScanLimits(
+                        nestedDescriptor.length,
+                        nestedArchive.length,
+                        1,
+                        1,
+                        2,
+                        exactExpandedBytes);
+        scanClassPathEntries(List.of(outerArchive.toString()), exactNestedBoundary);
+
+        assertBudgetExceeded(
+                outerArchive,
+                new ScanLimits(
+                        nestedDescriptor.length,
+                        nestedArchive.length - 1L,
+                        1,
+                        1,
+                        2,
+                        exactExpandedBytes),
+                "nested archive byte limit");
+        assertBudgetExceeded(
+                outerArchive,
+                new ScanLimits(
+                        nestedDescriptor.length,
+                        nestedArchive.length,
+                        0,
+                        1,
+                        2,
+                        exactExpandedBytes),
+                "nested archive count limit");
+        assertBudgetExceeded(
+                outerArchive,
+                new ScanLimits(
+                        nestedDescriptor.length,
+                        nestedArchive.length,
+                        1,
+                        0,
+                        2,
+                        exactExpandedBytes),
+                "nested archive entry limit");
+        assertBudgetExceeded(
+                outerArchive,
+                new ScanLimits(
+                        nestedDescriptor.length,
+                        nestedArchive.length,
+                        1,
+                        1,
+                        1,
+                        exactExpandedBytes),
+                "relevant entry limit");
+        assertBudgetExceeded(
+                outerArchive,
+                new ScanLimits(
+                        nestedDescriptor.length,
+                        nestedArchive.length,
+                        1,
+                        1,
+                        2,
+                        exactExpandedBytes - 1L),
+                "total relevant expanded byte limit");
+    }
+
+    private static void assertBudgetExceeded(
+            Path classPathEntry, ScanLimits limits, String message) {
+        assertThatThrownBy(
+                        () ->
+                                scanClassPathEntries(
+                                        List.of(classPathEntry.toString()), limits))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining(message);
+    }
+
     private static ServiceDescriptorCatalog scanProductionServiceDescriptors() {
         return scanClassPathEntries(
-                Arrays.asList(
-                        System.getProperty("java.class.path", "")
-                                .split(File.pathSeparator)));
+                splitJavaClassPath(System.getProperty("java.class.path", "")));
+    }
+
+    private static List<String> splitJavaClassPath(String classPath) {
+        return Arrays.asList(
+                classPath.split(Pattern.quote(File.pathSeparator), -1));
     }
 
     private static ServiceDescriptorCatalog scanClassPathEntries(
             List<String> rawEntries) {
+        return scanClassPathEntries(rawEntries, PRODUCTION_SCAN_LIMITS);
+    }
+
+    private static ServiceDescriptorCatalog scanClassPathEntries(
+            List<String> rawEntries, ScanLimits limits) {
         Set<Path> classPathEntries =
                 rawEntries.stream()
-                        .filter(entry -> !entry.isBlank())
                         .map(IntakeFormalSinkAssemblyTest::resolveClassPathEntry)
                         .collect(
                                 Collectors.toCollection(
                                         () -> new TreeSet<>(Comparator.comparing(Path::toString))));
         List<ServiceDescriptor> descriptors = new ArrayList<>();
-        classPathEntries.forEach(path -> scanClassPathEntry(path, descriptors));
+        ScanBudget budget = new ScanBudget(limits);
+        classPathEntries.forEach(
+                path -> scanClassPathEntry(path, descriptors, budget));
         return new ServiceDescriptorCatalog(descriptors);
     }
 
@@ -670,7 +833,9 @@ class IntakeFormalSinkAssemblyTest {
     }
 
     private static void scanClassPathEntry(
-            Path classPathEntry, List<ServiceDescriptor> descriptors) {
+            Path classPathEntry,
+            List<ServiceDescriptor> descriptors,
+            ScanBudget budget) {
         if (!Files.exists(classPathEntry)) {
             throw new IllegalStateException(
                     "classpath entry does not exist: " + classPathEntry);
@@ -680,7 +845,7 @@ class IntakeFormalSinkAssemblyTest {
                     "classpath entry is not readable: " + classPathEntry);
         }
         if (Files.isDirectory(classPathEntry)) {
-            scanServiceDescriptorDirectory(classPathEntry, descriptors);
+            scanServiceDescriptorDirectory(classPathEntry, descriptors, budget);
             return;
         }
         if (!Files.isRegularFile(classPathEntry)) {
@@ -688,11 +853,13 @@ class IntakeFormalSinkAssemblyTest {
                     "classpath entry is neither a directory nor a regular archive: "
                             + classPathEntry);
         }
-        scanServiceDescriptorArchive(classPathEntry, descriptors);
+        scanServiceDescriptorArchive(classPathEntry, descriptors, budget);
     }
 
     private static void scanServiceDescriptorDirectory(
-            Path classesDirectory, List<ServiceDescriptor> descriptors) {
+            Path classesDirectory,
+            List<ServiceDescriptor> descriptors,
+            ScanBudget budget) {
         Path serviceRoot = classesDirectory.resolve("META-INF").resolve("services");
         if (!Files.isDirectory(serviceRoot)) {
             return;
@@ -700,13 +867,18 @@ class IntakeFormalSinkAssemblyTest {
         try (var paths = Files.list(serviceRoot)) {
             for (Path descriptor :
                     paths.filter(Files::isRegularFile)
+                            .peek(path -> budget.recordRelevantEntry(path.toString()))
                             .sorted(Comparator.comparing(Path::toString))
                             .toList()) {
                 descriptors.add(
                         parseServiceDescriptorBytes(
                                 descriptor.toString(),
                                 descriptor.getFileName().toString(),
-                                Files.readAllBytes(descriptor)));
+                                readRelevantEntry(
+                                        Files.newInputStream(descriptor),
+                                        budget.descriptorReadBudget(),
+                                        descriptor.toString(),
+                                        budget::recordDescriptorBytes)));
             }
         } catch (IOException failure) {
             throw new UncheckedIOException(
@@ -716,30 +888,16 @@ class IntakeFormalSinkAssemblyTest {
     }
 
     private static void scanServiceDescriptorArchive(
-            Path archivePath, List<ServiceDescriptor> descriptors) {
+            Path archivePath,
+            List<ServiceDescriptor> descriptors,
+            ScanBudget budget) {
         try (JarFile archive = new JarFile(archivePath.toFile())) {
-            List<JarEntry> entries =
-                    archive.stream()
-                            .filter(entry -> !entry.isDirectory())
-                            .sorted(Comparator.comparing(JarEntry::getName))
-                            .toList();
-            for (JarEntry entry : entries) {
-                String source = archivePath + "!/" + entry.getName();
-                Optional<String> contract = descriptorContract(entry.getName());
-                if (contract.isPresent()) {
-                    descriptors.add(
-                            parseServiceDescriptorBytes(
-                                    source,
-                                    contract.orElseThrow(),
-                                    archive.getInputStream(entry).readAllBytes()));
-                } else if (isBootNestedArchive(entry.getName())) {
-                    scanNestedArchive(
-                            archive.getInputStream(entry).readAllBytes(),
-                            source,
-                            1,
-                            descriptors);
-                }
-            }
+            scanArchiveEntries(
+                    archive,
+                    archivePath.toString(),
+                    0,
+                    descriptors,
+                    budget);
         } catch (ZipException failure) {
             throw new IllegalStateException(
                     "classpath entry is not a readable ZIP archive: " + archivePath,
@@ -751,11 +909,65 @@ class IntakeFormalSinkAssemblyTest {
         }
     }
 
+    private static void scanArchiveEntries(
+            JarFile archive,
+            String source,
+            int nestedDepth,
+            List<ServiceDescriptor> descriptors,
+            ScanBudget budget) throws IOException {
+        List<JarEntry> relevantEntries = new ArrayList<>();
+        var entries = archive.entries();
+        while (entries.hasMoreElements()) {
+            JarEntry entry = entries.nextElement();
+            if (nestedDepth > 0) {
+                budget.recordNestedArchiveEntry(source);
+            }
+            if (!entry.isDirectory()
+                    && (descriptorContract(entry.getName()).isPresent()
+                            || isBootNestedArchive(entry.getName()))) {
+                budget.recordRelevantEntry(source + "!/" + entry.getName());
+                relevantEntries.add(entry);
+            }
+        }
+        relevantEntries.sort(Comparator.comparing(JarEntry::getName));
+
+        for (JarEntry entry : relevantEntries) {
+            String entrySource = source + "!/" + entry.getName();
+            Optional<String> contract = descriptorContract(entry.getName());
+            if (contract.isPresent()) {
+                descriptors.add(
+                        parseServiceDescriptorBytes(
+                                entrySource,
+                                contract.orElseThrow(),
+                                readRelevantEntry(
+                                        archive.getInputStream(entry),
+                                        budget.descriptorReadBudget(),
+                                        entrySource,
+                                        budget::recordDescriptorBytes)));
+            } else {
+                budget.reserveNestedArchive(entrySource);
+                byte[] nestedArchive =
+                        readRelevantEntry(
+                                archive.getInputStream(entry),
+                                        budget.nestedArchiveReadBudget(),
+                                        entrySource,
+                                        budget::recordNestedArchiveBytes);
+                scanNestedArchive(
+                        nestedArchive,
+                        entrySource,
+                        nestedDepth + 1,
+                        descriptors,
+                        budget);
+            }
+        }
+    }
+
     private static void scanNestedArchive(
             byte[] archiveBytes,
             String source,
             int depth,
-            List<ServiceDescriptor> descriptors) {
+            List<ServiceDescriptor> descriptors,
+            ScanBudget budget) {
         if (depth > MAX_NESTED_ARCHIVE_DEPTH) {
             throw new IllegalStateException(
                     "nested BOOT-INF/lib archive depth exceeds "
@@ -763,33 +975,33 @@ class IntakeFormalSinkAssemblyTest {
                             + ": "
                             + source);
         }
-        if (!hasZipSignature(archiveBytes)) {
-            throw new IllegalStateException(
-                    "BOOT-INF/lib entry is not a readable ZIP archive: " + source);
-        }
-        try (ZipInputStream archive =
-                new ZipInputStream(new ByteArrayInputStream(archiveBytes))) {
-            for (ZipEntry entry = archive.getNextEntry();
-                    entry != null;
-                    entry = archive.getNextEntry()) {
-                if (entry.isDirectory()) {
-                    continue;
-                }
-                byte[] content = archive.readAllBytes();
-                String nestedSource = source + "!/" + entry.getName();
-                Optional<String> contract = descriptorContract(entry.getName());
-                if (contract.isPresent()) {
-                    descriptors.add(
-                            parseServiceDescriptorBytes(
-                                    nestedSource, contract.orElseThrow(), content));
-                } else if (isBootNestedArchive(entry.getName())) {
-                    scanNestedArchive(content, nestedSource, depth + 1, descriptors);
-                }
+        Path temporaryArchive = null;
+        try {
+            temporaryArchive = Files.createTempFile("intake-service-provider-", ".zip");
+            Files.write(temporaryArchive, archiveBytes);
+            try (JarFile archive = new JarFile(temporaryArchive.toFile())) {
+                scanArchiveEntries(
+                        archive, source, depth, descriptors, budget);
             }
+        } catch (ZipException failure) {
+            throw new IllegalStateException(
+                    "BOOT-INF/lib entry has no valid ZIP central directory: " + source,
+                    failure);
         } catch (IOException failure) {
             throw new UncheckedIOException(
                     "cannot scan nested BOOT-INF/lib archive " + source,
                     failure);
+        } finally {
+            if (temporaryArchive != null) {
+                try {
+                    Files.deleteIfExists(temporaryArchive);
+                } catch (IOException failure) {
+                    throw new UncheckedIOException(
+                            "cannot delete nested archive staging file "
+                                    + temporaryArchive,
+                            failure);
+                }
+            }
         }
     }
 
@@ -812,15 +1024,6 @@ class IntakeFormalSinkAssemblyTest {
         }
         String relativeName = entryName.substring(BOOT_LIB_PATH.length());
         return !relativeName.isEmpty() && !relativeName.contains("/");
-    }
-
-    private static boolean hasZipSignature(byte[] bytes) {
-        if (bytes.length < 4 || bytes[0] != 'P' || bytes[1] != 'K') {
-            return false;
-        }
-        return (bytes[2] == 3 && bytes[3] == 4)
-                || (bytes[2] == 5 && bytes[3] == 6)
-                || (bytes[2] == 7 && bytes[3] == 8);
     }
 
     private static ServiceDescriptorCatalog parseServiceDescriptors(
@@ -879,6 +1082,37 @@ class IntakeFormalSinkAssemblyTest {
             throw new IllegalArgumentException(
                     "service descriptor is not valid UTF-8: " + source,
                     failure);
+        }
+    }
+
+    private static byte[] readRelevantEntry(
+            InputStream input,
+            EntryReadBudget readBudget,
+            String source,
+            LongConsumer byteRecorder) throws IOException {
+        try (input; ByteArrayOutputStream content = new ByteArrayOutputStream()) {
+            byte[] buffer = new byte[8_192];
+            long total = 0;
+            while (true) {
+                long remaining = readBudget.maxBytes() - total;
+                int requested =
+                        (int) (remaining < buffer.length ? remaining + 1 : buffer.length);
+                int read = input.read(buffer, 0, requested);
+                if (read < 0) {
+                    break;
+                }
+                if (read == 0) {
+                    continue;
+                }
+                if (read > remaining) {
+                    throw new IllegalStateException(
+                            readBudget.limitName() + " exceeded while reading " + source);
+                }
+                content.write(buffer, 0, read);
+                total += read;
+            }
+            byteRecorder.accept(total);
+            return content.toByteArray();
         }
     }
 
@@ -989,4 +1223,99 @@ class IntakeFormalSinkAssemblyTest {
             Set<String> ownedProviderNames,
             List<String> missingOwnedProviderRegistrations,
             List<String> externalProviderRegistrations) {}
+
+    private record ScanLimits(
+            long maxDescriptorBytes,
+            long maxNestedArchiveBytes,
+            long maxNestedArchiveCount,
+            long maxNestedArchiveEntries,
+            long maxRelevantEntries,
+            long maxTotalRelevantExpandedBytes) {
+
+        private ScanLimits {
+            if (maxDescriptorBytes < 0
+                    || maxNestedArchiveBytes < 0
+                    || maxNestedArchiveCount < 0
+                    || maxNestedArchiveEntries < 0
+                    || maxRelevantEntries < 0
+                    || maxTotalRelevantExpandedBytes < 0) {
+                throw new IllegalArgumentException("service descriptor scan limits cannot be negative");
+            }
+        }
+    }
+
+    private record EntryReadBudget(long maxBytes, String limitName) {}
+
+    private static final class ScanBudget {
+
+        private final ScanLimits limits;
+        private long nestedArchiveCount;
+        private long nestedArchiveEntries;
+        private long relevantEntries;
+        private long totalRelevantExpandedBytes;
+
+        private ScanBudget(ScanLimits limits) {
+            this.limits = limits;
+        }
+
+        private EntryReadBudget descriptorReadBudget() {
+            return readBudget(limits.maxDescriptorBytes(), "descriptor byte limit");
+        }
+
+        private EntryReadBudget nestedArchiveReadBudget() {
+            return readBudget(limits.maxNestedArchiveBytes(), "nested archive byte limit");
+        }
+
+        private EntryReadBudget readBudget(long entryLimit, String entryLimitName) {
+            long totalRemaining =
+                    limits.maxTotalRelevantExpandedBytes()
+                            - totalRelevantExpandedBytes;
+            if (totalRemaining < entryLimit) {
+                return new EntryReadBudget(
+                        totalRemaining, "total relevant expanded byte limit");
+            }
+            return new EntryReadBudget(entryLimit, entryLimitName);
+        }
+
+        private void reserveNestedArchive(String source) {
+            nestedArchiveCount++;
+            if (nestedArchiveCount > limits.maxNestedArchiveCount()) {
+                throw new IllegalStateException(
+                        "nested archive count limit exceeded at " + source);
+            }
+        }
+
+        private void recordNestedArchiveEntry(String source) {
+            nestedArchiveEntries++;
+            if (nestedArchiveEntries > limits.maxNestedArchiveEntries()) {
+                throw new IllegalStateException(
+                        "nested archive entry limit exceeded in " + source);
+            }
+        }
+
+        private void recordRelevantEntry(String source) {
+            relevantEntries++;
+            if (relevantEntries > limits.maxRelevantEntries()) {
+                throw new IllegalStateException(
+                        "relevant entry limit exceeded at " + source);
+            }
+        }
+
+        private void recordDescriptorBytes(long bytes) {
+            recordRelevantExpandedBytes(bytes);
+        }
+
+        private void recordNestedArchiveBytes(long bytes) {
+            recordRelevantExpandedBytes(bytes);
+        }
+
+        private void recordRelevantExpandedBytes(long bytes) {
+            if (bytes > limits.maxTotalRelevantExpandedBytes()
+                    - totalRelevantExpandedBytes) {
+                throw new IllegalStateException(
+                        "total relevant expanded byte limit exceeded");
+            }
+            totalRelevantExpandedBytes += bytes;
+        }
+    }
 }
