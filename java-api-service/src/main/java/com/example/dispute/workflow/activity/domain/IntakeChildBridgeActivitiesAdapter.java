@@ -148,10 +148,9 @@ public final class IntakeChildBridgeActivitiesAdapter implements IntakeChildBrid
         requireParticipantRole(command.actorRef().actorRole());
         Objects.requireNonNull(source.party(), "authoritative Intake party");
         IntakeCommandType type = commandType(command.commandType());
-        if (source.executionContext() != null
-                && source.executionContext().deadlineEpochMillis()
-                        != command.deadlineAt().toEpochMilli()) {
-            throw new IllegalArgumentException("execution deadline mismatch");
+        if (source.executionContext() != null) {
+            throw new IllegalArgumentException(
+                    "current Intake authority gate permits only inert external events");
         }
 
         IntakeWorkflowCommand typed =
@@ -208,6 +207,14 @@ public final class IntakeChildBridgeActivitiesAdapter implements IntakeChildBrid
         requireHash(source.resultHash(), "result hash");
         requireNonNegative(source.processRevision(), "process revision");
         requireNonNegative(source.roomRevision(), "room revision");
+        boolean turnEvent = mappedType == IntakeDomainEventType.TURN_NEEDS_INPUT
+                || mappedType == IntakeDomainEventType.TURN_READY_TO_CONFIRM;
+        if (turnEvent && (source.agentRunRef() == null || source.graphExecutionRef() == null)) {
+            throw new IllegalArgumentException("turn event requires Agent and Graph execution references");
+        }
+        if (!turnEvent && (source.agentRunRef() != null || source.graphExecutionRef() != null)) {
+            throw new IllegalArgumentException("branch event forbids Agent and Graph execution references");
+        }
 
         IntakeDomainEventRef typed =
                 new IntakeDomainEventRef(
@@ -256,9 +263,8 @@ public final class IntakeChildBridgeActivitiesAdapter implements IntakeChildBrid
                 "room workflow type");
         requireEqual(provision.roomWorkflowBuildId(), active.roomWorkflowBuildId(),
                 "room workflow build id");
-        if (provision.writerMode() != WriterMode.SHADOW
-                && provision.writerMode() != WriterMode.TEMPORAL) {
-            throw new IllegalArgumentException("typed Intake bridge requires SHADOW or TEMPORAL");
+        if (provision.writerMode() != WriterMode.SHADOW) {
+            throw new IllegalArgumentException("current typed Intake bridge gate requires SHADOW");
         }
         if (!GRAPH_KEY.equals(provision.graphKey())) {
             throw new IllegalArgumentException("persisted typed Intake selection is invalid");
