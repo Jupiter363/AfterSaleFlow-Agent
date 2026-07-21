@@ -104,6 +104,16 @@ class JdbcIntakeChildBridgeReadPortTest {
         verify(statement).setString(6, "MERCHANT");
     }
 
+    @Test
+    void commandPayloadUriMustMatchTheImmutableAuthorityRow() throws Exception {
+        when(result.next()).thenReturn(true, false);
+        stubValidCommandRow("urn:intake:authority");
+
+        assertThatThrownBy(() -> port.readCommand(commandRequest()))
+                .isInstanceOf(IntakeAuthorityInvariantException.class)
+                .hasMessage("payload URI mismatch");
+    }
+
     private static CommandRequest commandRequest() {
         return new CommandRequest(
                 "intake-child-command-request.v1",
@@ -134,5 +144,44 @@ class JdbcIntakeChildBridgeReadPortTest {
                         "case-build.v1",
                         "IntakeRoomWorkflow",
                         "room-build.v1"));
+    }
+
+    private void stubValidCommandRow(String authorityUri) throws Exception {
+        when(result.getString(anyString())).thenAnswer(invocation -> switch ((String) invocation.getArgument(0)) {
+            case "command_id" -> "CMD_AUTHORITY";
+            case "command_type" -> "INTAKE_MESSAGE";
+            case "epoch_id" -> "EPOCH_AUTHORITY";
+            case "access_session_id" -> "ACCESS_AUTHORITY";
+            case "registration_id" -> "REGISTRATION_AUTHORITY";
+            case "tenant_surrogate" -> "tenant-authority";
+            case "case_id" -> "CASE_AUTHORITY";
+            case "room_type" -> "INTAKE";
+            case "thread_id" -> "grt.v1." + "d".repeat(32);
+            case "actor_id" -> "merchant-authority";
+            case "actor_role" -> "MERCHANT";
+            case "actor_scope_hash", "content_sha256" -> "a".repeat(64);
+            case "agent_session_id" -> "AGENT_AUTHORITY";
+            case "payload_authority_id" -> "PAYLOAD_AUTHORITY";
+            case "request_hash" -> "b".repeat(64);
+            case "execution_disposition" -> JdbcIntakeChildBridgeReadPort.INERT_DISPOSITION;
+            case "source_kind" -> "EXISTING_PRIVATE_EVENT";
+            case "payload_schema_version" -> "intake-turn-event.v2";
+            case "payload_uri" -> authorityUri;
+            case "party" -> "RESPONDENT";
+            case "case_workflow_type" -> "CaseProcessWorkflow";
+            case "case_workflow_build_id" -> "case-build.v1";
+            case "room_workflow_type" -> "IntakeRoomWorkflow";
+            case "room_workflow_build_id" -> "room-build.v1";
+            default -> null;
+        });
+        when(result.getLong(anyString())).thenAnswer(invocation -> switch ((String) invocation.getArgument(0)) {
+            case "case_command_sequence" -> 1L;
+            case "room_epoch" -> 3L;
+            case "fencing_token" -> 9L;
+            case "accepted_room_revision" -> 2L;
+            case "payload_size_bytes" -> 42L;
+            case "expected_process_revision" -> 7L;
+            default -> 0L;
+        });
     }
 }

@@ -329,6 +329,7 @@ public final class JdbcIntakeChildBridgeReadPort implements IntakeChildBridgeRea
         requireEquals(row.roomEpoch(), command.roomEpoch(), "room epoch");
         requireEquals(row.commandType(), command.commandType().name(), "command type");
         requireEquals(row.payloadSchemaVersion(), command.payloadRef().schemaVersion(), "payload schema");
+        requireEquals(row.payloadUri(), command.payloadRef().uri(), "payload URI");
         requireEquals(row.payloadSha256(), command.payloadRef().sha256(), "payload hash");
         requireEquals(row.payloadSizeBytes(), command.payloadRef().sizeBytes(), "payload size");
         requireEquals(row.requestHash(), command.requestHash(), "request hash");
@@ -357,6 +358,10 @@ public final class JdbcIntakeChildBridgeReadPort implements IntakeChildBridgeRea
         requireEquals(row.roomEpoch(), event.roomEpoch(), "room epoch");
         requireEquals(row.sequence(), event.caseEventSequence(), "event sequence");
         requireEquals(row.schemaVersion(), "intake-turn-event.v2", "event schema");
+        requireEquals(row.schemaVersion(), event.payloadRef().schemaVersion(), "event payload schema");
+        requireEquals(row.objectUri(), event.payloadRef().uri(), "event payload URI");
+        requireEquals(row.contentSha256(), event.payloadRef().sha256(), "event payload hash");
+        requireEquals(row.sizeBytes(), event.payloadRef().sizeBytes(), "event payload size");
         String eventHash = sha256(row.eventJson());
         JsonNode json = parseEventJson(row.eventJson());
         String actorScope = text(json, "actor_scope_hash", row.actorScopeHash());
@@ -490,6 +495,7 @@ public final class JdbcIntakeChildBridgeReadPort implements IntakeChildBridgeRea
                 r.getString("thread_id"), r.getString("actor_scope_hash"), r.getString("agent_session_id"),
                 r.getString("actor_audience"), r.getString("schema_version"), r.getString("artifact_id"),
                 r.getString("object_uri"), r.getString("object_version"), r.getString("content_sha256"),
+                r.getLong("size_bytes"),
                 r.getString("event_id"), r.getLong("event_sequence"), r.getString("event_type"),
                 r.getString("event_json"), r.getString("party"), r.getString("case_workflow_type"),
                 r.getString("case_workflow_build_id"), r.getString("room_workflow_type"),
@@ -658,7 +664,7 @@ public final class JdbcIntakeChildBridgeReadPort implements IntakeChildBridgeRea
     private record EventRow(String bindingId, String registrationId, String tenantSurrogate, String caseId,
             String roomType, long roomEpoch, long fencingToken, String threadId, String actorScopeHash,
             String agentSessionId, String actorAudience, String schemaVersion, String artifactId, String objectUri,
-            String objectVersion, String contentSha256, String eventId, long sequence, String eventType,
+            String objectVersion, String contentSha256, long sizeBytes, String eventId, long sequence, String eventType,
             String eventJson, String party, String caseWorkflowType, String caseWorkflowBuildId,
             String roomWorkflowType, String roomWorkflowBuildId) {}
 }
