@@ -118,6 +118,27 @@ def _is_formal_writer_seed(name: str) -> bool:
 
 
 @dataclass(frozen=True)
+class JavaImport:
+    qualified_parts: tuple[str, ...]
+    is_static: bool
+    is_wildcard: bool
+
+    def imported_type_name(self) -> str | None:
+        if not self.qualified_parts or (self.is_wildcard and not self.is_static):
+            return None
+        if self.is_static and not self.is_wildcard:
+            if len(self.qualified_parts) < 2:
+                return None
+            return self.qualified_parts[-2]
+        return self.qualified_parts[-1]
+
+    def static_member_name(self) -> str | None:
+        if not self.is_static or self.is_wildcard:
+            return None
+        return self.qualified_parts[-1]
+
+
+@dataclass(frozen=True)
 class JavaStructure:
     path: Path
     tokens: tuple[str, ...]
@@ -130,29 +151,62 @@ class JavaStructure:
     def parse_source(cls, name: str, source: str) -> JavaStructure:
         return cls(Path(name), _java_tokens(source))
 
-    def imports(self) -> set[str]:
-        imports: set[str] = set()
+    def imports(self) -> set[JavaImport]:
+        imports: set[JavaImport] = set()
         for index, token in enumerate(self.tokens):
             if token != "import":
                 continue
             cursor = index + 1
-            if cursor < len(self.tokens) and self.tokens[cursor] == "static":
+            is_static = cursor < len(self.tokens) and self.tokens[cursor] == "static"
+            if is_static:
                 cursor += 1
             parts: list[str] = []
-            while cursor < len(self.tokens) and self.tokens[cursor] != ";":
-                parts.append(self.tokens[cursor])
+            is_wildcard = False
+            expect_part = True
+            while cursor < len(self.tokens):
+                candidate = self.tokens[cursor]
+                if candidate == ";":
+                    break
+                if expect_part and _is_identifier(candidate):
+                    parts.append(candidate)
+                    expect_part = False
+                elif expect_part and candidate == "*" and parts:
+                    is_wildcard = True
+                    expect_part = False
+                elif not expect_part and candidate == "." and not is_wildcard:
+                    expect_part = True
+                else:
+                    break
                 cursor += 1
-            imports.add("".join(parts))
+            if (
+                cursor < len(self.tokens)
+                and self.tokens[cursor] == ";"
+                and parts
+                and not expect_part
+            ):
+                imports.add(JavaImport(tuple(parts), is_static, is_wildcard))
         return imports
 
     def imported_type_names(self) -> set[str]:
-        # A wildcard is not itself a dependency. A referenced seed from that package is
-        # still present in the declaration/body tokens and is resolved by the graph.
         return {
-            imported.rsplit(".", 1)[-1]
+            type_name
             for imported in self.imports()
-            if not imported.endswith(".*")
+            if (type_name := imported.imported_type_name()) is not None
         }
+
+    def static_import_dependencies(
+        self, referenced_tokens: tuple[str, ...]
+    ) -> set[str]:
+        referenced = set(referenced_tokens)
+        dependencies: set[str] = set()
+        for imported in self.imports():
+            if not imported.is_static:
+                continue
+            owner = imported.imported_type_name()
+            member = imported.static_member_name()
+            if owner is not None and (imported.is_wildcard or member in referenced):
+                dependencies.add(owner)
+        return dependencies
 
     def annotations(self) -> set[str]:
         annotations: set[str] = set()
@@ -334,6 +388,7 @@ class JavaStructure:
         symbol_types = self.symbol_type_candidates(known_types)
         registered: set[str] = set()
         for arguments in self.call_arguments("registerActivitiesImplementations"):
+            registered.update(self.static_import_dependencies(arguments))
             for token in arguments:
                 if token in known_types:
                     registered.add(token)
@@ -499,6 +554,194 @@ def test_gate_is_scheduled_for_batch_2_and_the_accepted_candidate() -> None:
     assert gate_path in static_source["command"]
 
 
+def test_import_parser_distinguishes_packages_types_and_static_owners() -> None:
+    unit = JavaStructure.parse_source(
+        "Imports.java",
+        """
+        import com.example.SafeType;
+        import com.example.shadow.*;
+        import static com.example.FormalFactory.create;
+        import static com.example.FormalFactory.ACTIVITY;
+        import static com.example.FormalWildcard.*;
+        """,
+    )
+
+    assert unit.imports() == {
+        JavaImport(("com", "example", "SafeType"), False, False),
+        JavaImport(("com", "example", "shadow"), False, True),
+        JavaImport(("com", "example", "FormalFactory", "create"), True, False),
+        JavaImport(("com", "example", "FormalFactory", "ACTIVITY"), True, False),
+        JavaImport(("com", "example", "FormalWildcard"), True, True),
+    }
+    assert unit.imported_type_names() == {
+        "SafeType",
+        "FormalFactory",
+        "FormalWildcard",
+    }
+
+
+def test_static_factory_import_reaches_formal_writer_from_spring_bean() -> None:
+    units = (
+        JavaStructure.parse_source(
+            "FormalFactory.java",
+            """
+            final class FormalFactory {
+                private final IntakeFormalCommitPort writer;
+                static Object create() { return null; }
+            }
+            """,
+        ),
+        JavaStructure.parse_source(
+            "StaticFactoryAssembly.java",
+            """
+            import static com.example.FormalFactory.create;
+
+            @Configuration
+            final class StaticFactoryAssembly {
+                @Bean
+                Object activity() { return create(); }
+            }
+            """,
+        ),
+    )
+    graph = TypeDependencyGraph.build(units)
+
+    assert graph.formal_writer_chain("StaticFactoryAssembly") is None
+    assert (
+        "FormalFactory",
+        "IntakeFormalCommitPort",
+    ) in _spring_assembly_violations(units, graph)[Path("StaticFactoryAssembly.java")]
+
+
+def test_static_activity_field_import_reaches_registered_formal_owner() -> None:
+    units = (
+        JavaStructure.parse_source(
+            "FormalFactory.java",
+            """
+            final class FormalFactory {
+                private final IntakeFormalCommitPort writer;
+                static final Object ACTIVITY = null;
+            }
+            """,
+        ),
+        JavaStructure.parse_source(
+            "StaticFieldRegistrar.java",
+            """
+            import static com.example.FormalFactory.ACTIVITY;
+
+            final class StaticFieldRegistrar {
+                void register() {
+                    worker.registerActivitiesImplementations(ACTIVITY);
+                }
+            }
+            """,
+        ),
+    )
+    graph = TypeDependencyGraph.build(units)
+
+    assert (
+        "FormalFactory",
+        "IntakeFormalCommitPort",
+    ) in _registration_violations(units, graph)[Path("StaticFieldRegistrar.java")]
+
+
+def test_static_wildcard_import_retains_formal_owner_for_both_gates() -> None:
+    units = (
+        JavaStructure.parse_source(
+            "FormalFactory.java",
+            """
+            final class FormalFactory {
+                private final IntakeFormalCommitPort writer;
+                static final Object ACTIVITY = null;
+                static Object create() { return ACTIVITY; }
+            }
+            """,
+        ),
+        JavaStructure.parse_source(
+            "StaticWildcardAssembly.java",
+            """
+            import static com.example.FormalFactory.*;
+
+            @Configuration
+            final class StaticWildcardAssembly {
+                @Bean
+                Object activity() { return create(); }
+
+                void register() {
+                    worker.registerActivitiesImplementations(ACTIVITY);
+                }
+            }
+            """,
+        ),
+    )
+    graph = TypeDependencyGraph.build(units)
+    assembly = units[-1]
+    expected_chain = ("FormalFactory", "IntakeFormalCommitPort")
+
+    assert assembly.imported_type_names() == {"FormalFactory"}
+    assert (
+        expected_chain
+        in _spring_assembly_violations(units, graph)[
+            Path("StaticWildcardAssembly.java")
+        ]
+    )
+    assert (
+        expected_chain
+        in _registration_violations(units, graph)[Path("StaticWildcardAssembly.java")]
+    )
+
+
+def test_qualified_factory_call_and_method_reference_remain_positive_controls() -> None:
+    units = (
+        JavaStructure.parse_source(
+            "FormalFactory.java",
+            """
+            final class FormalFactory {
+                private final IntakeFormalCommitPort writer;
+                static Object create() { return null; }
+            }
+            """,
+        ),
+        JavaStructure.parse_source(
+            "QualifiedCallAssembly.java",
+            """
+            @Configuration
+            final class QualifiedCallAssembly {
+                @Bean
+                Object activity() { return FormalFactory.create(); }
+            }
+            """,
+        ),
+        JavaStructure.parse_source(
+            "MethodReferenceAssembly.java",
+            """
+            @Configuration
+            final class MethodReferenceAssembly {
+                @Bean
+                Supplier<Object> activityFactory() {
+                    return FormalFactory::create;
+                }
+            }
+            """,
+        ),
+    )
+    graph = TypeDependencyGraph.build(units)
+    violations = _spring_assembly_violations(units, graph)
+
+    assert graph.formal_writer_chain("QualifiedCallAssembly") == (
+        "QualifiedCallAssembly",
+        "FormalFactory",
+        "IntakeFormalCommitPort",
+    )
+    assert graph.formal_writer_chain("MethodReferenceAssembly") == (
+        "MethodReferenceAssembly",
+        "FormalFactory",
+        "IntakeFormalCommitPort",
+    )
+    assert Path("QualifiedCallAssembly.java") in violations
+    assert Path("MethodReferenceAssembly.java") in violations
+
+
 def test_dependency_graph_rejects_alias_wrapper_and_delegation_routes() -> None:
     units = (
         JavaStructure.parse_source(
@@ -596,9 +839,11 @@ def test_comparison_only_shadow_activity_is_allowed() -> None:
         ),
     )
     graph = TypeDependencyGraph.build(units)
+    assembly = units[-1]
 
     assert graph.formal_writer_chain("IntakeRoomActivities") is None
     assert graph.formal_writer_chain("SafeShadowActivities") is None
+    assert not assembly.imported_type_names()
     assert not _registration_violations(units, graph)
     assert not _spring_assembly_violations(units, graph)
 
