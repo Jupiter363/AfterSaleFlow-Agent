@@ -35,12 +35,14 @@ public record CaseProcessCarryState(
     ActiveChildDescriptor activeChildDescriptor,
     Long activeRoomRevision,
     RecoveryErrorOrigin protocolErrorOrigin,
-    boolean provisioningManualRecoveryRequired) {
+    boolean provisioningManualRecoveryRequired,
+    List<UnreconciledChildExecution> unreconciledChildren) {
 
   public static final int MAX_RECENT_COMMANDS = 256;
   public static final int MAX_BUFFERED_EVENTS = 128;
   public static final int MAX_CLOSED_ROOMS = 256;
   public static final int MAX_PROVISIONING_COMMITMENTS = 64;
+  public static final int MAX_UNRECONCILED_CHILDREN = 2;
 
   public CaseProcessCarryState(
       String schemaVersion,
@@ -97,7 +99,8 @@ public record CaseProcessCarryState(
         null,
         null,
         null,
-        false);
+        false,
+        List.of());
   }
 
   public CaseProcessCarryState(
@@ -151,7 +154,8 @@ public record CaseProcessCarryState(
         null,
         null,
         null,
-        false);
+        false,
+        List.of());
   }
 
   public CaseProcessCarryState(
@@ -210,7 +214,8 @@ public record CaseProcessCarryState(
         activeChildDescriptor,
         null,
         null,
-        false);
+        false,
+        List.of());
   }
 
   public CaseProcessCarryState(
@@ -271,7 +276,71 @@ public record CaseProcessCarryState(
         activeChildDescriptor,
         activeRoomRevision,
         protocolErrorOrigin,
-        false);
+        false,
+        List.of());
+  }
+
+  public CaseProcessCarryState(
+      String schemaVersion,
+      String tenantSurrogate,
+      String caseId,
+      RoomType activeRoomType,
+      long activeRoomEpoch,
+      String activeChildWorkflowId,
+      long observedProcessRevision,
+      long nextCommandSequence,
+      long nextCaseEventSequence,
+      long processedCommandCount,
+      long processedEventCount,
+      List<ProcessedCommandIdentity> recentCommands,
+      List<CaseDomainEventRef> bufferedEvents,
+      long highestObservedEventSequence,
+      int runGeneration,
+      int commandRecoveryAttempts,
+      int eventRecoveryAttempts,
+      boolean commandManualRecoveryRequired,
+      boolean eventManualRecoveryRequired,
+      String protocolErrorCode,
+      List<ClosedRoomTuple> closedRooms,
+      long activeFencingToken,
+      String activeChildWorkflowRunId,
+      List<ProvisioningCommitment> provisioningCommitments,
+      List<ProvisionedRoomEpochHighWater> highestProvisionedEpochs,
+      ActiveChildDescriptor activeChildDescriptor,
+      Long activeRoomRevision,
+      RecoveryErrorOrigin protocolErrorOrigin,
+      boolean provisioningManualRecoveryRequired) {
+    this(
+        schemaVersion,
+        tenantSurrogate,
+        caseId,
+        activeRoomType,
+        activeRoomEpoch,
+        activeChildWorkflowId,
+        observedProcessRevision,
+        nextCommandSequence,
+        nextCaseEventSequence,
+        processedCommandCount,
+        processedEventCount,
+        recentCommands,
+        bufferedEvents,
+        highestObservedEventSequence,
+        runGeneration,
+        commandRecoveryAttempts,
+        eventRecoveryAttempts,
+        commandManualRecoveryRequired,
+        eventManualRecoveryRequired,
+        protocolErrorCode,
+        closedRooms,
+        activeFencingToken,
+        activeChildWorkflowRunId,
+        provisioningCommitments,
+        highestProvisionedEpochs,
+        activeChildDescriptor,
+        activeRoomRevision,
+        protocolErrorOrigin,
+        provisioningManualRecoveryRequired,
+        List.of());
   }
 
   public CaseProcessCarryState {
@@ -324,9 +393,16 @@ public record CaseProcessCarryState(
         provisioningCommitments == null ? List.of() : List.copyOf(provisioningCommitments);
     highestProvisionedEpochs =
         highestProvisionedEpochs == null ? List.of() : List.copyOf(highestProvisionedEpochs);
+    unreconciledChildren =
+        unreconciledChildren == null ? List.of() : List.copyOf(unreconciledChildren);
     if (activeRoomRevision != null
         && (activeRoomRevision < 0 || activeRoomType == null)) {
       throw new IllegalArgumentException("active room revision is invalid");
+    }
+    if (unreconciledChildren.size() > MAX_UNRECONCILED_CHILDREN
+        || (!unreconciledChildren.isEmpty() && !provisioningManualRecoveryRequired)
+        || unreconciledChildren.stream().distinct().count() != unreconciledChildren.size()) {
+      throw new IllegalArgumentException("unreconciled child identities are invalid");
     }
     if (recentCommands.size() > MAX_RECENT_COMMANDS) {
       throw new IllegalArgumentException("recent command cache is too large");
@@ -408,6 +484,18 @@ public record CaseProcessCarryState(
     public ProvisionedRoomEpochHighWater {
       if (roomType == null || roomEpoch < 0) {
         throw new IllegalArgumentException("provisioned room epoch high-water is invalid");
+      }
+    }
+  }
+
+  public record UnreconciledChildExecution(String workflowId, String workflowRunId) {
+
+    public UnreconciledChildExecution {
+      if (workflowId == null
+          || workflowId.isBlank()
+          || workflowRunId == null
+          || workflowRunId.isBlank()) {
+        throw new IllegalArgumentException("unreconciled child execution identity is invalid");
       }
     }
   }

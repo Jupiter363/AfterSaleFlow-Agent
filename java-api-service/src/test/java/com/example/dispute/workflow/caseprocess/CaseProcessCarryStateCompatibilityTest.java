@@ -11,6 +11,7 @@ import com.example.dispute.workflow.contract.v1.ProvisionRoomEpochReceipt;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.ActiveChildDescriptor;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.ActiveChildKind;
+import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.UnreconciledChildExecution;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessSnapshot;
 import com.example.dispute.workflow.temporal.caseprocess.ProvisioningCommitment;
 import com.fasterxml.jackson.databind.json.JsonMapper;
@@ -62,6 +63,7 @@ class CaseProcessCarryStateCompatibilityTest {
     assertThat(carry.activeRoomRevision()).isNull();
     assertThat(carry.protocolErrorOrigin()).isNull();
     assertThat(carry.provisioningManualRecoveryRequired()).isFalse();
+    assertThat(carry.unreconciledChildren()).isEmpty();
   }
 
   @Test
@@ -108,17 +110,36 @@ class CaseProcessCarryStateCompatibilityTest {
   void provisioningManualRecoveryOutcomeSurvivesCarryRoundTrip() throws Exception {
     com.fasterxml.jackson.databind.node.ObjectNode node =
         mapper.valueToTree(CaseProcessCarryState.initial());
+    List<UnreconciledChildExecution> unresolved =
+        List.of(
+            new UnreconciledChildExecution("orphan-child-1", "orphan-run-1"),
+            new UnreconciledChildExecution("orphan-child-2", "orphan-run-2"));
     node.put("provisioningManualRecoveryRequired", true);
+    node.set("unreconciledChildren", mapper.valueToTree(unresolved));
 
     CaseProcessCarryState restored =
         mapper.readValue(mapper.writeValueAsBytes(node), CaseProcessCarryState.class);
 
     assertThat(restored.provisioningManualRecoveryRequired()).isTrue();
-    assertThat(
-            mapper
-                .readValue(mapper.writeValueAsBytes(restored), CaseProcessCarryState.class)
-                .provisioningManualRecoveryRequired())
-        .isTrue();
+    assertThat(restored.unreconciledChildren()).containsExactlyElementsOf(unresolved);
+    CaseProcessCarryState roundTripped =
+        mapper.readValue(mapper.writeValueAsBytes(restored), CaseProcessCarryState.class);
+    assertThat(roundTripped.provisioningManualRecoveryRequired()).isTrue();
+    assertThat(roundTripped.unreconciledChildren()).containsExactlyElementsOf(unresolved);
+  }
+
+  @Test
+  void readsPriorManualRecoveryFlagWithoutUnreconciledIdentityList() throws Exception {
+    com.fasterxml.jackson.databind.node.ObjectNode node =
+        mapper.valueToTree(CaseProcessCarryState.initial());
+    node.put("provisioningManualRecoveryRequired", true);
+    node.remove("unreconciledChildren");
+
+    CaseProcessCarryState restored =
+        mapper.readValue(mapper.writeValueAsBytes(node), CaseProcessCarryState.class);
+
+    assertThat(restored.provisioningManualRecoveryRequired()).isTrue();
+    assertThat(restored.unreconciledChildren()).isEmpty();
   }
 
   @Test
@@ -219,6 +240,7 @@ class CaseProcessCarryStateCompatibilityTest {
     assertThat(snapshot.activeRoomRevision()).isNull();
     assertThat(snapshot.protocolErrorOrigin()).isNull();
     assertThat(snapshot.provisioningManualRecoveryRequired()).isFalse();
+    assertThat(snapshot.unreconciledChildren()).isEmpty();
   }
 
   @Test

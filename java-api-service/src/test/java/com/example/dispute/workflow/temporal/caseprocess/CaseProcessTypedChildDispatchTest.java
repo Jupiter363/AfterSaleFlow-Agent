@@ -22,6 +22,7 @@ import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleAct
 import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.RecordCaseCommandRoutedResult;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.ActiveChildKind;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.RecoveryErrorOrigin;
+import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.UnreconciledChildExecution;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessLedgerActivities.CaseCommandLedgerEntry;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessLedgerActivities.CaseCommandLedgerState;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessLedgerActivities.LoadSequenceRange;
@@ -54,6 +55,7 @@ import io.temporal.client.WorkflowStub;
 import io.temporal.client.WorkflowUpdateException;
 import io.temporal.client.WorkflowUpdateStage;
 import io.temporal.api.common.v1.WorkflowExecution;
+import io.temporal.api.history.v1.HistoryEvent;
 import io.temporal.common.WorkflowExecutionHistory;
 import io.temporal.failure.ActivityFailure;
 import io.temporal.failure.ApplicationFailure;
@@ -70,6 +72,7 @@ import io.temporal.workflow.Promise;
 import io.temporal.workflow.WorkflowInterface;
 import io.temporal.workflow.WorkflowMethod;
 import io.temporal.workflow.Workflow;
+import io.temporal.workflow.SignalMethod;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -277,6 +280,31 @@ class CaseProcessTypedChildDispatchTest {
     awaitFlag(bridge.startCanceled, "bridge start Activity did not observe cancellation");
     awaitStatus(WORKFLOW_ID, WORKFLOW_EXECUTION_STATUS_CANCELED);
     assertThat(callerFailure.join()).isNotNull();
+  }
+
+  @Test
+  void parentCancellationAfterCommitmentCancelsTheAbandonedActiveChild() {
+    startWorkflow();
+    ProvisionRoomEpochReceipt receipt =
+        provision(typedProvision(RoomType.INTAKE, 0, 1, 0, 0, 0));
+
+    client.newUntypedWorkflowStub(WORKFLOW_ID).cancel();
+
+    awaitStatus(WORKFLOW_ID, WORKFLOW_EXECUTION_STATUS_CANCELED);
+    awaitStatus(receipt.roomWorkflowId(), WORKFLOW_EXECUTION_STATUS_CANCELED);
+    assertThat(
+            client.fetchHistory(WORKFLOW_ID).getEvents().stream()
+                .filter(
+                    event ->
+                        event.hasRequestCancelExternalWorkflowExecutionInitiatedEventAttributes())
+                .map(
+                    event ->
+                        event
+                            .getRequestCancelExternalWorkflowExecutionInitiatedEventAttributes()
+                            .getWorkflowExecution()
+                            .getWorkflowId())
+                .toList())
+        .contains(receipt.roomWorkflowId());
   }
 
   @Test
@@ -624,7 +652,7 @@ class CaseProcessTypedChildDispatchTest {
   }
 
   @Test
-  void detachedCompensationCancelsChildStartedBeforeRootCancellation() {
+  void detachedCaptureChecksPendingCancellationBeforeCommitmentAndCompensates() {
     ProvisionRoomEpoch request = typedProvision(RoomType.INTAKE, 7, 7, 0, 0, 0);
     String probeId = "case-process-replacement-cancellation-probe";
     ReplacementCancellationProbe probe =
@@ -642,6 +670,7 @@ class CaseProcessTypedChildDispatchTest {
     assertThat(started.getRunId()).isNotBlank();
     assertThat(probe.authorityCommitted()).isFalse();
     client.newUntypedWorkflowStub(probeId).cancel();
+    probe.releaseCapturedChild();
 
     awaitStatus(probeId, WORKFLOW_EXECUTION_STATUS_CANCELED);
     awaitStatus(request.roomWorkflowId(), WORKFLOW_EXECUTION_STATUS_CANCELED);
@@ -667,6 +696,109 @@ class CaseProcessTypedChildDispatchTest {
     assertThat(exposed.getType()).isEqualTo("ROOM_EPOCH_PROVISIONING_RUNTIME_FAILURE");
     assertThat(exposed.isNonRetryable()).isTrue();
     assertThat(exposed.getCause()).isSameAs(original);
+  }
+
+  @Test
+  void twoDistinctCompensationFailuresRemainDeduplicatedAndOperationallyAddressable() {
+    WorkflowExecution first =
+        WorkflowExecution.newBuilder()
+            .setWorkflowId("orphan-child-1")
+            .setRunId("orphan-run-1")
+            .build();
+    WorkflowExecution second =
+        WorkflowExecution.newBuilder()
+            .setWorkflowId("orphan-child-2")
+            .setRunId("orphan-run-2")
+            .build();
+
+    AtomicInteger attempts = new AtomicInteger();
+    CaseProcessWorkflowImpl.CompensationBatchOutcome batch =
+        CaseProcessWorkflowImpl.compensateChildren(
+            List.of(first, second, first),
+            List.of(),
+            target -> {
+              attempts.incrementAndGet();
+              return new CaseProcessWorkflowImpl.CompensationOutcome(
+                  true,
+                  new IllegalStateException("cannot cancel " + target.getWorkflowId()));
+            });
+
+    assertThat(attempts).hasValue(2);
+    assertThat(batch.failures()).hasSize(2);
+    assertThat(batch.unreconciledChildren())
+        .containsExactly(
+            new UnreconciledChildExecution("orphan-child-1", "orphan-run-1"),
+            new UnreconciledChildExecution("orphan-child-2", "orphan-run-2"));
+  }
+
+  @Test
+  void reconciliationGateUsesStableProtocolFailureType() {
+    assertThatThrownBy(() -> CaseProcessWorkflowImpl.requireProvisioningReconciled(true))
+        .isInstanceOfSatisfying(
+            ApplicationFailure.class,
+            failure ->
+                assertThat(failure.getType())
+                    .isEqualTo("ROOM_EPOCH_CHILD_RECONCILIATION_REQUIRED"));
+  }
+
+  @Test
+  void unreconciledChildrenSurviveContinueAsNewBlockNewProvisioningAndStayStickyOnReplay() {
+    TestWorkflowEnvironment recoveryEnvironment =
+        TestWorkflowEnvironment.newInstance(
+            TestEnvironmentOptions.newBuilder().setInitialTime(NOW).build());
+    try {
+      String taskQueue = "case-control-unreconciled-carry";
+      Worker worker = recoveryEnvironment.newWorker(taskQueue);
+      worker.registerWorkflowImplementationTypes(ManualRecoveryCarryBootstrapWorkflowImpl.class);
+      recoveryEnvironment.start();
+      WorkflowClient recoveryClient = recoveryEnvironment.getWorkflowClient();
+      CaseProcessWorkflow recovered =
+          recoveryClient.newWorkflowStub(
+              CaseProcessWorkflow.class,
+              WorkflowOptions.newBuilder()
+                  .setWorkflowId(WORKFLOW_ID)
+                  .setTaskQueue(taskQueue)
+                  .build());
+      WorkflowClient.start(recovered::run, (CaseProcessCarryState) null);
+
+      CaseProcessSnapshot restored =
+          awaitProcess(recovered, snapshot -> snapshot.runGeneration() == 1);
+      ProvisionRoomEpoch committed = typedProvision(RoomType.INTAKE, 0, 1, 0, 0, 0);
+      ProvisionRoomEpochReceipt replayed = provision(recovered, committed);
+
+      assertThat(replayed.roomWorkflowRunId()).isEqualTo("closed-room-run");
+      CaseProcessSnapshot beforeRejectedProvisioning = recovered.state();
+      assertThat(beforeRejectedProvisioning.provisioningManualRecoveryRequired()).isTrue();
+      assertThat(beforeRejectedProvisioning.unreconciledChildren())
+          .containsExactlyElementsOf(unreconciledFixture());
+      WorkflowExecutionHistory historyBeforeRejection =
+          recoveryClient.fetchHistory(
+              WORKFLOW_ID, beforeRejectedProvisioning.workflowRunId());
+
+      ProvisionRoomEpoch next = typedProvision(RoomType.INTAKE, 1, 2, 0, 0, 0);
+      assertThatThrownBy(() -> provision(recovered, next))
+          .isInstanceOf(WorkflowUpdateException.class);
+
+      CaseProcessSnapshot blocked = recovered.state();
+      WorkflowExecutionHistory historyAfterRejection =
+          recoveryClient.fetchHistory(
+              WORKFLOW_ID, beforeRejectedProvisioning.workflowRunId());
+      assertThat(blocked.blockedReason()).isEqualTo("PROVISIONING_MANUAL_RECOVERY");
+      assertThat(blocked.provisioningManualRecoveryRequired()).isTrue();
+      assertThat(blocked.unreconciledChildren())
+          .containsExactlyElementsOf(unreconciledFixture());
+      assertThat(blocked.provisioningCommitmentCount())
+          .isEqualTo(beforeRejectedProvisioning.provisioningCommitmentCount());
+      assertThat(blocked.activeChildWorkflowId())
+          .isEqualTo(beforeRejectedProvisioning.activeChildWorkflowId());
+      assertThat(blocked).isEqualTo(beforeRejectedProvisioning);
+      assertThat(persistedUpdateEvents(historyAfterRejection))
+          .containsExactlyElementsOf(persistedUpdateEvents(historyBeforeRejection));
+      assertThat(restored.unreconciledChildren())
+          .containsExactlyElementsOf(unreconciledFixture());
+    } finally {
+      recoveryEnvironment.close();
+    }
   }
 
   @Test
@@ -826,7 +958,12 @@ class CaseProcessTypedChildDispatchTest {
   }
 
   private ProvisionRoomEpochReceipt provision(ProvisionRoomEpoch request) {
-    return WorkflowStub.fromTyped(workflow())
+    return provision(workflow(), request);
+  }
+
+  private static ProvisionRoomEpochReceipt provision(
+      CaseProcessWorkflow target, ProvisionRoomEpoch request) {
+    return WorkflowStub.fromTyped(target)
         .startUpdate(
             UpdateOptions.newBuilder(ProvisionRoomEpochReceipt.class)
                 .setUpdateName(CaseProcessWorkflowProtocol.PROVISION_ROOM_EPOCH_UPDATE)
@@ -842,11 +979,16 @@ class CaseProcessTypedChildDispatchTest {
   }
 
   private CaseProcessSnapshot awaitProcess(Predicate<CaseProcessSnapshot> predicate) {
+    return awaitProcess(workflow(), predicate);
+  }
+
+  private static CaseProcessSnapshot awaitProcess(
+      CaseProcessWorkflow target, Predicate<CaseProcessSnapshot> predicate) {
     long deadline = System.nanoTime() + java.time.Duration.ofSeconds(10).toNanos();
     CaseProcessSnapshot last = null;
     while (System.nanoTime() < deadline) {
       try {
-        last = workflow().state();
+        last = target.state();
         if (predicate.test(last)) {
           return last;
         }
@@ -856,6 +998,15 @@ class CaseProcessTypedChildDispatchTest {
       sleepBriefly();
     }
     throw new AssertionError("case workflow did not converge; last=" + last);
+  }
+
+  private static List<HistoryEvent> persistedUpdateEvents(WorkflowExecutionHistory history) {
+    return history.getEvents().stream()
+        .filter(
+            event ->
+                event.hasWorkflowExecutionUpdateAcceptedEventAttributes()
+                    || event.hasWorkflowExecutionUpdateCompletedEventAttributes())
+        .toList();
   }
 
   private IntakeRoomSnapshot awaitIntake(
@@ -933,6 +1084,96 @@ class CaseProcessTypedChildDispatchTest {
       Thread.currentThread().interrupt();
       throw new AssertionError("test interrupted", failure);
     }
+  }
+
+  private static List<UnreconciledChildExecution> unreconciledFixture() {
+    return List.of(
+        new UnreconciledChildExecution("orphan-child-1", "orphan-run-1"),
+        new UnreconciledChildExecution("orphan-child-2", "orphan-run-2"));
+  }
+
+  private static CaseProcessCarryState manualRecoveryCarry(String firstExecutionRunId) {
+    ProvisionRoomEpoch request = typedProvision(RoomType.INTAKE, 0, 1, 0, 0, 0);
+    ProvisionRoomEpochReceipt receipt =
+        committedReceipt(request, firstExecutionRunId, "closed-room-run");
+    ProvisioningCommitment commitment =
+        new ProvisioningCommitment(
+            request.updateId(), request.payloadSha256(), request, receipt);
+    return new CaseProcessCarryState(
+        "case-process-carry-state.v1",
+        TENANT,
+        CASE_ID,
+        null,
+        -1,
+        null,
+        0,
+        1,
+        1,
+        0,
+        0,
+        List.of(),
+        List.of(),
+        0,
+        1,
+        0,
+        0,
+        false,
+        false,
+        "ROOM_EPOCH_CHILD_RECONCILIATION_REQUIRED",
+        List.of(),
+        0,
+        null,
+        List.of(commitment),
+        List.of(
+            new CaseProcessCarryState.ProvisionedRoomEpochHighWater(
+                request.roomType(), request.roomEpoch())),
+        null,
+        null,
+        RecoveryErrorOrigin.PROVISIONING,
+        true,
+        unreconciledFixture());
+  }
+
+  private static ProvisionRoomEpochReceipt committedReceipt(
+      ProvisionRoomEpoch request, String caseWorkflowRunId, String roomWorkflowRunId) {
+    return new ProvisionRoomEpochReceipt(
+        "provision-room-epoch-receipt.v1",
+        request.epochId(),
+        request.tenantSurrogate(),
+        request.caseId(),
+        request.roomId(),
+        request.roomType(),
+        request.roomEpoch(),
+        request.fencingToken(),
+        request.initialProcessRevision(),
+        request.initialRoomRevision(),
+        request.macroPhase(),
+        request.currentRoom(),
+        request.roomPhase(),
+        request.projectedDeadlineAt(),
+        request.writerMode(),
+        request.selectionSchemaVersion(),
+        request.processContractVersion(),
+        request.workflowType(),
+        request.temporalBuildId(),
+        request.roomWorkflowType(),
+        request.roomWorkflowBuildId(),
+        request.graphKey(),
+        request.graphVersion(),
+        request.checkpointSchemaVersion(),
+        request.streamProtocol(),
+        request.lastCommandSequence(),
+        request.lastCaseEventSequence(),
+        request.firstCommandSequence(),
+        request.firstCaseEventSequence(),
+        request.projectionRef(),
+        request.projectionSha256(),
+        request.requestedAt(),
+        request.caseWorkflowId(),
+        caseWorkflowRunId,
+        request.roomWorkflowId(),
+        roomWorkflowRunId,
+        request.payloadSha256());
   }
 
   private static ProvisionRoomEpoch typedProvision(
@@ -1089,6 +1330,20 @@ class CaseProcessTypedChildDispatchTest {
         "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01");
   }
 
+  public static final class ManualRecoveryCarryBootstrapWorkflowImpl
+      extends CaseProcessWorkflowImpl {
+
+    @Override
+    public void run(CaseProcessCarryState carryState) {
+      if (Workflow.getInfo().getContinuedExecutionRunId().isEmpty()) {
+        Workflow.continueAsNew(
+            manualRecoveryCarry(Workflow.getInfo().getFirstExecutionRunId()));
+        return;
+      }
+      super.run(carryState);
+    }
+  }
+
   public static final class RecordingIntakeWorkflow implements IntakeRoomWorkflow {
     private IntakeRoomStart start;
     private long commandCount;
@@ -1165,6 +1420,9 @@ class CaseProcessTypedChildDispatchTest {
 
     @QueryMethod
     boolean authorityCommitted();
+
+    @SignalMethod
+    void releaseCapturedChild();
   }
 
   public static final class ReplacementCancellationProbeImpl
@@ -1172,10 +1430,10 @@ class CaseProcessTypedChildDispatchTest {
 
     private WorkflowExecution startedChild;
     private boolean authorityCommitted;
+    private boolean releaseCapturedChild;
 
     @Override
     public void run(String childWorkflowId, IntakeRoomStart start) {
-      WorkflowExecution[] execution = new WorkflowExecution[1];
       CancellationScope detachedStart =
           Workflow.newDetachedCancellationScope(
               () -> {
@@ -1191,12 +1449,12 @@ class CaseProcessTypedChildDispatchTest {
                             .build());
                 Promise<?> completion = Async.function(child::run, start);
                 completion.exceptionally(failure -> null);
-                execution[0] = Workflow.getWorkflowExecution(child).get();
+                startedChild = Workflow.getWorkflowExecution(child).get();
+                Workflow.await(() -> releaseCapturedChild);
               });
-      detachedStart.run();
-      startedChild = execution[0];
       try {
-        Workflow.await(() -> false);
+        detachedStart.run();
+        CancellationScope.throwCanceled();
         authorityCommitted = true;
       } finally {
         if (!authorityCommitted && startedChild != null) {
@@ -1214,6 +1472,11 @@ class CaseProcessTypedChildDispatchTest {
     @Override
     public boolean authorityCommitted() {
       return authorityCommitted;
+    }
+
+    @Override
+    public void releaseCapturedChild() {
+      releaseCapturedChild = true;
     }
   }
 

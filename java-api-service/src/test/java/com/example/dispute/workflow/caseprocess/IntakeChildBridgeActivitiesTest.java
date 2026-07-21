@@ -94,6 +94,20 @@ class IntakeChildBridgeActivitiesTest {
     }
 
     @Test
+    void merchantInitiatedCommandUsesTheAuthoritativeTypedParty() {
+        port.command = commandSource(
+                "CMD_BRIDGE", TENANT, CASE_ID, EPOCH, FENCE, COMMAND_SEQUENCE,
+                CommandType.INTAKE_CANCEL, PAYLOAD_HASH, REQUEST_HASH,
+                PROCESS_REVISION, ROOM_REVISION, IntakeParty.INITIATOR);
+
+        var binding = adapter.bindCommand(
+                commandRequest(CommandType.INTAKE_CANCEL, ActorRole.MERCHANT));
+
+        assertThat(binding.command().party()).isEqualTo(IntakeParty.INITIATOR);
+        assertThat(binding.command().actorScopeHash()).isEqualTo(INITIATOR_SCOPE);
+    }
+
+    @Test
     void keepsCaseAndRoomWorkflowBindingsSeparateAndAllowsFutureTemporalMode() {
         var binding = adapter.bindStart(startRequest(WriterMode.TEMPORAL));
         assertThat(binding.activeBinding().caseWorkflowType())
@@ -181,46 +195,46 @@ class IntakeChildBridgeActivitiesTest {
     void rejectsReturnedCommandTupleIdTypeEpochFenceSequenceHashesAndRevisions() {
         assertCommandInvariant(commandSource("OTHER", TENANT, CASE_ID, EPOCH, FENCE,
                 COMMAND_SEQUENCE, CommandType.INTAKE_CANCEL, PAYLOAD_HASH, REQUEST_HASH,
-                PROCESS_REVISION, ROOM_REVISION, ActorRole.USER));
+                PROCESS_REVISION, ROOM_REVISION, IntakeParty.INITIATOR));
         assertCommandInvariant(commandSource("CMD_BRIDGE", "other-tenant", CASE_ID, EPOCH, FENCE,
                 COMMAND_SEQUENCE, CommandType.INTAKE_CANCEL, PAYLOAD_HASH, REQUEST_HASH,
-                PROCESS_REVISION, ROOM_REVISION, ActorRole.USER));
+                PROCESS_REVISION, ROOM_REVISION, IntakeParty.INITIATOR));
         assertCommandInvariant(commandSource("CMD_BRIDGE", TENANT, CASE_ID, EPOCH + 1, FENCE,
                 COMMAND_SEQUENCE, CommandType.INTAKE_CANCEL, PAYLOAD_HASH, REQUEST_HASH,
-                PROCESS_REVISION, ROOM_REVISION, ActorRole.USER));
+                PROCESS_REVISION, ROOM_REVISION, IntakeParty.INITIATOR));
         assertCommandInvariant(commandSource("CMD_BRIDGE", TENANT, CASE_ID, EPOCH, FENCE + 1,
                 COMMAND_SEQUENCE, CommandType.INTAKE_CANCEL, PAYLOAD_HASH, REQUEST_HASH,
-                PROCESS_REVISION, ROOM_REVISION, ActorRole.USER));
+                PROCESS_REVISION, ROOM_REVISION, IntakeParty.INITIATOR));
         assertCommandInvariant(commandSource("CMD_BRIDGE", TENANT, CASE_ID, EPOCH, FENCE,
                 COMMAND_SEQUENCE + 1, CommandType.INTAKE_CANCEL, PAYLOAD_HASH, REQUEST_HASH,
-                PROCESS_REVISION, ROOM_REVISION, ActorRole.USER));
+                PROCESS_REVISION, ROOM_REVISION, IntakeParty.INITIATOR));
         assertCommandInvariant(commandSource("CMD_BRIDGE", TENANT, CASE_ID, EPOCH, FENCE,
                 COMMAND_SEQUENCE, CommandType.INTAKE_CONFIRM, PAYLOAD_HASH, REQUEST_HASH,
-                PROCESS_REVISION, ROOM_REVISION, ActorRole.USER));
+                PROCESS_REVISION, ROOM_REVISION, IntakeParty.INITIATOR));
         assertCommandInvariant(commandSource("CMD_BRIDGE", TENANT, CASE_ID, EPOCH, FENCE,
                 COMMAND_SEQUENCE, CommandType.INTAKE_CANCEL, "0".repeat(64), REQUEST_HASH,
-                PROCESS_REVISION, ROOM_REVISION, ActorRole.USER));
+                PROCESS_REVISION, ROOM_REVISION, IntakeParty.INITIATOR));
         assertCommandInvariant(commandSource("CMD_BRIDGE", TENANT, CASE_ID, EPOCH, FENCE,
                 COMMAND_SEQUENCE, CommandType.INTAKE_CANCEL, PAYLOAD_HASH, "0".repeat(64),
-                PROCESS_REVISION, ROOM_REVISION, ActorRole.USER));
+                PROCESS_REVISION, ROOM_REVISION, IntakeParty.INITIATOR));
         assertCommandInvariant(commandSource("CMD_BRIDGE", TENANT, CASE_ID, EPOCH, FENCE,
                 COMMAND_SEQUENCE, CommandType.INTAKE_CANCEL, PAYLOAD_HASH, REQUEST_HASH,
-                PROCESS_REVISION + 1, ROOM_REVISION, ActorRole.USER));
+                PROCESS_REVISION + 1, ROOM_REVISION, IntakeParty.INITIATOR));
         assertCommandInvariant(commandSource("CMD_BRIDGE", TENANT, CASE_ID, EPOCH, FENCE,
                 COMMAND_SEQUENCE, CommandType.INTAKE_CANCEL, PAYLOAD_HASH, REQUEST_HASH,
-                PROCESS_REVISION, -1, ActorRole.USER));
+                PROCESS_REVISION, -1, IntakeParty.INITIATOR));
     }
 
     @Test
     void rejectsUnknownCommandAndActorTypes() {
         port.command = commandSource("CMD_BRIDGE", TENANT, CASE_ID, EPOCH, FENCE,
                 COMMAND_SEQUENCE, CommandType.CASE_OPEN, PAYLOAD_HASH, REQUEST_HASH,
-                PROCESS_REVISION, ROOM_REVISION, ActorRole.USER);
+                PROCESS_REVISION, ROOM_REVISION, IntakeParty.INITIATOR);
         assertInvariant(() -> adapter.bindCommand(commandRequest(CommandType.CASE_OPEN, ActorRole.USER)));
 
         port.command = commandSource("CMD_BRIDGE", TENANT, CASE_ID, EPOCH, FENCE,
                 COMMAND_SEQUENCE, CommandType.INTAKE_CANCEL, PAYLOAD_HASH, REQUEST_HASH,
-                PROCESS_REVISION, ROOM_REVISION, ActorRole.SYSTEM);
+                PROCESS_REVISION, ROOM_REVISION, IntakeParty.INITIATOR);
         assertInvariant(
                 () -> adapter.bindCommand(commandRequest(CommandType.INTAKE_CANCEL, ActorRole.SYSTEM)));
     }
@@ -365,7 +379,7 @@ class IntakeChildBridgeActivitiesTest {
                 binding,
                 "CMD_BRIDGE", TENANT, CASE_ID, EPOCH, FENCE, COMMAND_SEQUENCE,
                 CommandType.INTAKE_CANCEL, PAYLOAD_HASH, REQUEST_HASH,
-                PROCESS_REVISION, ROOM_REVISION, ActorRole.USER);
+                PROCESS_REVISION, ROOM_REVISION, IntakeParty.INITIATOR);
         assertInvariant(() -> adapter.bindCommand(
                 commandRequest(CommandType.INTAKE_CANCEL, ActorRole.USER, binding)));
 
@@ -513,10 +527,10 @@ class IntakeChildBridgeActivitiesTest {
             String requestHash,
             long processRevision,
             long roomRevision,
-            ActorRole actorRole) {
+            IntakeParty party) {
         return commandSource(
                 activeBinding(), commandId, tenant, caseId, epoch, fence, sequence, type,
-                payloadHash, requestHash, processRevision, roomRevision, actorRole);
+                payloadHash, requestHash, processRevision, roomRevision, party);
     }
 
     private static CommandSource commandSource(
@@ -532,9 +546,7 @@ class IntakeChildBridgeActivitiesTest {
             String requestHash,
             long processRevision,
             long roomRevision,
-            ActorRole actorRole) {
-        IntakeParty party = actorRole == ActorRole.MERCHANT
-                ? IntakeParty.RESPONDENT : IntakeParty.INITIATOR;
+            IntakeParty party) {
         String scope = party == IntakeParty.RESPONDENT ? RESPONDENT_SCOPE : INITIATOR_SCOPE;
         return new CommandSource(
                 binding,
@@ -781,7 +793,7 @@ class IntakeChildBridgeActivitiesTest {
         private CommandSource command = commandSource(
                 "CMD_BRIDGE", TENANT, CASE_ID, EPOCH, FENCE, COMMAND_SEQUENCE,
                 CommandType.INTAKE_CANCEL, PAYLOAD_HASH, REQUEST_HASH,
-                PROCESS_REVISION, ROOM_REVISION, ActorRole.USER);
+                PROCESS_REVISION, ROOM_REVISION, IntakeParty.INITIATOR);
         private DomainEventSource event = eventSource(
                 "INTAKE_CANCELLED", IntakeDomainEventType.CANCELLED,
                 "EVT_BRIDGE", TENANT, CASE_ID, EPOCH, FENCE, EVENT_SEQUENCE,

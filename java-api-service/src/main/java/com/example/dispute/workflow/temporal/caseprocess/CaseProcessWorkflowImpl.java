@@ -21,6 +21,7 @@ import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.A
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.ClosedRoomTuple;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.ProvisionedRoomEpochHighWater;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.RecoveryErrorOrigin;
+import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.UnreconciledChildExecution;
 import com.example.dispute.workflow.temporal.caseprocess.IntakeChildBridgeActivities.ActiveChildBinding;
 import com.example.dispute.workflow.temporal.caseprocess.IntakeChildBridgeActivities.CommandBinding;
 import com.example.dispute.workflow.temporal.caseprocess.IntakeChildBridgeActivities.CommandRequest;
@@ -73,6 +74,7 @@ import java.util.Map;
 import java.util.NavigableMap;
 import java.util.Objects;
 import java.util.TreeMap;
+import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
@@ -89,6 +91,8 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
   private static final String AUTHORITY_CHECKPOINT_CHANGE_ID =
       "case-process-authority-checkpoint-v1";
   private static final String TYPED_INTAKE_CHILD_CHANGE_ID = "typed-intake-room-child-v1";
+  private static final String CHILD_COMPENSATION_INVARIANT_CHANGE_ID =
+      "case-process-child-compensation-invariant-v1";
   private static final String AUTHORITY_CHECKPOINT_MEMO_KEY =
       "case_process_authority_checkpoint_v1";
   private static final String SELECTION_V1 = "room-epoch-selection.v1";
@@ -169,6 +173,8 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
           new EnumMap<>(com.example.dispute.workflow.contract.v1.ContractTypes.RoomType.class);
   private final LinkedHashMap<String, PendingProvisioning> pendingProvisioningByUpdateId =
       new LinkedHashMap<>();
+  private final LinkedHashSet<UnreconciledChildExecution> unreconciledChildren =
+      new LinkedHashSet<>();
 
   private String tenantSurrogate;
   private String caseId;
@@ -204,6 +210,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
   private Boolean provisioningEnabled;
   private boolean authorityCheckpointEnabled;
   private int typedIntakeChildVersion;
+  private int childCompensationInvariantVersion;
   private boolean provisioningSwitchInProgress;
   private StartedChild uncommittedChild;
   private String protocolErrorCode;
@@ -212,6 +219,17 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
 
   @Override
   public void run(CaseProcessCarryState carryState) {
+    try {
+      runUntilContinued(carryState);
+    } catch (CanceledFailure failure) {
+      if (childCompensationInvariantVersion == 1) {
+        compensateChildrenAfterParentCancellation(failure);
+      }
+      throw failure;
+    }
+  }
+
+  private void runUntilContinued(CaseProcessCarryState carryState) {
     restoreCarryState(carryState);
     provisioningEnabled =
         Workflow.getVersion(ROOM_EPOCH_PROVISION_CHANGE_ID, Workflow.DEFAULT_VERSION, 1) == 1;
@@ -219,6 +237,9 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
         Workflow.getVersion(AUTHORITY_CHECKPOINT_CHANGE_ID, Workflow.DEFAULT_VERSION, 1) == 1;
     typedIntakeChildVersion =
         Workflow.getVersion(TYPED_INTAKE_CHILD_CHANGE_ID, Workflow.DEFAULT_VERSION, 1);
+    childCompensationInvariantVersion =
+        Workflow.getVersion(
+            CHILD_COMPENSATION_INVARIANT_CHANGE_ID, Workflow.DEFAULT_VERSION, 1);
     restoreActiveChildStub();
     restoreAuthorityCheckpoint();
     runMaxAgeTimer = Workflow.newTimer(RUN_MAX_AGE);
@@ -287,6 +308,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
       requireSameProvisioningPayload(updateId, payloadSha256, committed.payloadSha256());
       return committed.receipt();
     }
+    requireProvisioningReconciled();
     PendingProvisioning existing = pendingProvisioningByUpdateId.get(updateId);
     if (existing != null) {
       requireSameProvisioningPayload(updateId, payloadSha256, existing.payloadSha256());
@@ -313,6 +335,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
       requireSameProvisioningPayload(updateId, payloadSha256, committed.payloadSha256());
       return;
     }
+    requireProvisioningReconciled();
     PendingProvisioning pending = pendingProvisioningByUpdateId.get(updateId);
     if (pending != null) {
       requireSameProvisioningPayload(updateId, payloadSha256, pending.payloadSha256());
@@ -390,7 +413,8 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
         activeChildDescriptor == null ? null : activeChildDescriptor.roomWorkflowBuildId(),
         hasActiveChild() ? activeRoomRevision : null,
         protocolErrorOrigin,
-        provisioningManualRecoveryRequired);
+        provisioningManualRecoveryRequired,
+        new ArrayList<>(unreconciledChildren));
   }
 
   @Override
@@ -439,6 +463,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
     commandManualRecoveryRequired = carry.commandManualRecoveryRequired();
     eventManualRecoveryRequired = carry.eventManualRecoveryRequired();
     provisioningManualRecoveryRequired = carry.provisioningManualRecoveryRequired();
+    unreconciledChildren.addAll(carry.unreconciledChildren());
     protocolErrorCode = carry.protocolErrorCode();
     protocolErrorOrigin =
         carry.protocolErrorOrigin() == null
@@ -629,6 +654,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
     RuntimeException callerFailure = null;
     try {
       ProvisionRoomEpoch request = pending.request();
+      requireProvisioningReconciled();
       validateAgainstCommittedProvisioning(request, pending.updateId(), pending.payloadSha256());
       if (request.firstCommandSequence() != nextCommandSequence
           || request.firstCaseEventSequence() != nextCaseEventSequence) {
@@ -651,6 +677,9 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
       ActiveChildKind childKind = selectProvisionedChildKind(request);
       started = startProvisionedChild(request, pending.payloadSha256(), childKind);
       uncommittedChild = started;
+      if (childCompensationInvariantVersion == 1) {
+        CancellationScope.throwCanceled();
+      }
 
       ProvisionRoomEpochReceipt receipt =
           new ProvisionRoomEpochReceipt(
@@ -717,7 +746,6 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
       trimProvisioningCommitments();
       commitmentPublished = true;
       uncommittedChild = null;
-      provisioningManualRecoveryRequired = false;
       if (retirementError == null) {
         clearRecoveryError(RecoveryErrorOrigin.PROVISIONING);
       } else {
@@ -750,7 +778,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
     } catch (RuntimeException failure) {
       ApplicationFailure exposed = failClosedProvisioningRuntime(failure);
       callerFailure = exposed;
-      provisioningManualRecoveryRequired = true;
+      markProvisioningManualRecovery(null);
       recordProtocolError(
           "ROOM_EPOCH_PROVISIONING_RUNTIME_FAILURE", RecoveryErrorOrigin.PROVISIONING);
       pending.fail(exposed);
@@ -760,7 +788,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
             cancelUncommittedChild(
                 started.execution(), "ROOM_CONTROL_PROVISIONING_NOT_COMMITTED");
         if (compensation.requiresManualRecovery()) {
-          provisioningManualRecoveryRequired = true;
+          markProvisioningManualRecovery(started.execution());
           if (callerFailure != null && compensation.failure() != null) {
             callerFailure.addSuppressed(compensation.failure());
           }
@@ -1226,6 +1254,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
 
   private void validateProvisioningOrder(
       ProvisionRoomEpoch request, String updateId, String payloadSha256) {
+    requireProvisioningReconciled();
     validateAgainstCommittedProvisioning(request, updateId, payloadSha256);
     long highestFence = highestCommittedFencingToken();
     long highestEpoch = highestCommittedEpoch(request.roomType());
@@ -1315,6 +1344,18 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
 
   private static boolean sameRoomTuple(ProvisionRoomEpoch left, ProvisionRoomEpoch right) {
     return left.roomType() == right.roomType() && left.roomEpoch() == right.roomEpoch();
+  }
+
+  private void requireProvisioningReconciled() {
+    requireProvisioningReconciled(provisioningManualRecoveryRequired);
+  }
+
+  static void requireProvisioningReconciled(boolean manualRecoveryRequired) {
+    if (manualRecoveryRequired) {
+      throw protocolFailure(
+          "ROOM_EPOCH_CHILD_RECONCILIATION_REQUIRED",
+          "room epoch provisioning is blocked until child compensation is reconciled");
+    }
   }
 
   private static void requireSameProvisioningPayload(
@@ -2118,6 +2159,91 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
         : outcome[0];
   }
 
+  private void compensateChildrenAfterParentCancellation(CanceledFailure parentCancellation) {
+    List<WorkflowExecution> targets = new ArrayList<>(2);
+    if (uncommittedChild != null) {
+      targets.add(uncommittedChild.execution());
+    }
+    WorkflowExecution activeExecution = activeChildExecution();
+    if (activeExecution != null
+        && targets.stream().noneMatch(target -> sameExecution(target, activeExecution))) {
+      targets.add(activeExecution);
+    }
+    CompensationBatchOutcome batch =
+        compensateChildren(
+            targets,
+            new ArrayList<>(unreconciledChildren),
+            target -> cancelUncommittedChild(target, "CASE_PROCESS_PARENT_CANCELED"));
+    if (!batch.failures().isEmpty()) {
+      provisioningManualRecoveryRequired = true;
+      unreconciledChildren.clear();
+      unreconciledChildren.addAll(batch.unreconciledChildren());
+      batch.failures().forEach(parentCancellation::addSuppressed);
+    }
+    uncommittedChild = null;
+  }
+
+  static CompensationBatchOutcome compensateChildren(
+      List<WorkflowExecution> targets,
+      List<UnreconciledChildExecution> existing,
+      Function<WorkflowExecution, CompensationOutcome> compensation) {
+    Objects.requireNonNull(targets, "compensation targets must not be null");
+    Objects.requireNonNull(compensation, "compensation function must not be null");
+    List<UnreconciledChildExecution> unresolved = List.copyOf(existing);
+    List<RuntimeException> failures = new ArrayList<>();
+    LinkedHashSet<WorkflowExecution> distinctTargets = new LinkedHashSet<>(targets);
+    for (WorkflowExecution target : distinctTargets) {
+      CompensationOutcome outcome = compensation.apply(target);
+      if (outcome.requiresManualRecovery()) {
+        unresolved = withUnreconciledChild(unresolved, target);
+        failures.add(outcome.failure());
+      }
+    }
+    return new CompensationBatchOutcome(unresolved, failures);
+  }
+
+  private WorkflowExecution activeChildExecution() {
+    if (activeChildWorkflowId == null) {
+      return null;
+    }
+    WorkflowExecution.Builder execution =
+        WorkflowExecution.newBuilder().setWorkflowId(activeChildWorkflowId);
+    if (activeChildWorkflowRunId != null && !activeChildWorkflowRunId.isBlank()) {
+      execution.setRunId(activeChildWorkflowRunId);
+    }
+    return execution.build();
+  }
+
+  private static boolean sameExecution(WorkflowExecution left, WorkflowExecution right) {
+    return left.getWorkflowId().equals(right.getWorkflowId())
+        && left.getRunId().equals(right.getRunId());
+  }
+
+  private void markProvisioningManualRecovery(WorkflowExecution execution) {
+    provisioningManualRecoveryRequired = true;
+    if (execution == null) {
+      return;
+    }
+    List<UnreconciledChildExecution> updated =
+        withUnreconciledChild(new ArrayList<>(unreconciledChildren), execution);
+    unreconciledChildren.clear();
+    unreconciledChildren.addAll(updated);
+  }
+
+  static List<UnreconciledChildExecution> withUnreconciledChild(
+      List<UnreconciledChildExecution> existing, WorkflowExecution execution) {
+    Objects.requireNonNull(existing, "existing unreconciled children must not be null");
+    Objects.requireNonNull(execution, "unreconciled child execution must not be null");
+    UnreconciledChildExecution candidate =
+        new UnreconciledChildExecution(execution.getWorkflowId(), execution.getRunId());
+    LinkedHashSet<UnreconciledChildExecution> updated = new LinkedHashSet<>(existing);
+    updated.add(candidate);
+    if (updated.size() > CaseProcessCarryState.MAX_UNRECONCILED_CHILDREN) {
+      throw new IllegalStateException("unreconciled child identity capacity exceeded");
+    }
+    return List.copyOf(updated);
+  }
+
   private void clearUncommittedChild(StartedChild started) {
     if (uncommittedChild == started) {
       uncommittedChild = null;
@@ -2371,7 +2497,8 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
             activeChildDescriptor,
             hasActiveChild() ? activeRoomRevision : null,
             protocolErrorOrigin,
-            provisioningManualRecoveryRequired);
+            provisioningManualRecoveryRequired,
+            new ArrayList<>(unreconciledChildren));
     ContinueAsNewOptions options =
         ContinueAsNewOptions.newBuilder()
             .setTaskQueue(CASE_CONTROL_TASK_QUEUE)
@@ -2613,6 +2740,16 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
 
     private static CompensationOutcome manualRecovery(RuntimeException failure) {
       return new CompensationOutcome(true, Objects.requireNonNull(failure));
+    }
+  }
+
+  static record CompensationBatchOutcome(
+      List<UnreconciledChildExecution> unreconciledChildren,
+      List<RuntimeException> failures) {
+
+    CompensationBatchOutcome {
+      unreconciledChildren = List.copyOf(unreconciledChildren);
+      failures = List.copyOf(failures);
     }
   }
 

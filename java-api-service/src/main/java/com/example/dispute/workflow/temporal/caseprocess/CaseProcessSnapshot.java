@@ -3,6 +3,7 @@ package com.example.dispute.workflow.temporal.caseprocess;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.ActiveChildKind;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.RecoveryErrorOrigin;
+import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.UnreconciledChildExecution;
 import java.util.List;
 
 public record CaseProcessSnapshot(
@@ -39,7 +40,8 @@ public record CaseProcessSnapshot(
     String activeRoomWorkflowBuildId,
     Long activeRoomRevision,
     RecoveryErrorOrigin protocolErrorOrigin,
-    boolean provisioningManualRecoveryRequired) {
+    boolean provisioningManualRecoveryRequired,
+    List<UnreconciledChildExecution> unreconciledChildren) {
 
   public CaseProcessSnapshot(
       String schemaVersion,
@@ -99,7 +101,8 @@ public record CaseProcessSnapshot(
         null,
         null,
         null,
-        false);
+        false,
+        List.of());
   }
 
   public CaseProcessSnapshot(
@@ -164,7 +167,8 @@ public record CaseProcessSnapshot(
         null,
         null,
         null,
-        false);
+        false,
+        List.of());
   }
 
   public CaseProcessSnapshot(
@@ -233,7 +237,8 @@ public record CaseProcessSnapshot(
         activeRoomWorkflowBuildId,
         null,
         null,
-        false);
+        false,
+        List.of());
   }
 
   public CaseProcessSnapshot(
@@ -304,7 +309,81 @@ public record CaseProcessSnapshot(
         activeRoomWorkflowBuildId,
         activeRoomRevision,
         protocolErrorOrigin,
-        false);
+        false,
+        List.of());
+  }
+
+  public CaseProcessSnapshot(
+      String schemaVersion,
+      String workflowId,
+      String workflowRunId,
+      String tenantSurrogate,
+      String caseId,
+      String macroPhase,
+      RoomType activeRoomType,
+      long activeRoomEpoch,
+      String activeChildWorkflowId,
+      long observedProcessRevision,
+      long nextCommandSequence,
+      long nextCaseEventSequence,
+      long processedCommandCount,
+      long processedEventCount,
+      int pendingCommandCount,
+      int bufferedEventCount,
+      int recentCommandCount,
+      long highestObservedCommandSequence,
+      long highestObservedEventSequence,
+      int runGeneration,
+      String blockedReason,
+      String protocolErrorCode,
+      List<String> recentCommandIds,
+      long activeFencingToken,
+      String activeChildWorkflowRunId,
+      int provisioningCommitmentCount,
+      String activeProvisioningSha256,
+      ActiveChildKind activeChildKind,
+      String activeSelectionSchemaVersion,
+      String activeRoomWorkflowType,
+      String activeRoomWorkflowBuildId,
+      Long activeRoomRevision,
+      RecoveryErrorOrigin protocolErrorOrigin,
+      boolean provisioningManualRecoveryRequired) {
+    this(
+        schemaVersion,
+        workflowId,
+        workflowRunId,
+        tenantSurrogate,
+        caseId,
+        macroPhase,
+        activeRoomType,
+        activeRoomEpoch,
+        activeChildWorkflowId,
+        observedProcessRevision,
+        nextCommandSequence,
+        nextCaseEventSequence,
+        processedCommandCount,
+        processedEventCount,
+        pendingCommandCount,
+        bufferedEventCount,
+        recentCommandCount,
+        highestObservedCommandSequence,
+        highestObservedEventSequence,
+        runGeneration,
+        blockedReason,
+        protocolErrorCode,
+        recentCommandIds,
+        activeFencingToken,
+        activeChildWorkflowRunId,
+        provisioningCommitmentCount,
+        activeProvisioningSha256,
+        activeChildKind,
+        activeSelectionSchemaVersion,
+        activeRoomWorkflowType,
+        activeRoomWorkflowBuildId,
+        activeRoomRevision,
+        protocolErrorOrigin,
+        provisioningManualRecoveryRequired,
+        List.of());
   }
 
   public CaseProcessSnapshot {
@@ -312,10 +391,17 @@ public record CaseProcessSnapshot(
       throw new IllegalArgumentException("schemaVersion must be case-process-snapshot.v1");
     }
     recentCommandIds = List.copyOf(recentCommandIds);
+    unreconciledChildren =
+        unreconciledChildren == null ? List.of() : List.copyOf(unreconciledChildren);
     if (activeFencingToken < 0
         || provisioningCommitmentCount < 0
         || (activeRoomRevision != null && activeRoomRevision < 0)) {
       throw new IllegalArgumentException("provisioning snapshot counters are invalid");
+    }
+    if (unreconciledChildren.size() > CaseProcessCarryState.MAX_UNRECONCILED_CHILDREN
+        || (!unreconciledChildren.isEmpty() && !provisioningManualRecoveryRequired)
+        || unreconciledChildren.stream().distinct().count() != unreconciledChildren.size()) {
+      throw new IllegalArgumentException("unreconciled child snapshot identities are invalid");
     }
   }
 }

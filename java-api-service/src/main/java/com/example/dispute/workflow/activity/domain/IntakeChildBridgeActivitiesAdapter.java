@@ -145,8 +145,8 @@ public final class IntakeChildBridgeActivitiesAdapter implements IntakeChildBrid
                 source.operationKey(),
                 "intake.operation:" + command.caseId() + ":" + command.commandId(),
                 "command operation key");
-        IntakeParty actorParty = party(command.actorRef().actorRole());
-        requireSame(source.party(), actorParty, "actor party");
+        requireParticipantRole(command.actorRef().actorRole());
+        Objects.requireNonNull(source.party(), "authoritative Intake party");
         IntakeCommandType type = commandType(command.commandType());
         if (source.executionContext() != null
                 && source.executionContext().deadlineEpochMillis()
@@ -303,12 +303,10 @@ public final class IntakeChildBridgeActivitiesAdapter implements IntakeChildBrid
         };
     }
 
-    private static IntakeParty party(ActorRole role) {
-        return switch (role) {
-            case USER -> IntakeParty.INITIATOR;
-            case MERCHANT -> IntakeParty.RESPONDENT;
-            default -> throw new IllegalArgumentException("unknown Intake actor role");
-        };
+    private static void requireParticipantRole(ActorRole role) {
+        if (role != ActorRole.USER && role != ActorRole.MERCHANT) {
+            throw new IllegalArgumentException("unknown Intake actor role");
+        }
     }
 
     private static IntakeDomainEventType eventType(String source) {
