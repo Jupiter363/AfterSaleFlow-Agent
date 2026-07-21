@@ -70,7 +70,7 @@ class MigrationIntegrationTest {
         MigrateResult first = flyway.migrate();
         MigrateResult second = flyway.migrate();
 
-        assertThat(first.migrationsExecuted).isEqualTo(45);
+        assertThat(first.migrationsExecuted).isEqualTo(48);
         assertThat(second.migrationsExecuted).isZero();
 
         try (Connection connection =
@@ -144,6 +144,12 @@ class MigrationIntegrationTest {
                             "case_process_projection",
                             "case_room_epoch",
                             "room_epoch_bootstrap_outbox",
+                            "case_intake_graph_thread_binding",
+                            "case_intake_snapshot_binding",
+                            "case_intake_epoch_selection_binding",
+                            "case_intake_epoch_party_authority",
+                            "case_intake_command_payload_authority",
+                            "case_intake_command_authority",
                             "domain_operation",
                             "process_reconciliation_issue",
                             "immutable_payload_snapshot",
@@ -221,6 +227,10 @@ class MigrationIntegrationTest {
                             "idx_case_room_epoch_workflow_history",
                             "idx_room_epoch_bootstrap_pending",
                             "idx_room_epoch_bootstrap_lease",
+                            "uq_r15_case_room_epoch_selection",
+                            "uq_r15_graph_thread_authority",
+                            "uq_r15_payload_command_route",
+                            "uq_r15_command_payload",
                             "uq_domain_operation_tenant_key",
                             "idx_payload_snapshot_case_visibility",
                             "uq_agent_execution_manifest_logical_run");
@@ -241,7 +251,13 @@ class MigrationIntegrationTest {
                             "trg_immutable_payload_snapshot_append_only",
                             "trg_agent_execution_manifest_append_only",
                             "trg_case_room_epoch_immutable_selection",
-                            "trg_case_process_projection_activation");
+                            "trg_case_process_projection_activation",
+                            "trg_r15_selection_immutable",
+                            "trg_r15_party_immutable",
+                            "trg_r15_payload_immutable",
+                            "trg_r15_command_immutable",
+                            "trg_r15_existing_private_event_assertion",
+                            "trg_r15_command_exact_comparison");
             assertFormalJuryReportUniqueness(connection);
             assertAppendOnlyTablesRejectMutation(connection);
         }
