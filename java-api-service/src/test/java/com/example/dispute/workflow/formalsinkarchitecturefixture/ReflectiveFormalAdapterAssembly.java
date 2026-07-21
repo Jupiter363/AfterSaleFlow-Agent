@@ -24,3 +24,19 @@ final class FormalAdapterClassResolver {
         return type.getDeclaredConstructor().newInstance();
     }
 }
+
+@Configuration
+class SafeReflectiveAssembly {
+
+    Object safeUtility() throws ReflectiveOperationException {
+        return new SafeUtilityClassResolver().instantiate();
+    }
+}
+
+final class SafeUtilityClassResolver {
+
+    Object instantiate() throws ReflectiveOperationException {
+        Class<?> type = Class.forName("java.util.ArrayList");
+        return type.getDeclaredConstructor().newInstance();
+    }
+}

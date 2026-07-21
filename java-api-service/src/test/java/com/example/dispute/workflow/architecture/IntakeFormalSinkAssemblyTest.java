@@ -8,6 +8,7 @@ import com.tngtech.archunit.core.domain.Dependency;
 import com.tngtech.archunit.core.domain.JavaAnnotation;
 import com.tngtech.archunit.core.domain.JavaClass;
 import com.tngtech.archunit.core.domain.JavaClasses;
+import com.tngtech.archunit.core.domain.JavaCodeUnit;
 import com.tngtech.archunit.core.domain.JavaCodeUnitAccess;
 import com.tngtech.archunit.core.importer.ClassFileImporter;
 import com.tngtech.archunit.core.importer.ImportOption;
@@ -18,17 +19,20 @@ import com.tngtech.archunit.lang.ArchRule;
 import com.tngtech.archunit.lang.ConditionEvents;
 import com.tngtech.archunit.lang.SimpleConditionEvent;
 import com.tngtech.archunit.lang.syntax.ArchRuleDefinition;
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.net.URI;
+import java.net.URISyntaxException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayDeque;
@@ -38,12 +42,17 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.StringTokenizer;
 import java.util.TreeSet;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.jar.Attributes;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
+import java.util.jar.Manifest;
 import java.util.function.LongConsumer;
 import java.util.stream.Collectors;
 import java.util.regex.Pattern;
@@ -53,6 +62,11 @@ import java.util.zip.ZipOutputStream;
 import javax.lang.model.SourceVersion;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.springframework.asm.ClassReader;
+import org.springframework.asm.ClassVisitor;
+import org.springframework.asm.MethodVisitor;
+import org.springframework.asm.Opcodes;
+import org.springframework.asm.Type;
 
 @AnalyzeClasses(
         packages = "com.example.dispute",
@@ -74,7 +88,9 @@ class IntakeFormalSinkAssemblyTest {
     private static final String BOOT_CLASSES_SERVICES_PATH =
             "BOOT-INF/classes/META-INF/services/";
     private static final String BOOT_LIB_PATH = "BOOT-INF/lib/";
+    private static final String MANIFEST_PATH = JarFile.MANIFEST_NAME;
     private static final int MAX_NESTED_ARCHIVE_DEPTH = 8;
+    private static final int MAX_DYNAMIC_CLASS_BYTES = 4_194_304;
     private static final int MAX_EOCD_BYTES = 65_557;
     private static final long EOCD_SIGNATURE = 0x06054b50L;
     private static final long ZIP64_EOCD_LOCATOR_SIGNATURE = 0x07064b50L;
@@ -84,9 +100,12 @@ class IntakeFormalSinkAssemblyTest {
     private static final ScanLimits PRODUCTION_SCAN_LIMITS =
             new ScanLimits(
                     1_048_576,
+                    1_048_576,
                     67_108_864,
                     1_073_741_824,
+                    8_192,
                     4_096,
+                    32,
                     67_108_864,
                     5_000_000,
                     2_048,
@@ -138,6 +157,9 @@ class IntakeFormalSinkAssemblyTest {
                     "getBeansWithAnnotation",
                     "findAnnotationOnBean");
 
+    private static final Map<DynamicCodeUnitKey, DynamicTargetEvidence>
+            DYNAMIC_TARGET_EVIDENCE = new ConcurrentHashMap<>();
+
     @ArchTest
     static final ArchRule ASSEMBLY_ROOTS_MUST_NOT_REACH_A_FORMAL_INTAKE_SINK =
             noFormalSinkAssemblyRule(PRODUCTION_SERVICE_DESCRIPTORS.ownedProviderNames());
@@ -177,6 +199,8 @@ class IntakeFormalSinkAssemblyTest {
                                 combinedDescriptor));
         ServiceDescriptorCatalog scannedDescriptors =
                 createAndScanServiceDescriptorFixtures(tempDirectory, combinedDescriptor);
+        assertThat(scannedDescriptors.ownedProviderNames())
+                .contains(FIXTURE_PACKAGE + ".ManifestOnlyFormalProvider");
         ServiceDescriptorCatalog allFixtureDescriptors =
                 ServiceDescriptorCatalog.merge(injectedDescriptors, scannedDescriptors);
         ServiceProviderResolution injectedResolution =
@@ -203,6 +227,7 @@ class IntakeFormalSinkAssemblyTest {
                 .contains("CrossFileWrapperAssembly")
                 .contains("WorkerRegistrationMethodReferenceAssembly")
                 .contains("MetaAnnotatedFormalAssembly")
+                .contains("ManifestOnlyFormalProvider")
                 .contains("FixtureFormalFactory")
                 .contains("CrossFileFormalDelegate")
                 .contains("IntakeFormalCommitPort")
@@ -219,6 +244,15 @@ class IntakeFormalSinkAssemblyTest {
                         "formal Intake sink is reachable: "
                                 + FIXTURE_PACKAGE
                                 + ".OpaqueProvider$NestedOpaqueProvider -> "
+                                + FIXTURE_PACKAGE
+                                + ".CrossFileFormalWrapper -> "
+                                + FIXTURE_PACKAGE
+                                + ".CrossFileFormalDelegate -> "
+                                + "com.example.dispute.workflow.application.intake.IntakeFormalCommitPort")
+                .contains(
+                        "formal Intake sink is reachable: "
+                                + FIXTURE_PACKAGE
+                                + ".ManifestOnlyFormalProvider -> "
                                 + FIXTURE_PACKAGE
                                 + ".CrossFileFormalWrapper -> "
                                 + FIXTURE_PACKAGE
@@ -243,6 +277,18 @@ class IntakeFormalSinkAssemblyTest {
                                 + FIXTURE_PACKAGE
                                 + ".FormalBeanNameResolver -> "
                                 + "org.springframework.context.ApplicationContext.getBean");
+        assertThat(violations)
+                .contains(
+                        "UnresolvedWorkerDynamicAssembly -> java.lang.Class.forName")
+                .contains(
+                        "UnresolvedBeanLookupAssembly -> "
+                                + "org.springframework.context.ApplicationContext.getBean")
+                .doesNotContain("SafeServiceLoaderAssembly")
+                .doesNotContain("SafeServiceProviderLoader")
+                .doesNotContain("SafeReflectiveAssembly")
+                .doesNotContain("SafeUtilityClassResolver")
+                .doesNotContain("SafeSpringBeanLookupAssembly")
+                .doesNotContain("SafeBeanNameResolver");
 
         assertShortestChain(
                 fixtures,
@@ -379,7 +425,8 @@ class IntakeFormalSinkAssemblyTest {
                                                                         root,
                                                                         "formal Intake sink is reachable: "
                                                                                 + formatChain(chain))));
-                                addDynamicAssemblyViolations(root, events);
+                                addDynamicAssemblyViolations(
+                                        root, serviceProviderRoots, events);
                             }
                         })
                 .because(
@@ -477,10 +524,13 @@ class IntakeFormalSinkAssemblyTest {
     }
 
     private static void addDynamicAssemblyViolations(
-            JavaClass root, ConditionEvents events) {
+            JavaClass root,
+            Set<String> serviceProviderRoots,
+            ConditionEvents events) {
         for (PathNode reachable : reachableOwnedPaths(root)) {
             for (JavaCodeUnitAccess<?> access :
-                    forbiddenDynamicAssemblyAccesses(reachable.javaClass())) {
+                    forbiddenDynamicAssemblyAccesses(
+                            reachable.javaClass(), root, serviceProviderRoots)) {
                 events.add(
                         SimpleConditionEvent.violated(
                                 root,
@@ -495,13 +545,18 @@ class IntakeFormalSinkAssemblyTest {
     }
 
     private static List<JavaCodeUnitAccess<?>> forbiddenDynamicAssemblyAccesses(
-            JavaClass javaClass) {
+            JavaClass javaClass,
+            JavaClass root,
+            Set<String> serviceProviderRoots) {
         List<JavaCodeUnitAccess<?>> accesses = new ArrayList<>();
         accesses.addAll(javaClass.getMethodCallsFromSelf());
         accesses.addAll(javaClass.getConstructorCallsFromSelf());
         accesses.addAll(javaClass.getMethodReferencesFromSelf());
         return accesses.stream()
-                .filter(IntakeFormalSinkAssemblyTest::isForbiddenDynamicAssemblyAccess)
+                .filter(
+                        access ->
+                                isForbiddenDynamicAssemblyAccess(
+                                        access, root, serviceProviderRoots))
                 .sorted(
                         Comparator.comparing(
                                         (JavaCodeUnitAccess<?> access) ->
@@ -511,7 +566,30 @@ class IntakeFormalSinkAssemblyTest {
                 .toList();
     }
 
-    private static boolean isForbiddenDynamicAssemblyAccess(JavaCodeUnitAccess<?> access) {
+    private static boolean isForbiddenDynamicAssemblyAccess(
+            JavaCodeUnitAccess<?> access,
+            JavaClass root,
+            Set<String> serviceProviderRoots) {
+        if (!isDynamicAssemblyApi(access)) {
+            return false;
+        }
+        DynamicTargetEvidence evidence = dynamicTargetEvidence(access.getOrigin());
+        if (!evidence.inspected()) {
+            return true;
+        }
+        if (hasFormalDynamicTarget(evidence)
+                || shortestFormalSinkChain(access.getOriginOwner()).isPresent()) {
+            return true;
+        }
+        if (hasResolvedDynamicTarget(evidence)) {
+            return false;
+        }
+        return isWorkerRegistrationRoot(root)
+                || declaresBeanMethod(root)
+                || serviceProviderRoots.contains(root.getName());
+    }
+
+    private static boolean isDynamicAssemblyApi(JavaCodeUnitAccess<?> access) {
         JavaClass owner = access.getTargetOwner();
         String ownerName = owner.getName();
         String methodName = access.getName();
@@ -544,6 +622,182 @@ class IntakeFormalSinkAssemblyTest {
         }
         return SPRING_DYNAMIC_LOOKUP_METHODS.contains(methodName)
                 && owner.isAssignableTo(SPRING_BEAN_FACTORY);
+    }
+
+    private static boolean hasFormalDynamicTarget(DynamicTargetEvidence evidence) {
+        return evidence.stringConstants().stream()
+                        .anyMatch(IntakeFormalSinkAssemblyTest::isFormalDynamicTargetName)
+                || evidence.typeConstants().stream()
+                        .anyMatch(IntakeFormalSinkAssemblyTest::isFormalDynamicTargetName);
+    }
+
+    private static boolean hasResolvedDynamicTarget(DynamicTargetEvidence evidence) {
+        return !evidence.typeConstants().isEmpty()
+                || evidence.stringConstants().stream()
+                        .anyMatch(
+                                value ->
+                                        !value.isBlank()
+                                                && value.chars()
+                                                        .noneMatch(Character::isWhitespace));
+    }
+
+    private static boolean isFormalDynamicTargetName(String candidate) {
+        String normalized = candidate.replace('$', '.');
+        String simpleName =
+                normalized.substring(normalized.lastIndexOf('.') + 1);
+        String lowerCase = normalized.toLowerCase(Locale.ROOT);
+        return FORMAL_ROOT_SIMPLE_NAMES.contains(simpleName)
+                || simpleName.startsWith("JdbcIntakeFormal")
+                || normalized.equals(
+                        "com.example.dispute.workflow.temporal.room.intake.IntakeRoomActivities")
+                || normalized.endsWith(".IntakeRoomActivitiesAdapter")
+                || (lowerCase.contains("intake") && lowerCase.contains("formal"));
+    }
+
+    private static DynamicTargetEvidence dynamicTargetEvidence(JavaCodeUnit origin) {
+        DynamicCodeUnitKey key =
+                new DynamicCodeUnitKey(
+                        origin.getOwner().getName(),
+                        origin.getName(),
+                        origin.getDescriptor());
+        return DYNAMIC_TARGET_EVIDENCE.computeIfAbsent(
+                key, ignored -> readDynamicTargetEvidence(origin));
+    }
+
+    private static DynamicTargetEvidence readDynamicTargetEvidence(JavaCodeUnit origin) {
+        String resourceName =
+                origin.getOwner().getName().replace('.', '/') + ".class";
+        ClassLoader classLoader = IntakeFormalSinkAssemblyTest.class.getClassLoader();
+        try (InputStream input = classLoader.getResourceAsStream(resourceName)) {
+            if (input == null) {
+                return DynamicTargetEvidence.uninspected();
+            }
+            byte[] classBytes = input.readNBytes(MAX_DYNAMIC_CLASS_BYTES + 1);
+            if (classBytes.length > MAX_DYNAMIC_CLASS_BYTES) {
+                return DynamicTargetEvidence.uninspected();
+            }
+            Set<String> stringConstants = new TreeSet<>();
+            Set<String> typeConstants = new TreeSet<>();
+            boolean[] matchedOrigin = {false};
+            ClassReader reader = new ClassReader(classBytes);
+            reader.accept(
+                    new ClassVisitor(Opcodes.ASM9) {
+                        @Override
+                        public MethodVisitor visitMethod(
+                                int access,
+                                String name,
+                                String descriptor,
+                                String signature,
+                                String[] exceptions) {
+                            if (!name.equals(origin.getName())
+                                    || !descriptor.equals(origin.getDescriptor())) {
+                                return null;
+                            }
+                            matchedOrigin[0] = true;
+                            return new MethodVisitor(Opcodes.ASM9) {
+                                private final Set<String> recentStrings = new HashSet<>();
+                                private final Set<String> recentTypes = new HashSet<>();
+
+                                @Override
+                                public void visitLdcInsn(Object value) {
+                                    if (value instanceof String stringValue) {
+                                        recentStrings.add(stringValue);
+                                    } else if (value instanceof Type typeValue
+                                            && (typeValue.getSort() == Type.OBJECT
+                                                    || typeValue.getSort() == Type.ARRAY)) {
+                                        recentTypes.add(typeValue.getClassName());
+                                    }
+                                }
+
+                                @Override
+                                public void visitMethodInsn(
+                                        int opcode,
+                                        String owner,
+                                        String name,
+                                        String methodDescriptor,
+                                        boolean isInterface) {
+                                    if (isDynamicTargetInvocation(owner, name)) {
+                                        stringConstants.addAll(recentStrings);
+                                        typeConstants.addAll(recentTypes);
+                                    }
+                                    clearRecentConstants();
+                                }
+
+                                @Override
+                                public void visitInsn(int opcode) {
+                                    clearRecentConstants();
+                                }
+
+                                @Override
+                                public void visitIntInsn(int opcode, int operand) {
+                                    clearRecentConstants();
+                                }
+
+                                @Override
+                                public void visitVarInsn(int opcode, int variable) {
+                                    clearRecentConstants();
+                                }
+
+                                @Override
+                                public void visitTypeInsn(int opcode, String type) {
+                                    clearRecentConstants();
+                                }
+
+                                @Override
+                                public void visitFieldInsn(
+                                        int opcode, String owner, String name, String descriptor) {
+                                    clearRecentConstants();
+                                }
+
+                                @Override
+                                public void visitInvokeDynamicInsn(
+                                        String name,
+                                        String descriptor,
+                                        org.springframework.asm.Handle bootstrapMethodHandle,
+                                        Object... bootstrapMethodArguments) {
+                                    clearRecentConstants();
+                                }
+
+                                @Override
+                                public void visitJumpInsn(int opcode, org.springframework.asm.Label label) {
+                                    clearRecentConstants();
+                                }
+
+                                private void clearRecentConstants() {
+                                    recentStrings.clear();
+                                    recentTypes.clear();
+                                }
+                            };
+                        }
+                    },
+                    ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+            return new DynamicTargetEvidence(
+                    matchedOrigin[0], stringConstants, typeConstants);
+        } catch (IOException | RuntimeException failure) {
+            return DynamicTargetEvidence.uninspected();
+        }
+    }
+
+    private static boolean isDynamicTargetInvocation(String owner, String methodName) {
+        if (owner.equals("java/util/ServiceLoader") && methodName.equals("load")) {
+            return true;
+        }
+        if (owner.equals("java/lang/Class") && methodName.equals("forName")) {
+            return true;
+        }
+        if (owner.endsWith("ClassLoader") && methodName.equals("loadClass")) {
+            return true;
+        }
+        if ((owner.startsWith("org/springframework/beans/factory/")
+                        || owner.equals("org/springframework/context/ApplicationContext"))
+                && SPRING_DYNAMIC_LOOKUP_METHODS.contains(methodName)) {
+            return true;
+        }
+        return owner.startsWith("java/lang/invoke/MethodHandles")
+                || (owner.equals("java/lang/invoke/MethodType")
+                        && methodName.equals("fromMethodDescriptorString"))
+                || (owner.equals("java/lang/reflect/Proxy")
+                        && methodName.equals("newProxyInstance"));
     }
 
     private static ServiceDescriptorCatalog createAndScanServiceDescriptorFixtures(
@@ -588,6 +842,34 @@ class IntakeFormalSinkAssemblyTest {
         writeArchive(
                 nestedBootArchive,
                 Map.of(BOOT_LIB_PATH + "opaque-provider.library", nestedLibrary));
+
+        Path manifestAppDirectory = tempDirectory.resolve("manifest-app");
+        Path manifestLibraryDirectory = tempDirectory.resolve("manifest-libs");
+        Path manifestSafeDirectory = tempDirectory.resolve("manifest-safe-classes");
+        Files.createDirectories(manifestAppDirectory);
+        Files.createDirectories(manifestLibraryDirectory);
+        writeDirectoryDescriptor(
+                manifestSafeDirectory,
+                "com.vendor.ManifestSafeProvider".getBytes(StandardCharsets.UTF_8));
+        Path manifestRootArchive = manifestAppDirectory.resolve("manifest-root.bin");
+        Path manifestProviderArchive =
+                manifestLibraryDirectory.resolve("formal-provider.bin");
+        writeArchive(
+                manifestProviderArchive,
+                Map.of(
+                        MANIFEST_PATH,
+                        manifestBytes("../manifest-app/manifest-root.bin"),
+                        descriptorEntry,
+                        (FIXTURE_PACKAGE + ".ManifestOnlyFormalProvider")
+                                .getBytes(StandardCharsets.UTF_8)));
+        writeArchive(
+                manifestRootArchive,
+                Map.of(
+                        MANIFEST_PATH,
+                        manifestBytes(
+                                "../manifest-libs/formal-provider.bin "
+                                        + "../manifest-libs/./formal-provider.bin "
+                                        + "../manifest-safe-classes/")));
 
         Path plainFile = tempDirectory.resolve("not-an-archive.txt");
         Files.writeString(plainFile, "not a ZIP archive", StandardCharsets.UTF_8);
@@ -637,10 +919,11 @@ class IntakeFormalSinkAssemblyTest {
         fixtureClassPath.add(uriArchive.toUri().toASCIIString());
         fixtureClassPath.add(bootClassesArchive.toString());
         fixtureClassPath.add(nestedBootArchive.toString());
+        fixtureClassPath.add(manifestRootArchive.toString());
         ServiceDescriptorCatalog catalog = scanClassPathEntries(fixtureClassPath);
         assertThat(catalog.descriptors())
                 .filteredOn(descriptor -> descriptor.source().contains(tempDirectory.toString()))
-                .hasSize(6);
+                .hasSize(8);
         assertScannerBudgets(tempDirectory);
         return catalog;
     }
@@ -673,6 +956,17 @@ class IntakeFormalSinkAssemblyTest {
                 archive.closeEntry();
             }
         }
+        return bytes.toByteArray();
+    }
+
+    private static byte[] manifestBytes(String classPath) throws IOException {
+        Manifest manifest = new Manifest();
+        manifest.getMainAttributes()
+                .put(Attributes.Name.MANIFEST_VERSION, "1.0");
+        manifest.getMainAttributes()
+                .put(Attributes.Name.CLASS_PATH, classPath);
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        manifest.write(bytes);
         return bytes.toByteArray();
     }
 
@@ -788,7 +1082,120 @@ class IntakeFormalSinkAssemblyTest {
                         exactExpandedBytes - 1L),
                 "total relevant expanded byte limit");
         assertRawArchivePreflight(tempDirectory);
+        assertManifestClassPathTraversal(tempDirectory);
         assertCleanupFailurePolicy(tempDirectory);
+    }
+
+    private static void assertManifestClassPathTraversal(Path tempDirectory) throws IOException {
+        Path fixtureDirectory = tempDirectory.resolve("manifest-traversal-budget");
+        Files.createDirectories(fixtureDirectory);
+        Path dependency = fixtureDirectory.resolve("dependency.bin");
+        writeArchive(dependency, Map.of());
+        Path root = fixtureDirectory.resolve("root.bin");
+        byte[] rootManifest = manifestBytes("dependency.bin");
+        writeArchive(root, Map.of(MANIFEST_PATH, rootManifest));
+
+        scanClassPathEntries(
+                List.of(root.toString()),
+                withManifestTraversalLimits(
+                        testScanLimits(256, 4_096, 1, 10, 10, 8_192),
+                        rootManifest.length,
+                        2,
+                        2,
+                        1));
+
+        assertThatThrownBy(
+                        () ->
+                                scanClassPathEntries(
+                                        List.of(root.toString()),
+                                        withManifestTraversalLimits(
+                                                testScanLimits(
+                                                        256, 4_096, 1, 10, 10, 8_192),
+                                                rootManifest.length,
+                                                1,
+                                                2,
+                                                1)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("resolved classpath entry limit");
+        assertThatThrownBy(
+                        () ->
+                                scanClassPathEntries(
+                                        List.of(root.toString()),
+                                        withManifestTraversalLimits(
+                                                testScanLimits(
+                                                        256, 4_096, 1, 10, 10, 8_192),
+                                                rootManifest.length,
+                                                2,
+                                                1,
+                                                1)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("classpath archive count limit");
+        assertThatThrownBy(
+                        () ->
+                                scanClassPathEntries(
+                                        List.of(root.toString()),
+                                        withManifestTraversalLimits(
+                                                testScanLimits(
+                                                        256, 4_096, 1, 10, 10, 8_192),
+                                                rootManifest.length,
+                                                2,
+                                                2,
+                                                0)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("manifest Class-Path hop depth limit");
+        assertThatThrownBy(
+                        () ->
+                                scanClassPathEntries(
+                                        List.of(root.toString()),
+                                        withManifestTraversalLimits(
+                                                testScanLimits(
+                                                        256, 4_096, 1, 10, 10, 8_192),
+                                                rootManifest.length - 1L,
+                                                2,
+                                                2,
+                                                1)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("manifest byte limit");
+
+        Path unsupportedUri = fixtureDirectory.resolve("unsupported-uri.bin");
+        writeArchive(
+                unsupportedUri,
+                Map.of(MANIFEST_PATH, manifestBytes("https://example.invalid/provider.jar")));
+        assertManifestTraversalFails(unsupportedUri, "unsupported URI scheme");
+
+        Path malformedUri = fixtureDirectory.resolve("malformed-uri.bin");
+        writeArchive(malformedUri, Map.of(MANIFEST_PATH, manifestBytes("bad[uri")));
+        assertManifestTraversalFails(malformedUri, "malformed Class-Path URI");
+
+        Path staleThirdPartyManifest = fixtureDirectory.resolve("stale-third-party-manifest.bin");
+        writeArchive(
+                staleThirdPartyManifest,
+                Map.of(MANIFEST_PATH, manifestBytes("missing-transitive-dependency.jar")));
+        assertThat(
+                        scanClassPathEntries(
+                                        List.of(staleThirdPartyManifest.toString()),
+                                        testScanLimits(256, 4_096, 1, 10, 10, 8_192))
+                                .descriptors())
+                .isEmpty();
+
+        Path malformedManifest = fixtureDirectory.resolve("malformed-manifest.bin");
+        writeArchive(
+                malformedManifest,
+                Map.of(
+                        MANIFEST_PATH,
+                        "Manifest-Version: 1.0\r\nMalformed Header\r\n\r\n"
+                                .getBytes(StandardCharsets.UTF_8)));
+        assertManifestTraversalFails(malformedManifest, "malformed archive manifest");
+    }
+
+    private static void assertManifestTraversalFails(Path archive, String message) {
+        assertThatThrownBy(
+                        () ->
+                                scanClassPathEntries(
+                                        List.of(archive.toString()),
+                                        testScanLimits(256, 4_096, 1, 10, 10, 8_192)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining(message);
     }
 
     private static void assertRawArchivePreflight(Path tempDirectory) throws IOException {
@@ -932,6 +1339,28 @@ class IntakeFormalSinkAssemblyTest {
                                         }))
                 .isInstanceOf(UncheckedIOException.class)
                 .hasMessageContaining("cannot delete nested archive staging file");
+
+        SecurityException securityFailure =
+                new SecurityException("synthetic security cleanup failure");
+        IllegalStateException securityPrimaryFailure =
+                new IllegalStateException("primary scan failure before security cleanup");
+        cleanupTemporaryArchive(
+                stagedArchive,
+                securityPrimaryFailure,
+                ignored -> {
+                    throw securityFailure;
+                });
+        assertThat(securityPrimaryFailure.getSuppressed())
+                .containsExactly(securityFailure);
+        assertThatThrownBy(
+                        () ->
+                                cleanupTemporaryArchive(
+                                        stagedArchive,
+                                        null,
+                                        ignored -> {
+                                            throw securityFailure;
+                                        }))
+                .isSameAs(securityFailure);
         Files.deleteIfExists(stagedArchive);
     }
 
@@ -944,9 +1373,12 @@ class IntakeFormalSinkAssemblyTest {
             long maxTotalRelevantExpandedBytes) {
         return new ScanLimits(
                 maxDescriptorBytes,
+                1_048_576,
                 maxNestedArchiveBytes,
                 1_048_576,
+                1_000,
                 100,
+                32,
                 1_048_576,
                 1_000,
                 maxNestedArchiveCount,
@@ -963,11 +1395,36 @@ class IntakeFormalSinkAssemblyTest {
             long maxTotalArchiveEntries) {
         return new ScanLimits(
                 limits.maxDescriptorBytes(),
+                limits.maxManifestBytes(),
                 limits.maxNestedArchiveBytes(),
                 maxArchiveFileBytes,
+                limits.maxResolvedClassPathEntries(),
                 maxClasspathArchiveCount,
+                limits.maxManifestHopDepth(),
                 maxCentralDirectoryBytes,
                 maxTotalArchiveEntries,
+                limits.maxNestedArchiveCount(),
+                limits.maxNestedArchiveEntries(),
+                limits.maxRelevantEntries(),
+                limits.maxTotalRelevantExpandedBytes());
+    }
+
+    private static ScanLimits withManifestTraversalLimits(
+            ScanLimits limits,
+            long maxManifestBytes,
+            long maxResolvedClassPathEntries,
+            long maxClasspathArchiveCount,
+            long maxManifestHopDepth) {
+        return new ScanLimits(
+                limits.maxDescriptorBytes(),
+                maxManifestBytes,
+                limits.maxNestedArchiveBytes(),
+                limits.maxArchiveFileBytes(),
+                maxResolvedClassPathEntries,
+                maxClasspathArchiveCount,
+                maxManifestHopDepth,
+                limits.maxCentralDirectoryBytes(),
+                limits.maxTotalArchiveEntries(),
                 limits.maxNestedArchiveCount(),
                 limits.maxNestedArchiveEntries(),
                 limits.maxRelevantEntries(),
@@ -1001,16 +1458,42 @@ class IntakeFormalSinkAssemblyTest {
 
     private static ServiceDescriptorCatalog scanClassPathEntries(
             List<String> rawEntries, ScanLimits limits) {
-        Set<Path> classPathEntries =
-                rawEntries.stream()
-                        .map(IntakeFormalSinkAssemblyTest::resolveClassPathEntry)
-                        .collect(
-                                Collectors.toCollection(
-                                        () -> new TreeSet<>(Comparator.comparing(Path::toString))));
-        List<ServiceDescriptor> descriptors = new ArrayList<>();
         ScanBudget budget = new ScanBudget(limits);
-        classPathEntries.forEach(
-                path -> scanClassPathEntry(path, descriptors, budget));
+        ArrayDeque<ClassPathScanEntry> pending =
+                rawEntries.stream()
+                        .map(
+                                rawEntry ->
+                                        new ClassPathScanEntry(
+                                                resolveClassPathEntry(rawEntry),
+                                                0,
+                                                "classpath entry '" + rawEntry + "'"))
+                        .peek(entry -> budget.recordResolvedClassPathEntry(entry.source()))
+                        .sorted(Comparator.comparing(entry -> entry.path().toString()))
+                        .collect(Collectors.toCollection(ArrayDeque::new));
+        Set<String> visitedIdentities = new HashSet<>();
+        List<ServiceDescriptor> descriptors = new ArrayList<>();
+        while (!pending.isEmpty()) {
+            ClassPathScanEntry candidate = pending.removeFirst();
+            if (!Files.exists(candidate.path()) && candidate.manifestHopDepth() > 0) {
+                // URLClassLoader ignores unreachable manifest URLs; they still consume scan width.
+                continue;
+            }
+            CanonicalClassPathEntry canonical =
+                    canonicalClassPathEntry(candidate.path(), candidate.source());
+            if (!visitedIdentities.add(canonical.identity())) {
+                continue;
+            }
+            budget.checkManifestHopDepth(
+                    candidate.manifestHopDepth(), candidate.source());
+            scanClassPathEntry(
+                            canonical.path(),
+                            candidate.manifestHopDepth(),
+                            descriptors,
+                            budget)
+                    .stream()
+                    .sorted(Comparator.comparing(entry -> entry.path().toString()))
+                    .forEach(pending::addLast);
+        }
         return new ServiceDescriptorCatalog(descriptors);
     }
 
@@ -1027,28 +1510,56 @@ class IntakeFormalSinkAssemblyTest {
         }
     }
 
-    private static void scanClassPathEntry(
-            Path classPathEntry,
-            List<ServiceDescriptor> descriptors,
-            ScanBudget budget) {
+    private static CanonicalClassPathEntry canonicalClassPathEntry(
+            Path classPathEntry, String source) {
         if (!Files.exists(classPathEntry)) {
             throw new IllegalStateException(
-                    "classpath entry does not exist: " + classPathEntry);
+                    "classpath entry does not exist: " + classPathEntry + " from " + source);
         }
         if (!Files.isReadable(classPathEntry)) {
             throw new IllegalStateException(
-                    "classpath entry is not readable: " + classPathEntry);
+                    "classpath entry is not readable: " + classPathEntry + " from " + source);
         }
+        try {
+            Path canonicalPath = classPathEntry.toRealPath();
+            BasicFileAttributes attributes =
+                    Files.readAttributes(canonicalPath, BasicFileAttributes.class);
+            Object fileKey = attributes.fileKey();
+            String normalizedPath = canonicalPath.toString();
+            if (File.separatorChar == '\\') {
+                normalizedPath = normalizedPath.toLowerCase(Locale.ROOT);
+            }
+            String identity =
+                    fileKey == null
+                            ? "path:" + normalizedPath
+                            : "file:" + canonicalPath.getRoot() + ":" + fileKey;
+            return new CanonicalClassPathEntry(canonicalPath, identity);
+        } catch (IOException failure) {
+            throw new UncheckedIOException(
+                    "cannot resolve canonical classpath entry "
+                            + classPathEntry
+                            + " from "
+                            + source,
+                    failure);
+        }
+    }
+
+    private static List<ClassPathScanEntry> scanClassPathEntry(
+            Path classPathEntry,
+            int manifestHopDepth,
+            List<ServiceDescriptor> descriptors,
+            ScanBudget budget) {
         if (Files.isDirectory(classPathEntry)) {
             scanServiceDescriptorDirectory(classPathEntry, descriptors, budget);
-            return;
+            return List.of();
         }
         if (!Files.isRegularFile(classPathEntry)) {
             throw new IllegalStateException(
                     "classpath entry is neither a directory nor a regular archive: "
                             + classPathEntry);
         }
-        scanServiceDescriptorArchive(classPathEntry, descriptors, budget);
+        return scanServiceDescriptorArchive(
+                classPathEntry, manifestHopDepth, descriptors, budget);
     }
 
     private static void scanServiceDescriptorDirectory(
@@ -1082,8 +1593,9 @@ class IntakeFormalSinkAssemblyTest {
         }
     }
 
-    private static void scanServiceDescriptorArchive(
+    private static List<ClassPathScanEntry> scanServiceDescriptorArchive(
             Path archivePath,
+            int manifestHopDepth,
             List<ServiceDescriptor> descriptors,
             ScanBudget budget) {
         try {
@@ -1092,10 +1604,13 @@ class IntakeFormalSinkAssemblyTest {
             ZipPreflight preflight =
                     preflightArchive(archivePath, source, 0, budget);
             try (JarFile archive = new JarFile(archivePath.toFile())) {
-                scanArchiveEntries(
+                return scanArchiveEntries(
                         archive,
                         source,
                         preflight,
+                        Optional.of(
+                                new ManifestScanContext(
+                                        archivePath, manifestHopDepth)),
                         descriptors,
                         budget);
             }
@@ -1398,10 +1913,11 @@ class IntakeFormalSinkAssemblyTest {
         bytes[offset + 3] = (byte) (value >>> 24);
     }
 
-    private static void scanArchiveEntries(
+    private static List<ClassPathScanEntry> scanArchiveEntries(
             JarFile archive,
             String source,
             ZipPreflight preflight,
+            Optional<ManifestScanContext> manifestContext,
             List<ServiceDescriptor> descriptors,
             ScanBudget budget) throws IOException {
         List<JarEntry> relevantEntries = new ArrayList<>();
@@ -1412,7 +1928,9 @@ class IntakeFormalSinkAssemblyTest {
             jarEntryNames.add(entry.getName());
             if (!entry.isDirectory()
                     && (descriptorContract(entry.getName()).isPresent()
-                            || isBootNestedArchive(entry.getName()))) {
+                            || isBootNestedArchive(entry.getName())
+                            || (manifestContext.isPresent()
+                                    && entry.getName().equals(MANIFEST_PATH)))) {
                 budget.recordRelevantEntry(source + "!/" + entry.getName());
                 relevantEntries.add(entry);
             }
@@ -1424,7 +1942,16 @@ class IntakeFormalSinkAssemblyTest {
                             + source);
         }
         relevantEntries.sort(Comparator.comparing(JarEntry::getName));
+        long manifestCount =
+                relevantEntries.stream()
+                        .filter(entry -> entry.getName().equals(MANIFEST_PATH))
+                        .count();
+        if (manifestCount > 1) {
+            throw new IllegalStateException(
+                    "archive contains duplicate manifests: " + source);
+        }
 
+        List<ClassPathScanEntry> manifestTargets = new ArrayList<>();
         for (JarEntry entry : relevantEntries) {
             String entrySource = source + "!/" + entry.getName();
             Optional<String> contract = descriptorContract(entry.getName());
@@ -1438,7 +1965,7 @@ class IntakeFormalSinkAssemblyTest {
                                         budget.descriptorReadBudget(),
                                         entrySource,
                                         budget::recordDescriptorBytes)));
-            } else {
+            } else if (isBootNestedArchive(entry.getName())) {
                 budget.reserveNestedArchive(entrySource);
                 byte[] nestedArchive =
                         readRelevantEntry(
@@ -1452,7 +1979,102 @@ class IntakeFormalSinkAssemblyTest {
                         preflight.nestedDepth() + 1,
                         descriptors,
                         budget);
+            } else {
+                ManifestScanContext context = manifestContext.orElseThrow();
+                byte[] manifestBytes =
+                        readRelevantEntry(
+                                archive.getInputStream(entry),
+                                budget.manifestReadBudget(),
+                                entrySource,
+                                budget::recordManifestBytes);
+                manifestTargets.addAll(
+                        parseManifestClassPath(
+                                manifestBytes,
+                                context,
+                                entrySource,
+                                budget));
             }
+        }
+        return List.copyOf(manifestTargets);
+    }
+
+    private static List<ClassPathScanEntry> parseManifestClassPath(
+            byte[] content,
+            ManifestScanContext context,
+            String source,
+            ScanBudget budget) {
+        Manifest manifest;
+        try (ByteArrayInputStream input = new ByteArrayInputStream(content)) {
+            manifest = new Manifest(input);
+        } catch (IOException | RuntimeException failure) {
+            throw new IllegalStateException(
+                    "malformed archive manifest " + source,
+                    failure);
+        }
+        String classPath =
+                manifest.getMainAttributes().getValue(Attributes.Name.CLASS_PATH);
+        if (classPath == null || classPath.isBlank()) {
+            return List.of();
+        }
+        List<ClassPathScanEntry> targets = new ArrayList<>();
+        StringTokenizer tokens = new StringTokenizer(classPath);
+        while (tokens.hasMoreTokens()) {
+            String token = tokens.nextToken();
+            String targetSource = source + " Class-Path '" + token + "'";
+            budget.recordResolvedClassPathEntry(targetSource);
+            Path target = resolveManifestClassPathTarget(context.ownerArchive(), token, source);
+            targets.add(
+                    new ClassPathScanEntry(
+                            target,
+                            context.manifestHopDepth() + 1,
+                            targetSource));
+        }
+        return List.copyOf(targets);
+    }
+
+    private static Path resolveManifestClassPathTarget(
+            Path ownerArchive, String token, String source) {
+        URI tokenUri;
+        try {
+            tokenUri = new URI(token);
+        } catch (URISyntaxException failure) {
+            throw new IllegalStateException(
+                    "malformed Class-Path URI '" + token + "' in " + source,
+                    failure);
+        }
+        if (tokenUri.isAbsolute()
+                && !"file".equalsIgnoreCase(tokenUri.getScheme())) {
+            throw new IllegalStateException(
+                    "unsupported URI scheme in manifest Class-Path '"
+                            + token
+                            + "' in "
+                            + source);
+        }
+        Path ownerParent = ownerArchive.getParent();
+        if (ownerParent == null) {
+            throw new IllegalStateException(
+                    "owning archive has no filesystem parent for manifest Class-Path: "
+                            + ownerArchive);
+        }
+        URI resolved =
+                tokenUri.isAbsolute()
+                        ? tokenUri
+                        : ownerParent.toUri().resolve(tokenUri);
+        if (!"file".equalsIgnoreCase(resolved.getScheme())
+                || resolved.getQuery() != null
+                || resolved.getFragment() != null) {
+            throw new IllegalStateException(
+                    "unsupported file URI in manifest Class-Path '"
+                            + token
+                            + "' in "
+                            + source);
+        }
+        try {
+            return Path.of(resolved).toAbsolutePath().normalize();
+        } catch (RuntimeException failure) {
+            throw new IllegalStateException(
+                    "malformed Class-Path URI '" + token + "' in " + source,
+                    failure);
         }
     }
 
@@ -1479,7 +2101,12 @@ class IntakeFormalSinkAssemblyTest {
                             temporaryArchive, source, depth, budget);
             try (JarFile archive = new JarFile(temporaryArchive.toFile())) {
                 scanArchiveEntries(
-                        archive, source, preflight, descriptors, budget);
+                        archive,
+                        source,
+                        preflight,
+                        Optional.empty(),
+                        descriptors,
+                        budget);
             }
         } catch (ZipException failure) {
             IllegalStateException wrapped = new IllegalStateException(
@@ -1518,6 +2145,12 @@ class IntakeFormalSinkAssemblyTest {
                             "cannot delete nested archive staging file "
                                     + temporaryArchive,
                             failure);
+            if (primaryFailure != null) {
+                primaryFailure.addSuppressed(cleanupFailure);
+                return;
+            }
+            throw cleanupFailure;
+        } catch (RuntimeException | Error cleanupFailure) {
             if (primaryFailure != null) {
                 primaryFailure.addSuppressed(cleanupFailure);
                 return;
@@ -1702,6 +2335,24 @@ class IntakeFormalSinkAssemblyTest {
 
     private record PathNode(JavaClass javaClass, List<JavaClass> path) {}
 
+    private record DynamicCodeUnitKey(
+            String ownerName, String methodName, String descriptor) {}
+
+    private record DynamicTargetEvidence(
+            boolean inspected,
+            Set<String> stringConstants,
+            Set<String> typeConstants) {
+
+        private DynamicTargetEvidence {
+            stringConstants = Set.copyOf(stringConstants);
+            typeConstants = Set.copyOf(typeConstants);
+        }
+
+        private static DynamicTargetEvidence uninspected() {
+            return new DynamicTargetEvidence(false, Set.of(), Set.of());
+        }
+    }
+
     private record ServiceDescriptor(
             String source, String contractName, Set<String> providerNames) {
 
@@ -1745,11 +2396,21 @@ class IntakeFormalSinkAssemblyTest {
             List<String> missingOwnedProviderRegistrations,
             List<String> externalProviderRegistrations) {}
 
+    private record ClassPathScanEntry(
+            Path path, int manifestHopDepth, String source) {}
+
+    private record CanonicalClassPathEntry(Path path, String identity) {}
+
+    private record ManifestScanContext(Path ownerArchive, int manifestHopDepth) {}
+
     private record ScanLimits(
             long maxDescriptorBytes,
+            long maxManifestBytes,
             long maxNestedArchiveBytes,
             long maxArchiveFileBytes,
+            long maxResolvedClassPathEntries,
             long maxClasspathArchiveCount,
+            long maxManifestHopDepth,
             long maxCentralDirectoryBytes,
             long maxTotalArchiveEntries,
             long maxNestedArchiveCount,
@@ -1759,9 +2420,12 @@ class IntakeFormalSinkAssemblyTest {
 
         private ScanLimits {
             if (maxDescriptorBytes < 0
+                    || maxManifestBytes < 0
                     || maxNestedArchiveBytes < 0
                     || maxArchiveFileBytes < 0
+                    || maxResolvedClassPathEntries < 0
                     || maxClasspathArchiveCount < 0
+                    || maxManifestHopDepth < 0
                     || maxCentralDirectoryBytes < 0
                     || maxTotalArchiveEntries < 0
                     || maxNestedArchiveCount < 0
@@ -1796,6 +2460,7 @@ class IntakeFormalSinkAssemblyTest {
     private static final class ScanBudget {
 
         private final ScanLimits limits;
+        private long resolvedClassPathEntries;
         private long classpathArchiveCount;
         private long totalArchiveEntries;
         private long nestedArchiveCount;
@@ -1805,6 +2470,21 @@ class IntakeFormalSinkAssemblyTest {
 
         private ScanBudget(ScanLimits limits) {
             this.limits = limits;
+        }
+
+        private void recordResolvedClassPathEntry(String source) {
+            resolvedClassPathEntries++;
+            if (resolvedClassPathEntries > limits.maxResolvedClassPathEntries()) {
+                throw new IllegalStateException(
+                        "resolved classpath entry limit exceeded at " + source);
+            }
+        }
+
+        private void checkManifestHopDepth(int manifestHopDepth, String source) {
+            if (manifestHopDepth > limits.maxManifestHopDepth()) {
+                throw new IllegalStateException(
+                        "manifest Class-Path hop depth limit exceeded at " + source);
+            }
         }
 
         private void reserveClasspathArchive(long archiveBytes, String source) {
@@ -1852,6 +2532,10 @@ class IntakeFormalSinkAssemblyTest {
             return readBudget(limits.maxDescriptorBytes(), "descriptor byte limit");
         }
 
+        private EntryReadBudget manifestReadBudget() {
+            return readBudget(limits.maxManifestBytes(), "manifest byte limit");
+        }
+
         private EntryReadBudget nestedArchiveReadBudget() {
             return readBudget(limits.maxNestedArchiveBytes(), "nested archive byte limit");
         }
@@ -1884,6 +2568,10 @@ class IntakeFormalSinkAssemblyTest {
         }
 
         private void recordDescriptorBytes(long bytes) {
+            recordRelevantExpandedBytes(bytes);
+        }
+
+        private void recordManifestBytes(long bytes) {
             recordRelevantExpandedBytes(bytes);
         }
 

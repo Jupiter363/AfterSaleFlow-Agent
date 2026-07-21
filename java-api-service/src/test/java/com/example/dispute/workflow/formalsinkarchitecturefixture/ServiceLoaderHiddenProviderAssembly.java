@@ -36,3 +36,23 @@ final class IntakeServiceProviderLoader {
         return legacyProviders.hasNext() ? legacyProviders.next() : HIDDEN_PROVIDER_INTENT;
     }
 }
+
+@Configuration
+class SafeServiceLoaderAssembly {
+
+    Object safeProvider() {
+        return new SafeServiceProviderLoader().load();
+    }
+}
+
+final class SafeServiceProviderLoader {
+
+    Object load() {
+        return ServiceLoader.load(SafePlugin.class).stream()
+                .findFirst()
+                .map(ServiceLoader.Provider::get)
+                .orElse(null);
+    }
+}
+
+interface SafePlugin {}

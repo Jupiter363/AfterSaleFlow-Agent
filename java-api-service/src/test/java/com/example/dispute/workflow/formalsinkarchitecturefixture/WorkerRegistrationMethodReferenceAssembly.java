@@ -11,3 +11,14 @@ class WorkerRegistrationMethodReferenceAssembly {
         registration.accept(new Object[] {alias});
     }
 }
+
+final class UnresolvedWorkerDynamicAssembly {
+
+    void register(
+            Worker worker,
+            SafeComparisonActivities safeActivities,
+            String runtimeClassName) throws ClassNotFoundException {
+        Class.forName(runtimeClassName);
+        worker.registerActivitiesImplementations(safeActivities);
+    }
+}

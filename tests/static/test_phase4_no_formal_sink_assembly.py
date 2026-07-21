@@ -174,6 +174,11 @@ def test_archunit_rule_and_compiled_fixture_contract_exist() -> None:
         "parseServiceDescriptors",
         "resolveServiceProviders",
         "scanClassPathEntries",
+        "canonicalClassPathEntry",
+        "parseManifestClassPath",
+        "stale-third-party-manifest",
+        "Attributes.Name.CLASS_PATH",
+        "maxManifestHopDepth",
         "BOOT_CLASSES_SERVICES_PATH",
         "BOOT_LIB_PATH",
         "decodeStrictUtf8",
@@ -226,7 +231,14 @@ def test_archunit_rule_and_compiled_fixture_contract_exist() -> None:
         "@NestedFixtureStereotype",
         "ObjectProvider<SafeComparisonActivities>",
         "class OpaqueProvider",
+        "class ManifestOnlyFormalProvider",
         "class SafeIntakeRoomActivitiesMetricsProvider",
+        "SafePlugin.class",
+        'Class.forName("java.util.ArrayList")',
+        'context.getBean("safeComparisonActivities")',
+        "context.getBean(SafeComparisonActivities.class)",
+        "runtimeClassName",
+        "runtimeBeanName",
     ):
         assert required in fixture_source
 

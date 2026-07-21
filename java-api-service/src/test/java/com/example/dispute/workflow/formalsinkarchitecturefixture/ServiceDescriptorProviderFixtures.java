@@ -40,3 +40,16 @@ final class SafeIntakeRoomActivitiesMetricsProvider {
 
     interface MetricsSink {}
 }
+
+final class ManifestOnlyFormalProvider {
+
+    private final CrossFileFormalWrapper wrapper;
+
+    ManifestOnlyFormalProvider(CrossFileFormalWrapper wrapper) {
+        this.wrapper = wrapper;
+    }
+
+    Object value() {
+        return wrapper;
+    }
+}
