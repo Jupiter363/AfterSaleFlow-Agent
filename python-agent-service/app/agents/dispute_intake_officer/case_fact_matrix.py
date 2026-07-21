@@ -246,8 +246,10 @@ def _reduce_fact_row(
     actor_role: str,
     matrix_kind: CaseMatrixKind,
 ) -> dict[str, Any]:
-    if previous_row is None and item.source_scope != CaseMatrixSourceScope.CURRENT_SOURCE:
-        _schema_error(f"new fact {item.fact_key} must cite CURRENT_SOURCE")
+    if previous_row is None and item.source_scope == CaseMatrixSourceScope.PREVIOUS_MATRIX:
+        _schema_error(f"new fact {item.fact_key} cannot cite PREVIOUS_MATRIX")
+    if previous_row is not None and item.materiality != previous_row.materiality:
+        _schema_error(f"existing fact {fact_id} cannot change materiality")
     positions = (
         previous_row.positions.model_dump(mode="json")
         if previous_row is not None

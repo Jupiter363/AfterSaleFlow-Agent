@@ -259,6 +259,108 @@ def _existing_fact_delta(
     )
 
 
+def test_reducer_allows_new_fact_with_mixed_scope_using_only_current_source() -> None:
+    case_id = "CASE_new_mixed_source"
+    request = IntakeTurnRequest.model_validate(
+        {
+            "case_id": case_id,
+            "room_type": "INTAKE",
+            "turn_source": "FORM_SUBMISSION",
+            "initial_case_facts": {
+                "form_source": "FORM_SUBMISSION",
+                "form_description": "The current form confirms the order exists.",
+                "order_reference": "ORDER_NEW_MIXED_SOURCE",
+                "initiator_role": "USER",
+            },
+            "agent_context": _context(case_id, "USER", "user-local"),
+        }
+    )
+    matrix = finalize_case_fact_matrix(
+        request=request,
+        case_detail=_detail("The current form confirms the order exists."),
+        delta=CaseFactMatrixDeltaV2.model_validate(
+            {
+                "fact_rows": [
+                    {
+                        "fact_key": "NEW_ORDER_EXISTS",
+                        "category": "ORDER",
+                        "fact_target": "Whether the order exists.",
+                        "materiality": "CORE",
+                        "stance": "CONFIRM",
+                        "position_summary": "The current form confirms the order.",
+                        "asserted_value": "exists",
+                        "source_scope": "PREVIOUS_AND_CURRENT_SOURCE",
+                    }
+                ],
+                "summary_source_fact_keys": ["NEW_ORDER_EXISTS"],
+            }
+        ),
+    )
+
+    expected_source = f"INTAKE_FORM_{case_id}"
+    row = matrix.fact_rows[0]
+    assert row.origin.source_refs == [expected_source]
+    assert row.positions.USER.source_refs == [expected_source]
+
+
+@pytest.mark.parametrize(
+    ("source_scope", "stance", "position_summary", "asserted_value"),
+    [
+        (
+            "CURRENT_SOURCE",
+            "CONFIRM",
+            "The respondent confirms the existing fact.",
+            "confirmed",
+        ),
+        (
+            "PREVIOUS_AND_CURRENT_SOURCE",
+            "CONFIRM",
+            "The respondent confirms the existing fact and its prior context.",
+            "confirmed",
+        ),
+        (
+            "PREVIOUS_MATRIX",
+            "NOT_ADDRESSED",
+            "The respondent has not addressed this fact.",
+            None,
+        ),
+    ],
+)
+def test_reducer_preserves_existing_fact_materiality_for_every_source_scope(
+    source_scope: str,
+    stance: str,
+    position_summary: str,
+    asserted_value: str | None,
+) -> None:
+    case_id = f"CASE_materiality_{source_scope.lower()}"
+    previous = _single_fact_initiator_matrix(case_id)
+    previous_row = previous.fact_rows[0]
+    delta = CaseFactMatrixDeltaV2.model_validate(
+        {
+            "fact_rows": [
+                {
+                    "fact_key": previous_row.fact_id,
+                    "category": previous_row.category,
+                    "fact_target": previous_row.fact_target,
+                    "materiality": "SUPPORTING",
+                    "stance": stance,
+                    "position_summary": position_summary,
+                    "asserted_value": asserted_value,
+                    "source_scope": source_scope,
+                }
+            ],
+            "summary_source_fact_keys": [previous_row.fact_id],
+        }
+    )
+
+    with pytest.raises(AgentOutputSchemaError, match="cannot change materiality"):
+        finalize_case_fact_matrix(
+            request=_respondent_request(case_id, previous.model_dump(mode="json")),
+            case_detail=_detail("The respondent addressed the frozen fact."),
+            delta=delta,
+        )
+
+
 def _mistyped_fact_id(fact_id: str) -> str:
     replacement = "A" if fact_id[-1] != "A" else "B"
     return fact_id[:-1] + replacement

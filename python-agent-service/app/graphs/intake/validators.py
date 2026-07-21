@@ -516,6 +516,8 @@ def validate_matrix_patch(
                 raise IntakeGraphContractError("INTAKE_MATRIX_FACT_UNKNOWN")
             if fingerprint != _matrix_row_fingerprint(prior):
                 raise IntakeGraphContractError("INTAKE_MATRIX_FACT_REBOUND")
+            if row["materiality"] != prior.get("materiality"):
+                raise IntakeGraphContractError("INTAKE_MATRIX_FACT_REBOUND")
             resolution: tuple[str, bytes | str] = ("FACT", fact_key)
         else:
             if row["source_scope"] == "PREVIOUS_MATRIX":

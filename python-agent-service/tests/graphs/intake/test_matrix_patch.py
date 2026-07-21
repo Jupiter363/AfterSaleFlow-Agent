@@ -470,6 +470,33 @@ def test_delta_rejects_unknown_or_rebound_fact_identity(
         validate_matrix_patch(state, patch)
 
 
+@pytest.mark.parametrize(
+    "source_scope",
+    ["CURRENT_SOURCE", "PREVIOUS_AND_CURRENT_SOURCE", "PREVIOUS_MATRIX"],
+)
+def test_delta_rejects_materiality_rebind_for_every_source_scope(
+    bindings,
+    version_pins,
+    snapshot,
+    source_scope,
+) -> None:
+    _, _, state = _respondent_state(bindings, version_pins, snapshot)
+    patch = _delta_patch()
+    patch["fact_rows"][0].update(
+        materiality="SUPPORTING",
+        source_scope=source_scope,
+    )
+    if source_scope == "PREVIOUS_MATRIX":
+        patch["fact_rows"][0].update(
+            stance="NOT_ADDRESSED",
+            position_summary="The respondent has not addressed this fact.",
+            asserted_value=None,
+        )
+
+    with pytest.raises(IntakeGraphContractError, match="INTAKE_MATRIX_FACT_REBOUND"):
+        validate_matrix_patch(state, patch)
+
+
 def test_not_addressed_only_carries_a_prior_fact_without_asserted_value(
     bindings,
     version_pins,

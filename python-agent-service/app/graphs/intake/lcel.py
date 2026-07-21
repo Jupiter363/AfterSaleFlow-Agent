@@ -50,7 +50,10 @@ only an Intake utterance, bounded dossier or matrix patches, readiness, missing 
 recommendation, knowledge-answer mode, and confidence. Never claim a formal action, room
 transition, deadline, invitation, summons, cancellation, admission, tool call, hidden reasoning,
 or another party's private state. Cite only source references and hashes present in the authorized
-source catalog."""
+source catalog. For every FACT_* matrix row, preserve the frozen prior materiality for
+CURRENT_SOURCE, PREVIOUS_MATRIX, and PREVIOUS_AND_CURRENT_SOURCE. A NEW_* row may not use
+PREVIOUS_MATRIX; PREVIOUS_AND_CURRENT_SOURCE is allowed but contributes only the current
+authorized source."""
 
 _HUMAN_PROMPT = """Authorized audience: {audience}
 <authorized_messages_json>{messages_json}</authorized_messages_json>

@@ -137,6 +137,16 @@ def _policy() -> ModelInvocationPolicy:
     )
 
 
+def test_system_prompt_preserves_matrix_binding_and_source_scope_semantics() -> None:
+    normalized_prompt = " ".join(INTAKE_SYSTEM_PROMPT.split())
+    assert (
+        "preserve the frozen prior materiality for CURRENT_SOURCE, PREVIOUS_MATRIX, and "
+        "PREVIOUS_AND_CURRENT_SOURCE" in normalized_prompt
+    )
+    assert "A NEW_* row may not use PREVIOUS_MATRIX" in normalized_prompt
+    assert "contributes only the current authorized source" in normalized_prompt
+
+
 def _event_state(bindings, version_pins, snapshot, event):
     graph = compile_intake_v2_graph(
         intake_lcel=_create_test_only_intake_cognition(deterministic_message_fallback)
