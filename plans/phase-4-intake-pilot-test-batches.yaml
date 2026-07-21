@@ -503,6 +503,7 @@ batches:
       - tests/static/test_temporal_refactor_traceability.py
       - tests/static/test_graph_import_boundaries.py
       - tests/static/test_agent_platform_schema_contracts.py
+      - tests/static/test_phase4_matrix_authority_erratum.py
     source_commands:
       - id: p4_entry_static
         cwd: .
@@ -512,6 +513,7 @@ batches:
           tests/static/test_temporal_refactor_traceability.py
           tests/static/test_graph_import_boundaries.py
           tests/static/test_agent_platform_schema_contracts.py
+          tests/static/test_phase4_matrix_authority_erratum.py
           -q
       - id: p4_entry_python
         cwd: python-agent-service
@@ -633,6 +635,7 @@ batches:
     static_tests:
       - tests/static/test_phase4_intake_pilot_plan.py
       - tests/static/test_graph_import_boundaries.py
+      - tests/static/test_phase4_matrix_authority_erratum.py
     execution:
       heavy_parallelism: 1
       light_parallelism: 2
@@ -775,6 +778,7 @@ batches:
           tests/static/test_graph_import_boundaries.py
           tests/static/test_agent_platform_schema_contracts.py
           tests/static/test_temporal_refactor_traceability.py
+          tests/static/test_phase4_matrix_authority_erratum.py
           -q
     execution:
       strategy: deduplicated_source_suites_then_derived_batch_views

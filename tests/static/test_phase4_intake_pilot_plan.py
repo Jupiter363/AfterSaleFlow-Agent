@@ -214,6 +214,7 @@ def test_phase4_batch_policy_defers_heavy_recovery_and_freezes_one_candidate() -
     }
     for required in (
         "test_phase4_intake_pilot_plan.py",
+        "test_phase4_matrix_authority_erratum.py",
         "test_intake_turn.py",
         "test_streaming_v2.py",
         "test_graph_security_runtime.py",
