@@ -1031,13 +1031,13 @@ def test_r15_server_canonical_branch_is_closed_and_bounded() -> None:
     wire_validator("intake-branch-command.schema.json").validate(critical)
 
     schema_risk_levels = set(branch_schema["properties"]["risk_level"]["enum"])
-    java_enum_body = RISK_LEVEL_JAVA.read_text(encoding="utf-8").split(
-        "public enum RiskLevel {", maxsplit=1
-    )[1].split("}", maxsplit=1)[0]
+    java_enum_body = (
+        RISK_LEVEL_JAVA.read_text(encoding="utf-8")
+        .split("public enum RiskLevel {", maxsplit=1)[1]
+        .split("}", maxsplit=1)[0]
+    )
     java_risk_levels = {
-        line.strip().rstrip(",")
-        for line in java_enum_body.splitlines()
-        if line.strip()
+        line.strip().rstrip(",") for line in java_enum_body.splitlines() if line.strip()
     }
     v001 = V001_MIGRATION.read_text(encoding="utf-8")
     database_constraint = v001.split(
@@ -1524,11 +1524,13 @@ def test_r15_exit_gate_and_phase4_links_cover_every_review_finding() -> None:
     )
     assert "UNIQUE(payload_authority_id)" in runbook
     assert RUNBOOK.name in plan
-    assert "P4-R1.5 Authority-Binding Gate" in plan
+    assert "P4-R1.5 Authority-Binding Contract Gate" in plan
+    assert "P4-R1.5-IMPLEMENTATION-GATE" in plan
 
 
 def test_r15_phase4_task_dag_and_batches_enforce_the_gate() -> None:
     schedule = yaml.safe_load(PHASE4_BATCHES.read_text(encoding="utf-8"))
+    task_contracts = schedule["task_contracts"]
     assert "P4-R1.5" in schedule["agents"]["R"]["tasks"]
     assert schedule["gate"]["authority_binding_gate"] == {
         "gate_id": "P4-R1.5",
@@ -1536,11 +1538,87 @@ def test_r15_phase4_task_dag_and_batches_enforce_the_gate() -> None:
         "manifest": "plans/phase-4-r15-authority-binding-contract.yaml",
         "schema": "plans/phase-4-r15-authority-binding-contract.schema.json",
         "static_gate": R15_STATIC_TEST,
-        "required_before_tasks": ["P4-R1", "P4-D1", "P4-E1"],
+        "required_before_tasks": [
+            "P4-R1",
+            "P4-R1.5-A",
+            "P4-R1.5-B",
+            "P4-R1.5-C",
+            "P4-R1.5-D",
+            "P4-R1.5-E",
+        ],
         "runtime_effect": "none",
     }
     for task_name in ["P4-R1", "P4-D1", "P4-E1"]:
         assert "P4-R1.5" in schedule["task_contracts"][task_name]["depends_on"]
+
+    implementation_gate = schedule["gate"]["authority_binding_implementation_gate"]
+    assert implementation_gate == {
+        "gate_id": "P4-R1.5-IMPLEMENTATION-GATE",
+        "status": "BLOCKED_UNTIL_FIVE_OWNER_SLICES_MERGE_AND_PASS",
+        "contract_gate": "P4-R1.5",
+        "required_owner_tasks": [
+            "P4-R1.5-A",
+            "P4-R1.5-B",
+            "P4-R1.5-C",
+            "P4-R1.5-D",
+            "P4-R1.5-E",
+        ],
+        "required_before_tasks": ["P4-D1", "P4-E1", "P4-R2"],
+        "independent_review_required": True,
+        "runtime_effect": "none",
+    }
+    for task_name in implementation_gate["required_owner_tasks"]:
+        assert "P4-R1.5" in schedule["task_contracts"][task_name]["depends_on"]
+    assert set(implementation_gate["required_owner_tasks"]) <= set(
+        schedule["task_contracts"]["P4-R1.5-IMPLEMENTATION-GATE"]["depends_on"]
+    )
+    for task_name in ["P4-D1", "P4-E1", "P4-R2"]:
+        assert "P4-R1.5-IMPLEMENTATION-GATE" in task_contracts[task_name]["depends_on"]
+
+    for contract in task_contracts.values():
+        assert set(contract["depends_on"]) <= set(task_contracts)
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(task_name: str) -> None:
+        assert task_name not in visiting, (
+            f"cyclic Phase 4 task dependency at {task_name}"
+        )
+        if task_name in visited:
+            return
+        visiting.add(task_name)
+        for dependency in task_contracts[task_name]["depends_on"]:
+            visit(dependency)
+        visiting.remove(task_name)
+        visited.add(task_name)
+
+    for task_name in task_contracts:
+        visit(task_name)
+
+    implementation = schedule["r15_implementation"]
+    assert implementation["contract_gate"] == "P4-R1.5"
+    assert implementation["completion_gate"] == "P4-R1.5-IMPLEMENTATION-GATE"
+    delegated_roles = [
+        role
+        for wave_name in ["wave_a", "wave_b"]
+        for role in implementation[wave_name]["active_roles"]
+    ]
+    delegated_tasks = [
+        task
+        for wave_name in ["wave_a", "wave_b"]
+        for task in implementation[wave_name]["tasks"]
+    ]
+    assert delegated_roles == ["A", "B", "D", "C", "E"]
+    assert len(delegated_roles) == len(set(delegated_roles)) == 5
+    assert set(delegated_tasks) == set(implementation_gate["required_owner_tasks"])
+    assert implementation["wave_a"]["max_active_children"] == 3
+    assert implementation["wave_b"]["max_active_children"] == 2
+    assert implementation["test_policy"] == {
+        "delegated": "focused_T0_only",
+        "merged": "one_deduplicated_R1_5_batch",
+        "maven_or_testcontainers_parallelism": 1,
+        "full_regression": "deferred_to_unified_checkpoint",
+    }
 
     batches = schedule["batches"]
     for batch_name in ["P4-BATCH-1", "P4-BATCH-2"]:
@@ -1554,7 +1632,9 @@ def test_r15_phase4_task_dag_and_batches_enforce_the_gate() -> None:
 
     checkpoint = batches["P4-BATCH-3"]
     assert "P4-R1.5" in checkpoint["requires_tasks"]
+    assert "P4-R1.5-IMPLEMENTATION-GATE" in checkpoint["requires_tasks"]
     assert "P4_R1_5_authority_binding_gate_pass" in checkpoint["requires"]
+    assert "P4_R1_5_implementation_gate_pass" in checkpoint["requires"]
     static_command = next(
         command
         for command in checkpoint["source_commands"]

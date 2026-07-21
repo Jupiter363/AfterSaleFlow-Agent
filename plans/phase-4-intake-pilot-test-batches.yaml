@@ -41,7 +41,15 @@ gate:
     manifest: plans/phase-4-r15-authority-binding-contract.yaml
     schema: plans/phase-4-r15-authority-binding-contract.schema.json
     static_gate: tests/static/test_phase4_r15_authority_binding_contract.py
-    required_before_tasks: [P4-R1, P4-D1, P4-E1]
+    required_before_tasks: [P4-R1, P4-R1.5-A, P4-R1.5-B, P4-R1.5-C, P4-R1.5-D, P4-R1.5-E]
+    runtime_effect: none
+  authority_binding_implementation_gate:
+    gate_id: P4-R1.5-IMPLEMENTATION-GATE
+    status: BLOCKED_UNTIL_FIVE_OWNER_SLICES_MERGE_AND_PASS
+    contract_gate: P4-R1.5
+    required_owner_tasks: [P4-R1.5-A, P4-R1.5-B, P4-R1.5-C, P4-R1.5-D, P4-R1.5-E]
+    required_before_tasks: [P4-D1, P4-E1, P4-R2]
+    independent_review_required: true
     runtime_effect: none
 
 resources:
@@ -154,12 +162,13 @@ claim_status_policy:
 agents:
   A:
     role: Intake Graph and governed LCEL
-    tasks: [P4-A1, P4-A2]
+    tasks: [P4-A1, P4-A2, P4-R1.5-A]
     slices: [P4-S1, P4-S3, P4-S5]
     test_routes:
       - python-agent-service/tests/graphs/intake/**
       - python-agent-service/tests/agents/test_intake_*.py
       - python-agent-service/tests/graph_runtime/**/test_*intake*.py
+      - java-api-service/src/test/java/com/example/dispute/database/IntakeAuthorityBindingMigrationTest.java
     change_routes:
       - python-agent-service/app/graphs/intake/**
       - python-agent-service/app/agents/dispute_intake_officer/workflow.py
@@ -171,34 +180,42 @@ agents:
       - python-agent-service/tests/graphs/intake/test_snapshot_import.py
       - python-agent-service/tests/agents/test_intake_*.py
       - python-agent-service/tests/graph_runtime/**/test_*intake*.py
+      - java-api-service/src/main/resources/db/migration/V043_1__intake_authority_bindings.sql
     primary_check_ids: [GRAPH-007, GRAPH-008, GRAPH-020, GRAPH-021, GRAPH-022, ROOM-INTAKE-003]
     supporting_baseline_ids: [INT-001, INT-005, INT-008, INT-009, INT-010, SEC-004, SEC-005, SEC-006]
 
   B:
     role: Temporal Intake process
-    tasks: [P4-B1, P4-B2]
+    tasks: [P4-B1, P4-B2, P4-R1.5-B]
     slices: [P4-S1, P4-S2, P4-S3, P4-S5]
     test_routes:
       - java-api-service/src/test/java/com/example/dispute/workflow/room/intake/**
       - java-api-service/src/test/java/com/example/dispute/workflow/recovery/*Intake*
+      - java-api-service/src/test/java/com/example/dispute/workflow/authority/epoch/**
     change_routes:
       - java-api-service/src/main/java/com/example/dispute/workflow/temporal/room/intake/**
       - java-api-service/src/test/java/com/example/dispute/workflow/room/intake/**
+      - java-api-service/src/main/java/com/example/dispute/workflow/application/authority/epoch/**
+      - java-api-service/src/main/java/com/example/dispute/workflow/infrastructure/persistence/authority/epoch/**
+      - java-api-service/src/test/java/com/example/dispute/workflow/authority/epoch/**
     primary_check_ids: [TEMP-020, TEMP-021, TEMP-022, TEMP-023, ROOM-INTAKE-004]
     supporting_baseline_ids: [INT-002, INT-003, INT-004, INT-005, INT-006, INT-007]
 
   C:
     role: Java domain ledger and Finalizer
-    tasks: [P4-C1, P4-C2]
+    tasks: [P4-C1, P4-C2, P4-R1.5-C]
     slices: [P4-S1, P4-S2, P4-S3, P4-S5]
     test_routes:
       - java-api-service/src/test/java/com/example/dispute/room/*Intake*
       - java-api-service/src/test/java/com/example/dispute/workflow/activity/intake/**
       - java-api-service/src/test/java/com/example/dispute/database/*Intake*
+      - java-api-service/src/test/java/com/example/dispute/workflow/authority/payload/**
     change_routes:
       - java-api-service/src/main/resources/db/migration/V043__intake_graph_bindings.sql
       - java-api-service/src/main/java/com/example/dispute/workflow/activity/intake/**
       - java-api-service/src/main/java/com/example/dispute/workflow/application/intake/**
+      - java-api-service/src/main/java/com/example/dispute/workflow/application/authority/payload/**
+      - java-api-service/src/main/java/com/example/dispute/workflow/infrastructure/persistence/authority/payload/**
       - java-api-service/src/main/java/com/example/dispute/room/application/IntakeAgentTurnService.java
       - java-api-service/src/main/java/com/example/dispute/room/application/IntakeRoomService.java
       - java-api-service/src/main/java/com/example/dispute/room/application/IntakeMatrixLifecycleService.java
@@ -217,7 +234,7 @@ agents:
 
   D:
     role: Projection, stream, and frontend compatibility
-    tasks: [P4-D1, P4-D2]
+    tasks: [P4-D1, P4-D2, P4-R1.5-D]
     slices: [P4-S4]
     test_routes:
       - java-api-service/src/test/java/com/example/dispute/workflow/projection/*Intake*
@@ -237,17 +254,21 @@ agents:
       - frontend/src/api/agentStream.*
       - frontend/src/stores/agentStream.*
       - frontend/src/stores/room.*
+      - java-api-service/src/main/java/com/example/dispute/workflow/activity/domain/IntakeChildBridgeActivitiesAdapter.java
+      - java-api-service/src/main/java/com/example/dispute/workflow/infrastructure/persistence/authority/bridge/**
+      - java-api-service/src/test/java/com/example/dispute/workflow/authority/bridge/**
     primary_check_ids: [ROOM-INTAKE-001, JAVA-011]
     supporting_baseline_ids: [OVR-003, CORE-004, CORE-005, CORE-006, CORE-007, CORE-008, CORE-009, CORE-010, INT-009, INT-010, UI-001, UI-003, UI-004]
 
   E:
     role: Shadow parity, fault injection, and rollback hardening
-    tasks: [P4-E1, P4-E2]
+    tasks: [P4-E1, P4-E2, P4-R1.5-E]
     slices: [P4-S1, P4-S5]
     test_routes:
       - java-api-service/src/test/java/com/example/dispute/workflow/shadow/*Intake*
       - java-api-service/src/test/java/com/example/dispute/workflow/recovery/*Intake*
       - python-agent-service/tests/graphs/intake/test_*recovery*.py
+      - java-api-service/src/test/java/com/example/dispute/workflow/config/IntakeAuthorityWorkerRegistrationTest.java
       - tests/static/test_phase4_*.py
     change_routes:
       - java-api-service/src/main/java/com/example/dispute/workflow/shadow/intake/**
@@ -256,12 +277,13 @@ agents:
       - java-api-service/src/test/java/com/example/dispute/workflow/shadow/*Intake*
       - java-api-service/src/test/java/com/example/dispute/workflow/recovery/*Intake*
       - python-agent-service/tests/graphs/intake/test_*recovery*.py
+      - java-api-service/src/main/java/com/example/dispute/workflow/config/IntakeAuthorityWorkerRegistration.java
     primary_check_ids: [MIG-004]
     supporting_baseline_ids: [INT-001, INT-002, INT-005, INT-006, INT-008, INT-009, INT-010, CORE-004, CORE-005, SEC-001, SEC-002, SEC-003, SEC-004, SEC-005, SEC-006]
 
   R:
     role: Primary contract, integration, review, and evidence
-    tasks: [P4-0, P4-R0G, P4-R1.5, P4-R1, P4-R2]
+    tasks: [P4-0, P4-R0G, P4-R1.5, P4-R1.5-IMPLEMENTATION-GATE, P4-R1, P4-R2]
     slices: [P4-S1, P4-S2, P4-S3, P4-S4, P4-S5]
     test_routes:
       - tests/static/test_phase4_*.py
@@ -349,7 +371,7 @@ task_contracts:
     definition_of_done: Atomicity, replay, stale fence, actor isolation, and all Intake branch invariants pass; SHADOW cannot resolve these ports.
   P4-D1:
     owner: D
-    depends_on: [P4-B2, P4-C2, P4-R1.5, P4-R1]
+    depends_on: [P4-B2, P4-C2, P4-R1.5, P4-R1, P4-R1.5-IMPLEMENTATION-GATE]
     objective: Implement the versioned Java Intake projection/reader and API compatibility fields.
     inputs: [workflow_snapshot, finalization_receipt, process_projection]
     outputs: [projection_adapter, API_compatibility_tests]
@@ -363,7 +385,7 @@ task_contracts:
     definition_of_done: OVR, CORE, INT, SEC, and UI focused baselines pass without route or layout regressions.
   P4-E1:
     owner: E
-    depends_on: [P4-A2, P4-B2, P4-C2, P4-R1.5, P4-R1]
+    depends_on: [P4-A2, P4-B2, P4-C2, P4-R1.5, P4-R1, P4-R1.5-IMPLEMENTATION-GATE]
     objective: Replace global cutover semantics with a room-specific stable Intake selector and implement isolated synthetic parity and bounded telemetry.
     inputs: [epoch_selection_contract, normalized_parity_contract]
     outputs: [intake_epoch_selector, shadow_comparison, observability]
@@ -382,6 +404,71 @@ task_contracts:
     inputs: [A_foundation, B_ports, C_foundation, V043_immutable_bindings]
     outputs: [r15_authority_manifest, r15_wire_schemas, r15_static_gate]
     definition_of_done: The manifest validates against a closed schema, positive and negative wire fixtures pass, runtime gates remain closed, and independent review accepts the contract commit.
+  P4-R1.5-A:
+    owner: A
+    depends_on: [P4-R1.5, P4-C1]
+    objective: Implement the expand-only V043_1 authority schema, candidate keys, immutable/check-trigger rules, and migration-level proofs from the frozen contract.
+    inputs: [r15_authority_manifest, V043_immutable_bindings]
+    outputs: [V043_1_migration, authority_ddl_tests]
+    owned_paths:
+      - java-api-service/src/main/resources/db/migration/V043_1__intake_authority_bindings.sql
+      - java-api-service/src/test/java/com/example/dispute/database/IntakeAuthorityBindingMigrationTest.java
+    forbidden_paths: [V001-V043_migrations, application_services, Temporal_workflows, Python_graphs]
+    definition_of_done: PostgreSQL proves every declared PK/UK/FK, exact status checks, immutability, constraint-trigger route comparison, and expand-only ordering without editing V001-V043.
+  P4-R1.5-B:
+    owner: B
+    depends_on: [P4-R1.5, P4-C1]
+    objective: Implement atomic epoch selection, bilateral party authority binding, fixed-order lock coordination, and bootstrap outbox publication.
+    inputs: [r15_authority_manifest, V043_1_migration, room_epoch_allocator_contract]
+    outputs: [epoch_authority_service, lock_coordinator, bootstrap_authority_tests]
+    owned_paths:
+      - java-api-service/src/main/java/com/example/dispute/workflow/application/authority/epoch/**
+      - java-api-service/src/main/java/com/example/dispute/workflow/infrastructure/persistence/authority/epoch/**
+      - java-api-service/src/test/java/com/example/dispute/workflow/authority/epoch/**
+    forbidden_paths: [Python_graphs, frontend, formal_writer_activation, payload_authority_package]
+    definition_of_done: User-initiated and merchant-initiated cases bind exactly one initiator/respondent pair; revoke/accept races linearize in the declared table order; bootstrap is deliverable only after the two-party assertion.
+  P4-R1.5-C:
+    owner: C
+    depends_on: [P4-R1.5, P4-C1]
+    objective: Implement immutable payload/put-receipt authority, canonical branch and human-input command validation, case-command authority, and transactional outbox binding.
+    inputs: [r15_wire_schemas, V043_1_migration, case_command_control_plane]
+    outputs: [payload_authority_services, command_authority_services, payload_command_tests]
+    owned_paths:
+      - java-api-service/src/main/java/com/example/dispute/workflow/application/authority/payload/**
+      - java-api-service/src/main/java/com/example/dispute/workflow/infrastructure/persistence/authority/payload/**
+      - java-api-service/src/test/java/com/example/dispute/workflow/authority/payload/**
+    forbidden_paths: [Temporal_workflow_decisions, Python_checkpoint_data, frontend, object_store_global_cleanup]
+    definition_of_done: JCS/hash/size/receipt checks, same-key retry conflict semantics, source row-shape checks, one-to-one command binding, and no-deliverable-outbox-on-rollback tests pass.
+  P4-R1.5-D:
+    owner: D
+    depends_on: [P4-R1.5, P4-R1, P4-C1]
+    objective: Implement the read-only REPEATABLE_READ JDBC bridge and party-aware v2 adapter enrichment using exact epoch, registration, session, payload, command, and event tuples.
+    inputs: [V043_1_migration, epoch_authority_service, payload_command_services, typed_child_bridge_contract]
+    outputs: [jdbc_bridge_read_port, party_aware_v2_adapter, read_consistency_tests]
+    owned_paths:
+      - java-api-service/src/main/java/com/example/dispute/workflow/activity/domain/IntakeChildBridgeActivitiesAdapter.java
+      - java-api-service/src/main/java/com/example/dispute/workflow/infrastructure/persistence/authority/bridge/**
+      - java-api-service/src/test/java/com/example/dispute/workflow/authority/bridge/**
+    forbidden_paths: [Domain_writes, Python_checkpoint_tables, Temporal_direct_repository_access, frontend]
+    definition_of_done: Start/command/event reads use one REPEATABLE_READ snapshot, reject missing/duplicate/stale tuples, preserve actor party authority, and expose only inert execution context under the current gate.
+  P4-R1.5-E:
+    owner: E
+    depends_on: [P4-R1.5, P4-R1, P4-R1.5-D]
+    objective: Implement worker registration/context smoke, v1/v2 History compatibility checks, and no-formal-sink integration for the authority-backed bridge.
+    inputs: [typed_child_bridge_contract, jdbc_bridge_read_port, no_formal_sink_gate]
+    outputs: [authority_worker_registration, replay_compatibility_tests, context_smoke]
+    owned_paths:
+      - java-api-service/src/main/java/com/example/dispute/workflow/config/IntakeAuthorityWorkerRegistration.java
+      - java-api-service/src/test/java/com/example/dispute/workflow/config/IntakeAuthorityWorkerRegistrationTest.java
+    forbidden_paths: [formal_activity_registration, real_shadow, TEMPORAL_allocation, secrets, production_deployment]
+    definition_of_done: CASE_CONTROL/ROOM_CONTROL registrations are exact, completed and scheduled v1 histories remain pinned correctly, context smoke passes, and the formal sink remains unreachable.
+  P4-R1.5-IMPLEMENTATION-GATE:
+    owner: R
+    depends_on: [P4-R1, P4-R1.5-A, P4-R1.5-B, P4-R1.5-C, P4-R1.5-D, P4-R1.5-E]
+    objective: Integrate the five R1.5 implementation slices, adjudicate cross-owner findings, and record one implementation-completion gate before projection/release work advances.
+    inputs: [V043_1_migration, epoch_authority_service, payload_command_services, jdbc_bridge_read_port, authority_worker_registration]
+    outputs: [integrated_r15_authority_chain, implementation_gate_evidence]
+    definition_of_done: One clean integrated SHA passes the R1.5 implementation checks, independent P0/P1 review, Batch 2 prerequisite checks, and preserves DISABLED or signed synthetic SHADOW defaults.
   P4-R1:
     owner: R
     depends_on: [P4-A1, P4-B1, P4-C1, P4-R1.5]
@@ -391,7 +478,7 @@ task_contracts:
     definition_of_done: Case Workflow dispatch honors persisted workflow_type with a Temporal version marker, and the S1 chain ends only in comparison storage.
   P4-R2:
     owner: R
-    depends_on: [P4-A2, P4-B2, P4-C2, P4-D2, P4-E2, P4-R1.5, P4-R1]
+    depends_on: [P4-A2, P4-B2, P4-C2, P4-D2, P4-E2, P4-R1.5, P4-R1, P4-R1.5-IMPLEMENTATION-GATE]
     objective: Close reviews, freeze one candidate, run the deduplicated checkpoint, classify failures, and archive evidence.
     outputs: [phase4_candidate, phase4_evidence_bundle, engineering_checkpoint]
     definition_of_done: One candidate SHA supplies all accepted reports and promotion remains PENDING.
@@ -470,6 +557,45 @@ slices:
       - normalized_shadow_invariant_diff
       - disabled_mode_and_higher_epoch_rollback_contract
 
+r15_implementation:
+  contract_gate: P4-R1.5
+  completion_gate: P4-R1.5-IMPLEMENTATION-GATE
+  runtime_modes_allowed: [DISABLED, SIGNED_SYNTHETIC_SHADOW]
+  formal_sink_allowed: false
+  temporal_intake_allocation_allowed: false
+  real_case_shadow_allowed: false
+  wave_a:
+    active_roles: [A, B, D]
+    tasks: [P4-R1.5-A, P4-R1.5-B, P4-R1.5-D]
+    max_active_children: 3
+    owner_checks: T0_only
+    heavy_tests: primary_token_only
+  wave_b:
+    active_roles: [C, E]
+    tasks: [P4-R1.5-C, P4-R1.5-E]
+    max_active_children: 2
+    reuses_released_wave_a_slots: true
+    owner_checks: T0_only
+    heavy_tests: primary_token_only
+  integration_order:
+    - P4-R1.5-A
+    - P4-R1.5-B
+    - P4-R1.5-C
+    - P4-R1.5-D
+    - P4-R1.5-E
+  completion_checks:
+    - migration_and_postgresql_constraints
+    - epoch_party_and_revocation_races
+    - payload_command_atomicity
+    - repeatable_read_bridge
+    - worker_context_replay_and_no_formal_sink
+    - independent_P0_P1_review
+  test_policy:
+    delegated: focused_T0_only
+    merged: one_deduplicated_R1_5_batch
+    maven_or_testcontainers_parallelism: 1
+    full_regression: deferred_to_unified_checkpoint
+
 waves:
   wave_0:
     active_roles: [R]
@@ -490,8 +616,9 @@ waves:
     test_batch: P4-BATCH-1
 
   wave_2:
-    active_roles: [D, E, R]
-    tasks: [P4-R1.5, P4-R1, P4-D1, P4-D2, P4-E1, P4-E2]
+    active_roles: [D, E]
+    tasks: [P4-D1, P4-D2, P4-E1, P4-E2]
+    depends_on: [P4-R1.5-IMPLEMENTATION-GATE]
     reused_completed_slots: true
     slices: [P4-S2, P4-S3, P4-S4, P4-S5]
     max_active_children: 2
@@ -675,7 +802,7 @@ batches:
     tier: T2
     trigger: wave_2_merged
     purpose: Run S2-S4 integration and S5 fault hardening once after all owner changes and cross-owner fixes are merged.
-    requires_tasks: [P4-A2, P4-B2, P4-C2, P4-D1, P4-D2, P4-E1, P4-E2, P4-R1.5, P4-R1]
+    requires_tasks: [P4-A2, P4-B2, P4-C2, P4-D1, P4-D2, P4-E1, P4-E2, P4-R1.5, P4-R1, P4-R1.5-IMPLEMENTATION-GATE]
     slices: [P4-S2, P4-S3, P4-S4, P4-S5]
     static_tests:
       - tests/static/test_phase4_no_formal_sink_assembly.py
@@ -761,7 +888,8 @@ batches:
       - MIG_003_still_recorded_as_PENDING_PROMOTION
       - formal_traffic_still_disabled
       - P4_R1_5_authority_binding_gate_pass
-    requires_tasks: [P4-R1.5]
+      - P4_R1_5_implementation_gate_pass
+    requires_tasks: [P4-R1.5, P4-R1.5-IMPLEMENTATION-GATE]
     candidate_policy:
       accepted_candidate_count: 1
       candidate_sha_immutable_during_run: true
