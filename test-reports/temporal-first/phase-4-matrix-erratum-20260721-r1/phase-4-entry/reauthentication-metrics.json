@@ -1,0 +1,128 @@
+{
+  "schema_version": "phase-4-contract-erratum-reauthentication.v1",
+  "release_id": "phase-4-matrix-erratum-20260721-r1",
+  "gate": "P4.0_MATRIX_AUTHORITY_ERRATUM",
+  "result": "PASS",
+  "contract_candidate": {
+    "commit": "0740c9b73b7385249ed5645cf1dee10909173049",
+    "worktree": ".codex-run/phase4-matrix-erratum-0740c9b7",
+    "detached": true,
+    "head_before": "0740c9b73b7385249ed5645cf1dee10909173049",
+    "head_after": "0740c9b73b7385249ed5645cf1dee10909173049",
+    "tracked_clean_before": true,
+    "tracked_clean_after": true,
+    "mixed_candidate_results": false
+  },
+  "execution": {
+    "started_at": "2026-07-21T14:23:04+08:00",
+    "completed_at": "2026-07-21T14:54:07+08:00",
+    "heavy_parallelism": 1,
+    "light_parallelism": 2,
+    "real_provider": false,
+    "formal_finalizer": false,
+    "archive_normalization": {
+      "system_output_nodes_removed": 8,
+      "archived_system_output_nodes": 0,
+      "hash_policy": "SHA256_OF_LF_CANONICAL_BYTES"
+    }
+  },
+  "source_suites": [
+    {
+      "command_id": "p4_entry_static",
+      "cwd": ".",
+      "matrix_command": "D:\\miniconda\\python.exe -m pytest tests/static/test_phase4_intake_pilot_plan.py tests/static/test_temporal_refactor_traceability.py tests/static/test_graph_import_boundaries.py tests/static/test_agent_platform_schema_contracts.py tests/static/test_phase4_matrix_authority_erratum.py -q",
+      "reporting_instrumentation": "--junitxml=<absolute-report-path>",
+      "wall_seconds": 7.6,
+      "exit_code": 0,
+      "junit": {
+        "path": "static-entry-junit.xml",
+        "canonical_lf_bytes": 5118,
+        "canonical_lf_sha256": "1e278a043a6a1e8ef91cd0b9b09bfdd61767a2354b6395df1641ac759088f246",
+        "tests": 30,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    },
+    {
+      "command_id": "p4_entry_python",
+      "cwd": "python-agent-service",
+      "matrix_command": "D:\\miniconda\\python.exe -m pytest tests/agents/test_intake_turn.py tests/agents/test_intake_case_detail_dossier.py tests/agents/test_intake_prompt_compaction.py tests/agents/test_intake_resource_bounds.py tests/test_streaming.py tests/test_streaming_v2.py tests/security/test_graph_security_runtime.py tests/model_runtime/test_runnable_factory.py -q",
+      "reporting_instrumentation": "--junitxml=<absolute-report-path>",
+      "wall_seconds": 15.1,
+      "exit_code": 0,
+      "junit": {
+        "path": "python-entry-junit.xml",
+        "canonical_lf_bytes": 10909,
+        "canonical_lf_sha256": "bedfe4b97e4f5ed7f784dd20090f2bd2aea793d791e21eeedb9ff70a6c8150a9",
+        "tests": 70,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    },
+    {
+      "command_id": "p4_entry_java",
+      "cwd": "java-api-service",
+      "matrix_command": ".\\mvnw.cmd -DforkCount=1 \"-Dtest=IntakeRoomServiceTest,IntakeRoomServiceIntegrationTest,IntakeAgentTurnServiceTest,IntakeProgressServiceTest,IntakeRoomControllerTest,IntakeSequentialWorkflowTest,AgentConversationSessionResolverTest,RoomTurnMemoryQueryServiceTest,RoomMessageAndEventServiceTest,AgentRunStreamEventServiceTest,OrchestrationCutoverPropertiesTest,ConfiguredRoomEpochSelectorTest,Mig001ScenarioServiceTest\" test",
+      "reporting_instrumentation": "-Dsurefire.reportNameSuffix=phase4-matrix-erratum-0740c9b7-r1",
+      "wall_seconds": 96.9,
+      "exit_code": 0,
+      "junit": {
+        "path": "java-entry-junit.xml",
+        "canonical_lf_bytes": 16870,
+        "canonical_lf_sha256": "3826f8921e0b32aedd9b34a0b840121eae83f16b19b3970688467df8611880ba",
+        "tests": 83,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    },
+    {
+      "command_id": "p4_entry_frontend",
+      "cwd": "frontend",
+      "matrix_command": "node node_modules/vitest/vitest.mjs run src/views/disputes/IntakeRoomView.test.js src/views/disputes/DisputeOverviewView.test.js src/components/room/RoomShell.test.js src/api/agentStream.test.js src/stores/agentStream.test.js src/stores/room.test.js --minWorkers=1 --maxWorkers=2",
+      "reporting_instrumentation": "--reporter=junit --outputFile=<absolute-report-path>",
+      "wall_seconds": 9.7,
+      "exit_code": 0,
+      "junit": {
+        "path": "frontend-entry-junit.xml",
+        "canonical_lf_bytes": 25236,
+        "canonical_lf_sha256": "dcd267184eefb581e22216857d7be4563d3528e94918c475e634764b6ecb3292",
+        "tests": 120,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    }
+  ],
+  "totals": {
+    "tests": 303,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "independent_review": {
+    "result": "PASS",
+    "p0": 0,
+    "p1": 0,
+    "p2": 0,
+    "reviewed_candidate": "0740c9b73b7385249ed5645cf1dee10909173049"
+  },
+  "protected_worktree_exception": {
+    "path": "docs/api/README.md",
+    "state": "deleted_unstaged",
+    "touched_by_phase_4": false,
+    "staged_in_evidence_commit": false
+  },
+  "runtime_gate": {
+    "allowed_modes": ["DISABLED", "SIGNED_SYNTHETIC_SHADOW"],
+    "real_case_shadow": false,
+    "temporal_intake_allocation": false,
+    "formal_finalizer_runtime_wiring": false,
+    "canary": false,
+    "promotion": false,
+    "MIG-003": "PENDING_PROMOTION",
+    "MIG-004": "PENDING_PROMOTION"
+  }
+}

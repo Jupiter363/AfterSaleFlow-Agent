@@ -1,0 +1,44 @@
+{
+  "schema_version": "phase-4-gate-failure-classification.v1",
+  "release_id": "phase-4-matrix-erratum-20260721-r1",
+  "candidate_commit": "0740c9b73b7385249ed5645cf1dee10909173049",
+  "product_failures": [],
+  "resolved_attempts": [
+    {
+      "suite": "p4_entry_frontend",
+      "classification": "INFRA",
+      "exit_code": 1,
+      "wall_seconds": 1.8,
+      "symptom": "The clean detached worktree did not materialize ignored frontend/node_modules.",
+      "resolution": "Bound the candidate frontend/node_modules path to the existing workspace dependency tree and reran the exact matrix command.",
+      "accepted_as_evidence": false
+    },
+    {
+      "suite": "p4_entry_frontend",
+      "classification": "INFRA",
+      "exit_code": 1,
+      "wall_seconds": 2.3,
+      "symptom": "An absolute Vitest entry point still left candidate vite.config.js unable to resolve the vite package.",
+      "resolution": "Used a directory junction so config and test imports resolve from the candidate cwd without changing tracked files.",
+      "accepted_as_evidence": false
+    }
+  ],
+  "environment_resolution": {
+    "type": "DIRECTORY_JUNCTION",
+    "candidate_path": ".codex-run/phase4-matrix-erratum-0740c9b7/frontend/node_modules",
+    "dependency_path": "frontend/node_modules",
+    "package_json_sha256": "0819cb9c250f74b07c6ded46dfcc3f6b8aa0d25ba8034be22c723b623e3925d2",
+    "pnpm_lock_sha256": "a7a7ef6a83eccff67d18c19c20ebeb537c6fc9e7cd0603dc54b682b0b06cc1db",
+    "candidate_manifests_match_dependency_workspace": true,
+    "tracked_candidate_files_changed": false
+  },
+  "accepted_attempt": {
+    "suite": "p4_entry_frontend",
+    "command_id": "p4_entry_frontend",
+    "exit_code": 0,
+    "tests": 120,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  }
+}

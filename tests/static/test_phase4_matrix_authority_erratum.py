@@ -245,5 +245,13 @@ def test_erratum_requires_exact_sha_reauthentication_without_promotion() -> None
     assert "`RESPONDENT_CONFIRM` reads an already frozen formal matrix" in erratum
     assert "Java remains the sole authority" in erratum
     assert "PENDING_PROMOTION" in erratum
-    assert "PENDING_BATCH_0_REAUTHENTICATION" in entry
-    assert "implementation_integration: BLOCKED_PENDING_EVIDENCE_COMMIT" in entry
+    pending = (
+        "PENDING_BATCH_0_REAUTHENTICATION" in entry
+        and "implementation_integration: BLOCKED_PENDING_EVIDENCE_COMMIT" in entry
+    )
+    authenticated = (
+        "PASS_AT_0740c9b73b7385249ed5645cf1dee10909173049" in entry
+        and "implementation_integration: AUTHORIZED_FOR_PHASE_4_ENGINEERING_ONLY"
+        in entry
+    )
+    assert pending ^ authenticated
