@@ -248,7 +248,7 @@ class CaseFactDeltaRowV2(StrictModel):
     category: FactCategory
     fact_target: LongText
     materiality: FactMateriality
-    stance: FactStance = FactStance.CONFIRM
+    stance: FactStance
     position_summary: LongText
     asserted_value: ShortText | None = None
     source_scope: CaseMatrixSourceScope

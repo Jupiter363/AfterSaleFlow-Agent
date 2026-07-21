@@ -92,6 +92,34 @@ MODEL_CONTROLLED_FORBIDDEN_FIELDS = frozenset(
     }
 )
 
+_DOSSIER_MATRIX_AUTHORITY_FIELDS = frozenset(
+    {
+        "case_fact_matrix",
+        "unilateral_case_matrix",
+        "matrix_patch",
+        "matrix_id",
+        "matrix_version",
+        "matrix_kind",
+        "source_binding",
+        "generation_ref",
+        "parent_ref",
+        "party_map",
+        "fact_indexes",
+        "fact_relationships",
+        "summary_source_fact_ids",
+        "truth_status",
+        "evidence_coverage_status",
+    }
+)
+_DOSSIER_MATRIX_SCHEMA_VERSIONS = frozenset(
+    {
+        "unilateral_case_matrix.v1",
+        "unilateral_case_matrix.draft.v1",
+        "case_fact_matrix.v2",
+        "case_fact_matrix.delta.v2",
+    }
+)
+
 
 class StrictIntakeModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -181,6 +209,9 @@ class DossierPatch(StrictIntakeModel):
     def reject_explicit_null_branches(self) -> DossierPatch:
         if any(getattr(self, name) is None for name in self.model_fields_set):
             raise ValueError("dossier patch branches cannot be null")
+        _reject_dossier_matrix_authority(
+            self.model_dump(mode="python", exclude_none=True, exclude_unset=True)
+        )
         return self
 
 
@@ -411,3 +442,16 @@ def _reject_model_controlled_fields(value: Any) -> None:
     elif isinstance(value, list | tuple):
         for child in value:
             _reject_model_controlled_fields(child)
+
+
+def _reject_dossier_matrix_authority(value: Any) -> None:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if key in _DOSSIER_MATRIX_AUTHORITY_FIELDS or (
+                key == "schema_version" and child in _DOSSIER_MATRIX_SCHEMA_VERSIONS
+            ):
+                raise ValueError(f"dossier matrix authority field is forbidden: {key}")
+            _reject_dossier_matrix_authority(child)
+    elif isinstance(value, list | tuple):
+        for child in value:
+            _reject_dossier_matrix_authority(child)

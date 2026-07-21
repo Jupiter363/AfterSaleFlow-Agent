@@ -971,6 +971,9 @@ def test_governed_usage_allows_provider_overhead(
     [
         lambda value: value.update(open_evidence=True),
         lambda value: value["dossier_patch"]["case_story"].update(room_transition="EVIDENCE"),
+        lambda value: value["dossier_patch"]["case_story"].update(
+            nested={"matrix_kind": "BILATERAL_FROZEN"}
+        ),
     ],
 )
 def test_strict_parser_rejects_unknown_and_formal_action_fields(mutation) -> None:

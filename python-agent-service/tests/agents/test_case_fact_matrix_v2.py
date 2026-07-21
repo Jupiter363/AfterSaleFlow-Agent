@@ -17,6 +17,26 @@ from app.harness.evidence_context_assembler import (
 )
 
 
+def test_delta_requires_explicit_stance() -> None:
+    with pytest.raises(ValueError, match="stance"):
+        CaseFactMatrixDeltaV2.model_validate(
+            {
+                "schema_version": "case_fact_matrix.delta.v2",
+                "fact_rows": [
+                    {
+                        "fact_key": "NEW_MISSING_STANCE",
+                        "category": "ORDER",
+                        "fact_target": "Whether the order exists.",
+                        "materiality": "CORE",
+                        "position_summary": "The actor stated a position.",
+                        "source_scope": "CURRENT_SOURCE",
+                    }
+                ],
+                "summary_source_fact_keys": ["NEW_MISSING_STANCE"],
+            }
+        )
+
+
 def test_delta_can_carry_an_existing_unaddressed_fact_without_new_source() -> None:
     carried = CaseFactMatrixDeltaV2.model_validate(
         {

@@ -76,14 +76,14 @@ def _cognition(matrix_patch: dict) -> dict:
 
 
 def _formal_initiator_matrix(case_id: str) -> dict:
-    return {
+    matrix = {
         "schema_version": "case_fact_matrix.v2",
         "case_id": case_id,
-        "matrix_id": "CASE_MATRIX_SYNTHETIC_1",
+        "matrix_id": "CASE_MATRIX_0123456789ABCDEF0123",
         "matrix_version": 1,
         "matrix_kind": "INITIATOR_FROZEN",
         "parent_ref": None,
-        "content_hash": "a" * 64,
+        "content_hash": "0" * 64,
         "party_map": {"initiator_role": "USER", "respondent_role": "MERCHANT"},
         "source_refs": ["MESSAGE_P4_USER_1"],
         "case_overview": {
@@ -91,35 +91,74 @@ def _formal_initiator_matrix(case_id: str) -> dict:
             "core_conflict": "Whether damage existed at delivery.",
             "summary_source_fact_ids": ["FACT_DAMAGE"],
         },
-        "claims": {},
+        "claims": {
+            "initiator_claim": {
+                "initiator_role": "USER",
+                "requested_resolution": "REFUND",
+                "reason_summary": "The order allegedly arrived damaged.",
+                "position_summary": "The initiator requests a refund.",
+                "source_refs": ["MESSAGE_P4_USER_1"],
+            },
+            "respondent_reported_by_initiator": None,
+            "respondent_direct": None,
+            "claim_conflict": None,
+        },
         "fact_rows": [
             {
                 "fact_id": "FACT_DAMAGE",
                 "category": "PRODUCT_STATE",
                 "fact_target": "Whether the order arrived damaged.",
                 "materiality": "CORE",
+                "origin": {
+                    "introduced_stage": "INITIATOR_INTAKE",
+                    "source_refs": ["MESSAGE_P4_USER_1"],
+                },
                 "positions": {
                     "USER": {
                         "stance": "CONFIRM",
                         "position_summary": "The order arrived damaged.",
                         "asserted_value": "damaged",
+                        "source_type": "DIRECT_PARTY_STATEMENT",
+                        "source_refs": ["MESSAGE_P4_USER_1"],
                     },
                     "MERCHANT": {
                         "stance": "NOT_ADDRESSED",
-                        "position_summary": "The respondent has not addressed this fact.",
+                        "position_summary": "No direct respondent position is recorded.",
                         "asserted_value": None,
+                        "source_type": "NO_DIRECT_POSITION",
+                        "source_refs": [],
                     },
                 },
-            }
+                "party_alignment": {
+                    "status": "NOT_COMPUTED",
+                    "agreed_statement": None,
+                    "conflict_summary": None,
+                },
+                "requires_resolution": None,
+                "truth_status": "NOT_EVALUATED",
+                "evidence_coverage_status": "PENDING_EVIDENCE_REVIEW",
+            },
         ],
+        "fact_relationships": [],
         "generation_ref": {
             "actor_role": "USER",
             "source_stage": "INITIATOR_INTAKE",
             "latest_source_ref": "MESSAGE_P4_USER_1",
             "source_context_hash": "b" * 64,
         },
-        "fact_indexes": {},
+        "fact_indexes": {
+            "not_computed_fact_ids": ["FACT_DAMAGE"],
+            "agreed_fact_ids": [],
+            "partially_agreed_fact_ids": [],
+            "contested_fact_ids": [],
+            "one_sided_fact_ids": [],
+            "unresolved_fact_ids": [],
+            "core_fact_ids": ["FACT_DAMAGE"],
+            "requires_resolution_fact_ids": [],
+        },
     }
+    matrix["content_hash"] = canonical_sha256_omitting(matrix, "content_hash")
+    return matrix
 
 
 def _import_state(bindings, version_pins, snapshot):
@@ -132,7 +171,7 @@ def _import_state(bindings, version_pins, snapshot):
     )
 
 
-def _respondent_state(bindings, version_pins, snapshot):
+def _respondent_snapshot(bindings, snapshot):
     respondent_bindings = copy.deepcopy(bindings)
     respondent_bindings["private"]["audience"] = "MERCHANT"
     respondent_snapshot = copy.deepcopy(snapshot)
@@ -144,6 +183,11 @@ def _respondent_state(bindings, version_pins, snapshot):
         respondent_snapshot,
         "snapshot_hash",
     )
+    return respondent_bindings, respondent_snapshot
+
+
+def _respondent_state(bindings, version_pins, snapshot):
+    respondent_bindings, respondent_snapshot = _respondent_snapshot(bindings, snapshot)
     return (
         respondent_bindings,
         respondent_snapshot,
@@ -164,6 +208,45 @@ def test_contract_union_requires_explicit_delta_stance() -> None:
     missing_stance["matrix_patch"]["fact_rows"][0].pop("stance")
     with pytest.raises(ValidationError, match="stance"):
         IntakeCognitionDraft.model_validate(missing_stance)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("matrix_id", "CASE_MATRIX_MODEL_DERIVED"),
+        ("matrix_version", 2),
+        ("matrix_kind", "BILATERAL_FROZEN"),
+        ("generation_ref", {"actor_role": "USER"}),
+        ("parent_ref", {"matrix_id": "CASE_MATRIX_PARENT"}),
+        ("party_map", {"initiator_role": "USER", "respondent_role": "MERCHANT"}),
+        ("fact_indexes", {"core_fact_ids": ["FACT_DAMAGE"]}),
+        ("schema_version", "case_fact_matrix.v2"),
+    ],
+)
+def test_dossier_patch_recursively_rejects_matrix_authority_metadata(
+    field,
+    value,
+) -> None:
+    cognition = _cognition(_unilateral_patch())
+    cognition["matrix_patch"] = None
+    cognition["dossier_patch"]["case_story"] = {"nested": {field: value}}
+
+    with pytest.raises(ValidationError, match="dossier matrix authority field"):
+        IntakeCognitionDraft.model_validate(cognition)
+
+
+def test_dossier_patch_keeps_general_fact_and_source_references() -> None:
+    cognition = _cognition(_unilateral_patch())
+    cognition["matrix_patch"] = None
+    cognition["dossier_patch"]["case_story"] = {
+        "fact_id": "FACT_DAMAGE",
+        "source_refs": ["MESSAGE_P4_USER_1"],
+        "content_hash": "a" * 64,
+    }
+
+    parsed = IntakeCognitionDraft.model_validate(cognition)
+
+    assert parsed.dossier_patch.case_story == cognition["dossier_patch"]["case_story"]
 
 
 def test_initiator_can_only_propose_unilateral_matrix(
@@ -203,6 +286,122 @@ def test_respondent_delta_fails_closed_without_locked_initiator_matrix(
 
     with pytest.raises(IntakeGraphContractError, match="INTAKE_MATRIX_PATCH_UNAUTHORIZED"):
         validate_matrix_patch(state, _delta_patch())
+
+
+def test_respondent_unlock_rejects_stale_embedded_matrix_hash(
+    bindings,
+    version_pins,
+    snapshot,
+) -> None:
+    respondent_bindings, respondent_snapshot = _respondent_snapshot(bindings, snapshot)
+    respondent_snapshot["current_dossier"]["case_fact_matrix"]["fact_rows"][0]["fact_target"] = (
+        "A stale-hash mutation."
+    )
+    respondent_snapshot["snapshot_hash"] = canonical_sha256_omitting(
+        respondent_snapshot,
+        "snapshot_hash",
+    )
+
+    with pytest.raises(IntakeGraphContractError, match="INTAKE_MATRIX_CURRENT_INVALID"):
+        _import_state(respondent_bindings, version_pins, respondent_snapshot)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda matrix: matrix.update(matrix_id="CASE_MATRIX_SYNTHETIC_1"),
+        lambda matrix: matrix.update(matrix_version=2),
+        lambda matrix: matrix["generation_ref"].update(latest_source_ref="MESSAGE_UNKNOWN"),
+        lambda matrix: matrix["fact_indexes"].update(core_fact_ids=[]),
+        lambda matrix: matrix["fact_rows"][0]["positions"]["MERCHANT"].update(
+            position_summary="A fabricated respondent position."
+        ),
+    ],
+)
+def test_respondent_unlock_rejects_rehashed_non_java_frozen_shape(
+    bindings,
+    version_pins,
+    snapshot,
+    mutation,
+) -> None:
+    respondent_bindings, respondent_snapshot = _respondent_snapshot(bindings, snapshot)
+    matrix = respondent_snapshot["current_dossier"]["case_fact_matrix"]
+    mutation(matrix)
+    matrix["content_hash"] = canonical_sha256_omitting(matrix, "content_hash")
+    respondent_snapshot["snapshot_hash"] = canonical_sha256_omitting(
+        respondent_snapshot,
+        "snapshot_hash",
+    )
+
+    with pytest.raises(IntakeGraphContractError, match="INTAKE_MATRIX_CURRENT_INVALID"):
+        _import_state(respondent_bindings, version_pins, respondent_snapshot)
+
+
+def test_respondent_delta_must_carry_every_frozen_fact(
+    bindings,
+    version_pins,
+    snapshot,
+) -> None:
+    respondent_bindings, respondent_snapshot = _respondent_snapshot(bindings, snapshot)
+    matrix = respondent_snapshot["current_dossier"]["case_fact_matrix"]
+    second = copy.deepcopy(matrix["fact_rows"][0])
+    second.update(
+        fact_id="FACT_DELIVERY",
+        category="LOGISTICS",
+        fact_target="Whether delivery completed at the agreed address.",
+        materiality="SUPPORTING",
+    )
+    second["positions"]["USER"].update(
+        position_summary="The initiator disputes successful delivery.",
+        asserted_value="not delivered",
+    )
+    matrix["fact_rows"].append(second)
+    matrix["fact_indexes"]["not_computed_fact_ids"].append("FACT_DELIVERY")
+    matrix["content_hash"] = canonical_sha256_omitting(matrix, "content_hash")
+    respondent_snapshot["snapshot_hash"] = canonical_sha256_omitting(
+        respondent_snapshot,
+        "snapshot_hash",
+    )
+    state = _import_state(respondent_bindings, version_pins, respondent_snapshot)
+
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_MATRIX_FACT_MEMBERSHIP_INVALID",
+    ):
+        validate_matrix_patch(state, _delta_patch())
+
+
+def test_respondent_fact_membership_excludes_unilateral_projection(
+    bindings,
+    version_pins,
+    snapshot,
+) -> None:
+    respondent_bindings, respondent_snapshot = _respondent_snapshot(bindings, snapshot)
+    respondent_snapshot["current_dossier"]["unilateral_case_matrix"] = {
+        "fact_rows": [
+            {
+                "fact_id": "FACT_EXTRA",
+                "category": "ORDER",
+                "fact_target": "A fact absent from the frozen matrix.",
+                "materiality": "CORE",
+            }
+        ]
+    }
+    respondent_snapshot["snapshot_hash"] = canonical_sha256_omitting(
+        respondent_snapshot,
+        "snapshot_hash",
+    )
+    state = _import_state(respondent_bindings, version_pins, respondent_snapshot)
+    patch = _delta_patch()
+    patch["fact_rows"][0].update(
+        fact_key="FACT_EXTRA",
+        category="ORDER",
+        fact_target="A fact absent from the frozen matrix.",
+    )
+    patch["summary_source_fact_keys"] = ["FACT_EXTRA"]
+
+    with pytest.raises(IntakeGraphContractError, match="INTAKE_MATRIX_FACT_UNKNOWN"):
+        validate_matrix_patch(state, patch)
 
 
 @pytest.mark.parametrize(
