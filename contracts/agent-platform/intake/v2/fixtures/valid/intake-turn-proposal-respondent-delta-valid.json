@@ -1,0 +1,56 @@
+{
+  "schema_version": "intake-turn-proposal.v2",
+  "command_id": "COMMAND_P4_MATRIX_MERCHANT_2",
+  "logical_run_id": "RUN_P4_MATRIX_MERCHANT_2",
+  "attempt_id": "ATTEMPT_P4_MATRIX_MERCHANT_2_1",
+  "case_id": "CASE_P4_SYNTHETIC_1",
+  "room_epoch": 1,
+  "thread_id": "grt.v1.018f6b7ec30a7430982fffc520c8195c",
+  "actor_scope_hash": "52f01901287fe5e5465ddcd7d7baf9074aa77e3d88a64da747bf1f530916a5d2",
+  "agent_session_id": "AGENT_SESSION_P4_MERCHANT_1",
+  "cognitive_revision": 2,
+  "source_snapshot_hash": "7deb1aa13efc125244aa0e122b6e02dc4343f97afc0423c94a00308b217fea0d",
+  "source_event_hash": "5da4ebd5b5ff75ea8af5c955c01f2cf18138892d07ad6ca74be7c7fb50ff5815",
+  "room_utterance": "The response to the submitted facts was recorded.",
+  "dossier_patch": {
+    "schema_version": "intake-dossier.v2",
+    "respondent_attitude": {"attitude": "DISAGREE"}
+  },
+  "matrix_patch": {
+    "schema_version": "case_fact_matrix.delta.v2",
+    "fact_rows": [
+      {
+        "fact_key": "FACT_DAMAGE",
+        "category": "PRODUCT_STATE",
+        "fact_target": "Whether the order arrived damaged.",
+        "materiality": "CORE",
+        "stance": "DENY",
+        "position_summary": "The current actor denies that the item was damaged at dispatch.",
+        "asserted_value": "undamaged at dispatch",
+        "source_scope": "CURRENT_SOURCE",
+        "conflict_summary": "The parties disagree about the item condition at delivery."
+      }
+    ],
+    "summary_source_fact_keys": ["FACT_DAMAGE"],
+    "respondent_claim": {
+      "attitude": "DISAGREE",
+      "position_summary": "The current actor disputes the requested refund."
+    }
+  },
+  "readiness": "INCOMPLETE",
+  "missing_fields": ["respondent_supporting_evidence"],
+  "recommendation": "NEED_MORE_INFO",
+  "knowledge_answer_mode": "NONE",
+  "confidence": 0.76,
+  "profile_versions": {
+    "graph_version": "2.0.0",
+    "checkpoint_schema_version": "intake-checkpoint.v2",
+    "prompt_version": "intake-prompt.v2",
+    "model_profile_id": "intake-model.synthetic.v1",
+    "output_schema_version": "intake-turn-proposal.v2",
+    "policy_version": "intake-policy.v2",
+    "guardrail_version": "intake-guardrail.v2",
+    "tool_policy_version": "no-tools.v1"
+  },
+  "proposal_hash": "d046d464ddc52bbc08363a06e6ec23e01a7a2bdaff5c2d491316393b7caf9cbc"
+}

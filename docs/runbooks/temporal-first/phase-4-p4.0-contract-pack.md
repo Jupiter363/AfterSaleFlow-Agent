@@ -478,5 +478,18 @@ formal_intake_writer: FORBIDDEN
     dispatch uses `typed-intake-room-child-v1`, while v1 and old History stay on the generic child.
 13. Promotion remains independently gated; `MIG-004` cannot pass while `MIG-003` is pending.
 
+## Matrix Proposal Authority Erratum
+
+The original `unilateral_or_bilateral_matrix_patch proposal` wording is refined by
+[`phase-4-p4.0-matrix-authority-erratum.md`](./phase-4-p4.0-matrix-authority-erratum.md). The strict
+`intake-turn-proposal.v2.matrix_patch` union is `null`, a current-actor
+`unilateral_case_matrix.draft.v1`, or an unlocked-respondent `case_fact_matrix.delta.v2`.
+
+Neither non-null member is a formal matrix. Java alone authorizes the actor and unlock state,
+derives stable IDs, versions, provenance and canonical hashes, and creates or freezes the formal
+unilateral/bilateral projection. The total proposal limit remains 64 KiB. This correction requires
+a new exact-SHA Batch 0 re-authentication before its implementation can enter the Phase 4
+integration candidate. `MIG-003` and `MIG-004` remain `PENDING_PROMOTION`.
+
 An incompatible change requires an additive schema/contract version or accepted ADR, updated
 cross-language fixtures, and explicit notification to every affected owner.

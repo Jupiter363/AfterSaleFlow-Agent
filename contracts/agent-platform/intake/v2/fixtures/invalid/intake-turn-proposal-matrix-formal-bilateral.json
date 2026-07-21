@@ -1,0 +1,35 @@
+{
+  "schema_version": "intake-turn-proposal.v2",
+  "command_id": "COMMAND_P4_BAD_BILATERAL_MATRIX",
+  "logical_run_id": "RUN_P4_BAD_BILATERAL_MATRIX",
+  "attempt_id": "ATTEMPT_P4_BAD_BILATERAL_MATRIX_1",
+  "case_id": "CASE_P4_SYNTHETIC_1",
+  "room_epoch": 1,
+  "thread_id": "grt.v1.018f6b7ec30a7430982fffc520c8195c",
+  "actor_scope_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "agent_session_id": "AGENT_SESSION_P4_USER_1",
+  "cognitive_revision": 2,
+  "source_snapshot_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "room_utterance": "A graph cannot emit a frozen bilateral matrix.",
+  "dossier_patch": {"schema_version": "intake-dossier.v2"},
+  "matrix_patch": {
+    "schema_version": "case_fact_matrix.v2",
+    "matrix_kind": "BILATERAL_FROZEN"
+  },
+  "readiness": "INCOMPLETE",
+  "missing_fields": [],
+  "recommendation": "NEED_MORE_INFO",
+  "knowledge_answer_mode": "NONE",
+  "confidence": 0.5,
+  "profile_versions": {
+    "graph_version": "2.0.0",
+    "checkpoint_schema_version": "intake-checkpoint.v2",
+    "prompt_version": "intake-prompt.v2",
+    "model_profile_id": "intake-model.synthetic.v1",
+    "output_schema_version": "intake-turn-proposal.v2",
+    "policy_version": "intake-policy.v2",
+    "guardrail_version": "intake-guardrail.v2",
+    "tool_policy_version": "no-tools.v1"
+  },
+  "proposal_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+}

@@ -29,7 +29,8 @@
     "matrix_patch": {
       "oneOf": [
         {"type": "null"},
-        {"$ref": "#/$defs/unilateral_matrix_draft"}
+        {"$ref": "#/$defs/unilateral_matrix_draft"},
+        {"$ref": "#/$defs/case_matrix_delta"}
       ]
     },
     "readiness": {"enum": ["INCOMPLETE", "READY_TO_CONFIRM", "NEEDS_REVIEW"]},
@@ -145,6 +146,86 @@
         "source_scope": {"enum": [
           "CURRENT_SOURCE", "PREVIOUS_MATRIX", "PREVIOUS_AND_CURRENT_SOURCE"
         ]}
+      }
+    },
+    "case_matrix_delta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "fact_rows", "summary_source_fact_keys"],
+      "properties": {
+        "schema_version": {"const": "case_fact_matrix.delta.v2"},
+        "fact_rows": {
+          "type": "array", "minItems": 1, "maxItems": 200,
+          "items": {"$ref": "#/$defs/case_fact_delta"}
+        },
+        "summary_source_fact_keys": {
+          "type": "array", "minItems": 1, "maxItems": 200, "uniqueItems": true,
+          "items": {"$ref": "#/$defs/fact_key"}
+        },
+        "respondent_claim": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/respondent_claim_delta"}
+          ]
+        }
+      }
+    },
+    "case_fact_delta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fact_key", "category", "fact_target", "materiality", "stance",
+        "position_summary", "source_scope"
+      ],
+      "properties": {
+        "fact_key": {"$ref": "#/$defs/fact_key"},
+        "category": {"enum": [
+          "ORDER", "PRODUCT_PAGE", "PAYMENT", "FULFILLMENT", "LOGISTICS",
+          "PRODUCT_STATE", "COMMUNICATION", "AFTER_SALES", "TIME", "OTHER"
+        ]},
+        "fact_target": {"type": "string", "minLength": 1, "maxLength": 20000},
+        "materiality": {"enum": ["CORE", "SUPPORTING", "CONTEXT"]},
+        "stance": {"enum": ["CONFIRM", "DENY", "PARTIAL", "UNKNOWN", "NOT_ADDRESSED"]},
+        "position_summary": {"type": "string", "minLength": 1, "maxLength": 20000},
+        "asserted_value": {
+          "oneOf": [
+            {"type": "null"},
+            {"type": "string", "minLength": 1, "maxLength": 2000}
+          ]
+        },
+        "source_scope": {"enum": [
+          "CURRENT_SOURCE", "PREVIOUS_MATRIX", "PREVIOUS_AND_CURRENT_SOURCE"
+        ]},
+        "agreed_statement": {
+          "oneOf": [
+            {"type": "null"},
+            {"type": "string", "minLength": 1, "maxLength": 20000}
+          ]
+        },
+        "conflict_summary": {
+          "oneOf": [
+            {"type": "null"},
+            {"type": "string", "minLength": 1, "maxLength": 20000}
+          ]
+        }
+      }
+    },
+    "respondent_claim_delta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["attitude", "position_summary"],
+      "properties": {
+        "attitude": {"enum": [
+          "AGREE", "PARTIALLY_AGREE", "DISAGREE", "ALTERNATIVE_PROPOSED",
+          "NEED_MORE_INFO", "NOT_ADDRESSED"
+        ]},
+        "position_summary": {"type": "string", "minLength": 1, "maxLength": 20000},
+        "alternative_proposal": {
+          "oneOf": [
+            {"type": "null"},
+            {"type": "string", "minLength": 1, "maxLength": 20000}
+          ]
+        }
       }
     },
     "fact_key": {

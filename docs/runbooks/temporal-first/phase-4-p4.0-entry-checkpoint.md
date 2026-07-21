@@ -105,3 +105,23 @@ The amended contract was re-authenticated on 2026-07-21 from clean detached work
 This supersedes `cf1ae353` only as the current P4.0 contract baseline. It does not authorize a new
 runtime mode or formal traffic: engineering execution remains restricted to `DISABLED` or signed
 synthetic `SHADOW`, and `promotion_gate`, `MIG-003`, and `MIG-004` remain `PENDING`.
+
+## Matrix Proposal Erratum Re-authentication Pending
+
+The contract candidate containing
+[`phase-4-p4.0-matrix-authority-erratum.md`](./phase-4-p4.0-matrix-authority-erratum.md) adds the
+missing strict `case_fact_matrix.delta.v2` respondent proposal branch while retaining the strict
+unilateral draft and `null` branches. Its status at this commit is:
+
+```text
+matrix_erratum_candidate: PENDING_BATCH_0_REAUTHENTICATION
+implementation_integration: BLOCKED_PENDING_EVIDENCE_COMMIT
+previous_authenticated_candidate: f626fca36265af70bee061829f242d3cd1b67cb9
+MIG-003: PENDING_PROMOTION
+MIG-004: PENDING_PROMOTION
+```
+
+The 298-test result above authenticates only `f626fca36265af70bee061829f242d3cd1b67cb9` and must not be
+relabelled as evidence for the amended schemas. A later entry-evidence commit must name the exact
+contract-candidate SHA, commands, report hashes, and Batch 0 result before Graph implementation is
+integrated. Runtime restrictions remain unchanged.
