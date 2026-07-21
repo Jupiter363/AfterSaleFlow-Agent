@@ -1,0 +1,956 @@
+schema_ref: phase-4-r15-authority-binding-contract.schema.json
+schema_version: phase-4-r15-authority-binding-contract.v1
+contract_id: P4-R1.5
+status: FROZEN_FOR_IMPLEMENTATION
+owner: R
+depends_on: [P4-A1, P4-B1, P4-C1, P4-R1_TYPED_DISPATCH]
+
+purpose: >-
+  Bind every typed Intake bridge read to immutable Java-owned epoch, case-party,
+  registration, access-session, AgentSession, payload, and command authority
+  without accepting a client-selected thread or session.
+
+runtime_gate:
+  allowed_modes: [DISABLED, SIGNED_SYNTHETIC_SHADOW]
+  real_case_shadow_allowed: false
+  temporal_intake_allocation_allowed: false
+  formal_sink_allowed: false
+  required_defaults:
+    graph_runtime: DISABLED
+    new_epoch_mode: LEGACY
+    non_legacy_epoch_allocation_enabled: false
+    temporal_writer_enabled: false
+
+execution_matrix:
+  DISABLED:
+    INERT_EXTERNAL_EVENT: forbidden
+    ACTIVITY_ORCHESTRATED: forbidden
+  SIGNED_SYNTHETIC_SHADOW:
+    INERT_EXTERNAL_EVENT: allowed
+    ACTIVITY_ORCHESTRATED: forbidden_until_P4_E1
+  TEMPORAL:
+    INERT_EXTERNAL_EVENT: forbidden_until_MIG_004
+    ACTIVITY_ORCHESTRATED: forbidden_until_MIG_004
+
+authority_tables:
+  case_intake_epoch_selection_binding:
+    cardinality: exactly_one_per_v2_intake_epoch
+    primary_key: [epoch_id]
+    unique_keys:
+      - [epoch_id, tenant_surrogate, case_id, room_type, room_epoch, fencing_token]
+    foreign_keys:
+      - columns: [epoch_id, tenant_surrogate, case_id, room_type, room_epoch, fencing_token]
+        references:
+          table: case_room_epoch
+          columns: [id, tenant_surrogate, case_id, room_type, room_epoch, fencing_token]
+          candidate_key_added_by_V044: true
+    immutable: true
+    required_pins:
+      - selection_hash
+      - writer_mode
+      - case_workflow_type
+      - case_workflow_build_id
+      - room_workflow_type
+      - room_workflow_build_id
+      - process_contract_version
+      - graph_key
+      - graph_version
+      - checkpoint_schema_version
+      - state_schema_version
+      - stream_protocol
+      - prompt_version
+      - model_profile_id
+      - output_schema_version
+      - policy_version
+      - guardrail_version
+      - tool_policy_version
+      - cohort_policy_version
+      - agent_key
+      - agent_session_profile_version
+      - memory_policy_id
+
+  case_intake_epoch_party_authority:
+    cardinality: exactly_one_initiator_and_one_respondent_per_bound_epoch
+    primary_key: [authority_id]
+    unique_keys:
+      - [epoch_id, party]
+      -
+        - authority_id
+        - epoch_id
+        - tenant_surrogate
+        - case_id
+        - room_type
+        - room_epoch
+        - fencing_token
+        - access_session_id
+        - registration_id
+        - thread_id
+        - actor_id
+        - actor_role
+        - actor_scope_hash
+        - agent_session_id
+    foreign_keys:
+      - columns: [epoch_id, tenant_surrogate, case_id, room_type, room_epoch, fencing_token]
+        references:
+          table: case_intake_epoch_selection_binding
+          columns: [epoch_id, tenant_surrogate, case_id, room_type, room_epoch, fencing_token]
+      - columns:
+          - registration_id
+          - tenant_surrogate
+          - case_id
+          - room_epoch
+          - fencing_token
+          - thread_id
+          - actor_id
+          - actor_role
+          - audience
+          - actor_scope_hash
+          - agent_session_id
+          - registration_hash
+        references:
+          table: case_intake_graph_thread_binding
+          columns:
+            - registration_id
+            - tenant_surrogate
+            - case_id
+            - room_epoch
+            - fencing_token
+            - thread_id
+            - actor_id
+            - actor_role
+            - audience
+            - actor_scope_hash
+            - agent_session_id
+            - registration_hash
+          candidate_key_added_by_V044: true
+      - columns:
+          - access_session_id
+          - session_tenant_id
+          - session_case_id
+          - actor_id
+          - actor_role
+          - permission_level
+        references:
+          table: case_access_session
+          columns:
+            - id
+            - tenant_id
+            - case_id
+            - actor_id
+            - actor_role
+            - permission_level
+          candidate_key_added_by_V044: true
+      - columns:
+          - agent_session_id
+          - session_tenant_id
+          - session_case_id
+          - room_type
+          - access_session_id
+          - actor_id
+          - actor_role
+          - agent_key
+          - prompt_version
+          - agent_session_profile_version
+          - prompt_profile_id
+          - memory_policy_id
+        references:
+          table: agent_conversation_session
+          columns:
+            - id
+            - tenant_id
+            - case_id
+            - room_type
+            - access_session_id
+            - actor_id
+            - actor_role
+            - agent_key
+            - prompt_version
+            - agent_session_profile_version
+            - prompt_profile_id
+            - memory_policy_id
+          candidate_key_added_by_V044: true
+    immutable: true
+    required_pins:
+      - party
+      - tenant_surrogate
+      - case_id
+      - session_tenant_id
+      - session_case_id
+      - room_type
+      - room_epoch
+      - fencing_token
+      - registration_id
+      - registration_hash
+      - thread_id
+      - actor_id
+      - actor_role
+      - audience
+      - actor_scope_hash
+      - access_session_id
+      - permission_level
+      - agent_session_id
+      - agent_key
+      - prompt_version
+      - prompt_profile_id
+      - agent_session_profile_version
+      - memory_policy_id
+    scope_checks:
+      party_enum: [INITIATOR, RESPONDENT]
+      session_tenant_id_equals_tenant_surrogate: true
+      session_case_id_equals_case_id: true
+      room_type: INTAKE
+      permission_level_by_actor_role:
+        USER: PARTY_USER
+        MERCHANT: PARTY_MERCHANT
+    transactional_status_checks:
+      epoch_binding_transaction:
+        case_access_session: ACTIVE
+        agent_conversation_session: ACTIVE
+      acceptance_transaction:
+        case_access_session: ACTIVE
+        agent_conversation_session: ACTIVE
+      start_read_transaction:
+        case_access_session: ACTIVE
+        agent_conversation_session: ACTIVE
+      status_columns_in_foreign_keys: false
+      reason: ACTIVE_is_mutable_and_must_not_be_part_of_an_immutable_candidate_key
+    bootstrap_cardinality_assertion:
+      required_parties: [INITIATOR, RESPONDENT]
+      exact_row_count: 2
+      asserted_in: epoch_binding_transaction
+      unique_epoch_party_semantics: at_most_one_row_per_party_only
+      bootstrap_outbox_deliverable_after_assertion_only: true
+
+  case_intake_command_payload_authority:
+    cardinality: exactly_one_server_bound_payload_per_bound_command
+    primary_key: [payload_authority_id]
+    unique_keys:
+      - [tenant_surrogate, artifact_id]
+      -
+        - payload_authority_id
+        - epoch_id
+        - party_authority_id
+        - access_session_id
+        - registration_id
+        - tenant_surrogate
+        - case_id
+        - room_type
+        - room_epoch
+        - fencing_token
+        - thread_id
+        - actor_scope_hash
+        - agent_session_id
+    foreign_keys:
+      - columns:
+          - party_authority_id
+          - epoch_id
+          - tenant_surrogate
+          - case_id
+          - room_type
+          - room_epoch
+          - fencing_token
+          - access_session_id
+          - registration_id
+          - thread_id
+          - actor_id
+          - actor_role
+          - actor_scope_hash
+          - agent_session_id
+        references:
+          table: case_intake_epoch_party_authority
+          columns:
+            - authority_id
+            - epoch_id
+            - tenant_surrogate
+            - case_id
+            - room_type
+            - room_epoch
+            - fencing_token
+            - access_session_id
+            - registration_id
+            - thread_id
+            - actor_id
+            - actor_role
+            - actor_scope_hash
+            - agent_session_id
+      - columns:
+          - existing_event_binding_id
+          - registration_id
+          - tenant_surrogate
+          - case_id
+          - room_type
+          - room_epoch
+          - fencing_token
+          - thread_id
+          - actor_scope_hash
+          - agent_session_id
+          - actor_role
+          - existing_event_binding_type
+          - schema_version
+          - artifact_id
+          - object_uri
+          - object_version
+          - content_sha256
+          - size_bytes
+        references:
+          table: case_intake_snapshot_binding
+          columns:
+            - binding_id
+            - thread_registration_id
+            - tenant_surrogate
+            - case_id
+            - room_type
+            - room_epoch
+            - fencing_token
+            - thread_id
+            - actor_scope_hash
+            - agent_session_id
+            - actor_audience
+            - binding_type
+            - schema_version
+            - artifact_id
+            - object_uri
+            - object_version
+            - content_sha256
+            - size_bytes
+          candidate_key_added_by_V044: true
+    immutable: true
+    required_pins:
+      - epoch_id
+      - party_authority_id
+      - access_session_id
+      - registration_id
+      - tenant_surrogate
+      - case_id
+      - room_type
+      - room_epoch
+      - fencing_token
+      - thread_id
+      - actor_id
+      - actor_role
+      - actor_scope_hash
+      - agent_session_id
+      - source_kind
+      - artifact_id
+      - schema_version
+      - object_uri
+      - object_version
+      - content_sha256
+      - size_bytes
+    source_kind_row_shape:
+      database_check_constraint_required: true
+      common_non_null_columns:
+        - payload_authority_id
+        - epoch_id
+        - party_authority_id
+        - access_session_id
+        - registration_id
+        - tenant_surrogate
+        - case_id
+        - room_type
+        - room_epoch
+        - fencing_token
+        - thread_id
+        - actor_id
+        - actor_role
+        - actor_scope_hash
+        - agent_session_id
+        - source_kind
+        - artifact_id
+        - schema_version
+        - object_uri
+        - object_version
+        - content_sha256
+        - size_bytes
+      EXISTING_PRIVATE_EVENT:
+        required_values:
+          source_kind: EXISTING_PRIVATE_EVENT
+          existing_event_binding_type: EVENT
+          schema_version: intake-turn-event.v2
+        event_composite_non_null_columns:
+          - existing_event_binding_id
+          - registration_id
+          - tenant_surrogate
+          - case_id
+          - room_type
+          - room_epoch
+          - fencing_token
+          - thread_id
+          - actor_scope_hash
+          - agent_session_id
+          - actor_role
+          - existing_event_binding_type
+          - schema_version
+          - artifact_id
+          - object_uri
+          - object_version
+          - content_sha256
+          - size_bytes
+        null_columns:
+          - put_receipt_schema_version
+          - put_receipt_id
+          - put_receipt_stored_at
+          - put_receipt_hash
+      SERVER_MINTED_HUMAN_INPUT:
+        required_values:
+          source_kind: SERVER_MINTED_HUMAN_INPUT
+          schema_version: intake-human-input-command.v1
+          put_receipt_schema_version: intake-command-payload-put-receipt.v1
+        non_null_columns:
+          - put_receipt_schema_version
+          - put_receipt_id
+          - put_receipt_stored_at
+          - put_receipt_hash
+        null_columns: [existing_event_binding_id, existing_event_binding_type]
+      SERVER_CANONICAL_BRANCH:
+        required_values:
+          source_kind: SERVER_CANONICAL_BRANCH
+          schema_version: intake-branch-command.v1
+          put_receipt_schema_version: intake-command-payload-put-receipt.v1
+        non_null_columns:
+          - put_receipt_schema_version
+          - put_receipt_id
+          - put_receipt_stored_at
+          - put_receipt_hash
+        null_columns: [existing_event_binding_id, existing_event_binding_type]
+
+  case_intake_command_authority:
+    cardinality: exactly_one_per_bound_command
+    primary_key: [case_command_id]
+    unique_keys:
+      - [tenant_surrogate, command_id]
+      - [case_command_id, tenant_surrogate, case_id, command_id, request_hash]
+      - [payload_authority_id]
+    foreign_keys:
+      - columns: [case_command_id, tenant_surrogate, case_id, command_id, request_hash]
+        references:
+          table: case_command
+          columns: [id, tenant_surrogate, case_id, command_id, request_hash]
+          candidate_key_added_by_V044: true
+      - columns:
+          - party_authority_id
+          - epoch_id
+          - tenant_surrogate
+          - case_id
+          - room_type
+          - room_epoch
+          - fencing_token
+          - access_session_id
+          - registration_id
+          - thread_id
+          - actor_id
+          - actor_role
+          - actor_scope_hash
+          - agent_session_id
+        references:
+          table: case_intake_epoch_party_authority
+          columns:
+            - authority_id
+            - epoch_id
+            - tenant_surrogate
+            - case_id
+            - room_type
+            - room_epoch
+            - fencing_token
+            - access_session_id
+            - registration_id
+            - thread_id
+            - actor_id
+            - actor_role
+            - actor_scope_hash
+            - agent_session_id
+      - columns:
+          - payload_authority_id
+          - epoch_id
+          - party_authority_id
+          - access_session_id
+          - registration_id
+          - tenant_surrogate
+          - case_id
+          - room_type
+          - room_epoch
+          - fencing_token
+          - thread_id
+          - actor_scope_hash
+          - agent_session_id
+        references:
+          table: case_intake_command_payload_authority
+          columns:
+            - payload_authority_id
+            - epoch_id
+            - party_authority_id
+            - access_session_id
+            - registration_id
+            - tenant_surrogate
+            - case_id
+            - room_type
+            - room_epoch
+            - fencing_token
+            - thread_id
+            - actor_scope_hash
+            - agent_session_id
+    immutable: true
+    required_pins:
+      - command_id
+      - case_command_sequence
+      - command_type
+      - epoch_id
+      - party_authority_id
+      - access_session_id
+      - registration_id
+      - tenant_surrogate
+      - case_id
+      - room_type
+      - room_epoch
+      - fencing_token
+      - thread_id
+      - actor_id
+      - actor_role
+      - actor_scope_hash
+      - agent_session_id
+      - payload_authority_id
+      - request_hash
+      - accepted_room_revision
+      - execution_disposition
+    binding_source: authenticated_actor_and_server_resolved_access_session
+    transaction_boundary: same_as_payload_authority_case_command_and_command_outbox
+    replay_policy: exact_command_payload_and_authority_or_fail_closed
+
+creation_order:
+  epoch_authority: >-
+    Persist the selection row and both case-party rows atomically before the
+    bootstrap outbox becomes deliverable.
+  command_authority: >-
+    Verify or mint the payload authority and persist it, command authority,
+    case_command, and command outbox atomically before delivery is visible.
+
+selection_rules:
+  schema_version: room-epoch-selection.v2
+  graph_key: intake.v2
+  state_schema_version: intake-graph-state.v2
+  output_schema_version: intake-turn-proposal.v2
+  current_writer_mode: SHADOW
+  current_execution_disposition: INERT_EXTERNAL_EVENT
+  canonicalization: RFC_8785
+  hash: SHA_256
+  agent_session_profile:
+    agent_key: DISPUTE_INTAKE_OFFICER
+    agent_session_profile_version: agent-session-profile.v1
+    prompt_profile_id_column: agent_conversation_session.prompt_profile_id
+    prompt_profile_id_formula: "asp.v1.{lowercase_sha256_of_rfc8785_utf8_canonical_hash_input}"
+    prompt_profile_id_prefix: asp.v1.
+    prompt_profile_id_encoded_length: 71
+    prompt_profile_id_storage_length: 128
+    canonicalization: RFC_8785
+    canonical_encoding: UTF_8
+    hash: SHA_256
+    canonical_hash_input:
+      - agent_key
+      - actor_role
+      - prompt_version
+      - agent_session_profile_version
+    registry:
+      authority: JAVA_OWNED_IMMUTABLE_VERSIONED_REGISTRY
+      lookup: exact_prompt_profile_id_and_canonical_hash_input
+      mutable_default_forbidden: true
+    memory_policy_id: GRAPH_PRIVATE_NO_MEMORY_FRAME_V1
+    registration_prompt_version_must_equal_selection: true
+    registration_model_profile_must_equal_selection: true
+
+party_resolution:
+  authority_source: fulfillment_dispute_case
+  INITIATOR: [initiator_id, initiator_role]
+  RESPONDENT: [respondent_id, respondent_role]
+  exact_actor_id_and_role_match_required: true
+  exactly_one_party_match_required: true
+  role_only_mapping_forbidden: true
+  required_bridge_command_source_fields: [actor_id, actor_role, party, actor_scope_hash]
+  required_tests: [user_initiated_case, merchant_initiated_case]
+
+source_and_route_authority:
+  human_source_authority: authenticated_actor_plus_active_server_resolved_access_session
+  agent_session_source_claimed: false
+  route_target: immutable_epoch_party_authority
+  route_target_client_selectable: false
+  registration_agent_session_must_belong_to_access_session: true
+  payload:
+    provenance: server_minted_or_server_verified_immutable_artifact
+    exact_scope:
+      - tenant_surrogate
+      - case_id
+      - room_epoch
+      - actor_id
+      - access_session_id
+      - party
+      - party_authority_id
+    raw_client_uri_or_hash_is_authority: false
+    case_command_payload_ref_must_equal_authority: true
+
+payload_contract:
+  source_kind_enum:
+    - EXISTING_PRIVATE_EVENT
+    - SERVER_MINTED_HUMAN_INPUT
+    - SERVER_CANONICAL_BRANCH
+  command_schema_matrix:
+    - command_type: INTAKE_MESSAGE
+      source_kind: EXISTING_PRIVATE_EVENT
+      schema_version: intake-turn-event.v2
+      maximum_bytes: 32768
+      execution_disposition: INERT_EXTERNAL_EVENT
+      current_gate: allowed_only_for_signed_synthetic_shadow
+    - command_type: INTAKE_MESSAGE
+      source_kind: SERVER_MINTED_HUMAN_INPUT
+      schema_version: intake-human-input-command.v1
+      maximum_bytes: 32768
+      execution_disposition: ACTIVITY_ORCHESTRATED
+      current_gate: forbidden_until_P4_E1
+    - command_type: INTAKE_CONFIRM
+      source_kind: SERVER_CANONICAL_BRANCH
+      schema_version: intake-branch-command.v1
+      maximum_bytes: 16384
+      execution_disposition: ACTIVITY_ORCHESTRATED
+      current_gate: forbidden_until_P4_E1
+    - command_type: INTAKE_CANCEL
+      source_kind: SERVER_CANONICAL_BRANCH
+      schema_version: intake-branch-command.v1
+      maximum_bytes: 16384
+      execution_disposition: ACTIVITY_ORCHESTRATED
+      current_gate: forbidden_until_P4_E1
+  existing_private_event:
+    required_v043_table: case_intake_snapshot_binding
+    required_binding_type: EVENT
+    required_schema_version: intake-turn-event.v2
+    composite_foreign_key_required: true
+    exact_route_registration_required: true
+    nullable_binding_columns_for_other_source_kinds: true
+    exact_route_fields:
+      - registration_id
+      - tenant_surrogate
+      - case_id
+      - room_type
+      - room_epoch
+      - fencing_token
+      - thread_id
+      - actor_scope_hash
+      - agent_session_id
+      - actor_role
+    exact_artifact_fields:
+      - existing_event_binding_id
+      - schema_version
+      - artifact_id
+      - object_uri
+      - object_version
+      - content_sha256
+      - size_bytes
+  server_minted_human_input:
+    authority: JAVA_SERVER
+    canonicalization: RFC_8785
+    canonical_encoding: UTF_8
+    maximum_bytes: 32768
+    immutable_put_order: before_database_transaction
+    put_idempotency_key_formula: "iput.v1.{lowercase_sha256_of_rfc8785_utf8_put_key_input}"
+    put_idempotency_key_input:
+      - tenant_surrogate
+      - case_id
+      - command_id
+      - source_kind
+    put_idempotency_key_encoded_length: 72
+    put_key_content_hash_binding: content_sha256_first_write_wins
+    same_key_same_hash: return_same_immutable_object_version_and_receipt
+    same_key_different_hash: conflict_without_new_object
+    receipt_schema_version: intake-command-payload-put-receipt.v1
+    provenance_receipt_required: true
+    provenance_receipt_exact_fields:
+      - receipt_schema_version
+      - receipt_id
+      - tenant_surrogate
+      - case_id
+      - registration_id
+      - actor_id
+      - access_session_id
+      - source_kind
+      - artifact_id
+      - schema_version
+      - object_uri
+      - object_version
+      - content_sha256
+      - size_bytes
+      - stored_at
+      - receipt_hash
+    authority_receipt_snapshot: required_and_rfc8785_recomputed
+    database_failure_result: no_deliverable_command_or_outbox
+    orphan_cleanup:
+      idempotency_key: "intake.payload.orphan-cleanup:{tenant_surrogate}:{artifact_id}:{object_version}"
+      eligibility: terminally_abandoned_put_and_exact_object_version_has_no_committed_payload_authority
+      serialized_with_put_key: true
+      acceptance_retry_reuses_receipt_before_abandonment: true
+      retry_after_terminal_abandonment: forbidden
+      repeat_result: ALREADY_ABSENT_OR_DELETED
+      committed_authority_object_deletion_forbidden: true
+  server_canonical_branch:
+    authority: JAVA_SERVER
+    raw_client_payload_ref_allowed: false
+    schema_version: intake-branch-command.v1
+    canonicalization: RFC_8785
+    canonical_encoding: UTF_8
+    maximum_bytes: 16384
+    immutable_put_order: before_database_transaction
+    put_idempotency_key_formula: "iput.v1.{lowercase_sha256_of_rfc8785_utf8_put_key_input}"
+    put_idempotency_key_input:
+      - tenant_surrogate
+      - case_id
+      - command_id
+      - source_kind
+    put_idempotency_key_encoded_length: 72
+    put_key_content_hash_binding: content_sha256_first_write_wins
+    same_key_same_hash: return_same_immutable_object_version_and_receipt
+    same_key_different_hash: conflict_without_new_object
+    receipt_schema_version: intake-command-payload-put-receipt.v1
+    provenance_receipt_required: true
+    provenance_receipt_exact_fields:
+      - receipt_schema_version
+      - receipt_id
+      - tenant_surrogate
+      - case_id
+      - registration_id
+      - actor_id
+      - access_session_id
+      - source_kind
+      - artifact_id
+      - schema_version
+      - object_uri
+      - object_version
+      - content_sha256
+      - size_bytes
+      - stored_at
+      - receipt_hash
+    authority_receipt_snapshot: required_and_rfc8785_recomputed
+    database_failure_result: no_deliverable_command_or_outbox
+    orphan_cleanup:
+      idempotency_key: "intake.payload.orphan-cleanup:{tenant_surrogate}:{artifact_id}:{object_version}"
+      eligibility: terminally_abandoned_put_and_exact_object_version_has_no_committed_payload_authority
+      serialized_with_put_key: true
+      acceptance_retry_reuses_receipt_before_abandonment: true
+      retry_after_terminal_abandonment: forbidden
+      repeat_result: ALREADY_ABSENT_OR_DELETED
+      committed_authority_object_deletion_forbidden: true
+    additional_properties: false
+    bounded_fields:
+      command_id: 128
+      dispute_type: 128
+      confirmation_note: 2000
+      cancellation_reason: 2000
+    allowed_fields:
+      - schema_version
+      - command_id
+      - command_type
+      - party
+      - operation
+      - admissible
+      - dispute_type
+      - risk_level
+      - confirmation_note
+      - cancellation_reason
+    operation_matrix:
+      INTAKE_CONFIRM_INITIATOR: [INITIATOR_ACCEPT, INITIATOR_REJECT]
+      INTAKE_CONFIRM_RESPONDENT: [RESPONDENT_CONFIRM]
+      INTAKE_CANCEL_INITIATOR: [CANCEL]
+    respondent_cancel_allowed: false
+  put_receipt_snapshot:
+    applies_to: [SERVER_MINTED_HUMAN_INPUT, SERVER_CANONICAL_BRANCH]
+    authority_columns:
+      - put_receipt_schema_version
+      - put_receipt_id
+      - put_receipt_stored_at
+      - put_receipt_hash
+    authority_column_constraints:
+      put_receipt_schema_version: intake-command-payload-put-receipt.v1
+      put_receipt_id: identifier_max_128
+      put_receipt_stored_at: non_null_timestamptz
+      put_receipt_hash: lowercase_sha256
+    exact_field_mapping:
+      receipt_schema_version: put_receipt_schema_version
+      receipt_id: put_receipt_id
+      tenant_surrogate: tenant_surrogate
+      case_id: case_id
+      registration_id: registration_id
+      actor_id: actor_id
+      access_session_id: access_session_id
+      source_kind: source_kind
+      artifact_id: artifact_id
+      schema_version: schema_version
+      object_uri: object_uri
+      object_version: object_version
+      content_sha256: content_sha256
+      size_bytes: size_bytes
+      stored_at: put_receipt_stored_at
+      receipt_hash: put_receipt_hash
+    receipt_hash_input_fields:
+      - receipt_schema_version
+      - receipt_id
+      - tenant_surrogate
+      - case_id
+      - registration_id
+      - actor_id
+      - access_session_id
+      - source_kind
+      - artifact_id
+      - schema_version
+      - object_uri
+      - object_version
+      - content_sha256
+      - size_bytes
+      - stored_at
+    receipt_hash_recomputation: SHA_256_of_RFC_8785_UTF_8_authority_snapshot
+    persisted_snapshot_immutable: true
+  case_command_ref_payload_ref:
+    exact_field_mapping:
+      schema_version: schema_version
+      uri: object_uri
+      sha256: content_sha256
+      size_bytes: size_bytes
+    fields_not_present_in_case_command_ref:
+      - artifact_id
+      - object_version
+    artifact_and_object_version_proof:
+      EXISTING_PRIVATE_EVENT: exact_V043_composite_foreign_key
+      SERVER_MINTED_HUMAN_INPUT: exact_immutable_put_provenance_receipt
+      SERVER_CANONICAL_BRANCH: exact_server_canonicalization_and_immutable_put_receipt
+
+read_port:
+  implementation: JdbcIntakeChildBridgeReadPort
+  transaction:
+    read_only: true
+    isolation: REPEATABLE_READ
+    lock_rows: false
+  candidate_policy: exactly_one_or_fail_closed
+  forbidden_selection:
+    - findFirst
+    - latest_created_at
+    - latest_registered_at
+    - distinct_then_pick
+    - actor_role_only
+    - browser_supplied_thread_or_session
+  command_acceptance:
+    authenticated_actor_required: true
+    access_session_resolved_server_side: true
+    payload_provenance_verified_server_side: true
+    command_authority_written_with_command_and_outbox: atomically
+    replay_requires_existing_payload_and_authority_match: true
+  command_authority_exact_comparison:
+    database_composite_fk_fields:
+      - case_command_id
+      - tenant_surrogate
+      - case_id
+      - command_id
+      - request_hash
+    authority_snapshot_fields:
+      - case_command_sequence
+      - command_type
+      - room_type
+      - room_epoch
+      - actor_id
+      - actor_role
+      - payload_authority_id
+      - accepted_room_revision
+      - execution_disposition
+    case_command_payload_ref_fields_compared_in_transaction:
+      - payload_schema_version
+      - payload_uri
+      - payload_sha256
+      - payload_size_bytes
+    payload_uri_in_composite_btree_key: false
+    request_hash_semantics: canonical_case_command_ref_binds_actor_and_payload_ref
+  linearization:
+    start: current_registered_registration_and_active_sessions_required
+    revoke_before_accept: reject_without_command_or_outbox
+    accepted_inert_command: immutable_acceptance_snapshot_survives_later_revocation
+    committed_event_replay: use_committed_receipt_without_reopening_current_authorization
+    activity_orchestrated_revocation: blocked_until_P4_E1_terminal_disposition_protocol
+  retryable_failures:
+    - transient_database_unavailable
+    - retryable_transaction_failure
+  invariant_failures:
+    - missing_row
+    - multiple_rows
+    - revoke_before_accept
+    - tuple_or_hash_drift
+    - unsupported_schema_or_event
+    - malformed_json
+    - unsupported_execution_disposition
+
+event_rules:
+  turn_event:
+    agent_run_ref: required
+    graph_execution_ref: required
+    graph_thread_must_equal_registration_thread: true
+    operation_result_hash_semantics: finalization_receipt_hash
+    graph_result_hash_source: committed_manifest_output
+  branch_event:
+    agent_run_ref: forbidden
+    graph_execution_ref: forbidden
+  source_hash_recomputed_from: case_timeline_event.event_json
+
+worker_assembly:
+  CASE_CONTROL:
+    workflow_types: [CaseProcessWorkflowImpl]
+    required_activities: [IntakeChildBridgeActivitiesV2Adapter]
+    bridge_activity_cardinality: exactly_one
+  ROOM_CONTROL:
+    required_workflow_types: [RoomControlWorkflowImpl, IntakeRoomWorkflowImpl]
+  forbidden_runtime_types:
+    - IntakeRoomActivitiesAdapter
+    - IntakeFormalCommitPort
+    - IntakeFormalBranchCommitPort
+    - IntakeGraphResultFinalizer
+
+compatibility:
+  temporal_history_identity: command_and_event_refs_only
+  agent_session_id_in_browser_contract: forbidden
+  version_marker: typed-intake-bridge-authority-v1
+  v2_activity_names:
+    - BindIntakeChildStartV2
+    - BindIntakeChildCommandV2
+    - BindIntakeChildDomainEventV2
+  completed_v1_activity_result: replay_from_history
+  scheduled_uncompleted_v1_activity: remain_on_pinned_old_worker_build_until_drained
+  old_worker_retirement_gate: zero_open_or_pending_v1_bridge_activities
+  ambiguous_v1_backfill: forbidden
+  missing_v2_authority_binding: fail_closed
+  in_epoch_party_rebinding: forbidden
+  session_change_policy: higher_fenced_epoch_or_future_versioned_protocol
+
+implementation_gate:
+  required_before_P4_D1_or_P4_E1:
+    - contract_schema_and_exact_static_tests
+    - migration_pk_uk_fk_and_immutability_tests
+    - atomic_epoch_authority_before_bootstrap_test
+    - exact_two_party_bootstrap_cardinality_test
+    - atomic_command_payload_authority_and_outbox_test
+    - payload_source_kind_command_schema_matrix_tests
+    - payload_source_kind_row_shape_check_tests
+    - existing_private_event_exact_V043_fk_test
+    - immutable_put_receipt_and_orphan_cleanup_tests
+    - put_receipt_snapshot_recomputation_test
+    - deterministic_put_retry_conflict_and_cleanup_tests
+    - canonical_branch_payload_boundaries
+    - command_payload_authority_one_to_one_test
+    - case_command_ref_four_field_comparison_test
+    - agent_session_profile_hash_boundary_tests
+    - user_and_merchant_initiated_party_tests
+    - payload_cross_session_rejection_test
+    - read_port_unit_and_postgresql_tests
+    - revoke_before_and_after_acceptance_races
+    - commit_before_event_delivery_loss_test
+    - repeatable_read_concurrency_test
+    - v1_completed_and_uncompleted_history_compatibility_tests
+    - worker_registration_context_smoke
+    - no_formal_sink_gate
+    - typed_child_replay_tests
+    - independent_review_pass
+  claims_forbidden_at_R1_5:
+    - production_graph_registration_delivery
+    - real_case_shadow
+    - temporal_writer
+    - canary
+    - promotion

@@ -1,0 +1,772 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.after-sale-flow.example/plans/phase-4-r15-authority-binding-contract.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_ref",
+    "schema_version",
+    "contract_id",
+    "status",
+    "owner",
+    "depends_on",
+    "purpose",
+    "runtime_gate",
+    "execution_matrix",
+    "authority_tables",
+    "creation_order",
+    "selection_rules",
+    "party_resolution",
+    "source_and_route_authority",
+    "payload_contract",
+    "read_port",
+    "event_rules",
+    "worker_assembly",
+    "compatibility",
+    "implementation_gate"
+  ],
+  "properties": {
+    "schema_ref": {
+      "const": "phase-4-r15-authority-binding-contract.schema.json"
+    },
+    "schema_version": {
+      "const": "phase-4-r15-authority-binding-contract.v1"
+    },
+    "contract_id": {"const": "P4-R1.5"},
+    "status": {"const": "FROZEN_FOR_IMPLEMENTATION"},
+    "owner": {"const": "R"},
+    "depends_on": {"$ref": "#/$defs/nonEmptyStringArray"},
+    "purpose": {"type": "string", "minLength": 32},
+    "runtime_gate": {"$ref": "#/$defs/runtimeGate"},
+    "execution_matrix": {"$ref": "#/$defs/executionMatrix"},
+    "authority_tables": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "case_intake_epoch_selection_binding",
+        "case_intake_epoch_party_authority",
+        "case_intake_command_payload_authority",
+        "case_intake_command_authority"
+      ],
+      "properties": {
+        "case_intake_epoch_selection_binding": {"$ref": "#/$defs/table"},
+        "case_intake_epoch_party_authority": {
+          "allOf": [
+            {"$ref": "#/$defs/table"},
+            {
+              "type": "object",
+              "required": [
+                "scope_checks",
+                "transactional_status_checks",
+                "bootstrap_cardinality_assertion"
+              ],
+              "properties": {
+                "scope_checks": {
+                  "const": {
+                    "party_enum": ["INITIATOR", "RESPONDENT"],
+                    "session_tenant_id_equals_tenant_surrogate": true,
+                    "session_case_id_equals_case_id": true,
+                    "room_type": "INTAKE",
+                    "permission_level_by_actor_role": {
+                      "USER": "PARTY_USER",
+                      "MERCHANT": "PARTY_MERCHANT"
+                    }
+                  }
+                },
+                "transactional_status_checks": {
+                  "const": {
+                    "epoch_binding_transaction": {
+                      "case_access_session": "ACTIVE",
+                      "agent_conversation_session": "ACTIVE"
+                    },
+                    "acceptance_transaction": {
+                      "case_access_session": "ACTIVE",
+                      "agent_conversation_session": "ACTIVE"
+                    },
+                    "start_read_transaction": {
+                      "case_access_session": "ACTIVE",
+                      "agent_conversation_session": "ACTIVE"
+                    },
+                    "status_columns_in_foreign_keys": false,
+                    "reason": "ACTIVE_is_mutable_and_must_not_be_part_of_an_immutable_candidate_key"
+                  }
+                },
+                "bootstrap_cardinality_assertion": {
+                  "const": {
+                    "required_parties": ["INITIATOR", "RESPONDENT"],
+                    "exact_row_count": 2,
+                    "asserted_in": "epoch_binding_transaction",
+                    "unique_epoch_party_semantics": "at_most_one_row_per_party_only",
+                    "bootstrap_outbox_deliverable_after_assertion_only": true
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "case_intake_command_payload_authority": {
+          "allOf": [
+            {"$ref": "#/$defs/table"},
+            {
+              "type": "object",
+              "required": ["source_kind_row_shape"],
+              "properties": {
+                "source_kind_row_shape": {"$ref": "#/$defs/sourceKindRowShape"}
+              }
+            }
+          ]
+        },
+        "case_intake_command_authority": {
+          "allOf": [
+            {"$ref": "#/$defs/table"},
+            {
+              "type": "object",
+              "properties": {
+                "unique_keys": {
+                  "contains": {"const": ["payload_authority_id"]}
+                },
+                "required_pins": {
+                  "allOf": [
+                    {"contains": {"const": "case_command_sequence"}},
+                    {"contains": {"const": "command_type"}},
+                    {"contains": {"const": "request_hash"}}
+                  ]
+                },
+                "foreign_keys": {
+                  "contains": {
+                    "const": {
+                      "columns": [
+                        "case_command_id",
+                        "tenant_surrogate",
+                        "case_id",
+                        "command_id",
+                        "request_hash"
+                      ],
+                      "references": {
+                        "table": "case_command",
+                        "columns": [
+                          "id",
+                          "tenant_surrogate",
+                          "case_id",
+                          "command_id",
+                          "request_hash"
+                        ],
+                        "candidate_key_added_by_V044": true
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "creation_order": {"$ref": "#/$defs/nonEmptyObject"},
+    "selection_rules": {
+      "allOf": [
+        {"$ref": "#/$defs/nonEmptyObject"},
+        {
+          "type": "object",
+          "required": ["agent_session_profile"],
+          "properties": {
+            "agent_session_profile": {"$ref": "#/$defs/agentSessionProfile"}
+          }
+        }
+      ]
+    },
+    "party_resolution": {"$ref": "#/$defs/nonEmptyObject"},
+    "source_and_route_authority": {"$ref": "#/$defs/nonEmptyObject"},
+    "payload_contract": {"$ref": "#/$defs/payloadContract"},
+    "read_port": {
+      "allOf": [
+        {"$ref": "#/$defs/nonEmptyObject"},
+        {
+          "type": "object",
+          "required": ["command_authority_exact_comparison"],
+          "properties": {
+            "command_authority_exact_comparison": {
+              "$ref": "#/$defs/commandAuthorityExactComparison"
+            }
+          }
+        }
+      ]
+    },
+    "event_rules": {"$ref": "#/$defs/nonEmptyObject"},
+    "worker_assembly": {"$ref": "#/$defs/nonEmptyObject"},
+    "compatibility": {"$ref": "#/$defs/nonEmptyObject"},
+    "implementation_gate": {"$ref": "#/$defs/nonEmptyObject"}
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "nonEmptyStringArray": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/identifier"}
+    },
+    "nonEmptyObject": {
+      "type": "object",
+      "minProperties": 1
+    },
+    "runtimeGate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "allowed_modes",
+        "real_case_shadow_allowed",
+        "temporal_intake_allocation_allowed",
+        "formal_sink_allowed",
+        "required_defaults"
+      ],
+      "properties": {
+        "allowed_modes": {
+          "const": ["DISABLED", "SIGNED_SYNTHETIC_SHADOW"]
+        },
+        "real_case_shadow_allowed": {"const": false},
+        "temporal_intake_allocation_allowed": {"const": false},
+        "formal_sink_allowed": {"const": false},
+        "required_defaults": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "graph_runtime",
+            "new_epoch_mode",
+            "non_legacy_epoch_allocation_enabled",
+            "temporal_writer_enabled"
+          ],
+          "properties": {
+            "graph_runtime": {"const": "DISABLED"},
+            "new_epoch_mode": {"const": "LEGACY"},
+            "non_legacy_epoch_allocation_enabled": {"const": false},
+            "temporal_writer_enabled": {"const": false}
+          }
+        }
+      }
+    },
+    "executionMatrix": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["DISABLED", "SIGNED_SYNTHETIC_SHADOW", "TEMPORAL"],
+      "properties": {
+        "DISABLED": {"$ref": "#/$defs/dispositionMap"},
+        "SIGNED_SYNTHETIC_SHADOW": {"$ref": "#/$defs/dispositionMap"},
+        "TEMPORAL": {"$ref": "#/$defs/dispositionMap"}
+      }
+    },
+    "dispositionMap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["INERT_EXTERNAL_EVENT", "ACTIVITY_ORCHESTRATED"],
+      "properties": {
+        "INERT_EXTERNAL_EVENT": {
+          "type": "string",
+          "pattern": "^(allowed|forbidden.*)$"
+        },
+        "ACTIVITY_ORCHESTRATED": {
+          "type": "string",
+          "pattern": "^forbidden.*$"
+        }
+      }
+    },
+    "table": {
+      "type": "object",
+      "required": [
+        "cardinality",
+        "primary_key",
+        "unique_keys",
+        "foreign_keys",
+        "immutable",
+        "required_pins"
+      ],
+      "properties": {
+        "cardinality": {"type": "string", "minLength": 8},
+        "primary_key": {"$ref": "#/$defs/nonEmptyStringArray"},
+        "unique_keys": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/nonEmptyStringArray"}
+        },
+        "foreign_keys": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/foreignKey"}
+        },
+        "immutable": {"const": true},
+        "required_pins": {"$ref": "#/$defs/nonEmptyStringArray"},
+        "binding_source": {"type": "string"},
+        "transaction_boundary": {"type": "string"},
+        "replay_policy": {"type": "string"},
+        "scope_checks": {"$ref": "#/$defs/nonEmptyObject"},
+        "transactional_status_checks": {"$ref": "#/$defs/nonEmptyObject"},
+        "bootstrap_cardinality_assertion": {"$ref": "#/$defs/nonEmptyObject"},
+        "source_kind_row_shape": {"$ref": "#/$defs/nonEmptyObject"}
+      },
+      "additionalProperties": false
+    },
+    "foreignKey": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["columns", "references"],
+      "properties": {
+        "columns": {"$ref": "#/$defs/nonEmptyStringArray"},
+        "references": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["table", "columns"],
+          "properties": {
+            "table": {"$ref": "#/$defs/identifier"},
+            "columns": {"$ref": "#/$defs/nonEmptyStringArray"},
+            "candidate_key_added_by_V044": {"type": "boolean"}
+          }
+        }
+      }
+    },
+    "agentSessionProfile": {
+      "const": {
+        "agent_key": "DISPUTE_INTAKE_OFFICER",
+        "agent_session_profile_version": "agent-session-profile.v1",
+        "prompt_profile_id_column": "agent_conversation_session.prompt_profile_id",
+        "prompt_profile_id_formula": "asp.v1.{lowercase_sha256_of_rfc8785_utf8_canonical_hash_input}",
+        "prompt_profile_id_prefix": "asp.v1.",
+        "prompt_profile_id_encoded_length": 71,
+        "prompt_profile_id_storage_length": 128,
+        "canonicalization": "RFC_8785",
+        "canonical_encoding": "UTF_8",
+        "hash": "SHA_256",
+        "canonical_hash_input": [
+          "agent_key",
+          "actor_role",
+          "prompt_version",
+          "agent_session_profile_version"
+        ],
+        "registry": {
+          "authority": "JAVA_OWNED_IMMUTABLE_VERSIONED_REGISTRY",
+          "lookup": "exact_prompt_profile_id_and_canonical_hash_input",
+          "mutable_default_forbidden": true
+        },
+        "memory_policy_id": "GRAPH_PRIVATE_NO_MEMORY_FRAME_V1",
+        "registration_prompt_version_must_equal_selection": true,
+        "registration_model_profile_must_equal_selection": true
+      }
+    },
+    "commandAuthorityExactComparison": {
+      "const": {
+        "database_composite_fk_fields": [
+          "case_command_id",
+          "tenant_surrogate",
+          "case_id",
+          "command_id",
+          "request_hash"
+        ],
+        "authority_snapshot_fields": [
+          "case_command_sequence",
+          "command_type",
+          "room_type",
+          "room_epoch",
+          "actor_id",
+          "actor_role",
+          "payload_authority_id",
+          "accepted_room_revision",
+          "execution_disposition"
+        ],
+        "case_command_payload_ref_fields_compared_in_transaction": [
+          "payload_schema_version",
+          "payload_uri",
+          "payload_sha256",
+          "payload_size_bytes"
+        ],
+        "payload_uri_in_composite_btree_key": false,
+        "request_hash_semantics": "canonical_case_command_ref_binds_actor_and_payload_ref"
+      }
+    },
+    "sourceKindRowShape": {
+      "const": {
+        "database_check_constraint_required": true,
+        "common_non_null_columns": [
+          "payload_authority_id",
+          "epoch_id",
+          "party_authority_id",
+          "access_session_id",
+          "registration_id",
+          "tenant_surrogate",
+          "case_id",
+          "room_type",
+          "room_epoch",
+          "fencing_token",
+          "thread_id",
+          "actor_id",
+          "actor_role",
+          "actor_scope_hash",
+          "agent_session_id",
+          "source_kind",
+          "artifact_id",
+          "schema_version",
+          "object_uri",
+          "object_version",
+          "content_sha256",
+          "size_bytes"
+        ],
+        "EXISTING_PRIVATE_EVENT": {
+          "required_values": {
+            "source_kind": "EXISTING_PRIVATE_EVENT",
+            "existing_event_binding_type": "EVENT",
+            "schema_version": "intake-turn-event.v2"
+          },
+          "event_composite_non_null_columns": [
+            "existing_event_binding_id",
+            "registration_id",
+            "tenant_surrogate",
+            "case_id",
+            "room_type",
+            "room_epoch",
+            "fencing_token",
+            "thread_id",
+            "actor_scope_hash",
+            "agent_session_id",
+            "actor_role",
+            "existing_event_binding_type",
+            "schema_version",
+            "artifact_id",
+            "object_uri",
+            "object_version",
+            "content_sha256",
+            "size_bytes"
+          ],
+          "null_columns": [
+            "put_receipt_schema_version",
+            "put_receipt_id",
+            "put_receipt_stored_at",
+            "put_receipt_hash"
+          ]
+        },
+        "SERVER_MINTED_HUMAN_INPUT": {
+          "required_values": {
+            "source_kind": "SERVER_MINTED_HUMAN_INPUT",
+            "schema_version": "intake-human-input-command.v1",
+            "put_receipt_schema_version": "intake-command-payload-put-receipt.v1"
+          },
+          "non_null_columns": [
+            "put_receipt_schema_version",
+            "put_receipt_id",
+            "put_receipt_stored_at",
+            "put_receipt_hash"
+          ],
+          "null_columns": ["existing_event_binding_id", "existing_event_binding_type"]
+        },
+        "SERVER_CANONICAL_BRANCH": {
+          "required_values": {
+            "source_kind": "SERVER_CANONICAL_BRANCH",
+            "schema_version": "intake-branch-command.v1",
+            "put_receipt_schema_version": "intake-command-payload-put-receipt.v1"
+          },
+          "non_null_columns": [
+            "put_receipt_schema_version",
+            "put_receipt_id",
+            "put_receipt_stored_at",
+            "put_receipt_hash"
+          ],
+          "null_columns": ["existing_event_binding_id", "existing_event_binding_type"]
+        }
+      }
+    },
+    "payloadContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_kind_enum",
+        "command_schema_matrix",
+        "existing_private_event",
+        "server_minted_human_input",
+        "server_canonical_branch",
+        "put_receipt_snapshot",
+        "case_command_ref_payload_ref"
+      ],
+      "properties": {
+        "source_kind_enum": {
+          "const": [
+            "EXISTING_PRIVATE_EVENT",
+            "SERVER_MINTED_HUMAN_INPUT",
+            "SERVER_CANONICAL_BRANCH"
+          ]
+        },
+        "command_schema_matrix": {
+          "const": [
+            {
+              "command_type": "INTAKE_MESSAGE",
+              "source_kind": "EXISTING_PRIVATE_EVENT",
+              "schema_version": "intake-turn-event.v2",
+              "maximum_bytes": 32768,
+              "execution_disposition": "INERT_EXTERNAL_EVENT",
+              "current_gate": "allowed_only_for_signed_synthetic_shadow"
+            },
+            {
+              "command_type": "INTAKE_MESSAGE",
+              "source_kind": "SERVER_MINTED_HUMAN_INPUT",
+              "schema_version": "intake-human-input-command.v1",
+              "maximum_bytes": 32768,
+              "execution_disposition": "ACTIVITY_ORCHESTRATED",
+              "current_gate": "forbidden_until_P4_E1"
+            },
+            {
+              "command_type": "INTAKE_CONFIRM",
+              "source_kind": "SERVER_CANONICAL_BRANCH",
+              "schema_version": "intake-branch-command.v1",
+              "maximum_bytes": 16384,
+              "execution_disposition": "ACTIVITY_ORCHESTRATED",
+              "current_gate": "forbidden_until_P4_E1"
+            },
+            {
+              "command_type": "INTAKE_CANCEL",
+              "source_kind": "SERVER_CANONICAL_BRANCH",
+              "schema_version": "intake-branch-command.v1",
+              "maximum_bytes": 16384,
+              "execution_disposition": "ACTIVITY_ORCHESTRATED",
+              "current_gate": "forbidden_until_P4_E1"
+            }
+          ]
+        },
+        "existing_private_event": {
+          "const": {
+            "required_v043_table": "case_intake_snapshot_binding",
+            "required_binding_type": "EVENT",
+            "required_schema_version": "intake-turn-event.v2",
+            "composite_foreign_key_required": true,
+            "exact_route_registration_required": true,
+            "nullable_binding_columns_for_other_source_kinds": true,
+            "exact_route_fields": [
+              "registration_id",
+              "tenant_surrogate",
+              "case_id",
+              "room_type",
+              "room_epoch",
+              "fencing_token",
+              "thread_id",
+              "actor_scope_hash",
+              "agent_session_id",
+              "actor_role"
+            ],
+            "exact_artifact_fields": [
+              "existing_event_binding_id",
+              "schema_version",
+              "artifact_id",
+              "object_uri",
+              "object_version",
+              "content_sha256",
+              "size_bytes"
+            ]
+          }
+        },
+        "server_minted_human_input": {
+          "const": {
+            "authority": "JAVA_SERVER",
+            "canonicalization": "RFC_8785",
+            "canonical_encoding": "UTF_8",
+            "maximum_bytes": 32768,
+            "immutable_put_order": "before_database_transaction",
+            "put_idempotency_key_formula": "iput.v1.{lowercase_sha256_of_rfc8785_utf8_put_key_input}",
+            "put_idempotency_key_input": [
+              "tenant_surrogate",
+              "case_id",
+              "command_id",
+              "source_kind"
+            ],
+            "put_idempotency_key_encoded_length": 72,
+            "put_key_content_hash_binding": "content_sha256_first_write_wins",
+            "same_key_same_hash": "return_same_immutable_object_version_and_receipt",
+            "same_key_different_hash": "conflict_without_new_object",
+            "receipt_schema_version": "intake-command-payload-put-receipt.v1",
+            "provenance_receipt_required": true,
+            "provenance_receipt_exact_fields": [
+              "receipt_schema_version",
+              "receipt_id",
+              "tenant_surrogate",
+              "case_id",
+              "registration_id",
+              "actor_id",
+              "access_session_id",
+              "source_kind",
+              "artifact_id",
+              "schema_version",
+              "object_uri",
+              "object_version",
+              "content_sha256",
+              "size_bytes",
+              "stored_at",
+              "receipt_hash"
+            ],
+            "authority_receipt_snapshot": "required_and_rfc8785_recomputed",
+            "database_failure_result": "no_deliverable_command_or_outbox",
+            "orphan_cleanup": {
+              "idempotency_key": "intake.payload.orphan-cleanup:{tenant_surrogate}:{artifact_id}:{object_version}",
+              "eligibility": "terminally_abandoned_put_and_exact_object_version_has_no_committed_payload_authority",
+              "serialized_with_put_key": true,
+              "acceptance_retry_reuses_receipt_before_abandonment": true,
+              "retry_after_terminal_abandonment": "forbidden",
+              "repeat_result": "ALREADY_ABSENT_OR_DELETED",
+              "committed_authority_object_deletion_forbidden": true
+            }
+          }
+        },
+        "server_canonical_branch": {
+          "const": {
+            "authority": "JAVA_SERVER",
+            "raw_client_payload_ref_allowed": false,
+            "schema_version": "intake-branch-command.v1",
+            "canonicalization": "RFC_8785",
+            "canonical_encoding": "UTF_8",
+            "maximum_bytes": 16384,
+            "immutable_put_order": "before_database_transaction",
+            "put_idempotency_key_formula": "iput.v1.{lowercase_sha256_of_rfc8785_utf8_put_key_input}",
+            "put_idempotency_key_input": [
+              "tenant_surrogate",
+              "case_id",
+              "command_id",
+              "source_kind"
+            ],
+            "put_idempotency_key_encoded_length": 72,
+            "put_key_content_hash_binding": "content_sha256_first_write_wins",
+            "same_key_same_hash": "return_same_immutable_object_version_and_receipt",
+            "same_key_different_hash": "conflict_without_new_object",
+            "receipt_schema_version": "intake-command-payload-put-receipt.v1",
+            "provenance_receipt_required": true,
+            "provenance_receipt_exact_fields": [
+              "receipt_schema_version",
+              "receipt_id",
+              "tenant_surrogate",
+              "case_id",
+              "registration_id",
+              "actor_id",
+              "access_session_id",
+              "source_kind",
+              "artifact_id",
+              "schema_version",
+              "object_uri",
+              "object_version",
+              "content_sha256",
+              "size_bytes",
+              "stored_at",
+              "receipt_hash"
+            ],
+            "authority_receipt_snapshot": "required_and_rfc8785_recomputed",
+            "database_failure_result": "no_deliverable_command_or_outbox",
+            "orphan_cleanup": {
+              "idempotency_key": "intake.payload.orphan-cleanup:{tenant_surrogate}:{artifact_id}:{object_version}",
+              "eligibility": "terminally_abandoned_put_and_exact_object_version_has_no_committed_payload_authority",
+              "serialized_with_put_key": true,
+              "acceptance_retry_reuses_receipt_before_abandonment": true,
+              "retry_after_terminal_abandonment": "forbidden",
+              "repeat_result": "ALREADY_ABSENT_OR_DELETED",
+              "committed_authority_object_deletion_forbidden": true
+            },
+            "additional_properties": false,
+            "bounded_fields": {
+              "command_id": 128,
+              "dispute_type": 128,
+              "confirmation_note": 2000,
+              "cancellation_reason": 2000
+            },
+            "allowed_fields": [
+              "schema_version",
+              "command_id",
+              "command_type",
+              "party",
+              "operation",
+              "admissible",
+              "dispute_type",
+              "risk_level",
+              "confirmation_note",
+              "cancellation_reason"
+            ],
+            "operation_matrix": {
+              "INTAKE_CONFIRM_INITIATOR": ["INITIATOR_ACCEPT", "INITIATOR_REJECT"],
+              "INTAKE_CONFIRM_RESPONDENT": ["RESPONDENT_CONFIRM"],
+              "INTAKE_CANCEL_INITIATOR": ["CANCEL"]
+            },
+            "respondent_cancel_allowed": false
+          }
+        },
+        "put_receipt_snapshot": {
+          "const": {
+            "applies_to": [
+              "SERVER_MINTED_HUMAN_INPUT",
+              "SERVER_CANONICAL_BRANCH"
+            ],
+            "authority_columns": [
+              "put_receipt_schema_version",
+              "put_receipt_id",
+              "put_receipt_stored_at",
+              "put_receipt_hash"
+            ],
+            "authority_column_constraints": {
+              "put_receipt_schema_version": "intake-command-payload-put-receipt.v1",
+              "put_receipt_id": "identifier_max_128",
+              "put_receipt_stored_at": "non_null_timestamptz",
+              "put_receipt_hash": "lowercase_sha256"
+            },
+            "exact_field_mapping": {
+              "receipt_schema_version": "put_receipt_schema_version",
+              "receipt_id": "put_receipt_id",
+              "tenant_surrogate": "tenant_surrogate",
+              "case_id": "case_id",
+              "registration_id": "registration_id",
+              "actor_id": "actor_id",
+              "access_session_id": "access_session_id",
+              "source_kind": "source_kind",
+              "artifact_id": "artifact_id",
+              "schema_version": "schema_version",
+              "object_uri": "object_uri",
+              "object_version": "object_version",
+              "content_sha256": "content_sha256",
+              "size_bytes": "size_bytes",
+              "stored_at": "put_receipt_stored_at",
+              "receipt_hash": "put_receipt_hash"
+            },
+            "receipt_hash_input_fields": [
+              "receipt_schema_version",
+              "receipt_id",
+              "tenant_surrogate",
+              "case_id",
+              "registration_id",
+              "actor_id",
+              "access_session_id",
+              "source_kind",
+              "artifact_id",
+              "schema_version",
+              "object_uri",
+              "object_version",
+              "content_sha256",
+              "size_bytes",
+              "stored_at"
+            ],
+            "receipt_hash_recomputation": "SHA_256_of_RFC_8785_UTF_8_authority_snapshot",
+            "persisted_snapshot_immutable": true
+          }
+        },
+        "case_command_ref_payload_ref": {
+          "const": {
+            "exact_field_mapping": {
+              "schema_version": "schema_version",
+              "uri": "object_uri",
+              "sha256": "content_sha256",
+              "size_bytes": "size_bytes"
+            },
+            "fields_not_present_in_case_command_ref": [
+              "artifact_id",
+              "object_version"
+            ],
+            "artifact_and_object_version_proof": {
+              "EXISTING_PRIVATE_EVENT": "exact_V043_composite_foreign_key",
+              "SERVER_MINTED_HUMAN_INPUT": "exact_immutable_put_provenance_receipt",
+              "SERVER_CANONICAL_BRANCH": "exact_server_canonicalization_and_immutable_put_receipt"
+            }
+          }
+        }
+      }
+    }
+  }
+}
