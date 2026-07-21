@@ -15,6 +15,7 @@ import com.example.dispute.agentstream.application.AgentRunLedger;
 import com.example.dispute.workflow.activity.agent.AgentRunExecutionGateway;
 import com.example.dispute.workflow.activity.agent.AgentRunFinalizationGateway;
 import com.example.dispute.workflow.activity.domain.CaseProcessLedgerActivitiesImpl;
+import com.example.dispute.workflow.activity.domain.IntakeChildBridgeReadPort;
 import com.example.dispute.workflow.activity.domain.ProcessProjectionActivitiesImpl;
 import com.example.dispute.workflow.activity.system.TemporalWorkerProbeActivities.TemporalWorkerDescription;
 import com.example.dispute.workflow.activity.system.TemporalWorkerProbeWorkflow;
@@ -212,7 +213,8 @@ class TemporalWorkerConfigurationTest {
                 optionsFactory,
                 mock(EvidenceWindowActivitiesAdapter.class),
                 mock(CaseProcessLedgerActivitiesImpl.class),
-                mock(ProcessProjectionActivitiesImpl.class));
+                mock(ProcessProjectionActivitiesImpl.class),
+                provider(mock(IntakeChildBridgeReadPort.class)));
     }
 
     @SuppressWarnings("unchecked")

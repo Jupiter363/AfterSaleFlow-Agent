@@ -91,6 +91,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
   private static final String AUTHORITY_CHECKPOINT_CHANGE_ID =
       "case-process-authority-checkpoint-v1";
   private static final String TYPED_INTAKE_CHILD_CHANGE_ID = "typed-intake-room-child-v1";
+  private static final String AUTHORITY_BRIDGE_CHANGE_ID = "typed-intake-bridge-authority-v1";
   private static final String CHILD_COMPENSATION_INVARIANT_CHANGE_ID =
       "case-process-child-compensation-invariant-v1";
   private static final String AUTHORITY_CHECKPOINT_MEMO_KEY =
@@ -140,22 +141,11 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
   private final IntakeChildBridgeActivities intakeChildBridgeActivities =
       Workflow.newActivityStub(
           IntakeChildBridgeActivities.class,
-          ActivityOptions.newBuilder()
-              .setTaskQueue(CASE_CONTROL_TASK_QUEUE)
-              .setStartToCloseTimeout(Duration.ofSeconds(10))
-              .setScheduleToCloseTimeout(Duration.ofSeconds(30))
-              .setHeartbeatTimeout(Duration.ofSeconds(10))
-              .setCancellationType(ActivityCancellationType.WAIT_CANCELLATION_COMPLETED)
-              .setRetryOptions(
-                  RetryOptions.newBuilder()
-                      .setInitialInterval(Duration.ofSeconds(1))
-                      .setMaximumInterval(Duration.ofSeconds(5))
-                      .setMaximumAttempts(3)
-                      .setDoNotRetry(
-                          "INTAKE_CHILD_BRIDGE_INVARIANT",
-                          "INTAKE_CHILD_BRIDGE_READ_UNCLASSIFIED")
-                      .build())
-              .build());
+          intakeChildBridgeActivityOptions());
+  private final IntakeChildBridgeActivitiesV2 intakeChildBridgeActivitiesV2 =
+      Workflow.newActivityStub(
+          IntakeChildBridgeActivitiesV2.class,
+          intakeChildBridgeActivityOptions());
   private final WorkflowQueue<PendingCommand> commandInbox = Workflow.newQueue(INBOX_CAPACITY);
   private final WorkflowQueue<CaseDomainEventRef> eventInbox = Workflow.newQueue(INBOX_CAPACITY);
   private final WorkflowQueue<PendingProvisioning> provisioningInbox =
@@ -210,12 +200,32 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
   private Boolean provisioningEnabled;
   private boolean authorityCheckpointEnabled;
   private int typedIntakeChildVersion;
+  private int authorityBridgeVersion;
   private int childCompensationInvariantVersion;
   private boolean provisioningSwitchInProgress;
   private StartedChild uncommittedChild;
   private String protocolErrorCode;
   private RecoveryErrorOrigin protocolErrorOrigin;
   private Promise<Void> runMaxAgeTimer;
+
+  private static ActivityOptions intakeChildBridgeActivityOptions() {
+    return ActivityOptions.newBuilder()
+        .setTaskQueue(CASE_CONTROL_TASK_QUEUE)
+        .setStartToCloseTimeout(Duration.ofSeconds(10))
+        .setScheduleToCloseTimeout(Duration.ofSeconds(30))
+        .setHeartbeatTimeout(Duration.ofSeconds(10))
+        .setCancellationType(ActivityCancellationType.WAIT_CANCELLATION_COMPLETED)
+        .setRetryOptions(
+            RetryOptions.newBuilder()
+                .setInitialInterval(Duration.ofSeconds(1))
+                .setMaximumInterval(Duration.ofSeconds(5))
+                .setMaximumAttempts(3)
+                .setDoNotRetry(
+                    "INTAKE_CHILD_BRIDGE_INVARIANT",
+                    "INTAKE_CHILD_BRIDGE_READ_UNCLASSIFIED")
+                .build())
+        .build();
+  }
 
   @Override
   public void run(CaseProcessCarryState carryState) {
@@ -237,6 +247,8 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
         Workflow.getVersion(AUTHORITY_CHECKPOINT_CHANGE_ID, Workflow.DEFAULT_VERSION, 1) == 1;
     typedIntakeChildVersion =
         Workflow.getVersion(TYPED_INTAKE_CHILD_CHANGE_ID, Workflow.DEFAULT_VERSION, 1);
+    authorityBridgeVersion =
+        Workflow.getVersion(AUTHORITY_BRIDGE_CHANGE_ID, Workflow.DEFAULT_VERSION, 1);
     childCompensationInvariantVersion =
         Workflow.getVersion(
             CHILD_COMPENSATION_INVARIANT_CHANGE_ID, Workflow.DEFAULT_VERSION, 1);
@@ -801,6 +813,24 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
     return true;
   }
 
+  private CommandBinding bindIntakeChildCommand(CommandRequest request) {
+    return authorityBridgeVersion == 1
+        ? intakeChildBridgeActivitiesV2.bindCommand(request)
+        : intakeChildBridgeActivities.bindCommand(request);
+  }
+
+  private StartBinding bindIntakeChildStart(StartRequest request) {
+    return authorityBridgeVersion == 1
+        ? intakeChildBridgeActivitiesV2.bindStart(request)
+        : intakeChildBridgeActivities.bindStart(request);
+  }
+
+  private DomainEventBinding bindIntakeChildDomainEvent(DomainEventRequest request) {
+    return authorityBridgeVersion == 1
+        ? intakeChildBridgeActivitiesV2.bindDomainEvent(request)
+        : intakeChildBridgeActivities.bindDomainEvent(request);
+  }
+
   private void routeCommandToActiveChild(CaseCommandRef command) {
     if (activeChildDescriptor.kind() == ActiveChildKind.GENERIC_ROOM_CONTROL) {
       if (activeRoomChild == null) {
@@ -822,7 +852,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
     CommandBinding binding;
     try {
       binding =
-          intakeChildBridgeActivities.bindCommand(
+          bindIntakeChildCommand(
               new CommandRequest("intake-child-command-request.v1", command, expected));
     } catch (ActivityFailure failure) {
       rethrowIfCanceled(failure);
@@ -978,7 +1008,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
     StartBinding binding;
     try {
       binding =
-          intakeChildBridgeActivities.bindStart(
+          bindIntakeChildStart(
               new StartRequest("intake-child-start-request.v1", request, expected));
     } catch (ActivityFailure failure) {
       rethrowIfCanceled(failure);
@@ -1788,7 +1818,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
     DomainEventBinding binding;
     try {
       binding =
-          intakeChildBridgeActivities.bindDomainEvent(
+          bindIntakeChildDomainEvent(
               new DomainEventRequest("intake-child-domain-event-request.v1", event, expected));
     } catch (ActivityFailure failure) {
       rethrowIfCanceled(failure);

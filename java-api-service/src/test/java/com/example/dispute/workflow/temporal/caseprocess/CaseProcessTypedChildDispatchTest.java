@@ -28,6 +28,13 @@ import com.example.dispute.workflow.temporal.caseprocess.CaseProcessLedgerActivi
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessLedgerActivities.LoadSequenceRange;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessLedgerActivities.SequenceGapReport;
 import com.example.dispute.workflow.temporal.caseprocess.IntakeChildBridgeActivities.ActiveChildBinding;
+import com.example.dispute.workflow.temporal.caseprocess.IntakeChildBridgeActivities.CommandBinding;
+import com.example.dispute.workflow.temporal.caseprocess.IntakeChildBridgeActivities.CommandRequest;
+import com.example.dispute.workflow.temporal.caseprocess.IntakeChildBridgeActivities.DomainEventBinding;
+import com.example.dispute.workflow.temporal.caseprocess.IntakeChildBridgeActivities.DomainEventRequest;
+import com.example.dispute.workflow.temporal.caseprocess.IntakeChildBridgeActivities.StartBinding;
+import com.example.dispute.workflow.temporal.caseprocess.IntakeChildBridgeActivities.StartRequest;
+import com.example.dispute.workflow.temporal.caseprocess.IntakeChildBridgeActivitiesV2;
 import com.example.dispute.workflow.temporal.room.common.RoomControlWorkflow;
 import com.example.dispute.workflow.temporal.room.common.RoomControlWorkflowImpl;
 import com.example.dispute.workflow.temporal.room.intake.IntakeCommandDecision;
@@ -112,7 +119,8 @@ class CaseProcessTypedChildDispatchTest {
         CaseProcessWorkflowImpl.class, ReplacementCancellationProbeImpl.class);
     ledger = new RecordingLedger();
     bridge = new RecordingBridge();
-    caseWorker.registerActivitiesImplementations(ledger, bridge);
+    caseWorker.registerActivitiesImplementations(
+        ledger, bridge, new RecordingBridgeV2Adapter(bridge));
     Worker roomWorker = environment.newWorker(CaseProcessWorkflowProtocol.ROOM_CONTROL_TASK_QUEUE);
     roomWorker.registerWorkflowImplementationTypes(
         RoomControlWorkflowImpl.class, IntakeRoomWorkflowImpl.class);
@@ -257,6 +265,19 @@ class CaseProcessTypedChildDispatchTest {
 
     assertThatThrownBy(() -> CaseProcessWorkflowImpl.rethrowIfCanceled(wrapper))
         .isSameAs(canceled);
+  }
+
+  @Test
+  void newTypedIntakeHistoryUsesTheAuthorityBackedV2BridgeName() {
+    startWorkflow();
+    provision(typedProvision(RoomType.INTAKE, 0, 1, 0, 0, 0));
+
+    assertThat(client.fetchHistory(WORKFLOW_ID).getEvents().stream()
+            .filter(HistoryEvent::hasActivityTaskScheduledEventAttributes)
+            .map(event -> event.getActivityTaskScheduledEventAttributes().getActivityType().getName())
+            .toList())
+        .contains("BindIntakeChildStartV2")
+        .doesNotContain("BindIntakeChildStart");
   }
 
   @Test
@@ -1786,6 +1807,29 @@ class CaseProcessTypedChildDispatchTest {
           eventProcessRevision,
           eventRoomRevision,
           typed);
+    }
+  }
+
+  private static final class RecordingBridgeV2Adapter implements IntakeChildBridgeActivitiesV2 {
+    private final RecordingBridge delegate;
+
+    private RecordingBridgeV2Adapter(RecordingBridge delegate) {
+      this.delegate = delegate;
+    }
+
+    @Override
+    public StartBinding bindStart(StartRequest request) {
+      return delegate.bindStart(request);
+    }
+
+    @Override
+    public CommandBinding bindCommand(CommandRequest request) {
+      return delegate.bindCommand(request);
+    }
+
+    @Override
+    public DomainEventBinding bindDomainEvent(DomainEventRequest request) {
+      return delegate.bindDomainEvent(request);
     }
   }
 

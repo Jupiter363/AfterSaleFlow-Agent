@@ -93,7 +93,12 @@ class IntakeAuthorityBindingMigrationTest {
                 .contains("content_sha256 is distinct from new.content_sha256")
                 .contains("create constraint trigger trg_r15_command_exact_comparison")
                 .contains("payload_uri is distinct from payload_row.object_uri")
-                .contains("payload_sha256 is distinct from payload_row.content_sha256");
+                .contains("payload_sha256 is distinct from payload_row.content_sha256")
+                .contains("payload_row.source_kind = 'existing_private_event'")
+                .contains("new.execution_disposition = 'inert_external_event'")
+                .contains("payload_row.source_kind = 'server_minted_human_input'")
+                .contains("payload_row.source_kind = 'server_canonical_branch'")
+                .contains("new.execution_disposition = 'activity_orchestrated'");
     }
 
     @Test

@@ -12,6 +12,8 @@ import com.example.dispute.workflow.activity.agent.AgentRunFinalizationGateway;
 import com.example.dispute.workflow.activity.agent.ExecuteAgentRunActivityImpl;
 import com.example.dispute.workflow.activity.agent.FinalizeAgentRunActivityImpl;
 import com.example.dispute.workflow.activity.domain.CaseProcessLedgerActivitiesImpl;
+import com.example.dispute.workflow.activity.domain.IntakeChildBridgeActivitiesV2Adapter;
+import com.example.dispute.workflow.activity.domain.IntakeChildBridgeReadPort;
 import com.example.dispute.workflow.activity.domain.ProcessProjectionActivitiesImpl;
 import com.example.dispute.workflow.activity.system.TemporalWorkerProbeWorkflowImpl;
 import com.example.dispute.workflow.application.EvidenceWindowActivitiesAdapter;
@@ -19,10 +21,15 @@ import com.example.dispute.workflow.contract.v1.TemporalTaskQueues;
 import com.example.dispute.workflow.temporal.EvidenceWindowWorkflowImpl;
 import com.example.dispute.workflow.temporal.agentrun.AgentRunWorkflowImpl;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessWorkflowImpl;
+import com.example.dispute.workflow.temporal.caseprocess.IntakeChildBridgeActivitiesV2;
 import com.example.dispute.workflow.temporal.room.common.RoomControlWorkflowImpl;
+import com.example.dispute.workflow.temporal.room.intake.IntakeRoomWorkflowImpl;
+import com.example.dispute.workflow.infrastructure.persistence.authority.bridge.JdbcIntakeChildBridgeReadPort;
 import io.temporal.client.WorkflowClient;
 import io.temporal.worker.Worker;
 import io.temporal.worker.WorkerFactory;
+import java.util.List;
+import javax.sql.DataSource;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.context.annotation.Bean;
@@ -34,6 +41,11 @@ import org.springframework.context.annotation.Lazy;
         name = "app.temporal.worker.enabled",
         havingValue = "true")
 public class TemporalWorkerConfiguration {
+
+    @Bean
+    IntakeChildBridgeReadPort intakeChildBridgeReadPort(DataSource dataSource) {
+        return new JdbcIntakeChildBridgeReadPort(dataSource);
+    }
 
     @Bean(destroyMethod = "shutdown")
     @Lazy(false)
@@ -48,7 +60,10 @@ public class TemporalWorkerConfiguration {
             TemporalWorkerOptionsFactory optionsFactory,
             EvidenceWindowActivitiesAdapter evidenceWindowActivities,
             CaseProcessLedgerActivitiesImpl ledgerActivities,
-            ProcessProjectionActivitiesImpl projectionActivities) {
+            ProcessProjectionActivitiesImpl projectionActivities,
+            ObjectProvider<IntakeChildBridgeReadPort> intakeChildBridgeReadPortProvider) {
+        IntakeAuthorityWorkerRegistration intakeAuthorityRegistration =
+                IntakeAuthorityWorkerRegistration.fromReadPortProvider(intakeChildBridgeReadPortProvider);
         WorkerFactory factory =
                 WorkerFactory.newInstance(workflowClient, optionsFactory.factoryOptions());
         return start(
@@ -61,7 +76,8 @@ public class TemporalWorkerConfiguration {
                                 optionsFactory,
                                 evidenceWindowActivities,
                                 ledgerActivities,
-                                projectionActivities));
+                                projectionActivities,
+                                intakeAuthorityRegistration));
     }
 
     @Bean(destroyMethod = "shutdown")
@@ -100,24 +116,43 @@ public class TemporalWorkerConfiguration {
             TemporalWorkerOptionsFactory optionsFactory,
             EvidenceWindowActivitiesAdapter evidenceWindowActivities,
             CaseProcessLedgerActivitiesImpl ledgerActivities,
-            ProcessProjectionActivitiesImpl projectionActivities) {
+            ProcessProjectionActivitiesImpl projectionActivities,
+            IntakeAuthorityWorkerRegistration intakeAuthorityRegistration) {
         requireDedicatedLegacyTaskQueue(legacyTaskQueue);
 
         Worker caseControl =
                 factory.newWorker(CASE_CONTROL, optionsFactory.workerOptions(CASE_CONTROL));
-        caseControl.registerWorkflowImplementationTypes(
-                CaseProcessWorkflowImpl.class, TemporalWorkerProbeWorkflowImpl.class);
-        caseControl.registerActivitiesImplementations(
-                ledgerActivities,
-                projectionActivities,
-                new TemporalWorkerProbeActivitiesImpl(properties, CASE_CONTROL));
+        List<Class<?>> caseControlWorkflows =
+                List.of(CaseProcessWorkflowImpl.class, TemporalWorkerProbeWorkflowImpl.class);
+        IntakeChildBridgeActivitiesV2Adapter v2BridgeActivities =
+                new IntakeChildBridgeActivitiesV2Adapter(intakeAuthorityRegistration.bridgeActivities());
+        IntakeAuthorityWorkerRegistration.V2BridgeActivityRegistration v2BridgeRegistration =
+                intakeAuthorityRegistration.authorityBackedV2Activity(
+                        v2BridgeActivities, IntakeChildBridgeActivitiesV2.class);
+        List<Object> caseControlActivities =
+                intakeAuthorityRegistration.caseControlActivityImplementations(
+                        v2BridgeRegistration,
+                        ledgerActivities,
+                        projectionActivities,
+                        new TemporalWorkerProbeActivitiesImpl(properties, CASE_CONTROL));
+        intakeAuthorityRegistration.validateCaseControlRegistration(
+                caseControlWorkflows, caseControlActivities, v2BridgeRegistration);
+        caseControl.registerWorkflowImplementationTypes(caseControlWorkflows.toArray(Class[]::new));
+        caseControl.registerActivitiesImplementations(caseControlActivities.toArray());
 
         Worker roomControl =
                 factory.newWorker(ROOM_CONTROL, optionsFactory.workerOptions(ROOM_CONTROL));
-        roomControl.registerWorkflowImplementationTypes(
-                RoomControlWorkflowImpl.class, TemporalWorkerProbeWorkflowImpl.class);
-        roomControl.registerActivitiesImplementations(
-                new TemporalWorkerProbeActivitiesImpl(properties, ROOM_CONTROL));
+        List<Class<?>> roomControlWorkflows =
+                List.of(
+                        RoomControlWorkflowImpl.class,
+                        IntakeRoomWorkflowImpl.class,
+                        TemporalWorkerProbeWorkflowImpl.class);
+        List<Object> roomControlActivities =
+                List.of(new TemporalWorkerProbeActivitiesImpl(properties, ROOM_CONTROL));
+        intakeAuthorityRegistration.validateRoomControlRegistration(
+                roomControlWorkflows, roomControlActivities);
+        roomControl.registerWorkflowImplementationTypes(roomControlWorkflows.toArray(Class[]::new));
+        roomControl.registerActivitiesImplementations(roomControlActivities.toArray());
 
         Worker notificationAndTools =
                 factory.newWorker(

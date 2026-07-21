@@ -628,7 +628,20 @@ begin
        or command_row.payload_schema_version is distinct from payload_row.schema_version
        or command_row.payload_uri is distinct from payload_row.object_uri
        or command_row.payload_sha256 is distinct from payload_row.content_sha256
-       or command_row.payload_size_bytes is distinct from payload_row.size_bytes then
+       or command_row.payload_size_bytes is distinct from payload_row.size_bytes
+       or not (
+            (payload_row.source_kind = 'EXISTING_PRIVATE_EVENT'
+                and new.command_type = 'INTAKE_MESSAGE'
+                and new.execution_disposition = 'INERT_EXTERNAL_EVENT')
+            or
+            (payload_row.source_kind = 'SERVER_MINTED_HUMAN_INPUT'
+                and new.command_type = 'INTAKE_MESSAGE'
+                and new.execution_disposition = 'ACTIVITY_ORCHESTRATED')
+            or
+            (payload_row.source_kind = 'SERVER_CANONICAL_BRANCH'
+                and new.command_type in ('INTAKE_CONFIRM', 'INTAKE_CANCEL')
+                and new.execution_disposition = 'ACTIVITY_ORCHESTRATED')
+       ) then
         raise exception using errcode = '23514',
             message = 'P4-R1.5 command authority exact comparison failed';
     end if;
