@@ -8,6 +8,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 JAVA_MAIN = ROOT / "java-api-service/src/main/java"
+JAVA_RESOURCES = ROOT / "java-api-service/src/main/resources"
 ARCHUNIT_TEST = (
     ROOT
     / "java-api-service/src/test/java/com/example/dispute/workflow/architecture"
@@ -71,6 +72,35 @@ def test_formal_intake_adapters_are_not_discoverable_components() -> None:
         assert not DISCOVERY_STEREOTYPE.search(source), path
 
 
+def test_no_meta_inf_service_provider_can_assemble_an_intake_formal_sink() -> None:
+    service_root = JAVA_RESOURCES / "META-INF/services"
+    descriptors = (
+        sorted(path for path in service_root.rglob("*") if path.is_file())
+        if service_root.exists()
+        else []
+    )
+    forbidden_fragments = {
+        *FORMAL_ROOT_NAMES,
+        "IntakeRoomActivities",
+        "IntakeRoomActivitiesAdapter",
+        "JdbcIntakeFormal",
+    }
+
+    for descriptor in descriptors:
+        contract = descriptor.relative_to(service_root).as_posix().replace("/", ".")
+        providers = {
+            provider
+            for line in descriptor.read_text(encoding="utf-8").splitlines()
+            if (provider := line.split("#", 1)[0].strip())
+        }
+        registrations = {contract, *providers}
+        assert not {
+            registration
+            for registration in registrations
+            if any(fragment in registration for fragment in forbidden_fragments)
+        }, descriptor
+
+
 def test_archunit_rule_and_compiled_fixture_contract_exist() -> None:
     source = ARCHUNIT_TEST.read_text(encoding="utf-8")
     seed_start = source.index("FORMAL_ROOT_SIMPLE_NAMES")
@@ -86,6 +116,14 @@ def test_archunit_rule_and_compiled_fixture_contract_exist() -> None:
         'startsWith("JdbcIntakeFormal")',
         '"io.temporal.worker.Worker"',
         '"registerActivitiesImplementations"',
+        "getConstructorCallsFromSelf()",
+        "getMethodReferencesFromSelf()",
+        "isWorkerRegistrationRoot",
+        "forbiddenDynamicAssemblyAccesses",
+        '"java.util.ServiceLoader"',
+        '"java.lang.ClassLoader"',
+        '"java.lang.invoke.MethodHandles"',
+        '"org.springframework.beans.factory.BeanFactory"',
         "shortestFormalSinkChain",
         "isAssemblyRoot(neutralContract)",
         "isAssemblyRoot(comparisonAdapter)",
@@ -98,12 +136,17 @@ def test_archunit_rule_and_compiled_fixture_contract_exist() -> None:
         "CrossFileWrapperAssembly.java",
         "FixtureFormalFactory.java",
         "LocalShadowingSafeRegistrar.java",
+        "MetaAnnotatedFormalAssembly.java",
         "QualifiedCallAndMethodReferenceAssembly.java",
+        "ReflectiveFormalAdapterAssembly.java",
         "SafeComparisonActivities.java",
         "SafeComparisonAssembly.java",
+        "ServiceLoaderHiddenProviderAssembly.java",
+        "SpringStringBeanLookupAssembly.java",
         "StaticFieldAliasRegistrar.java",
         "StaticImportedFactoryBeanAssembly.java",
         "StaticWildcardNestedFactoryAssembly.java",
+        "WorkerRegistrationMethodReferenceAssembly.java",
     }
     assert {path.name for path in FIXTURE_ROOT.glob("*.java")} == expected_fixtures
 
@@ -118,8 +161,14 @@ def test_archunit_rule_and_compiled_fixture_contract_exist() -> None:
         "var secondAlias",
         "FixtureFormalFactory::formalActivity",
         "worker.registerActivitiesImplementations",
+        "worker::registerActivitiesImplementations",
         "implements IntakeRoomActivities",
         "Object FORMAL_ACTIVITY = safe",
+        "ServiceLoader.load(IntakeRoomActivities.class)",
+        "Class.forName(",
+        'context.getBean("formalIntakeFinalizer")',
+        "@NestedFixtureStereotype",
+        "ObjectProvider<SafeComparisonActivities>",
     ):
         assert required in fixture_source
 

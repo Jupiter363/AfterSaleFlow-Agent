@@ -6,8 +6,14 @@ import org.springframework.context.annotation.Configuration;
 @Configuration
 class CrossFileWrapperAssembly {
 
+    private final CrossFileFormalWrapper wrapper;
+
+    CrossFileWrapperAssembly(CrossFileFormalWrapper wrapper) {
+        this.wrapper = wrapper;
+    }
+
     @Bean
-    CrossFileFormalWrapper formalWrapper(CrossFileFormalDelegate delegate) {
-        return new CrossFileFormalWrapper(delegate);
+    Object formalWrapperBean() {
+        return wrapper;
     }
 }
