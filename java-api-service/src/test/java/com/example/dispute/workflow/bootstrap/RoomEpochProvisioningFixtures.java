@@ -50,6 +50,50 @@ final class RoomEpochProvisioningFixtures {
                 REQUESTED_AT);
     }
 
+    static ProvisionRoomEpoch v2Command(
+            String epochId,
+            String caseId,
+            RoomType roomType,
+            String roomWorkflowType,
+            String roomWorkflowBuildId) {
+        String tenant = "tenant";
+        return new ProvisionRoomEpoch(
+                ProvisionRoomEpoch.SCHEMA_VERSION,
+                epochId,
+                tenant,
+                caseId,
+                "ROOM_1",
+                roomType,
+                1,
+                10,
+                3,
+                7,
+                roomType.name(),
+                roomType.name(),
+                "OPEN",
+                WriterMode.SHADOW,
+                CaseProcessWorkflowProtocol.caseWorkflowId(tenant, caseId),
+                CaseProcessWorkflowProtocol.roomWorkflowId(caseId, roomType, 1),
+                "room-epoch-selection.v2",
+                "case-process-contract.v1",
+                CaseProcessWorkflowProtocol.CASE_WORKFLOW_TYPE,
+                "after-sale-control.local-dev",
+                roomWorkflowType,
+                roomWorkflowBuildId,
+                roomType == RoomType.INTAKE ? "intake.v2" : "evidence.v2",
+                "2.0.0",
+                "intake-checkpoint.v2",
+                "agent-stream.v2",
+                4,
+                6,
+                5,
+                7,
+                REQUESTED_AT.plusSeconds(3600),
+                null,
+                null,
+                REQUESTED_AT);
+    }
+
     static ProvisionRoomEpochReceipt receipt(ProvisionRoomEpoch command) {
         return new ProvisionRoomEpochReceipt(
                 "provision-room-epoch-receipt.v1",
@@ -71,6 +115,8 @@ final class RoomEpochProvisioningFixtures {
                 command.processContractVersion(),
                 command.workflowType(),
                 command.temporalBuildId(),
+                command.roomWorkflowType(),
+                command.roomWorkflowBuildId(),
                 command.graphKey(),
                 command.graphVersion(),
                 command.checkpointSchemaVersion(),

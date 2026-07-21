@@ -2,6 +2,8 @@ package com.example.dispute.workflow.contract.v1;
 
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.regex.Pattern;
@@ -26,6 +28,8 @@ public record ProvisionRoomEpochReceipt(
     String processContractVersion,
     String workflowType,
     String temporalBuildId,
+    @JsonInclude(JsonInclude.Include.NON_NULL) String roomWorkflowType,
+    @JsonInclude(JsonInclude.Include.NON_NULL) String roomWorkflowBuildId,
     String graphKey,
     String graphVersion,
     String checkpointSchemaVersion,
@@ -45,6 +49,82 @@ public record ProvisionRoomEpochReceipt(
 
   private static final Pattern STATE = Pattern.compile("[A-Z][A-Z0-9_]{0,63}");
   private static final Pattern SHA256 = Pattern.compile("[0-9a-f]{64}");
+
+  public ProvisionRoomEpochReceipt(
+      String schemaVersion,
+      String epochId,
+      String tenantSurrogate,
+      String caseId,
+      String roomId,
+      RoomType roomType,
+      long roomEpoch,
+      long fencingToken,
+      long initialProcessRevision,
+      long initialRoomRevision,
+      String macroPhase,
+      String currentRoom,
+      String roomPhase,
+      Instant projectedDeadlineAt,
+      WriterMode writerMode,
+      String selectionSchemaVersion,
+      String processContractVersion,
+      String workflowType,
+      String temporalBuildId,
+      String graphKey,
+      String graphVersion,
+      String checkpointSchemaVersion,
+      String streamProtocol,
+      long lastCommandSequence,
+      long lastCaseEventSequence,
+      long firstCommandSequence,
+      long firstCaseEventSequence,
+      String projectionRef,
+      String projectionSha256,
+      Instant requestedAt,
+      String caseWorkflowId,
+      String caseWorkflowRunId,
+      String roomWorkflowId,
+      String roomWorkflowRunId,
+      String provisioningSha256) {
+    this(
+        schemaVersion,
+        epochId,
+        tenantSurrogate,
+        caseId,
+        roomId,
+        roomType,
+        roomEpoch,
+        fencingToken,
+        initialProcessRevision,
+        initialRoomRevision,
+        macroPhase,
+        currentRoom,
+        roomPhase,
+        projectedDeadlineAt,
+        writerMode,
+        selectionSchemaVersion,
+        processContractVersion,
+        workflowType,
+        temporalBuildId,
+        null,
+        null,
+        graphKey,
+        graphVersion,
+        checkpointSchemaVersion,
+        streamProtocol,
+        lastCommandSequence,
+        lastCaseEventSequence,
+        firstCommandSequence,
+        firstCaseEventSequence,
+        projectionRef,
+        projectionSha256,
+        requestedAt,
+        caseWorkflowId,
+        caseWorkflowRunId,
+        roomWorkflowId,
+        roomWorkflowRunId,
+        provisioningSha256);
+  }
 
   public ProvisionRoomEpochReceipt {
     if (!"provision-room-epoch-receipt.v1".equals(schemaVersion)) {
@@ -73,6 +153,13 @@ public record ProvisionRoomEpochReceipt(
     requireText(processContractVersion, 64, "processContractVersion");
     requireText(workflowType, 128, "workflowType");
     requireText(temporalBuildId, 128, "temporalBuildId");
+    requireSelectionBinding(
+        selectionSchemaVersion,
+        roomType,
+        writerMode,
+        workflowType,
+        roomWorkflowType,
+        roomWorkflowBuildId);
     requireText(graphKey, 128, "graphKey");
     requireText(graphVersion, 128, "graphVersion");
     requireText(checkpointSchemaVersion, 128, "checkpointSchemaVersion");
@@ -128,6 +215,9 @@ public record ProvisionRoomEpochReceipt(
         && processContractVersion.equals(request.processContractVersion())
         && workflowType.equals(request.workflowType())
         && temporalBuildId.equals(request.temporalBuildId())
+        && (!isV2Selection(selectionSchemaVersion)
+            || (roomWorkflowType.equals(request.roomWorkflowType())
+                && roomWorkflowBuildId.equals(request.roomWorkflowBuildId())))
         && graphKey.equals(request.graphKey())
         && graphVersion.equals(request.graphVersion())
         && checkpointSchemaVersion.equals(request.checkpointSchemaVersion())
@@ -142,6 +232,50 @@ public record ProvisionRoomEpochReceipt(
         && caseWorkflowId.equals(request.caseWorkflowId())
         && roomWorkflowId.equals(request.roomWorkflowId())
         && provisioningSha256.equals(request.payloadSha256());
+  }
+
+  @JsonIgnore
+  public String caseWorkflowType() {
+    return workflowType;
+  }
+
+  @JsonIgnore
+  public String caseWorkflowBuildId() {
+    return temporalBuildId;
+  }
+
+  private static void requireSelectionBinding(
+      String selectionSchemaVersion,
+      RoomType roomType,
+      WriterMode writerMode,
+      String caseWorkflowType,
+      String roomWorkflowType,
+      String roomWorkflowBuildId) {
+    if ("room-epoch-selection.v1".equals(selectionSchemaVersion)) {
+      if (roomWorkflowType != null || roomWorkflowBuildId != null) {
+        throw new IllegalArgumentException(
+            "v1 receipt cannot contain a room Workflow binding");
+      }
+      return;
+    }
+    if (!isV2Selection(selectionSchemaVersion)) {
+      throw new IllegalArgumentException("unsupported selectionSchemaVersion");
+    }
+    requireText(roomWorkflowType, 128, "roomWorkflowType");
+    requireText(roomWorkflowBuildId, 128, "roomWorkflowBuildId");
+    if (!CaseProcessWorkflowProtocol.CASE_WORKFLOW_TYPE.equals(caseWorkflowType)) {
+      throw new IllegalArgumentException(
+          "v2 receipt requires the CaseProcessWorkflow case binding");
+    }
+    if (writerMode != WriterMode.LEGACY
+        && (roomType != RoomType.INTAKE || !"IntakeRoomWorkflow".equals(roomWorkflowType))) {
+      throw new IllegalArgumentException(
+          "non-LEGACY v2 receipt requires the IntakeRoomWorkflow binding");
+    }
+  }
+
+  private static boolean isV2Selection(String selectionSchemaVersion) {
+    return "room-epoch-selection.v2".equals(selectionSchemaVersion);
   }
 
   private static void requireText(String value, int maxLength, String field) {

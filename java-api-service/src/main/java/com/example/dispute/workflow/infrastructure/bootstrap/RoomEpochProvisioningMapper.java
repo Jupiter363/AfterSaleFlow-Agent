@@ -47,6 +47,8 @@ public final class RoomEpochProvisioningMapper {
                 epoch.getProcessContractVersion(),
                 epoch.getWorkflowType(),
                 epoch.getTemporalBuildId(),
+                epoch.getRoomWorkflowType(),
+                epoch.getRoomWorkflowBuildId(),
                 epoch.getGraphKey(),
                 epoch.getGraphVersion(),
                 epoch.getCheckpointSchemaVersion(),

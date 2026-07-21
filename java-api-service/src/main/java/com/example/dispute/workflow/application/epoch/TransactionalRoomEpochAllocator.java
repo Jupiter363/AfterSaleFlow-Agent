@@ -272,7 +272,7 @@ public class TransactionalRoomEpochAllocator implements RoomEpochAllocator {
                         selection.streamProtocol(),
                         selection.selectionSchemaVersion(),
                         selection.processContractVersion(),
-                        selection.workflowType(),
+                        selection.caseWorkflowType(),
                         command.occurredAt(),
                         command.occurredAt());
         epochRepository.saveAndFlush(terminal);
@@ -313,14 +313,16 @@ public class TransactionalRoomEpochAllocator implements RoomEpochAllocator {
                     0,
                     fencingToken,
                     workflowId,
-                    selection.buildId(),
+                    selection.caseWorkflowBuildId(),
                     selection.graphKey(),
                     selection.graphVersion(),
                     selection.checkpointSchemaVersion(),
                     selection.streamProtocol(),
                     selection.selectionSchemaVersion(),
                     selection.processContractVersion(),
-                    selection.workflowType(),
+                    selection.caseWorkflowType(),
+                    selection.roomWorkflowType(),
+                    selection.roomWorkflowBuildId(),
                     occurredAt);
         }
         return CaseRoomEpochEntity.active(
@@ -336,14 +338,16 @@ public class TransactionalRoomEpochAllocator implements RoomEpochAllocator {
                 fencingToken,
                 workflowId,
                 null,
-                selection.buildId(),
+                selection.caseWorkflowBuildId(),
                 selection.graphKey(),
                 selection.graphVersion(),
                 selection.checkpointSchemaVersion(),
                 selection.streamProtocol(),
                 selection.selectionSchemaVersion(),
                 selection.processContractVersion(),
-                selection.workflowType(),
+                selection.caseWorkflowType(),
+                selection.roomWorkflowType(),
+                selection.roomWorkflowBuildId(),
                 occurredAt);
     }
 
@@ -526,6 +530,8 @@ public class TransactionalRoomEpochAllocator implements RoomEpochAllocator {
                         epoch.getProcessContractVersion(),
                         epoch.getWorkflowType(),
                         epoch.getTemporalBuildId(),
+                        epoch.getRoomWorkflowType(),
+                        epoch.getRoomWorkflowBuildId(),
                         epoch.getGraphKey(),
                         epoch.getGraphVersion(),
                         epoch.getCheckpointSchemaVersion(),

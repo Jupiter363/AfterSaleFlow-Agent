@@ -286,6 +286,14 @@ class RoomEpochAllocatorIntegrationTest {
 
         assertThat(selector.calls()).isEqualTo(1);
         assertThat(allocation.lifecycleStatus()).isEqualTo(EpochLifecycleStatus.PREPARING);
+        assertThat(allocation.selection().selectionSchemaVersion())
+                .isEqualTo("room-epoch-selection.v2");
+        assertThat(allocation.selection().caseWorkflowType())
+                .isEqualTo(CaseProcessWorkflowProtocol.CASE_WORKFLOW_TYPE);
+        assertThat(allocation.selection().roomWorkflowType())
+                .isEqualTo("IntakeRoomWorkflow");
+        assertThat(allocation.selection().roomWorkflowBuildId())
+                .isEqualTo("intake-room.synthetic.v1");
         assertThat(countEpochs(caseId)).isEqualTo(1);
         assertThat(projectionCount(caseId)).isEqualTo(1);
         assertThat(
@@ -294,6 +302,18 @@ class RoomEpochAllocatorIntegrationTest {
                                 String.class,
                                 caseId))
                 .isEqualTo("PREPARING");
+        assertThat(
+                        jdbc.queryForObject(
+                                """
+                                select workflow_type || ':' || temporal_build_id || ':' ||
+                                       room_workflow_type || ':' || room_workflow_build_id
+                                  from case_room_epoch where case_id = ?
+                                """,
+                                String.class,
+                                caseId))
+                .isEqualTo(
+                        "CaseProcessWorkflow:temporal-build-v1:"
+                                + "IntakeRoomWorkflow:intake-room.synthetic.v1");
         assertThat(
                         jdbc.queryForObject(
                                 "select writer_activation_status from case_process_projection where case_id = ?",
@@ -729,13 +749,29 @@ class RoomEpochAllocatorIntegrationTest {
             calls.incrementAndGet();
             SelectorConfiguration selected = configuration.get();
             boolean legacy = selected.writerMode() == WriterMode.LEGACY;
+            if (!legacy) {
+                if (roomType != RoomType.INTAKE) {
+                    throw new IllegalStateException(
+                            "test selector refuses non-LEGACY non-INTAKE selection");
+                }
+                return new RoomEpochSelection(
+                        selected.writerMode(),
+                        "room-epoch-selection.v2",
+                        "case-process-contract.v1",
+                        CaseProcessWorkflowProtocol.CASE_WORKFLOW_TYPE,
+                        selected.buildId(),
+                        "IntakeRoomWorkflow",
+                        "intake-room.synthetic.v1",
+                        "intake.v2",
+                        selected.graphVersion(),
+                        "intake-checkpoint.v2",
+                        "agent-stream.v2");
+            }
             return new RoomEpochSelection(
                     selected.writerMode(),
                     "room-epoch-selection.v1",
                     "case-process-contract.v1",
-                    legacy
-                            ? "LegacyJavaRoomState"
-                            : CaseProcessWorkflowProtocol.CASE_WORKFLOW_TYPE,
+                    "LegacyJavaRoomState",
                     selected.buildId(),
                     roomType.name().toLowerCase(Locale.ROOT) + ".test",
                     selected.graphVersion(),

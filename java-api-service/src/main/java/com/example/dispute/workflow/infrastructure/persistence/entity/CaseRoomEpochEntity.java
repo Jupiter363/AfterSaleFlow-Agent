@@ -92,6 +92,12 @@ public class CaseRoomEpochEntity extends AbstractEntity {
     @Column(name = "workflow_type", length = 128, nullable = false, updatable = false)
     private String workflowType;
 
+    @Column(name = "room_workflow_type", length = 128, updatable = false)
+    private String roomWorkflowType;
+
+    @Column(name = "room_workflow_build_id", length = 128, updatable = false)
+    private String roomWorkflowBuildId;
+
     @Column(name = "activated_at", nullable = false, updatable = false)
     private OffsetDateTime activatedAt;
 
@@ -142,6 +148,56 @@ public class CaseRoomEpochEntity extends AbstractEntity {
             String processContractVersion,
             String workflowType,
             OffsetDateTime activatedAt) {
+        return active(
+                id,
+                tenantSurrogate,
+                caseId,
+                roomId,
+                roomType,
+                roomEpoch,
+                writerMode,
+                processRevision,
+                roomRevision,
+                fencingToken,
+                temporalWorkflowId,
+                temporalRunId,
+                temporalBuildId,
+                graphKey,
+                graphVersion,
+                checkpointSchemaVersion,
+                streamProtocol,
+                selectionSchemaVersion,
+                processContractVersion,
+                workflowType,
+                null,
+                null,
+                activatedAt);
+    }
+
+    public static CaseRoomEpochEntity active(
+            String id,
+            String tenantSurrogate,
+            String caseId,
+            String roomId,
+            RoomType roomType,
+            long roomEpoch,
+            WriterMode writerMode,
+            long processRevision,
+            long roomRevision,
+            long fencingToken,
+            String temporalWorkflowId,
+            String temporalRunId,
+            String temporalBuildId,
+            String graphKey,
+            String graphVersion,
+            String checkpointSchemaVersion,
+            String streamProtocol,
+            String selectionSchemaVersion,
+            String processContractVersion,
+            String workflowType,
+            String roomWorkflowType,
+            String roomWorkflowBuildId,
+            OffsetDateTime activatedAt) {
         if (writerMode == WriterMode.TEMPORAL) {
             throw new IllegalArgumentException(
                     "TEMPORAL epochs must be created through the PREPARING lifecycle");
@@ -168,6 +224,8 @@ public class CaseRoomEpochEntity extends AbstractEntity {
                 selectionSchemaVersion,
                 processContractVersion,
                 workflowType,
+                roomWorkflowType,
+                roomWorkflowBuildId,
                 activatedAt,
                 null);
     }
@@ -192,6 +250,52 @@ public class CaseRoomEpochEntity extends AbstractEntity {
             String processContractVersion,
             String workflowType,
             OffsetDateTime activatedAt) {
+        return preparing(
+                id,
+                tenantSurrogate,
+                caseId,
+                roomId,
+                roomType,
+                roomEpoch,
+                processRevision,
+                roomRevision,
+                fencingToken,
+                temporalWorkflowId,
+                temporalBuildId,
+                graphKey,
+                graphVersion,
+                checkpointSchemaVersion,
+                streamProtocol,
+                selectionSchemaVersion,
+                processContractVersion,
+                workflowType,
+                null,
+                null,
+                activatedAt);
+    }
+
+    public static CaseRoomEpochEntity preparing(
+            String id,
+            String tenantSurrogate,
+            String caseId,
+            String roomId,
+            RoomType roomType,
+            long roomEpoch,
+            long processRevision,
+            long roomRevision,
+            long fencingToken,
+            String temporalWorkflowId,
+            String temporalBuildId,
+            String graphKey,
+            String graphVersion,
+            String checkpointSchemaVersion,
+            String streamProtocol,
+            String selectionSchemaVersion,
+            String processContractVersion,
+            String workflowType,
+            String roomWorkflowType,
+            String roomWorkflowBuildId,
+            OffsetDateTime activatedAt) {
         return create(
                 id,
                 tenantSurrogate,
@@ -214,6 +318,8 @@ public class CaseRoomEpochEntity extends AbstractEntity {
                 selectionSchemaVersion,
                 processContractVersion,
                 workflowType,
+                roomWorkflowType,
+                roomWorkflowBuildId,
                 activatedAt,
                 null);
     }
@@ -239,6 +345,58 @@ public class CaseRoomEpochEntity extends AbstractEntity {
             String selectionSchemaVersion,
             String processContractVersion,
             String workflowType,
+            OffsetDateTime activatedAt,
+            OffsetDateTime terminalAt) {
+        return terminal(
+                id,
+                tenantSurrogate,
+                caseId,
+                roomId,
+                roomType,
+                roomEpoch,
+                writerMode,
+                processRevision,
+                roomRevision,
+                fencingToken,
+                temporalWorkflowId,
+                temporalRunId,
+                temporalBuildId,
+                graphKey,
+                graphVersion,
+                checkpointSchemaVersion,
+                streamProtocol,
+                selectionSchemaVersion,
+                processContractVersion,
+                workflowType,
+                null,
+                null,
+                activatedAt,
+                terminalAt);
+    }
+
+    public static CaseRoomEpochEntity terminal(
+            String id,
+            String tenantSurrogate,
+            String caseId,
+            String roomId,
+            RoomType roomType,
+            long roomEpoch,
+            WriterMode writerMode,
+            long processRevision,
+            long roomRevision,
+            long fencingToken,
+            String temporalWorkflowId,
+            String temporalRunId,
+            String temporalBuildId,
+            String graphKey,
+            String graphVersion,
+            String checkpointSchemaVersion,
+            String streamProtocol,
+            String selectionSchemaVersion,
+            String processContractVersion,
+            String workflowType,
+            String roomWorkflowType,
+            String roomWorkflowBuildId,
             OffsetDateTime activatedAt,
             OffsetDateTime terminalAt) {
         if (writerMode != WriterMode.LEGACY) {
@@ -267,6 +425,8 @@ public class CaseRoomEpochEntity extends AbstractEntity {
                 selectionSchemaVersion,
                 processContractVersion,
                 workflowType,
+                roomWorkflowType,
+                roomWorkflowBuildId,
                 activatedAt,
                 Objects.requireNonNull(terminalAt, "terminalAt must not be null"));
     }
@@ -293,6 +453,8 @@ public class CaseRoomEpochEntity extends AbstractEntity {
             String selectionSchemaVersion,
             String processContractVersion,
             String workflowType,
+            String roomWorkflowType,
+            String roomWorkflowBuildId,
             OffsetDateTime activatedAt,
             OffsetDateTime terminalAt) {
         if (roomEpoch < 0 || processRevision < 0 || roomRevision < 0 || fencingToken < 0) {
@@ -367,6 +529,27 @@ public class CaseRoomEpochEntity extends AbstractEntity {
         entity.selectionSchemaVersion = required(selectionSchemaVersion, "selectionSchemaVersion");
         entity.processContractVersion = required(processContractVersion, "processContractVersion");
         entity.workflowType = required(workflowType, "workflowType");
+        if ("room-epoch-selection.v1".equals(entity.selectionSchemaVersion)) {
+            if (roomWorkflowType != null || roomWorkflowBuildId != null) {
+                throw new IllegalArgumentException(
+                        "v1 epoch cannot contain a room Workflow selection");
+            }
+        } else if ("room-epoch-selection.v2".equals(entity.selectionSchemaVersion)) {
+            if (!CaseProcessWorkflowProtocol.CASE_WORKFLOW_TYPE.equals(entity.workflowType)) {
+                throw new IllegalArgumentException(
+                        "v2 epoch requires the CaseProcessWorkflow case binding");
+            }
+            entity.roomWorkflowType = required(roomWorkflowType, "roomWorkflowType");
+            entity.roomWorkflowBuildId = required(roomWorkflowBuildId, "roomWorkflowBuildId");
+            if (requiredWriterMode != WriterMode.LEGACY
+                    && (entity.roomType != RoomType.INTAKE
+                            || !"IntakeRoomWorkflow".equals(entity.roomWorkflowType))) {
+                throw new IllegalArgumentException(
+                        "non-LEGACY v2 epochs require the IntakeRoomWorkflow binding");
+            }
+        } else {
+            throw new IllegalArgumentException("unsupported selectionSchemaVersion");
+        }
         entity.activatedAt = Objects.requireNonNull(activatedAt, "activatedAt must not be null");
         entity.terminalAt = terminalAt;
         entity.createdAt = activatedAt;
@@ -522,6 +705,14 @@ public class CaseRoomEpochEntity extends AbstractEntity {
 
     public String getWorkflowType() {
         return workflowType;
+    }
+
+    public String getRoomWorkflowType() {
+        return roomWorkflowType;
+    }
+
+    public String getRoomWorkflowBuildId() {
+        return roomWorkflowBuildId;
     }
 
     public OffsetDateTime getActivatedAt() {

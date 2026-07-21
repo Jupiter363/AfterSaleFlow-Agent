@@ -21,8 +21,11 @@ class ConfiguredRoomEpochSelectorTest {
                         .selectForNewEpoch(RoomType.INTAKE);
 
         assertThat(selection.writerMode()).isEqualTo(WriterMode.LEGACY);
+        assertThat(selection.selectionSchemaVersion())
+                .isEqualTo(ConfiguredRoomEpochSelector.SELECTION_SCHEMA_VERSION);
         assertThat(selection.workflowType())
                 .isEqualTo(ConfiguredRoomEpochSelector.LEGACY_WORKFLOW_TYPE);
+        assertThat(selection.roomWorkflowType()).isNull();
     }
 
     @Test
@@ -39,8 +42,29 @@ class ConfiguredRoomEpochSelectorTest {
     void permitsExplicitShadowWithoutOpeningTheTemporalWriter() {
         var properties = new OrchestrationCutoverProperties(WriterMode.SHADOW, true, false);
 
-        assertThat(selector(properties).selectForNewEpoch(RoomType.INTAKE).writerMode())
-                .isEqualTo(WriterMode.SHADOW);
+        var selection = selector(properties).selectForNewEpoch(RoomType.INTAKE);
+
+        assertThat(selection.writerMode()).isEqualTo(WriterMode.SHADOW);
+        assertThat(selection.selectionSchemaVersion())
+                .isEqualTo(ConfiguredRoomEpochSelector.INTAKE_SELECTION_SCHEMA_VERSION);
+        assertThat(selection.caseWorkflowType()).isEqualTo("CaseProcessWorkflow");
+        assertThat(selection.caseWorkflowBuildId()).isEqualTo("after-sale-control.local-dev");
+        assertThat(selection.roomWorkflowType()).isEqualTo("IntakeRoomWorkflow");
+        assertThat(selection.roomWorkflowBuildId()).isEqualTo("intake-room.synthetic.v1");
+        assertThat(selection.graphKey()).isEqualTo("intake.v2");
+        assertThat(selection.graphVersion()).isEqualTo("2.0.0");
+        assertThat(selection.checkpointSchemaVersion()).isEqualTo("intake-checkpoint.v2");
+    }
+
+    @Test
+    void forcesNonIntakeRoomsBackToTheLegacyV1Selection() {
+        var properties = new OrchestrationCutoverProperties(WriterMode.SHADOW, true, false);
+
+        var selection = selector(properties).selectForNewEpoch(RoomType.EVIDENCE);
+
+        assertThat(selection.writerMode()).isEqualTo(WriterMode.LEGACY);
+        assertThat(selection.selectionSchemaVersion()).isEqualTo("room-epoch-selection.v1");
+        assertThat(selection.roomWorkflowType()).isNull();
     }
 
     @Test
@@ -57,8 +81,47 @@ class ConfiguredRoomEpochSelectorTest {
     void requiresBothLocksForAnExplicitTemporalSelection() {
         var properties = new OrchestrationCutoverProperties(WriterMode.TEMPORAL, true, true);
 
-        assertThat(selector(properties).selectForNewEpoch(RoomType.INTAKE).writerMode())
-                .isEqualTo(WriterMode.TEMPORAL);
+        var selection = selector(properties).selectForNewEpoch(RoomType.INTAKE);
+
+        assertThat(selection.writerMode()).isEqualTo(WriterMode.TEMPORAL);
+        assertThat(selection.roomWorkflowType()).isEqualTo("IntakeRoomWorkflow");
+    }
+
+    @Test
+    void rejectsIncompleteOrMixedVersionSelectionBindings() {
+        assertThatThrownBy(
+                        () ->
+                                new com.example.dispute.workflow.application.epoch.RoomEpochSelection(
+                                        WriterMode.SHADOW,
+                                        "room-epoch-selection.v2",
+                                        "case-process-contract.v1",
+                                        "CaseProcessWorkflow",
+                                        "case-build",
+                                        null,
+                                        null,
+                                        "intake.v2",
+                                        "2.0.0",
+                                        "intake-checkpoint.v2",
+                                        "agent-stream.v2"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("roomWorkflowType must not be blank");
+
+        assertThatThrownBy(
+                        () ->
+                                new com.example.dispute.workflow.application.epoch.RoomEpochSelection(
+                                        WriterMode.LEGACY,
+                                        "room-epoch-selection.v1",
+                                        "case-process-contract.v1",
+                                        "LegacyJavaRoomState",
+                                        "legacy-java.v1",
+                                        "IntakeRoomWorkflow",
+                                        "room-build",
+                                        "intake.v2",
+                                        "1.0.0",
+                                        "checkpoint.v1",
+                                        "agent-stream.v2"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("v1 selection cannot contain a room Workflow binding");
     }
 
     private static ConfiguredRoomEpochSelector selector(
