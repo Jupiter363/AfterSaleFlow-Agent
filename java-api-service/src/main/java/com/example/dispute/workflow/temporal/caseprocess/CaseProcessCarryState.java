@@ -2,6 +2,7 @@ package com.example.dispute.workflow.temporal.caseprocess;
 
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
+import com.example.dispute.workflow.contract.v1.ProvisionRoomEpoch;
 import java.util.List;
 import java.util.Objects;
 
@@ -31,7 +32,9 @@ public record CaseProcessCarryState(
     String activeChildWorkflowRunId,
     List<ProvisioningCommitment> provisioningCommitments,
     List<ProvisionedRoomEpochHighWater> highestProvisionedEpochs,
-    ActiveChildDescriptor activeChildDescriptor) {
+    ActiveChildDescriptor activeChildDescriptor,
+    Long activeRoomRevision,
+    RecoveryErrorOrigin protocolErrorOrigin) {
 
   public static final int MAX_RECENT_COMMANDS = 256;
   public static final int MAX_BUFFERED_EVENTS = 128;
@@ -90,6 +93,8 @@ public record CaseProcessCarryState(
         activeChildWorkflowRunId,
         provisioningCommitments,
         highestProvisionedEpochs,
+        null,
+        null,
         null);
   }
 
@@ -141,6 +146,66 @@ public record CaseProcessCarryState(
         null,
         List.of(),
         List.of(),
+        null,
+        null,
+        null);
+  }
+
+  public CaseProcessCarryState(
+      String schemaVersion,
+      String tenantSurrogate,
+      String caseId,
+      RoomType activeRoomType,
+      long activeRoomEpoch,
+      String activeChildWorkflowId,
+      long observedProcessRevision,
+      long nextCommandSequence,
+      long nextCaseEventSequence,
+      long processedCommandCount,
+      long processedEventCount,
+      List<ProcessedCommandIdentity> recentCommands,
+      List<CaseDomainEventRef> bufferedEvents,
+      long highestObservedEventSequence,
+      int runGeneration,
+      int commandRecoveryAttempts,
+      int eventRecoveryAttempts,
+      boolean commandManualRecoveryRequired,
+      boolean eventManualRecoveryRequired,
+      String protocolErrorCode,
+      List<ClosedRoomTuple> closedRooms,
+      long activeFencingToken,
+      String activeChildWorkflowRunId,
+      List<ProvisioningCommitment> provisioningCommitments,
+      List<ProvisionedRoomEpochHighWater> highestProvisionedEpochs,
+      ActiveChildDescriptor activeChildDescriptor) {
+    this(
+        schemaVersion,
+        tenantSurrogate,
+        caseId,
+        activeRoomType,
+        activeRoomEpoch,
+        activeChildWorkflowId,
+        observedProcessRevision,
+        nextCommandSequence,
+        nextCaseEventSequence,
+        processedCommandCount,
+        processedEventCount,
+        recentCommands,
+        bufferedEvents,
+        highestObservedEventSequence,
+        runGeneration,
+        commandRecoveryAttempts,
+        eventRecoveryAttempts,
+        commandManualRecoveryRequired,
+        eventManualRecoveryRequired,
+        protocolErrorCode,
+        closedRooms,
+        activeFencingToken,
+        activeChildWorkflowRunId,
+        provisioningCommitments,
+        highestProvisionedEpochs,
+        activeChildDescriptor,
+        null,
         null);
   }
 
@@ -194,6 +259,10 @@ public record CaseProcessCarryState(
         provisioningCommitments == null ? List.of() : List.copyOf(provisioningCommitments);
     highestProvisionedEpochs =
         highestProvisionedEpochs == null ? List.of() : List.copyOf(highestProvisionedEpochs);
+    if (activeRoomRevision != null
+        && (activeRoomRevision < 0 || activeRoomType == null)) {
+      throw new IllegalArgumentException("active room revision is invalid");
+    }
     if (recentCommands.size() > MAX_RECENT_COMMANDS) {
       throw new IllegalArgumentException("recent command cache is too large");
     }
@@ -212,6 +281,26 @@ public record CaseProcessCarryState(
         throw new IllegalArgumentException("provisioned room high-water list is not ordered");
       }
       previousRoomTypeOrdinal = highWater.roomType().ordinal();
+    }
+    if (activeChildDescriptor != null
+        && activeChildDescriptor.kind() == ActiveChildKind.TYPED_INTAKE) {
+      ProvisioningCommitment pinned = null;
+      for (ProvisioningCommitment commitment : provisioningCommitments) {
+        if (commitment.request().roomType() == activeRoomType
+            && commitment.request().roomEpoch() == activeRoomEpoch
+            && commitment.request().fencingToken() == activeFencingToken) {
+          pinned = commitment;
+        }
+      }
+      if (pinned == null || !activeChildDescriptor.matches(pinned)) {
+        throw new IllegalArgumentException(
+            "typed active child descriptor does not match its provisioning commitment");
+      }
+      long initialRoomRevision = pinned.request().initialRoomRevision();
+      if (activeRoomRevision != null && activeRoomRevision < initialRoomRevision) {
+        throw new IllegalArgumentException(
+            "active room revision precedes the provisioned initial revision");
+      }
     }
   }
 
@@ -261,6 +350,13 @@ public record CaseProcessCarryState(
   public enum ActiveChildKind {
     GENERIC_ROOM_CONTROL,
     TYPED_INTAKE
+  }
+
+  public enum RecoveryErrorOrigin {
+    PROVISIONING,
+    COMMAND,
+    DOMAIN_EVENT,
+    SYSTEM
   }
 
   public record ActiveChildDescriptor(
@@ -317,6 +413,21 @@ public record CaseProcessCarryState(
       if (value == null || value.isBlank()) {
         throw new IllegalArgumentException(field + " must not be blank");
       }
+    }
+
+    boolean matches(ProvisioningCommitment commitment) {
+      ProvisionRoomEpoch request = commitment.request();
+      return selectionSchemaVersion.equals(request.selectionSchemaVersion())
+          && writerMode == request.writerMode()
+          && caseWorkflowType.equals(request.caseWorkflowType())
+          && caseWorkflowBuildId.equals(request.caseWorkflowBuildId())
+          && Objects.equals(roomWorkflowType, request.roomWorkflowType())
+          && Objects.equals(roomWorkflowBuildId, request.roomWorkflowBuildId())
+          && roomType == request.roomType()
+          && roomEpoch == request.roomEpoch()
+          && fencingToken == request.fencingToken()
+          && workflowId.equals(request.roomWorkflowId())
+          && startedRunId.equals(commitment.receipt().roomWorkflowRunId());
     }
   }
 }

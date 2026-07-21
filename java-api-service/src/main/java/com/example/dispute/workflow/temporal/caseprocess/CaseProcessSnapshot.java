@@ -2,6 +2,7 @@ package com.example.dispute.workflow.temporal.caseprocess;
 
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.ActiveChildKind;
+import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.RecoveryErrorOrigin;
 import java.util.List;
 
 public record CaseProcessSnapshot(
@@ -35,7 +36,9 @@ public record CaseProcessSnapshot(
     ActiveChildKind activeChildKind,
     String activeSelectionSchemaVersion,
     String activeRoomWorkflowType,
-    String activeRoomWorkflowBuildId) {
+    String activeRoomWorkflowBuildId,
+    Long activeRoomRevision,
+    RecoveryErrorOrigin protocolErrorOrigin) {
 
   public CaseProcessSnapshot(
       String schemaVersion,
@@ -88,6 +91,8 @@ public record CaseProcessSnapshot(
         0,
         null,
         0,
+        null,
+        null,
         null,
         null,
         null,
@@ -154,6 +159,76 @@ public record CaseProcessSnapshot(
         null,
         null,
         null,
+        null,
+        null,
+        null);
+  }
+
+  public CaseProcessSnapshot(
+      String schemaVersion,
+      String workflowId,
+      String workflowRunId,
+      String tenantSurrogate,
+      String caseId,
+      String macroPhase,
+      RoomType activeRoomType,
+      long activeRoomEpoch,
+      String activeChildWorkflowId,
+      long observedProcessRevision,
+      long nextCommandSequence,
+      long nextCaseEventSequence,
+      long processedCommandCount,
+      long processedEventCount,
+      int pendingCommandCount,
+      int bufferedEventCount,
+      int recentCommandCount,
+      long highestObservedCommandSequence,
+      long highestObservedEventSequence,
+      int runGeneration,
+      String blockedReason,
+      String protocolErrorCode,
+      List<String> recentCommandIds,
+      long activeFencingToken,
+      String activeChildWorkflowRunId,
+      int provisioningCommitmentCount,
+      String activeProvisioningSha256,
+      ActiveChildKind activeChildKind,
+      String activeSelectionSchemaVersion,
+      String activeRoomWorkflowType,
+      String activeRoomWorkflowBuildId) {
+    this(
+        schemaVersion,
+        workflowId,
+        workflowRunId,
+        tenantSurrogate,
+        caseId,
+        macroPhase,
+        activeRoomType,
+        activeRoomEpoch,
+        activeChildWorkflowId,
+        observedProcessRevision,
+        nextCommandSequence,
+        nextCaseEventSequence,
+        processedCommandCount,
+        processedEventCount,
+        pendingCommandCount,
+        bufferedEventCount,
+        recentCommandCount,
+        highestObservedCommandSequence,
+        highestObservedEventSequence,
+        runGeneration,
+        blockedReason,
+        protocolErrorCode,
+        recentCommandIds,
+        activeFencingToken,
+        activeChildWorkflowRunId,
+        provisioningCommitmentCount,
+        activeProvisioningSha256,
+        activeChildKind,
+        activeSelectionSchemaVersion,
+        activeRoomWorkflowType,
+        activeRoomWorkflowBuildId,
+        null,
         null);
   }
 
@@ -162,7 +237,9 @@ public record CaseProcessSnapshot(
       throw new IllegalArgumentException("schemaVersion must be case-process-snapshot.v1");
     }
     recentCommandIds = List.copyOf(recentCommandIds);
-    if (activeFencingToken < 0 || provisioningCommitmentCount < 0) {
+    if (activeFencingToken < 0
+        || provisioningCommitmentCount < 0
+        || (activeRoomRevision != null && activeRoomRevision < 0)) {
       throw new IllegalArgumentException("provisioning snapshot counters are invalid");
     }
   }

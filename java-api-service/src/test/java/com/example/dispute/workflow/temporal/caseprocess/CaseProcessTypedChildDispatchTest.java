@@ -21,6 +21,7 @@ import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleAct
 import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.RecordCaseCommandRouted;
 import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.RecordCaseCommandRoutedResult;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.ActiveChildKind;
+import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.RecoveryErrorOrigin;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessLedgerActivities.CaseCommandLedgerEntry;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessLedgerActivities.CaseCommandLedgerState;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessLedgerActivities.LoadSequenceRange;
@@ -44,12 +45,22 @@ import io.temporal.client.WorkflowOptions;
 import io.temporal.client.WorkflowStub;
 import io.temporal.client.WorkflowUpdateException;
 import io.temporal.client.WorkflowUpdateStage;
+import io.temporal.api.common.v1.WorkflowExecution;
 import io.temporal.common.WorkflowExecutionHistory;
+import io.temporal.failure.ActivityFailure;
 import io.temporal.failure.ApplicationFailure;
+import io.temporal.failure.CanceledFailure;
 import io.temporal.testing.TestEnvironmentOptions;
 import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.testing.WorkflowReplayer;
 import io.temporal.worker.Worker;
+import io.temporal.workflow.Async;
+import io.temporal.workflow.CancellationScope;
+import io.temporal.workflow.ChildWorkflowOptions;
+import io.temporal.workflow.QueryMethod;
+import io.temporal.workflow.Promise;
+import io.temporal.workflow.WorkflowInterface;
+import io.temporal.workflow.WorkflowMethod;
 import io.temporal.workflow.Workflow;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -84,7 +95,8 @@ class CaseProcessTypedChildDispatchTest {
         TestWorkflowEnvironment.newInstance(
             TestEnvironmentOptions.newBuilder().setInitialTime(NOW).build());
     Worker caseWorker = environment.newWorker(CaseProcessWorkflowProtocol.CASE_CONTROL_TASK_QUEUE);
-    caseWorker.registerWorkflowImplementationTypes(CaseProcessWorkflowImpl.class);
+    caseWorker.registerWorkflowImplementationTypes(
+        CaseProcessWorkflowImpl.class, ReplacementCancellationProbeImpl.class);
     ledger = new RecordingLedger();
     bridge = new RecordingBridge();
     caseWorker.registerActivitiesImplementations(ledger, bridge);
@@ -142,6 +154,40 @@ class CaseProcessTypedChildDispatchTest {
         "INTAKE_CHILD_SELECTION_INVALID",
         () -> selection(1, "room-epoch-selection.v2", WriterMode.SHADOW, RoomType.INTAKE,
             "IntakeRoomWorkflow", "intake-room.synthetic.v1", "intake.v3"));
+  }
+
+  @Test
+  void legacyAmbiguousActiveBindingErrorRestoresAsProvisioningOrigin() {
+    assertThat(
+            CaseProcessWorkflowImpl.inferLegacyErrorOrigin(
+                "INTAKE_CHILD_ACTIVE_BINDING_INVALID"))
+        .isEqualTo(RecoveryErrorOrigin.PROVISIONING);
+    assertThat(
+            CaseProcessWorkflowImpl.inferLegacyErrorOrigin(
+                "INTAKE_CHILD_BRIDGE_COMMAND_BINDING_INVALID"))
+        .isEqualTo(RecoveryErrorOrigin.COMMAND);
+    assertThat(
+            CaseProcessWorkflowImpl.inferLegacyErrorOrigin(
+                "INTAKE_CHILD_BRIDGE_EVENT_BINDING_INVALID"))
+        .isEqualTo(RecoveryErrorOrigin.DOMAIN_EVENT);
+  }
+
+  @Test
+  void activityCancellationPropagatesTheCanceledFailureInsteadOfItsWrapper() {
+    CanceledFailure canceled = new CanceledFailure("bridge activity canceled");
+    ActivityFailure wrapper =
+        new ActivityFailure(
+            "bridge activity failed",
+            1,
+            2,
+            "BindIntakeChildCommand",
+            "activity-id",
+            io.temporal.api.enums.v1.RetryState.RETRY_STATE_CANCEL_REQUESTED,
+            "test-worker",
+            canceled);
+
+    assertThatThrownBy(() -> CaseProcessWorkflowImpl.rethrowIfCanceled(wrapper))
+        .isSameAs(canceled);
   }
 
   @Test
@@ -251,6 +297,194 @@ class CaseProcessTypedChildDispatchTest {
     assertThat(blocked.processedEventCount()).isZero();
     assertThat(blocked.bufferedEventCount()).isEqualTo(1);
     assertThat(blocked.observedProcessRevision()).isZero();
+  }
+
+  @Test
+  void malformedCommandBindingFailsClosedBeforeTypedSignal() {
+    startWorkflow();
+    ProvisionRoomEpochReceipt receipt =
+        provision(typedProvision(RoomType.INTAKE, 0, 1, 0, 0, 0));
+    CaseCommandRef command = command(1, 0, 0);
+    ledger.put(command);
+    bridge.commandFault = CommandBindingFault.NULL_BINDING;
+
+    assertThatThrownBy(() -> workflow().acceptCommand(command))
+        .isInstanceOf(WorkflowUpdateException.class);
+
+    CaseProcessSnapshot blocked =
+        awaitProcess(
+            snapshot ->
+                "INTAKE_CHILD_BRIDGE_COMMAND_BINDING_INVALID"
+                    .equals(snapshot.protocolErrorCode()));
+    assertThat(blocked.nextCommandSequence()).isEqualTo(1);
+    assertThat(blocked.protocolErrorOrigin()).isEqualTo(RecoveryErrorOrigin.COMMAND);
+    assertThat(awaitIntake(receipt.roomWorkflowId(), snapshot -> true).processedCommandCount())
+        .isZero();
+  }
+
+  @Test
+  void commandBindingOuterAndInnerPinsAreValidatedBeforeTypedSignal() {
+    startWorkflow();
+    ProvisionRoomEpochReceipt receipt =
+        provision(typedProvision(RoomType.INTAKE, 0, 1, 0, 0, 0));
+    CaseCommandRef command = command(1, 0, 0);
+    ledger.put(command);
+    bridge.commandFault = CommandBindingFault.OUTER_PAYLOAD_HASH;
+
+    assertThatThrownBy(() -> workflow().acceptCommand(command))
+        .isInstanceOf(WorkflowUpdateException.class);
+    awaitProcess(
+        snapshot ->
+            "INTAKE_CHILD_BRIDGE_COMMAND_BINDING_INVALID"
+                .equals(snapshot.protocolErrorCode()));
+
+    bridge.commandFault = CommandBindingFault.INNER_COMMAND_ID;
+    workflow().retrySequenceGap();
+    awaitProcess(snapshot -> bridge.commandCalls.get() >= 2);
+    CaseProcessSnapshot blocked = workflow().state();
+    assertThat(blocked.nextCommandSequence()).isEqualTo(1);
+    assertThat(awaitIntake(receipt.roomWorkflowId(), snapshot -> true).processedCommandCount())
+        .isZero();
+  }
+
+  @Test
+  void domainEventBindingOuterAndInnerPinsAreValidatedBeforeTypedSignal() {
+    startWorkflow();
+    ProvisionRoomEpochReceipt receipt =
+        provision(typedProvision(RoomType.INTAKE, 0, 1, 0, 0, 0));
+    bridge.eventFault = EventBindingFault.OUTER_SOURCE_PAYLOAD_HASH;
+
+    workflow().domainEventCommitted(event(1, 0));
+
+    CaseProcessSnapshot blocked =
+        awaitProcess(
+            snapshot ->
+                "INTAKE_CHILD_BRIDGE_EVENT_BINDING_INVALID"
+                    .equals(snapshot.protocolErrorCode()));
+    assertThat(blocked.nextCaseEventSequence()).isEqualTo(1);
+    assertThat(blocked.protocolErrorOrigin()).isEqualTo(RecoveryErrorOrigin.DOMAIN_EVENT);
+    assertThat(awaitIntake(receipt.roomWorkflowId(), snapshot -> true).processedEventCount())
+        .isZero();
+
+    bridge.eventFault = EventBindingFault.INNER_EVENT_ID;
+    workflow().retrySequenceGap();
+    awaitProcess(snapshot -> bridge.eventCalls.get() >= 2);
+    assertThat(workflow().state().nextCaseEventSequence()).isEqualTo(1);
+    assertThat(awaitIntake(receipt.roomWorkflowId(), snapshot -> true).processedEventCount())
+        .isZero();
+  }
+
+  @Test
+  void malformedDomainEventBindingFailsClosedBeforeTypedSignal() {
+    startWorkflow();
+    ProvisionRoomEpochReceipt receipt =
+        provision(typedProvision(RoomType.INTAKE, 0, 1, 0, 0, 0));
+    bridge.eventFault = EventBindingFault.NULL_BINDING;
+
+    workflow().domainEventCommitted(event(1, 0));
+
+    CaseProcessSnapshot blocked =
+        awaitProcess(
+            snapshot ->
+                "INTAKE_CHILD_BRIDGE_EVENT_BINDING_INVALID"
+                    .equals(snapshot.protocolErrorCode()));
+    assertThat(blocked.nextCaseEventSequence()).isEqualTo(1);
+    assertThat(awaitIntake(receipt.roomWorkflowId(), snapshot -> true).processedEventCount())
+        .isZero();
+  }
+
+  @Test
+  void roomRevisionStartsFromProvisioningAndAdvancesMonotonicallyOnEvents() {
+    startWorkflow();
+    provision(typedProvision(RoomType.INTAKE, 0, 1, 0, 0, 0));
+    assertThat(workflow().state().activeRoomRevision()).isZero();
+
+    workflow().domainEventCommitted(event(1, 0));
+    CaseProcessSnapshot afterEvent =
+        awaitProcess(snapshot -> snapshot.nextCaseEventSequence() == 2);
+    assertThat(afterEvent.activeRoomRevision()).isEqualTo(1);
+
+    CaseCommandRef command = command(1, 0, 1);
+    ledger.put(command);
+    bridge.commandRoomRevision = 0;
+    assertThatThrownBy(() -> workflow().acceptCommand(command))
+        .isInstanceOf(WorkflowUpdateException.class);
+    CaseProcessSnapshot stale =
+        awaitProcess(
+            snapshot ->
+                "INTAKE_CHILD_BRIDGE_COMMAND_BINDING_INVALID"
+                    .equals(snapshot.protocolErrorCode()));
+    assertThat(stale.activeRoomRevision()).isEqualTo(1);
+    assertThat(stale.nextCommandSequence()).isEqualTo(1);
+
+    bridge.commandRoomRevision = 1;
+    workflow().retrySequenceGap();
+    CaseProcessSnapshot recovered = awaitProcess(snapshot -> snapshot.nextCommandSequence() == 2);
+    assertThat(recovered.activeRoomRevision()).isEqualTo(1);
+  }
+
+  @Test
+  void successfulOldChildRoutingDoesNotClearProvisioningBindingError() {
+    startWorkflow();
+    ProvisionRoomEpochReceipt generic =
+        provision(genericProvision(RoomType.INTAKE, 0, 1, 0, 0, 0));
+    bridge.startActiveBindingMismatch = true;
+
+    assertThatThrownBy(() -> provision(typedProvision(RoomType.INTAKE, 1, 2, 0, 0, 0)))
+        .isInstanceOf(WorkflowUpdateException.class);
+    CaseProcessSnapshot failedProvision =
+        awaitProcess(
+            snapshot ->
+                "INTAKE_CHILD_ACTIVE_BINDING_INVALID".equals(snapshot.protocolErrorCode()));
+    assertThat(failedProvision.protocolErrorOrigin()).isEqualTo(RecoveryErrorOrigin.PROVISIONING);
+
+    CaseCommandRef command = command(1, 0, 0);
+    ledger.put(command);
+    workflow().acceptCommand(command);
+    CaseProcessSnapshot routed = awaitProcess(snapshot -> snapshot.nextCommandSequence() == 2);
+    assertThat(routed.activeChildWorkflowId()).isEqualTo(generic.roomWorkflowId());
+    assertThat(routed.protocolErrorCode()).isEqualTo("INTAKE_CHILD_ACTIVE_BINDING_INVALID");
+    assertThat(routed.protocolErrorOrigin()).isEqualTo(RecoveryErrorOrigin.PROVISIONING);
+
+    bridge.startActiveBindingMismatch = false;
+    provision(typedProvision(RoomType.INTAKE, 1, 3, 1, 1, 0));
+    assertThat(workflow().state().protocolErrorCode()).isNull();
+    assertThat(workflow().state().protocolErrorOrigin()).isNull();
+  }
+
+  @Test
+  void detachedCompensationCancelsChildStartedBeforeRootCancellation() {
+    ProvisionRoomEpoch request = typedProvision(RoomType.INTAKE, 7, 7, 0, 0, 0);
+    String probeId = "case-process-replacement-cancellation-probe";
+    ReplacementCancellationProbe probe =
+        client.newWorkflowStub(
+            ReplacementCancellationProbe.class,
+            WorkflowOptions.newBuilder()
+                .setWorkflowId(probeId)
+                .setTaskQueue(CaseProcessWorkflowProtocol.CASE_CONTROL_TASK_QUEUE)
+                .build());
+
+    WorkflowClient.start(probe::run, request.roomWorkflowId(), typedStart(request));
+
+    WorkflowExecution started = awaitProbeStarted(probe);
+    assertThat(started.getWorkflowId()).isEqualTo(request.roomWorkflowId());
+    assertThat(started.getRunId()).isNotBlank();
+    assertThat(probe.authorityCommitted()).isFalse();
+    client.newUntypedWorkflowStub(probeId).cancel();
+
+    awaitStatus(probeId, WORKFLOW_EXECUTION_STATUS_CANCELED);
+    awaitStatus(request.roomWorkflowId(), WORKFLOW_EXECUTION_STATUS_CANCELED);
+    assertThat(client.fetchHistory(probeId).getEvents())
+        .anySatisfy(
+            historyEvent -> {
+              assertThat(historyEvent.hasRequestCancelExternalWorkflowExecutionInitiatedEventAttributes())
+                  .isTrue();
+              assertThat(
+                      historyEvent
+                          .getRequestCancelExternalWorkflowExecutionInitiatedEventAttributes()
+                          .getWorkflowExecution())
+                  .isEqualTo(started);
+            });
   }
 
   @Test
@@ -458,6 +692,22 @@ class CaseProcessTypedChildDispatchTest {
       sleepBriefly();
     }
     throw new AssertionError("typed Intake child did not converge");
+  }
+
+  private WorkflowExecution awaitProbeStarted(ReplacementCancellationProbe probe) {
+    long deadline = System.nanoTime() + java.time.Duration.ofSeconds(10).toNanos();
+    while (System.nanoTime() < deadline) {
+      try {
+        WorkflowExecution started = probe.startedChild();
+        if (started != null && !started.getRunId().isBlank()) {
+          return started;
+        }
+      } catch (RuntimeException ignored) {
+        // The query can race probe start.
+      }
+      sleepBriefly();
+    }
+    throw new AssertionError("replacement cancellation probe did not start its child");
   }
 
   private void awaitStatus(
@@ -706,6 +956,69 @@ class CaseProcessTypedChildDispatchTest {
     }
   }
 
+  @WorkflowInterface
+  public interface ReplacementCancellationProbe {
+
+    @WorkflowMethod(name = "ReplacementCancellationProbe")
+    void run(String childWorkflowId, IntakeRoomStart start);
+
+    @QueryMethod
+    WorkflowExecution startedChild();
+
+    @QueryMethod
+    boolean authorityCommitted();
+  }
+
+  public static final class ReplacementCancellationProbeImpl
+      implements ReplacementCancellationProbe {
+
+    private WorkflowExecution startedChild;
+    private boolean authorityCommitted;
+
+    @Override
+    public void run(String childWorkflowId, IntakeRoomStart start) {
+      WorkflowExecution[] execution = new WorkflowExecution[1];
+      CancellationScope detachedStart =
+          Workflow.newDetachedCancellationScope(
+              () -> {
+                IntakeRoomWorkflow child =
+                    Workflow.newChildWorkflowStub(
+                        IntakeRoomWorkflow.class,
+                        ChildWorkflowOptions.newBuilder()
+                            .setWorkflowId(childWorkflowId)
+                            .setTaskQueue(CaseProcessWorkflowProtocol.ROOM_CONTROL_TASK_QUEUE)
+                            .setParentClosePolicy(
+                                io.temporal.api.enums.v1.ParentClosePolicy
+                                    .PARENT_CLOSE_POLICY_ABANDON)
+                            .build());
+                Promise<?> completion = Async.function(child::run, start);
+                completion.exceptionally(failure -> null);
+                execution[0] = Workflow.getWorkflowExecution(child).get();
+              });
+      detachedStart.run();
+      startedChild = execution[0];
+      try {
+        Workflow.await(() -> false);
+        authorityCommitted = true;
+      } finally {
+        if (!authorityCommitted && startedChild != null) {
+          CaseProcessWorkflowImpl.cancelUncommittedChild(
+              startedChild, "ROOM_CONTROL_PROVISIONING_NOT_COMMITTED");
+        }
+      }
+    }
+
+    @Override
+    public WorkflowExecution startedChild() {
+      return startedChild;
+    }
+
+    @Override
+    public boolean authorityCommitted() {
+      return authorityCommitted;
+    }
+  }
+
   private static final class RecordingBridge implements IntakeChildBridgeActivities {
     private final AtomicInteger startCalls = new AtomicInteger();
     private final AtomicInteger commandCalls = new AtomicInteger();
@@ -714,6 +1027,10 @@ class CaseProcessTypedChildDispatchTest {
     private volatile int commandUnavailableFailures;
     private volatile boolean startInvariantFailure;
     private volatile boolean eventInvariantFailure;
+    private volatile boolean startActiveBindingMismatch;
+    private volatile CommandBindingFault commandFault = CommandBindingFault.NONE;
+    private volatile EventBindingFault eventFault = EventBindingFault.NONE;
+    private volatile long commandRoomRevision;
 
     @Override
     public StartBinding bindStart(StartRequest request) {
@@ -726,9 +1043,24 @@ class CaseProcessTypedChildDispatchTest {
         throw ApplicationFailure.newFailure(
             "unavailable", "INTAKE_CHILD_BRIDGE_READ_UNAVAILABLE");
       }
+      ActiveChildBinding returnedBinding = request.activeBinding();
+      if (startActiveBindingMismatch) {
+        returnedBinding =
+            new ActiveChildBinding(
+                returnedBinding.schemaVersion(),
+                returnedBinding.tenantSurrogate(),
+                returnedBinding.caseId(),
+                returnedBinding.roomEpoch() + 1,
+                returnedBinding.fencingToken(),
+                returnedBinding.selectionSchemaVersion(),
+                returnedBinding.caseWorkflowType(),
+                returnedBinding.caseWorkflowBuildId(),
+                returnedBinding.roomWorkflowType(),
+                returnedBinding.roomWorkflowBuildId());
+      }
       return new StartBinding(
           "intake-child-start-binding.v1",
-          request.activeBinding(),
+          returnedBinding,
           request.provisioning().payloadSha256(),
           typedStart(request.provisioning()));
     }
@@ -740,11 +1072,18 @@ class CaseProcessTypedChildDispatchTest {
         throw ApplicationFailure.newFailure(
             "unavailable", "INTAKE_CHILD_BRIDGE_READ_UNAVAILABLE");
       }
+      if (commandFault == CommandBindingFault.NULL_BINDING) {
+        return null;
+      }
       CaseCommandRef source = request.command();
+      String typedCommandId =
+          commandFault == CommandBindingFault.INNER_COMMAND_ID
+              ? source.commandId() + "-mismatch"
+              : source.commandId();
       IntakeWorkflowCommand typed =
           new IntakeWorkflowCommand(
               "intake-workflow-command.v1",
-              source.commandId(),
+              typedCommandId,
               source.tenantSurrogate(),
               source.caseId(),
               source.roomEpoch(),
@@ -760,10 +1099,12 @@ class CaseProcessTypedChildDispatchTest {
       return new CommandBinding(
           "intake-child-command-binding.v1",
           request.activeBinding(),
-          source.payloadRef().sha256(),
+          commandFault == CommandBindingFault.OUTER_PAYLOAD_HASH
+              ? "c".repeat(64)
+              : source.payloadRef().sha256(),
           source.requestHash(),
           source.expectedProcessRevision(),
-          0,
+          commandRoomRevision,
           typed);
     }
 
@@ -774,12 +1115,19 @@ class CaseProcessTypedChildDispatchTest {
         throw ApplicationFailure.newNonRetryableFailure(
             "invariant", "INTAKE_CHILD_BRIDGE_INVARIANT");
       }
+      if (eventFault == EventBindingFault.NULL_BINDING) {
+        return null;
+      }
       CaseDomainEventRef source = request.event();
       String requestHash = "e".repeat(64);
+      String typedEventId =
+          eventFault == EventBindingFault.INNER_EVENT_ID
+              ? source.eventId() + "-mismatch"
+              : source.eventId();
       IntakeDomainEventRef typed =
           new IntakeDomainEventRef(
               "intake-domain-event-ref.v1",
-              source.eventId(),
+              typedEventId,
               source.payloadRef().uri(),
               source.payloadRef().sha256(),
               source.caseEventSequence(),
@@ -802,12 +1150,28 @@ class CaseProcessTypedChildDispatchTest {
       return new DomainEventBinding(
           "intake-child-domain-event-binding.v1",
           request.activeBinding(),
-          source.payloadRef().sha256(),
+          eventFault == EventBindingFault.OUTER_SOURCE_PAYLOAD_HASH
+              ? "c".repeat(64)
+              : source.payloadRef().sha256(),
           requestHash,
           1,
           1,
           typed);
     }
+  }
+
+  private enum CommandBindingFault {
+    NONE,
+    NULL_BINDING,
+    OUTER_PAYLOAD_HASH,
+    INNER_COMMAND_ID
+  }
+
+  private enum EventBindingFault {
+    NONE,
+    NULL_BINDING,
+    OUTER_SOURCE_PAYLOAD_HASH,
+    INNER_EVENT_ID
   }
 
   private static final class RecordingLedger
