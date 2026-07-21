@@ -654,6 +654,8 @@ batches:
     purpose: Run S2-S4 integration and S5 fault hardening once after all owner changes and cross-owner fixes are merged.
     requires_tasks: [P4-A2, P4-B2, P4-C2, P4-D1, P4-D2, P4-E1, P4-E2, P4-R1]
     slices: [P4-S2, P4-S3, P4-S4, P4-S5]
+    static_tests:
+      - tests/static/test_phase4_no_formal_sink_assembly.py
     python_tests:
       - python-agent-service/tests/graphs/intake
       - python-agent-service/tests/agents/test_intake_turn.py
