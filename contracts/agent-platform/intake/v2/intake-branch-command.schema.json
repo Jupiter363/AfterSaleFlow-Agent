@@ -16,7 +16,7 @@
     },
     "admissible": {"type": "boolean"},
     "dispute_type": {"$ref": "#/$defs/identifier"},
-    "risk_level": {"enum": ["LOW", "MEDIUM", "HIGH"]},
+    "risk_level": {"enum": ["LOW", "MEDIUM", "HIGH", "CRITICAL"]},
     "confirmation_note": {"type": "string", "minLength": 1, "maxLength": 2000},
     "cancellation_reason": {"type": "string", "minLength": 0, "maxLength": 2000}
   },

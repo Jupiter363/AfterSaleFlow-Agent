@@ -1,0 +1,11 @@
+{
+  "schema_version": "intake-branch-command.v1",
+  "command_id": "CMD_P4_R15_CONFIRM_CRITICAL_1",
+  "command_type": "INTAKE_CONFIRM",
+  "party": "INITIATOR",
+  "operation": "INITIATOR_ACCEPT",
+  "admissible": true,
+  "dispute_type": "SAFETY_HAZARD",
+  "risk_level": "CRITICAL",
+  "confirmation_note": "Proceed with critical-risk intake handling."
+}

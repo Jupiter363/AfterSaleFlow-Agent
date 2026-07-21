@@ -113,9 +113,9 @@ tuples. The row checks
 `USER/PARTY_USER` or `MERCHANT/PARTY_MERCHANT`.
 
 `case_access_session.status=ACTIVE`, `agent_conversation_session.status=ACTIVE`, and
-`case_intake_graph_thread_binding.status=REGISTERED` are checked in the epoch-binding transaction,
-the command-acceptance transaction, and again by the start read. Status is mutable and is therefore
-deliberately absent from every foreign key and immutable candidate key. The database constrains
+`case_intake_graph_thread_binding.registration_status=REGISTERED` are checked in the epoch-binding
+transaction, the command-acceptance transaction, and again by the start read. Status is mutable and
+is therefore deliberately absent from every foreign key and immutable candidate key. The database constrains
 `party` to `INITIATOR | RESPONDENT`, but
 `UNIQUE(epoch_id, party)` proves only at most one row for each value. The epoch-binding transaction
 must insert both rows, assert exact count two with both enum members present, and only then make the

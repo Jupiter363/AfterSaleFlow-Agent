@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import re
 from pathlib import Path
 
 import jsonschema
@@ -20,6 +21,17 @@ RUNBOOK = (
 PHASE4_PLAN = ROOT / "plans/phase-4-intake-pilot-execution.md"
 PHASE4_BATCHES = ROOT / "plans/phase-4-intake-pilot-test-batches.yaml"
 INTAKE_CONTRACT_ROOT = ROOT / "contracts/agent-platform/intake/v2"
+V001_MIGRATION = (
+    ROOT / "java-api-service/src/main/resources/db/migration/V001__init_case_tables.sql"
+)
+V043_MIGRATION = (
+    ROOT
+    / "java-api-service/src/main/resources/db/migration/V043__intake_graph_bindings.sql"
+)
+RISK_LEVEL_JAVA = (
+    ROOT
+    / "java-api-service/src/main/java/com/example/dispute/domain/model/RiskLevel.java"
+)
 SAFE_INTEGER_MAX = 9_007_199_254_740_991
 R15_STATIC_TEST = "tests/static/test_phase4_r15_authority_binding_contract.py"
 
@@ -600,21 +612,26 @@ def test_r15_party_authority_binds_exact_epoch_and_registration() -> None:
 
 def test_r15_active_status_is_transactional_and_never_a_foreign_key_pin() -> None:
     party = load_manifest()["authority_tables"]["case_intake_epoch_party_authority"]
+    active = {"column": "status", "required_value": "ACTIVE"}
+    registered = {
+        "column": "registration_status",
+        "required_value": "REGISTERED",
+    }
     assert party["transactional_status_checks"] == {
         "epoch_binding_transaction": {
-            "case_access_session": "ACTIVE",
-            "agent_conversation_session": "ACTIVE",
-            "case_intake_graph_thread_binding": "REGISTERED",
+            "case_access_session": active,
+            "agent_conversation_session": active,
+            "case_intake_graph_thread_binding": registered,
         },
         "acceptance_transaction": {
-            "case_access_session": "ACTIVE",
-            "agent_conversation_session": "ACTIVE",
-            "case_intake_graph_thread_binding": "REGISTERED",
+            "case_access_session": active,
+            "agent_conversation_session": active,
+            "case_intake_graph_thread_binding": registered,
         },
         "start_read_transaction": {
-            "case_access_session": "ACTIVE",
-            "agent_conversation_session": "ACTIVE",
-            "case_intake_graph_thread_binding": "REGISTERED",
+            "case_access_session": active,
+            "agent_conversation_session": active,
+            "case_intake_graph_thread_binding": registered,
         },
         "status_columns_in_foreign_keys": False,
         "reason": "ACTIVE_is_mutable_and_must_not_be_part_of_an_immutable_candidate_key",
@@ -623,7 +640,25 @@ def test_r15_active_status_is_transactional_and_never_a_foreign_key_pin() -> Non
     referenced_columns = {
         column for fk in party["foreign_keys"] for column in fk["references"]["columns"]
     }
-    assert "status" not in fk_columns | referenced_columns
+    assert {active["column"], registered["column"]}.isdisjoint(
+        fk_columns | referenced_columns
+    )
+
+    v043 = V043_MIGRATION.read_text(encoding="utf-8")
+    table_definition = v043.split(
+        "create table case_intake_graph_thread_binding (", maxsplit=1
+    )[1].split("\n);", maxsplit=1)[0]
+    assert registered["column"] == "registration_status"
+    assert registered["column"] != "status"
+    assert re.search(
+        rf"(?m)^\s*{registered['column']}\s+varchar\(24\)\s+not null\b",
+        table_definition,
+    )
+    status_constraint = table_definition.split(
+        "constraint ck_intake_graph_thread_status", maxsplit=1
+    )[1].split("constraint ck_intake_graph_thread_status_time", maxsplit=1)[0]
+    assert registered["column"] in status_constraint
+    assert f"'{registered['required_value']}'" in status_constraint
 
 
 def test_r15_epoch_binding_asserts_both_parties_before_bootstrap_delivery() -> None:
@@ -990,6 +1025,27 @@ def test_r15_server_canonical_branch_is_closed_and_bounded() -> None:
     }
     assert branch["respondent_cancel_allowed"] is False
 
+    critical = load_fixture("valid", "intake-branch-command-critical-valid.json")
+    assert critical["risk_level"] == "CRITICAL"
+    branch_schema = load_wire_schema("intake-branch-command.schema.json")
+    wire_validator("intake-branch-command.schema.json").validate(critical)
+
+    schema_risk_levels = set(branch_schema["properties"]["risk_level"]["enum"])
+    java_enum_body = RISK_LEVEL_JAVA.read_text(encoding="utf-8").split(
+        "public enum RiskLevel {", maxsplit=1
+    )[1].split("}", maxsplit=1)[0]
+    java_risk_levels = {
+        line.strip().rstrip(",")
+        for line in java_enum_body.splitlines()
+        if line.strip()
+    }
+    v001 = V001_MIGRATION.read_text(encoding="utf-8")
+    database_constraint = v001.split(
+        "constraint ck_fulfillment_case_risk_level", maxsplit=1
+    )[1].split("\n);", maxsplit=1)[0]
+    database_risk_levels = set(re.findall(r"'([A-Z_]+)'", database_constraint))
+    assert schema_risk_levels == java_risk_levels == database_risk_levels
+
 
 def test_r15_put_receipt_snapshot_is_persisted_and_rfc8785_recomputed() -> None:
     snapshot = load_manifest()["payload_contract"]["put_receipt_snapshot"]
@@ -1244,9 +1300,18 @@ def test_r15_revocation_lock_order_and_conflict_matrix_are_closed() -> None:
     assert protocol["acceptance"] == {
         "lock_mode": "FOR_SHARE",
         "status_checks_after_all_locks": {
-            "case_access_session": "ACTIVE",
-            "agent_conversation_session": "ACTIVE",
-            "case_intake_graph_thread_binding": "REGISTERED",
+            "case_access_session": {
+                "column": "status",
+                "required_value": "ACTIVE",
+            },
+            "agent_conversation_session": {
+                "column": "status",
+                "required_value": "ACTIVE",
+            },
+            "case_intake_graph_thread_binding": {
+                "column": "registration_status",
+                "required_value": "REGISTERED",
+            },
         },
         "holds_locks_until": "transaction_commit_or_rollback",
     }

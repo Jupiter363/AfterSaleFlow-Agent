@@ -286,7 +286,7 @@
         "replay_policy": {"type": "string"},
         "check_constraints": {"type": "object", "minProperties": 1},
         "scope_checks": {"$ref": "#/$defs/nonEmptyObject"},
-        "transactional_status_checks": {"$ref": "#/$defs/nonEmptyObject"},
+        "transactional_status_checks": {"$ref": "#/$defs/transactionalStatusChecks"},
         "bootstrap_cardinality_assertion": {"$ref": "#/$defs/nonEmptyObject"},
         "agent_session_profile_proof": {"$ref": "#/$defs/nonEmptyObject"},
         "source_kind_row_shape": {"$ref": "#/$defs/nonEmptyObject"},
@@ -313,6 +313,54 @@
           "uniqueItems": true,
           "items": {"$ref": "#/$defs/identifier"}
         }
+      }
+    },
+    "transactionalStatusChecks": {
+      "const": {
+        "epoch_binding_transaction": {
+          "case_access_session": {
+            "column": "status",
+            "required_value": "ACTIVE"
+          },
+          "agent_conversation_session": {
+            "column": "status",
+            "required_value": "ACTIVE"
+          },
+          "case_intake_graph_thread_binding": {
+            "column": "registration_status",
+            "required_value": "REGISTERED"
+          }
+        },
+        "acceptance_transaction": {
+          "case_access_session": {
+            "column": "status",
+            "required_value": "ACTIVE"
+          },
+          "agent_conversation_session": {
+            "column": "status",
+            "required_value": "ACTIVE"
+          },
+          "case_intake_graph_thread_binding": {
+            "column": "registration_status",
+            "required_value": "REGISTERED"
+          }
+        },
+        "start_read_transaction": {
+          "case_access_session": {
+            "column": "status",
+            "required_value": "ACTIVE"
+          },
+          "agent_conversation_session": {
+            "column": "status",
+            "required_value": "ACTIVE"
+          },
+          "case_intake_graph_thread_binding": {
+            "column": "registration_status",
+            "required_value": "REGISTERED"
+          }
+        },
+        "status_columns_in_foreign_keys": false,
+        "reason": "ACTIVE_is_mutable_and_must_not_be_part_of_an_immutable_candidate_key"
       }
     },
     "foreignKey": {
@@ -578,9 +626,18 @@
         "acceptance": {
           "lock_mode": "FOR_SHARE",
           "status_checks_after_all_locks": {
-            "case_access_session": "ACTIVE",
-            "agent_conversation_session": "ACTIVE",
-            "case_intake_graph_thread_binding": "REGISTERED"
+            "case_access_session": {
+              "column": "status",
+              "required_value": "ACTIVE"
+            },
+            "agent_conversation_session": {
+              "column": "status",
+              "required_value": "ACTIVE"
+            },
+            "case_intake_graph_thread_binding": {
+              "column": "registration_status",
+              "required_value": "REGISTERED"
+            }
           },
           "holds_locks_until": "transaction_commit_or_rollback"
         },
