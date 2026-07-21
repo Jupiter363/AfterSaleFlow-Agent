@@ -669,6 +669,7 @@ batches:
       - python-agent-service/tests/security/test_graph_security_runtime.py
       - python-agent-service/tests/model_runtime/test_runnable_factory.py
     java_test_classes:
+      - IntakeFormalSinkAssemblyTest
       - IntakeRoomWorkflowTest
       - IntakeRoomWorkflowReplayTest
       - IntakeRoomWorkflowRecoveryTest
@@ -756,6 +757,7 @@ batches:
           -q
       - id: java_phase_4
         cwd: java-api-service
+        inherits_java_test_classes_from: [P4-BATCH-1, P4-BATCH-2]
         command_template: >-
           .\mvnw.cmd -DforkCount=1
           -Dtest=<deduplicated_phase_4_intake_test_classes>
