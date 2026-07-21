@@ -11,11 +11,15 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import com.example.dispute.common.api.ErrorCode;
+import com.example.dispute.common.exception.BusinessException;
 import com.example.dispute.common.exception.IdempotencyConflictException;
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
@@ -45,6 +49,7 @@ import com.example.dispute.room.infrastructure.persistence.repository.CasePartic
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseTimelineEventRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.RoomMessageRepository;
+import com.example.dispute.workflow.application.intake.LegacyIntakeWriterGuard;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.time.Instant;
@@ -87,6 +92,7 @@ class RoomMessageAndEventServiceTest {
     @Mock private EvidenceAgentTurnService evidenceAgentTurnService;
     @Mock private AccessSessionResolver accessSessionResolver;
     @Mock private IntakeProgressService intakeProgressService;
+    @Mock private LegacyIntakeWriterGuard legacyIntakeWriterGuard;
 
     private CaseEventService eventService;
     private RoomMessageService messageService;
@@ -120,6 +126,7 @@ class RoomMessageAndEventServiceTest {
                         accessSessionResolver,
                         permissionService,
                         intakeProgressService,
+                        legacyIntakeWriterGuard,
                         CLOCK);
         lenient()
                 .when(accessSessionResolver.resolve(any(), any()))
@@ -395,6 +402,43 @@ class RoomMessageAndEventServiceTest {
         assertThat(replayed.id()).isEqualTo(message.id());
         verify(messageRepository, org.mockito.Mockito.times(1)).save(any());
         verify(eventRepository, org.mockito.Mockito.times(1)).save(any());
+    }
+
+    @Test
+    void temporalOwnedIntakeRejectsBeforeMessageReplayOrPersistence() {
+        FulfillmentCaseEntity dispute = intakeCase();
+        when(caseRepository.findByIdForUpdate(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+        BusinessException rejected =
+                new BusinessException(
+                        ErrorCode.CASE_STATUS_INVALID,
+                        "Temporal owns Intake",
+                        Map.of("reason_code", LegacyIntakeWriterGuard.REASON_CODE));
+        doThrow(rejected)
+                .when(legacyIntakeWriterGuard)
+                .assertLegacyWriteAllowed(dispute.getId());
+
+        assertThatThrownBy(
+                        () ->
+                                messageService.post(
+                                        dispute.getId(),
+                                        RoomType.INTAKE,
+                                        new RoomMessageCommand(
+                                                MessageType.PARTY_TEXT,
+                                                "must not reach the legacy writer",
+                                                List.of()),
+                                        new AuthenticatedActor(
+                                                "user-local", ActorRole.USER),
+                                        "intake-replay-key",
+                                        "TRACE_TEMPORAL_GUARD"))
+                .isSameAs(rejected);
+
+        verify(legacyIntakeWriterGuard).assertLegacyWriteAllowed(dispute.getId());
+        verifyNoInteractions(
+                accessSessionResolver,
+                roomRepository,
+                messageRepository,
+                intakeAgentTurnService);
     }
 
     // 所属模块：【房间协作与权限 / 自动化测试层】「RoomMessageAndEventServiceTest.rejectsReusingAnIdempotencyKeyForDifferentImmutableMessageContent()」。

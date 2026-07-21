@@ -10,11 +10,17 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import com.example.dispute.agentstream.application.AgentRunFinalizationContext;
+import com.example.dispute.common.api.ErrorCode;
+import com.example.dispute.common.exception.BusinessException;
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.domain.model.CaseStatus;
@@ -44,6 +50,7 @@ import com.example.dispute.room.infrastructure.persistence.repository.CaseIntake
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.RoomMessageRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.RoomTurnMemoryRepository;
+import com.example.dispute.workflow.application.intake.LegacyIntakeWriterGuard;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.time.Instant;
@@ -83,6 +90,7 @@ class IntakeAgentTurnServiceTest {
     @Mock private AgentSessionResolver agentSessionResolver;
     @Mock private SessionPermissionService permissionService;
     @Mock private IntakeAgentTurnClient client;
+    @Mock private LegacyIntakeWriterGuard legacyIntakeWriterGuard;
 
     private ObjectMapper objectMapper;
     private IntakeAgentTurnService service;
@@ -108,7 +116,8 @@ class IntakeAgentTurnServiceTest {
                         permissionService,
                         client,
                         objectMapper,
-                        CLOCK);
+                        CLOCK,
+                        legacyIntakeWriterGuard);
         lenient()
                 .when(accessSessionResolver.resolve(any(), any()))
                 .thenAnswer(
@@ -126,6 +135,86 @@ class IntakeAgentTurnServiceTest {
                                         invocation.getArgument(2),
                                         invocation.getArgument(3),
                                         invocation.getArgument(4)));
+    }
+
+    @Test
+    void allLegacyAgentWriteEntrypointsRejectBeforeReadingOrPersistingDomainState() {
+        FulfillmentCaseEntity dispute = intakeCase();
+        CaseRoomEntity room = intakeRoom(dispute);
+        RoomMessageEntity participantMessage =
+                participantMessage(
+                        dispute,
+                        room,
+                        1,
+                        "MESSAGE_TEMPORAL_GUARD",
+                        "must not reach legacy Intake");
+        BusinessException rejected =
+                new BusinessException(
+                        ErrorCode.CASE_STATUS_INVALID,
+                        "Temporal owns Intake",
+                        Map.of("reason_code", LegacyIntakeWriterGuard.REASON_CODE));
+        doThrow(rejected)
+                .when(legacyIntakeWriterGuard)
+                .assertLegacyWriteAllowed(dispute.getId());
+
+        assertThatThrownBy(
+                        () ->
+                                service.startInitialTurn(
+                                        dispute.getId(),
+                                        new AuthenticatedActor(
+                                                "user-local", ActorRole.USER),
+                                        null,
+                                        "TRACE_GUARD_START",
+                                        "REQ_GUARD_START"))
+                .isSameAs(rejected);
+        assertThatThrownBy(
+                        () ->
+                                service.ensureRespondentOpening(
+                                        dispute.getId(),
+                                        RoomType.INTAKE,
+                                        new AuthenticatedActor(
+                                                "merchant-local", ActorRole.MERCHANT),
+                                        "TRACE_GUARD_OPENING",
+                                        "REQ_GUARD_OPENING"))
+                .isSameAs(rejected);
+        assertThatThrownBy(
+                        () ->
+                                service.continueFromParticipantMessage(
+                                        dispute.getId(),
+                                        RoomType.INTAKE,
+                                        new AuthenticatedActor(
+                                                "user-local", ActorRole.USER),
+                                        participantMessage,
+                                        "TRACE_GUARD_CONTINUE",
+                                        "REQ_GUARD_CONTINUE"))
+                .isSameAs(rejected);
+        assertThatThrownBy(
+                        () ->
+                                service.finalizeResult(
+                                        new AgentRunFinalizationContext(
+                                                "RUN_GUARD",
+                                                dispute.getId(),
+                                                room.getId(),
+                                                "INTAKE_TURN",
+                                                "TRACE_GUARD_FINALIZE",
+                                                "agent-intake-turn:SESSION:1",
+                                                objectMapper.createObjectNode()),
+                                        objectMapper.createObjectNode()))
+                .isSameAs(rejected);
+
+        verify(legacyIntakeWriterGuard, times(4))
+                .assertLegacyWriteAllowed(dispute.getId());
+        verifyNoInteractions(
+                caseRepository,
+                roomRepository,
+                memoryRepository,
+                intakeDossierRepository,
+                messageRepository,
+                eventService,
+                accessSessionResolver,
+                agentSessionResolver,
+                permissionService,
+                client);
     }
 
     // 所属模块：【房间协作与权限 / 自动化测试层】「IntakeAgentTurnServiceTest.initialTurnUsesLobbySeedAndPersistsAgentScrollSnapshot()」。

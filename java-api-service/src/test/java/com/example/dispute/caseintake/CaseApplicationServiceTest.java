@@ -40,6 +40,7 @@ import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import com.example.dispute.workflow.application.epoch.RoomEpochAllocator;
 import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.ActivateRoomEpoch;
+import com.example.dispute.workflow.application.intake.LegacyIntakeWriterGuard;
 import com.example.dispute.workflow.contract.v1.ContractTypes;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
@@ -73,6 +74,7 @@ class CaseApplicationServiceTest {
     @Mock private IntakeAgentTurnService intakeAgentTurnService;
     @Mock private IntakeProgressService intakeProgressService;
     @Mock private RoomEpochAllocator roomEpochAllocator;
+    @Mock private LegacyIntakeWriterGuard legacyIntakeWriterGuard;
 
     private CaseApplicationService service;
 
@@ -109,6 +111,7 @@ class CaseApplicationServiceTest {
                         intakeAgentTurnService,
                         intakeProgressService,
                         roomEpochAllocator,
+                        legacyIntakeWriterGuard,
                         properties,
                         Clock.fixed(Instant.parse("2026-06-28T00:00:00Z"), ZoneOffset.UTC),
                         new ObjectMapper().findAndRegisterModules());
@@ -158,10 +161,13 @@ class CaseApplicationServiceTest {
                 inOrder(
                         roomRepository,
                         roomEpochAllocator,
+                        legacyIntakeWriterGuard,
                         participantService,
                         intakeAgentTurnService);
         creationOrder.verify(roomRepository).save(intakeRoom.capture());
         creationOrder.verify(roomEpochAllocator).activate(activation.capture());
+        creationOrder.verify(legacyIntakeWriterGuard)
+                .assertLegacyWriteAllowed(result.id());
         creationOrder.verify(participantService)
                 .addInitiator(
                         any(),
@@ -192,6 +198,45 @@ class CaseApplicationServiceTest {
         verify(auditLogRepository).save(audit.capture());
         assertThat(audit.getValue().getAction()).isEqualTo("CASE_CREATED");
         assertThat(audit.getValue().getTraceId()).isEqualTo("TRACE_test");
+    }
+
+    @Test
+    void creationReplayChecksWriterAuthorityBeforeReturningTheExistingCase() {
+        FulfillmentCaseEntity existing =
+                FulfillmentCaseEntity.create(
+                        "CASE_CREATE_REPLAY",
+                        "ORDER_CREATE_REPLAY",
+                        null,
+                        null,
+                        "user-1",
+                        "merchant-1",
+                        ActorRole.USER,
+                        "idem-create-replay",
+                        "DISPUTE",
+                        "Existing case",
+                        "Existing case description",
+                        RiskLevel.MEDIUM,
+                        "user-1");
+        existing.completeIntake(
+                "FULFILLMENT_CONFLICT",
+                CaseStatus.INTAKE_COMPLETED,
+                RiskLevel.MEDIUM,
+                "{\"potentialDispute\":true,\"missingSlots\":[],\"agentDegraded\":false,\"analyzedAt\":\"2026-06-28T00:00:00Z\"}",
+                "user-1");
+        when(caseRepository.findByCreationIdempotencyKey("idem-create-replay"))
+                .thenReturn(Optional.of(existing));
+
+        CaseView replay =
+                service.create(
+                        command("Existing case description", "ORDER_CREATE_REPLAY"),
+                        new AuthenticatedActor("user-1", ActorRole.USER),
+                        "idem-create-replay",
+                        "TRACE_replay",
+                        "REQ_replay");
+
+        assertThat(replay.id()).isEqualTo(existing.getId());
+        verify(legacyIntakeWriterGuard).assertLegacyWriteAllowed(existing.getId());
+        verifyNoInteractions(roomRepository, participantService, intakeAgentTurnService, roomEpochAllocator);
     }
 
     // 所属模块：【案件受理兼容链路 / 自动化测试层】「CaseApplicationServiceTest.structuredClaimResolutionSeedIsPassedToTheIntakeAgentWithoutExecutingTools()」。

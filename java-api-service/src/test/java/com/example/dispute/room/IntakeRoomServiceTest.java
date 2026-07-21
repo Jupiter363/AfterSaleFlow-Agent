@@ -49,6 +49,7 @@ import com.example.dispute.workflow.application.EvidenceWindowCoordinator;
 import com.example.dispute.workflow.application.epoch.RoomEpochAllocator;
 import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.ActivateRoomEpoch;
 import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.TerminateRoomEpoch;
+import com.example.dispute.workflow.application.intake.LegacyIntakeWriterGuard;
 import com.example.dispute.workflow.contract.v1.ContractTypes;
 import java.time.Clock;
 import java.time.Instant;
@@ -86,6 +87,7 @@ class IntakeRoomServiceTest {
     @Mock private CaseEventService caseEventService;
     @Mock private IntakeProgressService intakeProgressService;
     @Mock private RoomEpochAllocator roomEpochAllocator;
+    @Mock private LegacyIntakeWriterGuard legacyIntakeWriterGuard;
 
     private IntakeRoomService service;
 
@@ -110,6 +112,7 @@ class IntakeRoomServiceTest {
                         evidenceWindowCoordinator,
                         caseEventService,
                         roomEpochAllocator,
+                        legacyIntakeWriterGuard,
                         new DisputeProperties(
                                 Duration.ofHours(2),
                                 Duration.ofHours(3),
@@ -494,6 +497,7 @@ class IntakeRoomServiceTest {
 
         assertThat(result.caseStatus()).isEqualTo(CaseStatus.INTAKE_COMPLETED);
         assertThat(result.currentRoom()).isEqualTo(RoomType.INTAKE);
+        verify(legacyIntakeWriterGuard).assertLegacyWriteAllowed(dispute.getId());
         verifyNoInteractions(roomRepository, roomEpochAllocator);
         verify(caseRepository, never()).save(any());
     }

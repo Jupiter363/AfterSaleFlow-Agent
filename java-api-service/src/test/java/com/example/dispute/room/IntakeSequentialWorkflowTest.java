@@ -34,6 +34,7 @@ import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRe
 import com.example.dispute.workflow.application.EvidenceWindowCoordinator;
 import com.example.dispute.workflow.application.epoch.RoomEpochAllocator;
 import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.TransitionRoomEpoch;
+import com.example.dispute.workflow.application.intake.LegacyIntakeWriterGuard;
 import com.example.dispute.workflow.contract.v1.ContractTypes;
 import java.time.Clock;
 import java.time.Duration;
@@ -62,6 +63,8 @@ class IntakeSequentialWorkflowTest {
                 mock(CaseLifecycleNotificationService.class);
         EvidenceWindowCoordinator evidenceWindow = mock(EvidenceWindowCoordinator.class);
         RoomEpochAllocator roomEpochAllocator = mock(RoomEpochAllocator.class);
+        LegacyIntakeWriterGuard legacyIntakeWriterGuard =
+                mock(LegacyIntakeWriterGuard.class);
         CaseEventService events = mock(CaseEventService.class);
         FulfillmentCaseEntity dispute = pendingCase();
         CaseRoomEntity intakeRoom =
@@ -122,6 +125,7 @@ class IntakeSequentialWorkflowTest {
                         evidenceWindow,
                         events,
                         roomEpochAllocator,
+                        legacyIntakeWriterGuard,
                         new DisputeProperties(
                                 Duration.ofHours(2),
                                 Duration.ofHours(3),

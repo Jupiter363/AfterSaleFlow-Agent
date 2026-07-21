@@ -31,6 +31,7 @@ import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import com.example.dispute.workflow.application.epoch.RoomEpochAllocator;
 import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.ActivateRoomEpoch;
+import com.example.dispute.workflow.application.intake.LegacyIntakeWriterGuard;
 import com.example.dispute.workflow.contract.v1.ContractTypes;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -61,6 +62,7 @@ public class CaseApplicationService {
     private final IntakeAgentTurnService intakeAgentTurnService;
     private final IntakeProgressService intakeProgressService;
     private final RoomEpochAllocator roomEpochAllocator;
+    private final LegacyIntakeWriterGuard legacyIntakeWriterGuard;
     private final AppProperties properties;
     private final Clock clock;
     private final ObjectMapper objectMapper;
@@ -79,6 +81,7 @@ public class CaseApplicationService {
             IntakeAgentTurnService intakeAgentTurnService,
             IntakeProgressService intakeProgressService,
             RoomEpochAllocator roomEpochAllocator,
+            LegacyIntakeWriterGuard legacyIntakeWriterGuard,
             AppProperties properties,
             Clock clock,
             ObjectMapper objectMapper) {
@@ -89,6 +92,7 @@ public class CaseApplicationService {
         this.intakeAgentTurnService = intakeAgentTurnService;
         this.intakeProgressService = intakeProgressService;
         this.roomEpochAllocator = roomEpochAllocator;
+        this.legacyIntakeWriterGuard = legacyIntakeWriterGuard;
         this.properties = properties;
         this.clock = clock;
         this.objectMapper = objectMapper;
@@ -112,6 +116,7 @@ public class CaseApplicationService {
                 .findByCreationIdempotencyKey(idempotencyKey)
                 .map(
                         entity -> {
+                            legacyIntakeWriterGuard.assertLegacyWriteAllowed(entity.getId());
                             assertCanRead(entity, actor);
                             return toView(
                                     entity,
@@ -291,6 +296,7 @@ public class CaseApplicationService {
                         intakeRoom.getRoomStatus().name(),
                         saved.getCurrentDeadlineAt(),
                         now));
+        legacyIntakeWriterGuard.assertLegacyWriteAllowed(saved.getId());
         if (actor.role() == ActorRole.USER
                 || actor.role() == ActorRole.MERCHANT) {
             participantService.addInitiator(saved, actor, now);

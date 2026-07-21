@@ -24,6 +24,7 @@ import com.example.dispute.room.infrastructure.persistence.entity.RoomMessageEnt
 import com.example.dispute.room.infrastructure.persistence.repository.CaseParticipantRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.RoomMessageRepository;
+import com.example.dispute.workflow.application.intake.LegacyIntakeWriterGuard;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -52,6 +53,7 @@ public class RoomMessageService {
     private final AccessSessionResolver accessSessionResolver;
     private final SessionPermissionService permissionService;
     private final IntakeProgressService intakeProgressService;
+    private final LegacyIntakeWriterGuard legacyIntakeWriterGuard;
     private final Clock clock;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -72,6 +74,7 @@ public class RoomMessageService {
             AccessSessionResolver accessSessionResolver,
             SessionPermissionService permissionService,
             IntakeProgressService intakeProgressService,
+            LegacyIntakeWriterGuard legacyIntakeWriterGuard,
             Clock clock) {
         this.caseRepository = caseRepository;
         this.roomRepository = roomRepository;
@@ -83,6 +86,7 @@ public class RoomMessageService {
         this.accessSessionResolver = accessSessionResolver;
         this.permissionService = permissionService;
         this.intakeProgressService = intakeProgressService;
+        this.legacyIntakeWriterGuard = legacyIntakeWriterGuard;
         this.clock = clock;
     }
 
@@ -104,6 +108,9 @@ public class RoomMessageService {
                 caseRepository
                         .findByIdForUpdate(caseId)
                         .orElseThrow(() -> new IllegalArgumentException("case not found"));
+        if (roomType == RoomType.INTAKE) {
+            legacyIntakeWriterGuard.assertLegacyWriteAllowed(caseId);
+        }
         CaseAccessSessionEntity accessSession = accessSessionResolver.resolve(caseId, actor);
         permissionService.requireRoomRead(accessSession, roomType);
         permissionService.require(accessSession, PermissionScope.ROOM_MESSAGE_WRITE);
@@ -178,6 +185,7 @@ public class RoomMessageService {
             String traceId,
             String requestId) {
         if (roomType == RoomType.INTAKE) {
+            legacyIntakeWriterGuard.assertLegacyWriteAllowed(caseId);
             FulfillmentCaseEntity dispute =
                     caseRepository.findById(caseId)
                             .orElseThrow(() -> new IllegalArgumentException("case not found"));

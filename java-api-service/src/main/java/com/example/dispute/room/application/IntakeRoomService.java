@@ -34,6 +34,7 @@ import com.example.dispute.workflow.application.epoch.RoomEpochAllocator;
 import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.ActivateRoomEpoch;
 import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.TerminateRoomEpoch;
 import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.TransitionRoomEpoch;
+import com.example.dispute.workflow.application.intake.LegacyIntakeWriterGuard;
 import com.example.dispute.workflow.contract.v1.ContractTypes;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.stereotype.Service;
@@ -58,6 +59,7 @@ public class IntakeRoomService {
     private final EvidenceWindowCoordinator evidenceWindowCoordinator;
     private final CaseEventService caseEventService;
     private final RoomEpochAllocator roomEpochAllocator;
+    private final LegacyIntakeWriterGuard legacyIntakeWriterGuard;
     private final DisputeProperties disputeProperties;
     private final Clock clock;
     private final ObjectMapper objectMapper = new ObjectMapper();
@@ -81,6 +83,7 @@ public class IntakeRoomService {
             EvidenceWindowCoordinator evidenceWindowCoordinator,
             CaseEventService caseEventService,
             RoomEpochAllocator roomEpochAllocator,
+            LegacyIntakeWriterGuard legacyIntakeWriterGuard,
             DisputeProperties disputeProperties,
             Clock clock) {
         this.caseRepository = caseRepository;
@@ -94,6 +97,7 @@ public class IntakeRoomService {
         this.evidenceWindowCoordinator = evidenceWindowCoordinator;
         this.caseEventService = caseEventService;
         this.roomEpochAllocator = roomEpochAllocator;
+        this.legacyIntakeWriterGuard = legacyIntakeWriterGuard;
         this.disputeProperties = disputeProperties;
         this.clock = clock;
         this.branchDomainService =
@@ -132,6 +136,7 @@ public class IntakeRoomService {
                                                 ErrorCode.CASE_NOT_FOUND,
                                                 "case not found",
                                                 Map.of("case_id", caseId)));
+        legacyIntakeWriterGuard.assertLegacyWriteAllowed(caseId);
         OffsetDateTime now = OffsetDateTime.now(clock);
         ActorRole confirmationRole = confirmationRole(dispute, actor);
         if (confirmationRole != dispute.getInitiatorRole() && !command.admissible()) {
@@ -158,6 +163,7 @@ public class IntakeRoomService {
                                                         actor.actorId())));
         assertOpenIntakeRoom(dispute, intakeRoom);
         ensureIntakeEpoch(dispute, intakeRoom, now);
+        legacyIntakeWriterGuard.assertLegacyWriteAllowed(caseId);
         if (confirmationRole != dispute.getInitiatorRole()) {
             IntakeBranchDomainService.BranchResult result = branchDomainService
                     .confirmRespondent(dispute, intakeRoom, actor, command, now);
@@ -220,6 +226,7 @@ public class IntakeRoomService {
                                                 ErrorCode.CASE_NOT_FOUND,
                                                 "case not found",
                                                 Map.of("case_id", caseId)));
+        legacyIntakeWriterGuard.assertLegacyWriteAllowed(caseId);
         if (confirmationRole(dispute, actor) != dispute.getInitiatorRole()) {
             throw new ForbiddenException("only the intake initiator can cancel the dispute");
         }
@@ -239,6 +246,7 @@ public class IntakeRoomService {
                                                         actor.actorId())));
         assertOpenIntakeRoom(dispute, intakeRoom);
         ensureIntakeEpoch(dispute, intakeRoom, now);
+        legacyIntakeWriterGuard.assertLegacyWriteAllowed(caseId);
         IntakeConfirmationView result =
                 branchDomainService.cancel(dispute, intakeRoom, actor, reason, now).view();
         terminateIntakeEpoch(dispute, now);

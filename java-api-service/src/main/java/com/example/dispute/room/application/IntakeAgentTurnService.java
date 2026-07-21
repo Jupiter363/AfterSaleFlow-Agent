@@ -32,6 +32,7 @@ import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRe
 import com.example.dispute.room.infrastructure.persistence.repository.CaseIntakeDossierRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.RoomMessageRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.RoomTurnMemoryRepository;
+import com.example.dispute.workflow.application.intake.LegacyIntakeWriterGuard;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -74,6 +75,7 @@ public class IntakeAgentTurnService implements AgentRunFinalizer {
     private final AgentSessionResolver agentSessionResolver;
     private final SessionPermissionService permissionService;
     private final IntakeAgentTurnClient client;
+    private final LegacyIntakeWriterGuard legacyIntakeWriterGuard;
     private final ObjectMapper objectMapper;
     private final Clock clock;
     private AgentRunCoordinator agentRunCoordinator;
@@ -96,7 +98,8 @@ public class IntakeAgentTurnService implements AgentRunFinalizer {
             SessionPermissionService permissionService,
             IntakeAgentTurnClient client,
             ObjectMapper objectMapper,
-            Clock clock) {
+            Clock clock,
+            LegacyIntakeWriterGuard legacyIntakeWriterGuard) {
         this.caseRepository = caseRepository;
         this.roomRepository = roomRepository;
         this.memoryRepository = memoryRepository;
@@ -107,6 +110,7 @@ public class IntakeAgentTurnService implements AgentRunFinalizer {
         this.agentSessionResolver = agentSessionResolver;
         this.permissionService = permissionService;
         this.client = client;
+        this.legacyIntakeWriterGuard = legacyIntakeWriterGuard;
         this.objectMapper = objectMapper;
         this.clock = clock;
     }
@@ -131,6 +135,7 @@ public class IntakeAgentTurnService implements AgentRunFinalizer {
             IntakeAgentTurnClient client,
             ObjectMapper objectMapper,
             Clock clock,
+            LegacyIntakeWriterGuard legacyIntakeWriterGuard,
             AgentRunCoordinator agentRunCoordinator) {
         this(
                 caseRepository,
@@ -144,7 +149,8 @@ public class IntakeAgentTurnService implements AgentRunFinalizer {
                 permissionService,
                 client,
                 objectMapper,
-                clock);
+                clock,
+                legacyIntakeWriterGuard);
         this.agentRunCoordinator = agentRunCoordinator;
     }
 
@@ -161,6 +167,7 @@ public class IntakeAgentTurnService implements AgentRunFinalizer {
             IntakeLobbySeed lobbySeed,
             String traceId,
             String requestId) {
+        legacyIntakeWriterGuard.assertLegacyWriteAllowed(caseId);
         // 先在 Java 事实源中解析案件、房间和 party-private 会话，再构造 Agent 输入。
         // lobbySeed 会经过脱敏，短订单号/售后号不会被当作自然语言事实重复送给模型。
         TurnContext context = prepare(caseId, RoomType.INTAKE);
@@ -205,6 +212,7 @@ public class IntakeAgentTurnService implements AgentRunFinalizer {
         if (roomType != RoomType.INTAKE || !isParty(actor.role())) {
             throw new IllegalArgumentException("respondent intake opening requires a party actor");
         }
+        legacyIntakeWriterGuard.assertLegacyWriteAllowed(caseId);
 
         TurnContext context = prepare(caseId, RoomType.INTAKE);
         if (actor.role() == context.dispute().getInitiatorRole()) {
@@ -284,6 +292,7 @@ public class IntakeAgentTurnService implements AgentRunFinalizer {
                 || !isParty(actor.role())) {
             return null;
         }
+        legacyIntakeWriterGuard.assertLegacyWriteAllowed(caseId);
         TurnContext context = prepare(caseId, RoomType.INTAKE);
         SessionContext session = resolveSession(caseId, actor, RoomType.INTAKE);
         int turnNo = memoryRepository.findMaxTurnNoByAgentSessionId(session.agentSession().getId()) + 1;
@@ -379,6 +388,7 @@ public class IntakeAgentTurnService implements AgentRunFinalizer {
     @Override
     @Transactional
     public void finalizeResult(AgentRunFinalizationContext finalization, JsonNode rawResult) {
+        legacyIntakeWriterGuard.assertLegacyWriteAllowed(finalization.caseId());
         IntakeAgentTurnCommand command =
                 objectMapper.convertValue(finalization.request(), IntakeAgentTurnCommand.class);
         IntakeAgentTurnResult result =
