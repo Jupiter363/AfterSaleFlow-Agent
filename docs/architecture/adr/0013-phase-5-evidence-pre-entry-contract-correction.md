@@ -51,6 +51,34 @@ before the first P5.0 acceptance:
    and Graph lease fence are distinct tokens; Java Finalizer revalidates the room fence. The schema
    declares the gateway check as `x-gateway-cross-binding` with failure
    `BEFORE_CHECKPOINT_MUTATION`.
+5. `RoomGraphCommand.domain_snapshot_ref` authenticates the complete transport artifact, not the
+   internal manifest self-hash. Its SHA-256 and size cover the full RFC 8785 canonical signed
+   manifest bytes, including `manifest_hash` and `signature`; its immutable allowlisted URI is
+   content-addressed by that full-payload SHA-256. The gateway verifies the raw snapshot SHA, size,
+   and URI before parsing, requires parsed JSON to re-canonicalize to the same bytes, then verifies
+   the internal `manifest_hash` with `manifest_hash` and `signature` omitted, and only then verifies
+   the Java ES256 signature. The full-payload and internal hashes are not interchangeable.
+6. `RoomGraphCommand.invocation_context.output_schema_version` and the Graph registry output schema
+   both pin the terminal `evidence-batch-proposal.v1`. The internal per-item LCEL parser alone pins
+   `evidence-item-assessment.v1`; the assessment pin is never substituted as transport metadata.
+
+The final pre-entry authority mapping is normative in every Phase 5 governance document:
+
+```text
+snapshot_payload_hash_scope: FULL_RFC8785_CANONICAL_SIGNED_MANIFEST_BYTES
+snapshot_payload_size_scope: EXACT_FULL_CANONICAL_SIGNED_MANIFEST_BYTES
+snapshot_payload_uri: IMMUTABLE_CONTENT_ADDRESSED_BY_SNAPSHOT_SHA256
+internal_manifest_hash_scope: RFC8785_OMIT_MANIFEST_HASH_AND_SIGNATURE
+snapshot_and_internal_hashes_interchangeable: false
+validation_order: SNAPSHOT_SHA_SIZE_URI -> PARSE_CANONICAL_JSON -> INTERNAL_MANIFEST_HASH -> JAVA_ES256_SIGNATURE
+room_graph_command_output_schema_version: evidence-batch-proposal.v1
+graph_registry_output_schema_version: evidence-batch-proposal.v1
+item_lcel_parser_output_schema_version: evidence-item-assessment.v1
+java_room_fence_source: SIGNED_MANIFEST
+graph_lease_fence_source: CURRENT_GRAPH_LEASE
+fence_tokens_interchangeable: false
+engineering_execution: BLOCKED_PENDING_P5_0_ENTRY_EVIDENCE
+```
 
 The correction is indivisible. A candidate containing only the signature change, only the split
 pins, stale fixture hashes, or one-language validation is invalid. The corrected candidate must

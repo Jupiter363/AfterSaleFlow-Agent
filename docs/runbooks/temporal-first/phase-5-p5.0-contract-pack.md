@@ -220,6 +220,35 @@ enforces the current Graph lease fence before checkpoint mutation. The tokens ar
 Java Finalizer revalidates the room fence. The schema declares `x-gateway-cross-binding` with
 failure `BEFORE_CHECKPOINT_MUTATION`.
 
+`domain_snapshot_ref` is a transport-integrity binding over the complete artifact. Its `sha256`
+and `size_bytes` cover the full RFC 8785 canonical signed manifest bytes, including the internal
+`manifest_hash` and `signature`; its immutable allowlisted URI is content-addressed by the same
+full-payload SHA-256. The gateway verifies raw SHA, size, and URI before parsing, requires parsed
+JSON to re-canonicalize byte-for-byte, then recomputes the internal `manifest_hash` with
+`manifest_hash` and `signature` omitted, and only then verifies the Java ES256 signature. The
+snapshot payload hash and internal manifest hash have different scopes and cannot substitute for
+one another.
+
+The command transport and Graph registry describe the final Graph result, so both output schema
+pins are `evidence-batch-proposal.v1`. The internal item LCEL parser independently uses
+`evidence-item-assessment.v1`; it is not the command or registry output schema.
+
+```text
+snapshot_payload_hash_scope: FULL_RFC8785_CANONICAL_SIGNED_MANIFEST_BYTES
+snapshot_payload_size_scope: EXACT_FULL_CANONICAL_SIGNED_MANIFEST_BYTES
+snapshot_payload_uri: IMMUTABLE_CONTENT_ADDRESSED_BY_SNAPSHOT_SHA256
+internal_manifest_hash_scope: RFC8785_OMIT_MANIFEST_HASH_AND_SIGNATURE
+snapshot_and_internal_hashes_interchangeable: false
+validation_order: SNAPSHOT_SHA_SIZE_URI -> PARSE_CANONICAL_JSON -> INTERNAL_MANIFEST_HASH -> JAVA_ES256_SIGNATURE
+room_graph_command_output_schema_version: evidence-batch-proposal.v1
+graph_registry_output_schema_version: evidence-batch-proposal.v1
+item_lcel_parser_output_schema_version: evidence-item-assessment.v1
+java_room_fence_source: SIGNED_MANIFEST
+graph_lease_fence_source: CURRENT_GRAPH_LEASE
+fence_tokens_interchangeable: false
+engineering_execution: BLOCKED_PENDING_P5_0_ENTRY_EVIDENCE
+```
+
 The manifest, item assessment, terminal proposal, and process projection carry both output pins.
 An asset capability binds `profile_versions_hash` computed over that exact split profile. The
 finalization receipt does not carry `profile_versions`; its authority derives from revalidation

@@ -444,6 +444,38 @@ def test_phase5_contract_correction_does_not_relax_runtime_or_promotion() -> Non
         assert "PENDING_PROMOTION" in normalized
 
 
+def test_phase5_governance_documents_share_final_snapshot_and_output_contract() -> None:
+    documents = (
+        PRE_ENTRY_CORRECTION.read_text(encoding="utf-8"),
+        EXECUTION_PLAN.read_text(encoding="utf-8"),
+        CONTRACT_PACK.read_text(encoding="utf-8"),
+        BASELINE_INVENTORY.read_text(encoding="utf-8"),
+        REVIEW_CLOSURE.read_text(encoding="utf-8"),
+    )
+    final_contract = (
+        "snapshot_payload_hash_scope: FULL_RFC8785_CANONICAL_SIGNED_MANIFEST_BYTES",
+        "snapshot_payload_size_scope: EXACT_FULL_CANONICAL_SIGNED_MANIFEST_BYTES",
+        "snapshot_payload_uri: IMMUTABLE_CONTENT_ADDRESSED_BY_SNAPSHOT_SHA256",
+        "internal_manifest_hash_scope: RFC8785_OMIT_MANIFEST_HASH_AND_SIGNATURE",
+        "snapshot_and_internal_hashes_interchangeable: false",
+        "room_graph_command_output_schema_version: evidence-batch-proposal.v1",
+        "graph_registry_output_schema_version: evidence-batch-proposal.v1",
+        "item_lcel_parser_output_schema_version: evidence-item-assessment.v1",
+        "java_room_fence_source: SIGNED_MANIFEST",
+        "graph_lease_fence_source: CURRENT_GRAPH_LEASE",
+        "fence_tokens_interchangeable: false",
+        "engineering_execution: BLOCKED_PENDING_P5_0_ENTRY_EVIDENCE",
+    )
+
+    for document in documents:
+        normalized = " ".join(document.split())
+        for contract_line in final_contract:
+            assert contract_line in normalized
+        assert "P5.0 NOT_RUN" in normalized
+        assert "BLOCKED" in normalized
+        assert "45d7f087eafe4f50be0d491b3d612446a3e1e94e" in normalized
+
+
 def test_phase5_review_keeps_d0_and_e0_independent_with_exact_path_closure() -> None:
     batches = _batches()
     closure = REVIEW_CLOSURE.read_text(encoding="utf-8")

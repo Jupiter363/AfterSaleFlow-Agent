@@ -171,6 +171,30 @@ exact split `profile_versions_hash` and no false finalization-receipt profile cl
 enforcement; and Java Finalizer revalidation of the distinct room fence authenticated by the
 manifest. All fixture hashes must be regenerated, with Python plus Java parity over the same bytes.
 
+Review additionally freezes the two integrity layers and output roles. `domain_snapshot_ref`
+SHA-256, exact size, and content-addressed immutable URI bind the full RFC 8785 canonical signed
+manifest bytes and are verified before parsing. The internal `manifest_hash` is then recomputed
+with `manifest_hash` and `signature` omitted before Java ES256 signature verification; it is never
+interchangeable with the snapshot payload hash. RoomGraphCommand invocation and Graph registry
+output use terminal `evidence-batch-proposal.v1`, while the internal item LCEL parser uses
+`evidence-item-assessment.v1`.
+
+```text
+snapshot_payload_hash_scope: FULL_RFC8785_CANONICAL_SIGNED_MANIFEST_BYTES
+snapshot_payload_size_scope: EXACT_FULL_CANONICAL_SIGNED_MANIFEST_BYTES
+snapshot_payload_uri: IMMUTABLE_CONTENT_ADDRESSED_BY_SNAPSHOT_SHA256
+internal_manifest_hash_scope: RFC8785_OMIT_MANIFEST_HASH_AND_SIGNATURE
+snapshot_and_internal_hashes_interchangeable: false
+validation_order: SNAPSHOT_SHA_SIZE_URI -> PARSE_CANONICAL_JSON -> INTERNAL_MANIFEST_HASH -> JAVA_ES256_SIGNATURE
+room_graph_command_output_schema_version: evidence-batch-proposal.v1
+graph_registry_output_schema_version: evidence-batch-proposal.v1
+item_lcel_parser_output_schema_version: evidence-item-assessment.v1
+java_room_fence_source: SIGNED_MANIFEST
+graph_lease_fence_source: CURRENT_GRAPH_LEASE
+fence_tokens_interchangeable: false
+engineering_execution: BLOCKED_PENDING_P5_0_ENTRY_EVIDENCE
+```
+
 Any partial correction or attempt to reuse `45d7f087` reports fails `P5-G10`. The corrected
 candidate requires a new exact clean detached SHA and full Batch 0. Once P5.0 is first accepted,
 future authority, hash, signature, trust-binding, or output-pin changes require a new schema version,

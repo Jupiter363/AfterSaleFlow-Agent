@@ -222,6 +222,30 @@ binds the distinct Java room fence, which Java Finalizer revalidates. Every fixt
 regenerated and both Python validation and Java parity must pass. A partial correction is not a
 candidate.
 
+The final correction also separates transport integrity from manifest authority. The command
+snapshot SHA, exact size, and content-addressed immutable URI cover the full RFC 8785 canonical
+signed manifest bytes. Those raw bindings are checked before parsing; the internal `manifest_hash`
+is then recomputed with `manifest_hash` and `signature` omitted, followed by Java ES256 signature
+verification. The full-payload hash and internal hash are not interchangeable. Command invocation
+and Graph registry output pin terminal `evidence-batch-proposal.v1`; only the internal item LCEL
+parser pins `evidence-item-assessment.v1`.
+
+```text
+snapshot_payload_hash_scope: FULL_RFC8785_CANONICAL_SIGNED_MANIFEST_BYTES
+snapshot_payload_size_scope: EXACT_FULL_CANONICAL_SIGNED_MANIFEST_BYTES
+snapshot_payload_uri: IMMUTABLE_CONTENT_ADDRESSED_BY_SNAPSHOT_SHA256
+internal_manifest_hash_scope: RFC8785_OMIT_MANIFEST_HASH_AND_SIGNATURE
+snapshot_and_internal_hashes_interchangeable: false
+validation_order: SNAPSHOT_SHA_SIZE_URI -> PARSE_CANONICAL_JSON -> INTERNAL_MANIFEST_HASH -> JAVA_ES256_SIGNATURE
+room_graph_command_output_schema_version: evidence-batch-proposal.v1
+graph_registry_output_schema_version: evidence-batch-proposal.v1
+item_lcel_parser_output_schema_version: evidence-item-assessment.v1
+java_room_fence_source: SIGNED_MANIFEST
+graph_lease_fence_source: CURRENT_GRAPH_LEASE
+fence_tokens_interchangeable: false
+engineering_execution: BLOCKED_PENDING_P5_0_ENTRY_EVIDENCE
+```
+
 The manifest, item, terminal, and projection contracts carry both pins; asset capability binds the
 exact split `profile_versions_hash`. Finalization receipt is not treated as a profile carrier.
 

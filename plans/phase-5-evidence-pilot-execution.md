@@ -112,8 +112,33 @@ reader. The corrected contract candidate must contain all of the following toget
   invocation/profile `x-gateway-cross-binding` with failure `BEFORE_CHECKPOINT_MUTATION`, followed
   by independent Graph lease-fence enforcement; the signed manifest binds the distinct Java room
   fence and Java Finalizer revalidates it;
+- `domain_snapshot_ref` SHA-256, exact size, and content-addressed immutable URI over the full RFC
+  8785 canonical signed manifest bytes, verified before parsing; internal `manifest_hash` is then
+  recomputed with hash and signature omitted before Java ES256 verification, and the two hashes are
+  never interchangeable;
+- `RoomGraphCommand` invocation and Graph registry output mapped to terminal
+  `evidence-batch-proposal.v1`, while only the internal item LCEL parser uses
+  `evidence-item-assessment.v1`;
 - regenerated hashes for every positive and negative fixture plus Python validation and Java
   parity for the same corrected bytes.
+
+All implementation owners consume this exact authority mapping:
+
+```text
+snapshot_payload_hash_scope: FULL_RFC8785_CANONICAL_SIGNED_MANIFEST_BYTES
+snapshot_payload_size_scope: EXACT_FULL_CANONICAL_SIGNED_MANIFEST_BYTES
+snapshot_payload_uri: IMMUTABLE_CONTENT_ADDRESSED_BY_SNAPSHOT_SHA256
+internal_manifest_hash_scope: RFC8785_OMIT_MANIFEST_HASH_AND_SIGNATURE
+snapshot_and_internal_hashes_interchangeable: false
+validation_order: SNAPSHOT_SHA_SIZE_URI -> PARSE_CANONICAL_JSON -> INTERNAL_MANIFEST_HASH -> JAVA_ES256_SIGNATURE
+room_graph_command_output_schema_version: evidence-batch-proposal.v1
+graph_registry_output_schema_version: evidence-batch-proposal.v1
+item_lcel_parser_output_schema_version: evidence-item-assessment.v1
+java_room_fence_source: SIGNED_MANIFEST
+graph_lease_fence_source: CURRENT_GRAPH_LEASE
+fence_tokens_interchangeable: false
+engineering_execution: BLOCKED_PENDING_P5_0_ENTRY_EVIDENCE
+```
 
 Partial correction is forbidden. The primary must freeze a new exact clean detached SHA, run the
 full P5-BATCH-0 from a fresh detached worktree, and commit entry evidence separately. After the first

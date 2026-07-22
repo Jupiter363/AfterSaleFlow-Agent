@@ -15,6 +15,13 @@ TEST_BATCHES = ROOT / "plans/phase-5-evidence-pilot-test-batches.yaml"
 CONTRACT_PACK = (
     ROOT / "docs/runbooks/temporal-first/phase-5-p5.0-contract-pack.md"
 )
+BASELINE_INVENTORY = (
+    ROOT
+    / "docs/runbooks/temporal-first/phase-5-p5.0-baseline-inventory.md"
+)
+REVIEW_CLOSURE = (
+    ROOT / "docs/runbooks/temporal-first/phase-5-p5.0-review-closure.md"
+)
 PRE_ENTRY_CORRECTION = (
     ROOT
     / "docs/architecture/adr/"
@@ -145,6 +152,42 @@ def test_phase5_entry_requires_corrected_manifest_authority_before_batch0() -> N
     assert "full P5-BATCH-0" in execution
     assert "regenerated" in execution and "fixture" in execution
     assert "Python" in execution and "Java" in execution and "parity" in execution
+
+
+def test_phase5_governance_docs_freeze_transport_and_internal_hash_layers() -> None:
+    governance_docs = (
+        PRE_ENTRY_CORRECTION,
+        EXECUTION_PLAN,
+        CONTRACT_PACK,
+        BASELINE_INVENTORY,
+        REVIEW_CLOSURE,
+    )
+    required_contract = (
+        "snapshot_payload_hash_scope: FULL_RFC8785_CANONICAL_SIGNED_MANIFEST_BYTES",
+        "snapshot_payload_size_scope: EXACT_FULL_CANONICAL_SIGNED_MANIFEST_BYTES",
+        "snapshot_payload_uri: IMMUTABLE_CONTENT_ADDRESSED_BY_SNAPSHOT_SHA256",
+        "internal_manifest_hash_scope: RFC8785_OMIT_MANIFEST_HASH_AND_SIGNATURE",
+        "snapshot_and_internal_hashes_interchangeable: false",
+        "validation_order: SNAPSHOT_SHA_SIZE_URI -> PARSE_CANONICAL_JSON -> "
+        "INTERNAL_MANIFEST_HASH -> JAVA_ES256_SIGNATURE",
+        "room_graph_command_output_schema_version: evidence-batch-proposal.v1",
+        "graph_registry_output_schema_version: evidence-batch-proposal.v1",
+        "item_lcel_parser_output_schema_version: evidence-item-assessment.v1",
+        "java_room_fence_source: SIGNED_MANIFEST",
+        "graph_lease_fence_source: CURRENT_GRAPH_LEASE",
+        "fence_tokens_interchangeable: false",
+        "engineering_execution: BLOCKED_PENDING_P5_0_ENTRY_EVIDENCE",
+    )
+
+    for path in governance_docs:
+        normalized = " ".join(path.read_text(encoding="utf-8").split())
+        for contract_line in required_contract:
+            assert contract_line in normalized, path
+        assert "45d7f087eafe4f50be0d491b3d612446a3e1e94e" in normalized
+        assert "P5.0 NOT_RUN" in normalized
+        assert "ASCII_LOWERCASE_HEX_TEXT" in normalized
+        assert "JOSE_P1363_BASE64URL" in normalized
+        assert "authorization_proof_ref" in normalized
 
 
 def test_phase5_evidence_room_command_binds_full_signed_manifest_payload() -> None:
