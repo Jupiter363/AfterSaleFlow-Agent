@@ -806,6 +806,7 @@ describe("IntakeRoomView", () => {
         writerMode: "SHADOW",
       },
       currentProcessProjection({ room_phase: "WAITING_TIMER" }),
+      currentProcessProjection({ fencing_token: 0 }),
       currentProcessProjection({ pending_state: "WAITING_PARTY" }),
       {
         ...currentProcessProjection(),

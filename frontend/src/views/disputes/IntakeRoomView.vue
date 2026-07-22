@@ -230,11 +230,12 @@ function normalizeIntakeProcessProjection(status) {
     fields.roomEpoch,
     fields.processRevision,
     fields.roomRevision,
-    fields.fencingToken,
   ];
-  if (revisionFields.some(
-    (value) => !Number.isSafeInteger(value) || value < 0,
-  )) {
+  if (
+    revisionFields.some((value) => !Number.isSafeInteger(value) || value < 0) ||
+    !Number.isSafeInteger(fields.fencingToken) ||
+    fields.fencingToken < 1
+  ) {
     return processingProjection();
   }
 
