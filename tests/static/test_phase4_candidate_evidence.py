@@ -161,15 +161,24 @@ def _fixture_execution_manifest(
         command = item["command"]
         raw_path = tmp_path / "attempts" / command_id / "raw-junit.xml"
         if command_id in {"python_phase_4", "static_phase_4"}:
-            executed = command + f' --junitxml="{raw_path}"'
+            executed_argv = [
+                *evidence._split_approved_command(command),
+                f"--junitxml={raw_path}",
+            ]
         elif command_id == "frontend_phase_4":
-            executed = command + f' --reporter=junit --outputFile="{raw_path}"'
+            executed_argv = [
+                *evidence._split_approved_command(command),
+                "--reporter=junit",
+                f"--outputFile={raw_path}",
+            ]
         else:
-            executed = evidence.re.sub(
-                r"\btest$",
-                "-Dsurefire.reportNameSuffix=p4-aaaaaaaaaaaa-12345678 test",
-                command,
-            )
+            approved = evidence._split_approved_command(command)
+            executed_argv = [
+                *approved[:-1],
+                "-Dsurefire.reportNameSuffix=p4-aaaaaaaaaaaa-12345678",
+                "test",
+            ]
+        executed = evidence.render_command_argv(executed_argv)
         records.append(
             {
                 "id": command_id,
@@ -180,6 +189,7 @@ def _fixture_execution_manifest(
                     command.encode("utf-8")
                 ).hexdigest(),
                 "executed_command": executed,
+                "executed_argv": executed_argv,
                 "executed_command_sha256": evidence.hashlib.sha256(
                     executed.encode("utf-8")
                 ).hexdigest(),
@@ -204,7 +214,7 @@ def _fixture_execution_manifest(
                 },
             }
         )
-    return {
+    manifest = {
         "schema_version": evidence.EXECUTION_MANIFEST_SCHEMA,
         "phase": 4,
         "candidate_commit": CANDIDATE,
@@ -220,6 +230,87 @@ def _fixture_execution_manifest(
         "promotion_gate": "PENDING",
         "MIG-003": "PENDING_PROMOTION",
         "MIG-004": "PENDING_PROMOTION",
+    }
+    evidence.seal_execution_manifest(manifest)
+    return manifest
+
+
+def _materialize_execution_manifest(
+    tmp_path: Path, manifest: dict, source_dir: Path
+) -> Path:
+    dependency_paths = (
+        "python-agent-service/requirements.lock",
+        "java-api-service/pom.xml",
+        "frontend/pnpm-lock.yaml",
+    )
+    manifest["environment"]["dependency_manifests"] = [
+        {"path": dependency, "sha256": evidence._sha256(evidence.ROOT / dependency)}
+        for dependency in dependency_paths
+    ]
+    manifest["environment"].pop("snapshot_sha256", None)
+    manifest["environment"]["snapshot_sha256"] = evidence._json_sha256(
+        manifest["environment"]
+    )
+    for record in manifest["commands"]:
+        record["environment_sha256"] = manifest["environment"]["snapshot_sha256"]
+        raw = tmp_path / "attempts" / record["id"] / "raw-junit.xml"
+        raw.parent.mkdir(parents=True, exist_ok=True)
+        raw.write_bytes((source_dir / record["report"]).read_bytes())
+        record["raw_reports"] = [
+            {
+                "path": raw.relative_to(tmp_path).as_posix(),
+                "sha256": evidence._sha256(raw),
+            }
+        ]
+        for stream in ("stdout", "stderr"):
+            path = tmp_path / record[f"{stream}_path"]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"{record['id']} {stream}\n", encoding="utf-8")
+            record[f"{stream}_sha256"] = evidence._sha256(path)
+    evidence.seal_execution_manifest(manifest)
+    manifest_path = tmp_path / evidence.EXECUTION_MANIFEST_NAME
+    evidence._write_json(manifest_path, manifest)
+    return manifest_path
+
+
+def _add_quarantined_java_infra_attempt(
+    tmp_path: Path, manifest: dict
+) -> dict[str, Path]:
+    accepted = next(
+        record for record in manifest["commands"] if record["id"] == "java_phase_4"
+    )
+    attempt = copy.deepcopy(accepted)
+    quarantine_root = tmp_path / "quarantined" / "java_phase_4-attempt-1"
+    raw_path = quarantine_root / "raw-junit.xml"
+    stdout_path = quarantine_root / "stdout.log"
+    stderr_path = quarantine_root / "stderr.log"
+    raw_path.parent.mkdir(parents=True, exist_ok=True)
+    accepted_raw = tmp_path / accepted["raw_reports"][0]["path"]
+    raw_path.write_bytes(accepted_raw.read_bytes())
+    stdout_path.write_text("java_phase_4 quarantined stdout\n", encoding="utf-8")
+    stderr_path.write_text("java_phase_4 quarantined stderr\n", encoding="utf-8")
+    attempt.update(
+        {
+            "exit_code": 1,
+            "accepted": False,
+            "failure_classification": "INFRA",
+            "raw_reports": [
+                {
+                    "path": raw_path.relative_to(tmp_path).as_posix(),
+                    "sha256": evidence._sha256(raw_path),
+                }
+            ],
+            "stdout_path": stdout_path.relative_to(tmp_path).as_posix(),
+            "stdout_sha256": evidence._sha256(stdout_path),
+            "stderr_path": stderr_path.relative_to(tmp_path).as_posix(),
+            "stderr_sha256": evidence._sha256(stderr_path),
+        }
+    )
+    manifest["quarantined_attempts"] = [attempt]
+    return {
+        "raw_junit": raw_path,
+        "stdout": stdout_path,
+        "stderr": stderr_path,
     }
 
 
@@ -243,37 +334,7 @@ def test_execution_manifest_authenticates_commands_environment_logs_and_reports(
     policy = evidence._load_yaml(evidence.POLICY_PATH)
     source_dir = _fixture_source_reports(tmp_path, matrix, policy)
     manifest = _fixture_execution_manifest(tmp_path, matrix, source_dir)
-    dependency_paths = (
-        "python-agent-service/requirements.lock",
-        "java-api-service/pom.xml",
-        "frontend/pnpm-lock.yaml",
-    )
-    manifest["environment"]["dependency_manifests"] = [
-        {"path": dependency, "sha256": evidence._sha256(evidence.ROOT / dependency)}
-        for dependency in dependency_paths
-    ]
-    manifest["environment"].pop("snapshot_sha256")
-    manifest["environment"]["snapshot_sha256"] = evidence._json_sha256(
-        manifest["environment"]
-    )
-    for record in manifest["commands"]:
-        record["environment_sha256"] = manifest["environment"]["snapshot_sha256"]
-        raw = tmp_path / "attempts" / record["id"] / "raw-junit.xml"
-        raw.parent.mkdir(parents=True, exist_ok=True)
-        raw.write_bytes((source_dir / record["report"]).read_bytes())
-        record["raw_reports"] = [
-            {
-                "path": raw.relative_to(tmp_path).as_posix(),
-                "sha256": evidence._sha256(raw),
-            }
-        ]
-        for stream in ("stdout", "stderr"):
-            path = tmp_path / record[f"{stream}_path"]
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(f"{record['id']} {stream}\n", encoding="utf-8")
-            record[f"{stream}_sha256"] = evidence._sha256(path)
-    manifest_path = tmp_path / evidence.EXECUTION_MANIFEST_NAME
-    evidence._write_json(manifest_path, manifest)
+    manifest_path = _materialize_execution_manifest(tmp_path, manifest, source_dir)
 
     loaded = evidence.load_execution_manifest(
         path=manifest_path,
@@ -286,7 +347,19 @@ def test_execution_manifest_authenticates_commands_environment_logs_and_reports(
         evidence.SOURCE_REPORTS
     )
 
+    manifest["commands"][0]["duration_seconds"] = 59.0
+    evidence._write_json(manifest_path, manifest)
+    with pytest.raises(evidence.EvidenceError, match="manifest SHA-256 drifted"):
+        evidence.load_execution_manifest(
+            path=manifest_path,
+            candidate_commit=CANDIDATE,
+            matrix=matrix,
+            source_dir=source_dir,
+        )
+
+    manifest["commands"][0]["duration_seconds"] = 60.0
     manifest["commands"][0]["exit_code"] = 1
+    evidence.seal_execution_manifest(manifest)
     evidence._write_json(manifest_path, manifest)
     with pytest.raises(evidence.EvidenceError, match="source command was not accepted"):
         evidence.load_execution_manifest(
@@ -295,6 +368,122 @@ def test_execution_manifest_authenticates_commands_environment_logs_and_reports(
             matrix=matrix,
             source_dir=source_dir,
         )
+
+
+@pytest.mark.parametrize(
+    ("artifact", "error"),
+    [
+        ("stdout", "java_phase_4 quarantined stdout SHA-256 drifted"),
+        ("stderr", "java_phase_4 quarantined stderr SHA-256 drifted"),
+        ("raw_junit", "java_phase_4 quarantined raw JUnit SHA-256 drifted"),
+    ],
+)
+def test_resealed_manifest_rejects_tampered_quarantined_infra_artifacts(
+    tmp_path: Path,
+    artifact: str,
+    error: str,
+) -> None:
+    matrix = evidence.load_matrix()
+    policy = evidence._load_yaml(evidence.POLICY_PATH)
+    source_dir = _fixture_source_reports(tmp_path, matrix, policy)
+    manifest = _fixture_execution_manifest(tmp_path, matrix, source_dir)
+    manifest_path = _materialize_execution_manifest(tmp_path, manifest, source_dir)
+    artifacts = _add_quarantined_java_infra_attempt(tmp_path, manifest)
+    evidence.seal_execution_manifest(manifest)
+    evidence._write_json(manifest_path, manifest)
+    assert evidence.load_execution_manifest(
+        path=manifest_path,
+        candidate_commit=CANDIDATE,
+        matrix=matrix,
+        source_dir=source_dir,
+    )["status"] == "PASS"
+
+    artifacts[artifact].write_bytes(b"tampered quarantined evidence\n")
+    previous_seal = manifest["manifest_sha256"]
+    manifest["quarantined_attempts"][0]["duration_seconds"] = 59.0
+    evidence.seal_execution_manifest(manifest)
+    assert manifest["manifest_sha256"] != previous_seal
+    evidence._write_json(manifest_path, manifest)
+
+    with pytest.raises(evidence.EvidenceError, match=error):
+        evidence.load_execution_manifest(
+            path=manifest_path,
+            candidate_commit=CANDIDATE,
+            matrix=matrix,
+            source_dir=source_dir,
+        )
+
+
+def test_assemble_cannot_turn_an_unvalidated_manifest_dictionary_into_pass(
+    tmp_path: Path,
+) -> None:
+    matrix = evidence.load_matrix()
+    policy = evidence._load_yaml(evidence.POLICY_PATH)
+    source_dir = _fixture_source_reports(tmp_path, matrix, policy)
+    manifest = _fixture_execution_manifest(tmp_path, matrix, source_dir)
+    manifest_path = tmp_path / evidence.EXECUTION_MANIFEST_NAME
+    evidence._write_json(manifest_path, manifest)
+
+    with pytest.raises(evidence.EvidenceError, match="dependency manifest hashes"):
+        evidence.assemble_evidence(
+            matrix=matrix,
+            policy=policy,
+            source_dir=source_dir,
+            output_dir=tmp_path / "fabricated-pass",
+            release_id="phase-4-fabricated",
+            base_commit=BASE,
+            candidate_commit=CANDIDATE,
+            engineering_started_at="2026-07-21T00:00:00+00:00",
+            verification_started_at="2026-07-22T00:00:00+00:00",
+            verification_finished_at="2026-07-22T00:01:00+00:00",
+            execution_manifest_path=manifest_path,
+        )
+
+
+def test_assemble_reloads_and_rejects_tampered_quarantined_raw_junit(
+    tmp_path: Path,
+) -> None:
+    matrix = evidence.load_matrix()
+    policy = evidence._load_yaml(evidence.POLICY_PATH)
+    source_dir = _fixture_source_reports(tmp_path, matrix, policy)
+    manifest = _fixture_execution_manifest(tmp_path, matrix, source_dir)
+    manifest_path = _materialize_execution_manifest(tmp_path, manifest, source_dir)
+    artifacts = _add_quarantined_java_infra_attempt(tmp_path, manifest)
+    evidence.seal_execution_manifest(manifest)
+    evidence._write_json(manifest_path, manifest)
+    validated = evidence.load_execution_manifest(
+        path=manifest_path,
+        candidate_commit=CANDIDATE,
+        matrix=matrix,
+        source_dir=source_dir,
+    )
+    assert len(validated["quarantined_attempts"]) == 1
+
+    artifacts["raw_junit"].write_bytes(b"tampered after validation\n")
+    previous_seal = manifest["manifest_sha256"]
+    manifest["quarantined_attempts"][0]["duration_seconds"] = 59.0
+    evidence.seal_execution_manifest(manifest)
+    assert manifest["manifest_sha256"] != previous_seal
+    evidence._write_json(manifest_path, manifest)
+
+    with pytest.raises(
+        evidence.EvidenceError,
+        match="java_phase_4 quarantined raw JUnit SHA-256 drifted",
+    ):
+        evidence.assemble_evidence(
+            matrix=matrix,
+            policy=policy,
+            source_dir=source_dir,
+            output_dir=tmp_path / "must-not-exist",
+            release_id="phase-4-reload-guard",
+            base_commit=BASE,
+            candidate_commit=CANDIDATE,
+            engineering_started_at="2026-07-21T00:00:00+00:00",
+            verification_started_at="2026-07-22T00:00:00+00:00",
+            verification_finished_at="2026-07-22T00:01:00+00:00",
+            execution_manifest_path=manifest_path,
+        )
+    assert not (tmp_path / "must-not-exist").exists()
 
 
 def test_frontend_policy_selector_accepts_vitest_suite_prefix() -> None:
@@ -422,6 +611,9 @@ def test_assembles_exact_bundle_and_keeps_both_migrations_pending(
     policy = evidence._load_yaml(evidence.POLICY_PATH)
     source_dir = _fixture_source_reports(tmp_path, matrix, policy)
     execution_manifest = _fixture_execution_manifest(tmp_path, matrix, source_dir)
+    execution_manifest_path = _materialize_execution_manifest(
+        tmp_path, execution_manifest, source_dir
+    )
     output_dir = tmp_path / "phase-4"
     monkeypatch.setattr(
         evidence,
@@ -445,7 +637,7 @@ def test_assembles_exact_bundle_and_keeps_both_migrations_pending(
         engineering_started_at="2026-07-21T00:00:00+00:00",
         verification_started_at="2026-07-22T00:00:00+00:00",
         verification_finished_at="2026-07-22T00:01:00+00:00",
-        execution_manifest=execution_manifest,
+        execution_manifest_path=execution_manifest_path,
     )
     second_output = tmp_path / "phase-4-repeat"
     evidence.assemble_evidence(
@@ -459,7 +651,7 @@ def test_assembles_exact_bundle_and_keeps_both_migrations_pending(
         engineering_started_at="2026-07-21T00:00:00+00:00",
         verification_started_at="2026-07-22T00:00:00+00:00",
         verification_finished_at="2026-07-22T00:01:00+00:00",
-        execution_manifest=execution_manifest,
+        execution_manifest_path=execution_manifest_path,
     )
 
     assert {path.name for path in output_dir.iterdir()} == evidence.EXPECTED_FILES
@@ -538,6 +730,13 @@ def test_promotion_or_runtime_relaxation_is_rejected() -> None:
 def test_candidate_preflight_requires_fixed_detached_clean_head(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    with pytest.raises(evidence.EvidenceError, match="must be under .codex-run"):
+        evidence.assert_candidate_run_directory(evidence.ROOT)
+    with pytest.raises(evidence.EvidenceError, match="must be under .codex-run"):
+        evidence.assert_candidate_run_directory(evidence.ROOT / "python-agent-service" / "run")
+    evidence.assert_candidate_run_directory(evidence.ROOT / ".codex-run" / "candidate")
+    evidence.assert_candidate_run_directory(tmp_path / "candidate")
+
     responses = {
         "rev-parse": subprocess.CompletedProcess(
             ["git"], 0, stdout=CANDIDATE + "\n", stderr=""

@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import copy
 import importlib.util
+import json
+import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 import yaml
 
 
@@ -36,6 +39,7 @@ def test_plan_expands_one_sha_and_the_complete_signed_synthetic_chain() -> None:
         "IntakeExchangeP0Test",
         "IntakeSyntheticShadowConfigurationTest",
         "TemporalWorkerConfigurationTest",
+        "IntakeReliabilityHarnessTest",
     ):
         assert classname in java
     for test_path in (
@@ -71,27 +75,152 @@ def test_runtime_material_provider_is_an_explicit_engineering_only_evidence_boun
 
 def test_junit_transforms_preserve_the_approved_matrix_command(tmp_path: Path) -> None:
     raw = tmp_path / "raw.xml"
-    pytest_command = runner._command_for_source(
+    pytest_argv = runner._command_argv_for_source(
         "python_phase_4", "python -m pytest tests", raw, report_suffix="unused"
     )
-    frontend_command = runner._command_for_source(
+    frontend_argv = runner._command_argv_for_source(
         "frontend_phase_4", "node vitest.mjs run tests", raw, report_suffix="unused"
     )
-    java_command = runner._command_for_source(
+    java_argv = runner._command_argv_for_source(
         "java_phase_4",
         ".\\mvnw.cmd -Dtest=FixtureTest test",
         raw,
         report_suffix="p4-aaaaaaaaaaaa-12345678",
     )
 
-    assert pytest_command.startswith("python -m pytest tests --junitxml=")
-    assert frontend_command.startswith(
-        "node vitest.mjs run tests --reporter=junit --outputFile="
+    assert pytest_argv == ["python", "-m", "pytest", "tests", f"--junitxml={raw.resolve()}"]
+    assert frontend_argv == [
+        "node",
+        "vitest.mjs",
+        "run",
+        "tests",
+        "--reporter=junit",
+        f"--outputFile={raw.resolve()}",
+    ]
+    assert java_argv == [
+        ".\\mvnw.cmd",
+        "-Dtest=FixtureTest",
+        "-Dsurefire.reportNameSuffix=p4-aaaaaaaaaaaa-12345678",
+        "test",
+    ]
+
+
+def test_report_path_metacharacters_remain_one_non_shell_argument(tmp_path: Path) -> None:
+    raw = tmp_path / "$(touch-injected)&report.xml"
+
+    arguments = runner._command_argv_for_source(
+        "python_phase_4",
+        "python -m pytest tests",
+        raw,
+        report_suffix="unused",
     )
-    assert java_command == (
-        ".\\mvnw.cmd -Dtest=FixtureTest "
-        "-Dsurefire.reportNameSuffix=p4-aaaaaaaaaaaa-12345678 test"
+
+    assert arguments[:-1] == ["python", "-m", "pytest", "tests"]
+    assert arguments[-1] == f"--junitxml={raw.resolve()}"
+
+    with pytest.raises(runner.EvidenceError, match="shell control characters"):
+        runner._command_argv_for_source(
+            "python_phase_4",
+            "python -m pytest tests & echo injected",
+            raw,
+            report_suffix="unused",
+        )
+
+
+def test_resume_rejects_bare_command_ids_that_would_skip_all_sources(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "attempt-forged"
+    run_root.mkdir()
+    manifest = runner._initial_manifest(
+        candidate=CANDIDATE,
+        environment_id="resume-forgery-test",
+        run_root=run_root,
     )
+    manifest["commands"] = [{"id": command_id} for command_id in runner.COMMAND_ORDER]
+    runner._write_manifest(run_root / runner.MANIFEST_NAME, manifest)
+
+    with pytest.raises(
+        runner.EvidenceError, match="resume record binding drifted"
+    ):
+        runner._load_resume_manifest(run_root, CANDIDATE)
+
+
+def test_resume_rejects_commands_that_are_not_the_ordered_source_prefix(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "attempt-out-of-order"
+    run_root.mkdir()
+    manifest = runner._initial_manifest(
+        candidate=CANDIDATE,
+        environment_id="resume-prefix-test",
+        run_root=run_root,
+    )
+    manifest["commands"] = [{"id": runner.COMMAND_ORDER[1]}]
+    runner._write_manifest(run_root / runner.MANIFEST_NAME, manifest)
+
+    with pytest.raises(runner.EvidenceError, match="ordered source prefix"):
+        runner._load_resume_manifest(run_root, CANDIDATE)
+
+
+def test_resume_rejects_unsealed_and_tampered_manifests(tmp_path: Path) -> None:
+    run_root = tmp_path / "attempt-seal"
+    run_root.mkdir()
+    manifest = runner._initial_manifest(
+        candidate=CANDIDATE,
+        environment_id="resume-seal-test",
+        run_root=run_root,
+    )
+    manifest_path = run_root / runner.MANIFEST_NAME
+    runner._write_manifest(manifest_path, manifest)
+
+    sealed = json.loads(manifest_path.read_text(encoding="utf-8"))
+    sealed["status"] = "REQUIRES_CLASSIFICATION"
+    manifest_path.write_text(json.dumps(sealed), encoding="utf-8")
+    with pytest.raises(runner.EvidenceError, match="manifest SHA-256 drifted"):
+        runner._load_resume_manifest(run_root, CANDIDATE)
+
+    sealed.pop("manifest_sha256")
+    manifest_path.write_text(json.dumps(sealed), encoding="utf-8")
+    with pytest.raises(runner.EvidenceError, match="no lowercase manifest SHA-256"):
+        runner._load_resume_manifest(run_root, CANDIDATE)
+
+
+def test_candidate_run_directory_is_confined_inside_the_repository(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(runner.EvidenceError, match="must be under .codex-run"):
+        runner.assert_candidate_run_directory(ROOT / "test-reports" / "forged-run")
+
+    runner.assert_candidate_run_directory(ROOT / ".codex-run" / "phase4-safe")
+    runner.assert_candidate_run_directory(tmp_path / "external-phase4-run")
+
+
+def test_source_process_receives_argv_with_shell_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    observed: dict[str, object] = {}
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        observed["command"] = command
+        observed["shell"] = kwargs["shell"]
+        observed["cwd"] = kwargs["cwd"]
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    command = ["python", "-c", "print('literal & | > payload')"]
+    stdout = tmp_path / "stdout.log"
+    stderr = tmp_path / "stderr.log"
+
+    _, _, _, exit_code = runner._run_shell(command, tmp_path, stdout, stderr)
+
+    assert exit_code == 0
+    assert observed == {
+        "command": command,
+        "shell": False,
+        "cwd": tmp_path,
+    }
 
 
 def _failed_manifest() -> dict:

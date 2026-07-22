@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import platform
 import re
 import shutil
@@ -20,12 +21,19 @@ try:
         _sha256,
         _write_json,
         normalize_source_reports,
+        parse_junit,
     )
     from scripts.generate_phase4_candidate_evidence import (
         SOURCE_REPORTS,
+        _assert_executed_command,
+        _assert_execution_manifest_seal,
+        _split_approved_command,
         assert_clean_detached_candidate,
+        assert_candidate_run_directory,
         focused_commands,
         load_matrix,
+        render_command_argv,
+        seal_execution_manifest,
     )
 except ModuleNotFoundError:  # Direct execution puts scripts/ on sys.path.
     from generate_phase3_candidate_evidence import (  # type: ignore[no-redef]
@@ -34,12 +42,19 @@ except ModuleNotFoundError:  # Direct execution puts scripts/ on sys.path.
         _sha256,
         _write_json,
         normalize_source_reports,
+        parse_junit,
     )
     from generate_phase4_candidate_evidence import (  # type: ignore[no-redef]
         SOURCE_REPORTS,
+        _assert_executed_command,
+        _assert_execution_manifest_seal,
+        _split_approved_command,
         assert_clean_detached_candidate,
+        assert_candidate_run_directory,
         focused_commands,
         load_matrix,
+        render_command_argv,
+        seal_execution_manifest,
     )
 
 
@@ -70,8 +85,14 @@ def _json_sha256(value: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _quoted_path(path: Path) -> str:
-    return '"' + str(path.resolve()).replace('"', '\\"') + '"'
+def _write_manifest(path: Path, manifest: dict[str, Any]) -> None:
+    seal_execution_manifest(manifest)
+    temporary = path.with_name(f".{path.name}.tmp")
+    try:
+        _write_json(temporary, manifest)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _relative(path: Path, root: Path) -> str:
@@ -204,13 +225,297 @@ def _load_resume_manifest(run_root: Path, candidate: str) -> dict[str, Any]:
         raise EvidenceError(f"cannot resume Phase 4 manifest {path}: {exception}") from exception
     if manifest.get("schema_version") != SCHEMA_VERSION or manifest.get("phase") != 4:
         raise EvidenceError("resume manifest is not a Phase 4 source execution manifest")
+    _assert_execution_manifest_seal(manifest)
     if manifest.get("candidate_commit") != candidate:
         raise EvidenceError("resume manifest belongs to a different candidate SHA")
     if manifest.get("status") == "PASS":
         raise EvidenceError("Phase 4 source execution manifest already passed")
     if manifest.get("status") == "CANDIDATE_BLOCKED":
         raise EvidenceError("classified PRODUCT, FIXTURE, or EXTERNAL_GATE blocked this candidate")
+    _validate_resume_manifest(manifest, run_root, candidate)
     return manifest
+
+
+def _timestamp(value: Any, field: str) -> datetime:
+    if not isinstance(value, str):
+        raise EvidenceError(f"resume manifest {field} is not an ISO-8601 timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exception:
+        raise EvidenceError(
+            f"resume manifest {field} is not an ISO-8601 timestamp"
+        ) from exception
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise EvidenceError(f"resume manifest {field} must include a timezone")
+    return parsed
+
+
+def _artifact_path(
+    run_root: Path,
+    relative: Any,
+    expected_sha256: Any,
+    context: str,
+) -> Path:
+    if not isinstance(relative, str) or not relative:
+        raise EvidenceError(f"{context} path is missing")
+    path = (run_root / relative).resolve()
+    if not path.is_relative_to(run_root.resolve()) or not path.is_file():
+        raise EvidenceError(f"{context} path is missing or escapes the run directory")
+    if not isinstance(expected_sha256, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", expected_sha256
+    ):
+        raise EvidenceError(f"{context} has no lowercase SHA-256")
+    if _sha256(path) != expected_sha256:
+        raise EvidenceError(f"{context} SHA-256 drifted")
+    return path
+
+
+def _validate_record_common(
+    record: Any,
+    *,
+    command_id: str,
+    candidate: str,
+    run_root: Path,
+    matrix_item: dict[str, str],
+    environment_sha256: str,
+    verification_started: datetime,
+) -> tuple[set[Path], Path | None]:
+    if not isinstance(record, dict) or record.get("id") != command_id:
+        raise EvidenceError(f"resume manifest has an invalid {command_id} record")
+    matrix_command = matrix_item["command"]
+    if (
+        record.get("candidate_commit") != candidate
+        or record.get("cwd") != matrix_item["cwd"]
+        or record.get("matrix_command") != matrix_command
+        or record.get("matrix_command_sha256")
+        != hashlib.sha256(matrix_command.encode("utf-8")).hexdigest()
+        or record.get("environment_sha256") != environment_sha256
+    ):
+        raise EvidenceError(f"{command_id}: resume record binding drifted")
+    executed = record.get("executed_command")
+    junit_output = _assert_executed_command(
+        command_id,
+        matrix_command,
+        executed,
+        record.get("executed_argv"),
+        run_root.resolve(),
+    )
+    if record.get("executed_command_sha256") != hashlib.sha256(
+        executed.encode("utf-8")
+    ).hexdigest():
+        raise EvidenceError(f"{command_id}: executed command SHA-256 drifted")
+    started = _timestamp(record.get("started_at"), f"{command_id}.started_at")
+    finished = _timestamp(record.get("finished_at"), f"{command_id}.finished_at")
+    duration = record.get("duration_seconds")
+    if (
+        started < verification_started
+        or finished < started
+        or not isinstance(duration, (int, float))
+        or isinstance(duration, bool)
+        or duration < 0
+    ):
+        raise EvidenceError(f"{command_id}: invalid resume record timeline")
+    wall_duration = (finished - started).total_seconds()
+    if abs(float(duration) - wall_duration) > max(5.0, wall_duration * 0.05):
+        raise EvidenceError(f"{command_id}: duration is not bound to command timestamps")
+    for stream in ("stdout", "stderr"):
+        _artifact_path(
+            run_root,
+            record.get(f"{stream}_path"),
+            record.get(f"{stream}_sha256"),
+            f"{command_id} {stream}",
+        )
+    raw_reports = record.get("raw_reports")
+    if not isinstance(raw_reports, list):
+        raise EvidenceError(f"{command_id}: raw JUnit records are invalid")
+    retained: set[Path] = set()
+    for raw in raw_reports:
+        if not isinstance(raw, dict):
+            raise EvidenceError(f"{command_id}: raw JUnit record is invalid")
+        retained.add(
+            _artifact_path(
+                run_root,
+                raw.get("path"),
+                raw.get("sha256"),
+                f"{command_id} raw JUnit",
+            )
+        )
+    return retained, junit_output
+
+
+def _validate_accepted_record(
+    record: Any,
+    *,
+    command_id: str,
+    candidate: str,
+    run_root: Path,
+    matrix_item: dict[str, str],
+    environment_sha256: str,
+    verification_started: datetime,
+) -> None:
+    retained, junit_output = _validate_record_common(
+        record,
+        command_id=command_id,
+        candidate=candidate,
+        run_root=run_root,
+        matrix_item=matrix_item,
+        environment_sha256=environment_sha256,
+        verification_started=verification_started,
+    )
+    if (
+        record.get("exit_code") != 0
+        or record.get("accepted") is not True
+        or record.get("failure_classification") != "NONE"
+        or not retained
+        or (junit_output is not None and junit_output not in retained)
+    ):
+        raise EvidenceError(f"{command_id}: resume source command was not accepted")
+    expected_report = SOURCE_REPORTS[command_id]
+    if (
+        record.get("report") != expected_report
+        or record.get("report_path") != f"source/{expected_report}"
+    ):
+        raise EvidenceError(f"{command_id}: accepted report path drifted")
+    report_path = _artifact_path(
+        run_root,
+        record.get("report_path"),
+        record.get("report_sha256"),
+        f"{command_id} accepted report",
+    )
+    report = parse_junit(report_path)
+    if report.candidate_commit != candidate or report.command_id != command_id:
+        raise EvidenceError(f"{command_id}: accepted report binding drifted")
+    totals = report.totals
+    if totals["failures"] or totals["errors"] or totals["skipped"]:
+        raise EvidenceError(f"{command_id}: accepted report is not all-pass zero-skip")
+    for field in ("tests", "failures", "errors", "skipped"):
+        if record.get(field) != totals[field]:
+            raise EvidenceError(f"{command_id}: accepted report totals drifted")
+
+
+def _validate_failed_record(
+    record: Any,
+    *,
+    command_id: str,
+    candidate: str,
+    run_root: Path,
+    matrix_item: dict[str, str],
+    environment_sha256: str,
+    verification_started: datetime,
+    classification: str,
+) -> None:
+    _validate_record_common(
+        record,
+        command_id=command_id,
+        candidate=candidate,
+        run_root=run_root,
+        matrix_item=matrix_item,
+        environment_sha256=environment_sha256,
+        verification_started=verification_started,
+    )
+    if (
+        record.get("exit_code") == 0
+        or record.get("accepted") is not False
+        or record.get("failure_classification") != classification
+    ):
+        raise EvidenceError(f"{command_id}: failed resume record is invalid")
+
+
+def _validate_resume_manifest(
+    manifest: dict[str, Any], run_root: Path, candidate: str
+) -> None:
+    if manifest.get("attempt_id") != run_root.name:
+        raise EvidenceError("resume manifest attempt ID does not match its run directory")
+    if manifest.get("status") not in {"RUNNING", "REQUIRES_CLASSIFICATION"}:
+        raise EvidenceError("resume manifest is not in a resumable state")
+    if manifest.get("verification_finished_at") is not None:
+        raise EvidenceError("resumable manifest already has a verification finish time")
+    if manifest.get("quarantined_attempts_reused") is not False:
+        raise EvidenceError("resume manifest reused a quarantined attempt")
+    environment = manifest.get("environment")
+    if not isinstance(environment, dict):
+        raise EvidenceError("resume manifest lacks its execution environment")
+    snapshot_sha256 = environment.get("snapshot_sha256")
+    unsigned_environment = dict(environment)
+    unsigned_environment.pop("snapshot_sha256", None)
+    if snapshot_sha256 != _json_sha256(unsigned_environment):
+        raise EvidenceError("resume environment snapshot SHA-256 drifted")
+    dependencies = environment.get("dependency_manifests")
+    if not isinstance(dependencies, list) or not dependencies:
+        raise EvidenceError("resume environment lacks dependency manifest hashes")
+    for dependency in dependencies:
+        if not isinstance(dependency, dict) or not isinstance(dependency.get("path"), str):
+            raise EvidenceError("resume environment dependency record is invalid")
+        path = (ROOT / dependency["path"]).resolve()
+        if not path.is_relative_to(ROOT.resolve()) or not path.is_file():
+            raise EvidenceError("resume environment dependency path escapes the candidate")
+        if dependency.get("sha256") != _sha256(path):
+            raise EvidenceError("resume environment dependency SHA-256 drifted")
+    verification_started = _timestamp(
+        manifest.get("verification_started_at"), "verification_started_at"
+    )
+    commands = focused_commands(load_matrix())
+    records = manifest.get("commands")
+    if not isinstance(records, list) or len(records) > len(COMMAND_ORDER):
+        raise EvidenceError("resume manifest accepted command list is invalid")
+    record_ids = [record.get("id") if isinstance(record, dict) else None for record in records]
+    if record_ids != list(COMMAND_ORDER[: len(records)]):
+        raise EvidenceError("resume manifest accepted commands are not an ordered source prefix")
+    for record, command_id in zip(
+        records, COMMAND_ORDER[: len(records)], strict=True
+    ):
+        _validate_accepted_record(
+            record,
+            command_id=command_id,
+            candidate=candidate,
+            run_root=run_root,
+            matrix_item=commands[command_id],
+            environment_sha256=snapshot_sha256,
+            verification_started=verification_started,
+        )
+    source_dir = run_root / "source"
+    observed_sources = (
+        {path.name for path in source_dir.iterdir() if path.is_file()}
+        if source_dir.is_dir()
+        else set()
+    )
+    expected_sources = {SOURCE_REPORTS[command_id] for command_id in record_ids}
+    if observed_sources != expected_sources:
+        raise EvidenceError("resume source report set drifted from accepted commands")
+    pending = manifest.get("pending_failure")
+    next_command = COMMAND_ORDER[len(records)] if len(records) < len(COMMAND_ORDER) else None
+    if manifest["status"] == "REQUIRES_CLASSIFICATION":
+        if pending is None or next_command is None:
+            raise EvidenceError("classification state has no next source failure")
+        _validate_failed_record(
+            pending,
+            command_id=next_command,
+            candidate=candidate,
+            run_root=run_root,
+            matrix_item=commands[next_command],
+            environment_sha256=snapshot_sha256,
+            verification_started=verification_started,
+            classification="UNCLASSIFIED",
+        )
+    elif pending is not None:
+        raise EvidenceError("RUNNING resume manifest retains an unclassified failure")
+    quarantined = manifest.get("quarantined_attempts")
+    if not isinstance(quarantined, list):
+        raise EvidenceError("resume manifest quarantined attempts are invalid")
+    for attempt in quarantined:
+        command_id = attempt.get("id") if isinstance(attempt, dict) else None
+        if command_id not in SOURCE_REPORTS:
+            raise EvidenceError("resume manifest contains an unknown quarantined source")
+        _validate_failed_record(
+            attempt,
+            command_id=command_id,
+            candidate=candidate,
+            run_root=run_root,
+            matrix_item=commands[command_id],
+            environment_sha256=snapshot_sha256,
+            verification_started=verification_started,
+            classification="INFRA",
+        )
 
 
 def _classification_map(values: Sequence[str]) -> dict[str, str]:
@@ -266,36 +571,81 @@ def _command_for_source(
     *,
     report_suffix: str,
 ) -> str:
-    command = matrix_command.rstrip()
-    if command_id in {"python_phase_4", "static_phase_4"}:
-        return command + f" --junitxml={_quoted_path(raw_path)}"
-    if command_id == "frontend_phase_4":
-        return command + f" --reporter=junit --outputFile={_quoted_path(raw_path)}"
-    if not re.search(r"\btest$", command):
-        raise EvidenceError("java_phase_4 command must end in the Maven test goal")
-    return re.sub(
-        r"\btest$",
-        f"-Dsurefire.reportNameSuffix={report_suffix} test",
-        command,
+    return render_command_argv(
+        _command_argv_for_source(
+            command_id,
+            matrix_command,
+            raw_path,
+            report_suffix=report_suffix,
+        )
     )
 
 
-def _run_shell(command: str, cwd: Path, stdout_path: Path, stderr_path: Path) -> tuple[str, str, float, int]:
+def _command_argv_for_source(
+    command_id: str,
+    matrix_command: str,
+    raw_path: Path,
+    *,
+    report_suffix: str,
+) -> list[str]:
+    arguments = _split_approved_command(matrix_command)
+    if command_id in {"python_phase_4", "static_phase_4"}:
+        return [*arguments, f"--junitxml={raw_path.resolve()}"]
+    if command_id == "frontend_phase_4":
+        return [*arguments, "--reporter=junit", f"--outputFile={raw_path.resolve()}"]
+    if arguments[-1:] != ["test"]:
+        raise EvidenceError("java_phase_4 command must end in the Maven test goal")
+    if not re.fullmatch(r"p4-[0-9a-f]{12}-[0-9a-f]{8}", report_suffix):
+        raise EvidenceError("java_phase_4 report suffix is invalid")
+    return [
+        *arguments[:-1],
+        f"-Dsurefire.reportNameSuffix={report_suffix}",
+        "test",
+    ]
+
+
+def _run_shell(
+    command: Sequence[str],
+    cwd: Path,
+    stdout_path: Path,
+    stderr_path: Path,
+) -> tuple[str, str, float, int]:
     started_at = _utc_now()
     started = time.perf_counter()
     with stdout_path.open("w", encoding="utf-8", errors="replace") as stdout, stderr_path.open(
         "w", encoding="utf-8", errors="replace"
     ) as stderr:
+        invocation = list(command)
+        if os.name == "nt" and invocation[0].lower().endswith((".cmd", ".bat")):
+            _assert_cmd_exe_safe(invocation)
+            invocation = [
+                "cmd.exe",
+                "/d",
+                "/v:off",
+                "/s",
+                "/c",
+                subprocess.list2cmdline(invocation),
+            ]
         process = subprocess.run(
-            command,
+            invocation,
             cwd=cwd,
-            shell=True,
+            shell=False,
             check=False,
             stdout=stdout,
             stderr=stderr,
         )
     duration = round(time.perf_counter() - started, 3)
     return started_at, _utc_now(), duration, process.returncode
+
+
+def _assert_cmd_exe_safe(invocation: Sequence[str]) -> None:
+    if not invocation:
+        raise EvidenceError("source command argv is empty")
+    for argument in invocation:
+        if re.search(r"[&|<>^%!\r\n]", argument):
+            raise EvidenceError(
+                "Windows cmd wrapper rejected shell control characters in source argv"
+            )
 
 
 def _raw_reports(
@@ -327,18 +677,21 @@ def _record_source(
         f"p4-{candidate[:12]}-{hashlib.sha256(str(attempt_dir).encode('utf-8')).hexdigest()[:8]}"
     )
     cwd = (ROOT / matrix_item["cwd"]).resolve()
+    if not cwd.is_dir() or not cwd.is_relative_to(ROOT.resolve()):
+        raise EvidenceError(f"{command_id}: matrix cwd escapes the candidate worktree")
     if command_id == "java_phase_4":
         stale = _raw_reports(command_id, raw_path, report_suffix, cwd)
         if stale:
             raise EvidenceError("candidate-specific Surefire report suffix is not unique")
-    executed_command = _command_for_source(
+    executed_argv = _command_argv_for_source(
         command_id,
         matrix_item["command"],
         raw_path,
         report_suffix=report_suffix,
     )
+    executed_command = render_command_argv(executed_argv)
     started_at, finished_at, duration, exit_code = _run_shell(
-        executed_command, cwd, stdout_path, stderr_path
+        executed_argv, cwd, stdout_path, stderr_path
     )
     _assert_candidate_unchanged(candidate, run_root)
     raw_reports = _raw_reports(command_id, raw_path, report_suffix, cwd)
@@ -360,6 +713,7 @@ def _record_source(
             matrix_item["command"].encode("utf-8")
         ).hexdigest(),
         "executed_command": executed_command,
+        "executed_argv": executed_argv,
         "executed_command_sha256": hashlib.sha256(
             executed_command.encode("utf-8")
         ).hexdigest(),
@@ -433,6 +787,7 @@ def execute_checkpoint(
 ) -> dict[str, Any]:
     candidate = _assert_candidate(candidate_commit)
     run_root = run_root.resolve()
+    assert_candidate_run_directory(run_root)
     if resume:
         if not run_root.is_dir():
             raise EvidenceError(f"resume run directory does not exist: {run_root}")
@@ -447,11 +802,11 @@ def execute_checkpoint(
             environment_id=environment_id,
             run_root=run_root,
         )
-        _write_json(run_root / MANIFEST_NAME, manifest)
+        _write_manifest(run_root / MANIFEST_NAME, manifest)
     _assert_candidate_unchanged(candidate, run_root)
     classification_map = _classification_map(classifications)
     if not _classify_pending_failure(manifest, classification_map):
-        _write_json(run_root / MANIFEST_NAME, manifest)
+        _write_manifest(run_root / MANIFEST_NAME, manifest)
         return manifest
 
     matrix = load_matrix()
@@ -471,10 +826,10 @@ def execute_checkpoint(
         if not passed:
             manifest["pending_failure"] = record
             manifest["status"] = "REQUIRES_CLASSIFICATION"
-            _write_json(run_root / MANIFEST_NAME, manifest)
+            _write_manifest(run_root / MANIFEST_NAME, manifest)
             return manifest
         manifest["commands"].append(record)
-        _write_json(run_root / MANIFEST_NAME, manifest)
+        _write_manifest(run_root / MANIFEST_NAME, manifest)
 
     manifest["status"] = "PASS"
     manifest["verification_finished_at"] = _utc_now()
@@ -482,7 +837,7 @@ def execute_checkpoint(
     manifest["MIG-003"] = "PENDING_PROMOTION"
     manifest["MIG-004"] = "PENDING_PROMOTION"
     _assert_candidate_unchanged(candidate, run_root)
-    _write_json(run_root / MANIFEST_NAME, manifest)
+    _write_manifest(run_root / MANIFEST_NAME, manifest)
     return manifest
 
 

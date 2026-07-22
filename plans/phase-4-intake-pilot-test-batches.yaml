@@ -848,6 +848,7 @@ batches:
       - MigrationIntegrationTest
       - IntakeSyntheticShadowConfigurationTest
       - TemporalWorkerConfigurationTest
+      - IntakeReliabilityHarnessTest
       - IntakeGraphCommandFactoryTest
       - IntakeGraphResultFinalizerTest
       - IntakeProcessProjectionAdapterTest
@@ -992,6 +993,7 @@ batches:
         - static-phase4-junit.xml
       execution_manifest: source-execution-manifest.json
       execution_manifest_required_fields:
+        - manifest_sha256
         - candidate_commit
         - environment
         - commands
@@ -999,6 +1001,7 @@ batches:
         - command_durations
         - command_exit_codes
         - command_and_report_sha256
+        - executed_argv
         - failure_classification
       derived_views:
         - batch-0-junit.xml

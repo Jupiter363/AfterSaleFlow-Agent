@@ -6,6 +6,7 @@ import fnmatch
 import hashlib
 import json
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -147,6 +148,40 @@ def _json_sha256(value: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def seal_execution_manifest(manifest: dict[str, Any]) -> str:
+    unsigned = dict(manifest)
+    unsigned.pop("manifest_sha256", None)
+    digest = _json_sha256(unsigned)
+    manifest["manifest_sha256"] = digest
+    return digest
+
+
+def _assert_execution_manifest_seal(manifest: dict[str, Any]) -> None:
+    expected = manifest.get("manifest_sha256")
+    if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+        raise EvidenceError("execution manifest has no lowercase manifest SHA-256")
+    unsigned = dict(manifest)
+    unsigned.pop("manifest_sha256", None)
+    if _json_sha256(unsigned) != expected:
+        raise EvidenceError("execution manifest SHA-256 drifted")
+
+
+def _split_approved_command(command: str) -> list[str]:
+    try:
+        arguments = shlex.split(command, posix=False)
+    except ValueError as exception:
+        raise EvidenceError(f"approved source command cannot be parsed: {exception}") from exception
+    if not arguments or any(not isinstance(argument, str) or not argument for argument in arguments):
+        raise EvidenceError("approved source command has an empty argument")
+    if any(re.search(r"[&|<>^%!\r\n]", argument) for argument in arguments):
+        raise EvidenceError("approved source command contains shell control characters")
+    return arguments
+
+
+def render_command_argv(arguments: Sequence[str]) -> str:
+    return shlex.join(list(arguments))
+
+
 def _manifest_timestamp(value: Any, field: str) -> datetime:
     if not isinstance(value, str):
         raise EvidenceError(f"execution manifest {field} must be an ISO-8601 timestamp")
@@ -164,26 +199,56 @@ def _assert_file_digest(path: Path, expected: Any, context: str) -> None:
         raise EvidenceError(f"{context} SHA-256 drifted: {actual} != {expected}")
 
 
-def _assert_executed_command(command_id: str, matrix_command: str, executed: Any) -> None:
+def _assert_executed_command(
+    command_id: str,
+    matrix_command: str,
+    executed: Any,
+    executed_argv: Any,
+    run_root: Path,
+) -> Path | None:
     if not isinstance(executed, str) or not executed.strip():
         raise EvidenceError(f"{command_id}: executed command is missing")
+    if (
+        not isinstance(executed_argv, list)
+        or not executed_argv
+        or any(not isinstance(argument, str) or not argument for argument in executed_argv)
+    ):
+        raise EvidenceError(f"{command_id}: executed argv is missing or invalid")
+    if executed != render_command_argv(executed_argv):
+        raise EvidenceError(f"{command_id}: executed command text does not match argv")
+    approved = _split_approved_command(matrix_command)
     if command_id in {"python_phase_4", "static_phase_4"}:
-        valid = executed.startswith(matrix_command.rstrip() + " --junitxml=")
+        if executed_argv[: len(approved)] != approved or len(executed_argv) != len(approved) + 1:
+            raise EvidenceError(f"{command_id}: executed argv drifted from the matrix")
+        output = executed_argv[-1]
+        if not output.startswith("--junitxml=") or not output.removeprefix("--junitxml="):
+            raise EvidenceError(f"{command_id}: JUnit output argument is invalid")
+        report_path = Path(output.removeprefix("--junitxml=")).resolve()
     elif command_id == "frontend_phase_4":
-        valid = executed.startswith(
-            matrix_command.rstrip() + " --reporter=junit --outputFile="
-        )
+        if executed_argv[: len(approved)] != approved or len(executed_argv) != len(approved) + 2:
+            raise EvidenceError(f"{command_id}: executed argv drifted from the matrix")
+        if executed_argv[-2] != "--reporter=junit" or not executed_argv[-1].startswith(
+            "--outputFile="
+        ):
+            raise EvidenceError(f"{command_id}: JUnit reporter arguments are invalid")
+        report_path = Path(executed_argv[-1].removeprefix("--outputFile=")).resolve()
     else:
-        prefix = re.sub(r"\btest$", "", matrix_command.rstrip())
-        valid = bool(
-            executed.startswith(prefix)
-            and re.search(
-                r"-Dsurefire\.reportNameSuffix=p4-[0-9a-f]{12}-[0-9a-f]{8} test$",
-                executed,
+        if approved[-1:] != ["test"]:
+            raise EvidenceError("java_phase_4 matrix command must end in the Maven test goal")
+        if (
+            len(executed_argv) != len(approved) + 1
+            or executed_argv[: len(approved) - 1] != approved[:-1]
+            or not re.fullmatch(
+                r"-Dsurefire\.reportNameSuffix=p4-[0-9a-f]{12}-[0-9a-f]{8}",
+                executed_argv[-2],
             )
-        )
-    if not valid:
-        raise EvidenceError(f"{command_id}: executed command is not the approved JUnit transform")
+            or executed_argv[-1] != "test"
+        ):
+            raise EvidenceError(f"{command_id}: executed argv is not the approved JUnit transform")
+        return None
+    if not report_path.is_relative_to(run_root):
+        raise EvidenceError(f"{command_id}: JUnit output path escapes the run directory")
+    return report_path
 
 
 def load_execution_manifest(
@@ -199,6 +264,7 @@ def load_execution_manifest(
         raise EvidenceError(f"cannot load execution manifest {path}: {exception}") from exception
     if not isinstance(manifest, dict):
         raise EvidenceError("execution manifest must be a JSON object")
+    _assert_execution_manifest_seal(manifest)
     if manifest.get("schema_version") != EXECUTION_MANIFEST_SCHEMA:
         raise EvidenceError("unsupported Phase 4 source execution manifest schema")
     if manifest.get("phase") != 4 or manifest.get("candidate_commit") != candidate_commit:
@@ -291,7 +357,13 @@ def load_execution_manifest(
         if record.get("matrix_command_sha256") != expected_matrix_hash:
             raise EvidenceError(f"{command_id}: matrix command SHA-256 drifted")
         executed = record.get("executed_command")
-        _assert_executed_command(command_id, matrix_command, executed)
+        junit_output = _assert_executed_command(
+            command_id,
+            matrix_command,
+            executed,
+            record.get("executed_argv"),
+            run_root,
+        )
         if record.get("executed_command_sha256") != hashlib.sha256(
             executed.encode("utf-8")
         ).hexdigest():
@@ -314,6 +386,9 @@ def load_execution_manifest(
             or duration < 0
         ):
             raise EvidenceError(f"{command_id}: invalid command timeline or duration")
+        wall_duration = (finished - started).total_seconds()
+        if abs(float(duration) - wall_duration) > max(5.0, wall_duration * 0.05):
+            raise EvidenceError(f"{command_id}: duration is not bound to command timestamps")
         expected_report = SOURCE_REPORTS[command_id]
         if record.get("report") != expected_report or record.get("report_path") != (
             f"source/{expected_report}"
@@ -331,17 +406,21 @@ def load_execution_manifest(
         raw_reports = record.get("raw_reports")
         if not isinstance(raw_reports, list) or not raw_reports:
             raise EvidenceError(f"{command_id}: no retained raw JUnit reports")
+        retained_raw_paths: set[Path] = set()
         for raw in raw_reports:
             if not isinstance(raw, dict) or not isinstance(raw.get("path"), str):
                 raise EvidenceError(f"{command_id}: invalid raw JUnit record")
             raw_path = (run_root / raw["path"]).resolve()
             if not raw_path.is_relative_to(run_root):
                 raise EvidenceError(f"{command_id}: raw JUnit path escapes the run directory")
+            retained_raw_paths.add(raw_path)
             _assert_file_digest(
                 raw_path,
                 raw.get("sha256"),
                 f"{command_id} raw JUnit",
             )
+        if junit_output is not None and junit_output not in retained_raw_paths:
+            raise EvidenceError(f"{command_id}: executed JUnit output was not retained")
         for stream in ("stdout", "stderr"):
             relative = record.get(f"{stream}_path")
             if not isinstance(relative, str):
@@ -361,15 +440,82 @@ def load_execution_manifest(
     if not isinstance(quarantined, list):
         raise EvidenceError("execution manifest quarantined attempts must be a list")
     for attempt in quarantined:
+        if not isinstance(attempt, dict) or attempt.get("id") not in SOURCE_REPORTS:
+            raise EvidenceError("a PASS manifest may retain only classified same-SHA INFRA attempts")
+        command_id = attempt["id"]
+        matrix_item = commands[command_id]
+        matrix_command = matrix_item["command"]
         if (
-            not isinstance(attempt, dict)
-            or attempt.get("candidate_commit") != candidate_commit
-            or attempt.get("id") not in SOURCE_REPORTS
+            attempt.get("candidate_commit") != candidate_commit
+            or attempt.get("cwd") != matrix_item["cwd"]
+            or attempt.get("matrix_command") != matrix_command
+            or attempt.get("matrix_command_sha256")
+            != hashlib.sha256(matrix_command.encode("utf-8")).hexdigest()
             or attempt.get("exit_code") == 0
             or attempt.get("accepted") is not False
             or attempt.get("failure_classification") != "INFRA"
+            or attempt.get("environment_sha256") != snapshot_sha256
         ):
-            raise EvidenceError("a PASS manifest may retain only classified same-SHA INFRA attempts")
+            raise EvidenceError("a PASS manifest may retain only authenticated same-SHA INFRA attempts")
+        executed = attempt.get("executed_command")
+        _assert_executed_command(
+            command_id,
+            matrix_command,
+            executed,
+            attempt.get("executed_argv"),
+            run_root,
+        )
+        if attempt.get("executed_command_sha256") != hashlib.sha256(
+            executed.encode("utf-8")
+        ).hexdigest():
+            raise EvidenceError(f"{command_id}: quarantined command SHA-256 drifted")
+        started = _manifest_timestamp(
+            attempt.get("started_at"), f"quarantined.{command_id}.started_at"
+        )
+        finished = _manifest_timestamp(
+            attempt.get("finished_at"), f"quarantined.{command_id}.finished_at"
+        )
+        duration = attempt.get("duration_seconds")
+        if (
+            finished < started
+            or started < verification_started
+            or finished > verification_finished
+            or not isinstance(duration, (int, float))
+            or isinstance(duration, bool)
+            or duration < 0
+        ):
+            raise EvidenceError(f"{command_id}: invalid quarantined command timeline")
+        wall_duration = (finished - started).total_seconds()
+        if abs(float(duration) - wall_duration) > max(5.0, wall_duration * 0.05):
+            raise EvidenceError(
+                f"{command_id}: quarantined duration is not bound to timestamps"
+            )
+        raw_reports = attempt.get("raw_reports")
+        if not isinstance(raw_reports, list):
+            raise EvidenceError(f"{command_id}: invalid quarantined raw JUnit records")
+        for raw in raw_reports:
+            if not isinstance(raw, dict) or not isinstance(raw.get("path"), str):
+                raise EvidenceError(f"{command_id}: invalid quarantined raw JUnit record")
+            raw_path = (run_root / raw["path"]).resolve()
+            if not raw_path.is_relative_to(run_root):
+                raise EvidenceError(f"{command_id}: quarantined raw JUnit path escapes")
+            _assert_file_digest(
+                raw_path,
+                raw.get("sha256"),
+                f"{command_id} quarantined raw JUnit",
+            )
+        for stream in ("stdout", "stderr"):
+            relative = attempt.get(f"{stream}_path")
+            if not isinstance(relative, str):
+                raise EvidenceError(f"{command_id}: missing quarantined {stream} path")
+            stream_path = (run_root / relative).resolve()
+            if not stream_path.is_relative_to(run_root):
+                raise EvidenceError(f"{command_id}: quarantined {stream} path escapes")
+            _assert_file_digest(
+                stream_path,
+                attempt.get(f"{stream}_sha256"),
+                f"{command_id} quarantined {stream}",
+            )
     return manifest
 
 
@@ -1072,10 +1218,16 @@ def assemble_evidence(
     engineering_started_at: str,
     verification_started_at: str,
     verification_finished_at: str,
-    execution_manifest: dict[str, Any],
+    execution_manifest_path: Path,
 ) -> dict[str, Any]:
     candidate_commit = _assert_candidate(candidate_commit)
     assert_candidate_chain_policy(matrix, policy)
+    execution_manifest = load_execution_manifest(
+        path=execution_manifest_path,
+        candidate_commit=candidate_commit,
+        matrix=matrix,
+        source_dir=source_dir,
+    )
     output_dir.mkdir(parents=True, exist_ok=False)
     reports = consume_source_reports(
         source_dir=source_dir,
@@ -1153,6 +1305,17 @@ def _git_result(*arguments: str, repository: Path = ROOT) -> subprocess.Complete
         text=True,
         encoding="utf-8",
     )
+
+
+def assert_candidate_run_directory(run_root: Path, repository: Path = ROOT) -> None:
+    resolved = run_root.resolve()
+    candidate_root = repository.resolve()
+    if resolved.is_relative_to(candidate_root) and not resolved.is_relative_to(
+        candidate_root / ".codex-run"
+    ):
+        raise EvidenceError(
+            "candidate run directory inside the repository must be under .codex-run"
+        )
 
 
 def assert_clean_detached_candidate(
@@ -1270,17 +1433,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         policy = _load_yaml(POLICY_PATH)
         source_dir = arguments.source_dir.resolve()
         execution_manifest_path = arguments.execution_manifest.resolve()
+        assert_candidate_run_directory(execution_manifest_path.parent)
         assert_clean_detached_candidate(
             candidate_commit,
             allowed_untracked_roots=(execution_manifest_path.parent,),
         )
         assert_base_ancestor(arguments.base_commit, candidate_commit)
-        execution_manifest = load_execution_manifest(
-            path=execution_manifest_path,
-            candidate_commit=candidate_commit,
-            matrix=matrix,
-            source_dir=source_dir,
-        )
         if output_dir.exists() or staging.exists():
             raise EvidenceError(f"evidence output or staging path already exists: {output_dir}")
         metrics = assemble_evidence(
@@ -1294,7 +1452,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             engineering_started_at=arguments.engineering_started_at,
             verification_started_at=arguments.verification_started_at,
             verification_finished_at=arguments.verification_finished_at,
-            execution_manifest=execution_manifest,
+            execution_manifest_path=execution_manifest_path,
         )
         assert_clean_detached_candidate(
             candidate_commit,
