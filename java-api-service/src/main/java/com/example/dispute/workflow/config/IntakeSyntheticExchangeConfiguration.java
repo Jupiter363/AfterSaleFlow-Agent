@@ -22,13 +22,19 @@ import org.springframework.context.annotation.Configuration;
 @Configuration(proxyBeanMethods = false)
 @EnableConfigurationProperties({
     IntakeEpochSelectionProperties.class,
-    GraphCommandClientProperties.class,
     AgentRunV2Properties.class,
     IntakeSyntheticExchangeProperties.class
 })
 @ConditionalOnProperty(
         name = "app.orchestration.intake-epoch-selection.signed-synthetic-shadow-enabled",
         havingValue = "true")
+@ConditionalOnProperty(
+        name = "app.orchestration.intake-synthetic-exchange.enabled",
+        havingValue = "true")
+@ConditionalOnProperty(
+        name = "app.temporal.worker.enabled",
+        havingValue = "false",
+        matchIfMissing = true)
 public class IntakeSyntheticExchangeConfiguration {
 
     @Bean
@@ -65,10 +71,9 @@ public class IntakeSyntheticExchangeConfiguration {
             IntakeExchangePayloadObjectStoreGateway payloadStore,
             IntakeImmutablePayloadPublisher proposalPublisher,
             IntakeEpochSelectionProperties epochSelection,
-            GraphCommandClientProperties graphClient,
             AgentRunV2Properties agentRunV2,
             IntakeExchangeCanonicalPayloadValidator validator) {
-        requireSyntheticShadow(epochSelection, graphClient, agentRunV2);
+        requireSyntheticShadow(epochSelection, agentRunV2);
         return new IntakeExchangeService(
                 authority,
                 new IntakePrivateObjectStoreExchangeAdapter(payloadStore, proposalPublisher),
@@ -77,14 +82,10 @@ public class IntakeSyntheticExchangeConfiguration {
 
     private static void requireSyntheticShadow(
             IntakeEpochSelectionProperties epochSelection,
-            GraphCommandClientProperties graphClient,
             AgentRunV2Properties agentRunV2) {
         if (!epochSelection.shadowSelectionConfigured()) {
             throw new IllegalStateException(
                     "Intake exchange requires a complete signed synthetic SHADOW selection");
-        }
-        if (graphClient.mode() != GraphCommandClientProperties.Mode.SHADOW) {
-            throw new IllegalStateException("Intake exchange requires Graph client mode SHADOW");
         }
         if (agentRunV2.enabled()) {
             throw new IllegalStateException(

@@ -10,6 +10,7 @@ import com.example.dispute.workflow.activity.intake.IntakeImmutablePayloadPublis
 import com.example.dispute.workflow.activity.intake.IntakeSnapshotPublicationPort;
 import com.example.dispute.workflow.application.intake.IntakeGraphBindingStore;
 import com.example.dispute.workflow.infrastructure.objectstore.intake.IntakeRuntimeMaterialObjectStore;
+import com.example.dispute.workflow.infrastructure.objectstore.intake.MinioIntakeSyntheticExchangeStore;
 import com.example.dispute.workflow.infrastructure.objectstore.intake.PrivateObjectStoreIntakeSyntheticRuntimeMaterialSource;
 import com.example.dispute.workflow.shadow.intake.IntakeRuntimeMaterialManifestReferenceSource;
 import com.example.dispute.workflow.shadow.intake.IntakeSignedSyntheticAdmissionPort;
@@ -22,10 +23,12 @@ import com.example.dispute.workflow.shadow.intake.IntakeSyntheticSnapshotMateria
 import com.example.dispute.workflow.shadow.intake.IntakeSyntheticWorkerRegistration;
 import com.example.dispute.workflow.shadow.intake.JdbcIntakeSyntheticComparisonLedger;
 import com.example.dispute.workflow.shadow.intake.JdbcIntakeSyntheticRuntimeSource;
+import com.example.dispute.workflow.shadow.intake.SignedSyntheticIntakeCommandAdmissionLookup;
 import com.example.dispute.workflow.shadow.intake.SignedSyntheticIntakeDriver;
 import com.example.dispute.workflow.shadow.intake.admission.IntakeSyntheticAdmissionTrustSet;
 import com.example.dispute.workflow.shadow.intake.admission.JdbcIntakeSignedSyntheticAdmissionPort;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.minio.MinioClient;
 import java.lang.reflect.Method;
 import java.nio.file.Path;
 import java.util.Arrays;
@@ -47,8 +50,13 @@ class IntakeSyntheticShadowConfigurationTest {
     private static final String POLICY =
             "app.orchestration.intake-epoch-selection.cohort-policy-version=synthetic.v1";
     private static final String GRAPH_MODE = "app.agent-run-v2.graph-client.mode=SHADOW";
+    private static final String GRAPH_DISABLED =
+            "app.agent-run-v2.graph-client.mode=DISABLED";
     private static final String GRAPH_ENDPOINT =
             "app.agent-run-v2.graph-client.base-uri=https://python-agent-service:18000";
+    private static final String AGENT_ROLE = "app.temporal.worker.role=AGENT";
+    private static final String CONTROL_ROLE = "app.temporal.worker.role=CONTROL";
+    private static final String WORKER_ENABLED = "app.temporal.worker.enabled=true";
     private static final String RUNTIME_MATERIAL_ENABLED =
             "app.orchestration.intake-synthetic-runtime-material.enabled=true";
     private static final String RUNTIME_MATERIAL_INDEX =
@@ -71,18 +79,37 @@ class IntakeSyntheticShadowConfigurationTest {
     }
 
     @Test
-    void enabledModeBuildsTheLedgerRegistrationAndSameDriver() {
+    void agentRoleBuildsOnlyTheComparisonActivityRegistration() {
         enabledRunner().run(context -> {
             assertThat(context).hasNotFailed();
             assertThat(context).hasSingleBean(JdbcIntakeSyntheticComparisonLedger.class);
             assertThat(context).hasSingleBean(IntakeSyntheticWorkerRegistration.class);
-            assertThat(context).hasSingleBean(SignedSyntheticIntakeDriver.class);
-
-            IntakeSyntheticWorkerRegistration registration =
-                    context.getBean(IntakeSyntheticWorkerRegistration.class);
-            assertThat(context.getBean(SignedSyntheticIntakeDriver.class))
-                    .isSameAs(registration.driver());
+            assertThat(context).doesNotHaveBean(SignedSyntheticIntakeDriver.class);
+            assertThat(context).doesNotHaveBean(IntakeAuthorityWorkerRegistration.class);
         });
+    }
+
+    @Test
+    void apiRoleBuildsTheAdmissionDriverWithoutAgentOrControlRuntime() {
+        baseRunner()
+                .withPropertyValues(
+                        ENABLED,
+                        EPOCH_MODE,
+                        COHORT,
+                        POLICY,
+                        GRAPH_DISABLED,
+                        "app.temporal.worker.enabled=false")
+                .withBean(
+                        IntakeSignedSyntheticAdmissionPort.class,
+                        () -> mock(IntakeSignedSyntheticAdmissionPort.class))
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context).hasSingleBean(SignedSyntheticIntakeDriver.class);
+                    assertThat(context).doesNotHaveBean(IntakeSyntheticWorkerRegistration.class);
+                    assertThat(context).doesNotHaveBean(JdbcIntakeSyntheticComparisonLedger.class);
+                    assertThat(context).doesNotHaveBean(IntakeAuthorityWorkerRegistration.class);
+                    assertThat(context).doesNotHaveBean(IntakeSyntheticRuntimeSource.class);
+                });
     }
 
     @Test
@@ -96,7 +123,31 @@ class IntakeSyntheticShadowConfigurationTest {
             assertThat(context).hasSingleBean(IntakeSignedSyntheticGraphExecutionPort.class);
             assertThat(context).hasSingleBean(IntakeSyntheticParityObservationPort.class);
             assertThat(context).hasSingleBean(IntakeSyntheticWorkerRegistration.class);
+            assertThat(context).doesNotHaveBean(IntakeAuthorityWorkerRegistration.class);
+            assertThat(context).doesNotHaveBean(SignedSyntheticIntakeDriver.class);
+        });
+    }
+
+    @Test
+    void controlRoleBuildsOnlyTheAdmissionBackedAuthorityBridge() {
+        controlBridgeRunner(true).run(context -> {
+            assertThat(context).hasNotFailed();
             assertThat(context).hasSingleBean(IntakeAuthorityWorkerRegistration.class);
+            assertThat(context).doesNotHaveBean(IntakeSyntheticWorkerRegistration.class);
+            assertThat(context).doesNotHaveBean(JdbcIntakeSyntheticComparisonLedger.class);
+            assertThat(context).doesNotHaveBean(SignedSyntheticIntakeDriver.class);
+            assertThat(context).doesNotHaveBean(IntakeSyntheticRuntimeSource.class);
+        });
+    }
+
+    @Test
+    void controlRoleFailsClosedWithoutTheDurableAdmissionLookup() {
+        controlBridgeRunner(false).run(context -> {
+            assertThat(context).hasFailed();
+            assertThat(context.getStartupFailure())
+                    .rootCause()
+                    .hasMessageContaining(
+                            SignedSyntheticIntakeCommandAdmissionLookup.class.getName());
         });
     }
 
@@ -106,9 +157,7 @@ class IntakeSyntheticShadowConfigurationTest {
             assertThat(context).hasFailed();
             assertThat(context.getStartupFailure())
                     .rootCause()
-                    .hasMessageContaining(
-                            "exactly one real "
-                                    + IntakeSignedSyntheticAdmissionPort.class.getName());
+                    .hasMessageContaining(IntakeSyntheticAdmissionTrustSet.class.getName());
         });
     }
 
@@ -121,7 +170,9 @@ class IntakeSyntheticShadowConfigurationTest {
                     .hasSingleBean(IntakeSyntheticSnapshotMaterialSource.class)
                     .hasSingleBean(IntakeSyntheticGraphMaterialSource.class)
                     .hasSingleBean(IntakeSyntheticParityMaterialSource.class)
-                    .hasSingleBean(IntakeSyntheticRuntimeSource.class);
+                    .hasSingleBean(IntakeSyntheticRuntimeSource.class)
+                    .hasSingleBean(MinioIntakeSyntheticExchangeStore.class)
+                    .hasSingleBean(IntakeImmutablePayloadPublisher.class);
 
             Object provider =
                     context.getBean(PrivateObjectStoreIntakeSyntheticRuntimeMaterialSource.class);
@@ -150,7 +201,6 @@ class IntakeSyntheticShadowConfigurationTest {
     @Test
     void enabledModeFailsWhenAnyRequiredPortIsMissing() {
         List<Class<?>> requiredPorts = List.of(
-                IntakeSignedSyntheticAdmissionPort.class,
                 IntakeSnapshotPublicationPort.class,
                 IntakeSignedSyntheticGraphExecutionPort.class,
                 IntakeSyntheticParityObservationPort.class);
@@ -198,7 +248,13 @@ class IntakeSyntheticShadowConfigurationTest {
     @Test
     void enabledFlagRejectsGraphAndAgentRunModeConflicts() {
         runnerWithRequiredBeans()
-                .withPropertyValues(ENABLED, EPOCH_MODE, COHORT, POLICY)
+                .withPropertyValues(
+                        ENABLED,
+                        EPOCH_MODE,
+                        COHORT,
+                        POLICY,
+                        AGENT_ROLE,
+                        WORKER_ENABLED)
                 .run(context -> {
                     assertThat(context).hasFailed();
                     assertThat(context.getStartupFailure())
@@ -236,12 +292,28 @@ class IntakeSyntheticShadowConfigurationTest {
 
     private static ApplicationContextRunner enabledRunner() {
         return runnerWithRequiredBeans()
-                .withPropertyValues(ENABLED, EPOCH_MODE, COHORT, POLICY, GRAPH_MODE, GRAPH_ENDPOINT);
+                .withPropertyValues(
+                        ENABLED,
+                        EPOCH_MODE,
+                        COHORT,
+                        POLICY,
+                        GRAPH_MODE,
+                        GRAPH_ENDPOINT,
+                        AGENT_ROLE,
+                        WORKER_ENABLED);
     }
 
     private static ApplicationContextRunner enabledRunnerWithout(Class<?> missing) {
         ApplicationContextRunner runner = baseRunner()
-                .withPropertyValues(ENABLED, EPOCH_MODE, COHORT, POLICY, GRAPH_MODE, GRAPH_ENDPOINT)
+                .withPropertyValues(
+                        ENABLED,
+                        EPOCH_MODE,
+                        COHORT,
+                        POLICY,
+                        GRAPH_MODE,
+                        GRAPH_ENDPOINT,
+                        AGENT_ROLE,
+                        WORKER_ENABLED)
                 .withBean(DataSource.class, () -> mock(DataSource.class))
                 .withBean(ObjectMapper.class, () -> new ObjectMapper().findAndRegisterModules())
                 .withBean(
@@ -293,7 +365,17 @@ class IntakeSyntheticShadowConfigurationTest {
 
     private static ApplicationContextRunner productionRuntimeRunner(boolean trusted) {
         ApplicationContextRunner runner = baseRunner()
-                .withPropertyValues(ENABLED, EPOCH_MODE, COHORT, POLICY, GRAPH_MODE, GRAPH_ENDPOINT)
+                .withPropertyValues(
+                        ENABLED,
+                        EPOCH_MODE,
+                        COHORT,
+                        POLICY,
+                        GRAPH_MODE,
+                        GRAPH_ENDPOINT,
+                        AGENT_ROLE,
+                        WORKER_ENABLED,
+                        RUNTIME_MATERIAL_ENABLED,
+                        RUNTIME_MATERIAL_INDEX)
                 .withBean(DataSource.class, () -> mock(DataSource.class))
                 .withBean(ObjectMapper.class, () -> new ObjectMapper().findAndRegisterModules())
                 .withBean(
@@ -308,6 +390,12 @@ class IntakeSyntheticShadowConfigurationTest {
                 .withBean(
                         IntakeSyntheticParityMaterialSource.class,
                         () -> mock(IntakeSyntheticParityMaterialSource.class))
+                .withBean(
+                        IntakeRuntimeMaterialManifestReferenceSource.class,
+                        () -> mock(IntakeRuntimeMaterialManifestReferenceSource.class))
+                .withBean(
+                        IntakeRuntimeMaterialObjectStore.class,
+                        () -> mock(IntakeRuntimeMaterialObjectStore.class))
                 .withBean(
                         IntakeImmutablePayloadPublisher.class,
                         () -> mock(IntakeImmutablePayloadPublisher.class))
@@ -333,7 +421,15 @@ class IntakeSyntheticShadowConfigurationTest {
 
     private static ApplicationContextRunner runtimeMaterialRunner(boolean enabled) {
         ApplicationContextRunner runner = runnerWithRequiredBeans()
-                .withPropertyValues(ENABLED, EPOCH_MODE, COHORT, POLICY, GRAPH_MODE, GRAPH_ENDPOINT)
+                .withPropertyValues(
+                        ENABLED,
+                        EPOCH_MODE,
+                        COHORT,
+                        POLICY,
+                        GRAPH_MODE,
+                        GRAPH_ENDPOINT,
+                        AGENT_ROLE,
+                        WORKER_ENABLED)
                 .withBean(
                         IntakeSyntheticAdmissionTrustSet.class,
                         () -> mock(IntakeSyntheticAdmissionTrustSet.class))
@@ -342,9 +438,34 @@ class IntakeSyntheticShadowConfigurationTest {
                         () -> mock(IntakeRuntimeMaterialManifestReferenceSource.class))
                 .withBean(
                         IntakeRuntimeMaterialObjectStore.class,
-                        () -> mock(IntakeRuntimeMaterialObjectStore.class));
+                        () -> mock(IntakeRuntimeMaterialObjectStore.class))
+                .withBean(MinioClient.class, () -> mock(MinioClient.class));
         if (enabled) {
             runner = runner.withPropertyValues(RUNTIME_MATERIAL_ENABLED, RUNTIME_MATERIAL_INDEX);
+        }
+        return runner;
+    }
+
+    private static ApplicationContextRunner controlBridgeRunner(boolean withLookup) {
+        ApplicationContextRunner runner = baseRunner()
+                .withPropertyValues(
+                        ENABLED,
+                        EPOCH_MODE,
+                        COHORT,
+                        POLICY,
+                        GRAPH_DISABLED,
+                        CONTROL_ROLE,
+                        WORKER_ENABLED)
+                .withBean(
+                        IntakeSignedSyntheticAdmissionPort.class,
+                        () -> mock(IntakeSignedSyntheticAdmissionPort.class))
+                .withBean(
+                        IntakeChildBridgeReadPort.class,
+                        () -> mock(IntakeChildBridgeReadPort.class));
+        if (withLookup) {
+            runner = runner.withBean(
+                    SignedSyntheticIntakeCommandAdmissionLookup.class,
+                    () -> mock(SignedSyntheticIntakeCommandAdmissionLookup.class));
         }
         return runner;
     }

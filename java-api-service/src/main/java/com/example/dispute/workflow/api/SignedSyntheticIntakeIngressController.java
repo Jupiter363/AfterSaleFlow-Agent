@@ -9,7 +9,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Pattern;
 import java.time.Clock;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
@@ -24,7 +24,16 @@ import org.springframework.web.bind.annotation.RestController;
 @Validated
 @RestController
 @RequestMapping("/api/internal/disputes/{caseId}/intake/signed-synthetic/commands")
-@ConditionalOnBean(SignedSyntheticIntakeIngressService.class)
+@ConditionalOnProperty(
+        name = "app.orchestration.intake-epoch-selection.signed-synthetic-shadow-enabled",
+        havingValue = "true")
+@ConditionalOnProperty(
+        name = "app.orchestration.intake-synthetic-exchange.enabled",
+        havingValue = "true")
+@ConditionalOnProperty(
+        name = "app.temporal.worker.enabled",
+        havingValue = "false",
+        matchIfMissing = true)
 public class SignedSyntheticIntakeIngressController {
 
     private final SignedSyntheticIntakeIngressService service;

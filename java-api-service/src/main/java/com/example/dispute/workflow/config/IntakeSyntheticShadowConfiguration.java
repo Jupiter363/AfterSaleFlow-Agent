@@ -10,8 +10,10 @@ import com.example.dispute.workflow.activity.intake.IntakeSnapshotPublicationPor
 import com.example.dispute.workflow.application.intake.IntakeDomainSnapshotPublisher;
 import com.example.dispute.workflow.application.intake.IntakeGraphBindingStore;
 import com.example.dispute.workflow.application.intake.IntakeGraphCommandFactory;
+import com.example.dispute.workflow.application.intake.exchange.IntakeExchangeCanonicalPayloadValidator;
 import com.example.dispute.workflow.infrastructure.objectstore.intake.IntakeRuntimeMaterialObjectStore;
 import com.example.dispute.workflow.infrastructure.objectstore.intake.MinioIntakeRuntimeMaterialObjectStore;
+import com.example.dispute.workflow.infrastructure.objectstore.intake.MinioIntakeSyntheticExchangeStore;
 import com.example.dispute.workflow.infrastructure.objectstore.intake.PrivateObjectStoreIntakeSyntheticRuntimeMaterialSource;
 import com.example.dispute.workflow.infrastructure.persistence.authority.epoch.EpochAuthorityLockCoordinator;
 import com.example.dispute.workflow.shadow.intake.IntakeRuntimeMaterialManifestReferenceSource;
@@ -44,7 +46,6 @@ import java.time.Clock;
 import java.util.List;
 import javax.sql.DataSource;
 import org.springframework.beans.factory.ObjectProvider;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -61,6 +62,7 @@ import org.springframework.transaction.support.TransactionTemplate;
     GraphCommandClientProperties.class,
     AgentRunV2Properties.class,
     IntakeSyntheticAdmissionTrustProperties.class,
+    IntakeSyntheticExchangeProperties.class,
     IntakeSyntheticRuntimeMaterialProperties.class
 })
 @ConditionalOnProperty(
@@ -69,6 +71,9 @@ import org.springframework.transaction.support.TransactionTemplate;
 public class IntakeSyntheticShadowConfiguration {
 
     @Bean
+    @ConditionalOnProperty(
+            name = "app.temporal.worker.role",
+            havingValue = "AGENT")
     JdbcIntakeSyntheticComparisonLedger intakeSyntheticComparisonLedger(
             DataSource dataSource,
             ObjectMapper objectMapper,
@@ -76,7 +81,7 @@ public class IntakeSyntheticShadowConfiguration {
             IntakeEpochSelectionProperties epochSelection,
             GraphCommandClientProperties graphClient,
             AgentRunV2Properties agentRunV2) {
-        requireSyntheticShadow(epochSelection, graphClient, agentRunV2);
+        requireSyntheticAgentRuntime(epochSelection, graphClient, agentRunV2);
         return new JdbcIntakeSyntheticComparisonLedger(
                 new NamedParameterJdbcTemplate(dataSource),
                 objectMapper,
@@ -85,6 +90,9 @@ public class IntakeSyntheticShadowConfiguration {
     }
 
     @Bean
+    @ConditionalOnProperty(
+            name = "app.temporal.worker.role",
+            havingValue = "AGENT")
     IntakeSyntheticWorkerRegistration intakeSyntheticWorkerRegistration(
             IntakeEpochSelectionProperties epochSelection,
             GraphCommandClientProperties graphClient,
@@ -94,7 +102,7 @@ public class IntakeSyntheticShadowConfiguration {
             ObjectProvider<IntakeSignedSyntheticGraphExecutionPort> signedGraphProvider,
             ObjectProvider<IntakeSyntheticParityObservationPort> observationProvider,
             JdbcIntakeSyntheticComparisonLedger ledger) {
-        requireSyntheticShadow(epochSelection, graphClient, agentRunV2);
+        requireSyntheticAgentRuntime(epochSelection, graphClient, agentRunV2);
         return new IntakeSyntheticWorkerRegistration(
                 requireExactlyOneReal(
                         admissionProvider, IntakeSignedSyntheticAdmissionPort.class),
@@ -116,15 +124,16 @@ public class IntakeSyntheticShadowConfiguration {
     }
 
     @Bean
-    @ConditionalOnBean(IntakeSyntheticAdmissionTrustSet.class)
-    @ConditionalOnMissingBean
+    @ConditionalOnMissingBean({
+        Es256IntakeSyntheticAdmissionVerifier.class,
+        IntakeSignedSyntheticAdmissionPort.class
+    })
     Es256IntakeSyntheticAdmissionVerifier intakeSyntheticAdmissionVerifier(
             IntakeSyntheticAdmissionTrustSet trustSet) {
         return new Es256IntakeSyntheticAdmissionVerifier(trustSet, Clock.systemUTC());
     }
 
     @Bean
-    @ConditionalOnBean(Es256IntakeSyntheticAdmissionVerifier.class)
     @ConditionalOnMissingBean(IntakeSignedSyntheticAdmissionPort.class)
     JdbcIntakeSignedSyntheticAdmissionPort intakeSignedSyntheticAdmissionPort(
             Es256IntakeSyntheticAdmissionVerifier verifier,
@@ -140,7 +149,12 @@ public class IntakeSyntheticShadowConfiguration {
     }
 
     @Bean
-    @ConditionalOnBean(IntakeSyntheticAdmissionTrustSet.class)
+    @ConditionalOnProperty(
+            name = "app.orchestration.intake-synthetic-runtime-material.enabled",
+            havingValue = "true")
+    @ConditionalOnProperty(
+            name = "app.temporal.worker.role",
+            havingValue = "AGENT")
     @ConditionalOnMissingBean(IntakeSyntheticAdmissionReader.class)
     JdbcIntakeSyntheticAdmissionReader intakeSyntheticAdmissionReader() {
         return new JdbcIntakeSyntheticAdmissionReader();
@@ -150,7 +164,9 @@ public class IntakeSyntheticShadowConfiguration {
     @ConditionalOnProperty(
             name = "app.orchestration.intake-synthetic-runtime-material.enabled",
             havingValue = "true")
-    @ConditionalOnBean(IntakeSyntheticAdmissionTrustSet.class)
+    @ConditionalOnProperty(
+            name = "app.temporal.worker.role",
+            havingValue = "AGENT")
     @ConditionalOnMissingBean(IntakeRuntimeMaterialManifestReferenceSource.class)
     MountedIntakeRuntimeMaterialManifestReferenceSource
             intakeRuntimeMaterialManifestReferenceSource(
@@ -159,7 +175,7 @@ public class IntakeSyntheticShadowConfiguration {
                     IntakeEpochSelectionProperties epochSelection,
                     GraphCommandClientProperties graphClient,
                     AgentRunV2Properties agentRunV2) {
-        requireSyntheticShadow(epochSelection, graphClient, agentRunV2);
+        requireSyntheticAgentRuntime(epochSelection, graphClient, agentRunV2);
         return MountedIntakeRuntimeMaterialManifestReferenceSource.load(
                 properties.requireManifestReferenceIndexPath(), objectMapper);
     }
@@ -168,7 +184,9 @@ public class IntakeSyntheticShadowConfiguration {
     @ConditionalOnProperty(
             name = "app.orchestration.intake-synthetic-runtime-material.enabled",
             havingValue = "true")
-    @ConditionalOnBean(IntakeSyntheticAdmissionTrustSet.class)
+    @ConditionalOnProperty(
+            name = "app.temporal.worker.role",
+            havingValue = "AGENT")
     @ConditionalOnMissingBean(IntakeRuntimeMaterialObjectStore.class)
     MinioIntakeRuntimeMaterialObjectStore intakeRuntimeMaterialObjectStore(
             MinioClient minioClient,
@@ -176,7 +194,7 @@ public class IntakeSyntheticShadowConfiguration {
             IntakeEpochSelectionProperties epochSelection,
             GraphCommandClientProperties graphClient,
             AgentRunV2Properties agentRunV2) {
-        requireSyntheticShadow(epochSelection, graphClient, agentRunV2);
+        requireSyntheticAgentRuntime(epochSelection, graphClient, agentRunV2);
         return new MinioIntakeRuntimeMaterialObjectStore(
                 minioClient, properties.bucket(), properties.prefix());
     }
@@ -185,11 +203,9 @@ public class IntakeSyntheticShadowConfiguration {
     @ConditionalOnProperty(
             name = "app.orchestration.intake-synthetic-runtime-material.enabled",
             havingValue = "true")
-    @ConditionalOnBean({
-        IntakeSyntheticAdmissionTrustSet.class,
-        IntakeRuntimeMaterialManifestReferenceSource.class,
-        IntakeRuntimeMaterialObjectStore.class
-    })
+    @ConditionalOnProperty(
+            name = "app.temporal.worker.role",
+            havingValue = "AGENT")
     @ConditionalOnMissingBean({
         IntakeSyntheticSnapshotMaterialSource.class,
         IntakeSyntheticGraphMaterialSource.class,
@@ -203,19 +219,40 @@ public class IntakeSyntheticShadowConfiguration {
                     IntakeEpochSelectionProperties epochSelection,
                     GraphCommandClientProperties graphClient,
                     AgentRunV2Properties agentRunV2) {
-        requireSyntheticShadow(epochSelection, graphClient, agentRunV2);
+        requireSyntheticAgentRuntime(epochSelection, graphClient, agentRunV2);
         return new PrivateObjectStoreIntakeSyntheticRuntimeMaterialSource(
                 objectMapper, referenceSource, objectStore);
     }
 
     @Bean
-    @ConditionalOnBean({
-        IntakeSyntheticAdmissionTrustSet.class,
-        IntakeSyntheticAdmissionReader.class,
-        IntakeSyntheticSnapshotMaterialSource.class,
-        IntakeSyntheticGraphMaterialSource.class,
-        IntakeSyntheticParityMaterialSource.class
-    })
+    @ConditionalOnProperty(
+            name = "app.orchestration.intake-synthetic-runtime-material.enabled",
+            havingValue = "true")
+    @ConditionalOnProperty(
+            name = "app.temporal.worker.role",
+            havingValue = "AGENT")
+    @ConditionalOnMissingBean(IntakeImmutablePayloadPublisher.class)
+    MinioIntakeSyntheticExchangeStore intakeSyntheticRuntimePayloadPublisher(
+            MinioClient minioClient,
+            IntakeSyntheticExchangeProperties properties,
+            IntakeEpochSelectionProperties epochSelection,
+            GraphCommandClientProperties graphClient,
+            AgentRunV2Properties agentRunV2) {
+        requireSyntheticAgentRuntime(epochSelection, graphClient, agentRunV2);
+        return new MinioIntakeSyntheticExchangeStore(
+                minioClient,
+                new IntakeExchangeCanonicalPayloadValidator(),
+                properties.bucket(),
+                properties.prefix());
+    }
+
+    @Bean
+    @ConditionalOnProperty(
+            name = "app.orchestration.intake-synthetic-runtime-material.enabled",
+            havingValue = "true")
+    @ConditionalOnProperty(
+            name = "app.temporal.worker.role",
+            havingValue = "AGENT")
     @ConditionalOnMissingBean(IntakeSyntheticRuntimeSource.class)
     JdbcIntakeSyntheticRuntimeSource intakeSyntheticRuntimeSource(
             DataSource dataSource,
@@ -232,11 +269,12 @@ public class IntakeSyntheticShadowConfiguration {
     }
 
     @Bean
-    @ConditionalOnBean({
-        IntakeSyntheticRuntimeSource.class,
-        IntakeImmutablePayloadPublisher.class,
-        IntakeGraphBindingStore.class
-    })
+    @ConditionalOnProperty(
+            name = "app.orchestration.intake-synthetic-runtime-material.enabled",
+            havingValue = "true")
+    @ConditionalOnProperty(
+            name = "app.temporal.worker.role",
+            havingValue = "AGENT")
     @ConditionalOnMissingBean(IntakeSnapshotPublicationPort.class)
     IntakeSyntheticSnapshotPublicationAdapter intakeSyntheticSnapshotPublicationAdapter(
             IntakeSyntheticRuntimeSource source,
@@ -247,11 +285,12 @@ public class IntakeSyntheticShadowConfiguration {
     }
 
     @Bean
-    @ConditionalOnBean({
-        IntakeSyntheticRuntimeSource.class,
-        AgentGraphCommandClient.class,
-        AgentGraphReconciliationClient.class
-    })
+    @ConditionalOnProperty(
+            name = "app.orchestration.intake-synthetic-runtime-material.enabled",
+            havingValue = "true")
+    @ConditionalOnProperty(
+            name = "app.temporal.worker.role",
+            havingValue = "AGENT")
     @ConditionalOnMissingBean(IntakeSignedSyntheticGraphExecutionPort.class)
     IntakeSyntheticSignedGraphExecutionAdapter intakeSyntheticSignedGraphExecutionAdapter(
             IntakeSyntheticRuntimeSource source,
@@ -267,7 +306,12 @@ public class IntakeSyntheticShadowConfiguration {
     }
 
     @Bean
-    @ConditionalOnBean(IntakeSyntheticRuntimeSource.class)
+    @ConditionalOnProperty(
+            name = "app.orchestration.intake-synthetic-runtime-material.enabled",
+            havingValue = "true")
+    @ConditionalOnProperty(
+            name = "app.temporal.worker.role",
+            havingValue = "AGENT")
     @ConditionalOnMissingBean(IntakeSyntheticParityObservationPort.class)
     IntakeSyntheticParityObservationAdapter intakeSyntheticParityObservationAdapter(
             IntakeSyntheticRuntimeSource source) {
@@ -275,13 +319,15 @@ public class IntakeSyntheticShadowConfiguration {
     }
 
     @Bean
-    @ConditionalOnBean({
-        IntakeChildBridgeReadPort.class,
-        SignedSyntheticIntakeCommandAdmissionLookup.class
-    })
+    @ConditionalOnProperty(
+            name = "app.temporal.worker.role",
+            havingValue = "CONTROL")
     IntakeAuthorityWorkerRegistration signedSyntheticIntakeAuthorityWorkerRegistration(
             IntakeChildBridgeReadPort readPort,
-            SignedSyntheticIntakeCommandAdmissionLookup admissions) {
+            SignedSyntheticIntakeCommandAdmissionLookup admissions,
+            IntakeEpochSelectionProperties epochSelection,
+            AgentRunV2Properties agentRunV2) {
+        requireSignedSyntheticSelection(epochSelection, agentRunV2);
         return IntakeAuthorityWorkerRegistration.fromAdapter(
                 new IntakeChildBridgeActivitiesAdapter(
                         new SignedSyntheticIntakeBridgeReadPortDecorator(
@@ -290,22 +336,35 @@ public class IntakeSyntheticShadowConfiguration {
     }
 
     @Bean
+    @ConditionalOnProperty(
+            name = "app.temporal.worker.enabled",
+            havingValue = "false",
+            matchIfMissing = true)
     SignedSyntheticIntakeDriver signedSyntheticIntakeDriver(
-            IntakeSyntheticWorkerRegistration registration) {
-        return registration.driver();
+            IntakeSignedSyntheticAdmissionPort admission,
+            IntakeEpochSelectionProperties epochSelection,
+            AgentRunV2Properties agentRunV2) {
+        requireSignedSyntheticSelection(epochSelection, agentRunV2);
+        return new SignedSyntheticIntakeDriver(admission);
     }
 
-    private static void requireSyntheticShadow(
+    private static void requireSyntheticAgentRuntime(
             IntakeEpochSelectionProperties epochSelection,
             GraphCommandClientProperties graphClient,
+            AgentRunV2Properties agentRunV2) {
+        requireSignedSyntheticSelection(epochSelection, agentRunV2);
+        if (graphClient.mode() != GraphCommandClientProperties.Mode.SHADOW) {
+            throw new IllegalStateException(
+                    "signed synthetic Intake requires Graph client mode SHADOW");
+        }
+    }
+
+    private static void requireSignedSyntheticSelection(
+            IntakeEpochSelectionProperties epochSelection,
             AgentRunV2Properties agentRunV2) {
         if (!epochSelection.shadowSelectionConfigured()) {
             throw new IllegalStateException(
                     "signed synthetic Intake requires a complete SHADOW epoch selection");
-        }
-        if (graphClient.mode() != GraphCommandClientProperties.Mode.SHADOW) {
-            throw new IllegalStateException(
-                    "signed synthetic Intake requires Graph client mode SHADOW");
         }
         if (agentRunV2.enabled()) {
             throw new IllegalStateException(

@@ -9,9 +9,12 @@ import static org.mockito.Mockito.when;
 
 import com.example.dispute.common.exception.ForbiddenException;
 import com.example.dispute.config.AppProperties;
+import com.example.dispute.workflow.activity.agent.AgentGraphCommandClient;
 import com.example.dispute.workflow.activity.intake.IntakeImmutablePayloadPublisher;
+import com.example.dispute.workflow.api.SignedSyntheticIntakeIngressController;
 import com.example.dispute.workflow.api.intake.IntakeExchangeController;
 import com.example.dispute.workflow.api.intake.IntakeExchangeRequestCodec;
+import com.example.dispute.workflow.application.command.CaseCommandService;
 import com.example.dispute.workflow.application.intake.exchange.IntakeExchangeAuthorityValidationPort.PayloadLoadClaim;
 import com.example.dispute.workflow.application.intake.exchange.IntakeExchangeAuthorityValidationPort.PayloadLoadGrant;
 import com.example.dispute.workflow.application.intake.exchange.IntakeExchangeAuthorityValidationPort.ProposalPutClaim;
@@ -22,12 +25,17 @@ import com.example.dispute.workflow.application.intake.exchange.IntakeExchangeCo
 import com.example.dispute.workflow.application.intake.exchange.IntakeExchangeContract.ProposalDocument;
 import com.example.dispute.workflow.application.intake.exchange.IntakeExchangeContract.ProposalPutRequest;
 import com.example.dispute.workflow.config.IntakeSyntheticExchangeConfiguration;
+import com.example.dispute.workflow.config.IntakeSyntheticShadowConfiguration;
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
 import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
 import com.example.dispute.workflow.infrastructure.objectstore.intake.IntakePrivateObjectStoreExchangeAdapter;
 import com.example.dispute.workflow.infrastructure.objectstore.intake.MinioIntakeSyntheticExchangeStore;
 import com.example.dispute.workflow.infrastructure.persistence.authority.intake.JdbcSignedSyntheticIntakeExchangeAuthorityValidationPort;
+import com.example.dispute.workflow.shadow.intake.IntakeSignedSyntheticAdmissionPort;
+import com.example.dispute.workflow.shadow.intake.IntakeSyntheticWorkerRegistration;
+import com.example.dispute.workflow.shadow.intake.SignedSyntheticIntakeDriver;
+import com.example.dispute.workflow.shadow.intake.SignedSyntheticIntakeIngressService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
@@ -48,6 +56,9 @@ import javax.sql.DataSource;
 import okhttp3.Headers;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
+import org.springframework.context.annotation.ComponentScan;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.FilterType;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcOperations;
 import org.springframework.jdbc.core.namedparam.SqlParameterSource;
 
@@ -58,15 +69,16 @@ class IntakeExchangeP0Test {
 
     private static final String SYNTHETIC_ENABLED =
             "app.orchestration.intake-epoch-selection.signed-synthetic-shadow-enabled=true";
+    private static final String EXCHANGE_ENABLED =
+            "app.orchestration.intake-synthetic-exchange.enabled=true";
+    private static final String API_ROLE = "app.temporal.worker.enabled=false";
     private static final String SHADOW_SELECTION =
             "app.orchestration.intake-epoch-selection.mode=SHADOW";
     private static final String SHADOW_COHORT =
             "app.orchestration.intake-epoch-selection.shadow-cohort-basis-points=1";
     private static final String SHADOW_POLICY =
             "app.orchestration.intake-epoch-selection.cohort-policy-version=synthetic.v1";
-    private static final String GRAPH_SHADOW = "app.agent-run-v2.graph-client.mode=SHADOW";
-    private static final String GRAPH_ENDPOINT =
-            "app.agent-run-v2.graph-client.base-uri=https://python-agent-service:18000";
+    private static final String GRAPH_DISABLED = "app.agent-run-v2.graph-client.mode=DISABLED";
 
     @Test
     void exchangeAssemblyIsAbsentUnlessSyntheticShadowAndEveryRealPortExist() {
@@ -81,21 +93,36 @@ class IntakeExchangeP0Test {
                         SHADOW_SELECTION,
                         SHADOW_COHORT,
                         SHADOW_POLICY,
-                        GRAPH_SHADOW,
-                        GRAPH_ENDPOINT)
+                        API_ROLE)
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context).doesNotHaveBean(IntakeExchangeService.class);
+                });
+
+        exchangeRunnerWithPorts()
+                .withPropertyValues(
+                        SYNTHETIC_ENABLED,
+                        EXCHANGE_ENABLED,
+                        SHADOW_SELECTION,
+                        SHADOW_COHORT,
+                        SHADOW_POLICY,
+                        API_ROLE,
+                        GRAPH_DISABLED)
                 .run(context -> {
                     assertThat(context).hasNotFailed();
                     assertThat(context).hasSingleBean(IntakeExchangeService.class);
+                    assertThat(context).doesNotHaveBean(AgentGraphCommandClient.class);
                 });
 
         exchangeRunnerWithoutPayloadStore()
                 .withPropertyValues(
                         SYNTHETIC_ENABLED,
+                        EXCHANGE_ENABLED,
                         SHADOW_SELECTION,
                         SHADOW_COHORT,
                         SHADOW_POLICY,
-                        GRAPH_SHADOW,
-                        GRAPH_ENDPOINT)
+                        API_ROLE,
+                        GRAPH_DISABLED)
                 .run(context -> {
                     assertThat(context).hasFailed();
                     assertThat(context.getStartupFailure())
@@ -111,11 +138,12 @@ class IntakeExchangeP0Test {
                 .withUserConfiguration(IntakeSyntheticExchangeConfiguration.class)
                 .withPropertyValues(
                         SYNTHETIC_ENABLED,
+                        EXCHANGE_ENABLED,
                         SHADOW_SELECTION,
                         SHADOW_COHORT,
                         SHADOW_POLICY,
-                        GRAPH_SHADOW,
-                        GRAPH_ENDPOINT)
+                        API_ROLE,
+                        GRAPH_DISABLED)
                 .withBean(DataSource.class, () -> mock(DataSource.class))
                 .withBean(ObjectMapper.class, () -> new ObjectMapper().findAndRegisterModules())
                 .withBean(MinioClient.class, () -> mock(MinioClient.class))
@@ -136,7 +164,11 @@ class IntakeExchangeP0Test {
     @Test
     void exchangeAssemblyRejectsFormalOrIncompleteRuntimeModes() {
         exchangeRunnerWithPorts()
-                .withPropertyValues(SYNTHETIC_ENABLED, GRAPH_SHADOW, GRAPH_ENDPOINT)
+                .withPropertyValues(
+                        SYNTHETIC_ENABLED,
+                        EXCHANGE_ENABLED,
+                        API_ROLE,
+                        GRAPH_DISABLED)
                 .run(context -> {
                     assertThat(context).hasFailed();
                     assertThat(context.getStartupFailure())
@@ -147,11 +179,12 @@ class IntakeExchangeP0Test {
         exchangeRunnerWithPorts()
                 .withPropertyValues(
                         SYNTHETIC_ENABLED,
+                        EXCHANGE_ENABLED,
                         SHADOW_SELECTION,
                         SHADOW_COHORT,
                         SHADOW_POLICY,
-                        GRAPH_SHADOW,
-                        GRAPH_ENDPOINT,
+                        API_ROLE,
+                        GRAPH_DISABLED,
                         "app.agent-run-v2.enabled=true",
                         "app.agent-run-v2.scheduler-mode=DETECTOR")
                 .run(context -> {
@@ -159,6 +192,75 @@ class IntakeExchangeP0Test {
                     assertThat(context.getStartupFailure())
                             .rootCause()
                             .hasMessageContaining("formal AgentRunV2 path is enabled");
+                });
+    }
+
+    @Test
+    void apiAssemblyExposesIngressAndExchangeWhileGraphClientStaysDisabled() {
+        signedSyntheticApiRunner()
+                .withPropertyValues(
+                        SYNTHETIC_ENABLED,
+                        EXCHANGE_ENABLED,
+                        SHADOW_SELECTION,
+                        SHADOW_COHORT,
+                        SHADOW_POLICY,
+                        API_ROLE,
+                        GRAPH_DISABLED)
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context).hasSingleBean(SignedSyntheticIntakeDriver.class);
+                    assertThat(context).hasSingleBean(SignedSyntheticIntakeIngressService.class);
+                    assertThat(context).hasSingleBean(SignedSyntheticIntakeIngressController.class);
+                    assertThat(context).hasSingleBean(IntakeExchangeService.class);
+                    assertThat(context).hasSingleBean(IntakeExchangeController.class);
+                    assertThat(context).doesNotHaveBean(AgentGraphCommandClient.class);
+                    assertThat(context).doesNotHaveBean(IntakeSyntheticWorkerRegistration.class);
+                });
+    }
+
+    @Test
+    void signedSyntheticApiComponentsAreAbsentByDefaultAndOnWorkerRoles() {
+        signedSyntheticApiRunner().run(context -> {
+            assertThat(context).hasNotFailed();
+            assertThat(context).doesNotHaveBean(SignedSyntheticIntakeIngressService.class);
+            assertThat(context).doesNotHaveBean(SignedSyntheticIntakeIngressController.class);
+            assertThat(context).doesNotHaveBean(IntakeExchangeController.class);
+        });
+
+        signedSyntheticApiRunner()
+                .withPropertyValues(
+                        SYNTHETIC_ENABLED,
+                        EXCHANGE_ENABLED,
+                        SHADOW_SELECTION,
+                        SHADOW_COHORT,
+                        SHADOW_POLICY,
+                        "app.temporal.worker.enabled=true")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context).doesNotHaveBean(SignedSyntheticIntakeIngressService.class);
+                    assertThat(context)
+                            .doesNotHaveBean(SignedSyntheticIntakeIngressController.class);
+                    assertThat(context).doesNotHaveBean(IntakeExchangeController.class);
+                    assertThat(context).doesNotHaveBean(IntakeExchangeService.class);
+                });
+    }
+
+    @Test
+    void exchangeAssemblyIsUnreachableFromWorkerRoles() {
+        exchangeRunnerWithPorts()
+                .withPropertyValues(
+                        SYNTHETIC_ENABLED,
+                        EXCHANGE_ENABLED,
+                        SHADOW_SELECTION,
+                        SHADOW_COHORT,
+                        SHADOW_POLICY,
+                        "app.temporal.worker.enabled=true",
+                        "app.temporal.worker.role=AGENT")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context).doesNotHaveBean(IntakeExchangeService.class);
+                    assertThat(context)
+                            .doesNotHaveBean(IntakeExchangeCanonicalPayloadValidator.class);
                 });
     }
 
@@ -463,6 +565,48 @@ class IntakeExchangeP0Test {
                         IntakeImmutablePayloadPublisher.class,
                         () -> mock(IntakeImmutablePayloadPublisher.class));
     }
+
+    private static ApplicationContextRunner signedSyntheticApiRunner() {
+        return new ApplicationContextRunner()
+                .withUserConfiguration(
+                        SignedSyntheticApiComponentScan.class,
+                        IntakeSyntheticShadowConfiguration.class,
+                        IntakeSyntheticExchangeConfiguration.class)
+                .withBean(
+                        IntakeSignedSyntheticAdmissionPort.class,
+                        () -> mock(IntakeSignedSyntheticAdmissionPort.class))
+                .withBean(
+                        IntakeExchangeAuthorityValidationPort.class,
+                        () -> mock(IntakeExchangeAuthorityValidationPort.class))
+                .withBean(
+                        IntakeExchangePayloadObjectStoreGateway.class,
+                        () -> mock(IntakeExchangePayloadObjectStoreGateway.class))
+                .withBean(
+                        IntakeImmutablePayloadPublisher.class,
+                        () -> mock(IntakeImmutablePayloadPublisher.class))
+                .withBean(CaseCommandService.class, () -> mock(CaseCommandService.class))
+                .withBean(AppProperties.class, () -> mock(AppProperties.class))
+                .withBean(ObjectMapper.class, () -> new ObjectMapper().findAndRegisterModules())
+                .withBean(Clock.class, Clock::systemUTC);
+    }
+
+    @Configuration(proxyBeanMethods = false)
+    @ComponentScan(
+            basePackageClasses = {
+                SignedSyntheticIntakeIngressService.class,
+                SignedSyntheticIntakeIngressController.class,
+                IntakeExchangeController.class
+            },
+            useDefaultFilters = false,
+            includeFilters =
+                    @ComponentScan.Filter(
+                            type = FilterType.ASSIGNABLE_TYPE,
+                            classes = {
+                                SignedSyntheticIntakeIngressService.class,
+                                SignedSyntheticIntakeIngressController.class,
+                                IntakeExchangeController.class
+                            }))
+    static class SignedSyntheticApiComponentScan {}
 
     private static PayloadLoadRequest loadRequest(byte[] payload) throws Exception {
         JsonNode document = MAPPER.readTree(payload);

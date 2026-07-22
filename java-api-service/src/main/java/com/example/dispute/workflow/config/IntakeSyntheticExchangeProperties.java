@@ -6,6 +6,7 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
 /** Isolated private object-store namespace for signed-synthetic Intake artifacts. */
 @ConfigurationProperties(prefix = "app.orchestration.intake-synthetic-exchange")
 public record IntakeSyntheticExchangeProperties(
+        @DefaultValue("false") boolean enabled,
         @DefaultValue("intake-synthetic-private") String bucket,
         @DefaultValue("signed-synthetic/intake") String prefix) {
 

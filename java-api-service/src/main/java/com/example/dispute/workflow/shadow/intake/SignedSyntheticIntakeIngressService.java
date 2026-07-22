@@ -12,7 +12,7 @@ import com.example.dispute.workflow.temporal.room.intake.IntakeCommandType;
 import com.example.dispute.workflow.temporal.room.intake.IntakeWorkflowCommand;
 import java.time.Instant;
 import java.util.Objects;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -23,7 +23,16 @@ import org.springframework.transaction.annotation.Transactional;
  * signed synthetic tuple first, then reuses the existing command outbox path into CaseProcess.
  */
 @Service
-@ConditionalOnBean(SignedSyntheticIntakeDriver.class)
+@ConditionalOnProperty(
+        name = "app.orchestration.intake-epoch-selection.signed-synthetic-shadow-enabled",
+        havingValue = "true")
+@ConditionalOnProperty(
+        name = "app.orchestration.intake-synthetic-exchange.enabled",
+        havingValue = "true")
+@ConditionalOnProperty(
+        name = "app.temporal.worker.enabled",
+        havingValue = "false",
+        matchIfMissing = true)
 public class SignedSyntheticIntakeIngressService {
 
     private static final String PAYLOAD_SCHEMA = "intake-turn-event.v2";

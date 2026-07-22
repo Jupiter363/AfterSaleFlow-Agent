@@ -9,7 +9,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.Objects;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -19,7 +20,16 @@ import org.springframework.web.bind.annotation.RestController;
 
 /** Internal fail-closed HTTP boundary for Python graph Intake exchange. */
 @RestController
-@ConditionalOnBean(IntakeExchangeService.class)
+@ConditionalOnProperty(
+        name = "app.orchestration.intake-epoch-selection.signed-synthetic-shadow-enabled",
+        havingValue = "true")
+@ConditionalOnProperty(
+        name = "app.orchestration.intake-synthetic-exchange.enabled",
+        havingValue = "true")
+@ConditionalOnProperty(
+        name = "app.temporal.worker.enabled",
+        havingValue = "false",
+        matchIfMissing = true)
 @RequestMapping("/internal/graph/intake/v2")
 public final class IntakeExchangeController {
 
@@ -27,6 +37,7 @@ public final class IntakeExchangeController {
     private final AppProperties properties;
     private final IntakeExchangeRequestCodec codec;
 
+    @Autowired
     public IntakeExchangeController(
             IntakeExchangeService service, AppProperties properties, ObjectMapper objectMapper) {
         this.service = Objects.requireNonNull(service, "service");
