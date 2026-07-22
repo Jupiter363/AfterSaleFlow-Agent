@@ -875,8 +875,11 @@ def _preflight_failure(command_id: str, command: dict[str, Any]) -> str | None:
     if (
         required_path.is_absolute()
         or required_path.drive
+        or required_path.root
         or windows_path.is_absolute()
         or windows_path.drive
+        or windows_path.root
+        or windows_path.anchor
         or not required_path.parts
         or ".." in required_path.parts
         or ".." in windows_path.parts

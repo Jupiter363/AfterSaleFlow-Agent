@@ -736,7 +736,15 @@ def test_frontend_dependency_preflight_allows_candidate_relative_directory_link(
 
 @pytest.mark.parametrize(
     "required_path",
-    ["../outside", "..\\outside", "C:outside", "C:/outside", "\\\\server\\share\\file"],
+    [
+        "../outside",
+        "..\\outside",
+        "C:outside",
+        "C:/outside",
+        "\\Windows\\System32\\cmd.exe",
+        "/Windows/System32/cmd.exe",
+        "\\\\server\\share\\file",
+    ],
 )
 def test_frontend_dependency_preflight_rejects_non_relative_paths(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, required_path: str
