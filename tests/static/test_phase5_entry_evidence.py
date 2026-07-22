@@ -15,6 +15,26 @@ ROOT = Path(__file__).resolve().parents[2]
 CANDIDATE = "a" * 40
 BASE = "b" * 40
 RELEASE_ID = "phase-5-entry-fixture"
+HANDOFF = {
+    "checkpoint_path": "test-reports/temporal-first/p4/phase-4/phase-metrics.json",
+    "checkpoint_sha256": "1" * 64,
+    "evidence_commit": "d" * 40,
+    "phase4_candidate_commit": "e" * 40,
+    "engineering_checkpoint": "PASS",
+    "next_phase_permission": "PHASE_5_ENGINEERING_ONLY",
+    "promotion_gate": "PENDING",
+    "MIG-004": "PENDING_PROMOTION",
+    "source_execution_manifest_sha256": "2" * 64,
+}
+
+
+@pytest.fixture(autouse=True)
+def _authenticated_phase4_handoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        generator.runner,
+        "authenticate_phase4_handoff",
+        lambda *_args, **_kwargs: HANDOFF,
+    )
 
 
 def _write_junit(path: Path, candidate: str, command_id: str) -> None:
@@ -45,6 +65,7 @@ def _build_pass_run(tmp_path: Path, candidate: str = CANDIDATE) -> Path:
         candidate=candidate,
         environment_id="phase5-entry-fixture",
         run_root=run_root,
+        phase4_handoff=HANDOFF,
     )
     manifest["verification_started_at"] = "2026-07-22T00:00:00+00:00"
     manifest["verification_finished_at"] = "2026-07-22T00:00:04+00:00"
@@ -179,6 +200,7 @@ def test_generator_atomically_writes_the_exact_candidate_bound_entry_bundle(
         "MIG-005": "PENDING_PROMOTION",
         "implementation_allowed_before_commit": False,
     }
+    assert metrics["upstream_phase4_checkpoint"] == HANDOFF
     index = json.loads((output / "artifact-sha256.json").read_text(encoding="utf-8"))
     assert index["candidate_commit"] == CANDIDATE
     assert {item["path"] for item in index["artifacts"]} == {
@@ -229,6 +251,20 @@ def test_generator_rejects_an_old_run_from_another_candidate(tmp_path: Path) -> 
     manifest_path = _build_pass_run(tmp_path, candidate="c" * 40)
 
     with pytest.raises(generator.shared.EvidenceError, match="candidate SHA drifted"):
+        generator.load_pass_manifest(manifest_path, CANDIDATE)
+
+
+def test_generator_rejects_reauthenticated_phase4_handoff_drift(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    manifest_path = _build_pass_run(tmp_path)
+    monkeypatch.setattr(
+        generator.runner,
+        "authenticate_phase4_handoff",
+        lambda *_args, **_kwargs: {**HANDOFF, "checkpoint_sha256": "9" * 64},
+    )
+
+    with pytest.raises(generator.shared.EvidenceError, match="live authentication drifted"):
         generator.load_pass_manifest(manifest_path, CANDIDATE)
 
 

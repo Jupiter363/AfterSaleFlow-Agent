@@ -478,6 +478,13 @@ batches:
       - tests/static/test_agent_platform_schema_contracts.py
     execution:
       runner: scripts/run_phase5_entry_checkpoint.py
+      phase4_checkpoint_argument: --phase4-checkpoint=<tracked-phase-4/phase-metrics.json>
+      execute_ready_matrix_state:
+        document_status: P5_0_CONTRACT_CANDIDATE_AWAITING_BATCH0
+        phase_4_engineering_checkpoint: PASS
+        next_phase_permission: PHASE_5_ENGINEERING_ONLY
+        entry_decision: READY_FOR_P5_BATCH_0
+      execute_while_matrix_blocked_or_not_recorded: forbidden_before_source_invocation
       command_order: [p5_entry_static, p5_entry_python, p5_entry_java, p5_entry_frontend]
       source_reports:
         - static-phase5-entry-junit.xml

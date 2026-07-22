@@ -460,6 +460,16 @@ def test_phase5_batch0_runner_is_candidate_bound_and_frontend_missing_is_infra()
     assert execution["exact_candidate_sha_required"] is True
     assert execution["candidate_sha_must_be_clean_and_detached"] is True
     assert execution["same_sha_retry_allowed_only_for"] == "INFRA"
+    assert execution["phase4_checkpoint_argument"].startswith("--phase4-checkpoint=")
+    assert execution["execute_ready_matrix_state"] == {
+        "document_status": "P5_0_CONTRACT_CANDIDATE_AWAITING_BATCH0",
+        "phase_4_engineering_checkpoint": "PASS",
+        "next_phase_permission": "PHASE_5_ENGINEERING_ONLY",
+        "entry_decision": "READY_FOR_P5_BATCH_0",
+    }
+    assert execution["execute_while_matrix_blocked_or_not_recorded"] == (
+        "forbidden_before_source_invocation"
+    )
     assert execution["heavy_parallelism"] == 1
     assert execution["light_parallelism"] == 2
     assert frontend["preflight"]["required_path"] == (

@@ -5,6 +5,7 @@ import hashlib
 import json
 import re
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Sequence
@@ -29,10 +30,27 @@ COMMAND_ORDER = (
     "p5_entry_frontend",
 )
 FAILURE_CLASSIFICATIONS = {"PRODUCT", "FIXTURE", "INFRA", "EXTERNAL_GATE"}
+INITIAL_GATE_FIELDS = {
+    "batch_0": "NOT_RUN",
+    "contract_gate": "P5.0_NOT_PASSED",
+    "engineering_execution": "BLOCKED_UNTIL_ENTRY_EVIDENCE_COMMIT",
+    "promotion_gate": "PENDING",
+    "MIG-004": "PENDING_PROMOTION",
+    "MIG-005": "PENDING_PROMOTION",
+}
 
 
-def load_source_commands() -> dict[str, dict[str, Any]]:
+def load_matrix() -> dict[str, Any]:
     matrix = yaml.safe_load(MATRIX_PATH.read_text(encoding="utf-8"))
+    if not isinstance(matrix, dict):
+        raise shared.EvidenceError("Phase 5 test matrix must be a YAML object")
+    return matrix
+
+
+def load_source_commands(
+    matrix: dict[str, Any] | None = None,
+) -> dict[str, dict[str, Any]]:
+    matrix = matrix or load_matrix()
     batch = matrix["batches"][BATCH_ID]
     records = batch["source_commands"]
     commands = {record["id"]: record for record in records}
@@ -55,7 +73,9 @@ SOURCE_REPORTS = {
 
 def candidate_plan(candidate_commit: str) -> dict[str, Any]:
     candidate = shared._assert_candidate(candidate_commit)
-    commands = load_source_commands()
+    matrix = load_matrix()
+    commands = load_source_commands(matrix)
+    gate = matrix["gate"]
     return {
         "schema_version": "phase5-entry-run-plan.v1",
         "phase": 5,
@@ -77,6 +97,17 @@ def candidate_plan(candidate_commit: str) -> dict[str, Any]:
             for command_id in COMMAND_ORDER
         ],
         "concurrency": {"heavy": 1, "light": 2, "runner_execution": "sequential"},
+        "execution_gate": {
+            "document_status": matrix["document_status"],
+            "phase_4_engineering_checkpoint": gate["observed_entry_state"][
+                "phase_4_engineering_checkpoint"
+            ],
+            "next_phase_permission": gate["observed_entry_state"][
+                "next_phase_permission"
+            ],
+            "entry_decision": gate["entry_decision"],
+            "execute_allowed": _matrix_allows_batch0(matrix),
+        },
         "runtime_restrictions": {
             "formal_evidence_sink": "forbidden",
             "temporal_evidence_allocation": "forbidden",
@@ -85,6 +116,178 @@ def candidate_plan(candidate_commit: str) -> dict[str, Any]:
             "promotion": "forbidden",
         },
     }
+
+
+def _matrix_allows_batch0(matrix: dict[str, Any]) -> bool:
+    gate = matrix.get("gate", {})
+    observed = gate.get("observed_entry_state", {})
+    return (
+        matrix.get("document_status")
+        == "P5_0_CONTRACT_CANDIDATE_AWAITING_BATCH0"
+        and observed.get("phase_4_engineering_checkpoint") == "PASS"
+        and observed.get("next_phase_permission") == "PHASE_5_ENGINEERING_ONLY"
+        and gate.get("entry_decision") == "READY_FOR_P5_BATCH_0"
+        and gate.get("contract_gate_status") == "NOT_RUN"
+    )
+
+
+def _validate_phase4_checkpoint_document(document: Any) -> dict[str, Any]:
+    if not isinstance(document, dict):
+        raise shared.EvidenceError("Phase 4 checkpoint must be a JSON object")
+    status = document.get("status")
+    verification = document.get("candidate_verification")
+    if (
+        document.get("schema_version") != "temporal-first-phase-metrics.v1"
+        or document.get("phase") != 4
+        or not isinstance(status, dict)
+        or status.get("engineering_checkpoint") != "PASS"
+        or status.get("next_phase_permission") != "PHASE_5_ENGINEERING_ONLY"
+        or status.get("promotion_gate") != "PENDING"
+        or status.get("MIG-004") != "PENDING_PROMOTION"
+    ):
+        raise shared.EvidenceError(
+            "Phase 4 checkpoint does not grant PHASE_5_ENGINEERING_ONLY"
+        )
+    if (
+        not isinstance(verification, dict)
+        or verification.get("failures") != 0
+        or verification.get("errors") != 0
+        or verification.get("skipped") != 0
+        or verification.get("mixed_candidate_results") is not False
+        or verification.get("quarantined_attempts_reused") is not False
+    ):
+        raise shared.EvidenceError("Phase 4 checkpoint verification is not an accepted PASS")
+    phase4_candidate = shared._assert_candidate(
+        document.get("candidate_commit", ""), "Phase 4 candidate commit"
+    )
+    source_manifest = document.get("source_execution_manifest")
+    if (
+        not isinstance(source_manifest, dict)
+        or source_manifest.get("name") != "source-execution-manifest.json"
+        or not re.fullmatch(r"[0-9a-f]{64}", str(source_manifest.get("sha256", "")))
+    ):
+        raise shared.EvidenceError("Phase 4 checkpoint source manifest binding is invalid")
+    return {
+        "phase4_candidate_commit": phase4_candidate,
+        "engineering_checkpoint": "PASS",
+        "next_phase_permission": "PHASE_5_ENGINEERING_ONLY",
+        "promotion_gate": "PENDING",
+        "MIG-004": "PENDING_PROMOTION",
+        "source_execution_manifest_sha256": source_manifest["sha256"],
+    }
+
+
+def _git_bytes(*arguments: str) -> bytes:
+    process = subprocess.run(
+        ["git", *arguments],
+        cwd=ROOT,
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if process.returncode:
+        raise shared.EvidenceError(
+            f"Git checkpoint authentication failed: {process.stderr.decode(errors='replace').strip()}"
+        )
+    return process.stdout
+
+
+def _assert_ancestor(ancestor: str, candidate: str, context: str) -> None:
+    process = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", ancestor, candidate],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if process.returncode:
+        raise shared.EvidenceError(f"{context} is not an ancestor of the P5 candidate")
+
+
+def authenticate_phase4_handoff(
+    matrix: dict[str, Any], checkpoint_path: Path, candidate_commit: str
+) -> dict[str, Any]:
+    if not _matrix_allows_batch0(matrix):
+        raise shared.EvidenceError(
+            "P5 matrix remains BLOCKED/NOT_RECORDED; P5-BATCH-0 execute is forbidden"
+        )
+    candidate = shared._assert_candidate(candidate_commit)
+    checkpoint = checkpoint_path.resolve()
+    if not checkpoint.is_relative_to(ROOT.resolve()) or checkpoint.name != "phase-metrics.json":
+        raise shared.EvidenceError(
+            "Phase 4 checkpoint must be a repository phase-metrics.json"
+        )
+    relative = checkpoint.relative_to(ROOT.resolve()).as_posix()
+    try:
+        document = json.loads(checkpoint.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exception:
+        raise shared.EvidenceError(f"cannot read Phase 4 checkpoint: {exception}") from exception
+    authenticated = _validate_phase4_checkpoint_document(document)
+    candidate_file = checkpoint.parent / "candidate-commit.txt"
+    source_manifest = checkpoint.parent / "source-execution-manifest.json"
+    if candidate_file.read_text(encoding="utf-8") != (
+        authenticated["phase4_candidate_commit"] + "\n"
+    ):
+        raise shared.EvidenceError("Phase 4 candidate-commit.txt drifted")
+    if shared._sha256(source_manifest) != authenticated[
+        "source_execution_manifest_sha256"
+    ]:
+        raise shared.EvidenceError("Phase 4 source execution manifest SHA-256 drifted")
+    candidate_blob = _git_bytes("show", f"{candidate}:{relative}")
+    if candidate_blob != checkpoint.read_bytes():
+        raise shared.EvidenceError("Phase 4 checkpoint is not the candidate Git blob")
+    evidence_commit = (
+        _git_bytes("log", "-1", "--format=%H", candidate, "--", relative)
+        .decode("ascii")
+        .strip()
+    )
+    evidence_commit = shared._assert_candidate(evidence_commit, "Phase 4 evidence commit")
+    _assert_ancestor(authenticated["phase4_candidate_commit"], candidate, "Phase 4 candidate")
+    _assert_ancestor(evidence_commit, candidate, "Phase 4 evidence commit")
+    return {
+        "checkpoint_path": relative,
+        "checkpoint_sha256": shared._sha256(checkpoint),
+        "evidence_commit": evidence_commit,
+        **authenticated,
+    }
+
+
+def _validate_embedded_handoff(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise shared.EvidenceError("manifest lacks its authenticated Phase 4 checkpoint")
+    required = {
+        "checkpoint_path",
+        "checkpoint_sha256",
+        "evidence_commit",
+        "phase4_candidate_commit",
+        "engineering_checkpoint",
+        "next_phase_permission",
+        "promotion_gate",
+        "MIG-004",
+        "source_execution_manifest_sha256",
+    }
+    if set(value) != required:
+        raise shared.EvidenceError("manifest Phase 4 checkpoint fields drifted")
+    for field in (
+        "checkpoint_sha256",
+        "source_execution_manifest_sha256",
+    ):
+        if not re.fullmatch(r"[0-9a-f]{64}", str(value.get(field, ""))):
+            raise shared.EvidenceError(f"manifest Phase 4 {field} is invalid")
+    shared._assert_candidate(value.get("evidence_commit", ""), "Phase 4 evidence commit")
+    shared._assert_candidate(
+        value.get("phase4_candidate_commit", ""), "Phase 4 candidate commit"
+    )
+    if (
+        value.get("engineering_checkpoint") != "PASS"
+        or value.get("next_phase_permission") != "PHASE_5_ENGINEERING_ONLY"
+        or value.get("promotion_gate") != "PENDING"
+        or value.get("MIG-004") != "PENDING_PROMOTION"
+    ):
+        raise shared.EvidenceError("manifest Phase 4 permission drifted")
+    return value
 
 
 def _write_manifest(path: Path, manifest: dict[str, Any]) -> None:
@@ -99,8 +302,17 @@ def _assert_candidate_unchanged(candidate: str, run_root: Path) -> None:
 
 
 def _initial_manifest(
-    *, candidate: str, environment_id: str, run_root: Path
+    *,
+    candidate: str,
+    environment_id: str,
+    run_root: Path,
+    phase4_handoff: dict[str, Any],
 ) -> dict[str, Any]:
+    authenticated_handoff = dict(_validate_embedded_handoff(phase4_handoff))
+    environment = shared.capture_environment(environment_id)
+    environment["upstream_phase4_checkpoint"] = authenticated_handoff
+    environment.pop("snapshot_sha256", None)
+    environment["snapshot_sha256"] = shared._json_sha256(environment)
     return {
         "schema_version": SCHEMA_VERSION,
         "phase": 5,
@@ -110,14 +322,13 @@ def _initial_manifest(
         "status": "RUNNING",
         "verification_started_at": shared._utc_now(),
         "verification_finished_at": None,
-        "environment": shared.capture_environment(environment_id),
+        "environment": environment,
+        "upstream_phase4_checkpoint": authenticated_handoff,
         "commands": [],
         "quarantined_attempts": [],
         "pending_failure": None,
         "quarantined_attempts_reused": False,
-        "promotion_gate": "PENDING",
-        "MIG-004": "PENDING_PROMOTION",
-        "MIG-005": "PENDING_PROMOTION",
+        **INITIAL_GATE_FIELDS,
     }
 
 
@@ -303,7 +514,10 @@ def _validate_record(
 
 
 def _validate_resume_manifest(
-    manifest: dict[str, Any], run_root: Path, candidate: str
+    manifest: dict[str, Any],
+    run_root: Path,
+    candidate: str,
+    phase4_handoff: dict[str, Any],
 ) -> None:
     if (
         manifest.get("schema_version") != SCHEMA_VERSION
@@ -321,7 +535,17 @@ def _validate_resume_manifest(
         raise shared.EvidenceError("resumable manifest already has a finish time")
     if manifest.get("quarantined_attempts_reused") is not False:
         raise shared.EvidenceError("resume manifest reused a quarantined attempt")
+    for field, expected in INITIAL_GATE_FIELDS.items():
+        if manifest.get(field) != expected:
+            raise shared.EvidenceError(f"resume manifest pre-finish {field} drifted")
+    embedded_handoff = _validate_embedded_handoff(
+        manifest.get("upstream_phase4_checkpoint")
+    )
+    if embedded_handoff != phase4_handoff:
+        raise shared.EvidenceError("resume Phase 4 checkpoint binding drifted")
     environment_sha256 = _validate_environment(manifest)
+    if manifest["environment"].get("upstream_phase4_checkpoint") != phase4_handoff:
+        raise shared.EvidenceError("resume environment Phase 4 checkpoint drifted")
     verification_started = shared._timestamp(
         manifest.get("verification_started_at"), "verification_started_at"
     )
@@ -383,14 +607,16 @@ def _validate_resume_manifest(
         )
 
 
-def _load_resume_manifest(run_root: Path, candidate: str) -> dict[str, Any]:
+def _load_resume_manifest(
+    run_root: Path, candidate: str, phase4_handoff: dict[str, Any]
+) -> dict[str, Any]:
     path = run_root / MANIFEST_NAME
     try:
         manifest = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exception:
         raise shared.EvidenceError(f"cannot resume Phase 5 entry manifest: {exception}") from exception
     shared._assert_execution_manifest_seal(manifest)
-    _validate_resume_manifest(manifest, run_root, candidate)
+    _validate_resume_manifest(manifest, run_root, candidate, phase4_handoff)
     return manifest
 
 
@@ -617,16 +843,21 @@ def execute_checkpoint(
     candidate_commit: str,
     run_root: Path,
     environment_id: str,
+    phase4_checkpoint_path: Path,
     resume: bool,
     classifications: Sequence[str],
 ) -> dict[str, Any]:
     candidate = shared._assert_candidate(candidate_commit)
+    matrix = load_matrix()
+    phase4_handoff = authenticate_phase4_handoff(
+        matrix, phase4_checkpoint_path, candidate
+    )
     run_root = run_root.resolve()
     shared.assert_candidate_run_directory(run_root)
     if resume:
         if not run_root.is_dir():
             raise shared.EvidenceError(f"resume run directory does not exist: {run_root}")
-        manifest = _load_resume_manifest(run_root, candidate)
+        manifest = _load_resume_manifest(run_root, candidate, phase4_handoff)
     else:
         shared.assert_clean_detached_candidate(candidate)
         if run_root.exists():
@@ -636,6 +867,7 @@ def execute_checkpoint(
             candidate=candidate,
             environment_id=environment_id,
             run_root=run_root,
+            phase4_handoff=phase4_handoff,
         )
         _write_manifest(run_root / MANIFEST_NAME, manifest)
     _assert_candidate_unchanged(candidate, run_root)
@@ -643,7 +875,7 @@ def execute_checkpoint(
         _write_manifest(run_root / MANIFEST_NAME, manifest)
         return manifest
 
-    commands = load_source_commands()
+    commands = load_source_commands(matrix)
     accepted = {entry["id"] for entry in manifest["commands"]}
     environment_sha256 = manifest["environment"]["snapshot_sha256"]
     for command_id in COMMAND_ORDER:
@@ -664,10 +896,17 @@ def execute_checkpoint(
         manifest["commands"].append(record)
         _write_manifest(run_root / MANIFEST_NAME, manifest)
 
-    manifest["status"] = "PASS"
-    manifest["batch_0"] = "PASS"
-    manifest["contract_gate"] = "P5.0_AWAITING_ENTRY_EVIDENCE_COMMIT"
-    manifest["engineering_execution"] = "BLOCKED_UNTIL_ENTRY_EVIDENCE_COMMIT"
+    manifest.update(
+        {
+            "status": "PASS",
+            "batch_0": "PASS",
+            "contract_gate": "P5.0_AWAITING_ENTRY_EVIDENCE_COMMIT",
+            "engineering_execution": "BLOCKED_UNTIL_ENTRY_EVIDENCE_COMMIT",
+            "promotion_gate": "PENDING",
+            "MIG-004": "PENDING_PROMOTION",
+            "MIG-005": "PENDING_PROMOTION",
+        }
+    )
     manifest["verification_finished_at"] = shared._utc_now()
     _assert_candidate_unchanged(candidate, run_root)
     _write_manifest(run_root / MANIFEST_NAME, manifest)
@@ -684,6 +923,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--run-dir", type=Path)
     parser.add_argument("--environment-id", default="local-phase5-entry")
+    parser.add_argument(
+        "--phase4-checkpoint",
+        type=Path,
+        help="Tracked accepted Phase 4 phase-metrics.json; required with --execute.",
+    )
     parser.add_argument("--resume", action="store_true")
     parser.add_argument(
         "--failure-classification",
@@ -704,10 +948,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if arguments.run_dir is None:
             raise shared.EvidenceError("--run-dir is required with --execute")
+        if arguments.phase4_checkpoint is None:
+            raise shared.EvidenceError("--phase4-checkpoint is required with --execute")
         manifest = execute_checkpoint(
             candidate_commit=arguments.candidate_commit,
             run_root=arguments.run_dir,
             environment_id=arguments.environment_id,
+            phase4_checkpoint_path=arguments.phase4_checkpoint,
             resume=arguments.resume,
             classifications=arguments.failure_classification,
         )

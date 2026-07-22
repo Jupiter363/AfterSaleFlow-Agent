@@ -81,6 +81,18 @@ def load_pass_manifest(
         or manifest.get("MIG-005") != "PENDING_PROMOTION"
     ):
         raise shared.EvidenceError("execution manifest gate or recovery state drifted")
+    phase4_handoff = runner._validate_embedded_handoff(
+        manifest.get("upstream_phase4_checkpoint")
+    )
+    if manifest.get("environment", {}).get("upstream_phase4_checkpoint") != phase4_handoff:
+        raise shared.EvidenceError("execution manifest Phase 4 environment binding drifted")
+    live_handoff = runner.authenticate_phase4_handoff(
+        runner.load_matrix(),
+        ROOT / phase4_handoff["checkpoint_path"],
+        candidate,
+    )
+    if live_handoff != phase4_handoff:
+        raise shared.EvidenceError("execution manifest Phase 4 live authentication drifted")
 
     run_root = path.parent
     shared.assert_candidate_run_directory(run_root)
@@ -220,6 +232,7 @@ def assemble_entry_evidence(
             "mixed_candidate_results": False,
             "source_reports_reused_from_other_run": False,
         },
+        "upstream_phase4_checkpoint": manifest["upstream_phase4_checkpoint"],
         "source_suites": source_suites,
         "totals": totals,
         "recovery": {
