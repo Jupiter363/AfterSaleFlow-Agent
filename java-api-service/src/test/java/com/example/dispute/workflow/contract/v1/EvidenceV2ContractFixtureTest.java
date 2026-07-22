@@ -20,6 +20,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.function.Consumer;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -42,6 +43,34 @@ class EvidenceV2ContractFixtureTest {
                     "evidence-item-proposal.schema.json",
                     "evidence-process-projection.schema.json",
                     "evidence-terminal-proposal.schema.json");
+    private static final Map<String, String> INVALID_FIXTURE_REASONS =
+            Map.of(
+                    "evidence-asset-capability-credential.json",
+                    "credential_field_forbidden",
+                    "evidence-batch-manifest-formal-action.json",
+                    "manifest_formal_action_forbidden",
+                    "evidence-batch-manifest-public-51.json",
+                    "public_submission_over_50",
+                    "evidence-finalization-receipt-real-formal-write.json",
+                    "formal_domain_write_forbidden",
+                    "evidence-item-proposal-formal-action.json",
+                    "assessment_formal_action_forbidden",
+                    "evidence-process-projection-temporal-real-shadow.json",
+                    "temporal_real_shadow_forbidden",
+                    "evidence-terminal-proposal-formal-action.json",
+                    "terminal_formal_action_forbidden");
+    private static final List<String> PROFILE_PIN_FIELDS =
+            List.of(
+                    "graph_version",
+                    "checkpoint_schema_version",
+                    "state_schema_version",
+                    "prompt_version",
+                    "model_profile_id",
+                    "assessment_output_schema_version",
+                    "terminal_output_schema_version",
+                    "policy_version",
+                    "guardrail_version",
+                    "tool_policy_version");
 
     private static Map<String, ContractSchema> schemasByVersion;
 
@@ -67,6 +96,48 @@ class EvidenceV2ContractFixtureTest {
 
     static Stream<Path> invalidFixtures() throws IOException {
         return fixtureFiles("invalid").stream();
+    }
+
+    static Stream<SchemaRejectionCase> namedSchemaRejectionCases() {
+        return Stream.of(
+                new SchemaRejectionCase(
+                        "missing_manifest_signature",
+                        "evidence-batch-manifest.v1",
+                        "evidence-batch-manifest-synthetic-1-valid.json",
+                        value -> value.remove("signature"),
+                        "signature"),
+                new SchemaRejectionCase(
+                        "invalid_manifest_signature",
+                        "evidence-batch-manifest.v1",
+                        "evidence-batch-manifest-synthetic-1-valid.json",
+                        value -> value.put("signature", "not+base64url="),
+                        "signature"),
+                new SchemaRejectionCase(
+                        "assessment_output_schema_pin_mismatch",
+                        "evidence-item-assessment.v1",
+                        "evidence-item-proposal-valid.json",
+                        value ->
+                                ((ObjectNode) value.required("profile_versions"))
+                                        .put(
+                                                "assessment_output_schema_version",
+                                                "evidence-item-assessment.v0"),
+                        "assessment_output_schema_version"),
+                new SchemaRejectionCase(
+                        "terminal_output_schema_pin_mismatch",
+                        "evidence-batch-proposal.v1",
+                        "evidence-terminal-proposal-valid.json",
+                        value ->
+                                ((ObjectNode) value.required("profile_versions"))
+                                        .put(
+                                                "terminal_output_schema_version",
+                                                "evidence-batch-proposal.v0"),
+                        "terminal_output_schema_version"),
+                new SchemaRejectionCase(
+                        "forbidden_authorization_proof_ref",
+                        "evidence-batch-manifest.v1",
+                        "evidence-batch-manifest-synthetic-1-valid.json",
+                        value -> value.putObject("authorization_proof_ref").put("proof_id", "FORBIDDEN"),
+                        "authorization_proof_ref"));
     }
 
     @Test
@@ -125,8 +196,205 @@ class EvidenceV2ContractFixtureTest {
         JsonNode fixture = MAPPER.readTree(path.toFile());
         ContractSchema schema = schemaFor(fixture, path);
         Set<ValidationMessage> errors = schema.validator().validate(fixture);
+        String reason = INVALID_FIXTURE_REASONS.get(path.getFileName().toString());
 
-        assertThat(errors).as("invalid fixture must fail closed: %s", path).isNotEmpty();
+        assertThat(reason).as("named rejection reason for %s", path).isNotBlank();
+        assertThat(errors)
+                .as("invalid fixture must fail closed [%s]: %s", reason, path)
+                .isNotEmpty();
+    }
+
+    @Test
+    void manifestDeclaresDirectJavaEs256AuthorityAndGatewayBinding() {
+        JsonNode schema = schemasByVersion.get("evidence-batch-manifest.v1").document();
+
+        assertThat(schema.required("x-self-hash"))
+                .isEqualTo(
+                        MAPPER.valueToTree(
+                                Map.of(
+                                        "algorithm", "SHA-256",
+                                        "field", "manifest_hash",
+                                        "preimage", "omit_top_level_fields",
+                                        "omit_fields", List.of("manifest_hash", "signature"))));
+        assertThat(schema.required("x-signature"))
+                .isEqualTo(
+                        MAPPER.valueToTree(
+                                Map.of("algorithm", "ES256", "covers", "manifest_hash")));
+        assertThat(jsonText(schema.required("required")))
+                .contains("signature_algorithm", "signing_key_id", "signature");
+
+        String constraints = jsonText(schema.required("x-semantic-constraints"));
+        assertThat(constraints)
+                .containsIgnoringCase("room-graph-command.v1")
+                .containsIgnoringCase("gateway")
+                .containsIgnoringCase("before checkpoint mutation")
+                .contains(
+                        "command_id",
+                        "logical_run_id",
+                        "attempt_id",
+                        "thread_id",
+                        "room_epoch",
+                        "fencing_token");
+    }
+
+    @Test
+    void contractPackContainsNoDetachedAuthorizationProofReference() throws IOException {
+        for (Path path : schemaFiles()) {
+            assertThat(jsonText(MAPPER.readTree(path.toFile())))
+                    .as("detached authority is forbidden in %s", path)
+                    .doesNotContain("authorization_proof_ref");
+        }
+        for (String disposition : List.of("valid", "invalid")) {
+            for (Path path : fixtureFiles(disposition)) {
+                assertThat(jsonText(MAPPER.readTree(path.toFile())))
+                        .as("detached authority is forbidden in %s", path)
+                        .doesNotContain("authorization_proof_ref");
+            }
+        }
+        assertThat(Files.readString(CONTRACT_ROOT.resolve("compatibility-matrix.yaml")))
+                .doesNotContain("authorization_proof_ref");
+    }
+
+    @Test
+    void validFixturesHaveDualOutputPinsAndDirectManifestSignatureShape() throws IOException {
+        for (Path path : fixtureFiles("valid")) {
+            JsonNode fixture = MAPPER.readTree(path.toFile());
+            if (fixture.has("profile_versions")) {
+                assertDualOutputPins(fixture.required("profile_versions"), path);
+            }
+            if (fixture.has("version_pins")) {
+                assertDualOutputPins(fixture.required("version_pins"), path);
+            }
+            if ("evidence-batch-manifest.v1".equals(fixture.path("schema_version").asText())) {
+                assertThat(fixture.required("signature_algorithm").asText()).isEqualTo("ES256");
+                assertThat(fixture.required("signing_key_id").asText())
+                        .matches("^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$");
+                assertThat(fixture.required("signature").asText())
+                        .matches("^[A-Za-z0-9_-]{16,4096}$")
+                        .doesNotContain("=");
+            }
+        }
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("namedSchemaRejectionCases")
+    void trustAndVersionConfusionFailuresHaveNamedReasons(SchemaRejectionCase rejection)
+            throws IOException {
+        ObjectNode fixture =
+                (ObjectNode)
+                        MAPPER.readTree(
+                                FIXTURE_ROOT.resolve("valid").resolve(rejection.fixtureName()).toFile());
+        rejection.mutation().accept(fixture);
+
+        Set<ValidationMessage> errors =
+                schemasByVersion.get(rejection.schemaVersion()).validator().validate(fixture);
+        assertThat(errors).as(rejection.reason()).isNotEmpty();
+        assertThat(errors.toString()).as(rejection.reason()).contains(rejection.expectedErrorToken());
+    }
+
+    @Test
+    void legacySingleOutputSchemaVersionIsRejectedEverywhere() throws IOException {
+        for (String fixtureName :
+                List.of(
+                        "evidence-batch-manifest-synthetic-1-valid.json",
+                        "evidence-item-proposal-valid.json",
+                        "evidence-terminal-proposal-valid.json")) {
+            ObjectNode fixture = readValidObject(fixtureName);
+            ((ObjectNode) fixture.required("profile_versions"))
+                    .put("output_schema_version", "evidence-batch-proposal.v1");
+            assertThat(schemaFor(fixture, FIXTURE_ROOT.resolve("valid").resolve(fixtureName))
+                            .validator()
+                            .validate(fixture))
+                    .as("legacy output_schema_version must be rejected in %s", fixtureName)
+                    .isNotEmpty();
+        }
+
+        ObjectNode projection = readValidObject("evidence-process-projection-valid.json");
+        ((ObjectNode) projection.required("version_pins"))
+                .put("output_schema_version", "evidence-batch-proposal.v1");
+        assertThat(schemasByVersion
+                        .get("evidence-process-projection.v1")
+                        .validator()
+                        .validate(projection))
+                .as("legacy output_schema_version must be rejected in projection pins")
+                .isNotEmpty();
+    }
+
+    @Test
+    void validDocumentsAreExactlyCrossBoundToTheVerifiedRoomGraphCommand()
+            throws IOException {
+        JsonNode manifest = readValidObject("evidence-batch-manifest-synthetic-1-valid.json");
+        JsonNode capability = readValidObject("evidence-asset-capability-valid.json");
+        JsonNode assessment = readValidObject("evidence-item-proposal-valid.json");
+        JsonNode terminal = readValidObject("evidence-terminal-proposal-valid.json");
+        JsonNode projection = readValidObject("evidence-process-projection-valid.json");
+        JsonNode item = manifest.required("items").required(0);
+        JsonNode command = manifest.required("command_binding");
+
+        assertEqualFields(
+                manifest,
+                capability,
+                "registration_id",
+                "manifest_id",
+                "manifest_hash",
+                "tenant_surrogate",
+                "case_id",
+                "room_epoch",
+                "fencing_token",
+                "thread_id",
+                "actor_scope_hash",
+                "agent_session_id");
+        assertEqualFields(
+                item,
+                capability,
+                "evidence_id",
+                "item_hash",
+                "owner_participant_id",
+                "owner_role",
+                "visibility",
+                "object_ref",
+                "immutable_object_version",
+                "object_sha256",
+                "content_type",
+                "byte_size",
+                "privacy_basis",
+                "parse_ref",
+                "parse_hash",
+                "parse_status",
+                "permitted_modalities");
+        assertEqualFields(manifest, assessment, "manifest_id", "manifest_hash", "thread_id");
+        assertEqualFields(manifest, terminal, "manifest_id", "manifest_hash", "thread_id");
+        assertEqualFields(
+                command, assessment, "command_id", "logical_run_id", "attempt_id");
+        assertEqualFields(command, terminal, "command_id", "logical_run_id", "attempt_id");
+        assertThat(assessment.required("profile_versions"))
+                .isEqualTo(manifest.required("profile_versions"));
+        assertThat(terminal.required("profile_versions"))
+                .isEqualTo(manifest.required("profile_versions"));
+        assertThat(capability.required("profile_versions_hash").asText())
+                .isEqualTo(ContractJson.sha256Hex(manifest.required("profile_versions")));
+        assertThat(terminal.required("assessment_refs").required(0).required("assessment_hash"))
+                .isEqualTo(assessment.required("assessment_hash"));
+
+        JsonNode activeRun = projection.required("active_graph_run");
+        assertEqualFields(command, activeRun, "command_id", "logical_run_id", "attempt_id");
+        assertEqualFields(manifest, activeRun, "manifest_id", "manifest_hash");
+        assertThat(projection.required("room_epoch")).isEqualTo(manifest.required("room_epoch"));
+        assertThat(projection.required("fencing_token"))
+                .isEqualTo(manifest.required("fencing_token"));
+        for (String field : PROFILE_PIN_FIELDS) {
+            assertThat(projection.required("version_pins").required(field))
+                    .as("projection version pin %s", field)
+                    .isEqualTo(manifest.required("profile_versions").required(field));
+        }
+
+        ObjectNode gatewayBinding = verifiedGatewayBinding(manifest);
+        assertVerifiedRoomGraphCommandBinding(manifest, gatewayBinding);
+        gatewayBinding.put("fencing_token", manifest.required("fencing_token").longValue() + 1);
+        org.assertj.core.api.Assertions.assertThatThrownBy(
+                        () -> assertVerifiedRoomGraphCommandBinding(manifest, gatewayBinding))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("room_graph_command_binding_mismatch:fencing_token");
     }
 
     @Test
@@ -156,6 +424,78 @@ class EvidenceV2ContractFixtureTest {
                 .as("fixture %s declares a known schema_version", path)
                 .containsKey(schemaVersion);
         return schemasByVersion.get(schemaVersion);
+    }
+
+    private static ObjectNode readValidObject(String fixtureName) throws IOException {
+        return (ObjectNode)
+                MAPPER.readTree(FIXTURE_ROOT.resolve("valid").resolve(fixtureName).toFile());
+    }
+
+    private static void assertDualOutputPins(JsonNode pins, Path path) {
+        assertThat(pins.has("output_schema_version"))
+                .as("ambiguous legacy output pin in %s", path)
+                .isFalse();
+        assertThat(pins.required("assessment_output_schema_version").asText())
+                .as("assessment output pin in %s", path)
+                .isEqualTo("evidence-item-assessment.v1");
+        assertThat(pins.required("terminal_output_schema_version").asText())
+                .as("terminal output pin in %s", path)
+                .isEqualTo("evidence-batch-proposal.v1");
+    }
+
+    private static void assertEqualFields(JsonNode expected, JsonNode actual, String... fields) {
+        for (String field : fields) {
+            assertThat(actual.required(field))
+                    .as("cross-document binding for %s", field)
+                    .isEqualTo(expected.required(field));
+        }
+    }
+
+    private static ObjectNode verifiedGatewayBinding(JsonNode manifest) {
+        ObjectNode binding = MAPPER.createObjectNode();
+        JsonNode command = manifest.required("command_binding");
+        for (String field : List.of("command_id", "logical_run_id", "attempt_id")) {
+            binding.set(field, command.required(field));
+        }
+        for (String field :
+                List.of(
+                        "registration_id",
+                        "tenant_surrogate",
+                        "case_id",
+                        "room_id",
+                        "room_epoch",
+                        "fencing_token",
+                        "thread_id",
+                        "actor_id",
+                        "actor_role",
+                        "participant_id",
+                        "actor_scope_hash",
+                        "agent_session_id")) {
+            binding.set(field, manifest.required(field));
+        }
+        binding.set("profile_versions", manifest.required("profile_versions"));
+        return binding;
+    }
+
+    private static void assertVerifiedRoomGraphCommandBinding(
+            JsonNode manifest, JsonNode gatewayBinding) {
+        ObjectNode expected = verifiedGatewayBinding(manifest);
+        expected.fieldNames()
+                .forEachRemaining(
+                        field -> {
+                            if (!expected.required(field).equals(gatewayBinding.path(field))) {
+                                throw new IllegalArgumentException(
+                                        "room_graph_command_binding_mismatch:" + field);
+                            }
+                        });
+    }
+
+    private static String jsonText(JsonNode value) {
+        try {
+            return MAPPER.writeValueAsString(value);
+        } catch (IOException exception) {
+            throw new IllegalArgumentException("cannot render contract JSON", exception);
+        }
     }
 
     private static void assertSelfHash(JsonNode fixture, JsonNode schema, Path path) {
@@ -193,4 +533,16 @@ class EvidenceV2ContractFixtureTest {
     }
 
     private record ContractSchema(JsonNode document, JsonSchema validator) {}
+
+    private record SchemaRejectionCase(
+            String reason,
+            String schemaVersion,
+            String fixtureName,
+            Consumer<ObjectNode> mutation,
+            String expectedErrorToken) {
+        @Override
+        public String toString() {
+            return reason;
+        }
+    }
 }
