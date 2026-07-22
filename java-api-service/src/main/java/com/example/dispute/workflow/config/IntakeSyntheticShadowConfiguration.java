@@ -17,6 +17,7 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
+import org.springframework.transaction.PlatformTransactionManager;
 
 /** Explicit, fail-closed assembly for the comparison-only signed synthetic Intake path. */
 @Configuration(proxyBeanMethods = false)
@@ -34,12 +35,16 @@ public class IntakeSyntheticShadowConfiguration {
     JdbcIntakeSyntheticComparisonLedger intakeSyntheticComparisonLedger(
             DataSource dataSource,
             ObjectMapper objectMapper,
+            PlatformTransactionManager transactionManager,
             IntakeEpochSelectionProperties epochSelection,
             GraphCommandClientProperties graphClient,
             AgentRunV2Properties agentRunV2) {
         requireSyntheticShadow(epochSelection, graphClient, agentRunV2);
         return new JdbcIntakeSyntheticComparisonLedger(
-                new NamedParameterJdbcTemplate(dataSource), objectMapper, Clock.systemUTC());
+                new NamedParameterJdbcTemplate(dataSource),
+                objectMapper,
+                Clock.systemUTC(),
+                transactionManager);
     }
 
     @Bean

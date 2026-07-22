@@ -18,6 +18,7 @@ import java.util.stream.Stream;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
+import org.springframework.transaction.PlatformTransactionManager;
 
 class IntakeSyntheticShadowConfigurationTest {
 
@@ -156,7 +157,10 @@ class IntakeSyntheticShadowConfigurationTest {
         ApplicationContextRunner runner = baseRunner()
                 .withPropertyValues(ENABLED, EPOCH_MODE, COHORT, POLICY, GRAPH_MODE, GRAPH_ENDPOINT)
                 .withBean(DataSource.class, () -> mock(DataSource.class))
-                .withBean(ObjectMapper.class, () -> new ObjectMapper().findAndRegisterModules());
+                .withBean(ObjectMapper.class, () -> new ObjectMapper().findAndRegisterModules())
+                .withBean(
+                        PlatformTransactionManager.class,
+                        () -> mock(PlatformTransactionManager.class));
         if (missing != IntakeSignedSyntheticAdmissionPort.class) {
             runner = runner.withBean(
                     IntakeSignedSyntheticAdmissionPort.class,
@@ -184,6 +188,9 @@ class IntakeSyntheticShadowConfigurationTest {
         return baseRunner()
                 .withBean(DataSource.class, () -> mock(DataSource.class))
                 .withBean(ObjectMapper.class, () -> new ObjectMapper().findAndRegisterModules())
+                .withBean(
+                        PlatformTransactionManager.class,
+                        () -> mock(PlatformTransactionManager.class))
                 .withBean(
                         IntakeSignedSyntheticAdmissionPort.class,
                         () -> mock(IntakeSignedSyntheticAdmissionPort.class))
