@@ -263,8 +263,9 @@ class MigrationIntegrationTest {
                             "trg_r15_command_immutable",
                             "trg_r15_existing_private_event_assertion",
                             "trg_r15_command_exact_comparison",
-                            "trg_intake_shadow_comparison_immutable",
-                            "trg_intake_shadow_comparison_no_truncate");
+                            "trg_intake_shadow_comparison_immutable");
+            assertThat(loadStatementLevelTruncateTriggers(connection))
+                    .contains("trg_intake_shadow_comparison_no_truncate");
             assertFormalJuryReportUniqueness(connection);
             assertAppendOnlyTablesRejectMutation(connection);
         }
@@ -393,6 +394,29 @@ class MigrationIntegrationTest {
                                 select trigger_name
                                 from information_schema.triggers
                                 where trigger_schema = 'public'
+                                """)) {
+            while (result.next()) {
+                triggers.add(result.getString(1));
+            }
+        }
+        return triggers;
+    }
+
+    private static Set<String> loadStatementLevelTruncateTriggers(Connection connection)
+            throws SQLException {
+        Set<String> triggers = new HashSet<>();
+        try (Statement statement = connection.createStatement();
+                ResultSet result =
+                        statement.executeQuery(
+                                """
+                                select trigger.tgname
+                                from pg_catalog.pg_trigger trigger
+                                join pg_catalog.pg_class target on target.oid = trigger.tgrelid
+                                join pg_catalog.pg_namespace schema on schema.oid = target.relnamespace
+                                where schema.nspname = 'public'
+                                  and not trigger.tgisinternal
+                                  and (trigger.tgtype & 1) = 0
+                                  and (trigger.tgtype & 32) <> 0
                                 """)) {
             while (result.next()) {
                 triggers.add(result.getString(1));

@@ -153,6 +153,7 @@ public final class JdbcIntakeSyntheticComparisonLedger
                         .addValue("recordedAt", recordedAt);
 
         AuthorityRoute route = requireAuthorityRoute(parameters);
+        parameters.addValue("epochId", route.epochId());
         lockActiveAuthority(route, parameters);
 
         int inserted =
