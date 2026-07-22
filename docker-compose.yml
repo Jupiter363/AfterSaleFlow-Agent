@@ -56,6 +56,8 @@ x-java-environment: &java-environment
   APP_ORCHESTRATION_INTAKE_SHADOW_COHORT_BASIS_POINTS: ${APP_ORCHESTRATION_INTAKE_SHADOW_COHORT_BASIS_POINTS:-0}
   APP_ORCHESTRATION_INTAKE_COHORT_POLICY_VERSION: ${APP_ORCHESTRATION_INTAKE_COHORT_POLICY_VERSION:-}
   APP_ORCHESTRATION_INTAKE_SIGNED_SYNTHETIC_SHADOW_ENABLED: ${APP_ORCHESTRATION_INTAKE_SIGNED_SYNTHETIC_SHADOW_ENABLED:-false}
+  APP_ORCHESTRATION_INTAKE_SYNTHETIC_ADMISSION_TRUST_ENABLED: ${APP_ORCHESTRATION_INTAKE_SYNTHETIC_ADMISSION_TRUST_ENABLED:-false}
+  APP_ORCHESTRATION_INTAKE_SYNTHETIC_ADMISSION_TRUST_PUBLIC_KEY_DIRECTORY: /run/secrets/intake-synthetic/admission-public-keys
   APP_ORCHESTRATION_INTAKE_SYNTHETIC_EXCHANGE_BUCKET: ${MINIO_BUCKET_INTAKE_SYNTHETIC_PRIVATE:-intake-synthetic-private}
   APP_ORCHESTRATION_INTAKE_SYNTHETIC_EXCHANGE_PREFIX: ${APP_ORCHESTRATION_INTAKE_SYNTHETIC_EXCHANGE_PREFIX:-signed-synthetic/intake}
   APP_ORCHESTRATION_COMMAND_OUTBOX_BATCH_SIZE: ${APP_ORCHESTRATION_COMMAND_OUTBOX_BATCH_SIZE:-32}
@@ -464,6 +466,7 @@ services:
       APP_GRAPH_JWKS_KEY_DIRECTORY: /run/secrets/graph-public-keys
     volumes:
       - ${GRAPH_PUBLIC_KEYS_HOST_DIRECTORY:-./.runtime/graph-public-keys}:/run/secrets/graph-public-keys:ro
+      - ${INTAKE_SYNTHETIC_ADMISSION_PUBLIC_KEYS_HOST_DIRECTORY:-./.runtime/intake-synthetic/admission-public-keys}:/run/secrets/intake-synthetic/admission-public-keys:ro
     ports:
       - "127.0.0.1:${JAVA_API_PORT:-8080}:8080"
     depends_on: *java-api-depends-on
@@ -490,6 +493,8 @@ services:
       APP_ORCHESTRATION_ROOM_EPOCH_BOOTSTRAP_ENABLED: ${APP_ORCHESTRATION_ROOM_EPOCH_BOOTSTRAP_ENABLED:-false}
       APP_ORCHESTRATION_DOMAIN_EVENT_RECOVERY_ENABLED: ${APP_ORCHESTRATION_DOMAIN_EVENT_RECOVERY_ENABLED:-false}
       APP_ORCHESTRATION_PROJECTION_RECONCILIATION_ENABLED: ${APP_ORCHESTRATION_PROJECTION_RECONCILIATION_ENABLED:-false}
+    volumes:
+      - ${INTAKE_SYNTHETIC_ADMISSION_PUBLIC_KEYS_HOST_DIRECTORY:-./.runtime/intake-synthetic/admission-public-keys}:/run/secrets/intake-synthetic/admission-public-keys:ro
     depends_on: *java-core-depends-on
     healthcheck:
       test: ["CMD-SHELL", "kill -0 1"]
@@ -539,6 +544,7 @@ services:
     volumes:
       - ${GRAPH_SIGNING_KEYS_HOST_DIRECTORY:-./.runtime/graph-signing-keys}:/run/secrets/graph-signing-keys:ro
       - ${GRAPH_MTLS_HOST_DIRECTORY:-./.runtime/graph-mtls}:/run/secrets/graph-mtls:ro
+      - ${INTAKE_SYNTHETIC_ADMISSION_PUBLIC_KEYS_HOST_DIRECTORY:-./.runtime/intake-synthetic/admission-public-keys}:/run/secrets/intake-synthetic/admission-public-keys:ro
       - ${INTAKE_SYNTHETIC_RUNTIME_MATERIAL_INDEX_HOST_PATH:-./.runtime/intake-synthetic/runtime-material-index.json}:/run/secrets/intake-synthetic/runtime-material-index.json:ro
     depends_on: *java-agent-depends-on
     healthcheck:
