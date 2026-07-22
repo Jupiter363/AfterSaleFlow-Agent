@@ -2,6 +2,8 @@ package com.example.dispute.workflow.application.intake.exchange;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -24,17 +26,30 @@ import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
 import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
 import com.example.dispute.workflow.infrastructure.objectstore.intake.IntakePrivateObjectStoreExchangeAdapter;
+import com.example.dispute.workflow.infrastructure.objectstore.intake.MinioIntakeSyntheticExchangeStore;
+import com.example.dispute.workflow.infrastructure.persistence.authority.intake.JdbcSignedSyntheticIntakeExchangeAuthorityValidationPort;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
+import io.minio.GetObjectResponse;
+import io.minio.MinioClient;
+import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.Base64;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import javax.sql.DataSource;
+import okhttp3.Headers;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
+import org.springframework.jdbc.core.namedparam.NamedParameterJdbcOperations;
+import org.springframework.jdbc.core.namedparam.SqlParameterSource;
 
 class IntakeExchangeP0Test {
 
@@ -82,8 +97,39 @@ class IntakeExchangeP0Test {
                         GRAPH_SHADOW,
                         GRAPH_ENDPOINT)
                 .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure())
+                            .rootCause()
+                            .hasMessageContaining(
+                                    IntakeExchangePayloadObjectStoreGateway.class.getName());
+                });
+    }
+
+    @Test
+    void syntheticShadowCreatesConcreteJdbcAndMinioExchangeAdapters() {
+        new ApplicationContextRunner()
+                .withUserConfiguration(IntakeSyntheticExchangeConfiguration.class)
+                .withPropertyValues(
+                        SYNTHETIC_ENABLED,
+                        SHADOW_SELECTION,
+                        SHADOW_COHORT,
+                        SHADOW_POLICY,
+                        GRAPH_SHADOW,
+                        GRAPH_ENDPOINT)
+                .withBean(DataSource.class, () -> mock(DataSource.class))
+                .withBean(ObjectMapper.class, () -> new ObjectMapper().findAndRegisterModules())
+                .withBean(MinioClient.class, () -> mock(MinioClient.class))
+                .run(context -> {
                     assertThat(context).hasNotFailed();
-                    assertThat(context).doesNotHaveBean(IntakeExchangeService.class);
+                    assertThat(context)
+                            .hasSingleBean(
+                                    JdbcSignedSyntheticIntakeExchangeAuthorityValidationPort.class);
+                    assertThat(context)
+                            .hasSingleBean(MinioIntakeSyntheticExchangeStore.class)
+                            .hasSingleBean(IntakeExchangeAuthorityValidationPort.class)
+                            .hasSingleBean(IntakeExchangePayloadObjectStoreGateway.class)
+                            .hasSingleBean(IntakeImmutablePayloadPublisher.class)
+                            .hasSingleBean(IntakeExchangeService.class);
                 });
     }
 
@@ -293,6 +339,86 @@ class IntakeExchangeP0Test {
         assertThat(gateway.lastRequest.objectVersion()).isEqualTo(OBJECT_VERSION);
         assertThat(gateway.lastRequest.uri()).isEqualTo(load.objectRef().uri());
         assertThat(publisher.lastRequest.putIdempotencyKey()).isEqualTo(put.idempotencyKey());
+    }
+
+    @Test
+    void jdbcAuthorityRequiresOneExactCurrentAdmissionAndReturnsItsObjectVersion()
+            throws Exception {
+        byte[] payload = canonicalFixture(
+                "../contracts/agent-platform/intake/v2/fixtures/valid/"
+                        + "intake-domain-snapshot-valid.json");
+        PayloadLoadRequest request = loadRequest(payload);
+        NamedParameterJdbcOperations jdbc = mock(NamedParameterJdbcOperations.class);
+        when(jdbc.queryForList(anyString(), any(SqlParameterSource.class)))
+                .thenReturn(List.of(Map.of(
+                        "artifact_id", request.objectRef().artifactId(),
+                        "schema_version", request.objectRef().schemaVersion(),
+                        "object_uri", request.objectRef().uri(),
+                        "object_version", OBJECT_VERSION,
+                        "content_sha256", request.objectRef().sha256(),
+                        "size_bytes", request.objectRef().sizeBytes())));
+        var authority = new JdbcSignedSyntheticIntakeExchangeAuthorityValidationPort(
+                jdbc,
+                MAPPER,
+                Clock.fixed(Instant.parse("2026-07-22T08:00:00Z"), ZoneOffset.UTC));
+
+        assertThat(authority.requirePayloadLoad(new PayloadLoadClaim(request)).objectVersion())
+                .isEqualTo(OBJECT_VERSION);
+
+        when(jdbc.queryForList(anyString(), any(SqlParameterSource.class)))
+                .thenReturn(List.of());
+        assertThatThrownBy(() -> authority.requirePayloadLoad(new PayloadLoadClaim(request)))
+                .isInstanceOf(IntakeExchangeAuthorityValidationPort.Rejected.class)
+                .hasMessageContaining("not current and exact");
+    }
+
+    @Test
+    void minioStorePublishesAndReadsOnlyItsExactContentAddress() throws Exception {
+        byte[] payload = canonicalFixture(
+                "../contracts/agent-platform/intake/v2/fixtures/valid/"
+                        + "intake-turn-event-valid.json");
+        JsonNode document = MAPPER.readTree(payload);
+        String hash = document.get("event_hash").textValue();
+        MinioClient minio = mock(MinioClient.class);
+        var store = new MinioIntakeSyntheticExchangeStore(
+                minio,
+                new IntakeExchangeCanonicalPayloadValidator(),
+                "intake-synthetic-private",
+                "signed-synthetic/intake");
+        var published = store.publish(new IntakeImmutablePayloadPublisher.PublishRequest(
+                "EVENT_P4_EXCHANGE_1",
+                "intake-turn-event.v2",
+                hash,
+                payload,
+                IntakeExchangeContract.EVENT_MAX_BYTES));
+        String objectKey = java.net.URI.create(published.uri()).getPath().substring(1);
+        when(minio.getObject(any())).thenReturn(new GetObjectResponse(
+                new Headers.Builder().build(),
+                "intake-synthetic-private",
+                null,
+                objectKey,
+                new ByteArrayInputStream(payload)));
+
+        var loaded = store.readExact(new IntakeExchangePayloadObjectStoreGateway.ReadRequest(
+                published.artifactId(),
+                published.schemaVersion(),
+                published.uri(),
+                published.objectVersion(),
+                published.contentSha256(),
+                published.sizeBytes()));
+
+        assertThat(loaded.canonicalPayload()).isEqualTo(payload);
+        assertThat(published.objectVersion()).isEqualTo(hash);
+        assertThatThrownBy(() -> store.readExact(
+                        new IntakeExchangePayloadObjectStoreGateway.ReadRequest(
+                                published.artifactId(),
+                                published.schemaVersion(),
+                                published.uri(),
+                                "0".repeat(64),
+                                published.contentSha256(),
+                                published.sizeBytes())))
+                .isInstanceOf(SecurityException.class)
+                .hasMessageContaining("content address");
     }
 
     @Test

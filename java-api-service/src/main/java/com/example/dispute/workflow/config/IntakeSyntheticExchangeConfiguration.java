@@ -6,7 +6,12 @@ import com.example.dispute.workflow.application.intake.exchange.IntakeExchangeCa
 import com.example.dispute.workflow.application.intake.exchange.IntakeExchangePayloadObjectStoreGateway;
 import com.example.dispute.workflow.application.intake.exchange.IntakeExchangeService;
 import com.example.dispute.workflow.infrastructure.objectstore.intake.IntakePrivateObjectStoreExchangeAdapter;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
+import com.example.dispute.workflow.infrastructure.objectstore.intake.MinioIntakeSyntheticExchangeStore;
+import com.example.dispute.workflow.infrastructure.persistence.authority.intake.JdbcSignedSyntheticIntakeExchangeAuthorityValidationPort;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.minio.MinioClient;
+import java.time.Clock;
+import javax.sql.DataSource;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -18,7 +23,8 @@ import org.springframework.context.annotation.Configuration;
 @EnableConfigurationProperties({
     IntakeEpochSelectionProperties.class,
     GraphCommandClientProperties.class,
-    AgentRunV2Properties.class
+    AgentRunV2Properties.class,
+    IntakeSyntheticExchangeProperties.class
 })
 @ConditionalOnProperty(
         name = "app.orchestration.intake-epoch-selection.signed-synthetic-shadow-enabled",
@@ -26,11 +32,33 @@ import org.springframework.context.annotation.Configuration;
 public class IntakeSyntheticExchangeConfiguration {
 
     @Bean
-    @ConditionalOnBean({
-        IntakeExchangeAuthorityValidationPort.class,
-        IntakeExchangePayloadObjectStoreGateway.class,
-        IntakeImmutablePayloadPublisher.class
+    @ConditionalOnMissingBean
+    IntakeExchangeCanonicalPayloadValidator intakeExchangeCanonicalPayloadValidator() {
+        return new IntakeExchangeCanonicalPayloadValidator();
+    }
+
+    @Bean
+    @ConditionalOnMissingBean(IntakeExchangeAuthorityValidationPort.class)
+    JdbcSignedSyntheticIntakeExchangeAuthorityValidationPort intakeExchangeAuthority(
+            DataSource dataSource, ObjectMapper objectMapper) {
+        return new JdbcSignedSyntheticIntakeExchangeAuthorityValidationPort(
+                dataSource, objectMapper, Clock.systemUTC());
+    }
+
+    @Bean
+    @ConditionalOnMissingBean({
+        IntakeImmutablePayloadPublisher.class,
+        IntakeExchangePayloadObjectStoreGateway.class
     })
+    MinioIntakeSyntheticExchangeStore intakeSyntheticExchangeStore(
+            MinioClient minioClient,
+            IntakeExchangeCanonicalPayloadValidator validator,
+            IntakeSyntheticExchangeProperties properties) {
+        return new MinioIntakeSyntheticExchangeStore(
+                minioClient, validator, properties.bucket(), properties.prefix());
+    }
+
+    @Bean
     @ConditionalOnMissingBean(IntakeExchangeService.class)
     IntakeExchangeService intakeExchangeService(
             IntakeExchangeAuthorityValidationPort authority,
@@ -38,12 +66,13 @@ public class IntakeSyntheticExchangeConfiguration {
             IntakeImmutablePayloadPublisher proposalPublisher,
             IntakeEpochSelectionProperties epochSelection,
             GraphCommandClientProperties graphClient,
-            AgentRunV2Properties agentRunV2) {
+            AgentRunV2Properties agentRunV2,
+            IntakeExchangeCanonicalPayloadValidator validator) {
         requireSyntheticShadow(epochSelection, graphClient, agentRunV2);
         return new IntakeExchangeService(
                 authority,
                 new IntakePrivateObjectStoreExchangeAdapter(payloadStore, proposalPublisher),
-                new IntakeExchangeCanonicalPayloadValidator());
+                validator);
     }
 
     private static void requireSyntheticShadow(
