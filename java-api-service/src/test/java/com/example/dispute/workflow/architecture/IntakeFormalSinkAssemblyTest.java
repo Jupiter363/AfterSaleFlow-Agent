@@ -80,6 +80,8 @@ class IntakeFormalSinkAssemblyTest {
     private static final String TEMPORAL_WORKER = "io.temporal.worker.Worker";
     private static final String REGISTER_ACTIVITIES = "registerActivitiesImplementations";
     private static final String SPRING_COMPONENT = "org.springframework.stereotype.Component";
+    private static final String SPRING_TEST_COMPONENT =
+            "org.springframework.boot.test.context.TestComponent";
     private static final String SPRING_CONFIGURATION =
             "org.springframework.context.annotation.Configuration";
     private static final String SPRING_BEAN = "org.springframework.context.annotation.Bean";
@@ -185,6 +187,19 @@ class IntakeFormalSinkAssemblyTest {
                 new ClassFileImporter()
                         .withImportOption(new ImportOption.OnlyIncludeTests())
                         .importPackages(FIXTURE_PACKAGE);
+        assertThat(
+                        fixtures.stream()
+                                .filter(javaClass -> !javaClass.isAnnotation())
+                                .filter(IntakeFormalSinkAssemblyTest::hasDiscoverableClassAnnotation)
+                                .filter(
+                                        javaClass ->
+                                                !hasTransitiveAnnotation(
+                                                        javaClass, SPRING_TEST_COMPONENT))
+                                .map(JavaClass::getName)
+                                .sorted()
+                                .toList())
+                .as("component-like architecture fixtures must stay out of real Spring contexts")
+                .isEmpty();
 
         String combinedDescriptor =
                 """
@@ -502,6 +517,22 @@ class IntakeFormalSinkAssemblyTest {
                 continue;
             }
             if (isDiscoveryAnnotation(annotationType.getName())) {
+                return true;
+            }
+            pending.addAll(directAnnotationTypes(annotationType));
+        }
+        return false;
+    }
+
+    private static boolean hasTransitiveAnnotation(JavaClass javaClass, String annotationName) {
+        ArrayDeque<JavaClass> pending = new ArrayDeque<>(directAnnotationTypes(javaClass));
+        Set<String> visited = new HashSet<>();
+        while (!pending.isEmpty()) {
+            JavaClass annotationType = pending.removeFirst();
+            if (!visited.add(annotationType.getName())) {
+                continue;
+            }
+            if (annotationName.equals(annotationType.getName())) {
                 return true;
             }
             pending.addAll(directAnnotationTypes(annotationType));

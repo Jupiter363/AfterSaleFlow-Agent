@@ -19,6 +19,7 @@ import java.lang.annotation.Target;
 @interface NestedFixtureStereotype {}
 
 @NestedFixtureStereotype
+@FormalSinkArchitectureFixture
 class MetaAnnotatedFormalAssembly {
 
     private final CrossFileFormalWrapper wrapper;

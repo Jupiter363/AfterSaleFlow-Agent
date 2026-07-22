@@ -4,6 +4,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 @Configuration
+@FormalSinkArchitectureFixture
 class CrossFileWrapperAssembly {
 
     private final CrossFileFormalWrapper wrapper;

@@ -6,6 +6,7 @@ import java.util.ServiceLoader;
 import org.springframework.context.annotation.Configuration;
 
 @Configuration
+@FormalSinkArchitectureFixture
 class ServiceLoaderHiddenProviderAssembly {
 
     private final IntakeServiceProviderLoader providerLoader;
@@ -38,6 +39,7 @@ final class IntakeServiceProviderLoader {
 }
 
 @Configuration
+@FormalSinkArchitectureFixture
 class SafeServiceLoaderAssembly {
 
     Object safeProvider() {

@@ -10,6 +10,7 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.stereotype.Component;
 
 @Configuration
+@FormalSinkArchitectureFixture
 class ReflectiveFormalAdapterAssembly {
 
     private final FormalAdapterClassResolver resolver;
@@ -33,6 +34,7 @@ final class FormalAdapterClassResolver {
 }
 
 @Configuration
+@FormalSinkArchitectureFixture
 class NeutralReflectiveHelperAssembly {
 
     Object instantiate() throws ReflectiveOperationException {
@@ -59,6 +61,7 @@ final class HiddenFinalizerAdapter {
 }
 
 @Configuration
+@FormalSinkArchitectureFixture
 class SafeReflectiveAssembly {
 
     Object safeUtility() throws ReflectiveOperationException {
@@ -75,6 +78,7 @@ final class SafeUtilityClassResolver {
 }
 
 @Configuration
+@FormalSinkArchitectureFixture
 class MixedSafeAndRuntimeReflectiveAssembly {
 
     Object resolve(String runtimeFormalClassName) throws ClassNotFoundException {
@@ -84,6 +88,7 @@ class MixedSafeAndRuntimeReflectiveAssembly {
 }
 
 @Configuration
+@FormalSinkArchitectureFixture
 class SameLineAmbiguousDynamicAssembly {
 
     Object resolve(String runtimeFormalClassName) throws ClassNotFoundException {
@@ -92,6 +97,7 @@ class SameLineAmbiguousDynamicAssembly {
 }
 
 @Configuration
+@FormalSinkArchitectureFixture
 class MixedSafeAndRuntimeConstructorAssembly {
 
     Object resolve(Constructor<?> runtimeConstructor) throws ReflectiveOperationException {
@@ -101,6 +107,7 @@ class MixedSafeAndRuntimeConstructorAssembly {
 }
 
 @Configuration
+@FormalSinkArchitectureFixture
 class MixedSafeAndRuntimeMethodAssembly {
 
     Object resolve(Method runtimeMethod, Object receiver) throws ReflectiveOperationException {
@@ -110,6 +117,7 @@ class MixedSafeAndRuntimeMethodAssembly {
 }
 
 @Configuration
+@FormalSinkArchitectureFixture
 class MixedSafeAndRuntimeFieldAssembly {
 
     Object resolve(Field runtimeField, Object receiver) throws ReflectiveOperationException {
@@ -119,6 +127,7 @@ class MixedSafeAndRuntimeFieldAssembly {
 }
 
 @Configuration
+@FormalSinkArchitectureFixture
 class UnresolvedConfigurationDynamicAssembly {
 
     Object resolve(String runtimeFormalClassName) throws ClassNotFoundException {
@@ -127,6 +136,7 @@ class UnresolvedConfigurationDynamicAssembly {
 }
 
 @Component
+@FormalSinkArchitectureFixture
 class UnresolvedComponentDynamicAssembly {
 
     Object resolve(String runtimeFormalClassName) throws ClassNotFoundException {
@@ -135,6 +145,7 @@ class UnresolvedComponentDynamicAssembly {
 }
 
 @Named
+@FormalSinkArchitectureFixture
 class UnresolvedNamedDynamicAssembly {
 
     Object resolve(String runtimeFormalClassName) throws ClassNotFoundException {

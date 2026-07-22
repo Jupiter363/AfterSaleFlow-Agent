@@ -5,6 +5,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 @Configuration
+@FormalSinkArchitectureFixture
 class SpringStringBeanLookupAssembly {
 
     private final FormalBeanNameResolver resolver;
@@ -32,6 +33,7 @@ final class FormalBeanNameResolver {
 }
 
 @Configuration
+@FormalSinkArchitectureFixture
 class SafeSpringBeanLookupAssembly {
 
     private final SafeBeanNameResolver resolver;
