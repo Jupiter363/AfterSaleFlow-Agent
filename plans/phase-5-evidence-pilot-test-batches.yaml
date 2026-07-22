@@ -1,0 +1,564 @@
+schema_version: phase-test-batches.v1
+phase: 5
+name: evidence-pilot-engineering-shadow
+document_status: DRAFT_BLOCKED
+
+documents:
+  execution_plan: plans/phase-5-evidence-pilot-execution.md
+  contract_pack: docs/runbooks/temporal-first/phase-5-p5.0-contract-pack.md
+  source_plan: plans/temporal-langgraph-room-refactor.md
+  acceptance_checklist: docs/acceptance/temporal-first-agent-platform-verification-checklist.md
+  acceptance_manifest: tests/acceptance/temporal-first-check-manifest.yaml
+  room_behavior_baseline: docs/acceptance/current-room-function-baseline.md
+
+gate:
+  contract_gate: P5.0
+  contract_gate_status: NOT_RUN
+  required_entry: PHASE_4_ENGINEERING_CHECKPOINT_AND_MIG_004
+  observed_base_sha: 49e1c22f0e7203478cde2ea568058db86231092d
+  observed_entry_state:
+    phase_4_engineering_checkpoint: NOT_RECORDED
+    next_phase_permission: BLOCKED
+    MIG-004: PENDING_PROMOTION
+    product_100_file_approval: NOT_RECORDED
+    fanout_bulkhead_evidence: PARTIAL_ENGINEERING
+    authorized_asset_boundary: NOT_APPROVED_FOR_PHASE_5
+  entry_decision: BLOCKED
+  implementation_allowed_when:
+    - PHASE_4_ENGINEERING_CHECKPOINT_PASS
+    - PHASE_5_ENGINEERING_ONLY_PERMISSION_RECORDED
+    - MIG_004_PASS_RECORDED
+    - EVIDENCE_100_FILE_PRODUCT_API_UI_APPROVAL_RECORDED
+    - GRAPH_016_ROOM_TENANT_GLOBAL_BULKHEAD_PASS_RECORDED
+    - AUTHORIZED_EVIDENCE_ASSET_BOUNDARY_PASS_RECORDED
+    - P5_0_CONTRACT_CANDIDATE_COMMITTED
+    - P5_0_BATCH_0_PASSED_ON_EXACT_CONTRACT_CANDIDATE_SHA
+    - P5_0_ENTRY_EVIDENCE_COMMITTED
+  runtime_modes_allowed: [LEGACY, DISABLED, SIGNED_SYNTHETIC_SHADOW]
+  traffic_constraints:
+    formal_evidence_graph_sink_allowed: false
+    temporal_evidence_allocation_allowed: false
+    real_case_shadow_allowed: false
+    production_traffic_allowed: false
+    canary_allowed: false
+    promotion_allowed: false
+    synthetic_fixtures_only: true
+  invariants:
+    - Java Evidence ledger remains the sole formal writer.
+    - Temporal owns Evidence wait timer and party completion ordering only for a future admitted TEMPORAL epoch.
+    - Graph results remain proposals and cannot merge freeze or open Hearing.
+    - Evidence batch size is at most 100 and room assessment concurrency is at most 8.
+    - Tenant and global bulkheads plus bounded queues are required before parallel Graph admission.
+    - Hearing supplementation remains unchanged and capped at 50 files per party.
+    - MIG-005 cannot pass from synthetic engineering evidence.
+  gate_change_policy:
+    - An upstream approval does not implicitly relax this matrix.
+    - Every changed gate requires an amended candidate and a new exact-SHA checkpoint.
+    - No implementation task may start from this draft.
+
+resources:
+  active_primary_agents: 1
+  logical_child_owners: 5
+  max_active_child_agents: 3
+  max_active_agents_total: 4
+  execution_waves: 2
+  heavy_test_slots: 1
+  light_test_slots: 2
+  pytest_db_workers: 1
+  maven_fork_count: 1
+  frontend_max_workers: 2
+  docker_compose_owner: primary
+  temporal_test_environment_owner: primary
+  candidate_checkpoint_owner: primary
+  heavy_resources:
+    - maven_test
+    - spring_context
+    - postgresql
+    - testcontainers
+    - temporal_test_server
+    - docker_compose
+    - frontend_build
+    - browser_or_playwright
+    - repository_full_regression
+    - load_or_soak
+  child_forbidden_commands:
+    - java_full_suite
+    - python_full_suite
+    - docker_compose_up_or_build
+    - frontend_production_build
+    - browser_or_playwright_suite
+    - repository_full_regression
+    - load_or_soak
+
+test_token:
+  required_for:
+    - maven_test
+    - spring_context
+    - postgresql
+    - testcontainers
+    - temporal_test_server
+    - docker_compose
+    - browser_or_playwright
+    - load_or_soak
+  request_fields: [task_id, command, expected_duration, resource_class]
+  grantor: primary
+  max_heavy_tokens: 1
+
+tiers:
+  T0:
+    owner: delegated_agent
+    max_duration_seconds: 180
+    services: none
+    purpose: syntax schema pure reducer workflow domain and UI unit checks
+  T1:
+    owner: primary
+    trigger: wave_a_merged
+    purpose: deduplicated service-free Graph Workflow and Java authority checks
+  T2:
+    owner: primary
+    trigger: wave_b_merged
+    purpose: PostgreSQL Temporal recovery projection stream and synthetic parity integration
+  T3:
+    owner: primary
+    trigger: explicit_unified_verification_checkpoint_only
+    automatic: false
+    purpose: full regression browser real shadow load soak failover DR and canary
+
+baseline_ids:
+  evidence: [EVD-001, EVD-002, EVD-003, EVD-004, EVD-005, EVD-006, EVD-007, EVD-008, EVD-009, EVD-010, EVD-011, EVD-012, EVD-013, EVD-014, EVD-015]
+  ui: [UI-001, UI-003, UI-004, UI-005]
+  core: [CORE-001, CORE-002, CORE-003, CORE-004, CORE-005, CORE-006, CORE-007, CORE-008, CORE-009, CORE-010]
+  security: [SEC-001, SEC-002, SEC-003, SEC-004, SEC-005, SEC-006]
+
+primary_check_ids:
+  room_evidence: [ROOM-EVIDENCE-001, ROOM-EVIDENCE-002, ROOM-EVIDENCE-003, ROOM-EVIDENCE-004, ROOM-EVIDENCE-005, ROOM-EVIDENCE-006]
+  graph: [GRAPH-009, GRAPH-016, GRAPH-017, GRAPH-018, GRAPH-019]
+  temporal: [TEMP-020, TEMP-021, TEMP-022, TEMP-023, TEMP-024]
+  lcel: [LCEL-009]
+  environment: [ENV-014]
+  migration: [MIG-005]
+
+claim_policy:
+  engineering_pass_required:
+    - ROOM-EVIDENCE-001
+    - ROOM-EVIDENCE-002
+    - ROOM-EVIDENCE-003
+    - ROOM-EVIDENCE-004
+    - ROOM-EVIDENCE-005
+    - ROOM-EVIDENCE-006
+    - GRAPH-009
+    - GRAPH-016
+    - GRAPH-017
+    - GRAPH-018
+    - GRAPH-019
+    - TEMP-020
+    - TEMP-021
+    - TEMP-022
+    - TEMP-023
+    - TEMP-024
+    - LCEL-009
+  partial_engineering_not_sufficient:
+    ENV-014: capacity evidence does not approve the 100-file product contract
+  pending_promotion:
+    MIG-005: real shadow formal writer cutover canary observation and production approval are external
+
+owners:
+  A:
+    role: Evidence Graph state fanout reducer and recovery
+    tasks: [P5-A1, P5-A2]
+    slices: [P5-S1]
+    change_routes:
+      - python-agent-service/app/graphs/evidence/**
+      - python-agent-service/tests/graphs/evidence/**
+      - python-agent-service/app/graph_runtime/reducers.py
+      - python-agent-service/tests/graph_runtime/unit/test_reducers.py
+    forbidden_routes:
+      - java-api-service/**
+      - frontend/**
+      - java-api-service/src/main/resources/db/migration/**
+      - any_formal_evidence_sink
+    primary_check_ids: [ROOM-EVIDENCE-002, ROOM-EVIDENCE-003, GRAPH-016, GRAPH-017, GRAPH-018, GRAPH-019]
+  B:
+    role: Temporal Evidence process timers and recovery
+    tasks: [P5-B1, P5-B2]
+    slices: [P5-S2]
+    change_routes:
+      - java-api-service/src/main/java/com/example/dispute/workflow/temporal/room/evidence/**
+      - java-api-service/src/test/java/com/example/dispute/workflow/*EvidenceRoomWorkflow*
+    forbidden_routes:
+      - python-agent-service/**
+      - frontend/**
+      - java-api-service/src/main/java/com/example/dispute/hearing/**
+      - formal_evidence_repository_implementation
+    primary_check_ids: [ROOM-EVIDENCE-005, ROOM-EVIDENCE-006, TEMP-020, TEMP-021, TEMP-022, TEMP-023, TEMP-024]
+  C:
+    role: Java manifest asset authority formal ledger and Finalizer
+    tasks: [P5-C1, P5-C2]
+    slices: [P5-S3]
+    change_routes:
+      - java-api-service/src/main/java/com/example/dispute/evidence/**
+      - java-api-service/src/main/java/com/example/dispute/room/application/EvidenceAgentTurnService.java
+      - java-api-service/src/main/resources/db/migration/V043_2__evidence_graph_bindings.sql
+      - java-api-service/src/test/java/com/example/dispute/evidence/**
+    forbidden_routes:
+      - python-agent-service/app/graph_runtime/**
+      - frontend/**
+      - java-api-service/src/main/java/com/example/dispute/hearing/**
+      - existing_migrations
+    primary_check_ids: [ROOM-EVIDENCE-001, ROOM-EVIDENCE-004, ROOM-EVIDENCE-006, GRAPH-009, LCEL-009]
+  D:
+    role: Evidence projection API and compatible frontend experience
+    tasks: [P5-D1, P5-D2]
+    slices: [P5-S4]
+    change_routes:
+      - java-api-service/src/main/java/com/example/dispute/workflow/projection/evidence/**
+      - frontend/src/views/disputes/EvidenceRoomView.vue
+      - frontend/src/views/disputes/EvidenceRoomView.test.js
+      - frontend/src/api/evidence.*
+      - frontend/src/stores/evidence.*
+    forbidden_routes:
+      - python-agent-service/**
+      - temporal_worker_or_selector_configuration
+      - formal_evidence_business_rules
+      - hearing_supplement_behavior
+    primary_check_ids: [ROOM-EVIDENCE-001, ROOM-EVIDENCE-004]
+  E:
+    role: Bulkheads synthetic parity selector observability and rollback
+    tasks: [P5-E1, P5-E2]
+    slices: [P5-S5]
+    change_routes:
+      - java-api-service/src/main/java/com/example/dispute/workflow/shadow/evidence/**
+      - java-api-service/src/test/java/com/example/dispute/workflow/shadow/*Evidence*
+      - java-api-service/src/test/java/com/example/dispute/workflow/recovery/*Evidence*
+      - python-agent-service/tests/graphs/evidence/test_*recovery*.py
+      - tests/static/test_phase5_*.py
+    forbidden_routes:
+      - formal_sink_activation
+      - production_secrets_or_deployment
+      - java-api-service/src/main/java/com/example/dispute/hearing/**
+      - unrelated_room_migration
+    primary_check_ids: [GRAPH-016, MIG-005]
+  R:
+    role: Primary contracts integration review scheduling and candidate evidence
+    tasks: [P5-0, P5-R1, P5-R2]
+    slices: [P5-S1, P5-S2, P5-S3, P5-S4, P5-S5]
+    change_routes:
+      - contracts/agent-platform/evidence/v2/**
+      - plans/phase-5-*
+      - docs/runbooks/temporal-first/phase-5-*
+      - tests/static/test_phase5_*.py
+      - scripts/*phase*5*
+      - test-reports/temporal-first/*/phase-5/**
+      - shared_worker_selector_and_contract_assembly_explicitly_granted_in_task
+    owns_candidate_checkpoint: true
+    owns_failure_classification: true
+    owns_external_gate_record: true
+    owns_shared_contract_changes: true
+
+task_contracts:
+  P5-0:
+    owner: R
+    status: BLOCKED
+    depends_on:
+      - PHASE_4_ENGINEERING_CHECKPOINT_PASS
+      - MIG_004_PASS_RECORDED
+      - EVIDENCE_100_FILE_APPROVAL
+      - GRAPH_016_COMPLETE
+      - AUTHORIZED_ASSET_BOUNDARY_APPROVED
+    definition_of_done:
+      - exact_contract_candidate_committed
+      - batch_0_passed_on_candidate_sha
+      - separate_entry_evidence_commit
+  P5-A1:
+    owner: A
+    depends_on: [P5-0]
+    output: evidence_v2_state_topology_and_manifest_scheduler
+    t0_checks: [schema_imports, pure_topology, one_eight_one_hundred_bounds]
+  P5-A2:
+    owner: A
+    depends_on: [P5-A1, P5-C1]
+    output: deterministic_keyed_reducer_and_recovery_properties
+    t0_checks: [associativity, completion_order, identical_replay, conflicting_key]
+  P5-B1:
+    owner: B
+    depends_on: [P5-0]
+    output: typed_evidence_workflow_timer_kernel
+    t0_checks: [determinism, duplicate_signal, immutable_deadline, reminder_boundary]
+  P5-B2:
+    owner: B
+    depends_on: [P5-B1, P5-C1]
+    output: java_receipt_orchestration_and_recovery
+    t0_checks: [activity_retry, cancellation, stale_epoch, admission_receipt]
+  P5-C1:
+    owner: C
+    depends_on: [P5-0]
+    output: manifest_asset_and_versioned_authority_contracts
+    t0_checks: [scope_hash_owner_visibility, actual_load_receipt, stale_fence]
+  P5-C2:
+    owner: C
+    depends_on: [P5-A1, P5-B1, P5-C1]
+    output: exact_once_java_merge_freeze_and_additive_bindings
+    t0_checks: [terminal_coverage, transaction_idempotency, low_relevance_semantics]
+  P5-D1:
+    owner: D
+    depends_on: [P5-A2, P5-B2, P5-C2]
+    output: versioned_evidence_projection_and_api_compatibility
+    t0_checks: [privacy_matrix, pending_state, active_run, history_mode]
+  P5-D2:
+    owner: D
+    depends_on: [P5-D1]
+    output: evidence_100_card_frontend_behavior
+    t0_checks: [component, store, api, accessibility]
+  P5-E1:
+    owner: E
+    depends_on: [P5-A2, P5-B2, P5-C2]
+    output: tenant_global_bulkheads_and_signed_synthetic_parity
+    t0_checks: [bounded_queue, no_formal_sink, privacy, deterministic_hash]
+  P5-E2:
+    owner: E
+    depends_on: [P5-D2, P5-E1]
+    output: crash_race_selector_observability_and_rollback
+    t0_checks: [first_eighth_hundredth_crash, timer_race, selector_fail_closed]
+  P5-R1:
+    owner: R
+    depends_on: [P5-A2, P5-B2, P5-C2]
+    output: wave_a_integration_and_batch_1
+  P5-R2:
+    owner: R
+    depends_on: [P5-D2, P5-E2]
+    output: cross_review_closure_and_one_candidate_checkpoint
+
+waves:
+  wave_0:
+    active_roles: [R]
+    tasks: [P5-0]
+    test_batch: P5-BATCH-0
+  wave_a:
+    active_roles: [R, A, B, C]
+    delegated_tasks: [P5-A1, P5-A2, P5-B1, P5-B2, P5-C1, P5-C2]
+    integration_task: P5-R1
+    test_batch: P5-BATCH-1
+  wave_b:
+    active_roles: [R, D, E]
+    delegated_tasks: [P5-D1, P5-D2, P5-E1, P5-E2]
+    released_wave_a_roles_are_reviewers: true
+    test_batch: P5-BATCH-2
+  candidate_wave:
+    active_roles: [R]
+    tasks: [P5-R2]
+    requires_cross_review: true
+    test_batch: P5-BATCH-3
+
+batches:
+  P5-BATCH-0:
+    status: BLOCKED_BY_ENTRY_GATES
+    tier: T1
+    trigger: P5_0_contract_candidate_commit
+    purpose: Authenticate every upstream gate and freeze the exact legacy Evidence baseline before implementation.
+    requires:
+      - phase_4_engineering_checkpoint_pass
+      - PHASE_5_ENGINEERING_ONLY_permission
+      - MIG_004_pass
+      - evidence_100_file_product_api_ui_approval
+      - graph_room_tenant_global_bulkhead_pass
+      - authorized_asset_boundary_pass
+      - runtime_restricted_to_DISABLED_or_SIGNED_SYNTHETIC_SHADOW
+      - protected_unrelated_worktree_changes_recorded
+    baseline_suites:
+      java:
+        - EvidenceApiIntegrationTest
+        - EvidenceSubmissionServiceTest
+        - EvidenceCompletionServiceTest
+        - EvidenceAgentTurnServiceTest
+        - EvidenceDossierFreezerTest
+        - EvidenceWindowWorkflowTest
+        - EvidenceWindowCoordinatorTest
+        - EvidenceRoomControllerTest
+        - EvidenceRoomIntegrationTest
+      python:
+        - python-agent-service/tests/agents/test_evidence_clerk_turn.py
+        - python-agent-service/tests/agents/test_evidence_fact_mapping_policy.py
+        - python-agent-service/tests/evals/test_evidence_clerk_prompt_catalog.py
+        - python-agent-service/tests/test_streaming.py
+        - python-agent-service/tests/test_streaming_v2.py
+      frontend:
+        - frontend/src/views/disputes/EvidenceRoomView.test.js
+        - frontend/src/components/room/RoomShell.test.js
+        - frontend/src/api/evidence.test.js
+        - frontend/src/api/agentStream.test.js
+        - frontend/src/stores/agentStream.test.js
+    static_tests:
+      - tests/static/test_phase5_evidence_pilot_plan.py
+      - tests/static/test_temporal_refactor_traceability.py
+      - tests/static/test_graph_import_boundaries.py
+      - tests/static/test_agent_platform_schema_contracts.py
+    execution:
+      candidate_sha_must_be_clean_and_detached: true
+      evidence_commit_must_be_later_than_tested_sha: true
+      heavy_parallelism: 1
+      light_parallelism: 2
+      browser_or_playwright: none
+      real_provider: forbidden
+      formal_finalizer: forbidden
+
+  P5-BATCH-1:
+    tier: T1
+    trigger: wave_a_merged
+    purpose: Verify Graph reducer Workflow kernel Java authority and additive persistence once after Wave A integration.
+    requires_tasks: [P5-A1, P5-A2, P5-B1, P5-B2, P5-C1, P5-C2, P5-R1]
+    planned_python_tests:
+      - python-agent-service/tests/graphs/evidence
+      - python-agent-service/tests/agents/test_evidence_clerk_turn.py
+      - python-agent-service/tests/agents/test_evidence_fact_mapping_policy.py
+    planned_java_test_classes:
+      - EvidenceRoomWorkflowTest
+      - EvidenceReducerPropertyTest
+      - EvidenceGraphCommandFactoryTest
+      - EvidenceGraphResultFinalizerTest
+      - EvidenceAssetAuthorizationTest
+      - EvidenceSubmissionServiceTest
+      - EvidenceCompletionServiceTest
+      - EvidenceDossierFreezerTest
+    execution:
+      heavy_parallelism: 1
+      light_parallelism: 2
+      database_workers: 1
+      temporal_test_environments: 1
+      real_provider: forbidden
+      formal_finalizer_runtime_wiring: forbidden
+
+  P5-BATCH-2:
+    tier: T2
+    trigger: wave_b_merged
+    purpose: Verify projections frontend bulkheads synthetic parity fault recovery and rollback once after all owner work.
+    requires_tasks: [P5-D1, P5-D2, P5-E1, P5-E2]
+    planned_python_tests:
+      - python-agent-service/tests/graphs/evidence
+      - python-agent-service/tests/graphs/evidence/test_evidence_graph_recovery.py
+      - python-agent-service/tests/security
+    planned_java_test_classes:
+      - EvidenceRoomWorkflowRecoveryTest
+      - EvidenceTemporalCutoverIntegrationTest
+      - EvidenceShadowParityServiceTest
+      - EvidenceCutoverRollbackTest
+      - EvidenceBulkheadIntegrationTest
+      - EvidenceApiIntegrationTest
+      - EvidenceAgentTurnServiceTest
+      - EvidenceWindowWorkflowTest
+    frontend_tests:
+      - frontend/src/views/disputes/EvidenceRoomView.test.js
+      - frontend/src/components/room/RoomShell.test.js
+      - frontend/src/api/evidence.test.js
+      - frontend/src/api/agentStream.test.js
+      - frontend/src/stores/agentStream.test.js
+    execution:
+      order: [graph_and_asset_privacy, java_postgresql_and_temporal, projection_stream_and_frontend, crash_race_parity_and_rollback]
+      heavy_parallelism: 1
+      light_parallelism: 2
+      database_workers: 1
+      temporal_test_environments: 1
+      frontend_workers: 2
+      browser_or_playwright: none
+      real_provider: forbidden
+      formal_finalizer_runtime_wiring: forbidden
+
+  P5-BATCH-3:
+    tier: T2
+    trigger: cross_review_fixes_merged
+    purpose: Produce one accepted Phase 5 engineering candidate checkpoint and evidence bundle.
+    requires:
+      - clean_detached_candidate_worktree
+      - fixed_candidate_commit_before_first_command
+      - batch_0_pass
+      - batch_1_pass
+      - batch_2_pass
+      - all_phase_5_baseline_ids_mapped
+      - all_phase_5_check_ids_mapped
+      - no_open_PRODUCT_failures
+      - formal_traffic_still_disabled
+      - real_case_shadow_still_forbidden
+    candidate_policy:
+      accepted_candidate_count: 1
+      candidate_sha_immutable_during_run: true
+      source_suites_execute_once_per_accepted_candidate: true
+      mixed_commit_results_forbidden: true
+      quarantined_attempts_not_reused: true
+      code_change_invalidates_entire_candidate_checkpoint: true
+      infra_retry_same_sha_only: true
+    source_groups:
+      - python_phase_5_deduplicated
+      - java_phase_5_deduplicated
+      - frontend_phase_5_deduplicated
+      - static_phase_5_deduplicated
+    execution:
+      strategy: deduplicated_source_suites_then_derived_batch_views
+      heavy_parallelism: 1
+      light_parallelism: 2
+      database_workers: 1
+    evidence:
+      root: test-reports/temporal-first/<release-id>/phase-5
+      required_files:
+        - phase-metrics.json
+        - baseline-id-coverage.json
+        - check-id-coverage.json
+        - failure-classification.json
+        - external-gates.json
+        - candidate-commit.txt
+        - python-phase5-junit.xml
+        - java-phase5-junit.xml
+        - frontend-phase5-junit.xml
+        - static-phase5-junit.xml
+        - batch-0-junit.xml
+        - batch-1-junit.xml
+        - batch-2-junit.xml
+        - batch-3-junit.xml
+      required_status_output:
+        engineering_checkpoint: PASS_or_FAIL
+        promotion_gate: PENDING
+        next_phase_permission: PHASE_6_ENGINEERING_ONLY_or_BLOCKED
+        MIG-005: PENDING_PROMOTION
+
+  P5-UNIFIED-CHECKPOINT:
+    tier: T3
+    automatic: false
+    trigger: explicit_user_request_or_agreed_unified_checkpoint
+    owner: primary
+    classification: EXTERNAL_GATE
+    commands:
+      - repository_full_regression
+      - browser_full_regression
+      - docker_all_service_deployment
+      - production_equivalent_mtls_and_asset_acl
+      - real_case_shadow_privacy_scan
+      - temporal_worker_kill_matrix
+      - graph_postgresql_failover
+      - evidence_100_file_load
+      - 1000_room_load
+      - soak_24h
+      - dr_restore_and_failover
+      - canary_observation
+
+failure_classification:
+  required_values: [PRODUCT, FIXTURE, INFRA, EXTERNAL_GATE]
+  classify_before_rerun: true
+  exactly_one_classification_per_failure: true
+  PRODUCT:
+    action: return_to_owner_and_block_dependent_batch
+  FIXTURE:
+    action: prove_contract_correct_fixture_and_rerun_exact_failed_scope
+  INFRA:
+    action: preserve_trace_restore_environment_and_rerun_same_sha_failed_scope
+  EXTERNAL_GATE:
+    action: record_owner_and_due_condition_without_claiming_pass
+  forbidden:
+    - unconditional_full_suite_retry
+    - weakening_authority_privacy_asset_or_writer_assertions_for_green
+    - mixing_results_from_different_candidate_commits
+    - formal_writer_or_real_traffic_in_engineering
+
+current_contract_prep:
+  static_checks_only: true
+  regression_suites_run: false
+  browser_or_service_execution_run: false
+  batch_0_run: false
+  status_must_remain: DRAFT_BLOCKED
