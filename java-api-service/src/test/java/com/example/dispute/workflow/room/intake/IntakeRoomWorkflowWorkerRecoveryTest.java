@@ -17,11 +17,13 @@ import com.example.dispute.workflow.temporal.room.intake.IntakeWorkflowCommand;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowClientOptions;
 import io.temporal.client.WorkflowOptions;
+import io.temporal.internal.testservice.ExecutionId;
 import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.worker.Worker;
 import io.temporal.worker.WorkerFactory;
 import io.temporal.worker.WorkerFactoryOptions;
 import io.temporal.worker.WorkerOptions;
+import java.lang.reflect.Field;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -49,6 +51,7 @@ class IntakeRoomWorkflowWorkerRecoveryTest {
         IntakeRoomWorkflowActivityTest.FakeActivities activities =
             new IntakeRoomWorkflowActivityTest.FakeActivities();
         String workflowQueue = "phase4-intake-worker-recovery";
+        String workflowId = "intake-room:" + CASE_ID + ":" + EPOCH;
         WorkerFactory first = startWorkers(environment, workflowQueue, activities, "first");
         factories.add(first);
 
@@ -58,19 +61,22 @@ class IntakeRoomWorkflowWorkerRecoveryTest {
                 .newWorkflowStub(
                     IntakeRoomWorkflow.class,
                     WorkflowOptions.newBuilder()
-                        .setWorkflowId("intake-room:" + CASE_ID + ":" + EPOCH)
+                        .setWorkflowId(workflowId)
                         .setTaskQueue(workflowQueue)
                         .build());
         WorkflowClient.start(workflow::run, start());
-        workflow.commandAccepted(
-            command(1, "CMD_BEFORE_WORKER_KILL", IntakeCommandType.INTAKE_MESSAGE, null));
+        IntakeWorkflowCommand committedCommand =
+            command(1, "CMD_BEFORE_WORKER_KILL", IntakeCommandType.INTAKE_MESSAGE, null);
+        workflow.commandAccepted(committedCommand);
         awaitState(workflow, state -> state.nextEventSequence() == 2);
 
         first.shutdownNow();
         first.awaitTermination(10, TimeUnit.SECONDS);
+        clearTestServerStickyRouting(environment, workflowId);
         WorkerFactory replacement =
             startWorkers(environment, workflowQueue, activities, "replacement");
         factories.add(replacement);
+        workflow.commandAccepted(committedCommand);
         environment.sleep(Duration.ofMillis(250));
 
         IntakeRoomSnapshot replayed =
@@ -113,6 +119,27 @@ class IntakeRoomWorkflowWorkerRecoveryTest {
     }
   }
 
+  private static void clearTestServerStickyRouting(
+      TestWorkflowEnvironment environment, String workflowId) {
+    // temporal-test-server 1.35 neither expires dead sticky queues nor implements its reset RPC.
+    try {
+      Field serviceField = environment.getClass().getDeclaredField("service");
+      serviceField.setAccessible(true);
+      Object service = serviceField.get(environment);
+      var getMutableState =
+          service.getClass().getDeclaredMethod("getMutableState", ExecutionId.class);
+      getMutableState.setAccessible(true);
+      Object mutableState =
+          getMutableState.invoke(service, new ExecutionId("default", workflowId, ""));
+      Field stickyExecutionAttributes =
+          mutableState.getClass().getDeclaredField("stickyExecutionAttributes");
+      stickyExecutionAttributes.setAccessible(true);
+      stickyExecutionAttributes.set(mutableState, null);
+    } catch (ReflectiveOperationException exception) {
+      throw new AssertionError("unable to clear in-memory sticky routing", exception);
+    }
+  }
+
   private static WorkerFactory startWorkers(
       TestWorkflowEnvironment environment,
       String workflowQueue,
@@ -149,14 +176,16 @@ class IntakeRoomWorkflowWorkerRecoveryTest {
       IntakeRoomWorkflow workflow, Predicate<IntakeRoomSnapshot> predicate) {
     long deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
     IntakeRoomSnapshot last = null;
+    RuntimeException lastFailure = null;
     while (System.nanoTime() < deadline) {
       try {
         last = workflow.state();
         if (predicate.test(last)) {
           return last;
         }
-      } catch (RuntimeException ignored) {
+      } catch (RuntimeException failure) {
         // Worker replacement can briefly leave the task queue without a poller.
+        lastFailure = failure;
       }
       try {
         Thread.sleep(10);
@@ -165,7 +194,7 @@ class IntakeRoomWorkflowWorkerRecoveryTest {
         throw new AssertionError("test interrupted", exception);
       }
     }
-    throw new AssertionError("Intake state did not converge; last=" + last);
+    throw new AssertionError("Intake state did not converge; last=" + last, lastFailure);
   }
 
   private static IntakeRoomStart start() {
