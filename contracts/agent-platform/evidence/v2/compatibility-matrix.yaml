@@ -1,5 +1,6 @@
 schema_version: evidence-contract-compatibility.v1
 authority: JSON Schema files in this directory
+root_schema_count: 6
 contracts:
   evidence-batch-manifest.v1:
     file: evidence-batch-manifest.schema.json
@@ -9,6 +10,13 @@ contracts:
       - evidence-item-manifest.v1
       - evidence-room-command.v1
     self_hash: manifest_hash
+    self_hash_omits: [manifest_hash, signature]
+    signature_algorithm: ES256
+    signature_covers: manifest_hash
+    signing_authority: JAVA
+    profile_output_pins:
+      assessment: evidence-item-assessment.v1
+      terminal: evidence-batch-proposal.v1
     max_serialized_bytes: 262144
     accepts: [evidence-batch-manifest.v1]
     rejects_unknown_future: true
@@ -18,6 +26,10 @@ contracts:
     self_hash: capability_hash
     self_hash_omits: [capability_hash, signature]
     signature_covers: capability_hash
+    manifest_authorization: exact_verified_java_signed_manifest
+    profile_versions_hash_covers:
+      - assessment_output_schema_version
+      - terminal_output_schema_version
     max_serialized_bytes: 32768
     accepts: [evidence-asset-capability.v1]
     synthetic_only: true
@@ -26,6 +38,9 @@ contracts:
     file: evidence-item-proposal.schema.json
     responsibilities: [evidence-item-assessment.v1]
     self_hash: assessment_hash
+    profile_output_pins:
+      assessment: evidence-item-assessment.v1
+      terminal: evidence-batch-proposal.v1
     max_serialized_bytes: 65536
     accepts: [evidence-item-assessment.v1]
     rejects_unknown_future: true
@@ -33,6 +48,9 @@ contracts:
     file: evidence-terminal-proposal.schema.json
     responsibilities: [evidence-batch-proposal.v1]
     self_hash: proposal_hash
+    profile_output_pins:
+      assessment: evidence-item-assessment.v1
+      terminal: evidence-batch-proposal.v1
     max_serialized_bytes: 262144
     accepts: [evidence-batch-proposal.v1]
     rejects_unknown_future: true
@@ -48,6 +66,10 @@ contracts:
     file: evidence-process-projection.schema.json
     responsibilities: [evidence-process-projection.v1]
     self_hash: projection_hash
+    profile_output_pins:
+      assessment: evidence-item-assessment.v1
+      terminal: evidence-batch-proposal.v1
+    legacy_unavailable_compatible: true
     max_serialized_bytes: 32768
     accepts: [evidence-process-projection.v1]
     rejects_unknown_future: true
@@ -61,6 +83,127 @@ runtime_gate:
   temporal_evidence_allocation_allowed: false
   formal_graph_sink_allowed: false
   promotion_allowed: false
+authorization:
+  manifest:
+    authority: JAVA_ES256_SIGNATURE
+    signature_required: true
+    self_hash_omits_exactly: [manifest_hash, signature]
+    signature_covers_exactly: manifest_hash
+    signature_metadata_hash_bound: true
+    exact_id_hash_replay_allowed: true
+    same_id_different_hash: reject
+    detached_authorization_proof_ref: forbidden
+    python_may_mint_or_sign: false
+  room_graph_command_cross_binding:
+    required_before_checkpoint_mutation: true
+    source_schema_version: room-graph-command.v1
+    transport_identity: MTLS_JAVA_API_SERVICE
+    envelope_signature_algorithm: ES256
+    snapshot_ref_bindings:
+      domain_snapshot_ref.artifact_id: manifest_id
+      domain_snapshot_ref.schema_version: evidence-batch-manifest.v1
+      domain_snapshot_ref.sha256: manifest_hash
+      domain_snapshot_ref.size_bytes: exact_serialized_manifest_bytes
+      domain_snapshot_ref.uri: exact_immutable_allowlisted_uri
+    command_bindings:
+      - command_id
+      - logical_run_id
+      - attempt_id
+      - tenant_surrogate
+      - case_id
+      - room_type
+      - room_epoch
+      - thread_id
+      - actor_scope_hash
+      - graph_version
+      - checkpoint_schema_version
+      - deadline_at
+    thread_bindings:
+      - tenant_surrogate
+      - case_id
+      - room_type
+      - room_epoch
+      - thread_id
+      - actor_id
+      - actor_role
+      - actor_scope_hash
+      - agent_session_id
+    registry_bindings:
+      - graph_key
+      - graph_version
+      - checkpoint_schema_version
+      - state_schema_version
+      - prompt_version
+      - model_profile_id
+      - assessment_output_schema_version
+      - policy_version
+      - guardrail_version
+      - tool_policy_version
+      - registry_binding_hash
+    signed_manifest_only_bindings:
+      - room_id
+      - fencing_token
+      - participant_id
+      - registration_id
+      - submission_batch_id
+      - submission_revision
+      - dossier_target_version
+      - terminal_output_schema_version
+      - ordered_item_keys
+      - items
+    mismatch: reject_before_checkpoint_mutation
+  hash_cycle_guard:
+    manifest_must_not_embed_room_graph_request_hash: true
+    reason: room_graph_request_hash_already_covers_manifest_hash
+  fencing:
+    manifest_fencing_token: java_room_fence
+    graph_execution_fencing_token: graph_lease_fence
+    tokens_are_interchangeable: false
+  validity:
+    initial_admission: signature_and_time_window_must_be_current
+    durable_exact_recovery: use_committed_admission_binding_after_expiry
+    recovery_may_create_new_authority: false
+profile_versioning:
+  required_fields:
+    - assessment_output_schema_version
+    - terminal_output_schema_version
+  assessment_output_schema_version: evidence-item-assessment.v1
+  terminal_output_schema_version: evidence-batch-proposal.v1
+  exact_copy_required_across:
+    - evidence-batch-manifest.v1
+    - evidence-item-assessment.v1
+    - evidence-batch-proposal.v1
+  capability_profile_versions_hash: canonical_hash_of_split_manifest_profile_versions
+  projection_exposes_both_pins: true
+  room_graph_command_output_schema_maps_to: assessment_output_schema_version
+  graph_registry_output_schema_maps_to: assessment_output_schema_version
+  terminal_schema_maps_to: terminal_output_schema_version
+projection_compatibility:
+  legacy_unavailable:
+    writer_mode: LEGACY
+    projection_state: UNAVAILABLE
+    graph_runtime_mode: DISABLED
+    room_id: null
+    room_epoch: 0
+    fencing_token: 0
+    workflow_graph_checkpoint_state_pins: null
+    active_graph_run: null
+    authorization_material_exposed: false
+    write_behavior_changed: false
+governance:
+  closed_root_schema_set: true
+  pre_entry_in_place_correction:
+    authority: ADR_0013_PHASE_5_PRE_ENTRY_CONTRACT_CORRECTION
+    predecessor_candidate: 45d7f087eafe4f50be0d491b3d612446a3e1e94e
+    predecessor_status: QUARANTINED_DIAGNOSTIC_ONLY
+    allowed_once_before_first_p5_acceptance: true
+    requires_no_runtime_or_accepted_consumer: true
+    requires_atomic_schema_matrix_fixture_hash_doc_update: true
+    requires_new_clean_candidate_and_full_entry_revalidation: true
+    establishes_future_in_place_precedent: false
+  future_authority_changes:
+    require_new_schema_version: true
+    require_adr: true
 rules:
   unknown_fields: reject
   missing_required_fields: reject
@@ -71,3 +214,8 @@ rules:
   digest: SHA_256
   additive_optional_fields: require_new_schema_version
   authority_field_changes: require_new_schema_version_and_ADR
+  authorization_from_unsigned_manifest_content: forbidden
+  authorization_proof_ref: forbidden
+  signed_manifest_command_registry_mismatch: reject_before_checkpoint_mutation
+  output_pin_implicit_substitution: forbidden
+  legacy_unavailable_graph_execution: forbidden
